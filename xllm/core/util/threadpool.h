@@ -102,7 +102,6 @@ class TaskGroup final {
 //   `schedule_with_tid`. Tasks pushed via `schedule_with_tid(task, tid)`
 //   are guaranteed to run on worker `tid` in FIFO order. This preserves
 //   the strict per-tid ordering and worker affinity required by callers
-//   such as `RequestOutputDispatcher` and `RecWorkerImpl::step`.
 class ThreadPool final {
  public:
   // a runnable is an object intended to be executed by the threadpool

@@ -36,7 +36,6 @@ class EngineType {
     SSM = 1,
     VLM = 2,
     DIT = 3,
-    REC = 4,
     VLMSSM = 5,
     INVALID = -1,
   };
@@ -53,8 +52,6 @@ class EngineType {
       value_ = VLMSSM;
     } else if (str == "DIT" || str == "dit") {
       value_ = DIT;
-    } else if (str == "REC" || str == "rec") {
-      value_ = REC;
     } else {
       value_ = INVALID;
     }
@@ -81,11 +78,8 @@ class EngineType {
       return "VLMSSM";
     } else if (this->value_ == DIT) {
       return "DIT";
-    } else if (this->value_ == REC) {
-      return "REC";
-    } else {
-      return "INVALID";
     }
+    return "INVALID";
   }
 
  private:
@@ -206,15 +200,6 @@ struct RawToken {
   std::vector<int64_t> top_tokens;
   std::vector<float> top_logprobs;
   std::vector<float> embeddings;  // hidden states
-};
-
-struct RecItemInfo {
-  // The decoded recommendation item id.
-  int64_t item_id = 0;
-  // The DID associated with the recommendation item.
-  std::string did;
-  // The business type associated with the recommendation item.
-  std::string type;
 };
 
 // Weight segment info for P2P transfer (supports non-contiguous allocation)
@@ -441,12 +426,5 @@ struct WakeupOptions {
   // Model-local sleep generation, assigned by the residency coordinator.
   uint64_t transition_id = 0;
 };
-
-inline constexpr int32_t REC_TOKEN_SIZE = 3;
-using RecTokenTriple = std::array<int32_t, REC_TOKEN_SIZE>;
-inline constexpr const char* LLM_REC_INPUT_TOKENS = "llm_rec_input_tokens";
-inline constexpr const char* LLM_REC_INPUT_INDICES = "llm_rec_input_indices";
-inline constexpr const char* LLM_REC_INPUT_EMBEDDING =
-    "llm_rec_input_embedding";
 
 }  // namespace xllm

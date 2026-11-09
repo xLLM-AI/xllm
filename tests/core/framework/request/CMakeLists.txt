@@ -27,31 +27,6 @@ target_link_options(vlm_request_factory_test
                     PRIVATE
                     $<$<BOOL:${USE_MLU}>:-Wl,--no-as-needed>)
 
-cc_test(
-  NAME
-    rec_request_factory_test
-  CPU_ONLY
-  SRCS
-    rec_request_factory_test.cpp
-  DEPS
-    :common
-    :config
-    :request
-    :util
-    $<$<BOOL:${USE_MLU}>:torch_mlu>
-    $<$<BOOL:${USE_NPU}>:torch_npu>
-    GTest::gtest_main
-)
-target_link_libraries(rec_request_factory_test
-                      PUBLIC
-                      Python::Python
-                      $<$<BOOL:${USE_NPU}>:ascendcl>
-                      $<$<BOOL:${USE_NPU}>:hccl>
-                      $<$<BOOL:${USE_NPU}>:c_sec>
-                      $<$<BOOL:${USE_NPU}>:nnopbase>)
-target_link_options(rec_request_factory_test
-                    PRIVATE
-                    $<$<BOOL:${USE_MLU}>:-Wl,--no-as-needed>)
 
 cc_test(
   NAME
@@ -68,17 +43,6 @@ cc_test(
     GTest::gtest_main
 )
 
-cc_test(
-  NAME
-    rec_sequence_test
-  SRCS
-    rec_sequence_test.cpp
-  DEPS
-    :config
-    :request
-    GTest::gtest
-    GTest::gtest_main
-)
 
 cc_test(
   NAME

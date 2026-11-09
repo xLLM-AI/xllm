@@ -460,22 +460,6 @@ bool ModelRegistry::register_causallm_factory(std::string name,
   return true;
 }
 
-void ModelRegistry::register_rec_model_factory(const std::string& name,
-                                               RecModelFactory factory) {
-  ModelRegistry* instance = get_instance();
-
-  if (instance->model_registry_[name].rec_model_factory != nullptr) {
-    SAFE_LOG_WARNING("rec model factory for " << name
-                                              << " already registered.");
-  } else {
-    instance->model_registry_[name].rec_model_factory = factory;
-    std::string& backend = instance->model_backend_[name];
-    if (backend.empty()) {
-      backend = "rec";
-    }
-  }
-}
-
 void ModelRegistry::register_causalvlm_factory(const std::string& name,
                                                CausalVLMFactory factory) {
   register_causalvlm_factory(name, std::move(factory), /*priority=*/0);
@@ -629,12 +613,6 @@ CausalLMFactory ModelRegistry::get_causallm_factory(
     return nullptr;
   }
   return registration->second.factory;
-}
-
-RecModelFactory ModelRegistry::get_rec_model_factory(const std::string& name) {
-  ModelRegistry* instance = get_instance();
-
-  return instance->model_registry_[name].rec_model_factory;
 }
 
 CausalVLMFactory ModelRegistry::get_causalvlm_factory(const std::string& name) {
@@ -928,27 +906,6 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
   LOG(ERROR) << "Unsupported model type: "
              << context.get_model_args().model_type()
              << " for model_impl=" << canonical_model_impl(model_impl);
-
-  return nullptr;
-}
-
-std::unique_ptr<RecModel> create_rec_model(const ModelContext& context) {
-  std::string resolved_name;
-  std::string error_message;
-  if (!resolve_model_registration_name(context.get_model_args().model_type(),
-                                       &resolved_name,
-                                       &error_message)) {
-    LOG(ERROR) << error_message;
-    return nullptr;
-  }
-
-  auto factory = ModelRegistry::get_rec_model_factory(resolved_name);
-  if (factory) {
-    return factory(context);
-  }
-
-  LOG(ERROR) << "Unsupported rec model type: "
-             << context.get_model_args().model_type();
 
   return nullptr;
 }

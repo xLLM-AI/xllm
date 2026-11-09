@@ -88,7 +88,6 @@ class Worker {
 
   const bool is_driver();
 
-  std::optional<ForwardOutput> step(const RecForwardInput& inputs);
   std::optional<ForwardOutput> step(const VlmForwardInput& inputs);
 
   std::optional<ForwardOutput> step(const DiTForwardInput& inputs);
@@ -136,9 +135,6 @@ class Worker {
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const DiTForwardInput& inputs);
-
-  folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const RecForwardInput& inputs);
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const VlmForwardInput& inputs);

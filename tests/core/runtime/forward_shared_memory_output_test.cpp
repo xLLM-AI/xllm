@@ -37,9 +37,7 @@ constexpr std::array kTokenOutputMethods = {
     std::pair{&ForwardSharedMemoryTransport::llm_output_write,
               &ForwardSharedMemoryTransport::llm_output_read},
     std::pair{&ForwardSharedMemoryTransport::vlm_output_write,
-              &ForwardSharedMemoryTransport::vlm_output_read},
-    std::pair{&ForwardSharedMemoryTransport::rec_output_write,
-              &ForwardSharedMemoryTransport::rec_output_read}};
+              &ForwardSharedMemoryTransport::vlm_output_read}};
 
 template <typename Value>
 void append_wire_value(std::string& frame, const Value& value) {
@@ -168,24 +166,6 @@ TEST_F(ForwardSharedMemoryOutputTest,
   ASSERT_EQ(output.outputs[0].mm_embeddings.size(), 1);
   EXPECT_TRUE(torch::equal(output.outputs[0].mm_embeddings[0],
                            source.sample_output.mm_embeddings[0][0]));
-}
-
-TEST_F(ForwardSharedMemoryOutputTest, RecPreservesBeamOutput) {
-  ForwardOutput source;
-  source.sample_output.next_tokens = torch::tensor({7, 8}, torch::kInt32);
-  source.beam_search_output.src_seq_idxes =
-      torch::tensor({1, 0}, torch::kInt32);
-  source.beam_search_output.out_tokens = torch::tensor({8, 7}, torch::kInt32);
-  source.beam_search_output.out_logprobs = torch::tensor({-0.2f, -0.3f});
-  ASSERT_TRUE(writer_->rec_output_write(source, {}));
-
-  RawForwardOutput output;
-  ASSERT_TRUE(reader_->rec_output_read(output));
-  EXPECT_EQ(output.src_seq_idxes, (std::vector<int32_t>{1, 0}));
-  EXPECT_EQ(output.out_tokens, (std::vector<int32_t>{8, 7}));
-  EXPECT_EQ(output.out_logprobs, (std::vector<float>{-0.2f, -0.3f}));
-  ASSERT_EQ(output.outputs.size(), 2);
-  EXPECT_EQ(output.outputs[1].tokens[0].id, 8);
 }
 
 TEST_F(ForwardSharedMemoryOutputTest,
@@ -467,32 +447,6 @@ TEST_F(ForwardSharedMemoryOutputTest,
                            source.sample_output.mm_embeddings[0][0]));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       ZeroSpeculativeRowsRejectMultimodalRowsWithoutPublishing) {
-  ForwardOutput source;
-  source.sample_output.next_tokens = torch::empty({0, 2}, torch::kInt64);
-  source.sample_output.mm_embeddings = {{torch::tensor({1.0f})}};
-  EXPECT_FALSE(writer_->llm_output_write(source, {}));
-  EXPECT_FALSE(writer_->vlm_output_write(source, {}));
-  EXPECT_FALSE(writer_->rec_output_write(source, {}));
-  EXPECT_EQ(published_version(), 0);
-}
-
-TEST_F(ForwardSharedMemoryOutputTest, RecBeamOnlyOutputNeedsNoSampleRows) {
-  ForwardOutput source;
-  source.beam_search_output.src_seq_idxes =
-      torch::tensor({1, 0}, torch::kInt32);
-  source.beam_search_output.out_tokens = torch::tensor({8, 7}, torch::kInt32);
-  source.beam_search_output.out_logprobs = torch::tensor({-0.2f, -0.3f});
-  ASSERT_TRUE(writer_->rec_output_write(source, {}));
-  RawForwardOutput output;
-  ASSERT_TRUE(reader_->rec_output_read(output));
-  EXPECT_TRUE(output.outputs.empty());
-  EXPECT_EQ(output.src_seq_idxes, (std::vector<int32_t>{1, 0}));
-  EXPECT_EQ(output.out_tokens, (std::vector<int32_t>{8, 7}));
-  EXPECT_EQ(output.out_logprobs, (std::vector<float>{-0.2f, -0.3f}));
-}
-
 TEST_F(ForwardSharedMemoryOutputTest, EmptyTokenOutputClearsPreviousPayload) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
@@ -639,27 +593,6 @@ TEST_F(ForwardSharedMemoryOutputTest, VlmTensorsSurviveSubsequentOutputWrites) {
 }
 
 TEST_F(ForwardSharedMemoryOutputTest,
-       InvalidTokenWritesPreservePublishedOutput) {
-  ForwardOutput valid;
-  valid.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
-  ASSERT_TRUE(writer_->llm_output_write(valid, {}));
-  const uint64_t version = published_version();
-  ForwardOutput invalid = valid;
-  invalid.sample_output.logprobs = torch::tensor({-0.5f, -0.2f});
-  EXPECT_FALSE(writer_->llm_output_write(invalid, {}));
-  invalid = valid;
-  invalid.sample_output.mm_embeddings = {{torch::Tensor()}};
-  EXPECT_FALSE(writer_->vlm_output_write(invalid, {}));
-  invalid = valid;
-  invalid.beam_search_output.out_tokens = torch::tensor({8}, torch::kInt32);
-  EXPECT_FALSE(writer_->rec_output_write(invalid, {}));
-  EXPECT_EQ(published_version(), version);
-  RawForwardOutput output;
-  ASSERT_TRUE(reader_->llm_output_read(output));
-  EXPECT_EQ(output.outputs[0].tokens[0].id, 7);
-}
-
-TEST_F(ForwardSharedMemoryOutputTest,
        OverflowDiTWritePreservesPublishedOutput) {
   DiTForwardOutput valid;
   valid.text_output = {"first"};
@@ -726,18 +659,6 @@ TEST_F(ForwardSharedMemoryOutputTest,
 }
 
 TEST_F(ForwardSharedMemoryOutputTest,
-       DiTReaderRejectsTokenOutputWithoutMutation) {
-  ForwardOutput source;
-  source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
-  ASSERT_TRUE(writer_->rec_output_write(source, {}));
-  RawForwardOutput output;
-  output.dit_forward_output.text_output = {"previous"};
-  EXPECT_FALSE(reader_->dit_output_read(output));
-  EXPECT_EQ(output.dit_forward_output.text_output,
-            (std::vector<std::string>{"previous"}));
-}
-
-TEST_F(ForwardSharedMemoryOutputTest,
        TokenReaderRejectsDiTOutputWithoutMutation) {
   DiTForwardOutput source;
   source.text_output = {"diffusion"};
@@ -745,19 +666,6 @@ TEST_F(ForwardSharedMemoryOutputTest,
   RawForwardOutput output;
   output.prepared_token = 81;
   EXPECT_FALSE(reader_->vlm_output_read(output));
-  EXPECT_EQ(output.prepared_token, 81);
-}
-
-TEST_F(ForwardSharedMemoryOutputTest, MalformedCountFailsWithoutMutation) {
-  ForwardOutput source;
-  ASSERT_TRUE(writer_->rec_output_write(source, {}));
-  const uint64_t invalid_count = std::numeric_limits<uint64_t>::max();
-  char* payload =
-      static_cast<char*>(writer_->base_address()) + sizeof(ControlMetadata);
-  std::memcpy(payload, &invalid_count, sizeof(invalid_count));
-  RawForwardOutput output;
-  output.prepared_token = 81;
-  EXPECT_FALSE(reader_->rec_output_read(output));
   EXPECT_EQ(output.prepared_token, 81);
 }
 
@@ -797,6 +705,62 @@ TEST_F(ForwardSharedMemoryOutputTest, MalformedTensorSizeFailsWithoutMutation) {
   EXPECT_FALSE(reader_->dit_output_read(output));
   EXPECT_EQ(output.dit_forward_output.text_output,
             (std::vector<std::string>{"previous"}));
+}
+
+TEST_F(ForwardSharedMemoryOutputTest,
+       ZeroSpeculativeRowsRejectMultimodalRowsWithoutPublishing) {
+  ForwardOutput source;
+  source.sample_output.next_tokens = torch::empty({0, 2}, torch::kInt64);
+  source.sample_output.mm_embeddings = {{torch::tensor({1.0f})}};
+  EXPECT_FALSE(writer_->llm_output_write(source, {}));
+  EXPECT_FALSE(writer_->vlm_output_write(source, {}));
+  EXPECT_EQ(published_version(), 0);
+}
+
+TEST_F(ForwardSharedMemoryOutputTest,
+       InvalidTokenWritesPreservePublishedOutput) {
+  ForwardOutput valid;
+  valid.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
+  ASSERT_TRUE(writer_->llm_output_write(valid, {}));
+  const uint64_t version = published_version();
+  ForwardOutput invalid = valid;
+  invalid.sample_output.logprobs = torch::tensor({-0.5f, -0.2f});
+  EXPECT_FALSE(writer_->llm_output_write(invalid, {}));
+  invalid = valid;
+  invalid.sample_output.mm_embeddings = {{torch::Tensor()}};
+  EXPECT_FALSE(writer_->vlm_output_write(invalid, {}));
+  invalid = valid;
+  invalid.beam_search_output.out_tokens = torch::tensor({8}, torch::kInt32);
+  EXPECT_FALSE(writer_->llm_output_write(invalid, {}));
+  EXPECT_EQ(published_version(), version);
+  RawForwardOutput output;
+  ASSERT_TRUE(reader_->llm_output_read(output));
+  EXPECT_EQ(output.outputs[0].tokens[0].id, 7);
+}
+
+TEST_F(ForwardSharedMemoryOutputTest,
+       DiTReaderRejectsTokenOutputWithoutMutation) {
+  ForwardOutput source;
+  source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
+  ASSERT_TRUE(writer_->llm_output_write(source, {}));
+  RawForwardOutput output;
+  output.dit_forward_output.text_output = {"previous"};
+  EXPECT_FALSE(reader_->dit_output_read(output));
+  EXPECT_EQ(output.dit_forward_output.text_output,
+            (std::vector<std::string>{"previous"}));
+}
+
+TEST_F(ForwardSharedMemoryOutputTest, MalformedCountFailsWithoutMutation) {
+  ForwardOutput source;
+  ASSERT_TRUE(writer_->llm_output_write(source, {}));
+  const uint64_t invalid_count = std::numeric_limits<uint64_t>::max();
+  char* payload =
+      static_cast<char*>(writer_->base_address()) + sizeof(ControlMetadata);
+  std::memcpy(payload, &invalid_count, sizeof(invalid_count));
+  RawForwardOutput output;
+  output.prepared_token = 81;
+  EXPECT_FALSE(reader_->llm_output_read(output));
+  EXPECT_EQ(output.prepared_token, 81);
 }
 
 }  // namespace

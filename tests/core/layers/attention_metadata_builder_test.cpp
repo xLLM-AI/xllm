@@ -21,9 +21,7 @@ limitations under the License.
 #include <memory>
 
 #include "core/framework/batch/batch_forward_type.h"
-#include "core/framework/config/rec_config.h"
 #include "core/framework/model/model_params_view.h"
-#include "core/framework/model/rec_model_params.h"
 #include "core/layers/common/attention_metadata.h"
 
 namespace xllm::layer {
@@ -47,133 +45,6 @@ ModelParamsView make_params() {
   params.linear_state_validity_mask = {0, 1, 0};
   return params;
 }
-
-RecModelParams make_rec_params() {
-  RecModelParams params;
-  params.meta.batch_forward_type = BatchForwardType::DECODE;
-  params.meta.num_sequences = 2;
-  params.meta.q_max_seq_len = 1;
-  params.meta.kv_max_seq_len = 5;
-  params.attention.host.q_seq_lens = {1, 1};
-  params.attention.host.kv_seq_lens = {3, 5};
-  params.attention.host.q_cu_seq_lens = {1, 2};
-  params.attention.device.q_seq_lens =
-      torch::tensor(params.attention.host.q_seq_lens, torch::kInt32);
-  params.attention.device.kv_seq_lens =
-      torch::tensor(params.attention.host.kv_seq_lens, torch::kInt32);
-  params.attention.device.q_cu_seq_lens =
-      torch::tensor(params.attention.host.q_cu_seq_lens, torch::kInt32);
-  params.attention.device.new_cache_slots =
-      torch::tensor({1, 2}, torch::kInt32);
-  params.attention.device.block_tables =
-      torch::tensor({{0}, {1}}, torch::kInt32);
-  return params;
-}
-
-TEST(AttentionMetadataBuilderTest, RecRoundMetadataDoesNotEnableSpecVerify) {
-  auto params = make_rec_params();
-  auto& rec = params.mutable_llmrec_params();
-  rec.beam_width = 2;
-  rec.current_round_tensor = torch::tensor({3}, torch::kInt32);
-
-  const auto metadata =
-      AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
-
-  EXPECT_TRUE(metadata.step_tensor.is_same(rec.current_round_tensor));
-  EXPECT_FALSE(metadata.is_spec_verify);
-  EXPECT_FALSE(metadata.expanded_decode.enabled);
-  EXPECT_EQ(metadata.total_kv_len, 8);
-  EXPECT_TRUE(
-      metadata.block_table.is_same(params.attention.device.block_tables));
-}
-
-TEST(AttentionMetadataBuilderTest, LlmSpecVerifyDoesNotAcquireRecRoundState) {
-  auto params = make_params();
-  params.meta.batch_forward_type = BatchForwardType::DECODE;
-  params.is_spec_verify = true;
-  params.graph.use_expanded_decode_for_spec_verify_attention = true;
-  params.graph.expanded_kv_seq_lens = torch::tensor({2, 3}, torch::kInt32);
-  params.graph.expanded_block_tables = torch::tensor({{0}, {1}}, torch::kInt32);
-  params.graph.expanded_paged_kv_indptr =
-      torch::tensor({0, 1, 2}, torch::kInt32);
-  params.graph.expanded_paged_kv_indices = torch::tensor({0, 1}, torch::kInt32);
-  params.graph.expanded_paged_kv_last_page_len =
-      torch::tensor({2, 3}, torch::kInt32);
-
-  const auto metadata =
-      AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
-
-  EXPECT_TRUE(metadata.is_spec_verify);
-  EXPECT_TRUE(metadata.expanded_decode.enabled);
-  EXPECT_TRUE(metadata.expanded_decode.kv_seq_lens.is_same(
-      params.graph.expanded_kv_seq_lens));
-  EXPECT_FALSE(metadata.step_tensor.defined());
-#if defined(USE_CUDA) || defined(USE_MUSA)
-  EXPECT_FALSE(metadata.xattention_two_stage_decode_cache.has_value());
-#endif
-}
-
-#if defined(USE_CUDA) || defined(USE_MUSA)
-class ScopedXAttentionMode final {
- public:
-  explicit ScopedXAttentionMode(bool one_stage)
-      : previous_(RecConfig::get_instance().enable_xattention_one_stage()) {
-    RecConfig::get_instance().enable_xattention_one_stage(one_stage);
-  }
-  ~ScopedXAttentionMode() {
-    RecConfig::get_instance().enable_xattention_one_stage(previous_);
-  }
-
- private:
-  bool previous_;
-};
-
-TEST(AttentionMetadataBuilderTest,
-     RecTwoStageCacheKeepsBeamAndRoundDimensions) {
-  const ScopedXAttentionMode mode(/*one_stage=*/false);
-  auto params = make_rec_params();
-  auto& rec = params.mutable_llmrec_params();
-  rec.beam_width = 2;
-  rec.current_round_tensor = torch::tensor({3}, torch::kInt32);
-  rec.unshared_k_caches = {torch::zeros({2, 2, 7, 1, 4})};
-  rec.two_stage_shared_o = torch::zeros({4, 2, 4});
-  rec.two_stage_shared_lse = torch::zeros({4, 2, 1});
-  rec.two_stage_unshared_o = torch::zeros({4, 2, 4});
-  rec.two_stage_unshared_lse = torch::zeros({4, 2, 1});
-  rec.two_stage_q_cu_seq_lens_shared = torch::tensor({0, 2, 4}, torch::kInt32);
-  rec.two_stage_qo_indptr_expanded =
-      torch::tensor({0, 1, 2, 3, 4}, torch::kInt32);
-
-  const auto metadata =
-      AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
-
-  ASSERT_TRUE(metadata.xattention_two_stage_decode_cache.has_value());
-  const auto& cache = metadata.xattention_two_stage_decode_cache.value();
-  EXPECT_EQ(cache.cached_batch_size, 2);
-  EXPECT_EQ(cache.cached_beam_size, 2);
-  EXPECT_EQ(cache.cached_max_decode_step, 7);
-  EXPECT_EQ(cache.cached_step, 3);
-  EXPECT_EQ(cache.cached_num_heads, 2);
-  EXPECT_EQ(cache.cached_head_size, 4);
-  EXPECT_TRUE(cache.shared_o.is_same(rec.two_stage_shared_o));
-  EXPECT_TRUE(cache.unshared_o.is_same(rec.two_stage_unshared_o));
-  EXPECT_TRUE(
-      cache.qo_indptr_expanded.is_same(rec.two_stage_qo_indptr_expanded));
-}
-
-TEST(AttentionMetadataBuilderTest, RecOneStageDoesNotBuildTwoStageCache) {
-  const ScopedXAttentionMode mode(/*one_stage=*/true);
-  auto params = make_rec_params();
-  auto& rec = params.mutable_llmrec_params();
-  rec.current_round_tensor = torch::tensor({1}, torch::kInt32);
-
-  const auto metadata =
-      AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
-
-  EXPECT_TRUE(metadata.step_tensor.is_same(rec.current_round_tensor));
-  EXPECT_FALSE(metadata.xattention_two_stage_decode_cache.has_value());
-}
-#endif
 
 TEST(AttentionMetadataBuilderTest, LinearPrefillSchedulesRespectChunkSize) {
   for (const int32_t block_size : {16, 64}) {

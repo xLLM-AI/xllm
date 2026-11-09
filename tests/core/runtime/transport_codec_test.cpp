@@ -340,15 +340,6 @@ TEST(TransportCodecTest, InvalidMultimodalOutputDecodePreservesDestination) {
   expect_original_output(destination);
 }
 
-TEST(TransportCodecTest, InvalidBeamOutputDecodePreservesDestination) {
-  proto::RECForwardResponse source;
-  source.add_src_seq_idxes(0);
-  source.add_out_tokens(7);
-  RawForwardOutput destination = original_output();
-  EXPECT_FALSE(decode_rec_output(source, destination));
-  expect_original_output(destination);
-}
-
 TEST(TransportCodecTest, InvalidDiTOutputDecodePreservesDestination) {
   proto::DITForwardResponse source;
   source.mutable_dit_forward_output()->mutable_tensors()->add_tensors();

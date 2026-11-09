@@ -34,7 +34,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/execution_config.h"
-#include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 #include "util/net.h"
 
@@ -55,15 +54,6 @@ class ShmFallbackService final : public proto::DistributeWorker {
   void ExecuteVLMModel(google::protobuf::RpcController* /*controller*/,
                        const proto::VLMForwardRequest* /*request*/,
                        proto::VLMForwardResponse* response,
-                       google::protobuf::Closure* done) override {
-    brpc::ClosureGuard guard(done);
-    executions_.fetch_add(1);
-    response->add_outputs()->add_tokens()->set_id(99);
-  }
-
-  void ExecuteRECModel(google::protobuf::RpcController* /*controller*/,
-                       const proto::RECForwardRequest* /*request*/,
-                       proto::RECForwardResponse* response,
                        google::protobuf::Closure* done) override {
     brpc::ClosureGuard guard(done);
     executions_.fetch_add(1);
@@ -231,63 +221,9 @@ TEST_F(ShmChannelTest, ReadsVlmOutputWithoutRpcExecution) {
   EXPECT_EQ(service_.execution_count(), 0);
 }
 
-TEST_F(ShmChannelTest, ReadsRecOutputWithoutRpcExecution) {
-  ForwardOutput source;
-  source.beam_search_output.src_seq_idxes = torch::tensor({0}, torch::kInt32);
-  source.beam_search_output.out_tokens = torch::tensor({8}, torch::kInt32);
-  source.beam_search_output.out_logprobs = torch::tensor({-0.5f});
-  ASSERT_TRUE(writer_->rec_output_write(source, {}));
-  OutputPromise promise;
-  auto future = promise.getSemiFuture();
-  channel_->execute_rec_model_async(RecForwardInput(), promise);
-  const auto output = std::move(future).get();
-  ASSERT_TRUE(output.has_value());
-  EXPECT_EQ(output->out_tokens, (std::vector<int32_t>{8}));
-  EXPECT_EQ(service_.execution_count(), 0);
-}
-
 TEST_F(ShmChannelTest, ReadsDitOutputWithoutRpcExecution) {
   DiTForwardOutput source;
   source.text_output = {"shared output"};
-  ASSERT_TRUE(writer_->dit_output_write(source));
-  OutputPromise promise;
-  auto future = promise.getSemiFuture();
-  channel_->execute_dit_model_async(DiTForwardInput(), promise);
-  const auto output = std::move(future).get();
-  ASSERT_TRUE(output.has_value());
-  EXPECT_EQ(output->dit_forward_output.text_output, source.text_output);
-  EXPECT_EQ(service_.execution_count(), 0);
-}
-
-TEST_F(ShmChannelTest, DecodeFailureDoesNotReexecuteAndNextReadRecovers) {
-  const std::array<std::function<void(OutputPromise&)>, 4> execute = {
-      [this](OutputPromise& promise) {
-        channel_->execute_llm_model_async(LlmForwardInput(), promise);
-      },
-      [this](OutputPromise& promise) {
-        channel_->execute_vlm_model_async(VlmForwardInput(), promise);
-      },
-      [this](OutputPromise& promise) {
-        channel_->execute_rec_model_async(RecForwardInput(), promise);
-      },
-      [this](OutputPromise& promise) {
-        channel_->execute_dit_model_async(DiTForwardInput(), promise);
-      }};
-  for (const auto& execute_model : execute) {
-    ASSERT_TRUE(writer_->llm_output_write(ForwardOutput(), {}));
-    const uint64_t invalid_count = std::numeric_limits<uint64_t>::max();
-    char* payload =
-        static_cast<char*>(writer_->base_address()) + sizeof(ControlMetadata);
-    std::memcpy(payload, &invalid_count, sizeof(invalid_count));
-    OutputPromise promise;
-    auto future = promise.getSemiFuture();
-    execute_model(promise);
-    ASSERT_TRUE(future.isReady());
-    EXPECT_FALSE(std::move(future).get().has_value());
-    EXPECT_EQ(service_.execution_count(), 0);
-  }
-  DiTForwardOutput source;
-  source.text_output = {"recovered output"};
   ASSERT_TRUE(writer_->dit_output_write(source));
   OutputPromise promise;
   auto future = promise.getSemiFuture();
@@ -338,18 +274,47 @@ TEST_F(ShmChannelTest, VlmOverflowFallsBackForEveryRankAndStaysOnBrpc) {
       oversized, VlmForwardInput(), &ShmChannel::execute_vlm_model_async);
 }
 
-TEST_F(ShmChannelTest, RecOverflowFallsBackForEveryRankAndStaysOnBrpc) {
-  RecForwardInput oversized;
-  oversized.token_ids = torch::zeros({kInputBytes * 2}, torch::kInt32);
-  expect_group_input_fallback(
-      oversized, RecForwardInput(), &ShmChannel::execute_rec_model_async);
-}
-
 TEST_F(ShmChannelTest, DitOverflowFallsBackForEveryRankAndStaysOnBrpc) {
   DiTForwardInput oversized;
   oversized.model_params.prompts = {std::string(kInputBytes * 2, 'x')};
   expect_group_input_fallback(
       oversized, DiTForwardInput(), &ShmChannel::execute_dit_model_async);
+}
+
+TEST_F(ShmChannelTest, DecodeFailureDoesNotReexecuteAndNextReadRecovers) {
+  const std::array<std::function<void(OutputPromise&)>, 3> execute = {
+      [this](OutputPromise& promise) {
+        channel_->execute_llm_model_async(LlmForwardInput(), promise);
+      },
+      [this](OutputPromise& promise) {
+        channel_->execute_vlm_model_async(VlmForwardInput(), promise);
+      },
+      [this](OutputPromise& promise) {
+        channel_->execute_dit_model_async(DiTForwardInput(), promise);
+      }};
+  for (const auto& execute_model : execute) {
+    ASSERT_TRUE(writer_->llm_output_write(ForwardOutput(), {}));
+    const uint64_t invalid_count = std::numeric_limits<uint64_t>::max();
+    char* payload =
+        static_cast<char*>(writer_->base_address()) + sizeof(ControlMetadata);
+    std::memcpy(payload, &invalid_count, sizeof(invalid_count));
+    OutputPromise promise;
+    auto future = promise.getSemiFuture();
+    execute_model(promise);
+    ASSERT_TRUE(future.isReady());
+    EXPECT_FALSE(std::move(future).get().has_value());
+    EXPECT_EQ(service_.execution_count(), 0);
+  }
+  DiTForwardOutput source;
+  source.text_output = {"recovered output"};
+  ASSERT_TRUE(writer_->dit_output_write(source));
+  OutputPromise promise;
+  auto future = promise.getSemiFuture();
+  channel_->execute_dit_model_async(DiTForwardInput(), promise);
+  const auto output = std::move(future).get();
+  ASSERT_TRUE(output.has_value());
+  EXPECT_EQ(output->dit_forward_output.text_output, source.text_output);
+  EXPECT_EQ(service_.execution_count(), 0);
 }
 
 TEST_F(ShmChannelTest, InputPreflightMatchesExactPackedSize) {
@@ -362,38 +327,9 @@ TEST_F(ShmChannelTest, InputPreflightMatchesExactPackedSize) {
   vlm_input.positions =
       torch::arange(8, torch::kInt64).reshape({2, 4}).transpose(0, 1);
   ASSERT_NO_FATAL_FAILURE(expect_input_capacity(vlm_input));
-  RecForwardInput rec_input;
-  ASSERT_NO_FATAL_FAILURE(expect_input_capacity(rec_input));
   DiTForwardInput dit_input;
   dit_input.model_params.prompts = {"capacity boundary"};
   ASSERT_NO_FATAL_FAILURE(expect_input_capacity(dit_input));
-}
-
-TEST_F(ShmChannelTest, RecPreflightRejectsUnsupportedFieldsBeforePublishing) {
-  bool is_creator = false;
-  ForwardSharedMemoryTransport writer(writer_->name() + "_rec_input",
-                                      kInputBytes,
-                                      is_creator,
-                                      ForwardType::RAW_INPUT);
-  ASSERT_TRUE(is_creator);
-  RecForwardInput input;
-  input.decoder_sampling_params.selected_token_idxes() =
-      torch::tensor({0}, torch::kInt32);
-  EXPECT_FALSE(
-      ForwardSharedMemoryTransport::can_write_input(input, kInputBytes));
-  EXPECT_FALSE(writer.input_write(input));
-  input.decoder_sampling_params.selected_token_idxes() = torch::Tensor();
-  input.step_decode.emplace();
-  EXPECT_FALSE(
-      ForwardSharedMemoryTransport::can_write_input(input, kInputBytes));
-  EXPECT_FALSE(writer.input_write(input));
-  input.step_decode.reset();
-  input.input_params.mutable_onerec_params();
-  EXPECT_FALSE(
-      ForwardSharedMemoryTransport::can_write_input(input, kInputBytes));
-  EXPECT_FALSE(writer.input_write(input));
-  EXPECT_EQ(static_cast<const ControlMetadata*>(writer.base_address())->version,
-            0);
 }
 
 }  // namespace

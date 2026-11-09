@@ -129,11 +129,6 @@ class WorkerService : public proto::DistributeWorker {
                        proto::VLMForwardResponse* response,
                        ::google::protobuf::Closure* done) override;
 
-  void ExecuteRECModel(::google::protobuf::RpcController* controller,
-                       const proto::RECForwardRequest* request,
-                       proto::RECForwardResponse* response,
-                       ::google::protobuf::Closure* done) override;
-
   void ExecuteDITModel(::google::protobuf::RpcController* controller,
                        const proto::DITForwardRequest* request,
                        proto::DITForwardResponse* response,
@@ -185,10 +180,6 @@ class WorkerService : public proto::DistributeWorker {
       VlmForwardInput& input,
       ForwardOutput& cpu_output,
       std::vector<SpeculativeTokenStats>& speculative_token_stats);
-  void step_rec_model(
-      RecForwardInput& input,
-      ForwardOutput& cpu_output,
-      std::vector<SpeculativeTokenStats>& speculative_token_stats);
   void step_dit_model(const DiTForwardInput& input, ForwardOutput& cpu_output);
 
   void collect_llm_output(const ForwardOutput& output,
@@ -201,8 +192,6 @@ class WorkerService : public proto::DistributeWorker {
   void poll_llm_shm(
       std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
   void poll_vlm_shm(
-      std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
-  void poll_rec_shm(
       std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
   void poll_dit_shm(
       std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);

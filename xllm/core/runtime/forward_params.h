@@ -330,13 +330,12 @@ class WorkerType {
  public:
   enum Value : int8_t {
     INVALID = 0,
-    LLM,     // LLM
-    VLM,     // VLM
-    DIT,     // DIT
-    ELM,     // Embedding LM
-    EVLM,    // Embedding VLM
-    REC,     // Rec
-    MMEVLM,  // Encoder Embedding VLM
+    LLM,         // LLM
+    VLM,         // VLM
+    DIT,         // DIT
+    ELM,         // Embedding LM
+    EVLM,        // Embedding VLM
+    MMEVLM = 7,  // Encoder Embedding VLM
   };
 
   constexpr WorkerType(Value v) : value_(v) {}
@@ -351,8 +350,6 @@ class WorkerType {
       value_ = ELM;
     } else if (str == "EVLM") {
       value_ = EVLM;
-    } else if (str == "REC") {
-      value_ = REC;
     } else if (str == "MMEVLM") {
       value_ = MMEVLM;
     } else {
@@ -381,8 +378,6 @@ class WorkerType {
       return "ELM";
     } else if (this->value_ == EVLM) {
       return "EVLM";
-    } else if (this->value_ == REC) {
-      return "REC";
     } else if (this->value_ == MMEVLM) {
       return "MMEVLM";
     } else {
@@ -394,7 +389,6 @@ class WorkerType {
   Value value_;
 };
 
-// Step-level decode metadata for Rec multi-round (device loop).
 // Inputs for forward execution
 class LlmForwardInput final {
  public:
@@ -651,7 +645,6 @@ class ForwardOutput final {
   int64_t prepared_token = -1;
 
   BeamSearchOutput beam_search_output;
-  torch::Tensor beam_sequence_group;
 
   // dit output data
   DiTForwardOutput dit_forward_output;
@@ -699,8 +692,6 @@ class RawForwardOutput final {
   std::vector<int32_t> out_tokens;
   std::vector<float> out_logprobs;
 
-  // batch-level beam output for Rec multi-round mode
-  std::vector<int32_t> beam_sequence_group;  // flattened 2D
   // dit output data
   DiTForwardOutput dit_forward_output;
 };

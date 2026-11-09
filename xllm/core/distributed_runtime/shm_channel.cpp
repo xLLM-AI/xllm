@@ -105,33 +105,6 @@ void ShmChannel::execute_dit_model_async(
   execute_dit_model_with_brpc(input, promise);
 }
 
-void ShmChannel::execute_rec_model_async(
-    const RecForwardInput& input,
-    folly::Promise<std::optional<RawForwardOutput>>& promise) {
-  if (enable_shm_) {
-    const bool input_fits = input_shm_manager_
-                                ? input_shm_manager_->input_write(input)
-                                : ForwardSharedMemoryTransport::can_write_input(
-                                      input, input_shm_size_);
-    if (!input_fits) {
-      enable_shm_ = false;
-      LOG(ERROR) << "REC shared-memory input write failed, fallback to brpc";
-    } else {
-      RawForwardOutput output;
-      if (!output_shm_manager_->rec_output_read(output)) {
-        LOG(ERROR) << "REC shared-memory output read failed";
-        // The model has already executed. Retrying with BRPC would execute it
-        // twice and advance worker state again.
-        promise.setValue(std::nullopt);
-        return;
-      }
-      promise.setValue(std::move(output));
-      return;
-    }
-  }
-  execute_rec_model_with_brpc(input, promise);
-}
-
 void ShmChannel::execute_vlm_model_async(
     const VlmForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {

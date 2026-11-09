@@ -25,7 +25,6 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "core/distributed_runtime/worker_model_codec.h"
 #include "core/kv_cache/transfer/kv_transport_codec.h"
-#include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 
 namespace xllm {
@@ -671,43 +670,6 @@ void ExecuteDITModelClosure::Run() {
   RawForwardOutput output;
   if (!decode_dit_output(pb_output, output)) {
     LOG(ERROR) << "Failed to decode DIT model output";
-    promise.setValue(std::optional<RawForwardOutput>{});
-    return;
-  }
-  promise.setValue(std::move(output));
-}
-
-void CommChannel::execute_rec_model_async(
-    const RecForwardInput& input,
-    folly::Promise<std::optional<RawForwardOutput>>& promise) {
-  execute_rec_model_with_brpc(input, promise);
-}
-
-bool CommChannel::execute_rec_model_with_brpc(
-    const RecForwardInput& input,
-    folly::Promise<std::optional<RawForwardOutput>>& promise) {
-  proto::RECForwardRequest request;
-  if (!input.to_packed_proto(request.mutable_packed_input())) {
-    LOG(ERROR) << "Failed to pack RecForwardInput for remote execution";
-    promise.setValue(std::optional<RawForwardOutput>{});
-    return false;
-  }
-  auto* done = new ExecuteRECModelClosure();
-  done->promise = std::move(promise);
-  stub_->ExecuteRECModel(&done->cntl, &request, &done->pb_output, done);
-  return true;
-}
-
-void ExecuteRECModelClosure::Run() {
-  std::unique_ptr<ExecuteRECModelClosure> self_guard(this);
-  if (cntl.Failed()) {
-    LOG(ERROR) << "ExecuteRECModel failed: " << cntl.ErrorText();
-    promise.setValue(std::optional<RawForwardOutput>{});
-    return;
-  }
-  RawForwardOutput output;
-  if (!decode_rec_output(pb_output, output)) {
-    LOG(ERROR) << "Failed to decode REC model output";
     promise.setValue(std::optional<RawForwardOutput>{});
     return;
   }

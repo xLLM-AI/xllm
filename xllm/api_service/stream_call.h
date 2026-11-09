@@ -94,7 +94,7 @@ class StreamCall : public Call {
   bool write_and_finish(Response& response) {
     if constexpr (std::is_same_v<Response, proto::ChatResponse> ||
                   std::is_same_v<Response, proto::CompletionResponse>) {
-      if (openai_http_ && use_openai_json(response)) {
+      if (openai_http_) {
         std::string payload =
             api_service::serialize_openai_response(*request_,
                                                    response,
@@ -180,7 +180,7 @@ class StreamCall : public Call {
     if constexpr (std::is_same_v<Message, Response> &&
                   (std::is_same_v<Response, proto::ChatResponse> ||
                    std::is_same_v<Response, proto::CompletionResponse>)) {
-      if (openai_http_ && use_openai_json(response)) {
+      if (openai_http_) {
         io_buf_.append(
             api_service::serialize_openai_response(*request_,
                                                    response,
@@ -257,13 +257,6 @@ class StreamCall : public Call {
   ::google::protobuf::Closure* done() { return done_; }
 
  private:
-  static bool use_openai_json(const Response& response) {
-    if constexpr (std::is_same_v<Response, proto::CompletionResponse>) {
-      return response.output_tensors().empty();
-    }
-    return true;
-  }
-
   static void on_stream_stopped(std::shared_ptr<std::atomic<bool>> stopped) {
     stopped->store(true, std::memory_order_release);
   }

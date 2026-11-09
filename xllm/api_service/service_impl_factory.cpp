@@ -25,7 +25,6 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/distributed_runtime/dit_master.h"
 #include "core/distributed_runtime/llm_master.h"
-#include "core/distributed_runtime/rec_master.h"
 #include "core/distributed_runtime/vlm_master.h"
 #include "core/framework/config/model_config.h"
 
@@ -98,17 +97,6 @@ void ServiceImplFactory::create(
              std::make_unique<TextGenerationServiceImpl>(dit_master, models);
          self->video_generation_service_impl_ =
              std::make_unique<VideoGenerationServiceImpl>(dit_master, models);
-       }},
-      {static_cast<int8_t>(ServingMode::REC),
-       [](APIService* self,
-          Master* master,
-          const std::vector<std::string>& models) {
-         auto* rec_master = dynamic_cast<RecMaster*>(master);
-         CHECK(rec_master != nullptr);
-         self->rec_completion_service_impl_ =
-             std::make_unique<RecCompletionServiceImpl>(rec_master, models);
-         self->chat_service_impl_ =
-             std::make_unique<ChatServiceImpl>(rec_master, models);
        }},
   };
 

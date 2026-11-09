@@ -20,10 +20,6 @@ limitations under the License.
 #include <memory>
 #include <utility>
 
-#include "core/framework/request/onerec_sequence.h"
-#include "core/framework/request/rec_sequence.h"
-#include "core/framework/request/rec_type.h"
-
 namespace xllm {
 
 std::unique_ptr<Sequence> create_sequence(
@@ -33,31 +29,12 @@ std::unique_ptr<Sequence> create_sequence(
     const MMData& mm_data,
     const IncrementalDecoder& incremental_decoder,
     const SequenceParams& seq_params) {
-  switch (seq_params.rec_type) {
-    case RecType::kNone:
-      return std::make_unique<Sequence>(index,
-                                        prompt_token_ids,
-                                        std::move(input_embedding),
-                                        mm_data,
-                                        incremental_decoder,
-                                        seq_params);
-    case RecType::kLlmRec:
-      return std::make_unique<LlmRecSequence>(index,
-                                              prompt_token_ids,
-                                              std::move(input_embedding),
-                                              mm_data,
-                                              incremental_decoder,
-                                              seq_params);
-    case RecType::kOneRec:
-      return std::make_unique<OneRecSequence>(index,
-                                              prompt_token_ids,
-                                              std::move(input_embedding),
-                                              mm_data,
-                                              incremental_decoder,
-                                              seq_params);
-  }
-  LOG(FATAL) << "unknown rec type " << static_cast<int>(seq_params.rec_type);
-  return nullptr;
+  return std::make_unique<Sequence>(index,
+                                    prompt_token_ids,
+                                    std::move(input_embedding),
+                                    mm_data,
+                                    incremental_decoder,
+                                    seq_params);
 }
 
 }  // namespace xllm

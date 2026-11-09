@@ -31,7 +31,6 @@ set(CUDA_HEADER_FILES
   utils.h
   cuda_ops_library.h
   device_utils.cuh
-  xattention/xattention_ops_api.h
   moe/moe_topk.cuh
   moe/moe_topk_sigmoid_kernels.cuh
   moe/moe_topk_softmax_kernels.cuh
@@ -137,16 +136,10 @@ set(CUDA_SOURCE_FILES
   matmul.cpp
   norm.cu
   piecewise_graphs.cpp
-  rec_beam_search.cu
   reshape_paged_cache.cu
   rope.cu
   utils.cpp
   cuda_ops_library.cpp
-  xattention/beam_search.cpp
-  xattention/cache_select.cu
-  xattention/decoder_reshape_and_cache.cu
-  xattention/lse_combine.cu
-  xattention/prefill_reshape_and_cache.cu
   moe/moe_fused_topk.cu
   moe/fused_moe.cpp
 )

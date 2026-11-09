@@ -187,14 +187,6 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     return forward_impl(tokens, positions, kv_caches, local_params);
   }
 
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const RecModelParams& input_params) {
-    auto local_params = input_params.clone();
-    return forward_impl(tokens, positions, kv_caches, local_params);
-  }
-
   template <typename InputParams>
   ModelOutput forward_impl(torch::Tensor tokens,
                            torch::Tensor positions,
@@ -322,12 +314,10 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
                      event_flag);
       rolling_guard.after_layer(layer_index);
 
-      if constexpr (std::is_same_v<InputParams, ModelParamsView>) {
-        if (input_params.has_multimodal()) {
-          const auto& deep_stacks = input_params.multimodal().deep_stacks;
-          if (i < deep_stacks.size()) {
-            h = h + deep_stacks[i];
-          }
+      if (input_params.has_multimodal()) {
+        const auto& deep_stacks = input_params.multimodal().deep_stacks;
+        if (i < deep_stacks.size()) {
+          h = h + deep_stacks[i];
         }
       }
       // Intralayer add-norm splits the stream, so pass residual for the add.
@@ -469,8 +459,6 @@ TORCH_MODULE(Qwen3MoeForCausalLM);
 REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen3_moe_atb,
                                    qwen3_moe_atb,
                                    Qwen3MoeForCausalLM);
-
-REGISTER_CAUSAL_REC_MODEL(qwen3_moe_atb, Qwen3MoeForCausalLM);
 
 // register the model args
 // example config:

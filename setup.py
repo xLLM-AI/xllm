@@ -328,7 +328,6 @@ class ExtBuild(build_ext):
         ("base-dir=", None, "base directory of xLLM project"),
         ("device=", None, "target device type (npu or mlu or cuda or ilu or musa or maca)"),
         ("arch=", None, "target arch type (x86 or arm)"),
-        ("generate-so=", None, "generate so or binary"),
         ("dev=", None, "build with -O1 for fast iteration"),
         ("tilelang-jobs=", None, "maximum parallel TileLang compile workers"),
     ]
@@ -338,7 +337,6 @@ class ExtBuild(build_ext):
         self.base_dir = get_base_dir()
         self.device: str | None = None
         self.arch: str | None = None
-        self.generate_so: bool = False
         self.dev: bool = False
         self.force_dependencies: bool = False
         self.tilelang_jobs: int | str | None = None
@@ -507,13 +505,6 @@ class ExtBuild(build_ext):
         else:
             raise ValueError("Please set --device to npu, mlu, cuda, dcu, ilu, musa or maca.")
 
-        product: str = "xllm"
-        if self.generate_so:
-            product = "libxllm.so"
-            cmake_args += ["-DGENERATE_SO=ON"]
-        else:
-            cmake_args += ["-DGENERATE_SO=OFF"]
-
         # Adding CMake arguments set as environment variable
         # (needed e.g. to build for ARM OSx on conda-forge)
         if "CMAKE_ARGS" in os.environ:
@@ -537,7 +528,7 @@ class ExtBuild(build_ext):
         logger.info(f"CMake Args: {cmake_args}")
         logger.info(f"Env: {env}")
 
-        self.build_cmake_targets(ext, cmake_args, build_args, env, extdir, product)
+        self.build_cmake_targets(ext, cmake_args, build_args, env, extdir)
 
     def _configure_cmake(self, cmake_cmd: str, cmake_args: list[str], env: dict[str, str]) -> list[str]:
         cmake_dir = get_cmake_dir()
@@ -561,7 +552,6 @@ class ExtBuild(build_ext):
         build_args: list[str],
         env: dict[str, str],
         extdir: str,
-        product: str,
     ) -> None:
         """Build CMake targets"""
         cmake_dir = get_cmake_dir()
@@ -579,7 +569,7 @@ class ExtBuild(build_ext):
         server_output_dir = os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/")
         os.makedirs(server_output_dir, exist_ok=True)
         shutil.copy(
-            os.path.join(extdir, product),
+            os.path.join(extdir, ext.name),
             server_output_dir,
         )
         for name in ("libetcd_wrapper.so", "libk8s_lease_wrapper.so"):
@@ -649,7 +639,6 @@ class ExtBuildSingleTest(ExtBuild):
         build_args: list[str],
         env: dict[str, str],
         extdir: str,
-        product: str,
     ) -> None:
         """Override method: only build the specified test target and run"""
         cmake_dir = get_cmake_dir()
@@ -859,7 +848,6 @@ class TestUT(ExtBuild):
         build_args: list[str],
         env: dict[str, str],
         extdir: str,
-        product: str,
     ) -> None:
         cmake_cmd = "cmake_maca" if self.device == "maca" else "cmake"
         self._configure_cmake(cmake_cmd, cmake_args, env)
@@ -965,7 +953,6 @@ class SingleTest(Command):
         ("test-name=", None, "name of the test target to build and run (e.g. platform_vmm_test)"),
         ("device=", None, "target device type (npu or mlu or cuda or ilu)"),
         ("arch=", None, "target arch type (x86 or arm)"),
-        ("generate-so=", None, "generate so or binary"),
         ("tilelang-jobs=", None, "maximum parallel TileLang compile workers"),
     ]
 
@@ -973,7 +960,6 @@ class SingleTest(Command):
         self.test_name: str | None = None
         self.device: str | None = None
         self.arch: str | None = None
-        self.generate_so: bool = False
         self.force_dependencies: bool = False
         self.tilelang_jobs: int | str | None = None
 
@@ -988,7 +974,6 @@ class SingleTest(Command):
         build_ext.test_name = self.test_name
         build_ext.device = self.device
         build_ext.arch = self.arch
-        build_ext.generate_so = self.generate_so
         build_ext.force_dependencies = self.force_dependencies
         build_ext.tilelang_jobs = self.tilelang_jobs
         build_ext.finalize_options()
@@ -1020,13 +1005,6 @@ def parse_arguments() -> dict[str, Any]:
         help="Device type: npu, mlu, ilu, cuda or musa or maca (case-insensitive)",
     )
     parser.add_argument(
-        "--generate-so",
-        type=str.lower,
-        choices=["true", "false", "1", "0", "yes", "no", "y", "n", "on", "off"],
-        default="false",
-        help="Whether to generate so or binary",
-    )
-    parser.add_argument(
         "--deps",
         action="store_true",
         help="Force installation of Mooncake build dependencies",
@@ -1054,11 +1032,9 @@ def parse_arguments() -> dict[str, Any]:
 
     sys.argv = [sys.argv[0]] + args.setup_args
 
-    generate_so = args.generate_so.lower() in ("true", "1", "yes", "y", "on")
     return {
         "device": args.device,
         "force_dependencies": args.deps,
-        "generate_so": generate_so,
         "test_name": args.test_name,
         "tilelang_jobs": args.tilelang_jobs,
         "dev": args.dev,
@@ -1075,7 +1051,6 @@ if __name__ == "__main__":
     logger.info(f"🚀 Build xllm with CPU arch: {arch}, target device: {device}")
     pre_build(device, force_dependencies=config["force_dependencies"])
 
-    generate_so = config["generate_so"]
     test_name = config.get("test_name")
     tilelang_jobs = config.get("tilelang_jobs")
     dev = config.get("dev", False)
@@ -1095,7 +1070,6 @@ if __name__ == "__main__":
         "build_ext": {
             "device": device,
             "arch": arch,
-            "generate_so": generate_so,
             "dev": dev,
             "force_dependencies": config["force_dependencies"],
             "tilelang_jobs": tilelang_jobs,
@@ -1111,7 +1085,6 @@ if __name__ == "__main__":
         options["test"] = {
             "device": device,
             "arch": arch,
-            "generate_so": generate_so,
             "test_name": test_name,
             "force_dependencies": config["force_dependencies"],
             "tilelang_jobs": tilelang_jobs,

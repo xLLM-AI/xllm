@@ -30,7 +30,6 @@ limitations under the License.
 #include "image_generation_service_impl.h"
 #include "models_service_impl.h"
 #include "qwen3_rerank_service_impl.h"
-#include "rec_completion_service_impl.h"
 #include "rerank_service_impl.h"
 #include "sample_service_impl.h"
 #include "speech_to_text_service_impl.h"
@@ -276,7 +275,6 @@ class APIService : public proto::XllmAPIService {
   std::unique_ptr<TextGenerationServiceImpl> text_generation_service_impl_;
   std::unique_ptr<VideoGenerationServiceImpl> video_generation_service_impl_;
   std::unique_ptr<RerankServiceImpl> rerank_service_impl_;
-  std::unique_ptr<RecCompletionServiceImpl> rec_completion_service_impl_;
 };
 
 }  // namespace xllm

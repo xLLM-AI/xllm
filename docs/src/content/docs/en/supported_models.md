@@ -4,7 +4,7 @@ description: "Find an xLLM model by task and accelerator, compare documented har
 sidebar:
   order: 20
 ---
-<p class="catalog-intro">Find the right model for your workload. Compare hardware support across text, vision, reranking, generation, and recommendation, then open a deployment guide to get started.</p>
+<p class="catalog-intro">Find the right model for your workload. Compare hardware support across text, vision, reranking, and generation, then open a deployment guide to get started.</p>
 <div class="catalog-links">
 <a href="/en/getting_started/quick_start/">Quick start →</a>
 <a href="/en/hardware/overview/">Hardware setup →</a>
@@ -16,7 +16,6 @@ sidebar:
 <a href="#vlm"><strong>VLM</strong><span>Vision-language</span></a>
 <a href="#rerank"><strong>Rerank</strong><span>Reranking</span></a>
 <a href="#dit"><strong>DiT</strong><span>Image & video</span></a>
-<a href="#rec"><strong>Rec</strong><span>Recommendation</span></a>
 </nav>
 
 <div data-catalog-filters></div>
@@ -110,25 +109,6 @@ Diffusion models for image and video generation.
 | Flux | ✅ | ❌ | ❌ | Not yet available |
 | Flux2 | ✅ | — | — | [Guide ↗](/en/cookbook/diffusion_models/flux/flux2/) |
 | Wan2.2 | ✅ | — | — | [Guide ↗](/en/cookbook/diffusion_models/wan/wan2_2/) |
-
-</div>
-
-</section>
-
-<section data-model-category="rec">
-
-## Rec
-
-Models for generative recommendation workloads.
-
-<div class="catalog-table" tabindex="0" role="region" aria-label="Recommendation">
-
-| Model / family | Ascend NPU | Cambricon MLU | Hygon DCU | Deployment guide |
-| :--- | :---: | :---: | :---: | :--- |
-| OneRec | ✅ | ❌ | ❌ | Not yet available |
-| Qwen2 | ✅ | ❌ | ❌ | Not yet available |
-| Qwen2.5 | ✅ | ❌ | ❌ | Not yet available |
-| Qwen3 | ✅ | ❌ | ❌ | Not yet available |
 
 </div>
 

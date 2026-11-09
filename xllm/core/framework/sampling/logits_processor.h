@@ -21,8 +21,7 @@ limitations under the License.
 
 namespace xllm {
 
-// In-place pre-sampling transforms, shared by the Sampler, the RecSampler
-// fast path, and the rejection sampler's verify path. Penalty stages are
+// In-place sampling transforms shared with the rejection sampler. Stages are
 // rank-agnostic (last dim, per-sequence tables, stride-0 grouped broadcast);
 // the argmax-preserving filters take flat 2-D [rows, vocab] logits — the
 // contract the fused device kernels accept.
@@ -66,8 +65,7 @@ void process_logits(torch::Tensor& logits,
                     const SamplingParameters& params,
                     const torch::Tensor& filter_mask = {});
 
-// Penalties only, for paths that skip the transform stage (e.g. the
-// RecSampler fast path).
+// Penalties only, for paths that skip the transform stage.
 void apply_sampling_penalties(torch::Tensor& logits,
                               const SamplingParameters& params);
 

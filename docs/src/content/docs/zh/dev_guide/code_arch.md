@@ -76,7 +76,6 @@ title: "代码架构与请求流程"
 │   │   ├── llm/                           # 语言模型及 Python 模型桥接
 │   │   ├── vlm/                           # 视觉语言模型
 │   │   ├── dit/                           # 扩散模型
-│   │   └── rec/                           # 生成式推荐模型
 │   ├── python/                            # Python 模型执行
 │   │   ├── models/                        # Python 模型定义
 │   │   ├── model_executor/                # 执行协调与 eager/graph runner
@@ -91,8 +90,6 @@ title: "代码架构与请求流程"
 │   ├── function_call/                     # 工具调用解析器
 │   ├── proto/                             # 服务与内部 RPC 协议定义
 │   ├── pybind/                            # 面向用户的 Python 推理 API 与 C++ 绑定
-│   ├── c_api/                             # C 集成接口
-│   ├── cc_api/                            # C++ 集成接口
 │   ├── compiler/                          # 算子编译与 AOT 构建工具
 │   └── auto_config/                       # 按模型和硬件生成启动配置
 ├── examples/                              # 离线推理示例
@@ -388,7 +385,7 @@ POST /v1/chat/completions
 
 跟踪配置时，请区分三个选择：
 
-- **服务后端**（`llm`、`vlm`、`dit`、`rec`）决定 master/engine 类型，从
+- **服务后端**（`llm`、`vlm`、`dit`）决定 master/engine 类型，从
   `master_factory.cpp` 开始查看。
 - **模型实现**（`native` 或 `python`）决定模型执行路径，从
   `core/runtime/executor.cpp` 和

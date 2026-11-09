@@ -4,7 +4,7 @@ description: "按任务和硬件查找 xLLM 模型，对比已记录的平台支
 sidebar:
   order: 20
 ---
-<p class="catalog-intro">为你的任务选择合适的模型。对比文本生成、视觉语言、重排序、图像与视频生成及推荐模型的硬件支持情况，从部署指南开始使用。</p>
+<p class="catalog-intro">为你的任务选择合适的模型。对比文本生成、视觉语言、重排序、图像与视频生成的硬件支持情况，从部署指南开始使用。</p>
 <div class="catalog-links">
 <a href="/zh/getting_started/quick_start/">快速开始 →</a>
 <a href="/zh/hardware/overview/">硬件环境配置 →</a>
@@ -16,7 +16,6 @@ sidebar:
 <a href="#vlm"><strong>VLM</strong><span>视觉语言</span></a>
 <a href="#rerank"><strong>Rerank</strong><span>重排序</span></a>
 <a href="#dit"><strong>DiT</strong><span>图像与视频生成</span></a>
-<a href="#rec"><strong>Rec</strong><span>生成式推荐</span></a>
 </nav>
 
 <div data-catalog-filters></div>
@@ -110,25 +109,6 @@ sidebar:
 | Flux | ✅ | ❌ | ❌ | 指南待补充 |
 | Flux2 | ✅ | — | — | [部署指南 ↗](/zh/cookbook/diffusion_models/flux/flux2/) |
 | Wan2.2 | ✅ | — | — | [部署指南 ↗](/zh/cookbook/diffusion_models/wan/wan2_2/) |
-
-</div>
-
-</section>
-
-<section data-model-category="rec">
-
-## Rec
-
-用于生成式推荐任务的模型。
-
-<div class="catalog-table" tabindex="0" role="region" aria-label="生成式推荐">
-
-| 模型 / 系列 | Ascend NPU | Cambricon MLU | Hygon DCU | 部署指南 |
-| :--- | :---: | :---: | :---: | :--- |
-| OneRec | ✅ | ❌ | ❌ | 指南待补充 |
-| Qwen2 | ✅ | ❌ | ❌ | 指南待补充 |
-| Qwen2.5 | ✅ | ❌ | ❌ | 指南待补充 |
-| Qwen3 | ✅ | ❌ | ❌ | 指南待补充 |
 
 </div>
 

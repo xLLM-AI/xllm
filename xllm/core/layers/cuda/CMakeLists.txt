@@ -8,20 +8,14 @@ cc_library(
     base_attention_impl.h
     flashinfer_attention.h
     fused_moe.h
-    xattention.h
-    xattention_planinfo.h
     flashinfer_workspace.h
-    xattention_workspace.h
     flashinfer_planinfo.h
   SRCS
     attention.cpp
     base_attention_impl.cpp
-    xattention.cpp
-    xattention_planinfo.cpp
     flashinfer_attention.cpp
     fused_moe.cpp
     flashinfer_workspace.cpp
-    xattention_workspace.cpp
     flashinfer_planinfo.cpp
   DEPS
     :cuda_kernels

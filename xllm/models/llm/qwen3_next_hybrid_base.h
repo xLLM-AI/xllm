@@ -191,12 +191,6 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
       if (attn_metadata.plan_info != nullptr) {
         attn_metadata.plan_info->layer_id = static_cast<int32_t>(i);
       }
-      if (attn_metadata.shared_plan_info != nullptr) {
-        attn_metadata.shared_plan_info->layer_id = static_cast<int32_t>(i);
-      }
-      if (attn_metadata.unshared_plan_info != nullptr) {
-        attn_metadata.unshared_plan_info->layer_id = static_cast<int32_t>(i);
-      }
 #endif
       // Capture hooks run before a layer. Worker-side draft config loading
       // converts target output layer L to capture index L + 1, matching the

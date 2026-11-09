@@ -140,7 +140,7 @@ curl http://127.0.0.1:9977/v1/sample \
 
 `/v1/sample` 使用说明：
 
-- 仅支持 `--backend=llm`，当前不支持 VLM/DiT/Rec。
+- 仅支持 `--backend=llm`，当前不支持 VLM/DiT。
 - `selector.type` 当前固定为 `literal`，`selector.value` 按 prompt 文本顺序全文匹配。
 - `logprobs` 默认值为 `5`，允许范围为 `[1, 5]`。
 - `choices[i].index` 即该命中的 `sample_id`，与 prompt 中命中顺序一一对应。

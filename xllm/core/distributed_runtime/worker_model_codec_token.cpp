@@ -375,15 +375,4 @@ bool decode_vlm_output(const proto::VLMForwardResponse& response,
   return decode_token_output(response, output, "vlm");
 }
 
-bool encode_rec_output(const ForwardOutput& output,
-                       const std::vector<SpeculativeTokenStats>& stats,
-                       proto::RECForwardResponse* response) {
-  return encode_token_output(output, stats, response, "rec");
-}
-
-bool decode_rec_output(const proto::RECForwardResponse& response,
-                       RawForwardOutput& output) {
-  return decode_token_output(response, output, "rec");
-}
-
 }  // namespace xllm

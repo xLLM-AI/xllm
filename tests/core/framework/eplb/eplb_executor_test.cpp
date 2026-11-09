@@ -27,7 +27,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/causal_lm.h"
-#include "core/framework/model/rec_model.h"
 
 namespace xllm {
 namespace {
@@ -36,8 +35,6 @@ static_assert(std::is_same_v<decltype(EplbInfo::prepare_token), int64_t>);
 static_assert(std::is_same_v<decltype(EplbInfo::activation_token), int64_t>);
 static_assert(
     std::is_constructible_v<EplbExecutor, CausalLM&, const torch::Device&>);
-static_assert(
-    !std::is_constructible_v<EplbExecutor, RecModel&, const torch::Device&>);
 
 class RecordingModel final : public CausalLM {
  public:

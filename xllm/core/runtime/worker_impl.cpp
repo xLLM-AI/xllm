@@ -215,10 +215,6 @@ void ensure_forward_input_device_tensors(Input& input,
       input.input_params.embedding.mtp_shifted_token_ids, device);
   move_tensor_to_device_if_needed(input.sampling_params.selected_token_idxes(),
                                   device);
-  if constexpr (std::is_same_v<Input, RecForwardInput>) {
-    move_tensor_to_device_if_needed(
-        input.decoder_sampling_params.selected_token_idxes(), device);
-  }
 }
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
@@ -787,24 +783,6 @@ void WorkerImpl::process_group_test() {
   parallel_state::reduce(tensor, parallel_args_.process_group_);
   // call allgather
   parallel_state::gather(tensor, parallel_args_.process_group_);
-}
-
-std::optional<ForwardOutput> WorkerImpl::step(
-    const RecForwardInput& /*inputs*/) {
-  LOG(FATAL) << "Rec input requires a Rec worker";
-  return std::nullopt;
-}
-
-void WorkerImpl::prepare_work_before_execute(
-    const RecForwardInput& /*inputs*/,
-    RecForwardInput& /*processed_inputs*/) {
-  LOG(FATAL) << "Rec input preparation requires a Rec worker";
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
-    const RecForwardInput& /*inputs*/) {
-  LOG(FATAL) << "Rec input requires a Rec worker";
-  return folly::makeSemiFuture(std::optional<ForwardOutput>{});
 }
 
 template <typename Params>
@@ -1545,10 +1523,6 @@ void WorkerImpl::apply_kv_block_swaps(const VlmModelParams& input_params) {
   apply_kv_block_swaps_impl(input_params);
 }
 
-void WorkerImpl::apply_kv_block_swaps(const RecModelParams& input_params) {
-  apply_kv_block_swaps_impl(input_params);
-}
-
 #if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
 void WorkerImpl::refresh_cuda_block_copy_runtime_state() {
   cuda_block_copy_runtime_state_ = {};
@@ -1637,11 +1611,6 @@ bool WorkerImpl::can_use_cuda_block_copy_kernel(
   return can_use_cuda_block_copy_kernel_impl(input_params);
 }
 
-bool WorkerImpl::can_use_cuda_block_copy_kernel(
-    const RecModelParams& input_params) const {
-  return can_use_cuda_block_copy_kernel_impl(input_params);
-}
-
 template <typename Params>
 void WorkerImpl::execute_cuda_block_copy_kernel_impl(
     const Params& input_params) {
@@ -1666,10 +1635,6 @@ void WorkerImpl::execute_cuda_block_copy_kernel(
   execute_cuda_block_copy_kernel_impl(input_params);
 }
 
-void WorkerImpl::execute_cuda_block_copy_kernel(
-    const RecModelParams& input_params) {
-  execute_cuda_block_copy_kernel_impl(input_params);
-}
 #endif
 
 void WorkerImpl::observe_execution_memory(bool is_warmup) {
@@ -2593,7 +2558,6 @@ void WorkerImpl::prepare_mla_prefixcache_inputs_impl(Params& input_params) {
       torch::empty({sum_prefix, context_.get_model_args().qk_rope_head_dim()},
                    torch::TensorOptions().dtype(dtype_).pinned_memory(true))
           .to(device_);
-  ;
 
   input_params.attention.device.ring_cur_seqlen =
       torch::stack({input_params.attention.device.q_seq_lens,
@@ -2617,10 +2581,6 @@ void WorkerImpl::prepare_mla_prefixcache_inputs(LlmModelParams& input_params) {
 }
 
 void WorkerImpl::prepare_mla_prefixcache_inputs(VlmModelParams& input_params) {
-  prepare_mla_prefixcache_inputs_impl(input_params);
-}
-
-void WorkerImpl::prepare_mla_prefixcache_inputs(RecModelParams& input_params) {
   prepare_mla_prefixcache_inputs_impl(input_params);
 }
 

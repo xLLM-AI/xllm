@@ -469,8 +469,6 @@ void DistributedWorkerManager::start_worker_servers(
       LOG(FATAL) << "Unsupported " << options.task_type()
                  << " for vlm model backend";
     }
-  } else if (model_backend == "rec") {
-    worker_type = WorkerType::REC;
   } else if (model_backend == "dit") {
     worker_type = WorkerType::DIT;
   } else {

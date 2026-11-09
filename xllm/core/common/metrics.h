@@ -312,16 +312,6 @@ DECLARE_COUNTER(proto_latency_seconds_o2proto);
 // engine metrics
 DECLARE_COUNTER(prepare_input_latency_seconds);
 
-// rec engine metrics
-DECLARE_HISTOGRAM(rec_total_latency_microseconds);
-DECLARE_HISTOGRAM(prepare_input_latency_microseconds);
-DECLARE_HISTOGRAM(rec_first_token_latency_microseconds);
-DECLARE_HISTOGRAM(rec_second_token_latency_microseconds);
-DECLARE_HISTOGRAM(rec_third_token_latency_microseconds);
-DECLARE_HISTOGRAM(rec_sampling_latency_microseconds);
-DECLARE_GAUGE(rec_beam_search_width);
-DECLARE_HISTOGRAM(rec_input_token_num_per_request);
-
 // multi node metrics
 DECLARE_COUNTER(worker_service_latency_seconds);
 DECLARE_COUNTER(engine_latency_seconds);

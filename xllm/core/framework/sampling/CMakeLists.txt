@@ -7,13 +7,11 @@ cc_library(
     sampling_params.h
     logits_processor.h
     sampler.h
-    rec_sampler.h
     beam_searcher.h
   SRCS
     sampling_params.cpp
     logits_processor.cpp
     sampler.cpp
-    rec_sampler.cpp
     beam_searcher.cpp
   DEPS
     util

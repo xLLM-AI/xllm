@@ -44,7 +44,6 @@ limitations under the License.
 #include "framework/tokenizer/tokenizer.h"
 #include "options.h"
 #include "platform/device.h"
-#include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 #include "util/threadpool.h"
 #if defined(USE_NPU)
@@ -173,14 +172,8 @@ class WorkerImpl {
   // Internal helper shared by worker pipelines before model execution.
   virtual void apply_kv_block_swaps(const LlmModelParams& input_params);
   virtual void apply_kv_block_swaps(const VlmModelParams& input_params);
-  virtual void apply_kv_block_swaps(const RecModelParams& input_params);
 
   virtual std::optional<ForwardOutput> step(const DiTForwardInput& inputs);
-
-  virtual std::optional<ForwardOutput> step(const RecForwardInput& inputs);
-
-  virtual void prepare_work_before_execute(const RecForwardInput& inputs,
-                                           RecForwardInput& processed_inputs);
 
   virtual std::optional<ForwardOutput> step(const LlmForwardInput& inputs);
   virtual std::optional<ForwardOutput> step(const VlmForwardInput& inputs);
@@ -286,9 +279,6 @@ class WorkerImpl {
   virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const DiTForwardInput& inputs);
 
-  virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const RecForwardInput& inputs);
-
   virtual folly::SemiFuture<folly::Unit> process_group_test_async();
 
   const torch::Device& device() const { return device_.unwrap(); }
@@ -339,8 +329,7 @@ class WorkerImpl {
   }
 
   bool share_weights_from(WorkerImpl& source) {
-    // Weight sharing is specific to CausalLM. Rec workers own their models in
-    // pipelines, so use model_ rather than the virtual model() accessor here.
+    // Weight sharing uses the owned language model.
     if (model_ == nullptr || source.model_ == nullptr) {
       return false;
     }
@@ -433,7 +422,6 @@ class WorkerImpl {
   // Only used for deepseek chunked prefill ops on npu device
   void prepare_mla_prefixcache_inputs(LlmModelParams& input_params);
   void prepare_mla_prefixcache_inputs(VlmModelParams& input_params);
-  void prepare_mla_prefixcache_inputs(RecModelParams& input_params);
 
   void init_hierarchy_kv_cache_transfer(
       const KVCacheShape& kv_cache_shape,
@@ -470,8 +458,6 @@ class WorkerImpl {
   void execute_cuda_block_copy_kernel(const LlmModelParams& input_params);
   bool can_use_cuda_block_copy_kernel(const VlmModelParams& input_params) const;
   void execute_cuda_block_copy_kernel(const VlmModelParams& input_params);
-  bool can_use_cuda_block_copy_kernel(const RecModelParams& input_params) const;
-  void execute_cuda_block_copy_kernel(const RecModelParams& input_params);
 
   struct CudaBlockCopyRuntimeState {
     torch::Tensor k_cache_ptrs_device;

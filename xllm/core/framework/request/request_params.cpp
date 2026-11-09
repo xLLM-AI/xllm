@@ -885,10 +885,7 @@ RequestSamplingParam RequestParams::to_sampling_param(size_t best_of) const {
     // enable logprobs for best_of to generate sequence logprob
     sampling_param.logprobs = true;
   }
-  // Beam-search fields (beam_width / num_return_sequences) are intentionally
-  // NOT mapped here: they are model-specific. LLM copies beam_width and then
-  // normalizes logprobs/top_logprobs for beam expansion, REC copies both
-  // fields, and VLM omits them entirely. Each factory layers them on as needed.
+  // Beam-search fields are model-specific. Each factory applies its policy.
   return sampling_param;
 }
 

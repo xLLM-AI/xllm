@@ -24,11 +24,8 @@ limitations under the License.
 #include "core/disaggregation/pd_scheduler.h"
 #include "scheduler/continuous_scheduler.h"
 #include "scheduler/dit_scheduler.h"
-#include "scheduler/fixed_steps_scheduler.h"
 
 namespace xllm {
-
-class RecEngine;
 
 enum class SchedulerKind : int8_t { CONTINUOUS = 0, PD = 5 };
 
@@ -77,9 +74,5 @@ std::unique_ptr<Scheduler> create_continuous_scheduler(
 std::unique_ptr<DiTScheduler> create_dit_scheduler(
     DiTEngine* engine,
     DiTScheduler::Options options);
-
-std::unique_ptr<FixedStepsScheduler> create_fixed_steps_scheduler(
-    RecEngine* engine,
-    SchedulerOptions options);
 
 }  // namespace xllm

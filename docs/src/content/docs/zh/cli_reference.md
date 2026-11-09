@@ -131,7 +131,6 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `enable_beam_search_kernel` | `bool` | `false` | 是否启用 beam search kernel。 |
 | `beam_width` | `int32` | `1` | Beam search 的 beam width。 |
 | `enable_block_copy_kernel` | `bool` | `true`（NPU/CUDA/MUSA/DCU）；`false`（其他后端） | 是否在支持的后端使用 block copy kernel。 |
-| `enable_topk_sorted` | `bool` | `true` | 是否启用 top-k 结果排序输出。 |
 
 ## SchedulerConfig
 
@@ -300,20 +299,3 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `dit_sparse_attention_sparse_start_step` | `int64` | `0` | 开始使用 sparse attention 的 step 索引；此前的 step 使用 dense attention。 |
 | `dit_sparse_attention_version` | `string` | `"rain_fusion"` | sparse attention 版本：`rain_fusion`（frame-pairing + `aclnnRainFusionAttention`）或 `sparse_attention`（block-decompose + `aclnnBlockSparseAttention`）。 |
 | `dit_sparse_attention_mask_refresh_steps` | `int64` | `1` | 每 N 个 diffusion step 重新计算一次 block sparse mask；`1` 表示每步都算，值越大 mask 复用越久。 |
-
-## RecConfig
-
-| 参数名称 | 类型 | 默认值 | 参数含义 |
-|:---------|:-----|:-------|:---------|
-| `enable_rec_fast_sampler` | `bool` | `true` | 是否为 Rec pipeline 启用 RecSampler fast sampling path。 |
-| `enable_rec_prefill_only` | `bool` | `false` | 是否启用 Rec prefill-only 模式，不分配 decoder self-attention blocks。 |
-| `enable_xattention_one_stage` | `bool` | `false` | 是否在 Rec multi-round 模式下强制使用 xattention one-stage decode。 |
-| `max_decode_rounds` | `int32` | `0` | multi-step decoding 的最大 decode round 数；`0` 表示禁用。 |
-| `enable_constrained_decoding` | `bool` | `false` | 是否启用 constrained decoding，用预定义规则约束输出格式或结构。 |
-| `output_rec_logprobs` | `bool` | `false` | 是否输出 Rec multi-round token-aligned logprobs；启用后缺失的 per-token logprobs 会用最终 beam logprob 填充。 |
-| `enable_convert_tokens_to_item` | `bool` | `false` | 是否在 REC/OneRec response 中将 token ids 转换为 item id。 |
-| `enable_output_sku_logprobs` | `bool` | `false` | 是否输出 REC/OneRec token-aligned logprobs tensor。 |
-| `enable_extended_item_info` | `bool` | `false` | 是否解析并输出 REC extended item info tensors。 |
-| `each_conversion_threshold` | `int32` | `50` | 每个 REC token triplet 最多输出的 item 数。 |
-| `total_conversion_threshold` | `int32` | `1000` | 单个 REC response 最多输出的 item 总数。 |
-| `rec_worker_max_concurrency` | `uint32` | `1` | Rec worker 并行执行并发度；小于等于 `1` 表示禁用并发 Rec worker。 |

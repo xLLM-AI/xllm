@@ -8,14 +8,9 @@ cc_library(
     model_path.h
     vocab_validation.h
     seq_lens.h
-    rec_model_utils.h
     causal_lm.h
     model.h
     moe_execution_input.h
-    causal_rec.h
-    generic_rec.h
-    rec_model.h
-    rec_model_kind.h
     causal_vlm.h
     dit_model.h
     dit_model_output.h

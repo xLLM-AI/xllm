@@ -40,7 +40,6 @@ Sequence make_decode_ready_sequence(bool enable_schedule_overlap) {
   params.skip_special_tokens = true;
   params.streaming = false;
   params.enable_schedule_overlap = enable_schedule_overlap;
-  params.rec_type = RecType::kNone;
   params.bos_token_id = 0;
   params.request_id = "generated_tokens_req";
   params.sampling_param = &sampling_param;

@@ -172,14 +172,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     return forward_impl(tokens, positions, kv_caches, local_params);
   }
 
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const RecModelParams& input_params) {
-    auto local_params = input_params.clone();
-    return forward_impl(tokens, positions, kv_caches, local_params);
-  }
-
   template <typename InputParams>
   ModelOutput forward_impl(torch::Tensor tokens,
                            torch::Tensor positions,
@@ -301,12 +293,10 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
                      event_flag);
 
       rolling_guard.after_layer(layer_index);
-      if constexpr (std::is_same_v<InputParams, ModelParamsView>) {
-        if (input_params.has_multimodal()) {
-          const auto& deep_stacks = input_params.multimodal().deep_stacks;
-          if (i < deep_stacks.size()) {
-            h = h + deep_stacks[i];
-          }
+      if (input_params.has_multimodal()) {
+        const auto& deep_stacks = input_params.multimodal().deep_stacks;
+        if (i < deep_stacks.size()) {
+          h = h + deep_stacks[i];
         }
       }
       // ATB keeps `h` as the full residual stream, so no separate residual.
@@ -489,8 +479,6 @@ TORCH_MODULE(QWen3ForCausalLM);
 
 // register the causal model
 REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen3_atb, qwen3_atb, QWen3ForCausalLM);
-
-REGISTER_CAUSAL_REC_MODEL(qwen3_atb, QWen3ForCausalLM);
 
 // register the model args
 REGISTER_MODEL_ARGS_WITH_VARNAME(qwen3_atb, qwen3_atb, [&] {

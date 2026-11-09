@@ -33,7 +33,6 @@ cc_library(
     llm_engine.h
     vlm_engine.h
     speculative_engine.h
-    rec_engine.h
     distributed_worker_manager.h
     remote_worker.h
     worker_server.h
@@ -51,7 +50,6 @@ cc_library(
     llm_engine.cpp
     vlm_engine.cpp
     speculative_engine.cpp
-    rec_engine.cpp
     distributed_worker_manager.cpp
     kv_transfer_coordinator.cpp
     remote_worker.cpp
@@ -133,7 +131,6 @@ cc_library(
   HDRS
     llm_master.h
     master.h
-    rec_master.h
     master_manager.h
     master_factory.h
     vlm_master.h
@@ -141,7 +138,6 @@ cc_library(
   SRCS
     llm_master.cpp
     master.cpp
-    rec_master.cpp
     master_manager.cpp
     master_factory.cpp
     vlm_master.cpp

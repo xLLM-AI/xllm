@@ -69,7 +69,6 @@ void Sequence::init_logprob_state(bool force_token_logprobs) {
   // buffers are created, independent of any upstream normalization. best_of>n
   // forces logprobs on upstream, so it is already covered. A derived type may
   // emit per-token logprobs in its output regardless of the request flags
-  // (OneRec SKU logprobs) and then forces the buffer on.
   const bool is_beam_search = sequence_params_.sampling_param->beam_width > 1;
   const bool enable_logprobs = sequence_params_.sampling_param->logprobs ||
                                force_token_logprobs || is_beam_search;

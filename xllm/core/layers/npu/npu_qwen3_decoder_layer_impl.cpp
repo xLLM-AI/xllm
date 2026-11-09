@@ -27,7 +27,6 @@ limitations under the License.
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/model/rec_model_utils.h"
 #include "core/layers/npu/loader/qwen3_decoder_loader.h"
 #include "operations/aclnn/ops/quant_matmul_nz_decode_operation.h"
 #include "operations/aclnn/utils/utils.h"
@@ -87,7 +86,6 @@ void NpuQwen3DecoderLayerImpl::param_from_args(
       ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() &&
       isPrefill;
   param.loraEnableGMM = false;
-  param.enableXattention = is_rec_multi_round_mode();
   const auto& kernel_config = ::xllm::KernelConfig::get_instance();
 
   param.linearTransposeType = {static_cast<int>(TransposeType::NOT_TRANSPOSE),
@@ -384,8 +382,7 @@ torch::Tensor NpuQwen3DecoderLayerImpl::forward_impl(
     NpuDecoderInputView input_params,
     aclrtEvent* event,
     std::atomic<bool>* event_flag,
-    int node_id,
-    const LlmRecMultiRoundParams* llmrec) {
+    int node_id) {
   atb::Status st;
   if (!input_params.meta.batch_forward_type.is_decode()) {
     build_node_variant_pack(prefill_node_,
@@ -397,8 +394,7 @@ torch::Tensor NpuQwen3DecoderLayerImpl::forward_impl(
                             input_params,
                             /*is_prefill=*/true,
                             node_id,
-                            /*use_graph_decode_input=*/false,
-                            llmrec);
+                            /*use_graph_decode_input=*/false);
     // mstxRangeEnd(id);
     st = execute_node(prefill_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
@@ -424,8 +420,7 @@ torch::Tensor NpuQwen3DecoderLayerImpl::forward_impl(
                             input_params,
                             /*is_prefill=*/false,
                             node_id,
-                            use_graph_decode_input,
-                            llmrec);
+                            use_graph_decode_input);
     st = execute_node(decode_node, node_id + 1000, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
                            << "execute decode layer fail, error code: " << st;
@@ -444,8 +439,7 @@ void NpuQwen3DecoderLayerImpl::build_node_variant_pack(
     NpuDecoderInputView input_params,
     bool is_prefill,
     int node_id,
-    bool use_graph_decode_input,
-    const LlmRecMultiRoundParams* llmrec) {
+    bool use_graph_decode_input) {
   internal_tensors_ = atb_speed::Utils::AtTensor2Tensor(x);
   if (::xllm::KernelConfig::get_instance().enable_interlayer_addnorm() &&
       residual_.defined()) {
@@ -472,39 +466,13 @@ void NpuQwen3DecoderLayerImpl::build_node_variant_pack(
           input_params.attention.device.block_tables);
 
   int input_idx = WEIGHT_COUNT_PER_LAYER + 11;
-  if (llmrec != nullptr) {
-    if (is_prefill) {
-      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 4) =
-          atb_speed::Utils::AtTensor2Tensor(kv_cache.get_k_cache());
-      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 5) =
-          atb_speed::Utils::AtTensor2Tensor(kv_cache.get_v_cache());
-    } else {
-      CHECK_LT(static_cast<size_t>(node_id), llmrec->unshared_k_caches.size());
-      CHECK_LT(static_cast<size_t>(node_id), llmrec->unshared_v_caches.size());
-      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 4) =
-          atb_speed::Utils::AtTensor2Tensor(llmrec->unshared_k_caches[node_id]);
-      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 5) =
-          atb_speed::Utils::AtTensor2Tensor(llmrec->unshared_v_caches[node_id]);
-    }
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10) = placeholder_;
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
-        atb_speed::Utils::AtTensor2Tensor(llmrec->shared_k_caches[node_id]);
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 12) =
-        atb_speed::Utils::AtTensor2Tensor(llmrec->shared_v_caches[node_id]);
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 13) =
-        atb_speed::Utils::AtTensor2Tensor(llmrec->beam_width_tensor);
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 14) =
-        atb_speed::Utils::AtTensor2Tensor(llmrec->current_round_tensor);
-    input_idx = WEIGHT_COUNT_PER_LAYER + 15;
-  } else {
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 4) =
-        atb_speed::Utils::AtTensor2Tensor(kv_cache.get_k_cache());
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 5) =
-        atb_speed::Utils::AtTensor2Tensor(kv_cache.get_v_cache());
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10) =
-        atb_speed::Utils::AtTensor2Tensor(
-            input_params.attention.device.new_cache_slots);
-  }
+  node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 4) =
+      atb_speed::Utils::AtTensor2Tensor(kv_cache.get_k_cache());
+  node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 5) =
+      atb_speed::Utils::AtTensor2Tensor(kv_cache.get_v_cache());
+  node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10) =
+      atb_speed::Utils::AtTensor2Tensor(
+          input_params.attention.device.new_cache_slots);
 
   if (is_prefill &&
       (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() ||

@@ -40,17 +40,11 @@ class VlmCodec final {
   static constexpr auto decode = decode_vlm_output;
 };
 
-class RecCodec final {
- public:
-  using Response = proto::RECForwardResponse;
-  static constexpr auto encode = encode_rec_output;
-  static constexpr auto decode = decode_rec_output;
-};
+using TokenCodecs = ::testing::Types<LlmCodec, VlmCodec>;
 
 template <typename Codec>
 class WorkerModelTokenCodecTest : public ::testing::Test {};
 
-using TokenCodecs = ::testing::Types<LlmCodec, VlmCodec, RecCodec>;
 TYPED_TEST_SUITE(WorkerModelTokenCodecTest, TokenCodecs);
 
 RawForwardOutput original_output() {

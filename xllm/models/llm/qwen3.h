@@ -20,7 +20,6 @@ limitations under the License.
 #include <type_traits>
 
 #include "core/framework/model/model_output.h"
-#include "core/framework/model/rec_model_utils.h"
 #if defined(USE_NPU)
 #include "core/layers/common/attention_mask.h"
 #endif
@@ -114,14 +113,6 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
     return forward_impl(tokens, positions, kv_caches, local_params);
   }
 
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const RecModelParams& input_params) {
-    auto local_params = input_params.clone();
-    return forward_impl(tokens, positions, kv_caches, local_params);
-  }
-
   template <typename InputParams>
   ModelOutput forward_impl(torch::Tensor tokens,
                            torch::Tensor positions,
@@ -162,16 +153,8 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
       if (!input_params_new.synchronize_layer(static_cast<uint32_t>(i))) {
         return ModelOutput();
       }
-      prepare_qwen_rec_layer(
-          input_params_new, attn_metadata, i, layers_.size());
 #if defined(USE_CUDA)
       attn_metadata.plan_info->layer_id = i;
-      if (attn_metadata.shared_plan_info != nullptr) {
-        attn_metadata.shared_plan_info->layer_id = i;
-      }
-      if (attn_metadata.unshared_plan_info != nullptr) {
-        attn_metadata.unshared_plan_info->layer_id = i;
-      }
 #endif
       auto& layer = layers_[i];
       h = layer->forward(h,
@@ -185,12 +168,10 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
         return ModelOutput();
       }
 
-      if constexpr (std::is_same_v<InputParams, ModelParamsView>) {
-        if (input_params.has_multimodal()) {
-          const auto& deep_stacks = input_params.multimodal().deep_stacks;
-          if (i < deep_stacks.size()) {
-            h = h + deep_stacks[i];
-          }
+      if (input_params.has_multimodal()) {
+        const auto& deep_stacks = input_params.multimodal().deep_stacks;
+        if (i < deep_stacks.size()) {
+          h = h + deep_stacks[i];
         }
       }
     }
@@ -205,11 +186,6 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
     return build_attention_metadata(params, h);
   }
 
-  layer::AttentionMetadata get_attention_metadata(const RecModelParams& params,
-                                                  const torch::Tensor& h) {
-    return build_attention_metadata(params, h);
-  }
-
   template <typename InputParams>
   layer::AttentionMetadata build_attention_metadata(const InputParams& params,
                                                     const torch::Tensor& h) {
@@ -220,9 +196,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
     }
     max_seq_len_ = std::max(params.meta.kv_max_seq_len, max_seq_len_);
     bool is_spec_verify = false;
-    if constexpr (std::is_same_v<InputParams, ModelParamsView>) {
-      is_spec_verify = params.is_spec_verify;
-    }
+    is_spec_verify = params.is_spec_verify;
     const bool use_append_mask =
         is_spec_verify || params.meta.batch_forward_type.is_mixed() ||
         params.meta.batch_forward_type.is_chunked_prefill();
@@ -296,8 +270,6 @@ TORCH_MODULE(QWen3ForCausalLM);
 
 // register the causal model
 REGISTER_CAUSAL_MODEL(qwen3, QWen3ForCausalLM);
-
-REGISTER_CAUSAL_REC_MODEL(qwen3, QWen3ForCausalLM);
 
 // register the model args
 REGISTER_MODEL_ARGS(qwen3, [&] {

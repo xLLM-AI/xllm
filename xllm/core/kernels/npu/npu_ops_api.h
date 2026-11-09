@@ -419,21 +419,6 @@ w4a8_dynamic_moe_preprocess(
     int64_t group_size,
     bool pack_weight_to_int32);
 
-std::tuple<torch::Tensor, torch::Tensor> rec_constrained_topk(
-    const torch::Tensor& logits,
-    const torch::Tensor& sequence_group,
-    const torch::Tensor& first_token_ids,
-    const torch::Tensor& prefix1_offsets,
-    const torch::Tensor& prefix1_values,
-    const torch::Tensor& prefix1_pair_keys,
-    const torch::Tensor& prefix2_value_offsets,
-    const torch::Tensor& prefix2_values,
-    const torch::Tensor& temperatures,
-    int64_t current_step,
-    int64_t top_k,
-    int64_t max_prefix1_degree,
-    int64_t max_prefix2_degree);
-
 torch::Tensor causal_conv1d(const torch::Tensor& x,
                             const torch::Tensor& weight,
                             const torch::Tensor& conv_state,

@@ -135,9 +135,6 @@ struct SchedulerOptions {
   // Index ID for internal server ID, which must be set different values
   // if the model supports multiple version or there are multiple models.
   PROPERTY(int64_t, server_idx) = 0;
-
-  // max concurrency for rec worker
-  PROPERTY(int32_t, rec_worker_max_concurrency) = 1;
 };
 
 class SchedulerBase {

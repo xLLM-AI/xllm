@@ -35,7 +35,7 @@ namespace xllm {
 
 struct ModelArgs;
 
-// LLM/VLM engine-facing batch. Rec uses RecBatch directly.
+// LLM/VLM engine-facing batch.
 class Batch final {
  public:
   Batch() = default;

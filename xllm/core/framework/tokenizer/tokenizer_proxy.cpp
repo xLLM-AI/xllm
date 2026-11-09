@@ -48,11 +48,6 @@ bool TokenizerProxy::batch_encode(const std::vector<std::string>& texts,
   return get_tls_tokenizer()->batch_encode(texts, ids, add_special_tokens);
 }
 
-bool TokenizerProxy::encode(int64_t item_id,
-                            std::vector<int32_t>* token_ids) const {
-  return get_tls_tokenizer()->encode(item_id, token_ids);
-}
-
 std::string TokenizerProxy::decode(const Slice<int32_t>& ids,
                                    bool skip_special_tokens) const {
   return get_tls_tokenizer()->decode(ids, skip_special_tokens);
@@ -60,12 +55,6 @@ std::string TokenizerProxy::decode(const Slice<int32_t>& ids,
 
 std::string TokenizerProxy::decode_token(int32_t id) const {
   return get_tls_tokenizer()->decode_token(id);
-}
-
-bool TokenizerProxy::decode(const Slice<int32_t>& token_ids,
-                            bool skip_special_tokens,
-                            std::vector<int64_t>* item_ids) const {
-  return get_tls_tokenizer()->decode(token_ids, skip_special_tokens, item_ids);
 }
 
 std::optional<int32_t> TokenizerProxy::token_to_id(
