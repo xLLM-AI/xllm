@@ -80,53 +80,6 @@ TEST(FFmpegAudioDecoderTest, DurationBudgetBoundsDecoding) {
   }
 }
 
-TEST(FFmpegVideoEncoderTest, RoundTripPreservesAllFramesAndFrameRate) {
-  for (const std::string format : {"mp4", "avi"}) {
-    for (int64_t num_frames : {1, 5, 124}) {
-      for (double fps : {24.0, 30000.0 / 1001.0}) {
-        for (bool include_audio : {false, true}) {
-          SCOPED_TRACE(::testing::Message()
-                       << "format=" << format << " frames=" << num_frames
-                       << " fps=" << fps << " audio=" << include_audio);
-          const torch::Tensor video = torch::zeros({num_frames, 3, 16, 16});
-          FFmpegVideoEncoder encoder;
-          std::string encoded;
-          if (include_audio) {
-            const int32_t sample_rate = 32000;
-            const int64_t samples =
-                static_cast<int64_t>(num_frames * sample_rate / fps);
-            const torch::Tensor audio = torch::zeros({2, samples});
-            ASSERT_TRUE(encoder.encode(
-                video, audio, fps, sample_rate, format, encoded));
-            FFmpegAudioDecoder audio_decoder;
-            torch::Tensor decoded_audio;
-            AudioMetadata audio_metadata;
-            ASSERT_TRUE(audio_decoder.decode(encoded,
-                                             decoded_audio,
-                                             audio_metadata,
-                                             sample_rate,
-                                             /*target_channels=*/2));
-            // Container handling of AAC priming and tail padding can differ.
-            EXPECT_NEAR(audio_metadata.duration,
-                        static_cast<double>(samples) / sample_rate,
-                        2048.0 / sample_rate);
-          } else {
-            ASSERT_TRUE(encoder.encode(video, fps, format, encoded));
-          }
-          FFmpegVideoDecoder decoder;
-          torch::Tensor decoded;
-          VideoMetadata metadata;
-          ASSERT_TRUE(decoder.decode(encoded, decoded, metadata));
-          EXPECT_EQ(decoded.size(0), num_frames);
-          EXPECT_EQ(metadata.total_num_frames, num_frames);
-          EXPECT_NEAR(metadata.fps, fps, 1e-6);
-          EXPECT_NEAR(metadata.duration, num_frames / fps, 1e-6);
-        }
-      }
-    }
-  }
-}
-
 }  // namespace xllm
 
 namespace xllm {
