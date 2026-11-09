@@ -162,8 +162,8 @@ void benchmark_llm_batch_factory(benchmark::State& state,
   const BatchFactory factory(dp_size);
 
   for (auto _ : state) {
-    BatchGroup batches = factory.create_batches(
-        fixture.requests(), fixture.sequences(), fixture.budgets());
+    BatchGroup batches =
+        factory.create_batches(fixture.sequences(), fixture.budgets());
     benchmark::DoNotOptimize(batches);
   }
   state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) *

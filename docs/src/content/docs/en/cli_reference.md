@@ -127,14 +127,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `store_local_hostname` | `string` | `""` | Local host name of the KV Cache Store client. |
 | `enable_control_h2d_block_num` | `bool` | `false` | Whether to control the number of H2D copy blocks. |
 
-## BeamSearchConfig
-
-| Parameter | Type | Default | Description |
-|:----------|:-----|:--------|:------------|
-| `enable_beam_search_kernel` | `bool` | `false` | Whether to enable the beam search kernel. |
-| `beam_width` | `int32` | `1` | Beam width for beam search. |
-| `enable_block_copy_kernel` | `bool` | `true` (NPU/CUDA/MUSA/DCU); `false` (other backends) | Whether to use the block copy kernel on supported backends. |
-
 ## SchedulerConfig
 
 | Parameter | Type | Default | Description |

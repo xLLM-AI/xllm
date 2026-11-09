@@ -34,13 +34,7 @@ void BatchGroup::apply_outputs(const std::vector<RawForwardOutput>& outputs,
   for (size_t dp_rank = 0; dp_rank < size(); ++dp_rank) {
     Batch& batch = batches_[dp_rank];
     const RawForwardOutput& output = outputs[dp_rank];
-    if (action == BatchOutputAction::COMMIT_PENDING ||
-        output.src_seq_idxes.empty()) {
-      batch.process_sample_output(output, action);
-    } else {
-      batch.process_beam_search_output(output, action);
-    }
-    batch.refresh_sequences_from_groups();
+    batch.process_sample_output(output, action);
   }
 }
 

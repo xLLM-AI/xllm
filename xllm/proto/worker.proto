@@ -217,8 +217,7 @@ message RequestSamplingParam {
   int64 top_logprobs = 8;
   reserved 9;
   bool is_embeddings = 10;
-  int32 beam_width = 11;
-  int32 num_return_sequences = 12;
+  reserved 11, 12;
   float min_p = 13;
 }
 
@@ -293,19 +292,19 @@ message MediaNamedTensor {
 
 message DiTForwardInput {
   int32 batch_size = 1;
-  
+
   // Primary input text description for image generation
   repeated string prompts = 2;
-  
+
   // Secondary prompt for additional details (e.g., color, lighting)
   repeated string prompts_2 = 3;
-  
+
   // Negative prompt to exclude low-quality features
   repeated string negative_prompts = 4;
-  
+
   // Secondary negative prompt to exclude additional unwanted features
   repeated string negative_prompts_2 = 5;
-  
+
   reserved 6, 7, 8, 9, 10, 11, 12, 13, 14, 15;
   // generation params
   DiTGenerationParams generation_params = 16;
@@ -426,9 +425,7 @@ message LLMForwardResponse {
   repeated SquenceOutput outputs = 2;
   repeated int64 expert_load_data = 3;
   int64 prepared_token = 4;
-  repeated int32 src_seq_idxes = 5;
-  repeated int32 out_tokens = 6;
-  repeated float out_logprobs = 7;
+  reserved 5, 6, 7;
   repeated JsonObjectOutputError json_object_errors = 9;
   reserved 10, 11;
 }
@@ -437,9 +434,7 @@ message VLMForwardResponse {
   repeated SquenceOutput outputs = 2;
   repeated int64 expert_load_data = 3;
   int64 prepared_token = 4;
-  repeated int32 src_seq_idxes = 5;
-  repeated int32 out_tokens = 6;
-  repeated float out_logprobs = 7;
+  reserved 5, 6, 7;
   repeated JsonObjectOutputError json_object_errors = 9;
 }
 

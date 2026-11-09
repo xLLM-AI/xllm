@@ -110,10 +110,7 @@ message CompletionRequest {
   // request priority. default = DEFAULT
   optional Priority priority = 28;
 
-  optional int32 beam_width = 29;
-
-  // Final number of beam results to return. Defaults to beam_width when unset.
-  optional int32 num_return_sequences = 41;
+  reserved 29, 41;
 
   optional bool add_special_tokens = 30;
 

@@ -55,15 +55,6 @@ std::string generate_rerank_request_id() {
          short_uuid.random();
 }
 
-void apply_beam_search_logprobs_default(
-    RequestParams& params,
-    bool probability_params_explicitly_set) {
-  if (params.beam_width > 1 && !probability_params_explicitly_set) {
-    params.logprobs = true;
-    params.top_logprobs = static_cast<int64_t>(params.beam_width);
-  }
-}
-
 nlohmann::json proto_struct_to_json(const google::protobuf::Struct& pb_struct);
 
 // Handle tool_choice conversion from Anthropic format to internal format
@@ -267,15 +258,6 @@ RequestParams::RequestParams(const proto::CompletionRequest& request,
       streaming = false;
     }
   }
-  // beam search
-  if (request.has_beam_width()) {
-    beam_width = request.beam_width();
-  }
-  if (request.has_num_return_sequences()) {
-    num_return_sequences = request.num_return_sequences();
-  }
-  apply_beam_search_logprobs_default(
-      *this, /*probability_params_explicitly_set=*/request.has_logprobs());
   if (request.has_add_special_tokens()) {
     add_special_tokens = request.add_special_tokens();
   } else {
@@ -510,18 +492,6 @@ void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
     }
   }
 
-  // beam search
-  if (request.has_beam_width()) {
-    params.beam_width = request.beam_width();
-  }
-  if (request.has_num_return_sequences()) {
-    params.num_return_sequences = request.num_return_sequences();
-  }
-  apply_beam_search_logprobs_default(
-      params,
-      /*probability_params_explicitly_set=*/
-      request.has_logprobs() || request.has_top_logprobs());
-
   if (request.has_add_special_tokens()) {
     params.add_special_tokens = request.add_special_tokens();
   } else {
@@ -728,7 +698,7 @@ bool RequestParams::verify_params(OutputCallback callback) const {
     return false;
   }
 
-  if (temperature == 0 && n > 1 && beam_width <= 1) {
+  if (temperature == 0 && n > 1) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "n must be 1 when using greedy sampling",
                         service_request_id,
@@ -782,24 +752,6 @@ bool RequestParams::verify_params(OutputCallback callback) const {
     return false;
   }
 
-  if (num_return_sequences > 0) {
-    if (beam_width <= 0) {
-      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "num_return_sequences requires beam_width > 0",
-                          service_request_id,
-                          source_xservice_addr);
-      return false;
-    }
-    if (num_return_sequences < beam_width) {
-      CALLBACK_WITH_ERROR(
-          StatusCode::INVALID_ARGUMENT,
-          "num_return_sequences must be greater than or equal to beam_width",
-          service_request_id,
-          source_xservice_addr);
-      return false;
-    }
-  }
-
   if (logprobs && echo) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "logprobs is not supported with echo",
@@ -808,38 +760,13 @@ bool RequestParams::verify_params(OutputCallback callback) const {
     return false;
   }
 
-  // top_logprobs becomes the k of torch::topk() whenever logprobs are in
-  // effect. Beam search forces logprobs on downstream
-  // (RequestSamplingParam::enable_beam_search), so a beam request with
-  // logprobs=false must be validated too; otherwise an oversized count would
-  // only surface as a throw inside the sampler at execution time. The raw field
-  // is checked first so that a negative count is reported as a client error
-  // rather than silently repaired by the beam normalization.
-  if (logprobs || beam_width > 1) {
-    if (top_logprobs < (beam_width > 1 ? 0 : -1) || top_logprobs > 2000) {
-      CALLBACK_WITH_ERROR(
-          StatusCode::INVALID_ARGUMENT,
-          "logprobs must be -1 (all vocabulary) or between 0 and 2000; "
-          "beam search requires a non-negative count",
-          service_request_id,
-          source_xservice_addr);
-      return false;
-    }
-    // Beam search raises top_logprobs to at least beam_width, so also validate
-    // the value that will actually be used. Derive it through the same helper
-    // so the rule is not duplicated here.
-    RequestSamplingParam effective;
-    effective.logprobs = logprobs;
-    effective.top_logprobs = top_logprobs;
-    effective.enable_beam_search(beam_width);
-    if (effective.top_logprobs > 2000) {
-      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "beam_width must be at most 2000 (it sets the "
-                          "top_logprobs used for beam expansion)",
-                          service_request_id,
-                          source_xservice_addr);
-      return false;
-    }
+  if (logprobs && (top_logprobs < -1 || top_logprobs > 2000)) {
+    CALLBACK_WITH_ERROR(
+        StatusCode::INVALID_ARGUMENT,
+        "logprobs must be -1 (all vocabulary) or between 0 and 2000",
+        service_request_id,
+        source_xservice_addr);
+    return false;
   }
 
   // presence_penalty between [-2.0, 2.0]
@@ -885,7 +812,6 @@ RequestSamplingParam RequestParams::to_sampling_param(size_t best_of) const {
     // enable logprobs for best_of to generate sequence logprob
     sampling_param.logprobs = true;
   }
-  // Beam-search fields are model-specific. Each factory applies its policy.
   return sampling_param;
 }
 

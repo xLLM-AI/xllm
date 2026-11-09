@@ -50,8 +50,6 @@ class ForwardInputBuilder final {
       const std::vector<uint32_t>& allowed_max_tokens,
       const std::vector<torch::Tensor>& input_embeddings_vec,
       const std::vector<MMData>& mm_data_vec,
-      // for beam-search
-      std::vector<BlockTransferInfo>* swap_block_transfer_infos,
       const uint64_t batch_id,
       const ModelArgs* args,
       BatchForwardType batch_forward_type,
@@ -79,9 +77,6 @@ class ForwardInputBuilder final {
       Sequence* sequence,
       uint32_t seq_len,
       uint32_t kv_split_size);
-
-  template <typename Input>
-  void process_swap_block_infos(Input& forward_input);
 
   // State management
   struct BuilderState {
@@ -115,9 +110,6 @@ class ForwardInputBuilder final {
     // Grouped cache block tables.
     // [manager_num][batch_size][block_ids]
     std::vector<std::vector<std::vector<int32_t>>> multi_block_tables;
-
-    // beam search kernel input
-    std::vector<float> acc_logprob_vec;
 
     // Additional data
     std::vector<int32_t> embedding_ids;
@@ -189,9 +181,6 @@ class ForwardInputBuilder final {
   bool build_execution_batch_ = false;
   bool is_graph_warmup_ = false;
   int32_t cp_size_ = 1;
-
-  // copy in and out cache contents
-  std::vector<BlockTransferInfo>* swap_block_transfer_infos_ = nullptr;
 
   // thread pool for multithreaded processing, not owned
   ThreadPool* thread_pool_ = nullptr;

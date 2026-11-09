@@ -25,7 +25,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
@@ -339,9 +338,6 @@ class WorkerForwardCompletionTest
       false};
   ScopedConfigValue<bool> eplb_{EPLBConfig::get_instance().enable_eplb(),
                                 false};
-  ScopedConfigValue<bool> beam_search_{
-      BeamSearchConfig::get_instance().enable_beam_search_kernel(),
-      false};
   ScopedConfigValue<bool> graph_{ExecutionConfig::get_instance().enable_graph(),
                                  false};
   ScopedConfigValue<std::string> model_impl_{

@@ -161,80 +161,12 @@ TEST(RequestParamsTest, RejectsUnsupportedResponseFormat) {
   EXPECT_NE(received_status->message().find("json_object"), std::string::npos);
 }
 
-TEST(RequestParamsTest,
-     CompletionBeamSearchDefaultsTopLogprobsToBeamWidthWhenUnset) {
+TEST(RequestParamsTest, CompletionKeepsLogprobsDisabled) {
   proto::CompletionRequest request;
-  request.set_beam_width(3);
-
-  RequestParams params(request, "", "");
-
-  EXPECT_TRUE(params.logprobs);
-  EXPECT_EQ(params.top_logprobs, 3);
-}
-
-TEST(RequestParamsTest, CompletionBeamSearchKeepsExplicitLogprobsWhenSet) {
-  proto::CompletionRequest request;
-  request.set_beam_width(3);
-  request.set_logprobs(5);
-
-  RequestParams params(request, "", "");
-
-  EXPECT_TRUE(params.logprobs);
-  EXPECT_EQ(params.top_logprobs, 5);
-}
-
-TEST(RequestParamsTest, CompletionNonBeamSearchKeepsLogprobsDisabled) {
-  proto::CompletionRequest request;
-  request.set_beam_width(1);
 
   RequestParams params(request, "", "");
 
   EXPECT_FALSE(params.logprobs);
-  EXPECT_EQ(params.top_logprobs, 0);
-}
-
-TEST(RequestParamsTest, ChatBeamSearchDefaultsTopLogprobsToBeamWidthWhenUnset) {
-  proto::ChatRequest request;
-  request.set_beam_width(4);
-
-  RequestParams params(request, "", "");
-
-  EXPECT_TRUE(params.logprobs);
-  EXPECT_EQ(params.top_logprobs, 4);
-}
-
-TEST(RequestParamsTest, ChatBeamSearchKeepsExplicitLogprobsDisabled) {
-  proto::ChatRequest request;
-  request.set_beam_width(4);
-  request.set_logprobs(false);
-
-  RequestParams params(request, "", "");
-
-  EXPECT_FALSE(params.logprobs);
-  EXPECT_EQ(params.top_logprobs, 0);
-}
-
-TEST(RequestParamsTest, ChatBeamSearchKeepsExplicitTopLogprobs) {
-  proto::ChatRequest request;
-  request.set_beam_width(4);
-  request.set_logprobs(true);
-  request.set_top_logprobs(2);
-
-  RequestParams params(request, "", "");
-
-  EXPECT_TRUE(params.logprobs);
-  EXPECT_EQ(params.top_logprobs, 2);
-}
-
-TEST(RequestParamsTest, ChatBeamSearchKeepsExplicitZeroTopLogprobs) {
-  proto::ChatRequest request;
-  request.set_beam_width(4);
-  request.set_logprobs(true);
-  request.set_top_logprobs(0);
-
-  RequestParams params(request, "", "");
-
-  EXPECT_TRUE(params.logprobs);
   EXPECT_EQ(params.top_logprobs, 0);
 }
 
@@ -254,81 +186,9 @@ std::optional<Status> verify(const RequestParams& params) {
 
 }  // namespace
 
-// Beam search forces logprobs on downstream, so top_logprobs must be validated
-// even when the client explicitly disabled logprobs; otherwise an invalid count
-// would only surface inside the sampler at execution time.
-TEST(RequestParamsTest,
-     VerifyRejectsNegativeTopLogprobsForBeamWithLogprobsOff) {
+TEST(RequestParamsTest, VerifyIgnoresTopLogprobsWhenLogprobsOff) {
   proto::ChatRequest request;
-  request.set_beam_width(4);
-  request.set_logprobs(false);
-  request.set_top_logprobs(-1);
-  RequestParams params(request, "", "");
 
-  const auto status = verify(params);
-
-  ASSERT_TRUE(status.has_value());
-  EXPECT_EQ(status->code(), StatusCode::INVALID_ARGUMENT);
-  EXPECT_NE(status->message().find("2000"), std::string::npos);
-}
-
-TEST(RequestParamsTest,
-     VerifyRejectsOversizedTopLogprobsForBeamWithLogprobsOff) {
-  proto::ChatRequest request;
-  request.set_beam_width(4);
-  request.set_logprobs(false);
-  request.set_top_logprobs(5000);
-  RequestParams params(request, "", "");
-
-  const auto status = verify(params);
-
-  ASSERT_TRUE(status.has_value());
-  EXPECT_EQ(status->code(), StatusCode::INVALID_ARGUMENT);
-}
-
-// When top_logprobs is unset, beam search derives it from beam_width, so an
-// oversized beam_width is rejected on the value that would actually be used.
-TEST(RequestParamsTest, VerifyRejectsBeamWidthThatDerivesOversizedTopLogprobs) {
-  proto::ChatRequest request;
-  request.set_beam_width(3000);
-  request.set_logprobs(false);
-  request.set_top_logprobs(0);
-  RequestParams params(request, "", "");
-
-  const auto status = verify(params);
-
-  ASSERT_TRUE(status.has_value());
-  EXPECT_EQ(status->code(), StatusCode::INVALID_ARGUMENT);
-}
-
-// A positive top_logprobs below beam_width is valid input: the factory raises
-// it to the width (RequestSamplingParam::enable_beam_search), it is not an
-// error.
-TEST(RequestParamsTest, VerifyAcceptsTopLogprobsBelowBeamWidth) {
-  proto::ChatRequest request;
-  request.set_beam_width(4);
-  request.set_logprobs(false);
-  request.set_top_logprobs(2);
-  RequestParams params(request, "", "");
-
-  EXPECT_FALSE(verify(params).has_value());
-}
-
-TEST(RequestParamsTest, VerifyAcceptsBeamWithLogprobsOffAndInRangeDerivedTopK) {
-  proto::ChatRequest request;
-  request.set_beam_width(4);
-  request.set_logprobs(false);
-  request.set_top_logprobs(0);
-  RequestParams params(request, "", "");
-
-  EXPECT_FALSE(verify(params).has_value());
-}
-
-// Non-beam requests with logprobs off never consume top_logprobs, so the value
-// is not validated (unchanged behavior).
-TEST(RequestParamsTest, VerifyIgnoresTopLogprobsWhenLogprobsOffAndNoBeam) {
-  proto::ChatRequest request;
-  request.set_beam_width(1);
   request.set_logprobs(false);
   request.set_top_logprobs(5000);
   RequestParams params(request, "", "");

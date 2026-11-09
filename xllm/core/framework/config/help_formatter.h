@@ -22,7 +22,6 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/dit_config.h"
@@ -57,7 +56,6 @@ class HelpFormatter {
         LoadConfig::option_category(),
         KVCacheConfig::option_category(),
         KVCacheStoreConfig::option_category(),
-        BeamSearchConfig::option_category(),
         SchedulerConfig::option_category(),
         ParallelConfig::option_category(),
         EPLBConfig::option_category(),

@@ -301,7 +301,7 @@ TEST(TransportCodecTest, InvalidOutputTensorLayoutsPreserveDestination) {
   const std::string original = destination.SerializeAsString();
   ForwardOutput valid;
   valid.sample_output.next_tokens = torch::tensor({7, 8}, torch::kInt32);
-  std::vector<ForwardOutput> invalid_inputs(10, valid);
+  std::vector<ForwardOutput> invalid_inputs(9, valid);
   invalid_inputs[0].sample_output.next_tokens = torch::tensor({7.0f, 8.0f});
   invalid_inputs[1].sample_output.logprobs = torch::tensor({-0.5f});
   invalid_inputs[2].sample_output.top_tokens =
@@ -314,14 +314,13 @@ TEST(TransportCodecTest, InvalidOutputTensorLayoutsPreserveDestination) {
   invalid_inputs[5].sample_output.embeddings = torch::tensor({{1.0f}});
   invalid_inputs[6].sample_output.next_tokens =
       torch::tensor({{7, 8}, {9, 10}}, torch::kInt32).transpose(0, 1);
-  invalid_inputs[7].beam_search_output.src_seq_idxes =
-      torch::tensor({1, 0}, torch::kInt64);
-  invalid_inputs[8].sample_output.mm_embeddings = {{torch::tensor({1.0f})},
+
+  invalid_inputs[7].sample_output.mm_embeddings = {{torch::tensor({1.0f})},
                                                    {torch::tensor({2.0f})},
                                                    {torch::tensor({3.0f})}};
-  invalid_inputs[9].sample_output.next_tokens =
+  invalid_inputs[8].sample_output.next_tokens =
       torch::empty({0}, torch::kInt32);
-  invalid_inputs[9].sample_output.embeddings = torch::tensor({{1.0f}, {2.0f}});
+  invalid_inputs[8].sample_output.embeddings = torch::tensor({{1.0f}, {2.0f}});
   for (const ForwardOutput& invalid : invalid_inputs) {
     EXPECT_FALSE(encode_llm_output(invalid, /*stats=*/{}, &destination));
     EXPECT_EQ(destination.SerializeAsString(), original);
@@ -359,10 +358,7 @@ TEST(TransportCodecTest, OutputRoundTripPreservesTokenAndTensorPayloads) {
   source.sample_output.embeddings = torch::tensor({{1.0f, 2.0f}, {3.0f, 4.0f}});
   source.sample_output.mm_embeddings = {{torch::tensor({1.0f, 2.0f})},
                                         {torch::tensor({3.0f})}};
-  source.beam_search_output.src_seq_idxes =
-      torch::tensor({1, 0}, torch::kInt32);
-  source.beam_search_output.out_tokens = torch::tensor({8, 7}, torch::kInt32);
-  source.beam_search_output.out_logprobs = torch::tensor({-1.0f, -0.5f});
+
   source.json_object_errors = {{"sequence-0", "invalid JSON"}};
   proto::VLMForwardResponse encoded;
   constexpr int64_t kLargeRoundCount = (int64_t{1} << 33) + 5;
@@ -388,9 +384,7 @@ TEST(TransportCodecTest, OutputRoundTripPreservesTokenAndTensorPayloads) {
   ASSERT_EQ(decoded.outputs[0].mm_embeddings.size(), 1);
   EXPECT_TRUE(torch::equal(decoded.outputs[0].mm_embeddings[0],
                            source.sample_output.mm_embeddings[0][0]));
-  EXPECT_EQ(decoded.src_seq_idxes, (std::vector<int32_t>{1, 0}));
-  EXPECT_EQ(decoded.out_tokens, (std::vector<int32_t>{8, 7}));
-  EXPECT_EQ(decoded.out_logprobs, (std::vector<float>{-1.0f, -0.5f}));
+
   ASSERT_EQ(decoded.json_object_errors.size(), 1);
   EXPECT_EQ(decoded.json_object_errors[0].sample_sequence_id, "sequence-0");
   EXPECT_EQ(decoded.json_object_errors[0].message, "invalid JSON");
@@ -516,11 +510,11 @@ TEST(TransportCodecTest,
 
 TEST(TransportCodecTest, SharedOutputSizeIncludesVerifiedRoundWord) {
   const ScopedRawOutputTransport host_only;
-  // One token, twelve container lengths (one is INT32), five INT64 values
+  // One token, nine container lengths (one is INT32), five INT64 values
   // (id, three stats, prepared token), and two optional-payload flags.
-  constexpr size_t kRequiredBytes =
-      sizeof(ControlMetadata) + 11 * sizeof(uint64_t) + sizeof(int32_t) +
-      5 * sizeof(int64_t) + 2 * sizeof(bool) + 2 * sizeof(uint64_t);
+  constexpr size_t kRequiredBytes = sizeof(ControlMetadata) +
+                                    8 * sizeof(uint64_t) + sizeof(int32_t) +
+                                    5 * sizeof(int64_t) + 2 * sizeof(bool);
   const auto tokens = torch::tensor({7}, torch::kInt64);
   for (const size_t bytes : {kRequiredBytes - 1, kRequiredBytes}) {
     const std::string name = ForwardSharedMemoryTransport::create_unique_name(

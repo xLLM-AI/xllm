@@ -265,7 +265,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-For xLLM's `beam_width` extension, see [Online Service](/en/basic_usage/online_service/). Leave `best_of` unset for streaming examples; xLLM streams only when `best_of` equals `n`.
+Leave `best_of` unset for streaming examples; xLLM streams only when `best_of` equals `n`.
 
 ## Compatibility limits and errors
 

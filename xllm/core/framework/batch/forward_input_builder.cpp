@@ -25,13 +25,11 @@ limitations under the License.
 #include <limits>
 #include <numeric>
 #include <thread>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "core/common/global_flags.h"
 #include "core/common/metrics.h"
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -112,68 +110,6 @@ void append_virtual_kv_cache_global_offsets(
   }
 }
 
-struct BlockCopyKernelInputData {
-  std::vector<int32_t> src_indices;
-  std::vector<int32_t> dst_indices;
-  std::vector<int32_t> cum_sum;
-  bool has_overlap = false;
-};
-
-BlockCopyKernelInputData build_block_copy_kernel_input_data(
-    const std::vector<BlockTransferInfo>& swap_blocks,
-    bool detect_overlap) {
-  BlockCopyKernelInputData input_data;
-  if (swap_blocks.empty()) {
-    return input_data;
-  }
-
-  int32_t current_src = swap_blocks[0].src_block_id;
-  input_data.src_indices.reserve(swap_blocks.size());
-  input_data.dst_indices.reserve(swap_blocks.size());
-  input_data.cum_sum.reserve(swap_blocks.size());
-
-  std::unordered_set<int32_t> src_set;
-  std::unordered_map<int32_t, int32_t> dst_to_src;
-  if (detect_overlap) {
-    for (const auto& block : swap_blocks) {
-      src_set.insert(block.src_block_id);
-    }
-  }
-
-  input_data.src_indices.push_back(swap_blocks[0].src_block_id);
-  input_data.dst_indices.push_back(swap_blocks[0].dst_block_id);
-  if (detect_overlap) {
-    dst_to_src.emplace(swap_blocks[0].dst_block_id,
-                       swap_blocks[0].src_block_id);
-    if (src_set.count(swap_blocks[0].dst_block_id) > 0 &&
-        swap_blocks[0].dst_block_id != swap_blocks[0].src_block_id) {
-      input_data.has_overlap = true;
-    }
-  }
-
-  for (size_t i = 1; i < swap_blocks.size(); ++i) {
-    input_data.dst_indices.push_back(swap_blocks[i].dst_block_id);
-    if (detect_overlap) {
-      auto [it, inserted] = dst_to_src.emplace(swap_blocks[i].dst_block_id,
-                                               swap_blocks[i].src_block_id);
-      if (!inserted && it->second != swap_blocks[i].src_block_id) {
-        input_data.has_overlap = true;
-      }
-      if (src_set.count(swap_blocks[i].dst_block_id) > 0 &&
-          swap_blocks[i].dst_block_id != swap_blocks[i].src_block_id) {
-        input_data.has_overlap = true;
-      }
-    }
-    if (swap_blocks[i].src_block_id != current_src) {
-      input_data.src_indices.push_back(swap_blocks[i].src_block_id);
-      input_data.cum_sum.push_back(static_cast<int32_t>(i));
-      current_src = swap_blocks[i].src_block_id;
-    }
-  }
-  input_data.cum_sum.emplace_back(static_cast<int32_t>(swap_blocks.size()));
-  return input_data;
-}
-
 }  // namespace
 
 ForwardInputBuilder::ForwardInputBuilder(const BatchInputData& data,
@@ -184,7 +120,6 @@ ForwardInputBuilder::ForwardInputBuilder(const BatchInputData& data,
                           data.allowed_max_tokens,
                           data.input_embeddings,
                           data.mm_data,
-                          data.swap_block_transfer_infos,
                           data.batch_id,
                           args,
                           data.forward_type,
@@ -196,7 +131,6 @@ ForwardInputBuilder::ForwardInputBuilder(
     const std::vector<uint32_t>& allowed_max_tokens,
     const std::vector<torch::Tensor>& input_embeddings_vec,
     const std::vector<MMData>& mm_data_vec,
-    std::vector<BlockTransferInfo>* swap_block_transfer_infos,
     const uint64_t batch_id,
     const ModelArgs* args,
     BatchForwardType batch_forward_type,
@@ -211,7 +145,6 @@ ForwardInputBuilder::ForwardInputBuilder(
           ServiceConfig::get_instance().enable_json_object_output()),
       thread_pool_(thread_pool),
       num_sequences_(sequences.size()),
-      swap_block_transfer_infos_(swap_block_transfer_infos),
       batch_id_(batch_id),
       cp_size_(cp_size) {
   build_execution_batch_ = ModelConfig::is_python_model_impl(
@@ -235,7 +168,6 @@ ForwardInputBuilder::ForwardInputBuilder(
   state_.sampling.reserve(sequences.size());
   state_.mrope_positions_vec.reserve(sequences.size());
   state_.block_tables_vec.reserve(sequences.size());
-  state_.acc_logprob_vec.reserve(sequences.size());
   state_.new_token_slot_ids.reserve(token_reserve);
   state_.kv_cache_tokens_nums.reserve(sequences.size());
   if (build_execution_batch_) {
@@ -628,9 +560,6 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     state_.block_tables_vec.insert(state_.block_tables_vec.end(),
                                    state.block_tables_vec.begin(),
                                    state.block_tables_vec.end());
-    state_.acc_logprob_vec.insert(state_.acc_logprob_vec.end(),
-                                  state.acc_logprob_vec.begin(),
-                                  state.acc_logprob_vec.end());
     const int32_t token_offset = static_cast<int32_t>(
         state_.flatten_tokens_vec.size() - state.flatten_tokens_vec.size());
     state_.sampling.merge(std::move(state.sampling), token_offset);
@@ -807,12 +736,6 @@ void ForwardInputBuilder::process_single_sequence(int32_t seq_index,
   // Setup KV cache
   setup_kv_cache_info(
       sequence, n_kv_cache_tokens, seq_len, padded_q_seq_len, state_ptr);
-
-  // Input for beam search kernel
-  if (::xllm::BeamSearchConfig::get_instance().enable_beam_search_kernel() &&
-      sequence->check_beam_search() && sequence->num_generated_tokens() > 0) {
-    state.acc_logprob_vec.emplace_back(sequence->get_acc_logprob());
-  }
 }
 
 void ForwardInputBuilder::extract_tokens_and_positions(
@@ -1333,7 +1256,6 @@ Input ForwardInputBuilder::state_to_forward_input() {
   }
 
   forward_input.transfer_kv_infos = std::move(state_.transfer_kv_infos);
-  process_swap_block_infos(forward_input);
 
   if (!state_.sampling.empty()) {
     forward_input.sampling_params = state_.sampling.build();
@@ -1369,56 +1291,6 @@ Input ForwardInputBuilder::state_to_forward_input() {
   }
 
   return forward_input;
-}
-
-template <typename Input>
-void ForwardInputBuilder::process_swap_block_infos(Input& forward_input) {
-  if (swap_block_transfer_infos_ == nullptr ||
-      swap_block_transfer_infos_->empty()) {
-    return;
-  }
-
-  auto& input_params = forward_input.input_params;
-  auto& swap_blocks = *swap_block_transfer_infos_;
-  if (::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel()) {
-    std::sort(swap_blocks.begin(),
-              swap_blocks.end(),
-              [](const BlockTransferInfo& a, const BlockTransferInfo& b) {
-                return a.src_block_id < b.src_block_id;
-              });
-#if defined(USE_CUDA) || defined(USE_MUSA)
-    input_params.block_copy.swap_blocks.insert(
-        input_params.block_copy.swap_blocks.end(),
-        swap_blocks.begin(),
-        swap_blocks.end());
-    const BlockCopyKernelInputData kernel_input =
-        build_block_copy_kernel_input_data(swap_blocks,
-                                           /*detect_overlap=*/true);
-    if (!kernel_input.has_overlap) {
-      input_params.block_copy.src_block_indices =
-          make_pinned_cpu_tensor(kernel_input.src_indices);
-      input_params.block_copy.dst_block_indices =
-          make_pinned_cpu_tensor(kernel_input.dst_indices);
-      input_params.block_copy.cum_sum =
-          make_pinned_cpu_tensor(kernel_input.cum_sum);
-    }
-#else
-    const BlockCopyKernelInputData kernel_input =
-        build_block_copy_kernel_input_data(swap_blocks,
-                                           /*detect_overlap=*/false);
-    input_params.block_copy.src_block_indices =
-        make_pinned_cpu_tensor(kernel_input.src_indices);
-    input_params.block_copy.dst_block_indices =
-        make_pinned_cpu_tensor(kernel_input.dst_indices);
-    input_params.block_copy.cum_sum =
-        make_pinned_cpu_tensor(kernel_input.cum_sum);
-#endif
-  } else {
-    input_params.block_copy.swap_blocks.insert(
-        input_params.block_copy.swap_blocks.end(),
-        swap_blocks.begin(),
-        swap_blocks.end());
-  }
 }
 
 void ForwardInputBuilder::process_multi_modal_inputs(Sequence* sequence,

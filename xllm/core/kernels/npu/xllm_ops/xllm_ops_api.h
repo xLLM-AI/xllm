@@ -48,13 +48,6 @@ constexpr int32_t DIM_2 = 2;
 constexpr int32_t DIM_3 = 3;
 }  // namespace op_infer
 
-void beam_search(const torch::Tensor& logprobs,
-                 const torch::Tensor& top_tokens,
-                 const torch::Tensor& top_logprobs,
-                 torch::Tensor& src_seq_idxes,
-                 torch::Tensor& out_logprobs,
-                 torch::Tensor& out_token_ids);
-
 void top_k_top_p(torch::Tensor& logits,
                  const torch::Tensor& topK,
                  const torch::Tensor& topP);

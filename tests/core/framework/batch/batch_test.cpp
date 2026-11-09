@@ -49,7 +49,6 @@ limitations under the License.
 #include "core/util/tensor_helper.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/block/composite_block_manager.h"
-#include "framework/config/beam_search_config.h"
 #include "framework/config/service_config.h"
 #include "framework/model/model_args.h"
 #include "framework/request/stopping_checker.h"
@@ -359,9 +358,9 @@ class BatchOutputActionTest : public ::testing::TestWithParam<bool> {
         original_chunked_prefill_);
   }
 
-  std::unique_ptr<Request> make_beam_request(bool enable_schedule_overlap) {
+  std::unique_ptr<Request> make_request(bool enable_schedule_overlap) {
     RequestSamplingParam sampling_param;
-    sampling_param.beam_width = 2;
+
     sampling_param.top_logprobs = 2;
     sampling_param.logprobs = true;
     StoppingChecker stopping_checker;
@@ -1248,43 +1247,6 @@ TEST(SequenceTest, JsonObjectOverlapCommitAdvancesGrammarOnce) {
   const JsonObjectGrammarState* committed_state = sequence.json_object_state();
   ASSERT_NE(committed_state, nullptr);
   EXPECT_EQ(committed_state->snapshot().token_ids, std::vector<int32_t>({0}));
-}
-
-TEST(SequenceTest, RestoresJsonObjectStateForBeamCandidate) {
-  BlockManager::Options options;
-  options.num_blocks(8).block_size(4);
-  BlockManagerImpl manager(options);
-  RequestSamplingParam sampling_param;
-  StoppingChecker stopping_checker;
-  stopping_checker.set_max_generated_tokens(4);
-  std::shared_ptr<const JsonObjectGrammar> grammar =
-      std::make_shared<const JsonObjectGrammar>(
-          std::vector<std::string>{"{", " {", "\"a\"", ":", "1"},
-          std::unordered_set<int32_t>{});
-
-  SequenceParams seq_params;
-  seq_params.seq_capacity = 16;
-  seq_params.stopping_checker = &stopping_checker;
-  seq_params.sampling_param = &sampling_param;
-  seq_params.request_id = "req-beam-restore";
-  seq_params.json_object_grammar = grammar;
-  IncrementalDecoder decoder("", 2, false, false);
-  Sequence sequence(/*index=*/0,
-                    /*prompt_token_ids=*/{10, 11},
-                    torch::Tensor(),
-                    MMData(),
-                    std::move(decoder),
-                    seq_params);
-  sequence.add_blocks(BlockType::KV, manager.allocate(1));
-  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
-  sequence.append_token(Token(/*id=*/0));
-
-  JsonObjectGrammarSnapshot candidate_snapshot =
-      sequence.json_object_state()->snapshot();
-  candidate_snapshot.token_ids.back() = 1;
-  ASSERT_TRUE(sequence.restore_json_object_state(candidate_snapshot));
-  EXPECT_EQ(sequence.json_object_state()->snapshot().token_ids,
-            std::vector<int32_t>({1}));
 }
 
 TEST(SequenceTest, JsonObjectCommitMismatchFailsBeforeTokenMutation) {
@@ -2197,14 +2159,8 @@ TEST(BatchTest, ChunkedPDTransferUsesStepWindow) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {8};
-  ForwardInputBuilder builder(sequences,
-                              budgets,
-                              {},
-                              {},
-                              nullptr,
-                              0,
-                              nullptr,
-                              BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(
+      sequences, budgets, {}, {}, 0, nullptr, BatchForwardType::PREFILL);
 
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2259,14 +2215,8 @@ TEST(BatchTest, PrefixCacheTransferIgnoresKvCacheCursor) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {2};
-  ForwardInputBuilder builder(sequences,
-                              budgets,
-                              {},
-                              {},
-                              nullptr,
-                              0,
-                              nullptr,
-                              BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(
+      sequences, budgets, {}, {}, 0, nullptr, BatchForwardType::PREFILL);
 
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2319,14 +2269,8 @@ TEST(BatchTest, ForwardInputPreservesTransferInfoAndBatchId) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {8};
-  ForwardInputBuilder builder(sequences,
-                              budgets,
-                              {},
-                              {},
-                              nullptr,
-                              batch_id,
-                              nullptr,
-                              BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(
+      sequences, budgets, {}, {}, batch_id, nullptr, BatchForwardType::PREFILL);
 
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2381,14 +2325,8 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {4};
-  ForwardInputBuilder builder(sequences,
-                              budgets,
-                              {},
-                              {},
-                              nullptr,
-                              batch_id,
-                              nullptr,
-                              BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(
+      sequences, budgets, {}, {}, batch_id, nullptr, BatchForwardType::PREFILL);
 
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2629,75 +2567,6 @@ TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
             "prior token violates json_object grammar");
 }
 
-TEST(BatchTest, ForwardInputBlockCopyKernelFieldsMatchExpectedLayout) {
-  const bool old_enable_block_copy_kernel =
-      ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel();
-  ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel(true);
-
-  BlockManager::Options options;
-  options.num_blocks(8).block_size(4);
-  BlockManagerImpl manager(options);
-
-  RequestSamplingParam sampling_param;
-  StoppingChecker stopping_checker;
-  stopping_checker.set_max_generated_tokens(4);
-  SequenceParams seq_params;
-  seq_params.seq_capacity = 32;
-  seq_params.stopping_checker = &stopping_checker;
-  seq_params.sampling_param = &sampling_param;
-  seq_params.skip_special_tokens = true;
-  seq_params.echo = false;
-  seq_params.logprobs = false;
-  seq_params.enable_schedule_overlap = false;
-
-  torch::Tensor input_embedding;
-  MMData mm_data;
-  IncrementalDecoder forward_decoder("", 1, false, false);
-  Sequence forward_seq(/*index=*/0,
-                       /*token_ids=*/{1, 2, 3, 4},
-                       input_embedding,
-                       mm_data,
-                       std::move(forward_decoder),
-                       seq_params);
-  forward_seq.add_blocks(BlockType::KV, manager.allocate(1));
-
-  std::vector<BlockTransferInfo> forward_swap_blocks = {
-      BlockTransferInfo(7, 10),
-      BlockTransferInfo(7, 11),
-      BlockTransferInfo(8, 12)};
-  std::vector<uint32_t> budgets = {4};
-
-  std::vector<Sequence*> forward_sequences = {&forward_seq};
-  ForwardInputBuilder forward_builder(forward_sequences,
-                                      budgets,
-                                      {},
-                                      {},
-                                      &forward_swap_blocks,
-                                      /*batch_id=*/1,
-                                      nullptr,
-                                      BatchForwardType::PREFILL);
-  LlmForwardInput forward_input =
-      forward_builder.build_forward_input(/*num_decoding_tokens=*/1,
-                                          /*min_decoding_batch_size=*/0);
-
-  EXPECT_TRUE(equal(forward_input.input_params.block_copy.src_block_indices,
-                    std::vector<int32_t>({7, 8})));
-  EXPECT_TRUE(equal(forward_input.input_params.block_copy.dst_block_indices,
-                    std::vector<int32_t>({10, 11, 12})));
-  EXPECT_TRUE(equal(forward_input.input_params.block_copy.cum_sum,
-                    std::vector<int32_t>({2, 3})));
-
-#if defined(USE_CUDA)
-  EXPECT_EQ(forward_input.input_params.block_copy.swap_blocks.size(),
-            forward_swap_blocks.size());
-#else
-  EXPECT_TRUE(forward_input.input_params.block_copy.swap_blocks.empty());
-#endif
-
-  ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel(
-      old_enable_block_copy_kernel);
-}
-
 TEST(BatchTest, KVCacheEmptySupportsLinearOnlyAndFullOnlyLayouts) {
   auto options =
       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
@@ -2798,7 +2667,6 @@ TEST(BatchTest, SampleRequestKeepsThreadedForwardBuilderOffsetsStable) {
                               allowed_max_tokens,
                               input_embeddings_vec,
                               mm_data_vec,
-                              /*swap_block_transfer_infos=*/nullptr,
                               /*batch_id=*/1,
                               &args,
                               BatchForwardType::PREFILL,
@@ -2857,7 +2725,6 @@ TEST(BatchTest, ThreadedMropeIgnoresEmptyTailPartitions) {
                               allowed_max_tokens,
                               input_embeddings,
                               mm_data,
-                              /*swap_block_transfer_infos=*/nullptr,
                               /*batch_id=*/1,
                               &args,
                               BatchForwardType::PREFILL,
@@ -2915,7 +2782,6 @@ TEST(BatchTest, DecodeMinBatchSizeDoesNotPadTransportState) {
                               allowed_max_tokens,
                               input_embeddings_vec,
                               mm_data_vec,
-                              /*swap_block_transfer_infos=*/nullptr,
                               /*batch_id=*/1,
                               &args,
                               BatchForwardType::DECODE);
@@ -2983,7 +2849,6 @@ TEST(BatchTest, DecodeEmbeddingAndLinearStateIdsAreIndependentSlots) {
                               allowed_max_tokens,
                               input_embeddings_vec,
                               mm_data_vec,
-                              /*swap_block_transfer_infos=*/nullptr,
                               /*batch_id=*/1,
                               &args,
                               BatchForwardType::DECODE);
@@ -3046,7 +2911,6 @@ TEST(BatchTest, SharedArenaPublishesLinearGroupSlotsForReadAndWriteStates) {
                               allowed_max_tokens,
                               input_embeddings_vec,
                               mm_data_vec,
-                              /*swap_block_transfer_infos=*/nullptr,
                               /*batch_id=*/1,
                               &args,
                               BatchForwardType::DECODE);
@@ -4212,52 +4076,9 @@ TEST(BatchTest, SampleRequestFallsBackToEmptyPlaceholderOnPartialRawOutputs) {
   EXPECT_FALSE(logprobs[prompt_tokens + 1].has_value());
 }
 
-TEST_P(BatchOutputActionTest, ImmediateCommitsBeamWithGlobalOverlapEnabled) {
-  const ScopedScheduleOverlap overlap(/*enabled=*/true);
-  auto request = make_beam_request(/*enable_schedule_overlap=*/false);
-  Batch batch;
-  batch.add(request->sequences().front().get());
-  batch.add(request->sequence_group());
-  (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
-
-  apply_output(batch, BatchOutputAction::IMMEDIATE, /*token_id=*/101);
-
-  ASSERT_EQ(request->sequences().size(), 2u);
-  EXPECT_EQ(request->sequences()[0]->num_generated_tokens(), 1u);
-  EXPECT_EQ(request->sequences()[0]->tokens().back(), 101);
-  EXPECT_EQ(request->sequences()[1]->num_generated_tokens(), 1u);
-  EXPECT_EQ(request->sequences()[1]->tokens().back(), 102);
-}
-
-TEST_P(BatchOutputActionTest, ReserveDefersBeamWithGlobalOverlapDisabled) {
-  const ScopedScheduleOverlap overlap(/*enabled=*/false);
-  auto request = make_beam_request(/*enable_schedule_overlap=*/true);
-  Batch batch;
-  batch.add(request->sequences().front().get());
-  batch.add(request->sequence_group());
-  (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
-
-  // The action controls publication even when a worker supplies concrete
-  // tokens.
-  apply_output(batch, BatchOutputAction::RESERVE_PENDING, /*token_id=*/201);
-  ASSERT_EQ(request->sequences().size(), 1u);
-  EXPECT_EQ(request->sequences().front()->num_generated_tokens(), 1u);
-  EXPECT_EQ(request->sequences().front()->tokens().back(), 201);
-
-  apply_output(batch, BatchOutputAction::COMMIT_PENDING, /*token_id=*/101);
-
-  ASSERT_EQ(request->sequences().size(), 2u);
-  EXPECT_EQ(request->sequences()[0]->num_generated_tokens(), 1u);
-  EXPECT_EQ(request->sequences()[0]->tokens().back(), 101);
-  EXPECT_EQ(request->sequences()[1]->num_generated_tokens(), 1u);
-  EXPECT_EQ(request->sequences()[1]->tokens().back(), 102);
-}
-
 TEST_P(BatchOutputActionTest, CommitSkipsCancelledPendingTarget) {
   const ScopedScheduleOverlap overlap(/*enabled=*/false);
-  auto request = make_beam_request(/*enable_schedule_overlap=*/true);
+  auto request = make_request(/*enable_schedule_overlap=*/true);
   Batch batch;
   batch.add(request->sequences().front().get());
   batch.add(request->sequence_group());

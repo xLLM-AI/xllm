@@ -59,21 +59,10 @@ void Sequence::init_request_state() {
 }
 
 void Sequence::init_logprob_state(bool force_token_logprobs) {
-  // Only allocate the per-position buffers when they will actually be read.
-  // The beam readers (SequencesGroup::process_beam_search and
-  // Batch::process_beam_search_output) index both the logprob and top-k buffers
-  // by token position, so a beam request must have them allocated. The request
-  // factories already force logprobs/top_logprobs on for beam
-  // (RequestSamplingParam::enable_beam_search); tying the allocation to
-  // beam_width itself as well keeps the readers' requirement enforced where the
-  // buffers are created, independent of any upstream normalization. best_of>n
-  // forces logprobs on upstream, so it is already covered. A derived type may
-  // emit per-token logprobs in its output regardless of the request flags
-  const bool is_beam_search = sequence_params_.sampling_param->beam_width > 1;
-  const bool enable_logprobs = sequence_params_.sampling_param->logprobs ||
-                               force_token_logprobs || is_beam_search;
+  const bool enable_logprobs =
+      sequence_params_.sampling_param->logprobs || force_token_logprobs;
   const bool enable_top_logprobs =
-      sequence_params_.sampling_param->top_logprobs > 0 || is_beam_search;
+      sequence_params_.sampling_param->top_logprobs > 0;
   logprob_state_ = LogprobState(
       num_prompt_tokens_, tokens_.size(), enable_logprobs, enable_top_logprobs);
 }
@@ -204,17 +193,13 @@ Sequence::Sequence(const Sequence& other, size_t index)
       closed_(other.closed_),
       dp_rank_(other.dp_rank_),
       cur_generated_token_idx_(other.cur_generated_token_idx_),
-      first_token_(other.first_token_),
-      updated_since_last_beam_search_(other.updated_since_last_beam_search_) {
+      first_token_(other.first_token_) {
   logprob_state_ = other.logprob_state_;
-  // A forked sequence (beam / best_of) shares the prompt KV prefix by
+  // A forked sequence (best_of) shares the prompt KV prefix by
   // ref-counting those blocks, but its linear-state / embedding resource block
   // is private: drop the copied Embedding and Linear blocks so this sequence
   // allocates its own on the next allocate. Preserves the pre-map behavior
   // where the private slot was never copied by this constructor.
-  // TODO: Linear-attention beam search is not supported yet. A beam child that
-  // keeps its parent's KV progress must clone the parent's recurrent state into
-  // its newly allocated private LINEAR slot before the next forward.
   kv_state_.erase_blocks(BlockType::EMBEDDING);
   kv_state_.erase_blocks(BlockType::LINEAR);
   host_kv_state_.erase_blocks(BlockType::EMBEDDING);
@@ -289,30 +274,6 @@ bool Sequence::try_commit_json_object_token(int32_t token_id,
   return false;
 }
 
-bool Sequence::restore_json_object_state(
-    const JsonObjectGrammarSnapshot& snapshot) {
-  if (!json_object_state_.has_value()) {
-    return true;
-  }
-  const JsonObjectGrammar* grammar = json_object_state_->grammar();
-  if (grammar == nullptr) {
-    fail(Status(StatusCode::UNKNOWN,
-                "cannot restore an uninitialized json_object grammar state"));
-    return false;
-  }
-  JsonObjectGrammarState restored_state = grammar->restore_state(snapshot);
-  if (!restored_state.is_valid()) {
-    LOG(ERROR) << "JSON grammar replay failed during beam state restoration: "
-               << "request_id=" << request_id() << ", sequence_index=" << index_
-               << ", committed_tokens=" << snapshot.token_ids.size();
-    fail(Status(StatusCode::UNKNOWN,
-                "beam candidate violates json_object grammar"));
-    return false;
-  }
-  json_object_state_ = std::move(restored_state);
-  return true;
-}
-
 void Sequence::append_token(const Token& token) {
   CHECK_LT(num_tokens_, tokens_.size())
       << "exceed the token capacity of the sequence";
@@ -361,7 +322,6 @@ void Sequence::append_token(const Token& token) {
 
   // invalidate the finish status once a new token is appended
   finish_status_invalidated_ = true;
-  updated_since_last_beam_search_ = true;
 }
 
 void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
@@ -420,7 +380,6 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
   }
   ++cur_generated_token_idx_;
   finish_status_invalidated_ = true;
-  updated_since_last_beam_search_ = true;
 }
 
 void Sequence::update_token(size_t index, const Token& token) {
@@ -971,10 +930,6 @@ float Sequence::get_acc_logprob() {
   return logprob_state_.get_acc_logprob(num_tokens_);
 }
 
-float Sequence::get_base_logprob() {
-  return logprob_state_.get_base_logprob(num_tokens_);
-}
-
 void Sequence::generate_output_tokens_logprobs(
     size_t start_idx,
     size_t end_idx,
@@ -1012,17 +967,4 @@ void Sequence::fail(Status status) {
   finish_reason_ = FinishReason::NONE;
   stop_reason_ = std::monostate{};
 }
-
-void Sequence::reset_finish_state_for_beam_search() {
-  if (error_status().has_value()) {
-    return;
-  }
-  finished_ = false;
-  finish_reason_ = FinishReason::NONE;
-  stop_reason_ = std::monostate{};
-  matched_stop_token_count_ = 0;
-  finish_status_invalidated_ = true;
-  finished();
-}
-
 }  // namespace xllm

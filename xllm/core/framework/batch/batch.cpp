@@ -67,10 +67,6 @@ std::vector<Sequence*> Batch::get_sequences() const {
   return state_.group_sequences();
 }
 
-void Batch::refresh_sequences_from_groups() {
-  state_.refresh_sequences_from_groups();
-}
-
 LlmForwardInput Batch::prepare_forward_input(uint32_t num_decoding_tokens,
                                              uint32_t min_decoding_batch_size,
                                              const ModelArgs& args,
@@ -116,19 +112,9 @@ VlmForwardInput Batch::prepare_vlm_forward_input(const ModelArgs& args,
 }
 
 void Batch::process_sample_output(const SampleOutput& output,
-                                  BatchOutputAction action,
-                                  bool force_requested_beam_result_size) {
+                                  BatchOutputAction action) {
   const auto sequences = get_sequences();
-  output_handler_.process_sample_output({sequences, state_.sequence_groups()},
-                                        output,
-                                        action,
-                                        force_requested_beam_result_size);
-}
-
-void Batch::process_beam_search_output(const RawForwardOutput& output,
-                                       BatchOutputAction action) {
-  const auto sequences = get_sequences();
-  output_handler_.process_beam_search_output(
+  output_handler_.process_sample_output(
       {sequences, state_.sequence_groups()}, output, action);
 }
 }  // namespace xllm

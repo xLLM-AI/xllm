@@ -36,25 +36,7 @@ cc_test(
     GTest::gtest_main
     glog::glog
 )
-option(XLLM_ENABLE_DCU_BLOCK_COPY_TEST
-       "Build and register the expensive DCU block_copy_test"
-       OFF
-)
 
-if(XLLM_ENABLE_DCU_BLOCK_COPY_TEST)
-  cc_test(
-    NAME
-      block_copy_dcu_test
-    SRCS
-      block_copy_test.cpp
-    DEPS
-      :dcu_kernels
-      hip::host
-      torch
-      GTest::gtest_main
-      glog::glog
-  )
-endif()
 
 cc_test(
   NAME

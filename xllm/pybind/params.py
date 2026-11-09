@@ -116,12 +116,6 @@ class SamplingParams(_RequestParamsProxy):
         super()._set_field(key, value)
 
 
-class BeamSearchParams(SamplingParams):
-    def __init__(self, beam_width: int = 1, max_tokens: int = 16, **kwargs: Any) -> None:
-        kwargs.setdefault("temperature", 0.0)
-        super().__init__(beam_width=beam_width, max_tokens=max_tokens, **kwargs)
-
-
 class PoolingParams(_RequestParamsProxy):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -142,9 +136,7 @@ def to_request_params(
         return params
     if isinstance(params, _RequestParamsProxy):
         return params.to_request_params()
-    raise TypeError(
-        "Unsupported params type. Expected RequestParams, SamplingParams, BeamSearchParams, or PoolingParams."
-    )
+    raise TypeError("Unsupported params type. Expected RequestParams, SamplingParams, or PoolingParams.")
 
 
 def to_request_params_list(

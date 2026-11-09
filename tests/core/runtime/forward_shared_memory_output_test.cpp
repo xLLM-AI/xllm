@@ -186,10 +186,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
     source.sample_output.mm_embeddings = {
         {torch::tensor({1.0f, 2.0f}), torch::empty({0, 3})}};
     source.expert_load_data = torch::tensor({{1, 2}, {3, 4}}, torch::kInt64);
-    source.beam_search_output.src_seq_idxes =
-        torch::tensor({1, 0}, torch::kInt32);
-    source.beam_search_output.out_tokens = torch::tensor({8, 7}, torch::kInt32);
-    source.beam_search_output.out_logprobs = torch::tensor({-0.2f, -0.3f});
+
     source.json_object_errors = {{"request#0", "invalid prior token"}};
     source.prepared_token = 45;
     ASSERT_TRUE((writer_.get()->*write)(source, {{0, 3}, {2, 3}}));
@@ -200,7 +197,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
     source.sample_output.embeddings.zero_();
     source.sample_output.mm_embeddings.clear();
     source.expert_load_data.zero_();
-    source.beam_search_output.out_tokens.zero_();
+
     source.json_object_errors.clear();
 
     RawForwardOutput output;
@@ -226,9 +223,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
     EXPECT_EQ(output.outputs[1].speculative_token_stats.accepted_tokens, 2);
     EXPECT_EQ(output.outputs[1].speculative_token_stats.proposed_tokens, 3);
     EXPECT_EQ(output.expert_load_data, (std::vector<int64_t>{1, 2, 3, 4}));
-    EXPECT_EQ(output.src_seq_idxes, (std::vector<int32_t>{1, 0}));
-    EXPECT_EQ(output.out_tokens, (std::vector<int32_t>{8, 7}));
-    EXPECT_EQ(output.out_logprobs, (std::vector<float>{-0.2f, -0.3f}));
+
     ASSERT_EQ(output.json_object_errors.size(), 1);
     EXPECT_EQ(output.json_object_errors[0].message, "invalid prior token");
     EXPECT_EQ(output.prepared_token, 45);
@@ -268,18 +263,6 @@ TEST_F(ForwardSharedMemoryOutputTest,
     overflow = ForwardOutput();
     overflow.expert_load_data =
         torch::ones({static_cast<int64_t>(kSegmentBytes)}, torch::kInt64);
-    EXPECT_FALSE((writer_.get()->*write)(overflow, {}));
-    EXPECT_EQ(
-        std::memcmp(writer_->base_address(), published.data(), kSegmentBytes),
-        0);
-
-    overflow = ForwardOutput();
-    overflow.beam_search_output.src_seq_idxes =
-        torch::zeros({static_cast<int64_t>(kSegmentBytes)}, torch::kInt32);
-    overflow.beam_search_output.out_tokens =
-        torch::zeros({static_cast<int64_t>(kSegmentBytes)}, torch::kInt32);
-    overflow.beam_search_output.out_logprobs =
-        torch::zeros({static_cast<int64_t>(kSegmentBytes)}, torch::kFloat32);
     EXPECT_FALSE((writer_.get()->*write)(overflow, {}));
     EXPECT_EQ(
         std::memcmp(writer_->base_address(), published.data(), kSegmentBytes),
@@ -359,7 +342,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
 TEST_F(ForwardSharedMemoryOutputTest,
        MetadataFramingIsIncludedInTokenCapacityChecks) {
   // This embedding fits only when the required metadata count is omitted.
-  constexpr size_t kFixedFrameBytes = 11 * sizeof(uint64_t) +
+  constexpr size_t kFixedFrameBytes = 8 * sizeof(uint64_t) +
                                       4 * sizeof(int64_t) + 2 * sizeof(bool) +
                                       sizeof(int32_t);
   const int64_t embedding_width = static_cast<int64_t>(
@@ -516,23 +499,19 @@ TEST_F(ForwardSharedMemoryOutputTest, VlmPreservesEplbExpertLoads) {
   EXPECT_EQ(output.prepared_token, 19);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, TokenReadsClearPreviousDiTAndBeamData) {
+TEST_F(ForwardSharedMemoryOutputTest, TokenReadsClearPreviousDiTData) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
   ASSERT_TRUE(writer_->llm_output_write(source, {}));
   RawForwardOutput output;
   output.dit_forward_output.text_output = {"old text"};
   output.dit_forward_output.tensors = {torch::ones({2})};
-  output.src_seq_idxes = {1};
-  output.out_tokens = {3};
-  output.out_logprobs = {-0.5f};
+
   output.json_object_errors = {{"old", "old error"}};
   ASSERT_TRUE(reader_->llm_output_read(output));
   EXPECT_TRUE(output.dit_forward_output.text_output.empty());
   EXPECT_TRUE(output.dit_forward_output.tensors.empty());
-  EXPECT_TRUE(output.src_seq_idxes.empty());
-  EXPECT_TRUE(output.out_tokens.empty());
-  EXPECT_TRUE(output.out_logprobs.empty());
+
   EXPECT_TRUE(output.json_object_errors.empty());
 }
 
@@ -643,7 +622,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   ASSERT_TRUE(writer_->dit_output_write(source));
   // Empty image/text vectors precede the audio vector and its tensor header.
   constexpr size_t kAudioTensorBytesOffset =
-      sizeof(ControlMetadata) + 6 * sizeof(uint64_t) + sizeof(int64_t) +
+      sizeof(ControlMetadata) + 3 * sizeof(uint64_t) + sizeof(int64_t) +
       sizeof(bool) + 2 * sizeof(int32_t) + 2 * sizeof(uint64_t) +
       sizeof(int64_t) + sizeof(int8_t);
   const uint64_t invalid_bytes = kSegmentBytes;
@@ -693,7 +672,7 @@ TEST_F(ForwardSharedMemoryOutputTest, MalformedTensorSizeFailsWithoutMutation) {
   // RAW_OUTPUT framing, tensor vector count, rank, shape, and dtype precede
   // the tensor byte count. Corrupt only that count in an otherwise valid frame.
   constexpr size_t kTensorBytesOffset =
-      sizeof(ControlMetadata) + 6 * sizeof(uint64_t) + sizeof(int64_t) +
+      sizeof(ControlMetadata) + 3 * sizeof(uint64_t) + sizeof(int64_t) +
       sizeof(bool) + sizeof(int32_t) + sizeof(uint64_t) + sizeof(int64_t) +
       sizeof(int8_t);
   char* byte_count =
@@ -729,9 +708,6 @@ TEST_F(ForwardSharedMemoryOutputTest,
   invalid = valid;
   invalid.sample_output.mm_embeddings = {{torch::Tensor()}};
   EXPECT_FALSE(writer_->vlm_output_write(invalid, {}));
-  invalid = valid;
-  invalid.beam_search_output.out_tokens = torch::tensor({8}, torch::kInt32);
-  EXPECT_FALSE(writer_->llm_output_write(invalid, {}));
   EXPECT_EQ(published_version(), version);
   RawForwardOutput output;
   ASSERT_TRUE(reader_->llm_output_read(output));

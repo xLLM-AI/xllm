@@ -401,14 +401,6 @@ void reshape_paged_cache(torch::Tensor slot_ids,
                          torch::Tensor key_cache,
                          torch::Tensor value_cache);
 
-void block_copy(torch::Tensor key_cache_ptrs,
-                torch::Tensor value_cache_ptrs,
-                torch::Tensor src_block_indices,
-                torch::Tensor dst_block_indices,
-                torch::Tensor cum_sum,
-                int64_t numel_per_block,
-                torch::ScalarType cache_dtype);
-
 void rms_norm(torch::Tensor output,
               torch::Tensor input,
               torch::Tensor weight,

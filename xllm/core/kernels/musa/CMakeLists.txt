@@ -25,7 +25,6 @@ set(_TORCH_MUSA_KERNEL_SRCS
   activation.cu
   rope.cu
   gdn_state_commit.cu
-  ../cuda/block_copy.cu
   ../cuda/norm.cu
   ../cuda/reshape_paged_cache.cu
   ../cuda/moe/moe_fused_topk.cu

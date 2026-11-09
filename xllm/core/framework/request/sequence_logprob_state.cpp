@@ -34,7 +34,6 @@ LogprobState::LogprobState(int64_t num_prompt_tokens,
   if (enable_logprobs) {
     logprobs_.resize(capacity);
     // Top-k candidate buffers are only needed when top_logprobs are requested
-    // (e.g. beam search, which forces top_logprobs > 0).
     if (enable_top_logprobs) {
       top_tokens_.resize(capacity);
       top_logprobs_.resize(capacity);
@@ -63,45 +62,6 @@ float LogprobState::get_acc_logprob(int64_t num_tokens) {
     }
   }
   last_acc_token_idx_ = num_tokens;
-  return acc_logprob_;
-}
-
-float LogprobState::get_base_logprob(int64_t num_tokens) {
-  const int64_t generated_tokens_num = num_tokens - num_prompt_tokens_;
-  if (generated_tokens_num <= 1) {
-    return 0.0f;
-  }
-
-  const int64_t history_num_tokens = num_tokens - 1;
-
-  // Fast path: if accumulation already reaches current sequence length,
-  // subtract only the last token logprob to get the base beam score.
-  if (last_acc_token_idx_ == num_tokens) {
-    const int64_t last_token_idx = num_tokens - 1;
-    if (last_token_idx >= 0 &&
-        last_token_idx < static_cast<int64_t>(logprobs_.size()) &&
-        logprobs_[last_token_idx].has_value()) {
-      return acc_logprob_ - logprobs_[last_token_idx].value();
-    }
-    return acc_logprob_;
-  }
-
-  // Fast path: accumulation already reaches the history boundary.
-  if (last_acc_token_idx_ == history_num_tokens) {
-    return acc_logprob_;
-  }
-
-  // Slow path: incrementally accumulate only the missing history range.
-  CHECK(last_acc_token_idx_ < history_num_tokens)
-      << "last_acc_token_idx_ must be less than history_num_tokens, "
-      << last_acc_token_idx_ << " vs " << history_num_tokens;
-
-  for (int64_t i = last_acc_token_idx_; i < history_num_tokens; ++i) {
-    if (logprobs_[i].has_value()) {
-      acc_logprob_ += logprobs_[i].value();
-    }
-  }
-  last_acc_token_idx_ = history_num_tokens;
   return acc_logprob_;
 }
 

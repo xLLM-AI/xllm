@@ -64,9 +64,6 @@ class KVCacheImpl {
 
   virtual std::vector<std::vector<int64_t>> get_shapes() const;
 
-  virtual void swap_blocks(torch::Tensor& src_tensor,
-                           torch::Tensor& dst_tensor);
-
  protected:
   void create_host_tensor(const std::vector<int64_t>& dims,
                           torch::ScalarType dtype,

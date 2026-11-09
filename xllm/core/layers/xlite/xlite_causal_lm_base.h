@@ -27,7 +27,6 @@ limitations under the License.
 
 #include <xlite/xlite.h>
 
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
@@ -279,9 +278,6 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
     CHECK_LE(::xllm::ParallelConfig::get_instance().cp_size(), 1)
         << "Context parallelism is not supported by xlite backend; set "
            "--cp_size=1 or use a non-xlite backend.";
-    CHECK(!::xllm::BeamSearchConfig::get_instance().enable_beam_search_kernel())
-        << "Beam search is not supported by xlite backend; disable "
-           "--enable_beam_search_kernel or use a non-xlite backend.";
     CHECK_NE(::xllm::KVCacheConfig::get_instance().indexer_cache_dtype(),
              "int8")
         << "INT8 indexer cache is not supported by xlite backend; set "

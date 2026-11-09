@@ -109,8 +109,7 @@ class CompositeBlockManager : public BlockManager {
 
   BlockManager* leaf_of(BlockType type) const;
 
-  // Typed block-level allocation routed to the leaf under `type`. Used for
-  // beam copy-on-write.
+  // Typed block-level allocation routed to the leaf under `type`.
   std::vector<Block> allocate_blocks(BlockType type, size_t num_blocks);
 
   // Type-ambiguous block-level primitives are not meaningful on a composition.

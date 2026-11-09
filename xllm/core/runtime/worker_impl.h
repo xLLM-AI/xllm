@@ -39,7 +39,6 @@ limitations under the License.
 #include "framework/model_context/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
-#include "framework/sampling/beam_searcher.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "options.h"
@@ -175,10 +174,6 @@ class WorkerImpl {
   // Lazily create (or return) the worker-local JSON grammar. Thread-safe.
   std::shared_ptr<const JsonObjectGrammar> ensure_json_object_grammar(
       bool reasoning_enabled);
-
-  // Internal helper shared by worker pipelines before model execution.
-  virtual void apply_kv_block_swaps(const LlmModelParams& input_params);
-  virtual void apply_kv_block_swaps(const VlmModelParams& input_params);
 
   virtual std::optional<ForwardOutput> step(const DiTForwardInput& inputs);
 
@@ -459,26 +454,6 @@ class WorkerImpl {
   // Virtual memory residency sleep path.
   bool virtual_memory_sleep(MasterStatus master_status);
 
-#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
-  void refresh_cuda_block_copy_runtime_state();
-  bool can_use_cuda_block_copy_kernel(const LlmModelParams& input_params) const;
-  void execute_cuda_block_copy_kernel(const LlmModelParams& input_params);
-  bool can_use_cuda_block_copy_kernel(const VlmModelParams& input_params) const;
-  void execute_cuda_block_copy_kernel(const VlmModelParams& input_params);
-
-  struct CudaBlockCopyRuntimeState {
-    torch::Tensor k_cache_ptrs_device;
-    torch::Tensor v_cache_ptrs_device;
-    int64_t num_layers = 0;
-    int64_t numel_per_block = 0;
-
-    bool valid() const {
-      return k_cache_ptrs_device.defined() && v_cache_ptrs_device.defined() &&
-             num_layers > 0 && numel_per_block > 0;
-    }
-  };
-#endif
-
 #if defined(USE_NPU)
   static constexpr size_t kDraftDpEpPaddingCacheCapacity = 2;
   DpEpPaddingCache draft_dp_ep_padding_cache_{kDraftDpEpPaddingCacheCapacity};
@@ -529,8 +504,6 @@ class WorkerImpl {
   template <typename Params>
   bool can_skip_npu_graph_decode_sync_impl(const Params& input_params) const;
   template <typename Params>
-  void apply_kv_block_swaps_impl(const Params& input_params);
-  template <typename Params>
   void prepare_mla_prefixcache_inputs_impl(Params& input_params);
 #if defined(USE_NPU)
   template <typename Params>
@@ -538,12 +511,6 @@ class WorkerImpl {
   template <typename Params>
   void prepare_dp_ep_padding_on_stream_impl(Params& input_params,
                                             Stream& prepare_stream);
-#endif
-#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
-  template <typename Params>
-  bool can_use_cuda_block_copy_kernel_impl(const Params& input_params) const;
-  template <typename Params>
-  void execute_cuda_block_copy_kernel_impl(const Params& input_params);
 #endif
 
  protected:
@@ -619,10 +586,6 @@ class WorkerImpl {
       hierarchy_kv_cache_transfer_context_;
   std::shared_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
   std::unique_ptr<WorkerRendezvous> worker_rendezvous_;
-
-#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
-  CudaBlockCopyRuntimeState cuda_block_copy_runtime_state_;
-#endif
 
 #if defined(USE_NPU)
   std::unique_ptr<MooncakeWeightTransfer> weight_transfer_;

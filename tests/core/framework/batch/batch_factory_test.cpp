@@ -27,7 +27,6 @@ limitations under the License.
 
 #include "core/framework/batch/batch_output_action.h"
 #include "core/framework/batch/sampling_input_builder.h"
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
@@ -44,14 +43,13 @@ namespace xllm {
 namespace {
 
 std::shared_ptr<Request> make_request(int32_t rank,
-                                      int32_t beam_width = 1,
                                       std::vector<int32_t> prompt_tokens = {1,
                                                                             2,
                                                                             3},
                                       MMData mm_data = {},
                                       torch::Tensor input_embedding = {}) {
   RequestSamplingParam sampling;
-  sampling.beam_width = beam_width;
+
   StoppingChecker stopping;
   stopping.set_max_generated_tokens(/*max_generated_tokens=*/8);
   stopping.set_max_context_len(/*max_context_len=*/64);
@@ -130,14 +128,14 @@ TEST(BatchFactoryTest, IndependentFactoriesKeepTheirOwnDpSize) {
   BatchFactory single(/*dp_size=*/1);
   BatchFactory multiple(/*dp_size=*/3);
   auto request = make_request(/*rank=*/2);
-  auto batches = multiple.create_batches(
-      {request}, {request->sequences().front().get()}, {2});
+  auto batches =
+      multiple.create_batches({request->sequences().front().get()}, {2});
   ASSERT_EQ(batches.size(), 3);
   EXPECT_TRUE(batches[0].empty());
   EXPECT_TRUE(batches[1].empty());
   EXPECT_EQ(batches[2].size(), 1);
-  EXPECT_EQ(single.create_batches({}, {}, {}).size(), 1);
-  EXPECT_EQ(multiple.create_batches({}, {}, {}).size(), 3);
+  EXPECT_EQ(single.create_batches({}, {}).size(), 1);
+  EXPECT_EQ(multiple.create_batches({}, {}).size(), 3);
 }
 
 TEST(BatchFactoryTest, PreservesRankLocalSequenceOrderAndBudgets) {
@@ -148,8 +146,7 @@ TEST(BatchFactoryTest, PreservesRankLocalSequenceOrderAndBudgets) {
   auto* seq1 = first->sequences().front().get();
   auto* seq2 = second->sequences().front().get();
   auto* seq3 = third->sequences().front().get();
-  auto batches = factory.create_batches(
-      {first, second, third}, {seq1, seq2, seq3}, {1, 2, 3});
+  auto batches = factory.create_batches({seq1, seq2, seq3}, {1, 2, 3});
   ASSERT_EQ(batches.size(), 9);
   EXPECT_EQ(batches[0].get_sequences(), (std::vector<Sequence*>{seq2}));
   EXPECT_EQ(batches[0].get_allowed_max_tokens(), (std::vector<uint32_t>{2}));
@@ -203,10 +200,6 @@ TEST(BatchStateTest, MixedForwardTypeSurvivesAdditionalStagesAndRefreshes) {
   EXPECT_TRUE(state.prepare_sequence_input_data().forward_type.is_mixed());
 }
 
-#if defined(USE_CUDA) || defined(USE_NPU) || defined(USE_MLU) || \
-    defined(USE_MUSA)
-#endif
-
 TEST(BatchSequencePlanTest, ReorderingMovesSequencesTogetherWithBudgets) {
   auto first = make_request(0);
   auto second = make_request(0);
@@ -230,36 +223,21 @@ TEST(BatchSequencePlanDeathTest, RejectsInvalidPermutation) {
   EXPECT_DEATH(plan.reorder({0}), "source_indices.size");
 }
 
-TEST(BatchFactoryTest, TransfersAreConsumedOnlyForActiveRanks) {
-  BatchFactory factory(/*dp_size=*/2);
-  auto request = make_request(/*rank=*/1);
-  std::vector<std::vector<BlockTransferInfo>> transfers(2);
-  uint8_t key[XXH3_128BITS_HASH_VALUE_LEN] = {};
-  transfers[0].emplace_back(/*src_id=*/1, /*dst_id=*/2, key, TransferType::G2D);
-  transfers[1].emplace_back(/*src_id=*/3, /*dst_id=*/4, key, TransferType::G2D);
-  auto batches = factory.create_batches(
-      {request}, {request->sequences()[0].get()}, {3}, &transfers);
-  EXPECT_EQ(transfers[0].size(), 1);
-  EXPECT_TRUE(transfers[1].empty());
-  EXPECT_TRUE(batches[0].empty());
-  EXPECT_FALSE(batches[1].empty());
-}
-
 TEST(BatchFactoryDeathTest, RejectsMismatchedBudgetsAndInvalidRanks) {
   BatchFactory factory(/*dp_size=*/2);
   auto request = make_request(/*rank=*/0);
   auto* sequence = request->sequences()[0].get();
-  EXPECT_DEATH(factory.create_batches({request}, {sequence}, {}),
+  EXPECT_DEATH(factory.create_batches({sequence}, {}),
                "Each scheduled sequence requires one token budget");
-  EXPECT_DEATH(factory.create_batches({request}, {sequence}, {0}), "budgets");
+  EXPECT_DEATH(factory.create_batches({sequence}, {0}), "budgets");
   const size_t overflow_budget =
       static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1;
-  EXPECT_DEATH(factory.create_batches({request}, {sequence}, {overflow_budget}),
+  EXPECT_DEATH(factory.create_batches({sequence}, {overflow_budget}),
                "budgets");
   sequence->set_dp_rank(-1);
-  EXPECT_DEATH(factory.create_batches({request}, {sequence}, {1}), "dp_rank");
+  EXPECT_DEATH(factory.create_batches({sequence}, {1}), "dp_rank");
   sequence->set_dp_rank(2);
-  EXPECT_DEATH(factory.create_batches({request}, {sequence}, {1}), "dp_rank");
+  EXPECT_DEATH(factory.create_batches({sequence}, {1}), "dp_rank");
 }
 
 TEST(BatchFactoryDeathTest, RejectsFinishedScheduledSequences) {
@@ -269,82 +247,21 @@ TEST(BatchFactoryDeathTest, RejectsFinishedScheduledSequences) {
   auto* active_sequence = active_request->sequences()[0].get();
   auto* finished_sequence = finished_request->sequences()[0].get();
   finished_sequence->finish();
-  EXPECT_DEATH(factory.create_batches({active_request, finished_request},
-                                      {active_sequence, finished_sequence},
-                                      {1, 1}),
-               "finished");
+  EXPECT_DEATH(
+      factory.create_batches({active_sequence, finished_sequence}, {1, 1}),
+      "finished");
 
   Batch batch;
   EXPECT_DEATH(batch.add(finished_sequence), "finished");
 }
 
-TEST(BatchFactoryDeathTest, RejectsNullScheduledSequencesAndRequests) {
+TEST(BatchFactoryDeathTest, RejectsNullScheduledSequences) {
   BatchFactory factory(/*dp_size=*/1);
-  auto request = make_request(/*rank=*/0);
-  auto* sequence = request->sequences()[0].get();
-  EXPECT_DEATH(factory.create_batches({request}, {nullptr}, {1}),
-               "sequence != nullptr");
-  EXPECT_DEATH(factory.create_batches({nullptr}, {sequence}, {1}),
-               "request != nullptr");
+  EXPECT_DEATH(factory.create_batches({nullptr}, {1}), "sequence != nullptr");
 
   Batch batch;
   EXPECT_DEATH(batch.add(static_cast<Sequence*>(nullptr)),
                "sequence != nullptr");
-}
-
-TEST(BatchFactoryDeathTest, RejectsInvalidSwapRankCount) {
-  BatchFactory factory(/*dp_size=*/2);
-  std::vector<std::vector<BlockTransferInfo>> transfers(1);
-  EXPECT_DEATH(factory.create_batches({}, {}, {}, &transfers), "swap_infos");
-}
-
-TEST(BatchFactoryTest, BeamBatchRetainsAllRequestGroupsInOrder) {
-  BatchFactory factory(/*dp_size=*/9);
-  auto first = make_request(/*rank=*/8);
-  auto other_rank = make_request(/*rank=*/0);
-  auto beam = make_request(/*rank=*/8, /*beam_width=*/2);
-  auto batches = factory.create_batches({first, other_rank, beam},
-                                        {first->sequences()[0].get(),
-                                         other_rank->sequences()[0].get(),
-                                         beam->sequences()[0].get()},
-                                        {3, 2, 1});
-  ASSERT_EQ(batches.size(), 9);
-  EXPECT_EQ(batches[0].sequence_groups(),
-            (std::vector<SequencesGroup*>{other_rank->sequence_group()}));
-  ASSERT_EQ(batches[8].sequence_groups().size(), 2);
-  EXPECT_EQ(batches[8].sequence_groups()[0], first->sequence_group());
-  EXPECT_EQ(batches[8].sequence_groups()[1], beam->sequence_group());
-  EXPECT_EQ(batches[8].get_allowed_max_tokens(), (std::vector<uint32_t>{3, 1}));
-  for (size_t rank = 1; rank < 8; ++rank) {
-    EXPECT_TRUE(batches[rank].empty());
-  }
-}
-
-TEST(BatchFactoryTest, ReusingFactoryDoesNotRetainPreviousBeamGroups) {
-  BatchFactory factory(/*dp_size=*/9);
-  auto beam = make_request(/*rank=*/8, /*beam_width=*/2);
-  auto beam_batches =
-      factory.create_batches({beam}, {beam->sequences()[0].get()}, {3});
-  ASSERT_EQ(beam_batches.size(), 9);
-  ASSERT_EQ(beam_batches[8].sequence_groups().size(), 1);
-
-  auto request = make_request(/*rank=*/0);
-  auto batches =
-      factory.create_batches({request}, {request->sequences()[0].get()}, {3});
-  EXPECT_TRUE(batches[0].sequence_groups().empty());
-  EXPECT_EQ(batches[0].get_sequences(),
-            (std::vector<Sequence*>{request->sequences()[0].get()}));
-  EXPECT_EQ(batches[0].input_type(), BatchInputType::SEQUENCE);
-  for (size_t rank = 1; rank < batches.size(); ++rank) {
-    EXPECT_TRUE(batches[rank].empty());
-    EXPECT_TRUE(batches[rank].sequence_groups().empty());
-  }
-
-  auto empty_batches = factory.create_batches({}, {}, {});
-  for (const auto& batch : empty_batches) {
-    EXPECT_TRUE(batch.empty());
-    EXPECT_EQ(batch.batch_id(), UNINITIALIZED_BATCH_ID);
-  }
 }
 
 TEST(BatchFactoryTest, MixedEmbeddingInputsKeepRankLocalOrderAcrossCalls) {
@@ -358,18 +275,15 @@ TEST(BatchFactoryTest, MixedEmbeddingInputsKeepRankLocalOrderAcrossCalls) {
       torch::arange(12, 24, torch::kFloat32).reshape({3, 4});
   const auto other_embedding = torch::full({3, 4}, 42.0F);
   auto first = make_request(/*rank=*/8,
-                            /*beam_width=*/1,
                             /*prompt_tokens=*/{11, 12, 13},
                             /*mm_data=*/{},
                             first_embedding);
   auto plain = make_request(/*rank=*/8);
   auto other_rank = make_request(/*rank=*/0,
-                                 /*beam_width=*/1,
                                  /*prompt_tokens=*/{31, 32, 33},
                                  /*mm_data=*/{},
                                  other_embedding);
   auto last = make_request(/*rank=*/8,
-                           /*beam_width=*/1,
                            /*prompt_tokens=*/{21, 22, 23},
                            /*mm_data=*/{},
                            last_embedding);
@@ -382,7 +296,7 @@ TEST(BatchFactoryTest, MixedEmbeddingInputsKeepRankLocalOrderAcrossCalls) {
     sequence->add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
     sequences.emplace_back(sequence);
   }
-  auto batches = factory.create_batches(requests, sequences, {3, 3, 3, 3});
+  auto batches = factory.create_batches(sequences, {3, 3, 3, 3});
   ASSERT_EQ(batches.size(), 9);
   ModelArgs args{};
   const auto input = batches[8].prepare_forward_input(
@@ -400,31 +314,12 @@ TEST(BatchFactoryTest, MixedEmbeddingInputsKeepRankLocalOrderAcrossCalls) {
   auto next = make_request(/*rank=*/8);
   auto* next_sequence = next->sequences()[0].get();
   next_sequence->add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
-  auto next_batches = factory.create_batches({next}, {next_sequence}, {3});
+  auto next_batches = factory.create_batches({next_sequence}, {3});
   ASSERT_EQ(next_batches.size(), 9);
   const auto next_input = next_batches[8].prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, args);
   EXPECT_FALSE(next_input.input_params.embedding.input_embedding.defined());
   EXPECT_TRUE(next_batches[0].empty());
 }
-
-TEST(BatchOutputHandlerDeathTest, RejectsBeamSourceOutsideBatch) {
-  BatchFactory factory(/*dp_size=*/1);
-  auto request = make_request(/*rank=*/0, /*beam_width=*/2);
-  auto batches =
-      factory.create_batches({request}, {request->sequences()[0].get()}, {1});
-  RawForwardOutput output;
-  output.src_seq_idxes = {1};
-  output.out_tokens = {4};
-  output.out_logprobs = {0.0F};
-  EXPECT_DEATH(batches[0].process_beam_search_output(
-                   output, BatchOutputAction::IMMEDIATE),
-               "data.sequences.size");
-  output.src_seq_idxes = {-1};
-  EXPECT_DEATH(batches[0].process_beam_search_output(
-                   output, BatchOutputAction::IMMEDIATE),
-               "src_seq_idx >= 0");
-}
-
 }  // namespace
 }  // namespace xllm

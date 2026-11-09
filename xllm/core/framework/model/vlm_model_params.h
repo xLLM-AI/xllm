@@ -35,7 +35,6 @@ class VlmModelParams final {
     out.attention = attention;
     out.embedding = embedding;
     out.parallel = parallel;
-    out.block_copy = block_copy;
     out.multimodal = multimodal;
     out.expert = expert;
     out.graph = graph;
@@ -57,7 +56,6 @@ class VlmModelParams final {
     params.meta = meta;
     params.attention = attention.to(device);
     params.embedding = embedding.to(device);
-    params.block_copy = block_copy.to(device);
     params.multimodal = multimodal.to(device);
     params.parallel = parallel.to(device);
     params.expert = expert.to(device);
@@ -128,7 +126,6 @@ class VlmModelParams final {
   VlmAttentionInput attention;
   VlmEmbeddingInput embedding;
   ParallelInput parallel;
-  BlockCopyInput block_copy;
   VlmVisionInput multimodal;
   ExpertInput expert;
   VlmGraphInput graph;

@@ -626,7 +626,6 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearReadWriteIds) {
                               budgets,
                               {},
                               {},
-                              nullptr,
                               /*batch_id=*/1,
                               nullptr,
                               BatchForwardType::DECODE);
@@ -832,10 +831,10 @@ TEST(BatchPackedInputTest, NativeDomainsRejectUnsupportedPackedSchemas) {
   LlmForwardInput llm_source;
   VlmForwardInput vlm_source;
   DiTForwardInput dit_source;
-  std::vector<proto::PackedForwardInput> packed_inputs(4);
+  std::vector<proto::PackedForwardInput> packed_inputs(3);
   ASSERT_TRUE(llm_source.to_packed_proto(&packed_inputs[0]));
   ASSERT_TRUE(vlm_source.to_packed_proto(&packed_inputs[1]));
-  ASSERT_TRUE(dit_source.to_packed_proto(&packed_inputs[3]));
+  ASSERT_TRUE(dit_source.to_packed_proto(&packed_inputs[2]));
 
   for (const auto& packed_input : packed_inputs) {
     ASSERT_GE(packed_input.payload().size(), 40u);
@@ -1035,7 +1034,6 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
                               budgets,
                               {},
                               {},
-                              nullptr,
                               /*batch_id=*/1,
                               nullptr,
                               BatchForwardType::DECODE);
@@ -1565,7 +1563,6 @@ TEST(BatchPackedInputTest, PackedProtoLazyToPreservesJsonMetadata) {
                               allowed_max_tokens,
                               {},
                               {},
-                              nullptr,
                               /*batch_id=*/2,
                               nullptr,
                               BatchForwardType::DECODE);

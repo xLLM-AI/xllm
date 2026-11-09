@@ -118,9 +118,6 @@ class BlockManagerPool : public KVCacheManager {
   void publish_prefix(Sequence* sequence) override;
   void publish_prefix(Sequence* sequence, size_t num_tokens) override;
 
-  std::vector<std::vector<BlockTransferInfo>>* get_swap_block_transfer_infos()
-      override;
-
   virtual float get_gpu_cache_usage_perc() const;
 
   uint32_t num_blocks() const override;
@@ -148,8 +145,6 @@ class BlockManagerPool : public KVCacheManager {
   int32_t get_manager_with_max_available_blocks() const;
   int32_t get_dp_rank(Sequence* sequence) const;
 
-  bool process_beam_search(Sequence* sequence, bool need_swap = false);
-
  private:
   friend class BlockManagerPoolTestPeer;
 
@@ -157,7 +152,6 @@ class BlockManagerPool : public KVCacheManager {
   // The runtime retains it until this pool and its blocks have been destroyed.
   VmmKVPageAllocator* page_allocator_;
   mutable std::atomic<size_t> dp_selection_cursor_{0};
-  std::vector<std::vector<BlockTransferInfo>> swap_block_transfer_infos_;
 
  protected:
   // the options for the block manager

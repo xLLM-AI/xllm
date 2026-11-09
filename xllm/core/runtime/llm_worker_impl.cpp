@@ -25,7 +25,6 @@ limitations under the License.
 
 #include "common/device_monitor.h"
 #include "common/metrics.h"
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
@@ -87,13 +86,6 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
     LOG(WARNING) << "MUSA pool compute streams are not validated for Qwen3 "
                     "attention; using the default compute stream.";
   }
-
-  const auto& beam_search_config = BeamSearchConfig::get_instance();
-  CHECK(!has_linear_attention_layers(context.get_model_args()) ||
-        (!beam_search_config.enable_beam_search_kernel() &&
-         beam_search_config.beam_width() <= 1))
-      << "MUSA beam search is not supported for models with linear-attention "
-         "layers.";
 #endif
 
 #if defined(USE_CUDA) || defined(USE_MUSA)
@@ -144,10 +136,6 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
     if (!is_spec_draft_) {
       eplb_executor_ = std::make_unique<EplbExecutor>(*model_, device_);
     }
-  }
-
-  if (::xllm::BeamSearchConfig::get_instance().enable_beam_search_kernel()) {
-    beam_searcher_ = std::make_unique<BeamSearcher>();
   }
   return true;
 }
@@ -378,21 +366,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
             sampling_params.min_token_positions() - selected_positions;
         return sample(logits, target_sampling);
       }();
-      // beam search kernel
-      BeamSearchOutput beam_search_output;
-      if (sampling_params.use_beam_search() &&
-          sampling_params.acc_logprob().defined() &&
-          sampling_params.acc_logprob().numel() > 0) {
-        beam_search_output =
-            beam_searcher_->forward(sampling_params.acc_logprob(),
-                                    sample_output.top_tokens,
-                                    sample_output.top_logprobs);
-      }
-
-      // set sample output to output
-      output.sample_output = sample_output;
-      // set beam search output to output
-      output.beam_search_output = beam_search_output;
+      output.sample_output = std::move(sample_output);
     }
     output.logits = logits;
   }

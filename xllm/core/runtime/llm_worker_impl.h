@@ -101,7 +101,6 @@ class LLMWorkerImpl : public WorkerImpl {
   }
 
  protected:
-  std::unique_ptr<BeamSearcher> beam_searcher_;
   torch::Tensor expert_load_data_;
   std::unique_ptr<EplbExecutor> eplb_executor_;
 };

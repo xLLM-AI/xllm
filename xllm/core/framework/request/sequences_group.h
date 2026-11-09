@@ -48,12 +48,6 @@ class SequencesGroup {
                         const Tokenizer& tokenizer,
                         ThreadPool* thread_pool = nullptr);
 
-  void process_beam_search(bool force_requested_result_size = false);
-
-  bool check_beam_search() {
-    return sequence_params_.sampling_param->beam_width > 1;
-  }
-
   std::vector<std::unique_ptr<Sequence>>& sequences() { return sequences_; }
 
   const std::vector<std::unique_ptr<Sequence>>& sequences() const {

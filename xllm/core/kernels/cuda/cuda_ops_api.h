@@ -47,13 +47,6 @@ void reshape_paged_cache(
     torch::Tensor key_cache,  // [n_blocks, block_size, n_heads, head_dim]
     torch::Tensor value_cache);
 
-void block_copy(torch::Tensor key_cache_ptrs,
-                torch::Tensor value_cache_ptrs,
-                torch::Tensor src_block_indices,
-                torch::Tensor dst_block_indices,
-                torch::Tensor cum_sum,
-                int64_t numel_per_block,
-                torch::ScalarType cache_dtype);
 #if !defined(USE_DCU)
 void batch_prefill(const std::string& uri,
                    ffi::Array<int64_t> plan_info,

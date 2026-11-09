@@ -229,7 +229,7 @@ TEST(RequestTest, GenerateOutputReturnsSequenceFailureStatus) {
 
   Sequence copied_sequence(*request.sequences()[0], /*index=*/1);
   EXPECT_EQ(copied_sequence.sample_sequence_id(), "req-error#1");
-  copied_sequence.reset_finish_state_for_beam_search();
+
   EXPECT_TRUE(copied_sequence.finished());
   ASSERT_TRUE(copied_sequence.error_status().has_value());
 

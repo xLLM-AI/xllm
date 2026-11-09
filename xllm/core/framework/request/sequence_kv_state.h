@@ -122,15 +122,6 @@ class KVCacheState {
 
   size_t current_max_tokens_capacity() const;
 
-  Slice<Block> src_blocks() const { return src_blocks_; };
-
-  void set_src_blocks(std::vector<Block> src_blocks, bool need_swap = false) {
-    src_blocks_ = std::move(src_blocks);
-    need_swap_ = need_swap;
-  }
-
-  bool need_swap() const { return need_swap_; }
-
   // Groups exported to the worker's multi_block_tables, in the fixed
   // kMultiBlockExportOrder. Each pair is (type, &blocks); only types currently
   // present in the map are returned. Empty for the flat KV path.
@@ -167,8 +158,6 @@ class KVCacheState {
 
   void reset();
 
-  void process_beam_search(std::optional<Block> new_block = std::nullopt);
-
  private:
   void remember_block_size(BlockType type, const std::vector<Block>& blocks);
 
@@ -190,12 +179,6 @@ class KVCacheState {
   // invalid placeholders behind, so capacity calculations cannot read size()
   // from the first current handle.
   std::map<BlockType, size_t> block_sizes_;
-
-  // source kv cache blocks for swap
-  std::vector<Block> src_blocks_;
-
-  // if need to swap last block
-  bool need_swap_ = false;
 
   // transfer kv info for disaggregated PD mode.
   std::optional<TransferKVInfo> transfer_kv_info_;

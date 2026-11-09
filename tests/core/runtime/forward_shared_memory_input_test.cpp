@@ -188,7 +188,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest, RejectsPreviousPackedInputSchema) {
   const TypeParam source = make_input<TypeParam>(make_sparse_role_offsets());
   proto::PackedForwardInput packed;
   ASSERT_TRUE(source.to_packed_proto(&packed));
-  constexpr uint16_t kPreviousVersion = 10;
+  constexpr uint16_t kPreviousVersion = 11;
   ASSERT_GE(packed.payload().size(),
             sizeof(uint64_t) + sizeof(kPreviousVersion));
   std::memcpy(packed.mutable_payload()->data() + sizeof(uint64_t),

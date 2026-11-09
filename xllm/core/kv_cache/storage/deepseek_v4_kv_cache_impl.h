@@ -38,10 +38,7 @@ class Dsv4StateCache final {
   torch::Tensor score() const;
   torch::Tensor packed() const;
 
-  void swap_blocks(const torch::Tensor& src, const torch::Tensor& dst);
-
  private:
-  bool packed_layout_ = false;
   torch::Tensor packed_;
   torch::Tensor kv_;
   torch::Tensor score_;
@@ -72,9 +69,6 @@ class DeepSeekV4KVCacheImpl final : public KVCacheImpl {
   bool empty() const override;
 
   std::vector<std::vector<int64_t>> get_shapes() const override;
-
-  void swap_blocks(torch::Tensor& src_tensor,
-                   torch::Tensor& dst_tensor) override;
 
  private:
   torch::Tensor key_cache_;

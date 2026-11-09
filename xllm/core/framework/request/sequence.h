@@ -137,7 +137,7 @@ class Sequence {
   Sequence(const Sequence& other, size_t index);
   virtual ~Sequence();
 
-  // Polymorphic copy for beam / best_of expansion: same request, new index.
+  // Polymorphic copy for best_of expansion: same request, new index.
   // Derived types return their own type so no state is sliced away.
   virtual std::unique_ptr<Sequence> fork(size_t index) const;
 
@@ -228,7 +228,6 @@ class Sequence {
   void append_token(const Token& token);
   void append_token(int64_t token_id) { append_token(Token(token_id)); }
   void update_token(size_t index, const Token& token);
-  bool restore_json_object_state(const JsonObjectGrammarSnapshot& snapshot);
   void update_last_step_token(const Token& token, size_t token_offset = 0);
   bool has_new_tokens_generated() const {
     return num_tokens_ > stream_output_token_offset_;
@@ -423,8 +422,6 @@ class Sequence {
 
   // for generated tokens
   float get_acc_logprob();
-  // Returns the beam base score: accumulated logprob excluding last token.
-  float get_base_logprob();
   void generate_output_tokens_logprobs(
       size_t start_idx,
       size_t end_idx,
@@ -432,10 +429,6 @@ class Sequence {
       std::optional<std::vector<LogProb>>& out_logprobs);
 
   void reset();
-
-  bool check_beam_search() {
-    return sequence_params_.sampling_param->beam_width > 1;
-  }
 
   const std::vector<SampleSlot>& sample_slots() const {
     static const std::vector<SampleSlot> kEmpty;
@@ -445,21 +438,6 @@ class Sequence {
   }
 
   bool check_need_unique_tokens() { return need_unique_tokens_; }
-
-  // True if this sequence received token updates after the previous
-  // SequencesGroup::process_beam_search() round.
-  bool updated_since_last_beam_search() const {
-    return updated_since_last_beam_search_;
-  }
-
-  void clear_updated_since_last_beam_search() {
-    updated_since_last_beam_search_ = false;
-  }
-
-  // Beam search may clone a finished sequence and then rewrite tokens to a
-  // non-finished candidate. Reset cached finish state so finished() is
-  // re-evaluated from current tokens.
-  void reset_finish_state_for_beam_search();
 
   LogprobState* logprob_state() { return &logprob_state_; }
   void set_estimated_latency(double estimated_latency) {
@@ -524,7 +502,7 @@ class Sequence {
   bool try_commit_json_object_token(int32_t token_id, int64_t token_offset);
 
   // Drop cached block hashes that may be stale after the token at
-  // `token_index` was rewritten (beam search / speculative / disagg PD).
+  // `token_index` was rewritten (speculative / disagg PD).
   void invalidate_block_hashes_from(size_t token_index);
 
   // Same as above for the linear-state hash domain: drop cached chunk hashes
@@ -687,12 +665,6 @@ class Sequence {
 
   // whether the last token is handled
   std::atomic<bool> last_token_handled_{false};
-
-  // Mark whether the sequence has new token updates in current decode step.
-  // This is only consumed by software beam search to distinguish:
-  // 1) beams that were already finished before current step and
-  // 2) beams that just became finished in current step.
-  bool updated_since_last_beam_search_ = false;
 };
 
 }  // namespace xllm

@@ -88,11 +88,8 @@ class RequestParams final {
   // Projects the shared sampling-related fields into a RequestSamplingParam.
   // `best_of` is the effective best_of (== best_of.value_or(n)); when it
   // exceeds `n`, logprobs are forced on so a per-sequence logprob can be
-  // produced. Model-specific fields/rules are intentionally left out and
-  // layered on by the individual request factories: json_object (LLM), and the
-  // beam-search fields beam_width/num_return_sequences plus their logprob
-  // normalization, which differ per model (LLM normalizes, VLM
-  // omits them).
+  // produced. Model-specific fields such as json_object are applied by
+  // the individual request factories.
   RequestSamplingParam to_sampling_param(size_t best_of) const;
 
   std::optional<std::string> prepare_sampling_constraints(
@@ -218,10 +215,6 @@ class RequestParams final {
   int32_t priority_weight = 1;
 
   RequestPriority priority = RequestPriority::NORMAL;
-
-  // beam search
-  int32_t beam_width = 0;
-  int32_t num_return_sequences = 0;
 
   bool add_special_tokens = false;
 

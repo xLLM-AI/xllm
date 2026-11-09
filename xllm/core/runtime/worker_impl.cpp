@@ -49,7 +49,6 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/common/constants.h"
 #include "core/common/flash_comm1_context.h"
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
@@ -69,9 +68,6 @@ limitations under the License.
 #include "platform/npu/device_capture_lock.h"
 #elif defined(USE_CUDA) || defined(USE_DCU) || defined(USE_MUSA)
 #include "platform/torch_profiler.h"
-#endif
-#if defined(USE_CUDA) || defined(USE_DCU)
-#include "kernels/cuda/cuda_ops_api.h"
 #endif
 #if defined(USE_CUDA)
 #include "platform/cuda_profiler.h"
@@ -480,16 +476,6 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
   prepare_stream_ = device_.get_stream_from_pool();
   compute_stream_ = device_.current_stream();
 
-#if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_MUSA) && \
-    !defined(USE_DCU)
-  if (::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel()) {
-    LOG(WARNING)
-        << "enable_block_copy_kernel is only supported on NPU/CUDA/MUSA/DCU; "
-           "forcing enable_block_copy_kernel=false.";
-    ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel(false);
-  }
-#endif
-
 #if defined(USE_NPU)
   if (::xllm::LoadConfig::get_instance().enable_vmm_weights() &&
       !::xllm::KVCacheConfig::get_instance().vmm_elastic()) {
@@ -709,10 +695,6 @@ bool WorkerImpl::allocate_kv_cache_storage(
 
   allocate_kv_caches(kv_caches_, kv_cache_shape, create_options);
   init_hierarchy_kv_cache_transfer(kv_cache_shape, create_options);
-
-#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
-  refresh_cuda_block_copy_runtime_state();
-#endif
 
   return true;
 }
@@ -1474,14 +1456,11 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
       return;
     }
 
+    // Initialize newly allocated shared rows and publish their mappings.
     prepare_shared_kv_cache(input_params.embedding.full_block_slot_rows,
                             input_params.embedding.full_block_lease_epochs,
                             input_params.embedding.linear_state_slot_rows,
                             prepare_stream);
-
-    // Initialize new destinations before copy-on-write or reload data is
-    // placed there, and publish their row maps before resolving copies.
-    apply_kv_block_swaps(input_params);
 
 #if defined(USE_NPU)
     if (context_.get_model_args().enable_mla() &&
@@ -1593,175 +1572,6 @@ std::shared_ptr<const JsonObjectGrammar> WorkerImpl::ensure_json_object_grammar(
   }
   return *grammar;
 }
-
-template <typename Params>
-void WorkerImpl::apply_kv_block_swaps_impl(const Params& input_params) {
-#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
-  if (::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel() &&
-      can_use_cuda_block_copy_kernel(input_params)) {
-    execute_cuda_block_copy_kernel(input_params);
-    return;
-  }
-#endif
-
-#if defined(USE_NPU)
-  if (input_params.block_copy.swap_blocks.size() == 0 ||
-      ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel()) {
-    return;
-  }
-#elif defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU) || \
-    defined(USE_MLU)
-  // MLU has no fused block-copy kernel (enable_block_copy_kernel defaults to
-  // false), so it always falls through to the torch swap path below. Without
-  // this, beam-search copy-on-write blocks are allocated but never populated
-  // with the source KV, leaving each diverging beam reading stale pool memory.
-  if (input_params.block_copy.swap_blocks.size() == 0) {
-    return;
-  }
-#else
-  return;
-#endif
-
-#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MUSA) || \
-    defined(USE_DCU) || defined(USE_MLU)
-  std::vector<int64_t> src_indices, dst_indices;
-  src_indices.reserve(input_params.block_copy.swap_blocks.size());
-  dst_indices.reserve(input_params.block_copy.swap_blocks.size());
-
-  for (const auto& block : input_params.block_copy.swap_blocks) {
-    src_indices.push_back(block.src_block_id);
-    dst_indices.push_back(block.dst_block_id);
-  }
-
-  auto src_tensor = async_h2d_tensor(src_indices, device_);
-  auto dst_tensor = async_h2d_tensor(dst_indices, device_);
-  for (size_t layer_id = 0; layer_id < kv_caches_.size(); ++layer_id) {
-    kv_caches_[layer_id].swap_blocks(src_tensor, dst_tensor);
-  }
-#endif
-}
-
-void WorkerImpl::apply_kv_block_swaps(const LlmModelParams& input_params) {
-  apply_kv_block_swaps_impl(input_params);
-}
-
-void WorkerImpl::apply_kv_block_swaps(const VlmModelParams& input_params) {
-  apply_kv_block_swaps_impl(input_params);
-}
-
-#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
-void WorkerImpl::refresh_cuda_block_copy_runtime_state() {
-  cuda_block_copy_runtime_state_ = {};
-  if (!::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel() ||
-      kv_caches_.empty()) {
-    return;
-  }
-
-  const auto& first_kv_cache = kv_caches_.front();
-  auto key_cache = first_kv_cache.get_k_cache();
-  auto value_cache = first_kv_cache.get_v_cache();
-  if (!key_cache.defined() || !value_cache.defined()) {
-    return;
-  }
-#if defined(USE_MUSA)
-  if (!key_cache.device().is_privateuseone() ||
-      !value_cache.device().is_privateuseone()) {
-    return;
-  }
-#else
-  if (!key_cache.is_cuda() || !value_cache.is_cuda()) {
-    return;
-  }
-#endif
-
-  CHECK(key_cache.is_contiguous())
-      << "CUDA block copy kernel expects contiguous key cache";
-  CHECK(value_cache.is_contiguous())
-      << "CUDA block copy kernel expects contiguous value cache";
-  CHECK_GT(key_cache.size(0), 0);
-
-  const auto cache_dtype = key_cache.scalar_type();
-  std::vector<int64_t> key_cache_ptrs;
-  std::vector<int64_t> value_cache_ptrs;
-  key_cache_ptrs.reserve(kv_caches_.size());
-  value_cache_ptrs.reserve(kv_caches_.size());
-  for (const auto& kv_cache : kv_caches_) {
-    auto layer_k_cache = kv_cache.get_k_cache();
-    auto layer_v_cache = kv_cache.get_v_cache();
-    CHECK(layer_k_cache.defined() && layer_v_cache.defined());
-#if defined(USE_MUSA)
-    CHECK(layer_k_cache.device().is_privateuseone() &&
-          layer_v_cache.device().is_privateuseone());
-#else
-    CHECK(layer_k_cache.is_cuda() && layer_v_cache.is_cuda());
-#endif
-    CHECK(layer_k_cache.is_contiguous());
-    CHECK(layer_v_cache.is_contiguous());
-    CHECK(layer_k_cache.scalar_type() == cache_dtype);
-    CHECK(layer_v_cache.scalar_type() == cache_dtype);
-    CHECK(layer_k_cache.sizes() == key_cache.sizes());
-    CHECK(layer_v_cache.sizes() == value_cache.sizes());
-    key_cache_ptrs.push_back(
-        reinterpret_cast<int64_t>(layer_k_cache.data_ptr()));
-    value_cache_ptrs.push_back(
-        reinterpret_cast<int64_t>(layer_v_cache.data_ptr()));
-  }
-
-  cuda_block_copy_runtime_state_.k_cache_ptrs_device =
-      async_h2d_tensor(key_cache_ptrs, device_);
-  cuda_block_copy_runtime_state_.v_cache_ptrs_device =
-      async_h2d_tensor(value_cache_ptrs, device_);
-  cuda_block_copy_runtime_state_.num_layers = kv_caches_.size();
-  cuda_block_copy_runtime_state_.numel_per_block = key_cache[0].numel();
-}
-
-template <typename Params>
-bool WorkerImpl::can_use_cuda_block_copy_kernel_impl(
-    const Params& input_params) const {
-  return cuda_block_copy_runtime_state_.valid() &&
-         input_params.block_copy.src_block_indices.defined() &&
-         input_params.block_copy.dst_block_indices.defined() &&
-         input_params.block_copy.cum_sum.defined() &&
-         input_params.block_copy.src_block_indices.numel() > 0 &&
-         input_params.block_copy.dst_block_indices.numel() > 0 &&
-         input_params.block_copy.cum_sum.numel() > 0;
-}
-
-bool WorkerImpl::can_use_cuda_block_copy_kernel(
-    const LlmModelParams& input_params) const {
-  return can_use_cuda_block_copy_kernel_impl(input_params);
-}
-
-bool WorkerImpl::can_use_cuda_block_copy_kernel(
-    const VlmModelParams& input_params) const {
-  return can_use_cuda_block_copy_kernel_impl(input_params);
-}
-
-template <typename Params>
-void WorkerImpl::execute_cuda_block_copy_kernel_impl(
-    const Params& input_params) {
-  CHECK(!kv_caches_.empty());
-  xllm::kernel::cuda::block_copy(
-      cuda_block_copy_runtime_state_.k_cache_ptrs_device,
-      cuda_block_copy_runtime_state_.v_cache_ptrs_device,
-      input_params.block_copy.src_block_indices,
-      input_params.block_copy.dst_block_indices,
-      input_params.block_copy.cum_sum,
-      cuda_block_copy_runtime_state_.numel_per_block,
-      kv_caches_.front().get_k_cache().scalar_type());
-}
-
-void WorkerImpl::execute_cuda_block_copy_kernel(
-    const LlmModelParams& input_params) {
-  execute_cuda_block_copy_kernel_impl(input_params);
-}
-
-void WorkerImpl::execute_cuda_block_copy_kernel(
-    const VlmModelParams& input_params) {
-  execute_cuda_block_copy_kernel_impl(input_params);
-}
-
-#endif
 
 void WorkerImpl::observe_execution_memory(bool is_warmup) {
   const auto& cache_config = KVCacheConfig::get_instance();

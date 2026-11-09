@@ -265,7 +265,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-xLLM 的 `beam_width` 扩展请参阅[在线服务](/zh/basic_usage/online_service/)。流式示例无需设置 `best_of`；只有 `best_of` 等于 `n` 时，xLLM 才采用流式输出。
+流式示例无需设置 `best_of`；只有 `best_of` 等于 `n` 时，xLLM 才采用流式输出。
 
 ## 兼容性限制与错误处理
 

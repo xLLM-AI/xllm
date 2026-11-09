@@ -30,24 +30,15 @@ BatchBuilder::BatchBuilder(int32_t dp_size) : dp_size_(dp_size) {
   CHECK_GT(dp_size_, 0);
 }
 
-BatchGroup BatchBuilder::build(
-    const std::vector<std::shared_ptr<Request>>& requests,
-    const std::vector<Sequence*>& sequences,
-    const std::vector<size_t>& budgets,
-    std::vector<std::vector<BlockTransferInfo>>* swap_infos) const {
+BatchGroup BatchBuilder::build(const std::vector<Sequence*>& sequences,
+                               const std::vector<size_t>& budgets) const {
   CHECK_EQ(sequences.size(), budgets.size())
       << "Each scheduled sequence requires one token budget";
-  if (swap_infos != nullptr) {
-    CHECK_EQ(swap_infos->size(), static_cast<size_t>(dp_size_));
-  }
 
   absl::InlinedVector<size_t, 8> sequence_counts(dp_size_);
   // Plain LLM sequences do not carry embeddings. Allocate this only when the
   // first embedding is observed, then reserve the exact per-rank count.
   absl::InlinedVector<size_t, 8> embedding_counts;
-  // Beam groups are uncommon in the regular LLM path, so defer this allocation
-  // until the request scan confirms that groups must be retained.
-  absl::InlinedVector<size_t, 8> group_counts;
   size_t num_prompt_tokens = 0;
   size_t num_generated_tokens = 0;
 
@@ -77,49 +68,16 @@ BatchGroup BatchBuilder::build(
     num_generated_tokens += budgets[i] - prompt_tokens;
   }
 
-  bool retain_request_groups = false;
-  for (const auto& request : requests) {
-    CHECK(request != nullptr);
-    retain_request_groups |= request->check_beam_search();
-  }
-  if (retain_request_groups) {
-    group_counts.resize(dp_size_);
-    for (const auto& request : requests) {
-      auto* group = request->sequence_group();
-      CHECK(group != nullptr);
-      CHECK(!group->sequences().empty());
-      CHECK_GE(group->dp_rank(), 0);
-      CHECK_LT(group->dp_rank(), dp_size_);
-      ++group_counts[group->dp_rank()];
-    }
-  }
-
   BatchGroup batches(static_cast<size_t>(dp_size_));
   for (int32_t rank = 0; rank < dp_size_; ++rank) {
     batches[rank].reserve(
         sequence_counts[rank],
-        retain_request_groups ? group_counts[rank] : 0,
+        /*group_count=*/0,
         embedding_counts.empty() ? 0 : embedding_counts[rank]);
   }
   for (size_t i = 0; i < sequences.size(); ++i) {
     batches[sequences[i]->dp_rank()].add(sequences[i],
                                          static_cast<uint32_t>(budgets[i]));
-  }
-  if (retain_request_groups) {
-    for (const auto& request : requests) {
-      auto* group = request->sequence_group();
-      batches[group->dp_rank()].add(group);
-    }
-  }
-  if (swap_infos != nullptr) {
-    for (int32_t rank = 0; rank < dp_size_; ++rank) {
-      if (batches[rank].empty()) {
-        continue;
-      }
-      batches[rank].set_swap_block_transfer_infos(
-          std::move((*swap_infos)[rank]));
-      (*swap_infos)[rank].clear();
-    }
   }
 
   COUNTER_ADD(num_processing_tokens_total_prompt, num_prompt_tokens);

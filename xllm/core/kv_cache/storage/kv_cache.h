@@ -36,8 +36,7 @@ class KVCache final {
   explicit KVCache(const DeepSeekV4KVCacheTensors& tensors);
   KVCache(const KVCacheShape& kv_cache_shape,
           const KVCacheCreateOptions& create_options,
-          int64_t layer_id,
-          bool owns_layer_cache = true);
+          int64_t layer_id);
   KVCache(const KVCacheShape& kv_cache_shape,
           const KVCacheCreateOptions& create_options,
           BlockType type,
@@ -93,16 +92,9 @@ class KVCache final {
   torch::Tensor physical_token_slots(const torch::Tensor& token_slots,
                                      int64_t block_size) const;
 
-  [[nodiscard]] bool owns_layer_cache() const noexcept {
-    return owns_layer_cache_;
-  }
-
-  void swap_blocks(torch::Tensor& src_tensor, torch::Tensor& dst_tensor);
-
  private:
   [[nodiscard]] KVCache create_shared_view() const;
 
-  bool owns_layer_cache_ = true;
   std::shared_ptr<KVCacheImpl> impl_;
   std::shared_ptr<const StaticKVCacheLayout> static_layout_;
   std::shared_ptr<LinearStateSlotTable> linear_state_slots_;

@@ -143,7 +143,6 @@ message MMChatRequest {
 
   optional string service_request_id = 25;
 
-
   Routing routing = 26;
 
   repeated Tool tools = 27;
@@ -157,10 +156,7 @@ message MMChatRequest {
   // request priority. default = DEFAULT
   optional Priority priority = 31;
 
-  optional int32 beam_width = 32;
-
-  // Final number of beam results to return. Defaults to beam_width when unset.
-  optional int32 num_return_sequences = 42;
+  reserved 32, 42;
 
   optional bool add_special_tokens = 33;
 

@@ -36,7 +36,6 @@ limitations under the License.
 #include "core/layers/npu/loader/base_loader.h"
 #include "core/layers/npu/loader/rolling_load_manager.h"
 #include "core/layers/npu/loader/rolling_weight_buffer.h"
-#include "core/layers/npu/npu_block_copy_impl.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_pos_embedding_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
@@ -55,7 +54,6 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
     CHECK(layer_id_ >= 0) << "layer_id must be >= 0, but got " << layer_id_;
     // register submodules
     decoder_layer_ = register_module("decoder_layer", DecoderType(context));
-    block_copy_ = register_module("block_copy", layer::NpuBlockCopy(context));
     decoder_layer_->set_layer_id(layer_id_);
   }
 
@@ -67,15 +65,6 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
                                 ModelParamsView& input_params,
                                 aclrtEvent* event,
                                 std::atomic<bool>* event_flag) {
-    if (input_params.block_copy.src_block_indices.numel() > 0) {
-      block_copy_(kv_cache.get_k_cache(),
-                  kv_cache.get_v_cache(),
-                  input_params.block_copy.src_block_indices,
-                  input_params.block_copy.dst_block_indices,
-                  input_params.block_copy.cum_sum,
-                  0);
-    }
-
     return decoder_layer_->forward(x,
                                    cos_pos,
                                    sin_pos,
@@ -92,7 +81,6 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
   }
   virtual void merge_loaded_weights() {
     decoder_layer_->merge_loaded_weights();
-    block_copy_->merge_loaded_weights();
   }
 
   // load the weight from the checkpoint
@@ -103,7 +91,6 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
 
   virtual void merge_and_move_pinned_host() {
     decoder_layer_->merge_and_move_pinned_host();
-    block_copy_->merge_loaded_weights();
   }
 
   virtual void free_weights() { decoder_layer_->free_weights(); }
@@ -128,7 +115,6 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
 
  private:
   DecoderType decoder_layer_{nullptr};
-  layer::NpuBlockCopy block_copy_{nullptr};
   int32_t layer_id_;
 };
 
