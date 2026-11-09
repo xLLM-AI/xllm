@@ -5,7 +5,6 @@
 状态：静态 Full/Linear 共享后端及 Python Qwen 路径已接通；实际验收以对应 exact-commit 的 NPU 全量及 TP4 服务证据为准，不据此声明所有组合已验收。日期：2026-11-04。第 1–10 节保留总体演进路线，第 11 节记录底层布局和历史 native eager 基线，第 12.1–12.6 节记录 Python 接入阶段；当前实现与验收范围以第 12.7 节为准，共同页布局沿用第 11.1–11.2 节。
 
 - xLLM 基线：上游 `xLLM-AI/xllm` 的 `main`，`9a656af7bfae7f77dfd7f9401987a603d50cda22`。
-- vLLM 参考：`main` 的固定提交 `5689c2790c911a55c75825aac5166305df0b591d`。
 - 目标分支：`features/rearch_kv_cache`。
 - 当前工作树已包含静态共享 arena、共同页布局、加权资源池及 native/Python NPU 接入；实际能力与性能收益须由对应 exact-commit 的可复现测试和服务证据说明。
 
@@ -19,30 +18,21 @@
 
 第一条端到端路径选择 NPU、单实例、Full Attention + SWA，覆盖多窗口和 chunked prefill。以现有 KVCachePageBackend 为起点形成统一存储边界，提供静态 arena 和 VMM 两种实现；P1 先用最小兼容布局验证两者共享的容量与所有权契约，再在 P2 接通同一套上层策略。VMM 继续复用已有 PhysicalPagePool、稳定虚拟地址和映射事务。随后接入 APC、Full + GDN、DSV4 压缩缓存、Host/PD。纯 Full 模型必须保持原有行为。尚未完成的组合在初始化按明确能力矩阵选择已有受支持路径或拒绝新策略，不能在执行失败后切换。
 
-vLLM 的保留、共享容量和前缀协调策略作为语义基准；物理布局由后端能力决定。静态后端首先采用固定 C 的共享 slot/lane 布局，运行时只调整池内所有权；VMM 可以让各组使用不同 tensor shape 和页成本，无需预先强制所有组拥有相同层数或相同缓存块字节数。两种后端不要求物理布局相同。VMM 的页内 packing 作为独立优化，是否实现由 P1 的实际驻留内存和映射成本决定。
+缓存保留、共享容量和前缀协调由 xLLM 的执行生命周期与所有权契约定义，物理布局由后端能力决定。静态后端首先采用固定 C 的共享 slot/lane 布局，运行时只调整池内所有权；VMM 可以让各组使用不同 tensor shape 和页成本，无需预先强制所有组拥有相同层数或相同缓存块字节数。两种后端不要求物理布局相同。VMM 的页内 packing 作为独立优化，是否实现由 P1 的实际驻留内存和映射成本决定。
 
-## 2. vLLM 中需要迁移的实际机制
+## 2. 缓存管理机制与职责边界
 
-以下结论依据固定提交源码。vLLM 的 hybrid 设计文档仍描述较旧实现，其中“只能 Full + 一种其他 attention”和“所有层 page bytes 必须一致”的限制不能直接作为现行约束。
+各缓存类型共享物理容量，但保留独立的逻辑索引与生命周期。以下契约约束 xLLM 的布局规划、资源协调和执行接入。
 
-| 机制 | 当前 vLLM 行为 | xLLM 对应决策 |
-| --- | --- | --- |
-| 规格与分组 | CacheSpec 描述存储及保留语义；同组层共用逻辑表；每组 policy 使用共享 BlockPool | 分离 layer spec、group identity、物理池与模型 adapter |
-| 内存单位 | 池中固定分配单元为 `C` 字节；各组可具有不同 token block size，最新实现也支持部分 mixed-page packing；N 还包含保留 ID | VMM 按真实硬件页需求统一计费，区分虚拟 block ID 与物理 page ID；固定 C 路径使用 `N_usable=N-N_reserved` |
-| 分组 | 同构页路径采用层数启发式及 padding，不是层数 GCD；mixed-page 路径按生命周期分桶并打包 | VMM 首先按生命周期及 backend 兼容性分组，不强制等层数；lane/padding 作为独立布局优化 |
-| 生命周期 | Full 保留全部历史；SWA 只保留实际窗口及执行余量；chunked-local 按 chunk 退休；recurrent 保留 working state 与 checkpoint | 为这些真实变化点提供 policy；GDN 不能当作 `window=1` 的 SWA |
-| 空闲与淘汰 | 同一池维护 ownership、空闲队列及 group-aware cache key；未缓存块优先复用，缓存块按释放顺序淘汰 | 建立跨组 eviction；无需沿用每 leaf 一套独立 LRU |
-| 前缀复用 | key 包含 group；各类型返回可恢复边界；多类型通过单调缩短的固定点求共同 hit | 不直接取一次 `min(group_hit_tokens)` |
-| 异步边界 | 先按已完成的安全边界退休，再申请新块；in-flight/spec tokens 纳入需求 | 保留 schedule overlap、spec rollback、transfer lease 的执行生命周期 |
-
-主要源码依据：
-
-1. [规格与 group](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/kv_cache_interface.py#L1506)、[coordinator 注入共享池](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/core/kv_cache_coordinator.py#L111)。
-2. [分组启发式](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/core/kv_cache_planning.py#L501)、[物理块字节及 backing views](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/core/kv_cache_planning.py#L594)、[mixed-page packing](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/core/kv_cache_planning.py#L930)。
-3. [SWA/Chunked 容量上界](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/kv_cache_interface.py#L861)、[运行时退休与分配顺序](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/core/kv_cache_manager.py#L556)。
-4. [group-aware lookup](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/core/block_pool.py#L202)、[块复用及淘汰](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/core/block_pool.py#L706)。
-5. [多组前缀固定点](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/core/kv_cache_coordinator.py#L806)、[recurrent state 生命周期](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/core/single_type_kv_cache_manager.py#L1428)。
-6. [不同 token block size 的对齐](https://github.com/vllm-project/vllm/blob/5689c2790c911a55c75825aac5166305df0b591d/vllm/v1/core/kv_cache_utils.py#L764)。
+| 机制 | xLLM 设计契约 |
+| --- | --- |
+| 规格与分组 | 分离 layer spec、group identity、物理池与模型 adapter；同组层共用逻辑表，按各自保留规则提出资源需求 |
+| 内存单位 | 区分虚拟 block ID 与物理 page ID；固定 C 路径使用 `N_usable=N-N_reserved`，VMM 按真实硬件页需求统一计费 |
+| 分组 | 按生命周期及 backend 兼容性分组，不强制等层数；lane/padding 由布局规划单独计算并显式计费 |
+| 生命周期 | Full 保留全部历史；SWA 保留窗口及执行余量；chunked-local 按 chunk 退休；recurrent 管理 working state 与 checkpoint，GDN 不能当作 `window=1` 的 SWA |
+| 空闲与淘汰 | 共享池维护 ownership 和空闲容量，缓存身份包含 group；跨组协调 eviction，避免每个 leaf 独立淘汰造成容量隔离 |
+| 前缀复用 | 各类型返回合法恢复边界，通过单调缩短求共同 hit，不能直接取一次 `min(group_hit_tokens)` |
+| 异步边界 | 先按已完成的安全边界退休，再申请新块；资源需求覆盖 schedule overlap、spec rollback、in-flight tokens 和 transfer lease |
 
 ## 3. xLLM 现状和需要解除的耦合
 
@@ -127,7 +117,7 @@ flowchart TD
 
 ### 5.1 VMM 后端：各组虚拟存储独立，共享硬件页
 
-区分四级索引：`token logical position → group 内 virtual block ID → tensor 虚拟 byte offset → 硬件物理页`。vLLM 的 physical block 是缓存分配单元，不等同于 VMM 的设备物理页。不同 group 可以有相同数值的 virtual block ID，完整身份必须带 group；物理页所有权由现有池和映射维护。
+区分四级索引：`token logical position → group 内 virtual block ID → tensor 虚拟 byte offset → 硬件物理页`。缓存 block 是逻辑分配单元，不等同于 VMM 的设备物理页。不同 group 可以有相同数值的 virtual block ID，完整身份必须带 group；物理页所有权由现有池和映射维护。
 
 每组保留各层 tensor 所需的虚拟范围，按自己的 shape/dtype/block size 建立 mapping geometry；统一从已有 PhysicalPagePool 获取硬件页。共享容量不要求不同组的 tensor 虚拟地址相同，也不要求等层数 padding。组内逻辑表仍按生命周期协同；硬件映射批次覆盖该组所需 tensor roles，而非整个模型的所有 K/V/INDEX。
 
@@ -158,7 +148,7 @@ D(request) = sum_g required_live_blocks(request, g)
 
 各 group 的 tensor views alias 同一 backing 地址区间，但同一时刻不能占有相同 physical ID。因此共享池是**跨组复用物理容量**，并不意味着多个组拿相同 ID 写不同内容。N 包含 null/padding 等保留 ID，最大并发和 admission 必须以 `N_usable` 及动态 pinned/evictable 状态计算。不同层 group 之间的 alias、stride 和 kernel 接受的页布局必须同时成立。
 
-同构 lane：`S` 层一组、每层页 `P`，则 `C=S*P`。可采用 vLLM 当前启发式：通常 `S=min(type_layer_counts)`；若最大层数 `<1.5*最小层数`，优先用最大值减少小尾组。未填满的 lane 仍占物理容量，必须显示 padding，不能为了整除使用 GCD 生成过多组。该启发式不约束 VMM 独立 group 路径。PP/layerwise split 投影后重算各 rank 的 backing 和 scratch 费用。
+同构 lane：`S` 层一组、每层页 `P`，则 `C=S*P`。层分组需在 group 数量与尾组 padding 之间权衡，`S` 由各缓存类型的层数和后端兼容性共同确定。未填满的 lane 仍占物理容量，必须显式计入 padding，不能为了整除使用 GCD 生成过多组。静态 lane 布局不约束 VMM 独立 group 路径。PP/layerwise split 投影后重算各 rank 的 backing 和 scratch 费用。
 
 允许一个 group 内不同 `P(g,l)` 的紧凑打包。若 backend 不能表示 block stride、跨 dtype offset 或 padding，该路径只接受已验证的同构方案。扩大 B 只在 attention kernel、scheduler 和 hash 粒度都支持时采用；不能仅为对齐 recurrent state 就任意扩大 B 或对 MLA 填充。
 
@@ -178,7 +168,7 @@ Full: 7 IDs，SWA-1: 2 IDs，SWA-2: 2 IDs
 ### 5.4 统一容量模型
 
 - Full：按将要读写的 token 范围向上取整，包括本轮 lookahead。
-- SWA：依安全 computed 边界退休，保留窗口、spec/rollback 和 in-flight 所需范围。可参考 vLLM 上界 `ceil(min(W-1+extra_retained+max_in_flight,max_model_len)/B)+1`，但 xLLM 的 `max_in_flight` 必须由实际 overlap/chunk/verify 契约推导。
+- SWA：依安全 computed 边界退休，保留窗口、spec/rollback 和 in-flight 所需范围。容量上界必须覆盖块边界对齐产生的额外占用；`max_in_flight` 由实际 overlap/chunk/verify 契约推导。
 - Chunked-local：按 attention chunk 保留，不能与 serving 的 chunked prefill 混淆；在模型确有此类型时接入。
 - GDN/recurrent：分别计算 working state、checkpoint、复制/verify 暂存的生存期，不用 `ceil(tokens/B)` 推算 state 数量。
 - Compressed：C4/C128 以原 token coverage 与压缩倍率声明，保留额外 index/scale、压缩生成和 lookahead 的依赖。
@@ -203,7 +193,7 @@ SWA 继续采用绝对 logical index + invalid/null placeholders，初版不增�
 - 逻辑 key 包含模型/target-draft/cache namespace、plan/group identity、已有 TEXT/MM/MTP 语义和 prefix chain hash；group id 不取自 `BlockType` 数值。
 - Full 的命中向下闭合；SWA 必须证明候选结束点前的所需窗口连续可用；GDN 必须存在准确边界的 checkpoint；compressed policy 证明对应生成依赖。
 - 从最大候选结束点开始，任一 group 缩短候选后重新检查其他非向下闭合组，直到固定点，支持多个窗口及没有 Full group 的情形。
-- 普通组首版采用可缓存 token block size/checkpoint stride 的共同合法对齐；区分 hash 粒度、scheduler 粒度、hit 粒度。vLLM 的默认 hash GCD、常规 hit LCM 可作为基础；遇到 xLLM MTP lookahead/压缩 offset，需显式纳入合法边界规则。
+- 普通组首版采用可缓存 token block size/checkpoint stride 的共同合法对齐；区分 hash 粒度、scheduler 粒度、hit 粒度。共同恢复位置必须满足各组的 token block 与 checkpoint 合法边界，并显式纳入 MTP lookahead 和压缩 offset。
 - cached checkpoint 和共享 prefix 不允许原地修改。继续生成前准备独立 writable state，copy 完成前保留源 lease。recurrent sub-block hit 和共享尾块 COW 在相应能力完成后启用。
 - 保留 exact-repeat 最后 token/logits 重算，以及 DSV4 稀疏窗口和 GDN restore 现有契约。可选的周期性 sparse checkpoint 保留策略不作为首版必选项。
 
@@ -215,7 +205,7 @@ SWA 继续采用绝对 logical index + invalid/null placeholders，初版不增�
 4. Graph 为实际 group plan 预分配持久表和 padding/null 区，确保地址稳定；graph identity 包含影响 capture 的 group/layout/shape；更新表值不重新分配。同步修改 eager、expanded decode、spec verify 和 Python metadata 通道。
 5. PD/Host 沿用现有 logical manifest、tensor roles、owner rank、reshard spans、lease。新增稳定 group schema/plan compatibility 校验，区分 block-scoped 与 sequence-scoped state；旧 BlockType wire 值由兼容 adapter 解释。Host/device physical ID 不互传为对方 ID。
 6. VMM 在 P1/P2 完成 group 独立 geometry、虚拟槽、预算和映射事务；复用现有分布式 prepare/commit/abort，不重建底层物理池。推导每 tensor view 的真实映射、可回收整页与部分页占用，不使用 `free_IDs*C` 或 live block bytes 代替 mapped bytes。现有 WorkerImpl 和 VmmKVCacheLayout 明确拒绝 grouped layout，并限制 quantized/NZ/KPool 等布局，启用新组合前必须逐项完成支持。保留 APC retain、target/draft 预算、padding block、弹性容量 advisory 语义；稳定 tensor 地址也不能替代 graph 对空洞、表更新和异步 remap 的正确性验证。
-7. 原有 beam COW、CP/DCP/PCP、KV split、layerwise split、quantized/index/MLA、MTP 的新布局支持逐项验证。vLLM 自身也有具体 SWA/Chunked 与 DCP/PCP 组合限制，不能从抽象可表示推断 kernel 已支持。
+7. 原有 beam COW、CP/DCP/PCP、KV split、layerwise split、quantized/index/MLA、MTP 的新布局支持逐项验证。各组合必须基于实际 backend 和 kernel 能力校验，不能从抽象可表示推断 kernel 已支持。
 
 ## 8. 分阶段实施及完成条件
 
@@ -285,7 +275,7 @@ Full 和 SSM 保留整行对齐；Conv 行起点向上取整，其最坏间隙�
 
 两类 logical page 均对应一个相同字节大小的 physical page；较小载荷以及不足四层的 Full 尾组通过 padding 补齐。128*4=512 只是逻辑槽位示意，不能代替 dtype、head shape、Conv 和 SSM 的真实字节计算。物理页不是 512 字节，也不代表单层 512-token 的序列跨度。启动日志报告 page、载荷与 padding，不能仅凭共享容量声称节省显存。
 
-分配单位是固定大小的 slot（与 vLLM hybrid allocator 的分组方式一致），见第 12.8 节：slot 含 `S = ceil(num_full_layers/4)` 个 page，每次分配恰好一个 slot。一个整模型 Full token block 占一个 slot，第 i 个 Full 层位于 lane `i/4`、页内偏移 `(i%4)*2F`。Linear 层按 S 个一组划分为 `G = ceil(num_linear_layers/S)` 组，第 j 个 Linear 层位于第 `j/S` 组的 lane `j%S`；一个 Linear sequence state 在每组各占一个 slot，这些 slot 互不要求连续。保留现有请求级 Full/Linear 生命周期和 APC 所有权；任意空闲 slot 可在最终引用释放后跨类型复用，因此不存在连续 extent 的外部碎片。
+分配单位是固定大小的 slot，见第 12.8 节：slot 含 `S = ceil(num_full_layers/4)` 个 page，每次分配恰好一个 slot。一个整模型 Full token block 占一个 slot，第 i 个 Full 层位于 lane `i/4`、页内偏移 `(i%4)*2F`。Linear 层按 S 个一组划分为 `G = ceil(num_linear_layers/S)` 组，第 j 个 Linear 层位于第 `j/S` 组的 lane `j%S`；一个 Linear sequence state 在每组各占一个 slot，这些 slot 互不要求连续。保留现有请求级 Full/Linear 生命周期和 APC 所有权；任意空闲 slot 可在最终引用释放后跨类型复用，因此不存在连续 extent 的外部碎片。
 
 因此，统一的是 page 的概念与字节大小，以及 slot 这一分配单位；token block、层分组各自保留已有职责。内核继续使用每层原有 tensor shape 和 token block size，通过固定起始地址及 slot 索引访问共享 backing。
 
@@ -338,28 +328,23 @@ Hybrid target 的 Full/Linear 共用静态 arena；full-only MTP draft 使用独
 
 测试启动使用 `enable_shared_kv_cache=true`、`enable_vmm_kvcache=false`、`enable_vmm_weights=false`、`enable_graph_vmm_pool=false`、`vmm_elastic=false`，并令 `max_linear_state_cache_slots=0`，由共享 arena 统一决定状态容量。四个 Full 层的 128-token block 与一个 Linear 层状态按真实字节数对齐；安全 Conv ceiling 间隙和必要的 LCM fallback padding 都计入预算，不能假定所有模型的 page 都只有四个 Full block 的有效载荷。
 
-本阶段补齐了 Python GDN 共享 decode/verify、ACL metadata 持久更新和生产入口资源接线，最初验证范围为 LLM。第 12.7 节进一步接通 dense Qwen 图像 VLM 与 unified MTP，不再沿用本阶段的 VLM 关闭限制；实际验收以对应 exact-commit 的 NPU 全量及 TP4 服务证据为准，不据此声明所有组合已验收。prefill piecewise graph、task pipeline、PD/Host/store、CP/KV/layerwise split、MLA/index/量化以及其他 speculative 算法仍未扩展。第 11 节的 native eager 实现保持原有边界。
+本阶段补齐了 Python GDN 共享 decode/verify、ACL metadata 持久更新和生产入口资源接线。此前分支曾扩展 unified MTP 与独立 prefill graph；这些执行器已由当前 main 删除，2026-11-09 的迁移不恢复旧执行架构。第 12.7 节描述迁移后的执行边界，旧提交的服务结果不作为本版本的验收证据。第 11 节的 native eager 边界保持不变。
 
-### 12.7 当前实现与验收范围：Qwen3.8-27B TP4 图像 VLM 与 unified MTP（2026-11-04）
+### 12.7 基于 main 的执行边界（2026-11-09）
 
-当前代码已接通单机四卡、`backend=vlm` 的 dense Qwen3.8-27B Python 路径：target 的 Full/Linear 共用静态 arena，支持 eager/chunked prefill、ACL decode/verify、普通 Qwen MTP，以及真正合并 target/draft 的固定宽度 greedy unified MTP graph（K 为 1–16）。真实 checkpoint 的外层类型为 `qwen3_5`，文本 decoder 为 `qwen3_5_text`，含 48 个 Linear 层、16 个 Full 层、独立视觉塔和一层 Full MTP draft；TP4 下的 head 数可整除。不得把普通 MTP worker 配置中打开 unified flag 视作已执行统一图。
+本次以本地 main `ad9572c928b8c65ce8092412905f1feb5eb9b1a2` 为基线，保留现有独立 target/draft MTP worker 和 DecodeAclGraphRunner。共享池仅改变缓存存储、逻辑到物理行的映射与容量计费，不恢复 unified MTP、PreparedAclGraphRunner 或已删除的 task pipeline。Python 视觉 prefill 保留已有 eager/chunked 路径，不引入独立 prefill ACL runner。
 
-本轮服务验收仅覆盖 image 输入，视频完整端到端验收和多机部署不在本轮支持声明中。配置使用 `enable_vmm_kvcache=false`、`enable_vmm_weights=false`、`enable_graph_vmm_pool=false`、`vmm_elastic=false`，DP/CP/KV/layerwise split 均为 1；C++ prefill piecewise graph、task pipeline、PD/Host/store 维持关闭。Python prefill ACL graph 仅捕获已验证的固定几何，超过 2048 tokens 或 8 个几何变体时在执行前选择 eager。实际验收以对应 exact-commit 的 NPU 全量及 TP4 真实图文服务证据为准，不据此声明所有组合已验收。
+- Hybrid target 的 Full/Linear 共用静态 arena，Full-only MTP draft 保留独立 dense KV 存储并联合计费。
+- 每层 Full 物理映射与 GDN Conv/SSM state 索引通过当前 metadata 所有者发布。图回放保留持久缓冲区；普通 decode 所需的 Host 更新不能因删除旧 prepared runner 而跳过。
+- batch 和共享内存传输同时携带逻辑 Full rows、物理映射与 64 位 lease epoch；新分配块清零先于 copy-on-write 和 restore，复用块保留 stream 依赖。
+- 调度与 prefix 管理保留 main 的 `release(std::span<Block>)` 和 ownership 记账；共享容量统计同时计入 Full 与 Linear 的真实占用。
+- 使用 `enable_vmm_kvcache=false`、`enable_vmm_weights=false`、`enable_graph_vmm_pool=false`、`vmm_elastic=false`、`max_linear_state_cache_slots=0`；DP/CP/KV/layerwise split 均为 1。MTP 按 main 的配置关闭 graph double buffering。
 
-实施按以下依赖推进：
-
-1. 接通 dense Qwen VLM 的生产 capability 与 Python executor。共享 cache 的 shape 和容量来自拉平后的文本 decoder，不将视觉塔参数算成 KV 层。视觉 prefill/chunked prefill 将显式 chunk embedding 和三轴 mRoPE 绑定到 Python ACL graph 的持久输入；不满足固定几何准入条件时执行前选择 eager。冷捕获前保存 Full KV 与 GDN 写入位置，在每次 warmup 前和捕获后恢复，保证首轮 replay 只写入一次请求状态。纯 decode 不持有前一请求的视觉 embedding。
-2. 为统一图保留 target/draft 独立 backend、每步持久 metadata 和执行上下文。target 的逻辑 Linear state IDs 与上一轮 accepted prefix lengths 必须跨 native/Python 边界显式传递；Full table、Conv/SSM 索引以及 accepted checkpoint 在图重放和 variant 切换时同步更新。
-   Qwen 首步沿用 `VERIFIER_CONDITIONED_FIRST_PASS`：保留上一轮完整 target token/hidden span，按每请求 accepted 长度选择最后有效行；首步固定容量为 K+1，后续 draft step 的位置与 KV 写入沿用普通 Qwen MTP 的 offset。不能复用 GLM 的两行 tail repair；独立普通逐 token oracle 必须比较 draft hidden、logits 和 proposals，避免 target rejection 掩盖草稿状态错误。
-3. 通过 typed worker bridge 保留 VLM prefill 的输入类型，仅在纯 decode 采用既有 mRoPE continuation 位置转换。统一图的 verify KV 长度独立于 mRoPE 位置；不根据图像位置偏移推算 cache slot。native 只负责入口、资源和 metadata 转发，不新增 C++ attention 或组图算法。
-4. 运行结构/生命周期单测、真实 NPU 数值和统一图 capture/replay 测试，再验证 TP4 图文服务。对照服务使用普通 MTP、关闭 APC；正式服务启用 unified MTP 和 APC。使用真实图文请求比较输出，覆盖同图 warm prefix、相同文字不同图像、跨 512-token chunk、后缀变化、接受/拒绝回滚及并发 batch/variant 切换。
-5. 确认四个 rank 均使用同一提交的 Python 路径和共享 arena，日志实际出现 Unified worker、variant capture 与 replay；所有 VMM 开关保持关闭。用户文本压力客户端只作为补充，不能替代视觉验收。记录 exact-commit 构建、测试及服务证据后再发布。
-
-单层 Full token block 仍为 128，四层分组表示合计 512 个跨层槽位；TP4 下 physical page 的字节数必须由本地 head 数和实际 Conv/SSM checkpoint payload 重新计算，不能复用 TP2 的 9 MiB 数值。Full-only draft 仍独立存储并联合计费。本轮不扩展 C++ shared prefill piecewise graph、task pipeline、PD/Host/store、CP/KV/layerwise split、多机或其他 speculative 算法；视频完整端到端验收不在本轮范围内。GLM 模型验收按用户要求排除。
+本次不扩展 prefill piecewise graph、PD/Host/store、MLA/indexer/量化缓存、其他 speculative 算法或多机部署；GLM 模型验收按用户要求排除。当前提交的构建、NPU 数值、真实服务和性能结果需要单独记录；此前 unified 或 double-buffer 配置的结果不能直接复用。
 
 ### 12.8 固定 slot 与 Linear 分组（2026-11-04）
 
-早期实现中 Full block 原子占用 `ceil(num_full/4)` 个连续 page，Linear state 占用 `num_linear` 个连续 page；两种 extent 大小不同，混合分配后空闲 page 会碎片化，并要求 admission 按连续 extent 计算。现改为按 vLLM hybrid allocator 的分组方式：page 定义不变（四个 Full 层 block 或一个 Linear 层状态，字节数同第 11.1 节），但分配单位统一为固定的 slot。
+早期实现中 Full block 原子占用 `ceil(num_full/4)` 个连续 page，Linear state 占用 `num_linear` 个连续 page；两种 extent 大小不同，混合分配后空闲 page 会碎片化，并要求 admission 按连续 extent 计算。为避免连续 extent 的外部碎片，分配单位统一为固定大小的 slot；page 定义不变（四个 Full 层 block 或一个 Linear 层状态，字节数同第 11.1 节）。
 
 - **几何**：`S = ceil(num_full/4)`，`slot_bytes = S * page_bytes`，`G = ceil(num_linear/S)`。Full 层 i 位于 lane `i/4`；Linear 层 j 位于组 `j/S` 的 lane `j%S`。以 Qwen3.8-27B TP2 MTP 为例，page 9 MiB、S=4、slot 36 MiB、G=12。
 - **分配**：每次分配恰好一个 slot，空闲 slot 可被任意类型复用，不存在外部碎片。一个 Linear state 在每组各取一个 slot，可互不连续；state id 取其第 0 组 slot，`StaticKVCacheBlockPool` 记录全部 G 个 slot。slot 0 是各组共同的 padding，state 0 在所有组都映射到 slot 0。

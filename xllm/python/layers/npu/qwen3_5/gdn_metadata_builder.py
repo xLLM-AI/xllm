@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from itertools import accumulate
 from math import gcd
 from typing import TYPE_CHECKING, cast
@@ -43,15 +43,6 @@ if TYPE_CHECKING:
     from xllm.python.models.qwen3_5 import Qwen3_5Config
 
 _MEGA_GDN_CHUNK_SIZE = 128
-
-
-@dataclass(frozen=True, slots=True)
-class _GdnGraphStateSnapshot:
-    rows: tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], ...]
-
-    def restore(self) -> None:
-        for cache, indices, values in self.rows:
-            cache.index_copy_(0, indices, values)
 
 
 def _build_mega_prefill_indices(
@@ -182,53 +173,6 @@ class Qwen3_5GdnMetadataBuilder:
 
     def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> GdnMetadata:
         return self.build(input_batch, metadata)
-
-    def snapshot_graph_state(self, metadata: ExecutionMetadataSource) -> _GdnGraphStateSnapshot:
-        """Preserve live state when a Unified variant captures actual requests."""
-        if self._state_caches is None or self._checkpoint_stride is None:
-            raise RuntimeError("Qwen3.5 GDN state caches must be bound before capture")
-        if not getattr(metadata, "is_spec_verify", False):
-            raise ValueError("Unified GDN capture requires fixed-width verification")
-        _, state_indices = resolve_linear_state_io_indices(metadata)
-        if state_indices is None:
-            raise ValueError("Unified GDN capture requires logical state indices")
-        width = self._checkpoint_stride
-        rows = []
-        for layer_id, state in self._state_caches.items():
-            if self._shared_layout is None:
-                conv_indices = state_indices.to(torch.long)
-                ssm_bases = conv_indices * width
-            else:
-                slots = self._group_slots[self._layer_groups[layer_id]]
-                conv_indices = self._shared_layout.linear_state_indices(state_indices, role="conv", slots=slots).to(
-                    torch.long
-                )
-                ssm_bases = self._shared_layout.linear_state_indices(state_indices, role="ssm", slots=slots).to(
-                    torch.long
-                )
-            ssm_indices = (ssm_bases[:, None] + torch.arange(width, device=ssm_bases.device)).reshape(-1)
-            for cache, indices in ((state.conv, conv_indices), (state.ssm, ssm_indices)):
-                rows.append((cache, indices, cache.index_select(0, indices)))
-        return _GdnGraphStateSnapshot(tuple(rows))
-
-    def snapshot_prefill_graph_state(self, metadata: GdnPrefillMetadata) -> _GdnGraphStateSnapshot:
-        """Preserve the destination rows overwritten by a prefill capture."""
-        if self._state_caches is None or self._checkpoint_stride is None:
-            raise RuntimeError("Qwen3.5 GDN state caches must be bound before capture")
-        stride = self._checkpoint_stride
-        rows = []
-        for layer_id, state in self._state_caches.items():
-            group = self._layer_groups.get(layer_id, 0)
-            conv_slots = metadata.conv_write_indices[group].to(torch.long).clamp_min(0)
-            ssm_bases = metadata.ssm_write_indices[group].to(torch.long).clamp_min(0)
-            conv = state.conv.view(-1, state.conv.shape[-1])
-            conv_offsets = torch.arange(state.conv.shape[1], device=conv_slots.device)
-            conv_indices = (conv_slots[:, None] * state.conv.shape[1] + conv_offsets).reshape(-1)
-            ssm_offsets = torch.arange(stride, device=ssm_bases.device)
-            ssm_indices = (ssm_bases[:, None] + ssm_offsets).reshape(-1)
-            rows.append((conv, conv_indices, conv.index_select(0, conv_indices)))
-            rows.append((state.ssm, ssm_indices, state.ssm.index_select(0, ssm_indices)))
-        return _GdnGraphStateSnapshot(tuple(rows))
 
     def update_persistent(
         self, persistent_metadata: object, input_batch: InputBatch, metadata: ExecutionMetadataSource

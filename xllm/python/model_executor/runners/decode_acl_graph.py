@@ -103,7 +103,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
 
     Inputs are copied into entry-owned storage; MTP outputs are detached from
     replay buffers. Taskless graphs replay on the caller's stream.
-    Slot-bound execution uses PreparedAclGraphRunner.
     """
 
     def __init__(

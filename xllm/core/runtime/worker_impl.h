@@ -146,7 +146,7 @@ class WorkerImpl {
                                bool record_ready_event,
                                bool restore_linear_state,
                                bool wait_for_compute_stream);
-  // Composite execution prepares the cache-owning target on its actual stream.
+  // Prepare shared mappings and new block contents on the owning stream.
   void prepare_shared_kv_cache(
       const std::vector<int32_t>& full_block_rows,
       const std::vector<uint64_t>& full_block_lease_epochs,

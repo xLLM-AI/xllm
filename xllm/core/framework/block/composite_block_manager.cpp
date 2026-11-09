@@ -1314,6 +1314,10 @@ size_t CompositeBlockManager::num_used_blocks() const {
 }
 
 double CompositeBlockManager::kv_cache_utilization() const {
+  if (shared_block_pool_) {
+    return static_cast<double>(shared_block_pool_->num_used_slots()) /
+           shared_block_pool_->num_total_slots();
+  }
   const LeafEntry* leaf = capacity_leaf();
   return leaf == nullptr ? 0.0 : leaf->leaf->kv_cache_utilization();
 }
