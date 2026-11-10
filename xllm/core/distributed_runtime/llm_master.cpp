@@ -171,10 +171,6 @@ LLMMaster::LLMMaster(const Options& options)
   } else {
     const std::string draft_model_path =
         options_.draft_model_path().value_or("");
-    const bool use_suffix_spec = SpeculativeConfig::is_suffix_algorithm(
-        options_.speculative_algorithm());
-    CHECK(use_suffix_spec || !draft_model_path.empty())
-        << "draft model path is required unless --speculative_algorithm=Suffix";
     engine_options.draft_model_path(draft_model_path)
         .num_speculative_tokens(options_.num_speculative_tokens())
         .speculative_algorithm(options_.speculative_algorithm())
@@ -182,28 +178,14 @@ LLMMaster::LLMMaster(const Options& options)
         .enable_mtp_draft_body_tp1(options_.enable_mtp_draft_body_tp1())
         .speculative_suffix_cache_max_depth(
             options_.speculative_suffix_cache_max_depth())
-        .speculative_suffix_max_spec_factor(
-            options_.speculative_suffix_max_spec_factor())
-        .speculative_suffix_max_spec_offset(
-            options_.speculative_suffix_max_spec_offset())
-        .speculative_suffix_min_token_prob(
-            options_.speculative_suffix_min_token_prob())
         .speculative_suffix_max_cached_requests(
-            options_.speculative_suffix_max_cached_requests())
-        .speculative_suffix_use_tree_spec(
-            options_.speculative_suffix_use_tree_spec());
-    if (use_suffix_spec) {
-      suffix_engine_ =
-          std::make_unique<SuffixSpeculativeEngine>(engine_options);
-    } else {
-      speculative_engine_ =
-          std::make_unique<SpeculativeEngineBase<LLMEngine>>(engine_options);
-    }
+            options_.speculative_suffix_max_cached_requests());
+    speculative_engine_ =
+        std::make_unique<SpeculativeEngineBase<LLMEngine>>(engine_options);
   }
   distributed_worker_manager_ = dispatch_engine(
       [](auto* engine) { return engine->get_distributed_worker_manager(); },
       llm_engine_.get(),
-      suffix_engine_.get(),
       speculative_engine_.get());
   model_residency_coordinator_ = std::make_shared<ModelResidencyCoordinator>(
       ModelResidencyCoordinator::Options{
@@ -247,10 +229,8 @@ LLMMaster::LLMMaster(const Options& options)
           << "XServiceClient init fail!";
     }
   };
-  dispatch_engine(initialize_engine,
-                  llm_engine_.get(),
-                  suffix_engine_.get(),
-                  speculative_engine_.get());
+  dispatch_engine(
+      initialize_engine, llm_engine_.get(), speculative_engine_.get());
   task_type_ = options_.task_type();
 
   SchedulerOptions scheduler_options;
@@ -306,10 +286,8 @@ LLMMaster::LLMMaster(const Options& options)
             kv_transfer_coordinator_,
             std::move(response_options));
       };
-  dispatch_engine(create_scheduler,
-                  llm_engine_.get(),
-                  suffix_engine_.get(),
-                  speculative_engine_.get());
+  dispatch_engine(
+      create_scheduler, llm_engine_.get(), speculative_engine_.get());
 
   if (options_.enable_service_routing()) {
     auto& instance_info = scheduler_->get_instance_info();
@@ -321,10 +299,8 @@ LLMMaster::LLMMaster(const Options& options)
                                                  model_args_.model_type());
     tokenizer_ = engine->tokenizer()->clone();
   };
-  dispatch_engine(initialize_tokenizer,
-                  llm_engine_.get(),
-                  suffix_engine_.get(),
-                  speculative_engine_.get());
+  dispatch_engine(
+      initialize_tokenizer, llm_engine_.get(), speculative_engine_.get());
   Tokenizer* request_tokenizer = tokenizer_.get();
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/options_.num_request_handling_threads(),
@@ -665,14 +641,12 @@ bool LLMMaster::unlink_p2p(const std::vector<std::string>& remote_addrs) {
 bool LLMMaster::start_profile() {
   return dispatch_engine([](auto* engine) { return engine->start_profile(); },
                          llm_engine_.get(),
-                         suffix_engine_.get(),
                          speculative_engine_.get());
 }
 
 bool LLMMaster::stop_profile() {
   return dispatch_engine([](auto* engine) { return engine->stop_profile(); },
                          llm_engine_.get(),
-                         suffix_engine_.get(),
                          speculative_engine_.get());
 }
 

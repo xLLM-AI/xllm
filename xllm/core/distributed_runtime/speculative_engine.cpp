@@ -42,18 +42,12 @@ limitations under the License.
 namespace xllm {
 
 template <typename TargetEngine>
-SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
-    const runtime::Options& options)
-    : SpeculativeEngineBase(options, /*use_draft_engine=*/true) {}
-
-template <typename TargetEngine>
 SpeculativeEngineBase<TargetEngine>::~SpeculativeEngineBase() = default;
 
 template <typename TargetEngine>
 SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
-    const runtime::Options& options,
-    bool use_draft_engine)
-    : options_(options), use_draft_engine_(use_draft_engine) {
+    const runtime::Options& options)
+    : options_(options) {
   CHECK_GT(options.num_speculative_tokens(), 0)
       << "speculative tokens should not be zero";
 
@@ -69,7 +63,8 @@ SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
   engine_ = std::make_unique<TargetEngine>(target_engine_options,
                                            distributed_worker_manager_);
 
-  if (use_draft_engine_) {
+  if (!SpeculativeConfig::is_suffix_algorithm(
+          options.speculative_algorithm())) {
     // draft engine
     // In vlm mtp case, we'd like to use llm backend instead of vlm backend for
     // draft engine.
@@ -89,10 +84,6 @@ SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
                                                 distributed_worker_manager_);
   }
 }
-
-SuffixSpeculativeEngine::SuffixSpeculativeEngine(
-    const runtime::Options& options)
-    : SpeculativeEngineBase<LLMEngine>(options, /*use_draft_engine=*/false) {}
 
 template <typename TargetEngine>
 bool SpeculativeEngineBase<TargetEngine>::init(MasterStatus master_status) {
@@ -147,7 +138,7 @@ bool SpeculativeEngineBase<TargetEngine>::init_model(
     return false;
   }
 
-  if (use_draft_engine_) {
+  if (draft_engine_ != nullptr) {
     if (!draft_engine_->init_model(/*master_status=*/MasterStatus::WAKEUP,
                                    prepare_model)) {
       return false;
@@ -189,7 +180,7 @@ template <typename TargetEngine>
 bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
     std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
   const bool shared_vmm = KVCacheConfig::get_instance().enable_vmm_kvcache() &&
-                          use_draft_engine_ &&
+                          draft_engine_ != nullptr &&
                           !should_skip_external_draft_kv_cache();
   KVCacheCapacity target_kv_cache_cap =
       engine_->estimate_kv_cache_capacity(!shared_vmm);
@@ -207,7 +198,7 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
     }
   };
 
-  if (!use_draft_engine_) {
+  if (draft_engine_ == nullptr) {
     return allocate_target_cache(target_kv_cache_cap);
   }
 
@@ -309,7 +300,7 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
 template <typename TargetEngine>
 bool SpeculativeEngineBase<TargetEngine>::should_skip_external_draft_kv_cache()
     const {
-  if (!use_draft_engine_ || draft_engine_ == nullptr) {
+  if (draft_engine_ == nullptr) {
     return false;
   }
   return uses_embedded_eagle3_draft(options_.speculative_algorithm(),

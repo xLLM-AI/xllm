@@ -15,38 +15,16 @@ limitations under the License.
 
 #pragma once
 
-#include <glog/logging.h>
-
-#include <utility>
-
 namespace xllm {
 
-namespace detail {
-
-// Unreachable: dispatch_engine CHECKs that exactly one engine is non-null.
-template <typename Function, typename Engine, typename... Rest>
-decltype(auto) invoke_first_engine(Function&& function,
-                                   Engine* engine,
-                                   Rest*... rest) {
+template <typename Function, typename Engine, typename OtherEngine>
+decltype(auto) dispatch_engine(const Function& function,
+                               Engine* engine,
+                               OtherEngine* other_engine) {
   if (engine != nullptr) {
-    return std::forward<Function>(function)(engine);
+    return function(engine);
   }
-  if constexpr (sizeof...(rest) > 0) {
-    return invoke_first_engine(std::forward<Function>(function), rest...);
-  } else {
-    LOG(FATAL) << "dispatch_engine requires a non-null engine";
-  }
-}
-
-}  // namespace detail
-
-// Invokes function on the active engine; exactly one pointer is non-null.
-template <typename Function, typename... Engines>
-decltype(auto) dispatch_engine(Function&& function, Engines*... engines) {
-  CHECK_EQ(((engines != nullptr) + ...), 1)
-      << "exactly one engine must be non-null";
-  return detail::invoke_first_engine(std::forward<Function>(function),
-                                     engines...);
+  return function(other_engine);
 }
 
 }  // namespace xllm

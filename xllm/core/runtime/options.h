@@ -82,15 +82,7 @@ struct Options {
 
   PROPERTY(int32_t, speculative_suffix_cache_max_depth) = 64;
 
-  PROPERTY(double, speculative_suffix_max_spec_factor) = 1.0;
-
-  PROPERTY(double, speculative_suffix_max_spec_offset) = 0.0;
-
-  PROPERTY(double, speculative_suffix_min_token_prob) = 0.1;
-
   PROPERTY(int32_t, speculative_suffix_max_cached_requests) = -1;
-
-  PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
 
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;

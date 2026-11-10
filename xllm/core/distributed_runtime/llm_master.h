@@ -148,7 +148,6 @@ class LLMMaster : public Master {
   // Exactly one of these owners is populated, depending on the configured
   // LLM execution mode.
   std::unique_ptr<LLMEngine> llm_engine_;
-  std::unique_ptr<SuffixSpeculativeEngine> suffix_engine_;
   std::unique_ptr<SpeculativeEngineBase<LLMEngine>> speculative_engine_;
 
   // Scheduler must be destroyed before the engine it references.

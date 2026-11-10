@@ -33,27 +33,10 @@ DEFINE_int32(speculative_suffix_cache_max_depth,
              64,
              "Maximum suffix tree depth for suffix speculative decoding.");
 
-DEFINE_double(speculative_suffix_max_spec_factor,
-              1.0,
-              "Suffix speculation max tokens factor relative to match length.");
-
-DEFINE_double(speculative_suffix_max_spec_offset,
-              0.0,
-              "Suffix speculation max tokens additive offset.");
-
-DEFINE_double(speculative_suffix_min_token_prob,
-              0.1,
-              "Minimum token probability used in suffix speculation.");
-
 DEFINE_int32(speculative_suffix_max_cached_requests,
              -1,
              "Maximum globally cached requests for suffix speculation (-1 "
              "unlimited, 0 disabled).");
-
-DEFINE_bool(speculative_suffix_use_tree_spec,
-            false,
-            "Whether to use tree-based suffix speculation instead of path "
-            "speculation.");
 
 DEFINE_bool(enable_probabilistic_draft,
             false,
@@ -76,11 +59,7 @@ void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(num_speculative_tokens);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_algorithm);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_cache_max_depth);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_max_spec_factor);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_max_spec_offset);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_min_token_prob);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_max_cached_requests);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_use_tree_spec);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_probabilistic_draft);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mtp_draft_body_tp1);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_atb_spec_kernel);
@@ -91,11 +70,7 @@ void SpeculativeConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(num_speculative_tokens);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_algorithm);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_cache_max_depth);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_max_spec_factor);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_max_spec_offset);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_min_token_prob);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_max_cached_requests);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_use_tree_spec);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_probabilistic_draft);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mtp_draft_body_tp1);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_atb_spec_kernel);
@@ -113,15 +88,7 @@ void SpeculativeConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, speculative_suffix_cache_max_depth);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, speculative_suffix_max_spec_factor);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, speculative_suffix_max_spec_offset);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, speculative_suffix_min_token_prob);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, speculative_suffix_max_cached_requests);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, speculative_suffix_use_tree_spec);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_probabilistic_draft);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
