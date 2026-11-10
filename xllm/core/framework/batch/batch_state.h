@@ -31,7 +31,7 @@ limitations under the License.
 namespace xllm {
 
 struct ModelArgs;
-class SharedKVCachePublication;
+class SharedKVCacheMappingTracker;
 constexpr uint64_t UNINITIALIZED_BATCH_ID = 0x0;
 
 // maintains scheduling invariants and forward resources across model domains.
@@ -82,7 +82,7 @@ class BatchState final {
       const ModelArgs& args,
       ThreadPool* thread_pool,
       int32_t cp_size,
-      SharedKVCachePublication* publication = nullptr);
+      SharedKVCacheMappingTracker* mapping_tracker = nullptr);
   VlmForwardInput build_vlm_sequence_input(const BatchInputData& data,
                                            uint32_t num_decoding_tokens,
                                            uint32_t min_decoding_batch_size,

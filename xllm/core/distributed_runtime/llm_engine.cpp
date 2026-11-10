@@ -551,7 +551,7 @@ bool LLMEngine::allocate_kv_cache(
       return false;
     }
   }
-  forward_input_factory_->reset_shared_kv_cache_publication();
+  forward_input_factory_->reset_shared_kv_cache_mapping_tracker();
   // VirtualMemory mode: reserve padding blocks and start prealloc thread.
   kv_cache_manager_->reserve_virtual_memory_padding_blocks();
 

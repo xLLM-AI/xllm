@@ -30,7 +30,7 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/common/metrics.h"
-#include "core/framework/batch/shared_kv_cache_publication.h"
+#include "core/framework/batch/shared_kv_cache_mapping_tracker.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -106,11 +106,12 @@ void append_virtual_kv_cache_global_offsets(
 
 }  // namespace
 
-ForwardInputBuilder::ForwardInputBuilder(const BatchInputData& data,
-                                         const ModelArgs* args,
-                                         int32_t cp_size,
-                                         ThreadPool* thread_pool,
-                                         SharedKVCachePublication* publication)
+ForwardInputBuilder::ForwardInputBuilder(
+    const BatchInputData& data,
+    const ModelArgs* args,
+    int32_t cp_size,
+    ThreadPool* thread_pool,
+    SharedKVCacheMappingTracker* mapping_tracker)
     : ForwardInputBuilder(data.sequences,
                           data.allowed_max_tokens,
                           data.input_embeddings,
@@ -120,7 +121,7 @@ ForwardInputBuilder::ForwardInputBuilder(const BatchInputData& data,
                           data.forward_type,
                           cp_size,
                           thread_pool) {
-  shared_kv_publication_ = publication;
+  shared_kv_mapping_tracker_ = mapping_tracker;
 }
 
 ForwardInputBuilder::ForwardInputBuilder(
@@ -867,8 +868,8 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
   if (shared_pool == nullptr) {
     return;
   }
-  if (shared_pool->uses_slabs() && shared_kv_publication_ != nullptr) {
-    shared_kv_publication_->append_rows(
+  if (shared_pool->uses_slabs() && shared_kv_mapping_tracker_ != nullptr) {
+    shared_kv_mapping_tracker_->append_rows(
         shared_pool,
         BlockType::LINEAR,
         Slice<Block>(linear_blocks.data() + read_index,
@@ -960,12 +961,12 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
     const auto& shared_pool =
         shared_block->manager()->options().shared_block_pool();
     if (shared_pool != nullptr && shared_pool->uses_slabs() &&
-        shared_kv_publication_ != nullptr) {
-      shared_kv_publication_->append_rows(shared_pool,
-                                          BlockType::KV,
-                                          blocks,
-                                          &state.full_block_slot_rows,
-                                          &state.full_block_lease_epochs);
+        shared_kv_mapping_tracker_ != nullptr) {
+      shared_kv_mapping_tracker_->append_rows(shared_pool,
+                                              BlockType::KV,
+                                              blocks,
+                                              &state.full_block_slot_rows,
+                                              &state.full_block_lease_epochs);
     } else if (shared_pool != nullptr && shared_pool->uses_slabs()) {
       for (const auto& block : blocks) {
         if (!block.is_valid()) {
