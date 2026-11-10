@@ -32,6 +32,8 @@ limitations under the License.
 
 namespace xllm {
 
+class ProcessGroup;
+
 struct SpecVerifyGraphTaskSignal {
   int64_t linear_state_id = 0;
   int64_t num_accepted_tokens = 0;
@@ -44,6 +46,8 @@ struct SpecVerifyGraphTaskSignal {
 class ExecutorImpl {
  public:
   virtual ~ExecutorImpl() = default;
+
+  virtual void set_dp_process_group(ProcessGroup* /*group*/) {}
 
   virtual ModelOutput run(const torch::Tensor& tokens,
                           const torch::Tensor& positions,

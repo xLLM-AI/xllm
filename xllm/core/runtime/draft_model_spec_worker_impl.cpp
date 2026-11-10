@@ -472,7 +472,10 @@ void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input(
         embedding.embedding_ids[row_idx],
         embedding.request_ids[row_idx],
         token_ids[row_idx],
-        bootstrap_embeddings.select(/*dim=*/0, i));
+        bootstrap_embeddings.select(/*dim=*/0, i),
+        input.host_positions().dim() == 2
+            ? input.host_positions().select(/*dim=*/1, row_idx)
+            : torch::Tensor());
   }
 }
 

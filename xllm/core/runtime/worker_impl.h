@@ -159,8 +159,6 @@ class WorkerImpl {
   // False on composites where only leaf workers consume parallel metadata.
   virtual bool owns_npu_parallel_input_prepare() const { return true; }
 
-  // Cached: whether the loaded model advertises NPU model-side CP.
-  bool model_supports_model_cp() const;
   // Lazily create (or return) the worker-local JSON grammar. Thread-safe.
   std::shared_ptr<const JsonObjectGrammar> ensure_json_object_grammar(
       bool reasoning_enabled);
@@ -507,12 +505,6 @@ class WorkerImpl {
 
   // parallel args of current instance
   ParallelArgs parallel_args_;
-
-  // Lazily computed: whether the resolved model_type advertises the NPU
-  // model-side CP pipeline (is_npu_model_cp_capable). Cached so the per-forward
-  // worker predicate does not resolve the model name on every step.
-  mutable bool model_cp_capable_computed_ = false;
-  mutable bool model_cp_capable_ = false;
 
   // kv caches
   std::vector<xllm::KVCache> kv_caches_;

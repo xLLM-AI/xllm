@@ -19,137 +19,107 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <cstddef>
+#include <memory>
 #include <optional>
-#include <type_traits>
+#include <unordered_map>
+#include <vector>
 
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/runtime/executor_impl.h"
 #include "core/runtime/executor_impl_factory.h"
+#include "core/runtime/mlu_graph_planner.h"
 #include "core/runtime/options.h"
 
 namespace xllm::mlu {
-// Helper class to hold persistent parameters for graph execution
-// Multiple MluGraph instances can share the same GraphPersistentParam object
 class GraphPersistentParam final {
  public:
   GraphPersistentParam(const ModelArgs& args,
                        const torch::Device& device,
-                       const runtime::Options& options);
+                       const runtime::Options& options,
+                       const MtpModelCapabilities& capabilities);
 
   ~GraphPersistentParam() = default;
 
-  template <typename Params>
-  void init_params(const Params& params,
-                   uint32_t padding_num_tokens,
-                   uint32_t padding_needed);
+  void bind_buffers(ModelParamsView& graph_params, const GraphPlan& plan);
 
-  // Update persistent tensors with new input data
-  template <typename Params>
   void update_input_buffer(const torch::Tensor& tokens,
                            const torch::Tensor& positions,
-                           const Params& params,
-                           uint32_t padding_needed);
+                           const ModelParamsView& params,
+                           ModelParamsView& graph_params,
+                           const GraphPlan& plan);
 
   std::size_t get_persistent_tensor_bytes() const;
 
-  // input tensors
   torch::Tensor tokens_;
   torch::Tensor positions_;
-  std::optional<ModelParamsView> params_;
 
-  template <typename Params>
-  Params& capture_params() {
-    return params_.value();
-  }
-  // mrope
   bool use_mrope_ = false;
-  // output
   torch::Tensor output_;
   torch::Tensor aux_hidden_states_;
 
  private:
-  // attn_metadata
   torch::Tensor q_seq_lens_;
   torch::Tensor kv_seq_lens_;
   torch::Tensor new_cache_slots_;
   torch::Tensor block_table_;
-  uint32_t num_decoding_tokens_;
   torch::Tensor linear_state_indices_;
 
-  // for vl
   torch::Tensor input_embeds_;
-
-  // for mtp model
-  torch::Tensor embedding_;
-
-  // linear state indices for GDN models
-  torch::Tensor linear_state_indices(uint32_t actual_batch_size = 0) const {
-    if (linear_state_indices_.numel() == 0) {
-      return linear_state_indices_;
-    }
-    if (actual_batch_size > 0) {
-      return linear_state_indices_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
-    }
-    return linear_state_indices_;
-  }
 };
 
-// graph executor using libtorch MLUGraph for memory management
-// MLUGraph provides mempool to manage temporary tensors during forward pass
+struct GraphOwnedBuffers final {
+  torch::Tensor num_accepted_tokens;
+  std::vector<torch::Tensor> multi_block_tables;
+};
+
+struct GraphActionWorkspace final {
+  torch::Tensor input_host;
+  torch::Tensor input_device;
+  torch::Tensor output_device;
+  torch::Tensor output_host;
+};
+
 class MluGraph final {
  public:
-  MluGraph(GraphPersistentParam* persistent_param, uint32_t padding_num_tokens);
+  MluGraph(GraphPersistentParam* persistent_param, GraphPlan plan);
 
-  // Capture computation graph for given bucket num_tokens.
   // All buckets must capture on the same MLU stream so the caching allocator
   // can reuse scratch freed by earlier captures within the shared mempool;
   // capturing on different streams defeats its per-stream block reuse.
-  template <typename ModelType>
-  void capture(ModelType* model,
-               std::vector<KVCache>& kv_cache,
-               const torch_mlu::MempoolId_t& pool,
-               const torch_mlu::MLUStream& capture_stream,
-               const runtime::Options& options);
+  ModelOutput capture(CausalLM* model,
+                      std::vector<KVCache>& kv_cache,
+                      const torch_mlu::MempoolId_t& pool,
+                      const torch_mlu::MLUStream& capture_stream,
+                      const runtime::Options& options);
 
-  // Replay captured graph with new input data
   ModelOutput replay();
-  template <typename ModelType, typename Params>
-  void update_input_buffer(ModelType* model,
+
+  void update_input_buffer(CausalLM* model,
                            const torch::Tensor& tokens,
                            const torch::Tensor& positions,
-                           const Params& params,
+                           const ModelParamsView& params,
                            bool is_init = false);
-
-  // Accessor for graph metadata state (used by executor to prepare
-  // metadata before replay).
-  ModelGraphMetadataState* model_graph_metadata_state() {
-    return model_graph_metadata_state_.get();
-  }
 
   void prepare_model_graph_metadata(CausalLM* model,
                                     const ModelParamsView& params);
 
-  bool matches_graph_input(const ModelParamsView&) const { return true; }
-
  private:
-  // MLUGraph with mempool for managing temporary tensors during forward pass
+  ModelOutput persistent_output() const;
+
+  std::optional<ModelParamsView> params_;
+  GraphPlan plan_;
+  bool enable_aux_hidden_states_ = false;
   torch_mlu::MLUGraph graph_;
 
-  // Reference to persistent parameters (shared across multiple MluGraph
-  // instances)
   GraphPersistentParam* persistent_param_;  // not owned
-  uint32_t padding_num_tokens_;
 
-  // Per-graph metadata state for models that require graph-forward
-  // metadata preparation (e.g., DeepSeek V4 DSA metadata).
   std::unique_ptr<ModelGraphMetadataState> model_graph_metadata_state_;
+
+  GraphOwnedBuffers owned_buffers_;
 };
 
-// Executor implementation using MLU graph optimization
-// Uses MLUGraph mempool to reduce memory allocation overhead during inference
 class MluGraphExecutorImpl final : public ExecutorImpl {
  public:
   MluGraphExecutorImpl(CausalLM* model,
@@ -159,31 +129,22 @@ class MluGraphExecutorImpl final : public ExecutorImpl {
 
   ~MluGraphExecutorImpl() override = default;
 
-  // Execute model with graph optimization for decode phase
+  void set_dp_process_group(ProcessGroup* group) override;
+
   ModelOutput run(const torch::Tensor& tokens,
                   const torch::Tensor& positions,
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
 
  private:
-  template <typename ModelType, typename Params>
-  ModelOutput run_impl(ModelType* model,
-                       const torch::Tensor& tokens,
-                       const torch::Tensor& positions,
-                       std::vector<KVCache>& kv_caches,
-                       const Params& params);
-
-  template <typename ModelType, typename Params>
-  ModelOutput run_eager(ModelType* model,
-                        const torch::Tensor& tokens,
+  ModelOutput run_eager(const torch::Tensor& tokens,
                         const torch::Tensor& positions,
                         std::vector<KVCache>& kv_caches,
-                        const Params& params);
+                        const ModelParamsView& params);
   void init_param_once();
   void log_memory_after_capture();
 
   CausalLM* model_;  // not owned
-  // not owned
   ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
@@ -191,11 +152,15 @@ class MluGraphExecutorImpl final : public ExecutorImpl {
   // Fixed capture stream shared by every bucket capture. Lazily initialized on
   // the first capture so the allocator can reuse pool scratch across buckets.
   std::optional<torch_mlu::MLUStream> graph_capture_stream_;
-  int64_t max_tokens_for_graph_mode_ = 0;
   std::size_t last_pool_reserved_bytes_ = 0;
   std::size_t peak_pool_reserved_bytes_ = 0;
 
-  std::unordered_map<uint32_t, std::unique_ptr<MluGraph>> graphs_;
+  std::unique_ptr<MluGraphPlanner> planner_;
+  ProcessGroup* dp_group_ = nullptr;
+  GraphActionWorkspace graph_action_workspace_;
+  MtpModelCapabilities mtp_capabilities_;
+
+  std::unordered_map<GraphKey, std::unique_ptr<MluGraph>, GraphKeyHash> graphs_;
   std::unique_ptr<GraphPersistentParam> persistent_param_;
 };
 REGISTER_EXECUTOR("mlu", MluGraphExecutorImpl);

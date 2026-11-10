@@ -53,22 +53,17 @@ void build_compressed_pad_positions(const torch::Tensor& input_positions,
   }
 }
 
-std::vector<int32_t> tensor_to_vec(const torch::Tensor& tensor,
-                                   const char* name) {
+std::vector<int32_t> seq_lens_to_vec(const torch::Tensor& tensor,
+                                     const std::vector<int32_t>& host_lens,
+                                     int32_t batch_size,
+                                     const char* name) {
+  if (!host_lens.empty()) {
+    return Slice<int32_t>(host_lens, batch_size);
+  }
   CHECK(tensor.defined()) << "DSAMetadataBuilderMlu requires " << name << ".";
   CHECK_EQ(tensor.dim(), 1)
       << "DSAMetadataBuilderMlu expects " << name << " to be 1D.";
-  torch::Tensor cpu_tensor =
-      tensor.to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32))
-          .contiguous();
-  const int64_t numel = cpu_tensor.numel();
-  std::vector<int32_t> values;
-  values.reserve(static_cast<size_t>(numel));
-  if (numel > 0) {
-    const int32_t* data = cpu_tensor.data_ptr<int32_t>();
-    values.assign(data, data + numel);
-  }
-  return values;
+  return tensor_to_vector<int32_t>(tensor.narrow(0, 0, batch_size));
 }
 
 torch::Tensor sanitize_block_table(const torch::Tensor& table) {
@@ -669,8 +664,14 @@ void DSAMetadataBuilderMlu::build_seq_lengths(
   torch::Tensor q_lens;
   torch::Tensor kv_lens;
 
-  q_lens_vec = tensor_to_vec(attn_metadata.q_seq_lens, "q_seq_lens");
-  kv_lens_vec = tensor_to_vec(attn_metadata.kv_seq_lens, "kv_seq_lens");
+  q_lens_vec = seq_lens_to_vec(attn_metadata.q_seq_lens,
+                               attn_metadata.q_seq_lens_vec,
+                               batch_size,
+                               "q_seq_lens");
+  kv_lens_vec = seq_lens_to_vec(attn_metadata.kv_seq_lens,
+                                attn_metadata.kv_seq_lens_vec,
+                                batch_size,
+                                "kv_seq_lens");
 
   q_cu_lens = attn_metadata.q_cu_seq_lens.to(torch::kInt32).contiguous();
   kv_cu_lens = attn_metadata.kv_cu_seq_lens.to(torch::kInt32).contiguous();

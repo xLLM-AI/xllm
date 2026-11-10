@@ -81,10 +81,9 @@ torch::Tensor to_int32_contiguous(const torch::Tensor& tensor) {
   return result.contiguous();
 }
 
-template <typename InputParams>
 void populate_fa3_attention_metadata(
     AttentionMetadata& attn_metadata,
-    const InputParams& params,
+    const ModelParamsView& params,
     const std::optional<torch::Tensor>& attn_mask,
     bool skip_cu_seq_lens) {
   if (!skip_cu_seq_lens) {
@@ -153,27 +152,21 @@ void populate_fa3_attention_metadata(
 }
 #endif
 
-template <typename InputParams>
 void materialize_linear_state_validity(
-    const InputParams& params,
+    const ModelParamsView& params,
     const std::optional<torch::Device>& device,
     const AttentionMetadataBuildOptions& build_options,
     AttentionMetadata& attn_metadata) {
   const bool needs_initial_states =
-      attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
+      !attn_metadata.is_spec_verify &&
+      (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill);
   if (!needs_initial_states) {
     return;
   }
 
   const int64_t mask_rows =
       static_cast<int64_t>(params.linear_state_validity_mask.size());
-  // Dense (non-linear) models still emit one linear_state_ids row per batch
-  // entry to keep row alignment for downstream consumers, but every slot is
-  // the invalid sentinel (-1); see
-  // ForwardInputBuilder::append_linear_state_row. A canonical validity mask is
-  // only required when at least one row carries a real (non-negative)
-  // linear-state slot, so mirror has_linear_state_slot() rather than treating a
-  // placeholder-only container as linear state.
+  // Dense batches retain -1 linear-state rows; only real slots require a mask.
   const bool has_linear_state_rows =
       std::any_of(params.embedding.linear_state_ids.begin(),
                   params.embedding.linear_state_ids.end(),
@@ -218,17 +211,13 @@ void materialize_linear_state_validity(
           : torch::tensor(params.linear_state_validity_mask, options);
 }
 
-template <typename InputParams>
 AttentionMetadata build_common_attention_metadata(
-    const InputParams& params,
-    bool is_spec_verify,
+    const ModelParamsView& params,
     bool enable_mla,
     const std::string& compute_dtype,
     const std::optional<torch::Device>& device,
     const std::optional<torch::Tensor>& attn_mask,
     const AttentionMetadataBuildOptions& build_options) {
-  // MLA mode still affects which shared tensors must be materialized for
-  // attention execution, but the flag itself is no longer carried in metadata.
   AttentionMetadata attn_metadata;
 #if defined(USE_MUSA)
   if (params.attn_metadata != nullptr) {
@@ -261,7 +250,7 @@ AttentionMetadata build_common_attention_metadata(
   attn_metadata.use_dense_flash_attention =
       params.graph.use_dense_flash_attention;
 #endif
-  attn_metadata.is_spec_verify = is_spec_verify;
+  attn_metadata.is_spec_verify = params.is_spec_verify;
 
   // for flashinfer
   attn_metadata.paged_kv_indptr = params.attention.device.paged_kv_indptr;
@@ -297,7 +286,8 @@ AttentionMetadata build_common_attention_metadata(
                    !params.meta.batch_forward_type.is_mixed() &&
                    !params.meta.batch_forward_type.is_chunked_prefill();
   bool is_spec_verify_chunked_prefill =
-      is_spec_verify && params.meta.batch_forward_type.is_chunked_prefill();
+      params.is_spec_verify &&
+      params.meta.batch_forward_type.is_chunked_prefill();
   bool use_acl_graph = ::xllm::ExecutionConfig::get_instance().enable_graph() &&
                        params.enable_graph &&
                        (is_decode || is_spec_verify_chunked_prefill) &&
@@ -493,13 +483,8 @@ AttentionMetadata AttentionMetadataBuilder::build(
     const std::optional<torch::Tensor>& attn_mask,
     const std::optional<torch::Device>& device,
     const AttentionMetadataBuildOptions& build_options) {
-  auto metadata = build_common_attention_metadata(params,
-                                                  params.is_spec_verify,
-                                                  enable_mla,
-                                                  compute_dtype,
-                                                  device,
-                                                  attn_mask,
-                                                  build_options);
+  auto metadata = build_common_attention_metadata(
+      params, enable_mla, compute_dtype, device, attn_mask, build_options);
   metadata.expanded_decode = ExpandedDecodeMetadataBuilder::build(params);
   return metadata;
 }
@@ -526,7 +511,8 @@ torch::Tensor AttentionMetadataBuilder::build_chunk_indices(
 void AttentionMetadataBuilder::build_linear_prefill(
     AttentionMetadata& attn_metadata,
     int64_t block_size) {
-  if (!attn_metadata.is_prefill && !attn_metadata.is_chunked_prefill) {
+  if (attn_metadata.is_spec_verify ||
+      (!attn_metadata.is_prefill && !attn_metadata.is_chunked_prefill)) {
     return;
   }
 

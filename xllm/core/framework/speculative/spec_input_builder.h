@@ -74,6 +74,7 @@ struct DecodeRowContext {
   std::vector<torch::Tensor> multi_block_tables_owner;
   Slice<int32_t> token_ids;
   Slice<int32_t> positions;
+  int32_t num_rope_axes = 1;
   Slice<int32_t> kv_seq_lens;
   Slice<int32_t> block_tables;
   std::vector<std::vector<Slice<int32_t>>> multi_block_tables;

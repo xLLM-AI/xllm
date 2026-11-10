@@ -33,18 +33,24 @@ namespace {
 
 constexpr int64_t kMaxBlockHv = 32;
 constexpr int64_t kMaxGdnBlockHv = 16;
+constexpr int64_t kMinGdnBlockHv = 2;
 constexpr int64_t kMaxBlockN = 4;
 constexpr int64_t kBlockQueryLen = 4;
 constexpr int64_t kSplitBlockV = 64;
 
 int64_t choose_block_hv(int64_t num_k_heads,
                         int64_t num_v_heads,
-                        int64_t max_block_hv) {
+                        int64_t max_block_hv,
+                        bool split_gdn_hv) {
   CHECK_GT(num_k_heads, 0);
   CHECK_GE(num_v_heads, num_k_heads);
   CHECK_EQ(num_v_heads % num_k_heads, 0) << "HV must be divisible by H";
 
   int64_t heads_per_query = num_v_heads / num_k_heads;
+  if (split_gdn_hv) {
+    max_block_hv =
+        std::min(max_block_hv, std::max(kMinGdnBlockHv, heads_per_query));
+  }
   int64_t candidate = std::min<int64_t>(
       (max_block_hv / heads_per_query) * heads_per_query, num_v_heads);
   for (; candidate >= heads_per_query; candidate -= heads_per_query) {
@@ -263,14 +269,14 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
       block_n = 2;
     }
   }
+  const bool split_gdn_hv = !is_kda && num_v_heads > 1;
   int64_t max_block_hv = kMaxBlockHv / block_n;
   // Bound GDN head tiles to keep four-token Qwen3.5 updates within MLU NRAM.
-  // Preserve the existing KDA launch configuration.
   if (!is_kda) {
     max_block_hv = std::min(max_block_hv, kMaxGdnBlockHv);
   }
-
-  int64_t block_hv = choose_block_hv(num_k_heads, num_v_heads, max_block_hv);
+  int64_t block_hv =
+      choose_block_hv(num_k_heads, num_v_heads, max_block_hv, split_gdn_hv);
   // A single-token KDA update has no recurrence across heads or value rows.
   // Split both dimensions so each program owns a disjoint state tile; keep K
   // whole because splitting the reduction would require synchronization.
@@ -283,8 +289,9 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
       block_v = std::min<int64_t>(head_v_dim, kSplitBlockV);
     }
   }
+  const bool split_hv = split_gdn_hv || split_single_token;
   int64_t num_hv_blocks =
-      split_single_token ? (num_v_heads + block_hv - 1) / block_hv : 1;
+      split_hv ? (num_v_heads + block_hv - 1) / block_hv : 1;
   int64_t total_blocks = ((head_k_dim + block_k - 1) / block_k) *
                          ((head_v_dim + block_v - 1) / block_v) *
                          num_sequences * num_hv_blocks;
@@ -339,10 +346,10 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
            /*IS_KDA=*/is_kda ? 1 : 0,
            /*KDA_USE_SAFE_GATE=*/kda_use_safe_gate ? 1 : 0,
            kda_gate_lower_bound,
-           /*SPLIT_HV=*/split_single_token ? 1 : 0,
+           /*SPLIT_HV=*/split_hv ? 1 : 0,
            /*BLOCK_N=*/static_cast<int32_t>(block_n),
            /*BLOCK_QUERY_LEN=*/static_cast<int32_t>(kBlockQueryLen),
-           /*FACTORED_REDUCE=*/0);
+           /*FACTORED_REDUCE=*/!is_kda && head_k_dim == 128 ? 1 : 0);
 
   return std::make_pair(out, final_state);
 }

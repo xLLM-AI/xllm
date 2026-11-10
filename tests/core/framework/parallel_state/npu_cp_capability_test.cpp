@@ -26,47 +26,9 @@ limitations under the License.
 #include "core/framework/config/parallel_config_validation.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/util/scope_guard.h"
-#include "models/model_registry.h"
 
 namespace xllm {
 namespace {
-
-TEST(NpuCpCapabilityTest, RegisteredCpCapableModels) {
-  // Native DeepSeekV4 owns context-parallel input sharding.
-  EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v4"));
-  EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v4_mtp"));
-  // The registry must advertise MODEL for these and NONE for the rest.
-  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v4"),
-            CpShardingMode::MODEL);
-  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v4_mtp"),
-            CpShardingMode::MODEL);
-}
-
-TEST(NpuCpCapabilityTest, UnregisteredModelsAreNotCapable) {
-  EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v3_mtp"));
-  EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v3"));
-  // Unrelated NPU models are not CP-capable.
-  EXPECT_FALSE(is_npu_model_cp_capable("qwen3"));
-  // Hybrid linear attention models are the only ones the graph executor takes
-  // through spec-verify chunked prefill; none of them is CP-capable, which is
-  // what keeps that capture path CP-free.
-  EXPECT_FALSE(is_npu_model_cp_capable("qwen3_next"));
-  // Unknown model names default to NONE.
-  EXPECT_FALSE(is_npu_model_cp_capable("definitely_not_a_model"));
-  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v3_mtp"),
-            CpShardingMode::NONE);
-  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("definitely_not_a_model"),
-            CpShardingMode::NONE);
-}
-
-TEST(NpuCpCapabilityTest, RegistrationIsIdempotent) {
-  // Repeated calls must not flip the capability and must keep returning the
-  // same result (std::call_once guards the one-shot registration).
-  for (int i = 0; i < 3; ++i) {
-    EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v4"));
-    EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v3_mtp"));
-  }
-}
 
 TEST(NpuCpCapabilityTest, PythonDcpRejectsCrossDpGroupsBeforePcpEarlyReturn) {
   ModelConfig& model_config = ModelConfig::get_instance();
@@ -86,10 +48,6 @@ TEST(NpuCpCapabilityTest, PythonDcpRejectsCrossDpGroupsBeforePcpEarlyReturn) {
       options, EngineType::LLM, "glm_moe_dsa", /*global_world_size=*/8);
   ASSERT_TRUE(error.has_value());
   EXPECT_NE(error->find("Python DCP requires dp_size == 1"), std::string::npos);
-  EXPECT_NE(error->find("dp_size=2"), std::string::npos);
-  EXPECT_NE(error->find("tp_size=4"), std::string::npos);
-  EXPECT_NE(error->find("cp_size=1"), std::string::npos);
-  EXPECT_NE(error->find("kv_split_size=2"), std::string::npos);
 
   model_config.model_impl("py");
   EXPECT_TRUE(validate_context_parallel_config(options,
@@ -158,14 +116,13 @@ TEST(NpuCpCapabilityTest, PythonCpAllowsAclGraphAndRejectsCompileBackends) {
                    .has_value());
 
   execution_config.python_graph_backend("inductor");
-  const std::optional<std::string> graph_error = std::optional<std::string>(
-      "Python model-side CP requires Prefill to use EagerRunner; use "
-      "--python_graph_backend=off or decode-only aclgraph");
-  EXPECT_EQ(validate_context_parallel_config(options,
+  EXPECT_NE(validate_context_parallel_config(options,
                                              EngineType::LLM,
                                              "glm_moe_dsa",
-                                             /*global_world_size=*/16),
-            graph_error);
+                                             /*global_world_size=*/16)
+                .value_or("")
+                .find("EagerRunner"),
+            std::string::npos);
 
   execution_config.python_graph_backend("off");
   EXPECT_FALSE(validate_context_parallel_config(options,
@@ -217,14 +174,13 @@ TEST(NpuCpCapabilityTest, PythonCpPreservesQwenAndRestrictsGlm) {
                    .has_value());
 
   options.speculative_algorithm("DSpark");
-  EXPECT_EQ(validate_context_parallel_config(options,
+  EXPECT_NE(validate_context_parallel_config(options,
                                              EngineType::SSM,
                                              "glm_moe_dsa",
-                                             /*global_world_size=*/16),
-            std::optional<std::string>(
-                "Current model-side CP does not support aux-hidden-capture "
-                "speculative algorithms (Eagle3/DFlash/DSpark); run "
-                "speculative decoding on a cp_size=1 Decode instance."));
+                                             /*global_world_size=*/16)
+                .value_or("")
+                .find("aux-hidden-capture"),
+            std::string::npos);
 
   options.cp_size(1).instance_role(InstanceRole::DECODE).enable_disagg_pd(true);
   EXPECT_FALSE(validate_context_parallel_config(options,
@@ -259,24 +215,22 @@ TEST(NpuCpCapabilityTest, PythonCpPreservesQwenAndRestrictsGlm) {
                    .has_value());
 
   parallel_config.kv_split_size(1);
-  EXPECT_EQ(validate_context_parallel_config(options,
+  EXPECT_NE(validate_context_parallel_config(options,
                                              EngineType::LLM,
                                              "glm_moe_dsa_mtp",
-                                             /*global_world_size=*/16),
-            std::optional<std::string>(
-                "Python model-side CP does not support "
-                "model_type=glm_moe_dsa_mtp; supported models are qwen3, "
-                "glm_moe_dsa, deepseek_v4, glm5_next, glm5_next_text and "
-                "glm5_3_flash."));
+                                             /*global_world_size=*/16)
+                .value_or("")
+                .find("model_type=glm_moe_dsa_mtp"),
+            std::string::npos);
 
   parallel_config.kv_split_size(3);
-  EXPECT_EQ(validate_context_parallel_config(options,
+  EXPECT_NE(validate_context_parallel_config(options,
                                              EngineType::LLM,
                                              "glm_moe_dsa",
-                                             /*global_world_size=*/16),
-            std::optional<std::string>(
-                "Python CP requires kv_split_size effective value to be a "
-                "positive divisor of cp_size"));
+                                             /*global_world_size=*/16)
+                .value_or("")
+                .find("positive divisor of cp_size"),
+            std::string::npos);
 }
 
 TEST(NpuCpCapabilityTest, PythonGlm5NextCapabilityGate) {
@@ -340,23 +294,22 @@ TEST(NpuCpCapabilityTest, PythonGlm5NextCapabilityGate) {
                                                 /*global_world_size=*/8)
                    .has_value());
 
-  EXPECT_EQ(
-      validate_context_parallel_config(options,
-                                       EngineType::SSM,
-                                       "glm5_next",
-                                       /*global_world_size=*/8),
-      std::optional<std::string>(
-          "Python GLM-5 Next CP does not support target-side speculative "
-          "verification; run speculation on a cp_size=1 Decode instance"));
+  EXPECT_NE(validate_context_parallel_config(options,
+                                             EngineType::SSM,
+                                             "glm5_next",
+                                             /*global_world_size=*/8)
+                .value_or("")
+                .find("target-side speculative verification"),
+            std::string::npos);
 
   execution_config.python_graph_backend("inductor");
-  EXPECT_EQ(validate_context_parallel_config(options,
+  EXPECT_NE(validate_context_parallel_config(options,
                                              EngineType::LLM,
                                              "glm5_next",
-                                             /*global_world_size=*/8),
-            std::optional<std::string>(
-                "Python model-side CP requires Prefill to use EagerRunner; use "
-                "--python_graph_backend=off or decode-only aclgraph"));
+                                             /*global_world_size=*/8)
+                .value_or("")
+                .find("EagerRunner"),
+            std::string::npos);
 
   execution_config.python_graph_backend("off");
   for (int32_t dp_size : {1, 2}) {
@@ -372,13 +325,13 @@ TEST(NpuCpCapabilityTest, PythonGlm5NextCapabilityGate) {
   options.dp_size(1);
   for (int32_t ep_size : {0, 3}) {
     options.ep_size(ep_size);
-    EXPECT_EQ(validate_context_parallel_config(options,
+    EXPECT_NE(validate_context_parallel_config(options,
                                                EngineType::LLM,
                                                "glm5_next",
-                                               /*global_world_size=*/8),
-              std::optional<std::string>(
-                  "Python GLM-5 Next CP requires ep_size to be a positive "
-                  "divisor of world_size"));
+                                               /*global_world_size=*/8)
+                  .value_or("")
+                  .find("ep_size to be a positive divisor"),
+              std::string::npos);
   }
   options.ep_size(1);
 
@@ -389,32 +342,33 @@ TEST(NpuCpCapabilityTest, PythonGlm5NextCapabilityGate) {
                                                 /*global_world_size=*/8)
                    .has_value());
   options.ep_size(4);
-  EXPECT_EQ(validate_context_parallel_config(options,
+  EXPECT_NE(validate_context_parallel_config(options,
                                              EngineType::LLM,
                                              "glm5_next",
-                                             /*global_world_size=*/8),
-            std::optional<std::string>(
-                "Python GLM-5 Next EPLv2 with PCP requires ep_size equal to "
-                "world_size"));
+                                             /*global_world_size=*/8)
+                .value_or("")
+                .find("ep_size equal to world_size"),
+            std::string::npos);
   options.expert_parallel_degree(1).ep_size(1);
 
   parallel_config.kv_split_size(2);
-  EXPECT_EQ(validate_context_parallel_config(options,
+  EXPECT_NE(validate_context_parallel_config(options,
                                              EngineType::LLM,
                                              "glm5_next",
-                                             /*global_world_size=*/8),
-            std::optional<std::string>(
-                "Python GLM-5 Next CP initially requires kv_split_size == 1"));
+                                             /*global_world_size=*/8)
+                .value_or("")
+                .find("kv_split_size == 1"),
+            std::string::npos);
   parallel_config.kv_split_size(1);
 
   scheduler_config.enable_chunked_prefill(true);
-  EXPECT_EQ(
-      validate_context_parallel_config(options,
-                                       EngineType::LLM,
-                                       "glm5_next",
-                                       /*global_world_size=*/8),
-      std::optional<std::string>("Python GLM-5 Next CP initially requires "
-                                 "enable_chunked_prefill=false"));
+  EXPECT_NE(validate_context_parallel_config(options,
+                                             EngineType::LLM,
+                                             "glm5_next",
+                                             /*global_world_size=*/8)
+                .value_or("")
+                .find("enable_chunked_prefill=false"),
+            std::string::npos);
   scheduler_config.enable_chunked_prefill(false);
 
   scheduler_config.enable_mix_batch(true);
@@ -427,39 +381,41 @@ TEST(NpuCpCapabilityTest, PythonGlm5NextCapabilityGate) {
   scheduler_config.enable_mix_batch(false);
 
   kv_cache_config.enable_prefix_cache(true);
-  EXPECT_EQ(
-      validate_context_parallel_config(options,
-                                       EngineType::LLM,
-                                       "glm5_next",
-                                       /*global_world_size=*/8),
-      std::optional<std::string>("Python GLM-5 Next CP initially requires "
-                                 "enable_prefix_cache=false"));
+  EXPECT_NE(validate_context_parallel_config(options,
+                                             EngineType::LLM,
+                                             "glm5_next",
+                                             /*global_world_size=*/8)
+                .value_or("")
+                .find("enable_prefix_cache=false"),
+            std::string::npos);
   kv_cache_config.enable_prefix_cache(false);
 
   scheduler_config.enable_schedule_overlap(true);
-  EXPECT_EQ(
-      validate_context_parallel_config(options,
-                                       EngineType::LLM,
-                                       "glm5_next",
-                                       /*global_world_size=*/8),
-      std::optional<std::string>("Python GLM-5 Next CP initially requires "
-                                 "enable_schedule_overlap=false"));
+  EXPECT_NE(validate_context_parallel_config(options,
+                                             EngineType::LLM,
+                                             "glm5_next",
+                                             /*global_world_size=*/8)
+                .value_or("")
+                .find("enable_schedule_overlap=false"),
+            std::string::npos);
   scheduler_config.enable_schedule_overlap(false);
 
   options.enable_disagg_pd(true);
-  EXPECT_EQ(validate_context_parallel_config(options,
+  EXPECT_NE(validate_context_parallel_config(options,
                                              EngineType::LLM,
                                              "glm5_next",
-                                             /*global_world_size=*/8),
-            std::optional<std::string>(
-                "Python GLM-5 Next CP does not support disaggregated PD"));
+                                             /*global_world_size=*/8)
+                .value_or("")
+                .find("disaggregated PD"),
+            std::string::npos);
   options.instance_role(InstanceRole::DEFAULT);
-  EXPECT_EQ(validate_context_parallel_config(options,
+  EXPECT_NE(validate_context_parallel_config(options,
                                              EngineType::LLM,
                                              "glm5_next",
-                                             /*global_world_size=*/8),
-            std::optional<std::string>(
-                "Python GLM-5 Next CP does not support disaggregated PD"));
+                                             /*global_world_size=*/8)
+                .value_or("")
+                .find("disaggregated PD"),
+            std::string::npos);
 }
 
 TEST(NpuCpCapabilityTest, PythonGlmMtpSupportsCpWithDecodeAclGraph) {

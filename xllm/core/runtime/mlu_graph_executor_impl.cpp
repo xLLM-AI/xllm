@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/common/constants.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
+#include "core/framework/parallel_state/process_group.h"
 #include "core/runtime/graph_execution_input.h"
 #include "core/util/tensor_options.h"
 #include "runtime/decode_graph_bucket.h"
@@ -93,12 +94,6 @@ GraphPoolMemoryUsage get_graph_pool_usage(
   return usage;
 }
 
-uint32_t get_bucket_num_tokens(uint32_t num_tokens,
-                               const xllm::runtime::Options& options) {
-  return static_cast<uint32_t>(xllm::runtime::get_decode_graph_token_bucket(
-      num_tokens, options.enable_graph_mode_decode_no_padding()));
-}
-
 xllm::ModelOutput make_graph_output(const torch::Tensor& hidden_states,
                                     const torch::Tensor& aux_hidden_states,
                                     bool enable_aux_hidden_states) {
@@ -109,158 +104,114 @@ xllm::ModelOutput make_graph_output(const torch::Tensor& hidden_states,
   return xllm::ModelOutput(hidden_states);
 }
 
-enum class RunMode : int8_t {
-  kGraph = 0,
-  kPaddedDpGraph,
-  kDraft,
-  kSpecVerify,
-  kNonDecode,
-  kDummy,
-  kUnevenDp,
-  kMixedDp,
-  kBadDpMeta,
-};
-
-bool has_zero_tokens(const std::vector<int32_t>& dp_token_nums) {
-  return std::any_of(dp_token_nums.begin(),
-                     dp_token_nums.end(),
-                     [](int32_t token_num) { return token_num == 0; });
+int64_t extra_rows_of(const xllm::mlu::GraphLayout& layout) {
+  return (layout.padded_num_reqs - layout.num_reqs) *
+         layout.tokens_per_request / layout.attention_row_query_len;
 }
 
-bool dp_tokens_equal(const std::vector<int32_t>& dp_token_nums) {
-  return dp_token_nums.empty() ||
-         std::all_of(
-             dp_token_nums.begin(),
-             dp_token_nums.end(),
-             [first_token_num = dp_token_nums.front()](int32_t token_num) {
-               return token_num == first_token_num;
-             });
-}
-
-bool allow_graph(RunMode run_mode) {
-  return run_mode == RunMode::kGraph || run_mode == RunMode::kPaddedDpGraph;
-}
-
-uint32_t align_tokens(uint32_t tokens, uint32_t align) {
-  CHECK_GT(align, 0U) << "align must be positive";
-  uint32_t rem = tokens % align;
-  return rem == 0 ? tokens : tokens + align - rem;
-}
-
-uint32_t get_tp_size(const xllm::runtime::Options& options) {
-  int32_t world_size = options.world_size();
-  int32_t dp_size = options.dp_size();
-  if (world_size <= 1 || dp_size <= 1 || world_size < dp_size ||
-      world_size % dp_size != 0) {
-    return 1;
-  }
-
-  return static_cast<uint32_t>(world_size / dp_size);
-}
-
-int64_t get_graph_token_capacity(const xllm::runtime::Options& options) {
-  int64_t capacity = options.max_seqs_per_batch();
-
-  if (options.enable_speculative_decode() && !options.is_draft_engine()) {
-    capacity *= options.num_decoding_tokens();
-  }
-
-  capacity = static_cast<int64_t>(get_bucket_num_tokens(
-      static_cast<uint32_t>(std::max<int64_t>(capacity, 1)), options));
-
-  const uint32_t tp_size = get_tp_size(options);
-  capacity = static_cast<int64_t>(align_tokens(
-      static_cast<uint32_t>(std::max<int64_t>(capacity, tp_size)), tp_size));
-
-  return capacity;
-}
-
-template <typename Params>
-uint32_t get_graph_dp_tokens(uint32_t actual_tokens,
-                             const Params& params,
-                             const xllm::runtime::Options& options) {
-  if (params.parallel.dp_global_token_nums.size() <= 1) {
-    return get_bucket_num_tokens(actual_tokens, options);
-  }
-
-  const auto max_token_num =
-      std::max_element(params.parallel.dp_global_token_nums.begin(),
-                       params.parallel.dp_global_token_nums.end());
-  CHECK(max_token_num != params.parallel.dp_global_token_nums.end())
-      << "dp_global_token_nums is empty";
-  uint32_t bucket_tokens =
-      get_bucket_num_tokens(static_cast<uint32_t>(*max_token_num), options);
-  uint32_t tp_size = get_tp_size(options);
-  return align_tokens(std::max(bucket_tokens, tp_size), tp_size);
-}
-
-template <typename Params>
-xllm::GraphExecutionInput<Params> prepare_graph_input(
-    const Params& params,
-    uint32_t padding_num_tokens) {
-  xllm::GraphExecutionInput<Params> graph_input(params);
+xllm::GraphExecutionInput<xllm::ModelParamsView> prepare_graph_input(
+    const xllm::ModelParamsView& params,
+    int64_t padding_num_tokens) {
+  xllm::GraphExecutionInput<xllm::ModelParamsView> graph_input(params);
   graph_input.pad_dp_token_counts(static_cast<int32_t>(padding_num_tokens));
   return graph_input;
 }
 
-template <typename Params>
-RunMode get_run_mode(const xllm::runtime::Options& options,
-                     const Params& params) {
-  if (options.is_draft_engine()) {
-    return RunMode::kDraft;
-  }
+enum class GraphAction : int8_t { EAGER, CAPTURE, REPLAY };
 
-  if constexpr (std::is_same_v<Params, xllm::ModelParamsView>) {
-    if (params.is_spec_verify) {
-      return RunMode::kSpecVerify;
+// Compare fields directly so hash collisions cannot split DP graph actions.
+constexpr int64_t kGraphPacketFields = 12;
+constexpr int64_t kGraphPacketSize = 32;
+
+GraphAction agree_graph_action(const xllm::mlu::GraphPlan* plan,
+                               bool cache_hit,
+                               xllm::ProcessGroup* dp_group,
+                               const torch::Device& device,
+                               xllm::mlu::GraphActionWorkspace& workspace) {
+  if (dp_group == nullptr || dp_group->world_size() <= 1) {
+    return plan == nullptr
+               ? GraphAction::EAGER
+               : (cache_hit ? GraphAction::REPLAY : GraphAction::CAPTURE);
+  }
+  if (!workspace.input_device.defined()) {
+    const auto options = torch::TensorOptions().dtype(torch::kInt64);
+    workspace.input_host = torch::empty({kGraphPacketSize}, options);
+    workspace.input_device =
+        torch::empty({kGraphPacketSize}, options.device(device));
+    workspace.output_device = torch::empty(
+        {dp_group->world_size(), kGraphPacketSize}, options.device(device));
+    workspace.output_host =
+        torch::empty({dp_group->world_size(), kGraphPacketSize}, options);
+  }
+  int64_t* packet = workspace.input_host.data_ptr<int64_t>();
+  std::fill_n(packet, kGraphPacketSize, 0);
+  packet[0] = plan != nullptr;
+  if (plan != nullptr) {
+    CHECK_LE(plan->key.multi_block_table_column_counts.size(),
+             static_cast<std::size_t>(kGraphPacketSize - kGraphPacketFields));
+    packet[1] = cache_hit ? 1 : 0;
+    packet[2] = plan->layout.padded_num_tokens;
+    packet[3] = plan->layout.padded_num_reqs;
+    packet[4] = plan->layout.tokens_per_request;
+    packet[5] = plan->layout.attention_row_query_len;
+    packet[6] = plan->layout.cache_pad_slot;
+    packet[7] = plan->history_capacity;
+    packet[8] = plan->main_block_table_columns;
+    packet[9] = plan->key.has_input_embedding;
+    packet[10] =
+        static_cast<int64_t>(plan->key.multi_block_table_column_counts.size());
+    packet[11] = plan->key.grouped;
+    std::copy(plan->key.multi_block_table_column_counts.begin(),
+              plan->key.multi_block_table_column_counts.end(),
+              packet + kGraphPacketFields);
+  }
+  workspace.input_device.copy_(workspace.input_host);
+  dp_group
+      ->allgather_base_async(workspace.input_device, workspace.output_device)
+      ->wait();
+  workspace.output_host.copy_(workspace.output_device);
+  const int64_t* values = workspace.output_host.data_ptr<int64_t>();
+  bool all_hit = true;
+  for (int32_t rank = 0; rank < dp_group->world_size(); ++rank) {
+    const int64_t* peer = values + rank * kGraphPacketSize;
+    if (peer[0] == 0) {
+      return GraphAction::EAGER;
     }
-  }
-
-  if (!params.meta.batch_forward_type.is_decode()) {
-    return RunMode::kNonDecode;
-  }
-
-  if (params.meta.q_max_seq_len == 0) {
-    return RunMode::kDummy;
-  }
-
-  if (params.parallel.dp_global_token_nums.size() <= 1) {
-    return RunMode::kGraph;
-  }
-
-  if (has_zero_tokens(params.parallel.dp_global_token_nums)) {
-    return RunMode::kDummy;
-  }
-
-  if (params.parallel.dp_is_decode.size() !=
-      params.parallel.dp_global_token_nums.size()) {
-    return RunMode::kBadDpMeta;
-  }
-
-  if (std::find(params.parallel.dp_is_decode.begin(),
-                params.parallel.dp_is_decode.end(),
-                0) != params.parallel.dp_is_decode.end()) {
-    return RunMode::kMixedDp;
-  }
-
-  if (!dp_tokens_equal(params.parallel.dp_global_token_nums)) {
-    if (params.meta.q_max_seq_len == 1) {
-      return RunMode::kPaddedDpGraph;
+    if (!std::equal(packet + 2, packet + kGraphPacketSize, peer + 2)) {
+      LOG_FIRST_N(WARNING, 4)
+          << "MLU graph layout differs across dp ranks; this step runs eager "
+             "on every rank";
+      return GraphAction::EAGER;
     }
-    return RunMode::kUnevenDp;
+    all_hit = all_hit && peer[1] != 0;
   }
-
-  return RunMode::kGraph;
+  return all_hit ? GraphAction::REPLAY : GraphAction::CAPTURE;
 }
 
-template <typename Params>
-const std::vector<torch::Tensor>& graph_multi_block_tables(
-    const Params& params) {
-  if constexpr (std::is_same_v<Params, xllm::ModelParamsView>) {
-    return params.multi_block_tables;
-  } else {
-    static const std::vector<torch::Tensor> empty;
-    return empty;
+void log_eager_reason(xllm::mlu::EagerReason reason) {
+  switch (reason) {
+    case xllm::mlu::EagerReason::NON_DECODE:
+      LOG_FIRST_N(INFO, 1)
+          << "MLU graph fallback to eager for non-decode or draft step";
+      break;
+    case xllm::mlu::EagerReason::UNSUPPORTED_INPUT:
+      LOG_FIRST_N(INFO, 1)
+          << "MLU graph fallback to eager for unsupported input layout";
+      break;
+    case xllm::mlu::EagerReason::INVALID_LAYOUT:
+      LOG_FIRST_N(INFO, 1)
+          << "MLU graph fallback to eager for a non-uniform step layout";
+      break;
+    case xllm::mlu::EagerReason::TOKEN_LIMIT:
+      LOG_FIRST_N(INFO, 1)
+          << "MLU graph fallback to eager because the padded token bucket "
+             "exceeds max_tokens_for_graph_mode";
+      break;
+    case xllm::mlu::EagerReason::HISTORY_LIMIT:
+      LOG_FIRST_N(INFO, 1)
+          << "MLU graph fallback to eager because kv history exceeds the "
+             "captured graph capacity";
+      break;
   }
 }
 
@@ -268,15 +219,16 @@ const std::vector<torch::Tensor>& graph_multi_block_tables(
 
 namespace xllm::mlu {
 
-GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
-                                           const torch::Device& device,
-                                           const runtime::Options& options)
-    : num_decoding_tokens_(options.num_decoding_tokens()) {
-  const int64_t max_tokens = options.max_tokens_per_batch();
-  const int64_t graph_tokens_capacity = get_graph_token_capacity(options);
-  // Sequence lengths are cumulative offsets for graph token rows, including
-  // the terminal offset.
-  const int64_t max_seq_lens = graph_tokens_capacity + 1;
+GraphPersistentParam::GraphPersistentParam(
+    const ModelArgs& args,
+    const torch::Device& device,
+    const runtime::Options& options,
+    const MtpModelCapabilities& capabilities) {
+  const int64_t graph_tokens_capacity =
+      get_graph_token_capacity(options, capabilities);
+  const int64_t max_tokens =
+      std::max<int64_t>(options.max_tokens_per_batch(), graph_tokens_capacity);
+  const int64_t max_seq_lens = graph_tokens_capacity;
   const int64_t max_seq_len = args.max_position_embeddings();
   const uint32_t block_size = options.block_size();
   const int64_t max_num_blocks_per_req =
@@ -311,139 +263,147 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       torch::full({max_seq_lens}, kPaddingLinearStateId, int_tensor_options);
 }
 
-template <typename Params>
-void GraphPersistentParam::init_params(const Params& params,
-                                       uint32_t padding_num_tokens,
-                                       uint32_t padding_needed) {
-  params_.emplace(params.to(tokens_.device()).view());
-  Params& graph_params = capture_params<Params>();
-  graph_params.enable_graph = true;
-  graph_params.attention.device.q_seq_lens = q_seq_lens_.slice(
-      0, 0, params.attention.device.q_seq_lens.size(0) + padding_needed);
-  graph_params.attention.device.kv_seq_lens = kv_seq_lens_.slice(
-      0, 0, params.attention.device.kv_seq_lens.size(0) + padding_needed);
-  graph_params.attention.device.new_cache_slots =
-      new_cache_slots_.slice(0, 0, padding_num_tokens);
-  graph_params.attention.device.block_tables =
-      block_table_.slice(0, 0, padding_num_tokens);
-  if (params.embedding.input_embedding.defined()) {
+void GraphPersistentParam::bind_buffers(ModelParamsView& graph_params,
+                                        const GraphPlan& plan) {
+  const GraphLayout& layout = plan.layout;
+  const int64_t attention_rows =
+      layout.padded_num_tokens / layout.attention_row_query_len;
+  auto& attention = graph_params.attention.device;
+  attention.q_seq_lens = q_seq_lens_.slice(0, 0, attention_rows);
+  attention.q_cu_seq_lens = torch::Tensor();
+  attention.kv_seq_lens = kv_seq_lens_.slice(0, 0, attention_rows);
+  attention.new_cache_slots =
+      new_cache_slots_.slice(0, 0, layout.padded_num_tokens);
+  if (attention.block_tables.defined()) {
+    const int64_t columns = plan.main_block_table_columns > 0
+                                ? plan.main_block_table_columns
+                                : attention.block_tables.size(1);
+    attention.block_tables =
+        block_table_.slice(0, 0, attention_rows).slice(1, 0, columns);
+  }
+  if (graph_params.embedding.input_embedding.defined()) {
     if (!input_embeds_.defined()) {
       input_embeds_ = torch::zeros_like(output_);
     }
     graph_params.embedding.input_embedding =
-        input_embeds_.slice(0, 0, padding_num_tokens);
+        input_embeds_.slice(0, 0, layout.padded_num_tokens);
   }
-
-  if (!params.embedding.linear_state_ids.empty()) {
-    graph_params.embedding.linear_state_ids = params.embedding.linear_state_ids;
+  if (!graph_params.embedding.linear_state_ids.empty()) {
     graph_params.embedding.linear_state_indices =
-        linear_state_indices(padding_num_tokens);
+        linear_state_indices_.slice(0, 0, layout.padded_num_reqs);
   }
+  // The EPLB decode mask is rebuilt per step and cannot be replayed.
+  graph_params.expert.eplb_decode_token_mask = torch::Tensor();
 }
 
-template <typename Params>
 void GraphPersistentParam::update_input_buffer(const torch::Tensor& tokens,
                                                const torch::Tensor& positions,
-                                               const Params& params,
-                                               uint32_t padding_needed) {
-  Params& graph_params = capture_params<Params>();
-  const auto& multi_block_tables = graph_multi_block_tables(params);
-  // Copy data from input parameters to persistent graph tensors
-  int32_t slice_dim = use_mrope_ ? 1 : 0;
-  const int64_t actual_tokens = tokens.size(0);
-  const int64_t padded_tokens = actual_tokens + padding_needed;
-  const int64_t actual_batch =
-      params.attention.device.block_tables.defined()
-          ? params.attention.device.block_tables.size(0)
-          : (!multi_block_tables.empty() ? multi_block_tables[0].size(0)
-                                         : actual_tokens);
-  const int64_t block_rows_end = actual_batch + padding_needed;
-  auto position_slice =
-      positions_.slice(slice_dim, 0, positions.size(slice_dim));
-  auto token_slice = tokens_.slice(0, 0, tokens.size(0));
-  auto cache_slot_slice = new_cache_slots_.slice(
-      0, 0, params.attention.device.new_cache_slots.size(0));
-  position_slice.copy_(positions, true);
-  token_slice.copy_(tokens, true);
-  cache_slot_slice.copy_(params.attention.device.new_cache_slots, true);
-  if (padding_needed > 0) {
-    positions_.slice(slice_dim, actual_tokens, padded_tokens).zero_();
-    tokens_.slice(0, actual_tokens, padded_tokens).zero_();
-    new_cache_slots_.slice(0, actual_tokens, padded_tokens).zero_();
+                                               const ModelParamsView& params,
+                                               ModelParamsView& graph_params,
+                                               const GraphPlan& plan) {
+  const GraphLayout& layout = plan.layout;
+  const int64_t extra_rows = extra_rows_of(layout);
+  const int32_t dim = use_mrope_ ? 1 : 0;
+  const int64_t row_step = layout.attention_row_query_len;
+  const auto copy_rows = [](const torch::Tensor& dst,
+                            const torch::Tensor& src,
+                            int64_t fill,
+                            int64_t dim = 0) {
+    if (!dst.defined()) {
+      return;
+    }
+    const int64_t rows = src.defined() ? src.size(dim) : 0;
+    if (rows < dst.size(dim)) {
+      dst.narrow(dim, rows, dst.size(dim) - rows).fill_(fill);
+    }
+    if (src.defined()) {
+      dst.narrow(dim, 0, rows).copy_(src, true);
+    }
+  };
+  const auto copy_host = [](const torch::Tensor& dst,
+                            const std::vector<int32_t>& values) {
+    dst.copy_(
+        torch::tensor(values, torch::TensorOptions().dtype(torch::kInt32)),
+        true);
+  };
+
+  copy_rows(tokens_.slice(0, 0, layout.padded_num_tokens), tokens, 0);
+  copy_rows(
+      positions_.slice(dim, 0, layout.padded_num_tokens), positions, 0, dim);
+
+  auto& host = graph_params.attention.host;
+  host.q_seq_lens = params.attention.host.q_seq_lens;
+  host.kv_seq_lens = params.attention.host.kv_seq_lens;
+  host.kpool_query_lens = params.attention.host.kpool_query_lens;
+  util::pad_uniform_decode_lens(
+      host.q_seq_lens, host.kv_seq_lens, extra_rows, row_step);
+  if (!host.kpool_query_lens.empty()) {
+    host.kpool_query_lens.resize(layout.padded_num_reqs,
+                                 layout.tokens_per_request);
   }
-  graph_params.meta.num_sequences = params.meta.num_sequences;
 
-  std::vector<int32_t> q_seq_lens_vec(params.attention.host.q_seq_lens);
-  std::vector<int32_t> kv_seq_lens_vec(params.attention.host.kv_seq_lens);
-  util::pad_uniform_decode_lens(q_seq_lens_vec,
-                                kv_seq_lens_vec,
-                                padding_needed,
-                                static_cast<int32_t>(num_decoding_tokens_));
+  auto& attention = graph_params.attention.device;
+  copy_rows(attention.q_seq_lens, params.attention.device.q_seq_lens, row_step);
+  copy_rows(attention.kv_seq_lens, params.attention.device.kv_seq_lens, 0);
 
-  graph_params.attention.host.q_seq_lens = q_seq_lens_vec;
-  graph_params.attention.host.kv_seq_lens = kv_seq_lens_vec;
+  copy_rows(attention.new_cache_slots,
+            params.attention.device.new_cache_slots,
+            layout.cache_pad_slot);
 
-  auto q_seq_lens = torch::tensor(q_seq_lens_vec, q_seq_lens_.options());
-  auto kv_seq_lens = torch::tensor(kv_seq_lens_vec, kv_seq_lens_.options());
-  auto q_seq_slice = q_seq_lens_.slice(0, 0, q_seq_lens.size(0));
-  auto kv_seq_slice = kv_seq_lens_.slice(0, 0, kv_seq_lens.size(0));
-  q_seq_slice.copy_(q_seq_lens, true);
-  kv_seq_slice.copy_(kv_seq_lens, true);
-
-  // Copy block table data
-  if (params.attention.device.block_tables.defined()) {
-    const int64_t actual_block_batch =
-        params.attention.device.block_tables.size(0);
-    const int64_t actual_n_block = params.attention.device.block_tables.size(1);
-    auto slice_block_tables = block_table_.slice(0, 0, actual_block_batch)
-                                  .slice(1, 0, actual_n_block);
-    slice_block_tables.copy_(params.attention.device.block_tables, true);
-    if (actual_n_block < block_table_.size(1)) {
-      block_table_.slice(0, 0, actual_block_batch)
-          .slice(1, actual_n_block, block_table_.size(1))
+  if (attention.block_tables.defined()) {
+    const auto& source_table = params.attention.device.block_tables;
+    const int64_t block_rows = source_table.size(0);
+    const int64_t copy_width =
+        std::min(attention.block_tables.size(1), source_table.size(1));
+    if (block_rows > 0 && copy_width > 0) {
+      attention.block_tables.narrow(0, 0, block_rows)
+          .narrow(1, 0, copy_width)
+          .copy_(source_table.narrow(1, 0, copy_width), true);
+    }
+    if (copy_width < attention.block_tables.size(1)) {
+      attention.block_tables.narrow(0, 0, block_rows)
+          .narrow(1, copy_width, attention.block_tables.size(1) - copy_width)
           .zero_();
     }
-    if (block_rows_end > actual_block_batch) {
-      block_table_.slice(0, actual_block_batch, block_rows_end).zero_();
-    }
-  }
-
-  if (!multi_block_tables.empty()) {
-    graph_params.multi_block_tables = multi_block_tables;
-  }
-
-  if (params.embedding.input_embedding.defined()) {
-    auto input_embed_slice =
-        input_embeds_.slice(0, 0, params.embedding.input_embedding.size(0));
-    input_embed_slice.copy_(params.embedding.input_embedding, true);
-    if (padding_needed > 0) {
-      input_embeds_
-          .slice(0, params.embedding.input_embedding.size(0), padded_tokens)
+    if (block_rows < attention.block_tables.size(0)) {
+      attention.block_tables
+          .narrow(0, block_rows, attention.block_tables.size(0) - block_rows)
           .zero_();
     }
   }
 
-  if (!params.embedding.linear_state_ids.empty()) {
-    const int64_t actual_batch_size = params.embedding.linear_state_ids.size();
-    if (params.embedding.linear_state_indices.defined()) {
-      linear_state_indices_
-          .slice(/*dim=*/0, /*start=*/0, /*end=*/actual_batch_size)
-          .copy_(params.embedding.linear_state_indices, /*non_blocking=*/true);
-    } else {
-      linear_state_indices_
-          .slice(/*dim=*/0, /*start=*/0, /*end=*/actual_batch_size)
-          .copy_(torch::tensor(params.embedding.linear_state_ids,
-                               linear_state_indices_.options()),
-                 /*non_blocking=*/true);
+  if (params.embedding.linear_state_indices.defined() ||
+      params.embedding.linear_state_ids.empty()) {
+    copy_rows(graph_params.embedding.linear_state_indices,
+              params.embedding.linear_state_indices,
+              kPaddingLinearStateId);
+  } else {
+    graph_params.embedding.linear_state_indices.fill_(kPaddingLinearStateId);
+    copy_host(graph_params.embedding.linear_state_indices.narrow(
+                  0, 0, layout.num_reqs),
+              params.embedding.linear_state_ids);
+  }
+  copy_rows(graph_params.embedding.input_embedding,
+            params.embedding.input_embedding,
+            0);
+  copy_rows(graph_params.num_accepted_tokens, params.num_accepted_tokens, 1);
+  if (graph_params.num_accepted_tokens.defined()) {
+    graph_params.num_accepted_tokens_host = params.num_accepted_tokens_host;
+    graph_params.num_accepted_tokens_host.resize(layout.padded_num_reqs, 1);
+  }
+  if (plan.key.grouped) {
+    for (std::size_t i = 0; i < graph_params.multi_block_tables.size(); ++i) {
+      copy_rows(
+          graph_params.multi_block_tables[i], params.multi_block_tables[i], 0);
     }
-    if (padded_tokens > actual_batch_size) {
-      linear_state_indices_
-          .slice(/*dim=*/0, /*start=*/actual_batch_size, /*end=*/padded_tokens)
-          .fill_(kPaddingLinearStateId);
-    }
+  } else {
+    graph_params.multi_block_tables = params.multi_block_tables;
+  }
+
+  if (!graph_params.embedding.linear_state_ids.empty()) {
     graph_params.embedding.linear_state_ids = params.embedding.linear_state_ids;
-    graph_params.embedding.linear_state_indices =
-        linear_state_indices(padded_tokens);
+    graph_params.embedding.linear_state_ids.resize(layout.padded_num_reqs,
+                                                   kPaddingLinearStateId);
   }
 }
 
@@ -459,14 +419,12 @@ std::size_t GraphPersistentParam::get_persistent_tensor_bytes() const {
   total += tensor_bytes(kv_seq_lens_);
   total += tensor_bytes(input_embeds_);
   total += tensor_bytes(aux_hidden_states_);
-
+  total += tensor_bytes(linear_state_indices_);
   return total;
 }
 
-MluGraph::MluGraph(GraphPersistentParam* persistent_param,
-                   uint32_t padding_num_tokens)
-    : persistent_param_(persistent_param),
-      padding_num_tokens_(padding_num_tokens) {}
+MluGraph::MluGraph(GraphPersistentParam* persistent_param, GraphPlan plan)
+    : plan_(std::move(plan)), persistent_param_(persistent_param) {}
 
 void MluGraph::prepare_model_graph_metadata(CausalLM* model,
                                             const ModelParamsView& params) {
@@ -477,97 +435,145 @@ void MluGraph::prepare_model_graph_metadata(CausalLM* model,
   if (!model_graph_metadata_state_) {
     model_graph_metadata_state_ = model->create_graph_forward_metadata_state();
   }
-  auto graph_input = prepare_graph_input(params, padding_num_tokens_);
+  auto graph_input =
+      prepare_graph_input(params, plan_.layout.padded_num_tokens);
   ModelParamsView& graph_params = graph_input.mutable_params();
-  // Metadata captured by the model must use the same bucket-shaped tensors
-  // as graph execution, while retaining the current logical batch metadata.
-  const auto& graph_attention = persistent_param_->params_->attention.device;
-  graph_params.attention.device.q_seq_lens = graph_attention.q_seq_lens;
-  graph_params.attention.device.kv_seq_lens = graph_attention.kv_seq_lens;
+  // Captured metadata must use bucket-shaped tensors.
+  const ModelParamsView& captured = params_.value();
+  graph_params.attention.device.q_seq_lens =
+      captured.attention.device.q_seq_lens;
+  graph_params.attention.device.kv_seq_lens =
+      captured.attention.device.kv_seq_lens;
+  graph_params.attention.device.q_cu_seq_lens =
+      captured.attention.device.q_cu_seq_lens;
   graph_params.attention.device.new_cache_slots =
-      graph_attention.new_cache_slots;
-  graph_params.attention.device.block_tables = graph_attention.block_tables;
-  graph_params.attention.host.q_seq_lens =
-      persistent_param_->params_->attention.host.q_seq_lens;
-  graph_params.attention.host.kv_seq_lens =
-      persistent_param_->params_->attention.host.kv_seq_lens;
+      captured.attention.device.new_cache_slots;
+  graph_params.attention.device.block_tables =
+      captured.attention.device.block_tables;
+  graph_params.attention.host.q_seq_lens = captured.attention.host.q_seq_lens;
+  graph_params.attention.host.kv_seq_lens = captured.attention.host.kv_seq_lens;
+  graph_params.attention.host.kpool_query_lens =
+      captured.attention.host.kpool_query_lens;
   graph_params.embedding.linear_state_indices =
-      persistent_param_->params_->embedding.linear_state_indices;
+      captured.embedding.linear_state_indices;
+  graph_params.num_accepted_tokens = captured.num_accepted_tokens;
+  graph_params.num_accepted_tokens_host = captured.num_accepted_tokens_host;
+  graph_params.multi_block_tables = captured.multi_block_tables;
   graph_params.enable_graph = true;
-  int32_t slice_dim = persistent_param_->use_mrope_ ? 1 : 0;
   model->prepare_graph_forward_metadata(
       model_graph_metadata_state_.get(),
-      persistent_param_->positions_.slice(slice_dim, 0, padding_num_tokens_),
+      persistent_param_->positions_.slice(persistent_param_->use_mrope_ ? 1 : 0,
+                                          0,
+                                          plan_.layout.padded_num_tokens),
       graph_params);
-
-  persistent_param_->params_->attn_metadata = graph_params.attn_metadata;
+  params_->attn_metadata = std::move(graph_params.attn_metadata);
 }
 
-template <typename ModelType>
-void MluGraph::capture(ModelType* model,
-                       std::vector<KVCache>& kv_cache,
-                       const torch_mlu::MempoolId_t& pool,
-                       const torch_mlu::MLUStream& capture_stream,
-                       const runtime::Options& options) {
-  Params& graph_params = persistent_param_->capture_params<Params>();
-
-  int32_t slice_dim = persistent_param_->use_mrope_ ? 1 : 0;
+ModelOutput MluGraph::capture(CausalLM* model,
+                              std::vector<KVCache>& kv_cache,
+                              const torch_mlu::MempoolId_t& pool,
+                              const torch_mlu::MLUStream& capture_stream,
+                              const runtime::Options& options) {
+  const int32_t slice_dim = persistent_param_->use_mrope_ ? 1 : 0;
+  const int64_t padded_tokens = plan_.layout.padded_num_tokens;
+  enable_aux_hidden_states_ = options.enable_graph_aux_hidden_states();
+  const auto forward = [&]() {
+    return model->forward(
+        persistent_param_->tokens_.slice(0, 0, padded_tokens),
+        persistent_param_->positions_.slice(slice_dim, 0, padded_tokens),
+        kv_cache,
+        params_.value());
+  };
+  const auto store_output = [&](const ModelOutput& result) {
+    persistent_param_->output_.slice(0, 0, result.hidden_states.size(0))
+        .copy_(result.hidden_states, true);
+    if (enable_aux_hidden_states_ && result.aux_hidden_states.defined()) {
+      if (persistent_param_->aux_hidden_states_.numel() == 0) {
+        auto shape = result.aux_hidden_states.sizes().vec();
+        shape[0] = persistent_param_->output_.size(0);
+        persistent_param_->aux_hidden_states_ =
+            torch::zeros(shape, persistent_param_->output_.options());
+      }
+      auto slice = persistent_param_->aux_hidden_states_.slice(
+          0, 0, result.aux_hidden_states.size(0));
+      if (slice.sizes() == result.aux_hidden_states.sizes()) {
+        slice.copy_(result.aux_hidden_states, true);
+      }
+    }
+  };
+  const bool has_state =
+      std::any_of(kv_cache.begin(), kv_cache.end(), [](const KVCache& cache) {
+        return cache.has_request_state();
+      });
+  if (has_state) {
+    store_output(forward());
+  }
   triton_jit::JITKernel::initialize_device();
   torch_mlu::synchronize();
   auto prev_stream = torch_mlu::getCurrentMLUStream();
   torch_mlu::mlu::MLUStreamGuard guard(capture_stream);
   graph_ = torch_mlu::MLUGraph();
   graph_.capture_begin(pool, cnrtQueueCaptureModeRelaxed);
-  auto forward_result = model->forward(
-      persistent_param_->tokens_.slice(0, 0, padding_num_tokens_),
-      persistent_param_->positions_.slice(slice_dim, 0, padding_num_tokens_),
-      kv_cache,
-      graph_params);
-  persistent_param_->output_.slice(0, 0, forward_result.hidden_states.size(0))
-      .copy_(forward_result.hidden_states, true);
-  // Only capture aux_hidden_states when enable_graph_aux_hidden_states is on
-  // (e.g. main worker in EAGLE-3); draft worker has this option false.
-  if (options.enable_graph_aux_hidden_states() &&
-      forward_result.aux_hidden_states.defined()) {
-    if (persistent_param_->aux_hidden_states_.numel() == 0) {
-      // Lazy initialization
-      auto shape = forward_result.aux_hidden_states.sizes().vec();
-      shape[0] = persistent_param_->output_.size(0);
-      persistent_param_->aux_hidden_states_ =
-          torch::zeros(shape, persistent_param_->output_.options());
-    }
-    auto slice = persistent_param_->aux_hidden_states_.slice(
-        0, 0, forward_result.aux_hidden_states.size(0));
-    if (slice.sizes() == forward_result.aux_hidden_states.sizes()) {
-      slice.copy_(forward_result.aux_hidden_states, true);
-    }
-  }
+  store_output(forward());
   graph_.capture_end();
   torch_mlu::setCurrentMLUStream(prev_stream);
   torch_mlu::synchronize();
-  graph_.replay();
+  if (!has_state) {
+    graph_.replay();
+  }
+  return persistent_output();
+}
+
+ModelOutput MluGraph::persistent_output() const {
+  const int64_t padded_tokens = plan_.layout.padded_num_tokens;
+  return make_graph_output(
+      persistent_param_->output_.slice(0, 0, padded_tokens),
+      persistent_param_->aux_hidden_states_.numel() > 0
+          ? persistent_param_->aux_hidden_states_.slice(0, 0, padded_tokens)
+          : torch::Tensor(),
+      enable_aux_hidden_states_);
 }
 
 ModelOutput MluGraph::replay() {
   graph_.replay();
-  const uint32_t actual_tokens = padding_num_tokens_;
-  // Note: aux_hidden_states handling is done in MluGraphExecutorImpl::run()
-  // since replay() doesn't have access to options
-  return ModelOutput(persistent_param_->output_.slice(0, 0, actual_tokens));
+  return persistent_output();
 }
 
-template <typename ModelType, typename Params>
-void MluGraph::update_input_buffer(ModelType* model,
+void MluGraph::update_input_buffer(CausalLM* model,
                                    const torch::Tensor& tokens,
                                    const torch::Tensor& positions,
-                                   const Params& params,
+                                   const ModelParamsView& params,
                                    bool is_init) {
-  uint32_t padding_needed = padding_num_tokens_ - tokens.size(0);
   if (is_init) {
-    persistent_param_->init_params(params, padding_num_tokens_, padding_needed);
+    params_.emplace(params.to(persistent_param_->tokens_.device()).view());
+
+    ModelParamsView& graph_params = params_.value();
+    graph_params.enable_graph = true;
+    graph_params.meta.num_sequences =
+        plan_.layout.padded_num_tokens / plan_.layout.attention_row_query_len;
+    if (plan_.history_capacity > 0) {
+      graph_params.meta.kv_max_seq_len = plan_.history_capacity;
+    }
+    graph_params.attn_metadata.reset();
+    if (plan_.key.grouped) {
+      const int64_t rows = plan_.layout.padded_num_reqs;
+      const auto options = torch::TensorOptions().device(tokens.device());
+      owned_buffers_.num_accepted_tokens =
+          torch::empty({rows}, options.dtype(torch::kInt32));
+      owned_buffers_.multi_block_tables.clear();
+      for (const torch::Tensor& table : params.multi_block_tables) {
+        owned_buffers_.multi_block_tables.emplace_back(torch::empty(
+            {table.size(0) + extra_rows_of(plan_.layout), table.size(1)},
+            table.options()));
+      }
+      graph_params.num_accepted_tokens = owned_buffers_.num_accepted_tokens;
+      graph_params.multi_block_tables = owned_buffers_.multi_block_tables;
+    }
+
+    persistent_param_->bind_buffers(graph_params, plan_);
   }
   persistent_param_->update_input_buffer(
-      tokens, positions, params, padding_needed);
+      tokens, positions, params, params_.value(), plan_);
   // For some models (e.g. DeepSeekV4), the metadata depends on variable host
   // data, which needs to be updated outside of capture.
   prepare_model_graph_metadata(model, params);
@@ -582,39 +588,55 @@ MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
       device_(device),
       options_(options),
       graph_pool_(torch_mlu::graph_pool_handle()) {
-  max_tokens_for_graph_mode_ =
-      ::xllm::ExecutionConfig::get_instance().max_tokens_for_graph_mode();
-  if (max_tokens_for_graph_mode_ < options_.max_seqs_per_batch()) {
-    max_tokens_for_graph_mode_ = options_.max_seqs_per_batch();
+  std::string model_name;
+  std::string resolve_error;
+  if (!resolve_model_registration_name(
+          args_.model_type(), &model_name, &resolve_error)) {
+    model_name = args_.model_type();
   }
+  mtp_capabilities_ = ModelRegistry::get_mtp_capabilities(model_name);
+  int64_t history_capacity = 0;
+  if (args_.max_position_embeddings() > 0) {
+    history_capacity = (get_block_capacity(args_.max_position_embeddings(),
+                                           options_.block_size()) +
+                        1) *
+                       options_.block_size();
+  }
+  if (mtp_capabilities_.graph_context_policy ==
+      GraphContextPolicy::KPOOL_FIXED) {
+    history_capacity = ModelRegistry::get_graph_kv_capacity(
+        model_name, args_, history_capacity);
+  } else if (mtp_capabilities_.graph_context_policy ==
+             GraphContextPolicy::QWEN_FULL_ATTENTION) {
+    CHECK_GT(args_.max_position_embeddings(), 0)
+        << "Qwen3.5 graph capture requires positive max_position_embeddings";
+    history_capacity = args_.max_position_embeddings();
+  }
+  GraphPlannerConfig planner_config;
+  planner_config.options = options_;
+  planner_config.capabilities = mtp_capabilities_;
+  planner_config.state_required =
+      model_ != nullptr && model_->requires_graph_forward_metadata();
+  planner_config.history_capacity = history_capacity;
+  planner_config.max_tokens = std::min<int64_t>(
+      std::max<int64_t>(
+          ::xllm::ExecutionConfig::get_instance().max_tokens_for_graph_mode(),
+          options_.max_seqs_per_batch()),
+      get_graph_token_capacity(options_, mtp_capabilities_));
+  planner_ = std::make_unique<MluGraphPlanner>(std::move(planner_config));
 }
 
-template <typename ModelType, typename Params>
-ModelOutput MluGraphExecutorImpl::run_eager(ModelType* model,
-                                            const torch::Tensor& tokens,
+void MluGraphExecutorImpl::set_dp_process_group(ProcessGroup* group) {
+  graph_action_workspace_ = {};
+  dp_group_ = group;
+}
+
+ModelOutput MluGraphExecutorImpl::run_eager(const torch::Tensor& tokens,
                                             const torch::Tensor& positions,
                                             std::vector<KVCache>& kv_caches,
-                                            const Params& params) {
-  RunMode run_mode = get_run_mode(options_, params);
-  if (run_mode == RunMode::kDraft) {
-    LOG_FIRST_N(INFO, 1) << "MLU graph fallback to eager for draft worker";
-  } else if (run_mode == RunMode::kSpecVerify) {
-    LOG_FIRST_N(INFO, 1) << "MLU graph fallback to eager for Spec Verify";
-  } else if (run_mode == RunMode::kDummy) {
-    LOG_FIRST_N(INFO, 1)
-        << "MLU graph fallback to eager when decode inputs contain dummy run";
-  } else if (run_mode == RunMode::kUnevenDp) {
-    LOG_FIRST_N(INFO, 1)
-        << "MLU graph fallback to eager for uneven dp decode batch";
-  } else if (run_mode == RunMode::kMixedDp) {
-    LOG_FIRST_N(INFO, 1)
-        << "MLU graph fallback to eager for mixed dp prefill/decode batch";
-  } else if (run_mode == RunMode::kBadDpMeta) {
-    LOG_FIRST_N(WARNING, 1)
-        << "MLU graph fallback to eager because dp_is_decode is invalid";
-  }
+                                            const ModelParamsView& params) {
   COUNTER_INC(num_model_execution_total_eager);
-  ModelOutput result = model->forward(tokens, positions, kv_caches, params);
+  ModelOutput result = model_->forward(tokens, positions, kv_caches, params);
   ModelOutput output =
       make_graph_output(result.hidden_states,
                         result.aux_hidden_states,
@@ -625,8 +647,8 @@ ModelOutput MluGraphExecutorImpl::run_eager(ModelType* model,
 
 void MluGraphExecutorImpl::init_param_once() {
   if (persistent_param_ == nullptr) {
-    persistent_param_ =
-        std::make_unique<GraphPersistentParam>(args_, device_, options_);
+    persistent_param_ = std::make_unique<GraphPersistentParam>(
+        args_, device_, options_, mtp_capabilities_);
   }
 }
 
@@ -651,8 +673,11 @@ void MluGraphExecutorImpl::log_memory_after_capture() {
 
   const std::size_t persistent_param_bytes =
       persistent_param_ ? persistent_param_->get_persistent_tensor_bytes() : 0;
+  const std::size_t graph_action_bytes =
+      tensor_bytes(graph_action_workspace_.input_device) +
+      tensor_bytes(graph_action_workspace_.output_device);
   const std::size_t executor_total_bytes =
-      reserved_bytes + persistent_param_bytes;
+      reserved_bytes + persistent_param_bytes + graph_action_bytes;
 
   // Per-capture delta of the shared graph pool. When scratch is being reused
   // across buckets, this collapses to ~0 after the first (largest) capture;
@@ -666,9 +691,10 @@ void MluGraphExecutorImpl::log_memory_after_capture() {
       std::max(peak_pool_reserved_bytes_, reserved_bytes);
 
   LOG(INFO) << "MluGraphExecutorMemory Usage:"
-            << " executor_total_memory="
+            << " graphs_cached=" << graphs_.size() << " executor_total_memory="
             << format_memory_size(executor_total_bytes) << " persistent_param="
             << format_memory_size(persistent_param_bytes)
+            << " graph_action_memory=" << format_memory_size(graph_action_bytes)
             << " pool_reserved=" << format_memory_size(reserved_bytes)
             << " pool_reserved_delta=" << (reserved_grew ? "+" : "-")
             << format_memory_size(reserved_delta) << " pool_reserved_peak="
@@ -686,103 +712,87 @@ ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
                                       const torch::Tensor& positions,
                                       std::vector<KVCache>& kv_caches,
                                       const ModelParamsView& params) {
-  return run_impl(model_, tokens, positions, kv_caches, params);
-}
-
-template <typename ModelType, typename Params>
-ModelOutput MluGraphExecutorImpl::run_impl(ModelType* model,
-                                           const torch::Tensor& tokens,
-                                           const torch::Tensor& positions,
-                                           std::vector<KVCache>& kv_caches,
-                                           const Params& params) {
-  const RunMode run_mode = get_run_mode(options_, params);
-  if (!allow_graph(run_mode)) {
-    return run_eager(model, tokens, positions, kv_caches, params);
+  const int64_t actual_tokens = tokens.size(0);
+  GraphDecision decision = planner_->plan(actual_tokens, params);
+  const GraphPlan* plan = std::get_if<GraphPlan>(&decision);
+  MluGraph* existing = nullptr;
+  if (plan != nullptr) {
+    const auto it = graphs_.find(plan->key);
+    existing = it != graphs_.end() ? it->second.get() : nullptr;
   }
-
-  const uint32_t actual_tokens = static_cast<uint32_t>(tokens.size(0));
-  const uint32_t graph_tokens =
-      get_graph_dp_tokens(actual_tokens, params, options_);
-  if (static_cast<int64_t>(graph_tokens) > max_tokens_for_graph_mode_) {
-    LOG_FIRST_N(INFO, 1)
-        << "MLU graph fallback to eager because graph bucket num_tokens "
-        << graph_tokens << " exceeds max_tokens_for_graph_mode ("
-        << max_tokens_for_graph_mode_ << ")";
-    return run_eager(model, tokens, positions, kv_caches, params);
+  GraphAction action = GraphAction::EAGER;
+  const auto& decode_flags = params.parallel.dp_is_decode;
+  const auto& token_nums = params.parallel.dp_global_token_nums;
+  const bool skip_dp_agreement =
+      dp_group_ != nullptr && dp_group_->world_size() > 1 &&
+      (decode_flags.empty() ||
+       std::find(decode_flags.begin(), decode_flags.end(), 0) !=
+           decode_flags.end() ||
+       std::find(token_nums.begin(), token_nums.end(), 0) != token_nums.end());
+  if (!skip_dp_agreement) {
+    action = agree_graph_action(
+        plan, existing != nullptr, dp_group_, device_, graph_action_workspace_);
   }
-
-  init_param_once();
-
-  auto graph_input = prepare_graph_input(params, graph_tokens);
-  const Params& graph_params = graph_input.params();
-
-  if (graph_params.parallel.dp_global_token_nums !=
-      params.parallel.dp_global_token_nums) {
-    LOG_FIRST_N(INFO, 4) << "MLU graph padded dp decode path: raw "
-                         << "dp_global_token_nums="
-                         << params.parallel.dp_global_token_nums
-                         << ", graph dp_global_token_nums="
-                         << graph_params.parallel.dp_global_token_nums
-                         << ", tp_size=" << get_tp_size(options_)
-                         << ", graph_tokens=" << graph_tokens;
-  }
-
-  auto it = graphs_.find(graph_tokens);
-  if (it != graphs_.end() && !it->second->matches_graph_input(params)) {
-    torch_mlu::synchronize();
-    graphs_.erase(it);
-    it = graphs_.end();
-  }
-  if (it != graphs_.end()) {
-    MluGraph* cur_graph = it->second.get();
-    cur_graph->update_input_buffer(model, tokens, positions, graph_params);
-    ModelOutput result = cur_graph->replay();
-    // Return only the actual num_tokens portion
-    auto hidden_states = result.hidden_states.slice(0, 0, actual_tokens);
-    if (options_.enable_graph_aux_hidden_states()) {
-      auto aux_hidden_states =
-          persistent_param_->aux_hidden_states_.numel() > 0
-              ? persistent_param_->aux_hidden_states_.slice(0, 0, actual_tokens)
-              : torch::Tensor();
-      return make_graph_output(
-          hidden_states, aux_hidden_states, /*enable_aux_hidden_states=*/true);
+  if (action == GraphAction::EAGER) {
+    if (plan == nullptr) {
+      log_eager_reason(std::get<EagerReason>(decision));
     }
-    return ModelOutput(hidden_states);
+    return run_eager(tokens, positions, kv_caches, params);
   }
+  if (action == GraphAction::CAPTURE &&
+      params.embedding.input_embedding.defined()) {
+    CHECK(params.embedding.input_embedding.device() == device_)
+        << "input_embedding graph input device changed";
+  }
+  init_param_once();
+  ModelOutput result;
+  if (action == GraphAction::REPLAY && existing != nullptr) {
+    existing->update_input_buffer(model_, tokens, positions, params);
+    result = existing->replay();
+  } else {
+    auto graph_input =
+        prepare_graph_input(params, plan->layout.padded_num_tokens);
+    if (mtp_capabilities_.model_family == MtpModelFamily::GLM5 ||
+        mtp_capabilities_.model_family == MtpModelFamily::QWEN35) {
+      if (!params.is_spec_verify &&
+          (params.num_accepted_tokens.defined() ||
+           !params.num_accepted_tokens_host.empty())) {
+        auto& graph_params = graph_input.mutable_params();
+        graph_params.num_accepted_tokens = torch::Tensor();
+        graph_params.num_accepted_tokens_host.clear();
+      }
+    }
 
-  std::unique_ptr<MluGraph> graph =
-      std::make_unique<MluGraph>(persistent_param_.get(), graph_tokens);
-  graph->update_input_buffer(model, tokens, positions, graph_params, true);
-  if (!graph_capture_stream_.has_value()) {
-    graph_capture_stream_ =
-        torch_mlu::getStreamFromPool(/*isHighPriority=*/false, device_.index());
-  }
-  graph->capture(
-      model, kv_caches, graph_pool_, *graph_capture_stream_, options_);
-  log_memory_after_capture();
-  graphs_[graph_tokens] = std::move(graph);
-  // Return the output from capture
-  auto hidden_states = persistent_param_->output_.slice(0, 0, actual_tokens);
-  if (options_.enable_graph_aux_hidden_states()) {
-    auto aux_hidden_states =
-        persistent_param_->aux_hidden_states_.numel() > 0
-            ? persistent_param_->aux_hidden_states_.slice(0, 0, actual_tokens)
-            : torch::Tensor();
-    return make_graph_output(
-        hidden_states, aux_hidden_states, /*enable_aux_hidden_states=*/true);
-  }
+    auto graph = std::make_unique<MluGraph>(persistent_param_.get(), *plan);
+    graph->update_input_buffer(
+        model_, tokens, positions, graph_input.params(), true);
+    if (!graph_capture_stream_.has_value()) {
+      graph_capture_stream_ = torch_mlu::getStreamFromPool(
+          /*isHighPriority=*/false, device_.index());
+    }
+    result = graph->capture(
+        model_, kv_caches, graph_pool_, *graph_capture_stream_, options_);
+    // Old replay work may still use these resources on the caller stream.
+    if (existing != nullptr) {
+      torch_mlu::synchronize();
+    }
+    graphs_[plan->key] = std::move(graph);
 
-  return ModelOutput(hidden_states);
+    LOG(INFO) << "MLU graph captured: padded_num_reqs="
+              << plan->layout.padded_num_reqs
+              << ", tokens_per_request=" << plan->layout.tokens_per_request
+              << ", grouped=" << plan->key.grouped
+              << ", draft=" << options_.is_draft_engine()
+              << ", verify=" << params.is_spec_verify
+              << ", padded_num_tokens=" << plan->layout.padded_num_tokens;
+    log_memory_after_capture();
+  }
+  return make_graph_output(
+      result.hidden_states.slice(0, 0, actual_tokens),
+      result.aux_hidden_states.defined()
+          ? result.aux_hidden_states.slice(0, 0, actual_tokens)
+          : torch::Tensor(),
+      options_.enable_graph_aux_hidden_states());
 }
-
-template void GraphPersistentParam::init_params<ModelParamsView>(
-    const ModelParamsView&,
-    uint32_t,
-    uint32_t);
-template void GraphPersistentParam::update_input_buffer<ModelParamsView>(
-    const torch::Tensor&,
-    const torch::Tensor&,
-    const ModelParamsView&,
-    uint32_t);
 
 }  // namespace xllm::mlu

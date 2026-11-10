@@ -154,13 +154,6 @@ class CudaGraphPersistentParam {
     }
     return persistent_paged_kv_indptr_;
   }
-  torch::Tensor persistent_paged_kv_indices(uint32_t actual_size) const {
-    if (actual_size > 0) {
-      return persistent_paged_kv_indices_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_size);
-    }
-    return persistent_paged_kv_indices_;
-  }
   torch::Tensor persistent_paged_kv_last_page_len(
       uint32_t actual_batch_size) const {
     if (actual_batch_size > 0) {

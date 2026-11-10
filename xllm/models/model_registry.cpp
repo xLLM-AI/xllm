@@ -19,7 +19,6 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <iostream>
-#include <mutex>
 #include <unordered_set>
 #include <utility>
 
@@ -258,12 +257,6 @@ bool resolve_model_registration_name(const std::string& model_type,
 bool is_npu_model_cp_capable(const std::string& resolved_name) {
   static const std::unordered_set<std::string> kCpCapableModels = {
       "deepseek_v4", "deepseek_v4_mtp"};
-  static std::once_flag once;
-  std::call_once(once, []() {
-    for (const std::string& name : kCpCapableModels) {
-      ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::MODEL);
-    }
-  });
   return kCpCapableModels.contains(resolved_name);
 }
 
@@ -276,12 +269,6 @@ bool is_mlu_model_cp_capable(const std::string& resolved_name) {
       "deepseek_v4",
       "glm_moe_dsa",
   };
-  static std::once_flag once;
-  std::call_once(once, []() {
-    for (const std::string& name : kCpCapableModels) {
-      ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::MODEL);
-    }
-  });
   return kCpCapableModels.contains(resolved_name);
 }
 
@@ -423,21 +410,6 @@ void ModelRegistry::register_tokenizer_args_loader(const std::string& name,
   } else {
     instance->model_registry_[name].tokenizer_args_loader = loader;
   }
-}
-
-void ModelRegistry::register_cp_sharding_mode(const std::string& name,
-                                              CpShardingMode mode) {
-  ModelRegistry* instance = get_instance();
-  instance->model_registry_[name].cp_sharding_mode = mode;
-}
-
-CpShardingMode ModelRegistry::get_cp_sharding_mode(const std::string& name) {
-  ModelRegistry* instance = get_instance();
-  const auto it = instance->model_registry_.find(name);
-  if (it == instance->model_registry_.end()) {
-    return CpShardingMode::NONE;
-  }
-  return it->second.cp_sharding_mode;
 }
 
 void ModelRegistry::register_dcp_capability(const std::string& name) {
@@ -644,6 +616,23 @@ MtpModelCapabilities ModelRegistry::get_mtp_capabilities(
     return MtpModelCapabilities();
   }
   return entry->second.mtp_capabilities;
+}
+
+void ModelRegistry::register_graph_kv_capacity(const std::string& name,
+                                               GraphKVCapacityAdapter adapter) {
+  get_instance()->model_registry_[name].graph_kv_capacity_adapter =
+      std::move(adapter);
+}
+
+int64_t ModelRegistry::get_graph_kv_capacity(const std::string& name,
+                                             const ModelArgs& args,
+                                             int64_t default_capacity) {
+  const auto& registry = get_instance()->model_registry_;
+  const auto it = registry.find(name);
+  if (it == registry.end() || !it->second.graph_kv_capacity_adapter) {
+    return default_capacity;
+  }
+  return it->second.graph_kv_capacity_adapter(args);
 }
 
 void ModelRegistry::configure_mtp_args(ModelArgs& args,

@@ -1914,7 +1914,7 @@ def test_dp_real_and_dummy_decode_share_graph_admission() -> None:
     assert dummy_runner.can_execute(input_ids, make_metadata(is_dummy=True))
 
 
-def test_decode_rejects_mismatched_linear_state_mask_host() -> None:
+def test_decode_rejects_mismatched_linear_state_validity_mask() -> None:
     runner = _runner()
     metadata = _metadata(torch.arange(4, dtype=torch.int32))
     metadata.has_initial_state = torch.ones(3, dtype=torch.int32)

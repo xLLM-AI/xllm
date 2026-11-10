@@ -15,6 +15,7 @@ limitations under the License.
 #pragma once
 
 #include <algorithm>
+#include <unordered_set>
 
 #include "core/util/utils.h"
 #include "models/model_registry.h"
@@ -259,7 +260,12 @@ REGISTER_MODEL_ARGS_LOADER(glm5_next_mtp, &glm5_next_args::load_model_args);
 const bool glm5_next_mtp_capabilities_registered = []() {
   MtpModelCapabilities capabilities;
   capabilities.native_draft_requires_accepted_span_replay = true;
+  capabilities.model_family = MtpModelFamily::GLM5;
+  capabilities.supports_causal_replay = true;
+  capabilities.supports_grouped_graph = true;
+  capabilities.graph_context_policy = GraphContextPolicy::KPOOL_FIXED;
   capabilities.python_draft_owns_embedding_and_lm_head = true;
+  ModelRegistry::register_mtp_capabilities("glm5_next", capabilities);
   ModelRegistry::register_mtp_capabilities("glm5_next_mtp", capabilities);
   return true;
 }();

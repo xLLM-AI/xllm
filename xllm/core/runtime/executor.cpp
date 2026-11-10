@@ -41,6 +41,10 @@ Executor::Executor(CausalLM* model,
       model, args, device, options, executor_type);
 }
 
+void Executor::set_dp_process_group(ProcessGroup* group) {
+  impl_->set_dp_process_group(group);
+}
+
 ModelOutput Executor::forward(const torch::Tensor& tokens,
                               const torch::Tensor& positions,
                               std::vector<KVCache>& kv_caches,

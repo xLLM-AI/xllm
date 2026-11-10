@@ -31,6 +31,8 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/runtime/graph_execution_input.h"
+#include "core/runtime/mlu_graph_planner.h"
 #include "mlu_graph_executor_impl.h"
 #include "models/llm/mlu/mtp_topk_state.h"
 #include "platform/device.h"
@@ -83,6 +85,31 @@ TEST(DecodeGraphBucketTest, MapsTokenBucketsWithAndWithoutPadding) {
   EXPECT_EQ(runtime::get_decode_graph_token_bucket(
                 /*num_tokens=*/17, /*enable_no_padding=*/true),
             17);
+}
+
+TEST(MluGraphCapacityTest, GroupedRowsCoverRoundedRequests) {
+  runtime::Options options;
+  options.max_seqs_per_batch(33)
+      .num_decoding_tokens(3)
+      .enable_speculative_decode(true)
+      .enable_graph_mode_decode_no_padding(false)
+      .speculative_algorithm("mtp");
+  MtpModelCapabilities capabilities;
+  EXPECT_EQ(mlu::get_graph_token_capacity(options, capabilities), 112);
+  capabilities.supports_grouped_graph = true;
+  EXPECT_EQ(mlu::get_graph_token_capacity(options, capabilities), 144);
+}
+TEST(MluGraphCapacityTest, DraftRowsCoverIntermediateTpAlignedPrefixes) {
+  runtime::Options options;
+  options.max_seqs_per_batch(1)
+      .num_decoding_tokens(1)
+      .mtp_draft_prefix_width(4)
+      .is_draft_engine(true)
+      .world_size(16)
+      .dp_size(2);
+  MtpModelCapabilities capabilities;
+  capabilities.supports_grouped_graph = true;
+  EXPECT_EQ(mlu::get_graph_token_capacity(options, capabilities), 24);
 }
 
 }  // namespace
@@ -146,8 +173,6 @@ class MockCausalLM : public CausalLM {
   std::vector<int32_t> last_dp_token_nums_;
 };
 
-namespace {}  // namespace
-
 class MluGraphExecutorTest : public ::testing::Test {
  protected:
   MluGraphExecutorTest() = default;
@@ -183,12 +208,8 @@ class MluGraphExecutorTest : public ::testing::Test {
         torch::randint(0, 10, {batch_size}, int_tensor_options);
     auto block_table = torch::randint(
         0, 10, {batch_size, num_blocks_per_req}, int_tensor_options);
-    std::vector<int32_t> q_seq_lens_vec(batch_size + 1, 0);
-    std::vector<int32_t> kv_seq_lens_vec(batch_size + 1, 0);
-    for (int32_t i = 0; i < batch_size; ++i) {
-      q_seq_lens_vec[i + 1] = q_seq_lens_vec[i] + 1;
-      kv_seq_lens_vec[i + 1] = kv_seq_lens_vec[i] + 1;
-    }
+    std::vector<int32_t> q_seq_lens_vec(batch_size, 1);
+    std::vector<int32_t> kv_seq_lens_vec(batch_size, 1);
     auto q_seq_lens = torch::tensor(q_seq_lens_vec, int_tensor_options);
     auto kv_seq_lens = torch::tensor(kv_seq_lens_vec, int_tensor_options);
     auto input_embedding =
@@ -557,23 +578,41 @@ TEST_F(MluGraphExecutorTest, OverConfiguredTokenLimitFallsBackToEager) {
   EXPECT_EQ(model_->last_tokens_size(), batch_size);
 }
 
-TEST_F(MluGraphExecutorTest, PersistentTensorBytesIncludeLazyAux) {
-  ::xllm::mlu::GraphPersistentParam param(
-      model_args_, tensor_options_.device(), options_);
-  const std::size_t output_bytes =
-      static_cast<std::size_t>(param.output_.numel()) *
-      param.output_.element_size();
-  const std::size_t base_bytes = param.get_persistent_tensor_bytes();
+TEST_F(MluGraphExecutorTest, OverPersistentGraphRowCapacityFallsBackToEager) {
+  ScopedConfigSnapshot config_snapshot;
+  ExecutionConfig::get_instance().max_tokens_for_graph_mode(128);
+  options_.is_draft_engine(false);
+  options_.max_seqs_per_batch(1);
+  options_.enable_speculative_decode(false);
+  rebuild_impl();
 
-  param.aux_hidden_states_ = torch::zeros_like(param.output_);
+  const int32_t batch_size = 2;
+  const uint64_t seed = 97;
+  auto forward_input = prepare_inputs(batch_size, seed);
+  const int32_t start_cnt = model_->forward_cnt();
 
-  EXPECT_GT(base_bytes, output_bytes);
-  EXPECT_EQ(param.get_persistent_tensor_bytes(), base_bytes + output_bytes);
+  auto first_output = impl_
+                          ->run({forward_input.token_ids},
+                                {forward_input.positions},
+                                kv_caches_,
+                                {ModelParamsView(forward_input.input_params)})
+                          .hidden_states;
+  auto second_output = impl_
+                           ->run({forward_input.token_ids},
+                                 {forward_input.positions},
+                                 kv_caches_,
+                                 {ModelParamsView(forward_input.input_params)})
+                           .hidden_states;
+
+  torch_mlu::synchronize();
+  EXPECT_TRUE(torch::allclose(first_output, second_output, 1e-5, 1e-6));
+  EXPECT_EQ(model_->forward_cnt(), start_cnt + 2);
+  EXPECT_EQ(model_->last_tokens_size(), batch_size);
 }
 
 TEST_F(MluGraphExecutorTest, LinearStatePaddingTailUsesPaddingId) {
   ::xllm::mlu::GraphPersistentParam param(
-      model_args_, tensor_options_.device(), options_);
+      model_args_, tensor_options_.device(), options_, {});
 
   LlmForwardInput first_input = prepare_inputs(/*batch_size=*/4, /*seed=*/83);
   first_input.input_params.embedding.linear_state_ids = {10, 20, 30, 40};
@@ -581,13 +620,18 @@ TEST_F(MluGraphExecutorTest, LinearStatePaddingTailUsesPaddingId) {
       torch::tensor(first_input.input_params.embedding.linear_state_ids,
                     tensor_options_.dtype(torch::kInt32));
 
-  param.init_params(ModelParamsView(first_input.input_params),
-                    /*padding_num_tokens=*/4,
-                    /*padding_needed=*/0);
+  ::xllm::mlu::GraphPlan first_plan;
+  first_plan.layout.num_reqs = 4;
+  first_plan.layout.padded_num_reqs = 4;
+  first_plan.layout.padded_num_tokens = 4;
+  ModelParamsView graph_params =
+      copy_graph_execution_input(ModelParamsView(first_input.input_params));
+  param.bind_buffers(graph_params, first_plan);
   param.update_input_buffer(first_input.token_ids,
                             first_input.positions,
                             ModelParamsView(first_input.input_params),
-                            /*padding_needed=*/0);
+                            graph_params,
+                            first_plan);
 
   LlmForwardInput second_input = prepare_inputs(/*batch_size=*/3, /*seed=*/89);
   second_input.input_params.embedding.linear_state_ids = {11, 21, 31};
@@ -595,14 +639,17 @@ TEST_F(MluGraphExecutorTest, LinearStatePaddingTailUsesPaddingId) {
       torch::tensor(second_input.input_params.embedding.linear_state_ids,
                     tensor_options_.dtype(torch::kInt32));
 
+  ::xllm::mlu::GraphPlan second_plan = first_plan;
+  second_plan.layout.num_reqs = 3;
   param.update_input_buffer(second_input.token_ids,
                             second_input.positions,
                             ModelParamsView(second_input.input_params),
-                            /*padding_needed=*/1);
+                            graph_params,
+                            second_plan);
 
   torch_mlu::synchronize();
   torch::Tensor linear_state_indices =
-      param.params_->embedding.linear_state_indices.cpu();
+      graph_params.embedding.linear_state_indices.cpu();
   EXPECT_TRUE(torch::equal(linear_state_indices,
                            torch::tensor({11, 21, 31, kPaddingLinearStateId},
                                          torch::dtype(torch::kInt32))));
