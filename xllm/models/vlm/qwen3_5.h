@@ -115,13 +115,9 @@ class Qwen3_5ModelImpl final
       std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
     }
 
-    auto inputs_embeds = input_params.embedding.input_embedding;
-    torch::Tensor h;
-    if (inputs_embeds.defined()) {
-      h = inputs_embeds;
-    } else {
-      h = embed_tokens_(tokens);
-    }
+    torch::Tensor h = input_params.embedding.input_embedding.defined()
+                          ? input_params.embedding.input_embedding
+                          : embed_tokens_(tokens);
 
     // Prepared graph metadata preserves the captured bucket's history bounds.
     std::optional<layer::AttentionMetadata> derived_attn_metadata;

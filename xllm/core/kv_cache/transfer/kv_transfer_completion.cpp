@@ -17,14 +17,12 @@ limitations under the License.
 
 #include <folly/executors/InlineExecutor.h>
 #include <glog/logging.h>
-#include <xxhash.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
-#include <cstring>
 #include <mutex>
 #include <utility>
 
@@ -105,56 +103,21 @@ std::vector<std::string> KVTransferCompletion::wait(
     return failed_request_ids;
   }
 
-  const size_t kPayloadMetadataSize = 2;
-  const size_t payload_size =
-      kPayloadMetadataSize + canonical_request_ids.size();
-  torch::Tensor payload_host = torch::zeros(
-      {static_cast<int64_t>(payload_size)},
-      torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
-  int64_t* payload_data = payload_host.data_ptr<int64_t>();
-  payload_data[0] = static_cast<int64_t>(canonical_request_ids.size());
-  uint64_t request_ids_hash = 0;
-  for (const auto& request_id : canonical_request_ids) {
-    request_ids_hash = XXH3_64bits_withSeed(
-        request_id.data(), request_id.size(), request_ids_hash);
-  }
-  std::memcpy(&payload_data[1], &request_ids_hash, sizeof(request_ids_hash));
+  torch::Tensor bitmap_host = torch::zeros(
+      {static_cast<int64_t>(canonical_request_ids.size())}, torch::kInt32);
+  auto* bitmap_data = bitmap_host.data_ptr<int32_t>();
   for (size_t index = 0; index < canonical_request_ids.size(); ++index) {
-    if (locally_failed(canonical_request_ids[index])) {
-      payload_data[kPayloadMetadataSize + index] = 1;
-    }
+    bitmap_data[index] = locally_failed(canonical_request_ids[index]);
   }
-  // Orthogonal TP/CP groups carry the cumulative bitmap forward so a failure
-  // found by an earlier group also reaches ranks that only share the later
-  // group. Metadata stays unchanged, so the existing payload is reused.
-  torch::Tensor payload = payload_host.to(device);
+  torch::Tensor bitmap = bitmap_host.to(device);
   for (size_t group_index = 0; group_index < num_groups; ++group_index) {
-    ProcessGroup* group = active_groups[group_index];
-    torch::Tensor gathered =
-        group->allgather_base_sync(payload).to(torch::kCPU);
-    CHECK_EQ(gathered.numel(),
-             static_cast<int64_t>(group->world_size() * payload.numel()))
-        << "unexpected KV transfer request payload shape";
-    const int64_t* gathered_data = gathered.data_ptr<int64_t>();
-    for (int32_t rank = 0; rank < group->world_size(); ++rank) {
-      const int64_t rank_offset = rank * payload.numel();
-      CHECK_EQ(gathered_data[rank_offset], payload_data[0])
-          << "KV transfer request count differs across reduction ranks";
-      CHECK_EQ(gathered_data[rank_offset + 1], payload_data[1])
-          << "KV transfer request IDs differ across reduction ranks";
-      for (size_t index = 0; index < canonical_request_ids.size(); ++index) {
-        if (gathered_data[rank_offset + kPayloadMetadataSize + index] > 0) {
-          payload_data[kPayloadMetadataSize + index] = 1;
-        }
-      }
-    }
-    if (group_index + 1 < num_groups) {
-      payload.copy_(payload_host);
-    }
+    active_groups[group_index]->allreduce(bitmap);
   }
+  bitmap_host = bitmap.to(torch::kCPU);
+  bitmap_data = bitmap_host.data_ptr<int32_t>();
   std::vector<std::string> failed_request_ids;
   for (size_t index = 0; index < canonical_request_ids.size(); ++index) {
-    if (payload_data[kPayloadMetadataSize + index] > 0) {
+    if (bitmap_data[index] != 0) {
       failed_request_ids.emplace_back(canonical_request_ids[index]);
     }
   }

@@ -16,14 +16,17 @@ limitations under the License.
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 
 #include <gtest/gtest.h>
+#include <torch/types.h>
 
 #include <chrono>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "core/framework/parallel_state/process_group.h"
 #include "core/platform/device.h"
 
 namespace xllm {
@@ -118,6 +121,37 @@ TEST(KVTransferTrackerTest, DestructionWaitsForTrackedTransfer) {
   EXPECT_EQ(result.wait_for(50ms), std::future_status::timeout);
   completion.reset();
   EXPECT_EQ(result.wait_for(1s), std::future_status::ready);
+}
+
+class FailureProcessGroup final : public ProcessGroup {
+ public:
+  explicit FailureProcessGroup(bool remote_failure = false)
+      : ProcessGroup(/*rank=*/0, /*world_size=*/2, torch::Device(torch::kCPU)),
+        remote_failure_(remote_failure) {}
+
+  void allreduce(torch::Tensor& input) override {
+    ++reductions_;
+    if (remote_failure_) {
+      input.index_put_({1}, 1);
+    }
+  }
+
+  int32_t reductions_ = 0;
+
+ private:
+  bool remote_failure_;
+};
+
+TEST(KVTransferCompletionTest, MergesFailuresAcrossDistinctReplicaGroups) {
+  folly::Promise<std::vector<std::string>> promise;
+  KVTransferCompletion completion(promise.getSemiFuture(), {"second", "first"});
+  promise.setValue(std::vector<std::string>{"first"});
+  FailureProcessGroup tp(/*remote_failure=*/true);
+  FailureProcessGroup cp;
+  EXPECT_EQ(completion.wait({&tp, &cp}, Device(torch::kCPU)),
+            (std::vector<std::string>{"first", "second"}));
+  EXPECT_EQ(tp.reductions_, 1);
+  EXPECT_EQ(cp.reductions_, 1);
 }
 
 }  // namespace
