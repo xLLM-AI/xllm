@@ -136,6 +136,7 @@ do
   #nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
   nohup $XLLM_PATH \
     --model $MODEL_PATH \
+    --model_impl=python \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
@@ -149,7 +150,7 @@ do
     --enable_graph=true \
     --enable_schedule_overlap=true \
     --communication_backend="hccl" \
-    --graph_decode_batch_size_limit=2 \
+    --acl_graph_decode_batch_size_limit=2 \
     --draft_model=$DRAFT_MODEL_PATH \
     --num_speculative_tokens=3 \
     --ep_size=16 \
@@ -207,6 +208,7 @@ for (( i=0; i<$LOCAL_NODES; i++ )); do
   DEVICE=$((START_DEVICE + i));  LOG_FILE="$LOG_DIR/node_$i.log"
   nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
     --model $MODEL_PATH \
+    --model_impl=python \
     --host $LOCAL_HOST \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
@@ -251,6 +253,7 @@ for (( i=0; i<$LOCAL_NODES; i++ )); do
   DEVICE=$((START_DEVICE + i));  LOG_FILE="$LOG_DIR/node_$i.log"
   nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
     --model $MODEL_PATH \
+    --model_impl=python \
     --host $LOCAL_HOST \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
@@ -426,6 +429,7 @@ cd ..
     LOG_FILE="$LOG_DIR/node_$i.log"
     nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
       --model $MODEL_PATH  --model_id glmmoe \
+      --model_impl=python \
       --host $LOCAL_HOST \
       --port $PORT \
       --master_node_addr=$MASTER_NODE_ADDR \
@@ -481,6 +485,7 @@ cd ..
     LOG_FILE="$LOG_DIR/node_$i.log"
     nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
       --model $MODEL_PATH  --model_id glmmoe \
+      --model_impl=python \
       --host $LOCAL_HOST \
       --port $PORT \
       --master_node_addr=$MASTER_NODE_ADDR \

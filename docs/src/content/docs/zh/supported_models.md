@@ -36,19 +36,13 @@ sidebar:
 
 | 模型 / 系列 | Ascend NPU | Cambricon MLU | Hygon DCU | 部署指南 |
 | :--- | :---: | :---: | :---: | :--- |
-| DeepSeek-V3 / R1 / V3.1 | ✅ | ✅ | ❌ | 指南待补充 |
+| DeepSeek-V3 / R1 / V3.1 | ❌ | ✅ | ❌ | 指南待补充 |
 | DeepSeek-V3.2 | ✅ | ✅ | ❌ | 指南待补充 |
 | DeepSeek-V4 | ✅ | ✅ | — | [部署指南 ↗](/zh/cookbook/autoregressive_models/deepseek/deepseek_v4/) |
-| Qwen2 / Qwen2.5 / QwQ | ✅ | ✅ | ✅ | 指南待补充 |
+| Qwen2 / Qwen2.5 / QwQ | ❌ | ✅ | ✅ | 指南待补充 |
 | Qwen3 | ✅ | ✅ | ✅ | 指南待补充 |
 | Qwen3 MoE | ✅ | ✅ | ✅ | 指南待补充 |
 | Qwen3.5 | ✅ | ✅ | — | [部署指南 ↗](/zh/cookbook/autoregressive_models/qwen/qwen3_5/) |
-| Kimi-K2 | ✅ | ❌ | ❌ | 指南待补充 |
-| Kimi-K2.5 / Kimi-K2.6 | ✅ | — | — | [部署指南 ↗](/zh/cookbook/autoregressive_models/kimi/kimi2_5/) |
-| Llama2 / Llama3 | ✅ | ❌ | ❌ | 指南待补充 |
-| GLM-4.5 | ✅ | ❌ | ❌ | 指南待补充 |
-| GLM-4.6 | ✅ | ❌ | ❌ | 指南待补充 |
-| GLM-4.7 | ✅ | ❌ | ❌ | 指南待补充 |
 | GLM-5 | ✅ | ✅ | ❌ | [部署指南 ↗](/zh/cookbook/autoregressive_models/glm/glm_5/) |
 | GLM-5.1 / GLM-5.2 / GLM-5.3 | ✅ | ✅ | — | [部署指南 ↗](/zh/cookbook/autoregressive_models/glm/glm_5/) |
 | GLM-5.3-Flash | ✅ | — | — | [预览版指南 ↗](/zh/cookbook/autoregressive_models/glm/glm_5_3_flash/) |
@@ -68,13 +62,10 @@ sidebar:
 
 | 模型 / 系列 | Ascend NPU | Cambricon MLU | Hygon DCU | 部署指南 |
 | :--- | :---: | :---: | :---: | :--- |
-| MiniCPM-V | ✅ | ❌ | ❌ | 指南待补充 |
-| MiMo-VL | ✅ | ❌ | ❌ | 指南待补充 |
-| Qwen2.5-VL | ✅ | ✅ | ✅ | 指南待补充 |
-| Qwen3-VL | ✅ | ✅ | ✅ | 指南待补充 |
-| GLM-4.6V | ✅ | ❌ | ❌ | 指南待补充 |
+| Qwen2.5-VL | ❌ | ✅ | ✅ | 指南待补充 |
+| Qwen3-VL（稠密） | ✅ | ✅ | ✅ | 指南待补充 |
+| Qwen3-VL MoE | ❌ | ✅ | ✅ | 指南待补充 |
 | GLM-5.3-Flash-VL | ✅ | — | — | [预览版指南 ↗](/zh/cookbook/autoregressive_models/glm/glm_5_3_flash/) |
-| VLM-R1 | ✅ | ❌ | ❌ | 指南待补充 |
 
 </div>
 
