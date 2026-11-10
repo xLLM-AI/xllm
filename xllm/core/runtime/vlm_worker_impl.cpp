@@ -105,28 +105,28 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
   const auto& sampling_params = input.sampling_params;
   ModelOutput model_output;
   torch::Tensor logits;
-  torch::Tensor lm_head_selected_token_idxes;
+  torch::Tensor lm_head_input_indices;
   torch::Tensor selected_hidden_from_lm_head;
   {
     ModelParamsView params(input.input_params);
     model_output = model_executor_->forward(
         input.token_ids, input.positions, kv_caches_, params);
     if (sampling_params.num_sample_seqs() > 0) {
-      lm_head_selected_token_idxes = remap_selected_token_idxes_for_lm_head(
-          sampling_params.selected_token_idxes(),
-          params.parallel,
-          model_output.hidden_states);
+      lm_head_input_indices =
+          remap_logits_indices(sampling_params.logits_indices(),
+                               params.parallel,
+                               model_output.hidden_states);
     }
   }
 
   if (sampling_params.num_sample_seqs() > 0) {
     if (options_.enable_speculative_decode()) {
       logits = model_->logits(model_output.hidden_states,
-                              lm_head_selected_token_idxes,
+                              lm_head_input_indices,
                               selected_hidden_from_lm_head);
     } else {
-      logits = model_->logits(model_output.hidden_states,
-                              lm_head_selected_token_idxes);
+      logits =
+          model_->logits(model_output.hidden_states, lm_head_input_indices);
     }
   }
 
@@ -163,7 +163,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
         !is_spec_draft_;
     output_spec_hidden_states(output.sample_output,
                               model_output,
-                              lm_head_selected_token_idxes,
+                              lm_head_input_indices,
                               selected_hidden_from_lm_head,
                               is_target_prefill,
                               /*cp_enabled=*/options_.cp_size() > 1);

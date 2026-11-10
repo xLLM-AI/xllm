@@ -22,8 +22,10 @@ limitations under the License.
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "common/types.h"
@@ -77,11 +79,6 @@ inline bool supports_contiguous_forward_input_buffer(
   return false;
 #endif
 }
-
-bool try_to_device_from_input_host_buffer(const LlmForwardInput& input,
-                                          const torch::Device& device,
-                                          torch::ScalarType dtype,
-                                          LlmForwardInput& output);
 
 bool unpack_from_input_host_buffer(const LlmForwardInput& input,
                                    const torch::Device& device,
@@ -190,8 +187,7 @@ struct ForwardInputBufferPlan {
 inline bool add_sampling_to_plan(const SamplingParameters& source,
                                  SamplingParameters& target,
                                  ForwardInputBufferPlan& plan) {
-  return plan.add(source.selected_token_idxes(),
-                  &target.selected_token_idxes()) &&
+  return plan.add(source.logits_indices(), &target.logits_indices()) &&
          plan.add(source.frequency_penalties(),
                   &target.frequency_penalties()) &&
          plan.add(source.presence_penalties(), &target.presence_penalties()) &&
@@ -284,33 +280,6 @@ inline bool add_model_tensors_to_plan(const Params& source,
                   &target.embedding.mtp_bootstrap_embeddings) &&
          plan.add(source.graph.attn_mask, &target.graph.attn_mask) &&
          plan.add(source.graph.tiling_data, &target.graph.tiling_data);
-}
-
-inline torch::Tensor gather_tensor_by_indices(
-    const torch::Tensor& tensor,
-    const std::vector<int64_t>& indices) {
-  if (!tensor.defined()) {
-    return tensor;
-  }
-  torch::Tensor cpu_tensor = to_cpu_contiguous(tensor);
-  torch::Tensor gather_indices = make_cpu_tensor(indices);
-  if (cpu_tensor.dim() <= 1) {
-    return cpu_tensor.index_select(0, gather_indices);
-  }
-  CHECK_EQ(cpu_tensor.dim(), 2) << "Expected 1-D or 2-D tensor for CP shard";
-  return cpu_tensor.index_select(1, gather_indices);
-}
-
-inline torch::Tensor gather_tensor_by_indices_on_dim(
-    const torch::Tensor& tensor,
-    const std::vector<int64_t>& indices,
-    int64_t dim) {
-  if (!tensor.defined()) {
-    return tensor;
-  }
-  torch::Tensor cpu_tensor = to_cpu_contiguous(tensor);
-  torch::Tensor gather_indices = make_cpu_tensor(indices);
-  return cpu_tensor.index_select(dim, gather_indices);
 }
 
 }  // namespace detail
@@ -554,8 +523,7 @@ class LlmForwardInput final {
     LOG(INFO) << "  token_ids: " << token_ids << std::endl;
     LOG(INFO) << "  positions: " << positions << std::endl;
     ModelParamsView(input_params).print();
-    LOG(INFO) << " params.selected_token_idxes "
-              << sampling_params.selected_token_idxes();
+    LOG(INFO) << " params.logits_indices " << sampling_params.logits_indices();
     LOG(INFO) << " params.do_sample " << sampling_params.do_sample();
   }
 
@@ -606,6 +574,7 @@ class ForwardOutput final {
   // emits 1-D tokens); consumed before proto/shared-memory serialization.
   SpecVerifyStats spec_verify_stats;
   std::vector<JsonObjectOutputError> json_object_errors;
+  std::vector<std::string> failed_request_ids;
   // Keep no-sync input tensor handles alive until downstream consumers finish
   // using outputs on the same compute stream. Composite workers append child
   // outputs' retained inputs here. Local runtime handles; not in proto/shm.
@@ -633,21 +602,48 @@ class ForwardOutput final {
   DiTForwardOutput dit_forward_output;
 };
 
-inline void copy_retained_inputs(ForwardOutput& destination,
-                                 const ForwardOutput& source) {
-  destination.retained_inputs.insert(destination.retained_inputs.end(),
-                                     source.retained_inputs.begin(),
-                                     source.retained_inputs.end());
+inline std::optional<ForwardOutput> make_transfer_failure_output(
+    std::vector<std::string> failed_request_ids) {
+  if (failed_request_ids.empty()) {
+    return std::nullopt;
+  }
+  ForwardOutput output;
+  output.failed_request_ids = std::move(failed_request_ids);
+  return output;
+}
+
+inline void append_failed_request_ids(
+    ForwardOutput& destination,
+    std::vector<std::string>&& failed_request_ids) {
+  if (failed_request_ids.empty()) {
+    return;
+  }
+  if (destination.failed_request_ids.empty()) {
+    destination.failed_request_ids = std::move(failed_request_ids);
+    return;
+  }
+  destination.failed_request_ids.insert(
+      destination.failed_request_ids.end(),
+      std::make_move_iterator(failed_request_ids.begin()),
+      std::make_move_iterator(failed_request_ids.end()));
+  failed_request_ids.clear();
 }
 
 inline void transfer_retained_inputs(ForwardOutput& destination,
                                      ForwardOutput& source) {
   CHECK_NE(&destination, &source)
       << "transfer_retained_inputs cannot alias source and destination";
-  destination.retained_inputs.insert(
-      destination.retained_inputs.end(),
-      std::make_move_iterator(source.retained_inputs.begin()),
-      std::make_move_iterator(source.retained_inputs.end()));
+  if (source.retained_inputs.empty()) {
+    return;
+  }
+  if (destination.retained_inputs.empty()) {
+    destination.retained_inputs = std::move(source.retained_inputs);
+  } else {
+    destination.retained_inputs.insert(
+        destination.retained_inputs.end(),
+        std::make_move_iterator(source.retained_inputs.begin()),
+        std::make_move_iterator(source.retained_inputs.end()));
+  }
   source.retained_inputs.clear();
 }
 
@@ -668,6 +664,7 @@ class RawForwardOutput final {
  public:
   std::vector<RawSampleOutput> outputs;  // num seqs
   std::vector<JsonObjectOutputError> json_object_errors;
+  std::vector<std::string> failed_request_ids;
   std::vector<int64_t> expert_load_data;
   int64_t prepared_token = -1;
   // dit output data

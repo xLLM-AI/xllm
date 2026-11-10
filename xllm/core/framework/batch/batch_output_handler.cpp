@@ -30,13 +30,6 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-uint32_t get_sample_source_position(const SampleSlot& sample_slot) {
-  if (sample_slot.token_position == 0) {
-    return 0;
-  }
-  return static_cast<uint32_t>(sample_slot.token_position - 1);
-}
-
 Token make_token(const RawToken& raw_token) {
   Token token(raw_token.id);
   if (raw_token.logprob.has_value()) {
@@ -63,83 +56,89 @@ void update_sequence_embedding(Sequence* seq, const torch::Tensor& embedding) {
   seq->update_mtp_bootstrap_embedding(cur_seq_embed);
 }
 
-std::unordered_set<std::string> fail_json_object_requests(
-    const std::vector<Sequence*>& sequences,
-    const std::vector<JsonObjectOutputError>& errors) {
-  std::unordered_set<std::string> failed_request_ids;
-  if (errors.empty()) {
-    return failed_request_ids;
+void fail_requests(const std::vector<Sequence*>& sequences,
+                   const RawForwardOutput& raw_output) {
+  if (raw_output.json_object_errors.empty() &&
+      raw_output.failed_request_ids.empty()) {
+    return;
   }
 
-  std::unordered_map<std::string, Sequence*> sequences_by_sample_id;
-  sequences_by_sample_id.reserve(sequences.size());
-  for (Sequence* sequence : sequences) {
-    CHECK(sequence != nullptr);
-    const bool inserted =
-        sequences_by_sample_id.emplace(sequence->sample_sequence_id(), sequence)
-            .second;
-    CHECK(inserted) << "duplicate sampled sequence id in batch: "
-                    << sequence->sample_sequence_id();
-  }
+  struct RequestFailure {
+    Status status;
+    bool matched = false;
+  };
+  std::unordered_map<std::string, RequestFailure> request_errors;
+  request_errors.reserve(raw_output.json_object_errors.size() +
+                         raw_output.failed_request_ids.size());
+  if (!raw_output.json_object_errors.empty()) {
+    std::unordered_map<std::string, Sequence*> sequences_by_sample_id;
+    sequences_by_sample_id.reserve(sequences.size());
+    for (Sequence* sequence : sequences) {
+      const bool inserted =
+          sequences_by_sample_id
+              .emplace(sequence->sample_sequence_id(), sequence)
+              .second;
+      CHECK(inserted) << "duplicate sampled sequence id in batch: "
+                      << sequence->sample_sequence_id();
+    }
 
-  std::unordered_map<std::string, Status> request_errors;
-  request_errors.reserve(errors.size());
-  for (const JsonObjectOutputError& error : errors) {
-    CHECK(!error.sample_sequence_id.empty())
-        << "json_object output error has empty sampled sequence id";
-    const auto sequence_iter =
-        sequences_by_sample_id.find(error.sample_sequence_id);
-    CHECK(sequence_iter != sequences_by_sample_id.end())
-        << "json_object output error references unknown sampled sequence id: "
-        << error.sample_sequence_id;
+    for (const JsonObjectOutputError& error : raw_output.json_object_errors) {
+      const auto sequence_iter =
+          sequences_by_sample_id.find(error.sample_sequence_id);
+      CHECK(sequence_iter != sequences_by_sample_id.end())
+          << "json_object output error references unknown sampled sequence id: "
+          << error.sample_sequence_id;
 
-    const std::string& request_id = sequence_iter->second->request_id();
-    request_errors.try_emplace(request_id,
-                               StatusCode::UNKNOWN,
-                               "json_object constrained decoding failed for " +
-                                   error.sample_sequence_id + ": " +
-                                   error.message);
-    failed_request_ids.emplace(request_id);
-  }
-
-  for (Sequence* sequence : sequences) {
-    const auto error_iter = request_errors.find(sequence->request_id());
-    if (!sequence->cancelled() && error_iter != request_errors.end()) {
-      sequence->fail(error_iter->second);
+      request_errors.try_emplace(
+          sequence_iter->second->request_id(),
+          RequestFailure{Status(StatusCode::UNKNOWN,
+                                "json_object constrained decoding failed for " +
+                                    error.sample_sequence_id + ": " +
+                                    error.message)});
     }
   }
-  return failed_request_ids;
+  for (const std::string& request_id : raw_output.failed_request_ids) {
+    request_errors.try_emplace(
+        request_id,
+        RequestFailure{Status(StatusCode::UNKNOWN, "KV cache push failed")});
+  }
+  for (Sequence* sequence : sequences) {
+    auto error = request_errors.find(sequence->request_id());
+    if (error == request_errors.end()) {
+      continue;
+    }
+    error->second.matched = true;
+    if (!sequence->cancelled()) {
+      sequence->fail(error->second.status);
+    }
+  }
+  for (const auto& [request_id, error] : request_errors) {
+    if (!error.matched) {
+      LOG(ERROR) << "KV cache push failure references unknown request_id: "
+                 << request_id;
+    }
+  }
 }
 
 }  // namespace
 
 void BatchOutputHandler::prepare(const BatchInputData& data) {
   clear();
-  reserve(data.sequences.size());
+  output_targets_.reserve(data.sequences.size());
   for (size_t seq_index = 0; seq_index < data.sequences.size(); ++seq_index) {
     add_sequence_targets(data.sequences[seq_index],
                          data.allowed_max_tokens[seq_index]);
   }
 }
 
-void BatchOutputHandler::add_sequence_target(Sequence* sequence) {
-  CHECK(sequence != nullptr);
-  output_targets_.emplace_back(OutputTarget{sequence, /*sample_id=*/0, false});
-}
-
 void BatchOutputHandler::add_sequence_targets(Sequence* sequence,
                                               uint32_t token_budget) {
-  if (sequence == nullptr) {
-    return;
-  }
-
   const uint32_t n_tokens = static_cast<uint32_t>(sequence->tokens().size());
   const uint32_t n_kv_cache_tokens = sequence->kv_state().kv_cache_tokens_num();
   if (n_tokens <= n_kv_cache_tokens) {
     return;
   }
 
-  CHECK_GT(token_budget, 0);
   const uint32_t q_seq_len =
       std::min(n_tokens - n_kv_cache_tokens, token_budget);
   const uint32_t seq_len = q_seq_len + n_kv_cache_tokens;
@@ -147,14 +146,13 @@ void BatchOutputHandler::add_sequence_targets(Sequence* sequence,
 
   if (sample_slots.empty()) {
     if (seq_len == n_tokens) {
-      add_sequence_target(sequence);
+      output_targets_.emplace_back(OutputTarget{sequence});
     }
     return;
   }
 
   for (const auto& sample_slot : sample_slots) {
-    const uint32_t sample_source_position =
-        get_sample_source_position(sample_slot);
+    const uint32_t sample_source_position = sample_slot.source_position();
     if (sample_source_position < n_kv_cache_tokens ||
         sample_source_position >= seq_len) {
       continue;
@@ -165,13 +163,11 @@ void BatchOutputHandler::add_sequence_targets(Sequence* sequence,
 }
 
 void BatchOutputHandler::process_sample_output(
-    const BatchOutputData& data,
+    const std::vector<Sequence*>& sequences,
     const RawForwardOutput& raw_output,
     BatchOutputAction action) {
   const bool replace_fake_token = action == BatchOutputAction::COMMIT_PENDING;
-  const auto& sequences = data.sequences;
-  const std::unordered_set<std::string> failed_request_ids =
-      fail_json_object_requests(sequences, raw_output.json_object_errors);
+  fail_requests(sequences, raw_output);
 
   for (size_t output_idx = 0; output_idx < output_targets_.size();
        ++output_idx) {
@@ -179,8 +175,7 @@ void BatchOutputHandler::process_sample_output(
     auto* seq = target.sequence;
     CHECK(seq != nullptr);
 
-    if (seq->cancelled() || failed_request_ids.contains(seq->request_id()) ||
-        seq->error_status().has_value()) {
+    if (seq->cancelled() || seq->error_status().has_value()) {
       continue;
     }
 
@@ -237,7 +232,7 @@ void BatchOutputHandler::process_sample_output(
 }
 
 void BatchOutputHandler::process_sample_output(
-    const BatchOutputData& data,
+    const std::vector<Sequence*>& sequences,
     const SampleOutput& sample_output,
     BatchOutputAction action) {
   const bool replace_fake_token = action == BatchOutputAction::COMMIT_PENDING;
@@ -248,7 +243,6 @@ void BatchOutputHandler::process_sample_output(
   if (sample_output.embeddings.defined() && !next_tokens_are_spec_width) {
     const int64_t num_seqs = sample_output.embeddings.size(0);
     int64_t output_idx = 0;
-    const auto& sequences = data.sequences;
     for (auto* seq : sequences) {
       CHECK_LT(output_idx, num_seqs);
       update_sequence_embedding(seq, sample_output.embeddings[output_idx++]);
@@ -258,7 +252,6 @@ void BatchOutputHandler::process_sample_output(
     const int64_t num_embedding_rows = sample_output.embeddings.size(0);
     const int64_t num_token_rows = sample_output.next_tokens.size(0);
     int64_t output_idx = 0;
-    const auto& sequences = data.sequences;
     for (auto* seq : sequences) {
       CHECK_LT(output_idx, num_token_rows);
       CHECK_LT(output_idx, num_embedding_rows);

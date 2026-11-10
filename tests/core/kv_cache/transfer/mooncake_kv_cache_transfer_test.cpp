@@ -1640,7 +1640,7 @@ TEST(MooncakeVirtualKVCacheTransferTest, MergePreservesSparseIndexOffsets) {
   second.dst_virtual_kv_cache_layer_global_offsets[0] = {
       {12, 13}, {22, 23}, {32, 33}};
   std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged;
-  transfer.merge_kv_blocks(merged, {first, second}, make_args(0, 1, 1));
+  transfer.merge_kv_blocks(merged, {first, second});
   ASSERT_EQ(merged.size(), 1U);
   const auto& layers =
       merged.begin()->second.dst_virtual_kv_cache_layer_global_offsets;
@@ -1682,7 +1682,7 @@ TEST(MooncakeVirtualKVCacheTransferTest, MergeAllowsEmptyKvSplitOffsets) {
   TransferKVInfo second = first;
   second.dst_virtual_kv_cache_layer_global_offsets[0] = {{}, {}, {}};
   std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged;
-  transfer.merge_kv_blocks(merged, {first, second}, make_args(0, 1, 1));
+  transfer.merge_kv_blocks(merged, {first, second});
   ASSERT_EQ(merged.size(), 1U);
   const auto& layers =
       merged.begin()->second.dst_virtual_kv_cache_layer_global_offsets;
@@ -1692,7 +1692,7 @@ TEST(MooncakeVirtualKVCacheTransferTest, MergeAllowsEmptyKvSplitOffsets) {
   EXPECT_EQ(layers[0].index_offsets, (std::vector<uint64_t>{30, 31}));
 
   std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> reverse_merged;
-  transfer.merge_kv_blocks(reverse_merged, {second, first}, make_args(0, 1, 1));
+  transfer.merge_kv_blocks(reverse_merged, {second, first});
   ASSERT_EQ(reverse_merged.size(), 1U);
   const auto& reverse_layers =
       reverse_merged.begin()->second.dst_virtual_kv_cache_layer_global_offsets;
@@ -1737,7 +1737,7 @@ TEST(MooncakeVirtualKVCacheTransferTest,
             (std::vector<uint64_t>{11}));
 
   std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged;
-  transfer.merge_kv_blocks(merged, filtered, make_args(0, 1, 1));
+  transfer.merge_kv_blocks(merged, filtered);
   ASSERT_EQ(merged.size(), 1U);
   const auto& layers =
       merged.begin()->second.dst_virtual_kv_cache_layer_global_offsets;
@@ -1747,8 +1747,7 @@ TEST(MooncakeVirtualKVCacheTransferTest,
   EXPECT_EQ(layers[0].index_offsets, (std::vector<uint64_t>{31}));
 
   std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> reverse_merged;
-  transfer.merge_kv_blocks(
-      reverse_merged, {filtered[1], filtered[0]}, make_args(0, 1, 1));
+  transfer.merge_kv_blocks(reverse_merged, {filtered[1], filtered[0]});
   ASSERT_EQ(reverse_merged.size(), 1U);
   const auto& reverse_layers =
       reverse_merged.begin()->second.dst_virtual_kv_cache_layer_global_offsets;
@@ -1773,8 +1772,7 @@ TEST(MooncakeVirtualKVCacheTransferTest,
         TransferKVInfo info = make_info(1, 1, 0);
         info.dst_virtual_kv_cache_layer_global_offsets = {std::move(offsets)};
         std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged;
-        EXPECT_DEATH(
-            transfer.merge_kv_blocks(merged, {info}, make_args(0, 1, 1)), "");
+        EXPECT_DEATH(transfer.merge_kv_blocks(merged, {info}), "");
       };
 
   expect_rejected({{10}, {}, {}});
@@ -1787,9 +1785,7 @@ TEST(MooncakeVirtualKVCacheTransferTest,
   TransferKVInfo second = first;
   second.dst_virtual_kv_cache_layer_global_offsets = {{{11}, {21}, {31}}};
   std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged;
-  EXPECT_DEATH(
-      transfer.merge_kv_blocks(merged, {first, second}, make_args(0, 1, 1)),
-      "");
+  EXPECT_DEATH(transfer.merge_kv_blocks(merged, {first, second}), "");
 }
 
 TEST(MooncakeKVCacheTransferEngineTest, LinksAllPcpSourcesWithOneActiveOwner) {
@@ -1999,12 +1995,9 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   const TransferKVInfo info = make_info(/*dst_dp_size=*/1,
                                         /*dst_tp_size=*/4,
                                         /*dst_dp_rank=*/0);
-  const ParallelArgs parallel_args = make_args(/*rank=*/0,
-                                               /*world_size=*/2,
-                                               /*dp_size=*/1);
   std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
 
-  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
+  transfer.merge_kv_blocks(merged_kv_infos, {info});
 
   ASSERT_EQ(merged_kv_infos.size(), 4U);
   EXPECT_NE(merged_kv_infos.find("100_addr_0"), merged_kv_infos.end());
@@ -2025,12 +2018,9 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   const TransferKVInfo info = make_info(/*dst_dp_size=*/1,
                                         /*dst_tp_size=*/4,
                                         /*dst_dp_rank=*/0);
-  const ParallelArgs parallel_args = make_args(/*rank=*/0,
-                                               /*world_size=*/2,
-                                               /*dp_size=*/1);
   std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
 
-  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
+  transfer.merge_kv_blocks(merged_kv_infos, {info});
 
   EXPECT_EQ(merged_kv_infos.size(), 4U);
 }
@@ -2911,9 +2901,11 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                                /*dp_size=*/1);
   std::shared_ptr<KVPushSynchronizerImpl> synchronizer;
 
-  folly::SemiFuture<bool> future = transfer.push_kv_blocks_async(
-      {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
-  EXPECT_FALSE(std::move(future).get());
+  folly::SemiFuture<std::vector<std::string>> future =
+      transfer.push_kv_blocks_async(
+          {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
+  const std::vector<std::string> results = std::move(future).get();
+  EXPECT_EQ(results, (std::vector<std::string>{"req"}));
   EXPECT_TRUE(engine_observer->move_calls.empty());
 }
 
@@ -2996,9 +2988,11 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   parallel_args.kv_split_size(2);
   std::shared_ptr<KVPushSynchronizerImpl> synchronizer;
 
-  folly::SemiFuture<bool> future = transfer.push_kv_blocks_async(
-      {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
-  EXPECT_FALSE(std::move(future).get());
+  folly::SemiFuture<std::vector<std::string>> future =
+      transfer.push_kv_blocks_async(
+          {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
+  const std::vector<std::string> results = std::move(future).get();
+  EXPECT_EQ(results, (std::vector<std::string>{"req"}));
   EXPECT_TRUE(engine_observer->move_calls.empty());
 }
 
@@ -3027,9 +3021,11 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   parallel_args.kv_split_size(2);
   std::shared_ptr<KVPushSynchronizerImpl> synchronizer;
 
-  folly::SemiFuture<bool> future = transfer.push_kv_blocks_async(
-      {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
-  EXPECT_FALSE(std::move(future).get());
+  folly::SemiFuture<std::vector<std::string>> future =
+      transfer.push_kv_blocks_async(
+          {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
+  const std::vector<std::string> results = std::move(future).get();
+  EXPECT_EQ(results, (std::vector<std::string>{"req"}));
   EXPECT_TRUE(engine_observer->move_calls.empty());
 }
 
@@ -3234,7 +3230,6 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   ASSERT_EQ(local_device.synchronize_default_stream(), 0);
 
   KVCacheTransfer::KVCacheInfo info;
-  info.dst_cluster_id = remote_cluster_id;
   info.dst_addr = remote_addr;
   info.mappings = {linear_mapping, kv_mapping};
   std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_infos;
@@ -3245,11 +3240,13 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                          /*device_index=*/0));
   ASSERT_TRUE(synchronizer->record_event(/*layer_index=*/1,
                                          /*device_index=*/0));
-  ASSERT_TRUE(local_transfer.push_kv_blocks(merged_infos,
-                                            synchronizer,
-                                            /*is_spec_draft=*/false,
-                                            /*kv_split_rank=*/0,
-                                            /*kv_split_size=*/1));
+  const std::vector<std::string> results =
+      local_transfer.push_kv_blocks(merged_infos,
+                                    synchronizer,
+                                    /*is_spec_draft=*/false,
+                                    /*kv_split_rank=*/0,
+                                    /*kv_split_size=*/1);
+  EXPECT_TRUE(results.empty());
 
   int32_t command = kValidatePushCommand;
   ASSERT_TRUE(write_all(parent_to_child[1], &command, sizeof(command)));
@@ -3322,7 +3319,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   mapping.local_ids = {1};
   mapping.remote_ids = {2};
   KVCacheTransfer::KVCacheInfo info;
-  info.dst_cluster_id = 1;
+  info.append_unique_request_id("req");
   info.dst_addr = "remote";
   info.mappings.emplace_back(std::move(mapping));
   std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_infos;
@@ -3331,11 +3328,13 @@ TEST(MooncakeKVCacheTransferDefaultTest,
       std::make_shared<KVPushSynchronizerImpl>(/*num_layers=*/1);
   synchronizer->abort();
 
-  EXPECT_FALSE(transfer.push_kv_blocks(merged_infos,
-                                       synchronizer,
-                                       /*is_spec_draft=*/false,
-                                       /*kv_split_rank=*/0,
-                                       /*kv_split_size=*/1));
+  const std::vector<std::string> results =
+      transfer.push_kv_blocks(merged_infos,
+                              synchronizer,
+                              /*is_spec_draft=*/false,
+                              /*kv_split_rank=*/0,
+                              /*kv_split_size=*/1);
+  EXPECT_EQ(results, (std::vector<std::string>{"req"}));
   EXPECT_TRUE(engine_observer->move_calls.empty());
 }
 

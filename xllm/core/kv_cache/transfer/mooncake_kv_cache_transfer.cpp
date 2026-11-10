@@ -21,6 +21,7 @@ limitations under the License.
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <unordered_set>
 
 #include "common/global_flags.h"
 #include "core/framework/config/disagg_pd_config.h"
@@ -38,6 +39,23 @@ namespace {
 std::string get_merge_key(const uint64_t dst_cluster_id,
                           const std::string& dst_addr) {
   return std::to_string(dst_cluster_id) + "_" + dst_addr;
+}
+
+std::vector<std::string> collect_failed_request_ids(
+    const std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo>&
+        kv_infos,
+    const std::unordered_set<std::string>& failed_transfer_keys) {
+  size_t count = 0;
+  for (const std::string& key : failed_transfer_keys) {
+    count += kv_infos.at(key).request_ids().size();
+  }
+  std::vector<std::string> request_ids;
+  request_ids.reserve(count);
+  for (const std::string& key : failed_transfer_keys) {
+    const std::vector<std::string>& ids = kv_infos.at(key).request_ids();
+    request_ids.insert(request_ids.end(), ids.begin(), ids.end());
+  }
+  return request_ids;
 }
 
 void validate_virtual_kv_cache_global_offsets(
@@ -99,16 +117,27 @@ int64_t physical_rows_per_resource(KVCacheTensorRole role,
   return role == KVCacheTensorRole::SSM ? ssm_checkpoint_stride : 1;
 }
 
-void append_mappings(std::vector<KVTransferMapping>& dst,
-                     const std::vector<KVTransferMapping>& src) {
-  for (const KVTransferMapping& src_mapping : src) {
-    auto it = std::find_if(dst.begin(),
-                           dst.end(),
+void merge_kv_info(
+    std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo>&
+        merged_kv_infos,
+    const TransferKVInfo& info,
+    const int32_t dst_rank) {
+  uint64_t dst_cluster_id = info.remote_instance_info.cluster_ids[dst_rank];
+  const std::string& dst_addr = info.remote_instance_info.addrs[dst_rank];
+  std::string key = get_merge_key(dst_cluster_id, dst_addr);
+  auto [it, inserted] = merged_kv_infos.try_emplace(std::move(key));
+  KVCacheTransfer::KVCacheInfo& kv_info = it->second;
+  if (inserted) {
+    kv_info.dst_addr = dst_addr;
+  }
+  for (const KVTransferMapping& src_mapping : info.mappings) {
+    auto it = std::find_if(kv_info.mappings.begin(),
+                           kv_info.mappings.end(),
                            [&src_mapping](const KVTransferMapping& mapping) {
                              return mapping.group_id == src_mapping.group_id;
                            });
-    if (it == dst.end()) {
-      dst.emplace_back(src_mapping);
+    if (it == kv_info.mappings.end()) {
+      kv_info.mappings.emplace_back(src_mapping);
       continue;
     }
     it->local_ids.insert(it->local_ids.end(),
@@ -118,33 +147,9 @@ void append_mappings(std::vector<KVTransferMapping>& dst,
                           src_mapping.remote_ids.begin(),
                           src_mapping.remote_ids.end());
   }
-}
-
-void merge_kv_info(
-    std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo>&
-        merged_kv_infos,
-    const TransferKVInfo& info,
-    const int32_t dst_rank) {
-  uint64_t dst_cluster_id = info.remote_instance_info.cluster_ids[dst_rank];
-  const std::string& dst_addr = info.remote_instance_info.addrs[dst_rank];
-  std::string key = get_merge_key(dst_cluster_id, dst_addr);
-
-  auto it = merged_kv_infos.find(key);
-  if (it == merged_kv_infos.end()) {
-    KVCacheTransfer::KVCacheInfo kv_info;
-    kv_info.dst_cluster_id = dst_cluster_id;
-    kv_info.dst_addr = dst_addr;
-    append_mappings(kv_info.mappings, info.mappings);
-    merge_virtual_kv_cache_global_offsets(
-        kv_info.dst_virtual_kv_cache_layer_global_offsets,
-        info.dst_virtual_kv_cache_layer_global_offsets);
-    merged_kv_infos.emplace(key, std::move(kv_info));
-    return;
-  }
-
-  append_mappings(it->second.mappings, info.mappings);
+  kv_info.append_unique_request_id(info.request_id);
   merge_virtual_kv_cache_global_offsets(
-      it->second.dst_virtual_kv_cache_layer_global_offsets,
+      kv_info.dst_virtual_kv_cache_layer_global_offsets,
       info.dst_virtual_kv_cache_layer_global_offsets);
 }
 
@@ -684,9 +689,7 @@ bool MooncakeKVCacheTransferDefault::pull_kv_blocks(
 
 void MooncakeKVCacheTransferBase::merge_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
-    const std::vector<TransferKVInfo>& transfer_kv_infos,
-    const ParallelArgs& parallel_args) {
-  (void)parallel_args;
+    const std::vector<TransferKVInfo>& transfer_kv_infos) {
   for (const TransferKVInfo& info : transfer_kv_infos) {
     const int32_t dst_dp_size = info.remote_instance_info.dp_size;
     const int32_t dst_world_size =
@@ -709,7 +712,7 @@ void MooncakeKVCacheTransferBase::merge_kv_blocks(
 }
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-bool MooncakeKVCacheTransferDefault::push_kv_blocks(
+std::vector<std::string> MooncakeKVCacheTransferDefault::push_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
     bool is_spec_draft,
@@ -728,16 +731,19 @@ bool MooncakeKVCacheTransferDefault::push_kv_blocks(
     keys = rotate_dst_rank(keys, kv_split_rank);
   }
 
-  bool result = true;
+  std::unordered_set<std::string> failed_transfer_keys;
   const CacheNamespace cache_namespace =
       is_spec_draft ? CacheNamespace::SPEC_DRAFT : CacheNamespace::MAIN;
   for (int64_t layer_index = 0; layer_index < num_layers; ++layer_index) {
     if (!layer_synchronizer->synchronize_layer(layer_index)) {
       LOG(ERROR) << "Synchronize KV cache layer failed, layer=" << layer_index;
-      result = false;
+      failed_transfer_keys.insert(keys.begin(), keys.end());
       continue;
     }
     for (const std::string& key : keys) {
+      if (failed_transfer_keys.contains(key)) {
+        continue;
+      }
       const KVCacheInfo& kv_info = merged_kv_infos.at(key);
       std::vector<ByteRegion> regions;
       const Status bind_status =
@@ -750,7 +756,7 @@ bool MooncakeKVCacheTransferDefault::push_kv_blocks(
         LOG(ERROR) << "Bind KV byte regions failed, layer=" << layer_index
                    << ", destination=" << kv_info.dst_addr << ": "
                    << bind_status.message();
-        result = false;
+        failed_transfer_keys.insert(key);
         continue;
       }
       if (regions.empty()) {
@@ -761,13 +767,14 @@ bool MooncakeKVCacheTransferDefault::push_kv_blocks(
       if (!success) {
         LOG(ERROR) << "Push KV byte regions failed, layer=" << layer_index
                    << ", destination=" << kv_info.dst_addr;
-        result = false;
+        failed_transfer_keys.insert(key);
       }
     }
   }
   VLOG(1) << "[Mooncake][PDTransfer] direction=push, destinations="
-          << keys.size() << ", layers=" << num_layers << ", success=" << result;
-  return result;
+          << keys.size() << ", layers=" << num_layers
+          << ", failed_tasks=" << failed_transfer_keys.size();
+  return collect_failed_request_ids(merged_kv_infos, failed_transfer_keys);
 }
 #endif
 
@@ -1019,7 +1026,7 @@ bool MooncakeVirtualKVCacheTransfer::pull_kv_blocks(
 }
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-bool MooncakeVirtualKVCacheTransfer::push_kv_blocks(
+std::vector<std::string> MooncakeVirtualKVCacheTransfer::push_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
     bool is_spec_draft,
@@ -1091,14 +1098,20 @@ bool MooncakeVirtualKVCacheTransfer::build_explicit_mappings(
 }
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
+std::vector<std::string> MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
     int32_t kv_split_rank,
     int32_t kv_split_size) {
   if (model_id_.empty()) {
     LOG(ERROR) << "model_id not set for VirtualMemory mode push";
-    return false;
+    std::vector<std::string> results;
+    results.reserve(merged_kv_infos.size());
+    for (const auto& entry : merged_kv_infos) {
+      const auto& request_ids = entry.second.request_ids();
+      results.insert(results.end(), request_ids.begin(), request_ids.end());
+    }
+    return results;
   }
 
   std::vector<std::string> keys;
@@ -1110,16 +1123,19 @@ bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
     keys = rotate_dst_rank(keys, kv_split_rank);
   }
 
-  bool result = true;
+  std::unordered_set<std::string> failed_transfer_keys;
   for (int64_t layer_index = 0; layer_index < num_layers_; ++layer_index) {
     if (!layer_synchronizer->synchronize_layer(layer_index)) {
       LOG(ERROR) << "Synchronize VirtualMemory KV cache layer failed, layer="
                  << layer_index;
-      result = false;
+      failed_transfer_keys.insert(keys.begin(), keys.end());
       continue;
     }
 
     for (const std::string& key : keys) {
+      if (failed_transfer_keys.find(key) != failed_transfer_keys.end()) {
+        continue;
+      }
       const KVCacheInfo& kv_info = merged_kv_infos.at(key);
       const auto mapping_it = std::find_if(
           kv_info.mappings.begin(),
@@ -1129,13 +1145,15 @@ bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
           });
       if (mapping_it == kv_info.mappings.end()) {
         LOG(ERROR) << "Missing VirtualMemory KV transfer mapping.";
-        return false;
+        failed_transfer_keys.insert(key);
+        continue;
       }
       if (mapping_it->local_ids.size() != mapping_it->remote_ids.size()) {
         LOG(ERROR) << "VirtualMemory KV transfer mapping size mismatch, local="
                    << mapping_it->local_ids.size()
                    << ", remote=" << mapping_it->remote_ids.size();
-        return false;
+        failed_transfer_keys.insert(key);
+        continue;
       }
       const std::vector<uint64_t>& src_blocks = mapping_it->local_ids;
       if (src_blocks.empty()) {
@@ -1146,7 +1164,8 @@ bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
           kv_info.dst_virtual_kv_cache_layer_global_offsets.size()) {
         LOG(ERROR) << "Missing VirtualMemory destination offsets, layer="
                    << layer_index;
-        return false;
+        failed_transfer_keys.insert(key);
+        continue;
       }
       std::vector<ExplicitResourceMapping> explicit_mappings;
       if (!build_explicit_mappings(
@@ -1154,7 +1173,8 @@ bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
               kv_info.dst_virtual_kv_cache_layer_global_offsets[layer_index],
               layer_index,
               &explicit_mappings)) {
-        return false;
+        failed_transfer_keys.insert(key);
+        continue;
       }
 
       std::vector<ByteRegion> regions;
@@ -1168,7 +1188,7 @@ bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
         LOG(ERROR) << "Bind VirtualMemory KV byte regions failed, layer="
                    << layer_index << ", destination=" << kv_info.dst_addr
                    << ": " << bind_status.message();
-        result = false;
+        failed_transfer_keys.insert(key);
         continue;
       }
       const bool ret =
@@ -1178,13 +1198,14 @@ bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
                                  MooncakeTransferEngine::MoveOpcode::WRITE);
       if (!ret) {
         LOG(ERROR) << "push_kv_blocks_impl failed at layer " << layer_index;
-        result = false;
+        failed_transfer_keys.insert(key);
       }
     }
   }
 
-  VLOG(1) << "push_kv_blocks_impl success, num_layers=" << num_layers_;
-  return result;
+  VLOG(1) << "push_kv_blocks_impl completed, num_layers=" << num_layers_
+          << ", failed_tasks=" << failed_transfer_keys.size();
+  return collect_failed_request_ids(merged_kv_infos, failed_transfer_keys);
 }
 #endif
 

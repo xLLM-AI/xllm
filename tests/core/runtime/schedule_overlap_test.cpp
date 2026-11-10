@@ -113,9 +113,6 @@ class OverlapTestWorker final : public WorkerImpl {
   void set_output_hook(std::function<void(ForwardOutput&, Stream&)> hook) {
     output_hook_ = std::move(hook);
   }
-  void set_empty_output_hook(std::function<void()> hook) {
-    empty_output_hook_ = std::move(hook);
-  }
   const torch::Tensor& executed_filter_bitmask() const {
     return executed_filter_bitmask_;
   }
@@ -212,8 +209,6 @@ class OverlapTestWorker final : public WorkerImpl {
     }
     if (output.has_value() && output_hook_) {
       output_hook_(*output, *compute_stream_);
-    } else if (!output.has_value() && empty_output_hook_) {
-      empty_output_hook_();
     }
     return output;
   }
@@ -230,7 +225,6 @@ class OverlapTestWorker final : public WorkerImpl {
   std::vector<int32_t> executed_grammar_tokens_;
   bool executed_grammar_initialized_ = false;
   std::function<void(ForwardOutput&, Stream&)> output_hook_;
-  std::function<void()> empty_output_hook_;
 };
 
 template <typename Input>
@@ -640,8 +634,7 @@ TYPED_TEST(ScheduleOverlapTest,
     input.sample_sequence_ids = {"second#0", "first#0", "new#0"};
     input.sample_prior_output_rows = {1, 0, -1};
     auto& sampling = input.sampling_params;
-    sampling.selected_token_idxes() =
-        torch::arange(3, torch::kInt64).to(device);
+    sampling.logits_indices() = torch::arange(3, torch::kInt64).to(device);
     sampling.bad_words() =
         torch::tensor({{{1, 3}}, {{1, 3}}, {{1, 3}}}, torch::kInt64).to(device);
     sampling.bad_word_suffix() =

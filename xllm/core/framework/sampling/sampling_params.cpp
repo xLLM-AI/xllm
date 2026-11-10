@@ -159,12 +159,12 @@ void advance_sampling_history(SamplingParameters& params,
 
 void SamplingParameters::init(
     const std::vector<const RequestSamplingParam*>& req_sampling_params,
-    const std::vector<int32_t>& selected_token_idxes,
+    const std::vector<int32_t>& logits_indices,
     const std::vector<std::vector<int64_t>>& unique_token_ids_vec,
     const std::vector<std::vector<int32_t>>& unique_token_counts_vec,
     const std::vector<int32_t>& unique_token_lens_vec) {
   *this = SamplingParameters();
-  CHECK_EQ(req_sampling_params.size(), selected_token_idxes.size());
+  CHECK_EQ(req_sampling_params.size(), logits_indices.size());
 
   std::vector<float> frequency_penalties;
   std::vector<float> presence_penalties;
@@ -234,7 +234,7 @@ void SamplingParameters::init(
     this->min_p() = make_pinned_cpu_tensor(min_p);
   }
 
-  this->selected_token_idxes() = make_pinned_cpu_tensor(selected_token_idxes);
+  this->logits_indices() = make_pinned_cpu_tensor(logits_indices);
   if (need_token_stats) {
     CHECK_EQ(req_sampling_params.size(), unique_token_ids_vec.size());
     CHECK_EQ(req_sampling_params.size(), unique_token_counts_vec.size());
@@ -281,10 +281,9 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
   // selected indices are tiny control tensors and correctness-critical. Use
   // blocking H2D copies to avoid consuming partially transferred index
   // buffers on NPU runtime paths.
-  params.selected_token_idxes() =
-      selected_token_idxes().defined()
-          ? safe_to(selected_token_idxes(), device).contiguous()
-          : selected_token_idxes();
+  params.logits_indices() = logits_indices().defined()
+                                ? safe_to(logits_indices(), device).contiguous()
+                                : logits_indices();
   const torch::TensorOptions options = torch::device(device).dtype(dtype);
   if (filter_bitmask().defined()) {
     if (device.is_cpu()) {

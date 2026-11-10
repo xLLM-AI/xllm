@@ -20,65 +20,49 @@ limitations under the License.
 #include <chrono>
 #include <future>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "core/platform/device.h"
 
 namespace xllm {
 namespace {
 
 using namespace std::chrono_literals;
 
-TEST(KVTransferCompletionTest, WaitsForEveryTransfer) {
-  folly::Promise<bool> first_promise;
-  folly::Promise<bool> second_promise;
-  KVTransferCompletion completion;
-  completion.add(first_promise.getSemiFuture());
-  completion.add(second_promise.getSemiFuture());
-
+TEST(KVTransferCompletionTest, WaitsForTransferAndReportsFailures) {
+  folly::Promise<std::vector<std::string>> promise;
+  KVTransferCompletion completion(promise.getSemiFuture(),
+                                  {"request-success", "request-failure"});
   std::promise<void> waiter_started;
   std::future<void> started = waiter_started.get_future();
-  std::future<bool> result = std::async(std::launch::async, [&]() {
+  auto result = std::async(std::launch::async, [&]() {
     waiter_started.set_value();
-    return completion.wait();
+    return completion.wait({}, Device(torch::kCPU));
   });
 
   started.wait();
-  first_promise.setValue(true);
   EXPECT_EQ(result.wait_for(50ms), std::future_status::timeout);
-  second_promise.setValue(true);
-  EXPECT_TRUE(result.get());
+  promise.setValue(std::vector<std::string>{"request-failure"});
+  EXPECT_EQ(result.get(), (std::vector<std::string>{"request-failure"}));
 }
 
-TEST(KVTransferCompletionTest, ReportsTransferFailure) {
-  folly::Promise<bool> success_promise;
-  folly::Promise<bool> failure_promise;
-  KVTransferCompletion completion;
-  completion.add(success_promise.getSemiFuture());
-  completion.add(failure_promise.getSemiFuture());
-  success_promise.setValue(true);
-  failure_promise.setValue(false);
+TEST(KVTransferCompletionTest, MarksAllRequestsFailedIfTransferThrows) {
+  folly::Promise<std::vector<std::string>> promise;
+  KVTransferCompletion completion(promise.getSemiFuture(), {"first", "second"});
+  promise.setException(std::runtime_error("push failed"));
 
-  EXPECT_FALSE(completion.wait());
-}
-
-TEST(KVTransferCompletionTest, RejectsPendingTransferAfterTimeout) {
-  EXPECT_DEATH(
-      {
-        folly::Promise<bool> promise;
-        KVTransferCompletion completion(1ms);
-        completion.add(promise.getSemiFuture());
-        try {
-          completion.wait();
-        } catch (const folly::FutureTimeout&) {
-        }
-      },
-      "pending KV transfers");
+  EXPECT_EQ(completion.wait({}, Device(torch::kCPU)),
+            (std::vector<std::string>{"first", "second"}));
 }
 
 TEST(KVTransferCompletionTest, RejectsPendingTransferAtDestruction) {
   EXPECT_DEATH(
       {
-        folly::Promise<bool> promise;
-        KVTransferCompletion completion;
-        completion.add(promise.getSemiFuture());
+        folly::Promise<std::vector<std::string>> promise;
+        KVTransferCompletion completion(promise.getSemiFuture(),
+                                        {"request-pending"});
       },
       "pending KV transfers");
 }

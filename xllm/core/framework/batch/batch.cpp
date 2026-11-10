@@ -87,9 +87,7 @@ LlmForwardInput Batch::prepare_forward_input(const ModelArgs& args,
 
 void Batch::process_sample_output(const RawForwardOutput& output,
                                   BatchOutputAction action) {
-  const auto sequences = get_sequences();
-  output_handler_.process_sample_output(
-      {sequences, state_.sequence_groups()}, output, action);
+  output_handler_.process_sample_output(get_sequences(), output, action);
 }
 
 VlmForwardInput Batch::prepare_vlm_forward_input(
@@ -113,8 +111,6 @@ VlmForwardInput Batch::prepare_vlm_forward_input(const ModelArgs& args,
 
 void Batch::process_sample_output(const SampleOutput& output,
                                   BatchOutputAction action) {
-  const auto sequences = get_sequences();
-  output_handler_.process_sample_output(
-      {sequences, state_.sequence_groups()}, output, action);
+  output_handler_.process_sample_output(get_sequences(), output, action);
 }
 }  // namespace xllm

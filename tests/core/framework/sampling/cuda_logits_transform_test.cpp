@@ -34,8 +34,7 @@ namespace {
 SamplingParameters make_transform_params(int64_t rows) {
   SamplingParameters params;
   const auto options = torch::TensorOptions().device(torch::kCUDA);
-  params.selected_token_idxes() =
-      torch::arange(rows, options.dtype(torch::kInt));
+  params.logits_indices() = torch::arange(rows, options.dtype(torch::kInt));
   params.sampling_mode() = SamplingMode::RANDOM;
   return params;
 }
@@ -162,8 +161,7 @@ TEST(CudaLogitsTransformTest, MatchesReferenceAcrossShapesAndMixedParameters) {
       SCOPED_TRACE(width);
       SCOPED_TRACE(dtype);
       auto params = make_transform_params(6);
-      const auto fp =
-          params.selected_token_idxes().options().dtype(torch::kFloat32);
+      const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
       params.temperatures() =
           torch::tensor({0.0F, 0.7F, 1.0F, 1.5F, 0.01F, 0.8F}, fp);
       params.min_p() = torch::tensor({0.0F, 0.1F, 0.5F, 0.0F, 0.0F, 1.0F}, fp);
@@ -179,8 +177,7 @@ TEST(CudaLogitsTransformTest, MatchesReferenceAcrossShapesAndMixedParameters) {
 TEST(CudaLogitsTransformTest, PreservesRandomLargeBatchTopPBoundaries) {
   torch::manual_seed(19);
   auto params = make_transform_params(256);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   for (const torch::ScalarType dtype :
        {torch::kFloat32, torch::kFloat16, torch::kBFloat16}) {
     SCOPED_TRACE(dtype);
@@ -204,8 +201,7 @@ TEST(CudaLogitsTransformTest, PreservesLargeVocabularyBoundaryTies) {
   torch::manual_seed(71);
   for (const int64_t rows : {1, 8, 32}) {
     auto params = make_transform_params(rows);
-    const auto fp =
-        params.selected_token_idxes().options().dtype(torch::kFloat32);
+    const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
     for (const torch::ScalarType dtype :
          {torch::kFloat32, torch::kFloat16, torch::kBFloat16}) {
       SCOPED_TRACE(rows);
@@ -229,8 +225,7 @@ TEST(CudaLogitsTransformTest, PreservesLargeVocabularyBoundaryTies) {
 TEST(CudaLogitsTransformTest, SelectsExactTopKWithMixedRanksAndTies) {
   torch::manual_seed(83);
   auto params = make_transform_params(48);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   for (const int64_t width : {4097, 32000, 151936}) {
     params.top_k() =
         torch::tensor(std::vector<int64_t>{1, 40, 1024, 4096, width, 0},
@@ -249,8 +244,7 @@ TEST(CudaLogitsTransformTest, SelectsExactTopKWithMixedRanksAndTies) {
 
 TEST(CudaLogitsTransformTest, PreservesMinPBoundaryAndAdjacentValues) {
   auto params = make_transform_params(3);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   params.min_p() = torch::tensor({0.1F, 0.4F, 0.9F}, fp);
   const auto boundary = params.min_p().log().unsqueeze(1);
   const auto input = torch::cat(
@@ -264,8 +258,7 @@ TEST(CudaLogitsTransformTest, PreservesMinPBoundaryAndAdjacentValues) {
 
 TEST(CudaLogitsTransformTest, PreservesSubnormalLogitsAndTemperatures) {
   auto params = make_transform_params(2);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   params.temperatures() = torch::tensor({1.0F, 0x1p-130F}, fp);
   params.min_p() = torch::tensor({1.0F, 0.0F}, fp);
   const auto input =
@@ -286,8 +279,7 @@ TEST(CudaLogitsTransformTest, PreservesSubnormalLogitsAndTemperatures) {
 
 TEST(CudaLogitsTransformTest, ParameterDtypesAreIndependentOfLogits) {
   auto params = make_transform_params(3);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   for (const torch::ScalarType parameter_dtype :
        {torch::kFloat32, torch::kFloat16, torch::kBFloat16}) {
     params.temperatures() =
@@ -309,8 +301,7 @@ TEST(CudaLogitsTransformTest, ParameterDtypesAreIndependentOfLogits) {
 
 TEST(CudaLogitsTransformTest, SupportsEachOptionalTransformAndDisabledRows) {
   auto params = make_transform_params(3);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   const auto input = torch::arange(1031, fp).unsqueeze(0).repeat({3, 1}) / 100;
   expect_transform(input, params);
   params.temperatures() = torch::tensor({0.0F, 1.0F, 0.7F}, fp);
@@ -328,8 +319,7 @@ TEST(CudaLogitsTransformTest, SupportsEachOptionalTransformAndDisabledRows) {
 
 TEST(CudaLogitsTransformTest, PreservesTopKTiesAndTopPEqualityBoundary) {
   auto params = make_transform_params(2);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   params.top_k() = torch::tensor({1, 0}, fp.dtype(torch::kLong));
   auto tied = torch::tensor(
       {{3.0F, 3.0F, 1.0F, -INFINITY}, {1.0F, 2.0F, 3.0F, 4.0F}}, fp);
@@ -349,8 +339,7 @@ TEST(CudaLogitsTransformTest, PreservesTopKTiesAndTopPEqualityBoundary) {
 
 TEST(CudaLogitsTransformTest, SparseRowsAndExtremeLogitsRemainNormalized) {
   auto params = make_transform_params(3);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   auto input = torch::full({3, 4097}, -INFINITY, fp);
   input[0][0] = 10000.0F;
   input[0][4096] = 9999.0F;
@@ -363,8 +352,7 @@ TEST(CudaLogitsTransformTest, SparseRowsAndExtremeLogitsRemainNormalized) {
 
 TEST(CudaLogitsTransformTest, NoncontiguousRowsAndEmptyBatches) {
   auto params = make_transform_params(3);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   auto storage = torch::randn({6, 1031}, fp);
   auto input = storage.slice(0, 0, 6, 2);
   const auto untouched = storage.slice(0, 1, 6, 2).clone();
@@ -388,8 +376,7 @@ TEST(CudaLogitsTransformTest,
   for (const int64_t width : {1031, 151936}) {
     for (const int64_t rows : {4, 64}) {
       auto params = make_transform_params(rows);
-      const auto fp =
-          params.selected_token_idxes().options().dtype(torch::kFloat32);
+      const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
       params.temperatures() = torch::full({rows}, 0.8F, fp);
       params.min_p() = torch::full({rows}, 0.9F, fp);
       params.top_k() = torch::full({rows}, 40, fp.dtype(torch::kLong));
@@ -430,8 +417,7 @@ TEST(CudaLogitsTransformTest,
 TEST(CudaLogitsTransformTest, LargeStridedRowsPreservePaddingAndParameters) {
   torch::manual_seed(97);
   auto params = make_transform_params(64);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   params.top_k() = torch::arange(64, fp.dtype(torch::kLong)) * 500;
   params.top_p() = torch::full({64}, 0.9F, fp);
   for (const torch::ScalarType dtype :
@@ -455,8 +441,7 @@ TEST(CudaLogitsTransformTest, MatchesNativeSamplingAndGlobalRngConsumption) {
   torch::manual_seed(109);
   for (const int64_t rows : {8, 64}) {
     auto params = make_transform_params(rows);
-    const auto fp =
-        params.selected_token_idxes().options().dtype(torch::kFloat32);
+    const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
     params.temperatures() = torch::full({rows}, 0.8F, fp);
     params.top_k() = torch::full({rows}, 40, fp.dtype(torch::kLong));
     params.top_p() = torch::full({rows}, 0.9F, fp);
@@ -494,8 +479,7 @@ TEST(CudaLogitsTransformTest, MatchesNativeSamplingAndGlobalRngConsumption) {
 
 TEST(CudaLogitsTransformTest, SamplerPreservesRawLogprobsPenaltiesAndMasks) {
   auto params = make_transform_params(2);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   params.temperatures() = torch::full({2}, 0.8F, fp);
   params.top_k() = torch::full({2}, 3, fp.dtype(torch::kLong));
   params.top_p() = torch::full({2}, 0.9F, fp);
@@ -539,8 +523,7 @@ TEST(CudaLogitsTransformTest, SamplerPreservesRawLogprobsPenaltiesAndMasks) {
 TEST(CudaLogitsTransformTest, UnseededDistributionExcludesFilteredTokens) {
   constexpr int64_t kRows = 16384;
   auto params = make_transform_params(kRows);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   params.temperatures() = torch::full({kRows}, 0.8F, fp);
   params.top_k() = torch::full({kRows}, 3, fp.dtype(torch::kLong));
   params.top_p() = torch::full({kRows}, 0.9F, fp);
@@ -567,8 +550,7 @@ TEST(CudaLogitsTransformTest, UnseededDistributionExcludesFilteredTokens) {
 TEST(CudaLogitsTransformTest,
      GreedySkipsTransformsAndNoncontiguousColumnsUseTorch) {
   auto params = make_transform_params(2);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   params.temperatures() = torch::full({2}, 0.7F, fp);
   params.top_k() = torch::full({2}, 2, fp.dtype(torch::kLong));
   params.top_p() = torch::full({2}, 0.9F, fp);
@@ -587,8 +569,7 @@ TEST(CudaLogitsTransformTest,
 
 TEST(CudaLogitsTransformTest, UnsupportedParameterLayoutsAndDtypesUseTorch) {
   auto params = make_transform_params(2);
-  const auto fp =
-      params.selected_token_idxes().options().dtype(torch::kFloat32);
+  const auto fp = params.logits_indices().options().dtype(torch::kFloat32);
   const auto source = torch::randn({2, 257}, fp);
   params.temperatures() =
       torch::tensor({0.7F, 1.0F, 1.2F, 1.0F}, fp).slice(0, 0, 4, 2);
@@ -626,8 +607,7 @@ TEST(CudaLogitsTransformDeathTest, RejectsInvalidParameterDeviceDtypeAndShape) {
       {
         auto params = make_transform_params(2);
         auto logits = torch::ones(
-            {2, 4},
-            params.selected_token_idxes().options().dtype(torch::kFloat));
+            {2, 4}, params.logits_indices().options().dtype(torch::kFloat));
         kernel::cuda::fused_logits_transform(
             logits, torch::ones({2}), {}, {}, {});
       },
@@ -636,18 +616,16 @@ TEST(CudaLogitsTransformDeathTest, RejectsInvalidParameterDeviceDtypeAndShape) {
       {
         auto params = make_transform_params(2);
         auto logits = torch::ones(
-            {2, 4},
-            params.selected_token_idxes().options().dtype(torch::kFloat));
+            {2, 4}, params.logits_indices().options().dtype(torch::kFloat));
         kernel::cuda::fused_logits_transform(
-            logits, {}, {}, params.selected_token_idxes(), {});
+            logits, {}, {}, params.logits_indices(), {});
       },
       "scalar_type");
   EXPECT_DEATH(
       {
         auto params = make_transform_params(2);
         auto logits = torch::ones(
-            {2, 4},
-            params.selected_token_idxes().options().dtype(torch::kFloat));
+            {2, 4}, params.logits_indices().options().dtype(torch::kFloat));
         const auto temperatures = torch::ones({1}, logits.options());
         kernel::cuda::fused_logits_transform(logits, temperatures, {}, {}, {});
       },
@@ -656,9 +634,8 @@ TEST(CudaLogitsTransformDeathTest, RejectsInvalidParameterDeviceDtypeAndShape) {
       {
         auto params = make_transform_params(2);
         auto logits =
-            torch::ones(
-                {2, 8},
-                params.selected_token_idxes().options().dtype(torch::kFloat))
+            torch::ones({2, 8},
+                        params.logits_indices().options().dtype(torch::kFloat))
                 .slice(1, 0, 8, 2);
         kernel::cuda::fused_logits_transform(logits, {}, {}, {}, {});
       },

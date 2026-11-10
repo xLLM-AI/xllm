@@ -100,7 +100,7 @@ TEST(SamplingInputBuilderTest, MergeOffsetsSelectedRows) {
   first.merge(std::move(second), /*token_offset=*/4);
   EXPECT_EQ(first.selected_token_indices(), (std::vector<int32_t>{1, 3, 4}));
   const auto sampling = first.build();
-  EXPECT_TRUE(torch::equal(sampling.selected_token_idxes(),
+  EXPECT_TRUE(torch::equal(sampling.logits_indices(),
                            torch::tensor({1, 3, 4}, torch::kInt)));
 }
 

@@ -413,18 +413,6 @@ void ModelRegistry::register_model_args_loader(const std::string& name,
   }
 }
 
-void ModelRegistry::register_quant_args_loader(const std::string& name,
-                                               QuantArgsLoader loader) {
-  ModelRegistry* instance = get_instance();
-
-  if (instance->model_registry_[name].quant_args_loader != nullptr) {
-    SAFE_LOG_WARNING("quant args loader for " << name
-                                              << " already registered.");
-  } else {
-    instance->model_registry_[name].quant_args_loader = loader;
-  }
-}
-
 void ModelRegistry::register_tokenizer_args_loader(const std::string& name,
                                                    TokenizerArgsLoader loader) {
   ModelRegistry* instance = get_instance();
@@ -535,12 +523,6 @@ ModelArgsLoader ModelRegistry::get_model_args_loader(const std::string& name) {
   ModelRegistry* instance = get_instance();
 
   return instance->model_registry_[name].model_args_loader;
-}
-
-QuantArgsLoader ModelRegistry::get_quant_args_loader(const std::string& name) {
-  ModelRegistry* instance = get_instance();
-
-  return instance->model_registry_[name].quant_args_loader;
 }
 
 TokenizerArgsLoader ModelRegistry::get_tokenizer_args_loader(

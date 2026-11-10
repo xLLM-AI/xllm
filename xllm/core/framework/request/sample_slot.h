@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,10 @@ struct SampleSlot {
   std::string request_id;
   size_t sample_id = 0;
   size_t token_position = 0;
+
+  uint32_t source_position() const {
+    return token_position == 0 ? 0 : static_cast<uint32_t>(token_position - 1);
+  }
 };
 
 bool build_sample_slots(const std::string& request_id,

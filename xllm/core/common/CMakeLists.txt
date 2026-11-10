@@ -32,7 +32,6 @@ cc_library(
     options.h
     rate_limiter.h
     types.h
-    version_singleton.h
     flash_comm1_context.h
   SRCS
     etcd_client.cpp

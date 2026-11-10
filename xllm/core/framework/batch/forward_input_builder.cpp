@@ -66,13 +66,6 @@ namespace {
 // so decode always stays single-threaded while large prefill still fans out.
 constexpr size_t kMultithreadTokenThreshold = 65536;
 
-uint32_t get_sample_source_position(const SampleSlot& sample_slot) {
-  if (sample_slot.token_position == 0) {
-    return 0;
-  }
-  return static_cast<uint32_t>(sample_slot.token_position - 1);
-}
-
 void append_virtual_kv_cache_global_offsets(
     TransferKVInfo* info,
     const TransferKVInfo& full_info,
@@ -784,7 +777,7 @@ void ForwardInputBuilder::extract_tokens_and_positions(
       // state.
       while (sample_slot_idx < sample_slots.size()) {
         const uint32_t sample_source_position =
-            get_sample_source_position(sample_slots[sample_slot_idx]);
+            sample_slots[sample_slot_idx].source_position();
         if (sample_source_position < j) {
           ++sample_slot_idx;
           continue;

@@ -119,11 +119,8 @@ ForwardOutput ScheduleOverlapState::consume() {
   std::unique_lock<std::mutex> lock(mutex_);
   condition_.wait(lock, [this] { return pending_ || shutting_down_; });
 
-  ForwardOutput output;
-  if (pending_ && (has_tokens_ || retain_tokenless_output_ ||
-                   !prior_output_.json_object_errors.empty())) {
-    output = prior_output_;
-  }
+  ForwardOutput output =
+      pending_ && has_output() ? prior_output_ : ForwardOutput();
   pending_ = false;
   condition_.notify_all();
   return output;
@@ -186,8 +183,7 @@ void ScheduleOverlapState::update_prior_output(
   request_ids_ = std::move(request_ids);
   sample_sequence_ids_ = std::move(sample_sequence_ids);
   has_tokens_ = prior_output_.sample_output.next_tokens.defined();
-  if (!output.has_value() || (!has_tokens_ && !retain_tokenless_output_ &&
-                              prior_output_.json_object_errors.empty())) {
+  if (!output.has_value() || !has_output()) {
     request_ids_.clear();
     sample_sequence_ids_.clear();
   }

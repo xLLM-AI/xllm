@@ -17,18 +17,22 @@ limitations under the License.
 
 #include <folly/futures/Future.h>
 
-#include <chrono>
+#include <array>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace xllm {
 
-// Owns asynchronous KV transfers until every transfer reaches a terminal
-// state. Source KV blocks must not be released while this object is pending.
+class Device;
+class ProcessGroup;
+
+// Source KV blocks must not be released while this object is pending.
 class KVTransferCompletion final {
  public:
-  KVTransferCompletion();
-  explicit KVTransferCompletion(std::chrono::milliseconds wait_timeout);
+  KVTransferCompletion() = default;
+  KVTransferCompletion(folly::SemiFuture<std::vector<std::string>> future,
+                       std::vector<std::string> request_ids);
   ~KVTransferCompletion();
 
   KVTransferCompletion(const KVTransferCompletion&) = delete;
@@ -36,17 +40,13 @@ class KVTransferCompletion final {
   KVTransferCompletion(KVTransferCompletion&&) = delete;
   KVTransferCompletion& operator=(KVTransferCompletion&&) = delete;
 
-  void add(folly::SemiFuture<bool> future);
-
-  bool empty() const { return futures_.empty(); }
-
-  // Waits until all owned transfers finish. Returns false when any transfer
-  // reports failure or completes with an exception.
-  bool wait();
+  std::vector<std::string> wait(const std::array<ProcessGroup*, 2>& groups,
+                                const Device& device);
 
  private:
-  std::chrono::milliseconds wait_timeout_;
-  std::vector<folly::SemiFuture<bool>> futures_;
+  folly::Future<std::vector<std::string>> future_ =
+      folly::Future<std::vector<std::string>>::makeEmpty();
+  std::vector<std::string> request_ids_;
 };
 
 // Tracks callbacks that retain KV block managers or blocks. A Completion

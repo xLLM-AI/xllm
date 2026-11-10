@@ -43,6 +43,7 @@ limitations under the License.
 #include "core/framework/config/distributed_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
+#include "core/platform/device.h"
 #include "core/util/scope_guard.h"
 #include "distributed_runtime/distributed_worker_manager.h"
 #include "distributed_runtime/engine.h"
@@ -2137,14 +2138,14 @@ TEST_P(ChunkReservationTest,
   TestPDScheduler prefill(&engine, options);
   auto local = accepted();
   prefill.admit_prefill(local);
-  folly::Promise<bool> push;
+  folly::Promise<std::vector<std::string>> push;
   std::promise<void> started;
   auto entered = started.get_future();
   engine.forward = [&](BatchGroup& batch) {
-    KVTransferCompletion completion;
-    completion.add(push.getSemiFuture());
+    KVTransferCompletion completion(push.getSemiFuture(),
+                                    {local->request_id()});
     started.set_value();
-    CHECK(completion.wait());
+    completion.wait({}, Device(torch::kCPU));
     batch[0][0]->kv_state().set_kv_cache_tokens_num(2);
     return ForwardOutput{};
   };
@@ -2154,7 +2155,7 @@ TEST_P(ChunkReservationTest,
   EXPECT_EQ(service_.calls, 0);
   EXPECT_FALSE(decode_.reservations_empty());
   EXPECT_GE(remote->sequences()[0]->get_embedding_block_id(), 0);
-  push.setValue(true);
+  push.setValue(std::vector<std::string>{});
   step.get();
   auto blocker = make_request(std::vector<int32_t>(12, 99), "blocker");
   ASSERT_TRUE(

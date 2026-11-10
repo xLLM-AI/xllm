@@ -22,6 +22,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "common/metrics.h"
 #include "core/framework/config/eplb_config.h"
@@ -195,35 +196,40 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   Timer timer;
   auto& sampling_params = input.sampling_params;
 
-  KVTransferCompletion kv_transfers;
-
-  if (options_.kv_cache_transfer_mode() == "PUSH" &&
-      !input.transfer_kv_infos.empty()) {
+  KVTransferCompletion kv_transfers = [&]() {
+    if (options_.kv_cache_transfer_mode() == "PUSH" &&
+        !input.transfer_kv_infos.empty()) {
 #if defined(USE_NPU)
-    std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
-        std::make_shared<NPULayerSynchronizerImpl>(
-            context_.get_model_args().n_layers());
+      std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
+          std::make_shared<NPULayerSynchronizerImpl>(
+              context_.get_model_args().n_layers());
 #elif defined(USE_MLU)
-    std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer =
-        std::make_shared<MLULayerSynchronizerImpl>(
-            context_.get_model_args().n_layers());
+      std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer =
+          std::make_shared<MLULayerSynchronizerImpl>(
+              context_.get_model_args().n_layers());
 #elif defined(USE_DCU)
-    std::shared_ptr<DCULayerSynchronizerImpl> layer_synchronizer =
-        std::make_shared<DCULayerSynchronizerImpl>(
-            context_.get_model_args().n_layers());
+      std::shared_ptr<DCULayerSynchronizerImpl> layer_synchronizer =
+          std::make_shared<DCULayerSynchronizerImpl>(
+              context_.get_model_args().n_layers());
 #endif
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-    input.input_params.parallel.layer_synchronizer = layer_synchronizer;
+      input.input_params.parallel.layer_synchronizer = layer_synchronizer;
+      auto request_ids =
+          KVCacheTransfer::unique_request_ids(input.transfer_kv_infos);
 
-    kv_transfers.add(
-        kv_cache_transfer_->push_kv_blocks_async(input.transfer_kv_infos,
-                                                 context_.get_parallel_args(),
-                                                 layer_synchronizer,
-                                                 is_spec_draft_));
+      return KVTransferCompletion(
+          kv_cache_transfer_->push_kv_blocks_async(input.transfer_kv_infos,
+                                                   context_.get_parallel_args(),
+                                                   layer_synchronizer,
+                                                   is_spec_draft_),
+          std::move(request_ids));
 #endif
-  }
-  auto wait_kv_push = [&kv_transfers]() {
-    CHECK(kv_transfers.wait()) << "KV cache push failed";
+    }
+    return KVTransferCompletion{};
+  }();
+  auto wait_kv_push = [&]() {
+    return kv_transfers.wait(
+        {parallel_args_.tp_group_, parallel_args_.cp_group_}, device_);
   };
   if (eplb_executor_ != nullptr) {
     eplb_executor_->start_eplb_step(input.input_params.expert.eplb_info);
@@ -237,26 +243,24 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     eplb_executor_->finish_eplb_step();
   }
   if (!model_output.hidden_states.defined()) {
-    wait_kv_push();
-    return std::nullopt;
+    return make_transfer_failure_output(wait_kv_push());
   }
 
   torch::Tensor logits;
-  torch::Tensor lm_head_selected_token_idxes;
+  torch::Tensor lm_head_input_indices;
   torch::Tensor selected_hidden;
   if (sampling_params.num_sample_seqs() > 0) {
-    torch::Tensor selected_token_idxes = remap_selected_token_idxes_for_lm_head(
-        sampling_params.selected_token_idxes(),
-        execution_params.parallel,
-        model_output.hidden_states);
-    if (model_output.hidden_states.defined() &&
-        selected_token_idxes.device() != model_output.hidden_states.device()) {
-      selected_token_idxes = selected_token_idxes
-                                 .to(model_output.hidden_states.device(),
-                                     /*non_blocking=*/false)
-                                 .contiguous();
+    torch::Tensor logits_indices =
+        remap_logits_indices(sampling_params.logits_indices(),
+                             execution_params.parallel,
+                             model_output.hidden_states);
+    if (logits_indices.device() != model_output.hidden_states.device()) {
+      logits_indices = logits_indices
+                           .to(model_output.hidden_states.device(),
+                               /*non_blocking=*/false)
+                           .contiguous();
     }
-    lm_head_selected_token_idxes = selected_token_idxes;
+    lm_head_input_indices = logits_indices;
     const bool need_selected_hidden =
         input.return_selected_hidden ||
         (options_.cp_size() > 1 && options_.enable_speculative_decode());
@@ -265,16 +269,16 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       // ConfidenceHead and CP speculative paths can consume hidden without a
       // second projection.
       logits = model_->logits(
-          model_output.hidden_states, selected_token_idxes, selected_hidden);
-      if (!selected_hidden.defined() && model_output.hidden_states.defined()) {
+          model_output.hidden_states, logits_indices, selected_hidden);
+      if (!selected_hidden.defined()) {
         // Models with only the two-argument logits overload leave this unset.
         // Gather in logits order: equal row counts do not imply an identity
         // permutation of the selected indices.
         selected_hidden = model_output.hidden_states.index_select(
-            /*dim=*/0, selected_token_idxes.to(torch::kLong));
+            /*dim=*/0, logits_indices.to(torch::kLong));
       }
     } else {
-      logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+      logits = model_->logits(model_output.hidden_states, logits_indices);
     }
   }
 
@@ -285,77 +289,69 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     output.prepared_token = eplb_executor_->consume_ready_prepare_token();
   }
 
-  if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
-      !options_.enable_speculative_decode()) {
-    MULTI_MODEL_STEP_UNLOCK();
-    if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
-      wait_kv_push();
-      return std::nullopt;
-    }
-    int ret = device_.synchronize_default_stream();
-    CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
-    wait_kv_push();
-    if (eplb_executor_ != nullptr) {
-      return output;
-    }
-    return std::nullopt;
-  }
-
-  // driver prepare model output
-  if (sampling_params.num_sample_seqs() > 0) {
-    output.selected_hidden = selected_hidden;
-    output.logprobs = sampling_params.logprobs();
-    output.max_top_logprobs = sampling_params.max_top_logprobs();
-    if (!input.skip_sampling_for_logits_only) {
-      if (prepare_sampling) {
-        prepare_sampling();
-      }
-      auto sample_output = [&]() {
-        if (!sampling_params.min_token_positions().defined()) {
-          return sample(logits, sampling_params);
+  const bool return_model_output = enable_schedule_overlap() || driver_ ||
+                                   dp_driver_ ||
+                                   options_.enable_speculative_decode();
+  if (return_model_output) {
+    if (sampling_params.num_sample_seqs() > 0) {
+      output.selected_hidden = selected_hidden;
+      output.logprobs = sampling_params.logprobs();
+      output.max_top_logprobs = sampling_params.max_top_logprobs();
+      if (!input.skip_sampling_for_logits_only) {
+        if (prepare_sampling) {
+          prepare_sampling();
         }
-        SamplingParameters target_sampling = sampling_params;
-        const auto selected_positions = input.positions.index_select(
-            /*dim=*/0,
-            sampling_params.selected_token_idxes().to(torch::kInt64));
-        target_sampling.min_tokens_remaining() =
-            sampling_params.min_token_positions() - selected_positions;
-        return sample(logits, target_sampling);
-      }();
-      output.sample_output = std::move(sample_output);
+        auto sample_output = [&]() {
+          if (!sampling_params.min_token_positions().defined()) {
+            return sample(logits, sampling_params);
+          }
+          SamplingParameters target_sampling = sampling_params;
+          const auto selected_positions = input.positions.index_select(
+              /*dim=*/0, sampling_params.logits_indices().to(torch::kInt64));
+          target_sampling.min_tokens_remaining() =
+              sampling_params.min_token_positions() - selected_positions;
+          return sample(logits, target_sampling);
+        }();
+        output.sample_output = std::move(sample_output);
+      }
+      output.logits = logits;
     }
-    output.logits = logits;
-  }
 
-  if (options_.enable_speculative_decode()) {
-    const bool is_target_prefill =
-        !input.input_params.meta.batch_forward_type.is_decode() &&
-        !is_spec_draft_;
-    output_spec_hidden_states(output.sample_output,
-                              model_output,
-                              lm_head_selected_token_idxes,
-                              selected_hidden,
-                              is_target_prefill,
-                              /*cp_enabled=*/options_.cp_size() > 1);
+    if (options_.enable_speculative_decode()) {
+      const bool is_target_prefill =
+          !input.input_params.meta.batch_forward_type.is_decode() &&
+          !is_spec_draft_;
+      output_spec_hidden_states(output.sample_output,
+                                model_output,
+                                lm_head_input_indices,
+                                selected_hidden,
+                                is_target_prefill,
+                                /*cp_enabled=*/options_.cp_size() > 1);
+    }
   }
 
   MULTI_MODEL_STEP_UNLOCK();
   bool should_sync_default_stream = true;
 #if defined(USE_NPU)
   should_sync_default_stream =
+      !return_model_output ||
       !can_skip_npu_graph_decode_sync(input.input_params);
 #endif
-  if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
-    wait_kv_push();
-    finalize_no_sync_output(output, input, completion);
-    return output;
-  }
-  if (should_sync_default_stream) {
+  if (sync_policy != ForwardSyncPolicy::NO_SYNC && should_sync_default_stream) {
     int ret = device_.synchronize_default_stream();
     CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
   }
-
-  wait_kv_push();
+  output.failed_request_ids = wait_kv_push();
+  if (!return_model_output) {
+    if (sync_policy == ForwardSyncPolicy::LEGACY && eplb_executor_ != nullptr) {
+      return output;
+    }
+    return make_transfer_failure_output(std::move(output.failed_request_ids));
+  }
+  if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
+    finalize_no_sync_output(output, input, completion);
+    return output;
+  }
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 

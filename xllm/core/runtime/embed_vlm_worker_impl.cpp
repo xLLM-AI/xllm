@@ -97,7 +97,7 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
       }
     } else {
       sample_output.embeddings =
-          model_->pooler(hidden_states, sampling_params.selected_token_idxes());
+          model_->pooler(hidden_states, sampling_params.logits_indices());
     }
     output.sample_output = sample_output;
   }

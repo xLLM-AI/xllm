@@ -240,10 +240,6 @@ class SimpleCausalLM : public CausalLM {
 
     // Initialize scalar tensors for computation
     // const tensors
-    kv_scale_ =
-        torch::tensor(0.01f, torch::dtype(torch::kFloat32).device(device));
-    q_scale_ =
-        torch::tensor(0.01f, torch::dtype(torch::kFloat32).device(device));
     cache_scale_ =
         torch::tensor(0.005f, torch::dtype(torch::kFloat32).device(device));
     block_scale_ =
@@ -278,19 +274,6 @@ class SimpleCausalLM : public CausalLM {
 
     // Apply linear layer
     auto output = linear_->forward(combined);
-
-    // Add some computation using other params to make it more realistic
-    // if (params.attention.device.kv_seq_lens.defined()) {
-    //   // Use kv_seq_lens in computation
-    //   auto kv_lens_sum = torch::sum(params.attention.device.kv_seq_lens);
-    //   output = output + kv_lens_sum * kv_scale_;
-    // }
-
-    // if (params.attention.device.q_seq_lens.defined()) {
-    //   // Use q_seq_lens in computation
-    //   auto q_lens_sum = torch::sum(params.attention.device.q_seq_lens);
-    //   output = output + q_lens_sum * q_scale_;
-    // }
 
     if (params.attention.device.new_cache_slots.defined()) {
       // Use new_cache_slots in computation
@@ -397,8 +380,6 @@ class SimpleCausalLM : public CausalLM {
   torch::Tensor pos_embedding_table_;
 
   // Pre-allocated constant scalar tensors for computation
-  torch::Tensor kv_scale_;
-  torch::Tensor q_scale_;
   torch::Tensor cache_scale_;
   torch::Tensor block_scale_;
   torch::Tensor block_size_;
@@ -644,11 +625,7 @@ TEST_F(AclGraphExecutorTest, PreservesAuxHiddenStatesAcrossGraphReplay) {
                                {ModelParamsView(forward_input.input_params)});
   };
   ModelOutput capture_output = run_graph();
-  for (int32_t slot_idx = 1;
-       slot_idx < graph_executor->graph_slot_count_for_test();
-       ++slot_idx) {
-    run_graph();
-  }
+  run_graph();
   ModelOutput replay_output = run_graph();
   EXPECT_EQ(COUNTER_num_model_execution_total_eager.get_value(),
             eager_fallbacks_before)
@@ -780,14 +757,10 @@ TEST_F(AclGraphExecutorTest, DifferentBatchSizes) {
                             {forward_input.positions},
                             kv_caches_,
                             {ModelParamsView(forward_input.input_params)});
-    for (int32_t slot_idx = 1;
-         slot_idx < graph_executor->graph_slot_count_for_test();
-         ++slot_idx) {
-      graph_executor->run({forward_input.token_ids},
-                          {forward_input.positions},
-                          kv_caches_,
-                          {ModelParamsView(forward_input.input_params)});
-    }
+    graph_executor->run({forward_input.token_ids},
+                        {forward_input.positions},
+                        kv_caches_,
+                        {ModelParamsView(forward_input.input_params)});
 
     // Verify output shape
     EXPECT_EQ(output.hidden_states.size(0),
@@ -803,14 +776,6 @@ TEST_F(AclGraphExecutorTest, DifferentBatchSizes) {
     captured_outputs.emplace_back(output.hidden_states.clone());
   }
 
-  const size_t expected_graph_count =
-      batch_sizes.size() * graph_executor->graph_slot_count_for_test();
-  EXPECT_EQ(graph_executor->get_graph_count(), expected_graph_count);
-  EXPECT_EQ(graph_executor->get_graph_memory_pool_count(),
-            graph_executor->graph_slot_count_for_test());
-  EXPECT_EQ(graph_executor->get_graph_capture_stream_count(),
-            graph_executor->graph_slot_count_for_test());
-
   const std::vector<size_t> replay_order = {2, 0, 1};
   for (size_t index : replay_order) {
     auto output = graph_executor->run({captured_token_ids[index]},
@@ -823,7 +788,6 @@ TEST_F(AclGraphExecutorTest, DifferentBatchSizes) {
                                 /*atol=*/1e-6))
         << "Replay batch size: " << batch_sizes[index];
   }
-  EXPECT_EQ(graph_executor->get_graph_count(), expected_graph_count);
 }
 
 // Test decode batch-size threshold fallback: ACL graph should fall back to
@@ -1136,59 +1100,6 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
   ASSERT_EQ(params_for_capture->linear_state_validity_mask.size(), 2);
   EXPECT_EQ(params_for_capture->linear_state_validity_mask[0], 1);
   EXPECT_EQ(params_for_capture->linear_state_validity_mask[1], 0);
-}
-
-TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {
-  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
-  const bool original_enable_graph_double_buffer =
-      execution_config.enable_graph_double_buffer();
-
-  execution_config.enable_graph_double_buffer(true);
-  std::unique_ptr<::xllm::npu::AclGraphExecutorImpl> double_buffer_executor =
-      std::make_unique<::xllm::npu::AclGraphExecutorImpl>(
-          model_.get(), model_args_, *device_, options_);
-  EXPECT_EQ(double_buffer_executor->graph_slot_count_for_test(), 2);
-
-  execution_config.enable_graph_double_buffer(false);
-  std::unique_ptr<::xllm::npu::AclGraphExecutorImpl> single_buffer_executor =
-      std::make_unique<::xllm::npu::AclGraphExecutorImpl>(
-          model_.get(), model_args_, *device_, options_);
-  EXPECT_EQ(single_buffer_executor->graph_slot_count_for_test(), 1);
-
-  execution_config.enable_graph_double_buffer(
-      original_enable_graph_double_buffer);
-}
-
-TEST_F(AclGraphExecutorTest, DpDecodeGraphKeyIgnoresRawTokenDistribution) {
-  options_.world_size(16).dp_size(8);
-  ::xllm::npu::AclGraphExecutorImpl graph_executor(
-      model_.get(), model_args_, *device_, options_);
-
-  ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
-  params.meta.batch_forward_type = BatchForwardType::DECODE;
-  params.parallel.dp_ep_padding_data.attn_padding_idx(
-      torch::zeros({32}, torch::kInt32));
-
-  const std::vector<std::vector<int32_t>> dp_token_distributions = {
-      {20, 20, 20, 20, 20, 20, 20, 20},
-      {8, 16, 16, 16, 12, 20, 20, 20},
-      {8, 12, 12, 8, 12, 20, 20, 20},
-      {8, 8, 12, 8, 12, 16, 12, 20},
-      {4, 8, 12, 4, 12, 16, 4, 20},
-      {4, 8, 12, 0, 12, 12, 4, 20},
-  };
-
-  std::optional<uint64_t> expected_graph_key;
-  for (const std::vector<int32_t>& distribution : dp_token_distributions) {
-    params.parallel.dp_global_token_nums = distribution;
-    params.parallel.raw_dp_global_token_nums = distribution;
-    const uint64_t graph_key =
-        graph_executor.graph_key_for_test(/*bucket_num_tokens=*/32, params);
-    if (!expected_graph_key.has_value()) {
-      expected_graph_key = graph_key;
-    }
-    EXPECT_EQ(graph_key, expected_graph_key.value());
-  }
 }
 
 TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {

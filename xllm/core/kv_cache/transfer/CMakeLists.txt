@@ -57,8 +57,12 @@ cc_library(
   SRCS
     kv_transfer_completion.cpp
   DEPS
+    :parallel_state
+    :platform
     glog::glog
     Folly::folly
+    torch
+    xxHash
 )
 
 cc_library(

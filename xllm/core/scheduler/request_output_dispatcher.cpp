@@ -216,19 +216,18 @@ void RequestOutputDispatcher::batch_process_completed_requests(
 // process non-stream requests
 void RequestOutputDispatcher::process_completed_requests(
     std::vector<std::shared_ptr<Request>>& requests) {
-  std::vector<std::shared_ptr<Request>> output_requests;
-  output_requests.reserve(requests.size());
-  for (const auto& request : requests) {
-    // P owns computation and handoff; D owns every successful response.
-    if (!request->state().decode_address.empty()) {
-      continue;
-    }
-    output_requests.emplace_back(request);
-  }
+  const auto skip_prefill_response = [](const auto& request) {
+    return !request->state().decode_address.empty() &&
+           !request->error_status().has_value();
+  };
   if (enable_batch_response_) {
-    batch_process_completed_requests(output_requests);
+    std::erase_if(requests, skip_prefill_response);
+    batch_process_completed_requests(requests);
   } else {
-    for (auto& request : output_requests) {
+    for (auto& request : requests) {
+      if (skip_prefill_response(request)) {
+        continue;
+      }
       process_completed_request(std::move(request));
     }
   }
@@ -377,19 +376,17 @@ void RequestOutputDispatcher::batch_process_stream_requests(
 // process stream requests
 void RequestOutputDispatcher::process_stream_requests(
     std::vector<std::shared_ptr<Request>>& requests) {
-  std::vector<std::shared_ptr<Request>> output_requests;
-  output_requests.reserve(requests.size());
-  for (const auto& request : requests) {
-    // P owns computation and handoff; D owns every successful response.
-    if (!request->state().decode_address.empty()) {
-      continue;
-    }
-    output_requests.emplace_back(request);
-  }
+  const auto skip_prefill_response = [](const auto& request) {
+    return !request->state().decode_address.empty();
+  };
   if (enable_batch_response_) {
-    batch_process_stream_requests(output_requests);
+    std::erase_if(requests, skip_prefill_response);
+    batch_process_stream_requests(requests);
   } else {
-    for (auto& request : output_requests) {
+    for (auto& request : requests) {
+      if (skip_prefill_response(request)) {
+        continue;
+      }
       process_stream_request(std::move(request));
     }
   }

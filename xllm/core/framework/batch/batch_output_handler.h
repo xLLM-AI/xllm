@@ -26,11 +26,6 @@ limitations under the License.
 
 namespace xllm {
 
-struct BatchOutputData {
-  const std::vector<Sequence*>& sequences;
-  const std::vector<SequencesGroup*>& sequence_groups;
-};
-
 // Captures sampling targets before input building advances KV state. These
 // targets determine output row ownership through both phases of
 // schedule-overlap writeback, independently of later sequence stages. Requests
@@ -38,17 +33,11 @@ struct BatchOutputData {
 class BatchOutputHandler final {
  public:
   void clear() { output_targets_.clear(); }
-  void reserve(size_t target_count) { output_targets_.reserve(target_count); }
   void prepare(const BatchInputData& data);
-  // Domain handlers may collect token-based and explicitly selected targets
-  // in forward row order after clear(), before input building advances KV
-  // state.
-  void add_sequence_targets(Sequence* sequence, uint32_t token_budget);
-  void add_sequence_target(Sequence* sequence);
-  void process_sample_output(const BatchOutputData& data,
+  void process_sample_output(const std::vector<Sequence*>& sequences,
                              const RawForwardOutput& output,
                              BatchOutputAction action);
-  void process_sample_output(const BatchOutputData& data,
+  void process_sample_output(const std::vector<Sequence*>& sequences,
                              const SampleOutput& output,
                              BatchOutputAction action);
 
@@ -59,6 +48,7 @@ class BatchOutputHandler final {
     bool from_sample_slot = false;
   };
 
+  void add_sequence_targets(Sequence* sequence, uint32_t token_budget);
   void append_token_for_sequence(Sequence* sequence,
                                  const Token& token,
                                  int32_t token_idx,

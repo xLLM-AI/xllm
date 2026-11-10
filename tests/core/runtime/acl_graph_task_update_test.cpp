@@ -749,69 +749,6 @@ TEST(FusedInferAttentionWorkspaceSignatureTest, IncludesSoftmaxLseMode) {
   EXPECT_FALSE(without_lse == with_lse);
 }
 
-TEST_F(AclGraphTaskUpdateTest, Qwen35DpPrepareSkipsUnsupportedDecodeSteps) {
-  ExecutionConfig::get_instance().enable_graph_double_buffer(true);
-  model_args_.model_type("qwen3_5");
-  model_ = std::make_unique<HybridConv1dMockLM>(model_args_, *device_);
-
-  constexpr int32_t kLocalBatchSize = 3;
-  auto batch = create_decode_batch(/*batch_size=*/kLocalBatchSize);
-  auto input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
-  input = input.to(*device_, kDtype);
-  populate_query_start_loc(input.input_params);
-
-  const auto set_dp_layout = [](LlmModelParams& params,
-                                const std::vector<int32_t>& token_counts) {
-    params.parallel.dp_global_token_nums = token_counts;
-    params.parallel.raw_dp_global_token_nums = token_counts;
-    params.parallel.dp_is_decode.assign(token_counts.size(), 1);
-  };
-  const std::vector<int32_t> balanced_token_counts = {kLocalBatchSize,
-                                                      kLocalBatchSize};
-  set_dp_layout(input.input_params, balanced_token_counts);
-
-  auto kv_graph = create_hybrid_kv_caches();
-  auto graph_exec = std::make_unique<npu::AclGraphExecutorImpl>(
-      model_.get(), model_args_, *device_, options_);
-  (void)graph_exec->run(input.token_ids,
-                        input.positions,
-                        kv_graph,
-                        ModelParamsView(input.input_params));
-
-  auto second_input = input.clone();
-  second_input.token_ids.add_(1);
-  second_input.positions.add_(1);
-  (void)graph_exec->run(second_input.token_ids,
-                        second_input.positions,
-                        kv_graph,
-                        ModelParamsView(second_input.input_params));
-  ASSERT_EQ(graph_exec->get_graph_count(), 2);
-  ASSERT_FALSE(graph_exec->graph_slot_prepared_for_test(/*slot_idx=*/0));
-
-  auto prepared_input = second_input.clone();
-  prepared_input.token_ids.add_(1);
-  prepared_input.positions.add_(1);
-  for (const std::vector<int32_t>& unsupported_token_counts :
-       {std::vector<int32_t>{kLocalBatchSize, kLocalBatchSize - 1},
-        std::vector<int32_t>{kLocalBatchSize, 0}}) {
-    set_dp_layout(prepared_input.input_params, unsupported_token_counts);
-    graph_exec->prepare_graph_input(
-        prepared_input.token_ids,
-        prepared_input.positions,
-        kv_graph,
-        ModelParamsView(prepared_input.input_params));
-    EXPECT_FALSE(graph_exec->graph_slot_prepared_for_test(/*slot_idx=*/0));
-  }
-
-  set_dp_layout(prepared_input.input_params, balanced_token_counts);
-  graph_exec->prepare_graph_input(prepared_input.token_ids,
-                                  prepared_input.positions,
-                                  kv_graph,
-                                  ModelParamsView(prepared_input.input_params));
-  EXPECT_TRUE(graph_exec->graph_slot_prepared_for_test(/*slot_idx=*/0));
-}
-
 TEST_F(AclGraphTaskUpdateTest, CaptureReplayVsEagerDecodeBranch) {
   for (bool double_buffer : {false, true}) {
     SCOPED_TRACE(double_buffer);

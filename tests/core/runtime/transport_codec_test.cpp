@@ -508,29 +508,6 @@ TEST(TransportCodecTest,
   EXPECT_EQ(decoded.json_object_errors[0].message, "error after round stats");
 }
 
-TEST(TransportCodecTest, SharedOutputSizeIncludesVerifiedRoundWord) {
-  const ScopedRawOutputTransport host_only;
-  // One token, nine container lengths (one is INT32), five INT64 values
-  // (id, three stats, prepared token), and two optional-payload flags.
-  constexpr size_t kRequiredBytes = sizeof(ControlMetadata) +
-                                    8 * sizeof(uint64_t) + sizeof(int32_t) +
-                                    5 * sizeof(int64_t) + 2 * sizeof(bool);
-  const auto tokens = torch::tensor({7}, torch::kInt64);
-  for (const size_t bytes : {kRequiredBytes - 1, kRequiredBytes}) {
-    const std::string name = ForwardSharedMemoryTransport::create_unique_name(
-        "round_size_" + std::to_string(static_cast<int64_t>(getpid())) + "_" +
-            std::to_string(bytes),
-        /*dp_group=*/0,
-        ForwardType::RAW_OUTPUT,
-        /*rank=*/0);
-    bool is_creator = false;
-    ForwardSharedMemoryTransport writer(
-        name, bytes, is_creator, ForwardType::RAW_OUTPUT);
-    EXPECT_EQ(write_shared_tokens(writer, tokens, {{0, 0, 1}}),
-              bytes == kRequiredBytes);
-  }
-}
-
 TEST(TransportCodecTest, EmbeddingOnlyOutputUsesPlaceholderToken) {
   ForwardOutput source;
   source.sample_output.embeddings = torch::tensor({{1.0f, 2.0f}});

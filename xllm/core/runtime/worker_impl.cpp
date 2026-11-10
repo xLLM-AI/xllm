@@ -274,7 +274,7 @@ void ensure_forward_input_device_tensors(Input& input,
   move_tensor_to_device_if_needed(input.positions, device);
   move_tensor_to_device_if_needed(
       input.input_params.embedding.mtp_shifted_token_ids, device);
-  move_tensor_to_device_if_needed(input.sampling_params.selected_token_idxes(),
+  move_tensor_to_device_if_needed(input.sampling_params.logits_indices(),
                                   device);
 }
 
@@ -923,17 +923,17 @@ WorkerImpl::estimate_kv_cache_capacity_async() {
   return future;
 }
 
-torch::Tensor WorkerImpl::remap_selected_token_idxes_for_lm_head(
-    const torch::Tensor& selected_token_idxes,
+torch::Tensor WorkerImpl::remap_logits_indices(
+    const torch::Tensor& logits_indices,
     const ParallelInput& parallel_input,
     const torch::Tensor& hidden_states) const {
   const auto& mapping = context_.get_parallel_args().mapping_data();
   const int64_t hidden_num_rows = hidden_states.size(0);
-  if (!selected_token_idxes.defined() || selected_token_idxes.numel() == 0 ||
+  if (!logits_indices.defined() || logits_indices.numel() == 0 ||
       mapping.empty() || !mapping.contains("attnDp") ||
       !mapping["attnDp"].contains("rank") ||
       parallel_input.dp_global_token_nums.size() <= 1 || hidden_num_rows <= 0) {
-    return selected_token_idxes;
+    return logits_indices;
   }
 
   const int64_t dp_rank = mapping["attnDp"]["rank"].get<int64_t>();
@@ -942,12 +942,12 @@ torch::Tensor WorkerImpl::remap_selected_token_idxes_for_lm_head(
            static_cast<int64_t>(parallel_input.dp_global_token_nums.size()))
       << "attnDp rank exceeds dp_global_token_nums";
 
-  const int64_t local_selected_rows = selected_token_idxes.numel();
+  const int64_t local_selected_rows = logits_indices.numel();
   const int64_t local_token_count =
       parallel_input.dp_global_token_nums.at(dp_rank);
   if (hidden_num_rows == local_token_count ||
       hidden_num_rows == local_selected_rows) {
-    return selected_token_idxes;
+    return logits_indices;
   }
 
   int64_t dp_offset = 0;
@@ -956,7 +956,7 @@ torch::Tensor WorkerImpl::remap_selected_token_idxes_for_lm_head(
   }
 
   torch::Tensor selected_cpu =
-      selected_token_idxes.to(torch::dtype(torch::kLong).device(torch::kCPU));
+      logits_indices.to(torch::dtype(torch::kLong).device(torch::kCPU));
   torch::Tensor logical_selected_cpu = selected_cpu + dp_offset;
 
   const auto& padding_idx =
@@ -969,7 +969,7 @@ torch::Tensor WorkerImpl::remap_selected_token_idxes_for_lm_head(
         logical_selected_cpu.max().item<int64_t>();
     if (max_logical_selected < padding_cpu.numel()) {
       return padding_cpu.index_select(/*dim=*/0, logical_selected_cpu)
-          .to(torch::dtype(selected_token_idxes.scalar_type())
+          .to(torch::dtype(logits_indices.scalar_type())
                   .device(hidden_states.device()),
               /*non_blocking=*/false)
           .contiguous();
@@ -977,16 +977,16 @@ torch::Tensor WorkerImpl::remap_selected_token_idxes_for_lm_head(
   }
 
   if (dp_offset == 0) {
-    return selected_token_idxes;
+    return logits_indices;
   }
 
   const int64_t max_selected_idx = selected_cpu.max().item<int64_t>();
   if (max_selected_idx + dp_offset >= hidden_num_rows) {
-    return selected_token_idxes;
+    return logits_indices;
   }
 
   torch::Tensor remapped =
-      selected_token_idxes.to(hidden_states.device(), /*non_blocking=*/false)
+      logits_indices.to(hidden_states.device(), /*non_blocking=*/false)
           .contiguous();
   return (remapped + dp_offset).to(remapped.scalar_type()).contiguous();
 }
@@ -1256,20 +1256,6 @@ std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
     const std::function<void()>& /*prepare_sampling*/) {
   LOG(FATAL) << "execute_no_sync_on_stream is not supported by this worker";
   return std::nullopt;
-}
-
-void WorkerImpl::prepare_input_on_stream(const LlmForwardInput& input,
-                                         LlmForwardInput& processed_input,
-                                         Stream& prepare_stream,
-                                         bool record_ready_event,
-                                         bool restore_linear_state,
-                                         bool wait_for_compute_stream) {
-  prepare_work_before_execute_on_stream_impl(input,
-                                             processed_input,
-                                             prepare_stream,
-                                             record_ready_event,
-                                             restore_linear_state,
-                                             wait_for_compute_stream);
 }
 
 template <typename Input>

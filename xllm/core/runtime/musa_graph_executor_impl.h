@@ -309,9 +309,6 @@ class MusaGraph final {
                            std::vector<KVCache>& kv_cache,
                            const Params& params);
 
-  // Print graph held tensors for debugging
-  void print_graph_tensors() const;
-
   // Refresh the persistent host mirrors used by the Mate FFI batch_decode
   // run() call. Lazily allocates pinned CPU buffers sized to worst case (set
   // by MusaGraphPersistentParam at executor construction), then copies the

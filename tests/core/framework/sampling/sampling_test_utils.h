@@ -40,7 +40,7 @@ inline SamplingParameters make_sampling_params(const torch::Tensor& do_sample) {
   SamplingParameters params;
   params.do_sample() = do_sample;
   if (do_sample.defined()) {
-    params.selected_token_idxes() =
+    params.logits_indices() =
         arange_indices(do_sample.size(0), torch::Device(torch::kCPU));
   }
   params.sampling_mode() = sampling_mode_from_do_sample(do_sample);
@@ -50,7 +50,7 @@ inline SamplingParameters make_sampling_params(const torch::Tensor& do_sample) {
 // All-greedy batch; do_sample stays undefined as in production.
 inline SamplingParameters make_sampling_params(int64_t batch_size) {
   SamplingParameters params;
-  params.selected_token_idxes() =
+  params.logits_indices() =
       arange_indices(batch_size, torch::Device(torch::kCPU));
   return params;
 }

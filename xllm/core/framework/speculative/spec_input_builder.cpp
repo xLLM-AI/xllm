@@ -145,7 +145,7 @@ MtpTopkStatePtr select_mtp_topk_state_for_next_step(
   if (num_seqs == 0 || state->num_rows() == num_seqs) {
     return state;
   }
-  const torch::Tensor& selected_idxes = sampling_params.selected_token_idxes();
+  const torch::Tensor& selected_idxes = sampling_params.logits_indices();
   if (selected_idxes.device().is_cpu()) {
     CHECK_GT(state->num_rows(), selected_idxes.max().item<int64_t>())
         << "MTP selected top-k index exceeds top-k rows.";
