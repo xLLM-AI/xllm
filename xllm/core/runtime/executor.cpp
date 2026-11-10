@@ -31,8 +31,6 @@ Executor::Executor(CausalLM* model,
   if (executor_type.empty()) {
     if (ModelConfig::is_python_model_impl(model_config.model_impl())) {
       executor_type = "python";
-    } else if (options.npu_kernel_backend() == "XLITE") {
-      executor_type = "xlite";
     } else if (options.backend() != "vlm" && options.enable_graph()) {
       executor_type = Platform::type_str();
     } else {

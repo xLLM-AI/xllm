@@ -349,7 +349,7 @@ TEST(ModelRegistryTest, SelectedModelFamilyRequiresRequestedType) {
                 family);
 }
 
-TEST(ModelRegistryTest, SelectedExtensionStillValidatesBackendAvailability) {
+TEST(ModelRegistryTest, SelectedExtensionStillValidatesBackend) {
   const std::string family = "npu_backend_validation_custom";
   ASSERT_TRUE(ModelRegistry::register_causallm_factory(
       "qwen2", family, unused_lm_factory()));
@@ -366,24 +366,7 @@ TEST(ModelRegistryTest, SelectedExtensionStillValidatesBackendAvailability) {
                                           &error_message));
   EXPECT_EQ(error_message,
             "Unsupported --npu_kernel_backend=INVALID. Supported values: "
-            "AUTO, ATB, TORCH, XLITE.");
-
-  const bool xlite_available = resolve_model_registration("qwen2",
-                                                          "XLITE",
-                                                          family,
-                                                          "causal_lm",
-                                                          &effective_backend,
-                                                          &resolved_name,
-                                                          &error_message);
-#if defined(USE_XLITE)
-  EXPECT_TRUE(xlite_available);
-  EXPECT_EQ(effective_backend, "XLITE");
-  EXPECT_EQ(resolved_name, "qwen2");
-#else
-  EXPECT_FALSE(xlite_available);
-  EXPECT_EQ(error_message,
-            "XLITE backend is not compiled; please build with USE_XLITE=ON.");
-#endif
+            "AUTO, ATB, TORCH.");
 }
 
 TEST(ModelRegistryTest, UnknownExtensionFamilyCannotBypassBackendRules) {

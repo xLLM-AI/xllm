@@ -86,7 +86,6 @@ std::string canonical_model_impl(std::string model_impl) {
 constexpr char kAutoBackend[] = "AUTO";
 constexpr char kAtbBackend[] = "ATB";
 constexpr char kTorchBackend[] = "TORCH";
-constexpr char kXliteBackend[] = "XLITE";
 
 bool is_torch_only_model_type(const std::string& model_type) {
   static const std::unordered_set<std::string> kTorchOnlyModelTypes = {
@@ -194,24 +193,15 @@ bool resolve_model_registration(const std::string& model_type,
                                   ? kAutoBackend
                                   : requested_npu_kernel_backend;
   if (backend != kAutoBackend && backend != kAtbBackend &&
-      backend != kTorchBackend && backend != kXliteBackend) {
+      backend != kTorchBackend) {
     if (error_message != nullptr) {
       *error_message = "Unsupported --npu_kernel_backend=" + backend +
-                       ". Supported values: AUTO, ATB, TORCH, XLITE.";
+                       ". Supported values: AUTO, ATB, TORCH.";
     }
     return false;
   }
 
   if (selected_extension_model) {
-#if !defined(USE_XLITE)
-    if (backend == kXliteBackend) {
-      if (error_message != nullptr) {
-        *error_message =
-            "XLITE backend is not compiled; please build with USE_XLITE=ON.";
-      }
-      return false;
-    }
-#endif
     if (effective_npu_kernel_backend != nullptr) {
       *effective_npu_kernel_backend =
           backend == kAutoBackend ? kTorchBackend : backend;
@@ -225,32 +215,6 @@ bool resolve_model_registration(const std::string& model_type,
     effective_backend = is_torch_only_model_type(canonical_model_type)
                             ? kTorchBackend
                             : kAtbBackend;
-  } else if (backend == kXliteBackend) {
-#if defined(USE_XLITE)
-    // Reject torch-only model types
-    if (is_torch_only_model_type(canonical_model_type)) {
-      if (error_message != nullptr) {
-        *error_message =
-            "Model type " + model_type + " only supports TORCH, not XLITE.";
-      }
-      return false;
-    }
-    // Reject non-xlite model types
-    if (!xllm::xlite::is_xlite_model_type(canonical_model_type)) {
-      if (error_message != nullptr) {
-        *error_message = "Model type " + model_type +
-                         " has no XLITE implementation; use ATB or TORCH"
-                         " backend instead.";
-      }
-      return false;
-    }
-#else
-    if (error_message != nullptr) {
-      *error_message =
-          "XLITE backend is not compiled; please build with USE_XLITE=ON.";
-    }
-    return false;
-#endif
   } else if (canonical_model_type == "qwen3" ||
              canonical_model_type == "qwen3_moe" ||
              canonical_model_type == "deepseek_v32" ||
@@ -283,10 +247,7 @@ bool resolve_model_registration(const std::string& model_type,
   if (effective_npu_kernel_backend != nullptr) {
     *effective_npu_kernel_backend = effective_backend;
   }
-  if (backend == kXliteBackend) {
-    *resolved_name = canonical_model_type + "_xlite";
-  } else if (canonical_model_type == "qwen3" &&
-             effective_backend == kAtbBackend) {
+  if (canonical_model_type == "qwen3" && effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_atb";
   } else if (canonical_model_type == "qwen3_moe" &&
              effective_backend == kAtbBackend) {

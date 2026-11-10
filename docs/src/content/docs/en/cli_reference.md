@@ -259,7 +259,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `enable_customize_mla_kernel` | `bool` | `false` | Whether to enable the customized MLA kernel. |
-| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel backend. Supported values: `AUTO`, `ATB`, `TORCH`, `XLITE`. |
+| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel backend. Supported values: `AUTO`, `ATB`, `TORCH`. |
 | `enable_intralayer_addnorm` | `bool` | `false` | Whether to enable fused intralayer addnorm ops. |
 | `enable_fused_mc2` | `int32` | `-1` | Fused MC2 mode for NPU. `-1` uses the auto default, `0` disables fused MC2, positive values enable dense matmul-allreduce, `1` uses DispatchFFNCombine for MoE, `2` uses DispatchGmmCombineDecode for MoE. |
 | `enable_interlayer_addnorm` | `bool` | `false` | Whether to enable fused interlayer addnorm ops. |

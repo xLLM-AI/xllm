@@ -266,8 +266,8 @@ bool resolve_model_registration(const std::string& model_type,
 
 // Resolve a selected model extension before applying built-in backend rules.
 // model_component is "causal_lm" or "causal_vlm". Registered model extensions
-// use TORCH for AUTO and honor explicit ATB/TORCH/XLITE; XLITE still requires a
-// build with USE_XLITE. Families without that component retain built-in rules.
+// use TORCH for AUTO and honor explicit ATB/TORCH. Families without that
+// component retain built-in rules.
 bool resolve_model_registration(const std::string& model_type,
                                 const std::string& requested_npu_kernel_backend,
                                 const std::string& extension_impl,
