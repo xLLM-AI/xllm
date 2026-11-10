@@ -91,8 +91,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
         });
   }
   scheduler_metrics_ =
-      std::make_unique<SchedulerMetrics>(distributed_worker_manager_,
-                                         kv_cache_manager_,
+      std::make_unique<SchedulerMetrics>(kv_cache_manager_,
                                          options_.dp_size(),
                                          options_.num_speculative_tokens(),
                                          options_.enable_disagg_pd());

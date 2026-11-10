@@ -55,12 +55,10 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `enable_manual_loader` | `bool` | `false` | Pin decoder layer weights to host memory and use async H2D transfer. Required by `enable_rolling_load`; also implied by `enable_vmm_weights`. |
-| `enable_vmm_weights` | `bool` | `false` | Enable VMM for model weights and implicitly enable the manual loader. Independent of `enable_vmm_kvcache`. NPU only. |
-| `enable_rolling_load` | `bool` | `false` | Enable rolling weight load: keep only N decoder layer weight slots in HBM and stream-load each layer just in time. Requires `enable_manual_loader=true`. NPU only. |
+| `enable_vmm_weights` | `bool` | `false` | Enable VMM for model weights. Independent of `enable_vmm_kvcache`. NPU only. |
+| `enable_rolling_load` | `bool` | `false` | Stream DiT layer weights through a fixed number of HBM slots. NPU only. |
 | `rolling_load_num_cached_layers` | `int32` | `2` | Number of decoder layer weight slots to keep in HBM when `enable_rolling_load=true`. |
 | `rolling_load_num_rolling_slots` | `int32` | `-1` | Number of rolling slots used by decoder rolling load. Fixed slots are `rolling_load_num_cached_layers - rolling_load_num_rolling_slots`. `-1` means auto, `min(2, preload_count)`. Must be in `[-1, rolling_load_num_cached_layers]`. |
-| `enable_prefetch_weight` | `bool` | `false` | Whether to enable weight prefetching. Only applies to Qwen3-dense models. The default gateup weight prefetch ratio is 40%; adjust with `PREFETCH_COEFFOCIENT`. |
 
 ## KVCacheConfig
 
@@ -162,7 +160,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `enable_mm_encoder_dp` | `bool` | `false` | Whether to enable encoder data parallelism for multimodal models. |
 | `enable_multi_stream_parallel` | `bool` | `false` | Whether to enable computation/communication parallelism with two streams and two micro batches in the prefill stage. See [Multi-Stream Parallelism](/en/features/multi_streams/). |
 | `micro_batch_num` | `int32` | `1` | Number of micro batches used for multi-stream parallelism. |
-| `enable_dp_balance` | `bool` | `false` | Whether to enable DP load balancing. If true, sequences within a single DP batch are shuffled. |
 
 ## EPLBConfig
 
@@ -212,7 +209,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Maximum number of globally cached requests for suffix speculation. `-1` means unlimited; `0` disables it. |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | Whether to use tree-based suffix speculation instead of path speculation. |
 | `enable_probabilistic_draft` | `bool` | false | Drafts sample proposals from their distribution (emitting q for rejection sampling). The default is greedy argmax. Only `MTP`, `DSpark`, `DFlash2`, `Eagle3` support it. |
-| `enable_atb_spec_kernel` | `bool` | `false` | Whether to use the ATB speculative kernel. |
 
 ## ProfileConfig
 
@@ -255,14 +251,8 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `enable_customize_mla_kernel` | `bool` | `false` | Whether to enable the customized MLA kernel. |
-| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel backend. Supported values: `AUTO`, `ATB`, `TORCH`. |
-| `enable_intralayer_addnorm` | `bool` | `false` | Whether to enable fused intralayer addnorm ops. |
+| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel backend. Supported values: `AUTO`, `TORCH`. |
 | `enable_fused_mc2` | `int32` | `-1` | Fused MC2 mode for NPU. `-1` uses the auto default, `0` disables fused MC2, positive values enable dense matmul-allreduce, `1` uses DispatchFFNCombine for MoE, `2` uses DispatchGmmCombineDecode for MoE. |
-| `enable_interlayer_addnorm` | `bool` | `false` | Whether to enable fused interlayer addnorm ops. |
-| `enable_split_rmsnorm_rope` | `bool` | `false` | Whether to enable fused split rmsnorm rope ops. |
-| `enable_aclnn_matmul` | `bool` | `false` | Whether to enable the ACLNN matmul backend for supported NPU ATB layers. |
-| `enable_aclnn_swiglu` | `bool` | `false` | Whether to enable the ACLNN SwiGLU backend for supported NPU ATB layers. |
 | `enable_dspark_native_sas` | `bool` | `false` | Enable native NPU DSpark SparseAttnSharedkv semantics. Older operators that reject non-empty `ori_sparse_indices` may terminate during tiling; keep this disabled to use q_len=1 compatibility mode. |
 
 ## DiTConfig

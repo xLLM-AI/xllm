@@ -323,16 +323,6 @@ struct TransferKVInfo {
   std::vector<KVTransferMapping> mappings;
 };
 
-// in bytes
-struct DeviceStats {
-  int64_t total_memory = 0;
-  int64_t weights_memory = 0;
-  int64_t total_kv_cache_memory = 0;
-  int64_t total_activation_memory = 0;
-  int64_t active_activation_memory = 0;
-  // TODO: add more device stats
-};
-
 // Function call related types
 class JsonFunction final {
  public:

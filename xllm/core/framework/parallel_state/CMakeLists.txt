@@ -5,7 +5,6 @@ cc_library(
     parallel_state
   HDRS
     mapping_npu.h
-    npu_cp_plan.h
     npu_dp_ep_padding.h
     dit_mapping.h
     rank_generator.h
@@ -25,7 +24,6 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:mega_moe_comm_resource.h>
   SRCS
     mapping_npu.cpp
-    npu_cp_plan.cpp
     npu_dp_ep_padding.cpp
     dit_mapping.cpp
     parallel_state.cpp
@@ -46,9 +44,6 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:hccl>
     $<$<BOOL:${USE_NPU}>:hcomm>
-    $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
-    $<$<BOOL:${USE_NPU}>:atb>
-    $<$<BOOL:${USE_NPU}>:atb_customize>
     $<$<BOOL:${USE_NPU}>:c_sec>
     gflags::gflags
     glog::glog

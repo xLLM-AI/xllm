@@ -274,17 +274,7 @@ DEFINE_COUNTER(engine_latency_seconds, "Engine execution latency in seconds");
 DEFINE_GAUGE(total_memory_size_in_kilobytes, "Total memory size in kilobytes");
 DEFINE_GAUGE(weight_size_in_kilobytes, "Weight size in kilobytes");
 DEFINE_GAUGE(total_kv_cache_size_in_kilobytes, "KV cache size in kilobytes");
-DEFINE_GAUGE(total_activation_size_in_kilobytes,
-             "Total activation size in kilobytes");
 
 DEFINE_MULTI_HISTOGRAM(active_kv_cache_size_in_kilobytes,
                        "dp_rank",
                        "Active kv cache size in kilobytes per dp rank");
-DEFINE_MULTI_HISTOGRAM(
-    prefill_active_activation_size_in_kilobytes,
-    "dp_rank",
-    "Active activation size in kilobytes per dp rank during prefill phase");
-DEFINE_MULTI_HISTOGRAM(
-    decode_active_activation_size_in_kilobytes,
-    "dp_rank",
-    "Active activation size in kilobytes per dp rank during decode phase");

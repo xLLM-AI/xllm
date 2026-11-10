@@ -44,7 +44,6 @@ limitations under the License.
 #include "models/dit/utils/util.h"
 
 #if defined(USE_NPU)
-#include "core/layers/npu/loader/rolling_load_manager.h"
 #include "core/layers/npu/loader/rolling_weight_buffer.h"
 #endif
 #include "framework/model_context/model_context.h"

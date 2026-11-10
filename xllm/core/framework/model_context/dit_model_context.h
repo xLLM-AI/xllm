@@ -15,10 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#if defined(USE_NPU)
-#include <acl/acl.h>
-#endif
-
 #include <memory>
 
 #include "core/framework/dit_cache/dit_cache_config.h"
@@ -63,10 +59,6 @@ class DiTModelContext {
 
   const DiTCacheConfig& get_dit_config() const { return dit_config_; }
 
-#if defined(USE_NPU)
-  const atb::Context* get_atb_context() const { return context_; }
-#endif
-
  private:
   std::unordered_map<std::string, ModelArgs> model_args_;
   std::unordered_map<std::string, QuantArgs> quant_args_;
@@ -74,11 +66,6 @@ class DiTModelContext {
   torch::TensorOptions tensor_options_;
   DiTCacheConfig dit_config_;
   std::string model_type_;
-
-#if defined(USE_NPU)
-  // used for npu atb
-  atb::Context* context_;
-#endif
 };
 
 }  // namespace xllm

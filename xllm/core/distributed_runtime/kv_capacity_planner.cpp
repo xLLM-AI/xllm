@@ -21,7 +21,6 @@ limitations under the License.
 #include <limits>
 #include <tuple>
 
-#include "core/common/device_monitor.h"
 #include "core/common/metrics.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
@@ -132,11 +131,6 @@ KVCacheCapacity KVCapacityPlanner::plan(bool initialize_virtual_memory) const {
   }
   GAUGE_SET(total_kv_cache_size_in_kilobytes,
             capacity.cache_size_in_bytes() / 1024);
-  for (const auto& device : options_.devices()) {
-    DeviceMonitor::get_instance().set_total_kv_cache_memory(
-        device.index(), capacity.cache_size_in_bytes());
-    DeviceMonitor::get_instance().set_total_activation_memory(device.index());
-  }
   return capacity;
 }
 

@@ -48,10 +48,6 @@ DEFINE_bool(enable_mtp_draft_body_tp1,
             "Whether to run the MTP draft body with tensor-parallel size 1 "
             "while keeping the draft LMHead on the target TP group.");
 
-DEFINE_bool(enable_atb_spec_kernel,
-            false,
-            "Whether to use ATB speculative kernel.");
-
 namespace xllm {
 
 void SpeculativeConfig::from_flags() {
@@ -62,7 +58,6 @@ void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_max_cached_requests);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_probabilistic_draft);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mtp_draft_body_tp1);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_atb_spec_kernel);
 }
 
 void SpeculativeConfig::from_json(const JsonReader& json) {
@@ -73,7 +68,6 @@ void SpeculativeConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_max_cached_requests);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_probabilistic_draft);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mtp_draft_body_tp1);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_atb_spec_kernel);
 }
 
 void SpeculativeConfig::append_config_json(
@@ -93,8 +87,6 @@ void SpeculativeConfig::append_config_json(
       config_json, default_config, enable_probabilistic_draft);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_mtp_draft_body_tp1);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_atb_spec_kernel);
 }
 
 SpeculativeConfig& SpeculativeConfig::get_instance() {

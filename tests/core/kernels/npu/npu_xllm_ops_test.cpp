@@ -329,6 +329,50 @@ TEST_F(NpuXllmOpsTest, DispatcherRmsNormMatchesReference) {
              .item<float>();
 }
 
+TEST_F(NpuXllmOpsTest, VisionRotarySupportsHead72WithoutModelGraph) {
+  py::gil_scoped_acquire gil;
+  torch::manual_seed(42);
+  for (const torch::ScalarType dtype : {torch::kFloat16, torch::kBFloat16}) {
+    SCOPED_TRACE(dtype == torch::kFloat16 ? "float16" : "bfloat16");
+    const auto cpu_options = torch::TensorOptions().dtype(dtype);
+    const auto options = cpu_options.device(torch::kPrivateUse1);
+    // Eight heads match TP2 vision and keep each BF16/FP16 row 32-byte aligned.
+    const torch::Tensor query_cpu = torch::randn({5, 8, 72}, cpu_options);
+    const torch::Tensor key_cpu = torch::randn({5, 8, 72}, cpu_options);
+    const torch::Tensor angles = torch::randn({5, 36}, torch::kFloat32);
+    const torch::Tensor cos_cpu = angles.cos().repeat({1, 2}).to(dtype);
+    const torch::Tensor sin_cpu = angles.sin().repeat({1, 2}).to(dtype);
+    torch::Tensor query = query_cpu.to(options);
+    torch::Tensor key = key_cpu.to(options);
+    std::vector<int32_t> seq_lens_host = {5};
+    const torch::Tensor seq_lens =
+        torch::tensor(seq_lens_host, options.dtype(torch::kInt32));
+    const auto reference = [&](const torch::Tensor& input) {
+      const torch::Tensor values = input.to(torch::kFloat32);
+      const auto halves = values.chunk(2, /*dim=*/-1);
+      const torch::Tensor rotated = torch::cat({-halves[1], halves[0]}, -1);
+      return values * cos_cpu.to(torch::kFloat32).unsqueeze(1) +
+             rotated * sin_cpu.to(torch::kFloat32).unsqueeze(1);
+    };
+
+    kernel::npu::apply_vision_rotary(query,
+                                     key,
+                                     cos_cpu.to(options),
+                                     sin_cpu.to(options),
+                                     seq_lens,
+                                     seq_lens_host);
+
+    EXPECT_TRUE(torch::allclose(query.cpu().to(torch::kFloat32),
+                                reference(query_cpu),
+                                /*rtol=*/0.02,
+                                /*atol=*/0.02));
+    EXPECT_TRUE(torch::allclose(key.cpu().to(torch::kFloat32),
+                                reference(key_cpu),
+                                /*rtol=*/0.02,
+                                /*atol=*/0.02));
+  }
+}
+
 TEST_F(NpuXllmOpsTest, DispatcherAtbMatmulEinSumMatchesReference) {
   py::gil_scoped_acquire gil;
   torch::manual_seed(20260923);

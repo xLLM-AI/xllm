@@ -112,39 +112,6 @@ class CausalVLMImpl : public CausalVLM {
 
   void update_expert_weight(int32_t layer_id) override { return; }
 
-#if defined(USE_NPU)
-  layer::NpuLmHead get_npu_lm_head() override {
-    if constexpr (detail::has_get_npu_lm_head<ModelType>::value) {
-      return model_->get_npu_lm_head();
-    } else {
-      return CausalLM::get_npu_lm_head();
-    }
-  }
-
-  void set_npu_lm_head(layer::NpuLmHead& head) override {
-    if constexpr (detail::has_set_npu_lm_head<ModelType>::value) {
-      model_->set_npu_lm_head(head);
-    } else {
-      CausalLM::set_npu_lm_head(head);
-    }
-  }
-
-  layer::NpuWordEmbedding get_npu_word_embedding() override {
-    if constexpr (detail::has_get_npu_word_embedding<ModelType>::value) {
-      return model_->get_npu_word_embedding();
-    } else {
-      return CausalLM::get_npu_word_embedding();
-    }
-  }
-
-  void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) override {
-    if constexpr (detail::has_set_npu_word_embedding<ModelType>::value) {
-      model_->set_npu_word_embedding(embedding);
-    } else {
-      CausalLM::set_npu_word_embedding(embedding);
-    }
-  }
-#endif
   layer::LmHead get_lm_head() override {
     if constexpr (detail::has_get_lm_head<ModelType>::value) {
       return model_->get_lm_head();

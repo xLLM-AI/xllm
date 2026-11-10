@@ -22,15 +22,10 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 
 #if defined(USE_NPU)
-DEFINE_bool(enable_customize_mla_kernel, false, "enable customize mla kernel");
 
 DEFINE_string(npu_kernel_backend,
               "AUTO",
-              "NPU kernel backend. Supported options: AUTO, ATB, TORCH.");
-
-DEFINE_bool(enable_intralayer_addnorm,
-            false,
-            "enable fused intralayer addnorm ops.");
+              "NPU kernel backend. Supported options: AUTO, TORCH.");
 
 DEFINE_int32(enable_fused_mc2,
              -1,
@@ -38,21 +33,6 @@ DEFINE_int32(enable_fused_mc2,
              "MC2, positive values enable dense matmul-allreduce, 1 uses "
              "DispatchFFNCombine for MoE, 2 uses DispatchGmmCombineDecode for "
              "MoE.");
-DEFINE_bool(enable_interlayer_addnorm,
-            false,
-            "enable fused interlayer addnorm ops.");
-
-DEFINE_bool(enable_split_rmsnorm_rope,
-            false,
-            "enable fused split rmsnorm rope ops.");
-
-DEFINE_bool(enable_aclnn_matmul,
-            false,
-            "enable ACLNN matmul backend for supported NPU ATB layers.");
-
-DEFINE_bool(enable_aclnn_swiglu,
-            false,
-            "enable ACLNN SwiGLU backend for supported NPU ATB layers.");
 
 DEFINE_bool(enable_mega_moe,
             false,
@@ -107,14 +87,8 @@ int32_t resolve_fused_mc2_mode(int32_t mode) {
 
 void KernelConfig::from_flags() {
 #if defined(USE_NPU)
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_customize_mla_kernel);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(npu_kernel_backend);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_intralayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_fused_mc2);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_interlayer_addnorm);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_split_rmsnorm_rope);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_matmul);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_swiglu);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mega_moe);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dspark_native_sas);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1);
@@ -126,14 +100,8 @@ void KernelConfig::from_flags() {
 
 void KernelConfig::from_json(const JsonReader& json) {
 #if defined(USE_NPU)
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_customize_mla_kernel);
   XLLM_CONFIG_ASSIGN_FROM_JSON(npu_kernel_backend);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_intralayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_fused_mc2);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_interlayer_addnorm);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_split_rmsnorm_rope);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_matmul);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_swiglu);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mega_moe);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dspark_native_sas);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1);
@@ -151,21 +119,9 @@ void KernelConfig::append_config_json(
   const KernelConfig default_config;
 #if defined(USE_NPU)
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_customize_mla_kernel);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, npu_kernel_backend);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_intralayer_addnorm);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_fused_mc2);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_interlayer_addnorm);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_split_rmsnorm_rope);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_aclnn_matmul);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_aclnn_swiglu);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_mega_moe);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

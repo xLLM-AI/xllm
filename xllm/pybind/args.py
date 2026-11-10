@@ -95,7 +95,7 @@ class ArgumentParser:
             "--num_request_handling_threads", type=int, default=4, help="Number of handling threads."
         )
         self.parser.add_argument("--communication_backend", type=str, default="hccl", help="npu communication backend.")
-        self.parser.add_argument("--rank_tablefile", type=str, default="", help="atb hccl rank table file")
+        self.parser.add_argument("--rank_tablefile", type=str, default="", help="HCCL rank table file")
         self.parser.add_argument("--expert_parallel_degree", type=int, default=0, help="ep degree")
         self.parser.add_argument(
             "--enable_chunked_prefill",

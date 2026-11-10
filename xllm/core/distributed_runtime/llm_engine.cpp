@@ -31,7 +31,6 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
-#include "common/device_monitor.h"
 #include "common/metrics.h"
 #include "common/options.h"
 #include "core/common/global_flags.h"
@@ -95,8 +94,6 @@ LLMEngine::LLMEngine(
   CHECK(!master_node_addr.empty())
       << " LLM need to set master node addr, Please set --master_node_addr.";
   const auto& devices = options_.devices();
-  // initialize device monitor
-  DeviceMonitor::get_instance().initialize(devices);
   CHECK_GT(devices.size(), 0) << "At least one device is required";
 
   CHECK(!devices[0].is_cpu()) << "CPU device is not supported";
@@ -104,10 +101,6 @@ LLMEngine::LLMEngine(
   for (const auto device : devices) {
     CHECK_EQ(device.type(), device_type)
         << "All devices should be the same type";
-#if defined(USE_NPU)
-    FLAGS_enable_atb_comm_multiprocess =
-        options.enable_offline_inference() || (options.nnodes() > 1);
-#endif
   }
 
   // setup all workers and create worker clients in nnode_rank=0 engine side.

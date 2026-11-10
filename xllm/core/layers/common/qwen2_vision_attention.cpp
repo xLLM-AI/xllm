@@ -67,11 +67,6 @@ Qwen2VisionAttentionImpl::Qwen2VisionAttentionImpl(const ModelContext& context,
                                             quant_args,
                                             parallel_args.tp_group_,
                                             options));
-#if defined(USE_NPU)
-  // currently only atb rope operation supports the head_dim=72,
-  // aclnn rope operation only supports head_dim=64 or 128
-  rope_layer_ = register_module("rope", NpuRopeLayer(context));
-#endif
 }
 
 std::vector<torch::Tensor> Qwen2VisionAttentionImpl::split_qkv(
@@ -238,14 +233,8 @@ torch::Tensor Qwen2VisionAttentionImpl::forward(
 
   // Apply rotary position embedding to both q and k in a single call.
 #if defined(USE_NPU)
-  auto q_atb = q.reshape({B * S, -1});
-  auto k_atb = k.reshape({B * S, -1});
-  auto rotary_result = rope_layer_->forward(
-      q_atb, k_atb, m_cos_pos, m_sin_pos, cu_seq_len, cu_seq_len_vec);
-  q = std::get<0>(rotary_result)
-          .reshape({B * S, num_attention_heads_per_partition_, head_dim});
-  k = std::get<1>(rotary_result)
-          .reshape({B * S, num_attention_heads_per_partition_, head_dim});
+  xllm::kernel::npu::apply_vision_rotary(
+      q, k, m_cos_pos, m_sin_pos, cu_seq_len, cu_seq_len_vec);
 #else
   // NOTE: Do NOT call apply_rotary twice; the first call already handles both
   // q and k. A second call would incorrectly apply RoPE to k a second time.

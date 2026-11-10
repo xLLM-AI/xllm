@@ -321,15 +321,11 @@ class WorkerForwardCompletionTest
     ModelContext context(parallel_args,
                          args,
                          QuantArgs{},
-                         torch::TensorOptions().device(device),
-                         /*context=*/nullptr);
+                         torch::TensorOptions().device(device));
     context.set_model_impl("native");
     return worker.init_model(context);
   }
 
-  ScopedConfigValue<bool> manual_loader_{
-      LoadConfig::get_instance().enable_manual_loader(),
-      false};
   ScopedConfigValue<bool> rolling_load_{
       LoadConfig::get_instance().enable_rolling_load(),
       false};
@@ -345,7 +341,7 @@ class WorkerForwardCompletionTest
       "native"};
   ScopedConfigValue<std::string> kernel_backend_{
       KernelConfig::get_instance().npu_kernel_backend(),
-      "ATB"};
+      "TORCH"};
 };
 
 TEST_P(WorkerForwardCompletionTest, HonorsCompletionAndRetainsInputOwners) {

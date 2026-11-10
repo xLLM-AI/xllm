@@ -30,7 +30,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "common/device_monitor.h"
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/distributed_runtime/worker_model_codec.h"
@@ -471,12 +470,6 @@ void WorkerService::collect_llm_output(
     copy_output_to_host();
     stream_->synchronize();
   }
-#if defined(USE_NPU)
-  if (!use_default_stream) {
-    DeviceMonitor::get_instance().update_active_activation_memory(
-        device_.index());
-  }
-#endif
 }
 
 void WorkerService::step_llm_model(
@@ -656,12 +649,6 @@ void WorkerService::collect_vlm_output(
   }
   copy_output_to_host();
   stream_->synchronize();
-#if defined(USE_NPU)
-  if (options_.enable_schedule_overlap()) {
-    DeviceMonitor::get_instance().update_active_activation_memory(
-        device_.index());
-  }
-#endif
 }
 
 void WorkerService::step_vlm_model(
@@ -1167,20 +1154,6 @@ void WorkerService::StopProfile(::google::protobuf::RpcController* controller,
     resp->set_ok(status);
   });
 
-  return;
-}
-
-void WorkerService::GetActiveActivationMemory(
-    ::google::protobuf::RpcController* controller,
-    const proto::Empty* req,
-    proto::ActivationMemory* resp,
-    ::google::protobuf::Closure* done) {
-  threadpool_->schedule([this, controller, req, resp, done]() mutable {
-    brpc::ClosureGuard done_guard(done);
-    auto future = worker_->get_active_activation_memory_async();
-    int64_t active_activation_memory = std::move(future).get();
-    resp->set_active_activation_memory(active_activation_memory);
-  });
   return;
 }
 

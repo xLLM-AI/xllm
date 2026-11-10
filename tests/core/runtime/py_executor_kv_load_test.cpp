@@ -129,12 +129,9 @@ patch.__enter__()
         .head_dim(8)
         .n_layers(1)
         .vocab_size(16);
-    // This CPU executor double does not create an ATB device context.
-    ModelContext context(parallel,
-                         args,
-                         QuantArgs(),
-                         torch::TensorOptions().device(device),
-                         /*context=*/nullptr);
+    // This executor double runs on the CPU.
+    ModelContext context(
+        parallel, args, QuantArgs(), torch::TensorOptions().device(device));
     PyCausalLM model(context, "test_reload");
     std::vector<KVCache> caches;
     for (bool layerwise : {false, true}) {

@@ -17,17 +17,13 @@ limitations under the License.
 
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
-#include <folly/ExceptionWrapper.h>
-#include <folly/futures/Future.h>
 #include <gtest/gtest.h>
 
 #include <memory>
-#include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include "common/metrics.h"
-#include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/request/request.h"
@@ -35,59 +31,8 @@ limitations under the License.
 
 namespace xllm {
 
-namespace {
-
-class ActivationMemoryWorkerClient final : public WorkerClient {
- public:
-  explicit ActivationMemoryWorkerClient(int64_t activation_memory,
-                                        bool fail = false)
-      : activation_memory_(activation_memory), fail_(fail) {}
-
-  folly::SemiFuture<int64_t> get_active_activation_memory_async() override {
-    if (fail_) {
-      folly::Promise<int64_t> promise;
-      auto future = promise.getSemiFuture();
-      promise.setException(folly::make_exception_wrapper<std::runtime_error>(
-          "worker activation memory query failed"));
-      return future;
-    }
-    return folly::makeSemiFuture(activation_memory_);
-  }
-
- private:
-  int64_t activation_memory_;
-  bool fail_;
-};
-
-}  // namespace
-
 class SchedulerMetricsTestPeer final {
  public:
-  static std::shared_ptr<DistributedWorkerManager> make_manager(
-      const std::vector<int64_t>& activation_memories) {
-    std::vector<std::shared_ptr<WorkerClient>> worker_clients;
-    worker_clients.reserve(activation_memories.size());
-    for (int64_t activation_memory : activation_memories) {
-      worker_clients.emplace_back(
-          std::make_shared<ActivationMemoryWorkerClient>(activation_memory));
-    }
-    return std::shared_ptr<DistributedWorkerManager>(
-        new DistributedWorkerManager(std::move(worker_clients)));
-  }
-
-  static std::shared_ptr<DistributedWorkerManager> make_failing_manager() {
-    std::vector<std::shared_ptr<WorkerClient>> worker_clients;
-    worker_clients.emplace_back(
-        std::make_shared<ActivationMemoryWorkerClient>(0, true));
-    return std::shared_ptr<DistributedWorkerManager>(
-        new DistributedWorkerManager(std::move(worker_clients)));
-  }
-
-  static std::vector<int64_t> active_activation_in_bytes(
-      const SchedulerMetrics& metrics) {
-    return metrics.get_active_activation_in_bytes();
-  }
-
   static std::vector<int64_t> occupied_slots(
       const SchedulerMetrics& metrics,
       const std::vector<Sequence*>& sequences) {
@@ -134,8 +79,7 @@ std::shared_ptr<Request> make_request() {
 
 TEST(SchedulerMetricsTest, CollectsAndDrainsLatencySamples) {
   auto block_manager = make_block_manager_pool();
-  SchedulerMetrics metrics(SchedulerMetricsTestPeer::make_manager({0}),
-                           block_manager.get(),
+  SchedulerMetrics metrics(block_manager.get(),
                            /*dp_size=*/1,
                            /*num_speculative_tokens=*/0,
                            /*collect_recent_latency=*/true);
@@ -174,8 +118,7 @@ TEST(SchedulerMetricsTest, CollectsAndDrainsLatencySamples) {
 
 TEST(SchedulerMetricsTest, SkipsRecentSamplesWhenCollectionDisabled) {
   auto block_manager = make_block_manager_pool();
-  SchedulerMetrics metrics(SchedulerMetricsTestPeer::make_manager({0}),
-                           block_manager.get(),
+  SchedulerMetrics metrics(block_manager.get(),
                            /*dp_size=*/1,
                            /*num_speculative_tokens=*/0,
                            /*collect_recent_latency=*/false);
@@ -197,20 +140,6 @@ TEST(SchedulerMetricsTest, SkipsRecentSamplesWhenCollectionDisabled) {
   EXPECT_GT(sequence->time_to_first_token_latency_seconds(), 0.0);
 }
 
-TEST(SchedulerMetricsTest, SamplesFirstWorkerOfEachDataParallelRank) {
-  auto block_manager = make_block_manager_pool(/*dp_size=*/3);
-  SchedulerMetrics metrics(
-      SchedulerMetricsTestPeer::make_manager(
-          {1025, 8192, 16384, 2049, 32768, 65536, 3073, 131072, 262144}),
-      block_manager.get(),
-      /*dp_size=*/3,
-      /*num_speculative_tokens=*/0,
-      /*collect_recent_latency=*/false);
-
-  EXPECT_EQ(SchedulerMetricsTestPeer::active_activation_in_bytes(metrics),
-            (std::vector<int64_t>{1025, 2049, 3073}));
-}
-
 TEST(SchedulerMetricsTest, SharedArenaCountsFullTailsAndKeepsLinearState) {
   BlockManagerPool::Options options;
   options.num_blocks(18)
@@ -221,7 +150,7 @@ TEST(SchedulerMetricsTest, SharedArenaCountsFullTailsAndKeepsLinearState) {
       .enable_shared_kv_cache(true)
       .shared_linear_state_slots(2);
   BlockManagerPool block_manager(options);
-  SchedulerMetrics metrics(nullptr, &block_manager, 1, 0, false);
+  SchedulerMetrics metrics(&block_manager, 1, 0, false);
   std::shared_ptr<Request> request = make_request();
   Sequence* sequence = request->sequences().front().get();
   ASSERT_TRUE(block_manager.allocate(sequence, /*num_tokens=*/4));
@@ -257,7 +186,7 @@ TEST(SchedulerMetricsTest, SharedSlabCountsPayloadBytesAndPartialFullTails) {
       .shared_layout(
           std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
   BlockManagerPool block_manager(options);
-  SchedulerMetrics metrics(nullptr, &block_manager, 1, 0, false);
+  SchedulerMetrics metrics(&block_manager, 1, 0, false);
   std::shared_ptr<Request> request = make_request();
   Sequence* sequence = request->sequences().front().get();
   ASSERT_TRUE(block_manager.allocate(sequence, /*num_tokens=*/4));
@@ -279,44 +208,6 @@ TEST(SchedulerMetricsTest, SharedSlabCountsPayloadBytesAndPartialFullTails) {
   metrics.update(sequences);
   EXPECT_EQ(recorder->count(), samples_before + 1);
   block_manager.deallocate(sequence);
-}
-
-TEST(SchedulerMetricsTest, PropagatesActivationMemoryQueryFailure) {
-  auto block_manager = make_block_manager_pool();
-  SchedulerMetrics metrics(SchedulerMetricsTestPeer::make_failing_manager(),
-                           block_manager.get(),
-                           /*dp_size=*/1,
-                           /*num_speculative_tokens=*/0,
-                           /*collect_recent_latency=*/false);
-  std::shared_ptr<Request> request = make_request();
-  std::vector<Sequence*> sequences = {request->sequences().front().get()};
-
-  EXPECT_THROW(metrics.update(sequences), std::runtime_error);
-}
-
-TEST(SchedulerMetricsTest, RejectsIncompleteDataParallelSamples) {
-  auto block_manager = make_block_manager_pool(/*dp_size=*/2);
-  SchedulerMetrics metrics(SchedulerMetricsTestPeer::make_manager({1024}),
-                           block_manager.get(),
-                           /*dp_size=*/2,
-                           /*num_speculative_tokens=*/0,
-                           /*collect_recent_latency=*/false);
-
-  EXPECT_DEATH(SchedulerMetricsTestPeer::active_activation_in_bytes(metrics),
-               "samples must cover every DP rank");
-}
-
-TEST(SchedulerMetricsTest, RejectsUnequalWorkerCountsPerDataParallelRank) {
-  auto block_manager = make_block_manager_pool(/*dp_size=*/2);
-  SchedulerMetrics metrics(
-      SchedulerMetricsTestPeer::make_manager({1024, 2048, 4096}),
-      block_manager.get(),
-      /*dp_size=*/2,
-      /*num_speculative_tokens=*/0,
-      /*collect_recent_latency=*/false);
-
-  EXPECT_DEATH(SchedulerMetricsTestPeer::active_activation_in_bytes(metrics),
-               "samples must have equal worker counts per DP rank");
 }
 
 TEST(SchedulerMetricsTest, AmortizedTokenLatencyRoundsHalfUp) {

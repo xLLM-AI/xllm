@@ -329,9 +329,7 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   // with an N+1-token query so recurrent state is checkpointed and committed
   // by the model's spec-verify kernel instead of being expanded into N+1
   // independent decode rows.
-  const bool use_chunked_spec_verify =
-      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel() ||
-      input.input_params.is_spec_verify;
+  const bool use_chunked_spec_verify = input.input_params.is_spec_verify;
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
 
@@ -349,10 +347,10 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
                             row_ctx.block_table_stride);
   }
 
-  std::vector<int32_t> atb_kv_seq_lens_vec = {};
-  std::vector<int32_t> atb_q_seq_lens_vec = {};
-  std::vector<int32_t> atb_q_cu_seq_lens_vec = {};
-  int32_t atb_kv_max_seq_len = 0;
+  std::vector<int32_t> chunked_kv_seq_lens_vec = {};
+  std::vector<int32_t> chunked_q_seq_lens_vec = {};
+  std::vector<int32_t> chunked_q_cu_seq_lens_vec = {};
+  int32_t chunked_kv_max_seq_len = 0;
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     int32_t kv_len =
         specBuilder::calc_kv_len(kv_seq_lens, seq_id, /*offset=*/0);
@@ -373,10 +371,11 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
 
     if (use_chunked_spec_verify) {
       const int32_t kv_len_after_validation = kv_len + num_speculative_tokens;
-      specBuilder::update_kv_seq_lens_and_max(
-          atb_kv_seq_lens_vec, kv_len_after_validation, atb_kv_max_seq_len);
+      specBuilder::update_kv_seq_lens_and_max(chunked_kv_seq_lens_vec,
+                                              kv_len_after_validation,
+                                              chunked_kv_max_seq_len);
       specBuilder::append_q_seq_len(
-          atb_q_seq_lens_vec, atb_q_cu_seq_lens_vec, num_val_tokens);
+          chunked_q_seq_lens_vec, chunked_q_cu_seq_lens_vec, num_val_tokens);
     }
   }
 
@@ -403,10 +402,10 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
     specBuilder::update_input_params(input_params,
                                      buf,
                                      num_val_tokens,
-                                     std::move(atb_q_seq_lens_vec),
-                                     std::move(atb_q_cu_seq_lens_vec),
-                                     atb_kv_max_seq_len,
-                                     std::move(atb_kv_seq_lens_vec));
+                                     std::move(chunked_q_seq_lens_vec),
+                                     std::move(chunked_q_cu_seq_lens_vec),
+                                     chunked_kv_max_seq_len,
+                                     std::move(chunked_kv_seq_lens_vec));
   } else {
     specBuilder::update_input_params(input_params,
                                      buf,

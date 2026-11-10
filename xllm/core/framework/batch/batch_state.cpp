@@ -24,7 +24,6 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/batch/forward_input_builder.h"
-#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/model/model_args.h"
@@ -106,99 +105,6 @@ void BatchState::add(SequencesGroup* sequence_group) {
   sequence_groups_.emplace_back(sequence_group);
 }
 
-void BatchState::dp_balance_shuffle_seqs() {
-#if defined(USE_NPU)
-  // this shuffle operation is mainly used for npu with 24 cores
-  // and specific mla op implementation
-  constexpr size_t kNumNpuCores = 24;
-  if (::xllm::KernelConfig::get_instance().enable_customize_mla_kernel() &&
-      ::xllm::ParallelConfig::get_instance().enable_dp_balance() &&
-      sequence_plan_.sequences().size() > kNumNpuCores) {
-    std::vector<uint32_t> kv_cache_tokens_num;
-    kv_cache_tokens_num.reserve(sequence_plan_.sequences().size());
-    for (auto& seq : sequence_plan_.sequences()) {
-      kv_cache_tokens_num.push_back(seq->kv_state().kv_cache_tokens_num());
-    }
-    auto seq_index_shift = cal_seq_exchange_index(kv_cache_tokens_num);
-
-    std::vector<size_t> source_indices(sequence_plan_.size());
-    for (const auto& [source, target] : seq_index_shift) {
-      source_indices[target] = source;
-    }
-    sequence_plan_.reorder(source_indices);
-  }
-#else
-  // TODO: implement dp_balance_shuffle_seqs for non-npu devices
-  static bool warning = true;
-  if (warning) {
-    LOG(WARNING)
-        << "dp_balance_shuffle_seqs is not implemented for current device";
-    warning = false;
-  }
-#endif
-}
-
-std::unordered_map<uint32_t, uint32_t> BatchState::cal_seq_exchange_index(
-    std::vector<uint32_t>& kv_cache_tokens_num) {
-  constexpr size_t kNumNpuCores = 24;
-  const size_t num_seqs = kv_cache_tokens_num.size();
-  const size_t base_per_core = num_seqs / kNumNpuCores;
-  const size_t remainder = num_seqs % kNumNpuCores;
-
-  // find the indices of the remainder biggest elements
-  std::vector<uint32_t> indices(num_seqs);
-  std::iota(indices.begin(), indices.end(), 0);
-  if (remainder > 0) {
-    std::nth_element(indices.begin(),
-                     indices.end() - remainder,
-                     indices.end(),
-                     [&kv_cache_tokens_num](uint32_t a, uint32_t b) {
-                       return kv_cache_tokens_num[a] < kv_cache_tokens_num[b];
-                     });
-  }
-
-  std::vector<uint32_t> base_indices(indices.begin(),
-                                     indices.end() - remainder);
-  std::vector<uint32_t> remainder_indices(indices.end() - remainder,
-                                          indices.end());
-
-  // sort base_indices in descending order
-  std::sort(base_indices.begin(),
-            base_indices.end(),
-            [&kv_cache_tokens_num](uint32_t a, uint32_t b) {
-              return kv_cache_tokens_num[a] > kv_cache_tokens_num[b];
-            });
-
-  // allocate a long and a short request to each core, to ensuring
-  // load balance among all cores
-  std::vector<std::vector<uint32_t>> base_assignment(
-      kNumNpuCores, std::vector<uint32_t>(base_per_core));
-  for (size_t i = 0; i < base_indices.size(); ++i) {
-    const size_t col = i / kNumNpuCores;
-    const size_t row = (col % 2 == 0) ? (i % kNumNpuCores)
-                                      : (kNumNpuCores - 1 - (i % kNumNpuCores));
-    base_assignment[row][col] = base_indices[i];
-  }
-
-  // record the index map, first one is original index,
-  // second one is the target index to be exchanged to
-  std::unordered_map<uint32_t, uint32_t> index_shift;
-  // add base part data
-  for (size_t i = 0; i < kNumNpuCores; ++i) {
-    for (size_t j = 0; j < base_per_core; ++j) {
-      const uint32_t idx = base_assignment[i][j];
-      index_shift[idx] = static_cast<uint32_t>(i + j * kNumNpuCores);
-    }
-  }
-  // add remainder part data
-  for (size_t i = 0; i < remainder; ++i) {
-    index_shift[remainder_indices[i]] =
-        static_cast<uint32_t>(i + kNumNpuCores * base_per_core);
-  }
-
-  return index_shift;
-}
-
 void BatchState::refresh_forward_type(const std::vector<Sequence*>& sequences) {
   batch_forward_type_ = BatchForwardType();
   for (auto* sequence : sequences) {
@@ -270,7 +176,6 @@ BatchInputData BatchState::prepare_sequence_input_data() {
 BatchInputData BatchState::prepare_distributed_input_data() {
   CHECK(sequence_groups_.empty() || !sequence_plan_.empty())
       << "Sequence input requires scheduled sequences";
-  dp_balance_shuffle_seqs();
   return input_data(sequence_plan_);
 }
 

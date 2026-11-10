@@ -231,7 +231,7 @@ std::optional<std::string> validate_context_parallel_config(
       return "Model-side CP supports only DEFAULT or PREFILL roles";
     }
 
-    // Python CP bypasses ATB; only GLM-5 Next restores DP-local rows
+    // Only Python GLM-5 Next restores DP-local rows
     // before routed MoE, so other Python models require DP1.
     if (ModelConfig::is_python_model_impl(
             ModelConfig::get_instance().model_impl())) {
@@ -323,9 +323,8 @@ std::optional<std::string> validate_context_parallel_config(
       return std::nullopt;
     }
 
-    // Require registered NPU model-side CP capability. The backend is not
-    // constrained: ATB models drive CP through NpuCpPlan, while TORCH models
-    // (deepseek_v4) own their CP split inside the model. Both rely on the
+    // Require registered native NPU model-side CP capability for models that
+    // own their CP split inside the model. This relies on the
     // orthogonal dp * cp * attn_tp == world layout validated below.
     std::string effective_backend;
     std::string resolved_name;

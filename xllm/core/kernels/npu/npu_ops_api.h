@@ -58,6 +58,13 @@ void batch_decode(const torch::Tensor& query,
                   const torch::Tensor& seq_lens,
                   torch::Tensor& output);
 
+void apply_vision_rotary(torch::Tensor& query,
+                         torch::Tensor& key,
+                         const torch::Tensor& cos,
+                         const torch::Tensor& sin,
+                         const torch::Tensor& seq_lens,
+                         std::vector<int32_t>& seq_lens_host);
+
 void apply_rotary(torch::Tensor& query,
                   torch::Tensor& key,
                   const torch::Tensor& cos,

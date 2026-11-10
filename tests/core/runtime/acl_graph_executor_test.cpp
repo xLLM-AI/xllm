@@ -30,7 +30,6 @@ limitations under the License.
 #include "core/framework/batch/batch.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
@@ -45,8 +44,6 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/layers/common/attention_metadata.h"
-#include "core/layers/npu/npu_lm_head_impl.h"
-#include "core/layers/npu/npu_word_embedding_impl.h"
 #include "core/layers/npu_torch/qwen3_next_attention.h"
 #include "core/layers/npu_torch/tests_utils.h"
 #include "core/runtime/acl_graph_executor_impl.h"
@@ -389,24 +386,6 @@ class SimpleCausalLM : public CausalLM {
   }
 
   void update_expert_weight(int32_t layer_id) override {
-    // Simple implementation for testing
-  }
-
-  layer::NpuLmHead get_npu_lm_head() override {
-    // Simple implementation for testing
-    return layer::NpuLmHead(nullptr);
-  }
-
-  void set_npu_lm_head(layer::NpuLmHead& head) override {
-    // Simple implementation for testing
-  }
-
-  layer::NpuWordEmbedding get_npu_word_embedding() override {
-    // Simple implementation for testing
-    return layer::NpuWordEmbedding(nullptr);
-  }
-
-  void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) override {
     // Simple implementation for testing
   }
 
@@ -1213,11 +1192,6 @@ TEST_F(AclGraphExecutorTest, DpDecodeGraphKeyIgnoresRawTokenDistribution) {
 }
 
 TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
-  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
-  const bool original_enable_atb_spec_kernel =
-      speculative_config.enable_atb_spec_kernel();
-  speculative_config.enable_atb_spec_kernel(false);
-
   ModelArgs args;
   args.model_type("deepseek_v4");
   args.dtype("float32");
@@ -1294,18 +1268,11 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
       /*is_hybrid_linear_attention=*/true);
   // 10 seqs x 3 decoding tokens = 30 rows -> bucket 32 -> 11 metadata rows.
   EXPECT_EQ(hybrid_persistent_param.persistent_block_tables().size(0), 11);
-
-  speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
 
 class HybridSpecVerifyPaddingTest : public ::testing::TestWithParam<int32_t> {};
 
 TEST_P(HybridSpecVerifyPaddingTest, MetadataCoversBucketPadding) {
-  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
-  const bool original_enable_atb_spec_kernel =
-      speculative_config.enable_atb_spec_kernel();
-  speculative_config.enable_atb_spec_kernel(false);
-
   ModelArgs args;
   args.model_type("qwen3_5_text");
   args.dtype("float32");
@@ -1414,8 +1381,6 @@ TEST_P(HybridSpecVerifyPaddingTest, MetadataCoversBucketPadding) {
   EXPECT_TRUE(
       torch::equal(capture_params->attention.device.q_seq_lens.cpu(),
                    torch::tensor(expected_query_lengths, torch::kInt32)));
-
-  speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
 
 INSTANTIATE_TEST_SUITE_P(VerifyWidths,
@@ -1500,11 +1465,6 @@ TEST(AclGraphPersistentParamTest,
 }
 
 TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
-  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
-  const bool original_enable_atb_spec_kernel =
-      speculative_config.enable_atb_spec_kernel();
-  speculative_config.enable_atb_spec_kernel(false);
-
   ModelArgs args;
   args.model_type("deepseek_v4");
   args.dtype("float32");
@@ -1542,8 +1502,6 @@ TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
           options.max_seqs_per_batch(),
           options.enable_graph_mode_decode_no_padding());
   EXPECT_EQ(draft_param.aux_hidden_states().size(0), expected_draft_capacity);
-
-  speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
 
 TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {

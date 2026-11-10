@@ -55,7 +55,7 @@ DEFINE_int32(eplb_prepare_timeout_seconds,
 
 DEFINE_int32(expert_parallel_degree, 0, "Expert parallel degree.");
 
-DEFINE_string(rank_tablefile, "", "ATB HCCL rank table file.");
+DEFINE_string(rank_tablefile, "", "HCCL rank table file.");
 
 namespace xllm {
 

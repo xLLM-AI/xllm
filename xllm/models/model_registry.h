@@ -244,11 +244,7 @@ bool resolve_model_registration_name(const std::string& model_type,
                                      std::string* resolved_name,
                                      std::string* error_message = nullptr);
 
-// Lazily register the NPU ATB model-side CP pipeline capability for the four
-// supported models (deepseek_v32, deepseek_v32_mtp, glm_moe_dsa,
-// glm_moe_dsa_mtp) and return whether `resolved_name` is CP-capable.
-// Idempotent. `resolved_name` must already be backend-resolved (see
-// resolve_model_registration) so qwen3_atb etc. are not misclassified.
+// Return whether a native NPU model owns context-parallel sharding.
 bool is_npu_model_cp_capable(const std::string& resolved_name);
 
 // Native DCP capability is distinct from prefill CP sharding capability.
@@ -266,8 +262,7 @@ bool resolve_model_registration(const std::string& model_type,
 
 // Resolve a selected model extension before applying built-in backend rules.
 // model_component is "causal_lm" or "causal_vlm". Registered model extensions
-// use TORCH for AUTO and honor explicit ATB/TORCH. Families without that
-// component retain built-in rules.
+// use the same Torch backend as built-in NPU implementations.
 bool resolve_model_registration(const std::string& model_type,
                                 const std::string& requested_npu_kernel_backend,
                                 const std::string& extension_impl,

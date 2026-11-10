@@ -16,9 +16,6 @@ limitations under the License.
 
 #pragma once
 
-#if defined(USE_NPU)
-#include <atb/atb_infer.h>
-#endif
 #include <c10/core/ScalarType.h>
 #include <torch/torch.h>
 
@@ -28,15 +25,9 @@ limitations under the License.
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/model_loader/dit_model_loader.h"
 #include "core/kv_cache/storage/kv_cache.h"
-#if defined(USE_NPU)
-#include "core/layers/npu/npu_siglip_encoder_layer_impl.h"
-#endif
 #include "models/model_registry.h"
 #include "processors/clip_prompt_processor.h"
 #include "xllm/core/layers/common/add_matmul.h"
-#if defined(USE_NPU)
-#include "xllm_atb_layers/core/include/atb_speed/log.h"
-#endif
 
 namespace xllm {
 // clip_text_model compatible with huggingface weights

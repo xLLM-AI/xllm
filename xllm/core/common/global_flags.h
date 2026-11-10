@@ -123,8 +123,6 @@ DECLARE_bool(enable_multi_stream_parallel);
 
 DECLARE_int32(micro_batch_num);
 
-DECLARE_bool(enable_dp_balance);
-
 // --- ep load balance config ---
 DECLARE_bool(enable_eplb);
 
@@ -192,10 +190,6 @@ DECLARE_bool(enable_schedule_overlap);
 DECLARE_double(prefill_scheduling_memory_usage_threshold);
 
 DECLARE_int32(max_reconnect_count);
-
-DECLARE_bool(enable_atb_comm_multiprocess);
-
-DECLARE_bool(enable_atb_spec_kernel);
 
 DECLARE_string(etcd_addr);
 
@@ -279,7 +273,6 @@ DECLARE_bool(enable_shared_kv_cache);
 DECLARE_int64(phy_page_granularity_size);
 
 // --- load config ---
-DECLARE_bool(enable_manual_loader);
 
 DECLARE_bool(enable_vmm_weights);
 
@@ -287,8 +280,6 @@ DECLARE_bool(enable_rolling_load);
 
 DECLARE_int32(rolling_load_num_cached_layers);
 DECLARE_int32(rolling_load_num_rolling_slots);
-
-DECLARE_bool(enable_prefetch_weight);
 
 // --- qwen3 reranker config ---
 DECLARE_bool(enable_qwen3_reranker);
@@ -363,21 +354,10 @@ DECLARE_bool(use_audio_in_video);
 
 // --- kernel config ---
 #if defined(USE_NPU)
-DECLARE_bool(enable_customize_mla_kernel);
 
 DECLARE_string(npu_kernel_backend);
 
-DECLARE_bool(enable_intralayer_addnorm);
-
 DECLARE_int32(enable_fused_mc2);
-
-DECLARE_bool(enable_interlayer_addnorm);
-
-DECLARE_bool(enable_split_rmsnorm_rope);
-
-DECLARE_bool(enable_aclnn_matmul);
-
-DECLARE_bool(enable_aclnn_swiglu);
 
 DECLARE_bool(enable_dspark_native_sas);
 

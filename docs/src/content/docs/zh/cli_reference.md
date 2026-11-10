@@ -55,12 +55,10 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
-| `enable_manual_loader` | `bool` | `false` | 将 decoder layer 权重固定在 host 内存并使用异步 H2D 传输；`enable_rolling_load` 依赖该参数，`enable_vmm_weights` 也会隐式启用该能力。 |
-| `enable_vmm_weights` | `bool` | `false` | 为模型权重启用 VMM，并隐式启用 manual loader。与 `enable_vmm_kvcache` 独立，仅 NPU 支持。 |
-| `enable_rolling_load` | `bool` | `false` | 启用 rolling weight load：HBM 中仅保留 N 个 decoder layer 权重槽位，并按层即时加载；需要 `enable_manual_loader=true`，仅 NPU 支持。 |
+| `enable_vmm_weights` | `bool` | `false` | 为模型权重启用 VMM。与 `enable_vmm_kvcache` 独立，仅 NPU 支持。 |
+| `enable_rolling_load` | `bool` | `false` | 使用固定数量的 HBM 槽位按层加载 DiT 权重，仅 NPU 支持。 |
 | `rolling_load_num_cached_layers` | `int32` | `2` | `enable_rolling_load=true` 时 HBM 中保留的 decoder layer 权重槽位数量。 |
 | `rolling_load_num_rolling_slots` | `int32` | `-1` | decoder rolling load 使用的 rolling 槽位数量；固定槽位数为 `rolling_load_num_cached_layers - rolling_load_num_rolling_slots`。`-1` 表示自动设置为 `min(2, preload_count)`，取值需在 `[-1, rolling_load_num_cached_layers]` 范围内。 |
-| `enable_prefetch_weight` | `bool` | `false` | 是否启用权重预取，仅适用于 Qwen3-dense 模型；gateup 权重默认预取比例为 40%，可通过环境变量 `PREFETCH_COEFFOCIENT` 调整。 |
 
 ## KVCacheConfig
 
@@ -162,7 +160,6 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `enable_mm_encoder_dp` | `bool` | `false` | 是否为多模态模型启用 encoder data parallel。 |
 | `enable_multi_stream_parallel` | `bool` | `false` | 是否在 prefill 阶段通过双 stream 和双 micro batch 启用计算通信并行；详见 [多流并行](/zh/features/multi_streams/)。 |
 | `micro_batch_num` | `int32` | `1` | 多流并行使用的 micro batch 数。 |
-| `enable_dp_balance` | `bool` | `false` | 是否启用 DP 负载均衡；启用后会 shuffle 单个 DP batch 内的 sequences。 |
 
 ## EPLBConfig
 
@@ -212,7 +209,6 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Suffix speculation 全局最大缓存请求数；`-1` 表示不限，`0` 表示禁用。 |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | 是否使用 tree-based suffix speculation，而不是 path speculation。 |
 | `enable_probabilistic_draft` | `bool` | false | draft 从自身分布采样 proposal（携带 q 供拒绝采样）。默认为 greedy argmax。仅 `MTP`、`DSpark`、`DFlash2`、`Eagle3` 支持。 |
-| `enable_atb_spec_kernel` | `bool` | `false` | 是否使用 ATB speculative kernel。 |
 
 ## ProfileConfig
 
@@ -255,14 +251,8 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
-| `enable_customize_mla_kernel` | `bool` | `false` | 是否启用自定义 MLA kernel。 |
-| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel 后端，支持 `AUTO`、`ATB`、`TORCH`。 |
-| `enable_intralayer_addnorm` | `bool` | `false` | 是否启用 fused intralayer addnorm ops。 |
+| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel 后端，支持 `AUTO`、`TORCH`。 |
 | `enable_fused_mc2` | `int32` | `-1` | NPU 的 Fused MC2 模式；`-1` 使用自动默认值，`0` 禁用 fused MC2，正值启用 dense matmul-allreduce，`1` 对 MoE 使用 DispatchFFNCombine，`2` 对 MoE 使用 DispatchGmmCombineDecode。 |
-| `enable_interlayer_addnorm` | `bool` | `false` | 是否启用 fused interlayer addnorm ops。 |
-| `enable_split_rmsnorm_rope` | `bool` | `false` | 是否启用 fused split rmsnorm rope ops。 |
-| `enable_aclnn_matmul` | `bool` | `false` | 是否为支持的 NPU ATB layer 启用 ACLNN matmul 后端。 |
-| `enable_aclnn_swiglu` | `bool` | `false` | 是否为支持的 NPU ATB layer 启用 ACLNN SwiGLU 后端。 |
 | `enable_dspark_native_sas` | `bool` | `false` | 启用 NPU DSpark 原生 SparseAttnSharedkv 语义。旧版算子若不接受非空 `ori_sparse_indices`，可能在 tiling 阶段终止进程；请保持关闭以使用 q_len=1 兼容模式。 |
 
 ## DiTConfig

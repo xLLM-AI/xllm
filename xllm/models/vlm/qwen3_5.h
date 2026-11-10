@@ -29,7 +29,7 @@ limitations under the License.
 
 #if defined(USE_NPU)
 #include "models/llm/qwen3_5.h"
-#include "models/vlm/npu/qwen3_vl.h"
+#include "models/vlm/qwen3_vl.h"
 #elif defined(USE_MLU) || defined(USE_DCU)
 #if defined(USE_MLU)
 #include "core/kernels/mlu/mlu_ops_api.h"
@@ -191,11 +191,7 @@ TORCH_MODULE(Qwen3_5ForCausalLM);
 
 #endif  // !defined(USE_NPU)
 
-#if defined(USE_NPU)
-using Qwen3_5_VisionTransformer = npu::model::Qwen3_VisionTransformer;
-#else
 using Qwen3_5_VisionTransformer = Qwen3_VisionTransformer;
-#endif
 
 using Qwen3_5ForConditionalGenerationImpl =
     Qwen3VLForConditionalGenerationBase<Qwen3_5_VisionTransformer,

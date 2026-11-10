@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "core/runtime/vlm_worker_impl.h"
 
-#include <c10/core/DeviceGuard.h>
+#include <c10/core/StreamGuard.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
 
@@ -24,7 +24,6 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "common/metrics.h"
-#include "core/framework/config/load_config.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_extend_input.h"
@@ -64,28 +63,6 @@ bool VLMWorkerImpl::init_model(ModelContext& context) {
 }
 
 std::optional<ForwardOutput> VLMWorkerImpl::step(const VlmForwardInput& input) {
-  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
-#if defined(USE_NPU)
-    if (!enable_schedule_overlap()) {
-      aclrtStream current_stream =
-          c10_npu::getCurrentNPUStream(device_.index()).stream();
-      atb::Context* atb_context =
-          const_cast<atb::Context*>(context_.get_atb_context());
-      atb_context->SetExecuteStream(current_stream);
-      std::unique_ptr<Stream> stream = device_.current_stream();
-      wait_input_ready_events(input, *stream);
-      return step_internal(input, ForwardSyncPolicy::LEGACY);
-    } else {
-      SET_ATB_EXECUTE_STREAM(compute_stream_, device_, context_);
-      wait_input_ready_events(input, *compute_stream_);
-      return step_internal(input, ForwardSyncPolicy::LEGACY);
-    }
-#else
-    std::unique_ptr<Stream> stream = device_.current_stream();
-    wait_input_ready_events(input, *stream);
-    return step_internal(input, ForwardSyncPolicy::LEGACY);
-#endif
-  }
   std::unique_ptr<Stream> stream = device_.current_stream();
   wait_input_ready_events(input, *stream);
   return step_internal(input, ForwardSyncPolicy::LEGACY);
@@ -108,26 +85,6 @@ std::optional<ForwardOutput> VLMWorkerImpl::execute_no_sync_on_stream(
     const std::function<void()>& prepare_sampling) {
   const ForwardSyncPolicy sync_policy = ForwardSyncPolicy::NO_SYNC;
   c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
-  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
-#if defined(USE_NPU)
-    if (!enable_schedule_overlap()) {
-      aclrtStream current_acl_stream =
-          c10_npu::getCurrentNPUStream(device_.index()).stream();
-      atb::Context* atb_context =
-          const_cast<atb::Context*>(context_.get_atb_context());
-      atb_context->SetExecuteStream(current_acl_stream);
-      wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy, completion, prepare_sampling);
-    } else {
-      SET_ATB_EXECUTE_STREAM((&compute_stream), device_, context_);
-      wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy, completion, prepare_sampling);
-    }
-#else
-    wait_input_ready_events(input, compute_stream);
-    return step_internal(input, sync_policy, completion, prepare_sampling);
-#endif
-  }
   wait_input_ready_events(input, compute_stream);
   return step_internal(input, sync_policy, completion, prepare_sampling);
 }

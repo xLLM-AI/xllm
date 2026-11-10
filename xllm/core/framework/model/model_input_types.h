@@ -46,7 +46,6 @@ limitations under the License.
 #include "core/framework/batch/batch_forward_type.h"
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
-#include "core/framework/parallel_state/npu_cp_plan.h"
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
 #include "core/util/hash_util.h"
 #include "core/util/tensor_helper.h"
@@ -137,7 +136,6 @@ Input attention_device_to(const Input& source, const torch::Device& device) {
   out.history_k_rope = safe_to(source.history_k_rope, device);
   out.ring_cur_seqlen = safe_to(source.ring_cur_seqlen, device);
   out.ring_cache_seqlen = safe_to(source.ring_cache_seqlen, device);
-  out.in_prefix_slots = safe_to(source.in_prefix_slots, device, true);
   return out;
 }
 }  // namespace detail
@@ -159,10 +157,6 @@ class LlmAttentionDeviceInput final {
   torch::Tensor history_k_rope;
   torch::Tensor ring_cur_seqlen;
   torch::Tensor ring_cache_seqlen;
-
-  // Per-rank prefix slot indices for KV-split prefix AllGather. NpuCpPlan
-  // supplies this graph input with the rest of the CP attention metadata.
-  torch::Tensor in_prefix_slots;
 
   LlmAttentionDeviceInput to(const torch::Device& device) const {
     return detail::attention_device_to(*this, device);
@@ -186,10 +180,6 @@ class VlmAttentionDeviceInput final {
   torch::Tensor history_k_rope;
   torch::Tensor ring_cur_seqlen;
   torch::Tensor ring_cache_seqlen;
-
-  // Per-rank prefix slot indices for KV-split prefix AllGather. NpuCpPlan
-  // supplies this graph input with the rest of the CP attention metadata.
-  torch::Tensor in_prefix_slots;
 
   VlmAttentionDeviceInput to(const torch::Device& device) const {
     return detail::attention_device_to(*this, device);
@@ -429,7 +419,6 @@ class ParallelInput final {
   torch::Tensor mega_active_mask;
 
   DpEpPaddingData dp_ep_padding_data;
-  NpuCpPlan cp_plan;
 
 #if defined(USE_MLU)
   std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer = nullptr;
@@ -456,7 +445,6 @@ class ParallelInput final {
     out.dp_is_decode = dp_is_decode;
     out.mega_active_mask = mega_active_mask;
     out.dp_ep_padding_data = dp_ep_padding_data;
-    out.cp_plan = cp_plan.to(device);
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
     out.layer_synchronizer = layer_synchronizer;
 #endif

@@ -32,7 +32,6 @@ cc_library(
     options.h
     rate_limiter.h
     types.h
-    device_monitor.h
     version_singleton.h
     flash_comm1_context.h
   SRCS
@@ -41,7 +40,6 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:mspti_helper.cpp>
     options.cpp
     rate_limiter.cpp
-    device_monitor.cpp
     flash_comm1_context.cpp
   DEPS
     :native_library

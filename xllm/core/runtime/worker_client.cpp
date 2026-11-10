@@ -162,8 +162,4 @@ WorkerClient::get_last_vlm_step_result_async() {
   return folly::makeSemiFuture(std::optional<RawForwardOutput>(std::nullopt));
 }
 
-folly::SemiFuture<int64_t> WorkerClient::get_active_activation_memory_async() {
-  return worker_->get_active_activation_memory_async();
-}
-
 }  // namespace xllm

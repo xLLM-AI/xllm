@@ -15,17 +15,11 @@ limitations under the License.
 
 #include "core/distributed_runtime/distributed_worker_manager.h"
 
-#include <folly/ExceptionWrapper.h>
-#include <folly/futures/Future.h>
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <cstdint>
-#include <functional>
-#include <future>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,15 +29,6 @@ namespace {
 
 class RecordingWorkerClient final : public WorkerClient {
  public:
-  folly::SemiFuture<int64_t> get_active_activation_memory_async() override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    ++activation_memory_calls_;
-    if (activation_memory_query_) {
-      return activation_memory_query_();
-    }
-    return folly::makeSemiFuture(activation_memory_);
-  }
-
   void get_cache_info(uint64_t& cluster_id,
                       std::string& addr,
                       uint16_t& port) override {
@@ -90,9 +75,6 @@ class RecordingWorkerClient final : public WorkerClient {
     return unlink_p2p_result_;
   }
 
-  int32_t activation_memory_calls_ = 0;
-  int64_t activation_memory_ = 0;
-  std::function<folly::SemiFuture<int64_t>()> activation_memory_query_;
   int32_t cache_info_calls_ = 0;
   uint64_t cache_cluster_id_ = 0;
   std::string cache_addr_;
@@ -188,62 +170,6 @@ TEST_F(DistributedWorkerManagerTest, PreservesCacheEndpointsWithoutWorkers) {
   EXPECT_EQ(ids, (std::vector<uint64_t>{99}));
   EXPECT_EQ(addresses, (std::vector<std::string>{"existing"}));
   EXPECT_EQ(source_ports, (std::vector<uint16_t>{999}));
-}
-
-TEST_F(DistributedWorkerManagerTest, QueriesAllWorkersBeforeWaiting) {
-  folly::Promise<int64_t> first_result;
-  auto first = std::make_shared<RecordingWorkerClient>();
-  first->activation_memory_query_ = [&first_result] {
-    return first_result.getSemiFuture();
-  };
-  std::promise<void> second_dispatched;
-  auto second = std::make_shared<RecordingWorkerClient>();
-  second->activation_memory_query_ = [&second_dispatched] {
-    second_dispatched.set_value();
-    return folly::makeSemiFuture<int64_t>(2048);
-  };
-  auto manager = make_manager({first, second});
-  auto dispatched = second_dispatched.get_future();
-
-  auto query = std::async(std::launch::async, [&manager] {
-    return manager->get_active_activation_memory();
-  });
-  const std::future_status dispatch_status =
-      dispatched.wait_for(std::chrono::seconds(5));
-  // Release the first worker even on timeout so the query cannot outlive the
-  // test.
-  first_result.setValue(4096);
-
-  EXPECT_EQ(dispatch_status, std::future_status::ready);
-  EXPECT_EQ(query.get(), (std::vector<int64_t>{4096, 2048}));
-  EXPECT_EQ(first->activation_memory_calls_, 1);
-  EXPECT_EQ(second->activation_memory_calls_, 1);
-  EXPECT_FALSE(has_link_threadpool(*manager));
-}
-
-TEST_F(DistributedWorkerManagerTest, PropagatesActivationMemoryQueryFailure) {
-  auto first = std::make_shared<RecordingWorkerClient>();
-  first->activation_memory_query_ = [] {
-    folly::Promise<int64_t> result;
-    auto future = result.getSemiFuture();
-    result.setException(folly::make_exception_wrapper<std::runtime_error>(
-        "worker activation memory query failed"));
-    return future;
-  };
-  auto second = std::make_shared<RecordingWorkerClient>();
-  second->activation_memory_ = 2048;
-  auto manager = make_manager({first, second});
-
-  EXPECT_THROW(manager->get_active_activation_memory(), std::runtime_error);
-
-  EXPECT_EQ(first->activation_memory_calls_, 1);
-  EXPECT_EQ(second->activation_memory_calls_, 1);
-}
-
-TEST_F(DistributedWorkerManagerTest, ReturnsNoActivationMemoryWithoutWorkers) {
-  auto manager = make_manager({});
-
-  EXPECT_TRUE(manager->get_active_activation_memory().empty());
 }
 
 TEST_F(DistributedWorkerManagerTest, LinksAndUnlinksAllWorkers) {

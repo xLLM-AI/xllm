@@ -566,9 +566,6 @@ TEST(HFModelLoaderTest, Qwen3DSparkFieldsFromTorchConfig) {
 
 TEST(HFModelLoaderTest, Qwen3DSparkPreservesSlidingWindowVisibility) {
   std::vector<std::string> model_types = {"qwen3"};
-#if defined(USE_NPU)
-  model_types.emplace_back("qwen3_atb");
-#endif
   for (const std::string& model_type : model_types) {
     ModelArgsLoader loader = ModelRegistry::get_model_args_loader(model_type);
     ASSERT_NE(loader, nullptr);
@@ -623,7 +620,7 @@ TEST(HFModelLoaderTest, Qwen38DSparkPreservesYarnGeometry) {
 }
 
 TEST(HFModelLoaderTest, Qwen3DFlash2AcceptsArrayEosTokenIds) {
-  for (const char* model_name : {"qwen3", "qwen3_atb"}) {
+  for (const char* model_name : {"qwen3"}) {
     auto loader = ModelRegistry::get_model_args_loader(model_name);
     ASSERT_NE(loader, nullptr);
 

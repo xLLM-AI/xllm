@@ -23,7 +23,6 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
-#include "core/common/device_monitor.h"
 #include "core/platform/device.h"
 #include "core/runtime/worker_memory_resources.h"
 
@@ -65,15 +64,10 @@ void WorkerMemoryService::GetMemoryInfo(
     Device device(device_);
     device.set_device();
 
-    const int32_t device_id = device_.index();
-
     const WorkerMemoryCapacity capacity =
         WorkerMemoryResources::get_instance().memory_capacity_snapshot();
     const int64_t available_memory = capacity.available_memory;
     const int64_t total_memory = capacity.total_memory;
-
-    // Update device monitor
-    DeviceMonitor::get_instance().set_total_memory(device_id, total_memory);
 
     // Live admission queries this on the serving path; keep snapshots out of
     // the default per-request logs.

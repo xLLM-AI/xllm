@@ -35,10 +35,6 @@ message InitModelRequest {
   MasterStatus master_status = 3;
 }
 
-message ActivationMemory {
-  int64 active_activation_memory = 1;
-}
-
 message DeviceMemory {
   int64 available_memory = 1;
   int64 total_memory = 2;
@@ -467,7 +463,6 @@ service DistributeWorker {
   rpc ExecuteDITModel (DITForwardRequest) returns (DITForwardResponse);
   rpc GetLastLLMStepResult (Empty) returns (LLMForwardResponse);
   rpc GetLastVLMStepResult (Empty) returns (VLMForwardResponse);
-  rpc GetActiveActivationMemory (Empty) returns (ActivationMemory);
   rpc TransferBlocks(BlockTransferInfos) returns (TransferStatus) {}
   rpc WaitForKVBlocksTransfer(WaitForKVBlocksTransferRequest) returns (Status) {}
   rpc PrefetchFromStorage(PrefetchRequest) returns (Status) {}

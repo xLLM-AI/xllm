@@ -62,8 +62,6 @@ class DiTWorkerImpl : public WorkerImpl {
 
   folly::SemiFuture<folly::Unit> process_group_test_async() override;
 
-  int64_t get_active_activation_memory();
-
  private:
   std::unique_ptr<DiTModel> dit_model_;
 
