@@ -11,7 +11,6 @@ from pathlib import Path
 from types import ModuleType
 
 from scripts.build_support.env import set_npu_envs
-from scripts.build_support.npu_ops_source import xllm_ops_source_identity
 from scripts.logger import logger
 
 _MOONCAKE_DEPENDENCIES_COMMAND = "bash scripts/build_support/install_dependencies.sh"
@@ -639,6 +638,21 @@ def _clear_xllm_ops_cache_git_head(cache_path: str) -> bool:
     return True
 
 
+def _get_xllm_ops_source_git_head() -> str | None:
+    repo_root = _join_path("third_party", "xllm_ops")
+    ok, output, err = _run_command(
+        ["git", "-c", f"safe.directory={repo_root}", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        check=True,
+    )
+    if ok:
+        return output.strip() or None
+    logger.error(f"❌ Failed to get git HEAD for {repo_root}.")
+    if err:
+        logger.error(f"   {err}")
+    return None
+
+
 def _read_version_info(file_path: str) -> str | None:
     if not os.path.isfile(file_path):
         return None
@@ -678,30 +692,32 @@ def _ensure_xllm_ops_rebuild_state(device: str) -> None:
         return
 
     set_npu_envs()
-    source_identity = xllm_ops_source_identity(get_base_dir())
+    source_git_head = _get_xllm_ops_source_git_head()
+    if source_git_head is None:
+        logger.error("❌ Failed to determine third_party/xllm_ops git HEAD.")
+        _print_manual_check_commands([f"git -C {_join_path('third_party', 'xllm_ops')} rev-parse HEAD"])
+        exit(1)
 
     marker_path = _get_xllm_ops_marker_path()
-    installed_identity = None
+    installed_git_head = None
     if os.path.isfile(marker_path):
         with open(marker_path, encoding="utf-8") as marker_file:
-            installed_identity = marker_file.readline().strip() or None
-    if installed_identity == source_identity:
-        os.environ["XLLM_OPS_GIT_HEAD_CACHED"] = source_identity
-        logger.info(
-            f"✅ xllm_ops is already installed in {os.path.dirname(marker_path)} with a matching source identity."
-        )
+            installed_git_head = marker_file.readline().strip() or None
+    if installed_git_head == source_git_head:
+        os.environ["XLLM_OPS_GIT_HEAD_CACHED"] = source_git_head
+        logger.info(f"✅ xllm_ops is already installed in {os.path.dirname(marker_path)} with a matching git HEAD.")
         return
 
     os.environ.pop("XLLM_OPS_GIT_HEAD_CACHED", None)
     if _clear_xllm_ops_cache_git_head(_get_cmake_cache_path()):
         logger.info("✅ Cleared XLLM_OPS_GIT_HEAD_CACHED from CMake cache to trigger xllm_ops rebuild.")
 
-    if installed_identity is None:
+    if installed_git_head is None:
         logger.info(f"ℹ️ xllm_ops marker not found at {marker_path}. A rebuild is required.")
     else:
-        logger.info("ℹ️ Installed xllm_ops marker does not match xllm_ops source identity. A rebuild is required.")
-        logger.info(f"   installed source: {installed_identity}")
-        logger.info(f"   checkout source:  {source_identity}")
+        logger.info("ℹ️ Installed xllm_ops marker does not match third_party/xllm_ops HEAD. A rebuild is required.")
+        logger.info(f"   installed git HEAD: {installed_git_head}")
+        logger.info(f"   source git HEAD:    {source_git_head}")
 
     version_info_path, cann_version = _get_cann_version_info()
     if cann_version is None:

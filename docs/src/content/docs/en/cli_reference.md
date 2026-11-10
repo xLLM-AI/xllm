@@ -81,10 +81,6 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `vmm_startup_timeout_ms` | `int32` | `120000` | Positive timeout in milliseconds applied separately to the master's node-registration wait and each non-master's physical-pool readiness wait during VMM startup. Independent of per-request RPC timeouts; each wait has its own timer. |
 | `phy_page_granularity_size` | `int64` | `2097152` | Granularity size of one physical page in bytes, default 2 MiB, for continuous KV Cache. |
 
-The hybrid target shares one static arena between Full and Linear caches; the Full-only MTP draft uses a separate dense KV pool with a joint capacity budget, without aliasing the target. The main-based implementation retains the existing decode graph and separate MTP workers; the removed unified/prepared graph runners are not restored. Python visual prefill uses the existing eager/chunked path. Validation must use the corresponding exact commit; results from the previous execution architecture do not establish correctness or performance for this version. Use `enable_vmm_kvcache=false`, `enable_vmm_weights=false`, `enable_graph_vmm_pool=false`, `vmm_elastic=false`, `max_linear_state_cache_slots=0`, and DP/CP/KV/layerwise split sizes of 1. MTP uses the current main graph configuration, with graph double buffering disabled. Shared prefill piecewise graphs, PD/Host/store, MLA/indexer/quantized caches and other speculative algorithms have not been extended. Complete end-to-end video validation and multi-node deployment are outside the current scope.
-
-For VMM usage and capacity guidance, see [Virtual Memory for KV Cache and Model Weights](/en/features/virtual_memory/).
-
 ### kv_events_config
 
 The following fields belong to the JSON object in `kv_events_config`:

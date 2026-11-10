@@ -81,10 +81,6 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `vmm_startup_timeout_ms` | `int32` | `120000` | VMM 启动时，master 等待节点注册、各非 master 等待物理池就绪分别使用的超时，单位毫秒，须为正数。独立于单次 RPC 超时，每个等待阶段单独计时。 |
 | `phy_page_granularity_size` | `int64` | `2097152` | 单个物理页的粒度大小，单位 byte，默认 2 MiB；用于连续 KV Cache。 |
 
-Hybrid target 的 Full/Linear 共用静态 arena；Full-only MTP draft 使用独立 dense KV 池并联合计费，不与 target alias。基于当前 main 的实现保留现有 decode graph 和独立 MTP worker，不恢复已删除的 unified/prepared graph runner；Python 视觉 prefill 使用已有 eager/chunked 路径。验证必须对应当前 exact commit，旧执行架构的测试和性能结果不能代表本版本。该配置使用 `enable_vmm_kvcache=false`、`enable_vmm_weights=false`、`enable_graph_vmm_pool=false`、`vmm_elastic=false`、`max_linear_state_cache_slots=0`，DP/CP/KV/layerwise split 均为 1。MTP 沿用 main 的图配置，关闭 graph double buffering。shared prefill piecewise graph、PD/Host/store、MLA/indexer/量化缓存和其他 speculative 算法未扩展；视频完整端到端验收及多机部署不在本轮范围内。
-
-VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内存](/zh/features/virtual_memory/)。
-
 ### kv_events_config
 
 以下字段位于 `kv_events_config` 的 JSON 对象中：
