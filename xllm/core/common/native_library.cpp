@@ -127,9 +127,6 @@ void check_build_info(void* handle, const std::filesystem::path& path) {
       << "Native library " << path << " uses an incompatible C++ ABI.";
   CHECK_EQ(actual->device_flags, kExpected.device_flags)
       << "Native library " << path << " uses incompatible device features.";
-  CHECK_EQ(actual->kernel_backend_flags, kExpected.kernel_backend_flags)
-      << "Native library " << path
-      << " uses incompatible kernel backend features.";
   CHECK_EQ(actual->pointer_size, kExpected.pointer_size)
       << "Native library " << path << " uses an incompatible pointer size.";
 }

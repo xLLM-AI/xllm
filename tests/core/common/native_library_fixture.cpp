@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "core/common/native_library.h"
 
-#if defined(TEST_NATIVE_MISMATCH) || defined(TEST_NATIVE_BACKEND_MISMATCH)
+#if defined(TEST_NATIVE_MISMATCH) || defined(TEST_NATIVE_VERSION_MISMATCH)
 extern "C" __attribute__((visibility("default")))
 const xllm::NativeLibraryBuildInfo*
 xllm_native_library_build_info() {
@@ -25,7 +25,7 @@ xllm_native_library_build_info() {
 #if defined(TEST_NATIVE_MISMATCH)
     info.revision = "incompatible-source-revision";
 #else
-    info.kernel_backend_flags ^= 1U << 0;
+    --info.version;
 #endif
     return info;
   }();

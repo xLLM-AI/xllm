@@ -115,13 +115,13 @@ TEST(NativeLibraryTest, RejectsEmptyListEntries) {
       "empty trailing path");
 }
 
-TEST(NativeLibraryTest, RejectsIncompatibleKernelBackendFeatures) {
+TEST(NativeLibraryTest, RejectsIncompatibleDescriptorVersions) {
   EXPECT_DEATH(
       {
-        setenv("XLLM_NATIVE_LIBRARIES", NATIVE_BACKEND_MISMATCH_FIXTURE, 1);
+        setenv("XLLM_NATIVE_LIBRARIES", NATIVE_VERSION_MISMATCH_FIXTURE, 1);
         load_native_libraries();
       },
-      "incompatible kernel backend features");
+      "incompatible descriptor version");
 }
 
 }  // namespace

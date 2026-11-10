@@ -45,10 +45,6 @@ namespace layer {
 struct AttentionMetadata;
 }
 
-namespace xlite {
-class XliteModelHolder;
-}
-
 struct ModelGraphMetadataState {
   virtual ~ModelGraphMetadataState() = default;
 };
@@ -124,11 +120,6 @@ class CausalLM : public torch::nn::Module, public Model {
     }
     return logits(hidden_states, seleted_idxes);
   }
-
-#if defined(USE_NPU)
-  // xlite runtime access, nullptr for non-xlite models.
-  virtual xlite::XliteModelHolder* get_xlite_holder() { return nullptr; }
-#endif
 
   virtual bool share_weights_from(CausalLM& /*source*/) { return false; }
 
@@ -426,14 +417,6 @@ class CausalLMImpl : public CausalLM {
                                                      num_cached_slots,
                                                      requested_rolling_slots,
                                                      model_id);
-  }
-
-  // Forward to inner ModelType.
-  xlite::XliteModelHolder* get_xlite_holder() override {
-    if constexpr (detail::has_get_xlite_holder<ModelType>::value) {
-      return model_->get_xlite_holder();
-    }
-    return CausalLM::get_xlite_holder();
   }
 #endif
 

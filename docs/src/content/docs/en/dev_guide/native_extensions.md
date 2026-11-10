@@ -92,8 +92,8 @@ Native model extensions require the native model backend. Their model types
 are resolved before the built-in NPU backend aliases, so an extension can
 replace a supported model type without exposing its class implementation to
 the host. On NPU, a selected model extension uses `TORCH` when
-`npu_kernel_backend=AUTO`; set `ATB`, `TORCH`, or `XLITE` explicitly when needed
-by the extension. `XLITE` still requires an xLLM build with `USE_XLITE=ON`.
+`npu_kernel_backend=AUTO`; set `ATB` or `TORCH` explicitly when needed by the
+extension.
 The extension is responsible for supporting the requested backend. A new
 model type can also register as `native` and use the default model selection
 once its factory has been loaded.
@@ -108,9 +108,8 @@ and factory call.
 
 The descriptor records the xLLM source revision, Torch version, compiler,
 standard library and C++ ABI, architecture, pointer width, enabled device
-support, and kernel backend features. The optional XLITE NPU kernel backend
-is recorded separately from device support.
-The current descriptor is version 2; rebuild extensions with the matching SDK
+support.
+The current descriptor is version 3; rebuild extensions with the matching SDK
 when updating xLLM.
 The loader checks these fields after the DSO's static initializers
 run and terminates startup on a mismatch. This check detects accidental ABI

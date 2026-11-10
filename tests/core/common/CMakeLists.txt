@@ -7,7 +7,7 @@ cc_test(
   DEPS GTest::gtest_main proto::xllm_proto torch
 )
 
-foreach(_fixture valid mismatch backend_mismatch missing_descriptor host_dependent)
+foreach(_fixture valid mismatch version_mismatch missing_descriptor host_dependent)
   add_library(native_library_${_fixture}_fixture SHARED
     native_library_fixture.cpp)
   # native_extension's static deps pull a second glog into the dlopen'd
@@ -19,8 +19,8 @@ foreach(_fixture valid mismatch backend_mismatch missing_descriptor host_depende
 endforeach()
 target_compile_definitions(native_library_mismatch_fixture PRIVATE
   TEST_NATIVE_MISMATCH)
-target_compile_definitions(native_library_backend_mismatch_fixture PRIVATE
-  TEST_NATIVE_BACKEND_MISMATCH)
+target_compile_definitions(native_library_version_mismatch_fixture PRIVATE
+  TEST_NATIVE_VERSION_MISMATCH)
 target_compile_definitions(native_library_missing_descriptor_fixture PRIVATE
   TEST_NATIVE_NO_DESCRIPTOR)
 target_link_libraries(native_library_missing_descriptor_fixture PRIVATE
@@ -46,10 +46,10 @@ xllm_export_native_host(native_library_test)
 target_compile_definitions(native_library_test PRIVATE
   NATIVE_VALID_FIXTURE="$<TARGET_FILE:native_library_valid_fixture>"
   NATIVE_MISMATCH_FIXTURE="$<TARGET_FILE:native_library_mismatch_fixture>"
-  NATIVE_BACKEND_MISMATCH_FIXTURE="$<TARGET_FILE:native_library_backend_mismatch_fixture>"
+  NATIVE_VERSION_MISMATCH_FIXTURE="$<TARGET_FILE:native_library_version_mismatch_fixture>"
   NATIVE_NO_DESCRIPTOR_FIXTURE="$<TARGET_FILE:native_library_missing_descriptor_fixture>")
 add_dependencies(native_library_test native_library_valid_fixture
-  native_library_mismatch_fixture native_library_backend_mismatch_fixture
+  native_library_mismatch_fixture native_library_version_mismatch_fixture
   native_library_missing_descriptor_fixture)
 
 # This executable must not link the host loader: the fixture models a Python
