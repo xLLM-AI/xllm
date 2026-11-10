@@ -28,7 +28,7 @@ class BatchGroup;
 class EplbController;
 class ThreadPool;
 struct ModelArgs;
-class SharedKVCachePublication;
+class SharedKVCacheMappingTracker;
 
 struct ForwardInputFactoryOptions {
   uint32_t dp_size = 1;
@@ -59,7 +59,7 @@ class ForwardInputFactory final {
   // Call only after every TP/CP worker has successfully accepted its DP input.
   void acknowledge_shared_kv_cache();
   // Reset after allocating/replacing worker cache storage.
-  void reset_shared_kv_cache_publication();
+  void reset_shared_kv_cache_mapping_tracker();
 
   // The controller remains owned by LLMEngine and must outlive this factory.
   void set_eplb_controller(EplbController* controller);
@@ -85,8 +85,8 @@ class ForwardInputFactory final {
   void annotate_eplb_inputs(PreparationState& state);
 
   ForwardInputFactoryOptions options_;
-  std::vector<std::unique_ptr<SharedKVCachePublication>>
-      dp_shared_kv_publications_;
+  std::vector<std::unique_ptr<SharedKVCacheMappingTracker>>
+      dp_shared_kv_mapping_trackers_;
   std::vector<std::vector<int32_t>> dp_batch_embedding_ids_;
   std::vector<std::vector<std::string>> dp_batch_request_ids_;
   std::vector<uint64_t> dp_batch_generations_;

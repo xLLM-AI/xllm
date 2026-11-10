@@ -35,7 +35,7 @@ limitations under the License.
 #include "core/distributed_runtime/worker_model_codec.h"
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/batch/forward_input_builder.h"
-#include "core/framework/batch/shared_kv_cache_publication.h"
+#include "core/framework/batch/shared_kv_cache_mapping_tracker.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -2973,9 +2973,9 @@ TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
                     "linear_attention",
                     "linear_attention",
                     "full_attention"});
-  SharedKVCachePublication publication;
+  SharedKVCacheMappingTracker mapping_tracker;
   const LlmForwardInput input = batch.prepare_forward_input(
-      args, &thread_pool, /*cp_size=*/1, &publication);
+      args, &thread_pool, /*cp_size=*/1, &mapping_tracker);
   const auto& embedding = input.input_params.embedding;
   ASSERT_EQ(embedding.full_block_slot_rows.size(), 9u);
   EXPECT_EQ(embedding.full_block_lease_epochs,
@@ -2999,16 +2999,16 @@ TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
                 write_id,
                 second.kv_state().blocks(BlockType::LINEAR)[0].id()}));
 
-  publication.acknowledge();
-  publication.begin();
+  mapping_tracker.acknowledge();
+  mapping_tracker.begin();
   first.kv_state().set_kv_cache_tokens_num(0);
   second.kv_state().set_kv_cache_tokens_num(kQueryTokens);
   const LlmForwardInput unchanged = batch.prepare_forward_input(
-      args, &thread_pool, /*cp_size=*/1, &publication);
+      args, &thread_pool, /*cp_size=*/1, &mapping_tracker);
   EXPECT_TRUE(unchanged.input_params.embedding.full_block_slot_rows.empty());
   EXPECT_TRUE(unchanged.input_params.embedding.full_block_lease_epochs.empty());
   EXPECT_TRUE(unchanged.input_params.embedding.linear_state_slot_rows.empty());
-  publication.acknowledge();
+  mapping_tracker.acknowledge();
 
   // Replacing only the write state preserves the published read mapping and
   // republishes its recycled logical ID even when the context is unchanged.
@@ -3017,11 +3017,11 @@ TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
   ASSERT_EQ(replacement.size(), 1u);
   ASSERT_EQ(replacement[0].id(), write_id);
   first.add_blocks(BlockType::LINEAR, replacement);
-  publication.begin();
+  mapping_tracker.begin();
   first.kv_state().set_kv_cache_tokens_num(0);
   second.kv_state().set_kv_cache_tokens_num(kQueryTokens);
   const LlmForwardInput reused_write = batch.prepare_forward_input(
-      args, &thread_pool, /*cp_size=*/1, &publication);
+      args, &thread_pool, /*cp_size=*/1, &mapping_tracker);
   const auto& reused_embedding = reused_write.input_params.embedding;
   EXPECT_TRUE(reused_embedding.full_block_slot_rows.empty());
   EXPECT_TRUE(reused_embedding.full_block_lease_epochs.empty());

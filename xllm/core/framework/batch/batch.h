@@ -95,7 +95,7 @@ class Batch final {
       const ModelArgs& args,
       ThreadPool* thread_pool,
       int32_t cp_size = 1,
-      SharedKVCachePublication* publication = nullptr);
+      SharedKVCacheMappingTracker* mapping_tracker = nullptr);
   VlmForwardInput prepare_vlm_forward_input(uint32_t num_decoding_tokens,
                                             uint32_t min_decoding_batch_size,
                                             const ModelArgs& args,

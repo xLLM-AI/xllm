@@ -321,6 +321,18 @@ class Qwen3_5GdnMetadataBuilder:
                 write_indices,
                 out=persistent_decode.packed_write_state_indices if persistent_decode is not None else None,
             )
+            if (
+                persistent_decode is not None
+                and packed_read is persistent_decode.packed_read_state_indices
+                and packed_write is persistent_decode.packed_write_state_indices
+            ):
+                return replace(
+                    persistent_decode,
+                    state_caches=self._state_caches,
+                    read_state_indices=read_indices,
+                    write_state_indices=write_indices,
+                    layer_groups=self._layer_groups,
+                )
             return GdnDecodeMetadata(
                 self._state_caches,
                 read_indices,
@@ -357,14 +369,20 @@ class Qwen3_5GdnMetadataBuilder:
         has_initial_state = metadata.has_initial_state
         if has_initial_state is None:
             raise RuntimeError("has_initial_state is required by Qwen3.5 prefill")
-        conv_read, conv_write, ssm_read, ssm_write = _build_mega_prefill_indices(
-            read_indices,
-            write_indices,
-            has_initial_state.to(device=device, dtype=torch.bool),
-            self._checkpoint_stride,
-            self._shared_layout,
-            self._group_slots,
-        )
+        has_initial_state = has_initial_state.to(device=device, dtype=torch.bool)
+        if self._shared_layout is not None and self._shared_layout.num_slabs:
+            conv_read, conv_write, ssm_read, ssm_write = self._shared_prefill_indices(
+                read_indices, write_indices, has_initial_state
+            )
+        else:
+            conv_read, conv_write, ssm_read, ssm_write = _build_mega_prefill_indices(
+                read_indices,
+                write_indices,
+                has_initial_state,
+                self._checkpoint_stride,
+                self._shared_layout,
+                self._group_slots,
+            )
         cu_seqlens = metadata.q_cu_seq_lens
         host_query_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
         if host_query_ends and host_query_ends != query_ends and host_query_ends != query_ends[1:]:
@@ -396,6 +414,32 @@ class Qwen3_5GdnMetadataBuilder:
             layer_groups=self._layer_groups,
             shared_checkpoint_stride=self._checkpoint_stride if self._shared_layout is not None else None,
         )
+
+    def _shared_prefill_indices(
+        self,
+        read_indices: torch.Tensor,
+        write_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...], tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        if has_initial_state.shape != read_indices.shape:
+            raise ValueError("Qwen3.5 state validity must be sequence-scoped")
+        packed = self._shared_state_indices(torch.cat((read_indices, write_indices)))
+        batch_size = read_indices.numel()
+        packed_read = torch.where(has_initial_state[None, :, None], packed[:, :batch_size], -1)
+        # Decode maps every nonpositive ID to -1. Prefill writes retain negative
+        # sentinels and resolve logical zero through its writable scratch rows.
+        assert self._row_table is not None
+        rows = self._row_table.rows()
+        scratch_rows = rows.view(len(self._group_slots), 2, rows.shape[1])[:, :, 0].unsqueeze(1)
+        logical_write = write_indices[None, :, None]
+        nonpositive_write = torch.where(logical_write == 0, scratch_rows, logical_write)
+        packed_write = torch.where(logical_write > 0, packed[:, batch_size:], nonpositive_write)
+        # MegaGdnPrefill consumes contiguous per-layer role indices. Pack all
+        # roles together before exposing rows, rather than copying each layer.
+        role_indices = torch.stack(
+            (packed_read[:, :, 0], packed_write[:, :, 0], packed_read[:, :, 1], packed_write[:, :, 1])
+        )
+        return tuple(tuple(role.unbind(0)) for role in role_indices.unbind(0))
 
     def _shared_state_indices(self, indices: torch.Tensor, *, out: torch.Tensor | None = None) -> torch.Tensor:
         """Resolve all layer/role rows once at the cache metadata boundary."""
@@ -449,6 +493,14 @@ class Qwen3_5GdnMetadataBuilder:
             metadata.state_indices,
             out=persistent_metadata.packed_state_indices if persistent_metadata is not None else None,
         )
+        if persistent_metadata is not None and packed is persistent_metadata.packed_state_indices:
+            return replace(
+                metadata,
+                conv_state_indices=persistent_metadata.conv_state_indices,
+                ssm_state_indices=persistent_metadata.ssm_state_indices,
+                layer_groups=self._layer_groups,
+                packed_state_indices=packed,
+            )
         return replace(
             metadata,
             conv_state_indices=tuple(packed[:, :, 0].unbind(0)),

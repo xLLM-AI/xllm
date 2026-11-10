@@ -22,7 +22,7 @@ cc_library(
     forward_input_factory.h
     vlm_forward_input_factory.h
     sampling_input_builder.h
-    shared_kv_cache_publication.h
+    shared_kv_cache_mapping_tracker.h
   SRCS
     dit_batch.cpp
     dit_batch_factory.cpp
@@ -39,7 +39,7 @@ cc_library(
     forward_input_factory.cpp
     vlm_forward_input_factory.cpp
     sampling_input_builder.cpp
-    shared_kv_cache_publication.cpp
+    shared_kv_cache_mapping_tracker.cpp
   DEPS
     :config
     :eplb

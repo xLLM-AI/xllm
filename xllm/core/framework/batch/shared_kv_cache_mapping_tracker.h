@@ -28,10 +28,11 @@ namespace xllm {
 
 class StaticKVCacheBlockPool;
 
-// One ordered worker group owns a publication cursor. A prepared input remains
-// tentative until every target worker acknowledges it; abandoned preparation
-// is rolled back so the next input republishes its mappings.
-class SharedKVCachePublication final {
+// Each ordered worker group tracks its acknowledged mapping versions. A
+// prepared input remains tentative until every target worker acknowledges it;
+// abandoned preparation is rolled back so the next input republishes its
+// mappings.
+class SharedKVCacheMappingTracker final {
  public:
   void begin();
   void acknowledge();

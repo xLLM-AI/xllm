@@ -81,11 +81,11 @@ LlmForwardInput Batch::prepare_forward_input(
     const ModelArgs& args,
     ThreadPool* thread_pool,
     int32_t cp_size,
-    SharedKVCachePublication* publication) {
+    SharedKVCacheMappingTracker* mapping_tracker) {
   const auto data = state_.prepare_distributed_input_data();
   output_handler_.prepare(data);
   return state_.build_distributed_input(
-      data, args, thread_pool, cp_size, publication);
+      data, args, thread_pool, cp_size, mapping_tracker);
 }
 
 void Batch::process_sample_output(const RawForwardOutput& output,

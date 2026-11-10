@@ -198,8 +198,9 @@ LlmForwardInput BatchState::build_distributed_input(
     const ModelArgs& args,
     ThreadPool* thread_pool,
     int32_t cp_size,
-    SharedKVCachePublication* publication) {
-  ForwardInputBuilder builder(data, &args, cp_size, thread_pool, publication);
+    SharedKVCacheMappingTracker* mapping_tracker) {
+  ForwardInputBuilder builder(
+      data, &args, cp_size, thread_pool, mapping_tracker);
   auto input = builder.build_forward_input(/*num_decoding_tokens=*/0,
                                            /*min_decoding_batch_size=*/0);
 
