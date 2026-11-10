@@ -128,6 +128,8 @@ class AclGraphExecutionState:
     # Only runners that serialize graph replay may supply this pool. Growing
     # it never replaces an allocation already referenced by a captured graph.
     serial_workspace_pool: list[torch.Tensor] | None = None
+    # Layer views borrow the fixed mapping outputs of this graph entry.
+    shared_full_layer_views: dict[tuple[object, ...], dict[int, torch.Tensor]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
