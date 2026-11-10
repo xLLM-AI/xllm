@@ -421,6 +421,7 @@ void WorkerService::collect_llm_output(
   stats = record_speculative_metrics(output);
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
+  cpu_output.failed_request_ids = output.failed_request_ids;
   const auto& sample = output.sample_output;
   auto copy_output_to_host = [&]() {
     // Every D2H, including expert data, runs under the selected output stream.
@@ -606,6 +607,7 @@ void WorkerService::collect_vlm_output(
   stats = record_speculative_metrics(output);
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
+  cpu_output.failed_request_ids = output.failed_request_ids;
   const auto& sample = output.sample_output;
   auto copy_output_to_host = [&]() {
     // Every D2H, including expert data, runs under the selected output stream.

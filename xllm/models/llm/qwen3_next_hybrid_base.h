@@ -250,10 +250,6 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     blocks_->push_back(layer);
   }
 
-  int32_t num_hidden_layers() const {
-    return static_cast<int32_t>(layers_.size());
-  }
-
  protected:
   torch::Tensor build_attention_mask(const ModelParamsView& input_params) {
 #if defined(USE_NPU)

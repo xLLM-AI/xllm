@@ -132,6 +132,9 @@ bool decode_token_output(const Response& response,
     decoded_output.json_object_errors.emplace_back(
         JsonObjectOutputError{error.sample_sequence_id(), error.message()});
   }
+  decoded_output.failed_request_ids.assign(
+      response.failed_request_ids().begin(),
+      response.failed_request_ids().end());
   decoded_output.prepared_token = response.prepared_token();
   decoded_output.outputs.reserve(response.outputs_size());
   for (const proto::SquenceOutput& sequence : response.outputs()) {
@@ -303,6 +306,8 @@ bool encode_token_output(
     pb_error->set_sample_sequence_id(error.sample_sequence_id);
     pb_error->set_message(error.message);
   }
+  ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_failed_request_ids(),
+                      output.failed_request_ids);
   response->Swap(pb_forward_output);
   COUNTER_ADD(proto_latency_seconds_o2proto, timer.elapsed_seconds());
   return true;

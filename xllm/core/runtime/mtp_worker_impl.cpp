@@ -843,6 +843,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
         run_worker_no_sync(*draft_impl_, draft_input, draft_prepared);
     if (draft_output.has_value()) {
       transfer_retained_inputs(*output, draft_output.value());
+      append_failed_request_ids(*output,
+                                std::move(draft_output->failed_request_ids));
     }
     clear_all_output_embeddings(*output);
     this->finalize_output_on_stream(
@@ -890,6 +892,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
         run_worker_no_sync(*impl_, new_input, target_prepared).value();
     for (ForwardOutput& draft_output : draft_outputs) {
       transfer_retained_inputs(output, draft_output);
+      append_failed_request_ids(output,
+                                std::move(draft_output.failed_request_ids));
     }
     clear_all_output_embeddings(output);
     this->finalize_output_on_stream(
@@ -981,12 +985,13 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
   }
 
   transfer_retained_inputs(output, draft_output);
+  append_failed_request_ids(output, std::move(draft_output.failed_request_ids));
   this->finalize_output_on_stream(
       output, *compute_stream_, enable_schedule_overlap());
 
   if (!enable_schedule_overlap() && !this->is_driver() &&
       !::xllm::EPLBConfig::get_instance().enable_eplb()) {
-    return std::nullopt;
+    return make_transfer_failure_output(std::move(output.failed_request_ids));
   }
   return output;
 }
@@ -1414,7 +1419,7 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
 template <typename TargetInput>
 std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     const TargetInput& input,
-    const std::vector<ForwardOutput>& draft_outputs,
+    std::vector<ForwardOutput>& draft_outputs,
     TargetInput& validate_input,
     int32_t num_speculative_tokens) {
   Timer target_timer;
@@ -1435,6 +1440,10 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
                                             *compute_stream_,
                                             target_prepared)
                         .value();
+  }
+  for (ForwardOutput& draft_output : draft_outputs) {
+    append_failed_request_ids(target_output,
+                              std::move(draft_output.failed_request_ids));
   }
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               target_timer.elapsed_seconds());
@@ -1525,7 +1534,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
 
     if (!enable_schedule_overlap() && !this->is_driver() &&
         !::xllm::EPLBConfig::get_instance().enable_eplb()) {
-      return std::nullopt;
+      return make_transfer_failure_output(
+          std::move(target_output.failed_request_ids));
     }
     return finalize_verify_output(std::move(target_output),
                                   std::move(val_output),
@@ -1678,11 +1688,9 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
   }
   target_output.ready_event = target_context_ready_event;
 
-  // Target validation consumes all draft outputs on the same compute stream;
-  // keep their prepared inputs alive on target_output until the target-context
-  // event completes. Copy (not move): draft_outputs live beyond this loop.
-  for (const ForwardOutput& draft_output : draft_outputs) {
-    copy_retained_inputs(target_output, draft_output);
+  // Keep prepared inputs alive until the target-context event completes.
+  for (ForwardOutput& draft_output : draft_outputs) {
+    transfer_retained_inputs(target_output, draft_output);
   }
 
   if (!enable_schedule_overlap()) {
@@ -1694,7 +1702,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
 
   if (!enable_schedule_overlap() && !this->is_driver() &&
       !::xllm::EPLBConfig::get_instance().enable_eplb()) {
-    return std::nullopt;
+    return make_transfer_failure_output(
+        std::move(target_output.failed_request_ids));
   }
   return finalize_verify_output(std::move(target_output),
                                 std::move(val_output),
@@ -2609,7 +2618,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   auto& validate_sampling_params = validate_input.sampling_params;
 #if defined(USE_NPU)
   // A single greedy sequence needs only the cached arange as
-  // selected_token_idxes; the generic builder's registry walk is pure
+  // logits_indices; the generic builder's registry walk is pure
   // overhead on the final-draft -> target dependency chain.
   const bool use_stable_greedy_validate_sampling =
       use_explicit_spec_verify_replay_update &&
@@ -3011,11 +3020,10 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
     }
     auto& params = extend_input.sampling_params;
     torch::TensorOptions idx_options =
-        params.selected_token_idxes().defined()
-            ? params.selected_token_idxes().options()
+        params.logits_indices().defined()
+            ? params.logits_indices().options()
             : torch::dtype(torch::kInt).device(device_);
-    params.selected_token_idxes() =
-        async_h2d_tensor(selected_rows, idx_options);
+    params.logits_indices() = async_h2d_tensor(selected_rows, idx_options);
     extend_input.runtime.device_tensors_ready = true;
     check_draft_input_embedding(input_params.embedding.input_embedding,
                                 "target replay");
@@ -3196,22 +3204,21 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
 
   auto& params = extend_input.sampling_params;
   torch::TensorOptions idx_options =
-      params.selected_token_idxes().defined()
-          ? params.selected_token_idxes().options()
+      params.logits_indices().defined()
+          ? params.logits_indices().options()
           : torch::dtype(torch::kInt).device(device_);
   if (use_uniform_two_rows) {
     // These layouts always append two rows per sequence and select the second
     // row.  Build the tiny control tensor directly on device; copying a
     // temporary pinned CPU tensor forces its allocator to synchronize before
     // the asynchronous H2D has completed.
-    params.selected_token_idxes() = torch::arange(
+    params.logits_indices() = torch::arange(
         /*start=*/1,
         /*end=*/2 * num_sequences,
         /*step=*/2,
         idx_options);
   } else {
-    params.selected_token_idxes() =
-        async_h2d_tensor(selected_row_idx, idx_options);
+    params.logits_indices() = async_h2d_tensor(selected_row_idx, idx_options);
   }
   extend_input.runtime.device_tensors_ready = true;
   extend_input.runtime.metadata_ready_event =

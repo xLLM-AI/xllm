@@ -424,6 +424,7 @@ message LLMForwardResponse {
   reserved 5, 6, 7;
   repeated JsonObjectOutputError json_object_errors = 9;
   reserved 10, 11;
+  repeated string failed_request_ids = 12;
 }
 
 message VLMForwardResponse {
@@ -432,6 +433,7 @@ message VLMForwardResponse {
   int64 prepared_token = 4;
   reserved 5, 6, 7;
   repeated JsonObjectOutputError json_object_errors = 9;
+  repeated string failed_request_ids = 10;
 }
 
 message DITForwardResponse {

@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -531,10 +532,11 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
         << "DFlash prefill hidden/cache slot count mismatch.";
 
     AUTO_COUNTER(speculative_execution_latency_seconds_draft);
-    write_context_kv(processed_target_input,
-                     embeddings,
-                     processed_target_input.positions,
-                     context_cache_slots);
+    append_failed_request_ids(output,
+                              write_context_kv(processed_target_input,
+                                               embeddings,
+                                               processed_target_input.positions,
+                                               context_cache_slots));
   }
 
   if (input.sampling_params.num_sample_seqs() > 0) {
@@ -544,7 +546,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
   }
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
-    return std::nullopt;
+    return make_transfer_failure_output(std::move(output.failed_request_ids));
   }
   return output;
 }
@@ -683,10 +685,12 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   maybe_broadcast_spec_tokens(val_output.next_tokens);
   compute_stream_->synchronize();
   val_output.next_tokens = to_cpu_contiguous(val_output.next_tokens);
-  write_target_context_to_cache(input, val_output);
+  append_failed_request_ids(target_output,
+                            write_target_context_to_cache(input, val_output));
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
-    return std::nullopt;
+    return make_transfer_failure_output(
+        std::move(target_output.failed_request_ids));
   }
   return finalize_verify_output(std::move(target_output),
                                 std::move(val_output),
@@ -871,7 +875,7 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
   }
   input_params.attention.rebuild_device_buffer(device_);
 
-  query_input.sampling_params.selected_token_idxes() =
+  query_input.sampling_params.logits_indices() =
       async_h2d_tensor(selected_idxes, device_.unwrap());
   prepare_draft_sampling(/*probabilistic=*/false, query_input.sampling_params);
   for (const auto& field : kSamplingFields) {
@@ -883,7 +887,7 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
   query_input.runtime.device_tensors_ready = true;
 }
 
-void DFlashWorkerImpl::write_context_kv(
+std::vector<std::string> DFlashWorkerImpl::write_context_kv(
     const LlmForwardInput& input,
     const torch::Tensor& context_hidden,
     const torch::Tensor& positions_device,
@@ -911,19 +915,24 @@ void DFlashWorkerImpl::write_context_kv(
   // waited on before this runs, so the overwrite is safe. No-op when
   // transfer_kv_infos is empty. NPU-only: the scatter's record_event loop is
   // NPU-gated, so a non-NPU push would stall on events that never record.
-  KVTransferCompletion kv_transfers;
-  if (options_.kv_cache_transfer_mode() == "PUSH" &&
-      !input.transfer_kv_infos.empty()) {
-    std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
-        std::make_shared<NPULayerSynchronizerImpl>(
-            draft_impl_->context_.get_model_args().n_layers());
-    input.input_params.parallel.layer_synchronizer = layer_synchronizer;
-    kv_transfers.add(kv_cache_transfer_->push_kv_blocks_async(
-        input.transfer_kv_infos,
-        draft_impl_->context_.get_parallel_args(),
-        layer_synchronizer,
-        /*is_spec_draft=*/true));
-  }
+  KVTransferCompletion kv_transfers = [&]() {
+    if (options_.kv_cache_transfer_mode() == "PUSH" &&
+        !input.transfer_kv_infos.empty()) {
+      std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
+          std::make_shared<NPULayerSynchronizerImpl>(
+              draft_impl_->context_.get_model_args().n_layers());
+      input.input_params.parallel.layer_synchronizer = layer_synchronizer;
+      auto request_ids =
+          KVCacheTransfer::unique_request_ids(input.transfer_kv_infos);
+      return KVTransferCompletion(kv_cache_transfer_->push_kv_blocks_async(
+                                      input.transfer_kv_infos,
+                                      draft_impl_->context_.get_parallel_args(),
+                                      layer_synchronizer,
+                                      /*is_spec_draft=*/true),
+                                  std::move(request_ids));
+    }
+    return KVTransferCompletion{};
+  }();
 #endif
 
   ModelOutput scatter_output =
@@ -951,11 +960,16 @@ void DFlashWorkerImpl::write_context_kv(
   // Wait for the draft KV push (if any) so the source draft cache is not
   // overwritten by the next step while the transfer is still reading it
   // (mirrors step_internal's wait_kv_push()). No-op when no push was issued.
-  CHECK(kv_transfers.wait()) << "DFlash draft context-KV push failed";
+  return kv_transfers.wait(
+      {draft_impl_->context_.get_parallel_args().tp_group_,
+       draft_impl_->context_.get_parallel_args().cp_group_},
+      device_);
+#else
+  return {};
 #endif
 }
 
-void DFlashWorkerImpl::write_target_context_to_cache(
+std::vector<std::string> DFlashWorkerImpl::write_target_context_to_cache(
     const LlmForwardInput& input,
     const SampleOutput& validate_output) {
   const torch::Tensor& accepted_embeddings = validate_output.embeddings;
@@ -1004,7 +1018,7 @@ void DFlashWorkerImpl::write_target_context_to_cache(
     CHECK(compute_stream_->wait_event(context_hidden_ready_event))
         << "failed to wait DFlash context hidden ready event";
   }
-  write_context_kv(
+  std::vector<std::string> failed_request_ids = write_context_kv(
       input, context_hidden, positions_device, new_cache_slots_device);
   CHECK(!input.input_params.embedding.embedding_ids.empty())
       << "DFlash target context cache write requires embedding ids";
@@ -1015,6 +1029,7 @@ void DFlashWorkerImpl::write_target_context_to_cache(
       validate_output.embeddings,
       options_.num_speculative_tokens(),
       /*retain_previous_embedding=*/false);
+  return failed_request_ids;
 }
 
 }  // namespace xllm

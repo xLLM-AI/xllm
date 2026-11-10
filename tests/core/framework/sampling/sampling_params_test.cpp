@@ -72,7 +72,7 @@ TEST(SamplingParamsTest, NormalizesGreedyAndSmallTemperatureRows) {
 
 TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {
   SamplingParameters params;
-  params.selected_token_idxes() = torch::arange(2, torch::kInt32);
+  params.logits_indices() = torch::arange(2, torch::kInt32);
   params.min_token_positions() = torch::tensor({100, 200}, torch::kInt64);
   params.min_tokens_remaining() = torch::tensor({3, 4}, torch::kInt64);
   params.min_token_ids() = torch::tensor({{7, -1}, {8, 9}}, torch::kInt64);
@@ -85,7 +85,7 @@ TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {
       repeat_interleave_if_defined(field.member(params), /*repeats=*/3);
     }
   }
-  params.selected_token_idxes() = torch::arange(6, torch::kInt32);
+  params.logits_indices() = torch::arange(6, torch::kInt32);
   EXPECT_TRUE(torch::equal(
       params.min_token_positions(),
       torch::tensor({100, 100, 100, 200, 200, 200}, torch::kInt64)));
@@ -111,7 +111,7 @@ TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {
 
 TEST(SamplingParamsTest, DeviceTransferPreservesSamplingStateAndTensorTypes) {
   SamplingParameters params;
-  params.selected_token_idxes() = torch::tensor({2, 5}, torch::kInt32);
+  params.logits_indices() = torch::tensor({2, 5}, torch::kInt32);
   params.filter_bitmask() = torch::tensor({{1}, {2}}, torch::kInt32);
   params.frequency_penalties() = torch::tensor({0.5F, 0.25F});
   params.presence_penalties() = torch::tensor({0.75F, 0.5F});
@@ -143,9 +143,9 @@ TEST(SamplingParamsTest, DeviceTransferPreservesSamplingStateAndTensorTypes) {
   const SamplingParameters transferred =
       params.to(torch::Device(torch::kCPU), torch::kFloat64);
 
-  EXPECT_TRUE(torch::equal(transferred.selected_token_idxes(),
-                           params.selected_token_idxes()));
-  EXPECT_EQ(transferred.selected_token_idxes().scalar_type(), torch::kInt32);
+  EXPECT_TRUE(
+      torch::equal(transferred.logits_indices(), params.logits_indices()));
+  EXPECT_EQ(transferred.logits_indices().scalar_type(), torch::kInt32);
   EXPECT_TRUE(
       torch::equal(transferred.filter_bitmask(), params.filter_bitmask()));
   EXPECT_EQ(transferred.filter_bitmask().scalar_type(), torch::kInt32);
@@ -212,8 +212,8 @@ TEST(SamplingParamsTest, ReinitializationClearsPreviousBatchState) {
 
   params.init({&greedy}, {7}, {}, {}, {});
 
-  EXPECT_TRUE(torch::equal(params.selected_token_idxes(),
-                           torch::tensor({7}, torch::kInt32)));
+  EXPECT_TRUE(
+      torch::equal(params.logits_indices(), torch::tensor({7}, torch::kInt32)));
   for (const auto& field : kSamplingFields) {
     EXPECT_FALSE(field.member(params).defined());
   }

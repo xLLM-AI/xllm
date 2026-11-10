@@ -82,6 +82,12 @@ class ScheduleOverlapState final {
     std::vector<std::shared_ptr<const void>> owners;
   };
 
+  bool has_output() const {
+    return has_tokens_ || retain_tokenless_output_ ||
+           !prior_output_.json_object_errors.empty() ||
+           !prior_output_.failed_request_ids.empty();
+  }
+
   void retire_prior_inputs();
   void retire_deferred_inputs(bool wait);
   void update_prior_output(std::optional<ForwardOutput> output,

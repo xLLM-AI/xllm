@@ -754,7 +754,7 @@ TEST(SpecMtpTopkInputBuilderTest, SelectsSampledRowsForNextDraftStep) {
       torch::tensor({{0, 1}, {2, 3}, {4, 5}, {6, 7}}, torch::kInt32);
   const MtpTopkStatePtr state = MtpTopkState::from_tensor(topk_indices);
   SamplingParameters sampling_params;
-  sampling_params.selected_token_idxes() = torch::tensor({1, 3}, torch::kInt32);
+  sampling_params.logits_indices() = torch::tensor({1, 3}, torch::kInt32);
 
   const MtpTopkStatePtr selected =
       select_mtp_topk_state_for_next_step(state, sampling_params);
@@ -769,7 +769,7 @@ TEST(SpecMtpTopkInputBuilderTest, KeepsRowsWhenAlreadyMatchedToDraftBatch) {
       torch::tensor({{0, 1}, {2, 3}}, torch::kInt32);
   const MtpTopkStatePtr state = MtpTopkState::from_tensor(topk_indices);
   SamplingParameters sampling_params;
-  sampling_params.selected_token_idxes() = torch::tensor({0, 1}, torch::kInt32);
+  sampling_params.logits_indices() = torch::tensor({0, 1}, torch::kInt32);
 
   const MtpTopkStatePtr selected =
       select_mtp_topk_state_for_next_step(state, sampling_params);
@@ -803,7 +803,7 @@ TEST(SpecMtpTopkInputBuilderTest, TensorBindingKeepsStorageAcrossUpdates) {
 
 TEST(SpecMtpTopkInputBuilderTest, KeepsUndefinedStateUndefined) {
   SamplingParameters sampling_params;
-  sampling_params.selected_token_idxes() = torch::tensor({0}, torch::kInt32);
+  sampling_params.logits_indices() = torch::tensor({0}, torch::kInt32);
 
   const MtpTopkStatePtr selected =
       select_mtp_topk_state_for_next_step(nullptr, sampling_params);
@@ -824,7 +824,7 @@ TEST(SpecMtpTopkInputBuilderTest, SelectsMluRowsWithoutMixingLayerState) {
       std::make_shared<mlu::model::MluMtpTopkState>(std::move(states));
   EXPECT_FALSE(state->as_tensor().has_value());
   SamplingParameters sampling_params;
-  sampling_params.selected_token_idxes() = torch::tensor({2, 0}, torch::kInt32);
+  sampling_params.logits_indices() = torch::tensor({2, 0}, torch::kInt32);
 
   const MtpTopkStatePtr selected =
       select_mtp_topk_state_for_next_step(state, sampling_params);
@@ -856,7 +856,7 @@ TEST(SpecMtpTopkInputBuilderTest, KeepsMluStateWhenRowsAlreadyMatchDraftBatch) {
   const MtpTopkStatePtr state =
       std::make_shared<mlu::model::MluMtpTopkState>(std::move(states));
   SamplingParameters sampling_params;
-  sampling_params.selected_token_idxes() = torch::tensor({0, 1}, torch::kInt32);
+  sampling_params.logits_indices() = torch::tensor({0, 1}, torch::kInt32);
 
   const MtpTopkStatePtr selected =
       select_mtp_topk_state_for_next_step(state, sampling_params);

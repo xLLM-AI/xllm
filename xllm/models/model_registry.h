@@ -62,9 +62,6 @@ using MultimodalProcessorFactory =
 using ModelArgsLoader =
     std::function<bool(const JsonReader& json, ModelArgs* args)>;
 
-using QuantArgsLoader =
-    std::function<bool(const JsonReader& json, QuantArgs* args)>;
-
 class SpeechModelInterface;
 
 using SpeechModelFactory =
@@ -109,7 +106,6 @@ struct ModelMeta {
   DiTModelFactory dit_model_factory;
   MultimodalProcessorFactory multimodal_processor_factory;
   ModelArgsLoader model_args_loader;
-  QuantArgsLoader quant_args_loader;
   TokenizerArgsLoader tokenizer_args_loader;
   CpShardingMode cp_sharding_mode = CpShardingMode::NONE;
   bool supports_dcp = false;
@@ -166,9 +162,6 @@ class ModelRegistry {
   static void register_model_args_loader(const std::string& name,
                                          ModelArgsLoader loader);
 
-  static void register_quant_args_loader(const std::string& name,
-                                         QuantArgsLoader loader);
-
   static void register_tokenizer_args_loader(const std::string& name,
                                              TokenizerArgsLoader loader);
 
@@ -221,8 +214,6 @@ class ModelRegistry {
   static DiTModelFactory get_dit_model_factory(const std::string& name);
 
   static ModelArgsLoader get_model_args_loader(const std::string& name);
-
-  static QuantArgsLoader get_quant_args_loader(const std::string& name);
 
   static TokenizerArgsLoader get_tokenizer_args_loader(const std::string& name);
 
@@ -443,16 +434,6 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 
 #define REGISTER_MODEL_ARGS(ModelType, ...) \
   REGISTER_MODEL_ARGS_WITH_VARNAME(ModelType, ModelType, __VA_ARGS__)
-
-// Macro to register a quantization args loader with the ModelRegistry
-#define REGISTER_QUANT_ARGS_LOADER_WITH_VARNAME(VarName, ModelType, Loader) \
-  const bool VarName##_quant_args_loader_registered = []() {                \
-    ModelRegistry::register_quant_args_loader(#ModelType, Loader);          \
-    return true;                                                            \
-  }()
-
-#define REGISTER_QUANT_ARGS_LOADER(ModelType, Loader) \
-  REGISTER_QUANT_ARGS_LOADER_WITH_VARNAME(ModelType, ModelType, Loader)
 
 // Macro to register a tokenizer args loader with the ModelRegistry
 #define REGISTER_TOKENIZER_ARGS_LOADER_WITH_VARNAME(                   \

@@ -138,12 +138,6 @@ class WorkerImpl {
                                              Stream& prepare_stream,
                                              bool record_ready_event = true,
                                              bool restore_linear_state = true);
-  void prepare_input_on_stream(const LlmForwardInput& input,
-                               LlmForwardInput& processed_input,
-                               Stream& prepare_stream,
-                               bool record_ready_event,
-                               bool restore_linear_state,
-                               bool wait_for_compute_stream);
   // Prepare shared mappings and new block contents on the owning stream.
   void prepare_shared_kv_cache(
       const std::vector<int32_t>& full_block_rows,
@@ -317,8 +311,6 @@ class WorkerImpl {
 
   Status get_status() const { return status_; }
 
-  Executor* model_executor() const { return model_executor_.get(); }
-
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;
 
@@ -380,10 +372,9 @@ class WorkerImpl {
   }
 
   // Map shard-local selections to the rows consumed by the LM head.
-  torch::Tensor remap_selected_token_idxes_for_lm_head(
-      const torch::Tensor& selected_token_idxes,
-      const ParallelInput& parallel_input,
-      const torch::Tensor& hidden_states) const;
+  torch::Tensor remap_logits_indices(const torch::Tensor& logits_indices,
+                                     const ParallelInput& parallel_input,
+                                     const torch::Tensor& hidden_states) const;
   // Prepare (reset/restore/direct-read) the recurrent slots on the caller's
   // current stream. Overlap callers must use compute_stream_ after the
   // preceding forward.

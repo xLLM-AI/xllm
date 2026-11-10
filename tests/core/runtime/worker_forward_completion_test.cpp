@@ -242,7 +242,7 @@ class WorkerForwardCompletionTest
       // Reorder continuing rows and leave the inserted row without history.
       input.sample_prior_output_rows = {1, 0, -1};
       auto& sampling = input.sampling_params;
-      sampling.selected_token_idxes() = torch::arange(3, long_options);
+      sampling.logits_indices() = torch::arange(3, long_options);
       sampling.bad_words() =
           torch::tensor({{{2, 3}}, {{2, 3}}, {{2, 3}}}, long_options);
       sampling.bad_word_suffix() = torch::full({3, 1}, -1, long_options);

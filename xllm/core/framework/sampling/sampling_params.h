@@ -81,7 +81,7 @@ class SamplingSelection final {
   // selected tokens are tokens for sampling the next token,
   // including the generated tokens and the last prompt token
   // IntTensor
-  PROPERTY(torch::Tensor, selected_token_idxes);
+  PROPERTY(torch::Tensor, logits_indices);
 
   // whether to sample for each sequence.
   // [num_seqs] BoolTensor
@@ -181,7 +181,7 @@ class SamplingOutput final {
 class SamplingParameters final {
  public:
   void init(const std::vector<const RequestSamplingParam*>& req_sampling_params,
-            const std::vector<int32_t>& selected_token_idxes,
+            const std::vector<int32_t>& logits_indices,
             const std::vector<std::vector<int64_t>>& unique_token_ids_vec,
             const std::vector<std::vector<int32_t>>& unique_token_counts_vec,
             const std::vector<int32_t>& unique_token_lens_vec);
@@ -190,7 +190,7 @@ class SamplingParameters final {
                         torch::ScalarType dtype) const;
 
   PROPERTY(SamplingSelection, selection);
-  FORWARD_PROPERTY(torch::Tensor, selected_token_idxes, selection);
+  FORWARD_PROPERTY(torch::Tensor, logits_indices, selection);
   FORWARD_PROPERTY(torch::Tensor, do_sample, selection);
   FORWARD_PROPERTY(SamplingMode, sampling_mode, selection);
 
@@ -232,14 +232,8 @@ class SamplingParameters final {
   PROPERTY(torch::Tensor, prefix_tokens);
 
   int64_t num_sample_seqs() const {
-    return selected_token_idxes().defined() ? selected_token_idxes().numel()
-                                            : 0;
+    return logits_indices().defined() ? logits_indices().numel() : 0;
   }
-
-  // Whether any post-penalty transform (top-k, top-p, min-p, filter masks)
-  // is active; penalty-only fast paths consult this instead of restating the
-  // list.
-  bool has_post_penalty_transforms() const;
 
   bool has_sampling_fields() const;
 
@@ -286,24 +280,19 @@ class SamplingTensorAccessor final {
     return (params.*const_getter_)();
   }
 
-  constexpr bool operator==(const SamplingTensorAccessor& other) const {
-    return mutable_getter_ == other.mutable_getter_;
-  }
-
  private:
   MutableGetter mutable_getter_;
   ConstGetter const_getter_;
 };
 
 // Registry of the per-token sampling fields. Roles: per_request (the seeds
-// — never expand to verify width), is_greedy (dead on a greedy batch), and
-// post_penalty_transform. selected_token_idxes/do_sample are handled by
+// — never expand to verify width) and is_greedy (dead on a greedy batch).
+// logits_indices/do_sample are handled by
 // their call sites.
 struct SamplingFieldDesc {
   SamplingTensorAccessor member;
   bool per_request = false;
   bool is_greedy = false;
-  bool post_penalty_transform = false;
 };
 
 // Omitted flags default to false; a plain token-indexed field is a bare
@@ -323,12 +312,10 @@ inline constexpr std::array<SamplingFieldDesc, 20> kSamplingFields = {
       .is_greedy = true},
      {.member = SamplingTensorAccessor{&SamplingParameters::top_p,
                                        &SamplingParameters::top_p},
-      .is_greedy = true,
-      .post_penalty_transform = true},
+      .is_greedy = true},
      {.member = SamplingTensorAccessor{&SamplingParameters::min_p,
                                        &SamplingParameters::min_p},
-      .is_greedy = true,
-      .post_penalty_transform = true},
+      .is_greedy = true},
      {.member = SamplingTensorAccessor{&SamplingParameters::logits_bias,
                                        &SamplingParameters::logits_bias}},
      {.member =
@@ -344,8 +331,7 @@ inline constexpr std::array<SamplingFieldDesc, 20> kSamplingFields = {
       .is_greedy = true},
      {.member = SamplingTensorAccessor{&SamplingParameters::top_k,
                                        &SamplingParameters::top_k},
-      .is_greedy = true,
-      .post_penalty_transform = true},
+      .is_greedy = true},
      {.member = SamplingTensorAccessor{&SamplingParameters::unique_token_ids,
                                        &SamplingParameters::unique_token_ids}},
      {.member =
@@ -355,8 +341,7 @@ inline constexpr std::array<SamplingFieldDesc, 20> kSamplingFields = {
           SamplingTensorAccessor{&SamplingParameters::unique_token_ids_lens,
                                  &SamplingParameters::unique_token_ids_lens}},
      {.member = SamplingTensorAccessor{&SamplingParameters::filter_bitmask,
-                                       &SamplingParameters::filter_bitmask},
-      .post_penalty_transform = true},
+                                       &SamplingParameters::filter_bitmask}},
      {.member = SamplingTensorAccessor{&SamplingParameters::seeds,
                                        &SamplingParameters::seeds},
       .per_request = true,
@@ -371,16 +356,6 @@ inline constexpr std::array<SamplingFieldDesc, 20> kSamplingFields = {
                                        &SamplingParameters::bad_word_suffix}},
      {.member = SamplingTensorAccessor{&SamplingParameters::prefix_tokens,
                                        &SamplingParameters::prefix_tokens}}}};
-
-// Out-of-line because it derives from kSamplingFields (below the class).
-inline bool SamplingParameters::has_post_penalty_transforms() const {
-  for (const auto& field : kSamplingFields) {
-    if (field.post_penalty_transform && field.member(*this).defined()) {
-      return true;
-    }
-  }
-  return false;
-}
 
 // Out-of-line because it derives from kSamplingFields (below the class).
 inline bool SamplingParameters::has_sampling_fields() const {
@@ -443,7 +418,7 @@ inline void expand_sampling_params_for_verify(
     const torch::Device& device,
     torch::Tensor cached_indices = torch::Tensor()) {
   clear_all_sampling_fields(sampling_params);
-  sampling_params.selected_token_idxes() =
+  sampling_params.logits_indices() =
       cached_indices.defined() ? std::move(cached_indices)
                                : arange_indices(total_num_val_tokens, device);
   repeat_interleave_if_defined(sampling_params.do_sample(), repeats);

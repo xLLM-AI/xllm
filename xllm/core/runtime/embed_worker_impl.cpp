@@ -87,7 +87,7 @@ std::optional<ForwardOutput> EmbedWorkerImpl::step(
     // create embeddings
     timer.reset();
     auto embeddings =
-        model_->pooler(hidden_states, sampling_params.selected_token_idxes());
+        model_->pooler(hidden_states, sampling_params.logits_indices());
     sample_output.embeddings = embeddings;
     COUNTER_ADD(execution_latency_seconds_sampling, timer.elapsed_seconds());
 

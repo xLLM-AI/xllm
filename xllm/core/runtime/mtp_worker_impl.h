@@ -100,7 +100,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       Stream& compute_stream);
   std::optional<ForwardOutput> run_validate(
       const TargetInput& input,
-      const std::vector<ForwardOutput>& draft_outputs,
+      std::vector<ForwardOutput>& draft_outputs,
       TargetInput& validate_input,
       int32_t num_speculative_tokens);
 

@@ -275,9 +275,6 @@ class CudaGraph {
                      const at::cuda::MempoolId_t& pool,
                      TorchMemPool* pool_ptr);
 
-  // Print graph held tensors for debugging
-  void print_graph_tensors() const;
-
   // Destroy captured work before releasing its native input owner.
   std::optional<ModelParamsView> capture_params_;
 

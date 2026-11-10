@@ -1067,46 +1067,6 @@ void AclGraphExecutorImpl::initialize(bool need_update_attn_mask,
   }
 }
 
-size_t AclGraphExecutorImpl::get_graph_count() const {
-  size_t graph_count = 0;
-  for (int32_t slot_idx = 0; slot_idx < graph_slot_count_; ++slot_idx) {
-    graph_count += graph_slots_[slot_idx].graphs.size();
-  }
-  return graph_count;
-}
-
-size_t AclGraphExecutorImpl::get_graph_memory_pool_count() {
-  std::vector<c10_npu::MempoolId_t> memory_pools;
-  memory_pools.reserve(graph_slot_count_);
-  for (int32_t slot_idx = 0; slot_idx < graph_slot_count_; ++slot_idx) {
-    for (auto& [graph_key, graph] : graph_slots_[slot_idx].graphs) {
-      (void)graph_key;
-      const c10_npu::MempoolId_t memory_pool = graph->memory_pool();
-      if (std::find(memory_pools.begin(), memory_pools.end(), memory_pool) ==
-          memory_pools.end()) {
-        memory_pools.emplace_back(memory_pool);
-      }
-    }
-  }
-  return memory_pools.size();
-}
-
-size_t AclGraphExecutorImpl::get_graph_capture_stream_count() const {
-  std::vector<int64_t> stream_ids;
-  stream_ids.reserve(graph_slot_count_);
-  for (int32_t slot_idx = 0; slot_idx < graph_slot_count_; ++slot_idx) {
-    for (const auto& [graph_key, graph] : graph_slots_[slot_idx].graphs) {
-      (void)graph_key;
-      const int64_t stream_id = graph->capture_stream_id();
-      if (std::find(stream_ids.begin(), stream_ids.end(), stream_id) ==
-          stream_ids.end()) {
-        stream_ids.emplace_back(stream_id);
-      }
-    }
-  }
-  return stream_ids.size();
-}
-
 // Main execution method with graph optimization for decode phase
 // tokens: [num_decode_tokens]
 // positions: [num_decode_tokens] token pos in the sequence
@@ -1605,22 +1565,6 @@ bool AclGraphExecutorImpl::prepare_static_mtp_graph_tasks(
   }
   return graph->prepare_static_mtp_graph_tasks(signal,
                                                *signal_stream.get_stream());
-}
-
-void AclGraph::print_graph_tensors() const {
-  VLOG(kGraphExecutorLogVerboseLevel)
-      << "graph persistent_tokens_: " << persistent_param_.persistent_tokens();
-  VLOG(kGraphExecutorLogVerboseLevel)
-      << "graph persistent_positions_: "
-      << persistent_param_.persistent_positions();
-  VLOG(kGraphExecutorLogVerboseLevel)
-      << "graph persistent_new_cache_slots_: "
-      << persistent_param_.persistent_new_cache_slots();
-  VLOG(kGraphExecutorLogVerboseLevel)
-      << "graph persistent_block_tables_: "
-      << persistent_param_.persistent_block_tables();
-  VLOG(kGraphExecutorLogVerboseLevel)
-      << "graph hidden_states_: " << persistent_param_.hidden_states();
 }
 
 uint32_t AclGraphExecutorImpl::get_bucket_num_tokens(

@@ -1786,13 +1786,13 @@ TEST(BatchTest, Basic) {
   EXPECT_TRUE(equal(sampling_params.unique_token_ids_lens(), token_ids_lens));
 
   // The model's output hidden_states shape is [num_tokens, hidden_size].
-  // selected_token_idxes is used to select the required corresponding token's hidden_state from it, perform logits calculation, and obtain the probability that the token belongs to each class.
+  // logits_indices is used to select the required corresponding token's hidden_state from it, perform logits calculation, and obtain the probability that the token belongs to each class.
   // The logits_processor's output logits shape is [num_selected_tokens, vocab_size].
   // Generally, num_selected_tokens equals num_sample_tokens.
-  const std::vector<int32_t> expected_selected_token_idxes = {8,9,10};
+  const std::vector<int32_t> expected_logits_indices = {8,9,10};
   // seq4 has no sampling parameters
-  EXPECT_EQ(sampling_params.selected_token_idxes().size(0), batch.size()-1);
-  EXPECT_TRUE(equal(sampling_params.selected_token_idxes(), expected_selected_token_idxes));
+  EXPECT_EQ(sampling_params.logits_indices().size(0), batch.size()-1);
+  EXPECT_TRUE(equal(sampling_params.logits_indices(), expected_logits_indices));
 
   // clang-format on
 }
@@ -1849,10 +1849,10 @@ TEST(BatchTest, SampleRequestInjectsAllMatchedSlots) {
       /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   const auto& sampling_params_out = forward_input.sampling_params;
-  const std::vector<int32_t> expected_selected_token_idxes = {1, 4};
-  EXPECT_TRUE(equal(sampling_params_out.selected_token_idxes(),
-                    expected_selected_token_idxes));
-  EXPECT_EQ(sampling_params_out.selected_token_idxes().size(0), 2);
+  const std::vector<int32_t> expected_logits_indices = {1, 4};
+  EXPECT_TRUE(
+      equal(sampling_params_out.logits_indices(), expected_logits_indices));
+  EXPECT_EQ(sampling_params_out.logits_indices().size(0), 2);
 }
 
 TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
@@ -1995,7 +1995,7 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
   EXPECT_EQ(
       first_input.sample_sequence_ids,
       std::vector<std::string>({"req-plain-chain#1", "req-json-chain#0"}));
-  EXPECT_TRUE(equal(first_input.sampling_params.selected_token_idxes(),
+  EXPECT_TRUE(equal(first_input.sampling_params.logits_indices(),
                     std::vector<int32_t>({1, 3})));
   ASSERT_EQ(first_input.json_object_states.size(), 2u);
   EXPECT_FALSE(first_input.json_object_states[0].initialized());
@@ -2508,6 +2508,7 @@ TEST(BatchTest, ForwardOutputProtoRoundTripPreservesJsonObjectErrors) {
   ForwardOutput forward_output;
   forward_output.sample_output.next_tokens = next_tokens;
   forward_output.json_object_errors = errors;
+  forward_output.failed_request_ids = {"request-a", "request-b"};
   proto::LLMForwardResponse proto_output;
   ASSERT_TRUE(encode_llm_output(
       forward_output, speculative_token_stats, &proto_output));
@@ -2525,6 +2526,8 @@ TEST(BatchTest, ForwardOutputProtoRoundTripPreservesJsonObjectErrors) {
   EXPECT_EQ(round_trip.json_object_errors[0].sample_sequence_id, "req-error#0");
   EXPECT_EQ(round_trip.json_object_errors[0].message,
             "missing prior sampled output row");
+  EXPECT_EQ(round_trip.failed_request_ids,
+            (std::vector<std::string>{"request-a", "request-b"}));
 }
 
 TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
@@ -2549,6 +2552,7 @@ TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
   ForwardOutput forward_output;
   forward_output.sample_output.next_tokens = next_tokens;
   forward_output.json_object_errors = errors;
+  forward_output.failed_request_ids = {"request-a", "request-b"};
   ASSERT_TRUE(
       writer_manager.llm_output_write(forward_output, speculative_token_stats));
 
@@ -2565,6 +2569,8 @@ TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
   EXPECT_EQ(round_trip.json_object_errors[0].sample_sequence_id, "req-error#0");
   EXPECT_EQ(round_trip.json_object_errors[0].message,
             "prior token violates json_object grammar");
+  EXPECT_EQ(round_trip.failed_request_ids,
+            (std::vector<std::string>{"request-a", "request-b"}));
 }
 
 TEST(BatchTest, KVCacheEmptySupportsLinearOnlyAndFullOnlyLayouts) {
@@ -2677,9 +2683,9 @@ TEST(BatchTest, SampleRequestKeepsThreadedForwardBuilderOffsetsStable) {
       builder.build_forward_input(/*num_decoding_tokens=*/1,
                                   /*min_decoding_batch_size=*/0);
 
-  const std::vector<int32_t> expected_selected_token_idxes = {1, 3, 4, 6};
-  EXPECT_TRUE(equal(forward_input.sampling_params.selected_token_idxes(),
-                    expected_selected_token_idxes));
+  const std::vector<int32_t> expected_logits_indices = {1, 3, 4, 6};
+  EXPECT_TRUE(equal(forward_input.sampling_params.logits_indices(),
+                    expected_logits_indices));
   ASSERT_EQ(forward_input.input_params.embedding.embedding_ids.size(),
             sequences.size());
   ASSERT_EQ(forward_input.input_params.embedding.linear_state_ids.size(),
@@ -3253,9 +3259,8 @@ TEST(BatchTest, ThreadedPrefillPreservesChunkSlicesAndFinalSamplingOffset) {
               std::vector<int32_t>({-1, -1}));
     EXPECT_EQ(input_params.embedding.extra_token_ids,
               std::vector<int32_t>({32871, -1}));
-    EXPECT_TRUE(
-        torch::equal(forward_input.sampling_params.selected_token_idxes(),
-                     make_cpu_tensor(std::vector<int32_t>({65535}))));
+    EXPECT_TRUE(torch::equal(forward_input.sampling_params.logits_indices(),
+                             make_cpu_tensor(std::vector<int32_t>({65535}))));
   };
 
   verify(/*thread_pool=*/nullptr);
@@ -4114,7 +4119,7 @@ TEST_P(BatchOutputActionTest, ChunkedPrefillKeepsFinalAndDecodeOutputTargets) {
   first_chunk.add(&sequence, /*allowed_max_token=*/2);
   const auto first_input = first_chunk.prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
-  EXPECT_FALSE(first_input.sampling_params.selected_token_idxes().defined());
+  EXPECT_FALSE(first_input.sampling_params.logits_indices().defined());
   apply_outputs(first_chunk,
                 BatchOutputAction::RESERVE_PENDING,
                 /*token_ids=*/{});
@@ -4123,7 +4128,7 @@ TEST_P(BatchOutputActionTest, ChunkedPrefillKeepsFinalAndDecodeOutputTargets) {
   second_chunk.add(&sequence, /*allowed_max_token=*/2);
   const auto second_input = second_chunk.prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
-  EXPECT_FALSE(second_input.sampling_params.selected_token_idxes().defined());
+  EXPECT_FALSE(second_input.sampling_params.logits_indices().defined());
   apply_outputs(second_chunk,
                 BatchOutputAction::RESERVE_PENDING,
                 /*token_ids=*/{});
@@ -4136,7 +4141,7 @@ TEST_P(BatchOutputActionTest, ChunkedPrefillKeepsFinalAndDecodeOutputTargets) {
   final_chunk.add(&sequence, /*allowed_max_token=*/1);
   const auto final_input = final_chunk.prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
-  EXPECT_EQ(final_input.sampling_params.selected_token_idxes().numel(), 1);
+  EXPECT_EQ(final_input.sampling_params.logits_indices().numel(), 1);
   apply_outputs(final_chunk,
                 BatchOutputAction::RESERVE_PENDING,
                 /*token_ids=*/{-1});
@@ -4193,7 +4198,7 @@ TEST_P(BatchOutputActionTest, MixedChunkedPrefillKeepsEachStepsOutputRowOrder) {
   prior.add(&second, /*allowed_max_token=*/3);
   const auto prior_input = prior.prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
-  EXPECT_EQ(prior_input.sampling_params.selected_token_idxes().numel(), 1);
+  EXPECT_EQ(prior_input.sampling_params.logits_indices().numel(), 1);
   apply_outputs(prior,
                 BatchOutputAction::RESERVE_PENDING,
                 /*token_ids=*/{-1});
@@ -4205,7 +4210,7 @@ TEST_P(BatchOutputActionTest, MixedChunkedPrefillKeepsEachStepsOutputRowOrder) {
   current.add(&second, /*allowed_max_token=*/1);
   const auto current_input = current.prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
-  EXPECT_EQ(current_input.sampling_params.selected_token_idxes().numel(), 2);
+  EXPECT_EQ(current_input.sampling_params.logits_indices().numel(), 2);
   apply_outputs(current,
                 BatchOutputAction::RESERVE_PENDING,
                 /*token_ids=*/{-1, -1});
@@ -4469,12 +4474,14 @@ TEST(BatchTest, JsonObjectErrorFailsOnlyOwningRequestWithoutTokenCommit) {
                          make_raw_sample_output(103, std::nullopt)};
   real_output.json_object_errors = {
       {failed.sample_sequence_id(), "missing prior sampled output row"}};
+  real_output.failed_request_ids = {failed.request_id()};
   batch.process_sample_output(real_output, BatchOutputAction::COMMIT_PENDING);
 
   EXPECT_EQ(failed.num_generated_tokens(), 1u);
   EXPECT_EQ(failed.tokens()[failed.num_prompt_tokens()], -1);
   ASSERT_TRUE(failed.error_status().has_value());
-  EXPECT_FALSE(failed.error_status()->ok());
+  EXPECT_NE(failed.error_status()->message().find("json_object"),
+            std::string::npos);
   EXPECT_TRUE(failed.finished());
 
   EXPECT_EQ(failed_peer.num_generated_tokens(), 1u);
@@ -4490,6 +4497,23 @@ TEST(BatchTest, JsonObjectErrorFailsOnlyOwningRequestWithoutTokenCommit) {
 
   SchedulerConfig::get_instance().enable_schedule_overlap(
       old_enable_schedule_overlap);
+}
+
+TEST(BatchTest, TransferFailureWithoutTokensSkipsSampleOutput) {
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  Sequence failed = make_overlap_sequence({1, 2, 3},
+                                          /*seq_capacity=*/16,
+                                          &sampling_param,
+                                          &stopping_checker,
+                                          "request-failed");
+  Batch batch(&failed);
+  RawForwardOutput output;
+  output.failed_request_ids = {failed.request_id()};
+  batch.process_sample_output(output, BatchOutputAction::IMMEDIATE);
+  ASSERT_TRUE(failed.error_status().has_value());
+  EXPECT_TRUE(failed.finished());
+  EXPECT_EQ(failed.num_generated_tokens(), 0);
 }
 
 TEST(BatchTest, JsonObjectErrorForUnknownSequenceDies) {

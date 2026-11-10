@@ -54,8 +54,7 @@ class MooncakeKVCacheTransferBase : public KVCacheTransfer {
 
   void merge_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
-      const std::vector<TransferKVInfo>& transfer_kv_infos,
-      const ParallelArgs& parallel_args) override;
+      const std::vector<TransferKVInfo>& transfer_kv_infos) override;
 
  protected:
   std::string addr_;
@@ -104,7 +103,7 @@ class MooncakeKVCacheTransferDefault final
                       const std::vector<KVTransferMapping>& mappings) override;
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  bool push_kv_blocks(
+  std::vector<std::string> push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
       bool is_spec_draft,
@@ -177,7 +176,7 @@ class MooncakeVirtualKVCacheTransfer final
                       const std::vector<KVTransferMapping>& mappings) override;
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  bool push_kv_blocks(
+  std::vector<std::string> push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
       bool is_spec_draft,
@@ -196,7 +195,7 @@ class MooncakeVirtualKVCacheTransfer final
       std::vector<ExplicitResourceMapping>* explicit_mappings) const;
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  bool push_kv_blocks_impl(
+  std::vector<std::string> push_kv_blocks_impl(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
       int32_t kv_split_rank,

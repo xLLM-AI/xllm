@@ -182,21 +182,6 @@ inline size_t get_string_vector_size(const std::vector<std::string>& vec) {
   return size;
 }
 
-template <typename T>
-inline size_t get_vector_size(const std::vector<T>& vec) {
-  return type_size<uint64_t> + vec.size() * type_size<T>;
-}
-
-template <typename T>
-size_t get_vector_to_tensor_size(const std::vector<T>& vec) {
-  uint64_t size = type_size<uint64_t>;  // ndim
-  size += type_size<uint64_t>;          // shape
-  size += type_size<int8_t>;            // dtype
-  size += type_size<uint64_t>;          // databytes
-  size += vec.size() * type_size<T>;    // data
-  return size;
-}
-
 inline size_t get_tensor_size(const torch::Tensor& tensor) {
   uint64_t size = type_size<uint64_t>;  // ndim
   if (!tensor.defined()) {
@@ -268,28 +253,6 @@ void write_tensor_parameters_impl(const TensorParameters& parameters,
   }
 }
 
-template <typename T>
-inline size_t get_2d_vector_size(const std::vector<std::vector<T>>& vec2d) {
-  size_t size = type_size<uint64_t>;
-  for (const auto& vec : vec2d) {
-    size += get_vector_size(vec);
-  }
-  return size;
-}
-
-template <typename T>
-size_t get_2d_vector_to_tensor_size(const std::vector<std::vector<T>>& vec2d) {
-  uint64_t size = type_size<uint64_t>;  // ndim
-  if (vec2d.size() == 0 || vec2d[0].size() == 0) {
-    return size;
-  }
-  size += type_size<uint64_t> * 2;                        // shape
-  size += type_size<int8_t>;                              // dtype
-  size += type_size<uint64_t>;                            // databytes
-  size += vec2d.size() * vec2d[0].size() * type_size<T>;  // data
-  return size;
-}
-
 void normalize_linear_state_ids(std::vector<int32_t>& linear_state_ids,
                                 int32_t num_sequences) {
   if (num_sequences <= 0) {
@@ -303,134 +266,6 @@ void normalize_linear_state_ids(std::vector<int32_t>& linear_state_ids,
   CHECK_EQ(linear_state_ids.size(), static_cast<size_t>(num_sequences))
       << "linear_state_ids size (" << linear_state_ids.size()
       << ") must match num_sequences (" << num_sequences << ")";
-}
-
-inline size_t get_instance_info_size(const InstanceInfo& info) {
-  size_t size = get_string_size(info.name) + get_string_size(info.rpc_address) +
-                get_string_size(info.type);
-
-  size += type_size<uint64_t> + info.cluster_ids.size() * type_size<uint64_t>;
-
-  size += type_size<uint64_t>;
-  for (const auto& addr : info.addrs) {
-    size += get_string_size(addr);
-  }
-
-  size += type_size<int32_t>    // dp_size
-          + type_size<int32_t>  // kv_split_size
-          + type_size<uint64_t> +
-          info.ttft_profiling_data.size() *
-              (type_size<int32_t> + type_size<int64_t>);
-
-  return size;
-}
-
-inline size_t get_virtual_kv_cache_layer_global_offsets_size(
-    const std::vector<VirtualKVCacheLayerGlobalOffsets>& offsets) {
-  size_t total = type_size<uint64_t>;  // num_layers
-  for (const auto& layer : offsets) {
-    total += get_vector_size(layer.k_offsets) +
-             get_vector_size(layer.v_offsets) +
-             get_vector_size(layer.index_offsets);
-  }
-  return total;
-}
-
-inline size_t get_kv_transfer_mappings_size(
-    const std::vector<KVTransferMapping>& mappings) {
-  size_t total = type_size<uint64_t>;
-  for (const KVTransferMapping& mapping : mappings) {
-    total += type_size<int32_t> + get_vector_size(mapping.local_ids) +
-             get_vector_size(mapping.remote_ids);
-  }
-  return total;
-}
-
-inline size_t get_transfer_kv_info_size(const TransferKVInfo& info) {
-  return get_string_size(info.request_id) +
-         type_size<bool> +     // rank_local_mapping
-         type_size<int32_t> +  // dp_rank
-         get_instance_info_size(info.remote_instance_info) +
-         get_virtual_kv_cache_layer_global_offsets_size(
-             info.dst_virtual_kv_cache_layer_global_offsets) +
-         get_kv_transfer_mappings_size(info.mappings);
-}
-
-inline size_t get_eplb_info_size(const EplbInfo& info) {
-  return type_size<int32_t>    // prepare_layer_id
-         + type_size<int64_t>  // prepare_token
-         + get_vector_size(info.expert_ids) +
-         type_size<int32_t> +  // update_layer_id
-         type_size<int64_t>;   // activation_token
-}
-
-inline size_t get_mm_dict_size(const MMDict& mm_dict) {
-  size_t total = 0;
-  total += type_size<size_t>;  // mm_dict size
-  for (auto& [mm_key, mm_value] : mm_dict) {
-    total += get_string_size(mm_key);
-    total += type_size<int32_t>;  // num of tensors
-    if (std::holds_alternative<torch::Tensor>(mm_value)) {
-      total += get_tensor_size(std::get<torch::Tensor>(mm_value));
-    } else if (std::holds_alternative<std::vector<torch::Tensor>>(mm_value)) {
-      for (const auto& tensor :
-           std::get<std::vector<torch::Tensor>>(mm_value)) {
-        total += get_tensor_size(tensor);
-      }
-    }
-  }
-  return total;
-}
-
-inline size_t get_mm_item_size(const MMDataItem& mm_item) {
-  size_t total = 0;
-
-  total += type_size<uint32_t>;               // type
-  total += get_mm_dict_size(mm_item.data());  // dict
-
-  // token_pos
-  total += type_size<int32_t> * 2;
-  // mm_token_num
-  total += type_size<int32_t>;
-
-  // mm_token_mask
-  total += get_tensor_size(mm_item.state().mm_token_mask());
-
-  // seq_index
-  total += type_size<int32_t>;
-
-  // schedule_data
-  total += XXH3_128BITS_HASH_VALUE_LEN;
-  total += type_size<int32_t> * 2;
-
-  return total;
-}
-
-inline size_t get_mm_data_size(const MMData& mm_data) {
-  size_t total = 0;
-  total += type_size<uint32_t>;  //  mm_type
-  if (mm_data.hold<MMItemVec>()) {
-    total += type_size<size_t>;  // num of mm_items
-    const auto& mm_items = mm_data.items<MMItemVec>();
-    for (const auto& mm_item : mm_items) {
-      total += get_mm_item_size(mm_item);
-    }
-  } else if (mm_data.hold<MMDict>()) {
-    total += get_mm_dict_size(mm_data.items<MMDict>());
-  }
-  return total;
-}
-
-inline size_t get_mm_batch_data_size(const MMBatchData& mm_data) {
-  const auto& vec = mm_data.mm_data_vec();
-
-  size_t total = 0;
-  total += type_size<size_t>;   // num of vec
-  total += type_size<uint8_t>;  // is_mm_item
-  for (const auto& mm_data : vec) {
-    total += get_mm_data_size(mm_data);
-  }
-  return total;
 }
 
 inline size_t get_vector_tensor_size(
@@ -594,32 +429,6 @@ inline void write_tensor(RawInputSerializeContext& context,
   write_padding(context.tensor_arena, aligned_bytes - tensor_data_bytes);
 }
 
-inline void write_sampling_param(char*& buffer,
-                                 const RequestSamplingParam& param) {
-  char* ptr = buffer;
-  *reinterpret_cast<float*>(ptr) = param.frequency_penalty;
-  ptr += type_size<float>;
-  *reinterpret_cast<float*>(ptr) = param.presence_penalty;
-  ptr += type_size<float>;
-  *reinterpret_cast<float*>(ptr) = param.repetition_penalty;
-  ptr += type_size<float>;
-  *reinterpret_cast<float*>(ptr) = param.temperature;
-  ptr += type_size<float>;
-  *reinterpret_cast<float*>(ptr) = param.top_p;
-  ptr += type_size<float>;
-  *reinterpret_cast<float*>(ptr) = param.min_p;
-  ptr += type_size<float>;
-  *reinterpret_cast<int64_t*>(ptr) = param.top_k;
-  ptr += type_size<int64_t>;
-  *reinterpret_cast<bool*>(ptr) = param.logprobs;
-  ptr += type_size<bool>;
-  *reinterpret_cast<int64_t*>(ptr) = param.top_logprobs;
-  ptr += type_size<int64_t>;
-  *reinterpret_cast<bool*>(ptr) = param.is_embeddings;
-  ptr += type_size<bool>;
-  buffer = ptr;
-}
-
 template <typename T>
 inline void write_vector(char*& buffer, const std::vector<T>& vec) {
   const uint64_t size = vec.size();
@@ -686,83 +495,6 @@ void write_vector_to_tensor(RawInputSerializeContext& context,
   const uint64_t data_bytes = vec.size() * type_size<T>;
   write_data(context.descriptor, data_bytes);
   write_bytes(context.tensor_arena, vec.data(), data_bytes);
-  const uint64_t aligned_bytes = get_aligned_tensor_arena_bytes(data_bytes);
-  write_padding(context.tensor_arena, aligned_bytes - data_bytes);
-}
-
-template <typename T>
-inline void write_2d_vector(char*& buffer,
-                            const std::vector<std::vector<T>>& vec2d) {
-  write_data(buffer, (uint64_t)vec2d.size());
-  for (const auto& vec : vec2d) {
-    write_vector(buffer, vec);
-  }
-}
-
-template <typename T>
-inline void write_2d_vector(RawInputSectionCursor& cursor,
-                            const std::vector<std::vector<T>>& vec2d) {
-  write_data(cursor, static_cast<uint64_t>(vec2d.size()));
-  for (const auto& vec : vec2d) {
-    write_vector(cursor, vec);
-  }
-}
-
-template <typename T>
-void write_2d_vector_to_tensor(char*& buffer,
-                               const std::vector<std::vector<T>>& vec2d) {
-  // write ndim
-  uint64_t ndim;
-  if (vec2d.size() == 0 || vec2d[0].size() == 0) {
-    ndim = 0;
-    write_data(buffer, ndim);
-    return;
-  }
-  ndim = 2;
-  write_data(buffer, ndim);
-  // write shape
-  write_data(buffer, vec2d.size());
-  write_data(buffer, vec2d[0].size());
-  // write dtype
-  const int8_t tensor_dtype = static_cast<int8_t>(get_scalar_type<T>());
-  write_data(buffer, tensor_dtype);
-  // write data_bytes
-  const uint64_t per_data_bytes = vec2d[0].size() * type_size<T>;
-  const uint64_t data_bytes = vec2d.size() * per_data_bytes;
-  write_data(buffer, data_bytes);
-  // write vec data
-  for (const auto& vec : vec2d) {
-    std::memcpy(buffer, vec.data(), per_data_bytes);
-    buffer += per_data_bytes;
-  }
-}
-
-template <typename T>
-void write_2d_vector_to_tensor(RawInputSerializeContext& context,
-                               const std::vector<std::vector<T>>& vec2d) {
-  uint64_t ndim;
-  if (vec2d.empty() || vec2d[0].empty()) {
-    ndim = 0;
-    write_data(context.descriptor, ndim);
-    return;
-  }
-
-  ndim = 2;
-  write_data(context.descriptor, ndim);
-  write_data(context.descriptor, vec2d.size());
-  write_data(context.descriptor, vec2d[0].size());
-
-  const int8_t tensor_dtype = static_cast<int8_t>(get_scalar_type<T>());
-  write_data(context.descriptor, tensor_dtype);
-
-  const uint64_t per_data_bytes = vec2d[0].size() * type_size<T>;
-  const uint64_t data_bytes = vec2d.size() * per_data_bytes;
-  write_data(context.descriptor, data_bytes);
-
-  for (const auto& vec : vec2d) {
-    write_bytes(context.tensor_arena, vec.data(), per_data_bytes);
-  }
-
   const uint64_t aligned_bytes = get_aligned_tensor_arena_bytes(data_bytes);
   write_padding(context.tensor_arena, aligned_bytes - data_bytes);
 }
@@ -1644,43 +1376,6 @@ inline void read_tensor_and_vector(ReadContext& context,
   }
   advance_tensor_cursors(context,
                          get_aligned_tensor_arena_bytes(meta.data_bytes));
-}
-
-template <typename T>
-inline void read_2d_vector(const char*& buffer,
-                           std::vector<std::vector<T>>& vec2d) {
-  uint64_t size;
-  read_data(buffer, size);
-  vec2d.resize(size);
-  for (auto& vec : vec2d) {
-    read_vector(buffer, vec);
-  }
-}
-
-inline void read_sampling_param(const char*& buffer,
-                                RequestSamplingParam& param) {
-  const char* ptr = buffer;
-  param.frequency_penalty = *reinterpret_cast<const float*>(ptr);
-  ptr += type_size<float>;
-  param.presence_penalty = *reinterpret_cast<const float*>(ptr);
-  ptr += type_size<float>;
-  param.repetition_penalty = *reinterpret_cast<const float*>(ptr);
-  ptr += type_size<float>;
-  param.temperature = *reinterpret_cast<const float*>(ptr);
-  ptr += type_size<float>;
-  param.top_p = *reinterpret_cast<const float*>(ptr);
-  ptr += type_size<float>;
-  param.min_p = *reinterpret_cast<const float*>(ptr);
-  ptr += type_size<float>;
-  param.top_k = *reinterpret_cast<const int64_t*>(ptr);
-  ptr += type_size<int64_t>;
-  param.logprobs = *reinterpret_cast<const bool*>(ptr);
-  ptr += type_size<bool>;
-  param.top_logprobs = *reinterpret_cast<const int64_t*>(ptr);
-  ptr += type_size<int64_t>;
-  param.is_embeddings = *reinterpret_cast<const bool*>(ptr);
-  ptr += type_size<bool>;
-  buffer = ptr;
 }
 
 inline void read_instance_info(const char*& buffer, InstanceInfo& info) {
@@ -2629,11 +2324,11 @@ inline void deserialize_forward_input_payload(
                          stream);
 
   // sampling_params
-  uint64_t selected_token_idxes_size;
-  read_data(context, selected_token_idxes_size);
-  if (selected_token_idxes_size > 0) {
+  uint64_t logits_indices_size;
+  read_data(context, logits_indices_size);
+  if (logits_indices_size > 0) {
     auto& sampling_params = forward_input.sampling_params;
-    read_tensor(context, sampling_params.selected_token_idxes(), stream);
+    read_tensor(context, sampling_params.logits_indices(), stream);
     read_tensor(context, sampling_params.filter_bitmask(), stream);
     read_tensor(context, sampling_params.frequency_penalties(), stream);
     read_tensor(context, sampling_params.presence_penalties(), stream);
@@ -2951,11 +2646,11 @@ inline void serialize_forward_input_sections(
       input_params.attention.device.kv_cache_tokens_nums);
 
   const SamplingParameters& sampling_params = input.sampling_params;
-  const uint64_t selected_token_idxes_size =
+  const uint64_t logits_indices_size =
       static_cast<uint64_t>(sampling_params.num_sample_seqs());
-  write_data(context.descriptor, selected_token_idxes_size);
-  if (selected_token_idxes_size > 0) {
-    write_tensor(context, sampling_params.selected_token_idxes());
+  write_data(context.descriptor, logits_indices_size);
+  if (logits_indices_size > 0) {
+    write_tensor(context, sampling_params.logits_indices());
     write_tensor(context, sampling_params.filter_bitmask());
     write_tensor(context, sampling_params.frequency_penalties());
     write_tensor(context, sampling_params.presence_penalties());
@@ -3292,6 +2987,21 @@ bool read_raw_sample_output(ShmOutputReader& reader, RawSampleOutput& sample) {
          reader.read(sample.speculative_token_stats.verified_rounds);
 }
 
+bool read_string_vector(ShmOutputReader& reader,
+                        std::vector<std::string>& values) {
+  uint64_t count = 0;
+  if (!reader.read_count(count, get_string_size(""))) {
+    return false;
+  }
+  values.resize(count);
+  for (std::string& value : values) {
+    if (!reader.read_string(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool read_json_object_errors(ShmOutputReader& reader,
                              std::vector<JsonObjectOutputError>& errors) {
   uint64_t count = 0;
@@ -3405,14 +3115,6 @@ bool unpack_from_input_host_buffer(const LlmForwardInput& input,
                                        /*materialize_device_buffer=*/false);
 }
 
-bool try_to_device_from_input_host_buffer(const LlmForwardInput& input,
-                                          const torch::Device& device,
-                                          torch::ScalarType dtype,
-                                          LlmForwardInput& output) {
-  return unpack_from_input_host_buffer(
-      input, device, dtype, output, /*materialize_device_buffer=*/true);
-}
-
 }  // namespace detail
 
 namespace {
@@ -3427,8 +3129,8 @@ bool token_input_to_packed_proto(
   // The packed layout stores the per-sequence fields as flat vectors;
   // anything else (e.g. a reshaped [1, N] view) would serialize with a
   // mismatched shape and corrupt the unpack-side sample count.
-  if ((sampling.selected_token_idxes().defined() &&
-       sampling.selected_token_idxes().dim() != 1) ||
+  if ((sampling.logits_indices().defined() &&
+       sampling.logits_indices().dim() != 1) ||
       (sampling.do_sample().defined() && sampling.do_sample().dim() != 1)) {
     LOG(ERROR) << "Packed sampling fields must be 1-D vectors";
     return false;
@@ -3827,6 +3529,7 @@ bool ForwardSharedMemoryTransport::write_token_output(
     payload_bytes += sizeof(uint64_t) + 3 * sizeof(int64_t);
   }
   payload_bytes += calculate_json_object_errors_size(output.json_object_errors);
+  payload_bytes += get_string_vector_size(output.failed_request_ids);
   payload_bytes += sizeof(uint64_t) + expert_count * sizeof(int64_t);
   payload_bytes += sizeof(int64_t) + sizeof(bool);
   if (size() < static_cast<int64_t>(sizeof(ControlMetadata)) ||
@@ -3889,6 +3592,7 @@ bool ForwardSharedMemoryTransport::write_token_output(
     write_data(cursor, stats.verified_rounds);
   }
   write_json_object_errors(cursor, output.json_object_errors);
+  write_string_vector(cursor, output.failed_request_ids);
   write_output_values(cursor,
                       expert_count > 0
                           ? output.expert_load_data.const_data_ptr<int64_t>()
@@ -3931,6 +3635,7 @@ bool ForwardSharedMemoryTransport::read_token_output(RawForwardOutput& output,
   bool has_dit_output = false;
   bool valid_fields =
       read_json_object_errors(reader, decoded.json_object_errors) &&
+      read_string_vector(reader, decoded.failed_request_ids) &&
       reader.read_vector(decoded.expert_load_data) &&
       reader.read(decoded.prepared_token) && reader.read_bool(has_dit_output) &&
       !has_dit_output;
@@ -4036,15 +3741,8 @@ bool ForwardSharedMemoryTransport::dit_output_read(RawForwardOutput& output) {
     if (!reader.read_tensors(decoded.dit_forward_output.tensors)) {
       return false;
     }
-    uint64_t text_count = 0;
-    if (!reader.read_count(text_count, sizeof(uint64_t))) {
+    if (!read_string_vector(reader, decoded.dit_forward_output.text_output)) {
       return false;
-    }
-    decoded.dit_forward_output.text_output.resize(text_count);
-    for (std::string& text : decoded.dit_forward_output.text_output) {
-      if (!reader.read_string(text)) {
-        return false;
-      }
     }
     if (!reader.read_tensors(decoded.dit_forward_output.audio_tensors)) {
       return false;

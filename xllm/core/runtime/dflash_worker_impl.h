@@ -116,13 +116,15 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
       LlmForwardInput& input,
       const std::vector<EmbeddingCache::DecodeState>& last_states) const;
 
-  void write_context_kv(const LlmForwardInput& input,
-                        const torch::Tensor& context_hidden,
-                        const torch::Tensor& positions_device,
-                        const torch::Tensor& new_cache_slots_device);
+  std::vector<std::string> write_context_kv(
+      const LlmForwardInput& input,
+      const torch::Tensor& context_hidden,
+      const torch::Tensor& positions_device,
+      const torch::Tensor& new_cache_slots_device);
 
-  void write_target_context_to_cache(const LlmForwardInput& input,
-                                     const SampleOutput& validate_output);
+  std::vector<std::string> write_target_context_to_cache(
+      const LlmForwardInput& input,
+      const SampleOutput& validate_output);
 
  protected:
   // Shared by the DSpark/DFlash2 sampling sites.

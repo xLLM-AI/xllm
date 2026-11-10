@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
 
-#include <folly/Unit.h>
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -30,12 +29,9 @@ limitations under the License.
 namespace xllm {
 
 void KVCacheTransfer::drain() {
-  folly::Promise<folly::Unit> barrier;
-  auto future = barrier.getFuture();
-  threadpool_.schedule([barrier = std::move(barrier)]() mutable {
-    barrier.setValue(folly::unit);
-  });
-  std::move(future).get();
+  TaskGroup barrier(1);
+  threadpool_.schedule(barrier.wrap([] {}));
+  barrier.wait();
 }
 
 bool KVCacheTransfer::validate_transfer_mappings(
@@ -231,6 +227,19 @@ std::vector<TransferKVInfo> filter_kv_split_infos(
   return filtered_kv_infos;
 }
 
+std::vector<std::string> KVCacheTransfer::unique_request_ids(
+    const std::vector<TransferKVInfo>& transfer_kv_infos) {
+  std::unordered_set<std::string> request_ids_by_transfer;
+  std::vector<std::string> request_ids;
+  request_ids.reserve(transfer_kv_infos.size());
+  for (const TransferKVInfo& info : transfer_kv_infos) {
+    if (request_ids_by_transfer.emplace(info.request_id).second) {
+      request_ids.emplace_back(info.request_id);
+    }
+  }
+  return request_ids;
+}
+
 std::vector<std::string> KVCacheTransfer::rotate_dst_rank(
     const std::vector<std::string>& keys,
     int32_t kv_split_rank) {
@@ -245,16 +254,18 @@ std::vector<std::string> KVCacheTransfer::rotate_dst_rank(
 }
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-folly::SemiFuture<bool> KVCacheTransfer::push_kv_blocks_async(
+folly::SemiFuture<std::vector<std::string>>
+KVCacheTransfer::push_kv_blocks_async(
     const std::vector<TransferKVInfo>& transfer_kv_infos,
     const ParallelArgs& parallel_args,
     std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer,
     bool is_spec_draft) {
-  folly::Promise<bool> promise;
+  folly::Promise<std::vector<std::string>> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this,
                         transfer_kv_infos,
-                        parallel_args,
+                        kv_split_size = parallel_args.kv_split_size_effective(),
+                        kv_split_rank = parallel_args.kv_split_rank(),
                         layer_synchronizer,
                         is_spec_draft,
                         promise = std::move(promise)]() mutable {
@@ -265,176 +276,37 @@ folly::SemiFuture<bool> KVCacheTransfer::push_kv_blocks_async(
     // kv_split_size==1 (each CP rank holds a full KV replica) the filter
     // degenerates to a copy, so we skip it and let each rank consume
     // remote_ids 1:1.
-    const int32_t kv_split_size = parallel_args.kv_split_size_effective();
     if (!validate_transfer_mappings(*kv_infos, kv_split_size)) {
-      promise.setValue(false);
+      promise.setValue(unique_request_ids(transfer_kv_infos));
       return;
     }
     if (kv_split_size > 1) {
-      filtered_kv_infos = filter_kv_split_infos(
-          parallel_args.kv_split_rank(), kv_split_size, *kv_infos);
+      filtered_kv_infos =
+          filter_kv_split_infos(kv_split_rank, kv_split_size, *kv_infos);
       kv_infos = &filtered_kv_infos;
       if (kv_infos->empty()) {
-        promise.setValue(true);
+        promise.setValue(std::vector<std::string>{});
         return;
       }
     }
     if (!validate_transfer_mappings(*kv_infos, /*kv_split_size=*/1)) {
-      promise.setValue(false);
+      promise.setValue(unique_request_ids(transfer_kv_infos));
       return;
     }
-    merge_kv_blocks(merged_kv_infos, *kv_infos, parallel_args);
-    bool success = true;
+    merge_kv_blocks(merged_kv_infos, *kv_infos);
+    std::vector<std::string> results;
     if (!merged_kv_infos.empty()) {
-      success = this->push_kv_blocks(merged_kv_infos,
+      results = this->push_kv_blocks(merged_kv_infos,
                                      layer_synchronizer,
                                      is_spec_draft,
-                                     parallel_args.kv_split_rank(),
-                                     parallel_args.kv_split_size_effective());
+                                     kv_split_rank,
+                                     kv_split_size);
     }
-    promise.setValue(success);
+    promise.setValue(std::move(results));
   });
   return future;
 }
 #endif
-
-void KVCacheTransfer::merge_kv_blocks(
-    std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
-    const std::vector<TransferKVInfo>& transfer_kv_infos,
-    const ParallelArgs& parallel_args) {
-  // Obtain the parallel parameters of the source instance.
-  // When CP is enabled on the P side, the per-DP worker count is
-  // cp_size * tp_size. We need the *actual* TP size (excluding CP) so that
-  // src_dp_local_tp_rank correctly reflects only the TP dimension.
-  // Using cp_size * tp_size here would make CP rank > 0 workers appear to
-  // have a tp_rank >= dst_world_size, causing the linked_dp_ranks filter to
-  // skip all requests for those workers.
-  int32_t src_rank = parallel_args.rank();
-  int32_t src_dp_size = parallel_args.dp_size();
-  int32_t src_kv_split_size = parallel_args.kv_split_size_effective();
-  int32_t src_world_size = parallel_args.world_size();
-  int32_t src_tp_size = src_world_size / src_dp_size / src_kv_split_size;
-  int32_t src_dp_local_tp_rank = src_rank % src_tp_size;
-  auto append_mappings = [](std::vector<KVTransferMapping>& dst,
-                            const std::vector<KVTransferMapping>& src) {
-    for (const KVTransferMapping& src_mapping : src) {
-      auto it = std::find_if(dst.begin(),
-                             dst.end(),
-                             [&src_mapping](const KVTransferMapping& mapping) {
-                               return mapping.group_id == src_mapping.group_id;
-                             });
-      if (it == dst.end()) {
-        dst.emplace_back(src_mapping);
-        continue;
-      }
-      it->local_ids.insert(it->local_ids.end(),
-                           src_mapping.local_ids.begin(),
-                           src_mapping.local_ids.end());
-      it->remote_ids.insert(it->remote_ids.end(),
-                            src_mapping.remote_ids.begin(),
-                            src_mapping.remote_ids.end());
-    }
-  };
-  for (auto& info : transfer_kv_infos) {
-    // Obtain the parallel parameters of the destination instance.
-    int32_t dst_dp_rank = info.dp_rank;
-    int32_t dst_dp_size = info.remote_instance_info.dp_size;
-    int32_t dst_world_size = info.remote_instance_info.cluster_ids.size();
-    int32_t dst_tp_size = dst_world_size / dst_dp_size;
-    // Get the DP groups of the destination instance connected to the current
-    // worker.
-    std::unordered_set<int32_t> linked_dp_ranks;
-    for (int32_t i = src_dp_local_tp_rank; i < dst_world_size;
-         i += src_tp_size) {
-      int32_t linked_dp_rank = i / dst_tp_size;
-      linked_dp_ranks.emplace(linked_dp_rank);
-    }
-    // If the target DP rank of the request is not linked to the current worker,
-    // skip the request.
-    if (linked_dp_ranks.find(dst_dp_rank) == linked_dp_ranks.end()) {
-      continue;
-    }
-    // The current worker needs to push the KV Cache to all workers in the
-    // destination DP group it is connected to.
-    for (int32_t i =
-             src_dp_local_tp_rank % dst_tp_size + dst_tp_size * dst_dp_rank;
-         i < dst_tp_size * (dst_dp_rank + 1);
-         i += src_tp_size) {
-      uint64_t dst_cluster_id = info.remote_instance_info.cluster_ids[i];
-      auto& dst_addr = info.remote_instance_info.addrs[i];
-      std::string key = std::to_string(dst_cluster_id) + "_" + dst_addr;
-      // Merge all kv blocks with the same destination worker into a single
-      // vector.
-      if (merged_kv_infos.find(key) == merged_kv_infos.end()) {
-        KVCacheInfo kv_info;
-        kv_info.dst_cluster_id = dst_cluster_id;
-        kv_info.dst_addr = dst_addr;
-        append_mappings(kv_info.mappings, info.mappings);
-
-        // VirtualMemory mode: copy destination offsets
-        if (!info.dst_virtual_kv_cache_layer_global_offsets.empty()) {
-          kv_info.dst_virtual_kv_cache_layer_global_offsets =
-              info.dst_virtual_kv_cache_layer_global_offsets;
-        }
-        merged_kv_infos[key] = std::move(kv_info);
-      } else {
-        append_mappings(merged_kv_infos[key].mappings, info.mappings);
-
-        // VirtualMemory mode: merge destination offsets (append to each layer)
-        if (!info.dst_virtual_kv_cache_layer_global_offsets.empty()) {
-          auto& existing =
-              merged_kv_infos[key].dst_virtual_kv_cache_layer_global_offsets;
-          // Initialize if not already done
-          if (existing.empty()) {
-            existing = info.dst_virtual_kv_cache_layer_global_offsets;
-          } else {
-            CHECK_EQ(existing.size(),
-                     info.dst_virtual_kv_cache_layer_global_offsets.size());
-            for (size_t layer = 0; layer < existing.size(); ++layer) {
-              auto& existing_layer = existing[layer];
-              const auto& source =
-                  info.dst_virtual_kv_cache_layer_global_offsets[layer];
-              CHECK_EQ(existing_layer.k_offsets.empty(),
-                       existing_layer.v_offsets.empty());
-              CHECK_EQ(source.k_offsets.empty(), source.v_offsets.empty());
-              if (existing_layer.k_offsets.empty()) {
-                CHECK(existing_layer.index_offsets.empty());
-              } else {
-                CHECK_EQ(existing_layer.k_offsets.size(),
-                         existing_layer.v_offsets.size());
-                CHECK(existing_layer.index_offsets.empty() ||
-                      existing_layer.index_offsets.size() ==
-                          existing_layer.k_offsets.size());
-              }
-              if (source.k_offsets.empty()) {
-                CHECK(source.index_offsets.empty());
-              } else {
-                CHECK_EQ(source.k_offsets.size(), source.v_offsets.size());
-                CHECK(source.index_offsets.empty() ||
-                      source.index_offsets.size() == source.k_offsets.size());
-              }
-              if (!existing_layer.k_offsets.empty() &&
-                  !source.k_offsets.empty()) {
-                CHECK_EQ(existing_layer.index_offsets.empty(),
-                         source.index_offsets.empty());
-              }
-              existing_layer.index_offsets.insert(
-                  existing_layer.index_offsets.end(),
-                  source.index_offsets.begin(),
-                  source.index_offsets.end());
-              existing_layer.k_offsets.insert(existing_layer.k_offsets.end(),
-                                              source.k_offsets.begin(),
-                                              source.k_offsets.end());
-              existing_layer.v_offsets.insert(existing_layer.v_offsets.end(),
-                                              source.v_offsets.begin(),
-                                              source.v_offsets.end());
-            }
-          }
-        }
-      }
-    }
-  }
-}
 
 std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
     uint16_t transfer_listen_port,

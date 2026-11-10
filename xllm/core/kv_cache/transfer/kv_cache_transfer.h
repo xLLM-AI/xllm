@@ -17,6 +17,11 @@ limitations under the License.
 
 #include <folly/futures/Future.h>
 
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 #include "common/types.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/kv_cache/transfer/virtual_kv_cache_transfer_memory_provider.h"
@@ -61,8 +66,16 @@ std::vector<TransferKVInfo> filter_kv_split_infos(
 
 class KVCacheTransfer {
  public:
-  struct KVCacheInfo {
-    uint64_t dst_cluster_id;
+  class KVCacheInfo {
+   public:
+    void append_unique_request_id(const std::string& request_id) {
+      if (seen_request_ids_.emplace(request_id).second) {
+        request_ids_.emplace_back(request_id);
+      }
+    }
+
+    const std::vector<std::string>& request_ids() const { return request_ids_; }
+
     std::string dst_addr;
     std::vector<KVTransferMapping> mappings;
 
@@ -72,7 +85,14 @@ class KVCacheTransfer {
     // layers.
     std::vector<VirtualKVCacheLayerGlobalOffsets>
         dst_virtual_kv_cache_layer_global_offsets;
+
+   private:
+    std::vector<std::string> request_ids_;
+    std::unordered_set<std::string> seen_request_ids_;
   };
+
+  static std::vector<std::string> unique_request_ids(
+      const std::vector<TransferKVInfo>& transfer_kv_infos);
 
   static std::vector<std::string> rotate_dst_rank(
       const std::vector<std::string>& keys,
@@ -128,7 +148,7 @@ class KVCacheTransfer {
       const std::vector<KVTransferMapping>& mappings);
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  virtual folly::SemiFuture<bool> push_kv_blocks_async(
+  virtual folly::SemiFuture<std::vector<std::string>> push_kv_blocks_async(
       const std::vector<TransferKVInfo>& transfer_kv_infos,
       const ParallelArgs& parallel_args,
       std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer,
@@ -137,11 +157,10 @@ class KVCacheTransfer {
 
   virtual void merge_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
-      const std::vector<TransferKVInfo>& transfer_kv_infos,
-      const ParallelArgs& parallel_args);
+      const std::vector<TransferKVInfo>& transfer_kv_infos) = 0;
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  virtual bool push_kv_blocks(
+  virtual std::vector<std::string> push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
       bool is_spec_draft,

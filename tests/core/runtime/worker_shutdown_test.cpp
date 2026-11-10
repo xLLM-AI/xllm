@@ -61,9 +61,6 @@ class ShutdownTestWorker final : public WorkerImpl {
         ACL_SUCCESS);
   }
 
-  // Keep a failing wakeup assertion from leaving the test's future blocked.
-  void release_result_waiter() { begin_shutdown(); }
-
  protected:
   std::optional<ForwardOutput> step_for_schedule_overlap(
       const LlmForwardInput& /*input*/,
@@ -115,7 +112,7 @@ TEST(WorkerShutdownTest, WakesResultWaitersWithoutPublishingAnOutput) {
   const std::future_status status = result.wait_for(2s);
   EXPECT_EQ(status, std::future_status::ready);
   if (status != std::future_status::ready) {
-    worker.release_result_waiter();
+    worker.begin_shutdown();
   }
   EXPECT_FALSE(result.get().sample_output.next_tokens.defined());
   worker.drain_pending_execution();
@@ -216,13 +213,16 @@ class BlockingKVCacheTransfer final : public KVCacheTransfer {
     release_future_.wait_for(10s);
     return true;
   }
-  bool push_kv_blocks(
+  void merge_kv_blocks(std::unordered_map<std::string, KVCacheInfo>&,
+                       const std::vector<TransferKVInfo>&) override {}
+
+  std::vector<std::string> push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& /*merged_kv_infos*/,
       std::shared_ptr<KVPushSynchronizerImpl>& /*layer_synchronizer*/,
       bool /*is_spec_draft*/,
       int32_t /*kv_split_rank*/,
       int32_t /*kv_split_size*/) override {
-    return true;
+    return {};
   }
 
   std::future<void> entered() { return entered_.get_future(); }

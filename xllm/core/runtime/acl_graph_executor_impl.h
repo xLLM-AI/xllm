@@ -129,13 +129,7 @@ class AclGraph {
     return persistent_param_.hidden_states(actual_num_tokens);
   }
 
-  c10_npu::MempoolId_t memory_pool() { return graph_.pool(); }
-  int64_t capture_stream_id() const { return capture_stream_->id(); }
-
  private:
-  // Print graph held tensors for debugging
-  void print_graph_tensors() const;
-
   // Initialize capture stream if not already initialized
   void initialize_streams(c10::DeviceIndex device_index,
                           const c10_npu::NPUStream& capture_stream);
@@ -207,22 +201,6 @@ class AclGraphExecutorImpl final : public ExecutorImpl {
 
   bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
                                       const Stream& signal_stream) override;
-
-  [[nodiscard]] int32_t graph_slot_count_for_test() const {
-    return graph_slot_count_;
-  }
-  [[nodiscard]] bool graph_slot_prepared_for_test(int32_t slot_idx) const {
-    return graph_slots_.at(static_cast<size_t>(slot_idx)).is_prepared;
-  }
-  size_t get_graph_count() const;
-  size_t get_graph_memory_pool_count();
-  size_t get_graph_capture_stream_count() const;
-
-  [[nodiscard]] uint64_t graph_key_for_test(
-      uint32_t bucket_num_tokens,
-      const ModelParamsView& params) const {
-    return get_graph_key(bucket_num_tokens, params);
-  }
 
  private:
   // not own

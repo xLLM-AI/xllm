@@ -2557,9 +2557,7 @@ TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
   }
 }
 
-TEST(SchedulerPolicyTest, SharedSlabAdmissionPreservesByteUnitsAboveFourGiB) {
-  ScopedConfigValue<bool> prefix_cache_guard(
-      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+TEST(SchedulerPolicyTest, SharedSlabPreservesByteUnitsAboveFourGiB) {
   constexpr size_t kGiB = size_t{1} << 30;
   for (const size_t num_allocatable_slabs : {7u, 8u}) {
     SCOPED_TRACE(num_allocatable_slabs);
@@ -2583,11 +2581,8 @@ TEST(SchedulerPolicyTest, SharedSlabAdmissionPreservesByteUnitsAboveFourGiB) {
         .shared_layout(
             std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
     BlockManagerPool pool(options);
-    // Only mappings are allocated; the real prompt/state footprint is 4.25 GiB.
     EXPECT_EQ(pool.sequence_resource_units(4), 4 * kGiB + kGiB / 4);
     EXPECT_EQ(pool.admission_capacity(0), num_allocatable_slabs * kGiB);
-    EXPECT_GT(pool.sequence_resource_units(4),
-              std::numeric_limits<uint32_t>::max());
   }
 }
 

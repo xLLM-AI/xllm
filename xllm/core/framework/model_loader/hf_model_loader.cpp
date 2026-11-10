@@ -36,7 +36,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
-#include "core/common/version_singleton.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/state_dict/safetensors/safetensors.h"
