@@ -209,9 +209,6 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `num_speculative_tokens` | `int32` | `0` | 每轮 speculative decoding 生成的 speculative token 数。 |
 | `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding 算法，支持 `MTP`、`Eagle3`、`Suffix`、`DFlash`、`DFlash2`（仅 NPU）、`DSpark`。 |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Suffix speculative decoding 的后缀树最大深度。 |
-| `speculative_suffix_max_spec_factor` | `double` | `1.0` | Suffix speculation 相对于匹配长度的最大 token 系数。 |
-| `speculative_suffix_max_spec_offset` | `double` | `0.0` | Suffix speculation 的最大 token 加性偏移。 |
-| `speculative_suffix_min_token_prob` | `double` | `0.1` | Suffix speculation 使用的最小 token 概率。 |
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Suffix speculation 全局最大缓存请求数；`-1` 表示不限，`0` 表示禁用。 |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | 是否使用 tree-based suffix speculation，而不是 path speculation。 |
 | `enable_probabilistic_draft` | `bool` | false | draft 从自身分布采样 proposal（携带 q 供拒绝采样）。默认为 greedy argmax。仅 `MTP`、`DSpark`、`DFlash2`、`Eagle3` 支持。 |

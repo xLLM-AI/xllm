@@ -169,10 +169,6 @@ class Int32Map {
   // Default-construct in-place if absent, otherwise return existing.
   T& operator[](int32_t key) { return emplace(key); }
 
-  size_t memory_usage() const noexcept {
-    return sizeof(*this) + sizeof(Slot) * cap_;
-  }
-
   /* Iterators */
 
   friend class Int32MapIterator<T, false>;

@@ -73,9 +73,6 @@ class SpeculativeEngineBase : public Engine {
 
   std::vector<RawForwardOutput> collect_step_outputs(const BatchGroup& batch);
 
- protected:
-  SpeculativeEngineBase(const runtime::Options& options, bool use_draft_engine);
-
  private:
   bool init_model(MasterStatus master_status,
                   const LLMEngine::ModelInitCallback& prepare_model);
@@ -100,19 +97,10 @@ class SpeculativeEngineBase : public Engine {
   // draft engine
   std::unique_ptr<LLMEngine> draft_engine_;
 
-  // whether this speculative engine uses an external draft engine
-  const bool use_draft_engine_;
-
   ModelArgs model_args_;
 
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_ =
       nullptr;
-};
-
-class SuffixSpeculativeEngine : public SpeculativeEngineBase<LLMEngine> {
- public:
-  explicit SuffixSpeculativeEngine(const runtime::Options& options);
-  ~SuffixSpeculativeEngine() override = default;
 };
 
 }  // namespace xllm

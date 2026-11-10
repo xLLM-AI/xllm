@@ -21,17 +21,9 @@ limitations under the License.
 
 #include <algorithm>
 #include <cassert>
-#include <queue>
-#include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace xllm {
-
-#define CHECK_OR_RETURN(cond)                                             \
-  if (!(cond))                                                            \
-    return "Integrity check failed at line " + std::to_string(__LINE__) + \
-           ": " + #cond;
 
 namespace {
 
@@ -519,6 +511,15 @@ void SuffixTree::extend(int32_t seq_id, std::span<const int32_t> tokens) {
   }
 }
 
+std::span<const int32_t> SuffixTree::tail(int32_t seq_id, size_t n) const {
+  const auto it = seqs_.find(seq_id);
+  if (it == seqs_.end()) {
+    return {};
+  }
+  const std::vector<int32_t>& seq = it->second;
+  return std::span<const int32_t>(seq).last(std::min(n, seq.size()));
+}
+
 // Remove an existing sequence.
 void SuffixTree::remove(int32_t seq_id) {
   const std::vector<int32_t>& seq = seqs_[seq_id];
@@ -600,11 +601,7 @@ void SuffixTree::remove(int32_t seq_id) {
 }
 
 Draft SuffixTree::speculate(std::span<const int32_t> context,
-                            int32_t max_spec_tokens,
-                            float max_spec_factor,
-                            float max_spec_offset,
-                            float min_token_prob,
-                            bool use_tree_spec) {
+                            int32_t max_tokens) {
   Draft best_draft;
   for (int32_t match_len = 1; match_len < static_cast<int32_t>(context.size());
        match_len++) {
@@ -613,199 +610,12 @@ Draft SuffixTree::speculate(std::span<const int32_t> context,
     if (node == nullptr) {
       break;
     }
-    int32_t max_tokens =
-        std::min(max_spec_tokens,
-                 static_cast<int32_t>(match_len * max_spec_factor +
-                                      max_spec_offset + 1e-6));
-    max_tokens = std::max(max_tokens, 0);
-    Draft draft;
-    if (use_tree_spec) {
-      draft = speculate_tree(node, idx, max_tokens, min_token_prob);
-    } else {
-      draft = speculate_path(node, idx, max_tokens, min_token_prob);
-    }
+    Draft draft = speculate_path(node, idx, max_tokens);
     if (draft.score >= best_draft.score) {
       best_draft = std::move(draft);
-      best_draft.match_len = match_len;
     }
   }
   return best_draft;
-}
-
-std::string SuffixTree::check_integrity() {
-  // 1. Check structural integrity of all nodes.
-  std::queue<Node*> queue;
-  queue.push(root_.get());
-  while (!queue.empty()) {
-    Node* node = queue.front();
-    queue.pop();
-    std::string ret = check_node_integrity(node);
-    if (!ret.empty()) {
-      return ret;
-    }
-    for (const auto& [token, child] : node->children) {
-      queue.push(child.get());
-    }
-  }
-  // 2. Check all sequences are represented in the tree.
-  std::unordered_map<Node*, int64_t> visit_count;
-  for (int32_t seq_id = 0; seq_id < static_cast<int32_t>(seqs_.size());
-       seq_id++) {
-    const std::vector<int32_t>& seq = seqs_[seq_id];
-    // Loop through all suffix starting indices.
-    for (int32_t start = 0; start < static_cast<int32_t>(seq.size()); start++) {
-      int32_t idx = start;
-      // Traverse the tree along this suffix.
-      Node* node = root_.get();
-      visit_count[node]++;
-      while (idx < static_cast<int32_t>(seq.size()) &&
-             idx - start < max_depth_) {
-        // There should be a child for the next token.
-        CHECK_OR_RETURN(node->children.contains(seq[idx]));
-        node = node->children[seq[idx]].get();
-        visit_count[node]++;
-        // Sequence should not end in the middle of a node.
-        CHECK_OR_RETURN(idx + node->length <= static_cast<int32_t>(seq.size()));
-        for (int32_t i = 0; i < node->length; ++i) {
-          int32_t ref_seq = node->ref_seq;
-          int32_t ref_idx = node->ref_idx + i;
-          // Reference tokens should match sequence tokens.
-          CHECK_OR_RETURN(seq[idx + i] == seqs_[ref_seq][ref_idx]);
-        }
-        idx += node->length;
-      }
-      // The last node on this path should have an endpoint.
-      CHECK_OR_RETURN(node->endpoints.contains(seq_id));
-    }
-  }
-  // 3. Check all nodes were visited the correct number of times.
-  assert(queue.empty());
-  queue.push(root_.get());
-  while (!queue.empty()) {
-    Node* node = queue.front();
-    queue.pop();
-    // The visit count should match the node count.
-    CHECK_OR_RETURN(node->count == visit_count[node]);
-    for (const auto& [token, child] : node->children) {
-      queue.push(child.get());
-    }
-  }
-  return "";
-}
-
-std::string SuffixTree::check_node_integrity(Node* node) {
-  int64_t children_count = 0;
-  for (const auto& [token, child] : node->children) {
-    // All children should have the correct parent pointer.
-    CHECK_OR_RETURN(child->parent == node);
-    children_count++;
-  }
-  // Node count should be at least the sum of all children counts.
-  CHECK_OR_RETURN(children_count <= node->count);
-  if (node == root_.get()) {
-    // Root node should not contain any tokens, do some basic checks.
-    CHECK_OR_RETURN(node->count >= 0);
-    CHECK_OR_RETURN(node->parent == nullptr);
-    CHECK_OR_RETURN(node->length == 0);
-    CHECK_OR_RETURN(node->endpoints.empty());
-    CHECK_OR_RETURN(node->ref_idx == -1);
-  } else {
-    // Node length should be positive.
-    CHECK_OR_RETURN(node->length > 0);
-    // Node count should be positive.
-    CHECK_OR_RETURN(node->count > 0);
-    // Each child count should be strictly less than the node count.
-    // Otherwise, the node and the child should have been merged into a
-    // single node.
-    for (const auto& [token, child] : node->children) {
-      CHECK_OR_RETURN(child->count < node->count);
-    }
-    // Internal nodes must have a valid reference sequence and index.
-    CHECK_OR_RETURN(seqs_.contains(node->ref_seq));
-    CHECK_OR_RETURN(node->ref_idx >= 0);
-    CHECK_OR_RETURN(node->ref_idx + node->length <=
-                    static_cast<int32_t>(seqs_[node->ref_seq].size()));
-    // Check the first token of the node is correct.
-    CHECK_OR_RETURN(node->token == seqs_[node->ref_seq][node->ref_idx]);
-    // Check the node is in its parent's children map.
-    CHECK_OR_RETURN(node->parent->children.contains(node->token));
-    CHECK_OR_RETURN(node->parent->children[node->token].get() == node);
-    // Check all endpoint references are correct.
-    for (auto [seq_id, end_idx] : node->endpoints) {
-      // Endpoint should refer to a sequence id that exists.
-      CHECK_OR_RETURN(seqs_.contains(seq_id));
-      // Endpoint index should be within the sequence length.
-      CHECK_OR_RETURN(end_idx > 0 &&
-                      end_idx <= static_cast<int32_t>(seqs_[seq_id].size()));
-      // Check all tokens from the start of the suffix to the endpoint.
-      Node* n = node;
-      int32_t idx = end_idx;
-      // Walk up the tree and check all tokens agree with the suffix
-      // ending at this endpoint.
-      do {
-        // Check the index in the sequence is not underflowed.
-        CHECK_OR_RETURN(n->length <= idx);
-        idx -= n->length;
-        for (int32_t i = 0; i < n->length; ++i) {
-          int32_t tok = seqs_[n->ref_seq][n->ref_idx + i];
-          // Check each token in this node agrees with the sequence.
-          CHECK_OR_RETURN(seqs_[seq_id][idx + i] == tok);
-        }
-        n = n->parent;
-      } while (n != nullptr);
-    }
-  }
-  // Check siblings list integrity.
-  if (!node->head_child && !node->tail_child) {
-    CHECK_OR_RETURN(node->children.empty());
-  } else {
-    // If there is a child then there must be both a head and a tail child.
-    CHECK_OR_RETURN(node->head_child && node->tail_child);
-    // Check head and tail child pointers are correct.
-    CHECK_OR_RETURN(node->head_child->prev_sibling == nullptr);
-    CHECK_OR_RETURN(node->tail_child->next_sibling == nullptr);
-    // Check all children are in the siblings linked list.
-    int32_t count = 0;
-    Node* child = node->head_child;
-    Node* prev_child = nullptr;
-    while (child != nullptr) {
-      count++;
-      // Check the child is in the children map.
-      CHECK_OR_RETURN(node->children.contains(child->token));
-      // Check the group pointer is valid.
-      CHECK_OR_RETURN(child->group != nullptr);
-      if (prev_child) {
-        // Check the siblings are ordered in nonincreasing count.
-        CHECK_OR_RETURN(child->count <= prev_child->count);
-        // Check the sibling pointers are correct.
-        CHECK_OR_RETURN(child->prev_sibling == prev_child);
-        CHECK_OR_RETURN(prev_child->next_sibling == child);
-        // Check the group pointers are correct.
-        if (child->count == prev_child->count) {
-          // If the next sibling has the same count, they should be
-          // in the same group.
-          CHECK_OR_RETURN(child->group == prev_child->group);
-        } else {
-          // Otherwise, they should be in different groups.
-          CHECK_OR_RETURN(child->group != prev_child->group);
-          // The child should be the head of its group.
-          CHECK_OR_RETURN(child->group->head == child);
-          // Check group pointers are correct.
-          CHECK_OR_RETURN(child->group->prev == prev_child->group.get());
-          CHECK_OR_RETURN(prev_child->group->next == child->group.get());
-        }
-      } else {
-        CHECK_OR_RETURN(child == node->head_child);
-      }
-      prev_child = child;
-      child = child->next_sibling;
-    }
-    // Check the last child reached is the tail child.
-    CHECK_OR_RETURN(prev_child == node->tail_child);
-    // Check the number of children matches the size of the children map.
-    CHECK_OR_RETURN(count == static_cast<int32_t>(node->children.size()));
-  }
-  return "";
 }
 
 std::pair<Node*, int32_t> SuffixTree::match_context(
@@ -835,18 +645,13 @@ std::pair<Node*, int32_t> SuffixTree::match_context(
 
 Draft SuffixTree::speculate_path(Node* node,
                                  int32_t idx,
-                                 int32_t max_spec_tokens,
-                                 float min_token_prob) {
+                                 int32_t max_spec_tokens) {
   Draft ret;
   float prob = 1.0f;
   const int32_t* ref_data = seqs_[node->ref_seq].data() + node->ref_idx;
-  while (ret.token_ids.size() < static_cast<size_t>(max_spec_tokens) &&
-         prob >= min_token_prob) {
+  while (ret.token_ids.size() < static_cast<size_t>(max_spec_tokens)) {
     if (idx < node->length) {
-      // Use previous token index as parent; if none, mark as -1.
-      ret.parents.push_back(static_cast<int32_t>(ret.token_ids.size()) - 1);
       ret.token_ids.push_back(ref_data[idx]);
-      ret.probs.push_back(prob);
       ret.score += prob;
       idx++;
     } else {
@@ -863,90 +668,6 @@ Draft SuffixTree::speculate_path(Node* node,
     }
   }
   return ret;
-}
-
-struct HeapItem {
-  float prob;
-  Node* node;
-  int32_t idx;
-  int32_t parent;  // index in the draft token list; -1 if none.
-
-  HeapItem(float p, Node* n, int32_t i, int32_t par)
-      : prob(p), node(n), idx(i), parent(par) {}
-};
-
-struct HeapItemCmp {
-  bool operator()(const HeapItem& a, const HeapItem& b) const {
-    // In C++ priority_queue by default returns the largest element.
-    // Thus, we compare probabilities so that the highest prob is returned.
-    return a.prob < b.prob;
-  }
-};
-
-// Get a draft token tree using a priority queue.
-Draft SuffixTree::speculate_tree(Node* node,
-                                 int32_t idx,
-                                 int32_t max_spec_tokens,
-                                 float min_token_prob) {
-  Draft ret;
-  std::priority_queue<HeapItem, std::vector<HeapItem>, HeapItemCmp> queue;
-  queue.emplace(1.0, node, idx, -1);
-  while (ret.token_ids.size() < static_cast<size_t>(max_spec_tokens) &&
-         !queue.empty()) {
-    HeapItem it = queue.top();
-    queue.pop();
-    if (it.idx < it.node->length) {
-      int32_t token = seqs_[it.node->ref_seq][it.node->ref_idx + it.idx];
-      ret.token_ids.push_back(token);
-      ret.parents.push_back(it.parent);
-      ret.probs.push_back(it.prob);
-      ret.score += it.prob;
-      queue.emplace(it.prob,
-                    it.node,
-                    it.idx + 1,
-                    static_cast<int32_t>(ret.token_ids.size()) - 1);
-    } else {
-      Node* child = it.node->head_child;
-      while (child) {
-        float prob =
-            it.prob * child->count / static_cast<float>(it.node->count);
-        if (prob < min_token_prob) {
-          break;
-        }
-        queue.emplace(prob, child, 0, it.parent);
-        child = child->next_sibling;
-      }
-    }
-  }
-  return ret;
-}
-
-size_t SuffixTree::estimate_memory() const {
-  size_t total = sizeof(*this);
-  std::vector<Node*> stack;
-  stack.push_back(root_.get());
-  while (!stack.empty()) {
-    Node* node = stack.back();
-    stack.pop_back();
-    total += node->memory_usage();
-    if (node->head_child) {
-      Group* group = node->head_child->group.get();
-      while (group) {
-        total += sizeof(*group);
-        group = group->next;
-      }
-    }
-    for (const auto& [token, child] : node->children) {
-      stack.push_back(child.get());
-    }
-  }
-  for (const auto& [seq_id, seq] : seqs_) {
-    total += sizeof(seq) * seq.capacity();
-  }
-  for (const auto& [seq_id, nodes] : active_nodes_) {
-    total += sizeof(nodes) * nodes.size();
-  }
-  return total;
 }
 
 }  // namespace xllm

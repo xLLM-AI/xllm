@@ -15,9 +15,7 @@ limitations under the License.
 
 #pragma once
 
-#include <unordered_map>
 #include <unordered_set>
-#include <vector>
 
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/suffix_decoding_cache.h"
@@ -49,8 +47,7 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl<LlmForwardInput> {
                         const DraftProposal& draft_proposal,
                         const ForwardOutput& target_output);
 
-  std::unique_ptr<SuffixDecodingCache> suffix_cache_;
-  std::unordered_map<std::string, std::vector<int32_t>> suffix_recent_tokens_;
+  SuffixDecodingCache suffix_cache_;
   std::unordered_set<std::string> suffix_active_decode_req_ids_;
 };
 }  // namespace xllm

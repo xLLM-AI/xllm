@@ -28,32 +28,6 @@ namespace xllm {
 
 namespace {
 
-void append_tokens_with_limit(std::vector<int32_t>& history,
-                              std::span<const int32_t> tokens,
-                              size_t max_size) {
-  history.insert(history.end(), tokens.begin(), tokens.end());
-  if (history.size() > max_size) {
-    history.erase(history.begin(), history.end() - max_size);
-  }
-}
-
-std::string summarize_int32_span(std::span<const int32_t> values,
-                                 size_t limit = 8) {
-  std::string out = "[";
-  const size_t n = std::min(values.size(), limit);
-  for (size_t i = 0; i < n; ++i) {
-    if (i > 0) {
-      out += ",";
-    }
-    out += std::to_string(values[i]);
-  }
-  if (values.size() > n) {
-    out += ",...";
-  }
-  out += "]";
-  return out;
-}
-
 runtime::Options SuffixTargetOptions(const runtime::Options& options) {
   auto opts = options;
   opts.enable_schedule_overlap(false);
@@ -67,11 +41,9 @@ SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
     : SpeculativeWorkerImpl<LlmForwardInput>(parallel_args,
                                              device,
                                              options,
-                                             SuffixTargetOptions(options)) {
-  suffix_cache_ = std::make_unique<SuffixDecodingCache>(
-      options_.speculative_suffix_cache_max_depth(),
-      options_.speculative_suffix_max_cached_requests());
-}
+                                             SuffixTargetOptions(options)),
+      suffix_cache_(options_.speculative_suffix_cache_max_depth(),
+                    options_.speculative_suffix_max_cached_requests()) {}
 
 std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
     const LlmForwardInput& input) {
@@ -104,8 +76,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
   const int32_t num_sequences = input_params.meta.num_sequences;
   const auto& request_ids = input_params.embedding.request_ids;
 
-  if (suffix_cache_ != nullptr &&
-      request_ids.size() == static_cast<size_t>(num_sequences)) {
+  if (request_ids.size() == static_cast<size_t>(num_sequences)) {
     const torch::Tensor& token_ids = input.token_ids_host;
     Slice<int32_t> tokens_ids_slice = tensor_slice(token_ids);
 
@@ -117,21 +88,12 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
           tokens_ids_slice.slice(start_idx, start_idx + q_len);
       start_idx += q_len;
 
-      const std::string req_id = request_ids[seq_id];
+      const std::string& req_id = request_ids[seq_id];
       if (req_id.empty()) {
         continue;
       }
 
-      if (!suffix_cache_->has_active_request(req_id)) {
-        suffix_cache_->start_request(req_id, seq_tokens);
-        suffix_recent_tokens_[req_id].clear();
-      } else {
-        suffix_cache_->add_active_prompt(req_id, seq_tokens);
-      }
-      append_tokens_with_limit(
-          suffix_recent_tokens_[req_id],
-          seq_tokens,
-          static_cast<size_t>(suffix_cache_->max_tree_depth()));
+      suffix_cache_.start_request(req_id, seq_tokens);
     }
 
     if (output.sample_output.next_tokens.defined() &&
@@ -145,16 +107,12 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
         if (token < 0) {
           continue;
         }
-        const std::string req_id = request_ids[seq_id];
+        const std::string& req_id = request_ids[seq_id];
         if (req_id.empty()) {
           continue;
         }
-        suffix_cache_->add_active_response(req_id,
-                                           std::span<const int32_t>(&token, 1));
-        append_tokens_with_limit(
-            suffix_recent_tokens_[req_id],
-            std::span<const int32_t>(&token, 1),
-            static_cast<size_t>(suffix_cache_->max_tree_depth()));
+        suffix_cache_.add_active_response(req_id,
+                                          std::span<const int32_t>(&token, 1));
       }
     }
   }
@@ -174,7 +132,6 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   const auto& request_ids = input.input_params.embedding.request_ids;
 
   const bool has_request_ids =
-      suffix_cache_ != nullptr &&
       request_ids.size() == static_cast<size_t>(num_sequences);
   if (has_request_ids) {
     std::unordered_set<std::string> current_req_ids;
@@ -186,10 +143,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
 
     for (const auto& req_id : suffix_active_decode_req_ids_) {
       if (current_req_ids.find(req_id) == current_req_ids.end()) {
-        if (suffix_cache_->has_active_request(req_id)) {
-          suffix_cache_->stop_request(req_id);
-        }
-        suffix_recent_tokens_.erase(req_id);
+        suffix_cache_.stop_request(req_id);
       }
     }
     suffix_active_decode_req_ids_ = std::move(current_req_ids);
@@ -198,56 +152,30 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   const torch::Tensor& input_token_ids = input.token_ids_host;
   Slice<int32_t> input_tokens_slice = tensor_slice(input_token_ids);
 
-  // Records before the target forward so it stays out of this window.
   Timer draft_timer;
 
   std::vector<int32_t> draft_tokens_flat;
   draft_tokens_flat.reserve(num_sequences * num_speculative_tokens);
-  std::vector<std::string> req_ids(num_sequences);
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    int32_t fallback_token = input_tokens_slice[seq_id];
+    const int32_t fallback_token = input_tokens_slice[seq_id];
     for (int32_t i = 0; i < num_speculative_tokens; ++i) {
       draft_tokens_flat.emplace_back(fallback_token);
     }
 
-    if (suffix_cache_ == nullptr ||
-        request_ids.size() != static_cast<size_t>(num_sequences)) {
+    if (!has_request_ids) {
       continue;
     }
 
-    const std::string req_id = request_ids[seq_id];
+    const std::string& req_id = request_ids[seq_id];
     if (req_id.empty()) {
       continue;
     }
-    req_ids[seq_id] = req_id;
 
-    if (!suffix_cache_->has_active_request(req_id)) {
-      suffix_cache_->start_request(
-          req_id, std::span<const int32_t>(&fallback_token, 1));
-      suffix_recent_tokens_[req_id].clear();
-      append_tokens_with_limit(
-          suffix_recent_tokens_[req_id],
-          std::span<const int32_t>(&fallback_token, 1),
-          static_cast<size_t>(suffix_cache_->max_tree_depth()));
-    }
-
-    auto& history = suffix_recent_tokens_[req_id];
-    if (history.empty()) {
-      append_tokens_with_limit(
-          history,
-          std::span<const int32_t>(&fallback_token, 1),
-          static_cast<size_t>(suffix_cache_->max_tree_depth()));
-    }
-
-    SuffixDecodingDraft draft = suffix_cache_->speculate(
-        req_id,
-        std::span<const int32_t>(history.data(), history.size()),
-        /*max_spec_tokens=*/num_speculative_tokens,
-        options_.speculative_suffix_max_spec_factor(),
-        options_.speculative_suffix_max_spec_offset(),
-        options_.speculative_suffix_min_token_prob(),
-        options_.speculative_suffix_use_tree_spec());
+    const Draft draft =
+        suffix_cache_.speculate(req_id,
+                                std::span<const int32_t>(&fallback_token, 1),
+                                num_speculative_tokens);
 
     const int32_t fill_count =
         std::min<int32_t>(num_speculative_tokens, draft.token_ids.size());
@@ -296,60 +224,33 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
     val_output = validate(input.sampling_params, draft_proposal, target_output);
   }
 
-  if (suffix_cache_ != nullptr &&
-      request_ids.size() == static_cast<size_t>(num_sequences)) {
-    torch::Tensor accepted_tokens = to_cpu_contiguous(
-        val_output.next_tokens.view({num_sequences, num_val_tokens}),
-        torch::kInt);
-    Slice<int32_t> accepted_tokens_slice = tensor_slice(accepted_tokens);
+  if (has_request_ids) {
+    const torch::Tensor accepted_tokens =
+        to_cpu_contiguous(val_output.next_tokens, torch::kInt);
+    Slice<int32_t> accepted_tokens_slice =
+        tensor_slice<int32_t>(accepted_tokens);
 
+    std::vector<int32_t> accepted;
+    accepted.reserve(num_val_tokens);
     for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-      const std::string& req_id = req_ids[seq_id];
+      const std::string& req_id = request_ids[seq_id];
       if (req_id.empty()) {
         continue;
       }
 
-      std::vector<int32_t> accepted;
-      accepted.reserve(num_val_tokens);
-      int32_t first_reject_idx = -1;
-      std::vector<int32_t> row_tokens;
-      row_tokens.reserve(num_val_tokens);
+      accepted.clear();
       for (int32_t j = 0; j < num_val_tokens; ++j) {
-        int32_t token = accepted_tokens_slice[seq_id * num_val_tokens + j];
-        row_tokens.emplace_back(token);
+        const int32_t token =
+            accepted_tokens_slice[seq_id * num_val_tokens + j];
         if (token < 0) {
-          if (first_reject_idx < 0) {
-            first_reject_idx = j;
-          }
           break;
         }
         accepted.emplace_back(token);
       }
 
-      if (seq_id < 8) {
-        VLOG(3) << "[spec-validate-output] seq=" << seq_id
-                << " req_id=" << req_id << " accepted_len=" << accepted.size()
-                << " first_reject_idx=" << first_reject_idx << " accepted="
-                << summarize_int32_span(std::span<const int32_t>(
-                       accepted.data(), accepted.size()))
-                << " row_tokens="
-                << summarize_int32_span(std::span<const int32_t>(
-                       row_tokens.data(), row_tokens.size()));
-        VLOG(3) << "[spec-reject-handle] seq=" << seq_id
-                << " accepted_prefix_len=" << accepted.size()
-                << " first_reject_idx=" << first_reject_idx << " pos_offset = "
-                << (static_cast<int32_t>(accepted.size()) - 1) << " row_tokens="
-                << summarize_int32_span(std::span<const int32_t>(
-                       row_tokens.data(), row_tokens.size()));
-      }
-
       if (!accepted.empty()) {
-        suffix_cache_->add_active_response(
+        suffix_cache_.add_active_response(
             req_id, std::span<const int32_t>(accepted.data(), accepted.size()));
-        append_tokens_with_limit(
-            suffix_recent_tokens_[req_id],
-            std::span<const int32_t>(accepted.data(), accepted.size()),
-            static_cast<size_t>(suffix_cache_->max_tree_depth()));
       }
     }
   }

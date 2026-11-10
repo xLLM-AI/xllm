@@ -40,16 +40,8 @@ std::string Options::to_string() const {
      << ", enable_probabilistic_draft: " << enable_probabilistic_draft()
      << ", speculative_suffix_cache_max_depth: "
      << speculative_suffix_cache_max_depth()
-     << ", speculative_suffix_max_spec_factor: "
-     << speculative_suffix_max_spec_factor()
-     << ", speculative_suffix_max_spec_offset: "
-     << speculative_suffix_max_spec_offset()
-     << ", speculative_suffix_min_token_prob: "
-     << speculative_suffix_min_token_prob()
      << ", speculative_suffix_max_cached_requests: "
      << speculative_suffix_max_cached_requests()
-     << ", speculative_suffix_use_tree_spec: "
-     << speculative_suffix_use_tree_spec()
      << ", enable_mtp_draft_body_tp1: " << enable_mtp_draft_body_tp1()
      << ", num_request_handling_threads: " << num_request_handling_threads()
      << ", communication_backend: " << communication_backend().value_or("null")

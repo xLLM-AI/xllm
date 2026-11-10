@@ -209,9 +209,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `num_speculative_tokens` | `int32` | `0` | Number of speculative tokens generated per speculative decoding step. |
 | `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`, `DFlash`, `DFlash2` (NPU only), `DSpark`. |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Maximum suffix-tree depth for suffix speculative decoding. |
-| `speculative_suffix_max_spec_factor` | `double` | `1.0` | Maximum suffix speculation token factor relative to match length. |
-| `speculative_suffix_max_spec_offset` | `double` | `0.0` | Maximum additive token offset for suffix speculation. |
-| `speculative_suffix_min_token_prob` | `double` | `0.1` | Minimum token probability used in suffix speculation. |
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Maximum number of globally cached requests for suffix speculation. `-1` means unlimited; `0` disables it. |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | Whether to use tree-based suffix speculation instead of path speculation. |
 | `enable_probabilistic_draft` | `bool` | false | Drafts sample proposals from their distribution (emitting q for rejection sampling). The default is greedy argmax. Only `MTP`, `DSpark`, `DFlash2`, `Eagle3` support it. |

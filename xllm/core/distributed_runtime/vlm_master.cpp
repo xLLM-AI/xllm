@@ -233,16 +233,8 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
         .enable_mtp_draft_body_tp1(options_.enable_mtp_draft_body_tp1())
         .speculative_suffix_cache_max_depth(
             options_.speculative_suffix_cache_max_depth())
-        .speculative_suffix_max_spec_factor(
-            options_.speculative_suffix_max_spec_factor())
-        .speculative_suffix_max_spec_offset(
-            options_.speculative_suffix_max_spec_offset())
-        .speculative_suffix_min_token_prob(
-            options_.speculative_suffix_min_token_prob())
         .speculative_suffix_max_cached_requests(
             options_.speculative_suffix_max_cached_requests())
-        .speculative_suffix_use_tree_spec(
-            options_.speculative_suffix_use_tree_spec())
         .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
         .transfer_listen_port(options_.transfer_listen_port())
         .host_blocks_factor(options_.host_blocks_factor())

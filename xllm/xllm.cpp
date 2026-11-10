@@ -160,16 +160,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
           speculative_config.enable_probabilistic_draft())
       .speculative_suffix_cache_max_depth(
           speculative_config.speculative_suffix_cache_max_depth())
-      .speculative_suffix_max_spec_factor(
-          speculative_config.speculative_suffix_max_spec_factor())
-      .speculative_suffix_max_spec_offset(
-          speculative_config.speculative_suffix_max_spec_offset())
-      .speculative_suffix_min_token_prob(
-          speculative_config.speculative_suffix_min_token_prob())
       .speculative_suffix_max_cached_requests(
           speculative_config.speculative_suffix_max_cached_requests())
-      .speculative_suffix_use_tree_spec(
-          speculative_config.speculative_suffix_use_tree_spec())
       .enable_mtp_draft_body_tp1(speculative_config.enable_mtp_draft_body_tp1())
       .num_request_handling_threads(
           service_config.num_request_handling_threads())

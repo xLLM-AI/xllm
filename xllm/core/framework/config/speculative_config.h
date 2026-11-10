@@ -109,11 +109,7 @@ class SpeculativeConfig final {
          "num_speculative_tokens",
          "speculative_algorithm",
          "speculative_suffix_cache_max_depth",
-         "speculative_suffix_max_spec_factor",
-         "speculative_suffix_max_spec_offset",
-         "speculative_suffix_min_token_prob",
          "speculative_suffix_max_cached_requests",
-         "speculative_suffix_use_tree_spec",
          "enable_probabilistic_draft",
          "enable_mtp_draft_body_tp1",
          "enable_atb_spec_kernel"}};
@@ -128,15 +124,7 @@ class SpeculativeConfig final {
 
   PROPERTY(int32_t, speculative_suffix_cache_max_depth) = 64;
 
-  PROPERTY(double, speculative_suffix_max_spec_factor) = 1.0;
-
-  PROPERTY(double, speculative_suffix_max_spec_offset) = 0.0;
-
-  PROPERTY(double, speculative_suffix_min_token_prob) = 0.1;
-
   PROPERTY(int32_t, speculative_suffix_max_cached_requests) = -1;
-
-  PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
 
   PROPERTY(bool, enable_probabilistic_draft) = false;
 
