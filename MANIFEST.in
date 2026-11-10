@@ -10,7 +10,6 @@ recursive-include examples *.py
 recursive-include third_party *
 recursive-include tools *.*
 recursive-include scripts *.*
-recursive-include patches *.patch
 recursive-include proto *.*
 prune */__pycache__
 global-exclude *.o *.so *.dylib *.a .git *.pyc *.swp
