@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <array>
 #include <nlohmann/json.hpp>
 #include <string>
 
@@ -187,11 +188,20 @@ struct ParallelArgs {
 
 #endif
 
+  std::array<ProcessGroup*, 2> kv_transfer_groups() const {
+    if (kv_transfer_groups_[0] != nullptr ||
+        kv_transfer_groups_[1] != nullptr) {
+      return kv_transfer_groups_;
+    }
+    return {tp_group_, cp_group_};
+  }
+
   // the following pointers are unique pointers from CollectiveCommunicator
   //  So they are not owned by ParallelArgs.
   ProcessGroup* process_group_ = nullptr;
   ProcessGroup* dp_local_process_group_ = nullptr;
   ProcessGroup* tp_group_ = nullptr;
+  std::array<ProcessGroup*, 2> kv_transfer_groups_{};
   // Optional output-projection group for models whose body and LMHead use
   // different tensor-parallel strategies.
   ProcessGroup* lm_head_group_ = nullptr;

@@ -917,8 +917,7 @@ std::vector<std::string> DFlashWorkerImpl::write_context_kv(
   // transfer_kv_infos is empty. NPU-only: the scatter's record_event loop is
   // NPU-gated, so a non-NPU push would stall on events that never record.
   KVTransferCompletion kv_transfers = [&]() {
-    if (options_.kv_cache_transfer_mode() == "PUSH" &&
-        !input.transfer_kv_infos.empty()) {
+    if (options_.kv_push_enabled() && !input.transfer_kv_infos.empty()) {
       std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
           std::make_shared<NPULayerSynchronizerImpl>(
               draft_impl_->context_.get_model_args().n_layers());
@@ -962,9 +961,7 @@ std::vector<std::string> DFlashWorkerImpl::write_context_kv(
   // overwritten by the next step while the transfer is still reading it
   // (mirrors step_internal's wait_kv_push()). No-op when no push was issued.
   return kv_transfers.wait(
-      {draft_impl_->context_.get_parallel_args().tp_group_,
-       draft_impl_->context_.get_parallel_args().cp_group_},
-      device_);
+      draft_impl_->context_.get_parallel_args().kv_transfer_groups(), device_);
 #else
   return {};
 #endif

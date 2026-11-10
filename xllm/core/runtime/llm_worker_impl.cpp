@@ -199,8 +199,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   auto& sampling_params = input.sampling_params;
 
   KVTransferCompletion kv_transfers = [&]() {
-    if (options_.kv_cache_transfer_mode() == "PUSH" &&
-        !input.transfer_kv_infos.empty()) {
+    if (options_.kv_push_enabled() && !input.transfer_kv_infos.empty()) {
 #if defined(USE_NPU)
       std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
           std::make_shared<NPULayerSynchronizerImpl>(
@@ -230,8 +229,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     return KVTransferCompletion{};
   }();
   auto wait_kv_push = [&]() {
-    return kv_transfers.wait(
-        {parallel_args_.tp_group_, parallel_args_.cp_group_}, device_);
+    return kv_transfers.wait(parallel_args_.kv_transfer_groups(), device_);
   };
   if (eplb_executor_ != nullptr) {
     eplb_executor_->start_eplb_step(input.input_params.expert.eplb_info);

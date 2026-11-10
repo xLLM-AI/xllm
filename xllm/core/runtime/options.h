@@ -177,6 +177,13 @@ struct Options {
   // support `PUSH` and `PULL`
   PROPERTY(std::string, kv_cache_transfer_mode) = "PUSH";
 
+  bool kv_push_enabled() const {
+    return enable_disagg_pd() &&
+           (instance_role() == InstanceRole::PREFILL ||
+            instance_role() == InstanceRole::MIX) &&
+           kv_cache_transfer_mode() == "PUSH";
+  }
+
   // transfer_listen_port needed in disaggregated prefill and decode execution.
   PROPERTY(uint16_t, transfer_listen_port) = 26000;
 

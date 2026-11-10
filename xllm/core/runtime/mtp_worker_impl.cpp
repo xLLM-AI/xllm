@@ -390,6 +390,7 @@ ParallelArgs mtp_draft_parallel_args(const ParallelArgs& parallel_args,
   CHECK(parallel_args.single_rank_group_ != nullptr)
       << "MTP draft body TP1 requires a single-rank process group";
   ParallelArgs draft_args = parallel_args;
+  draft_args.kv_transfer_groups_ = parallel_args.kv_transfer_groups();
   draft_args.rank(0)
       .world_size(1)
       .dp_size(1)

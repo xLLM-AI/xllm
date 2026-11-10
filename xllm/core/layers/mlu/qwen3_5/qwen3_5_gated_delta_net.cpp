@@ -257,7 +257,6 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
       build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
 
   if (input_params.is_spec_verify) {
-    const int64_t q_max_seq_len = attn_metadata.max_query_len;
     mixed_qkv = xllm::kernel::mlu::causal_conv1d_update_decode(
         mixed_qkv,
         conv_cache,
@@ -267,7 +266,7 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
         /*activation=*/true,
         /*pad_slot_id=*/kPaddingLinearStateId,
         attn_metadata.q_cu_seq_lens,
-        static_cast<int32_t>(q_max_seq_len),
+        static_cast<int32_t>(attn_metadata.max_query_len),
         input_params.num_accepted_tokens);
 
     auto [q, k, v] = split_mixed_qkv(mixed_qkv,
@@ -276,7 +275,7 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
                                      head_k_dim_,
                                      head_v_dim_);
     torch::Tensor ssm_state_indices = build_rebased_ssm_state_indices(
-        logical_state_indices, checkpoint_stride, q_max_seq_len);
+        logical_state_indices, checkpoint_stride, attn_metadata.max_query_len);
 
     xllm::kernel::FusedSigmoidGatingDeltaRuleUpdateParams params;
     params.A_log = A_log_;

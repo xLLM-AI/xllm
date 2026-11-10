@@ -266,12 +266,12 @@ GraphPersistentParam::GraphPersistentParam(
 void GraphPersistentParam::bind_buffers(ModelParamsView& graph_params,
                                         const GraphPlan& plan) {
   const GraphLayout& layout = plan.layout;
-  const int64_t attention_rows =
+  const int64_t num_seqs =
       layout.padded_num_tokens / layout.attention_row_query_len;
   auto& attention = graph_params.attention.device;
-  attention.q_seq_lens = q_seq_lens_.slice(0, 0, attention_rows);
+  attention.q_seq_lens = q_seq_lens_.slice(0, 0, num_seqs);
   attention.q_cu_seq_lens = torch::Tensor();
-  attention.kv_seq_lens = kv_seq_lens_.slice(0, 0, attention_rows);
+  attention.kv_seq_lens = kv_seq_lens_.slice(0, 0, num_seqs);
   attention.new_cache_slots =
       new_cache_slots_.slice(0, 0, layout.padded_num_tokens);
   if (attention.block_tables.defined()) {
@@ -279,7 +279,7 @@ void GraphPersistentParam::bind_buffers(ModelParamsView& graph_params,
                                 ? plan.main_block_table_columns
                                 : attention.block_tables.size(1);
     attention.block_tables =
-        block_table_.slice(0, 0, attention_rows).slice(1, 0, columns);
+        block_table_.slice(0, 0, num_seqs).slice(1, 0, columns);
   }
   if (graph_params.embedding.input_embedding.defined()) {
     if (!input_embeds_.defined()) {
@@ -304,7 +304,6 @@ void GraphPersistentParam::update_input_buffer(const torch::Tensor& tokens,
   const GraphLayout& layout = plan.layout;
   const int64_t extra_rows = extra_rows_of(layout);
   const int32_t dim = use_mrope_ ? 1 : 0;
-  const int64_t row_step = layout.attention_row_query_len;
   const auto copy_rows = [](const torch::Tensor& dst,
                             const torch::Tensor& src,
                             int64_t fill,
@@ -335,15 +334,19 @@ void GraphPersistentParam::update_input_buffer(const torch::Tensor& tokens,
   host.q_seq_lens = params.attention.host.q_seq_lens;
   host.kv_seq_lens = params.attention.host.kv_seq_lens;
   host.kpool_query_lens = params.attention.host.kpool_query_lens;
-  util::pad_uniform_decode_lens(
-      host.q_seq_lens, host.kv_seq_lens, extra_rows, row_step);
+  util::pad_uniform_decode_lens(host.q_seq_lens,
+                                host.kv_seq_lens,
+                                extra_rows,
+                                layout.attention_row_query_len);
   if (!host.kpool_query_lens.empty()) {
     host.kpool_query_lens.resize(layout.padded_num_reqs,
                                  layout.tokens_per_request);
   }
 
   auto& attention = graph_params.attention.device;
-  copy_rows(attention.q_seq_lens, params.attention.device.q_seq_lens, row_step);
+  copy_rows(attention.q_seq_lens,
+            params.attention.device.q_seq_lens,
+            layout.attention_row_query_len);
   copy_rows(attention.kv_seq_lens, params.attention.device.kv_seq_lens, 0);
 
   copy_rows(attention.new_cache_slots,
@@ -475,12 +478,12 @@ ModelOutput MluGraph::capture(CausalLM* model,
                               const torch_mlu::MLUStream& capture_stream,
                               const runtime::Options& options) {
   const int32_t slice_dim = persistent_param_->use_mrope_ ? 1 : 0;
-  const int64_t padded_tokens = plan_.layout.padded_num_tokens;
   enable_aux_hidden_states_ = options.enable_graph_aux_hidden_states();
   const auto forward = [&]() {
     return model->forward(
-        persistent_param_->tokens_.slice(0, 0, padded_tokens),
-        persistent_param_->positions_.slice(slice_dim, 0, padded_tokens),
+        persistent_param_->tokens_.slice(0, 0, plan_.layout.padded_num_tokens),
+        persistent_param_->positions_.slice(
+            slice_dim, 0, plan_.layout.padded_num_tokens),
         kv_cache,
         params_.value());
   };
@@ -525,11 +528,11 @@ ModelOutput MluGraph::capture(CausalLM* model,
 }
 
 ModelOutput MluGraph::persistent_output() const {
-  const int64_t padded_tokens = plan_.layout.padded_num_tokens;
   return make_graph_output(
-      persistent_param_->output_.slice(0, 0, padded_tokens),
+      persistent_param_->output_.slice(0, 0, plan_.layout.padded_num_tokens),
       persistent_param_->aux_hidden_states_.numel() > 0
-          ? persistent_param_->aux_hidden_states_.slice(0, 0, padded_tokens)
+          ? persistent_param_->aux_hidden_states_.slice(
+                0, 0, plan_.layout.padded_num_tokens)
           : torch::Tensor(),
       enable_aux_hidden_states_);
 }
@@ -556,10 +559,9 @@ void MluGraph::update_input_buffer(CausalLM* model,
     }
     graph_params.attn_metadata.reset();
     if (plan_.key.grouped) {
-      const int64_t rows = plan_.layout.padded_num_reqs;
       const auto options = torch::TensorOptions().device(tokens.device());
-      owned_buffers_.num_accepted_tokens =
-          torch::empty({rows}, options.dtype(torch::kInt32));
+      owned_buffers_.num_accepted_tokens = torch::empty(
+          {plan_.layout.padded_num_reqs}, options.dtype(torch::kInt32));
       owned_buffers_.multi_block_tables.clear();
       for (const torch::Tensor& table : params.multi_block_tables) {
         owned_buffers_.multi_block_tables.emplace_back(torch::empty(

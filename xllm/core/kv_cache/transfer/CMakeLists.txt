@@ -62,7 +62,6 @@ cc_library(
     glog::glog
     Folly::folly
     torch
-    xxHash
 )
 
 cc_library(

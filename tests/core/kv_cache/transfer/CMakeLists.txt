@@ -41,6 +41,9 @@ cc_test(
     kv_transfer_completion_test.cpp
   DEPS
     :kv_transfer_completion
+    :parallel_state
+    :platform
+    torch
     GTest::gtest_main
 )
 
