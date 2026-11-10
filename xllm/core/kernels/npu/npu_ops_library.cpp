@@ -724,6 +724,11 @@ TORCH_LIBRARY(xllm_ops, m) {
       "Tensor(i!) columns, int block_size) -> ()");
   m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
   m.def(
+      "t5_split_qkv_append_cache(Tensor qkv, Tensor past_key, "
+      "Tensor past_value, int head_num, int head_dim) -> "
+      "(Tensor, Tensor, Tensor)");
+  m.def("has_t5_split_qkv_append_cache() -> bool");
+  m.def(
       "rms_norm_gated(Tensor input, Tensor gate, Tensor weight, float eps) -> "
       "Tensor");
   m.def(
@@ -1005,6 +1010,8 @@ TORCH_LIBRARY(xllm_ops, m) {
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
+  m.impl("t5_split_qkv_append_cache",
+         TORCH_FN(xllm::kernel::npu::t5_split_qkv_append_cache));
   m.impl(
       "dspark_allocate_verify_prefixes",
       TORCH_FN(xllm::kernel::npu::tilelang::dspark_allocate_verify_prefixes));
@@ -1099,6 +1106,8 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
 // runs only on the eager prefill path, so it needs no fake/meta registration;
 // decode graph capture is phase-disjoint.
 TORCH_LIBRARY_IMPL(xllm_ops, CompositeExplicitAutograd, m) {
+  m.impl("has_t5_split_qkv_append_cache",
+         TORCH_FN(xllm::kernel::npu::has_t5_split_qkv_append_cache));
   m.impl("has_moe_grouped_matmul_swiglu_quant",
          TORCH_FN(xllm::kernel::npu::has_moe_grouped_matmul_swiglu_quant));
   m.impl("has_moe_init_routing_v3",
