@@ -35,15 +35,22 @@ limitations under the License.
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model/model_traits.h"
+#include "core/framework/model_context/model_context.h"
+#include "core/framework/model_loader/model_loader.h"
+#include "core/framework/multimodal/mm_data_item.h"
 #include "core/framework/quantization/quant_args.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/layers/common/lm_head.h"
+#include "core/layers/common/word_embedding.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 
 namespace layer {
 struct AttentionMetadata;
-}
+class LmHead;
+}  // namespace layer
 
 struct ModelGraphMetadataState {
   virtual ~ModelGraphMetadataState() = default;
@@ -87,49 +94,54 @@ class CausalLM : public torch::nn::Module, public Model {
                                               const torch::Tensor&,
                                               ModelParamsView&) {}
 
+  // Multimodal entry points, present only on VLM families.
+  virtual MMDict encode(const ModelParamsView& parameters) {
+    (void)parameters;
+    LOG(FATAL) << "encode is only available on multimodal models.";
+    return {};
+  }
+
+  virtual torch::Tensor get_input_embeddings(
+      const torch::Tensor& input_ids,
+      const ModelParamsView& input_params) {
+    (void)input_ids;
+    (void)input_params;
+    LOG(FATAL) << "get_input_embeddings is only available on multimodal "
+               << "models.";
+    return {};
+  }
+
   // hidden_states: [num_tokens, hidden_size]
   // seleted_idxes: [num_tokens]
   // returns: [num_seqs, hidden_size]
   virtual torch::Tensor pooler(const torch::Tensor& hidden_states,
                                const torch::Tensor& seleted_idxes) {
-    if (seleted_idxes.defined()) {
-      return hidden_states.index_select(/*dim=*/0, seleted_idxes);
-    }
-    return hidden_states;
+    torch::Tensor pooled;
+    gather_rows_if_defined(hidden_states, seleted_idxes, pooled);
+    return pooled;
   }
 
   // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // returns: [num_tokens, vocab_size]
-  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes) = 0;
-
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // out_hidden: [num_selected_tokens, hidden_size]
-  // returns: [num_selected_tokens, vocab_size]
-  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
+  // seleted_idxes: [num_tokens] (undefined = all rows)
+  // out_hidden: [num_selected, hidden_size]; logits: [num_selected, vocab]
+  virtual void project_lm_head(const torch::Tensor& hidden_states,
                                const torch::Tensor& seleted_idxes,
-                               torch::Tensor& out_hidden) {
-    if (seleted_idxes.defined()) {
-      const auto idxes = seleted_idxes.to(
-          torch::dtype(torch::kLong).device(hidden_states.device()));
-      out_hidden = hidden_states.index_select(/*dim=*/0, idxes);
-    } else {
-      out_hidden = hidden_states;
-    }
-    return logits(hidden_states, seleted_idxes);
-  }
+                               torch::Tensor& out_hidden,
+                               torch::Tensor& logits) = 0;
 
-  virtual bool share_weights_from(CausalLM& /*source*/) { return false; }
+  virtual layer::LmHead get_lm_head() { return nullptr; }
+
+  virtual void share_lm_head(CausalLM& /*target*/) {}
+
+  virtual void share_embed_tokens(CausalLM& /*target*/) {}
 
   virtual void prepare_expert_weight(
-      int32_t layer_id,
-      const std::vector<int32_t>& expert_ids) = 0;
+      int32_t /*layer_id*/,
+      const std::vector<int32_t>& /*expert_ids*/) {}
 
   virtual void start_expert_weight_transfer(int32_t /*layer_id*/) {}
 
-  virtual void update_expert_weight(int32_t layer_id) = 0;
+  virtual void update_expert_weight(int32_t /*layer_id*/) {}
 
   // Returns whether the last prepare_expert_weight() call for the given layer
   // succeeded. Default is true so models that do not fail-report keep the old
@@ -169,13 +181,20 @@ class CausalLM : public torch::nn::Module, public Model {
     NOT_IMPLEMENTED();
     return {};
   }
+
+  // DSpark ConfidenceHead: acceptance-prob estimate for adaptive-speculative
+  // pruning over the whole draft block. hidden_all [num_reqs, num_spec, H],
+  // prev_matrix [num_reqs, num_spec]; returns [num_reqs, num_spec] fp32 in
+  // [0, 1]. When the confidence head is absent (not built or feature disabled),
+  // returns an undefined tensor; the worker falls back to the sampler-gathered
+  // draft prob.
 };
 
 template <typename ModelType>
 class CausalLMImpl : public CausalLM {
  public:
-  CausalLMImpl(ModelType model, const torch::TensorOptions& options)
-      : model_(std::move(model)), options_(options) {}
+  CausalLMImpl(ModelType model, const ModelContext& context)
+      : model_(std::move(model)), options_(context.get_tensor_options()) {}
 
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
@@ -184,199 +203,218 @@ class CausalLMImpl : public CausalLM {
     return model_->forward(tokens, positions, kv_caches, parameters);
   }
 
-  bool requires_graph_forward_metadata() override {
-    if constexpr (detail::has_requires_graph_forward_metadata<
-                      ModelType>::value) {
-      return model_->requires_graph_forward_metadata();
-    } else {
-      return CausalLM::requires_graph_forward_metadata();
-    }
-  }
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_requires_graph_forward_metadata,
+                        requires_graph_forward_metadata,
+                        bool,
+                        (),
+                        ())
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_is_hybrid_linear_attention,
+                        is_hybrid_linear_attention,
+                        bool,
+                        (),
+                        ())
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_supports_mla_graph_kv_bucketing,
+                        supports_mla_graph_kv_bucketing,
+                        bool,
+                        () const,
+                        ())
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_create_graph_forward_metadata_state,
+                        create_graph_forward_metadata_state,
+                        std::unique_ptr<ModelGraphMetadataState>,
+                        (),
+                        ())
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_prepare_graph_forward_metadata,
+                        prepare_graph_forward_metadata,
+                        void,
+                        (ModelGraphMetadataState * state,
+                         const torch::Tensor& positions,
+                         ModelParamsView& params),
+                        (state, positions, params))
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_pooler,
+                        pooler,
+                        torch::Tensor,
+                        (const torch::Tensor& hidden_states,
+                         const torch::Tensor& seleted_idxes),
+                        (hidden_states, seleted_idxes))
 
-  bool is_hybrid_linear_attention() override {
-    if constexpr (detail::has_is_hybrid_linear_attention<ModelType>::value) {
-      return model_->is_hybrid_linear_attention();
-    } else {
-      return CausalLM::is_hybrid_linear_attention();
-    }
-  }
-
-  bool supports_mla_graph_kv_bucketing() const override {
-    if constexpr (detail::has_supports_mla_graph_kv_bucketing<
-                      ModelType>::value) {
-      return model_->supports_mla_graph_kv_bucketing();
-    }
-    return CausalLM::supports_mla_graph_kv_bucketing();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
-      override {
-    if constexpr (detail::has_create_graph_forward_metadata_state<
-                      ModelType>::value) {
-      return model_->create_graph_forward_metadata_state();
-    } else {
-      return CausalLM::create_graph_forward_metadata_state();
-    }
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& parameters) override {
-    if constexpr (detail::has_prepare_graph_forward_metadata<
-                      ModelType>::value) {
-      model_->prepare_graph_forward_metadata(state, positions, parameters);
-    }
-  }
-
-  torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) override {
-    return model_->pooler(hidden_states, seleted_idxes);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) override {
-    return model_->logits(hidden_states, seleted_idxes);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
+  void project_lm_head(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes,
-                       torch::Tensor& out_hidden) override {
-    if constexpr (detail::has_logits_with_hidden<ModelType>::value) {
-      return model_->logits(hidden_states, seleted_idxes, out_hidden);
+                       torch::Tensor& out_hidden,
+                       torch::Tensor& logits) override {
+    if constexpr (detail::has_project_lm_head<ModelType>::value) {
+      model_->project_lm_head(hidden_states, seleted_idxes, out_hidden, logits);
     } else {
-      return CausalLM::logits(hidden_states, seleted_idxes, out_hidden);
+      NOT_IMPLEMENTED();
     }
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) override {
     model_->load_model(std::move(loader));
-  }
-
-  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
-                               const torch::Tensor& positions,
-                               const torch::Tensor& device_cache_slots,
-                               std::vector<KVCache>& kv_caches,
-                               const ModelParamsView& input_params) override {
-    if constexpr (detail::has_write_context_kv<ModelType>::value) {
-      return model_->write_context_kv(target_hidden,
-                                      positions,
-                                      device_cache_slots,
-                                      kv_caches,
-                                      input_params);
-    } else {
-      return CausalLM::write_context_kv(target_hidden,
-                                        positions,
-                                        device_cache_slots,
-                                        kv_caches,
-                                        input_params);
+    // The base get_word_embedding() aborts for models without one, so both
+    // conditions are required before tying.
+    if constexpr (detail::has_tie_lm_head_weights<ModelType>::value &&
+                  detail::has_get_word_embedding<ModelType>::value) {
+      model_->tie_lm_head_weights(get_word_embedding());
     }
   }
 
-  DFlash2CandidateOutput dflash2_candidates(
-      const torch::Tensor& hidden_states,
-      const torch::Tensor& unary_logits,
-      const torch::Tensor& anchor_token_ids) override {
-    if constexpr (detail::has_dflash2_candidates<ModelType>::value) {
-      return model_->dflash2_candidates(
-          hidden_states, unary_logits, anchor_token_ids);
+  XLLM_FORWARD_OPTIONAL(
+      ModelType,
+      CausalLM,
+      detail::has_write_context_kv,
+      write_context_kv,
+      ModelOutput,
+      (const torch::Tensor& target_hidden,
+       const torch::Tensor& positions,
+       const torch::Tensor& device_cache_slots,
+       std::vector<KVCache>& kv_caches,
+       const ModelParamsView& input_params),
+      (target_hidden, positions, device_cache_slots, kv_caches, input_params))
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_dflash2_candidates,
+                        dflash2_candidates,
+                        DFlash2CandidateOutput,
+                        (const torch::Tensor& hidden_states,
+                         const torch::Tensor& unary_logits,
+                         const torch::Tensor& anchor_token_ids),
+                        (hidden_states, unary_logits, anchor_token_ids))
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_dspark_markov_bias,
+                        dspark_markov_bias,
+                        torch::Tensor,
+                        (const torch::Tensor& previous_token_ids),
+                        (previous_token_ids))
+
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_lazy_load_model,
+                        lazy_load_model,
+                        void,
+                        (std::unique_ptr<ModelLoader> loader),
+                        (std::move(loader)))
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_free_model_weights,
+                        free_model_weights,
+                        void,
+                        (),
+                        ())
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_reload_model_weights,
+                        reload_model_weights,
+                        void,
+                        (),
+                        ())
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_reload_model_weights_from_device,
+                        reload_model_weights_from_device,
+                        void,
+                        (),
+                        ())
+
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_prepare_expert_weight,
+                        prepare_expert_weight,
+                        void,
+                        (int32_t layer_id,
+                         const std::vector<int32_t>& expert_ids),
+                        (layer_id, expert_ids))
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_start_expert_weight_transfer,
+                        start_expert_weight_transfer,
+                        void,
+                        (int32_t layer_id),
+                        (layer_id))
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_update_expert_weight,
+                        update_expert_weight,
+                        void,
+                        (int32_t layer_id),
+                        (layer_id))
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_last_prepare_expert_weight_ok,
+                        last_prepare_expert_weight_ok,
+                        bool,
+                        (int32_t layer_id) const,
+                        (layer_id))
+
+  // CPU-flavor head channel; the share_lm_head virtual below reads it to
+  // adopt the target's head on hosts that own none of their own.
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_family_get_lm_head,
+                        get_lm_head,
+                        layer::LmHead,
+                        (),
+                        ())
+
+  // The interface and backbone hook names differ, so the macro can't be used.
+  MMDict encode(const ModelParamsView& parameters) override {
+    if constexpr (detail::has_get_multimodal_embeddings<ModelType>::value) {
+      return model_->get_multimodal_embeddings(parameters);
     }
-    return CausalLM::dflash2_candidates(
-        hidden_states, unary_logits, anchor_token_ids);
+    return CausalLM::encode(parameters);
   }
 
-  torch::Tensor dspark_markov_bias(
-      const torch::Tensor& previous_token_ids) override {
-    if constexpr (detail::has_dspark_markov_bias<ModelType>::value) {
-      return model_->dspark_markov_bias(previous_token_ids);
+  torch::Tensor get_input_embeddings(
+      const torch::Tensor& input_ids,
+      const ModelParamsView& input_params) override {
+    if constexpr (detail::has_vlm_get_input_embeddings<ModelType>::value) {
+      return model_->get_input_embeddings(input_ids, input_params);
     }
-    return CausalLM::dspark_markov_bias(previous_token_ids);
+    return CausalLM::get_input_embeddings(input_ids, input_params);
   }
 
-  void lazy_load_model(std::unique_ptr<ModelLoader> loader) override {
-    if constexpr (detail::has_lazy_load_model<ModelType>::value) {
-      model_->lazy_load_model(std::move(loader));
-    } else {
-      CausalLM::lazy_load_model(std::move(loader));
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_get_word_embedding,
+                        get_word_embedding,
+                        layer::WordEmbedding,
+                        (),
+                        ())
+  XLLM_FORWARD_OPTIONAL(ModelType,
+                        CausalLM,
+                        detail::has_set_word_embedding,
+                        set_word_embedding,
+                        void,
+                        (layer::WordEmbedding & embedding),
+                        (embedding))
+
+  void share_lm_head(CausalLM& target) override {
+    if constexpr (detail::has_adopt_lm_head<ModelType>::value) {
+      model_->adopt_lm_head(*model_, target.get_lm_head());
+      return;
     }
+    CausalLM::share_lm_head(target);
   }
 
-  void free_model_weights() override {
-    if constexpr (detail::has_free_model_weights<ModelType>::value) {
-      model_->free_model_weights();
-    } else {
-      CausalLM::free_model_weights();
-    }
-  }
-
-  void reload_model_weights() override {
-    if constexpr (detail::has_reload_model_weights<ModelType>::value) {
-      model_->reload_model_weights();
-    } else {
-      CausalLM::reload_model_weights();
-    }
-  }
-
-  void reload_model_weights_from_device() override {
-    if constexpr (detail::has_reload_model_weights_from_device<
-                      ModelType>::value) {
-      model_->reload_model_weights_from_device();
-    } else {
-      CausalLM::reload_model_weights_from_device();
-    }
-  }
-
-  void prepare_expert_weight(int32_t layer_id,
-                             const std::vector<int32_t>& expert_ids) override {
-    return model_->prepare_expert_weight(layer_id, expert_ids);
-  }
-
-  void start_expert_weight_transfer(int32_t layer_id) override {
-    if constexpr (detail::has_start_expert_weight_transfer<ModelType>::value) {
-      model_->start_expert_weight_transfer(layer_id);
-    }
-  }
-
-  void update_expert_weight(int32_t layer_id) override {
-    return model_->update_expert_weight(layer_id);
-  }
-
-  bool last_prepare_expert_weight_ok(int32_t layer_id) const override {
-    if constexpr (detail::has_last_prepare_expert_weight_ok<ModelType>::value) {
-      return model_->last_prepare_expert_weight_ok(layer_id);
-    } else {
-      return CausalLM::last_prepare_expert_weight_ok(layer_id);
-    }
-  }
-
-  layer::LmHead get_lm_head() override {
-    if constexpr (detail::has_get_lm_head<ModelType>::value) {
-      return model_->get_lm_head();
-    } else {
-      return CausalLM::get_lm_head();
-    }
-  }
-
-  void set_lm_head(layer::LmHead& head) override {
-    if constexpr (detail::has_set_lm_head<ModelType>::value) {
-      model_->set_lm_head(head);
-    } else {
-      CausalLM::set_lm_head(head);
-    }
-  }
-
-  layer::WordEmbedding get_word_embedding() override {
-    if constexpr (detail::has_get_word_embedding<ModelType>::value) {
-      return model_->get_word_embedding();
-    } else {
-      return CausalLM::get_word_embedding();
-    }
-  }
-
-  void set_word_embedding(layer::WordEmbedding& embedding) override {
+  void share_embed_tokens(CausalLM& target) override {
     if constexpr (detail::has_set_word_embedding<ModelType>::value) {
-      model_->set_word_embedding(embedding);
-    } else {
-      CausalLM::set_word_embedding(embedding);
+      auto own = get_word_embedding();
+      if (!detail::weight_loaded(own)) {
+        auto target_embed = target.get_word_embedding();
+        set_word_embedding(target_embed);
+      }
     }
   }
 
@@ -384,10 +422,161 @@ class CausalLMImpl : public CausalLM {
 
   const torch::TensorOptions& options() const override { return options_; }
 
- private:
+ protected:
   ModelType model_;
 
+ private:
   torch::TensorOptions options_;
 };
 
+namespace detail {
+
+// The host must derive from torch::nn::Module.
+class LmHeadOwner {
+ public:
+  void init_lm_head(torch::nn::Module& host,
+                    const ModelContext& context,
+                    bool defer_head = false) {
+    read_model_args(context);
+    if (embedding_mode_ || defer_head) {
+      return;
+    }
+    lm_head_ = host.register_module("lm_head", layer::LmHead(context));
+  }
+
+  layer::LmHead get_lm_head() { return lm_head_; }
+
+  void project_lm_head(const torch::Tensor& hidden_states,
+                       const torch::Tensor& selected_idxes,
+                       torch::Tensor& out_hidden,
+                       torch::Tensor& logits) {
+    logits = lm_head_->forward_with_hidden(
+        hidden_states, selected_idxes, out_hidden);
+  }
+
+  bool head_weight_loaded() const { return weight_loaded(lm_head_); }
+
+  virtual void load_lm_head_weights(const StateDict& state_dict,
+                                    layer::LmHead& head,
+                                    bool tie_word_embeddings) {
+    if (tie_word_embeddings) {
+      static const std::vector<std::string> kTorchTiedEmbeddingPrefixes = {
+          "model.embed_tokens.", "embed_tokens.", "embed."};
+      head->load_state_dict(
+          state_dict.get_dict_with_prefix(kTorchTiedEmbeddingPrefixes));
+    } else {
+      static const std::vector<std::string> kTorchLmHeadPrefixes = {
+          "lm_head.", "model.lm_head.", "model.head.", "head."};
+      head->load_state_dict(
+          state_dict.get_dict_with_prefix(kTorchLmHeadPrefixes));
+    }
+  }
+
+  void load_lm_head_weights(const std::unique_ptr<ModelLoader>& loader) {
+    if (embedding_mode_ || lm_head_.is_empty() || head_weight_loaded()) {
+      return;
+    }
+    for (const auto& state_dict : loader->get_state_dicts()) {
+      load_lm_head_weights(*state_dict, lm_head_, tie_word_embeddings_);
+    }
+  }
+
+  // Bind the tied lm_head weight to embed_tokens.weight so they share one
+  // storage. TP>1 shards them on orthogonal dims, so they cannot alias and the
+  // head keeps its own copy.
+  void tie_lm_head_weights(const layer::WordEmbedding& embed_tokens) {
+    if (!tie_word_embeddings_ || embedding_mode_ || lm_head_.is_empty()) {
+      return;
+    }
+    if (embed_tokens.is_empty()) {
+      return;
+    }
+    auto head_weight = lm_head_->weight();
+    auto embed_weight = embed_tokens->weight();
+    if (!head_weight.defined() || !embed_weight.defined() ||
+        head_weight.sizes() != embed_weight.sizes() ||
+        head_weight.scalar_type() != embed_weight.scalar_type()) {
+      return;
+    }
+    lm_head_->tie_weights(embed_weight);
+  }
+
+  void adopt_lm_head(torch::nn::Module& host, layer::LmHead target_head) {
+    if (head_weight_loaded()) {
+      return;
+    }
+    // replace_module (not assignment) so an already-allocated eager head
+    // releases its vocab-sized device tensor.
+    if (lm_head_.is_empty()) {
+      lm_head_ = host.register_module("lm_head", std::move(target_head));
+    } else {
+      lm_head_ = host.replace_module("lm_head", std::move(target_head));
+    }
+  }
+
+ protected:
+  void read_model_args(const ModelContext& context) {
+    const auto& model_args = context.get_model_args();
+    tie_word_embeddings_ = model_args.tie_word_embeddings();
+    embedding_mode_ = model_args.embedding_mode();
+  }
+
+  layer::LmHead lm_head_{nullptr};
+  bool tie_word_embeddings_ = false;
+  bool embedding_mode_ = false;
+};
+
+// VLM-wrapper mixin: delegates the language-tower surface via requires-clauses.
+template <typename LanguageModel>
+class VlmLanguageModelHost {
+ public:
+  ModelOutput forward(const torch::Tensor& tokens,
+                      const torch::Tensor& positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelParamsView& input_params) {
+    return language_model_->forward(tokens, positions, kv_caches, input_params);
+  }
+
+  void project_lm_head(const torch::Tensor& hidden_states,
+                       const torch::Tensor& seleted_idxes,
+                       torch::Tensor& out_hidden,
+                       torch::Tensor& logits) {
+    language_model_->project_lm_head(
+        hidden_states, seleted_idxes, out_hidden, logits);
+  }
+
+  torch::Tensor pooler(const torch::Tensor& hidden_states,
+                       const torch::Tensor& seleted_idxes) {
+    return language_model_->pooler(hidden_states, seleted_idxes);
+  }
+
+  layer::WordEmbedding get_word_embedding()
+    requires has_get_word_embedding<LanguageModel>::value
+  {
+    return language_model_->get_word_embedding();
+  }
+
+  void set_word_embedding(layer::WordEmbedding& embedding)
+    requires has_set_word_embedding<LanguageModel>::value
+  {
+    language_model_->set_word_embedding(embedding);
+  }
+
+  bool supports_mla_graph_kv_bucketing() const
+    requires has_supports_mla_graph_kv_bucketing<LanguageModel>::value
+  {
+    return language_model_->supports_mla_graph_kv_bucketing();
+  }
+
+  bool is_hybrid_linear_attention()
+    requires has_is_hybrid_linear_attention<LanguageModel>::value
+  {
+    return language_model_->is_hybrid_linear_attention();
+  }
+
+ protected:
+  LanguageModel language_model_{nullptr};
+};
+
+}  // namespace detail
 }  // namespace xllm

@@ -31,10 +31,7 @@ VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
                                  const ModelArgs& args,
                                  const torch::Device& device,
                                  const runtime::Options& options)
-    : model_(dynamic_cast<CausalVLM*>(model)),
-      args_(args),
-      device_(device),
-      options_(options) {
+    : model_(model), args_(args), device_(device), options_(options) {
   if (options_.max_encoder_cache_size() > 0) {
     encoder_cache_ = std::make_unique<EncoderCache>(
         options_.max_encoder_cache_size() * 1024 * 1024);

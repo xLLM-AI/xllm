@@ -194,6 +194,12 @@ class AclGraphExecutorImpl final : public ExecutorImpl {
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
 
+  ModelOutput run(const torch::Tensor& tokens,
+                  const torch::Tensor& positions,
+                  std::vector<KVCache>& kv_caches,
+                  const ModelParamsView& params,
+                  const torch::Tensor& logits_indices) override;
+
   void prepare_graph_input(const torch::Tensor& tokens,
                            const torch::Tensor& positions,
                            std::vector<KVCache>& kv_caches,
@@ -209,6 +215,11 @@ class AclGraphExecutorImpl final : public ExecutorImpl {
   void initialize(bool need_update_attn_mask,
                   bool is_hybrid_linear_attention,
                   bool supports_mla_graph_kv_bucketing);
+  void attach_logits_stage_result(ModelOutput& result,
+                                  GraphPersistentParam& persistent_param,
+                                  const AclGraph& graph,
+                                  uint32_t logits_rows);
+
   template <typename Model, typename Params>
   ModelOutput run_typed(Model* model,
                         const torch::Tensor& tokens,
@@ -233,6 +244,9 @@ class AclGraphExecutorImpl final : public ExecutorImpl {
   std::vector<PagedAttentionPlanDescriptor>
       spec_verify_attention_plan_descriptors_;
   std::mutex graph_slots_mutex_;
+  // Set per-step by the logits-aware run() overload; graph buckets always
+  // capture the logits stage, so replays read the persistent logits buffers.
+  uint32_t logits_indices_rows_ = 0;
   int32_t graph_slot_count_ = 2;
   int32_t next_replay_slot_ = 0;
   int32_t last_started_replay_slot_ = -1;

@@ -25,7 +25,6 @@ limitations under the License.
 #include "executor_impl_factory.h"
 #include "framework/encoder_cache/encoder_cache.h"
 #include "framework/model/causal_lm.h"
-#include "framework/model/causal_vlm.h"
 #include "framework/model/model_output.h"
 #include "framework/model/model_params_view.h"
 #include "runtime/executor_impl.h"
@@ -56,8 +55,7 @@ class VlmExecutorImpl : public ExecutorImpl {
 
   virtual MMDict encode(const ModelParamsView& params);
 
-  // not own
-  CausalVLM* model_;
+  CausalLM* model_;  // Not owned.
   ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;

@@ -225,6 +225,11 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
                           impl_->context_.get_model_args().vocab_size(),
                           device_);
   }
+  if (impl_ != nullptr && draft_impl_ != nullptr &&
+      impl_->get_status() == WorkerImpl::Status::LOADED &&
+      draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
+    draft_impl_->share_weights_from(*impl_);
+  }
   return result;
 }
 

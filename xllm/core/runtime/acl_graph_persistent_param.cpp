@@ -277,6 +277,21 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       max_tokens_per_batch * std::max<int32_t>(options.dp_size(), 1);
   persistent_eplb_decode_token_mask_ = torch::zeros(
       {eplb_decode_mask_capacity}, torch::dtype(torch::kBool).device(device));
+  // Logits rows are bounded by sampled sequences (decode) or by
+  // seqs * num_decoding_tokens (spec verify), not by token rows.
+  const int64_t logits_row_capacity =
+      max_graph_tokens < max_tokens_per_batch
+          ? max_graph_tokens
+          : static_cast<int64_t>(options.max_seqs_per_batch()) *
+                std::max<int32_t>(1, options.num_decoding_tokens());
+  persistent_logits_indices_ = torch::zeros(
+      {logits_row_capacity}, torch::dtype(torch::kInt).device(device));
+  const torch::Dtype logits_dtype = util::parse_dtype(args_.dtype(), device);
+  persistent_logits_ = torch::zeros({logits_row_capacity, args_.vocab_size()},
+                                    torch::dtype(logits_dtype).device(device));
+  persistent_selected_hidden_ =
+      torch::zeros({logits_row_capacity, args_.hidden_size()},
+                   torch::dtype(logits_dtype).device(device));
   persistent_linear_state_indices_ = torch::zeros(
       {metadata_capacity}, torch::dtype(torch::kInt).device(device));
   persistent_linear_state_read_indices_ = torch::zeros(
@@ -1212,6 +1227,9 @@ std::optional<Params> GraphPersistentParam::update(
         /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
     if (params.graph.spec_verify_source_addresses_stable) {
       // Stable verify graphs include the active width in their graph key.
+      // This view keeps the persistent buffer's device address so replay
+      // refreshes (update_expanded_spec_decode_attention) stay visible to
+      // the captured kernels.
       return block_tables.narrow(
           /*dim=*/1,
           /*start=*/0,
@@ -1251,7 +1269,11 @@ std::optional<Params> GraphPersistentParam::update(
         plan_params.attention.host.kv_seq_lens = expanded_kv_seq_lens_vec;
         plan_params.attention.host.q_seq_lens =
             std::vector<int32_t>(static_cast<size_t>(padded_num_tokens), 1);
-        plan_block_tables = expanded_block_tables_for_graph();
+        // The graph view keeps the persistent buffer's device address (see
+        // expanded_block_tables_for_graph); the tiling plan only reads the
+        // values, so hand it a contiguous copy — atb tensors must be
+        // contiguous, and a dim-1 narrow leaves row gaps.
+        plan_block_tables = expanded_block_tables_for_graph().contiguous();
         plan_params.attention.device.block_tables = plan_block_tables;
       } else {
         plan_params.meta.num_sequences =

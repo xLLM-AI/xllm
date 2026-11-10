@@ -213,9 +213,6 @@ class Glm5NextForCausalLMImpl final
     LlmForCausalLMImplBase<Glm5NextModel>::load_model(std::move(loader),
                                                       std::move(prefix));
     model_->verify_loaded_weights();
-    if (!embedding_mode_) {
-      CHECK(lm_head_->is_weight_loaded()) << "Missing lm_head.weight";
-    }
   }
 };
 TORCH_MODULE(Glm5NextForCausalLM);

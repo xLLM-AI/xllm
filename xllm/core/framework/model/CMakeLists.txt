@@ -11,7 +11,6 @@ cc_library(
     causal_lm.h
     model.h
     moe_execution_input.h
-    causal_vlm.h
     dit_model.h
     dit_model_output.h
     dit_model_params.h

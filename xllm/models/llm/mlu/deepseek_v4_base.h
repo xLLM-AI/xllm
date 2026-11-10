@@ -21,7 +21,6 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -169,15 +168,17 @@ inline std::string normalize_model_parameter_name(std::string name,
   return remap_parameter_name(name);
 }
 
-inline std::optional<std::string> normalize_lm_head_parameter_name(
-    std::string name) {
-  if (strip_prefix(&name, "lm_head.")) {
-    return name;
-  }
-  if (strip_prefix(&name, "head.")) {
-    return name;
-  }
-  return std::nullopt;
+inline void load_lm_head_from_normalized(const StateDict& state_dict,
+                                         layer::LmHead& head,
+                                         const std::string& preferred_prefix) {
+  head->load_state_dict(state_dict.get_dict_with_prefix(
+      std::vector<std::string>{preferred_prefix,
+                               "lm_head.",
+                               "head.",
+                               "model.lm_head.",
+                               "model.head.",
+                               "model.language_model.lm_head.",
+                               "language_model.model.lm_head."}));
 }
 
 }  // namespace detail

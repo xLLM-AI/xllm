@@ -818,6 +818,16 @@ ModelOutput DcuGraphExecutorImpl::run(const torch::Tensor& tokens,
   return run_impl(model_, tokens, positions, kv_caches, params);
 }
 
+ModelOutput DcuGraphExecutorImpl::run(const torch::Tensor& tokens,
+                                      const torch::Tensor& positions,
+                                      std::vector<KVCache>& kv_caches,
+                                      const ModelParamsView& params,
+                                      const torch::Tensor& logits_indices) {
+  ModelOutput output = run(tokens, positions, kv_caches, params);
+  project_after_forward(output, model_, logits_indices);
+  return output;
+}
+
 template <typename ModelType, typename Params>
 ModelOutput DcuGraphExecutorImpl::run_impl(ModelType* model,
                                            const torch::Tensor& tokens,

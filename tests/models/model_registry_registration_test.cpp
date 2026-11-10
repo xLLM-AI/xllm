@@ -20,56 +20,50 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/extension_registry.h"
+#include "core/framework/model/causal_lm.h"
 #include "models/model_registry.h"
 
 namespace xllm {
 namespace {
 
 template <int32_t Marker>
-class RegistryTestModel final : public CausalVLM {
+class RegistryTestBackboneImpl final : public torch::nn::Module {
  public:
-  explicit RegistryTestModel(const ModelContext& /*context*/) {
-    register_module("dropout", torch::nn::Dropout(/*p=*/0.5));
-  }
+  explicit RegistryTestBackboneImpl(const ModelContext& /*context*/) {}
 
   ModelOutput forward(const torch::Tensor& /*tokens*/,
                       const torch::Tensor& /*positions*/,
                       std::vector<KVCache>& /*kv_caches*/,
-                      const ModelParamsView& /*parameters*/) override {
+                      const ModelParamsView& /*parameters*/) {
     return {};
   }
 
-  torch::Tensor logits(const torch::Tensor& /*hidden_states*/,
-                       const torch::Tensor& /*selected_idxes*/) override {
+  void load_model(std::unique_ptr<ModelLoader> /*loader*/) {}
+
+  MMDict get_multimodal_embeddings(const ModelParamsView& /*parameters*/) {
     return {};
   }
 
-  void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {}
-
-  torch::Device device() const override { return torch::Device(torch::kCPU); }
-
-  const torch::TensorOptions& options() const override { return options_; }
-
-  void prepare_expert_weight(
-      int32_t /*layer_id*/,
-      const std::vector<int32_t>& /*expert_ids*/) override {}
-
-  void update_expert_weight(int32_t /*layer_id*/) override {}
-
-  MMDict encode(const ModelParamsView& /*parameters*/) override { return {}; }
-
-  torch::Tensor get_input_embeddings(
-      const torch::Tensor& /*input_ids*/,
-      const ModelParamsView& /*input_params*/) override {
+  torch::Tensor get_input_embeddings(const torch::Tensor& /*input_ids*/,
+                                     const ModelParamsView& /*input_params*/) {
     return {};
   }
-
- private:
-  torch::TensorOptions options_ = torch::TensorOptions().device(torch::kCPU);
+};
+template <int32_t Marker>
+class RegistryTestModel final
+    : public CausalLMImpl<std::shared_ptr<RegistryTestBackboneImpl<Marker>>> {
+ public:
+  explicit RegistryTestModel(const ModelContext& context)
+      : CausalLMImpl<std::shared_ptr<RegistryTestBackboneImpl<Marker>>>(
+            std::make_shared<RegistryTestBackboneImpl<Marker>>(context),
+            context) {}
 };
 
+template <int32_t Marker>
+using RegistryTestVlmModel = RegistryTestModel<Marker>;
+
 using MacroRegisteredModel = RegistryTestModel<7>;
-using MacroRegisteredVlm = RegistryTestModel<9>;
+using MacroRegisteredVlm = RegistryTestVlmModel<9>;
 
 template <int32_t Marker>
 CausalLMFactory make_factory() {
@@ -79,9 +73,9 @@ CausalLMFactory make_factory() {
 }
 
 template <int32_t Marker>
-CausalVLMFactory make_vlm_factory() {
+VlmFactory make_vlm_factory() {
   return [](const ModelContext& context) {
-    return std::make_unique<RegistryTestModel<Marker>>(context);
+    return std::make_unique<RegistryTestVlmModel<Marker>>(context);
   };
 }
 
@@ -151,8 +145,6 @@ TEST(ModelRegistryRegistrationTest, DirectSubclassMacroRegistersFactory) {
   std::unique_ptr<CausalLM> model = factory(ModelContext{});
   EXPECT_NE(dynamic_cast<MacroRegisteredModel*>(model.get()), nullptr);
   EXPECT_FALSE(model->is_training());
-  ASSERT_EQ(model->children().size(), 1);
-  EXPECT_FALSE(model->children().front()->is_training());
 
   const CausalLMFactory alias_factory =
       ModelRegistry::get_causallm_factory("registry_macro_lm_alias");
@@ -162,19 +154,18 @@ TEST(ModelRegistryRegistrationTest, DirectSubclassMacroRegistersFactory) {
 }
 
 TEST(ModelRegistryRegistrationTest, VlmSubclassMacroRegistersFactory) {
-  const CausalVLMFactory factory =
-      ModelRegistry::get_causalvlm_factory("registry_macro_vlm", "custom");
+  const VlmFactory factory =
+      ModelRegistry::get_vlm_factory("registry_macro_vlm", "custom");
   ASSERT_TRUE(factory);
-  std::unique_ptr<CausalVLM> model = factory(ModelContext{});
+  std::unique_ptr<CausalLM> model = factory(ModelContext{});
+  ASSERT_NE(model, nullptr);
   EXPECT_NE(dynamic_cast<MacroRegisteredVlm*>(model.get()), nullptr);
   EXPECT_FALSE(model->is_training());
-  ASSERT_EQ(model->children().size(), 1);
-  EXPECT_FALSE(model->children().front()->is_training());
 
-  const CausalVLMFactory alias_factory = ModelRegistry::get_causalvlm_factory(
-      "registry_macro_vlm_alias", "custom");
+  const VlmFactory alias_factory =
+      ModelRegistry::get_vlm_factory("registry_macro_vlm_alias", "custom");
   ASSERT_TRUE(alias_factory);
-  std::unique_ptr<CausalVLM> alias_model = alias_factory(ModelContext{});
+  std::unique_ptr<CausalLM> alias_model = alias_factory(ModelContext{});
   EXPECT_NE(dynamic_cast<MacroRegisteredVlm*>(alias_model.get()), nullptr);
 }
 
@@ -221,33 +212,33 @@ TEST(ModelRegistryRegistrationTest, AutoModelImplUsesNativeRegistration) {
   EXPECT_NE(dynamic_cast<RegistryTestModel<1>*>(lm.get()), nullptr);
 
   const std::string vlm_name = "registry_auto_vlm_test";
-  EXPECT_TRUE(ModelRegistry::register_causalvlm_factory(vlm_name,
-                                                        "native",
-                                                        make_vlm_factory<2>(),
-                                                        /*priority=*/4));
+  EXPECT_TRUE(ModelRegistry::register_vlm_factory(vlm_name,
+                                                  "native",
+                                                  make_vlm_factory<2>(),
+                                                  /*priority=*/4));
 
-  std::unique_ptr<CausalVLM> vlm =
+  std::unique_ptr<CausalLM> vlm =
       create_vlm_model(make_context(vlm_name, "auto"));
-  EXPECT_NE(dynamic_cast<RegistryTestModel<2>*>(vlm.get()), nullptr);
+  EXPECT_NE(dynamic_cast<RegistryTestVlmModel<2>*>(vlm.get()), nullptr);
 }
 
 TEST(ModelRegistryRegistrationTest, VlmPrioritySelectsFactory) {
   const std::string model_name = "registry_vlm_priority_test";
-  EXPECT_TRUE(ModelRegistry::register_causalvlm_factory(model_name,
-                                                        "custom",
-                                                        make_vlm_factory<1>(),
-                                                        /*priority=*/1));
-  EXPECT_TRUE(ModelRegistry::register_causalvlm_factory(model_name,
-                                                        "custom",
-                                                        make_vlm_factory<2>(),
-                                                        /*priority=*/2));
-  EXPECT_FALSE(ModelRegistry::register_causalvlm_factory(
+  EXPECT_TRUE(ModelRegistry::register_vlm_factory(model_name,
+                                                  "custom",
+                                                  make_vlm_factory<1>(),
+                                                  /*priority=*/1));
+  EXPECT_TRUE(ModelRegistry::register_vlm_factory(model_name,
+                                                  "custom",
+                                                  make_vlm_factory<2>(),
+                                                  /*priority=*/2));
+  EXPECT_FALSE(ModelRegistry::register_vlm_factory(
       model_name, "custom", make_vlm_factory<3>(), /*priority=*/2));
-  const CausalVLMFactory factory =
-      ModelRegistry::get_causalvlm_factory(model_name, "custom");
+  const VlmFactory factory =
+      ModelRegistry::get_vlm_factory(model_name, "custom");
   ASSERT_TRUE(factory);
-  std::unique_ptr<CausalVLM> model = factory(ModelContext{});
-  EXPECT_NE(dynamic_cast<RegistryTestModel<2>*>(model.get()), nullptr);
+  std::unique_ptr<CausalLM> model = factory(ModelContext{});
+  EXPECT_NE(dynamic_cast<RegistryTestVlmModel<2>*>(model.get()), nullptr);
 }
 
 TEST(ModelRegistryRegistrationTest,
@@ -274,18 +265,18 @@ TEST(ModelRegistryRegistrationTest, LlmCreationRejectsUnregisteredCustomImpl) {
 TEST(ModelRegistryRegistrationTest,
      VlmCreationPrefersRegisteredPythonOverride) {
   const std::string model_name = "registry_create_vlm_python_test";
-  EXPECT_TRUE(ModelRegistry::register_causalvlm_factory(
+  EXPECT_TRUE(ModelRegistry::register_vlm_factory(
       model_name, "native", make_vlm_factory<1>()));
-  EXPECT_TRUE(ModelRegistry::register_causalvlm_factory(
+  EXPECT_TRUE(ModelRegistry::register_vlm_factory(
       model_name, "python", make_vlm_factory<2>()));
-  std::unique_ptr<CausalVLM> model =
+  std::unique_ptr<CausalLM> model =
       create_vlm_model(make_context(model_name, "py"));
-  EXPECT_NE(dynamic_cast<RegistryTestModel<2>*>(model.get()), nullptr);
+  EXPECT_NE(dynamic_cast<RegistryTestVlmModel<2>*>(model.get()), nullptr);
 }
 
 TEST(ModelRegistryRegistrationTest, VlmCreationRejectsUnregisteredCustomImpl) {
   const std::string model_name = "registry_create_vlm_missing_custom_test";
-  EXPECT_TRUE(ModelRegistry::register_causalvlm_factory(
+  EXPECT_TRUE(ModelRegistry::register_vlm_factory(
       model_name, "native", make_vlm_factory<1>()));
   EXPECT_EQ(
       create_vlm_model(make_context(model_name, "native", "missing_custom")),
@@ -326,21 +317,20 @@ TEST(ModelRegistryRegistrationTest, MissingModelInSelectedFamilyRejectsNative) {
 
 TEST(ModelRegistryRegistrationTest, VlmCreationUsesExtensionFamily) {
   const std::string model_name = "registry_create_custom_vlm_test";
-  EXPECT_TRUE(ModelRegistry::register_causalvlm_factory(
+  EXPECT_TRUE(ModelRegistry::register_vlm_factory(
       model_name, "custom", make_vlm_factory<9>()));
-  std::unique_ptr<CausalVLM> model =
+  std::unique_ptr<CausalLM> model =
       create_vlm_model(make_context(model_name, "native", "custom"));
-  EXPECT_NE(dynamic_cast<RegistryTestModel<9>*>(model.get()), nullptr);
+  EXPECT_NE(dynamic_cast<RegistryTestVlmModel<9>*>(model.get()), nullptr);
 }
 
 TEST(ModelRegistryRegistrationTest, MissingVlmInSelectedFamilyRejectsNative) {
   const std::string model_name = "registry_family_missing_vlm_test";
-  EXPECT_TRUE(ModelRegistry::register_causalvlm_factory(
+  EXPECT_TRUE(ModelRegistry::register_vlm_factory(
       model_name, "native", make_vlm_factory<1>()));
-  EXPECT_TRUE(
-      ModelRegistry::register_causalvlm_factory("registry_family_other_vlm",
-                                                "registry_vlm_family",
-                                                make_vlm_factory<2>()));
+  EXPECT_TRUE(ModelRegistry::register_vlm_factory("registry_family_other_vlm",
+                                                  "registry_vlm_family",
+                                                  make_vlm_factory<2>()));
   EXPECT_EQ(create_vlm_model(
                 make_context(model_name, "native", "registry_vlm_family")),
             nullptr);

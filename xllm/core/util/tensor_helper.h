@@ -83,6 +83,16 @@ inline torch::Tensor index_select_2d(const torch::Tensor& input,
   return input.gather(dim, index.unsqueeze(dim)).squeeze(dim);
 }
 
+inline void gather_rows_if_defined(const torch::Tensor& input,
+                                   const torch::Tensor& index,
+                                   torch::Tensor& out) {
+  if (index.defined()) {
+    out = input.index_select(/*dim=*/0, index);
+  } else {
+    out = input;
+  }
+}
+
 namespace detail {
 
 // H2D-source options; the caching host allocator recycles pinned blocks.

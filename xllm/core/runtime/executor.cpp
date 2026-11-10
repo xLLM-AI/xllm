@@ -52,6 +52,14 @@ ModelOutput Executor::forward(const torch::Tensor& tokens,
   return impl_->run(tokens, positions, kv_caches, params);
 }
 
+ModelOutput Executor::forward(const torch::Tensor& tokens,
+                              const torch::Tensor& positions,
+                              std::vector<KVCache>& kv_caches,
+                              const ModelParamsView& params,
+                              const torch::Tensor& logits_indices) {
+  return impl_->run(tokens, positions, kv_caches, params, logits_indices);
+}
+
 void Executor::prepare_graph_input(const torch::Tensor& tokens,
                                    const torch::Tensor& positions,
                                    std::vector<KVCache>& kv_caches,

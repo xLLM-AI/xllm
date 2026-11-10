@@ -151,6 +151,40 @@ class GraphPersistentParam final {
     }
     return persistent_mask_;
   }
+
+  torch::Tensor persistent_logits_indices(uint32_t graph_num_tokens = 0) const {
+    if (graph_num_tokens > 0) {
+      return persistent_logits_indices_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/graph_num_tokens);
+    }
+    return persistent_logits_indices_;
+  }
+
+  torch::Tensor persistent_logits(uint32_t actual_rows = 0) const {
+    if (actual_rows > 0) {
+      return persistent_logits_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/actual_rows);
+    }
+    return persistent_logits_;
+  }
+
+  torch::Tensor persistent_selected_hidden(uint32_t actual_rows = 0) const {
+    if (actual_rows > 0) {
+      return persistent_selected_hidden_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/actual_rows);
+    }
+    return persistent_selected_hidden_;
+  }
+
+  // Fills the persistent indices from a host- or device-side selection.
+  void set_logits_indices(const torch::Tensor& indices) {
+    const uint32_t rows = static_cast<uint32_t>(indices.size(0));
+    CHECK_LE(rows, persistent_logits_indices_.size(0))
+        << "logits selection exceeds persistent capacity " << rows << " > "
+        << persistent_logits_indices_.size(0);
+    persistent_logits_indices_.slice(/*dim=*/0, /*start=*/0, /*end=*/rows)
+        .copy_(indices, /*non_blocking=*/true);
+  }
   const torch::Tensor& tiling_data() const { return tiling_data_; }
   std::optional<PagedAttentionPlanDescriptor> paged_attention_plan_descriptor(
       int64_t num_rows,
@@ -262,6 +296,9 @@ class GraphPersistentParam final {
 
   // Persistent tensors
   torch::Tensor persistent_tokens_;
+  torch::Tensor persistent_logits_indices_;
+  torch::Tensor persistent_logits_;
+  torch::Tensor persistent_selected_hidden_;
   torch::Tensor persistent_positions_;
   torch::Tensor persistent_new_cache_slots_;
   torch::Tensor persistent_eplb_decode_token_mask_;

@@ -44,6 +44,12 @@ class BaseExecutorImpl : public ExecutorImpl {
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
 
+  ModelOutput run(const torch::Tensor& tokens,
+                  const torch::Tensor& positions,
+                  std::vector<KVCache>& kv_caches,
+                  const ModelParamsView& params,
+                  const torch::Tensor& logits_indices) override;
+
  private:
   // not own
   CausalLM* model_;

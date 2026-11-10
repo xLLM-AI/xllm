@@ -27,7 +27,8 @@ class JoyAILLMFlashMtpForCausalLMImpl
   void load_model(
       std::unique_ptr<ModelLoader> loader,
       std::string prefix = "model." /*llm model weight prefix*/) override {
-    // no need to load lm_head since it shares the same weights with main model
+    load_lm_head_weights(loader);
+
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
     }

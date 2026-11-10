@@ -117,18 +117,19 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
       lm_head_input_indices =
           remap_logits_indices(sampling_params.logits_indices(),
                                params.parallel,
-                               model_output.hidden_states);
+                               input.token_ids.size(0));
     }
   }
 
   if (sampling_params.num_sample_seqs() > 0) {
     if (options_.enable_speculative_decode()) {
-      logits = model_->logits(model_output.hidden_states,
-                              lm_head_input_indices,
-                              selected_hidden_from_lm_head);
+      logits = logits_processor_.forward(*model_,
+                                         model_output.hidden_states,
+                                         lm_head_input_indices,
+                                         selected_hidden_from_lm_head);
     } else {
-      logits =
-          model_->logits(model_output.hidden_states, lm_head_input_indices);
+      logits = logits_processor_.forward(
+          *model_, model_output.hidden_states, lm_head_input_indices);
     }
   }
 

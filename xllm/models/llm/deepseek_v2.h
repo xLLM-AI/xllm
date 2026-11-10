@@ -254,16 +254,22 @@ class DeepseekV2ForCausalLMImpl
   void load_model(
       std::unique_ptr<ModelLoader> loader,
       std::string prefix = "model." /*llm model weight prefix*/) override {
+    LlmForCausalLMImplBase<DeepseekV2Model>::load_lm_head_weights(loader);
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-      if (tie_word_embeddings) {
-        lm_head_->load_state_dict(
-            state_dict->get_dict_with_prefix(prefix + "embed_tokens."));
-      } else {
-        lm_head_->load_state_dict(state_dict->get_dict_with_prefix("lm_head."));
-      }
     }
     model_->verify_loaded_weights();
+  }
+
+  void load_lm_head_weights(const StateDict& state_dict,
+                            layer::LmHead& head,
+                            bool tie_word_embeddings) override {
+    if (tie_word_embeddings) {
+      head->load_state_dict(
+          state_dict.get_dict_with_prefix("model.embed_tokens."));
+    } else {
+      head->load_state_dict(state_dict.get_dict_with_prefix("lm_head."));
+    }
   }
 };
 TORCH_MODULE(DeepseekV2ForCausalLM);

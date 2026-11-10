@@ -710,6 +710,7 @@ void MluGraphExecutorImpl::log_memory_after_capture() {
 // tokens: [num_decode_tokens]
 // positions: [num_decode_tokens] token pos in the sequence
 // returns: ModelOutput
+
 ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
                                       const torch::Tensor& positions,
                                       std::vector<KVCache>& kv_caches,
@@ -795,6 +796,16 @@ ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
           ? result.aux_hidden_states.slice(0, 0, actual_tokens)
           : torch::Tensor(),
       options_.enable_graph_aux_hidden_states());
+}
+
+ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
+                                      const torch::Tensor& positions,
+                                      std::vector<KVCache>& kv_caches,
+                                      const ModelParamsView& params,
+                                      const torch::Tensor& logits_indices) {
+  ModelOutput output = run(tokens, positions, kv_caches, params);
+  project_after_forward(output, model_, logits_indices);
+  return output;
 }
 
 }  // namespace xllm::mlu

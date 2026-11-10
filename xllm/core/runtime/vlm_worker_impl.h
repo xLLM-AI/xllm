@@ -19,6 +19,7 @@ limitations under the License.
 #include <functional>
 #include <optional>
 
+#include "core/framework/model/logits_processor.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "runtime/worker_impl.h"
 
@@ -48,6 +49,8 @@ class VLMWorkerImpl final : public WorkerImpl {
       const std::function<void()>& prepare_sampling = {}) override;
 
  private:
+  LogitsProcessor logits_processor_;
+
   std::optional<ForwardOutput> execute_no_sync_on_stream(
       const VlmForwardInput& input,
       Stream& compute_stream,

@@ -33,22 +33,30 @@ class WordEmbedding;
 }  // namespace layer
 
 namespace detail {
+
+// The macro must expand to a real virtual override: a member function
+// template would hide the base virtual and silently dispatch base defaults
+// through base pointers.
+#define XLLM_FORWARD_OPTIONAL(ModelType, Base, trait, hook, ret, sig, args) \
+  ret hook sig override {                                                   \
+    if constexpr (trait<ModelType>::value) {                                \
+      return model_->hook args;                                             \
+    } else {                                                                \
+      return Base::hook args;                                               \
+    }                                                                       \
+  }
+
 template <typename T, typename = void>
-struct has_get_lm_head : std::false_type {};
+struct has_project_lm_head : std::false_type {};
 
 template <typename T>
-struct has_get_lm_head<T,
-                       std::void_t<decltype(std::declval<T>()->get_lm_head())>>
-    : std::true_type {};
-
-template <typename T, typename = void>
-struct has_set_lm_head : std::false_type {};
-
-template <typename T>
-struct has_set_lm_head<T,
-                       std::void_t<decltype(std::declval<T>()->set_lm_head(
-                           std::declval<layer::LmHead&>()))>> : std::true_type {
-};
+struct has_project_lm_head<
+    T,
+    std::void_t<decltype(std::declval<T>()->project_lm_head(
+        std::declval<const torch::Tensor&>(),
+        std::declval<const torch::Tensor&>(),
+        std::declval<torch::Tensor&>(),
+        std::declval<torch::Tensor&>()))>> : std::true_type {};
 
 template <typename T, typename = void>
 struct has_get_word_embedding : std::false_type {};
@@ -60,6 +68,26 @@ struct has_get_word_embedding<
     : std::true_type {};
 
 template <typename T, typename = void>
+struct has_family_get_lm_head : std::false_type {};
+
+template <typename T>
+struct has_family_get_lm_head<
+    T,
+    std::void_t<decltype(std::declval<T>()->get_lm_head())>> : std::true_type {
+};
+
+// adopt_lm_head(host, head) exists only on LmHeadOwner hosts.
+template <typename T, typename = void>
+struct has_adopt_lm_head : std::false_type {};
+
+template <typename T>
+struct has_adopt_lm_head<T,
+                         std::void_t<decltype(std::declval<T>()->adopt_lm_head(
+                             std::declval<torch::nn::Module&>(),
+                             std::declval<layer::LmHead>()))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
 struct has_set_word_embedding : std::false_type {};
 
 template <typename T>
@@ -67,17 +95,6 @@ struct has_set_word_embedding<
     T,
     std::void_t<decltype(std::declval<T>()->set_word_embedding(
         std::declval<layer::WordEmbedding&>()))>> : std::true_type {};
-
-template <typename T, typename = void>
-struct has_logits_with_hidden : std::false_type {};
-
-template <typename T>
-struct has_logits_with_hidden<T,
-                              std::void_t<decltype(std::declval<T>()->logits(
-                                  std::declval<const torch::Tensor&>(),
-                                  std::declval<const torch::Tensor&>(),
-                                  std::declval<torch::Tensor&>()))>>
-    : std::true_type {};
 
 template <typename T, typename = void>
 struct has_lazy_load_model : std::false_type {};
@@ -141,6 +158,25 @@ template <typename T>
 struct has_start_expert_weight_transfer<
     T,
     std::void_t<decltype(std::declval<T>()->start_expert_weight_transfer(
+        std::declval<int32_t>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_prepare_expert_weight : std::false_type {};
+
+template <typename T>
+struct has_prepare_expert_weight<
+    T,
+    std::void_t<decltype(std::declval<T>()->prepare_expert_weight(
+        std::declval<int32_t>(),
+        std::declval<const std::vector<int32_t>&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_update_expert_weight : std::false_type {};
+
+template <typename T>
+struct has_update_expert_weight<
+    T,
+    std::void_t<decltype(std::declval<T>()->update_expert_weight(
         std::declval<int32_t>()))>> : std::true_type {};
 
 template <typename T, typename = void>
@@ -224,6 +260,40 @@ struct has_dspark_markov_bias<
     T,
     std::void_t<decltype(std::declval<T>()->dspark_markov_bias(
         std::declval<const torch::Tensor&>()))>> : std::true_type {};
+
+// An empty holder counts as not loaded, so its owner may adopt the target's.
+template <typename Holder>
+bool weight_loaded(const Holder& holder) {
+  return !holder.is_empty() && holder->is_weight_loaded();
+}
+
+template <typename T, typename = void>
+struct has_get_multimodal_embeddings : std::false_type {};
+
+template <typename T>
+struct has_get_multimodal_embeddings<
+    T,
+    std::void_t<decltype(std::declval<T>()->get_multimodal_embeddings(
+        std::declval<const ModelParamsView&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_vlm_get_input_embeddings : std::false_type {};
+
+template <typename T>
+struct has_vlm_get_input_embeddings<
+    T,
+    std::void_t<decltype(std::declval<T>()->get_input_embeddings(
+        std::declval<const torch::Tensor&>(),
+        std::declval<const ModelParamsView&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_tie_lm_head_weights : std::false_type {};
+
+template <typename T>
+struct has_tie_lm_head_weights<
+    T,
+    std::void_t<decltype(std::declval<T>()->tie_lm_head_weights(
+        std::declval<layer::WordEmbedding>()))>> : std::true_type {};
 
 }  // namespace detail
 }  // namespace xllm

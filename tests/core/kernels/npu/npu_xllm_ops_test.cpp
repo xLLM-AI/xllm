@@ -1276,14 +1276,17 @@ class FakeModel(torch.nn.Module):
 
 
 with patch.object(
-    executor_module, "_create_attention_backend", return_value=FakeBackend()
-):
+    executor_module, "_create_attention_backend"
+) as create_backend:
+    create_backend.return_value = FakeBackend()
     model_executor = executor_module.ModelExecutor(
         FakeModel(),
         {"python_graph_backend": "off"},
         max_seqs_per_batch=3,
     )
-    assert model_executor._num_attention_layers == 1
+    # One decode row per request: the explicit batch limit reaches the
+    # attention backend unchanged (max(3, 1) * 1).
+    assert create_backend.call_args.args[-1] == 3
     assert model_executor.decode_graph_runner is None
     assert model_executor.inductor_runner is None
 )PY");

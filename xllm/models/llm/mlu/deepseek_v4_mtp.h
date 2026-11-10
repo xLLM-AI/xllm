@@ -303,30 +303,26 @@ class DeepseekV4MtpForCausalLMImpl final
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
+    LlmForCausalLMImplBase<DeepseekV4MtpModel>::load_lm_head_weights(loader);
+
     for (const std::unique_ptr<StateDict>& state_dict :
          loader->get_state_dicts()) {
       std::unordered_map<std::string, torch::Tensor> remapped_dict;
-      std::unordered_map<std::string, torch::Tensor> lm_head_dict;
       for (auto it = state_dict->begin(); it != state_dict->end(); ++it) {
         remapped_dict[detail::normalize_model_parameter_name(
             it->first, prefix)] = it->second;
-        std::optional<std::string> lm_head_name =
-            detail::normalize_lm_head_parameter_name(it->first);
-        if (lm_head_name.has_value()) {
-          lm_head_dict[lm_head_name.value()] = it->second;
-        }
       }
 
       StateDict remapped_state_dict(remapped_dict);
       model_->load_state_dict(remapped_state_dict);
-      if (!lm_head_dict.empty()) {
-        lm_head_->load_state_dict(StateDict(lm_head_dict));
-      } else {
-        lm_head_->load_state_dict(
-            remapped_state_dict.get_dict_with_prefix("layers.0.head."));
-      }
     }
     model_->verify_loaded_weights(prefix);
+  }
+
+  void load_lm_head_weights(const StateDict& state_dict,
+                            layer::LmHead& head,
+                            bool /*tie_word_embeddings*/) override {
+    detail::load_lm_head_from_normalized(state_dict, head, "layers.0.head.");
   }
 
   bool requires_graph_forward_metadata() {
@@ -357,25 +353,11 @@ inline void load_deepseek_v4_mtp_model_args(const JsonReader& json,
 
 REGISTER_CAUSAL_MODEL(deepseek_v4_mtp, DeepseekV4MtpForCausalLM);
 
-const bool deepseek_v4_mtp_capabilities_registered = []() {
-  MtpModelCapabilities capabilities;
-  capabilities.native_draft_owns_embedding_and_lm_head = true;
-  capabilities.python_draft_owns_embedding_and_lm_head = true;
-  ModelRegistry::register_mtp_capabilities("deepseek_v4_mtp", capabilities);
-  return true;
-}();
-
 REGISTER_MODEL_ARGS(deepseek_v4_mtp, [&] {
   const DeepseekV4ArgsPolicy args_policy = build_deepseek_v4_args_policy();
   load_deepseek_v4_mtp_model_args(json, args);
   process_deepseek_v4_args(args, args_policy);
   validate_deepseek_v4_args(*args, args_policy);
 });
-
-// The draft checkpoint owns its embedding and LM head weights.
-const bool deepseek_v4_mtp_shared_weight_owner_registered = []() {
-  ModelRegistry::register_mtp_shared_weight_owner("deepseek_v4_mtp");
-  return true;
-}();
 
 }  // namespace xllm::mlu::model

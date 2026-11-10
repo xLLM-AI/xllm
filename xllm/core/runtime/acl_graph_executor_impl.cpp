@@ -368,6 +368,9 @@ bool AclGraph::capture(CausalLM* model,
   num_tokens_ = bucket_num_tokens;
   const bool capture_static_graph_tasks = uses_static_mtp_graph_task_variant(
       params, bucket_num_tokens, options.block_size());
+  // Embedding-mode models never host an lm_head; their graphs stop at the
+  // forward pass and leave the logits stage to the caller.
+  const bool graph_has_lm_head = !model->get_lm_head().is_empty();
 
   // Get actual num_tokens from tokens tensor
   // const uint32_t actual_num_tokens = tokens.size(0);
@@ -526,6 +529,21 @@ bool AclGraph::capture(CausalLM* model,
                          {graph_params.value()});
 
       persistent_param_.set_hidden_states(forward_result.hidden_states);
+      if (graph_has_lm_head) {
+        // Captured against the graph-width slice of the indices buffer:
+        // sampled rows never exceed the bucket token count, so replay only
+        // fills the leading rows and the tail stays unread.
+        torch::Tensor out_hidden;
+        torch::Tensor logits;
+        model->project_lm_head(
+            persistent_param_.hidden_states(num_tokens_),
+            persistent_param_.persistent_logits_indices(num_tokens_),
+            out_hidden,
+            logits);
+        persistent_param_.persistent_logits(num_tokens_).copy_(logits);
+        persistent_param_.persistent_selected_hidden(num_tokens_)
+            .copy_(out_hidden);
+      }
       if (options.enable_graph_aux_hidden_states() &&
           forward_result.aux_hidden_states.defined()) {
         persistent_param_.set_aux_hidden_states(
@@ -1071,6 +1089,54 @@ void AclGraphExecutorImpl::initialize(bool need_update_attn_mask,
 // tokens: [num_decode_tokens]
 // positions: [num_decode_tokens] token pos in the sequence
 // returns: [num_decode_tokens, hidden_size]
+void AclGraphExecutorImpl::attach_logits_stage_result(
+    ModelOutput& result,
+    GraphPersistentParam& persistent_param,
+    const AclGraph& graph,
+    uint32_t logits_rows) {
+  if (logits_rows == 0) {
+    return;
+  }
+  // A replay that fell back to eager inside AclGraph::replay returns fresh
+  // hidden states and must not read the persistent logits buffers -- they
+  // still hold the last successful replay of this graph. Graph outputs are
+  // slices of the persistent hidden buffer, so compare storage identity.
+  if (result.hidden_states.storage().data() !=
+      graph.get_hidden_states().storage().data()) {
+    return;
+  }
+  // The persistent logits buffers live in the graph pool; clone before any
+  // consumer may outlive the next replay of the same graph.
+  result.logits = persistent_param.persistent_logits(logits_rows).clone();
+  result.selected_hidden_states =
+      persistent_param.persistent_selected_hidden(logits_rows).clone();
+}
+
+ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
+                                      const torch::Tensor& positions,
+                                      std::vector<KVCache>& kv_caches,
+                                      const ModelParamsView& params,
+                                      const torch::Tensor& logits_indices) {
+  // The logits stage selection is data-only: fill the persistent buffer up
+  // front so capture and replay both consume it inside the graph.
+  // The worker step lock serializes run() calls, and run_typed picks
+  // next_replay_slot_ under graph_slots_mutex_ before any other writer can
+  // touch the persistent buffers, so filling the slot up front is safe.
+  if (logits_indices.defined() && logits_indices.numel() > 0) {
+    auto& slot = graph_slots_[next_replay_slot_];
+    slot.persistent_param->set_logits_indices(logits_indices);
+    logits_indices_rows_ = static_cast<uint32_t>(logits_indices.numel());
+  } else {
+    logits_indices_rows_ = 0;
+  }
+  ModelOutput result = run_typed(model_, tokens, positions, kv_caches, params);
+  logits_indices_rows_ = 0;
+  // run_typed returns graph-captured logits only on the replay/capture paths;
+  // its eager fallbacks run the model forward alone, so project here.
+  project_after_forward(result, model_, logits_indices);
+  return result;
+}
+
 ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
                                       const torch::Tensor& positions,
                                       std::vector<KVCache>& kv_caches,
@@ -1335,13 +1401,14 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
         << "AclGraphExecutorImpl::run() in replay mode";
     ModelOutput result = replay_graph->replay(
         model, tokens_tensor, positions_tensor, kv_caches, params_single);
+    attach_logits_stage_result(
+        result, active_persistent_param, *replay_graph, logits_indices_rows_);
     // Handle aux_hidden_states based on options
     if (options_.enable_graph_aux_hidden_states()) {
       torch::Tensor aux_hidden_states =
           active_persistent_param.aux_hidden_states(n_tokens);
       if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
-        return ModelOutput(
-            result.hidden_states, torch::Tensor(), aux_hidden_states);
+        result.aux_hidden_states = aux_hidden_states;
       }
     }
     return result;
@@ -1425,14 +1492,17 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
   // Return the output from capture (no need to replay since capture
   // already executed)
   torch::Tensor hidden_states = graph->get_hidden_states(n_tokens);
+  ModelOutput capture_result(hidden_states);
+  attach_logits_stage_result(
+      capture_result, active_persistent_param, *graph, logits_indices_rows_);
   if (options_.enable_graph_aux_hidden_states()) {
     torch::Tensor aux_hidden_states =
         active_persistent_param.aux_hidden_states(n_tokens);
     if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
-      return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
+      capture_result.aux_hidden_states = aux_hidden_states;
     }
   }
-  return ModelOutput(hidden_states);
+  return capture_result;
 }
 
 void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,

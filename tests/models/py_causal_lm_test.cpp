@@ -305,6 +305,55 @@ TEST(PyCausalLMConfigBridgeTest, PreservesBlockDraftWindowEnablement) {
   }
 }
 
+TEST(PyCausalLMShareTest, SharedModulesPointToTargetModel) {
+  ModelContext context = make_bridge_model_context(kBridgeTestModelType);
+  PyCausalLM target(context);
+  PyCausalLM draft(context);
+
+  py::object own_lm_head;
+  {
+    py::gil_scoped_acquire gil;
+    py::module_ types = py::module_::import("types");
+    py::module_ builtins = py::module_::import("builtins");
+    py::object target_lm_head = builtins.attr("object")();
+    py::object target_embedding = builtins.attr("object")();
+    target.python_model().attr("lm_head") = target_lm_head;
+    target.python_model().attr("model") = types.attr("SimpleNamespace")(
+        py::arg("embed_tokens") = target_embedding);
+    draft.python_model().attr("lm_head") = py::none();
+    draft.python_model().attr("model") =
+        types.attr("SimpleNamespace")(py::arg("embed_tokens") = py::none());
+  }
+
+  draft.share_lm_head(target);
+  draft.share_embed_tokens(target);
+
+  {
+    py::gil_scoped_acquire gil;
+    EXPECT_TRUE(draft.python_model().attr("lm_head").is(
+        target.python_model().attr("lm_head")));
+    EXPECT_TRUE(
+        draft.python_model()
+            .attr("model")
+            .attr("embed_tokens")
+            .is(target.python_model().attr("model").attr("embed_tokens")));
+  }
+
+  {
+    py::gil_scoped_acquire gil;
+    py::module_ builtins = py::module_::import("builtins");
+    own_lm_head = builtins.attr("object")();
+    draft.python_model().attr("lm_head") = own_lm_head;
+  }
+  draft.share_lm_head(target);
+  {
+    py::gil_scoped_acquire gil;
+    py::object current = draft.python_model().attr("lm_head");
+    EXPECT_TRUE(current.is(own_lm_head));
+    EXPECT_FALSE(current.is(target.python_model().attr("lm_head")));
+  }
+}
+
 TEST(PyCausalLMContextKVBridgeTest, PassesSwaCacheAsSixthPythonSlot) {
   ModelContext context = make_bridge_model_context(kBridgeTestModelType);
   PyCausalLM model(context);
