@@ -58,6 +58,7 @@ class EmbeddingCache final {
     // only when the draft requires replay of every verified KV position.
     std::vector<int32_t> replay_token_ids;
     torch::Tensor replay_embeddings;
+    torch::Tensor replay_mrope_positions;
 
     int32_t correction_token_id = 0;  // accepted token for step correction
     int32_t correction_position_offset = 0;
@@ -72,16 +73,21 @@ class EmbeddingCache final {
 
   // Seed target context from prefill output or PD handoff. The embeddings
   // contain one selected hidden row per sequence; draft output is excluded.
-  void write_prefill_target_context(const std::vector<int32_t>& embedding_ids,
-                                    const std::vector<std::string>& request_ids,
-                                    const torch::Tensor& next_tokens,
-                                    const torch::Tensor& embeddings);
+  void write_prefill_target_context(
+      const std::vector<int32_t>& embedding_ids,
+      const std::vector<std::string>& request_ids,
+      const torch::Tensor& next_tokens,
+      const torch::Tensor& embeddings,
+      const torch::Tensor& logits_indices = torch::Tensor(),
+      const torch::Tensor& target_positions = torch::Tensor());
 
   // Seeds PD handoff context without replacing an active request tail.
-  void write_mtp_bootstrap_context(int32_t embedding_id,
-                                   const std::string& request_id,
-                                   int32_t token_id,
-                                   const torch::Tensor& embedding);
+  void write_mtp_bootstrap_context(
+      int32_t embedding_id,
+      const std::string& request_id,
+      int32_t token_id,
+      const torch::Tensor& embedding,
+      const torch::Tensor& target_position = torch::Tensor());
 
   // Writes target validate output after rejection sampling. accepted_tokens is
   // a contiguous accepted prefix padded by -1; accepted_embeddings keeps the

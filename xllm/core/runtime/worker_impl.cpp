@@ -334,7 +334,7 @@ LinearStateInputRows get_host_linear_state_rows(Params& input_params) {
   const int64_t cached_row_count = static_cast<int64_t>(cached_tokens.size());
   if (!input_params.is_spec_verify &&
       input_params.meta.batch_forward_type.is_decode() &&
-      query_row_count > cached_row_count) {
+      num_reqs > cached_row_count) {
     active_rows = cached_row_count;
   }
 #endif
@@ -376,10 +376,11 @@ LinearStateInputRows get_mlu_linear_state_rows(Params& input_params) {
       << "invalid MLU linear-state input row counts: sequence_rows="
       << sequence_rows << ", active_rows=" << active_rows
       << ", slot_rows=" << slot_rows;
-  CHECK_EQ(slot_rows, active_rows)
-      << "invalid MLU linear-state input row counts: sequence_rows="
-      << sequence_rows << ", active_rows=" << active_rows
-      << ", slot_rows=" << slot_rows;
+  // Spec verification expands rows but keeps a sequence-scoped validity mask.
+  CHECK(slot_rows == active_rows ||
+        (input_params.is_spec_verify && slot_rows == sequence_rows))
+      << "invalid MLU linear-state slot layout: sequence_rows=" << sequence_rows
+      << ", active_rows=" << active_rows << ", slot_rows=" << slot_rows;
   return {cached_tokens, active_rows, /*empty_shard=*/false};
 }
 #endif
@@ -1059,23 +1060,6 @@ std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
     const LlmForwardInput& input,
     const std::function<void()>& prepare_sampling) {
   return step_for_schedule_overlap_impl(input, prepare_sampling);
-}
-
-bool WorkerImpl::model_supports_model_cp() const {
-  if (model_cp_capable_computed_) {
-    return model_cp_capable_;
-  }
-  model_cp_capable_computed_ = true;
-  std::string resolved_name;
-  std::string error_message;
-  if (!resolve_model_registration_name(context_.get_model_args().model_type(),
-                                       &resolved_name,
-                                       &error_message)) {
-    model_cp_capable_ = false;
-    return false;
-  }
-  model_cp_capable_ = is_npu_model_cp_capable(resolved_name);
-  return model_cp_capable_;
 }
 
 #if defined(USE_NPU)
@@ -1932,6 +1916,10 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
               {"glm_moe_dsa", "glm_moe_dsa_mtp"},
               {"joyai_llm_flash", "joyai_llm_flash_mtp"},
               {"mimo", "mimo_mtp"},
+              {"qwen3_5", "qwen3_5_mtp"},
+              {"qwen3_5_moe", "qwen3_5_moe_mtp"},
+              {"qwen3_5_text", "qwen3_5_mtp"},
+              {"qwen3_5_moe_text", "qwen3_5_moe_mtp"},
           };
       const std::string& current_type = args.model_type();
       auto it = kModelTypeToMtpType.find(current_type);

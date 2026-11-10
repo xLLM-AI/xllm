@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -22,6 +24,7 @@ limitations under the License.
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/layers/common/attention_metadata.h"
+#include "core/util/env_var.h"
 #include "models/llm/llm_model_base.h"
 #include "models/llm/mlu/deepseek_mtp.h"
 #include "models/llm/mlu/glm5_next_graph.h"
@@ -75,6 +78,24 @@ class Glm5NextMtpForCausalLMImpl final
   }
 };
 TORCH_MODULE(Glm5NextMtpForCausalLM);
+
+inline int64_t fixed_graph_capacity(const ModelArgs& args) {
+  constexpr int kDefaultGraphHistoryCapacity = 32768;
+  int64_t capacity = xllm::util::get_int_env("XLLM_GRAPH_INDEX_HISTORY_MAX_KV",
+                                             kDefaultGraphHistoryCapacity);
+  CHECK_GT(capacity, 0) << "XLLM_GRAPH_INDEX_HISTORY_MAX_KV must be positive";
+  if (args.max_position_embeddings() > 0) {
+    capacity = std::min(capacity, args.max_position_embeddings());
+  }
+  return capacity;
+}
+
+const bool glm5_next_mtp_capabilities_registered = []() {
+  ModelRegistry::register_graph_kv_capacity("glm5_next", &fixed_graph_capacity);
+  ModelRegistry::register_graph_kv_capacity("glm5_next_mtp",
+                                            &fixed_graph_capacity);
+  return true;
+}();
 
 REGISTER_CAUSAL_MODEL(glm5_next_mtp, Glm5NextMtpForCausalLM);
 

@@ -80,22 +80,35 @@ struct CausalVLMRegistration {
   int32_t priority = 0;
 };
 
-// Model-advertised CP mode: NONE or MODEL (shard after embed / merge before
-// LM head). Backend capability queries decide the concrete model data path.
-enum class CpShardingMode : int8_t {
-  NONE = 0,
-  MODEL = 1,
-};
-
 // Rewrites a target model's args into the registered MTP draft form. The
 // registry owns dispatch so engines never name a concrete MTP model.
 using MtpArgsAdapter =
     std::function<void(ModelArgs& args, bool is_python_model)>;
 
+using GraphKVCapacityAdapter = std::function<int64_t(const ModelArgs&)>;
+
+enum class MtpModelFamily : int8_t {
+  NONE,
+  GLM5,
+  QWEN35,
+};
+
+enum class GraphContextPolicy : int8_t {
+  MAX_CONTEXT,
+  QWEN_FULL_ATTENTION,
+  KPOOL_FIXED,
+};
+
 struct MtpModelCapabilities {
   bool native_draft_requires_accepted_span_replay = false;
   bool native_draft_owns_embedding_and_lm_head = false;
   bool python_draft_owns_embedding_and_lm_head = false;
+  bool allow_tail_fallback = false;
+  MtpModelFamily model_family = MtpModelFamily::NONE;
+  bool supports_causal_replay = false;
+  bool supports_expanded_replay = false;
+  bool supports_grouped_graph = false;
+  GraphContextPolicy graph_context_policy = GraphContextPolicy::MAX_CONTEXT;
 };
 
 // TODO: add default args loader.
@@ -107,10 +120,10 @@ struct ModelMeta {
   MultimodalProcessorFactory multimodal_processor_factory;
   ModelArgsLoader model_args_loader;
   TokenizerArgsLoader tokenizer_args_loader;
-  CpShardingMode cp_sharding_mode = CpShardingMode::NONE;
   bool supports_dcp = false;
   MtpModelCapabilities mtp_capabilities;
   MtpArgsAdapter mtp_args_adapter;
+  GraphKVCapacityAdapter graph_kv_capacity_adapter;
 };
 
 // Model config names may be aliases, but registry lookups use one canonical
@@ -172,15 +185,6 @@ class ModelRegistry {
   static void register_speech_model_factory(const std::string& name,
                                             SpeechModelFactory factory);
 
-  // Register the model-side CP sharding mode advertised by `name`. Defaults to
-  // NONE for any unregistered model.
-  static void register_cp_sharding_mode(const std::string& name,
-                                        CpShardingMode mode);
-
-  // Read-only query of the registered CP sharding mode. Returns NONE when
-  // `name` is unknown or the model did not opt into model-side CP.
-  static CpShardingMode get_cp_sharding_mode(const std::string& name);
-
   static void register_dcp_capability(const std::string& name);
   static bool supports_dcp(const std::string& name);
 
@@ -193,6 +197,13 @@ class ModelRegistry {
                                         MtpModelCapabilities capabilities);
 
   static MtpModelCapabilities get_mtp_capabilities(const std::string& name);
+
+  static void register_graph_kv_capacity(const std::string& name,
+                                         GraphKVCapacityAdapter adapter);
+
+  static int64_t get_graph_kv_capacity(const std::string& name,
+                                       const ModelArgs& args,
+                                       int64_t default_capacity);
 
   static void configure_mtp_args(ModelArgs& args,
                                  std::string_view algorithm,

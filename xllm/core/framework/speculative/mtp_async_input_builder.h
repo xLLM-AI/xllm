@@ -54,29 +54,5 @@ void prepare_next_draft_from_accepted_state(
     bool rebuild_expanded_decode_metadata,
     int32_t block_size);
 
-// Builds one-row-per-sequence metadata for a later draft step from the
-// accepted device base used by draft-0. The caller must order this work after
-// draft-0 metadata correction on the same stream.
-template <typename Source>
-void prepare_later_draft_from_device_base(LlmForwardInput& draft_input,
-                                          const Source& block_table_source,
-                                          const torch::Tensor& base_positions,
-                                          const torch::Tensor& base_kv_seq_lens,
-                                          int32_t position_offset,
-                                          int32_t block_size);
-
-// Corrects an already prepared fixed-shape target verification template from
-// the previous target's accepted device state. Draft token columns remain
-// placeholders and are filled after their producing draft forwards.
-template <typename Input>
-void prepare_target_verify_from_accepted_state(
-    Input& validate_input,
-    const torch::Tensor& accepted_tokens,
-    const torch::Tensor& base_positions,
-    const torch::Tensor& base_kv_seq_lens,
-    int32_t block_size,
-    bool use_chunked_prefill = false,
-    bool step_major_layout = false);
-
 }  // namespace mtp_async
 }  // namespace xllm

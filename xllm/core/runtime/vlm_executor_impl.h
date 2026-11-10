@@ -52,6 +52,8 @@ class VlmExecutorImpl : public ExecutorImpl {
                            std::vector<KVCache>& kv_caches,
                            const ModelParamsView& params) override;
 
+  void set_dp_process_group(ProcessGroup* group) override;
+
   virtual MMDict encode(const ModelParamsView& params);
 
   // not own

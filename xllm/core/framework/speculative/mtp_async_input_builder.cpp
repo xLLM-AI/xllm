@@ -17,8 +17,6 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <algorithm>
-
 #include "core/util/tensor_helper.h"
 
 #if defined(USE_NPU)
@@ -31,56 +29,6 @@ limitations under the License.
 
 namespace xllm::mtp_async {
 namespace {
-void shift_host_rows(std::vector<int32_t>& values,
-                     const torch::Tensor& base_values,
-                     int64_t batch_size,
-                     int64_t row_width,
-                     bool step_major_layout) {
-  if (values.empty()) {
-    return;
-  }
-  CHECK_EQ(base_values.numel(), batch_size);
-  CHECK(values.size() == static_cast<size_t>(batch_size) ||
-        values.size() == static_cast<size_t>(batch_size * row_width));
-  // tensor_to_vector() owns the device-to-host copy and reads only after the
-  // copy has completed. Calling to(torch::kCPU) here first can expose a
-  // pending asynchronous NPU copy as stale host memory.
-  const std::vector<int64_t> base = tensor_to_vector<int64_t>(base_values);
-  if (values.size() == static_cast<size_t>(batch_size)) {
-    for (int64_t seq_id = 0; seq_id < batch_size; ++seq_id) {
-      values[static_cast<size_t>(seq_id)] =
-          static_cast<int32_t>(base[static_cast<size_t>(seq_id)]);
-    }
-    return;
-  }
-  for (int64_t seq_id = 0; seq_id < batch_size; ++seq_id) {
-    const int64_t first_index = step_major_layout ? seq_id : seq_id * row_width;
-    const int32_t delta =
-        static_cast<int32_t>(base[static_cast<size_t>(seq_id)]) -
-        values[static_cast<size_t>(first_index)];
-    for (int64_t row = 0; row < row_width; ++row) {
-      const int64_t index = step_major_layout ? row * batch_size + seq_id
-                                              : seq_id * row_width + row;
-      values[static_cast<size_t>(index)] += delta;
-    }
-  }
-}
-
-void shift_host_tensor(torch::Tensor& tensor,
-                       const torch::Tensor& base_values,
-                       int64_t batch_size,
-                       int64_t row_width,
-                       bool step_major_layout) {
-  if (!tensor.defined() || tensor.numel() == 0) {
-    return;
-  }
-  CHECK(tensor.device().is_cpu());
-  CHECK_EQ(tensor.scalar_type(), torch::kInt);
-  std::vector<int32_t> values = tensor_to_vector<int32_t>(tensor);
-  shift_host_rows(
-      values, base_values, batch_size, row_width, step_major_layout);
-  std::copy(values.begin(), values.end(), tensor.data_ptr<int32_t>());
-}
 
 template <typename Input>
 torch::Tensor build_device_cache_slots(const Input& input,
@@ -317,215 +265,6 @@ void prepare_next_draft_from_accepted_state(
   }
 #endif
 }
-template <typename Source>
-void prepare_later_draft_from_device_base(LlmForwardInput& draft_input,
-                                          const Source& block_table_source,
-                                          const torch::Tensor& base_positions,
-                                          const torch::Tensor& base_kv_seq_lens,
-                                          int32_t position_offset,
-                                          int32_t block_size) {
-  CHECK(base_positions.defined());
-  CHECK(base_kv_seq_lens.defined());
-  CHECK_EQ(base_positions.dim(), 1);
-  CHECK_EQ(base_kv_seq_lens.dim(), 1);
-  CHECK_EQ(base_positions.numel(), base_kv_seq_lens.numel());
-  CHECK_GE(position_offset, 0);
-
-  torch::Tensor row_positions =
-      (base_positions + position_offset).unsqueeze(/*dim=*/1);
-  draft_input.positions =
-      row_positions.flatten().to(draft_input.positions.options());
-  draft_input.input_params.attention.device.new_cache_slots =
-      build_device_cache_slots(block_table_source, row_positions, block_size);
-  draft_input.input_params.attention.device.kv_seq_lens =
-      (base_kv_seq_lens + position_offset)
-          .to(draft_input.input_params.attention.device.kv_seq_lens.options());
-}
-template <typename Input>
-void prepare_target_verify_from_accepted_state(
-    Input& validate_input,
-    const torch::Tensor& accepted_tokens,
-    const torch::Tensor& base_positions,
-    const torch::Tensor& base_kv_seq_lens,
-    int32_t block_size,
-    bool use_chunked_prefill,
-    bool step_major_layout) {
-  CHECK(validate_input.token_ids.defined());
-  CHECK(validate_input.positions.defined());
-  CHECK_EQ(accepted_tokens.dim(), 2);
-  const int64_t batch_size = accepted_tokens.size(0);
-  const int64_t validate_width = accepted_tokens.size(1);
-  CHECK_EQ(validate_input.token_ids.numel(), batch_size * validate_width);
-  CHECK_EQ(validate_input.positions.numel(), batch_size * validate_width);
-
-  AcceptedTokenMetadata metadata = build_accepted_token_metadata(
-      accepted_tokens, base_positions, base_kv_seq_lens);
-  shift_host_tensor(validate_input.positions_host,
-                    metadata.base_positions,
-                    batch_size,
-                    validate_width,
-                    step_major_layout);
-  shift_host_rows(validate_input.input_params.attention.host.kv_seq_lens,
-                  use_chunked_prefill
-                      ? metadata.base_kv_seq_lens + (validate_width - 1)
-                      : metadata.base_kv_seq_lens,
-                  batch_size,
-                  validate_width,
-                  step_major_layout);
-  if (validate_input.input_params.graph.expanded_kv_seq_lens.defined()) {
-    shift_host_rows(validate_input.input_params.graph.expanded_kv_seq_lens_vec,
-                    metadata.base_kv_seq_lens,
-                    batch_size,
-                    validate_width,
-                    step_major_layout);
-  }
-  if (!validate_input.input_params.attention.host.kv_seq_lens.empty()) {
-    validate_input.input_params.meta.kv_max_seq_len = *std::max_element(
-        validate_input.input_params.attention.host.kv_seq_lens.begin(),
-        validate_input.input_params.attention.host.kv_seq_lens.end());
-  }
-  torch::Tensor template_position_rows;
-  if (step_major_layout) {
-    template_position_rows =
-        validate_input.positions.view({validate_width, batch_size})
-            .transpose(0, 1);
-  } else {
-    template_position_rows =
-        validate_input.positions.view({batch_size, validate_width});
-  }
-  torch::Tensor position_delta =
-      metadata.base_positions -
-      template_position_rows.select(/*dim=*/1, /*index=*/0).to(torch::kLong);
-  torch::Tensor position_rows =
-      template_position_rows.to(torch::kLong) + position_delta.unsqueeze(1);
-  validate_input.positions =
-      (step_major_layout ? position_rows.transpose(0, 1) : position_rows)
-          .flatten()
-          .to(validate_input.positions.options());
-  if (validate_input.input_params.multi_block_tables.empty()) {
-    const auto& graph = validate_input.input_params.graph;
-    const torch::Tensor& expanded_block_tables =
-        graph.expanded_block_tables.defined()
-            ? graph.expanded_block_tables
-            : validate_input.input_params.attention.device.block_tables;
-    CHECK(expanded_block_tables.defined());
-    CHECK_EQ(expanded_block_tables.dim(), 2);
-    torch::Tensor sequence_block_tables;
-    if (expanded_block_tables.size(0) == batch_size) {
-      sequence_block_tables = expanded_block_tables;
-    } else if (expanded_block_tables.size(0) == batch_size * validate_width &&
-               step_major_layout) {
-      sequence_block_tables =
-          expanded_block_tables
-              .view({validate_width, batch_size, expanded_block_tables.size(1)})
-              .select(/*dim=*/0, /*index=*/0);
-    } else if (expanded_block_tables.size(0) == batch_size * validate_width) {
-      sequence_block_tables =
-          expanded_block_tables
-              .view({batch_size, validate_width, expanded_block_tables.size(1)})
-              .select(/*dim=*/1, /*index=*/0);
-    } else {
-      LOG(FATAL) << "target verify block tables have "
-                 << expanded_block_tables.size(0) << " rows; expected "
-                 << batch_size << " or " << batch_size * validate_width;
-    }
-    torch::Tensor slot_rows =
-        map_positions_to_cache_slots(
-            sequence_block_tables, position_rows, block_size)
-            .view({batch_size, validate_width});
-    validate_input.input_params.attention.device.new_cache_slots =
-        (step_major_layout ? slot_rows.transpose(0, 1) : slot_rows).flatten();
-  } else {
-    validate_input.input_params.attention.device.new_cache_slots =
-        torch::zeros_like(position_rows,
-                          position_rows.options().dtype(torch::kInt))
-            .flatten();
-  }
-
-  torch::Tensor template_kv_rows;
-  const torch::Tensor kv_seq_lens =
-      validate_input.input_params.attention.device.kv_seq_lens.flatten();
-  if (kv_seq_lens.numel() == batch_size) {
-    torch::Tensor kv_delta =
-        metadata.base_kv_seq_lens.flatten().slice(0, 0, batch_size) -
-        kv_seq_lens.to(torch::kLong);
-    if (use_chunked_prefill) {
-      kv_delta = kv_delta + (validate_width - 1);
-    }
-    validate_input.input_params.attention.device.kv_seq_lens =
-        (kv_seq_lens.to(torch::kLong) + kv_delta)
-            .to(validate_input.input_params.attention.device.kv_seq_lens
-                    .options());
-  } else {
-    CHECK_EQ(kv_seq_lens.numel(), batch_size * validate_width)
-        << "target verify KV lengths have " << kv_seq_lens.numel()
-        << " values; expected " << batch_size << " or "
-        << batch_size * validate_width;
-    if (step_major_layout) {
-      template_kv_rows =
-          kv_seq_lens.view({validate_width, batch_size}).transpose(0, 1);
-    } else {
-      template_kv_rows = kv_seq_lens.view({batch_size, validate_width});
-    }
-  }
-  if (template_kv_rows.defined()) {
-    if (step_major_layout) {
-      template_kv_rows =
-          validate_input.input_params.attention.device.kv_seq_lens
-              .view({validate_width, batch_size})
-              .transpose(0, 1);
-    } else {
-      template_kv_rows =
-          validate_input.input_params.attention.device.kv_seq_lens.view(
-              {batch_size, validate_width});
-    }
-    torch::Tensor kv_delta =
-        metadata.base_kv_seq_lens -
-        template_kv_rows.select(/*dim=*/1, /*index=*/0).to(torch::kLong);
-    torch::Tensor corrected_kv_rows =
-        template_kv_rows.to(torch::kLong) + kv_delta.unsqueeze(1);
-    validate_input.input_params.attention.device.kv_seq_lens =
-        (step_major_layout ? corrected_kv_rows.transpose(0, 1)
-                           : corrected_kv_rows)
-            .flatten()
-            .to(validate_input.input_params.attention.device.kv_seq_lens
-                    .options());
-  }
-
-#if defined(USE_NPU)
-  if (validate_input.input_params.graph.expanded_kv_seq_lens.defined()) {
-    auto& params = validate_input.input_params;
-    const torch::Tensor offsets =
-        torch::arange(validate_width, metadata.base_kv_seq_lens.options());
-    const torch::Tensor rows =
-        metadata.base_kv_seq_lens.unsqueeze(1) + offsets.unsqueeze(0);
-    const torch::Tensor expanded_kv_lens =
-        (step_major_layout ? rows.transpose(0, 1) : rows)
-            .flatten()
-            .to(params.graph.expanded_kv_seq_lens.options());
-    // The Python backend selects expanded_decode ahead of generic metadata.
-    // Refresh lengths and page lists together after acceptance crosses a page.
-    layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(
-        ModelParamsView(params),
-        expanded_kv_lens,
-        params.graph.expanded_block_tables,
-        params.graph.expanded_kv_seq_lens_vec,
-        block_size);
-  }
-#endif
-
-  torch::Tensor token_rows;
-  if (step_major_layout) {
-    token_rows = validate_input.token_ids.view({validate_width, batch_size})
-                     .transpose(0, 1);
-  } else {
-    token_rows = validate_input.token_ids.view({batch_size, validate_width});
-  }
-  token_rows.select(/*dim=*/1, /*index=*/0)
-      .copy_(metadata.last_tokens.to(validate_input.token_ids.options()),
-             /*non_blocking=*/true);
-  validate_input.runtime.device_tensors_ready = true;
-}
 
 template void prepare_next_draft_from_accepted_state(LlmForwardInput&,
                                                      const LlmForwardInput&,
@@ -537,19 +276,6 @@ template void prepare_next_draft_from_accepted_state(LlmForwardInput&,
                                                      bool,
                                                      bool,
                                                      int32_t);
-template void prepare_later_draft_from_device_base(LlmForwardInput&,
-                                                   const LlmForwardInput&,
-                                                   const torch::Tensor&,
-                                                   const torch::Tensor&,
-                                                   int32_t,
-                                                   int32_t);
-template void prepare_target_verify_from_accepted_state(LlmForwardInput&,
-                                                        const torch::Tensor&,
-                                                        const torch::Tensor&,
-                                                        const torch::Tensor&,
-                                                        int32_t,
-                                                        bool,
-                                                        bool);
 template void prepare_next_draft_from_accepted_state(LlmForwardInput&,
                                                      const VlmForwardInput&,
                                                      const torch::Tensor&,
@@ -560,18 +286,5 @@ template void prepare_next_draft_from_accepted_state(LlmForwardInput&,
                                                      bool,
                                                      bool,
                                                      int32_t);
-template void prepare_later_draft_from_device_base(LlmForwardInput&,
-                                                   const VlmForwardInput&,
-                                                   const torch::Tensor&,
-                                                   const torch::Tensor&,
-                                                   int32_t,
-                                                   int32_t);
-template void prepare_target_verify_from_accepted_state(VlmForwardInput&,
-                                                        const torch::Tensor&,
-                                                        const torch::Tensor&,
-                                                        const torch::Tensor&,
-                                                        int32_t,
-                                                        bool,
-                                                        bool);
 
 }  // namespace xllm::mtp_async

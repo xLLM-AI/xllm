@@ -31,7 +31,6 @@ class Glm5NextGraphMetadataState final : public ModelGraphMetadataState {
 
  private:
   std::shared_ptr<layer::AttentionMetadata> metadata_;
-  torch::Tensor has_initial_states_host_;
 };
 
 inline void Glm5NextGraphMetadataState::prepare(const torch::Tensor& positions,
@@ -43,9 +42,6 @@ inline void Glm5NextGraphMetadataState::prepare(const torch::Tensor& positions,
     params.embedding.linear_state_ids.resize(
         graph_rows, static_cast<int32_t>(kPaddingLinearStateId));
   }
-  if (params.linear_state_validity_mask.size() != graph_rows) {
-    params.linear_state_validity_mask.resize(graph_rows, 0);
-  }
   if (!metadata_) {
     metadata_ = std::make_shared<layer::AttentionMetadata>(
         layer::AttentionMetadataBuilder::build(params,
@@ -55,11 +51,6 @@ inline void Glm5NextGraphMetadataState::prepare(const torch::Tensor& positions,
                                                positions.device()));
     // Zero sizes the workspace from the static block-table width.
     metadata_->max_seq_len = 0;
-    if (metadata_->has_initial_states.defined()) {
-      has_initial_states_host_ = torch::empty(
-          metadata_->has_initial_states.sizes(),
-          metadata_->has_initial_states.options().device(torch::kCPU));
-    }
     params.attn_metadata = metadata_;
     layer::prepare_glm5_next_kpool_metadata(*params.attn_metadata,
                                             positions.device());
@@ -69,19 +60,6 @@ inline void Glm5NextGraphMetadataState::prepare(const torch::Tensor& positions,
   auto& attn = *params.attn_metadata;
   attn.kv_seq_lens = attention.kv_seq_lens;
   attn.q_seq_lens = attention.q_seq_lens;
-  if (attn.has_initial_states.defined()) {
-    CHECK_EQ(has_initial_states_host_.numel(),
-             static_cast<int64_t>(params.linear_state_validity_mask.size()));
-    auto* staging = has_initial_states_host_.data_ptr<bool>();
-    for (size_t i = 0; i < params.linear_state_validity_mask.size(); ++i) {
-      staging[i] = params.linear_state_validity_mask[i] != 0;
-    }
-    attn.has_initial_states.copy_(has_initial_states_host_, false);
-  }
-  // Block table and linear state indices alias graph-owned storage that the
-  // executor rewrites per replay, including same-shape page remaps.
-  CHECK_EQ(attn.kpool_batch_metadata->block_table.data_ptr(),
-           attention.block_tables.data_ptr());
 }
 
 }  // namespace xllm::mlu::model

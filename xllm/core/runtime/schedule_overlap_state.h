@@ -50,8 +50,6 @@ class ScheduleOverlapState final {
               std::vector<std::string> request_ids,
               std::vector<std::string> sample_sequence_ids);
 
-  bool publishes_to_host() const { return publish_to_host_; }
-
   // Only valid for host-visible ranks. Waits for publication or shutdown and
   // consumes the publication flag. Returns a copy when relevant to the caller.
   // The cached prior output is retained for the next overlapped device step.

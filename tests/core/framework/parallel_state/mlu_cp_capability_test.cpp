@@ -18,7 +18,6 @@ limitations under the License.
 #include "common/options.h"
 #include "core/framework/config/parallel_config_validation.h"
 #include "framework/config/parallel_config.h"
-#include "models/model_registry.h"
 
 namespace xllm {
 namespace {
@@ -33,31 +32,6 @@ Options make_cp_options(int32_t world_size) {
       .speculative_algorithm("Suffix");
   ParallelConfig::get_instance().kv_split_size(1);
   return options;
-}
-
-TEST(MluCpCapabilityTest, RegistersSupportedModels) {
-  EXPECT_TRUE(is_mlu_model_cp_capable("deepseek_v4"));
-  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v4"),
-            CpShardingMode::MODEL);
-  EXPECT_FALSE(is_mlu_model_cp_capable("deepseek_v32"));
-  EXPECT_TRUE(is_mlu_model_cp_capable("glm_moe_dsa"));
-  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v32"),
-            CpShardingMode::NONE);
-  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("glm_moe_dsa"),
-            CpShardingMode::MODEL);
-}
-
-TEST(MluCpCapabilityTest, RejectsUnsupportedModels) {
-  EXPECT_FALSE(is_mlu_model_cp_capable("deepseek_v4_mtp"));
-  EXPECT_FALSE(is_mlu_model_cp_capable("deepseek_v3"));
-  EXPECT_FALSE(is_mlu_model_cp_capable("qwen3"));
-  EXPECT_FALSE(is_mlu_model_cp_capable("definitely_not_a_model"));
-}
-
-TEST(MluCpCapabilityTest, SharedRegistryDoesNotLeakBackendCapability) {
-  ModelRegistry::register_cp_sharding_mode("npu_only_fixture",
-                                           CpShardingMode::MODEL);
-  EXPECT_FALSE(is_mlu_model_cp_capable("npu_only_fixture"));
 }
 
 TEST(MluCpCapabilityTest, AcceptsOrthogonalDeepseekV4TargetAndSuffix) {

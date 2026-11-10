@@ -130,6 +130,7 @@ endif()
 
 if(USE_NPU OR USE_MLU)
 cc_test(
+  DISCOVER_TESTS
   NAME
     mooncake_kv_cache_transfer_test
   SRCS
@@ -141,10 +142,16 @@ cc_test(
 )
 if(USE_NPU)
   # The controller and peer must inherit port isolation before runtime startup.
-  set_tests_properties(
-    MooncakeKVCacheTransferDefaultTest.NpuLinearIndexerScalePushAndPullRoundTrip
-    PROPERTIES RUN_SERIAL TRUE
-               ENVIRONMENT "HCCL_NPU_SOCKET_PORT_RANGE=auto"
-  )
+    set(_mooncake_properties_file
+      "${CMAKE_CURRENT_BINARY_DIR}/mooncake-npu-properties.cmake")
+    file(GENERATE OUTPUT "${_mooncake_properties_file}" CONTENT [[
+set_tests_properties(
+  MooncakeKVCacheTransferDefaultTest.NpuLinearIndexerScalePushAndPullRoundTrip
+  PROPERTIES RUN_SERIAL TRUE
+             ENVIRONMENT "HCCL_NPU_SOCKET_PORT_RANGE=auto"
+)
+]])
+    set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+      "${_mooncake_properties_file}")
 endif()
 endif()

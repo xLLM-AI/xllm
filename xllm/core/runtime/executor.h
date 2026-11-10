@@ -35,6 +35,8 @@ class Executor final {
 
   virtual ~Executor() = default;
 
+  void set_dp_process_group(ProcessGroup* group);
+
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
                       std::vector<KVCache>& kv_caches,

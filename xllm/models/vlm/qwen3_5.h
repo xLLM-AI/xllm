@@ -15,7 +15,12 @@ limitations under the License.
 
 #pragma once
 
+#include <algorithm>
+#include <optional>
+#include <unordered_set>
+
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/model_params_view.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/lm_head.h"
 #include "core/layers/common/rotary_embedding_util.h"
@@ -97,20 +102,16 @@ class Qwen3_5ModelImpl final
     return layer::rotary::apply_mrope(cos_sin_, positions, mrope_section_);
   }
 
-  virtual ModelOutput forward(torch::Tensor tokens,
-                              torch::Tensor positions,
-                              std::vector<KVCache>& kv_caches,
-                              const ModelParamsView& input_params) {
-    ModelParamsView& input_params_new =
-        const_cast<ModelParamsView&>(input_params);
-    std::vector<torch::Tensor> deep_stacks;
-
+  ModelOutput forward(torch::Tensor tokens,
+                      torch::Tensor positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelParamsView& input_params) override {
     if (dp_size_ > 1) {
       if (tokens.numel() == 0) {
         tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
         positions = torch::tensor({1}).to(torch::kInt32).to(positions.device());
       }
-      auto& dp_token_nums = input_params_new.parallel.dp_global_token_nums;
+      auto& dp_token_nums = input_params.parallel.dp_global_token_nums;
       std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
     }
 
@@ -122,25 +123,22 @@ class Qwen3_5ModelImpl final
       h = embed_tokens_(tokens);
     }
 
-    if (!input_params_new.attn_metadata) {
-      input_params_new.attn_metadata =
-          std::make_shared<layer::AttentionMetadata>(
-              get_attention_metadata(input_params_new, h));
+    // Prepared graph metadata preserves the captured bucket's history bounds.
+    std::optional<layer::AttentionMetadata> derived_attn_metadata;
+    if (!input_params.attn_metadata) {
+      derived_attn_metadata.emplace(get_attention_metadata(input_params, h));
     }
-
-    auto& attn_metadata = *(input_params_new.attn_metadata);
+    auto& attn_metadata = input_params.attn_metadata
+                              ? *input_params.attn_metadata
+                              : *derived_attn_metadata;
     std::tie(attn_metadata.mrope_cos, attn_metadata.mrope_sin) =
         apply_mrope(positions);
 
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
       auto& layer = layers_[i];
-      h = layer(h,
-                residual,
-                positions,
-                attn_metadata,
-                kv_caches[i],
-                input_params_new);
+      h = layer(
+          h, residual, positions, attn_metadata, kv_caches[i], input_params);
     }
     if (residual.has_value()) {
       h = h + residual.value();

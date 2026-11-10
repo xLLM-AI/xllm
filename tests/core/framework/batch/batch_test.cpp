@@ -1785,10 +1785,6 @@ TEST(BatchTest, Basic) {
   const std::vector<int32_t> token_ids_lens = {6, 5, 16};
   EXPECT_TRUE(equal(sampling_params.unique_token_ids_lens(), token_ids_lens));
 
-  // The model's output hidden_states shape is [num_tokens, hidden_size].
-  // logits_indices is used to select the required corresponding token's hidden_state from it, perform logits calculation, and obtain the probability that the token belongs to each class.
-  // The logits_processor's output logits shape is [num_selected_tokens, vocab_size].
-  // Generally, num_selected_tokens equals num_sample_tokens.
   const std::vector<int32_t> expected_logits_indices = {8,9,10};
   // seq4 has no sampling parameters
   EXPECT_EQ(sampling_params.logits_indices().size(0), batch.size()-1);
