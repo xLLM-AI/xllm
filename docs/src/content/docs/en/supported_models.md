@@ -36,19 +36,13 @@ Language models for chat, reasoning, and text generation.
 
 | Model / family | Ascend NPU | Cambricon MLU | Hygon DCU | Deployment guide |
 | :--- | :---: | :---: | :---: | :--- |
-| DeepSeek-V3 / R1 / V3.1 | ✅ | ✅ | ❌ | Not yet available |
+| DeepSeek-V3 / R1 / V3.1 | ❌ | ✅ | ❌ | Not yet available |
 | DeepSeek-V3.2 | ✅ | ✅ | ❌ | Not yet available |
 | DeepSeek-V4 | ✅ | ✅ | — | [Guide ↗](/en/cookbook/autoregressive_models/deepseek/deepseek_v4/) |
-| Qwen2 / Qwen2.5 / QwQ | ✅ | ✅ | ✅ | Not yet available |
+| Qwen2 / Qwen2.5 / QwQ | ❌ | ✅ | ✅ | Not yet available |
 | Qwen3 | ✅ | ✅ | ✅ | Not yet available |
 | Qwen3 MoE | ✅ | ✅ | ✅ | Not yet available |
 | Qwen3.5 | ✅ | ✅ | — | [Guide ↗](/en/cookbook/autoregressive_models/qwen/qwen3_5/) |
-| Kimi-K2 | ✅ | ❌ | ❌ | Not yet available |
-| Kimi-K2.5 / Kimi-K2.6 | ✅ | — | — | [Guide ↗](/en/cookbook/autoregressive_models/kimi/kimi2_5/) |
-| Llama2 / Llama3 | ✅ | ❌ | ❌ | Not yet available |
-| GLM-4.5 | ✅ | ❌ | ❌ | Not yet available |
-| GLM-4.6 | ✅ | ❌ | ❌ | Not yet available |
-| GLM-4.7 | ✅ | ❌ | ❌ | Not yet available |
 | GLM-5 | ✅ | ✅ | ❌ | [Guide ↗](/en/cookbook/autoregressive_models/glm/glm_5/) |
 | GLM-5.1 / GLM-5.2 / GLM-5.3 | ✅ | ✅ | — | [Guide ↗](/en/cookbook/autoregressive_models/glm/glm_5/) |
 | GLM-5.3-Flash | ✅ | — | — | [Preview guide ↗](/en/cookbook/autoregressive_models/glm/glm_5_3_flash/) |
@@ -68,13 +62,10 @@ Vision-language models for understanding images and text.
 
 | Model / family | Ascend NPU | Cambricon MLU | Hygon DCU | Deployment guide |
 | :--- | :---: | :---: | :---: | :--- |
-| MiniCPM-V | ✅ | ❌ | ❌ | Not yet available |
-| MiMo-VL | ✅ | ❌ | ❌ | Not yet available |
-| Qwen2.5-VL | ✅ | ✅ | ✅ | Not yet available |
-| Qwen3-VL | ✅ | ✅ | ✅ | Not yet available |
-| GLM-4.6V | ✅ | ❌ | ❌ | Not yet available |
+| Qwen2.5-VL | ❌ | ✅ | ✅ | Not yet available |
+| Qwen3-VL (dense) | ✅ | ✅ | ✅ | Not yet available |
+| Qwen3-VL MoE | ❌ | ✅ | ✅ | Not yet available |
 | GLM-5.3-Flash-VL | ✅ | — | — | [Preview guide ↗](/en/cookbook/autoregressive_models/glm/glm_5_3_flash/) |
-| VLM-R1 | ✅ | ❌ | ❌ | Not yet available |
 
 </div>
 
