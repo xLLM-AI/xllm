@@ -113,8 +113,6 @@ class RemoteWorker : public WorkerClient {
   folly::SemiFuture<std::optional<RawForwardOutput>>
   get_last_vlm_step_result_async() override;
 
-  folly::SemiFuture<int64_t> get_active_activation_memory_async() override;
-
   // Check if the connection to worker is healthy
   bool check_health();
 

@@ -115,8 +115,7 @@ class SpeculativeConfig final {
          "speculative_suffix_max_cached_requests",
          "speculative_suffix_use_tree_spec",
          "enable_probabilistic_draft",
-         "enable_mtp_draft_body_tp1",
-         "enable_atb_spec_kernel"}};
+         "enable_mtp_draft_body_tp1"}};
     return kOptionCategory;
   }
 
@@ -141,8 +140,6 @@ class SpeculativeConfig final {
   PROPERTY(bool, enable_probabilistic_draft) = false;
 
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
-
-  PROPERTY(bool, enable_atb_spec_kernel) = false;
 };
 
 }  // namespace xllm

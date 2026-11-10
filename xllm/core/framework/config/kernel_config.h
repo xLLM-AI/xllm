@@ -40,14 +40,8 @@ class KernelConfig final {
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {
         "KERNEL OPTIONS",
-        {"enable_customize_mla_kernel",
-         "npu_kernel_backend",
-         "enable_intralayer_addnorm",
+        {"npu_kernel_backend",
          "enable_fused_mc2",
-         "enable_interlayer_addnorm",
-         "enable_split_rmsnorm_rope",
-         "enable_aclnn_matmul",
-         "enable_aclnn_swiglu",
          "enable_mega_moe",
          "enable_dspark_native_sas",
          "enable_flashcomm1",
@@ -58,21 +52,10 @@ class KernelConfig final {
   }
 
 #if defined(USE_NPU)
-  PROPERTY(bool, enable_customize_mla_kernel) = false;
 
   PROPERTY(std::string, npu_kernel_backend) = "AUTO";
 
-  PROPERTY(bool, enable_intralayer_addnorm) = false;
-
   PROPERTY(int32_t, enable_fused_mc2) = 0;
-
-  PROPERTY(bool, enable_interlayer_addnorm) = false;
-
-  PROPERTY(bool, enable_split_rmsnorm_rope) = false;
-
-  PROPERTY(bool, enable_aclnn_matmul) = false;
-
-  PROPERTY(bool, enable_aclnn_swiglu) = false;
 
   PROPERTY(bool, enable_mega_moe) = false;
 

@@ -283,15 +283,6 @@ RemoteWorker::get_last_vlm_step_result_async() {
   return future;
 }
 
-folly::SemiFuture<int64_t> RemoteWorker::get_active_activation_memory_async() {
-  folly::Promise<int64_t> promise;
-  auto future = promise.getSemiFuture();
-  threadpool_.schedule([this, promise = std::move(promise)]() mutable {
-    channel_->get_active_activation_memory_async(promise);
-  });
-  return future;
-}
-
 bool RemoteWorker::check_health() { return channel_->check_health(); }
 
 folly::SemiFuture<bool> RemoteWorker::sleep_async(MasterStatus master_status,

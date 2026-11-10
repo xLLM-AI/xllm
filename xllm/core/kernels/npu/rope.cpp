@@ -20,6 +20,37 @@ limitations under the License.
 
 namespace xllm::kernel::npu {
 
+void apply_vision_rotary(torch::Tensor& query,
+                         torch::Tensor& key,
+                         const torch::Tensor& cos,
+                         const torch::Tensor& sin,
+                         const torch::Tensor& seq_lens,
+                         std::vector<int32_t>& seq_lens_host) {
+  atb::infer::RopeParam rope_param;
+  rope_param.rotaryCoeff = 2;
+  auto& rope_cache = atb::OpParamCache<atb::infer::RopeParam>::getInstance();
+  atb::Operation* rope = rope_cache.get_operation(rope_param, "RopeOperation");
+  // ATB Rope consumes token rows with flattened attention heads.
+  torch::Tensor query_flat = query.view({query.size(0), -1});
+  torch::Tensor key_flat = key.view({key.size(0), -1});
+  torch::Tensor rotated_q = torch::empty_like(query);
+  torch::Tensor rotated_k = torch::empty_like(key);
+  torch::Tensor rotated_q_flat = rotated_q.view_as(query_flat);
+  torch::Tensor rotated_k_flat = rotated_k.view_as(key_flat);
+  atb::ParamSetter setter;
+  setter.Input(query_flat, true)
+      .Input(key_flat, true)
+      .Input(cos, true)
+      .Input(sin, true)
+      .Input(seq_lens, true)
+      .Output(rotated_q_flat)
+      .Output(rotated_k_flat);
+  setter.variant_pack_.inTensors.at(4).hostData = seq_lens_host.data();
+  atb::run_atb_cmd(rope, setter, "RopeOperation");
+  query = rotated_q;
+  key = rotated_k;
+}
+
 void apply_rotary(torch::Tensor& query,
                   torch::Tensor& key,
                   const torch::Tensor& cos,

@@ -173,15 +173,4 @@ namespace xllm {
     }                                          \
   } while (0)
 
-// Set ATB execute stream with stream guard
-#define SET_ATB_EXECUTE_STREAM(compute_stream, device, context)           \
-  c10::StreamGuard __stream_guard = (compute_stream)->set_stream_guard(); \
-  do {                                                                    \
-    aclrtStream __current_stream =                                        \
-        c10_npu::getCurrentNPUStream((device).index()).stream();          \
-    auto __atb_context =                                                  \
-        const_cast<atb::Context*>((context).get_atb_context());           \
-    __atb_context->SetExecuteStream(__current_stream);                    \
-  } while (0)
-
 }  // namespace xllm

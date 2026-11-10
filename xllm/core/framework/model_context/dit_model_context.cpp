@@ -16,17 +16,6 @@ limitations under the License.
 #include "core/framework/model_context/dit_model_context.h"
 
 #include <torch/torch.h>
-#if defined(USE_NPU)
-#ifdef TORCH_HIGHER_THAN_PTA6
-// #include <torch_npu/csrc/core/npu/NPUFormat.h>
-#include <torch_npu/csrc/framework/OpCommand.h>
-#else
-#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
-#include <torch_npu/csrc/framework/utils/OpPreparation.h>
-#endif
-#include <torch_npu/csrc/libs/init_npu.h>
-#endif
-
 namespace xllm {
 DiTModelContext::DiTModelContext(
     const ParallelArgs& input_parallel_args,
@@ -40,15 +29,7 @@ DiTModelContext::DiTModelContext(
       quant_args_(std::move(quant_args)),
       tensor_options_(tensor_options),
       dit_config_(dit_config),
-      model_type_(model_type) {
-#if defined(USE_NPU)
-  int32_t device_id = tensor_options.device().index();
-  void* stream = c10_npu::getCurrentNPUStream(device_id).stream();
-  atb::CreateContext(&context_);
-  context_->SetExecuteStream(stream);
-  context_->SetAsyncTilingCopyStatus(true);
-#endif
-}
+      model_type_(model_type) {}
 
 const ModelArgs& DiTModelContext::get_model_args(
     const std::string& component) const {
@@ -78,18 +59,10 @@ const QuantArgs& DiTModelContext::get_quant_args(
     defined(USE_DCU)
 ModelContext DiTModelContext::get_model_context(
     const std::string& component) const {
-#if defined(USE_NPU)
-  return ModelContext(parallel_args_,
-                      get_model_args(component),
-                      get_quant_args(component),
-                      tensor_options_,
-                      context_);
-#else
   return ModelContext(parallel_args_,
                       get_model_args(component),
                       get_quant_args(component),
                       tensor_options_);
-#endif
 }
 #endif
 

@@ -92,18 +92,10 @@ ModelContext make_context(const std::string& model_name,
   args.model_type(model_name);
   const torch::TensorOptions options =
       torch::TensorOptions().device(torch::kCPU);
-#if defined(USE_NPU)
-  ModelContext context(ParallelArgs(/*rank=*/0, /*world_size=*/1, nullptr),
-                       args,
-                       QuantArgs{},
-                       options,
-                       /*context=*/nullptr);
-#else
   ModelContext context(ParallelArgs(/*rank=*/0, /*world_size=*/1, nullptr),
                        args,
                        QuantArgs{},
                        options);
-#endif
   context.set_model_impl(model_impl);
   context.set_extension_impl(extension_impl);
   return context;

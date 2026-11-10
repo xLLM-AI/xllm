@@ -113,11 +113,6 @@ class Batch final {
     return state_.sequence_plan().budgets();
   }
 
-  std::unordered_map<uint32_t, uint32_t> cal_seq_exchange_index_test(
-      std::vector<uint32_t>& kv_cache_tokens_num) {
-    return BatchState::cal_seq_exchange_index(kv_cache_tokens_num);
-  }
-
   // Return the current sequence view.
   std::vector<Sequence*> get_sequences();
   std::vector<Sequence*> get_sequences() const;

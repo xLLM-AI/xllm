@@ -372,21 +372,10 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
       const bool python_weights_shared =
           draft_impl_->WorkerImpl::share_weights_from(*impl_);
       if (!python_weights_shared) {
-#if defined(USE_NPU)
-        if (!SpeculativeConfig::is_dflash2_algorithm(
-                options_.speculative_algorithm())) {
-          auto head = impl_->get_npu_lm_head();
-          draft_impl_->set_npu_lm_head(head);
-          auto word_embedding = impl_->get_npu_word_embedding();
-          draft_impl_->set_npu_word_embedding(word_embedding);
-        } else
-#endif
-        {
-          auto head = impl_->get_lm_head();
-          draft_impl_->set_lm_head(head);
-          auto word_embedding = impl_->get_word_embedding();
-          draft_impl_->set_word_embedding(word_embedding);
-        }
+        auto head = impl_->get_lm_head();
+        draft_impl_->set_lm_head(head);
+        auto word_embedding = impl_->get_word_embedding();
+        draft_impl_->set_word_embedding(word_embedding);
       }
     }
 

@@ -44,7 +44,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "common/device_monitor.h"
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "core/common/constants.h"
@@ -89,7 +88,6 @@ limitations under the License.
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/model/aux_hidden_capture.h"
 #include "framework/model/model_params_view.h"
-#include "framework/parallel_state/npu_cp_plan.h"
 #include "framework/state_dict/state_dict.h"
 #include "models/model_registry.h"
 #include "runtime/forward_params.h"
@@ -415,10 +413,6 @@ void disable_layerwise_split_for_draft(ParallelArgs* parallel_args) {
     split["rankIds"] =
         std::vector<uint32_t>{static_cast<uint32_t>(parallel_args->rank())};
   }
-  // NOTE: the atb_speed::base::ATTN_LAYERWISE_SPLIT C++ mapping path is dropped
-  // on this GLM5-next branch (the pinned xllm_atb_layers submodule does not
-  // export that symbol). The JSON attnLayerwiseSplit mapping above is enough
-  // for the models served here.
 }
 
 // Negative cache slots keep the dummy prefill from writing real KV;
@@ -493,9 +487,7 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
       LOG(ERROR) << "Failed to register GlobalVirtualMemoryRegion";
     }
   }
-  if (::xllm::LoadConfig::get_instance().enable_rolling_load()) {
-    load_stream_ = device_.get_stream_from_pool();
-  }
+
   worker_rendezvous_ =
       std::make_unique<WorkerRendezvous>(kv_cache_transfer_, weight_transfer_);
 #else
@@ -531,11 +523,6 @@ void WorkerImpl::drain_pending_execution() {
   device_.set_device();
   CHECK_EQ(compute_stream_->synchronize(), 0);
   CHECK_EQ(prepare_stream_->synchronize(), 0);
-#if defined(USE_NPU)
-  if (load_stream_ != nullptr) {
-    CHECK_EQ(load_stream_->synchronize(), 0);
-  }
-#endif
   worker_execution_drained_ = true;
 }
 
@@ -835,9 +822,6 @@ std::tuple<int64_t, int64_t> WorkerImpl::estimate_kv_cache_capacity() {
 #endif
   const auto available_memory = device_.free_memory();
   const auto total_memory = device_.total_memory();
-  DeviceMonitor::get_instance().set_total_memory(device_id, total_memory);
-  DeviceMonitor::get_instance().set_weight_memory(
-      device_id, total_memory - available_memory - torch_cache);
   return {available_memory + torch_cache, total_memory};
 }
 
@@ -1093,56 +1077,6 @@ bool WorkerImpl::model_supports_model_cp() const {
   model_cp_capable_ = is_npu_model_cp_capable(resolved_name);
   return model_cp_capable_;
 }
-
-#if defined(USE_NPU)
-const CpPlanRuntimeConfig& WorkerImpl::npu_cp_plan_runtime_config() const {
-  if (npu_cp_runtime_config_computed_) {
-    return npu_cp_runtime_config_;
-  }
-  CpPlanRuntimeConfig cfg;
-  // NpuCpPlan is the ATB-side CP substrate: it emits cp_ep_meta for ATB graph
-  // nodes and reads attn tp/cp widths out of MappingNPU's json, which only the
-  // ATB branch populates. TORCH models (deepseek_v4) own their CP split inside
-  // the model, so the worker must not shard a second time here -- and must not
-  // reach the mapping CHECK below with an empty mapping.
-  cfg.enabled =
-      parallel_args_.cp_size() > 1 && Platform::uses_model_cp_sharding() &&
-      ::xllm::KernelConfig::get_instance().npu_kernel_backend() == "ATB" &&
-      owns_npu_parallel_input_prepare() && model_supports_model_cp();
-  cfg.has_prefix_slots =
-      KVCacheConfig::get_instance().enable_prefix_cache() ||
-      SchedulerConfig::get_instance().enable_chunked_prefill();
-  if (cfg.enabled) {
-    const nlohmann::json& mapping = context_.get_parallel_args().mapping_data();
-    CHECK(!mapping.empty()) << "NPU CP plan requires parallel mapping data";
-    cfg.cp_group = parallel_args_.cp_group_;
-    CpPlanConfig& plan_config = cfg.plan_config;
-    plan_config.cp_size = parallel_args_.cp_size();
-    plan_config.cp_rank = parallel_args_.cp_rank();
-    plan_config.block_size = options_.block_size();
-    plan_config.kv_split_size = parallel_args_.kv_split_size_effective();
-    plan_config.kv_split_rank = parallel_args_.kv_split_rank();
-    plan_config.attention_tp_size = mapping["attnTpSize"].get<int32_t>();
-    plan_config.attention_tp_rank = mapping["attnTp"]["rank"].get<int32_t>();
-    plan_config.attention_cp_size = mapping["attnCpSize"].get<int32_t>();
-    plan_config.attention_cp_group_size =
-        static_cast<int32_t>(mapping["attnCp"]["rankIds"].size());
-    plan_config.moe_ep_size =
-        mapping.contains("moeEpSize") ? mapping["moeEpSize"].get<int32_t>() : 1;
-    plan_config.expert_parallel_degree =
-        EPLBConfig::get_instance().expert_parallel_degree();
-    plan_config.num_experts_per_token =
-        context_.get_model_args().num_experts_per_tok();
-    // CP only runs on prefill (decode is filtered in prepare()).
-    plan_config.is_prefill = true;
-    plan_config.device = device_;
-    plan_config.dtype = dtype_;
-  }
-  npu_cp_runtime_config_ = std::move(cfg);
-  npu_cp_runtime_config_computed_ = true;
-  return npu_cp_runtime_config_;
-}
-#endif
 
 #if defined(USE_NPU)
 bool WorkerImpl::uses_npu_dp_ep_padding() const {
@@ -1495,8 +1429,6 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
 
 #if defined(USE_NPU)
     // CP prepare after global attention-meta consumers.
-    processed_input.input_params.parallel.cp_plan.prepare(
-        processed_input, npu_cp_plan_runtime_config());
 
     if (can_prepare_npu_graph_decode_input(input_params)) {
       ModelParamsView execution_params(processed_input.input_params);
@@ -1780,21 +1712,8 @@ bool WorkerImpl::wakeup(const WakeupOptions& options) {
 
 bool WorkerImpl::wakeup_local(const WakeupOptions& options) {
   if (options.master_status == MasterStatus::LIGHT_SLEEP) {
-#if defined(USE_NPU)
-    if (::xllm::LoadConfig::get_instance().enable_rolling_load() &&
-        !is_spec_draft_) {
-      // Reuse rolling runtime state and refresh rolling initialization on
-      // wakeup without re-reading checkpoint in LIGHT_SLEEP.
-      if (!init_rolling_runtime_state()) {
-        LOG(ERROR) << "Failed to initialize rolling runtime state on wakeup";
-        return false;
-      }
-    } else {
-      model()->reload_model_weights();
-    }
-#else
     model()->reload_model_weights();
-#endif
+
   } else if (options.master_status == MasterStatus::DEEP_SLEEP) {
     auto model_loader = ModelLoader::create(model_weights_path_);
     this->load_model(std::move(model_loader));
@@ -1805,11 +1724,6 @@ bool WorkerImpl::wakeup_local(const WakeupOptions& options) {
 #if defined(USE_NPU)
 bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   // Prefer segment-based transfer if available, fallback to legacy offsets.
-  if (::xllm::LoadConfig::get_instance().enable_rolling_load()) {
-    LOG(ERROR) << "Remote weight wakeup does not support "
-                  "::xllm::LoadConfig::get_instance().enable_rolling_load()";
-    return false;
-  }
 
   bool use_segments = !options.src_weight_segments.empty();
   if (use_segments) {
@@ -1985,10 +1899,6 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
       args.layers_to_capture(
           read_capture_layer_ids(options_.draft_model_path().value()));
     }
-  } else if (options_.enable_speculative_decode() &&
-             ::xllm::SpeculativeConfig::get_instance()
-                 .enable_atb_spec_kernel()) {
-    args.num_speculative_tokens(options_.num_speculative_tokens());
   }
   if (options_.enable_speculative_decode() && !options_.is_draft_engine() &&
       SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm) &&
@@ -2148,47 +2058,9 @@ torch::Tensor WorkerImpl::take_draft_token_id_offsets() {
 
 void WorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {
   CHECK(model() != nullptr) << "Model is not initialized.";
-#if defined(USE_NPU)
-  // Rolling mode uses host-pinned weights as the single source of truth:
-  // lazy_load_model -> init_rolling_runtime_state() to finish rolling init.
-  if (::xllm::LoadConfig::get_instance().enable_rolling_load() &&
-      !is_spec_draft_) {
-    model()->lazy_load_model(std::move(loader));
-    CHECK(init_rolling_runtime_state())
-        << "Failed to initialize rolling runtime state during load_model";
-    return;
-  }
-#endif
 
   model()->load_model(std::move(loader));
 }
-
-#if defined(USE_NPU)
-bool WorkerImpl::init_rolling_runtime_state() {
-  // Draft model (speculative decoding) has only 1 decoder layer, skip rolling
-  // load.
-  if (!::xllm::LoadConfig::get_instance().enable_rolling_load() ||
-      is_spec_draft_) {
-    return true;
-  }
-
-  CHECK(model() != nullptr) << "Model is not initialized for rolling load";
-  CHECK(load_stream_ != nullptr) << "load_stream_ is null for rolling load";
-
-  // Rolling runtime ownership is moved into model.
-  // Worker provides runtime dependencies and delegates
-  // initialization/refresh.
-  const int32_t n_slots =
-      ::xllm::LoadConfig::get_instance().rolling_load_num_cached_layers();
-  const int32_t n_rolling_slots =
-      ::xllm::LoadConfig::get_instance().rolling_load_num_rolling_slots();
-  return model()->init_or_refresh_rolling_runtime(load_stream_.get(),
-                                                  compute_stream_.get(),
-                                                  n_slots,
-                                                  n_rolling_slots,
-                                                  options_.model_id());
-}
-#endif
 
 void WorkerImpl::lazy_load_model(std::unique_ptr<ModelLoader> loader) {
   CHECK(model() != nullptr) << "Model is not initialized.";
@@ -2410,12 +2282,6 @@ std::vector<uint8_t> WorkerImpl::prefetch_kv_blocks(
     return std::vector<uint8_t>(block_transfer_info.size(), /*value=*/0);
   }
   return hierarchy_kv_cache_transfer_->prefetch_kv_blocks(block_transfer_info);
-}
-
-int64_t WorkerImpl::get_active_activation_memory() {
-  return DeviceMonitor::get_instance()
-      .get_device_stats(device_.index())
-      .active_activation_memory;
 }
 
 // hierarchy temporarily disabled during the block-manager refactor

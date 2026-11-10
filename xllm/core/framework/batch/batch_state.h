@@ -89,12 +89,9 @@ class BatchState final {
                                               const ModelArgs& args,
                                               ThreadPool* thread_pool,
                                               int32_t cp_size);
-  static std::unordered_map<uint32_t, uint32_t> cal_seq_exchange_index(
-      std::vector<uint32_t>& kv_cache_tokens_num);
 
  private:
   void retain_host_restore_blocks(Sequence& sequence);
-  void dp_balance_shuffle_seqs();
   BatchSequencePlan sequence_plan_;
   std::vector<SequencesGroup*> sequence_groups_;
   std::vector<torch::Tensor> input_embeddings_vec_;

@@ -9,9 +9,9 @@ xLLM 可以分别为 KV Cache 和模型权重启用虚拟内存管理（VMM）�
 | 开关 | 用途 |
 |:-----|:-----|
 | `enable_vmm_kvcache` | 为 KV Cache 使用 VMM。关闭时使用物理 KV Cache 实现。 |
-| `enable_vmm_weights` | 为模型权重使用 VMM，并隐式启用 manual loader。 |
+| `enable_vmm_weights` | 为模型权重使用 VMM。 |
 
-两个开关可以单独启用，也可以同时启用，使 KV Cache 和模型权重共享 VMM 池。仅启用 KV VMM 时继续使用配置的权重加载器，不会隐式启用 `enable_manual_loader`；仅启用权重 VMM 时继续使用物理 KV Cache。权重 VMM 目前仅支持 LLM 后端。模型休眠、唤醒和 fork 需要设置 `enable_vmm_weights=true`。仅启用权重 VMM 时要求 `vmm_elastic=true`，避免固定权重页池占用物理 KV Cache 所需的显存。所有开关和默认值见 [CLI 参数参考](/zh/cli_reference/)。
+两个开关可以单独启用，也可以同时启用，使 KV Cache 和模型权重共享 VMM 池。仅启用权重 VMM 时继续使用物理 KV Cache。权重 VMM 目前仅支持 LLM 后端。模型休眠、唤醒和 fork 需要设置 `enable_vmm_weights=true`。仅启用权重 VMM 时要求 `vmm_elastic=true`，避免固定权重页池占用物理 KV Cache 所需的显存。所有开关和默认值见 [CLI 参数参考](/zh/cli_reference/)。
 
 ## 虚拟 KV Cache 的前缀缓存
 

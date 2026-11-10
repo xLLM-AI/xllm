@@ -1129,7 +1129,6 @@ TEST(VirtualMemoryConfigTest, JsonLoadsAndExportsIndependentMemoryModes) {
 
       EXPECT_EQ(kv_cache_config.enable_vmm_kvcache(), enable_kvcache);
       EXPECT_EQ(load_config.enable_vmm_weights(), enable_weights);
-      EXPECT_FALSE(load_config.enable_manual_loader());
       EXPECT_EQ(distributed_config.worker_memory_master_node_addr(),
                 "192.0.2.1:19889");
 

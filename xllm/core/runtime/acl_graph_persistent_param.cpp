@@ -50,7 +50,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/model/model_type.h"
 #include "core/util/tensor_options.h"
-#include "pytorch/adapter/utils/utils.h"
+#include "custom_functions_npu/atb_common.h"
 
 namespace xllm::npu {
 
@@ -67,10 +67,7 @@ int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
   CHECK_GT(options.num_decoding_tokens(), 0)
       << "num_decoding_tokens must be > 0 for graph token capacity";
   int64_t token_capacity = options.max_seqs_per_batch();
-  if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
-    return runtime::get_decode_graph_token_bucket(
-        token_capacity, options.enable_graph_mode_decode_no_padding());
-  }
+
   if (options.enable_speculative_decode() && !options.is_draft_engine()) {
     token_capacity *= options.num_decoding_tokens();
   }
@@ -377,29 +374,6 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       .post_lmhead_gather_indices(
           torch::zeros({padding_buf_capacity}, int_opts));
 
-  persistent_cp_ep_meta_.attention_tp_padding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.attention_tp_unpadding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.ffn_padding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.ffn_unpadding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.lm_head_skip_padding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.prenorm_gather_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.attention_padding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.attention_unpadding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.dynamic_ep_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.moe_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.expert_array =
-      torch::zeros({padding_buf_capacity, 1}, int_opts);
-
   // Do not need to create ATB context and custom paged attention operation
   if (args_.head_dim() == 0) {
     return;
@@ -511,35 +485,6 @@ void GraphPersistentParam::update_persistent_dp_ep_padding(
                        src.post_lmhead_gather_indices());
 }
 
-void GraphPersistentParam::update_persistent_cp_ep_meta(
-    const CpEpMeta& src,
-    uint32_t /*padded_tokens*/) {
-  if (!src.attention_tp_padding_indices.defined() ||
-      src.attention_tp_padding_indices.numel() == 0) {
-    return;
-  }
-  copy_into_persistent(persistent_cp_ep_meta_.attention_tp_padding_indices,
-                       src.attention_tp_padding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.attention_tp_unpadding_indices,
-                       src.attention_tp_unpadding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.ffn_padding_indices,
-                       src.ffn_padding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.ffn_unpadding_indices,
-                       src.ffn_unpadding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.lm_head_skip_padding_indices,
-                       src.lm_head_skip_padding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.prenorm_gather_indices,
-                       src.prenorm_gather_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.attention_padding_indices,
-                       src.attention_padding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.attention_unpadding_indices,
-                       src.attention_unpadding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.dynamic_ep_indices,
-                       src.dynamic_ep_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.moe_indices, src.moe_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.expert_array, src.expert_array);
-}
-
 void GraphPersistentParam::replace_capture_dp_ep_padding(
     const DpEpPaddingData& src,
     uint32_t padded_tokens,
@@ -585,42 +530,6 @@ void GraphPersistentParam::replace_capture_dp_ep_padding(
   dst.post_lmhead_gather_indices(
       slice_like_source(persistent_dp_ep_padding_.post_lmhead_gather_indices(),
                         src.post_lmhead_gather_indices()));
-}
-
-void GraphPersistentParam::replace_capture_cp_ep_meta(const CpEpMeta& src,
-                                                      CpEpMeta& dst) const {
-  if (!src.attention_tp_padding_indices.defined() ||
-      src.attention_tp_padding_indices.numel() == 0) {
-    return;
-  }
-  dst.attention_tp_padding_indices =
-      slice_like_source(persistent_cp_ep_meta_.attention_tp_padding_indices,
-                        src.attention_tp_padding_indices);
-  dst.attention_tp_unpadding_indices =
-      slice_like_source(persistent_cp_ep_meta_.attention_tp_unpadding_indices,
-                        src.attention_tp_unpadding_indices);
-  dst.ffn_padding_indices = slice_like_source(
-      persistent_cp_ep_meta_.ffn_padding_indices, src.ffn_padding_indices);
-  dst.ffn_unpadding_indices = slice_like_source(
-      persistent_cp_ep_meta_.ffn_unpadding_indices, src.ffn_unpadding_indices);
-  dst.lm_head_skip_padding_indices =
-      slice_like_source(persistent_cp_ep_meta_.lm_head_skip_padding_indices,
-                        src.lm_head_skip_padding_indices);
-  dst.prenorm_gather_indices =
-      slice_like_source(persistent_cp_ep_meta_.prenorm_gather_indices,
-                        src.prenorm_gather_indices);
-  dst.attention_padding_indices =
-      slice_like_source(persistent_cp_ep_meta_.attention_padding_indices,
-                        src.attention_padding_indices);
-  dst.attention_unpadding_indices =
-      slice_like_source(persistent_cp_ep_meta_.attention_unpadding_indices,
-                        src.attention_unpadding_indices);
-  dst.dynamic_ep_indices = slice_like_source(
-      persistent_cp_ep_meta_.dynamic_ep_indices, src.dynamic_ep_indices);
-  dst.moe_indices =
-      slice_like_source(persistent_cp_ep_meta_.moe_indices, src.moe_indices);
-  dst.expert_array =
-      slice_like_source(persistent_cp_ep_meta_.expert_array, src.expert_array);
 }
 
 GraphPersistentParam::~GraphPersistentParam() {
@@ -1376,8 +1285,6 @@ std::optional<Params> GraphPersistentParam::update(
           : 1;
   update_persistent_dp_ep_padding(
       params.parallel.dp_ep_padding_data, padded_num_tokens, dp_layout_size);
-  update_persistent_cp_ep_meta(params.parallel.cp_plan.cp_ep_meta(),
-                               padded_num_tokens);
   if (::xllm::KernelConfig::get_instance().enable_mega_moe()) {
     // Empty DP shards are padded with one fake token by the worker so graph
     // capture sees a non-empty batch; the mega mask must mark that row
@@ -1595,11 +1502,6 @@ std::optional<Params> GraphPersistentParam::update(
           persistent_mega_active_mask_.slice(
               /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
     }
-    CpEpMeta capture_cp_ep_meta = params.parallel.cp_plan.cp_ep_meta();
-    replace_capture_cp_ep_meta(params.parallel.cp_plan.cp_ep_meta(),
-                               capture_cp_ep_meta);
-    graph_params->parallel.cp_plan.replace_cp_ep_meta_storage(
-        std::move(capture_cp_ep_meta));
 
     auto& qsl = graph_params->parallel.query_start_loc;
     qsl.clear();
@@ -1979,16 +1881,15 @@ void GraphPersistentParam::plan_paged_attention_tiling(
     aclrtStream stream,
     bool copy_to_device) {
   // Convert torch tensors to atb tensors
-  atb::Tensor atb_k_cache = atb_speed::Utils::AtTensor2Tensor(k_cache);
-  atb::Tensor atb_v_cache = atb_speed::Utils::AtTensor2Tensor(v_cache);
-  atb::Tensor atb_block_tables =
-      atb_speed::Utils::AtTensor2Tensor(block_tables);
+  atb::Tensor atb_k_cache = atb::at_tensor_to_atb_tensor(k_cache);
+  atb::Tensor atb_v_cache = atb::at_tensor_to_atb_tensor(v_cache);
+  atb::Tensor atb_block_tables = atb::at_tensor_to_atb_tensor(block_tables);
   // Get context_lens from input_params.attention.device.kv_seq_lens
-  atb::Tensor atb_context_lens = atb_speed::Utils::AtTensor2Tensor(
-      input_params.attention.device.kv_seq_lens);
+  atb::Tensor atb_context_lens =
+      atb::at_tensor_to_atb_tensor(input_params.attention.device.kv_seq_lens);
   atb_context_lens.hostData =
       const_cast<int32_t*>(input_params.attention.host.kv_seq_lens.data());
-  atb::Tensor atb_tiling_data = atb_speed::Utils::AtTensor2Tensor(tiling_data_);
+  atb::Tensor atb_tiling_data = atb::at_tensor_to_atb_tensor(tiling_data_);
 
   atb_tiling_data.desc.dtype = ACL_UINT32;
 
@@ -2020,7 +1921,7 @@ void GraphPersistentParam::plan_paged_attention_tiling(
   atb::VariantPack custom_variantPack;
   // Conditionally include mask based on need_update_attn_mask_
   if (need_update_attn_mask_) {
-    atb::Tensor atb_mask = atb_speed::Utils::AtTensor2Tensor(persistent_mask_);
+    atb::Tensor atb_mask = atb::at_tensor_to_atb_tensor(persistent_mask_);
     custom_variantPack.inTensors = {atb_query,
                                     atb_k_cache,
                                     atb_v_cache,

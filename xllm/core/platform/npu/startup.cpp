@@ -494,7 +494,7 @@ class VendorConfigLock {
     const bool is_python = ModelConfig::is_python_model_impl(
         ModelConfig::get_instance().model_impl());
     desired_order_ = desired_order_for(is_python);
-    backend_label_ = is_python ? "python" : "atb";
+    backend_label_ = is_python ? "python" : "native";
 
     // Missing vendor libraries stop CANN's search, hiding later usable vendors.
     namespace fs = std::filesystem;

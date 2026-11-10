@@ -23,10 +23,8 @@ if(USE_NPU)
       absl::synchronization
       absl::time
       GTest::gtest_main
-      xllm_atb_layers
       nnopbase
       ascendcl
-      atb
       c_sec
       spdlog::spdlog
   )
@@ -70,19 +68,6 @@ if(USE_NPU)
                                c_sec
                                nnopbase)
 
-  cc_test(
-    NAME
-      npu_cp_plan_test
-    CPU_ONLY
-    SRCS
-      npu_cp_plan_test.cpp
-    DEPS
-      parallel_state
-      torch
-      absl::synchronization
-      absl::time
-      GTest::gtest_main
-  )
 
   cc_test(
     NAME

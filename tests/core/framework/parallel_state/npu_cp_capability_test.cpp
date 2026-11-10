@@ -32,33 +32,21 @@ namespace xllm {
 namespace {
 
 TEST(NpuCpCapabilityTest, RegisteredCpCapableModels) {
-  // The models that opt into NPU model-side CP. deepseek_v32 / glm_moe_dsa
-  // drive it through the ATB NpuCpPlan pipeline; deepseek_v4 owns its split
-  // inside the model on the TORCH backend. Both are advertised here because
-  // this is the master-side startup gate, not the worker-side sharding switch.
-  EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v32"));
-  EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v32_mtp"));
+  // Native DeepSeekV4 owns context-parallel input sharding.
   EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v4"));
   EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v4_mtp"));
-  EXPECT_TRUE(is_npu_model_cp_capable("glm_moe_dsa"));
-  EXPECT_TRUE(is_npu_model_cp_capable("glm_moe_dsa_mtp"));
   // The registry must advertise MODEL for these and NONE for the rest.
-  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v32"),
+  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v4"),
             CpShardingMode::MODEL);
-  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("glm_moe_dsa_mtp"),
+  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v4_mtp"),
             CpShardingMode::MODEL);
 }
 
 TEST(NpuCpCapabilityTest, UnregisteredModelsAreNotCapable) {
-  // deepseek_v3_mtp uses the DeepSeekV2 decoder without the V3.2 ATB CP
-  // metadata/TP contract; it must NOT be advertised as CP-capable so that
-  // validate_context_parallel_config rejects deepseek_v3_mtp + cp_size>1 at
-  // startup.
   EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v3_mtp"));
   EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v3"));
   // Unrelated NPU models are not CP-capable.
   EXPECT_FALSE(is_npu_model_cp_capable("qwen3"));
-  EXPECT_FALSE(is_npu_model_cp_capable("qwen3_atb"));
   // Hybrid linear attention models are the only ones the graph executor takes
   // through spec-verify chunked prefill; none of them is CP-capable, which is
   // what keeps that capture path CP-free.
@@ -75,7 +63,7 @@ TEST(NpuCpCapabilityTest, RegistrationIsIdempotent) {
   // Repeated calls must not flip the capability and must keep returning the
   // same result (std::call_once guards the one-shot registration).
   for (int i = 0; i < 3; ++i) {
-    EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v32"));
+    EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v4"));
     EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v3_mtp"));
   }
 }

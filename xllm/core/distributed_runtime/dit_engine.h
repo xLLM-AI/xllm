@@ -43,7 +43,6 @@ class DiTEngine : public Engine {
   bool init();
 
   // return the active activation memory
-  std::vector<int64_t> get_active_activation_memory() const;
 
   std::shared_ptr<DistributedWorkerManager> get_distributed_worker_manager()
       const {

@@ -25,7 +25,6 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
-#include "common/device_monitor.h"
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/common/global_flags.h"
@@ -230,10 +229,5 @@ folly::SemiFuture<folly::Unit> DiTWorkerImpl::process_group_test_async() {
 }
 
 // prepare input for execution
-int64_t DiTWorkerImpl::get_active_activation_memory() {
-  return DeviceMonitor::get_instance()
-      .get_device_stats(device_.index())
-      .active_activation_memory;
-}
 
 }  // namespace xllm

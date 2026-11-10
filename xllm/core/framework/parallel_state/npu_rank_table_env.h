@@ -21,7 +21,7 @@ namespace xllm {
 namespace parallel_state {
 
 // torch_npu ProcessGroupHCCL consumes ranktable through this HCCL environment
-// variable. Keep it in one place so ATB and TORCH routes can share the same
+// variable. Keep it in one place so NPU process groups can share the same
 // user-facing --rank_tablefile option.
 void sync_torch_npu_rank_table_file_env(const std::string& rank_tablefile);
 

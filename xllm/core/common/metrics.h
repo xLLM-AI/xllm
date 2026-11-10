@@ -302,8 +302,5 @@ DECLARE_COUNTER(engine_latency_seconds);
 DECLARE_GAUGE(total_memory_size_in_kilobytes);
 DECLARE_GAUGE(weight_size_in_kilobytes);
 DECLARE_GAUGE(total_kv_cache_size_in_kilobytes);
-DECLARE_GAUGE(total_activation_size_in_kilobytes);
 
 DECLARE_MULTI_HISTOGRAM(active_kv_cache_size_in_kilobytes);
-DECLARE_MULTI_HISTOGRAM(prefill_active_activation_size_in_kilobytes);
-DECLARE_MULTI_HISTOGRAM(decode_active_activation_size_in_kilobytes);

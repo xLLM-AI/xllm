@@ -24,8 +24,6 @@ limitations under the License.
 
 #if defined(USE_NPU)
 #include "core/framework/parallel_state/npu_process_group.h"
-#include "xllm_atb_layers/core/include/atb_speed/base/external_comm_manager.h"
-#include "xllm_atb_layers/core/include/atb_speed/utils/singleton.h"
 #elif defined(USE_MLU)
 #include "mlu_process_group.h"
 #elif defined(USE_CUDA) || defined(USE_DCU)
@@ -146,67 +144,6 @@ std::string get_rank_table_server_host(int32_t global_rank,
   return fallback_host;
 }
 
-struct DispatchAndCombineComm {
-  nlohmann::json mapping_data;
-  atb_speed::base::Mapping mapping;
-  std::string domain;
-  HcclComm comm = nullptr;
-};
-
-DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
-                                                        int32_t world_size,
-                                                        int32_t dp_size,
-                                                        int32_t ep_size,
-                                                        int32_t cp_size,
-                                                        bool initialize_hccl) {
-  const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
-  const int32_t attn_tp_size = world_size / (dp_size * normalized_cp_size);
-
-  MappingNPU::Options mapping_options;
-  mapping_options.dp_size(dp_size)
-      .tp_size(attn_tp_size)
-      .moe_tp_size(world_size / ep_size)
-      .moe_ep_size(ep_size)
-      .pp_size(1)
-      .sp_size(1)
-      .cp_size(normalized_cp_size)
-      .layerwise_split_size(
-          ParallelConfig::get_instance().layerwise_split_size());
-
-  MappingNPU mapping_npu(EPLBConfig::get_instance().rank_tablefile(),
-                         world_size,
-                         global_rank,
-                         mapping_options);
-  DispatchAndCombineComm result;
-  result.mapping_data = mapping_npu.to_json();
-  result.mapping.ParseParam(result.mapping_data);
-  if (!initialize_hccl) {
-    return result;
-  }
-  result.mapping.InitGlobalCommDomain(
-      ParallelConfig::get_instance().communication_backend());
-
-  auto moe_ep_parallel_info = result.mapping.Get(atb_speed::base::MOE_EP);
-  const bool moe_ep_is_world =
-      moe_ep_parallel_info.rankIds.size() == static_cast<size_t>(world_size);
-  const uint32_t comm_buffer_size =
-      moe_ep_is_world ? 0 : moe_ep_parallel_info.bufferSize;
-  const bool reuse_comm_domain = moe_ep_is_world;
-  result.domain =
-      atb_speed::GetSingleton<atb_speed::ExternalCommManager>().GetCommDomain(
-          moe_ep_parallel_info.groupId,
-          moe_ep_parallel_info.rankIds,
-          moe_ep_parallel_info.rank,
-          ParallelConfig::get_instance().communication_backend(),
-          comm_buffer_size,
-          0,
-          reuse_comm_domain);
-  result.comm =
-      atb_speed::GetSingleton<atb_speed::ExternalCommManager>().GetCommPtr(
-          result.domain);
-  return result;
-}
-
 #endif
 
 std::string get_context_parallel_group_host(int32_t group_root_rank,
@@ -236,58 +173,6 @@ CollectiveCommunicator::CollectiveCommunicator(int32_t global_rank,
   const ParallelConfig& config = ParallelConfig::get_instance();
   parallel_args_->kv_split_size(config.kv_split_size());
   parallel_args_->layerwise_split_size(config.layerwise_split_size());
-#if defined(USE_NPU)
-  if (KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
-    return;
-  }
-
-  // HACK: MappingNPU internally uses a static counter to auto-assign
-  // buffer_offset for multi-model scenarios. This is a hack and should be
-  // refactored later.
-  const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
-  const int32_t attn_tp_size = world_size / (dp_size * normalized_cp_size);
-  // FLAGS_kv_split_size: 0 -> leave Options::kv_split_size = -1 so that
-  // MappingNPU falls back to cp_size (byte-equivalent). >0 -> propagate
-  // verbatim; MappingNPU::validate() enforces divisibility against cp_size.
-  const int32_t kv_split_size = parallel_args_->kv_split_size();
-  const int32_t mapping_kv_split_size = kv_split_size > 0 ? kv_split_size : -1;
-  MappingNPU::Options mapping_options;
-  mapping_options.dp_size(dp_size)
-      .tp_size(attn_tp_size)
-      .moe_tp_size(world_size / ep_size)
-      .moe_ep_size(ep_size)
-      .pp_size(1)
-      .sp_size(1)
-      .cp_size(normalized_cp_size)
-      .kv_split_size(mapping_kv_split_size)
-      .layerwise_split_size(parallel_args_->layerwise_split_size());
-  MappingNPU mapping_npu(::xllm::EPLBConfig::get_instance().rank_tablefile(),
-                         world_size,
-                         global_rank,
-                         mapping_options);
-  auto mapping_data = mapping_npu.to_json();
-  atb_speed::base::Mapping mapping;
-  mapping.ParseParam(mapping_data);
-  mapping.InitGlobalCommDomain(
-      ::xllm::ParallelConfig::get_instance().communication_backend());
-  auto moeEpParallelInfo = mapping.Get(atb_speed::base::MOE_EP);
-  auto dispatchAndCombinecommDomain =
-      atb_speed::GetSingleton<atb_speed::ExternalCommManager>().GetCommDomain(
-          moeEpParallelInfo.groupId,
-          moeEpParallelInfo.rankIds,
-          moeEpParallelInfo.rank,
-          ::xllm::ParallelConfig::get_instance().communication_backend(),
-          moeEpParallelInfo.bufferSize,
-          false);
-  auto dispatchAndCombineHcclComm =
-      atb_speed::GetSingleton<atb_speed::ExternalCommManager>().GetCommPtr(
-          dispatchAndCombinecommDomain);
-  parallel_args_->mapping_data(std::move(mapping_data));
-  parallel_args_->mapping(std::move(mapping));
-  parallel_args_->dispatchAndCombinecommDomain(
-      std::move(dispatchAndCombinecommDomain));
-  parallel_args_->dispatchAndCombineHcclComm(dispatchAndCombineHcclComm);
-#endif
 }
 
 void CollectiveCommunicator::create_process_groups(
@@ -322,53 +207,6 @@ void CollectiveCommunicator::create_process_groups(
     parallel_args_->encoder_dp_group_ = encoder_dp_group_.get();
     port += dp_size;
   }
-
-#if defined(USE_NPU)
-  if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "ATB") {
-    if (::xllm::KernelConfig::get_instance().enable_mega_moe()) {
-      const int32_t attn_tp_size = world_size / (dp_size * cp_size);
-      const int32_t moe_ep_port = port + 1 + (cp_size > 1 ? attn_tp_size : 0);
-      moe_ep_group_ = create_process_group(global_rank,
-                                           world_size,
-                                           ep_size,
-                                           moe_ep_port,
-                                           true,
-                                           host,
-                                           "moe_ep_group",
-                                           device);
-      parallel_args_->moe_ep_group_ = moe_ep_group_.get();
-    }
-
-    // ATB owns TP/DP/EP; build a standalone HCCL CP ProcessGroup for
-    // model-side AllGather.
-    if (cp_size > 1) {
-      const parallel_state::ParallelTopology topology(global_rank,
-                                                      world_size,
-                                                      dp_size,
-                                                      ep_size,
-                                                      cp_size,
-                                                      /*dcp_size=*/1);
-      const std::vector<int32_t>& cp_ranks = topology.pcp_group_ranks();
-      const int32_t cp_local_rank = topology.pcp_rank();
-      CHECK_EQ(cp_ranks.size(), cp_size);
-      CHECK_GE(cp_local_rank, 0);
-      CHECK_LT(cp_local_rank, cp_size);
-      CHECK_EQ(cp_ranks[cp_local_rank], global_rank);
-      // Unique TCPStore port per CP group (keyed by attn TP rank).
-      cp_group_ = create_process_group(global_rank,
-                                       cp_local_rank,
-                                       cp_ranks,
-                                       world_size,
-                                       cp_size,
-                                       port + 1 + topology.tp_rank(),
-                                       host,
-                                       "cp_group",
-                                       device);
-      parallel_args_->cp_group_ = cp_group_.get();
-    }
-    return;
-  }
-#endif
 
   const int32_t world_group_port = ++port;
   process_group_ = create_process_group(global_rank,
@@ -631,12 +469,20 @@ void CollectiveCommunicator::create_process_groups(
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
       ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
       ep_size == world_size) {
-    // Torch already owns the HCCL process group. Creating an ATB rank-table
-    // communicator here initializes HCCL a second time for full-world EP.
-    auto dispatch_and_combine_comm = create_dispatch_and_combine_comm(
-        global_rank, world_size, dp_size, ep_size, cp_size, false);
-    parallel_args_->mapping_data(dispatch_and_combine_comm.mapping_data);
-    parallel_args_->mapping(dispatch_and_combine_comm.mapping);
+    MappingNPU::Options mapping_options;
+    mapping_options.dp_size(dp_size)
+        .tp_size(topology.tp_size())
+        .moe_tp_size(topology.moe_tp_size())
+        .moe_ep_size(ep_size)
+        .pp_size(1)
+        .sp_size(1)
+        .cp_size(normalized_cp_size)
+        .layerwise_split_size(parallel_args_->layerwise_split_size());
+    MappingNPU mapping(EPLBConfig::get_instance().rank_tablefile(),
+                       world_size,
+                       global_rank,
+                       mapping_options);
+    parallel_args_->mapping_data(mapping.to_json());
     CHECK(parallel_args_->moe_ep_group_ != nullptr)
         << "EP2 dispatch/combine requires a Torch MoE EP process group.";
     const std::string dispatch_and_combine_comm_name =

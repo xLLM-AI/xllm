@@ -115,23 +115,6 @@ void DistributedWorkerManager::get_cache_info(
   }
 }
 
-std::vector<int64_t> DistributedWorkerManager::get_active_activation_memory()
-    const {
-  std::vector<folly::SemiFuture<int64_t>> futures;
-  futures.reserve(worker_clients_.size());
-  for (const auto& worker : worker_clients_) {
-    futures.emplace_back(worker->get_active_activation_memory_async());
-  }
-
-  auto results = folly::collectAll(futures).get();
-  std::vector<int64_t> active_activation_memories;
-  active_activation_memories.reserve(worker_clients_.size());
-  for (const auto& result : results) {
-    active_activation_memories.emplace_back(result.value());
-  }
-  return active_activation_memories;
-}
-
 void DistributedWorkerManager::ensure_link_threadpool() {
   if (link_threadpool_ != nullptr) {
     return;

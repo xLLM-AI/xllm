@@ -591,23 +591,6 @@ bool CommChannel::get_last_vlm_step_result_async(
   return true;
 }
 
-bool CommChannel::get_active_activation_memory_async(
-    folly::Promise<int64_t>& promise) {
-  proto::Empty req;
-  proto::ActivationMemory mem;
-  brpc::Controller cntl;
-
-  stub_->GetActiveActivationMemory(&cntl, &req, &mem, nullptr);
-  if (cntl.Failed()) {
-    LOG(ERROR) << "get_active_activation_memory_async failed: "
-               << cntl.ErrorText();
-    promise.setValue(0);
-    return false;
-  }
-  promise.setValue(mem.active_activation_memory());
-  return true;
-}
-
 bool CommChannel::execute_llm_model_with_brpc(
     const LlmForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {

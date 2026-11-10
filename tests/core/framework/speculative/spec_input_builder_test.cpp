@@ -248,7 +248,7 @@ TEST(SpecDecodeInputBuilderTest, VlmVerifyRowsPreserveVisionState) {
             deep_stack.data_ptr());
 }
 
-TEST(SpecDecodeInputBuilderTest, ValidateInputsNonAtbExpansion) {
+TEST(SpecDecodeInputBuilderTest, ValidateInputsDecodeExpansion) {
   ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
   params.meta.num_sequences = 2;
   const int32_t num_speculative_tokens = 2;
@@ -392,11 +392,11 @@ TEST(SpecDecodeInputBuilderTest, ValidateRowsStartFromCorrectedCurrentView) {
   EXPECT_EQ(buf.out_kv_seq_lens, std::vector<int32_t>({7, 8, 10}));
 }
 
-TEST(SpecDecodeInputBuilderTest, ValidateInputsAtbChunkedPrefillShape) {
+TEST(SpecDecodeInputBuilderTest, ValidateInputsChunkedPrefillShape) {
   std::vector<int32_t> kv_seq_lens = {5, 9};
-  std::vector<int32_t> atb_kv_seq_lens;
-  std::vector<int32_t> atb_q_seq_lens;
-  int32_t atb_kv_max_seq_len = 0;
+  std::vector<int32_t> chunked_kv_seq_lens;
+  std::vector<int32_t> chunked_q_seq_lens;
+  int32_t chunked_kv_max_seq_len = 0;
   const int32_t num_val_tokens = 3;
 
   auto kv_slice = to_slice(kv_seq_lens);
@@ -404,13 +404,13 @@ TEST(SpecDecodeInputBuilderTest, ValidateInputsAtbChunkedPrefillShape) {
     int32_t kv_len = calc_kv_len(kv_slice, seq_id, /*offset=*/0);
     int32_t kv_len_after_validation = kv_len + num_val_tokens;
     update_kv_seq_lens_and_max(
-        atb_kv_seq_lens, kv_len_after_validation, atb_kv_max_seq_len);
-    atb_q_seq_lens.emplace_back(num_val_tokens);
+        chunked_kv_seq_lens, kv_len_after_validation, chunked_kv_max_seq_len);
+    chunked_q_seq_lens.emplace_back(num_val_tokens);
   }
 
-  EXPECT_EQ(atb_kv_seq_lens, std::vector<int32_t>({8, 12}));
-  EXPECT_EQ(atb_q_seq_lens, std::vector<int32_t>({3, 3}));
-  EXPECT_EQ(atb_kv_max_seq_len, 12);
+  EXPECT_EQ(chunked_kv_seq_lens, std::vector<int32_t>({8, 12}));
+  EXPECT_EQ(chunked_q_seq_lens, std::vector<int32_t>({3, 3}));
+  EXPECT_EQ(chunked_kv_max_seq_len, 12);
 }
 
 TEST(SpecDecodeInputBuilderTest, FirstDecodeInputsFixAndNonFixMix) {

@@ -48,7 +48,6 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "core/framework/model_loader/weight/mooncake_weight_transfer.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
-#include "layers/npu/loader/rolling_load_manager.h"
 #endif
 
 namespace xllm {
@@ -152,9 +151,6 @@ class WorkerImpl {
       const std::vector<int32_t>& linear_state_rows,
       Stream& prepare_stream);
 #if defined(USE_NPU)
-  // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
-  // and cached.
-  const CpPlanRuntimeConfig& npu_cp_plan_runtime_config() const;
   // Builds or reuses draft decode padding on the current stream. MTP calls this
   // while preparing B/2B metadata so the compute stream only observes hits.
   bool uses_npu_dp_ep_padding() const;
@@ -291,33 +287,6 @@ class WorkerImpl {
     return context_.get_model_args().hidden_size();
   }
 
-#if defined(USE_NPU)
-  virtual layer::NpuLmHead get_npu_lm_head() {
-    return model()->get_npu_lm_head();
-  }
-
-  virtual void set_npu_lm_head(layer::NpuLmHead& head) {
-    model()->set_npu_lm_head(head);
-  }
-
-  virtual layer::NpuWordEmbedding get_npu_word_embedding() {
-    return model()->get_npu_word_embedding();
-  }
-
-  virtual bool has_restored_npu_word_embedding() {
-    return model()->has_restored_npu_word_embedding();
-  }
-
-  virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
-    model()->set_npu_word_embedding(embedding);
-  }
-
-  virtual void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& embedding) {
-    model()->set_restored_npu_word_embedding(embedding);
-  }
-#endif
-
   virtual layer::LmHead get_lm_head() { return model()->get_lm_head(); }
 
   virtual void set_lm_head(layer::LmHead& head) { model()->set_lm_head(head); }
@@ -345,8 +314,6 @@ class WorkerImpl {
   virtual ForwardOutput get_last_step_result();
 
   bool is_driver() const { return driver_ || dp_driver_; }
-
-  int64_t get_active_activation_memory();
 
   Status get_status() const { return status_; }
 
@@ -459,10 +426,6 @@ class WorkerImpl {
   DpEpPaddingCache draft_dp_ep_padding_cache_{kDraftDpEpPaddingCacheCapacity};
 
   bool wakeup_from_remote_weights(const WakeupOptions& options);
-  // Complete rolling initialization by delegating to model-owned rolling
-  // runtime (manager + buffer): decoder preload, non-decoder reload, and
-  // decoder ATB binding refresh.
-  bool init_rolling_runtime_state();
 
 #endif
 
@@ -589,11 +552,7 @@ class WorkerImpl {
 
 #if defined(USE_NPU)
   std::unique_ptr<MooncakeWeightTransfer> weight_transfer_;
-  std::unique_ptr<Stream> load_stream_;
 
-  // Lazily-built cache backing npu_cp_plan_runtime_config().
-  mutable bool npu_cp_runtime_config_computed_ = false;
-  mutable CpPlanRuntimeConfig npu_cp_runtime_config_;
 #endif
 
   bool is_spec_draft_ = false;

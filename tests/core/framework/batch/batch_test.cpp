@@ -4699,22 +4699,4 @@ TEST(BatchTest, OverlapMTPReplacementKeepsCompositeKvBlocks) {
       old_enable_schedule_overlap);
 }
 
-TEST(BatchTest, DPBalanceShuffle) {
-  Batch batch;
-  std::vector<uint32_t> kv_cache_tokens_num = {
-      99, 1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
-      17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
-      34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48};
-  auto shifted_indices = batch.cal_seq_exchange_index_test(kv_cache_tokens_num);
-  // shifted_indices are expected as
-  // {48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31,
-  //  30, 29, 28, 27, 26, 25,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12,
-  //  13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 99}
-  EXPECT_EQ(shifted_indices[0], 48);
-  EXPECT_EQ(shifted_indices[48], 0);
-  EXPECT_EQ(shifted_indices[1], 24);
-  EXPECT_EQ(shifted_indices[47], 1);
-  EXPECT_EQ(shifted_indices[2], 25);
-}
-
 }  // namespace xllm

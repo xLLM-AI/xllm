@@ -145,10 +145,6 @@ class Worker {
 
   folly::SemiFuture<std::optional<ForwardOutput>> get_last_step_result_async();
 
-  int64_t get_active_activation_memory();
-
-  folly::SemiFuture<int64_t> get_active_activation_memory_async();
-
  private:
   WorkerImpl* impl_ = nullptr;
   ThreadPool threadpool_{/*num_threads=*/1,

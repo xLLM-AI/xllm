@@ -33,15 +33,9 @@ namespace xllm::layer::v4_cp {
 
 // Per-forward prefill context-parallel plan for DeepSeek-V4.
 //
-// Why not reuse the framework's NpuCpPlan: that substrate localizes
-// kv_seq_lens in apply_attention_meta(), but V4 derives every cache group's
-// slot_mapping from kv_seq_lens (expand_blocks_to_slots / compute_slot_num
-// scale it by the group's ratio and block_size). Shortening kv lengths would
-// write KV to the wrong slots. This plan keeps kv global on purpose and
-// localizes only the query axis. NpuCpPlan also splits zigzag (two chunks per
-// rank, so a sequence's local rows are non-contiguous, needing two metadata
-// rows) and asserts 2D hidden, while V4 metadata is one row per sequence and
-// its hidden is 3D.
+// Cache slot mappings derive from global KV lengths. Keep that axis global
+// while localizing query rows, with one metadata row per sequence and 3D
+// hidden states.
 struct DeepseekV4CpContext {
   // Global row indices this rank owns, in ascending (global) order.
   torch::Tensor local_row_indices;

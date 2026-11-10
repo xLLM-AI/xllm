@@ -23,7 +23,6 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
-#include "common/device_monitor.h"
 #include "common/metrics.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -165,47 +164,11 @@ std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
     const std::function<void()>& prepare_sampling) {
   const ForwardSyncPolicy sync_policy = ForwardSyncPolicy::NO_SYNC;
   c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
-  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
-#if defined(USE_NPU)
-    if (!enable_schedule_overlap() && options_.backend() == "llm") {
-      aclrtStream current_acl_stream =
-          c10_npu::getCurrentNPUStream(device_.index()).stream();
-      atb::Context* atb_context =
-          const_cast<atb::Context*>(context_.get_atb_context());
-      atb_context->SetExecuteStream(current_acl_stream);
-      wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy, completion, prepare_sampling);
-    } else {
-      SET_ATB_EXECUTE_STREAM((&compute_stream), device_, context_);
-      wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy, completion, prepare_sampling);
-    }
-#else
-    wait_input_ready_events(input, compute_stream);
-    return step_internal(input, sync_policy, completion, prepare_sampling);
-#endif
-  }
   wait_input_ready_events(input, compute_stream);
   return step_internal(input, sync_policy, completion, prepare_sampling);
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step(const LlmForwardInput& input) {
-#if defined(USE_NPU)
-  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
-    if (!enable_schedule_overlap() && options_.backend() == "llm") {
-      aclrtStream current_stream =
-          c10_npu::getCurrentNPUStream(device_.index()).stream();
-      atb::Context* atb_context =
-          const_cast<atb::Context*>(context_.get_atb_context());
-      atb_context->SetExecuteStream(current_stream);
-    } else {
-      SET_ATB_EXECUTE_STREAM(compute_stream_, device_, context_);
-      wait_input_ready_events(input, *compute_stream_);
-      return step_internal(input, ForwardSyncPolicy::LEGACY);
-    }
-  }
-#endif
-
   std::unique_ptr<Stream> stream = device_.current_stream();
   wait_input_ready_events(input, *stream);
   return step_internal(input, ForwardSyncPolicy::LEGACY);
@@ -304,16 +267,9 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       logits = model_->logits(
           model_output.hidden_states, selected_token_idxes, selected_hidden);
       if (!selected_hidden.defined() && model_output.hidden_states.defined()) {
-        // ATB lm_head backend does not expose a second output tensor
-        // (LmHeadParam::outputHidden is false), so we surface the hidden here.
-        // selected_hidden must align row-for-row with `logits`, which is
-        // produced in selected_token_idxes order. index_select reproduces that
-        // order for any selection. We deliberately do NOT alias the full
-        // hidden_states on a numel match: equal row count does not imply the
-        // idxes are the identity permutation, and a full-but-reordered
-        // selection would silently misalign hidden against logits. The gather
-        // is one [num_selected, hidden] copy per decode step (not per layer),
-        // negligible next to the forward.
+        // Models with only the two-argument logits overload leave this unset.
+        // Gather in logits order: equal row counts do not imply an identity
+        // permutation of the selected indices.
         selected_hidden = model_output.hidden_states.index_select(
             /*dim=*/0, selected_token_idxes.to(torch::kLong));
       }
@@ -402,10 +358,6 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   wait_kv_push();
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
-  if (should_sync_default_stream) {
-    DeviceMonitor::get_instance().update_active_activation_memory(
-        device_.index());
-  }
 
   return output;
 }

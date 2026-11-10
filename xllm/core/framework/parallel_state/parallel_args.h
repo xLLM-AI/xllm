@@ -15,16 +15,11 @@ limitations under the License.
 
 #pragma once
 
-#include "core/common/macros.h"
-#include "core/framework/parallel_state/process_group.h"
-
-#if defined(USE_NPU)
-#include "hccl/hccl.h"
-#include "xllm_atb_layers/models/base/param/mapping.h"
-#endif
-
 #include <nlohmann/json.hpp>
 #include <string>
+
+#include "core/common/macros.h"
+#include "core/framework/parallel_state/process_group.h"
 
 namespace xllm {
 
@@ -182,18 +177,14 @@ struct ParallelArgs {
                          : dp_local_rank / (dp_local_size / kv);
   }
 
-  // atb hccl mapping json data
+  // Parallel topology metadata for expert dispatch.
   PROPERTY(nlohmann::json, mapping_data);
 
 #if defined(USE_NPU)
-  // atb hccl mapping
-  PROPERTY(atb_speed::base::Mapping, mapping);
 
-  // atb hccl dispatchAndCombinecommDomain
+  // Torch HCCL communicator name for expert dispatch.
   PROPERTY(std::string, dispatchAndCombinecommDomain);
 
-  // atb hccl dispatchAndCombineHcclComm
-  PROPERTY(HcclComm, dispatchAndCombineHcclComm);
 #endif
 
   // the following pointers are unique pointers from CollectiveCommunicator

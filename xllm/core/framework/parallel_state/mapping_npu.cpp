@@ -92,8 +92,7 @@ MappingNPU::MappingNPU(const std::string rank_table_file,
   get_tp_group(attn_inner_sp_);
   get_dp_group(attn_cp_);
   // KV-split group lives alongside attn_cp_. When kv_split_size == cp_size
-  // (the default fallback) it produces an identical rank_ids list, so the ATB
-  // ExternalCommManager will de-dup the underlying HCCL commDomain. When
+  // (the default value) it produces an identical rank_ids list. When
   // kv_split_size == 1 each rank becomes its own single-rank group.
   get_kv_split_group(attn_kv_split_);
 
@@ -406,7 +405,7 @@ void MappingNPU::get_dp_group(ParallelInfo& parallel_info) {
 void MappingNPU::get_kv_split_group(ParallelInfo& parallel_info) {
   // Reuse the get_dp_group stride layout. The stride is world_size /
   // group_size, so when group_size == attn_cp_.group_size() the produced
-  // rank_per_group is identical to attn_cp_'s and ATB will de-dup the HCCL
+  // rank_per_group is identical to attn_cp_'s and reuses the HCCL
   // commDomain. When group_size == 1 each rank is its own single-element group,
   // i.e. no collective communication will be issued for KV split.
   get_dp_group(parallel_info);
@@ -500,10 +499,8 @@ nlohmann::json MappingNPU::to_json() {
   data["lcocAttnTp"] = attn_tp_.to_json(buffer_offset_);
   data["attnCp"] = attn_cp_.to_json(buffer_offset_);
   data["attnLayerwiseSplit"] = attn_layerwise_split_.to_json(buffer_offset_);
-  // KV split metadata. ATB layers that consume `kvSplit` use it to size the
+  // KV split metadata describes the width of the
   // prefix AllGather (or to skip it entirely when group_size == 1).
-  // Older ATB versions ignore the unknown key, preserving backward
-  // compatibility.
   data["kvSplitSize"] = attn_kv_split_.group_size();
   data["kvSplit"] = attn_kv_split_.to_json(buffer_offset_);
 

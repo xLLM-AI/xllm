@@ -70,9 +70,6 @@ CombinedDraftExecutionPath classify_combined_draft_execution_path(
   if (model_type == "qwen3_5_mtp" || model_type == "qwen3_5_moe_mtp") {
     return CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
   }
-  if (model_type == "glm_moe_dsa_mtp") {
-    return CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION;
-  }
   return CombinedDraftExecutionPath::UNSUPPORTED;
 }
 
@@ -93,8 +90,6 @@ bool supports_combined_draft_configuration(
   switch (execution_path) {
     case CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION:
       return npu_backend == "TORCH" && dp_size <= 1;
-    case CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION:
-      return npu_backend == "ATB";
     case CombinedDraftExecutionPath::UNSUPPORTED:
       return false;
   }

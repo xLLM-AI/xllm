@@ -84,8 +84,7 @@ class AttentionDeviceInputView final {
         history_compressed_kv(owner.history_compressed_kv),
         history_k_rope(owner.history_k_rope),
         ring_cur_seqlen(owner.ring_cur_seqlen),
-        ring_cache_seqlen(owner.ring_cache_seqlen),
-        in_prefix_slots(owner.in_prefix_slots) {}
+        ring_cache_seqlen(owner.ring_cache_seqlen) {}
 
   torch::Tensor& q_seq_lens;
   torch::Tensor& kv_seq_lens;
@@ -102,7 +101,6 @@ class AttentionDeviceInputView final {
   torch::Tensor& history_k_rope;
   torch::Tensor& ring_cur_seqlen;
   torch::Tensor& ring_cache_seqlen;
-  torch::Tensor& in_prefix_slots;
 };
 
 // Borrows storage from a domain owner. No tensor or vector is copied.
@@ -376,7 +374,6 @@ void copy_attention_device_input(const Source& source, Target& target) {
   target.history_k_rope = source.history_k_rope;
   target.ring_cur_seqlen = source.ring_cur_seqlen;
   target.ring_cache_seqlen = source.ring_cache_seqlen;
-  target.in_prefix_slots = source.in_prefix_slots;
 }
 
 template <typename Owner>

@@ -41,8 +41,6 @@ limitations under the License.
 #include "core/kv_cache/storage/linear_state_restore.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
-#include "core/layers/npu/npu_lm_head_impl.h"
-#include "core/layers/npu/npu_word_embedding_impl.h"
 #include "core/layers/npu_torch/attention.h"
 #include "core/platform/npu/acl_graph_task_update_context.h"
 #include "core/platform/stream.h"
@@ -357,14 +355,6 @@ class HybridConv1dMockLM final : public CausalLM {
   }
   void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
   void update_expert_weight(int32_t) override {}
-  layer::NpuLmHead get_npu_lm_head() override {
-    return layer::NpuLmHead(nullptr);
-  }
-  void set_npu_lm_head(layer::NpuLmHead&) override {}
-  layer::NpuWordEmbedding get_npu_word_embedding() override {
-    return layer::NpuWordEmbedding(nullptr);
-  }
-  void set_npu_word_embedding(layer::NpuWordEmbedding&) override {}
 
  private:
   torch::Device device_;

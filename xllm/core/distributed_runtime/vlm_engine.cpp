@@ -123,10 +123,6 @@ VLMEngine::VLMEngine(
     CHECK_EQ(device.type(), device_type)
         << "All devices should be the same type";
   }
-#if defined(USE_NPU)
-  FLAGS_enable_atb_comm_multiprocess =
-      options.enable_offline_inference() || (options.nnodes() > 1);
-#endif
 
   // setup all workers and create worker clients in nnode_rank=0 engine side.
   setup_workers(options);

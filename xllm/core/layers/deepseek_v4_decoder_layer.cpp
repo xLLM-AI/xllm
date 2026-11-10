@@ -205,8 +205,7 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   // crosses cp_rank, and partial expert sums are only addable when every group
   // member holds the same tokens. Gather back to the full DP-local token set
   // for the gate and the experts, then re-shard so the residual path stays
-  // CP-local. This mirrors what the ATB CP path does through
-  // CpEpMeta::ffn_padding_indices.
+  // CP-local.
   const v4_cp::DeepseekV4CpContext* cp_ctx = dsa.v4_cp_context;
   const bool cp_bridge_ffn = cp_ctx != nullptr && cp_ctx->enabled();
   if (cp_bridge_ffn) {

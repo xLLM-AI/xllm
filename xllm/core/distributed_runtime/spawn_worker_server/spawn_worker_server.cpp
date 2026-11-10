@@ -171,7 +171,6 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
 #if defined(USE_NPU)
   device.init_device_context();
   KernelConfig::get_instance().npu_kernel_backend(npu_kernel_backend);
-  FLAGS_enable_atb_comm_multiprocess = true;
 #endif
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
   // Bind worker process to the same NUMA node as the device

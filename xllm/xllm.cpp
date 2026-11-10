@@ -333,13 +333,6 @@ void validate_config(const std::string& model_type) {
                  << "Disabling enable_graph_double_buffer.";
     execution_config.enable_graph_double_buffer(false);
   }
-  // Weight VMM and rolling load require the manual weight loader.
-  if ((load_config.enable_vmm_weights() || load_config.enable_rolling_load()) &&
-      !load_config.enable_manual_loader()) {
-    LOG(WARNING) << "enable_vmm_weights or enable_rolling_load requires "
-                    "enable_manual_loader; forcing enable_manual_loader=true.";
-    load_config.enable_manual_loader(true);
-  }
   if (load_config.enable_rolling_load() &&
       load_config.rolling_load_num_cached_layers() < 1) {
     LOG(FATAL) << "rolling_load_num_cached_layers must be >= 1.";
@@ -362,9 +355,7 @@ void validate_config(const std::string& model_type) {
   if (load_config.enable_vmm_weights()) {
     LOG(FATAL) << "enable_vmm_weights is only supported on NPU.";
   }
-  if (load_config.enable_manual_loader()) {
-    LOG(FATAL) << "enable_manual_loader is only supported on NPU.";
-  }
+
   if (load_config.enable_rolling_load()) {
     LOG(FATAL) << "enable_rolling_load is only supported on NPU.";
   }

@@ -37,7 +37,6 @@ TargetSpecVerifyMode classify_target_spec_verify_mode(
 enum class CombinedDraftExecutionPath {
   UNSUPPORTED,
   QWEN3_5_PAGED_ATTENTION,
-  GLM_MOE_DSA_SPARSE_ATTENTION,
 };
 
 CombinedDraftExecutionPath classify_combined_draft_execution_path(

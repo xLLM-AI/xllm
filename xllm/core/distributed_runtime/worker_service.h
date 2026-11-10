@@ -144,11 +144,6 @@ class WorkerService : public proto::DistributeWorker {
                             proto::VLMForwardResponse* response,
                             ::google::protobuf::Closure* done) override;
 
-  void GetActiveActivationMemory(::google::protobuf::RpcController* controller,
-                                 const proto::Empty* req,
-                                 proto::ActivationMemory* resp,
-                                 ::google::protobuf::Closure* done) override;
-
   void Sleep(::google::protobuf::RpcController* controller,
              const proto::SleepRequest* req,
              proto::Status* resp,

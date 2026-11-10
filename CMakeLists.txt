@@ -542,24 +542,6 @@ if(USE_NPU)
   message(STATUS "VCPKG_INCLUDE_DIR = ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
   include_directories("${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
 
-  add_subdirectory(
-    "${XLLM_ATB_LAYERS_SOURCE_DIR}"
-    "${CMAKE_BINARY_DIR}/xllm_atb_layers"
-  )
-  message(STATUS "Configured xllm_atb_layers from source: ${XLLM_ATB_LAYERS_SOURCE_DIR}")
-
-  if(EXISTS "$ENV{NPU_HOME_PATH}/include/aclnnop")
-    target_include_directories(xllm_atb_layers SYSTEM PRIVATE
-      $ENV{NPU_HOME_PATH}/include/aclnnop
-    )
-  endif()
-
-  if(EXISTS "$ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/aclnnop")
-    target_include_directories(xllm_atb_layers SYSTEM PRIVATE
-      $ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/aclnnop
-    )
-  endif()
-
   # torch npu_torch and npu ops is only used by npu related modules/classes, so system priority is reasonable.
   include_directories(SYSTEM
       $ENV{PYTHON_INCLUDE_PATH}
@@ -585,12 +567,6 @@ if(USE_NPU)
     )
   endif()
 
-  # Keep third-party warnings suppressed while providing headers expected by
-  # legacy includes like "atb_speed/log.h" from xllm_atb_layers.
-  include_directories(SYSTEM
-      ${XLLM_ATB_LAYERS_SOURCE_DIR}
-      ${XLLM_ATB_LAYERS_SOURCE_DIR}/core/include
-  )
   link_directories(
       $ENV{PYTHON_LIB_PATH}
       $ENV{PYTORCH_INSTALL_PATH}/lib

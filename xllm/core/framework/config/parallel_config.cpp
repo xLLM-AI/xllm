@@ -77,12 +77,6 @@ DEFINE_int32(micro_batch_num,
              1,
              "Default use two micro batches for multi-stream parallel.");
 
-DEFINE_bool(
-    enable_dp_balance,
-    false,
-    "Whether to enable dp load balance, if true, sequences within a single "
-    "dp batch will be shuffled.");
-
 namespace xllm {
 
 void ParallelConfig::from_flags() {
@@ -100,7 +94,6 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mm_encoder_dp);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_multi_stream_parallel);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(micro_batch_num);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dp_balance);
 }
 
 void ParallelConfig::from_json(const JsonReader& json) {
@@ -118,7 +111,6 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mm_encoder_dp);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_multi_stream_parallel);
   XLLM_CONFIG_ASSIGN_FROM_JSON(micro_batch_num);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dp_balance);
 }
 
 void ParallelConfig::append_config_json(
@@ -147,8 +139,6 @@ void ParallelConfig::append_config_json(
       config_json, default_config, enable_multi_stream_parallel);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, micro_batch_num);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_dp_balance);
 }
 
 ParallelConfig& ParallelConfig::get_instance() {

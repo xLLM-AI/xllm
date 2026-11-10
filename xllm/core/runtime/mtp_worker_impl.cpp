@@ -538,35 +538,12 @@ bool MTPWorkerImpl<TargetInput>::init_model(
           draft_impl_->share_weights_from(*impl_);
       if (!python_weights_shared) {
         const bool share_lm_head = share_target_lm_head_with_draft();
-#if defined(USE_NPU)
-        if (::xllm::KernelConfig::get_instance().npu_kernel_backend() !=
-            "TORCH") {
-          if (share_lm_head) {
-            auto head = impl_->get_npu_lm_head();
-            draft_impl_->set_npu_lm_head(head);
-          }
-          auto word_embedding = impl_->get_npu_word_embedding();
-          if (impl_->has_restored_npu_word_embedding()) {
-            draft_impl_->set_restored_npu_word_embedding(word_embedding);
-          } else {
-            draft_impl_->set_npu_word_embedding(word_embedding);
-          }
-        } else {
-          if (share_lm_head) {
-            auto head = impl_->get_lm_head();
-            draft_impl_->set_lm_head(head);
-          }
-          auto word_embedding = impl_->get_word_embedding();
-          draft_impl_->set_word_embedding(word_embedding);
-        }
-#else
         if (share_lm_head) {
           auto head = impl_->get_lm_head();
           draft_impl_->set_lm_head(head);
         }
         auto word_embedding = impl_->get_word_embedding();
         draft_impl_->set_word_embedding(word_embedding);
-#endif
       }
     }
     if (impl_->get_status() != WorkerImpl::Status::UNINITIALIZED) {
@@ -1191,42 +1168,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
       prepare_draft_extend_inputs(input, last_states, current_draft_input);
     }
   }
-  const bool use_continuous_dsa_drafts =
-      (use_device_target_context || use_prelaunched_first_draft) &&
-      combined_draft_execution_path_ ==
-          mtp_async::CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION;
-  std::vector<LlmForwardInput> later_draft_inputs;
-  torch::Tensor accepted_base_positions;
-  torch::Tensor accepted_base_kv_seq_lens;
-  if (use_continuous_dsa_drafts) {
-    later_draft_inputs.resize(num_speculative_tokens);
-    const LlmForwardInput& combined_draft_input =
-        use_prelaunched_first_draft ? pending_draft_context_.prepared_input
-                                    : current_draft_input;
-    const int64_t batch_size = input.input_params.meta.num_sequences;
-    CHECK_EQ(combined_draft_input.positions.numel(), batch_size * 2)
-        << "combined draft positions must contain [repair,current] rows";
-    CHECK_EQ(
-        combined_draft_input.input_params.attention.device.kv_seq_lens.numel(),
-        batch_size * 2)
-        << "combined draft KV lengths must contain [repair,current] rows";
-    accepted_base_positions =
-        combined_draft_input.positions.view({batch_size, 2}).select(1, 1);
-    accepted_base_kv_seq_lens =
-        combined_draft_input.input_params.attention.device.kv_seq_lens
-            .view({batch_size, 2})
-            .select(1, 1);
-
-    for (int32_t draft_idx = 1; draft_idx < num_speculative_tokens;
-         ++draft_idx) {
-      // Only the fixed B layout is needed on prepare_stream. Reusing offset 0
-      // avoids extending an already conservative Host template past the
-      // scheduler-allocated block range; device metadata is replaced below.
-      prepare_draft_inputs(metadata_template,
-                           later_draft_inputs[draft_idx],
-                           /*position_offset=*/0);
-    }
-  }
 
   const auto materialize_pending_target_host_state = [&]() {
     flush_pending_target_context();
@@ -1253,7 +1194,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
   for (int32_t draft_idx = 0; draft_idx < num_speculative_tokens; ++draft_idx) {
     const bool is_final_draft = draft_idx == num_speculative_tokens - 1;
     const bool static_graph_tasks_prepared =
-        is_final_draft && !use_continuous_dsa_drafts &&
+        is_final_draft &&
         prepare_static_mtp_graph_tasks_before_final_draft(input);
     if (reuse_mtp_topk_state) {
       current_draft_input.input_params.mtp_topk_state = mtp_topk_state;
@@ -1278,7 +1219,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
     }
 
     if ((use_device_target_context || use_prelaunched_first_draft) &&
-        !use_continuous_dsa_drafts && draft_idx == 0) {
+        draft_idx == 0) {
       // The next draft forward is already queued behind target validation.
       // It can start immediately when rejection sampling finishes while the
       // worker materializes the accepted state for later draft/target metadata
@@ -1287,54 +1228,11 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
       materialize_pending_target_host_state();
     }
 
-    if (use_continuous_dsa_drafts && is_final_draft) {
-      // Queue target metadata before the Host target-context wait. The fixed
-      // template can be copied immediately; its real device values are
-      // corrected after a prepare-stream wait on the previous target event.
-      prepare_validate_inputs(metadata_template,
-                              validate_input,
-                              /*static_graph_tasks_prepared=*/false,
-                              /*record_ready_event=*/false);
-      {
-        c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-        CHECK(prepare_stream_->wait_event(target_context_ready_event))
-            << "failed to wait pending target state on prepare stream";
-        mtp_async::prepare_target_verify_from_accepted_state(
-            validate_input,
-            accepted_tokens,
-            target_base_positions,
-            target_base_kv_seq_lens,
-            logical_block_size());
-        validate_input.runtime.retained_device_tensors = {
-            accepted_tokens, target_base_positions, target_base_kv_seq_lens};
-        validate_input.runtime.metadata_ready_event =
-            prepare_stream_->record_event_or_sync();
-      }
-
-      // Host cache materialization is still required before staging the next
-      // target context, but it no longer blocks target metadata submission.
-      materialize_pending_target_host_state();
-    }
-
     // Overlap next-step input preparation with async draft forward.
     if (is_final_draft) {
-      if (!use_continuous_dsa_drafts) {
-        prepare_validate_inputs(
-            metadata_template, validate_input, static_graph_tasks_prepared);
-      }
-    } else if (use_continuous_dsa_drafts) {
-      next_step_input = std::move(later_draft_inputs[draft_idx + 1]);
-      c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-      CHECK(compute_stream_->wait_event(
-          next_step_input.runtime.metadata_ready_event))
-          << "failed to wait speculative metadata ready event";
-      clear_ready_events(next_step_input);
-      mtp_async::prepare_later_draft_from_device_base(next_step_input,
-                                                      input,
-                                                      accepted_base_positions,
-                                                      accepted_base_kv_seq_lens,
-                                                      draft_idx + 1,
-                                                      logical_block_size());
+      prepare_validate_inputs(
+          metadata_template, validate_input, static_graph_tasks_prepared);
+
     } else {
       // The verifier-conditioned first pass writes the bonus at anchor-1 and
       // produces proposal 0. Proposal 1 writes at anchor, not anchor+1.
@@ -2242,12 +2140,6 @@ bool MTPWorkerImpl<TargetInput>::supports_combined_first_draft_execution()
     return false;
   }
 
-  // The ATB speculative path expects CHUNKED_PREFILL metadata instead of the
-  // eager two-row DECODE input used by the prelaunch.
-  if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
-    return false;
-  }
-
   const std::string& npu_backend =
       ::xllm::KernelConfig::get_instance().npu_kernel_backend();
   return device_.unwrap().is_privateuseone() &&
@@ -2295,13 +2187,6 @@ bool MTPWorkerImpl<TargetInput>::can_prelaunch_next_first_draft(
                      [](int32_t active) { return active == 0; })) {
       return false;
     }
-  }
-  const bool requires_dp_symmetric_prelaunch =
-      parallel_args_.dp_size() > 1 &&
-      combined_draft_execution_path_ ==
-          mtp_async::CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION;
-  if (requires_dp_symmetric_prelaunch) {
-    return has_active_dp_tokens(input);
   }
   return device_target_context_ready_for_batch(input);
 }
@@ -2604,14 +2489,12 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
   Slice<int32_t> positions = tensor_slice(input.positions_host);
   Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
-  const bool use_atb_spec_kernel =
-      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel() ||
-      use_chunked_prefill_spec_verify_path();
+  const bool use_chunked_spec_verify = use_chunked_prefill_spec_verify_path();
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(total_num_val_tokens);
   buf.out_positions.reserve(total_num_val_tokens);
   buf.out_new_cache_slots.reserve(total_num_val_tokens);
-  if (!use_atb_spec_kernel) {
+  if (!use_chunked_spec_verify) {
     buf.out_kv_seq_lens.reserve(total_num_val_tokens);
     buf.out_q_seq_lens.reserve(total_num_val_tokens);
     buf.out_q_cu_seq_lens.reserve(total_num_val_tokens);
@@ -2619,10 +2502,10 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
                             row_ctx.block_table_stride);
   }
 
-  std::vector<int32_t> atb_kv_seq_lens_vec;
-  std::vector<int32_t> atb_q_seq_lens_vec;
-  std::vector<int32_t> atb_q_cu_seq_lens_vec;
-  int32_t atb_kv_max_seq_len = 0;
+  std::vector<int32_t> chunked_kv_seq_lens_vec;
+  std::vector<int32_t> chunked_q_seq_lens_vec;
+  std::vector<int32_t> chunked_q_cu_seq_lens_vec;
+  int32_t chunked_kv_max_seq_len = 0;
   const bool step_major_validate_layout = uses_step_major_validate_layout();
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     const int32_t start_position = positions[seq_id];
@@ -2634,13 +2517,14 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
           << ", start_position=" << start_position << ", kv_len=" << kv_len;
     }
 
-    if (use_atb_spec_kernel) {
+    if (use_chunked_spec_verify) {
       const int32_t kv_len_after_validation =
           kv_len + options_.num_speculative_tokens();
-      specBuilder::update_kv_seq_lens_and_max(
-          atb_kv_seq_lens_vec, kv_len_after_validation, atb_kv_max_seq_len);
+      specBuilder::update_kv_seq_lens_and_max(chunked_kv_seq_lens_vec,
+                                              kv_len_after_validation,
+                                              chunked_kv_max_seq_len);
       specBuilder::append_q_seq_len(
-          atb_q_seq_lens_vec, atb_q_cu_seq_lens_vec, num_val_tokens);
+          chunked_q_seq_lens_vec, chunked_q_cu_seq_lens_vec, num_val_tokens);
     }
   }
   if (step_major_validate_layout) {
@@ -2663,9 +2547,9 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
         row.seq_id = seq_id;
         row.token_id = val_idx == 0 ? token_ids[seq_id] : -val_idx;
         row.position_offset = val_idx;
-        row.append_kv_len = !use_atb_spec_kernel;
-        row.append_q_len_one = !use_atb_spec_kernel;
-        row.append_block_table = !use_atb_spec_kernel;
+        row.append_kv_len = !use_chunked_spec_verify;
+        row.append_q_len_one = !use_chunked_spec_verify;
+        row.append_block_table = !use_chunked_spec_verify;
         specBuilder::append_decode_row(row_ctx, row, logical_block_size, buf);
       }
     }
@@ -2689,20 +2573,20 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
                                             token_options,
                                             position_options);
   }
-  if (!use_atb_spec_kernel) {
+  if (!use_chunked_spec_verify) {
     input_params.meta.num_sequences = total_num_val_tokens;
     input_params.meta.batch_forward_type = BatchForwardType::DECODE;
   } else {
     input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
   }
-  if (use_atb_spec_kernel) {
+  if (use_chunked_spec_verify) {
     specBuilder::update_input_params(input_params,
                                      buf,
                                      num_val_tokens,
-                                     std::move(atb_q_seq_lens_vec),
-                                     std::move(atb_q_cu_seq_lens_vec),
-                                     atb_kv_max_seq_len,
-                                     std::move(atb_kv_seq_lens_vec));
+                                     std::move(chunked_q_seq_lens_vec),
+                                     std::move(chunked_q_cu_seq_lens_vec),
+                                     chunked_kv_max_seq_len,
+                                     std::move(chunked_kv_seq_lens_vec));
   } else {
     specBuilder::update_input_params(input_params,
                                      buf,
@@ -3143,8 +3027,6 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
   const int32_t num_sequences = input_params.meta.num_sequences;
 
   const bool dp_enabled = parallel_args_.dp_size() > 1;
-  const bool use_chunked_prefill =
-      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
   CHECK_EQ(last_states.size(), static_cast<size_t>(num_sequences))
       << "draft extend state count mismatch";
   const std::string_view target_model_type =
@@ -3172,13 +3054,13 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
   buf.out_token_ids.reserve(num_sequences * 2);
   buf.out_positions.reserve(num_sequences * 2);
   buf.out_new_cache_slots.reserve(num_sequences * 2);
-  buf.out_kv_seq_lens.reserve(num_sequences * (use_chunked_prefill ? 1 : 2));
-  buf.out_q_seq_lens.reserve(num_sequences * (use_chunked_prefill ? 1 : 2));
+  buf.out_kv_seq_lens.reserve(num_sequences * 2);
+  buf.out_q_seq_lens.reserve(num_sequences * 2);
   buf.out_q_cu_seq_lens.reserve(num_sequences * 2);
-  if (!use_chunked_prefill) {
-    buf.reserve_row_buffers(static_cast<size_t>(num_sequences) * 2,
-                            row_ctx.block_table_stride);
-  }
+
+  buf.reserve_row_buffers(static_cast<size_t>(num_sequences) * 2,
+                          row_ctx.block_table_stride);
+
   std::vector<torch::Tensor> expanded_embeddings;
   std::vector<int32_t> selected_row_idx;
   expanded_embeddings.reserve(num_sequences * 2);
@@ -3204,9 +3086,9 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
       row.seq_id = seq_id;
       row.token_id = token_id >= 0 ? token_id : 0;
       row.position_offset = position_offset;
-      row.append_kv_len = !use_chunked_prefill;
-      row.append_q_len_one = !use_chunked_prefill;
-      row.append_block_table = !use_chunked_prefill;
+      row.append_kv_len = true;
+      row.append_q_len_one = true;
+      row.append_block_table = true;
       specBuilder::append_decode_row(row_ctx, row, logical_block_size, buf);
       if (embedding.defined()) {
         expanded_embeddings.emplace_back(to_worker_device(embedding));
@@ -3221,30 +3103,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
       state = EmbeddingCache::DecodeState();
       state.token_id = current_token_id >= 0 ? current_token_id : 0;
     }
-    if (use_chunked_prefill) {
-      int32_t prev_token_id = state.prev_token_id;
-      torch::Tensor prev_embedding = state.prev_embedding;
-      const bool prev_is_placeholder = prev_token_id < 0;
-      if (prev_is_placeholder) {
-        prev_token_id = current_token_id >= 0 ? current_token_id : 0;
-        prev_embedding = torch::Tensor();
-      }
-      add_row(prev_token_id, /*position_offset=*/-1, prev_embedding);
-      if (prev_is_placeholder) {
-        // Redirect to padding block 0 to avoid overwriting correct KV cache.
-        buf.out_new_cache_slots.back() = 0;
-      }
-      add_row(state.token_id, /*position_offset=*/0, state.embedding);
-      buf.out_q_seq_lens.emplace_back(/*value=*/2);
-      const int32_t kv_len = specBuilder::calc_kv_len(
-          base_input.input_params.attention.host.kv_seq_lens,
-          seq_id,
-          /*offset=*/0);
-      specBuilder::update_kv_seq_lens_and_max(
-          buf.out_kv_seq_lens, kv_len, buf.meta.kv_max_seq_len);
-      selected_row_idx.emplace_back(2 * seq_id + 1);
-      continue;
-    }
+
     const bool sequence_uses_two_rows =
         use_uniform_two_rows || state.all_draft_accepted;
     if (sequence_uses_two_rows) {
@@ -3295,32 +3154,19 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
                                           buf.out_positions,
                                           token_options,
                                           position_options);
-  if (use_chunked_prefill) {
-    input_params.meta.num_sequences = num_sequences;
-    input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
-    std::vector<int32_t> q_cu_seq_lens_vec =
-        util::cu_num_tokens(buf.out_q_seq_lens);
-    specBuilder::update_input_params(input_params,
-                                     buf,
-                                     /*q_max_seq_len=*/2,
-                                     std::move(buf.out_q_seq_lens),
-                                     std::move(q_cu_seq_lens_vec),
-                                     buf.meta.kv_max_seq_len,
-                                     std::move(buf.out_kv_seq_lens),
-                                     /*update_block_tables=*/false);
-  } else {
-    input_params.meta.num_sequences =
-        static_cast<int32_t>(buf.out_positions.size());
-    input_params.meta.batch_forward_type = BatchForwardType::DECODE;
-    specBuilder::update_input_params(input_params,
-                                     buf,
-                                     1,
-                                     std::move(buf.out_q_seq_lens),
-                                     std::move(buf.out_q_cu_seq_lens),
-                                     buf.meta.kv_max_seq_len,
-                                     std::move(buf.out_kv_seq_lens),
-                                     /*update_block_tables=*/true);
-  }
+
+  input_params.meta.num_sequences =
+      static_cast<int32_t>(buf.out_positions.size());
+  input_params.meta.batch_forward_type = BatchForwardType::DECODE;
+  specBuilder::update_input_params(input_params,
+                                   buf,
+                                   1,
+                                   std::move(buf.out_q_seq_lens),
+                                   std::move(buf.out_q_cu_seq_lens),
+                                   buf.meta.kv_max_seq_len,
+                                   std::move(buf.out_kv_seq_lens),
+                                   /*update_block_tables=*/true);
+
   if (supports_expanded_spec_verify()) {
     specBuilder::rebuild_q_cu_seq_lens(input_params);
   }
@@ -3331,9 +3177,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
                               "decode extend");
 
   if (!input_params.parallel.dp_global_token_nums.empty()) {
-    if (use_chunked_prefill) {
-      scale_parallel_token_counts(input_params.parallel, /*multiplier=*/2);
-    } else if (dp_enabled) {
+    if (dp_enabled) {
       constexpr int32_t num_extend_tokens = 2;
       scale_parallel_token_counts(input_params.parallel, num_extend_tokens);
     } else if (input_params.parallel.dp_global_token_nums.size() == 1) {
@@ -3355,7 +3199,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
       params.selected_token_idxes().defined()
           ? params.selected_token_idxes().options()
           : torch::dtype(torch::kInt).device(device_);
-  if (use_chunked_prefill || use_uniform_two_rows) {
+  if (use_uniform_two_rows) {
     // These layouts always append two rows per sequence and select the second
     // row.  Build the tiny control tensor directly on device; copying a
     // temporary pinned CPU tensor forces its allocator to synchronize before

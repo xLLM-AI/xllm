@@ -16,8 +16,7 @@ The normal xLLM installation includes C++ headers and the CMake package
 C++ ABI settings used by the extension:
 
 ```sh
-cmake -S . -B build -DUSE_NPU=ON -DUSE_CXX11_ABI=OFF \
-  -DXLLM_ATB_LAYERS_SOURCE_DIR="${PWD}/third_party/xllm_atb_layers"
+cmake -S . -B build -DUSE_NPU=ON -DUSE_CXX11_ABI=OFF
 cmake --build build --target xllm
 cmake --install build --prefix /opt/xllm
 ```
@@ -92,10 +91,8 @@ Native model extensions require the native model backend. Their model types
 are resolved before the built-in NPU backend aliases, so an extension can
 replace a supported model type without exposing its class implementation to
 the host. On NPU, a selected model extension uses `TORCH` when
-`npu_kernel_backend=AUTO`; set `ATB` or `TORCH` explicitly when needed by the
-extension.
-The extension is responsible for supporting the requested backend. A new
-model type can also register as `native` and use the default model selection
+`npu_kernel_backend=AUTO`. The remaining NPU model implementations use
+`TORCH`. A new model type can also register as `native` and use the default model selection
 once its factory has been loaded.
 
 The four-argument `REGISTER_EXECUTOR` example registers a family-specific
