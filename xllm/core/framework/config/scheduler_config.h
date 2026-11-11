@@ -20,11 +20,38 @@ limitations under the License.
 #include <string>
 
 #include "core/common/macros.h"
+#include "core/framework/config/config_input.h"
 #include "core/framework/config/option_category.h"
 
 namespace xllm {
 
 class JsonReader;
+
+// Requested values retain omission and provenance until policy resolution.
+// The effective SchedulerConfig below keeps the existing consumer contract.
+struct SchedulerConfigInput {
+  config::ConfigInput<int32_t> max_tokens_per_batch;
+  config::ConfigInput<int32_t> max_seqs_per_batch;
+  config::ConfigInput<bool> enable_schedule_overlap;
+  config::ConfigInput<double> prefill_scheduling_memory_usage_threshold;
+  config::ConfigInput<bool> enable_chunked_prefill;
+  config::ConfigInput<int32_t> max_tokens_per_chunk_for_prefill;
+  config::ConfigInput<int32_t> chunked_match_frequency;
+  config::ConfigInput<std::string> priority_strategy;
+  config::ConfigInput<bool> enable_mix_batch;
+  config::ConfigInput<double> aggressive_coeff;
+  config::ConfigInput<double> starve_threshold;
+  config::ConfigInput<bool> enable_starve_prevent;
+  config::ConfigInput<bool> enable_dp_fair_token_budget;
+  config::ConfigInput<int32_t> request_queue_size;
+};
+
+SchedulerConfigInput scheduler_config_input_from_flags(
+    const config::FlagInputSnapshot& flags);
+
+// Fills omitted inputs only; explicit GFlags/API values take precedence.
+void merge_scheduler_config_json(SchedulerConfigInput& input,
+                                 const JsonReader& json);
 
 class SchedulerConfig final {
  public:
@@ -37,6 +64,7 @@ class SchedulerConfig final {
   void from_json(const JsonReader& json);
   void append_config_json(nlohmann::ordered_json& config_json) const;
   void initialize();
+  void initialize(const SchedulerConfigInput& input);
 
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {
@@ -93,5 +121,8 @@ class SchedulerConfig final {
   // is full are rejected at admission.
   PROPERTY(int32_t, request_queue_size) = 100000;
 };
+
+// Materializes the legacy defaults without reading or writing global flags.
+SchedulerConfig resolve_scheduler_config(const SchedulerConfigInput& input);
 
 }  // namespace xllm

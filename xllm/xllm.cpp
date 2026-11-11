@@ -84,6 +84,13 @@ static std::atomic<uint32_t> signal_received{0};
 namespace {
 
 void initialize_configs() {
+  // Preserve user intent before any legacy config writes JSON values to FLAGS_.
+  auto scheduler_input =
+      scheduler_config_input_from_flags(config::FlagInputSnapshot::capture());
+  if (const auto& json_config = config::get_parsed_json_config()) {
+    merge_scheduler_config_json(scheduler_input, *json_config);
+  }
+
   DisaggPDConfig::get_instance().initialize();
   DistributedConfig::get_instance().initialize();
   DiTConfig::get_instance().initialize();
@@ -96,7 +103,7 @@ void initialize_configs() {
   ModelConfig::get_instance().initialize();
   ParallelConfig::get_instance().initialize();
   ProfileConfig::get_instance().initialize();
-  SchedulerConfig::get_instance().initialize();
+  SchedulerConfig::get_instance().initialize(scheduler_input);
   ServiceConfig::get_instance().initialize();
   SpeculativeConfig::get_instance().initialize();
 }

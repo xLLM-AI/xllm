@@ -15,6 +15,10 @@ limitations under the License.
 
 #include "core/framework/config/scheduler_config.h"
 
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 
@@ -72,72 +76,170 @@ DEFINE_int32(request_queue_size,
              "The request queue size of the scheduler");
 
 namespace xllm {
+namespace {
+
+template <typename T>
+struct SchedulerConfigField {
+  using Value = T;
+  const char* name;
+  T* flag;
+  config::ConfigInput<T> SchedulerConfigInput::* input;
+  const T& (SchedulerConfig::*get)() const& noexcept;
+  SchedulerConfig& (SchedulerConfig::*set)(const T&)&;
+};
+
+// One mapping serves the adapters, resolution and serialization. Runtime
+// consumers continue to access plain typed values in SchedulerConfig.
+const auto kSchedulerFields = std::tuple{
+    SchedulerConfigField<int32_t>{"max_tokens_per_batch",
+                                  &FLAGS_max_tokens_per_batch,
+                                  &SchedulerConfigInput::max_tokens_per_batch,
+                                  &SchedulerConfig::max_tokens_per_batch,
+                                  &SchedulerConfig::max_tokens_per_batch},
+    SchedulerConfigField<int32_t>{"max_seqs_per_batch",
+                                  &FLAGS_max_seqs_per_batch,
+                                  &SchedulerConfigInput::max_seqs_per_batch,
+                                  &SchedulerConfig::max_seqs_per_batch,
+                                  &SchedulerConfig::max_seqs_per_batch},
+    SchedulerConfigField<bool>{"enable_schedule_overlap",
+                               &FLAGS_enable_schedule_overlap,
+                               &SchedulerConfigInput::enable_schedule_overlap,
+                               &SchedulerConfig::enable_schedule_overlap,
+                               &SchedulerConfig::enable_schedule_overlap},
+    SchedulerConfigField<double>{
+        "prefill_scheduling_memory_usage_threshold",
+        &FLAGS_prefill_scheduling_memory_usage_threshold,
+        &SchedulerConfigInput::prefill_scheduling_memory_usage_threshold,
+        &SchedulerConfig::prefill_scheduling_memory_usage_threshold,
+        &SchedulerConfig::prefill_scheduling_memory_usage_threshold},
+    SchedulerConfigField<bool>{"enable_chunked_prefill",
+                               &FLAGS_enable_chunked_prefill,
+                               &SchedulerConfigInput::enable_chunked_prefill,
+                               &SchedulerConfig::enable_chunked_prefill,
+                               &SchedulerConfig::enable_chunked_prefill},
+    SchedulerConfigField<int32_t>{
+        "max_tokens_per_chunk_for_prefill",
+        &FLAGS_max_tokens_per_chunk_for_prefill,
+        &SchedulerConfigInput::max_tokens_per_chunk_for_prefill,
+        &SchedulerConfig::max_tokens_per_chunk_for_prefill,
+        &SchedulerConfig::max_tokens_per_chunk_for_prefill},
+    SchedulerConfigField<int32_t>{
+        "chunked_match_frequency",
+        &FLAGS_chunked_match_frequency,
+        &SchedulerConfigInput::chunked_match_frequency,
+        &SchedulerConfig::chunked_match_frequency,
+        &SchedulerConfig::chunked_match_frequency},
+    SchedulerConfigField<std::string>{"priority_strategy",
+                                      &FLAGS_priority_strategy,
+                                      &SchedulerConfigInput::priority_strategy,
+                                      &SchedulerConfig::priority_strategy,
+                                      &SchedulerConfig::priority_strategy},
+    SchedulerConfigField<bool>{"enable_mix_batch",
+                               &FLAGS_enable_mix_batch,
+                               &SchedulerConfigInput::enable_mix_batch,
+                               &SchedulerConfig::enable_mix_batch,
+                               &SchedulerConfig::enable_mix_batch},
+    SchedulerConfigField<double>{"aggressive_coeff",
+                                 &FLAGS_aggressive_coeff,
+                                 &SchedulerConfigInput::aggressive_coeff,
+                                 &SchedulerConfig::aggressive_coeff,
+                                 &SchedulerConfig::aggressive_coeff},
+    SchedulerConfigField<double>{"starve_threshold",
+                                 &FLAGS_starve_threshold,
+                                 &SchedulerConfigInput::starve_threshold,
+                                 &SchedulerConfig::starve_threshold,
+                                 &SchedulerConfig::starve_threshold},
+    SchedulerConfigField<bool>{"enable_starve_prevent",
+                               &FLAGS_enable_starve_prevent,
+                               &SchedulerConfigInput::enable_starve_prevent,
+                               &SchedulerConfig::enable_starve_prevent,
+                               &SchedulerConfig::enable_starve_prevent},
+    SchedulerConfigField<bool>{
+        "enable_dp_fair_token_budget",
+        &FLAGS_enable_dp_fair_token_budget,
+        &SchedulerConfigInput::enable_dp_fair_token_budget,
+        &SchedulerConfig::enable_dp_fair_token_budget,
+        &SchedulerConfig::enable_dp_fair_token_budget},
+    SchedulerConfigField<int32_t>{"request_queue_size",
+                                  &FLAGS_request_queue_size,
+                                  &SchedulerConfigInput::request_queue_size,
+                                  &SchedulerConfig::request_queue_size,
+                                  &SchedulerConfig::request_queue_size}};
+
+template <typename Visitor>
+void visit_scheduler_fields(Visitor&& visit) {
+  std::apply([&](const auto&... field) { (visit(field), ...); },
+             kSchedulerFields);
+}
+
+}  // namespace
+
+SchedulerConfigInput scheduler_config_input_from_flags(
+    const config::FlagInputSnapshot& flags) {
+  SchedulerConfigInput input;
+  visit_scheduler_fields([&](const auto& field) {
+    if (flags.is_specified(field.name)) {
+      input.*field.input = {*field.flag, config::ConfigInputSource::GFLAGS};
+    }
+  });
+  return input;
+}
+
+void merge_scheduler_config_json(SchedulerConfigInput& input,
+                                 const JsonReader& json) {
+  visit_scheduler_fields([&](const auto& field) {
+    auto& requested = input.*field.input;
+    if (requested.value.has_value()) {
+      return;
+    }
+    using T = typename std::decay_t<decltype(field)>::Value;
+    if (auto value = json.value<T>(field.name)) {
+      requested = {std::move(value), config::ConfigInputSource::JSON};
+    }
+  });
+}
+
+SchedulerConfig resolve_scheduler_config(const SchedulerConfigInput& input) {
+  SchedulerConfig resolved;
+  visit_scheduler_fields([&](const auto& field) {
+    const auto& requested = input.*field.input;
+    if (requested.value.has_value()) {
+      (resolved.*field.set)(*requested.value);
+    }
+  });
+  return resolved;
+}
 
 void SchedulerConfig::from_flags() {
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(max_tokens_per_batch);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(max_seqs_per_batch);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_schedule_overlap);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(prefill_scheduling_memory_usage_threshold);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_chunked_prefill);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(max_tokens_per_chunk_for_prefill);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(chunked_match_frequency);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(priority_strategy);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mix_batch);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(aggressive_coeff);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(starve_threshold);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_starve_prevent);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dp_fair_token_budget);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(request_queue_size);
+  visit_scheduler_fields(
+      [&](const auto& field) { (this->*field.set)(*field.flag); });
 }
 
 void SchedulerConfig::from_json(const JsonReader& json) {
-  XLLM_CONFIG_ASSIGN_FROM_JSON(max_tokens_per_batch);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(max_seqs_per_batch);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_schedule_overlap);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(prefill_scheduling_memory_usage_threshold);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_chunked_prefill);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(max_tokens_per_chunk_for_prefill);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(chunked_match_frequency);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(priority_strategy);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mix_batch);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(aggressive_coeff);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(starve_threshold);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_starve_prevent);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dp_fair_token_budget);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(request_queue_size);
+  // Compatibility adapter for callers that still use from_flags/from_json.
+  // Startup captures requested values before any JSON writeback instead.
+  const auto flags = config::FlagInputSnapshot::capture();
+  visit_scheduler_fields([&](const auto& field) {
+    if (flags.is_specified(field.name)) {
+      return;
+    }
+    using T = typename std::decay_t<decltype(field)>::Value;
+    if (auto value = json.value<T>(field.name)) {
+      (this->*field.set)(*value);
+    }
+    *field.flag = (this->*field.get)();
+  });
 }
 
 void SchedulerConfig::append_config_json(
     nlohmann::ordered_json& config_json) const {
   const SchedulerConfig default_config;
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, max_tokens_per_batch);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, max_seqs_per_batch);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_schedule_overlap);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, prefill_scheduling_memory_usage_threshold);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_chunked_prefill);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, max_tokens_per_chunk_for_prefill);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, chunked_match_frequency);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, priority_strategy);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_mix_batch);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, aggressive_coeff);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, starve_threshold);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_starve_prevent);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_dp_fair_token_budget);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, request_queue_size);
+  visit_scheduler_fields([&](const auto& field) {
+    const auto& value = (this->*field.get)();
+    if (value != (default_config.*field.get)()) {
+      config_json[field.name] = value;
+    }
+  });
 }
 
 SchedulerConfig& SchedulerConfig::get_instance() {
@@ -146,10 +248,20 @@ SchedulerConfig& SchedulerConfig::get_instance() {
 }
 
 void SchedulerConfig::initialize() {
-  from_flags();
+  auto input =
+      scheduler_config_input_from_flags(config::FlagInputSnapshot::capture());
   if (const auto& json_config = config::get_parsed_json_config()) {
-    from_json(*json_config);
+    merge_scheduler_config_json(input, *json_config);
   }
+  initialize(input);
+}
+
+void SchedulerConfig::initialize(const SchedulerConfigInput& input) {
+  *this = resolve_scheduler_config(input);
+  // Legacy consumers still read FLAGS_; keep this one-way compatibility
+  // writeback at application time, outside input parsing and resolution.
+  visit_scheduler_fields(
+      [&](const auto& field) { *field.flag = (this->*field.get)(); });
 }
 
 }  // namespace xllm

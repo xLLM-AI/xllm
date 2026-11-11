@@ -5,6 +5,7 @@ cc_library(
     config
   HDRS
     batch_sizes.h
+    config_input.h
     config_utils.h
     kv_cache_config.h
     disagg_pd_config.h
@@ -25,6 +26,7 @@ cc_library(
     speculative_config.h
   SRCS
     batch_sizes.cpp
+    config_input.cpp
     config_utils.cpp
     kv_cache_config.cpp
     disagg_pd_config.cpp
