@@ -32,6 +32,8 @@ class FBCache : public DitCacheImpl {
   void init(const DiTCacheConfig& cfg,
             const ParallelArgs& parallel_args) override;
 
+  void reset_cache() override;
+
   bool on_before_block(const CacheBlockIn& block_input) override;
   CacheBlockOut on_after_block(const CacheBlockIn& block_input) override;
 

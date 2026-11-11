@@ -25,8 +25,8 @@ void TaylorSeer::init(const DiTCacheConfig& cfg,
                       const ParallelArgs& parallel_args) {
   parallel_args_ = &parallel_args;
   CHECK_GE(cfg.taylorseer.warmup_steps, 0) << "warmup_steps must be >= 0";
-  CHECK_GE(cfg.taylorseer.skip_interval_steps, 0)
-      << "skip_interval_steps must be >= 0";
+  CHECK_GT(cfg.taylorseer.skip_interval_steps, 0)
+      << "skip_interval_steps must be > 0";
   CHECK_GE(cfg.taylorseer.n_derivatives, 0) << "n_derivatives must be >= 0";
 
   warmup_steps_ = cfg.taylorseer.warmup_steps;
@@ -37,6 +37,7 @@ void TaylorSeer::init(const DiTCacheConfig& cfg,
 }
 
 void TaylorSeer::reset_cache() {
+  DitCacheImpl::reset_cache();
   dY_prev_.assign(order_, torch::Tensor());
   dY_current_.assign(order_, torch::Tensor());
   valid_prev_.assign(order_, false);
@@ -53,7 +54,7 @@ TaylorSeer::approximate_derivative(const torch::Tensor& Y) {
   std::vector<torch::Tensor> dY(order_);
   std::vector<bool> valid(order_, false);
 
-  dY[0] = Y;
+  dY[0] = Y.clone();
   valid[0] = true;
 
   int elapsed_steps = current_step_ - last_non_approximated_step_;
@@ -93,7 +94,7 @@ void TaylorSeer::update(const torch::Tensor& Y) {
 
   if (!dY_current_[0].defined()) {
     for (int i = 0; i < order_; ++i) {
-      dY_current_[i] = (i == 0) ? Y : torch::zeros_like(Y);
+      dY_current_[i] = (i == 0) ? Y.clone() : torch::zeros_like(Y);
       valid_current_[i] = (i == 0);
     }
   } else {

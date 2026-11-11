@@ -37,6 +37,13 @@ void FBCacheTaylorSeer::init(const DiTCacheConfig& cfg,
   DiTCacheConfig ts_cfg;
   ts_cfg.taylorseer.n_derivatives = cfg.fbcachetaylorseer.n_derivatives;
   taylorseer->init(ts_cfg, parallel_args);
+  reset_cache();
+}
+
+void FBCacheTaylorSeer::reset_cache() {
+  DitCacheImpl::reset_cache();
+  use_cache_ = false;
+  taylorseer->reset_cache();
 }
 
 bool FBCacheTaylorSeer::on_before_block(const CacheBlockIn& block_input) {

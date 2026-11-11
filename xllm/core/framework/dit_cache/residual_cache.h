@@ -42,7 +42,7 @@ class ResidualCache : public DitCacheImpl {
   bool cache_validation();
 
   // Reset all cached derivatives and internal state
-  void reset_cache();
+  void reset_cache() override;
 
   // Mark the beginning of a new inference step
   void mark_step_begin();

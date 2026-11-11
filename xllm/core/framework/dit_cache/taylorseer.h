@@ -40,7 +40,7 @@ class TaylorSeer : public DitCacheImpl {
             const ParallelArgs& parallel_args) override;
 
   // Reset all cached derivatives and internal state
-  void reset_cache();
+  void reset_cache() override;
 
   // Mark the beginning of a new inference step
   void mark_step_begin();

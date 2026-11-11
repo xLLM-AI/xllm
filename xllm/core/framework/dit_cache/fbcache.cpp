@@ -26,9 +26,12 @@ void FBCache::init(const DiTCacheConfig& cfg,
 
   residual_diff_threshold_ = cfg.fbcache.residual_diff_threshold;
   warmup_steps_ = cfg.fbcache.warmup_steps;
-  current_step_ = 0;
+  reset_cache();
+}
+
+void FBCache::reset_cache() {
+  DitCacheImpl::reset_cache();
   use_cache_ = false;
-  buffers.clear();
 }
 
 bool FBCache::on_before_block(const CacheBlockIn& block_input) {

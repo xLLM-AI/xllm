@@ -42,17 +42,24 @@ class DitCacheImpl {
   virtual bool on_before_step(const CacheStepIn& stepin) = 0;
   virtual CacheStepOut on_after_step(const CacheStepIn& stepin) = 0;
 
-  // Per-generation params, refreshed on every forward().
+  virtual void reset_cache() {
+    buffers.clear();
+    current_step_ = 0;
+  }
+
+  // Setting a context starts a fresh generation, including an empty context
+  // when the worker releases request-owned cache state.
   virtual void set_context(const CacheContext& context) {
+    reset_cache();
     infer_steps_ = context.infer_steps;
     num_blocks_ = context.num_blocks;
   }
 
  protected:
-  int64_t warmup_steps_;
-  int64_t current_step_;
-  int64_t infer_steps_;
-  int64_t num_blocks_;
+  int64_t warmup_steps_ = 0;
+  int64_t current_step_ = 0;
+  int64_t infer_steps_ = 0;
+  int64_t num_blocks_ = 0;
   TensorMap buffers;
   // Non-owning: the worker's ParallelArgs outlives this cache singleton.
   const ParallelArgs* parallel_args_ = nullptr;

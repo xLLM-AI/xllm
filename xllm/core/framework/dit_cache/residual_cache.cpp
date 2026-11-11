@@ -39,6 +39,7 @@ void ResidualCache::init(const DiTCacheConfig& cfg,
 }
 
 void ResidualCache::reset_cache() {
+  DitCacheImpl::reset_cache();
   use_cache_ = false;
   update_cache_ = false;
 }

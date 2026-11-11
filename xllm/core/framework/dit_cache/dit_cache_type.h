@@ -23,6 +23,8 @@ namespace xllm {
 
 using TensorMap = std::unordered_map<std::string, torch::Tensor>;
 
+// Request denoising steps are one-based; 0 is the legacy standalone default.
+// Transformer block IDs are zero-based.
 struct CacheStepIn {
   int64_t step_id = 0;
   TensorMap tensors;
