@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
-#include "partial_json_parser/options.h"
-#include "partial_json_parser/parser.h"
+#include "core/util/partial_json_parser/options.h"
+#include "core/util/partial_json_parser/parser.h"
 
 using namespace partial_json_parser;
 using json = nlohmann::json;

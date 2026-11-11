@@ -13,34 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "utils.h"
+#include "core/util/partial_json_parser.h"
 
-#include <glog/logging.h>
-
-#include <algorithm>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 
-#include "partial_json_parser/options.h"
-#include "partial_json_parser/parser.h"
+#include "core/util/partial_json_parser/options.h"
+#include "core/util/partial_json_parser/parser.h"
 
 namespace xllm {
-namespace function_call {
+namespace partial_json {
 
-std::string find_common_prefix(const std::string& s1, const std::string& s2) {
-  std::string prefix;
-  size_t min_length = std::min(s1.length(), s2.length());
-
-  for (size_t i = 0; i < min_length; ++i) {
-    if (s1[i] == s2[i]) {
-      prefix += s1[i];
-    } else {
-      break;
-    }
-  }
-
-  return prefix;
-}
+namespace {
 
 // Convert our Allow enum to partial_json_parser TypeOptions
 partial_json_parser::TypeOptions convert_allow_to_type_options(Allow flags) {
@@ -64,6 +48,8 @@ partial_json_parser::TypeOptions convert_allow_to_type_options(Allow flags) {
 
   return static_cast<partial_json_parser::TypeOptions>(result);
 }
+
+}  // namespace
 
 std::tuple<nlohmann::json, int32_t> partial_json_loads(
     const std::string& input_str,
@@ -144,5 +130,5 @@ bool is_complete_json(const std::string& input_str) {
   }
 }
 
-}  // namespace function_call
+}  // namespace partial_json
 }  // namespace xllm
