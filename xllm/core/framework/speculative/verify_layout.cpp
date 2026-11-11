@@ -26,7 +26,7 @@ SpecVerifyStats make_verify_stats(
     const torch::Tensor& next_tokens,
     const std::vector<int32_t>* per_seq_draft_counts,
     const std::vector<int32_t>& num_accepted_tokens,
-    const std::vector<bool>& constrained_mask) {
+    const std::vector<char>& constrained_mask) {
   CHECK(next_tokens.defined()) << "verify output tokens are undefined";
   CHECK_EQ(next_tokens.dim(), 2)
       << "verify output tokens should be [batch, width]";
@@ -60,7 +60,8 @@ SpecVerifyStats make_verify_stats(
     // Accepted drafts always land inside the row's verified slots.
     CHECK_LE(request.num_accepted_tokens, request.num_draft_tokens)
         << "accepted token count exceeds the row's verified width";
-    request.json_constrained = have_constrained && constrained_mask[seq_id];
+    request.json_constrained =
+        have_constrained && constrained_mask[seq_id] != 0;
   }
   return stats;
 }

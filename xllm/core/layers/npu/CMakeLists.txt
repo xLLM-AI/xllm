@@ -1,150 +1,20 @@
 include(cc_library)
-include(cc_test)
-
-include_directories(
-  ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
-)
 
 cc_library(
   NAME
-    npu_layers 
+    npu_layers
   HDRS
-    multi_head_attention.h
-    npu_word_embedding_impl.h
-    npu_pos_embedding_impl.h
-    npu_lm_head_impl.h
-    npu_qwen2_vision_encoder_layer_impl.h
-    npu_qwen2dot5_vision_encoder_layer_impl.h
-    npu_qwen3_vision_encoder_layer_impl.h
-    npu_kimik25_vision_encoder_layer_impl.h
-    npu_decoder_input.h
-    npu_qwen3_moe_decoder_layer_impl.h
-    # atb_parallel_linear.h
-    npu_block_copy_impl.h
-    buffer/atb_buffer.h
-    buffer/atb_workspace.h
-    npu_base_layer.h
-    npu_column_parallel_linear_impl.h
-    npu_glm4_moe_decoder_layer.h
-    npu_glm4_moe_lite_decoder_layer.h
-    npu_glm4_vision_encoder_layer_impl.h
-    npu_deepseek_v2_decoder_layer_impl.h
-    npu_deepseek_v32_decoder_layer_impl.h
-    npu_llama_decoder_layer_impl.h
-    npu_mistral3_vision_encoder_layer_impl.h
-    npu_mistral_decoder_layer_impl.h
-    npu_qwen2_decoder_layer_impl.h
-    npu_qwen3_decoder_layer_impl.h
-    npu_onerec_block_layer_impl.h
-    npu_eagle3_decoder_layer_impl.h
-    npu_glm4_decoder_layer_impl.h
-    npu_rms_norm_impl.h
-    npu_rope_layer_impl.h
-    npu_siglip_encoder_layer_impl.h
     rotary_embedding.h
-    ../common/rotary_embedding_util.h
-    loader/qwen3_decoder_loader.h
-    loader/qwen2_decoder_loader.h
-    loader/qwen3_moe_decoder_loader.h
-    loader/eagle3_decoder_loader.h
-    loader/word_embedding_loader.h
-    loader/lm_head_loader.h
-    loader/column_parallel_linear_loader.h
-    loader/deepseek_v2_decoder_loader.h
-    loader/deepseek_v32_decoder_loader.h
-    loader/glm4_decoder_loader.h
-    loader/glm4_vision_encoder_loader.h
-    loader/glm4_moe_decoder_loader.h
-    loader/glm4_moe_lite_decoder_loader.h
-    loader/llama_decoder_loader.h
-    loader/mistral3_vision_encoder_loader.h
-    loader/mistral_decoder_loader.h
-    loader/qwen2_vision_encoder_loader.h
-    loader/qwen2dot5_vision_encoder_loader.h
-    loader/qwen3_vision_encoder_loader.h
-    loader/kimik25_vision_encoder_loader.h
-    loader/rms_norm_loader.h
-    loader/siglip_encoder_loader.h
-    loader/base_loader.h
     loader/rolling_weight_buffer.h
-    loader/rolling_load_manager.h
   SRCS
-    multi_head_attention.cpp
-    npu_word_embedding_impl.cpp
-    npu_pos_embedding_impl.cpp
-    npu_lm_head_impl.cpp
-    npu_qwen2_vision_encoder_layer_impl.cpp
-    npu_qwen2dot5_vision_encoder_layer_impl.cpp
-    npu_qwen3_vision_encoder_layer_impl.cpp
-    npu_kimik25_vision_encoder_layer_impl.cpp
-    npu_qwen3_moe_decoder_layer_impl.cpp
-    # atb_parallel_linear.cpp
-    npu_block_copy_impl.cpp
-    buffer/atb_buffer.cpp
-    buffer/atb_workspace.cpp
-    npu_base_layer.cpp
-    npu_column_parallel_linear_impl.cpp
-    npu_glm4_moe_decoder_layer.cpp
-    npu_glm4_moe_lite_decoder_layer.cpp
-    npu_glm4_vision_encoder_layer_impl.cpp
-    npu_deepseek_v2_decoder_layer_impl.cpp
-    npu_deepseek_v32_decoder_layer_impl.cpp
-    npu_llama_decoder_layer_impl.cpp
-    npu_mistral3_vision_encoder_layer_impl.cpp
-    npu_mistral_decoder_layer_impl.cpp
-    npu_qwen2_decoder_layer_impl.cpp
-    npu_qwen3_decoder_layer_impl.cpp
-    npu_onerec_block_layer_impl.cpp
-    npu_eagle3_decoder_layer_impl.cpp
-    npu_glm4_decoder_layer_impl.cpp
-    npu_rms_norm_impl.cpp
-    npu_rope_layer_impl.cpp
-    npu_siglip_encoder_layer_impl.cpp
     rotary_embedding.cpp
-    ../common/rotary_embedding_util.cpp
-    loader/qwen3_decoder_loader.cpp
-    loader/qwen2_decoder_loader.cpp
-    loader/qwen3_moe_decoder_loader.cpp
-    loader/eagle3_decoder_loader.cpp
-    loader/word_embedding_loader.cpp
-    loader/lm_head_loader.cpp
-    loader/column_parallel_linear_loader.cpp
-    loader/deepseek_v2_decoder_loader.cpp
-    loader/deepseek_v32_decoder_loader.cpp
-    loader/glm4_decoder_loader.cpp
-    loader/glm4_vision_encoder_loader.cpp
-    loader/glm4_moe_decoder_loader.cpp
-    loader/glm4_moe_lite_decoder_loader.cpp
-    loader/llama_decoder_loader.cpp
-    loader/mistral3_vision_encoder_loader.cpp
-    loader/mistral_decoder_loader.cpp
-    loader/qwen2_vision_encoder_loader.cpp
-    loader/qwen2dot5_vision_encoder_loader.cpp
-    loader/qwen3_vision_encoder_loader.cpp
-    loader/kimik25_vision_encoder_loader.cpp
-    loader/rms_norm_loader.cpp
-    loader/siglip_encoder_loader.cpp
-    loader/base_loader.cpp
     loader/rolling_weight_buffer.cpp
-    loader/rolling_load_manager.cpp
   DEPS
-    "-Wl,--whole-archive"
-    "-Wl,--no-whole-archive"
-    :attention_mask
-    :kv_cache
-    :prefix_cache
-    :block
-    :eplb
-    :parallel_state
-    :state_dict
     :worker_memory_resources
     :model
+    :state_dict
     glog::glog
-    gflags::gflags
-    spdlog::spdlog
     torch
     torch_npu
-    xllm_atb_layers
     ${NPU_RUNTIME_SO}
-    nnopbase
 )

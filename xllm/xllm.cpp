@@ -43,7 +43,6 @@ namespace py = pybind11;
 #include "core/distributed_runtime/master_factory.h"
 #include "core/distributed_runtime/worker_memory_options.h"
 #include "core/framework/allocator/global_virtual_memory_region.h"
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/distributed_config.h"
@@ -59,7 +58,6 @@ namespace py = pybind11;
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/profile_config.h"
-#include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -86,7 +84,6 @@ static std::atomic<uint32_t> signal_received{0};
 namespace {
 
 void initialize_configs() {
-  BeamSearchConfig::get_instance().initialize();
   DisaggPDConfig::get_instance().initialize();
   DistributedConfig::get_instance().initialize();
   DiTConfig::get_instance().initialize();
@@ -99,7 +96,6 @@ void initialize_configs() {
   ModelConfig::get_instance().initialize();
   ParallelConfig::get_instance().initialize();
   ProfileConfig::get_instance().initialize();
-  RecConfig::get_instance().initialize();
   SchedulerConfig::get_instance().initialize();
   ServiceConfig::get_instance().initialize();
   SpeculativeConfig::get_instance().initialize();
@@ -111,7 +107,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
   const KVCacheStoreConfig& kv_cache_store_config =
       KVCacheStoreConfig::get_instance();
-  const BeamSearchConfig& beam_search_config = BeamSearchConfig::get_instance();
   const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   const ParallelConfig& parallel_config = ParallelConfig::get_instance();
   const EPLBConfig& eplb_config = EPLBConfig::get_instance();
@@ -124,7 +119,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const ExecutionConfig& execution_config = ExecutionConfig::get_instance();
   const KernelConfig& kernel_config = KernelConfig::get_instance();
   const DiTConfig& dit_config = DiTConfig::get_instance();
-  const RecConfig& rec_config = RecConfig::get_instance();
 
 #if !defined(USE_NPU)
   CHECK(!speculative_config.enable_mtp_draft_body_tp1())
@@ -166,31 +160,9 @@ Options create_options(const std::string& instance_name, bool is_local) {
           speculative_config.enable_probabilistic_draft())
       .speculative_suffix_cache_max_depth(
           speculative_config.speculative_suffix_cache_max_depth())
-      .speculative_suffix_max_spec_factor(
-          speculative_config.speculative_suffix_max_spec_factor())
-      .speculative_suffix_max_spec_offset(
-          speculative_config.speculative_suffix_max_spec_offset())
-      .speculative_suffix_min_token_prob(
-          speculative_config.speculative_suffix_min_token_prob())
       .speculative_suffix_max_cached_requests(
           speculative_config.speculative_suffix_max_cached_requests())
-      .speculative_suffix_use_tree_spec(
-          speculative_config.speculative_suffix_use_tree_spec())
       .enable_mtp_draft_body_tp1(speculative_config.enable_mtp_draft_body_tp1())
-      .enable_adaptive_target_verify(
-          speculative_config.enable_adaptive_target_verify())
-      .enable_adaptive_draft_step(
-          speculative_config.enable_adaptive_draft_step())
-      .adaptive_draft_step_config(
-          speculative_config.adaptive_draft_step_config())
-      .adaptive_target_verify_min_gain(
-          speculative_config.adaptive_target_verify_min_gain())
-      .adaptive_target_verify_cost_table(
-          speculative_config.adaptive_target_verify_cost_table())
-      .adaptive_target_verify_calibration(
-          speculative_config.adaptive_target_verify_calibration())
-      .adaptive_target_verify_cost_table_output(
-          speculative_config.adaptive_target_verify_cost_table_output())
       .num_request_handling_threads(
           service_config.num_request_handling_threads())
       .communication_backend(parallel_config.communication_backend())
@@ -248,7 +220,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .profile_max_prompt_length(profile_config.profile_max_prompt_length())
       .enable_profile_kv_blocks(profile_config.enable_profile_kv_blocks())
       .disable_ttft_profiling(profile_config.disable_ttft_profiling())
-      .enable_task_pipeline(execution_config.enable_task_pipeline())
       .enable_graph(execution_config.enable_graph())
       .enable_graph_mode_decode_no_padding(
           execution_config.enable_graph_mode_decode_no_padding())
@@ -261,10 +232,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .enable_shm(execution_config.enable_shm())
       .input_shm_size(execution_config.input_shm_size())
       .output_shm_size(execution_config.output_shm_size())
-      .beam_width(beam_search_config.beam_width())
       .kv_cache_dtype(kv_cache_config.kv_cache_dtype())
-      .rec_worker_max_concurrency(
-          static_cast<int32_t>(rec_config.rec_worker_max_concurrency()))
+
       .is_local(is_local);
 
   return options;
@@ -356,13 +325,6 @@ void validate_config(const std::string& model_type) {
                  << "Disabling enable_graph_double_buffer.";
     execution_config.enable_graph_double_buffer(false);
   }
-  // Weight VMM and rolling load require the manual weight loader.
-  if ((load_config.enable_vmm_weights() || load_config.enable_rolling_load()) &&
-      !load_config.enable_manual_loader()) {
-    LOG(WARNING) << "enable_vmm_weights or enable_rolling_load requires "
-                    "enable_manual_loader; forcing enable_manual_loader=true.";
-    load_config.enable_manual_loader(true);
-  }
   if (load_config.enable_rolling_load() &&
       load_config.rolling_load_num_cached_layers() < 1) {
     LOG(FATAL) << "rolling_load_num_cached_layers must be >= 1.";
@@ -385,9 +347,7 @@ void validate_config(const std::string& model_type) {
   if (load_config.enable_vmm_weights()) {
     LOG(FATAL) << "enable_vmm_weights is only supported on NPU.";
   }
-  if (load_config.enable_manual_loader()) {
-    LOG(FATAL) << "enable_manual_loader is only supported on NPU.";
-  }
+
   if (load_config.enable_rolling_load()) {
     LOG(FATAL) << "enable_rolling_load is only supported on NPU.";
   }
@@ -400,7 +360,6 @@ int run() {
   ModelConfig& model_config = ModelConfig::get_instance();
   LoadConfig& load_config = LoadConfig::get_instance();
   KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
-  BeamSearchConfig& beam_search_config = BeamSearchConfig::get_instance();
   SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   ParallelConfig& parallel_config = ParallelConfig::get_instance();
   DistributedConfig& distributed_config = DistributedConfig::get_instance();
@@ -448,10 +407,6 @@ int run() {
         scheduler_config.max_tokens_per_batch());
   }
 
-// disable block copy kernel on unsupported backends
-#if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_MUSA)
-  beam_search_config.enable_block_copy_kernel(false);
-#endif
   std::string model_type = "";
   if (model_config.backend() != "dit") {
     model_type = xllm::get_model_type(model_path, model_config.backend());

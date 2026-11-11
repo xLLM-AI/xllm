@@ -118,7 +118,7 @@ class AclGraphExecutionState:
     """Persistent resources owned by one model-execution graph entry."""
 
     persistent_buffers: dict[tuple[object, ...], object]
-    paged_attention: dict[int, PagedAttentionGraphState] = field(default_factory=dict)
+    paged_attention: dict[int | tuple[int, int | None], PagedAttentionGraphState] = field(default_factory=dict)
     # Serial MTP draft steps may share temporary attention storage.  Keep the
     # per-step map above for outputs and metadata whose addresses are part of
     # the captured graph, while allowing explicitly shared workspaces to use a
@@ -299,11 +299,12 @@ def copy_into_execution_buffer(key: tuple[object, ...], source: torch.Tensor) ->
     """Copy ``source`` into a graph-owned buffer with a stable address.
 
     ACL graph replay does not re-run Python. Host-updated metadata must land in
-    the same storage the captured kernels recorded. Eager execution has no
-    ``execution_state`` and returns ``source`` unchanged.
+    the same storage the captured kernels recorded. Eager preparation may run
+    before a forward context exists; without a graph ``execution_state``,
+    return ``source`` unchanged.
     """
-    state = get_forward_context().execution_state
-    if state is None:
+    context = get_forward_context_or_none()
+    if context is None or context.execution_state is None:
         return source
     buffer = get_execution_buffer(key, lambda: torch.empty_like(source))
     if buffer.shape != source.shape or buffer.dtype != source.dtype or buffer.device != source.device:

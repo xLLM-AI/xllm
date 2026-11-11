@@ -35,7 +35,6 @@ Sequence make_sequence() {
   params.skip_special_tokens = true;
   params.streaming = false;
   params.enable_schedule_overlap = false;
-  params.rec_type = RecType::kNone;
   params.bos_token_id = 0;
   params.request_id = "mtp_bootstrap_req";
   params.sampling_param = &sampling_param;

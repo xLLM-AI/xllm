@@ -54,8 +54,7 @@ class ParallelConfig final {
          "communication_backend",
          "enable_mm_encoder_dp",
          "enable_multi_stream_parallel",
-         "micro_batch_num",
-         "enable_dp_balance"}};
+         "micro_batch_num"}};
     return kOptionCategory;
   }
 
@@ -87,8 +86,6 @@ class ParallelConfig final {
   PROPERTY(bool, enable_multi_stream_parallel) = false;
 
   PROPERTY(int32_t, micro_batch_num) = 1;
-
-  PROPERTY(bool, enable_dp_balance) = false;
 
   [[nodiscard]] int32_t kv_split_size_effective() const noexcept {
     return kv_split_size_ > 0 ? kv_split_size_ : cp_size_;

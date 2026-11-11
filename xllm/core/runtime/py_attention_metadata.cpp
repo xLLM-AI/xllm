@@ -41,13 +41,6 @@ struct PythonObjectHolder final {
 
 }  // namespace
 
-PythonAttentionMetadata::PythonAttentionMetadata(py::object value)
-    : object_holder_(std::make_shared<PythonObjectHolder>(std::move(value))) {}
-
-py::object PythonAttentionMetadata::value() const {
-  return std::static_pointer_cast<PythonObjectHolder>(object_holder_)->value;
-}
-
 void register_attention_metadata_views(py::module_& module) {
   py::class_<PyExpandedDecodeMetadataView>(module, "ExpandedDecodeMetadataView")
       .def_property_readonly("enabled", &PyExpandedDecodeMetadataView::enabled)

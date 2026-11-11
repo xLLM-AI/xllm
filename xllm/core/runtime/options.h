@@ -82,24 +82,7 @@ struct Options {
 
   PROPERTY(int32_t, speculative_suffix_cache_max_depth) = 64;
 
-  PROPERTY(double, speculative_suffix_max_spec_factor) = 1.0;
-
-  PROPERTY(double, speculative_suffix_max_spec_offset) = 0.0;
-
-  PROPERTY(double, speculative_suffix_min_token_prob) = 0.1;
-
   PROPERTY(int32_t, speculative_suffix_max_cached_requests) = -1;
-
-  PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
-
-  PROPERTY(bool, enable_adaptive_target_verify) = false;
-  PROPERTY(bool, enable_adaptive_draft_step) = false;
-  PROPERTY(std::string, adaptive_draft_step_config);
-
-  PROPERTY(double, adaptive_target_verify_min_gain) = 0.0;
-
-  PROPERTY(std::string, adaptive_target_verify_cost_table);
-  PROPERTY(std::string, adaptive_target_verify_calibration);
 
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;
@@ -264,9 +247,6 @@ struct Options {
   // if the model supports multiple version or there are multiple models.
   PROPERTY(int64_t, server_idx) = 0;
 
-  // Enable the task pipeline; scheduler overlap determines the slot count.
-  PROPERTY(bool, enable_task_pipeline) = false;
-
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;
   // enable graph-mode decode without padding
@@ -276,9 +256,6 @@ struct Options {
   // maximum number of tokens for graph execution
   PROPERTY(int32_t, max_tokens_for_graph_mode) = 2048;
 
-  // beam width for beam search
-  PROPERTY(int32_t, beam_width) = 128;
-
   // max tokens per batch
   PROPERTY(int32_t, max_tokens_per_batch) = 4096;
 
@@ -286,9 +263,6 @@ struct Options {
   // "auto" (default): KV cache dtype aligns with model dtype (no quantization).
   // "int8": Enables INT8 quantization. Only supported on MLU backend.
   PROPERTY(std::string, kv_cache_dtype) = "auto";
-
-  // max concurrency for rec worker
-  PROPERTY(int32_t, rec_worker_max_concurrency) = 1;
 };
 
 }  // namespace runtime

@@ -70,8 +70,6 @@ TEST(MtpAsyncStateTest, ClassifiesSupportedCombinedDraftExecutionPaths) {
             CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION);
   EXPECT_EQ(classify_combined_draft_execution_path("qwen3_5_moe_mtp"),
             CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION);
-  EXPECT_EQ(classify_combined_draft_execution_path("glm_moe_dsa_mtp"),
-            CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION);
   EXPECT_EQ(classify_combined_draft_execution_path("qwen3_next_mtp"),
             CombinedDraftExecutionPath::UNSUPPORTED);
   EXPECT_EQ(classify_combined_draft_execution_path("mimo_mtp"),
@@ -87,10 +85,6 @@ TEST(MtpAsyncStateTest, ClassifiesDraftPrefixProtocolFromBothModelLayouts) {
   for (const TargetSpecVerifyMode target_mode : target_modes) {
     EXPECT_EQ(classify_draft_prefix_policy(
                   target_mode, CombinedDraftExecutionPath::UNSUPPORTED),
-              DraftPrefixPolicy::TAIL_REPAIR);
-    EXPECT_EQ(classify_draft_prefix_policy(
-                  target_mode,
-                  CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION),
               DraftPrefixPolicy::TAIL_REPAIR);
   }
   const std::pair<TargetSpecVerifyMode, DraftPrefixPolicy> paged_cases[] = {
@@ -108,45 +102,6 @@ TEST(MtpAsyncStateTest, ClassifiesDraftPrefixProtocolFromBothModelLayouts) {
   }
 }
 
-TEST(MtpAsyncStateTest,
-     KeepsHybridPipelineModelAdmissionNarrowerThanPrefixPolicy) {
-  const std::pair<std::string_view, bool> target_cases[] = {
-      {"qwen3_5", true},
-      {"qwen3_5_text", true},
-      {"qwen3_5_moe", false},
-      {"qwen3_5_moe_text", false},
-      {"qwen3_5_mtp", false},
-      {"qwen3_next", false},
-      {"glm_moe_dsa", false},
-      {"deepseek_v32", false},
-      {"unknown_model", false},
-      {"", false},
-  };
-  for (const auto& [target_type, expected] : target_cases) {
-    EXPECT_EQ(
-        supports_hybrid_mtp_pipeline_model_pair(target_type, "qwen3_5_mtp"),
-        expected)
-        << "target_type=" << target_type;
-    for (const std::string_view draft_type : {"qwen3_5_moe_mtp",
-                                              "glm_moe_dsa_mtp",
-                                              "qwen3_next_mtp",
-                                              "unknown_draft",
-                                              ""}) {
-      EXPECT_FALSE(
-          supports_hybrid_mtp_pipeline_model_pair(target_type, draft_type))
-          << "target_type=" << target_type << " draft_type=" << draft_type;
-    }
-  }
-  // The ordinary layout policy alone must not widen pipeline admission.
-  EXPECT_EQ(classify_draft_prefix_policy(
-                classify_target_spec_verify_mode("qwen3_5_moe_text",
-                                                 /*is_python_model=*/false),
-                classify_combined_draft_execution_path("qwen3_5_moe_mtp")),
-            DraftPrefixPolicy::VERIFIER_CONDITIONED_FIRST_PASS);
-  EXPECT_FALSE(supports_hybrid_mtp_pipeline_model_pair("qwen3_5_moe_text",
-                                                       "qwen3_5_moe_mtp"));
-}
-
 TEST(MtpAsyncStateTest, RestrictsCombinedDraftToValidatedConfigurations) {
   EXPECT_TRUE(supports_combined_draft_configuration(
       CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION,
@@ -154,26 +109,10 @@ TEST(MtpAsyncStateTest, RestrictsCombinedDraftToValidatedConfigurations) {
       /*dp_size=*/1));
   EXPECT_FALSE(supports_combined_draft_configuration(
       CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION,
-      "ATB",
-      /*dp_size=*/1));
-  EXPECT_FALSE(supports_combined_draft_configuration(
-      CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION,
       "TORCH",
       /*dp_size=*/2));
-  EXPECT_TRUE(supports_combined_draft_configuration(
-      CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION,
-      "ATB",
-      /*dp_size=*/1));
-  EXPECT_TRUE(supports_combined_draft_configuration(
-      CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION,
-      "ATB",
-      /*dp_size=*/2));
   EXPECT_FALSE(supports_combined_draft_configuration(
-      CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION,
-      "TORCH",
-      /*dp_size=*/1));
-  EXPECT_FALSE(supports_combined_draft_configuration(
-      CombinedDraftExecutionPath::UNSUPPORTED, "ATB", /*dp_size=*/1));
+      CombinedDraftExecutionPath::UNSUPPORTED, "TORCH", /*dp_size=*/1));
 }
 
 TEST(MtpAsyncStateTest, ExtractsTargetBaseKvLengthsFromVerifyLayouts) {

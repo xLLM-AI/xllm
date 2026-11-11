@@ -68,11 +68,6 @@ class WorkerService : public proto::DistributeWorker {
                        proto::Status* response,
                        ::google::protobuf::Closure* done) override;
 
-  void DSparkCalibration(::google::protobuf::RpcController* controller,
-                         const proto::DSparkCalibrationRequest* request,
-                         proto::DSparkCalibrationResponse* response,
-                         ::google::protobuf::Closure* done) override;
-
   void AllocateKVCacheWithTransfer(
       ::google::protobuf::RpcController* controller,
       const proto::AllocateKVCacheRequest* req,
@@ -134,11 +129,6 @@ class WorkerService : public proto::DistributeWorker {
                        proto::VLMForwardResponse* response,
                        ::google::protobuf::Closure* done) override;
 
-  void ExecuteRECModel(::google::protobuf::RpcController* controller,
-                       const proto::RECForwardRequest* request,
-                       proto::RECForwardResponse* response,
-                       ::google::protobuf::Closure* done) override;
-
   void ExecuteDITModel(::google::protobuf::RpcController* controller,
                        const proto::DITForwardRequest* request,
                        proto::DITForwardResponse* response,
@@ -153,11 +143,6 @@ class WorkerService : public proto::DistributeWorker {
                             const proto::Empty* request,
                             proto::VLMForwardResponse* response,
                             ::google::protobuf::Closure* done) override;
-
-  void GetActiveActivationMemory(::google::protobuf::RpcController* controller,
-                                 const proto::Empty* req,
-                                 proto::ActivationMemory* resp,
-                                 ::google::protobuf::Closure* done) override;
 
   void Sleep(::google::protobuf::RpcController* controller,
              const proto::SleepRequest* req,
@@ -190,15 +175,10 @@ class WorkerService : public proto::DistributeWorker {
       VlmForwardInput& input,
       ForwardOutput& cpu_output,
       std::vector<SpeculativeTokenStats>& speculative_token_stats);
-  void step_rec_model(
-      RecForwardInput& input,
-      ForwardOutput& cpu_output,
-      std::vector<SpeculativeTokenStats>& speculative_token_stats);
   void step_dit_model(const DiTForwardInput& input, ForwardOutput& cpu_output);
 
   void collect_llm_output(const ForwardOutput& output,
                           ForwardOutput& cpu_output,
-                          bool cpu_ready_result,
                           std::vector<SpeculativeTokenStats>& stats);
   void collect_vlm_output(const ForwardOutput& output,
                           ForwardOutput& cpu_output,
@@ -207,8 +187,6 @@ class WorkerService : public proto::DistributeWorker {
   void poll_llm_shm(
       std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
   void poll_vlm_shm(
-      std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
-  void poll_rec_shm(
       std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
   void poll_dit_shm(
       std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);

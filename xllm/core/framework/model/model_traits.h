@@ -30,10 +30,6 @@ class KVCache;
 namespace layer {
 class LmHead;
 class WordEmbedding;
-#if defined(USE_NPU)
-class NpuLmHead;
-class NpuWordEmbedding;
-#endif
 }  // namespace layer
 
 namespace detail {
@@ -196,85 +192,6 @@ struct has_pooler<T,
                       std::declval<const torch::Tensor&>()))>>
     : std::true_type {};
 
-#if defined(USE_NPU)
-template <typename T, typename = void>
-struct has_get_npu_lm_head : std::false_type {};
-
-template <typename T>
-struct has_get_npu_lm_head<
-    T,
-    std::void_t<decltype(std::declval<T>()->get_npu_lm_head())>>
-    : std::true_type {};
-
-template <typename T, typename = void>
-struct has_set_npu_lm_head : std::false_type {};
-
-template <typename T>
-struct has_set_npu_lm_head<
-    T,
-    std::void_t<decltype(std::declval<T>()->set_npu_lm_head(
-        std::declval<layer::NpuLmHead&>()))>> : std::true_type {};
-
-template <typename T, typename = void>
-struct has_get_npu_word_embedding : std::false_type {};
-
-template <typename T>
-struct has_get_npu_word_embedding<
-    T,
-    std::void_t<decltype(std::declval<T>()->get_npu_word_embedding())>>
-    : std::true_type {};
-
-template <typename T, typename = void>
-struct has_restored_npu_word_embedding : std::false_type {};
-
-template <typename T>
-struct has_restored_npu_word_embedding<
-    T,
-    std::void_t<decltype(std::declval<T>()->has_restored_npu_word_embedding())>>
-    : std::true_type {};
-
-template <typename T, typename = void>
-struct has_set_npu_word_embedding : std::false_type {};
-
-template <typename T>
-struct has_set_npu_word_embedding<
-    T,
-    std::void_t<decltype(std::declval<T>()->set_npu_word_embedding(
-        std::declval<layer::NpuWordEmbedding&>()))>> : std::true_type {};
-
-template <typename T, typename = void>
-struct has_set_restored_npu_word_embedding : std::false_type {};
-
-template <typename T>
-struct has_set_restored_npu_word_embedding<
-    T,
-    std::void_t<decltype(std::declval<T>()->set_restored_npu_word_embedding(
-        std::declval<layer::NpuWordEmbedding&>()))>> : std::true_type {};
-
-template <typename T, typename = void>
-struct has_init_or_refresh_rolling_runtime : std::false_type {};
-
-template <typename T>
-struct has_init_or_refresh_rolling_runtime<
-    T,
-    std::void_t<decltype(std::declval<T>()->init_or_refresh_rolling_runtime(
-        std::declval<::xllm::Stream*>(),
-        std::declval<::xllm::Stream*>(),
-        std::declval<int32_t>(),
-        std::declval<int32_t>(),
-        std::declval<const std::string&>()))>> : std::true_type {};
-
-// SFINAE: xlite-backend models expose get_xlite_holder().
-template <typename T, typename = void>
-struct has_get_xlite_holder : std::false_type {};
-
-template <typename T>
-struct has_get_xlite_holder<
-    T,
-    std::void_t<decltype(std::declval<T>()->get_xlite_holder())>>
-    : std::true_type {};
-#endif
-
 template <typename T, typename = void>
 struct has_write_context_kv : std::false_type {};
 
@@ -307,25 +224,6 @@ struct has_dspark_markov_bias<
     T,
     std::void_t<decltype(std::declval<T>()->dspark_markov_bias(
         std::declval<const torch::Tensor&>()))>> : std::true_type {};
-
-template <typename T, typename = void>
-struct has_dspark_confidence_probs : std::false_type {};
-
-template <typename T>
-struct has_dspark_confidence_probs<
-    T,
-    std::void_t<decltype(std::declval<T>()->dspark_confidence_probs(
-        std::declval<const torch::Tensor&>(),
-        std::declval<const torch::Tensor&>()))>> : std::true_type {};
-
-template <typename T, typename = void>
-struct has_has_dspark_confidence_head : std::false_type {};
-
-template <typename T>
-struct has_has_dspark_confidence_head<
-    T,
-    std::void_t<decltype(std::declval<T>()->has_dspark_confidence_head())>>
-    : std::true_type {};
 
 }  // namespace detail
 }  // namespace xllm

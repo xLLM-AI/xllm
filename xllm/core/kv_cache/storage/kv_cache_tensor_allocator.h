@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -25,10 +26,13 @@ limitations under the License.
 namespace xllm {
 
 // Controls only the physical allocation of tensors selected by the KV cache
-// factory. Implementations must preserve the requested role, shape, and dtype.
+// factory. Implementations preserve the role, inner row shape, and dtype. A
+// backend using physical index translation may expose extra leading rows.
 class KVCacheTensorAllocator {
  public:
   virtual ~KVCacheTensorAllocator() = default;
+
+  virtual void begin_layer(int64_t /*layer_id*/) {}
 
   virtual torch::Tensor allocate(KVCacheTensorRole role,
                                  const std::vector<int64_t>& shape,

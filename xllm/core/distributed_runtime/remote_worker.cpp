@@ -26,7 +26,6 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/config/service_config.h"
-#include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 
 namespace xllm {
@@ -66,11 +65,6 @@ bool RemoteWorker::wait_for_server_ready(const std::string& server_address) {
   }
 
   return true;
-}
-
-std::optional<std::string> RemoteWorker::spec_calibration(
-    const SpecCalibrationCommand& command) {
-  return channel_->spec_calibration(command);
 }
 
 void RemoteWorker::get_cache_info(uint64_t& cluster_id,
@@ -139,23 +133,6 @@ RemoteWorker::step_remote_async(const DiTForwardInput& input) {
   threadpool_.schedule(
       [this, input = input, promise = std::move(promise)]() mutable {
         channel_->execute_dit_model_async(input, promise);
-      });
-  return future;
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> RemoteWorker::step_async(
-    const RecForwardInput& /*input*/) {
-  LOG(FATAL) << "Native Rec remote execution requires step_remote_async";
-  return folly::makeSemiFuture(std::optional<ForwardOutput>{});
-}
-
-folly::SemiFuture<std::optional<RawForwardOutput>>
-RemoteWorker::step_remote_async(const RecForwardInput& input) {
-  folly::Promise<std::optional<RawForwardOutput>> promise;
-  auto future = promise.getSemiFuture();
-  threadpool_.schedule(
-      [this, input = input.clone(), promise = std::move(promise)]() mutable {
-        channel_->execute_rec_model_async(input, promise);
       });
   return future;
 }
@@ -302,15 +279,6 @@ RemoteWorker::get_last_vlm_step_result_async() {
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
     channel_->get_last_vlm_step_result_async(promise);
-  });
-  return future;
-}
-
-folly::SemiFuture<int64_t> RemoteWorker::get_active_activation_memory_async() {
-  folly::Promise<int64_t> promise;
-  auto future = promise.getSemiFuture();
-  threadpool_.schedule([this, promise = std::move(promise)]() mutable {
-    channel_->get_active_activation_memory_async(promise);
   });
   return future;
 }

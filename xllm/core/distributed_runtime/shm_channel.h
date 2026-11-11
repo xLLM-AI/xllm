@@ -36,10 +36,6 @@ class ShmChannel : public CommChannel {
       const DiTForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise) override;
 
-  void execute_rec_model_async(
-      const RecForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise) override;
-
   void execute_vlm_model_async(
       const VlmForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise) override;

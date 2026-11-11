@@ -35,10 +35,6 @@ message InitModelRequest {
   MasterStatus master_status = 3;
 }
 
-message ActivationMemory {
-  int64 active_activation_memory = 1;
-}
-
 message DeviceMemory {
   int64 available_memory = 1;
   int64 total_memory = 2;
@@ -55,31 +51,12 @@ message KVCacheShape {
   bool grouped_cache_layout = 7;
   int32 kpool_layout = 8;
   repeated int64 kpool_tail_shape = 9;
+  // Physical arena slabs are independent of logical cache ID capacity.
+  int64 shared_slab_count = 10;
 }
 
 message AllocateKVCacheRequest {
   KVCacheShape kv_cache_shape = 1;
-}
-
-// Startup-only speculative calibration control. The DSpark RPC/message names
-// are retained for transport compatibility; MTP also uses this control plane.
-// Each command is handled only after
-// all previously submitted task-pipeline results have been retired.
-message DSparkCalibrationRequest {
-  enum Action {
-    UNSPECIFIED = 0;
-    CAPABILITIES = 1;
-    BEGIN_SAMPLE = 2;
-    FINISH_SAMPLE = 3;
-    INSTALL_COSTS = 4;
-  }
-  Action action = 1;
-  string payload = 2;
-}
-
-message DSparkCalibrationResponse {
-  bool ok = 1;
-  string payload = 2;
 }
 
 message SleepRequest {
@@ -236,8 +213,7 @@ message RequestSamplingParam {
   int64 top_logprobs = 8;
   reserved 9;
   bool is_embeddings = 10;
-  int32 beam_width = 11;
-  int32 num_return_sequences = 12;
+  reserved 11, 12;
   float min_p = 13;
 }
 
@@ -312,19 +288,19 @@ message MediaNamedTensor {
 
 message DiTForwardInput {
   int32 batch_size = 1;
-  
+
   // Primary input text description for image generation
   repeated string prompts = 2;
-  
+
   // Secondary prompt for additional details (e.g., color, lighting)
   repeated string prompts_2 = 3;
-  
+
   // Negative prompt to exclude low-quality features
   repeated string negative_prompts = 4;
-  
+
   // Secondary negative prompt to exclude additional unwanted features
   repeated string negative_prompts_2 = 5;
-  
+
   reserved 6, 7, 8, 9, 10, 11, 12, 13, 14, 15;
   // generation params
   DiTGenerationParams generation_params = 16;
@@ -386,8 +362,8 @@ message PackedForwardInput {
   // Versioned raw payload: [magic:uint64][version:uint16][domain:uint8]
   // [flags:uint8][header_bytes:uint32][descriptor_bytes:uint64]
   // [tensor_arena_offset:uint64][tensor_arena_bytes:uint64][descriptor][arena].
-  // The arena is 16-byte aligned. Domain 1 is LLM, 2 is VLM, 3 is Rec,
-  // and 4 is DiT. Workers must use the same runtime schema version. Readers
+  // The arena is 16-byte aligned. Domain 1 is LLM, 2 is VLM, and 4 is DiT.
+  // Workers must use the same runtime schema version. Readers
   // reject unversioned payloads and unsupported versions before materializing
   // tensors.
   bytes payload = 1;
@@ -402,10 +378,6 @@ message LLMForwardRequest {
 }
 
 message VLMForwardRequest {
-  PackedForwardInput packed_input = 1;
-}
-
-message RECForwardRequest {
   PackedForwardInput packed_input = 1;
 }
 
@@ -449,31 +421,16 @@ message LLMForwardResponse {
   repeated SquenceOutput outputs = 2;
   repeated int64 expert_load_data = 3;
   int64 prepared_token = 4;
-  repeated int32 src_seq_idxes = 5;
-  repeated int32 out_tokens = 6;
-  repeated float out_logprobs = 7;
+  reserved 5, 6, 7;
   repeated JsonObjectOutputError json_object_errors = 9;
-  repeated float dspark_confidence = 10;
-  repeated uint64 dspark_rounds_since_full_width = 11;
+  reserved 10, 11;
 }
 
 message VLMForwardResponse {
   repeated SquenceOutput outputs = 2;
   repeated int64 expert_load_data = 3;
   int64 prepared_token = 4;
-  repeated int32 src_seq_idxes = 5;
-  repeated int32 out_tokens = 6;
-  repeated float out_logprobs = 7;
-  repeated JsonObjectOutputError json_object_errors = 9;
-}
-
-message RECForwardResponse {
-  repeated SquenceOutput outputs = 2;
-  repeated int64 expert_load_data = 3;
-  int64 prepared_token = 4;
-  repeated int32 src_seq_idxes = 5;
-  repeated int32 out_tokens = 6;
-  repeated float out_logprobs = 7;
+  reserved 5, 6, 7;
   repeated JsonObjectOutputError json_object_errors = 9;
 }
 
@@ -494,8 +451,6 @@ service DistributeWorker {
   rpc ProcessGroupTest (Empty) returns (Status);
   rpc ProfileDeviceMemory (Empty) returns (DeviceMemory);
   rpc AllocateKVCache (AllocateKVCacheRequest) returns (Status);
-  rpc DSparkCalibration(DSparkCalibrationRequest)
-      returns (DSparkCalibrationResponse) {}
   rpc AllocateKVCacheWithTransfer(AllocateKVCacheRequest) returns (Status) {}
   rpc PullKVCache(PullKVCacheRequest) returns (Status) {}
   rpc GetCacheInfo(Empty) returns (CacheInfo) {}
@@ -505,11 +460,9 @@ service DistributeWorker {
   rpc UnlinkP2P(P2PLinkWorkerRequest) returns (Status) {}
   rpc ExecuteLLMModel (LLMForwardRequest) returns (LLMForwardResponse);
   rpc ExecuteVLMModel (VLMForwardRequest) returns (VLMForwardResponse);
-  rpc ExecuteRECModel (RECForwardRequest) returns (RECForwardResponse);
   rpc ExecuteDITModel (DITForwardRequest) returns (DITForwardResponse);
   rpc GetLastLLMStepResult (Empty) returns (LLMForwardResponse);
   rpc GetLastVLMStepResult (Empty) returns (VLMForwardResponse);
-  rpc GetActiveActivationMemory (Empty) returns (ActivationMemory);
   rpc TransferBlocks(BlockTransferInfos) returns (TransferStatus) {}
   rpc WaitForKVBlocksTransfer(WaitForKVBlocksTransferRequest) returns (Status) {}
   rpc PrefetchFromStorage(PrefetchRequest) returns (Status) {}

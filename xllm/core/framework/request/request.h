@@ -183,10 +183,6 @@ class Request : public RequestBase {
   size_t best_of() const { return state_.best_of; }
   void update_connection_status();
 
-  bool check_beam_search() const {
-    return state_.sampling_param.beam_width > 1;
-  }
-
   bool is_chunked_prefill_stage() const {
     return sequences_group_->is_chunked_prefill_stage();
   }

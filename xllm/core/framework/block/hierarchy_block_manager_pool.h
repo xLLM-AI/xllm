@@ -70,7 +70,6 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   void publish_prefix(Sequence* sequence, size_t num_tokens) override;
 
   void transfer_blocks(BatchGroup& batches) override;
-  void transfer_blocks(RecBatchGroup& batches) override;
   void transfer_blocks() override;
 
   bool has_storage_prefetch() const override {

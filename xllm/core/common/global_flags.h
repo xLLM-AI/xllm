@@ -85,26 +85,10 @@ DECLARE_string(speculative_algorithm);
 DECLARE_bool(enable_probabilistic_draft);
 
 DECLARE_bool(enable_mtp_draft_body_tp1);
-DECLARE_bool(enable_adaptive_target_verify);
-DECLARE_bool(enable_adaptive_draft_step);
-DECLARE_string(adaptive_draft_step_config);
-
-DECLARE_double(adaptive_target_verify_min_gain);
-DECLARE_string(adaptive_target_verify_cost_table);
-DECLARE_string(adaptive_target_verify_calibration);
-DECLARE_string(adaptive_target_verify_cost_table_output);
 
 DECLARE_int32(speculative_suffix_cache_max_depth);
 
-DECLARE_double(speculative_suffix_max_spec_factor);
-
-DECLARE_double(speculative_suffix_max_spec_offset);
-
-DECLARE_double(speculative_suffix_min_token_prob);
-
 DECLARE_int32(speculative_suffix_max_cached_requests);
-
-DECLARE_bool(speculative_suffix_use_tree_spec);
 
 DECLARE_int32(num_request_handling_threads);
 
@@ -139,8 +123,6 @@ DECLARE_bool(enable_multi_stream_parallel);
 
 DECLARE_int32(micro_batch_num);
 
-DECLARE_bool(enable_dp_balance);
-
 // --- ep load balance config ---
 DECLARE_bool(enable_eplb);
 
@@ -161,8 +143,6 @@ DECLARE_string(rank_tablefile);
 constexpr int32_t kGraphExecutorLogVerboseLevel = 50;
 
 DECLARE_bool(enable_graph);
-
-DECLARE_bool(enable_unified_mtp_graph);
 
 DECLARE_bool(disable_graph_warmup);
 
@@ -210,10 +190,6 @@ DECLARE_bool(enable_schedule_overlap);
 DECLARE_double(prefill_scheduling_memory_usage_threshold);
 
 DECLARE_int32(max_reconnect_count);
-
-DECLARE_bool(enable_atb_comm_multiprocess);
-
-DECLARE_bool(enable_atb_spec_kernel);
 
 DECLARE_string(etcd_addr);
 
@@ -292,11 +268,11 @@ DECLARE_int32(max_global_tpot_ms);
 DECLARE_int32(max_requests_per_batch);
 
 DECLARE_bool(enable_vmm_kvcache);
+DECLARE_bool(enable_shared_kv_cache);
 
 DECLARE_int64(phy_page_granularity_size);
 
 // --- load config ---
-DECLARE_bool(enable_manual_loader);
 
 DECLARE_bool(enable_vmm_weights);
 
@@ -304,32 +280,6 @@ DECLARE_bool(enable_rolling_load);
 
 DECLARE_int32(rolling_load_num_cached_layers);
 DECLARE_int32(rolling_load_num_rolling_slots);
-
-DECLARE_bool(enable_prefetch_weight);
-
-// --- beam search config ---
-DECLARE_bool(enable_beam_search_kernel);
-
-DECLARE_int32(beam_width);
-
-DECLARE_bool(enable_block_copy_kernel);
-
-DECLARE_bool(enable_topk_sorted);
-
-// --- rec config ---
-DECLARE_bool(enable_rec_fast_sampler);
-
-DECLARE_bool(enable_rec_prefill_only);
-
-DECLARE_bool(output_rec_logprobs);
-
-DECLARE_bool(enable_xattention_one_stage);
-
-DECLARE_int32(max_decode_rounds);
-
-DECLARE_bool(enable_constrained_decoding);
-
-DECLARE_uint32(rec_worker_max_concurrency);
 
 // --- qwen3 reranker config ---
 DECLARE_bool(enable_qwen3_reranker);
@@ -363,12 +313,6 @@ DECLARE_int64(dit_cache_n_derivatives);
 DECLARE_int64(dit_cache_skip_interval_steps);
 
 DECLARE_double(dit_cache_residual_diff_threshold);
-
-DECLARE_bool(enable_convert_tokens_to_item);
-DECLARE_bool(enable_output_sku_logprobs);
-DECLARE_bool(enable_extended_item_info);
-DECLARE_int32(each_conversion_threshold);
-DECLARE_int32(total_conversion_threshold);
 
 DECLARE_bool(enable_return_mm_full_embeddings);
 
@@ -410,21 +354,10 @@ DECLARE_bool(use_audio_in_video);
 
 // --- kernel config ---
 #if defined(USE_NPU)
-DECLARE_bool(enable_customize_mla_kernel);
 
 DECLARE_string(npu_kernel_backend);
 
-DECLARE_bool(enable_intralayer_addnorm);
-
 DECLARE_int32(enable_fused_mc2);
-
-DECLARE_bool(enable_interlayer_addnorm);
-
-DECLARE_bool(enable_split_rmsnorm_rope);
-
-DECLARE_bool(enable_aclnn_matmul);
-
-DECLARE_bool(enable_aclnn_swiglu);
 
 DECLARE_bool(enable_dspark_native_sas);
 

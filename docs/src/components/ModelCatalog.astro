@@ -12,7 +12,7 @@ const text = locale === 'zh' ? {
 	count: '显示 {visible} / {total} 个模型条目', empty: '没有匹配的模型',
 	emptyHint: '试试其他关键词，或重置任务和硬件筛选。',
 	supported: '支持', unsupported: '未支持', unknown: '未确认',
-	tasks: ['文本生成', '视觉语言', '重排序', '图像与视频生成', '生成式推荐'],
+	tasks: ['文本生成', '视觉语言', '重排序', '图像与视频生成'],
 } : {
 	search: 'Search models', placeholder: 'Try Qwen, GLM, DeepSeek…', task: 'Task',
 	allTasks: 'All tasks', hardware: 'Hardware', allHardware: 'All platforms',
@@ -20,9 +20,9 @@ const text = locale === 'zh' ? {
 	count: 'Showing {visible} of {total} model entries', empty: 'No matching models',
 	emptyHint: 'Try another name, or reset the task and hardware filters.',
 	supported: 'Supported', unsupported: 'Not supported', unknown: 'Not documented',
-	tasks: ['Text generation', 'Vision-language', 'Reranking', 'Image & video generation', 'Recommendation'],
+	tasks: ['Text generation', 'Vision-language', 'Reranking', 'Image & video generation'],
 };
-const categories = ['llm', 'vlm', 'rerank', 'dit', 'rec'];
+const categories = ['llm', 'vlm', 'rerank', 'dit'];
 ---
 
 <xllm-model-catalog

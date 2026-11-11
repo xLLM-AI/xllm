@@ -102,16 +102,6 @@ def _prepared_metadata() -> SimpleNamespace:
     )
 
 
-def test_unified_dcp_rejects_owned_metadata_before_warmup(
-    prepared_backend: SfaDcpAttentionBackend, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    prepare = MagicMock(side_effect=AssertionError("unsupported Unified metadata reached DCP preparation"))
-    monkeypatch.setattr(prepared_backend, "prepare", prepare)
-    with pytest.raises(NotImplementedError, match="Unified MTP graphs do not support DCP"):
-        prepared_backend.prepare_owned_graph_metadata(_prepared_metadata())
-    prepare.assert_not_called()
-
-
 def test_dcp_derived_buffers_are_not_direct_metadata_consumers(prepared_backend: SfaDcpAttentionBackend) -> None:
     metadata = _prepared_metadata()
     metadata.q_cu_seq_lens = None

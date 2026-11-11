@@ -20,11 +20,8 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
-#include <utility>
 
 #include "common/metrics.h"
-#include "core/distributed_runtime/distributed_worker_manager.h"
-#include "core/framework/config/scheduler_config.h"
 #include "framework/block/kv_cache_manager.h"
 
 namespace xllm {
@@ -43,14 +40,11 @@ int64_t SchedulerMetrics::amortized_token_latency(int64_t latency,
   return (latency + n / 2) / n;
 }
 
-SchedulerMetrics::SchedulerMetrics(
-    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager,
-    KVCacheManager* kv_cache_manager,
-    int32_t dp_size,
-    int32_t num_speculative_tokens,
-    bool collect_recent_latency)
-    : distributed_worker_manager_(std::move(distributed_worker_manager)),
-      kv_cache_manager_(kv_cache_manager),
+SchedulerMetrics::SchedulerMetrics(KVCacheManager* kv_cache_manager,
+                                   int32_t dp_size,
+                                   int32_t num_speculative_tokens,
+                                   bool collect_recent_latency)
+    : kv_cache_manager_(kv_cache_manager),
       dp_size_(dp_size),
       num_speculative_tokens_(num_speculative_tokens),
       collect_recent_latency_(collect_recent_latency) {
@@ -133,13 +127,16 @@ std::vector<int64_t> SchedulerMetrics::get_num_occupied_slots(
   const std::vector<size_t> num_used_blocks =
       kv_cache_manager_->num_used_blocks();
   const int32_t block_size = kv_cache_manager_->block_size();
+  const size_t full_block_units =
+      kv_cache_manager_->block_resource_units(BlockType::KV, 1);
   for (Sequence* sequence : sequences) {
     const int32_t dp_rank = sequence->dp_rank();
     const int32_t last_block_len =
         sequence->kv_state().kv_cache_tokens_num() % block_size;
-    num_occupied_slots[static_cast<size_t>(dp_rank)] += last_block_len;
+    num_occupied_slots[static_cast<size_t>(dp_rank)] +=
+        last_block_len * full_block_units;
     num_unfilled_blocks[static_cast<size_t>(dp_rank)] +=
-        last_block_len > 0 ? 1 : 0;
+        last_block_len > 0 ? full_block_units : 0;
   }
   for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
     num_occupied_slots[static_cast<size_t>(dp_rank)] +=
@@ -150,62 +147,26 @@ std::vector<int64_t> SchedulerMetrics::get_num_occupied_slots(
   return num_occupied_slots;
 }
 
-std::vector<int64_t> SchedulerMetrics::get_active_activation_in_bytes() const {
-  if (distributed_worker_manager_ == nullptr) {
-    return std::vector<int64_t>(static_cast<size_t>(dp_size_), 0);
-  }
-  const std::vector<int64_t> all_active_activation_in_bytes =
-      distributed_worker_manager_->get_active_activation_memory();
-  CHECK_GE(all_active_activation_in_bytes.size(), static_cast<size_t>(dp_size_))
-      << "Activation memory samples must cover every DP rank.";
-  CHECK_EQ(
-      all_active_activation_in_bytes.size() % static_cast<size_t>(dp_size_), 0)
-      << "Activation memory samples must have equal worker counts per DP rank.";
-  std::vector<int64_t> active_activation_in_bytes(
-      static_cast<size_t>(dp_size_));
-  const size_t workers_per_dp =
-      all_active_activation_in_bytes.size() / static_cast<size_t>(dp_size_);
-  for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
-    active_activation_in_bytes[static_cast<size_t>(dp_rank)] =
-        all_active_activation_in_bytes[static_cast<size_t>(dp_rank) *
-                                       workers_per_dp];
-  }
-  return active_activation_in_bytes;
-}
-
 void SchedulerMetrics::update_memory_metrics(
     const std::vector<Sequence*>& sequences) {
   const std::vector<int64_t> num_occupied_slots =
       get_num_occupied_slots(sequences);
-  const std::vector<int64_t> active_activation_size_in_bytes =
-      get_active_activation_in_bytes();
-  const int64_t num_total_slots =
-      kv_cache_manager_->num_blocks() * kv_cache_manager_->block_size();
   for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+    const double num_total_slots =
+        static_cast<double>(kv_cache_manager_->admission_capacity(dp_rank)) *
+        kv_cache_manager_->block_size();
     const double occupied_slots_ratio =
-        static_cast<double>(num_occupied_slots[static_cast<size_t>(dp_rank)]) /
-        num_total_slots;
+        num_total_slots > 0
+            ? static_cast<double>(
+                  num_occupied_slots[static_cast<size_t>(dp_rank)]) /
+                  num_total_slots
+            : 0;
     const double active_kv_cache_size_in_kilobytes =
         occupied_slots_ratio * GAUGE_VALUE(total_kv_cache_size_in_kilobytes);
-    const int64_t active_activation_size_in_kilobytes =
-        active_activation_size_in_bytes[static_cast<size_t>(dp_rank)] / 1024;
     MULTI_HISTOGRAM_OBSERVE(
         active_kv_cache_size_in_kilobytes,
         std::to_string(dp_rank),
         static_cast<int64_t>(active_kv_cache_size_in_kilobytes));
-    if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
-      MULTI_HISTOGRAM_OBSERVE(decode_active_activation_size_in_kilobytes,
-                              std::to_string(dp_rank),
-                              active_activation_size_in_kilobytes);
-    } else if (sequences.front()->is_first_token()) {
-      MULTI_HISTOGRAM_OBSERVE(prefill_active_activation_size_in_kilobytes,
-                              std::to_string(dp_rank),
-                              active_activation_size_in_kilobytes);
-    } else {
-      MULTI_HISTOGRAM_OBSERVE(decode_active_activation_size_in_kilobytes,
-                              std::to_string(dp_rank),
-                              active_activation_size_in_kilobytes);
-    }
   }
 }
 

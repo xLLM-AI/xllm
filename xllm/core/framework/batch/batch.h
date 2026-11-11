@@ -35,7 +35,7 @@ namespace xllm {
 
 struct ModelArgs;
 
-// LLM/VLM engine-facing batch. Rec uses RecBatch directly.
+// LLM/VLM engine-facing batch.
 class Batch final {
  public:
   Batch() = default;
@@ -64,11 +64,6 @@ class Batch final {
   void update_forward_type(Sequence* sequence);
 
   void refresh_forward_type();
-
-  void set_swap_block_transfer_infos(
-      std::vector<BlockTransferInfo> swap_block_transfer_infos) {
-    state_.set_swap_block_transfer_infos(std::move(swap_block_transfer_infos));
-  }
 
   void set_batch_id() { state_.set_batch_id(); }
 
@@ -109,27 +104,13 @@ class Batch final {
 
   // Apply sampled tokens or reserve/commit a pending overlap result.
   void process_sample_output(const SampleOutput& sample_output,
-                             BatchOutputAction action,
-                             bool force_requested_beam_result_size = false);
+                             BatchOutputAction action);
 
   void process_sample_output(const RawForwardOutput& raw_output,
                              BatchOutputAction action);
 
-  // process output for beam search kernel
-  void process_beam_search_output(const RawForwardOutput& raw_output,
-                                  BatchOutputAction action);
-
-  // Start a new sequence view after beam expansion. New beam rows have no
-  // scheduler token limit.
-  void refresh_sequences_from_groups();
-
   const std::vector<uint32_t>& get_allowed_max_tokens() const {
     return state_.sequence_plan().budgets();
-  }
-
-  std::unordered_map<uint32_t, uint32_t> cal_seq_exchange_index_test(
-      std::vector<uint32_t>& kv_cache_tokens_num) {
-    return BatchState::cal_seq_exchange_index(kv_cache_tokens_num);
   }
 
   // Return the current sequence view.

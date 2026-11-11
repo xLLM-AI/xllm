@@ -14,8 +14,7 @@ xLLM 的标准安装包含 C++ 头文件和 CMake 包 `XLLMNative`。构建并�
 设备、Torch、编译器和 C++ ABI 设置必须与扩展保持一致：
 
 ```sh
-cmake -S . -B build -DUSE_NPU=ON -DUSE_CXX11_ABI=OFF \
-  -DXLLM_ATB_LAYERS_SOURCE_DIR="${PWD}/third_party/xllm_atb_layers"
+cmake -S . -B build -DUSE_NPU=ON -DUSE_CXX11_ABI=OFF
 cmake --build build --target xllm
 cmake --install build --prefix /opt/xllm
 ```
@@ -77,9 +76,8 @@ REGISTER_CAUSAL_VLM(example_vlm, "custom", ExampleCausalVLM, 100);
 
 原生模型扩展要求使用 native 模型后端。扩展的模型类型会在内置 NPU 后端别名之前解析，
 因此扩展可以替换受支持模型类型的实现，而无需向宿主暴露具体的类实现。在 NPU 上，
-选定的模型扩展会将 `npu_kernel_backend=AUTO` 解析为 `TORCH`；可根据扩展需求显式
-指定 `ATB`、`TORCH` 或 `XLITE`。`XLITE` 仍要求 xLLM 构建启用 `USE_XLITE=ON`。
-扩展负责支持所请求的后端。新的模型类型也可以注册为 `native`，加载其工厂后便可
+选定的模型扩展会将 `npu_kernel_backend=AUTO` 解析为 `TORCH`。
+新的模型类型也可以注册为 `native`，加载其工厂后便可
 使用默认的模型选择方式。
 
 四参数 `REGISTER_EXECUTOR` 示例用于注册指定扩展族的 executor。现有的双参数注册和
@@ -88,9 +86,8 @@ REGISTER_CAUSAL_VLM(example_vlm, "custom", ExampleCausalVLM, 100);
 算子；xLLM 负责注册表、生命周期、流、缓存和工厂调用。
 
 描述符记录 xLLM 源码修订版本、Torch 版本、编译器、标准库及 C++ ABI、架构、
-指针位宽、已启用的设备支持及 kernel 后端特性。可选的 XLITE NPU kernel 后端
-与设备支持分别记录。
-当前描述符版本为 2；升级 xLLM 时，需使用匹配的 SDK 重新构建扩展。
+指针位宽及已启用的设备支持。
+当前描述符版本为 3；升级 xLLM 时，需使用匹配的 SDK 重新构建扩展。
 加载器会在 DSO 的静态初始化器执行后检查这些字段，
 发现不匹配时终止启动。此检查用于发现意外的 ABI 不匹配，不用于验证扩展的可信性。
 

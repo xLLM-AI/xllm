@@ -16,14 +16,12 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <array>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 #include "core/common/global_flags.h"
@@ -37,263 +35,9 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/config/speculative_config.h"
 
 namespace xllm {
 namespace {
-
-TEST(SpeculativeConfigTest, AdaptiveVerifyRequiresMtpOrDsparkDraftFiveOrSeven) {
-  SpeculativeConfig config;
-  config.enable_adaptive_target_verify(true);
-  for (const std::string& algorithm :
-       {"DFlash", "DFlash2", "Eagle3", "Suffix", "unknown"}) {
-    SCOPED_TRACE(algorithm);
-    config.speculative_algorithm(algorithm).num_speculative_tokens(7);
-    EXPECT_DEATH(config.validate(), "supports MTP/DSpark Draft5/7");
-    EXPECT_FALSE(SpeculativeConfig::supports_adaptive_target_verify(algorithm));
-  }
-  for (const std::string& algorithm :
-       {"MTP", "mtp", "MtP", "DSpark", "dspark", "DSPARK", "dSpArK"}) {
-    SCOPED_TRACE(algorithm);
-    config.speculative_algorithm(algorithm);
-    EXPECT_TRUE(SpeculativeConfig::supports_adaptive_target_verify(algorithm));
-    for (const int32_t width : {5, 7}) {
-      config.num_speculative_tokens(width);
-      EXPECT_NO_FATAL_FAILURE(config.validate());
-    }
-    for (const int32_t width : {0, 1, 3, 6, 8}) {
-      config.num_speculative_tokens(width);
-      EXPECT_DEATH(config.validate(), "supports MTP/DSpark Draft5/7");
-    }
-  }
-}
-
-TEST(SpeculativeConfigTest, FixedWidthAlgorithmsDoNotRequireAdaptiveSupport) {
-  SpeculativeConfig config;
-  for (const std::string& algorithm :
-       {"MTP", "DFlash", "DFlash2", "DSpark", "Eagle3", "Suffix"}) {
-    SCOPED_TRACE(algorithm);
-    config.speculative_algorithm(algorithm).num_speculative_tokens(3);
-    EXPECT_FALSE(config.enable_adaptive_target_verify());
-    EXPECT_NO_FATAL_FAILURE(config.validate());
-  }
-}
-
-TEST(SpeculativeConfigTest, RejectsRetiredAdaptiveFlagsInJson) {
-  SpeculativeConfig config;
-  constexpr std::array<std::pair<const char*, const char*>, 3> retired{{
-      {"enable_adaptive_speculative_decode", "enable_adaptive_target_verify"},
-      {"enable_adaptive_spec_prune", "enable_adaptive_target_verify"},
-      {"enable_adaptive_mtp", "enable_adaptive_draft_step"},
-  }};
-  for (const auto& [old_name, new_name] : retired) {
-    SCOPED_TRACE(old_name);
-    for (const bool enabled : {false, true}) {
-      const JsonReader json =
-          config::parse_json_string(nlohmann::json{{old_name, enabled}}.dump());
-      EXPECT_DEATH(config.from_json(json),
-                   std::string("was renamed to ") + new_name);
-    }
-  }
-  const JsonReader json = config::parse_json_string(
-      R"({"adaptive_mtp_config":"mtp_profile.json"})");
-  EXPECT_DEATH(config.from_json(json),
-               "was renamed to adaptive_draft_step_config");
-}
-
-TEST(SpeculativeConfigTest, AdaptiveHelpRegistersOnlyCurrentNames) {
-  google::CommandLineFlagInfo flag_info;
-  const auto& names = SpeculativeConfig::option_category().option_names;
-  for (const std::string& name : {"enable_adaptive_draft_step",
-                                  "enable_adaptive_target_verify",
-                                  "adaptive_draft_step_config",
-                                  "adaptive_target_verify_min_gain",
-                                  "adaptive_target_verify_calibration",
-                                  "adaptive_target_verify_cost_table",
-                                  "adaptive_target_verify_cost_table_output"}) {
-    SCOPED_TRACE(name);
-    EXPECT_TRUE(google::GetCommandLineFlagInfo(name.c_str(), &flag_info));
-    EXPECT_NE(std::find(names.begin(), names.end(), name), names.end());
-  }
-  for (const std::string& name : {"enable_adaptive_mtp",
-                                  "enable_adaptive_spec_prune",
-                                  "enable_adaptive_speculative_decode",
-                                  "adaptive_mtp_config",
-                                  "adaptive_speculative_min_gain",
-                                  "adaptive_dspark_calibration",
-                                  "adaptive_dspark_cost_table",
-                                  "adaptive_dspark_cost_table_output"}) {
-    SCOPED_TRACE(name);
-    EXPECT_FALSE(google::GetCommandLineFlagInfo(name.c_str(), &flag_info));
-    EXPECT_EQ(std::find(names.begin(), names.end(), name), names.end());
-  }
-}
-
-TEST(SpeculativeConfigTest,
-     RejectsRetiredTargetVerifySettingsWithMigrationHint) {
-  SpeculativeConfig config;
-  constexpr std::array<std::pair<const char*, const char*>, 3> retired{{
-      {"adaptive_dspark_calibration", "adaptive_target_verify_calibration"},
-      {"adaptive_dspark_cost_table", "adaptive_target_verify_cost_table"},
-      {"adaptive_dspark_cost_table_output",
-       "adaptive_target_verify_cost_table_output"},
-  }};
-  for (const auto& [old_name, new_name] : retired) {
-    const JsonReader json = config::parse_json_string(
-        nlohmann::json{{old_name, "costs.json"}}.dump());
-    EXPECT_DEATH(config.from_json(json),
-                 std::string("was renamed to ") + new_name);
-  }
-  const JsonReader json =
-      config::parse_json_string(R"({"adaptive_speculative_min_gain":0.1})");
-  EXPECT_DEATH(config.from_json(json),
-               "was renamed to adaptive_target_verify_min_gain");
-}
-
-TEST(SpeculativeConfigTest, AdaptiveCommandLineNamesReachConfiguration) {
-  {
-    google::FlagSaver flag_saver;
-    google::SetCommandLineOption("enable_adaptive_draft_step", "true");
-    google::SetCommandLineOption("adaptive_draft_step_config",
-                                 "draft_step.json");
-    SpeculativeConfig config;
-    config.from_flags();
-    EXPECT_TRUE(config.enable_adaptive_draft_step());
-    EXPECT_FALSE(config.enable_adaptive_target_verify());
-    EXPECT_EQ(config.adaptive_draft_step_config(), "draft_step.json");
-  }
-  {
-    google::FlagSaver flag_saver;
-    google::SetCommandLineOption("enable_adaptive_target_verify", "true");
-    SpeculativeConfig config;
-    config.from_flags();
-    EXPECT_TRUE(config.enable_adaptive_target_verify());
-    EXPECT_FALSE(config.enable_adaptive_draft_step());
-  }
-}
-
-TEST(SpeculativeConfigTest, ThroughputMtpHasSeparateAdmissionAndJsonKey) {
-  google::FlagSaver flag_saver;
-  SpeculativeConfig config;
-  config.from_json(config::parse_json_string(
-      R"({"enable_adaptive_draft_step":true,"adaptive_draft_step_config":"mtp_profile.json","num_speculative_tokens":3,"speculative_algorithm":"mTp"})"));
-  EXPECT_TRUE(config.enable_adaptive_draft_step());
-  EXPECT_FALSE(config.enable_adaptive_target_verify());
-  EXPECT_NO_FATAL_FAILURE(config.validate());
-  nlohmann::ordered_json saved;
-  config.append_config_json(saved);
-  EXPECT_EQ(saved["enable_adaptive_draft_step"], true);
-  EXPECT_EQ(saved["adaptive_draft_step_config"], "mtp_profile.json");
-  EXPECT_FALSE(saved.contains("enable_adaptive_mtp"));
-  EXPECT_FALSE(saved.contains("adaptive_mtp_config"));
-  config.speculative_algorithm("DSpark");
-  EXPECT_DEATH(config.validate(),
-               "draft-step selection currently requires MTP");
-  config.speculative_algorithm("MTP").adaptive_draft_step_config("");
-  EXPECT_NO_FATAL_FAILURE(config.validate());
-  config.enable_adaptive_target_verify(true);
-  EXPECT_DEATH(config.validate(), "disabled adaptive target verification");
-}
-
-TEST(SpeculativeConfigTest, ExternalDsparkCostTableRoundTripsAndAppearsInHelp) {
-  google::FlagSaver flag_saver;
-  google::CommandLineFlagInfo flag_info;
-  EXPECT_TRUE(google::GetCommandLineFlagInfo("enable_adaptive_target_verify",
-                                             &flag_info));
-  EXPECT_FALSE(google::GetCommandLineFlagInfo(
-      "enable_adaptive_speculative_decode", &flag_info));
-  SpeculativeConfig speculative_config;
-  const JsonReader json = config::parse_json_string(R"json({
-    "adaptive_target_verify_cost_table":"/tmp/dspark_sps.json",
-    "speculative_algorithm":"DSpark",
-    "num_speculative_tokens":7,
-    "enable_adaptive_target_verify":true
-  })json");
-  speculative_config.from_json(json);
-  speculative_config.validate();
-  EXPECT_EQ(speculative_config.adaptive_target_verify_cost_table(),
-            "/tmp/dspark_sps.json");
-  nlohmann::ordered_json serialized;
-  speculative_config.append_config_json(serialized);
-  EXPECT_EQ(serialized.at("adaptive_target_verify_cost_table"),
-            "/tmp/dspark_sps.json");
-  const auto& names = SpeculativeConfig::option_category().option_names;
-  EXPECT_NE(
-      std::find(
-          names.begin(), names.end(), "adaptive_target_verify_cost_table"),
-      names.end());
-  EXPECT_NE(
-      std::find(names.begin(), names.end(), "enable_adaptive_target_verify"),
-      names.end());
-  EXPECT_EQ(
-      std::find(
-          names.begin(), names.end(), "enable_adaptive_speculative_decode"),
-      names.end());
-  EXPECT_TRUE(serialized.at("enable_adaptive_target_verify").get<bool>());
-  EXPECT_FALSE(serialized.contains("enable_adaptive_speculative_decode"));
-}
-
-TEST(SpeculativeConfigTest, ExternalCostTableRequiresAdaptiveMtpOrDspark) {
-  google::FlagSaver flag_saver;
-  SpeculativeConfig speculative_config;
-  speculative_config.adaptive_target_verify_cost_table("/tmp/dspark_sps.json");
-  EXPECT_DEATH(speculative_config.validate(),
-               "requires adaptive MTP/DSpark Draft5/7");
-  speculative_config.enable_adaptive_target_verify(true);
-  for (const std::string& algorithm : {"DSpark", "MTP"}) {
-    SCOPED_TRACE(algorithm);
-    speculative_config.speculative_algorithm(algorithm);
-    for (const int32_t width : {5, 7}) {
-      SCOPED_TRACE(width);
-      speculative_config.num_speculative_tokens(width);
-      EXPECT_NO_FATAL_FAILURE(speculative_config.validate());
-    }
-  }
-  speculative_config.num_speculative_tokens(6);
-  EXPECT_DEATH(speculative_config.validate(),
-               "requires adaptive MTP/DSpark Draft5/7");
-}
-
-TEST(SpeculativeConfigTest,
-     StartupDsparkCalibrationRoundTripsAndAppearsInHelp) {
-  google::FlagSaver flag_saver;
-  SpeculativeConfig config;
-  config.from_json(config::parse_json_string(R"json({
-    "adaptive_target_verify_calibration":"/tmp/calibration.json",
-    "adaptive_target_verify_cost_table_output":"/tmp/new-costs.json",
-    "speculative_algorithm":"DSpark",
-    "num_speculative_tokens":7,
-    "enable_adaptive_target_verify":true
-  })json"));
-  config.validate();
-  nlohmann::ordered_json serialized;
-  config.append_config_json(serialized);
-  EXPECT_EQ(serialized.at("adaptive_target_verify_calibration"),
-            "/tmp/calibration.json");
-  EXPECT_EQ(serialized.at("adaptive_target_verify_cost_table_output"),
-            "/tmp/new-costs.json");
-  const auto& names = SpeculativeConfig::option_category().option_names;
-  for (const std::string& name : {"adaptive_target_verify_calibration",
-                                  "adaptive_target_verify_cost_table_output"}) {
-    EXPECT_NE(std::find(names.begin(), names.end(), name), names.end());
-  }
-  config.adaptive_target_verify_cost_table("/tmp/costs.json");
-  EXPECT_DEATH(config.validate(), "without a cost-table input");
-}
-
-TEST(SpeculativeConfigTest, StartupDsparkOutputAllowsDefaultCalibration) {
-  google::FlagSaver flag_saver;
-  SpeculativeConfig config;
-  config.adaptive_target_verify_cost_table_output("/tmp/output.json");
-  EXPECT_DEATH(config.validate(), "requires startup calibration");
-  config.enable_adaptive_target_verify(true)
-      .speculative_algorithm("DSpark")
-      .num_speculative_tokens(7);
-  config.validate();
-  EXPECT_TRUE(config.adaptive_target_verify_calibration().empty());
-  config.adaptive_target_verify_cost_table("/tmp/saved.json");
-  EXPECT_DEATH(config.validate(), "requires startup calibration");
-}
 
 inline constexpr std::string_view kInlineConfig = R"json({
   "block_size": 16,
@@ -1385,7 +1129,6 @@ TEST(VirtualMemoryConfigTest, JsonLoadsAndExportsIndependentMemoryModes) {
 
       EXPECT_EQ(kv_cache_config.enable_vmm_kvcache(), enable_kvcache);
       EXPECT_EQ(load_config.enable_vmm_weights(), enable_weights);
-      EXPECT_FALSE(load_config.enable_manual_loader());
       EXPECT_EQ(distributed_config.worker_memory_master_node_addr(),
                 "192.0.2.1:19889");
 

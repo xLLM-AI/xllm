@@ -36,12 +36,6 @@ bool encode_vlm_output(const ForwardOutput& output,
 bool decode_vlm_output(const proto::VLMForwardResponse& response,
                        RawForwardOutput& output);
 
-bool encode_rec_output(const ForwardOutput& output,
-                       const std::vector<SpeculativeTokenStats>& stats,
-                       proto::RECForwardResponse* response);
-bool decode_rec_output(const proto::RECForwardResponse& response,
-                       RawForwardOutput& output);
-
 bool encode_dit_output(const ForwardOutput& output,
                        proto::DITForwardResponse* response);
 bool decode_dit_output(const proto::DITForwardResponse& response,

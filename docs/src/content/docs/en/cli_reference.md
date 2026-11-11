@@ -55,12 +55,10 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `enable_manual_loader` | `bool` | `false` | Pin decoder layer weights to host memory and use async H2D transfer. Required by `enable_rolling_load`; also implied by `enable_vmm_weights`. |
-| `enable_vmm_weights` | `bool` | `false` | Enable VMM for model weights and implicitly enable the manual loader. Independent of `enable_vmm_kvcache`. NPU only. |
-| `enable_rolling_load` | `bool` | `false` | Enable rolling weight load: keep only N decoder layer weight slots in HBM and stream-load each layer just in time. Requires `enable_manual_loader=true`. NPU only. |
+| `enable_vmm_weights` | `bool` | `false` | Enable VMM for model weights. Independent of `enable_vmm_kvcache`. NPU only. |
+| `enable_rolling_load` | `bool` | `false` | Stream DiT layer weights through a fixed number of HBM slots. NPU only. |
 | `rolling_load_num_cached_layers` | `int32` | `2` | Number of decoder layer weight slots to keep in HBM when `enable_rolling_load=true`. |
 | `rolling_load_num_rolling_slots` | `int32` | `-1` | Number of rolling slots used by decoder rolling load. Fixed slots are `rolling_load_num_cached_layers - rolling_load_num_rolling_slots`. `-1` means auto, `min(2, preload_count)`. Must be in `[-1, rolling_load_num_cached_layers]`. |
-| `enable_prefetch_weight` | `bool` | `false` | Whether to enable weight prefetching. Only applies to Qwen3-dense models. The default gateup weight prefetch ratio is 40%; adjust with `PREFETCH_COEFFOCIENT`. |
 
 ## KVCacheConfig
 
@@ -77,12 +75,11 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `max_linear_state_cache_slots` | `int64` | `0` | Maximum number of active linear-attention state cache slots. `0` derives an automatic capacity from the available KV Cache budget. |
 | `xxh3_128bits_seed` | `uint32` | `1024` | Default XXH3 128-bit hash seed. |
 | `enable_vmm_kvcache` | `bool` | `false` | Enable VMM for KV Cache. Independent of `enable_vmm_weights`; `false` uses the original physical KV Cache implementation. NPU only. |
+| `enable_shared_kv_cache` | `bool` | `false` | Share one fixed physical arena between Full KV blocks and Linear state extents. Native NPU Torch Qwen hybrid execution remains limited to ordinary eager decoding. The Python path uses eager/chunked prefill, ACL decode/verify and ordinary Qwen3.5/3.8 MTP through the current separate target/draft execution paths. See the implementation scope and validation requirements below. |
 | `vmm_elastic` | `bool` | `true` | When either VMM flag is enabled, grow active logical slots and physical backing on demand, and release idle backing. `false` uses a fixed resident pool. |
 | `vmm_memory_reserve_bytes` | `int64` | `0` | Additional device memory to keep free when elastic virtual memory grows, in bytes. Supplements runtime execution headroom; must be nonnegative. |
 | `vmm_startup_timeout_ms` | `int32` | `120000` | Positive timeout in milliseconds applied separately to the master's node-registration wait and each non-master's physical-pool readiness wait during VMM startup. Independent of per-request RPC timeouts; each wait has its own timer. |
 | `phy_page_granularity_size` | `int64` | `2097152` | Granularity size of one physical page in bytes, default 2 MiB, for continuous KV Cache. |
-
-For VMM usage and capacity guidance, see [Virtual Memory for KV Cache and Model Weights](/en/features/virtual_memory/).
 
 ### kv_events_config
 
@@ -124,15 +121,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `store_local_hostname` | `string` | `""` | Local host name of the KV Cache Store client. |
 | `enable_control_h2d_block_num` | `bool` | `false` | Whether to control the number of H2D copy blocks. |
 
-## BeamSearchConfig
-
-| Parameter | Type | Default | Description |
-|:----------|:-----|:--------|:------------|
-| `enable_beam_search_kernel` | `bool` | `false` | Whether to enable the beam search kernel. |
-| `beam_width` | `int32` | `1` | Beam width for beam search. |
-| `enable_block_copy_kernel` | `bool` | `true` (NPU/CUDA/MUSA/DCU); `false` (other backends) | Whether to use the block copy kernel on supported backends. |
-| `enable_topk_sorted` | `bool` | `true` | Whether to enable sorted top-k output. |
-
 ## SchedulerConfig
 
 | Parameter | Type | Default | Description |
@@ -168,7 +156,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `enable_mm_encoder_dp` | `bool` | `false` | Whether to enable encoder data parallelism for multimodal models. |
 | `enable_multi_stream_parallel` | `bool` | `false` | Whether to enable computation/communication parallelism with two streams and two micro batches in the prefill stage. See [Multi-Stream Parallelism](/en/features/multi_streams/). |
 | `micro_batch_num` | `int32` | `1` | Number of micro batches used for multi-stream parallelism. |
-| `enable_dp_balance` | `bool` | `false` | Whether to enable DP load balancing. If true, sequences within a single DP batch are shuffled. |
 
 ## EPLBConfig
 
@@ -215,124 +202,9 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `num_speculative_tokens` | `int32` | `0` | Number of speculative tokens generated per speculative decoding step. |
 | `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`, `DFlash`, `DFlash2` (NPU only), `DSpark`. |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Maximum suffix-tree depth for suffix speculative decoding. |
-| `speculative_suffix_max_spec_factor` | `double` | `1.0` | Maximum suffix speculation token factor relative to match length. |
-| `speculative_suffix_max_spec_offset` | `double` | `0.0` | Maximum additive token offset for suffix speculation. |
-| `speculative_suffix_min_token_prob` | `double` | `0.1` | Minimum token probability used in suffix speculation. |
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Maximum number of globally cached requests for suffix speculation. `-1` means unlimited; `0` disables it. |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | Whether to use tree-based suffix speculation instead of path speculation. |
 | `enable_probabilistic_draft` | `bool` | false | Drafts sample proposals from their distribution (emitting q for rejection sampling). The default is greedy argmax. Only `MTP`, `DSpark`, `DFlash2`, `Eagle3` support it. |
-| `enable_atb_spec_kernel` | `bool` | `false` | Whether to use the ATB speculative kernel. |
-| `enable_adaptive_target_verify` | `bool` | `false` | Adapt how many already-generated draft proposals the target verifies, using historical confidence and calibrated full-cycle costs; draft generation width is unchanged. Supports DSpark and MTP greedy Draft5/7 with Python ACL graphs and task pipeline. MTP uses selected-token logits probabilities and requires ordinary graphs and DP=CP=1. Both ordinary-graph paths support greedy, random or mixed targets with a greedy draft; DSpark unified graphs require greedy targets. See [Adaptive Speculation](/en/features/adaptive_speculation/). |
-| `enable_adaptive_draft_step` | `bool` | `false` | Adapt the actual number of sequential draft forward steps before verification to maximize predicted full-cycle throughput. This suits autoregressive drafts, currently MTP; `num_speculative_tokens` is the maximum (1–64), not the current depth. Requires Python GLM DSA, ordinary prewarmed ACL graphs, async task pipeline and DP=CP=1; unified MTP and PD disaggregation are not supported. See [Adaptive Speculation](/en/features/adaptive_speculation/). |
-| `adaptive_draft_step_config` | `string` | `""` | Path to an optional JSON file: `policy` controls the acceptance window, update interval and switch margin; `calibration` controls startup sampling and fitting. It is not a cost-table input. Empty uses logged defaults and still measures the current MTP service's per-depth full-cycle costs before ready, sharing SPS/additive fitting code, not DSpark's measured values. See [Adaptive Speculation](/en/features/adaptive_speculation/) and the example below. |
-| `adaptive_target_verify_min_gain` | `double` | `0.0` | Minimum predicted relative throughput gain for changing the DSpark verification budget from the previous eligible plan. |
-| `adaptive_target_verify_calibration` | `string` | `""` | Optional startup-calibration JSON file. Empty selects built-in defaults; the effective settings are always logged. Cannot be combined with a saved-table input. |
-| `adaptive_target_verify_cost_table` | `string` | `""` | Load compatible saved full-step costs instead of sampling and fitting. Supports one-dimensional SPS and two-dimensional additive models. Graph warmup still runs. |
-| `adaptive_target_verify_cost_table_output` | `string` | `""` | Optionally save startup-calibrated costs as a versioned bundle. Empty keeps costs in memory. An existing output file is never overwritten. Not valid when loading a saved table. |
-
-### Throughput-aware draft-step configuration
-
-`enable_adaptive_draft_step` changes the number of draft forward steps;
-`enable_adaptive_target_verify` prunes proposals before target verification.
-Both flags name execution capabilities, not algorithms. Shared Host-side
-cost models, budget planning, calibration and steady-window collection live
-under `core/framework/speculative/adaptive/` and use `Spec*` types; the
-draft-step selector uses the same infrastructure with its own measured costs.
-They are separate controls: currently the former supports MTP and the latter
-supports DSpark Draft5/7. They cannot be enabled together.
-
-The previous names `enable_adaptive_mtp`, `adaptive_mtp_config`, and
-`enable_adaptive_spec_prune` are replaced by `enable_adaptive_draft_step`,
-`adaptive_draft_step_config`, and `enable_adaptive_target_verify`, respectively.
-Update both CLI arguments and JSON configurations; old JSON keys are rejected
-with migration instructions instead of silently disabling the feature.
-
-Target-verification settings follow the same capability-oriented names:
-
-| Previous name | Current name |
-| --- | --- |
-| `adaptive_dspark_calibration` | `adaptive_target_verify_calibration` |
-| `adaptive_dspark_cost_table` | `adaptive_target_verify_cost_table` |
-| `adaptive_dspark_cost_table_output` | `adaptive_target_verify_cost_table_output` |
-| `adaptive_speculative_min_gain` | `adaptive_target_verify_min_gain` |
-
-Update CLI arguments and JSON keys together. Old flags are no longer registered;
-old JSON keys report the corresponding replacement. Saved cost-table JSON and
-its algorithm/backend compatibility identity are unchanged. `SpecCostModel`
-provides SPS/additive costs, `SpecCostProfileStore` indexes physical request
-buckets and KV coverage, and `VerifyBudgetPlanner` selects verification budgets.
-Backend-specific draft token layouts and supported kernel widths stay at the
-runtime boundary rather than in the shared profile store.
-
-Example launch arguments:
-
-```bash
---model_impl=python --speculative_algorithm=MTP \
---num_speculative_tokens=3 --enable_task_pipeline=true \
---enable_graph=true --enable_unified_mtp_graph=false \
---enable_schedule_overlap=true --enable_adaptive_draft_step=true \
---adaptive_draft_step_config=mtp_profile.json
-```
-
-Supply the usual target/draft model paths and parallel arguments separately.
-The optional JSON controls sampling, not precomputed cost values. Omit
-`adaptive_draft_step_config` to use defaults for both sections; the effective settings
-are always logged. An example for graphs covering request buckets 1, 2, 4, 8:
-
-```json
-{
-  "version": 1,
-  "policy": {
-    "window_size": 20, "update_interval": 5,
-    "switch_min_gain": 0.05
-  },
-  "calibration": {
-    "model": "additive", "request_buckets": [1, 2, 4, 8],
-    "contexts": [{"prefill_tokens": 2048, "min_kv_length": 1, "max_kv_length": 4096}],
-    "warmup_steps": 8, "window_steps": 32,
-    "windows_per_point": 3, "token_seed": 1
-  }
-}
-```
-
-Startup reuses DSpark's internal request driver and steady result-fence windows,
-executing real MTP prefill/decode without restarting a service or sending HTTP
-requests. Each depth gets its own measured SPS (`model: "sps"`) or additive
-model. The additive axes are physical first-draft request capacity and padded
-target rows; valid larger padded target buckets make the two axes identifiable.
-Costs include sequential draft forwards, verification, sampling, prefix refresh
-and ordinary result retirement. Fitted models are kept in engine memory;
-effective settings and calibration progress are logged. No cost JSON is
-required or taken from a DSpark run.
-Defaults use additive fitting, actual captured request buckets (up to 128),
-prefill up to 2048 and KV up to 4096 with worst-case decode headroom. Explicit
-sampling must fit the captured shapes and KV capacity; invalid coverage fails
-startup rather than silently using guessed costs. Sampling all depths and
-captured shapes adds startup time. No NPU timing Events are introduced.
-
-The engine learns `p[j] = P(accepted prefix length > j)` from completed result
-metadata and chooses the depth maximizing `B * (1 + sum(p[:depth])) / cost_ms`.
-Each retired verify batch contributes its fraction of requests accepting the
-whole prefix through `j`; batches have equal window weight regardless of size.
-The default window holds 20 completed batches, shared across batch sizes.
-Rescoring occurs every 5 completed batches once every active position has a
-full window, with a 5% minimum predicted gain for a switch. Positions beyond
-the verified depth are unobserved, not rejections. A depth decrease clears
-deeper windows; missing rates are geometrically extrapolated from the known
-prefix rates (a single known position supplies a flat tail). There is no
-periodic forced maximum-depth exploration. The former `min_observations` and
-`exploration_interval` policy keys are rejected; configure `window_size` and
-`update_interval` instead.
-
-No confidence D2H or additional TP decision broadcast is introduced. The
-normal async result harvest supplies historical feedback; an already-submitted
-task is never modified. CPU-side dispatch epochs prevent results from older
-in-flight batches from refilling windows cleared by a depth decrease. Cold
-start, missing cost coverage and requests outside warmed graph capacity use
-the configured maximum depth. The effective policy is logged at startup.
-Graphs warm all candidate depths using maximum-capacity Slot storage, so step
-selection does not deliberately trigger serving-time recapture. The enabling
-flag defaults to false and leaves fixed-width MTP unchanged when disabled.
 
 ## ProfileConfig
 
@@ -356,7 +228,6 @@ flag defaults to false and leaves fixed-width MTP unchanged when disabled.
 |:----------|:-----|:--------|:------------|
 | `extension_impl` | `string` | `""` | Native extension implementation family for registered components, including models and executors. An empty value preserves normal selection. The selected family must be registered; components without registrations in that family keep their normal selection. |
 | `enable_graph` | `bool` | `false` | Whether to enable graph execution for the decode phase to reduce kernel-launch overhead and device idle time. Supports CUDA Graph, ACL Graph (NPU), MLU Graph, and DCU Graph. See [Graph Mode](/en/features/graph_mode/). |
-| `enable_unified_mtp_graph` | `bool` | `false` | Route supported NPU speculative decode requests through a unified Python graph. Supports GLM DSA MTP and `DFlash`/`DFlash2`/`DSpark` with a GLM DSA target model. Requires `enable_graph=true`; `DFlash`/`DFlash2`/`DSpark` also require `enable_task_pipeline=true`. Disabling this flag leaves ordinary model graph execution unchanged. |
 | `enable_graph_double_buffer` | `bool` | `true` | Whether to enable double-buffered ACL graph persistent params and graph instances for NPU schedule-overlap decode. |
 | `enable_graph_mode_decode_no_padding` | `bool` | `false` | Whether decode graph capture uses the actual `num_tokens` instead of a padded shape. |
 | `enable_prefill_piecewise_graph` | `bool` | `false` | Whether to enable piecewise CUDA graph for the prefill phase. Attention runs in eager mode while other operations are captured in CUDA graphs. |
@@ -376,14 +247,8 @@ flag defaults to false and leaves fixed-width MTP unchanged when disabled.
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `enable_customize_mla_kernel` | `bool` | `false` | Whether to enable the customized MLA kernel. |
-| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel backend. Supported values: `AUTO`, `ATB`, `TORCH`, `XLITE`. |
-| `enable_intralayer_addnorm` | `bool` | `false` | Whether to enable fused intralayer addnorm ops. |
+| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel backend. Supported values: `AUTO`, `TORCH`. |
 | `enable_fused_mc2` | `int32` | `-1` | Fused MC2 mode for NPU. `-1` uses the auto default, `0` disables fused MC2, positive values enable dense matmul-allreduce, `1` uses DispatchFFNCombine for MoE, `2` uses DispatchGmmCombineDecode for MoE. |
-| `enable_interlayer_addnorm` | `bool` | `false` | Whether to enable fused interlayer addnorm ops. |
-| `enable_split_rmsnorm_rope` | `bool` | `false` | Whether to enable fused split rmsnorm rope ops. |
-| `enable_aclnn_matmul` | `bool` | `false` | Whether to enable the ACLNN matmul backend for supported NPU ATB layers. |
-| `enable_aclnn_swiglu` | `bool` | `false` | Whether to enable the ACLNN SwiGLU backend for supported NPU ATB layers. |
 | `enable_dspark_native_sas` | `bool` | `false` | Enable native NPU DSpark SparseAttnSharedkv semantics. Older operators that reject non-empty `ori_sparse_indices` may terminate during tiling; keep this disabled to use q_len=1 compatibility mode. |
 
 ## DiTConfig
@@ -412,20 +277,3 @@ flag defaults to false and leaves fixed-width MTP unchanged when disabled.
 | `dit_sparse_attention_sparse_start_step` | `int64` | `0` | Sparse attention step index to start sparse attention. Steps before this use dense attention. |
 | `dit_sparse_attention_version` | `string` | `"rain_fusion"` | Sparse attention version: `rain_fusion` (frame-pairing + `aclnnRainFusionAttention`) or `sparse_attention` (block-decompose + `aclnnBlockSparseAttention`). |
 | `dit_sparse_attention_mask_refresh_steps` | `int64` | `1` | Recompute the block sparse mask every N diffusion steps. `1` means every step, higher values reuse the mask longer. |
-
-## RecConfig
-
-| Parameter | Type | Default | Description |
-|:----------|:-----|:--------|:------------|
-| `enable_rec_fast_sampler` | `bool` | `true` | Whether to enable the RecSampler fast sampling path for Rec pipelines. |
-| `enable_rec_prefill_only` | `bool` | `false` | Whether to enable Rec prefill-only mode without decoder self-attention block allocation. |
-| `enable_xattention_one_stage` | `bool` | `false` | Whether to force xattention one-stage decode for Rec multi-round mode. |
-| `max_decode_rounds` | `int32` | `0` | Maximum number of decode rounds for multi-step decoding. `0` means disabled. |
-| `enable_constrained_decoding` | `bool` | `false` | Whether to enable constrained decoding with predefined rules for output format or structure. |
-| `output_rec_logprobs` | `bool` | `false` | Whether to output Rec multi-round token-aligned logprobs. Missing per-token logprobs are filled with the final beam logprob. |
-| `enable_convert_tokens_to_item` | `bool` | `false` | Whether to convert token IDs to item IDs in REC/OneRec responses. |
-| `enable_output_sku_logprobs` | `bool` | `false` | Whether to output REC/OneRec token-aligned logprobs tensors. |
-| `enable_extended_item_info` | `bool` | `false` | Whether to parse and output REC extended item info tensors. |
-| `each_conversion_threshold` | `int32` | `50` | Maximum number of items emitted for each REC token triplet. |
-| `total_conversion_threshold` | `int32` | `1000` | Maximum total number of items emitted in one REC response. |
-| `rec_worker_max_concurrency` | `uint32` | `1` | Concurrency for Rec worker parallel execution. Values less than or equal to `1` disable concurrent Rec workers. |

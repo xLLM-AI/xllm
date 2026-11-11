@@ -21,7 +21,7 @@ Prefill uses FIA TND with causal mask; decode uses FIA TND with block_table.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -31,9 +31,12 @@ from xllm.python import distributed, kernels
 from xllm.python.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
+    CacheRowTable,
     LayerCache,
     MlaIndexContext,
     MlaPreprocessContext,
+    SharedKVCacheLayout,
+    detect_shared_kv_cache_layout,
     has_rope_dim,
     resolve_linear_state_io_indices,
 )
@@ -48,6 +51,7 @@ from xllm.python.attention.expanded_decode_metadata import (
 from xllm.python.attention.mla_index_context import is_compact_kpool_tail
 from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
+    copy_into_execution_buffer,
     get_execution_buffer,
     get_execution_workspace,
     get_forward_context,
@@ -266,6 +270,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._kda_checkpoint_stride: int | None = None
         self._kda_query_start_locs: dict[tuple[int, int, torch.device], torch.Tensor] = {}
         self._kda_checkpoint_offsets: dict[tuple[int, torch.device], torch.Tensor] = {}
+        self._shared_kv_layout: SharedKVCacheLayout | None = None
+        self._shared_full_block_tables: dict[int, torch.Tensor] = {}
+        self._shared_full_slot_mappings: dict[int, torch.Tensor] = {}
+        self._shared_full_slot_mapping_source: torch.Tensor | None = None
+        self._shared_full_row_table: CacheRowTable | None = None
+        self._shared_full_layer_ids: tuple[int, ...] = ()
+        self._active_full_layer: int | None = None
 
         self._kv_caches: list[LayerCache] = []
         self._kpool_cache_triton_compatible: tuple[bool, ...] = ()
@@ -277,7 +288,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._use_expanded_decode = False
         self._block_table_i32: torch.Tensor | None = None
         self._block_attention_masks: dict[tuple[object, ...], torch.Tensor] = {}
-        self._windowed_block_tables: dict[int, WindowedBlockTable] = {}
+        self._windowed_block_tables: dict[object, WindowedBlockTable] = {}
         self._block_draft_metadata: _PreparedPagedAttention | _PreparedMlaAttention | None = None
         self._actual_seq_lens: list[int] | None = None
         self._actual_seq_q: list[int] = []
@@ -320,7 +331,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
 
     @property
     def supports_linear_spec_verify_graph(self) -> bool:
-        return True
+        return self._shared_kv_layout is None
 
     @property
     def num_kv_blocks(self) -> int:
@@ -333,6 +344,11 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if self._page_size is None:
             raise RuntimeError("full-attention KV caches are not bound")
         return self._page_size
+
+    @property
+    def shared_kv_layout(self) -> SharedKVCacheLayout | None:
+        """Physical geometry for a shared Full/Linear cache arena, if bound."""
+        return self._shared_kv_layout
 
     def indexer_block_table(self) -> torch.Tensor:
         """Return the required paged index-cache table, expanded by DCP backends."""
@@ -381,19 +397,30 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             raise RuntimeError("full-attention layers use inconsistent KV block counts")
 
         self._kv_caches = kv_caches
+        self._shared_kv_layout = detect_shared_kv_cache_layout(kv_caches)
+        self._shared_full_row_table = None
+        self._shared_full_layer_ids = ()
         self._kpool_cache_triton_compatible = tuple(_is_compact_kpool_cache_compatible(cache) for cache in kv_caches)
         self._page_size = page_sizes.pop()
+        # FIA workspace sizing follows the physical cache view passed to the
+        # kernel. Shared block ids are translated to rows within that view;
+        # the logical arena-unit count is therefore not a valid key dimension.
         self._num_kv_blocks = num_kv_blocks.pop()
-        checkpoint_strides: set[int] = set()
-        for cache in kv_caches:
-            if cache.conv is None or cache.ssm is None:
-                continue
-            if cache.conv.shape[0] <= 0 or cache.ssm.shape[0] % cache.conv.shape[0] != 0:
-                raise RuntimeError("linear SSM cache does not align with state slots")
-            checkpoint_strides.add(cache.ssm.shape[0] // cache.conv.shape[0])
-        if len(checkpoint_strides) > 1:
-            raise RuntimeError("linear-attention layers use inconsistent checkpoint capacities")
-        self._kda_checkpoint_stride = checkpoint_strides.pop() if checkpoint_strides else None
+        if self._shared_kv_layout is not None:
+            if self._shared_kv_layout.page_size_tokens != self._page_size:
+                raise RuntimeError("shared KV layout page size does not match Full cache views")
+            self._kda_checkpoint_stride = self._shared_kv_layout.checkpoint_stride
+        else:
+            checkpoint_strides: set[int] = set()
+            for cache in kv_caches:
+                if cache.conv is None or cache.ssm is None:
+                    continue
+                if cache.conv.shape[0] <= 0 or cache.ssm.shape[0] % cache.conv.shape[0] != 0:
+                    raise RuntimeError("linear SSM cache does not align with state slots")
+                checkpoint_strides.add(cache.ssm.shape[0] // cache.conv.shape[0])
+            if len(checkpoint_strides) > 1:
+                raise RuntimeError("linear-attention layers use inconsistent checkpoint capacities")
+            self._kda_checkpoint_stride = checkpoint_strides.pop() if checkpoint_strides else None
         has_sparse_index = any(cache.index is not None for cache in kv_caches)
         # glm5_next DSA layers are NoPE: the latent lives in the key slot and
         # the value/rope slot is a 0-dim tensor normalized to None, while the
@@ -575,15 +602,38 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             )
         return _PreparedPagedAttention(block_table, query_ends, actual_seq_q, actual_seq_kv)
 
-    def prepare_owned_graph_metadata(self, metadata: AttentionMetadata) -> None:
-        self.prepare(metadata, graph_mode=True, owned_metadata=True)
-
     def prepare(
         self,
         metadata: AttentionMetadata,
         *,
         graph_mode: bool = False,
         owned_metadata: bool = False,
+    ) -> None:
+        self._prepare(metadata, graph_mode=graph_mode, owned_metadata=owned_metadata, update_shared_full_tables=True)
+
+    def prepare_graph_replay(self, metadata: AttentionMetadata) -> None:
+        context = get_forward_context_or_none()
+        prepared = getattr(metadata, "prepared_attention_state", None)
+        graph_owns_full_tables = (
+            isinstance(prepared, _PreparedPagedAttention)
+            and prepared.device_kv_lengths is not None
+            and context is not None
+            and context.execution_state is not None
+        )
+        # Device-length graphs retain prepared metadata inside capture and
+        # calculate physical tables there. Ordinary decode does not retain
+        # prepared metadata, so replay must continue updating on the Host.
+        self._prepare(
+            metadata, graph_mode=True, owned_metadata=False, update_shared_full_tables=not graph_owns_full_tables
+        )
+
+    def _prepare(
+        self,
+        metadata: AttentionMetadata,
+        *,
+        graph_mode: bool,
+        owned_metadata: bool,
+        update_shared_full_tables: bool,
     ) -> None:
         # Device KV lengths can change between forwards while the prepared
         # Slot binding stays the same. Masks are shared only within a forward.
@@ -592,6 +642,10 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._block_draft_metadata = None
         self._kda_validated_query_shape = None
         self._graph_metadata_updated_in_place = False
+        self._active_full_layer = None
+        self._shared_full_block_tables.clear()
+        self._shared_full_slot_mappings.clear()
+        self._shared_full_slot_mapping_source = None
         prepared = getattr(metadata, "prepared_attention_state", None)
         if isinstance(prepared, _PreparedMlaAttention):
             block_graph = self._mla_block_draft and prepared.is_chunked_prefill and not prepared.is_prefill
@@ -601,7 +655,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 raise ValueError("prepared MLA graph state requires decode")
             self._metadata = prepared
             self._use_expanded_decode = False
-            self._block_table_i32 = prepared.block_table
+            self._block_table_i32 = self._translate_full_block_table(prepared.block_table)
             self._actual_seq_lens = None
             self._actual_seq_q = []
             self._actual_seq_kv = []
@@ -638,9 +692,10 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             # cycle.
             self._metadata = metadata
             self._use_expanded_decode = False
-            self._block_table_i32 = prepared.block_table
+            self._block_table_i32 = self._translate_full_block_table(prepared.block_table)
             if prepared.device_kv_lengths is not None and not graph_mode:
-                self._block_table_i32 = prepared.block_table[:, : prepared.kv_capacity // self.page_size].contiguous()
+                self._block_table_i32 = self._block_table_i32[:, : prepared.kv_capacity // self.page_size].contiguous()
+            self._prepare_shared_full_tables(update=update_shared_full_tables)
             self._actual_seq_lens = None if graph_mode else prepared.query_ends
             self._actual_seq_q = prepared.actual_seq_q
             self._actual_seq_kv = prepared.actual_seq_kv
@@ -654,15 +709,15 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 prepared.actual_seq_kv[:] = metadata.kv_seq_lens_host_values
             context = get_forward_context_or_none() if graph_mode else None
             execution_state = None if context is None else context.execution_state
-            bounded = (
-                execution_state.paged_attention.get(len(prepared.actual_seq_kv))
-                if execution_state is not None and prepared.device_kv_lengths is not None
-                else None
-            )
-            if bounded is not None and bounded.kv is not prepared.actual_seq_kv:
-                # Ordinary decode graphs prepare a new Slot view per replay,
-                # while captured bounded FIA tasks read the capture-time list.
-                bounded.kv[:] = prepared.actual_seq_kv
+            if execution_state is not None and prepared.device_kv_lengths is not None:
+                # Shared slabs retain one bounded FIA state per Full layer.
+                # Only refresh the current row geometry's capture-time Host
+                # lists, including the ordinary row-keyed state.
+                row_count = len(prepared.actual_seq_kv)
+                for state_key, bounded in execution_state.paged_attention.items():
+                    state_rows = state_key[0] if isinstance(state_key, tuple) else state_key
+                    if state_rows == row_count and bounded.kv is not prepared.actual_seq_kv:
+                        bounded.kv[:] = prepared.actual_seq_kv
             if graph_mode and prepared.device_kv_lengths is None:
                 self._prepare_paged_graph()
             else:
@@ -674,6 +729,12 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._metadata = metadata
         expanded = resolve_expanded_decode_metadata(metadata, block_size=self.logical_page_size)
         self._use_expanded_decode = expanded is not None
+        graph_prefill = (
+            graph_mode
+            and (metadata.is_prefill or metadata.is_chunked_prefill)
+            and not metadata.is_spec_verify
+            and expanded is None
+        )
         block_table = expanded.block_table if expanded is not None else metadata.block_table
         kv_seq_lens = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
         kv_seq_lens_host_values = (
@@ -683,13 +744,18 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         )
 
         if block_table is not None:
-            self._block_table_i32 = block_table.to(torch.int32)
+            self._block_table_i32 = self._translate_full_block_table(block_table.to(torch.int32))
+            if graph_prefill and not self._is_mla:
+                self._block_table_i32 = copy_into_execution_buffer(
+                    ("PREFILL_GRAPH_BLOCK_TABLE", tuple(self._block_table_i32.shape)), self._block_table_i32
+                )
             real_batch = block_table.shape[0]
         else:
             self._block_table_i32 = None
             real_batch = 0
+        self._prepare_shared_full_tables(update=update_shared_full_tables)
 
-        if self._use_expanded_decode or graph_mode or self._is_mla:
+        if self._use_expanded_decode or (graph_mode and not graph_prefill) or self._is_mla:
             self._actual_seq_lens = None
         elif metadata.q_cu_seq_lens is not None:
             q_seq_lens = getattr(metadata, "q_seq_lens", None)
@@ -723,14 +789,22 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                     kv_seq_lens_host_values = kv_seq_lens_host_values[:real_batch]
                 else:
                     raise RuntimeError("host KV lengths must have one entry per block-table row")
-            self._actual_seq_q: list[int] = list(range(1, real_batch + 1))
+            self._actual_seq_q: list[int] = (
+                list(self._actual_seq_lens)
+                if graph_prefill and self._actual_seq_lens is not None
+                else list(range(1, real_batch + 1))
+            )
             self._actual_seq_kv: list[int] = list(kv_seq_lens_host_values)
         else:
             self._actual_seq_q = []
             self._actual_seq_kv = []
 
         if graph_mode and self._block_table_i32 is not None and not self._is_mla:
-            self._prepare_paged_graph()
+            if graph_prefill:
+                # Direct prefill FIA does not use decode's .out workspace.
+                self._paged_graph_state = None
+            else:
+                self._prepare_paged_graph()
 
         # Pre-cache MLA (sparse SFA) seq-lens once per step; shared by
         # execute_mla / mla_index_context instead of re-derived per layer.
@@ -868,6 +942,11 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 kv=[],
             )
             graph_state.paged_attention[graph_batch_size] = state
+        elif self._shared_kv_layout is not None:
+            if state.block_table.shape != self._block_table_i32.shape:
+                raise RuntimeError("shared KV graph block-table shape changed during replay")
+            state.block_table.copy_(self._block_table_i32)
+            self._block_table_i32 = state.block_table
         # Replace values, not list identities: capture-time task closures hold
         # these exact objects, including when another Slot prepares this backend.
         state.query[:] = self._actual_seq_q
@@ -992,6 +1071,15 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         k_cache, v_cache = layer_cache.key, layer_cache.value
         if k_cache is None or v_cache is None:
             raise RuntimeError(f"KV cache is missing for layer {layer_id}")
+        if self._shared_kv_layout is not None and self._shared_kv_layout.num_slabs:
+            self._active_full_layer = layer_id
+            if layer_id in self._shared_full_block_tables:
+                self._block_table_i32 = self._shared_full_block_tables[layer_id]
+                if self._paged_graph_state is not None:
+                    self._paged_graph_state = replace(self._paged_graph_state, block_table=self._block_table_i32)
+            # The final arena row can only hold V. Its paired K row is the
+            # preceding row, so both FIA operands expose the same row count.
+            k_cache = k_cache[: v_cache.shape[0]]
         num_tokens = q.shape[0]
 
         k_3d = k.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
@@ -1018,7 +1106,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         block_window = getattr(layer, "sliding_window", 0) > 0 and layer.fia_sparse_mode == _SPARSE_MODE_NONE
         if block_window and metadata.block_table is None:
             raise ValueError("windowed block drafts require a paged KV block table")
-        kernels.reshape_paged_cache(metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache)
+        kernels.reshape_paged_cache(self._full_slot_mapping(metadata), k_3d, v_3d, k_cache, v_cache)
 
         prepared = getattr(metadata, "prepared_attention_state", None)
         if (
@@ -1947,7 +2035,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         return mask
 
     def _windowed_block_table(self, prepared: _PreparedPagedAttention, left_context: int) -> WindowedBlockTable:
-        table = self._windowed_block_tables.get(left_context)
+        cache_key = (left_context, self._active_full_layer)
+        table = self._windowed_block_tables.get(cache_key)
         if table is None:
             table = prepare_windowed_block_table(
                 prepared.block_table,
@@ -1956,7 +2045,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 self.page_size,
                 left_context,
             )
-            self._windowed_block_tables[left_context] = table
+            if self._shared_kv_layout is not None:
+                table = WindowedBlockTable(
+                    self._translate_full_block_table(table.block_table),
+                    table.key_positions,
+                    table.capacity,
+                )
+            self._windowed_block_tables[cache_key] = table
         return table
 
     def _bounded_paged_graph_attention(
@@ -1972,13 +2067,14 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         graph_context = context.acl_graph
         assert context.execution_state is not None
         workspace_rows = prepared.workspace_query_capacity or query.shape[0]
+        translated_table = self._translate_full_block_table(prepared.block_table)
 
         def _allocate_workspace() -> torch.Tensor:
             # Startup visits small G first. Reserve the final row capacity
             # immediately so later graphs reuse one stable scratch address.
             workspace_query = query.new_empty((workspace_rows, *query.shape[1:]))
             workspace_mask = mask.new_empty((workspace_rows, *mask.shape[1:]))
-            workspace_table = prepared.block_table.new_empty((workspace_rows, prepared.block_table.shape[1]))
+            workspace_table = translated_table.new_empty((workspace_rows, translated_table.shape[1]))
             return torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=workspace_query,
                 key=key,
@@ -1998,7 +2094,12 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 softmax_lse_flag=False,
             )
 
-        state = context.execution_state.paged_attention.get(query.shape[0])
+        state_key = (
+            (query.shape[0], self._active_full_layer)
+            if self._shared_kv_layout is not None and self._shared_kv_layout.num_slabs
+            else query.shape[0]
+        )
+        state = context.execution_state.paged_attention.get(state_key)
         if state is None:
             state = PagedAttentionGraphState(
                 workspace=(
@@ -2014,11 +2115,15 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                     ("BOUNDED_FIA_LSE", query.shape[0]),
                     lambda: torch.empty(0, device=query.device, dtype=query.dtype),
                 ),
-                block_table=prepared.block_table,
+                block_table=translated_table,
                 query=prepared.query_lengths,
                 kv=prepared.actual_seq_kv,
             )
-            context.execution_state.paged_attention[query.shape[0]] = state
+            context.execution_state.paged_attention[state_key] = state
+        elif self._shared_kv_layout is not None:
+            if state.block_table.shape != translated_table.shape:
+                raise RuntimeError("shared bounded graph block-table shape changed during replay")
+            state.block_table.copy_(translated_table)
 
         def _update_bounded_fia_args() -> None:
             torch.ops.npu.npu_fused_infer_attention_score.out(
@@ -2214,7 +2319,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
 
         # Persist the full global-order KV into this rank's paged cache.
         kernels.reshape_paged_cache(
-            metadata.slot_mapping,
+            self._full_slot_mapping(metadata),
             kv_global_k.contiguous(),
             kv_global_v.contiguous(),
             k_cache,
@@ -2459,6 +2564,85 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _translate_full_block_table(self, block_table: torch.Tensor) -> torch.Tensor:
+        layout = self._shared_kv_layout
+        if layout is None:
+            return block_table
+        if layout.num_slabs:
+            if self._active_full_layer is None:
+                return block_table
+            return layout.full_block_table(block_table, self._kv_caches[self._active_full_layer].full_block_rows)
+        return layout.full_block_table(block_table)
+
+    def _prepare_shared_full_tables(self, *, update: bool = True) -> None:
+        layout = self._shared_kv_layout
+        if layout is None or not layout.num_slabs:
+            return
+        if self._shared_full_row_table is None:
+            full_caches = [(layer_id, cache) for layer_id, cache in enumerate(self._kv_caches) if cache.key is not None]
+            self._shared_full_layer_ids = tuple(layer_id for layer_id, _ in full_caches)
+            self._shared_full_row_table = CacheRowTable([cache.full_block_rows for _, cache in full_caches])
+        rows = self._shared_full_row_table.rows() if update else None
+        block_table = self._block_table_i32
+        context = get_forward_context_or_none()
+
+        def _buffer(kind: str, source: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+            key = (kind, self._shared_full_layer_ids, shape)
+            if not update and (
+                context is None
+                or context.execution_state is None
+                or key not in context.execution_state.persistent_buffers
+            ):
+                raise RuntimeError("shared Full replay requires metadata buffers owned by a captured graph entry")
+            return (
+                get_execution_buffer(key, lambda: source.new_empty(shape))
+                if context is not None
+                else source.new_empty(shape)
+            )
+
+        if block_table is not None:
+            shape = (len(self._shared_full_layer_ids), *block_table.shape)
+            tables = _buffer("SHARED_FULL_BLOCK_TABLES", block_table, shape)
+            if update:
+                layout.full_block_table(block_table, rows, out=tables)
+            self._shared_full_block_tables = dict(zip(self._shared_full_layer_ids, tables.unbind(0)))
+
+        metadata = self._metadata
+        slot_mapping = (
+            getattr(metadata, "local_slot_mapping", None)
+            if getattr(metadata, "has_kv_shard", False)
+            else getattr(metadata, "slot_mapping", None)
+        )
+        if slot_mapping is None:
+            return
+        shape = (len(self._shared_full_layer_ids), *slot_mapping.shape)
+        mappings = _buffer("SHARED_FULL_SLOT_MAPPINGS", slot_mapping, shape)
+        if update:
+            layout.full_slot_mapping(slot_mapping, rows, out=mappings)
+        self._shared_full_slot_mappings = dict(zip(self._shared_full_layer_ids, mappings.unbind(0)))
+        self._shared_full_slot_mapping_source = slot_mapping
+
+    def _full_slot_mapping(self, metadata: AttentionMetadata) -> torch.Tensor:
+        slot_mapping = metadata.local_slot_mapping if metadata.has_kv_shard else metadata.slot_mapping
+        if slot_mapping is None:
+            raise RuntimeError("Full attention cache writes require a slot mapping")
+        layout = self._shared_kv_layout
+        if layout is None:
+            return slot_mapping
+        if slot_mapping is self._shared_full_slot_mapping_source:
+            prepared = self._shared_full_slot_mappings.get(self._active_full_layer)
+            if prepared is not None:
+                return prepared
+        rows = (
+            self._kv_caches[self._active_full_layer].full_block_rows
+            if layout.num_slabs and self._active_full_layer is not None
+            else None
+        )
+        translated = layout.full_slot_mapping(slot_mapping, rows)
+        return copy_into_execution_buffer(
+            ("SHARED_FULL_SLOT_MAPPING", self._active_full_layer, tuple(translated.shape)), translated
+        )
 
     def _cumulative_seq_lens(
         self,

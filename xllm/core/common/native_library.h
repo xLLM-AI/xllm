@@ -38,7 +38,6 @@ struct NativeLibraryBuildInfo {
   uint64_t standard_library_version;
   int32_t cxx11_abi;
   uint32_t device_flags;
-  uint32_t kernel_backend_flags;
   uint32_t pointer_size;
 };
 
@@ -68,11 +67,6 @@ constexpr NativeLibraryBuildInfo native_library_build_info() {
   device_flags |= 1U << 6;
 #endif
 
-  uint32_t kernel_backend_flags = 0;
-#if defined(USE_XLITE)
-  kernel_backend_flags |= 1U << 0;
-#endif
-
 #if defined(_GLIBCXX_USE_CXX11_ABI)
   constexpr int32_t kCxx11Abi = _GLIBCXX_USE_CXX11_ABI;
 #else
@@ -86,7 +80,7 @@ constexpr NativeLibraryBuildInfo native_library_build_info() {
   constexpr uint64_t kStandardLibraryVersion = 0;
 #endif
 
-  return {2,
+  return {3,
           sizeof(NativeLibraryBuildInfo),
           NATIVE_LIBRARY_BUILD_REVISION,
           NATIVE_LIBRARY_BUILD_VERSION,
@@ -97,7 +91,6 @@ constexpr NativeLibraryBuildInfo native_library_build_info() {
           kStandardLibraryVersion,
           kCxx11Abi,
           device_flags,
-          kernel_backend_flags,
           sizeof(void*)};
 }
 

@@ -44,18 +44,18 @@ int32_t discover_num_slots(const std::vector<KVCache>& kv_caches) {
     }
     CHECK(conv_cache.defined() && ssm_cache.defined())
         << "linear-attention layers must provide both conv and ssm caches";
-    CHECK_GT(conv_cache.size(0), kPaddingLinearStateId)
+    const int64_t logical_slots = kv_cache.linear_state_slot_count();
+    CHECK_GT(logical_slots, kPaddingLinearStateId)
         << "linear-attention cache must include the reserved padding slot";
     CHECK_GT(ssm_cache.size(0), 0)
         << "linear-attention ssm cache must contain checkpoint rows";
-    CHECK_EQ(ssm_cache.size(0) % conv_cache.size(0), 0)
-        << "ssm cache checkpoint layout mismatch, ssm_rows="
-        << ssm_cache.size(0) << ", conv_rows=" << conv_cache.size(0);
+    const int64_t checkpoint_stride = kv_cache.linear_checkpoint_stride();
+    CHECK_GT(checkpoint_stride, 0);
     if (num_slots == 0) {
-      num_slots = static_cast<int32_t>(conv_cache.size(0));
+      num_slots = static_cast<int32_t>(logical_slots);
       continue;
     }
-    CHECK_EQ(num_slots, static_cast<int32_t>(conv_cache.size(0)))
+    CHECK_EQ(num_slots, static_cast<int32_t>(logical_slots))
         << "linear-attention cache slot count must match across layers";
   }
   return num_slots;
@@ -83,6 +83,21 @@ std::vector<int64_t> build_linear_state_mask(
     }
   }
   return warm_mask;
+}
+
+void update_linear_state_slots(const std::vector<KVCache>& kv_caches,
+                               const std::vector<int32_t>& rows) {
+  if (rows.empty()) {
+    return;
+  }
+  const auto it = std::find_if(
+      kv_caches.begin(), kv_caches.end(), [](const KVCache& kv_cache) {
+        return kv_cache.is_static_shared();
+      });
+  CHECK(it != kv_caches.end())
+      << "Linear state slot rows require shared static storage";
+  // Every layer shares one table.
+  it->update_linear_state_slots(rows);
 }
 
 void restore_linear_state_slots(std::vector<KVCache>& kv_caches,
@@ -147,6 +162,23 @@ void restore_linear_state_slots(std::vector<KVCache>& kv_caches,
         ++end;
       }
       for (const KVCache& kv_cache : kv_caches) {
+        if (kv_cache.is_static_shared() &&
+            kv_cache.get_conv_cache().defined()) {
+          for (size_t index = begin; index < end; ++index) {
+            const int64_t slot = pending_reset_slots[index];
+            kv_cache.get_conv_cache()
+                .select(
+                    0,
+                    kv_cache.physical_row_index(slot, KVCacheTensorRole::CONV))
+                .zero_();
+            kv_cache.get_ssm_cache()
+                .narrow(
+                    0,
+                    kv_cache.physical_row_index(slot, KVCacheTensorRole::SSM),
+                    kv_cache.linear_checkpoint_stride())
+                .zero_();
+          }
+        }
         const torch::Tensor kpool_tail = kv_cache.get_kpool_tail();
         if (!kpool_tail.defined()) {
           continue;
@@ -176,13 +208,27 @@ void restore_linear_state_slots(std::vector<KVCache>& kv_caches,
         if (!conv_cache.defined()) {
           continue;
         }
-        const int64_t stride = ssm_cache.size(0) / conv_cache.size(0);
-        conv_cache.select(0, write_ids[row])
-            .copy_(conv_cache.select(0, source_ids[row]));
-        ssm_cache
-            .narrow(0, static_cast<int64_t>(write_ids[row]) * stride, stride)
-            .copy_(ssm_cache.narrow(
-                0, static_cast<int64_t>(source_ids[row]) * stride, stride));
+        const int64_t stride = kv_cache.linear_checkpoint_stride();
+        conv_cache
+            .select(0,
+                    kv_cache.physical_row_index(write_ids[row],
+                                                KVCacheTensorRole::CONV))
+            .copy_(conv_cache.select(
+                0,
+                kv_cache.physical_row_index(source_ids[row],
+                                            KVCacheTensorRole::CONV)));
+        const int64_t write_base =
+            kv_cache.is_static_shared()
+                ? kv_cache.physical_row_index(write_ids[row],
+                                              KVCacheTensorRole::SSM)
+                : static_cast<int64_t>(write_ids[row]) * stride;
+        const int64_t read_base =
+            kv_cache.is_static_shared()
+                ? kv_cache.physical_row_index(source_ids[row],
+                                              KVCacheTensorRole::SSM)
+                : static_cast<int64_t>(source_ids[row]) * stride;
+        ssm_cache.narrow(0, write_base, stride)
+            .copy_(ssm_cache.narrow(0, read_base, stride));
       }
     }
     const auto mask_begin = validity_mask.begin() + row * repeat;

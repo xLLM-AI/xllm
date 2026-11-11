@@ -138,6 +138,29 @@ void ConcurrentBlockManagerImpl::release_out_of_window(Sequence* seq,
   inner_->release_out_of_window(seq, kv_state);
 }
 
+size_t ConcurrentBlockManagerImpl::evict_prefix_cache(size_t num_blocks) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return inner_->evict_prefix_cache(num_blocks);
+}
+
+std::vector<PrefixCacheEntry> ConcurrentBlockManagerImpl::prefix_cache_entries()
+    const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return inner_->prefix_cache_entries();
+}
+
+bool ConcurrentBlockManagerImpl::evict_cached_block(const XXH3Key& hash) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return inner_->evict_cached_block(hash);
+}
+
+void ConcurrentBlockManagerImpl::set_prefix_dependency(
+    const XXH3Key& hash,
+    const XXH3Key& dependency) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  inner_->set_prefix_dependency(hash, dependency);
+}
+
 size_t ConcurrentBlockManagerImpl::num_blocks_in_prefix_cache() const {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   return inner_->num_blocks_in_prefix_cache();

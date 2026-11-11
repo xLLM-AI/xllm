@@ -25,7 +25,6 @@ limitations under the License.
 
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
-#include "core/framework/model/rec_model_params.h"
 #include "core/kernels/npu/paged_attention_tiling_layout.h"
 #include "core/runtime/options.h"
 
@@ -331,7 +330,6 @@ class GraphPersistentParam final {
   // max decode capacity so that graph capture and replay always reference
   // stable device addresses, regardless of actual vs bucket token counts.
   DpEpPaddingData persistent_dp_ep_padding_;
-  CpEpMeta persistent_cp_ep_meta_;
 
   // Persistent int8 mega_moe active-token mask. Pre-allocated with max
   // decode graph token capacity; capture records its address so replays can
@@ -342,13 +340,10 @@ class GraphPersistentParam final {
   void update_persistent_dp_ep_padding(const DpEpPaddingData& src,
                                        uint32_t padded_tokens,
                                        int32_t dp_layout_size);
-  void update_persistent_cp_ep_meta(const CpEpMeta& src,
-                                    uint32_t padded_tokens);
   void replace_capture_dp_ep_padding(const DpEpPaddingData& src,
                                      uint32_t padded_tokens,
                                      int32_t dp_layout_size,
                                      DpEpPaddingData& dst) const;
-  void replace_capture_cp_ep_meta(const CpEpMeta& src, CpEpMeta& dst) const;
 };
 
 }  // namespace xllm::npu

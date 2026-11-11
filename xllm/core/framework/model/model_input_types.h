@@ -46,7 +46,6 @@ limitations under the License.
 #include "core/framework/batch/batch_forward_type.h"
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
-#include "core/framework/parallel_state/npu_cp_plan.h"
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
 #include "core/util/hash_util.h"
 #include "core/util/tensor_helper.h"
@@ -75,7 +74,6 @@ void materialize_linear_state_indices(Embedding& embedding,
   }
 }
 
-class PythonAttentionMetadata;
 namespace npu {
 struct AclGraphTaskUpdateContext;
 }  // namespace npu
@@ -115,22 +113,6 @@ struct VlmAttentionHostInput final {
   const int32_t* graph_kv_seq_lens_data = nullptr;
 };
 
-struct RecAttentionHostInput final {
-  std::vector<int32_t> kpool_query_lens;
-  std::vector<int32_t> q_seq_lens;
-  std::vector<int32_t> q_cu_seq_lens;
-  std::vector<int32_t> kv_seq_lens;
-  std::vector<int32_t> kv_cu_seq_lens;
-  std::vector<int32_t> new_cache_slots;
-  std::vector<int32_t> kv_cache_tokens_nums;
-  std::vector<int32_t> ring_cur_seqlen;
-  std::vector<int32_t> ring_cache_seqlen;
-  torch::Tensor block_tables;
-
-  const int32_t* graph_q_seq_lens_data = nullptr;
-  const int32_t* graph_kv_seq_lens_data = nullptr;
-};
-
 namespace detail {
 template <typename Input>
 Input attention_device_to(const Input& source, const torch::Device& device) {
@@ -154,7 +136,6 @@ Input attention_device_to(const Input& source, const torch::Device& device) {
   out.history_k_rope = safe_to(source.history_k_rope, device);
   out.ring_cur_seqlen = safe_to(source.ring_cur_seqlen, device);
   out.ring_cache_seqlen = safe_to(source.ring_cache_seqlen, device);
-  out.in_prefix_slots = safe_to(source.in_prefix_slots, device, true);
   return out;
 }
 }  // namespace detail
@@ -176,10 +157,6 @@ class LlmAttentionDeviceInput final {
   torch::Tensor history_k_rope;
   torch::Tensor ring_cur_seqlen;
   torch::Tensor ring_cache_seqlen;
-
-  // Per-rank prefix slot indices for KV-split prefix AllGather. NpuCpPlan
-  // supplies this graph input with the rest of the CP attention metadata.
-  torch::Tensor in_prefix_slots;
 
   LlmAttentionDeviceInput to(const torch::Device& device) const {
     return detail::attention_device_to(*this, device);
@@ -204,38 +181,7 @@ class VlmAttentionDeviceInput final {
   torch::Tensor ring_cur_seqlen;
   torch::Tensor ring_cache_seqlen;
 
-  // Per-rank prefix slot indices for KV-split prefix AllGather. NpuCpPlan
-  // supplies this graph input with the rest of the CP attention metadata.
-  torch::Tensor in_prefix_slots;
-
   VlmAttentionDeviceInput to(const torch::Device& device) const {
-    return detail::attention_device_to(*this, device);
-  }
-};
-
-class RecAttentionDeviceInput final {
- public:
-  torch::Tensor q_seq_lens;
-  torch::Tensor kv_seq_lens;
-  torch::Tensor q_cu_seq_lens;
-  torch::Tensor new_cache_slots;
-  torch::Tensor block_tables;
-  torch::Tensor paged_kv_indptr;
-  torch::Tensor paged_kv_indices;
-  torch::Tensor paged_kv_last_page_len;
-  torch::Tensor new_cache_slot_offsets;
-  torch::Tensor kv_cache_start_offsets;
-  torch::Tensor kv_cache_tokens_nums;
-  torch::Tensor history_compressed_kv;
-  torch::Tensor history_k_rope;
-  torch::Tensor ring_cur_seqlen;
-  torch::Tensor ring_cache_seqlen;
-
-  // Per-rank prefix slot indices for KV-split prefix AllGather. NpuCpPlan
-  // supplies this graph input with the rest of the CP attention metadata.
-  torch::Tensor in_prefix_slots;
-
-  RecAttentionDeviceInput to(const torch::Device& device) const {
     return detail::attention_device_to(*this, device);
   }
 };
@@ -365,11 +311,6 @@ struct BatchInputMeta {
   uint64_t batch_id = 0;
   bool requires_host_restore = false;
   bool is_graph_warmup = false;
-  // Engine-selected MTP depth for this task; zero keeps configured maximum.
-  // Transported with the input, never inferred independently on TP ranks.
-  uint32_t mtp_draft_steps = 0;
-  // Startup-only padded target shape for measuring the full MTP cost surface.
-  uint32_t mtp_target_graph_rows = 0;
 };
 
 class LlmEmbeddingInput final {
@@ -388,6 +329,16 @@ class LlmEmbeddingInput final {
 
   std::vector<int32_t> linear_state_read_ids;
   torch::Tensor linear_state_read_indices;
+
+  // Shared static storage only: [state id, Linear group slots...] for each
+  // recurrent state this batch reads or writes.
+  std::vector<int32_t> linear_state_slot_rows;
+
+  // Shared slab storage: [logical Full block id, physical row per Full layer].
+  std::vector<int32_t> full_block_slot_rows;
+
+  // One allocation epoch per Full mapping row, including retained prefixes.
+  std::vector<uint64_t> full_block_lease_epochs;
 
   // request ids of each sequence, used by suffix decoding request identity
   std::vector<std::string> request_ids;
@@ -412,32 +363,15 @@ class LlmEmbeddingInput final {
     out.linear_state_read_ids = linear_state_read_ids;
     out.linear_state_read_indices =
         safe_to(linear_state_read_indices, device, true);
+    out.linear_state_slot_rows = linear_state_slot_rows;
+    out.full_block_slot_rows = full_block_slot_rows;
+    out.full_block_lease_epochs = full_block_lease_epochs;
     out.request_ids = request_ids;
     out.extra_token_ids = extra_token_ids;
     out.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);
     out.mtp_bootstrap_row_idxes = mtp_bootstrap_row_idxes;
     out.mtp_bootstrap_embeddings =
         safe_to(mtp_bootstrap_embeddings, device, true);
-    return out;
-  }
-};
-
-class BlockCopyInput final {
- public:
-  // swap
-  std::vector<BlockTransferInfo> swap_blocks;
-
-  // block copy kernel
-  torch::Tensor src_block_indices;
-  torch::Tensor dst_block_indices;
-  torch::Tensor cum_sum;
-
-  BlockCopyInput to(const torch::Device& device) const {
-    BlockCopyInput out;
-    out.swap_blocks = swap_blocks;
-    out.src_block_indices = safe_to(src_block_indices, device, true);
-    out.dst_block_indices = safe_to(dst_block_indices, device, true);
-    out.cum_sum = safe_to(cum_sum, device, true);
     return out;
   }
 };
@@ -481,16 +415,10 @@ class ParallelInput final {
   // prelaunch admission. Missing metadata disables the prelaunch.
   std::vector<int32_t> dp_global_json_object_active;
   std::vector<int32_t> dp_is_decode;
-  // Request-ordered, n-2 DSpark feedback replicated by the engine. This is
-  // Host planning metadata, not a Device input or an additional readback.
-  std::vector<float> dp_dspark_confidence;
-  std::vector<uint64_t> dp_dspark_rounds_since_full_width;
-
   // Persistent int8 mask for real MegaMoE rows in a captured graph bucket.
   torch::Tensor mega_active_mask;
 
   DpEpPaddingData dp_ep_padding_data;
-  NpuCpPlan cp_plan;
 
 #if defined(USE_MLU)
   std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer = nullptr;
@@ -515,11 +443,8 @@ class ParallelInput final {
     out.dp_global_kv_max_seq_lens = dp_global_kv_max_seq_lens;
     out.dp_global_json_object_active = dp_global_json_object_active;
     out.dp_is_decode = dp_is_decode;
-    out.dp_dspark_confidence = dp_dspark_confidence;
-    out.dp_dspark_rounds_since_full_width = dp_dspark_rounds_since_full_width;
     out.mega_active_mask = mega_active_mask;
     out.dp_ep_padding_data = dp_ep_padding_data;
-    out.cp_plan = cp_plan.to(device);
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
     out.layer_synchronizer = layer_synchronizer;
 #endif
@@ -563,50 +488,6 @@ class ExpertInput final {
   }
 };
 
-// Borrowed fixed-capacity sources for in-graph adaptive DSpark packing. The
-// control word stores the active request count in its low 32 bits and a
-// startup/profiling KV-write suppression bit in its high 32 bits. No control
-// value or compact-arena offset is captured as a Host kernel argument.
-struct DSparkAdaptiveGraphInput {
-  torch::Tensor arena;
-  torch::Tensor control;
-  torch::Tensor anchors;
-  torch::Tensor base_positions;
-  torch::Tensor base_kv_lengths;
-  torch::Tensor base_block_table;
-  torch::Tensor offsets;
-  torch::Tensor owners;
-  torch::Tensor columns;
-  torch::Tensor linear_state_indices;
-  torch::Tensor num_accepted_tokens;
-  uint32_t block_size = 0;
-  uint32_t draft_width = 7;
-};
-
-namespace detail {
-inline DSparkAdaptiveGraphInput dspark_adaptive_graph_input_to(
-    const DSparkAdaptiveGraphInput& input,
-    const torch::Device& device) {
-  DSparkAdaptiveGraphInput out = input;
-  for (torch::Tensor* tensor : {&out.arena,
-                                &out.control,
-                                &out.anchors,
-                                &out.base_positions,
-                                &out.base_kv_lengths,
-                                &out.base_block_table,
-                                &out.offsets,
-                                &out.owners,
-                                &out.columns,
-                                &out.linear_state_indices,
-                                &out.num_accepted_tokens}) {
-    if (tensor->defined()) {
-      *tensor = safe_to(*tensor, device, /*non_blocking=*/true);
-    }
-  }
-  return out;
-}
-}  // namespace detail
-
 class LlmGraphInput final {
  public:
   torch::Tensor attn_mask;
@@ -638,7 +519,6 @@ class LlmGraphInput final {
   // already been recorded on the signal stream. Replay can skip cold-path
   // signaling on the final-draft-to-target critical path.
   bool spec_verify_static_graph_tasks_prepared = false;
-  DSparkAdaptiveGraphInput dspark_adaptive;
 
   LlmGraphInput to(const torch::Device& device) const {
     LlmGraphInput out;
@@ -674,8 +554,6 @@ class LlmGraphInput final {
         spec_verify_source_addresses_stable;
     out.spec_verify_static_graph_tasks_prepared =
         spec_verify_static_graph_tasks_prepared;
-    out.dspark_adaptive =
-        detail::dspark_adaptive_graph_input_to(dspark_adaptive, device);
     return out;
   }
 };
@@ -696,6 +574,16 @@ class VlmEmbeddingInput final {
 
   std::vector<int32_t> linear_state_read_ids;
   torch::Tensor linear_state_read_indices;
+
+  // Shared static storage only: [state id, Linear group slots...] for each
+  // recurrent state this batch reads or writes.
+  std::vector<int32_t> linear_state_slot_rows;
+
+  // Shared slab storage: [logical Full block id, physical row per Full layer].
+  std::vector<int32_t> full_block_slot_rows;
+
+  // One allocation epoch per Full mapping row, including retained prefixes.
+  std::vector<uint64_t> full_block_lease_epochs;
 
   // request ids of each sequence, used by suffix decoding request identity
   std::vector<std::string> request_ids;
@@ -720,6 +608,9 @@ class VlmEmbeddingInput final {
     out.linear_state_read_ids = linear_state_read_ids;
     out.linear_state_read_indices =
         safe_to(linear_state_read_indices, device, true);
+    out.linear_state_slot_rows = linear_state_slot_rows;
+    out.full_block_slot_rows = full_block_slot_rows;
+    out.full_block_lease_epochs = full_block_lease_epochs;
     out.request_ids = request_ids;
     out.extra_token_ids = extra_token_ids;
     out.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);
@@ -761,7 +652,6 @@ class VlmGraphInput final {
   // already been recorded on the signal stream. Replay can skip cold-path
   // signaling on the final-draft-to-target critical path.
   bool spec_verify_static_graph_tasks_prepared = false;
-  DSparkAdaptiveGraphInput dspark_adaptive;
 
   VlmGraphInput to(const torch::Device& device) const {
     VlmGraphInput out;
@@ -797,8 +687,6 @@ class VlmGraphInput final {
         spec_verify_source_addresses_stable;
     out.spec_verify_static_graph_tasks_prepared =
         spec_verify_static_graph_tasks_prepared;
-    out.dspark_adaptive =
-        detail::dspark_adaptive_graph_input_to(dspark_adaptive, device);
     return out;
   }
 };

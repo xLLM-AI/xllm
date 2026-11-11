@@ -38,8 +38,6 @@ limitations under the License.
 #include "core/runtime/executor_impl.h"
 #include "core/runtime/executor_impl_factory.h"
 #include "core/runtime/options.h"
-#include "core/runtime/rec_executor_backend.h"
-#include "core/runtime/rec_executor_impl_factory.h"
 #include "kernels/dcu/piecewise_graphs.h"
 
 namespace xllm::runtime::dcu {
@@ -212,10 +210,8 @@ class DcuGraph final {
   }
 
   bool matches_graph_input(const ModelParamsView&) const { return true; }
-  bool matches_graph_input(const RecModelParams& params) const;
 
  private:
-  std::optional<RecModelParams> rec_graph_input_;
   at::cuda::CUDAGraph graph_;
   bool is_piecewise_ = false;
   std::unique_ptr<::xllm::runtime::dcu::PiecewiseGraphs> piecewise_graph_;
@@ -228,15 +224,9 @@ class DcuGraph final {
   DcuStream capture_stream_;
 };
 
-class DcuGraphExecutorImpl final : public ExecutorImpl,
-                                   public RecExecutorBackend {
+class DcuGraphExecutorImpl final : public ExecutorImpl {
  public:
   DcuGraphExecutorImpl(CausalLM* model,
-                       const ModelArgs& args,
-                       const torch::Device& device,
-                       const runtime::Options& options);
-
-  DcuGraphExecutorImpl(RecModel* model,
                        const ModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options);
@@ -247,11 +237,6 @@ class DcuGraphExecutorImpl final : public ExecutorImpl,
                   const torch::Tensor& positions,
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
-
-  ModelOutput run(const torch::Tensor& tokens,
-                  const torch::Tensor& positions,
-                  std::vector<KVCache>& kv_caches,
-                  const RecModelParams& params) override;
 
  private:
   template <typename ModelType, typename Params>
@@ -275,8 +260,8 @@ class DcuGraphExecutorImpl final : public ExecutorImpl,
   static DcuStream get_capture_stream(c10::DeviceIndex device_index);
 
  private:
-  CausalLM* model_;                // not owned
-  RecModel* rec_model_ = nullptr;  // not owned
+  CausalLM* model_;  // not owned
+  // not owned
 
   ModelArgs args_;
   torch::Device device_;
@@ -294,6 +279,5 @@ class DcuGraphExecutorImpl final : public ExecutorImpl,
 };
 
 REGISTER_EXECUTOR("dcu", DcuGraphExecutorImpl);
-REGISTER_REC_EXECUTOR("dcu", DcuGraphExecutorImpl);
 
 }  // namespace xllm::runtime::dcu

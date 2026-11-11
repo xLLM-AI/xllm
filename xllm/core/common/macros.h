@@ -20,7 +20,6 @@ limitations under the License.
 #include <utility>
 
 #include "core/common/property_reflect.h"
-#include "core/util/tensor_codec.h"
 
 namespace xllm {
 
@@ -119,18 +118,6 @@ namespace xllm {
     }                                         \
   } while (0)
 
-#define TORCH_TENSOR_VEC_TO_PROTO_TENSOR_LIST(proto_field, torch_tensor_vec) \
-  do {                                                                       \
-    proto_field->mutable_tensors()->Reserve(torch_tensor_vec.size());        \
-    for (const auto& torch_tensor : torch_tensor_vec) {                      \
-      proto::Tensor* pb_tensor = proto_field->add_tensors();                 \
-      if (!util::torch_to_proto(torch_tensor, pb_tensor)) {                  \
-        LOG(ERROR)                                                           \
-            << "Failed to convert torch Tensor to PB Tensor (list item)";    \
-      }                                                                      \
-    }                                                                        \
-  } while (0)
-
 #define CALLBACK_WITH_ERROR_ARGS2(CODE, MSG) callback(Status{CODE, MSG})
 #define CALLBACK_WITH_ERROR_ARGS4(CODE, MSG, ID, TARGET_XSERVICE_ADDR) \
   callback({Status{CODE, MSG}, ID, TARGET_XSERVICE_ADDR})
@@ -184,17 +171,6 @@ namespace xllm {
     if (__multi_model_step_lock.owns_lock()) { \
       __multi_model_step_lock.unlock();        \
     }                                          \
-  } while (0)
-
-// Set ATB execute stream with stream guard
-#define SET_ATB_EXECUTE_STREAM(compute_stream, device, context)           \
-  c10::StreamGuard __stream_guard = (compute_stream)->set_stream_guard(); \
-  do {                                                                    \
-    aclrtStream __current_stream =                                        \
-        c10_npu::getCurrentNPUStream((device).index()).stream();          \
-    auto __atb_context =                                                  \
-        const_cast<atb::Context*>((context).get_atb_context());           \
-    __atb_context->SetExecuteStream(__current_stream);                    \
   } while (0)
 
 }  // namespace xllm

@@ -22,14 +22,10 @@ limitations under the License.
 #include "core/util/binary_payload.h"
 
 namespace xllm::proto {
-class InferInputTensor;
 class Tensor;
 }  // namespace xllm::proto
 
 namespace xllm::util {
-
-torch::Tensor convert_rec_tensor_to_torch(
-    const proto::InferInputTensor& input_tensor);
 
 torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor);
 

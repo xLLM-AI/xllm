@@ -15,7 +15,6 @@ cc_library(
     request.h
     llm_request_factory.h
     vlm_request_factory.h
-    rec_request_factory.h
     request_output.h
     usage.h
     dit_request_output.h
@@ -23,14 +22,11 @@ cc_library(
     dit_request_state.h
     sample_slot.h
     sequence.h
-    rec_sequence.h
-    onerec_sequence.h
     sequence_factory.h
     sequence_logprob_state.h
     sequence_kv_state.h
     sequences_group.h
     request_state.h
-    rec_type.h
     stopping_checker.h
     priority_comparator.h
   SRCS
@@ -44,15 +40,12 @@ cc_library(
     request_base.cpp
     llm_request_factory.cpp
     vlm_request_factory.cpp
-    rec_request_factory.cpp
     request_output.cpp
     dit_request_output.cpp
     request_params.cpp
     sample_slot.cpp
     dit_request_params.cpp
     sequence.cpp
-    rec_sequence.cpp
-    onerec_sequence.cpp
     sequence_factory.cpp
     sequence_logprob_state.cpp
     sequence_kv_state.cpp

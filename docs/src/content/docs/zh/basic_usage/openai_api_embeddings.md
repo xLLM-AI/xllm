@@ -16,7 +16,7 @@ export HCCL_IF_BASE_PORT=43432
 
 xllm --model=/path/to/Qwen3-8B \
   --model_id=Qwen3-8B \
-  --npu_kernel_backend=ATB \
+  --npu_kernel_backend=TORCH \
   --enable_graph=false \
   --task=embed \
   --host=127.0.0.1 \

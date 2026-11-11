@@ -107,7 +107,7 @@ class MappingNPU final {
     PROPERTY(int32_t, layerwise_split_size) = 1;
     // kv split size: number of ranks across which KV cache is sharded.
     // -1 means "follow cp_size" (legacy: KV split width == CP size).
-    // 1 means no KV split (each CP rank holds a full KV replica, ATB prefix
+    // 1 means no KV split (each CP rank holds a full KV replica; prefix
     // AllGather can be skipped). Other K must divide cp_size.
     PROPERTY(int32_t, kv_split_size) = -1;
   };
@@ -131,8 +131,7 @@ class MappingNPU final {
 
   // Build the KV-split parallel group. Layout reuses get_dp_group's stride
   // scheme so that when `attn_kv_split_.group_size() == attn_cp_.group_size()`
-  // the resulting rank_ids match attn_cp_ exactly (and the ATB
-  // ExternalCommManager de-duplicates the HCCL commDomain). When kv_split_size
+  // the resulting rank_ids match attn_cp_ exactly. When kv_split_size
   // == 1 each rank is its own group (no AllGather participants), matching the
   // "full-replica / skip prefix AllGather" mode.
   void get_kv_split_group(ParallelInfo& parallel_info);

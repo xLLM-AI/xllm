@@ -42,13 +42,13 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/util/scope_guard.h"
 #include "core/util/tensor_helper.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/block/composite_block_manager.h"
-#include "framework/config/beam_search_config.h"
 #include "framework/config/service_config.h"
 #include "framework/model/model_args.h"
 #include "framework/request/stopping_checker.h"
@@ -358,9 +358,9 @@ class BatchOutputActionTest : public ::testing::TestWithParam<bool> {
         original_chunked_prefill_);
   }
 
-  std::unique_ptr<Request> make_beam_request(bool enable_schedule_overlap) {
+  std::unique_ptr<Request> make_request(bool enable_schedule_overlap) {
     RequestSamplingParam sampling_param;
-    sampling_param.beam_width = 2;
+
     sampling_param.top_logprobs = 2;
     sampling_param.logprobs = true;
     StoppingChecker stopping_checker;
@@ -1249,43 +1249,6 @@ TEST(SequenceTest, JsonObjectOverlapCommitAdvancesGrammarOnce) {
   EXPECT_EQ(committed_state->snapshot().token_ids, std::vector<int32_t>({0}));
 }
 
-TEST(SequenceTest, RestoresJsonObjectStateForBeamCandidate) {
-  BlockManager::Options options;
-  options.num_blocks(8).block_size(4);
-  BlockManagerImpl manager(options);
-  RequestSamplingParam sampling_param;
-  StoppingChecker stopping_checker;
-  stopping_checker.set_max_generated_tokens(4);
-  std::shared_ptr<const JsonObjectGrammar> grammar =
-      std::make_shared<const JsonObjectGrammar>(
-          std::vector<std::string>{"{", " {", "\"a\"", ":", "1"},
-          std::unordered_set<int32_t>{});
-
-  SequenceParams seq_params;
-  seq_params.seq_capacity = 16;
-  seq_params.stopping_checker = &stopping_checker;
-  seq_params.sampling_param = &sampling_param;
-  seq_params.request_id = "req-beam-restore";
-  seq_params.json_object_grammar = grammar;
-  IncrementalDecoder decoder("", 2, false, false);
-  Sequence sequence(/*index=*/0,
-                    /*prompt_token_ids=*/{10, 11},
-                    torch::Tensor(),
-                    MMData(),
-                    std::move(decoder),
-                    seq_params);
-  sequence.add_blocks(BlockType::KV, manager.allocate(1));
-  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
-  sequence.append_token(Token(/*id=*/0));
-
-  JsonObjectGrammarSnapshot candidate_snapshot =
-      sequence.json_object_state()->snapshot();
-  candidate_snapshot.token_ids.back() = 1;
-  ASSERT_TRUE(sequence.restore_json_object_state(candidate_snapshot));
-  EXPECT_EQ(sequence.json_object_state()->snapshot().token_ids,
-            std::vector<int32_t>({1}));
-}
-
 TEST(SequenceTest, JsonObjectCommitMismatchFailsBeforeTokenMutation) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(4);
@@ -1946,7 +1909,6 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
             std::vector<int32_t>({-1, -1}));
   ASSERT_EQ(forward_input.json_object_states.size(), 2u);
   ASSERT_TRUE(forward_input.sampling_params.filter_bitmask().defined());
-  EXPECT_FALSE(forward_input.sampling_params.filter_mask().defined());
   EXPECT_EQ(forward_input.sampling_params.filter_bitmask().size(0), 2);
   EXPECT_EQ(forward_input.sampling_params.filter_bitmask().size(1), 1);
   EXPECT_EQ(forward_input.sampling_params.filter_bitmask()
@@ -2079,7 +2041,8 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
   JsonObjectGrammarState expected_constrained_state = grammar->initial_state();
   ASSERT_TRUE(expected_constrained_state.accept_token(0));
   ASSERT_TRUE(expected_constrained_state.accept_token(1));
-  EXPECT_FALSE(expected_constrained_state.can_accept_token(9));
+  JsonObjectGrammarState probe = expected_constrained_state;
+  EXPECT_FALSE(probe.accept_token(9));
   ASSERT_TRUE(expected_constrained_state.accept_token(2));
 
   ForwardOutput forward_output;
@@ -2153,7 +2116,6 @@ TEST(BatchTest, JsonObjectMetadataIsSkippedWhenDisabled) {
             std::vector<std::string>{sequence.sample_sequence_id()});
   EXPECT_EQ(forward_input.sample_prior_output_rows, std::vector<int32_t>{-1});
   EXPECT_FALSE(forward_input.sampling_params.filter_bitmask().defined());
-  EXPECT_FALSE(forward_input.sampling_params.filter_mask().defined());
 }
 
 TEST(BatchTest, ChunkedPDTransferUsesStepWindow) {
@@ -2197,14 +2159,8 @@ TEST(BatchTest, ChunkedPDTransferUsesStepWindow) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {8};
-  ForwardInputBuilder builder(sequences,
-                              budgets,
-                              {},
-                              {},
-                              nullptr,
-                              0,
-                              nullptr,
-                              BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(
+      sequences, budgets, {}, {}, 0, nullptr, BatchForwardType::PREFILL);
 
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2259,14 +2215,8 @@ TEST(BatchTest, PrefixCacheTransferIgnoresKvCacheCursor) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {2};
-  ForwardInputBuilder builder(sequences,
-                              budgets,
-                              {},
-                              {},
-                              nullptr,
-                              0,
-                              nullptr,
-                              BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(
+      sequences, budgets, {}, {}, 0, nullptr, BatchForwardType::PREFILL);
 
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2319,14 +2269,8 @@ TEST(BatchTest, ForwardInputPreservesTransferInfoAndBatchId) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {8};
-  ForwardInputBuilder builder(sequences,
-                              budgets,
-                              {},
-                              {},
-                              nullptr,
-                              batch_id,
-                              nullptr,
-                              BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(
+      sequences, budgets, {}, {}, batch_id, nullptr, BatchForwardType::PREFILL);
 
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2381,14 +2325,8 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {4};
-  ForwardInputBuilder builder(sequences,
-                              budgets,
-                              {},
-                              {},
-                              nullptr,
-                              batch_id,
-                              nullptr,
-                              BatchForwardType::PREFILL);
+  ForwardInputBuilder builder(
+      sequences, budgets, {}, {}, batch_id, nullptr, BatchForwardType::PREFILL);
 
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
@@ -2629,75 +2567,6 @@ TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
             "prior token violates json_object grammar");
 }
 
-TEST(BatchTest, ForwardInputBlockCopyKernelFieldsMatchExpectedLayout) {
-  const bool old_enable_block_copy_kernel =
-      ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel();
-  ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel(true);
-
-  BlockManager::Options options;
-  options.num_blocks(8).block_size(4);
-  BlockManagerImpl manager(options);
-
-  RequestSamplingParam sampling_param;
-  StoppingChecker stopping_checker;
-  stopping_checker.set_max_generated_tokens(4);
-  SequenceParams seq_params;
-  seq_params.seq_capacity = 32;
-  seq_params.stopping_checker = &stopping_checker;
-  seq_params.sampling_param = &sampling_param;
-  seq_params.skip_special_tokens = true;
-  seq_params.echo = false;
-  seq_params.logprobs = false;
-  seq_params.enable_schedule_overlap = false;
-
-  torch::Tensor input_embedding;
-  MMData mm_data;
-  IncrementalDecoder forward_decoder("", 1, false, false);
-  Sequence forward_seq(/*index=*/0,
-                       /*token_ids=*/{1, 2, 3, 4},
-                       input_embedding,
-                       mm_data,
-                       std::move(forward_decoder),
-                       seq_params);
-  forward_seq.add_blocks(BlockType::KV, manager.allocate(1));
-
-  std::vector<BlockTransferInfo> forward_swap_blocks = {
-      BlockTransferInfo(7, 10),
-      BlockTransferInfo(7, 11),
-      BlockTransferInfo(8, 12)};
-  std::vector<uint32_t> budgets = {4};
-
-  std::vector<Sequence*> forward_sequences = {&forward_seq};
-  ForwardInputBuilder forward_builder(forward_sequences,
-                                      budgets,
-                                      {},
-                                      {},
-                                      &forward_swap_blocks,
-                                      /*batch_id=*/1,
-                                      nullptr,
-                                      BatchForwardType::PREFILL);
-  LlmForwardInput forward_input =
-      forward_builder.build_forward_input(/*num_decoding_tokens=*/1,
-                                          /*min_decoding_batch_size=*/0);
-
-  EXPECT_TRUE(equal(forward_input.input_params.block_copy.src_block_indices,
-                    std::vector<int32_t>({7, 8})));
-  EXPECT_TRUE(equal(forward_input.input_params.block_copy.dst_block_indices,
-                    std::vector<int32_t>({10, 11, 12})));
-  EXPECT_TRUE(equal(forward_input.input_params.block_copy.cum_sum,
-                    std::vector<int32_t>({2, 3})));
-
-#if defined(USE_CUDA)
-  EXPECT_EQ(forward_input.input_params.block_copy.swap_blocks.size(),
-            forward_swap_blocks.size());
-#else
-  EXPECT_TRUE(forward_input.input_params.block_copy.swap_blocks.empty());
-#endif
-
-  ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel(
-      old_enable_block_copy_kernel);
-}
-
 TEST(BatchTest, KVCacheEmptySupportsLinearOnlyAndFullOnlyLayouts) {
   auto options =
       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
@@ -2798,7 +2667,6 @@ TEST(BatchTest, SampleRequestKeepsThreadedForwardBuilderOffsetsStable) {
                               allowed_max_tokens,
                               input_embeddings_vec,
                               mm_data_vec,
-                              /*swap_block_transfer_infos=*/nullptr,
                               /*batch_id=*/1,
                               &args,
                               BatchForwardType::PREFILL,
@@ -2857,7 +2725,6 @@ TEST(BatchTest, ThreadedMropeIgnoresEmptyTailPartitions) {
                               allowed_max_tokens,
                               input_embeddings,
                               mm_data,
-                              /*swap_block_transfer_infos=*/nullptr,
                               /*batch_id=*/1,
                               &args,
                               BatchForwardType::PREFILL,
@@ -2915,7 +2782,6 @@ TEST(BatchTest, DecodeMinBatchSizeDoesNotPadTransportState) {
                               allowed_max_tokens,
                               input_embeddings_vec,
                               mm_data_vec,
-                              /*swap_block_transfer_infos=*/nullptr,
                               /*batch_id=*/1,
                               &args,
                               BatchForwardType::DECODE);
@@ -2983,7 +2849,6 @@ TEST(BatchTest, DecodeEmbeddingAndLinearStateIdsAreIndependentSlots) {
                               allowed_max_tokens,
                               input_embeddings_vec,
                               mm_data_vec,
-                              /*swap_block_transfer_infos=*/nullptr,
                               /*batch_id=*/1,
                               &args,
                               BatchForwardType::DECODE);
@@ -2998,6 +2863,121 @@ TEST(BatchTest, DecodeEmbeddingAndLinearStateIdsAreIndependentSlots) {
             expected_embedding_id);
   EXPECT_EQ(forward_input.input_params.embedding.linear_state_ids[0],
             expected_linear_id);
+}
+
+TEST(BatchTest, SharedArenaPublishesLinearGroupSlotsForReadAndWriteStates) {
+  BlockManager::Options options;
+  options.num_blocks(16)
+      .block_size(4)
+      .enable_linear_state(true)
+      .linear_state_num_slots(16)
+      .enable_shared_kv_cache(true)
+      .shared_linear_state_slots(2)
+      .enable_prefix_cache(false);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(20);
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 32;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+  torch::Tensor input_embedding;
+  MMData mm_data;
+  IncrementalDecoder decoder("", 1, false, false);
+  Sequence seq(/*index=*/0,
+               /*token_ids=*/{1, 2, 3},
+               input_embedding,
+               mm_data,
+               std::move(decoder),
+               seq_params);
+  seq.add_blocks(BlockType::KV, manager.allocate_blocks(BlockType::KV, 1));
+  seq.kv_state().incr_kv_cache_tokens_num(/*size=*/3);
+  seq.append_token(4);
+  // Slot 1 holds the KV block. The read state takes slots {2, 3} and the
+  // write state takes slots {4, 5}.
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 2);
+  ASSERT_EQ(linear.size(), 2u);
+  seq.add_blocks(BlockType::LINEAR, linear);
+
+  std::vector<Sequence*> sequences = {&seq};
+  std::vector<uint32_t> allowed_max_tokens = {1};
+  std::vector<torch::Tensor> input_embeddings_vec;
+  std::vector<MMData> mm_data_vec;
+  ModelArgs args;
+  args.layer_types({"linear_attention", "full_attention"});
+  ForwardInputBuilder builder(sequences,
+                              allowed_max_tokens,
+                              input_embeddings_vec,
+                              mm_data_vec,
+                              /*batch_id=*/1,
+                              &args,
+                              BatchForwardType::DECODE);
+  LlmForwardInput forward_input =
+      builder.build_forward_input(/*num_decoding_tokens=*/1,
+                                  /*min_decoding_batch_size=*/0);
+
+  const auto& embedding = forward_input.input_params.embedding;
+  EXPECT_EQ(embedding.linear_state_ids, std::vector<int32_t>({4}));
+  EXPECT_EQ(embedding.linear_state_read_ids, std::vector<int32_t>({2}));
+  EXPECT_EQ(embedding.linear_state_slot_rows,
+            std::vector<int32_t>({4, 4, 5, 2, 2, 3}));
+}
+
+TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
+  constexpr uint32_t kQueryTokens = 32768;
+  ScopedPrefillChunkStride chunk_stride(kQueryTokens);
+  StaticKVCacheLayoutSpec spec;
+  spec.num_slots = 64;
+  spec.num_slabs = 16;
+  spec.full_row_bytes = 16;
+  spec.conv_row_bytes = 8;
+  spec.ssm_row_bytes = 32;
+  spec.checkpoint_stride = 2;
+  spec.full_layer_ids = {0, 3};
+  spec.linear_layer_ids = {1, 2};
+  BlockManager::Options options;
+  options.num_blocks(64)
+      .block_size(kQueryTokens)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64)
+      .enable_shared_kv_cache(true)
+      .shared_layout(std::make_shared<StaticKVCacheLayout>(spec))
+      .enable_prefix_cache(false);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  // Releasing a warmup allocation advances only this logical ID's lease.
+  auto warmup = manager.allocate_blocks(BlockType::KV, 1);
+  ASSERT_EQ(warmup.size(), 1u);
+  warmup.clear();
+  Sequence first = make_basic_sequence(std::vector<int32_t>(kQueryTokens, 1));
+  Sequence second =
+      make_basic_sequence(std::vector<int32_t>(2 * kQueryTokens, 2));
+  first.add_blocks(BlockType::KV, manager.allocate_blocks(BlockType::KV, 1));
+  second.add_blocks(BlockType::KV, manager.allocate_blocks(BlockType::KV, 2));
+  first.add_blocks(BlockType::LINEAR,
+                   manager.allocate_blocks(BlockType::LINEAR, 1));
+  second.add_blocks(BlockType::LINEAR,
+                    manager.allocate_blocks(BlockType::LINEAR, 1));
+  second.kv_state().set_kv_cache_tokens_num(kQueryTokens);
+  Batch batch({&first, &second});
+  ThreadPool thread_pool(/*num_threads=*/2);
+  ModelArgs args;
+  args.layer_types({"full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"});
+  const LlmForwardInput input = batch.prepare_forward_input(args, &thread_pool);
+  const auto& embedding = input.input_params.embedding;
+  ASSERT_EQ(embedding.full_block_slot_rows.size(), 9u);
+  EXPECT_EQ(embedding.full_block_lease_epochs,
+            (std::vector<uint64_t>{2, 1, 1}));
+  EXPECT_EQ(embedding.full_block_slot_rows[0],
+            first.kv_state().blocks(BlockType::KV)[0].id());
+  EXPECT_EQ(embedding.full_block_slot_rows[3],
+            second.kv_state().blocks(BlockType::KV)[0].id());
+  EXPECT_EQ(embedding.full_block_slot_rows[6],
+            second.kv_state().blocks(BlockType::KV)[1].id());
 }
 
 class LinearBatchLifetimeTest : public ::testing::TestWithParam<bool> {};
@@ -3770,6 +3750,10 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
   forward_input.input_params.attention.host.block_tables =
       forward_input.input_params.attention.device.block_tables;
   forward_input.input_params.embedding.linear_state_ids = {4, 6};
+  forward_input.input_params.embedding.linear_state_slot_rows = {
+      4, 4, 9, 6, 6, 11};
+  forward_input.input_params.embedding.full_block_slot_rows = {
+      4, 120, 122, 6, 180, 182};
   forward_input.input_params.embedding.embedding_ids = {2, 7};
   forward_input.input_params.embedding.request_ids = {"mtp-a", "mtp-b"};
 
@@ -3800,6 +3784,10 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
   reader_manager.input_read(from_shm, torch::Device(torch::kCPU));
   EXPECT_EQ(from_shm.input_params.embedding.linear_state_ids,
             std::vector<int32_t>({4, 6}));
+  EXPECT_EQ(from_shm.input_params.embedding.linear_state_slot_rows,
+            std::vector<int32_t>({4, 4, 9, 6, 6, 11}));
+  EXPECT_EQ(from_shm.input_params.embedding.full_block_slot_rows,
+            std::vector<int32_t>({4, 120, 122, 6, 180, 182}));
   EXPECT_EQ(from_shm.input_params.embedding.embedding_ids,
             std::vector<int32_t>({2, 7}));
   EXPECT_EQ(from_shm.input_params.embedding.request_ids,
@@ -4088,52 +4076,9 @@ TEST(BatchTest, SampleRequestFallsBackToEmptyPlaceholderOnPartialRawOutputs) {
   EXPECT_FALSE(logprobs[prompt_tokens + 1].has_value());
 }
 
-TEST_P(BatchOutputActionTest, ImmediateCommitsBeamWithGlobalOverlapEnabled) {
-  const ScopedScheduleOverlap overlap(/*enabled=*/true);
-  auto request = make_beam_request(/*enable_schedule_overlap=*/false);
-  Batch batch;
-  batch.add(request->sequences().front().get());
-  batch.add(request->sequence_group());
-  (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
-
-  apply_output(batch, BatchOutputAction::IMMEDIATE, /*token_id=*/101);
-
-  ASSERT_EQ(request->sequences().size(), 2u);
-  EXPECT_EQ(request->sequences()[0]->num_generated_tokens(), 1u);
-  EXPECT_EQ(request->sequences()[0]->tokens().back(), 101);
-  EXPECT_EQ(request->sequences()[1]->num_generated_tokens(), 1u);
-  EXPECT_EQ(request->sequences()[1]->tokens().back(), 102);
-}
-
-TEST_P(BatchOutputActionTest, ReserveDefersBeamWithGlobalOverlapDisabled) {
-  const ScopedScheduleOverlap overlap(/*enabled=*/false);
-  auto request = make_beam_request(/*enable_schedule_overlap=*/true);
-  Batch batch;
-  batch.add(request->sequences().front().get());
-  batch.add(request->sequence_group());
-  (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
-
-  // The action controls publication even when a worker supplies concrete
-  // tokens.
-  apply_output(batch, BatchOutputAction::RESERVE_PENDING, /*token_id=*/201);
-  ASSERT_EQ(request->sequences().size(), 1u);
-  EXPECT_EQ(request->sequences().front()->num_generated_tokens(), 1u);
-  EXPECT_EQ(request->sequences().front()->tokens().back(), 201);
-
-  apply_output(batch, BatchOutputAction::COMMIT_PENDING, /*token_id=*/101);
-
-  ASSERT_EQ(request->sequences().size(), 2u);
-  EXPECT_EQ(request->sequences()[0]->num_generated_tokens(), 1u);
-  EXPECT_EQ(request->sequences()[0]->tokens().back(), 101);
-  EXPECT_EQ(request->sequences()[1]->num_generated_tokens(), 1u);
-  EXPECT_EQ(request->sequences()[1]->tokens().back(), 102);
-}
-
 TEST_P(BatchOutputActionTest, CommitSkipsCancelledPendingTarget) {
   const ScopedScheduleOverlap overlap(/*enabled=*/false);
-  auto request = make_beam_request(/*enable_schedule_overlap=*/true);
+  auto request = make_request(/*enable_schedule_overlap=*/true);
   Batch batch;
   batch.add(request->sequences().front().get());
   batch.add(request->sequence_group());
@@ -4752,24 +4697,6 @@ TEST(BatchTest, OverlapMTPReplacementKeepsCompositeKvBlocks) {
 
   SchedulerConfig::get_instance().enable_schedule_overlap(
       old_enable_schedule_overlap);
-}
-
-TEST(BatchTest, DPBalanceShuffle) {
-  Batch batch;
-  std::vector<uint32_t> kv_cache_tokens_num = {
-      99, 1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
-      17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
-      34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48};
-  auto shifted_indices = batch.cal_seq_exchange_index_test(kv_cache_tokens_num);
-  // shifted_indices are expected as
-  // {48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31,
-  //  30, 29, 28, 27, 26, 25,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12,
-  //  13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 99}
-  EXPECT_EQ(shifted_indices[0], 48);
-  EXPECT_EQ(shifted_indices[48], 0);
-  EXPECT_EQ(shifted_indices[1], 24);
-  EXPECT_EQ(shifted_indices[47], 1);
-  EXPECT_EQ(shifted_indices[2], 25);
 }
 
 }  // namespace xllm

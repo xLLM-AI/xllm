@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kpool_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/platform/platform.h"
 #include "core/runtime/options.h"
@@ -544,6 +545,102 @@ void init_dsv4_counts(const ModelArgs& model_args,
   kv_cache_cap->n_blocks(std::max<int64_t>(manager_base_blocks, 1));
 }
 
+void init_shared_counts(const ModelArgs& model_args,
+                        const KVCacheEstimateOptions& options,
+                        KVCacheCapacity* capacity) {
+  CHECK_GT(capacity->num_full_attention_layers(), 0);
+  CHECK_GT(capacity->num_linear_attention_layers(), 0);
+  CHECK_EQ(options.layerwise_split_size, 1);
+  CHECK_GE(options.num_speculative_tokens, 0);
+  CHECK_EQ(options.max_linear_state_cache_slots, 0)
+      << "Shared static storage derives linear capacity from its arena.";
+  CHECK_EQ(options.kv_cache_dtype, "auto")
+      << "Shared static storage requires model-dtype Full KV rows.";
+  CHECK_EQ(options.embedding_context_bytes_per_block, 0);
+  CHECK_EQ(capacity->index_block_bytes(), 0);
+  CHECK_EQ(capacity->scale_slot_size(), 0);
+  CHECK_EQ(capacity->kpool_tail_slot_size(), 0);
+  CHECK(!model_args.enable_mla());
+  CHECK_EQ(model_args.linear_key_head_dim(),
+           model_args.linear_value_head_dim());
+  StaticKVCacheLayoutSpec spec;
+  spec.dtype = options.dtype;
+  spec.ssm_dtype =
+      resolve_ssm_dtype(model_args.mamba_ssm_dtype(), options.dtype);
+  spec.full_row_bytes =
+      static_cast<size_t>(capacity->slot_size() / 2 * capacity->block_size());
+  spec.conv_row_bytes = static_cast<size_t>(
+      torch::elementSize(options.dtype) * capacity->linear_conv_state_len() *
+      (model_args.linear_key_head_dim() * options.n_local_linear_k_heads * 2 +
+       model_args.linear_value_head_dim() * options.n_local_linear_v_heads));
+  spec.ssm_row_bytes = static_cast<size_t>(
+      torch::elementSize(spec.ssm_dtype) * options.n_local_linear_v_heads *
+      model_args.linear_key_head_dim() * model_args.linear_value_head_dim());
+  spec.checkpoint_stride =
+      static_cast<size_t>(capacity->linear_ssm_checkpoint_stride());
+  spec.full_layer_ids.reserve(capacity->num_full_attention_layers());
+  spec.linear_layer_ids.reserve(capacity->num_linear_attention_layers());
+  for (int64_t layer = 0; layer < capacity->n_layers(); ++layer) {
+    if (is_full_attention_layer(model_args, layer)) {
+      spec.full_layer_ids.emplace_back(layer);
+    } else {
+      spec.linear_layer_ids.emplace_back(layer);
+    }
+  }
+  const StaticKVCacheLayout layout(std::move(spec));
+  CHECK_LE(layout.slab_bytes(),
+           static_cast<size_t>(std::numeric_limits<int64_t>::max()));
+  const int64_t slab_bytes = static_cast<int64_t>(layout.slab_bytes());
+  int64_t slabs = capacity->cache_size_in_bytes() / slab_bytes;
+  // Native token slots and recurrent row indices use int32. Bound the dense
+  // arena, not the unrelated logical-ID mapping-table length.
+  const size_t max_index = std::numeric_limits<int32_t>::max();
+  const size_t full_rows = layout.rows_per_slab(KVCacheTensorRole::KEY);
+  CHECK_LE(full_rows, max_index / capacity->block_size());
+  slabs = std::min(
+      slabs,
+      static_cast<int64_t>(max_index / capacity->block_size() / full_rows));
+  for (const KVCacheTensorRole role :
+       {KVCacheTensorRole::CONV, KVCacheTensorRole::SSM}) {
+    slabs = std::min(
+        slabs, static_cast<int64_t>(max_index / layout.rows_per_slab(role)));
+  }
+  const auto slabs_for = [&layout](size_t count, size_t object_bytes) {
+    const size_t objects_per_slab = layout.slab_bytes() / object_bytes;
+    return (count + objects_per_slab - 1) / objects_per_slab;
+  };
+  // Reserved scratch and read-padding slabs cannot change type. One sequence
+  // needs separate typed slabs for its Full pairs, Conv rows and SSM bundles.
+  const int64_t minimum_slabs = static_cast<int64_t>(
+      layout.num_reserved_slabs() +
+      slabs_for(layout.full_layer_count(), layout.full_pair_bytes()) +
+      slabs_for(layout.linear_layer_count(), layout.conv_row_bytes()) +
+      slabs_for(layout.linear_layer_count(), layout.ssm_bundle_bytes()));
+  CHECK_GE(slabs, minimum_slabs)
+      << "Static shared KV budget cannot fit padding and one hybrid sequence.";
+  const int64_t full_block_bytes = static_cast<int64_t>(
+      layout.full_layer_count() * layout.full_pair_bytes());
+  const int64_t linear_state_bytes = static_cast<int64_t>(
+      layout.linear_layer_count() *
+      (layout.conv_row_bytes() + layout.ssm_bundle_bytes()));
+  const int64_t allocatable_slabs =
+      slabs - static_cast<int64_t>(layout.num_reserved_slabs());
+  const int64_t logical_capacity =
+      std::min<int64_t>(1 + allocatable_slabs * slab_bytes /
+                                std::min(full_block_bytes, linear_state_bytes),
+                        std::numeric_limits<int32_t>::max());
+  CHECK_LE(layout.num_linear_groups(), std::numeric_limits<uint32_t>::max());
+  capacity->n_blocks(logical_capacity)
+      .num_linear_state_blocks(logical_capacity)
+      .shared_slot_bytes(slab_bytes)
+      .shared_slab_count(slabs)
+      .shared_min_slab_count(minimum_slabs)
+      .shared_linear_state_slots(
+          static_cast<uint32_t>(layout.num_linear_groups()))
+      .cache_size_in_bytes(slabs * slab_bytes)
+      .linear_cache_size_in_bytes(0);
+}
+
 void init_standard_counts(const ModelArgs& model_args,
                           const KVCacheEstimateOptions& options,
                           KVCacheCapacity* kv_cache_cap) {
@@ -565,6 +662,11 @@ void init_standard_counts(const ModelArgs& model_args,
           indexer_layer_mask.begin(), indexer_layer_mask.end(), true));
     }
     kv_cache_cap->num_indexer_layers(num_indexer_layers);
+  }
+
+  if (options.enable_shared_kv_cache) {
+    init_shared_counts(model_args, options, kv_cache_cap);
+    return;
   }
 
   CHECK_GE(options.embedding_context_bytes_per_block, 0);
@@ -667,6 +769,53 @@ SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
   return {std::move(target_cap), std::move(draft_cap)};
 }
 
+SharedStaticKVCachePlan plan_shared_static_kv_cache(KVCacheCapacity target_cap,
+                                                    KVCacheCapacity draft_cap) {
+  CHECK_GT(target_cap.shared_slot_bytes(), 0);
+  CHECK_EQ(target_cap.linear_cache_size_in_bytes(), 0);
+  CHECK_EQ(draft_cap.shared_slot_bytes(), 0);
+  CHECK_EQ(draft_cap.num_linear_attention_layers(), 0);
+  CHECK_EQ(draft_cap.linear_cache_size_in_bytes(), 0);
+  CHECK_EQ(target_cap.block_size(), draft_cap.block_size());
+  const int64_t budget = std::min(target_cap.cache_size_in_bytes(),
+                                  draft_cap.cache_size_in_bytes());
+  const int64_t draft_block_bytes =
+      standard_full_cache_block_size_in_bytes(draft_cap);
+  const int64_t slab_bytes = target_cap.shared_slot_bytes();
+  const int64_t smallest_allocation = std::min(
+      standard_full_cache_block_size_in_bytes(target_cap),
+      target_cap.num_linear_attention_layers() * target_cap.linear_slot_size());
+  CHECK_GT(smallest_allocation, 0);
+  const auto logical_capacity = [&](int64_t slabs) {
+    return std::min(target_cap.n_blocks(),
+                    1 + (slabs - 1) * slab_bytes / smallest_allocation);
+  };
+  // The draft keeps dense Full rows indexed by logical IDs. It does not pay
+  // for one draft block per physical slab or per Linear mapping-table entry.
+  int64_t lower = 0;
+  int64_t upper = target_cap.shared_slab_count();
+  while (lower < upper) {
+    const int64_t middle = lower + (upper - lower + 1) / 2;
+    const int64_t target_bytes = middle * slab_bytes;
+    const int64_t remaining_bytes = budget - target_bytes;
+    if (remaining_bytes >= 0 &&
+        logical_capacity(middle) <= remaining_bytes / draft_block_bytes) {
+      lower = middle;
+    } else {
+      upper = middle - 1;
+    }
+  }
+  CHECK_GE(lower, target_cap.shared_min_slab_count())
+      << "Shared target and draft budget cannot fit one hybrid sequence.";
+  const int64_t slots = logical_capacity(lower);
+  target_cap.n_blocks(slots)
+      .num_linear_state_blocks(slots)
+      .shared_slab_count(lower)
+      .cache_size_in_bytes(lower * slab_bytes);
+  draft_cap.n_blocks(slots).cache_size_in_bytes(slots * draft_block_bytes);
+  return {std::move(target_cap), std::move(draft_cap)};
+}
+
 std::vector<bool> resolve_indexer_cache_enabled_layers(
     const ModelArgs& model_args,
     int64_t num_cache_layers) {
@@ -754,6 +903,9 @@ KVCacheCapacity KVCacheEstimator::estimate(
     const KVCacheEstimateContext& context) const {
   KVCacheEstimateOptions estimate_options;
   estimate_options.dtype = context.dtype;
+  estimate_options.enable_shared_kv_cache =
+      KVCacheConfig::get_instance().enable_shared_kv_cache() &&
+      !options.is_draft_engine();
   estimate_options.kv_cache_dtype = options.kv_cache_dtype();
   estimate_options.indexer_cache_dtype =
       ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype();
@@ -796,21 +948,6 @@ KVCacheCapacity KVCacheEstimator::estimate(
         options.is_draft_engine()
             ? 1
             : ParallelConfig::get_instance().layerwise_split_size();
-
-    if (options.enable_task_pipeline() &&
-        options.num_speculative_tokens() > 0 && !options.is_draft_engine()) {
-      estimate_options.embedding_context_bytes_per_block =
-          sizeof(int64_t) + 2 * sizeof(int32_t);
-      if (!SpeculativeConfig::is_block_diffusion_algorithm(
-              options.speculative_algorithm())) {
-        CHECK_GT(model_args_.hidden_size(), 0);
-        const int64_t element_bytes = static_cast<int64_t>(
-            torch::scalarTypeToTypeMeta(context.dtype).itemsize());
-        estimate_options.embedding_context_bytes_per_block +=
-            sizeof(int64_t) + 2 * model_args_.hidden_size() * element_bytes +
-            sizeof(bool);
-      }
-    }
   }
 
   return estimate(std::move(estimate_options));

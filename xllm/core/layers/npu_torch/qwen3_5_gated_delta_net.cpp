@@ -289,6 +289,11 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const ModelParamsView& input_params) {
+  if (kv_cache.is_static_shared()) {
+    return Qwen3GatedDeltaNetBaseImpl::forward(
+        hidden_states, attn_metadata, kv_cache, input_params);
+  }
+
   if (attn_metadata.is_dummy) {
     return torch::zeros_like(hidden_states);
   }

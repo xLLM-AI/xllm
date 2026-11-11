@@ -29,6 +29,11 @@ std::vector<int64_t> build_linear_state_mask(
     const std::vector<int32_t>& cached_tokens,
     int64_t active_rows);
 
+// Publish the batch's recurrent-state slot rows to shared static storage
+// before any layer resolves a state id.
+void update_linear_state_slots(const std::vector<KVCache>& kv_caches,
+                               const std::vector<int32_t>& rows);
+
 void restore_linear_state_slots(std::vector<KVCache>& kv_caches,
                                 const std::vector<int32_t>& write_ids,
                                 const std::vector<int32_t>& read_ids,

@@ -123,10 +123,6 @@ VLMEngine::VLMEngine(
     CHECK_EQ(device.type(), device_type)
         << "All devices should be the same type";
   }
-#if defined(USE_NPU)
-  FLAGS_enable_atb_comm_multiprocess =
-      options.enable_offline_inference() || (options.nnodes() > 1);
-#endif
 
   // setup all workers and create worker clients in nnode_rank=0 engine side.
   setup_workers(options);
@@ -418,10 +414,10 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
     CHECK(results[worker_rank].value().has_value())
         << "Failed to execute model, result has no value";
     auto& result = results[worker_rank].value();
-    if (result.value().src_seq_idxes.empty()) {
-      attach_embedding_output_metadata(
-          args_, batch[dp_rank].get_sequences(), result.value());
-    }
+
+    attach_embedding_output_metadata(
+        args_, batch[dp_rank].get_sequences(), result.value());
+
     outputs.emplace_back(std::move(result.value()));
     ++dp_rank;
   }
@@ -447,12 +443,6 @@ std::vector<RawForwardOutput> VLMEngine::collect_step_outputs(
   // Under data parallelism (DP), we need to get dp_size outputs.
   // The `stride` means the workers num we can skip.
   int32_t stride = dp_local_tp_size_;
-  // Every pipeline rank retains its completed Slot, including non-drivers.
-  // Retire all ranks before another Step, then keep the driver output below.
-  if (options_.enable_task_pipeline()) {
-    stride = 1;
-  }
-
   for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += stride) {
     futures.emplace_back(

@@ -32,8 +32,6 @@ limitations under the License.
 #include "core/common/message.h"
 #include "core/common/metrics.h"
 #include "core/common/types.h"
-#include "core/framework/config/execution_config.h"
-#include "core/framework/config/model_config.h"
 #include "framework/chat_template/chat_template.h"
 #include "framework/config/service_config.h"
 #include "framework/model/model_args.h"
@@ -247,8 +245,6 @@ class FakeChatTemplate final : public ChatTemplate {
 class LLMRequestFactoryTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    execution_config_ = ExecutionConfig::get_instance();
-    model_config_ = ModelConfig::get_instance();
     previous_json_object_output_ =
         ServiceConfig::get_instance().enable_json_object_output();
     ServiceConfig::get_instance().enable_json_object_output(true);
@@ -258,8 +254,6 @@ class LLMRequestFactoryTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    ExecutionConfig::get_instance() = execution_config_;
-    ModelConfig::get_instance() = model_config_;
     ServiceConfig::get_instance().enable_json_object_output(
         previous_json_object_output_);
   }
@@ -298,8 +292,6 @@ class LLMRequestFactoryTest : public ::testing::Test {
   Options options_;
   RateLimiter rate_limiter_;
   bool previous_json_object_output_ = true;
-  ExecutionConfig execution_config_;
-  ModelConfig model_config_;
 };
 
 TEST_F(LLMRequestFactoryTest, RejectsEmptyPromptAndReleasesRateLimitSlot) {
@@ -552,7 +544,7 @@ TEST_F(LLMRequestFactoryTest, ContextErrorRetainsServiceCallbackOwnership) {
 }
 
 TEST_F(LLMRequestFactoryTest, OverlapAcceptsBadWords) {
-  options_.enable_task_pipeline(false).enable_schedule_overlap(true);
+  options_.enable_schedule_overlap(true);
   auto factory = make_factory();
   CallbackCapture capture;
   RequestParams params;
@@ -666,39 +658,10 @@ TEST_F(LLMRequestFactoryTest, FactoryAddsStopSequenceVariants) {
   check_generated_token(kNonStopToken, FinishReason::NONE);
 }
 
-TEST_F(LLMRequestFactoryTest, TaskPipelineRejectsJsonObjectBeforeGrammarSetup) {
-  options_.enable_task_pipeline(true);
-  auto factory = make_factory();
-  CallbackCapture capture;
-  RequestParams sp;
-  sp.response_format = ResponseFormatType::JSON_OBJECT;
-
-  auto request = factory->create(
-      /*prompt=*/"hello world",
-      /*prompt_tokens=*/std::nullopt,
-      sp,
-      /*call=*/std::nullopt,
-      make_capture_callback(&capture),
-      ChatTemplateGenerationMode::UNKNOWN);
-
-  EXPECT_EQ(request, nullptr);
-  ASSERT_TRUE(capture.status.has_value());
-  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
-  EXPECT_EQ(capture.status->message(),
-            "response_format=json_object is not supported with "
-            "enable_task_pipeline");
-  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
-}
-
-#if defined(USE_NPU)
-TEST_F(LLMRequestFactoryTest,
-       UnifiedTaskPipelineKeepsJsonObjectChatForLegacyCompatibilityFallback) {
-  options_.enable_task_pipeline(true)
-      .num_speculative_tokens(3)
+TEST_F(LLMRequestFactoryTest, MtpCreatesJsonObjectChatRequest) {
+  options_.num_speculative_tokens(3)
       .draft_model_path(std::string("/fake/draft"))
       .speculative_algorithm("MTP");
-  ModelConfig::get_instance().model_impl("python");
-  ExecutionConfig::get_instance().enable_unified_mtp_graph(true);
   auto factory = make_factory();
   CallbackCapture capture;
   RequestParams sp;
@@ -719,85 +682,33 @@ TEST_F(LLMRequestFactoryTest,
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
 }
 
-TEST_F(LLMRequestFactoryTest, DisabledUnifiedTaskMtpRejectsJsonObject) {
-  options_.enable_task_pipeline(true)
-      .num_speculative_tokens(3)
-      .draft_model_path(std::string("/fake/draft"))
-      .speculative_algorithm("MTP");
-  ModelConfig::get_instance().model_impl("python");
-  ExecutionConfig::get_instance().enable_unified_mtp_graph(false);
-  auto factory = make_factory();
-  CallbackCapture capture;
-  RequestParams sp;
-  sp.response_format = ResponseFormatType::JSON_OBJECT;
-
-  auto request = factory->create(
-      /*prompt=*/"hello world",
-      /*prompt_tokens=*/std::nullopt,
-      sp,
-      /*call=*/std::nullopt,
-      make_capture_callback(&capture),
-      ChatTemplateGenerationMode::UNKNOWN);
-
-  EXPECT_EQ(request, nullptr);
-  ASSERT_TRUE(capture.status.has_value());
-  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
-  EXPECT_EQ(capture.status->message(),
-            "response_format=json_object is not supported with "
-            "enable_task_pipeline");
-  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
-}
-#endif
-
-TEST_F(LLMRequestFactoryTest, TaskPipelineAcceptsOrdinaryRequest) {
-  options_.enable_task_pipeline(true);
-  auto factory = make_factory();
-  CallbackCapture capture;
-  RequestParams sp;
-
-  auto request = factory->create(/*prompt=*/"hello world",
-                                 /*prompt_tokens=*/std::nullopt,
-                                 sp,
-                                 /*call=*/std::nullopt,
-                                 make_capture_callback(&capture));
-
-  ASSERT_NE(request, nullptr);
-  EXPECT_FALSE(capture.called);
-  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
-}
-
-TEST_F(LLMRequestFactoryTest, MtpMinimumLengthIsIndependentOfTaskPipeline) {
-  for (const bool pipeline : {false, true}) {
-    for (const bool overlap : {false, true}) {
-      SCOPED_TRACE(::testing::Message()
-                   << "pipeline=" << pipeline << ", overlap=" << overlap);
-      options_.enable_task_pipeline(pipeline)
-          .enable_schedule_overlap(overlap)
-          .num_speculative_tokens(4)
-          .speculative_algorithm("MTP");
-      auto factory = make_factory(/*vocab_size=*/1000, /*max_position=*/65536);
-      CallbackCapture capture;
-      RequestParams params;
-      params.max_tokens = 2048;
-      params.min_tokens = 2048;
-      auto request = factory->create("hello",
-                                     std::nullopt,
-                                     params,
-                                     std::nullopt,
-                                     make_capture_callback(&capture));
-      ASSERT_NE(request, nullptr);
-      EXPECT_FALSE(capture.called);
-      EXPECT_EQ(request->state().sampling_param.min_tokens, 2048U);
-      EXPECT_TRUE(request->state().sampling_param.device_min_tokens);
-    }
+TEST_F(LLMRequestFactoryTest, MtpMinimumLengthIsIndependentOfOverlap) {
+  for (const bool overlap : {false, true}) {
+    SCOPED_TRACE(overlap);
+    options_.enable_schedule_overlap(overlap)
+        .num_speculative_tokens(4)
+        .speculative_algorithm("MTP");
+    auto factory = make_factory(/*vocab_size=*/1000, /*max_position=*/65536);
+    CallbackCapture capture;
+    RequestParams params;
+    params.max_tokens = 2048;
+    params.min_tokens = 2048;
+    auto request = factory->create("hello",
+                                   std::nullopt,
+                                   params,
+                                   std::nullopt,
+                                   make_capture_callback(&capture));
+    ASSERT_NE(request, nullptr);
+    EXPECT_FALSE(capture.called);
+    EXPECT_EQ(request->state().sampling_param.min_tokens, 2048U);
+    EXPECT_TRUE(request->state().sampling_param.device_min_tokens);
   }
 }
 
 TEST_F(LLMRequestFactoryTest, MtpSamplingControlsAreIndependentOfOverlap) {
   for (const bool overlap : {false, true}) {
     SCOPED_TRACE(overlap);
-    options_.enable_task_pipeline(false)
-        .enable_schedule_overlap(overlap)
+    options_.enable_schedule_overlap(overlap)
         .num_speculative_tokens(4)
         .speculative_algorithm("MTP");
     auto factory = make_factory(/*vocab_size=*/1000, /*max_position=*/65536);
@@ -831,8 +742,7 @@ TEST_F(LLMRequestFactoryTest, MtpSamplingControlsAreIndependentOfOverlap) {
   }
 }
 
-TEST_F(LLMRequestFactoryTest, LegacyJsonObjectReachesGrammarValidation) {
-  options_.enable_task_pipeline(false);
+TEST_F(LLMRequestFactoryTest, JsonObjectReachesGrammarValidation) {
   auto factory = make_factory();
   CallbackCapture capture;
   RequestParams sp;
@@ -863,8 +773,8 @@ TEST_F(LLMRequestFactoryTest, RejectsTopLogprobsAboveVocabulary) {
   CallbackCapture capture;
   RequestParams sp;
   sp.max_tokens = 16;
-  sp.beam_width = 4;
-  sp.logprobs = false;
+
+  sp.logprobs = true;
   // Under the 2000 cap, so it passes verify_params, but above the vocabulary.
   sp.top_logprobs = 1500;
 
@@ -882,55 +792,12 @@ TEST_F(LLMRequestFactoryTest, RejectsTopLogprobsAboveVocabulary) {
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
 }
 
-TEST_F(LLMRequestFactoryTest,
-       DisaggregatedPdRejectsBeamSearchAndReleasesRateLimitSlot) {
-  options_.enable_disagg_pd(true);
-  auto factory = make_factory();
-  CallbackCapture capture;
-  RequestParams sp;
-  sp.beam_width = 2;
-  sp.max_tokens = 16;
-
-  auto request = factory->create(/*prompt=*/"hello",
-                                 /*prompt_tokens=*/std::nullopt,
-                                 sp,
-                                 /*call=*/std::nullopt,
-                                 make_capture_callback(&capture));
-
-  EXPECT_EQ(request, nullptr);
-  ASSERT_TRUE(capture.status.has_value());
-  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
-  EXPECT_NE(capture.status->message().find("beam_width > 1"),
-            std::string::npos);
-  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
-}
-
-TEST_F(LLMRequestFactoryTest, NonDisaggregatedBeamSearchRemainsSupported) {
-  options_.enable_disagg_pd(false);
-  auto factory = make_factory();
-  CallbackCapture capture;
-  RequestParams sp;
-  sp.beam_width = 2;
-  sp.max_tokens = 16;
-
-  auto request = factory->create(/*prompt=*/"hello",
-                                 /*prompt_tokens=*/std::nullopt,
-                                 sp,
-                                 /*call=*/std::nullopt,
-                                 make_capture_callback(&capture));
-
-  ASSERT_NE(request, nullptr);
-  EXPECT_FALSE(capture.called);
-  EXPECT_EQ(request->state().sampling_param.beam_width, 2);
-  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
-}
-
 TEST_F(LLMRequestFactoryTest, RetainsHttpResponseOptionsForDecodeDispatch) {
   options_.enable_disagg_pd(true);
   auto factory = make_factory();
   CallbackCapture capture;
   RequestParams sp;
-  sp.beam_width = 1;
+
   sp.max_tokens = 16;
   sp.source_xservice_addr = "worker:1234";
   sp.response_model = "response-model";
@@ -958,7 +825,7 @@ TEST_F(LLMRequestFactoryTest, RetainsHttpResponseOptionsForDecodeDispatch) {
                    .bool_value());
   EXPECT_TRUE(state.response_stream_options.include_usage());
   EXPECT_TRUE(state.response_stream_options.continuous_usage_stats());
-  EXPECT_EQ(state.sampling_param.beam_width, 1);
+
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
   EXPECT_FALSE(capture.called);
 }
@@ -1208,14 +1075,11 @@ TEST_F(LLMRequestFactoryTest,
 TEST_F(LLMRequestFactoryTest, BatchPreservesValidationErrorPrecedence) {
   options_.enable_disagg_pd(true);
   auto factory = make_factory(/*vocab_size=*/1000, /*max_position=*/8);
-  const std::vector<std::string> prompts = {
-      "", "", "12345678", "", "FAIL", "ok"};
+  const std::vector<std::string> prompts = {"", "", "12345678", "ok"};
   acquire_batch_slots(prompts.size());
   std::vector<RequestParams> params(prompts.size());
   params[0].temperature = -1;
-  params[0].beam_width = 2;
-  params[3].beam_width = 2;
-  params[4].beam_width = 2;
+
   BatchCallbackCapture capture(prompts.size());
 
   auto requests = factory->create_batch(prompts, params, capture.callback());
@@ -1224,9 +1088,7 @@ TEST_F(LLMRequestFactoryTest, BatchPreservesValidationErrorPrecedence) {
   const std::vector<std::string> expected_errors = {
       "temperature must be finite and non-negative",
       "Prompt is empty",
-      "Prompt is too long",
-      "beam_width > 1 is not supported in disaggregated PD mode",
-      "beam_width > 1 is not supported in disaggregated PD mode"};
+      "Prompt is too long"};
   for (size_t i = 0; i < expected_errors.size(); ++i) {
     EXPECT_EQ(requests[i], nullptr);
     EXPECT_EQ(capture.call_count(i), 1);
@@ -1236,7 +1098,7 @@ TEST_F(LLMRequestFactoryTest, BatchPreservesValidationErrorPrecedence) {
     EXPECT_EQ(capture.output(i)->status->message(), expected_errors[i]);
   }
   ASSERT_NE(requests.back(), nullptr);
-  EXPECT_EQ(capture.call_count(/*index=*/5), 0);
+  EXPECT_EQ(capture.call_count(/*index=*/3), 0);
   EXPECT_EQ(tokenizer_->attempted_texts(),
             std::vector<std::string>({"12345678", "ok"}));
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
@@ -1314,7 +1176,6 @@ TEST_F(LLMRequestFactoryTest, ChatBatchRejectsRenderingFailureIndependently) {
 
 TEST_F(LLMRequestFactoryTest,
        ChatBatchRetainsGenerationModesForJsonConstraints) {
-  options_.enable_task_pipeline(false);
   auto factory = make_factory();
   const std::vector<std::vector<Message>> conversations = {
       {Message("user", std::string("thinking"))},

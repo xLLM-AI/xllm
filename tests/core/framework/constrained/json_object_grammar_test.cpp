@@ -17,8 +17,9 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
-#include <cmath>
+#include <algorithm>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -85,6 +86,22 @@ JsonObjectGrammar make_grammar(bool add_model_only_token = false) {
                            {add_model_only_token ? 25 : 24});
 }
 
+torch::Tensor single_mask(const JsonObjectGrammarState& state) {
+  return build_json_object_filter_bitmask({state}).squeeze(/*dim=*/0);
+}
+
+// Probes against a throwaway copy so the caller's state is untouched.
+bool accepts_piece(const JsonObjectGrammarState& state,
+                   std::string_view piece) {
+  JsonObjectGrammarState probe = state;
+  return probe.accept_piece(piece);
+}
+
+bool can_accept_token(const JsonObjectGrammarState& state, int32_t token_id) {
+  JsonObjectGrammarState probe = state;
+  return probe.accept_token(token_id);
+}
+
 TEST(JsonObjectGrammarTest, AcceptsNestedValuesAndEscapes) {
   JsonObjectGrammar grammar = make_grammar();
   JsonObjectGrammarState state = grammar.initial_state();
@@ -92,8 +109,8 @@ TEST(JsonObjectGrammarTest, AcceptsNestedValuesAndEscapes) {
   EXPECT_TRUE(state.accept_piece("{\"a\":[true, {\"b\":\"x\\n"));
   EXPECT_TRUE(state.accept_piece("\"}]}"));
   EXPECT_TRUE(state.is_complete());
-  EXPECT_TRUE(state.can_accept_piece(" "));
-  EXPECT_FALSE(state.can_accept_piece("x"));
+  EXPECT_TRUE(accepts_piece(state, " "));
+  EXPECT_FALSE(accepts_piece(state, "x"));
 }
 
 TEST(JsonObjectGrammarTest, RejectsInvalidRootAndObjectSyntax) {
@@ -105,8 +122,8 @@ TEST(JsonObjectGrammarTest, RejectsInvalidRootAndObjectSyntax) {
 
   state = grammar.initial_state();
   EXPECT_TRUE(state.accept_piece("{\"a\""));
-  EXPECT_FALSE(state.can_accept_piece("}"));
-  EXPECT_TRUE(state.can_accept_piece(":"));
+  EXPECT_FALSE(accepts_piece(state, "}"));
+  EXPECT_TRUE(accepts_piece(state, ":"));
 
   state = grammar.initial_state();
   EXPECT_FALSE(state.accept_piece("{\"a\":1,}"));
@@ -124,39 +141,22 @@ TEST(JsonObjectGrammarTest, SupportsNumbersLiteralsAndWhitespace) {
 
   state = grammar.initial_state();
   EXPECT_TRUE(state.accept_piece("{\"a\":0}"));
-  EXPECT_FALSE(state.can_accept_piece("1"));
+  EXPECT_FALSE(accepts_piece(state, "1"));
 }
 
 TEST(JsonObjectGrammarTest, TemporaryAdvanceDoesNotCommitState) {
   JsonObjectGrammar grammar = make_grammar();
   JsonObjectGrammarState state = grammar.initial_state();
 
-  EXPECT_TRUE(state.can_accept_piece("{"));
+  EXPECT_TRUE(accepts_piece(state, "{"));
   EXPECT_TRUE(state.accept_piece("{"));
-  EXPECT_TRUE(state.can_accept_piece("}"));
+  EXPECT_TRUE(accepts_piece(state, "}"));
   const uint64_t fingerprint = state.fingerprint();
-  EXPECT_FALSE(state.can_accept_piece("]"));
+  EXPECT_FALSE(accepts_piece(state, "]"));
   EXPECT_EQ(state.fingerprint(), fingerprint);
   EXPECT_FALSE(state.is_complete());
   EXPECT_TRUE(state.accept_piece("\"a\":1}"));
   EXPECT_TRUE(state.is_complete());
-}
-
-TEST(JsonObjectGrammarTest, MtpDraftStatesAccumulateAcceptedTokens) {
-  JsonObjectGrammar grammar = make_grammar();
-  std::vector<JsonObjectGrammarState> original_states = {
-      grammar.initial_state()};
-
-  // The second draft row must be built from S+d0, not from the original S.
-  const std::vector<JsonObjectGrammarState> after_d0 =
-      advance_json_object_states(original_states, {0});
-  const std::vector<JsonObjectGrammarState> cumulative_states =
-      advance_json_object_states(after_d0, {2});
-  const std::vector<JsonObjectGrammarState> reset_states =
-      advance_json_object_states(original_states, {2});
-
-  EXPECT_TRUE(cumulative_states[0].can_accept_token(/*d2=*/3));
-  EXPECT_FALSE(reset_states[0].can_accept_token(/*d2=*/3));
 }
 
 TEST(JsonObjectGrammarTest, SnapshotRestoresCommittedState) {
@@ -177,7 +177,7 @@ TEST(JsonObjectGrammarTest, SnapshotRestoresCommittedState) {
   JsonObjectGrammarState restored = grammar.restore_state(snapshot);
   EXPECT_TRUE(restored.is_valid());
   EXPECT_EQ(restored.fingerprint(), fingerprint);
-  EXPECT_TRUE(restored.can_accept_piece(":1}"));
+  EXPECT_TRUE(restored.accept_piece(":1}"));
 }
 
 TEST(JsonObjectGrammarTest, ReasoningIsUnconstrainedUntilEndMarker) {
@@ -190,18 +190,12 @@ TEST(JsonObjectGrammarTest, ReasoningIsUnconstrainedUntilEndMarker) {
   EXPECT_TRUE(state.in_reasoning());
   EXPECT_EQ(grammar.allowed_token_ids(state),
             std::vector<int32_t>({0, 2, 3, 4}));
-  const torch::Tensor mask = grammar.build_filter_mask(state);
-  EXPECT_EQ(mask.index({0}).item<float>(), 0.0F);
-  EXPECT_LT(mask.index({1}).item<float>(), -1.0F);
-  EXPECT_EQ(mask.index({2}).item<float>(), 0.0F);
-  EXPECT_EQ(mask.index({3}).item<float>(), 0.0F);
-  EXPECT_EQ(mask.index({4}).item<float>(), 0.0F);
   EXPECT_TRUE(state.accept_token(2));
   EXPECT_TRUE(state.accept_token(3));
   EXPECT_TRUE(state.accept_token(4));
   EXPECT_FALSE(state.in_reasoning());
-  EXPECT_TRUE(state.can_accept_token(0));
-  EXPECT_FALSE(state.can_accept_token(1));
+  EXPECT_TRUE(can_accept_token(state, 0));
+  EXPECT_FALSE(can_accept_token(state, 1));
 }
 
 TEST(JsonObjectGrammarTest, ReasoningDisabledRejectsEndMarkerAtJsonStart) {
@@ -211,8 +205,8 @@ TEST(JsonObjectGrammarTest, ReasoningDisabledRejectsEndMarkerAtJsonStart) {
   JsonObjectGrammarState state = grammar.initial_state();
 
   EXPECT_FALSE(state.in_reasoning());
-  EXPECT_FALSE(state.can_accept_token(/*reasoning_end=*/4));
-  EXPECT_TRUE(state.can_accept_token(/*open_object=*/0));
+  EXPECT_FALSE(can_accept_token(state, /*reasoning_end=*/4));
+  EXPECT_TRUE(can_accept_token(state, /*open_object=*/0));
 }
 
 TEST(JsonObjectGrammarTest, RejectsNonEmptyStopTokensBeforeRootCompletion) {
@@ -233,24 +227,24 @@ TEST(JsonObjectGrammarTest, RejectsNonEmptyStopTokensBeforeRootCompletion) {
 
   JsonObjectGrammarState reasoning_state =
       grammar.initial_state(/*reasoning_phase=*/true);
-  EXPECT_FALSE(reasoning_state.can_accept_token(/*stop_x=*/5));
+  EXPECT_FALSE(can_accept_token(reasoning_state, /*stop_x=*/5));
 
   JsonObjectGrammarState key_state = grammar.initial_state();
   ASSERT_TRUE(key_state.accept_piece("{\"a"));
-  EXPECT_FALSE(key_state.can_accept_token(/*stop_x=*/5));
+  EXPECT_FALSE(can_accept_token(key_state, /*stop_x=*/5));
 
   JsonObjectGrammarState string_value_state = grammar.initial_state();
   ASSERT_TRUE(string_value_state.accept_piece("{\"a\":\""));
-  EXPECT_FALSE(string_value_state.can_accept_token(/*stop_x=*/5));
+  EXPECT_FALSE(can_accept_token(string_value_state, /*stop_x=*/5));
 
   JsonObjectGrammarState number_state = grammar.initial_state();
   ASSERT_TRUE(number_state.accept_piece("{\"a\":1"));
-  EXPECT_FALSE(number_state.can_accept_token(/*stop_space=*/6));
+  EXPECT_FALSE(can_accept_token(number_state, /*stop_space=*/6));
 
   JsonObjectGrammarState literal_state = grammar.initial_state();
   ASSERT_TRUE(
       literal_state.accept_piece("{\"a\":tru"));  // codespell:ignore tru
-  EXPECT_FALSE(literal_state.can_accept_token(/*stop_e=*/7));
+  EXPECT_FALSE(can_accept_token(literal_state, /*stop_e=*/7));
 }
 
 TEST(JsonObjectGrammarTest, AcceptsNonEmptyStopTokenAfterRootCompletion) {
@@ -259,7 +253,7 @@ TEST(JsonObjectGrammarTest, AcceptsNonEmptyStopTokenAfterRootCompletion) {
   JsonObjectGrammarState state = grammar.initial_state();
 
   ASSERT_TRUE(state.accept_piece("{\"a\":1}"));
-  EXPECT_TRUE(state.can_accept_token(/*stop_token_id=*/6));
+  EXPECT_TRUE(can_accept_token(state, /*stop_token_id=*/6));
 }
 
 TEST(JsonObjectGrammarTest, MatcherFingerprintIgnoresCommittedHistory) {
@@ -282,7 +276,7 @@ TEST(JsonObjectGrammarTest, MatcherFingerprintIgnoresCommittedHistory) {
   EXPECT_EQ(restored.fingerprint(), via_piece.fingerprint());
 }
 
-TEST(JsonObjectGrammarTest, BitmaskMatchesFloatMaskAndCaches) {
+TEST(JsonObjectGrammarTest, BitmaskMatchesAllowedTokensAndCaches) {
   JsonObjectGrammar grammar = make_grammar();
   JsonObjectGrammarState state = grammar.initial_state();
   ASSERT_TRUE(state.accept_piece("{\"a\":"));
@@ -291,12 +285,11 @@ TEST(JsonObjectGrammarTest, BitmaskMatchesFloatMaskAndCaches) {
   ASSERT_EQ(bitmask.size(), grammar.bitmask_num_words());
   EXPECT_EQ(grammar.allowed_token_bitmask(state), bitmask);
 
-  const torch::Tensor float_mask = grammar.build_filter_mask(state);
-  const torch::Tensor packed = grammar.build_filter_bitmask(state);
+  const torch::Tensor packed = single_mask(state);
   ASSERT_EQ(
       packed.sizes(),
       torch::IntArrayRef({static_cast<int64_t>(grammar.bitmask_num_words())}));
-
+  const std::vector<int32_t> allowed = grammar.allowed_token_ids(state);
   torch::Tensor logits =
       torch::zeros({1, static_cast<int64_t>(grammar.vocab_size())});
   SamplingParameters params;
@@ -305,14 +298,11 @@ TEST(JsonObjectGrammarTest, BitmaskMatchesFloatMaskAndCaches) {
   for (int64_t token_id = 0;
        token_id < static_cast<int64_t>(grammar.vocab_size());
        ++token_id) {
-    const float actual = logits.index({0, token_id}).item<float>();
-    const float expected = float_mask.index({token_id}).item<float>();
-    // EXPECT_NEAR on -inf pairs yields a nan delta; compare exactly.
-    if (std::isinf(expected)) {
-      EXPECT_EQ(actual, expected);
-    } else {
-      EXPECT_NEAR(actual, expected, 1.0e-3F);
-    }
+    const bool allowed_by_sampler =
+        logits.index({0, token_id}).item<float>() > -1.0F;
+    const bool in_allowed =
+        std::find(allowed.begin(), allowed.end(), token_id) != allowed.end();
+    EXPECT_EQ(allowed_by_sampler, in_allowed) << "token " << token_id;
   }
 }
 
@@ -334,68 +324,18 @@ TEST(JsonObjectGrammarTest, BuildsMixedBatchBitmask) {
 TEST(JsonObjectGrammarTest, MaskHasNoUnrestrictedFailureFallback) {
   JsonObjectGrammar grammar = make_grammar();
   JsonObjectGrammarState state = grammar.initial_state();
-  torch::Tensor mask = grammar.build_filter_mask(state);
+  const std::vector<uint32_t> mask = grammar.allowed_token_bitmask(state);
 
-  EXPECT_EQ(mask.size(0), static_cast<int64_t>(grammar.vocab_size()));
-  EXPECT_EQ(mask.index({0}).item<float>(), 0.0F);
-  EXPECT_LT(mask.index({1}).item<float>(), -1.0F);
+  EXPECT_NE(mask.front() & 0x1U, 0U);
+  EXPECT_EQ(mask.front() & 0x2U, 0U);
 }
 
 TEST(JsonObjectGrammarTest, KeepsModelOnlyTokensMasked) {
   JsonObjectGrammar grammar = make_grammar(/*add_model_only_token=*/true);
   JsonObjectGrammarState state = grammar.initial_state();
-  torch::Tensor mask = grammar.build_filter_mask(state);
+  const std::vector<uint32_t> mask = grammar.allowed_token_bitmask(state);
 
-  EXPECT_EQ(mask.size(0), 25);
-  EXPECT_LT(mask.index({24}).item<float>(), -1.0F);
-}
-
-TEST(JsonObjectGrammarTest, BuildsMixedBatchMask) {
-  JsonObjectGrammar grammar = make_grammar();
-  std::vector<JsonObjectGrammarState> states = {grammar.initial_state(),
-                                                JsonObjectGrammarState()};
-
-  torch::Tensor mask = build_json_object_filter_mask(states);
-
-  ASSERT_EQ(mask.sizes(), torch::IntArrayRef({2, 24}));
-  EXPECT_EQ(mask.index({0, 0}).item<float>(), 0.0F);
-  EXPECT_LT(mask.index({0, 1}).item<float>(), -1.0F);
-  EXPECT_EQ(mask.index({1, 0}).item<float>(), 0.0F);
-  EXPECT_EQ(mask.index({1, 1}).item<float>(), 0.0F);
-}
-
-TEST(JsonObjectGrammarTest, BuildsMaskWithMixedReasoningDefinitions) {
-  const std::vector<std::string> token_pieces = {
-      "{", "}", "reasoning", "<think>", "</think>"};
-  JsonObjectGrammar json_grammar(token_pieces, /*stop_token_ids=*/{1});
-  JsonObjectGrammar reasoning_grammar(token_pieces,
-                                      /*stop_token_ids=*/{1},
-                                      /*reasoning_end_token_ids=*/{3, 4});
-  std::vector<JsonObjectGrammarState> states = {
-      json_grammar.initial_state(),
-      reasoning_grammar.initial_state(/*reasoning_phase=*/true),
-      JsonObjectGrammarState(),
-      reasoning_grammar.initial_state(/*reasoning_phase=*/true),
-      json_grammar.initial_state()};
-
-  torch::Tensor mask = build_json_object_filter_mask(states);
-
-  ASSERT_EQ(mask.sizes(), torch::IntArrayRef({5, 5}));
-  EXPECT_EQ(mask.index({0, 0}).item<float>(), 0.0F);
-  EXPECT_LT(mask.index({0, 2}).item<float>(), -1.0F);
-  EXPECT_EQ(mask.index({1, 2}).item<float>(), 0.0F);
-  EXPECT_LT(mask.index({1, 1}).item<float>(), -1.0F);
-  EXPECT_EQ(mask.index({2, 1}).item<float>(), 0.0F);
-  EXPECT_EQ(mask.index({3, 2}).item<float>(), 0.0F);
-  EXPECT_LT(mask.index({4, 2}).item<float>(), -1.0F);
-
-  const torch::Tensor bitmask = build_json_object_filter_bitmask(states);
-  ASSERT_EQ(bitmask.sizes(), torch::IntArrayRef({5, 1}));
-  torch::Tensor masked_logits = torch::zeros({5, 5});
-  SamplingParameters params;
-  params.filter_bitmask() = bitmask;
-  process_logits(masked_logits, params);
-  EXPECT_TRUE(torch::equal(masked_logits, mask));
+  EXPECT_EQ(mask[24U / 32U] & (1U << (24U % 32U)), 0U);
 }
 
 TEST(JsonObjectGrammarTest, ReusesMaskForTransitionEquivalentStates) {
@@ -412,8 +352,8 @@ TEST(JsonObjectGrammarTest, ReusesMaskForTransitionEquivalentStates) {
 
   const double hits_before =
       COUNTER_json_object_mask_cache_hits_total.get_value();
-  const torch::Tensor first_mask = grammar.build_filter_mask(first);
-  const torch::Tensor second_mask = grammar.build_filter_mask(second);
+  const torch::Tensor first_mask = single_mask(first);
+  const torch::Tensor second_mask = single_mask(second);
 
   EXPECT_TRUE(torch::equal(first_mask, second_mask));
   EXPECT_GT(COUNTER_json_object_mask_cache_hits_total.get_value(), hits_before);
@@ -429,8 +369,8 @@ TEST(JsonObjectGrammarTest, ReusesMaskAfterDifferentCompletedLiterals) {
 
   const double hits_before =
       COUNTER_json_object_mask_cache_hits_total.get_value();
-  const torch::Tensor true_mask = grammar.build_filter_mask(true_value);
-  const torch::Tensor false_mask = grammar.build_filter_mask(false_value);
+  const torch::Tensor true_mask = single_mask(true_value);
+  const torch::Tensor false_mask = single_mask(false_value);
 
   EXPECT_TRUE(torch::equal(true_mask, false_mask));
   EXPECT_GT(COUNTER_json_object_mask_cache_hits_total.get_value(), hits_before);
@@ -442,9 +382,9 @@ TEST(JsonObjectGrammarTest, DoesNotAliasDifferentTransitionStates) {
   JsonObjectGrammarState in_object = grammar.initial_state();
   ASSERT_TRUE(in_object.accept_piece("{"));
 
-  const torch::Tensor initial_mask = grammar.build_filter_mask(initial);
-  const torch::Tensor object_mask = grammar.build_filter_mask(in_object);
-  const torch::Tensor cached_initial_mask = grammar.build_filter_mask(initial);
+  const torch::Tensor initial_mask = single_mask(initial);
+  const torch::Tensor object_mask = single_mask(in_object);
+  const torch::Tensor cached_initial_mask = single_mask(initial);
 
   EXPECT_FALSE(torch::equal(initial_mask, object_mask));
   EXPECT_TRUE(torch::equal(initial_mask, cached_initial_mask));
@@ -459,7 +399,7 @@ TEST(JsonObjectGrammarTest, BuildsCachedMasksConcurrently) {
   threads.reserve(kThreadCount);
   for (size_t thread_idx = 0; thread_idx < kThreadCount; ++thread_idx) {
     threads.emplace_back([&grammar, &masks, &state, thread_idx]() {
-      masks[thread_idx] = grammar.build_filter_mask(state);
+      masks[thread_idx] = single_mask(state);
     });
   }
   for (std::thread& thread : threads) {
@@ -474,9 +414,7 @@ TEST(JsonObjectGrammarTest, BuildsCachedMasksConcurrently) {
 TEST(JsonObjectGrammarTest, RemainsCorrectAfterMaskCacheEviction) {
   JsonObjectGrammar grammar({"{", "\"a\"", ":", "[", "]", "}", "0"});
   JsonObjectGrammarState initial = grammar.initial_state();
-  const torch::Tensor initial_mask = grammar.build_filter_mask(initial);
-  EXPECT_EQ(initial_mask.index({0}).item<float>(), 0.0F);
-  EXPECT_LT(initial_mask.index({3}).item<float>(), -1.0F);
+  single_mask(initial);
 
   JsonObjectGrammarState nested = grammar.initial_state();
   ASSERT_TRUE(nested.accept_token(/*open_object=*/0));
@@ -488,27 +426,26 @@ TEST(JsonObjectGrammarTest, RemainsCorrectAfterMaskCacheEviction) {
     if (depth == 0) {
       oldest_nested = nested;
     }
-    const torch::Tensor mask = grammar.build_filter_mask(nested);
-    EXPECT_EQ(mask.size(0), static_cast<int64_t>(grammar.vocab_size()));
+    single_mask(nested);
   }
 
   // Promote the initial state before inserting the 65th distinct state.
   const double hits_before_touch =
       COUNTER_json_object_mask_cache_hits_total.get_value();
-  grammar.build_filter_mask(initial);
+  single_mask(initial);
   EXPECT_GT(COUNTER_json_object_mask_cache_hits_total.get_value(),
             hits_before_touch);
 
   ASSERT_TRUE(nested.accept_token(/*open_array=*/3));
-  grammar.build_filter_mask(nested);
+  single_mask(nested);
 
   const double misses_before_hot_lookup =
       COUNTER_json_object_mask_cache_misses_total.get_value();
-  grammar.build_filter_mask(initial);
+  single_mask(initial);
   EXPECT_EQ(COUNTER_json_object_mask_cache_misses_total.get_value(),
             misses_before_hot_lookup);
 
-  grammar.build_filter_mask(oldest_nested);
+  single_mask(oldest_nested);
   EXPECT_GT(COUNTER_json_object_mask_cache_misses_total.get_value(),
             misses_before_hot_lookup);
 }
@@ -519,9 +456,9 @@ TEST(JsonObjectGrammarTest, StopsAtObjectCompletionWithMultipleStopTokens) {
   JsonObjectGrammarState state = grammar.initial_state();
 
   ASSERT_TRUE(state.accept_piece("{\"a\":1}"));
-  EXPECT_TRUE(state.can_accept_token(/*stop_token_id=*/7));
-  EXPECT_TRUE(state.can_accept_token(/*stop_token_id=*/8));
-  EXPECT_FALSE(state.can_accept_token(/*trailing_space_token_id=*/6));
+  EXPECT_TRUE(can_accept_token(state, /*stop_token_id=*/7));
+  EXPECT_TRUE(can_accept_token(state, /*stop_token_id=*/8));
+  EXPECT_FALSE(can_accept_token(state, /*trailing_space_token_id=*/6));
 }
 
 TEST(JsonObjectGrammarTest, UsesStableDecodeTokenPiecesForGrammar) {
@@ -541,8 +478,8 @@ TEST(JsonObjectGrammarTest, UsesStableDecodeTokenPiecesForGrammar) {
   ASSERT_TRUE(state.accept_token(1));
   ASSERT_TRUE(state.accept_token(2));
 
-  EXPECT_TRUE(state.can_accept_token(3));
-  EXPECT_FALSE(state.can_accept_piece("x"));
+  EXPECT_TRUE(can_accept_token(state, 3));
+  EXPECT_FALSE(accepts_piece(state, "x"));
 }
 
 TEST(JsonObjectGrammarTest, TrialAcceptIgnoresCommittedTokenHistorySize) {
@@ -550,15 +487,13 @@ TEST(JsonObjectGrammarTest, TrialAcceptIgnoresCommittedTokenHistorySize) {
   JsonObjectGrammarState state = grammar.initial_state();
   ASSERT_TRUE(state.accept_piece("{\"a\":"));
 
-  // Grow committed history with digit tokens; can_accept must stay equivalent
-  // without depending on O(generated) vector copies.
   constexpr int32_t kDigitOneTokenId = 12;
   for (int32_t i = 0; i < 64; ++i) {
     ASSERT_TRUE(state.accept_token(kDigitOneTokenId));
   }
-  EXPECT_TRUE(state.can_accept_token(kDigitOneTokenId));
-  EXPECT_TRUE(state.can_accept_piece("}"));
-  EXPECT_FALSE(state.can_accept_piece("x"));
+  EXPECT_TRUE(can_accept_token(state, kDigitOneTokenId));
+  EXPECT_TRUE(accepts_piece(state, "}"));
+  EXPECT_FALSE(accepts_piece(state, "x"));
 }
 
 }  // namespace

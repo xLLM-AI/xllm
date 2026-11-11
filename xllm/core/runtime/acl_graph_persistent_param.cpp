@@ -50,7 +50,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/model/model_type.h"
 #include "core/util/tensor_options.h"
-#include "pytorch/adapter/utils/utils.h"
+#include "custom_functions_npu/atb_common.h"
 
 namespace xllm::npu {
 
@@ -67,10 +67,7 @@ int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
   CHECK_GT(options.num_decoding_tokens(), 0)
       << "num_decoding_tokens must be > 0 for graph token capacity";
   int64_t token_capacity = options.max_seqs_per_batch();
-  if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
-    return runtime::get_decode_graph_token_bucket(
-        token_capacity, options.enable_graph_mode_decode_no_padding());
-  }
+
   if (options.enable_speculative_decode() && !options.is_draft_engine()) {
     token_capacity *= options.num_decoding_tokens();
   }
@@ -170,11 +167,9 @@ int64_t infer_actual_batch_size(const Params& params) {
       params.attention.device.block_tables.dim() >= 2) {
     return params.attention.device.block_tables.size(0);
   }
-  if constexpr (std::is_same_v<Params, ModelParamsView>) {
-    for (const auto& block_table : params.multi_block_tables) {
-      if (block_table.defined() && block_table.dim() >= 2) {
-        return block_table.size(0);
-      }
+  for (const auto& block_table : params.multi_block_tables) {
+    if (block_table.defined() && block_table.dim() >= 2) {
+      return block_table.size(0);
     }
   }
   return 0;
@@ -379,29 +374,6 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       .post_lmhead_gather_indices(
           torch::zeros({padding_buf_capacity}, int_opts));
 
-  persistent_cp_ep_meta_.attention_tp_padding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.attention_tp_unpadding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.ffn_padding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.ffn_unpadding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.lm_head_skip_padding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.prenorm_gather_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.attention_padding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.attention_unpadding_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.dynamic_ep_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.moe_indices =
-      torch::zeros({padding_buf_capacity}, int_opts);
-  persistent_cp_ep_meta_.expert_array =
-      torch::zeros({padding_buf_capacity, 1}, int_opts);
-
   // Do not need to create ATB context and custom paged attention operation
   if (args_.head_dim() == 0) {
     return;
@@ -513,35 +485,6 @@ void GraphPersistentParam::update_persistent_dp_ep_padding(
                        src.post_lmhead_gather_indices());
 }
 
-void GraphPersistentParam::update_persistent_cp_ep_meta(
-    const CpEpMeta& src,
-    uint32_t /*padded_tokens*/) {
-  if (!src.attention_tp_padding_indices.defined() ||
-      src.attention_tp_padding_indices.numel() == 0) {
-    return;
-  }
-  copy_into_persistent(persistent_cp_ep_meta_.attention_tp_padding_indices,
-                       src.attention_tp_padding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.attention_tp_unpadding_indices,
-                       src.attention_tp_unpadding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.ffn_padding_indices,
-                       src.ffn_padding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.ffn_unpadding_indices,
-                       src.ffn_unpadding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.lm_head_skip_padding_indices,
-                       src.lm_head_skip_padding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.prenorm_gather_indices,
-                       src.prenorm_gather_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.attention_padding_indices,
-                       src.attention_padding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.attention_unpadding_indices,
-                       src.attention_unpadding_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.dynamic_ep_indices,
-                       src.dynamic_ep_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.moe_indices, src.moe_indices);
-  copy_into_persistent(persistent_cp_ep_meta_.expert_array, src.expert_array);
-}
-
 void GraphPersistentParam::replace_capture_dp_ep_padding(
     const DpEpPaddingData& src,
     uint32_t padded_tokens,
@@ -587,42 +530,6 @@ void GraphPersistentParam::replace_capture_dp_ep_padding(
   dst.post_lmhead_gather_indices(
       slice_like_source(persistent_dp_ep_padding_.post_lmhead_gather_indices(),
                         src.post_lmhead_gather_indices()));
-}
-
-void GraphPersistentParam::replace_capture_cp_ep_meta(const CpEpMeta& src,
-                                                      CpEpMeta& dst) const {
-  if (!src.attention_tp_padding_indices.defined() ||
-      src.attention_tp_padding_indices.numel() == 0) {
-    return;
-  }
-  dst.attention_tp_padding_indices =
-      slice_like_source(persistent_cp_ep_meta_.attention_tp_padding_indices,
-                        src.attention_tp_padding_indices);
-  dst.attention_tp_unpadding_indices =
-      slice_like_source(persistent_cp_ep_meta_.attention_tp_unpadding_indices,
-                        src.attention_tp_unpadding_indices);
-  dst.ffn_padding_indices = slice_like_source(
-      persistent_cp_ep_meta_.ffn_padding_indices, src.ffn_padding_indices);
-  dst.ffn_unpadding_indices = slice_like_source(
-      persistent_cp_ep_meta_.ffn_unpadding_indices, src.ffn_unpadding_indices);
-  dst.lm_head_skip_padding_indices =
-      slice_like_source(persistent_cp_ep_meta_.lm_head_skip_padding_indices,
-                        src.lm_head_skip_padding_indices);
-  dst.prenorm_gather_indices =
-      slice_like_source(persistent_cp_ep_meta_.prenorm_gather_indices,
-                        src.prenorm_gather_indices);
-  dst.attention_padding_indices =
-      slice_like_source(persistent_cp_ep_meta_.attention_padding_indices,
-                        src.attention_padding_indices);
-  dst.attention_unpadding_indices =
-      slice_like_source(persistent_cp_ep_meta_.attention_unpadding_indices,
-                        src.attention_unpadding_indices);
-  dst.dynamic_ep_indices = slice_like_source(
-      persistent_cp_ep_meta_.dynamic_ep_indices, src.dynamic_ep_indices);
-  dst.moe_indices =
-      slice_like_source(persistent_cp_ep_meta_.moe_indices, src.moe_indices);
-  dst.expert_array =
-      slice_like_source(persistent_cp_ep_meta_.expert_array, src.expert_array);
 }
 
 GraphPersistentParam::~GraphPersistentParam() {
@@ -807,10 +714,8 @@ void GraphPersistentParam::update_tokens(const torch::Tensor& tokens,
                                          uint32_t padded_num_tokens) {
   CHECK_GT(padded_num_tokens, 0) << "padded_num_tokens must be > 0";
   const torch::Tensor& graph_tokens = [&]() -> const torch::Tensor& {
-    if constexpr (std::is_same_v<Params, ModelParamsView>) {
-      if (params.graph.input_tokens_override.defined()) {
-        return params.graph.input_tokens_override;
-      }
+    if (params.graph.input_tokens_override.defined()) {
+      return params.graph.input_tokens_override;
     }
     return tokens;
   }();
@@ -952,13 +857,9 @@ std::optional<Params> GraphPersistentParam::update(
   const bool is_decode = params.meta.batch_forward_type.is_decode();
   const bool is_chunked_prefill =
       params.meta.batch_forward_type.is_chunked_prefill();
-  const bool is_hybrid_spec_verify_chunked_prefill = [&]() {
-    if constexpr (std::is_same_v<Params, ModelParamsView>) {
-      return params.is_spec_verify && is_chunked_prefill &&
-             is_hybrid_linear_attention_;
-    }
-    return false;
-  }();
+  const bool is_hybrid_spec_verify_chunked_prefill =
+      params.is_spec_verify && is_chunked_prefill &&
+      is_hybrid_linear_attention_;
   CHECK(is_decode || is_hybrid_spec_verify_chunked_prefill)
       << "ACL graph persistent param only supports decode or hybrid "
          "spec-verify chunked prefill";
@@ -1130,20 +1031,18 @@ std::optional<Params> GraphPersistentParam::update(
           .fill_(kPaddingLinearStateId);
     }
   }
-  if constexpr (std::is_same_v<Params, ModelParamsView>) {
-    if (params.num_accepted_tokens.defined()) {
+  if (params.num_accepted_tokens.defined()) {
+    persistent_num_accepted_tokens_
+        .slice(/*dim=*/0, /*start=*/0, /*end=*/actual_batch_size)
+        .copy_(params.num_accepted_tokens.slice(
+                   /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size),
+               /*non_blocking=*/true);
+    if (padded_batch_size > actual_batch_size) {
       persistent_num_accepted_tokens_
-          .slice(/*dim=*/0, /*start=*/0, /*end=*/actual_batch_size)
-          .copy_(params.num_accepted_tokens.slice(
-                     /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size),
-                 /*non_blocking=*/true);
-      if (padded_batch_size > actual_batch_size) {
-        persistent_num_accepted_tokens_
-            .slice(/*dim=*/0,
-                   /*start=*/actual_batch_size,
-                   /*end=*/padded_batch_size)
-            .fill_(1);
-      }
+          .slice(/*dim=*/0,
+                 /*start=*/actual_batch_size,
+                 /*end=*/padded_batch_size)
+          .fill_(1);
     }
   }
 
@@ -1215,12 +1114,8 @@ std::optional<Params> GraphPersistentParam::update(
           : 0;
   if (has_q_cu && q_cu_size > 0) {
     const bool use_hybrid_query_start_loc = is_hybrid_linear_attention_;
-    const bool input_has_leading_zero = [&]() {
-      if constexpr (std::is_same_v<Params, ModelParamsView>) {
-        return params.is_spec_verify && use_hybrid_query_start_loc;
-      }
-      return false;
-    }();
+    const bool input_has_leading_zero =
+        params.is_spec_verify && use_hybrid_query_start_loc;
     const int64_t required_q_cu_seq_lens =
         actual_seq_len_rows + (input_has_leading_zero ? 1 : 0);
     CHECK_GE(params.attention.device.q_cu_seq_lens.numel(),
@@ -1271,13 +1166,8 @@ std::optional<Params> GraphPersistentParam::update(
   // That path consumes expanded KV lengths, block tables and tiling data, not
   // the dense graph attention mask. Avoid rebuilding the unused mask on every
   // target replay while preserving all other decode/prefill paths.
-  const bool skip_unused_expanded_verify_mask = [&]() {
-    if constexpr (std::is_same_v<Params, ModelParamsView>) {
-      return can_skip_unused_expanded_verify_mask(params,
-                                                  is_hybrid_linear_attention_);
-    }
-    return false;
-  }();
+  const bool skip_unused_expanded_verify_mask =
+      can_skip_unused_expanded_verify_mask(params, is_hybrid_linear_attention_);
   if (need_update_attn_mask_ && !skip_unused_expanded_verify_mask) {
     update_attention_mask(params);
   }
@@ -1305,35 +1195,27 @@ std::optional<Params> GraphPersistentParam::update(
   if (padded_batch_size > actual_seq_len_rows) {
     padded_q_seq_lens_vec.back() = padding_tail_query_length;
   }
-  const bool use_expanded_spec_decode_attention = [&]() {
-    if constexpr (std::is_same_v<Params, ModelParamsView>) {
-      return params.graph.use_expanded_decode_for_spec_verify_attention;
-    }
-    return false;
-  }();
+  const bool use_expanded_spec_decode_attention =
+      params.graph.use_expanded_decode_for_spec_verify_attention;
   if (is_hybrid_spec_verify_chunked_prefill) {
     CHECK(use_expanded_spec_decode_attention)
         << "hybrid spec-verify ACL graph requires expanded "
            "decode attention input";
   }
   std::vector<int32_t> expanded_kv_seq_lens_vec;
-  if constexpr (std::is_same_v<Params, ModelParamsView>) {
-    if (use_expanded_spec_decode_attention) {
-      expanded_kv_seq_lens_vec = update_expanded_spec_decode_attention(
-          params, actual_num_tokens, padded_num_tokens);
-    }
+  if (use_expanded_spec_decode_attention) {
+    expanded_kv_seq_lens_vec = update_expanded_spec_decode_attention(
+        params, actual_num_tokens, padded_num_tokens);
   }
   const auto expanded_block_tables_for_graph = [&]() {
     torch::Tensor block_tables = persistent_expanded_block_tables_.slice(
         /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
-    if constexpr (std::is_same_v<Params, ModelParamsView>) {
-      if (params.graph.spec_verify_source_addresses_stable) {
-        // Stable verify graphs include the active width in their graph key.
-        return block_tables.narrow(
-            /*dim=*/1,
-            /*start=*/0,
-            /*length=*/params.graph.expanded_block_tables.size(1));
-      }
+    if (params.graph.spec_verify_source_addresses_stable) {
+      // Stable verify graphs include the active width in their graph key.
+      return block_tables.narrow(
+          /*dim=*/1,
+          /*start=*/0,
+          /*length=*/params.graph.expanded_block_tables.size(1));
     }
     // Generic graphs key only on token shape, so retain the fixed persistent
     // width used by main instead of binding a request-dependent view.
@@ -1403,8 +1285,6 @@ std::optional<Params> GraphPersistentParam::update(
           : 1;
   update_persistent_dp_ep_padding(
       params.parallel.dp_ep_padding_data, padded_num_tokens, dp_layout_size);
-  update_persistent_cp_ep_meta(params.parallel.cp_plan.cp_ep_meta(),
-                               padded_num_tokens);
   if (::xllm::KernelConfig::get_instance().enable_mega_moe()) {
     // Empty DP shards are padded with one fake token by the worker so graph
     // capture sees a non-empty batch; the mega mask must mark that row
@@ -1453,9 +1333,7 @@ std::optional<Params> GraphPersistentParam::update(
       const bool use_mla_capture_host_lens = for_capture && is_decode;
       if (use_mla_capture_host_lens) {
         const int32_t capture_kv_seq_len = [&]() {
-          if constexpr (std::is_same_v<Params, ModelParamsView>) {
-            return get_mla_capture_kv_seq_len_bucket(params, options_);
-          }
+          return get_mla_capture_kv_seq_len_bucket(params, options_);
           CHECK(!supports_mla_graph_kv_bucketing_);
           return int32_t{0};
         }();
@@ -1584,24 +1462,20 @@ std::optional<Params> GraphPersistentParam::update(
       graph_params->embedding.input_embedding =
           persistent_embedding(padded_num_tokens);
     }
-    if constexpr (std::is_same_v<Params, ModelParamsView>) {
-      if (params.num_accepted_tokens.defined()) {
-        graph_params->num_accepted_tokens = persistent_num_accepted_tokens(
-            static_cast<uint32_t>(padded_batch_size));
-      }
+    if (params.num_accepted_tokens.defined()) {
+      graph_params->num_accepted_tokens = persistent_num_accepted_tokens(
+          static_cast<uint32_t>(padded_batch_size));
     }
-    if constexpr (std::is_same_v<Params, ModelParamsView>) {
-      if (use_expanded_spec_decode_attention) {
-        layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(
-            *graph_params,
-            expanded_kv_seq_lens_.slice(
-                /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens),
-            expanded_block_tables_for_graph(),
-            expanded_kv_seq_lens_vec,
-            options_.block_size());
-        graph_params->graph.expanded_tiling_data =
-            uses_paged_attention_tiling() ? tiling_data() : torch::Tensor();
-      }
+    if (use_expanded_spec_decode_attention) {
+      layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(
+          *graph_params,
+          expanded_kv_seq_lens_.slice(
+              /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens),
+          expanded_block_tables_for_graph(),
+          expanded_kv_seq_lens_vec,
+          options_.block_size());
+      graph_params->graph.expanded_tiling_data =
+          uses_paged_attention_tiling() ? tiling_data() : torch::Tensor();
     }
     if (params.attention.device.q_cu_seq_lens.defined()) {
       const bool use_hybrid_query_start_loc = is_hybrid_linear_attention_;
@@ -1628,11 +1502,6 @@ std::optional<Params> GraphPersistentParam::update(
           persistent_mega_active_mask_.slice(
               /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
     }
-    CpEpMeta capture_cp_ep_meta = params.parallel.cp_plan.cp_ep_meta();
-    replace_capture_cp_ep_meta(params.parallel.cp_plan.cp_ep_meta(),
-                               capture_cp_ep_meta);
-    graph_params->parallel.cp_plan.replace_cp_ep_meta_storage(
-        std::move(capture_cp_ep_meta));
 
     auto& qsl = graph_params->parallel.query_start_loc;
     qsl.clear();
@@ -1643,27 +1512,25 @@ std::optional<Params> GraphPersistentParam::update(
                        padded_q_seq_lens_vec[static_cast<size_t>(i)]);
     }
 
-    if constexpr (std::is_same_v<Params, ModelParamsView>) {
-      if (params.num_accepted_tokens.defined() &&
-          params.num_accepted_tokens.numel() > 0) {
-        if (!params.num_accepted_tokens_host.empty()) {
-          const int64_t copy_size = std::min<int64_t>(
-              actual_batch_size, params.num_accepted_tokens_host.size());
-          graph_params->num_accepted_tokens_host.assign(
-              params.num_accepted_tokens_host.begin(),
-              params.num_accepted_tokens_host.begin() + copy_size);
-        } else {
-          torch::Tensor nat_host = params.num_accepted_tokens.to(torch::kCPU)
-                                       .to(torch::kLong)
-                                       .contiguous();
-          const int64_t copy_size =
-              std::min<int64_t>(actual_batch_size, nat_host.numel());
-          const int64_t* data = nat_host.template data_ptr<int64_t>();
-          graph_params->num_accepted_tokens_host.assign(data, data + copy_size);
-        }
-        graph_params->num_accepted_tokens_host.resize(
-            static_cast<size_t>(padded_batch_size), 1);
+    if (params.num_accepted_tokens.defined() &&
+        params.num_accepted_tokens.numel() > 0) {
+      if (!params.num_accepted_tokens_host.empty()) {
+        const int64_t copy_size = std::min<int64_t>(
+            actual_batch_size, params.num_accepted_tokens_host.size());
+        graph_params->num_accepted_tokens_host.assign(
+            params.num_accepted_tokens_host.begin(),
+            params.num_accepted_tokens_host.begin() + copy_size);
+      } else {
+        torch::Tensor nat_host = params.num_accepted_tokens.to(torch::kCPU)
+                                     .to(torch::kLong)
+                                     .contiguous();
+        const int64_t copy_size =
+            std::min<int64_t>(actual_batch_size, nat_host.numel());
+        const int64_t* data = nat_host.template data_ptr<int64_t>();
+        graph_params->num_accepted_tokens_host.assign(data, data + copy_size);
       }
+      graph_params->num_accepted_tokens_host.resize(
+          static_cast<size_t>(padded_batch_size), 1);
     }
 
     return graph_params;
@@ -2014,16 +1881,15 @@ void GraphPersistentParam::plan_paged_attention_tiling(
     aclrtStream stream,
     bool copy_to_device) {
   // Convert torch tensors to atb tensors
-  atb::Tensor atb_k_cache = atb_speed::Utils::AtTensor2Tensor(k_cache);
-  atb::Tensor atb_v_cache = atb_speed::Utils::AtTensor2Tensor(v_cache);
-  atb::Tensor atb_block_tables =
-      atb_speed::Utils::AtTensor2Tensor(block_tables);
+  atb::Tensor atb_k_cache = atb::at_tensor_to_atb_tensor(k_cache);
+  atb::Tensor atb_v_cache = atb::at_tensor_to_atb_tensor(v_cache);
+  atb::Tensor atb_block_tables = atb::at_tensor_to_atb_tensor(block_tables);
   // Get context_lens from input_params.attention.device.kv_seq_lens
-  atb::Tensor atb_context_lens = atb_speed::Utils::AtTensor2Tensor(
-      input_params.attention.device.kv_seq_lens);
+  atb::Tensor atb_context_lens =
+      atb::at_tensor_to_atb_tensor(input_params.attention.device.kv_seq_lens);
   atb_context_lens.hostData =
       const_cast<int32_t*>(input_params.attention.host.kv_seq_lens.data());
-  atb::Tensor atb_tiling_data = atb_speed::Utils::AtTensor2Tensor(tiling_data_);
+  atb::Tensor atb_tiling_data = atb::at_tensor_to_atb_tensor(tiling_data_);
 
   atb_tiling_data.desc.dtype = ACL_UINT32;
 
@@ -2055,7 +1921,7 @@ void GraphPersistentParam::plan_paged_attention_tiling(
   atb::VariantPack custom_variantPack;
   // Conditionally include mask based on need_update_attn_mask_
   if (need_update_attn_mask_) {
-    atb::Tensor atb_mask = atb_speed::Utils::AtTensor2Tensor(persistent_mask_);
+    atb::Tensor atb_mask = atb::at_tensor_to_atb_tensor(persistent_mask_);
     custom_variantPack.inTensors = {atb_query,
                                     atb_k_cache,
                                     atb_v_cache,
@@ -2090,15 +1956,13 @@ void GraphPersistentParam::plan_paged_attention_tiling(
   CHECK_GT(tiling_buffer_info.tilingBufferSize, 0)
       << "Tiling buffer size is zero";
 
-  if constexpr (std::is_same_v<Params, ModelParamsView>) {
-    if (input_params.graph.use_expanded_decode_for_spec_verify_attention) {
-      const size_t word_count =
-          static_cast<size_t>(tiling_buffer_info.tilingBufferSize) /
-          sizeof(uint32_t);
-      const auto* words =
-          reinterpret_cast<const uint32_t*>(tiling_buffer_info.tilingBuffer);
-      paged_attention_tiling_template_.assign(words, words + word_count);
-    }
+  if (input_params.graph.use_expanded_decode_for_spec_verify_attention) {
+    const size_t word_count =
+        static_cast<size_t>(tiling_buffer_info.tilingBufferSize) /
+        sizeof(uint32_t);
+    const auto* words =
+        reinterpret_cast<const uint32_t*>(tiling_buffer_info.tilingBuffer);
+    paged_attention_tiling_template_.assign(words, words + word_count);
   }
 
   if (VLOG_IS_ON(kGraphExecutorLogVerboseLevel)) {
@@ -2252,22 +2116,6 @@ template std::optional<ModelParamsView> GraphPersistentParam::update(
     bool);
 template void GraphPersistentParam::update_tokens(const torch::Tensor&,
                                                   const ModelParamsView&,
-                                                  uint32_t,
-                                                  uint32_t);
-
-template std::optional<RecModelParams> GraphPersistentParam::update(
-    const torch::Tensor&,
-    const torch::Tensor&,
-    const torch::Tensor&,
-    const torch::Tensor&,
-    const RecModelParams&,
-    uint32_t,
-    bool,
-    bool,
-    bool,
-    bool);
-template void GraphPersistentParam::update_tokens(const torch::Tensor&,
-                                                  const RecModelParams&,
                                                   uint32_t,
                                                   uint32_t);
 

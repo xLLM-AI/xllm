@@ -45,9 +45,11 @@ KVCacheImpl::KVCacheImpl(const KVCacheTensors& tensors)
 KVCacheImpl::KVCacheImpl(const KVCacheShape& kv_cache_shape,
                          const KVCacheCreateOptions& create_options)
     : KVCacheImpl(create_kv_cache_tensors(kv_cache_shape, create_options)) {
-  key_cache_shape_ = kv_cache_shape.key_cache_shape();
-  if (kv_cache_shape.has_value_cache_shape()) {
-    value_cache_shape_ = kv_cache_shape.value_cache_shape();
+  if (create_options.static_layout() == nullptr) {
+    key_cache_shape_ = kv_cache_shape.key_cache_shape();
+    if (kv_cache_shape.has_value_cache_shape()) {
+      value_cache_shape_ = kv_cache_shape.value_cache_shape();
+    }
   }
 }
 
@@ -191,19 +193,6 @@ std::vector<std::vector<int64_t>> KVCacheImpl::get_shapes() const {
   shapes.emplace_back(key_cache_shape_);
   shapes.emplace_back(value_cache_shape_);
   return shapes;
-}
-
-void KVCacheImpl::swap_blocks(torch::Tensor& src_tensor,
-                              torch::Tensor& dst_tensor) {
-  torch::Tensor selected_keys = torch::index_select(key_cache_, 0, src_tensor);
-  key_cache_.index_copy_(0, dst_tensor, selected_keys);
-  // Packed MLA stores K and V in the same tensor.
-  if (value_cache_.defined() && value_cache_.numel() > 0 &&
-      !value_cache_.is_same(key_cache_)) {
-    torch::Tensor selected_values =
-        torch::index_select(value_cache_, 0, src_tensor);
-    value_cache_.index_copy_(0, dst_tensor, selected_values);
-  }
 }
 
 }  // namespace xllm

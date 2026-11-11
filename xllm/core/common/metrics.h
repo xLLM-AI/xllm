@@ -217,19 +217,9 @@ DECLARE_COUNTER(execution_latency_seconds_sampling);
 DECLARE_COUNTER(json_object_mask_cache_hits_total);
 DECLARE_COUNTER(json_object_mask_cache_misses_total);
 DECLARE_HISTOGRAM(json_object_mask_vocab_scan_latency_microseconds);
-DECLARE_HISTOGRAM(json_object_mask_row_build_latency_microseconds);
 DECLARE_HISTOGRAM(json_object_mask_batch_build_latency_microseconds);
 DECLARE_HISTOGRAM(json_object_mask_device_copy_latency_microseconds);
 DECLARE_HISTOGRAM(json_object_mask_transfer_submission_latency_microseconds);
-DECLARE_COUNTER(json_object_mask_build_calls_normal_total);
-DECLARE_COUNTER(json_object_mask_build_calls_draft_total);
-DECLARE_COUNTER(json_object_mask_build_calls_target_total);
-DECLARE_COUNTER(json_object_mask_build_rows_normal_total);
-DECLARE_COUNTER(json_object_mask_build_rows_draft_total);
-DECLARE_COUNTER(json_object_mask_build_rows_target_total);
-DECLARE_COUNTER(json_object_mask_build_constrained_rows_normal_total);
-DECLARE_COUNTER(json_object_mask_build_constrained_rows_draft_total);
-DECLARE_COUNTER(json_object_mask_build_constrained_rows_target_total);
 
 DECLARE_GAUGE(num_pending_requests);
 DECLARE_GAUGE(num_running_requests);
@@ -285,14 +275,6 @@ DECLARE_COUNTER(speculative_num_drafts_total);
 DECLARE_COUNTER(speculative_num_accepted_tokens_total);
 DECLARE_COUNTER(speculative_num_draft_tokens_total);
 DECLARE_MULTI_COUNTER(speculative_num_accepted_tokens_per_pos);
-DECLARE_HISTOGRAM(speculative_draft_token_d2h_latency_microseconds);
-DECLARE_MULTI_HISTOGRAM(
-    speculative_draft_token_copy_submission_latency_microseconds);
-DECLARE_MULTI_HISTOGRAM(
-    speculative_draft_token_ready_wait_latency_microseconds);
-DECLARE_MULTI_HISTOGRAM(speculative_draft_token_bulk_read_latency_microseconds);
-DECLARE_MULTI_HISTOGRAM(speculative_draft_token_handoff_latency_microseconds);
-DECLARE_COUNTER(speculative_draft_token_handoff_fallback_total);
 DECLARE_COUNTER(speculative_num_accepted_tokens_constrained_total);
 DECLARE_COUNTER(speculative_num_accepted_tokens_plain_total);
 DECLARE_COUNTER(speculative_num_draft_tokens_constrained_total);
@@ -312,16 +294,6 @@ DECLARE_COUNTER(proto_latency_seconds_o2proto);
 // engine metrics
 DECLARE_COUNTER(prepare_input_latency_seconds);
 
-// rec engine metrics
-DECLARE_HISTOGRAM(rec_total_latency_microseconds);
-DECLARE_HISTOGRAM(prepare_input_latency_microseconds);
-DECLARE_HISTOGRAM(rec_first_token_latency_microseconds);
-DECLARE_HISTOGRAM(rec_second_token_latency_microseconds);
-DECLARE_HISTOGRAM(rec_third_token_latency_microseconds);
-DECLARE_HISTOGRAM(rec_sampling_latency_microseconds);
-DECLARE_GAUGE(rec_beam_search_width);
-DECLARE_HISTOGRAM(rec_input_token_num_per_request);
-
 // multi node metrics
 DECLARE_COUNTER(worker_service_latency_seconds);
 DECLARE_COUNTER(engine_latency_seconds);
@@ -330,8 +302,5 @@ DECLARE_COUNTER(engine_latency_seconds);
 DECLARE_GAUGE(total_memory_size_in_kilobytes);
 DECLARE_GAUGE(weight_size_in_kilobytes);
 DECLARE_GAUGE(total_kv_cache_size_in_kilobytes);
-DECLARE_GAUGE(total_activation_size_in_kilobytes);
 
 DECLARE_MULTI_HISTOGRAM(active_kv_cache_size_in_kilobytes);
-DECLARE_MULTI_HISTOGRAM(prefill_active_activation_size_in_kilobytes);
-DECLARE_MULTI_HISTOGRAM(decode_active_activation_size_in_kilobytes);

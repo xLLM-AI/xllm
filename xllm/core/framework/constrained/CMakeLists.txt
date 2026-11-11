@@ -8,6 +8,8 @@ cc_library(
     json_object_grammar
   HDRS
     json_object_grammar.h
+    json_object_output_binding.h
+    json_object_output_error.h
   SRCS
     json_object_grammar.cpp
   DEPS
@@ -15,32 +17,3 @@ cc_library(
     :common
     glog::glog
     torch)
-
-cc_library(
-  NAME
-    json_object_constraint_batch
-  HDRS
-    json_object_constraint_batch.h
-    json_object_output_binding.h
-    json_object_output_error.h
-  SRCS
-    json_object_constraint_batch.cpp
-  DEPS
-    :json_object_grammar
-    glog::glog
-    torch)
-
-cc_library(
-  NAME
-    rec_constrained_decoding
-  HDRS
-    rec_constrained_decoding.h
-  SRCS
-    rec_constrained_decoding.cpp
-  DEPS
-    :state_dict
-    :common
-    util
-    glog::glog
-    torch
-)

@@ -25,7 +25,6 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "core/framework/config/rec_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "request.h"
 #include "request_state.h"
@@ -230,7 +229,7 @@ TEST(RequestTest, GenerateOutputReturnsSequenceFailureStatus) {
 
   Sequence copied_sequence(*request.sequences()[0], /*index=*/1);
   EXPECT_EQ(copied_sequence.sample_sequence_id(), "req-error#1");
-  copied_sequence.reset_finish_state_for_beam_search();
+
   EXPECT_TRUE(copied_sequence.finished());
   ASSERT_TRUE(copied_sequence.error_status().has_value());
 
@@ -453,68 +452,6 @@ TEST(SampleSlotTest, RequestOutputStableSortsOutOfOrderSampleIds) {
   EXPECT_EQ(output.outputs[1].text, "B");
   EXPECT_EQ(output.outputs[2].index, 2U);
   EXPECT_EQ(output.outputs[2].text, "C");
-}
-
-TEST(SampleSlotTest, OneRecOutputCarriesTokenLogprobsWhenEnabled) {
-  ScopedBoolFlag enable_output_sku_logprobs(
-      &RecConfig::get_instance().enable_output_sku_logprobs(), true);
-  ScopedBoolFlag enable_convert_tokens_to_item(
-      &RecConfig::get_instance().enable_convert_tokens_to_item(), false);
-
-  CharTokenizer tokenizer;
-  RequestSamplingParam sampling_param;
-  sampling_param.logprobs = true;
-
-  StoppingChecker stopping_checker;
-  stopping_checker.set_max_generated_tokens(3);
-
-  RequestState request_state(
-      /*prompt=*/"",
-      std::vector<int32_t>{11, 12},
-      sampling_param,
-      SchedulerParam{},
-      stopping_checker,
-      /*seq_capacity=*/8,
-      /*n=*/1,
-      /*best_of=*/1,
-      /*logprobs=*/true,
-      /*stream=*/false,
-      /*echo=*/false,
-      /*skip_special_tokens=*/true,
-      /*enable_schedule_overlap=*/false,
-      [](const RequestOutput&) { return true; },
-      OutputsFunc{});
-  request_state.rec_type = RecType::kOneRec;
-
-  Request request("onerec-score",
-                  /*x_request_id=*/"",
-                  /*x_request_time=*/"",
-                  std::move(request_state));
-  auto* seq = request.sequences()[0].get();
-
-  Token first_token(101);
-  first_token.logprob = -0.10f;
-  seq->append_token(first_token);
-
-  Token second_token(102);
-  second_token.logprob = -0.20f;
-  seq->append_token(second_token);
-
-  Token third_token(103);
-  third_token.logprob = -0.30f;
-  seq->append_token(third_token);
-
-  RequestOutput output = request.generate_output(tokenizer);
-
-  ASSERT_EQ(output.outputs.size(), 1);
-  ASSERT_EQ(output.outputs[0].token_ids.size(), 3U);
-  ASSERT_EQ(output.outputs[0].token_ids_logprobs.size(), 3U);
-  ASSERT_TRUE(output.outputs[0].token_ids_logprobs[0].has_value());
-  ASSERT_TRUE(output.outputs[0].token_ids_logprobs[1].has_value());
-  ASSERT_TRUE(output.outputs[0].token_ids_logprobs[2].has_value());
-  EXPECT_FLOAT_EQ(output.outputs[0].token_ids_logprobs[0].value(), -0.10f);
-  EXPECT_FLOAT_EQ(output.outputs[0].token_ids_logprobs[1].value(), -0.20f);
-  EXPECT_FLOAT_EQ(output.outputs[0].token_ids_logprobs[2].value(), -0.30f);
 }
 
 }  // namespace

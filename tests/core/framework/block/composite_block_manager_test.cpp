@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -24,16 +26,20 @@ limitations under the License.
 #include <map>
 #include <set>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 #include "core/framework/batch/batch.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/embedding_block_manager.h"
+#include "core/framework/block/kv_cache_manager.h"
 #include "core/framework/block/vmm_kv_block_manager.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
+#include "core/kv_cache/block/static_kv_cache_block_pool.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
 #include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
@@ -2146,30 +2152,6 @@ TEST(CompositeBlockManagerTest, SequenceResetReleasesCachedVirtualBlocks) {
   EXPECT_EQ(manager->num_used_blocks(), 0u);
 }
 
-TEST(CompositeBlockManagerTest, StateResetReleasesAliasedBeamSourceBlocks) {
-  BlockManager::Options options;
-  options.num_blocks(5).block_size(2).enable_prefix_cache(true);
-  ConcurrentBlockManagerImpl manager(
-      std::make_unique<BlockManagerImpl>(options));
-  const std::vector<int32_t> tokens = {11, 12};
-  std::vector<Block> blocks = manager.allocate(/*num_blocks=*/1);
-  ASSERT_EQ(blocks.size(), 1u);
-  manager.cache(tokens, blocks);
-  KVCacheState state;
-  state.set_src_blocks(blocks, /*need_swap=*/true);
-  state.add_blocks(BlockType::KV, blocks);
-  blocks.clear();
-
-  state.reset();
-
-  EXPECT_TRUE(state.src_blocks().empty());
-  EXPECT_FALSE(state.has_any_blocks());
-  EXPECT_FALSE(state.need_swap());
-  EXPECT_EQ(manager.num_used_blocks(), 0u);
-  EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 1u);
-  EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks() - 1);
-}
-
 TEST(CompositeBlockManagerTest, ForkPreservesParentPrivateBlockUsage) {
   for (const BlockType type : {BlockType::EMBEDDING, BlockType::LINEAR}) {
     SCOPED_TRACE(static_cast<int32_t>(type));
@@ -2831,5 +2813,1002 @@ TEST_P(LinearStateWindowTest, PoolReleasesCancelledSequenceBeforeResults) {
 INSTANTIATE_TEST_SUITE_P(PrefixCacheModes,
                          LinearStateWindowTest,
                          ::testing::Bool());
+
+class SharedKVCacheBlockTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    original_chunk_size_ =
+        SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
+    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 4;
+  }
+
+  void TearDown() override {
+    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
+        original_chunk_size_;
+  }
+
+  BlockManager::Options shared_options(uint32_t num_slots,
+                                       bool enable_prefix_cache = false) {
+    BlockManager::Options options;
+    options.num_blocks(num_slots)
+        .block_size(2)
+        .enable_linear_state(true)
+        .linear_state_num_slots(static_cast<int32_t>(num_slots))
+        .enable_shared_kv_cache(true)
+        .enable_prefix_cache(enable_prefix_cache);
+    return options;
+  }
+
+ private:
+  int32_t original_chunk_size_ = 0;
+};
+
+TEST_F(SharedKVCacheBlockTest, MultimodalPrefixIdentityKeepsBothGroupsAligned) {
+  for (const MMType modality : {MMType::IMAGE, MMType::VIDEO}) {
+    BlockManager::Options options =
+        shared_options(/*num_slots=*/48, /*enable_prefix_cache=*/true);
+    options.hasher_type(BlockHasherType::MTP_MM).num_speculative_tokens(4);
+    CompositeBlockManager manager(build_composite_leaves(options), options);
+    const auto make_multimodal = [modality](size_t index, uint8_t content_key) {
+      Sequence sequence = MakeTestSequence(index, std::vector<int32_t>(13, 7));
+      auto& item = sequence.mutable_mm_data().add(modality);
+      item.mutable_state().mutable_token_pos() = {5, 3};
+      item.mutable_state().mutable_schedule_data().key.data[0] = content_key;
+      return sequence;
+    };
+
+    Sequence producer = make_multimodal(/*index=*/0, /*content_key=*/1);
+    for (const size_t target : {4u, 8u, 12u, 13u}) {
+      ASSERT_TRUE(manager.allocate_sequence(&producer, target));
+      producer.kv_state().set_kv_cache_tokens_num(target);
+    }
+    manager.deallocate_for_sequence(&producer);
+
+    Sequence repeated = make_multimodal(/*index=*/1, /*content_key=*/1);
+    manager.allocate_shared_for_sequence(&repeated);
+    EXPECT_EQ(repeated.kv_cache_tokens_num(), 12u);
+    EXPECT_EQ(repeated.kv_state().shared_blocks_num(BlockType::KV), 6u);
+    EXPECT_EQ(repeated.kv_state().shared_blocks_num(BlockType::LINEAR), 3u);
+
+    Sequence changed = make_multimodal(/*index=*/2, /*content_key=*/2);
+    manager.allocate_shared_for_sequence(&changed);
+    // Only the text before the visual span may reuse its Full KV and GDN
+    // checkpoint. Equal placeholder token IDs do not identify visual content.
+    EXPECT_EQ(changed.kv_cache_tokens_num(), 4u);
+    EXPECT_EQ(changed.kv_state().shared_blocks_num(BlockType::KV), 2u);
+    EXPECT_EQ(changed.kv_state().shared_blocks_num(BlockType::LINEAR), 1u);
+    EXPECT_NE(changed.get_linear_state_slot_id(),
+              repeated.get_linear_state_slot_id());
+
+    Sequence text_only =
+        MakeTestSequence(/*index=*/3, std::vector<int32_t>(13, 7));
+    manager.allocate_shared_for_sequence(&text_only);
+    EXPECT_EQ(text_only.kv_cache_tokens_num(), 4u);
+    EXPECT_EQ(text_only.kv_state().shared_blocks_num(BlockType::KV), 2u);
+    EXPECT_EQ(text_only.kv_state().shared_blocks_num(BlockType::LINEAR), 1u);
+    manager.deallocate_for_sequence(&text_only);
+    manager.deallocate_for_sequence(&changed);
+    manager.deallocate_for_sequence(&repeated);
+  }
+}
+
+TEST_F(SharedKVCacheBlockTest,
+       ExactPrefixHitResumesFromCheckpointBeforePromptEnd) {
+  BlockManager::Options options =
+      shared_options(/*num_slots=*/48, /*enable_prefix_cache=*/true);
+  options.hasher_type(BlockHasherType::MTP_MM).num_speculative_tokens(4);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+
+  Sequence producer =
+      MakeTestSequence(/*index=*/0, std::vector<int32_t>(13, 7));
+  int32_t checkpoint_at_eight = -1;
+  for (const size_t target : {4u, 8u, 12u, 13u}) {
+    ASSERT_TRUE(manager.allocate_sequence(&producer, target));
+    producer.kv_state().set_kv_cache_tokens_num(target);
+    if (target == 8u) {
+      const Slice<Block> linear = producer.kv_state().blocks(BlockType::LINEAR);
+      ASSERT_GE(linear.size(), 2u);
+      checkpoint_at_eight = linear[1].id();
+    }
+  }
+  manager.deallocate_for_sequence(&producer);
+
+  Sequence repeated =
+      MakeTestSequence(/*index=*/1, std::vector<int32_t>(12, 7));
+  manager.allocate_shared_for_sequence(&repeated);
+
+  EXPECT_EQ(repeated.kv_cache_tokens_num(), 8u);
+  EXPECT_EQ(repeated.kv_state().shared_blocks_num(BlockType::KV), 4u);
+  const Slice<Block> repeated_linear =
+      repeated.kv_state().blocks(BlockType::LINEAR);
+  ASSERT_EQ(repeated_linear.size(), 2u);
+  EXPECT_FALSE(repeated_linear[0].is_valid());
+  ASSERT_TRUE(repeated_linear[1].is_valid());
+  EXPECT_EQ(repeated_linear[1].id(), checkpoint_at_eight);
+
+  manager.deallocate_for_sequence(&repeated);
+}
+
+TEST_F(SharedKVCacheBlockTest, FullAndLinearReuseOnePhysicalIdSpace) {
+  const BlockManager::Options options = shared_options(/*num_slots=*/5);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 3);
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(full.size(), 3u);
+  ASSERT_EQ(linear.size(), 1u);
+  std::unordered_set<int32_t> ids;
+  for (const Block& block : full) {
+    EXPECT_GT(block.id(), 0);
+    ids.insert(block.id());
+  }
+  EXPECT_EQ(ids.count(linear[0].id()), 0u);
+  EXPECT_EQ(manager.num_total_blocks(), 4u);
+  EXPECT_EQ(manager.admission_capacity(), 4u);
+  EXPECT_EQ(manager.num_free_blocks(), 0u);
+  EXPECT_EQ(manager.num_used_blocks(), 4u);
+  EXPECT_TRUE(manager.allocate_blocks(BlockType::LINEAR, 1).empty());
+
+  const int32_t released_id = full.back().id();
+  full.pop_back();
+  std::vector<Block> reused = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(reused.size(), 1u);
+  EXPECT_EQ(reused[0].id(), released_id);
+  EXPECT_EQ(manager.num_used_blocks(), 4u);
+}
+
+TEST_F(SharedKVCacheBlockTest, ShortageDoesNotConsumePartialCapacity) {
+  const BlockManager::Options options = shared_options(/*num_slots=*/4);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 2);
+  ASSERT_EQ(full.size(), 2u);
+  EXPECT_TRUE(manager.allocate_blocks(BlockType::LINEAR, 2).empty());
+  EXPECT_EQ(manager.num_free_blocks(), 1u);
+  EXPECT_EQ(manager.num_used_blocks(), 2u);
+  EXPECT_EQ(manager.allocate_blocks(BlockType::LINEAR, 1).size(), 1u);
+}
+
+TEST_F(SharedKVCacheBlockTest, FinalAliasReleaseMakesSlotReusableAcrossGroups) {
+  const BlockManager::Options options = shared_options(/*num_slots=*/3);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 1);
+  ASSERT_EQ(full.size(), 1u);
+  Block alias = full[0];
+  manager.deallocate(full);
+  full.clear();
+  EXPECT_EQ(manager.num_used_blocks(), 1u);
+  EXPECT_EQ(manager.num_free_blocks(), 1u);
+  EXPECT_TRUE(manager.allocate_blocks(BlockType::LINEAR, 2).empty());
+  alias = Block();
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+  EXPECT_EQ(manager.allocate_blocks(BlockType::LINEAR, 2).size(), 2u);
+}
+
+TEST_F(SharedKVCacheBlockTest, FullAllocationEvictsUnpinnedLinearCheckpoint) {
+  const BlockManager::Options options =
+      shared_options(/*num_slots=*/4, /*enable_prefix_cache=*/true);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  BlockManager* linear = manager.leaf_of(BlockType::LINEAR);
+  std::vector<Block> checkpoint = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(checkpoint.size(), 1u);
+  const int32_t checkpoint_id = checkpoint[0].id();
+  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> hash = {1};
+  checkpoint[0].set_hash_value(hash.data());
+  linear->cache(checkpoint);
+  linear->deallocate(checkpoint);
+  checkpoint.clear();
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+  EXPECT_EQ(manager.num_free_blocks(), 2u);
+  ASSERT_EQ(linear->num_blocks_in_prefix_cache(), 1u);
+
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 3);
+  ASSERT_EQ(full.size(), 3u);
+  EXPECT_EQ(linear->num_blocks_in_prefix_cache(), 0u);
+  EXPECT_TRUE(std::any_of(
+      full.begin(), full.end(), [checkpoint_id](const Block& block) {
+        return block.id() == checkpoint_id;
+      }));
+}
+
+TEST_F(SharedKVCacheBlockTest, PinnedCheckpointCannotBeReassigned) {
+  const BlockManager::Options options =
+      shared_options(/*num_slots=*/3, /*enable_prefix_cache=*/true);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  BlockManager* linear = manager.leaf_of(BlockType::LINEAR);
+  std::vector<Block> checkpoint = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(checkpoint.size(), 1u);
+  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> hash = {2};
+  checkpoint[0].set_hash_value(hash.data());
+  linear->cache(checkpoint);
+  Block restore_source = checkpoint[0];
+  linear->deallocate(checkpoint);
+  checkpoint.clear();
+  EXPECT_TRUE(manager.allocate_blocks(BlockType::KV, 2).empty());
+  EXPECT_EQ(linear->num_blocks_in_prefix_cache(), 1u);
+  EXPECT_EQ(manager.num_free_blocks(), 1u);
+  restore_source = Block();
+  EXPECT_EQ(manager.allocate_blocks(BlockType::KV, 2).size(), 2u);
+  EXPECT_EQ(linear->num_blocks_in_prefix_cache(), 0u);
+}
+
+TEST_F(SharedKVCacheBlockTest, SequenceShortageRollsBackBothGroups) {
+  const BlockManager::Options options = shared_options(/*num_slots=*/3);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  Sequence sequence = MakeTestSequence(/*index=*/0, {1, 2, 3, 4});
+  EXPECT_FALSE(manager.allocate_sequence(&sequence, /*num_tokens=*/4));
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 0u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 0u);
+  EXPECT_EQ(manager.num_free_blocks(), 2u);
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+}
+
+TEST_F(SharedKVCacheBlockTest, EmbeddingShortagePreservesSharedCheckpoints) {
+  const BlockManager::Options options =
+      shared_options(/*num_slots=*/4, /*enable_prefix_cache=*/true);
+  CompositeBlockManager::LeafMap leaves = build_composite_leaves(options);
+  leaves.emplace(BlockType::EMBEDDING,
+                 CompositeBlockManager::LeafEntry{
+                     std::make_unique<EmbeddingBlockManager>(
+                         /*num_blocks=*/1, /*resource_name=*/"embedding"),
+                     /*participates_in_admission=*/false,
+                     /*supports_prefix_cache=*/false});
+  CompositeBlockManager manager(std::move(leaves), options);
+  BlockManager* linear = manager.leaf_of(BlockType::LINEAR);
+  std::vector<Block> checkpoint = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(checkpoint.size(), 1u);
+  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> hash = {3};
+  checkpoint[0].set_hash_value(hash.data());
+  linear->cache(checkpoint);
+  linear->deallocate(checkpoint);
+  checkpoint.clear();
+
+  Sequence sequence = MakeTestSequence(/*index=*/0, {1, 2});
+  EXPECT_FALSE(manager.allocate_sequence(&sequence, /*num_tokens=*/2));
+  EXPECT_EQ(linear->num_blocks_in_prefix_cache(), 1u);
+  EXPECT_EQ(manager.num_free_blocks(), 2u);
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+}
+
+TEST_F(SharedKVCacheBlockTest, SharedPoolsRemainIndependentAcrossDpRanks) {
+  BlockManagerPool::Options options;
+  options.num_blocks(4)
+      .block_size(2)
+      .enable_linear_state(true)
+      .linear_state_num_slots(4)
+      .enable_shared_kv_cache(true)
+      .enable_prefix_cache(false);
+  BlockManagerPool pool(options, /*dp_size=*/2);
+  Sequence sequence = MakeTestSequence(/*index=*/0, {1, 2, 3, 4});
+  sequence.set_dp_rank(0);
+  ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/4));
+  EXPECT_EQ(pool.num_used_blocks()[0], 3u);
+  EXPECT_EQ(pool.num_used_blocks()[1], 0u);
+  pool.deallocate_without_cache(&sequence);
+  EXPECT_EQ(pool.num_used_blocks()[0], 0u);
+}
+
+TEST_F(SharedKVCacheBlockTest, AdmissionReservesTheLiveLinearSlot) {
+  BlockManagerPool::Options options;
+  options.num_blocks(4)
+      .block_size(2)
+      .enable_linear_state(true)
+      .linear_state_num_slots(4)
+      .enable_shared_kv_cache(true)
+      .enable_prefix_cache(false);
+  BlockManagerPool pool(options);
+  Sequence sequence = MakeTestSequence(/*index=*/0, {1, 2, 3, 4, 5});
+  EXPECT_FALSE(pool.exceeds_total_capacity(&sequence, /*num_tokens=*/4));
+  EXPECT_TRUE(pool.exceeds_total_capacity(&sequence, /*num_tokens=*/5));
+}
+
+TEST_F(SharedKVCacheBlockTest, AggregateAdmissionCountsEveryLinearSlot) {
+  BlockManagerPool::Options options;
+  options.num_blocks(6)
+      .block_size(2)
+      .enable_linear_state(true)
+      .linear_state_num_slots(6)
+      .enable_shared_kv_cache(true)
+      .enable_prefix_cache(false);
+  BlockManagerPool pool(options);
+  Sequence first = MakeTestSequence(/*index=*/0, {1, 2, 3, 4});
+  Sequence second = MakeTestSequence(/*index=*/1, {1, 2, 3, 4});
+  const std::vector<KVCacheManager::KVCacheReservation> reservations = {
+      {&first, 4}, {&second, 4}};
+  EXPECT_TRUE(pool.exceeds_total_capacity(reservations));
+}
+
+TEST_F(SharedKVCacheBlockTest, ConcurrentGroupsCannotAllocateTheSameSlot) {
+  BlockManager::Options options = shared_options(/*num_slots=*/17);
+  options.enable_disagg_pd(true);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  std::promise<void> start;
+  std::shared_future<void> ready = start.get_future().share();
+  auto full_future = std::async(std::launch::async, [&manager, ready]() {
+    ready.wait();
+    return manager.allocate_blocks(BlockType::KV, 8);
+  });
+  auto linear_future = std::async(std::launch::async, [&manager, ready]() {
+    ready.wait();
+    return manager.allocate_blocks(BlockType::LINEAR, 8);
+  });
+  start.set_value();
+  std::vector<Block> full = full_future.get();
+  std::vector<Block> linear = linear_future.get();
+  ASSERT_EQ(full.size(), 8u);
+  ASSERT_EQ(linear.size(), 8u);
+  std::unordered_set<int32_t> ids;
+  for (const Block& block : full) {
+    EXPECT_TRUE(ids.insert(block.id()).second);
+  }
+  for (const Block& block : linear) {
+    EXPECT_TRUE(ids.insert(block.id()).second);
+  }
+  EXPECT_EQ(manager.num_free_blocks(), 0u);
+  EXPECT_EQ(manager.num_used_blocks(), 16u);
+  full.clear();
+  linear.clear();
+  EXPECT_EQ(manager.num_free_blocks(), 16u);
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+}
+
+TEST_F(SharedKVCacheBlockTest, SlotCostsDetermineUsageAndCrossGroupReuse) {
+  BlockManager::Options options = shared_options(/*num_slots=*/15);
+  options.shared_linear_state_slots(2);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  EXPECT_EQ(manager.num_total_blocks(), 14u);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 2);
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(full.size(), 2u);
+  ASSERT_EQ(linear.size(), 1u);
+  EXPECT_EQ(manager.num_used_blocks(), 4u);
+  EXPECT_EQ(manager.num_free_blocks(), 10u);
+  EXPECT_EQ(manager.leaf_of(BlockType::KV)->num_used_blocks(), 2u);
+  EXPECT_EQ(manager.leaf_of(BlockType::LINEAR)->num_used_blocks(), 2u);
+
+  const int32_t released_id = full.front().id();
+  full.front() = Block();
+  std::vector<Block> reused = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(reused.size(), 1u);
+  EXPECT_EQ(reused.front().id(), released_id);
+  EXPECT_EQ(manager.num_used_blocks(), 5u);
+  EXPECT_EQ(manager.num_free_blocks(), 9u);
+}
+
+TEST_F(SharedKVCacheBlockTest, PaddingSlotIsNeverAllocatedInAnyGroup) {
+  BlockManager::Options options = shared_options(/*num_slots=*/15);
+  options.shared_linear_state_slots(2);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 7);
+  ASSERT_EQ(linear.size(), 7u);
+  const std::shared_ptr<StaticKVCacheBlockPool>& pool =
+      linear.front().manager()->options().shared_block_pool();
+  std::unordered_set<int32_t> slots;
+  for (const Block& block : linear) {
+    std::vector<int32_t> state_slots;
+    pool->append_linear_state_slots(block.id(), &state_slots);
+    ASSERT_EQ(state_slots.size(), 2u);
+    EXPECT_EQ(state_slots.front(), block.id());
+    for (const int32_t slot : state_slots) {
+      EXPECT_GE(slot, 1);
+      EXPECT_TRUE(slots.insert(slot).second);
+    }
+  }
+  EXPECT_EQ(manager.num_free_blocks(), 0u);
+  std::vector<int32_t> padding_slots;
+  pool->append_linear_state_slots(0, &padding_slots);
+  EXPECT_EQ(padding_slots, std::vector<int32_t>(2, 0));
+  linear.clear();
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 14);
+  ASSERT_EQ(full.size(), 14u);
+  for (const Block& block : full) {
+    EXPECT_GE(block.id(), 1);
+  }
+  EXPECT_EQ(manager.num_free_blocks(), 0u);
+}
+
+TEST_F(SharedKVCacheBlockTest, LinearStateTakesNonContiguousGroupSlots) {
+  BlockManager::Options options = shared_options(/*num_slots=*/12);
+  options.shared_linear_state_slots(2);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 3);
+  ASSERT_EQ(full.size(), 3u);
+  const int32_t hole = full[1].id();
+  full[1] = Block();
+
+  // The released hole and the next free slot need not be adjacent.
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(linear.size(), 1u);
+  EXPECT_EQ(linear.front().id(), hole);
+  std::vector<int32_t> state_slots;
+  linear.front()
+      .manager()
+      ->options()
+      .shared_block_pool()
+      ->append_linear_state_slots(linear.front().id(), &state_slots);
+  ASSERT_EQ(state_slots.size(), 2u);
+  EXPECT_EQ(state_slots[0], hole);
+  EXPECT_NE(state_slots[1], hole + 1);
+  EXPECT_EQ(manager.num_used_blocks(), 4u);
+  EXPECT_EQ(manager.num_free_blocks(), 7u);
+
+  // A failed batch leaves every free slot available to the other type.
+  EXPECT_TRUE(manager.allocate_blocks(BlockType::LINEAR, 4).empty());
+  EXPECT_EQ(manager.num_free_blocks(), 7u);
+  std::vector<Block> rest = manager.allocate_blocks(BlockType::KV, 7);
+  ASSERT_EQ(rest.size(), 7u);
+  EXPECT_EQ(manager.num_free_blocks(), 0u);
+  rest.clear();
+  full.clear();
+  linear.clear();
+  EXPECT_EQ(manager.num_free_blocks(), 11u);
+}
+
+TEST_F(SharedKVCacheBlockTest, CachedStateSlotsServeFullBlocks) {
+  BlockManager::Options options =
+      shared_options(/*num_slots=*/14, /*enable_prefix_cache=*/true);
+  options.shared_linear_state_slots(2);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  BlockManager* linear_leaf = manager.leaf_of(BlockType::LINEAR);
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 5);
+  ASSERT_EQ(linear.size(), 5u);
+  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> first_hash = {4};
+  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> second_hash = {5};
+  linear[1].set_hash_value(first_hash.data());
+  linear[3].set_hash_value(second_hash.data());
+  linear_leaf->cache(std::vector<Block>{linear[1], linear[3]});
+  linear_leaf->deallocate(linear);
+  linear.clear();
+  ASSERT_EQ(manager.num_free_blocks(), 9u);
+  ASSERT_EQ(linear_leaf->num_blocks_in_prefix_cache(), 2u);
+
+  // Retiring one cached state frees both of its group slots.
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 10);
+  ASSERT_EQ(full.size(), 10u);
+  EXPECT_EQ(linear_leaf->num_blocks_in_prefix_cache(), 1u);
+  EXPECT_EQ(manager.num_free_blocks(), 1u);
+  EXPECT_EQ(manager.num_used_blocks(), 10u);
+}
+
+TEST_F(SharedKVCacheBlockTest, AdmissionCountsSlotsPerBlockType) {
+  BlockManagerPool::Options options;
+  options.num_blocks(17)
+      .block_size(2)
+      .enable_linear_state(true)
+      .linear_state_num_slots(17)
+      .enable_shared_kv_cache(true)
+      .shared_linear_state_slots(2)
+      .enable_prefix_cache(false);
+  BlockManagerPool pool(options);
+  Sequence first = MakeTestSequence(/*index=*/0, {1, 2, 3, 4});
+  Sequence second = MakeTestSequence(/*index=*/1, {1, 2, 3, 4});
+  EXPECT_FALSE(pool.exceeds_total_capacity(&first, /*num_tokens=*/28));
+  EXPECT_TRUE(pool.exceeds_total_capacity(&first, /*num_tokens=*/29));
+  EXPECT_FALSE(pool.exceeds_total_capacity(
+      std::vector<KVCacheManager::KVCacheReservation>{{&first, 12},
+                                                      {&second, 12}}));
+  EXPECT_TRUE(pool.exceeds_total_capacity(
+      std::vector<KVCacheManager::KVCacheReservation>{{&first, 13},
+                                                      {&second, 13}}));
+}
+
+TEST_F(SharedKVCacheBlockTest, SchedulerDemandUsesSlotsAndMissingState) {
+  BlockManagerPool::Options options;
+  options.num_blocks(17)
+      .block_size(2)
+      .enable_linear_state(true)
+      .linear_state_num_slots(17)
+      .enable_shared_kv_cache(true)
+      .shared_linear_state_slots(2)
+      .enable_prefix_cache(false);
+  BlockManagerPool pool(options);
+  Sequence sequence = MakeTestSequence(/*index=*/0, {1, 2, 3, 4});
+
+  EXPECT_EQ(pool.admission_capacity(0), 16u);
+  EXPECT_EQ(pool.sequence_resource_units(/*num_tokens=*/4), 4u);
+  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/4), 4u);
+  ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/4));
+  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/4), 0u);
+  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/5), 1u);
+
+  // A sequence with mounted KV but no recurrent slot still needs state.
+  std::vector<Block> linear =
+      sequence.kv_state().take_blocks(BlockType::LINEAR);
+  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/4), 2u);
+  pool.deallocate_without_cache(&sequence);
+}
+
+TEST_F(SharedKVCacheBlockTest, ConcurrentGroupSlotsNeverOverlap) {
+  BlockManager::Options options = shared_options(/*num_slots=*/43);
+  options.enable_disagg_pd(true).shared_linear_state_slots(3);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  std::promise<void> start;
+  std::shared_future<void> ready = start.get_future().share();
+  auto full_future = std::async(std::launch::async, [&manager, ready]() {
+    ready.wait();
+    return manager.allocate_blocks(BlockType::KV, 8);
+  });
+  auto linear_future = std::async(std::launch::async, [&manager, ready]() {
+    ready.wait();
+    return manager.allocate_blocks(BlockType::LINEAR, 8);
+  });
+  start.set_value();
+  std::vector<Block> full = full_future.get();
+  std::vector<Block> linear = linear_future.get();
+  ASSERT_EQ(full.size(), 8u);
+  ASSERT_EQ(linear.size(), 8u);
+  const std::shared_ptr<StaticKVCacheBlockPool>& pool =
+      linear.front().manager()->options().shared_block_pool();
+  std::unordered_set<int32_t> slots;
+  for (const Block& block : full) {
+    EXPECT_GE(block.id(), 1);
+    EXPECT_TRUE(slots.insert(block.id()).second);
+  }
+  for (const Block& block : linear) {
+    std::vector<int32_t> state_slots;
+    pool->append_linear_state_slots(block.id(), &state_slots);
+    ASSERT_EQ(state_slots.size(), 3u);
+    for (const int32_t slot : state_slots) {
+      EXPECT_GE(slot, 1);
+      EXPECT_TRUE(slots.insert(slot).second);
+    }
+  }
+  EXPECT_EQ(slots.size(), 32u);
+  EXPECT_EQ(manager.num_free_blocks(), 10u);
+  EXPECT_EQ(manager.num_used_blocks(), 32u);
+  full.clear();
+  linear.clear();
+  EXPECT_EQ(manager.num_free_blocks(), 42u);
+}
+
+class SharedSlabKVCacheBlockTest : public SharedKVCacheBlockTest {
+ protected:
+  void cache_mtp_branches(CompositeBlockManager& manager,
+                          Sequence& first,
+                          Sequence& second,
+                          std::vector<Block>* linear) {
+    first.update_block_hashes(/*block_size=*/2, BlockHasherType::MTP_TEXT);
+    second.update_block_hashes(/*block_size=*/2, BlockHasherType::MTP_TEXT);
+    first.update_linear_state_hashes(/*chunk_stride=*/4);
+    second.update_linear_state_hashes(/*chunk_stride=*/4);
+    EXPECT_NE(first.block_hashes()[1], second.block_hashes()[1]);
+    EXPECT_EQ(first.linear_state_hashes()[0], second.linear_state_hashes()[0]);
+    BlockManager& full_leaf = *manager.leaf_of(BlockType::KV);
+    BlockManager& linear_leaf = *manager.leaf_of(BlockType::LINEAR);
+    std::vector<Block> first_full = manager.allocate_blocks(BlockType::KV, 2);
+    std::vector<Block> second_full = manager.allocate_blocks(BlockType::KV, 2);
+    *linear = manager.allocate_blocks(BlockType::LINEAR, 1);
+    ASSERT_EQ(first_full.size(), 2u);
+    ASSERT_EQ(second_full.size(), 2u);
+    ASSERT_EQ(linear->size(), 1u);
+    full_leaf.cache(first.tokens(),
+                    first_full,
+                    /*existed=*/0,
+                    first.mm_data(),
+                    first.block_hashes());
+    full_leaf.cache(second.tokens(),
+                    second_full,
+                    /*existed=*/0,
+                    second.mm_data(),
+                    second.block_hashes());
+    linear->front().set_hash_value(first.linear_state_hashes()[0].data);
+    linear_leaf.cache(*linear);
+    full_leaf.set_prefix_dependency(first.block_hashes()[1],
+                                    first.linear_state_hashes()[0]);
+    full_leaf.set_prefix_dependency(second.block_hashes()[1],
+                                    second.linear_state_hashes()[0]);
+    manager.deallocate(first_full);
+    manager.deallocate(second_full);
+  }
+
+  BlockManager::Options slab_options(size_t num_allocatable_slabs,
+                                     bool enable_prefix_cache = false) {
+    StaticKVCacheLayoutSpec spec;
+    spec.num_slots = 64;
+    spec.full_row_bytes = 16;
+    spec.conv_row_bytes = 8;
+    spec.ssm_row_bytes = 32;
+    spec.checkpoint_stride = 2;
+    spec.dtype = torch::kFloat32;
+    spec.ssm_dtype = torch::kFloat32;
+    spec.full_layer_ids = {0, 3};
+    spec.linear_layer_ids = {1, 2};
+    const StaticKVCacheLayout layout(spec);
+    spec.num_slabs = layout.num_reserved_slabs() + num_allocatable_slabs;
+    BlockManager::Options options =
+        shared_options(/*num_slots=*/64, enable_prefix_cache);
+    options.shared_layout(
+        std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
+    return options;
+  }
+};
+
+TEST_F(SharedSlabKVCacheBlockTest, ReportsSharedPayloadBytesAndTypedCapacity) {
+  const BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/8);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  EXPECT_EQ(manager.num_total_blocks(), 512u);
+  EXPECT_EQ(manager.admission_capacity(), 512u);
+  EXPECT_EQ(manager.leaf_of(BlockType::KV)->num_free_blocks(), 8u);
+  EXPECT_EQ(manager.leaf_of(BlockType::LINEAR)->num_free_blocks(), 3u);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 2);
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(full.size(), 2u);
+  ASSERT_EQ(linear.size(), 1u);
+  EXPECT_EQ(full.front().id(), linear.front().id());
+  EXPECT_EQ(manager.leaf_of(BlockType::KV)->num_used_blocks(), 128u);
+  EXPECT_EQ(manager.leaf_of(BlockType::LINEAR)->num_used_blocks(), 144u);
+  EXPECT_EQ(manager.num_used_blocks(), 272u);
+  EXPECT_EQ(manager.num_free_blocks(), 240u);
+  EXPECT_DOUBLE_EQ(manager.kv_cache_utilization(), 272.0 / 512.0);
+  full.clear();
+  linear.clear();
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+  EXPECT_EQ(manager.num_free_blocks(), 512u);
+}
+
+TEST_F(SharedSlabKVCacheBlockTest,
+       StateShortageRollsBackStagedFullAllocations) {
+  const BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/3);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  Sequence sequence = MakeTestSequence(/*index=*/0, {1, 2, 3, 4});
+  // Two Full blocks fit, but the coupled Conv/SSM state needs three slabs.
+  EXPECT_FALSE(manager.allocate_sequence(&sequence, /*num_tokens=*/4));
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 0u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 0u);
+  EXPECT_EQ(manager.num_free_blocks(), 192u);
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(linear.size(), 1u);
+  EXPECT_EQ(linear.front().id(), 1);
+}
+
+TEST_F(SharedSlabKVCacheBlockTest, FailedGrowthPreservesExistingStateMappings) {
+  const BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/4);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  Sequence sequence = MakeTestSequence(/*index=*/0, {1, 2, 3, 4});
+  ASSERT_TRUE(manager.allocate_sequence(&sequence, /*num_tokens=*/2));
+  const int32_t full_id = sequence.kv_state().blocks(BlockType::KV)[0].id();
+  const int32_t linear_id = sequence.get_linear_state_slot_id();
+  const std::shared_ptr<StaticKVCacheBlockPool>& pool =
+      manager.leaf_of(BlockType::KV)->options().shared_block_pool();
+  std::vector<int32_t> before;
+  pool->append_linear_state_rows(linear_id, &before);
+  EXPECT_FALSE(manager.allocate_sequence(&sequence, /*num_tokens=*/4));
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 1u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1u);
+  EXPECT_EQ(sequence.kv_state().blocks(BlockType::KV)[0].id(), full_id);
+  EXPECT_EQ(sequence.get_linear_state_slot_id(), linear_id);
+  std::vector<int32_t> after;
+  pool->append_linear_state_rows(linear_id, &after);
+  EXPECT_EQ(after, before);
+  EXPECT_EQ(manager.num_used_blocks(), 208u);
+  manager.deallocate_for_sequence(&sequence);
+  sequence.reset();
+  EXPECT_EQ(manager.num_free_blocks(), 256u);
+}
+
+TEST_F(SharedSlabKVCacheBlockTest,
+       FinalAliasKeepsSlabsPinnedAcrossCacheEviction) {
+  const BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/3, /*enable_prefix_cache=*/true);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  BlockManager* linear = manager.leaf_of(BlockType::LINEAR);
+  std::vector<Block> checkpoint = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(checkpoint.size(), 1u);
+  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> hash = {17};
+  checkpoint.front().set_hash_value(hash.data());
+  linear->cache(checkpoint);
+  Block alias = checkpoint.front();
+  linear->deallocate(checkpoint);
+  checkpoint.clear();
+  EXPECT_EQ(linear->evict_prefix_cache(1), 0u);
+  EXPECT_TRUE(manager.allocate_blocks(BlockType::KV, 3).empty());
+  EXPECT_EQ(linear->num_blocks_in_prefix_cache(), 1u);
+  EXPECT_EQ(manager.num_free_blocks(), 48u);
+  alias = Block();
+  EXPECT_EQ(linear->evict_prefix_cache(1), 1u);
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+  EXPECT_EQ(manager.num_free_blocks(), 192u);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 3);
+  ASSERT_EQ(full.size(), 3u);
+  EXPECT_EQ(manager.num_free_blocks(), 0u);
+}
+
+TEST_F(SharedSlabKVCacheBlockTest,
+       PrefixRestoreIsBoundedByFullAndLinearCoverage) {
+  const std::array<std::pair<size_t, size_t>, 2> cached_counts = {
+      std::pair<size_t, size_t>{4, 3}, std::pair<size_t, size_t>{6, 2}};
+  for (const auto& [full_count, linear_count] : cached_counts) {
+    const BlockManager::Options options = slab_options(
+        /*num_allocatable_slabs=*/31, /*enable_prefix_cache=*/true);
+    CompositeBlockManager manager(build_composite_leaves(options), options);
+    Sequence source =
+        MakeTestSequence(/*index=*/0, std::vector<int32_t>(13, 7));
+    source.update_block_hashes(/*block_size=*/2, BlockHasherType::TEXT);
+    source.update_linear_state_hashes(/*chunk_stride=*/4);
+    std::vector<Block> full =
+        manager.allocate_blocks(BlockType::KV, full_count);
+    std::vector<Block> linear =
+        manager.allocate_blocks(BlockType::LINEAR, linear_count);
+    ASSERT_EQ(full.size(), full_count);
+    ASSERT_EQ(linear.size(), linear_count);
+    for (size_t index = 0; index < full.size(); ++index) {
+      full[index].set_hash_value(source.block_hashes()[index].data);
+    }
+    for (size_t index = 0; index < linear.size(); ++index) {
+      linear[index].set_hash_value(source.linear_state_hashes()[index].data);
+    }
+    const int32_t checkpoint_at_eight = linear[1].id();
+    manager.leaf_of(BlockType::KV)->cache(full);
+    manager.leaf_of(BlockType::LINEAR)->cache(linear);
+    manager.deallocate(full);
+    manager.deallocate(linear);
+    full.clear();
+    linear.clear();
+    EXPECT_EQ(manager.num_used_blocks(), 0u);
+
+    Sequence restored =
+        MakeTestSequence(/*index=*/1, std::vector<int32_t>(13, 7));
+    manager.allocate_shared_for_sequence(&restored);
+    EXPECT_EQ(restored.kv_cache_tokens_num(), 8u);
+    EXPECT_EQ(restored.kv_state().shared_blocks_num(BlockType::KV), 4u);
+    const Slice<Block> state = restored.kv_state().blocks(BlockType::LINEAR);
+    ASSERT_EQ(state.size(), 2u);
+    EXPECT_FALSE(state.front().is_valid());
+    EXPECT_EQ(state.back().id(), checkpoint_at_eight);
+    EXPECT_EQ(manager.num_used_blocks(), 4 * 64 + 144);
+    manager.deallocate_for_sequence(&restored);
+    restored.reset();
+  }
+}
+
+TEST_F(SharedSlabKVCacheBlockTest,
+       PrefixRestoreDeclinesAnImpossibleTransientStateFootprint) {
+  const BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/6, /*enable_prefix_cache=*/true);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  ASSERT_TRUE(options.shared_layout()->can_fit(/*full_blocks=*/3,
+                                               /*linear_states=*/1));
+  ASSERT_FALSE(options.shared_layout()->can_fit(/*full_blocks=*/3,
+                                                /*linear_states=*/2));
+
+  Sequence source = MakeTestSequence(/*index=*/0, std::vector<int32_t>(5, 7));
+  source.update_block_hashes(/*block_size=*/2, BlockHasherType::TEXT);
+  source.update_linear_state_hashes(/*chunk_stride=*/4);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 2);
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(full.size(), 2u);
+  ASSERT_EQ(linear.size(), 1u);
+  BlockManager& full_leaf = *manager.leaf_of(BlockType::KV);
+  BlockManager& linear_leaf = *manager.leaf_of(BlockType::LINEAR);
+  full_leaf.cache(source.tokens(),
+                  full,
+                  /*existed_shared_blocks_num=*/0,
+                  source.mm_data(),
+                  source.block_hashes());
+  linear.front().set_hash_value(source.linear_state_hashes()[0].data);
+  linear_leaf.cache(linear);
+  full_leaf.set_prefix_dependency(source.block_hashes()[1],
+                                  source.linear_state_hashes()[0]);
+  manager.deallocate(full);
+  manager.deallocate(linear);
+  full.clear();
+  linear.clear();
+  ASSERT_EQ(full_leaf.num_blocks_in_prefix_cache(), 2u);
+  ASSERT_EQ(linear_leaf.num_blocks_in_prefix_cache(), 1u);
+  ASSERT_EQ(manager.num_used_blocks(), 0u);
+
+  Sequence sequence = MakeTestSequence(/*index=*/1, std::vector<int32_t>(5, 7));
+  manager.allocate_shared_for_sequence(&sequence);
+  EXPECT_TRUE(sequence.kv_state().prefix_cache_matched());
+  EXPECT_EQ(sequence.kv_cache_tokens_num(), 0u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 0u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 0u);
+  EXPECT_EQ(full_leaf.num_blocks_in_prefix_cache(), 2u);
+  EXPECT_EQ(linear_leaf.num_blocks_in_prefix_cache(), 1u);
+  manager.allocate_shared_for_sequence(&sequence);
+  EXPECT_EQ(sequence.kv_cache_tokens_num(), 0u);
+  EXPECT_FALSE(sequence.has_any_blocks());
+
+  ASSERT_TRUE(manager.allocate_sequence(&sequence, /*num_tokens=*/6));
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 3u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1u);
+  EXPECT_EQ(sequence.kv_state().shared_blocks_num(BlockType::KV), 0u);
+  EXPECT_EQ(sequence.kv_state().shared_blocks_num(BlockType::LINEAR), 0u);
+  EXPECT_EQ(linear_leaf.num_blocks_in_prefix_cache(), 0u);
+  manager.allocate_shared_for_sequence(&sequence);
+  EXPECT_EQ(sequence.kv_cache_tokens_num(), 0u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 3u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1u);
+  sequence.kv_state().set_kv_cache_tokens_num(5);
+  EXPECT_EQ(sequence.kv_cache_tokens_num(), 5u);
+  manager.deallocate_for_sequence(&sequence);
+  sequence.reset();
+}
+
+TEST_F(SharedSlabKVCacheBlockTest,
+       FullPressureReclaimsInactiveCheckpointSlabs) {
+  const BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/3, /*enable_prefix_cache=*/true);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  BlockManager* linear = manager.leaf_of(BlockType::LINEAR);
+  std::vector<Block> checkpoint = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(checkpoint.size(), 1u);
+  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> hash = {23};
+  checkpoint.front().set_hash_value(hash.data());
+  linear->cache(checkpoint);
+  linear->deallocate(checkpoint);
+  checkpoint.clear();
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+  EXPECT_EQ(manager.num_free_blocks(), 48u);
+  ASSERT_EQ(linear->num_blocks_in_prefix_cache(), 1u);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 3);
+  ASSERT_EQ(full.size(), 3u);
+  EXPECT_EQ(linear->num_blocks_in_prefix_cache(), 0u);
+  EXPECT_EQ(manager.num_free_blocks(), 0u);
+  EXPECT_EQ(manager.num_used_blocks(), 192u);
+}
+
+TEST_F(SharedSlabKVCacheBlockTest,
+       CheckpointPublicationRecordsExactFullBoundary) {
+  const BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/31, /*enable_prefix_cache=*/true);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  Sequence sequence = MakeTestSequence(/*index=*/0, std::vector<int32_t>(9, 7));
+  ASSERT_TRUE(manager.allocate_sequence(&sequence, /*num_tokens=*/4));
+  sequence.kv_state().set_kv_cache_tokens_num(4);
+  ASSERT_TRUE(manager.allocate_sequence(&sequence, /*num_tokens=*/8));
+  const std::vector<PrefixCacheEntry> checkpoints =
+      manager.leaf_of(BlockType::LINEAR)->prefix_cache_entries();
+  ASSERT_EQ(checkpoints.size(), 1u);
+  EXPECT_EQ(checkpoints.front().hash, sequence.linear_state_hashes()[0]);
+  const std::vector<PrefixCacheEntry> full =
+      manager.leaf_of(BlockType::KV)->prefix_cache_entries();
+  ASSERT_EQ(full.size(), 2u);
+  for (const PrefixCacheEntry& entry : full) {
+    EXPECT_TRUE(entry.chain_known);
+    if (entry.block_index == 1) {
+      ASSERT_TRUE(entry.parent.has_value());
+      EXPECT_EQ(*entry.parent, sequence.block_hashes()[0]);
+      ASSERT_TRUE(entry.dependency.has_value());
+      EXPECT_EQ(*entry.dependency, checkpoints.front().hash);
+    }
+  }
+  manager.deallocate_for_sequence(&sequence);
+  sequence.reset();
+}
+
+TEST_F(SharedSlabKVCacheBlockTest,
+       PressureReclaimsOrphanStateBeforeUsefulFullPrefix) {
+  BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/7, /*enable_prefix_cache=*/true);
+  options.enable_disagg_pd(true);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  BlockManager& full_leaf = *manager.leaf_of(BlockType::KV);
+  BlockManager& linear_leaf = *manager.leaf_of(BlockType::LINEAR);
+  Sequence source = MakeTestSequence(/*index=*/0, std::vector<int32_t>(9, 7));
+  source.update_block_hashes(/*block_size=*/2, BlockHasherType::TEXT);
+  source.update_linear_state_hashes(/*chunk_stride=*/4);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 2);
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 2);
+  ASSERT_EQ(full.size(), 2u);
+  ASSERT_EQ(linear.size(), 2u);
+  full_leaf.cache(source.tokens(),
+                  full,
+                  /*existed=*/0,
+                  source.mm_data(),
+                  source.block_hashes());
+  linear[0].set_hash_value(source.linear_state_hashes()[0].data);
+  linear[1].set_hash_value(source.linear_state_hashes()[1].data);
+  linear_leaf.cache(linear);
+  full_leaf.set_prefix_dependency(source.block_hashes()[1],
+                                  source.linear_state_hashes()[0]);
+  manager.deallocate(full);
+  manager.deallocate(linear);
+  full.clear();
+  linear.clear();
+
+  std::vector<Block> grown = manager.allocate_blocks(BlockType::KV, 1);
+  ASSERT_EQ(grown.size(), 1u);
+  EXPECT_EQ(full_leaf.num_blocks_in_prefix_cache(), 2u);
+  const std::vector<PrefixCacheEntry> retained =
+      linear_leaf.prefix_cache_entries();
+  ASSERT_EQ(retained.size(), 1u);
+  EXPECT_EQ(retained.front().hash, source.linear_state_hashes()[0]);
+}
+
+TEST_F(SharedSlabKVCacheBlockTest,
+       PairedEvictionPreservesFullAncestorsUsedByAnotherCheckpoint) {
+  const BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/9, /*enable_prefix_cache=*/true);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  BlockManager& full_leaf = *manager.leaf_of(BlockType::KV);
+  BlockManager& linear_leaf = *manager.leaf_of(BlockType::LINEAR);
+  Sequence source = MakeTestSequence(/*index=*/0, std::vector<int32_t>(9, 7));
+  source.update_block_hashes(/*block_size=*/2, BlockHasherType::TEXT);
+  source.update_linear_state_hashes(/*chunk_stride=*/4);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 4);
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 2);
+  ASSERT_EQ(full.size(), 4u);
+  ASSERT_EQ(linear.size(), 2u);
+  full_leaf.cache(source.tokens(),
+                  full,
+                  /*existed=*/0,
+                  source.mm_data(),
+                  source.block_hashes());
+  for (size_t index = 0; index < linear.size(); ++index) {
+    linear[index].set_hash_value(source.linear_state_hashes()[index].data);
+  }
+  linear_leaf.cache(linear);
+  full_leaf.set_prefix_dependency(source.block_hashes()[1],
+                                  source.linear_state_hashes()[0]);
+  full_leaf.set_prefix_dependency(source.block_hashes()[3],
+                                  source.linear_state_hashes()[1]);
+  manager.deallocate(full);
+  manager.deallocate(linear);
+  full.clear();
+  linear.clear();
+
+  std::vector<Block> grown = manager.allocate_blocks(BlockType::KV, 1);
+  ASSERT_EQ(grown.size(), 1u);
+  EXPECT_EQ(full_leaf.num_blocks_in_prefix_cache(), 2u);
+  EXPECT_EQ(linear_leaf.num_blocks_in_prefix_cache(), 1u);
+  Sequence restored = MakeTestSequence(/*index=*/1, std::vector<int32_t>(5, 7));
+  manager.allocate_shared_for_sequence(&restored);
+  EXPECT_EQ(restored.kv_cache_tokens_num(), 4u);
+  EXPECT_EQ(restored.kv_state().shared_blocks_num(BlockType::KV), 2u);
+  manager.deallocate_for_sequence(&restored);
+  restored.reset();
+}
+
+TEST_F(SharedSlabKVCacheBlockTest,
+       MtpBranchesSharingOneCheckpointStayInOneDependencyUnit) {
+  BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/7, /*enable_prefix_cache=*/true);
+  options.hasher_type(BlockHasherType::MTP_TEXT);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  Sequence first = MakeTestSequence(/*index=*/0, {7, 7, 7, 7, 7, 7, 7, 7, 7});
+  Sequence second = MakeTestSequence(/*index=*/1, {7, 7, 7, 7, 8, 7, 7, 7, 7});
+  std::vector<Block> linear;
+  cache_mtp_branches(manager, first, second, &linear);
+  ASSERT_EQ(linear.size(), 1u);
+  manager.deallocate(linear);
+  linear.clear();
+  ASSERT_EQ(manager.leaf_of(BlockType::KV)->num_blocks_in_prefix_cache(), 3u);
+  ASSERT_EQ(manager.leaf_of(BlockType::LINEAR)->num_blocks_in_prefix_cache(),
+            1u);
+  std::vector<Block> grown = manager.allocate_blocks(BlockType::KV, 2);
+  ASSERT_EQ(grown.size(), 2u);
+  EXPECT_EQ(manager.leaf_of(BlockType::KV)->num_blocks_in_prefix_cache(), 0u);
+  EXPECT_EQ(manager.leaf_of(BlockType::LINEAR)->num_blocks_in_prefix_cache(),
+            0u);
+}
+
+TEST_F(SharedSlabKVCacheBlockTest,
+       FullEvictionPreservesPinnedCheckpointWithAlternateMtpEndpoint) {
+  BlockManager::Options options =
+      slab_options(/*num_allocatable_slabs=*/8, /*enable_prefix_cache=*/true);
+  options.hasher_type(BlockHasherType::MTP_TEXT);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  Sequence first = MakeTestSequence(/*index=*/0, {7, 7, 7, 7, 7, 7, 7, 7, 7});
+  Sequence second = MakeTestSequence(/*index=*/1, {7, 7, 7, 7, 8, 7, 7, 7, 7});
+  std::vector<Block> pinned;
+  cache_mtp_branches(manager, first, second, &pinned);
+  ASSERT_EQ(pinned.size(), 1u);
+  std::vector<Block> grown = manager.allocate_blocks(BlockType::KV, 3);
+  ASSERT_EQ(grown.size(), 3u);
+  EXPECT_EQ(manager.leaf_of(BlockType::KV)->num_blocks_in_prefix_cache(), 2u);
+  EXPECT_EQ(manager.leaf_of(BlockType::LINEAR)->num_blocks_in_prefix_cache(),
+            1u);
+  Sequence restored = MakeTestSequence(/*index=*/2, {7, 7, 7, 7, 8});
+  manager.allocate_shared_for_sequence(&restored);
+  EXPECT_EQ(restored.kv_cache_tokens_num(), 4u);
+  EXPECT_EQ(restored.kv_state().shared_blocks_num(BlockType::KV), 2u);
+  manager.deallocate_for_sequence(&restored);
+  restored.reset();
+  manager.deallocate(pinned);
+  pinned.clear();
+}
 
 }  // namespace xllm

@@ -13,7 +13,6 @@ cc_library(
     scheduler.h
     dit_scheduler.h
     request_priority_queue.h
-    fixed_steps_scheduler.h
     scheduler_metrics.h
     scheduler_notifier.h
     kv_cache_prefetcher.h
@@ -26,7 +25,6 @@ cc_library(
     scheduler_metrics.cpp
     request_output_dispatcher.cpp
     dit_scheduler.cpp
-    fixed_steps_scheduler.cpp
     kv_cache_prefetcher.cpp
   DEPS
     :util

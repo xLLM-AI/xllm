@@ -28,6 +28,7 @@ from unittest import mock
 from setuptools import Distribution
 from setuptools.command.install_lib import install_lib
 
+from scripts.build_support import utils
 from scripts.build_support.npu_ops import stage_npu_ops_vendor
 from scripts.build_support.utils import get_python_version
 
@@ -305,6 +306,38 @@ class NpuOpsStagingTest(unittest.TestCase):
                     self.assertFalse(self.destination.exists())
                     self.assertEqual(list(self.extdir.glob(".xllm-ops-*")), [])
                     resource.write_text(self.files[name], encoding="utf-8")
+
+    def test_prebuild_reuses_matching_revision_and_invalidates_stale_cache(self) -> None:
+        cache = self.root / "CMakeCache.txt"
+        cache.write_text("XLLM_OPS_GIT_HEAD_CACHED:INTERNAL=old\nKEEP:BOOL=ON\n", encoding="utf-8")
+        with (
+            mock.patch.dict(os.environ, self.env, clear=True),
+            mock.patch.object(utils, "set_npu_envs"),
+            mock.patch.object(utils, "get_base_dir", return_value=str(self.source)),
+            mock.patch.object(utils, "_get_cmake_cache_path", return_value=str(cache)),
+            mock.patch.object(utils, "_get_cann_version_info", return_value=("fixture", "9.0.0")),
+        ):
+            utils._ensure_xllm_ops_rebuild_state("npu")
+            self.assertEqual(os.environ["XLLM_OPS_GIT_HEAD_CACHED"], self.git_head)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.ops_source),
+                    "-c",
+                    "user.name=xLLM test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "updated operator fixture",
+                ],
+                check=True,
+            )
+            utils._ensure_xllm_ops_rebuild_state("npu")
+            self.assertNotIn("XLLM_OPS_GIT_HEAD_CACHED", os.environ)
+            self.assertEqual(cache.read_text(), "KEEP:BOOL=ON\n")
 
     def test_rejects_different_operator_revision(self) -> None:
         (self.vendor / ".xllm_ops_git_head").write_text("different revision\n", encoding="utf-8")

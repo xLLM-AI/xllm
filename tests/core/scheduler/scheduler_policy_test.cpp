@@ -37,6 +37,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
@@ -55,8 +56,8 @@ class FakeTokenizer : public Tokenizer {
     NOT_IMPLEMENTED();
   }
   std::string decode(const Slice<int32_t>& ids,
-                     bool skip_special_tokens) const {
-    return {};
+                     bool /*skip_special_tokens*/) const override {
+    return std::string(ids.size(), 'x');
   }
   std::optional<int32_t> token_to_id(const std::string_view& token) const {
     NOT_IMPLEMENTED();
@@ -95,7 +96,11 @@ class FakeEngine : public Engine {
 
   explicit FakeEngine(std::unique_ptr<BlockManagerPool> block_manager)
       : fake_tokenizer_(std::make_unique<FakeTokenizer>()),
-        fake_block_manager_(std::move(block_manager)) {}
+        fake_block_manager_(std::move(block_manager)) {
+    if (fake_block_manager_->options().enable_linear_state()) {
+      model_args_.layer_types({"linear_attention"});
+    }
+  }
 
   virtual ForwardOutput step(BatchGroup& /*batch*/) { return {}; }
   virtual std::vector<RawForwardOutput> collect_step_outputs(
@@ -279,7 +284,8 @@ class PendingReleaseBlockManagerPool final : public BlockManagerPool {
  private:
   static BlockManagerPool::Options make_options() {
     BlockManagerPool::Options options;
-    options.num_blocks_ = 256;
+    // The 34025-token prompt needs 266 data blocks plus padding block zero.
+    options.num_blocks_ = 267;
     options.block_size_ = 128;
     options.max_seqs_per_batch_ = 16;
     options.enable_prefix_cache_ = true;
@@ -596,12 +602,15 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
 // verify how many tokens are processed in one scheduling.
 TEST(SchedulerPolicyTest, AddNewRequestBase) {
   std::vector<int32_t> prompt_len{10, 1024, 2048, 2048};
+  // The 2048-token prompt needs 128 data blocks plus padding block zero.
   std::vector<int32_t> num_blocks{16, 128, 129, 128};
   std::vector<int32_t> block_size{16, 16, 16, 256};
   std::vector<int32_t> chunk_size{1024, 1024, 1024, 768};
   std::vector<int32_t> kv_split_size{1, 1, 1, 2};
+  // Mixed prefill can redistribute unused budget to finish the full prompt.
   std::vector<int32_t> validate_allowed_max_tokens{10, 1024, 2048, 768};
   for (size_t idx = 0; idx < prompt_len.size(); ++idx) {
+    SCOPED_TRACE(idx);
     SchedulerOptions opt =
         create_scheduler_options(10000, 256, 0, chunk_size[idx], 1);
     ScopedConfigValue<int32_t> kv_split_guard(
@@ -625,7 +634,7 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
         batch[0].get_allowed_max_tokens();
     for (size_t i = 0; i < batch[0].size(); ++i) {
       auto seq = batch[0][i];
-      EXPECT_TRUE(allowed_max_tokens[i] == validate_allowed_max_tokens[idx]);
+      EXPECT_EQ(allowed_max_tokens[i], validate_allowed_max_tokens[idx]);
     }
   }
 }
@@ -2130,12 +2139,20 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
     // request prompt len: 1000
     auto requests = generate_request(
         {1, 1000}, {1, 100}, std::nullopt, std::nullopt, 10000);
+    std::optional<Status> callback_status;
+    requests[1]->state().output_func = [&](const RequestOutput& output) {
+      callback_status = output.status;
+      return true;
+    };
     scheduler->add_request(requests[0]);
     scheduler->add_request(requests[1]);
 
     auto batch = scheduler->prepare_batch_test();
-    EXPECT_TRUE(batch.size() == 1);
-    EXPECT_TRUE(batch[0].size() == 1);  // can not schedule the second.
+    scheduler->wait_for_responses();
+    ASSERT_EQ(batch.size(), 1u);
+    EXPECT_EQ(batch[0].size(), 1u);
+    ASSERT_TRUE(callback_status.has_value());
+    EXPECT_EQ(callback_status->code(), StatusCode::RESOURCE_EXHAUSTED);
   }
 }
 
@@ -2498,6 +2515,82 @@ TEST(SchedulerPolicyTest, FullFootprintAdmitsBothWhenFits) {
   EXPECT_EQ(batch[0].size(), 2);  // Both admitted.
 }
 
+TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
+  ScopedConfigValue<bool> prefix_cache_guard(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<bool> mix_batch_guard(
+      SchedulerConfig::get_instance().enable_mix_batch(), true);
+  ScopedConfigValue<int32_t> chunk_size_guard(
+      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 2);
+  for (const uint32_t linear_slots : {1u, 4u}) {
+    SCOPED_TRACE(linear_slots);
+    const uint32_t prompt_slots = 4 + linear_slots;
+    const uint32_t num_slots = 2 * prompt_slots;
+    BlockManagerPool::Options pool_options;
+    pool_options.num_blocks(num_slots)
+        .block_size(2)
+        .enable_prefix_cache(false)
+        .enable_linear_state(true)
+        .linear_state_num_slots(num_slots)
+        .enable_shared_kv_cache(true)
+        .shared_linear_state_slots(linear_slots);
+    FakeEngine engine(std::make_unique<BlockManagerPool>(pool_options));
+    SchedulerOptions options = create_scheduler_options(4, 4, 0, 2, 1);
+    options.enable_chunked_prefill(true)
+        .enable_schedule_overlap(false)
+        .disable_log_stats(true);
+    TestableContinuousScheduler scheduler(&engine, options);
+    auto requests =
+        generate_request({8, 8}, {2, 2}, std::nullopt, std::nullopt, 64);
+    ASSERT_TRUE(scheduler.add_request(requests[0]));
+    ASSERT_TRUE(scheduler.add_request(requests[1]));
+
+    BatchGroup batches = scheduler.prepare_batch_test();
+
+    ASSERT_EQ(batches.size(), 1u);
+    EXPECT_EQ(batches.front().size(), 1u);
+    EXPECT_EQ(scheduler.get_waiting_requests_num(), 1u);
+    EXPECT_EQ(engine.block_manager_pool()->admission_capacity(0),
+              num_slots - 1);
+    EXPECT_EQ(engine.block_manager_pool()->sequence_resource_units(8),
+              prompt_slots);
+  }
+}
+
+TEST(SchedulerPolicyTest, SharedSlabAdmissionPreservesByteUnitsAboveFourGiB) {
+  ScopedConfigValue<bool> prefix_cache_guard(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  constexpr size_t kGiB = size_t{1} << 30;
+  for (const size_t num_allocatable_slabs : {7u, 8u}) {
+    SCOPED_TRACE(num_allocatable_slabs);
+    StaticKVCacheLayoutSpec spec;
+    spec.num_slots = 64;
+    spec.full_row_bytes = kGiB / 4;
+    spec.conv_row_bytes = kGiB / 8;
+    spec.ssm_row_bytes = kGiB / 2;
+    spec.checkpoint_stride = 2;
+    spec.full_layer_ids = {0, 3};
+    spec.linear_layer_ids = {1, 2};
+    const StaticKVCacheLayout layout(spec);
+    spec.num_slabs = layout.num_reserved_slabs() + num_allocatable_slabs;
+    BlockManagerPool::Options options;
+    options.num_blocks(64)
+        .block_size(2)
+        .enable_prefix_cache(false)
+        .enable_linear_state(true)
+        .linear_state_num_slots(64)
+        .enable_shared_kv_cache(true)
+        .shared_layout(
+            std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
+    BlockManagerPool pool(options);
+    // Only mappings are allocated; the real prompt/state footprint is 4.25 GiB.
+    EXPECT_EQ(pool.sequence_resource_units(4), 4 * kGiB + kGiB / 4);
+    EXPECT_EQ(pool.admission_capacity(0), num_allocatable_slabs * kGiB);
+    EXPECT_GT(pool.sequence_resource_units(4),
+              std::numeric_limits<uint32_t>::max());
+  }
+}
+
 TEST(SchedulerPolicyTest, StaleCapacityReservesFullPromptBeforeFirstChunk) {
   ScopedConfigValue<bool> prefix_cache_guard(
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
@@ -2555,90 +2648,84 @@ TEST(SchedulerPolicyTest, StaleCapacityDefersFailedFullPromptReservation) {
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   for (bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    for (bool enable_beam_search : {false, true}) {
-      SCOPED_TRACE(enable_beam_search);
-      ScopedConfigValue<bool> mix_batch_guard(
-          SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
-      SchedulerOptions options = create_scheduler_options(
-          /*max_tokens_per_batch=*/4,
-          /*max_seqs_per_batch=*/1,
-          /*num_speculative_tokens=*/0,
-          /*max_tokens_per_chunk_for_prefill=*/4,
-          /*dp_size=*/1);
-      options.enable_chunked_prefill(true)
-          .enable_schedule_overlap(false)
-          .disable_log_stats(true);
-      auto block_manager = std::make_unique<StaleCapacityBlockManagerPool>(
-          /*advisory_capacity=*/0);
-      StaleCapacityBlockManagerPool* pool = block_manager.get();
-      FakeEngine engine(std::move(block_manager));
-      TestableContinuousScheduler scheduler(&engine, options);
-      const std::vector<size_t> initial_free_blocks = pool->num_free_blocks();
-      auto blocker = generate_request({24},
-                                      {4},
-                                      std::nullopt,
-                                      std::nullopt,
-                                      /*max_context_len=*/64)[0];
-      ASSERT_TRUE(pool->allocate(blocker->sequences().front().get(),
-                                 /*num_tokens=*/24));
-      const std::vector<size_t> free_blocks_before = pool->num_free_blocks();
-      RequestState request_state =
-          generate_request({12}, {4}, std::nullopt, std::nullopt, 64)[0]
-              ->state()
-              .clone();
-      if (enable_beam_search) {
-        request_state.sampling_param.enable_beam_search(/*width=*/2);
-      }
-      auto request = std::make_shared<Request>("reservation-retry",
-                                               "reservation-retry",
-                                               "",
-                                               std::move(request_state),
-                                               "");
-      ASSERT_EQ(request->check_beam_search(), enable_beam_search);
-      std::optional<Status> callback_status;
-      int32_t callback_count = 0;
-      request->state().output_func = [&](const RequestOutput& output) {
-        callback_status = output.status;
-        ++callback_count;
-        return true;
-      };
-      ASSERT_TRUE(scheduler.add_request(request));
 
-      // Another owner temporarily holds the pages. Failed admission must leave
-      // the request queued and return without retrying within the same round.
-      for (size_t attempt = 0; attempt < 2; ++attempt) {
-        BatchGroup batches = scheduler.prepare_batch_test();
-        scheduler.wait_for_responses();
-        ASSERT_EQ(batches.size(), 1u);
-        EXPECT_TRUE(batches.front().empty());
-        EXPECT_EQ(callback_count, 0);
-        EXPECT_FALSE(callback_status.has_value());
-        EXPECT_EQ(pool->allocate_targets().size(), attempt + 2);
-        EXPECT_EQ(pool->allocate_targets().back(), 12u);
-        EXPECT_EQ(
-            request->sequences().front()->kv_state().num_blocks(BlockType::KV),
-            0u);
-        EXPECT_EQ(pool->num_free_blocks(), free_blocks_before);
-        EXPECT_EQ(scheduler.get_waiting_requests_num(), 1u);
-      }
+    ScopedConfigValue<bool> mix_batch_guard(
+        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
+    SchedulerOptions options = create_scheduler_options(
+        /*max_tokens_per_batch=*/4,
+        /*max_seqs_per_batch=*/1,
+        /*num_speculative_tokens=*/0,
+        /*max_tokens_per_chunk_for_prefill=*/4,
+        /*dp_size=*/1);
+    options.enable_chunked_prefill(true)
+        .enable_schedule_overlap(false)
+        .disable_log_stats(true);
+    auto block_manager = std::make_unique<StaleCapacityBlockManagerPool>(
+        /*advisory_capacity=*/0);
+    StaleCapacityBlockManagerPool* pool = block_manager.get();
+    FakeEngine engine(std::move(block_manager));
+    TestableContinuousScheduler scheduler(&engine, options);
+    const std::vector<size_t> initial_free_blocks = pool->num_free_blocks();
+    auto blocker = generate_request({24},
+                                    {4},
+                                    std::nullopt,
+                                    std::nullopt,
+                                    /*max_context_len=*/64)[0];
+    ASSERT_TRUE(pool->allocate(blocker->sequences().front().get(),
+                               /*num_tokens=*/24));
+    const std::vector<size_t> free_blocks_before = pool->num_free_blocks();
+    RequestState request_state =
+        generate_request({12}, {4}, std::nullopt, std::nullopt, 64)[0]
+            ->state()
+            .clone();
 
-      pool->deallocate(blocker.get());
+    auto request = std::make_shared<Request>("reservation-retry",
+                                             "reservation-retry",
+                                             "",
+                                             std::move(request_state),
+                                             "");
+    std::optional<Status> callback_status;
+    int32_t callback_count = 0;
+    request->state().output_func = [&](const RequestOutput& output) {
+      callback_status = output.status;
+      ++callback_count;
+      return true;
+    };
+    ASSERT_TRUE(scheduler.add_request(request));
+
+    // Another owner temporarily holds the pages. Failed admission must leave
+    // the request queued and return without retrying within the same round.
+    for (size_t attempt = 0; attempt < 2; ++attempt) {
       BatchGroup batches = scheduler.prepare_batch_test();
       scheduler.wait_for_responses();
       ASSERT_EQ(batches.size(), 1u);
-      ASSERT_EQ(batches.front().size(), 1u);
-      EXPECT_EQ(batches.front()[0], request->sequences().front().get());
-      EXPECT_EQ(batches.front().get_allowed_max_tokens(),
-                (std::vector<uint32_t>{4}));
+      EXPECT_TRUE(batches.front().empty());
+      EXPECT_EQ(callback_count, 0);
+      EXPECT_FALSE(callback_status.has_value());
+      EXPECT_EQ(pool->allocate_targets().size(), attempt + 2);
+      EXPECT_EQ(pool->allocate_targets().back(), 12u);
       EXPECT_EQ(
           request->sequences().front()->kv_state().num_blocks(BlockType::KV),
-          3u);
-      EXPECT_EQ(callback_count, 0);
-      EXPECT_EQ(scheduler.get_waiting_requests_num(), 0u);
-
-      pool->deallocate(request.get());
-      EXPECT_EQ(pool->num_free_blocks(), initial_free_blocks);
+          0u);
+      EXPECT_EQ(pool->num_free_blocks(), free_blocks_before);
+      EXPECT_EQ(scheduler.get_waiting_requests_num(), 1u);
     }
+
+    pool->deallocate(blocker.get());
+    BatchGroup batches = scheduler.prepare_batch_test();
+    scheduler.wait_for_responses();
+    ASSERT_EQ(batches.size(), 1u);
+    ASSERT_EQ(batches.front().size(), 1u);
+    EXPECT_EQ(batches.front()[0], request->sequences().front().get());
+    EXPECT_EQ(batches.front().get_allowed_max_tokens(),
+              (std::vector<uint32_t>{4}));
+    EXPECT_EQ(
+        request->sequences().front()->kv_state().num_blocks(BlockType::KV), 3u);
+    EXPECT_EQ(callback_count, 0);
+    EXPECT_EQ(scheduler.get_waiting_requests_num(), 0u);
+
+    pool->deallocate(request.get());
+    EXPECT_EQ(pool->num_free_blocks(), initial_free_blocks);
   }
 }
 
@@ -3439,11 +3526,16 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   pool->deallocate(cached_request.get());
 
   TestableContinuousScheduler scheduler(&engine, options);
+  std::optional<bool> cancelled_response;
   RequestState request_state =
       generate_request({12}, {4}, std::nullopt, std::nullopt, 64)[0]
           ->state()
           .clone();
   request_state.best_of = 2;
+  request_state.output_func = [&](const RequestOutput& output) {
+    cancelled_response = output.cancelled;
+    return true;
+  };
   auto request = std::make_shared<Request>(
       "best-of-prefix", "best-of-prefix", "", std::move(request_state), "");
   ASSERT_TRUE(request->expand_sequences(/*share_prefix=*/false));
@@ -3484,6 +3576,8 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   scheduler.wait_for_responses();
   ASSERT_EQ(batches.size(), 1u);
   EXPECT_TRUE(batches.front().empty());
+  ASSERT_TRUE(cancelled_response.has_value());
+  EXPECT_TRUE(cancelled_response.value());
   EXPECT_EQ(first->kv_state().num_blocks(BlockType::KV), 0u);
   EXPECT_EQ(second->kv_state().num_blocks(BlockType::KV), 0u);
   EXPECT_EQ(pool->num_used_blocks(), used_blocks_before);

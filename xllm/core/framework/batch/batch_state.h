@@ -25,7 +25,6 @@ limitations under the License.
 #include "core/framework/batch/batch_input_data.h"
 #include "core/framework/batch/batch_sequence_plan.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/rec_forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/util/threadpool.h"
 
@@ -34,7 +33,6 @@ namespace xllm {
 struct ModelArgs;
 constexpr uint64_t UNINITIALIZED_BATCH_ID = 0x0;
 
-// Shared sequence execution state, composed by Batch and RecBatchState. It
 // maintains scheduling invariants and forward resources across model domains.
 class BatchState final {
  public:
@@ -62,12 +60,9 @@ class BatchState final {
   const std::vector<SequencesGroup*>& sequence_groups() const {
     return sequence_groups_;
   }
-  void set_swap_block_transfer_infos(std::vector<BlockTransferInfo> infos) {
-    swap_block_transfer_infos_ = std::move(infos);
-  }
+
   void update_forward_type(Sequence* sequence);
   void refresh_forward_type(const std::vector<Sequence*>& sequences);
-  void refresh_sequences_from_groups();
   std::vector<Sequence*> group_sequences() const;
   size_t num_group_sequences() const;
   Sequence* group_sequence(size_t index) const;
@@ -85,15 +80,6 @@ class BatchState final {
                                           const ModelArgs& args,
                                           ThreadPool* thread_pool,
                                           int32_t cp_size);
-  RecForwardInput build_rec_sequence_input(const BatchInputData& data,
-                                           uint32_t num_decoding_tokens,
-                                           uint32_t min_decoding_batch_size,
-                                           const ModelArgs& args,
-                                           int32_t cp_size);
-  RecForwardInput build_rec_sequence_input(const BatchInputData& data,
-                                           const ModelArgs& args,
-                                           ThreadPool* thread_pool,
-                                           int32_t cp_size);
   VlmForwardInput build_vlm_sequence_input(const BatchInputData& data,
                                            uint32_t num_decoding_tokens,
                                            uint32_t min_decoding_batch_size,
@@ -103,16 +89,11 @@ class BatchState final {
                                               const ModelArgs& args,
                                               ThreadPool* thread_pool,
                                               int32_t cp_size);
-  static std::unordered_map<uint32_t, uint32_t> cal_seq_exchange_index(
-      std::vector<uint32_t>& kv_cache_tokens_num);
 
  private:
   void retain_host_restore_blocks(Sequence& sequence);
-  void dp_balance_shuffle_seqs();
-  bool has_partial_finished_beam_group() const;
   BatchSequencePlan sequence_plan_;
   std::vector<SequencesGroup*> sequence_groups_;
-  std::vector<BlockTransferInfo> swap_block_transfer_infos_;
   std::vector<torch::Tensor> input_embeddings_vec_;
   std::vector<MMData> mm_data_vec_;
   // A cancelled sequence may release its own aliases before its pending

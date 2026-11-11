@@ -59,13 +59,6 @@ struct SchedulerOptions {
 
   // the maximum number of sequences per batch
   PROPERTY(int32_t, max_seqs_per_batch) = 256;
-  PROPERTY(bool, enable_task_pipeline) = false;
-  PROPERTY(std::string, adaptive_target_verify_calibration);
-  PROPERTY(bool, enable_adaptive_target_verify) = false;
-  PROPERTY(bool, enable_adaptive_draft_step) = false;
-  PROPERTY(std::string, adaptive_target_verify_cost_table);
-  PROPERTY(std::string, adaptive_target_verify_cost_table_output);
-  PROPERTY(std::string, spec_calibration_compatibility);
 
   // the capacity of the request queue; requests arriving while it is full
   // are rejected at admission.
@@ -142,9 +135,6 @@ struct SchedulerOptions {
   // Index ID for internal server ID, which must be set different values
   // if the model supports multiple version or there are multiple models.
   PROPERTY(int64_t, server_idx) = 0;
-
-  // max concurrency for rec worker
-  PROPERTY(int32_t, rec_worker_max_concurrency) = 1;
 };
 
 class SchedulerBase {

@@ -14,8 +14,10 @@ limitations under the License.
 ==============================================================================*/
 
 #include <gtest/gtest.h>
+#include <torch/torch.h>
 
 #include <cstdlib>
+#include <vector>
 
 #include "core/common/extension_registry.h"
 #include "core/common/native_library.h"
@@ -44,7 +46,14 @@ TEST(NativeLibraryIntegrationTest, CreatesTheRegisteredExecutorSubclass) {
       options,
       /*executor_type=*/"native_library_executor");
   ASSERT_NE(executor, nullptr);
-  EXPECT_TRUE(executor->supports_prepared_attention_metadata());
+  const torch::Tensor tokens = torch::tensor({1, 2}, torch::kInt64);
+  std::vector<KVCache> kv_caches;
+  LlmModelParams params;
+  const ModelOutput output = executor->run(tokens,
+                                           /*positions=*/torch::Tensor{},
+                                           kv_caches,
+                                           ModelParamsView(params));
+  EXPECT_TRUE(output.hidden_states.equal(tokens));
   EXPECT_TRUE(ExtensionRegistry::get_instance().has_implementation("custom",
                                                                    "executor"));
 }

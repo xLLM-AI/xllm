@@ -64,7 +64,6 @@ void Request::create_sequences_group() {
   sequence_params.streaming = state_.stream;
   sequence_params.enable_schedule_overlap = state_.enable_schedule_overlap;
   sequence_params.is_graph_warmup = state_.is_graph_warmup;
-  sequence_params.rec_type = state_.rec_type;
   sequence_params.bos_token_id = state_.bos_token_id;
   sequence_params.request_id = request_id_;
   sequence_params.sample_slots = &(state_.sample_slots);
@@ -185,10 +184,6 @@ void Request::log_statistic(double total_latency,
               << "avg tpot: " << tpot << "ms, "
               << "generation speed: " << gen_speed << " tokens/s"
               << speculative_stats_log;
-    // only log once when beam search is enabled
-    if (check_beam_search()) {
-      break;
-    }
   }
 }
 

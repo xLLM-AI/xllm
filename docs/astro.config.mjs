@@ -267,53 +267,6 @@ export default defineConfig({
 											translations: { 'zh-CN': 'GLM-5' },
 											slug: 'cookbook/autoregressive_models/glm/glm_5',
 										},
-										{
-											label: 'GLM-4.7',
-											translations: { 'zh-CN': 'GLM-4.7' },
-											slug: 'cookbook/autoregressive_models/glm/glm_4_7',
-										},
-										{
-											label: 'GLM-4.7-Flash',
-											translations: { 'zh-CN': 'GLM-4.7-Flash' },
-											slug: 'cookbook/autoregressive_models/glm/glm_4_7_flash',
-										},
-										{
-											label: 'GLM-4.6',
-											translations: { 'zh-CN': 'GLM-4.6' },
-											slug: 'cookbook/autoregressive_models/glm/glm_4_6',
-										},
-										{
-											label: 'GLM-4.6V',
-											translations: { 'zh-CN': 'GLM-4.6V' },
-											slug: 'cookbook/autoregressive_models/glm/glm_4_6v',
-										},
-										{
-											label: 'GLM-4.5',
-											translations: { 'zh-CN': 'GLM-4.5' },
-											slug: 'cookbook/autoregressive_models/glm/glm_4_5',
-										},
-										{
-											label: 'GLM-4.5V',
-											translations: { 'zh-CN': 'GLM-4.5V' },
-											slug: 'cookbook/autoregressive_models/glm/glm_4_5v',
-										},
-									],
-								},
-								{
-									label: 'Kimi',
-									translations: { 'zh-CN': 'Kimi' },
-									collapsed: true,
-									items: [
-										{
-											label: 'Kimi2',
-											translations: { 'zh-CN': 'Kimi2' },
-											slug: 'cookbook/autoregressive_models/kimi/kimi2',
-										},
-										{
-											label: 'Kimi-K2.5 / Kimi-K2.6',
-											translations: { 'zh-CN': 'Kimi-K2.5 / Kimi-K2.6' },
-											slug: 'cookbook/autoregressive_models/kimi/kimi2_5',
-										},
 									],
 								},
 								{
@@ -392,7 +345,6 @@ export default defineConfig({
 						'dev_guide/code_arch',
 						'design/cpp_framework_python_model_architecture',
 						'design/graph_mode_design',
-						'design/generative_recommendation_design',
 						'dev_guide/ai_coding_workflow',
 						'dev_guide/xllm_kernel_dev',
 						'dev_guide/tilelang_ascend_kernel_dev',

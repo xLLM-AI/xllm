@@ -191,15 +191,6 @@ void APIService::Completions(::google::protobuf::RpcController* controller,
 
   if (completion_service_impl_) {
     completion_service_impl_->process_async_rpc_impl(request);
-  } else if (rec_completion_service_impl_) {
-    auto arena = GetArenaWithCheck<CompletionCall>(response);
-    std::shared_ptr<Call> call = std::make_shared<CompletionCall>(
-        ctrl,
-        done_guard.release(),
-        const_cast<proto::CompletionRequest*>(request),
-        response,
-        arena != nullptr);
-    rec_completion_service_impl_->process_async(call);
   }
 }
 
@@ -257,18 +248,13 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
     return;
   }
 
-  if (!completion_service_impl_ && !rec_completion_service_impl_) {
+  if (!completion_service_impl_) {
     api_service::write_openai_error(ctrl,
                                     StatusCode::INVALID_ARGUMENT,
                                     "The model does not support completions.");
     return;
   }
-  if (rec_completion_service_impl_ && req_pb->prompts_size() > 0) {
-    api_service::write_openai_error(ctrl,
-                                    StatusCode::INVALID_ARGUMENT,
-                                    "Batched prompts require the LLM backend.");
-    return;
-  }
+
   auto call = std::make_shared<CompletionCall>(ctrl,
                                                done_guard.release(),
                                                req_pb,
@@ -278,8 +264,6 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
   call->set_system_fingerprint(system_fingerprint_);
   if (completion_service_impl_) {
     completion_service_impl_->process_async(call);
-  } else if (rec_completion_service_impl_) {
-    rec_completion_service_impl_->process_async(call);
   }
 }
 

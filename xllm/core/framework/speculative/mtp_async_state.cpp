@@ -70,9 +70,6 @@ CombinedDraftExecutionPath classify_combined_draft_execution_path(
   if (model_type == "qwen3_5_mtp" || model_type == "qwen3_5_moe_mtp") {
     return CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
   }
-  if (model_type == "glm_moe_dsa_mtp") {
-    return CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION;
-  }
   return CombinedDraftExecutionPath::UNSUPPORTED;
 }
 
@@ -86,12 +83,6 @@ DraftPrefixPolicy classify_draft_prefix_policy(
   return DraftPrefixPolicy::TAIL_REPAIR;
 }
 
-bool supports_hybrid_mtp_pipeline_model_pair(std::string_view target_type,
-                                             std::string_view draft_type) {
-  return (target_type == "qwen3_5" || target_type == "qwen3_5_text") &&
-         draft_type == "qwen3_5_mtp";
-}
-
 bool supports_combined_draft_configuration(
     CombinedDraftExecutionPath execution_path,
     std::string_view npu_backend,
@@ -99,8 +90,6 @@ bool supports_combined_draft_configuration(
   switch (execution_path) {
     case CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION:
       return npu_backend == "TORCH" && dp_size <= 1;
-    case CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION:
-      return npu_backend == "ATB";
     case CombinedDraftExecutionPath::UNSUPPORTED:
       return false;
   }

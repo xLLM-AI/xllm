@@ -22,7 +22,6 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/layers/common/attention_mask.h"
 #endif
-#include "core/framework/model/rec_model_utils.h"
 #include "core/layers/qwen3_moe_decoder_layer.h"
 #include "models/llm/llm_model_base.h"
 
@@ -108,14 +107,6 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
     return forward_impl(tokens, positions, kv_caches, local_params);
   }
 
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const RecModelParams& input_params) {
-    auto local_params = input_params.clone();
-    return forward_impl(tokens, positions, kv_caches, local_params);
-  }
-
   template <typename InputParams>
   ModelOutput forward_impl(torch::Tensor tokens,
                            torch::Tensor positions,
@@ -154,18 +145,10 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
       if (!modified_input_params.synchronize_layer(static_cast<uint32_t>(i))) {
         return ModelOutput();
       }
-      prepare_qwen_rec_layer(
-          modified_input_params, attn_metadata, i, layers_.size());
 #if defined(USE_CUDA) || defined(USE_MUSA)
       attn_metadata.plan_info->layer_id = i;
 #endif
 #if defined(USE_CUDA)
-      if (attn_metadata.shared_plan_info != nullptr) {
-        attn_metadata.shared_plan_info->layer_id = i;
-      }
-      if (attn_metadata.unshared_plan_info != nullptr) {
-        attn_metadata.unshared_plan_info->layer_id = i;
-      }
 #endif
       auto& layer = layers_[i];
       h = layer->forward(h,
@@ -179,12 +162,10 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
         return ModelOutput();
       }
 
-      if constexpr (std::is_same_v<InputParams, ModelParamsView>) {
-        if (input_params.has_multimodal()) {
-          const auto& deep_stacks = input_params.multimodal().deep_stacks;
-          if (i < deep_stacks.size()) {
-            h = h + deep_stacks[i];
-          }
+      if (input_params.has_multimodal()) {
+        const auto& deep_stacks = input_params.multimodal().deep_stacks;
+        if (i < deep_stacks.size()) {
+          h = h + deep_stacks[i];
         }
       }
     }
@@ -294,8 +275,6 @@ TORCH_MODULE(Qwen3MoeForCausalLM);
 
 // register the causal model
 REGISTER_CAUSAL_MODEL(qwen3_moe, Qwen3MoeForCausalLM);
-
-REGISTER_CAUSAL_REC_MODEL(qwen3_moe, Qwen3MoeForCausalLM);
 
 // register the model args
 // example config:

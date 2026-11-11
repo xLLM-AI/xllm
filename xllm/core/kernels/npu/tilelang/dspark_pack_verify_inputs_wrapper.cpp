@@ -67,7 +67,6 @@ bool spans_overlap(const torch::Tensor& first, const torch::Tensor& second) {
 
 DsparkPackVerifyInputsSpecialization build_runtime_specialization(
     int64_t batch_size,
-    bool device_control,
     int64_t draft_width) {
   int32_t bucket = 1;
   while (bucket < batch_size) {
@@ -75,8 +74,6 @@ DsparkPackVerifyInputsSpecialization build_runtime_specialization(
   }
   return make_dspark_pack_verify_inputs_specialization(
       DsparkPackVerifyInputsMaxBatchSize{bucket},
-      DsparkPackVerifyInputsDeviceControl{device_control ? int32_t{1}
-                                                         : int32_t{0}},
       DsparkPackVerifyInputsDraftWidth{static_cast<int32_t>(draft_width)});
 }
 
@@ -105,35 +102,27 @@ int32_t copy_core_count(const torch::Device& device, int64_t capacity) {
   return static_cast<int32_t>(
       std::min(requested, static_cast<int64_t>(cached_core_limit)));
 }
-void pack_verify_inputs(const torch::Tensor& anchors,
-                        const torch::Tensor& proposals,
-                        const torch::Tensor& base_positions,
-                        const torch::Tensor& base_kv_lengths,
-                        const torch::Tensor& base_block_table,
-                        const torch::Tensor& widths,
-                        torch::Tensor& offsets,
-                        torch::Tensor& tokens,
-                        torch::Tensor& positions,
-                        torch::Tensor& kv_seq_lens,
-                        torch::Tensor& slot_mapping,
-                        torch::Tensor& block_table,
-                        torch::Tensor& q_seq_lens,
-                        torch::Tensor& owners,
-                        torch::Tensor& columns,
-                        int64_t block_size,
-                        const torch::Tensor& control,
-                        bool device_control,
-                        int64_t draft_width,
-                        const torch::Tensor& state_indices = {},
-                        const torch::Tensor& accepted = {},
-                        const torch::Tensor& graph_state_indices = {},
-                        const torch::Tensor& graph_accepted = {},
-                        const torch::Tensor& cu_seqlens = {}) {
+}  // namespace
+
+void dspark_pack_verify_inputs(const torch::Tensor& anchors,
+                               const torch::Tensor& proposals,
+                               const torch::Tensor& base_positions,
+                               const torch::Tensor& base_kv_lengths,
+                               const torch::Tensor& base_block_table,
+                               const torch::Tensor& widths,
+                               torch::Tensor& offsets,
+                               torch::Tensor& tokens,
+                               torch::Tensor& positions,
+                               torch::Tensor& kv_seq_lens,
+                               torch::Tensor& slot_mapping,
+                               torch::Tensor& block_table,
+                               torch::Tensor& q_seq_lens,
+                               torch::Tensor& owners,
+                               torch::Tensor& columns,
+                               int64_t block_size) {
   CHECK(proposals.defined());
-  if (!device_control) {
-    CHECK_EQ(proposals.dim(), 2);
-    draft_width = proposals.size(1);
-  }
+  CHECK_EQ(proposals.dim(), 2);
+  const int64_t draft_width = proposals.size(1);
   CHECK(draft_width == 5 || draft_width == 7);
   CHECK(anchors.defined());
   CHECK(anchors.device().is_privateuseone());
@@ -147,20 +136,11 @@ void pack_verify_inputs(const torch::Tensor& anchors,
   CHECK(proposals.defined());
   CHECK_EQ(proposals.device(), device);
   CHECK(proposals.is_contiguous());
-  if (device_control) {
-    CHECK_GT(batch_size, 0);
-    check_vector(
-        proposals, device, torch::kUInt8, batch_size * (12 * draft_width + 4));
-    CHECK(widths.is_same(proposals));
-    check_vector(control, device, torch::kInt64, /*rows=*/1);
-    CHECK(!spans_overlap(proposals, control));
-  } else {
-    check_vector(widths, device, torch::kInt32, batch_size);
-    CHECK_EQ(proposals.scalar_type(), torch::kInt64);
-    CHECK_EQ(proposals.dim(), 2);
-    CHECK_EQ(proposals.size(0), batch_size);
-    CHECK_EQ(proposals.size(1), draft_width);
-  }
+  check_vector(widths, device, torch::kInt32, batch_size);
+  CHECK_EQ(proposals.scalar_type(), torch::kInt64);
+  CHECK_EQ(proposals.dim(), 2);
+  CHECK_EQ(proposals.size(0), batch_size);
+  CHECK_EQ(proposals.size(1), draft_width);
   CHECK(base_block_table.defined());
   CHECK_EQ(base_block_table.device(), device);
   CHECK_EQ(base_block_table.scalar_type(), torch::kInt32);
@@ -175,7 +155,7 @@ void pack_verify_inputs(const torch::Tensor& anchors,
   CHECK(tokens.defined());
   CHECK_EQ(tokens.dim(), 1);
   const int64_t capacity = tokens.size(0);
-  CHECK_GE(capacity, device_control ? int64_t{1} : batch_size);
+  CHECK_GE(capacity, batch_size);
   CHECK_GE(capacity, 0);
   CHECK_LE(capacity, kMaxBatchSize * (draft_width + 1));
   CHECK_LE(table_columns,
@@ -198,7 +178,7 @@ void pack_verify_inputs(const torch::Tensor& anchors,
   CHECK_EQ(block_table.size(1), table_columns);
   CHECK(block_table.is_contiguous());
   std::vector<const torch::Tensor*> inputs;
-  inputs.reserve(8);
+  inputs.reserve(6);
   inputs.insert(inputs.end(),
                 {&anchors,
                  &proposals,
@@ -207,7 +187,7 @@ void pack_verify_inputs(const torch::Tensor& anchors,
                  &base_block_table,
                  &widths});
   std::vector<const torch::Tensor*> outputs;
-  outputs.reserve(12);
+  outputs.reserve(9);
   outputs.insert(outputs.end(),
                  {&offsets,
                   &tokens,
@@ -218,23 +198,6 @@ void pack_verify_inputs(const torch::Tensor& anchors,
                   &q_seq_lens,
                   &owners,
                   &columns});
-  const bool recurrent = state_indices.defined();
-  int64_t linear_capacity = 0;
-  if (recurrent) {
-    CHECK(device_control);
-    check_vector(state_indices, device, torch::kInt32, batch_size);
-    check_vector(accepted, device, torch::kInt32, batch_size);
-    CHECK(graph_state_indices.defined());
-    linear_capacity = graph_state_indices.numel();
-    CHECK_GT(linear_capacity, 0);
-    CHECK_LE(linear_capacity, std::min(batch_size, capacity));
-    check_vector(graph_state_indices, device, torch::kInt32, linear_capacity);
-    check_vector(graph_accepted, device, torch::kInt32, linear_capacity);
-    check_vector(cu_seqlens, device, torch::kInt32, linear_capacity + 1);
-    inputs.insert(inputs.end(), {&state_indices, &accepted});
-    outputs.insert(outputs.end(),
-                   {&graph_state_indices, &graph_accepted, &cu_seqlens});
-  }
   for (size_t output = 0; output < outputs.size(); ++output) {
     for (const torch::Tensor* input : inputs) {
       CHECK(!spans_overlap(*outputs[output], *input))
@@ -244,175 +207,35 @@ void pack_verify_inputs(const torch::Tensor& anchors,
       CHECK(!spans_overlap(*outputs[output], *outputs[previous]))
           << "DSpark packed output spans must be disjoint";
     }
-    if (device_control) {
-      CHECK(!spans_overlap(*outputs[output], control));
-    }
   }
   const auto specialization =
-      build_runtime_specialization(batch_size, device_control, draft_width);
+      build_runtime_specialization(batch_size, draft_width);
   const auto* entry =
       find_dspark_pack_verify_inputs_kernel_entry(specialization);
   CHECK(entry != nullptr) << available_dspark_pack_verify_inputs_variant_keys();
   const int32_t copy_cores = copy_core_count(device, capacity);
   const auto stream = c10_npu::getCurrentNPUStream(device.index());
   c10_npu::NPUStreamGuard stream_guard(stream);
-  entry->fn(
-      reinterpret_cast<uint8_t*>(anchors.data_ptr()),
-      reinterpret_cast<uint8_t*>(proposals.data_ptr()),
-      reinterpret_cast<uint8_t*>(base_positions.data_ptr()),
-      reinterpret_cast<uint8_t*>(base_kv_lengths.data_ptr()),
-      reinterpret_cast<uint8_t*>(base_block_table.data_ptr()),
-      reinterpret_cast<uint8_t*>(widths.data_ptr()),
-      reinterpret_cast<uint8_t*>(offsets.data_ptr()),
-      reinterpret_cast<uint8_t*>(tokens.data_ptr()),
-      reinterpret_cast<uint8_t*>(positions.data_ptr()),
-      reinterpret_cast<uint8_t*>(kv_seq_lens.data_ptr()),
-      reinterpret_cast<uint8_t*>(slot_mapping.data_ptr()),
-      reinterpret_cast<uint8_t*>(block_table.data_ptr()),
-      reinterpret_cast<uint8_t*>(q_seq_lens.data_ptr()),
-      reinterpret_cast<uint8_t*>(owners.data_ptr()),
-      reinterpret_cast<uint8_t*>(columns.data_ptr()),
-      device_control ? reinterpret_cast<uint8_t*>(control.data_ptr()) : nullptr,
-      recurrent ? reinterpret_cast<uint8_t*>(state_indices.data_ptr())
-                : nullptr,
-      recurrent ? reinterpret_cast<uint8_t*>(accepted.data_ptr()) : nullptr,
-      recurrent ? reinterpret_cast<uint8_t*>(graph_state_indices.data_ptr())
-                : nullptr,
-      recurrent ? reinterpret_cast<uint8_t*>(graph_accepted.data_ptr())
-                : nullptr,
-      recurrent ? reinterpret_cast<uint8_t*>(cu_seqlens.data_ptr()) : nullptr,
-      static_cast<int32_t>(batch_size),
-      static_cast<int32_t>(capacity),
-      static_cast<int32_t>(table_columns),
-      static_cast<int32_t>(block_size),
-      copy_cores,
-      static_cast<int32_t>(linear_capacity),
-      stream.stream());
-}
-}  // namespace
-
-void dspark_pack_verify_inputs(const torch::Tensor& anchors,
-                               const torch::Tensor& proposals,
-                               const torch::Tensor& base_positions,
-                               const torch::Tensor& base_kv_lengths,
-                               const torch::Tensor& base_block_table,
-                               const torch::Tensor& widths,
-                               torch::Tensor& offsets,
-                               torch::Tensor& tokens,
-                               torch::Tensor& positions,
-                               torch::Tensor& kv_seq_lens,
-                               torch::Tensor& slot_mapping,
-                               torch::Tensor& block_table,
-                               torch::Tensor& q_seq_lens,
-                               torch::Tensor& owners,
-                               torch::Tensor& columns,
-                               int64_t block_size) {
-  pack_verify_inputs(anchors,
-                     proposals,
-                     base_positions,
-                     base_kv_lengths,
-                     base_block_table,
-                     widths,
-                     offsets,
-                     tokens,
-                     positions,
-                     kv_seq_lens,
-                     slot_mapping,
-                     block_table,
-                     q_seq_lens,
-                     owners,
-                     columns,
-                     block_size,
-                     torch::Tensor(),
-                     /*device_control=*/false,
-                     /*draft_width=*/0);
-}
-
-void dspark_pack_verify_inputs_graph(const torch::Tensor& anchors,
-                                     const torch::Tensor& arena,
-                                     const torch::Tensor& base_positions,
-                                     const torch::Tensor& base_kv_lengths,
-                                     const torch::Tensor& base_block_table,
-                                     const torch::Tensor& control,
-                                     torch::Tensor& offsets,
-                                     torch::Tensor& tokens,
-                                     torch::Tensor& positions,
-                                     torch::Tensor& kv_seq_lens,
-                                     torch::Tensor& slot_mapping,
-                                     torch::Tensor& block_table,
-                                     torch::Tensor& q_seq_lens,
-                                     torch::Tensor& owners,
-                                     torch::Tensor& columns,
-                                     int64_t block_size,
-                                     int64_t draft_width) {
-  pack_verify_inputs(anchors,
-                     arena,
-                     base_positions,
-                     base_kv_lengths,
-                     base_block_table,
-                     arena,
-                     offsets,
-                     tokens,
-                     positions,
-                     kv_seq_lens,
-                     slot_mapping,
-                     block_table,
-                     q_seq_lens,
-                     owners,
-                     columns,
-                     block_size,
-                     control,
-                     /*device_control=*/true,
-                     draft_width);
-}
-
-void dspark_pack_recurrent_verify_inputs_graph(
-    const torch::Tensor& anchors,
-    const torch::Tensor& arena,
-    const torch::Tensor& base_positions,
-    const torch::Tensor& base_kv_lengths,
-    const torch::Tensor& base_block_table,
-    const torch::Tensor& control,
-    torch::Tensor& offsets,
-    torch::Tensor& tokens,
-    torch::Tensor& positions,
-    torch::Tensor& kv_seq_lens,
-    torch::Tensor& slot_mapping,
-    torch::Tensor& block_table,
-    torch::Tensor& q_seq_lens,
-    torch::Tensor& owners,
-    torch::Tensor& columns,
-    const torch::Tensor& state_indices,
-    const torch::Tensor& accepted,
-    torch::Tensor& graph_state_indices,
-    torch::Tensor& graph_accepted,
-    torch::Tensor& cu_seqlens,
-    int64_t block_size,
-    int64_t draft_width) {
-  CHECK(state_indices.defined());
-  pack_verify_inputs(anchors,
-                     arena,
-                     base_positions,
-                     base_kv_lengths,
-                     base_block_table,
-                     arena,
-                     offsets,
-                     tokens,
-                     positions,
-                     kv_seq_lens,
-                     slot_mapping,
-                     block_table,
-                     q_seq_lens,
-                     owners,
-                     columns,
-                     block_size,
-                     control,
-                     /*device_control=*/true,
-                     draft_width,
-                     state_indices,
-                     accepted,
-                     graph_state_indices,
-                     graph_accepted,
-                     cu_seqlens);
+  entry->fn(reinterpret_cast<uint8_t*>(anchors.data_ptr()),
+            reinterpret_cast<uint8_t*>(proposals.data_ptr()),
+            reinterpret_cast<uint8_t*>(base_positions.data_ptr()),
+            reinterpret_cast<uint8_t*>(base_kv_lengths.data_ptr()),
+            reinterpret_cast<uint8_t*>(base_block_table.data_ptr()),
+            reinterpret_cast<uint8_t*>(widths.data_ptr()),
+            reinterpret_cast<uint8_t*>(offsets.data_ptr()),
+            reinterpret_cast<uint8_t*>(tokens.data_ptr()),
+            reinterpret_cast<uint8_t*>(positions.data_ptr()),
+            reinterpret_cast<uint8_t*>(kv_seq_lens.data_ptr()),
+            reinterpret_cast<uint8_t*>(slot_mapping.data_ptr()),
+            reinterpret_cast<uint8_t*>(block_table.data_ptr()),
+            reinterpret_cast<uint8_t*>(q_seq_lens.data_ptr()),
+            reinterpret_cast<uint8_t*>(owners.data_ptr()),
+            reinterpret_cast<uint8_t*>(columns.data_ptr()),
+            static_cast<int32_t>(batch_size),
+            static_cast<int32_t>(capacity),
+            static_cast<int32_t>(table_columns),
+            static_cast<int32_t>(block_size),
+            copy_cores,
+            stream.stream());
 }
 }  // namespace xllm::kernel::npu::tilelang

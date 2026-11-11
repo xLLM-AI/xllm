@@ -61,9 +61,6 @@ limitations under the License.
 #include "util/timer.h"
 #if defined(USE_NPU)
 #include "hccl/hccl.h"
-#include "xllm_atb_layers/core/include/atb_speed/base/external_comm_manager.h"
-#include "xllm_atb_layers/core/include/atb_speed/utils/singleton.h"
-#include "xllm_atb_layers/models/base/param/mapping.h"
 #endif
 
 extern char** environ;
@@ -450,8 +447,7 @@ WorkerServer::WorkerServer(int32_t local_worker_idx,
 
   if (worker_type == WorkerType::LLM || worker_type == WorkerType::ELM ||
       worker_type == WorkerType::VLM || worker_type == WorkerType::EVLM ||
-      worker_type == WorkerType::REC || worker_type == WorkerType::MMEVLM ||
-      worker_type == WorkerType::DIT) {
+      worker_type == WorkerType::MMEVLM || worker_type == WorkerType::DIT) {
     if (use_spawn_worker) {
       // start worker in a spawn process(for offline inference worker.)
       create_spawn_server(local_worker_idx,

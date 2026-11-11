@@ -22,7 +22,7 @@ import torch
 
 pytest.importorskip("torch_npu", reason="NPU paged-attention tests require torch_npu")
 
-from xllm.python.attention.backend import LayerCache  # noqa: E402
+from xllm.python.attention.backend import LayerCache, SharedKVCacheLayout  # noqa: E402
 from xllm.python.attention.npu_paged_attention import (  # noqa: E402
     NpuPagedAttentionBackend,
     PagedAttentionGraphState,
@@ -60,6 +60,18 @@ def test_uses_first_nonempty_key_cache() -> None:
 
     assert backend.num_kv_blocks == 17
     assert backend.page_size == 128
+
+
+@pytest.mark.parametrize("query_ends", [None, [3, 5], [0, 3, 5]])
+def test_query_sequence_ends_accepts_runtime_cumulative_layouts(query_ends: list[int] | None) -> None:
+    backend = _ordinary_backend()
+    tensor = None if query_ends is None else torch.tensor(query_ends, dtype=torch.int64)
+    result = backend._query_sequence_ends(tensor, 2)
+    if query_ends is None:
+        assert result is None
+    else:
+        assert result.dtype == torch.int32
+        assert result.tolist() == [3, 5]
 
 
 @pytest.mark.parametrize("host_ends", [[3, 5], [0, 3, 5]])
@@ -577,61 +589,6 @@ def test_mla_block_graph_matches_cpu_attention_after_prefix_changes() -> None:
             ) * layer.scale
             expected.append(torch.einsum("hts,sd->thd", scores.softmax(-1), keys))
         torch.testing.assert_close(captured.cpu().float(), torch.cat(expected), rtol=1e-2, atol=2e-3)
-
-
-def test_sparse_mtp_page_crossing_updates_without_host_lengths_or_query_rebuild(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from xllm.python.model_executor.forward_context import (
-        AclGraphExecutionState,
-        ForwardContext,
-        forward_context,
-    )
-
-    backend = _mla_backend()
-    cache = torch.empty(4, 128, 1, 512)
-    backend.bind_kv_caches([LayerCache(key=cache, value=cache, index=cache)])
-    metadata = SimpleNamespace(
-        slot_mapping=torch.tensor([127], dtype=torch.int32),
-        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
-        kv_seq_lens=torch.tensor([128], dtype=torch.int32),
-        q_cu_seq_lens=None,
-        q_seq_lens=None,
-        kv_seq_lens_host_values=[],
-        expanded_decode_metadata=None,
-        is_prefill=False,
-        is_chunked_prefill=False,
-    )
-
-    def reject_readback(*args: object, **kwargs: object) -> None:
-        raise AssertionError("sparse MTP metadata must stay on Device")
-
-    context = ForwardContext(backend, torch.device("cpu"), metadata, [], execution_state=AclGraphExecutionState({}))
-    with monkeypatch.context() as no_readback, forward_context(context):
-        no_readback.setattr(torch.Tensor, "cpu", reject_readback)
-        no_readback.setattr(torch.Tensor, "item", reject_readback)
-        backend.prepare_owned_graph_metadata(metadata)
-        assert backend.graph_metadata_updated_in_place
-        assert backend._mla_actual_seq_kv.data_ptr() == metadata.kv_seq_lens.data_ptr()
-        destinations = tuple(
-            (tensor.shape, tensor.dtype, tensor.device, tensor.data_ptr())
-            for tensor in (metadata.slot_mapping, metadata.block_table, metadata.kv_seq_lens)
-        )
-        query_ptr = backend._mla_actual_seq_q.data_ptr()
-        metadata.kv_seq_lens.fill_(129)
-        metadata.slot_mapping.fill_(128)
-        metadata.block_table.copy_(torch.tensor([[2, 3]], dtype=torch.int32))
-    assert backend._causal_mask is None
-    assert destinations == tuple(
-        (tensor.shape, tensor.dtype, tensor.device, tensor.data_ptr())
-        for tensor in (metadata.slot_mapping, metadata.block_table, metadata.kv_seq_lens)
-    )
-    assert backend._mla_actual_seq_q.data_ptr() == query_ptr
-    assert backend._mla_actual_seq_q.tolist() == [1]
-    assert backend._mla_actual_seq_kv.tolist() == [129]
-    assert backend._block_table_i32.tolist() == [[2, 3]]
-    backend.prepare(metadata)
-    assert not backend.graph_metadata_updated_in_place
 
 
 @pytest.mark.parametrize("prefill,chunked", [(True, False), (False, True), (False, False)])
@@ -1204,6 +1161,244 @@ def test_paged_workspace_sharing_respects_kv_capacity(monkeypatch: pytest.Monkey
     assert states[0].workspace.data_ptr() == states[2].workspace.data_ptr()
 
 
+def test_shared_paged_graph_refreshes_private_physical_indices(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144)
+    monkeypatch.setattr(backend, "_allocate_graph_workspace", lambda *_args, **_kwargs: torch.empty(4))
+    executions = [AclGraphExecutionState({}) for _ in range(2)]
+    metadata = [_mla_metadata(), _mla_metadata()]
+    mappings = []
+    contexts = []
+    for index, (view, execution) in enumerate(zip(metadata, executions)):
+        view.block_table.add_(2 * index)
+        view.slot_mapping = torch.tensor([129 + 256 * index, -1], dtype=torch.int32)
+        context = ForwardContext(backend, torch.device("cpu"), view, [], execution_state=execution)
+        contexts.append(context)
+        with forward_context(context):
+            backend.prepare(view, graph_mode=True)
+            mappings.append(backend._full_slot_mapping(view))
+
+    first, second = [execution.paged_attention[2] for execution in executions]
+    table_pointer = first.block_table.data_ptr()
+    mapping_pointer = mappings[0].data_ptr()
+    assert table_pointer != second.block_table.data_ptr()
+    assert mapping_pointer != mappings[1].data_ptr()
+    assert second.block_table.tolist() == [[16], [24]]
+    assert mappings[1].tolist() == [3073, -1]
+
+    metadata[0].block_table.copy_(torch.tensor([[4], [5]], dtype=torch.int32))
+    metadata[0].slot_mapping.copy_(torch.tensor([641, -1], dtype=torch.int32))
+    with forward_context(contexts[0]):
+        backend.prepare(metadata[0], graph_mode=True)
+        refreshed_mapping = backend._full_slot_mapping(metadata[0])
+
+    assert first.block_table.data_ptr() == table_pointer
+    assert refreshed_mapping.data_ptr() == mapping_pointer
+    assert first.block_table.tolist() == [[32], [40]]
+    assert refreshed_mapping.tolist() == [5121, -1]
+    assert second.block_table.tolist() == [[16], [24]]
+    assert mappings[1].tolist() == [3073, -1]
+
+
+def test_slab_full_layers_refresh_independent_graph_block_tables() -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+    rows = [torch.zeros(32, dtype=torch.int32) for _ in range(2)]
+    rows[0][1:3] = torch.tensor([16, 18])
+    rows[1][1:3] = torch.tensor([48, 50])
+    backend._kv_caches = [
+        LayerCache(torch.empty(1, 128, 1, 2), torch.empty(1, 128, 1, 2), full_block_rows=table) for table in rows
+    ]
+    metadata = _mla_metadata()
+    execution = AclGraphExecutionState({})
+    context = ForwardContext(backend, torch.device("cpu"), metadata, backend._kv_caches, execution_state=execution)
+    with forward_context(context):
+        backend._block_table_i32 = torch.tensor([[1, 2, -1]], dtype=torch.int32)
+        backend._prepare_shared_full_tables()
+        first, second = backend._shared_full_block_tables.values()
+        pointers = first.data_ptr(), second.data_ptr()
+        assert first.tolist() == [[16, 18, -1]]
+        assert second.tolist() == [[48, 50, -1]]
+        rows[0][1] = 72
+        backend._prepare_shared_full_tables()
+        assert first.tolist() == [[72, 18, -1]]
+        assert second.tolist() == [[48, 50, -1]]
+        assert pointers == tuple(table.data_ptr() for table in backend._shared_full_block_tables.values())
+        assert pointers[0] != pointers[1]
+
+
+def test_batched_slab_tables_and_write_slots_preserve_graph_entry_ownership() -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+    rows = torch.zeros(2, 32, dtype=torch.int32)
+    rows[:, 1:3] = torch.tensor([[16, 18], [48, 50]])
+    backend._kv_caches = [
+        LayerCache(torch.empty(1, 128, 1, 2), torch.empty(1, 128, 1, 2), full_block_rows=row) for row in rows.unbind(0)
+    ]
+    metadata = [_mla_metadata(), _mla_metadata()]
+    contexts = [
+        ForwardContext(
+            backend, torch.device("cpu"), view, backend._kv_caches, execution_state=AclGraphExecutionState({})
+        )
+        for view in metadata
+    ]
+    tables = []
+    mappings = []
+    for view, context in zip(metadata, contexts):
+        view.slot_mapping = torch.tensor([129, -1], dtype=torch.int32)
+        with forward_context(context):
+            backend._metadata = view
+            backend._block_table_i32 = torch.tensor([[1, 2, 0, -1]], dtype=torch.int32)
+            backend._prepare_shared_full_tables()
+            backend._active_full_layer = 0
+            tables.append(backend._shared_full_block_tables[0])
+            mappings.append(backend._full_slot_mapping(view))
+    pointers = tables[0].data_ptr(), mappings[0].data_ptr()
+    assert tables[0].data_ptr() != tables[1].data_ptr()
+    assert mappings[0].data_ptr() != mappings[1].data_ptr()
+    assert mappings[1].tolist() == [2049, -1]
+
+    rows[0, 1] = 72
+    metadata[0].slot_mapping.copy_(torch.tensor([130, -1], dtype=torch.int32))
+    with forward_context(contexts[0]):
+        backend._metadata = metadata[0]
+        backend._block_table_i32 = torch.tensor([[1, 2, 0, -1]], dtype=torch.int32)
+        backend._prepare_shared_full_tables()
+        backend._active_full_layer = 0
+        refreshed = backend._full_slot_mapping(metadata[0])
+    assert pointers == (tables[0].data_ptr(), refreshed.data_ptr())
+    assert tables[0].tolist() == [[72, 18, backend._shared_kv_layout.full_read_padding_row, -1]]
+    assert refreshed.tolist() == [9218, -1]
+    assert tables[1].tolist() == [[16, 18, backend._shared_kv_layout.full_read_padding_row, -1]]
+    assert mappings[1].tolist() == [2049, -1]
+
+
+@pytest.mark.parametrize("mode", ["ordinary", "prepared", "device-length"])
+def test_slab_graph_replay_preserves_full_table_update_owner(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+
+    def _workspace(*args: object, **kwargs: object) -> torch.Tensor:
+        return torch.empty(0)
+
+    monkeypatch.setattr(backend, "_allocate_graph_workspace", _workspace)
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+    rows = torch.zeros(2, 32, dtype=torch.int32)
+    rows[:, 1:3] = torch.tensor([[16, 18], [48, 50]])
+    backend._kv_caches = [
+        LayerCache(torch.empty(1, 128, 1, 2), torch.empty(1, 128, 1, 2), full_block_rows=row) for row in rows.unbind(0)
+    ]
+    metadata = _ordinary_metadata(paged=True)
+    metadata.block_table = torch.tensor([[1, 0, -1], [2, 0, -1]], dtype=torch.int32)
+    metadata.slot_mapping = torch.tensor([129, -1], dtype=torch.int32)
+    if mode != "ordinary":
+        metadata.prepared_attention_state = backend.prepare_metadata(
+            metadata, device_kv_lengths=mode == "device-length"
+        )
+    context = ForwardContext(
+        backend, torch.device("cpu"), metadata, backend._kv_caches, execution_state=AclGraphExecutionState({})
+    )
+    with forward_context(context):
+        backend.prepare(metadata, graph_mode=True)
+        tables = tuple(backend._shared_full_block_tables.values())
+        mappings = tuple(backend._shared_full_slot_mappings.values())
+        pointers = tuple(tensor.data_ptr() for tensor in (*tables, *mappings))
+        rows[0, 2] = 72
+        metadata.block_table[0, 0] = 2
+        metadata.slot_mapping[0] = 258
+        backend.prepare_graph_replay(metadata)
+        assert pointers == tuple(
+            tensor.data_ptr()
+            for tensor in (*backend._shared_full_block_tables.values(), *backend._shared_full_slot_mappings.values())
+        )
+        padding = backend._shared_kv_layout.full_read_padding_row
+        if mode == "device-length":
+            # Host replay binds the captured entry's outputs. The captured
+            # prepare owns reading the new logical IDs and native row maps.
+            assert tables[0].tolist() == [[16, padding, -1], [18, padding, -1]]
+            assert mappings[0].tolist() == [2049, -1]
+        else:
+            assert tables[0].tolist() == [[72, padding, -1], [72, padding, -1]]
+            assert mappings[0].tolist() == [9218, -1]
+
+
+@pytest.mark.parametrize("shared_pool", [False, True])
+def test_device_length_replay_refreshes_all_captured_layer_host_bounds(shared_pool: bool) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    if shared_pool:
+        backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+        rows = torch.zeros(2, 32, dtype=torch.int32)
+        rows[:, 1:3] = torch.tensor([[16, 18], [48, 50]])
+        backend._kv_caches = [
+            LayerCache(torch.empty(1, 128, 1, 2), torch.empty(1, 128, 1, 2), full_block_rows=row)
+            for row in rows.unbind(0)
+        ]
+    metadata = _ordinary_metadata(paged=True)
+    metadata.slot_mapping = torch.tensor([129, -1], dtype=torch.int32)
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    execution = AclGraphExecutionState({})
+    context = ForwardContext(backend, torch.device("cpu"), metadata, backend._kv_caches, execution_state=execution)
+    with forward_context(context):
+        backend.prepare(metadata, graph_mode=True)
+        state_keys = ((2, 0), (2, 1)) if shared_pool else (2,)
+        for key in state_keys:
+            execution.paged_attention[key] = PagedAttentionGraphState(
+                workspace=None,
+                output=torch.empty(0),
+                lse=torch.empty(0),
+                block_table=metadata.block_table,
+                query=[1, 1],
+                kv=[6, 4],
+            )
+        captured_bounds = [execution.paged_attention[key].kv for key in state_keys]
+        unrelated_key = (3, 0) if shared_pool else 3
+        unrelated = PagedAttentionGraphState(
+            workspace=None,
+            output=torch.empty(0),
+            lse=torch.empty(0),
+            block_table=metadata.block_table,
+            query=[1, 1, 1],
+            kv=[7, 5, 3],
+        )
+        execution.paged_attention[unrelated_key] = unrelated
+        metadata.kv_seq_lens.copy_(torch.tensor([10, 8], dtype=torch.int32))
+        metadata.kv_seq_lens_host_values = [10, 8]
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+        backend.prepare_graph_replay(metadata)
+
+    assert all(bounds == [10, 8] for bounds in captured_bounds)
+    assert all(execution.paged_attention[key].kv is bounds for key, bounds in zip(state_keys, captured_bounds))
+    assert unrelated.kv == [7, 5, 3]
+
+
+def test_prepared_slab_replay_requires_captured_entry_buffers() -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+    backend._kv_caches = [
+        LayerCache(
+            torch.empty(1, 128, 1, 2), torch.empty(1, 128, 1, 2), full_block_rows=torch.zeros(32, dtype=torch.int32)
+        )
+    ]
+    metadata = _ordinary_metadata(paged=True)
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    context = ForwardContext(
+        backend, torch.device("cpu"), metadata, backend._kv_caches, execution_state=AclGraphExecutionState({})
+    )
+    with forward_context(context), pytest.raises(RuntimeError, match="owned by a captured graph entry"):
+        backend.prepare_graph_replay(metadata)
+
+
 def _sparse_attention_out_args(
     query: torch.Tensor, output: torch.Tensor, layout: str, *, rope: bool = False
 ) -> tuple[object, ...]:
@@ -1415,6 +1610,7 @@ def test_kda_verify_uses_framework_native_conv(
             conv,
             ssm,
             recurrent,
+            0,
         )
         assert torch.isfinite(output).all()
     assert len(calls) == 2

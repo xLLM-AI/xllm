@@ -84,8 +84,7 @@ class AttentionDeviceInputView final {
         history_compressed_kv(owner.history_compressed_kv),
         history_k_rope(owner.history_k_rope),
         ring_cur_seqlen(owner.ring_cur_seqlen),
-        ring_cache_seqlen(owner.ring_cache_seqlen),
-        in_prefix_slots(owner.in_prefix_slots) {}
+        ring_cache_seqlen(owner.ring_cache_seqlen) {}
 
   torch::Tensor& q_seq_lens;
   torch::Tensor& kv_seq_lens;
@@ -102,7 +101,6 @@ class AttentionDeviceInputView final {
   torch::Tensor& history_k_rope;
   torch::Tensor& ring_cur_seqlen;
   torch::Tensor& ring_cache_seqlen;
-  torch::Tensor& in_prefix_slots;
 };
 
 // Borrows storage from a domain owner. No tensor or vector is copied.
@@ -376,7 +374,6 @@ void copy_attention_device_input(const Source& source, Target& target) {
   target.history_k_rope = source.history_k_rope;
   target.ring_cur_seqlen = source.ring_cur_seqlen;
   target.ring_cache_seqlen = source.ring_cache_seqlen;
-  target.in_prefix_slots = source.in_prefix_slots;
 }
 
 template <typename Owner>
@@ -440,33 +437,6 @@ class VlmAttentionInput final {
   }
   VlmAttentionHostInput host;
   VlmAttentionDeviceInput device;
-  torch::Tensor attention_host_buffer;
-  torch::Tensor attention_device_buffer;
-  uint64_t attention_buffer_bytes = 0;
-  uint64_t attention_buffer_capacity = 0;
-  std::shared_ptr<int> attention_buffer_owner = std::make_shared<int>(0);
-};
-
-class RecAttentionInput final {
- public:
-  using BufferReusePolicy = AttentionBufferReusePolicy;
-  using PackedIntInput = PackedAttentionIntInput;
-  RecAttentionInput to(const torch::Device& target) const {
-    return detail::attention_to(*this, target);
-  }
-  bool rebuild_device_buffer(
-      const torch::Device& target,
-      const std::vector<PackedIntInput>& extra = {},
-      BufferReusePolicy policy = BufferReusePolicy::COPY_ON_WRITE) {
-    return AttentionInputView(*this).rebuild_device_buffer(
-        target, extra, policy);
-  }
-  void reserve_device_buffer_capacity(uint64_t bytes,
-                                      const torch::Device& target) {
-    AttentionInputView(*this).reserve_device_buffer_capacity(bytes, target);
-  }
-  RecAttentionHostInput host;
-  RecAttentionDeviceInput device;
   torch::Tensor attention_host_buffer;
   torch::Tensor attention_device_buffer;
   uint64_t attention_buffer_bytes = 0;

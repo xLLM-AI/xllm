@@ -102,7 +102,6 @@ _PUBLIC_NAMES = {
     "VLMMaster",
     "Options",
     "SamplingParams",
-    "BeamSearchParams",
     "PoolingParams",
     "RequestParams",
     "RequestOutput",
@@ -128,7 +127,7 @@ def _load_public_api() -> None:
     from xllm.pybind.args import ArgumentParser
     from xllm.pybind.embedding import Embedding
     from xllm.pybind.llm import LLM
-    from xllm.pybind.params import BeamSearchParams, PoolingParams, SamplingParams
+    from xllm.pybind.params import PoolingParams, SamplingParams
 
     try:
         from xllm.pybind.vlm import VLM
@@ -145,7 +144,6 @@ def _load_public_api() -> None:
             "VLMMaster": xllm_export.VLMMaster,
             "Options": xllm_export.Options,
             "SamplingParams": SamplingParams,
-            "BeamSearchParams": BeamSearchParams,
             "PoolingParams": PoolingParams,
             "RequestParams": xllm_export.RequestParams,
             "RequestOutput": xllm_export.RequestOutput,
@@ -185,7 +183,6 @@ __all__ = [
     "VLMMaster",
     "Options",
     "SamplingParams",
-    "BeamSearchParams",
     "PoolingParams",
     "RequestParams",
     "RequestOutput",

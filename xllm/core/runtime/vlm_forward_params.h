@@ -60,7 +60,6 @@ class VlmForwardInput final {
     inputs.positions_host = positions_host;
     inputs.input_params = input_params.clone();
     inputs.sampling_params = sampling_params;
-    inputs.json_object_invalid_draft = json_object_invalid_draft;
     inputs.json_object_errors = json_object_errors;
     return inputs;
   }
@@ -224,9 +223,6 @@ class VlmForwardInput final {
   std::vector<int32_t> sample_prior_output_rows;
   std::vector<JsonObjectGrammarState> json_object_states;
   std::vector<JsonObjectGrammarSnapshot> json_object_state_snapshots;
-  // Flattened [sequence][draft position] flags produced during MTP
-  // validation. This is execution-local metadata and is not transported.
-  std::vector<uint8_t> json_object_invalid_draft;
   // Errors detected while aligning prior overlap output with grammar rows.
   std::vector<JsonObjectOutputError> json_object_errors;
 
@@ -290,7 +286,6 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target) {
   params.embedding.mtp_bootstrap_embeddings =
       source.embedding.mtp_bootstrap_embeddings;
   params.parallel = source.parallel;
-  params.block_copy = source.block_copy;
   params.expert = source.expert;
   params.graph.attn_mask = source.graph.attn_mask;
   params.graph.tiling_data = source.graph.tiling_data;
@@ -328,7 +323,6 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target) {
   params.mtp_topk_state = source.mtp_topk_state;
   params.num_accepted_tokens_host = source.num_accepted_tokens_host;
   params.attn_metadata = source.attn_metadata;
-  params.python_attention_metadata = source.python_attention_metadata;
   params.enable_graph = source.enable_graph;
   params.clear_linear_attention_state();
   draft.sampling_params = target.sampling_params;

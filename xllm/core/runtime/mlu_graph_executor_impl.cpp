@@ -34,7 +34,6 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/runtime/graph_execution_input.h"
-#include "core/runtime/rec_graph_input.h"
 #include "core/util/tensor_options.h"
 #include "runtime/decode_graph_bucket.h"
 #include "util/utils.h"
@@ -316,11 +315,7 @@ template <typename Params>
 void GraphPersistentParam::init_params(const Params& params,
                                        uint32_t padding_num_tokens,
                                        uint32_t padding_needed) {
-  if constexpr (std::is_same_v<Params, ModelParamsView>) {
-    params_.emplace(params.to(tokens_.device()).view());
-  } else {
-    rec_params_.emplace(params.to(tokens_.device()));
-  }
+  params_.emplace(params.to(tokens_.device()).view());
   Params& graph_params = capture_params<Params>();
   graph_params.enable_graph = true;
   graph_params.attention.device.q_seq_lens = q_seq_lens_.slice(
@@ -413,10 +408,8 @@ void GraphPersistentParam::update_input_buffer(const torch::Tensor& tokens,
     }
   }
 
-  if constexpr (std::is_same_v<Params, ModelParamsView>) {
-    if (!multi_block_tables.empty()) {
-      graph_params.multi_block_tables = multi_block_tables;
-    }
+  if (!multi_block_tables.empty()) {
+    graph_params.multi_block_tables = multi_block_tables;
   }
 
   if (params.embedding.input_embedding.defined()) {
@@ -516,13 +509,8 @@ void MluGraph::capture(ModelType* model,
                        const torch_mlu::MempoolId_t& pool,
                        const torch_mlu::MLUStream& capture_stream,
                        const runtime::Options& options) {
-  using Params = std::conditional_t<std::is_same_v<ModelType, RecModel>,
-                                    RecModelParams,
-                                    ModelParamsView>;
   Params& graph_params = persistent_param_->capture_params<Params>();
-  if constexpr (std::is_same_v<Params, RecModelParams>) {
-    rec_graph_input_.emplace(graph_params.clone());
-  }
+
   int32_t slice_dim = persistent_param_->use_mrope_ ? 1 : 0;
   triton_jit::JITKernel::initialize_device();
   torch_mlu::synchronize();
@@ -582,9 +570,7 @@ void MluGraph::update_input_buffer(ModelType* model,
       tokens, positions, params, padding_needed);
   // For some models (e.g. DeepSeekV4), the metadata depends on variable host
   // data, which needs to be updated outside of capture.
-  if constexpr (std::is_same_v<Params, ModelParamsView>) {
-    prepare_model_graph_metadata(model, params);
-  }
+  prepare_model_graph_metadata(model, params);
 }
 
 MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
@@ -601,22 +587,6 @@ MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
   if (max_tokens_for_graph_mode_ < options_.max_seqs_per_batch()) {
     max_tokens_for_graph_mode_ = options_.max_seqs_per_batch();
   }
-}
-
-MluGraphExecutorImpl::MluGraphExecutorImpl(RecModel* model,
-                                           const ModelArgs& args,
-                                           const torch::Device& device,
-                                           const runtime::Options& options)
-    : MluGraphExecutorImpl(static_cast<CausalLM*>(nullptr),
-                           args,
-                           device,
-                           options) {
-  rec_model_ = model;
-}
-
-bool MluGraph::matches_graph_input(const RecModelParams& params) const {
-  return rec_graph_input_.has_value() &&
-         rec_graph_bindings_match(*rec_graph_input_, params);
 }
 
 template <typename ModelType, typename Params>
@@ -719,13 +689,6 @@ ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
   return run_impl(model_, tokens, positions, kv_caches, params);
 }
 
-ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
-                                      const torch::Tensor& positions,
-                                      std::vector<KVCache>& kv_caches,
-                                      const RecModelParams& params) {
-  return run_impl(rec_model_, tokens, positions, kv_caches, params);
-}
-
 template <typename ModelType, typename Params>
 ModelOutput MluGraphExecutorImpl::run_impl(ModelType* model,
                                            const torch::Tensor& tokens,
@@ -816,19 +779,10 @@ template void GraphPersistentParam::init_params<ModelParamsView>(
     const ModelParamsView&,
     uint32_t,
     uint32_t);
-template void GraphPersistentParam::init_params<RecModelParams>(
-    const RecModelParams&,
-    uint32_t,
-    uint32_t);
 template void GraphPersistentParam::update_input_buffer<ModelParamsView>(
     const torch::Tensor&,
     const torch::Tensor&,
     const ModelParamsView&,
-    uint32_t);
-template void GraphPersistentParam::update_input_buffer<RecModelParams>(
-    const torch::Tensor&,
-    const torch::Tensor&,
-    const RecModelParams&,
     uint32_t);
 
 }  // namespace xllm::mlu

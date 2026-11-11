@@ -1,7 +1,6 @@
 include(cc_test)
 
 add_subdirectory(moe)
-add_subdirectory(xattention)
 
 cc_test(
   NAME
@@ -15,23 +14,7 @@ cc_test(
     glog::glog
 )
 
-option(XLLM_ENABLE_BLOCK_COPY_TEST
-       "Build and register the expensive CUDA block_copy_test"
-       OFF)
 
-if(XLLM_ENABLE_BLOCK_COPY_TEST)
-  cc_test(
-    NAME
-      block_copy_test
-    SRCS
-      block_copy_test.cpp
-    DEPS
-      :cuda_kernels
-      torch
-      GTest::gtest_main
-      glog::glog
-  )
-endif()
 
 cc_test(
   NAME

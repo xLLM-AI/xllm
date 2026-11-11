@@ -32,7 +32,6 @@ limitations under the License.
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
-#include "core/framework/model/rec_model.h"
 #include "core/layers/cuda/attention.h"
 #include "core/layers/cuda/flashinfer_workspace.h"
 #include "core/platform/device.h"
@@ -243,68 +242,6 @@ class FakeAttnCausalLM final : public CausalLM {
   std::unique_ptr<layer::AttentionImpl> attn_;
 };
 
-class NativeRecGraphModel final : public RecModel {
- public:
-  NativeRecGraphModel(int64_t hidden_size, const torch::Device& device)
-      : hidden_size_(hidden_size),
-        options_(torch::TensorOptions().dtype(torch::kFloat32).device(device)) {
-  }
-
-  RecModelKind model_kind() const override { return RecModelKind::kOneRec; }
-
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>&,
-                      const RecModelParams& params) override {
-    ++forward_count_;
-    const auto& strategy = *params.onerec_xattention_params();
-    auto values = tokens.to(torch::kFloat32) + positions.to(torch::kFloat32) +
-                  strategy.current_round_tensor.to(torch::kFloat32);
-    auto hidden_states = values.unsqueeze(1).repeat({1, hidden_size_});
-    strategy.shared_k_caches.front().copy_(hidden_states[0]);
-    return ModelOutput(hidden_states);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor&) override {
-    return hidden_states;
-  }
-  void load_model(std::unique_ptr<ModelLoader>) override {}
-  torch::Device device() const override { return options_.device(); }
-  const torch::TensorOptions& options() const override { return options_; }
-  int64_t forward_count() const { return forward_count_; }
-
- private:
-  int64_t hidden_size_;
-  torch::TensorOptions options_;
-  int64_t forward_count_ = 0;
-};
-
-RecModelParams make_native_rec_decode_params(const torch::Device& device,
-                                             const torch::Tensor& round,
-                                             const torch::Tensor& cache) {
-  RecModelParams params;
-  params.meta.batch_forward_type = BatchForwardType::DECODE;
-  params.meta.num_sequences = 1;
-  params.meta.kv_max_seq_len = 1;
-  params.meta.q_max_seq_len = 1;
-  const auto options =
-      torch::TensorOptions().dtype(torch::kInt32).device(device);
-  params.attention.device.q_seq_lens = torch::tensor({1}, options);
-  params.attention.device.kv_seq_lens = torch::tensor({1}, options);
-  params.attention.device.q_cu_seq_lens = torch::tensor({1}, options);
-  params.attention.device.new_cache_slots = torch::tensor({0}, options);
-  params.attention.device.block_tables = torch::zeros({1, 1}, options);
-  params.attention.device.paged_kv_indptr = torch::tensor({0, 1}, options);
-  params.attention.device.paged_kv_indices = torch::tensor({0}, options);
-  params.attention.device.paged_kv_last_page_len = torch::tensor({1}, options);
-  auto& strategy = params.mutable_onerec_xattention_params();
-  strategy.rec_stage = OneRecModelInputParams::RecStage::DECODE;
-  strategy.current_round_tensor = round;
-  strategy.shared_k_caches = {cache};
-  return params;
-}
-
 ModelParamsView MakeDecodeParams(const torch::Device& device) {
   ModelParamsView p = ModelInputSnapshot(LlmModelParams()).view();
   p.meta.batch_forward_type = BatchForwardType::DECODE;
@@ -464,63 +401,6 @@ ModelParamsView make_multi_sequence_decode_params(const torch::Device& device) {
   p.attention.device.paged_kv_indices = torch::tensor({2, 4, 6}, iopt);
   p.attention.device.paged_kv_last_page_len = torch::tensor({1, 2}, iopt);
   return p;
-}
-
-TEST(CudaGraphExecutorTest,
-     NativeRecReplaysRoundsAndRecapturesChangedKvBindings) {
-  if (!torch::cuda::is_available()) {
-    GTEST_SKIP() << "CUDA is not available at runtime.";
-  }
-  ScopedConfigSnapshot config_snapshot;
-  ExecutionConfig::get_instance().enable_graph_vmm_pool(false);
-  const torch::Device device = InitXllmCudaDeviceForTest();
-  layer::flashinfer::FlashinferWorkspace::get_instance().initialize(device);
-  ModelArgs args = make_test_model_args();
-  args.dtype("float32");
-  runtime::Options options = make_test_runtime_options(4);
-  NativeRecGraphModel model(args.hidden_size(), device);
-  runtime::cuda::CudaGraphExecutorImpl executor(&model, args, device, options);
-  auto kv_caches = MakeKvCaches(device, 16, 1, 1, 128);
-  const auto int_options =
-      torch::TensorOptions().dtype(torch::kInt32).device(device);
-  auto tokens = torch::tensor({12}, int_options);
-  auto positions = torch::tensor({3}, int_options);
-  auto round = torch::tensor({1}, int_options);
-  auto cache = torch::zeros({args.hidden_size()}, model.options());
-  auto params = make_native_rec_decode_params(device, round, cache);
-
-  auto output = executor.run(tokens, positions, kv_caches, params);
-  EXPECT_TRUE(torch::equal(output.hidden_states.cpu(),
-                           torch::full({1, args.hidden_size()}, 16.0f)));
-  const int64_t capture_forward_count = model.forward_count();
-  EXPECT_GT(capture_forward_count, 0);
-
-  // Reconstruct the caller's input owner while keeping the strategy bindings.
-  params = make_native_rec_decode_params(device, round, cache);
-  tokens.fill_(20);
-  positions.fill_(4);
-  round.fill_(2);
-  output = executor.run(tokens, positions, kv_caches, params);
-  EXPECT_EQ(model.forward_count(), capture_forward_count);
-  EXPECT_TRUE(torch::equal(output.hidden_states.cpu(),
-                           torch::full({1, args.hidden_size()}, 26.0f)));
-  EXPECT_TRUE(
-      torch::equal(cache.cpu(), torch::full({args.hidden_size()}, 26.0f)));
-
-  auto replacement_cache = torch::zeros_like(cache);
-  params.mutable_onerec_xattention_params().shared_k_caches = {
-      replacement_cache};
-  tokens.fill_(30);
-  positions.fill_(5);
-  round.fill_(3);
-  output = executor.run(tokens, positions, kv_caches, params);
-  EXPECT_GT(model.forward_count(), capture_forward_count);
-  EXPECT_TRUE(torch::equal(output.hidden_states.cpu(),
-                           torch::full({1, args.hidden_size()}, 38.0f)));
-  EXPECT_TRUE(torch::equal(replacement_cache.cpu(),
-                           torch::full({args.hidden_size()}, 38.0f)));
-  EXPECT_TRUE(
-      torch::equal(cache.cpu(), torch::full({args.hidden_size()}, 26.0f)));
 }
 
 TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesPersistentBuffers) {

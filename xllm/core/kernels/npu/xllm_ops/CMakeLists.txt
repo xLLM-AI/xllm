@@ -34,11 +34,6 @@ cc_library(
     sparse_flash_attention_lse.cpp
     mla_preprocess.cpp
     ../utils.cpp
-    beam_search.cpp
-    select_unshared_kv.cpp
-    beam_search_rec.cpp
-    rec_constrained_topk_fused.cpp
-    beam_search_rec_final.cpp
     npu_mega_chunk_gdn.cpp
     npu_mega_gdn_prefill.cpp
     npu_mega_gdn_decode.cpp

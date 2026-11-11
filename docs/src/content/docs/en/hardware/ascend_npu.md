@@ -87,26 +87,6 @@ python -m pip install /path/to/xllm_npu*.whl
 
 The target environment still needs CANN, drivers, hardware, and Python/PyTorch versions compatible with the wheel, but does not need a separate installation of the bundled `custom_xllm_math` vendor. The `xllm` launcher automatically configures its shared-library and custom OPP search paths while preserving the base CANN OPP configuration.
 
-xlite is disabled by default (`USE_XLITE=OFF`), so a default NPU wheel does not require the GVirt/xlite runtime. If you reuse a build directory that previously enabled xlite, explicitly disable the cached option and rebuild the wheel:
-
-```bash
-CMAKE_ARGS="${CMAKE_ARGS:+$CMAKE_ARGS }-DUSE_XLITE=OFF" python setup.py bdist_wheel --device npu
-```
-
-To use the optional XLITE backend, explicitly enable it when building:
-
-```bash
-CMAKE_ARGS="${CMAKE_ARGS:+$CMAKE_ARGS }-DUSE_XLITE=ON" python setup.py bdist_wheel --device npu
-```
-
-Builds with `USE_XLITE=ON` require the separate GVirt/xlite runtime. Distribute an xlite wheel built from the same `third_party/GVirt` revision and compatible CANN environment, install it in the target Python environment, and add its `xlite/lib` directory to `LD_LIBRARY_PATH` before starting xLLM. The xLLM wheel does not bundle `libxlite.so` or its kernel libraries:
-
-```bash
-python -m pip install /path/to/xlite*.whl
-XLITE_LIB_DIR="$(python -c 'import importlib.util; from pathlib import Path; print(Path(importlib.util.find_spec("xlite").origin).parent / "lib")')"
-export LD_LIBRARY_PATH="${XLITE_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-```
-
 `python setup.py build` only builds the artifacts; the unified command requires the installed wheel and its packaged server binary. Check the installed command before continuing:
 
 ```bash

@@ -1,5 +1,34 @@
 include(cc_library)
 
+cc_library(
+  NAME
+    static_kv_cache_layout
+  HDRS
+    layout/static_kv_cache_layout.h
+  SRCS
+    layout/static_kv_cache_layout.cpp
+  DEPS
+    glog::glog
+    torch
+)
+
+cc_library(
+  NAME
+    static_kv_cache_tensor_allocator
+  HDRS
+    storage/static_kv_cache_tensor_allocator.h
+  SRCS
+    storage/static_kv_cache_tensor_allocator.cpp
+    storage/static_kv_cache_tensor_allocator_factory.cpp
+  DEPS
+    :static_kv_cache_layout
+    :kv_cache_memory_interfaces
+    :kv_cache
+    :virtual_kv_cache_page_layout
+    glog::glog
+    torch
+)
+
 add_subdirectory(block)
 add_subdirectory(events)
 add_subdirectory(prefix)
@@ -103,6 +132,7 @@ cc_library(
     :deepseek_v4_cache_policy
     :block_utils
     :platform
+    :static_kv_cache_layout
     glog::glog
     proto::xllm_proto
     torch
@@ -128,6 +158,7 @@ cc_library(
     layout/layerwise_split_layout.h
     layout/vmm_kv_cache_layout.h
     storage/linear_attention_kv_cache_impl.h
+    storage/linear_state_slot_table.h
     storage/quantized_kv_cache_impl.h
   SRCS
     layout/cache_layout_builder.cpp
@@ -142,6 +173,7 @@ cc_library(
     storage/kv_cache_tensor_allocator.cpp
     storage/kv_cache_utils.cpp
     storage/linear_attention_kv_cache_impl.cpp
+    storage/linear_state_slot_table.cpp
     storage/quantized_kv_cache_impl.cpp
   DEPS
     :util
@@ -150,6 +182,7 @@ cc_library(
     :deepseek_v4_cache_policy
     :kv_cache_estimation
     :kv_cache_memory_interfaces
+    :static_kv_cache_layout
     glog::glog
     torch
     $<$<BOOL:${USE_MLU}>:cndrv>

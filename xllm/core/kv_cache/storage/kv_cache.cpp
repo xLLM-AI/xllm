@@ -18,16 +18,19 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <map>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "core/framework/model/model_type.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 #include "core/kv_cache/storage/indexed_kv_cache_impl.h"
 #include "core/kv_cache/storage/kpool_kv_cache_impl.h"
 #include "core/kv_cache/storage/linear_attention_kv_cache_impl.h"
+#include "core/kv_cache/storage/linear_state_slot_table.h"
 #include "core/kv_cache/storage/quantized_kv_cache_impl.h"
 #include "core/util/tensor_helper.h"
 #include "util/utils.h"
@@ -40,6 +43,9 @@ std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
     const KVCacheCreateOptions& create_options,
     int64_t layer_id) {
   CHECK_GE(layer_id, 0) << "KV cache layer_id must be non-negative.";
+  if (create_options.tensor_allocator() != nullptr) {
+    create_options.tensor_allocator()->begin_layer(layer_id);
+  }
 
   const bool mla_packed_c8 = create_options.mla_packed_c8();
 #if !defined(USE_MLU)
@@ -152,8 +158,7 @@ KVCache create_layerwise_scratch_cache(
   scratch_options.enable_linear_attention(false);
   return KVCache(kv_cache_shape,
                  scratch_options,
-                 /*layer_id=*/0,
-                 /*owns_layer_cache=*/false);
+                 /*layer_id=*/0);
 }
 
 }  // namespace
@@ -182,10 +187,23 @@ KVCache::KVCache(const DeepSeekV4KVCacheTensors& tensors)
 
 KVCache::KVCache(const KVCacheShape& kv_cache_shape,
                  const KVCacheCreateOptions& create_options,
-                 int64_t layer_id,
-                 bool owns_layer_cache)
-    : owns_layer_cache_(owns_layer_cache),
-      impl_(create_kv_cache_impl(kv_cache_shape, create_options, layer_id)) {}
+                 int64_t layer_id)
+    : impl_(create_kv_cache_impl(kv_cache_shape, create_options, layer_id)),
+      static_layout_(create_options.static_layout()),
+      linear_state_slots_(create_options.linear_state_slot_table()),
+      full_block_slots_(create_options.full_block_slot_table()) {
+  if (static_layout_ != nullptr && get_conv_cache().defined()) {
+    CHECK(linear_state_slots_ != nullptr);
+    CHECK_EQ(linear_state_slots_->num_groups(),
+             static_layout_->num_linear_groups());
+    linear_group_ = static_layout_->linear_group(layer_id);
+  } else if (static_layout_ != nullptr) {
+    CHECK(full_block_slots_ != nullptr);
+    CHECK_EQ(full_block_slots_->num_groups(),
+             static_layout_->full_layer_count());
+    full_layer_index_ = static_layout_->full_layer_index(layer_id);
+  }
+}
 
 KVCache::KVCache(const KVCacheShape& kv_cache_shape,
                  const KVCacheCreateOptions& create_options,
@@ -270,19 +288,105 @@ std::vector<std::vector<int64_t>> KVCache::get_shapes() {
 
 bool KVCache::empty() const { return impl_->empty(); }
 
+int64_t KVCache::cache_row_stride(KVCacheTensorRole /*role*/) const {
+  return 1;
+}
+
+int64_t KVCache::linear_state_slot_count() const {
+  return static_layout_ == nullptr
+             ? get_conv_cache().size(0)
+             : static_cast<int64_t>(static_layout_->num_slots());
+}
+
+int64_t KVCache::linear_checkpoint_stride() const {
+  if (static_layout_ != nullptr) {
+    return static_cast<int64_t>(static_layout_->checkpoint_stride());
+  }
+  const auto conv = get_conv_cache();
+  const auto ssm = get_ssm_cache();
+  return KVCacheShape::linear_ssm_checkpoint_stride(conv.size(0), ssm.size(0));
+}
+
+int64_t KVCache::physical_row_index(int64_t slot_id,
+                                    KVCacheTensorRole role) const {
+  if (slot_id < 0 || static_layout_ == nullptr) {
+    return slot_id;
+  }
+  if (role == KVCacheTensorRole::CONV || role == KVCacheTensorRole::SSM) {
+    const size_t group = linear_group_ + (role == KVCacheTensorRole::SSM);
+    return linear_state_slots_->slot(slot_id, group);
+  }
+  return full_block_slots_->slot(slot_id, full_layer_index_);
+}
+
+torch::Tensor KVCache::physical_row_indices(const torch::Tensor& state_ids,
+                                            KVCacheTensorRole role) const {
+  if (!state_ids.defined() || static_layout_ == nullptr) {
+    return state_ids;
+  }
+  if (role == KVCacheTensorRole::CONV || role == KVCacheTensorRole::SSM) {
+    const size_t group = linear_group_ + (role == KVCacheTensorRole::SSM);
+    return linear_state_slots_->slots(state_ids, group);
+  }
+  return full_block_slots_->slots(state_ids, full_layer_index_);
+}
+
+torch::Tensor KVCache::physical_token_slots(const torch::Tensor& token_slots,
+                                            int64_t block_size) const {
+  if (!token_slots.defined() || static_layout_ == nullptr) {
+    return token_slots;
+  }
+  const torch::Tensor rows = torch::floor_divide(token_slots, block_size);
+  const torch::Tensor physical_rows =
+      physical_row_indices(rows, KVCacheTensorRole::KEY);
+  return torch::where(
+      token_slots.lt(0),
+      token_slots,
+      physical_rows * block_size + torch::remainder(token_slots, block_size));
+}
+
 KVCache KVCache::create_shared_view() const {
   KVCache view;
-  view.owns_layer_cache_ = false;
   view.impl_ = impl_;
+  view.static_layout_ = static_layout_;
+  view.linear_state_slots_ = linear_state_slots_;
+  view.linear_group_ = linear_group_;
+  view.full_block_slots_ = full_block_slots_;
+  view.full_layer_index_ = full_layer_index_;
   return view;
 }
 
-void KVCache::swap_blocks(torch::Tensor& src_tensor,
-                          torch::Tensor& dst_tensor) {
-  if (!owns_layer_cache_) {
-    return;
+torch::Tensor KVCache::linear_state_slot_row() const {
+  if (linear_state_slots_ == nullptr || !get_conv_cache().defined()) {
+    return torch::Tensor();
   }
-  impl_->swap_blocks(src_tensor, dst_tensor);
+  return linear_state_slots_->device_slots().narrow(
+      0, static_cast<int64_t>(linear_group_), 2);
+}
+
+torch::Tensor KVCache::full_block_rows() const {
+  if (full_block_slots_ == nullptr || !get_k_cache().defined()) {
+    return torch::Tensor();
+  }
+  return full_block_slots_->device_slots().select(
+      0, static_cast<int64_t>(full_layer_index_));
+}
+
+int64_t KVCache::shared_checkpoint_stride() const {
+  return static_layout_ == nullptr ? 0 : linear_checkpoint_stride();
+}
+
+void KVCache::update_full_block_rows(const std::vector<int32_t>& rows) const {
+  if (full_block_slots_ != nullptr) {
+    full_block_slots_->update(rows);
+  }
+}
+
+void KVCache::update_linear_state_slots(
+    const std::vector<int32_t>& rows) const {
+  if (linear_state_slots_ != nullptr) {
+    linear_state_slots_->update(rows);
+  }
 }
 
 void allocate_kv_caches(std::vector<KVCache>& kv_caches,
@@ -361,10 +465,7 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
 
   if (layer_cache_owned.empty()) {
     for (int64_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-      kv_caches.emplace_back(kv_cache_shape,
-                             create_options,
-                             layer_idx,
-                             /*owns_layer_cache=*/true);
+      kv_caches.emplace_back(kv_cache_shape, create_options, layer_idx);
     }
     return;
   }
@@ -378,10 +479,7 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
       kv_caches.emplace_back(scratch_cache.create_shared_view());
       continue;
     }
-    kv_caches.emplace_back(kv_cache_shape,
-                           create_options,
-                           layer_idx,
-                           /*owns_layer_cache=*/true);
+    kv_caches.emplace_back(kv_cache_shape, create_options, layer_idx);
   }
 }
 

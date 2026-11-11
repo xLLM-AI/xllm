@@ -27,7 +27,6 @@ limitations under the License.
 #include "worker.pb.h"
 
 namespace xllm {
-class RecForwardInput;
 class VlmForwardInput;
 
 class Stream;
@@ -126,18 +125,10 @@ class ForwardSharedMemoryTransport final {
   // Every rank in a DP group must select the same transport before execution.
   static bool can_write_input(const DiTForwardInput& input,
                               size_t segment_size);
-  static bool can_write_input(const RecForwardInput& input,
-                              size_t segment_size);
   static bool can_write_input(const VlmForwardInput& input,
                               size_t segment_size);
   static bool can_write_input(const LlmForwardInput& input,
                               size_t segment_size);
-
-  bool input_write(const RecForwardInput& input);
-  bool input_read(RecForwardInput& input,
-                  const torch::Device& device,
-                  InputDeviceMaterializationPolicy policy =
-                      InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ);
 
   bool input_write(const VlmForwardInput& input);
   bool input_read(VlmForwardInput& input,
@@ -157,15 +148,11 @@ class ForwardSharedMemoryTransport final {
   bool vlm_output_write(
       const ForwardOutput& output,
       const std::vector<SpeculativeTokenStats>& speculative_token_stats);
-  bool rec_output_write(
-      const ForwardOutput& output,
-      const std::vector<SpeculativeTokenStats>& speculative_token_stats);
   bool dit_output_write(const DiTForwardOutput& output);
 
   // Read into owned storage and replace the destination only on success.
   bool llm_output_read(RawForwardOutput& output);
   bool vlm_output_read(RawForwardOutput& output);
-  bool rec_output_read(RawForwardOutput& output);
   bool dit_output_read(RawForwardOutput& output);
 
   // Permanently cancel input reads on this transport without publishing
@@ -175,13 +162,11 @@ class ForwardSharedMemoryTransport final {
   void clear();
 
  private:
-  template <bool IncludeDsparkFeedback>
   bool write_token_output(
       const ForwardOutput& output,
       const std::vector<SpeculativeTokenStats>& speculative_token_stats,
       const char* domain);
 
-  template <bool IncludeDsparkFeedback>
   bool read_token_output(RawForwardOutput& output, const char* domain);
 
   template <typename Input>

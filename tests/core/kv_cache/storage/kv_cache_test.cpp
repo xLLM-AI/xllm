@@ -253,7 +253,7 @@ void ExpectMluCompressedStateLayout(const std::vector<KVCache>& caches,
 
 }  // namespace
 
-TEST(Dsv4StateCacheTest, SplitStateReturnsInputsAndSwapsBoth) {
+TEST(Dsv4StateCacheTest, SplitStateReturnsInputViews) {
   torch::Tensor kv = torch::tensor({{{1.0F}}, {{2.0F}}, {{3.0F}}});
   torch::Tensor score = torch::tensor({{{4.0F}}, {{5.0F}}, {{6.0F}}});
   Dsv4StateCache state = Dsv4StateCache::from_split(kv, score);
@@ -261,18 +261,9 @@ TEST(Dsv4StateCacheTest, SplitStateReturnsInputsAndSwapsBoth) {
   EXPECT_EQ(state.kv().data_ptr(), kv.data_ptr());
   EXPECT_EQ(state.score().data_ptr(), score.data_ptr());
   EXPECT_FALSE(state.packed().defined());
-
-  torch::Tensor src = torch::tensor({0}, torch::kLong);
-  torch::Tensor dst = torch::tensor({2}, torch::kLong);
-  state.swap_blocks(src, dst);
-
-  EXPECT_TRUE(
-      torch::equal(state.kv(), torch::tensor({{{1.0F}}, {{2.0F}}, {{1.0F}}})));
-  EXPECT_TRUE(torch::equal(state.score(),
-                           torch::tensor({{{4.0F}}, {{5.0F}}, {{4.0F}}})));
 }
 
-TEST(Dsv4StateCacheTest, PackedStateReturnsWritableViewsAndSwapsOwner) {
+TEST(Dsv4StateCacheTest, PackedStateReturnsWritableViews) {
   torch::Tensor packed = torch::arange(24, torch::kFloat32).reshape({3, 2, 4});
   Dsv4StateCache state =
       Dsv4StateCache::from_packed(packed, torch::Tensor(), torch::Tensor());
@@ -288,19 +279,9 @@ TEST(Dsv4StateCacheTest, PackedStateReturnsWritableViewsAndSwapsOwner) {
       state.packed().narrow(/*dim=*/2, /*start=*/0, /*length=*/2), state.kv()));
   state.packed().narrow(/*dim=*/2, /*start=*/2, /*length=*/2).fill_(17.0F);
   EXPECT_TRUE(torch::equal(state.score(), torch::full({3, 2, 2}, 17.0F)));
-
-  torch::Tensor src = torch::tensor({0}, torch::kLong);
-  torch::Tensor dst = torch::tensor({2}, torch::kLong);
-  torch::Tensor expected = state.packed().clone();
-  expected.index_copy_(0, dst, torch::index_select(expected, 0, src));
-  state.swap_blocks(src, dst);
-
-  EXPECT_TRUE(torch::equal(state.packed(), expected));
-  EXPECT_TRUE(torch::equal(
-      state.kv(), expected.narrow(/*dim=*/2, /*start=*/0, /*length=*/2)));
 }
 
-TEST(Dsv4StateCacheTest, MissingPackedFallsBackWithoutSwappingSplit) {
+TEST(Dsv4StateCacheTest, MissingPackedReturnsSplitViews) {
   torch::Tensor kv = torch::tensor({{{1.0F}}, {{2.0F}}});
   torch::Tensor score = torch::tensor({{{3.0F}}, {{4.0F}}});
   Dsv4StateCache state =
@@ -309,13 +290,6 @@ TEST(Dsv4StateCacheTest, MissingPackedFallsBackWithoutSwappingSplit) {
   EXPECT_EQ(state.kv().data_ptr(), kv.data_ptr());
   EXPECT_EQ(state.score().data_ptr(), score.data_ptr());
   EXPECT_FALSE(state.packed().defined());
-
-  torch::Tensor src = torch::tensor({0}, torch::kLong);
-  torch::Tensor dst = torch::tensor({1}, torch::kLong);
-  state.swap_blocks(src, dst);
-
-  EXPECT_TRUE(torch::equal(state.kv(), kv));
-  EXPECT_TRUE(torch::equal(state.score(), score));
 }
 
 #if !defined(USE_MLU) && !defined(USE_NPU)
@@ -782,6 +756,25 @@ TEST(KVCacheTest, GroupedCacheCapabilitySurvivesProtoRoundTrip) {
   EXPECT_EQ(restored.key_cache_shape(), original.key_cache_shape());
 }
 
+TEST(KVCacheTest, SharedSlabCapacitySurvivesProtoRoundTrip) {
+  KVCacheCapacity capacity;
+  capacity.block_size(16).n_blocks(100).shared_slab_count(7);
+  ModelArgs args;
+  args.n_layers(4).n_heads(4).n_kv_heads(2).head_dim(16);
+  const KVCacheShape original(capacity, args, /*world_size=*/1);
+
+  proto::KVCacheShape serialized;
+  original.to_proto(&serialized);
+  const KVCacheShape restored = KVCacheShape::from_proto(serialized);
+
+  EXPECT_EQ(original.shared_slab_count(), 7);
+  EXPECT_EQ(serialized.shared_slab_count(), 7);
+  EXPECT_EQ(restored.shared_slab_count(), 7);
+  EXPECT_EQ(restored.key_cache_shape(), original.key_cache_shape());
+  EXPECT_EQ(restored.value_cache_shape(), original.value_cache_shape());
+  EXPECT_EQ(restored.key_cache_shape().front(), 100);
+}
+
 TEST(KVCacheTest, DeepSeekV4KVCacheExposesIndexerScaleThroughSharedContract) {
   DeepSeekV4KVCacheTensors tensors;
   tensors.key_cache = torch::zeros({2, 4, 1, 64});
@@ -1175,13 +1168,6 @@ TEST(KVCacheTest, MluSharedDsaLayersAllocateOnlyMlaCache) {
     EXPECT_FALSE(cache.get_v_cache().defined());
     EXPECT_FALSE(cache.empty());
   }
-
-  caches[1].get_k_cache()[0].fill_(1);
-  torch::Tensor source_block = torch::tensor({0}, torch::kLong);
-  torch::Tensor destination_block = torch::tensor({1}, torch::kLong);
-  caches[1].swap_blocks(source_block, destination_block);
-  EXPECT_TRUE(
-      torch::equal(caches[1].get_k_cache()[0], caches[1].get_k_cache()[1]));
 }
 
 TEST(KVCacheTest, MluMixedDsaLayersUseInjectedAllocatorForActualRoles) {

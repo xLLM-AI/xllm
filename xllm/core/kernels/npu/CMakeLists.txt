@@ -5,7 +5,7 @@ add_subdirectory(tilelang)
 add_subdirectory(xllm_ops)
 
 # Keep this adapter's cache separate from torch_npu's incompatible TLS cache.
-set_source_files_properties(atb_matmul_ein_sum.cpp PROPERTIES
+set_source_files_properties(atb_matmul_ein_sum.cpp rope.cpp PROPERTIES
   COMPILE_OPTIONS "-fvisibility=hidden"
 )
 
@@ -42,12 +42,12 @@ cc_library(
     npu_recurrent_gated_delta_rule.cpp
     utils.cpp
     w4a8_dynamic_moe_preprocess.cpp
-    rec_constrained_topk.cpp
     npu_ops_library.cpp
   DEPS
     :util
     # collectives.cpp issues raw Hccl* calls on the caller's stream.
     hccl
+    hcomm
     :torch_npu_kernels
     :triton_adapter
     :tilelang_kernels

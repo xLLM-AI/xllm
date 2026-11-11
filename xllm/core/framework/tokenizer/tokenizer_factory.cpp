@@ -18,7 +18,6 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/framework/tokenizer/fast_tokenizer.h"
-#include "core/framework/tokenizer/rec_tokenizer.h"
 #include "core/framework/tokenizer/rwkv_tokenizer.h"
 #include "core/framework/tokenizer/sentencepiece_tokenizer.h"
 #include "core/framework/tokenizer/tiktoken_tokenizer.h"
@@ -47,11 +46,6 @@ std::unique_ptr<Tokenizer> TokenizerFactory::create_tokenizer(
     LOG(INFO) << "Create Tiktoken tokenizer.";
     tokenizer =
         std::make_unique<TiktokenTokenizer>(model_weights_path, tokenizer_args);
-  } else if (tokenizer_args.tokenizer_type() == "rec") {
-    // 3. create rec tokenizer
-    LOG(INFO) << "Create rec tokenizer.";
-    tokenizer =
-        std::make_unique<RecTokenizer>(model_weights_path, tokenizer_args);
   } else {
     // 4. create sentencepiece tokenizer
     LOG(INFO) << "Create SentencePiece tokenizer.";

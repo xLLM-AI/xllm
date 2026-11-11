@@ -63,7 +63,7 @@ TEST_F(NpuVendorPathsTest, PythonPreservesTransformerPriority) {
             expected);
 }
 
-TEST_F(NpuVendorPathsTest, AtbPrefersBundledMathAndRetainsExternalVendors) {
+TEST_F(NpuVendorPathsTest, NativePrefersBundledMathAndRetainsExternalVendors) {
   const std::string external = (root_ / "extra").string();
   const std::vector<std::string> existing{
       external,

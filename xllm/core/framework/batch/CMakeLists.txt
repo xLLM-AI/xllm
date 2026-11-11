@@ -13,26 +13,15 @@ cc_library(
     batch.h
     batch_group.h
     batch_state.h
-    rec_batch.h
-    rec_batch_state.h
-    rec_batch_group.h
     batch_output_action.h
     batch_output_handler.h
-    rec_batch_output_handler.h
     batch_sequence_plan.h
     batch_builder.h
-    rec_batch_builder.h
     batch_factory.h
-    rec_batch_factory.h
     forward_input_builder.h
     forward_input_factory.h
     vlm_forward_input_factory.h
-    rec_forward_input_factory.h
     sampling_input_builder.h
-    rec_forward_input_builder.h
-    onerec_forward_input_builder.h
-    onerec_xattention_forward_input_builder.h
-    rec_multi_round_forward_input_builder.h
   SRCS
     dit_batch.cpp
     dit_batch_factory.cpp
@@ -41,26 +30,14 @@ cc_library(
     batch.cpp
     batch_group.cpp
     batch_state.cpp
-    rec_batch.cpp
-    rec_batch_state.cpp
-    rec_batch_group.cpp
     batch_output_handler.cpp
-    rec_batch_output_handler.cpp
     batch_sequence_plan.cpp
     batch_builder.cpp
-    rec_batch_builder.cpp
     batch_factory.cpp
-    rec_batch_factory.cpp
     forward_input_builder.cpp
     forward_input_factory.cpp
     vlm_forward_input_factory.cpp
-    rec_forward_input_factory.cpp
     sampling_input_builder.cpp
-    rec_forward_input_builder.cpp
-    onerec_forward_input_builder.cpp
-    onerec_xattention_forward_input_builder.cpp
-    rec_multi_round_forward_input_builder.cpp
-    beam_search.h
   DEPS
     :config
     :eplb

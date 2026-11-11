@@ -10,8 +10,6 @@ option(USE_DCU "Enable DCU support" OFF)
 option(USE_MACA "Enable MACA support" OFF)
 option(USE_ETCD "Build Mooncake etcd support" ON)
 option(STORE_USE_ETCD "Build Mooncake Store etcd support" ${USE_ETCD})
-# xlite is an opt-in NPU backend; it requires USE_NPU=ON.
-option(USE_XLITE "Enable xlite NPU backend" OFF)
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
@@ -52,8 +50,12 @@ if(USE_NPU)
     COMMAND git -c "safe.directory=${CMAKE_SOURCE_DIR}/third_party/xllm_ops" -C "${CMAKE_SOURCE_DIR}/third_party/xllm_ops" rev-parse HEAD
     OUTPUT_VARIABLE XLLM_OPS_GIT_HEAD
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
+    RESULT_VARIABLE XLLM_OPS_GIT_HEAD_RESULT
+    ERROR_VARIABLE XLLM_OPS_GIT_HEAD_ERROR
   )
+  if(NOT XLLM_OPS_GIT_HEAD_RESULT EQUAL 0)
+    message(FATAL_ERROR "Cannot determine xllm_ops git HEAD: ${XLLM_OPS_GIT_HEAD_ERROR}")
+  endif()
 
   if(DEFINED ENV{ASCEND_OPP_PATH} AND NOT "$ENV{ASCEND_OPP_PATH}" STREQUAL "")
     set(XLLM_OPS_MARKER_PATH "$ENV{ASCEND_OPP_PATH}/vendors/xllm/.xllm_ops_git_head")
@@ -75,8 +77,8 @@ if(USE_NPU)
     message(STATUS "xllm_ops git HEAD changed; running precompile via execute_process")
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E env "XLLM_OPS_BUILD_DIR=${XLLM_OPS_BUILD_DIR}"
-              bash ${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build.sh
-      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/xllm_ops
+              bash "${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build.sh"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/third_party/xllm_ops"
       RESULT_VARIABLE XLLM_OPS_RESULT
     )
     if(NOT XLLM_OPS_RESULT EQUAL 0)
@@ -510,34 +512,10 @@ if(USE_NPU)
   set(CMAKE_VERBOSE_MAKEFILE ON)
   add_definitions(-DTORCH_HIGHER_THAN_PTA6)
 
-  if (USE_XLITE)
-    add_definitions(-DUSE_XLITE)
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/xlite.cmake)
-    message(STATUS "USE_XLITE is ON")
-  endif()
-
   # Use vcpkg header files as the first priority search directory,
   #-> because the scope of third-party software managed by vcpkg is used throughout the entire xllm.
   message(STATUS "VCPKG_INCLUDE_DIR = ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
   include_directories("${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
-
-  add_subdirectory(
-    "${XLLM_ATB_LAYERS_SOURCE_DIR}"
-    "${CMAKE_BINARY_DIR}/xllm_atb_layers"
-  )
-  message(STATUS "Configured xllm_atb_layers from source: ${XLLM_ATB_LAYERS_SOURCE_DIR}")
-
-  if(EXISTS "$ENV{NPU_HOME_PATH}/include/aclnnop")
-    target_include_directories(xllm_atb_layers SYSTEM PRIVATE
-      $ENV{NPU_HOME_PATH}/include/aclnnop
-    )
-  endif()
-
-  if(EXISTS "$ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/aclnnop")
-    target_include_directories(xllm_atb_layers SYSTEM PRIVATE
-      $ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/aclnnop
-    )
-  endif()
 
   # torch npu_torch and npu ops is only used by npu related modules/classes, so system priority is reasonable.
   include_directories(SYSTEM
@@ -564,12 +542,6 @@ if(USE_NPU)
     )
   endif()
 
-  # Keep third-party warnings suppressed while providing headers expected by
-  # legacy includes like "atb_speed/log.h" from xllm_atb_layers.
-  include_directories(SYSTEM
-      ${XLLM_ATB_LAYERS_SOURCE_DIR}
-      ${XLLM_ATB_LAYERS_SOURCE_DIR}/core/include
-  )
   link_directories(
       $ENV{PYTHON_LIB_PATH}
       $ENV{PYTORCH_INSTALL_PATH}/lib

@@ -40,11 +40,6 @@ class LinearAttentionKVCacheImpl final : public KVCacheImpl {
 
   std::vector<std::vector<int64_t>> get_shapes() const override;
 
-  void swap_blocks(torch::Tensor& src_tensor,
-                   torch::Tensor& dst_tensor) override {
-    NOT_IMPLEMENTED();
-  };
-
  private:
   torch::Tensor conv_cache_;
   torch::Tensor ssm_cache_;

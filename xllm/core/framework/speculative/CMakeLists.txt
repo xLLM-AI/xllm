@@ -4,12 +4,6 @@ cc_library(
   NAME
     speculative
   HDRS
-    adaptive/verify_budget_planner.h
-    adaptive/dspark_dp_coordinator.h
-    adaptive/spec_cost_profile_store.h
-    adaptive/spec_cost_model.h
-    adaptive/spec_window_collector.h
-    adaptive/spec_startup_calibration.h
     draft_config.h
     draft_proposal.h
     draft_vocab_mapping.h
@@ -19,20 +13,12 @@ cc_library(
     mtp_async_state.h
     mtp_json_object_state.h
     mtp_utils.h
-    adaptive/draft_step_selector.h
-    adaptive/draft_step_controller.h
     draft_extend_input.h
     embedding_cache.h
     metrics.h
     verify_layout.h
     spec_verify.h
   SRCS
-    adaptive/verify_budget_planner.cpp
-    adaptive/dspark_dp_coordinator.cpp
-    adaptive/spec_cost_profile_store.cpp
-    adaptive/spec_cost_model.cpp
-    adaptive/spec_window_collector.cpp
-    adaptive/spec_startup_calibration.cpp
     draft_config.cpp
     draft_proposal.cpp
     draft_vocab_mapping.cpp
@@ -40,8 +26,6 @@ cc_library(
     spec_input_builder.cpp
     mtp_async_input_builder.cpp
     mtp_async_state.cpp
-    adaptive/draft_step_selector.cpp
-    adaptive/draft_step_controller.cpp
     draft_extend_input.cpp
     embedding_cache.cpp
     metrics.cpp

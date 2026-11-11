@@ -14,12 +14,21 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from itertools import accumulate
+from math import gcd
 from typing import TYPE_CHECKING, cast
 
 import torch
 
-from xllm.python.attention.backend import ExecutionMetadataSource, LayerCache, resolve_linear_state_io_indices
+from xllm.python.attention.backend import (
+    CacheRowTable,
+    ExecutionMetadataSource,
+    LayerCache,
+    SharedKVCacheLayout,
+    detect_shared_kv_cache_layout,
+    resolve_linear_state_io_indices,
+)
 from xllm.python.layers.npu.qwen3_5.gdn_metadata import (
     GdnDecodeMetadata,
     GdnDummyMetadata,
@@ -41,20 +50,32 @@ def _build_mega_prefill_indices(
     write_state_indices: torch.Tensor,
     has_initial_state: torch.Tensor,
     checkpoint_stride: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    shared_layout: SharedKVCacheLayout | None = None,
+    group_slots: tuple[torch.Tensor, ...] = (),
+) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...], tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
     if checkpoint_stride <= 0:
         raise ValueError("Qwen3.5 SSM checkpoint stride must be positive")
     if has_initial_state.shape != read_state_indices.shape:
         raise ValueError("Qwen3.5 state validity must be sequence-scoped")
     valid_read = has_initial_state & (read_state_indices > 0)
     conv_read = torch.where(valid_read, read_state_indices, -1)
-    if checkpoint_stride == 1:
-        return conv_read, write_state_indices, conv_read, write_state_indices
-    return (
-        conv_read,
-        write_state_indices,
-        torch.where(valid_read, read_state_indices * checkpoint_stride, -1),
-        write_state_indices * checkpoint_stride,
+    if shared_layout is None:
+        if checkpoint_stride == 1:
+            return (conv_read,), (write_state_indices,), (conv_read,), (write_state_indices,)
+        return (
+            (conv_read,),
+            (write_state_indices,),
+            (torch.where(valid_read, read_state_indices * checkpoint_stride, -1),),
+            (write_state_indices * checkpoint_stride,),
+        )
+    return tuple(
+        tuple(shared_layout.linear_state_indices(indices, role=role, slots=slots) for slots in group_slots)
+        for indices, role in (
+            (conv_read, "conv"),
+            (write_state_indices, "conv"),
+            (conv_read, "ssm"),
+            (write_state_indices, "ssm"),
+        )
     )
 
 
@@ -81,11 +102,19 @@ class Qwen3_5GdnMetadataBuilder:
         self._state_caches: dict[int, GdnStateCache] | None = None
         self._checkpoint_stride: int | None = None
         self._device: torch.device | None = None
+        self._shared_layout: SharedKVCacheLayout | None = None
+        self._layer_groups: dict[int, int] = {}
+        self._group_slots: tuple[torch.Tensor, ...] = ()
+        self._row_table: CacheRowTable | None = None
+        self._padding_state_index: torch.Tensor | None = None
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
         state_caches: dict[int, GdnStateCache] = {}
         stride: int | None = None
         device: torch.device | None = None
+        shared_layout = detect_shared_kv_cache_layout(layer_caches)
+        if shared_layout is not None:
+            stride = shared_layout.checkpoint_stride
         for layer_id in self._layer_ids:
             if layer_id >= len(layer_caches):
                 raise ValueError(f"GDN cache is missing for layer {layer_id}")
@@ -94,41 +123,129 @@ class Qwen3_5GdnMetadataBuilder:
                 raise ValueError(f"GDN state cache is missing for layer {layer_id}")
             if conv.dim() != 3 or conv.shape[0] <= 0 or conv.shape[2] != self._conv_dim:
                 raise ValueError(f"GDN Conv cache has invalid geometry for layer {layer_id}")
-            if (
-                ssm.dim() != 4
-                or ssm.shape[0] <= 0
-                or ssm.shape[0] % conv.shape[0]
-                or ssm.shape[1:] != (self._num_value_heads, 128, 128)
-            ):
+            if ssm.dim() != 4 or ssm.shape[0] <= 0 or ssm.shape[1:] != (self._num_value_heads, 128, 128):
                 raise ValueError(f"GDN SSM cache has invalid geometry for layer {layer_id}")
             if conv.dtype != torch.bfloat16 or ssm.dtype != torch.float32:
                 raise ValueError(f"GDN state cache has invalid dtype for layer {layer_id}")
             if conv.device != ssm.device or (device is not None and device != conv.device):
                 raise ValueError("Qwen3.5 GDN state caches must use one device")
-            layer_stride = ssm.shape[0] // conv.shape[0]
-            if conv.shape[1] != layer_stride + 2 or (stride is not None and stride != layer_stride):
-                raise ValueError("Qwen3.5 GDN caches must use one valid checkpoint stride")
+            if shared_layout is None:
+                if ssm.shape[0] % conv.shape[0]:
+                    raise ValueError(f"GDN SSM cache has invalid checkpoint rows for layer {layer_id}")
+                layer_stride = ssm.shape[0] // conv.shape[0]
+                if conv.shape[1] != layer_stride + 2 or (stride is not None and stride != layer_stride):
+                    raise ValueError("Qwen3.5 GDN caches must use one valid checkpoint stride")
+            else:
+                layer_stride = stride
+                if conv.shape[1] != layer_stride + 2:
+                    raise ValueError(f"GDN shared Conv cache checkpoint geometry is invalid for layer {layer_id}")
             stride, device = layer_stride, conv.device
             state_caches[layer_id] = cast(GdnStateCache, layer_caches[layer_id])
-        self._state_caches, self._checkpoint_stride, self._device = state_caches, stride, device
+        self._state_caches = state_caches
+        self._checkpoint_stride = stride
+        self._device = device
+        self._shared_layout = shared_layout
+        self._layer_groups = {}
+        self._group_slots = ()
+        self._row_table = None
+        self._padding_state_index = None
+        if shared_layout is not None:
+            # Slab storage allocates Conv and SSM rows independently for each
+            # layer. Legacy fixed pages instead share one map per lane group.
+            self._layer_groups = {
+                layer_id: index if shared_layout.num_slabs else index // shared_layout.pages_per_slot
+                for index, layer_id in enumerate(self._layer_ids)
+            }
+            group_slots: list[torch.Tensor] = [None] * shared_layout.num_linear_groups  # type: ignore[list-item]
+            for layer_id, group in self._layer_groups.items():
+                slots = layer_caches[layer_id].linear_state_slots
+                assert slots is not None
+                group_slots[group] = slots
+            self._group_slots = tuple(group_slots)
+            self._row_table = CacheRowTable(
+                tuple(row for slots in group_slots for row in slots.unbind(0))
+                if shared_layout.num_slabs
+                else self._group_slots
+            )
+            # The where(out=...) overload requires tensor operands. Keep its
+            # padding scalar on-device instead of allocating it per update.
+            self._padding_state_index = torch.full((), -1, dtype=torch.int32, device=device)
 
     def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> GdnMetadata:
-        if (
-            not input_batch.is_dummy
-            and (metadata.is_prefill or metadata.is_chunked_prefill)
-            and not getattr(metadata, "is_spec_verify", False)
-            and getattr(metadata, "linear_verify_graph", None) is None
-        ):
-            raise NotImplementedError("Qwen3.5 GDN ACL Graph supports decode and verify only")
         return self.build(input_batch, metadata)
 
     def update_persistent(
         self, persistent_metadata: object, input_batch: InputBatch, metadata: ExecutionMetadataSource
     ) -> None:
-        # The graph runner owns and updates the captured tensor aliases in place.
-        pass
+        # Graph capture keeps the metadata object and its tensor addresses.
+        # Build packed physical indices directly into their persistent owner;
+        # copy other tensors without replacing the dataclass or its views.
+        if not isinstance(persistent_metadata, GdnMetadata):
+            raise TypeError("Qwen3.5 GDN persistent metadata has an invalid type")
+        updated = self._build(input_batch, metadata, persistent_metadata=persistent_metadata)
+        if type(updated) is not type(persistent_metadata):
+            raise ValueError("Qwen3.5 GDN graph metadata changed execution mode during replay")
+        packed_fields = (
+            "packed_state_indices",
+            "packed_read_state_indices",
+            "packed_write_state_indices",
+        )
+        for field_name in (
+            *packed_fields,
+            "read_state_indices",
+            "write_state_indices",
+            "conv_read_state_indices",
+            "conv_write_state_indices",
+            "ssm_read_state_indices",
+            "ssm_write_state_indices",
+            "state_indices",
+            "num_accepted_tokens",
+            "packed_to_dense",
+            "dense_to_packed",
+            "cu_seqlens",
+            "conv_read_indices",
+            "conv_write_indices",
+            "ssm_read_indices",
+            "ssm_write_indices",
+            "conv_state_indices",
+            "ssm_state_indices",
+        ):
+            if field_name in (
+                "conv_state_indices",
+                "ssm_state_indices",
+                "conv_read_state_indices",
+                "conv_write_state_indices",
+                "ssm_read_state_indices",
+                "ssm_write_state_indices",
+            ) and any(getattr(persistent_metadata, name, None) is not None for name in packed_fields):
+                # Compatibility role views alias the batched packed indices;
+                # copying the owner once refreshes every layer and role.
+                continue
+            current = getattr(persistent_metadata, field_name, None)
+            replacement = getattr(updated, field_name, None)
+            if current is None or replacement is None:
+                continue
+            if isinstance(current, tuple):
+                if len(current) != len(replacement):
+                    raise ValueError(f"Qwen3.5 GDN graph metadata group count changed for {field_name}")
+            else:
+                current, replacement = (current,), (replacement,)
+            for current_group, replacement_group in zip(current, replacement, strict=True):
+                if current_group.shape != replacement_group.shape or current_group.dtype != replacement_group.dtype:
+                    raise ValueError(f"Qwen3.5 GDN graph metadata shape changed for {field_name}")
+                if current_group is not replacement_group:
+                    current_group.copy_(replacement_group)
 
     def build(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> GdnMetadata:
+        return self._build(input_batch, metadata)
+
+    def _build(
+        self,
+        input_batch: InputBatch,
+        metadata: ExecutionMetadataSource,
+        *,
+        persistent_metadata: GdnMetadata | None = None,
+    ) -> GdnMetadata:
         if self._state_caches is None or self._checkpoint_stride is None:
             raise RuntimeError("Qwen3.5 GDN state caches must be bound before execution")
         # A padded graph entry must capture the stateful path for later replays.
@@ -161,14 +278,17 @@ class Qwen3_5GdnMetadataBuilder:
             for tensor, count, dtype in tensors:
                 if tensor is None or tensor.shape != (count,) or tensor.dtype != dtype or tensor.device != device:
                     raise ValueError("Qwen3.5 packed graph requires fixed request indices and token maps")
-            return GdnVerifyMetadata(
-                self._state_caches,
-                graph.state_indices,
-                graph.num_accepted_tokens,
-                graph.query_width,
-                graph.packed_to_dense,
-                graph.dense_to_packed,
-                graph.cu_seqlens,
+            return self._with_shared_verify_indices(
+                GdnVerifyMetadata(
+                    self._state_caches,
+                    graph.state_indices,
+                    graph.num_accepted_tokens,
+                    graph.query_width,
+                    graph.packed_to_dense,
+                    graph.dense_to_packed,
+                    graph.cu_seqlens,
+                ),
+                persistent_metadata if isinstance(persistent_metadata, GdnVerifyMetadata) else None,
             )
         read_indices, write_indices = resolve_linear_state_io_indices(metadata)
         if read_indices is None or write_indices is None:
@@ -180,14 +300,39 @@ class Qwen3_5GdnMetadataBuilder:
         # Verify is also marked chunked prefill by the speculative worker.
         # It must restore the last accepted checkpoint before processing rows.
         if getattr(metadata, "is_spec_verify", False):
-            return self._build_verify(input_batch, metadata, write_indices)
+            return self._with_shared_verify_indices(
+                self._build_verify(input_batch, metadata, write_indices),
+                persistent_metadata if isinstance(persistent_metadata, GdnVerifyMetadata) else None,
+            )
         if not (metadata.is_prefill or metadata.is_chunked_prefill):
             # Captured decode graphs index their whole padded bucket.
             if read_indices.numel() != input_batch.num_tokens_after_padding or read_indices.numel() == 0:
                 raise ValueError("Qwen3.5 GDN decode requires one state slot per token")
             if self._checkpoint_stride != 1:
                 raise ValueError("Qwen3.5 MegaGdnDecode requires one SSM row per Conv slot")
-            return GdnDecodeMetadata(self._state_caches, read_indices, write_indices)
+            if self._shared_layout is None:
+                return GdnDecodeMetadata(self._state_caches, read_indices, write_indices)
+            persistent_decode = persistent_metadata if isinstance(persistent_metadata, GdnDecodeMetadata) else None
+            packed_read = self._shared_state_indices(
+                read_indices,
+                out=persistent_decode.packed_read_state_indices if persistent_decode is not None else None,
+            )
+            packed_write = self._shared_state_indices(
+                write_indices,
+                out=persistent_decode.packed_write_state_indices if persistent_decode is not None else None,
+            )
+            return GdnDecodeMetadata(
+                self._state_caches,
+                read_indices,
+                write_indices,
+                tuple(packed_read[:, :, 0].unbind(0)),
+                tuple(packed_write[:, :, 0].unbind(0)),
+                tuple(packed_read[:, :, 1].unbind(0)),
+                tuple(packed_write[:, :, 1].unbind(0)),
+                layer_groups=self._layer_groups,
+                packed_read_state_indices=packed_read,
+                packed_write_state_indices=packed_write,
+            )
         query_lengths_host = metadata.q_seq_lens_host
         if query_lengths_host is None:
             raise RuntimeError("Qwen3.5 MegaGdnPrefill requires host query lengths")
@@ -217,6 +362,8 @@ class Qwen3_5GdnMetadataBuilder:
             write_indices,
             has_initial_state.to(device=device, dtype=torch.bool),
             self._checkpoint_stride,
+            self._shared_layout,
+            self._group_slots,
         )
         cu_seqlens = metadata.q_cu_seq_lens
         host_query_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
@@ -246,6 +393,53 @@ class Qwen3_5GdnMetadataBuilder:
             ssm_write,
             cu_seqlens.to(device=device, dtype=torch.int32).contiguous(),
             _compute_mega_prefill_num_matrices(query_lengths, self._num_value_heads),
+            layer_groups=self._layer_groups,
+            shared_checkpoint_stride=self._checkpoint_stride if self._shared_layout is not None else None,
+        )
+
+    def _shared_state_indices(self, indices: torch.Tensor, *, out: torch.Tensor | None = None) -> torch.Tensor:
+        """Resolve all layer/role rows once at the cache metadata boundary."""
+        assert self._shared_layout is not None and self._row_table is not None and self._padding_state_index is not None
+        layout = self._shared_layout
+        groups = len(self._group_slots)
+        if out is not None and (
+            out.shape != (groups, indices.numel(), 2) or out.dtype != indices.dtype or out.device != indices.device
+        ):
+            raise ValueError("Qwen3.5 GDN graph packed state indices changed shape, dtype, or device")
+        rows = self._row_table.rows().index_select(1, indices.clamp_min(0).to(torch.int64))
+        if layout.num_slabs:
+            packed = rows.view(groups, 2, -1).transpose(1, 2).contiguous()
+        else:
+            if layout.conv_row_stride is None:
+                divisor = gcd(layout.slot_bytes, layout.conv_row_bytes)
+                offsets = rows.to(torch.int64) * (layout.slot_bytes // divisor)
+                denominator = layout.conv_row_bytes // divisor
+                conv = torch.div(offsets, denominator, rounding_mode="floor") + torch.remainder(
+                    offsets, denominator
+                ).ne(0)
+                conv = conv.to(indices.dtype)
+            else:
+                conv = rows * layout.conv_row_stride
+            packed = torch.stack((conv, rows * layout.ssm_row_stride), dim=-1)
+        # Zero is the shared warmup/padding slot, never a live request. Kernels
+        # skip its state access so padded lanes cannot race or touch scratch.
+        return torch.where(indices[None, :, None] > 0, packed.to(indices.dtype), self._padding_state_index, out=out)
+
+    def _with_shared_verify_indices(
+        self, metadata: GdnVerifyMetadata, persistent_metadata: GdnVerifyMetadata | None = None
+    ) -> GdnVerifyMetadata:
+        if self._shared_layout is None:
+            return metadata
+        packed = self._shared_state_indices(
+            metadata.state_indices,
+            out=persistent_metadata.packed_state_indices if persistent_metadata is not None else None,
+        )
+        return replace(
+            metadata,
+            conv_state_indices=tuple(packed[:, :, 0].unbind(0)),
+            ssm_state_indices=tuple(packed[:, :, 1].unbind(0)),
+            layer_groups=self._layer_groups,
+            packed_state_indices=packed,
         )
 
     def _build_verify(
@@ -288,7 +482,8 @@ class Qwen3_5GdnMetadataBuilder:
         if not lengths or any(length <= 0 or length > width for length in lengths):
             raise ValueError("Qwen3.5 MTP query lengths must be in [1, checkpoint stride]")
         token_count = sum(lengths)
-        if token_count != input_batch.num_tokens:
+        # Bound graph metadata includes dummy rows from its static input bucket.
+        if token_count != input_batch.num_tokens_after_padding:
             raise ValueError("Qwen3.5 MTP query lengths must cover every packed token")
         batch_size = len(lengths)
         if state_indices.numel() == token_count:

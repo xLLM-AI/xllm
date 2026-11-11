@@ -25,23 +25,16 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
-#include "core/framework/model/rec_model_params.h"
-#include "core/framework/model/rec_model_utils.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 
 namespace xllm {
 
-// ModelParamsView retains its cloned owner; Rec snapshots own the native
-// aggregate directly. Tensor handles intentionally share storage.
+// ModelParamsView retains its cloned owner. Tensor handles share storage.
 inline ModelParamsView copy_graph_execution_input(
     const ModelParamsView& params) {
   return params.clone().view();
-}
-
-inline RecModelParams copy_graph_execution_input(const RecModelParams& params) {
-  return params.clone();
 }
 
 // Borrow unchanged execution input. Detach host metadata only when graph
@@ -85,20 +78,6 @@ class GraphExecutionInput final {
   const Params& source_;
   std::optional<Params> owned_params_;
 };
-
-inline bool is_rec_multi_round_graph_input(const ModelParamsView&) {
-  return false;
-}
-
-inline bool is_rec_multi_round_graph_input(const RecModelParams&) {
-  return is_rec_multi_round_mode();
-}
-
-inline bool has_llmrec_graph_input(const ModelParamsView&) { return false; }
-
-inline bool has_llmrec_graph_input(const RecModelParams& params) {
-  return params.has_llmrec_params();
-}
 
 template <typename Params>
 inline void fill_persistent_graph_cu_seq_lens(const Params& params,

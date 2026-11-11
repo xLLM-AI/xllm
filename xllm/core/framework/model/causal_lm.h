@@ -45,10 +45,6 @@ namespace layer {
 struct AttentionMetadata;
 }
 
-namespace xlite {
-class XliteModelHolder;
-}
-
 struct ModelGraphMetadataState {
   virtual ~ModelGraphMetadataState() = default;
 };
@@ -125,11 +121,6 @@ class CausalLM : public torch::nn::Module, public Model {
     return logits(hidden_states, seleted_idxes);
   }
 
-#if defined(USE_NPU)
-  // xlite runtime access, nullptr for non-xlite models.
-  virtual xlite::XliteModelHolder* get_xlite_holder() { return nullptr; }
-#endif
-
   virtual bool share_weights_from(CausalLM& /*source*/) { return false; }
 
   virtual void prepare_expert_weight(
@@ -178,19 +169,6 @@ class CausalLM : public torch::nn::Module, public Model {
     NOT_IMPLEMENTED();
     return {};
   }
-
-  // DSpark ConfidenceHead: acceptance-prob estimate for adaptive-speculative
-  // pruning over the whole draft block. hidden_all [num_reqs, num_spec, H],
-  // prev_matrix [num_reqs, num_spec]; returns [num_reqs, num_spec] fp32 in
-  // [0, 1]. When the confidence head is absent (not built or feature disabled),
-  // returns an undefined tensor; the worker falls back to the sampler-gathered
-  // draft prob.
-  virtual torch::Tensor dspark_confidence_probs(
-      const torch::Tensor& hidden_all,
-      const torch::Tensor& prev_matrix) {
-    return {};
-  }
-  virtual bool has_dspark_confidence_head() const { return false; }
 };
 
 template <typename ModelType>
@@ -314,22 +292,6 @@ class CausalLMImpl : public CausalLM {
     return CausalLM::dspark_markov_bias(previous_token_ids);
   }
 
-  torch::Tensor dspark_confidence_probs(
-      const torch::Tensor& hidden_all,
-      const torch::Tensor& prev_matrix) override {
-    if constexpr (detail::has_dspark_confidence_probs<ModelType>::value) {
-      return model_->dspark_confidence_probs(hidden_all, prev_matrix);
-    }
-    return CausalLM::dspark_confidence_probs(hidden_all, prev_matrix);
-  }
-
-  bool has_dspark_confidence_head() const override {
-    if constexpr (detail::has_has_dspark_confidence_head<ModelType>::value) {
-      return model_->has_dspark_confidence_head();
-    }
-    return false;
-  }
-
   void lazy_load_model(std::unique_ptr<ModelLoader> loader) override {
     if constexpr (detail::has_lazy_load_model<ModelType>::value) {
       model_->lazy_load_model(std::move(loader));
@@ -385,86 +347,6 @@ class CausalLMImpl : public CausalLM {
       return CausalLM::last_prepare_expert_weight_ok(layer_id);
     }
   }
-
-#if defined(USE_NPU)
-  layer::NpuLmHead get_npu_lm_head() override {
-    if constexpr (detail::has_get_npu_lm_head<ModelType>::value) {
-      return model_->get_npu_lm_head();
-    } else {
-      return CausalLM::get_npu_lm_head();
-    }
-  }
-
-  void set_npu_lm_head(layer::NpuLmHead& head) override {
-    if constexpr (detail::has_set_npu_lm_head<ModelType>::value) {
-      model_->set_npu_lm_head(head);
-    } else {
-      CausalLM::set_npu_lm_head(head);
-    }
-  }
-
-  layer::NpuWordEmbedding get_npu_word_embedding() override {
-    if constexpr (detail::has_get_npu_word_embedding<ModelType>::value) {
-      return model_->get_npu_word_embedding();
-    } else {
-      return CausalLM::get_npu_word_embedding();
-    }
-  }
-
-  bool has_restored_npu_word_embedding() override {
-    if constexpr (detail::has_restored_npu_word_embedding<ModelType>::value) {
-      return model_->has_restored_npu_word_embedding();
-    } else {
-      return CausalLM::has_restored_npu_word_embedding();
-    }
-  }
-
-  void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) override {
-    if constexpr (detail::has_set_npu_word_embedding<ModelType>::value) {
-      model_->set_npu_word_embedding(embedding);
-    } else {
-      CausalLM::set_npu_word_embedding(embedding);
-    }
-  }
-
-  void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& embedding) override {
-    if constexpr (detail::has_set_restored_npu_word_embedding<
-                      ModelType>::value) {
-      model_->set_restored_npu_word_embedding(embedding);
-    } else {
-      CausalLM::set_restored_npu_word_embedding(embedding);
-    }
-  }
-
-  bool init_or_refresh_rolling_runtime(Stream* load_stream,
-                                       Stream* compute_stream,
-                                       int32_t num_cached_slots,
-                                       int32_t requested_rolling_slots,
-                                       const std::string& model_id) override {
-    if constexpr (detail::has_init_or_refresh_rolling_runtime<
-                      ModelType>::value) {
-      return model_->init_or_refresh_rolling_runtime(load_stream,
-                                                     compute_stream,
-                                                     num_cached_slots,
-                                                     requested_rolling_slots,
-                                                     model_id);
-    }
-    return CausalLM::init_or_refresh_rolling_runtime(load_stream,
-                                                     compute_stream,
-                                                     num_cached_slots,
-                                                     requested_rolling_slots,
-                                                     model_id);
-  }
-
-  // Forward to inner ModelType.
-  xlite::XliteModelHolder* get_xlite_holder() override {
-    if constexpr (detail::has_get_xlite_holder<ModelType>::value) {
-      return model_->get_xlite_holder();
-    }
-    return CausalLM::get_xlite_holder();
-  }
-#endif
 
   layer::LmHead get_lm_head() override {
     if constexpr (detail::has_get_lm_head<ModelType>::value) {

@@ -16,11 +16,13 @@ limitations under the License.
 #pragma once
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "core/platform/stream_event.h"
 #include "core/runtime/forward_params.h"
 
 namespace xllm {
@@ -74,12 +76,11 @@ class ScheduleOverlapState final {
   bool can_reuse_tokens(const std::vector<std::string>& request_ids) const;
 
  private:
+  // Host objects that must outlive the device work of the prior output.
   struct DeferredRelease final {
     StreamEventPtr ready_event;
     std::vector<std::shared_ptr<const void>> owners;
   };
-
-  static constexpr size_t kMaxDeferredReleases = 1;
 
   void retire_prior_inputs();
   void retire_deferred_inputs(bool wait);
@@ -98,7 +99,7 @@ class ScheduleOverlapState final {
   bool has_tokens_ = false;
   bool pending_ = false;
   bool shutting_down_ = false;
-  std::vector<DeferredRelease> deferred_releases_;
+  std::optional<DeferredRelease> deferred_release_;
 };
 
 }  // namespace xllm

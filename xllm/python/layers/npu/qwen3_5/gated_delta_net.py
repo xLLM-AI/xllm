@@ -35,7 +35,9 @@ from xllm.python.layers.npu.qwen3_5.gdn_metadata import (
 )
 from xllm.python.layers.qwen3_5.common import Qwen3_5GatedDeltaNetConfig
 from xllm.python.layers.qwen3_5.gated_delta_net import load_gdn_weights
-from xllm.python.model_executor.forward_context import get_execution_context
+from xllm.python.model_executor.forward_context import (
+    get_execution_context,
+)
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 
 _MEGA_GDN_MAX_DECODE_BATCH_SIZE = 32
@@ -189,6 +191,32 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         a = torch.nn.functional.linear(hidden, a_weight)
         return mixed_qkv, a, b, z
 
+    def _prefill(self, hidden: torch.Tensor, metadata: GdnPrefillMetadata) -> torch.Tensor:
+        state_cache = metadata.state_caches[self.layer_id]
+        group = metadata.layer_groups.get(self.layer_id, 0)
+        conv_read, conv_write = metadata.conv_read_indices[group], metadata.conv_write_indices[group]
+        ssm_read, ssm_write = metadata.ssm_read_indices[group], metadata.ssm_write_indices[group]
+        mixed_qkv, a, b, z = self._project_prefill_inputs(hidden)
+        output = kernels.mega_gdn_prefill(
+            mixed_qkv,
+            b,
+            a,
+            z,
+            self.conv1d_weight,
+            state_cache.conv,
+            self.A_log,
+            self.dt_bias,
+            conv_read,
+            conv_write,
+            ssm_read,
+            ssm_write,
+            state_cache.ssm,
+            metadata.cu_seqlens,
+            self.norm_weight,
+            metadata.num_matrices,
+        )
+        return output
+
     def _decode(
         self,
         hidden: torch.Tensor,
@@ -196,6 +224,8 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         ssm_state: torch.Tensor,
         read_state_indices: torch.Tensor,
         write_state_indices: torch.Tensor,
+        packed_read_state_indices: torch.Tensor | None = None,
+        packed_write_state_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = hidden.shape[0]
         mixed_qkvz = self.in_proj_qkvz(hidden)
@@ -203,6 +233,9 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         mixed_qkv, z = mixed_qkvz.split((self.conv_dim, self.value_dim), dim=-1)
         b, a = mixed_ba.split((self.num_v_heads, self.num_v_heads), dim=-1)
         z = z.view(batch_size, self.num_v_heads, self.value_head_dim)
+        if packed_read_state_indices is not None:
+            read_state_indices = packed_read_state_indices
+            write_state_indices = packed_write_state_indices
         chunk_outputs = []
         for start in range(0, batch_size, _MEGA_GDN_MAX_DECODE_BATCH_SIZE):
             end = min(start + _MEGA_GDN_MAX_DECODE_BATCH_SIZE, batch_size)
@@ -223,19 +256,24 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
                     True,
                 )
             )
-        return chunk_outputs[0] if len(chunk_outputs) == 1 else torch.cat(chunk_outputs, dim=0)
+        output = chunk_outputs[0] if len(chunk_outputs) == 1 else torch.cat(chunk_outputs, dim=0)
+        return output
 
     def _verify(self, hidden: torch.Tensor, metadata: GdnVerifyMetadata) -> torch.Tensor:
         batch_size = metadata.state_indices.numel()
         width = metadata.query_width
         state_cache = metadata.state_caches[self.layer_id]
+        group = metadata.layer_groups.get(self.layer_id, 0)
+        state_indices = (
+            metadata.state_indices if metadata.packed_state_indices is None else metadata.packed_state_indices[group]
+        )
 
         if metadata.cu_seqlens is not None:
             mixed_qkv, a, b, z = (tensor.contiguous() for tensor in self._project_prefill_inputs(hidden))
             output = torch.zeros_like(z)
             for start in range(0, batch_size, _MEGA_GDN_MAX_VARLEN_BATCH_SIZE):
                 end = min(start + _MEGA_GDN_MAX_VARLEN_BATCH_SIZE, batch_size)
-                indices = metadata.state_indices[start:end]
+                indices = state_indices[start:end]
                 kernels.mega_gdn_mtp_decode_varlen(
                     mixed_qkv,
                     z,
@@ -270,7 +308,7 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         chunk_outputs = []
         for start in range(0, batch_size, _MEGA_GDN_MAX_DECODE_BATCH_SIZE):
             end = min(start + _MEGA_GDN_MAX_DECODE_BATCH_SIZE, batch_size)
-            indices = metadata.state_indices[start:end]
+            indices = state_indices[start:end]
             chunk_outputs.append(
                 kernels.mega_gdn_mtp_decode(
                     mixed_qkv[start:end].contiguous(),
@@ -310,32 +348,17 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         if isinstance(metadata, GdnVerifyMetadata):
             output = self._verify(hidden, metadata)
         elif isinstance(metadata, GdnPrefillMetadata):
-            mixed_qkv, a, b, z = self._project_prefill_inputs(hidden)
-            output = kernels.mega_gdn_prefill(
-                mixed_qkv,
-                b,
-                a,
-                z,
-                self.conv1d_weight,
-                state_cache.conv,
-                self.A_log,
-                self.dt_bias,
-                metadata.conv_read_indices,
-                metadata.conv_write_indices,
-                metadata.ssm_read_indices,
-                metadata.ssm_write_indices,
-                state_cache.ssm,
-                metadata.cu_seqlens,
-                self.norm_weight,
-                metadata.num_matrices,
-            )
+            output = self._prefill(hidden, metadata)
         elif isinstance(metadata, GdnDecodeMetadata):
+            group = metadata.layer_groups.get(self.layer_id, 0)
             output = self._decode(
                 hidden,
                 state_cache.conv,
                 state_cache.ssm,
                 metadata.read_state_indices,
                 metadata.write_state_indices,
+                metadata.packed_read_state_indices[group] if metadata.packed_read_state_indices is not None else None,
+                metadata.packed_write_state_indices[group] if metadata.packed_write_state_indices is not None else None,
             )
         else:
             raise TypeError(f"Unsupported Qwen3.5 GDN metadata: {type(metadata).__name__}")

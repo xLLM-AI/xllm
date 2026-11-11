@@ -127,17 +127,15 @@ torch::Tensor gumbel_argmax(const torch::Tensor& logits,
   return gumbel_noise.argmax(/*dim=*/-1);
 }
 
-SampleOutput sample(torch::Tensor& logits,
-                    const SamplingParameters& params,
-                    const torch::Tensor& filter_mask) {
+SampleOutput sample(torch::Tensor& logits, const SamplingParameters& params) {
   SampleOutput output;
   // vLLM reports probabilities from the unmodified model distribution.
   const torch::Tensor raw_logprobs =
-      params.logprobs() && !params.use_beam_search()
+      params.logprobs()
           ? torch::log_softmax(logits, /*dim=*/-1, torch::kFloat32)
           : torch::Tensor();
 
-  process_logits(logits, params, filter_mask);
+  process_logits(logits, params);
 
   // Keep the model dtype; consumers upcast where the reduction needs fp32.
   if (params.return_logits()) {

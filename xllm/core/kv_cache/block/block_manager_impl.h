@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include "core/kv_cache/block/block_manager.h"
+#include "core/kv_cache/block/static_kv_cache_block_pool.h"
 #include "core/kv_cache/prefix/prefix_cache.h"
 
 namespace xllm {
@@ -26,8 +27,12 @@ class BlockManagerImpl : public BlockManager {
   explicit BlockManagerImpl(const Options& options);
   virtual ~BlockManagerImpl() {
     prefix_cache_.reset();
-    CHECK_EQ(num_free_blocks_, free_blocks_.size() - 1)
-        << "Not all blocks have been freed";
+    if (options_.shared_block_pool()) {
+      CHECK_EQ(num_used_blocks_, 0u) << "Not all blocks have been freed";
+    } else {
+      CHECK_EQ(num_free_blocks_, free_blocks_.size() - 1)
+          << "Not all blocks have been freed";
+    }
   };
 
   // Try to allocate blocks with num_blocks,
@@ -71,14 +76,29 @@ class BlockManagerImpl : public BlockManager {
   }
 
   // free blocks num
-  size_t num_free_blocks() const override { return num_free_blocks_; }
+  size_t num_free_blocks() const override {
+    return options_.shared_block_pool()
+               ? options_.shared_block_pool()->num_free_blocks(block_type())
+               : num_free_blocks_.load(std::memory_order_relaxed);
+  }
+  size_t evict_prefix_cache(size_t num_blocks) override;
+  std::vector<PrefixCacheEntry> prefix_cache_entries() const override;
+  bool evict_cached_block(const XXH3Key& hash) override;
+  void set_prefix_dependency(const XXH3Key& hash,
+                             const XXH3Key& dependency) override;
 
   // used blocks num
-  size_t num_used_blocks() const override { return num_used_blocks_; }
+  size_t num_used_blocks() const override {
+    const size_t blocks = num_used_blocks_.load(std::memory_order_relaxed);
+    return options_.shared_block_pool()
+               ? blocks *
+                     options_.shared_block_pool()->slots_per_block(block_type())
+               : blocks;
+  }
 
   // current kv cache utilization.
   double kv_cache_utilization() const override {
-    return static_cast<double>(num_used_blocks_) / num_total_blocks();
+    return static_cast<double>(num_used_blocks()) / num_total_blocks();
   }
 
   // call BlockManager to free block used by Block.
@@ -91,9 +111,16 @@ class BlockManagerImpl : public BlockManager {
   Block allocate() override;
 
   // total blocks num
-  size_t num_total_blocks() const override { return free_blocks_.size() - 1; }
+  size_t num_total_blocks() const override {
+    return options_.shared_block_pool()
+               ? options_.shared_block_pool()->num_total_slots()
+               : free_blocks_.size() - 1;
+  }
 
  protected:
+  std::vector<Block> allocate_with_placement(size_t num_blocks,
+                                             const void* placement_hint);
+
   // Flip a block's entry in `usage_ids` from 0 to 1. Returns true if the flip
   // happened; false if the entry was already 1 (i.e. block was already marked
   // used). Shared with subclasses (e.g. SlidingWindowBlockManager) that need

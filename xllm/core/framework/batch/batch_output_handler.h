@@ -50,11 +50,7 @@ class BatchOutputHandler final {
                              BatchOutputAction action);
   void process_sample_output(const BatchOutputData& data,
                              const SampleOutput& output,
-                             BatchOutputAction action,
-                             bool force_requested_beam_result_size);
-  void process_beam_search_output(const BatchOutputData& data,
-                                  const RawForwardOutput& output,
-                                  BatchOutputAction action);
+                             BatchOutputAction action);
 
  private:
   struct OutputTarget {
@@ -67,11 +63,7 @@ class BatchOutputHandler final {
                                  const Token& token,
                                  int32_t token_idx,
                                  bool replace_fake_token);
-  void finish_sample_output(const BatchOutputData& data,
-                            BatchOutputAction action,
-                            bool force_requested_beam_result_size = false);
-  void process_beam_search(const BatchOutputData& data,
-                           bool force_requested_result_size = false);
+  void finish_sample_output(BatchOutputAction action);
 
   std::vector<OutputTarget> output_targets_;
 };

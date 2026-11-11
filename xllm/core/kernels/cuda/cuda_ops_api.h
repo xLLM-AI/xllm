@@ -47,13 +47,6 @@ void reshape_paged_cache(
     torch::Tensor key_cache,  // [n_blocks, block_size, n_heads, head_dim]
     torch::Tensor value_cache);
 
-void block_copy(torch::Tensor key_cache_ptrs,
-                torch::Tensor value_cache_ptrs,
-                torch::Tensor src_block_indices,
-                torch::Tensor dst_block_indices,
-                torch::Tensor cum_sum,
-                int64_t numel_per_block,
-                torch::ScalarType cache_dtype);
 #if !defined(USE_DCU)
 void batch_prefill(const std::string& uri,
                    ffi::Array<int64_t> plan_info,
@@ -214,20 +207,6 @@ torch::Tensor fp8_scaled_matmul(
     torch::ScalarType output_dtype,
     const std::optional<torch::Tensor>& bias = std::nullopt,
     const std::optional<torch::Tensor>& output = std::nullopt);
-
-std::pair<torch::Tensor, torch::Tensor> compute_topk_for_beam_search(
-    torch::Tensor combined_probs,
-    uint32_t batch_size,
-    uint32_t beam_size,
-    uint32_t top_k,
-    torch::Device device);
-
-std::pair<torch::Tensor, torch::Tensor> compute_topk_general(
-    torch::Tensor input,
-    uint32_t batch_size,
-    uint32_t input_length,
-    uint32_t k,
-    torch::Device device);
 
 torch::Tensor air_log_softmax_last_dim(const torch::Tensor& input,
                                        const torch::Tensor& temperatures);

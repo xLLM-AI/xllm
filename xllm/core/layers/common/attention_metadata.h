@@ -87,29 +87,6 @@ struct PlanInfo {
   std::string uri;
 };
 
-// Cache for xattention two-stage decode.
-struct XAttentionTwoStageDecodeCache {
-  // Output tensors (shape fixed, values computed per layer)
-  torch::Tensor shared_lse;    // [total_beam, num_heads, 1], float32
-  torch::Tensor shared_o;      // [total_beam, num_heads, head_dim]
-  torch::Tensor unshared_lse;  // [total_beam, num_heads, 1], float32
-  torch::Tensor unshared_o;    // [total_beam, num_heads, head_dim]
-
-  // Fixed tensors (values don't change for the same batch/shape)
-  torch::Tensor q_cu_seq_lens_shared;             // [batch_size + 1], int32
-  torch::Tensor qo_indptr_expanded;               // [total_beam + 1], int32
-  torch::Tensor paged_kv_indptr_expanded;         // [total_beam + 1], int32
-  torch::Tensor paged_kv_indices_expanded;        // [total_beam], int32
-  torch::Tensor paged_kv_last_page_len_expanded;  // [total_beam], int32
-
-  // Cached parameters for validation / reuse
-  int32_t cached_batch_size = -1;
-  int32_t cached_beam_size = -1;
-  int32_t cached_num_heads = -1;
-  int32_t cached_head_size = -1;
-  int32_t cached_max_decode_step = -1;
-  int32_t cached_step = -1;
-};
 #endif
 
 #if defined(USE_MUSA)
@@ -208,14 +185,6 @@ struct AttentionMetadata {
   // the current batch configuration.
 #if defined(USE_CUDA) || defined(USE_MUSA)
   std::shared_ptr<PlanInfo> plan_info;
-  // Separate plan info for the shared stage in xattention two-stage decode.
-  std::shared_ptr<PlanInfo> shared_plan_info;
-  // Separate plan info for the unshared stage in xattention two-stage decode.
-  std::shared_ptr<PlanInfo> unshared_plan_info;
-
-  // for xattention two-stage decode cache (layer 0 only)
-  std::optional<XAttentionTwoStageDecodeCache>
-      xattention_two_stage_decode_cache;
 #endif
   // for CUDA graph - CPU tensors for plan_info update (avoid .to(CPU) during
   // graph capture) torch::Tensor q_cu_seq_lens_host;      // Prefill mode:
@@ -224,13 +193,6 @@ struct AttentionMetadata {
   // mode: paged_kv_indptr on CPU torch::Tensor kv_seq_lens_host;        //
   // Decode mode (tensor_core) / NPU: kv_seq_lens on CPU for CUDA graph
   bool enable_cuda_graph = false;
-
-  // for xattention
-  torch::Tensor full_k_cache;
-  torch::Tensor full_v_cache;
-  torch::Tensor unshared_k_cache;
-  torch::Tensor unshared_v_cache;
-  torch::Tensor step_tensor;
 
   // for GDN attention
   torch::Tensor chunk_indices;

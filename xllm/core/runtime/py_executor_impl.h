@@ -32,9 +32,6 @@ limitations under the License.
 namespace xllm {
 
 class PyCausalLM;
-class SlotBuffer;
-class ProcessGroup;
-struct TokenResultTensors;
 
 class __attribute__((visibility("hidden"))) PyExecutorImpl final
     : public ExecutorImpl {
@@ -46,58 +43,13 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
 
   ~PyExecutorImpl() override;
 
-  bool supports_adaptive_unified_graph() const override;
-  void warmup_adaptive_unified_graph(ExecutorImpl& draft_executor,
-                                     const AdaptiveDSparkGraphTask& task,
-                                     ProcessGroup* sampling_group) override;
-  torch::Tensor run_adaptive_unified_graph(
-      ExecutorImpl& draft_executor,
-      const AdaptiveDSparkGraphTask& task,
-      ProcessGroup* sampling_group) override;
-
-  bool supports_prepared_attention_metadata() const override {
-    return supports_prepared_metadata_;
-  }
-  void prepare_attention_metadata(std::vector<KVCache>& kv_caches,
-                                  ModelParamsView& params) override;
-
-  void warmup_prepared_graph(const torch::Tensor& tokens,
-                             const torch::Tensor& positions,
-                             std::vector<KVCache>& kv_caches,
-                             const ModelParamsView& params) override;
-
-  std::vector<torch::Tensor> get_prepared_aux_hidden_states(
-      const torch::Tensor& tokens,
-      const torch::Tensor& positions,
-      const ModelParamsView& params);
-
   ModelOutput run(const torch::Tensor& tokens,
                   const torch::Tensor& positions,
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
 
-  // GLM sparse MTP consumes one decode row per token and no Host KV/CSR data.
-  pybind11::object mtp_sparse_attention_metadata_view(
-      const torch::Tensor& block_table,
-      const torch::Tensor& kv_seq_lens,
-      const torch::Tensor& slots) const;
-
-  pybind11::object create_mtp_graph_variant_registry(
-      PyExecutorImpl& draft_executor,
-      int32_t max_variants);
-
-  torch::Tensor run_unified_block(PyExecutorImpl& draft_executor,
-                                  SlotBuffer& target,
-                                  SlotBuffer& draft,
-                                  const TokenResultTensors& result,
-                                  bool dspark,
-                                  ProcessGroup* sampling_group);
-
  private:
-  // Startup only; serving must find an already captured exact Slot binding.
-  void create_adaptive_unified_registry(PyExecutorImpl& draft_executor,
-                                        ProcessGroup* sampling_group);
-  // Caller holds the GIL. First binding occurs on Prepare for pipeline input.
+  // Caller holds the GIL.
   void bind_kv_caches(std::vector<KVCache>& kv_caches);
 
   PyCausalLM* py_causal_lm_;
@@ -108,16 +60,10 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
   bool enable_mla_ = false;
 
   pybind11::object py_executor_;
-  pybind11::object block_graph_registry_;
-  pybind11::object adaptive_unified_registry_;
-  PyExecutorImpl* adaptive_unified_draft_ = nullptr;
-  ProcessGroup* adaptive_unified_sampling_group_ = nullptr;
   bool requires_input_batch_metadata_ = false;
-  bool supports_prepared_metadata_ = false;
   bool supports_layerwise_kv_load_ = false;
   bool kv_bound_ = false;
   int64_t kv_layer_count_ = 0;
-  std::vector<torch::Tensor> prepared_kv_bindings_;
 };
 
 REGISTER_EXECUTOR("python", PyExecutorImpl);

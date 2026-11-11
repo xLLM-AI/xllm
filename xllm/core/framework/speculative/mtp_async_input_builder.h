@@ -23,10 +23,6 @@ namespace xllm {
 
 class LlmForwardInput;
 
-namespace kernel::npu {
-struct MtpPrepareNextDraftWorkspace;
-}  // namespace kernel::npu
-
 namespace mtp_async {
 
 // Refresh the verifier-conditioned draft prefix and select its last accepted
@@ -56,9 +52,7 @@ void prepare_next_draft_from_accepted_state(
     const torch::Tensor& base_kv_seq_lens,
     bool use_chunked_prefill,
     bool rebuild_expanded_decode_metadata,
-    int32_t block_size,
-    bool require_fused_npu_kernel = false,
-    kernel::npu::MtpPrepareNextDraftWorkspace* reusable_workspace = nullptr);
+    int32_t block_size);
 
 // Builds one-row-per-sequence metadata for a later draft step from the
 // accepted device base used by draft-0. The caller must order this work after

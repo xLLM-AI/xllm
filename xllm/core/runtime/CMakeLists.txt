@@ -11,9 +11,6 @@ cc_library(
     forward_runtime_state.h
     dit_forward_params.h
     executor.h
-    task_execution_pipeline.h
-    slot_buffer.h
-    task_execution_pipeline_speculative.h
     json_object_decode_adapter.h
     decode_input_placeholders.h
     schedule_overlap.h
@@ -22,23 +19,15 @@ cc_library(
     executor_impl_factory.h
     vlm_executor_impl.h
     base_executor_impl.h
-    rec_executor.h
-    rec_executor_impl.h
-    rec_executor_backend.h
-    rec_executor_impl_factory.h
     graph_execution_input.h
-    rec_graph_input.h
     dit_executor.h
     $<$<BOOL:${USE_NPU}>:acl_graph_bucket_policy.h>
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.h>
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.h>
-    $<$<BOOL:${USE_XLITE}>:xlite_executor_impl.h>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.h>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.h>
     $<$<BOOL:${USE_MUSA}>:musa_graph_executor_impl.h>
     py_executor_impl.h
-    mtp_py_executor_pair.h
-    unified_mtp_executor.h
     py_attention_metadata.h
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.h>
     worker.h
@@ -49,14 +38,12 @@ cc_library(
     dit_worker_impl.h
     embed_worker_impl.h
     embed_vlm_worker_impl.h
-    rec_worker_impl.h
     mm_embed_vlm_worker_impl.h
     worker_client.h
     draft_model_spec_worker_impl.h
     speculative_worker_impl.h
     mtp_worker_impl.h
     mtp_runtime_helpers.h
-    unified_mtp_worker_impl.h
     suffix_worker_impl.h
     eagle3_worker_impl.h
     dflash_worker_impl.h
@@ -66,30 +53,20 @@ cc_library(
     worker_rendezvous.h
   SRCS
     decode_graph_bucket.cpp
-    spec_startup_calibration.cpp
     executor.cpp
-    task_execution_pipeline.cpp
-    slot_buffer.cpp
-    task_execution_pipeline_speculative.cpp
     json_object_decode_adapter.cpp
     schedule_overlap.cpp
     schedule_overlap_state.cpp
     executor_impl_factory.cpp
     base_executor_impl.cpp
-    rec_executor.cpp
-    rec_executor_impl.cpp
-    rec_executor_impl_factory.cpp
     vlm_executor_impl.cpp
     dit_executor.cpp
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.cpp>
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.cpp>
-    $<$<BOOL:${USE_XLITE}>:xlite_executor_impl.cpp>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.cpp>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.cpp>
     $<$<BOOL:${USE_MUSA}>:musa_graph_executor_impl.cpp>
     py_executor_impl.cpp
-    mtp_py_executor_pair.cpp
-    unified_mtp_executor.cpp
     py_attention_metadata.cpp
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.cpp>
     worker.cpp
@@ -100,7 +77,6 @@ cc_library(
     dit_worker_impl.cpp
     embed_worker_impl.cpp
     embed_vlm_worker_impl.cpp
-    rec_worker_impl.cpp
     mm_embed_vlm_worker_impl.cpp
     worker_client.cpp
     dit_forward_params.cpp
@@ -108,7 +84,6 @@ cc_library(
     speculative_worker_impl.cpp
     mtp_worker_impl.cpp
     mtp_runtime_helpers.cpp
-    unified_mtp_worker_impl.cpp
     suffix_worker_impl.cpp
     eagle3_worker_impl.cpp
     dflash_worker_impl.cpp
@@ -134,6 +109,7 @@ cc_library(
     :global_virtual_memory_region
     :kv_cache
     :kv_cache_estimation
+    :static_kv_cache_tensor_allocator
     :virtual_memory_kv_cache_storage
     :virtual_kv_cache_transfer_memory_provider_impl
     :kv_cache_transfer
@@ -142,8 +118,7 @@ cc_library(
     :kv_transfer_completion
     :models
     :sampler
-    :rec_constrained_decoding
-    :json_object_constraint_batch
+    :json_object_grammar
     :tokenizer
     :model_loader
     :util
@@ -162,10 +137,6 @@ cc_library(
     $<$<BOOL:${USE_MUSA}>:torch_musa>
     $<$<BOOL:${USE_DCU}>:hip::host>
 )
-
-if(USE_XLITE)
-  xllm_link_xlite(runtime)
-endif()
 
 # This leaf owns local resources without depending on :runtime or RPC targets.
 cc_library(

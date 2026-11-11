@@ -18,11 +18,9 @@ limitations under the License.
 // github.com/snowflakedb/ArcticInference/blob/main/csrc/suffix_decoding/suffix_tree.h
 #pragma once
 
-#include <cassert>
 #include <deque>
 #include <memory>
 #include <span>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -86,14 +84,6 @@ struct Node {
         length(length),
         ref_seq(ref_seq),
         ref_idx(ref_idx) {}
-
-  // Memory usage of this node.
-  size_t memory_usage() const {
-    size_t total = sizeof(*this);
-    total += children.memory_usage();
-    total += endpoints.memory_usage();
-    return total;
-  }
 };
 
 struct Group {
@@ -113,24 +103,13 @@ struct Draft {
   // The token ids of the speculation draft.
   std::vector<int32_t> token_ids;
 
-  // For each token, the index of its parent token (-1 if no parent).
-  std::vector<int32_t> parents;
-
-  // For each token, the estimated probability of the token.
-  std::vector<float> probs;
-
   // Floating point score of the draft (sum of all probs).
   float score = 0.0;
-
-  // Length of the prefix match for the speculated tokens.
-  int32_t match_len = 0;
 };
 
 class SuffixTree {
  public:
   SuffixTree(int32_t max_depth);
-
-  int32_t num_seqs() const { return static_cast<int32_t>(seqs_.size()); }
 
   // Append a new element to the sequence with id seq_id.
   void append(int32_t seq_id, int32_t token);
@@ -138,24 +117,12 @@ class SuffixTree {
   // Append multiple new elements to the sequence with id seq_id.
   void extend(int32_t seq_id, std::span<const int32_t> tokens);
 
+  std::span<const int32_t> tail(int32_t seq_id, size_t n) const;
+
   // Remove the sequence with id seq_id.
   void remove(int32_t seq_id);
 
-  // Given a context, speculate the next tokens using the suffix tree.
-  Draft speculate(std::span<const int32_t> context,
-                  int32_t max_spec_tokens,
-                  float max_spec_factor,
-                  float max_spec_offset,
-                  float min_token_prob,
-                  bool use_tree_spec);
-
-  // Check the integrity of the suffix tree, return empty string if ok,
-  // otherwise return an error message.
-  std::string check_integrity();
-
-  // Estimate memory usage of the suffix tree, for debugging only. It
-  // walks the entire tree so can be slow.
-  size_t estimate_memory() const;
+  Draft speculate(std::span<const int32_t> context, int32_t max_tokens);
 
  private:
   // Maximum depth of the suffix tree.
@@ -175,17 +142,7 @@ class SuffixTree {
 
   std::pair<Node*, int32_t> match_context(std::span<const int32_t> context);
 
-  Draft speculate_path(Node* node,
-                       int32_t idx,
-                       int32_t max_spec_tokens,
-                       float min_token_prob);
-
-  Draft speculate_tree(Node* node,
-                       int32_t idx,
-                       int32_t max_spec_tokens,
-                       float min_token_prob);
-
-  std::string check_node_integrity(Node* node);
+  Draft speculate_path(Node* node, int32_t idx, int32_t max_spec_tokens);
 };
 
 }  // namespace xllm

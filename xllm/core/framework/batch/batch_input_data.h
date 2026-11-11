@@ -31,9 +31,6 @@ namespace xllm {
 // Selected by the scheduler's factory, independent of mutable sequence views.
 enum class BatchInputType : int8_t {
   SEQUENCE,
-  ONEREC,
-  ONEREC_XATTENTION,
-  REC_MULTI_ROUND,
 };
 
 // Non-owning per-forward view. Its sequence plan, owning batch and requests
@@ -44,7 +41,6 @@ struct BatchInputData {
   const std::vector<uint32_t>& allowed_max_tokens;
   const std::vector<torch::Tensor>& input_embeddings;
   const std::vector<MMData>& mm_data;
-  std::vector<BlockTransferInfo>* swap_block_transfer_infos;
   uint64_t batch_id;
   BatchForwardType forward_type;
 };

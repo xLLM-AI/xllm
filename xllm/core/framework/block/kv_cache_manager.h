@@ -21,7 +21,6 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "framework/batch/batch_group.h"
-#include "framework/batch/rec_batch_group.h"
 #include "framework/model/model_params_view.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -64,7 +63,6 @@ class KVCacheManager {
   virtual bool try_allocate(Sequence* sequence) = 0;
 
   virtual void transfer_blocks(BatchGroup& batches) {};
-  virtual void transfer_blocks(RecBatchGroup& batches) {};
   virtual void transfer_blocks() {};
 
   // Managers without storage prefetch admit directly to the ready queue.
@@ -114,10 +112,32 @@ class KVCacheManager {
   // deallocated, so later requests in the same batch can share them.
   virtual void publish_prefix(Sequence* sequence, size_t num_tokens) = 0;
 
-  virtual std::vector<std::vector<BlockTransferInfo>>*
-  get_swap_block_transfer_infos() = 0;
-
   virtual uint32_t num_blocks() const = 0;
+  // Scheduler counters use the same resource units as free/used capacity.
+  // Separate state pools do not consume token-KV capacity; a shared arena
+  // overrides the cost for each resource it stores.
+  virtual size_t block_resource_units(BlockType type, size_t count) const {
+    return type == BlockType::KV ? count : 0;
+  }
+  size_t sequence_resource_units(size_t num_tokens) const {
+    const size_t tokens_per_block = block_size();
+    const size_t full_blocks =
+        num_tokens / tokens_per_block + (num_tokens % tokens_per_block != 0);
+    return block_resource_units(BlockType::KV, full_blocks) +
+           block_resource_units(BlockType::LINEAR, 1);
+  }
+  size_t additional_resource_units(Sequence* sequence,
+                                   size_t num_tokens) const {
+    const size_t tokens_per_block = block_size();
+    const size_t full_blocks =
+        num_tokens / tokens_per_block + (num_tokens % tokens_per_block != 0);
+    const size_t held = sequence->kv_state().num_blocks(BlockType::KV);
+    const size_t additional = full_blocks > held ? full_blocks - held : 0;
+    return block_resource_units(BlockType::KV, additional) +
+           block_resource_units(
+               BlockType::LINEAR,
+               sequence->kv_state().num_blocks(BlockType::LINEAR) == 0);
+  }
   // Advisory total capacity, including held blocks. Elastic caches may return
   // a stale physical-budget snapshot; a low value alone cannot prove that an
   // otherwise idle request will fail allocation. num_blocks() is the configured

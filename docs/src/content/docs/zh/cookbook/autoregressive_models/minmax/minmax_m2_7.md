@@ -189,7 +189,6 @@ do
     --enable_prefix_cache=false \
     --enable_schedule_overlap=false \
     --enable_graph=false \
-    --enable_atb_spec_kernel=false \
     > $LOG_FILE 2>&1 &
 done
 ```

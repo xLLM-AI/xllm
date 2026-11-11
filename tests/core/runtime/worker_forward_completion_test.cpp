@@ -25,7 +25,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
@@ -322,15 +321,11 @@ class WorkerForwardCompletionTest
     ModelContext context(parallel_args,
                          args,
                          QuantArgs{},
-                         torch::TensorOptions().device(device),
-                         /*context=*/nullptr);
+                         torch::TensorOptions().device(device));
     context.set_model_impl("native");
     return worker.init_model(context);
   }
 
-  ScopedConfigValue<bool> manual_loader_{
-      LoadConfig::get_instance().enable_manual_loader(),
-      false};
   ScopedConfigValue<bool> rolling_load_{
       LoadConfig::get_instance().enable_rolling_load(),
       false};
@@ -339,9 +334,6 @@ class WorkerForwardCompletionTest
       false};
   ScopedConfigValue<bool> eplb_{EPLBConfig::get_instance().enable_eplb(),
                                 false};
-  ScopedConfigValue<bool> beam_search_{
-      BeamSearchConfig::get_instance().enable_beam_search_kernel(),
-      false};
   ScopedConfigValue<bool> graph_{ExecutionConfig::get_instance().enable_graph(),
                                  false};
   ScopedConfigValue<std::string> model_impl_{
@@ -349,7 +341,7 @@ class WorkerForwardCompletionTest
       "native"};
   ScopedConfigValue<std::string> kernel_backend_{
       KernelConfig::get_instance().npu_kernel_backend(),
-      "ATB"};
+      "TORCH"};
 };
 
 TEST_P(WorkerForwardCompletionTest, HonorsCompletionAndRetainsInputOwners) {

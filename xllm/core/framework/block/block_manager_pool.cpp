@@ -24,6 +24,7 @@ limitations under the License.
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/events/kv_cache_event_publisher.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "framework/model/model_params_view.h"
 
 namespace xllm {
@@ -90,6 +91,9 @@ BlockManagerPool::BlockManagerPool(const Options& options,
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .hasher_type(options_.hasher_type())
       .enable_vmm_kvcache(options_.enable_vmm_kvcache())
+      .enable_shared_kv_cache(options_.enable_shared_kv_cache())
+      .shared_linear_state_slots(options_.shared_linear_state_slots())
+      .shared_layout(options_.shared_layout())
       .num_layers(options_.num_layers())
       .slot_size(options_.slot_size())
       .virtual_block_bytes(options_.virtual_block_bytes())
@@ -137,8 +141,6 @@ BlockManagerPool::BlockManagerPool(const Options& options,
     block_managers_.emplace_back(std::make_unique<CompositeBlockManager>(
         std::move(leaves), block_options));
   }
-  swap_block_transfer_infos_.clear();
-  swap_block_transfer_infos_.resize(block_managers_.size());
 }
 
 int32_t BlockManagerPool::get_manager_with_max_available_blocks() const {
@@ -216,11 +218,6 @@ void BlockManagerPool::deallocate(Sequence* sequence) {
   composite->deallocate_for_sequence(sequence);
 }
 
-std::vector<std::vector<BlockTransferInfo>>*
-BlockManagerPool::get_swap_block_transfer_infos() {
-  return &swap_block_transfer_infos_;
-}
-
 bool BlockManagerPool::allocate(Sequence* sequence) {
   DCHECK(sequence != nullptr);
   return allocate(sequence, sequence->num_tokens());
@@ -247,26 +244,11 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   // failure, wrongly deallocate + reset the already-held SWA/C4/C128 blocks.
   const bool started_empty = !sequence->has_any_blocks();
 
-  // The leaves (KV / SWA / C4 / C128 / EMBEDDING / LINEAR) each apply their own
-  // strategy; the pool only orchestrates prefix-share-then-beam-then-grow,
-  // which beam (KV copy-on-write) must sit between.
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
   if (started_empty) {
     composite->allocate_shared_for_sequence(sequence);
   }
-  // Beam swap decision uses the KV block count after the shared attach.
-  const size_t kv_blocks = sequence->kv_state().num_blocks(BlockType::KV);
-  const size_t block_size = options_.block_size();
-  const size_t kv_blocks_needed = (num_tokens + block_size - 1) / block_size;
-  const bool kv_already_satisfied = kv_blocks_needed <= kv_blocks;
-  if (!process_beam_search(sequence, /*need_swap*/ kv_already_satisfied)) {
-    return false;
-  }
-  // Always run the composite growth pass: even when KV is already satisfied, a
-  // sequence (e.g. a fork/clone of a beam parent) may still be missing its
-  // per-sequence EMBEDDING / LINEAR block. The composite skips no-op leaves
-  // internally.
   if (!composite->allocate_sequence(sequence, num_tokens)) {
     if (started_empty) {
       composite->deallocate_for_sequence(sequence);
@@ -292,6 +274,18 @@ bool BlockManagerPool::exceeds_total_capacity(Sequence* sequence,
     }
     const auto* composite = static_cast<const CompositeBlockManager*>(
         block_managers_[dp_rank].get());
+    if (options_.enable_shared_kv_cache()) {
+      const size_t full_blocks =
+          num_tokens / block_size() + (num_tokens % block_size() != 0);
+      const bool fits = options_.shared_layout()
+                            ? options_.shared_layout()->can_fit(full_blocks, 1)
+                            : sequence_resource_units(num_tokens) <=
+                                  composite->admission_capacity();
+      if (fits) {
+        return false;
+      }
+      continue;
+    }
     bool fits_rank = true;
     for (const auto& [type, entry] : composite->leaf_entries()) {
       if (!entry.participates_in_admission || entry.leaf->block_size() == 0) {
@@ -333,10 +327,9 @@ bool BlockManagerPool::exceeds_total_capacity(
         static_cast<size_t>(assigned_rank) >= block_managers_.size()) {
       return false;
     }
-    // Prefix hits and beam/preempted states can share physical blocks. Their
+    // Prefix hits and preempted states can share physical blocks. Their
     // combined token footprint is not an exact physical reservation.
-    can_aggregate = can_aggregate && !sequence->check_beam_search() &&
-                    !sequence->has_any_blocks();
+    can_aggregate = can_aggregate && !sequence->has_any_blocks();
   }
   if (reservations.size() == 1 || !can_aggregate) {
     return false;
@@ -361,6 +354,31 @@ bool BlockManagerPool::exceeds_total_capacity(
   for (size_t dp_rank = 0; dp_rank < block_managers_.size(); ++dp_rank) {
     const auto* composite = static_cast<const CompositeBlockManager*>(
         block_managers_[dp_rank].get());
+    if (options_.enable_shared_kv_cache()) {
+      remaining_slots[dp_rank] =
+          composite->admission_capacity() / sequence_resource_units(num_tokens);
+      if (options_.shared_layout()) {
+        const StaticKVCacheLayout& layout = *options_.shared_layout();
+        const size_t full_blocks =
+            num_tokens / block_size() + (num_tokens % block_size() != 0);
+        size_t lower = 0;
+        size_t upper =
+            std::min(remaining_slots[dp_rank], layout.num_slots() - 1);
+        if (full_blocks != 0) {
+          upper = std::min(upper, (layout.num_slots() - 1) / full_blocks);
+        }
+        while (lower < upper) {
+          const size_t middle = lower + (upper - lower + 1) / 2;
+          if (layout.can_fit(full_blocks * middle, middle)) {
+            lower = middle;
+          } else {
+            upper = middle - 1;
+          }
+        }
+        remaining_slots[dp_rank] = lower;
+      }
+      continue;
+    }
     for (const auto& [type, entry] : composite->leaf_entries()) {
       if (!entry.participates_in_admission) {
         continue;
@@ -439,39 +457,6 @@ bool BlockManagerPool::try_allocate(Sequence* sequence) {
   return true;
 }
 
-bool BlockManagerPool::process_beam_search(Sequence* sequence, bool need_swap) {
-  if (!sequence->check_beam_search()) {
-    return true;
-  }
-
-  auto src_blocks = sequence->kv_state().src_blocks();
-  if (src_blocks.size() == 0) {
-    return true;
-  }
-
-  // when sequence need to swap the last block and no new block appended,
-  // allocate a new block for this sequence
-  if (need_swap && sequence->kv_state().need_swap()) {
-    int32_t dp_rank = get_dp_rank(sequence);
-    // Beam copy-on-write needs exactly one KV block; route through the
-    // composite's typed allocation so it reaches the (possibly concurrency-
-    // wrapped) KV leaf.
-    auto* composite =
-        static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
-    std::vector<Block> new_blocks =
-        composite->allocate_blocks(BlockType::KV, 1);
-    if (new_blocks.size() == 0) {
-      return false;
-    }
-    swap_block_transfer_infos_[dp_rank].emplace_back(src_blocks.back().id(),
-                                                     new_blocks[0].id());
-    sequence->kv_state().process_beam_search(new_blocks[0]);
-  } else {
-    sequence->kv_state().process_beam_search(std::nullopt);
-  }
-  return true;
-}
-
 void BlockManagerPool::allocate_shared(Sequence* sequence) {
   if (!options_.enable_prefix_cache()) {
     return;
@@ -518,10 +503,36 @@ float BlockManagerPool::get_gpu_cache_usage_perc() const {
 
 uint32_t BlockManagerPool::num_blocks() const { return options_.num_blocks(); }
 
+size_t BlockManagerPool::block_resource_units(BlockType type,
+                                              size_t count) const {
+  if (!options_.enable_shared_kv_cache()) {
+    return KVCacheManager::block_resource_units(type, count);
+  }
+  if (options_.shared_layout()) {
+    const StaticKVCacheLayout& layout = *options_.shared_layout();
+    if (type == BlockType::KV) {
+      return count * layout.full_layer_count() * 2 *
+             layout.row_bytes(KVCacheTensorRole::KEY);
+    }
+    return type == BlockType::LINEAR
+               ? count * layout.linear_layer_count() *
+                     (layout.row_bytes(KVCacheTensorRole::CONV) +
+                      layout.checkpoint_stride() *
+                          layout.row_bytes(KVCacheTensorRole::SSM))
+               : 0;
+  }
+  if (type == BlockType::KV) {
+    return count;
+  }
+  return type == BlockType::LINEAR
+             ? count * options_.shared_linear_state_slots()
+             : 0;
+}
+
 size_t BlockManagerPool::admission_capacity(int32_t dp_rank) const {
   CHECK_GE(dp_rank, 0);
   CHECK_LT(static_cast<size_t>(dp_rank), block_managers_.size());
-  if (!options_.enable_vmm_kvcache()) {
+  if (!options_.enable_vmm_kvcache() && !options_.enable_shared_kv_cache()) {
     // Preserve the original physical-cache scheduler's configured capacity.
     return num_blocks();
   }

@@ -84,28 +84,8 @@ std::string canonical_model_impl(std::string model_impl) {
 
 #if defined(USE_NPU)
 constexpr char kAutoBackend[] = "AUTO";
-constexpr char kAtbBackend[] = "ATB";
 constexpr char kTorchBackend[] = "TORCH";
-constexpr char kXliteBackend[] = "XLITE";
 
-bool is_torch_only_model_type(const std::string& model_type) {
-  static const std::unordered_set<std::string> kTorchOnlyModelTypes = {
-      "deepseek_v4",
-      "deepseek_v4_dspark",
-      "deepseek_v4_mtp",
-      "glm5_next_mtp",
-      "glm5_dspark",
-      "qwen3_5",
-      "qwen3_5_text",
-      "qwen3_5_moe",
-      "qwen3_5_moe_text",
-      "qwen3_5_mtp",
-      "qwen3_5_moe_mtp",
-      "qwen3_next",
-      "minimax_m2"};
-  return kTorchOnlyModelTypes.count(model_type) != 0 ||
-         is_dflash2_draft_model_type(model_type);
-}
 #endif
 
 bool validate_implementation_selection(const ModelContext& context) {
@@ -158,7 +138,6 @@ bool resolve_model_registration(const std::string& model_type,
       canonical_model_registration_name(model_type);
 
 #if defined(USE_NPU)
-  bool selected_extension_model = false;
   if (!extension_impl.empty()) {
     const auto& extensions = ExtensionRegistry::get_instance();
     if (!extensions.has_implementation(extension_impl)) {
@@ -169,6 +148,7 @@ bool resolve_model_registration(const std::string& model_type,
     }
     const std::string component(model_component);
     if (extensions.has_implementation(extension_impl, component)) {
+      bool selected_extension_model = false;
       if (model_component == "causal_lm") {
         selected_extension_model =
             static_cast<bool>(ModelRegistry::get_causallm_factory(
@@ -193,116 +173,18 @@ bool resolve_model_registration(const std::string& model_type,
   const std::string backend = requested_npu_kernel_backend.empty()
                                   ? kAutoBackend
                                   : requested_npu_kernel_backend;
-  if (backend != kAutoBackend && backend != kAtbBackend &&
-      backend != kTorchBackend && backend != kXliteBackend) {
+  if (backend != kAutoBackend && backend != kTorchBackend) {
     if (error_message != nullptr) {
       *error_message = "Unsupported --npu_kernel_backend=" + backend +
-                       ". Supported values: AUTO, ATB, TORCH, XLITE.";
-    }
-    return false;
-  }
-
-  if (selected_extension_model) {
-#if !defined(USE_XLITE)
-    if (backend == kXliteBackend) {
-      if (error_message != nullptr) {
-        *error_message =
-            "XLITE backend is not compiled; please build with USE_XLITE=ON.";
-      }
-      return false;
-    }
-#endif
-    if (effective_npu_kernel_backend != nullptr) {
-      *effective_npu_kernel_backend =
-          backend == kAutoBackend ? kTorchBackend : backend;
-    }
-    *resolved_name = canonical_model_type;
-    return true;
-  }
-
-  std::string effective_backend = backend;
-  if (backend == kAutoBackend) {
-    effective_backend = is_torch_only_model_type(canonical_model_type)
-                            ? kTorchBackend
-                            : kAtbBackend;
-  } else if (backend == kXliteBackend) {
-#if defined(USE_XLITE)
-    // Reject torch-only model types
-    if (is_torch_only_model_type(canonical_model_type)) {
-      if (error_message != nullptr) {
-        *error_message =
-            "Model type " + model_type + " only supports TORCH, not XLITE.";
-      }
-      return false;
-    }
-    // Reject non-xlite model types
-    if (!xllm::xlite::is_xlite_model_type(canonical_model_type)) {
-      if (error_message != nullptr) {
-        *error_message = "Model type " + model_type +
-                         " has no XLITE implementation; use ATB or TORCH"
-                         " backend instead.";
-      }
-      return false;
-    }
-#else
-    if (error_message != nullptr) {
-      *error_message =
-          "XLITE backend is not compiled; please build with USE_XLITE=ON.";
-    }
-    return false;
-#endif
-  } else if (canonical_model_type == "qwen3" ||
-             canonical_model_type == "qwen3_moe" ||
-             canonical_model_type == "deepseek_v32" ||
-             canonical_model_type == "glm_moe_dsa" ||
-             canonical_model_type == "glm_moe_dsa_mtp" ||
-             canonical_model_type == "qwen3_vl" ||
-             canonical_model_type == "deepseek_v32_mtp" ||
-             is_glm5_next_target_model_type(canonical_model_type) ||
-             canonical_model_type == "joyai_asr") {
-    // qwen3/qwen3_moe/deepseek_v32/glm_moe_dsa/glm_moe_dsa_mtp/qwen3_vl/
-    // deepseek_v32_mtp and GLM5 target aliases support both backends.
-    // qwen3_vl on TORCH is used by the Python model executor
-    // (--model_impl=python implements its own ViT + deepstack).
-  } else if (is_torch_only_model_type(canonical_model_type)) {
-    if (backend != kTorchBackend) {
-      if (error_message != nullptr) {
-        *error_message = "Model type " + model_type +
-                         " only supports --npu_kernel_backend=TORCH.";
-      }
-      return false;
-    }
-  } else if (backend != kAtbBackend) {
-    if (error_message != nullptr) {
-      *error_message = "Model type " + model_type +
-                       " only supports --npu_kernel_backend=ATB.";
+                       ". Supported values: AUTO, TORCH.";
     }
     return false;
   }
 
   if (effective_npu_kernel_backend != nullptr) {
-    *effective_npu_kernel_backend = effective_backend;
+    *effective_npu_kernel_backend = kTorchBackend;
   }
-  if (backend == kXliteBackend) {
-    *resolved_name = canonical_model_type + "_xlite";
-  } else if (canonical_model_type == "qwen3" &&
-             effective_backend == kAtbBackend) {
-    *resolved_name = "qwen3_atb";
-  } else if (canonical_model_type == "qwen3_moe" &&
-             effective_backend == kAtbBackend) {
-    *resolved_name = "qwen3_moe_atb";
-  } else if (canonical_model_type == "qwen2" &&
-             effective_backend == kAtbBackend) {
-    *resolved_name = "qwen2_atb";
-  } else if (canonical_model_type == "qwen2_5_vl" &&
-             effective_backend == kAtbBackend) {
-    *resolved_name = "qwen2_5_vl_atb";
-  } else if (canonical_model_type == "qwen3_vl" &&
-             effective_backend == kAtbBackend) {
-    *resolved_name = "qwen3_vl_atb";
-  } else {
-    *resolved_name = canonical_model_type;
-  }
+  *resolved_name = canonical_model_type;
   return true;
 #else
   *resolved_name = canonical_model_type;
@@ -315,9 +197,7 @@ void resolve_npu_kernel_backend(Options* options,
                                 std::string_view model_component) {
   CHECK(options != nullptr) << "options must not be null";
 
-  // Python model executor builds the compute graph in Python (torch/torch_npu),
-  // bypassing ATB C++ kernels entirely. Force TORCH so kernel dispatch picks
-  // pure-torch implementations for reshape_and_cache and related operators.
+  // Python executors use the Torch kernel implementation.
   if (ModelConfig::is_python_model_impl(
           ModelConfig::get_instance().model_impl())) {
     options->npu_kernel_backend("TORCH");
@@ -376,21 +256,8 @@ bool resolve_model_registration_name(const std::string& model_type,
 }
 
 bool is_npu_model_cp_capable(const std::string& resolved_name) {
-  // Registers model-side CP capability for master-side validation. Note this
-  // is not the same switch as the worker-side NpuCpPlan gate: deepseek_v4 and
-  // deepseek_v4_mtp own their CP split inside the model (TORCH backend) and
-  // deliberately keep model_supports_model_cp() false so the worker does not
-  // shard a second time. Python GLM5 models are admitted by the Python CP
-  // branch before this native capability check and likewise must not enable
-  // the ATB worker sharder.
   static const std::unordered_set<std::string> kCpCapableModels = {
-      "deepseek_v32",
-      "deepseek_v32_mtp",
-      "deepseek_v4",
-      "deepseek_v4_mtp",
-      "glm_moe_dsa",
-      "glm_moe_dsa_mtp",
-  };
+      "deepseek_v4", "deepseek_v4_mtp"};
   static std::once_flag once;
   std::call_once(once, []() {
     for (const std::string& name : kCpCapableModels) {
@@ -458,22 +325,6 @@ bool ModelRegistry::register_causallm_factory(std::string name,
       CausalLMRegistration{std::move(factory), priority});
   instance->model_backend_[std::move(name)] = "llm";
   return true;
-}
-
-void ModelRegistry::register_rec_model_factory(const std::string& name,
-                                               RecModelFactory factory) {
-  ModelRegistry* instance = get_instance();
-
-  if (instance->model_registry_[name].rec_model_factory != nullptr) {
-    SAFE_LOG_WARNING("rec model factory for " << name
-                                              << " already registered.");
-  } else {
-    instance->model_registry_[name].rec_model_factory = factory;
-    std::string& backend = instance->model_backend_[name];
-    if (backend.empty()) {
-      backend = "rec";
-    }
-  }
 }
 
 void ModelRegistry::register_causalvlm_factory(const std::string& name,
@@ -629,12 +480,6 @@ CausalLMFactory ModelRegistry::get_causallm_factory(
     return nullptr;
   }
   return registration->second.factory;
-}
-
-RecModelFactory ModelRegistry::get_rec_model_factory(const std::string& name) {
-  ModelRegistry* instance = get_instance();
-
-  return instance->model_registry_[name].rec_model_factory;
 }
 
 CausalVLMFactory ModelRegistry::get_causalvlm_factory(const std::string& name) {
@@ -928,27 +773,6 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
   LOG(ERROR) << "Unsupported model type: "
              << context.get_model_args().model_type()
              << " for model_impl=" << canonical_model_impl(model_impl);
-
-  return nullptr;
-}
-
-std::unique_ptr<RecModel> create_rec_model(const ModelContext& context) {
-  std::string resolved_name;
-  std::string error_message;
-  if (!resolve_model_registration_name(context.get_model_args().model_type(),
-                                       &resolved_name,
-                                       &error_message)) {
-    LOG(ERROR) << error_message;
-    return nullptr;
-  }
-
-  auto factory = ModelRegistry::get_rec_model_factory(resolved_name);
-  if (factory) {
-    return factory(context);
-  }
-
-  LOG(ERROR) << "Unsupported rec model type: "
-             << context.get_model_args().model_type();
 
   return nullptr;
 }

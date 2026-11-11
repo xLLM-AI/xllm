@@ -41,7 +41,6 @@ message TensorContents
   bytes bytes_contents = 9;
 }
 
-// TODO: rec.proto contains tensor definitions; refactor to separate tensor proto.
 message Tensor {
   string name = 1;
   string datatype = 2;

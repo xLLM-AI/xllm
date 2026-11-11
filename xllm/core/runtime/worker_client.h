@@ -51,9 +51,6 @@ class WorkerClient {
 
   virtual folly::SemiFuture<bool> stop_profile_async();
 
-  virtual std::optional<std::string> spec_calibration(
-      const SpecCalibrationCommand& command);
-
   virtual void get_cache_info(uint64_t& cluster_id,
                               std::string& addr,
                               uint16_t& port);
@@ -111,13 +108,6 @@ class WorkerClient {
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const DiTForwardInput& inputs);
 
-  // Run a local REC worker and return its device-resident output.
-  virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const RecForwardInput& inputs);
-
-  virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
-      const RecForwardInput& inputs);
-
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const VlmForwardInput& inputs);
 
@@ -130,8 +120,6 @@ class WorkerClient {
 
   virtual folly::SemiFuture<std::optional<RawForwardOutput>>
   get_last_vlm_step_result_async();
-
-  virtual folly::SemiFuture<int64_t> get_active_activation_memory_async();
 
  private:
   Worker* worker_ = nullptr;  // not owned

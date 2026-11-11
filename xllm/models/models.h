@@ -29,57 +29,18 @@ limitations under the License.
 #include "llm/deepseek_v4_mtp.h"                         // IWYU pragma: keep
 #include "llm/glm5_dspark.h"                             // IWYU pragma: keep
 #include "llm/glm5_next.h"                               // IWYU pragma: keep
-#include "llm/npu/deepseek_mtp.h"                        // IWYU pragma: keep
-#include "llm/npu/deepseek_v2.h"                         // IWYU pragma: keep
-#include "llm/npu/deepseek_v3.h"                         // IWYU pragma: keep
-#include "llm/npu/deepseek_v32.h"                        // IWYU pragma: keep
-#include "llm/npu/deepseek_v32_mtp.h"                    // IWYU pragma: keep
-#include "llm/npu/glm4.h"                                // IWYU pragma: keep
-#include "llm/npu/glm4_moe.h"                            // IWYU pragma: keep
-#include "llm/npu/glm4_moe_lite.h"                       // IWYU pragma: keep
-#include "llm/npu/glm4_moe_mtp.h"                        // IWYU pragma: keep
-#include "llm/npu/glm5_moe.h"                            // IWYU pragma: keep
-#include "llm/npu/glm5_moe_mtp.h"                        // IWYU pragma: keep
-#include "llm/npu/joyai_llm_flash.h"                     // IWYU pragma: keep
-#include "llm/npu/kimi_k2.h"                             // IWYU pragma: keep
-#include "llm/npu/kimi_k25_eagle3.h"                     // IWYU pragma: keep
-#include "llm/npu/llama.h"                               // IWYU pragma: keep
-#include "llm/npu/llama3.h"                              // IWYU pragma: keep
 #include "llm/npu/minimax_m2.h"                          // IWYU pragma: keep
-#include "llm/npu/mistral.h"                             // IWYU pragma: keep
-#include "llm/npu/oxygen.h"                              // IWYU pragma: keep
-#include "llm/npu/qwen2.h"                               // IWYU pragma: keep
-#include "llm/npu/qwen3.h"                               // IWYU pragma: keep
-#include "llm/npu/qwen3_dflash.h"                        // IWYU pragma: keep
 #include "llm/npu/qwen3_dflash2.h"                       // IWYU pragma: keep
-#include "llm/npu/qwen3_dspark.h"                        // IWYU pragma: keep
-#include "llm/npu/qwen3_eagle3.h"                        // IWYU pragma: keep
-#include "llm/npu/qwen3_moe.h"                           // IWYU pragma: keep
 #include "llm/qwen3.h"                                   // IWYU pragma: keep
 #include "llm/qwen3_5.h"                                 // IWYU pragma: keep
 #include "llm/qwen3_5_mtp.h"                             // IWYU pragma: keep
 #include "llm/qwen3_moe.h"                               // IWYU pragma: keep
 #include "llm/qwen3_next.h"                              // IWYU pragma: keep
-#include "rec/npu/onerec.h"                              // IWYU pragma: keep
+#include "models/npu_model_metadata.h"                   // IWYU pragma: keep
 #include "vlm/glm5_next_vlm.h"                           // IWYU pragma: keep
 #include "vlm/joyai_asr.h"                               // IWYU pragma: keep
-#include "vlm/npu/glm4v.h"                               // IWYU pragma: keep
-#include "vlm/npu/glm4v_moe.h"                           // IWYU pragma: keep
-#include "vlm/npu/kimi_k25.h"                            // IWYU pragma: keep
-#include "vlm/npu/minicpmv.h"                            // IWYU pragma: keep
-#include "vlm/npu/mistral3.h"                            // IWYU pragma: keep
-#include "vlm/npu/oxygen_vlm.h"                          // IWYU pragma: keep
-#include "vlm/npu/qwen2_5_vl.h"                          // IWYU pragma: keep
-#include "vlm/npu/qwen2_vl.h"                            // IWYU pragma: keep
-#include "vlm/npu/qwen3_vl.h"                            // IWYU pragma: keep
-#include "vlm/npu/qwen3_vl_moe.h"                        // IWYU pragma: keep
 #include "vlm/qwen3_5.h"                                 // IWYU pragma: keep
 #include "vlm/qwen3_vl.h"                                // IWYU pragma: keep
-
-// xlite backend models.
-#if defined(USE_XLITE)
-#include "llm/xlite/register_all.h"  // IWYU pragma: keep
-#endif
 
 #elif defined(USE_MLU)
 #include "dit/pipelines/pipeline_flux.h"          // IWYU pragma: keep

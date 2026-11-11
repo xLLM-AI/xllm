@@ -16,8 +16,6 @@ limitations under the License.
 #pragma once
 
 #include <optional>
-#include <string>
-#include <vector>
 
 #include "core/runtime/schedule_overlap_state.h"
 
@@ -55,18 +53,13 @@ class ScheduleOverlap final {
   template <typename Input>
   torch::Tensor prepare_sampling_impl(WorkerImpl& worker, Input& input);
   template <typename Input>
-  void complete_step_impl(const Input& input,
+  void complete_step_impl(Input& input,
                           Stream& compute_stream,
                           std::optional<ForwardOutput>& output);
   template <typename Input>
   static void replace_tokens(Input& input,
                              const ForwardOutput& prior_output,
                              bool use_graph_decode_input);
-
-  void record_output(Stream& compute_stream,
-                     const std::optional<ForwardOutput>& output,
-                     const std::vector<std::string>& request_ids,
-                     const std::vector<std::string>& sample_sequence_ids);
 
   ScheduleOverlapState state_;
 };

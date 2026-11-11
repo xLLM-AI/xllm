@@ -24,7 +24,6 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/batch/forward_input_builder.h"
-#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/model/model_args.h"
@@ -106,143 +105,6 @@ void BatchState::add(SequencesGroup* sequence_group) {
   sequence_groups_.emplace_back(sequence_group);
 }
 
-bool BatchState::has_partial_finished_beam_group() const {
-  if (sequence_groups_.empty()) {
-    return false;
-  }
-
-  for (auto* seq_group : sequence_groups_) {
-    if (!seq_group->check_beam_search()) {
-      continue;
-    }
-
-    const auto& sequences = seq_group->sequences();
-    if (sequences.empty()) {
-      continue;
-    }
-
-    const size_t finished_cnt = static_cast<size_t>(
-        std::count_if(sequences.begin(), sequences.end(), [](const auto& seq) {
-          return seq->finished();
-        }));
-    if (finished_cnt > 0 && finished_cnt < sequences.size()) {
-      return true;
-    }
-  }
-  return false;
-}
-
-void BatchState::refresh_sequences_from_groups() {
-  if (sequence_groups_.empty()) {
-    return;
-  }
-  BatchSequencePlan next_plan;
-  size_t sequence_count = 0;
-  for (const auto* group : sequence_groups_) {
-    sequence_count += group->sequences().size();
-  }
-  next_plan.reserve(sequence_count);
-  for (const auto* group : sequence_groups_) {
-    for (const auto& sequence : group->sequences()) {
-      next_plan.add(sequence.get(), std::numeric_limits<uint32_t>::max());
-    }
-  }
-  sequence_plan_ = std::move(next_plan);
-}
-
-void BatchState::dp_balance_shuffle_seqs() {
-#if defined(USE_NPU)
-  // this shuffle operation is mainly used for npu with 24 cores
-  // and specific mla op implementation
-  constexpr size_t kNumNpuCores = 24;
-  if (::xllm::KernelConfig::get_instance().enable_customize_mla_kernel() &&
-      ::xllm::ParallelConfig::get_instance().enable_dp_balance() &&
-      sequence_plan_.sequences().size() > kNumNpuCores) {
-    std::vector<uint32_t> kv_cache_tokens_num;
-    kv_cache_tokens_num.reserve(sequence_plan_.sequences().size());
-    for (auto& seq : sequence_plan_.sequences()) {
-      kv_cache_tokens_num.push_back(seq->kv_state().kv_cache_tokens_num());
-    }
-    auto seq_index_shift = cal_seq_exchange_index(kv_cache_tokens_num);
-
-    std::vector<size_t> source_indices(sequence_plan_.size());
-    for (const auto& [source, target] : seq_index_shift) {
-      source_indices[target] = source;
-    }
-    sequence_plan_.reorder(source_indices);
-  }
-#else
-  // TODO: implement dp_balance_shuffle_seqs for non-npu devices
-  static bool warning = true;
-  if (warning) {
-    LOG(WARNING)
-        << "dp_balance_shuffle_seqs is not implemented for current device";
-    warning = false;
-  }
-#endif
-}
-
-std::unordered_map<uint32_t, uint32_t> BatchState::cal_seq_exchange_index(
-    std::vector<uint32_t>& kv_cache_tokens_num) {
-  constexpr size_t kNumNpuCores = 24;
-  const size_t num_seqs = kv_cache_tokens_num.size();
-  const size_t base_per_core = num_seqs / kNumNpuCores;
-  const size_t remainder = num_seqs % kNumNpuCores;
-
-  // find the indices of the remainder biggest elements
-  std::vector<uint32_t> indices(num_seqs);
-  std::iota(indices.begin(), indices.end(), 0);
-  if (remainder > 0) {
-    std::nth_element(indices.begin(),
-                     indices.end() - remainder,
-                     indices.end(),
-                     [&kv_cache_tokens_num](uint32_t a, uint32_t b) {
-                       return kv_cache_tokens_num[a] < kv_cache_tokens_num[b];
-                     });
-  }
-
-  std::vector<uint32_t> base_indices(indices.begin(),
-                                     indices.end() - remainder);
-  std::vector<uint32_t> remainder_indices(indices.end() - remainder,
-                                          indices.end());
-
-  // sort base_indices in descending order
-  std::sort(base_indices.begin(),
-            base_indices.end(),
-            [&kv_cache_tokens_num](uint32_t a, uint32_t b) {
-              return kv_cache_tokens_num[a] > kv_cache_tokens_num[b];
-            });
-
-  // allocate a long and a short request to each core, to ensuring
-  // load balance among all cores
-  std::vector<std::vector<uint32_t>> base_assignment(
-      kNumNpuCores, std::vector<uint32_t>(base_per_core));
-  for (size_t i = 0; i < base_indices.size(); ++i) {
-    const size_t col = i / kNumNpuCores;
-    const size_t row = (col % 2 == 0) ? (i % kNumNpuCores)
-                                      : (kNumNpuCores - 1 - (i % kNumNpuCores));
-    base_assignment[row][col] = base_indices[i];
-  }
-
-  // record the index map, first one is original index,
-  // second one is the target index to be exchanged to
-  std::unordered_map<uint32_t, uint32_t> index_shift;
-  // add base part data
-  for (size_t i = 0; i < kNumNpuCores; ++i) {
-    for (size_t j = 0; j < base_per_core; ++j) {
-      const uint32_t idx = base_assignment[i][j];
-      index_shift[idx] = static_cast<uint32_t>(i + j * kNumNpuCores);
-    }
-  }
-  // add remainder part data
-  for (size_t i = 0; i < remainder; ++i) {
-    index_shift[remainder_indices[i]] =
-        static_cast<uint32_t>(i + kNumNpuCores * base_per_core);
-  }
-
-  return index_shift;
-}
-
 void BatchState::refresh_forward_type(const std::vector<Sequence*>& sequences) {
   batch_forward_type_ = BatchForwardType();
   for (auto* sequence : sequences) {
@@ -300,7 +162,6 @@ BatchInputData BatchState::input_data(const BatchSequencePlan& plan) {
           plan.budgets(),
           input_embeddings_vec_,
           mm_data_vec_,
-          &swap_block_transfer_infos_,
           batch_id_,
           batch_forward_type_};
 }
@@ -315,7 +176,6 @@ BatchInputData BatchState::prepare_sequence_input_data() {
 BatchInputData BatchState::prepare_distributed_input_data() {
   CHECK(sequence_groups_.empty() || !sequence_plan_.empty())
       << "Sequence input requires scheduled sequences";
-  dp_balance_shuffle_seqs();
   return input_data(sequence_plan_);
 }
 
@@ -340,23 +200,9 @@ LlmForwardInput BatchState::build_distributed_input(const BatchInputData& data,
   ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
   auto input = builder.build_forward_input(/*num_decoding_tokens=*/0,
                                            /*min_decoding_batch_size=*/0);
-  if (has_partial_finished_beam_group()) {
-    input.sampling_params.acc_logprob() = torch::Tensor();
-  }
+
   input.input_params.meta.requires_host_restore =
       std::exchange(requires_host_restore_, false);
-  return input;
-}
-
-RecForwardInput BatchState::build_rec_sequence_input(
-    const BatchInputData& data,
-    uint32_t num_decoding_tokens,
-    uint32_t min_decoding_batch_size,
-    const ModelArgs& args,
-    int32_t cp_size) {
-  ForwardInputBuilder builder(data, &args, cp_size);
-  auto input = builder.build_rec_forward_input(num_decoding_tokens,
-                                               min_decoding_batch_size);
   return input;
 }
 
@@ -381,24 +227,9 @@ VlmForwardInput BatchState::build_vlm_distributed_input(
     int32_t cp_size) {
   ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
   auto input = builder.build_vlm_forward_input(0, 0);
-  if (has_partial_finished_beam_group()) {
-    input.sampling_params.acc_logprob() = torch::Tensor();
-  }
+
   input.input_params.meta.requires_host_restore =
       std::exchange(requires_host_restore_, false);
-  return input;
-}
-
-RecForwardInput BatchState::build_rec_sequence_input(const BatchInputData& data,
-                                                     const ModelArgs& args,
-                                                     ThreadPool* thread_pool,
-                                                     int32_t cp_size) {
-  ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
-  auto input = builder.build_rec_forward_input(/*num_decoding_tokens=*/0,
-                                               /*min_decoding_batch_size=*/0);
-  if (has_partial_finished_beam_group()) {
-    input.sampling_params.acc_logprob() = torch::Tensor();
-  }
   return input;
 }
 

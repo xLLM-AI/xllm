@@ -28,11 +28,6 @@ limitations under the License.
 
 namespace xllm {
 
-std::optional<std::string> WorkerClient::spec_calibration(
-    const SpecCalibrationCommand& command) {
-  return worker_->spec_calibration(command);
-}
-
 void WorkerClient::get_cache_info(uint64_t& cluster_id,
                                   std::string& addr,
                                   uint16_t& port) {
@@ -83,17 +78,6 @@ WorkerClient::step_remote_async(const LlmForwardInput& input) {
 folly::SemiFuture<std::optional<RawForwardOutput>>
 WorkerClient::step_remote_async(const DiTForwardInput& /*input*/) {
   LOG(FATAL) << "Native DiT remote execution requires a remote worker";
-  return folly::makeSemiFuture(std::optional<RawForwardOutput>{});
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> WorkerClient::step_async(
-    const RecForwardInput& input) {
-  return worker_->step_async(input);
-}
-
-folly::SemiFuture<std::optional<RawForwardOutput>>
-WorkerClient::step_remote_async(const RecForwardInput& /*input*/) {
-  LOG(FATAL) << "Native Rec local execution requires step_async";
   return folly::makeSemiFuture(std::optional<RawForwardOutput>{});
 }
 
@@ -176,10 +160,6 @@ WorkerClient::get_last_llm_step_result_async() {
 folly::SemiFuture<std::optional<RawForwardOutput>>
 WorkerClient::get_last_vlm_step_result_async() {
   return folly::makeSemiFuture(std::optional<RawForwardOutput>(std::nullopt));
-}
-
-folly::SemiFuture<int64_t> WorkerClient::get_active_activation_memory_async() {
-  return worker_->get_active_activation_memory_async();
 }
 
 }  // namespace xllm

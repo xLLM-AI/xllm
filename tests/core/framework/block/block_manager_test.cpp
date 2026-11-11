@@ -128,10 +128,7 @@ bool allocate_next_linear_chunk(BlockManagerPool& pool, Sequence& sequence) {
 
 class BlockManagerPoolTest : public ::testing::Test {
  protected:
-  BlockManagerPoolTest() {
-    sampling_param_.beam_width = 0;
-    sampling_param_.is_embeddings = false;
-  }
+  BlockManagerPoolTest() { sampling_param_.is_embeddings = false; }
 
   Sequence make_sequence(size_t index,
                          const std::vector<int32_t>& prompt_tokens) {
@@ -141,7 +138,6 @@ class BlockManagerPoolTest : public ::testing::Test {
     params.skip_special_tokens = true;
     params.streaming = false;
     params.enable_schedule_overlap = false;
-    params.rec_type = RecType::kNone;
     params.bos_token_id = 0;
     params.request_id = "block_manager_pool_test";
     params.sampling_param = &sampling_param_;
@@ -178,6 +174,39 @@ BlockManagerPool::Options make_linear_state_pool_options(
       .enable_linear_state(true)
       .linear_state_num_slots(linear_state_num_slots);
   return options;
+}
+
+ModelArgs make_shared_cache_model_args() {
+  ModelArgs args;
+  args.model_type("qwen3_next")
+      .n_layers(4)
+      .n_heads(1)
+      .n_kv_heads(1)
+      .head_dim(1)
+      .full_attention_interval(2)
+      .linear_num_key_heads(1)
+      .linear_num_value_heads(1)
+      .linear_key_head_dim(1)
+      .linear_value_head_dim(1)
+      .linear_conv_kernel_dim(2)
+      .mamba_ssm_dtype("float32");
+  return args;
+}
+
+KVCacheCapacity make_shared_cache_capacity() {
+  // Full pairs cost 32 B, Conv rows 6 B and SSM rows 4 B: slab=96 B.
+  // Logical IDs and physical slabs have independent capacities.
+  KVCacheCapacity capacity;
+  capacity.n_blocks(53)
+      .block_size(8)
+      .num_linear_state_blocks(53)
+      .linear_conv_state_len(1)
+      .linear_ssm_checkpoint_stride(1)
+      .shared_slot_bytes(96)
+      .shared_slab_count(12)
+      .shared_min_slab_count(4)
+      .shared_linear_state_slots(4);
+  return capacity;
 }
 
 // Independently compute the chained block hashes for `tokens`, mirroring
@@ -252,6 +281,70 @@ TEST(KVCacheManagerFactoryTest,
                                              /*dp_size=*/1,
                                              host_options),
                "prefix caching is disabled");
+}
+
+TEST_F(BlockManagerPoolTest,
+       SharedFactorySeparatesLogicalIdsAndPhysicalBudget) {
+  BlockManagerPool::Options options;
+  options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
+  auto result = KVCacheManagerFactory::create(make_shared_cache_capacity(),
+                                              make_shared_cache_model_args(),
+                                              /*world_size=*/1,
+                                              torch::kBFloat16,
+                                              options,
+                                              /*transfer_coordinator=*/nullptr);
+  EXPECT_EQ(result.shape.key_cache_shape().front(), 53);
+  EXPECT_EQ(result.shape.conv_cache_shape().front(), 53);
+  EXPECT_EQ(result.manager->block_resource_units(BlockType::KV, 2), 128);
+  EXPECT_EQ(result.manager->block_resource_units(BlockType::LINEAR, 1), 20);
+  ASSERT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{1056});
+  auto sequence = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8, 9});
+  ASSERT_TRUE(result.manager->allocate(&sequence));
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 2);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1);
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{908});
+  result.manager->deallocate(&sequence);
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{1056});
+}
+
+TEST_F(BlockManagerPoolTest, SharedFactoryAccountsForTypedSlabFragmentation) {
+  BlockManagerPool::Options options;
+  options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
+  KVCacheCapacity capacity = make_shared_cache_capacity();
+  capacity.shared_slab_count(4);
+  auto result = KVCacheManagerFactory::create(capacity,
+                                              make_shared_cache_model_args(),
+                                              /*world_size=*/1,
+                                              torch::kBFloat16,
+                                              options,
+                                              /*transfer_coordinator=*/nullptr);
+  auto first = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8});
+  auto second = make_sequence(1, {9, 10, 11, 12, 13, 14, 15, 16});
+  EXPECT_FALSE(result.manager->exceeds_total_capacity(&first, 8));
+  // Three Full blocks plus one state cost 212 B, below the 288 B budget,
+  // but require two KV slabs and one slab for each recurrent role.
+  EXPECT_TRUE(result.manager->exceeds_total_capacity(&first, 24));
+  EXPECT_TRUE(result.manager->exceeds_total_capacity(
+      std::vector<KVCacheManager::KVCacheReservation>{{&first, 8},
+                                                      {&second, 8}}));
+  ASSERT_TRUE(result.manager->allocate(&first));
+  EXPECT_FALSE(result.manager->allocate(&second));
+  result.manager->deallocate(&first);
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{288});
+}
+
+TEST(KVCacheManagerFactoryTest, RejectsSharedStorageCostMismatch) {
+  BlockManagerPool::Options options;
+  options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
+  auto capacity = make_shared_cache_capacity();
+  capacity.shared_linear_state_slots(3);
+  EXPECT_DEATH(KVCacheManagerFactory::create(capacity,
+                                             make_shared_cache_model_args(),
+                                             /*world_size=*/1,
+                                             torch::kBFloat16,
+                                             options,
+                                             /*transfer_coordinator=*/nullptr),
+               "num_linear_groups");
 }
 
 TEST(BlockManagerTest, Basic) {
@@ -1165,7 +1258,7 @@ TEST_F(BlockManagerPoolTest, SequenceUpdateBlockHashes) {
 
   // Build the Sequence in-test so the sampling/stopping params outlive it.
   RequestSamplingParam sampling_param;
-  sampling_param.beam_width = 0;
+
   sampling_param.is_embeddings = false;
   StoppingChecker stopping_checker;
   SequenceParams params;

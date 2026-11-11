@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "core/runtime/vlm_worker_impl.h"
 
-#include <c10/core/DeviceGuard.h>
+#include <c10/core/StreamGuard.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
 
@@ -24,12 +24,10 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "common/metrics.h"
-#include "core/framework/config/load_config.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_extend_input.h"
 #include "core/kv_cache/storage/kv_cache.h"
-#include "core/runtime/task_execution_pipeline.h"
 #include "models/model_registry.h"
 #include "util/timer.h"
 
@@ -59,53 +57,12 @@ bool VLMWorkerImpl::init_model(ModelContext& context) {
   context.set_encoder_embedding_mode(false);
   model_ = create_vlm_model(context);
   CHECK(model_ != nullptr) << "Failed to create model.";
-  // The worker task path preserves the full multimodal input and uses the
-  // model's decode ACL graphs. Prepared LLM Slots do not carry visual data.
-  runtime::Options executor_options = options_;
-  executor_options.enable_task_pipeline(false);
   model_executor_ = std::make_unique<Executor>(
-      model_.get(), context.get_model_args(), device_, executor_options);
+      model_.get(), context.get_model_args(), device_, options_);
   return true;
 }
 
-::xllm::Status VLMWorkerImpl::create_task_pipeline(
-    std::unique_ptr<TaskExecutionPipeline>& output) {
-  LlmTaskCapacity capacity;
-  ::xllm::Status status = task_capacity(options_, capacity);
-  if (!status.ok()) {
-    return status;
-  }
-  status = TaskExecutionPipeline::create(
-      threadpool_, task_model(), *this, capacity, output);
-  if (status.ok()) {
-    LOG(INFO) << "VLM task execution pipeline: slots=" << capacity.slot_count;
-  }
-  return status;
-}
-
 std::optional<ForwardOutput> VLMWorkerImpl::step(const VlmForwardInput& input) {
-  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
-#if defined(USE_NPU)
-    if (!enable_schedule_overlap()) {
-      aclrtStream current_stream =
-          c10_npu::getCurrentNPUStream(device_.index()).stream();
-      atb::Context* atb_context =
-          const_cast<atb::Context*>(context_.get_atb_context());
-      atb_context->SetExecuteStream(current_stream);
-      std::unique_ptr<Stream> stream = device_.current_stream();
-      wait_input_ready_events(input, *stream);
-      return step_internal(input, ForwardSyncPolicy::LEGACY);
-    } else {
-      SET_ATB_EXECUTE_STREAM(compute_stream_, device_, context_);
-      wait_input_ready_events(input, *compute_stream_);
-      return step_internal(input, ForwardSyncPolicy::LEGACY);
-    }
-#else
-    std::unique_ptr<Stream> stream = device_.current_stream();
-    wait_input_ready_events(input, *stream);
-    return step_internal(input, ForwardSyncPolicy::LEGACY);
-#endif
-  }
   std::unique_ptr<Stream> stream = device_.current_stream();
   wait_input_ready_events(input, *stream);
   return step_internal(input, ForwardSyncPolicy::LEGACY);
@@ -128,26 +85,6 @@ std::optional<ForwardOutput> VLMWorkerImpl::execute_no_sync_on_stream(
     const std::function<void()>& prepare_sampling) {
   const ForwardSyncPolicy sync_policy = ForwardSyncPolicy::NO_SYNC;
   c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
-  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
-#if defined(USE_NPU)
-    if (!enable_schedule_overlap()) {
-      aclrtStream current_acl_stream =
-          c10_npu::getCurrentNPUStream(device_.index()).stream();
-      atb::Context* atb_context =
-          const_cast<atb::Context*>(context_.get_atb_context());
-      atb_context->SetExecuteStream(current_acl_stream);
-      wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy, completion, prepare_sampling);
-    } else {
-      SET_ATB_EXECUTE_STREAM((&compute_stream), device_, context_);
-      wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy, completion, prepare_sampling);
-    }
-#else
-    wait_input_ready_events(input, compute_stream);
-    return step_internal(input, sync_policy, completion, prepare_sampling);
-#endif
-  }
   wait_input_ready_events(input, compute_stream);
   return step_internal(input, sync_policy, completion, prepare_sampling);
 }

@@ -21,7 +21,6 @@ limitations under the License.
 
 #include <utility>
 
-#include "common/device_monitor.h"
 #include "common/types.h"
 #include "core/common/global_flags.h"
 #include "core/common/metrics.h"
@@ -44,8 +43,6 @@ DiTEngine::DiTEngine(
       << " DIT need to set master node addr, Please set --master_node_addr.";
 
   const auto& devices = options_.devices();
-  // initialize device monitor
-  DeviceMonitor::get_instance().initialize(devices);
   CHECK_GT(devices.size(), 0) << "At least one device is required";
 
   CHECK(!devices[0].is_cpu()) << "CPU device is not supported";
@@ -53,11 +50,6 @@ DiTEngine::DiTEngine(
   for (size_t i = 0; i < devices.size(); ++i) {
     CHECK(devices[i].type() == device_type)
         << "All devices should be the same type";
-
-#if defined(USE_NPU)
-    FLAGS_enable_atb_comm_multiprocess =
-        options.enable_offline_inference() || (options.nnodes() > 1);
-#endif
   }
 
   // setup all workers and create worker clients in nnode_rank=0 engine side.
@@ -141,21 +133,4 @@ DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
   return output;
 }
 
-std::vector<int64_t> DiTEngine::get_active_activation_memory() const {
-  // call worker to get active activation memory
-  std::vector<folly::SemiFuture<int64_t>> futures;
-  futures.reserve(worker_clients_num_);
-  for (auto& worker : worker_clients_) {
-    futures.push_back(worker->get_active_activation_memory_async());
-  }
-
-  // wait for all futures to complete
-  auto results = folly::collectAll(futures).get();
-  std::vector<int64_t> active_activation_memories;
-  active_activation_memories.reserve(worker_clients_num_);
-  for (auto& result : results) {
-    active_activation_memories.push_back(result.value());
-  }
-  return active_activation_memories;
-}
 }  // namespace xllm

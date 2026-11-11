@@ -32,12 +32,6 @@ limitations under the License.
 
 namespace xllm {
 
-#if defined(USE_NPU)
-namespace detail {
-class NpuJsonDraftTokenHandoff;
-}  // namespace detail
-#endif
-
 // MTP (Multi-Token Prediction) speculative worker.
 // Uses a draft model to generate proposals, then validates with target model.
 // Eagle3WorkerImpl inherits from this class.
@@ -67,12 +61,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   bool init_model(const std::string& model_weights_path,
                   int32_t random_seed,
                   MasterStatus master_status) override;
-
-  ::xllm::Status create_task_pipeline(
-      std::unique_ptr<TaskExecutionPipeline>& output) override;
-  bool uses_worker_task_pipeline() const override {
-    return std::is_same_v<TargetInput, VlmForwardInput>;
-  }
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
@@ -109,22 +97,19 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       const std::vector<ForwardOutput>& draft_outputs,
       TargetInput& validate_input,
       int32_t num_val_tokens,
-      const detail::JsonDraftValidationScratch* json_scratch,
       Stream& compute_stream);
   std::optional<ForwardOutput> run_validate(
       const TargetInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
       TargetInput& validate_input,
-      int32_t num_speculative_tokens,
-      const detail::JsonDraftValidationScratch* json_scratch);
+      int32_t num_speculative_tokens);
 
   // By value: run_validate owns its copy (JSON bitmask lift) and moves it to
   // the rejection sampler's sink.
   virtual SampleOutput validate(SamplingParameters sampling_params,
                                 const std::vector<ForwardOutput>& draft_outputs,
                                 const ForwardOutput& target_output,
-                                int32_t num_speculative_tokens,
-                                const std::vector<uint8_t>& invalid_draft);
+                                int32_t num_speculative_tokens);
 
   virtual void check_draft_input_embedding(const torch::Tensor& /*embedding*/,
                                            const std::string& /*phase*/) const {
@@ -134,8 +119,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   SampleOutput validate(SamplingParameters sampling_params,
                         const DraftProposal& draft_proposal,
                         const ForwardOutput& target_output,
-                        int32_t num_speculative_tokens,
-                        const std::vector<uint8_t>& invalid_draft = {});
+                        int32_t num_speculative_tokens);
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.
@@ -345,7 +329,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // path.  Their values depend on speculative width, not tensor-parallel
   // topology, and are rebuilt only when that width changes.
   torch::Tensor mtp_validate_greedy_indices_;
-  std::unique_ptr<detail::NpuJsonDraftTokenHandoff> json_draft_token_handoff_;
 #endif
 };
 }  // namespace xllm

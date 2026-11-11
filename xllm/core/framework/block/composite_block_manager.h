@@ -109,8 +109,7 @@ class CompositeBlockManager : public BlockManager {
 
   BlockManager* leaf_of(BlockType type) const;
 
-  // Typed block-level allocation routed to the leaf under `type`. Used for
-  // beam copy-on-write.
+  // Typed block-level allocation routed to the leaf under `type`.
   std::vector<Block> allocate_blocks(BlockType type, size_t num_blocks);
 
   // Type-ambiguous block-level primitives are not meaningful on a composition.
@@ -132,7 +131,7 @@ class CompositeBlockManager : public BlockManager {
              const Slice<XXH3Key>& block_hashes = {}) override;
   void cache(const std::vector<Block>& blocks) override;
 
-  // Stats reported from the single capacity leaf (see capacity_leaf()).
+  // Stats use the shared pool when enabled, otherwise the capacity leaf.
   size_t num_blocks_in_prefix_cache() const override;
   size_t num_free_blocks() const override;
   size_t num_used_blocks() const override;
@@ -159,6 +158,11 @@ class CompositeBlockManager : public BlockManager {
 
   KVCacheState& kv_state_for(Sequence& seq) const;
 
+  bool reclaim_shared_cache();
+  bool reclaim_shared_prefix();
+  void record_shared_checkpoint(Sequence& seq, size_t checkpoint_index);
+
+  std::shared_ptr<StaticKVCacheBlockPool> shared_block_pool_;
   LeafMap leaves_;
   LeafCombination combination_;
   CacheTier cache_tier_;

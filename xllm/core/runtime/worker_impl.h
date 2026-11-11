@@ -39,26 +39,21 @@ limitations under the License.
 #include "framework/model_context/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
-#include "framework/sampling/beam_searcher.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "options.h"
 #include "platform/device.h"
-#include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 #include "util/threadpool.h"
 #if defined(USE_NPU)
 #include "core/framework/model_loader/weight/mooncake_weight_transfer.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
-#include "layers/npu/loader/rolling_load_manager.h"
 #endif
 
 namespace xllm {
 
 class WorkerRendezvous;
-class TaskExecutionPipeline;
-struct LlmTaskCapacity;
-struct TaskModel;
+class StaticKVCacheTensorAllocator;
 
 class WorkerImpl {
  public:
@@ -80,16 +75,6 @@ class WorkerImpl {
   // destructor's drain cannot protect members of already-destroyed subclasses.
   void begin_shutdown();
   virtual void drain_pending_execution();
-
-  // Call outside the state executor, after weights load and before KV
-  // budgeting.
-  virtual ::xllm::Status create_task_pipeline(
-      std::unique_ptr<TaskExecutionPipeline>& output);
-  virtual bool task_models_loaded() const { return status_ == Status::LOADED; }
-  virtual bool uses_worker_task_pipeline() const { return false; }
-  ::xllm::Status task_capacity(const runtime::Options& options,
-                               LlmTaskCapacity& output) const;
-  TaskModel task_model();
 
   // initialize model, cache manager. blocking call
   virtual bool init_model(ModelContext& context) = 0;
@@ -159,10 +144,13 @@ class WorkerImpl {
                                bool record_ready_event,
                                bool restore_linear_state,
                                bool wait_for_compute_stream);
+  // Prepare shared mappings and new block contents on the owning stream.
+  void prepare_shared_kv_cache(
+      const std::vector<int32_t>& full_block_rows,
+      const std::vector<uint64_t>& full_block_lease_epochs,
+      const std::vector<int32_t>& linear_state_rows,
+      Stream& prepare_stream);
 #if defined(USE_NPU)
-  // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
-  // and cached.
-  const CpPlanRuntimeConfig& npu_cp_plan_runtime_config() const;
   // Builds or reuses draft decode padding on the current stream. MTP calls this
   // while preparing B/2B metadata so the compute stream only observes hits.
   bool uses_npu_dp_ep_padding() const;
@@ -183,17 +171,7 @@ class WorkerImpl {
   std::shared_ptr<const JsonObjectGrammar> ensure_json_object_grammar(
       bool reasoning_enabled);
 
-  // Internal helper shared by worker pipelines before model execution.
-  virtual void apply_kv_block_swaps(const LlmModelParams& input_params);
-  virtual void apply_kv_block_swaps(const VlmModelParams& input_params);
-  virtual void apply_kv_block_swaps(const RecModelParams& input_params);
-
   virtual std::optional<ForwardOutput> step(const DiTForwardInput& inputs);
-
-  virtual std::optional<ForwardOutput> step(const RecForwardInput& inputs);
-
-  virtual void prepare_work_before_execute(const RecForwardInput& inputs,
-                                           RecForwardInput& processed_inputs);
 
   virtual std::optional<ForwardOutput> step(const LlmForwardInput& inputs);
   virtual std::optional<ForwardOutput> step(const VlmForwardInput& inputs);
@@ -218,17 +196,6 @@ class WorkerImpl {
 
   virtual void process_group_test();
 
-  virtual void prepare_task_pipeline_input(const LlmForwardInput& input,
-                                           LlmForwardInput& prepared);
-  virtual std::optional<ForwardOutput> execute_task_pipeline(
-      const LlmForwardInput& prepared);
-  virtual void prepare_task_pipeline_input(const VlmForwardInput& input,
-                                           VlmForwardInput& prepared);
-  virtual std::optional<ForwardOutput> execute_task_pipeline(
-      VlmForwardInput& prepared);
-  // Records the ordered worker compute-stream boundary used to retire task
-  // pipeline inputs without blocking the state thread.
-  StreamEventPtr record_task_pipeline_completion() const;
   // Warmup waits for execution allocations; serving keeps stream overlap.
   void observe_execution_memory(bool is_warmup);
 
@@ -273,8 +240,8 @@ class WorkerImpl {
       const uint64_t batch_id,
       Slice<BlockTransferInfo>& block_transfer_info);
 
-  std::shared_ptr<HierarchyKVCacheTransfer> create_hierarchy_kv_cache_transfer(
-      std::optional<bool> enable_task_pipeline = std::nullopt);
+  std::shared_ptr<HierarchyKVCacheTransfer>
+  create_hierarchy_kv_cache_transfer();
 
   void bind_hierarchy_kv_cache_transfer(
       std::shared_ptr<HierarchyKVCacheTransfer> transfer,
@@ -310,9 +277,6 @@ class WorkerImpl {
   virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const DiTForwardInput& inputs);
 
-  virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const RecForwardInput& inputs);
-
   virtual folly::SemiFuture<folly::Unit> process_group_test_async();
 
   const torch::Device& device() const { return device_.unwrap(); }
@@ -322,33 +286,6 @@ class WorkerImpl {
   int32_t hidden_size() const {
     return context_.get_model_args().hidden_size();
   }
-
-#if defined(USE_NPU)
-  virtual layer::NpuLmHead get_npu_lm_head() {
-    return model()->get_npu_lm_head();
-  }
-
-  virtual void set_npu_lm_head(layer::NpuLmHead& head) {
-    model()->set_npu_lm_head(head);
-  }
-
-  virtual layer::NpuWordEmbedding get_npu_word_embedding() {
-    return model()->get_npu_word_embedding();
-  }
-
-  virtual bool has_restored_npu_word_embedding() {
-    return model()->has_restored_npu_word_embedding();
-  }
-
-  virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
-    model()->set_npu_word_embedding(embedding);
-  }
-
-  virtual void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& embedding) {
-    model()->set_restored_npu_word_embedding(embedding);
-  }
-#endif
 
   virtual layer::LmHead get_lm_head() { return model()->get_lm_head(); }
 
@@ -363,8 +300,7 @@ class WorkerImpl {
   }
 
   bool share_weights_from(WorkerImpl& source) {
-    // Weight sharing is specific to CausalLM. Rec workers own their models in
-    // pipelines, so use model_ rather than the virtual model() accessor here.
+    // Weight sharing uses the owned language model.
     if (model_ == nullptr || source.model_ == nullptr) {
       return false;
     }
@@ -378,8 +314,6 @@ class WorkerImpl {
   virtual ForwardOutput get_last_step_result();
 
   bool is_driver() const { return driver_ || dp_driver_; }
-
-  int64_t get_active_activation_memory();
 
   Status get_status() const { return status_; }
 
@@ -457,7 +391,6 @@ class WorkerImpl {
   // Only used for deepseek chunked prefill ops on npu device
   void prepare_mla_prefixcache_inputs(LlmModelParams& input_params);
   void prepare_mla_prefixcache_inputs(VlmModelParams& input_params);
-  void prepare_mla_prefixcache_inputs(RecModelParams& input_params);
 
   void init_hierarchy_kv_cache_transfer(
       const KVCacheShape& kv_cache_shape,
@@ -488,37 +421,11 @@ class WorkerImpl {
   // Virtual memory residency sleep path.
   bool virtual_memory_sleep(MasterStatus master_status);
 
-#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
-  void refresh_cuda_block_copy_runtime_state();
-  bool can_use_cuda_block_copy_kernel(const LlmModelParams& input_params) const;
-  void execute_cuda_block_copy_kernel(const LlmModelParams& input_params);
-  bool can_use_cuda_block_copy_kernel(const VlmModelParams& input_params) const;
-  void execute_cuda_block_copy_kernel(const VlmModelParams& input_params);
-  bool can_use_cuda_block_copy_kernel(const RecModelParams& input_params) const;
-  void execute_cuda_block_copy_kernel(const RecModelParams& input_params);
-
-  struct CudaBlockCopyRuntimeState {
-    torch::Tensor k_cache_ptrs_device;
-    torch::Tensor v_cache_ptrs_device;
-    int64_t num_layers = 0;
-    int64_t numel_per_block = 0;
-
-    bool valid() const {
-      return k_cache_ptrs_device.defined() && v_cache_ptrs_device.defined() &&
-             num_layers > 0 && numel_per_block > 0;
-    }
-  };
-#endif
-
 #if defined(USE_NPU)
   static constexpr size_t kDraftDpEpPaddingCacheCapacity = 2;
   DpEpPaddingCache draft_dp_ep_padding_cache_{kDraftDpEpPaddingCacheCapacity};
 
   bool wakeup_from_remote_weights(const WakeupOptions& options);
-  // Complete rolling initialization by delegating to model-owned rolling
-  // runtime (manager + buffer): decoder preload, non-decoder reload, and
-  // decoder ATB binding refresh.
-  bool init_rolling_runtime_state();
 
 #endif
 
@@ -560,8 +467,6 @@ class WorkerImpl {
   template <typename Params>
   bool can_skip_npu_graph_decode_sync_impl(const Params& input_params) const;
   template <typename Params>
-  void apply_kv_block_swaps_impl(const Params& input_params);
-  template <typename Params>
   void prepare_mla_prefixcache_inputs_impl(Params& input_params);
 #if defined(USE_NPU)
   template <typename Params>
@@ -569,12 +474,6 @@ class WorkerImpl {
   template <typename Params>
   void prepare_dp_ep_padding_on_stream_impl(Params& input_params,
                                             Stream& prepare_stream);
-#endif
-#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
-  template <typename Params>
-  bool can_use_cuda_block_copy_kernel_impl(const Params& input_params) const;
-  template <typename Params>
-  void execute_cuda_block_copy_kernel_impl(const Params& input_params);
 #endif
 
  protected:
@@ -626,6 +525,7 @@ class WorkerImpl {
 
   // kv caches
   std::vector<xllm::KVCache> kv_caches_;
+  std::shared_ptr<StaticKVCacheTensorAllocator> static_kv_cache_allocator_;
 
   // causal LM model
   std::unique_ptr<CausalLM> model_;
@@ -650,17 +550,9 @@ class WorkerImpl {
   std::shared_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
   std::unique_ptr<WorkerRendezvous> worker_rendezvous_;
 
-#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
-  CudaBlockCopyRuntimeState cuda_block_copy_runtime_state_;
-#endif
-
 #if defined(USE_NPU)
   std::unique_ptr<MooncakeWeightTransfer> weight_transfer_;
-  std::unique_ptr<Stream> load_stream_;
 
-  // Lazily-built cache backing npu_cp_plan_runtime_config().
-  mutable bool npu_cp_runtime_config_computed_ = false;
-  mutable CpPlanRuntimeConfig npu_cp_runtime_config_;
 #endif
 
   bool is_spec_draft_ = false;

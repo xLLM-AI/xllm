@@ -89,26 +89,9 @@ class Options {
 
   PROPERTY(int32_t, speculative_suffix_cache_max_depth) = 64;
 
-  PROPERTY(double, speculative_suffix_max_spec_factor) = 1.0;
-
-  PROPERTY(double, speculative_suffix_max_spec_offset) = 0.0;
-
-  PROPERTY(double, speculative_suffix_min_token_prob) = 0.1;
-
   PROPERTY(int32_t, speculative_suffix_max_cached_requests) = -1;
 
-  PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
-
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
-  PROPERTY(bool, enable_adaptive_target_verify) = false;
-  PROPERTY(bool, enable_adaptive_draft_step) = false;
-  PROPERTY(std::string, adaptive_draft_step_config);
-
-  PROPERTY(double, adaptive_target_verify_min_gain) = 0.0;
-
-  PROPERTY(std::string, adaptive_target_verify_cost_table);
-  PROPERTY(std::string, adaptive_target_verify_calibration);
-  PROPERTY(std::string, adaptive_target_verify_cost_table_output);
 
   // thread num to handle requests
   PROPERTY(size_t, num_request_handling_threads) = 4;
@@ -217,8 +200,6 @@ class Options {
   PROPERTY(bool, enable_profile_kv_blocks) = true;
   // true if disable ttft profiling
   PROPERTY(bool, disable_ttft_profiling) = false;
-  // Enable the task pipeline; scheduler overlap determines the slot count.
-  PROPERTY(bool, enable_task_pipeline) = false;
 
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;
@@ -269,9 +250,6 @@ class Options {
   // Host KV layer-wise copy batches.
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
 
-  // beam width for beam search
-  PROPERTY(int32_t, beam_width) = 128;
-
   // KV cache data type for quantization.
   // "auto" (default): KV cache dtype aligns with model dtype (no quantization).
   // "int8": Enables INT8 quantization. Only supported on MLU backend.
@@ -279,9 +257,6 @@ class Options {
 
   // Capacity of the scheduler request queue.
   PROPERTY(int32_t, request_queue_size) = 100000;
-
-  // max concurrency for rec worker
-  PROPERTY(int32_t, rec_worker_max_concurrency) = 1;
 
   PROPERTY(MasterStatus, master_status) = MasterStatus::WAKEUP;
 };

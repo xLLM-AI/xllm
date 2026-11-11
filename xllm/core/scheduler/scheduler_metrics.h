@@ -16,7 +16,6 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -25,16 +24,13 @@ limitations under the License.
 namespace xllm {
 
 class KVCacheManager;
-class DistributedWorkerManager;
 
 class SchedulerMetrics final {
  public:
-  SchedulerMetrics(
-      std::shared_ptr<DistributedWorkerManager> distributed_worker_manager,
-      KVCacheManager* kv_cache_manager,
-      int32_t dp_size,
-      int32_t num_speculative_tokens,
-      bool collect_recent_latency);
+  SchedulerMetrics(KVCacheManager* kv_cache_manager,
+                   int32_t dp_size,
+                   int32_t num_speculative_tokens,
+                   bool collect_recent_latency);
 
   SchedulerMetrics(const SchedulerMetrics&) = delete;
   SchedulerMetrics& operator=(const SchedulerMetrics&) = delete;
@@ -56,9 +52,7 @@ class SchedulerMetrics final {
   void update_memory_metrics(const std::vector<Sequence*>& sequences);
   std::vector<int64_t> get_num_occupied_slots(
       const std::vector<Sequence*>& sequences) const;
-  std::vector<int64_t> get_active_activation_in_bytes() const;
 
-  std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
   KVCacheManager* kv_cache_manager_;
   int32_t dp_size_;
   int32_t num_speculative_tokens_;

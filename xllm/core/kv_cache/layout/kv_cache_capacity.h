@@ -25,6 +25,11 @@ namespace xllm {
 class KVCacheCapacity final {
  public:
   PROPERTY(int64_t, n_blocks) = 0;
+  // Logical IDs are independent of the shared arena's physical slabs.
+  PROPERTY(int64_t, shared_slot_bytes) = 0;
+  PROPERTY(int64_t, shared_slab_count) = 0;
+  PROPERTY(int64_t, shared_min_slab_count) = 0;
+  PROPERTY(uint32_t, shared_linear_state_slots) = 1;
   PROPERTY(int64_t, cache_size_in_bytes) = 0;
   PROPERTY(int64_t, block_size) = 0;
   PROPERTY(int64_t, slot_size) = 0;

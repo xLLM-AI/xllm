@@ -118,39 +118,14 @@ void append_token(const Token& token,
   }
 }
 
-template <bool IncludeDspark, typename Response>
+template <typename Response>
 bool decode_token_output(const Response& response,
                          RawForwardOutput& output,
                          const char* model_name) {
   Timer timer;
   RawForwardOutput decoded_output;
-  if constexpr (IncludeDspark) {
-    decoded_output.dspark_feedback.confidence.assign(
-        response.dspark_confidence().begin(),
-        response.dspark_confidence().end());
-    decoded_output.dspark_feedback.rounds_since_full_width.assign(
-        response.dspark_rounds_since_full_width().begin(),
-        response.dspark_rounds_since_full_width().end());
-    if (!valid_dspark_dp_feedback(decoded_output.dspark_feedback,
-                                  response.outputs_size())) {
-      LOG(ERROR) << "Invalid adaptive DSpark feedback layout.";
-      return false;
-    }
-  }
   decoded_output.expert_load_data.assign(response.expert_load_data().begin(),
                                          response.expert_load_data().end());
-  decoded_output.src_seq_idxes.assign(response.src_seq_idxes().begin(),
-                                      response.src_seq_idxes().end());
-  decoded_output.out_tokens.assign(response.out_tokens().begin(),
-                                   response.out_tokens().end());
-  decoded_output.out_logprobs.assign(response.out_logprobs().begin(),
-                                     response.out_logprobs().end());
-  if (decoded_output.src_seq_idxes.size() != decoded_output.out_tokens.size() ||
-      decoded_output.src_seq_idxes.size() !=
-          decoded_output.out_logprobs.size()) {
-    LOG(ERROR) << "Mismatched " << model_name << " beam output field counts";
-    return false;
-  }
   decoded_output.json_object_errors.reserve(response.json_object_errors_size());
   for (const proto::JsonObjectOutputError& error :
        response.json_object_errors()) {
@@ -205,7 +180,7 @@ bool decode_token_output(const Response& response,
   return true;
 }
 
-template <bool IncludeDspark, typename Response>
+template <typename Response>
 bool encode_token_output(
     const ForwardOutput& output,
     const std::vector<SpeculativeTokenStats>& speculative_token_stats,
@@ -217,40 +192,16 @@ bool encode_token_output(
   const auto& top_logprobs = output.sample_output.top_logprobs;
   const auto& embeddings = output.sample_output.embeddings;
   const auto& mm_embeddings = output.sample_output.mm_embeddings;
-  const auto& src_seq_idxes = output.beam_search_output.src_seq_idxes;
-  const auto& out_tokens = output.beam_search_output.out_tokens;
-  const auto& out_logprobs = output.beam_search_output.out_logprobs;
   if (response == nullptr) {
     return false;
   }
   Response encoded_output;
   Response* pb_forward_output = &encoded_output;
-  if constexpr (IncludeDspark) {
-    ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_dspark_confidence(),
-                        output.dspark_feedback.confidence);
-    ADD_VECTOR_TO_PROTO(
-        pb_forward_output->mutable_dspark_rounds_since_full_width(),
-        output.dspark_feedback.rounds_since_full_width);
-  }
   Timer timer;
   if (!valid_token_output(
           next_tokens, logprobs, top_tokens, top_logprobs, embeddings) ||
-      !valid_host_tensor(output.expert_load_data, torch::kInt64) ||
-      !valid_host_tensor(src_seq_idxes, torch::kInt32) ||
-      !valid_host_tensor(out_tokens, torch::kInt32) ||
-      !valid_host_tensor(out_logprobs, torch::kFloat32)) {
+      !valid_host_tensor(output.expert_load_data, torch::kInt64)) {
     LOG(ERROR) << "Invalid forward output tensor layout.";
-    return false;
-  }
-  const int64_t beam_src_seq_count =
-      src_seq_idxes.defined() ? src_seq_idxes.numel() : 0;
-  const int64_t beam_token_count =
-      out_tokens.defined() ? out_tokens.numel() : 0;
-  const int64_t beam_logprob_count =
-      out_logprobs.defined() ? out_logprobs.numel() : 0;
-  if (beam_src_seq_count != beam_token_count ||
-      beam_src_seq_count != beam_logprob_count) {
-    LOG(ERROR) << "Mismatched " << model_name << " beam output field counts";
     return false;
   }
   int32_t num_seqs =
@@ -265,12 +216,6 @@ bool encode_token_output(
       speculative_token_stats.size() != static_cast<size_t>(num_seqs)) {
     LOG(ERROR) << "Speculative token stats must match forward output rows.";
     return false;
-  }
-  if constexpr (IncludeDspark) {
-    if (!valid_dspark_dp_feedback(output.dspark_feedback, num_seqs)) {
-      LOG(ERROR) << "Invalid adaptive DSpark feedback layout.";
-      return false;
-    }
   }
   if (embeddings.defined() &&
       embeddings.size(0) < static_cast<int64_t>(num_seqs)) {
@@ -351,21 +296,7 @@ bool encode_token_output(
                           expert_load_data_flattened_slice);
     }
   }
-  if (src_seq_idxes.defined() && src_seq_idxes.numel() > 0) {
-    Slice<int32_t> src_seq_idxes_slice = tensor_slice(src_seq_idxes);
-    ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_src_seq_idxes(),
-                        src_seq_idxes_slice);
-  }
-  if (out_tokens.defined() && out_tokens.numel() > 0) {
-    Slice<int32_t> out_tokens_slice = tensor_slice(out_tokens);
-    ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_out_tokens(),
-                        out_tokens_slice);
-  }
-  if (out_logprobs.defined() && out_logprobs.numel() > 0) {
-    Slice<float> out_logprobs_slice = tensor_slice<float>(out_logprobs);
-    ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_out_logprobs(),
-                        out_logprobs_slice);
-  }
+
   for (const JsonObjectOutputError& error : output.json_object_errors) {
     proto::JsonObjectOutputError* pb_error =
         pb_forward_output->add_json_object_errors();
@@ -382,34 +313,23 @@ bool encode_token_output(
 bool encode_llm_output(const ForwardOutput& output,
                        const std::vector<SpeculativeTokenStats>& stats,
                        proto::LLMForwardResponse* response) {
-  return encode_token_output<true>(output, stats, response, "llm");
+  return encode_token_output(output, stats, response, "llm");
 }
 
 bool decode_llm_output(const proto::LLMForwardResponse& response,
                        RawForwardOutput& output) {
-  return decode_token_output<true>(response, output, "llm");
+  return decode_token_output(response, output, "llm");
 }
 
 bool encode_vlm_output(const ForwardOutput& output,
                        const std::vector<SpeculativeTokenStats>& stats,
                        proto::VLMForwardResponse* response) {
-  return encode_token_output<false>(output, stats, response, "vlm");
+  return encode_token_output(output, stats, response, "vlm");
 }
 
 bool decode_vlm_output(const proto::VLMForwardResponse& response,
                        RawForwardOutput& output) {
-  return decode_token_output<false>(response, output, "vlm");
-}
-
-bool encode_rec_output(const ForwardOutput& output,
-                       const std::vector<SpeculativeTokenStats>& stats,
-                       proto::RECForwardResponse* response) {
-  return encode_token_output<false>(output, stats, response, "rec");
-}
-
-bool decode_rec_output(const proto::RECForwardResponse& response,
-                       RawForwardOutput& output) {
-  return decode_token_output<false>(response, output, "rec");
+  return decode_token_output(response, output, "vlm");
 }
 
 }  // namespace xllm

@@ -103,7 +103,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
 
     Inputs are copied into entry-owned storage; MTP outputs are detached from
     replay buffers. Taskless graphs replay on the caller's stream.
-    Slot-bound execution uses PreparedAclGraphRunner.
     """
 
     def __init__(
@@ -135,7 +134,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self._enable_decode_no_padding = enable_graph_mode_decode_no_padding
         # New exact shapes can arrive while native input preparation copies
         # the next batch on another thread. Only this thread captures the
-        # runner's owned static buffers, as in the unified MTP graph runner.
+        # runner's owned static buffers.
         if enable_graph_mode_decode_no_padding:
             self._capture_error_mode = "thread_local"
         self._serial_workspace_pool: list[torch.Tensor] | None = [] if enable_graph_mode_decode_no_padding else None
@@ -166,9 +165,72 @@ class DecodeAclGraphRunner(AclGraphRunner):
         super().bind_layer_caches(layer_caches)
         self._has_index_cache = any(cache.index is not None for cache in layer_caches)
         self._has_linear_cache = any(cache.conv is not None or cache.ssm is not None for cache in layer_caches)
+        self._model_owns_linear_spec_verify = any(
+            getattr(builder, "supports_linear_spec_verify_graph", False) for builder in self.execution_metadata_builders
+        )
         # Compressed-tail signature is fixed after bind; cache it once instead
         # of rescanning every layer cache on each decode step.
         self._uses_compressed_kpool_tail = any(is_compact_kpool_tail(cache.kpool_tail) for cache in layer_caches)
+
+    def _shared_kv_layout(self) -> object | None:
+        """Return the backend's shared physical-cache layout, when enabled.
+
+        The layout is owned by the attention backend because it is derived from
+        the cache views bound there. Keep this runner compatible with older
+        backends while the Python bridge is being rolled out: a missing
+        descriptor means the legacy per-cache allocation is in use.
+        """
+        layout = getattr(self.attention_backend, "shared_kv_layout", None)
+        if layout is None:
+            layout = getattr(self.attention_backend, "_shared_kv_layout", None)
+        if callable(layout):
+            layout = layout()
+        return layout
+
+    @staticmethod
+    def _zero_shared_linear_scratch(
+        cache: LayerCache,
+        layout: object,
+    ) -> None:
+        """Clear only rows explicitly owned by ACL graph scratch storage.
+
+        Static physical pages can alias full-attention and recurrent views. A
+        positional ``cache.conv[0]`` or ``cache.ssm[:stride]`` clear therefore
+        risks erasing a live full-attention page. The shared-layout descriptor
+        must identify an owned scratch extent for every recurrent role.
+        """
+        for role, tensor in (("conv", cache.conv), ("ssm", cache.ssm)):
+            if tensor is None:
+                raise RuntimeError(f"shared linear cache is missing {role} storage")
+            rows = getattr(layout, f"scratch_{role}_rows", None)
+            offset = getattr(layout, f"scratch_{role}_offset", 0)
+            if rows is None:
+                raise RuntimeError(f"shared KV layout does not define {role} graph scratch rows")
+            rows = int(rows)
+            offset = int(offset)
+            if rows <= 0 or offset < 0 or offset + rows > tensor.shape[0]:
+                raise RuntimeError(
+                    f"shared KV layout has invalid {role} graph scratch extent: "
+                    f"offset={offset}, rows={rows}, capacity={tensor.shape[0]}"
+                )
+            tensor[offset : offset + rows].zero_()
+
+    def _initialize_linear_graph_scratch(self) -> None:
+        """Initialize graph-owned recurrent state without crossing cache views."""
+        shared_layout = self._shared_kv_layout()
+        for cache in self.layer_caches:
+            if cache.conv is None and cache.ssm is None:
+                continue
+            if cache.conv is None or cache.ssm is None:
+                raise RuntimeError("linear graph capture requires both Conv and SSM cache views")
+            if shared_layout is not None:
+                self._zero_shared_linear_scratch(cache, shared_layout)
+                continue
+            if cache.conv.shape[0] <= 0 or cache.ssm.shape[0] % cache.conv.shape[0] != 0:
+                raise RuntimeError("linear SSM cache does not align with state slots")
+            stride = cache.ssm.shape[0] // cache.conv.shape[0]
+            cache.conv[0].zero_()
+            cache.ssm[:stride].zero_()
 
     def can_execute(
         self,
@@ -200,6 +262,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
         except RuntimeError:
             return None
         is_expanded_spec_verify = expanded_view is not None
+        if is_expanded_spec_verify and self._shared_kv_layout() is not None and not self._model_owns_linear_spec_verify:
+            # Shared KDA verification still uses a single state-index space.
+            # Model-owned GDN metadata supplies independent Conv/SSM rows.
+            return None
         if (metadata.is_prefill or metadata.is_chunked_prefill) and not is_expanded_spec_verify:
             return None
         if is_expanded_spec_verify and self._model_owns_linear_spec_verify:
@@ -1017,13 +1083,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             current_stream.wait_stream(self._stream)
             # Slot zero is reserved for padding. Only scratch checkpoints are
             # initialized; the request metadata and live state stay untouched.
-            for cache in self.layer_caches:
-                if cache.conv is not None and cache.ssm is not None:
-                    if cache.conv.shape[0] <= 0 or cache.ssm.shape[0] % cache.conv.shape[0] != 0:
-                        raise RuntimeError("linear SSM cache does not align with state slots")
-                    stride = cache.ssm.shape[0] // cache.conv.shape[0]
-                    cache.conv[0].zero_()
-                    cache.ssm[:stride].zero_()
+            self._initialize_linear_graph_scratch()
             entry.static_metadata.linear_state_indices.zero_()
             accepted = entry.static_metadata.num_accepted_tokens
             if accepted is not None:

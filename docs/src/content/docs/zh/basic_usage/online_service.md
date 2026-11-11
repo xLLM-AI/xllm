@@ -45,46 +45,6 @@ curl http://127.0.0.1:9977/v1/completions \
   }'
 ```
 
-Beam Search：
-
-将 `beam_width` 设置为大于 `1` 的值即可开启 LLM Beam Search。`/v1/chat/completions` 和 `/v1/completions` 均支持该参数。beam-search top-k 候选数量在 chat 请求中使用 `top_logprobs` 配置，在 completions 请求中使用数值型 `logprobs` 字段配置。如果这些字段未设置，xLLM 会使用 `beam_width` 作为 top logprob 数量。如果希望每个 beam 考虑更多候选 token，可以将候选数量设置为大于 `beam_width` 的值。这里的 top-k 不同于采样截断参数 `top_k`。`best_of` 不是 Beam Search 开关，本文档也不使用 `num_return_sequences` 来控制 LLM 返回的 beam 数。
-
-chat模式：
-```bash
-curl http://localhost:9977/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen2-7B-Instruct",
-    "max_tokens": 20,
-    "temperature": 0,
-    "stream": false,
-    "beam_width": 2,
-    "logprobs": true,
-    "top_logprobs": 4,
-    "messages": [
-      {
-        "role": "user",
-        "content": "请简短介绍 xLLM。"
-      }
-    ]
-  }'
-```
-
-completions模式：
-```bash
-curl http://127.0.0.1:9977/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen2-7B-Instruct",
-    "prompt": "请简短介绍 xLLM。",
-    "max_tokens": 20,
-    "temperature": 0,
-    "stream": false,
-    "beam_width": 2,
-    "logprobs": 4
-  }'
-```
-
 sample模式：
 ```bash
 curl http://127.0.0.1:9977/v1/sample \
@@ -140,7 +100,7 @@ curl http://127.0.0.1:9977/v1/sample \
 
 `/v1/sample` 使用说明：
 
-- 仅支持 `--backend=llm`，当前不支持 VLM/DiT/Rec。
+- 仅支持 `--backend=llm`，当前不支持 VLM/DiT。
 - `selector.type` 当前固定为 `literal`，`selector.value` 按 prompt 文本顺序全文匹配。
 - `logprobs` 默认值为 `5`，允许范围为 `[1, 5]`。
 - `choices[i].index` 即该命中的 `sample_id`，与 prompt 中命中顺序一一对应。

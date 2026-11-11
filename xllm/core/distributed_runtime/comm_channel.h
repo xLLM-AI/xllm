@@ -32,9 +32,7 @@ limitations under the License.
 #include "worker.pb.h"
 
 namespace xllm {
-class RecForwardInput;
 class VlmForwardInput;
-struct SpecCalibrationCommand;
 
 class CommChannel {
  public:
@@ -46,9 +44,6 @@ class CommChannel {
   virtual bool hello();
 
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
-
-  virtual std::optional<std::string> spec_calibration(
-      const SpecCalibrationCommand& command);
 
   virtual bool get_cache_info(uint64_t& cluster_id,
                               std::string& addr,
@@ -86,10 +81,6 @@ class CommChannel {
       const DiTForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise);
 
-  virtual void execute_rec_model_async(
-      const RecForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
-
   virtual void execute_vlm_model_async(
       const VlmForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise);
@@ -119,9 +110,6 @@ class CommChannel {
   virtual bool get_last_vlm_step_result_async(
       folly::Promise<std::optional<RawForwardOutput>>& promise);
 
-  virtual bool get_active_activation_memory_async(
-      folly::Promise<int64_t>& promise);
-
   // Check if the connection to worker is healthy
   virtual bool check_health();
 
@@ -140,10 +128,6 @@ class CommChannel {
 
   bool execute_dit_model_with_brpc(
       const DiTForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
-
-  bool execute_rec_model_with_brpc(
-      const RecForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise);
 
   bool execute_vlm_model_with_brpc(
@@ -179,15 +163,6 @@ class ExecuteVLMModelClosure final : public google::protobuf::Closure {
   void Run() override;
 
   proto::VLMForwardResponse pb_output;
-  brpc::Controller cntl;
-  folly::Promise<std::optional<RawForwardOutput>> promise;
-};
-
-class ExecuteRECModelClosure final : public google::protobuf::Closure {
- public:
-  void Run() override;
-
-  proto::RECForwardResponse pb_output;
   brpc::Controller cntl;
   folly::Promise<std::optional<RawForwardOutput>> promise;
 };

@@ -23,7 +23,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from xllm.python.attention.backend import LayerCache
+from xllm.python.attention.backend import LayerCache, detect_shared_kv_cache_layout
 from xllm.python.attention.csa_attention import DsaAttentionBackend
 from xllm.python.attention.dsa_metadata import DsaMetadataBuilder, build_cache_specs
 from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_metadata
@@ -113,6 +113,34 @@ def _capacity_metadata(rows: int, kv_length: int = 1, query_width: int = 1) -> S
             kv_seq_lens_host_values=metadata.kv_seq_lens_host_values,
         )
     return metadata
+
+
+def test_shared_gdn_verify_admission_uses_bound_model_capability() -> None:
+    runner = _runner(num_decoding_tokens=2, spec_verify_width=2)
+    builder = SimpleNamespace(supports_linear_spec_verify_graph=False)
+
+    def bind(_caches: list[LayerCache]) -> None:
+        builder.supports_linear_spec_verify_graph = True
+
+    builder.bind_layer_caches = bind
+    runner.execution_metadata_builders = (builder,)
+    runner.attention_backend.shared_kv_layout = object()
+    runner.attention_backend.supports_linear_spec_verify_graph = False
+    runner.bind_layer_caches([LayerCache(key=None, value=None, conv=torch.empty(2, 1), ssm=torch.empty(2, 1))])
+
+    assert runner._model_owns_linear_spec_verify
+    assert (
+        runner.prepare_execution(torch.arange(4, dtype=torch.int32), _capacity_metadata(4, query_width=2)) is not None
+    )
+
+
+@pytest.mark.parametrize("spec_verify_width", [1, 2])
+def test_shared_kda_verify_still_requires_role_specific_graph_support(spec_verify_width: int) -> None:
+    runner = _runner(num_decoding_tokens=2, spec_verify_width=spec_verify_width)
+    runner.attention_backend.shared_kv_layout = object()
+    runner.attention_backend.supports_linear_spec_verify_graph = False
+
+    assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), _capacity_metadata(4, query_width=2)) is None
 
 
 def test_decode_startup_captures_all_kv_capacities_from_short_metadata() -> None:
@@ -1209,6 +1237,56 @@ def test_capture_preserves_gdn_live_checkpoints(
     torch.testing.assert_close(conv[1:], original_conv[1:])
     torch.testing.assert_close(ssm[8:], original_ssm[8:])
     torch.testing.assert_close(metadata.linear_state_indices, torch.tensor(state_ids, dtype=index_dtype))
+
+
+@pytest.mark.parametrize("capture_fails", [False, True])
+def test_shared_capture_only_writes_reserved_physical_scratch(capture_fails: bool) -> None:
+    runner = _runner()
+    arena = torch.ones(8 * 1024, dtype=torch.uint8)
+    key = arena.view(torch.bfloat16)[: 57 * 64].reshape(57, 1, 1, 64)
+    value = arena[128:].view(torch.bfloat16)[: 57 * 64].reshape(57, 1, 1, 64)
+    conv = arena.view(torch.bfloat16)[: 29 * 128].reshape(29, 1, 1, 128)
+    ssm = arena[256:].view(torch.float32)[: 58 * 32].reshape(58, 1, 1, 32)
+    caches = [
+        LayerCache(key=key, value=value),
+        LayerCache(key=None, value=None, conv=conv, ssm=ssm, linear_state_slots=torch.arange(8, dtype=torch.int32)),
+    ]
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    runner.attention_backend.shared_kv_layout = layout
+    runner.bind_layer_caches(caches)
+    runner.attention_backend.prepare = Mock()
+    runner.attention_backend.prepare_graph_replay = Mock()
+    indices = torch.tensor([1, 2], dtype=torch.int32)
+    metadata = _metadata(indices)
+    input_ids = torch.arange(2, dtype=torch.int32)
+    live_pages = arena[layout.slot_bytes :].clone()
+
+    def capture(entry: AclGraphEntry, _stream: object) -> None:
+        selected = entry.static_metadata.linear_state_indices
+        conv_rows = layout.linear_state_indices(selected, role="conv").long()
+        ssm_rows = layout.linear_state_indices(selected, role="ssm").long()
+        checkpoints = ssm_rows[:, None] + torch.arange(layout.checkpoint_stride)
+        conv.index_fill_(0, conv_rows, -1)
+        ssm.index_fill_(0, checkpoints.reshape(-1), -1)
+        if capture_fails:
+            raise RuntimeError("capture failed")
+
+    with (
+        patch.object(AclGraphRunner, "_capture", side_effect=capture),
+        patch.object(torch.npu, "current_stream", return_value=Mock()),
+        patch.object(torch.npu, "Stream", return_value=Mock()),
+        patch(
+            "xllm.python.model_executor.runners.decode_acl_graph.kernels.update_decode_graph_metadata",
+            create=True,
+        ),
+    ):
+        failure = pytest.raises(RuntimeError, match="capture failed") if capture_fails else nullcontext()
+        with failure:
+            runner._prepare_graph_entry(input_ids, input_ids, metadata, None)
+
+    torch.testing.assert_close(arena[layout.slot_bytes :], live_pages)
+    torch.testing.assert_close(metadata.linear_state_indices, indices)
 
 
 @pytest.mark.parametrize(

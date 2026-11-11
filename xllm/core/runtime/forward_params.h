@@ -35,9 +35,7 @@ limitations under the License.
 #include "core/framework/multimodal/embedding_output.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
-#include "core/framework/sampling/beam_searcher.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "core/framework/speculative/adaptive/dspark_dp_coordinator.h"
 #include "core/framework/speculative/verify_layout.h"
 #include "core/util/tensor_helper.h"
 #include "platform/device.h"
@@ -221,9 +219,7 @@ inline bool add_sampling_to_plan(const SamplingParameters& source,
          plan.add(source.unique_token_ids_lens(),
                   &target.unique_token_ids_lens()) &&
          plan.add(source.do_sample(), &target.do_sample()) &&
-         plan.add(source.filter_mask(), &target.filter_mask()) &&
-         plan.add(source.filter_bitmask(), &target.filter_bitmask()) &&
-         plan.add(source.acc_logprob(), &target.acc_logprob());
+         plan.add(source.filter_bitmask(), &target.filter_bitmask());
 }
 
 inline torch::Tensor normalize_positions_for_device(
@@ -240,9 +236,6 @@ inline void clear_contiguous_input_buffer_tensor_targets(Params& params) {
   params.embedding.input_embedding = torch::Tensor();
   params.embedding.linear_state_indices = torch::Tensor();
   params.embedding.mtp_bootstrap_embeddings = torch::Tensor();
-  params.block_copy.src_block_indices = torch::Tensor();
-  params.block_copy.dst_block_indices = torch::Tensor();
-  params.block_copy.cum_sum = torch::Tensor();
   params.graph.attn_mask = torch::Tensor();
   params.graph.tiling_data = torch::Tensor();
 }
@@ -289,11 +282,6 @@ inline bool add_model_tensors_to_plan(const Params& source,
                   &target.embedding.linear_state_indices) &&
          plan.add(source.embedding.mtp_bootstrap_embeddings,
                   &target.embedding.mtp_bootstrap_embeddings) &&
-         plan.add(source.block_copy.src_block_indices,
-                  &target.block_copy.src_block_indices) &&
-         plan.add(source.block_copy.dst_block_indices,
-                  &target.block_copy.dst_block_indices) &&
-         plan.add(source.block_copy.cum_sum, &target.block_copy.cum_sum) &&
          plan.add(source.graph.attn_mask, &target.graph.attn_mask) &&
          plan.add(source.graph.tiling_data, &target.graph.tiling_data);
 }
@@ -331,13 +319,12 @@ class WorkerType {
  public:
   enum Value : int8_t {
     INVALID = 0,
-    LLM,     // LLM
-    VLM,     // VLM
-    DIT,     // DIT
-    ELM,     // Embedding LM
-    EVLM,    // Embedding VLM
-    REC,     // Rec
-    MMEVLM,  // Encoder Embedding VLM
+    LLM,         // LLM
+    VLM,         // VLM
+    DIT,         // DIT
+    ELM,         // Embedding LM
+    EVLM,        // Embedding VLM
+    MMEVLM = 7,  // Encoder Embedding VLM
   };
 
   constexpr WorkerType(Value v) : value_(v) {}
@@ -352,8 +339,6 @@ class WorkerType {
       value_ = ELM;
     } else if (str == "EVLM") {
       value_ = EVLM;
-    } else if (str == "REC") {
-      value_ = REC;
     } else if (str == "MMEVLM") {
       value_ = MMEVLM;
     } else {
@@ -382,8 +367,6 @@ class WorkerType {
       return "ELM";
     } else if (this->value_ == EVLM) {
       return "EVLM";
-    } else if (this->value_ == REC) {
-      return "REC";
     } else if (this->value_ == MMEVLM) {
       return "MMEVLM";
     } else {
@@ -395,7 +378,6 @@ class WorkerType {
   Value value_;
 };
 
-// Step-level decode metadata for Rec multi-round (device loop).
 // Inputs for forward execution
 class LlmForwardInput final {
  public:
@@ -418,7 +400,6 @@ class LlmForwardInput final {
     inputs.positions_host = positions_host;
     inputs.input_params = input_params.clone();
     inputs.sampling_params = sampling_params;
-    inputs.json_object_invalid_draft = json_object_invalid_draft;
     inputs.json_object_errors = json_object_errors;
     return inputs;
   }
@@ -590,9 +571,6 @@ class LlmForwardInput final {
   std::vector<int32_t> sample_prior_output_rows;
   std::vector<JsonObjectGrammarState> json_object_states;
   std::vector<JsonObjectGrammarSnapshot> json_object_state_snapshots;
-  // Flattened [sequence][draft position] flags produced during MTP
-  // validation. This is execution-local metadata and is not transported.
-  std::vector<uint8_t> json_object_invalid_draft;
   // Errors detected while aligning prior overlap output with grammar rows.
   std::vector<JsonObjectOutputError> json_object_errors;
 
@@ -627,7 +605,6 @@ class ForwardOutput final {
   // Non-empty requests is the sole marker of a verify result (ordinary decode
   // emits 1-D tokens); consumed before proto/shared-memory serialization.
   SpecVerifyStats spec_verify_stats;
-  DSparkDpFeedback dspark_feedback;
   std::vector<JsonObjectOutputError> json_object_errors;
   // Keep no-sync input tensor handles alive until downstream consumers finish
   // using outputs on the same compute stream. Composite workers append child
@@ -651,9 +628,6 @@ class ForwardOutput final {
   torch::Tensor expert_load_data;
   // EPLB prepare-attempt token completed by this worker.
   int64_t prepared_token = -1;
-
-  BeamSearchOutput beam_search_output;
-  torch::Tensor beam_sequence_group;
 
   // dit output data
   DiTForwardOutput dit_forward_output;
@@ -692,18 +666,10 @@ struct RawSampleOutput {
 
 class RawForwardOutput final {
  public:
-  DSparkDpFeedback dspark_feedback;
   std::vector<RawSampleOutput> outputs;  // num seqs
   std::vector<JsonObjectOutputError> json_object_errors;
   std::vector<int64_t> expert_load_data;
   int64_t prepared_token = -1;
-  // beam search kernel output
-  std::vector<int32_t> src_seq_idxes;
-  std::vector<int32_t> out_tokens;
-  std::vector<float> out_logprobs;
-
-  // batch-level beam output for Rec multi-round mode
-  std::vector<int32_t> beam_sequence_group;  // flattened 2D
   // dit output data
   DiTForwardOutput dit_forward_output;
 };

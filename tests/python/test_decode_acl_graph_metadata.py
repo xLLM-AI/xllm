@@ -85,10 +85,10 @@ def executor(runner: DecodeAclGraphRunner) -> ModelExecutor:
     executor.context_kv_graph_runner = None
     executor.layerwise_split_size = 1
     executor.decode_graph_runner = runner
-    executor.prepared_graph_runner = None
     executor.inductor_runner = None
     executor.eager_runner = Mock()
     executor.requires_input_batch_metadata = False
+    executor._eager_multimodal_prefill = False
     return executor
 
 

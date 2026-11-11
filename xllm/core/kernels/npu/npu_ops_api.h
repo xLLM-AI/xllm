@@ -58,6 +58,13 @@ void batch_decode(const torch::Tensor& query,
                   const torch::Tensor& seq_lens,
                   torch::Tensor& output);
 
+void apply_vision_rotary(torch::Tensor& query,
+                         torch::Tensor& key,
+                         const torch::Tensor& cos,
+                         const torch::Tensor& sin,
+                         const torch::Tensor& seq_lens,
+                         std::vector<int32_t>& seq_lens_host);
+
 void apply_rotary(torch::Tensor& query,
                   torch::Tensor& key,
                   const torch::Tensor& cos,
@@ -418,21 +425,6 @@ w4a8_dynamic_moe_preprocess(
     const std::optional<torch::Tensor>& w2_scale_bias,
     int64_t group_size,
     bool pack_weight_to_int32);
-
-std::tuple<torch::Tensor, torch::Tensor> rec_constrained_topk(
-    const torch::Tensor& logits,
-    const torch::Tensor& sequence_group,
-    const torch::Tensor& first_token_ids,
-    const torch::Tensor& prefix1_offsets,
-    const torch::Tensor& prefix1_values,
-    const torch::Tensor& prefix1_pair_keys,
-    const torch::Tensor& prefix2_value_offsets,
-    const torch::Tensor& prefix2_values,
-    const torch::Tensor& temperatures,
-    int64_t current_step,
-    int64_t top_k,
-    int64_t max_prefix1_degree,
-    int64_t max_prefix2_degree);
 
 torch::Tensor causal_conv1d(const torch::Tensor& x,
                             const torch::Tensor& weight,

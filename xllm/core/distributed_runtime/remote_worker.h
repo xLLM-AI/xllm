@@ -47,9 +47,6 @@ class RemoteWorker : public WorkerClient {
 
   bool wait_for_server_ready(const std::string& server_address);
 
-  std::optional<std::string> spec_calibration(
-      const SpecCalibrationCommand& command) override;
-
   void get_cache_info(uint64_t& cluster_id,
                       std::string& addr,
                       uint16_t& port) override;
@@ -103,12 +100,6 @@ class RemoteWorker : public WorkerClient {
   folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const DiTForwardInput& inputs) override;
 
-  folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const RecForwardInput& inputs) override;
-
-  folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
-      const RecForwardInput& inputs) override;
-
   folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const VlmForwardInput& inputs) override;
 
@@ -121,8 +112,6 @@ class RemoteWorker : public WorkerClient {
 
   folly::SemiFuture<std::optional<RawForwardOutput>>
   get_last_vlm_step_result_async() override;
-
-  folly::SemiFuture<int64_t> get_active_activation_memory_async() override;
 
   // Check if the connection to worker is healthy
   bool check_health();

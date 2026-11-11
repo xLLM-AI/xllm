@@ -35,7 +35,6 @@ class VlmModelParams final {
     out.attention = attention;
     out.embedding = embedding;
     out.parallel = parallel;
-    out.block_copy = block_copy;
     out.multimodal = multimodal;
     out.expert = expert;
     out.graph = graph;
@@ -48,7 +47,6 @@ class VlmModelParams final {
     out.mtp_topk_state = mtp_topk_state;
     out.num_accepted_tokens_host = num_accepted_tokens_host;
     out.attn_metadata = attn_metadata;
-    out.python_attention_metadata = python_attention_metadata;
     out.enable_graph = enable_graph;
     return out;
   }
@@ -58,7 +56,6 @@ class VlmModelParams final {
     params.meta = meta;
     params.attention = attention.to(device);
     params.embedding = embedding.to(device);
-    params.block_copy = block_copy.to(device);
     params.multimodal = multimodal.to(device);
     params.parallel = parallel.to(device);
     params.expert = expert.to(device);
@@ -129,7 +126,6 @@ class VlmModelParams final {
   VlmAttentionInput attention;
   VlmEmbeddingInput embedding;
   ParallelInput parallel;
-  BlockCopyInput block_copy;
   VlmVisionInput multimodal;
   ExpertInput expert;
   VlmGraphInput graph;
@@ -142,7 +138,6 @@ class VlmModelParams final {
   MtpTopkStatePtr mtp_topk_state;
   std::vector<int64_t> num_accepted_tokens_host;
   std::shared_ptr<layer::AttentionMetadata> attn_metadata;
-  std::shared_ptr<PythonAttentionMetadata> python_attention_metadata;
   bool enable_graph = false;
 };
 

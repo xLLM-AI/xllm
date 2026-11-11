@@ -144,10 +144,7 @@ Status normalize_generation(nlohmann::json& json,
                      " is not supported by the xLLM backend.");
     }
   }
-  if (json.value("use_beam_search", nlohmann::json()) == true) {
-    return invalid(
-        "use_beam_search is not supported; use xLLM beam_width instead.");
-  }
+
   if (chat && (json.value("echo", nlohmann::json()) == true ||
                json.value("continue_final_message", nlohmann::json()) == true ||
                json.value("add_generation_prompt", nlohmann::json()) == false ||

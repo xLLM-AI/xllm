@@ -228,9 +228,6 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("is_embeddings", &RequestParams::is_embeddings)
       .def_readwrite("stop", &RequestParams::stop)
       .def_readwrite("stop_token_ids", &RequestParams::stop_token_ids)
-      .def_readwrite("beam_width", &RequestParams::beam_width)
-      .def_readwrite("num_return_sequences",
-                     &RequestParams::num_return_sequences)
       .def_readwrite("add_special_tokens", &RequestParams::add_special_tokens)
       .def_readwrite("is_sample_request", &RequestParams::is_sample_request)
       .def_readwrite("sample_slots", &RequestParams::sample_slots);

@@ -74,6 +74,7 @@ struct KVCacheEstimateOptions {
   int64_t linear_state_cache_block_limit = 0;
   bool is_draft_engine = false;
   bool enable_prefix_cache = false;
+  bool enable_shared_kv_cache = false;
   int32_t layerwise_split_size = 1;
   bool enable_chunked_prefill = true;
   bool enable_schedule_overlap = true;
@@ -153,5 +154,15 @@ struct SharedKPoolPlan {
 SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
                                   KVCacheCapacity draft_cap,
                                   const ModelArgs& draft_args);
+
+// The shared target arena and dense full-attention MTP draft use the same
+// logical IDs while owning separate tensor storage on one device.
+struct SharedStaticKVCachePlan {
+  KVCacheCapacity target;
+  KVCacheCapacity draft;
+};
+
+SharedStaticKVCachePlan plan_shared_static_kv_cache(KVCacheCapacity target_cap,
+                                                    KVCacheCapacity draft_cap);
 
 }  // namespace xllm

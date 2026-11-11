@@ -40,17 +40,11 @@ class VlmCodec final {
   static constexpr auto decode = decode_vlm_output;
 };
 
-class RecCodec final {
- public:
-  using Response = proto::RECForwardResponse;
-  static constexpr auto encode = encode_rec_output;
-  static constexpr auto decode = decode_rec_output;
-};
+using TokenCodecs = ::testing::Types<LlmCodec, VlmCodec>;
 
 template <typename Codec>
 class WorkerModelTokenCodecTest : public ::testing::Test {};
 
-using TokenCodecs = ::testing::Types<LlmCodec, VlmCodec, RecCodec>;
 TYPED_TEST_SUITE(WorkerModelTokenCodecTest, TokenCodecs);
 
 RawForwardOutput original_output() {
@@ -73,7 +67,7 @@ void expect_original_output(const RawForwardOutput& output) {
 }
 
 TYPED_TEST(WorkerModelTokenCodecTest,
-           RoundTripPreservesTokensEmbeddingsStatsBeamAndJson) {
+           RoundTripPreservesTokensEmbeddingsStatsAndJson) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7, 8}, torch::kInt32);
   source.sample_output.logprobs = torch::tensor({-0.5f, -1.0f});
@@ -84,10 +78,7 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   source.sample_output.embeddings = torch::tensor({{1.0f, 2.0f}, {3.0f, 4.0f}});
   source.sample_output.mm_embeddings = {{torch::tensor({1.0f, 2.0f})},
                                         {torch::tensor({3.0f})}};
-  source.beam_search_output.src_seq_idxes =
-      torch::tensor({1, 0}, torch::kInt32);
-  source.beam_search_output.out_tokens = torch::tensor({8, 7}, torch::kInt32);
-  source.beam_search_output.out_logprobs = torch::tensor({-1.0f, -0.5f});
+
   source.json_object_errors = {{"sequence-0", "invalid JSON"}};
   // Token domains do not serialize diffusion output.
   source.dit_forward_output.tensors = {torch::Tensor()};
@@ -115,9 +106,7 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   EXPECT_EQ(decoded.outputs[1].speculative_token_stats.proposed_tokens, 3);
   EXPECT_EQ(decoded.prepared_token, 42);
   EXPECT_EQ(decoded.expert_load_data, (std::vector<int64_t>{9}));
-  EXPECT_EQ(decoded.src_seq_idxes, (std::vector<int32_t>{1, 0}));
-  EXPECT_EQ(decoded.out_tokens, (std::vector<int32_t>{8, 7}));
-  EXPECT_EQ(decoded.out_logprobs, (std::vector<float>{-1.0f, -0.5f}));
+
   ASSERT_EQ(decoded.json_object_errors.size(), 1);
   EXPECT_EQ(decoded.json_object_errors[0].sample_sequence_id, "sequence-0");
   EXPECT_EQ(decoded.json_object_errors[0].message, "invalid JSON");
@@ -126,13 +115,13 @@ TYPED_TEST(WorkerModelTokenCodecTest,
 }
 
 TYPED_TEST(WorkerModelTokenCodecTest,
-           InvalidTensorLayoutsAndBeamCountsPreserveEncodedDestination) {
+           InvalidTensorLayoutsPreserveEncodedDestination) {
   typename TypeParam::Response destination;
   destination.add_outputs()->add_tokens()->set_id(19);
   const std::string original = destination.SerializeAsString();
   ForwardOutput valid;
   valid.sample_output.next_tokens = torch::tensor({7, 8}, torch::kInt32);
-  std::vector<ForwardOutput> invalid_inputs(12, valid);
+  std::vector<ForwardOutput> invalid_inputs(8, valid);
   invalid_inputs[0].sample_output.next_tokens = torch::tensor({7.0f, 8.0f});
   invalid_inputs[1].sample_output.logprobs = torch::tensor({-0.5f});
   invalid_inputs[2].sample_output.top_tokens =
@@ -141,26 +130,13 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   invalid_inputs[4].sample_output.next_tokens =
       torch::tensor({{7, 8}, {9, 10}}, torch::kInt32).transpose(0, 1);
   invalid_inputs[5].sample_output.mm_embeddings = {{torch::Tensor()}};
-  invalid_inputs[6].beam_search_output.src_seq_idxes =
-      torch::tensor({1, 0}, torch::kInt64);
-  invalid_inputs[7].beam_search_output.src_seq_idxes =
-      torch::tensor({1, 0}, torch::kInt32);
-  invalid_inputs[8].beam_search_output.src_seq_idxes =
-      torch::tensor({1, 0}, torch::kInt32);
-  invalid_inputs[8].beam_search_output.out_tokens =
-      torch::tensor({8}, torch::kInt32);
-  invalid_inputs[8].beam_search_output.out_logprobs =
-      torch::tensor({-1.0f, -0.5f});
-  invalid_inputs[9].beam_search_output.out_tokens =
-      torch::tensor({8}, torch::kInt32);
-  invalid_inputs[9].beam_search_output.src_seq_idxes =
-      torch::empty({0}, torch::kInt32);
-  invalid_inputs[10].sample_output.mm_embeddings = {{torch::tensor({1.0f})},
-                                                    {torch::tensor({2.0f})},
-                                                    {torch::tensor({3.0f})}};
-  invalid_inputs[11].sample_output.next_tokens =
+
+  invalid_inputs[6].sample_output.mm_embeddings = {{torch::tensor({1.0f})},
+                                                   {torch::tensor({2.0f})},
+                                                   {torch::tensor({3.0f})}};
+  invalid_inputs[7].sample_output.next_tokens =
       torch::tensor({{7, 8}, {9, 10}}, torch::kInt32);
-  invalid_inputs[11].sample_output.mm_embeddings = {{torch::Tensor()}};
+  invalid_inputs[7].sample_output.mm_embeddings = {{torch::Tensor()}};
 
   for (const ForwardOutput& invalid : invalid_inputs) {
     EXPECT_FALSE(TypeParam::encode(invalid, {}, &destination));
@@ -173,11 +149,9 @@ TYPED_TEST(WorkerModelTokenCodecTest,
 
 TYPED_TEST(WorkerModelTokenCodecTest,
            MalformedPayloadsPreserveDecodedDestination) {
-  std::vector<typename TypeParam::Response> invalid_inputs(3);
-  invalid_inputs[0].add_src_seq_idxes(0);
-  invalid_inputs[0].add_out_tokens(7);
-  invalid_inputs[1].add_outputs()->add_tokens()->add_top_tokens(7);
-  invalid_inputs[2].add_outputs()->mutable_mm_embeddings()->add_tensors();
+  std::vector<typename TypeParam::Response> invalid_inputs(2);
+  invalid_inputs[0].add_outputs()->add_tokens()->add_top_tokens(7);
+  invalid_inputs[1].add_outputs()->mutable_mm_embeddings()->add_tensors();
   for (const typename TypeParam::Response& invalid : invalid_inputs) {
     RawForwardOutput destination = original_output();
     EXPECT_FALSE(TypeParam::decode(invalid, destination));
@@ -263,9 +237,6 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   ForwardOutput source;
   source.sample_output.embeddings = torch::tensor({{1.0f, 2.0f}});
   typename TypeParam::Response encoded;
-  encoded.add_src_seq_idxes(0);
-  encoded.add_out_tokens(7);
-  encoded.add_out_logprobs(-0.5f);
   encoded.add_json_object_errors()->set_message("stale");
   ASSERT_TRUE(TypeParam::encode(source, {}, &encoded));
   RawForwardOutput decoded = original_output();
@@ -276,9 +247,7 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   EXPECT_FALSE(decoded.outputs[0].tokens[0].logprob.has_value());
   EXPECT_EQ(decoded.outputs[0].tokens[0].embeddings,
             (std::vector<float>{1.0f, 2.0f}));
-  EXPECT_TRUE(decoded.src_seq_idxes.empty());
-  EXPECT_TRUE(decoded.out_tokens.empty());
-  EXPECT_TRUE(decoded.out_logprobs.empty());
+
   EXPECT_TRUE(decoded.json_object_errors.empty());
   EXPECT_TRUE(decoded.dit_forward_output.text_output.empty());
 
@@ -394,25 +363,6 @@ TEST(WorkerModelDitCodecTest, InvalidAudioTensorDecodePreservesDestination) {
   ASSERT_EQ(destination.dit_forward_output.audio_tensors.size(), 1);
   EXPECT_TRUE(torch::equal(destination.dit_forward_output.audio_tensors[0],
                            original_audio));
-}
-
-TEST(WorkerModelCodecTest, LlmDsparkFeedbackRoundTripRejectsMalformedRows) {
-  ForwardOutput source;
-  source.sample_output.next_tokens = torch::tensor({7, 9}, torch::kInt64);
-  source.dspark_feedback.confidence.assign(10, 0.4F);
-  source.dspark_feedback.rounds_since_full_width = {2, 3};
-  proto::LLMForwardResponse response;
-  ASSERT_TRUE(encode_llm_output(source, {}, &response));
-  RawForwardOutput decoded;
-  ASSERT_TRUE(decode_llm_output(response, decoded));
-  EXPECT_EQ(decoded.dspark_feedback.confidence,
-            source.dspark_feedback.confidence);
-  EXPECT_EQ(decoded.dspark_feedback.rounds_since_full_width,
-            source.dspark_feedback.rounds_since_full_width);
-  response.add_dspark_confidence(0.5F);
-  decoded = original_output();
-  EXPECT_FALSE(decode_llm_output(response, decoded));
-  expect_original_output(decoded);
 }
 
 }  // namespace

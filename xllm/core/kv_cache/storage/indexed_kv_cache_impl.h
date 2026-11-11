@@ -40,9 +40,6 @@ class IndexedKVCacheImpl : public KVCacheImpl {
 
   std::vector<std::vector<int64_t>> get_shapes() const override;
 
-  void swap_blocks(torch::Tensor& src_tensor,
-                   torch::Tensor& dst_tensor) override;
-
  protected:
   IndexedKVCacheImpl(const KVCacheShape& kv_cache_shape,
                      const IndexedKVCacheTensors& tensors);

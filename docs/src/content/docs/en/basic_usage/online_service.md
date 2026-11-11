@@ -45,46 +45,6 @@ curl http://127.0.0.1:9977/v1/completions \
   }'
 ```
 
-Beam Search:
-
-Set `beam_width` to a value greater than `1` to enable LLM Beam Search. This parameter is supported by both `/v1/chat/completions` and `/v1/completions`. The beam-search top-k candidate count is configured with `top_logprobs` in chat requests and with the numeric `logprobs` field in completion requests. When these fields are omitted, xLLM uses `beam_width` as the top logprob count. Set the candidate count to a value greater than `beam_width` when you want each beam to consider more candidate tokens. This is different from the sampling cutoff parameter `top_k`. `best_of` is not the Beam Search switch, and this LLM API guide does not use `num_return_sequences` to control the returned beams.
-
-Chat mode:
-```bash
-curl http://localhost:9977/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen2-7B-Instruct",
-    "max_tokens": 20,
-    "temperature": 0,
-    "stream": false,
-    "beam_width": 2,
-    "logprobs": true,
-    "top_logprobs": 4,
-    "messages": [
-      {
-        "role": "user",
-        "content": "Write a short introduction to xLLM."
-      }
-    ]
-  }'
-```
-
-Completions mode:
-```bash
-curl http://127.0.0.1:9977/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen2-7B-Instruct",
-    "prompt": "Write a short introduction to xLLM.",
-    "max_tokens": 20,
-    "temperature": 0,
-    "stream": false,
-    "beam_width": 2,
-    "logprobs": 4
-  }'
-```
-
 Sample mode:
 ```bash
 curl http://127.0.0.1:9977/v1/sample \
@@ -140,7 +100,7 @@ Typical response:
 
 `/v1/sample` notes:
 
-- Only `--backend=llm` is supported. VLM/DiT/Rec are not supported yet.
+- Only `--backend=llm` is supported. VLM/DiT are not supported yet.
 - `selector.type` is currently fixed to `literal`. `selector.value` is matched against prompt text in full and in order.
 - `logprobs` defaults to `5`, with an allowed range of `[1, 5]`.
 - `choices[i].index` is the matched `sample_id`, corresponding one-to-one with the matched order in prompt.

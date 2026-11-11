@@ -66,17 +66,6 @@ class Tokenizer {
     return decode(Slice<int32_t>(&id, 1), /*skip_special_tokens=*/false);
   }
 
-  // Only for generative recommendation
-  virtual bool encode(int64_t item_id, std::vector<int32_t>* token_ids) const {
-    return false;
-  }
-  // Only for generative recommendation
-  virtual bool decode(const Slice<int32_t>& token_ids,
-                      bool skip_special_tokens,
-                      std::vector<int64_t>* item_ids) const {
-    return false;
-  }
-
   virtual std::optional<int32_t> token_to_id(
       const std::string_view& token) const {
     return std::nullopt;

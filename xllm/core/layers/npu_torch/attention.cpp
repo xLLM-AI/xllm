@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "attention.h"
+#include "core/layers/npu_torch/attention.h"
 
 #include <glog/logging.h>
 
@@ -69,6 +69,24 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
   torch::Tensor k_cache = kv_cache.get_k_cache();
   std::optional<torch::Tensor> v_cache = kv_cache.get_v_cache();
 
+  torch::Tensor shared_block_table;
+  torch::Tensor shared_slot_mapping;
+  const torch::Tensor* physical_block_table = nullptr;
+  const torch::Tensor* physical_slot_mapping = nullptr;
+  if (kv_cache.is_static_shared()) {
+    CHECK(attn_metadata.kv_shard_batch_metadata == nullptr);
+    CHECK(!attn_metadata.expanded_decode.enabled);
+    // Dense arena views share storage, but each layer owns different rows.
+    shared_block_table = kv_cache.physical_row_indices(
+        attn_metadata.block_table, KVCacheTensorRole::KEY);
+    shared_slot_mapping = kv_cache.physical_token_slots(
+        attn_metadata.slot_mapping, k_cache.size(1));
+    physical_block_table = &shared_block_table;
+    physical_slot_mapping = &shared_slot_mapping;
+    CHECK(v_cache.has_value() && v_cache->defined());
+    k_cache = k_cache.narrow(0, 0, v_cache->size(0));
+  }
+
   if (!attn_metadata.prefill_without_cache) {
     xllm::kernel::ReshapePagedCacheParams reshape_paged_cache_params;
     reshape_paged_cache_params.key = key.view({-1, num_kv_heads_, head_size_});
@@ -78,17 +96,27 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
     reshape_paged_cache_params.v_cache = v_cache;
     const auto& shard_metadata = attn_metadata.kv_shard_batch_metadata;
     reshape_paged_cache_params.slot_mapping =
-        shard_metadata != nullptr ? shard_metadata->local_slot_mapping
-                                  : attn_metadata.slot_mapping;
+        physical_slot_mapping != nullptr ? *physical_slot_mapping
+        : shard_metadata != nullptr      ? shard_metadata->local_slot_mapping
+                                         : attn_metadata.slot_mapping;
     xllm::kernel::reshape_paged_cache(reshape_paged_cache_params);
   }
 
   if (attn_metadata.expanded_decode.enabled) {
-    decoder_forward(query, output, k_cache, v_cache, attn_metadata);
+    decoder_forward(
+        query, output, k_cache, v_cache, attn_metadata, physical_block_table);
   } else if (only_prefill) {
-    prefill_forward(query, key, value, output, k_cache, v_cache, attn_metadata);
+    prefill_forward(query,
+                    key,
+                    value,
+                    output,
+                    k_cache,
+                    v_cache,
+                    attn_metadata,
+                    physical_block_table);
   } else {
-    decoder_forward(query, output, k_cache, v_cache, attn_metadata);
+    decoder_forward(
+        query, output, k_cache, v_cache, attn_metadata, physical_block_table);
   }
 
   output = output.view({-1, num_heads_ * head_size_});
@@ -101,7 +129,8 @@ void AttentionImpl::prefill_forward(torch::Tensor& query,
                                     torch::Tensor& output,
                                     const torch::Tensor& k_cache,
                                     const std::optional<torch::Tensor>& v_cache,
-                                    const AttentionMetadata& attn_metadata) {
+                                    const AttentionMetadata& attn_metadata,
+                                    const torch::Tensor* physical_block_table) {
   query = query.view({-1, num_heads_, head_size_});
   output = output.view({-1, num_heads_, head_size_});
 
@@ -157,7 +186,9 @@ void AttentionImpl::prefill_forward(torch::Tensor& query,
         attn_metadata.fia_attn_mask.defined()
             ? std::make_optional(attn_metadata.fia_attn_mask)
             : std::nullopt,
-        attn_metadata.block_table.defined()
+        physical_block_table != nullptr
+            ? std::make_optional(*physical_block_table)
+        : attn_metadata.block_table.defined()
             ? std::make_optional(attn_metadata.block_table)
             : std::nullopt,
         attn_metadata.q_cu_seq_lens_host_vec,
@@ -180,7 +211,8 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
                                     torch::Tensor& output,
                                     const torch::Tensor& k_cache,
                                     const std::optional<torch::Tensor>& v_cache,
-                                    const AttentionMetadata& attn_metadata) {
+                                    const AttentionMetadata& attn_metadata,
+                                    const torch::Tensor* physical_block_table) {
   if (dcp_group_ != nullptr) {
     CHECK(v_cache.has_value() && v_cache->defined())
         << "DCP decode requires a value cache";
@@ -201,7 +233,9 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
   output = output.view({-1, 1, num_heads_, head_size_});
 
   torch::Tensor kv_seq_lens;
-  torch::Tensor block_table = attn_metadata.block_table;
+  torch::Tensor block_table = physical_block_table == nullptr
+                                  ? attn_metadata.block_table
+                                  : *physical_block_table;
   torch::Tensor tiling_data = attn_metadata.paged_attention_tiling_data;
   if (attn_metadata.expanded_decode.enabled) {
     block_table = attn_metadata.expanded_decode.block_table;

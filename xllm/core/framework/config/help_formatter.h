@@ -22,7 +22,6 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/dit_config.h"
@@ -36,7 +35,6 @@ limitations under the License.
 #include "core/framework/config/option_category.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/profile_config.h"
-#include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -58,7 +56,6 @@ class HelpFormatter {
         LoadConfig::option_category(),
         KVCacheConfig::option_category(),
         KVCacheStoreConfig::option_category(),
-        BeamSearchConfig::option_category(),
         SchedulerConfig::option_category(),
         ParallelConfig::option_category(),
         EPLBConfig::option_category(),
@@ -69,7 +66,7 @@ class HelpFormatter {
         ExecutionConfig::option_category(),
         KernelConfig::option_category(),
         DiTConfig::option_category(),
-        RecConfig::option_category()};
+    };
     return kOptionCategories;
   }
 

@@ -5,7 +5,6 @@ cc_library(
     config
   HDRS
     batch_sizes.h
-    beam_search_config.h
     config_utils.h
     kv_cache_config.h
     disagg_pd_config.h
@@ -21,13 +20,11 @@ cc_library(
     option_category.h
     parallel_config.h
     profile_config.h
-    rec_config.h
     scheduler_config.h
     service_config.h
     speculative_config.h
   SRCS
     batch_sizes.cpp
-    beam_search_config.cpp
     config_utils.cpp
     kv_cache_config.cpp
     disagg_pd_config.cpp
@@ -41,7 +38,6 @@ cc_library(
     model_config.cpp
     parallel_config.cpp
     profile_config.cpp
-    rec_config.cpp
     scheduler_config.cpp
     service_config.cpp
     speculative_config.cpp

@@ -30,11 +30,9 @@ limitations under the License.
 #include "core/framework/batch/batch.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
-#include "core/framework/model/rec_model.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/request/sequence.h"
@@ -46,8 +44,6 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/layers/common/attention_metadata.h"
-#include "core/layers/npu/npu_lm_head_impl.h"
-#include "core/layers/npu/npu_word_embedding_impl.h"
 #include "core/layers/npu_torch/qwen3_next_attention.h"
 #include "core/layers/npu_torch/tests_utils.h"
 #include "core/runtime/acl_graph_executor_impl.h"
@@ -215,232 +211,6 @@ const KVCache& first_full_attention_cache(
 }
 }  // namespace
 
-class NativeRecGraphModel final : public RecModel {
- public:
-  NativeRecGraphModel(int64_t hidden_size, const torch::Device& device)
-      : hidden_size_(hidden_size),
-        options_(torch::TensorOptions().dtype(torch::kFloat32).device(device)) {
-  }
-
-  RecModelKind model_kind() const override { return RecModelKind::kOneRec; }
-
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>&,
-                      const RecModelParams& params) override {
-    ++forward_count_;
-    const auto& strategy = *params.onerec_xattention_params();
-    auto values = tokens.to(torch::kFloat32) + positions.to(torch::kFloat32) +
-                  strategy.current_round_tensor.to(torch::kFloat32);
-    if (fail_next_forward_) {
-      fail_next_forward_ = false;
-      aclmdlRICaptureStatus capture_status{};
-      aclmdlRI captured_graph{};
-      const aclError result = aclmdlRICaptureGetInfo(
-          c10_npu::getCurrentNPUStream(options_.device().index()).stream(),
-          &capture_status,
-          &captured_graph);
-      failed_during_capture_ =
-          result == ACL_SUCCESS &&
-          capture_status == ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE;
-      throw std::runtime_error("injected Rec graph capture failure");
-    }
-    auto hidden_states = values.unsqueeze(1).repeat({1, hidden_size_});
-    strategy.shared_k_caches.front().copy_(hidden_states[0]);
-    return ModelOutput(hidden_states);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor&) override {
-    return hidden_states;
-  }
-  void load_model(std::unique_ptr<ModelLoader>) override {}
-  torch::Device device() const override { return options_.device(); }
-  const torch::TensorOptions& options() const override { return options_; }
-  int64_t forward_count() const { return forward_count_; }
-  void fail_next_forward() { fail_next_forward_ = true; }
-  bool failed_during_capture() const { return failed_during_capture_; }
-
- private:
-  int64_t hidden_size_;
-  torch::TensorOptions options_;
-  int64_t forward_count_ = 0;
-  bool fail_next_forward_ = false;
-  bool failed_during_capture_ = false;
-};
-
-RecModelParams make_native_rec_decode_params(const torch::Device& device,
-                                             const torch::Tensor& round,
-                                             const torch::Tensor& cache) {
-  RecModelParams params;
-  params.meta.batch_forward_type = BatchForwardType::DECODE;
-  params.meta.num_sequences = 3;
-  params.meta.kv_max_seq_len = 1;
-  params.meta.q_max_seq_len = 1;
-  const auto options =
-      torch::TensorOptions().dtype(torch::kInt32).device(device);
-  params.attention.host.q_seq_lens = {1, 1, 1};
-  params.attention.host.kv_seq_lens = {1, 1, 1};
-  params.attention.device.q_seq_lens = torch::tensor({1, 1, 1}, options);
-  params.attention.device.kv_seq_lens = torch::tensor({1, 1, 1}, options);
-  params.attention.device.new_cache_slots = torch::tensor({0, 1, 2}, options);
-  params.attention.device.block_tables = torch::zeros({3, 1}, options);
-  auto& strategy = params.mutable_onerec_xattention_params();
-  strategy.rec_stage = OneRecModelInputParams::RecStage::DECODE;
-  strategy.current_round_tensor = round;
-  strategy.shared_k_caches = {cache};
-  return params;
-}
-
-class AclGraphExecutorRecTest : public ::testing::Test {
- protected:
-  void SetUp() override {
-    ExecutionConfig::get_instance().enable_graph_double_buffer(false);
-    ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding(true);
-    args_.model_type("native_rec_test")
-        .dtype("float32")
-        .hidden_size(8)
-        .head_dim(0)
-        .n_layers(2)
-        .max_position_embeddings(16);
-    options_.max_tokens_per_batch(8)
-        .max_seqs_per_batch(4)
-        .num_decoding_tokens(1)
-        .block_size(4)
-        .dp_size(1);
-  }
-
-  void TearDown() override {
-    ExecutionConfig::get_instance() = saved_execution_config_;
-  }
-
-  const torch::Device device_{"npu:0"};
-  ModelArgs args_;
-  runtime::Options options_;
-
- private:
-  ExecutionConfig saved_execution_config_ = ExecutionConfig::get_instance();
-};
-
-TEST_F(AclGraphExecutorRecTest, ReplaysRoundsAndRecapturesChangedKvBindings) {
-  const auto& args = args_;
-  const auto& device = device_;
-  const auto& options = options_;
-  NativeRecGraphModel model(args.hidden_size(), device);
-  npu::AclGraphExecutorImpl executor(&model, args, device, options);
-  auto kv_tensor = torch::zeros({16, 32}, model.options());
-  std::vector<KVCache> kv_caches;
-  kv_caches.emplace_back(KVCacheTensors{kv_tensor, kv_tensor});
-  const auto int_options =
-      torch::TensorOptions().dtype(torch::kInt32).device(device);
-  auto tokens = torch::tensor({12, 12, 12}, int_options);
-  auto positions = torch::tensor({3, 3, 3}, int_options);
-  auto round = torch::tensor({1}, int_options);
-  auto cache = torch::zeros({args.hidden_size()}, model.options());
-  auto params = make_native_rec_decode_params(device, round, cache);
-  params.meta.is_graph_warmup = true;
-
-  auto output = executor.run(tokens, positions, kv_caches, params);
-  EXPECT_TRUE(torch::equal(output.hidden_states.cpu(),
-                           torch::full({3, args.hidden_size()}, 16.0f)));
-  EXPECT_EQ(executor.get_graph_count(), 1);
-  const int64_t capture_forward_count = model.forward_count();
-  EXPECT_GT(capture_forward_count, 0);
-
-  params = make_native_rec_decode_params(device, round, cache);
-  tokens.fill_(20);
-  positions.fill_(4);
-  round.fill_(2);
-  output = executor.run(tokens, positions, kv_caches, params);
-  EXPECT_EQ(model.forward_count(), capture_forward_count);
-  EXPECT_TRUE(torch::equal(output.hidden_states.cpu(),
-                           torch::full({3, args.hidden_size()}, 26.0f)));
-  EXPECT_TRUE(
-      torch::equal(cache.cpu(), torch::full({args.hidden_size()}, 26.0f)));
-
-  auto replacement_cache = torch::zeros_like(cache);
-  params.mutable_onerec_xattention_params().shared_k_caches = {
-      replacement_cache};
-  tokens.fill_(30);
-  positions.fill_(5);
-  round.fill_(3);
-  output = executor.run(tokens, positions, kv_caches, params);
-  EXPECT_GT(model.forward_count(), capture_forward_count);
-  EXPECT_EQ(executor.get_graph_count(), 1);
-  EXPECT_TRUE(torch::equal(output.hidden_states.cpu(),
-                           torch::full({3, args.hidden_size()}, 38.0f)));
-  EXPECT_TRUE(torch::equal(replacement_cache.cpu(),
-                           torch::full({args.hidden_size()}, 38.0f)));
-  EXPECT_TRUE(
-      torch::equal(cache.cpu(), torch::full({args.hidden_size()}, 26.0f)));
-}
-
-class AclGraphExecutorRecCaptureFailureTest
-    : public AclGraphExecutorRecTest,
-      public ::testing::WithParamInterface<bool> {};
-
-TEST_P(AclGraphExecutorRecCaptureFailureTest,
-       RestoresProducerStreamAndAllowsRecaptureAfterForwardThrows) {
-  const c10_npu::NPUStream producer_stream =
-      GetParam()
-          ? c10_npu::getStreamFromPool(/*isHighPriority=*/true, device_.index())
-          : c10_npu::getDefaultNPUStream(device_.index());
-  c10_npu::NPUStreamGuard stream_guard(producer_stream);
-  NativeRecGraphModel model(args_.hidden_size(), device_);
-  npu::AclGraphExecutorImpl executor(&model, args_, device_, options_);
-  auto kv_tensor = torch::zeros({16, 32}, model.options());
-  std::vector<KVCache> kv_caches;
-  kv_caches.emplace_back(KVCacheTensors{kv_tensor, kv_tensor});
-  const auto int_options =
-      torch::TensorOptions().dtype(torch::kInt32).device(device_);
-  auto tokens = torch::tensor({12, 12, 12}, int_options);
-  auto positions = torch::tensor({3, 3, 3}, int_options);
-  auto round = torch::tensor({1}, int_options);
-  auto cache = torch::zeros({args_.hidden_size()}, model.options());
-  auto params = make_native_rec_decode_params(device_, round, cache);
-  params.meta.is_graph_warmup = true;
-  model.forward(tokens, positions, kv_caches, params);
-  torch::npu::synchronize();
-  const int64_t warmup_forward_count = model.forward_count();
-  model.fail_next_forward();
-
-  try {
-    executor.run(tokens, positions, kv_caches, params);
-    FAIL() << "Rec graph capture did not propagate the forward failure";
-  } catch (const std::runtime_error& error) {
-    EXPECT_STREQ(error.what(), "injected Rec graph capture failure");
-  }
-  ASSERT_TRUE(model.failed_during_capture());
-  EXPECT_EQ(model.forward_count(), warmup_forward_count + 1);
-  EXPECT_TRUE(c10_npu::getCurrentNPUStream(device_.index()) == producer_stream);
-  ASSERT_EQ(executor.get_graph_count(), 0);
-
-  auto output = executor.run(tokens, positions, kv_caches, params);
-  EXPECT_TRUE(torch::equal(output.hidden_states.cpu(),
-                           torch::full({3, args_.hidden_size()}, 16.0f)));
-  ASSERT_EQ(executor.get_graph_count(), 1);
-  const int64_t capture_forward_count = model.forward_count();
-  EXPECT_GT(capture_forward_count, warmup_forward_count + 1);
-  EXPECT_TRUE(c10_npu::getCurrentNPUStream(device_.index()) == producer_stream);
-
-  params.meta.is_graph_warmup = false;
-  tokens.fill_(20);
-  positions.fill_(4);
-  round.fill_(2);
-  output = executor.run(tokens, positions, kv_caches, params);
-  EXPECT_EQ(model.forward_count(), capture_forward_count);
-  EXPECT_EQ(executor.get_graph_count(), 1);
-  EXPECT_TRUE(torch::equal(output.hidden_states.cpu(),
-                           torch::full({3, args_.hidden_size()}, 26.0f)));
-  EXPECT_TRUE(
-      torch::equal(cache.cpu(), torch::full({args_.hidden_size()}, 26.0f)));
-  EXPECT_TRUE(c10_npu::getCurrentNPUStream(device_.index()) == producer_stream);
-}
-
-INSTANTIATE_TEST_SUITE_P(DefaultAndPoolProducerStreams,
-                         AclGraphExecutorRecCaptureFailureTest,
-                         ::testing::Bool());
-
 // Simple CausalLM implementation for testing ACL graph executor
 // Uses basic operations to verify graph capture and replay functionality
 class SimpleCausalLM : public CausalLM {
@@ -465,7 +235,6 @@ class SimpleCausalLM : public CausalLM {
         "pos_embedding",
         torch::randn({max_pos, args.hidden_size()},
                      torch::dtype(torch::kFloat32).device(device)));
-    // Initialize block-related tensors for Rec multi-round computation
     block_size_ = torch::tensor(4L, torch::dtype(torch::kInt64).device(device));
     scalar_one_ = torch::tensor(1L, torch::dtype(torch::kInt64).device(device));
 
@@ -531,7 +300,6 @@ class SimpleCausalLM : public CausalLM {
     }
 
     if (params.attention.device.block_tables.defined() && !kv_caches.empty()) {
-      // Use block_tables to do embedding lookup from kv_cache - Rec multi-round
       // computation Calculate max_seq_len from actual seq_len tensor
       auto max_seq_len = torch::max(params.attention.device.kv_seq_lens);
 
@@ -618,24 +386,6 @@ class SimpleCausalLM : public CausalLM {
   }
 
   void update_expert_weight(int32_t layer_id) override {
-    // Simple implementation for testing
-  }
-
-  layer::NpuLmHead get_npu_lm_head() override {
-    // Simple implementation for testing
-    return layer::NpuLmHead(nullptr);
-  }
-
-  void set_npu_lm_head(layer::NpuLmHead& head) override {
-    // Simple implementation for testing
-  }
-
-  layer::NpuWordEmbedding get_npu_word_embedding() override {
-    // Simple implementation for testing
-    return layer::NpuWordEmbedding(nullptr);
-  }
-
-  void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) override {
     // Simple implementation for testing
   }
 
@@ -1442,11 +1192,6 @@ TEST_F(AclGraphExecutorTest, DpDecodeGraphKeyIgnoresRawTokenDistribution) {
 }
 
 TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
-  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
-  const bool original_enable_atb_spec_kernel =
-      speculative_config.enable_atb_spec_kernel();
-  speculative_config.enable_atb_spec_kernel(false);
-
   ModelArgs args;
   args.model_type("deepseek_v4");
   args.dtype("float32");
@@ -1523,18 +1268,11 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
       /*is_hybrid_linear_attention=*/true);
   // 10 seqs x 3 decoding tokens = 30 rows -> bucket 32 -> 11 metadata rows.
   EXPECT_EQ(hybrid_persistent_param.persistent_block_tables().size(0), 11);
-
-  speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
 
 class HybridSpecVerifyPaddingTest : public ::testing::TestWithParam<int32_t> {};
 
 TEST_P(HybridSpecVerifyPaddingTest, MetadataCoversBucketPadding) {
-  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
-  const bool original_enable_atb_spec_kernel =
-      speculative_config.enable_atb_spec_kernel();
-  speculative_config.enable_atb_spec_kernel(false);
-
   ModelArgs args;
   args.model_type("qwen3_5_text");
   args.dtype("float32");
@@ -1643,8 +1381,6 @@ TEST_P(HybridSpecVerifyPaddingTest, MetadataCoversBucketPadding) {
   EXPECT_TRUE(
       torch::equal(capture_params->attention.device.q_seq_lens.cpu(),
                    torch::tensor(expected_query_lengths, torch::kInt32)));
-
-  speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
 
 INSTANTIATE_TEST_SUITE_P(VerifyWidths,
@@ -1729,11 +1465,6 @@ TEST(AclGraphPersistentParamTest,
 }
 
 TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
-  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
-  const bool original_enable_atb_spec_kernel =
-      speculative_config.enable_atb_spec_kernel();
-  speculative_config.enable_atb_spec_kernel(false);
-
   ModelArgs args;
   args.model_type("deepseek_v4");
   args.dtype("float32");
@@ -1771,8 +1502,6 @@ TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
           options.max_seqs_per_batch(),
           options.enable_graph_mode_decode_no_padding());
   EXPECT_EQ(draft_param.aux_hidden_states().size(0), expected_draft_capacity);
-
-  speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
 
 TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {

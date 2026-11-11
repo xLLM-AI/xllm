@@ -27,10 +27,7 @@ limitations under the License.
 
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/causal_lm.h"
-#include "core/framework/model/causal_rec.h"
-#include "core/framework/model/generic_rec.h"
 #include "core/framework/model/model_type.h"
-#include "core/framework/model/rec_model.h"
 #include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/framework/speculative/mtp_utils.h"
@@ -46,89 +43,6 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-
-using ExpectedRecModelFactory =
-    std::function<std::unique_ptr<RecModel>(const ModelContext& context)>;
-
-static_assert(std::is_same_v<RecModelFactory, ExpectedRecModelFactory>,
-              "RecModelFactory must return std::unique_ptr<RecModel>.");
-static_assert(
-    !std::is_base_of_v<CausalLM, CausalRec> &&
-        !std::is_base_of_v<CausalLM, GenericRec>,
-    "Both recommendation families need independent forward contracts.");
-static_assert(!std::is_base_of_v<CausalRec, GenericRec> &&
-                  !std::is_base_of_v<GenericRec, CausalRec>,
-              "Recommendation families must remain siblings.");
-static_assert(std::is_base_of_v<RecModel, CausalRec> &&
-                  std::is_base_of_v<RecModel, GenericRec>,
-              "Both recommendation families must share the RecModel contract.");
-static_assert(std::is_base_of_v<Model, RecModel>,
-              "RecModel must expose input-independent model resources.");
-
-class DummyRecModelImpl final : public torch::nn::Module {
- public:
-  explicit DummyRecModelImpl(const ModelContext& /*context*/) {}
-
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const RecModelParams& parameters) {
-    UNUSED_PARAMETER(kv_caches);
-    return ModelOutput(tokens + positions +
-                       parameters.embedding.input_embedding);
-  }
-
-  torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) {
-    return hidden_states.index_select(/*dim=*/0, selected_idxes) * 2;
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) {
-    return hidden_states.index_select(/*dim=*/0, selected_idxes) * 3;
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> loader) {
-    UNUSED_PARAMETER(loader);
-  }
-};
-TORCH_MODULE(DummyRecModel);
-
-REGISTER_CAUSAL_REC_MODEL(rec_factory_causal_contract_test, DummyRecModel);
-REGISTER_GENERIC_REC_MODEL(rec_factory_generic_contract_test, DummyRecModel);
-
-void expect_rec_factory_contract(const std::string& factory_name,
-                                 RecModelKind expected_kind) {
-  RecModelFactory factory = ModelRegistry::get_rec_model_factory(factory_name);
-  ASSERT_TRUE(static_cast<bool>(factory));
-
-  ModelContext context;
-  std::unique_ptr<RecModel> rec_model = factory(context);
-  ASSERT_NE(rec_model, nullptr);
-  EXPECT_EQ(rec_model->model_kind(), expected_kind);
-
-  Model& model = *rec_model;
-  EXPECT_EQ(model.device(), torch::Device(torch::kCPU));
-  EXPECT_EQ(model.options().dtype(), context.get_tensor_options().dtype());
-
-  RecModelParams rec_params;
-  rec_params.embedding.input_embedding = torch::tensor({10.0f, 20.0f});
-  std::vector<KVCache> kv_caches;
-  const ModelOutput output = rec_model->forward(torch::tensor({1.0f, 2.0f}),
-                                                torch::tensor({3.0f, 4.0f}),
-                                                kv_caches,
-                                                rec_params);
-  EXPECT_TRUE(
-      torch::equal(output.hidden_states, torch::tensor({14.0f, 26.0f})));
-
-  const torch::Tensor selected_idxes = torch::tensor({1}, torch::kInt64);
-  EXPECT_TRUE(
-      torch::equal(rec_model->pooler(output.hidden_states, selected_idxes),
-                   torch::tensor({52.0f})));
-  EXPECT_TRUE(
-      torch::equal(rec_model->logits(output.hidden_states, selected_idxes),
-                   torch::tensor({78.0f})));
-}
 
 nlohmann::json speculators_eagle3_config() {
   return nlohmann::json{
@@ -302,96 +216,7 @@ TEST(HFModelLoaderTest, KeepLegacyFp8ConfigUnchanged) {
   EXPECT_FALSE(quant_args.activation_dynamic());
 }
 
-TEST(HFModelLoaderTest, RegisterRecFactoryAcceptsRecModelReturnType) {
-  const std::string factory_name = "rec_model_factory_contract_test";
-  RecModelFactory unregistered_factory =
-      ModelRegistry::get_rec_model_factory(factory_name);
-  EXPECT_FALSE(static_cast<bool>(unregistered_factory));
-
-  ModelRegistry::register_rec_model_factory(
-      factory_name,
-      [](const ModelContext& context) -> std::unique_ptr<RecModel> {
-        UNUSED_PARAMETER(context);
-        return nullptr;
-      });
-
-  RecModelFactory factory = ModelRegistry::get_rec_model_factory(factory_name);
-  EXPECT_TRUE(static_cast<bool>(factory));
-}
-
-TEST(HFModelLoaderTest, RecFactoryCreatesCausalRecModel) {
-  EXPECT_EQ(
-      ModelRegistry::get_model_backend("rec_factory_causal_contract_test"),
-      "rec");
-  expect_rec_factory_contract("rec_factory_causal_contract_test",
-                              RecModelKind::kLlmRec);
-}
-
-TEST(HFModelLoaderTest, RecFactoryCreatesGenericRecModel) {
-  EXPECT_EQ(
-      ModelRegistry::get_model_backend("rec_factory_generic_contract_test"),
-      "rec");
-  expect_rec_factory_contract("rec_factory_generic_contract_test",
-                              RecModelKind::kOneRec);
-}
-
-TEST(HFModelLoaderTest, RecFactoryPreservesExistingLlmBackend) {
-  const std::string name = "rec_factory_after_llm_backend_test";
-  ModelRegistry::register_causallm_factory(
-      name, [](const ModelContext& /*context*/) -> std::unique_ptr<CausalLM> {
-        return nullptr;
-      });
-  ModelRegistry::register_rec_model_factory(
-      name,
-      ModelRegistry::get_rec_model_factory("rec_factory_causal_contract_test"));
-
-  EXPECT_EQ(ModelRegistry::get_model_backend(name), "llm");
-  EXPECT_TRUE(static_cast<bool>(ModelRegistry::get_causallm_factory(name)));
-  expect_rec_factory_contract(name, RecModelKind::kLlmRec);
-}
-
-TEST(HFModelLoaderTest, LlmFactoryOverridesRecDefaultBackend) {
-  const std::string name = "llm_factory_after_rec_backend_test";
-  ModelRegistry::register_rec_model_factory(
-      name,
-      ModelRegistry::get_rec_model_factory("rec_factory_causal_contract_test"));
-  EXPECT_EQ(ModelRegistry::get_model_backend(name), "rec");
-  ModelRegistry::register_causallm_factory(
-      name, [](const ModelContext& /*context*/) -> std::unique_ptr<CausalLM> {
-        return nullptr;
-      });
-
-  EXPECT_EQ(ModelRegistry::get_model_backend(name), "llm");
-  EXPECT_TRUE(static_cast<bool>(ModelRegistry::get_causallm_factory(name)));
-  expect_rec_factory_contract(name, RecModelKind::kLlmRec);
-}
-
-TEST(HFModelLoaderTest, RecFactoryPreservesExplicitBackend) {
-  const std::string name = "rec_factory_explicit_backend_test";
-  ModelRegistry::register_model_backend(name, "vlm");
-  ModelRegistry::register_rec_model_factory(
-      name,
-      ModelRegistry::get_rec_model_factory("rec_factory_causal_contract_test"));
-
-  EXPECT_EQ(ModelRegistry::get_model_backend(name), "vlm");
-  expect_rec_factory_contract(name, RecModelKind::kLlmRec);
-}
-
 #if !defined(USE_MUSA)
-TEST(HFModelLoaderTest, QwenRetainsLlmBackendWithRecFactory) {
-#if defined(USE_NPU)
-  const std::string names[] = {
-      "qwen2_atb", "qwen3_atb", "qwen3_moe_atb", "qwen3", "qwen3_moe"};
-#else
-  const std::string names[] = {"qwen2", "qwen3", "qwen3_moe"};
-#endif
-  for (const std::string& name : names) {
-    SCOPED_TRACE(name);
-    EXPECT_EQ(ModelRegistry::get_model_backend(name), "llm");
-    EXPECT_TRUE(static_cast<bool>(ModelRegistry::get_causallm_factory(name)));
-    EXPECT_TRUE(static_cast<bool>(ModelRegistry::get_rec_model_factory(name)));
-  }
-}
 #endif
 
 #if defined(USE_NPU)
@@ -741,9 +566,6 @@ TEST(HFModelLoaderTest, Qwen3DSparkFieldsFromTorchConfig) {
 
 TEST(HFModelLoaderTest, Qwen3DSparkPreservesSlidingWindowVisibility) {
   std::vector<std::string> model_types = {"qwen3"};
-#if defined(USE_NPU)
-  model_types.emplace_back("qwen3_atb");
-#endif
   for (const std::string& model_type : model_types) {
     ModelArgsLoader loader = ModelRegistry::get_model_args_loader(model_type);
     ASSERT_NE(loader, nullptr);
@@ -798,7 +620,7 @@ TEST(HFModelLoaderTest, Qwen38DSparkPreservesYarnGeometry) {
 }
 
 TEST(HFModelLoaderTest, Qwen3DFlash2AcceptsArrayEosTokenIds) {
-  for (const char* model_name : {"qwen3", "qwen3_atb"}) {
+  for (const char* model_name : {"qwen3"}) {
     auto loader = ModelRegistry::get_model_args_loader(model_name);
     ASSERT_NE(loader, nullptr);
 

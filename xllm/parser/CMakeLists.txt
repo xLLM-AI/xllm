@@ -13,6 +13,7 @@ cc_library(
     reasoning_parser.cpp
     detector_registry.cpp
   DEPS
+    proto::xllm_proto
     absl::strings
     glog::glog
 )

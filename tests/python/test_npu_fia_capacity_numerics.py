@@ -38,19 +38,14 @@ def _graph_owners() -> list[object]:
     return []
 
 
-@pytest.mark.parametrize("prepared", [False, True], ids=["ordinary", "prepared"])
 @pytest.mark.parametrize("rows", [2, 8], ids=["two-rows", "eight-expanded-rows"])
 @torch.inference_mode()
-def test_fia_capacity_graphs_preserve_full_context_across_tiers(
-    prepared: bool, rows: int, _graph_owners: list[object]
-) -> None:
+def test_fia_capacity_graphs_preserve_full_context_across_tiers(rows: int, _graph_owners: list[object]) -> None:
     torch.npu.set_device(0)
     task_stream = torch.npu.Stream(device=torch.device("npu:0"))
     task_stream.wait_stream(torch.npu.current_stream())
-    # Native Slot warmup captures on its non-default task stream. Prepared
-    # graphs deliberately borrow that caller stream rather than owning one.
     with torch.npu.stream(task_stream):
-        _assert_fia_capacity_graphs(prepared, rows, _graph_owners)
+        _assert_fia_capacity_graphs(rows, _graph_owners)
     torch.npu.current_stream().wait_stream(task_stream)
     torch.npu.synchronize()
 
@@ -61,17 +56,16 @@ def test_padded_device_length_graph_preserves_full_context(_graph_owners: list[o
     task_stream = torch.npu.Stream(device=torch.device("npu:0"))
     task_stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(task_stream):
-        _assert_fia_capacity_graphs(False, 3, _graph_owners, padded=True)
+        _assert_fia_capacity_graphs(3, _graph_owners, padded=True)
     torch.npu.current_stream().wait_stream(task_stream)
     torch.npu.synchronize()
 
 
-def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[object], *, padded: bool = False) -> None:
+def _assert_fia_capacity_graphs(rows: int, graph_owners: list[object], *, padded: bool = False) -> None:
     from xllm.python.attention.backend import LayerCache
     from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
     from xllm.python.model_executor.forward_context import get_forward_context
     from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
-    from xllm.python.model_executor.runners.prepared_acl_graph import PreparedAclGraphRunner
 
     device = torch.device("npu:0")
     page_size, pages, heads, dimension = 128, 65, 2, 64
@@ -132,27 +126,19 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
         expanded_decode_metadata=None,
     )
     metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
-    runner = (
-        PreparedAclGraphRunner(AttentionProbe(), backend, device, rows, device_kv_lengths=True)
-        if prepared
-        else DecodeAclGraphRunner(
-            AttentionProbe(),
-            backend,
-            device,
-            graph_rows,
-            8192,
-            device_kv_lengths=True,
-            enable_graph_mode_decode_no_padding=not padded,
-        )
+    runner = DecodeAclGraphRunner(
+        AttentionProbe(),
+        backend,
+        device,
+        graph_rows,
+        8192,
+        device_kv_lengths=True,
+        enable_graph_mode_decode_no_padding=not padded,
     )
     runner.bind_layer_caches([cache])
     graph_owners.append(runner)
-    if prepared:
-        runner.warmup_prepared(tokens, positions, metadata)
-        entries = runner._prepared_graphs
-    else:
-        runner.warmup(tokens, positions, metadata, is_graph_warmup=True)
-        entries = runner._graphs
+    runner.warmup(tokens, positions, metadata, is_graph_warmup=True)
+    entries = runner._graphs
     torch.npu.synchronize()
 
     by_capacity = {entry.kv_capacity_pages: entry for entry in entries.values()}
@@ -161,8 +147,8 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
     addresses = {capacity: entry.static_metadata.block_table.data_ptr() for capacity, entry in by_capacity.items()}
     assert len(set(addresses.values())) == 3
     # Only a runner that shares one scratch allocation across its entries can
-    # afford the bounded FIA workspace; prepared entries keep the plain call.
-    expected_state = set() if prepared or padded else {rows}
+    # afford the bounded FIA workspace.
+    expected_state = set() if padded else {rows}
     for capacity, entry in by_capacity.items():
         assert set(entry.execution_state.paged_attention) == expected_state
         assert entry.static_metadata.block_table.shape == (graph_rows, capacity)
@@ -206,7 +192,7 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
             assert not torch.allclose(expected_tensor, torch.stack(truncated), rtol=0.01, atol=0.01)
         if live != capacity * page_size:
             assert not torch.allclose(expected_tensor, torch.stack(unmasked), rtol=0.01, atol=0.01)
-        if not prepared and not padded:
+        if not padded:
             # Replay prepares a fresh Slot view, so the captured FIA must read
             # this step's Host bound instead of the whole capacity tier.
             assert by_capacity[capacity].execution_state.paged_attention[rows].kv == [host_bound] * rows
@@ -214,86 +200,4 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
         torch.testing.assert_close(compact[:rows].cpu(), current_table[:, :capacity])
         assert compact.data_ptr() == addresses[capacity]
         assert len(entries) == 3, "crossing or returning to a tier must not capture at runtime"
-    torch.npu.synchronize()
-
-
-@pytest.mark.parametrize("window", [0, 2048], ids=["full-context", "sliding-window"])
-@torch.inference_mode()
-def test_prewarmed_block_fia_preserves_exact_device_lengths_and_window(
-    window: int, _graph_owners: list[object]
-) -> None:
-    from xllm.python.attention.backend import LayerCache
-    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
-    from xllm.python.model_executor.forward_context import get_forward_context
-    from xllm.python.model_executor.runners.acl_graph import StaticGraphAttentionMetadata
-    from xllm.python.model_executor.runners.prepared_acl_graph import PreparedAclGraphRunner
-
-    device = torch.device("npu:0")
-    rows, width, pages, page_size, dimension = 2, 8, 65, 128, 64
-    context = pages * page_size
-    generator = torch.Generator().manual_seed(4097)
-    table_host = torch.randperm(rows * pages, generator=generator).view(rows, pages).to(torch.int32)
-    key = torch.zeros(rows * pages, page_size, 1, dimension, device=device, dtype=torch.bfloat16)
-    value_host = torch.empty(rows * pages, page_size, 1, dimension, dtype=torch.bfloat16)
-    for row in range(rows):
-        sequence = torch.arange(context).float().div(128).add(row * 64)
-        for page in range(pages):
-            value_host[int(table_host[row, page]), :, 0] = sequence[page * page_size : (page + 1) * page_size, None]
-    value = value_host.to(device)
-    query = torch.zeros(rows * width, 1, dimension, device=device, dtype=torch.bfloat16)
-    backend = NpuPagedAttentionBackend(1, 1, dimension, dimension**-0.5, window, False, device, torch.bfloat16)
-    backend.bind_kv_caches([LayerCache(key=key, value=value)])
-    layer = SimpleNamespace(
-        causal=False,
-        fia_use_attention_mask=bool(window),
-        fia_sparse_mode=4 if window else 0,
-        fia_pre_tokens=window - 1 if window else 2147483647,
-        fia_next_tokens=width - 1,
-    )
-
-    class AttentionProbe(torch.nn.Module):
-        def forward(self, tokens: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-            metadata = get_forward_context().metadata
-            return backend._prefill(query, query, query, key, value, metadata, tokens.numel(), layer)
-
-    tokens = torch.zeros(rows * width, dtype=torch.int32, device=device)
-    positions = torch.zeros_like(tokens)
-    metadata = StaticGraphAttentionMetadata(
-        slot_mapping=torch.full_like(tokens, -1),
-        paged_kv_indptr=None,
-        paged_kv_indices=None,
-        paged_kv_last_page_len=None,
-        block_table=table_host.to(device),
-        q_seq_lens=torch.full((rows,), width, dtype=torch.int32),
-        q_cu_seq_lens=torch.arange(width, (rows + 1) * width, width, dtype=torch.int32, device=device),
-        kv_seq_lens=torch.full((rows,), width, dtype=torch.int32, device=device),
-        q_cu_seq_lens_host_values=[width, width * 2],
-        kv_seq_lens_host_values=[width] * rows,
-        is_chunked_prefill=True,
-    )
-    runner = PreparedAclGraphRunner(
-        AttentionProbe(), backend, device, rows * width, block_draft=True, block_draft_graph_warmup_max_kv_len=0
-    )
-    _graph_owners.append(runner)
-    stream = torch.npu.Stream(device=device)
-    stream.wait_stream(torch.npu.current_stream(device))
-    with torch.npu.stream(stream):
-        metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
-        runner.warmup_prepared(tokens, positions, metadata, pre_capture_kv_buckets=True)
-        assert [entry.kv_capacity_pages for entry in runner._prepared_graphs.values()] == [65, 64, 32]
-        for bound, live in ((4096, 4032), (8192, 4097), (8320, 8193), (4096, 512), (8320, 8200)):
-            metadata.kv_seq_lens_host_values[:] = [bound] * rows
-            metadata.kv_seq_lens.fill_(live)
-            output = runner.execute_block(tokens, positions, metadata).clone()
-            torch.npu.synchronize()
-            expected = []
-            for row in range(rows):
-                sequence = value_host[table_host[row].long(), :, 0].reshape(context, dimension).float()
-                for column in range(width):
-                    query_position = live - width + column
-                    start = max(0, query_position - window + 1) if window else 0
-                    expected.append(sequence[start:live].mean(dim=0))
-            torch.testing.assert_close(output.float().cpu(), torch.stack(expected), rtol=0.01, atol=0.02)
-            assert len(runner._prepared_graphs) == 3, "crossing warmed KV buckets must not capture at runtime"
-    torch.npu.current_stream(device).wait_stream(stream)
     torch.npu.synchronize()

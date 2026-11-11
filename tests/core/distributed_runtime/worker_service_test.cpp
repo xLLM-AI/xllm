@@ -45,8 +45,7 @@ class WorkerServiceOutputTest : public ::testing::Test {
                const ForwardOutput& source,
                ForwardOutput& destination) {
     std::vector<SpeculativeTokenStats> stats;
-    service.collect_llm_output(
-        source, destination, /*cpu_ready_result=*/true, stats);
+    service.collect_llm_output(source, destination, stats);
   }
 
   void collect(const ForwardOutput& source, ForwardOutput& destination) {
@@ -102,24 +101,6 @@ TEST_F(WorkerServiceOutputTest, WaitsForPendingCpuTokenSnapshot) {
   EXPECT_EQ(early_status, std::future_status::timeout);
   ASSERT_TRUE(collected.sample_output.next_tokens.defined());
   EXPECT_EQ(collected.sample_output.next_tokens.item<int64_t>(), 17);
-}
-
-TEST_F(WorkerServiceOutputTest, PreservesRetiredDsparkFeedbackBeforeEncoding) {
-  ForwardOutput source;
-  source.sample_output.next_tokens = torch::tensor({{7, 8}}, torch::kInt32);
-  source.dspark_feedback.confidence = {0.9F, 0.8F, 0.7F, 0.6F, 0.5F};
-  source.dspark_feedback.rounds_since_full_width = {3};
-  ForwardOutput collected;
-  collect(source, collected);
-  EXPECT_EQ(collected.dspark_feedback.confidence,
-            source.dspark_feedback.confidence);
-  EXPECT_EQ(collected.dspark_feedback.rounds_since_full_width,
-            source.dspark_feedback.rounds_since_full_width);
-
-  source.dspark_feedback = {};
-  collect(source, collected);
-  EXPECT_TRUE(collected.dspark_feedback.confidence.empty());
-  EXPECT_TRUE(collected.dspark_feedback.rounds_since_full_width.empty());
 }
 
 TEST(WorkerResidencyStateTest, RejectsUninitializedAndInvalidTransitions) {
@@ -439,15 +420,13 @@ void expect_rpc_rejection(runtime::Options options,
 }
 
 void make_packed_inputs(
-    std::array<proto::PackedForwardInput, 4>& packed_inputs) {
+    std::array<proto::PackedForwardInput, 3>& packed_inputs) {
   LlmForwardInput llm_input;
   VlmForwardInput vlm_input;
-  RecForwardInput rec_input;
   DiTForwardInput dit_input;
   ASSERT_TRUE(llm_input.to_packed_proto(&packed_inputs[0]));
   ASSERT_TRUE(vlm_input.to_packed_proto(&packed_inputs[1]));
-  ASSERT_TRUE(rec_input.to_packed_proto(&packed_inputs[2]));
-  ASSERT_TRUE(dit_input.to_packed_proto(&packed_inputs[3]));
+  ASSERT_TRUE(dit_input.to_packed_proto(&packed_inputs[2]));
 }
 
 template <typename Request, typename Response>
@@ -470,7 +449,7 @@ void expect_execute_rejections(const std::string& backend,
                        rpc,
                        "input domain, schema, or layout");
 
-  std::array<proto::PackedForwardInput, 4> packed_inputs;
+  std::array<proto::PackedForwardInput, 3> packed_inputs;
   ASSERT_NO_FATAL_FAILURE(make_packed_inputs(packed_inputs));
   for (size_t index = 0; index < packed_inputs.size(); ++index) {
     if (index == input_index) {
@@ -513,16 +492,9 @@ TEST(WorkerServiceModelRpcTest,
 }
 
 TEST(WorkerServiceModelRpcTest,
-     ExecuteRECRejectsInvalidRequestsBeforeExecution) {
-  expect_execute_rejections("rec",
-                            /*input_index=*/2,
-                            &WorkerService::ExecuteRECModel);
-}
-
-TEST(WorkerServiceModelRpcTest,
      ExecuteDITRejectsInvalidRequestsBeforeExecution) {
   expect_execute_rejections("dit",
-                            /*input_index=*/3,
+                            /*input_index=*/2,
                             &WorkerService::ExecuteDITModel);
 }
 
@@ -644,7 +616,7 @@ TEST_F(WorkerServiceInputLifetimeTest,
 }
 
 TEST(WorkerServiceShutdownTest, JoinsIdleShmPollingThreadForEveryBackend) {
-  for (const std::string& backend : {"llm", "vlm", "rec", "dit"}) {
+  for (const std::string& backend : {"llm", "vlm", "dit"}) {
     SCOPED_TRACE(backend);
     runtime::Options options;
     options.backend(backend);

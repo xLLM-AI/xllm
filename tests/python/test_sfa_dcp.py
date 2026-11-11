@@ -97,9 +97,10 @@ def test_copy_into_execution_buffer_reuses_graph_storage() -> None:
 
 def test_copy_into_execution_buffer_eager_returns_source() -> None:
     source = torch.tensor([1, 2], dtype=torch.int32)
+    assert copy_into_execution_buffer(("DCP_LOCAL_SLOTS", (2,)), source) is source
     with forward_context(_cpu_context(None)):
         out = copy_into_execution_buffer(("DCP_LOCAL_SLOTS", (2,)), source)
-        assert out.data_ptr() == source.data_ptr()
+        assert out is source
 
 
 def test_mla_index_context_uses_expanded_table_and_preserves_cp_context() -> None:

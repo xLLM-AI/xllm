@@ -32,8 +32,6 @@ limitations under the License.
 
 namespace xllm {
 
-class RecSequence;
-
 class SequencesGroup {
  public:
   SequencesGroup(const std::string& prompt,
@@ -50,12 +48,6 @@ class SequencesGroup {
                         const Tokenizer& tokenizer,
                         ThreadPool* thread_pool = nullptr);
 
-  void process_beam_search(bool force_requested_result_size = false);
-
-  bool check_beam_search() {
-    return sequence_params_.sampling_param->beam_width > 1;
-  }
-
   std::vector<std::unique_ptr<Sequence>>& sequences() { return sequences_; }
 
   const std::vector<std::unique_ptr<Sequence>>& sequences() const {
@@ -68,7 +60,7 @@ class SequencesGroup {
     return sequences_[0]->is_chunked_prefill_stage();
   }
 
-  // mark all sequences as finished (used by rec model multi-round decoding)
+  // Mark all sequences as finished.
   void finish();
 
  private:
@@ -78,12 +70,6 @@ class SequencesGroup {
                                  const Tokenizer& tokenizer,
                                  ThreadPool* thread_pool = nullptr);
 
-  // Generate output for multi-round beam search
-  void generate_multi_round_output(std::vector<SequenceOutput>& outputs,
-                                   const Tokenizer& tokenizer,
-                                   const RecSequence& base);
-
- private:
   const std::string& prompt_;                  // ref from request
   const std::vector<int32_t>& prompt_tokens_;  // ref from request
   const torch::Tensor& input_embedding_;       // ref from request

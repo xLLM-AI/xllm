@@ -55,12 +55,10 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
-| `enable_manual_loader` | `bool` | `false` | 将 decoder layer 权重固定在 host 内存并使用异步 H2D 传输；`enable_rolling_load` 依赖该参数，`enable_vmm_weights` 也会隐式启用该能力。 |
-| `enable_vmm_weights` | `bool` | `false` | 为模型权重启用 VMM，并隐式启用 manual loader。与 `enable_vmm_kvcache` 独立，仅 NPU 支持。 |
-| `enable_rolling_load` | `bool` | `false` | 启用 rolling weight load：HBM 中仅保留 N 个 decoder layer 权重槽位，并按层即时加载；需要 `enable_manual_loader=true`，仅 NPU 支持。 |
+| `enable_vmm_weights` | `bool` | `false` | 为模型权重启用 VMM。与 `enable_vmm_kvcache` 独立，仅 NPU 支持。 |
+| `enable_rolling_load` | `bool` | `false` | 使用固定数量的 HBM 槽位按层加载 DiT 权重，仅 NPU 支持。 |
 | `rolling_load_num_cached_layers` | `int32` | `2` | `enable_rolling_load=true` 时 HBM 中保留的 decoder layer 权重槽位数量。 |
 | `rolling_load_num_rolling_slots` | `int32` | `-1` | decoder rolling load 使用的 rolling 槽位数量；固定槽位数为 `rolling_load_num_cached_layers - rolling_load_num_rolling_slots`。`-1` 表示自动设置为 `min(2, preload_count)`，取值需在 `[-1, rolling_load_num_cached_layers]` 范围内。 |
-| `enable_prefetch_weight` | `bool` | `false` | 是否启用权重预取，仅适用于 Qwen3-dense 模型；gateup 权重默认预取比例为 40%，可通过环境变量 `PREFETCH_COEFFOCIENT` 调整。 |
 
 ## KVCacheConfig
 
@@ -77,12 +75,11 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `max_linear_state_cache_slots` | `int64` | `0` | linear-attention state cache 的最大活跃槽位数；`0` 表示根据可用 KV Cache 预算自动推导容量。 |
 | `xxh3_128bits_seed` | `uint32` | `1024` | XXH3 128-bit 哈希的默认 seed。 |
 | `enable_vmm_kvcache` | `bool` | `false` | 为 KV Cache 启用 VMM，与 `enable_vmm_weights` 独立；`false` 使用原有物理 KV Cache 实现，仅 NPU 支持。 |
+| `enable_shared_kv_cache` | `bool` | `false` | Full KV blocks 与 Linear state extents 共享固定物理 arena。原生 NPU Torch Qwen hybrid 路径仍限普通 eager；Python 路径沿用当前独立 target/draft 执行流程，支持 eager/chunked prefill、ACL decode/verify 和普通 Qwen3.5/3.8 MTP。当前实现范围及验收要求见下文。 |
 | `vmm_elastic` | `bool` | `true` | 任一 VMM 开关启用后，按需扩张活动逻辑槽位及物理页，并释放空闲页的物理内存；`false` 使用固定驻留池。 |
 | `vmm_memory_reserve_bytes` | `int64` | `0` | 弹性虚拟内存增长时额外保留的设备空闲显存，单位 byte，须非负；在运行时执行预留空间之外叠加生效。 |
 | `vmm_startup_timeout_ms` | `int32` | `120000` | VMM 启动时，master 等待节点注册、各非 master 等待物理池就绪分别使用的超时，单位毫秒，须为正数。独立于单次 RPC 超时，每个等待阶段单独计时。 |
 | `phy_page_granularity_size` | `int64` | `2097152` | 单个物理页的粒度大小，单位 byte，默认 2 MiB；用于连续 KV Cache。 |
-
-VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内存](/zh/features/virtual_memory/)。
 
 ### kv_events_config
 
@@ -124,15 +121,6 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `store_local_hostname` | `string` | `""` | KV Cache Store client 的本地主机名。 |
 | `enable_control_h2d_block_num` | `bool` | `false` | 是否控制 H2D 拷贝的 block 数。 |
 
-## BeamSearchConfig
-
-| 参数名称 | 类型 | 默认值 | 参数含义 |
-|:---------|:-----|:-------|:---------|
-| `enable_beam_search_kernel` | `bool` | `false` | 是否启用 beam search kernel。 |
-| `beam_width` | `int32` | `1` | Beam search 的 beam width。 |
-| `enable_block_copy_kernel` | `bool` | `true`（NPU/CUDA/MUSA/DCU）；`false`（其他后端） | 是否在支持的后端使用 block copy kernel。 |
-| `enable_topk_sorted` | `bool` | `true` | 是否启用 top-k 结果排序输出。 |
-
 ## SchedulerConfig
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
@@ -168,7 +156,6 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `enable_mm_encoder_dp` | `bool` | `false` | 是否为多模态模型启用 encoder data parallel。 |
 | `enable_multi_stream_parallel` | `bool` | `false` | 是否在 prefill 阶段通过双 stream 和双 micro batch 启用计算通信并行；详见 [多流并行](/zh/features/multi_streams/)。 |
 | `micro_batch_num` | `int32` | `1` | 多流并行使用的 micro batch 数。 |
-| `enable_dp_balance` | `bool` | `false` | 是否启用 DP 负载均衡；启用后会 shuffle 单个 DP batch 内的 sequences。 |
 
 ## EPLBConfig
 
@@ -215,111 +202,9 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `num_speculative_tokens` | `int32` | `0` | 每轮 speculative decoding 生成的 speculative token 数。 |
 | `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding 算法，支持 `MTP`、`Eagle3`、`Suffix`、`DFlash`、`DFlash2`（仅 NPU）、`DSpark`。 |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Suffix speculative decoding 的后缀树最大深度。 |
-| `speculative_suffix_max_spec_factor` | `double` | `1.0` | Suffix speculation 相对于匹配长度的最大 token 系数。 |
-| `speculative_suffix_max_spec_offset` | `double` | `0.0` | Suffix speculation 的最大 token 加性偏移。 |
-| `speculative_suffix_min_token_prob` | `double` | `0.1` | Suffix speculation 使用的最小 token 概率。 |
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Suffix speculation 全局最大缓存请求数；`-1` 表示不限，`0` 表示禁用。 |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | 是否使用 tree-based suffix speculation，而不是 path speculation。 |
 | `enable_probabilistic_draft` | `bool` | false | draft 从自身分布采样 proposal（携带 q 供拒绝采样）。默认为 greedy argmax。仅 `MTP`、`DSpark`、`DFlash2`、`Eagle3` 支持。 |
-| `enable_atb_spec_kernel` | `bool` | `false` | 是否使用 ATB speculative kernel。 |
-| `enable_adaptive_target_verify` | `bool` | `false` | 根据历史 confidence 和完整轮成本，调整已经生成的 draft 候选中交给 target 验证的数量，不改变 draft 生成宽度。支持 Python ACL graph、task pipeline 下的 DSpark 和 MTP greedy Draft5/7。MTP 使用选中 token 的 logits 概率，要求普通 graph 和 DP=CP=1；两者普通 graph 均支持 greedy、随机或混合 target，draft 必须为 greedy；DSpark unified graph 要求 greedy target。见[自适应投机推理](/zh/features/adaptive_speculation/)。 |
-| `enable_adaptive_draft_step` | `bool` | `false` | 调整一次 target 验证前实际执行的顺序 draft forward 步数，以最大化预测的完整轮吞吐。适合自回归生成候选的路径，当前接入 MTP；`num_speculative_tokens` 是最大步数（1–64），而非当前实际步数。要求 Python GLM DSA、普通预热 ACL graph、异步 task pipeline、DP=CP=1；不支持 unified MTP 和 PD 分离。见[自适应投机推理](/zh/features/adaptive_speculation/)。 |
-| `adaptive_draft_step_config` | `string` | `""` | 可选 JSON 配置文件的路径：`policy` 配置接受率窗口、更新间隔与切换门槛，`calibration` 配置启动采样与拟合；不是成本表输入。不传时使用默认值并打印日志，仍在就绪前实测当前 MTP 服务各候选步数的完整轮成本，复用 SPS/二维加性拟合代码，不复用 DSpark 的实测值。见[自适应投机推理](/zh/features/adaptive_speculation/)及下文示例。 |
-| `adaptive_target_verify_min_gain` | `double` | `0.0` | DSpark 改变上一个有效验证预算时，要求的最小预测相对吞吐收益。 |
-| `adaptive_target_verify_calibration` | `string` | `""` | 可选的启动标定 JSON 文件；为空时使用内置默认配置，两种情况都会打印实际生效值。不能与已保存成本表输入同时指定。 |
-| `adaptive_target_verify_cost_table` | `string` | `""` | 加载兼容的已保存完整步成本表，跳过启动采样和拟合；支持一维 SPS 和二维加性模型，仍需 graph warmup。 |
-| `adaptive_target_verify_cost_table_output` | `string` | `""` | 可选的启动标定结果输出文件，保存为带版本和配置身份的 bundle；为空则只保留在内存，绝不覆盖已有文件。加载已保存表时不能指定输出。 |
-
-### 吞吐感知的 draft 步数选择
-
-`enable_adaptive_draft_step` 调整 draft 模型实际执行的步数，
-`enable_adaptive_target_verify` 则在 target 验证前裁剪候选。
-两个开关按执行能力命名，不绑定算法名称。共享的 Host 成本模型、预算规划、
-启动标定和稳态窗口采集统一放在 `core/framework/speculative/adaptive/`，
-使用 `Spec*` 类型；步数选择器复用这套基础设施，但独立测量自身的成本。
-两者分别控制不同阶段：当前前者支持 MTP，后者支持 DSpark Draft5/7，
-暂不支持同时开启。
-
-原来的 `enable_adaptive_mtp`、`adaptive_mtp_config`、
-`enable_adaptive_spec_prune` 分别改为 `enable_adaptive_draft_step`、
-`adaptive_draft_step_config`、`enable_adaptive_target_verify`。
-命令行和 JSON 配置均需更新；旧 JSON 字段会明确报错并提示迁移，
-不会静默忽略而关闭功能。
-
-target 验证相关配置也统一按能力命名：
-
-| 原名称 | 新名称 |
-| --- | --- |
-| `adaptive_dspark_calibration` | `adaptive_target_verify_calibration` |
-| `adaptive_dspark_cost_table` | `adaptive_target_verify_cost_table` |
-| `adaptive_dspark_cost_table_output` | `adaptive_target_verify_cost_table_output` |
-| `adaptive_speculative_min_gain` | `adaptive_target_verify_min_gain` |
-
-命令行参数和 JSON 字段需一起迁移。旧 flag 不再注册，旧 JSON 字段会明确提示新名称。
-已保存成本表的 JSON 格式及其算法、后端兼容身份保持不变。
-`SpecCostModel` 提供一维 SPS／二维加性成本，`SpecCostProfileStore` 按物理请求桶
-与 KV 覆盖范围保存成本，`VerifyBudgetPlanner` 负责验证预算规划。
-具体 draft 的 token 布局和 kernel 宽度限制保留在 runtime 接入层，不放进共享成本存储。
-
-启动参数示例：
-
-```bash
---model_impl=python --speculative_algorithm=MTP \
---num_speculative_tokens=3 --enable_task_pipeline=true \
---enable_graph=true --enable_unified_mtp_graph=false \
---enable_schedule_overlap=true --enable_adaptive_draft_step=true \
---adaptive_draft_step_config=mtp_profile.json
-```
-
-另外指定正常的 target/draft 模型路径和并行参数。可选 JSON 只指定采样方式，
-不提供成本数值。不传 `adaptive_draft_step_config` 时使用默认策略与默认采样配置，
-两种情况都会打印实际生效值。以下示例要求图覆盖请求桶 1、2、4、8：
-
-```json
-{
-  "version": 1,
-  "policy": {
-    "window_size": 20, "update_interval": 5,
-    "switch_min_gain": 0.05
-  },
-  "calibration": {
-    "model": "additive", "request_buckets": [1, 2, 4, 8],
-    "contexts": [{"prefill_tokens": 2048, "min_kv_length": 1, "max_kv_length": 4096}],
-    "warmup_steps": 8, "window_steps": 32,
-    "windows_per_point": 3, "token_seed": 1
-  }
-}
-```
-
-启动时复用 DSpark 的内部请求驱动和稳态结果栅栏窗口，实际执行 MTP
-prefill/decode，无需重启服务或构造 HTTP 客户端。每个候选步数独立测量、拟合
-SPS（`model: "sps"`）或二维加性模型。二维轴分别是第一步 draft 的物理请求
-容量和 target 的 padding 后行数；同时测量合法的更大 target 桶以区分两个轴。
-成本包含逐步 draft、target 验证、采样、prefix refresh 和正常结果回收。
-拟合结果保留在 engine 内存，日志记录实际生效配置与标定进度；不要求现成成本
-JSON，更不套用 DSpark 的实测数值。默认使用二维加性模型、实际捕获的请求桶（最多 128）、
-最多 2048 的 prefill、最多 4096 的 KV，并预留最坏接受长度的空间。
-显式配置必须落在真实捕获的图和 KV 容量内；覆盖不足时启动失败，不猜测成本。
-遍历候选步数和图桶会增加启动时间，不引入 NPU Event 测时。
-
-engine 从正常回收的结果统计逐位置前缀接受概率
-`p[j] = P(接受的 draft 前缀长度 > j)`，选择使
-`B * (1 + sum(p[:步数])) / cost_ms` 最大的步数。每个回收的验证 batch
-向各位置窗口记录一次“该 batch 中接受完整前缀的请求比例”，不同 batch
-等权，不因请求数较多而增加权重。默认窗口为最近 20 个已完成 batch，
-在各 batch size 间共享。当前深度的所有位置都填满窗口后，每完成 5 个 batch
-重新评分，切换要求超过 5% 的预测收益。未验证的位置不记作拒绝。
-降步时清空更深位置的窗口；缺少历史的位置按已知前缀概率做几何衰减外推，
-只有一个已知位置时延续该概率。不再周期性强制运行最大深度。
-旧策略字段 `min_observations`、`exploration_interval` 不再接受，
-改用 `window_size` 与 `update_interval` 配置。
-
-不新增 confidence D2H 或 TP 决策广播；异步模式使用已有结果回收中的历史，
-不修改已提交 task。CPU 侧记录各在途 batch 的统计版本，防止降步前的旧结果
-重新填回已清空的深层窗口。冷启动、成本覆盖不足或超出已预热 graph
-请求容量时，按明确策略使用配置的最大步数，启动时打印实际生效配置。
-启动预热覆盖各候选步数，Slot 保留最大容量的存储，不以在线重新捕获实现切换。
-开关默认关闭，不影响默认的固定步数 MTP。
 
 ## ProfileConfig
 
@@ -343,7 +228,6 @@ engine 从正常回收的结果统计逐位置前缀接受概率
 |:---------|:-----|:-------|:---------|
 | `extension_impl` | `string` | `""` | 为模型、执行器等注册组件选择原生扩展实现族；空值保留原有选择方式。所选实现族必须已注册；该实现族未注册的组件继续使用原有选择方式。 |
 | `enable_graph` | `bool` | `false` | 是否在 decode 阶段启用图执行以降低 kernel launch 开销和设备空闲时间；支持 CUDA Graph、ACL Graph（NPU）、MLU Graph 和 DCU Graph，详见 [图执行](/zh/features/graph_mode/)。 |
-| `enable_unified_mtp_graph` | `bool` | `false` | 将支持的 NPU speculative decode 请求交由统一 Python graph 执行。支持 GLM DSA MTP，以及以 GLM DSA 为目标模型的 `DFlash`/`DFlash2`/`DSpark`。要求 `enable_graph=true`；`DFlash`/`DFlash2`/`DSpark` 还要求 `enable_task_pipeline=true`。关闭此开关不影响普通模型的图执行。 |
 | `enable_graph_double_buffer` | `bool` | `true` | 是否为 NPU schedule-overlap decode 启用双缓冲 ACL graph 持久化参数与 graph 实例。 |
 | `enable_graph_mode_decode_no_padding` | `bool` | `false` | decode 阶段是否按实际 `num_tokens` 捕获 graph，而不是按 padding 后 shape 捕获。 |
 | `enable_prefill_piecewise_graph` | `bool` | `false` | 是否在 prefill 阶段启用 piecewise CUDA graph；attention 使用 eager 模式，其他操作捕获进 CUDA graph。 |
@@ -363,14 +247,8 @@ engine 从正常回收的结果统计逐位置前缀接受概率
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
-| `enable_customize_mla_kernel` | `bool` | `false` | 是否启用自定义 MLA kernel。 |
-| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel 后端，支持 `AUTO`、`ATB`、`TORCH`、`XLITE`。 |
-| `enable_intralayer_addnorm` | `bool` | `false` | 是否启用 fused intralayer addnorm ops。 |
+| `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel 后端，支持 `AUTO`、`TORCH`。 |
 | `enable_fused_mc2` | `int32` | `-1` | NPU 的 Fused MC2 模式；`-1` 使用自动默认值，`0` 禁用 fused MC2，正值启用 dense matmul-allreduce，`1` 对 MoE 使用 DispatchFFNCombine，`2` 对 MoE 使用 DispatchGmmCombineDecode。 |
-| `enable_interlayer_addnorm` | `bool` | `false` | 是否启用 fused interlayer addnorm ops。 |
-| `enable_split_rmsnorm_rope` | `bool` | `false` | 是否启用 fused split rmsnorm rope ops。 |
-| `enable_aclnn_matmul` | `bool` | `false` | 是否为支持的 NPU ATB layer 启用 ACLNN matmul 后端。 |
-| `enable_aclnn_swiglu` | `bool` | `false` | 是否为支持的 NPU ATB layer 启用 ACLNN SwiGLU 后端。 |
 | `enable_dspark_native_sas` | `bool` | `false` | 启用 NPU DSpark 原生 SparseAttnSharedkv 语义。旧版算子若不接受非空 `ori_sparse_indices`，可能在 tiling 阶段终止进程；请保持关闭以使用 q_len=1 兼容模式。 |
 
 ## DiTConfig
@@ -399,20 +277,3 @@ engine 从正常回收的结果统计逐位置前缀接受概率
 | `dit_sparse_attention_sparse_start_step` | `int64` | `0` | 开始使用 sparse attention 的 step 索引；此前的 step 使用 dense attention。 |
 | `dit_sparse_attention_version` | `string` | `"rain_fusion"` | sparse attention 版本：`rain_fusion`（frame-pairing + `aclnnRainFusionAttention`）或 `sparse_attention`（block-decompose + `aclnnBlockSparseAttention`）。 |
 | `dit_sparse_attention_mask_refresh_steps` | `int64` | `1` | 每 N 个 diffusion step 重新计算一次 block sparse mask；`1` 表示每步都算，值越大 mask 复用越久。 |
-
-## RecConfig
-
-| 参数名称 | 类型 | 默认值 | 参数含义 |
-|:---------|:-----|:-------|:---------|
-| `enable_rec_fast_sampler` | `bool` | `true` | 是否为 Rec pipeline 启用 RecSampler fast sampling path。 |
-| `enable_rec_prefill_only` | `bool` | `false` | 是否启用 Rec prefill-only 模式，不分配 decoder self-attention blocks。 |
-| `enable_xattention_one_stage` | `bool` | `false` | 是否在 Rec multi-round 模式下强制使用 xattention one-stage decode。 |
-| `max_decode_rounds` | `int32` | `0` | multi-step decoding 的最大 decode round 数；`0` 表示禁用。 |
-| `enable_constrained_decoding` | `bool` | `false` | 是否启用 constrained decoding，用预定义规则约束输出格式或结构。 |
-| `output_rec_logprobs` | `bool` | `false` | 是否输出 Rec multi-round token-aligned logprobs；启用后缺失的 per-token logprobs 会用最终 beam logprob 填充。 |
-| `enable_convert_tokens_to_item` | `bool` | `false` | 是否在 REC/OneRec response 中将 token ids 转换为 item id。 |
-| `enable_output_sku_logprobs` | `bool` | `false` | 是否输出 REC/OneRec token-aligned logprobs tensor。 |
-| `enable_extended_item_info` | `bool` | `false` | 是否解析并输出 REC extended item info tensors。 |
-| `each_conversion_threshold` | `int32` | `50` | 每个 REC token triplet 最多输出的 item 数。 |
-| `total_conversion_threshold` | `int32` | `1000` | 单个 REC response 最多输出的 item 总数。 |
-| `rec_worker_max_concurrency` | `uint32` | `1` | Rec worker 并行执行并发度；小于等于 `1` 表示禁用并发 Rec worker。 |

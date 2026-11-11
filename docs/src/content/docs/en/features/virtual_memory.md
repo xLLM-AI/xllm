@@ -9,9 +9,9 @@ xLLM can use virtual memory management (VMM) independently for the KV Cache and 
 | Flag | Purpose |
 |:-----|:--------|
 | `enable_vmm_kvcache` | Use VMM for the KV Cache. When disabled, xLLM uses the physical KV Cache implementation. |
-| `enable_vmm_weights` | Use VMM for model weights and implicitly enable the manual loader. |
+| `enable_vmm_weights` | Use VMM for model weights. |
 
-Enable either option on its own, or enable both to share the VMM pool between the KV Cache and model weights. KV-only VMM keeps the configured weight loader and does not imply `enable_manual_loader`. Weight-only VMM keeps the physical KV Cache implementation. Weight VMM currently supports the LLM backend. Model sleep, wakeup and fork require `enable_vmm_weights=true`. Weight-only VMM requires `vmm_elastic=true`; a fixed weight pool would consume memory needed by the physical KV Cache. See the [CLI Reference](/en/cli_reference/) for all flags and defaults.
+Enable either option on its own, or enable both to share the VMM pool between the KV Cache and model weights. Weight-only VMM keeps the physical KV Cache implementation. Weight VMM currently supports the LLM backend. Model sleep, wakeup and fork require `enable_vmm_weights=true`. Weight-only VMM requires `vmm_elastic=true`; a fixed weight pool would consume memory needed by the physical KV Cache. See the [CLI Reference](/en/cli_reference/) for all flags and defaults.
 
 ## Prefix caching with virtual KV Cache
 
@@ -28,8 +28,7 @@ Append these flags to an existing NPU launch command:
 ```bash
 --enable_vmm_kvcache=true \
 --enable_prefix_cache=true \
---host_blocks_factor=2 \
---enable_task_pipeline=false
+--host_blocks_factor=2
 ```
 
 Host capacity is preallocated from the configured device KV tensor capacity multiplied by `host_blocks_factor`, including in elastic mode. Size `max_cache_size` and the factor for available host RAM. This LLM path supports flat KV and MLA+INDEX tensor layouts with `kv_cache_dtype=auto`; VLM, grouped caches, and hybrid linear-attention conv/SSM caches remain unsupported for VMM HostKV offload.
@@ -38,8 +37,6 @@ Host capacity is preallocated from the configured device KV tensor capacity mult
 
 Co-located MTP target and draft models can use `enable_vmm_kvcache=true`. The scheduler maps and releases both caches together, including models whose target and draft KV tensors have different widths. For hybrid attention models, only full-attention KV tensors use VMM; convolution and recurrent states remain resident and are reserved separately from the physical KV page pool.
 
-Use `enable_task_pipeline=false`; the task execution pipeline currently excludes virtual KV Cache.
-
 Append these flags to an existing MTP launch command:
 
 ```bash
@@ -47,8 +44,7 @@ Append these flags to an existing MTP launch command:
 --speculative_algorithm=MTP \
 --num_speculative_tokens=3 \
 --enable_vmm_kvcache=true \
---enable_vmm_weights=false \
---enable_task_pipeline=false
+--enable_vmm_weights=false
 ```
 
 Hybrid linear-state caches and external draft models do not support weight VMM. Embedded Eagle3 drafts and speculative decoding with PD disaggregation are unsupported with virtual KV Cache. Quantized KV Cache remains unsupported with KV VMM.

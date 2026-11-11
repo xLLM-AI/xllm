@@ -75,7 +75,10 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
        (!checkpoint_hash.has_value() && !blocks->back().is_shared()))) {
     return std::vector<Block>{};
   }
-  std::vector<Block> allocated = BlockManagerImpl::allocate(1);
+  const auto& pool = options_.shared_block_pool();
+  std::vector<Block> allocated = pool && pool->uses_slabs()
+                                     ? allocate_with_placement(1, seq)
+                                     : BlockManagerImpl::allocate(1);
   if (allocated.empty()) {
     // Checkpoint retention must not stall a private live slot.
     if (!blocks->empty() && !blocks->back().is_shared()) {

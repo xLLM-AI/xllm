@@ -138,8 +138,6 @@ DEFINE_COUNTER(json_object_mask_cache_misses_total,
                "JSON object mask cache miss count");
 DEFINE_HISTOGRAM(json_object_mask_vocab_scan_latency_microseconds,
                  "JSON object mask vocabulary scan latency in microseconds");
-DEFINE_HISTOGRAM(json_object_mask_row_build_latency_microseconds,
-                 "JSON object CPU mask row build latency in microseconds");
 DEFINE_HISTOGRAM(json_object_mask_batch_build_latency_microseconds,
                  "JSON object CPU mask batch build latency in microseconds");
 DEFINE_HISTOGRAM(json_object_mask_device_copy_latency_microseconds,
@@ -147,25 +145,6 @@ DEFINE_HISTOGRAM(json_object_mask_device_copy_latency_microseconds,
 DEFINE_HISTOGRAM(
     json_object_mask_transfer_submission_latency_microseconds,
     "JSON object non-blocking device copy submission latency in microseconds");
-DEFINE_COUNTER(json_object_mask_build_calls_normal_total,
-               "JSON object normal mask build calls");
-DEFINE_COUNTER(json_object_mask_build_calls_draft_total,
-               "JSON object draft mask build calls");
-DEFINE_COUNTER(json_object_mask_build_calls_target_total,
-               "JSON object target mask build calls");
-DEFINE_COUNTER(json_object_mask_build_rows_normal_total,
-               "JSON object normal mask build rows");
-DEFINE_COUNTER(json_object_mask_build_rows_draft_total,
-               "JSON object draft mask build rows");
-DEFINE_COUNTER(json_object_mask_build_rows_target_total,
-               "JSON object target mask build rows");
-DEFINE_COUNTER(json_object_mask_build_constrained_rows_normal_total,
-               "JSON object constrained rows in normal mask builds");
-DEFINE_COUNTER(json_object_mask_build_constrained_rows_draft_total,
-               "JSON object constrained rows in draft mask builds");
-DEFINE_COUNTER(json_object_mask_build_constrained_rows_target_total,
-               "JSON object constrained rows in target mask builds");
-
 // scheduler metrics
 DEFINE_GAUGE(num_pending_requests, "Number of pending requests in scheduler");
 DEFINE_GAUGE(num_running_requests, "Number of running requests in scheduler");
@@ -261,25 +240,6 @@ DEFINE_MULTI_COUNTER(speculative_num_accepted_tokens_per_pos,
                      "position",
                      "Accepted speculative tokens by zero-based draft "
                      "position");
-DEFINE_HISTOGRAM(speculative_draft_token_d2h_latency_microseconds,
-                 "Latency of draft token host copies in microseconds");
-DEFINE_MULTI_HISTOGRAM(
-    speculative_draft_token_copy_submission_latency_microseconds,
-    "draft_index",
-    "Latency of draft token asynchronous host-copy submission in microseconds");
-DEFINE_MULTI_HISTOGRAM(
-    speculative_draft_token_ready_wait_latency_microseconds,
-    "draft_index",
-    "Latency of draft token host event wait in microseconds");
-DEFINE_MULTI_HISTOGRAM(speculative_draft_token_bulk_read_latency_microseconds,
-                       "draft_index",
-                       "Latency of draft token bulk host read in microseconds");
-DEFINE_MULTI_HISTOGRAM(
-    speculative_draft_token_handoff_latency_microseconds,
-    "draft_index",
-    "Total latency of draft token host handoff in microseconds");
-DEFINE_COUNTER(speculative_draft_token_handoff_fallback_total,
-               "Draft token host handoff fallback count");
 DEFINE_COUNTER(speculative_num_accepted_tokens_constrained_total,
                "Accepted speculative tokens from constrained rows");
 DEFINE_COUNTER(speculative_num_accepted_tokens_plain_total,
@@ -305,25 +265,6 @@ DEFINE_COUNTER(proto_latency_seconds_o2proto,
 DEFINE_COUNTER(prepare_input_latency_seconds,
                "Latency of preparing input in seconds");
 
-// rec engine metrics
-DEFINE_HISTOGRAM(rec_total_latency_microseconds,
-                 "Latency of rec engine in microseconds");
-DEFINE_HISTOGRAM(prepare_input_latency_microseconds,
-                 "Latency of preparing input in microseconds");
-DEFINE_HISTOGRAM(rec_first_token_latency_microseconds,
-                 "Latency of rec first token generation in microseconds");
-DEFINE_HISTOGRAM(rec_second_token_latency_microseconds,
-                 "Latency of rec second token generation in microseconds");
-DEFINE_HISTOGRAM(rec_third_token_latency_microseconds,
-                 "Latency of rec third token generation in microseconds");
-DEFINE_HISTOGRAM(rec_sampling_latency_microseconds,
-                 "Latency of rec sampling in microseconds");
-
-DEFINE_GAUGE(rec_beam_search_width, "rec beam search width");
-
-DEFINE_HISTOGRAM(rec_input_token_num_per_request,
-                 "Histogram of input token number per request in rec engine");
-
 // multi node metrics
 DEFINE_COUNTER(worker_service_latency_seconds,
                "Worker service execution latency in seconds");
@@ -333,17 +274,7 @@ DEFINE_COUNTER(engine_latency_seconds, "Engine execution latency in seconds");
 DEFINE_GAUGE(total_memory_size_in_kilobytes, "Total memory size in kilobytes");
 DEFINE_GAUGE(weight_size_in_kilobytes, "Weight size in kilobytes");
 DEFINE_GAUGE(total_kv_cache_size_in_kilobytes, "KV cache size in kilobytes");
-DEFINE_GAUGE(total_activation_size_in_kilobytes,
-             "Total activation size in kilobytes");
 
 DEFINE_MULTI_HISTOGRAM(active_kv_cache_size_in_kilobytes,
                        "dp_rank",
                        "Active kv cache size in kilobytes per dp rank");
-DEFINE_MULTI_HISTOGRAM(
-    prefill_active_activation_size_in_kilobytes,
-    "dp_rank",
-    "Active activation size in kilobytes per dp rank during prefill phase");
-DEFINE_MULTI_HISTOGRAM(
-    decode_active_activation_size_in_kilobytes,
-    "dp_rank",
-    "Active activation size in kilobytes per dp rank during decode phase");

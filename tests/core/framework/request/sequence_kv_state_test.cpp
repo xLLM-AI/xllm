@@ -61,23 +61,6 @@ TEST(KVCacheStateTest, TransferCursorTracksAndResets) {
   EXPECT_EQ(state.next_transfer_block_idx(), 0u);
 }
 
-TEST(KVCacheStateTest, ResetClearsBeamSourceState) {
-  KVCacheState state;
-  Block block(/*id=*/1, /*allocator=*/nullptr);
-  const std::vector<Block> src_blocks{block};
-  const uint32_t external_ref_count = block.ref_count();
-
-  state.set_src_blocks(src_blocks, /*need_swap=*/true);
-  EXPECT_FALSE(state.src_blocks().empty());
-  EXPECT_TRUE(state.need_swap());
-  EXPECT_EQ(block.ref_count(), external_ref_count + 1);
-
-  state.reset();
-  EXPECT_TRUE(state.src_blocks().empty());
-  EXPECT_FALSE(state.need_swap());
-  EXPECT_EQ(block.ref_count(), external_ref_count);
-}
-
 TEST(KVCacheStateTest, PrefixMatchStateIsIndependentAndMovable) {
   KVCacheState state;
   EXPECT_FALSE(state.prefix_cache_matched());

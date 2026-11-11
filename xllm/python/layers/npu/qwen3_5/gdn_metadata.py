@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import torch
@@ -37,18 +37,34 @@ class GdnMetadata:
 
 @dataclass(frozen=True, slots=True)
 class GdnPrefillMetadata(GdnMetadata):
-    conv_read_indices: torch.Tensor
-    conv_write_indices: torch.Tensor
-    ssm_read_indices: torch.Tensor
-    ssm_write_indices: torch.Tensor
+    # Physical rows per Linear group: a recurrent state owns one shared slot
+    # per group. Ordinary storage has a single group.
+    conv_read_indices: tuple[torch.Tensor, ...]
+    conv_write_indices: tuple[torch.Tensor, ...]
+    ssm_read_indices: tuple[torch.Tensor, ...]
+    ssm_write_indices: tuple[torch.Tensor, ...]
     cu_seqlens: torch.Tensor
     num_matrices: int
+    # Linear group of each state cache, empty for a single group.
+    layer_groups: Mapping[int, int] = field(default_factory=dict)
+    shared_checkpoint_stride: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class GdnDecodeMetadata(GdnMetadata):
     read_state_indices: torch.Tensor
     write_state_indices: torch.Tensor
+    # Shared physical slots expose separate row spaces for Conv and SSM
+    # states, per Linear group.  The legacy fields above remain the
+    # common-index fast path.
+    conv_read_state_indices: tuple[torch.Tensor, ...] = ()
+    conv_write_state_indices: tuple[torch.Tensor, ...] = ()
+    ssm_read_state_indices: tuple[torch.Tensor, ...] = ()
+    ssm_write_state_indices: tuple[torch.Tensor, ...] = ()
+    layer_groups: Mapping[int, int] = field(default_factory=dict)
+    # [layer group, batch, (Conv physical slot, SSM physical checkpoint row)].
+    packed_read_state_indices: torch.Tensor | None = None
+    packed_write_state_indices: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +74,7 @@ class GdnVerifyMetadata(GdnMetadata):
     query_width: int
     # Packed token -> dense [request, verify position] row. None for uniform
     # batches, which can be reshaped without padding or copying.
-    packed_to_dense: torch.Tensor | None
+    packed_to_dense: torch.Tensor | None = None
     # Device-built inverse mapping for adaptive graph rows. Missing dense
     # positions use the appended zero row at packed_token_count; padding in
     # packed_to_dense uses the appended zero row at batch_size * query_width.
@@ -66,6 +82,12 @@ class GdnVerifyMetadata(GdnMetadata):
     # Device prefix endpoints for the fused packed verifier. Cache strides
     # and previous acceptance counts remain independent of current widths.
     cu_seqlens: torch.Tensor | None = None
+    # Physical role rows of the shared arena, per Linear group. Packed
+    # indices let the fused kernel access both independent arenas directly.
+    conv_state_indices: tuple[torch.Tensor, ...] = ()
+    ssm_state_indices: tuple[torch.Tensor, ...] = ()
+    layer_groups: Mapping[int, int] = field(default_factory=dict)
+    packed_state_indices: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)

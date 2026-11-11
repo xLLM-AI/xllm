@@ -76,21 +76,6 @@ DistributedWorkerManager::DistributedWorkerManager(
     std::vector<std::shared_ptr<WorkerClient>> worker_clients)
     : worker_clients_(std::move(worker_clients)) {}
 
-std::optional<std::vector<std::string>>
-DistributedWorkerManager::spec_calibration(
-    const SpecCalibrationCommand& command) {
-  std::vector<std::string> results;
-  results.reserve(worker_clients_.size());
-  for (const auto& worker : worker_clients_) {
-    auto result = worker->spec_calibration(command);
-    if (!result) {
-      return std::nullopt;
-    }
-    results.emplace_back(std::move(*result));
-  }
-  return results;
-}
-
 DistributedWorkerManager::~DistributedWorkerManager() {
   std::lock_guard<std::mutex> lock(link_mutex_);
   // Drain connection work while the worker clients and servers are still alive.
@@ -128,23 +113,6 @@ void DistributedWorkerManager::get_cache_info(
     addrs.emplace_back(std::move(addr));
     ports.emplace_back(port);
   }
-}
-
-std::vector<int64_t> DistributedWorkerManager::get_active_activation_memory()
-    const {
-  std::vector<folly::SemiFuture<int64_t>> futures;
-  futures.reserve(worker_clients_.size());
-  for (const auto& worker : worker_clients_) {
-    futures.emplace_back(worker->get_active_activation_memory_async());
-  }
-
-  auto results = folly::collectAll(futures).get();
-  std::vector<int64_t> active_activation_memories;
-  active_activation_memories.reserve(worker_clients_.size());
-  for (const auto& result : results) {
-    active_activation_memories.emplace_back(result.value());
-  }
-  return active_activation_memories;
 }
 
 void DistributedWorkerManager::ensure_link_threadpool() {
@@ -484,8 +452,6 @@ void DistributedWorkerManager::start_worker_servers(
       LOG(FATAL) << "Unsupported " << options.task_type()
                  << " for vlm model backend";
     }
-  } else if (model_backend == "rec") {
-    worker_type = WorkerType::REC;
   } else if (model_backend == "dit") {
     worker_type = WorkerType::DIT;
   } else {

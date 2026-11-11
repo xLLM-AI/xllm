@@ -89,7 +89,7 @@ xllm serve --model /path/to/Qwen3-0.6B \
   "enable_schedule_overlap": true,
   "enable_chunked_prefill": true,
   "max_tokens_per_chunk_for_prefill": 2048,
-  "npu_kernel_backend": "ATB",
+  "npu_kernel_backend": "TORCH",
   "enable_graph": true,
   "max_tokens_for_graph_mode": 2048
 }

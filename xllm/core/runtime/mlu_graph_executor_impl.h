@@ -28,8 +28,6 @@ limitations under the License.
 #include "core/runtime/executor_impl.h"
 #include "core/runtime/executor_impl_factory.h"
 #include "core/runtime/options.h"
-#include "core/runtime/rec_executor_backend.h"
-#include "core/runtime/rec_executor_impl_factory.h"
 
 namespace xllm::mlu {
 // Helper class to hold persistent parameters for graph execution
@@ -60,16 +58,10 @@ class GraphPersistentParam final {
   torch::Tensor tokens_;
   torch::Tensor positions_;
   std::optional<ModelParamsView> params_;
-  std::optional<RecModelParams> rec_params_;
 
   template <typename Params>
   Params& capture_params() {
-    if constexpr (std::is_same_v<Params, ModelParamsView>) {
-      return params_.value();
-    } else {
-      static_assert(std::is_same_v<Params, RecModelParams>);
-      return rec_params_.value();
-    }
+    return params_.value();
   }
   // mrope
   bool use_mrope_ = false;
@@ -141,10 +133,8 @@ class MluGraph final {
                                     const ModelParamsView& params);
 
   bool matches_graph_input(const ModelParamsView&) const { return true; }
-  bool matches_graph_input(const RecModelParams& params) const;
 
  private:
-  std::optional<RecModelParams> rec_graph_input_;
   // MLUGraph with mempool for managing temporary tensors during forward pass
   torch_mlu::MLUGraph graph_;
 
@@ -160,15 +150,9 @@ class MluGraph final {
 
 // Executor implementation using MLU graph optimization
 // Uses MLUGraph mempool to reduce memory allocation overhead during inference
-class MluGraphExecutorImpl final : public ExecutorImpl,
-                                   public RecExecutorBackend {
+class MluGraphExecutorImpl final : public ExecutorImpl {
  public:
   MluGraphExecutorImpl(CausalLM* model,
-                       const ModelArgs& args,
-                       const torch::Device& device,
-                       const runtime::Options& options);
-
-  MluGraphExecutorImpl(RecModel* model,
                        const ModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options);
@@ -180,11 +164,6 @@ class MluGraphExecutorImpl final : public ExecutorImpl,
                   const torch::Tensor& positions,
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
-
-  ModelOutput run(const torch::Tensor& tokens,
-                  const torch::Tensor& positions,
-                  std::vector<KVCache>& kv_caches,
-                  const RecModelParams& params) override;
 
  private:
   template <typename ModelType, typename Params>
@@ -203,8 +182,8 @@ class MluGraphExecutorImpl final : public ExecutorImpl,
   void init_param_once();
   void log_memory_after_capture();
 
-  CausalLM* model_;                // not owned
-  RecModel* rec_model_ = nullptr;  // not owned
+  CausalLM* model_;  // not owned
+  // not owned
   ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
@@ -220,5 +199,5 @@ class MluGraphExecutorImpl final : public ExecutorImpl,
   std::unique_ptr<GraphPersistentParam> persistent_param_;
 };
 REGISTER_EXECUTOR("mlu", MluGraphExecutorImpl);
-REGISTER_REC_EXECUTOR("mlu", MluGraphExecutorImpl);
+
 }  // namespace xllm::mlu

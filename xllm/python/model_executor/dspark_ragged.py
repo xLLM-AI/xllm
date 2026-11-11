@@ -160,7 +160,7 @@ def pack_verify_inputs(
     """Pack per-request prefixes into a host-chosen fixed graph capacity.
 
     ``base_positions`` is the anchor's cache position; ``base_kv_lengths``
-    already includes that anchor, matching SlotBuffer::patch_mtp_decode.
+    already includes that anchor.
     Real row (request, column) uses position=base_position+column and
     kv_len=base_kv_length+column. KV slot addressing uses the cache position,
     not the anchor-inclusive attention length. Caller guarantees in-range

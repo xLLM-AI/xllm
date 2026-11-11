@@ -272,12 +272,7 @@ void CompletionServiceImpl::process_async_impl(
                            std::move(send));
     return;
   }
-  const size_t choices_per_prompt =
-      request_params.beam_width > 1
-          ? static_cast<size_t>(request_params.num_return_sequences > 0
-                                    ? request_params.num_return_sequences
-                                    : request_params.beam_width)
-          : request_params.n;
+  const size_t choices_per_prompt = request_params.n;
   auto batch = std::make_shared<api_service::OpenAIBatch>(
       rpc_request.prompts_size(), choices_per_prompt, stream);
   for (int32_t index = 0; index < rpc_request.prompts_size(); ++index) {

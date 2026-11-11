@@ -20,15 +20,9 @@ namespace xllm {
 BatchFactory::BatchFactory(int32_t dp_size) : builder_(dp_size) {}
 
 BatchGroup BatchFactory::create_batches(
-    const std::vector<std::shared_ptr<Request>>& running_requests,
     const std::vector<Sequence*>& running_sequences,
-    const std::vector<size_t>& running_sequences_budgets,
-    std::vector<std::vector<BlockTransferInfo>>* swap_block_transfer_infos)
-    const {
-  return builder_.build(running_requests,
-                        running_sequences,
-                        running_sequences_budgets,
-                        swap_block_transfer_infos);
+    const std::vector<size_t>& running_sequences_budgets) const {
+  return builder_.build(running_sequences, running_sequences_budgets);
 }
 
 }  // namespace xllm

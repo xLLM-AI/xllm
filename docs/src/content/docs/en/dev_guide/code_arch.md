@@ -78,7 +78,6 @@ entry is **`xllm/xllm.cpp`**, inside the source directory.
 │   │   ├── llm/                           # Language models and Python model bridge
 │   │   ├── vlm/                           # Vision-language models
 │   │   ├── dit/                           # Diffusion models
-│   │   └── rec/                           # Generative recommendation models
 │   ├── python/                            # Python model execution
 │   │   ├── models/                        # Python model definitions
 │   │   ├── model_executor/                # Execution coordination and eager/graph runners
@@ -93,8 +92,6 @@ entry is **`xllm/xllm.cpp`**, inside the source directory.
 │   ├── function_call/                     # Tool-call parsers
 │   ├── proto/                             # Service and internal RPC schemas
 │   ├── pybind/                            # Python-facing inference API and C++ bindings
-│   ├── c_api/                             # C integration API
-│   ├── cc_api/                            # C++ integration API
 │   ├── compiler/                          # Kernel compilation and AOT build tooling
 │   └── auto_config/                       # Model/hardware-based launch configuration
 ├── examples/                              # Offline inference examples
@@ -454,7 +451,7 @@ worker coordination, and sampling remain in C++.
 
 Keep three choices separate when tracing configuration:
 
-- **Serving backend** (`llm`, `vlm`, `dit`, `rec`) chooses the master/engine
+- **Serving backend** (`llm`, `vlm`, `dit`) chooses the master/engine
   family. Start at `master_factory.cpp`.
 - **Model implementation** (`native` or `python`) chooses the model execution
   path. Start at `core/runtime/executor.cpp` and

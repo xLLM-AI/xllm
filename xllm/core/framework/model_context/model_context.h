@@ -15,12 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#if defined(USE_NPU)
-namespace atb {
-class Context;
-}  // namespace atb
-#endif
-
 #include <memory>
 #include <string>
 #include <utility>
@@ -33,10 +27,6 @@ class Context;
 namespace xllm {
 
 class ModelStreamRegistry;
-
-#if defined(USE_NPU)
-class AtbWorkspace;
-#endif
 
 // Internal optimization configuration.
 // This struct holds all optimization techniques that are automatically
@@ -64,14 +54,6 @@ class ModelContext {
                const ModelArgs& model_args,
                const QuantArgs& quant_args,
                const torch::TensorOptions& tensor_options);
-
-#if defined(USE_NPU)
-  ModelContext(const ParallelArgs& input_parallel_args,
-               const ModelArgs& model_args,
-               const QuantArgs& quant_args,
-               const torch::TensorOptions& tensor_options,
-               atb::Context* context);
-#endif
 
   const ModelArgs& get_model_args() const { return model_args_; }
 
@@ -102,13 +84,6 @@ class ModelContext {
   ModelContext with_parallel_args(const ParallelArgs& parallel_args) const;
 
   ModelContext with_quant_args(const QuantArgs& quant_args) const;
-
-#if defined(USE_NPU)
-  const atb::Context* get_atb_context() const { return context_; }
-  std::shared_ptr<AtbWorkspace> get_atb_workspace() const {
-    return atb_workspace_;
-  }
-#endif
 
   void set_encoder_embedding_mode(bool encoder_embedding_mode) {
     model_args_.encoder_embedding_mode() = encoder_embedding_mode;
@@ -143,12 +118,6 @@ class ModelContext {
   OptimizationConfig optimization_config_;
   FlashComm1Options flash_comm1_options_;
   std::shared_ptr<ModelStreamRegistry> stream_registry_;
-
-#if defined(USE_NPU)
-  // used for npu atb
-  atb::Context* context_;
-  std::shared_ptr<AtbWorkspace> atb_workspace_;
-#endif
 };
 
 }  // namespace xllm

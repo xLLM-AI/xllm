@@ -35,7 +35,6 @@ class DistributedWorkerManagerTest;
 class ModelResidencyCoordinatorTest;
 class KVTransferCoordinatorTest;
 class PDSchedulerTestPeer;
-class SchedulerMetricsTestPeer;
 
 // Owns worker servers, cluster rendezvous, and worker clients. Multiple engines
 // can share the manager to use the same distributed workers.
@@ -49,9 +48,6 @@ class DistributedWorkerManager final {
     return worker_clients_;
   }
 
-  std::optional<std::vector<std::string>> spec_calibration(
-      const SpecCalibrationCommand& command);
-
   // Appends the transport endpoints in global worker rank order.
   void get_cache_info(std::vector<uint64_t>& cluster_ids,
                       std::vector<std::string>& addrs,
@@ -59,7 +55,6 @@ class DistributedWorkerManager final {
 
   // Queries every worker before waiting, then returns bytes in worker rank
   // order.
-  std::vector<int64_t> get_active_activation_memory() const;
 
   bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                     const std::vector<std::string>& addrs,
@@ -81,7 +76,6 @@ class DistributedWorkerManager final {
   friend class ModelResidencyCoordinatorTest;
   friend class KVTransferCoordinatorTest;
   friend class PDSchedulerTestPeer;
-  friend class SchedulerMetricsTestPeer;
 
   DISALLOW_COPY_AND_ASSIGN(DistributedWorkerManager);
 

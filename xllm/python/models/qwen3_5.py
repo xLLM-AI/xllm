@@ -321,17 +321,15 @@ class Qwen3_5Model(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self._inputs_embeds: torch.Tensor | None = None
         self.aux_hidden_capture = AuxHiddenCapture(cfg.layers_to_capture)
 
     def forward(
-        self, input_ids: torch.Tensor, positions: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if self._inputs_embeds is None:
-            hidden = self.embed_tokens(input_ids)
-        else:
-            hidden = self._inputs_embeds
-            self._inputs_embeds = None
+        hidden = self.embed_tokens(input_ids) if input_embedding is None else input_embedding
         flash_comm1 = get_flash_comm1_context()
         if flash_comm1 is not None:
             hidden = flash_comm1.shard(hidden)

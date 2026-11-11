@@ -265,7 +265,6 @@ class ContinuousSchedulerBase : public Scheduler {
 
   std::optional<PendingStep> pending_step_;
 
-  // Refreshed at output consumption because beam search can replace sequences.
   std::vector<Sequence*> output_sequences_;
 
   // Construct a SchedulerState snapshot for the policy.
@@ -280,7 +279,7 @@ class ContinuousSchedulerBase : public Scheduler {
 
   void step_with_schedule_overlap(const absl::Duration& timeout);
 
-  void complete_pending_step(bool outputs_collected);
+  void complete_pending_step();
 
   void refresh_sequences_from_requests(
       const std::vector<std::shared_ptr<Request>>& requests,

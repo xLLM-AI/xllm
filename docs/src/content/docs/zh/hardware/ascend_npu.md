@@ -87,26 +87,6 @@ python -m pip install /path/to/xllm_npu*.whl
 
 目标环境仍需具备与 wheel 兼容的 CANN、驱动、硬件以及 Python/PyTorch 环境，但无需另行安装 wheel 已包含的 `custom_xllm_math`。`xllm` 启动器会自动配置该算子包的动态库和自定义 OPP 搜索路径，保留基础 CANN OPP 配置。
 
-xlite 默认关闭（`USE_XLITE=OFF`），默认构建的 NPU wheel 不依赖 GVirt/xlite 运行库。如果复用曾开启 xlite 的构建目录，需要显式关闭缓存中的选项并重新构建 wheel：
-
-```bash
-CMAKE_ARGS="${CMAKE_ARGS:+$CMAKE_ARGS }-DUSE_XLITE=OFF" python setup.py bdist_wheel --device npu
-```
-
-如需使用可选的 XLITE 后端，请在构建时显式开启：
-
-```bash
-CMAKE_ARGS="${CMAKE_ARGS:+$CMAKE_ARGS }-DUSE_XLITE=ON" python setup.py bdist_wheel --device npu
-```
-
-启用 `USE_XLITE=ON` 的构建需要独立的 GVirt/xlite 运行库。请同时分发使用相同 `third_party/GVirt` 提交和兼容 CANN 环境构建的 xlite wheel，在目标 Python 环境安装，并在启动 xLLM 前将其 `xlite/lib` 目录加入 `LD_LIBRARY_PATH`。xLLM wheel 不包含 `libxlite.so` 及其 kernel 库：
-
-```bash
-python -m pip install /path/to/xlite*.whl
-XLITE_LIB_DIR="$(python -c 'import importlib.util; from pathlib import Path; print(Path(importlib.util.find_spec("xlite").origin).parent / "lib")')"
-export LD_LIBRARY_PATH="${XLITE_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-```
-
 `python setup.py build` 仅构建产物；统一启动命令需要安装 wheel 及其包含的服务二进制。继续前先检查已安装的命令：
 
 ```bash
