@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "taylorseer.h"
 
+#include <utility>
+
 namespace xllm {
 
 namespace {
@@ -102,7 +104,7 @@ CacheBlockOut TaylorSeer::on_after_block(const CacheBlockIn& block_input) {
       get_tensor_or_empty(block_input.tensors, "hidden_states");
   out_map["encoder_hidden_states"] =
       get_tensor_or_empty(block_input.tensors, "encoder_hidden_states");
-  return CacheBlockOut(out_map);
+  return CacheBlockOut(std::move(out_map));
 }
 
 bool TaylorSeer::on_before_step(const CacheStepIn& stepin) {
@@ -126,7 +128,7 @@ CacheStepOut TaylorSeer::on_after_step(const CacheStepIn& stepin) {
   }
 
   TensorMap result{{"hidden_states", approximate_value()}};
-  return CacheStepOut(result);
+  return CacheStepOut(std::move(result));
 }
 
 }  // namespace xllm

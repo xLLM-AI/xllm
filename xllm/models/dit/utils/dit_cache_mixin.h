@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <tuple>
+#include <utility>
 
 #include "core/framework/dit_cache/dit_cache.h"
 
@@ -85,7 +86,7 @@ class DiTCacheMixin {
     TensorMap step_in_map = {
         {"hidden_states", hidden_states},
         {"original_hidden_states", original_hidden_states}};
-    CacheStepIn stepin_before(step_idx, step_in_map);
+    CacheStepIn stepin_before(step_idx, std::move(step_in_map));
     bool use_step_cache = cache.on_before_step(stepin_before, use_cfg);
 
     if (!use_step_cache) {
@@ -95,7 +96,7 @@ class DiTCacheMixin {
     TensorMap step_after_map = {
         {"hidden_states", hidden_states},
         {"original_hidden_states", original_hidden_states}};
-    CacheStepIn stepin_after(step_idx, step_after_map);
+    CacheStepIn stepin_after(step_idx, std::move(step_after_map));
     CacheStepOut stepout_after = cache.on_after_step(stepin_after, use_cfg);
     hidden_states = stepout_after.tensors.at("hidden_states");
   }
@@ -134,7 +135,7 @@ class DiTCacheMixin {
           {"encoder_hidden_states", encoder_hidden_states},
           {"original_hidden_states", original_hidden_states},
           {"original_encoder_hidden_states", original_encoder_hidden_states}};
-      CacheBlockIn blockin_after(block_id, block_after_map);
+      CacheBlockIn blockin_after(block_id, std::move(block_after_map));
       CacheBlockOut blockout_after =
           cache.on_after_block(blockin_after, use_cfg);
 
@@ -176,7 +177,7 @@ class DiTCacheMixin {
       TensorMap block_after_map = {
           {"hidden_states", hidden_states},
           {"original_hidden_states", original_hidden_states}};
-      CacheBlockIn blockin_after(block_id, block_after_map);
+      CacheBlockIn blockin_after(block_id, std::move(block_after_map));
       CacheBlockOut blockout_after =
           cache.on_after_block(blockin_after, use_cfg);
 

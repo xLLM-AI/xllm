@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "fbcache.h"
 
+#include <utility>
+
 namespace xllm {
 
 void FBCache::init(const DiTCacheConfig& cfg,
@@ -49,7 +51,7 @@ CacheBlockOut FBCache::on_after_block(const CacheBlockIn& block_input) {
         get_tensor_or_empty(block_input.tensors, "hidden_states");
     out_map["encoder_hidden_states"] =
         get_tensor_or_empty(block_input.tensors, "encoder_hidden_states");
-    return CacheBlockOut(out_map);
+    return CacheBlockOut(std::move(out_map));
   }
 
   auto hidden_states =
@@ -81,7 +83,7 @@ CacheBlockOut FBCache::on_after_block(const CacheBlockIn& block_input) {
   out_map["hidden_states"] = std::move(output_hidden_states);
   out_map["encoder_hidden_states"] = std::move(output_encoder_hidden_states);
 
-  return CacheBlockOut(out_map);
+  return CacheBlockOut(std::move(out_map));
 }
 
 bool FBCache::on_before_step(const CacheStepIn& stepin) {
@@ -119,7 +121,7 @@ CacheStepOut FBCache::on_after_step(const CacheStepIn& stepin) {
   if (hidden_states.defined())
     out_map["hidden_states"] = std::move(hidden_states);
 
-  return CacheStepOut(out_map);
+  return CacheStepOut(std::move(out_map));
 }
 
 std::pair<torch::Tensor, torch::Tensor>

@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "residual_cache.h"
 
+#include <utility>
+
 namespace xllm {
 
 void ResidualCache::init(const DiTCacheConfig& cfg,
@@ -96,7 +98,7 @@ CacheBlockOut ResidualCache::on_after_block(const CacheBlockIn& block_input) {
         out_map["hidden_states"] = add_residual(hidden_states, "hidden_states");
         out_map["encoder_hidden_states"] =
             add_residual(encoder_hidden_states, "encoder_hidden_states");
-        return CacheBlockOut(out_map);
+        return CacheBlockOut(std::move(out_map));
       }
     } else if (update_cache_) {
       if (block_input.block_id == dit_cache_start_blocks_ - 1) {
@@ -114,7 +116,7 @@ CacheBlockOut ResidualCache::on_after_block(const CacheBlockIn& block_input) {
   }
   out_map["hidden_states"] = hidden_states;
   out_map["encoder_hidden_states"] = encoder_hidden_states;
-  return CacheBlockOut(out_map);
+  return CacheBlockOut(std::move(out_map));
 }
 
 bool ResidualCache::on_before_step(const CacheStepIn& stepin) {
