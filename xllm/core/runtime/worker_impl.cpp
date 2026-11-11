@@ -1242,6 +1242,11 @@ std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
   return std::nullopt;
 }
 
+bool WorkerImpl::keep_vision_grid_on_cpu() const {
+  return ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
+         context_.get_model_args().model_type() == "qwen3_vl";
+}
+
 template <typename Input>
 void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     const Input& input,
@@ -1291,7 +1296,11 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
       << "failed to wait input metadata ready event on worker prepare stream";
 
   auto prepare_device_on_stream = [&]() {
-    processed_input = input.to(device_, dtype_);
+    if constexpr (std::is_same_v<Input, VlmForwardInput>) {
+      processed_input = input.to(device_, dtype_, keep_vision_grid_on_cpu());
+    } else {
+      processed_input = input.to(device_, dtype_);
+    }
     // Packed RPC/SHM inputs deserialize JSON snapshots inside
     // Input::to. Restore them before speculative dispatch so MTP sees
     // the grammar rows.

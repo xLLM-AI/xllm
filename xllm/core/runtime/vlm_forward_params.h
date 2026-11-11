@@ -28,7 +28,8 @@ bool unpack_from_input_host_buffer(const VlmForwardInput& input,
                                    const torch::Device& device,
                                    torch::ScalarType dtype,
                                    VlmForwardInput& output,
-                                   bool materialize_device_buffer);
+                                   bool materialize_device_buffer,
+                                   bool keep_vision_grid_on_cpu = false);
 bool unpack_from_input_host_buffer(const VlmForwardInput& input,
                                    const torch::Device& device,
                                    VlmForwardInput& output);
@@ -65,7 +66,8 @@ class VlmForwardInput final {
   }
 
   VlmForwardInput to(const torch::Device& device,
-                     torch::ScalarType dtype) const {
+                     torch::ScalarType dtype,
+                     bool keep_vision_grid_on_cpu = false) const {
     if (runtime.device_tensors_ready) {
       return clone();
     }
@@ -76,12 +78,16 @@ class VlmForwardInput final {
           ::xllm::ExecutionConfig::get_instance()
               .use_contiguous_input_buffer() &&
           detail::supports_contiguous_forward_input_buffer(device);
-      if (detail::unpack_from_input_host_buffer(
-              *this, device, dtype, buffer_inputs, materialize_device_buffer)) {
+      if (detail::unpack_from_input_host_buffer(*this,
+                                                device,
+                                                dtype,
+                                                buffer_inputs,
+                                                materialize_device_buffer,
+                                                keep_vision_grid_on_cpu)) {
         if (buffer_inputs.runtime.device_tensors_ready) {
           return buffer_inputs;
         }
-        return buffer_inputs.to(device, dtype);
+        return buffer_inputs.to(device, dtype, keep_vision_grid_on_cpu);
       }
     }
 
@@ -102,7 +108,7 @@ class VlmForwardInput final {
     inputs.token_ids = safe_to(source_token_ids, device, true);
     inputs.positions = detail::normalize_positions_for_device(
         safe_to(source_positions, device, true));
-    inputs.input_params = input_params.to(device);
+    inputs.input_params = input_params.to(device, keep_vision_grid_on_cpu);
     inputs.sampling_params = sampling_params.to(device, dtype);
     copy_metadata_to(inputs);
     inputs.runtime.input_host_buffer = runtime.input_host_buffer;

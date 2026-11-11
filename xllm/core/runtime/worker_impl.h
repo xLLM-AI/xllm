@@ -306,6 +306,7 @@ class WorkerImpl {
   virtual ForwardOutput get_last_step_result();
 
   bool is_driver() const { return driver_ || dp_driver_; }
+  bool keep_vision_grid_on_cpu() const;
 
   Status get_status() const { return status_; }
 

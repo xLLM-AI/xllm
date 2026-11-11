@@ -51,12 +51,13 @@ class VlmModelParams final {
     return out;
   }
 
-  VlmModelParams to(const torch::Device& device) const {
+  VlmModelParams to(const torch::Device& device,
+                    bool keep_vision_grid_on_cpu = false) const {
     VlmModelParams params;
     params.meta = meta;
     params.attention = attention.to(device);
     params.embedding = embedding.to(device);
-    params.multimodal = multimodal.to(device);
+    params.multimodal = multimodal.to(device, keep_vision_grid_on_cpu);
     params.parallel = parallel.to(device);
     params.expert = expert.to(device);
     params.graph = graph.to(device);

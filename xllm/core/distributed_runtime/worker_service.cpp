@@ -409,6 +409,12 @@ void WorkerService::InitModel(::google::protobuf::RpcController* controller,
       return;
     }
 
+    if (input_shm_manager_ && options_.backend() == "vlm") {
+      // The polling thread starts before InitModel; publish the model policy
+      // before the master can send its first shared-memory input.
+      input_shm_manager_->set_keep_vision_grid_on_cpu(
+          worker_->keep_vision_grid_on_cpu());
+    }
     response->set_ok(true);
   });
   return;

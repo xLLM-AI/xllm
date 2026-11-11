@@ -87,6 +87,7 @@ class Worker {
   bool unlink_p2p(const std::string& remote_addr);
 
   const bool is_driver();
+  bool keep_vision_grid_on_cpu() const;
 
   std::optional<ForwardOutput> step(const VlmForwardInput& inputs);
 
