@@ -283,6 +283,11 @@ TEST(EplbPolicyTest, Factory_LegacyNamesAliasToBalanced) {
   EXPECT_EQ(eplb_policy_kind_from_string("hier"), EplbPolicyKind::BALANCED);
   EXPECT_EQ(eplb_policy_kind_from_string("hierarchical"),
             EplbPolicyKind::BALANCED);
+  EXPECT_EQ(eplb_policy_kind_from_string("deepseek-flat"),
+            EplbPolicyKind::BALANCED);
+  EXPECT_EQ(eplb_policy_kind_from_string("DEEPSEEK-HIER"),
+            EplbPolicyKind::BALANCED);
+  EXPECT_EQ(eplb_policy_kind_from_string("BALANCED"), EplbPolicyKind::BALANCED);
 }
 
 TEST(EplbPolicyTest, SkipsUniformWorkloadRepackWithNoPeakLoadGain) {

@@ -26,7 +26,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/eplb/eplb_aggregator.h"
-#include "core/framework/eplb/eplb_executor.h"
 #include "core/framework/eplb/eplb_info.h"
 #include "core/framework/eplb/eplb_options.h"
 #include "core/framework/eplb/eplb_policy.h"
@@ -38,8 +37,6 @@ class EplbManager {
   // - layer_num: Total layers in the model
   // - device_num: Parallel devices in cluster
   // - experts_num: Experts per model layer
-  EplbManager(int32_t layer_num, int32_t device_num, int32_t experts_num);
-
   EplbManager(int32_t layer_num,
               int32_t device_num,
               int32_t experts_num,
@@ -168,11 +165,7 @@ class EplbManager {
   // torch tensors (which need layer_num_/device_num_/device_experts_num_
   // during their initialization) can be constructed after them without
   // relying on unspecified initialization order.
-  // Snapshot of the EPLB tunables at construction time. Every thread inside
-  // this manager reads from `options_` instead of reaching back into the
-  // process-wide EPLBConfig::get_instance(), so a single manager sees a
-  // stable configuration and unit tests can construct one with a custom
-  // EplbOptions without mutating global state.
+  // Each manager owns a stable policy snapshot supplied at construction.
   EplbOptions options_;
 
   // Constants

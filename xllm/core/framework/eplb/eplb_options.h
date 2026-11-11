@@ -20,15 +20,8 @@ limitations under the License.
 
 namespace xllm {
 
-class EPLBConfig;
-
-// Value-type snapshot of the EPLB tunables consumed by the manager / policy
-// layer. Constructed once by EplbManager at start-up from the global
-// EPLBConfig singleton and passed through the factory and every policy
-// constructor, so nothing under `framework/eplb/` reaches back into the
-// singleton at runtime. Snapshotting also makes the settings stable over the
-// lifetime of one manager: rebalance rounds see a consistent view rather
-// than picking up mid-round config mutations.
+// Stable startup policy supplied by the engine assembly boundary. Managers
+// and policies retain this value instead of reading process configuration.
 class EplbOptions final {
  public:
   int32_t redundant_experts_num = 1;
@@ -38,11 +31,11 @@ class EplbOptions final {
   std::string eplb_policy_kind = "balanced";
 
   void validate() const;
+};
 
-  // Build an EplbOptions from the process-wide EPLBConfig singleton. Defined
-  // in eplb_options.cpp so the header does not have to depend on the concrete
-  // EPLBConfig definition.
-  static EplbOptions from_global_config();
+struct EplbControllerConfig {
+  bool enabled = false;
+  EplbOptions policy;
 };
 
 }  // namespace xllm

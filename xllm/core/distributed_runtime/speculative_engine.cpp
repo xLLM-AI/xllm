@@ -168,7 +168,8 @@ bool SpeculativeEngineBase<TargetEngine>::init_model(
     engine_->eplb_controller_ = EplbController::create(
         engine_->model_args(),
         static_cast<int32_t>(engine_->worker_clients_num_),
-        engine_->options_.ep_size());
+        engine_->options_.ep_size(),
+        engine_->options_.eplb_controller_config());
     engine_->forward_input_factory_->set_eplb_controller(
         engine_->eplb_controller_.get());
   }

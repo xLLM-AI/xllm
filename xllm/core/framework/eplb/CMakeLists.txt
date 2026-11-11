@@ -32,7 +32,6 @@ cc_library(
   DEPS
     :request
     :common
-    :config
     :model
     Folly::folly
     glog::glog

@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "common/types.h"
+#include "core/framework/eplb/eplb_options.h"
 
 namespace xllm {
 namespace runtime {
@@ -90,6 +91,8 @@ struct Options {
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
 
   PROPERTY(bool, is_draft_engine) = false;
+
+  PROPERTY(EplbControllerConfig, eplb_controller_config);
 
   PROPERTY(int32_t, world_size) = 1;
 

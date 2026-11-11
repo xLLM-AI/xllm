@@ -24,7 +24,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/framework/config/eplb_config.h"
 #include "core/framework/eplb/eplb_manager.h"
 #include "core/framework/eplb/eplb_options.h"
 #include "core/framework/eplb/eplb_utils.h"
@@ -168,8 +167,9 @@ class EplbController::Impl final {
 std::unique_ptr<EplbController> EplbController::create(
     const ModelArgs& model_args,
     int32_t worker_num,
-    int32_t ep_size) {
-  if (!EPLBConfig::get_instance().enable_eplb()) {
+    int32_t ep_size,
+    EplbControllerConfig config) {
+  if (!config.enabled) {
     return nullptr;
   }
   const int64_t num_layers =
@@ -181,13 +181,13 @@ std::unique_ptr<EplbController> EplbController::create(
   CHECK_GT(num_experts, 0) << "EPLB num_experts must be positive.";
   CHECK_GT(worker_num, 0) << "EPLB worker_num must be positive.";
   const int32_t device_num = eplb::effective_device_num(worker_num, ep_size);
-  EplbOptions options = EplbOptions::from_global_config();
+  config.policy.validate();
   return std::unique_ptr<EplbController>(
       new EplbController(static_cast<int32_t>(num_layers),
                          num_experts,
                          worker_num,
                          device_num,
-                         std::move(options)));
+                         std::move(config.policy)));
 }
 
 EplbController::EplbController(int32_t num_layers,

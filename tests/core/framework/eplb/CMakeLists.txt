@@ -6,6 +6,7 @@ cc_test(
   SRCS
     eplb_controller_test.cpp
   DEPS
+    :config
     :eplb
     :model
     GTest::gtest_main

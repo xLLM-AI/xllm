@@ -15,6 +15,10 @@ limitations under the License.
 
 #include "core/framework/config/eplb_config.h"
 
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 
@@ -58,51 +62,137 @@ DEFINE_int32(expert_parallel_degree, 0, "Expert parallel degree.");
 DEFINE_string(rank_tablefile, "", "HCCL rank table file.");
 
 namespace xllm {
+namespace {
+
+template <typename T>
+struct EplbConfigField {
+  using Value = T;
+  const char* name;
+  T* flag;
+  config::ConfigInput<T> EplbConfigInput::* input;
+  const T& (EPLBConfig::*get)() const& noexcept;
+  EPLBConfig& (EPLBConfig::*set)(const T&)&;
+};
+
+// Preserve the existing adapter and dump order in one typed mapping.
+const auto kEplbFields = std::tuple{
+    EplbConfigField<bool>{"enable_eplb",
+                          &FLAGS_enable_eplb,
+                          &EplbConfigInput::enable_eplb,
+                          &EPLBConfig::enable_eplb,
+                          &EPLBConfig::enable_eplb},
+    EplbConfigField<int32_t>{"redundant_experts_num",
+                             &FLAGS_redundant_experts_num,
+                             &EplbConfigInput::redundant_experts_num,
+                             &EPLBConfig::redundant_experts_num,
+                             &EPLBConfig::redundant_experts_num},
+    EplbConfigField<int64_t>{"eplb_update_interval",
+                             &FLAGS_eplb_update_interval,
+                             &EplbConfigInput::eplb_update_interval,
+                             &EPLBConfig::eplb_update_interval,
+                             &EPLBConfig::eplb_update_interval},
+    EplbConfigField<double>{"eplb_min_peak_load_improvement",
+                            &FLAGS_eplb_min_peak_load_improvement,
+                            &EplbConfigInput::eplb_min_peak_load_improvement,
+                            &EPLBConfig::eplb_min_peak_load_improvement,
+                            &EPLBConfig::eplb_min_peak_load_improvement},
+    EplbConfigField<std::string>{"eplb_policy_kind",
+                                 &FLAGS_eplb_policy_kind,
+                                 &EplbConfigInput::eplb_policy_kind,
+                                 &EPLBConfig::eplb_policy_kind,
+                                 &EPLBConfig::eplb_policy_kind},
+    EplbConfigField<bool>{"eplb_use_decode_only_load",
+                          &FLAGS_eplb_use_decode_only_load,
+                          &EplbConfigInput::eplb_use_decode_only_load,
+                          &EPLBConfig::eplb_use_decode_only_load,
+                          &EPLBConfig::eplb_use_decode_only_load},
+    EplbConfigField<int32_t>{"eplb_prepare_timeout_seconds",
+                             &FLAGS_eplb_prepare_timeout_seconds,
+                             &EplbConfigInput::eplb_prepare_timeout_seconds,
+                             &EPLBConfig::eplb_prepare_timeout_seconds,
+                             &EPLBConfig::eplb_prepare_timeout_seconds},
+    EplbConfigField<int32_t>{"expert_parallel_degree",
+                             &FLAGS_expert_parallel_degree,
+                             &EplbConfigInput::expert_parallel_degree,
+                             &EPLBConfig::expert_parallel_degree,
+                             &EPLBConfig::expert_parallel_degree},
+    EplbConfigField<std::string>{"rank_tablefile",
+                                 &FLAGS_rank_tablefile,
+                                 &EplbConfigInput::rank_tablefile,
+                                 &EPLBConfig::rank_tablefile,
+                                 &EPLBConfig::rank_tablefile}};
+
+template <typename Visitor>
+void visit_eplb_fields(Visitor&& visit) {
+  std::apply([&](const auto&... field) { (visit(field), ...); }, kEplbFields);
+}
+
+}  // namespace
+
+EplbConfigInput eplb_config_input_from_flags(
+    const config::FlagInputSnapshot& flags) {
+  EplbConfigInput input;
+  visit_eplb_fields([&](const auto& field) {
+    if (flags.is_specified(field.name)) {
+      input.*field.input = {*field.flag, config::ConfigInputSource::GFLAGS};
+    }
+  });
+  return input;
+}
+
+void merge_eplb_config_json(EplbConfigInput& input, const JsonReader& json) {
+  visit_eplb_fields([&](const auto& field) {
+    auto& requested = input.*field.input;
+    if (requested.value.has_value()) {
+      return;
+    }
+    using T = typename std::decay_t<decltype(field)>::Value;
+    if (auto value = json.value<T>(field.name)) {
+      requested = {std::move(value), config::ConfigInputSource::JSON};
+    }
+  });
+}
+
+EPLBConfig resolve_eplb_config(const EplbConfigInput& input) {
+  EPLBConfig resolved;
+  visit_eplb_fields([&](const auto& field) {
+    const auto& requested = input.*field.input;
+    if (requested.value.has_value()) {
+      (resolved.*field.set)(*requested.value);
+    }
+  });
+  return resolved;
+}
 
 void EPLBConfig::from_flags() {
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_eplb);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(redundant_experts_num);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(eplb_update_interval);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(eplb_min_peak_load_improvement);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(eplb_policy_kind);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(eplb_use_decode_only_load);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(eplb_prepare_timeout_seconds);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(expert_parallel_degree);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(rank_tablefile);
+  visit_eplb_fields(
+      [&](const auto& field) { (this->*field.set)(*field.flag); });
 }
 
 void EPLBConfig::from_json(const JsonReader& json) {
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_eplb);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(redundant_experts_num);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(eplb_update_interval);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(eplb_min_peak_load_improvement);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(eplb_policy_kind);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(eplb_use_decode_only_load);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(eplb_prepare_timeout_seconds);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(expert_parallel_degree);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(rank_tablefile);
+  // Legacy callers retain the from_flags/from_json contract. Startup instead
+  // copies typed requested values before any configuration writes flags back.
+  const auto flags = config::FlagInputSnapshot::capture();
+  visit_eplb_fields([&](const auto& field) {
+    if (flags.is_specified(field.name)) {
+      return;
+    }
+    using T = typename std::decay_t<decltype(field)>::Value;
+    if (auto value = json.value<T>(field.name)) {
+      (this->*field.set)(*value);
+    }
+    *field.flag = (this->*field.get)();
+  });
 }
 
 void EPLBConfig::append_config_json(nlohmann::ordered_json& config_json) const {
   const EPLBConfig default_config;
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_eplb);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, redundant_experts_num);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, eplb_update_interval);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, eplb_min_peak_load_improvement);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, eplb_policy_kind);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, eplb_use_decode_only_load);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, eplb_prepare_timeout_seconds);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, expert_parallel_degree);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, rank_tablefile);
+  visit_eplb_fields([&](const auto& field) {
+    const auto& value = (this->*field.get)();
+    if (value != (default_config.*field.get)()) {
+      config_json[field.name] = value;
+    }
+  });
 }
 
 EPLBConfig& EPLBConfig::get_instance() {
@@ -111,10 +201,20 @@ EPLBConfig& EPLBConfig::get_instance() {
 }
 
 void EPLBConfig::initialize() {
-  from_flags();
+  auto input =
+      eplb_config_input_from_flags(config::FlagInputSnapshot::capture());
   if (const auto& json_config = config::get_parsed_json_config()) {
-    from_json(*json_config);
+    merge_eplb_config_json(input, *json_config);
   }
+  initialize(input);
+}
+
+void EPLBConfig::initialize(const EplbConfigInput& input) {
+  *this = resolve_eplb_config(input);
+  // Preserve process-global consumers only at the explicit application
+  // boundary.
+  visit_eplb_fields(
+      [&](const auto& field) { *field.flag = (this->*field.get)(); });
 }
 
 }  // namespace xllm
