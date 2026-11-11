@@ -29,6 +29,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/common/global_flags.h"
 #include "core/common/types.h"
+#include "core/framework/config/config_utils.h"
 #include "core/framework/config/dit_config.h"
 #include "core/framework/model_loader/dit_model_loader.h"
 #include "core/platform/device.h"
@@ -122,6 +123,15 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
     LOG(WARNING) << "could not find model_type: " << model_type
                  << ", using model_id: " << options_.model_id() << " instead.";
     model_type = options_.model_id();
+  }
+
+  // H3 was dense before cache integration. Preserve that default while
+  // respecting explicit CLI and JSON policy choices, including TaylorSeer.
+  const auto& json_config = config::get_parsed_json_config();
+  if (model_type == "MiniMaxH3ModularPipeline" &&
+      !config::is_flag_specified("dit_cache_policy") &&
+      !(json_config && json_config->contains("dit_cache_policy"))) {
+    cache_config.selected_policy = PolicyType::None;
   }
 
   dit_context_ = DiTModelContext(parallel_args_,

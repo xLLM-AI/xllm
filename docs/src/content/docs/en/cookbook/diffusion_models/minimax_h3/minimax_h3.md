@@ -180,3 +180,47 @@ Resolution and frame count are aligned to model requirements; the resulting
 duration must be between 5 and 15 seconds. The request above produces
 1344×768 video with 124 frames at 24 FPS. Other tasks, checkpoint formats,
 dtypes, and parallel layouts require separate validation.
+
+## Transformer cache
+
+H3 uses dense inference by default. To enable approximate TaylorSeer caching,
+explicitly set `--dit_cache_policy=TaylorSeer` (or `"dit_cache_policy": "TaylorSeer"`
+in the JSON configuration). For a 50-step request, replace the cache arguments
+in the service command with:
+
+```bash
+--dit_cache_policy=TaylorSeer \
+--dit_cache_warmup_steps=45 \
+--dit_cache_skip_interval_steps=2 \
+--dit_cache_n_derivatives=1
+```
+
+The interval must be greater than zero; `1` computes every denoising step.
+Warmup steps and derivative order must be nonnegative. Cache history is local to
+each request and each SP shard. The cache approximates the packed video/audio/text
+transformer block output; timestep-dependent output normalization, media projection,
+scheduler updates, and VAE decoding still execute normally. Caching changes the
+numerical result and requires workload-specific quality validation. Set
+`--dit_cache_policy=None` for dense inference.
+
+To use FBCache instead of TaylorSeer or dense inference, replace the cache
+arguments in the service command with the following. These settings are for a
+50-step request; keep the same conditioning and HTTP request format:
+
+```bash
+--dit_cache_policy=FBCache \
+--dit_cache_warmup_steps=45 \
+--dit_cache_residual_diff_threshold=0.09
+```
+
+Warmup steps and the residual threshold must be nonnegative. Setting the
+threshold to `0` disables reuse; setting warmup to at least the request's
+denoising step count also keeps every step fully computed. Approximate reuse
+changes numerical results, so choose settings using video and audio quality
+checks for your workload.
+
+FBCache cannot be combined with rolling weight loading. For TP=1, explicitly
+set `--enable_rolling_load=false`; all resident weights and inference workspace
+must then fit on one device. Disabling rolling does not guarantee that TP=1
+fits. Use the multi-device layouts above when memory is insufficient. H3 supports
+only `None`, `TaylorSeer`, and `FBCache`; `FBCacheTaylorSeer` is unsupported.

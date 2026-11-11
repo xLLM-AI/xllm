@@ -59,8 +59,7 @@ class TaylorSeer : public DitCacheImpl {
 
  private:
   // Compute approximate derivatives of Y using previous steps
-  std::pair<std::vector<torch::Tensor>, std::vector<bool>>
-  approximate_derivative(const torch::Tensor& Y);
+  std::vector<torch::Tensor> approximate_derivative(const torch::Tensor& Y);
 
  private:
   bool use_cache_ = false;
@@ -69,10 +68,7 @@ class TaylorSeer : public DitCacheImpl {
   int skip_interval_steps_;
   int last_non_approximated_step_;
 
-  std::vector<torch::Tensor> dY_prev_;
   std::vector<torch::Tensor> dY_current_;
-  std::vector<bool> valid_prev_;
-  std::vector<bool> valid_current_;
 };
 
 }  // namespace xllm

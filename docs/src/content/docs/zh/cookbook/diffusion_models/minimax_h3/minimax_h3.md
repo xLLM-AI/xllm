@@ -167,3 +167,40 @@ ffprobe -v error -show_entries \
 当前服务仅支持 batch 1 和 `num_videos_per_prompt=1`。分辨率和帧数会按模型要求
 对齐，对齐后时长需在 5～15 秒之间；上述请求生成 1344×768、124 帧、24 FPS 的音视频。
 其他任务、权重格式、精度和并行布局需单独验证。
+
+## Transformer 缓存
+
+H3 默认使用完整计算。要开启 TaylorSeer 近似缓存，必须显式指定
+`--dit_cache_policy=TaylorSeer`，或在 JSON 配置中设置
+`"dit_cache_policy": "TaylorSeer"`。对于 50 步请求，可将服务启动命令中的缓存参数改为：
+
+```bash
+--dit_cache_policy=TaylorSeer \
+--dit_cache_warmup_steps=45 \
+--dit_cache_skip_interval_steps=2 \
+--dit_cache_n_derivatives=1
+```
+
+计算间隔必须大于零；设为 `1` 时每个去噪步都完整计算。预热步数和导数阶数必须
+非负。缓存历史按请求和 SP 分片隔离。缓存近似的是 video/audio/text 打包序列的
+Transformer block 输出；依赖当前时间步的输出归一化、媒体投影、采样器更新和
+VAE 解码仍正常执行。近似缓存会改变数值结果，需要针对实际任务验证生成质量。
+使用 `--dit_cache_policy=None` 可恢复完整计算。
+
+要用 FBCache 替换 TaylorSeer 或完整计算，请将服务启动命令中的缓存参数
+替换为以下内容。这组设置用于 50 步请求；文本条件和 HTTP 请求格式保持一致：
+
+```bash
+--dit_cache_policy=FBCache \
+--dit_cache_warmup_steps=45 \
+--dit_cache_residual_diff_threshold=0.09
+```
+
+预热步数和残差阈值必须非负。阈值设为 `0` 时不复用缓存；预热步数不小于请求的
+去噪步数时，每步也均完整计算。近似复用会改变数值结果，需针对实际任务同时检查
+视频和音频质量来选择参数。
+
+FBCache 不能与滚动加载权重同时使用。TP=1 时必须显式设置
+`--enable_rolling_load=false`，此时单个设备须能容纳完整常驻权重及推理工作区；
+关闭滚动加载并不保证 TP=1 能够装下模型。显存不足时，请使用上面的多卡布局。
+H3 仅支持 `None`、`TaylorSeer` 和 `FBCache`，不支持 `FBCacheTaylorSeer`。

@@ -38,10 +38,7 @@ void TaylorSeer::init(const DiTCacheConfig& cfg,
 
 void TaylorSeer::reset_cache() {
   DitCacheImpl::reset_cache();
-  dY_prev_.assign(order_, torch::Tensor());
   dY_current_.assign(order_, torch::Tensor());
-  valid_prev_.assign(order_, false);
-  valid_current_.assign(order_, false);
   current_step_ = 1;
   last_non_approximated_step_ = 1;
   use_cache_ = false;
@@ -49,38 +46,42 @@ void TaylorSeer::reset_cache() {
 
 void TaylorSeer::mark_step_begin() { ++current_step_; }
 
-std::pair<std::vector<torch::Tensor>, std::vector<bool>>
-TaylorSeer::approximate_derivative(const torch::Tensor& Y) {
+std::vector<torch::Tensor> TaylorSeer::approximate_derivative(
+    const torch::Tensor& Y) {
   std::vector<torch::Tensor> dY(order_);
-  std::vector<bool> valid(order_, false);
 
   dY[0] = Y.clone();
-  valid[0] = true;
 
-  int elapsed_steps = current_step_ - last_non_approximated_step_;
-  if (elapsed_steps <= 0) return {dY, valid};
-
-  for (int i = 0; i < n_derivatives_; ++i) {
-    if (i >= static_cast<int>(valid_prev_.size()) || !valid_prev_[i] ||
-        !dY_prev_[i].defined()) {
-      break;
-    }
-    dY[i + 1] = (dY[i] - dY_prev_[i]) / static_cast<double>(elapsed_steps);
-    valid[i + 1] = true;
+  int64_t elapsed_steps = current_step_ - last_non_approximated_step_;
+  if (elapsed_steps <= 0) {
+    return dY;
   }
 
-  return {dY, valid};
+  for (int32_t i = 0; i < n_derivatives_; ++i) {
+    if (!dY_current_[i].defined()) {
+      break;
+    }
+    dY[i + 1] = (dY[i] - dY_current_[i]) / static_cast<double>(elapsed_steps);
+  }
+
+  return dY;
 }
 
 torch::Tensor TaylorSeer::approximate_value() {
-  if (!dY_current_[0].defined()) return torch::Tensor();
+  if (!dY_current_[0].defined()) {
+    return torch::Tensor();
+  }
 
-  int elapsed_steps = current_step_ - last_non_approximated_step_;
-  if (elapsed_steps < 0) return torch::Tensor();
+  int64_t elapsed_steps = current_step_ - last_non_approximated_step_;
+  if (elapsed_steps < 0) {
+    return torch::Tensor();
+  }
 
   torch::Tensor output = torch::zeros_like(dY_current_[0]);
-  for (int i = 0; i < order_; ++i) {
-    if (!valid_current_[i]) break;
+  for (int32_t i = 0; i < order_; ++i) {
+    if (!dY_current_[i].defined()) {
+      break;
+    }
     double coef =
         std::pow(static_cast<double>(elapsed_steps), i) / factorial(i);
     output += dY_current_[i] * coef;
@@ -89,19 +90,7 @@ torch::Tensor TaylorSeer::approximate_value() {
 }
 
 void TaylorSeer::update(const torch::Tensor& Y) {
-  dY_prev_ = dY_current_;
-  valid_prev_ = valid_current_;
-
-  if (!dY_current_[0].defined()) {
-    for (int i = 0; i < order_; ++i) {
-      dY_current_[i] = (i == 0) ? Y.clone() : torch::zeros_like(Y);
-      valid_current_[i] = (i == 0);
-    }
-  } else {
-    auto [new_dY, new_valid] = approximate_derivative(Y);
-    dY_current_ = std::move(new_dY);
-    valid_current_ = std::move(new_valid);
-  }
+  dY_current_ = approximate_derivative(Y);
   last_non_approximated_step_ = current_step_;
 }
 

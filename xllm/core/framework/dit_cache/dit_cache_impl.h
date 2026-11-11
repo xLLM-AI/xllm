@@ -53,6 +53,7 @@ class DitCacheImpl {
     reset_cache();
     infer_steps_ = context.infer_steps;
     num_blocks_ = context.num_blocks;
+    single_stream_ = context.single_stream;
   }
 
  protected:
@@ -60,6 +61,7 @@ class DitCacheImpl {
   int64_t current_step_ = 0;
   int64_t infer_steps_ = 0;
   int64_t num_blocks_ = 0;
+  bool single_stream_ = false;
   TensorMap buffers;
   // Non-owning: the worker's ParallelArgs outlives this cache singleton.
   const ParallelArgs* parallel_args_ = nullptr;

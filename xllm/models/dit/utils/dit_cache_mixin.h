@@ -152,11 +152,9 @@ class DiTCacheMixin {
   // preceding double-stream loop (keeping ResidualCache's block boundaries
   // accurate across both loops).
   //
-  // NOTE: the after-block map intentionally omits `encoder_hidden_states`. For
-  // FBCache-family policies the absence of that key forces a pass-through on
-  // single-stream blocks (see FBCache::on_after_block). Models that instead
-  // want the cache to engage on the single stream must drive DiTCache directly
-  // rather than use this helper.
+  // The after-block map omits encoder_hidden_states. FBCache-family policies
+  // engage here only when the request context explicitly selects single_stream;
+  // existing mixed dual-/single-stream callers retain their pass-through path.
   template <typename BlockFn>
   void exec_cached_single_blocks(int64_t num_blocks,
                                  torch::Tensor& hidden_states,

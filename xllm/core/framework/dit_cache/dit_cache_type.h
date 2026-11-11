@@ -57,6 +57,8 @@ struct CacheBlockOut {
 struct CacheContext {
   int64_t infer_steps = 0;
   int64_t num_blocks = 0;
+  // The cached body has one packed stream rather than separate encoder states.
+  bool single_stream = false;
 };
 
 }  // namespace xllm
