@@ -26,6 +26,10 @@ limitations under the License.
 
 namespace xllm {
 
+bool is_vision_grid_key(const MMKey& key) {
+  return key == "image_grid_thw" || key == "video_grid_thw";
+}
+
 MMBatchData::MMBatchData(std::vector<MMData> data) {
   this->batch(std::move(data));
 }
@@ -60,8 +64,7 @@ void move_dict_to_device(MMDict& dict,
                          bool keep_vision_grid_on_cpu) {
   for (auto& [key, value] : dict) {
     // Python Qwen3-VL consumes grid values only as host control metadata.
-    if (keep_vision_grid_on_cpu &&
-        (key == "image_grid_thw" || key == "video_grid_thw")) {
+    if (keep_vision_grid_on_cpu && is_vision_grid_key(key)) {
       continue;
     }
     if (std::holds_alternative<torch::Tensor>(value)) {

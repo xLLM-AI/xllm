@@ -23,12 +23,12 @@ limitations under the License.
 #include <future>
 #include <string>
 #include <utility>
-#include <vector>
 
 #include "core/framework/config/execution_config.h"
 #include "core/framework/multimodal/mm_visitor.h"
 #include "core/runtime/forward_shared_memory_transport.h"
 #include "core/runtime/vlm_forward_params.h"
+#include "tests/core/framework/multimodal/vision_test_data.h"
 
 namespace xllm {
 class ForwardSharedMemoryTransportTestPeer final {
@@ -66,22 +66,8 @@ VlmForwardInput make_vision_input(int64_t frames, float pixel_value = 1.0F) {
   input.input_params.attention.host.q_seq_lens = {2};
   input.input_params.attention.host.q_cu_seq_lens = {0, 2};
   input.input_params.attention.host.kv_seq_lens = {2};
-  MMItemVec items;
-  items.reserve(2);
-  items.emplace_back(
-      MMType::IMAGE,
-      MMDict{{"image_grid_thw", torch::tensor({{1, 4, 4}}, torch::kInt32)},
-             {"pixel_values", torch::full({16, 8}, pixel_value)}});
-  items.emplace_back(
-      MMType::VIDEO,
-      MMDict{
-          {"video_grid_thw",
-           torch::tensor({{frames, int64_t{4}, int64_t{4}}}, torch::kInt64)},
-          {"pixel_values_videos", torch::full({frames * 16, 8}, pixel_value)}});
-  std::vector<MMData> requests;
-  requests.reserve(1);
-  requests.emplace_back(MMType::IMAGE | MMType::VIDEO, std::move(items));
-  input.input_params.multimodal.mm_data.batch(std::move(requests));
+  input.input_params.multimodal.mm_data =
+      test::make_vision_batch(frames, pixel_value);
   return input;
 }
 

@@ -29,6 +29,9 @@ limitations under the License.
 
 namespace xllm {
 
+// Grid keys whose values describe image/video patch layout.
+bool is_vision_grid_key(const MMKey& key);
+
 class MMBatchData {
  public:
   MMBatchData() = default;

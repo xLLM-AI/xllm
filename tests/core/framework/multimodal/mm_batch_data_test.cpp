@@ -23,25 +23,14 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/multimodal/mm_visitor.h"
+#include "tests/core/framework/multimodal/vision_test_data.h"
 
 namespace xllm {
 namespace {
 
 TEST(MMBatchDataTest, HostGridPolicySurvivesPerItemRegather) {
   const torch::Tensor grid = torch::tensor({{1, 4, 4}}, torch::kInt32);
-  const torch::Tensor pixels = torch::ones({16, 8});
-  MMItemVec items;
-  items.reserve(2);
-  items.emplace_back(
-      MMType::IMAGE,
-      MMDict{{"image_grid_thw", grid}, {"pixel_values", pixels}});
-  items.emplace_back(
-      MMType::VIDEO,
-      MMDict{{"video_grid_thw", grid}, {"pixel_values_videos", pixels}});
-  std::vector<MMData> requests;
-  requests.reserve(1);
-  requests.emplace_back(MMType::IMAGE | MMType::VIDEO, std::move(items));
-  const MMBatchData original(std::move(requests));
+  const MMBatchData original = test::make_vision_batch(/*frames=*/1);
 
   auto moved = MMBatchData::to(original,
                                torch::Device(torch::kMeta),
