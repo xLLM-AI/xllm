@@ -30,7 +30,7 @@ limitations under the License.
 #include "processors/minicpmv_prompt_processor.h"
 #include "processors/mistral3_image_processor.h"
 #include "processors/mistral3_prompt_processor.h"
-#include "processors/multimodal_processor.h"
+#include "processors/multimodal_processor_pipeline.h"
 #include "processors/qwen2_vl_image_processor.h"
 #include "processors/qwen2_vl_prompt_processor.h"
 #include "processors/qwen2_vl_video_processor.h"

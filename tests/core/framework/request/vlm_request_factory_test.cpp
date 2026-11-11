@@ -48,7 +48,7 @@ using test::make_capture_callback;
 // the tokens it emits, without pulling in any real vision/audio pipeline.
 class FakeProcessor final : public MultimodalProcessorBase {
  public:
-  FakeProcessor() : MultimodalProcessorBase(/*tokenizer=*/nullptr) {}
+  FakeProcessor() = default;
 
   bool process_prompt(std::string& /*prompt*/,
                       MMData& /*mm_data*/,

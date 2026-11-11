@@ -22,7 +22,7 @@ limitations under the License.
 #include "models/llm/qwen3.h"
 #include "models/model_registry.h"
 #include "models/vlm/qwen3_vl_base.h"
-#include "processors/multimodal_processor.h"
+#include "processors/multimodal_processor_pipeline.h"
 #include "processors/qwen2_vl_image_processor.h"
 #include "processors/qwen3_vl_prompt_processor.h"
 #include "processors/qwen3_vl_video_processor.h"

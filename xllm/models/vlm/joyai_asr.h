@@ -27,7 +27,7 @@ limitations under the License.
 #include "processors/image_processor.h"
 #include "processors/joyai_asr_audio_processor.h"
 #include "processors/joyai_asr_prompt_processor.h"
-#include "processors/multimodal_processor.h"
+#include "processors/multimodal_processor_pipeline.h"
 #include "processors/video_processor.h"
 
 namespace xllm {
