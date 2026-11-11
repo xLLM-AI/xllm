@@ -74,8 +74,9 @@ A platform package owns everything specific to its hardware:
 
 Normalization APIs are exported by `xllm_kernel` and
 `xllm_kernel.ops.normalization`. Triton and TileLang registration modules are at `normalization/triton.py` and
-`normalization/tilelang.py`. Private DSL source lives in `normalization/_triton/`
-and `normalization/_tilelang.py`. Models and layers import these APIs directly;
+`normalization/tilelang.py`. Triton JIT kernels and launchers live with their
+registration in `triton.py`; TileLang DSL remains in `_tilelang.py` so AOT build
+tools can import it independently. Models and layers import these APIs directly;
 `kernels_npu` does not export normalization operators. Each normalization API
 uses its declared operation contract and startup-prepared callable. NPU runtime
 initialization imports and registers the Torch, ACLNN, Triton, and compiled
@@ -101,8 +102,9 @@ same Python DSL implementation before the xLLM binary exists.
 
 ### Python DSL ownership and AOT reuse
 
-`xllm_kernel.ops.normalization/_triton/` and `normalization/_tilelang.py` own
-normalization DSL source; `kernels_npu/tilelang/` and `kernels_npu/triton/` own
+`xllm_kernel.ops.normalization.triton` owns Triton normalization source, while
+`normalization/_tilelang.py` owns the independently importable TileLang DSL;
+`kernels_npu/tilelang/` and `kernels_npu/triton/` own
 the remaining DSL source. A leaf module contains the program builder, JIT
 launcher, implementation-local
 validation and reference/debug helpers. Runtime semantic modules may call these

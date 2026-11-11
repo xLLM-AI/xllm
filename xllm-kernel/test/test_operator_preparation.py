@@ -22,29 +22,34 @@ class _Vendor:
 
 
 @pytest.fixture
-def _triton_launchers(monkeypatch: pytest.MonkeyPatch) -> None:
-    for leaf, function in (
-        ("eh_norm", "fused_eh_norm"),
-        ("rms_norm", "rms_norm_sigmoid_gated"),
-        ("split_qkv_rmsnorm_rope", "split_qkv_rmsnorm_rope"),
-    ):
-        name = f"xllm_kernel.ops.normalization._triton.{leaf}"
-        module = ModuleType(name)
-        setattr(module, function, lambda *args, **kwargs: args[0])
-        monkeypatch.setitem(sys.modules, name, module)
+def _triton_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Substitute device SDK entrypoints while importing the real normalization
+    # kernels, launchers and registration module.
+    sdk = ModuleType("triton")
+    language = ModuleType("triton.language")
+    sdk.__path__ = []
+    sdk.language = language
+    sdk.jit = lambda function: function
+    monkeypatch.setitem(sys.modules, "triton", sdk)
+    monkeypatch.setitem(sys.modules, "triton.language", language)
+    utilities = ModuleType("xllm_kernel.utils.triton")
+    utilities.get_vectorcore_num = lambda: 48
+    for name in ("extract_slice", "get_element", "insert_slice"):
+        setattr(utilities, name, lambda *args, **kwargs: None)
+    monkeypatch.setitem(sys.modules, "xllm_kernel.utils.triton", utilities)
 
 
 def test_all_backend_modules_register_unique_variants_and_execute_public_binding(
     monkeypatch: pytest.MonkeyPatch,
-    _triton_launchers: None,
+    _triton_sdk: None,
 ) -> None:
     monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: PlatformEnum.NPU))
     registry = KernelRegistry()
     monkeypatch.setattr(KernelRegistry, "_instance", registry)
     monkeypatch.setitem(sys.modules, "torch_npu", _Vendor())
     monkeypatch.setattr(torch, "npu", SimpleNamespace(get_device_name=lambda: "Ascend910B2"), raising=False)
-    # Native schemas and DSL launchers are unavailable in this CPU test. The
-    # implementation adapters, import-time registration and registry are real.
+    # Native schemas and device SDKs are unavailable in this CPU test. The
+    # kernels, launchers, import-time registration and registry are real.
     monkeypatch.setattr(torch.ops, "xllm_ops", _Vendor(), raising=False)
     real_find_spec = importlib.util.find_spec
     monkeypatch.setattr(
@@ -235,7 +240,7 @@ def test_missing_triton_excludes_backend_before_import(monkeypatch: pytest.Monke
 def test_merged_triton_module_keeps_native_and_jit_dependencies_independent(
     jit_available: bool,
     monkeypatch: pytest.MonkeyPatch,
-    _triton_launchers: None,
+    _triton_sdk: None,
 ) -> None:
     registry = KernelRegistry()
     monkeypatch.setattr(KernelRegistry, "_instance", registry)
