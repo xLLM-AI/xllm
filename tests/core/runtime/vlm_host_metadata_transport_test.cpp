@@ -19,6 +19,7 @@ limitations under the License.
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <string>
 #include <utility>
@@ -30,6 +31,14 @@ limitations under the License.
 #include "core/runtime/vlm_forward_params.h"
 
 namespace xllm {
+class ForwardSharedMemoryTransportTestPeer final {
+ public:
+  static void observe_input_wait(ForwardSharedMemoryTransport& transport,
+                                 std::function<void()> observer) {
+    transport.input_wait_observer_ = std::move(observer);
+  }
+};
+
 namespace {
 
 class VlmHostMetadataTransportTest : public ::testing::Test {
@@ -49,7 +58,7 @@ class VlmHostMetadataTransportTest : public ::testing::Test {
   bool previous_contiguous_ = false;
 };
 
-VlmForwardInput make_vision_input(int64_t frames) {
+VlmForwardInput make_vision_input(int64_t frames, float pixel_value = 1.0F) {
   VlmForwardInput input;
   input.token_ids = torch::tensor({11, 23}, torch::kInt32);
   input.positions = torch::tensor({0, 1}, torch::kInt32);
@@ -62,12 +71,13 @@ VlmForwardInput make_vision_input(int64_t frames) {
   items.emplace_back(
       MMType::IMAGE,
       MMDict{{"image_grid_thw", torch::tensor({{1, 4, 4}}, torch::kInt32)},
-             {"pixel_values", torch::ones({16, 8})}});
+             {"pixel_values", torch::full({16, 8}, pixel_value)}});
   items.emplace_back(
       MMType::VIDEO,
-      MMDict{{"video_grid_thw",
-              torch::tensor({{frames, int64_t{4}, int64_t{4}}}, torch::kInt64)},
-             {"pixel_values_videos", torch::ones({frames * 16, 8})}});
+      MMDict{
+          {"video_grid_thw",
+           torch::tensor({{frames, int64_t{4}, int64_t{4}}}, torch::kInt64)},
+          {"pixel_values_videos", torch::full({frames * 16, 8}, pixel_value)}});
   std::vector<MMData> requests;
   requests.reserve(1);
   requests.emplace_back(MMType::IMAGE | MMType::VIDEO, std::move(items));
@@ -132,22 +142,92 @@ TEST_F(VlmHostMetadataTransportTest,
       name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
   const torch::Device device(torch::kPrivateUse1, 0);
   VlmForwardInput first;
+  std::promise<void> entered_wait;
+  auto entered = entered_wait.get_future();
+  std::promise<void> resume_wait;
+  auto resume = resume_wait.get_future();
+  ForwardSharedMemoryTransportTestPeer::observe_input_wait(reader, [&]() {
+    entered_wait.set_value();
+    resume.wait();
+  });
   auto pending_read = std::async(std::launch::async, [&]() {
     return reader.input_read(
         first, device, InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ);
   });
-  EXPECT_EQ(pending_read.wait_for(std::chrono::milliseconds(20)),
-            std::future_status::timeout);
-  // Model initialization can finish while the polling thread is waiting.
+  const std::future_status wait_status =
+      entered.wait_for(std::chrono::seconds(5));
+  // Publish only after the reader has entered wait_for_input. A policy cached
+  // before the wait will deterministically retain the old false value.
   reader.set_keep_vision_grid_on_cpu(/*enabled=*/true);
-  ASSERT_TRUE(writer.input_write(make_vision_input(/*frames=*/2)));
-  ASSERT_TRUE(pending_read.get());
+  const bool write_ok = writer.input_write(make_vision_input(/*frames=*/2));
+  if (!write_ok || wait_status != std::future_status::ready) {
+    reader.stop_input_read();
+  }
+  resume_wait.set_value();
+  const bool read_ok = pending_read.get();
+  ASSERT_EQ(wait_status, std::future_status::ready);
+  ASSERT_TRUE(write_ok);
+  ASSERT_TRUE(read_ok);
+  ForwardSharedMemoryTransportTestPeer::observe_input_wait(reader, {});
   ASSERT_TRUE(writer.input_write(make_vision_input(/*frames=*/3)));
   VlmForwardInput second;
   ASSERT_TRUE(reader.input_read(
       second, device, InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ));
   expect_host_grids(first, /*frames=*/2);
   expect_host_grids(second, /*frames=*/3);
+}
+
+TEST_F(VlmHostMetadataTransportTest,
+       DeferredPrepareOwnsPayloadAcrossReuseAndUnmapping) {
+  const torch::Device device(torch::kPrivateUse1, 0);
+  VlmForwardInput first;
+  VlmForwardInput second;
+  {
+    const std::string name = "opt03_deferred_grid_" + std::to_string(getpid());
+    constexpr size_t kSegmentBytes = 1 << 20;
+    bool is_creator = false;
+    ForwardSharedMemoryTransport writer(
+        name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
+    ASSERT_TRUE(is_creator);
+    ForwardSharedMemoryTransport reader(
+        name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
+    reader.set_keep_vision_grid_on_cpu(/*enabled=*/true);
+    ASSERT_TRUE(writer.input_write(make_vision_input(/*frames=*/2)));
+    ASSERT_TRUE(reader.input_read(
+        first,
+        device,
+        InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+    ASSERT_FALSE(first.runtime.device_tensors_ready);
+    ASSERT_TRUE(first.runtime.input_host_buffer_has_layout);
+    // Change pixels as well as the grid so stale/aliased payloads are visible.
+    auto next = make_vision_input(/*frames=*/3, /*pixel_value=*/7.0F);
+    ASSERT_TRUE(writer.input_write(next));
+    ASSERT_TRUE(reader.input_read(
+        second,
+        device,
+        InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  }
+  // Both SHM mappings are gone before worker-side unpacking/materialization.
+  auto prepared_first = first.to(device,
+                                 torch::kFloat32,
+                                 /*keep_vision_grid_on_cpu=*/true);
+  auto prepared_second = second.to(device,
+                                   torch::kFloat32,
+                                   /*keep_vision_grid_on_cpu=*/true);
+  expect_host_grids(prepared_first, /*frames=*/2);
+  expect_host_grids(prepared_second, /*frames=*/3);
+  for (const std::string key : {"pixel_values", "pixel_values_videos"}) {
+    const auto old_pixels =
+        prepared_first.input_params.multimodal.mm_data.get<torch::Tensor>(key)
+            .value()
+            .cpu();
+    const auto new_pixels =
+        prepared_second.input_params.multimodal.mm_data.get<torch::Tensor>(key)
+            .value()
+            .cpu();
+    EXPECT_TRUE(torch::equal(old_pixels, torch::ones_like(old_pixels)));
+    EXPECT_TRUE(torch::equal(new_pixels, torch::full_like(new_pixels, 7)));
+  }
 }
 
 }  // namespace
