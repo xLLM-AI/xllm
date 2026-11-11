@@ -13,26 +13,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "processors/multimodal_processor.h"
+#include "processors/multimodal_processor_pipeline.h"
 
 #include <utility>
 
 #include "common/metrics.h"
-#include "core/framework/config/dit_config.h"
 #include "core/framework/tokenizer/tokenizer.h"
 #include "util/timer.h"
 
 namespace xllm {
 
-MultimodalProcessorBase::MultimodalProcessorBase(
+MultimodalProcessorPipeline::MultimodalProcessorPipeline(
     std::shared_ptr<Tokenizer> tokenizer,
-    const TokenizerArgs& tokenizer_args)
-    : tokenizer_(std::move(tokenizer)), tokenizer_args_(tokenizer_args) {}
+    const TokenizerArgs& tokenizer_args,
+    int32_t max_sequence_length)
+    : tokenizer_(std::move(tokenizer)),
+      tokenizer_args_(tokenizer_args),
+      max_sequence_length_(max_sequence_length) {}
 
-MultimodalProcessorBase::~MultimodalProcessorBase() = default;
+MultimodalProcessorPipeline::~MultimodalProcessorPipeline() = default;
 
-bool MultimodalProcessorBase::tokenize(const std::string& prompt,
-                                       std::vector<int32_t>& token_ids) const {
+bool MultimodalProcessorPipeline::tokenize(
+    const std::string& prompt,
+    std::vector<int32_t>& token_ids) const {
   Timer timer;
   if (!tokenizer_->encode(prompt, &token_ids)) {
     LOG(ERROR) << "Failed to encode prompt: " + prompt;
@@ -44,8 +47,8 @@ bool MultimodalProcessorBase::tokenize(const std::string& prompt,
   return true;
 }
 
-void MultimodalProcessorBase::assign_mm_hash_keys(const MMInput& mm_input,
-                                                  MMData& mm_data) const {
+void MultimodalProcessorPipeline::assign_mm_hash_keys(const MMInput& mm_input,
+                                                      MMData& mm_data) const {
   const std::vector<MMInputItem>& input_items = mm_input.items();
   MMItemVec& output_items = mm_data.items<MMItemVec>();
   CHECK_EQ(input_items.size(), output_items.size());
@@ -58,22 +61,20 @@ void MultimodalProcessorBase::assign_mm_hash_keys(const MMInput& mm_input,
   }
 }
 
-void MultimodalProcessorBase::pad_to_max_length(
+void MultimodalProcessorPipeline::pad_to_max_length(
     std::vector<int32_t>& token_ids) const {
-  const int32_t max_sequence_length =
-      DiTConfig::get_instance().max_sequence_length();
-  if (max_sequence_length <= 0 || tokenizer_args_.pad_token().empty()) {
+  if (max_sequence_length_ <= 0 || tokenizer_args_.pad_token().empty()) {
     return;
   }
 
   const auto pad_id = tokenizer_->token_to_id(tokenizer_args_.pad_token());
   if (!pad_id.has_value() ||
-      static_cast<int32_t>(token_ids.size()) >= max_sequence_length) {
+      static_cast<int32_t>(token_ids.size()) >= max_sequence_length_) {
     return;
   }
 
   const int32_t pad_count =
-      max_sequence_length - static_cast<int32_t>(token_ids.size());
+      max_sequence_length_ - static_cast<int32_t>(token_ids.size());
   token_ids.insert(token_ids.begin(), pad_count, pad_id.value());
 }
 

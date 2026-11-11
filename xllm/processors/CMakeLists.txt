@@ -14,20 +14,21 @@ cc_library(
     torch
 )
 
-# Define the base dependencies
-set(BASE_DEPS
-  :multimodal
-  :processor_cache
-  :common
-  :kv_cache
-  :prefix_cache
-  :block
-  :chat_template
-  glog::glog
-  torch
-  torch_python
+cc_library(
+  NAME
+    python_image_processor
+  HDRS
+    python_image_processor.h
+  SRCS
+    python_image_processor.cpp
+  DEPS
+    :config
+    :util
+    glog::glog
+    torch
+  LINKOPTS
+    torch_python
 )
-
 
 # Define the library
 cc_library(
@@ -37,6 +38,8 @@ cc_library(
     transforms.h
     cacheable_multimodal_processor.h
     multimodal_processor.h
+    multimodal_processor_pipeline.h
+    processor_util.h
     audio_processor.h
     image_processor.h
     prompt_processor.h
@@ -61,7 +64,7 @@ cc_library(
   SRCS
     transforms.cpp
     cacheable_multimodal_processor.cpp
-    multimodal_processor.cpp
+    multimodal_processor_pipeline.cpp
     clip_image_processor.cpp
     clip_prompt_processor.cpp
     glm4v_image_processor.cpp
@@ -81,5 +84,11 @@ cc_library(
     qwen3_vl_video_processor.cpp
   DEPS
     :util
-    ${BASE_DEPS}
+    :multimodal
+    :processor_cache
+    :common
+    :config
+    :python_image_processor
+    glog::glog
+    torch
 )

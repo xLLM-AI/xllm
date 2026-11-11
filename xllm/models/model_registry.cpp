@@ -666,7 +666,8 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     const ModelArgs& model_args,
     std::shared_ptr<Tokenizer> tokenizer,
     int64_t max_cache_items,
-    const TokenizerArgs& tokenizer_args) {
+    const TokenizerArgs& tokenizer_args,
+    int32_t max_sequence_length) {
   const std::string& model_type = model_args.model_type();
   std::string resolved_name;
   std::string error_message;
@@ -679,8 +680,10 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
   CHECK(multimodal_processor_factory != nullptr)
       << "Missing multimodal processor for model type: " << model_type;
   std::unique_ptr<MultimodalProcessorBase> processor =
-      multimodal_processor_factory(
-          model_args, std::move(tokenizer), tokenizer_args);
+      multimodal_processor_factory(model_args,
+                                   std::move(tokenizer),
+                                   tokenizer_args,
+                                   max_sequence_length);
   if (max_cache_items == 0) {
     return processor;
   }
