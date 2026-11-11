@@ -16,6 +16,7 @@ cc_library(
     mm_input.h
     mm_item_state.h
     mm_type.h
+    multimodal_utils.h
   SRCS
     download_headers.cpp
     mm_batch_data.cpp
@@ -27,12 +28,14 @@ cc_library(
     mm_handler.cpp
     mm_input.cpp
     mm_type.cpp
+    multimodal_utils.cpp
   DEPS
     :content_hash
     common
     util
     encoder_cache
     :processor_cache
+    :parallel_state
     glog::glog
     OpenSSL::Crypto
     absl::strings
@@ -41,6 +44,20 @@ cc_library(
     torch
     ${OpenCV_LIBS}
     ${FFMPEG_LIBRARIES}
+)
+
+cc_library(
+  NAME
+    mposition
+  HDRS
+    mposition.h
+  SRCS
+    mposition.cpp
+  DEPS
+    :model
+    :multimodal
+    :common
+    torch
 )
 
 # Content identities are shared without depending on the multimodal handler graph.

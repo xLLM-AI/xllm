@@ -20,8 +20,8 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "core/framework/multimodal/mposition.h"
 #include "models/model_registry.h"
-#include "models/vlm/mposition/mposition.h"
 #include "processors/glm4v_image_processor.h"
 #include "processors/glm4v_prompt_processor.h"
 #include "processors/glm4v_video_processor.h"

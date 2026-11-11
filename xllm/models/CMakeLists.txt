@@ -1,7 +1,5 @@
 include(cc_library)
 
-add_subdirectory(vlm/mposition)
-
 if(USE_NPU)
   include_directories(
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
@@ -22,7 +20,6 @@ cc_library(
     model_registry.cpp
     dit/utils/lanczos_resample.cpp
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.cpp>
-    vlm/utils/multimodal_utils.cpp
     llm/py_causal_lm.cpp
     py_model_helper.cpp
   DEPS
