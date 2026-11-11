@@ -11,9 +11,8 @@ text-to-video-and-audio (T2VA) when no image conditions are supplied.
 
 ## Environment
 
-Prepare the Ascend development environment described in the
-[Wan2.2 recipe](/en/cookbook/diffusion_models/wan/wan2_2/), then build from the
-xLLM repository root:
+Prepare the xLLM [Ascend NPU development environment](/en/hardware/ascend_npu/),
+then build from the xLLM repository root:
 
 ```bash
 git submodule update --init --recursive
@@ -97,6 +96,27 @@ it based on the compressed MP4. The standard checkpoint has 56 attention heads,
 96 video patch channels, and 32 audio channels. Parallel layouts must satisfy
 `heads % (TP * SP) == 0`, `video_patch_dim % TP == 0`, and
 `audio_in_channels % TP == 0`.
+
+## Laser Attention
+
+To enable Laser on Ascend NPUs, change the service argument above to
+`--dit_laser_attention_enabled=true`. The default is `false`. Keep the same
+checkpoint, text conditioning, request fields and parallel layout described
+in this recipe; enabling Laser does not run the text encoder.
+
+Build xLLM together with its matching `xllm_ops` submodule. Rebuild the native
+operator in a fresh build directory when updating it so generated kernel
+caches are not reused. Use the Ascend environment described above.
+
+H3 selects Laser for self-attention with at least 2,048 live tokens and a
+head dimension no greater than 128. Short sequences use the existing dense
+attention operator. H3 excludes sequence-parallel padding from attention;
+Laser handles its own sequence and head-dimension alignment. No additional
+input padding or input-range scaling is required from the user.
+
+This option provides dense, non-causal attention. It does not add support for
+external attention masks, dropout or grouped-query attention. The model and
+request limitations below still apply.
 
 ## Generate video and audio
 
