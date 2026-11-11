@@ -330,7 +330,7 @@ TEST(PyCausalLMContextKVBridgeTest, PassesSwaCacheAsSixthPythonSlot) {
   py::list python_caches = model.python_model().attr("last_caches");
   ASSERT_EQ(py::len(python_caches), 1);
   py::tuple layer_cache = python_caches[0].cast<py::tuple>();
-  ASSERT_EQ(py::len(layer_cache), 15);
+  ASSERT_EQ(py::len(layer_cache), 20);
   py::object bridged_swa = model.python_model().attr("last_swa");
   EXPECT_TRUE(bridged_swa.is(layer_cache[5]));
   EXPECT_EQ(
