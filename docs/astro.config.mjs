@@ -343,6 +343,7 @@ export default defineConfig({
 					translations: { 'zh-CN': '开发者指南' },
 					items: [
 						'dev_guide/code_arch',
+						'dev_guide/dit_architecture',
 						'design/cpp_framework_python_model_architecture',
 						'design/graph_mode_design',
 						'dev_guide/ai_coding_workflow',
