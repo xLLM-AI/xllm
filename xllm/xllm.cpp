@@ -85,16 +85,18 @@ namespace {
 
 void initialize_configs() {
   // Preserve user intent before any legacy config writes JSON values to FLAGS_.
-  auto scheduler_input =
-      scheduler_config_input_from_flags(config::FlagInputSnapshot::capture());
+  const auto flag_inputs = config::FlagInputSnapshot::capture();
+  auto scheduler_input = scheduler_config_input_from_flags(flag_inputs);
+  auto eplb_input = eplb_config_input_from_flags(flag_inputs);
   if (const auto& json_config = config::get_parsed_json_config()) {
     merge_scheduler_config_json(scheduler_input, *json_config);
+    merge_eplb_config_json(eplb_input, *json_config);
   }
 
   DisaggPDConfig::get_instance().initialize();
   DistributedConfig::get_instance().initialize();
   DiTConfig::get_instance().initialize();
-  EPLBConfig::get_instance().initialize();
+  EPLBConfig::get_instance().initialize(eplb_input);
   ExecutionConfig::get_instance().initialize();
   KernelConfig::get_instance().initialize();
   KVCacheConfig::get_instance().initialize();

@@ -167,8 +167,11 @@ bool LLMEngine::init(
     return false;
   }
 
-  eplb_controller_ = EplbController::create(
-      args_, static_cast<int32_t>(worker_clients_num_), options_.ep_size());
+  eplb_controller_ =
+      EplbController::create(args_,
+                             static_cast<int32_t>(worker_clients_num_),
+                             options_.ep_size(),
+                             options_.eplb_controller_config());
   forward_input_factory_->set_eplb_controller(eplb_controller_.get());
 
   auto kv_cache_cap = estimate_kv_cache_capacity();

@@ -20,11 +20,31 @@ limitations under the License.
 #include <string>
 
 #include "core/common/macros.h"
+#include "core/framework/config/config_input.h"
 #include "core/framework/config/option_category.h"
 
 namespace xllm {
 
 class JsonReader;
+
+// Requested values retain omission and source until legacy value resolution.
+struct EplbConfigInput {
+  config::ConfigInput<bool> enable_eplb;
+  config::ConfigInput<int32_t> redundant_experts_num;
+  config::ConfigInput<int64_t> eplb_update_interval;
+  config::ConfigInput<double> eplb_min_peak_load_improvement;
+  config::ConfigInput<std::string> eplb_policy_kind;
+  config::ConfigInput<bool> eplb_use_decode_only_load;
+  config::ConfigInput<int32_t> eplb_prepare_timeout_seconds;
+  config::ConfigInput<int32_t> expert_parallel_degree;
+  config::ConfigInput<std::string> rank_tablefile;
+};
+
+EplbConfigInput eplb_config_input_from_flags(
+    const config::FlagInputSnapshot& flags);
+
+// Explicit GFlags/API values take precedence over JSON.
+void merge_eplb_config_json(EplbConfigInput& input, const JsonReader& json);
 
 class EPLBConfig final {
  public:
@@ -37,6 +57,7 @@ class EPLBConfig final {
   void from_json(const JsonReader& json);
   void append_config_json(nlohmann::ordered_json& config_json) const;
   void initialize();
+  void initialize(const EplbConfigInput& input);
 
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {
@@ -90,5 +111,9 @@ class EPLBConfig final {
 
   PROPERTY(std::string, rank_tablefile);
 };
+
+// Resolves values and defaults without global access or eager policy
+// validation.
+EPLBConfig resolve_eplb_config(const EplbConfigInput& input);
 
 }  // namespace xllm

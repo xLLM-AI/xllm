@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <limits>
+
 namespace xllm {
 namespace {
 
@@ -41,6 +43,48 @@ TEST(EplbOptionsTest, RejectsInvalidValuesBeforeRuntime) {
         options.validate();
       },
       "eplb_min_peak_load_improvement");
+}
+
+TEST(EplbOptionsTest, AcceptsZeroRedundancyIntervalAndImprovement) {
+  EplbOptions options;
+  options.redundant_experts_num = 0;
+  options.eplb_update_interval = 0;
+  options.eplb_min_peak_load_improvement = 0.0;
+  options.validate();
+}
+
+TEST(EplbOptionsTest, RejectsNegativeRedundancyAndNonpositiveTimeout) {
+  EXPECT_DEATH(
+      {
+        EplbOptions options;
+        options.redundant_experts_num = -1;
+        options.validate();
+      },
+      "redundant_experts_num");
+  for (int32_t timeout : {0, -1}) {
+    EXPECT_DEATH(
+        {
+          EplbOptions options;
+          options.eplb_prepare_timeout_seconds = timeout;
+          options.validate();
+        },
+        "eplb_prepare_timeout_seconds");
+  }
+}
+
+TEST(EplbOptionsTest, RejectsNonfiniteAndNegativeImprovement) {
+  for (double improvement : {-0.01,
+                             std::numeric_limits<double>::quiet_NaN(),
+                             std::numeric_limits<double>::infinity(),
+                             -std::numeric_limits<double>::infinity()}) {
+    EXPECT_DEATH(
+        {
+          EplbOptions options;
+          options.eplb_min_peak_load_improvement = improvement;
+          options.validate();
+        },
+        "eplb_min_peak_load_improvement");
+  }
 }
 
 }  // namespace

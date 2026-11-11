@@ -23,11 +23,11 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
+#include "core/framework/eplb/eplb_options.h"
 #include "core/runtime/forward_params.h"
 
 namespace xllm {
 
-class EplbOptions;
 struct ModelArgs;
 
 // Owns the EPLB lifecycle at the engine boundary. The controller keeps
@@ -35,10 +35,11 @@ struct ModelArgs;
 // out of distributed_runtime so LLMEngine only deals with batch-level facts.
 class EplbController final {
  public:
-  // Returns nullptr when EPLB is disabled in the process configuration.
+  // Returns nullptr when the supplied configuration disables EPLB.
   static std::unique_ptr<EplbController> create(const ModelArgs& model_args,
                                                 int32_t worker_num,
-                                                int32_t ep_size);
+                                                int32_t ep_size,
+                                                EplbControllerConfig config);
 
   ~EplbController();
 

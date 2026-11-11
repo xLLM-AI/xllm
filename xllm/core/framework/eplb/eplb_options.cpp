@@ -17,8 +17,6 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "core/framework/config/eplb_config.h"
-
 namespace xllm {
 
 void EplbOptions::validate() const {
@@ -31,18 +29,6 @@ void EplbOptions::validate() const {
       << "eplb_min_peak_load_improvement must be in [0, 1].";
   CHECK_GT(eplb_prepare_timeout_seconds, 0)
       << "eplb_prepare_timeout_seconds must be positive.";
-}
-
-EplbOptions EplbOptions::from_global_config() {
-  const EPLBConfig& cfg = EPLBConfig::get_instance();
-  EplbOptions o;
-  o.redundant_experts_num = cfg.redundant_experts_num();
-  o.eplb_update_interval = cfg.eplb_update_interval();
-  o.eplb_min_peak_load_improvement = cfg.eplb_min_peak_load_improvement();
-  o.eplb_prepare_timeout_seconds = cfg.eplb_prepare_timeout_seconds();
-  o.eplb_policy_kind = cfg.eplb_policy_kind();
-  o.validate();
-  return o;
 }
 
 }  // namespace xllm

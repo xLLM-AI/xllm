@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
+#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
@@ -105,7 +106,22 @@ LLMMaster::LLMMaster(const Options& options)
                     "avoiding performance degradation.";
   }
 
+  // Master has already applied the existing NPU API overrides.
+  const EPLBConfig& eplb_config = EPLBConfig::get_instance();
+  EplbControllerConfig controller_config;
+  controller_config.enabled = eplb_config.enable_eplb();
+  controller_config.policy.redundant_experts_num =
+      eplb_config.redundant_experts_num();
+  controller_config.policy.eplb_update_interval =
+      eplb_config.eplb_update_interval();
+  controller_config.policy.eplb_min_peak_load_improvement =
+      eplb_config.eplb_min_peak_load_improvement();
+  controller_config.policy.eplb_prepare_timeout_seconds =
+      eplb_config.eplb_prepare_timeout_seconds();
+  controller_config.policy.eplb_policy_kind = eplb_config.eplb_policy_kind();
+
   runtime::Options engine_options;
+  engine_options.eplb_controller_config(std::move(controller_config));
   engine_options.model_path(options_.model_path())
       .model_id(options_.model_id())
       .model_impl(ModelConfig::get_instance().model_impl())

@@ -346,7 +346,6 @@ export default defineConfig({
 						'dev_guide/dit_architecture',
 						'design/cpp_framework_python_model_architecture',
 						'design/graph_mode_design',
-						'design/configuration_refactoring',
 						'dev_guide/ai_coding_workflow',
 						'dev_guide/xllm_kernel_dev',
 						'dev_guide/tilelang_ascend_kernel_dev',

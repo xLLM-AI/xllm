@@ -29,7 +29,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "common/global_flags.h"
 #include "core/framework/eplb/eplb_utils.h"
 
 namespace xllm {
@@ -44,15 +43,6 @@ EplbOptions validated_options(EplbOptions options) {
 }  // namespace
 
 using namespace std::chrono_literals;
-
-EplbManager::EplbManager(int32_t layer_num,
-                         int32_t device_num,
-                         int32_t experts_num)
-    : EplbManager(layer_num,
-                  device_num,
-                  experts_num,
-                  EplbOptions::from_global_config(),
-                  nullptr) {}
 
 EplbManager::EplbManager(int32_t layer_num,
                          int32_t device_num,

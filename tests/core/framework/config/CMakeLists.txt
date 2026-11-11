@@ -26,3 +26,16 @@ cc_test(
     :util
     GTest::gtest_main
 )
+
+# Keep EPLB argv parsing isolated from legacy global flag writeback.
+cc_test(
+  NAME
+    eplb_config_input_test
+  CPU_ONLY
+  SRCS
+    eplb_config_input_test.cpp
+  DEPS
+    :config
+    :util
+    GTest::gtest_main
+)
