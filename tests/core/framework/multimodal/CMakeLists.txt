@@ -3,6 +3,7 @@ include(cc_test)
 cc_test(
   NAME
     mm_batch_data_test
+  INCLUDES ${PROJECT_SOURCE_DIR}
   CPU_ONLY
   SRCS
     mm_batch_data_test.cpp

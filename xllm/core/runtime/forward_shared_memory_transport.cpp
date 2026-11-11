@@ -1569,8 +1569,7 @@ inline void read_mm_dict(ReadContext& context, MMDict& mm_dict) {
     read_string(context, mm_key);
     read_data(context, tensor_num);
     const bool host_grid =
-        context.keep_vision_grid_on_cpu &&
-        (mm_key == "image_grid_thw" || mm_key == "video_grid_thw");
+        context.keep_vision_grid_on_cpu && is_vision_grid_key(mm_key);
     if (tensor_num == 1) {
       torch::Tensor tensor;
       read_tensor(context, tensor, /*stream=*/nullptr, host_grid);

@@ -3,6 +3,7 @@ include(cc_test)
 if(USE_NPU)
   cc_test(
     NAME vlm_host_metadata_transport_test
+    INCLUDES ${PROJECT_SOURCE_DIR}
     SRCS vlm_host_metadata_transport_test.cpp
     DEPS :runtime GTest::gtest_main nnopbase
   )
