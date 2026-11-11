@@ -196,6 +196,12 @@ def _register_builtin_models() -> None:
         "joyai_asr",
         "JoyaiASRForConditionalGeneration",
     )
+    _register_model_path(
+        "xllm.python.models.deepseek_ocr",
+        "DeepseekOCRForCausalLM",
+        "deepseek_ocr",
+        "DeepseekOCRForCausalLM",
+    )
 
 
 _register_builtin_models()

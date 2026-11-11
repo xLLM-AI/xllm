@@ -11,7 +11,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-==============================================================================*/
 
 #pragma once
 
@@ -37,6 +36,8 @@ limitations under the License.
 #include "llm/qwen3_moe.h"                               // IWYU pragma: keep
 #include "llm/qwen3_next.h"                              // IWYU pragma: keep
 #include "models/npu_model_metadata.h"                   // IWYU pragma: keep
+#include "rec/npu/onerec.h"                              // IWYU pragma: keep
+#include "vlm/deepseek_ocr_vlm.h"                        // IWYU pragma: keep
 #include "vlm/glm5_next_vlm.h"                           // IWYU pragma: keep
 #include "vlm/joyai_asr.h"                               // IWYU pragma: keep
 #include "vlm/qwen3_5.h"                                 // IWYU pragma: keep

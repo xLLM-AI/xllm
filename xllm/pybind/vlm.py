@@ -91,6 +91,7 @@ class VLM:
         use_cpp_chat_template: bool = True,
         disable_log_stats: bool = True,
         extension_impl: str = "",
+        model_impl: str = "",
         **kwargs: Any,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
@@ -107,6 +108,7 @@ class VLM:
 
         options = Options()
         options.model_path = model
+        options.model_impl = model_impl
         options.extension_impl = extension_impl
         options.task_type = task
         options.draft_model_path = draft_model

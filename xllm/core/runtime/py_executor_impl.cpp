@@ -343,7 +343,26 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
     py::object top_model = py_causal_lm_->python_model();
     MMDict encoded;
-    if (pixel_values.defined() && image_grid_thw.defined()) {
+    // Models whose image encoder needs every gathered multimodal key (e.g.
+    // DeepSeek-OCR's separate global-view and crop tensors) expose
+    // encode_with_inputs; they take over the whole batch dict and the
+    // per-modality 2-argument encode branches below are skipped. The
+    // pixel_values guard keeps chunked prefill safe: later chunks see their
+    // image items already embedded, EncoderInputGatherVisitor skips them,
+    // and the gathered dict is empty — encoding is skipped, and
+    // EncoderEmbeddingGatherVisitor below re-slices the per-item embeddings
+    // stored by the first chunk.
+    if (py::hasattr(top_model, "encode_with_inputs") &&
+        pixel_values.defined()) {
+      py::dict inputs;
+      for (const auto& [key, value] : mm_data.data()) {
+        inputs[py::str(key)] = py::cast(value);
+      }
+      torch::Tensor raw =
+          top_model.attr("encode_with_inputs")(inputs).cast<torch::Tensor>();
+      encoded[get_embedding_key(MMType::IMAGE)] =
+          split_by_token_nums(raw, get_mm_token_nums(mm_data, MMType::IMAGE));
+    } else if (pixel_values.defined() && image_grid_thw.defined()) {
       torch::Tensor raw = top_model.attr("encode")(pixel_values, image_grid_thw)
                               .cast<torch::Tensor>();
       encoded[get_embedding_key(MMType::IMAGE)] =
