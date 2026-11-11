@@ -50,115 +50,6 @@ def apply_qk_rotary(
     return query_out.squeeze(0), key_out.squeeze(0)
 
 
-def has_split_qkv_rmsnorm_mrope_specialization(
-    num_q_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-) -> bool:
-    """Return whether the AOT fused QKV specialization is available."""
-    return torch.ops.xllm_ops.has_split_qkv_rmsnorm_mrope_specialization(
-        num_q_heads,
-        num_kv_heads,
-        head_size,
-    )
-
-
-def build_split_qkv_rmsnorm_mrope_gather_pattern(
-    rope_dim: int,
-    mrope_section: list[int],
-    is_interleaved: bool,
-    device: torch.device,
-) -> torch.Tensor:
-    """Build the fused kernel's persistent mRoPE byte-offset table."""
-    return torch.ops.xllm_ops.build_split_qkv_rmsnorm_mrope_gather_pattern(
-        rope_dim,
-        mrope_section,
-        is_interleaved,
-        device,
-    )
-
-
-def split_qkv_rmsnorm_mrope(
-    qkvg: torch.Tensor,
-    q_weight: torch.Tensor,
-    k_weight: torch.Tensor,
-    cos_sin: torch.Tensor,
-    gather_pattern: torch.Tensor,
-    eps: float,
-    num_q_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Split Q/G/K/V and apply fused Q/K RMSNorm plus mRoPE."""
-    return torch.ops.xllm_ops.split_qkv_rmsnorm_mrope(
-        qkvg,
-        q_weight,
-        k_weight,
-        cos_sin,
-        gather_pattern,
-        eps,
-        num_q_heads,
-        num_kv_heads,
-        head_size,
-    )
-
-
-def fused_qk_norm_rope(
-    qkv: torch.Tensor,
-    *,
-    num_heads_q: int,
-    num_heads_k: int,
-    num_heads_v: int,
-    head_dim: int,
-    eps: float,
-    q_weight: torch.Tensor,
-    k_weight: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    position_ids: torch.Tensor,
-    cos: torch.Tensor | None = None,
-    sin: torch.Tensor | None = None,
-    interleaved: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Apply per-head QK-RMSNorm and RoPE to a packed QKV projection.
-
-    Args:
-        qkv: Packed projection of shape ``[num_tokens, q_size + 2 * kv_size]``.
-        num_heads_q: Query heads on this rank.
-        num_heads_k: Key heads on this rank.
-        num_heads_v: Value heads on this rank; derived from ``qkv`` here.
-        head_dim: Size of one head.
-        eps: RMSNorm epsilon shared by the query and key norms.
-        q_weight: Query RMSNorm weight of shape ``[head_dim]``.
-        k_weight: Key RMSNorm weight of shape ``[head_dim]``.
-        cos_sin_cache: Interleaved cosine/sine table indexed by position.
-        position_ids: Position of every token.
-        cos: Unused on NPU; the kernel reads ``cos_sin_cache`` directly.
-        sin: Unused on NPU; the kernel reads ``cos_sin_cache`` directly.
-        interleaved: Unused on NPU; the kernel always uses the split layout.
-
-    Returns:
-        Query, key and value, each of shape ``[num_tokens, heads * head_dim]``.
-        They may be views into one fused buffer, so a caller must not write
-        into them in place.
-    """
-    del num_heads_v, cos, sin, interleaved
-    from .triton.split_qkv_rmsnorm_rope import (
-        split_qkv_rmsnorm_rope,
-    )
-
-    return split_qkv_rmsnorm_rope(
-        qkv,
-        cos_sin_cache,
-        position_ids,
-        q_weight,
-        k_weight,
-        num_heads_q * head_dim,
-        num_heads_k * head_dim,
-        head_dim,
-        eps,
-    )
-
-
 @torch.library.custom_op("xllm_python::interleaved_rotary_embedding", mutates_args=())
 def interleaved_rotary_embedding(
     value: torch.Tensor,
@@ -308,14 +199,10 @@ def npu_inplace_partial_rotary_mul(
 
 __all__ = [
     "apply_qk_rotary",
-    "build_split_qkv_rmsnorm_mrope_gather_pattern",
-    "fused_qk_norm_rope",
     "has_fused_qk_rotary",
-    "has_split_qkv_rmsnorm_mrope_specialization",
     "inplace_partial_rotary_mul",
     "interleaved_rotary_embedding",
     "mrope",
     "npu_inplace_partial_rotary_mul",
-    "split_qkv_rmsnorm_mrope",
     "vision_rotary_mul",
 ]

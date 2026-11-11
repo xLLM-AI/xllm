@@ -177,7 +177,7 @@ def test_model_records_each_event_after_its_layer(model_type: str, monkeypatch: 
         return torch.cat((embed, carried), dim=-1)
 
     # This test tracks layer completion; normalization stays outside its scope.
-    monkeypatch.setattr("xllm.python.models.glm5_next_mtp.kernels.fused_eh_norm", _concat_hidden)
+    monkeypatch.setattr("xllm.python.models.glm5_next_mtp.normalization.fused_eh_norm", _concat_hidden)
     model_class = Glm5NextMtpModel if model_type == "mtp" else Glm5NextModel
     model = model_class.__new__(model_class)
     nn.Module.__init__(model)

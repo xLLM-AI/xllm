@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import torch
 import torch_npu
+from xllm_kernel.ops import normalization
 
 from xllm.python.model_executor.forward_context import get_forward_context_or_none
 
 from .linear import atb_matmul_ein_sum
-from .normalization import rms_norm, rms_norm_dynamic_quant
 from .quantization import dynamic_quant, quant_matmul, quant_matmul_out, quantize_per_tensor
 
 _KROPE_CTKV_CACHE_MODE = 1
@@ -256,7 +256,7 @@ def _write_mla_kv_cache(
         return
 
     k_latent_raw, k_rope_raw = kv.split([kv_lora_rank, qk_rope_head_dim], dim=-1)
-    k_latent = rms_norm(k_latent_raw, kv_norm_weight, kv_norm_epsilon).view(num_tokens, 1, kv_lora_rank)
+    k_latent = normalization.rms_norm(k_latent_raw, kv_norm_weight, kv_norm_epsilon).view(num_tokens, 1, kv_lora_rank)
     k_pe = torch_npu.npu_interleave_rope(
         k_rope_raw.view(num_tokens, 1, 1, qk_rope_head_dim),
         rope_cos,
@@ -323,7 +323,7 @@ def deepseek_mla_preprocess_decode(
     )
     kv_dim = kv_lora_rank + qk_rope_head_dim
     kv, q_a = qkv_a.split([kv_dim, q_lora_rank], dim=-1)
-    q_c = rms_norm(q_a, q_norm_weight, q_norm_epsilon)
+    q_c = normalization.rms_norm(q_a, q_norm_weight, q_norm_epsilon)
     q_c_quant = quantize_per_tensor(
         q_c,
         q_b_input_scale,
@@ -451,10 +451,10 @@ def deepseek_mla_preprocess_decode_dynamic(
     kv_dim = kv_lora_rank + qk_rope_head_dim
     kv, q_a = qkv_a.split([kv_dim, q_lora_rank], dim=-1)
     if fuse_q_norm_quant:
-        q_c_int8, q_c_scale = rms_norm_dynamic_quant(q_a, q_norm_weight, q_norm_epsilon)
+        q_c_int8, q_c_scale = normalization.rms_norm_dynamic_quant(q_a, q_norm_weight, q_norm_epsilon)
         q_c = q_c_int8
     else:
-        q_c = rms_norm(q_a, q_norm_weight, q_norm_epsilon)
+        q_c = normalization.rms_norm(q_a, q_norm_weight, q_norm_epsilon)
         q_c_int8, q_c_scale = dynamic_quant(q_c)
     if q_output is None:
         q = quant_matmul(

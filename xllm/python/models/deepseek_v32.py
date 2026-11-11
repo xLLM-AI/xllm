@@ -29,6 +29,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from xllm_kernel.ops import normalization
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.backend import (
@@ -1019,7 +1020,7 @@ class DeepseekV3MLAAttention(Attention):
         self, q_a: torch.Tensor
     ) -> tuple[torch.Tensor | tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         if self._can_fuse_q_norm_quant():
-            quantized_q = kernels.rms_norm_dynamic_quant(q_a, self.q_a_layernorm.weight, self.q_a_layernorm.eps)
+            quantized_q = normalization.rms_norm_dynamic_quant(q_a, self.q_a_layernorm.weight, self.q_a_layernorm.eps)
             return quantized_q, self.q_b_proj.forward_quantized(*quantized_q)
         q_c = self.q_a_layernorm(q_a)
         return q_c, self.q_b_proj(q_c)
@@ -2140,7 +2141,7 @@ class DeepseekV3DecoderLayer(nn.Module):
             residual = hidden
             hidden = self.input_layernorm(hidden)
         elif self.self_attn._can_fuse_input_norm_quant():
-            hidden, hidden_scale, residual = kernels.fused_add_rms_norm_dynamic_quant(
+            hidden, hidden_scale, residual = normalization.fused_add_rms_norm_dynamic_quant(
                 hidden, residual, self.input_layernorm.weight, self.input_layernorm.eps
             )
         else:
@@ -2159,7 +2160,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         )
         fused_dense_input: tuple[torch.Tensor, torch.Tensor] | None = None
         if self._fuse_dense_norm_quant:
-            hidden_quant, hidden_scale, residual = kernels.fused_add_rms_norm_dynamic_quant(
+            hidden_quant, hidden_scale, residual = normalization.fused_add_rms_norm_dynamic_quant(
                 hidden,
                 residual,
                 self.post_attention_layernorm.weight,

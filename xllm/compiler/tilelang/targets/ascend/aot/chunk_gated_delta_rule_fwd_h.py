@@ -13,12 +13,10 @@
 # limitations under the License.
 
 import tilelang
+from xllm_kernel.utils import tilelang as tilelang_utils
 
 from xllm.python.kernels_npu.tilelang import (
     chunk_gated_delta_rule_fwd_h as kernel_impl,
-)
-from xllm.python.kernels_npu.tilelang import (
-    utils as tilelang_utils,
 )
 from xllm.python.kernels_npu.tilelang.chunk_gated_delta_rule_fwd_h import (
     COMPILE_BT,

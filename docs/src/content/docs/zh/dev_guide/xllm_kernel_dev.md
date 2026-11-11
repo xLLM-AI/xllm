@@ -161,7 +161,7 @@ register_custom_op("my_native_op", fake_impl=my_native_fake)
    OPERATIONS = (OPERATION,)
    ```
 
-   包含多个算子的分组应在元组中列出所有声明，例如 `ops/normalization/__init__.py` 中的三个归一化算子。
+   包含多个算子的分组应在元组中列出所有声明，例如 `ops/normalization/__init__.py` 中的归一化算子及融合 QKV 辅助接口。
 2. 将分组模块加入 `catalog._BUILTINS`，并从 `ops/__init__.py` 导出公共 API。
 3. 公共 API 通过对应的 `OPERATION.get_prepared()` 获取固定绑定；模型初始化时将算子名称而非分组名称加入 `operations`。
 4. 接入模型或 layer 调用点。自定义 kernel 需要数值或性能验证时，再添加离线 suite；原生 Torch 适配器无需重复添加数值对比 suite。

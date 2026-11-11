@@ -13,19 +13,17 @@
 # limitations under the License.
 
 import tilelang
+from xllm_kernel.utils import tilelang as tilelang_utils
+from xllm_kernel.utils.tilelang import detect_vec_core_num
 
 from xllm.python.kernels_npu.tilelang import (
     sfa_dcp_remap as kernel_impl,
-)
-from xllm.python.kernels_npu.tilelang import (
-    utils as tilelang_utils,
 )
 from xllm.python.kernels_npu.tilelang.sfa_dcp_remap import (
     DEFAULT_REMAP_TOPK,
     REMAP_PASS_CONFIGS,
     build_remap_topk_kernel,
 )
-from xllm.python.kernels_npu.tilelang.utils import detect_vec_core_num
 
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 

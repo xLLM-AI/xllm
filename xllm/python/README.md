@@ -72,11 +72,21 @@ A platform package owns everything specific to its hardware:
 - mutation declarations and `torch.compile` graph boundaries;
 - the weight layouts its kernels require.
 
-Heavy launchers (TileLang, Triton, FlashInfer) stay lazily imported inside the
-semantic operator body unless a build tool explicitly imports a leaf DSL
-module.
+Normalization APIs are exported by `xllm_kernel` and
+`xllm_kernel.ops.normalization`. Triton and TileLang registration modules are at `normalization/triton.py` and
+`normalization/tilelang.py`. Private DSL source lives in `normalization/_triton/`
+and `normalization/_tilelang.py`. Models and layers import these APIs directly;
+`kernels_npu` does not export normalization operators. Each normalization API
+uses its declared operation contract and startup-prepared callable. NPU runtime
+initialization imports and registers the Torch, ACLNN, Triton, and compiled
+TileLang adapters before graph capture; forward execution does not load or
+select an implementation.
 
-The NPU package contains two independent leaf implementation libraries:
+For the remaining platform APIs, heavy launchers (TileLang, Triton, FlashInfer)
+are imported lazily inside the semantic operator body unless a build tool
+explicitly imports a leaf DSL module.
+
+Other NPU operators retain their independent leaf implementation libraries:
 
 ```text
 kernels_npu/
@@ -84,15 +94,17 @@ kernels_npu/
 └── triton/
 ```
 
-They depend only on their DSL/framework packages and their own helpers. They do
-not import the NPU semantic API, `_custom_op.py`, `torch.ops.xllm_ops`, the AOT
-compiler, or the native xLLM extension. This lets C++ build tooling import the
+Both locations depend only on their DSL/framework packages and shared helpers
+in `xllm_kernel.utils`. They do not import the NPU semantic API,
+`torch.ops.xllm_ops`, the AOT compiler, or the native xLLM extension. This lets C++ build tooling import the
 same Python DSL implementation before the xLLM binary exists.
 
 ### Python DSL ownership and AOT reuse
 
-`kernels_npu/tilelang/` and `kernels_npu/triton/` own the Python DSL source.
-A leaf module contains the program builder, JIT launcher, implementation-local
+`xllm_kernel.ops.normalization/_triton/` and `normalization/_tilelang.py` own
+normalization DSL source; `kernels_npu/tilelang/` and `kernels_npu/triton/` own
+the remaining DSL source. A leaf module contains the program builder, JIT
+launcher, implementation-local
 validation and reference/debug helpers. Runtime semantic modules may call these
 leaf modules, but the leaf modules never depend back on the semantic package.
 
@@ -100,15 +112,16 @@ Ascend TileLang AOT adapters live under
 `xllm/compiler/tilelang/targets/ascend/aot/`. They contain only build metadata
 and lowering concerns such as kernel-family registration, dispatch schemas,
 specializations, exported ABI and source generation. An AOT adapter imports the
-program builder from `kernels_npu/tilelang/`; it must not own or copy the DSL
+program builder from its owning TileLang package; it must not own or copy the DSL
 kernel body.
 
 The allowed dependency directions are:
 
 ```text
-kernels_npu semantic API  ->  kernels_npu/{tilelang,triton}
-Ascend TileLang compiler  ->  kernels_npu/tilelang
-kernels_npu/{tilelang,triton}  ->  DSL/framework dependencies only
+Models and layers  ->  xllm_kernel.ops.normalization
+NPU semantic adapters  ->  owning {tilelang,triton} package
+Ascend TileLang compiler  ->  owning tilelang package
+Leaf DSL packages  ->  xllm_kernel.utils and DSL/framework dependencies only
 ```
 
 Build tooling imports a concrete leaf DSL module directly. It neither imports

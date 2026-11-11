@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from xllm_kernel.ops import normalization
 
 from tests.python.qwen3_5_test_utils import (
     ConstantModule as _ConstantModule,
@@ -94,7 +95,7 @@ from xllm.python.model_executor.runners.eager import EagerRunner
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 from xllm.python.models.qwen3_5 import Qwen3_5Config
 
-kernels.gemma_rms_norm = _gemma_rms_norm
+normalization.gemma_rms_norm = _gemma_rms_norm
 kernels.moe_fused_topk = MagicMock()
 kernels.grouped_moe_bf16 = MagicMock()
 kernels.prepare_row_parallel_weight = MagicMock(side_effect=lambda weight: (weight, False))
@@ -225,7 +226,7 @@ def test_npu_gemma_rms_norm_uses_fused_residual_operator(
     expected_residual = torch.ones(2, 4, dtype=torch.bfloat16)
     fused_norm = MagicMock(return_value=(expected_output, expected_residual))
     monkeypatch.setattr(
-        kernels,
+        normalization,
         "fused_add_gemma_rms_norm",
         fused_norm,
         raising=False,
@@ -639,7 +640,7 @@ def test_npu_decode_uses_mega_fusion_boundary(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(kernels, "mega_gdn_decode", mega, raising=False)
     monkeypatch.setattr(kernels, "causal_conv1d_decode", MagicMock(), raising=False)
     monkeypatch.setattr(kernels, "fused_sigmoid_gating_delta_rule_decode", MagicMock(), raising=False)
-    monkeypatch.setattr(kernels, "rms_norm_gated", rms, raising=False)
+    monkeypatch.setattr(normalization, "rms_norm_gated", rms, raising=False)
 
     cfg = _linear_config(
         linear_num_key_heads=1,
@@ -752,7 +753,7 @@ def test_npu_gdn_uses_npu_prefill_fusion_boundary(
     for name, mock in (("mega", mega), ("rms", rms)):
         calls.attach_mock(mock, name)
     monkeypatch.setattr(kernels, "mega_gdn_prefill", mega, raising=False)
-    monkeypatch.setattr(kernels, "rms_norm_gated", rms, raising=False)
+    monkeypatch.setattr(normalization, "rms_norm_gated", rms, raising=False)
     for old_kernel in (
         "causal_conv1d_qkv_prefill",
         "fused_gdn_gating",

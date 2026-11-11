@@ -201,7 +201,7 @@ dependencies. To add an operator:
    ```
 
    Groups with several operators export every declaration in that tuple, as
-   `ops/normalization/__init__.py` does for the three normalization operators.
+   `ops/normalization/__init__.py` does for the normalization operators and fused-QKV helpers.
 2. Add the group module to `catalog._BUILTINS` and export its public API
    from `ops/__init__.py`.
 3. Have the public API obtain its fixed binding through `OPERATION.get_prepared()`;

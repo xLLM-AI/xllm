@@ -57,7 +57,7 @@ def model(monkeypatch: pytest.MonkeyPatch) -> Glm5DSparkForCausalLM:
     def rms_norm(value: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
         return value * torch.rsqrt(value.square().mean(-1, keepdim=True) + eps) * weight
 
-    monkeypatch.setattr(kernels, "rms_norm", rms_norm)
+    monkeypatch.setattr(normalization, "rms_norm", rms_norm)
     monkeypatch.setattr(kernels, "prepare_row_parallel_weight", lambda weight: (weight, False))
     result = Glm5DSparkForCausalLM(_config(enable_confidence_head=True, confidence_head_with_markov=True))
     torch.manual_seed(17)

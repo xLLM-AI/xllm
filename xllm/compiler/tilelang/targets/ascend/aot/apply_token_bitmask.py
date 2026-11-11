@@ -13,12 +13,10 @@
 # limitations under the License.
 
 import tilelang
+from xllm_kernel.utils import tilelang as tilelang_utils
 
 from xllm.python.kernels_npu.tilelang import (
     apply_token_bitmask as kernel_impl,
-)
-from xllm.python.kernels_npu.tilelang import (
-    utils as tilelang_utils,
 )
 from xllm.python.kernels_npu.tilelang.apply_token_bitmask import (
     DEFAULT_ASCEND_PASS_CONFIGS,

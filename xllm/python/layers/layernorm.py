@@ -13,14 +13,19 @@
 # limitations under the License.
 
 """RMSNorm layer (with optional fused residual-add), matching xLLM's
-``apply_norm``. Depends on :mod:`python.kernels`."""
+``apply_norm``."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
-from xllm.python import kernels
+from xllm.python.platform import current_platform
+
+if current_platform.is_npu():
+    from xllm_kernel.ops import normalization
+else:
+    from xllm.python.kernels_cuda import normalization
 
 
 class RMSNorm(nn.Module):
@@ -45,8 +50,8 @@ class RMSNorm(nn.Module):
         self, x: torch.Tensor, residual: torch.Tensor | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
-            return kernels.rms_norm(x, self.weight, self.eps)
-        return kernels.fused_add_rms_norm(x, residual, self.weight, self.eps)
+            return normalization.rms_norm(x, self.weight, self.eps)
+        return normalization.fused_add_rms_norm(x, residual, self.weight, self.eps)
 
 
 class GemmaRMSNorm(nn.Module):
@@ -78,7 +83,7 @@ class GemmaRMSNorm(nn.Module):
             normalized = normalized + residual.float()
             residual = normalized.to(original_dtype)
 
-        normalized = kernels.gemma_rms_norm(
+        normalized = normalization.gemma_rms_norm(
             normalized,
             self.weight,
             self.eps,

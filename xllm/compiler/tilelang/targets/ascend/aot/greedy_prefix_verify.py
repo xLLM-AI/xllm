@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import tilelang
+from xllm_kernel.utils import tilelang as tilelang_utils
 
 from xllm.python.kernels_npu.tilelang import greedy_prefix_verify as kernel_impl
-from xllm.python.kernels_npu.tilelang import utils as tilelang_utils
 from xllm.python.kernels_npu.tilelang.greedy_prefix_verify import (
     DEFAULT_TASK_COUNT,
     GREEDY_PREFIX_VERIFY_PASS_CONFIGS,
