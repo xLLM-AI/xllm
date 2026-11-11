@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "models/vlm/mposition/mposition.h"
+#include "core/framework/multimodal/mposition.h"
 
 #include <glog/logging.h>
 

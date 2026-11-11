@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_visitor.h"
+#include "core/framework/multimodal/multimodal_utils.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
@@ -41,7 +42,6 @@ limitations under the License.
 #include "core/util/pybind_helper.h"
 #include "models/llm/py_causal_lm.h"
 #include "models/py_model_helper.h"
-#include "models/vlm/utils/multimodal_utils.h"
 #include "platform/layer_synchronizer.h"
 
 #if defined(USE_NPU)

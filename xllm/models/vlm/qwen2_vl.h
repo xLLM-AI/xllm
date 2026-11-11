@@ -16,12 +16,12 @@ limitations under the License.
 #pragma once
 
 #include "core/framework/model/model_output.h"
+#include "core/framework/multimodal/mposition.h"
 #include "core/layers/common/lm_head.h"
 #include "core/layers/qwen2_decoder_layer.h"
 #include "core/layers/qwen2_vision_layer.h"
 #include "models/llm/qwen2.h"
 #include "models/model_registry.h"
-#include "models/vlm/mposition/mposition.h"
 #include "processors/qwen2_vl_image_processor.h"
 #include "processors/qwen2_vl_video_processor.h"
 #include "qwen2_5_vl.h"
