@@ -22,7 +22,6 @@ limitations under the License.
 #include <thread>
 
 #include "core/distributed_runtime/worker_memory_service.h"
-#include "core/framework/config/distributed_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/platform/device.h"
 #include "core/util/net.h"
@@ -74,18 +73,11 @@ void WorkerMemoryServer::create_server(const std::string& master_node_addr,
   server->run();
 }
 
-WorkerMemoryServer::WorkerMemoryServer(int32_t local_rank,
-                                       const std::string& master_node_addr,
+WorkerMemoryServer::WorkerMemoryServer(const std::string& master_node_addr,
                                        const torch::Device& device,
-                                       const WorkerMemoryOptions& options)
+                                       int32_t world_size,
+                                       int32_t global_rank)
     : readiness_result_(readiness_.get_future().share()) {
-  const auto& devices = options.devices();
-  int32_t each_node_ranks = static_cast<int32_t>(devices.size());
-  int32_t world_size =
-      each_node_ranks * ::xllm::DistributedConfig::get_instance().nnodes();
-  int32_t global_rank =
-      ::xllm::DistributedConfig::get_instance().node_rank() * each_node_ranks +
-      local_rank;
   server_name_ = "WorkerMemoryRpcServer_" + std::to_string(global_rank);
 
   server_thread_ = std::make_unique<std::thread>(

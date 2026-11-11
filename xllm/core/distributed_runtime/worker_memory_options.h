@@ -29,7 +29,7 @@ class WorkerMemoryOptions final {
   // Devices served by worker memory RPC servers on this node.
   PROPERTY(std::vector<torch::Device>, devices);
 
-  // Multi-node configuration
+  // Worker-process topology. Each process serves exactly one local device.
   PROPERTY(int32_t, nnodes) = 1;
   PROPERTY(int32_t, node_rank) = 0;
 };

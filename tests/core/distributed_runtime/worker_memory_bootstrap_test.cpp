@@ -57,23 +57,49 @@ TEST(WorkerMemoryBootstrapTest, RejectsNonpositiveDpSizeBeforeDivision) {
 
 TEST(WorkerMemoryBootstrapTest, RejectsInvalidNodeRankBeforeStartingServers) {
   WorkerMemoryOptions options;
-  options.devices({torch::Device(torch::kCPU)});
+  options.devices({torch::Device(torch::kCPU)}).nnodes(1).node_rank(1);
   EXPECT_DEATH(
-      {
-        DistributedConfig::get_instance().nnodes(1).node_rank(1);
-        DistributedVmmCoordinator::get_instance().setup_worker_memory_rpc(
-            options, "127.0.0.1:0", /*dp_size=*/1);
-      },
-      "distributed_config.node_rank.*distributed_config.nnodes");
+      DistributedVmmCoordinator::get_instance().setup_worker_memory_rpc(
+          options, "127.0.0.1:0", /*dp_size=*/1),
+      "options.node_rank.*options.nnodes");
+}
+
+TEST(WorkerMemoryBootstrapTest, RejectsNegativeNodeRankBeforeStartingServers) {
+  WorkerMemoryOptions options;
+  options.devices({torch::Device(torch::kCPU)}).node_rank(-1);
+  EXPECT_DEATH(
+      DistributedVmmCoordinator::get_instance().setup_worker_memory_rpc(
+          options, "127.0.0.1:0", /*dp_size=*/1),
+      "options.node_rank.*0");
+}
+
+TEST(WorkerMemoryBootstrapTest,
+     RejectsNonpositiveNodeCountBeforeStartingServers) {
+  WorkerMemoryOptions options;
+  options.devices({torch::Device(torch::kCPU)}).nnodes(0);
+  EXPECT_DEATH(
+      DistributedVmmCoordinator::get_instance().setup_worker_memory_rpc(
+          options, "127.0.0.1:0", /*dp_size=*/1),
+      "nnodes must be positive");
 }
 
 TEST(WorkerMemoryBootstrapTest,
      RejectsNondivisibleTopologyBeforeStartingServers) {
   WorkerMemoryOptions options;
-  options.devices({torch::Device(torch::kCPU)});
+  options.devices({torch::Device(torch::kCPU)}).nnodes(3);
+  EXPECT_DEATH(
+      DistributedVmmCoordinator::get_instance().setup_worker_memory_rpc(
+          options, "127.0.0.1:0", /*dp_size=*/2),
+      "world_size must be divisible by dp_size");
+}
+
+TEST(WorkerMemoryBootstrapTest,
+     UsesExplicitTopologyInsteadOfGlobalConfiguration) {
+  WorkerMemoryOptions options;
+  options.devices({torch::Device(torch::kCPU)}).nnodes(3).node_rank(1);
   EXPECT_DEATH(
       {
-        DistributedConfig::get_instance().nnodes(3).node_rank(0);
+        DistributedConfig::get_instance().nnodes(0).node_rank(-1);
         DistributedVmmCoordinator::get_instance().setup_worker_memory_rpc(
             options, "127.0.0.1:0", /*dp_size=*/2);
       },

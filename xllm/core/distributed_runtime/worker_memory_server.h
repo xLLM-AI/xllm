@@ -24,17 +24,16 @@ limitations under the License.
 #include <thread>
 
 #include "core/common/macros.h"
-#include "core/distributed_runtime/worker_memory_options.h"
 #include "model_memory_dist.pb.h"
 
 namespace xllm {
 
 class WorkerMemoryServer final {
  public:
-  WorkerMemoryServer(int32_t local_rank,
-                     const std::string& master_node_addr,
+  WorkerMemoryServer(const std::string& master_node_addr,
                      const torch::Device& device,
-                     const WorkerMemoryOptions& options);
+                     int32_t world_size,
+                     int32_t global_rank);
   ~WorkerMemoryServer();
 
   bool wait_until_ready();

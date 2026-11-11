@@ -51,6 +51,7 @@ class DistributedVmmCoordinator final : public KVCachePageBackend {
     return instance;
   }
 
+  // Validates the worker-process topology before starting memory RPC servers.
   void setup_worker_memory_rpc(const WorkerMemoryOptions& options,
                                const std::string& master_node_addr,
                                int32_t dp_size);
