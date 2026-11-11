@@ -17,6 +17,7 @@ limitations under the License.
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -165,6 +166,11 @@ class ForwardSharedMemoryTransport final {
   void clear();
 
  private:
+  friend class ForwardSharedMemoryTransportTestPeer;
+
+  // Test-only observation point; configured before starting the reader.
+  std::function<void()> input_wait_observer_;
+
   bool write_token_output(
       const ForwardOutput& output,
       const std::vector<SpeculativeTokenStats>& speculative_token_stats,

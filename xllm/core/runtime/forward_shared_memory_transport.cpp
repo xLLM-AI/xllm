@@ -3301,6 +3301,9 @@ void ForwardSharedMemoryTransport::stop_input_read() {
 }
 
 bool ForwardSharedMemoryTransport::wait_for_input() {
+  if (input_wait_observer_) {
+    input_wait_observer_();
+  }
   while (!input_read_stopped_.load(std::memory_order_relaxed)) {
     if (control_ptr_->version != last_version_) {
       last_version_ = control_ptr_->version;
