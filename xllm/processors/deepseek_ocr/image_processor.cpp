@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "processors/deepseek_ocr_image_processor.h"
+#include "processors/deepseek_ocr/image_processor.h"
 
 #include <pybind11/pybind11.h>
 #include <torch/python.h>  // registers the torch::Tensor pybind caster

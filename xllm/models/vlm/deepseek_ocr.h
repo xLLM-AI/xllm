@@ -37,8 +37,8 @@ limitations under the License.
 #include <nlohmann/json.hpp>
 
 #include "models/model_registry.h"
-#include "processors/deepseek_ocr_image_processor.h"
-#include "processors/deepseek_ocr_prompt_processor.h"
+#include "processors/deepseek_ocr/image_processor.h"
+#include "processors/deepseek_ocr/prompt_processor.h"
 #include "processors/multimodal_processor.h"
 
 namespace xllm {
