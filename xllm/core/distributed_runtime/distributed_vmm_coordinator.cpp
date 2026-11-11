@@ -32,7 +32,6 @@ limitations under the License.
 #include "core/distributed_runtime/worker_memory_server.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/allocator/vmm_arena_capacity.h"
-#include "core/framework/config/distributed_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator_impl.h"
@@ -195,17 +194,16 @@ void DistributedVmmCoordinator::setup_worker_memory_rpc(
   CHECK_GT(dp_size, 0) << "dp_size must be positive";
   CHECK(servers_.empty()) << "Worker memory RPC already set up";
 
-  const auto& distributed_config = DistributedConfig::get_instance();
-  CHECK_GT(distributed_config.nnodes(), 0) << "nnodes must be positive";
-  CHECK_GE(distributed_config.node_rank(), 0);
-  CHECK_LT(distributed_config.node_rank(), distributed_config.nnodes());
-  const int32_t world_size = distributed_config.nnodes();
+  CHECK_GT(options.nnodes(), 0) << "nnodes must be positive";
+  CHECK_GE(options.node_rank(), 0);
+  CHECK_LT(options.node_rank(), options.nnodes());
+  const int32_t world_size = options.nnodes();
   CHECK_EQ(world_size % dp_size, 0)
       << "world_size must be divisible by dp_size";
 
   const int32_t tp_size = world_size / dp_size;
   configure_workers(world_size, dp_size, tp_size);
-  node_rank_ = distributed_config.node_rank();
+  node_rank_ = options.node_rank();
 
   const auto timeout = std::chrono::milliseconds(
       KVCacheConfig::get_instance().vmm_startup_timeout_ms());
@@ -213,7 +211,7 @@ void DistributedVmmCoordinator::setup_worker_memory_rpc(
   // their own pool-readiness waits.
   const auto registration_deadline = std::chrono::steady_clock::now() + timeout;
   std::shared_ptr<CollectiveService> collective_service;
-  if (distributed_config.node_rank() == 0) {
+  if (node_rank_ == 0) {
     collective_service = std::make_shared<CollectiveService>(world_size);
     XllmServer* collective_server =
         ServerRegistry::get_instance().register_server(collective_server_name_);
@@ -224,7 +222,7 @@ void DistributedVmmCoordinator::setup_worker_memory_rpc(
   }
 
   servers_.emplace_back(std::make_unique<WorkerMemoryServer>(
-      /*local_rank=*/0, master_node_addr, devices.front(), options));
+      master_node_addr, devices.front(), world_size, node_rank_));
   CHECK(servers_.front()->wait_until_ready())
       << "Failed to start or register local worker memory RPC server";
 
