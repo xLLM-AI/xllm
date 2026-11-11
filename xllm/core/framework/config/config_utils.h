@@ -64,8 +64,9 @@ void dump_startup_config();
 // when the matching gflag was NOT explicitly set on the command line. When the
 // flag is specified on the CLI, its value (already assigned by from_flags via
 // XLLM_CONFIG_ASSIGN_FROM_FLAG) is preserved and the JSON entry is ignored.
-// is_flag_specified() reads gflags' is_default bit, which the FLAGS_ writeback
-// below (a direct assignment) never flips, so the signal stays accurate.
+// This legacy adapter queries gflags' mutable is_default bit. A later gflags
+// query can classify direct FLAGS_ writes as modified input. Migrated domains
+// must capture FlagInputSnapshot and typed inputs before any JSON writeback.
 #define XLLM_CONFIG_ASSIGN_FROM_JSON(property)                                 \
   do {                                                                         \
     if (!::xllm::config::is_flag_specified(#property)) {                       \
