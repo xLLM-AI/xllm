@@ -26,6 +26,8 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "tensor.pb.h"
+
 namespace xllm::util {
 torch::ScalarType datatype_proto_to_torch(const std::string& proto_datatype) {
   static const std::unordered_map<std::string, torch::ScalarType> kDatatypeMap =

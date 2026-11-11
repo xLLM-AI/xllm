@@ -1033,7 +1033,11 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
     const int64_t pad_tokens =
         (tokens_chunk_size_ - num_tokens % tokens_chunk_size_) %
         tokens_chunk_size_;
-    const int64_t num_chunks = (num_tokens + pad_tokens) / tokens_chunk_size_;
+    // The final overlap belongs to the last complete window, not a short one.
+    const int64_t num_chunks =
+        std::max<int64_t>(1,
+                          (num_tokens + pad_tokens) / tokens_chunk_size_ -
+                              static_cast<int64_t>(token_drop_ > 0));
     torch::Tensor padded = pad_by_repeating_last_frame(latent, pad_tokens);
 
     std::vector<torch::Tensor> decoded_chunks;

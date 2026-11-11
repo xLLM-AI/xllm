@@ -738,6 +738,11 @@ int32_t write_encoded_packets(AVFormatContext* format,
   int32_t packet_count = 0;
   int32_t result = 0;
   while ((result = avcodec_receive_packet(codec, packet)) >= 0) {
+    // CFR video uses one codec time-base tick per frame. Without a duration,
+    // MP4 can exclude the last frame from its presentation interval.
+    if (codec->codec_type == AVMEDIA_TYPE_VIDEO && packet->duration == 0) {
+      packet->duration = 1;
+    }
     av_packet_rescale_ts(packet, codec->time_base, stream->time_base);
     packet->stream_index = stream->index;
     result = av_interleaved_write_frame(format, packet);

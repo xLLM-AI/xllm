@@ -27,11 +27,11 @@ limitations under the License.
 
 namespace xllm::dit {
 
-float calculate_shift(int64_t image_seq_len,
-                      int64_t base_seq_len = 256,
-                      int64_t max_seq_len = 4096,
-                      float base_shift = 0.5f,
-                      float max_shift = 1.15f) {
+inline float calculate_shift(int64_t image_seq_len,
+                             int64_t base_seq_len = 256,
+                             int64_t max_seq_len = 4096,
+                             float base_shift = 0.5f,
+                             float max_shift = 1.15f) {
   float m =
       (max_shift - base_shift) / static_cast<float>(max_seq_len - base_seq_len);
   float b = base_shift - m * static_cast<float>(base_seq_len);
@@ -39,7 +39,7 @@ float calculate_shift(int64_t image_seq_len,
   return mu;
 }
 
-std::pair<torch::Tensor, int64_t> retrieve_timesteps(
+inline std::pair<torch::Tensor, int64_t> retrieve_timesteps(
     xllm::FlowMatchEulerDiscreteScheduler scheduler,
     int64_t num_inference_steps = 0,
     torch::Device device = torch::kCPU,
@@ -65,8 +65,8 @@ std::pair<torch::Tensor, int64_t> retrieve_timesteps(
   return {scheduler_timesteps, steps};
 }
 
-std::pair<int64_t, int64_t> calculate_dimensions(double target_area,
-                                                 double ratio) {
+inline std::pair<int64_t, int64_t> calculate_dimensions(double target_area,
+                                                        double ratio) {
   double width = std::sqrt(target_area * ratio);
   double height = width / ratio;
 
@@ -91,10 +91,11 @@ inline torch::Tensor randn_tensor(
       .to(options.device());
 }
 
-torch::Tensor randn_tensor(const std::vector<int64_t>& shape,
-                           int64_t seed,
-                           torch::TensorOptions& options,
-                           torch::ScalarType target_type = torch::kBFloat16) {
+inline torch::Tensor randn_tensor(
+    const std::vector<int64_t>& shape,
+    int64_t seed,
+    torch::TensorOptions& options,
+    torch::ScalarType target_type = torch::kBFloat16) {
   torch::Generator generator =
       torch::make_generator<torch::CPUGeneratorImpl>().clone();
   generator.set_current_seed(seed);

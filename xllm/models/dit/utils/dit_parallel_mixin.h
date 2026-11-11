@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -126,12 +127,15 @@ class SequenceParallelMixin {
   template <typename ForwardFn>
   SequenceParallelTensorMap sequence_parallel_forward(
       const SequenceParallelTensorMap& inputs,
-      ForwardFn&& forward_fn) {
+      ForwardFn&& forward_fn,
+      int64_t sequence_alignment = 1) {
     padding_lengths_.clear();
     SequenceParallelTensorMap local_inputs = inputs;
     for (auto& [tensor_name, tensor_and_dim] : local_inputs) {
-      tensor_and_dim.first = scatter_sequence(
-          tensor_and_dim.first, tensor_name, tensor_and_dim.second);
+      tensor_and_dim.first = scatter_sequence(tensor_and_dim.first,
+                                              tensor_name,
+                                              tensor_and_dim.second,
+                                              sequence_alignment);
     }
 
     SequenceParallelTensorMap outputs =
@@ -152,14 +156,17 @@ class SequenceParallelMixin {
 
   torch::Tensor scatter_sequence(const torch::Tensor& input,
                                  const std::string& tensor_name,
-                                 int64_t sequence_dim) {
+                                 int64_t sequence_dim,
+                                 int64_t sequence_alignment) {
     if (!input.defined()) {
       return input;
     }
 
     const int64_t sequence_length = input.size(sequence_dim);
+    const int64_t alignment =
+        std::lcm(static_cast<int64_t>(world_size()), sequence_alignment);
     const int64_t padding_length =
-        (world_size() - sequence_length % world_size()) % world_size();
+        (alignment - sequence_length % alignment) % alignment;
     padding_lengths_[tensor_name] = padding_length;
     if (!sequence_parallel_enabled()) {
       return input;
