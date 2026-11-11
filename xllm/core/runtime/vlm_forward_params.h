@@ -245,6 +245,11 @@ class VlmForwardInput final {
 inline LlmForwardInput make_llm_draft_input(const LlmForwardInput& target) {
   LlmForwardInput draft = target.clone();
   draft.input_params.clear_linear_attention_state();
+  draft.input_params.attention.host.shared_full_block_table = torch::Tensor();
+  draft.input_params.attention.host.shared_full_slot_mapping = torch::Tensor();
+  draft.input_params.attention.device.shared_full_block_table = torch::Tensor();
+  draft.input_params.attention.device.shared_full_slot_mapping =
+      torch::Tensor();
   return draft;
 }
 
@@ -265,6 +270,10 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target) {
                                     params.attention.host);
   detail::copy_attention_device_input(source.attention.device,
                                       params.attention.device);
+  params.attention.host.shared_full_block_table = torch::Tensor();
+  params.attention.host.shared_full_slot_mapping = torch::Tensor();
+  params.attention.device.shared_full_block_table = torch::Tensor();
+  params.attention.device.shared_full_slot_mapping = torch::Tensor();
   params.attention.attention_host_buffer =
       source.attention.attention_host_buffer;
   params.attention.attention_device_buffer =

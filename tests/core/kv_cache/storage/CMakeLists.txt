@@ -22,6 +22,7 @@ cc_test(
     static_kv_cache_tensor_allocator_test.cpp
   DEPS
     :static_kv_cache_tensor_allocator
+    :kv_cache_block
     GTest::gtest_main
     glog::glog
 )

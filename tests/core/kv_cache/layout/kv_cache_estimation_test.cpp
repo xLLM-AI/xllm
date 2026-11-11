@@ -452,8 +452,9 @@ TEST(KVCacheEstimationTest, SharedStaticCapacityUsesTheWholeArenaBudget) {
   model_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");
   KVCacheEstimateOptions options = make_linear_attention_options();
   options.enable_shared_kv_cache = true;
-  // LCM of a 2048-byte K/V pair, a 96-byte Conv row and 128-byte SSM row.
-  constexpr int64_t kSlabBytes = 6144;
+  // Each of two banks mirrors a 2 KiB Full bundle and 128-byte SSM rows.
+  // Conv rows align within the 2 KiB slice instead of inflating its LCM.
+  constexpr int64_t kSlabBytes = 4096;
   options.cache_size_in_bytes = 25 * kSlabBytes + kSlabBytes - 1;
 
   const KVCacheCapacity capacity =
@@ -461,8 +462,8 @@ TEST(KVCacheEstimationTest, SharedStaticCapacityUsesTheWholeArenaBudget) {
 
   EXPECT_EQ(capacity.shared_slot_bytes(), kSlabBytes);
   EXPECT_EQ(capacity.shared_slab_count(), 25);
-  EXPECT_EQ(capacity.n_blocks(), 330);
-  EXPECT_EQ(capacity.num_linear_state_blocks(), 330);
+  EXPECT_EQ(capacity.n_blocks(), 211);
+  EXPECT_EQ(capacity.num_linear_state_blocks(), 211);
   EXPECT_EQ(capacity.cache_size_in_bytes(), 25 * kSlabBytes);
   EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 0);
 }
@@ -532,14 +533,14 @@ TEST(KVCacheEstimationTest, SharedStaticIgnoresSeparateMegaGdnSlotLimit) {
   KVCacheEstimateOptions options = make_linear_attention_options();
   options.enable_shared_kv_cache = true;
   options.linear_state_cache_block_limit = 1024;
-  options.cache_size_in_bytes = 4096 * 6144;
+  options.cache_size_in_bytes = 4096 * 4096;
 
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
   EXPECT_EQ(capacity.shared_slab_count(), 4096);
-  EXPECT_EQ(capacity.n_blocks(), 56161);
-  EXPECT_EQ(capacity.num_linear_state_blocks(), 56161);
+  EXPECT_EQ(capacity.n_blocks(), 37431);
+  EXPECT_EQ(capacity.num_linear_state_blocks(), 37431);
   EXPECT_EQ(capacity.cache_size_in_bytes(), options.cache_size_in_bytes);
 }
 
@@ -562,6 +563,7 @@ TEST(KVCacheEstimationTest, SharedStaticCostsMatchTheStorageLayout) {
       estimate_kv_cache_capacity(model_args, options);
 
   EXPECT_EQ(capacity.shared_slot_bytes(), layout.slab_bytes());
+  EXPECT_EQ(capacity.shared_reserved_slab_count(), layout.num_reserved_slabs());
   EXPECT_EQ(capacity.shared_linear_state_slots(), layout.num_linear_groups());
   EXPECT_EQ(capacity.shared_linear_state_slots(), 4);
   EXPECT_EQ(capacity.cache_size_in_bytes(),
@@ -573,7 +575,7 @@ TEST(KVCacheEstimationTest, SharedStaticDoesNotReserveLinearMemoryTwice) {
   model_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");
   KVCacheEstimateOptions options = make_linear_attention_options();
   options.enable_shared_kv_cache = true;
-  options.cache_size_in_bytes = 25 * 6144;
+  options.cache_size_in_bytes = 25 * 4096;
   const KVCacheCapacity base = estimate_kv_cache_capacity(model_args, options);
 
   options.max_seqs_per_batch = 64;
@@ -582,7 +584,7 @@ TEST(KVCacheEstimationTest, SharedStaticDoesNotReserveLinearMemoryTwice) {
       estimate_kv_cache_capacity(model_args, options);
 
   EXPECT_EQ(base.shared_slab_count(), 25);
-  EXPECT_EQ(base.n_blocks(), 330);
+  EXPECT_EQ(base.n_blocks(), 211);
   EXPECT_EQ(cached.n_blocks(), base.n_blocks());
   EXPECT_EQ(cached.cache_size_in_bytes(), options.cache_size_in_bytes);
   EXPECT_EQ(cached.linear_cache_size_in_bytes(), 0);
@@ -593,18 +595,18 @@ TEST(KVCacheEstimationTest, SharedStaticRequiresOneHybridWorkingSet) {
   model_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");
   KVCacheEstimateOptions options = make_linear_attention_options();
   options.enable_shared_kv_cache = true;
-  options.cache_size_in_bytes = 3 * 6144;
+  options.cache_size_in_bytes = 4 * 4096;
 
   EXPECT_DEATH((void)estimate_kv_cache_capacity(model_args, options),
                "cannot fit padding and one hybrid sequence");
 
-  // Scratch plus one slab each for Full pairs, Conv rows and SSM bundles.
-  options.cache_size_in_bytes = 4 * 6144;
+  // Scratch and padding plus Full, Conv and SSM mirrored groups.
+  options.cache_size_in_bytes = 5 * 4096;
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
-  EXPECT_EQ(capacity.shared_min_slab_count(), 4);
-  EXPECT_EQ(capacity.shared_slab_count(), 4);
-  EXPECT_EQ(capacity.n_blocks(), 42);
+  EXPECT_EQ(capacity.shared_min_slab_count(), 5);
+  EXPECT_EQ(capacity.shared_slab_count(), 5);
+  EXPECT_EQ(capacity.n_blocks(), 28);
 }
 
 TEST(KVCacheEstimationTest,
@@ -615,28 +617,24 @@ TEST(KVCacheEstimationTest,
   KVCacheEstimateOptions options = make_linear_attention_options();
   options.enable_shared_kv_cache = true;
   options.n_local_linear_v_heads = 4;
-  // Two local KV heads give a 2 KiB Full pair. Four Linear value heads
-  // give 128-byte Conv rows and 256-byte FP32 SSM rows, both divisors of
-  // that pair. The 2 KiB slab holds writable Full scratch or read padding,
-  // so they need two reserved slabs instead of sharing the first slab.
-  constexpr int64_t kSlabBytes = 2048;
-  options.cache_size_in_bytes = 5 * kSlabBytes;
+  // Each bank's 2 KiB Full bundle fills one slice, so writable scratch
+  // and immutable padding require two reserved mirrored groups.
+  constexpr int64_t kSlabBytes = 4096;
+  options.cache_size_in_bytes = 4 * kSlabBytes;
   EXPECT_DEATH((void)estimate_kv_cache_capacity(model_args, options),
                "cannot fit padding and one hybrid sequence");
 
-  // Two Full layers need two typed slabs; both Conv layers fit in one,
-  // and both SSM layers fit in one. With the two reserved slabs, six
-  // slabs are the smallest complete hybrid working set.
-  options.cache_size_in_bytes = 6 * kSlabBytes;
+  // The minimum needs one mirrored group each for Full, Conv and SSM.
+  options.cache_size_in_bytes = 5 * kSlabBytes;
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
   EXPECT_EQ(capacity.shared_slot_bytes(), kSlabBytes);
-  EXPECT_EQ(capacity.shared_min_slab_count(), 6);
-  EXPECT_EQ(capacity.shared_slab_count(), 6);
-  // Four allocatable slabs hold 8 KiB, and one two-layer Linear state
-  // uses 2 * (128 + 256) = 768 bytes: ten IDs plus reserved logical zero.
-  EXPECT_EQ(capacity.n_blocks(), 11);
-  EXPECT_EQ(capacity.num_linear_state_blocks(), 11);
+  EXPECT_EQ(capacity.shared_reserved_slab_count(), 2);
+  EXPECT_EQ(capacity.shared_min_slab_count(), 5);
+  EXPECT_EQ(capacity.shared_slab_count(), 5);
+  // Three groups hold 12 KiB; each two-layer Linear state consumes 768 bytes.
+  EXPECT_EQ(capacity.n_blocks(), 17);
+  EXPECT_EQ(capacity.num_linear_state_blocks(), 17);
 
   StaticKVCacheLayoutSpec spec;
   spec.num_slots = capacity.n_blocks();
@@ -667,6 +665,32 @@ TEST(KVCacheEstimationTest, SharedStaticRejectsIndependentLinearSlotOverride) {
 }
 
 TEST(KVCacheEstimationTest, SharedStaticBoundsDenseInt32TokenSlots) {
+  ModelArgs model_args = make_linear_attention_args(/*head_dim=*/1);
+  model_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");
+  KVCacheEstimateOptions options = make_linear_attention_options();
+  options.enable_shared_kv_cache = true;
+  options.n_local_kv_heads = 1;
+  options.cache_size_in_bytes = int64_t{256} << 30;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  // Eight 32-byte Full rows occupy each bank-local slice. One element per
+  // token makes the int32 token slot limit stricter than the FIA byte span.
+  constexpr int64_t kSlabBytes = 512;
+  const int64_t tokens_per_slab = 8 * options.block_size;
+  const int64_t max_index = std::numeric_limits<int32_t>::max();
+  const int64_t expected_slabs = max_index / tokens_per_slab;
+  EXPECT_EQ(capacity.shared_slot_bytes(), kSlabBytes);
+  EXPECT_EQ(capacity.shared_slab_count(), expected_slabs);
+  EXPECT_LE(expected_slabs * tokens_per_slab, max_index);
+  EXPECT_GT((expected_slabs + 1) * tokens_per_slab, max_index);
+  EXPECT_EQ(capacity.cache_size_in_bytes(), expected_slabs * kSlabBytes);
+  EXPECT_GT(capacity.n_blocks(), capacity.shared_slab_count());
+  EXPECT_LT(capacity.cache_size_in_bytes(), options.cache_size_in_bytes);
+}
+
+TEST(KVCacheEstimationTest, SharedStaticBoundsFullBankFiaElements) {
   ModelArgs model_args = make_linear_attention_args();
   model_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");
   KVCacheEstimateOptions options = make_linear_attention_options();
@@ -676,22 +700,25 @@ TEST(KVCacheEstimationTest, SharedStaticBoundsDenseInt32TokenSlots) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  // A slab has six dense Full rows. Logical IDs map to these physical rows.
-  constexpr int64_t kSlabBytes = 6144;
-  const int64_t tokens_per_slab = 6 * options.block_size;
-  const int64_t max_index = std::numeric_limits<int32_t>::max();
-  const int64_t expected_slabs = max_index / tokens_per_slab;
+  constexpr int64_t kElementsPerFullRow = 512;
+  constexpr int64_t kFullRowsPerSlice = 2;
+  constexpr int64_t kFiaElementSpan = int64_t{1} << 32;
+  constexpr int64_t kSlabBytes = 4096;
+  const int64_t expected_slabs =
+      kFiaElementSpan / kElementsPerFullRow / kFullRowsPerSlice;
   EXPECT_EQ(capacity.shared_slab_count(), expected_slabs);
-  EXPECT_LE(expected_slabs * tokens_per_slab, max_index);
-  EXPECT_GT((expected_slabs + 1) * tokens_per_slab, max_index);
+  EXPECT_LE(expected_slabs * kFullRowsPerSlice * kElementsPerFullRow,
+            kFiaElementSpan);
+  EXPECT_GT((expected_slabs + 1) * kFullRowsPerSlice * kElementsPerFullRow,
+            kFiaElementSpan);
   EXPECT_EQ(capacity.cache_size_in_bytes(), expected_slabs * kSlabBytes);
-  EXPECT_GT(capacity.n_blocks(), capacity.shared_slab_count());
   EXPECT_LT(capacity.cache_size_in_bytes(), options.cache_size_in_bytes);
 }
 
 TEST(KVCacheEstimationTest, SharedStaticBoundsDenseConvIndices) {
   ModelArgs model_args = make_linear_attention_args(/*head_dim=*/128);
-  model_args.linear_num_key_heads(1)
+  model_args.n_layers(64)
+      .linear_num_key_heads(1)
       .linear_num_value_heads(1)
       .linear_key_head_dim(8)
       .linear_value_head_dim(8)
@@ -705,14 +732,17 @@ TEST(KVCacheEstimationTest, SharedStaticBoundsDenseConvIndices) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  // LCM(16 KiB Full pair, 96-byte Conv, 256-byte SSM) is 48 KiB.
+  // Thirty-two banks each hold a 16 KiB slice. Conv rows span the arena
+  // with ceil(512 KiB / 96) native rows per mirrored group.
+  constexpr int64_t kSlabBytes = 524288;
+  constexpr int64_t kConvRowsPerSlab = 5462;
   const int64_t max_index = std::numeric_limits<int32_t>::max();
-  const int64_t expected_slabs = max_index / 512;
-  EXPECT_EQ(capacity.shared_slot_bytes(), 49152);
+  const int64_t expected_slabs = max_index / kConvRowsPerSlab;
+  EXPECT_EQ(capacity.shared_slot_bytes(), kSlabBytes);
   EXPECT_EQ(capacity.shared_slab_count(), expected_slabs);
-  EXPECT_LE(expected_slabs * 512, max_index);
-  EXPECT_GT((expected_slabs + 1) * 512, max_index);
-  EXPECT_EQ(capacity.cache_size_in_bytes(), expected_slabs * 49152);
+  EXPECT_LE(expected_slabs * kConvRowsPerSlab, max_index);
+  EXPECT_GT((expected_slabs + 1) * kConvRowsPerSlab, max_index);
+  EXPECT_EQ(capacity.cache_size_in_bytes(), expected_slabs * kSlabBytes);
 }
 
 TEST(KVCacheEstimationTest, SharedStaticQwen38MtpSubdividesTypedSlabs) {
@@ -737,8 +767,9 @@ TEST(KVCacheEstimationTest, SharedStaticQwen38MtpSubdividesTypedSlabs) {
   options.n_local_linear_k_heads = 8;
   options.n_local_linear_v_heads = 24;
   options.num_speculative_tokens = 4;
-  // LCM(256 KiB Full pair, 70 KiB Conv, 7.5 MiB SSM bundle) is 52.5 MiB.
-  constexpr int64_t kSlabBytes = 55050240;
+  // Sixteen banks mirror 7.5 MiB slices; Conv alignment does not inflate
+  // the group beyond 120 MiB. Each slice contains thirty Full bundles.
+  constexpr int64_t kSlabBytes = 125829120;
   options.cache_size_in_bytes = 25 * kSlabBytes + kSlabBytes - 1;
 
   const KVCacheCapacity capacity =
@@ -746,12 +777,12 @@ TEST(KVCacheEstimationTest, SharedStaticQwen38MtpSubdividesTypedSlabs) {
 
   EXPECT_EQ(capacity.shared_slot_bytes(), kSlabBytes);
   EXPECT_EQ(capacity.shared_slab_count(), 25);
-  EXPECT_EQ(capacity.shared_min_slab_count(), 10);
+  EXPECT_EQ(capacity.shared_min_slab_count(), 7);
   EXPECT_EQ(capacity.shared_linear_state_slots(), 96);
   EXPECT_EQ(capacity.linear_conv_state_len(), 7);
   EXPECT_EQ(capacity.linear_ssm_checkpoint_stride(), 5);
-  EXPECT_EQ(capacity.n_blocks(), 316);
-  EXPECT_EQ(capacity.num_linear_state_blocks(), 316);
+  EXPECT_EQ(capacity.n_blocks(), 691);
+  EXPECT_EQ(capacity.num_linear_state_blocks(), 691);
   EXPECT_EQ(capacity.cache_size_in_bytes(), 25 * kSlabBytes);
 }
 
@@ -805,6 +836,7 @@ TEST(KVCacheEstimationTest, SharedStaticReservesEveryMtpCheckpoint) {
   EXPECT_EQ(capacity.linear_conv_state_len(), 6);
   EXPECT_EQ(capacity.linear_ssm_checkpoint_stride(), 5);
   EXPECT_EQ(capacity.shared_slot_bytes(), layout.slab_bytes());
+  EXPECT_EQ(capacity.shared_reserved_slab_count(), layout.num_reserved_slabs());
   EXPECT_EQ(capacity.n_blocks(), capacity.num_linear_state_blocks());
   EXPECT_LE(capacity.cache_size_in_bytes(), options.cache_size_in_bytes);
 }
@@ -849,12 +881,12 @@ TEST(KVCacheEstimationTest, SharedStaticPlanChargesDenseDraftAtEveryArenaId) {
   const SharedStaticKVCachePlan plan =
       plan_shared_static_kv_cache(target, draft);
 
-  EXPECT_EQ(plan.target.shared_slab_count(), 17);
-  EXPECT_EQ(plan.target.n_blocks(), 220);
-  EXPECT_EQ(plan.target.num_linear_state_blocks(), 220);
-  EXPECT_EQ(plan.draft.n_blocks(), 220);
-  EXPECT_EQ(plan.target.cache_size_in_bytes(), 17 * 6144);
-  EXPECT_EQ(plan.draft.cache_size_in_bytes(), 220 * 4096);
+  EXPECT_EQ(plan.target.shared_slab_count(), 27);
+  EXPECT_EQ(plan.target.n_blocks(), 229);
+  EXPECT_EQ(plan.target.num_linear_state_blocks(), 229);
+  EXPECT_EQ(plan.draft.n_blocks(), 229);
+  EXPECT_EQ(plan.target.cache_size_in_bytes(), 27 * 4096);
+  EXPECT_EQ(plan.draft.cache_size_in_bytes(), 229 * 4096);
   EXPECT_LE(
       plan.target.cache_size_in_bytes() + plan.draft.cache_size_in_bytes(),
       target_options.cache_size_in_bytes);
@@ -865,7 +897,7 @@ TEST(KVCacheEstimationTest, SharedStaticDraftPlanRequiresOneHybridWorkingSet) {
   target_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");
   KVCacheEstimateOptions target_options = make_linear_attention_options();
   target_options.enable_shared_kv_cache = true;
-  target_options.cache_size_in_bytes = 4 * 6144;
+  target_options.cache_size_in_bytes = 5 * 4096;
   const KVCacheCapacity target =
       estimate_kv_cache_capacity(target_args, target_options);
   ModelArgs draft_args = make_standard_args();

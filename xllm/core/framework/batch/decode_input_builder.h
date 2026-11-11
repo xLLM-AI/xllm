@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/framework/batch/batch_forward_type.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/util/slice.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 
@@ -42,6 +43,8 @@ struct DecodeBuildBuffers {
   std::vector<int32_t> out_q_seq_lens;
   std::vector<int32_t> out_new_cache_slots;
   std::vector<int32_t> out_block_tables;
+  std::vector<int32_t> out_shared_full_block_tables;
+  std::vector<int32_t> out_shared_full_slot_mapping;
   std::vector<int32_t> out_paged_kv_indptr;
   std::vector<int32_t> out_paged_kv_indices;
   std::vector<int32_t> out_paged_kv_last_page_len;
@@ -56,12 +59,14 @@ struct DecodeBuildBuffers {
 
 struct DecodeBatchContext {
   torch::Tensor block_tables_owner;
+  torch::Tensor shared_full_block_tables_owner;
   std::vector<torch::Tensor> multi_block_tables_owner;
   Slice<int32_t> token_ids;
   Slice<int32_t> positions;
   Slice<int32_t> kv_seq_lens;
   Slice<int32_t> q_seq_lens;
   Slice<int32_t> block_tables;
+  Slice<int32_t> shared_full_block_tables;
   std::vector<std::vector<Slice<int32_t>>> multi_block_tables;
   int32_t num_requests = 0;
   int32_t num_rope_axes = 1;
@@ -106,6 +111,10 @@ void update_kv_lengths_and_slots(Params& params, DecodeBuildBuffers& buf) {
   params.meta.kv_max_seq_len = util::max_len(buf.out_kv_seq_lens);
   params.attention.host.kv_seq_lens = std::move(buf.out_kv_seq_lens);
   params.attention.host.new_cache_slots = std::move(buf.out_new_cache_slots);
+  if (!buf.out_shared_full_slot_mapping.empty()) {
+    params.attention.host.shared_full_slot_mapping =
+        make_pinned_cpu_tensor(buf.out_shared_full_slot_mapping);
+  }
 }
 
 struct DecodeInputOptions {

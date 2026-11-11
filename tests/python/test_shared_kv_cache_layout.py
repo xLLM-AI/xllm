@@ -71,6 +71,111 @@ def _make_slab_caches() -> list[LayerCache]:
     return caches
 
 
+def _make_mirrored_caches(*, slice_bytes: int = 96) -> list[LayerCache]:
+    bank_bytes = 4 * slice_bytes
+    arena = torch.zeros(2 * bank_bytes, dtype=torch.uint8)
+    descriptor = {
+        "shared_bank_bytes": bank_bytes,
+        "shared_slice_bytes": slice_bytes,
+        "shared_checkpoint_stride": 3,
+        "shared_conv_scratch_row": 0,
+        "shared_ssm_scratch_row": 0,
+        "shared_full_read_padding_page": 6,
+    }
+    full_rows = bank_bytes // 8 - 3
+    caches = [
+        LayerCache(
+            key=_arena_view(arena, bank * bank_bytes + lane * 16, (full_rows, 2, 1, 2), torch.bfloat16),
+            value=_arena_view(arena, bank * bank_bytes + lane * 16 + 8, (full_rows, 2, 1, 2), torch.bfloat16),
+            **descriptor,
+        )
+        for bank in range(2)
+        for lane in range(2)
+    ]
+    for group in range(2):
+        rows = torch.zeros(2, 32, dtype=torch.int32)
+        rows[:, 1] = torch.tensor([10 + 2 * group, 12 + 3 * group])
+        caches.append(
+            LayerCache(
+                key=None,
+                value=None,
+                conv=_arena_view(arena, 0, (arena.numel() // 20, 5, 2), torch.bfloat16),
+                ssm=_arena_view(arena, 0, (arena.numel() // 16, 1, 2, 2), torch.float32),
+                linear_state_slots=rows,
+                **descriptor,
+            )
+        )
+    return caches
+
+
+@pytest.mark.parametrize("slice_bytes", [96, 192])
+def test_mirrored_layout_exposes_fixed_bank_lanes_and_dense_linear_views(slice_bytes: int) -> None:
+    caches = _make_mirrored_caches(slice_bytes=slice_bytes)
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    assert layout.bank_bytes == 4 * slice_bytes
+    assert layout.slot_bytes == slice_bytes
+    assert layout.full_read_padding_row == 6
+    assert layout.scratch_conv_offset == layout.scratch_ssm_offset == 0
+    assert layout.scratch_conv_rows == 1
+    assert layout.scratch_ssm_rows == 3
+    common_rows = layout.bank_bytes // 8 - 3
+    for index, cache in enumerate(caches[:4]):
+        bank, lane = divmod(index, 2)
+        assert cache.key.shape[0] == cache.value.shape[0] == common_rows
+        assert cache.key.storage_offset() * cache.key.element_size() == bank * layout.bank_bytes + 16 * lane
+        assert cache.value.data_ptr() - cache.key.data_ptr() == 8
+    state = torch.tensor([-1, 0, 1], dtype=torch.int32)
+    for group, cache in enumerate(caches[4:]):
+        assert cache.conv.storage_offset() == cache.ssm.storage_offset() == 0
+        assert layout.linear_state_indices(state, role="conv", slots=cache.linear_state_slots).tolist() == [
+            -1,
+            0,
+            10 + 2 * group,
+        ]
+        assert layout.linear_state_indices(state, role="ssm", slots=cache.linear_state_slots).tolist() == [
+            -1,
+            0,
+            12 + 3 * group,
+        ]
+
+
+def test_mirrored_padding_stays_finite_after_linear_scratch_is_poisoned() -> None:
+    caches = _make_mirrored_caches()
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    for cache in caches[4:]:
+        cache.conv[0].fill_(torch.nan)
+        cache.ssm[:3].fill_(torch.nan)
+    for cache in caches[:4]:
+        assert torch.isfinite(cache.key[layout.full_read_padding_row]).all()
+        assert torch.isfinite(cache.value[layout.full_read_padding_row]).all()
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("shared_slice_bytes", 192, "one native geometry"),
+        ("shared_full_read_padding_page", 45, "in-range"),
+    ],
+)
+def test_mirrored_layout_rejects_inconsistent_native_geometry(field: str, value: int, error: str) -> None:
+    caches = _make_mirrored_caches()
+    caches[0] = replace(caches[0], **{field: value})
+    with pytest.raises(ValueError, match=error):
+        detect_shared_kv_cache_layout(caches)
+
+
+def test_normalize_mirrored_tuple_preserves_zero_scratch_descriptors() -> None:
+    cache = _make_mirrored_caches()[0]
+    raw = (cache.key, cache.value, *(None for _ in range(12)), 3, 384, 96, 0, 0, 6)
+    normalized = normalize_layer_caches([raw])[0]
+    assert normalized.shared_bank_bytes == 384
+    assert normalized.shared_slice_bytes == 96
+    assert normalized.shared_conv_scratch_row == normalized.shared_ssm_scratch_row == 0
+    assert normalized.shared_full_read_padding_page == 6
+
+
 def test_slab_full_mapping_is_per_layer_and_preserves_token_offsets() -> None:
     caches = _make_slab_caches()
     layout = detect_shared_kv_cache_layout(caches)

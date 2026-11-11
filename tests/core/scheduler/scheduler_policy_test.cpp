@@ -2559,18 +2559,23 @@ TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
 
 TEST(SchedulerPolicyTest, SharedSlabPreservesByteUnitsAboveFourGiB) {
   constexpr size_t kGiB = size_t{1} << 30;
-  for (const size_t num_allocatable_slabs : {7u, 8u}) {
+  for (const size_t num_allocatable_slabs : {4u, 5u}) {
     SCOPED_TRACE(num_allocatable_slabs);
     StaticKVCacheLayoutSpec spec;
     spec.num_slots = 64;
-    spec.full_row_bytes = kGiB / 4;
+    spec.full_row_bytes = kGiB / 8;
     spec.conv_row_bytes = kGiB / 8;
-    spec.ssm_row_bytes = kGiB / 2;
+    spec.ssm_row_bytes = kGiB / 4;
     spec.checkpoint_stride = 2;
-    spec.full_layer_ids = {0, 3};
-    spec.linear_layer_ids = {1, 2};
+    spec.full_layer_ids = {0, 2, 4, 6};
+    spec.linear_layer_ids = {1, 3, 5, 7};
     const StaticKVCacheLayout layout(spec);
+    ASSERT_EQ(layout.bank_count(), 4u);
+    ASSERT_EQ(layout.slice_bytes(), kGiB / 2);
+    ASSERT_EQ(layout.slab_bytes(), 2 * kGiB);
+    ASSERT_EQ(layout.num_reserved_slabs(), 2u);
     spec.num_slabs = layout.num_reserved_slabs() + num_allocatable_slabs;
+    ASSERT_LE(spec.num_slabs, layout.max_slab_count());
     BlockManagerPool::Options options;
     options.num_blocks(64)
         .block_size(2)
@@ -2581,8 +2586,9 @@ TEST(SchedulerPolicyTest, SharedSlabPreservesByteUnitsAboveFourGiB) {
         .shared_layout(
             std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
     BlockManagerPool pool(options);
-    EXPECT_EQ(pool.sequence_resource_units(4), 4 * kGiB + kGiB / 4);
-    EXPECT_EQ(pool.admission_capacity(0), num_allocatable_slabs * kGiB);
+    // Only mappings are allocated; no multi-GiB backing tensor is needed.
+    EXPECT_EQ(pool.sequence_resource_units(4), 4 * kGiB + kGiB / 2);
+    EXPECT_EQ(pool.admission_capacity(0), num_allocatable_slabs * 2 * kGiB);
   }
 }
 

@@ -77,7 +77,22 @@ py::list build_python_kv_caches(const std::vector<KVCache>& kv_caches) {
         optional_tensor(kv_cache.get_kpool_tail()),
         optional_tensor(kv_cache.linear_state_slot_row()),
         optional_tensor(kv_cache.full_block_rows()),
-        checkpoint_stride > 0 ? py::cast(checkpoint_stride) : py::none()));
+        checkpoint_stride > 0 ? py::cast(checkpoint_stride) : py::none(),
+        kv_cache.shared_bank_bytes() > 0
+            ? py::cast(kv_cache.shared_bank_bytes())
+            : py::none(),
+        kv_cache.shared_slice_bytes() > 0
+            ? py::cast(kv_cache.shared_slice_bytes())
+            : py::none(),
+        kv_cache.shared_bank_bytes() > 0
+            ? py::cast(kv_cache.shared_conv_scratch_row())
+            : py::none(),
+        kv_cache.shared_bank_bytes() > 0
+            ? py::cast(kv_cache.shared_ssm_scratch_row())
+            : py::none(),
+        kv_cache.shared_bank_bytes() > 0
+            ? py::cast(kv_cache.shared_full_read_padding_page())
+            : py::none()));
   }
   return python_caches;
 }

@@ -194,7 +194,7 @@ ModelArgs make_shared_cache_model_args() {
 }
 
 KVCacheCapacity make_shared_cache_capacity() {
-  // Full pairs cost 32 B, Conv rows 6 B and SSM rows 4 B: slab=96 B.
+  // Two banks mirror 32-byte Full slices: global group = 64 bytes.
   // Logical IDs and physical slabs have independent capacities.
   KVCacheCapacity capacity;
   capacity.n_blocks(53)
@@ -202,9 +202,10 @@ KVCacheCapacity make_shared_cache_capacity() {
       .num_linear_state_blocks(53)
       .linear_conv_state_len(1)
       .linear_ssm_checkpoint_stride(1)
-      .shared_slot_bytes(96)
+      .shared_slot_bytes(64)
       .shared_slab_count(12)
-      .shared_min_slab_count(4)
+      .shared_min_slab_count(5)
+      .shared_reserved_slab_count(2)
       .shared_linear_state_slots(4);
   return capacity;
 }
@@ -297,21 +298,21 @@ TEST_F(BlockManagerPoolTest,
   EXPECT_EQ(result.shape.conv_cache_shape().front(), 53);
   EXPECT_EQ(result.manager->block_resource_units(BlockType::KV, 2), 128);
   EXPECT_EQ(result.manager->block_resource_units(BlockType::LINEAR, 1), 20);
-  ASSERT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{1056});
+  ASSERT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{640});
   auto sequence = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8, 9});
   ASSERT_TRUE(result.manager->allocate(&sequence));
   EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 2);
   EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1);
-  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{908});
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{492});
   result.manager->deallocate(&sequence);
-  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{1056});
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{640});
 }
 
 TEST_F(BlockManagerPoolTest, SharedFactoryAccountsForTypedSlabFragmentation) {
   BlockManagerPool::Options options;
   options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
   KVCacheCapacity capacity = make_shared_cache_capacity();
-  capacity.shared_slab_count(4);
+  capacity.shared_slab_count(5);
   auto result = KVCacheManagerFactory::create(capacity,
                                               make_shared_cache_model_args(),
                                               /*world_size=*/1,
@@ -321,16 +322,16 @@ TEST_F(BlockManagerPoolTest, SharedFactoryAccountsForTypedSlabFragmentation) {
   auto first = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8});
   auto second = make_sequence(1, {9, 10, 11, 12, 13, 14, 15, 16});
   EXPECT_FALSE(result.manager->exceeds_total_capacity(&first, 8));
-  // Three Full blocks plus one state cost 212 B, below the 288 B budget,
-  // but require two KV slabs and one slab for each recurrent role.
-  EXPECT_TRUE(result.manager->exceeds_total_capacity(&first, 24));
+  // Two Full blocks plus one state cost 148 B, below the 192 B budget,
+  // but require two KV groups and one group for each recurrent role.
+  EXPECT_TRUE(result.manager->exceeds_total_capacity(&first, 16));
   EXPECT_TRUE(result.manager->exceeds_total_capacity(
       std::vector<KVCacheManager::KVCacheReservation>{{&first, 8},
                                                       {&second, 8}}));
   ASSERT_TRUE(result.manager->allocate(&first));
   EXPECT_FALSE(result.manager->allocate(&second));
   result.manager->deallocate(&first);
-  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{288});
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{192});
 }
 
 TEST(KVCacheManagerFactoryTest, RejectsSharedStorageCostMismatch) {

@@ -20,6 +20,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/common/constants.h"
 #include "core/framework/config/model_config.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
@@ -62,6 +63,17 @@ std::pair<LlmForwardInput, DecodeBatchContext> make_two_request_ctx() {
                          {5, 9});
   DecodeBatchContext ctx = make_decode_batch_context(input);
   return {std::move(input), std::move(ctx)};
+}
+
+LlmForwardInput make_shared_forward_input() {
+  LlmForwardInput input =
+      make_forward_input(torch::tensor({10, 20}, torch::kInt),
+                         torch::tensor({3, 7}, torch::kInt),
+                         torch::tensor({{1, 2, 3}, {4, 5, 6}}, torch::kInt),
+                         {4, 8});
+  input.input_params.attention.host.shared_full_block_table =
+      torch::tensor({{120, 122, 124}, {180, 182, 184}}, torch::kInt);
+  return input;
 }
 
 TEST(DecodeInputBuilderTest, AppendDecodeRowBuildsSlotsAndKvGeometry) {
@@ -126,6 +138,121 @@ TEST(DecodeInputBuilderTest, PreservesRequestGroupsAndAbsoluteHistory) {
   EXPECT_EQ(batch.num_tokens, 3);
   EXPECT_EQ(batch.num_scheduled_tokens, std::vector<int32_t>({2, 1}));
   EXPECT_EQ(batch.query_start_loc, std::vector<int32_t>({0, 2, 3}));
+}
+
+TEST(DecodeInputBuilderTest,
+     VerifyRowsPreserveFinalTargetAndLogicalDraftPages) {
+  for (const bool chunked : {false, true}) {
+    SCOPED_TRACE(chunked);
+    LlmForwardInput input = make_shared_forward_input();
+    const DecodeBatchContext context = make_decode_batch_context(input);
+    const DecodeExpansionOptions options = make_verify_layout(
+        /*num_val_tokens=*/2, /*block_size=*/4, chunked);
+    DecodeBuildBuffers buffers = expand_decode_inputs(context, options);
+    EXPECT_EQ(buffers.out_new_cache_slots,
+              std::vector<int32_t>({7, 8, 23, 24}));
+    EXPECT_EQ(buffers.out_shared_full_slot_mapping,
+              std::vector<int32_t>({483, 488, 731, 736}));
+
+    build_decode_metadata(input.input_params, buffers, options);
+    const torch::Tensor expected_pages =
+        chunked ? torch::tensor({{120, 122, 124}, {180, 182, 184}}, torch::kInt)
+                : torch::tensor({{120, 122, 124},
+                                 {120, 122, 124},
+                                 {180, 182, 184},
+                                 {180, 182, 184}},
+                                torch::kInt);
+    EXPECT_TRUE(
+        torch::equal(input.input_params.attention.host.shared_full_block_table,
+                     expected_pages));
+    EXPECT_EQ(tensor_to_vector<int32_t>(
+                  input.input_params.attention.host.shared_full_slot_mapping),
+              std::vector<int32_t>({483, 488, 731, 736}));
+  }
+}
+
+TEST(DecodeInputBuilderTest, VerifyPaddingNeverWritesFiniteReadPage) {
+  LlmForwardInput input =
+      make_forward_input(torch::tensor({0}, torch::kInt),
+                         torch::tensor({0}, torch::kInt),
+                         torch::tensor({{0, 0}}, torch::kInt),
+                         {1});
+  input.input_params.attention.host.shared_full_block_table =
+      torch::tensor({{60, 60}}, torch::kInt);
+  input.input_params.attention.host.shared_full_slot_mapping =
+      torch::tensor({kPadSlotId}, torch::kInt);
+  const DecodeBatchContext context = make_decode_batch_context(input);
+  const DecodeExpansionOptions options = make_verify_layout(
+      /*num_val_tokens=*/1, /*block_size=*/4, /*chunked=*/false);
+  DecodeBuildBuffers buffers = expand_decode_inputs(context, options);
+  build_decode_metadata(input.input_params, buffers, options);
+
+  EXPECT_TRUE(
+      torch::equal(input.input_params.attention.host.shared_full_block_table,
+                   torch::tensor({{60, 60}}, torch::kInt)));
+  EXPECT_EQ(tensor_to_vector<int32_t>(
+                input.input_params.attention.host.shared_full_slot_mapping),
+            std::vector<int32_t>({kPadSlotId}));
+}
+
+TEST(DecodeInputBuilderTest, PaddingOverridesSuppressFinalWrites) {
+  for (const int32_t padding_slot : {kPaddingBlockId, kPadSlotId}) {
+    SCOPED_TRACE(padding_slot);
+    LlmForwardInput input = make_shared_forward_input();
+    const DecodeBatchContext context = make_decode_batch_context(input);
+    DecodeBuildBuffers buffers;
+    prepare_decode_buffers(buffers,
+                           context,
+                           /*num_tokens=*/1,
+                           /*emit_kv_len=*/true,
+                           /*emit_block_tables=*/true);
+    append_decode_token(context,
+                        {.req_id = 0,
+                         .position_offset = -1,
+                         .cache_slot_override = padding_slot},
+                        /*block_size=*/4,
+                        buffers);
+    build_decode_metadata(input.input_params, buffers, DecodeInputOptions{});
+
+    EXPECT_EQ(input.input_params.attention.host.new_cache_slots,
+              std::vector<int32_t>({padding_slot}));
+    EXPECT_EQ(tensor_to_vector<int32_t>(
+                  input.input_params.attention.host.shared_full_slot_mapping),
+              std::vector<int32_t>({kPadSlotId}));
+  }
+}
+
+TEST(DecodeInputBuilderTest, DraftSlotsUpdateWithoutRebuildingPageTables) {
+  LlmForwardInput input = make_shared_forward_input();
+  const torch::Tensor original_pages =
+      input.input_params.attention.host.shared_full_block_table;
+  input.input_params.attention.host.shared_full_slot_mapping =
+      torch::tensor({483, 731}, torch::kInt);
+  const DecodeBatchContext context = make_decode_batch_context(input);
+  DecodeBuildBuffers buffers;
+  prepare_decode_buffers(buffers,
+                         context,
+                         /*num_tokens=*/2,
+                         /*emit_kv_len=*/true,
+                         /*emit_block_tables=*/false);
+  for (int32_t request = 0; request < 2; ++request) {
+    append_decode_token(
+        context,
+        {.req_id = request, .position_offset = 1, .append_token = false},
+        /*block_size=*/4,
+        buffers);
+  }
+  update_kv_lengths_and_slots(input.input_params, buffers);
+
+  EXPECT_EQ(input.input_params.attention.host.new_cache_slots,
+            std::vector<int32_t>({8, 24}));
+  EXPECT_EQ(tensor_to_vector<int32_t>(
+                input.input_params.attention.host.shared_full_slot_mapping),
+            std::vector<int32_t>({488, 736}));
+  EXPECT_EQ(
+      input.input_params.attention.host.shared_full_block_table.data_ptr(),
+      original_pages.data_ptr());
+  EXPECT_TRUE(buffers.out_shared_full_block_tables.empty());
 }
 
 TEST(DecodeInputBuilderTest, VlmVerifyRowsPreserveVisionState) {

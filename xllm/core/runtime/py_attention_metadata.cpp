@@ -105,6 +105,13 @@ void register_attention_metadata_views(py::module_& module) {
                              &PyAttentionMetadataView::multi_block_tables)
       .def_property_readonly("block_table",
                              &PyAttentionMetadataView::block_table)
+      .def_property_readonly("shared_full_block_table",
+                             &PyAttentionMetadataView::shared_full_block_table)
+      .def_property_readonly("shared_full_slot_mapping",
+                             &PyAttentionMetadataView::shared_full_slot_mapping)
+      .def_property_readonly(
+          "shared_full_read_padding_page",
+          &PyAttentionMetadataView::shared_full_read_padding_page)
       .def_property_readonly("kv_seq_lens",
                              &PyAttentionMetadataView::kv_seq_lens)
       .def_property_readonly("linear_state_indices",
@@ -238,6 +245,10 @@ PyAttentionMetadataView::PyAttentionMetadataView(
     new_cache_slots_host_values_ = params.attention.host.new_cache_slots;
   }
   multi_block_tables_ = params.multi_block_tables;
+  shared_full_block_table_ = params.attention.device.shared_full_block_table;
+  shared_full_slot_mapping_ = params.attention.device.shared_full_slot_mapping;
+  shared_full_read_padding_page_ =
+      params.attention.host.shared_full_read_padding_page;
   linear_state_indices_ = params.embedding.linear_state_indices;
   num_accepted_tokens_ = params.num_accepted_tokens;
   num_accepted_tokens_host_values_ = params.num_accepted_tokens_host;
@@ -353,6 +364,18 @@ PyAttentionMetadataView::new_cache_slots_host_values() const {
 
 py::object PyAttentionMetadataView::block_table() const {
   return optional_tensor(metadata_->block_table);
+}
+
+py::object PyAttentionMetadataView::shared_full_block_table() const {
+  return optional_tensor(shared_full_block_table_);
+}
+
+py::object PyAttentionMetadataView::shared_full_slot_mapping() const {
+  return optional_tensor(shared_full_slot_mapping_);
+}
+
+int32_t PyAttentionMetadataView::shared_full_read_padding_page() const {
+  return shared_full_read_padding_page_;
 }
 
 py::object PyAttentionMetadataView::kv_seq_lens() const {

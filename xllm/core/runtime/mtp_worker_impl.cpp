@@ -143,6 +143,11 @@ template <typename Input>
 void stabilize_decode_host_tensors(Input& input) {
   input.token_ids_host = clone_host_tensor(input.token_ids_host);
   input.positions_host = clone_host_tensor(input.positions_host);
+  input.input_params.attention.host.shared_full_block_table = clone_host_tensor(
+      input.input_params.attention.host.shared_full_block_table);
+  input.input_params.attention.host.shared_full_slot_mapping =
+      clone_host_tensor(
+          input.input_params.attention.host.shared_full_slot_mapping);
   {
     const torch::Tensor& tensor =
         input.input_params.attention.host.block_tables;
@@ -2223,6 +2228,29 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   }
 
 #if defined(USE_NPU)
+  std::vector<int32_t> expanded_shared_full_pages;
+  torch::Tensor expanded_shared_full_flat;
+  int64_t shared_full_page_width = 0;
+  const torch::Tensor& shared_full_source =
+      input_params.attention.host.shared_full_block_table;
+  if (supports_expanded_spec_verify() && shared_full_source.defined()) {
+    CHECK_EQ(shared_full_source.size(0), num_sequences);
+    const int64_t active_width = shared_full_source.size(1);
+    shared_full_page_width = use_explicit_spec_verify_replay_update
+                                 ? spec_verify_block_table_width(
+                                       input_params.attention.host.block_tables)
+                                 : active_width;
+    expanded_shared_full_pages.assign(
+        static_cast<size_t>(total_num_val_tokens * shared_full_page_width),
+        input_params.attention.host.shared_full_read_padding_page);
+    const int32_t* source = shared_full_source.template data_ptr<int32_t>();
+    for (int64_t row = 0; row < total_num_val_tokens; ++row) {
+      std::memcpy(
+          expanded_shared_full_pages.data() + row * shared_full_page_width,
+          source + (row / num_val_tokens) * active_width,
+          static_cast<size_t>(active_width) * sizeof(int32_t));
+    }
+  }
   if (use_explicit_spec_verify_replay_update) {
     layer::ExpandedDecodeMetadataBuilder::update_expanded_decode_host_metadata(
         ModelParamsView(input_params));
@@ -2286,6 +2314,10 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     extra_int_inputs.push_back({.device_view = &expanded_block_tables_flat,
                                 .request_tensor = &attention.host.block_tables,
                                 .num_tokens_per_request = num_val_tokens});
+    if (!expanded_shared_full_pages.empty()) {
+      extra_int_inputs.push_back(
+          {&expanded_shared_full_pages, nullptr, &expanded_shared_full_flat});
+    }
     attention.rebuild_device_buffer(
         device_,
         extra_int_inputs,
@@ -2336,12 +2368,21 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
            nullptr,
            &input_params.embedding.linear_state_indices});
     }
+    if (!expanded_shared_full_pages.empty()) {
+      extra_int_inputs.push_back(
+          {&expanded_shared_full_pages, nullptr, &expanded_shared_full_flat});
+    }
     AttentionInputView(input_params.attention)
         .rebuild_device_buffer(device_, extra_int_inputs);
     if (supports_expanded_spec_verify()) {
       layer::ExpandedDecodeMetadataBuilder::update_expanded_decode_metadata(
           ModelParamsView(input_params), device_, logical_block_size);
     }
+  }
+  if (!expanded_shared_full_pages.empty()) {
+    input_params.attention.device.shared_full_block_table =
+        expanded_shared_full_flat.view(
+            {total_num_val_tokens, shared_full_page_width});
   }
 #else
   input_params.attention.rebuild_device_buffer(device_);

@@ -162,6 +162,63 @@ def test_no_padding_graph_entries_use_exact_rows_and_reuse_matching_shapes(runne
     assert len(runner._graphs) == 2
 
 
+def test_mirrored_graph_addresses_keep_entry_owned_storage_and_clear_stale_pages(
+    runner: DecodeAclGraphRunner,
+) -> None:
+    runner.attention_backend.shared_kv_layout = SimpleNamespace(bank_bytes=384, full_read_padding_row=6)
+    metadata = _metadata()
+    metadata.shared_full_block_table = torch.tensor([[16, 6], [24, 32]], dtype=torch.int32)
+    metadata.shared_full_slot_mapping = torch.tensor([65, 98], dtype=torch.int32)
+    metadata.shared_full_read_padding_page = 6
+    input_ids = torch.arange(2, dtype=torch.int32)
+    first = runner._allocate_entry(4, input_ids, metadata)
+    second = runner._allocate_entry(4, input_ids, metadata)
+    table = first.static_metadata.shared_full_block_table
+    slots = first.static_metadata.shared_full_slot_mapping
+    pointers = table.data_ptr(), slots.data_ptr()
+    assert table.data_ptr() != second.static_metadata.shared_full_block_table.data_ptr()
+    assert slots.data_ptr() != second.static_metadata.shared_full_slot_mapping.data_ptr()
+
+    runner._fill_entry(first, input_ids, input_ids, metadata, 2, None)
+    assert table.tolist() == [[16, 6, 6], [24, 32, 6], [6, 6, 6], [6, 6, 6]]
+    assert slots.tolist() == [65, 98, -1, -1]
+    metadata.block_table = metadata.block_table[:, :1].contiguous()
+    metadata.shared_full_block_table = torch.tensor([[40], [48]], dtype=torch.int32)
+    metadata.shared_full_slot_mapping = torch.tensor([161, 194], dtype=torch.int32)
+    runner._fill_entry(first, input_ids, input_ids, metadata, 2, None)
+    assert table.tolist() == [[40, 6, 6], [48, 6, 6], [6, 6, 6], [6, 6, 6]]
+    assert slots.tolist() == [161, 194, -1, -1]
+    assert pointers == (table.data_ptr(), slots.data_ptr())
+    assert second.static_metadata.shared_full_block_table.eq(6).all()
+    assert second.static_metadata.shared_full_slot_mapping.eq(-1).all()
+
+
+def test_mirrored_graph_dummy_has_explicit_finite_addresses_and_real_batch_requires_native_fields(
+    runner: DecodeAclGraphRunner,
+) -> None:
+    runner.attention_backend.shared_kv_layout = SimpleNamespace(bank_bytes=384, full_read_padding_row=6)
+    metadata = _metadata()
+    input_ids = torch.arange(2, dtype=torch.int32)
+    entry = runner._allocate_entry(4, input_ids, metadata)
+    with pytest.raises(ValueError, match="native final"):
+        runner._fill_entry(entry, input_ids, input_ids, metadata, 2, None)
+    metadata.is_dummy = True
+    runner._fill_entry(entry, input_ids, input_ids, metadata, 2, None)
+    assert entry.static_metadata.shared_full_block_table.eq(6).all()
+    assert entry.static_metadata.shared_full_slot_mapping.eq(-1).all()
+
+
+def test_draft_graph_ignores_target_final_addresses_without_shared_layout(runner: DecodeAclGraphRunner) -> None:
+    metadata = _metadata()
+    metadata.shared_full_block_table = torch.tensor([[16], [24]], dtype=torch.int32)
+    metadata.shared_full_slot_mapping = torch.tensor([65, 98], dtype=torch.int32)
+    input_ids = torch.arange(2, dtype=torch.int32)
+    entry = runner._allocate_entry(2, input_ids, metadata)
+    runner._fill_entry(entry, input_ids, input_ids, metadata, 2, None)
+    assert entry.static_metadata.shared_full_block_table is None
+    assert entry.static_metadata.shared_full_slot_mapping is None
+
+
 @pytest.mark.parametrize("no_padding", [False, True])
 @pytest.mark.parametrize("capture_fails", [False, True])
 def test_capture_preserves_live_checkpoints_on_success_and_failure(

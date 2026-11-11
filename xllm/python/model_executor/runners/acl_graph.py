@@ -67,6 +67,9 @@ class StaticGraphAttentionMetadata:
     paged_kv_indptr_host: torch.Tensor | None = None
     paged_kv_last_page_len_host: torch.Tensor | None = None
     block_table: torch.Tensor | None = None
+    shared_full_block_table: torch.Tensor | None = None
+    shared_full_slot_mapping: torch.Tensor | None = None
+    shared_full_read_padding_page: int = 0
     kv_seq_lens: torch.Tensor | None = None
     linear_state_indices: torch.Tensor | None = None
     linear_verify_graph: LinearVerifyGraphInputs | None = None

@@ -87,6 +87,11 @@ class LayerCache:
     # Slab storage maps logical Full blocks to this layer's paired K/V rows.
     full_block_rows: torch.Tensor | None = None
     shared_checkpoint_stride: int | None = None
+    shared_bank_bytes: int | None = None
+    shared_slice_bytes: int | None = None
+    shared_conv_scratch_row: int | None = None
+    shared_ssm_scratch_row: int | None = None
+    shared_full_read_padding_page: int | None = None
 
     @property
     def index_scale(self) -> torch.Tensor | None:
@@ -164,6 +169,8 @@ class SharedKVCacheLayout:
     scratch_conv_offset: int = 0
     scratch_ssm_offset: int = 0
     num_slabs: int = 0
+    bank_bytes: int = 0
+    read_padding_page: int = 0
 
     def __post_init__(self) -> None:
         values = (
@@ -201,6 +208,8 @@ class SharedKVCacheLayout:
     @property
     def full_read_padding_row(self) -> int:
         """K row of the immutable padding pair beyond every writable scratch extent."""
+        if self.bank_bytes:
+            return self.read_padding_page
         if not self.num_slabs:
             return 0
         full_pair_bytes = 2 * (self.slot_bytes // self.full_row_stride)
@@ -335,6 +344,102 @@ def _tensor_row_bytes(tensor: torch.Tensor) -> int:
     if tensor.ndim < 2 or not tensor.is_contiguous() or tensor.shape[0] <= 0:
         raise ValueError("shared KV cache tensors must be contiguous row views")
     return tensor.element_size() * tensor[0].numel()
+
+
+def _detect_shared_mirrored_layout(
+    full: Sequence[LayerCache], linear: Sequence[LayerCache], arena_bytes: int
+) -> SharedKVCacheLayout:
+    key, conv, ssm = full[0].key, linear[0].conv, linear[0].ssm
+    assert key is not None and conv is not None and ssm is not None
+    bank_bytes = full[0].shared_bank_bytes
+    slice_bytes = full[0].shared_slice_bytes
+    checkpoint_stride = linear[0].shared_checkpoint_stride
+    if (
+        not isinstance(bank_bytes, int)
+        or bank_bytes <= 0
+        or not isinstance(slice_bytes, int)
+        or slice_bytes <= 0
+        or not isinstance(checkpoint_stride, int)
+        or checkpoint_stride <= 0
+    ):
+        raise ValueError("mirrored shared caches require positive native bank, slice, and checkpoint geometry")
+    bank_count, remainder = divmod(arena_bytes, bank_bytes)
+    if remainder or bank_count != gcd(len(full), len(linear)):
+        raise ValueError("mirrored shared bank count must match the bound Full and Linear layers")
+    full_bytes, conv_bytes, ssm_bytes = (_tensor_row_bytes(tensor) for tensor in (key, conv, ssm))
+    full_per_bank = len(full) // bank_count
+    if (
+        bank_bytes % slice_bytes
+        or slice_bytes % lcm(2 * full_per_bank * full_bytes, checkpoint_stride * ssm_bytes)
+        or slice_bytes < conv_bytes
+    ):
+        raise ValueError("mirrored shared slices must align Full lanes and SSM checkpoint bundles")
+    rows = linear[0].linear_state_slots
+    if rows is None or rows.ndim != 2 or rows.shape[0] != 2 or rows.shape[1] < 2:
+        raise ValueError("mirrored shared Linear caches require independent Conv and SSM row maps")
+    num_slots = rows.shape[1]
+    full_rows = bank_bytes // full_bytes - (2 * full_per_bank - 1)
+    if full_rows <= 0:
+        raise ValueError("mirrored shared banks must hold all Full lanes")
+    read_padding_page = full[0].shared_full_read_padding_page
+    if not isinstance(read_padding_page, int) or not 0 <= read_padding_page < full_rows:
+        raise ValueError("mirrored shared caches require an in-range native Full read padding page")
+    for cache in (*full, *linear):
+        if (
+            cache.shared_bank_bytes != bank_bytes
+            or cache.shared_slice_bytes != slice_bytes
+            or cache.shared_checkpoint_stride != checkpoint_stride
+            or cache.shared_full_read_padding_page != read_padding_page
+        ):
+            raise ValueError("mirrored shared cache descriptors must use one native geometry")
+    for index, cache in enumerate(full):
+        assert cache.key is not None and cache.value is not None
+        bank, lane = divmod(index, full_per_bank)
+        key_offset = bank * bank_bytes + 2 * lane * full_bytes
+        for tensor, offset in ((cache.key, key_offset), (cache.value, key_offset + full_bytes)):
+            if (
+                tensor.shape != (full_rows, *key.shape[1:])
+                or tensor.dtype != key.dtype
+                or _tensor_storage_span(tensor)[1] != offset
+                or _tensor_row_bytes(tensor) != full_bytes
+            ):
+                raise ValueError("mirrored shared Full views must expose fixed bank-relative lanes")
+            if tensor.numel() > 1 << 32:
+                raise ValueError("mirrored shared Full views exceed FIA's 32-bit element offset range")
+        if cache.linear_state_slots is not None:
+            raise ValueError("shared Full cache layers do not own recurrent state slots")
+    for cache in linear:
+        assert cache.conv is not None and cache.ssm is not None
+        rows = cache.linear_state_slots
+        if rows is None or rows.shape != (2, num_slots) or rows.dtype != torch.int32 or rows.device != conv.device:
+            raise ValueError("mirrored shared Linear caches require device int32 role row maps")
+        for tensor, prototype, row_bytes in ((cache.conv, conv, conv_bytes), (cache.ssm, ssm, ssm_bytes)):
+            if (
+                tensor.shape != (arena_bytes // row_bytes, *prototype.shape[1:])
+                or tensor.dtype != prototype.dtype
+                or _tensor_storage_span(tensor)[1] != 0
+                or _tensor_row_bytes(tensor) != row_bytes
+            ):
+                raise ValueError("mirrored shared Linear views must retain whole-arena state geometry")
+        if cache.shared_conv_scratch_row != 0 or cache.shared_ssm_scratch_row != 0:
+            raise ValueError("mirrored shared Linear scratch must use the reserved zero rows")
+    return SharedKVCacheLayout(
+        page_size_tokens=int(key.shape[1]),
+        full_row_stride=slice_bytes // full_bytes,
+        conv_row_stride=slice_bytes // conv_bytes if slice_bytes % conv_bytes == 0 else None,
+        ssm_row_stride=slice_bytes // ssm_bytes,
+        checkpoint_stride=checkpoint_stride,
+        num_slots=num_slots,
+        slot_bytes=slice_bytes,
+        num_linear_groups=len(linear),
+        conv_row_bytes=conv_bytes,
+        scratch_full_rows=1,
+        scratch_conv_rows=1,
+        scratch_ssm_rows=checkpoint_stride,
+        num_slabs=bank_bytes // slice_bytes,
+        bank_bytes=bank_bytes,
+        read_padding_page=read_padding_page,
+    )
 
 
 def _detect_shared_slab_layout(
@@ -472,6 +577,8 @@ def detect_shared_kv_cache_layout(
     page_size_tokens = int(key.shape[1])
     if page_size_tokens <= 0 or min(full_row_bytes, conv_row_bytes, ssm_row_bytes) <= 0:
         raise ValueError("shared KV cache rows and Full page size must be positive")
+    if any(cache.shared_bank_bytes is not None for cache in full + linear):
+        return _detect_shared_mirrored_layout(full, linear, arena_bytes)
     if any(cache.full_block_rows is not None or cache.shared_checkpoint_stride is not None for cache in full + linear):
         return _detect_shared_slab_layout(full, linear, arena_bytes)
     pages_per_slot = (len(full) + 3) // 4
@@ -629,6 +736,11 @@ class ExecutionMetadataSource(Protocol):
 
 class AttentionMetadata(ExecutionMetadataSource, Protocol):
     prepared_attention_state: object | None
+    # Shared Full addresses are relative to the bound mirrored-bank K/V views.
+    # Draft executors continue to consume the logical table and token slots.
+    shared_full_block_table: torch.Tensor | None
+    shared_full_slot_mapping: torch.Tensor | None
+    shared_full_read_padding_page: int
     paged_kv_indptr: torch.Tensor
     paged_kv_indices: torch.Tensor
     paged_kv_last_page_len: torch.Tensor

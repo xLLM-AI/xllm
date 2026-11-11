@@ -666,7 +666,9 @@ TEST(LinearStateRestoreTest, StaticFullIndicesPreserveOffsetsAndSentinels) {
   std::vector<int32_t> first_rows;
   fixture.pool->append_full_block_rows(ids[0], &first_rows);
   ASSERT_EQ(first_rows.size(), 2u);
-  EXPECT_NE(first_rows[0], first_rows[1]);
+  EXPECT_EQ(first_rows[0], first_rows[1]);
+  EXPECT_NE(fixture.caches[1].get_k_cache()[first_rows[0]].data_ptr(),
+            fixture.caches[3].get_k_cache()[first_rows[1]].data_ptr());
 
   for (size_t layer = 0; layer < 2; ++layer) {
     const KVCache& full = fixture.caches[layer * 2 + 1];

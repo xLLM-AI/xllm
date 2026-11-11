@@ -591,7 +591,8 @@ void init_shared_counts(const ModelArgs& model_args,
   CHECK_LE(layout.slab_bytes(),
            static_cast<size_t>(std::numeric_limits<int64_t>::max()));
   const int64_t slab_bytes = static_cast<int64_t>(layout.slab_bytes());
-  int64_t slabs = capacity->cache_size_in_bytes() / slab_bytes;
+  int64_t slabs = std::min(capacity->cache_size_in_bytes() / slab_bytes,
+                           static_cast<int64_t>(layout.max_slab_count()));
   // Native token slots and recurrent row indices use int32. Bound the dense
   // arena, not the unrelated logical-ID mapping-table length.
   const size_t max_index = std::numeric_limits<int32_t>::max();
@@ -605,17 +606,16 @@ void init_shared_counts(const ModelArgs& model_args,
     slabs = std::min(
         slabs, static_cast<int64_t>(max_index / layout.rows_per_slab(role)));
   }
-  const auto slabs_for = [&layout](size_t count, size_t object_bytes) {
-    const size_t objects_per_slab = layout.slab_bytes() / object_bytes;
-    return (count + objects_per_slab - 1) / objects_per_slab;
+  const auto slabs_for = [&layout](size_t count, KVCacheTensorRole role) {
+    const size_t objects_per_slab = layout.objects_per_slab(role);
+    return count / objects_per_slab +
+           static_cast<size_t>(count % objects_per_slab != 0);
   };
-  // Reserved scratch and read-padding slabs cannot change type. One sequence
-  // needs separate typed slabs for its Full pairs, Conv rows and SSM bundles.
+  // Mirrored groups supply every bank together, preserving shared role leases.
   const int64_t minimum_slabs = static_cast<int64_t>(
-      layout.num_reserved_slabs() +
-      slabs_for(layout.full_layer_count(), layout.full_pair_bytes()) +
-      slabs_for(layout.linear_layer_count(), layout.conv_row_bytes()) +
-      slabs_for(layout.linear_layer_count(), layout.ssm_bundle_bytes()));
+      layout.num_reserved_slabs() + slabs_for(1, KVCacheTensorRole::KEY) +
+      slabs_for(layout.linear_layers_per_bank(), KVCacheTensorRole::CONV) +
+      slabs_for(layout.linear_layers_per_bank(), KVCacheTensorRole::SSM));
   CHECK_GE(slabs, minimum_slabs)
       << "Static shared KV budget cannot fit padding and one hybrid sequence.";
   const int64_t full_block_bytes = static_cast<int64_t>(
@@ -635,6 +635,8 @@ void init_shared_counts(const ModelArgs& model_args,
       .shared_slot_bytes(slab_bytes)
       .shared_slab_count(slabs)
       .shared_min_slab_count(minimum_slabs)
+      .shared_reserved_slab_count(
+          static_cast<int64_t>(layout.num_reserved_slabs()))
       .shared_linear_state_slots(
           static_cast<uint32_t>(layout.num_linear_groups()))
       .cache_size_in_bytes(slabs * slab_bytes)
@@ -788,7 +790,8 @@ SharedStaticKVCachePlan plan_shared_static_kv_cache(KVCacheCapacity target_cap,
   CHECK_GT(smallest_allocation, 0);
   const auto logical_capacity = [&](int64_t slabs) {
     return std::min(target_cap.n_blocks(),
-                    1 + (slabs - 1) * slab_bytes / smallest_allocation);
+                    1 + (slabs - target_cap.shared_reserved_slab_count()) *
+                            slab_bytes / smallest_allocation);
   };
   // The draft keeps dense Full rows indexed by logical IDs. It does not pay
   // for one draft block per physical slab or per Linear mapping-table entry.
