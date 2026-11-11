@@ -183,6 +183,8 @@ def test_mirrored_graph_addresses_keep_entry_owned_storage_and_clear_stale_pages
     assert table.tolist() == [[16, 6, 6], [24, 32, 6], [6, 6, 6], [6, 6, 6]]
     assert slots.tolist() == [65, 98, -1, -1]
     metadata.block_table = metadata.block_table[:, :1].contiguous()
+    metadata.kv_seq_lens = torch.tensor([2, 3], dtype=torch.int64)
+    metadata.kv_seq_lens_host_values = [2, 3]
     metadata.shared_full_block_table = torch.tensor([[40], [48]], dtype=torch.int32)
     metadata.shared_full_slot_mapping = torch.tensor([161, 194], dtype=torch.int32)
     runner._fill_entry(first, input_ids, input_ids, metadata, 2, None)
