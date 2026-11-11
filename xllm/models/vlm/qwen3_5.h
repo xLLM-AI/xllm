@@ -21,11 +21,11 @@ limitations under the License.
 
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/multimodal/mposition.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/lm_head.h"
 #include "core/layers/common/rotary_embedding_util.h"
 #include "models/model_registry.h"
-#include "models/vlm/mposition/mposition.h"
 #include "models/vlm/qwen3_vl_base.h"
 #include "processors/multimodal_processor.h"
 #include "processors/qwen2_vl_image_processor.h"

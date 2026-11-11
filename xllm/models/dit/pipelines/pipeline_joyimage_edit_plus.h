@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/framework/model_loader/dit_model_loader.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "core/framework/multimodal/mm_visitor.h"
+#include "core/framework/multimodal/mposition.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/tokenizer/tokenizer.h"
@@ -47,7 +48,6 @@ limitations under the License.
 #include "models/dit/utils/dit_parallel_mixin.h"
 #include "models/dit/utils/util.h"
 #include "models/model_registry.h"
-#include "models/vlm/mposition/mposition.h"
 #include "models/vlm/qwen3_vl.h"
 #include "processors/multimodal_processor.h"
 

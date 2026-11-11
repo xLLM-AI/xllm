@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "models/vlm/utils/multimodal_utils.h"
+#include "core/framework/multimodal/multimodal_utils.h"
 
 #include <glog/logging.h>
 

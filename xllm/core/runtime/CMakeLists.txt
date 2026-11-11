@@ -106,6 +106,7 @@ cc_library(
     :state_dict
     :dit_cache
     :model
+    :multimodal
     :parallel_state
     :worker_memory_resources
     :global_virtual_memory_region
