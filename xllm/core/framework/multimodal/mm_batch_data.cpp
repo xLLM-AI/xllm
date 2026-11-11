@@ -55,8 +55,15 @@ void MMBatchData::get(const MMKey& key, std::vector<torch::Tensor>& vec) const {
 }
 
 namespace {
-void move_dict_to_device(MMDict& dict, const torch::Device& device) {
+void move_dict_to_device(MMDict& dict,
+                         const torch::Device& device,
+                         bool keep_vision_grid_on_cpu) {
   for (auto& [key, value] : dict) {
+    // Python Qwen3-VL consumes grid values only as host control metadata.
+    if (keep_vision_grid_on_cpu &&
+        (key == "image_grid_thw" || key == "video_grid_thw")) {
+      continue;
+    }
     if (std::holds_alternative<torch::Tensor>(value)) {
       value = safe_to(std::get<torch::Tensor>(value), device, true);
     } else if (std::holds_alternative<std::vector<torch::Tensor>>(value)) {
@@ -68,8 +75,9 @@ void move_dict_to_device(MMDict& dict, const torch::Device& device) {
 }
 }  // namespace
 
-void MMBatchData::to(const torch::Device& device) {
-  move_dict_to_device(data_, device);
+void MMBatchData::to(const torch::Device& device,
+                     bool keep_vision_grid_on_cpu) {
+  move_dict_to_device(data_, device, keep_vision_grid_on_cpu);
 
   // Move per-item tensors (raw inputs and user-supplied embeddings) too. The
   // executor re-gathers inputs from per-item MMDataItem data() before running
@@ -79,18 +87,21 @@ void MMBatchData::to(const torch::Device& device) {
   for (auto& mm_data : mm_datas_) {
     if (mm_data.hold<MMItemVec>()) {
       for (auto& item : mm_data.items<MMItemVec>()) {
-        move_dict_to_device(item.mutable_data(), device);
+        move_dict_to_device(
+            item.mutable_data(), device, keep_vision_grid_on_cpu);
       }
     } else if (mm_data.hold<MMDict>()) {
-      move_dict_to_device(mm_data.items<MMDict>(), device);
+      move_dict_to_device(
+          mm_data.items<MMDict>(), device, keep_vision_grid_on_cpu);
     }
   }
 }
 
 MMBatchData MMBatchData::to(const MMBatchData& mm_data,
-                            const torch::Device& device) {
+                            const torch::Device& device,
+                            bool keep_vision_grid_on_cpu) {
   MMBatchData new_mm_data = mm_data;
-  new_mm_data.to(device);
+  new_mm_data.to(device, keep_vision_grid_on_cpu);
   return new_mm_data;
 }
 

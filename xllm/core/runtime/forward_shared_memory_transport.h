@@ -130,6 +130,9 @@ class ForwardSharedMemoryTransport final {
   static bool can_write_input(const LlmForwardInput& input,
                               size_t segment_size);
 
+  // Configure after model initialization, before publishing its first input.
+  void set_keep_vision_grid_on_cpu(bool enabled);
+
   bool input_write(const VlmForwardInput& input);
   bool input_read(VlmForwardInput& input,
                   const torch::Device& device,
@@ -181,6 +184,7 @@ class ForwardSharedMemoryTransport final {
 
   SharedMemoryManager segment_;
   std::atomic<bool> input_read_stopped_{false};
+  std::atomic<bool> keep_vision_grid_on_cpu_{false};
   ForwardType forward_type_;
   uint64_t last_version_ = 0;
   void* metadata_addr_ = nullptr;

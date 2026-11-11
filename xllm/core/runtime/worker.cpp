@@ -191,6 +191,10 @@ folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(
 
 const bool Worker::is_driver() { return impl_->is_driver(); }
 
+bool Worker::keep_vision_grid_on_cpu() const {
+  return impl_->keep_vision_grid_on_cpu();
+}
+
 folly::SemiFuture<std::tuple<int64_t, int64_t>>
 Worker::estimate_kv_cache_capacity_async() {
   return impl_->estimate_kv_cache_capacity_async();

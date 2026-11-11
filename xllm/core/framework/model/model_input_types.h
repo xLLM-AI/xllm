@@ -384,9 +384,10 @@ class VlmVisionInput final {
   // deep_stack for Qwen3-VL
   mutable std::vector<torch::Tensor> deep_stacks;
 
-  VlmVisionInput to(const torch::Device& device) const {
+  VlmVisionInput to(const torch::Device& device,
+                    bool keep_vision_grid_on_cpu = false) const {
     VlmVisionInput out;
-    out.mm_data = MMBatchData::to(mm_data, device);
+    out.mm_data = MMBatchData::to(mm_data, device, keep_vision_grid_on_cpu);
     out.deep_stacks = deep_stacks;
     return out;
   }

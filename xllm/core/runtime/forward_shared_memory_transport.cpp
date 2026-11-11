@@ -910,6 +910,7 @@ struct ReadContext final {
   const char* descriptor_cursor;
   const char* tensor_cursor;
   DeviceBufferSession* device_session = nullptr;
+  bool keep_vision_grid_on_cpu = false;
 };
 
 inline bool has_device_buffer(const ReadContext& context) {
@@ -1567,14 +1568,24 @@ inline void read_mm_dict(ReadContext& context, MMDict& mm_dict) {
     std::string mm_key;
     read_string(context, mm_key);
     read_data(context, tensor_num);
+    const bool host_grid =
+        context.keep_vision_grid_on_cpu &&
+        (mm_key == "image_grid_thw" || mm_key == "video_grid_thw");
     if (tensor_num == 1) {
       torch::Tensor tensor;
-      read_tensor(context, tensor);
+      read_tensor(context, tensor, /*stream=*/nullptr, host_grid);
+      if (host_grid) {
+        // Own the small host grid independently of shared-memory slot reuse.
+        tensor = tensor.clone();
+      }
       mm_dict[mm_key] = tensor;
     } else {
       std::vector<torch::Tensor> tensor_vec(tensor_num);
       for (int32_t i = 0; i < tensor_num; ++i) {
-        read_tensor(context, tensor_vec[i]);
+        read_tensor(context, tensor_vec[i], /*stream=*/nullptr, host_grid);
+        if (host_grid) {
+          tensor_vec[i] = tensor_vec[i].clone();
+        }
       }
       mm_dict[mm_key] = tensor_vec;
     }
@@ -2191,7 +2202,8 @@ inline void deserialize_forward_input_payload(
     Input& forward_input,
     const torch::Device& device,
     Stream* stream,
-    bool materialize_device_buffer = true) {
+    bool materialize_device_buffer = true,
+    bool keep_vision_grid_on_cpu = false) {
   const char* payload_base = buffer;
   RawInputLayoutHeader layout;
   CHECK(read_input_layout(
@@ -2203,6 +2215,7 @@ inline void deserialize_forward_input_payload(
   const char* descriptor_base = buffer;
   const char* tensor_arena_base = payload_base + layout.tensor_arena_offset;
   ReadContext context{descriptor_base, tensor_arena_base, &device_session};
+  context.keep_vision_grid_on_cpu = keep_vision_grid_on_cpu;
   initialize_device_buffer_session(context,
                                    forward_input,
                                    device,
@@ -3027,7 +3040,8 @@ bool unpack_native_input_host_buffer(const Input& input,
                                      const torch::Device& device,
                                      torch::ScalarType dtype,
                                      Input& output,
-                                     bool materialize_device_buffer) {
+                                     bool materialize_device_buffer,
+                                     bool keep_vision_grid_on_cpu = false) {
   if (!input.runtime.input_host_buffer.defined() ||
       !input.runtime.input_host_buffer.device().is_cpu() ||
       input.runtime.input_host_buffer.numel() == 0) {
@@ -3052,7 +3066,8 @@ bool unpack_native_input_host_buffer(const Input& input,
       output,
       device,
       /*stream=*/nullptr,
-      materialize_device_buffer);
+      materialize_device_buffer,
+      keep_vision_grid_on_cpu);
   CHECK(input.input_host_sample_count == kUnknownPackedSampleCount ||
         input.input_host_sample_count == output.input_host_sample_count)
       << "Packed sample count does not match the sampling sequence count";
@@ -3093,9 +3108,14 @@ bool unpack_from_input_host_buffer(const VlmForwardInput& input,
                                    const torch::Device& device,
                                    torch::ScalarType dtype,
                                    VlmForwardInput& output,
-                                   bool materialize_device_buffer) {
-  return unpack_native_input_host_buffer(
-      input, device, dtype, output, materialize_device_buffer);
+                                   bool materialize_device_buffer,
+                                   bool keep_vision_grid_on_cpu) {
+  return unpack_native_input_host_buffer(input,
+                                         device,
+                                         dtype,
+                                         output,
+                                         materialize_device_buffer,
+                                         keep_vision_grid_on_cpu);
 }
 
 bool unpack_from_input_host_buffer(const VlmForwardInput& input,
@@ -3385,13 +3405,18 @@ bool ForwardSharedMemoryTransport::read_token_input(
                                     input,
                                     device,
                                     stream_.get(),
-                                    materialize_device_buffer);
+                                    materialize_device_buffer,
+                                    keep_vision_grid_on_cpu_.load());
 
   return true;
 }
 
 bool ForwardSharedMemoryTransport::input_write(const LlmForwardInput& input) {
   return write_token_input(input);
+}
+
+void ForwardSharedMemoryTransport::set_keep_vision_grid_on_cpu(bool enabled) {
+  keep_vision_grid_on_cpu_.store(enabled);
 }
 
 bool ForwardSharedMemoryTransport::input_write(const VlmForwardInput& input) {
