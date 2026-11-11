@@ -1283,7 +1283,9 @@ with patch.object(
         {"python_graph_backend": "off"},
         max_seqs_per_batch=3,
     )
-    assert model_executor._num_attention_layers == 1
+    assert model_executor.execution_model is model_executor.model.model
+    assert model_executor.eager_runner.model is model_executor.model.model
+    assert model_executor.eager_runner.attention_backend is model_executor.attention_backend
     assert model_executor.decode_graph_runner is None
     assert model_executor.inductor_runner is None
 )PY");

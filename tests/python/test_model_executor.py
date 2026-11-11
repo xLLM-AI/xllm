@@ -586,12 +586,15 @@ class TestModelExecutorConstruction:
         "xllm.python.model_executor.executor._create_attention_backend",
         return_value=StubAttentionBackend(),
     )
-    def test_valid_model_creates_executor(self, _mock_backend):
+    def test_valid_model_creates_executor(self, mock_backend: MagicMock) -> None:
         model = _FakeModel(num_layers=3)
         config = {"python_graph_backend": "off"}
         executor = ModelExecutor(model, config, max_seqs_per_batch=4)
 
-        assert executor._num_attention_layers == 3
+        assert executor.execution_model is model.model
+        assert executor.attention_backend is mock_backend.return_value
+        assert executor.eager_runner.model is model.model
+        assert executor.eager_runner.attention_backend is mock_backend.return_value
         assert executor.decode_graph_runner is None
         assert executor.inductor_runner is None
 
