@@ -213,9 +213,9 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
     def prepare_graph_replay(self, metadata: AttentionMetadata) -> None:
         prepared = getattr(metadata, "prepared_attention_state", None)
         if not isinstance(prepared, _PreparedMlaAttention):
-            # Ordinary decode graphs update their static inputs before replay.
-            # Only prepared graphs capture the DCP metadata transforms.
-            super().prepare_graph_replay(metadata)
+            # Ordinary graphs must refresh the DCP-derived persistent buffers.
+            # Prepared graphs capture these transforms and reuse their buffers below.
+            self.prepare(metadata, graph_mode=True)
             return
         execution_state = get_forward_context().execution_state
         if execution_state is None:
