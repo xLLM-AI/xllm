@@ -11,8 +11,8 @@ sidebar:
 
 ## 环境准备
 
-按照 [Wan2.2 部署指南](/zh/cookbook/diffusion_models/wan/wan2_2/)
-准备 Ascend 开发环境，并在 xLLM 仓库根目录构建：
+按照 xLLM 的 [Ascend NPU 环境指南](/zh/hardware/ascend_npu/)
+准备开发环境，并在 xLLM 仓库根目录构建：
 
 ```bash
 git submodule update --init --recursive
@@ -27,14 +27,13 @@ python setup.py build --device npu
 
 使用 `MiniMaxAI/MiniMax-H3` 根目录的 Diffusers 组件格式。
 `model_index.json` 的 `_class_name` 应为 `MiniMaxH3ModularPipeline`，
-其中声明的组件目录均需保留。下面下载已验证版本的组件：
+其中声明的组件目录均需保留。准备好 Hugging Face 的 `hf` CLI 后，
+将组件下载到自己的权重目录：
 
 ```bash
-export HF_ENDPOINT=https://hf-mirror.com
-export HF_HOME=/data/models/.cache/huggingface
-export MODEL_PATH=/data/models/MiniMax-H3
+export MODEL_PATH=/path/to/MiniMax-H3
 
-uvx --from huggingface_hub==1.33.0 hf download MiniMaxAI/MiniMax-H3 \
+hf download MiniMaxAI/MiniMax-H3 \
   --revision 42ed227ee7df40d41602854ae760620d6eb651fe \
   --local-dir "$MODEL_PATH" \
   --include model_index.json --include 'transformer/*' \
@@ -46,8 +45,10 @@ uvx --from huggingface_hub==1.33.0 hf download MiniMaxAI/MiniMax-H3 \
 ## 文本条件
 
 当前 H3 管线要求调用方提供与模型配套的文本编码器生成的文本条件，
-不会仅根据 `input.prompt` 自动执行文本编码。准备一个 `conditioning.pt`
-文件，包含以下字段；文本条件必须与请求提示词一致：
+不会仅根据 `input.prompt` 自动执行文本编码。xLLM 当前不提供 H3 文本编码的
+预处理命令；以下请求从已有编码器输出开始，不能直接仅用原始文本运行。
+先取得配套 H3 编码器生成的特征和 token 标签，再将包含以下字段的 PyTorch
+字典保存为 `conditioning.pt`。提示词、特征和标签必须来自同一次编码：
 
 | 字段 | 类型与形状 | 说明 |
 | --- | --- | --- |
@@ -65,14 +66,14 @@ token 标签放在该张量的 `parameters.prompt_token_tags.int64_tensor_param`
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export MODEL_PATH=/data/models/MiniMax-H3
+export MODEL_PATH=/path/to/MiniMax-H3
 export XLLM_BINARY=/path/to/xllm
 export OMP_NUM_THREADS=8
 export HCCL_BUFFSIZE=256
 
 python -m xllm.launch_server serve --binary-path="$XLLM_BINARY" \
   --nnodes=4 --backend=dit --model="$MODEL_PATH" --model_id=minimax-h3 \
-  --tp_size=2 --sp_size=2 --cfg_size=1 --vae_size=1 \
+  --tp_size=2 --sp_size=2 --cfg_size=1 --vae_size=4 \
   --text_encoder_tp_size=1 --dit_h3_task_type=fl2va --dit_cache_policy=None \
   --dit_laser_attention_enabled=false --dit_sparse_attention_enabled=false \
   --master_node_addr=127.0.0.1:19885 --host=127.0.0.1 --port=8000 \
@@ -81,10 +82,21 @@ python -m xllm.launch_server serve --binary-path="$XLLM_BINARY" \
 
 八卡时，设置 `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`，并修改以下参数：
 
-| 配置 | `--nnodes` | `--tp_size` | `--sp_size` |
-| --- | --- | --- | --- |
-| 四卡 | `4` | `2` | `2` |
-| 八卡 | `8` | `2` | `4` |
+| 配置 | `--nnodes` | `--tp_size` | `--sp_size` | `--vae_size` |
+| --- | --- | --- | --- | --- |
+| 四卡 | `4` | `2` | `2` | `4` |
+| 八卡 | `8` | `2` | `4` | `8` |
+
+`--vae_size` 设置独立于 TP/SP 的 VAE 进程组大小，不计入
+`TP * SP * CFG * DP` 的乘积；其值必须为正数，且能整除 `--nnodes`。
+上述配置将视频空间切片分配到所有 NPU 上解码，再聚合、拼接输出；
+该参数不会并行音频 VAE 解码。
+VAE 保持 FP32，每张参与的 NPU 都会加载完整的视频 VAE 权重，并保存聚合后的切片；
+启用前需为这些权重和解码中间张量留出显存。
+
+设置 `--vae_size=1` 可使用本地 VAE 解码，无需更改 TP/SP 配置。
+未触发空间切片或切片数小于 VAE 组大小时，各参与 rank 使用本地解码路径，
+不会因增加 `--vae_size` 获得切片并行收益。
 
 `--max_body_size` 为生成结果的内部传输预留空间，不能按压缩后 MP4 的大小设置。
 标准权重有 56 个注意力头、96 个视频 patch 通道和 32 个音频通道；并行配置需满足

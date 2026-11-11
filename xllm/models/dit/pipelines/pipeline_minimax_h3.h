@@ -379,7 +379,6 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     }
 
     if (!is_video_vae_worker_) {
-      synchronize_tp_ranks();
       return DiTForwardOutput();
     }
 
@@ -408,7 +407,6 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
 
     torch::Tensor video = vae_->decode_to_pixels(video_latent);
     if (!is_tp_driver_) {
-      synchronize_tp_ranks();
       return DiTForwardOutput();
     }
 
@@ -427,7 +425,6 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     DiTForwardOutput output;
     output.tensors = {video};
     output.audio_tensors = {audio};
-    synchronize_tp_ranks();
     return output;
   }
 
@@ -736,13 +733,6 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     if (tp_active()) {
       tp_group_->broadcast(tensor, /*root_rank=*/0);
     }
-  }
-
-  void synchronize_tp_ranks() const {
-    if (!tp_active()) {
-      return;
-    }
-    tp_group_->barrier();
   }
 
   PackedLayout build_layout(

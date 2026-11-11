@@ -1085,10 +1085,9 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
     torch::Tensor decoded = decode(latent);
     torch::Tensor pixel_mean = pixel_mean_tensor_.to(decoded.device());
     torch::Tensor pixel_std = pixel_std_tensor_.to(decoded.device());
-    return torch::clamp(
-               decoded.to(torch::kFloat32) * pixel_std + pixel_mean, 0.0, 1.0)
-        .permute({0, 2, 1, 3, 4})
-        .contiguous();
+    decoded = decoded.to(torch::kFloat32);
+    decoded.mul_(pixel_std).add_(pixel_mean).clamp_(0.0, 1.0);
+    return decoded.permute({0, 2, 1, 3, 4}).contiguous();
   }
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
