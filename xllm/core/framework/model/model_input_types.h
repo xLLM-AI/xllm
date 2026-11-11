@@ -92,6 +92,9 @@ struct LlmAttentionHostInput final {
   std::vector<int32_t> ring_cur_seqlen;
   std::vector<int32_t> ring_cache_seqlen;
   torch::Tensor block_tables;
+  torch::Tensor shared_full_block_table;
+  torch::Tensor shared_full_slot_mapping;
+  int32_t shared_full_read_padding_page = 0;
 
   const int32_t* graph_q_seq_lens_data = nullptr;
   const int32_t* graph_kv_seq_lens_data = nullptr;
@@ -108,6 +111,9 @@ struct VlmAttentionHostInput final {
   std::vector<int32_t> ring_cur_seqlen;
   std::vector<int32_t> ring_cache_seqlen;
   torch::Tensor block_tables;
+  torch::Tensor shared_full_block_table;
+  torch::Tensor shared_full_slot_mapping;
+  int32_t shared_full_read_padding_page = 0;
 
   const int32_t* graph_q_seq_lens_data = nullptr;
   const int32_t* graph_kv_seq_lens_data = nullptr;
@@ -126,6 +132,10 @@ Input attention_device_to(const Input& source, const torch::Device& device) {
 #endif
   out.new_cache_slots = safe_to(source.new_cache_slots, device, true);
   out.block_tables = safe_to(source.block_tables, device, true);
+  out.shared_full_block_table =
+      safe_to(source.shared_full_block_table, device, true);
+  out.shared_full_slot_mapping =
+      safe_to(source.shared_full_slot_mapping, device, true);
   out.paged_kv_indptr = safe_to(source.paged_kv_indptr, device);
   out.paged_kv_indices = safe_to(source.paged_kv_indices, device);
   out.paged_kv_last_page_len = safe_to(source.paged_kv_last_page_len, device);
@@ -147,6 +157,9 @@ class LlmAttentionDeviceInput final {
   torch::Tensor q_cu_seq_lens;
   torch::Tensor new_cache_slots;
   torch::Tensor block_tables;
+  // Final bank-relative target addresses; logical tables remain for draft KV.
+  torch::Tensor shared_full_block_table;
+  torch::Tensor shared_full_slot_mapping;
   torch::Tensor paged_kv_indptr;
   torch::Tensor paged_kv_indices;
   torch::Tensor paged_kv_last_page_len;
@@ -170,6 +183,8 @@ class VlmAttentionDeviceInput final {
   torch::Tensor q_cu_seq_lens;
   torch::Tensor new_cache_slots;
   torch::Tensor block_tables;
+  torch::Tensor shared_full_block_table;
+  torch::Tensor shared_full_slot_mapping;
   torch::Tensor paged_kv_indptr;
   torch::Tensor paged_kv_indices;
   torch::Tensor paged_kv_last_page_len;

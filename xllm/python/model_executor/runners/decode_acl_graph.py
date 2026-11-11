@@ -1217,6 +1217,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
             dtype=torch.int32,
             device=device,
         )
+        shared_layout = self._shared_kv_layout()
+        shared_full_padding = (
+            int(shared_layout.full_read_padding_row)
+            if shared_layout is not None and getattr(shared_layout, "bank_bytes", 0)
+            else None
+        )
 
         entry = AclGraphEntry()
         entry.kv_capacity_pages = kv_capacity_pages
@@ -1292,6 +1298,15 @@ class DecodeAclGraphRunner(AclGraphRunner):
             ),
             kv_seq_lens_host_values=[1] * padded_batch_size,
             block_table=static_block_table,
+            shared_full_block_table=(
+                torch.full_like(static_block_table, shared_full_padding) if shared_full_padding is not None else None
+            ),
+            shared_full_slot_mapping=(
+                torch.full((padded_batch_size,), -1, dtype=torch.int32, device=device)
+                if shared_full_padding is not None
+                else None
+            ),
+            shared_full_read_padding_page=shared_full_padding if shared_full_padding is not None else 0,
             dp_execution_token_counts=(padded_batch_size,) * self.dp_size if self.dp_size > 1 else (),
             dp_is_decode=tuple([1] * self.dp_size) if self.dp_size > 1 else (),
             is_dummy=bool(getattr(metadata, "is_dummy", False)),
@@ -1403,6 +1418,38 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if decode_metadata is None:
             decode_metadata = self._decode_metadata(metadata, expanded)
         block_table = decode_metadata.block_table
+        full_table = static_metadata.shared_full_block_table
+        full_slots = static_metadata.shared_full_slot_mapping
+        if full_table is not None and full_slots is not None:
+            source_table = getattr(metadata, "shared_full_block_table", None)
+            source_slots = getattr(metadata, "shared_full_slot_mapping", None)
+            if source_table is None and source_slots is None and static_metadata.is_dummy:
+                full_table.fill_(static_metadata.shared_full_read_padding_page)
+                full_slots.fill_(-1)
+            else:
+                if source_table is None or source_slots is None:
+                    raise ValueError("mirrored shared Full graph requires native final block tables and token slots")
+                if (
+                    source_table.ndim != 2
+                    or source_table.shape[0] != batch_size
+                    or source_slots.shape != (batch_size,)
+                    or source_table.dtype != torch.int32
+                    or source_slots.dtype != torch.int32
+                    or source_table.device != full_table.device
+                    or source_slots.device != full_slots.device
+                    or not source_table.is_contiguous()
+                    or not source_slots.is_contiguous()
+                    or getattr(metadata, "shared_full_read_padding_page", None)
+                    != static_metadata.shared_full_read_padding_page
+                ):
+                    raise ValueError("shared Full graph addresses must match the final native batch layout")
+                copy_cols = min(source_table.shape[1], full_table.shape[1])
+                full_table[:batch_size, :copy_cols].copy_(source_table[:, :copy_cols])
+                full_table[:batch_size, copy_cols:].fill_(static_metadata.shared_full_read_padding_page)
+                full_slots[:batch_size].copy_(source_slots)
+                if padded_batch_size > batch_size:
+                    full_table[batch_size:].fill_(static_metadata.shared_full_read_padding_page)
+                    full_slots[batch_size:].fill_(-1)
         kv_seq_lens = decode_metadata.kv_seq_lens
         kv_seq_lens_host_values = decode_metadata.kv_seq_lens_host_values
         paged_kv_indptr = decode_metadata.paged_kv_indptr

@@ -2630,18 +2630,23 @@ TEST(SchedulerPolicyTest,
   ScopedConfigValue<bool> mix_batch_guard(
       SchedulerConfig::get_instance().enable_mix_batch(), true);
   constexpr size_t kGiB = size_t{1} << 30;
-  for (const size_t num_allocatable_slabs : {7u, 8u}) {
+  for (const size_t num_allocatable_slabs : {4u, 5u}) {
     SCOPED_TRACE(num_allocatable_slabs);
     StaticKVCacheLayoutSpec spec;
     spec.num_slots = 64;
-    spec.full_row_bytes = kGiB / 4;
+    spec.full_row_bytes = kGiB / 8;
     spec.conv_row_bytes = kGiB / 8;
-    spec.ssm_row_bytes = kGiB / 2;
+    spec.ssm_row_bytes = kGiB / 4;
     spec.checkpoint_stride = 2;
-    spec.full_layer_ids = {0, 3};
-    spec.linear_layer_ids = {1, 2};
+    spec.full_layer_ids = {0, 2, 4, 6};
+    spec.linear_layer_ids = {1, 3, 5, 7};
     const StaticKVCacheLayout layout(spec);
+    ASSERT_EQ(layout.bank_count(), 4u);
+    ASSERT_EQ(layout.slice_bytes(), kGiB / 2);
+    ASSERT_EQ(layout.slab_bytes(), 2 * kGiB);
+    ASSERT_EQ(layout.num_reserved_slabs(), 2u);
     spec.num_slabs = layout.num_reserved_slabs() + num_allocatable_slabs;
+    ASSERT_LE(spec.num_slabs, layout.max_slab_count());
     BlockManagerPool::Options pool_options;
     pool_options.num_blocks(64)
         .block_size(2)
@@ -2654,8 +2659,8 @@ TEST(SchedulerPolicyTest,
     FakeEngine engine(std::make_unique<BlockManagerPool>(pool_options));
     BlockManagerPool* pool = engine.block_manager_pool();
     // Only mappings are allocated; no multi-GiB backing tensor is needed.
-    EXPECT_EQ(pool->sequence_resource_units(4), 4 * kGiB + kGiB / 4);
-    EXPECT_EQ(pool->admission_capacity(0), num_allocatable_slabs * kGiB);
+    EXPECT_EQ(pool->sequence_resource_units(4), 4 * kGiB + kGiB / 2);
+    EXPECT_EQ(pool->admission_capacity(0), num_allocatable_slabs * 2 * kGiB);
     EXPECT_GT(pool->sequence_resource_units(4),
               std::numeric_limits<uint32_t>::max());
     SchedulerOptions options = create_scheduler_options(8, 1, 0, 4, 1);
@@ -2686,14 +2691,14 @@ TEST(SchedulerPolicyTest,
     ASSERT_EQ(sequence->num_tokens(), 8u);
     EXPECT_EQ(sequence->kv_state().num_blocks(BlockType::LINEAR), 1u);
 
-    // Nine tokens need 7.25 GiB of payload and eight typed slabs.
+    // Nine tokens need 7.5 GiB of payload and five typed mirrored groups.
     update_requests({request});
     EXPECT_EQ(pool->sequence_resource_units(sequence->num_tokens()),
-              7 * kGiB + kGiB / 4);
+              7 * kGiB + kGiB / 2);
     batches = scheduler.prepare_batch_test();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
-    if (num_allocatable_slabs == 8) {
+    if (num_allocatable_slabs == 5) {
       ASSERT_EQ(batches.front().size(), 1u);
       EXPECT_EQ(batches.front()[0], sequence);
       EXPECT_FALSE(callback_status.has_value());

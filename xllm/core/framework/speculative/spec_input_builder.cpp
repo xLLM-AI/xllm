@@ -291,6 +291,14 @@ DecodeRowContext make_decode_row_context(const Input& input) {
   CHECK_GT(ctx.block_table_stride, 0)
       << "invalid block table row stride=" << ctx.block_table_stride;
   ctx.block_tables = tensor_slice(ctx.block_tables_owner);
+  if (input.input_params.attention.host.shared_full_block_table.defined()) {
+    ctx.shared_full_block_tables_owner =
+        input.input_params.attention.host.shared_full_block_table.contiguous();
+    CHECK(ctx.shared_full_block_tables_owner.sizes() ==
+          ctx.block_tables_owner.sizes());
+    ctx.shared_full_block_tables =
+        tensor_slice(ctx.shared_full_block_tables_owner);
+  }
   return ctx;
 }
 
@@ -366,6 +374,24 @@ void append_decode_row(const DecodeRowContext& ctx,
         get_block_table_slice(ctx, row.seq_id);
     buf.out_new_cache_slots.emplace_back(
         calc_slot_id(cache_position, block_table_slice, block_size));
+    if (!ctx.shared_full_block_tables.empty()) {
+      const Slice<int32_t> final_pages{
+          ctx.shared_full_block_tables.data() +
+              static_cast<size_t>(row.seq_id) * ctx.block_table_stride,
+          static_cast<size_t>(ctx.block_table_stride)};
+      // A padded logical row has no leased pages. Its finite read page must
+      // remain immutable even when speculative rows are rebuilt.
+      buf.out_shared_full_slot_mapping.emplace_back(
+          block_table_slice[0] > 0
+              ? calc_slot_id(cache_position, final_pages, block_size)
+              : util::kPadSlotId);
+      if (row.append_block_table) {
+        buf.out_shared_full_block_tables.insert(
+            buf.out_shared_full_block_tables.end(),
+            final_pages.begin(),
+            final_pages.end());
+      }
+    }
     if (row.append_block_table) {
       if (buf.out_block_table_stride == 0) {
         buf.out_block_table_stride =
@@ -489,6 +515,11 @@ void update_input_params(Params& input_params,
   input_params.attention.host.kv_seq_lens = std::move(kv_seq_lens_vec);
   input_params.attention.host.new_cache_slots =
       std::move(buf.out_new_cache_slots);
+  if (input_params.attention.host.shared_full_block_table.defined() &&
+      !buf.out_shared_full_slot_mapping.empty()) {
+    input_params.attention.host.shared_full_slot_mapping =
+        make_cpu_int_tensor(buf.out_shared_full_slot_mapping);
+  }
   if (update_block_tables) {
     if (!buf.out_multi_block_tables.empty()) {
       input_params.multi_block_tables.clear();
@@ -507,6 +538,13 @@ void update_input_params(Params& input_params,
                                 buf.out_block_table_rows,
                                 buf.out_block_table_stride);
       input_params.multi_block_tables.clear();
+      if (input_params.attention.host.shared_full_block_table.defined() &&
+          !buf.out_shared_full_block_tables.empty()) {
+        input_params.attention.host.shared_full_block_table =
+            create_flat_2d_tensor(buf.out_shared_full_block_tables,
+                                  buf.out_block_table_rows,
+                                  buf.out_block_table_stride);
+      }
       if (!buf.out_paged_kv_indptr.empty()) {
         CHECK_EQ(buf.out_paged_kv_indptr.size(),
                  static_cast<size_t>(buf.out_block_table_rows + 1));

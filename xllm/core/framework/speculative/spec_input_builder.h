@@ -49,6 +49,8 @@ struct DecodeBuildBuffers {
   std::vector<int32_t> out_q_cu_seq_lens;
   std::vector<int32_t> out_new_cache_slots;
   std::vector<int32_t> out_block_tables;
+  std::vector<int32_t> out_shared_full_block_tables;
+  std::vector<int32_t> out_shared_full_slot_mapping;
   std::vector<int32_t> out_paged_kv_indptr;
   std::vector<int32_t> out_paged_kv_indices;
   std::vector<int32_t> out_paged_kv_last_page_len;
@@ -71,12 +73,14 @@ struct DecodeBuildBuffers {
 // It owns the contiguous block table tensor so row slices stay valid.
 struct DecodeRowContext {
   torch::Tensor block_tables_owner;
+  torch::Tensor shared_full_block_tables_owner;
   std::vector<torch::Tensor> multi_block_tables_owner;
   Slice<int32_t> token_ids;
   Slice<int32_t> positions;
   int32_t num_rope_axes = 1;
   Slice<int32_t> kv_seq_lens;
   Slice<int32_t> block_tables;
+  Slice<int32_t> shared_full_block_tables;
   std::vector<std::vector<Slice<int32_t>>> multi_block_tables;
   int32_t num_sequences = 0;
   int32_t block_table_stride = 0;

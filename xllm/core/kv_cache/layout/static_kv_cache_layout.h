@@ -29,7 +29,7 @@ class KVCacheShape;
 struct KVCacheCreateOptions;
 
 // Row costs are independent of physical capacity. Logical IDs only bound
-// mapping tables; physical slabs supply bytes shared by every cache role.
+// mapping tables; mirrored slab groups supply bytes shared by every cache role.
 struct StaticKVCacheLayoutSpec {
   size_t num_slots = 0;
   size_t num_slabs = 0;
@@ -52,15 +52,16 @@ struct StaticKVCacheTensorLayout {
   size_t view_rows = 0;
   // Layer index among layers with the same attention type.
   size_t lane = 0;
+  size_t bank = 0;
+  size_t bank_lane = 0;
   // Mapping-table row: two rows per Linear layer, Conv then SSM.
   size_t linear_group = 0;
 };
 
-// One arena has dense typed views for every layer. A slab can be subdivided
-// into Full K/V pairs, Conv rows, or complete SSM checkpoint bundles. Its byte
-// size is the LCM of those object sizes, so no object needs per-layer padding.
-// KEY and VALUE views differ by one row; the same physical key-row index
-// therefore addresses an adjacent K/V pair through the existing kernel ABI.
+// Fixed banks expose compact dense Full views. A shared slab group contains
+// one slice in every bank and changes role only after all mirrored leases end.
+// Full layers in a bank own fixed lanes of each object bundle; all Full layers
+// therefore consume the same final native page index.
 class StaticKVCacheLayout final {
  public:
   explicit StaticKVCacheLayout(StaticKVCacheLayoutSpec spec);
@@ -69,7 +70,20 @@ class StaticKVCacheLayout final {
 
   size_t num_slabs() const { return spec_.num_slabs; }
   size_t num_reserved_slabs() const { return num_reserved_slabs_; }
+  // Total backing bytes of one mirrored group, not one bank-local slice.
   size_t slab_bytes() const { return slab_bytes_; }
+  size_t slice_bytes() const { return slice_bytes_; }
+  size_t bank_count() const { return bank_count_; }
+  size_t bank_bytes() const { return bank_bytes_; }
+  size_t full_layers_per_bank() const { return full_layers_per_bank_; }
+  size_t linear_layers_per_bank() const { return linear_layers_per_bank_; }
+  size_t full_bundle_bytes() const { return full_bundle_bytes_; }
+  size_t full_pages_per_slab() const { return slice_bytes_ / full_row_bytes(); }
+  size_t max_slab_count() const;
+  size_t objects_per_slab(KVCacheTensorRole role) const;
+  size_t layer_bank_index(int64_t layer_id) const;
+  size_t scratch_full_page() const { return 0; }
+  size_t full_read_padding_page() const { return full_read_padding_row_; }
   size_t num_slots() const { return spec_.num_slots; }
   size_t full_row_bytes() const { return spec_.full_row_bytes; }
   size_t conv_row_bytes() const { return spec_.conv_row_bytes; }
@@ -82,6 +96,7 @@ class StaticKVCacheLayout final {
   size_t full_layer_count() const { return spec_.full_layer_ids.size(); }
   size_t linear_layer_count() const { return spec_.linear_layer_ids.size(); }
   size_t num_linear_groups() const { return 2 * linear_layer_count(); }
+  // Upper bound on native rows per group; Full rows are bank-local.
   size_t rows_per_slab(KVCacheTensorRole role) const;
   size_t full_layer_index(int64_t layer_id) const;
   // Capacity of an empty arena, including typed-slab fragmentation and IDs.
@@ -112,6 +127,12 @@ class StaticKVCacheLayout final {
   StaticKVCacheLayoutSpec spec_;
   std::vector<StaticKVCacheTensorLayout> tensors_;
   size_t slab_bytes_ = 0;
+  size_t slice_bytes_ = 0;
+  size_t bank_count_ = 0;
+  size_t bank_bytes_ = 0;
+  size_t full_layers_per_bank_ = 0;
+  size_t linear_layers_per_bank_ = 0;
+  size_t full_bundle_bytes_ = 0;
   size_t full_pair_bytes_ = 0;
   size_t ssm_bundle_bytes_ = 0;
   size_t full_read_padding_row_ = 0;

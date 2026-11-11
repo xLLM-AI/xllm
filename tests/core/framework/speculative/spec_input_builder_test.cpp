@@ -191,6 +191,69 @@ TEST(SpecDecodeInputBuilderTest, ActiveBlockDraftOnlyFillsIdlePeerCount) {
             std::vector<int32_t>({11, 12}));
 }
 
+TEST(SpecDecodeInputBuilderTest,
+     VerifyRowsPreserveFinalTargetAndLogicalDraftPages) {
+  LlmForwardInput input =
+      make_forward_input(torch::tensor({10, 20}, torch::kInt),
+                         torch::tensor({3, 7}, torch::kInt),
+                         torch::tensor({{1, 2, 3}, {4, 5, 6}}, torch::kInt),
+                         {4, 8});
+  input.input_params.attention.host.shared_full_block_table =
+      torch::tensor({{120, 122, 124}, {180, 182, 184}}, torch::kInt);
+  DecodeRowContext ctx = make_decode_row_context(input);
+  DecodeBuildBuffers buf;
+  for (int32_t sequence = 0; sequence < 2; ++sequence) {
+    for (int32_t step = 0; step < 2; ++step) {
+      RowSpec row;
+      row.seq_id = sequence;
+      row.use_input_token = true;
+      row.position_offset = step;
+      row.append_q_len_one = true;
+      row.append_block_table = true;
+      append_decode_row(ctx, row, /*block_size=*/4, buf);
+    }
+  }
+  EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({7, 8, 23, 24}));
+  EXPECT_EQ(buf.out_shared_full_slot_mapping,
+            std::vector<int32_t>({483, 488, 731, 736}));
+  update_input_params(input.input_params,
+                      buf,
+                      /*q_max_seq_len=*/1,
+                      buf.out_q_seq_lens,
+                      buf.out_q_cu_seq_lens,
+                      buf.meta.kv_max_seq_len,
+                      buf.out_kv_seq_lens,
+                      /*update_block_tables=*/true);
+  EXPECT_TRUE(torch::equal(
+      input.input_params.attention.host.shared_full_block_table,
+      torch::tensor(
+          {{120, 122, 124}, {120, 122, 124}, {180, 182, 184}, {180, 182, 184}},
+          torch::kInt)));
+  EXPECT_EQ(tensor_to_vector<int32_t>(
+                input.input_params.attention.host.shared_full_slot_mapping),
+            std::vector<int32_t>({483, 488, 731, 736}));
+}
+
+TEST(SpecDecodeInputBuilderTest, VerifyPaddingNeverWritesFiniteReadPage) {
+  LlmForwardInput input =
+      make_forward_input(torch::tensor({0}, torch::kInt),
+                         torch::tensor({0}, torch::kInt),
+                         torch::tensor({{0, 0}}, torch::kInt),
+                         {1});
+  input.input_params.attention.host.shared_full_block_table =
+      torch::tensor({{60, 60}}, torch::kInt);
+  input.input_params.attention.host.shared_full_slot_mapping =
+      torch::tensor({-1}, torch::kInt);
+  DecodeRowContext context = make_decode_row_context(input);
+  DecodeBuildBuffers buffers;
+  RowSpec row;
+  row.append_block_table = true;
+  append_decode_row(context, row, /*block_size=*/4, buffers);
+  EXPECT_EQ(buffers.out_shared_full_slot_mapping, std::vector<int32_t>({-1}));
+  EXPECT_EQ(buffers.out_shared_full_block_tables,
+            std::vector<int32_t>({60, 60}));
+}
+
 TEST(SpecDecodeInputBuilderTest, VlmVerifyRowsPreserveVisionState) {
   VlmForwardInput input;
   input.input_params.meta.num_sequences = 2;

@@ -29,6 +29,7 @@ class KVCacheCapacity final {
   PROPERTY(int64_t, shared_slot_bytes) = 0;
   PROPERTY(int64_t, shared_slab_count) = 0;
   PROPERTY(int64_t, shared_min_slab_count) = 0;
+  PROPERTY(int64_t, shared_reserved_slab_count) = 0;
   PROPERTY(uint32_t, shared_linear_state_slots) = 1;
   PROPERTY(int64_t, cache_size_in_bytes) = 0;
   PROPERTY(int64_t, block_size) = 0;

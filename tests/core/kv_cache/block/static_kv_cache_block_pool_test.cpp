@@ -61,7 +61,7 @@ size_t full_block_slab(const StaticKVCacheBlockPool& pool,
                        int32_t block_id) {
   std::vector<int32_t> rows;
   pool.append_full_block_rows(block_id, &rows);
-  return rows.front() * layout.full_row_bytes() / layout.slab_bytes();
+  return rows.front() * layout.full_row_bytes() / layout.slice_bytes();
 }
 
 TEST(StaticKVCacheBlockPoolTest,
@@ -143,7 +143,6 @@ TEST(StaticKVCacheBlockPoolTest, PacksMixedResourcesWithoutOverlappingBytes) {
   const auto linear = pool.allocate(/*num_blocks=*/1, BlockType::LINEAR);
   ASSERT_EQ(full.size(), 3);
   ASSERT_EQ(linear.size(), 1);
-  // The two stable logical ID spaces are independent.
   EXPECT_EQ(full.front(), linear.front());
   std::vector<ByteExtent> extents;
   extents.reserve(full.size() * layout.full_layer_count() +
@@ -151,16 +150,20 @@ TEST(StaticKVCacheBlockPoolTest, PacksMixedResourcesWithoutOverlappingBytes) {
   for (const int32_t id : full) {
     std::vector<int32_t> rows;
     pool.append_full_block_rows(id, &rows);
-    ASSERT_EQ(rows.size(), layout.full_layer_count());
-    for (const int32_t row : rows) {
-      const size_t begin = row * layout.full_row_bytes();
+    ASSERT_EQ(rows.size(), 2);
+    EXPECT_EQ(rows[0], rows[1]);
+    EXPECT_EQ(rows[0], pool.final_full_page(id));
+    for (size_t layer = 0; layer < rows.size(); ++layer) {
+      const int64_t layer_id = layer == 0 ? 0 : 3;
+      const size_t begin =
+          layout.tensor_layout(layer_id, KVCacheTensorRole::KEY).offset_bytes +
+          rows[layer] * layout.full_row_bytes();
       extents.emplace_back(ByteExtent{begin, begin + layout.full_pair_bytes()});
-      EXPECT_EQ(begin % layout.full_pair_bytes(), 0);
     }
   }
   std::vector<int32_t> state_rows;
   pool.append_linear_state_rows(linear.front(), &state_rows);
-  ASSERT_EQ(state_rows.size(), 2 * layout.linear_layer_count());
+  ASSERT_EQ(state_rows.size(), 4);
   for (size_t layer = 0; layer < layout.linear_layer_count(); ++layer) {
     const size_t conv_begin = state_rows[2 * layer] * layout.conv_row_bytes();
     const size_t ssm_begin = state_rows[2 * layer + 1] * layout.ssm_row_bytes();
@@ -168,7 +171,6 @@ TEST(StaticKVCacheBlockPoolTest, PacksMixedResourcesWithoutOverlappingBytes) {
         ByteExtent{conv_begin, conv_begin + layout.conv_row_bytes()});
     extents.emplace_back(
         ByteExtent{ssm_begin, ssm_begin + layout.ssm_bundle_bytes()});
-    EXPECT_EQ(ssm_begin % layout.ssm_bundle_bytes(), 0);
     EXPECT_LE(ssm_begin + layout.ssm_bundle_bytes(), layout.bytes_used());
   }
   std::sort(extents.begin(),
@@ -177,21 +179,21 @@ TEST(StaticKVCacheBlockPoolTest, PacksMixedResourcesWithoutOverlappingBytes) {
               return left.begin < right.begin;
             });
   EXPECT_GE(extents.front().begin,
-            layout.num_reserved_slabs() * layout.slab_bytes());
+            layout.num_reserved_slabs() * layout.slice_bytes());
   for (size_t extent = 1; extent < extents.size(); ++extent) {
     EXPECT_LE(extents[extent - 1].end, extents[extent].begin);
   }
   EXPECT_EQ(pool.slots_per_block(BlockType::KV), 64);
   EXPECT_EQ(pool.slots_per_block(BlockType::LINEAR), 144);
   EXPECT_EQ(pool.num_used_slots(), 3 * 64 + 144);
-  EXPECT_EQ(pool.num_free_slots(), 8 * 64 - (3 * 64 + 144));
+  EXPECT_EQ(pool.num_free_slots(), pool.num_total_slots() - (3 * 64 + 144));
 }
 
 TEST(StaticKVCacheBlockPoolTest, ReusesCompletelyFreedSlabsForAnotherType) {
   const StaticKVCacheLayout layout(make_spec(/*num_slabs=*/5));
   StaticKVCacheBlockPool pool(/*logical_capacity=*/64, layout);
-  const auto full = pool.allocate(/*num_blocks=*/3, BlockType::KV);
-  ASSERT_EQ(full.size(), 3);
+  const auto full = pool.allocate(/*num_blocks=*/6, BlockType::KV);
+  ASSERT_EQ(full.size(), 6);
   EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 0);
   EXPECT_TRUE(pool.allocate(/*num_blocks=*/1, BlockType::LINEAR).empty());
   for (const int32_t id : full) {
@@ -200,13 +202,13 @@ TEST(StaticKVCacheBlockPoolTest, ReusesCompletelyFreedSlabsForAnotherType) {
   EXPECT_EQ(pool.num_free_slots(), pool.num_total_slots());
   const auto linear = pool.allocate(/*num_blocks=*/1, BlockType::LINEAR);
   ASSERT_EQ(linear.size(), 1);
-  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 0);
+  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 2);
   pool.release(linear.front(), BlockType::LINEAR);
-  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 3);
+  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 6);
 }
 
 TEST(StaticKVCacheBlockPoolTest, RollsBackCoupledLinearAllocationOnExhaustion) {
-  const StaticKVCacheLayout layout(make_spec(/*num_slabs=*/4));
+  const StaticKVCacheLayout layout(make_spec(/*num_slabs=*/3));
   StaticKVCacheBlockPool pool(/*logical_capacity=*/64, layout);
   EXPECT_EQ(pool.num_free_blocks(BlockType::LINEAR), 0);
   EXPECT_TRUE(pool.allocate(/*num_blocks=*/1, BlockType::LINEAR).empty());
@@ -222,13 +224,13 @@ TEST(StaticKVCacheBlockPoolTest, RollsBackWholeFullBatchOnExhaustion) {
   const StaticKVCacheLayout layout(
       make_spec(/*num_slabs=*/3, /*checkpoint_stride=*/4));
   StaticKVCacheBlockPool pool(/*logical_capacity=*/64, layout);
-  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 2);
-  EXPECT_TRUE(pool.allocate(/*num_blocks=*/3, BlockType::KV).empty());
-  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 2);
+  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 4);
+  EXPECT_TRUE(pool.allocate(/*num_blocks=*/5, BlockType::KV).empty());
+  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 4);
   EXPECT_EQ(pool.num_free_slots(), pool.num_total_slots());
-  const auto full = pool.allocate(/*num_blocks=*/2, BlockType::KV);
-  ASSERT_EQ(full.size(), 2);
-  EXPECT_EQ(full, (std::vector<int32_t>{1, 2}));
+  const auto full = pool.allocate(/*num_blocks=*/4, BlockType::KV);
+  ASSERT_EQ(full.size(), 4);
+  EXPECT_EQ(full, (std::vector<int32_t>{1, 2, 3, 4}));
   EXPECT_EQ(pool.num_free_slots(), 0);
 }
 
@@ -243,20 +245,22 @@ TEST(StaticKVCacheBlockPoolTest, InactiveOwnershipKeepsPhysicalRowsPinned) {
   pool.mark_inactive(first.front(), BlockType::KV);
   pool.mark_inactive(first.front(), BlockType::KV);
   EXPECT_EQ(pool.num_used_slots(), 0);
-  EXPECT_EQ(pool.num_free_slots(), 64);
-  const auto second = pool.allocate(/*num_blocks=*/1, BlockType::KV);
-  ASSERT_EQ(second.size(), 1);
+  EXPECT_EQ(pool.num_free_slots(), pool.num_total_slots() - 64);
+  const auto second = pool.allocate(/*num_blocks=*/3, BlockType::KV);
+  ASSERT_EQ(second.size(), 3);
   EXPECT_TRUE(pool.allocate(/*num_blocks=*/1, BlockType::KV).empty());
   std::vector<int32_t> owned_rows;
   pool.append_full_block_rows(first.front(), &owned_rows);
   EXPECT_EQ(owned_rows, original_rows);
   pool.mark_active(first.front(), BlockType::KV);
   pool.mark_active(first.front(), BlockType::KV);
-  EXPECT_EQ(pool.num_used_slots(), 128);
+  EXPECT_EQ(pool.num_used_slots(), 256);
   pool.release(first.front(), BlockType::KV);
-  EXPECT_EQ(pool.num_used_slots(), 64);
+  EXPECT_EQ(pool.num_used_slots(), 192);
   EXPECT_EQ(pool.num_free_slots(), 64);
-  pool.release(second.front(), BlockType::KV);
+  for (const int32_t id : second) {
+    pool.release(id, BlockType::KV);
+  }
   EXPECT_EQ(pool.num_used_slots(), 0);
   EXPECT_EQ(pool.num_free_slots(), pool.num_total_slots());
 }
@@ -265,17 +269,17 @@ TEST(StaticKVCacheBlockPoolTest,
      CountsAllocatableBlocksWithTypedFragmentation) {
   const StaticKVCacheLayout layout(make_spec());
   StaticKVCacheBlockPool pool(/*logical_capacity=*/64, layout);
-  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 8);
-  EXPECT_EQ(pool.num_free_blocks(BlockType::LINEAR), 3);
+  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 16);
+  EXPECT_EQ(pool.num_free_blocks(BlockType::LINEAR), 7);
   const auto full = pool.allocate(/*num_blocks=*/2, BlockType::KV);
   ASSERT_EQ(full.size(), 2);
-  EXPECT_EQ(pool.num_free_blocks(BlockType::LINEAR), 2);
+  EXPECT_EQ(pool.num_free_blocks(BlockType::LINEAR), 6);
   const auto linear = pool.allocate(/*num_blocks=*/2, BlockType::LINEAR);
   ASSERT_EQ(linear.size(), 2);
-  EXPECT_EQ(pool.num_free_blocks(BlockType::LINEAR), 0);
-  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 1);
+  EXPECT_EQ(pool.num_free_blocks(BlockType::LINEAR), 4);
+  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 8);
   pool.release(linear.front(), BlockType::LINEAR);
-  EXPECT_EQ(pool.num_free_blocks(BlockType::LINEAR), 1);
+  EXPECT_EQ(pool.num_free_blocks(BlockType::LINEAR), 5);
 }
 
 TEST(StaticKVCacheBlockPoolTest, PreservesScratchAndNegativeSentinelMappings) {
@@ -292,11 +296,39 @@ TEST(StaticKVCacheBlockPoolTest, PreservesScratchAndNegativeSentinelMappings) {
   EXPECT_EQ(linear_rows, (std::vector<int32_t>{0, 0, 0, 0, -2, -2, -2, -2}));
 }
 
+TEST(StaticKVCacheBlockPoolTest,
+     PublishesFinalPagesWithoutChangingDenseLogicalPrefixIds) {
+  const StaticKVCacheLayout layout(make_spec());
+  StaticKVCacheBlockPool pool(/*logical_capacity=*/64, layout);
+  const auto ids = pool.allocate(/*num_blocks=*/2, BlockType::KV);
+  ASSERT_EQ(ids, (std::vector<int32_t>{1, 2}));
+  const int32_t first_page = pool.final_full_page(ids[0]);
+  const int32_t second_page = pool.final_full_page(ids[1]);
+  ASSERT_NE(first_page, ids[0]);
+  ASSERT_NE(second_page, ids[1]);
+  pool.mark_inactive(ids[0], BlockType::KV);
+  std::vector<Block> blocks;
+  blocks.reserve(4);
+  blocks.emplace_back(ids[1], /*allocator=*/nullptr);
+  blocks.emplace_back(ids[0], /*allocator=*/nullptr);
+  blocks.emplace_back(/*id=*/0, /*allocator=*/nullptr);
+  blocks.emplace_back(/*id=*/-1, /*allocator=*/nullptr);
+  std::vector<int32_t> pages = {123};
+  pool.append_final_full_pages(blocks, &pages);
+  EXPECT_EQ(pages, (std::vector<int32_t>{123, second_page, first_page, 0, -1}));
+  EXPECT_EQ(blocks[0].id(), ids[1]);
+  EXPECT_EQ(blocks[1].id(), ids[0]);
+  pool.mark_active(ids[0], BlockType::KV);
+  EXPECT_EQ(pool.final_full_page(ids[0]), first_page);
+  EXPECT_EQ(pool.full_read_padding_page(), layout.full_read_padding_page());
+  EXPECT_EQ(pool.scratch_full_page(), 0);
+}
+
 TEST(StaticKVCacheBlockPoolTest, ExcludesReadPaddingWhenSlabsChangeType) {
   const StaticKVCacheLayout layout(make_spec());
   StaticKVCacheBlockPool pool(/*logical_capacity=*/64, layout);
   const size_t allocatable_begin =
-      layout.num_reserved_slabs() * layout.slab_bytes();
+      layout.num_reserved_slabs() * layout.slice_bytes();
   const size_t padding_end =
       layout.full_read_padding_row() * layout.full_row_bytes() +
       layout.full_pair_bytes();
@@ -335,11 +367,11 @@ TEST(StaticKVCacheBlockPoolTest, AccountsForReadPaddingBeyondScratchSlab) {
   EXPECT_EQ(layout.num_reserved_slabs(), 2);
   EXPECT_EQ(layout.full_read_padding_row(), 4);
   EXPECT_EQ(pool.num_total_slots(), 2 * layout.slab_bytes());
-  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 2);
-  EXPECT_TRUE(layout.can_fit(/*full_blocks=*/2, /*linear_states=*/0));
-  EXPECT_FALSE(layout.can_fit(/*full_blocks=*/3, /*linear_states=*/0));
-  EXPECT_FALSE(layout.can_fit(/*full_blocks=*/0, /*linear_states=*/1));
-  EXPECT_EQ(pool.allocate(/*num_blocks=*/2, BlockType::KV).size(), 2);
+  EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 4);
+  EXPECT_TRUE(layout.can_fit(/*full_blocks=*/4, /*linear_states=*/0));
+  EXPECT_FALSE(layout.can_fit(/*full_blocks=*/5, /*linear_states=*/0));
+  EXPECT_TRUE(layout.can_fit(/*full_blocks=*/0, /*linear_states=*/1));
+  EXPECT_EQ(pool.allocate(/*num_blocks=*/4, BlockType::KV).size(), 4);
   EXPECT_TRUE(pool.allocate(/*num_blocks=*/1, BlockType::KV).empty());
 }
 
@@ -384,7 +416,7 @@ TEST(StaticKVCacheBlockPoolTest,
      RejectsHybridFootprintsNeedingTooManyTypedSlabs) {
   StaticKVCacheLayoutSpec spec;
   spec.num_slots = 32;
-  spec.num_slabs = 4;
+  spec.num_slabs = 5;
   spec.full_row_bytes = 16;
   spec.conv_row_bytes = 6;
   spec.ssm_row_bytes = 4;
@@ -392,12 +424,12 @@ TEST(StaticKVCacheBlockPoolTest,
   spec.linear_layer_ids = {0, 2};
   const StaticKVCacheLayout layout(spec);
   StaticKVCacheBlockPool pool(/*logical_capacity=*/32, layout);
-  ASSERT_EQ(layout.slab_bytes(), 96);
+  ASSERT_EQ(layout.slab_bytes(), 64);
   EXPECT_TRUE(layout.can_fit(/*full_blocks=*/1, /*linear_states=*/1));
   EXPECT_FALSE(layout.can_fit(/*full_blocks=*/3, /*linear_states=*/1));
   EXPECT_FALSE(layout.can_fit(/*full_blocks=*/2, /*linear_states=*/2));
-  const auto full = pool.allocate(/*num_blocks=*/3, BlockType::KV);
-  ASSERT_EQ(full.size(), 3);
+  const auto full = pool.allocate(/*num_blocks=*/2, BlockType::KV);
+  ASSERT_EQ(full.size(), 2);
   EXPECT_LT(pool.slots_per_block(BlockType::KV) * full.size() +
                 pool.slots_per_block(BlockType::LINEAR),
             pool.num_total_slots());
@@ -422,15 +454,15 @@ TEST(StaticKVCacheBlockPoolTest,
   spec.ssm_row_bytes = size_t{1} << 28;
   const StaticKVCacheLayout layout(spec);
   StaticKVCacheBlockPool pool(/*logical_capacity=*/64, layout);
-  EXPECT_EQ(pool.num_total_slots(), size_t{8} << 30);
+  EXPECT_EQ(pool.num_total_slots(), size_t{16} << 30);
   const auto full = pool.allocate(/*num_blocks=*/9, BlockType::KV);
   ASSERT_EQ(full.size(), 9);
   EXPECT_EQ(pool.num_used_slots(), size_t{9} << 29);
-  EXPECT_EQ(pool.num_free_slots(), size_t{7} << 29);
+  EXPECT_EQ(pool.num_free_slots(), size_t{23} << 29);
   for (const int32_t id : full) {
     pool.release(id, BlockType::KV);
   }
-  EXPECT_EQ(pool.num_free_slots(), size_t{8} << 30);
+  EXPECT_EQ(pool.num_free_slots(), size_t{16} << 30);
   EXPECT_EQ(pool.num_used_slots(), 0);
 }
 
@@ -441,9 +473,9 @@ TEST(StaticKVCacheBlockPoolTest, ResumedRequestsPreferTheirOwnNonfullSlabs) {
   const int32_t request_a = 1;
   const int32_t request_b = 2;
   auto first = pool.allocate(2, BlockType::KV, &request_a);
-  auto second = pool.allocate(4, BlockType::KV, &request_b);
+  auto second = pool.allocate(8, BlockType::KV, &request_b);
   ASSERT_EQ(first.size(), 2);
-  ASSERT_EQ(second.size(), 4);
+  ASSERT_EQ(second.size(), 8);
   const size_t first_slab = full_block_slab(pool, layout, first.back());
   const size_t second_slab = full_block_slab(pool, layout, second.back());
   ASSERT_NE(first_slab, second_slab);
@@ -490,18 +522,18 @@ TEST(StaticKVCacheBlockPoolTest,
   const auto other_state = pool.allocate(1, BlockType::LINEAR, &request_b);
   ASSERT_EQ(other_state.size(), 1);
   pool.release(other_state.front(), BlockType::LINEAR);
-  const auto other_full = pool.allocate(8, BlockType::KV, &request_b);
-  ASSERT_EQ(other_full.size(), 8);
-  ASSERT_EQ(full_block_slab(pool, layout, other_full[4]), old_slab);
-  const size_t global_slab = full_block_slab(pool, layout, other_full[0]);
+  const auto other_full = pool.allocate(16, BlockType::KV, &request_b);
+  ASSERT_EQ(other_full.size(), 16);
+  ASSERT_EQ(full_block_slab(pool, layout, other_full[0]), old_slab);
+  const size_t global_slab = full_block_slab(pool, layout, other_full[8]);
   ASSERT_NE(global_slab, old_slab);
-  pool.release(other_full[4], BlockType::KV);
+  pool.release(other_full[8], BlockType::KV);
   pool.release(other_full[0], BlockType::KV);
   const auto resumed = pool.allocate(1, BlockType::KV, &request_a);
   ASSERT_EQ(resumed.size(), 1);
   EXPECT_EQ(full_block_slab(pool, layout, resumed.front()), global_slab);
   for (size_t index = 0; index < other_full.size(); ++index) {
-    if (index != 0 && index != 4) {
+    if (index != 0 && index != 8) {
       pool.release(other_full[index], BlockType::KV);
     }
   }
@@ -526,7 +558,7 @@ TEST(StaticKVCacheBlockPoolTest,
   EXPECT_EQ(pool.num_used_slots(), 0);
   EXPECT_EQ(StaticKVCacheBlockPoolTestPeer::num_request_placements(pool), 1);
   const size_t free_bytes = pool.num_free_slots();
-  EXPECT_TRUE(pool.allocate(1, BlockType::LINEAR, &request_b).empty());
+  EXPECT_TRUE(pool.allocate(2, BlockType::LINEAR, &request_b).empty());
   EXPECT_EQ(pool.num_free_slots(), free_bytes);
   EXPECT_EQ(StaticKVCacheBlockPoolTestPeer::num_request_placements(pool), 1);
   std::vector<int32_t> after;
@@ -534,8 +566,9 @@ TEST(StaticKVCacheBlockPoolTest,
   EXPECT_EQ(after, before);
   pool.release(state.front(), BlockType::LINEAR);
   EXPECT_EQ(StaticKVCacheBlockPoolTestPeer::num_request_placements(pool), 0);
-  const auto full = pool.allocate(12, BlockType::KV, &request_b);
-  ASSERT_EQ(full.size(), 12);
+  const size_t full_capacity = pool.num_free_blocks(BlockType::KV);
+  const auto full = pool.allocate(full_capacity, BlockType::KV, &request_b);
+  ASSERT_EQ(full.size(), full_capacity);
   for (const int32_t id : full) {
     pool.release(id, BlockType::KV);
   }
@@ -560,17 +593,17 @@ TEST(StaticKVCacheBlockPoolTest, ScoresOnlyCompletelyCoveredInactiveSlabs) {
   EXPECT_EQ(pool.reclaimable_slab_count(BlockType::KV, full), 0);
   pool.mark_inactive(full[0], BlockType::KV);
   pool.mark_inactive(linear[0], BlockType::LINEAR);
-  EXPECT_EQ(pool.reclaimable_slab_count(BlockType::LINEAR, {linear[0]}), 2);
+  EXPECT_EQ(pool.reclaimable_slab_count(BlockType::LINEAR, {linear[0]}), 1);
   pool.mark_inactive(linear[1], BlockType::LINEAR);
   const size_t free_bytes = pool.num_free_slots();
-  EXPECT_EQ(pool.reclaimable_slab_count(BlockType::LINEAR, linear), 5);
+  EXPECT_EQ(pool.reclaimable_slab_count(BlockType::LINEAR, linear), 3);
   EXPECT_EQ(pool.reclaimable_slab_count(BlockType::KV, {-1, 0, 63}), 0);
   EXPECT_EQ(pool.num_free_slots(), free_bytes);
   for (const int32_t id : full) {
     pool.release(id, BlockType::KV);
   }
   pool.release(linear[0], BlockType::LINEAR);
-  EXPECT_EQ(pool.reclaimable_slab_count(BlockType::LINEAR, linear), 3);
+  EXPECT_EQ(pool.reclaimable_slab_count(BlockType::LINEAR, linear), 2);
   pool.release(linear[1], BlockType::LINEAR);
   EXPECT_EQ(pool.num_free_slots(), pool.num_total_slots());
   StaticKVCacheBlockPool legacy(/*num_slots=*/8, /*linear_state_slots=*/1);

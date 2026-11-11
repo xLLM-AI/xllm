@@ -122,6 +122,9 @@ struct AttentionMetadata {
   std::vector<int32_t> q_seq_lens_vec;
   torch::Tensor block_table;
   torch::Tensor slot_mapping;
+  // Final bank-relative addresses shared by all static Full-attention layers.
+  torch::Tensor shared_full_block_table;
+  torch::Tensor shared_full_slot_mapping;
   // Framework-managed cache slot ids.
   torch::Tensor linear_state_indices;
   // Prepared Slots own the final read view as well as the live write view.
