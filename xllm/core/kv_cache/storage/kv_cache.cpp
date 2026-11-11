@@ -288,6 +288,28 @@ std::vector<std::vector<int64_t>> KVCache::get_shapes() {
 
 bool KVCache::empty() const { return impl_->empty(); }
 
+int64_t KVCache::shared_bank_bytes() const {
+  return static_layout_ == nullptr
+             ? 0
+             : static_cast<int64_t>(static_layout_->bank_bytes());
+}
+
+int64_t KVCache::shared_slice_bytes() const {
+  return static_layout_ == nullptr
+             ? 0
+             : static_cast<int64_t>(static_layout_->slice_bytes());
+}
+
+int64_t KVCache::shared_conv_scratch_row() const { return 0; }
+
+int64_t KVCache::shared_ssm_scratch_row() const { return 0; }
+
+int64_t KVCache::shared_full_read_padding_page() const {
+  return static_layout_ == nullptr
+             ? 0
+             : static_cast<int64_t>(static_layout_->full_read_padding_page());
+}
+
 int64_t KVCache::cache_row_stride(KVCacheTensorRole /*role*/) const {
   return 1;
 }

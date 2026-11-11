@@ -38,6 +38,9 @@ StaticKVCacheTensorAllocator::StaticKVCacheTensorAllocator(
   LOG(INFO) << "Static shared KV arena: logical_slots=" << layout_.num_slots()
             << ", physical_slabs=" << layout_.num_slabs()
             << ", slab_bytes=" << layout_.slab_bytes()
+            << ", banks=" << layout_.bank_count()
+            << ", bank_bytes=" << layout_.bank_bytes()
+            << ", slice_bytes=" << layout_.slice_bytes()
             << ", arena_bytes=" << layout_.bytes_used()
             << ", Full_pair_bytes=" << layout_.full_pair_bytes()
             << ", Conv_bytes=" << layout_.conv_row_bytes()
@@ -69,39 +72,42 @@ void StaticKVCacheTensorAllocator::initialize_full_blocks(
     const std::vector<int32_t>& rows,
     const std::vector<uint64_t>& lease_epochs) {
   const size_t row_width = layout_.full_layer_count() + 1;
-  std::vector<int64_t> pair_indices;
-  pair_indices.reserve(lease_epochs.size() * layout_.full_layer_count());
+  std::vector<int64_t> bundle_indices;
+  bundle_indices.reserve(lease_epochs.size());
   for (size_t i = 0; i < lease_epochs.size(); ++i) {
     const int32_t* entry = rows.data() + i * row_width;
     const int32_t id = entry[0];
     if (id == 0 || initialized_full_block_epochs_[id] == lease_epochs[i]) {
       continue;
     }
-    for (size_t layer = 0; layer < layout_.full_layer_count(); ++layer) {
-      pair_indices.emplace_back(entry[layer + 1] / 2);
-    }
+    bundle_indices.emplace_back(
+        static_cast<int64_t>(entry[1]) /
+        static_cast<int64_t>(2 * layout_.full_layers_per_bank()));
     initialized_full_block_epochs_[id] = lease_epochs[i];
   }
-  if (pair_indices.empty()) {
+  if (bundle_indices.empty()) {
     return;
   }
-  std::sort(pair_indices.begin(), pair_indices.end());
-  const torch::ScalarType dtype = layout_.dtype(KVCacheTensorRole::KEY);
-  const int64_t pair_bytes = static_cast<int64_t>(layout_.full_pair_bytes());
+  std::sort(bundle_indices.begin(), bundle_indices.end());
+  const int64_t bundle_bytes =
+      static_cast<int64_t>(layout_.full_bundle_bytes());
+  const torch::Tensor banks =
+      arena_.view({static_cast<int64_t>(layout_.bank_count()),
+                   static_cast<int64_t>(layout_.bank_bytes())});
   size_t range_begin = 0;
-  while (range_begin < pair_indices.size()) {
+  while (range_begin < bundle_indices.size()) {
     size_t range_end = range_begin + 1;
-    while (range_end < pair_indices.size() &&
-           pair_indices[range_end] <= pair_indices[range_end - 1] + 1) {
+    while (range_end < bundle_indices.size() &&
+           bundle_indices[range_end] <= bundle_indices[range_end - 1] + 1) {
       ++range_end;
     }
-    const int64_t offset_bytes = pair_indices[range_begin] * pair_bytes;
+    const int64_t offset_bytes = bundle_indices[range_begin] * bundle_bytes;
     const int64_t length_bytes =
-        (pair_indices[range_end - 1] - pair_indices[range_begin] + 1) *
-        pair_bytes;
+        (bundle_indices[range_end - 1] - bundle_indices[range_begin] + 1) *
+        bundle_bytes;
     // Narrow before dispatch so initialization touches only newly leased pairs.
     // Zero bits also clear pairs retyped from FP32 SSM or Conv storage.
-    arena_.narrow(/*dim=*/0, offset_bytes, length_bytes).view(dtype).zero_();
+    banks.narrow(/*dim=*/1, offset_bytes, length_bytes).zero_();
     range_begin = range_end;
   }
 }

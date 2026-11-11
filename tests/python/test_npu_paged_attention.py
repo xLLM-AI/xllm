@@ -275,6 +275,129 @@ def test_prepared_mtp_keeps_live_device_lengths(width: int, expanded: bool) -> N
     assert prepared.kv_capacity == 128
 
 
+@pytest.mark.parametrize("chunked", [False, True])
+def test_mirrored_full_borrows_native_addresses_without_row_map_translation(chunked: bool) -> None:
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(
+        128, 8, 4, 8, 2, 32, 262144, num_slabs=4, bank_bytes=262144, read_padding_page=6
+    )
+    metadata = _mla_metadata(prefill=not chunked, chunked=chunked)
+    metadata.block_table = torch.tensor([[1, 0], [2, 3]], dtype=torch.int32)
+    metadata.shared_full_block_table = torch.tensor([[16, 6], [24, 32]], dtype=torch.int32)
+    metadata.shared_full_slot_mapping = torch.arange(5, dtype=torch.int32) + 2048
+    logical_table = metadata.block_table
+    with (
+        patch.object(SharedKVCacheLayout, "full_block_table", side_effect=AssertionError("unexpected row gather")),
+        patch.object(SharedKVCacheLayout, "full_slot_mapping", side_effect=AssertionError("unexpected slot gather")),
+    ):
+        prepared = backend.prepare_metadata(metadata)
+        metadata.prepared_attention_state = prepared
+        backend.prepare(metadata)
+        assert prepared.block_table is logical_table
+        assert prepared.shared_full_block_table is metadata.shared_full_block_table
+        assert prepared.shared_full_slot_mapping is metadata.shared_full_slot_mapping
+        assert backend._block_table_i32 is metadata.shared_full_block_table
+        assert backend._full_slot_mapping(metadata) is metadata.shared_full_slot_mapping
+        assert not backend._shared_full_block_tables
+        assert not backend._shared_full_slot_mappings
+
+
+def test_mirrored_full_dummy_uses_read_padding_and_skips_writes() -> None:
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(
+        128, 8, 4, 8, 2, 32, 262144, num_slabs=4, bank_bytes=262144, read_padding_page=6
+    )
+    metadata = _mla_metadata()
+    with pytest.raises(ValueError, match="native final"):
+        backend.prepare_metadata(metadata)
+    metadata.is_dummy = True
+    prepared = backend.prepare_metadata(metadata)
+    assert prepared.shared_full_block_table.eq(6).all()
+    assert prepared.shared_full_slot_mapping.eq(-1).all()
+
+
+def test_draft_full_ignores_target_final_addresses_without_shared_layout() -> None:
+    backend = _ordinary_backend()
+    metadata = _mla_metadata()
+    metadata.shared_full_block_table = torch.tensor([[16], [24]], dtype=torch.int32)
+    metadata.shared_full_slot_mapping = torch.tensor([2049, 3073], dtype=torch.int32)
+    prepared = backend.prepare_metadata(metadata)
+    assert prepared.shared_full_block_table is None
+    assert prepared.shared_full_slot_mapping is None
+    assert backend._prepared_full_block_table(prepared) is metadata.block_table
+
+
+def test_mirrored_graph_keeps_one_native_table_without_recopying_per_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(
+        128, 8, 4, 8, 2, 32, 262144, num_slabs=4, bank_bytes=262144, read_padding_page=6
+    )
+    monkeypatch.setattr(backend, "_allocate_graph_workspace", lambda *_args, **_kwargs: torch.empty(0))
+    table = torch.tensor([[16, 6], [24, 32]], dtype=torch.int32)
+    backend._block_table_i32 = table
+    backend._actual_seq_q = [1, 2]
+    backend._actual_seq_kv = [6, 4]
+    execution = AclGraphExecutionState({})
+    context = ForwardContext(backend, torch.device("cpu"), _mla_metadata(), [], execution_state=execution)
+    with forward_context(context):
+        backend._prepare_paged_graph()
+        graph_state = backend._paged_graph_state
+        table[0, 0] = 40
+        with patch.object(torch.Tensor, "copy_", side_effect=AssertionError("unexpected per-layer table copy")):
+            for layer_id in (0, 2):
+                backend._active_full_layer = layer_id
+                backend._prepare_paged_graph()
+                assert backend._paged_graph_state is graph_state
+                assert graph_state.block_table is table
+        assert graph_state.block_table[0, 0] == 40
+        assert len(execution.paged_attention) == 1
+
+
+def test_mirrored_mtp_borrows_expanded_native_rows_and_keeps_request_scoped_state() -> None:
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(
+        128, 8, 4, 8, 2, 32, 262144, num_slabs=4, bank_bytes=262144, read_padding_page=6
+    )
+    rows = 6
+    logical_table = torch.ones(rows, 1, dtype=torch.int32)
+    final_table = torch.arange(16, 16 + 8 * rows, 8, dtype=torch.int32).view(rows, 1)
+    final_slots = torch.arange(rows, dtype=torch.int32) + 2048
+    state = torch.tensor([1, 2], dtype=torch.int32)
+    accepted = torch.tensor([1, 3], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        q_seq_lens=torch.tensor([3, 3], dtype=torch.int32),
+        q_cu_seq_lens_host_values=[0, 3, 6],
+        block_table=torch.ones(2, 1, dtype=torch.int32),
+        kv_seq_lens=torch.ones(2, dtype=torch.int32),
+        kv_seq_lens_host_values=[10, 10],
+        slot_mapping=torch.zeros(rows, dtype=torch.int32),
+        shared_full_block_table=final_table,
+        shared_full_slot_mapping=final_slots,
+        expanded_decode_metadata=SimpleNamespace(
+            enabled=True,
+            block_table=logical_table,
+            kv_seq_lens=torch.arange(5, 5 + rows, dtype=torch.int32),
+            kv_seq_lens_host_values=[10] * rows,
+        ),
+        linear_state_indices=state,
+        num_accepted_tokens=accepted,
+        is_prefill=False,
+        is_chunked_prefill=True,
+        is_spec_verify=True,
+        has_kv_shard=False,
+    )
+    prepared = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    assert prepared.block_table is logical_table
+    assert prepared.shared_full_block_table is final_table
+    assert prepared.shared_full_slot_mapping is final_slots
+    assert prepared.query_lengths == [1] * rows
+    assert metadata.linear_state_indices is state
+    assert metadata.num_accepted_tokens is accepted
+    assert state.shape == accepted.shape == (2,)
+
+
 @pytest.mark.parametrize("width", [1, 4])
 def test_device_length_graph_skips_unused_tnd_workspace(width: int, monkeypatch: pytest.MonkeyPatch) -> None:
     from xllm.python.model_executor.forward_context import AclGraphExecutionState

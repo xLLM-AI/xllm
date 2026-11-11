@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/static_kv_cache_block_pool.h"
 #include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 namespace {
@@ -305,6 +306,19 @@ TEST(ForwardInputFactoryTest,
       inputs[0].input_params.embedding.linear_state_slot_rows;
   ASSERT_EQ(full_rows.size(), 3u);
   ASSERT_EQ(linear_rows.size(), 5u);
+  const auto& attention = inputs[0].input_params.attention;
+  ASSERT_TRUE(attention.host.shared_full_block_table.defined());
+  EXPECT_EQ(attention.host.block_tables.item<int32_t>(), full_rows[0]);
+  EXPECT_EQ(attention.host.shared_full_block_table.item<int32_t>(),
+            full_rows[1]);
+  EXPECT_EQ(
+      tensor_to_vector<int32_t>(attention.host.shared_full_slot_mapping),
+      std::vector<int32_t>(
+          {full_rows[1] * 4, full_rows[1] * 4 + 1, full_rows[1] * 4 + 2}));
+  const torch::Tensor final_table =
+      attention.host.shared_full_block_table.clone();
+  const torch::Tensor final_slots =
+      attention.host.shared_full_slot_mapping.clone();
   prepare(factory);
   EXPECT_EQ(inputs[0].input_params.embedding.full_block_slot_rows, full_rows);
   EXPECT_EQ(inputs[0].input_params.embedding.linear_state_slot_rows,
@@ -314,6 +328,23 @@ TEST(ForwardInputFactoryTest,
   EXPECT_TRUE(inputs[0].input_params.embedding.full_block_slot_rows.empty());
   EXPECT_TRUE(inputs[0].input_params.embedding.full_block_lease_epochs.empty());
   EXPECT_TRUE(inputs[0].input_params.embedding.linear_state_slot_rows.empty());
+  EXPECT_TRUE(torch::equal(
+      inputs[0].input_params.attention.host.shared_full_block_table,
+      final_table));
+  EXPECT_TRUE(torch::equal(
+      inputs[0].input_params.attention.host.shared_full_slot_mapping,
+      final_slots));
+  const LlmForwardInput draft = make_llm_draft_input(inputs[0]);
+  EXPECT_FALSE(
+      draft.input_params.attention.host.shared_full_block_table.defined());
+  EXPECT_FALSE(
+      draft.input_params.attention.device.shared_full_block_table.defined());
+  EXPECT_FALSE(
+      draft.input_params.attention.host.shared_full_slot_mapping.defined());
+  EXPECT_FALSE(
+      draft.input_params.attention.device.shared_full_slot_mapping.defined());
+  EXPECT_TRUE(torch::equal(draft.input_params.attention.host.block_tables,
+                           inputs[0].input_params.attention.host.block_tables));
   factory.acknowledge_shared_kv_cache();
   factory.reset_shared_kv_cache_mapping_tracker();
   prepare(factory);

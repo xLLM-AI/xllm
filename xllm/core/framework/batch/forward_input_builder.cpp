@@ -166,6 +166,8 @@ ForwardInputBuilder::ForwardInputBuilder(
   state_.sampling.reserve(sequences.size());
   state_.mrope_positions_vec.reserve(sequences.size());
   state_.block_tables_vec.reserve(sequences.size());
+  state_.shared_full_block_tables.reserve(sequences.size());
+  state_.shared_full_slot_mapping.reserve(token_reserve);
   state_.new_token_slot_ids.reserve(token_reserve);
   state_.kv_cache_tokens_nums.reserve(sequences.size());
   if (build_execution_batch_) {
@@ -441,6 +443,8 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     // reallocate (which serializes on the allocator and erodes the speedup).
     thread_state.sampling.reserve(sequences_per_thread);
     thread_state.block_tables_vec.reserve(sequences_per_thread);
+    thread_state.shared_full_block_tables.reserve(sequences_per_thread);
+    thread_state.shared_full_slot_mapping.reserve(thread_token_reserve);
     thread_state.new_token_slot_ids.reserve(thread_token_reserve);
     thread_state.kv_cache_tokens_nums.reserve(sequences_per_thread);
     if (build_execution_batch_) {
@@ -524,6 +528,8 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     state_.mrope_positions_vec.reserve(total_seqs);
   }
   state_.block_tables_vec.reserve(total_seqs);
+  state_.shared_full_block_tables.reserve(total_seqs);
+  state_.shared_full_slot_mapping.reserve(total_slots);
   state_.new_token_slot_ids.reserve(total_slots);
   state_.kv_cache_tokens_nums.reserve(total_seqs);
   if (build_execution_batch_) {
@@ -612,6 +618,18 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     state_.linear_state_slot_rows.insert(state_.linear_state_slot_rows.end(),
                                          state.linear_state_slot_rows.begin(),
                                          state.linear_state_slot_rows.end());
+    if (state.shared_full_read_padding_page.has_value()) {
+      state_.shared_full_read_padding_page =
+          state.shared_full_read_padding_page;
+      state_.shared_full_block_tables.insert(
+          state_.shared_full_block_tables.end(),
+          state.shared_full_block_tables.begin(),
+          state.shared_full_block_tables.end());
+      state_.shared_full_slot_mapping.insert(
+          state_.shared_full_slot_mapping.end(),
+          state.shared_full_slot_mapping.begin(),
+          state.shared_full_slot_mapping.end());
+    }
     state_.full_block_slot_rows.insert(state_.full_block_slot_rows.end(),
                                        state.full_block_slot_rows.begin(),
                                        state.full_block_slot_rows.end());
@@ -957,9 +975,9 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
       std::find_if(blocks.begin(), blocks.end(), [](const Block& block) {
         return block.is_valid() && block.manager() != nullptr;
       });
+  std::shared_ptr<StaticKVCacheBlockPool> shared_pool;
   if (shared_block != blocks.end()) {
-    const auto& shared_pool =
-        shared_block->manager()->options().shared_block_pool();
+    shared_pool = shared_block->manager()->options().shared_block_pool();
     if (shared_pool != nullptr && shared_pool->uses_slabs() &&
         shared_kv_mapping_tracker_ != nullptr) {
       shared_kv_mapping_tracker_->append_rows(shared_pool,
@@ -1039,6 +1057,25 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
     block_size = static_cast<int32_t>(block.size());
     block_ids.push_back(block.id());
   }
+  if (shared_pool != nullptr && shared_pool->uses_slabs()) {
+    state.shared_full_read_padding_page = shared_pool->full_read_padding_page();
+    std::vector<int32_t> final_pages;
+    final_pages.reserve(block_ids.size());
+    shared_pool->append_final_full_pages(blocks, &final_pages);
+    size_t token_position = n_kv_cache_tokens;
+    for (const int32_t slot : slot_ids) {
+      if (slot < 0) {
+        state.shared_full_slot_mapping.emplace_back(slot);
+        ++token_position;
+        continue;
+      }
+      state.shared_full_slot_mapping.emplace_back(
+          final_pages[token_position / block_size] * block_size +
+          token_position % block_size);
+      ++token_position;
+    }
+    state.shared_full_block_tables.emplace_back(std::move(final_pages));
+  }
   util::append_paged_kv_entry(block_ids,
                               static_cast<int32_t>(seq_len),
                               block_size,
@@ -1089,6 +1126,9 @@ void ForwardInputBuilder::padding_decode_batch_size(
                 torch::zeros({3, 1}, torch::kInt));
           }
           state_.new_token_slot_ids.emplace_back(0);
+          if (state_.shared_full_read_padding_page.has_value()) {
+            state_.shared_full_slot_mapping.emplace_back(-1);
+          }
           if (build_eplb_decode_token_mask_) {
             state_.eplb_decode_token_mask.emplace_back(0);
           }
@@ -1096,6 +1136,9 @@ void ForwardInputBuilder::padding_decode_batch_size(
         state_.seq_lens.emplace_back(num_decoding_tokens);
         state_.q_seq_lens.emplace_back(num_decoding_tokens);
         state_.block_tables_vec.emplace_back();
+        if (state_.shared_full_read_padding_page.has_value()) {
+          state_.shared_full_block_tables.emplace_back();
+        }
         if (!state_.multi_block_tables.empty()) {
           for (auto& mgr_tables : state_.multi_block_tables) {
             mgr_tables.emplace_back(std::vector<int32_t>{});
@@ -1211,6 +1254,24 @@ Input ForwardInputBuilder::state_to_forward_input() {
       create_2d_tensor(state_.block_tables_vec, torch::kInt);
   input_params.attention.host.block_tables =
       input_params.attention.device.block_tables;
+
+  if (state_.shared_full_read_padding_page.has_value()) {
+    CHECK_EQ(state_.shared_full_block_tables.size(),
+             state_.block_tables_vec.size());
+    CHECK_EQ(state_.shared_full_slot_mapping.size(),
+             state_.new_token_slot_ids.size());
+    const int32_t padding_page = *state_.shared_full_read_padding_page;
+    util::pad_2d_vector(state_.shared_full_block_tables, padding_page);
+    input_params.attention.host.shared_full_block_table =
+        create_2d_tensor(state_.shared_full_block_tables, torch::kInt);
+    input_params.attention.host.shared_full_slot_mapping =
+        make_cpu_tensor(state_.shared_full_slot_mapping);
+    input_params.attention.host.shared_full_read_padding_page = padding_page;
+    input_params.attention.device.shared_full_block_table =
+        input_params.attention.host.shared_full_block_table;
+    input_params.attention.device.shared_full_slot_mapping =
+        input_params.attention.host.shared_full_slot_mapping;
+  }
 
   // Setup grouped cache block tables.
   input_params.multi_block_tables =

@@ -98,7 +98,7 @@ constexpr PackedInputDomain packed_input_domain() {
   return PackedInputDomain::LLM;
 }
 constexpr uint64_t kPackedInputMagic = 0x584c4c4d494e5032;
-constexpr uint16_t kPackedInputSchemaVersion = 12;
+constexpr uint16_t kPackedInputSchemaVersion = 13;
 constexpr uint32_t kPackedInputHeaderBytes = 40;
 
 struct RawInputLayoutHeader final {
@@ -2384,6 +2384,15 @@ inline void deserialize_forward_input_payload(
                        input_params.attention.device.block_tables,
                        input_params.attention.host.block_tables,
                        stream);
+  read_tensor_and_host(context,
+                       input_params.attention.device.shared_full_block_table,
+                       input_params.attention.host.shared_full_block_table,
+                       stream);
+  read_tensor_and_host(context,
+                       input_params.attention.device.shared_full_slot_mapping,
+                       input_params.attention.host.shared_full_slot_mapping,
+                       stream);
+  read_data(context, input_params.attention.host.shared_full_read_padding_page);
   int32_t manager_num = 0;
   read_data(context, manager_num);
   CHECK_GE(manager_num, 0) << "multi_block_tables manager num is invalid.";
@@ -2699,6 +2708,16 @@ inline void serialize_forward_input_sections(
       context,
       choose_host_or_device_tensor(input_params.attention.host.block_tables,
                                    input_params.attention.device.block_tables));
+  write_tensor(context,
+               choose_host_or_device_tensor(
+                   input_params.attention.host.shared_full_block_table,
+                   input_params.attention.device.shared_full_block_table));
+  write_tensor(context,
+               choose_host_or_device_tensor(
+                   input_params.attention.host.shared_full_slot_mapping,
+                   input_params.attention.device.shared_full_slot_mapping));
+  write_data(context.descriptor,
+             input_params.attention.host.shared_full_read_padding_page);
   write_data(context.descriptor,
              static_cast<int32_t>(input_params.multi_block_tables.size()));
   for (const auto& manager_table : input_params.multi_block_tables) {

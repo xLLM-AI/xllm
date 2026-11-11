@@ -69,22 +69,15 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
   torch::Tensor k_cache = kv_cache.get_k_cache();
   std::optional<torch::Tensor> v_cache = kv_cache.get_v_cache();
 
-  torch::Tensor shared_block_table;
-  torch::Tensor shared_slot_mapping;
   const torch::Tensor* physical_block_table = nullptr;
   const torch::Tensor* physical_slot_mapping = nullptr;
   if (kv_cache.is_static_shared()) {
     CHECK(attn_metadata.kv_shard_batch_metadata == nullptr);
-    CHECK(!attn_metadata.expanded_decode.enabled);
-    // Dense arena views share storage, but each layer owns different rows.
-    shared_block_table = kv_cache.physical_row_indices(
-        attn_metadata.block_table, KVCacheTensorRole::KEY);
-    shared_slot_mapping = kv_cache.physical_token_slots(
-        attn_metadata.slot_mapping, k_cache.size(1));
-    physical_block_table = &shared_block_table;
-    physical_slot_mapping = &shared_slot_mapping;
+    CHECK(attn_metadata.shared_full_block_table.defined());
+    CHECK(attn_metadata.shared_full_slot_mapping.defined());
+    physical_block_table = &attn_metadata.shared_full_block_table;
+    physical_slot_mapping = &attn_metadata.shared_full_slot_mapping;
     CHECK(v_cache.has_value() && v_cache->defined());
-    k_cache = k_cache.narrow(0, 0, v_cache->size(0));
   }
 
   if (!attn_metadata.prefill_without_cache) {
@@ -238,7 +231,9 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
                                   : *physical_block_table;
   torch::Tensor tiling_data = attn_metadata.paged_attention_tiling_data;
   if (attn_metadata.expanded_decode.enabled) {
-    block_table = attn_metadata.expanded_decode.block_table;
+    block_table = physical_block_table == nullptr
+                      ? attn_metadata.expanded_decode.block_table
+                      : *physical_block_table;
     tiling_data = attn_metadata.expanded_decode.paged_attention_tiling_data;
     if (attn_metadata.expanded_decode.kv_seq_lens_host.defined()) {
       kv_seq_lens = attn_metadata.expanded_decode.kv_seq_lens_host;

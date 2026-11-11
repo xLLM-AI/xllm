@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/framework/batch/batch_forward_type.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/layers/common/attention_metadata.h"
+#include "core/layers/common/expanded_decode_metadata_builder.h"
 
 namespace xllm::layer {
 namespace {
@@ -77,6 +78,65 @@ TEST(AttentionMetadataBuilderTest, LinearDecodeDoesNotRequirePrefillLengths) {
   AttentionMetadataBuilder::build_linear_prefill(metadata, /*block_size=*/64);
   EXPECT_FALSE(metadata.batch.defined());
   EXPECT_FALSE(metadata.chunk_indices.defined());
+}
+
+TEST(AttentionMetadataBuilderTest, PreservesSharedFullFinalAddresses) {
+  ModelParamsView params = make_params();
+  const torch::Tensor final_pages =
+      torch::tensor({{120, 60}, {122, 124}, {126, 60}}, torch::kInt32);
+  const torch::Tensor final_slots =
+      torch::tensor({15360, 15875, -1}, torch::kInt32);
+  params.attention.device.block_tables =
+      torch::tensor({{1, 0}, {2, 3}, {4, 0}}, torch::kInt32);
+  params.attention.device.new_cache_slots =
+      torch::tensor({128, 259, 0}, torch::kInt32);
+  params.attention.device.shared_full_block_table = final_pages;
+  params.attention.device.shared_full_slot_mapping = final_slots;
+
+  for (const auto forward_type : {BatchForwardType::PREFILL,
+                                  BatchForwardType::CHUNKED_PREFILL,
+                                  BatchForwardType::DECODE}) {
+    params.meta.batch_forward_type = forward_type;
+    const AttentionMetadata metadata =
+        AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
+
+    EXPECT_EQ(metadata.shared_full_block_table.data_ptr(),
+              final_pages.data_ptr());
+    EXPECT_EQ(metadata.shared_full_slot_mapping.data_ptr(),
+              final_slots.data_ptr());
+    EXPECT_TRUE(torch::equal(metadata.slot_mapping,
+                             params.attention.device.new_cache_slots));
+    EXPECT_EQ(metadata.shared_full_slot_mapping[2].item<int32_t>(), -1);
+  }
+}
+
+TEST(AttentionMetadataBuilderTest, PreservesExpandedSharedFullFinalAddresses) {
+  ModelParamsView params = make_params();
+  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.is_spec_verify = true;
+  params.attention.device.shared_full_block_table = torch::tensor(
+      {{120, 60}, {120, 60}, {122, 124}, {122, 124}}, torch::kInt32);
+  params.attention.device.shared_full_slot_mapping =
+      torch::tensor({15362, 15363, 15622, 15623}, torch::kInt32);
+  ExpandedDecodeMetadataBuilder::populate_expanded_layout(
+      params,
+      torch::tensor({3, 4, 7, 8}, torch::kInt32),
+      torch::tensor({{1, 0}, {1, 0}, {2, 3}, {2, 3}}, torch::kInt32),
+      /*expanded_host_kv_seq_lens=*/{3, 4, 7, 8},
+      /*block_size=*/128);
+
+  const AttentionMetadata metadata =
+      AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
+
+  ASSERT_TRUE(metadata.expanded_decode.enabled);
+  EXPECT_EQ(metadata.shared_full_block_table.sizes(),
+            metadata.expanded_decode.block_table.sizes());
+  EXPECT_EQ(metadata.shared_full_block_table.data_ptr(),
+            params.attention.device.shared_full_block_table.data_ptr());
+  EXPECT_EQ(metadata.shared_full_slot_mapping.data_ptr(),
+            params.attention.device.shared_full_slot_mapping.data_ptr());
+  EXPECT_TRUE(torch::equal(metadata.expanded_decode.block_table,
+                           params.graph.expanded_block_tables));
 }
 
 TEST(AttentionMetadataBuilderTest, MaterializesCanonicalInitialStateMask) {

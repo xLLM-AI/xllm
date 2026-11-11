@@ -51,6 +51,9 @@ class AttentionHostInputView final {
         ring_cur_seqlen(owner.ring_cur_seqlen),
         ring_cache_seqlen(owner.ring_cache_seqlen),
         block_tables(owner.block_tables),
+        shared_full_block_table(owner.shared_full_block_table),
+        shared_full_slot_mapping(owner.shared_full_slot_mapping),
+        shared_full_read_padding_page(owner.shared_full_read_padding_page),
         graph_q_seq_lens_data(owner.graph_q_seq_lens_data),
         graph_kv_seq_lens_data(owner.graph_kv_seq_lens_data) {}
 
@@ -64,6 +67,9 @@ class AttentionHostInputView final {
   std::vector<int32_t>& ring_cur_seqlen;
   std::vector<int32_t>& ring_cache_seqlen;
   torch::Tensor& block_tables;
+  torch::Tensor& shared_full_block_table;
+  torch::Tensor& shared_full_slot_mapping;
+  int32_t& shared_full_read_padding_page;
   const int32_t*& graph_q_seq_lens_data;
   const int32_t*& graph_kv_seq_lens_data;
 };
@@ -77,6 +83,8 @@ class AttentionDeviceInputView final {
         q_cu_seq_lens(owner.q_cu_seq_lens),
         new_cache_slots(owner.new_cache_slots),
         block_tables(owner.block_tables),
+        shared_full_block_table(owner.shared_full_block_table),
+        shared_full_slot_mapping(owner.shared_full_slot_mapping),
         paged_kv_indptr(owner.paged_kv_indptr),
         paged_kv_indices(owner.paged_kv_indices),
         paged_kv_last_page_len(owner.paged_kv_last_page_len),
@@ -93,6 +101,8 @@ class AttentionDeviceInputView final {
   torch::Tensor& q_cu_seq_lens;
   torch::Tensor& new_cache_slots;
   torch::Tensor& block_tables;
+  torch::Tensor& shared_full_block_table;
+  torch::Tensor& shared_full_slot_mapping;
   torch::Tensor& paged_kv_indptr;
   torch::Tensor& paged_kv_indices;
   torch::Tensor& paged_kv_last_page_len;
@@ -234,6 +244,10 @@ class AttentionInputView final {
     add_int_vector(host.q_cu_seq_lens, nullptr, &device.q_cu_seq_lens);
     add_int_vector(host.new_cache_slots, nullptr, &device.new_cache_slots);
     add_cpu_tensor(host.block_tables, &device.block_tables);
+    add_cpu_tensor(host.shared_full_block_table,
+                   &device.shared_full_block_table);
+    add_cpu_tensor(host.shared_full_slot_mapping,
+                   &device.shared_full_slot_mapping);
     add_int_vector(
         host.kv_cache_tokens_nums, nullptr, &device.kv_cache_tokens_nums);
     add_int_vector(host.ring_cur_seqlen, nullptr, &device.ring_cur_seqlen);
@@ -400,6 +414,9 @@ void copy_attention_host_input(const Source& source, Target& target) {
   target.ring_cur_seqlen = source.ring_cur_seqlen;
   target.ring_cache_seqlen = source.ring_cache_seqlen;
   target.block_tables = source.block_tables;
+  target.shared_full_block_table = source.shared_full_block_table;
+  target.shared_full_slot_mapping = source.shared_full_slot_mapping;
+  target.shared_full_read_padding_page = source.shared_full_read_padding_page;
   target.graph_q_seq_lens_data = source.graph_q_seq_lens_data;
   target.graph_kv_seq_lens_data = source.graph_kv_seq_lens_data;
 }
@@ -411,6 +428,8 @@ void copy_attention_device_input(const Source& source, Target& target) {
   target.q_cu_seq_lens = source.q_cu_seq_lens;
   target.new_cache_slots = source.new_cache_slots;
   target.block_tables = source.block_tables;
+  target.shared_full_block_table = source.shared_full_block_table;
+  target.shared_full_slot_mapping = source.shared_full_slot_mapping;
   target.paged_kv_indptr = source.paged_kv_indptr;
   target.paged_kv_indices = source.paged_kv_indices;
   target.paged_kv_last_page_len = source.paged_kv_last_page_len;

@@ -191,7 +191,7 @@ TEST(SchedulerMetricsTest, SharedSlabCountsPayloadBytesAndPartialFullTails) {
   Sequence* sequence = request->sequences().front().get();
   ASSERT_TRUE(block_manager.allocate(sequence, /*num_tokens=*/4));
   ASSERT_EQ(block_manager.num_used_blocks()[0], 272u);
-  ASSERT_EQ(block_manager.admission_capacity(0), 512u);
+  ASSERT_EQ(block_manager.admission_capacity(0), 1024u);
   ASSERT_EQ(block_manager.num_blocks(), 64u);
 
   sequence->kv_state().set_kv_cache_tokens_num(3);

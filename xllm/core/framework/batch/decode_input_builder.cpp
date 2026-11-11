@@ -84,6 +84,14 @@ DecodeBatchContext make_decode_batch_context(const Input& input) {
       << ", num_block_tables=" << ctx.block_tables_owner.size(0);
   ctx.block_table_stride = static_cast<int32_t>(ctx.block_tables_owner.size(1));
   ctx.block_tables = tensor_slice(ctx.block_tables_owner);
+  if (input.input_params.attention.host.shared_full_block_table.defined()) {
+    ctx.shared_full_block_tables_owner = to_cpu_contiguous(
+        input.input_params.attention.host.shared_full_block_table);
+    CHECK(ctx.shared_full_block_tables_owner.sizes() ==
+          ctx.block_tables_owner.sizes());
+    ctx.shared_full_block_tables =
+        tensor_slice(ctx.shared_full_block_tables_owner);
+  }
   return ctx;
 }
 
@@ -122,6 +130,9 @@ void prepare_decode_buffers(DecodeBuildBuffers& buffers,
   buffers.out_token_ids.reserve(emit_token ? num_tokens : 0);
   buffers.out_positions.reserve(num_tokens);
   buffers.out_new_cache_slots.reserve(num_tokens);
+  if (!ctx.shared_full_block_tables.empty()) {
+    buffers.out_shared_full_slot_mapping.reserve(num_tokens);
+  }
   if (buffers.build_execution_batch) {
     buffers.out_num_scheduled_tokens.reserve(
         static_cast<size_t>(ctx.num_requests));
@@ -143,6 +154,10 @@ void prepare_decode_buffers(DecodeBuildBuffers& buffers,
     if (block_table_stride > 0) {
       buffers.out_block_table_stride = ctx.block_table_stride;
       buffers.out_block_tables.reserve(num_tokens * block_table_stride);
+      if (!ctx.shared_full_block_tables.empty()) {
+        buffers.out_shared_full_block_tables.reserve(num_tokens *
+                                                     block_table_stride);
+      }
       buffers.out_paged_kv_indices.reserve(num_tokens * block_table_stride);
       buffers.out_paged_kv_indptr.reserve(num_tokens + 1);
       buffers.out_paged_kv_last_page_len.reserve(num_tokens);
@@ -188,6 +203,26 @@ void append_decode_token(const DecodeBatchContext& ctx,
   }
   buf.out_positions.emplace_back(model_position);
   buf.out_new_cache_slots.emplace_back(cache_slot);
+  if (!ctx.shared_full_block_tables.empty()) {
+    const size_t request_stride = static_cast<size_t>(ctx.block_table_stride);
+    const size_t request_offset =
+        static_cast<size_t>(token_input.req_id) * request_stride;
+    const Slice<int32_t> final_pages = ctx.shared_full_block_tables.slice(
+        request_offset, request_offset + request_stride);
+    // Padding rows and explicit padding overrides must not write the finite
+    // shared read page or the source request's live KV pages.
+    buf.out_shared_full_slot_mapping.emplace_back(
+        flat_block_table_slice[0] > 0 && cache_slot > 0
+            ? util::compute_slot_mapping</*Ring=*/false>(
+                  final_pages, cache_position, block_size)
+            : kPadSlotId);
+    if (buf.emit_block_tables) {
+      buf.out_shared_full_block_tables.insert(
+          buf.out_shared_full_block_tables.end(),
+          final_pages.begin(),
+          final_pages.end());
+    }
+  }
 
   if (buf.build_execution_batch) {
     if (buf.last_req_id != token_input.req_id) {
@@ -356,6 +391,11 @@ void build_decode_metadata(Params& input_params,
         make_pinned_cpu_tensor(buf.out_block_tables)
             .view({num_block_tables, buf.out_block_table_stride});
     input_params.multi_block_tables.clear();
+    if (!buf.out_shared_full_block_tables.empty()) {
+      input_params.attention.host.shared_full_block_table =
+          make_pinned_cpu_tensor(buf.out_shared_full_block_tables)
+              .view({num_block_tables, buf.out_block_table_stride});
+    }
     if (!buf.out_paged_kv_indptr.empty()) {
       input_params.attention.device.paged_kv_indptr =
           make_pinned_cpu_tensor(buf.out_paged_kv_indptr);

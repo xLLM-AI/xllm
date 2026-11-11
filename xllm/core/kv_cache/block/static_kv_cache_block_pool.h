@@ -78,6 +78,12 @@ class StaticKVCacheBlockPool final {
   size_t reclaimable_slab_count(BlockType type,
                                 const std::vector<int32_t>& block_ids) const;
   bool uses_slabs() const { return slab_mode_; }
+  // Final page relative to every Full layer's fixed cache base.
+  int32_t final_full_page(int32_t logical_id) const;
+  void append_final_full_pages(Slice<Block> blocks,
+                               std::vector<int32_t>* pages) const;
+  int32_t scratch_full_page() const { return 0; }
+  int32_t full_read_padding_page() const;
 
  private:
   friend class StaticKVCacheBlockPoolTestPeer;
@@ -106,6 +112,13 @@ class StaticKVCacheBlockPool final {
   size_t object_bytes(SlabType type) const;
   size_t object_row_bytes(SlabType type) const;
   size_t available_objects(SlabType type) const;
+  size_t object_capacity(SlabType type) const;
+  uint32_t slab_for_row(int32_t row, SlabType type) const;
+  int32_t object_row(uint32_t slab_id,
+                     uint32_t object,
+                     SlabType type,
+                     size_t bank = 0) const;
+  int32_t mirrored_row(int32_t row, SlabType type, size_t bank) const;
   int32_t allocate_object(SlabType type, RequestPlacement* placement);
   void release_object(int32_t row, SlabType type);
   void remove_available_slab(uint32_t slab_id);
@@ -133,6 +146,13 @@ class StaticKVCacheBlockPool final {
   bool slab_mode_ = false;
   uint32_t logical_capacity_ = 0;
   size_t slab_bytes_ = 0;
+  size_t slice_bytes_ = 0;
+  size_t bank_bytes_ = 0;
+  size_t bank_count_ = 0;
+  size_t full_layers_per_bank_ = 0;
+  size_t linear_layers_per_bank_ = 0;
+  int32_t full_read_padding_page_ = 0;
+  std::array<size_t, 3> object_capacities_{};
   size_t num_reserved_slabs_ = 0;
   size_t full_row_bytes_ = 0;
   size_t conv_row_bytes_ = 0;

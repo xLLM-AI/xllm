@@ -54,25 +54,42 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
   CHECK_EQ(spec_.conv_row_bytes % torch::elementSize(spec_.dtype), 0u);
   CHECK_EQ(spec_.ssm_row_bytes % torch::elementSize(spec_.ssm_dtype), 0u);
 
+  bank_count_ = std::gcd(full_layer_count(), linear_layer_count());
+  full_layers_per_bank_ = full_layer_count() / bank_count_;
+  linear_layers_per_bank_ = linear_layer_count() / bank_count_;
   full_pair_bytes_ = checked_multiply(2, spec_.full_row_bytes);
+  full_bundle_bytes_ =
+      checked_multiply(full_layers_per_bank_, full_pair_bytes_);
   ssm_bundle_bytes_ =
       checked_multiply(spec_.checkpoint_stride, spec_.ssm_row_bytes);
-  slab_bytes_ = checked_lcm(checked_lcm(full_pair_bytes_, ssm_bundle_bytes_),
-                            spec_.conv_row_bytes);
-  // Recurrent scratch contains FP32 values whose BF16 aliases may be NaNs.
-  // Masked attention still reads V, so its padding must remain separate from
-  // every writable scratch role and from slabs that can be leased or retyped.
+  slice_bytes_ = checked_lcm(full_bundle_bytes_, ssm_bundle_bytes_);
+  // Conv rows align inside a slice instead of inflating every role to its LCM.
+  // Leave room for the leading alignment gap when the sizes do not divide.
+  const size_t conv_minimum = slice_bytes_ % spec_.conv_row_bytes == 0
+                                  ? spec_.conv_row_bytes
+                                  : checked_multiply(2, spec_.conv_row_bytes);
+  if (slice_bytes_ < conv_minimum) {
+    const size_t slices = conv_minimum / slice_bytes_ +
+                          static_cast<size_t>(conv_minimum % slice_bytes_ != 0);
+    slice_bytes_ = checked_multiply(slices, slice_bytes_);
+  }
+  slab_bytes_ = checked_multiply(bank_count_, slice_bytes_);
+  // FP32 scratch may alias BF16 NaNs. Every bank permanently separates the
+  // writable scratch bundle from its immutable Full read-padding bundle.
   const size_t scratch_bytes =
-      std::max({full_pair_bytes_, spec_.conv_row_bytes, ssm_bundle_bytes_});
+      std::max({full_bundle_bytes_, spec_.conv_row_bytes, ssm_bundle_bytes_});
   const size_t padding_offset = checked_multiply(
-      scratch_bytes / full_pair_bytes_ +
-          static_cast<size_t>(scratch_bytes % full_pair_bytes_ != 0),
-      full_pair_bytes_);
+      scratch_bytes / full_bundle_bytes_ +
+          static_cast<size_t>(scratch_bytes % full_bundle_bytes_ != 0),
+      full_bundle_bytes_);
   full_read_padding_row_ = padding_offset / spec_.full_row_bytes;
-  const size_t reserved_bytes = checked_add(padding_offset, full_pair_bytes_);
-  num_reserved_slabs_ = reserved_bytes / slab_bytes_ +
-                        static_cast<size_t>(reserved_bytes % slab_bytes_ != 0);
-  bytes_used_ = checked_multiply(spec_.num_slabs, slab_bytes_);
+  const size_t reserved_bytes = checked_add(padding_offset, full_bundle_bytes_);
+  num_reserved_slabs_ = reserved_bytes / slice_bytes_ +
+                        static_cast<size_t>(reserved_bytes % slice_bytes_ != 0);
+  CHECK_LE(spec_.num_slabs, max_slab_count())
+      << "Shared Full bank exceeds the paged attention address range";
+  bank_bytes_ = checked_multiply(spec_.num_slabs, slice_bytes_);
+  bytes_used_ = checked_multiply(bank_count_, bank_bytes_);
   CHECK_LE(bytes_used_,
            static_cast<size_t>(std::numeric_limits<int64_t>::max()));
   const size_t num_layers =
@@ -86,18 +103,28 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
     const int64_t layer_id = spec_.full_layer_ids[layer_index];
     CHECK_GE(layer_id, 0);
     CHECK(layer_ids.emplace(layer_id).second) << "Duplicate cache layer id";
+    const size_t bank = layer_index / full_layers_per_bank_;
+    const size_t bank_lane = layer_index % full_layers_per_bank_;
+    const size_t key_offset =
+        checked_add(checked_multiply(bank, bank_bytes_),
+                    checked_multiply(bank_lane, full_pair_bytes_));
     tensors_.emplace_back(StaticKVCacheTensorLayout{
         .layer_id = layer_id,
         .role = KVCacheTensorRole::KEY,
+        .offset_bytes = key_offset,
         .row_bytes = spec_.full_row_bytes,
         .lane = layer_index,
+        .bank = bank,
+        .bank_lane = bank_lane,
     });
     tensors_.emplace_back(StaticKVCacheTensorLayout{
         .layer_id = layer_id,
         .role = KVCacheTensorRole::VALUE,
-        .offset_bytes = spec_.full_row_bytes,
+        .offset_bytes = checked_add(key_offset, spec_.full_row_bytes),
         .row_bytes = spec_.full_row_bytes,
         .lane = layer_index,
+        .bank = bank,
+        .bank_lane = bank_lane,
     });
   }
 
@@ -106,12 +133,16 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
     const int64_t layer_id = spec_.linear_layer_ids[layer_index];
     CHECK_GE(layer_id, 0);
     CHECK(layer_ids.emplace(layer_id).second) << "Duplicate cache layer id";
+    const size_t bank = layer_index / linear_layers_per_bank_;
+    const size_t bank_lane = layer_index % linear_layers_per_bank_;
     const size_t conv_group = checked_multiply(layer_index, 2);
     tensors_.emplace_back(StaticKVCacheTensorLayout{
         .layer_id = layer_id,
         .role = KVCacheTensorRole::CONV,
         .row_bytes = spec_.conv_row_bytes,
         .lane = layer_index,
+        .bank = bank,
+        .bank_lane = bank_lane,
         .linear_group = conv_group,
     });
     tensors_.emplace_back(StaticKVCacheTensorLayout{
@@ -120,6 +151,8 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
         .row_bytes = spec_.ssm_row_bytes,
         .rows_per_slot = spec_.checkpoint_stride,
         .lane = layer_index,
+        .bank = bank,
+        .bank_lane = bank_lane,
         .linear_group = checked_add(conv_group, 1),
     });
   }
@@ -127,7 +160,14 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
     return;
   }
   for (auto& tensor : tensors_) {
-    tensor.view_rows = (bytes_used_ - tensor.offset_bytes) / tensor.row_bytes;
+    const bool full = tensor.role == KVCacheTensorRole::KEY ||
+                      tensor.role == KVCacheTensorRole::VALUE;
+    const size_t end =
+        full ? checked_multiply(tensor.bank + 1, bank_bytes_) : bytes_used_;
+    CHECK_LE(tensor.offset_bytes, end);
+    tensor.view_rows = full ? bank_bytes_ / spec_.full_row_bytes -
+                                  (2 * full_layers_per_bank_ - 1)
+                            : (end - tensor.offset_bytes) / tensor.row_bytes;
   }
 }
 
@@ -137,18 +177,64 @@ bool StaticKVCacheLayout::can_fit(size_t full_blocks,
       linear_states >= spec_.num_slots) {
     return false;
   }
-  const auto slabs_for = [this](size_t objects, size_t object_bytes) {
-    const size_t per_slab = slab_bytes_ / object_bytes;
+  const auto slabs_for = [this](size_t objects, KVCacheTensorRole role) {
+    const size_t per_slab = objects_per_slab(role);
     return objects / per_slab + static_cast<size_t>(objects % per_slab != 0);
   };
-  const size_t full_objects = checked_multiply(full_blocks, full_layer_count());
   const size_t linear_objects =
-      checked_multiply(linear_states, linear_layer_count());
-  const size_t required_slabs =
-      checked_add(slabs_for(full_objects, full_pair_bytes_),
-                  checked_add(slabs_for(linear_objects, spec_.conv_row_bytes),
-                              slabs_for(linear_objects, ssm_bundle_bytes_)));
+      checked_multiply(linear_states, linear_layers_per_bank_);
+  const size_t required_slabs = checked_add(
+      slabs_for(full_blocks, KVCacheTensorRole::KEY),
+      checked_add(slabs_for(linear_objects, KVCacheTensorRole::CONV),
+                  slabs_for(linear_objects, KVCacheTensorRole::SSM)));
   return required_slabs <= spec_.num_slabs - num_reserved_slabs_;
+}
+
+size_t StaticKVCacheLayout::max_slab_count() const {
+  // The deployed paged FIA address chain uses 32-bit relative element offsets.
+  // Bound each compact bank, independently of the logical-ID or arena sizes.
+  constexpr uint64_t kFiaElementSpan = uint64_t{1} << 32;
+  const size_t row_elements =
+      full_row_bytes() / torch::elementSize(spec_.dtype);
+  const size_t full_limit =
+      static_cast<size_t>(kFiaElementSpan / row_elements) /
+      full_pages_per_slab();
+  size_t limit = std::min(
+      full_limit,
+      static_cast<size_t>(std::numeric_limits<int64_t>::max()) / slab_bytes_);
+  const size_t max_index = std::numeric_limits<int32_t>::max();
+  limit = std::min(limit, max_index / full_pages_per_slab());
+  for (const KVCacheTensorRole role :
+       {KVCacheTensorRole::CONV, KVCacheTensorRole::SSM}) {
+    limit = std::min(limit, max_index / rows_per_slab(role));
+  }
+  return limit;
+}
+
+size_t StaticKVCacheLayout::objects_per_slab(KVCacheTensorRole role) const {
+  switch (role) {
+    case KVCacheTensorRole::KEY:
+    case KVCacheTensorRole::VALUE:
+      return slice_bytes_ / full_bundle_bytes_;
+    case KVCacheTensorRole::CONV:
+      return slice_bytes_ / spec_.conv_row_bytes -
+             static_cast<size_t>(slice_bytes_ % spec_.conv_row_bytes != 0);
+    case KVCacheTensorRole::SSM:
+      return slice_bytes_ / ssm_bundle_bytes_;
+    default:
+      LOG(FATAL) << "Unsupported static cache object role: "
+                 << role.to_string();
+      return 0;
+  }
+}
+
+size_t StaticKVCacheLayout::layer_bank_index(int64_t layer_id) const {
+  const auto it = std::find_if(
+      tensors_.begin(), tensors_.end(), [layer_id](const auto& tensor) {
+        return tensor.layer_id == layer_id;
+      });
+  CHECK(it != tensors_.end()) << "Unknown static cache layer";
+  return it->bank;
 }
 
 size_t StaticKVCacheLayout::row_bytes(KVCacheTensorRole role) const {
@@ -168,16 +254,25 @@ size_t StaticKVCacheLayout::row_bytes(KVCacheTensorRole role) const {
 }
 
 size_t StaticKVCacheLayout::rows_per_slab(KVCacheTensorRole role) const {
-  return slab_bytes_ / row_bytes(role);
+  const size_t bytes =
+      role == KVCacheTensorRole::KEY || role == KVCacheTensorRole::VALUE
+          ? slice_bytes_
+          : slab_bytes_;
+  const size_t row = row_bytes(role);
+  return bytes / row + static_cast<size_t>(bytes % row != 0);
 }
 
 size_t StaticKVCacheLayout::row_index(size_t slab,
                                       KVCacheTensorRole role) const {
-  return checked_multiply(slab, rows_per_slab(role));
+  const size_t bytes = checked_multiply(slab, slice_bytes_);
+  const size_t row = row_bytes(role);
+  return bytes / row + static_cast<size_t>(bytes % row != 0);
 }
 
 size_t StaticKVCacheLayout::role_row_stride(KVCacheTensorRole role) const {
-  return rows_per_slab(role);
+  CHECK_EQ(slice_bytes_ % row_bytes(role), 0u)
+      << "Aligned Conv objects do not have a constant native row stride";
+  return slice_bytes_ / row_bytes(role);
 }
 
 size_t StaticKVCacheLayout::full_layer_index(int64_t layer_id) const {

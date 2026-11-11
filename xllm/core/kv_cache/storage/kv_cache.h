@@ -89,6 +89,11 @@ class KVCache final {
   torch::Tensor full_block_rows() const;
   void update_full_block_rows(const std::vector<int32_t>& rows) const;
   int64_t shared_checkpoint_stride() const;
+  int64_t shared_bank_bytes() const;
+  int64_t shared_slice_bytes() const;
+  int64_t shared_conv_scratch_row() const;
+  int64_t shared_ssm_scratch_row() const;
+  int64_t shared_full_read_padding_page() const;
   torch::Tensor physical_token_slots(const torch::Tensor& token_slots,
                                      int64_t block_size) const;
 

@@ -112,6 +112,15 @@ TYPED_TEST(ForwardSharedFullLeaseInputTest,
     TypeParam source = make_input<TypeParam>({});
     source.input_params.embedding.full_block_slot_rows = expected_rows;
     source.input_params.embedding.full_block_lease_epochs = expected_epochs;
+    source.input_params.attention.host.shared_full_block_table =
+        torch::tensor({{120, 180}}, torch::kInt32);
+    source.input_params.attention.host.shared_full_slot_mapping =
+        torch::tensor({15360, 15361}, torch::kInt32);
+    source.input_params.attention.host.shared_full_read_padding_page = 60;
+    source.input_params.attention.device.shared_full_block_table =
+        source.input_params.attention.host.shared_full_block_table;
+    source.input_params.attention.device.shared_full_slot_mapping =
+        source.input_params.attention.host.shared_full_slot_mapping;
     const TypeParam copied =
         source.to(torch::Device(torch::kCPU), torch::kFloat32);
     EXPECT_EQ(copied.input_params.embedding.full_block_slot_rows,
@@ -128,6 +137,20 @@ TYPED_TEST(ForwardSharedFullLeaseInputTest,
   EXPECT_EQ(decoded.input_params.embedding.full_block_slot_rows, expected_rows);
   EXPECT_EQ(decoded.input_params.embedding.full_block_lease_epochs,
             expected_epochs);
+  EXPECT_TRUE(
+      torch::equal(decoded.input_params.attention.host.shared_full_block_table,
+                   torch::tensor({{120, 180}}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(
+      decoded.input_params.attention.device.shared_full_block_table,
+      decoded.input_params.attention.host.shared_full_block_table));
+  EXPECT_TRUE(
+      torch::equal(decoded.input_params.attention.host.shared_full_slot_mapping,
+                   torch::tensor({15360, 15361}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(
+      decoded.input_params.attention.device.shared_full_slot_mapping,
+      decoded.input_params.attention.host.shared_full_slot_mapping));
+  EXPECT_EQ(decoded.input_params.attention.host.shared_full_read_padding_page,
+            60);
 }
 
 TYPED_TEST(ForwardSharedFullLeaseInputTest,
@@ -188,7 +211,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest, RejectsPreviousPackedInputSchema) {
   const TypeParam source = make_input<TypeParam>(make_sparse_role_offsets());
   proto::PackedForwardInput packed;
   ASSERT_TRUE(source.to_packed_proto(&packed));
-  constexpr uint16_t kPreviousVersion = 11;
+  constexpr uint16_t kPreviousVersion = 12;
   ASSERT_GE(packed.payload().size(),
             sizeof(uint64_t) + sizeof(kPreviousVersion));
   std::memcpy(packed.mutable_payload()->data() + sizeof(uint64_t),

@@ -21,6 +21,7 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -109,6 +110,9 @@ class ForwardInputBuilder final {
     // Cache and block data
     std::vector<int32_t> new_token_slot_ids;
     std::vector<std::vector<int32_t>> block_tables_vec;
+    std::vector<std::vector<int32_t>> shared_full_block_tables;
+    std::vector<int32_t> shared_full_slot_mapping;
+    std::optional<int32_t> shared_full_read_padding_page;
     // Grouped cache block tables.
     // [manager_num][batch_size][block_ids]
     std::vector<std::vector<std::vector<int32_t>>> multi_block_tables;

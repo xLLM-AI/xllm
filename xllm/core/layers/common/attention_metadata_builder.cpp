@@ -244,6 +244,10 @@ AttentionMetadata build_common_attention_metadata(
   attn_metadata.kv_seq_lens_vec = params.attention.host.kv_seq_lens;
   attn_metadata.q_seq_lens_vec = params.attention.host.q_seq_lens;
   attn_metadata.slot_mapping = params.attention.device.new_cache_slots;
+  attn_metadata.shared_full_block_table =
+      params.attention.device.shared_full_block_table;
+  attn_metadata.shared_full_slot_mapping =
+      params.attention.device.shared_full_slot_mapping;
   attn_metadata.linear_state_indices = params.embedding.linear_state_indices;
   attn_metadata.kpool_query_lens = params.attention.host.kpool_query_lens;
   attn_metadata.compute_dtype = compute_dtype;
@@ -487,6 +491,11 @@ AttentionMetadata AttentionMetadataBuilder::build(
   auto metadata = build_common_attention_metadata(
       params, enable_mla, compute_dtype, device, attn_mask, build_options);
   metadata.expanded_decode = ExpandedDecodeMetadataBuilder::build(params);
+  if (metadata.expanded_decode.enabled &&
+      metadata.shared_full_block_table.defined()) {
+    CHECK(metadata.shared_full_block_table.sizes() ==
+          metadata.expanded_decode.block_table.sizes());
+  }
   return metadata;
 }
 

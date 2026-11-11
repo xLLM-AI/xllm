@@ -246,6 +246,10 @@ inline bool add_attention_to_plan(const Attention& source,
          plan.add(source.device.new_cache_slots,
                   &target.device.new_cache_slots) &&
          plan.add(source.device.block_tables, &target.device.block_tables) &&
+         plan.add(source.device.shared_full_block_table,
+                  &target.device.shared_full_block_table) &&
+         plan.add(source.device.shared_full_slot_mapping,
+                  &target.device.shared_full_slot_mapping) &&
          plan.add(source.device.paged_kv_indptr,
                   &target.device.paged_kv_indptr) &&
          plan.add(source.device.paged_kv_indices,
