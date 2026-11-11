@@ -230,6 +230,13 @@ int32_t StaticKVCacheBlockPool::allocate_object(SlabType type,
     if (preferred.type == type && preferred.generation == affinity.generation &&
         !preferred.free_objects.empty()) {
       slab_id = affinity.slab_id;
+    } else if (slab_id == affinity.slab_id &&
+               available_slabs_[index].size() > 1) {
+      // Do not immediately return to a slab whose generation invalidated this
+      // request's affinity. The global choice should make progress on another
+      // available slab when one exists; the stale slab remains eligible after
+      // the alternatives are exhausted.
+      slab_id = available_slabs_[index][available_slabs_[index].size() - 2];
     }
     placement->recent_slabs[index] = {slab_id, slabs_[slab_id].generation};
   }
