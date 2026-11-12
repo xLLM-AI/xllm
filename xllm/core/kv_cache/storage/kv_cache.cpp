@@ -201,7 +201,11 @@ KVCache::KVCache(const KVCacheShape& kv_cache_shape,
     CHECK(full_block_slots_ != nullptr);
     CHECK_EQ(full_block_slots_->num_groups(),
              static_layout_->full_layer_count());
-    full_layer_index_ = static_layout_->full_layer_index(layer_id);
+    // Mirrored banks give every target and draft Full layer the same final
+    // page. Draft-local layer IDs need not exist in the target layer schedule.
+    full_layer_index_ = create_options.shared_draft_cache()
+                            ? 0
+                            : static_layout_->full_layer_index(layer_id);
   }
 }
 

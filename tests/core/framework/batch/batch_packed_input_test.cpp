@@ -1301,6 +1301,36 @@ TEST(BatchPackedInputTest, VlmDraftConversionExcludesTargetOnlyState) {
   expect_vlm_transport_input(target);
 }
 
+TEST(BatchPackedInputTest, SharedVlmDraftRetainsFinalFullPageMetadata) {
+  auto target = make_vlm_transport_input();
+  const torch::Tensor table =
+      torch::tensor({37, 41}, torch::kInt32).view({1, 2});
+  const torch::Tensor slots = torch::tensor({149, 150}, torch::kInt32);
+  auto& attention = target.input_params.attention;
+  attention.host.shared_full_block_table = table;
+  attention.host.shared_full_slot_mapping = slots;
+  attention.device.shared_full_block_table = table;
+  attention.device.shared_full_slot_mapping = slots;
+  attention.host.shared_full_read_padding_page = 17;
+  const LlmForwardInput shared =
+      make_llm_draft_input(target, /*shared_full_cache=*/true);
+  EXPECT_TRUE(torch::equal(
+      shared.input_params.attention.host.shared_full_block_table, table));
+  EXPECT_TRUE(torch::equal(
+      shared.input_params.attention.host.shared_full_slot_mapping, slots));
+  EXPECT_TRUE(torch::equal(
+      shared.input_params.attention.device.shared_full_block_table, table));
+  EXPECT_TRUE(torch::equal(
+      shared.input_params.attention.device.shared_full_slot_mapping, slots));
+  EXPECT_EQ(shared.input_params.attention.host.shared_full_read_padding_page,
+            17);
+  const LlmForwardInput independent = make_llm_draft_input(target);
+  EXPECT_FALSE(independent.input_params.attention.host.shared_full_block_table
+                   .defined());
+  EXPECT_FALSE(independent.input_params.attention.device
+                   .shared_full_slot_mapping.defined());
+}
+
 TEST(BatchPackedInputTest, NativeVlmReadyCopyRetainsRuntimeLifetime) {
   ScopedContiguousInputBuffer contiguous_input_buffer(/*enabled=*/false);
   VlmForwardInput prepared;

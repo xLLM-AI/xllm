@@ -349,11 +349,11 @@ def _tensor_row_bytes(tensor: torch.Tensor) -> int:
 def _detect_shared_mirrored_layout(
     full: Sequence[LayerCache], linear: Sequence[LayerCache], arena_bytes: int
 ) -> SharedKVCacheLayout:
-    key, conv, ssm = full[0].key, linear[0].conv, linear[0].ssm
-    assert key is not None and conv is not None and ssm is not None
+    key = full[0].key
+    assert key is not None
     bank_bytes = full[0].shared_bank_bytes
     slice_bytes = full[0].shared_slice_bytes
-    checkpoint_stride = linear[0].shared_checkpoint_stride
+    checkpoint_stride = full[0].shared_checkpoint_stride
     if (
         not isinstance(bank_bytes, int)
         or bank_bytes <= 0
@@ -364,20 +364,40 @@ def _detect_shared_mirrored_layout(
     ):
         raise ValueError("mirrored shared caches require positive native bank, slice, and checkpoint geometry")
     bank_count, remainder = divmod(arena_bytes, bank_bytes)
-    if remainder or bank_count != gcd(len(full), len(linear)):
-        raise ValueError("mirrored shared bank count must match the bound Full and Linear layers")
-    full_bytes, conv_bytes, ssm_bytes = (_tensor_row_bytes(tensor) for tensor in (key, conv, ssm))
-    full_per_bank = len(full) // bank_count
-    if (
-        bank_bytes % slice_bytes
-        or slice_bytes % lcm(2 * full_per_bank * full_bytes, checkpoint_stride * ssm_bytes)
-        or slice_bytes < conv_bytes
-    ):
+    full_bytes = _tensor_row_bytes(key)
+    first_bank = 0
+    if linear:
+        target_banks = gcd(len(full), len(linear))
+        if remainder or bank_count < target_banks:
+            raise ValueError("mirrored shared bank count must cover the bound Full and Linear layers")
+        full_per_bank = len(full) // target_banks
+        conv, ssm = linear[0].conv, linear[0].ssm
+        assert conv is not None and ssm is not None
+        conv_bytes, ssm_bytes = (_tensor_row_bytes(tensor) for tensor in (conv, ssm))
+        if slice_bytes % lcm(2 * full_per_bank * full_bytes, checkpoint_stride * ssm_bytes) or slice_bytes < conv_bytes:
+            raise ValueError("mirrored shared slices must align Full lanes and SSM checkpoint bundles")
+        rows = linear[0].linear_state_slots
+        if rows is None or rows.ndim != 2 or rows.shape[0] != 2 or rows.shape[1] < 2:
+            raise ValueError("mirrored shared Linear caches require independent Conv and SSM row maps")
+        num_slots = rows.shape[1]
+    else:
+        # The Full-only draft borrows companion banks of the target arena.
+        # Equal row counts preserve the same final page in every Full view.
+        lane_rows = bank_bytes // full_bytes - key.shape[0] + 1
+        if remainder or lane_rows <= 0 or lane_rows % 2:
+            raise ValueError("shared draft banks require matching contiguous Full lanes")
+        full_per_bank = lane_rows // 2
+        first_bank, lane_offset = divmod(_tensor_storage_span(key)[1], bank_bytes)
+        if lane_offset or len(full) % full_per_bank or first_bank + len(full) // full_per_bank > bank_count:
+            raise ValueError("shared draft Full views must fit whole companion banks")
+        rows = full[0].full_block_rows
+        if rows is None or rows.ndim != 1 or rows.numel() < 2 or rows.dtype != torch.int32 or rows.device != key.device:
+            raise ValueError("shared draft caches require a native Full row map")
+        num_slots = rows.numel()
+        conv_bytes = 0
+        ssm_bytes = slice_bytes
+    if bank_bytes % slice_bytes or slice_bytes % (2 * full_per_bank * full_bytes):
         raise ValueError("mirrored shared slices must align Full lanes and SSM checkpoint bundles")
-    rows = linear[0].linear_state_slots
-    if rows is None or rows.ndim != 2 or rows.shape[0] != 2 or rows.shape[1] < 2:
-        raise ValueError("mirrored shared Linear caches require independent Conv and SSM row maps")
-    num_slots = rows.shape[1]
     full_rows = bank_bytes // full_bytes - (2 * full_per_bank - 1)
     if full_rows <= 0:
         raise ValueError("mirrored shared banks must hold all Full lanes")
@@ -395,7 +415,7 @@ def _detect_shared_mirrored_layout(
     for index, cache in enumerate(full):
         assert cache.key is not None and cache.value is not None
         bank, lane = divmod(index, full_per_bank)
-        key_offset = bank * bank_bytes + 2 * lane * full_bytes
+        key_offset = (first_bank + bank) * bank_bytes + 2 * lane * full_bytes
         for tensor, offset in ((cache.key, key_offset), (cache.value, key_offset + full_bytes)):
             if (
                 tensor.shape != (full_rows, *key.shape[1:])
@@ -426,12 +446,12 @@ def _detect_shared_mirrored_layout(
     return SharedKVCacheLayout(
         page_size_tokens=int(key.shape[1]),
         full_row_stride=slice_bytes // full_bytes,
-        conv_row_stride=slice_bytes // conv_bytes if slice_bytes % conv_bytes == 0 else None,
+        conv_row_stride=(slice_bytes // conv_bytes if slice_bytes % conv_bytes == 0 else None) if linear else 1,
         ssm_row_stride=slice_bytes // ssm_bytes,
         checkpoint_stride=checkpoint_stride,
         num_slots=num_slots,
         slot_bytes=slice_bytes,
-        num_linear_groups=len(linear),
+        num_linear_groups=max(len(linear), 1),
         conv_row_bytes=conv_bytes,
         scratch_full_rows=1,
         scratch_conv_rows=1,
@@ -530,13 +550,14 @@ def detect_shared_kv_cache_layout(
     """
     full = [cache for cache in layer_caches if cache.key is not None or cache.value is not None]
     linear = [cache for cache in layer_caches if cache.conv is not None or cache.ssm is not None]
-    if not full or not linear:
+    has_native_banks = any(cache.shared_bank_bytes is not None for cache in layer_caches)
+    if not full or (not linear and not has_native_banks):
         return None
     full_tensors = [tensor for cache in full for tensor in (cache.key, cache.value) if tensor is not None]
     linear_tensors = [tensor for cache in linear for tensor in (cache.conv, cache.ssm) if tensor is not None]
     full_storages = {(tensor.device, _tensor_storage_span(tensor)[0]) for tensor in full_tensors}
     linear_storages = {(tensor.device, _tensor_storage_span(tensor)[0]) for tensor in linear_tensors}
-    if not full_storages.intersection(linear_storages):
+    if linear and not full_storages.intersection(linear_storages):
         return None
     if len(full_storages.union(linear_storages)) != 1:
         raise ValueError("shared KV cache roles must expose one complete arena")
@@ -566,6 +587,9 @@ def detect_shared_kv_cache_layout(
     if arena_bytes <= 0 or any(span[2] != arena_bytes for span in spans):
         raise ValueError("shared KV cache views must expose one complete arena")
 
+    if has_native_banks:
+        return _detect_shared_mirrored_layout(full, linear, arena_bytes)
+
     key = full[0].key
     value = full[0].value
     conv = linear[0].conv
@@ -577,8 +601,6 @@ def detect_shared_kv_cache_layout(
     page_size_tokens = int(key.shape[1])
     if page_size_tokens <= 0 or min(full_row_bytes, conv_row_bytes, ssm_row_bytes) <= 0:
         raise ValueError("shared KV cache rows and Full page size must be positive")
-    if any(cache.shared_bank_bytes is not None for cache in full + linear):
-        return _detect_shared_mirrored_layout(full, linear, arena_bytes)
     if any(cache.full_block_rows is not None or cache.shared_checkpoint_stride is not None for cache in full + linear):
         return _detect_shared_slab_layout(full, linear, arena_bytes)
     pages_per_slot = (len(full) + 3) // 4

@@ -54,9 +54,14 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
   CHECK_EQ(spec_.conv_row_bytes % torch::elementSize(spec_.dtype), 0u);
   CHECK_EQ(spec_.ssm_row_bytes % torch::elementSize(spec_.ssm_dtype), 0u);
 
-  bank_count_ = std::gcd(full_layer_count(), linear_layer_count());
-  full_layers_per_bank_ = full_layer_count() / bank_count_;
-  linear_layers_per_bank_ = linear_layer_count() / bank_count_;
+  const size_t target_bank_count =
+      std::gcd(full_layer_count(), linear_layer_count());
+  full_layers_per_bank_ = full_layer_count() / target_bank_count;
+  linear_layers_per_bank_ = linear_layer_count() / target_bank_count;
+  CHECK_EQ(draft_layer_count() % full_layers_per_bank_, 0u)
+      << "Draft Full layers must fill whole companion banks";
+  bank_count_ = checked_add(target_bank_count,
+                            draft_layer_count() / full_layers_per_bank_);
   full_pair_bytes_ = checked_multiply(2, spec_.full_row_bytes);
   full_bundle_bytes_ =
       checked_multiply(full_layers_per_bank_, full_pair_bytes_);
@@ -95,37 +100,54 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
   const size_t num_layers =
       checked_add(spec_.full_layer_ids.size(), spec_.linear_layer_ids.size());
   tensors_.reserve(checked_multiply(num_layers, 2));
+  draft_tensors_.reserve(checked_multiply(draft_layer_count(), 2));
+  CHECK_LE(draft_layer_count(),
+           static_cast<size_t>(std::numeric_limits<int64_t>::max()));
   std::unordered_set<int64_t> layer_ids;
   layer_ids.reserve(num_layers);
 
+  const auto append_full_layer =
+      [this](std::vector<StaticKVCacheTensorLayout>& tensors,
+             int64_t layer_id,
+             size_t layer_index,
+             size_t bank) {
+        const size_t bank_lane = layer_index % full_layers_per_bank_;
+        const size_t key_offset =
+            checked_add(checked_multiply(bank, bank_bytes_),
+                        checked_multiply(bank_lane, full_pair_bytes_));
+        tensors.emplace_back(StaticKVCacheTensorLayout{
+            .layer_id = layer_id,
+            .role = KVCacheTensorRole::KEY,
+            .offset_bytes = key_offset,
+            .row_bytes = spec_.full_row_bytes,
+            .lane = layer_index,
+            .bank = bank,
+            .bank_lane = bank_lane,
+        });
+        tensors.emplace_back(StaticKVCacheTensorLayout{
+            .layer_id = layer_id,
+            .role = KVCacheTensorRole::VALUE,
+            .offset_bytes = checked_add(key_offset, spec_.full_row_bytes),
+            .row_bytes = spec_.full_row_bytes,
+            .lane = layer_index,
+            .bank = bank,
+            .bank_lane = bank_lane,
+        });
+      };
   for (size_t layer_index = 0; layer_index < spec_.full_layer_ids.size();
        ++layer_index) {
     const int64_t layer_id = spec_.full_layer_ids[layer_index];
     CHECK_GE(layer_id, 0);
     CHECK(layer_ids.emplace(layer_id).second) << "Duplicate cache layer id";
-    const size_t bank = layer_index / full_layers_per_bank_;
-    const size_t bank_lane = layer_index % full_layers_per_bank_;
-    const size_t key_offset =
-        checked_add(checked_multiply(bank, bank_bytes_),
-                    checked_multiply(bank_lane, full_pair_bytes_));
-    tensors_.emplace_back(StaticKVCacheTensorLayout{
-        .layer_id = layer_id,
-        .role = KVCacheTensorRole::KEY,
-        .offset_bytes = key_offset,
-        .row_bytes = spec_.full_row_bytes,
-        .lane = layer_index,
-        .bank = bank,
-        .bank_lane = bank_lane,
-    });
-    tensors_.emplace_back(StaticKVCacheTensorLayout{
-        .layer_id = layer_id,
-        .role = KVCacheTensorRole::VALUE,
-        .offset_bytes = checked_add(key_offset, spec_.full_row_bytes),
-        .row_bytes = spec_.full_row_bytes,
-        .lane = layer_index,
-        .bank = bank,
-        .bank_lane = bank_lane,
-    });
+    append_full_layer(
+        tensors_, layer_id, layer_index, layer_index / full_layers_per_bank_);
+  }
+  for (size_t layer_index = 0; layer_index < draft_layer_count();
+       ++layer_index) {
+    append_full_layer(draft_tensors_,
+                      static_cast<int64_t>(layer_index),
+                      layer_index,
+                      target_bank_count + layer_index / full_layers_per_bank_);
   }
 
   for (size_t layer_index = 0; layer_index < spec_.linear_layer_ids.size();
@@ -159,15 +181,17 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
   if (spec_.num_slabs == 0) {
     return;
   }
-  for (auto& tensor : tensors_) {
-    const bool full = tensor.role == KVCacheTensorRole::KEY ||
-                      tensor.role == KVCacheTensorRole::VALUE;
-    const size_t end =
-        full ? checked_multiply(tensor.bank + 1, bank_bytes_) : bytes_used_;
-    CHECK_LE(tensor.offset_bytes, end);
-    tensor.view_rows = full ? bank_bytes_ / spec_.full_row_bytes -
-                                  (2 * full_layers_per_bank_ - 1)
-                            : (end - tensor.offset_bytes) / tensor.row_bytes;
+  for (auto* layouts : {&tensors_, &draft_tensors_}) {
+    for (auto& tensor : *layouts) {
+      const bool full = tensor.role == KVCacheTensorRole::KEY ||
+                        tensor.role == KVCacheTensorRole::VALUE;
+      const size_t end =
+          full ? checked_multiply(tensor.bank + 1, bank_bytes_) : bytes_used_;
+      CHECK_LE(tensor.offset_bytes, end);
+      tensor.view_rows = full ? bank_bytes_ / spec_.full_row_bytes -
+                                    (2 * full_layers_per_bank_ - 1)
+                              : (end - tensor.offset_bytes) / tensor.row_bytes;
+    }
   }
 }
 
@@ -182,7 +206,7 @@ bool StaticKVCacheLayout::can_fit(size_t full_blocks,
     return objects / per_slab + static_cast<size_t>(objects % per_slab != 0);
   };
   const size_t linear_objects =
-      checked_multiply(linear_states, linear_layers_per_bank_);
+      checked_multiply(linear_states, linear_objects_per_state());
   const size_t required_slabs = checked_add(
       slabs_for(full_blocks, KVCacheTensorRole::KEY),
       checked_add(slabs_for(linear_objects, KVCacheTensorRole::CONV),
@@ -217,10 +241,13 @@ size_t StaticKVCacheLayout::objects_per_slab(KVCacheTensorRole role) const {
     case KVCacheTensorRole::VALUE:
       return slice_bytes_ / full_bundle_bytes_;
     case KVCacheTensorRole::CONV:
-      return slice_bytes_ / spec_.conv_row_bytes -
-             static_cast<size_t>(slice_bytes_ % spec_.conv_row_bytes != 0);
+      return checked_multiply(
+          draft_layer_count() == 0 ? 1 : bank_count_,
+          slice_bytes_ / spec_.conv_row_bytes -
+              static_cast<size_t>(slice_bytes_ % spec_.conv_row_bytes != 0));
     case KVCacheTensorRole::SSM:
-      return slice_bytes_ / ssm_bundle_bytes_;
+      return checked_multiply(draft_layer_count() == 0 ? 1 : bank_count_,
+                              slice_bytes_ / ssm_bundle_bytes_);
     default:
       LOG(FATAL) << "Unsupported static cache object role: "
                  << role.to_string();
@@ -306,6 +333,16 @@ const StaticKVCacheTensorLayout& StaticKVCacheLayout::tensor_layout(
       << "Static cache layout has no " << role.to_string()
       << " tensor for layer " << layer_id;
   return *it;
+}
+
+const StaticKVCacheTensorLayout& StaticKVCacheLayout::draft_tensor_layout(
+    int64_t draft_layer_id,
+    KVCacheTensorRole role) const {
+  CHECK_GE(draft_layer_id, 0);
+  CHECK_LT(static_cast<size_t>(draft_layer_id), draft_layer_count());
+  CHECK(role == KVCacheTensorRole::KEY || role == KVCacheTensorRole::VALUE);
+  return draft_tensors_[2 * static_cast<size_t>(draft_layer_id) +
+                        static_cast<size_t>(role == KVCacheTensorRole::VALUE)];
 }
 
 size_t StaticKVCacheLayout::linear_group(int64_t layer_id,

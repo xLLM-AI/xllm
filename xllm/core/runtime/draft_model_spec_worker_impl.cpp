@@ -383,7 +383,13 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
       allocate);
   const bool draft_allocated = allocate_pool_if_loaded(
       *draft_impl_,
-      [&] { return draft_kv_cache_shape(kv_cache_shape); },
+      [&] {
+        KVCacheShape draft_shape = draft_kv_cache_shape(kv_cache_shape);
+        if (kv_cache_shape.shared_draft_layers() > 0) {
+          draft_impl_->bind_shared_draft_kv_cache(*impl_);
+        }
+        return draft_shape;
+      },
       allocate);
 
   init_embedding_cache(kv_cache_shape.key_cache_shape()[0]);
@@ -401,6 +407,21 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
     finalize_hierarchy_kv_cache_transfers();
   }
   return allocated;
+}
+
+template <typename TargetInput>
+std::optional<ForwardOutput> DraftModelSpecWorkerImpl<TargetInput>::step(
+    const TargetInput& input) {
+  if (draft_impl_->uses_shared_static_kv_cache()) {
+    const auto& embedding = input.input_params.embedding;
+    // Decode can execute draft before target. Initialize their common leases
+    // here so a newly admitted draft page cannot expose previous Linear state.
+    // The compute stream orders this after preceding target/draft consumers.
+    impl_->initialize_shared_full_blocks(embedding.full_block_slot_rows,
+                                         embedding.full_block_lease_epochs,
+                                         *compute_stream_);
+  }
+  return SpeculativeWorkerImpl<TargetInput>::step(input);
 }
 
 template <typename TargetInput>

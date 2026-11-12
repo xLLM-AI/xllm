@@ -48,6 +48,8 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
 
+  std::optional<ForwardOutput> step(const TargetInput& input) override;
+
 #if defined(USE_NPU) || defined(USE_MLU)
   bool allocate_kv_cache_with_transfer(
       const KVCacheShape& kv_cache_shape) override;

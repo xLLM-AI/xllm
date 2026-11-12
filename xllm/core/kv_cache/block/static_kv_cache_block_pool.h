@@ -151,6 +151,8 @@ class StaticKVCacheBlockPool final {
   size_t bank_count_ = 0;
   size_t full_layers_per_bank_ = 0;
   size_t linear_layers_per_bank_ = 0;
+  size_t linear_objects_per_state_ = 0;
+  bool independent_linear_objects_ = false;
   int32_t full_read_padding_page_ = 0;
   std::array<size_t, 3> object_capacities_{};
   size_t num_reserved_slabs_ = 0;

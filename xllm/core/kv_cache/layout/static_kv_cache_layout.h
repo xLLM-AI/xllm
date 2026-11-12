@@ -37,6 +37,7 @@ struct StaticKVCacheLayoutSpec {
   size_t conv_row_bytes = 0;
   size_t ssm_row_bytes = 0;
   size_t checkpoint_stride = 1;
+  size_t draft_layer_count = 0;
   torch::ScalarType dtype = torch::kBFloat16;
   torch::ScalarType ssm_dtype = torch::kFloat32;
   std::vector<int64_t> full_layer_ids;
@@ -60,8 +61,9 @@ struct StaticKVCacheTensorLayout {
 
 // Fixed banks expose compact dense Full views. A shared slab group contains
 // one slice in every bank and changes role only after all mirrored leases end.
-// Full layers in a bank own fixed lanes of each object bundle; all Full layers
-// therefore consume the same final native page index.
+// Full layers in a bank own fixed lanes of each object bundle; target and draft
+// therefore consume the same final native page index. With draft banks, Linear
+// objects can occupy any bank instead of requiring mirrored target-only rows.
 class StaticKVCacheLayout final {
  public:
   explicit StaticKVCacheLayout(StaticKVCacheLayoutSpec spec);
@@ -77,6 +79,12 @@ class StaticKVCacheLayout final {
   size_t bank_bytes() const { return bank_bytes_; }
   size_t full_layers_per_bank() const { return full_layers_per_bank_; }
   size_t linear_layers_per_bank() const { return linear_layers_per_bank_; }
+  size_t draft_layer_count() const { return spec_.draft_layer_count; }
+  // Draft banks also supply Linear storage, without mirrored state objects.
+  size_t linear_objects_per_state() const {
+    return draft_layer_count() == 0 ? linear_layers_per_bank_
+                                    : linear_layer_count();
+  }
   size_t full_bundle_bytes() const { return full_bundle_bytes_; }
   size_t full_pages_per_slab() const { return slice_bytes_ / full_row_bytes(); }
   size_t max_slab_count() const;
@@ -119,6 +127,9 @@ class StaticKVCacheLayout final {
   bool has_layer(int64_t layer_id) const;
   const StaticKVCacheTensorLayout& tensor_layout(int64_t layer_id,
                                                  KVCacheTensorRole role) const;
+  const StaticKVCacheTensorLayout& draft_tensor_layout(
+      int64_t draft_layer_id,
+      KVCacheTensorRole role) const;
   // Zero for layers without recurrent state.
   size_t linear_group(int64_t layer_id,
                       KVCacheTensorRole role = KVCacheTensorRole::CONV) const;
@@ -126,6 +137,7 @@ class StaticKVCacheLayout final {
  private:
   StaticKVCacheLayoutSpec spec_;
   std::vector<StaticKVCacheTensorLayout> tensors_;
+  std::vector<StaticKVCacheTensorLayout> draft_tensors_;
   size_t slab_bytes_ = 0;
   size_t slice_bytes_ = 0;
   size_t bank_count_ = 0;

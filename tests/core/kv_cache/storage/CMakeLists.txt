@@ -36,6 +36,7 @@ cc_test(
     kv_cache_test.cpp
   DEPS
     :kv_cache
+    :static_kv_cache_tensor_allocator
     GTest::gtest_main
 )
 target_link_libraries(kv_cache_test

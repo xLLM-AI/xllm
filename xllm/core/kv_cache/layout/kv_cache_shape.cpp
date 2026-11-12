@@ -82,8 +82,10 @@ void transpose_dim_1_and_2(std::vector<int64_t>* shape) {
 KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
                            const ModelArgs& model_args,
                            int64_t world_size)
-    : shared_slab_count_(kv_cache_cap.shared_slab_count()) {
+    : shared_slab_count_(kv_cache_cap.shared_slab_count()),
+      shared_draft_layers_(kv_cache_cap.shared_draft_layers()) {
   CHECK_GE(shared_slab_count_, 0);
+  CHECK_GE(shared_draft_layers_, 0);
   CHECK_GT(world_size, 0) << "world_size must be positive.";
   CHECK_GT(kv_cache_cap.block_size(), 0) << "block_size must be positive.";
 
@@ -289,6 +291,7 @@ void KVCacheShape::to_proto(proto::KVCacheShape* proto_shape) const {
   proto_shape->set_grouped_cache_layout(has_grouped_cache_layout());
   proto_shape->set_kpool_layout(static_cast<int32_t>(kpool_layout_));
   proto_shape->set_shared_slab_count(shared_slab_count_);
+  proto_shape->set_shared_draft_layers(shared_draft_layers_);
   if (has_kpool_tail_shape()) {
     add_shape_to_proto(kpool_tail_shape(),
                        proto_shape->mutable_kpool_tail_shape());
@@ -318,6 +321,8 @@ KVCacheShape KVCacheShape::from_proto(const proto::KVCacheShape& proto_shape) {
   KVCacheShape kv_cache_shape;
   CHECK_GE(proto_shape.shared_slab_count(), 0);
   kv_cache_shape.shared_slab_count_ = proto_shape.shared_slab_count();
+  CHECK_GE(proto_shape.shared_draft_layers(), 0);
+  kv_cache_shape.shared_draft_layers_ = proto_shape.shared_draft_layers();
   CHECK(proto_shape.kpool_layout() ==
             static_cast<int32_t>(KPoolCacheLayout::PACKED) ||
         proto_shape.kpool_layout() ==
@@ -587,7 +592,9 @@ KVCacheShape build_speculative_draft_kv_cache_shape(
             KPoolCacheLayout::COMPRESSED_WITH_TAIL ||
         target_kv_cache_shape.has_kpool_tail_shape())
       << "Compressed KPool drafts require a target KPool tail shape.";
-  draft_capacity.n_blocks(target_kv_cache_shape.key_cache_shape()[0])
+  draft_capacity
+      .shared_draft_layers(target_kv_cache_shape.shared_draft_layers())
+      .n_blocks(target_kv_cache_shape.key_cache_shape()[0])
       .block_size(block_size)
       .enable_mla_kv_cache_quant(draft_mla_packed_c8);
   draft_capacity.kpool_layout(target_kv_cache_shape.kpool_layout());

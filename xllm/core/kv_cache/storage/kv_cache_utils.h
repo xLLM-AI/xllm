@@ -88,6 +88,7 @@ struct KVCacheCreateOptions {
   PROPERTY(bool, enable_kv_cache_quant) = false;
   PROPERTY(std::shared_ptr<KVCacheTensorAllocator>, tensor_allocator);
   PROPERTY(std::shared_ptr<const StaticKVCacheLayout>, static_layout);
+  PROPERTY(bool, shared_draft_cache) = false;
   PROPERTY(std::shared_ptr<LinearStateSlotTable>, linear_state_slot_table);
   PROPERTY(std::shared_ptr<LinearStateSlotTable>, full_block_slot_table);
 

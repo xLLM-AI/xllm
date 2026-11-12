@@ -327,6 +327,83 @@ def test_draft_full_ignores_target_final_addresses_without_shared_layout() -> No
     assert backend._prepared_full_block_table(prepared) is metadata.block_table
 
 
+@pytest.mark.parametrize("dummy", [False, True])
+def test_shared_draft_binds_companion_lanes_and_consumes_native_final_addresses(
+    dummy: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    row_bytes = 128 * 2 * 64 * 2
+    slice_bytes = 8 * row_bytes
+    bank_bytes = 4 * slice_bytes
+    arena = torch.zeros(3 * bank_bytes, dtype=torch.uint8)
+    full_rows = bank_bytes // row_bytes - 3
+    caches = [
+        LayerCache(
+            key=arena.narrow(0, 2 * bank_bytes + 2 * lane * row_bytes, full_rows * row_bytes)
+            .view(torch.float16)
+            .view(full_rows, 128, 2, 64),
+            value=arena.narrow(0, 2 * bank_bytes + (2 * lane + 1) * row_bytes, full_rows * row_bytes)
+            .view(torch.float16)
+            .view(full_rows, 128, 2, 64),
+            full_block_rows=torch.zeros(32, dtype=torch.int32),
+            shared_checkpoint_stride=5,
+            shared_bank_bytes=bank_bytes,
+            shared_slice_bytes=slice_bytes,
+            shared_conv_scratch_row=0,
+            shared_ssm_scratch_row=0,
+            shared_full_read_padding_page=8,
+        )
+        for lane in range(2)
+    ]
+    backend.bind_kv_caches(caches)
+    layout = backend.shared_kv_layout
+    assert layout is not None and layout.bank_bytes == bank_bytes
+    assert backend.num_kv_blocks == full_rows
+    metadata = _ordinary_metadata(paged=True)
+    metadata.slot_mapping = torch.tensor([129, 257], dtype=torch.int32)
+    metadata.is_dummy = dummy
+    if not dummy:
+        metadata.shared_full_block_table = torch.tensor([[16], [24]], dtype=torch.int32)
+        metadata.shared_full_slot_mapping = torch.tensor([2049, 3073], dtype=torch.int32)
+
+    def _workspace(*args: object, **kwargs: object) -> torch.Tensor:
+        return torch.empty(0)
+
+    monkeypatch.setattr(backend, "_allocate_graph_workspace", _workspace)
+    context = ForwardContext(backend, torch.device("cpu"), metadata, caches, execution_state=AclGraphExecutionState({}))
+    with (
+        forward_context(context),
+        patch.object(SharedKVCacheLayout, "full_block_table", side_effect=AssertionError("unexpected row gather")),
+        patch.object(SharedKVCacheLayout, "full_slot_mapping", side_effect=AssertionError("unexpected slot gather")),
+    ):
+        prepared = backend.prepare_metadata(metadata)
+        metadata.prepared_attention_state = prepared
+        backend.prepare(metadata, graph_mode=True)
+        table = backend._block_table_i32
+        slots = backend._full_slot_mapping(metadata)
+        assert table is prepared.shared_full_block_table
+        assert slots is prepared.shared_full_slot_mapping
+        assert backend._paged_graph_state.block_table is table
+        assert not backend._shared_full_block_tables
+        assert not backend._shared_full_slot_mappings
+        if dummy:
+            assert table.eq(8).all()
+            assert slots.eq(-1).all()
+        else:
+            assert table is metadata.shared_full_block_table
+            assert slots is metadata.shared_full_slot_mapping
+            metadata.shared_full_block_table[0, 0] = 20
+            metadata.shared_full_slot_mapping[0] = 2561
+            backend.prepare_graph_replay(metadata)
+            assert backend._block_table_i32 is table
+            assert backend._paged_graph_state.block_table is table
+            assert backend._full_slot_mapping(metadata) is slots
+            assert table.tolist() == [[20], [24]]
+            assert slots.tolist() == [2561, 3073]
+
+
 def test_mirrored_graph_keeps_one_native_table_without_recopying_per_layer(monkeypatch: pytest.MonkeyPatch) -> None:
     from xllm.python.model_executor.forward_context import AclGraphExecutionState
 

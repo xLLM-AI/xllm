@@ -204,8 +204,12 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
   KVCacheCapacity draft_kv_cache_cap =
       draft_engine_->estimate_kv_cache_capacity(!shared_vmm);
   if (target_kv_cache_cap.shared_slot_bytes() > 0) {
-    const SharedStaticKVCachePlan plan = plan_shared_static_kv_cache(
-        std::move(target_kv_cache_cap), std::move(draft_kv_cache_cap));
+    const SharedStaticKVCachePlan plan =
+        plan_shared_static_kv_cache(std::move(target_kv_cache_cap),
+                                    std::move(draft_kv_cache_cap),
+                                    engine_->model_args(),
+                                    engine_->dp_local_tp_size_,
+                                    dtype_);
     return allocate_target_cache(plan.target) &&
            draft_engine_->allocate_kv_cache(plan.draft,
                                             std::move(transfer_coordinator));

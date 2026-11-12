@@ -50,6 +50,14 @@ class StaticKVCacheTensorAllocator final : public KVCacheTensorAllocator {
   size_t bytes_used() const { return layout_.bytes_used(); }
 
  private:
+  friend class StaticDraftKVCacheTensorAllocator;
+
+  torch::Tensor allocate_tensor(const StaticKVCacheTensorLayout& tensor,
+                                KVCacheTensorRole role,
+                                const std::vector<int64_t>& shape,
+                                torch::ScalarType dtype,
+                                const torch::Device& device) const;
+
   StaticKVCacheLayout layout_;
   torch::Tensor arena_;
   std::vector<uint64_t> initialized_full_block_epochs_;
@@ -61,5 +69,10 @@ class StaticKVCacheTensorAllocator final : public KVCacheTensorAllocator {
 std::shared_ptr<StaticKVCacheTensorAllocator> create_static_kv_tensor_allocator(
     const KVCacheShape& shape,
     const KVCacheCreateOptions& options);
+
+// Gives draft-local layer IDs their own allocation cursor while retaining the
+// target arena. Target and draft tensors use the same final physical page ID.
+std::shared_ptr<KVCacheTensorAllocator> create_static_draft_kv_tensor_allocator(
+    std::shared_ptr<StaticKVCacheTensorAllocator> arena);
 
 }  // namespace xllm

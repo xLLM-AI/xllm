@@ -53,6 +53,8 @@ message KVCacheShape {
   repeated int64 kpool_tail_shape = 9;
   // Physical arena slabs are independent of logical cache ID capacity.
   int64 shared_slab_count = 10;
+  // Full-only draft layers backed by the target's static shared arena.
+  int64 shared_draft_layers = 11;
 }
 
 message AllocateKVCacheRequest {

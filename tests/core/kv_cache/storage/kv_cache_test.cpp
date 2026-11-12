@@ -35,6 +35,8 @@ limitations under the License.
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 #include "core/kv_cache/storage/kv_cache_tensor_allocator.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/linear_state_slot_table.h"
+#include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "tests/core/kv_cache/dcp_indexer_test_fixture.h"
@@ -756,9 +758,12 @@ TEST(KVCacheTest, GroupedCacheCapabilitySurvivesProtoRoundTrip) {
   EXPECT_EQ(restored.key_cache_shape(), original.key_cache_shape());
 }
 
-TEST(KVCacheTest, SharedSlabCapacitySurvivesProtoRoundTrip) {
+TEST(KVCacheTest, SharedArenaDraftCapabilitySurvivesProtoRoundTrip) {
   KVCacheCapacity capacity;
-  capacity.block_size(16).n_blocks(100).shared_slab_count(7);
+  capacity.block_size(16)
+      .n_blocks(100)
+      .shared_slab_count(7)
+      .shared_draft_layers(1);
   ModelArgs args;
   args.n_layers(4).n_heads(4).n_kv_heads(2).head_dim(16);
   const KVCacheShape original(capacity, args, /*world_size=*/1);
@@ -770,9 +775,83 @@ TEST(KVCacheTest, SharedSlabCapacitySurvivesProtoRoundTrip) {
   EXPECT_EQ(original.shared_slab_count(), 7);
   EXPECT_EQ(serialized.shared_slab_count(), 7);
   EXPECT_EQ(restored.shared_slab_count(), 7);
+  EXPECT_EQ(original.shared_draft_layers(), 1);
+  EXPECT_EQ(serialized.shared_draft_layers(), 1);
+  EXPECT_EQ(restored.shared_draft_layers(), 1);
   EXPECT_EQ(restored.key_cache_shape(), original.key_cache_shape());
   EXPECT_EQ(restored.value_cache_shape(), original.value_cache_shape());
   EXPECT_EQ(restored.key_cache_shape().front(), 100);
+}
+
+TEST(KVCacheTest, SharedDraftUsesTargetFinalPagesWithLocalLayerIds) {
+  StaticKVCacheLayoutSpec spec;
+  spec.num_slots = 8;
+  spec.num_slabs = 12;
+  spec.full_row_bytes = 16;
+  spec.conv_row_bytes = 8;
+  spec.ssm_row_bytes = 32;
+  spec.dtype = torch::kFloat32;
+  spec.ssm_dtype = torch::kFloat32;
+  spec.full_layer_ids = {1, 3};
+  spec.linear_layer_ids = {0, 2};
+  spec.draft_layer_count = 1;
+  const auto arena = std::make_shared<StaticKVCacheTensorAllocator>(
+      StaticKVCacheLayout(spec), torch::kCPU);
+  const auto layout =
+      std::shared_ptr<const StaticKVCacheLayout>(arena, &arena->layout());
+  const auto full_slots = std::make_shared<LinearStateSlotTable>(
+      spec.num_slots, layout->full_layer_count(), torch::kCPU);
+  KVCacheCapacity capacity;
+  capacity.n_blocks(8).block_size(1);
+  ModelArgs args;
+  args.n_layers(1).n_heads(1).n_kv_heads(1).head_dim(4);
+  const KVCacheShape shape(capacity, args, /*world_size=*/1);
+  KVCacheCreateOptions options;
+  options.device(torch::kCPU)
+      .dtype(torch::kFloat32)
+      .num_layers(1)
+      .static_layout(layout)
+      .shared_draft_cache(true)
+      .full_block_slot_table(full_slots)
+      .tensor_allocator(create_static_draft_kv_tensor_allocator(arena));
+  KVCache draft(shape, options, /*layer_id=*/0);
+  EXPECT_TRUE(draft.is_static_shared());
+  EXPECT_FALSE(draft.has_request_state());
+  EXPECT_EQ(draft.shared_bank_bytes(), layout->bank_bytes());
+  full_slots->update({2, 8, 8});
+  EXPECT_EQ(draft.physical_row_index(2, KVCacheTensorRole::KEY), 8);
+  EXPECT_EQ(draft.physical_row_index(2, KVCacheTensorRole::VALUE), 8);
+  EXPECT_EQ(draft.full_block_rows()[2].item<int32_t>(), 8);
+  EXPECT_TRUE(draft.get_k_cache().is_alias_of(draft.get_v_cache()));
+  EXPECT_NE(draft.get_k_cache()[8].data_ptr(),
+            draft.get_v_cache()[8].data_ptr());
+}
+
+TEST(KVCacheTest, DraftShapeBorrowsSharedArenaCapabilityAndLogicalCapacity) {
+  KVCacheCapacity target_capacity;
+  target_capacity.block_size(16)
+      .n_blocks(100)
+      .shared_slab_count(7)
+      .shared_draft_layers(1);
+  ModelArgs target_args;
+  target_args.n_layers(4).n_heads(4).n_kv_heads(2).head_dim(16);
+  const KVCacheShape target(target_capacity, target_args, /*world_size=*/1);
+  ModelArgs draft_args;
+  draft_args.n_layers(1).n_heads(4).n_kv_heads(2).head_dim(16);
+
+  const KVCacheShape draft =
+      build_speculative_draft_kv_cache_shape(target,
+                                             KVCacheCapacity{},
+                                             draft_args,
+                                             /*block_size=*/16,
+                                             /*draft_world_size=*/1,
+                                             /*kv_cache_dtype=*/"auto");
+
+  EXPECT_EQ(draft.shared_draft_layers(), 1);
+  EXPECT_EQ(draft.shared_slab_count(), 0);
+  EXPECT_EQ(draft.key_cache_shape(), target.key_cache_shape());
+  EXPECT_FALSE(draft.has_conv_cache_shape());
+  EXPECT_FALSE(draft.has_ssm_cache_shape());
 }
 
 TEST(KVCacheTest, DeepSeekV4KVCacheExposesIndexerScaleThroughSharedContract) {
