@@ -44,6 +44,7 @@ cc_test(
     kv_cache_estimation_test.cpp
   DEPS
     :kv_cache_estimation
+    :kv_cache
     $<$<BOOL:${USE_NPU}>:models>
     GTest::gtest_main
 )

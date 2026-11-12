@@ -672,7 +672,9 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             self._set_mla_host_lengths(prepared.query_ends, prepared.kv_lengths, graph_mode=graph_mode)
             self._mla_max_seqlen_q = prepared.max_query_len
             self._mla_max_seqlen_k = (
-                _mla_graph_max_seqlen_k(prepared.block_table, self.page_size) if graph_mode else prepared.max_seq_len
+                _mla_graph_max_seqlen_k(prepared.block_table, self.logical_page_size)
+                if graph_mode
+                else prepared.max_seq_len
             )
             # Slot input storage is reused across batches. Segment tables
             # belong to one forward, even when their source view is unchanged.

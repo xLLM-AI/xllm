@@ -112,9 +112,20 @@ std::vector<KVCacheTensor> get_mooncake_tensors(const KVCache& cache) {
 }
 
 int64_t physical_rows_per_resource(KVCacheTensorRole role,
+                                   int64_t replicated_block_pages,
                                    int64_t ssm_checkpoint_stride) {
-  CHECK_GT(ssm_checkpoint_stride, 0);
-  return role == KVCacheTensorRole::SSM ? ssm_checkpoint_stride : 1;
+  if (role == KVCacheTensorRole::SSM) {
+    return ssm_checkpoint_stride;
+  }
+  if (role == KVCacheTensorRole::INDEX ||
+      role == KVCacheTensorRole::INDEX_SCALE) {
+    return indexer_pages_per_block();
+  }
+  if (role == KVCacheTensorRole::KEY || role == KVCacheTensorRole::VALUE ||
+      role == KVCacheTensorRole::WINDOW) {
+    return replicated_block_pages;
+  }
+  return 1;
 }
 
 void merge_kv_info(
@@ -162,12 +173,12 @@ void merge_kv_info(
 MooncakeKVCacheTransferBase::MooncakeKVCacheTransferBase(
     const int32_t device_id,
     const uint16_t listen_port,
-    const torch::Device& device,
-    std::unique_ptr<MooncakeKVCacheTransferEngine> engine)
+    const torch::Device& device)
     : device_id_(device_id),
       device_(device),
       listen_port_(listen_port),
-      mooncake_te_(std::move(engine)) {
+      mooncake_te_(std::make_unique<MooncakeKVCacheTransferEngine>(listen_port,
+                                                                   device)) {
   std::string instance_ip = net::get_local_ip_addr();
   cluster_id_ = net::convert_ip_port_to_uint64(instance_ip, listen_port_);
   ShortUUID uuid;
@@ -287,25 +298,7 @@ MooncakeKVCacheTransferDefault::MooncakeKVCacheTransferDefault(
     const uint16_t listen_port,
     const torch::Device& device,
     const std::string& model_type)
-    : MooncakeKVCacheTransferBase(
-          device_id,
-          listen_port,
-          device,
-          std::make_unique<MooncakeKVCacheTransferEngine>(listen_port,
-                                                          device)) {
-  (void)model_type;
-}
-
-MooncakeKVCacheTransferDefault::MooncakeKVCacheTransferDefault(
-    const int32_t device_id,
-    const uint16_t listen_port,
-    const torch::Device& device,
-    const std::string& model_type,
-    std::unique_ptr<MooncakeKVCacheTransferEngine> engine)
-    : MooncakeKVCacheTransferBase(device_id,
-                                  listen_port,
-                                  device,
-                                  std::move(engine)) {
+    : MooncakeKVCacheTransferBase(device_id, listen_port, device) {
   (void)model_type;
 }
 
@@ -332,8 +325,8 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
     CacheTensorLayoutContext& tensor_layout =
         pending_registration_context_->tensor_layout;
     tensor_layout.linear_ssm_checkpoint_stride = ssm_checkpoint_stride;
-    // The shape carries the actual producer layout, including compressed KPool
-    // and draft caches. K/V blocks still cover the original token capacity.
+    tensor_layout.replicated_block_pages =
+        kv_cache_shape.replicated_block_pages();
     tensor_layout.index_block_capacity = 0;
     if (kv_cache_shape.kpool_layout() ==
             KPoolCacheLayout::COMPRESSED_WITH_TAIL &&
@@ -374,7 +367,9 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
       const int64_t physical_row_count = tensor.size(0);
       CHECK_GT(physical_row_count, 0);
       const int64_t rows_per_resource =
-          physical_rows_per_resource(cache_tensor.role, ssm_checkpoint_stride);
+          physical_rows_per_resource(cache_tensor.role,
+                                     kv_cache_shape.replicated_block_pages(),
+                                     ssm_checkpoint_stride);
       CHECK_EQ(physical_row_count % rows_per_resource, 0)
           << "Cache tensor physical rows must be divisible by its logical "
              "resource geometry, role="
@@ -447,7 +442,9 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
     spec_layout_ = layout;
   }
 
-  register_kv_cache_impl(kv_caches, ssm_checkpoint_stride);
+  register_kv_cache_impl(kv_caches,
+                         ssm_checkpoint_stride,
+                         kv_cache_shape.replicated_block_pages());
   if (pending_registration_context_.has_value()) {
     publish_cache_layout(tensor_manifests, *pending_registration_context_);
     pending_registration_context_.reset();
@@ -623,7 +620,8 @@ bool MooncakeKVCacheTransferDefault::append_buffer_mappings(
 
 void MooncakeKVCacheTransferDefault::register_kv_cache_impl(
     const std::vector<xllm::KVCache>& kv_caches,
-    int64_t ssm_checkpoint_stride) {
+    int64_t ssm_checkpoint_stride,
+    int64_t replicated_block_pages) {
   std::vector<void*> addrs;
   std::vector<size_t> lens;
   std::vector<uint64_t> buf_bytes;
@@ -638,12 +636,13 @@ void MooncakeKVCacheTransferDefault::register_kv_cache_impl(
         get_mooncake_tensors(cache);
     for (const KVCacheTensor& cache_tensor : transfer_tensors) {
       tensor_lifetime->emplace_back(cache_tensor.tensor);
-      add_buf(
-          cache_tensor.tensor,
-          addrs,
-          lens,
-          buf_bytes,
-          physical_rows_per_resource(cache_tensor.role, ssm_checkpoint_stride));
+      add_buf(cache_tensor.tensor,
+              addrs,
+              lens,
+              buf_bytes,
+              physical_rows_per_resource(cache_tensor.role,
+                                         replicated_block_pages,
+                                         ssm_checkpoint_stride));
     }
   }
 
@@ -787,11 +786,7 @@ MooncakeVirtualKVCacheTransfer::MooncakeVirtualKVCacheTransfer(
     const uint16_t listen_port,
     const torch::Device& device,
     std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider)
-    : MooncakeKVCacheTransferBase(
-          device_id,
-          listen_port,
-          device,
-          std::make_unique<MooncakeKVCacheTransferEngine>(listen_port, device)),
+    : MooncakeKVCacheTransferBase(device_id, listen_port, device),
       memory_provider_(std::move(memory_provider)) {
   CHECK(memory_provider_ != nullptr);
 }
@@ -966,14 +961,14 @@ bool MooncakeVirtualKVCacheTransfer::pull_kv_blocks(
                                                 mapping.remote_ids,
                                                 &source_manifest,
                                                 &source_offsets,
-                                                &pull_session) ||
+                                                pull_session) ||
       num_layers_ <= 0 ||
       source_offsets.size() != static_cast<size_t>(num_layers_)) {
     LOG(ERROR) << "Failed to resolve VirtualMemory PULL source offsets";
     return false;
   }
 
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   const Status plan_status = ReshardPlanner().build_native_pull_plan(
       local_cache_layout_, source_manifest, &plan);
   if (!plan_status.ok()) {

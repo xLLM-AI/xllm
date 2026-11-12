@@ -22,7 +22,10 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/model/model_args.h"
+#include "core/kv_cache/layout/cache_layout_types.h"
 #include "core/kv_cache/layout/flashinfer_cache_layout.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/layout/kv_shard_layout.h"
 #include "layers/common/kv_shard_batch_metadata.h"
@@ -99,6 +102,53 @@ TEST(CacheLayoutBuilderTest, SelectsStableOwnerForMqaReplicas) {
   EXPECT_EQ(descriptor.kind, LogicalShardKind::REPLICATED);
   ASSERT_EQ(descriptor.spans.size(), 1U);
   EXPECT_EQ(descriptor.spans[0].owner_tp_rank, 0);
+}
+
+TEST(CacheLayoutBuilderTest, DescribesReplicatedDraftKvAsOneLogicalBlock) {
+  CacheTensorLayoutContext context;
+  context.tp_rank = 0;
+  context.tp_size = 1;
+  context.block_token_capacity = 4;
+  context.kv_head_count = 2;
+  context.replicated_block_pages = 3;
+  KVCacheTensor tensor{.role = KVCacheTensorRole::KEY,
+                       .tensor = torch::zeros({6, 4, 2, 8}),
+                       .shard_descriptor = {}};
+  std::string error;
+
+  ASSERT_TRUE(describe_cache_tensor(context, &tensor, &error)) << error;
+  ASSERT_TRUE(tensor.shard_descriptor.has_value());
+  const LogicalShardDescriptor& descriptor = *tensor.shard_descriptor;
+  EXPECT_EQ(descriptor.kind, LogicalShardKind::SHARDED);
+  ASSERT_EQ(descriptor.spans.size(), 2U);
+  for (const LogicalSpan& span : descriptor.spans) {
+    EXPECT_EQ(span.repeat_count, 4U * 3U);
+    EXPECT_EQ(span.bytes_per_region, 8U * 4U);
+    EXPECT_EQ(span.logical_stride_bytes, 2U * 8U * 4U);
+    EXPECT_EQ(span.physical_stride_bytes, 2U * 8U * 4U);
+  }
+
+  KVCacheCapacity target_capacity;
+  target_capacity.n_blocks(4).block_size(4);
+  ModelArgs target_args;
+  target_args.head_dim(8).n_heads(2).n_kv_heads(2);
+  const KVCacheShape target_shape(target_capacity,
+                                  target_args,
+                                  /*world_size=*/1);
+  ModelArgs draft_args = target_args;
+  draft_args.n_layers(1).index_n_heads(1).index_head_dim(4);
+  KVCacheCapacity draft_capacity;
+  draft_capacity.replicated_block_pages(3);
+  const KVCacheShape draft_shape =
+      build_speculative_draft_kv_cache_shape(target_shape,
+                                             draft_capacity,
+                                             draft_args,
+                                             /*block_size=*/4,
+                                             /*draft_world_size=*/1,
+                                             "auto");
+  EXPECT_EQ(draft_shape.key_cache_shape()[0], 4 * 3);
+  EXPECT_EQ(draft_shape.replicated_block_pages(), 3);
+  EXPECT_TRUE(draft_shape.has_index_cache_shape());
 }
 
 TEST(CacheLayoutBuilderTest, SelectsContiguousReplicaGroupForGqaHeads) {

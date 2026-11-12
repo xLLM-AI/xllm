@@ -82,6 +82,21 @@ def test_builder_graph_decode_skips_prefill_count() -> None:
     assert torch.equal(metadata.dcp_context.seq_lens, torch.tensor([4, 4], dtype=torch.int32))
 
 
+def test_builder_accepts_precomputed_lengths_beyond_private_capacity() -> None:
+    builder = _builder()
+    local_lengths = torch.tensor([4, 4, 4, 4, 1], dtype=torch.int32)
+    metadata = builder.build(
+        torch.arange(5, dtype=torch.int32),
+        torch.arange(5, dtype=torch.int32).view(-1, 1),
+        torch.tensor([8, 8, 8, 8, 1], dtype=torch.int32),
+        num_reqs=5,
+        num_input_tokens=5,
+        dcp_local_seq_lens=local_lengths,
+    )
+    torch.testing.assert_close(metadata.dcp_context.seq_lens, local_lengths)
+    assert metadata.dcp_context.seq_lens.data_ptr() == local_lengths.data_ptr()
+
+
 def test_copy_into_execution_buffer_reuses_graph_storage() -> None:
     state = AclGraphExecutionState({})
     with forward_context(_cpu_context(state)):

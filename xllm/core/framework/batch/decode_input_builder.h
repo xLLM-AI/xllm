@@ -91,7 +91,9 @@ struct DecodeTokenInput {
 };
 
 template <typename Input>
-DecodeBatchContext make_decode_batch_context(const Input& input);
+DecodeBatchContext make_decode_batch_context(
+    const Input& input,
+    int64_t replicated_block_pages = 1);
 
 void append_decode_token(const DecodeBatchContext& ctx,
                          const DecodeTokenInput& token_input,

@@ -92,7 +92,7 @@ bool KVCacheTransfer::validate_transfer_mappings(
       return false;
     }
     const size_t max_remote_count = local_count * split_size;
-    const size_t min_remote_count = max_remote_count - split_size + 1;
+    const size_t min_remote_count = local_count;
     if (remote_count < min_remote_count || remote_count > max_remote_count) {
       LOG(ERROR) << "KV-split mapping remote coverage mismatch, request_id="
                  << request_id << ", group_id=" << mapping.group_id
@@ -142,11 +142,6 @@ folly::SemiFuture<bool> KVCacheTransfer::pull_kv_blocks_async(
   return future;
 }
 
-// In KV-split mode, each block-scoped mapping's local_ids already contains
-// only this rank's physical blocks. remote_ids holds the full D-side block
-// entries; this rank maps local_ids[k] to
-// remote_ids[kv_split_rank + k * kv_split_size]. The function rebuilds
-// remote_ids accordingly and drops infos with no mappings.
 std::vector<TransferKVInfo> filter_kv_split_infos(
     int32_t kv_split_rank,
     int32_t kv_split_size,
@@ -166,7 +161,19 @@ std::vector<TransferKVInfo> filter_kv_split_infos(
           !is_kv_split_cache_block_type(block_type.value())) {
         continue;
       }
-      const std::vector<uint64_t> remote_ids = mapping.remote_ids;
+      const std::vector<uint64_t> remote_ids = std::move(mapping.remote_ids);
+      const size_t stride = static_cast<size_t>(kv_split_size);
+      const size_t block_start = static_cast<size_t>(mapping.local_block_start);
+      const size_t remote_base = std::max(
+          block_start * stride, static_cast<size_t>(mapping.remote_shared_num));
+      const auto remote_index = [&](size_t k) -> std::optional<size_t> {
+        const size_t remote_block =
+            (block_start + k) * stride + static_cast<size_t>(kv_split_rank);
+        if (remote_block < remote_base) {
+          return std::nullopt;
+        }
+        return remote_block - remote_base;
+      };
       if (mapping.group_id == cache_group_id(BlockType::KV)) {
         for (auto& layer : filtered.dst_virtual_kv_cache_layer_global_offsets) {
           const auto filter_offsets = [&](std::vector<uint64_t>& offsets,
@@ -178,12 +185,14 @@ std::vector<TransferKVInfo> filter_kv_split_infos(
             std::vector<uint64_t> selected;
             selected.reserve(mapping.local_ids.size());
             for (size_t k = 0; k < mapping.local_ids.size(); ++k) {
-              const size_t index = static_cast<size_t>(kv_split_rank) +
-                                   k * static_cast<size_t>(kv_split_size);
-              if (index >= offsets.size()) {
+              const std::optional<size_t> index = remote_index(k);
+              if (!index.has_value()) {
+                continue;
+              }
+              if (index.value() >= offsets.size()) {
                 break;
               }
-              selected.emplace_back(offsets[index]);
+              selected.emplace_back(offsets[index.value()]);
             }
             offsets = std::move(selected);
           };
@@ -196,24 +205,18 @@ std::vector<TransferKVInfo> filter_kv_split_infos(
       size_t mapped_local = 0;
       mapping.remote_ids.reserve(mapping.local_ids.size());
       for (size_t k = 0; k < mapping.local_ids.size(); ++k) {
-        const size_t remote_idx = static_cast<size_t>(kv_split_rank) +
-                                  k * static_cast<size_t>(kv_split_size);
-        if (remote_idx >= remote_ids.size()) {
+        const std::optional<size_t> remote_idx = remote_index(k);
+        if (!remote_idx.has_value()) {
+          continue;
+        }
+        if (remote_idx.value() >= remote_ids.size()) {
           break;
         }
-        mapping.remote_ids.emplace_back(remote_ids[remote_idx]);
-        ++mapped_local;
+        mapping.local_ids[mapped_local++] = mapping.local_ids[k];
+        mapping.remote_ids.emplace_back(remote_ids[remote_idx.value()]);
       }
       mapping.local_ids.resize(mapped_local);
     }
-    // local_ids[k] maps to remote_ids[kv_split_rank + k * kv_split_size]. When
-    // the strided remote index runs past the D-side block list (the prompt
-    // spans multiple logical blocks and the last one is not full, which only
-    // happens for kv_split_rank > 0), the loop above stops early. local_ids
-    // must then be truncated to the blocks that actually got a remote target;
-    // otherwise the two sides differ in size and PushKvBlocks rejects the whole
-    // transfer. The dropped tail blocks correspond to tokens beyond the prompt
-    // length, so the truncation is loss-free.
     const bool has_mapping = std::any_of(filtered.mappings.begin(),
                                          filtered.mappings.end(),
                                          [](const KVTransferMapping& mapping) {

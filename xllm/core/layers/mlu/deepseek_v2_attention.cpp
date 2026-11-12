@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 #include "kernels/ops_api.h"
+#include "platform/model_stream_registry.h"
 
 namespace xllm {
 namespace layer {

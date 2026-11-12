@@ -104,15 +104,14 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
+  int64_t draft_replicated_block_pages() const;
+
   void prepare_hierarchy_kv_cache_transfers();
   void finalize_hierarchy_kv_cache_transfers();
   bool allocate_pools(
       const KVCacheShape& kv_cache_shape,
       absl::FunctionRef<bool(WorkerImpl&, const KVCacheShape&)> allocate);
 
-  // A DCP block-table entry covers one logical KV page per KV split; slot and
-  // expanded-attention metadata use this size, not the physical block size.
-  int32_t logical_block_size() const;
   bool uses_chunked_verify() const {
     return target_verify_mode_ != mtp_async::TargetSpecVerifyMode::GENERIC;
   }
