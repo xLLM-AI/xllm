@@ -163,7 +163,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # runner's owned static buffers.
         if enable_graph_mode_decode_no_padding:
             self._capture_error_mode = "thread_local"
-        self._serial_workspace_pool: list[torch.Tensor] | None = []
+        self._serial_workspace_pool: list[torch.Tensor] = []
         self._serial_buffers = AclGraphBufferPool(self.max_batch)
         # Device masks need compact capacity tiers. Host-length FIA updates
         # its live lengths between replays and uses a single full-width graph.
@@ -316,7 +316,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
             if any(count <= 0 for count in execution_counts):
                 raise RuntimeError(f"DP execution token counts must be positive, got {execution_counts}")
             dp_is_decode = getattr(metadata, "dp_is_decode", None)
-            if dp_is_decode is not None and not all(dp_is_decode):
+            if dp_is_decode is None or len(dp_is_decode) != self.dp_size:
+                raise RuntimeError(
+                    "DP decode step requires dp_is_decode on every rank: "
+                    f"got={dp_is_decode!r}, expected length={self.dp_size}"
+                )
+            # Local batch types can differ across DP ranks; graph eligibility is collective.
+            if not all(dp_is_decode):
                 return None
             if max(execution_counts) > self.max_batch:
                 return None
@@ -1105,9 +1111,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             assert self._update_done_event is not None
             # execute() already orders the previous caller after replay.
             # A different caller must also wait before reusing shared inputs.
-            if self._serial_buffers is not None and not _same_npu_stream(
-                current_stream, self._update_done_caller_stream
-            ):
+            if not _same_npu_stream(current_stream, self._update_done_caller_stream):
                 current_stream.wait_stream(self._stream)
             current_stream.wait_event(self._update_done_event)
 
@@ -1276,10 +1280,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             )
         return query_lens + (query_width,) * ((padded_num_tokens - num_tokens) // query_width)
 
-    def _retain_graph_output(self, entry: AclGraphEntry, output: ModelExecutionOutput) -> ModelExecutionOutput:
-        if entry.execution_state.serial_buffers is None:
-            return output
-
+    def _retain_graph_output(self, output: ModelExecutionOutput) -> ModelExecutionOutput:
         # All output-producing operators allocate normally inside capture.
         # Let the graph pool reuse those allocations for subsequent shapes.
         if isinstance(output, torch.Tensor):
@@ -1300,8 +1301,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
         device: torch.device,
         capacity: int | None = None,
     ) -> torch.Tensor:
-        if self._serial_buffers is None:
-            return torch.zeros(shape, dtype=dtype, device=device)
         return self._serial_buffers.get(("input", name), shape, dtype=dtype, device=device, capacity=capacity).zero_()
 
     def _allocate_entry(
@@ -1429,6 +1428,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             ),
             q_cu_seq_lens_host_values=list(range(padded_batch_size + 1)) if self._device_kv_lengths else None,
             q_seq_lens=(torch.tensor(graph_query_lens, dtype=torch.int32, device=device) if graph_query_lens else None),
+            spec_group_width=(_uniform_span_width(expanded_graph_query_lens) or 0),
             q_seq_lens_host=(
                 torch.tensor(expanded_graph_query_lens or graph_query_lens, dtype=torch.int32)
                 if graph_query_lens

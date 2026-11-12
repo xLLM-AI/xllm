@@ -102,9 +102,8 @@ struct ForwardInputBufferEntry {
   uint64_t aligned_bytes = 0;
 };
 
-struct ForwardInputBufferPlan {
-  std::vector<ForwardInputBufferEntry> entries;
-
+class ForwardInputBufferPlan final {
+ public:
   bool add(const torch::Tensor& tensor, torch::Tensor* target) {
     if (!tensor.defined()) {
       return true;
@@ -112,13 +111,33 @@ struct ForwardInputBufferPlan {
     if (!tensor.device().is_cpu()) {
       return false;
     }
-    entries.push_back({tensor.contiguous(), target, 0, 0});
+    entries_.push_back({tensor.contiguous(), target, 0, 0});
     return true;
   }
 
+  void materialize(const torch::Device& device, ForwardRuntimeState& runtime) {
+    const uint64_t total_bytes = prepare_layout();
+    if (total_bytes == 0) {
+      for (const auto& entry : entries_) {
+        *entry.target = torch::empty(
+            entry.host_tensor.sizes(),
+            entry.host_tensor.options().device(device).pinned_memory(false));
+      }
+      return;
+    }
+
+    runtime.input_host_buffer = build_host_buffer(total_bytes);
+    runtime.device_input_buffer =
+        safe_to(runtime.input_host_buffer,
+                torch::TensorOptions().dtype(torch::kUInt8).device(device),
+                true);
+    bind_device_views(runtime.device_input_buffer, device);
+  }
+
+ private:
   uint64_t prepare_layout() {
     uint64_t total = 0;
-    for (auto& entry : entries) {
+    for (auto& entry : entries_) {
       total = align_up(total, kForwardInputBufferAlignment);
       entry.offset = total;
       const uint64_t bytes = static_cast<uint64_t>(
@@ -136,7 +155,7 @@ struct ForwardInputBufferPlan {
                                    .device(torch::kCPU)
                                    .pinned_memory(true));
     auto* base = static_cast<char*>(buffer.data_ptr());
-    for (const auto& entry : entries) {
+    for (const auto& entry : entries_) {
       const uint64_t bytes = static_cast<uint64_t>(
           entry.host_tensor.numel() * entry.host_tensor.element_size());
       if (bytes == 0) {
@@ -155,10 +174,7 @@ struct ForwardInputBufferPlan {
   void bind_device_views(const torch::Tensor& device_buffer,
                          const torch::Device& device) const {
     const char* base = static_cast<const char*>(device_buffer.data_ptr());
-    for (const auto& entry : entries) {
-      if (entry.target == nullptr || !entry.host_tensor.defined()) {
-        continue;
-      }
+    for (const auto& entry : entries_) {
       const void* ptr = base + entry.offset;
 #if defined(USE_CUDA) || defined(USE_DCU)
       if (device.type() == torch::kCUDA) {
@@ -187,6 +203,8 @@ struct ForwardInputBufferPlan {
 #endif
     }
   }
+
+  std::vector<ForwardInputBufferEntry> entries_;
 };
 
 inline bool add_sampling_to_plan(const SamplingParameters& source,
@@ -474,15 +492,7 @@ class LlmForwardInput final {
       return false;
     }
 
-    const uint64_t total_bytes = plan.prepare_layout();
-    if (total_bytes > 0) {
-      inputs.runtime.input_host_buffer = plan.build_host_buffer(total_bytes);
-      inputs.runtime.device_input_buffer =
-          safe_to(inputs.runtime.input_host_buffer,
-                  torch::TensorOptions().dtype(torch::kUInt8).device(device),
-                  true);
-      plan.bind_device_views(inputs.runtime.device_input_buffer, device);
-    }
+    plan.materialize(device, inputs.runtime);
 
     inputs.runtime.device_tensors_ready = true;
     inputs.runtime.input_host_buffer_has_layout = false;

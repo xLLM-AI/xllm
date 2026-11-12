@@ -84,6 +84,7 @@ class StaticGraphAttentionMetadata:
     dp_global_sequence_nums: tuple[int, ...] = ()
     dp_is_decode: tuple[int, ...] = ()
     q_seq_lens: torch.Tensor | None = None
+    spec_group_width: int = 0
     kpool_query_lens: tuple[int, ...] = ()
     kpool_query_lens_device: torch.Tensor | None = None
     expanded_decode_metadata: ExpandedDecodeMetadata | None = None
@@ -344,7 +345,7 @@ class AclGraphRunner(BaseRunner):
         if positions is not None and (positions.dim() != 1 or positions.numel() != metadata_row_count):
             raise RuntimeError("ACL graph decode positions must contain one value per token")
 
-    def _retain_graph_output(self, entry: AclGraphEntry, output: ModelExecutionOutput) -> ModelExecutionOutput:
+    def _retain_graph_output(self, output: ModelExecutionOutput) -> ModelExecutionOutput:
         return output
 
     def _capture(
@@ -390,7 +391,7 @@ class AclGraphRunner(BaseRunner):
             ),
         ):
             entry.static_output = self._forward_static(entry)
-        entry.static_output = self._retain_graph_output(entry, entry.static_output)
+        entry.static_output = self._retain_graph_output(entry.static_output)
         entry.graph_tasks = capture_context.tasks
         logger.info(
             "Python ACL graph captured: model=%s bucket=%d mtp_topk=%s tasks=%d",

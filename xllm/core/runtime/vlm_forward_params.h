@@ -157,15 +157,7 @@ class VlmForwardInput final {
       return false;
     }
 
-    const uint64_t total_bytes = plan.prepare_layout();
-    if (total_bytes > 0) {
-      inputs.runtime.input_host_buffer = plan.build_host_buffer(total_bytes);
-      inputs.runtime.device_input_buffer =
-          safe_to(inputs.runtime.input_host_buffer,
-                  torch::TensorOptions().dtype(torch::kUInt8).device(device),
-                  true);
-      plan.bind_device_views(inputs.runtime.device_input_buffer, device);
-    }
+    plan.materialize(device, inputs.runtime);
 
     inputs.runtime.device_tensors_ready = true;
     inputs.runtime.input_host_buffer_has_layout = false;

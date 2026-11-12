@@ -291,6 +291,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
                           *compute_stream_);
 
   LlmForwardInput validate_input = input.clone();
+  validate_input.input_params.is_spec_verify = target_is_hybrid_recurrent_;
   // DSpark's N-wide draft geometry must be rescaled to (N+1) for the target's
   // anchor + drafts forward.
   scale_speculative_parallel_token_counts(validate_input.input_params,
