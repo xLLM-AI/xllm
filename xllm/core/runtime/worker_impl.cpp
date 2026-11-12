@@ -75,7 +75,6 @@ limitations under the License.
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/speculative/draft_config.h"
-#include "core/framework/speculative/mtp_utils.h"
 #include "core/kv_cache/layout/layerwise_split_layout.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/kv_cache/storage/linear_state_restore.h"

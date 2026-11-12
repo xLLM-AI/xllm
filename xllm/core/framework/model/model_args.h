@@ -326,7 +326,6 @@ class SpeculativeArgs final {
 
   PROPERTY(int64_t, draft_vocab_size) = 0;
   PROPERTY(int64_t, num_speculative_tokens) = 0;
-  PROPERTY(bool, enable_embedded_eagle3_draft) = false;
   PROPERTY(int32_t, max_concurrent_prefills_per_dp) = 0;
   PROPERTY(std::vector<int32_t>, layers_to_capture) = {};
   PROPERTY(bool, norm_before_fc) = false;
@@ -1075,7 +1074,6 @@ struct ModelArgs {
   FORWARD_PROPERTY(int32_t, max_window_layers, sliding_window_args);
 
   FORWARD_PROPERTY(int64_t, num_speculative_tokens, speculative_args);
-  FORWARD_PROPERTY(bool, enable_embedded_eagle3_draft, speculative_args);
   FORWARD_PROPERTY(int32_t, max_concurrent_prefills_per_dp, speculative_args);
   FORWARD_PROPERTY(std::vector<int32_t>, layers_to_capture, speculative_args);
   FORWARD_PROPERTY(bool, norm_before_fc, speculative_args);
@@ -1285,6 +1283,23 @@ inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
 inline bool is_glm5_next_target_model_type(std::string_view model_type) {
   return model_type == "glm5_3_flash" || model_type == "glm5_next" ||
          model_type == "glm5_next_text";
+}
+
+// NPU MTP targets whose num_speculative_tokens flows from engine Options into
+// ModelArgs; other targets keep the checkpoint default.
+inline bool uses_mtp_target_spec_width(std::string_view model_type) {
+  return is_glm5_next_target_model_type(model_type) ||
+         util::is_deepseek_v4_model_type(model_type);
+}
+
+// DeepSeek-V4 MTP stashes the pre-hc_head 3D hidden flattened to
+// [num_tokens, hc_mult*hidden], so the MTP embedding placeholder must cover
+// hc_mult*hidden per row.
+inline int64_t mtp_hidden_state_width(const ModelArgs& model_args) {
+  if (util::is_deepseek_v4_model_type(model_args.model_type())) {
+    return model_args.hc_mult() * model_args.hidden_size();
+  }
+  return model_args.hidden_size();
 }
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {

@@ -1693,7 +1693,6 @@ TEST(PropertyReflectTest,
   const std::vector<std::string> speculative_names = {
       "draft_vocab_size",
       "num_speculative_tokens",
-      "enable_embedded_eagle3_draft",
       "max_concurrent_prefills_per_dp",
       "layers_to_capture",
       "norm_before_fc",

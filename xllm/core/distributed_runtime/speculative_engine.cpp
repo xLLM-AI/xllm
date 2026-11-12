@@ -34,7 +34,6 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/vmm_kv_cache_layout.h"
 #include "core/util/tensor_options.h"
-#include "framework/speculative/mtp_utils.h"
 #include "llm_engine.h"
 #include "util/utils.h"
 #include "vlm_engine.h"
@@ -123,7 +122,7 @@ bool SpeculativeEngineBase<TargetEngine>::init_model(
   model_args_ = engine_->model_args();
 
   if (LoadConfig::get_instance().enable_vmm_weights() &&
-      draft_engine_ != nullptr && !should_skip_external_draft_kv_cache()) {
+      draft_engine_ != nullptr) {
     LOG(ERROR) << "Virtual weight memory does not support an external "
                   "speculative draft engine.";
     return false;
@@ -131,10 +130,10 @@ bool SpeculativeEngineBase<TargetEngine>::init_model(
   if (KVCacheConfig::get_instance().enable_vmm_kvcache() &&
       draft_engine_ != nullptr &&
       (!SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm()) ||
-       should_skip_external_draft_kv_cache() || options_.enable_disagg_pd() ||
+       options_.enable_disagg_pd() ||
        options_.instance_role() != InstanceRole::DEFAULT)) {
     LOG(ERROR) << "Virtual KV cache supports co-located MTP target and draft "
-                  "engines only; embedded Eagle3 and PD are unsupported.";
+                  "engines only; PD is unsupported.";
     return false;
   }
 
@@ -180,8 +179,7 @@ template <typename TargetEngine>
 bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
     std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
   const bool shared_vmm = KVCacheConfig::get_instance().enable_vmm_kvcache() &&
-                          draft_engine_ != nullptr &&
-                          !should_skip_external_draft_kv_cache();
+                          draft_engine_ != nullptr;
   KVCacheCapacity target_kv_cache_cap =
       engine_->estimate_kv_cache_capacity(!shared_vmm);
   std::optional<VmmKVCacheLayout> shared_vmm_layout;
@@ -199,13 +197,6 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
   };
 
   if (draft_engine_ == nullptr) {
-    return allocate_target_cache(target_kv_cache_cap);
-  }
-
-  // Some MLA Eagle3 targets keep the draft worker inside the target engine and
-  // allocate its full-attention KV cache with a separate shape. Do not compare
-  // that shape with the target MLA cache or allocate the external draft here.
-  if (should_skip_external_draft_kv_cache()) {
     return allocate_target_cache(target_kv_cache_cap);
   }
 
@@ -295,16 +286,6 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
   return allocate_target_cache(target_kv_cache_cap) &&
          draft_engine_->allocate_kv_cache(draft_kv_cache_cap,
                                           std::move(transfer_coordinator));
-}
-
-template <typename TargetEngine>
-bool SpeculativeEngineBase<TargetEngine>::should_skip_external_draft_kv_cache()
-    const {
-  if (draft_engine_ == nullptr) {
-    return false;
-  }
-  return uses_embedded_eagle3_draft(options_.speculative_algorithm(),
-                                    model_args_);
 }
 
 // TODO: support dp batches later

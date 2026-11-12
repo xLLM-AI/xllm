@@ -58,7 +58,6 @@ limitations under the License.
 #include "core/util/tensor_options.h"
 #include "framework/block/kv_cache_manager_factory.h"
 #include "framework/model/model_args.h"
-#include "framework/speculative/mtp_utils.h"
 #include "models/model_registry.h"
 #include "runtime/decode_graph_bucket.h"
 #include "runtime/llm_worker_impl.h"
