@@ -616,4 +616,11 @@ torch::Tensor layer_norm_fwd_aclnn(
     int64_t group_size = -1,
     bool norm_before_gate = true,
     bool is_rms_norm = false);
+void row_col_int8_quant(
+    const torch::Tensor& x,
+    torch::Tensor& q_row,
+    torch::Tensor& q_col,
+    torch::Tensor& row_absmax,
+    torch::Tensor& col_absmax);
+
 }  // namespace xllm::kernel::npu
