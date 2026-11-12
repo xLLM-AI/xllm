@@ -23,12 +23,20 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from xllm_kernel.ops.attention.fia import get_fused_attention
+from xllm_kernel.ops.gemm import matmul_ein_sum
 from xllm_kernel.ops.kv_cache import update_decode_graph_metadata
 
 _MIN_PAD_HEAD_DIM = 64
 _MAX_PAD_HEAD_DIM = 128
 _FIA_BLOCK_SIZE = 128
 _FIA_FULL_ATTENTION_TOKENS = 2147483647
+
+
+def batch_matmul_transpose(x: torch.Tensor, weight: torch.Tensor, *, graph_mode: bool) -> torch.Tensor:
+    """Project [T, H, D] activations with [H, D, O] weights to [T, H, O]."""
+    if graph_mode and x.dtype == torch.bfloat16:
+        return matmul_ein_sum(x, weight)
+    return torch.bmm(x.transpose(0, 1), weight).transpose(0, 1)
 
 
 def vision_fusion_attention(
@@ -95,6 +103,7 @@ def vision_fusion_attention(
 
 
 __all__ = [
+    "batch_matmul_transpose",
     "update_decode_graph_metadata",
     "vision_fusion_attention",
 ]
