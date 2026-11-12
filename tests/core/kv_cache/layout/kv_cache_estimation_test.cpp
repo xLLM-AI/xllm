@@ -749,7 +749,7 @@ TEST(KVCacheEstimationTest, SharedStaticQwen38MtpSubdividesTypedSlabs) {
   ModelArgs model_args = make_linear_attention_args(/*head_dim=*/256);
   model_args.model_type("qwen3_5_text")
       .n_layers(64)
-      .n_heads(32)
+      .n_heads(24)
       .n_kv_heads(4)
       .full_attention_interval(4)
       .linear_num_key_heads(16)
@@ -784,6 +784,96 @@ TEST(KVCacheEstimationTest, SharedStaticQwen38MtpSubdividesTypedSlabs) {
   EXPECT_EQ(capacity.n_blocks(), 691);
   EXPECT_EQ(capacity.num_linear_state_blocks(), 691);
   EXPECT_EQ(capacity.cache_size_in_bytes(), 25 * kSlabBytes);
+}
+
+TEST(KVCacheEstimationTest, SharedStaticQwen38MtpBoundsFiaBankAddressSpan) {
+  ModelArgs model_args = make_linear_attention_args(/*head_dim=*/256);
+  model_args.model_type("qwen3_5_text")
+      .n_layers(64)
+      .n_heads(24)
+      .n_kv_heads(4)
+      .full_attention_interval(4)
+      .linear_num_key_heads(16)
+      .linear_num_value_heads(48)
+      .linear_key_head_dim(128)
+      .linear_value_head_dim(128)
+      .linear_conv_kernel_dim(4)
+      .mamba_ssm_dtype("float32");
+  KVCacheEstimateOptions options = make_linear_attention_options();
+  options.enable_shared_kv_cache = true;
+  options.dtype = torch::kBFloat16;
+  options.world_size = 2;
+  options.block_size = 128;
+  options.n_local_kv_heads = 2;
+  options.n_local_linear_k_heads = 8;
+  options.n_local_linear_v_heads = 24;
+  options.num_speculative_tokens = 4;
+  constexpr int64_t kSliceBytes = 7864320;
+  constexpr int64_t kSlabBytes = 16 * kSliceBytes;
+  constexpr int64_t kElementsPerFullRow = 65536;
+  constexpr int64_t kFullPagesPerSlice = 60;
+  constexpr int64_t kFiaElementSpan = int64_t{1} << 32;
+  constexpr int64_t kExpectedSlabs =
+      kFiaElementSpan / kElementsPerFullRow / kFullPagesPerSlice;
+  // The pre-bank implementation logged this Qwen run as 319 slabs at
+  // 55,050,240 bytes each. Preserve that byte budget when checking the
+  // mirrored layout: one new group is 16 bank slices, so 139 groups fit.
+  constexpr int64_t kHistoricalArenaBytes = 17561026560;
+  constexpr int64_t kExpectedProductionSlabs =
+      kHistoricalArenaBytes / kSlabBytes;
+  options.cache_size_in_bytes = kHistoricalArenaBytes;
+
+  const KVCacheCapacity production_capacity =
+      estimate_kv_cache_capacity(model_args, options);
+  EXPECT_EQ(kExpectedProductionSlabs, 139);
+  EXPECT_EQ(production_capacity.shared_slab_count(), kExpectedProductionSlabs);
+  EXPECT_EQ(production_capacity.cache_size_in_bytes(),
+            kExpectedProductionSlabs * kSlabBytes);
+  EXPECT_LE(kExpectedProductionSlabs * kFullPagesPerSlice *
+                kElementsPerFullRow,
+            kFiaElementSpan);
+
+  options.cache_size_in_bytes = int64_t{256} << 30;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  // The 16 Full layers form 16 mirrored banks. Each bank exposes 60 native
+  // Full pages per 7.5 MiB slice, so 1092 groups are the largest FIA-safe
+  // arena before a 32-bit element offset reaches 2^32.
+  EXPECT_EQ(kExpectedSlabs, 1092);
+  EXPECT_EQ(capacity.shared_slab_count(), kExpectedSlabs);
+  EXPECT_EQ(capacity.shared_slot_bytes(), kSlabBytes);
+  EXPECT_EQ(capacity.shared_reserved_slab_count(), 2);
+  EXPECT_EQ(capacity.shared_min_slab_count(), 7);
+  EXPECT_EQ(capacity.cache_size_in_bytes(), kExpectedSlabs * kSlabBytes);
+  EXPECT_EQ(capacity.num_full_attention_layers(), 16);
+  EXPECT_EQ(capacity.num_linear_attention_layers(), 48);
+
+  StaticKVCacheLayoutSpec spec;
+  spec.num_slabs = static_cast<size_t>(kExpectedSlabs);
+  spec.full_row_bytes = 131072;
+  spec.conv_row_bytes = 71680;
+  spec.ssm_row_bytes = 1572864;
+  spec.checkpoint_stride = 5;
+  spec.dtype = torch::kBFloat16;
+  spec.ssm_dtype = torch::kFloat32;
+  for (int64_t layer = 0; layer < 64; ++layer) {
+    if ((layer + 1) % 4 == 0) {
+      spec.full_layer_ids.emplace_back(layer);
+    } else {
+      spec.linear_layer_ids.emplace_back(layer);
+    }
+  }
+  const StaticKVCacheLayout layout(std::move(spec));
+  EXPECT_EQ(layout.bank_count(), 16u);
+  EXPECT_EQ(layout.full_layers_per_bank(), 1u);
+  EXPECT_EQ(layout.linear_layers_per_bank(), 3u);
+  EXPECT_EQ(layout.slice_bytes(), static_cast<size_t>(kSliceBytes));
+  EXPECT_EQ(layout.slab_bytes(), static_cast<size_t>(kSlabBytes));
+  EXPECT_EQ(layout.full_pages_per_slab(),
+            static_cast<size_t>(kFullPagesPerSlice));
+  EXPECT_EQ(layout.max_slab_count(), static_cast<size_t>(kExpectedSlabs));
 }
 
 TEST(KVCacheEstimationTest, SharedStaticRejectsQuantizedFullPageGeometry) {
