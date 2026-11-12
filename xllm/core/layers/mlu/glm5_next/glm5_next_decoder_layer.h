@@ -55,7 +55,9 @@ class Glm5NextDecoderLayerImpl final : public torch::nn::Module {
                         const AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
                         const ModelParamsView& input_params,
-                        DsaTopkRelay* topk_relay = nullptr);
+                        DsaTopkRelay* topk_relay = nullptr,
+                        std::optional<PendingMHC>* pending_mhc = nullptr,
+                        bool is_last_layer = true);
 
  private:
   std::string weight_prefix_;
