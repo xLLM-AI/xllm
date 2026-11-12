@@ -363,7 +363,7 @@ class Glm5NextConfig:
             raise ValueError("expert_parallel_degree must be 0, 1 or 2")
         if self.enable_mega_moe:
             raise ValueError("GLM-5.3-Flash ordinary EP does not support enable_mega_moe")
-        if self.enable_fused_mc2:
+        if self.enable_fused_mc2 and self.expert_parallel_degree != 2:
             raise ValueError("GLM-5.3-Flash ordinary EP does not support enable_fused_mc2")
         for name in ("tp", "ep", "dp", "cp", "moe_tp"):
             size = getattr(self, f"{name}_size")
@@ -1078,7 +1078,7 @@ class Glm5NextIndexer(nn.Module):
         output = torch.empty(batch_size, seq_len, output_width, dtype=torch.long, device=device)
         for start in range(0, seq_len, max(1, sub)):
             end = min(start + sub, seq_len)
-            chunk_len = end - start
+            num_chunk_tokens = end - start
             chunk_positions = q_pos[:, start:end]
             chunk_mask = attention_mask[:, start:end]
             slab = torch.matmul(q_f[:, start:end], pool_keys_t)
@@ -1105,7 +1105,7 @@ class Glm5NextIndexer(nn.Module):
             group_budget = self.topk // self.index_kpool
             select_k = min(group_budget, pool_scores.shape[-1])
             if select_k == 0:
-                topk_indices = torch.empty(batch_size, chunk_len, 0, dtype=torch.long, device=device)
+                topk_indices = torch.empty(batch_size, num_chunk_tokens, 0, dtype=torch.long, device=device)
             else:
                 selected = pool_scores.topk(select_k, dim=-1).indices
                 selected_valid = candidate_valid.gather(-1, selected)
@@ -1115,7 +1115,7 @@ class Glm5NextIndexer(nn.Module):
                 selected_indices = (
                     pool_indices.reshape(batch_size, -1)
                     .gather(1, sel_flat)
-                    .reshape(batch_size, chunk_len, select_k, rate)
+                    .reshape(batch_size, num_chunk_tokens, select_k, rate)
                 )
                 topk_indices = selected_indices.flatten(-2)
                 topk_indices.masked_fill_(

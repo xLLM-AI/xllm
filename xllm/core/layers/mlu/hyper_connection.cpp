@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "layers/mlu/hyper_connection.h"
 
+#include <optional>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -77,15 +78,19 @@ StateDict get_hc_state(const StateDict& state_dict,
   return StateDict(std::move(tensors));
 }
 
-MHCFusionPlan resolve_mhc_fusion(const MHCFusionContext& context) {
-  const bool use_fused_mhc =
-      context.optimization_enabled && !context.is_prefill &&
-      !context.is_chunked_prefill && context.supports_fused_mhc &&
-      context.has_pending_storage;
+MHCFusionPlan resolve_mhc_fusion(bool can_fuse_mhc,
+                                 const std::optional<PendingMHC>* pending_mhc,
+                                 bool is_last_layer) {
+  if (pending_mhc == nullptr) {
+    return {};
+  }
+  const bool has_pending = pending_mhc->has_value();
+  CHECK(!has_pending || can_fuse_mhc)
+      << "Pending mHC state cannot enter an unfused layer.";
   return {
-      .use_fused_mhc = use_fused_mhc,
-      .consume_pending = use_fused_mhc && context.has_pending,
-      .defer_post = use_fused_mhc && !context.is_last_layer,
+      .use_fused_mhc = can_fuse_mhc,
+      .consume_pending = has_pending,
+      .defer_post = can_fuse_mhc && !is_last_layer,
   };
 }
 

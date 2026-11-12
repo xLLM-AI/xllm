@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cnrt.h>
 #include <framework/core/MLUStream.h>
 #include <framework/core/device.h>
 #include <glog/logging.h>
@@ -25,6 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "compiler/triton/include/jit_kernel.h"
+#include "compiler/triton/include/types.h"
 #include "kernels/mlu/mlu_ops_api.h"
 
 namespace xllm::kernel::mlu {
@@ -36,6 +38,7 @@ constexpr int64_t kMaxGdnBlockHv = 16;
 constexpr int64_t kMinGdnBlockHv = 2;
 constexpr int64_t kMaxBlockN = 4;
 constexpr int64_t kBlockQueryLen = 4;
+constexpr float kChunkVerifyGateLowerBound = -5.0f;
 constexpr int64_t kSplitBlockV = 64;
 
 int64_t choose_block_hv(int64_t num_k_heads,
@@ -61,6 +64,25 @@ int64_t choose_block_hv(int64_t num_k_heads,
   LOG(FATAL) << "Failed to select BLOCK_HV for H=" << num_k_heads
              << ", HV=" << num_v_heads;
   return heads_per_query;
+}
+
+int64_t choose_num_kda_heads_per_group(int64_t num_sequences,
+                                       int64_t num_heads,
+                                       int64_t num_cores) {
+  int64_t best_num_heads_per_group = num_heads;
+  int64_t best_num_heads_per_core =
+      ((num_sequences + num_cores - 1) / num_cores) * num_heads;
+  for (int64_t num_heads_per_group = num_heads / 2; num_heads_per_group > 0;
+       num_heads_per_group /= 2) {
+    int64_t num_jobs = num_sequences * (num_heads / num_heads_per_group);
+    int64_t num_heads_per_core =
+        ((num_jobs + num_cores - 1) / num_cores) * num_heads_per_group;
+    if (num_heads_per_core < best_num_heads_per_core) {
+      best_num_heads_per_group = num_heads_per_group;
+      best_num_heads_per_core = num_heads_per_core;
+    }
+  }
+  return best_num_heads_per_group;
 }
 
 }  // namespace
@@ -216,10 +238,194 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
       initial_state.scalar_type() == torch::kFloat32 &&
       A_log.scalar_type() == torch::kFloat32 &&
       dt_bias.scalar_type() == torch::kFloat32;
-  if (use_glm_kda) {
-    constexpr int32_t kDirectBlockV = 128;
-    const int64_t direct_tiles = num_sequences * num_v_heads;
+  const bool has_explicit_index_table =
+      ssm_state_indices.defined() && state_indices.dim() == 2;
+  const int64_t checkpoint_capacity =
+      has_explicit_index_table ? state_indices.size(1) : 0;
+  const bool has_sparse_checkpoints =
+      num_accepted_tokens.has_value() && checkpoint_capacity > 1 &&
+      batch_size * seq_len * 4 < num_sequences * checkpoint_capacity * 3;
+  const bool has_bounded_glm_query = inplace_final_state &&
+                                     has_explicit_index_table &&
+                                     checkpoint_capacity <= kBlockQueryLen;
+  const bool uses_chunk_glm_kda =
+      use_glm_kda && inplace_final_state && num_accepted_tokens.has_value() &&
+      checkpoint_capacity == kBlockQueryLen && num_sequences >= 5 &&
+      batch_size * seq_len == num_sequences * kBlockQueryLen &&
+      kda_gate_lower_bound == kChunkVerifyGateLowerBound;
+  if (uses_chunk_glm_kda) {
+    constexpr int32_t kMaxChunkWorkers = 32;
+    const int64_t num_chunk_tiles = num_sequences * num_v_heads;
+    triton_jit::LaunchCfg chunk_cfg;
+    chunk_cfg.num_warps = 1;
+    chunk_cfg.num_stages = 5;
+    chunk_cfg.force_use_shared_memory = true;
+    chunk_cfg.disable_trans_collapse_pass = true;
     cnrtQueue_t queue = torch_mlu::getCurMLUStream();
+    JITKernel::get("xllm.core.kernels.mlu.triton_kernel.fused_recurrent_kda",
+                   "fused_chunk_kda_decode_kernel")
+        .launch(static_cast<void*>(queue),
+                {static_cast<uint32_t>(
+                     std::min<int64_t>(num_chunk_tiles, kMaxChunkWorkers)),
+                 1,
+                 1},
+                chunk_cfg,
+                q,
+                k,
+                v,
+                a,
+                b,
+                out,
+                initial_state,
+                query_start_loc,
+                state_indices,
+                num_accepted_tokens,
+                A_log,
+                dt_bias,
+                /*scale=*/static_cast<float>(scale),
+                /*num_reqs=*/static_cast<int32_t>(num_sequences),
+                /*H=*/static_cast<int32_t>(num_k_heads),
+                /*D=*/static_cast<int32_t>(head_k_dim),
+                /*LOWER_BOUND=*/kda_gate_lower_bound);
+    return std::make_pair(out, final_state);
+  }
+  constexpr int32_t kNumGlmHeadsPerGroup = 4;
+  const int64_t num_glm_tiles =
+      num_sequences * (num_v_heads / kNumGlmHeadsPerGroup);
+  const bool checkpoint_capacity_exceeds_chunk_len =
+      checkpoint_capacity > kBlockQueryLen;
+  if (use_glm_kda && (!inplace_final_state ||
+                      (checkpoint_capacity_exceeds_chunk_len
+                           ? num_glm_tiles % core_count == 0
+                           : checkpoint_capacity > 1 && num_sequences >= 32))) {
+    constexpr int32_t kGlmBlockV = 128;
+    cnrtQueue_t queue = torch_mlu::getCurMLUStream();
+    JITKernel& glm_kernel = JITKernel::get(
+        /*py_path=*/"xllm.core.kernels.mlu.triton_kernel.fused_glm_kda_update",
+        /*fn_name=*/"fused_glm_kda_update_kernel");
+    glm_kernel.launch(
+        static_cast<void*>(queue),
+        /*grid=*/
+        {static_cast<uint32_t>(std::min(num_glm_tiles, core_count)), 1, 1},
+        /*cfg=*/{/*num_warps=*/1, /*num_stages=*/3},
+        A_log,
+        a,
+        b,
+        dt_bias,
+        softplus_beta,
+        softplus_threshold,
+        q,
+        k,
+        v,
+        out,
+        initial_state,
+        final_state,
+        query_start_loc,
+        state_indices,
+        num_accepted_tokens,
+        /*scale=*/static_cast<float>(scale),
+        /*N=*/static_cast<int64_t>(num_sequences),
+        /*T=*/static_cast<int64_t>(seq_len),
+        /*B=*/static_cast<int32_t>(batch_size),
+        /*H=*/static_cast<int32_t>(num_k_heads),
+        /*HV=*/static_cast<int32_t>(num_v_heads),
+        /*BLOCK_HV=*/kNumGlmHeadsPerGroup,
+        /*K=*/static_cast<int32_t>(head_k_dim),
+        /*V=*/static_cast<int32_t>(head_v_dim),
+        /*BK=*/static_cast<int32_t>(head_k_dim),
+        /*BV=*/kGlmBlockV,
+        /*stride_init_state_token=*/initial_state.stride(0),
+        /*stride_final_state_token=*/final_state.stride(0),
+        /*stride_indices_seq=*/stride_indices_seq,
+        /*stride_indices_tok=*/stride_indices_tok,
+        /*USE_INITIAL_STATE=*/1,
+        /*INPLACE_FINAL_STATE=*/inplace_final_state ? 1 : 0,
+        /*USE_QK_L2NORM_IN_KERNEL=*/1,
+        /*IS_VARLEN=*/cu_seqlens.defined() ? 1 : 0,
+        /*IS_CONTINUOUS_BATCHING=*/1,
+        /*IS_SPEC_DECODING=*/num_accepted_tokens.has_value() ? 1 : 0,
+        /*IS_KDA=*/1,
+        /*KDA_USE_SAFE_GATE=*/1,
+        /*KDA_GATE_LOWER_BOUND=*/kda_gate_lower_bound,
+        /*SPLIT_HV=*/1,
+        /*BLOCK_N=*/1,
+        /*BLOCK_QUERY_LEN=*/static_cast<int32_t>(kBlockQueryLen),
+        /*FACTORED_REDUCE=*/1,
+        /*BOUNDED_QUERY=*/has_bounded_glm_query ? 1 : 0);
+    return std::make_pair(out, final_state);
+  }
+  if (use_glm_kda && !checkpoint_capacity_exceeds_chunk_len &&
+      has_sparse_checkpoints) {
+    constexpr int32_t kBlockV = 128;
+    cnrtQueue_t queue = torch_mlu::getCurMLUStream();
+    JITKernel& kda_kernel = JITKernel::get(
+        /*py_path=*/
+        "xllm.core.kernels.mlu.triton_kernel.sparse_recurrent_kda",
+        /*fn_name=*/"sparse_recurrent_kda_kernel");
+    kda_kernel.launch(
+        static_cast<void*>(queue),
+        /*grid=*/
+        {1,
+         static_cast<uint32_t>((head_v_dim + kBlockV - 1) / kBlockV),
+         static_cast<uint32_t>(num_sequences * num_v_heads)},
+        /*cfg=*/{/*num_warps=*/1, /*num_stages=*/3},
+        q,
+        k,
+        v,
+        a,
+        b,
+        out,
+        initial_state,
+        final_state,
+        query_start_loc,
+        state_indices,
+        num_accepted_tokens,
+        A_log,
+        dt_bias,
+        /*scale=*/static_cast<float>(scale),
+        /*T=*/static_cast<int64_t>(batch_size * seq_len),
+        /*B=*/static_cast<int32_t>(batch_size),
+        /*H=*/static_cast<int32_t>(num_k_heads),
+        /*HV=*/static_cast<int32_t>(num_v_heads),
+        /*K=*/static_cast<int32_t>(head_k_dim),
+        /*V=*/static_cast<int32_t>(head_v_dim),
+        /*BK=*/static_cast<int32_t>(head_k_dim),
+        /*BV=*/kBlockV,
+        /*stride_init_state_token=*/initial_state.stride(0),
+        /*stride_final_state_token=*/final_state.stride(0),
+        /*stride_indices_seq=*/stride_indices_seq,
+        /*USE_INITIAL_STATE=*/1,
+        /*INPLACE_FINAL_STATE=*/inplace_final_state ? 1 : 0,
+        /*IS_BETA_HEADWISE=*/0,
+        /*USE_QK_L2NORM_IN_KERNEL=*/1,
+        /*IS_VARLEN=*/1,
+        /*IS_CONTINUOUS_BATCHING=*/1,
+        /*IS_SPEC_DECODING=*/1,
+        /*IS_KDA=*/1,
+        /*SIGMOID_BETA=*/1,
+        /*COMPUTE_GATE=*/1,
+        /*LOWER_BOUND=*/kda_gate_lower_bound);
+    return std::make_pair(out, final_state);
+  }
+  const int64_t num_kda_heads_per_group =
+      use_glm_kda ? choose_num_kda_heads_per_group(
+                        num_sequences, num_v_heads, core_count)
+                  : num_v_heads;
+  const bool short_underfilled_batch = num_sequences < core_count &&
+                                       batch_size * seq_len <= num_sequences &&
+                                       num_kda_heads_per_group < num_v_heads;
+  const bool uses_direct_kda =
+      use_glm_kda && (checkpoint_capacity_exceeds_chunk_len ||
+                      num_sequences <= core_count / 2 ||
+                      num_kda_heads_per_group == 1 || short_underfilled_batch);
+  if (uses_direct_kda) {
+    const int64_t direct_block_v =
+        num_sequences == 1 && batch_size * seq_len == 1 ? 32 : 128;
+    const int64_t direct_tiles =
+        num_sequences * num_v_heads *
+        ((head_v_dim + direct_block_v - 1) / direct_block_v);
+    cnrtQueue_t queue = torch_mlu::getCurMLUStream();
+
     JITKernel& direct_kernel = JITKernel::get(
         /*py_path=*/"xllm.core.kernels.mlu.triton_kernel.fused_recurrent_kda",
         /*fn_name=*/"fused_recurrent_kda_kernel");
@@ -227,7 +433,10 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
         static_cast<void*>(queue),
         /*grid=*/
         {static_cast<uint32_t>(std::min(direct_tiles, core_count)), 1, 1},
-        /*cfg=*/{/*num_warps=*/1, /*num_stages=*/4, /*bottleneck=*/"mv"},
+        /*cfg=*/
+        {/*num_warps=*/1,
+         /*num_stages=*/direct_block_v == 128 ? 4 : 3,
+         /*bottleneck=*/"mv"},
         q,
         k,
         v,
@@ -252,7 +461,7 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
         /*LOWER_BOUND=*/kda_gate_lower_bound,
         /*SPEC=*/num_accepted_tokens.has_value() ? 1 : 0,
         /*INPLACE=*/inplace_final_state ? 1 : 0,
-        /*BV=*/kDirectBlockV,
+        /*BV=*/static_cast<int32_t>(direct_block_v),
         /*BK=*/static_cast<int32_t>(head_k_dim));
     return std::make_pair(out, final_state);
   }
@@ -289,7 +498,13 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
       block_v = std::min<int64_t>(head_v_dim, kSplitBlockV);
     }
   }
-  const bool split_hv = split_gdn_hv || split_single_token;
+  const bool uses_factored_kda_reduce =
+      use_glm_kda && block_k == 128 && block_v == 128 && block_n == 1;
+  if (use_glm_kda) {
+    block_hv = num_kda_heads_per_group;
+  }
+  const bool split_hv = split_gdn_hv || split_single_token ||
+                        (use_glm_kda && block_hv < num_v_heads);
   int64_t num_hv_blocks =
       split_hv ? (num_v_heads + block_hv - 1) / block_hv : 1;
   int64_t total_blocks = ((head_k_dim + block_k - 1) / block_k) *
@@ -303,53 +518,55 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
       "update",
       /*fn_name=*/"tmo_fused_sigmoid_gating_delta_rule_update_kernel");
 
-  f.launch(static_cast<void*>(queue),
-           /*grid=*/
-           {static_cast<uint32_t>(std::min(total_blocks, core_count)), 1, 1},
-           /*cfg=*/{/*num_warps=*/1, /*num_stages=*/3},
-           A_log,
-           a,
-           b,
-           dt_bias,
-           softplus_beta,
-           softplus_threshold,
-           q,
-           k,
-           v,
-           out,
-           initial_state,
-           final_state,
-           query_start_loc,
-           state_indices,
-           num_accepted_tokens,
-           static_cast<float>(scale),
-           static_cast<int64_t>(num_sequences),
-           static_cast<int64_t>(seq_len),
-           static_cast<int32_t>(batch_size),
-           static_cast<int32_t>(num_k_heads),
-           static_cast<int32_t>(num_v_heads),
-           /*BLOCK_HV=*/static_cast<int32_t>(block_hv),
-           static_cast<int32_t>(head_k_dim),
-           static_cast<int32_t>(head_v_dim),
-           /*BK=*/static_cast<int32_t>(block_k),
-           /*BV=*/static_cast<int32_t>(block_v),
-           initial_state.stride(0),
-           final_state.stride(0),
-           stride_indices_seq,
-           stride_indices_tok,
-           /*USE_INITIAL_STATE=*/1,
-           /*INPLACE_FINAL_STATE=*/inplace_final_state ? 1 : 0,
-           /*USE_QK_L2NORM_IN_KERNEL=*/use_qk_l2norm_in_kernel ? 1 : 0,
-           /*IS_VARLEN=*/cu_seqlens.defined() ? 1 : 0,
-           /*IS_CONTINUOUS_BATCHING=*/ssm_state_indices.defined() ? 1 : 0,
-           /*IS_SPEC_DECODING=*/num_accepted_tokens.has_value() ? 1 : 0,
-           /*IS_KDA=*/is_kda ? 1 : 0,
-           /*KDA_USE_SAFE_GATE=*/kda_use_safe_gate ? 1 : 0,
-           kda_gate_lower_bound,
-           /*SPLIT_HV=*/split_hv ? 1 : 0,
-           /*BLOCK_N=*/static_cast<int32_t>(block_n),
-           /*BLOCK_QUERY_LEN=*/static_cast<int32_t>(kBlockQueryLen),
-           /*FACTORED_REDUCE=*/!is_kda && head_k_dim == 128 ? 1 : 0);
+  f.launch(
+      static_cast<void*>(queue),
+      /*grid=*/
+      {static_cast<uint32_t>(std::min(total_blocks, core_count)), 1, 1},
+      /*cfg=*/{/*num_warps=*/1, /*num_stages=*/3},
+      A_log,
+      a,
+      b,
+      dt_bias,
+      softplus_beta,
+      softplus_threshold,
+      q,
+      k,
+      v,
+      out,
+      initial_state,
+      final_state,
+      query_start_loc,
+      state_indices,
+      num_accepted_tokens,
+      static_cast<float>(scale),
+      static_cast<int64_t>(num_sequences),
+      static_cast<int64_t>(seq_len),
+      static_cast<int32_t>(batch_size),
+      static_cast<int32_t>(num_k_heads),
+      static_cast<int32_t>(num_v_heads),
+      /*BLOCK_HV=*/static_cast<int32_t>(block_hv),
+      static_cast<int32_t>(head_k_dim),
+      static_cast<int32_t>(head_v_dim),
+      /*BK=*/static_cast<int32_t>(block_k),
+      /*BV=*/static_cast<int32_t>(block_v),
+      initial_state.stride(0),
+      final_state.stride(0),
+      stride_indices_seq,
+      stride_indices_tok,
+      /*USE_INITIAL_STATE=*/1,
+      /*INPLACE_FINAL_STATE=*/inplace_final_state ? 1 : 0,
+      /*USE_QK_L2NORM_IN_KERNEL=*/use_qk_l2norm_in_kernel ? 1 : 0,
+      /*IS_VARLEN=*/cu_seqlens.defined() ? 1 : 0,
+      /*IS_CONTINUOUS_BATCHING=*/ssm_state_indices.defined() ? 1 : 0,
+      /*IS_SPEC_DECODING=*/num_accepted_tokens.has_value() ? 1 : 0,
+      /*IS_KDA=*/is_kda ? 1 : 0,
+      /*KDA_USE_SAFE_GATE=*/kda_use_safe_gate ? 1 : 0,
+      kda_gate_lower_bound,
+      /*SPLIT_HV=*/split_hv ? 1 : 0,
+      /*BLOCK_N=*/static_cast<int32_t>(block_n),
+      /*BLOCK_QUERY_LEN=*/static_cast<int32_t>(kBlockQueryLen),
+      /*FACTORED_REDUCE=*/
+      (uses_factored_kda_reduce || (!is_kda && head_k_dim == 128)) ? 1 : 0);
 
   return std::make_pair(out, final_state);
 }

@@ -48,6 +48,21 @@ class ChunkKDAImpl final : public torch::nn::Module {
       bool output_final_state,
       bool use_qk_l2norm);
 
+  std::tuple<torch::Tensor, torch::Tensor> forward_raw_gate(
+      const torch::Tensor& q,
+      const torch::Tensor& k,
+      const torch::Tensor& v,
+      const torch::Tensor& raw_gate,
+      const torch::Tensor& a_log,
+      const torch::Tensor& dt_bias,
+      float gate_lower_bound,
+      const torch::Tensor& raw_beta,
+      const torch::Tensor& initial_state,
+      const torch::Tensor& cu_seqlens,
+      const torch::Tensor& chunk_indices,
+      bool output_final_state,
+      bool use_qk_l2norm);
+
  private:
   int64_t total_core_num_ = 0;
   int64_t num_heads_ = 0;

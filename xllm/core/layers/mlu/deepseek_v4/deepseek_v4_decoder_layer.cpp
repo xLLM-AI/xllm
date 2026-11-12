@@ -27,7 +27,8 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
     const ModelContext& context,
     int32_t layer_id)
     : layer_id_(layer_id),
-      use_hash_(layer_id < context.get_model_args().n_hash_layers()) {
+      use_hash_(layer_id < context.get_model_args().n_hash_layers()),
+      is_last_layer_(layer_id == context.get_model_args().n_layers() - 1) {
   const ModelArgs& model_args = context.get_model_args();
   const QuantArgs& quant_args = context.get_quant_args();
   const ParallelArgs& parallel_args = context.get_parallel_args();
@@ -138,25 +139,15 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
     const ModelParamsView& input_params,
     const std::optional<torch::Tensor>& input_ids,
     std::optional<PendingMHC>* pending_mhc,
-    bool is_last_layer,
     const mlu_v4_cp::DeepseekV4CpContext* cp_context) {
   (void)positions;
 
   residual = std::nullopt;
-  const bool has_pending_storage = pending_mhc != nullptr;
-  const bool has_pending = has_pending_storage && pending_mhc->has_value();
-  const MHCFusionPlan mhc_plan = resolve_mhc_fusion({
-      .optimization_enabled = true,
-      .is_prefill = attn_metadata.is_prefill,
-      .is_chunked_prefill = attn_metadata.is_chunked_prefill,
-      .supports_fused_mhc = attn_hc_pre_->supports_fused_mhc() &&
-                            ffn_hc_pre_->supports_fused_mhc(),
-      .has_pending_storage = has_pending_storage,
-      .has_pending = has_pending,
-      .is_last_layer = is_last_layer,
-  });
-  CHECK(!has_pending || mhc_plan.consume_pending)
-      << "Pending mHC state cannot enter an unfused layer.";
+  const bool can_fuse_mhc = !attn_metadata.is_prefill &&
+                            !attn_metadata.is_chunked_prefill &&
+                            attn_hc_pre_->supports_fused_mhc();
+  const MHCFusionPlan mhc_plan =
+      resolve_mhc_fusion(can_fuse_mhc, pending_mhc, is_last_layer_);
 
   torch::Tensor residual_attn;
   MHCPreOutput attn_hc;

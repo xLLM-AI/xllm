@@ -102,21 +102,6 @@ TEST(Qwen3_5GatedDeltaNetSplitTest, SplitMixedQkvPreservesOffsets) {
   EXPECT_TRUE(v.is_contiguous());
 }
 
-TEST(Qwen3_5GatedDeltaNetSplitTest, BuildRebasedSsmStateIndicesCreatesGroups) {
-  torch::Tensor linear_state_indices =
-      torch::tensor({2, 5}, torch::dtype(torch::kInt32));
-
-  torch::Tensor indices =
-      build_rebased_ssm_state_indices(linear_state_indices,
-                                      /*checkpoint_stride=*/3,
-                                      /*q_max_seq_len=*/3);
-
-  torch::Tensor expected =
-      torch::tensor({{6, 7, 8}, {15, 16, 17}}, torch::dtype(torch::kInt32));
-  EXPECT_TRUE(torch::equal(indices, expected));
-  EXPECT_TRUE(indices.is_contiguous());
-}
-
 class Qwen3_5GatedDeltaNetTest : public ::testing::Test {
  protected:
   void SetUp() override {

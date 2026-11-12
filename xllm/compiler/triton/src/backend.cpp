@@ -344,6 +344,9 @@ std::string TritonBackend::compile(const std::string& path,
   if (cfg.force_use_shared_memory.has_value()) {
     options["force_use_shared_memory"] = *cfg.force_use_shared_memory;
   }
+  if (cfg.disable_trans_collapse_pass.has_value()) {
+    options["disable_trans_collapse_pass"] = *cfg.disable_trans_collapse_pass;
+  }
   py::object result = mod.attr("compile")(path,
                                           name,
                                           args_spec,

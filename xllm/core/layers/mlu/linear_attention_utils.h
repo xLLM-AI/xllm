@@ -60,14 +60,11 @@ inline std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> split_mixed_qkv(
   return {q, k, v};
 }
 
-inline torch::Tensor build_rebased_ssm_state_indices(
-    const torch::Tensor& logical_state_indices,
-    int64_t checkpoint_stride,
-    int64_t q_max_seq_len) {
-  torch::Tensor base_indices =
-      build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
-  torch::Tensor offsets = torch::arange(q_max_seq_len, base_indices.options());
-  return (base_indices.unsqueeze(/*dim=*/1) + offsets).contiguous();
+inline torch::Tensor build_ssm_checkpoint_indices(
+    const torch::Tensor& state_base_indices,
+    int64_t checkpoint_stride) {
+  auto offsets = torch::arange(checkpoint_stride, state_base_indices.options());
+  return state_base_indices.unsqueeze(/*dim=*/1) + offsets;
 }
 
 }  // namespace xllm::layer

@@ -17,8 +17,8 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <array>
 #include <string>
-#include <tuple>
 
 #include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_args.h"
@@ -35,26 +35,25 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-// GLM-5-Next's bounded, per-key log-space gate. The result is FP32 and lies
-// in [lower_bound, 0].
-torch::Tensor glm5_next_safe_gate(const torch::Tensor& raw_gate,
-                                  const torch::Tensor& A_log,
-                                  const torch::Tensor& dt_bias,
-                                  float lower_bound);
+class Glm5NextKDAInputProjectionImpl final : public torch::nn::Module {
+ public:
+  explicit Glm5NextKDAInputProjectionImpl(const ModelContext& context);
 
-// GLM-5-Next uses a sigmoid output gate after RMSNorm. This intentionally
-// differs from Qwen's SiLU-gated RMSNorm.
-torch::Tensor glm5_next_kda_apply_output_gate(const torch::Tensor& normalized,
-                                              const torch::Tensor& output_gate);
+  void load_state_dict(const StateDict& state_dict);
+  void verify_loaded_weights(const std::string& prefix) const;
+  torch::Tensor forward(const torch::Tensor& hidden_states);
+
+ private:
+  int32_t rank_;
+  int32_t tp_size_;
+  std::array<int64_t, 6> shard_sizes_;
+  std::array<bool, 6> loaded_{};
+  torch::Tensor weight_;
+};
+TORCH_MODULE(Glm5NextKDAInputProjection);
 
 class Glm5NextKDAImpl final : public torch::nn::Module {
  public:
-  Glm5NextKDAImpl() = default;
-  Glm5NextKDAImpl(const ModelArgs& args,
-                  const QuantArgs& quant_args,
-                  const ParallelArgs& parallel_args,
-                  const torch::TensorOptions& options,
-                  float gate_lower_bound = -5.0f);
   explicit Glm5NextKDAImpl(const ModelContext& context);
 
   void load_state_dict(const StateDict& state_dict);
@@ -69,22 +68,15 @@ class Glm5NextKDAImpl final : public torch::nn::Module {
   torch::Tensor get_linear_state_indices(const ModelParamsView& input_params,
                                          const torch::Device& device) const;
 
-  int64_t num_heads_ = 0;
   int64_t local_num_heads_ = 0;
   int64_t head_dim_ = 0;
-  int64_t projection_size_ = 0;
   int64_t local_projection_size_ = 0;
   int64_t tp_size_ = 1;
   int64_t rank_ = 0;
   int32_t conv_kernel_size_ = 0;
-  float gate_lower_bound_ = -5.0f;
+  float gate_lower_bound_;
 
-  ColumnParallelLinear q_proj_{nullptr};
-  ColumnParallelLinear k_proj_{nullptr};
-  ColumnParallelLinear v_proj_{nullptr};
-  ColumnParallelLinear b_proj_{nullptr};
-  ReplicatedLinear f_a_proj_{nullptr};
-  ReplicatedLinear g_a_proj_{nullptr};
+  Glm5NextKDAInputProjection in_proj_qkvbfg_a_{nullptr};
   ColumnParallelLinear f_b_proj_{nullptr};
   ColumnParallelLinear g_b_proj_{nullptr};
   ColumnParallelLinear q_conv1d_{nullptr};
