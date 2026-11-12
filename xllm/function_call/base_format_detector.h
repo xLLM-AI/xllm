@@ -25,8 +25,7 @@ limitations under the License.
 
 #include "chat.pb.h"
 #include "core/common/types.h"
-#include "core_types.h"
-#include "utils.h"
+#include "function_call/tool_call.h"
 
 namespace xllm {
 namespace function_call {

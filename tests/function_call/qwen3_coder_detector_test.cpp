@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "qwen3_coder_detector.h"
+#include "function_call/qwen3_coder_detector.h"
 
 #include <gtest/gtest.h>
 
@@ -21,8 +21,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core_types.h"
-#include "function_call_parser.h"
+#include "function_call/function_call_parser.h"
+#include "function_call/tool_call.h"
 
 namespace xllm {
 namespace function_call {

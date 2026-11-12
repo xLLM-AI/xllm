@@ -13,15 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "deepseekv32_detector.h"
+#include "function_call/deepseekv32_detector.h"
+
+#include <absl/strings/match.h>
 
 #include <algorithm>
 #include <cctype>
 #include <sstream>
 
-#include "base_format_detector.h"
 #include "core/common/types.h"
-#include "utils.h"
+#include "core/util/partial_json_parser.h"
+#include "function_call/base_format_detector.h"
 
 namespace xllm {
 namespace function_call {
@@ -480,8 +482,9 @@ DeepSeekV32Detector::parse_parameters_from_xml(
           if (param_value.empty()) {
             return parameters;
           }
-          // Use partial_json_loads for non-string types
-          auto [parsed_value, _] = partial_json_loads(param_value, Allow::ALL);
+          // Use partial_json::partial_json_loads for non-string types
+          auto [parsed_value, _] = partial_json::partial_json_loads(
+              param_value, partial_json::Allow::ALL);
           parameters[param_name] = parsed_value;
         }
       }
@@ -1096,7 +1099,7 @@ StreamingParseResult DeepSeekV32Detector::parse_streaming_increment(
       // 2. Parse current parameters (partial or complete)
       auto current_params =
           parse_parameters_from_xml(invoke_content, !is_tool_end);
-      // Use sorted-key dump so find_common_prefix is stable across chunks
+      // Use sorted-key dump so the common prefix is stable across chunks
       std::string current_args_json = params_to_json_sorted(current_params);
 
       // 3. Calculate and send incremental arguments
@@ -1116,8 +1119,8 @@ StreamingParseResult DeepSeekV32Detector::parse_streaming_increment(
               prev_tool_call_arr_[current_tool_id_]["arguments"];
 
           if (current_args_json != prev_args_json) {
-            std::string prefix =
-                find_common_prefix(prev_args_json, current_args_json);
+            std::string prefix(absl::FindLongestCommonPrefix(
+                prev_args_json, current_args_json));
             if (prefix.length() > sent_len) {
               argument_diff = prefix.substr(sent_len);
             }
