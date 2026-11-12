@@ -39,7 +39,8 @@ bool set_remote_cache_peer(MooncakeTransferEngineCore* core,
                            uint64_t cluster_id,
                            const WorkerCacheLayoutManifest& manifest,
                            proto::CachePeerMode mode,
-                           const std::string& endpoint) {
+                           const std::string& endpoint,
+                           const CachePeerSourceSelection* source_selection) {
   const auto channel =
       core->get_or_create_channel(control_endpoint(cluster_id));
   if (channel == nullptr) {
@@ -51,6 +52,14 @@ bool set_remote_cache_peer(MooncakeTransferEngineCore* core,
   proto::CachePeerRequest request;
   cache_layout_to_proto(manifest, request.mutable_destination_manifest());
   request.set_mode(mode);
+  if (source_selection != nullptr) {
+    auto* source = request.mutable_source_selection();
+    source->set_incarnation_id(source_selection->incarnation_id);
+    source->set_layout_generation(source_selection->layout_generation);
+    source->mutable_excluded_span_ordinals()->Assign(
+        source_selection->excluded_span_ordinals.begin(),
+        source_selection->excluded_span_ordinals.end());
+  }
   proto::Status response;
   brpc::Controller controller;
   stub.SetCachePeer(&controller, &request, &response, nullptr);
@@ -84,7 +93,7 @@ Status virtual_layer_manifests(const WorkerCacheLayoutManifest& manifest,
   const int32_t group_id = manifest.tensors.front().group_id;
   size_t layer_count = 0;
   for (const CacheTensorManifest& tensor : manifest.tensors) {
-    if (tensor.cache_namespace != CacheNamespace::MAIN ||
+    if (tensor.cache_pool_id != kPrimaryCachePoolId ||
         !tensor.explicit_resource_offsets || tensor.group_id != group_id ||
         tensor.mooncake_buffer_id != 0 || tensor.storage_offset_bytes != 0 ||
         tensor.physical_rows_per_resource != 1 || !tensor.contiguous ||
@@ -191,7 +200,7 @@ MooncakeKVTransferState& MooncakeKVTransferState::get_instance() {
 
 MooncakeKVTransferState::~MooncakeKVTransferState() {
   for (const auto& [addr, peer] : cache_peer_links_) {
-    if (peer.holds_session) {
+    if (peer.mode == CachePeerMode::ACTIVE) {
       transport_.close_session("", addr);
     }
   }
@@ -368,15 +377,29 @@ MooncakeKVTransferState::local_cache_layout() const {
 
 Status MooncakeKVTransferState::set_cache_peer(
     const WorkerCacheLayoutManifest& peer_manifest,
-    CachePeerMode mode) {
+    CachePeerMode mode,
+    const CachePeerSourceSelection* source_selection) {
   const Status manifest_status = validate_worker_cache_layout(peer_manifest);
   if (!manifest_status.ok()) {
     return manifest_status;
   }
 
+  const std::optional<std::vector<uint64_t>> excluded_spans =
+      source_selection == nullptr
+          ? std::nullopt
+          : std::make_optional(source_selection->excluded_span_ordinals);
   std::optional<WorkerCacheLayoutManifest> local_manifest;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (source_selection != nullptr &&
+        (!local_cache_layout_ ||
+         source_selection->incarnation_id !=
+             local_cache_layout_->incarnation_id ||
+         source_selection->layout_generation !=
+             local_cache_layout_->layout_generation)) {
+      return Status(StatusCode::UNAVAILABLE,
+                    "source cache layout changed while linking");
+    }
     const auto existing = cache_peer_links_.find(peer_manifest.addr);
     const bool identity_matches =
         existing != cache_peer_links_.end() &&
@@ -388,18 +411,19 @@ Status MooncakeKVTransferState::set_cache_peer(
       if (!identity_matches) {
         return Status();
       }
-      if (existing->second.holds_session) {
+      if (existing->second.mode == CachePeerMode::ACTIVE) {
         transport_.close_session("", peer_manifest.addr);
       }
       cache_peer_links_.erase(existing);
       return Status();
     }
     if (identity_matches) {
-      if (existing->second.mode == mode) {
+      if (existing->second.mode == mode &&
+          existing->second.excluded_source_spans == excluded_spans) {
         return Status();
       }
       return Status(StatusCode::INVALID_ARGUMENT,
-                    "cache peer mode change requires unlink");
+                    "cache peer mode or writer change requires unlink");
     }
     if (existing != cache_peer_links_.end() &&
         existing->second.destination_incarnation ==
@@ -416,19 +440,25 @@ Status MooncakeKVTransferState::set_cache_peer(
                   "local cache layout is not registered");
   }
 
-  std::optional<ReshardPlanTemplate> plan;
+  std::shared_ptr<const std::vector<StridedRegionTemplate>> plan;
   if (mode == CachePeerMode::ACTIVE) {
-    ReshardPlanTemplate active_plan;
+    std::vector<StridedRegionTemplate> active_plan;
     const Status plan_status = ReshardPlanner().build_outgoing_plan(
-        *local_manifest, peer_manifest, &active_plan);
+        *local_manifest,
+        peer_manifest,
+        &active_plan,
+        excluded_spans
+            ? std::make_optional(std::span<const uint64_t>(*excluded_spans))
+            : std::nullopt);
     if (!plan_status.ok()) {
       return plan_status;
     }
-    if (active_plan.regions.empty()) {
+    if (active_plan.empty()) {
       return Status(StatusCode::INVALID_ARGUMENT,
-                    "active cache peer requires a non-empty plan");
+                    "active cache peer requires non-empty transfer templates");
     }
-    plan = std::move(active_plan);
+    plan = std::make_shared<const std::vector<StridedRegionTemplate>>(
+        std::move(active_plan));
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
@@ -436,8 +466,9 @@ Status MooncakeKVTransferState::set_cache_peer(
       local_cache_layout_->incarnation_id != local_manifest->incarnation_id ||
       local_cache_layout_->layout_generation !=
           local_manifest->layout_generation) {
-    return Status(StatusCode::UNAVAILABLE,
-                  "local cache layout changed during plan construction");
+    return Status(
+        StatusCode::UNAVAILABLE,
+        "local cache layout changed while building transfer templates");
   }
 
   const auto existing = cache_peer_links_.find(peer_manifest.addr);
@@ -446,11 +477,12 @@ Status MooncakeKVTransferState::set_cache_peer(
           peer_manifest.incarnation_id &&
       existing->second.destination_layout_generation ==
           peer_manifest.layout_generation) {
-    if (existing->second.mode == mode) {
+    if (existing->second.mode == mode &&
+        existing->second.excluded_source_spans == excluded_spans) {
       return Status();
     }
     return Status(StatusCode::INVALID_ARGUMENT,
-                  "cache peer mode change requires unlink");
+                  "cache peer mode or writer change requires unlink");
   }
   if (existing != cache_peer_links_.end() &&
       existing->second.destination_incarnation ==
@@ -461,8 +493,8 @@ Status MooncakeKVTransferState::set_cache_peer(
                   "peer cache layout generation is stale");
   }
 
-  const bool holds_session = mode == CachePeerMode::ACTIVE;
-  if (holds_session && !transport_.open_session("", peer_manifest.addr)) {
+  if (mode == CachePeerMode::ACTIVE &&
+      !transport_.open_session("", peer_manifest.addr)) {
     return Status(StatusCode::UNAVAILABLE,
                   "failed to open cache peer data session");
   }
@@ -472,42 +504,25 @@ Status MooncakeKVTransferState::set_cache_peer(
   link.destination_layout_generation = peer_manifest.layout_generation;
   link.mode = mode;
   link.plan = std::move(plan);
-  link.holds_session = holds_session;
-  if (existing != cache_peer_links_.end() && existing->second.holds_session) {
-    transport_.close_session("", peer_manifest.addr);
+  link.excluded_source_spans = excluded_spans;
+  if (existing == cache_peer_links_.end()) {
+    cache_peer_links_.emplace(peer_manifest.addr, std::move(link));
+  } else {
+    if (existing->second.mode == CachePeerMode::ACTIVE) {
+      transport_.close_session("", peer_manifest.addr);
+    }
+    existing->second = std::move(link);
   }
-  cache_peer_links_[peer_manifest.addr] = std::move(link);
   return Status();
-}
-
-bool MooncakeKVTransferState::has_outgoing_plan(
-    const std::string& remote_addr,
-    CacheNamespace cache_namespace) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  const auto link_it = cache_peer_links_.find(remote_addr);
-  if (link_it == cache_peer_links_.end() || !link_it->second.plan.has_value()) {
-    return false;
-  }
-  return std::any_of(link_it->second.plan->regions.begin(),
-                     link_it->second.plan->regions.end(),
-                     [cache_namespace](const StridedRegionTemplate& region) {
-                       return region.cache_namespace == cache_namespace;
-                     });
-}
-
-bool MooncakeKVTransferState::has_reshard_plan(
-    const std::string& remote_addr) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return cache_peer_links_.find(remote_addr) != cache_peer_links_.end();
 }
 
 Status MooncakeKVTransferState::bind_outgoing_regions(
     const std::string& remote_addr,
     const std::vector<KVTransferMapping>& mappings,
-    CacheNamespace cache_namespace,
+    uint32_t cache_pool_id,
     int64_t layer_id,
     std::vector<ByteRegion>* regions) const {
-  std::optional<ReshardPlanTemplate> plan;
+  std::shared_ptr<const std::vector<StridedRegionTemplate>> plan;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto link_it = cache_peer_links_.find(remote_addr);
@@ -521,21 +536,17 @@ Status MooncakeKVTransferState::bind_outgoing_regions(
     }
     plan = link_it->second.plan;
   }
-  if (!plan.has_value()) {
-    return Status(StatusCode::UNAVAILABLE,
-                  "active cache peer has no reshard plan");
-  }
   RequestRegionBinder binder;
-  return binder.bind(*plan, mappings, cache_namespace, layer_id, regions);
+  return binder.bind(*plan, mappings, cache_pool_id, layer_id, regions);
 }
 
 Status MooncakeKVTransferState::bind_outgoing_regions_explicit(
     const std::string& remote_addr,
     const std::vector<ExplicitResourceMapping>& mappings,
-    CacheNamespace cache_namespace,
+    uint32_t cache_pool_id,
     int64_t layer_id,
     std::vector<ByteRegion>* regions) const {
-  std::optional<ReshardPlanTemplate> plan;
+  std::shared_ptr<const std::vector<StridedRegionTemplate>> plan;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto link_it = cache_peer_links_.find(remote_addr);
@@ -549,13 +560,9 @@ Status MooncakeKVTransferState::bind_outgoing_regions_explicit(
     }
     plan = link_it->second.plan;
   }
-  if (!plan.has_value()) {
-    return Status(StatusCode::UNAVAILABLE,
-                  "active cache peer has no reshard plan");
-  }
   RequestRegionBinder binder;
   return binder.bind_explicit(
-      *plan, mappings, cache_namespace, layer_id, regions);
+      *plan, mappings, cache_pool_id, layer_id, regions);
 }
 
 MooncakeKVTransferEngine::MooncakeKVTransferEngine(uint16_t listen_port,
@@ -639,10 +646,7 @@ bool MooncakeKVTransferEngine::get_remote_virtual_offsets(
     const std::vector<uint64_t>& block_ids,
     WorkerCacheLayoutManifest* manifest,
     std::vector<VirtualKVCacheLayerGlobalOffsets>* layer_offsets,
-    VirtualKVPullSession* session) {
-  if (session != nullptr) {
-    *session = VirtualKVPullSession();
-  }
+    VirtualKVPullSession& session) {
   if (manifest == nullptr || layer_offsets == nullptr) {
     return false;
   }
@@ -759,18 +763,15 @@ bool MooncakeKVTransferEngine::get_remote_virtual_offsets(
            peer.mode == peer_snapshot.mode;
   };
   const auto publish_offsets = [&]() {
-    if (session != nullptr) {
-      session->link_epoch = peer_snapshot.link_epoch;
-      session->source_cluster_id = remote_manifest.cluster_id;
-      session->source_addr = remote_manifest.addr;
-      session->source_incarnation = remote_manifest.incarnation_id;
-      session->source_layout_generation = remote_manifest.layout_generation;
-      session->destination_cluster_id = local_manifest->cluster_id;
-      session->destination_addr = local_manifest->addr;
-      session->destination_incarnation = local_manifest->incarnation_id;
-      session->destination_layout_generation =
-          local_manifest->layout_generation;
-    }
+    session.link_epoch = peer_snapshot.link_epoch;
+    session.source_cluster_id = remote_manifest.cluster_id;
+    session.source_addr = remote_manifest.addr;
+    session.source_incarnation = remote_manifest.incarnation_id;
+    session.source_layout_generation = remote_manifest.layout_generation;
+    session.destination_cluster_id = local_manifest->cluster_id;
+    session.destination_addr = local_manifest->addr;
+    session.destination_incarnation = local_manifest->incarnation_id;
+    session.destination_layout_generation = local_manifest->layout_generation;
     *manifest = peer_snapshot.source_manifest;
     *layer_offsets = std::move(offsets);
     return true;
@@ -827,7 +828,8 @@ bool MooncakeKVTransferEngine::set_remote_peer(
     uint64_t cluster_id,
     const std::string& remote_addr,
     const WorkerCacheLayoutManifest& manifest,
-    CachePeerMode mode) {
+    CachePeerMode mode,
+    const CachePeerSourceSelection* source_selection) {
   proto::CachePeerMode proto_mode = proto::CACHE_PEER_MODE_ABSENT;
   if (mode == CachePeerMode::ACTIVE) {
     proto_mode = proto::CACHE_PEER_MODE_ACTIVE;
@@ -838,7 +840,8 @@ bool MooncakeKVTransferEngine::set_remote_peer(
                                cluster_id,
                                manifest,
                                proto_mode,
-                               remote_addr);
+                               remote_addr,
+                               source_selection);
 }
 
 bool MooncakeKVTransferEngine::open_local_session(
@@ -892,8 +895,9 @@ bool MooncakeKVTransferEngine::link_sessions(
 
   ReshardPlanner planner;
   std::vector<size_t> selected_indices;
+  std::vector<std::vector<uint64_t>> excluded_spans;
   const Status selection = planner.select_sources(
-      remote_manifests, *local_manifest, &selected_indices);
+      remote_manifests, *local_manifest, &selected_indices, &excluded_spans);
   if (!selection.ok()) {
     LOG(ERROR) << "Remote cache layouts cannot cover local destination: "
                << selection.message();
@@ -930,9 +934,9 @@ bool MooncakeKVTransferEngine::link_sessions(
       const CachePeerMode mode = selected_set.find(index) != selected_set.end()
                                      ? CachePeerMode::ACTIVE
                                      : CachePeerMode::PLAN_ONLY;
-      if (peer->second.source_incarnation !=
+      if (peer->second.source_manifest.incarnation_id !=
               remote_manifests[index].incarnation_id ||
-          peer->second.source_layout_generation !=
+          peer->second.source_manifest.layout_generation !=
               remote_manifests[index].layout_generation ||
           peer->second.source_manifest.cluster_id !=
               remote_manifests[index].cluster_id ||
@@ -940,7 +944,8 @@ bool MooncakeKVTransferEngine::link_sessions(
               local_manifest->incarnation_id ||
           peer->second.destination_manifest.layout_generation !=
               local_manifest->layout_generation ||
-          peer->second.mode != mode) {
+          peer->second.mode != mode ||
+          peer->second.excluded_source_spans != excluded_spans[index]) {
         LOG(ERROR)
             << "Cache peer identity or mode changed; unlink required for "
             << remote_addrs[index];
@@ -959,8 +964,15 @@ bool MooncakeKVTransferEngine::link_sessions(
     const CachePeerMode mode =
         active ? CachePeerMode::ACTIVE : CachePeerMode::PLAN_ONLY;
     attempted_indices.emplace_back(index);
-    if (!set_remote_peer(
-            cluster_ids[index], remote_addrs[index], *local_manifest, mode)) {
+    const CachePeerSourceSelection source_selection{
+        remote_manifests[index].incarnation_id,
+        remote_manifests[index].layout_generation,
+        excluded_spans[index]};
+    if (!set_remote_peer(cluster_ids[index],
+                         remote_addrs[index],
+                         *local_manifest,
+                         mode,
+                         active ? &source_selection : nullptr)) {
       linked = false;
       break;
     }
@@ -1016,10 +1028,7 @@ bool MooncakeKVTransferEngine::link_sessions(
           LocalCachePeer cache_peer;
           cache_peer.destination_manifest = *local_manifest;
           cache_peer.source_manifest = remote_manifests[index];
-          cache_peer.source_incarnation =
-              remote_manifests[index].incarnation_id;
-          cache_peer.source_layout_generation =
-              remote_manifests[index].layout_generation;
+          cache_peer.excluded_source_spans = std::move(excluded_spans[index]);
           cache_peer.holds_session =
               selected_set.find(index) != selected_set.end();
           cache_peer.mode = cache_peer.holds_session ? CachePeerMode::ACTIVE
@@ -1067,35 +1076,24 @@ Status MooncakeKVTransferEngine::set_virtual_memory_provider(
                                                   std::move(provider));
 }
 
-bool MooncakeKVTransferEngine::has_outgoing_plan(
-    const std::string& remote_addr,
-    CacheNamespace cache_namespace) const {
-  return cache_state_.has_outgoing_plan(remote_addr, cache_namespace);
-}
-
-bool MooncakeKVTransferEngine::has_reshard_plan(
-    const std::string& remote_addr) const {
-  return cache_state_.has_reshard_plan(remote_addr);
-}
-
 Status MooncakeKVTransferEngine::bind_outgoing_regions(
     const std::string& remote_addr,
     const std::vector<KVTransferMapping>& mappings,
-    CacheNamespace cache_namespace,
+    uint32_t cache_pool_id,
     int64_t layer_id,
     std::vector<ByteRegion>* regions) const {
   return cache_state_.bind_outgoing_regions(
-      remote_addr, mappings, cache_namespace, layer_id, regions);
+      remote_addr, mappings, cache_pool_id, layer_id, regions);
 }
 
 Status MooncakeKVTransferEngine::bind_outgoing_regions_explicit(
     const std::string& remote_addr,
     const std::vector<ExplicitResourceMapping>& mappings,
-    CacheNamespace cache_namespace,
+    uint32_t cache_pool_id,
     int64_t layer_id,
     std::vector<ByteRegion>* regions) const {
   return cache_state_.bind_outgoing_regions_explicit(
-      remote_addr, mappings, cache_namespace, layer_id, regions);
+      remote_addr, mappings, cache_pool_id, layer_id, regions);
 }
 
 bool MooncakeKVTransferEngine::close_session(const uint64_t cluster_id,
@@ -1214,9 +1212,6 @@ bool MooncakeKVTransferEngine::move_memory_regions_with_session(
   return move_memory_regions(remote_addr, regions, move_opcode);
 }
 
-MooncakeKVTransferService::MooncakeKVTransferService()
-    : state_(MooncakeKVTransferState::shared_instance()) {}
-
 MooncakeKVTransferService::MooncakeKVTransferService(
     std::shared_ptr<MooncakeKVTransferState> state)
     : state_(std::move(state)) {}
@@ -1231,8 +1226,7 @@ void MooncakeKVTransferService::SetCachePeer(
     LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
-  if (!request->has_destination_manifest() ||
-      request->mode() == proto::CACHE_PEER_MODE_UNSPECIFIED) {
+  if (!request->has_destination_manifest()) {
     LOG(ERROR) << "SetCachePeer request is incomplete.";
     response->set_ok(false);
     return;
@@ -1259,7 +1253,17 @@ void MooncakeKVTransferService::SetCachePeer(
     return;
   }
 
-  const Status status = state_->set_cache_peer(peer_manifest, mode);
+  std::optional<CachePeerSourceSelection> source_selection;
+  if (request->has_source_selection()) {
+    const auto& source = request->source_selection();
+    source_selection.emplace(
+        CachePeerSourceSelection{source.incarnation_id(),
+                                 source.layout_generation(),
+                                 {source.excluded_span_ordinals().begin(),
+                                  source.excluded_span_ordinals().end()}});
+  }
+  const Status status = state_->set_cache_peer(
+      peer_manifest, mode, source_selection ? &*source_selection : nullptr);
   if (!status.ok()) {
     LOG(ERROR) << "SetCachePeer failed: " << status.message();
   }

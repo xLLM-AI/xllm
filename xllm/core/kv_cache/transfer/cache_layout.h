@@ -27,10 +27,8 @@ namespace xllm {
 
 inline constexpr uint32_t kCacheLayoutSchemaVersion = 1;
 
-enum class CacheNamespace : int8_t {
-  MAIN = 0,
-  SPEC_DRAFT = 1,
-};
+inline constexpr uint32_t kPrimaryCachePoolId = 0;
+inline constexpr uint32_t kMaxNumCachePools = proto::CacheNamespace_ARRAYSIZE;
 
 struct ParallelCoordinates {
   int32_t dp_rank = 0;
@@ -44,7 +42,7 @@ struct ParallelCoordinates {
 };
 
 struct CacheTensorManifest {
-  CacheNamespace cache_namespace = CacheNamespace::MAIN;
+  uint32_t cache_pool_id = kPrimaryCachePoolId;
   int64_t layer_id = 0;
   int32_t role = 0;
   int32_t group_id = 0;
@@ -84,15 +82,11 @@ struct WorkerCacheLayoutManifest {
 };
 
 struct CacheRegistrationContext {
-  CacheNamespace cache_namespace = CacheNamespace::MAIN;
   ParallelCoordinates coordinates;
   CacheTensorLayoutContext tensor_layout;
   std::string fingerprint;
   std::string backend;
   std::string layout_family;
-  uint64_t cluster_id = 0;
-  std::string addr;
-  uint16_t listen_port = 0;
 };
 
 Status validate_worker_cache_layout(const WorkerCacheLayoutManifest& manifest);

@@ -42,7 +42,7 @@ bool SuffixWorkerImpl::prepare_model_decode_continuation(
     const ForwardOutput& prior_output) {
   auto& input_params = inputs.input_params;
   const int32_t num_sequences = input_params.meta.num_sequences;
-  const int32_t block_size = options_.block_size();
+  const int32_t block_size = logical_block_size();
 
   const auto& next_tokens = prior_output.sample_output.next_tokens;
   const torch::Tensor last_token_ids = to_cpu_contiguous(next_tokens.flatten());

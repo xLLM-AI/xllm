@@ -53,6 +53,7 @@ limitations under the License.
 namespace xllm {
 
 class WorkerRendezvous;
+class KVTransferCompletion;
 class StaticKVTensorAllocator;
 class LinearStateSlotTable;
 
@@ -236,6 +237,12 @@ class WorkerImpl {
   virtual uint32_t transfer_kv_blocks(
       const uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info);
+
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+  KVTransferCompletion push_kv_blocks_async(
+      const std::vector<TransferKVInfo>& transfer_kv_infos,
+      std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer);
+#endif
 
   virtual bool wait_for_kv_blocks_transfer(uint64_t batch_id);
 
@@ -471,6 +478,7 @@ class WorkerImpl {
   bool worker_execution_drained_ = false;
 
   std::shared_ptr<KVTransfer> kv_transfer_;
+  uint32_t cache_pool_id_ = 0;
   std::optional<HierarchyKVTransfer::CacheRole> hierarchy_kv_cache_role_;
   const Stream* hierarchy_kv_cache_producer_stream_ = nullptr;
   std::string hierarchy_kv_cache_store_key_component_;

@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "core/kv_cache/storage/kv_cache_tensors.h"

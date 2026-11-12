@@ -15,7 +15,11 @@ limitations under the License.
 
 #include "core/kv_cache/layout/kv_cache_layout_policy.h"
 
+#include <algorithm>
+
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/platform/platform.h"
 
 namespace xllm {
 
@@ -31,8 +35,7 @@ bool is_linear_attention_layer(int64_t layer_idx,
     // Explicit full-attention markers (including the glm5_next
     // deepseek_sparse_attention label) use paged KV, not the linear
     // (conv/ssm) cache.
-    if (layer_type == "full_attention" || layer_type == "attention" ||
-        layer_type == "deepseek_sparse_attention") {
+    if (is_paged_kv_cache_layer(layer_type)) {
       return false;
     }
     // Only an explicit linear marker flips the layer to the conv/ssm cache.
@@ -51,6 +54,14 @@ bool is_linear_attention_layer(int64_t layer_idx,
 bool use_npu_nz_kv_cache_layout(const std::string& model_type) {
   return (model_type == "deepseek_v3" || model_type == "deepseek_v3_mtp") &&
          ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
+}
+
+int64_t num_index_pages_per_block() {
+  if (!Platform::supports_dsa_indexer_cache_sharding()) {
+    return 1;
+  }
+  return std::max<int64_t>(
+      ParallelConfig::get_instance().kv_split_size_effective(), /*b=*/1);
 }
 
 }  // namespace xllm

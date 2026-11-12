@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -27,7 +29,7 @@ limitations under the License.
 namespace xllm {
 
 struct StridedRegionTemplate {
-  CacheNamespace cache_namespace = CacheNamespace::MAIN;
+  uint32_t cache_pool_id = kPrimaryCachePoolId;
   int64_t layer_id = 0;
   int32_t role = 0;
   int32_t group_id = 0;
@@ -63,30 +65,19 @@ struct ExplicitResourceMapping {
   std::vector<uint64_t> remote_offsets;
 };
 
-struct ReshardPlanTemplate {
-  std::string source_incarnation;
-  uint64_t source_layout_generation = 0;
-  std::string destination_incarnation;
-  uint64_t destination_layout_generation = 0;
-  ParallelCoordinates source_coordinates;
-  ParallelCoordinates destination_coordinates;
-  std::string destination_addr;
-  std::vector<StridedRegionTemplate> regions;
-};
-
 class ReshardPlanner final {
  public:
-  Status select_sources(const std::vector<WorkerCacheLayoutManifest>& sources,
-                        const WorkerCacheLayoutManifest& destination,
-                        std::vector<size_t>* selected_indices) const;
-
-  Status validate_destination_coverage(
+  Status select_sources(
       const std::vector<WorkerCacheLayoutManifest>& sources,
-      const WorkerCacheLayoutManifest& destination) const;
+      const WorkerCacheLayoutManifest& destination,
+      std::vector<size_t>* selected_indices,
+      std::vector<std::vector<uint64_t>>* excluded_spans = nullptr) const;
 
   Status build_outgoing_plan(const WorkerCacheLayoutManifest& source,
                              const WorkerCacheLayoutManifest& destination,
-                             ReshardPlanTemplate* plan) const;
+                             std::vector<StridedRegionTemplate>* plan,
+                             std::optional<std::span<const uint64_t>>
+                                 excluded_source_spans = std::nullopt) const;
 
   // Native PULL uses the matching source TP rank, including replicated bytes
   // whose static PUSH writer is another rank. Bound local regions are Decode
@@ -94,20 +85,20 @@ class ReshardPlanner final {
   Status build_native_pull_plan(
       const WorkerCacheLayoutManifest& local_destination,
       const WorkerCacheLayoutManifest& remote_source,
-      ReshardPlanTemplate* plan) const;
+      std::vector<StridedRegionTemplate>* plan) const;
 };
 
 class RequestRegionBinder final {
  public:
-  Status bind(const ReshardPlanTemplate& plan,
+  Status bind(const std::vector<StridedRegionTemplate>& plan,
               const std::vector<KVTransferMapping>& mappings,
-              CacheNamespace cache_namespace,
+              uint32_t cache_pool_id,
               int64_t layer_id,
               std::vector<ByteRegion>* regions) const;
 
-  Status bind_explicit(const ReshardPlanTemplate& plan,
+  Status bind_explicit(const std::vector<StridedRegionTemplate>& plan,
                        const std::vector<ExplicitResourceMapping>& mappings,
-                       CacheNamespace cache_namespace,
+                       uint32_t cache_pool_id,
                        int64_t layer_id,
                        std::vector<ByteRegion>* regions) const;
 };

@@ -59,6 +59,7 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
   torch::Device device_;
   runtime::Options options_;
   bool enable_mla_ = false;
+  int64_t num_kv_pages_per_block_ = 1;
 
   pybind11::object py_executor_;
   bool requires_input_batch_metadata_ = false;

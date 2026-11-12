@@ -38,28 +38,6 @@ from xllm.python.distributed import (
 from xllm.python.layers.sfa_dcp_ref import remap_sparse_indices
 
 
-def _can_use_fused_remap(
-    topk_indices: torch.Tensor,
-    *,
-    index_topk: int,
-    physical_block_size: int,
-    dcp_size: int,
-) -> bool:
-    last_dim = int(topk_indices.shape[-1]) if topk_indices.ndim > 0 else 0
-    num_tokens = int(topk_indices.numel() // last_dim) if last_dim > 0 else 0
-    return (
-        index_topk == SFA_DCP_REMAP_TOPK
-        and last_dim == SFA_DCP_REMAP_TOPK
-        and 0 < num_tokens <= SFA_DCP_REMAP_MAX_TOKENS
-        and (physical_block_size > 0 and (physical_block_size & (physical_block_size - 1)) == 0)
-        and (dcp_size > 0 and (dcp_size & (dcp_size - 1)) == 0)
-        and topk_indices.dtype == torch.int32
-        and topk_indices.is_contiguous()
-        and topk_indices.device.type == "npu"
-        and has_sfa_dcp_remap_out()
-    )
-
-
 def _fill_wide_remap(
     *,
     out: torch.Tensor,
@@ -166,12 +144,12 @@ class AscendSFADCPMetadataBuilder:
             dtype=torch.int32,
             non_blocking=True,
         )
-        if num_reqs > self.dcp_local_seq_lens_buf.shape[0]:
-            raise RuntimeError(
-                f"dcp_local_seq_lens_buf is too small: "
-                f"shape={tuple(self.dcp_local_seq_lens_buf.shape)}, num_reqs={num_reqs}"
-            )
         if not use_precomputed:
+            if num_reqs > self.dcp_local_seq_lens_buf.shape[0]:
+                raise RuntimeError(
+                    f"dcp_local_seq_lens_buf is too small: "
+                    f"shape={tuple(self.dcp_local_seq_lens_buf.shape)}, num_reqs={num_reqs}"
+                )
             self.dcp_local_seq_lens_buf[:num_reqs].copy_(local_seq_lens, non_blocking=True)
             local_seq_lens = self.dcp_local_seq_lens_buf[:num_reqs]
 
@@ -239,28 +217,28 @@ class AscendSFADCPImpl:
     def _remap_sparse_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
         index_topk = int(self._dcp_index_topk)
         last_dim = int(topk_indices.shape[-1])
+        physical_block_size = int(self.layout.physical_block_size)
+        dcp_size = int(self.layout.dcp_size)
+        if not (
+            index_topk == SFA_DCP_REMAP_TOPK
+            and last_dim >= index_topk
+            and 0 < int(topk_indices.numel() // last_dim) <= SFA_DCP_REMAP_MAX_TOKENS
+            and (physical_block_size > 0 and (physical_block_size & (physical_block_size - 1)) == 0)
+            and (dcp_size > 0 and (dcp_size & (dcp_size - 1)) == 0)
+            and topk_indices.dtype == torch.int32
+            and topk_indices.device.type == "npu"
+            and has_sfa_dcp_remap_out()
+        ):
+            return remap_sparse_indices(topk_indices, self.layout, index_topk=index_topk)
+
         prefix = topk_indices[..., :index_topk] if last_dim > index_topk else topk_indices
         prefix = prefix.contiguous()
-        if not _can_use_fused_remap(
-            prefix,
-            index_topk=index_topk,
-            physical_block_size=int(self.layout.physical_block_size),
-            dcp_size=int(self.layout.dcp_size),
-        ):
-            return remap_sparse_indices(
-                topk_indices,
-                self.layout,
-                index_topk=index_topk,
-            )
-
         prefix_out = torch.empty_like(prefix)
-        num_tokens = int(prefix.numel() // index_topk)
-        scratch_n = num_tokens * index_topk
-        idx_scratch = torch.empty(scratch_n, dtype=torch.int32, device=topk_indices.device)
+        idx_scratch = torch.empty(int(prefix.numel()), dtype=torch.int32, device=prefix.device)
         fused = sfa_dcp_remap_out(
             prefix,
-            int(self.layout.physical_block_size),
-            int(self.layout.dcp_size),
+            physical_block_size,
+            dcp_size,
             int(self.layout.dcp_rank),
             prefix_out,
             idx_scratch,

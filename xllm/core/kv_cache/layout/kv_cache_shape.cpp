@@ -45,7 +45,6 @@ namespace {
 constexpr int32_t kNzAlignment = 16;
 
 int64_t get_local_head_count(int64_t total_head_count, int64_t world_size) {
-  CHECK_GT(world_size, 0) << "world_size must be positive.";
   return std::max<int64_t>(1, total_head_count / world_size);
 }
 
@@ -54,30 +53,14 @@ std::vector<int64_t> repeated_field_to_vector(
   return std::vector<int64_t>(field.begin(), field.end());
 }
 
-void add_shape_to_proto(const std::vector<int64_t>& shape,
-                        google::protobuf::RepeatedField<int64_t>* proto_shape) {
-  CHECK(proto_shape != nullptr) << "proto_shape must not be nullptr.";
-  proto_shape->Reserve(static_cast<int32_t>(shape.size()));
-  for (const int64_t dim : shape) {
-    proto_shape->Add(dim);
-  }
-}
-
-void transpose_dim_1_and_2(std::vector<int64_t>* shape) {
-  CHECK(shape != nullptr) << "shape must not be nullptr.";
-  if (shape->size() <= 2) {
-    return;
-  }
-  std::swap((*shape)[1], (*shape)[2]);
-}
-
 }  // namespace
 
 KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
                            const ModelArgs& model_args,
                            int64_t world_size)
     : shared_slab_count_(kv_cache_cap.shared_slab_count()),
-      shared_draft_layers_(kv_cache_cap.shared_draft_layers()) {
+      shared_draft_layers_(kv_cache_cap.shared_draft_layers()),
+      num_kv_pages_per_block_(kv_cache_cap.num_kv_pages_per_block()) {
   CHECK_GE(shared_slab_count_, 0);
   CHECK_GE(shared_draft_layers_, 0);
   CHECK_GT(world_size, 0) << "world_size must be positive.";
@@ -211,7 +194,6 @@ int64_t KVCacheShape::linear_ssm_checkpoint_stride() const {
   if (!has_conv_cache_shape() || !has_ssm_cache_shape()) {
     return 1;
   }
-  CHECK(!conv_cache_shape().empty() && !ssm_cache_shape().empty());
   const int64_t checkpoint_stride =
       linear_ssm_checkpoint_stride(conv_cache_shape()[0], ssm_cache_shape()[0]);
   CHECK_GT(checkpoint_stride, 0);
@@ -271,27 +253,30 @@ void KVCacheShape::to_proto(proto::KVCacheShape* proto_shape) const {
   proto_shape->set_shared_slab_count(shared_slab_count_);
   proto_shape->set_shared_draft_layers(shared_draft_layers_);
   if (has_kpool_tail_shape()) {
-    add_shape_to_proto(kpool_tail_shape(),
-                       proto_shape->mutable_kpool_tail_shape());
+    proto_shape->mutable_kpool_tail_shape()->Add(kpool_tail_shape_->begin(),
+                                                 kpool_tail_shape_->end());
   }
-  add_shape_to_proto(key_cache_shape(), proto_shape->mutable_key_cache_shape());
+  const auto& key_shape = key_cache_shape();
+  proto_shape->mutable_key_cache_shape()->Add(key_shape.begin(),
+                                              key_shape.end());
   if (has_value_cache_shape()) {
-    add_shape_to_proto(value_cache_shape(),
-                       proto_shape->mutable_value_cache_shape());
+    proto_shape->mutable_value_cache_shape()->Add(value_cache_shape_->begin(),
+                                                  value_cache_shape_->end());
   }
   if (has_index_cache_shape()) {
-    add_shape_to_proto(index_cache_shape(),
-                       proto_shape->mutable_index_cache_shape());
+    proto_shape->mutable_index_cache_shape()->Add(index_cache_shape_->begin(),
+                                                  index_cache_shape_->end());
   }
   if (has_index_cache_scale_shape()) {
-    add_shape_to_proto(index_cache_scale_shape(),
-                       proto_shape->mutable_index_cache_scale_shape());
+    proto_shape->mutable_index_cache_scale_shape()->Add(
+        index_cache_scale_shape_->begin(), index_cache_scale_shape_->end());
   }
   if (has_conv_cache_shape()) {
-    add_shape_to_proto(conv_cache_shape(),
-                       proto_shape->mutable_conv_cache_shape());
-    add_shape_to_proto(ssm_cache_shape(),
-                       proto_shape->mutable_ssm_cache_shape());
+    proto_shape->mutable_conv_cache_shape()->Add(conv_cache_shape_->begin(),
+                                                 conv_cache_shape_->end());
+    const auto& ssm_shape = ssm_cache_shape();
+    proto_shape->mutable_ssm_cache_shape()->Add(ssm_shape.begin(),
+                                                ssm_shape.end());
   }
 }
 
@@ -429,18 +414,15 @@ void KVCacheShape::init_mla_packed_c8_shape(const KVCacheCapacity& kv_cache_cap,
 
 void KVCacheShape::init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
                                           const ModelArgs& model_args) {
-  const int64_t replication_factor =
-      Platform::supports_dsa_indexer_cache_sharding()
-          ? ParallelConfig::get_instance().kv_split_size_effective()
-          : 1;
-  const int64_t index_block_count =
-      kv_cache_cap.n_blocks() * replication_factor;
+  const int64_t num_pages_per_block = num_index_pages_per_block();
+  const int64_t num_index_blocks =
+      kv_cache_cap.n_blocks() * num_pages_per_block;
   if (kpool_layout_ == KPoolCacheLayout::COMPRESSED_WITH_TAIL &&
       model_args.index_kpool_compress()) {
     CHECK_EQ(kv_cache_cap.block_size() % model_args.index_kpool(), 0)
         << "KPool cache block_size must be divisible by index_kpool.";
     index_cache_shape_ = std::vector<int64_t>{
-        index_block_count,
+        num_index_blocks,
         kv_cache_cap.block_size() / model_args.index_kpool(),
         1,
         model_args.index_head_dim()};
@@ -455,14 +437,10 @@ void KVCacheShape::init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
   const int64_t cache_head_dim =
       model_args.index_kpool_compress() ? head_dim * 2 + 1 : head_dim;
   index_cache_shape_ = std::vector<int64_t>{
-      index_block_count, kv_cache_cap.block_size(), 1, cache_head_dim};
+      num_index_blocks, kv_cache_cap.block_size(), 1, cache_head_dim};
 }
 
 void KVCacheShape::init_index_cache_scale_shape() {
-  CHECK(index_cache_shape_.has_value())
-      << "index_cache_shape must be initialized before index cache scale.";
-  CHECK_EQ(index_cache_shape_->size(), 4)
-      << "index_cache_shape must be [blocks, heads, block_size, head_dim].";
   index_cache_scale_shape_ = std::vector<int64_t>{(*index_cache_shape_)[0],
                                                   (*index_cache_shape_)[1],
                                                   (*index_cache_shape_)[2]};
@@ -523,22 +501,17 @@ void KVCacheShape::apply_device_layout(const ModelArgs& model_args) {
   // default k/v cache layout: [n_blocks, block_size, n_head, head_dim]
   // => mlu/ilu k/v cache layout: [n_blocks, n_head, block_size, head_dim]
 #if defined(USE_MLU) || defined(USE_ILU)
-  if (key_cache_shape_.has_value()) {
-    transpose_dim_1_and_2(&*key_cache_shape_);
-  }
+  std::swap((*key_cache_shape_)[1], (*key_cache_shape_)[2]);
   if (value_cache_shape_.has_value()) {
-    transpose_dim_1_and_2(&*value_cache_shape_);
+    std::swap((*value_cache_shape_)[1], (*value_cache_shape_)[2]);
   }
   if (index_cache_shape_.has_value()) {
-    transpose_dim_1_and_2(&*index_cache_shape_);
+    std::swap((*index_cache_shape_)[1], (*index_cache_shape_)[2]);
   }
 #endif
 
 #if defined(USE_MLU) || defined(USE_DCU)
   if (model_args.enable_mla()) {
-    CHECK(key_cache_shape_.has_value())
-        << "key_cache_shape is not initialized.";
-    CHECK_GE(key_cache_shape_->size(), 4) << "invalid mla key_cache_shape.";
     (*key_cache_shape_)[3] =
         model_args.kv_lora_rank() + model_args.qk_rope_head_dim();
     value_cache_shape_.reset();
@@ -551,46 +524,6 @@ void KVCacheShape::apply_device_layout(const ModelArgs& model_args) {
 const std::vector<int64_t>& KVCacheShape::empty_shape() {
   static const std::vector<int64_t> kEmptyShape;
   return kEmptyShape;
-}
-
-KVCacheShape build_speculative_draft_kv_cache_shape(
-    const KVCacheShape& target_kv_cache_shape,
-    KVCacheCapacity draft_capacity,
-    const ModelArgs& draft_model_args,
-    int64_t block_size,
-    int64_t draft_world_size,
-    const std::string& kv_cache_dtype) {
-  CHECK(!target_kv_cache_shape.key_cache_shape().empty())
-      << "target KV cache shape must contain key cache shape";
-  if (target_kv_cache_shape.has_grouped_cache_layout()) {
-    return target_kv_cache_shape;
-  }
-
-  // Derive the draft layout from its model type and the configured KV dtype.
-  const bool draft_mla_packed_c8 =
-      draft_model_args.enable_mla() &&
-      util::enable_mla_packed_c8(kv_cache_dtype == "int8",
-                                 draft_model_args.model_type());
-  CHECK(!has_linear_attention_layers(draft_model_args) ||
-        draft_capacity.num_linear_state_blocks() > 0)
-      << "Linear drafts require an explicit linear-state capacity.";
-  CHECK(!draft_model_args.index_kpool_compress() ||
-        target_kv_cache_shape.kpool_layout() !=
-            KPoolCacheLayout::COMPRESSED_WITH_TAIL ||
-        target_kv_cache_shape.has_kpool_tail_shape())
-      << "Compressed KPool drafts require a target KPool tail shape.";
-  draft_capacity
-      .shared_draft_layers(target_kv_cache_shape.shared_draft_layers())
-      .n_blocks(target_kv_cache_shape.key_cache_shape()[0])
-      .block_size(block_size)
-      .enable_mla_kv_cache_quant(draft_mla_packed_c8);
-  draft_capacity.kpool_layout(target_kv_cache_shape.kpool_layout());
-  if (target_kv_cache_shape.has_kpool_tail_shape()) {
-    draft_capacity
-        .num_linear_state_blocks(target_kv_cache_shape.kpool_tail_shape()[0])
-        .kpool_tail_len(target_kv_cache_shape.kpool_tail_shape()[2]);
-  }
-  return KVCacheShape(draft_capacity, draft_model_args, draft_world_size);
 }
 
 }  // namespace xllm

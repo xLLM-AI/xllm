@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <utility>
 
+#include "core/platform/model_stream_registry.h"
 #include "layers/common/dsa_topk_share_plan.h"
 
 namespace xllm {

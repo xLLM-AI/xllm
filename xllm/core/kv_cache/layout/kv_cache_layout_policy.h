@@ -17,9 +17,16 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace xllm {
+
+inline bool is_paged_kv_cache_layer(std::string_view layer_type) {
+  return layer_type == "full_attention" || layer_type == "attention" ||
+         layer_type == "deepseek_sparse_attention" ||
+         layer_type == "sliding_attention";
+}
 
 // for qwen3.5
 bool is_linear_attention_layer(
@@ -29,5 +36,7 @@ bool is_linear_attention_layer(
 
 // Whether NPU KV cache should use FRACTAL_NZ layout for a model type.
 bool use_npu_nz_kv_cache_layout(const std::string& model_type);
+
+int64_t num_index_pages_per_block();
 
 }  // namespace xllm

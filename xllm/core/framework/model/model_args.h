@@ -28,6 +28,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/framework/model/model_type.h"
+#include "core/kv_cache/layout/kv_cache_layout_policy.h"
 
 namespace xllm {
 
@@ -1257,12 +1258,7 @@ inline bool is_full_attention_layer(const ModelArgs& args, int64_t layer_id) {
   if (layer_id >= 0 &&
       layer_id < static_cast<int64_t>(hybrid_layer_types.size())) {
     const auto& layer_type = hybrid_layer_types[layer_id];
-    // deepseek_sparse_attention (glm5_next DSA layers) is a full-attention
-    // variant: it uses paged KV, not the linear (conv/ssm) state cache. Treat
-    // it as full attention here so capacity estimation and per-layer dispatch
-    // classify it correctly (mirrors is_linear_attention_layer's exclusion).
-    return layer_type == "full_attention" || layer_type == "attention" ||
-           layer_type == "deepseek_sparse_attention";
+    return is_paged_kv_cache_layer(layer_type);
   }
 
   int32_t attention_interval = args.full_attention_interval();
@@ -1278,9 +1274,7 @@ inline bool has_linear_attention_layers(const ModelArgs& args) {
     return std::any_of(hybrid_layer_types.begin(),
                        hybrid_layer_types.end(),
                        [](const std::string& layer_type) {
-                         return layer_type != "full_attention" &&
-                                layer_type != "attention" &&
-                                layer_type != "deepseek_sparse_attention";
+                         return !is_paged_kv_cache_layer(layer_type);
                        });
   }
   return args.full_attention_interval() > 1;

@@ -29,15 +29,6 @@ cc_library(
 
 cc_library(
   NAME
-    push_route
-  HDRS
-    push_route.h
-  SRCS
-    push_route.cpp
-)
-
-cc_library(
-  NAME
     pd_topology_guard
   HDRS
     pd_topology_guard.h
@@ -103,7 +94,6 @@ cc_library(
     :common
     :kv_cache
     :mooncake_transfer_engine
-    :push_route
     :reshard_planner
     :util
     :platform

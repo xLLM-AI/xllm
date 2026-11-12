@@ -214,15 +214,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
 #endif
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
       input.input_params.parallel.layer_synchronizer = layer_synchronizer;
-      auto request_ids =
-          KVTransfer::unique_request_ids(input.transfer_kv_infos);
-
-      return KVTransferCompletion(
-          kv_transfer_->push_kv_blocks_async(input.transfer_kv_infos,
-                                             context_.get_parallel_args(),
-                                             layer_synchronizer,
-                                             options_.is_draft_engine()),
-          std::move(request_ids));
+      return push_kv_blocks_async(input.transfer_kv_infos, layer_synchronizer);
 #endif
     }
     return KVTransferCompletion{};

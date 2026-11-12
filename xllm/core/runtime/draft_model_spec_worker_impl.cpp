@@ -331,22 +331,49 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
 }
 
 template <typename TargetInput>
+int64_t DraftModelSpecWorkerImpl<TargetInput>::get_draft_kv_pages_per_block()
+    const {
+  return SpeculativeConfig::get_draft_kv_pages_per_block(
+      options_.speculative_algorithm(),
+      parallel_args_.kv_split_size_effective());
+}
+
+template <typename TargetInput>
 KVCacheShape DraftModelSpecWorkerImpl<TargetInput>::draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape) const {
-  const int64_t draft_world_size =
-      target_kv_cache_shape.has_grouped_cache_layout()
-          ? -1
-          : get_dp_local_tp_size(draft_impl_->context_.get_parallel_args());
-  KVCacheCapacity draft_capacity;
-  draft_capacity.enable_indexer_cache_quant(
-      KVCacheConfig::get_instance().indexer_cache_dtype() == "int8");
-  return build_speculative_draft_kv_cache_shape(
-      target_kv_cache_shape,
-      draft_capacity,
-      draft_impl_->context_.get_model_args(),
-      options_.block_size(),
-      draft_world_size,
-      options_.kv_cache_dtype());
+  const auto& target_key_shape = target_kv_cache_shape.key_cache_shape();
+  CHECK(!target_key_shape.empty()) << "Target KV cache must have a key shape.";
+  const int64_t num_kv_pages_per_block = get_draft_kv_pages_per_block();
+  if (target_kv_cache_shape.has_grouped_cache_layout() &&
+      num_kv_pages_per_block == 1) {
+    return target_kv_cache_shape;
+  }
+
+  const ModelContext& draft_context = draft_impl_->context_;
+  const ModelArgs& draft_args = draft_context.get_model_args();
+  CHECK(!has_linear_attention_layers(draft_args))
+      << "Linear drafts require an explicit linear-state capacity.";
+
+  KVCacheCapacity capacity;
+  capacity.n_blocks(target_key_shape.front() * num_kv_pages_per_block)
+      .block_size(options_.block_size())
+      .num_kv_pages_per_block(num_kv_pages_per_block)
+      .shared_draft_layers(target_kv_cache_shape.shared_draft_layers())
+      .enable_mla_kv_cache_quant(
+          draft_args.enable_mla() &&
+          util::enable_mla_packed_c8(options_.kv_cache_dtype() == "int8",
+                                     draft_args.model_type()))
+      .enable_indexer_cache_quant(
+          KVCacheConfig::get_instance().indexer_cache_dtype() == "int8")
+      .kpool_layout(target_kv_cache_shape.kpool_layout());
+  if (target_kv_cache_shape.has_kpool_tail_shape()) {
+    const auto& tail_shape = target_kv_cache_shape.kpool_tail_shape();
+    capacity.num_linear_state_blocks(tail_shape[0])
+        .kpool_tail_len(tail_shape[2]);
+  }
+  return KVCacheShape(capacity,
+                      draft_args,
+                      get_dp_local_tp_size(draft_context.get_parallel_args()));
 }
 
 template <typename TargetInput>
@@ -468,9 +495,10 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
       target_status == WorkerImpl::Status::LOADED &&
       draft_impl_->get_status() == WorkerImpl::Status::LOADED &&
       impl_->context_.get_model_id() != draft_impl_->context_.get_model_id();
-  bool target_allocated = true;
   if (target_status == WorkerImpl::Status::LOADED) {
-    target_allocated = allocate(*impl_, kv_cache_shape);
+    if (!allocate(*impl_, kv_cache_shape)) {
+      return false;
+    }
   } else {
     CHECK_EQ(target_status, WorkerImpl::Status::READY);
   }
@@ -478,15 +506,6 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
     const auto shape = draft_kv_cache_shape(kv_cache_shape);
     draft_impl_->allocate_kv_cache(
         shape, build_draft_kv_cache_layout(shape), kv_transfer_);
-    if (kv_transfer_) {
-      kv_transfer_->configure_cache_layout(
-          draft_impl_->context_.get_parallel_args(),
-          draft_impl_->context_.get_model_args(),
-          draft_impl_->options().block_size(),
-          true);
-      kv_transfer_->register_kv_cache_spec(
-          draft_impl_->kv_caches(), shape, draft_impl_->dtype());
-    }
   } else {
     CHECK_EQ(draft_impl_->get_status(), WorkerImpl::Status::READY);
   }
@@ -498,19 +517,17 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
     embedding_cache_->set_placeholder(
         torch::zeros({placeholder_size}, torch::dtype(dtype_).device(device_)));
   }
-  if (target_allocated) {
-    if (bind_vmm_group) {
-      // The scheduler's block IDs address both caches. Bind their mappings
-      // before the master reserves its first (padding) page group.
-      CHECK(WorkerMemoryResources::get_instance()
-                .kv_cache_memory()
-                .bind_mapping_group(impl_->context_.get_model_id(),
-                                    {impl_->context_.get_model_id(),
-                                     draft_impl_->context_.get_model_id()}));
-    }
-    finalize_hierarchy_kv_transfers();
+  if (bind_vmm_group) {
+    // The scheduler's block IDs address both caches. Bind their mappings
+    // before the master reserves its first (padding) page group.
+    CHECK(WorkerMemoryResources::get_instance()
+              .kv_cache_memory()
+              .bind_mapping_group(impl_->context_.get_model_id(),
+                                  {impl_->context_.get_model_id(),
+                                   draft_impl_->context_.get_model_id()}));
   }
-  return target_allocated;
+  finalize_hierarchy_kv_transfers();
+  return true;
 }
 
 template <typename TargetInput>
@@ -544,12 +561,10 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_kv_cache_with_transfer(
     const KVCacheShape& kv_cache_shape) {
   prepare_hierarchy_kv_transfers();
   if (kv_transfer_ == nullptr) {
+    CHECK_EQ(impl_->get_status(), WorkerImpl::Status::LOADED);
     kv_transfer_ = std::make_shared<MooncakeKVTransferDefault>(
-        device_.index(),
-        options_.transfer_listen_port(),
-        device_,
-        context_.get_model_args().model_type());
-    kv_transfer_->initialize(device_.index());
+        options_.transfer_listen_port(), device_.unwrap());
+    kv_transfer_->initialize();
   }
   return allocate_pools(
       kv_cache_shape, [this](WorkerImpl& worker, const KVCacheShape& shape) {
@@ -619,11 +634,6 @@ DraftModelSpecWorkerImpl<TargetInput>::finalize_step_output(
 }
 
 template <typename TargetInput>
-int32_t DraftModelSpecWorkerImpl<TargetInput>::logical_block_size() const {
-  return options_.block_size() * parallel_args_.kv_split_size_effective();
-}
-
-template <typename TargetInput>
 void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
     TargetInput& input,
     const std::vector<EmbeddingCache::DecodeState>& last_states) const {
@@ -651,9 +661,9 @@ void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
       chunked_verify && block_tables.defined() && block_tables.dim() == 2;
   const int32_t verify_lens = options_.num_speculative_tokens() + 1;
   const int32_t allocated_kv_len =
-      clamp_active
-          ? static_cast<int32_t>(block_tables.size(1)) * logical_block_size()
-          : 0;
+      clamp_active ? static_cast<int32_t>(block_tables.size(1)) *
+                         this->logical_block_size()
+                   : 0;
   const int32_t max_valid_position = allocated_kv_len - verify_lens;
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {

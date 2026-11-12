@@ -624,15 +624,8 @@ void PDScheduler::dispatch_requests() {
 
         sequence->kv_state().set_transfer_kv_info(std::move(info));
 
-        // Compress per-group transfer cursors to the D-side shared count.
-        // advance_group_transfer_block_idx is monotonic max, so this is a
-        // no-op if the group's remote_shared_num is 0 (SWA / LINEAR under
-        // DECODE, or D that got no prefix cache hit); when it is >0, P
-        // starts pushing at the first block D actually needs, skipping the
-        // shared prefix without touching P's own local shared_num.
-        const auto& mappings =
-            sequence->kv_state().transfer_kv_info()->mappings;
-        for (const KVTransferMapping& mapping : mappings) {
+        const auto& transfer_info = *sequence->kv_state().transfer_kv_info();
+        for (const KVTransferMapping& mapping : transfer_info.mappings) {
           if (mapping.remote_shared_num == 0) {
             continue;
           }
@@ -643,13 +636,20 @@ void PDScheduler::dispatch_requests() {
                        << mapping.group_id;
             continue;
           }
+          const size_t num_dst_blocks_per_src_block =
+              is_kv_split_cache_block_type(block_type.value()) &&
+                      !transfer_info.rank_local_mapping
+                  ? static_cast<size_t>(instance_info_.kv_split_size)
+                  : 1;
+          const size_t num_shared_src_blocks =
+              static_cast<size_t>(mapping.remote_shared_num) /
+              num_dst_blocks_per_src_block;
           if (block_type.value() == BlockType::KV) {
             sequence->kv_state().advance_transfer_block_idx(
-                static_cast<size_t>(mapping.remote_shared_num));
+                num_shared_src_blocks);
           } else {
             sequence->kv_state().advance_group_transfer_block_idx(
-                block_type.value(),
-                static_cast<size_t>(mapping.remote_shared_num));
+                block_type.value(), num_shared_src_blocks);
           }
         }
       }

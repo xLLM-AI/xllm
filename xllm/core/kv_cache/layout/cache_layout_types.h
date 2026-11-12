@@ -67,13 +67,13 @@ struct CacheTensorLayoutContext {
   // Physical pool entries per INDEX block; zero uses block_token_capacity.
   int64_t index_block_capacity = 0;
   int64_t kv_head_count = 0;
-  int64_t index_head_count = 0;
   int64_t linear_key_head_count = 0;
   int64_t linear_value_head_count = 0;
   int64_t linear_key_head_dim = 0;
   int64_t linear_ssm_checkpoint_stride = 1;
   bool enable_mla = false;
   bool head_major_layout = false;
+  int64_t num_kv_pages_per_block = 1;
 };
 
 }  // namespace xllm

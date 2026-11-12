@@ -19,7 +19,6 @@ limitations under the License.
 
 #include <algorithm>
 #include <limits>
-#include <numeric>
 #include <sstream>
 #include <unordered_set>
 
@@ -27,8 +26,8 @@ limitations under the License.
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/layout/cache_layout_builder.h"
+#include "core/kv_cache/layout/kv_cache_layout_policy.h"
 #include "core/kv_cache/storage/kv_cache_tensors.h"
-#include "core/kv_cache/transfer/push_route.h"
 #include "core/util/tensor_helper.h"
 #include "util/net.h"
 #include "util/uuid.h"
@@ -41,6 +40,25 @@ std::string get_merge_key(const uint64_t dst_cluster_id,
                           const std::string& dst_addr) {
   return std::to_string(dst_cluster_id) + "_" + dst_addr;
 }
+
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+std::vector<std::string> push_destination_keys(
+    const std::unordered_map<std::string, KVTransfer::KVCacheInfo>& kv_infos,
+    int32_t kv_split_rank,
+    int32_t kv_split_size) {
+  std::vector<std::string> keys;
+  keys.reserve(kv_infos.size());
+  for (const auto& destination : kv_infos) {
+    keys.push_back(destination.first);
+  }
+  if (kv_split_size > 1 && keys.size() > 1) {
+    std::sort(keys.begin(), keys.end());
+    std::rotate(
+        keys.begin(), keys.begin() + kv_split_rank % keys.size(), keys.end());
+  }
+  return keys;
+}
+#endif
 
 std::vector<std::string> collect_failed_request_ids(
     const std::unordered_map<std::string, KVTransfer::KVCacheInfo>& kv_infos,
@@ -60,11 +78,6 @@ std::vector<std::string> collect_failed_request_ids(
 
 void validate_virtual_kv_cache_global_offsets(
     const VirtualKVCacheLayerGlobalOffsets& offsets) {
-  CHECK_EQ(offsets.k_offsets.empty(), offsets.v_offsets.empty());
-  if (offsets.k_offsets.empty()) {
-    CHECK(offsets.index_offsets.empty());
-    return;
-  }
   CHECK_EQ(offsets.k_offsets.size(), offsets.v_offsets.size());
   CHECK(offsets.index_offsets.empty() ||
         offsets.index_offsets.size() == offsets.k_offsets.size());
@@ -107,14 +120,45 @@ void merge_virtual_kv_cache_global_offsets(
   }
 }
 
-std::vector<KVCacheTensor> get_mooncake_tensors(const KVCache& cache) {
-  return cache.get_cache_tensors();
+int64_t physical_rows_per_resource(KVCacheTensorRole role,
+                                   const CacheTensorLayoutContext& context) {
+  if (role == KVCacheTensorRole::SSM) {
+    return context.linear_ssm_checkpoint_stride;
+  }
+  if (role == KVCacheTensorRole::INDEX ||
+      role == KVCacheTensorRole::INDEX_SCALE) {
+    return num_index_pages_per_block();
+  }
+  if (role == KVCacheTensorRole::KEY || role == KVCacheTensorRole::VALUE ||
+      role == KVCacheTensorRole::WINDOW) {
+    return context.num_kv_pages_per_block;
+  }
+  return 1;
 }
 
-int64_t physical_rows_per_resource(KVCacheTensorRole role,
-                                   int64_t ssm_checkpoint_stride) {
-  CHECK_GT(ssm_checkpoint_stride, 0);
-  return role == KVCacheTensorRole::SSM ? ssm_checkpoint_stride : 1;
+CacheTensorManifest make_cache_tensor_manifest(
+    const CacheTensorLayoutContext& tensor_layout,
+    KVCacheTensor& cache_tensor,
+    int64_t layer_id) {
+  std::string descriptor_error;
+  CHECK(describe_cache_tensor(tensor_layout, &cache_tensor, &descriptor_error))
+      << "Failed to describe cache tensor, layer=" << layer_id
+      << ", role=" << cache_tensor.role.to_string() << ": " << descriptor_error;
+  const torch::Tensor& tensor = cache_tensor.tensor;
+  CacheTensorManifest manifest;
+  manifest.layer_id = layer_id;
+  manifest.role = static_cast<int32_t>(
+      static_cast<KVCacheTensorRole::Value>(cache_tensor.role));
+  manifest.group_id = cache_tensor.group_id;
+  manifest.scalar_type = static_cast<int32_t>(tensor.scalar_type());
+  manifest.element_bytes = tensor.element_size();
+  manifest.shape = tensor.sizes().vec();
+  manifest.stride = tensor.strides().vec();
+  manifest.contiguous = true;
+  manifest.block_token_capacity = static_cast<uint64_t>(
+      std::max<int64_t>(tensor_layout.block_token_capacity, 0));
+  manifest.shard = std::move(cache_tensor.shard_descriptor.value());
+  return manifest;
 }
 
 void merge_kv_info(
@@ -158,42 +202,33 @@ void merge_kv_info(
 // MooncakeKVTransferBase
 // ============================================================================
 
-MooncakeKVTransferBase::MooncakeKVTransferBase(
-    const int32_t device_id,
-    const uint16_t listen_port,
-    const torch::Device& device,
-    std::unique_ptr<MooncakeKVTransferEngine> engine)
-    : device_id_(device_id),
-      device_(device),
-      listen_port_(listen_port),
-      mooncake_te_(std::move(engine)) {
+MooncakeKVTransferBase::MooncakeKVTransferBase(const uint16_t listen_port,
+                                               const torch::Device& device)
+    : listen_port_(listen_port),
+      mooncake_te_(
+          std::make_unique<MooncakeKVTransferEngine>(listen_port, device)) {
   std::string instance_ip = net::get_local_ip_addr();
   cluster_id_ = net::convert_ip_port_to_uint64(instance_ip, listen_port_);
   ShortUUID uuid;
   incarnation_id_ = uuid.random();
 }
 
-void MooncakeKVTransferBase::initialize(int32_t device_id) {
-  (void)device_id;
+void MooncakeKVTransferBase::initialize() {
   addr_ = mooncake_te_->initialize();
 }
 
 void MooncakeKVTransferBase::configure_cache_layout(
     const ParallelArgs& parallel_args,
     const ModelArgs& model_args,
-    int32_t block_token_capacity,
-    bool is_spec_draft) {
+    int32_t block_token_capacity) {
   CHECK_GT(parallel_args.dp_size(), 0);
   CHECK_GT(parallel_args.cp_size(), 0);
   CHECK_GT(parallel_args.world_size(), 0);
-  CHECK_EQ(parallel_args.world_size() % parallel_args.dp_size(), 0);
   CHECK_EQ(parallel_args.world_size() %
                (parallel_args.dp_size() * parallel_args.cp_size()),
            0);
 
   CacheRegistrationContext context;
-  context.cache_namespace =
-      is_spec_draft ? CacheNamespace::SPEC_DRAFT : CacheNamespace::MAIN;
   const int32_t tp_size = parallel_args.world_size() / parallel_args.dp_size() /
                           parallel_args.cp_size();
   const int32_t rank_in_dp =
@@ -214,7 +249,6 @@ void MooncakeKVTransferBase::configure_cache_layout(
   tensor_layout.block_token_capacity = block_token_capacity;
   tensor_layout.kv_head_count =
       model_args.n_kv_heads().value_or(model_args.n_heads());
-  tensor_layout.index_head_count = model_args.index_n_heads();
   tensor_layout.linear_key_head_count = model_args.linear_num_key_heads();
   tensor_layout.linear_value_head_count = model_args.linear_num_value_heads();
   tensor_layout.linear_key_head_dim = model_args.linear_key_head_dim();
@@ -223,7 +257,6 @@ void MooncakeKVTransferBase::configure_cache_layout(
   tensor_layout.head_major_layout = true;
   context.layout_family = "head_token_dim";
 #else
-  tensor_layout.head_major_layout = false;
   context.layout_family = "token_head_dim";
 #endif
 
@@ -239,11 +272,8 @@ void MooncakeKVTransferBase::configure_cache_layout(
   std::ostringstream fingerprint;
   fingerprint << model_args.model_type() << ":" << model_args.n_layers() << ":"
               << tensor_layout.kv_head_count << ":" << model_args.head_dim()
-              << ":" << tensor_layout.index_head_count;
+              << ":" << model_args.index_n_heads();
   context.fingerprint = fingerprint.str();
-  context.cluster_id = cluster_id_;
-  context.addr = addr_;
-  context.listen_port = listen_port_;
   pending_registration_context_ = std::move(context);
 }
 
@@ -281,58 +311,25 @@ bool MooncakeKVTransferBase::unlink_cluster(const uint64_t& cluster_id,
 // MooncakeKVTransferDefault
 // ============================================================================
 
-MooncakeKVTransferDefault::MooncakeKVTransferDefault(
-    const int32_t device_id,
-    const uint16_t listen_port,
-    const torch::Device& device,
-    const std::string& model_type)
-    : MooncakeKVTransferBase(
-          device_id,
-          listen_port,
-          device,
-          std::make_unique<MooncakeKVTransferEngine>(listen_port, device)) {
-  (void)model_type;
-}
-
-MooncakeKVTransferDefault::MooncakeKVTransferDefault(
-    const int32_t device_id,
-    const uint16_t listen_port,
-    const torch::Device& device,
-    const std::string& model_type,
-    std::unique_ptr<MooncakeKVTransferEngine> engine)
-    : MooncakeKVTransferBase(device_id,
-                             listen_port,
-                             device,
-                             std::move(engine)) {
-  (void)model_type;
-}
-
-void MooncakeKVTransferDefault::register_kv_cache(
+uint32_t MooncakeKVTransferDefault::register_kv_cache(
     std::vector<xllm::KVCache>& kv_caches,
     const KVCacheShape& kv_cache_shape,
-    torch::ScalarType dtype) {
-  const bool is_spec_draft = main_layout_.registered;
-  CHECK(!is_spec_draft || !spec_layout_.registered)
-      << "Spec draft kv cache is already registered.";
-
+    torch::ScalarType) {
+  CHECK_LT(cache_pool_layouts_.size(), kMaxNumCachePools)
+      << "Mooncake cache pool count exceeds the RPC limit.";
+  const auto cache_pool_id = static_cast<uint32_t>(cache_pool_layouts_.size());
   const int64_t num_layers = static_cast<int64_t>(kv_caches.size());
-  bool has_v_cache = true;
-  if (!kv_caches.empty()) {
-    torch::Tensor value_cache = kv_caches[0].get_v_cache();
-    has_v_cache = value_cache.defined() && value_cache.numel() > 0;
-  }
 
-  (void)dtype;
-
-  const int64_t ssm_checkpoint_stride =
+  CacheRegistrationContext* registration =
+      pending_registration_context_ ? &*pending_registration_context_ : nullptr;
+  CacheTensorLayoutContext local_layout;
+  CacheTensorLayoutContext& tensor_layout =
+      registration != nullptr ? registration->tensor_layout : local_layout;
+  tensor_layout.linear_ssm_checkpoint_stride =
       kv_cache_shape.linear_ssm_checkpoint_stride();
-  if (pending_registration_context_.has_value()) {
-    CacheTensorLayoutContext& tensor_layout =
-        pending_registration_context_->tensor_layout;
-    tensor_layout.linear_ssm_checkpoint_stride = ssm_checkpoint_stride;
-    // The shape carries the actual producer layout, including compressed KPool
-    // and draft caches. K/V blocks still cover the original token capacity.
-    tensor_layout.index_block_capacity = 0;
+  tensor_layout.num_kv_pages_per_block =
+      kv_cache_shape.num_kv_pages_per_block();
+  if (registration != nullptr) {
     if (kv_cache_shape.kpool_layout() ==
             KPoolCacheLayout::COMPRESSED_WITH_TAIL &&
         kv_cache_shape.has_index_cache_shape()) {
@@ -340,142 +337,126 @@ void MooncakeKVTransferDefault::register_kv_cache(
       tensor_layout.index_block_capacity =
           kv_cache_shape.index_cache_shape().at(token_axis);
     }
-    if (!is_spec_draft && kv_cache_shape.has_kpool_tail_shape()) {
+    if (cache_pool_id == kPrimaryCachePoolId &&
+        kv_cache_shape.has_kpool_tail_shape()) {
       const auto& tail_shape = kv_cache_shape.kpool_tail_shape();
-      CHECK_GE(tail_shape.size(), 4U);
-      pending_registration_context_->fingerprint +=
+      registration->fingerprint +=
           "|compressed_kpool_tail:" + std::to_string(tail_shape.back()) + ":" +
           std::to_string(tail_shape[2]) + ":" +
           std::to_string(tensor_layout.block_token_capacity);
     }
   }
 
-  BufLayout layout;
-  layout.num_layers = num_layers;
-  layout.layers.resize(static_cast<size_t>(num_layers));
-  if (is_spec_draft) {
-    layout.offset = main_layout_.offset + main_layout_.total_buf_cnt;
-  }
+  CachePoolLayout pool_layout(kv_caches.size());
+  std::vector<void*> addrs;
+  std::vector<size_t> lens;
+  std::vector<uint64_t> buf_bytes;
+  const size_t num_expected_buffers = kv_caches.size() * 4;
+  addrs.reserve(num_expected_buffers);
+  lens.reserve(num_expected_buffers);
+  buf_bytes.reserve(num_expected_buffers);
+  auto tensor_lifetime = std::make_shared<std::vector<torch::Tensor>>();
+  tensor_lifetime->reserve(num_expected_buffers);
   std::vector<CacheTensorManifest> tensor_manifests;
   for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
-    const std::vector<KVCacheTensor> transfer_tensors =
-        get_mooncake_tensors(kv_caches[static_cast<size_t>(layer_id)]);
+    std::vector<KVCacheTensor> transfer_tensors =
+        kv_caches[static_cast<size_t>(layer_id)].get_cache_tensors();
     std::vector<RegisteredBufferDesc>& layer_buffers =
-        layout.layers[static_cast<size_t>(layer_id)];
+        pool_layout[static_cast<size_t>(layer_id)];
     layer_buffers.reserve(transfer_tensors.size());
-    for (const KVCacheTensor& cache_tensor : transfer_tensors) {
+    for (KVCacheTensor& cache_tensor : transfer_tensors) {
       const torch::Tensor& tensor = cache_tensor.tensor;
-      CHECK(tensor.defined() && tensor.numel() > 0)
-          << "Mooncake cache tensor must be allocated, layer=" << layer_id
-          << ", role=" << cache_tensor.role.to_string();
       CHECK_GT(tensor.dim(), 0);
+      CHECK(tensor.is_contiguous())
+          << "Mooncake registration requires a contiguous cache tensor";
       const int64_t physical_row_count = tensor.size(0);
-      CHECK_GT(physical_row_count, 0);
       const int64_t rows_per_resource =
-          physical_rows_per_resource(cache_tensor.role, ssm_checkpoint_stride);
+          physical_rows_per_resource(cache_tensor.role, tensor_layout);
+      CHECK_GT(rows_per_resource, 0);
       CHECK_EQ(physical_row_count % rows_per_resource, 0)
           << "Cache tensor physical rows must be divisible by its logical "
              "resource geometry, role="
           << cache_tensor.role.to_string();
       const int64_t resource_count = physical_row_count / rows_per_resource;
-      const uint64_t logical_bytes = static_cast<uint64_t>(tensor.nbytes());
-      CHECK_EQ(logical_bytes % static_cast<uint64_t>(resource_count), 0);
-
-      RegisteredBufferDesc desc{
-          layout.offset + layout.total_buf_cnt,
-          cache_tensor.role,
-          cache_tensor.group_id,
-          logical_bytes / static_cast<uint64_t>(resource_count)};
-      layer_buffers.emplace_back(std::move(desc));
-      if (pending_registration_context_.has_value()) {
-        KVCacheTensor described_tensor = cache_tensor;
-        std::string descriptor_error;
-        CHECK(
-            describe_cache_tensor(pending_registration_context_->tensor_layout,
-                                  &described_tensor,
-                                  &descriptor_error))
-            << "Failed to describe cache tensor, layer=" << layer_id
-            << ", role=" << cache_tensor.role.to_string() << ": "
-            << descriptor_error;
-        CHECK(described_tensor.shard_descriptor.has_value());
-        CacheTensorManifest tensor_manifest;
-        tensor_manifest.cache_namespace =
-            pending_registration_context_->cache_namespace;
-        tensor_manifest.layer_id = layer_id;
-        tensor_manifest.role = static_cast<int32_t>(
-            static_cast<KVCacheTensorRole::Value>(cache_tensor.role));
-        tensor_manifest.group_id = cache_tensor.group_id;
-        tensor_manifest.mooncake_buffer_id =
-            layout.offset + layout.total_buf_cnt;
-        tensor_manifest.scalar_type =
-            static_cast<int32_t>(tensor.scalar_type());
-        tensor_manifest.element_bytes = tensor.element_size();
-        tensor_manifest.shape = tensor.sizes().vec();
-        tensor_manifest.stride = tensor.strides().vec();
-        tensor_manifest.storage_offset_bytes = 0;
-        tensor_manifest.contiguous = tensor.is_contiguous();
+      const size_t logical_bytes = tensor.nbytes();
+      const int64_t storage_offset = tensor.storage_offset();
+      CHECK_GE(storage_offset, 0);
+      const size_t element_size = tensor.element_size();
+      CHECK_LE(static_cast<size_t>(storage_offset),
+               std::numeric_limits<size_t>::max() / element_size);
+      const size_t storage_offset_bytes =
+          static_cast<size_t>(storage_offset) * element_size;
+      const size_t storage_bytes = tensor.storage().nbytes();
+      CHECK_LE(storage_offset_bytes, storage_bytes);
+      CHECK_LE(logical_bytes, storage_bytes - storage_offset_bytes)
+          << "Mooncake registration exceeds tensor storage capacity";
+      const int64_t buffer_id =
+          num_registered_buffers_ + static_cast<int64_t>(addrs.size());
+      addrs.emplace_back(tensor.data_ptr());
+      lens.emplace_back(logical_bytes);
+      buf_bytes.emplace_back(logical_bytes /
+                             static_cast<size_t>(resource_count));
+      tensor_lifetime->emplace_back(tensor);
+      layer_buffers.push_back(
+          {buffer_id, cache_tensor.role, cache_tensor.group_id});
+      if (registration != nullptr) {
+        auto tensor_manifest =
+            make_cache_tensor_manifest(tensor_layout, cache_tensor, layer_id);
+        tensor_manifest.cache_pool_id = cache_pool_id;
+        tensor_manifest.mooncake_buffer_id = buffer_id;
         tensor_manifest.resource_count = static_cast<uint64_t>(resource_count);
         tensor_manifest.physical_rows_per_resource =
             static_cast<uint64_t>(rows_per_resource);
         tensor_manifest.resource_stride_bytes =
-            static_cast<uint64_t>(tensor.stride(0)) * tensor.element_size() *
+            static_cast<uint64_t>(tensor.stride(0)) * element_size *
             static_cast<uint64_t>(rows_per_resource);
-        tensor_manifest.buffer_bytes = static_cast<uint64_t>(tensor.nbytes());
-        tensor_manifest
-            .block_token_capacity = static_cast<uint64_t>(std::max<int64_t>(
-            pending_registration_context_->tensor_layout.block_token_capacity,
-            0));
-        tensor_manifest.explicit_resource_offsets = false;
-        tensor_manifest.shard =
-            std::move(described_tensor.shard_descriptor.value());
+        tensor_manifest.buffer_bytes = logical_bytes;
         tensor_manifests.emplace_back(std::move(tensor_manifest));
       }
-      ++layout.total_buf_cnt;
     }
     CHECK(!layer_buffers.empty())
         << "No Mooncake cache tensor registered at layer " << layer_id;
   }
-  layout.registered = true;
-
-  if (!is_spec_draft) {
-    num_layers_ = num_layers;
-    has_v_cache_ = has_v_cache;
-    main_layout_ = layout;
-  } else {
-    spec_layout_ = layout;
+  const size_t buffer_count = addrs.size();
+  if (!mooncake_te_->register_memory(std::move(addrs),
+                                     std::move(lens),
+                                     std::move(buf_bytes),
+                                     std::move(tensor_lifetime))) {
+    LOG(FATAL) << "Mooncake cache registration failed";
   }
-
-  register_kv_cache_impl(kv_caches, ssm_checkpoint_stride);
-  if (pending_registration_context_.has_value()) {
-    publish_cache_layout(tensor_manifests, *pending_registration_context_);
+  cache_pool_layouts_.emplace_back(std::move(pool_layout));
+  num_registered_buffers_ += static_cast<int64_t>(buffer_count);
+  LOG(INFO) << "Registered Mooncake cache, layers=" << kv_caches.size()
+            << ", buffers=" << buffer_count;
+  if (registration != nullptr) {
+    publish_cache_layout(tensor_manifests, *registration);
     pending_registration_context_.reset();
   }
+  return cache_pool_id;
 }
 
 void MooncakeKVTransferBase::publish_cache_layout(
     const std::vector<CacheTensorManifest>& tensor_manifests,
     const CacheRegistrationContext& registration_context) {
   CHECK(!tensor_manifests.empty());
-  if (registration_context.cache_namespace == CacheNamespace::MAIN) {
+  if (tensor_manifests.front().cache_pool_id == kPrimaryCachePoolId) {
     local_cache_layout_.tensors.clear();
     local_cache_layout_.schema_version = kCacheLayoutSchemaVersion;
     local_cache_layout_.incarnation_id = incarnation_id_;
     local_cache_layout_.fingerprint = registration_context.fingerprint;
     local_cache_layout_.backend = registration_context.backend;
     local_cache_layout_.layout_family = registration_context.layout_family;
-    local_cache_layout_.cluster_id = registration_context.cluster_id;
-    local_cache_layout_.addr = registration_context.addr;
-    local_cache_layout_.listen_port = registration_context.listen_port;
+    local_cache_layout_.cluster_id = cluster_id_;
+    local_cache_layout_.addr = addr_;
+    local_cache_layout_.listen_port = listen_port_;
     local_cache_layout_.coordinates = registration_context.coordinates;
   } else {
     CHECK(!local_cache_layout_.tensors.empty())
-        << "Main cache layout must be published before SPEC_DRAFT.";
+        << "The primary cache pool must be registered first.";
     CHECK_EQ(local_cache_layout_.backend, registration_context.backend);
     CHECK_EQ(local_cache_layout_.layout_family,
              registration_context.layout_family);
-    // Worker coordinates describe the MAIN cache topology. SPEC_DRAFT tensors
-    // carry their independent logical TP placement in each shard descriptor,
-    // which permits a replicated TP1 MTP draft body beside a sharded target.
+    // Keep the fingerprint compatible with existing peers.
     local_cache_layout_.fingerprint.append("|spec:");
     local_cache_layout_.fingerprint.append(registration_context.fingerprint);
   }
@@ -490,79 +471,11 @@ void MooncakeKVTransferBase::publish_cache_layout(
   CHECK(status.ok()) << "Failed to publish cache layout: " << status.message();
 }
 
-void MooncakeKVTransferDefault::register_kv_cache_spec(
-    std::vector<xllm::KVCache>& kv_caches,
-    const KVCacheShape& kv_cache_shape,
-    torch::ScalarType dtype) {
-  CHECK(main_layout_.registered)
-      << "Main KV cache must be registered before spec draft KV cache.";
-  register_kv_cache(kv_caches, kv_cache_shape, dtype);
-}
-
-void MooncakeKVTransferDefault::add_buf(
-    const torch::Tensor& tensor,
-    std::vector<void*>& addrs,
-    std::vector<size_t>& lens,
-    std::vector<uint64_t>& buf_bytes,
-    int64_t physical_rows_per_resource) const {
-  if (!tensor.defined() || tensor.numel() == 0) {
-    return;
-  }
-
-  CHECK_GT(tensor.dim(), 0) << "cache tensor dim must be positive";
-  CHECK(tensor.is_contiguous())
-      << "Mooncake registration requires a contiguous cache tensor";
-  const int64_t block_count = tensor.size(0);
-  CHECK_GT(block_count, 0) << "cache tensor block dim must be positive";
-  CHECK_GT(physical_rows_per_resource, 0);
-  CHECK_EQ(block_count % physical_rows_per_resource, 0)
-      << "cache tensor rows must be divisible by physical rows per resource";
-  const int64_t resource_count = block_count / physical_rows_per_resource;
-
-  const int64_t storage_offset = tensor.storage_offset();
-  CHECK_GE(storage_offset, 0) << "tensor storage offset must be non-negative";
-  const size_t element_size = tensor.element_size();
-  CHECK_GT(element_size, static_cast<size_t>(0))
-      << "tensor element byte size must be positive";
-  CHECK_LE(static_cast<size_t>(storage_offset),
-           std::numeric_limits<size_t>::max() / element_size)
-      << "tensor storage offset byte size overflow";
-  const size_t storage_offset_bytes =
-      static_cast<size_t>(storage_offset) * element_size;
-  const size_t storage_bytes = tensor.storage().nbytes();
-  CHECK_LE(storage_offset_bytes, storage_bytes)
-      << "tensor storage offset exceeds storage capacity";
-  const size_t available_bytes = storage_bytes - storage_offset_bytes;
-
-  const size_t logical_bytes = static_cast<size_t>(tensor.nbytes());
-  CHECK_EQ(logical_bytes % static_cast<size_t>(resource_count),
-           static_cast<size_t>(0))
-      << "cache tensor bytes must be divisible by resource count";
-  const size_t block_bytes =
-      logical_bytes / static_cast<size_t>(resource_count);
-  CHECK_GT(block_bytes, static_cast<size_t>(0))
-      << "cache tensor block byte size must be positive";
-
-  CHECK_GE(available_bytes, logical_bytes)
-      << "Mooncake registration exceeds tensor storage capacity: "
-      << "logical_bytes=" << logical_bytes
-      << ", available_bytes=" << available_bytes
-      << ", block_bytes=" << block_bytes;
-
-  addrs.emplace_back(tensor.data_ptr());
-  lens.emplace_back(logical_bytes);
-  buf_bytes.emplace_back(static_cast<uint64_t>(block_bytes));
-}
-
-bool MooncakeKVTransferDefault::append_buffer_mappings(
-    const BufLayout& layout,
-    const std::vector<int64_t>& layer_ids,
-    const std::vector<KVTransferMapping>& mappings,
-    std::vector<MooncakeTransferEngine::BufferTransferMapping>* buffer_mappings)
-    const {
-  CHECK(buffer_mappings != nullptr);
-  CHECK(layout.registered) << "KV cache is not registered.";
-  CHECK_EQ(layout.layers.size(), static_cast<size_t>(layout.num_layers));
+bool MooncakeKVTransferDefault::pull_kv_blocks(
+    const uint64_t src_cluster_id,
+    const std::string& src_addr,
+    const std::vector<KVTransferMapping>& mappings) {
+  CHECK(!cache_pool_layouts_.empty()) << "KV cache is not registered.";
 
   std::unordered_map<int32_t, const KVTransferMapping*> mappings_by_group;
   mappings_by_group.reserve(mappings.size());
@@ -580,97 +493,27 @@ bool MooncakeKVTransferDefault::append_buffer_mappings(
     }
   }
 
-  std::vector<int64_t> active_layer_ids;
-  if (layer_ids.empty()) {
-    active_layer_ids.resize(static_cast<size_t>(layout.num_layers));
-    std::iota(active_layer_ids.begin(), active_layer_ids.end(), 0);
-  } else {
-    active_layer_ids = layer_ids;
-  }
-
-  for (int64_t layer_id : active_layer_ids) {
-    CHECK_GE(layer_id, 0) << "layer_id must be non-negative";
-    CHECK_LT(layer_id, layout.num_layers) << "layer_id out of range";
-  }
-
-  for (int64_t layer_id : active_layer_ids) {
-    const std::vector<RegisteredBufferDesc>& layer_buffers =
-        layout.layers[static_cast<size_t>(layer_id)];
-    for (const RegisteredBufferDesc& buffer : layer_buffers) {
-      const auto mapping_it = mappings_by_group.find(buffer.group_id);
-      if (mapping_it == mappings_by_group.end()) {
-        LOG(ERROR) << "Missing KV cache transfer mapping, layer=" << layer_id
-                   << ", buf_id=" << buffer.buf_id
-                   << ", role=" << buffer.role.to_string()
-                   << ", group_id=" << buffer.group_id;
-        return false;
-      }
-      const KVTransferMapping& mapping = *mapping_it->second;
-      if (mapping.local_ids.empty()) {
-        continue;
-      }
-      MooncakeTransferEngine::BufferTransferMapping buffer_mapping;
-      buffer_mapping.buf_id = buffer.buf_id;
-      buffer_mapping.local_ids = mapping.local_ids;
-      buffer_mapping.remote_ids = mapping.remote_ids;
-      buffer_mappings->emplace_back(std::move(buffer_mapping));
-    }
-  }
-  return true;
-}
-
-void MooncakeKVTransferDefault::register_kv_cache_impl(
-    const std::vector<xllm::KVCache>& kv_caches,
-    int64_t ssm_checkpoint_stride) {
-  std::vector<void*> addrs;
-  std::vector<size_t> lens;
-  std::vector<uint64_t> buf_bytes;
-  addrs.reserve(kv_caches.size() * 4);
-  lens.reserve(kv_caches.size() * 4);
-  buf_bytes.reserve(kv_caches.size() * 4);
-  auto tensor_lifetime = std::make_shared<std::vector<torch::Tensor>>();
-  tensor_lifetime->reserve(kv_caches.size() * 4);
-
-  for (const KVCache& cache : kv_caches) {
-    const std::vector<KVCacheTensor> transfer_tensors =
-        get_mooncake_tensors(cache);
-    for (const KVCacheTensor& cache_tensor : transfer_tensors) {
-      tensor_lifetime->emplace_back(cache_tensor.tensor);
-      add_buf(
-          cache_tensor.tensor,
-          addrs,
-          lens,
-          buf_bytes,
-          physical_rows_per_resource(cache_tensor.role, ssm_checkpoint_stride));
-    }
-  }
-
-  const size_t buffer_count = buf_bytes.size();
-  if (!mooncake_te_->register_memory(std::move(addrs),
-                                     std::move(lens),
-                                     std::move(buf_bytes),
-                                     std::move(tensor_lifetime))) {
-    LOG(FATAL) << "register_kv_cache_impl failed";
-  }
-
-  LOG(INFO) << "register_kv_cache_impl success, registered_layers="
-            << kv_caches.size() << ", buffers=" << buffer_count;
-}
-
-bool MooncakeKVTransferDefault::pull_kv_blocks(
-    const uint64_t src_cluster_id,
-    const std::string& src_addr,
-    const std::vector<KVTransferMapping>& mappings) {
-  std::vector<int64_t> layer_ids;
   std::vector<MooncakeTransferEngine::BufferTransferMapping> buffer_mappings;
-  if (!append_buffer_mappings(
-          main_layout_, layer_ids, mappings, &buffer_mappings)) {
-    return false;
-  }
-  if (spec_layout_.registered &&
-      !append_buffer_mappings(
-          spec_layout_, layer_ids, mappings, &buffer_mappings)) {
-    return false;
+  buffer_mappings.reserve(static_cast<size_t>(num_registered_buffers_));
+  for (const auto& pool_layout : cache_pool_layouts_) {
+    for (size_t layer_id = 0; layer_id < pool_layout.size(); ++layer_id) {
+      for (const RegisteredBufferDesc& buffer : pool_layout[layer_id]) {
+        const auto mapping_it = mappings_by_group.find(buffer.group_id);
+        if (mapping_it == mappings_by_group.end()) {
+          LOG(ERROR) << "Missing KV cache transfer mapping, layer=" << layer_id
+                     << ", buf_id=" << buffer.buf_id
+                     << ", role=" << buffer.role.to_string()
+                     << ", group_id=" << buffer.group_id;
+          return false;
+        }
+        const KVTransferMapping& mapping = *mapping_it->second;
+        if (mapping.local_ids.empty()) {
+          continue;
+        }
+        buffer_mappings.push_back(
+            {buffer.buf_id, mapping.local_ids, mapping.remote_ids});
+      }
+    }
   }
   const bool success = mooncake_te_->move_memory_groups(
       src_addr, buffer_mappings, MooncakeTransferEngine::MoveOpcode::READ);
@@ -713,25 +556,18 @@ void MooncakeKVTransferBase::merge_kv_blocks(
 std::vector<std::string> MooncakeKVTransferDefault::push_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
-    bool is_spec_draft,
+    uint32_t cache_pool_id,
     int32_t kv_split_rank,
     int32_t kv_split_size) {
-  const BufLayout& layout = is_spec_draft ? spec_layout_ : main_layout_;
-  CHECK(layout.registered) << "KV cache is not registered.";
-  const int64_t num_layers = layout.num_layers;
+  CHECK_LT(cache_pool_id, cache_pool_layouts_.size())
+      << "KV cache pool is not registered.";
+  const int64_t num_layers =
+      static_cast<int64_t>(cache_pool_layouts_[cache_pool_id].size());
 
-  std::vector<std::string> keys;
-  keys.reserve(merged_kv_infos.size());
-  for (const auto& pair : merged_kv_infos) {
-    keys.push_back(pair.first);
-  }
-  if (kv_split_size > 1) {
-    keys = rotate_dst_rank(keys, kv_split_rank);
-  }
+  const auto keys =
+      push_destination_keys(merged_kv_infos, kv_split_rank, kv_split_size);
 
   std::unordered_set<std::string> failed_transfer_keys;
-  const CacheNamespace cache_namespace =
-      is_spec_draft ? CacheNamespace::SPEC_DRAFT : CacheNamespace::MAIN;
   for (int64_t layer_index = 0; layer_index < num_layers; ++layer_index) {
     if (!layer_synchronizer->synchronize_layer(layer_index)) {
       LOG(ERROR) << "Synchronize KV cache layer failed, layer=" << layer_index;
@@ -747,7 +583,7 @@ std::vector<std::string> MooncakeKVTransferDefault::push_kv_blocks(
       const Status bind_status =
           mooncake_te_->bind_outgoing_regions(kv_info.dst_addr,
                                               kv_info.mappings,
-                                              cache_namespace,
+                                              cache_pool_id,
                                               layer_index,
                                               &regions);
       if (!bind_status.ok()) {
@@ -781,23 +617,19 @@ std::vector<std::string> MooncakeKVTransferDefault::push_kv_blocks(
 // ============================================================================
 
 MooncakeVirtualKVTransfer::MooncakeVirtualKVTransfer(
-    const int32_t device_id,
     const uint16_t listen_port,
     const torch::Device& device,
     std::unique_ptr<VirtualKVTransferMemoryProvider> memory_provider)
-    : MooncakeKVTransferBase(
-          device_id,
-          listen_port,
-          device,
-          std::make_unique<MooncakeKVTransferEngine>(listen_port, device)),
+    : MooncakeKVTransferBase(listen_port, device),
       memory_provider_(std::move(memory_provider)) {
   CHECK(memory_provider_ != nullptr);
 }
 
-void MooncakeVirtualKVTransfer::register_kv_cache(
+uint32_t MooncakeVirtualKVTransfer::register_kv_cache(
     std::vector<xllm::KVCache>& kv_caches,
     const KVCacheShape& kv_cache_shape,
     torch::ScalarType dtype) {
+  CHECK_EQ(num_layers_, 0) << "Virtual memory supports one cache pool.";
   num_layers_ = static_cast<int64_t>(kv_caches.size());
   const std::vector<int64_t>& key_cache_shape =
       kv_cache_shape.key_cache_shape();
@@ -813,88 +645,8 @@ void MooncakeVirtualKVTransfer::register_kv_cache(
     count_per_block *= key_cache_shape[i];
   }
   CHECK_LE(count_per_block, std::numeric_limits<int64_t>::max() / data_size);
-  size_per_block_ = count_per_block * data_size;
+  const uint64_t block_size_bytes = count_per_block * data_size;
 
-  std::vector<CacheTensorManifest> tensor_manifests;
-  std::optional<CacheRegistrationContext> registration_context;
-  if (pending_registration_context_.has_value()) {
-    registration_context = *pending_registration_context_;
-    registration_context->layout_family.append("_virtual_memory_v2");
-    const VirtualKVTransferMemoryRegion memory_region =
-        memory_provider_->memory_region();
-    tensor_manifests.reserve(kv_caches.size() * 3);
-    for (int64_t layer_id = 0; layer_id < num_layers_; ++layer_id) {
-      const std::vector<KVCacheTensor> transfer_tensors =
-          get_mooncake_tensors(kv_caches[static_cast<size_t>(layer_id)]);
-      for (const KVCacheTensor& cache_tensor : transfer_tensors) {
-        CHECK(cache_tensor.role == KVCacheTensorRole::KEY ||
-              cache_tensor.role == KVCacheTensorRole::VALUE ||
-              cache_tensor.role == KVCacheTensorRole::INDEX)
-            << "VirtualMemory MoonCake transfer supports only K/V/INDEX "
-               "tensors, "
-               "role="
-            << cache_tensor.role.to_string();
-        const torch::Tensor& tensor = cache_tensor.tensor;
-        CHECK(tensor.defined() && tensor.numel() > 0);
-        CHECK(tensor.is_contiguous());
-        CHECK_GT(tensor.dim(), 0);
-        const int64_t resource_count = tensor.size(0);
-        CHECK_GT(resource_count, 0);
-        const uint64_t tensor_bytes = static_cast<uint64_t>(tensor.nbytes());
-        CHECK_EQ(tensor_bytes % static_cast<uint64_t>(resource_count), 0);
-        const uint64_t resource_stride =
-            tensor_bytes / static_cast<uint64_t>(resource_count);
-        CHECK_GT(memory_region.page_size_bytes, 0);
-        CHECK_LE(resource_stride, memory_region.page_size_bytes)
-            << "VirtualMemory transfer tensor blocks must fit one page";
-        CHECK_EQ(memory_region.page_size_bytes % resource_stride, 0)
-            << "VirtualMemory transfer tensor blocks must divide the page size";
-
-        KVCacheTensor described_tensor = cache_tensor;
-        std::string descriptor_error;
-        CHECK(describe_cache_tensor(registration_context->tensor_layout,
-                                    &described_tensor,
-                                    &descriptor_error))
-            << "Failed to describe VirtualMemory cache tensor, layer="
-            << layer_id << ", role=" << cache_tensor.role.to_string() << ": "
-            << descriptor_error;
-        CHECK(described_tensor.shard_descriptor.has_value());
-
-        CacheTensorManifest manifest;
-        manifest.cache_namespace = registration_context->cache_namespace;
-        manifest.layer_id = layer_id;
-        manifest.role = static_cast<int32_t>(
-            static_cast<KVCacheTensorRole::Value>(cache_tensor.role));
-        manifest.group_id = cache_tensor.group_id;
-        manifest.mooncake_buffer_id = 0;
-        manifest.scalar_type = static_cast<int32_t>(tensor.scalar_type());
-        manifest.element_bytes = tensor.element_size();
-        manifest.shape = tensor.sizes().vec();
-        manifest.stride = tensor.strides().vec();
-        manifest.contiguous = true;
-        manifest.resource_count = static_cast<uint64_t>(resource_count);
-        manifest.resource_stride_bytes = resource_stride;
-        manifest.buffer_bytes = static_cast<uint64_t>(memory_region.size_bytes);
-        manifest.block_token_capacity = static_cast<uint64_t>(std::max<int64_t>(
-            registration_context->tensor_layout.block_token_capacity, 0));
-        manifest.explicit_resource_offsets = true;
-        manifest.shard = std::move(described_tensor.shard_descriptor.value());
-        tensor_manifests.emplace_back(std::move(manifest));
-      }
-    }
-  }
-
-  register_kv_cache_impl();
-  if (registration_context.has_value()) {
-    publish_cache_layout(tensor_manifests, *registration_context);
-    const Status provider_status =
-        mooncake_te_->set_virtual_memory_provider(model_id_, memory_provider_);
-    CHECK(provider_status.ok()) << provider_status.message();
-    pending_registration_context_.reset();
-  }
-}
-
-void MooncakeVirtualKVTransfer::register_kv_cache_impl() {
   const VirtualKVTransferMemoryRegion memory_region =
       memory_provider_->memory_region();
   CHECK(memory_region.fully_resident)
@@ -904,20 +656,64 @@ void MooncakeVirtualKVTransfer::register_kv_cache_impl() {
   CHECK(memory_region.base_address != nullptr);
   CHECK_GT(memory_region.size_bytes, 0);
 
-  std::vector<void*> addrs = {memory_region.base_address};
-  std::vector<size_t> lens = {memory_region.size_bytes};
-  std::vector<uint64_t> buf_bytes = {static_cast<uint64_t>(size_per_block_)};
+  std::vector<CacheTensorManifest> tensor_manifests;
+  if (pending_registration_context_.has_value()) {
+    auto& registration = *pending_registration_context_;
+    registration.layout_family.append("_virtual_memory_v2");
+    CHECK_GT(memory_region.page_size_bytes, 0);
+    tensor_manifests.reserve(kv_caches.size() * 3);
+    for (int64_t layer_id = 0; layer_id < num_layers_; ++layer_id) {
+      std::vector<KVCacheTensor> transfer_tensors =
+          kv_caches[static_cast<size_t>(layer_id)].get_cache_tensors();
+      for (KVCacheTensor& cache_tensor : transfer_tensors) {
+        CHECK(cache_tensor.role == KVCacheTensorRole::KEY ||
+              cache_tensor.role == KVCacheTensorRole::VALUE ||
+              cache_tensor.role == KVCacheTensorRole::INDEX)
+            << "VirtualMemory MoonCake transfer supports only K/V/INDEX "
+               "tensors, "
+               "role="
+            << cache_tensor.role.to_string();
+        const torch::Tensor& tensor = cache_tensor.tensor;
+        CHECK(tensor.is_contiguous());
+        CHECK_GT(tensor.dim(), 0);
+        const int64_t resource_count = tensor.size(0);
+        const uint64_t tensor_bytes = static_cast<uint64_t>(tensor.nbytes());
+        const uint64_t resource_stride =
+            tensor_bytes / static_cast<uint64_t>(resource_count);
+        CHECK_LE(resource_stride, memory_region.page_size_bytes)
+            << "VirtualMemory transfer tensor blocks must fit one page";
+        CHECK_EQ(memory_region.page_size_bytes % resource_stride, 0)
+            << "VirtualMemory transfer tensor blocks must divide the page size";
 
-  if (!mooncake_te_->register_memory(std::move(addrs),
-                                     std::move(lens),
-                                     std::move(buf_bytes),
+        auto manifest = make_cache_tensor_manifest(
+            registration.tensor_layout, cache_tensor, layer_id);
+        manifest.resource_count = static_cast<uint64_t>(resource_count);
+        manifest.resource_stride_bytes = resource_stride;
+        manifest.buffer_bytes = static_cast<uint64_t>(memory_region.size_bytes);
+        manifest.explicit_resource_offsets = true;
+        tensor_manifests.emplace_back(std::move(manifest));
+      }
+    }
+  }
+
+  if (!mooncake_te_->register_memory({memory_region.base_address},
+                                     {memory_region.size_bytes},
+                                     {block_size_bytes},
                                      memory_region.lifetime)) {
     LOG(FATAL) << "register GlobalVirtualMemoryRegion failed";
   }
 
-  LOG(INFO) << "register_kv_cache_impl success, total_size="
+  LOG(INFO) << "Registered Mooncake virtual cache, total_size="
             << memory_region.size_bytes
-            << ", size_per_block=" << size_per_block_;
+            << ", size_per_block=" << block_size_bytes;
+  if (pending_registration_context_.has_value()) {
+    publish_cache_layout(tensor_manifests, *pending_registration_context_);
+    const Status provider_status =
+        mooncake_te_->set_virtual_memory_provider(model_id_, memory_provider_);
+    CHECK(provider_status.ok()) << provider_status.message();
+    pending_registration_context_.reset();
+  }
+  return kPrimaryCachePoolId;
 }
 
 bool MooncakeVirtualKVTransfer::pull_kv_blocks(
@@ -964,14 +760,14 @@ bool MooncakeVirtualKVTransfer::pull_kv_blocks(
                                                 mapping.remote_ids,
                                                 &source_manifest,
                                                 &source_offsets,
-                                                &pull_session) ||
+                                                pull_session) ||
       num_layers_ <= 0 ||
       source_offsets.size() != static_cast<size_t>(num_layers_)) {
     LOG(ERROR) << "Failed to resolve VirtualMemory PULL source offsets";
     return false;
   }
 
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   const Status plan_status = ReshardPlanner().build_native_pull_plan(
       local_cache_layout_, source_manifest, &plan);
   if (!plan_status.ok()) {
@@ -990,13 +786,13 @@ bool MooncakeVirtualKVTransfer::pull_kv_blocks(
     if (!build_explicit_mappings(mapping,
                                  source_offsets[layer_index],
                                  layer_id,
-                                 &explicit_mappings)) {
+                                 explicit_mappings)) {
       return false;
     }
     const Status bind_status =
         binder.bind_explicit(plan,
                              explicit_mappings,
-                             CacheNamespace::MAIN,
+                             kPrimaryCachePoolId,
                              layer_id,
                              &layer_regions[layer_index]);
     if (!bind_status.ok() || layer_regions[layer_index].empty()) {
@@ -1023,24 +819,11 @@ bool MooncakeVirtualKVTransfer::pull_kv_blocks(
   return true;
 }
 
-#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-std::vector<std::string> MooncakeVirtualKVTransfer::push_kv_blocks(
-    std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
-    std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
-    bool is_spec_draft,
-    int32_t kv_split_rank,
-    int32_t kv_split_size) {
-  (void)is_spec_draft;
-  return push_kv_blocks_impl(
-      merged_kv_infos, layer_synchronizer, kv_split_rank, kv_split_size);
-}
-#endif
-
 bool MooncakeVirtualKVTransfer::build_explicit_mappings(
     const KVTransferMapping& mapping,
     const VirtualKVCacheLayerGlobalOffsets& remote_offsets,
     int64_t layer_id,
-    std::vector<ExplicitResourceMapping>* explicit_mappings) const {
+    std::vector<ExplicitResourceMapping>& explicit_mappings) const {
   if (remote_offsets.k_offsets.size() != mapping.local_ids.size() ||
       remote_offsets.v_offsets.size() != mapping.local_ids.size() ||
       (!remote_offsets.index_offsets.empty() &&
@@ -1050,12 +833,8 @@ bool MooncakeVirtualKVTransfer::build_explicit_mappings(
     return false;
   }
 
-  if (explicit_mappings == nullptr ||
-      mapping.local_ids.size() != mapping.remote_ids.size()) {
-    return false;
-  }
-  explicit_mappings->clear();
-  explicit_mappings->reserve(3);
+  explicit_mappings.clear();
+  explicit_mappings.reserve(3);
   const auto append_mapping = [&](KVCacheTensorRole role,
                                   const std::vector<uint64_t>& offsets) {
     ExplicitResourceMapping explicit_mapping;
@@ -1066,7 +845,7 @@ bool MooncakeVirtualKVTransfer::build_explicit_mappings(
     explicit_mapping.remote_ids = mapping.remote_ids;
     explicit_mapping.remote_offsets = offsets;
     explicit_mapping.local_offsets.reserve(mapping.local_ids.size());
-    explicit_mappings->emplace_back(std::move(explicit_mapping));
+    explicit_mappings.emplace_back(std::move(explicit_mapping));
   };
   append_mapping(KVCacheTensorRole::KEY, remote_offsets.k_offsets);
   append_mapping(KVCacheTensorRole::VALUE, remote_offsets.v_offsets);
@@ -1084,10 +863,10 @@ bool MooncakeVirtualKVTransfer::build_explicit_mappings(
                  << layer_id << ", block=" << block_id;
       return false;
     }
-    (*explicit_mappings)[0].local_offsets.emplace_back(local_offsets->k_offset);
-    (*explicit_mappings)[1].local_offsets.emplace_back(local_offsets->v_offset);
+    explicit_mappings[0].local_offsets.emplace_back(local_offsets->k_offset);
+    explicit_mappings[1].local_offsets.emplace_back(local_offsets->v_offset);
     if (local_offsets->index_offset.has_value()) {
-      (*explicit_mappings)[2].local_offsets.emplace_back(
+      explicit_mappings[2].local_offsets.emplace_back(
           *local_offsets->index_offset);
     }
   }
@@ -1096,9 +875,10 @@ bool MooncakeVirtualKVTransfer::build_explicit_mappings(
 }
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-std::vector<std::string> MooncakeVirtualKVTransfer::push_kv_blocks_impl(
+std::vector<std::string> MooncakeVirtualKVTransfer::push_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
+    uint32_t,
     int32_t kv_split_rank,
     int32_t kv_split_size) {
   if (model_id_.empty()) {
@@ -1112,14 +892,8 @@ std::vector<std::string> MooncakeVirtualKVTransfer::push_kv_blocks_impl(
     return results;
   }
 
-  std::vector<std::string> keys;
-  keys.reserve(merged_kv_infos.size());
-  for (const auto& pair : merged_kv_infos) {
-    keys.push_back(pair.first);
-  }
-  if (kv_split_size > 1) {
-    keys = rotate_dst_rank(keys, kv_split_rank);
-  }
+  const auto keys =
+      push_destination_keys(merged_kv_infos, kv_split_rank, kv_split_size);
 
   std::unordered_set<std::string> failed_transfer_keys;
   for (int64_t layer_index = 0; layer_index < num_layers_; ++layer_index) {
@@ -1131,7 +905,7 @@ std::vector<std::string> MooncakeVirtualKVTransfer::push_kv_blocks_impl(
     }
 
     for (const std::string& key : keys) {
-      if (failed_transfer_keys.find(key) != failed_transfer_keys.end()) {
+      if (failed_transfer_keys.contains(key)) {
         continue;
       }
       const KVCacheInfo& kv_info = merged_kv_infos.at(key);
@@ -1170,7 +944,7 @@ std::vector<std::string> MooncakeVirtualKVTransfer::push_kv_blocks_impl(
               *mapping_it,
               kv_info.dst_virtual_kv_cache_layer_global_offsets[layer_index],
               layer_index,
-              &explicit_mappings)) {
+              explicit_mappings)) {
         failed_transfer_keys.insert(key);
         continue;
       }
@@ -1179,7 +953,7 @@ std::vector<std::string> MooncakeVirtualKVTransfer::push_kv_blocks_impl(
       const Status bind_status =
           mooncake_te_->bind_outgoing_regions_explicit(kv_info.dst_addr,
                                                        explicit_mappings,
-                                                       CacheNamespace::MAIN,
+                                                       kPrimaryCachePoolId,
                                                        layer_index,
                                                        &regions);
       if (!bind_status.ok()) {
@@ -1195,14 +969,16 @@ std::vector<std::string> MooncakeVirtualKVTransfer::push_kv_blocks_impl(
                                  regions,
                                  MooncakeTransferEngine::MoveOpcode::WRITE);
       if (!ret) {
-        LOG(ERROR) << "push_kv_blocks_impl failed at layer " << layer_index;
+        LOG(ERROR) << "VirtualMemory PUSH transfer failed, layer="
+                   << layer_index;
         failed_transfer_keys.insert(key);
       }
     }
   }
 
-  VLOG(1) << "push_kv_blocks_impl completed, num_layers=" << num_layers_
-          << ", failed_tasks=" << failed_transfer_keys.size();
+  VLOG(1) << "[Mooncake][PDTransfer] direction=push, virtual_memory=true, "
+             "layers="
+          << num_layers_ << ", failed_tasks=" << failed_transfer_keys.size();
   return collect_failed_request_ids(merged_kv_infos, failed_transfer_keys);
 }
 #endif

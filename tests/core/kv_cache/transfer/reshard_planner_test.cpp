@@ -61,7 +61,7 @@ WorkerCacheLayoutManifest make_head_manifest(int32_t tp_rank,
       replicated ? tp_rank / replica_count : tp_rank * local_heads;
 
   CacheTensorManifest tensor;
-  tensor.cache_namespace = CacheNamespace::MAIN;
+  tensor.cache_pool_id = kPrimaryCachePoolId;
   tensor.layer_id = 0;
   tensor.role = 0;
   tensor.group_id = 7;
@@ -114,7 +114,7 @@ WorkerCacheLayoutManifest make_ssm_manifest(int32_t tp_rank,
   const int64_t local_heads = global_heads / tp_size;
   const int64_t first_head = tp_rank * local_heads;
   CacheTensorManifest tensor;
-  tensor.cache_namespace = CacheNamespace::MAIN;
+  tensor.cache_pool_id = kPrimaryCachePoolId;
   tensor.layer_id = 0;
   tensor.role = static_cast<int32_t>(KVCacheTensorRole::SSM);
   tensor.group_id = 7;
@@ -159,7 +159,7 @@ WorkerCacheLayoutManifest make_conv_manifest(uint64_t state_count,
                                                           buffer_id,
                                                           addr);
   CacheTensorManifest tensor;
-  tensor.cache_namespace = CacheNamespace::MAIN;
+  tensor.cache_pool_id = kPrimaryCachePoolId;
   tensor.layer_id = 0;
   tensor.role = static_cast<int32_t>(KVCacheTensorRole::CONV);
   tensor.group_id = cache_group_id(BlockType::LINEAR);
@@ -190,18 +190,17 @@ WorkerCacheLayoutManifest make_conv_manifest(uint64_t state_count,
   return manifest;
 }
 
-WorkerCacheLayoutManifest make_kpool_tail_manifest(
-    uint64_t tail_length,
-    uint64_t buffer_id,
-    const std::string& addr,
-    CacheNamespace cache_namespace) {
+WorkerCacheLayoutManifest make_kpool_tail_manifest(uint64_t tail_length,
+                                                   uint64_t buffer_id,
+                                                   const std::string& addr,
+                                                   uint32_t cache_pool_id) {
   WorkerCacheLayoutManifest manifest = make_head_manifest(/*tp_rank=*/0,
                                                           /*tp_size=*/1,
                                                           /*global_heads=*/1,
                                                           buffer_id,
                                                           addr);
   CacheTensorManifest tensor;
-  tensor.cache_namespace = cache_namespace;
+  tensor.cache_pool_id = cache_pool_id;
   tensor.layer_id = 0;
   tensor.role = static_cast<int32_t>(KVCacheTensorRole::KPOOL_TAIL);
   tensor.group_id = cache_group_id(BlockType::LINEAR);
@@ -247,7 +246,7 @@ WorkerCacheLayoutManifest make_large_head_manifest(int32_t tp_rank,
   for (int64_t layer_id = 0; layer_id < layer_count; ++layer_id) {
     for (int32_t role = 0; role < 2; ++role) {
       CacheTensorManifest tensor;
-      tensor.cache_namespace = CacheNamespace::MAIN;
+      tensor.cache_pool_id = kPrimaryCachePoolId;
       tensor.layer_id = layer_id;
       tensor.role = role;
       tensor.group_id = 7;
@@ -455,7 +454,7 @@ void append_tp1_spec_tensor(WorkerCacheLayoutManifest* manifest,
       buffer_id,
       manifest->addr + "-draft");
   CacheTensorManifest spec_tensor = std::move(draft.tensors[0]);
-  spec_tensor.cache_namespace = CacheNamespace::SPEC_DRAFT;
+  spec_tensor.cache_pool_id = 1;
   manifest->tensors.emplace_back(std::move(spec_tensor));
   manifest->fingerprint.append("|spec:planner-test-model");
 }
@@ -497,6 +496,13 @@ void expect_destination_resource(const WorkerCacheLayoutManifest& manifest,
   }
 }
 
+Status validate_destination_coverage(
+    const std::vector<WorkerCacheLayoutManifest>& sources,
+    const WorkerCacheLayoutManifest& destination) {
+  std::vector<size_t> source_indices;
+  return ReshardPlanner().select_sources(sources, destination, &source_indices);
+}
+
 void run_copy_case(int32_t source_tp,
                    int32_t destination_tp,
                    int64_t global_heads) {
@@ -515,13 +521,12 @@ void run_copy_case(int32_t source_tp,
        ++destination_rank) {
     const WorkerCacheLayoutManifest& destination =
         destinations[destination_rank];
-    ASSERT_TRUE(
-        planner.validate_destination_coverage(sources, destination).ok());
+    ASSERT_TRUE(validate_destination_coverage(sources, destination).ok());
     destination_bytes[destination_rank].assign(
         static_cast<size_t>(destination.tensors[0].buffer_bytes), 0);
 
     for (size_t source_rank = 0; source_rank < sources.size(); ++source_rank) {
-      ReshardPlanTemplate plan;
+      std::vector<StridedRegionTemplate> plan;
       ASSERT_TRUE(
           planner.build_outgoing_plan(sources[source_rank], destination, &plan)
               .ok());
@@ -534,7 +539,7 @@ void run_copy_case(int32_t source_tp,
       ASSERT_TRUE(binder
                       .bind(plan,
                             {mapping},
-                            CacheNamespace::MAIN,
+                            kPrimaryCachePoolId,
                             /*layer_id=*/0,
                             &regions)
                       .ok());
@@ -619,7 +624,7 @@ TEST(ReshardPlannerTest, CheckpointedSsmBindsLogicalSlotsAcrossTp) {
   const WorkerCacheLayoutManifest destination = make_ssm_manifest(
       /*tp_rank=*/3, /*tp_size=*/4, /*global_heads=*/4, 17, "destination");
   ReshardPlanner planner;
-  ASSERT_TRUE(planner.validate_destination_coverage(sources, destination).ok());
+  ASSERT_TRUE(validate_destination_coverage(sources, destination).ok());
 
   std::vector<std::vector<uint8_t>> source_bytes(sources.size());
   for (size_t rank = 0; rank < sources.size(); ++rank) {
@@ -628,7 +633,7 @@ TEST(ReshardPlannerTest, CheckpointedSsmBindsLogicalSlotsAcrossTp) {
   std::vector<uint8_t> destination_bytes(
       static_cast<size_t>(destination.tensors[0].buffer_bytes), 0);
   for (size_t rank = 0; rank < sources.size(); ++rank) {
-    ReshardPlanTemplate plan;
+    std::vector<StridedRegionTemplate> plan;
     ASSERT_TRUE(
         planner.build_outgoing_plan(sources[rank], destination, &plan).ok());
     KVTransferMapping mapping;
@@ -639,7 +644,7 @@ TEST(ReshardPlannerTest, CheckpointedSsmBindsLogicalSlotsAcrossTp) {
     ASSERT_TRUE(RequestRegionBinder()
                     .bind(plan,
                           {mapping},
-                          CacheNamespace::MAIN,
+                          kPrimaryCachePoolId,
                           /*layer_id=*/0,
                           &regions)
                     .ok());
@@ -676,10 +681,9 @@ TEST(ReshardPlannerTest, CompactSsmSourceCoversExpandedDestination) {
       /*checkpoint_stride=*/3);
 
   ReshardPlanner planner;
-  ASSERT_TRUE(
-      planner.validate_destination_coverage({source}, destination).ok());
+  ASSERT_TRUE(validate_destination_coverage({source}, destination).ok());
 
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(planner.build_outgoing_plan(source, destination, &plan).ok());
   KVTransferMapping mapping;
   mapping.group_id = source.tensors[0].group_id;
@@ -689,7 +693,7 @@ TEST(ReshardPlannerTest, CompactSsmSourceCoversExpandedDestination) {
   ASSERT_TRUE(RequestRegionBinder()
                   .bind(plan,
                         {mapping},
-                        CacheNamespace::MAIN,
+                        kPrimaryCachePoolId,
                         /*layer_id=*/0,
                         &regions)
                   .ok());
@@ -704,10 +708,9 @@ TEST(ReshardPlannerTest, CompactConvSourceCoversExpandedDestination) {
       make_conv_manifest(/*state_count=*/6, /*buffer_id=*/17, "destination");
 
   ReshardPlanner planner;
-  ASSERT_TRUE(
-      planner.validate_destination_coverage({source}, destination).ok());
+  ASSERT_TRUE(validate_destination_coverage({source}, destination).ok());
 
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(planner.build_outgoing_plan(source, destination, &plan).ok());
   KVTransferMapping mapping;
   mapping.group_id = cache_group_id(BlockType::LINEAR);
@@ -717,7 +720,7 @@ TEST(ReshardPlannerTest, CompactConvSourceCoversExpandedDestination) {
   ASSERT_TRUE(RequestRegionBinder()
                   .bind(plan,
                         {mapping},
-                        CacheNamespace::MAIN,
+                        kPrimaryCachePoolId,
                         /*layer_id=*/0,
                         &regions)
                   .ok());
@@ -732,8 +735,7 @@ TEST(ReshardPlannerTest, CompactConvDoesNotSkipUncoveredPrefix) {
       make_conv_manifest(/*state_count=*/6, /*buffer_id=*/17, "destination");
   source.tensors[0].shard.spans[0].logical_offset_bytes = 2;
 
-  const Status status =
-      ReshardPlanner().validate_destination_coverage({source}, destination);
+  const Status status = validate_destination_coverage({source}, destination);
 
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("no source writer"), std::string::npos);
@@ -746,20 +748,20 @@ TEST(ReshardPlannerTest, RejectsDifferentSpecDraftKpoolCapacities) {
         /*tail_length=*/expanded_destination ? 4 : 7,
         /*buffer_id=*/3,
         "source",
-        CacheNamespace::SPEC_DRAFT);
+        /*cache_pool_id=*/1);
     const WorkerCacheLayoutManifest destination = make_kpool_tail_manifest(
         /*tail_length=*/expanded_destination ? 7 : 4,
         /*buffer_id=*/17,
         "destination",
-        CacheNamespace::SPEC_DRAFT);
+        /*cache_pool_id=*/1);
 
     ReshardPlanner planner;
     const Status coverage =
-        planner.validate_destination_coverage({source}, destination);
+        validate_destination_coverage({source}, destination);
     EXPECT_FALSE(coverage.ok());
     EXPECT_NE(coverage.message().find("KPool circular-tail layouts differ"),
               std::string::npos);
-    ReshardPlanTemplate plan;
+    std::vector<StridedRegionTemplate> plan;
     const Status outgoing =
         planner.build_outgoing_plan(source, destination, &plan);
     EXPECT_FALSE(outgoing.ok());
@@ -773,12 +775,12 @@ TEST(ReshardPlannerTest, TransfersEqualSpecDraftKpoolCapacity) {
       /*tail_length=*/4,
       /*buffer_id=*/3,
       "source",
-      CacheNamespace::SPEC_DRAFT);
+      /*cache_pool_id=*/1);
   WorkerCacheLayoutManifest destination = make_kpool_tail_manifest(
       /*tail_length=*/4,
       /*buffer_id=*/17,
       "destination",
-      CacheNamespace::SPEC_DRAFT);
+      /*cache_pool_id=*/1);
   CacheTensorManifest& destination_tensor = destination.tensors[0];
   ++destination_tensor.resource_count;
   ++destination_tensor.shape[0];
@@ -786,10 +788,9 @@ TEST(ReshardPlannerTest, TransfersEqualSpecDraftKpoolCapacity) {
                                     destination_tensor.resource_stride_bytes;
 
   ReshardPlanner planner;
-  ASSERT_TRUE(
-      planner.validate_destination_coverage({source}, destination).ok());
+  ASSERT_TRUE(validate_destination_coverage({source}, destination).ok());
 
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(planner.build_outgoing_plan(source, destination, &plan).ok());
   KVTransferMapping mapping;
   mapping.group_id = cache_group_id(BlockType::LINEAR);
@@ -799,7 +800,7 @@ TEST(ReshardPlannerTest, TransfersEqualSpecDraftKpoolCapacity) {
   ASSERT_TRUE(RequestRegionBinder()
                   .bind(plan,
                         {mapping},
-                        CacheNamespace::SPEC_DRAFT,
+                        /*cache_pool_id=*/1,
                         /*layer_id=*/0,
                         &regions)
                   .ok());
@@ -814,20 +815,19 @@ TEST(ReshardPlannerTest, RejectsDifferentSpecDraftKpoolShapeWithEqualBytes) {
       /*tail_length=*/4,
       /*buffer_id=*/3,
       "source",
-      CacheNamespace::SPEC_DRAFT);
+      /*cache_pool_id=*/1);
   WorkerCacheLayoutManifest destination = make_kpool_tail_manifest(
       /*tail_length=*/4,
       /*buffer_id=*/17,
       "destination",
-      CacheNamespace::SPEC_DRAFT);
+      /*cache_pool_id=*/1);
   destination.tensors[0].shape = {
       static_cast<int64_t>(kResourceCount), 2, 2, 2};
   destination.tensors[0].stride = {8, 4, 2, 1};
 
   ReshardPlanner planner;
-  EXPECT_FALSE(
-      planner.validate_destination_coverage({source}, destination).ok());
-  ReshardPlanTemplate plan;
+  EXPECT_FALSE(validate_destination_coverage({source}, destination).ok());
+  std::vector<StridedRegionTemplate> plan;
   EXPECT_FALSE(planner.build_outgoing_plan(source, destination, &plan).ok());
 }
 
@@ -852,10 +852,10 @@ TEST(ReshardPlannerTest, HandlesProductionScaleNonMlaLayout) {
       "destination");
   ReshardPlanner planner;
 
-  EXPECT_TRUE(planner.validate_destination_coverage(sources, destination).ok());
-  ReshardPlanTemplate plan;
+  EXPECT_TRUE(validate_destination_coverage(sources, destination).ok());
+  std::vector<StridedRegionTemplate> plan;
   EXPECT_TRUE(planner.build_outgoing_plan(sources[0], destination, &plan).ok());
-  EXPECT_FALSE(plan.regions.empty());
+  EXPECT_FALSE(plan.empty());
 }
 
 TEST(ReshardPlannerTest, MqaReplicationUsesOneStaticSourceWriter) {
@@ -869,15 +869,6 @@ TEST(ReshardPlannerTest, MqaReplicationUsesOneStaticSourceWriter) {
     ASSERT_TRUE(
         planner.select_sources(sources, destination, &selected_indices).ok());
     EXPECT_EQ(selected_indices, std::vector<size_t>({0}));
-    ReshardPlanTemplate owner_plan;
-    ReshardPlanTemplate replica_plan;
-    ASSERT_TRUE(
-        planner.build_outgoing_plan(sources[0], destination, &owner_plan).ok());
-    ASSERT_TRUE(
-        planner.build_outgoing_plan(sources[1], destination, &replica_plan)
-            .ok());
-    EXPECT_FALSE(owner_plan.regions.empty());
-    EXPECT_TRUE(replica_plan.regions.empty());
   }
 }
 
@@ -895,14 +886,11 @@ TEST(ReshardPlannerTest, GqaReplicationUsesContiguousSourceWriters) {
   for (const WorkerCacheLayoutManifest& destination : destinations) {
     const int32_t expected_source_rank =
         destination.coordinates.tp_rank / kReplicaCount * kReplicaCount;
+    std::vector<size_t> source_indices;
     ASSERT_TRUE(
-        planner.validate_destination_coverage(sources, destination).ok());
-    for (const WorkerCacheLayoutManifest& source : sources) {
-      ReshardPlanTemplate plan;
-      ASSERT_TRUE(planner.build_outgoing_plan(source, destination, &plan).ok());
-      EXPECT_EQ(plan.regions.empty(),
-                source.coordinates.tp_rank != expected_source_rank);
-    }
+        planner.select_sources(sources, destination, &source_indices).ok());
+    EXPECT_EQ(source_indices,
+              std::vector<size_t>({static_cast<size_t>(expected_source_rank)}));
   }
 }
 
@@ -916,9 +904,7 @@ TEST(ReshardPlannerTest, RejectsMultipleStaticWriters) {
                          /*global_heads=*/1,
                          /*buffer_id=*/17,
                          "destination");
-  ReshardPlanner planner;
-  const Status status =
-      planner.validate_destination_coverage(sources, destination);
+  const Status status = validate_destination_coverage(sources, destination);
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("multiple writers"), std::string::npos);
 }
@@ -930,8 +916,7 @@ TEST(ReshardPlannerTest, RejectsDestinationWithoutSourceWriter) {
       make_head_manifest(0, 1, 1, 17, "destination");
   destination.tensors[0].shard.spans[0].logical_tensor = "missing_key";
 
-  const Status status =
-      ReshardPlanner().validate_destination_coverage(sources, destination);
+  const Status status = validate_destination_coverage(sources, destination);
 
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("no source writer"), std::string::npos);
@@ -944,8 +929,7 @@ TEST(ReshardPlannerTest, RejectsIncompatibleMatchingTensor) {
       make_head_manifest(0, 1, 1, 17, "destination");
   destination.tensors[0].scalar_type = 1;
 
-  const Status status =
-      ReshardPlanner().validate_destination_coverage(sources, destination);
+  const Status status = validate_destination_coverage(sources, destination);
 
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("incompatible"), std::string::npos);
@@ -957,8 +941,7 @@ TEST(ReshardPlannerTest, RejectsCpPartitionMismatch) {
   WorkerCacheLayoutManifest destination =
       make_head_manifest(0, 1, 1, 17, "destination");
   destination.coordinates.cp_size = 2;
-  const Status status =
-      ReshardPlanner().validate_destination_coverage(sources, destination);
+  const Status status = validate_destination_coverage(sources, destination);
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("CP/KV-split"), std::string::npos);
 }
@@ -1016,13 +999,13 @@ TEST(ReshardPlannerTest, PreservesKvSplitWhenDecodeCollapsesCp) {
     EXPECT_EQ(selected_indices,
               std::vector<size_t>({static_cast<size_t>(kv_split_rank)}));
 
-    ReshardPlanTemplate plan;
+    std::vector<StridedRegionTemplate> plan;
     ASSERT_TRUE(
         planner
             .build_outgoing_plan(
                 sources[static_cast<size_t>(kv_split_rank)], destination, &plan)
             .ok());
-    EXPECT_FALSE(plan.regions.empty());
+    EXPECT_FALSE(plan.empty());
   }
 }
 
@@ -1057,13 +1040,13 @@ TEST(ReshardPlannerTest, PreservesKvSplitWhenDecodeCollapsesCpAndTp) {
     EXPECT_EQ(selected_indices,
               std::vector<size_t>({static_cast<size_t>(kv_split_rank)}));
 
-    ReshardPlanTemplate plan;
+    std::vector<StridedRegionTemplate> plan;
     ASSERT_TRUE(
         planner
             .build_outgoing_plan(
                 sources[static_cast<size_t>(kv_split_rank)], destination, &plan)
             .ok());
-    EXPECT_FALSE(plan.regions.empty());
+    EXPECT_FALSE(plan.empty());
   }
 }
 
@@ -1111,11 +1094,11 @@ TEST(ReshardPlannerTest, SelectsSingleOwnerForPcpMqaDecodeWorkers) {
     EXPECT_EQ(selected_indices, std::vector<size_t>({0}));
   }
 
-  ReshardPlanTemplate replica_plan;
+  std::vector<StridedRegionTemplate> replica_plan;
   ASSERT_TRUE(
       planner.build_outgoing_plan(sources[2], destinations[0], &replica_plan)
           .ok());
-  EXPECT_FALSE(replica_plan.regions.empty());
+  EXPECT_FALSE(replica_plan.empty());
 }
 
 TEST(ReshardPlannerTest, SelectsOneCpOwnerPerKvSplitPartition) {
@@ -1206,7 +1189,7 @@ TEST(ReshardPlannerTest, CollapsesPrefillCpAndKvSplitIntoDecodePartition) {
   for (size_t source_rank = 0; source_rank < sources.size(); ++source_rank) {
     const WorkerCacheLayoutManifest& source = sources[source_rank];
     fill_source(source, &source_bytes[source_rank]);
-    ReshardPlanTemplate plan;
+    std::vector<StridedRegionTemplate> plan;
     ASSERT_TRUE(planner.build_outgoing_plan(source, destination, &plan).ok());
 
     KVTransferMapping mapping;
@@ -1218,7 +1201,7 @@ TEST(ReshardPlannerTest, CollapsesPrefillCpAndKvSplitIntoDecodePartition) {
     ASSERT_TRUE(RequestRegionBinder()
                     .bind(plan,
                           {mapping},
-                          CacheNamespace::MAIN,
+                          kPrimaryCachePoolId,
                           /*layer_id=*/0,
                           &regions)
                     .ok());
@@ -1252,34 +1235,42 @@ TEST(ReshardPlannerTest, SupportsTp1SpecDraftBesideShardedMainCache) {
   }
   ReshardPlanner planner;
 
-  ASSERT_TRUE(
-      planner.validate_destination_coverage(sources, destinations[1]).ok());
-  ReshardPlanTemplate source_zero_plan;
-  ReshardPlanTemplate source_one_plan;
+  std::vector<size_t> source_indices;
+  std::vector<std::vector<uint64_t>> excluded_spans;
   ASSERT_TRUE(
       planner
-          .build_outgoing_plan(sources[0], destinations[1], &source_zero_plan)
+          .select_sources(
+              sources, destinations[1], &source_indices, &excluded_spans)
+          .ok());
+  ASSERT_EQ(source_indices, (std::vector<size_t>{0, 1}));
+  std::vector<StridedRegionTemplate> source_zero_plan;
+  std::vector<StridedRegionTemplate> source_one_plan;
+  ASSERT_TRUE(
+      planner
+          .build_outgoing_plan(
+              sources[0], destinations[1], &source_zero_plan, excluded_spans[0])
           .ok());
   ASSERT_TRUE(
-      planner.build_outgoing_plan(sources[1], destinations[1], &source_one_plan)
+      planner
+          .build_outgoing_plan(
+              sources[1], destinations[1], &source_one_plan, excluded_spans[1])
           .ok());
-  EXPECT_TRUE(std::any_of(source_zero_plan.regions.begin(),
-                          source_zero_plan.regions.end(),
+  EXPECT_TRUE(std::any_of(source_zero_plan.begin(),
+                          source_zero_plan.end(),
                           [](const StridedRegionTemplate& region) {
-                            return region.cache_namespace ==
-                                   CacheNamespace::SPEC_DRAFT;
+                            return region.cache_pool_id ==
+                                   /*cache_pool_id=*/1;
                           }));
-  EXPECT_FALSE(std::any_of(source_one_plan.regions.begin(),
-                           source_one_plan.regions.end(),
+  EXPECT_FALSE(std::any_of(source_one_plan.begin(),
+                           source_one_plan.end(),
                            [](const StridedRegionTemplate& region) {
-                             return region.cache_namespace ==
-                                    CacheNamespace::SPEC_DRAFT;
+                             return region.cache_pool_id ==
+                                    /*cache_pool_id=*/1;
                            }));
-  EXPECT_TRUE(std::any_of(source_one_plan.regions.begin(),
-                          source_one_plan.regions.end(),
+  EXPECT_TRUE(std::any_of(source_one_plan.begin(),
+                          source_one_plan.end(),
                           [](const StridedRegionTemplate& region) {
-                            return region.cache_namespace ==
-                                   CacheNamespace::MAIN;
+                            return region.cache_pool_id == kPrimaryCachePoolId;
                           }));
 }
 
@@ -1290,8 +1281,7 @@ TEST(ReshardPlannerTest, RejectsIncompleteSourceWorkerSet) {
   const WorkerCacheLayoutManifest destination =
       make_head_manifest(0, 1, 2, 17, "destination");
 
-  const Status status =
-      ReshardPlanner().validate_destination_coverage(sources, destination);
+  const Status status = validate_destination_coverage(sources, destination);
 
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("incomplete"), std::string::npos);
@@ -1308,11 +1298,50 @@ TEST(ReshardPlannerTest, RejectsNonDivisibleCpAndKvSplitSizes) {
   const WorkerCacheLayoutManifest destination =
       make_head_manifest(0, 1, 1, 17, "destination");
 
-  const Status status =
-      ReshardPlanner().validate_destination_coverage(sources, destination);
+  const Status status = validate_destination_coverage(sources, destination);
 
   EXPECT_FALSE(status.ok());
-  EXPECT_NE(status.message().find("divisible"), std::string::npos);
+}
+
+TEST(ReshardPlannerTest, SelectsParticipatingWriterForPartialKvSplit) {
+  std::vector<WorkerCacheLayoutManifest> sources;
+  for (int32_t worker = 0; worker < 4; ++worker) {
+    WorkerCacheLayoutManifest manifest = make_head_manifest(
+        /*tp_rank=*/worker,
+        /*tp_size=*/4,
+        /*global_heads=*/2,
+        /*buffer_id=*/3 + worker,
+        "source" + std::to_string(worker));
+    manifest.coordinates.kv_split_size = 2;
+    manifest.coordinates.kv_split_rank = worker / 2;
+    if (worker >= 2) {
+      manifest.tensors[0].shard.spans[0].owner_tp_rank = 0;
+    }
+    sources.emplace_back(std::move(manifest));
+  }
+  WorkerCacheLayoutManifest destination = make_head_manifest(
+      /*tp_rank=*/2,
+      /*tp_size=*/4,
+      /*global_heads=*/2,
+      /*buffer_id=*/17,
+      "destination");
+  destination.coordinates.kv_split_size = 2;
+  destination.coordinates.kv_split_rank = 1;
+
+  std::vector<size_t> source_indices;
+  std::vector<std::vector<uint64_t>> excluded_spans;
+  ReshardPlanner planner;
+  const Status status = planner.select_sources(
+      sources, destination, &source_indices, &excluded_spans);
+  ASSERT_TRUE(status.ok()) << status.message();
+  ASSERT_EQ(source_indices, (std::vector<size_t>{2}));
+  std::vector<StridedRegionTemplate> region_templates;
+  ASSERT_TRUE(
+      planner
+          .build_outgoing_plan(
+              sources[2], destination, &region_templates, excluded_spans[2])
+          .ok());
+  EXPECT_FALSE(region_templates.empty());
 }
 
 TEST(ReshardPlannerTest, RejectsDuplicateSourceRank) {
@@ -1322,8 +1351,7 @@ TEST(ReshardPlannerTest, RejectsDuplicateSourceRank) {
   const WorkerCacheLayoutManifest destination =
       make_head_manifest(0, 1, 2, 17, "destination");
 
-  const Status status =
-      ReshardPlanner().validate_destination_coverage(sources, destination);
+  const Status status = validate_destination_coverage(sources, destination);
 
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("duplicate rank"), std::string::npos);
@@ -1336,20 +1364,19 @@ TEST(ReshardPlannerTest, RejectsSourceGenerationMismatch) {
   const WorkerCacheLayoutManifest destination =
       make_head_manifest(0, 1, 2, 17, "destination");
 
-  const Status status =
-      ReshardPlanner().validate_destination_coverage(sources, destination);
+  const Status status = validate_destination_coverage(sources, destination);
 
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("disagree"), std::string::npos);
 }
 
-TEST(ReshardPlannerTest, KeepsCacheNamespacesIsolated) {
+TEST(ReshardPlannerTest, KeepsCachePoolsIsolated) {
   WorkerCacheLayoutManifest source = make_head_manifest(0, 1, 1, 3, "source");
   WorkerCacheLayoutManifest destination =
       make_head_manifest(0, 1, 1, 17, "destination");
-  source.tensors[0].cache_namespace = CacheNamespace::SPEC_DRAFT;
-  destination.tensors[0].cache_namespace = CacheNamespace::SPEC_DRAFT;
-  ReshardPlanTemplate plan;
+  source.tensors[0].cache_pool_id = 1;
+  destination.tensors[0].cache_pool_id = 1;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(
       ReshardPlanner().build_outgoing_plan(source, destination, &plan).ok());
   KVTransferMapping mapping;
@@ -1362,7 +1389,7 @@ TEST(ReshardPlannerTest, KeepsCacheNamespacesIsolated) {
   ASSERT_TRUE(binder
                   .bind(plan,
                         {mapping},
-                        CacheNamespace::MAIN,
+                        kPrimaryCachePoolId,
                         /*layer_id=*/0,
                         &regions)
                   .ok());
@@ -1370,7 +1397,7 @@ TEST(ReshardPlannerTest, KeepsCacheNamespacesIsolated) {
   ASSERT_TRUE(binder
                   .bind(plan,
                         {mapping},
-                        CacheNamespace::SPEC_DRAFT,
+                        /*cache_pool_id=*/1,
                         /*layer_id=*/0,
                         &regions)
                   .ok());
@@ -1383,7 +1410,7 @@ TEST(ReshardPlannerTest, SupportsSequenceScopedResources) {
       make_head_manifest(0, 1, 1, 17, "destination");
   source.tensors[0].shard.resource_scope = CacheResourceScope::SEQUENCE;
   destination.tensors[0].shard.resource_scope = CacheResourceScope::SEQUENCE;
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
 
   ASSERT_TRUE(
       ReshardPlanner().build_outgoing_plan(source, destination, &plan).ok());
@@ -1395,7 +1422,7 @@ TEST(ReshardPlannerTest, SupportsSequenceScopedResources) {
   ASSERT_TRUE(RequestRegionBinder()
                   .bind(plan,
                         {mapping},
-                        CacheNamespace::MAIN,
+                        kPrimaryCachePoolId,
                         /*layer_id=*/0,
                         &regions)
                   .ok());
@@ -1423,7 +1450,7 @@ TEST(ReshardPlannerTest, SupportsCompositeDescriptors) {
     suffix.bytes_per_region = kTokenCount - 1;
     shard.spans.emplace_back(suffix);
   }
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(
       ReshardPlanner().build_outgoing_plan(source, destination, &plan).ok());
   KVTransferMapping mapping;
@@ -1435,7 +1462,7 @@ TEST(ReshardPlannerTest, SupportsCompositeDescriptors) {
   ASSERT_TRUE(RequestRegionBinder()
                   .bind(plan,
                         {mapping},
-                        CacheNamespace::MAIN,
+                        kPrimaryCachePoolId,
                         /*layer_id=*/0,
                         &regions)
                   .ok());
@@ -1451,7 +1478,7 @@ TEST(RequestRegionBinderTest, BindsExplicitVirtualMemoryResourceOffsets) {
   source.tensors[0].buffer_bytes = 1024;
   destination.tensors[0].explicit_resource_offsets = true;
   destination.tensors[0].buffer_bytes = 1024;
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(
       ReshardPlanner().build_outgoing_plan(source, destination, &plan).ok());
   ExplicitResourceMapping mapping;
@@ -1466,7 +1493,7 @@ TEST(RequestRegionBinderTest, BindsExplicitVirtualMemoryResourceOffsets) {
   ASSERT_TRUE(RequestRegionBinder()
                   .bind_explicit(plan,
                                  {mapping},
-                                 CacheNamespace::MAIN,
+                                 kPrimaryCachePoolId,
                                  /*layer_id=*/0,
                                  &regions)
                   .ok());
@@ -1484,10 +1511,8 @@ TEST(RequestRegionBinderTest,
       /*tp_rank=*/0, /*tp_size=*/1, {true, false}, "source");
   const WorkerCacheLayoutManifest destination = make_virtual_mla_manifest(
       /*tp_rank=*/0, /*tp_size=*/1, {true, false}, "destination");
-  ReshardPlanTemplate plan;
-  ASSERT_TRUE(ReshardPlanner()
-                  .validate_destination_coverage({source}, destination)
-                  .ok());
+  std::vector<StridedRegionTemplate> plan;
+  ASSERT_TRUE(validate_destination_coverage({source}, destination).ok());
   ASSERT_TRUE(
       ReshardPlanner().build_outgoing_plan(source, destination, &plan).ok());
   std::vector<ByteRegion> regions;
@@ -1495,7 +1520,7 @@ TEST(RequestRegionBinderTest,
   ASSERT_TRUE(RequestRegionBinder()
                   .bind_explicit(plan,
                                  make_virtual_mla_mappings(),
-                                 CacheNamespace::MAIN,
+                                 kPrimaryCachePoolId,
                                  /*layer_id=*/0,
                                  &regions)
                   .ok());
@@ -1526,13 +1551,18 @@ TEST(ReshardPlannerTest, SelectsSparseVirtualIndexOwnerAcrossLayers) {
       /*tp_rank=*/0, /*tp_size=*/1, {false, true}, "destination");
   ReshardPlanner planner;
   std::vector<size_t> selected;
-  ASSERT_TRUE(planner.select_sources(sources, destination, &selected).ok());
+  std::vector<std::vector<uint64_t>> excluded_spans;
+  ASSERT_TRUE(
+      planner.select_sources(sources, destination, &selected, &excluded_spans)
+          .ok());
   EXPECT_EQ(selected, std::vector<size_t>({0, 1}));
 
   for (size_t rank : selected) {
-    ReshardPlanTemplate plan;
-    ASSERT_TRUE(
-        planner.build_outgoing_plan(sources[rank], destination, &plan).ok());
+    std::vector<StridedRegionTemplate> plan;
+    ASSERT_TRUE(planner
+                    .build_outgoing_plan(
+                        sources[rank], destination, &plan, excluded_spans[rank])
+                    .ok());
     for (int64_t layer = 0; layer < 2; ++layer) {
       std::vector<ExplicitResourceMapping> mappings =
           make_virtual_mla_mappings();
@@ -1540,9 +1570,9 @@ TEST(ReshardPlannerTest, SelectsSparseVirtualIndexOwnerAcrossLayers) {
       std::vector<ByteRegion> regions;
       ASSERT_TRUE(RequestRegionBinder()
                       .bind_explicit(
-                          plan, mappings, CacheNamespace::MAIN, layer, &regions)
+                          plan, mappings, kPrimaryCachePoolId, layer, &regions)
                       .ok());
-      const size_t expected_count = rank == 0 ? 2 : static_cast<size_t>(layer);
+      const size_t expected_count = rank == 0 ? 2 : (layer == 1 ? 1 : 0);
       ASSERT_EQ(regions.size(), expected_count);
       for (size_t index = 0; index < regions.size(); ++index) {
         const size_t role = rank == 0 ? index : 2;
@@ -1559,7 +1589,7 @@ TEST(RequestRegionBinderTest, RejectsVirtualMlaRequestMissingIndexMapping) {
       /*tp_rank=*/0, /*tp_size=*/1, {true, false}, "source");
   const WorkerCacheLayoutManifest destination = make_virtual_mla_manifest(
       /*tp_rank=*/0, /*tp_size=*/1, {true, false}, "destination");
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(
       ReshardPlanner().build_outgoing_plan(source, destination, &plan).ok());
   std::vector<ExplicitResourceMapping> mappings = make_virtual_mla_mappings();
@@ -1567,7 +1597,7 @@ TEST(RequestRegionBinderTest, RejectsVirtualMlaRequestMissingIndexMapping) {
   std::vector<ByteRegion> regions(1);
 
   const Status status = RequestRegionBinder().bind_explicit(
-      plan, mappings, CacheNamespace::MAIN, /*layer_id=*/0, &regions);
+      plan, mappings, kPrimaryCachePoolId, /*layer_id=*/0, &regions);
 
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("missing an explicit cache tensor mapping"),
@@ -1581,8 +1611,7 @@ TEST(ReshardPlannerTest, RejectsVirtualMlaDestinationIndexWithoutSourceOwner) {
   const WorkerCacheLayoutManifest destination = make_virtual_mla_manifest(
       /*tp_rank=*/0, /*tp_size=*/1, {false, true}, "destination");
 
-  const Status status =
-      ReshardPlanner().validate_destination_coverage({source}, destination);
+  const Status status = validate_destination_coverage({source}, destination);
 
   EXPECT_FALSE(status.ok());
   EXPECT_NE(status.message().find("no source writer"), std::string::npos);
@@ -1593,27 +1622,15 @@ TEST(ReshardPlannerTest, NativePullCopiesAllMlaRolesOnNonOwnerRank) {
       /*tp_rank=*/1, "prefill", /*buffer_id=*/7);
   const WorkerCacheLayoutManifest destination = make_native_pull_mla_manifest(
       /*tp_rank=*/1, "decode", /*buffer_id=*/3);
-  ReshardPlanTemplate outgoing_plan;
-  ASSERT_TRUE(ReshardPlanner()
-                  .build_outgoing_plan(source, destination, &outgoing_plan)
-                  .ok());
-  ASSERT_TRUE(outgoing_plan.regions.empty());
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
 
   const Status status =
       ReshardPlanner().build_native_pull_plan(destination, source, &plan);
 
   ASSERT_TRUE(status.ok()) << status.message();
-  EXPECT_EQ(plan.source_incarnation, source.incarnation_id);
-  EXPECT_EQ(plan.destination_incarnation, destination.incarnation_id);
-  EXPECT_EQ(plan.source_layout_generation, source.layout_generation);
-  EXPECT_EQ(plan.destination_layout_generation, destination.layout_generation);
-  EXPECT_EQ(plan.destination_addr, destination.addr);
-  EXPECT_EQ(plan.source_coordinates.tp_rank, 1);
-  EXPECT_EQ(plan.destination_coordinates.tp_rank, 1);
-  ASSERT_EQ(plan.regions.size(), 8U);
-  for (size_t index = 0; index < plan.regions.size(); ++index) {
-    const StridedRegionTemplate& region = plan.regions[index];
+  ASSERT_EQ(plan.size(), 8U);
+  for (size_t index = 0; index < plan.size(); ++index) {
+    const StridedRegionTemplate& region = plan[index];
     const CacheTensorManifest& tensor = destination.tensors[index];
     EXPECT_EQ(region.layer_id, tensor.layer_id);
     EXPECT_EQ(region.role, tensor.role);
@@ -1633,7 +1650,7 @@ TEST(RequestRegionBinderTest, NativePullReadsIndependentMlaRoleOffsets) {
       /*tp_rank=*/1, "prefill", /*buffer_id=*/7);
   const WorkerCacheLayoutManifest destination = make_native_pull_mla_manifest(
       /*tp_rank=*/1, "decode", /*buffer_id=*/3);
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(
       ReshardPlanner().build_native_pull_plan(destination, source, &plan).ok());
   const std::vector<ExplicitResourceMapping> mappings =
@@ -1642,7 +1659,7 @@ TEST(RequestRegionBinderTest, NativePullReadsIndependentMlaRoleOffsets) {
   ASSERT_TRUE(RequestRegionBinder()
                   .bind_explicit(plan,
                                  mappings,
-                                 CacheNamespace::MAIN,
+                                 kPrimaryCachePoolId,
                                  /*layer_id=*/0,
                                  &regions)
                   .ok());
@@ -1675,7 +1692,7 @@ TEST(RequestRegionBinderTest, NativePullReadsIndependentMlaRoleOffsets) {
   ASSERT_TRUE(RequestRegionBinder()
                   .bind_explicit(plan,
                                  mappings,
-                                 CacheNamespace::MAIN,
+                                 kPrimaryCachePoolId,
                                  /*layer_id=*/1,
                                  &regions)
                   .ok());
@@ -1690,11 +1707,11 @@ TEST(ReshardPlannerTest, NativePullAllowsDifferentResourceCountsAndDpRanks) {
   source.coordinates.dp_size = 2;
   destination.coordinates.dp_size = 2;
   destination.coordinates.dp_rank = 1;
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
 
   ASSERT_TRUE(
       ReshardPlanner().build_native_pull_plan(destination, source, &plan).ok());
-  for (const StridedRegionTemplate& region : plan.regions) {
+  for (const StridedRegionTemplate& region : plan) {
     EXPECT_EQ(region.local_resource_count, 2U);
     EXPECT_EQ(region.remote_resource_count, 4U);
   }
@@ -1708,7 +1725,7 @@ TEST(ReshardPlannerTest, NativePullAllowsDifferentResourceCountsAndDpRanks) {
   ASSERT_TRUE(RequestRegionBinder()
                   .bind_explicit(plan,
                                  mappings,
-                                 CacheNamespace::MAIN,
+                                 kPrimaryCachePoolId,
                                  /*layer_id=*/0,
                                  &regions)
                   .ok());
@@ -1717,7 +1734,7 @@ TEST(ReshardPlannerTest, NativePullAllowsDifferentResourceCountsAndDpRanks) {
   EXPECT_FALSE(RequestRegionBinder()
                    .bind_explicit(plan,
                                   mappings,
-                                  CacheNamespace::MAIN,
+                                  kPrimaryCachePoolId,
                                   /*layer_id=*/0,
                                   &regions)
                    .ok());
@@ -1729,7 +1746,7 @@ TEST(ReshardPlannerTest, NativePullRejectsMissingOrDifferentSparseRoles) {
       /*tp_rank=*/1, "decode", /*buffer_id=*/3);
   WorkerCacheLayoutManifest source = make_native_pull_mla_manifest(
       /*tp_rank=*/1, "prefill", /*buffer_id=*/7);
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   source.tensors.pop_back();
   EXPECT_FALSE(
       ReshardPlanner().build_native_pull_plan(destination, source, &plan).ok());
@@ -1746,7 +1763,7 @@ TEST(ReshardPlannerTest, NativePullRejectsOwnershipAndLogicalShardMismatch) {
       /*tp_rank=*/1, "decode", /*buffer_id=*/3);
   WorkerCacheLayoutManifest source = make_native_pull_mla_manifest(
       /*tp_rank=*/1, "prefill", /*buffer_id=*/7);
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   source.tensors[0].shard.spans[0].owner_tp_rank = 1;
   ASSERT_TRUE(validate_worker_cache_layout(source).ok());
   EXPECT_FALSE(
@@ -1763,7 +1780,7 @@ TEST(ReshardPlannerTest, NativePullRejectsDtypeAndResourceGeometryMismatch) {
       /*tp_rank=*/1, "decode", /*buffer_id=*/3);
   WorkerCacheLayoutManifest source = make_native_pull_mla_manifest(
       /*tp_rank=*/1, "prefill", /*buffer_id=*/7);
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   source.tensors[0].scalar_type = 5;
   ASSERT_TRUE(validate_worker_cache_layout(source).ok());
   EXPECT_FALSE(
@@ -1782,7 +1799,7 @@ TEST(ReshardPlannerTest, NativePullRejectsIncompatibleLayoutIdentity) {
   const WorkerCacheLayoutManifest original_source =
       make_native_pull_mla_manifest(
           /*tp_rank=*/1, "prefill", /*buffer_id=*/7);
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   for (int32_t field = 0; field < 4; ++field) {
     WorkerCacheLayoutManifest source = original_source;
     switch (field) {
@@ -1812,7 +1829,7 @@ TEST(ReshardPlannerTest, NativePullRejectsTopologyMismatch) {
   const WorkerCacheLayoutManifest original_source =
       make_native_pull_mla_manifest(
           /*tp_rank=*/1, "prefill", /*buffer_id=*/7);
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   for (int32_t field = 0; field < 5; ++field) {
     WorkerCacheLayoutManifest source = original_source;
     switch (field) {
@@ -1847,13 +1864,13 @@ TEST(ReshardPlannerTest, NativePullRejectsUnsupportedTensorSemantics) {
       make_native_pull_mla_manifest(/*tp_rank=*/1, "decode", /*buffer_id=*/3);
   const WorkerCacheLayoutManifest source = make_native_pull_mla_manifest(
       /*tp_rank=*/1, "prefill", /*buffer_id=*/7);
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   for (int32_t field = 0; field < 5; ++field) {
     WorkerCacheLayoutManifest destination = original_destination;
     CacheTensorManifest& tensor = destination.tensors[0];
     switch (field) {
       case 0:
-        tensor.cache_namespace = CacheNamespace::SPEC_DRAFT;
+        tensor.cache_pool_id = 1;
         break;
       case 1:
         tensor.group_id += 1;
@@ -1882,7 +1899,7 @@ TEST(RequestRegionBinderTest,
       /*tp_rank=*/1, "prefill", /*buffer_id=*/7);
   const WorkerCacheLayoutManifest destination = make_native_pull_mla_manifest(
       /*tp_rank=*/1, "decode", /*buffer_id=*/3);
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(
       ReshardPlanner().build_native_pull_plan(destination, source, &plan).ok());
   std::vector<ExplicitResourceMapping> mappings =
@@ -1892,7 +1909,7 @@ TEST(RequestRegionBinderTest,
   EXPECT_FALSE(RequestRegionBinder()
                    .bind_explicit(plan,
                                   mappings,
-                                  CacheNamespace::MAIN,
+                                  kPrimaryCachePoolId,
                                   /*layer_id=*/0,
                                   &regions)
                    .ok());
@@ -1905,7 +1922,7 @@ TEST(RequestRegionBinderTest,
     EXPECT_FALSE(RequestRegionBinder()
                      .bind_explicit(plan,
                                     mappings,
-                                    CacheNamespace::MAIN,
+                                    kPrimaryCachePoolId,
                                     /*layer_id=*/0,
                                     &regions)
                      .ok());
@@ -1952,7 +1969,7 @@ TEST(RequestRegionBinderTest, RejectsExplicitOffsetOutsideManifestBuffer) {
   source.tensors[0].buffer_bytes = 1024;
   destination.tensors[0].explicit_resource_offsets = true;
   destination.tensors[0].buffer_bytes = 1024;
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(
       ReshardPlanner().build_outgoing_plan(source, destination, &plan).ok());
   ExplicitResourceMapping mapping;
@@ -1965,7 +1982,7 @@ TEST(RequestRegionBinderTest, RejectsExplicitOffsetOutsideManifestBuffer) {
   std::vector<ByteRegion> regions;
 
   const Status status = RequestRegionBinder().bind_explicit(
-      plan, {mapping}, CacheNamespace::MAIN, /*layer_id=*/0, &regions);
+      plan, {mapping}, kPrimaryCachePoolId, /*layer_id=*/0, &regions);
   EXPECT_FALSE(status.ok());
   EXPECT_TRUE(regions.empty());
 }
@@ -2083,7 +2100,7 @@ TEST(RequestRegionBinderTest, RejectsOutOfRangeNonContiguousResourceIds) {
       make_head_manifest(0, 1, 1, 3, "source");
   const WorkerCacheLayoutManifest destination =
       make_head_manifest(0, 1, 1, 17, "destination");
-  ReshardPlanTemplate plan;
+  std::vector<StridedRegionTemplate> plan;
   ASSERT_TRUE(
       ReshardPlanner().build_outgoing_plan(source, destination, &plan).ok());
   KVTransferMapping mapping;
@@ -2092,7 +2109,7 @@ TEST(RequestRegionBinderTest, RejectsOutOfRangeNonContiguousResourceIds) {
   mapping.remote_ids = {0};
   std::vector<ByteRegion> regions;
   const Status status = RequestRegionBinder().bind(
-      plan, {mapping}, CacheNamespace::MAIN, 0, &regions);
+      plan, {mapping}, kPrimaryCachePoolId, 0, &regions);
   EXPECT_FALSE(status.ok());
   EXPECT_TRUE(regions.empty());
 }

@@ -914,33 +914,6 @@ TEST(KVCacheTest, SharedDraftUsesTargetFinalPagesWithLocalLayerIds) {
             draft.get_v_cache()[8].data_ptr());
 }
 
-TEST(KVCacheTest, DraftShapeBorrowsSharedArenaCapabilityAndLogicalCapacity) {
-  KVCacheCapacity target_capacity;
-  target_capacity.block_size(16)
-      .n_blocks(100)
-      .shared_slab_count(7)
-      .shared_draft_layers(1);
-  ModelArgs target_args;
-  target_args.n_layers(4).n_heads(4).n_kv_heads(2).head_dim(16);
-  const KVCacheShape target(target_capacity, target_args, /*world_size=*/1);
-  ModelArgs draft_args;
-  draft_args.n_layers(1).n_heads(4).n_kv_heads(2).head_dim(16);
-
-  const KVCacheShape draft =
-      build_speculative_draft_kv_cache_shape(target,
-                                             KVCacheCapacity{},
-                                             draft_args,
-                                             /*block_size=*/16,
-                                             /*draft_world_size=*/1,
-                                             /*kv_cache_dtype=*/"auto");
-
-  EXPECT_EQ(draft.shared_draft_layers(), 1);
-  EXPECT_EQ(draft.shared_slab_count(), 0);
-  EXPECT_EQ(draft.key_cache_shape(), target.key_cache_shape());
-  EXPECT_FALSE(draft.has_conv_cache_shape());
-  EXPECT_FALSE(draft.has_ssm_cache_shape());
-}
-
 TEST(KVCacheTest, DeepSeekV4KVCacheExposesIndexerScaleThroughSharedContract) {
   DeepSeekV4KVCacheTensors tensors;
   tensors.key_cache = torch::zeros({2, 4, 1, 64});

@@ -37,6 +37,7 @@ limitations under the License.
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kpool_cache_policy.h"
+#include "core/kv_cache/layout/kv_cache_layout_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
@@ -73,8 +74,9 @@ int64_t kv_cache_dtype_size(const std::string& kv_cache_dtype,
 }
 
 int64_t kv_slot_size(const ModelArgs& model_args,
-                     const KVCacheEstimateOptions& options,
-                     int64_t cache_dtype_size) {
+                     const KVCacheEstimateOptions& options) {
+  const int64_t cache_dtype_size = kv_cache_dtype_size(
+      options.kv_cache_dtype, torch::elementSize(options.dtype));
   if (model_args.enable_mla()) {
     if (util::enable_mla_packed_c8(options.kv_cache_dtype == "int8",
                                    model_args.model_type())) {
@@ -195,41 +197,47 @@ int64_t layerwise_split_block_count(const ModelArgs& model_args,
   return common_block_count;
 }
 
-bool enable_hybrid_spec_verify(const ModelArgs& model_args,
-                               const KVCacheEstimateOptions& options) {
-  return options.num_speculative_tokens > 0 && !options.is_draft_engine &&
-         options.instance_role != InstanceRole::PREFILL &&
-         (is_qwen3_5_target_model_type(model_args.model_type()) ||
-          is_glm5_next_target_model_type(model_args.model_type()));
-}
+struct LinearCacheLayout {
+  int64_t conv_state_len;
+  int64_t ssm_checkpoint_stride;
+  int64_t slot_size_bytes = 0;
+};
 
-int64_t linear_slot_size(const ModelArgs& model_args,
-                         const KVCacheEstimateOptions& options,
-                         int64_t dtype_size) {
-  if (model_args.linear_num_value_heads() <= 0) {
-    return 0;
-  }
+LinearCacheLayout get_local_linear_cache_layout(
+    const ModelArgs& model_args,
+    const KVCacheEstimateOptions& options) {
+  const bool uses_speculative_checkpoints =
+      options.num_speculative_tokens > 0 && !options.is_draft_engine &&
+      options.instance_role != InstanceRole::PREFILL &&
+      (is_qwen3_5_target_model_type(model_args.model_type()) ||
+       is_glm5_next_target_model_type(model_args.model_type()));
   const int64_t num_speculative_tokens =
-      enable_hybrid_spec_verify(model_args, options)
-          ? options.num_speculative_tokens
-          : 0;
+      uses_speculative_checkpoints ? options.num_speculative_tokens : 0;
+  LinearCacheLayout linear_cache_layout{
+      .conv_state_len =
+          model_args.linear_conv_kernel_dim() - 1 + num_speculative_tokens,
+      .ssm_checkpoint_stride = num_speculative_tokens + 1,
+  };
+  if (model_args.linear_num_value_heads() <= 0) {
+    return linear_cache_layout;
+  }
 
   const int64_t head_k_dim = model_args.linear_key_head_dim();
   const int64_t head_v_dim = model_args.linear_value_head_dim();
+  const int64_t dtype_size = torch::elementSize(options.dtype);
   const int64_t ssm_dtype_size =
       resolve_ssm_dtype_size(model_args.mamba_ssm_dtype(), dtype_size);
-
   const int64_t linear_ssm_slot_size =
       ssm_dtype_size * options.n_local_linear_v_heads * head_k_dim * head_v_dim;
-  const int64_t linear_conv_state_len =
-      model_args.linear_conv_kernel_dim() - 1 + num_speculative_tokens;
   const int64_t linear_conv_slot_size =
       dtype_size *
       (head_k_dim * options.n_local_linear_k_heads * 2 +
        head_v_dim * options.n_local_linear_v_heads) *
-      linear_conv_state_len;
-  return linear_conv_slot_size +
-         linear_ssm_slot_size * (num_speculative_tokens + 1);
+      linear_cache_layout.conv_state_len;
+  linear_cache_layout.slot_size_bytes =
+      linear_conv_slot_size +
+      linear_ssm_slot_size * linear_cache_layout.ssm_checkpoint_stride;
+  return linear_cache_layout;
 }
 
 int64_t max_linear_state_blocks(int64_t cache_size_in_bytes,
@@ -1090,10 +1098,7 @@ KVCacheCapacity estimate_kv_cache_capacity(
            "target";
   }
 
-  const int64_t dtype_size = static_cast<int64_t>(
-      torch::scalarTypeToTypeMeta(options.dtype).itemsize());
-  const int64_t cache_dtype_size =
-      kv_cache_dtype_size(options.kv_cache_dtype, dtype_size);
+  const int64_t dtype_size = torch::elementSize(options.dtype);
   const bool enable_indexer_cache_quantization =
       options.indexer_cache_dtype == "int8";
   KPoolCacheLayout kpool_layout = options.kpool_layout;
@@ -1124,21 +1129,18 @@ KVCacheCapacity estimate_kv_cache_capacity(
       CHECK_GT(model_args.index_kpool(), 0)
           << "KPool requires index_kpool > 0.";
     }
-    const int64_t split_factor =
-        Platform::supports_dsa_indexer_cache_sharding()
-            ? ParallelConfig::get_instance().kv_split_size_effective()
-            : 1;
+    const int64_t num_pages_per_block = num_index_pages_per_block();
     if (enable_indexer_cache_quantization) {
       // int8 index cache: one byte per element plus a per-token fp32 scale.
-      index_cache_slot_size =
-          split_factor * (static_cast<int64_t>(sizeof(int8_t)) * index_n_head *
-                              model_args.index_head_dim() +
-                          static_cast<int64_t>(sizeof(float)));
+      index_cache_slot_size = num_pages_per_block *
+                              (static_cast<int64_t>(sizeof(int8_t)) *
+                                   index_n_head * model_args.index_head_dim() +
+                               static_cast<int64_t>(sizeof(float)));
       index_cache_block_size = index_cache_slot_size * options.block_size;
     } else if (uses_compressed_tail) {
       // A compressed block holds block_size / index_kpool whole pools.
-      const int64_t pool_bytes = split_factor * dtype_size * index_n_head *
-                                 model_args.index_head_dim();
+      const int64_t pool_bytes = num_pages_per_block * dtype_size *
+                                 index_n_head * model_args.index_head_dim();
       // The per-token value rounds up; the block charge below stays exact.
       index_cache_slot_size = (pool_bytes + model_args.index_kpool() - 1) /
                               model_args.index_kpool();
@@ -1151,28 +1153,25 @@ KVCacheCapacity estimate_kv_cache_capacity(
                                       ? 2 * model_args.index_head_dim() + 1
                                       : model_args.index_head_dim();
       index_cache_slot_size =
-          split_factor * dtype_size * index_n_head * index_width;
+          num_pages_per_block * dtype_size * index_n_head * index_width;
       index_cache_block_size = index_cache_slot_size * options.block_size;
     }
   }
 
-  kv_cache_cap.slot_size(kv_slot_size(model_args, options, cache_dtype_size))
+  const LinearCacheLayout linear_cache_layout =
+      get_local_linear_cache_layout(model_args, options);
+  kv_cache_cap.slot_size(kv_slot_size(model_args, options))
       .index_slot_size(index_cache_slot_size)
       .index_block_bytes(index_cache_block_size)
       .kpool_layout(kpool_layout)
       .enable_indexer_cache_quant(enable_indexer_cache_quantization)
       .enable_mla_kv_cache_quant(enable_mla_kv_cache_quantization)
       .scale_slot_size(scale_slot_size(model_args, options))
-      .linear_slot_size(linear_slot_size(model_args, options, dtype_size))
+      .linear_slot_size(linear_cache_layout.slot_size_bytes)
+      .linear_conv_state_len(linear_cache_layout.conv_state_len)
+      .linear_ssm_checkpoint_stride(linear_cache_layout.ssm_checkpoint_stride)
       .n_layers(model_args.n_layers())
       .block_size(options.block_size);
-  const int64_t num_speculative_tokens =
-      enable_hybrid_spec_verify(model_args, options)
-          ? options.num_speculative_tokens
-          : 0;
-  kv_cache_cap.linear_conv_state_len(model_args.linear_conv_kernel_dim() - 1 +
-                                     num_speculative_tokens);
-  kv_cache_cap.linear_ssm_checkpoint_stride(num_speculative_tokens + 1);
   if (model_args.index_kpool_compress() &&
       kpool_layout == KPoolCacheLayout::COMPRESSED_WITH_TAIL) {
     CHECK_EQ(options.layerwise_split_size, 1)

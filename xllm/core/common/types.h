@@ -303,6 +303,8 @@ struct KVTransferMapping {
   // cache under this group. P uses this to compress its per-group transfer
   // cursor to the first block D actually needs (no shared -> zero, no-op).
   uint32_t remote_shared_num = 0;
+  // Source logical block index corresponding to local_ids[0].
+  uint64_t local_start_block_index = 0;
 };
 
 struct TransferKVInfo {

@@ -77,6 +77,7 @@ limitations under the License.
 #include "core/kv_cache/storage/linear_state_slot_table.h"
 #include "core/kv_cache/storage/static_kv_tensor_allocator.h"
 #include "core/kv_cache/storage/vmm_kv_tensor_allocator.h"
+#include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/kv_cache/transfer/virtual_kv_transfer_memory_factory.h"
 #include "core/runtime/worker_memory_resources.h"
 #include "core/runtime/worker_rendezvous.h"
@@ -490,13 +491,17 @@ void WorkerImpl::allocate_kv_cache(const KVCacheShape& shape,
                                    std::shared_ptr<KVTransfer> transfer) {
   kv_transfer_ = std::move(transfer);
   allocate_kv_cache_storage(shape, kv_transfer_ != nullptr, &layout);
+  if (kv_transfer_) {
+    register_kv_transfer(shape);
+  }
   status_ = Status::READY;
 }
 
 void WorkerImpl::register_kv_transfer(const KVCacheShape& kv_cache_shape) {
   kv_transfer_->configure_cache_layout(
-      parallel_args_, context_.get_model_args(), options_.block_size(), false);
-  kv_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
+      parallel_args_, context_.get_model_args(), options_.block_size());
+  cache_pool_id_ =
+      kv_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
 }
 
 bool WorkerImpl::allocate_kv_cache_with_transfer(
@@ -504,7 +509,6 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   CHECK(model_ != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
-  const ModelArgs& model_args = context_.get_model_args();
   std::unique_ptr<VirtualKVTransferMemoryProvider> memory_provider;
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_vmm_kvcache()) {
@@ -514,15 +518,14 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   }
 #endif
   kv_transfer_ = KVTransferFactory::create(options_.transfer_listen_port(),
-                                           device_,
-                                           model_args.model_type(),
+                                           device_.unwrap(),
                                            options_.model_id(),
                                            std::move(memory_provider));
   if (kv_transfer_ == nullptr) {
     LOG(ERROR) << "Failed to create KV cache transfer backend.";
     return false;
   }
-  kv_transfer_->initialize(device_.index());
+  kv_transfer_->initialize();
 
 #if defined(USE_MLU)
   constexpr bool use_huge_page_allocator = false;
@@ -1564,6 +1567,19 @@ folly::SemiFuture<bool> WorkerImpl::pull_kv_blocks_async(
   return future;
 #endif
 }
+
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+KVTransferCompletion WorkerImpl::push_kv_blocks_async(
+    const std::vector<TransferKVInfo>& transfer_kv_infos,
+    std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer) {
+  return KVTransferCompletion(
+      kv_transfer_->push_kv_blocks_async(transfer_kv_infos,
+                                         context_.get_parallel_args(),
+                                         std::move(layer_synchronizer),
+                                         cache_pool_id_),
+      KVTransfer::unique_request_ids(transfer_kv_infos));
+}
+#endif
 
 uint32_t WorkerImpl::transfer_kv_blocks(
     const uint64_t batch_id,
