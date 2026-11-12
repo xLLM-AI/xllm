@@ -134,6 +134,11 @@ inline std::string canonical_model_registration_name(
   if (model_type == "glm5_3_flash") {
     return "glm5_next";
   }
+  // The DeepSeek-OCR release ships HF config model_type "deepseek_vl_v2"
+  // (its architecture lineage); xllm registers the port under deepseek_ocr.
+  if (model_type == "deepseek_vl_v2") {
+    return "deepseek_ocr";
+  }
   return std::string(model_type);
 }
 

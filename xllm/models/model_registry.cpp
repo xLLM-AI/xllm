@@ -798,6 +798,8 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
     std::string python_model_name = context.get_model_args().model_type();
     if (is_glm5_next_target_model_type(python_model_name)) {
       python_model_name = "glm5_next_vl";
+    } else {
+      python_model_name = canonical_model_registration_name(python_model_name);
     }
     return std::make_unique<PyCausalLM>(context, std::move(python_model_name));
   }

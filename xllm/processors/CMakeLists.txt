@@ -46,6 +46,8 @@ cc_library(
     clip_image_processor.h
     clip_prompt_processor.h
     glm4v_image_processor.h
+    deepseek_ocr/prompt_processor.h
+    deepseek_ocr/image_processor.h
     joyai_asr_audio_processor.h
     joyai_asr_prompt_processor.h
     kimi25_image_processor.h
@@ -68,6 +70,8 @@ cc_library(
     clip_image_processor.cpp
     clip_prompt_processor.cpp
     glm4v_image_processor.cpp
+    deepseek_ocr/prompt_processor.cpp
+    deepseek_ocr/image_processor.cpp
     joyai_asr_audio_processor.cpp
     joyai_asr_prompt_processor.cpp
     kimi25_image_processor.cpp

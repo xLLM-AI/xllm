@@ -406,6 +406,9 @@ class VisionArgs final {
   PROPERTY(std::string, mm_hidden_act);
   PROPERTY(int64_t, mm_hidden_size) = 0;
   PROPERTY(int64_t, mm_image_size) = 0;
+  // DeepSeek-OCR dual-view recipe: global-view canvas (mm_image_base_size)
+  // vs local crop tile (mm_image_size); see processors/deepseek_ocr_*.
+  PROPERTY(int64_t, mm_image_base_size) = 0;
   PROPERTY(int64_t, mm_intermediate_size) = 0;
   PROPERTY(int64_t, mm_num_channels) = 0;
   PROPERTY(float, mm_initializer_range) = 0.0f;
@@ -916,6 +919,7 @@ struct ModelArgs {
   FORWARD_PROPERTY(std::string, mm_hidden_act, vision_args);
   FORWARD_PROPERTY(int64_t, mm_hidden_size, vision_args);
   FORWARD_PROPERTY(int64_t, mm_image_size, vision_args);
+  FORWARD_PROPERTY(int64_t, mm_image_base_size, vision_args);
   FORWARD_PROPERTY(int64_t, mm_intermediate_size, vision_args);
   FORWARD_PROPERTY(int64_t, mm_num_channels, vision_args);
   FORWARD_PROPERTY(float, mm_initializer_range, vision_args);
@@ -1347,6 +1351,7 @@ inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << ", mm_hidden_act: " << args.mm_hidden_act();
   os << ", mm_hidden_size: " << args.mm_hidden_size();
   os << ", mm_image_size: " << args.mm_image_size();
+  os << ", mm_image_base_size: " << args.mm_image_base_size();
   os << ", mm_intermediate_size: " << args.mm_intermediate_size();
   os << ", mm_num_channels: " << args.mm_num_channels();
   os << ", mm_initializer_range: " << args.mm_initializer_range();

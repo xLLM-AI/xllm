@@ -39,6 +39,13 @@ class Options {
 
   PROPERTY(std::string, model_id);
 
+  // Model implementation flavor ("native" | "python"); pybind callers use
+  // this to select the Python model executor since the offline API has no
+  // command-line flags. Only the VLMMaster pybind path mirrors it into
+  // ModelConfig today; LLM offline callers must use --model_impl (flags or
+  // config JSON). Empty leaves ModelConfig at its flag/JSON default.
+  PROPERTY(std::string, model_impl);
+
   // Select a named extension family for this instance.
   PROPERTY(std::string, extension_impl);
 
