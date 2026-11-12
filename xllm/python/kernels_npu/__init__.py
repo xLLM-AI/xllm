@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 _EXPORTS = {
     "activation": ("silu_and_mul", "fused_sigmoid_mul"),
     "attention": (
+        "batch_matmul_transpose",
         "reshape_paged_cache",
         "update_decode_graph_metadata",
         "vision_fusion_attention",
@@ -166,6 +167,7 @@ __all__ = [
     "fused_sigmoid_mul",
     "silu_and_mul",
     "dequant_swiglu_quant",
+    "batch_matmul_transpose",
     "reshape_paged_cache",
     "update_decode_graph_metadata",
     "vision_fusion_attention",
