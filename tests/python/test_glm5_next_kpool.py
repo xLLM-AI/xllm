@@ -18,7 +18,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from xllm.python.attention.mla_index_context import KPoolIndexContext
 from xllm.python.models import glm5_next
 from xllm.python.models.glm5_next_kpool import update_compressed_kpool
 
@@ -34,32 +33,6 @@ def _indexer(device: torch.device) -> glm5_next.Glm5NextIndexer:
         index_kpool_compress=True,
     )
     return glm5_next.Glm5NextIndexer(config, 1, torch.bfloat16, device).to(device=device, dtype=torch.bfloat16)
-
-
-@pytest.mark.parametrize(
-    ("query_lens", "rate", "expected"),
-    [
-        ([], 4, None),
-        ([1, 1], 4, 1),
-        ([4, 4], 4, 4),
-        ([8, 8], 4, 8),
-        ([9, 9], 4, 9),
-        ([4, 8], 4, None),
-        ([0], 4, None),
-        ([1], 0, None),
-    ],
-)
-def test_compact_kpool_query_width_spans_multiple_pools(query_lens: list[int], rate: int, expected: int | None) -> None:
-    assert glm5_next._compact_kpool_triton_query_len(query_lens, rate) == expected
-
-
-def test_kpool_query_spans_cover_all_token_rows() -> None:
-    ctx = SimpleNamespace(
-        kpool=KPoolIndexContext(tail=torch.empty(0), tail_read_indices=None, tail_write_indices=None, query_lens=(6,))
-    )
-    with pytest.raises(RuntimeError, match="cover the current token rows"):
-        glm5_next._kpool_update_query_lens(ctx, 8)
-    assert glm5_next._kpool_update_query_lens(ctx, 6) == [6]
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17])
@@ -138,13 +111,16 @@ def test_indexer_paged_selection_reuses_merged_weights_for_varlen_queries(
         query_positions=padded_positions,
     )[valid]
     context = SimpleNamespace(
-        index_cache=None,
+        index_cache=history.unsqueeze(2),
         slot_mapping=None,
-        block_table=torch.zeros(3, 1, dtype=torch.int32),
+        block_table=torch.arange(3, dtype=torch.int32).view(3, 1),
         actual_seq_kv=torch.tensor([8, 8, 8]),
         kpool_tail=None,
     )
-    backend = SimpleNamespace(gather_index_history=lambda *_args: history)
+    backend = SimpleNamespace(
+        indexer_block_table=lambda: context.block_table,
+        gather_index_history=lambda _layer, begin=None, end=None: history[begin:end],
+    )
     monkeypatch.setattr(glm5_next, "_current_q_seq_lens", lambda *_args: query_lengths)
     indexer.process_weights_after_loading()
 

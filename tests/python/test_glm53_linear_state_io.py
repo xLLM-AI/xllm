@@ -467,7 +467,7 @@ def test_varlen_prefill_uses_one_native_convolution(
     assert causal_conv1d_reference[0]["query_start_loc"] == [0, 1, 3, 6]
     assert causal_conv1d_reference[0]["run_mode"] == 0
     assert [call["op"] for call in kda_test_environment] == ["chunk"] * 3
-    assert [call["cu_seqlens"].tolist() for call in kda_test_environment] == [[0, 1], [0, 2], [0, 3]]
+    assert [call["cu_seqlens"] for call in kda_test_environment] == [[0, 1], [0, 2], [0, 3]]
 
 
 def _verify_metadata(slots: torch.Tensor, width: int) -> SimpleNamespace:

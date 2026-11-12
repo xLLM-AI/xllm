@@ -704,6 +704,9 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     TargetInput new_input = input.clone();
     scale_speculative_parallel_token_counts(new_input.input_params,
                                             options_.num_speculative_tokens());
+    if (impl_->has_request_state_cache()) {
+      new_input.input_params.is_spec_verify = true;
+    }
     ForwardOutput output = run_worker_no_sync_impl(*impl_,
                                                    new_input,
                                                    *prepare_stream_,

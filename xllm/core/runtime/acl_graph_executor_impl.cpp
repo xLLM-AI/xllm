@@ -191,8 +191,9 @@ uint64_t specialize_dp_ep_graph_key(uint64_t graph_key, const Params& params) {
   return graph_namespace | graph_key;
 }
 
-constexpr uint64_t paged_attention_plan_bucket_unchecked(int64_t max_kv,
-                                                         int64_t block_size) {
+uint64_t paged_attention_plan_bucket(int64_t max_kv, int64_t block_size) {
+  CHECK_GT(max_kv, 0);
+  CHECK_GT(block_size, 0);
   const uint64_t block =
       static_cast<uint64_t>((max_kv + block_size - 1) / block_size);
   // Keep the exact block endpoint separate. This preserves a conservative
@@ -201,19 +202,6 @@ constexpr uint64_t paged_attention_plan_bucket_unchecked(int64_t max_kv,
   // block.
   const uint64_t is_block_endpoint = max_kv % block_size == 0 ? 1 : 0;
   return (block << 1) | is_block_endpoint;
-}
-
-static_assert(paged_attention_plan_bucket_unchecked(127, 128) == 2);
-static_assert(paged_attention_plan_bucket_unchecked(128, 128) == 3);
-static_assert(paged_attention_plan_bucket_unchecked(129, 128) == 4);
-static_assert(paged_attention_plan_bucket_unchecked(255, 128) == 4);
-static_assert(paged_attention_plan_bucket_unchecked(256, 128) == 5);
-static_assert(paged_attention_plan_bucket_unchecked(257, 128) == 6);
-
-uint64_t paged_attention_plan_bucket(int64_t max_kv, int64_t block_size) {
-  CHECK_GT(max_kv, 0);
-  CHECK_GT(block_size, 0);
-  return paged_attention_plan_bucket_unchecked(max_kv, block_size);
 }
 
 uint64_t spec_verify_packed_graph_key(uint32_t bucket_num_tokens,

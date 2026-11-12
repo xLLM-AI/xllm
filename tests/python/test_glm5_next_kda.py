@@ -125,7 +125,7 @@ def test_framework_kda_checkpoints_match_tokenwise_reference(
                     layout="TND",
                     scale=head_dim**-0.5,
                     output_final_state=True,
-                    inplace_final_state=False,
+                    inplace_final_state=True,
                     use_qk_l2norm_in_kernel=True,
                     use_gate_in_kernel=False,
                     use_beta_sigmoid_in_kernel=False,

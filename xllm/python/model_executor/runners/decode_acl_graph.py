@@ -280,7 +280,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
             if any(count <= 0 for count in execution_counts):
                 raise RuntimeError(f"DP execution token counts must be positive, got {execution_counts}")
             dp_is_decode = getattr(metadata, "dp_is_decode", None)
-            if dp_is_decode is not None and not all(dp_is_decode):
+            if dp_is_decode is None or len(dp_is_decode) != self.dp_size:
+                raise RuntimeError(
+                    "DP decode step requires dp_is_decode on every rank: "
+                    f"got={dp_is_decode!r}, expected length={self.dp_size}"
+                )
+            # Local batch types can differ across DP ranks; graph eligibility is collective.
+            if not all(dp_is_decode):
                 return None
             if max(execution_counts) > self.max_batch:
                 return None
@@ -1227,6 +1233,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             ),
             q_cu_seq_lens_host_values=list(range(padded_batch_size + 1)) if self._device_kv_lengths else None,
             q_seq_lens=(torch.tensor(graph_query_lens, dtype=torch.int32, device=device) if graph_query_lens else None),
+            spec_group_width=(_uniform_span_width(expanded_graph_query_lens) or 0),
             q_seq_lens_host=(
                 torch.tensor(expanded_graph_query_lens or graph_query_lens, dtype=torch.int32)
                 if graph_query_lens
