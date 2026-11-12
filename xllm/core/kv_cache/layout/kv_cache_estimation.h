@@ -155,14 +155,18 @@ SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
                                   KVCacheCapacity draft_cap,
                                   const ModelArgs& draft_args);
 
-// The shared target arena and dense full-attention MTP draft use the same
-// logical IDs while owning separate tensor storage on one device.
+// Target Full/GDN and the co-located Full-only draft share one physical arena
+// and the same final Full pages. The draft capacity owns no separate storage.
 struct SharedStaticKVCachePlan {
   KVCacheCapacity target;
   KVCacheCapacity draft;
 };
 
-SharedStaticKVCachePlan plan_shared_static_kv_cache(KVCacheCapacity target_cap,
-                                                    KVCacheCapacity draft_cap);
+SharedStaticKVCachePlan plan_shared_static_kv_cache(
+    KVCacheCapacity target_cap,
+    KVCacheCapacity draft_cap,
+    const ModelArgs& target_args,
+    int64_t world_size,
+    torch::ScalarType dtype);
 
 }  // namespace xllm

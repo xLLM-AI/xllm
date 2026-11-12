@@ -223,7 +223,9 @@ TEST(DecodeInputBuilderTest, PaddingOverridesSuppressFinalWrites) {
 }
 
 TEST(DecodeInputBuilderTest, DraftSlotsUpdateWithoutRebuildingPageTables) {
-  LlmForwardInput input = make_shared_forward_input();
+  const LlmForwardInput target = make_shared_forward_input();
+  LlmForwardInput input =
+      make_llm_draft_input(target, /*shared_full_cache=*/true);
   const torch::Tensor original_pages =
       input.input_params.attention.host.shared_full_block_table;
   input.input_params.attention.host.shared_full_slot_mapping =

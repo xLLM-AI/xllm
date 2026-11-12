@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include "core/kv_cache/storage/kv_cache_utils.h"
@@ -78,10 +79,19 @@ TEST(StaticKVCacheTensorAllocatorNpuTest, KeepsDenseNdViewsInOnePhysicalArena) {
   spec.ssm_dtype = torch::kFloat32;
   spec.full_layer_ids = {0, 2};
   spec.linear_layer_ids = {1, 3};
-  StaticKVCacheTensorAllocator allocator(StaticKVCacheLayout(spec), device);
-  const NpuCacheViews views = allocate_views(allocator, spec, device);
+  spec.draft_layer_count = 1;
+  const auto allocator = std::make_shared<StaticKVCacheTensorAllocator>(
+      StaticKVCacheLayout(spec), device);
+  NpuCacheViews views = allocate_views(*allocator, spec, device);
+  const auto draft = create_static_draft_kv_tensor_allocator(allocator);
+  draft->begin_layer(/*layer_id=*/0);
+  views.keys.emplace_back(draft->allocate(
+      KVCacheTensorRole::KEY, {8, 2, 4}, torch::kBFloat16, device));
+  views.values.emplace_back(draft->allocate(
+      KVCacheTensorRole::VALUE, {8, 2, 4}, torch::kBFloat16, device));
+  EXPECT_TRUE(views.keys.back().is_alias_of(views.keys.front()));
   std::vector<torch::Tensor> tensors;
-  tensors.reserve(8);
+  tensors.reserve(10);
   tensors.insert(tensors.end(), views.keys.begin(), views.keys.end());
   tensors.insert(tensors.end(), views.values.begin(), views.values.end());
   tensors.insert(tensors.end(), views.conv.begin(), views.conv.end());
@@ -135,9 +145,19 @@ TEST(StaticKVCacheTensorAllocatorNpuTest,
   spec.ssm_dtype = torch::kFloat32;
   spec.full_layer_ids = {0, 2, 4, 6};
   spec.linear_layer_ids = {1, 3};
+  spec.draft_layer_count = 2;
   const StaticKVCacheLayout layout(spec);
-  StaticKVCacheTensorAllocator allocator(layout, device);
-  const NpuCacheViews views = allocate_views(allocator, spec, device);
+  const auto allocator =
+      std::make_shared<StaticKVCacheTensorAllocator>(layout, device);
+  NpuCacheViews views = allocate_views(*allocator, spec, device);
+  const auto draft = create_static_draft_kv_tensor_allocator(allocator);
+  for (int64_t layer = 0; layer < 2; ++layer) {
+    draft->begin_layer(layer);
+    views.keys.emplace_back(draft->allocate(
+        KVCacheTensorRole::KEY, {8, 2, 4}, torch::kBFloat16, device));
+    views.values.emplace_back(draft->allocate(
+        KVCacheTensorRole::VALUE, {8, 2, 4}, torch::kBFloat16, device));
+  }
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
     views.keys[layer][0].fill_(std::numeric_limits<float>::quiet_NaN());
     views.values[layer][0].fill_(std::numeric_limits<float>::quiet_NaN());
@@ -155,23 +175,23 @@ TEST(StaticKVCacheTensorAllocatorNpuTest,
     views.ssm[layer].narrow(0, bank_ssm_offset + 12, 2).fill_(43);
   }
   const std::vector<int32_t> rows = {0, 0, 0, 0, 0, 1, 8, 8, 8, 8};
-  EXPECT_TRUE(
-      allocator.needs_full_block_initialization(rows, /*lease_epochs=*/{0, 1}));
-  allocator.initialize_full_blocks(rows, /*lease_epochs=*/{0, 1});
+  EXPECT_TRUE(allocator->needs_full_block_initialization(
+      rows, /*lease_epochs=*/{0, 1}));
+  allocator->initialize_full_blocks(rows, /*lease_epochs=*/{0, 1});
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
     EXPECT_TRUE(views.keys[layer][8].eq(0).all().item<bool>());
     EXPECT_TRUE(views.values[layer][8].eq(0).all().item<bool>());
     views.keys[layer][8].fill_(7);
     views.values[layer][8].fill_(9);
   }
-  EXPECT_FALSE(
-      allocator.needs_full_block_initialization(rows, /*lease_epochs=*/{0, 1}));
-  allocator.initialize_full_blocks(rows, /*lease_epochs=*/{0, 1});
+  EXPECT_FALSE(allocator->needs_full_block_initialization(
+      rows, /*lease_epochs=*/{0, 1}));
+  allocator->initialize_full_blocks(rows, /*lease_epochs=*/{0, 1});
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
     EXPECT_TRUE(views.keys[layer][8].eq(7).all().item<bool>());
     EXPECT_TRUE(views.values[layer][8].eq(9).all().item<bool>());
   }
-  allocator.initialize_full_blocks(rows, /*lease_epochs=*/{0, 2});
+  allocator->initialize_full_blocks(rows, /*lease_epochs=*/{0, 2});
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
     EXPECT_TRUE(views.keys[layer][8].eq(0).all().item<bool>());
     views.keys[layer][8].fill_(7);
@@ -185,9 +205,9 @@ TEST(StaticKVCacheTensorAllocatorNpuTest,
   const std::vector<int32_t> mixed_rows = {
       3, 16, 16, 16, 16, 1, 8, 8, 8, 8, 4, 28, 28, 28, 28};
   const std::vector<uint64_t> epochs = {1, 2, 1};
-  EXPECT_TRUE(allocator.needs_full_block_initialization(mixed_rows, epochs));
-  allocator.initialize_full_blocks(mixed_rows, epochs);
-  EXPECT_FALSE(allocator.needs_full_block_initialization(mixed_rows, epochs));
+  EXPECT_TRUE(allocator->needs_full_block_initialization(mixed_rows, epochs));
+  allocator->initialize_full_blocks(mixed_rows, epochs);
+  EXPECT_FALSE(allocator->needs_full_block_initialization(mixed_rows, epochs));
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
     for (const int64_t page : {16, 28}) {
       EXPECT_TRUE(views.keys[layer][page].eq(0).all().item<bool>());
@@ -210,7 +230,7 @@ TEST(StaticKVCacheTensorAllocatorNpuTest,
                     .all()
                     .item<bool>());
   }
-  allocator.initialize_full_blocks(mixed_rows, epochs);
+  allocator->initialize_full_blocks(mixed_rows, epochs);
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
     for (const int64_t page : {16, 28}) {
       EXPECT_TRUE(views.keys[layer][page].eq(11).all().item<bool>());

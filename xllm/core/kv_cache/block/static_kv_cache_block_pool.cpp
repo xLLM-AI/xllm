@@ -65,6 +65,8 @@ StaticKVCacheBlockPool::StaticKVCacheBlockPool(
       bank_count_(layout.bank_count()),
       full_layers_per_bank_(layout.full_layers_per_bank()),
       linear_layers_per_bank_(layout.linear_layers_per_bank()),
+      linear_objects_per_state_(layout.linear_objects_per_state()),
+      independent_linear_objects_(layout.draft_layer_count() > 0),
       full_read_padding_page_(
           static_cast<int32_t>(layout.full_read_padding_page())),
       object_capacities_{layout.objects_per_slab(KVCacheTensorRole::KEY),
@@ -159,8 +161,9 @@ size_t StaticKVCacheBlockPool::object_capacity(SlabType type) const {
 
 uint32_t StaticKVCacheBlockPool::slab_for_row(int32_t row,
                                               SlabType type) const {
-  return static_cast<uint32_t>(static_cast<size_t>(row) *
-                               object_row_bytes(type) / slice_bytes_);
+  return static_cast<uint32_t>(
+      (static_cast<size_t>(row) * object_row_bytes(type) % bank_bytes_) /
+      slice_bytes_);
 }
 
 int32_t StaticKVCacheBlockPool::object_row(uint32_t slab_id,
@@ -168,7 +171,14 @@ int32_t StaticKVCacheBlockPool::object_row(uint32_t slab_id,
                                            SlabType type,
                                            size_t bank) const {
   const size_t row_bytes = object_row_bytes(type);
+  if (independent_linear_objects_ && type != SlabType::KV) {
+    const size_t capacity = object_capacity(type) / bank_count_;
+    bank += object / capacity;
+    object = static_cast<uint32_t>(object % capacity);
+  }
   const size_t bytes = bank * bank_bytes_ + slab_id * slice_bytes_;
+  // Conv alignment depends on the absolute bank base, which need not be a
+  // multiple of a Conv row. Keep the leading gap inside this bank's slice.
   const size_t row =
       divide_up(bytes, row_bytes) + object * (object_bytes(type) / row_bytes);
   CHECK_LE(row, static_cast<size_t>(std::numeric_limits<int32_t>::max()));
@@ -257,13 +267,22 @@ void StaticKVCacheBlockPool::release_object(int32_t row, SlabType type) {
   Slab& slab = slabs_[slab_id];
   CHECK(slab.type == type);
   CHECK_GT(slab.live_objects, 0u);
-  const size_t first_row = static_cast<size_t>(object_row(slab_id, 0, type));
+  const size_t bank =
+      independent_linear_objects_ && type != SlabType::KV
+          ? static_cast<size_t>(row) * object_row_bytes(type) / bank_bytes_
+          : 0;
+  const size_t first_row =
+      static_cast<size_t>(object_row(slab_id, 0, type, bank));
   const size_t row_offset = static_cast<size_t>(row) - first_row;
   const size_t rows_per_object = object_bytes(type) / object_row_bytes(type);
   CHECK_EQ(row_offset % rows_per_object, 0u);
   const bool was_full = slab.free_objects.empty();
+  const size_t bank_objects =
+      independent_linear_objects_ && type != SlabType::KV
+          ? bank * (object_capacity(type) / bank_count_)
+          : 0;
   slab.free_objects.emplace_back(
-      static_cast<uint32_t>(row_offset / rows_per_object));
+      static_cast<uint32_t>(bank_objects + row_offset / rows_per_object));
   ++available_object_counts_[static_cast<size_t>(type)];
   --slab.live_objects;
   if (slab.live_objects == 0) {
@@ -291,7 +310,8 @@ std::vector<int32_t> StaticKVCacheBlockPool::allocate_slab_blocks(
   if (num_blocks > free_ids_[index].size()) {
     return {};
   }
-  const size_t width = type == BlockType::KV ? 1 : 2 * linear_layers_per_bank_;
+  const size_t width =
+      type == BlockType::KV ? 1 : 2 * linear_objects_per_state_;
   RequestPlacement placement;
   if (placement_hint != nullptr) {
     const auto existing = request_placements_.find(placement_hint);
@@ -337,6 +357,10 @@ std::vector<int32_t> StaticKVCacheBlockPool::allocate_slab_blocks(
     int32_t* destination = physical_rows_[index].data() + id * stored_width;
     if (type == BlockType::KV) {
       std::fill_n(destination, full_layers_, rows[block]);
+      continue;
+    }
+    if (independent_linear_objects_) {
+      std::copy_n(rows.data() + block * width, width, destination);
       continue;
     }
     for (size_t layer = 0; layer < linear_layers_; ++layer) {
@@ -429,7 +453,7 @@ void StaticKVCacheBlockPool::release(int32_t block_id, BlockType type) {
         type == BlockType::KV ? full_layers_ : 2 * linear_layers_;
     const size_t begin = static_cast<size_t>(block_id) * width;
     const size_t objects =
-        type == BlockType::KV ? 1 : 2 * linear_layers_per_bank_;
+        type == BlockType::KV ? 1 : 2 * linear_objects_per_state_;
     for (size_t object = 0; object < objects; ++object) {
       const SlabType slab_type =
           type == BlockType::KV
@@ -679,7 +703,7 @@ size_t StaticKVCacheBlockPool::reclaimable_slab_count(
       continue;
     }
     const size_t objects =
-        type == BlockType::KV ? 1 : 2 * linear_layers_per_bank_;
+        type == BlockType::KV ? 1 : 2 * linear_objects_per_state_;
     for (size_t object = 0; object < objects; ++object) {
       const SlabType slab_type =
           type == BlockType::KV
@@ -714,7 +738,7 @@ size_t StaticKVCacheBlockPool::num_free_blocks(BlockType type) const {
   size_t upper = free_ids_[index].size();
   while (lower < upper) {
     const size_t count = lower + (upper - lower + 1) / 2;
-    const size_t objects = count * linear_layers_per_bank_;
+    const size_t objects = count * linear_objects_per_state_;
     const size_t conv_needed =
         objects > conv_available ? objects - conv_available : 0;
     const size_t ssm_needed =

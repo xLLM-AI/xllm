@@ -54,6 +54,7 @@ namespace xllm {
 
 class WorkerRendezvous;
 class StaticKVCacheTensorAllocator;
+class LinearStateSlotTable;
 
 class WorkerImpl {
  public:
@@ -92,6 +93,14 @@ class WorkerImpl {
   virtual std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
 
   bool has_request_state_cache() const;
+
+  bool uses_shared_static_kv_cache() const {
+    return static_kv_cache_allocator_ != nullptr;
+  }
+
+  // Called by the speculative worker after target allocation and before draft
+  // allocation. The target owns lease initialization for both models.
+  void bind_shared_draft_kv_cache(const WorkerImpl& target);
 
   // allocate kv cache. blocking call
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
@@ -137,6 +146,10 @@ class WorkerImpl {
                                              Stream& prepare_stream,
                                              bool record_ready_event = true);
   // Prepare shared mappings and new block contents on the owning stream.
+  void initialize_shared_full_blocks(
+      const std::vector<int32_t>& full_block_rows,
+      const std::vector<uint64_t>& full_block_lease_epochs,
+      Stream& prepare_stream);
   void prepare_shared_kv_cache(
       const std::vector<int32_t>& full_block_rows,
       const std::vector<uint64_t>& full_block_lease_epochs,
@@ -506,6 +519,8 @@ class WorkerImpl {
   // kv caches
   std::vector<xllm::KVCache> kv_caches_;
   std::shared_ptr<StaticKVCacheTensorAllocator> static_kv_cache_allocator_;
+  std::shared_ptr<KVCacheTensorAllocator> static_draft_kv_cache_allocator_;
+  std::shared_ptr<LinearStateSlotTable> static_full_block_slots_;
 
   // causal LM model
   std::unique_ptr<CausalLM> model_;

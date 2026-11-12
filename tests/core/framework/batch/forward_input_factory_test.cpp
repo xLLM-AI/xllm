@@ -345,6 +345,15 @@ TEST(ForwardInputFactoryTest,
       draft.input_params.attention.device.shared_full_slot_mapping.defined());
   EXPECT_TRUE(torch::equal(draft.input_params.attention.host.block_tables,
                            inputs[0].input_params.attention.host.block_tables));
+  const LlmForwardInput shared_draft =
+      make_llm_draft_input(inputs[0], /*shared_full_cache=*/true);
+  EXPECT_TRUE(torch::equal(
+      shared_draft.input_params.attention.host.shared_full_block_table,
+      final_table));
+  EXPECT_TRUE(torch::equal(
+      shared_draft.input_params.attention.host.shared_full_slot_mapping,
+      final_slots));
+  EXPECT_TRUE(shared_draft.input_params.embedding.linear_state_ids.empty());
   factory.acknowledge_shared_kv_cache();
   factory.reset_shared_kv_cache_mapping_tracker();
   prepare(factory);

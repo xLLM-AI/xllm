@@ -25,6 +25,54 @@ limitations under the License.
 
 namespace xllm {
 
+class StaticDraftKVCacheTensorAllocator final : public KVCacheTensorAllocator {
+ public:
+  explicit StaticDraftKVCacheTensorAllocator(
+      std::shared_ptr<StaticKVCacheTensorAllocator> arena)
+      : arena_(std::move(arena)) {
+    CHECK(arena_ != nullptr);
+    CHECK_GT(arena_->layout().draft_layer_count(), 0u);
+  }
+
+  void begin_layer(int64_t layer_id) override {
+    CHECK_GE(layer_id, 0);
+    CHECK_LT(static_cast<size_t>(layer_id),
+             arena_->layout().draft_layer_count());
+    CHECK(started_layers_.emplace(layer_id).second)
+        << "Static draft cache layer cannot be allocated twice";
+    current_layer_id_ = layer_id;
+    allocated_roles_ = 0;
+  }
+
+  torch::Tensor allocate(KVCacheTensorRole role,
+                         const std::vector<int64_t>& shape,
+                         torch::ScalarType dtype,
+                         const torch::Device& device) override {
+    CHECK_GE(current_layer_id_, 0)
+        << "Static draft cache allocation requires an explicit layer";
+    CHECK(role == KVCacheTensorRole::KEY || role == KVCacheTensorRole::VALUE)
+        << "Static shared draft cache supports only KEY and VALUE";
+    const uint32_t role_mask = 1u << static_cast<uint32_t>(
+                                   static_cast<KVCacheTensorRole::Value>(role));
+    CHECK_EQ(allocated_roles_ & role_mask, 0u)
+        << "Static draft cache role cannot be allocated twice in one layer";
+    torch::Tensor tensor = arena_->allocate_tensor(
+        arena_->layout().draft_tensor_layout(current_layer_id_, role),
+        role,
+        shape,
+        dtype,
+        device);
+    allocated_roles_ |= role_mask;
+    return tensor;
+  }
+
+ private:
+  std::shared_ptr<StaticKVCacheTensorAllocator> arena_;
+  std::unordered_set<int64_t> started_layers_;
+  int64_t current_layer_id_ = -1;
+  uint32_t allocated_roles_ = 0;
+};
+
 StaticKVCacheTensorAllocator::StaticKVCacheTensorAllocator(
     StaticKVCacheLayout layout,
     const torch::Device& device)
@@ -39,6 +87,7 @@ StaticKVCacheTensorAllocator::StaticKVCacheTensorAllocator(
             << ", physical_slabs=" << layout_.num_slabs()
             << ", slab_bytes=" << layout_.slab_bytes()
             << ", banks=" << layout_.bank_count()
+            << ", draft_layers=" << layout_.draft_layer_count()
             << ", bank_bytes=" << layout_.bank_bytes()
             << ", slice_bytes=" << layout_.slice_bytes()
             << ", arena_bytes=" << layout_.bytes_used()
@@ -129,6 +178,21 @@ torch::Tensor StaticKVCacheTensorAllocator::allocate(
       << "Static cache allocation requires an explicit layer";
   const StaticKVCacheTensorLayout& tensor =
       layout_.tensor_layout(current_layer_id_, role);
+  const uint32_t role_mask =
+      1u << static_cast<uint32_t>(static_cast<KVCacheTensorRole::Value>(role));
+  CHECK_EQ(allocated_roles_ & role_mask, 0u)
+      << "Static cache role cannot be allocated twice in one layer";
+  torch::Tensor view = allocate_tensor(tensor, role, shape, dtype, device);
+  allocated_roles_ |= role_mask;
+  return view;
+}
+
+torch::Tensor StaticKVCacheTensorAllocator::allocate_tensor(
+    const StaticKVCacheTensorLayout& tensor,
+    KVCacheTensorRole role,
+    const std::vector<int64_t>& shape,
+    torch::ScalarType dtype,
+    const torch::Device& device) const {
   CHECK_EQ(device, arena_.device());
   CHECK_EQ(dtype, layout_.dtype(role));
   CHECK(!shape.empty());
@@ -143,10 +207,6 @@ torch::Tensor StaticKVCacheTensorAllocator::allocate(
            tensor.row_bytes)
       << "Static cache inner row geometry does not match the layout";
 
-  const uint32_t role_mask =
-      1u << static_cast<uint32_t>(static_cast<KVCacheTensorRole::Value>(role));
-  CHECK_EQ(allocated_roles_ & role_mask, 0u)
-      << "Static cache role cannot be allocated twice in one layer";
   std::vector<int64_t> view_shape = shape;
   view_shape.front() = static_cast<int64_t>(tensor.view_rows);
   const int64_t view_bytes =
@@ -158,8 +218,12 @@ torch::Tensor StaticKVCacheTensorAllocator::allocate(
           .view(dtype)
           .view(view_shape);
   CHECK(view.is_contiguous());
-  allocated_roles_ |= role_mask;
   return view;
+}
+
+std::shared_ptr<KVCacheTensorAllocator> create_static_draft_kv_tensor_allocator(
+    std::shared_ptr<StaticKVCacheTensorAllocator> arena) {
+  return std::make_shared<StaticDraftKVCacheTensorAllocator>(std::move(arena));
 }
 
 }  // namespace xllm

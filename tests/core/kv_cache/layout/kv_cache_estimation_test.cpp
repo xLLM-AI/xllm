@@ -955,7 +955,7 @@ TEST_F(SharedStaticRuntimeEstimationTest, FullOnlyDraftKeepsDenseKvRows) {
   EXPECT_EQ(capacity.n_blocks(), 256);
 }
 
-TEST(KVCacheEstimationTest, SharedStaticPlanChargesDenseDraftAtEveryArenaId) {
+TEST(KVCacheEstimationTest, SharedStaticPlanPlacesDraftInsideArenaBudget) {
   ModelArgs target_args = make_linear_attention_args();
   target_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");
   KVCacheEstimateOptions target_options = make_linear_attention_options();
@@ -967,18 +967,19 @@ TEST(KVCacheEstimationTest, SharedStaticPlanChargesDenseDraftAtEveryArenaId) {
   const KVCacheCapacity draft =
       estimate_kv_cache_capacity(draft_args, make_estimate_options());
 
-  const SharedStaticKVCachePlan plan =
-      plan_shared_static_kv_cache(target, draft);
+  const SharedStaticKVCachePlan plan = plan_shared_static_kv_cache(
+      target, draft, target_args, /*world_size=*/1, torch::kFloat16);
 
-  EXPECT_EQ(plan.target.shared_slab_count(), 27);
-  EXPECT_EQ(plan.target.n_blocks(), 229);
-  EXPECT_EQ(plan.target.num_linear_state_blocks(), 229);
-  EXPECT_EQ(plan.draft.n_blocks(), 229);
-  EXPECT_EQ(plan.target.cache_size_in_bytes(), 27 * 4096);
-  EXPECT_EQ(plan.draft.cache_size_in_bytes(), 229 * 4096);
-  EXPECT_LE(
-      plan.target.cache_size_in_bytes() + plan.draft.cache_size_in_bytes(),
-      target_options.cache_size_in_bytes);
+  EXPECT_EQ(plan.target.shared_draft_layers(), 2);
+  EXPECT_EQ(plan.target.shared_slot_bytes(), 8192);
+  EXPECT_EQ(plan.target.shared_slab_count(), 128);
+  EXPECT_EQ(plan.target.n_blocks(), plan.target.num_linear_state_blocks());
+  EXPECT_EQ(plan.draft.n_blocks(), plan.target.n_blocks());
+  EXPECT_EQ(plan.draft.shared_draft_layers(), 2);
+  EXPECT_EQ(plan.target.cache_size_in_bytes(), 1024 * 1024);
+  EXPECT_EQ(plan.draft.cache_size_in_bytes(), 0);
+  EXPECT_LE(plan.target.cache_size_in_bytes(),
+            target_options.cache_size_in_bytes);
 }
 
 TEST(KVCacheEstimationTest, SharedStaticDraftPlanRequiresOneHybridWorkingSet) {
@@ -994,8 +995,73 @@ TEST(KVCacheEstimationTest, SharedStaticDraftPlanRequiresOneHybridWorkingSet) {
   const KVCacheCapacity draft =
       estimate_kv_cache_capacity(draft_args, make_estimate_options());
 
-  EXPECT_DEATH((void)plan_shared_static_kv_cache(target, draft),
-               "budget cannot fit one hybrid sequence");
+  EXPECT_DEATH(
+      (void)plan_shared_static_kv_cache(
+          target, draft, target_args, /*world_size=*/1, torch::kFloat16),
+      "budget cannot fit one hybrid sequence");
+}
+
+TEST(KVCacheEstimationTest, SharedStaticDraftRejectsMismatchedFullRows) {
+  ModelArgs target_args = make_linear_attention_args();
+  target_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");
+  KVCacheEstimateOptions target_options = make_linear_attention_options();
+  target_options.enable_shared_kv_cache = true;
+  const KVCacheCapacity target =
+      estimate_kv_cache_capacity(target_args, target_options);
+  ModelArgs draft_args = make_standard_args();
+  draft_args.head_dim(32).n_layers(1);
+  const KVCacheCapacity draft =
+      estimate_kv_cache_capacity(draft_args, make_estimate_options());
+
+  EXPECT_DEATH(
+      (void)plan_shared_static_kv_cache(
+          target, draft, target_args, /*world_size=*/1, torch::kFloat16),
+      "requires the target Full row geometry");
+}
+
+TEST(KVCacheEstimationTest, SharedStaticQwen38DraftSharesAllBanksWithGdn) {
+  ModelArgs target_args = make_linear_attention_args(/*head_dim=*/256);
+  target_args.model_type("qwen3_5_text")
+      .n_layers(64)
+      .n_heads(24)
+      .n_kv_heads(4)
+      .full_attention_interval(4)
+      .linear_num_key_heads(16)
+      .linear_num_value_heads(48)
+      .linear_key_head_dim(128)
+      .linear_value_head_dim(128)
+      .linear_conv_kernel_dim(4)
+      .mamba_ssm_dtype("float32");
+  KVCacheEstimateOptions options = make_linear_attention_options();
+  options.enable_shared_kv_cache = true;
+  options.dtype = torch::kBFloat16;
+  options.world_size = 2;
+  options.block_size = 128;
+  options.n_local_kv_heads = 2;
+  options.n_local_linear_k_heads = 8;
+  options.n_local_linear_v_heads = 24;
+  options.num_speculative_tokens = 4;
+  options.cache_size_in_bytes = 18710000000;
+  const KVCacheCapacity target =
+      estimate_kv_cache_capacity(target_args, options);
+  ModelArgs draft_args = make_standard_args();
+  draft_args.n_layers(1).head_dim(256).n_heads(24).n_kv_heads(4);
+  KVCacheEstimateOptions draft_options = options;
+  draft_options.enable_shared_kv_cache = false;
+  draft_options.is_draft_engine = true;
+  const KVCacheCapacity draft =
+      estimate_kv_cache_capacity(draft_args, draft_options);
+
+  const SharedStaticKVCachePlan plan = plan_shared_static_kv_cache(
+      target, draft, target_args, /*world_size=*/2, torch::kBFloat16);
+
+  EXPECT_EQ(plan.target.shared_slot_bytes(), 17 * 7864320);
+  EXPECT_EQ(plan.target.shared_slab_count(), 139);
+  EXPECT_EQ(plan.target.shared_draft_layers(), 1);
+  EXPECT_EQ(plan.target.cache_size_in_bytes(), int64_t{18583388160});
+  EXPECT_EQ(plan.draft.cache_size_in_bytes(), 0);
+  EXPECT_EQ(plan.draft.n_blocks(), plan.target.n_blocks());
+  EXPECT_LE(plan.target.cache_size_in_bytes(), options.cache_size_in_bytes);
 }
 
 TEST(KVCacheEstimationTest, MultimodalRuntimeReservesMtpCheckpoints) {

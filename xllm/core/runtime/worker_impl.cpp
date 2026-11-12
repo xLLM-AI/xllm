@@ -533,6 +533,25 @@ bool WorkerImpl::has_request_state_cache() const {
       });
 }
 
+void WorkerImpl::bind_shared_draft_kv_cache(const WorkerImpl& target) {
+  CHECK(options_.is_draft_engine());
+  CHECK_EQ(status_, Status::LOADED);
+  CHECK(kv_caches_.empty());
+  CHECK(static_kv_cache_allocator_ == nullptr);
+  CHECK(target.static_kv_cache_allocator_ != nullptr);
+  CHECK(target.static_draft_kv_cache_allocator_ == nullptr);
+  CHECK(target.static_full_block_slots_ != nullptr);
+  CHECK_EQ(static_cast<size_t>(get_num_layers()),
+           target.static_kv_cache_allocator_->layout().draft_layer_count());
+  static_kv_cache_allocator_ = target.static_kv_cache_allocator_;
+  static_draft_kv_cache_allocator_ =
+      create_static_draft_kv_tensor_allocator(static_kv_cache_allocator_);
+  static_full_block_slots_ = target.static_full_block_slots_;
+  LOG(INFO) << "Draft KV cache shares target static arena: draft_layers="
+            << static_kv_cache_allocator_->layout().draft_layer_count()
+            << ", banks=" << static_kv_cache_allocator_->layout().bank_count();
+}
+
 bool WorkerImpl::allocate_kv_cache_storage(
     const KVCacheShape& kv_cache_shape,
     bool use_huge_page_allocator,
@@ -660,8 +679,24 @@ bool WorkerImpl::allocate_kv_cache_storage(
 #if defined(USE_NPU)
   create_options.enable_kv_cache_huge_page_allocator(use_huge_page_allocator);
 #endif
-  if (KVCacheConfig::get_instance().enable_shared_kv_cache() &&
-      !options_.is_draft_engine()) {
+  if (static_draft_kv_cache_allocator_ != nullptr) {
+    CHECK_EQ(kv_cache_shape.shared_draft_layers(), num_layers);
+    CHECK(!use_huge_page_allocator &&
+          create_options.tensor_allocator() == nullptr &&
+          kv_cache_transfer_ == nullptr);
+    CHECK(!has_grouped_cache && !enable_linear_attention &&
+          !enable_lighting_indexer && !enable_kv_cache_quant &&
+          !enable_indexer_cache_quant &&
+          create_options.layer_cache_owned().empty())
+        << "Static shared draft storage requires ordinary Full-only layers";
+    create_options
+        .static_layout(std::shared_ptr<const StaticKVCacheLayout>(
+            static_kv_cache_allocator_, &static_kv_cache_allocator_->layout()))
+        .shared_draft_cache(true)
+        .full_block_slot_table(static_full_block_slots_)
+        .tensor_allocator(static_draft_kv_cache_allocator_);
+  } else if (KVCacheConfig::get_instance().enable_shared_kv_cache() &&
+             !options_.is_draft_engine()) {
     CHECK(!use_huge_page_allocator &&
           create_options.tensor_allocator() == nullptr &&
           kv_cache_transfer_ == nullptr)
@@ -670,12 +705,14 @@ bool WorkerImpl::allocate_kv_cache_storage(
     auto allocator =
         create_static_kv_tensor_allocator(kv_cache_shape, create_options);
     const StaticKVCacheLayout& layout = allocator->layout();
+    static_full_block_slots_ = std::make_shared<LinearStateSlotTable>(
+        layout.num_slots(), layout.full_layer_count(), device_.unwrap());
     create_options
         .linear_state_slot_table(std::make_shared<LinearStateSlotTable>(
             layout.num_slots(), layout.num_linear_groups(), device_.unwrap()))
-        .full_block_slot_table(std::make_shared<LinearStateSlotTable>(
-            layout.num_slots(), layout.full_layer_count(), device_.unwrap()))
-        .static_layout(std::make_shared<const StaticKVCacheLayout>(layout));
+        .full_block_slot_table(static_full_block_slots_)
+        .static_layout(
+            std::shared_ptr<const StaticKVCacheLayout>(allocator, &layout));
     static_kv_cache_allocator_ = allocator;
     create_options.tensor_allocator(std::move(allocator));
   }
@@ -1187,12 +1224,35 @@ void WorkerImpl::prepare_work_before_execute(const LlmForwardInput& input,
       input, processed_input, *prepare_stream_);
 }
 
+void WorkerImpl::initialize_shared_full_blocks(
+    const std::vector<int32_t>& full_block_rows,
+    const std::vector<uint64_t>& full_block_lease_epochs,
+    Stream& prepare_stream) {
+  if (static_kv_cache_allocator_ == nullptr ||
+      static_draft_kv_cache_allocator_ != nullptr || full_block_rows.empty() ||
+      !static_kv_cache_allocator_->needs_full_block_initialization(
+          full_block_rows, full_block_lease_epochs)) {
+    return;
+  }
+  c10::StreamGuard stream_guard = prepare_stream.set_stream_guard();
+  // Reused rows may still be read by the preceding batch. A caller on the
+  // compute stream already orders those reads before initialization.
+  if (compute_stream_ != nullptr &&
+      prepare_stream.get_stream()->unwrap() !=
+          compute_stream_->get_stream()->unwrap()) {
+    prepare_stream.wait_stream(*compute_stream_);
+  }
+  static_kv_cache_allocator_->initialize_full_blocks(full_block_rows,
+                                                     full_block_lease_epochs);
+}
+
 void WorkerImpl::prepare_shared_kv_cache(
     const std::vector<int32_t>& full_block_rows,
     const std::vector<uint64_t>& full_block_lease_epochs,
     const std::vector<int32_t>& linear_state_rows,
     Stream& prepare_stream) {
   if (static_kv_cache_allocator_ == nullptr ||
+      static_draft_kv_cache_allocator_ != nullptr ||
       (full_block_rows.empty() && linear_state_rows.empty())) {
     return;
   }
@@ -1203,18 +1263,8 @@ void WorkerImpl::prepare_shared_kv_cache(
       });
   CHECK(shared_cache != kv_caches_.end());
   if (!full_block_rows.empty()) {
-    if (static_kv_cache_allocator_->needs_full_block_initialization(
-            full_block_rows, full_block_lease_epochs)) {
-      // Reused rows may still be read by the preceding batch. A caller on the
-      // compute stream already orders those reads before initialization.
-      if (compute_stream_ != nullptr &&
-          prepare_stream.get_stream()->unwrap() !=
-              compute_stream_->get_stream()->unwrap()) {
-        prepare_stream.wait_stream(*compute_stream_);
-      }
-      static_kv_cache_allocator_->initialize_full_blocks(
-          full_block_rows, full_block_lease_epochs);
-    }
+    initialize_shared_full_blocks(
+        full_block_rows, full_block_lease_epochs, prepare_stream);
     shared_cache->update_full_block_rows(full_block_rows);
   }
   shared_cache->update_linear_state_slots(linear_state_rows);

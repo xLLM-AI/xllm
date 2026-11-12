@@ -242,18 +242,24 @@ class VlmForwardInput final {
   ForwardRuntimeState runtime;
 };
 
-inline LlmForwardInput make_llm_draft_input(const LlmForwardInput& target) {
+inline LlmForwardInput make_llm_draft_input(const LlmForwardInput& target,
+                                            bool shared_full_cache = false) {
   LlmForwardInput draft = target.clone();
   draft.input_params.clear_linear_attention_state();
-  draft.input_params.attention.host.shared_full_block_table = torch::Tensor();
-  draft.input_params.attention.host.shared_full_slot_mapping = torch::Tensor();
-  draft.input_params.attention.device.shared_full_block_table = torch::Tensor();
-  draft.input_params.attention.device.shared_full_slot_mapping =
-      torch::Tensor();
+  if (!shared_full_cache) {
+    draft.input_params.attention.host.shared_full_block_table = torch::Tensor();
+    draft.input_params.attention.host.shared_full_slot_mapping =
+        torch::Tensor();
+    draft.input_params.attention.device.shared_full_block_table =
+        torch::Tensor();
+    draft.input_params.attention.device.shared_full_slot_mapping =
+        torch::Tensor();
+  }
   return draft;
 }
 
-inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target) {
+inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target,
+                                            bool shared_full_cache = false) {
   CHECK(!target.runtime.input_host_buffer_has_layout ||
         target.runtime.device_tensors_ready)
       << "Cannot create an LLM draft input from an unmaterialized packed VLM "
@@ -270,10 +276,12 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target) {
                                     params.attention.host);
   detail::copy_attention_device_input(source.attention.device,
                                       params.attention.device);
-  params.attention.host.shared_full_block_table = torch::Tensor();
-  params.attention.host.shared_full_slot_mapping = torch::Tensor();
-  params.attention.device.shared_full_block_table = torch::Tensor();
-  params.attention.device.shared_full_slot_mapping = torch::Tensor();
+  if (!shared_full_cache) {
+    params.attention.host.shared_full_block_table = torch::Tensor();
+    params.attention.host.shared_full_slot_mapping = torch::Tensor();
+    params.attention.device.shared_full_block_table = torch::Tensor();
+    params.attention.device.shared_full_slot_mapping = torch::Tensor();
+  }
   params.attention.attention_host_buffer =
       source.attention.attention_host_buffer;
   params.attention.attention_device_buffer =

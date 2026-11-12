@@ -562,7 +562,8 @@ KVCacheShape MTPWorkerImpl<TargetInput>::draft_kv_cache_shape(
     return build_draft_kv_cache_shape(target_kv_cache_shape,
                                       /*draft_world_size=*/1);
   }
-  if (KVCacheConfig::get_instance().enable_vmm_kvcache()) {
+  if (KVCacheConfig::get_instance().enable_vmm_kvcache() ||
+      target_kv_cache_shape.shared_draft_layers() > 0) {
     return build_draft_kv_cache_shape(target_kv_cache_shape);
   }
   return target_kv_cache_shape;
@@ -694,7 +695,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
     TargetInput target_prepared;
     LlmForwardInput draft_prepared;
-    LlmForwardInput draft_input = make_llm_draft_input(input);
+    LlmForwardInput draft_input =
+        make_llm_draft_input(input, draft_impl_->uses_shared_static_kv_cache());
     auto output = run_worker_no_sync_impl(
         *impl_, input, *prepare_stream_, *compute_stream_, target_prepared);
     auto draft_output = run_worker_no_sync_impl(*draft_impl_,
@@ -719,7 +721,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     std::vector<ForwardOutput> draft_outputs;
     draft_outputs.reserve(options_.num_speculative_tokens());
 
-    LlmForwardInput draft_extend_input = make_llm_draft_input(input);
+    LlmForwardInput draft_extend_input =
+        make_llm_draft_input(input, draft_impl_->uses_shared_static_kv_cache());
     CHECK(draft_context_replay_policy_.has_value())
         << "Draft context replay policy is not initialized.";
     scale_speculative_parallel_token_counts(
@@ -740,7 +743,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     }
 
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
-      LlmForwardInput draft_input = make_llm_draft_input(input);
+      LlmForwardInput draft_input = make_llm_draft_input(
+          input, draft_impl_->uses_shared_static_kv_cache());
       draft_outputs.emplace_back(run_worker_no_sync_impl(*draft_impl_,
                                                          draft_input,
                                                          *prepare_stream_,
@@ -767,7 +771,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     this->finalize_output_on_stream(
         output, *compute_stream_, enable_schedule_overlap());
     if (can_prelaunch_next_first_draft(input)) {
-      LlmForwardInput next_first_draft_input = make_llm_draft_input(input);
+      LlmForwardInput next_first_draft_input = make_llm_draft_input(
+          input, draft_impl_->uses_shared_static_kv_cache());
       scale_parallel_token_counts(
           next_first_draft_input.input_params.parallel,
           draft_context_replay_policy_->target_expansion_width);
@@ -875,7 +880,8 @@ void MTPWorkerImpl<TargetInput>::prepare_prefill_inputs(
     const TargetInput& input,
     LlmForwardInput& prefill_input) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-  prefill_input = make_llm_draft_input(input);
+  prefill_input =
+      make_llm_draft_input(input, draft_impl_->uses_shared_static_kv_cache());
   prepare_draft_sampling(is_probabilistic_draft_,
                          prefill_input.sampling_params);
   prefill_input = prefill_input.to(device_, dtype_);
@@ -1811,7 +1817,8 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_prefix(
   CHECK(input.input_params.multi_block_tables.empty());
   {
     c10::StreamGuard guard = prepare_stream_->set_stream_guard();
-    draft_input = make_llm_draft_input(input);
+    draft_input =
+        make_llm_draft_input(input, draft_impl_->uses_shared_static_kv_cache());
     prepare_draft_sampling(is_probabilistic_draft_,
                            draft_input.sampling_params);
     clear_ready_events(draft_input);
@@ -2464,7 +2471,8 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
   if (wait_for_compute_stream) {
     prepare_stream_->wait_stream(*compute_stream_);
   }
-  extend_input = make_llm_draft_input(base_input);
+  extend_input = make_llm_draft_input(
+      base_input, draft_impl_->uses_shared_static_kv_cache());
   prepare_draft_sampling(is_probabilistic_draft_, extend_input.sampling_params);
   clear_ready_events(extend_input);
   extend_input.runtime.device_tensors_ready = false;
@@ -2783,7 +2791,8 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
     LlmForwardInput& draft_input,
     int32_t position_offset) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-  draft_input = make_llm_draft_input(input);
+  draft_input =
+      make_llm_draft_input(input, draft_impl_->uses_shared_static_kv_cache());
   if (requires_full_target_replay()) {
     // The first replay proposal consumed the target hidden at
     // current_position - 1; recursive proposals advance from that draft

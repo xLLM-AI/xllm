@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include "core/kv_cache/block/static_kv_cache_block_pool.h"
@@ -568,6 +569,81 @@ TEST(StaticKVCacheTensorAllocatorTest, TensorViewRetainsArenaOwnership) {
     retained[retained.size(0) - 1].fill_(43);
   }
   EXPECT_TRUE(retained[retained.size(0) - 1].eq(43).all().item<bool>());
+}
+
+TEST(StaticKVCacheTensorAllocatorTest,
+     DraftLocalLayersShareArenaAndFinalPagesWithTarget) {
+  StaticKVCacheLayoutSpec spec = make_spec();
+  spec.draft_layer_count = 1;
+  auto arena = std::make_shared<StaticKVCacheTensorAllocator>(
+      StaticKVCacheLayout(spec), torch::kCPU);
+  const CacheViews target = allocate_views(*arena, spec);
+  const auto draft = create_static_draft_kv_tensor_allocator(arena);
+  draft->begin_layer(/*layer_id=*/0);
+  const torch::Tensor key = draft->allocate(
+      KVCacheTensorRole::KEY, {64, 4}, torch::kFloat32, torch::kCPU);
+  const torch::Tensor value = draft->allocate(
+      KVCacheTensorRole::VALUE, {64, 4}, torch::kFloat32, torch::kCPU);
+  EXPECT_TRUE(key.is_alias_of(target.keys.front()));
+  EXPECT_TRUE(value.is_alias_of(target.values.front()));
+  EXPECT_EQ(key.sizes(), target.keys.front().sizes());
+  const StaticKVCacheLayout& layout = arena->layout();
+  StaticKVCacheBlockPool pool(/*logical_capacity=*/64, layout);
+  const auto blocks = pool.allocate(/*num_blocks=*/2, BlockType::KV);
+  ASSERT_EQ(blocks.size(), 2u);
+  const int32_t page = pool.final_full_page(blocks[0]);
+  const int32_t prefix_page = pool.final_full_page(blocks[1]);
+  const FullPublication publication = full_publication(pool, layout, blocks);
+  arena->initialize_full_blocks(publication.rows, publication.epochs);
+  target.keys.front()[page].fill_(17);
+  key[page].fill_(19);
+  value[page].fill_(23);
+  key[prefix_page].fill_(29);
+  value[prefix_page].fill_(31);
+  EXPECT_TRUE(target.keys.front()[page].eq(17).all().item<bool>());
+  EXPECT_TRUE(key[page].eq(19).all().item<bool>());
+  EXPECT_TRUE(value[page].eq(23).all().item<bool>());
+  EXPECT_NE(key[page].data_ptr(), target.keys.front()[page].data_ptr());
+  EXPECT_NE(key[page].data_ptr(), value[page].data_ptr());
+
+  // A repeated publication must preserve draft writes in the shared lease.
+  arena->initialize_full_blocks(publication.rows, publication.epochs);
+  EXPECT_TRUE(key[page].eq(19).all().item<bool>());
+  pool.release(blocks[0], BlockType::KV);
+  const auto renewed = pool.allocate(/*num_blocks=*/1, BlockType::KV);
+  ASSERT_EQ(renewed.size(), 1u);
+  ASSERT_EQ(pool.final_full_page(renewed.front()), page);
+  const FullPublication next = full_publication(pool, layout, renewed);
+  arena->initialize_full_blocks(next.rows, next.epochs);
+  EXPECT_TRUE(target.keys.front()[page].eq(0).all().item<bool>());
+  EXPECT_TRUE(key[page].eq(0).all().item<bool>());
+  EXPECT_TRUE(value[page].eq(0).all().item<bool>());
+  EXPECT_TRUE(key[prefix_page].eq(29).all().item<bool>());
+  EXPECT_TRUE(value[prefix_page].eq(31).all().item<bool>());
+  std::weak_ptr<StaticKVCacheTensorAllocator> retained_arena = arena;
+  arena.reset();
+  EXPECT_FALSE(retained_arena.expired());
+  key[page].fill_(37);
+  EXPECT_TRUE(key[page].eq(37).all().item<bool>());
+}
+
+TEST(StaticKVCacheTensorAllocatorTest,
+     DraftRejectsRecurrentRolesAndBadGeometry) {
+  StaticKVCacheLayoutSpec spec = make_spec();
+  spec.draft_layer_count = 1;
+  const auto arena = std::make_shared<StaticKVCacheTensorAllocator>(
+      StaticKVCacheLayout(spec), torch::kCPU);
+  const auto draft = create_static_draft_kv_tensor_allocator(arena);
+  EXPECT_DEATH(draft->begin_layer(/*layer_id=*/1), "layer_id");
+  draft->begin_layer(/*layer_id=*/0);
+  EXPECT_DEATH(
+      draft->allocate(
+          KVCacheTensorRole::KEY, {64, 6}, torch::kFloat32, torch::kCPU),
+      "inner row geometry");
+  EXPECT_DEATH(
+      draft->allocate(
+          KVCacheTensorRole::CONV, {64, 2}, torch::kFloat32, torch::kCPU),
+      "draft cache supports only KEY and VALUE");
 }
 
 TEST(StaticKVCacheTensorAllocatorTest, RejectsInvalidLayerAndRowGeometry) {

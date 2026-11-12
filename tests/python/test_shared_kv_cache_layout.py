@@ -71,9 +71,9 @@ def _make_slab_caches() -> list[LayerCache]:
     return caches
 
 
-def _make_mirrored_caches(*, slice_bytes: int = 96) -> list[LayerCache]:
+def _make_mirrored_caches(*, slice_bytes: int = 96, companion_banks: int = 0) -> list[LayerCache]:
     bank_bytes = 4 * slice_bytes
-    arena = torch.zeros(2 * bank_bytes, dtype=torch.uint8)
+    arena = torch.zeros((2 + companion_banks) * bank_bytes, dtype=torch.uint8)
     descriptor = {
         "shared_bank_bytes": bank_bytes,
         "shared_slice_bytes": slice_bytes,
@@ -138,6 +138,47 @@ def test_mirrored_layout_exposes_fixed_bank_lanes_and_dense_linear_views(slice_b
             0,
             12 + 3 * group,
         ]
+
+
+def test_target_and_full_only_draft_detect_the_same_shared_arena() -> None:
+    target = _make_mirrored_caches(companion_banks=1)
+    prototype = target[0]
+    bank_bytes = prototype.shared_bank_bytes
+    assert bank_bytes is not None
+    arena = target[-1].ssm.view(torch.uint8).view(-1)
+    draft = [
+        replace(
+            prototype,
+            key=_arena_view(arena, 2 * bank_bytes + lane * 16, tuple(prototype.key.shape), torch.bfloat16),
+            value=_arena_view(arena, 2 * bank_bytes + lane * 16 + 8, tuple(prototype.value.shape), torch.bfloat16),
+            full_block_rows=torch.zeros(32, dtype=torch.int32),
+        )
+        for lane in range(2)
+    ]
+
+    target_layout = detect_shared_kv_cache_layout(target)
+    draft_layout = detect_shared_kv_cache_layout(draft)
+
+    assert target_layout is not None and draft_layout is not None
+    assert target_layout.bank_bytes == draft_layout.bank_bytes == bank_bytes
+    assert target_layout.num_slabs == draft_layout.num_slabs == 4
+    assert target_layout.full_read_padding_row == draft_layout.full_read_padding_row == 6
+    assert draft_layout.num_slots == 32
+    # A Linear allocation in a companion bank and a Full allocation use the
+    # same backing storage; final page metadata needs no draft translation.
+    target[-1].ssm[2 * bank_bytes // 16].fill_(7)
+    assert draft[0].key[0].view(torch.float32).eq(7).all()
+    draft[0].key[24].fill_(3)
+    assert arena[2 * bank_bytes + 24 * 8 : 2 * bank_bytes + 25 * 8].view(torch.bfloat16).eq(3).all()
+
+
+def test_full_only_draft_rejects_a_partial_companion_bank() -> None:
+    target = _make_mirrored_caches()
+    prototype = target[0]
+    draft = [replace(prototype, full_block_rows=torch.zeros(32, dtype=torch.int32))]
+
+    with pytest.raises(ValueError, match="whole companion banks"):
+        detect_shared_kv_cache_layout(draft)
 
 
 def test_mirrored_padding_stays_finite_after_linear_scratch_is_poisoned() -> None:
