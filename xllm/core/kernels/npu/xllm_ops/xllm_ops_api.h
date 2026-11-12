@@ -56,8 +56,12 @@ void replace_token(torch::Tensor& dst,
                    torch::Tensor& src,
                    bool synchronize_stream = true);
 
-// Laser attention (MindIE-SD kernel tuned for Wan2.2). q/k/v in BNSD layout;
-// returns attention output in BNSD layout, cast back to the input dtype.
+// Dense non-causal attention: non-empty BNSD Q/K/V on the same NPU, matching
+// BF16/FP16 dtype, batch/head counts and head dimension (1..128). K/V shapes
+// match. Non-contiguous inputs are accepted; output preserves Q shape/dtype.
+// Laser handles self-attention with S >= 2048, padding S to 256 and D to 128;
+// shorter/cross-attention uses npu_fusion_attention. No external mask, causal
+// attention, dropout or GQA. Callers must exclude their own sequence padding.
 torch::Tensor laser_attention(const torch::Tensor& q_bnsd,
                               const torch::Tensor& k_bnsd,
                               const torch::Tensor& v_bnsd,

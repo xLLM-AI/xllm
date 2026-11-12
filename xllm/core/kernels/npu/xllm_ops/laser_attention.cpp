@@ -13,31 +13,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <c10/core/Device.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
-#include <torch_npu/csrc/libs/init_npu.h>
-#include <torch_npu/torch_npu.h>
+#include <torch_npu/csrc/aten/CustomFunctions.h>
 
 #include <cmath>
-#ifdef TORCH_HIGHER_THAN_PTA6
-#include <torch_npu/csrc/framework/OpCommand.h>
-#else
-#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
-#include <torch_npu/csrc/framework/utils/OpPreparation.h>
-#endif
+#include <limits>
+#include <optional>
+#include <vector>
 
-#include "acl/acl.h"
 #include "aclnn_laser_attention.h"
-#include "core/common/macros.h"
 #include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "core/kernels/npu/utils.h"
-#include "xllm_ops_api.h"
+#include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
 
 namespace xllm::kernel::npu {
 
-// Laser attention kernel tuned for Wan2.2. q/k/v and output are in BNSD
-// layout; output is cast back to the input dtype (kernel emits fp32).
+// Dense, non-causal attention in BNSD layout. Short and cross-attention
+// use the existing dense NPU operator before any Laser preprocessing.
 torch::Tensor laser_attention(const torch::Tensor& q_bnsd,
                               const torch::Tensor& k_bnsd,
                               const torch::Tensor& v_bnsd,
@@ -46,8 +39,42 @@ torch::Tensor laser_attention(const torch::Tensor& q_bnsd,
   check_tensor(q_bnsd, "query", "laser_attention");
   check_tensor(k_bnsd, "key", "laser_attention");
   check_tensor(v_bnsd, "value", "laser_attention");
+  CHECK_EQ(q_bnsd.dim(), 4) << "Laser attention expects BNSD tensors";
+  CHECK_EQ(k_bnsd.dim(), 4);
+  CHECK_EQ(v_bnsd.dim(), 4);
+  CHECK(q_bnsd.device().is_privateuseone());
+  CHECK(q_bnsd.device() == k_bnsd.device());
+  CHECK(q_bnsd.device() == v_bnsd.device());
+  const torch::ScalarType input_dtype = q_bnsd.scalar_type();
+  CHECK(input_dtype == torch::kHalf || input_dtype == torch::kBFloat16);
+  CHECK(input_dtype == k_bnsd.scalar_type());
+  CHECK(input_dtype == v_bnsd.scalar_type());
+  CHECK_EQ(q_bnsd.size(0), k_bnsd.size(0));
+  CHECK_EQ(q_bnsd.size(1), head_num);
+  CHECK_EQ(q_bnsd.size(1), k_bnsd.size(1));
+  CHECK_EQ(q_bnsd.size(3), k_bnsd.size(3));
+  CHECK(k_bnsd.sizes() == v_bnsd.sizes());
+  CHECK_LE(q_bnsd.size(3), 128);
+  CHECK(std::isfinite(scale_value));
+  CHECK_GT(scale_value, 0.0);
 
-  const auto input_dtype = q_bnsd.scalar_type();
+  if (q_bnsd.size(2) < 2048 || q_bnsd.size(2) != k_bnsd.size(2)) {
+    const auto results = at_npu::native::custom_ops::npu_fusion_attention(
+        q_bnsd.contiguous(),
+        k_bnsd.contiguous(),
+        v_bnsd.contiguous(),
+        head_num,
+        "BNSD",
+        /*pse=*/std::nullopt,
+        /*padding_mask=*/std::nullopt,
+        /*atten_mask=*/std::nullopt,
+        scale_value,
+        /*keep_prob=*/1.0,
+        /*pre_tokens=*/std::numeric_limits<int64_t>::max(),
+        /*next_tokens=*/std::numeric_limits<int64_t>::max());
+    return std::get<0>(results);
+  }
+
   // Pad seq to a multiple of 256 and head_dim to 128, masking padded keys via
   // pre_tokens; slice the padding back off the output afterwards.
   namespace F = torch::nn::functional;
@@ -59,15 +86,12 @@ torch::Tensor laser_attention(const torch::Tensor& q_bnsd,
   const int64_t kv_seqlen = k_bnsd.size(2);  // real key/value seq len
   const int64_t head_dim = q_bnsd.size(3);   // real head dim
 
-  // 1. cast to fp16 (kernel is fp16-only).
-  auto q_f16 = q_bnsd.to(torch::kHalf).contiguous();
-  auto k_f16 = k_bnsd.to(torch::kHalf).contiguous();
-  auto v_f16 = v_bnsd.to(torch::kHalf).contiguous();
-
   // 2. zero-pad seq (dim=2) to a multiple of 256 and head_dim (dim=3) to 128.
   auto pad_to = [](const torch::Tensor& t, int64_t base, int64_t dim) {
     int64_t sz = t.size(dim);
-    if (sz % base == 0) return t;
+    if (sz % base == 0) {
+      return t;
+    }
     int64_t pad = ((sz / base) + 1) * base - sz;
     // PadFuncOptions pads from the last dim backwards.
     std::vector<int64_t> spec = (dim == 3) ? std::vector<int64_t>{0, pad}
@@ -75,13 +99,13 @@ torch::Tensor laser_attention(const torch::Tensor& q_bnsd,
     return F::pad(t, F::PadFuncOptions(spec).mode(torch::kConstant).value(0))
         .contiguous();
   };
-  q_f16 = pad_to(pad_to(q_f16, kSeqBase, 2), kDimBase, 3);
-  k_f16 = pad_to(pad_to(k_f16, kSeqBase, 2), kDimBase, 3);
-  v_f16 = pad_to(pad_to(v_f16, kSeqBase, 2), kDimBase, 3);
-
-  const auto q_c = q_f16;
-  const auto k_c = k_f16;
-  const auto v_c = v_f16;
+  // Preserve BF16 range and probability precision in the native kernel.
+  const auto q_c =
+      pad_to(pad_to(q_bnsd.contiguous(), kSeqBase, 2), kDimBase, 3);
+  const auto k_c =
+      pad_to(pad_to(k_bnsd.contiguous(), kSeqBase, 2), kDimBase, 3);
+  const auto v_c =
+      pad_to(pad_to(v_bnsd.contiguous(), kSeqBase, 2), kDimBase, 3);
 
   // 3. pre_tokens = number of trailing padded keys to exclude from softmax.
   int64_t pre_tokens = kMaxToken;
@@ -100,7 +124,7 @@ torch::Tensor laser_attention(const torch::Tensor& q_bnsd,
   char input_layout[] = "BNSD";
   const double keep_prob = 1.0;
   const bool is_high_precision = true;
-  const c10::optional<at::Tensor> no_mask;  // atten/alibi/drop masks: unused
+  const std::optional<torch::Tensor> no_mask;  // atten/alibi/drop masks: unused
 
   // Two-stage aclnn call (GetWorkspaceSize + execute) handled by the macro.
   EXEC_NPU_CMD(aclnnLaserAttention,
