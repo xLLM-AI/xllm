@@ -206,50 +206,67 @@ torch::Tensor hc_head_ref(const torch::Tensor& x,
 
 }  // namespace
 
-TEST(MHCFusionPlanTest, BuildsPendingChainForSupportedDecodeLayers) {
-  const MHCFusionPlan first_layer = resolve_mhc_fusion({
-      .optimization_enabled = true,
-      .is_prefill = false,
-      .is_chunked_prefill = false,
-      .supports_fused_mhc = true,
-      .has_pending_storage = true,
-      .has_pending = false,
-      .is_last_layer = false,
-  });
-  EXPECT_TRUE(first_layer.use_fused_mhc);
-  EXPECT_FALSE(first_layer.consume_pending);
-  EXPECT_TRUE(first_layer.defer_post);
+TEST(MHCFusionPlanTest, BuildsPendingChainForDecodeAndSpecVerify) {
+  const std::array<MHCFusionContext, 2> phases = {{
+      {},
+      {.is_chunked_prefill = true, .is_spec_verify = true},
+  }};
+  for (MHCFusionContext context : phases) {
+    SCOPED_TRACE(::testing::Message()
+                 << "prefill=" << context.is_prefill
+                 << " chunked=" << context.is_chunked_prefill
+                 << " verify=" << context.is_spec_verify);
+    context.supports_fused_mhc = true;
+    context.has_pending_storage = true;
+    context.is_last_layer = false;
+    const MHCFusionPlan first_layer = resolve_mhc_fusion(context);
+    EXPECT_TRUE(first_layer.use_fused_mhc);
+    EXPECT_FALSE(first_layer.consume_pending);
+    EXPECT_TRUE(first_layer.defer_post);
 
-  const MHCFusionPlan middle_layer = resolve_mhc_fusion({
-      .optimization_enabled = true,
-      .is_prefill = false,
-      .is_chunked_prefill = false,
-      .supports_fused_mhc = true,
-      .has_pending_storage = true,
-      .has_pending = true,
-      .is_last_layer = false,
-  });
-  EXPECT_TRUE(middle_layer.use_fused_mhc);
-  EXPECT_TRUE(middle_layer.consume_pending);
-  EXPECT_TRUE(middle_layer.defer_post);
+    context.has_pending = true;
+    const MHCFusionPlan middle_layer = resolve_mhc_fusion(context);
+    EXPECT_TRUE(middle_layer.use_fused_mhc);
+    EXPECT_TRUE(middle_layer.consume_pending);
+    EXPECT_TRUE(middle_layer.defer_post);
 
-  const MHCFusionPlan last_layer = resolve_mhc_fusion({
-      .optimization_enabled = true,
-      .is_prefill = false,
-      .is_chunked_prefill = false,
-      .supports_fused_mhc = true,
-      .has_pending_storage = true,
-      .has_pending = true,
-      .is_last_layer = true,
-  });
-  EXPECT_TRUE(last_layer.use_fused_mhc);
-  EXPECT_TRUE(last_layer.consume_pending);
-  EXPECT_FALSE(last_layer.defer_post);
+    context.is_last_layer = true;
+    const MHCFusionPlan last_layer = resolve_mhc_fusion(context);
+    EXPECT_TRUE(last_layer.use_fused_mhc);
+    EXPECT_TRUE(last_layer.consume_pending);
+    EXPECT_FALSE(last_layer.defer_post);
+
+    context.has_pending = false;
+    const MHCFusionPlan single_layer = resolve_mhc_fusion(context);
+    EXPECT_TRUE(single_layer.use_fused_mhc);
+    EXPECT_FALSE(single_layer.consume_pending);
+    EXPECT_FALSE(single_layer.defer_post);
+  }
+}
+
+TEST(MHCFusionPlanTest, DisablesPrefillFusion) {
+  const std::array<MHCFusionContext, 3> phases = {{
+      {.is_prefill = true},
+      {.is_chunked_prefill = true},
+      {.is_prefill = true, .is_chunked_prefill = true},
+  }};
+  for (MHCFusionContext context : phases) {
+    SCOPED_TRACE(::testing::Message()
+                 << "prefill=" << context.is_prefill
+                 << " chunked=" << context.is_chunked_prefill);
+    context.supports_fused_mhc = true;
+    context.has_pending_storage = true;
+    context.has_pending = true;
+    context.is_last_layer = false;
+    const MHCFusionPlan plan = resolve_mhc_fusion(context);
+    EXPECT_FALSE(plan.use_fused_mhc);
+    EXPECT_FALSE(plan.consume_pending);
+    EXPECT_FALSE(plan.defer_post);
+  }
 }
 
 TEST(MHCFusionPlanTest, DisablesUnsupportedFusionContexts) {
   const MHCFusionContext supported_decode = {
-      .optimization_enabled = true,
       .is_prefill = false,
       .is_chunked_prefill = false,
       .supports_fused_mhc = true,
@@ -258,19 +275,13 @@ TEST(MHCFusionPlanTest, DisablesUnsupportedFusionContexts) {
       .is_last_layer = false,
   };
 
-  MHCFusionContext disabled = supported_decode;
-  disabled.optimization_enabled = false;
-  MHCFusionContext prefill = supported_decode;
-  prefill.is_prefill = true;
-  MHCFusionContext chunked_prefill = supported_decode;
-  chunked_prefill.is_chunked_prefill = true;
   MHCFusionContext unsupported = supported_decode;
   unsupported.supports_fused_mhc = false;
   MHCFusionContext missing_storage = supported_decode;
   missing_storage.has_pending_storage = false;
 
-  const std::array<MHCFusionContext, 5> disabled_contexts = {
-      disabled, prefill, chunked_prefill, unsupported, missing_storage};
+  const std::array<MHCFusionContext, 2> disabled_contexts = {unsupported,
+                                                             missing_storage};
   for (const MHCFusionContext& context : disabled_contexts) {
     const MHCFusionPlan plan = resolve_mhc_fusion(context);
     EXPECT_FALSE(plan.use_fused_mhc);
@@ -323,6 +334,72 @@ class HyperConnectionTest : public ::testing::Test {
                     options_.device())},
             {"hc_head_scale",
              torch::tensor({0.1f}, options_.dtype(torch::kFloat32))}};
+  }
+
+  void verify_fused_post_pre_norm(int64_t tokens) {
+    torch::Tensor x = seeded("deepseek_v4_hc.fused.x",
+                             {tokens, config_.dim},
+                             torch::kBFloat16,
+                             options_.device());
+    torch::Tensor residual = seeded("deepseek_v4_hc.fused.residual",
+                                    {tokens, config_.hc_mult, config_.dim},
+                                    torch::kBFloat16,
+                                    options_.device());
+    torch::Tensor post = seeded("deepseek_v4_hc.fused.post",
+                                {tokens, config_.hc_mult},
+                                torch::kFloat32,
+                                options_.device()) +
+                         0.5;
+    torch::Tensor comb =
+        torch::softmax(seeded("deepseek_v4_hc.fused.comb",
+                              {tokens, config_.hc_mult, config_.hc_mult},
+                              torch::kFloat32,
+                              options_.device()),
+                       -1);
+    torch::Tensor gamma = seeded("deepseek_v4_hc.fused.gamma",
+                                 {config_.dim},
+                                 torch::kBFloat16,
+                                 options_.device()) +
+                          1.0;
+    std::unordered_map<std::string, torch::Tensor> weights = pre_weights();
+    MHCPre hc_pre(config_.hc_mult,
+                  config_.dim,
+                  config_.sinkhorn_iters,
+                  config_.hc_eps,
+                  config_.norm_eps,
+                  options_);
+    hc_pre->load_state_dict(StateDict(weights));
+    MHCPost hc_post(config_.norm_eps);
+
+    torch::Tensor expected_residual;
+    torch::Tensor rsqrt;
+    std::tie(expected_residual, rsqrt) =
+        hc_post->forward(x, residual, post, comb, /*compute_rms=*/false);
+    MHCPreOutput expected_pre = hc_pre->forward(expected_residual);
+    torch::Tensor expected_norm =
+        expected_pre.output.to(torch::kFloat32) *
+        torch::rsqrt(
+            expected_pre.output.to(torch::kFloat32).square().mean(-1, true) +
+            config_.norm_eps) *
+        gamma.to(torch::kFloat32);
+
+    torch::Tensor actual_norm;
+    torch::Tensor actual_residual;
+    torch::Tensor actual_post;
+    torch::Tensor actual_comb;
+    std::tie(actual_norm, actual_residual, actual_post, actual_comb) =
+        hc_pre->fused_post_pre_norm(x, residual, post, comb, gamma);
+
+    test::verify_tensor_close(actual_norm.cpu(),
+                              expected_norm.to(torch::kBFloat16).cpu(),
+                              2e-2,
+                              2e-2);
+    test::verify_tensor_close(
+        actual_residual.cpu(), expected_residual.cpu(), 2e-2, 2e-2);
+    test::verify_tensor_close(
+        actual_post.cpu(), expected_pre.post.cpu(), 2e-3, 2e-3);
+    test::verify_tensor_close(
+        actual_comb.cpu(), expected_pre.comb.cpu(), 2e-3, 2e-3);
   }
 
   HCConfig config_;
@@ -405,68 +482,10 @@ TEST_F(HyperConnectionTest, HCPostMatchesOfficialReference) {
 }
 
 TEST_F(HyperConnectionTest, FusedPostPreNormMatchesComposition) {
-  const int64_t tokens = 2;
-  torch::Tensor x = seeded("deepseek_v4_hc.fused.x",
-                           {tokens, config_.dim},
-                           torch::kBFloat16,
-                           options_.device());
-  torch::Tensor residual = seeded("deepseek_v4_hc.fused.residual",
-                                  {tokens, config_.hc_mult, config_.dim},
-                                  torch::kBFloat16,
-                                  options_.device());
-  torch::Tensor post = seeded("deepseek_v4_hc.fused.post",
-                              {tokens, config_.hc_mult},
-                              torch::kFloat32,
-                              options_.device()) +
-                       0.5;
-  torch::Tensor comb =
-      torch::softmax(seeded("deepseek_v4_hc.fused.comb",
-                            {tokens, config_.hc_mult, config_.hc_mult},
-                            torch::kFloat32,
-                            options_.device()),
-                     -1);
-  torch::Tensor gamma = seeded("deepseek_v4_hc.fused.gamma",
-                               {config_.dim},
-                               torch::kBFloat16,
-                               options_.device()) +
-                        1.0;
-  std::unordered_map<std::string, torch::Tensor> weights = pre_weights();
-  MHCPre hc_pre(config_.hc_mult,
-                config_.dim,
-                config_.sinkhorn_iters,
-                config_.hc_eps,
-                config_.norm_eps,
-                options_);
-  hc_pre->load_state_dict(StateDict(weights));
-  MHCPost hc_post(config_.norm_eps);
-
-  torch::Tensor expected_residual;
-  torch::Tensor rsqrt;
-  std::tie(expected_residual, rsqrt) =
-      hc_post->forward(x, residual, post, comb, /*compute_rms=*/true);
-  MHCPreOutput expected_pre = hc_pre->forward(expected_residual, rsqrt);
-  torch::Tensor expected_norm =
-      expected_pre.output.to(torch::kFloat32) *
-      torch::rsqrt(
-          expected_pre.output.to(torch::kFloat32).square().mean(-1, true) +
-          config_.norm_eps) *
-      gamma.to(torch::kFloat32);
-
-  torch::Tensor actual_norm;
-  torch::Tensor actual_residual;
-  torch::Tensor actual_post;
-  torch::Tensor actual_comb;
-  std::tie(actual_norm, actual_residual, actual_post, actual_comb) =
-      hc_pre->fused_post_pre_norm(x, residual, post, comb, gamma);
-
-  test::verify_tensor_close(
-      actual_norm.cpu(), expected_norm.to(torch::kBFloat16).cpu(), 2e-2, 2e-2);
-  test::verify_tensor_close(
-      actual_residual.cpu(), expected_residual.cpu(), 2e-2, 2e-2);
-  test::verify_tensor_close(
-      actual_post.cpu(), expected_pre.post.cpu(), 2e-3, 2e-3);
-  test::verify_tensor_close(
-      actual_comb.cpu(), expected_pre.comb.cpu(), 2e-3, 2e-3);
+  for (const int64_t tokens : {1, 2, 129, 8192}) {
+    SCOPED_TRACE(::testing::Message() << "tokens=" << tokens);
+    verify_fused_post_pre_norm(tokens);
+  }
 }
 
 TEST_F(HyperConnectionTest, HCHeadMatchesOfficialReference) {

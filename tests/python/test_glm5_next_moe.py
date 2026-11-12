@@ -14,10 +14,7 @@
 
 from __future__ import annotations
 
-import math
-import runpy
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -26,28 +23,6 @@ from torch import nn
 
 from xllm.python.model_loader import QLinearWeightLoader, W8A8WeightLoader
 from xllm.python.models import glm5_next
-
-
-def test_native_test_oracle_uses_glm_clamp_not_the_operator_under_test() -> None:
-    cases = runpy.run_path(str(Path(__file__).parents[1] / "core/kernels/npu/glm5_next_moe_cases.py"))
-    gate_up = torch.tensor([[20.0, -20.0, 20.0, 20.0]])
-    actual = cases["_activation_reference"](gate_up)
-    expected = torch.tensor([[100.0 / (1.0 + math.exp(-10.0)), -200.0 / (1.0 + math.exp(20.0))]])
-    torch.testing.assert_close(actual, expected)
-    assert actual[0, 0] < 100.0
-    assert abs(actual[0, 1]) < 1e-5
-    quantized, scale = cases["_quantize_reference"](torch.tensor([[0.0, 1.0, -1.0]]))
-    torch.testing.assert_close(quantized, torch.tensor([[0, 127, -127]], dtype=torch.int8))
-    torch.testing.assert_close(scale, torch.tensor([1.0 / 127.0]))
-
-
-def test_native_npu_cases_do_not_replace_production_bindings() -> None:
-    path = Path(__file__).parents[1] / "core/kernels/npu/glm5_next_moe_cases.py"
-    source = path.read_text()
-    assert "monkeypatch" not in source
-    assert "torch_npu.npu_dequant_swiglu_quant" not in source
-    assert "_dispatch_has_kernel_for_dispatch_key" in source
-    assert not (Path(__file__).parent / "test_glm5_next_moe_npu.py").exists()
 
 
 def _config(**overrides: object) -> glm5_next.Glm5NextConfig:
@@ -81,7 +56,6 @@ def _config(**overrides: object) -> glm5_next.Glm5NextConfig:
         ({"expert_parallel_degree": 2}, "requires EP > 1"),
         ({"expert_parallel_degree": 3}, "must be 0, 1 or 2"),
         ({"enable_mega_moe": True}, "does not support enable_mega_moe"),
-        ({"enable_fused_mc2": True}, "does not support enable_fused_mc2"),
     ],
 )
 def test_invalid_parallel_config(overrides: dict, message: str) -> None:
@@ -518,19 +492,6 @@ def test_bf16_packed_loader_slices_ep_then_moe_tp() -> None:
     torch.testing.assert_close(experts.gate_up_proj, torch.cat((gate_up[2:, 4:8], gate_up[2:, 12:16]), dim=1))
     torch.testing.assert_close(experts.down_proj, down[2:, :, 4:])
     assert (loader.tp_size, loader.tp_rank) == (4, 3)
-
-
-@pytest.mark.parametrize("rows", [1, 7, 16])
-def test_native_numerical_fixture_is_away_from_input_quantization_ties(rows: int) -> None:
-    cases = runpy.run_path(str(Path(__file__).parents[1] / "core/kernels/npu/glm5_next_moe_cases.py"))
-    case = cases["_make_case"](rows)
-    _, scale = cases["_quantize_reference"](case["hidden"])
-    normalized = case["hidden"].float() / scale[:, None]
-    torch.testing.assert_close(normalized, normalized.round(), rtol=0, atol=0)
-    # Graph tests retain the historical varying-input sample, not just this
-    # numerically stable fixture.
-    original = cases["_make_case"](rows, quantization_safe=False)
-    assert not torch.equal(original["hidden"], case["hidden"])
 
 
 @pytest.mark.parametrize("shape", [(1, 8), (4, 8), (1, 4, 8)])

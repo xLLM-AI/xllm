@@ -68,19 +68,21 @@ void launch_kpool_update(const torch::Tensor& k,
 // Select causal top-k pools with Triton scoring and exact selection. Long
 // prefill gathers one request at a time; query chunks reuse bounded scores.
 // Output order is unspecified. Equal scores prefer lower logical pool ids.
-torch::Tensor glm5_next_kpool_select(const torch::Tensor& query,
-                                     const torch::Tensor& head_weights,
-                                     const torch::Tensor& positions,
-                                     const torch::Tensor& row_batch,
-                                     const torch::Tensor& index_cache,
-                                     const torch::Tensor& block_table,
-                                     int64_t max_kv_seq_len,
-                                     int64_t block_size,
-                                     int64_t index_kpool,
-                                     int64_t index_topk,
-                                     double softmax_scale,
-                                     int64_t workspace_bytes = 64 * 1024 * 1024,
-                                     const KPoolBatchMetadata* batch = nullptr);
+torch::Tensor glm5_next_kpool_select(
+    const torch::Tensor& query,
+    const torch::Tensor& head_weights,
+    const torch::Tensor& positions,
+    const torch::Tensor& row_batch,
+    const torch::Tensor& index_cache,
+    const torch::Tensor& block_table,
+    int64_t max_kv_seq_len,
+    int64_t block_size,
+    int64_t index_kpool,
+    int64_t index_topk,
+    double softmax_scale,
+    int64_t workspace_bytes = 64 * 1024 * 1024,
+    const KPoolBatchMetadata* batch = nullptr,
+    const torch::Tensor& query_starts = torch::Tensor());
 
 // Expand logical pool ids back to their token slots, append the incomplete
 // causal tail, compact valid entries to the left, then map through block_table.

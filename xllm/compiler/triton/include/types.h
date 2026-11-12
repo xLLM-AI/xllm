@@ -36,6 +36,7 @@ struct LaunchCfg {
   std::optional<bool> enable_fp_fusion;
   std::optional<bool> enable_soft_i64;
   std::optional<bool> force_use_shared_memory;
+  std::optional<bool> disable_trans_collapse_pass;
 };
 
 }  // namespace xllm::triton_jit

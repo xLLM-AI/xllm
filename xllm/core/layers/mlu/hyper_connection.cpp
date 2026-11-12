@@ -79,9 +79,9 @@ StateDict get_hc_state(const StateDict& state_dict,
 
 MHCFusionPlan resolve_mhc_fusion(const MHCFusionContext& context) {
   const bool use_fused_mhc =
-      context.optimization_enabled && !context.is_prefill &&
-      !context.is_chunked_prefill && context.supports_fused_mhc &&
-      context.has_pending_storage;
+      !context.is_prefill &&
+      (!context.is_chunked_prefill || context.is_spec_verify) &&
+      context.supports_fused_mhc && context.has_pending_storage;
   return {
       .use_fused_mhc = use_fused_mhc,
       .consume_pending = use_fused_mhc && context.has_pending,

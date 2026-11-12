@@ -97,6 +97,9 @@ std::string serialize_key(const SpecList& specs,
     s += '|';
     s += option.has_value() ? (*option ? '1' : '0') : '-';
   }
+  if (cfg.disable_trans_collapse_pass.has_value()) {
+    s += *cfg.disable_trans_collapse_pass ? "|tc1" : "|tc0";
+  }
   s += "|d";
   s += std::to_string(device);
   return s;

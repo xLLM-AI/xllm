@@ -226,7 +226,6 @@ class Glm5NextConfig:
     enable_eplb: bool = False
     expert_parallel_degree: int = 0
     enable_mega_moe: bool = False
-    enable_fused_mc2: bool = False
     # 0-based post-layer indices threaded from the draft's target_layer_ids
     # (via ModelArgs). Empty => capture disabled (non-speculative serving).
     layers_to_capture: tuple[int, ...] = ()
@@ -346,7 +345,6 @@ class Glm5NextConfig:
             enable_eplb=bool(pick("enable_eplb", default=False)),
             expert_parallel_degree=degree,
             enable_mega_moe=bool(pick("enable_mega_moe", default=False)),
-            enable_fused_mc2=bool(pick("enable_fused_mc2", default=False)),
             layers_to_capture=tuple(int(layer_id) for layer_id in pick("layers_to_capture", default=[])),
             # mHC fields: ModelArgs may emit a 0 default (un-plumbed); treat 0
             # /None as unset and fall back to the real 300B defaults.
@@ -363,8 +361,6 @@ class Glm5NextConfig:
             raise ValueError("expert_parallel_degree must be 0, 1 or 2")
         if self.enable_mega_moe:
             raise ValueError("GLM-5.3-Flash ordinary EP does not support enable_mega_moe")
-        if self.enable_fused_mc2:
-            raise ValueError("GLM-5.3-Flash ordinary EP does not support enable_fused_mc2")
         for name in ("tp", "ep", "dp", "cp", "moe_tp"):
             size = getattr(self, f"{name}_size")
             rank = getattr(self, f"{name}_rank")
