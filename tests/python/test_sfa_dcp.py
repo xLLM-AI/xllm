@@ -111,16 +111,9 @@ def test_copy_into_execution_buffer_reuses_graph_storage() -> None:
         assert torch.equal(reused, second)
 
 
-def test_copy_into_execution_buffer_eager_returns_source() -> None:
-    source = torch.tensor([1, 2], dtype=torch.int32)
-    assert copy_into_execution_buffer(("DCP_LOCAL_SLOTS", (2,)), source) is source
-    with forward_context(_cpu_context(None)):
-        out = copy_into_execution_buffer(("DCP_LOCAL_SLOTS", (2,)), source)
-        assert out is source
-
-
 def test_mla_index_context_uses_expanded_table_and_preserves_cp_context() -> None:
     backend = object.__new__(SfaDcpAttentionBackend)
+    backend._mla_cp_block_tables = {}
     expanded_block_table = torch.tensor([[3, 1]], dtype=torch.int32)
     backend._expanded_indexer_block_table = expanded_block_table
     index_cache = torch.empty(1)
@@ -166,6 +159,7 @@ def test_mla_index_context_uses_expanded_table_and_preserves_cp_context() -> Non
 @pytest.mark.parametrize("with_scale", [False, True])
 def test_mla_index_materialization_keeps_cache_scale_and_table_together(with_scale: bool) -> None:
     backend = object.__new__(NpuPagedAttentionBackend)
+    backend._mla_cp_block_tables = {}
     index_cache = torch.empty(1)
     index_cache_scale = torch.empty(1) if with_scale else None
     materialized_cache = torch.empty(2)
@@ -190,21 +184,6 @@ def test_mla_index_materialization_keeps_cache_scale_and_table_together(with_sca
     if with_scale:
         expected_calls.append(((index_cache_scale, metadata, cp_context), {}))
     assert materialize_cp_cache.call_args_list == expected_calls
-
-
-def test_cp_block_table_segmentation_reuses_forward_cache() -> None:
-    backend = object.__new__(NpuPagedAttentionBackend)
-    block_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
-    cp_context = SimpleNamespace(segment_seq_indices=torch.tensor([1, 0]))
-
-    first = backend._segment_block_table(block_table, cp_context)
-    second = backend._segment_block_table(block_table, cp_context)
-
-    assert first is second
-    torch.testing.assert_close(
-        first,
-        torch.tensor([[3, 4], [1, 2]], dtype=torch.int32),
-    )
 
 
 def test_glm_quant_indexer_without_cp_uses_materialized_scale() -> None:

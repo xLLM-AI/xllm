@@ -33,6 +33,10 @@ limitations under the License.
 #include "layers/common/attention_metadata.h"
 #include "layers/common/expanded_decode_metadata_builder.h"
 
+#if defined(USE_NPU)
+#include "core/platform/npu/acl_graph_task_update_context.h"
+#endif
+
 namespace xllm::layer {
 
 namespace {
@@ -364,13 +368,17 @@ AttentionMetadata build_common_attention_metadata(
     attn_metadata.q_seq_lens = params.attention.device.q_seq_lens;
     torch::Tensor q_cu_seq_lens = params.attention.device.q_cu_seq_lens;
     if (!q_cu_seq_lens.defined()) {
-      q_cu_seq_lens = torch::cumsum(attn_metadata.q_seq_lens, 0);
+      q_cu_seq_lens = torch::cumsum(attn_metadata.q_seq_lens, 0, torch::kInt32);
     }
     q_cu_seq_lens = q_cu_seq_lens.to(torch::kInt32);
     const bool q_cu_has_leading_zero =
         !params.attention.host.q_cu_seq_lens.empty() &&
         params.attention.host.q_cu_seq_lens.front() == 0;
-    if (params.graph.tiling_data.defined() || q_cu_has_leading_zero) {
+    const bool capturing =
+        params.graph.acl_graph_task_update_context != nullptr &&
+        params.graph.acl_graph_task_update_context->capturing;
+    if (params.graph.tiling_data.defined() || capturing ||
+        q_cu_has_leading_zero) {
       attn_metadata.q_cu_seq_lens = q_cu_seq_lens;
     } else {
       attn_metadata.q_cu_seq_lens = prepend_leading_zero(q_cu_seq_lens);

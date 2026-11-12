@@ -99,7 +99,7 @@ def test_owner_local_index_write_ignores_non_owned_slots(dtype: torch.dtype, slo
         var.index_copy_(0, indices[valid], updates[valid])
 
     with patch(
-        "xllm.python.attention.npu_paged_attention.kernels.scatter_nd_update",
+        "xllm.python.attention.npu_paged_attention.kernels.scatter_cache_by_slot",
         side_effect=scatter,
         create=True,
     ):
@@ -368,6 +368,7 @@ def test_mla_cp_uses_one_paged_sequence_per_zigzag_segment_and_reuses_lengths(
     has_kv_shard: bool,
 ) -> None:
     backend = object.__new__(NpuPagedAttentionBackend)
+    backend._mla_cp_block_tables = {}
     backend._metadata = SimpleNamespace(
         has_kv_shard=has_kv_shard,
         kv_split_size=1,

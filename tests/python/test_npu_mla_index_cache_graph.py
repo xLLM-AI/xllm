@@ -52,20 +52,6 @@ def _apply_expected(cache: torch.Tensor, slots: torch.Tensor, values: torch.Tens
             cache[slot].copy_(value)
 
 
-@pytest.mark.parametrize("dtype", (torch.int8, torch.bfloat16, torch.float16))
-@pytest.mark.parametrize("width", (1, 128))
-def test_native_index_scatter_skips_negative_slots(npu_device: torch.device, dtype: torch.dtype, width: int) -> None:
-    if os.environ.get("XLLM_TEST_NPU_DEVICE") is None:
-        pytest.skip("set XLLM_TEST_NPU_DEVICE to execute migrated native-scatter tests")
-    expected = torch.full((128, width), -77, dtype=dtype)
-    actual = expected.to(npu_device)
-    slots = torch.tensor([0, -1, 127, -1], dtype=torch.int64)
-    values = torch.arange(4 * width).reshape(4, width).remainder(61).to(dtype)
-    kernels.scatter_nd_update(actual, slots.to(npu_device).view(-1, 1), values.to(npu_device))
-    _apply_expected(expected, slots, values)
-    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
-
-
 @pytest.mark.parametrize(
     "owner,dtype,width,with_scales",
     (

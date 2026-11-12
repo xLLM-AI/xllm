@@ -430,7 +430,6 @@ def test_prepare_uses_expanded_rows_for_mtp_verify(
             paged_kv_last_page_len=torch.tensor(
                 [3, 4, 7, 8] if first_kv_len == 3 else [511, 512, 3, 4], dtype=torch.int32
             ),
-            paged_attention_tiling_data=None,
             kv_seq_lens_host=None,
             kv_seq_lens_host_values=[first_kv_len + offset for offset in (0, 1, 4, 5)],
         ),
@@ -615,7 +614,7 @@ def test_gather_index_history_dcp_covers_tokens_in_one_logical_page() -> None:
     expanded = backend.indexer_block_table()
     assert torch.equal(expanded[0], torch.tensor([0, 1, 2, 3], dtype=torch.int32))
 
-    packed = backend.gather_index_history(SimpleNamespace(layer_id=0))
+    packed = backend.gather_index_history(SimpleNamespace(layer_id=0), 0, 1)
     assert packed.shape == (1, kv_len, width)
     assert torch.equal(packed[0, :page_size, -1], torch.zeros(page_size))
     assert torch.equal(packed[0, page_size:kv_len, -1], torch.ones(page_size))

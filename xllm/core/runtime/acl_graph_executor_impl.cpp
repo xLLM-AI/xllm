@@ -463,11 +463,9 @@ bool AclGraph::capture(CausalLM* model,
     update_spec_verify_attention_tiling(graph_params.value());
   }
 
-  if (model->is_hybrid_linear_attention()) {
-    graph_task_context_ = std::make_shared<AclGraphTaskUpdateContext>();
-    graph_task_context_->begin_capture();
-    graph_params->graph.acl_graph_task_update_context = graph_task_context_;
-  }
+  graph_task_context_ = std::make_shared<AclGraphTaskUpdateContext>();
+  graph_task_context_->begin_capture();
+  graph_params->graph.acl_graph_task_update_context = graph_task_context_;
   // Synchronize stream to ensure all data is copied to graph persistent buffers
   aclrtSynchronizeStream(stream);
 
@@ -557,14 +555,12 @@ bool AclGraph::capture(CausalLM* model,
   return true;
 }
 
-bool AclGraph::update_graph_tasks(const ModelParamsView& params,
+void AclGraph::update_graph_tasks(const ModelParamsView& params,
                                   bool update_causal_conv1d_tasks) {
   if (graph_task_context_ == nullptr) {
-    return false;
+    return;
   }
 
-  c10_npu::NPUStream update_stream = update_stream_.value();
-  c10_npu::NPUStreamGuard stream_guard(update_stream);
   auto& causal_conv1d_tasks = graph_task_context_->causal_conv1d_tasks;
   auto& fused_infer_attention_tasks =
       graph_task_context_->fused_infer_attention_tasks;
@@ -574,8 +570,11 @@ bool AclGraph::update_graph_tasks(const ModelParamsView& params,
   const bool has_fused_infer_attention_tasks =
       !fused_infer_attention_tasks.empty();
   if (!has_causal_conv1d_tasks && !has_fused_infer_attention_tasks) {
-    return false;
+    return;
   }
+
+  c10_npu::NPUStream update_stream = update_stream_.value();
+  c10_npu::NPUStreamGuard stream_guard(update_stream);
 
   std::vector<int64_t> empty_host_args;
   std::vector<int64_t> linear_state_indices_host;
@@ -717,7 +716,6 @@ bool AclGraph::update_graph_tasks(const ModelParamsView& params,
       ++fused_infer_attention_index;
     }
   }
-  return true;
 }
 
 void AclGraph::signal_static_causal_conv1d_tasks(
@@ -920,13 +918,10 @@ ModelOutput AclGraph::replay(CausalLM* model,
 
   aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
-  const bool has_dcp_fused_infer_attention_tasks =
-      has_fused_infer_attention_graph_tasks() &&
-      graph_task_context_->fused_infer_attention_tasks.front().dcp_size > 1;
   // The first hybrid replay must wait for real inputs to replace capture
   // padding.
   if (graph_paged_attention_tiling_data_.defined() ||
-      has_dcp_fused_infer_attention_tasks ||
+      has_fused_infer_attention_graph_tasks() ||
       first_hybrid_replay_after_capture_) {
     make_graph_wait_for_current_stream(stream);
   }
@@ -941,17 +936,9 @@ ModelOutput AclGraph::replay(CausalLM* model,
   CHECK(!static_graph_tasks_prepared || use_static_graph_tasks)
       << "prepared static graph tasks do not match the replay signature";
   graph_.replay();
-  if (model->is_hybrid_linear_attention()) {
-    CHECK(graph_params.has_value())
-        << "update() should return ModelParamsView for graph task update";
-    const bool causal_conv1d_tasks_prepared =
-        use_static_graph_tasks && static_graph_tasks_prepared;
-    // The first replay after dirty capture dynamically replaces slot-0 host
-    // parameters. Later matching MTP replays may use the existing ready signal.
-    update_graph_tasks(
-        graph_params.value(),
-        /*update_causal_conv1d_tasks=*/!causal_conv1d_tasks_prepared);
-  }
+  update_graph_tasks(graph_params ? *graph_params : params,
+                     /*update_causal_conv1d_tasks=*/!use_static_graph_tasks ||
+                         !static_graph_tasks_prepared);
   make_current_stream_wait_for_graph(stream);
 
   // Return the actual num_tokens portion of ModelOutput

@@ -210,6 +210,16 @@ def pool_key_indexer(
     )
 
 
+def scatter_cache_by_slot(
+    cache: torch.Tensor,
+    slots: torch.Tensor,
+    values: torch.Tensor,
+) -> None:
+    from .triton.scatter_cache_by_slot import scatter_cache_by_slot as scatter
+
+    scatter(cache, slots, values)
+
+
 def sparse_flash_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -530,6 +540,7 @@ __all__ = [
     "supports_pool_key_indexer",
     "quant_lightning_indexer",
     "quant_lightning_indexer_metadata",
+    "scatter_cache_by_slot",
     "scatter_nd_update",
     "sparse_flash_attention",
     "sparse_flash_attention_out",

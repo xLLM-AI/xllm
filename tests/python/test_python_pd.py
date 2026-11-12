@@ -94,14 +94,13 @@ def test_pd_kpool_decode_uses_transferred_history(prompt_length: int, graph_mode
         torch.tensor([[3, 1, 4, 2]]),
     )
     prompt_positions = torch.arange(prompt_length)
-    prompt_rows = indexer.get_packed_states(
-        hidden[:, :prompt_length], torch.ones(1, prompt_length, dtype=torch.bool)
-    ).reshape(prompt_length, -1)
-    raw_k, raw_gate, valid = torch.split(prompt_rows, [cfg.index_head_dim, cfg.index_head_dim, 1], dim=-1)
+    prompt = hidden[:, :prompt_length]
+    raw_k = indexer.k_norm(indexer.wk(prompt))
+    raw_gate = nn.functional.linear(prompt, indexer.index_kpool_compress_gate)
     update_compressed_kpool(
-        raw_k,
-        raw_gate,
-        valid.reshape(-1).bool(),
+        raw_k.reshape(prompt_length, -1),
+        raw_gate.reshape(prompt_length, -1),
+        torch.ones(prompt_length, dtype=torch.bool),
         prompt_positions,
         source.cache,
         source.kpool_tail,
