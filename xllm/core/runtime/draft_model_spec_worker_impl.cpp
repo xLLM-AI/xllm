@@ -421,8 +421,9 @@ KVCacheShape DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_shape(
         get_dp_local_tp_size(draft_impl_->context_.get_parallel_args());
   }
   KVCacheCapacity draft_capacity;
-  draft_capacity.enable_indexer_cache_quant(
-      KVCacheConfig::get_instance().indexer_cache_dtype() == "int8");
+  draft_capacity.replicated_block_pages(draft_replicated_block_pages())
+      .enable_indexer_cache_quant(
+          KVCacheConfig::get_instance().indexer_cache_dtype() == "int8");
   return build_speculative_draft_kv_cache_shape(
       target_kv_cache_shape,
       draft_capacity,
@@ -695,12 +696,6 @@ DraftModelSpecWorkerImpl<TargetInput>::finalize_step_output(
   return output;
 }
 
-template <typename TargetInput>
-int32_t DraftModelSpecWorkerImpl<TargetInput>::logical_block_size() const {
-  return options_.block_size() * parallel_args_.kv_split_size_effective();
-}
-
-template <typename TargetInput>
 void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
     TargetInput& input,
     const std::vector<EmbeddingCache::DecodeState>& last_states) const {
@@ -727,9 +722,9 @@ void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
       chunked_verify && block_tables.defined() && block_tables.dim() == 2;
   const int32_t verify_lens = options_.num_speculative_tokens() + 1;
   const int32_t allocated_kv_len =
-      clamp_active
-          ? static_cast<int32_t>(block_tables.size(1)) * logical_block_size()
-          : 0;
+      clamp_active ? static_cast<int32_t>(block_tables.size(1)) *
+                         this->logical_block_size()
+                   : 0;
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     CHECK_LT(static_cast<size_t>(seq_id), input_token_ids.size());

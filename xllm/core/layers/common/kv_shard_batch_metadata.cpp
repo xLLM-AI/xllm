@@ -17,7 +17,13 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <cstddef>
+#include <utility>
+
 #include "layers/common/attention_metadata.h"
+#if defined(USE_NPU)
+#include "platform/npu/acl_graph_task_update_context.h"
+#endif
 
 namespace xllm::layer {
 
@@ -125,6 +131,32 @@ KVShardCausalSelectorMetadata build_kv_shard_causal_selector_metadata(
       std::move(selector_q_cu_seq_lens)};
 }
 
+torch::Tensor expand_replicated_block_table(
+    const torch::Tensor& logical_block_table,
+    int64_t replicated_block_pages) {
+  if (!logical_block_table.defined() || logical_block_table.numel() == 0 ||
+      replicated_block_pages <= 1) {
+    return logical_block_table;
+  }
+  CHECK_EQ(logical_block_table.dim(), 2)
+      << "block table must be [sequences, logical_blocks]";
+  CHECK(logical_block_table.scalar_type() == torch::kInt32 ||
+        logical_block_table.scalar_type() == torch::kInt64)
+      << "block table must use int32 or int64";
+  const torch::Tensor page_offsets =
+      torch::arange(replicated_block_pages, logical_block_table.options());
+  torch::Tensor expanded =
+      logical_block_table.unsqueeze(-1) * replicated_block_pages + page_offsets;
+  expanded =
+      torch::where(logical_block_table.unsqueeze(-1) >= 0,
+                   expanded,
+                   torch::full_like(expanded, KVShardLayout::kInvalidSlot));
+  return expanded
+      .reshape({logical_block_table.size(0),
+                logical_block_table.size(1) * replicated_block_pages})
+      .contiguous();
+}
+
 std::shared_ptr<KVShardBatchMetadata> build_kv_shard_batch_metadata(
     const AttentionMetadata& attention_metadata,
     const KVShardLayout& layout,
@@ -168,7 +200,8 @@ std::shared_ptr<KVShardBatchMetadata> build_kv_shard_batch_metadata(
       previous_query_end = query_end;
     }
 #if defined(USE_NPU)
-    if (attention_metadata.paged_attention_tiling_data.defined()) {
+    if (attention_metadata.acl_graph_task_update_context != nullptr &&
+        attention_metadata.acl_graph_task_update_context->capturing) {
       metadata->empty_shard_mask =
           (attention_metadata.kv_seq_lens <= layout.first_token_index())
               .view({-1, 1, 1});

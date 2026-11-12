@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_type.h"
 #include "core/kv_cache/block/block_utils.h"
+#include "core/kv_cache/layout/cache_layout_builder.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kpool_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
@@ -1063,10 +1064,7 @@ KVCacheCapacity estimate_kv_cache_capacity(
       CHECK_GT(model_args.index_kpool(), 0)
           << "KPool requires index_kpool > 0.";
     }
-    const int64_t split_factor =
-        Platform::supports_dsa_indexer_cache_sharding()
-            ? ParallelConfig::get_instance().kv_split_size_effective()
-            : 1;
+    const int64_t split_factor = indexer_pages_per_block();
     if (enable_indexer_cache_quantization) {
       // int8 index cache: one byte per element plus a per-token fp32 scale.
       index_cache_slot_size =

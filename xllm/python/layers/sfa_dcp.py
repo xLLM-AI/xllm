@@ -163,12 +163,12 @@ class AscendSFADCPMetadataBuilder:
             dtype=torch.int32,
             non_blocking=True,
         )
-        if num_reqs > self.dcp_local_seq_lens_buf.shape[0]:
-            raise RuntimeError(
-                f"dcp_local_seq_lens_buf is too small: "
-                f"shape={tuple(self.dcp_local_seq_lens_buf.shape)}, num_reqs={num_reqs}"
-            )
         if not use_precomputed:
+            if num_reqs > self.dcp_local_seq_lens_buf.shape[0]:
+                raise RuntimeError(
+                    f"dcp_local_seq_lens_buf is too small: "
+                    f"shape={tuple(self.dcp_local_seq_lens_buf.shape)}, num_reqs={num_reqs}"
+                )
             self.dcp_local_seq_lens_buf[:num_reqs].copy_(local_seq_lens, non_blocking=True)
             local_seq_lens = self.dcp_local_seq_lens_buf[:num_reqs]
 

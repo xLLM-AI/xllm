@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -101,6 +103,8 @@ bool kv_split_spans_cp_and_tp(const ParallelCoordinates& coordinates) {
 
 bool supports_kv_split_topology(const ParallelCoordinates& coordinates) {
   return coordinates.cp_size % coordinates.kv_split_size == 0 ||
+         (coordinates.cp_size == 1 &&
+          coordinates.tp_size % coordinates.kv_split_size == 0) ||
          kv_split_spans_cp_and_tp(coordinates);
 }
 
@@ -108,6 +112,9 @@ bool supports_partition_layout(const ParallelCoordinates& source,
                                const ParallelCoordinates& destination) {
   if (same_partition_sizes(source, destination)) {
     return true;
+  }
+  if (source.cp_size == 1 && source.kv_split_size > 1) {
+    return false;
   }
   return destination.cp_size == 1 && destination.cp_rank == 0 &&
          (destination.kv_split_size == 1 ||
@@ -200,13 +207,95 @@ Status validate_native_pull_tensor_pair(const CacheTensorManifest& local,
   return Status();
 }
 
+using SpanOwnerKey =
+    std::tuple<int32_t, int64_t, int32_t, int32_t, std::string, uint64_t>;
+
+SpanOwnerKey span_owner_key(const CacheTensorManifest& tensor,
+                            const LogicalSpan& span) {
+  return std::make_tuple(static_cast<int32_t>(tensor.cache_namespace),
+                         tensor.layer_id,
+                         tensor.role,
+                         tensor.group_id,
+                         span.logical_tensor,
+                         span.logical_offset_bytes);
+}
+
+using SpanOwnerMap = std::map<SpanOwnerKey, int32_t>;
+
+class SpanWriters final {
+ public:
+  static SpanWriters everything() { return SpanWriters(); }
+
+  static SpanWriters declared() {
+    SpanWriters writers;
+    writers.by_declaration_ = true;
+    return writers;
+  }
+
+  static SpanWriters lowest_of(
+      const std::vector<WorkerCacheLayoutManifest>& sources,
+      const std::vector<size_t>& candidates) {
+    struct SpanHolders {
+      std::optional<int32_t> declared_owner;
+      bool conflicting = false;
+      int32_t lowest_tp_rank = -1;
+    };
+    std::map<SpanOwnerKey, SpanHolders> holders;
+    for (size_t index : candidates) {
+      const int32_t tp_rank = sources[index].coordinates.tp_rank;
+      for (const CacheTensorManifest& tensor : sources[index].tensors) {
+        for (const LogicalSpan& span : tensor.shard.spans) {
+          SpanHolders& entry = holders[span_owner_key(tensor, span)];
+          entry.lowest_tp_rank = entry.lowest_tp_rank < 0
+                                     ? tp_rank
+                                     : std::min(entry.lowest_tp_rank, tp_rank);
+          if (span.owner_tp_rank < 0) {
+            entry.conflicting = true;
+          } else if (!entry.declared_owner.has_value()) {
+            entry.declared_owner = span.owner_tp_rank;
+          } else if (*entry.declared_owner != span.owner_tp_rank) {
+            entry.conflicting = true;
+          }
+        }
+      }
+    }
+    SpanWriters writers;
+    writers.by_declaration_ = true;
+    for (const auto& [key, entry] : holders) {
+      if (!entry.conflicting) {
+        writers.resolved_.emplace(key, entry.lowest_tp_rank);
+      }
+    }
+    return writers;
+  }
+
+  bool writes(const CacheTensorManifest& tensor,
+              const LogicalSpan& span,
+              int32_t tp_rank) const {
+    if (!by_declaration_) {
+      return true;
+    }
+    const auto owner = resolved_.find(span_owner_key(tensor, span));
+    return tp_rank ==
+           (owner == resolved_.end() ? span.owner_tp_rank : owner->second);
+  }
+
+ private:
+  bool by_declaration_ = false;
+  SpanOwnerMap resolved_;
+};
+
+SpanWriters source_writers(const ParallelCoordinates& coordinates) {
+  return kv_split_spans_cp_and_tp(coordinates) ? SpanWriters::everything()
+                                               : SpanWriters::declared();
+}
+
 void expand_manifest(const WorkerCacheLayoutManifest& manifest,
-                     bool only_static_owner,
+                     const SpanWriters& writers,
                      std::vector<AtomicLogicalRegion>* regions) {
   for (const CacheTensorManifest& tensor : manifest.tensors) {
     for (const LogicalSpan& span : tensor.shard.spans) {
-      if (only_static_owner &&
-          manifest.coordinates.tp_rank != span.owner_tp_rank) {
+      if (!writers.writes(tensor, span, manifest.coordinates.tp_rank)) {
         continue;
       }
       for (uint64_t repeat = 0; repeat < span.repeat_count; ++repeat) {
@@ -455,15 +544,14 @@ Status validate_source_instance(
   if (!supports_partition_layout(reference.coordinates,
                                  destination.coordinates)) {
     return invalid(
-        "source CP/KV-split partitions can only collapse into a CP1 "
-        "destination with either KV-split1 or the matching KV-split size");
+        "source and destination CP/KV-split partitions are unsupported");
   }
 
   const ParallelCoordinates& expected = reference.coordinates;
   if (!supports_kv_split_topology(expected)) {
     return invalid(
-        "source cp_size must be divisible by kv_split_size, or "
-        "kv_split_size must equal cp_size * tp_size");
+        "source kv_split_size must divide cp_size, divide tp_size when "
+        "cp_size is 1, or equal cp_size * tp_size");
   }
   if (multiply_overflows(static_cast<uint64_t>(expected.dp_size),
                          static_cast<uint64_t>(expected.cp_size)) ||
@@ -510,9 +598,9 @@ Status validate_source_instance(
 
 bool has_logical_overlap(const WorkerCacheLayoutManifest& source,
                          const RegionGroups& destination_groups,
-                         bool only_static_owner) {
+                         const SpanWriters& writers) {
   std::vector<AtomicLogicalRegion> source_regions;
-  expand_manifest(source, only_static_owner, &source_regions);
+  expand_manifest(source, writers, &source_regions);
   const RegionGroups source_groups = group_regions(source_regions);
   for (const auto& [key, sources] : source_groups) {
     const auto destination_it = destination_groups.find(key);
@@ -543,6 +631,7 @@ Status select_collapsed_writers(
   std::map<std::pair<int32_t, int32_t>, int32_t> cp_kv_ranks;
   const bool spans_cp_and_tp =
       kv_split_spans_cp_and_tp(sources.front().coordinates);
+  const SpanWriters span_writers = source_writers(sources.front().coordinates);
   for (size_t index = 0; index < sources.size(); ++index) {
     const ParallelCoordinates& coordinates = sources[index].coordinates;
     if (!spans_cp_and_tp) {
@@ -575,9 +664,8 @@ Status select_collapsed_writers(
     required_groups->emplace(group);
     // Lowest CP rank is the deterministic writer; replicas are PLAN_ONLY.
     for (size_t index : cp_workers.begin()->second) {
-      if (has_logical_overlap(sources[index],
-                              destination_groups,
-                              /*only_static_owner=*/!spans_cp_and_tp)) {
+      if (has_logical_overlap(
+              sources[index], destination_groups, span_writers)) {
         writers->emplace_back(index);
       }
     }
@@ -725,7 +813,7 @@ uint64_t explicit_mapping_key(int32_t group_id, int32_t role) {
 }
 
 Status bind_regions(
-    const ReshardPlanTemplate& plan,
+    const std::vector<StridedRegionTemplate>& plan,
     const std::unordered_map<int32_t, ResourceMappingView>* regular_mappings,
     const std::unordered_map<uint64_t, ResourceMappingView>* explicit_mappings,
     CacheNamespace cache_namespace,
@@ -737,7 +825,7 @@ Status bind_regions(
   regions->clear();
 
   std::vector<BoundRegion> bound;
-  for (const StridedRegionTemplate& region_template : plan.regions) {
+  for (const StridedRegionTemplate& region_template : plan) {
     if (region_template.cache_namespace != cache_namespace ||
         (layer_id >= 0 && region_template.layer_id != layer_id)) {
       continue;
@@ -930,11 +1018,11 @@ Status ReshardPlanner::select_sources(
   }
 
   std::vector<AtomicLogicalRegion> destination_regions;
-  expand_manifest(
-      destination, /*only_static_owner=*/false, &destination_regions);
+  expand_manifest(destination, SpanWriters::everything(), &destination_regions);
   const RegionGroups destination_groups = group_regions(destination_regions);
   const bool collapse_partitions = !same_partition_sizes(
       sources.front().coordinates, destination.coordinates);
+  SpanWriters homogeneous_writers;
   std::vector<size_t> writers;
   std::set<CoverageKey> required_groups;
   if (collapse_partitions) {
@@ -944,15 +1032,20 @@ Status ReshardPlanner::select_sources(
       return selection;
     }
   } else {
+    std::vector<size_t> homogeneous_candidates;
     for (size_t index = 0; index < sources.size(); ++index) {
       const ParallelCoordinates& coordinates = sources[index].coordinates;
       if (!same_partition(coordinates, destination.coordinates)) {
         continue;
       }
       required_groups.emplace(coordinates.dp_rank, 0);
-      if (has_logical_overlap(sources[index],
-                              destination_groups,
-                              /*only_static_owner=*/true)) {
+      homogeneous_candidates.emplace_back(index);
+    }
+    homogeneous_writers =
+        SpanWriters::lowest_of(sources, homogeneous_candidates);
+    for (size_t index : homogeneous_candidates) {
+      if (has_logical_overlap(
+              sources[index], destination_groups, homogeneous_writers)) {
         writers.emplace_back(index);
       }
     }
@@ -967,11 +1060,10 @@ Status ReshardPlanner::select_sources(
     }
     const int32_t kv_partition =
         collapse_partitions ? source.coordinates.kv_split_rank : 0;
-    const bool only_static_owner =
-        !kv_split_spans_cp_and_tp(source.coordinates);
+    const SpanWriters source_span_writers = source_writers(source.coordinates);
     expand_manifest(
         source,
-        only_static_owner,
+        collapse_partitions ? source_span_writers : homogeneous_writers,
         &writer_regions[{source.coordinates.dp_rank, kv_partition}]);
   }
 
@@ -984,17 +1076,10 @@ Status ReshardPlanner::select_sources(
   return Status();
 }
 
-Status ReshardPlanner::validate_destination_coverage(
-    const std::vector<WorkerCacheLayoutManifest>& sources,
-    const WorkerCacheLayoutManifest& destination) const {
-  std::vector<size_t> selected_indices;
-  return select_sources(sources, destination, &selected_indices);
-}
-
 Status ReshardPlanner::build_outgoing_plan(
     const WorkerCacheLayoutManifest& source,
     const WorkerCacheLayoutManifest& destination,
-    ReshardPlanTemplate* plan) const {
+    std::vector<StridedRegionTemplate>* plan) const {
   if (plan == nullptr) {
     return invalid("reshard plan output must not be null");
   }
@@ -1003,21 +1088,12 @@ Status ReshardPlanner::build_outgoing_plan(
     return compatibility;
   }
 
-  plan->source_incarnation = source.incarnation_id;
-  plan->source_layout_generation = source.layout_generation;
-  plan->destination_incarnation = destination.incarnation_id;
-  plan->destination_layout_generation = destination.layout_generation;
-  plan->source_coordinates = source.coordinates;
-  plan->destination_coordinates = destination.coordinates;
-  plan->destination_addr = destination.addr;
-  plan->regions.clear();
+  plan->clear();
 
   std::vector<AtomicLogicalRegion> source_regions;
   std::vector<AtomicLogicalRegion> destination_regions;
-  const bool only_static_owner = !kv_split_spans_cp_and_tp(source.coordinates);
-  expand_manifest(source, only_static_owner, &source_regions);
-  expand_manifest(
-      destination, /*only_static_owner=*/false, &destination_regions);
+  expand_manifest(source, SpanWriters::everything(), &source_regions);
+  expand_manifest(destination, SpanWriters::everything(), &destination_regions);
   const RegionGroups source_groups = group_regions(source_regions);
   const RegionGroups destination_groups = group_regions(destination_regions);
   std::vector<PlannedAtomicRegion> candidates;
@@ -1082,14 +1158,14 @@ Status ReshardPlanner::build_outgoing_plan(
       return overlap_status;
     }
   }
-  compact_planned_regions(&candidates, &plan->regions);
+  compact_planned_regions(&candidates, plan);
   return Status();
 }
 
 Status ReshardPlanner::build_native_pull_plan(
     const WorkerCacheLayoutManifest& local_destination,
     const WorkerCacheLayoutManifest& remote_source,
-    ReshardPlanTemplate* plan) const {
+    std::vector<StridedRegionTemplate>* plan) const {
   if (plan == nullptr) {
     return invalid("native PULL plan output must not be null");
   }
@@ -1134,15 +1210,8 @@ Status ReshardPlanner::build_native_pull_plan(
     }
   }
 
-  ReshardPlanTemplate candidate;
-  candidate.source_incarnation = remote_source.incarnation_id;
-  candidate.source_layout_generation = remote_source.layout_generation;
-  candidate.destination_incarnation = local_destination.incarnation_id;
-  candidate.destination_layout_generation = local_destination.layout_generation;
-  candidate.source_coordinates = remote;
-  candidate.destination_coordinates = local;
-  candidate.destination_addr = local_destination.addr;
-  candidate.regions.reserve(local_destination.tensors.size());
+  std::vector<StridedRegionTemplate> candidate;
+  candidate.reserve(local_destination.tensors.size());
   for (const CacheTensorManifest& local_tensor : local_destination.tensors) {
     const Status tensor_status = validate_native_pull_tensor(local_tensor);
     if (!tensor_status.ok()) {
@@ -1184,13 +1253,13 @@ Status ReshardPlanner::build_native_pull_plan(
     region.remote_buffer_bytes = remote_tensor.buffer_bytes;
     region.local_explicit_resource_offsets = true;
     region.remote_explicit_resource_offsets = true;
-    candidate.regions.emplace_back(std::move(region));
+    candidate.emplace_back(std::move(region));
   }
   *plan = std::move(candidate);
   return Status();
 }
 
-Status RequestRegionBinder::bind(const ReshardPlanTemplate& plan,
+Status RequestRegionBinder::bind(const std::vector<StridedRegionTemplate>& plan,
                                  const std::vector<KVTransferMapping>& mappings,
                                  CacheNamespace cache_namespace,
                                  int64_t layer_id,
@@ -1217,7 +1286,7 @@ Status RequestRegionBinder::bind(const ReshardPlanTemplate& plan,
 }
 
 Status RequestRegionBinder::bind_explicit(
-    const ReshardPlanTemplate& plan,
+    const std::vector<StridedRegionTemplate>& plan,
     const std::vector<ExplicitResourceMapping>& mappings,
     CacheNamespace cache_namespace,
     int64_t layer_id,

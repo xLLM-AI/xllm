@@ -15,9 +15,13 @@ limitations under the License.
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <string>
 
+#include "core/framework/config/parallel_config.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/platform/platform.h"
 
 namespace xllm {
 
@@ -27,5 +31,13 @@ namespace xllm {
 bool describe_cache_tensor(const CacheTensorLayoutContext& context,
                            KVCacheTensor* cache_tensor,
                            std::string* error);
+
+inline int64_t indexer_pages_per_block() {
+  if (!Platform::supports_dsa_indexer_cache_sharding()) {
+    return 1;
+  }
+  return std::max<int64_t>(
+      ParallelConfig::get_instance().kv_split_size_effective(), 1);
+}
 
 }  // namespace xllm

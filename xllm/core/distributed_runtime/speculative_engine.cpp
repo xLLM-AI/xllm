@@ -342,15 +342,17 @@ int64_t SpeculativeEngineBase<TargetEngine>::calculate_kv_cache(
                      target_kv_cache_cap.scale_slot_size())) +
       target_kv_cache_cap.num_indexer_layers() *
           target_kv_cache_cap.index_block_bytes();
-  // The draft KV cache is allocated from the draft's own KVCacheShape, so its
-  // per-block cost uses the draft's own slot size, which may exceed the
-  // target's (e.g. a full-attention draft against an MLA target).
+  const int32_t replicated_block_pages =
+      SpeculativeConfig::draft_replicated_block_pages(
+          options_.speculative_algorithm(),
+          ParallelConfig::get_instance().kv_split_size_effective());
   const int64_t draft_full_attention_block_size_in_bytes =
-      block_size * (draft_full_attention_layers *
-                    (draft_kv_cache_cap.slot_size() +
-                     draft_kv_cache_cap.scale_slot_size())) +
-      draft_kv_cache_cap.num_indexer_layers() *
-          draft_kv_cache_cap.index_block_bytes();
+      replicated_block_pages *
+      (block_size * (draft_full_attention_layers *
+                     (draft_kv_cache_cap.slot_size() +
+                      draft_kv_cache_cap.scale_slot_size())) +
+       draft_kv_cache_cap.num_indexer_layers() *
+           draft_kv_cache_cap.index_block_bytes());
   const int32_t layerwise_split_size =
       options_.is_draft_engine()
           ? 1

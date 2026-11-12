@@ -88,6 +88,7 @@ class KVCacheShape final {
   int64_t shared_slab_count() const { return shared_slab_count_; }
   int64_t shared_draft_layers() const { return shared_draft_layers_; }
   int64_t linear_ssm_checkpoint_stride() const;
+  int64_t replicated_block_pages() const { return replicated_block_pages_; }
   static int64_t linear_ssm_checkpoint_stride(int64_t logical_slots,
                                               int64_t physical_rows);
   bool has_grouped_cache_layout() const {
@@ -132,6 +133,7 @@ class KVCacheShape final {
   int64_t shared_slab_count_ = 0;
   int64_t shared_draft_layers_ = 0;
   KPoolCacheLayout kpool_layout_ = KPoolCacheLayout::PACKED;
+  int64_t replicated_block_pages_ = 1;
   std::optional<std::vector<int64_t>> kpool_tail_shape_;
   ShapeKind shape_kind_ = ShapeKind::NORMAL;
   std::optional<std::vector<int64_t>> key_cache_shape_;

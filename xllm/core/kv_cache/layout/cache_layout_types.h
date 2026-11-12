@@ -74,6 +74,7 @@ struct CacheTensorLayoutContext {
   int64_t linear_ssm_checkpoint_stride = 1;
   bool enable_mla = false;
   bool head_major_layout = false;
+  int64_t replicated_block_pages = 1;
 };
 
 }  // namespace xllm

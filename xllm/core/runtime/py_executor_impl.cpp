@@ -286,7 +286,11 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
           << "Python model Host KV reload failed.";
     }
   }
-  if (!enable_mla_ && py_causal_lm_->cp_size() == 1 &&
+  const bool draft_replicates_kv =
+      options_.is_draft_engine() &&
+      SpeculativeConfig::draft_replicated_block_pages(
+          options_.speculative_algorithm(), py_causal_lm_->kv_split_size()) > 1;
+  if (!enable_mla_ && !draft_replicates_kv && py_causal_lm_->cp_size() == 1 &&
       py_causal_lm_->kv_split_size() > 1) {
     const KVShardLayout layout(options_.block_size(),
                                py_causal_lm_->kv_split_size(),

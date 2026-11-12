@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/decode_input_builder.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
@@ -96,6 +97,14 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                             LlmForwardInput& query_input);
   void prepare_validate_inputs(const LlmForwardInput& input,
                                LlmForwardInput& validate_input);
+
+  int64_t draft_replicated_block_pages() const override {
+    return SpeculativeConfig::draft_replicated_block_pages(
+        options_.speculative_algorithm(),
+        parallel_args_.kv_split_size_effective());
+  }
+
+  void expand_draft_block_tables(LlmModelParams& input_params) const;
 
   bool draft_input_per_request_ = true;
   BatchForwardType draft_forward_type_ = BatchForwardType::CHUNKED_PREFILL;

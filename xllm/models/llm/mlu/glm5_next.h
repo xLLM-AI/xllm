@@ -193,16 +193,16 @@ class Glm5NextForCausalLMImpl final
 
   bool is_hybrid_linear_attention() { return true; }
 
-  bool requires_graph_forward_metadata() override { return true; }
+  bool requires_graph_forward_metadata() { return true; }
 
-  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
-      override {
+  std::unique_ptr<ModelGraphMetadataState>
+  create_graph_forward_metadata_state() {
     return std::make_unique<Glm5NextGraphMetadataState>();
   }
 
   void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
                                       const torch::Tensor& positions,
-                                      ModelParamsView& params) override {
+                                      ModelParamsView& params) {
     auto* graph_state = dynamic_cast<Glm5NextGraphMetadataState*>(state);
     CHECK(graph_state != nullptr) << "GLM5 requires per-graph metadata state";
     graph_state->prepare(positions, params);

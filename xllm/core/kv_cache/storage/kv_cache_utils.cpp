@@ -27,6 +27,7 @@ limitations under the License.
 #include <sstream>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "util/utils.h"
 #if defined(USE_MLU)
@@ -177,11 +178,7 @@ bool is_linear_attention_layer(int64_t layer_idx,
       return false;
     }
     const std::string& layer_type = layer_types[static_cast<size_t>(layer_idx)];
-    // Explicit full-attention markers (including the glm5_next
-    // deepseek_sparse_attention label) use paged KV, not the linear
-    // (conv/ssm) cache.
-    if (layer_type == "full_attention" || layer_type == "attention" ||
-        layer_type == "deepseek_sparse_attention") {
+    if (is_paged_kv_layer_type(layer_type)) {
       return false;
     }
     // Only an explicit linear marker flips the layer to the conv/ssm cache.
