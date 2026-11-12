@@ -475,11 +475,9 @@ bool AclGraph::capture(CausalLM* model,
     update_spec_verify_attention_tiling(graph_params.value());
   }
 
-  if (model->is_hybrid_linear_attention()) {
-    graph_task_context_ = std::make_shared<AclGraphTaskUpdateContext>();
-    graph_task_context_->begin_capture();
-    graph_params->graph.acl_graph_task_update_context = graph_task_context_;
-  }
+  graph_task_context_ = std::make_shared<AclGraphTaskUpdateContext>();
+  graph_task_context_->begin_capture();
+  graph_params->graph.acl_graph_task_update_context = graph_task_context_;
   // Synchronize stream to ensure all data is copied to graph persistent buffers
   aclrtSynchronizeStream(stream);
 
@@ -940,13 +938,10 @@ ModelOutput AclGraph::replay(CausalLM* model,
 
   aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
-  const bool has_dcp_fused_infer_attention_tasks =
-      has_fused_infer_attention_graph_tasks() &&
-      graph_task_context_->fused_infer_attention_tasks.front().dcp_size > 1;
   // The first hybrid replay must wait for real inputs to replace capture
   // padding.
   if (graph_paged_attention_tiling_data_.defined() ||
-      has_dcp_fused_infer_attention_tasks ||
+      has_fused_infer_attention_graph_tasks() ||
       first_hybrid_replay_after_capture_) {
     make_graph_wait_for_current_stream(stream);
   }
@@ -959,16 +954,12 @@ ModelOutput AclGraph::replay(CausalLM* model,
   CHECK(!static_graph_tasks_prepared || use_static_graph_tasks)
       << "prepared static graph tasks do not match the replay signature";
   graph_.replay();
-  if (model->is_hybrid_linear_attention()) {
-    CHECK(graph_params.has_value())
-        << "update() should return ModelParamsView for graph task update";
-    const bool causal_conv1d_tasks_prepared =
-        use_static_graph_tasks && static_graph_tasks_prepared;
-    // The first replay after dirty capture dynamically replaces slot-0 host
-    // parameters. Later matching MTP replays may use the existing ready signal.
-    update_graph_tasks(
-        graph_params.value(),
-        /*update_causal_conv1d_tasks=*/!causal_conv1d_tasks_prepared);
+  if (graph_task_context_ != nullptr &&
+      (!graph_task_context_->fused_infer_attention_tasks.empty() ||
+       !graph_task_context_->causal_conv1d_tasks.empty())) {
+    update_graph_tasks(graph_params.has_value() ? graph_params.value() : params,
+                       /*update_causal_conv1d_tasks=*/!use_static_graph_tasks ||
+                           !static_graph_tasks_prepared);
   }
   make_current_stream_wait_for_graph(stream);
 
@@ -982,7 +973,8 @@ void AclGraph::prepare_replay_inputs(const torch::Tensor& tokens,
                                      const torch::Tensor& positions,
                                      std::vector<KVCache>& kv_cache,
                                      const ModelParamsView& params) {
-  if (graph_paged_attention_tiling_data_.defined()) {
+  if (graph_paged_attention_tiling_data_.defined() ||
+      has_fused_infer_attention_graph_tasks()) {
     return;
   }
   const uint32_t actual_num_tokens =

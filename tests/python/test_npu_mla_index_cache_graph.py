@@ -61,7 +61,7 @@ def test_native_index_scatter_skips_negative_slots(npu_device: torch.device, dty
     actual = expected.to(npu_device)
     slots = torch.tensor([0, -1, 127, -1], dtype=torch.int64)
     values = torch.arange(4 * width).reshape(4, width).remainder(61).to(dtype)
-    kernels.scatter_nd_update(actual, slots.to(npu_device).view(-1, 1), values.to(npu_device))
+    kernels.scatter_cache_by_slot(actual, slots.to(npu_device).view(-1, 1), values.to(npu_device))
     _apply_expected(expected, slots, values)
     torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 

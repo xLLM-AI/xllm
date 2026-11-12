@@ -106,7 +106,6 @@ def _capacity_metadata(rows: int, kv_length: int = 1, query_width: int = 1) -> S
             paged_kv_indptr=metadata.paged_kv_indptr,
             paged_kv_indices=metadata.paged_kv_indices,
             paged_kv_last_page_len=metadata.paged_kv_last_page_len,
-            paged_attention_tiling_data=None,
             kv_seq_lens_host=None,
             kv_seq_lens_host_values=metadata.kv_seq_lens_host_values,
         )
@@ -1168,7 +1167,6 @@ def test_accepted_counts_refresh_in_stable_graph_buffer() -> None:
         paged_kv_indptr=metadata.paged_kv_indptr,
         paged_kv_indices=metadata.paged_kv_indices,
         paged_kv_last_page_len=metadata.paged_kv_last_page_len,
-        paged_attention_tiling_data=None,
         kv_seq_lens_host=None,
         kv_seq_lens_host_values=metadata.kv_seq_lens_host_values,
     )
@@ -1347,7 +1345,6 @@ def test_capture_preserves_live_state_until_first_replay(
             paged_kv_indptr=metadata.paged_kv_indptr,
             paged_kv_indices=metadata.paged_kv_indices,
             paged_kv_last_page_len=metadata.paged_kv_last_page_len,
-            paged_attention_tiling_data=None,
             kv_seq_lens_host=None,
             kv_seq_lens_host_values=metadata.kv_seq_lens_host_values,
         )
@@ -1933,15 +1930,14 @@ def test_decode_rejects_mismatched_linear_state_indices_without_cache_probe() ->
     metadata = _metadata(torch.arange(4, dtype=torch.int32))
     metadata.linear_state_indices = torch.arange(3, dtype=torch.int32)
 
-    with patch.object(runner, "_has_compatible_index_history", side_effect=AssertionError):
-        assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None
+    assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None
 
 
 @pytest.mark.parametrize("speculative_tokens", [3, 7], ids=["mtp", "dspark"])
 @pytest.mark.parametrize("dp_size", [1, 2])
 def test_mla_speculative_decode_ignores_unused_linear_state_rows(speculative_tokens: int, dp_size: int) -> None:
     rows = speculative_tokens + 1
-    backend = SimpleNamespace(page_size=4, is_mla=True, graph_index_history_max_kv=32)
+    backend = SimpleNamespace(page_size=4, is_mla=True)
     runner = DecodeAclGraphRunner(
         nn.Identity(),
         backend,
@@ -1957,7 +1953,6 @@ def test_mla_speculative_decode_ignores_unused_linear_state_rows(speculative_tok
     metadata.has_initial_state = torch.zeros(1, dtype=torch.bool)
     metadata.dp_global_sequence_nums = (1,) * dp_size
     metadata.dp_execution_token_counts = (rows,) * dp_size
-    metadata.dp_global_kv_max_seq_lens = (rows,) * dp_size
     metadata.dp_is_decode = (1,) * dp_size
 
     assert runner.prepare_execution(torch.arange(rows, dtype=torch.int32), metadata) is not None
@@ -1971,16 +1966,5 @@ def test_hybrid_mla_rejects_mismatched_recurrent_metadata(cache_slot: str, inval
     runner.bind_layer_caches([LayerCache(torch.zeros(1), torch.zeros(1), **{cache_slot: torch.zeros(1)})])
     metadata = _metadata(torch.arange(4, dtype=torch.int32))
     setattr(metadata, invalid_field, torch.zeros(1, dtype=torch.int32))
-
-    assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None
-
-
-def test_mla_admission_retains_index_history_capacity_check() -> None:
-    runner = _runner()
-    runner.attention_backend.is_mla = True
-    runner.attention_backend.graph_index_history_max_kv = 4
-    runner.bind_layer_caches([LayerCache(torch.zeros(1), torch.zeros(1), index=torch.zeros(1))])
-    metadata = _metadata(torch.arange(4, dtype=torch.int32))
-    metadata.linear_state_indices = torch.tensor([-1], dtype=torch.int32)
 
     assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None

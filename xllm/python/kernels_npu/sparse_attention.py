@@ -360,6 +360,16 @@ def quant_lightning_indexer_metadata(
     )
 
 
+def scatter_cache_by_slot(
+    cache: torch.Tensor,
+    slots: torch.Tensor,
+    values: torch.Tensor,
+) -> None:
+    from .triton.scatter_cache_by_slot import scatter_cache_by_slot as scatter
+
+    scatter(cache, slots, values)
+
+
 def scatter_nd_update(
     value: torch.Tensor,
     indices: torch.Tensor,
@@ -370,7 +380,7 @@ def scatter_nd_update(
     Args:
         value: Destination tensor, updated in place.
         indices: Index of every updated row, shape ``[num_updates, 1]``.
-            Negative indices are ignored on device, including graph padding.
+            Indices must address valid rows.
         updates: Rows written into ``value``.
     """
     torch.ops.xllm_ops.scatter_nd_update(value, indices, updates)
@@ -704,6 +714,7 @@ __all__ = [
     "supports_pool_key_indexer",
     "quant_lightning_indexer",
     "quant_lightning_indexer_metadata",
+    "scatter_cache_by_slot",
     "scatter_nd_update",
     "sparse_flash_attention",
     "sparse_flash_attention_out",

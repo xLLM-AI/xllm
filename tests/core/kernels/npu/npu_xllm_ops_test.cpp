@@ -1238,8 +1238,6 @@ from xllm.python.model_executor import executor as executor_module
 
 
 class FakeBackend:
-    supports_prepared_metadata = False
-
     def __init__(self, **kwargs):
         pass
 
@@ -1259,10 +1257,6 @@ class FakeBackend:
     @property
     def page_size(self):
         return 1
-
-    @property
-    def supports_prepared_metadata(self) -> bool:
-        return False
 
 
 class FakeModel(torch.nn.Module):

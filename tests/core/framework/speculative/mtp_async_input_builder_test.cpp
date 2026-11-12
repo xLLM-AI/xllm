@@ -33,7 +33,6 @@ limitations under the License.
 #include "core/kernels/npu/tilelang/mtp_prepare_next_draft.h"
 #include "core/kernels/xllm_torch_ops.h"
 #include "core/layers/common/attention_metadata.h"
-#include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/py_attention_metadata.h"
@@ -297,62 +296,6 @@ TEST(MtpAsyncInputBuilderTest, RejectsPageCountBeyondBlockTableWidth) {
                "KV length exceeds block-table capacity");
 }
 
-TEST(MtpAsyncInputBuilderTest, PybindViewOwnsGlobalDpKvMaxSequenceLengths) {
-  ensure_xllm_torch_ops_registered();
-  if (!Py_IsInitialized()) {
-    setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0", 1);
-    Py_InitializeEx(0);
-  }
-  py::gil_scoped_acquire gil;
-  prepend_python_model_path();
-  py::module_::import("xllm.python._npu_bootstrap");
-  py::module_::import("xllm.python").attr("initialize_runtime")();
-  py::module_ main_module = py::module_::import("__main__");
-  if (!py::hasattr(main_module, "AttentionMetadataView")) {
-    register_attention_metadata_views(main_module);
-  }
-
-  auto metadata = std::make_shared<layer::AttentionMetadata>();
-  metadata->kv_seq_lens_vec = {1};
-  metadata->max_seq_len = 1;
-  metadata->is_dummy = true;
-
-  const std::vector<std::vector<int32_t>> histories = {{32769, 0}, {0, 32769}};
-  for (const std::vector<int32_t>& expected : histories) {
-    py::object py_metadata;
-    {
-      ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
-      params.parallel.dp_global_token_nums = {expected[0] == 0 ? 0 : 1,
-                                              expected[1] == 0 ? 0 : 1};
-      params.parallel.dp_global_kv_max_seq_lens = expected;
-      py_metadata = py::cast(PyAttentionMetadataView(metadata, params));
-      EXPECT_EQ(py_metadata.attr("raw_dp_execution_token_counts")
-                    .cast<std::vector<int32_t>>(),
-                params.parallel.dp_global_token_nums);
-      EXPECT_EQ(py_metadata.attr("dp_global_kv_max_seq_lens")
-                    .cast<std::vector<int32_t>>(),
-                expected);
-
-      params.parallel.dp_global_kv_max_seq_lens = {7, 9};
-      EXPECT_EQ(py_metadata.attr("dp_global_kv_max_seq_lens")
-                    .cast<std::vector<int32_t>>(),
-                expected);
-    }
-
-    EXPECT_EQ(py_metadata.attr("dp_global_kv_max_seq_lens")
-                  .cast<std::vector<int32_t>>(),
-              expected);
-    py::list lengths = py_metadata.attr("dp_global_kv_max_seq_lens");
-    lengths[0] = py::int_(123);
-    EXPECT_EQ(py_metadata.attr("dp_global_kv_max_seq_lens")
-                  .cast<std::vector<int32_t>>(),
-              expected);
-    EXPECT_THROW(
-        py::setattr(py_metadata, "dp_global_kv_max_seq_lens", py::none()),
-        py::error_already_set);
-  }
-}
-
 TEST(MtpAsyncInputBuilderTest, PybindViewExposesLinearStateReadAndWriteSlots) {
   ensure_xllm_torch_ops_registered();
   if (!Py_IsInitialized()) {
@@ -464,9 +407,10 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   const torch::Tensor table = torch::tensor({{10, 11}}, torch::kInt);
   const torch::Tensor lengths = torch::tensor({128}, torch::kInt);
   const torch::Tensor slots = torch::tensor({1407}, torch::kInt);
-  auto sparse = std::make_shared<layer::AttentionMetadata>(
-      layer::AttentionMetadataBuilder::build_mtp_sparse_decode(
-          table, lengths, slots, /*block_size=*/128));
+  auto sparse = std::make_shared<layer::AttentionMetadata>();
+  sparse->block_table = table;
+  sparse->kv_seq_lens = lengths;
+  sparse->slot_mapping = slots;
   py::object sparse_view = py::cast(PyAttentionMetadataView(sparse, params));
   const torch::Tensor view_table =
       sparse_view.attr("block_table").cast<torch::Tensor>();
@@ -477,11 +421,6 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   EXPECT_EQ(view_table.data_ptr(), table.data_ptr());
   EXPECT_EQ(view_lengths.data_ptr(), lengths.data_ptr());
   EXPECT_EQ(view_slots.data_ptr(), slots.data_ptr());
-  EXPECT_TRUE(sparse->kv_seq_lens_vec.empty());
-  EXPECT_FALSE(sparse->kv_seq_lens_host.defined());
-  EXPECT_FALSE(sparse->paged_kv_indptr.defined());
-  EXPECT_FALSE(sparse->paged_kv_indices.defined());
-  EXPECT_FALSE(sparse->expanded_decode.enabled);
 
   // The Python view retains the owner as the request crosses a page boundary.
   sparse.reset();

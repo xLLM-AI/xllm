@@ -861,7 +861,6 @@ class TestDecodeAclGraphSpeculativeMetadata:
                 paged_kv_indptr=torch.tensor([0, 1, 2, 4, 6], dtype=torch.int32),
                 paged_kv_indices=torch.tensor([10, 10, 20, 21, 20, 21], dtype=torch.int32),
                 paged_kv_last_page_len=torch.tensor([3, 4, 3, 4], dtype=torch.int32),
-                paged_attention_tiling_data=None,
                 kv_seq_lens_host=torch.tensor([3, 4, 7, 8], dtype=torch.int32),
                 kv_seq_lens_host_values=[3, 4, 7, 8],
             ),
@@ -1510,7 +1509,6 @@ def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device
         metadata.expanded_decode_metadata = SimpleNamespace(
             **tensors,
             enabled=True,
-            paged_attention_tiling_data=None,
             kv_seq_lens_host=None,
             kv_seq_lens_host_values=lengths,
         )
@@ -2048,10 +2046,6 @@ def test_mtp_topk_routes_to_acl_graph(mock_create):
 
 
 class _GraphStubAttentionBackend(StubAttentionBackend):
-    @property
-    def supports_prepared_metadata(self) -> bool:
-        return True
-
     def prepare_metadata(self, metadata: AttentionMetadata, *, device_kv_lengths: bool = False) -> object:
         return SimpleNamespace(source=metadata.q_cu_seq_lens_host_values, device_kv_lengths=device_kv_lengths)
 

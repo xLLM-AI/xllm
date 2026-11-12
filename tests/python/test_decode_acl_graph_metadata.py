@@ -546,7 +546,6 @@ def test_metadata_reuse_preserves_expanded_verify_rows_and_query_groups(
         paged_kv_indptr=torch.tensor([0, 1, 2, 3, 5], dtype=torch.int32),
         paged_kv_indices=torch.tensor([11, 11, 21, 21, 22], dtype=torch.int32),
         paged_kv_last_page_len=torch.tensor([1, 2, 4, 1], dtype=torch.int32),
-        paged_attention_tiling_data=None,
     )
 
     with patch.object(runner, "_decode_metadata", wraps=runner._decode_metadata) as decode:
@@ -590,7 +589,6 @@ def test_expanded_query_row_offsets_survive_padding_and_bucket_reuse(runner: Dec
             paged_kv_indptr=torch.arange(rows + 1, dtype=torch.int32),
             paged_kv_indices=torch.full((rows,), 11, dtype=torch.int32),
             paged_kv_last_page_len=torch.ones(rows, dtype=torch.int32),
-            paged_attention_tiling_data=None,
         )
         decoded = runner.prepare_execution(input_ids, metadata)
         assert decoded is not None
