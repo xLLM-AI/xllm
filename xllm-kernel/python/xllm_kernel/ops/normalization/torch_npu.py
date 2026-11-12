@@ -9,10 +9,10 @@ from xllm_kernel.ops.normalization import (
     FUSED_ADD_RMS_NORM_DYNAMIC_QUANT_CONTRACT,
     GEMMA_RMS_NORM_CONTRACT,
 )
-from xllm_kernel.platform import Platform, PlatformEnum
+from xllm_kernel.platform import PlatformEnum, current_platform
 from xllm_kernel.registry import register_kernel
 
-if Platform.is_npu():
+if current_platform.is_npu():
     import torch_npu
 
     _gemma_rms_norm = torch_npu.npu_gemma_rms_norm

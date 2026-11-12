@@ -85,10 +85,10 @@ xLLM runtime。算子接收准备好的输入，不在 solution 内另建请求�
 ```python
 import torch
 
-from xllm_kernel import Platform, PlatformEnum, register_kernel
+from xllm_kernel import PlatformEnum, current_platform, register_kernel
 from xllm_kernel.ops.normalization import RMS_NORM_CONTRACT
 
-if Platform.is_npu():
+if current_platform.is_npu():
     import torch_npu
 
     _native_rms_norm = torch_npu.npu_rms_norm

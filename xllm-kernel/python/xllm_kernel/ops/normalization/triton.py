@@ -18,10 +18,10 @@ from xllm_kernel.ops.normalization import (
     RMS_NORM_SIGMOID_GATED_CONTRACT,
     TRITON_JIT_REQUIRES,
 )
-from xllm_kernel.platform import Platform, PlatformEnum
+from xllm_kernel.platform import PlatformEnum, current_platform
 from xllm_kernel.registry import register_kernel
 
-if Platform.is_npu():
+if current_platform.is_npu():
     # JIT-only preparation does not require the host's compiled L2 schema;
     # compiled L2 preparation does not require the optional Python JIT SDKs.
     if hasattr(torch.ops.xllm_ops, "l2_norm"):

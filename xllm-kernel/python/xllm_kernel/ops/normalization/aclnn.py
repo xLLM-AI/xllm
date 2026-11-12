@@ -10,10 +10,10 @@ from xllm_kernel.ops.normalization import (
     RMS_NORM_DYNAMIC_QUANT_CONTRACT,
     RMS_NORM_GATED_CONTRACT,
 )
-from xllm_kernel.platform import Platform, PlatformEnum
+from xllm_kernel.platform import PlatformEnum, current_platform
 from xllm_kernel.registry import register_kernel
 
-if Platform.is_npu():
+if current_platform.is_npu():
     _fused_add_gemma_rms_norm = torch.ops.xllm_ops.fused_add_gemma_rms_norm
     _rms_norm_dynamic_quant = torch.ops.xllm_ops.rms_norm_dynamic_quant
     _rms_norm_gated = torch.ops.xllm_ops.rms_norm_gated

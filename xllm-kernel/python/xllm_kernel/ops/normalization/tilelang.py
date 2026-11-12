@@ -10,10 +10,10 @@ from xllm_kernel.ops.normalization import (
     HAS_SPLIT_QKV_RMSNORM_MROPE_SPECIALIZATION_CONTRACT,
     SPLIT_QKV_RMSNORM_MROPE_CONTRACT,
 )
-from xllm_kernel.platform import Platform, PlatformEnum
+from xllm_kernel.platform import PlatformEnum, current_platform
 from xllm_kernel.registry import register_kernel
 
-if Platform.is_npu():
+if current_platform.is_npu():
     _split_qkv_rmsnorm_mrope = torch.ops.xllm_ops.split_qkv_rmsnorm_mrope
     _has_split_qkv_rmsnorm_mrope_specialization = torch.ops.xllm_ops.has_split_qkv_rmsnorm_mrope_specialization
     _build_split_qkv_rmsnorm_mrope_gather_pattern = torch.ops.xllm_ops.build_split_qkv_rmsnorm_mrope_gather_pattern
