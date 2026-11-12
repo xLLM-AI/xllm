@@ -65,8 +65,7 @@ torch::Tensor extract_target_base_kv_seq_lens(
     const torch::Tensor& validate_kv_seq_lens,
     int64_t batch_size,
     int64_t num_validate_tokens,
-    bool use_chunked_prefill,
-    bool step_major_layout = false);
+    bool use_chunked_prefill);
 
 // Device-resident state derived from target verification. base_positions and
 // base_kv_seq_lens point at the logical position immediately after the accepted

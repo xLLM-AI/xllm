@@ -11,7 +11,6 @@ cc_library(
     mtp_async_input_builder.h
     mtp_async_state.h
     mtp_json_object_state.h
-    mtp_utils.h
     draft_extend_input.h
     embedding_cache.h
     metrics.h

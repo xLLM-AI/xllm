@@ -142,13 +142,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       const torch::Tensor& block_tables) const;
   void ensure_spec_verify_control_block_table(TargetModelParams& input_params,
                                               int64_t num_sequences);
-  bool uses_embedded_eagle3_draft() const;
   bool requires_full_target_replay() const override;
-  void synchronize_embedded_eagle3_forward();
-  template <typename Input>
-  std::optional<ForwardOutput> run_worker_no_sync(WorkerImpl& worker,
-                                                  const Input& input,
-                                                  Input& processed_input);
   // Prepare target validate input from cached target context.
   void prepare_validate_inputs(const TargetInput& inputs,
                                TargetInput& validate_inputs,
@@ -247,10 +241,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                            const SampleOutput& validate_output,
                            const torch::Tensor& base_positions,
                            const torch::Tensor& base_kv_seq_lens);
-
-  void write_target_context_to_cache(const TargetInput& input,
-                                     const SampleOutput& validate_output,
-                                     int32_t num_speculative_tokens);
 
  protected:
   // Rejection sampling produces accepted state on the compute stream.  Keep

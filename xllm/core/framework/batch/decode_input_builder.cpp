@@ -312,17 +312,9 @@ DecodeBuildBuffers expand_decode_inputs(
     append_decode_token(ctx, token_input, decode_options.block_size, buf);
   };
 
-  if (decode_options.step_major) {
+  for (int32_t req_id = 0; req_id < num_reqs; ++req_id) {
     for (int32_t val_idx = 0; val_idx < num_val_tokens; ++val_idx) {
-      for (int32_t req_id = 0; req_id < num_reqs; ++req_id) {
-        append_token_input(req_id, val_idx);
-      }
-    }
-  } else {
-    for (int32_t req_id = 0; req_id < num_reqs; ++req_id) {
-      for (int32_t val_idx = 0; val_idx < num_val_tokens; ++val_idx) {
-        append_token_input(req_id, val_idx);
-      }
+      append_token_input(req_id, val_idx);
     }
   }
   if (decode_options.per_request) {

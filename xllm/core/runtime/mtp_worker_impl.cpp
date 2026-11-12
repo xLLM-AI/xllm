@@ -37,8 +37,8 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_utils.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/multimodal/mm_data.h"
-#include "core/framework/speculative/mtp_utils.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #if defined(USE_NPU)
@@ -109,13 +109,6 @@ constexpr int64_t kMaxSpecVerifyGraphUpdateBlockTableWidth = (1 << 15) - 1;
 template <typename Input>
 void clear_ready_events(Input& input) {
   input.runtime.metadata_ready_event.reset();
-}
-
-template <typename Input>
-void clear_mla_prefixcache_workspace(Input& input) {
-  auto& attention = input.input_params.attention.device;
-  attention.history_compressed_kv = torch::Tensor();
-  attention.history_k_rope = torch::Tensor();
 }
 
 template <typename Input>
@@ -453,8 +446,7 @@ bool MTPWorkerImpl<TargetInput>::init_model(
              ? draft_capabilities.python_draft_owns_embedding_and_lm_head
              : draft_capabilities.native_draft_owns_embedding_and_lm_head);
 #if defined(USE_MLU)
-    if (!is_python_draft && !use_tp1_draft_body &&
-        !uses_embedded_eagle3_draft()) {
+    if (!is_python_draft && !use_tp1_draft_body) {
       if (!draft_impl_->context_.get_model_args().embedding_mode() &&
           share_target_lm_head_with_draft() &&
           !draft_impl_->get_lm_head()->is_weight_loaded()) {
@@ -485,14 +477,14 @@ bool MTPWorkerImpl<TargetInput>::init_model(
       // loaded, before embedding/KV cache allocation.
       const bool is_python_target =
           ModelConfig::is_python_model_impl(context_.get_model_impl());
-      const bool legacy_tail =
-          draft_capabilities.allow_tail_fallback &&
-          (is_python_target || is_python_draft || uses_embedded_eagle3_draft());
+      const bool legacy_tail = draft_capabilities.allow_tail_fallback &&
+                               (is_python_target || is_python_draft);
       const bool full_target_replay =
           draft_capabilities.native_draft_requires_accepted_span_replay &&
           !legacy_tail;
       if (full_target_replay) {
         std::string resolved_target_model_name;
+        std::string error_message;
         CHECK(resolve_model_registration_name(
             context_.get_model_args().model_type(),
             &resolved_target_model_name,
@@ -510,7 +502,6 @@ bool MTPWorkerImpl<TargetInput>::init_model(
             target_capabilities.model_family != MtpModelFamily::NONE &&
             target_capabilities.model_family == draft_capabilities.model_family;
         CHECK(replay_pair && !is_python_target && !is_python_draft &&
-              !uses_embedded_eagle3_draft() &&
               (target_verify_mode_ ==
                    mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL ||
                target_verify_mode_ ==
@@ -556,18 +547,12 @@ MTPWorkerImpl<TargetInput>::estimate_kv_cache_capacity() {
 
 template <typename TargetInput>
 int64_t MTPWorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
-  // DeepSeek-V4 MTP stashes the pre-hc_head 3D hidden flattened to
-  // [num_tokens, hc_mult*hidden], so the cache placeholder must cover
-  // hc_mult*hidden per row.
   return mtp_hidden_state_width(impl_->context_.get_model_args());
 }
 
 template <typename TargetInput>
 KVCacheShape MTPWorkerImpl<TargetInput>::draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape) const {
-  if (uses_embedded_eagle3_draft()) {
-    return build_draft_kv_cache_shape(target_kv_cache_shape);
-  }
   if (options_.enable_mtp_draft_body_tp1()) {
     return build_draft_kv_cache_shape(target_kv_cache_shape,
                                       /*draft_world_size=*/1);
@@ -576,46 +561,6 @@ KVCacheShape MTPWorkerImpl<TargetInput>::draft_kv_cache_shape(
     return build_draft_kv_cache_shape(target_kv_cache_shape);
   }
   return target_kv_cache_shape;
-}
-
-template <typename TargetInput>
-bool MTPWorkerImpl<TargetInput>::uses_embedded_eagle3_draft() const {
-  if (impl_ == nullptr || draft_impl_ == nullptr ||
-      impl_->get_status() == WorkerImpl::Status::UNINITIALIZED ||
-      draft_impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
-    return false;
-  }
-  return ::xllm::uses_embedded_eagle3_draft(options_.speculative_algorithm(),
-                                            impl_->context_.get_model_args());
-}
-
-template <typename TargetInput>
-void MTPWorkerImpl<TargetInput>::synchronize_embedded_eagle3_forward() {
-#if defined(USE_NPU)
-  if (uses_embedded_eagle3_draft()) {
-    const int32_t ret = compute_stream_->synchronize();
-    CHECK_EQ(ret, 0) << "failed to synchronize embedded Eagle3 forward, ret="
-                     << ret;
-  }
-#endif
-}
-
-template <typename TargetInput>
-template <typename Input>
-std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_worker_no_sync(
-    WorkerImpl& worker,
-    const Input& input,
-    Input& processed_input) {
-  std::optional<ForwardOutput> output = run_worker_no_sync_impl(
-      worker, input, *prepare_stream_, *compute_stream_, processed_input);
-  synchronize_embedded_eagle3_forward();
-  if (uses_embedded_eagle3_draft()) {
-    clear_mla_prefixcache_workspace(processed_input);
-    if (output.has_value()) {
-      output->retained_inputs.clear();
-    }
-  }
-  return output;
 }
 
 template <typename TargetInput>
@@ -745,9 +690,13 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     TargetInput target_prepared;
     LlmForwardInput draft_prepared;
     LlmForwardInput draft_input = make_llm_draft_input(input);
-    auto output = run_worker_no_sync(*impl_, input, target_prepared);
-    auto draft_output =
-        run_worker_no_sync(*draft_impl_, draft_input, draft_prepared);
+    auto output = run_worker_no_sync_impl(
+        *impl_, input, *prepare_stream_, *compute_stream_, target_prepared);
+    auto draft_output = run_worker_no_sync_impl(*draft_impl_,
+                                                draft_input,
+                                                *prepare_stream_,
+                                                *compute_stream_,
+                                                draft_prepared);
     if (draft_output.has_value()) {
       transfer_retained_inputs(*output, draft_output.value());
       append_failed_request_ids(*output,
@@ -787,16 +736,23 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
 
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
       LlmForwardInput draft_input = make_llm_draft_input(input);
-      draft_outputs.emplace_back(
-          run_worker_no_sync(*draft_impl_, draft_input, draft_step_prepared[i])
-              .value());
+      draft_outputs.emplace_back(run_worker_no_sync_impl(*draft_impl_,
+                                                         draft_input,
+                                                         *prepare_stream_,
+                                                         *compute_stream_,
+                                                         draft_step_prepared[i])
+                                     .value());
     }
 
     TargetInput new_input = input.clone();
     scale_speculative_parallel_token_counts(
         new_input.input_params, options_.num_speculative_tokens() + 1);
-    ForwardOutput output =
-        run_worker_no_sync(*impl_, new_input, target_prepared).value();
+    ForwardOutput output = run_worker_no_sync_impl(*impl_,
+                                                   new_input,
+                                                   *prepare_stream_,
+                                                   *compute_stream_,
+                                                   target_prepared)
+                               .value();
     for (ForwardOutput& draft_output : draft_outputs) {
       transfer_retained_inputs(output, draft_output);
       append_failed_request_ids(output,
@@ -833,7 +789,9 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
 
   // run the target model to get first token and hidden states
   ForwardOutput output =
-      run_worker_no_sync(*impl_, input, target_prepared).value();
+      run_worker_no_sync_impl(
+          *impl_, input, *prepare_stream_, *compute_stream_, target_prepared)
+          .value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               target_timer.elapsed_seconds());
 
@@ -875,8 +833,12 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
   }
   // generate kv cache for draft model
   Timer draft_timer;
-  ForwardOutput draft_output =
-      run_worker_no_sync(*draft_impl_, prefill_input, draft_prepared).value();
+  ForwardOutput draft_output = run_worker_no_sync_impl(*draft_impl_,
+                                                       prefill_input,
+                                                       *prepare_stream_,
+                                                       *compute_stream_,
+                                                       draft_prepared)
+                                   .value();
   {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     this->draft_vocab_.remap(draft_output.sample_output);
@@ -1113,16 +1075,11 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
           std::move(pending_draft_context_.prepared_input);
       pending_draft_context_ = PendingDraftContext();
     } else {
-      if (uses_embedded_eagle3_draft()) {
-        draft_output_opt = run_worker_no_sync(
-            *draft_impl_, current_draft_input, draft_prepared[draft_idx]);
-      } else {
-        draft_output_opt = run_worker_no_sync_impl(*draft_impl_,
-                                                   current_draft_input,
-                                                   *compute_stream_,
-                                                   *compute_stream_,
-                                                   draft_prepared[draft_idx]);
-      }
+      draft_output_opt = run_worker_no_sync_impl(*draft_impl_,
+                                                 current_draft_input,
+                                                 *compute_stream_,
+                                                 *compute_stream_,
+                                                 draft_prepared[draft_idx]);
     }
 
     if ((use_device_target_context || use_prelaunched_first_draft) &&
@@ -1206,7 +1163,6 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
     TargetInput& validate_input,
     int32_t num_val_tokens,
     Stream& compute_stream) {
-  const bool step_major = uses_embedded_eagle3_draft();
   const int32_t num_sequences = input.input_params.meta.num_sequences;
   CHECK_GT(num_val_tokens, 0);
   CHECK(validate_input.token_ids.defined())
@@ -1291,9 +1247,7 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
 #endif
   // Stack the draft columns once and copy into the fixed-width rows.
   torch::Tensor validate_token_rows =
-      step_major
-          ? validate_input.token_ids.view({num_val_tokens, num_sequences})
-          : validate_input.token_ids.view({num_sequences, num_val_tokens});
+      validate_input.token_ids.view({num_sequences, num_val_tokens});
   if (!draft_token_steps.empty()) {
     std::vector<torch::Tensor> draft_token_columns;
     draft_token_columns.reserve(draft_token_steps.size());
@@ -1302,14 +1256,8 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
           safe_to(draft_tokens, token_options, /*non_blocking=*/true));
     }
     torch::Tensor packed_drafts = torch::stack(draft_token_columns, /*dim=*/1);
-    if (step_major) {
-      validate_token_rows.slice(/*dim=*/0, /*start=*/1, /*end=*/num_val_tokens)
-          .copy_(packed_drafts.transpose(/*dim0=*/0, /*dim1=*/1),
-                 /*non_blocking=*/true);
-    } else {
-      validate_token_rows.slice(/*dim=*/1, /*start=*/1, /*end=*/num_val_tokens)
-          .copy_(packed_drafts, /*non_blocking=*/true);
-    }
+    validate_token_rows.slice(/*dim=*/1, /*start=*/1, /*end=*/num_val_tokens)
+        .copy_(packed_drafts, /*non_blocking=*/true);
   }
   validate_input.runtime.device_tensors_ready = true;
   validate_input.runtime.metadata_ready_event =
@@ -1329,18 +1277,12 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
                                          validate_input,
                                          num_speculative_tokens + 1,
                                          *compute_stream_);
-  ForwardOutput target_output;
-  if (uses_embedded_eagle3_draft()) {
-    target_output =
-        run_worker_no_sync(*impl_, validate_input, target_prepared).value();
-  } else {
-    target_output = run_worker_no_sync_impl(*impl_,
-                                            validate_input,
-                                            *compute_stream_,
-                                            *compute_stream_,
-                                            target_prepared)
-                        .value();
-  }
+  ForwardOutput target_output = run_worker_no_sync_impl(*impl_,
+                                                        validate_input,
+                                                        *compute_stream_,
+                                                        *compute_stream_,
+                                                        target_prepared)
+                                    .value();
   for (ForwardOutput& draft_output : draft_outputs) {
     append_failed_request_ids(target_output,
                               std::move(draft_output.failed_request_ids));
@@ -1390,10 +1332,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
         const int64_t width = num_speculative_tokens + 1;
         if (lengths.numel() == batch_size) {
           first_positions = lengths - width;
-        } else if (uses_embedded_eagle3_draft()) {
-          first_positions =
-              lengths.view({width, batch_size}).select(/*dim=*/0, /*index=*/0) -
-              1;
         } else {
           first_positions =
               lengths.view({batch_size, width}).select(/*dim=*/1, /*index=*/0) -
@@ -1415,31 +1353,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
                           draft_outputs,
                           target_output,
                           num_speculative_tokens);
-  }
-
-  if (uses_embedded_eagle3_draft()) {
-    // Embedded Eagle3 publishes target context synchronously before reuse.
-    if (this->should_broadcast_spec_tokens(
-            get_optimization_config().enable_spec_token_broadcast,
-            input.sampling_params.sampling_mode() == SamplingMode::GREEDY)) {
-      c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-      this->broadcast_spec_tokens(val_output.next_tokens);
-    }
-
-    const int32_t ret = compute_stream_->synchronize();
-    CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
-    target_output.retained_inputs.clear();
-    val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
-    write_target_context_to_cache(input, val_output, num_speculative_tokens);
-
-    if (!enable_schedule_overlap() && !this->is_driver() &&
-        !::xllm::EPLBConfig::get_instance().enable_eplb()) {
-      return make_transfer_failure_output(
-          std::move(target_output.failed_request_ids));
-    }
-    return finalize_verify_output(std::move(target_output),
-                                  std::move(val_output),
-                                  input.json_object_states);
   }
 
   const int64_t num_val_tokens = options_.num_speculative_tokens() + 1;
@@ -1783,23 +1696,6 @@ void MTPWorkerImpl<TargetInput>::flush_pending_target_context(
       }
     }
   }
-}
-
-template <typename TargetInput>
-void MTPWorkerImpl<TargetInput>::write_target_context_to_cache(
-    const TargetInput& input,
-    const SampleOutput& validate_output,
-    int32_t num_speculative_tokens) {
-  CHECK(embedding_cache_ != nullptr)
-      << "embedding_cache_ must be initialized before target cache write";
-  CHECK(!input.input_params.embedding.embedding_ids.empty())
-      << "target context cache write requires embedding ids";
-  embedding_cache_->write_target_context(
-      input.input_params.embedding.embedding_ids,
-      input.input_params.embedding.request_ids,
-      validate_output.next_tokens,
-      validate_output.embeddings,
-      num_speculative_tokens);
 }
 
 template <typename TargetInput>
@@ -2257,10 +2153,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   DecodeBatchContext batch_ctx = make_decode_batch_context(input);
   const bool chunked_verify = this->uses_chunked_verify();
   const DecodeExpansionOptions decode_options =
-      make_verify_layout(num_val_tokens,
-                         logical_block_size,
-                         chunked_verify,
-                         uses_embedded_eagle3_draft());
+      make_verify_layout(num_val_tokens, logical_block_size, chunked_verify);
   DecodeBuildBuffers buf = expand_decode_inputs(batch_ctx, decode_options);
 
   if (impl_->has_request_state_cache()) {
@@ -2964,36 +2857,11 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     const DraftProposal& draft_proposal,
     const ForwardOutput& target_output,
     int32_t num_speculative_tokens) {
-  const int32_t num_val_tokens = num_speculative_tokens + 1;
-  const int32_t batch_size =
-      static_cast<int32_t>(draft_proposal.token_ids().size(0));
-  const int32_t vocab_size = target_output.logits.size(/*dim=*/-1);
-
-  const bool step_major_validate_layout = uses_embedded_eagle3_draft();
-  // Last target hidden states for the committed verify rows; step-major
-  // graphs emit them transposed, so permute into [batch, val_tokens, hidden].
-  torch::Tensor target_hidden_states = target_output.sample_output.embeddings;
-  const auto to_batch_major = [&](torch::Tensor tensor) {
-    return tensor.view({num_val_tokens, batch_size, tensor.size(-1)})
-        .permute({1, 0, 2})
-        .contiguous();
-  };
-  torch::Tensor target_logits = target_output.logits;
-  if (step_major_validate_layout) {
-    target_logits = to_batch_major(target_output.logits)
-                        .view({batch_size * num_val_tokens, vocab_size});
-    if (target_hidden_states.defined()) {
-      target_hidden_states = to_batch_major(target_hidden_states);
-    }
-  }
-
-  SampleOutput sample_output =
-      spec_verify::run_rejection_sampling(std::move(sampling_params),
-                                          draft_proposal,
-                                          target_logits,
-                                          target_hidden_states);
-
-  return sample_output;
+  return spec_verify::run_rejection_sampling(
+      std::move(sampling_params),
+      draft_proposal,
+      target_output.logits,
+      target_output.sample_output.embeddings);
 }
 
 template class MTPWorkerImpl<LlmForwardInput>;

@@ -27,10 +27,10 @@ limitations under the License.
 
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/causal_lm.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_type.h"
 #include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/model_loader/hf_model_config.h"
-#include "core/framework/speculative/mtp_utils.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/platform/device.h"
@@ -221,7 +221,7 @@ TEST(HFModelLoaderTest, KeepLegacyFp8ConfigUnchanged) {
 
 #if defined(USE_NPU)
 TEST(HFModelLoaderTest, Eagle3DraftVocabSizeWinsOverFullVocab) {
-  const std::string names[] = {"qwen3_eagle3", "kimi_k25_eagle3"};
+  const std::string names[] = {"qwen3_eagle3"};
   for (const std::string& name : names) {
     SCOPED_TRACE(name);
     ModelArgsLoader loader = ModelRegistry::get_model_args_loader(name);

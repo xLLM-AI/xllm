@@ -120,7 +120,6 @@ struct DecodeInputOptions {
 struct DecodeExpansionOptions : DecodeInputOptions {
   int32_t block_size = 0;
   std::optional<int32_t> mask_token_id;
-  bool step_major = false;
   bool sample_from_anchor = false;
 };
 
@@ -130,8 +129,7 @@ DecodeBuildBuffers expand_decode_inputs(
 
 inline DecodeExpansionOptions make_verify_layout(int32_t num_val_tokens,
                                                  int32_t block_size,
-                                                 bool chunked,
-                                                 bool step_major = false) {
+                                                 bool chunked) {
   DecodeExpansionOptions decode_options;
   decode_options.num_val_tokens = num_val_tokens;
   decode_options.block_size = block_size;
@@ -139,7 +137,6 @@ inline DecodeExpansionOptions make_verify_layout(int32_t num_val_tokens,
   decode_options.forward_type =
       chunked ? BatchForwardType::CHUNKED_PREFILL : BatchForwardType::DECODE;
   decode_options.leading_zero_cu = chunked;
-  decode_options.step_major = step_major;
   return decode_options;
 }
 
