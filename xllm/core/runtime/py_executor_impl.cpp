@@ -216,11 +216,6 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["enable_schedule_overlap"] =
       options_.enable_schedule_overlap();
   executor_config["is_draft_engine"] = options_.is_draft_engine();
-  if (options_.is_draft_engine()) {
-    num_kv_pages_per_block_ = SpeculativeConfig::get_draft_kv_pages_per_block(
-        options_.speculative_algorithm(), py_causal_lm_->kv_split_size());
-  }
-  executor_config["kv_pages_per_block"] = num_kv_pages_per_block_;
   executor_config["is_mtp_algorithm"] =
       SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm());
   executor_config["is_block_diffusion_algorithm"] =
@@ -328,8 +323,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
           << "Python model Host KV reload failed.";
     }
   }
-  if (!enable_mla_ && num_kv_pages_per_block_ == 1 &&
-      py_causal_lm_->cp_size() == 1 && py_causal_lm_->kv_split_size() > 1) {
+  if (!enable_mla_ && py_causal_lm_->cp_size() == 1 &&
+      py_causal_lm_->kv_split_size() > 1) {
     const KVShardLayout layout(options_.block_size(),
                                py_causal_lm_->kv_split_size(),
                                py_causal_lm_->kv_split_rank());

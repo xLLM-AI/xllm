@@ -94,9 +94,9 @@ def test_pd_kpool_decode_uses_transferred_history(prompt_length: int, graph_mode
         torch.tensor([[3, 1, 4, 2]]),
     )
     prompt_positions = torch.arange(prompt_length)
-    prompt = hidden[:, :prompt_length]
-    raw_k = indexer.k_norm(indexer.wk(prompt))
-    raw_gate = nn.functional.linear(prompt, indexer.index_kpool_compress_gate)
+    prompt_rows = hidden[:, :prompt_length]
+    raw_k = indexer.k_norm(indexer.wk(prompt_rows))
+    raw_gate = nn.functional.linear(prompt_rows, indexer.index_kpool_compress_gate)
     update_compressed_kpool(
         raw_k.reshape(prompt_length, -1),
         raw_gate.reshape(prompt_length, -1),

@@ -115,6 +115,7 @@ class AclGraphEntry:
     static_input_ids: torch.Tensor
     static_positions: torch.Tensor
     static_metadata: StaticGraphAttentionMetadata
+    static_output: ModelExecutionOutput
 
     __slots__ = (
         "batch_size",
@@ -298,7 +299,8 @@ class AclGraphRunner(BaseRunner):
         if self._replay_done_event is None:
             self._replay_done_event = torch.npu.Event()
 
-    def _prepare_attention(self, entry: AclGraphEntry, metadata: AttentionMetadata, *, replay: bool = False) -> None:
+    def _prepare_attention(self, entry: AclGraphEntry, *, replay: bool = False) -> None:
+        metadata = entry.static_metadata
         context = ForwardContext(
             self.attention_backend,
             self.device,
@@ -345,7 +347,7 @@ class AclGraphRunner(BaseRunner):
         if positions is not None and (positions.dim() != 1 or positions.numel() != metadata_row_count):
             raise RuntimeError("ACL graph decode positions must contain one value per token")
 
-    def _retain_graph_output(self, entry: AclGraphEntry, output: ModelExecutionOutput) -> ModelExecutionOutput:
+    def _retain_graph_output(self, output: ModelExecutionOutput) -> ModelExecutionOutput:
         return output
 
     def _capture(
@@ -390,8 +392,8 @@ class AclGraphRunner(BaseRunner):
                 capture_error_mode=self._capture_error_mode,
             ),
         ):
-            entry.static_output = self._forward_static(entry)
-        entry.static_output = self._retain_graph_output(entry, entry.static_output)
+            output = self._forward_static(entry)
+        entry.static_output = self._retain_graph_output(output)
         entry.graph_tasks = capture_context.tasks
         logger.info(
             "Python ACL graph captured: model=%s bucket=%d mtp_topk=%s tasks=%d",

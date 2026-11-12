@@ -363,6 +363,11 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             raise RuntimeError("indexer_block_table needs a paged block_table")
         return block_table
 
+    def indexer_history_block_table(self, page_size: int) -> torch.Tensor:
+        block_table = self.indexer_block_table()
+        capacity = getattr(self._metadata, "dsa_graph_token_capacity", 0)
+        return block_table[:, : (capacity + page_size - 1) // page_size] if capacity else block_table
+
     @property
     def is_mla(self) -> bool:
         return self._is_mla
@@ -1544,10 +1549,17 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if slot_mapping.numel() == 0:
             return
         cache_view = index_cache.view(-1, index_cache.size(-1))
-        kernels.scatter_cache_by_slot(cache_view, slot_mapping, values)
+        # ScatterNdUpdateV2 skips negative slots on device. Keep the row count
+        # static: nonzero would synchronize the captured ACLGraph stream.
+        scatter_indices = slot_mapping.reshape(-1, 1)
+        kernels.scatter_nd_update(cache_view, scatter_indices, values)
         if index_cache_scale is not None and scales is not None:
             scale_view = index_cache_scale.view(-1, index_cache_scale.size(-1))
-            kernels.scatter_cache_by_slot(scale_view, slot_mapping, scales)
+            kernels.scatter_nd_update(
+                scale_view,
+                scatter_indices,
+                scales,
+            )
 
     def _materialize_cp_cache(
         self,
@@ -1622,56 +1634,60 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     def gather_index_history(
         self,
         layer: Attention,
-        seq_start: int,
-        seq_stop: int,
+        start_request_index: int,
+        end_request_index: int,
     ) -> torch.Tensor:
         assert self._metadata is not None, "gather_index_history called before prepare()"
         index_cache = self._kv_caches[layer.layer_id].index
         assert index_cache is not None, "gather_index_history requires a paged index cache"
-        block_table = self.indexer_block_table()
         block_size = index_cache.shape[1]
-        width = index_cache.shape[3]
+        block_table = self.indexer_history_block_table(block_size)
+        index_head_dim = index_cache.shape[3]
         device = index_cache.device
 
         kv_seq_lens = self._mla_actual_seq_kv
         if kv_seq_lens is None:
             raise RuntimeError("gather_index_history needs prepared device KV lengths")
-        num_seqs = seq_stop - seq_start
-        kv_lens = kv_seq_lens[seq_start:seq_stop].to(torch.int64)
+        num_reqs = end_request_index - start_request_index
+        kv_lens = kv_seq_lens[start_request_index:end_request_index].to(torch.int64)
         graph_mode = in_acl_graph()
-        max_kv = block_table.shape[1] * block_size if graph_mode else int(kv_lens.max().item())
-        flat = index_cache.view(-1, width)
-        bt = block_table[seq_start:seq_stop].to(torch.int64)
+        kv_token_capacity = block_table.shape[1] * block_size if graph_mode else int(kv_lens.max().item())
+        flat_index_cache = index_cache.view(-1, index_head_dim)
+        request_block_table = block_table[start_request_index:end_request_index].to(torch.int64)
 
         if graph_mode:
-            out = torch.empty(num_seqs, max_kv, width, dtype=index_cache.dtype, device=device)
+            out = torch.empty(num_reqs, kv_token_capacity, index_head_dim, dtype=index_cache.dtype, device=device)
             block_offsets = torch.arange(block_size, device=device)
-            slot_ids = (bt[:, :, None] * block_size + block_offsets[None, None, :]).reshape(num_seqs, max_kv)
-            gathered = flat.index_select(0, slot_ids.reshape(-1)).view(num_seqs, max_kv, width)
-            row_valid = torch.arange(max_kv, device=device)[None, :] < kv_lens[:, None]
-            torch.mul(gathered, row_valid[:, :, None].to(out.dtype), out=out)
+            slot_indices = (request_block_table[:, :, None] * block_size + block_offsets[None, None, :]).reshape(
+                num_reqs, kv_token_capacity
+            )
+            gathered = flat_index_cache.index_select(0, slot_indices.reshape(-1)).view(
+                num_reqs, kv_token_capacity, index_head_dim
+            )
+            valid_kv_tokens = torch.arange(kv_token_capacity, device=device)[None, :] < kv_lens[:, None]
+            torch.mul(gathered, valid_kv_tokens[:, :, None].to(out.dtype), out=out)
             return out
 
-        out = torch.zeros(num_seqs, max_kv, width, dtype=index_cache.dtype, device=device)
-        for b in range(num_seqs):
-            kl = int(kv_lens[b].item())
-            if kl == 0:
+        out = torch.zeros(num_reqs, kv_token_capacity, index_head_dim, dtype=index_cache.dtype, device=device)
+        for req_idx in range(num_reqs):
+            kv_len = int(kv_lens[req_idx].item())
+            if kv_len == 0:
                 continue
-            n_full = kl // block_size
-            tail = kl - n_full * block_size
-            rows = []
-            blk = bt[b]
-            if n_full > 0:
-                slot_ids = (blk[:n_full, None] * block_size + torch.arange(block_size, device=device)[None, :]).reshape(
-                    -1
-                )
-                rows.append(flat.index_select(0, slot_ids))
-            if tail > 0:
-                last_blk = int(blk[n_full].item())
-                slot_ids = last_blk * block_size + torch.arange(tail, device=device)
-                rows.append(flat.index_select(0, slot_ids))
-            packed = torch.cat(rows, dim=0) if len(rows) > 1 else rows[0]
-            out[b, :kl] = packed
+            num_full_blocks = kv_len // block_size
+            num_tail_tokens = kv_len - num_full_blocks * block_size
+            key_chunks = []
+            block_ids = request_block_table[req_idx]
+            if num_full_blocks > 0:
+                slot_indices = (
+                    block_ids[:num_full_blocks, None] * block_size + torch.arange(block_size, device=device)[None, :]
+                ).reshape(-1)
+                key_chunks.append(flat_index_cache.index_select(0, slot_indices))
+            if num_tail_tokens > 0:
+                tail_block_id = block_ids[num_full_blocks]
+                slot_indices = tail_block_id * block_size + torch.arange(num_tail_tokens, device=device)
+                key_chunks.append(flat_index_cache.index_select(0, slot_indices))
+            packed = torch.cat(key_chunks, dim=0) if len(key_chunks) > 1 else key_chunks[0]
+            out[req_idx, :kv_len] = packed
         return out
 
     def _mla_sparse(

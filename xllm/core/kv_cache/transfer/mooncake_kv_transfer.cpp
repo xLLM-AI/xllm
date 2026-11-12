@@ -129,10 +129,6 @@ int64_t physical_rows_per_resource(KVCacheTensorRole role,
       role == KVCacheTensorRole::INDEX_SCALE) {
     return num_index_pages_per_block();
   }
-  if (role == KVCacheTensorRole::KEY || role == KVCacheTensorRole::VALUE ||
-      role == KVCacheTensorRole::WINDOW) {
-    return context.num_kv_pages_per_block;
-  }
   return 1;
 }
 
@@ -327,8 +323,6 @@ uint32_t MooncakeKVTransferDefault::register_kv_cache(
       registration != nullptr ? registration->tensor_layout : local_layout;
   tensor_layout.linear_ssm_checkpoint_stride =
       kv_cache_shape.linear_ssm_checkpoint_stride();
-  tensor_layout.num_kv_pages_per_block =
-      kv_cache_shape.num_kv_pages_per_block();
   if (registration != nullptr) {
     if (kv_cache_shape.kpool_layout() ==
             KPoolCacheLayout::COMPRESSED_WITH_TAIL &&

@@ -70,7 +70,6 @@ class VlmForwardInput final {
 
   void copy_metadata_to(VlmForwardInput& inputs) const {
     copy_non_runtime_metadata_to(inputs);
-    inputs.runtime.kv_slot_layout = runtime.kv_slot_layout;
     inputs.runtime.metadata_ready_event = runtime.metadata_ready_event;
     inputs.runtime.retained_device_tensors = runtime.retained_device_tensors;
   }

@@ -82,9 +82,6 @@ class SpeculativeConfig final {
            is_dspark_algorithm(algorithm);
   }
 
-  static int64_t get_draft_kv_pages_per_block(std::string_view algorithm,
-                                              int64_t kv_split_size);
-
   static std::optional<bool> chunked_block_diffusion(
       std::string_view algorithm,
       std::string_view model_type);

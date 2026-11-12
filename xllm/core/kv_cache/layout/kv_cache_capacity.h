@@ -36,8 +36,6 @@ class KVCacheCapacity final {
   PROPERTY(int64_t, block_size) = 0;
   PROPERTY(int64_t, slot_size) = 0;
 
-  PROPERTY(int64_t, num_kv_pages_per_block) = 1;
-
   PROPERTY(KPoolCacheLayout, kpool_layout) = default_kpool_layout();
   PROPERTY(int64_t, kpool_tail_len) = 0;
   PROPERTY(int64_t, kpool_tail_slot_size) = 0;

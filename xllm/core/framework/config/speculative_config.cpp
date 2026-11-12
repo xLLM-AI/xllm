@@ -102,15 +102,6 @@ void SpeculativeConfig::append_config_json(
       config_json, default_config, enable_mtp_draft_body_tp1);
 }
 
-int64_t SpeculativeConfig::get_draft_kv_pages_per_block(
-    std::string_view algorithm,
-    int64_t kv_split_size) {
-  return kv_split_size > 1 && (is_dflash_algorithm(algorithm) ||
-                               is_dflash2_algorithm(algorithm))
-             ? kv_split_size
-             : 1;
-}
-
 SpeculativeConfig& SpeculativeConfig::get_instance() {
   static SpeculativeConfig config;
   return config;

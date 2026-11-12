@@ -189,8 +189,9 @@ uint64_t specialize_dp_ep_graph_key(uint64_t graph_key, const Params& params) {
   return graph_namespace | graph_key;
 }
 
-constexpr uint64_t paged_attention_plan_bucket_unchecked(int64_t max_kv,
-                                                         int64_t block_size) {
+uint64_t paged_attention_plan_bucket(int64_t max_kv, int64_t block_size) {
+  CHECK_GT(max_kv, 0);
+  CHECK_GT(block_size, 0);
   const uint64_t block =
       static_cast<uint64_t>((max_kv + block_size - 1) / block_size);
   // Keep the exact block endpoint separate. This preserves a conservative
@@ -199,19 +200,6 @@ constexpr uint64_t paged_attention_plan_bucket_unchecked(int64_t max_kv,
   // block.
   const uint64_t is_block_endpoint = max_kv % block_size == 0 ? 1 : 0;
   return (block << 1) | is_block_endpoint;
-}
-
-static_assert(paged_attention_plan_bucket_unchecked(127, 128) == 2);
-static_assert(paged_attention_plan_bucket_unchecked(128, 128) == 3);
-static_assert(paged_attention_plan_bucket_unchecked(129, 128) == 4);
-static_assert(paged_attention_plan_bucket_unchecked(255, 128) == 4);
-static_assert(paged_attention_plan_bucket_unchecked(256, 128) == 5);
-static_assert(paged_attention_plan_bucket_unchecked(257, 128) == 6);
-
-uint64_t paged_attention_plan_bucket(int64_t max_kv, int64_t block_size) {
-  CHECK_GT(max_kv, 0);
-  CHECK_GT(block_size, 0);
-  return paged_attention_plan_bucket_unchecked(max_kv, block_size);
 }
 
 uint64_t spec_verify_packed_graph_key(uint32_t bucket_num_tokens,
@@ -1375,13 +1363,8 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
                                                const torch::Tensor& positions,
                                                std::vector<KVCache>& kv_caches,
                                                const ModelParamsView& params) {
-  const bool in_decoding_phase = params.meta.batch_forward_type.is_decode() &&
-                                 params.meta.q_max_seq_len <= 1;
-  const bool in_spec_verify_phase =
-      !options_.is_draft_engine() &&
-      params.meta.batch_forward_type.is_decode() &&
-      params.meta.q_max_seq_len > 1;
-  if ((!in_decoding_phase && !in_spec_verify_phase) || args_.n_layers() == 1) {
+  if (!params.meta.batch_forward_type.is_decode() ||
+      params.meta.q_max_seq_len > 1 || args_.n_layers() == 1) {
     return;
   }
   if (!is_qwen3_5_dp_graph_step_supported(args_, options_, params)) {
@@ -1390,10 +1373,8 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
   if (model_->requires_graph_forward_metadata()) {
     return;
   }
-  if (in_spec_verify_phase && !model_->is_hybrid_linear_attention()) {
-    return;
-  }
-  if (in_decoding_phase && params.parallel.dp_global_token_nums.size() > 1) {
+  const bool dp_batch = params.parallel.dp_global_token_nums.size() > 1;
+  if (dp_batch) {
     if (params.parallel.dp_is_decode.size() !=
         params.parallel.dp_global_token_nums.size()) {
       return;
@@ -1411,26 +1392,14 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
   }
 
   uint32_t graph_num_tokens = tokens.size(/*dim=*/0);
-  if (params.parallel.dp_global_token_nums.size() > 1) {
+  if (dp_batch) {
     graph_num_tokens = util::max(params.parallel.dp_global_token_nums);
   }
   if (graph_num_tokens == 0) {
     return;
   }
   const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
-  uint64_t attention_plan_class = 0;
-  if (in_spec_verify_phase &&
-      params.graph.spec_verify_source_addresses_stable) {
-    const uint64_t lookup_key = spec_verify_attention_plan_lookup_key(
-        bucket_num_tokens, params, options_.block_size());
-    auto plan_class = find_spec_verify_attention_plan_class(lookup_key);
-    if (!plan_class.has_value()) {
-      return;
-    }
-    attention_plan_class = plan_class.value();
-  }
-  const uint64_t graph_key =
-      get_graph_key(bucket_num_tokens, params, attention_plan_class);
+  const uint64_t graph_key = get_graph_key(bucket_num_tokens, params);
 
   std::shared_ptr<AclGraph> graph;
   {

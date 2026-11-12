@@ -59,8 +59,7 @@ KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
                            const ModelArgs& model_args,
                            int64_t world_size)
     : shared_slab_count_(kv_cache_cap.shared_slab_count()),
-      shared_draft_layers_(kv_cache_cap.shared_draft_layers()),
-      num_kv_pages_per_block_(kv_cache_cap.num_kv_pages_per_block()) {
+      shared_draft_layers_(kv_cache_cap.shared_draft_layers()) {
   CHECK_GE(shared_slab_count_, 0);
   CHECK_GE(shared_draft_layers_, 0);
   CHECK_GT(world_size, 0) << "world_size must be positive.";

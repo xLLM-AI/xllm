@@ -107,6 +107,9 @@ class _ChunkRecordingBackend:
     def indexer_block_table(self) -> torch.Tensor:
         return self._backend.indexer_block_table()
 
+    def indexer_history_block_table(self, page_size: int) -> torch.Tensor:
+        return self._backend.indexer_history_block_table(page_size)
+
     def gather_index_history(
         self,
         layer: Attention,
@@ -247,9 +250,9 @@ def test_graph_selection_replay_uses_refreshed_lengths_and_data(monkeypatch: pyt
     )
 
     page_size, index_size, num_reqs = 4, 128, 2
-    capacity_blocks = 4
     kv = torch.tensor([8, 16], dtype=torch.int32)
     block_table = torch.tensor([[1, 1, 3, 3], [2, 4, 4, 4]], dtype=torch.int32)
+    history_token_capacity = block_table.size(1) * page_size
     backend = _make_backend(5, page_size, index_size)
     layer = Attention(num_heads=8, num_kv_heads=1, head_dim=128, scale=0.1, sliding_window=0, layer_id=0)
 
@@ -275,7 +278,7 @@ def test_graph_selection_replay_uses_refreshed_lengths_and_data(monkeypatch: pyt
         backend.prepare(_prepare_metadata(block_table, kv), graph_mode=True)
         ctx = backend.mla_index_context(layer)
         first = indexer.select_qli(hidden, query, torch.tensor([7, 15], dtype=torch.int64), mask, ctx, layer, recorder)
-        assert all(shape[1] == capacity_blocks * page_size for shape in recorder.gathered_shapes)
+        assert all(shape[1] == history_token_capacity for shape in recorder.gathered_shapes)
         assert len(recorder.gathered_shapes) > 1
 
         kv2 = torch.tensor([16, 8], dtype=torch.int32)
@@ -284,12 +287,11 @@ def test_graph_selection_replay_uses_refreshed_lengths_and_data(monkeypatch: pyt
         index[3, :, 0, -1] = 100
         recorder.gathered_shapes.clear()
         second = indexer.select_qli(hidden, query, torch.tensor([15, 7], dtype=torch.int64), mask, ctx, layer, recorder)
-        assert all(shape[1] == capacity_blocks * page_size for shape in recorder.gathered_shapes)
+        assert all(shape[1] == history_token_capacity for shape in recorder.gathered_shapes)
         assert all(shape[0] < num_reqs for shape in recorder.gathered_shapes)
 
-    first_topk_token_indices = first.reshape(num_reqs, -1)
+    assert first.shape == second.shape
     second_topk_token_indices = second.reshape(num_reqs, -1)
-    assert first_topk_token_indices.shape == second_topk_token_indices.shape
     assert ((second_topk_token_indices[0] >= kv[0]) & (second_topk_token_indices[0] < kv2[0])).any()
     assert (second_topk_token_indices[1] >= 0).any()
     assert (second_topk_token_indices[1] < kv2[1]).all()
@@ -307,7 +309,7 @@ def test_chunk_budget_includes_batch_in_scores_slab(monkeypatch: pytest.MonkeyPa
     packed[..., -1] = 1
     positions = (torch.arange(q_len) + kv_len - q_len).expand(num_reqs, -1).contiguous()
 
-    num_pools = kv_len  # raw rate=1: one pool per token
+    num_pools = kv_len
     score_budget_bytes = num_reqs * indexer.n_heads * num_pools * 4
     matmul_shapes: list[tuple[int, ...]] = []
     real_matmul = torch.matmul
@@ -330,10 +332,10 @@ def test_chunk_budget_includes_batch_in_scores_slab(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(torch.Tensor, "topk", _spy_topk)
     chunked = indexer.select_topk(
         q_resid,
-        hidden,
+        indexer.weights_proj(hidden),
         mask,
         kv_len=kv_len,
-        current_length=kv_len,
+        kv_seq_lens=torch.full((num_reqs,), kv_len),
         packed_states=packed,
         query_positions=positions,
     )
@@ -347,10 +349,10 @@ def test_chunk_budget_includes_batch_in_scores_slab(monkeypatch: pytest.MonkeyPa
 
     baseline = indexer.select_topk(
         q_resid,
-        hidden,
+        indexer.weights_proj(hidden),
         mask,
         kv_len=kv_len,
-        current_length=kv_len,
+        kv_seq_lens=torch.full((num_reqs,), kv_len),
         packed_states=packed,
         query_positions=positions,
     )

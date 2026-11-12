@@ -64,55 +64,7 @@ VlmForwardInput VlmForwardInput::to(const torch::Device& device,
   inputs.runtime.input_host_buffer = runtime.input_host_buffer;
   inputs.runtime.device_input_buffer = runtime.device_input_buffer;
   inputs.runtime.device_tensors_ready = true;
-  inputs.runtime.kv_slot_layout = runtime.kv_slot_layout;
   return inputs;
-}
-
-bool VlmForwardInput::to_contiguous_input_buffer(
-    const torch::Device& device,
-    VlmForwardInput& inputs) const {
-  copy_metadata_to(inputs);
-  set_host_views(inputs);
-
-  const VlmModelParams& source_params = input_params;
-  if ((token_ids.defined() && !inputs.token_ids_host.defined()) ||
-      (positions.defined() && !inputs.positions_host.defined()) ||
-      source_params.multimodal.mm_data.valid() ||
-      !source_params.multimodal.deep_stacks.empty()) {
-    return false;
-  }
-
-  inputs.input_params = source_params.clone();
-  detail::clear_contiguous_input_buffer_tensor_targets(inputs.input_params);
-  inputs.sampling_params = sampling_params;
-
-  torch::Tensor positions_for_device =
-      detail::normalize_positions_for_device(inputs.positions_host);
-  detail::ForwardInputBufferPlan plan;
-  if (!plan.add(inputs.token_ids_host, &inputs.token_ids) ||
-      !plan.add(positions_for_device, &inputs.positions) ||
-      !detail::add_attention_to_plan(
-          source_params.attention, inputs.input_params.attention, plan) ||
-      !detail::add_model_tensors_to_plan(
-          source_params, inputs.input_params, plan) ||
-      !detail::add_sampling_to_plan(
-          sampling_params, inputs.sampling_params, plan)) {
-    return false;
-  }
-
-  const uint64_t total_bytes = plan.prepare_layout();
-  if (total_bytes > 0) {
-    inputs.runtime.input_host_buffer = plan.build_host_buffer(total_bytes);
-    inputs.runtime.device_input_buffer =
-        safe_to(inputs.runtime.input_host_buffer,
-                torch::TensorOptions().dtype(torch::kUInt8).device(device),
-                /*non_blocking=*/true);
-    plan.bind_device_views(inputs.runtime.device_input_buffer, device);
-  }
-
-  inputs.runtime.device_tensors_ready = true;
-  inputs.runtime.input_host_buffer_has_layout = false;
-  return true;
 }
 
 }  // namespace xllm

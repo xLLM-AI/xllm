@@ -102,31 +102,6 @@ TEST(CacheLayoutBuilderTest, SelectsStableOwnerForMqaReplicas) {
   EXPECT_EQ(descriptor.spans[0].owner_tp_rank, 0);
 }
 
-TEST(CacheLayoutBuilderTest, DescribesReplicatedPagesAsOneLogicalBlock) {
-  CacheTensorLayoutContext context;
-  context.tp_rank = 0;
-  context.tp_size = 1;
-  context.block_token_capacity = 4;
-  context.kv_head_count = 2;
-  context.num_kv_pages_per_block = 3;
-  KVCacheTensor tensor{.role = KVCacheTensorRole::KEY,
-                       .tensor = torch::zeros({6, 4, 2, 8}),
-                       .shard_descriptor = {}};
-  std::string error;
-
-  ASSERT_TRUE(describe_cache_tensor(context, &tensor, &error)) << error;
-  ASSERT_TRUE(tensor.shard_descriptor.has_value());
-  const LogicalShardDescriptor& descriptor = *tensor.shard_descriptor;
-  EXPECT_EQ(descriptor.kind, LogicalShardKind::SHARDED);
-  ASSERT_EQ(descriptor.spans.size(), 2U);
-  for (const LogicalSpan& span : descriptor.spans) {
-    EXPECT_EQ(span.repeat_count, 4U * 3U);
-    EXPECT_EQ(span.bytes_per_region, 8U * 4U);
-    EXPECT_EQ(span.logical_stride_bytes, 2U * 8U * 4U);
-    EXPECT_EQ(span.physical_stride_bytes, 2U * 8U * 4U);
-  }
-}
-
 TEST(CacheLayoutBuilderTest, SelectsContiguousReplicaGroupForGqaHeads) {
   CacheTensorLayoutContext context;
   context.tp_rank = 2;

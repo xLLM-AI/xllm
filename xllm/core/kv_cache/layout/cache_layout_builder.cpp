@@ -161,42 +161,25 @@ bool describe_attention_heads(const CacheTensorLayoutContext& context,
   const uint64_t physical_token_stride =
       tensor_stride_bytes(tensor, token_axis);
   const uint64_t physical_head_stride = tensor_stride_bytes(tensor, head_axis);
-  const uint64_t physical_page_stride_bytes = tensor_stride_bytes(tensor, 0);
-  const uint64_t num_tokens_per_page =
-      static_cast<uint64_t>(tensor.size(token_axis));
-  const uint64_t num_kv_pages_per_block =
-      static_cast<uint64_t>(context.num_kv_pages_per_block);
-  // Head-major storage interleaves the heads between consecutive pages.
-  const bool uses_separate_page_spans =
-      context.head_major_layout && local_head_count > 1;
-  const uint64_t num_pages_per_span =
-      uses_separate_page_spans ? 1 : num_kv_pages_per_block;
-  const uint64_t num_spans_per_head =
-      uses_separate_page_spans ? num_kv_pages_per_block : 1;
-  descriptor.spans.reserve(static_cast<size_t>(local_head_count) *
-                           num_spans_per_head);
+  const uint64_t token_count = static_cast<uint64_t>(tensor.size(token_axis));
+  descriptor.spans.reserve(static_cast<size_t>(local_head_count));
 
   for (int64_t local_head = 0; local_head < local_head_count; ++local_head) {
     const int64_t global_head = first_global_head + local_head;
-    for (uint64_t page_index = 0; page_index < num_spans_per_head;
-         ++page_index) {
-      LogicalSpan span;
-      span.logical_tensor = cache_tensor->role.to_string();
-      span.logical_offset_bytes =
-          page_index * num_tokens_per_page * logical_token_stride +
-          static_cast<uint64_t>(global_head) * bytes_per_head;
-      span.physical_offset_bytes =
-          page_index * physical_page_stride_bytes +
-          static_cast<uint64_t>(local_head) * physical_head_stride;
-      span.bytes_per_region = bytes_per_head;
-      span.repeat_count = num_tokens_per_page * num_pages_per_span;
-      span.logical_stride_bytes = logical_token_stride;
-      span.physical_stride_bytes = physical_token_stride;
-      span.owner_tp_rank =
-          replicated ? static_cast<int32_t>(global_head * replica_count)
-                     : context.tp_rank;
-      descriptor.spans.emplace_back(std::move(span));
-    }
+    LogicalSpan span;
+    span.logical_tensor = cache_tensor->role.to_string();
+    span.logical_offset_bytes =
+        static_cast<uint64_t>(global_head) * bytes_per_head;
+    span.physical_offset_bytes =
+        static_cast<uint64_t>(local_head) * physical_head_stride;
+    span.bytes_per_region = bytes_per_head;
+    span.repeat_count = token_count;
+    span.logical_stride_bytes = logical_token_stride;
+    span.physical_stride_bytes = physical_token_stride;
+    span.owner_tp_rank = replicated
+                             ? static_cast<int32_t>(global_head * replica_count)
+                             : context.tp_rank;
+    descriptor.spans.emplace_back(std::move(span));
   }
   cache_tensor->shard_descriptor = std::move(descriptor);
   return true;
@@ -395,7 +378,6 @@ bool describe_index_cache(const CacheTensorLayoutContext& context,
     if (context.index_block_capacity > 0) {
       index_context.block_token_capacity = context.index_block_capacity;
     }
-    index_context.num_kv_pages_per_block = 1;
     return describe_attention_heads(
         index_context, /*global_head_count=*/1, cache_tensor, error);
   }

@@ -331,49 +331,44 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
 }
 
 template <typename TargetInput>
-int64_t DraftModelSpecWorkerImpl<TargetInput>::get_draft_kv_pages_per_block()
-    const {
-  return SpeculativeConfig::get_draft_kv_pages_per_block(
-      options_.speculative_algorithm(),
-      parallel_args_.kv_split_size_effective());
-}
-
-template <typename TargetInput>
 KVCacheShape DraftModelSpecWorkerImpl<TargetInput>::draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape) const {
-  const auto& target_key_shape = target_kv_cache_shape.key_cache_shape();
-  CHECK(!target_key_shape.empty()) << "Target KV cache must have a key shape.";
-  const int64_t num_kv_pages_per_block = get_draft_kv_pages_per_block();
-  if (target_kv_cache_shape.has_grouped_cache_layout() &&
-      num_kv_pages_per_block == 1) {
+  CHECK(!target_kv_cache_shape.key_cache_shape().empty())
+      << "target KV cache shape must contain key cache shape";
+  if (target_kv_cache_shape.has_grouped_cache_layout()) {
     return target_kv_cache_shape;
   }
 
-  const ModelContext& draft_context = draft_impl_->context_;
-  const ModelArgs& draft_args = draft_context.get_model_args();
-  CHECK(!has_linear_attention_layers(draft_args))
+  const ModelArgs& draft_model_args = draft_impl_->context_.get_model_args();
+  CHECK(!has_linear_attention_layers(draft_model_args))
       << "Linear drafts require an explicit linear-state capacity.";
+  CHECK(!draft_model_args.index_kpool_compress() ||
+        target_kv_cache_shape.kpool_layout() !=
+            KPoolCacheLayout::COMPRESSED_WITH_TAIL ||
+        target_kv_cache_shape.has_kpool_tail_shape())
+      << "Compressed KPool drafts require a target KPool tail shape.";
 
-  KVCacheCapacity capacity;
-  capacity.n_blocks(target_key_shape.front() * num_kv_pages_per_block)
+  const bool draft_mla_packed_c8 =
+      draft_model_args.enable_mla() &&
+      util::enable_mla_packed_c8(options_.kv_cache_dtype() == "int8",
+                                 draft_model_args.model_type());
+  KVCacheCapacity draft_capacity;
+  draft_capacity.n_blocks(target_kv_cache_shape.key_cache_shape()[0])
       .block_size(options_.block_size())
-      .num_kv_pages_per_block(num_kv_pages_per_block)
       .shared_draft_layers(target_kv_cache_shape.shared_draft_layers())
-      .enable_mla_kv_cache_quant(
-          draft_args.enable_mla() &&
-          util::enable_mla_packed_c8(options_.kv_cache_dtype() == "int8",
-                                     draft_args.model_type()))
+      .enable_mla_kv_cache_quant(draft_mla_packed_c8)
       .enable_indexer_cache_quant(
           KVCacheConfig::get_instance().indexer_cache_dtype() == "int8")
       .kpool_layout(target_kv_cache_shape.kpool_layout());
   if (target_kv_cache_shape.has_kpool_tail_shape()) {
     const auto& tail_shape = target_kv_cache_shape.kpool_tail_shape();
-    capacity.num_linear_state_blocks(tail_shape[0])
+    draft_capacity.num_linear_state_blocks(tail_shape[0])
         .kpool_tail_len(tail_shape[2]);
   }
-  return KVCacheShape(capacity,
-                      draft_args,
-                      get_dp_local_tp_size(draft_context.get_parallel_args()));
+  return KVCacheShape(
+      draft_capacity,
+      draft_model_args,
+      get_dp_local_tp_size(draft_impl_->context_.get_parallel_args()));
 }
 
 template <typename TargetInput>

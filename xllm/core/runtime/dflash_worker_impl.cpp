@@ -30,9 +30,6 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/spec_verify.h"
-#if defined(USE_NPU) || defined(USE_MLU)
-#include "core/kv_cache/transfer/mooncake_kv_transfer.h"
-#endif
 #if defined(USE_NPU)
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
@@ -44,9 +41,7 @@ limitations under the License.
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/framework/speculative/draft_config.h"
 #include "core/framework/speculative/draft_extend_input.h"
-#include "core/layers/common/kv_shard_batch_metadata.h"
 #include "core/platform/platform.h"
-#include "core/runtime/vlm_forward_params.h"
 #include "core/util/tensor_helper.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/json_reader.h"
@@ -246,17 +241,10 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   }
 
   const DecodeExpansionOptions decode_options = prepare_for_draft();
-  LlmForwardInput query_input =
-      make_llm_draft_input(input, draft_impl_->uses_shared_static_kv_cache());
-  query_input.input_params.attn_metadata.reset();
+  LlmForwardInput query_input = input.clone();
+  dflash_detail::invalidate_draft_model_geometry(query_input.input_params);
   const int32_t num_sequences = query_input.input_params.meta.num_sequences;
   if (!prepare_parallel_draft_metadata(query_input, decode_options)) {
-    c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-    if (num_sequences > 0 &&
-        expand_draft_block_tables(query_input.input_params)) {
-      query_input.input_params.attention.rebuild_device_buffer(
-          device_.unwrap());
-    }
     const int32_t rows_per_sequence =
         decode_options.per_request ? 1
                                    : decode_options.num_speculative_tokens + 1;
@@ -500,7 +488,7 @@ void DFlashWorkerImpl::prepare_validate_inputs(
       layer::ExpandedDecodeMetadataBuilder::update_expanded_decode_metadata(
           ModelParamsView(input_params),
           device_.unwrap(),
-          logical_block_size());
+          options_.block_size());
     }
 #endif
   }
@@ -508,34 +496,14 @@ void DFlashWorkerImpl::prepare_validate_inputs(
       prepare_stream_->record_event_or_sync();
 }
 
-bool DFlashWorkerImpl::expand_draft_block_tables(LlmModelParams& params) const {
-  if (!params.multi_block_tables.empty()) {
-    return false;
-  }
-  const int64_t num_kv_pages_per_block = get_draft_kv_pages_per_block();
-  if (num_kv_pages_per_block == 1) {
-    return false;
-  }
-  auto& block_tables = params.attention.host.block_tables;
-  const auto logical_block_table = to_cpu_contiguous(block_tables);
-  CHECK_EQ(logical_block_table.dim(), 2);
-  const auto block_ids = logical_block_table.unsqueeze(-1);
-  const auto page_offsets =
-      torch::arange(num_kv_pages_per_block, logical_block_table.options());
-  const auto page_ids = block_ids * num_kv_pages_per_block + page_offsets;
-  block_tables = torch::where(block_ids >= 0, page_ids, -1).flatten(1);
-  return true;
-}
-
 void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
                                             LlmForwardInput& query_input) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-  query_input =
-      make_llm_draft_input(input, draft_impl_->uses_shared_static_kv_cache());
+  query_input = input.clone();
   query_input.runtime.device_tensors_ready = false;
   LlmModelParams& input_params = query_input.input_params;
   input_params.embedding.input_embedding = torch::Tensor();
-  input_params.attn_metadata.reset();
+  dflash_detail::invalidate_draft_model_geometry(input_params);
 
   const DecodeExpansionOptions decode_options = prepare_for_draft();
   const bool idle_rank =
@@ -543,8 +511,7 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
   if (idle_rank) {
     query_input.sampling_params.logits_indices() = torch::Tensor();
   } else {
-    expand_draft_block_tables(input_params);
-    const DecodeBatchContext batch_ctx = make_decode_batch_context(query_input);
+    DecodeBatchContext batch_ctx = make_decode_batch_context(input);
     DecodeBuildBuffers buf = expand_decode_inputs(batch_ctx, decode_options);
     const int32_t query_width = decode_options.num_speculative_tokens + 1;
     const int32_t num_logits_per_request = options_.num_speculative_tokens();
@@ -674,15 +641,10 @@ std::vector<std::string> DFlashWorkerImpl::write_target_context_to_cache(
   CHECK_EQ(accepted_embeddings.size(1), token_width)
       << "DFlash accepted token/embedding width mismatch.";
 
-  c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   DecodeBuildBuffers buf;
   std::vector<int64_t> accepted_idxes = build_accepted_context_rows(
-      input,
-      accepted_tokens,
-      input.input_params.multi_block_tables.empty()
-          ? options_.block_size() * get_draft_kv_pages_per_block()
-          : options_.block_size(),
-      buf);
+      input, accepted_tokens, options_.block_size(), buf);
+  c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   torch::Tensor accepted_index =
       async_h2d_tensor(accepted_idxes, accepted_embeddings.device());
   torch::Tensor flat_embeddings = accepted_embeddings.reshape(

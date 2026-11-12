@@ -548,7 +548,6 @@ TEST(BatchPackedInputTest, CpuPreparationAndReadyCopyRetainExecutionSources) {
     source.runtime.retained_device_tensors.reserve(1);
     source.runtime.retained_device_tensors.emplace_back(
         torch::tensor({3.0f, 5.0f}));
-    source.runtime.kv_slot_layout = KvSlotLayout::NPU_CP_RECOVERED_PHYSICAL;
     buffer_data = source.runtime.device_input_buffer.data_ptr();
     retained_data = source.runtime.retained_device_tensors[0].data_ptr();
 
@@ -567,8 +566,6 @@ TEST(BatchPackedInputTest, CpuPreparationAndReadyCopyRetainExecutionSources) {
       ready_copy.runtime.device_input_buffer, {7, 9}));
   EXPECT_TRUE(tensor_equals_vector<float>(
       ready_copy.runtime.retained_device_tensors[0], {3.0f, 5.0f}));
-  EXPECT_EQ(ready_copy.runtime.kv_slot_layout,
-            KvSlotLayout::NPU_CP_RECOVERED_PHYSICAL);
   EXPECT_TRUE(ready_copy.runtime.device_tensors_ready);
   EXPECT_TRUE(
       tensor_equals_vector<int32_t>(ready_copy.host_token_ids(), {11, 23}));
@@ -1312,14 +1309,11 @@ TEST(BatchPackedInputTest, NativeVlmReadyCopyRetainsRuntimeLifetime) {
     auto source = make_vlm_transport_input();
     source.runtime.retained_device_tensors = {
         torch::tensor({7, 9}, torch::kInt32)};
-    source.runtime.kv_slot_layout = KvSlotLayout::NPU_CP_RECOVERED_PHYSICAL;
     prepared = source.to(torch::Device(torch::kCPU), torch::kFloat32);
   }
   const auto ready_copy =
       prepared.to(torch::Device(torch::kCPU), torch::kFloat32);
   prepared = VlmForwardInput();
-  EXPECT_EQ(ready_copy.runtime.kv_slot_layout,
-            KvSlotLayout::NPU_CP_RECOVERED_PHYSICAL);
   ASSERT_EQ(ready_copy.runtime.retained_device_tensors.size(), 1u);
   EXPECT_TRUE(torch::equal(ready_copy.runtime.retained_device_tensors[0],
                            torch::tensor({7, 9}, torch::kInt32)));

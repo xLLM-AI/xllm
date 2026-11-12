@@ -106,8 +106,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
-  int64_t get_draft_kv_pages_per_block() const;
-
   void prepare_hierarchy_kv_transfers();
   void finalize_hierarchy_kv_transfers();
   bool allocate_pools(

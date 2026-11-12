@@ -182,65 +182,68 @@ class KdaLinearAttentionMixin:
             # position instead (rows==seqs) silently drops the tail rows of
             # every sequence past the first and corrupts the view/layout
             # downstream.
-            q_cu_raw = metadata.q_cu_seq_lens
-            if in_graph and getattr(metadata, "expanded_decode_metadata", None) is not None and q_cu_raw is not None:
-                # Graph capture/replay of an expanded spec-verify batch. The
-                # static metadata keeps the PER-ROW layout the attention
-                # backends consume (q_cu/kv/block_table all per token row);
-                # the per-sequence group count rides on q_seq_lens (N
-                # entries of value spec_width). Pure shape math — no
-                # device->host syncs. Row slots arrive per-row and pairwise
-                # equal; take each group's row 0.
-                num_rows = int(mixed_qkv.shape[2])
-                q_seq_lens = getattr(metadata, "q_seq_lens", None)
-                n_groups = int(q_seq_lens.numel()) if q_seq_lens is not None else int(q_cu_raw.numel()) - 1
-                if num_seqs > 0 and n_groups > 0 and (num_rows % n_groups == 0):
-                    if idx.numel() == num_rows:
-                        group_idx = idx.view(n_groups, num_rows // n_groups)[:, 0].contiguous()
-                    else:
-                        group_idx = idx
-                    return self._spec_verify(
-                        mixed_qkv,
-                        forget_gate.gate_from_raw(raw_gate_proj),
-                        beta,
-                        conv_weight,
-                        activation,
-                        group_idx,
-                        metadata,
-                        conv_cache,
-                        ssm_cache,
-                        recurrent_kda,
-                        layer_id,
-                    )
-            q_rows = 0 if in_graph else (int(q_cu_raw.numel()) - 1 if q_cu_raw is not None else 0)
-            per_row_idx = None
-            per_row_cu = None
-            if q_rows == idx.numel() and idx.numel() > 1 and bool((idx[1:] == idx[:-1]).any().item()):
-                # Defensive: indices already duplicated per row.
-                per_row_idx = idx
-                per_row_cu = q_cu_raw
-            elif q_rows > idx.numel() and q_rows % idx.numel() == 0:
-                # Spec-verify expansion (uniform rows per sequence = k+1).
-                per_row_idx = idx.repeat_interleave(q_rows // idx.numel())
-                per_row_cu = q_cu_raw
-            elif (
-                0 < q_rows < idx.numel()
-                and idx.numel() % q_rows == 0
-                and idx.numel() > 1
-                and bool((idx[1:] == idx[:-1]).any().item())
+            if (
+                in_graph
+                and getattr(metadata, "expanded_decode_metadata", None) is not None
+                and (q_lens_host := metadata.q_seq_lens_host) is not None
             ):
-                # Chunked-typed spec verify: q_cu is sequence-scoped while
-                # linear_state_indices is per-row (one row per token).
-                # Normalize to the per-row view — every row is one token.
-                per_row_idx = idx
-                per_row_cu = torch.arange(idx.numel() + 1, dtype=torch.int64, device=idx.device)
-            elif q_rows > idx.numel():
-                raise RuntimeError(
-                    f"unaligned linear-state batch: {q_rows} rows vs {idx.numel()} sequences with non-uniform expansion"
+                num_rows = mixed_qkv.shape[2]
+                n_groups = q_lens_host.numel()
+                q_len = int(q_lens_host[0])
+                num_verify_tokens = n_groups * q_len
+                num_padding_tokens = num_rows - num_verify_tokens
+                if idx.numel() == num_rows:
+                    if num_padding_tokens:
+                        idx = idx[:num_verify_tokens]
+                    idx = idx.view(n_groups, q_len)[:, 0].contiguous()
+                if num_padding_tokens:
+                    mixed_qkv = mixed_qkv[:, :, :num_verify_tokens]
+                    raw_gate_proj = raw_gate_proj[:, :num_verify_tokens]
+                    beta = beta[:, :num_verify_tokens]
+                verify_output = self._spec_verify(
+                    mixed_qkv,
+                    forget_gate.gate_from_raw(raw_gate_proj),
+                    beta,
+                    conv_weight,
+                    activation,
+                    idx,
+                    metadata,
+                    conv_cache,
+                    ssm_cache,
+                    recurrent_kda,
+                    layer_id,
                 )
-            if per_row_idx is not None:
-                if per_row_cu is None:
-                    raise RuntimeError("KDA verify rows require cumulative query lengths")
+                if not num_padding_tokens:
+                    return verify_output
+                padding = verify_output.new_zeros(
+                    (verify_output.shape[0], num_padding_tokens, *verify_output.shape[2:])
+                )
+                return torch.cat((verify_output, padding), dim=1)
+            verify_query_spans = None
+            if not in_graph and (q_cu_raw := metadata.q_cu_seq_lens) is not None:
+                q_rows = int(q_cu_raw.numel()) - 1
+                num_state_indices = idx.numel()
+                if q_rows == num_state_indices and num_state_indices > 1 and bool((idx[1:] == idx[:-1]).any().item()):
+                    verify_query_spans = (idx, q_cu_raw)
+                elif q_rows > num_state_indices and q_rows % num_state_indices == 0:
+                    verify_query_spans = (idx.repeat_interleave(q_rows // num_state_indices), q_cu_raw)
+                elif (
+                    0 < q_rows < num_state_indices
+                    and num_state_indices % q_rows == 0
+                    and bool((idx[1:] == idx[:-1]).any().item())
+                ):
+                    verify_query_spans = (
+                        idx,
+                        torch.arange(num_state_indices + 1, dtype=torch.int64, device=idx.device),
+                    )
+                elif q_rows > num_state_indices:
+                    message = (
+                        f"unaligned linear-state batch: {q_rows} query spans vs "
+                        f"{num_state_indices} sequences with non-uniform expansion"
+                    )
+                    raise RuntimeError(message)
+            if verify_query_spans is not None:
+                per_row_idx, per_row_cu = verify_query_spans
                 row_lengths = (per_row_cu[1:] - per_row_cu[:-1]).tolist()
                 merged_lengths: list = []
                 merged_slots: list = []
@@ -253,7 +256,7 @@ class KdaLinearAttentionMixin:
                 if len(set(merged_lengths)) != 1:
                     raise RuntimeError("KDA verify requires uniform rows per sequence")
                 idx = torch.tensor(merged_slots, dtype=idx.dtype, device=idx.device)
-            if per_row_idx is not None or (
+            if verify_query_spans is not None or (
                 (not is_prefill or is_spec_verify)
                 and getattr(metadata, "num_accepted_tokens", None) is not None
                 and idx.numel() > 0
@@ -304,11 +307,11 @@ class KdaLinearAttentionMixin:
         # tokens per sequence (seq_len > 1) but is still a decode step; the
         # seq_len heuristic would wrongly send it to the chunked prefill path.
         device = mixed_qkv.device
+        q_cu_list = None
         if num_seqs == batch_size:
             mixed_qkv = self._causal_conv1d(mixed_qkv, conv_state, conv_weight, activation, is_prefill=is_prefill)
         else:
             q_cu = metadata.q_cu_seq_lens
-            assert q_cu is not None, "multi-sequence linear attention needs q_cu_seq_lens"
             host_values = getattr(metadata, "q_cu_seq_lens_host_values", None)
             if host_values is not None and len(host_values) == num_seqs + 1:
                 q_cu_list = host_values
@@ -332,7 +335,6 @@ class KdaLinearAttentionMixin:
                     if q_cu.device.type != "cpu":
                         raise RuntimeError("NPU KDA multi-sequence prefill requires host q_cu_seq_lens metadata")
                     q_cu_list = [int(value) for value in q_cu.to(torch.int64).tolist()]
-            del host_values
             mixed_qkv = self._causal_conv1d(
                 mixed_qkv, conv_state, conv_weight, activation, query_start_loc=q_cu_list, is_prefill=is_prefill
             )
@@ -375,8 +377,13 @@ class KdaLinearAttentionMixin:
             v_tnd = value.reshape(-1, num_heads_local, head_dim).to(torch.bfloat16).contiguous()
             g_tnd = g.reshape(-1, num_heads_local, head_dim).contiguous()
             b_tnd = b.reshape(-1, num_heads_local).contiguous()
-            if num_seqs != batch_size:
-                cu_seqlens = q_cu.to(torch.int32)
+            if q_cu_list is not None:
+                q_cu = metadata.q_cu_seq_lens
+                cu_seqlens = (
+                    q_cu.to(device=device, dtype=torch.int32, non_blocking=True)
+                    if q_cu is not None and q_cu.numel() == len(q_cu_list)
+                    else torch.tensor(q_cu_list, dtype=torch.int32, device=device)
+                )
             elif seq_len == 1:
                 # B independent single-token sequences.
                 if in_graph:
@@ -422,26 +429,13 @@ class KdaLinearAttentionMixin:
             q_in = l2_norm(query)
             k_in = l2_norm(key)
             v_in = value.to(torch.bfloat16).contiguous()
-            cu_seqlens = (
-                q_cu.to(torch.int32)
-                if num_seqs != batch_size
-                else torch.tensor([0, seq_len], dtype=torch.int32, device=device)
-            )
-            if cu_seqlens.numel() > 2:
-                # Seq-wise prefill: one single-sequence chunk_kda_fwd per
-                # sequence. A merged multi-sequence prefill (engine batches the
-                # concurrent requests' prefills) leaves per-seq conv/ssm state
-                # that differs from a single-request prefill (state-fingerprint
-                # verified: L0 state matches, L1+ diverges on seq1/seq2), and
-                # that state drift propagates through every later verify step.
-                # state_v_first=True pins the [HV,V,K] state layout so the
-                # ssm state handed to decode matches the recurrent path
-                # (default False is [HV,K,V] — K/V-transposed; K=V=128 hides
-                # the shape mismatch while corrupting decode precision).
+            host_cu_seqlens = [0, seq_len] if q_cu_list is None else q_cu_list
+            if len(host_cu_seqlens) > 2:
+                # Batched chunk KDA can alter the recurrent state of later sequences.
                 _pout, _pstates = [], []
                 for s in range(num_seqs):
-                    t0, t1 = q_cu_list[s], q_cu_list[s + 1]
-                    sel = slice(int(t0), int(t1))
+                    t0, t1 = host_cu_seqlens[s : s + 2]
+                    sel = slice(t0, t1)
                     _r = chunk_kda_fwd(
                         q_in[:, sel].contiguous(),
                         k_in[:, sel].contiguous(),
@@ -453,21 +447,13 @@ class KdaLinearAttentionMixin:
                         layout="BSND",
                         initial_state=ssm_state[s : s + 1],
                         output_final_state=True,
-                        cu_seqlens=torch.tensor([0, int(t1 - t0)], dtype=torch.int32, device=device),
+                        cu_seqlens=[0, t1 - t0],
                         return_intermediate_states=False,
                         state_v_first=True,
                         **_gate_kwargs,
                     )
                     _pout.append(_r[0])
                     _pstates.append(_r[1])
-                # Each _r[0] is [1, seq_len_s, nh, hd] (layout="BSND", one
-                # sequence per call). The per-sequence token counts differ
-                # across a multi-sequence prefill batch, so they must be
-                # concatenated along the token axis (dim=1) to restore the
-                # original [1, total_tokens, nh, hd] packing of q_in — cat on
-                # dim=0 would require equal seq_len and crashes (aclnnCat 161002
-                # "dim 1 of tensor 1 is [X], should be equal to tensor 0 [Y]")
-                # at >=2 concurrent prefills of differing length.
                 core_attn_out = torch.cat(_pout, dim=1).to(query.dtype)
                 final_state = torch.cat(_pstates, dim=0)
             else:
@@ -482,7 +468,7 @@ class KdaLinearAttentionMixin:
                     layout="BSND",
                     initial_state=ssm_state,
                     output_final_state=True,
-                    cu_seqlens=cu_seqlens,
+                    cu_seqlens=host_cu_seqlens,
                     return_intermediate_states=False,
                     state_v_first=True,
                     **_gate_kwargs,

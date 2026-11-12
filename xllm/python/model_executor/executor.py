@@ -165,7 +165,6 @@ def _create_attention_backend(
             dcp_group is not None
             and dcp_size > 1
             and (int(config.get("kv_split_size", dcp_size)) or cp_size) > 1
-            and int(config.get("kv_pages_per_block", 1)) == 1
             and (cp_size == 1 or model_type in ("glm_moe_dsa", "glm_moe_dsa_mtp"))
         ):
             if model_type in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):
@@ -496,6 +495,7 @@ class ModelExecutor:
                     # to masked BNSD can change BF16 verify outputs.
                     device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
                     kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
+                    enable_index_history_bucketing=bool(dsa_layers),
                     max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
                 )
         else:

@@ -329,7 +329,7 @@ def tmo_chunk_kda_state_kernel(
     qg: tl.tensor,
     kg: tl.tensor,
     aq: tl.tensor,
-    cumulative_gate: tl.tensor,
+    gate_cumsum: tl.tensor,
     input_state: tl.tensor,
     final_state: tl.tensor,
     output: tl.tensor,
@@ -431,7 +431,7 @@ def tmo_chunk_kda_state_kernel(
                 )
 
                 last_gate_one = tl.load(
-                    cumulative_gate + (slot * H + head) * D + key_offsets,
+                    gate_cumsum + (slot * H + head) * D + key_offsets,
                 ).to(tl.float32)
                 state_one *= tl.extra.mlu.libdevice.fast_expf(last_gate_one)[None, :]
                 kg_one = tl.load(

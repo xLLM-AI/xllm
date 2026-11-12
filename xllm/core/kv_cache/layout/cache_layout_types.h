@@ -73,7 +73,6 @@ struct CacheTensorLayoutContext {
   int64_t linear_ssm_checkpoint_stride = 1;
   bool enable_mla = false;
   bool head_major_layout = false;
-  int64_t num_kv_pages_per_block = 1;
 };
 
 }  // namespace xllm

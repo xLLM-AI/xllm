@@ -400,7 +400,7 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
         /*USE_QK_L2NORM_IN_KERNEL=*/1,
         /*IS_VARLEN=*/1,
         /*IS_CONTINUOUS_BATCHING=*/1,
-        /*IS_SPEC_DECODING=*/1,
+        /*USES_ACCEPTED_TOKEN_COUNTS=*/1,
         /*IS_KDA=*/1,
         /*SIGMOID_BETA=*/1,
         /*COMPUTE_GATE=*/1,

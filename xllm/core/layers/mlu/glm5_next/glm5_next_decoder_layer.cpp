@@ -185,13 +185,13 @@ torch::Tensor Glm5NextDecoderLayerImpl::forward(
 
   const bool can_fuse_mhc = input_params.meta.batch_forward_type.is_decode() &&
                             attn_hc_pre_->supports_fused_mhc();
-  const MHCFusionPlan fusion_flags =
+  const MHCFusionPlan mhc_fusion =
       resolve_mhc_fusion(can_fuse_mhc, pending_mhc, is_last_layer_);
 
   torch::Tensor residual_attention;
   MHCPreOutput attention_hc;
   torch::Tensor attention_input;
-  if (fusion_flags.consume_pending) {
+  if (mhc_fusion.consume_pending) {
     PendingMHC& pending = pending_mhc->value();
     std::tie(attention_input,
              residual_attention,
@@ -238,7 +238,7 @@ torch::Tensor Glm5NextDecoderLayerImpl::forward(
   torch::Tensor residual_ffn;
   MHCPreOutput ffn_hc;
   torch::Tensor ffn_input;
-  if (fusion_flags.use_fused_mhc) {
+  if (mhc_fusion.use_fused_mhc) {
     std::tie(ffn_input, residual_ffn, ffn_hc.post, ffn_hc.comb) =
         ffn_hc_pre_->fused_post_pre_norm(attention_output,
                                          residual_attention,
@@ -262,7 +262,7 @@ torch::Tensor Glm5NextDecoderLayerImpl::forward(
     ffn_output = sparse_moe_->forward_selected(
         ffn_input, route.reduce_weight, route.expert_id, input_params);
   }
-  if (fusion_flags.defer_post) {
+  if (mhc_fusion.defer_post) {
     pending_mhc->emplace(
         PendingMHC{ffn_output, residual_ffn, ffn_hc.post, ffn_hc.comb});
     hidden_states = ffn_output;

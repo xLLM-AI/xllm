@@ -27,7 +27,7 @@ def _runner(
     *,
     dp_size: int = 2,
     num_speculative_tokens: int = 0,
-    is_draft_model: bool = False,
+    is_spec_draft: bool = False,
 ) -> DecodeAclGraphRunner:
     runner = DecodeAclGraphRunner(
         nn.Identity(),
@@ -38,15 +38,15 @@ def _runner(
         dp_size=dp_size,
         dp_rank=dp_rank,
         num_speculative_tokens=num_speculative_tokens,
-        is_spec_draft=is_draft_model,
-        bucket_index_history=True,
+        is_spec_draft=is_spec_draft,
+        enable_index_history_bucketing=True,
     )
     runner.bind_layer_caches([LayerCache(torch.empty(1), torch.empty(1), index=torch.empty(1))])
     return runner
 
 
-def _metadata(lengths: tuple[int, ...], rank: int) -> SimpleNamespace:
-    local_length = lengths[rank]
+def _metadata(global_lengths: tuple[int, ...], rank: int) -> SimpleNamespace:
+    local_length = global_lengths[rank]
     is_dummy = local_length == 0
     local_length = max(local_length, 1)
     page_size = 128
@@ -55,9 +55,9 @@ def _metadata(lengths: tuple[int, ...], rank: int) -> SimpleNamespace:
         is_prefill=False,
         is_chunked_prefill=False,
         is_dummy=is_dummy,
-        dp_execution_token_counts=(1,) * len(lengths),
-        dp_is_decode=(1,) * len(lengths),
-        dp_global_kv_max_seq_lens=lengths,
+        dp_execution_token_counts=(1,) * len(global_lengths),
+        dp_is_decode=(1,) * len(global_lengths),
+        dp_global_kv_max_seq_lens=global_lengths,
         slot_mapping=torch.tensor([0], dtype=torch.int32),
         new_cache_slots_host_values=[0],
         paged_kv_indptr=torch.tensor([0, columns], dtype=torch.int32),
@@ -77,7 +77,7 @@ def _metadata(lengths: tuple[int, ...], rank: int) -> SimpleNamespace:
 
 
 @pytest.mark.parametrize(
-    ("lengths", "num_speculative_tokens", "is_draft_model", "expected_bucket"),
+    ("lengths", "num_speculative_tokens", "is_spec_draft", "expected_bucket"),
     [
         ((32768, 0), 0, False, 1),
         ((0, 32769), 0, False, 2),
@@ -86,11 +86,11 @@ def _metadata(lengths: tuple[int, ...], rank: int) -> SimpleNamespace:
     ],
 )
 def test_dp_raw_index_history_uses_shared_bucket(
-    lengths: tuple[int, int], num_speculative_tokens: int, is_draft_model: bool, expected_bucket: int
+    lengths: tuple[int, int], num_speculative_tokens: int, is_spec_draft: bool, expected_bucket: int
 ) -> None:
     input_ids = torch.tensor([1], dtype=torch.int32)
     for rank in range(len(lengths)):
-        runner = _runner(rank, num_speculative_tokens=num_speculative_tokens, is_draft_model=is_draft_model)
+        runner = _runner(rank, num_speculative_tokens=num_speculative_tokens, is_spec_draft=is_spec_draft)
         prepared = runner.prepare_execution(input_ids, _metadata(lengths, rank))
         assert prepared is not None
         assert prepared.token_capacity_bucket == expected_bucket

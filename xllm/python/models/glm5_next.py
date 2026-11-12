@@ -645,11 +645,14 @@ def _current_q_seq_lens(num_seqs: int, num_tokens: int) -> list[int]:
     return [ends[0]] + [ends[i] - ends[i - 1] for i in range(1, len(ends))]
 
 
-# Forward-context cache key for the request-level KPool query spans shared by
-# every full indexer layer of one forward.
-_KPOOL_LAYOUT_CACHE_KEY = (__name__, "kpool_query_lens")
 _CP_MERGED_POSITIONS_KEY = (__name__, "cp_merged_positions")
 _CP_ATTENTION_MASK_KEY = (__name__, "cp_attention_mask")
+
+
+@dataclass(frozen=True)
+class _KPoolLayout:
+    query_lens: list[int]
+    num_covered_tokens: int
 
 
 def _span_lens(num_rows: int, num_tokens: int) -> list[int]:
@@ -661,21 +664,31 @@ def _span_lens(num_rows: int, num_tokens: int) -> list[int]:
     return _current_q_seq_lens(num_rows, num_tokens)
 
 
-def _kpool_update_query_lens(ctx: KPoolMlaIndexContext, num_tokens: int) -> list[int]:
-    """Resolve logical request spans for request-owned KPool tail updates."""
+def _prefix_token_tensor(tensor: torch.Tensor, num_tokens: int, num_valid_tokens: int) -> torch.Tensor:
+    if tensor.shape[0] == num_tokens:
+        return tensor[:num_valid_tokens]
+    if tensor.dim() >= 2 and tensor.shape[0] == 1 and tensor.shape[1] == num_tokens:
+        return tensor[:, :num_valid_tokens]
+    raise RuntimeError(
+        f"cannot keep the first {num_valid_tokens} tokens of shape {tuple(tensor.shape)} for num_tokens={num_tokens}"
+    )
+
+
+def _kpool_update_layout(ctx: KPoolMlaIndexContext, num_tokens: int) -> _KPoolLayout:
     kpool = ctx.kpool
     if kpool is not None and kpool.query_lens:
         query_lens = [int(length) for length in kpool.query_lens]
         if any(length <= 0 for length in query_lens):
             raise RuntimeError(f"kPool query spans must be positive: spans={query_lens}")
-        if sum(query_lens) != num_tokens:
+        covered = sum(query_lens)
+        if covered != num_tokens and not (in_acl_graph() and covered < num_tokens):
             raise RuntimeError(
                 f"kPool query spans must cover the current token rows: spans={query_lens}, num_tokens={num_tokens}"
             )
-        return query_lens
+        return _KPoolLayout(query_lens, covered)
     if ctx.block_table is None:
         raise RuntimeError("kPool update requires a block table")
-    return _span_lens(ctx.block_table.shape[0], num_tokens)
+    return _KPoolLayout(_span_lens(ctx.block_table.shape[0], num_tokens), num_tokens)
 
 
 def _kpool_logical_rows(
@@ -823,6 +836,10 @@ class Glm5NextIndexer(nn.Module):
             and self.index_kpool_compress_ape.is_contiguous()
         )
 
+    @property
+    def _index_token_capacity(self) -> int:
+        return self.topk + (self.index_kpool - 1 if self.index_kpool_always_select_tail else 0)
+
     def process_weights_after_loading(self) -> None:
         prev_weight = self._wk_weights_weight
         self._wk_weights_weight = None
@@ -867,7 +884,7 @@ class Glm5NextIndexer(nn.Module):
         attention_mask: torch.Tensor,
         pool_cache: torch.Tensor,
         pool_block_table: torch.Tensor,
-        query_positions: torch.Tensor | None = None,
+        query_positions: torch.Tensor,
         pool_query_block_table: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         """Run PoolKeyIndexer through the paged PA_BBND pool cache."""
@@ -882,8 +899,6 @@ class Glm5NextIndexer(nn.Module):
             token_count = kv_seq_lens.reshape(-1).to(torch.int32)
             fused_block_table = pool_block_table
         else:
-            if query_positions is None or query_positions.shape != (batch_size, query_len):
-                return None
             # PoolKeyIndexer only receives one pool-tail length per batch. An
             # MTP verify spans several causal positions, so treating its rows
             # as one S1 sequence loses the historical partial pool whenever the
@@ -919,75 +934,34 @@ class Glm5NextIndexer(nn.Module):
             layout_k="PA_BBND",
         )
 
-        output_width = self.topk + (self.index_kpool - 1 if self.index_kpool_always_select_tail else 0)
-        indices = indices.reshape(batch_size, query_len, -1)[..., :output_width]
+        indices = indices.reshape(batch_size, query_len, -1)[..., : self._index_token_capacity]
         return indices.masked_fill(~attention_mask[..., None], -1).long()
 
     def select_topk(
         self,
         q_resid: torch.Tensor,
-        hidden_states: torch.Tensor,
+        projected_weights: torch.Tensor,
         attention_mask: torch.Tensor,
         kv_len: int,
-        current_length: int,
+        *,
+        kv_seq_lens: torch.Tensor,
+        query_positions: torch.Tensor,
         packed_states: torch.Tensor | None = None,
-        pool_data: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-        key_valid: torch.Tensor | None = None,
         pool_block_table: torch.Tensor | None = None,
         pool_cache: torch.Tensor | None = None,
-        kv_seq_lens: torch.Tensor | None = None,
-        projected_weights: torch.Tensor | None = None,
-        query_positions: torch.Tensor | None = None,
         pool_query_block_table: torch.Tensor | None = None,
-        append_unscored_tail: bool = False,
     ) -> torch.Tensor:
-        """Top-k pool selection over the FULL packed index history.
-
-        ``packed_states`` is ``[B, kv_len, head_dim*2+1]`` (k, gate, valid) for
-        every kv token accumulated so far (the reference keeps this in the
-        indexer cache and pools over the whole of it each step); ``q_resid`` /
-        ``hidden_states`` are the CURRENT query tokens ``[B, S_q, ...]``.
-        Alternatively, pass ``pool_data``/``key_valid`` from the paged pool
-        cache (read_pools) to skip both the dense gather and the per-step
-        re-pooling. Paged decode can pass ``kv_seq_lens`` instead of a dense
-        ``key_valid`` mask; only the non-fused fallback materializes that mask,
-        while ``query_positions`` preserves exact causal visibility for packed
-        or variable-length query rows.
-        Returns absolute kv-position top-k indices
-        ``[B, S_q, topk]`` (int64, -1 = invalid), matching the reference
-        indexer output.
-        """
+        """Select absolute KV positions with -1 for masked or unused entries."""
         batch_size, seq_len = q_resid.shape[:2]
         device = q_resid.device
+        if query_positions.shape != (batch_size, seq_len):
+            raise ValueError(
+                f"query_positions must match the logical query shape: "
+                f"positions={tuple(query_positions.shape)}, queries={(batch_size, seq_len)}"
+            )
 
         q = self.wq_b(q_resid).view(batch_size, seq_len, self.n_heads, self.head_dim)
 
-        raw_key_cache = packed_states is not None and packed_states.shape[-1] == self.head_dim
-        if raw_key_cache and self.index_kpool != 1:
-            raise ValueError("index_kpool_compress=false requires index_kpool=1")
-
-        if pool_data is not None:
-            # Pool-cache path: pools were compressed at write time; per-pool
-            # visibility is derived later (at gather time) from key_valid,
-            # mirroring gather_index_history's row_valid.
-            pool_keys, pool_indices, pool_valid = pool_data
-        else:
-            if key_valid is None and kv_seq_lens is None:
-                if raw_key_cache:
-                    key_valid = torch.ones(
-                        batch_size,
-                        packed_states.shape[1],
-                        dtype=torch.bool,
-                        device=device,
-                    )
-                else:
-                    key_valid = packed_states[..., -1].gt(0)
-
-        weights = (
-            self.weights_proj(hidden_states.to(self.weights_proj.weight.dtype))
-            if projected_weights is None
-            else projected_weights
-        )
         if (
             self.index_kpool_compress
             and q.device.type == "npu"
@@ -995,11 +969,11 @@ class Glm5NextIndexer(nn.Module):
             and pool_cache is not None
             and pool_block_table is not None
         ):
-            scaled_weights = (weights * (self.n_heads**-0.5)).to(q.dtype)
+            scaled_weights = (projected_weights * (self.n_heads**-0.5)).to(q.dtype)
             fused_indices = self._select_topk_fused_pa(
                 q,
                 scaled_weights,
-                kv_seq_lens if kv_seq_lens is not None else key_valid.sum(-1, dtype=torch.int32),
+                kv_seq_lens,
                 attention_mask,
                 pool_cache,
                 pool_block_table,
@@ -1008,73 +982,39 @@ class Glm5NextIndexer(nn.Module):
             )
             if fused_indices is not None:
                 return fused_indices
-        if key_valid is None:
-            # kv_len is padded to a whole number of pools by the decode caller;
-            # a narrower mask would misalign the gather at pool_start below and
-            # silently drop the tail pool's validity bit.
-            assert kv_len % self.index_kpool == 0, (
-                f"kv_len {kv_len} must be a multiple of index_kpool {self.index_kpool}"
+        key_valid = torch.arange(kv_len, device=device)[None] < kv_seq_lens.reshape(-1, 1)
+        q_pos = query_positions.to(device=device, dtype=torch.int64)
+        if pool_cache is not None and pool_block_table is not None:
+            pool_keys, pool_indices, pool_valid = read_pools(
+                pool_cache,
+                pool_block_table,
+                kv_seq_lens,
+                (kv_len + self.index_kpool - 1) // self.index_kpool,
+                self.index_kpool,
             )
-            # This dense [B, kv_len] mask scales with kv_len and is rebuilt each
-            # step; only decode (seq_len=1) reaches here with kv_seq_lens, so it
-            # stays cheap. Long-kv prefill takes the fused / pool_data paths above
-            # rather than materializing this mask.
-            key_valid = torch.arange(kv_len, device=device)[None] < kv_seq_lens.reshape(-1, 1)
-        # Resolve query positions only after the fused decode fast path. This
-        # keeps graph decode from materializing any history-sized helper tensor.
-        if query_positions is None:
-            q_pos = current_length - seq_len + torch.arange(seq_len, device=device)
-            q_pos = q_pos.unsqueeze(0).expand(batch_size, -1)
         else:
-            q_pos = query_positions.to(device=device, dtype=torch.int64)
-            if q_pos.shape != (batch_size, seq_len):
-                raise ValueError(
-                    "query_positions must match the logical query shape: "
-                    f"positions={tuple(q_pos.shape)}, queries={(batch_size, seq_len)}"
-                )
-        if pool_data is None:
-            if pool_cache is not None and pool_block_table is not None:
-                kv_lens = kv_seq_lens if kv_seq_lens is not None else key_valid.sum(-1, dtype=torch.int64)
-                n_pools = (kv_len + self.index_kpool - 1) // self.index_kpool
-                pool_keys, pool_indices, pool_valid = read_pools(
-                    pool_cache,
-                    pool_block_table,
-                    kv_lens,
-                    n_pools,
-                    self.index_kpool,
-                )
+            history = cast("torch.Tensor", packed_states)
+            if history.shape[-1] == self.head_dim:
+                if self.index_kpool != 1:
+                    raise ValueError("index_kpool_compress=false requires index_kpool=1")
+                pool_keys = history.squeeze(-2) if history.dim() == 4 else history
+                pool_indices = torch.arange(kv_len, device=device).expand(batch_size, -1).unsqueeze(-1)
+                pool_valid = key_valid
             else:
-                if raw_key_cache:
-                    pool_keys = packed_states
-                    if pool_keys.dim() == 4:
-                        pool_keys = pool_keys.squeeze(-2)
-                    pool_indices = (
-                        torch.arange(
-                            pool_keys.shape[1],
-                            device=device,
-                        )
-                        .expand(batch_size, -1)
-                        .unsqueeze(-1)
-                    )
-                    pool_valid = key_valid
-                else:
-                    pool_keys, pool_indices, pool_valid = self.get_pooled_states(packed_states, key_valid)
-        weights = weights.float().mul_(self.n_heads**-0.5)
-        # Query-dim sub-chunking: each query row's logits are
-        # q[row] @ pool_keys.T and its pool score a head-weighted sum of those
-        # logits — independent of every other row — so slicing the query dim
-        # is bit-exact while keeping each transient scores slab under
-        # _SCORES_SLAB_CAP_BYTES. Without it the full [B, S, n_heads, n_pools]
-        # fp32 scores tensor grows linearly with n_pools (= kv_len /
-        # index_kpool) and OOMs mid prefill. When the full tensor already fits
-        # (decode: S=1; short prefills) sub == seq_len and the loop degenerates
-        # to the original single matmul.
+                pool_keys, pool_indices, pool_valid = self.get_pooled_states(history, key_valid)
+
+        weights = projected_weights.to(dtype=torch.float32, copy=True).mul_(self.n_heads**-0.5)
+        # Bound the [B, sub, n_heads, n_pools] FP32 score slab for long prefills.
         n_pools = pool_keys.shape[1]
+        append_unscored_tail = pool_cache is not None and self.index_kpool_always_select_tail
+        pool_anchor = pool_indices[..., -1 if append_unscored_tail else 0].clamp(0, kv_len - 1)
+        pool_valid = pool_valid & key_valid.gather(1, pool_anchor)
+        select_k = min(self.topk // self.index_kpool, n_pools)
         pool_keys_t = pool_keys.transpose(-1, -2).float().unsqueeze(1)
         q_f = q.float()
         slab_elems = batch_size * self.n_heads * n_pools
         sub = seq_len if slab_elems == 0 else max(1, min(seq_len, _SCORES_SLAB_CAP_BYTES // (slab_elems * 4)))
-        output_width = self.topk + (self.index_kpool - 1 if self.index_kpool_always_select_tail else 0)
+        output_width = self._index_token_capacity
         output = torch.empty(batch_size, seq_len, output_width, dtype=torch.long, device=device)
         for start in range(0, seq_len, max(1, sub)):
             end = min(start + sub, seq_len)
@@ -1082,28 +1022,14 @@ class Glm5NextIndexer(nn.Module):
             chunk_positions = q_pos[:, start:end]
             chunk_mask = attention_mask[:, start:end]
             slab = torch.matmul(q_f[:, start:end], pool_keys_t)
-            # In-place relu/scale: bit-identical elementwise math, but avoids a
-            # second [B, sub, n_heads, n_pools] fp32 allocation.
-            slab = torch.relu_(slab)
+            torch.relu_(slab)
             slab *= self.softmax_scale
             pool_scores = torch.einsum("bshp,bsh->bsp", slab, weights[:, start:end])
             del slab
 
-            if pool_keys.shape[1] != 0:
-                pool_anchor = pool_indices[..., -1 if append_unscored_tail else 0].clamp(0, kv_len - 1)
-                pool_key_valid = key_valid.gather(1, pool_anchor)  # [B, n_pools]
-                pool_visible = (
-                    (pool_anchor[:, None, :] <= chunk_positions[:, :, None])
-                    & pool_key_valid[:, None, :]
-                    & chunk_mask[:, :, None]
-                )  # [B, seq_len, n_pools]
-                candidate_valid = (pool_visible & pool_valid[:, None]).to(torch.bool)
-                pool_scores.masked_fill_(~candidate_valid, torch.finfo(pool_scores.dtype).min)
-            else:
-                candidate_valid = pool_valid[:, None].expand(batch_size, chunk_len, -1).to(torch.bool)
+            candidate_valid = (pool_anchor[:, None, :] <= chunk_positions[:, :, None]) & pool_valid[:, None, :]
+            pool_scores.masked_fill_(~candidate_valid, torch.finfo(pool_scores.dtype).min)
 
-            group_budget = self.topk // self.index_kpool
-            select_k = min(group_budget, pool_scores.shape[-1])
             if select_k == 0:
                 topk_indices = torch.empty(batch_size, num_chunk_tokens, 0, dtype=torch.long, device=device)
             else:
@@ -1122,10 +1048,10 @@ class Glm5NextIndexer(nn.Module):
                     ~selected_valid[..., None].expand_as(selected_indices).flatten(-2),
                     -1,
                 )
-                safe_pos = topk_indices.clamp(0, kv_len - 1)  # [B, seq_len, select_k*rate]
+                safe_pos = topk_indices.clamp(0, kv_len - 1)
                 flat = safe_pos.reshape(batch_size, -1)
                 selected_key_valid = key_valid.gather(1, flat).reshape_as(safe_pos)
-                pos_visible = (safe_pos <= chunk_positions[:, :, None]) & selected_key_valid & chunk_mask[:, :, None]
+                pos_visible = (safe_pos <= chunk_positions[:, :, None]) & selected_key_valid
                 topk_indices.masked_fill_(~pos_visible, -1)
 
             if append_unscored_tail:
@@ -1151,7 +1077,10 @@ class Glm5NextIndexer(nn.Module):
         """Update the selected KPool layout and return SFA token indices."""
         batch_size, seq_len = hidden_states.shape[:2]
         num_tokens = batch_size * seq_len
-        output_width = self.topk + (self.index_kpool - 1 if self.index_kpool_always_select_tail else 0)
+        full_num_tokens = num_tokens
+        index_token_capacity = self._index_token_capacity
+        if num_tokens == 0:
+            return torch.empty((0, 1, index_token_capacity), dtype=torch.int32, device=qr.device)
         key, weights = self._project_key_weights(hidden_states)
         if ctx.block_table is None:
             raise RuntimeError("GLM-5.3-Flash kPool requires a block table")
@@ -1166,15 +1095,16 @@ class Glm5NextIndexer(nn.Module):
         # for every indexer layer of this forward; compute it once in the
         # forward context instead of per layer.
         forward_cache = get_forward_context_or_none()
-        kpool_query_lens = None
+        kpool_query_lens: list[int] | None = None
+        num_valid_tokens = num_tokens
         if uses_compressed_tail:
-            kpool_query_lens = (
-                None if forward_cache is None else forward_cache.layer_shared_cache.get(_KPOOL_LAYOUT_CACHE_KEY)
-            )
-            if kpool_query_lens is None:
-                kpool_query_lens = _kpool_update_query_lens(ctx, num_tokens)
+            layout = None if forward_cache is None else get_execution_context(_KPoolLayout)
+            if layout is None:
+                layout = _kpool_update_layout(cast(KPoolMlaIndexContext, ctx), num_tokens)
                 if forward_cache is not None:
-                    forward_cache.layer_shared_cache[_KPOOL_LAYOUT_CACHE_KEY] = kpool_query_lens
+                    forward_cache.layer_shared_cache[_KPoolLayout] = layout
+            kpool_query_lens = layout.query_lens
+            num_valid_tokens = layout.num_covered_tokens
         query_lens_device = kpool.query_lens_device if kpool is not None else None
         if query_lens_device is not None and (
             query_lens_device.device != hidden_states.device
@@ -1184,9 +1114,20 @@ class Glm5NextIndexer(nn.Module):
             query_lens_device = None
         if uses_compressed_tail and in_acl_graph() and query_lens_device is None:
             raise RuntimeError("ACL graph compressed KPool requires device query lengths matching its request spans")
+        if num_valid_tokens < num_tokens:
+            hidden_states = _prefix_token_tensor(hidden_states, num_tokens, num_valid_tokens)
+            key = _prefix_token_tensor(key, num_tokens, num_valid_tokens)
+            weights = _prefix_token_tensor(weights, num_tokens, num_valid_tokens)
+            qr = _prefix_token_tensor(qr, num_tokens, num_valid_tokens)
+            positions = _prefix_token_tensor(positions, num_tokens, num_valid_tokens)
+            attention_mask = _prefix_token_tensor(attention_mask, num_tokens, num_valid_tokens)
+            num_tokens = num_valid_tokens
+            batch_size, seq_len = hidden_states.shape[:2]
         kpool_block_table = ctx.block_table
         pool_query_block_table = kpool_block_table
         kpool_kv_lens = ctx.actual_seq_kv.reshape(-1)
+        if kpool_kv_lens.numel() == 0:
+            return torch.full((full_num_tokens, 1, index_token_capacity), -1, dtype=torch.int32, device=qr.device)
         if kpool_query_lens is not None:
             kpool_block_table, kpool_kv_lens = _kpool_logical_rows(
                 kpool_block_table,
@@ -1206,7 +1147,10 @@ class Glm5NextIndexer(nn.Module):
                     kpool_query_lens,
                     query_lens_device,
                 )
-                kpool_valid_rows = _kpool_valid_rows(attention_mask, ctx.slot_mapping)
+                slot_mapping = ctx.slot_mapping
+                if num_tokens < full_num_tokens and slot_mapping.numel() == full_num_tokens:
+                    slot_mapping = _prefix_token_tensor(slot_mapping, full_num_tokens, num_tokens)
+                kpool_valid_rows = _kpool_valid_rows(attention_mask, slot_mapping)
                 triton_query_len = _compact_kpool_triton_query_len(kpool_query_lens, self.index_kpool)
                 # Decode/spec-verify resolves read/write to the same tensor. A
                 # distinct prefix-restore destination needs the torch path's
@@ -1283,7 +1227,6 @@ class Glm5NextIndexer(nn.Module):
             # one-token decode, equal-length batch): a plain view is exact
             # and allocation-free — the decode hot path stays untouched.
             qr_bsd = qr.view(num_seqs, max_q, -1)
-            hidden_bsd = hidden_states.view(num_seqs, max_q, -1)
             mask_bsd = attention_mask.view(num_seqs, max_q)
             positions_bsd = positions.reshape(num_seqs, max_q)
             weights_bsd = weights.view(num_seqs, max_q, self.n_heads)
@@ -1300,73 +1243,64 @@ class Glm5NextIndexer(nn.Module):
             valid = q_offsets[None, :] < lens_t[:, None]
             src_flat = src.clamp(max=num_tokens - 1).reshape(-1)
             qr_bsd = qr.index_select(0, src_flat).view(num_seqs, max_q, -1)
-            hidden_bsd = hidden_states.reshape(num_tokens, -1).index_select(0, src_flat).view(num_seqs, max_q, -1)
             mask_bsd = attention_mask.reshape(-1).index_select(0, src_flat).view(num_seqs, max_q) & valid
             positions_bsd = positions.reshape(-1).index_select(0, src_flat).view(num_seqs, max_q)
             weights_bsd = weights.reshape(num_tokens, self.n_heads).index_select(0, src_flat).view(num_seqs, max_q, -1)
 
-        if in_acl_graph():
-            token_page_size = (
-                pool_cache.shape[1] * self.index_kpool if pool_cache is not None else ctx.index_cache.shape[1]
-            )
-            kv_len = ctx.block_table.shape[1] * token_page_size
-        elif pool_cache is not None:
+        if pool_cache is None:
+            kv_lens_host = None if in_acl_graph() else ctx.actual_seq_kv_host
+            if kv_lens_host and len(kv_lens_host) == num_seqs:
+                kv_len = max(kv_lens_host)
+            else:
+                page_size = ctx.index_cache.shape[1]
+                kv_len = backend.indexer_history_block_table(page_size).shape[1] * page_size
+        elif in_acl_graph():
+            kv_len = ctx.block_table.shape[1] * pool_cache.shape[1] * self.index_kpool
+        else:
             kv_lens_host = ctx.actual_seq_kv_host
             if kv_lens_host is not None and len(kv_lens_host) == kpool_kv_lens.numel():
                 kv_len = max(max(int(length) for length in kv_lens_host), self.index_kpool)
             else:
                 kv_len = ctx.block_table.shape[1] * pool_cache.shape[1] * self.index_kpool
             kv_len = ((kv_len + self.index_kpool - 1) // self.index_kpool) * self.index_kpool
-        else:
-            kv_len = backend.indexer_block_table().shape[1] * ctx.index_cache.shape[1]
-        logical_kv_lens = kpool_kv_lens if pool_cache is not None else ctx.actual_seq_kv[:num_seqs].to(torch.int64)
         if pool_cache is not None:
-            key_valid = None
-            kv_seq_lens = logical_kv_lens.clamp(max=kv_len)
             topk_indices = self.select_topk(
                 qr_bsd,
-                hidden_bsd,
+                weights_bsd,
                 mask_bsd,
                 kv_len=kv_len,
-                current_length=kv_len,
                 pool_cache=pool_cache,
-                projected_weights=weights_bsd,
-                key_valid=key_valid,
-                kv_seq_lens=kv_seq_lens,
+                kv_seq_lens=kpool_kv_lens.clamp(max=kv_len),
                 pool_block_table=kpool_block_table,
                 query_positions=positions_bsd,
                 pool_query_block_table=pool_query_block_table,
-                append_unscored_tail=uses_compressed_tail and self.index_kpool_always_select_tail,
             )
         else:
-            append_tail = uses_compressed_tail and self.index_kpool_always_select_tail
             index_dtype_size_bytes = ctx.index_cache.element_size()
             request_size_bytes = max(1, 2 * kv_len * ctx.index_cache.shape[3] * index_dtype_size_bytes)
             num_reqs_per_chunk = max(1, _INDEX_HISTORY_CHUNK_BYTES // request_size_bytes)
-            topk_indices = torch.empty(num_seqs, max_q, output_width, dtype=torch.int64, device=qr.device)
+            topk_indices = torch.empty(num_seqs, max_q, index_token_capacity, dtype=torch.int64, device=qr.device)
             for begin in range(0, num_seqs, num_reqs_per_chunk):
                 end = min(begin + num_reqs_per_chunk, num_seqs)
                 chunk_history = backend.gather_index_history(layer, begin, end)
                 chunk_kv_len = chunk_history.shape[1]
-                chunk_lens = logical_kv_lens[begin:end]
-                chunk_key_valid = torch.arange(chunk_kv_len, device=chunk_history.device)[None, :] < chunk_lens[:, None]
                 chunk_topk = self.select_topk(
                     qr_bsd[begin:end],
-                    hidden_bsd[begin:end],
+                    weights_bsd[begin:end],
                     mask_bsd[begin:end],
                     kv_len=chunk_kv_len,
-                    current_length=chunk_kv_len,
                     packed_states=chunk_history,
-                    projected_weights=weights_bsd[begin:end],
-                    key_valid=chunk_key_valid,
+                    kv_seq_lens=ctx.actual_seq_kv[begin:end],
                     query_positions=positions_bsd[begin:end],
-                    append_unscored_tail=append_tail,
                 )
                 topk_indices[begin:end] = chunk_topk
-                del chunk_history, chunk_key_valid, chunk_topk
+                del chunk_history, chunk_topk
         if is_varlen:
             topk_indices = topk_indices[valid]
-        return topk_indices.reshape(num_tokens, 1, -1).to(torch.int32)
+        topk_indices = topk_indices.reshape(num_tokens, 1, -1).to(torch.int32)
+        if num_tokens < full_num_tokens:
+            topk_indices = F.pad(topk_indices, (0, 0, 0, 0, 0, full_num_tokens - num_tokens), value=-1)
+        return topk_indices
 
 
 # ---------------------------------------------------------------------------

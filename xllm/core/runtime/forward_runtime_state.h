@@ -17,18 +17,11 @@ limitations under the License.
 
 #include <torch/types.h>
 
-#include <cstdint>
 #include <vector>
 
 #include "core/platform/stream_event.h"
 
 namespace xllm {
-
-// Worker-local KV slot layout for NPU CP (not transported).
-enum class KvSlotLayout : int8_t {
-  LOGICAL_REAL = 0,  // Builder slots; input to prepare_cache_slots.
-  NPU_CP_RECOVERED_PHYSICAL = 1,  // Already CP-expanded; skip re-prepare.
-};
 
 // Buffer ownership and execution lifetime state shared by forward domains.
 struct ForwardRuntimeState {
@@ -41,9 +34,6 @@ struct ForwardRuntimeState {
   // True when all model input tensors already reference execution-device
   // views. Runtime preparation can reuse them without rebuilding or copying.
   bool device_tensors_ready = false;
-
-  // KV slot layout; flip after one-shot context-parallel remapping.
-  KvSlotLayout kv_slot_layout = KvSlotLayout::LOGICAL_REAL;
 
   // Device-side readiness dependencies for inputs prepared on a different
   // stream. These are local runtime handles and are intentionally not included
