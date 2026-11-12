@@ -1598,7 +1598,8 @@ class Glm5NextMlaAttention(Attention):
 
         q = self.q_b_proj(q_c).view(num_tokens, self.num_heads_local, self.qk_head_dim)
         q_nope = q.narrow(-1, 0, self.qk_nope_head_dim)
-        q_latent = torch.bmm(q_nope.transpose(0, 1), self.W_UK).transpose(0, 1)
+        graph_mode = in_acl_graph()
+        q_latent = kernels.batch_matmul_transpose(q_nope, self.W_UK, graph_mode=graph_mode)
 
         k_latent_raw = kv.narrow(-1, 0, self.kv_lora_rank)
         k_latent = self.kv_a_layernorm(k_latent_raw)
@@ -1610,7 +1611,7 @@ class Glm5NextMlaAttention(Attention):
                 attn_out.reshape(num_tokens, self.num_heads_local, self.kv_lora_rank),
                 cp_context,
             )
-        v_full = torch.bmm(attn_out.transpose(0, 1), self.W_UV).transpose(0, 1)
+        v_full = kernels.batch_matmul_transpose(attn_out, self.W_UV, graph_mode=graph_mode)
         v_full = v_full.reshape(attn_out.shape[0], self.num_heads_local * self.v_head_dim)
         o = self.o_proj(v_full)
         if cp_context is not None:
