@@ -31,7 +31,6 @@ limitations under the License.
 #include "core/kernels/npu/tilelang/mtp_prepare_next_draft.h"
 #include "core/kernels/xllm_torch_ops.h"
 #include "core/layers/common/attention_metadata.h"
-#include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/py_attention_metadata.h"
@@ -461,9 +460,10 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   const torch::Tensor table = torch::tensor({{10, 11}}, torch::kInt);
   const torch::Tensor lengths = torch::tensor({128}, torch::kInt);
   const torch::Tensor slots = torch::tensor({1407}, torch::kInt);
-  auto sparse = std::make_shared<layer::AttentionMetadata>(
-      layer::AttentionMetadataBuilder::build_mtp_sparse_decode(
-          table, lengths, slots, /*block_size=*/128));
+  auto sparse = std::make_shared<layer::AttentionMetadata>();
+  sparse->block_table = table;
+  sparse->kv_seq_lens = lengths;
+  sparse->slot_mapping = slots;
   py::object sparse_view = py::cast(PyAttentionMetadataView(sparse, params));
   const torch::Tensor view_table =
       sparse_view.attr("block_table").cast<torch::Tensor>();
@@ -474,11 +474,6 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   EXPECT_EQ(view_table.data_ptr(), table.data_ptr());
   EXPECT_EQ(view_lengths.data_ptr(), lengths.data_ptr());
   EXPECT_EQ(view_slots.data_ptr(), slots.data_ptr());
-  EXPECT_TRUE(sparse->kv_seq_lens_vec.empty());
-  EXPECT_FALSE(sparse->kv_seq_lens_host.defined());
-  EXPECT_FALSE(sparse->paged_kv_indptr.defined());
-  EXPECT_FALSE(sparse->paged_kv_indices.defined());
-  EXPECT_FALSE(sparse->expanded_decode.enabled);
 
   // The Python view retains the owner as the request crosses a page boundary.
   sparse.reset();

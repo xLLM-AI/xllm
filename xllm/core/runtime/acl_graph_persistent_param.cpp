@@ -639,8 +639,6 @@ GraphPersistentParam::update_expanded_spec_decode_attention(
       << "expanded spec decode attention is only for spec verify";
   CHECK(input_params.meta.batch_forward_type.is_chunked_prefill())
       << "expanded spec decode attention expects chunked prefill";
-  CHECK(input_params.graph.use_expanded_decode_for_spec_verify_attention)
-      << "MTP worker must prepare expanded spec-verify graph input";
   CHECK(input_params.graph.expanded_kv_seq_lens.defined())
       << "expanded spec-verify kv seq lens must be defined";
   CHECK(input_params.graph.expanded_block_tables.defined())
