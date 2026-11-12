@@ -943,8 +943,11 @@ def test_slab_full_device_lengths_ignore_poisoned_writable_scratch(layer_id: int
 
 
 @pytest.mark.parametrize("rows", [1, 5], ids=["draft-step", "draft-prefix"])
+@pytest.mark.parametrize("shared_draft", [False, True], ids=["dense", "shared-companion"])
 @torch.inference_mode()
-def test_ordinary_draft_graph_reads_growing_kv_prefix(rows: int, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ordinary_draft_graph_reads_growing_kv_prefix(
+    rows: int, shared_draft: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from xllm.python.attention.backend import LayerCache
     from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
     from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_metadata
@@ -955,12 +958,43 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(rows: int, monkeypatch: py
     device = torch.device("npu:0")
     heads, kv_heads, dimension, page_size, capacity = 4, 2, 64, 128, 4096
     backend = NpuPagedAttentionBackend(heads, kv_heads, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
-    key = torch.zeros(33, page_size, kv_heads, dimension, device=device, dtype=torch.bfloat16)
     values_host = torch.arange(33 * page_size, dtype=torch.float32) / 2048
     values_host = values_host.view(33, page_size, 1, 1).expand(33, page_size, kv_heads, dimension)
-    value = values_host.contiguous().to(device=device, dtype=key.dtype)
-    caches = [LayerCache(key=key, value=value)]
+    if shared_draft:
+        full_row_bytes = page_size * kv_heads * dimension * 2
+        slice_bytes, bank_bytes = 6 * full_row_bytes, 96 * full_row_bytes
+        arena = torch.zeros(3 * bank_bytes, device=device, dtype=torch.uint8)
+        # The first two banks belong to the target. Poisoning them detects
+        # a draft view that accidentally retains the target bank's base.
+        arena[: 2 * bank_bytes].view(torch.bfloat16).fill_(float("nan"))
+        view_bytes = bank_bytes - full_row_bytes
+        key = arena.narrow(0, 2 * bank_bytes, view_bytes).view(torch.bfloat16)
+        value = arena.narrow(0, 2 * bank_bytes + full_row_bytes, view_bytes).view(torch.bfloat16)
+        key = key.view(95, page_size, kv_heads, dimension)
+        value = value.view_as(key)
+        physical_pages = 12 + 2 * torch.arange(33, dtype=torch.int64, device=device)
+        # K and V views overlap. Write only the allocated V lanes so the
+        # paired K lanes and the immutable read-padding pair stay zero.
+        value.index_copy_(0, physical_pages, values_host.contiguous().to(device=device, dtype=key.dtype))
+        caches = [
+            LayerCache(
+                key=key,
+                value=value,
+                full_block_rows=torch.zeros(64, dtype=torch.int32, device=device),
+                shared_checkpoint_stride=3,
+                shared_bank_bytes=bank_bytes,
+                shared_slice_bytes=slice_bytes,
+                shared_conv_scratch_row=0,
+                shared_ssm_scratch_row=0,
+                shared_full_read_padding_page=6,
+            )
+        ]
+    else:
+        key = torch.zeros(33, page_size, kv_heads, dimension, device=device, dtype=torch.bfloat16)
+        value = values_host.contiguous().to(device=device, dtype=key.dtype)
+        caches = [LayerCache(key=key, value=value)]
     backend.bind_kv_caches(caches)
+    assert (backend.shared_kv_layout is not None) == shared_draft
     attention = Attention(heads, kv_heads, dimension, dimension**-0.5, 0, 0)
     query = torch.zeros(rows, heads * dimension, device=device, dtype=key.dtype)
     projected = torch.zeros(rows, kv_heads * dimension, device=device, dtype=key.dtype)
@@ -983,10 +1017,10 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(rows: int, monkeypatch: py
     tokens = torch.zeros(rows, dtype=torch.int32, device=device)
     table = torch.arange(1, 33, dtype=torch.int32, device=device).expand(rows, -1).contiguous()
 
-    def _metadata_for(length: int) -> SimpleNamespace:
+    def _metadata_for(length: int, *, dummy: bool = False) -> SimpleNamespace:
         lengths = list(range(length, length + rows))
         indptr, indices, last_page = build_row_aligned_paged_kv_metadata(table, lengths, page_size)
-        return SimpleNamespace(
+        metadata = SimpleNamespace(
             is_prefill=False,
             is_chunked_prefill=False,
             is_spec_verify=False,
@@ -1004,8 +1038,15 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(rows: int, monkeypatch: py
             slot_mapping=torch.full((rows,), -1, dtype=torch.int32, device=device),
             linear_state_indices=None,
         )
+        if shared_draft:
+            metadata.is_dummy = dummy
+            if not dummy:
+                metadata.shared_full_block_table = (12 + 2 * table).contiguous()
+                metadata.shared_full_slot_mapping = metadata.slot_mapping
+                metadata.shared_full_read_padding_page = 6
+        return metadata
 
-    runner.warmup(tokens, tokens, _metadata_for(8), is_graph_warmup=True)
+    runner.warmup(tokens, tokens, _metadata_for(8, dummy=shared_draft), is_graph_warmup=True)
     # With zero queries and keys, attention must average the entire live
     # prefix. This distinguishes a frozen short capture bound from the mask.
     for length in (129, 1875, 7, 1987):
