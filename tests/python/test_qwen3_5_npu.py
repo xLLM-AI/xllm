@@ -911,13 +911,14 @@ def test_npu_mtp_gdn_accepts_padded_graph_rows() -> None:
     result = builder.build(_input_batch(32, (1,) * 22), metadata)
 
     assert isinstance(result, GdnVerifyMetadata)
+    assert result.packed_state_indices is not None
     torch.testing.assert_close(result.state_indices, state_indices)
     assert result.num_accepted_tokens is accepted
     torch.testing.assert_close(result.state_indices[22:], torch.zeros(10, dtype=torch.int32))
     torch.testing.assert_close(result.num_accepted_tokens[:22], torch.full((22,), 2, dtype=torch.int32))
     torch.testing.assert_close(result.num_accepted_tokens[22:], torch.ones(10, dtype=torch.int32))
     torch.testing.assert_close(
-        result.conv_state_indices[0],
+        result.packed_state_indices[0, :, 0],
         torch.where(
             state_indices > 0,
             layout.linear_state_indices(state_indices, role="conv", slots=caches[0].linear_state_slots),
@@ -925,7 +926,7 @@ def test_npu_mtp_gdn_accepts_padded_graph_rows() -> None:
         ),
     )
     torch.testing.assert_close(
-        result.ssm_state_indices[0],
+        result.packed_state_indices[0, :, 1],
         torch.where(
             state_indices > 0,
             layout.linear_state_indices(state_indices, role="ssm", slots=caches[0].linear_state_slots),
@@ -1160,19 +1161,23 @@ def test_npu_bounded_qwen38_gdn_verify_refreshes_persistent_physical_indices(
     batch = _input_batch(35, (5,) * 7)
     persistent = builder.allocate_persistent(batch, source)
     assert isinstance(persistent, GdnVerifyMetadata)
-    conv_pointer, ssm_pointer = persistent.conv_state_indices[0].data_ptr(), persistent.ssm_state_indices[0].data_ptr()
+    assert persistent.packed_state_indices is not None
+    conv_pointer, ssm_pointer = (
+        persistent.packed_state_indices[0, :, 0].data_ptr(),
+        persistent.packed_state_indices[0, :, 1].data_ptr(),
+    )
     expected_conv = torch.tensor([132, 264, 4477, 4608, -1, -1, 65828572], dtype=torch.int32)
     expected_ssm = torch.tensor([6, 12, 204, 210, -1, -1, 3000000], dtype=torch.int32)
-    torch.testing.assert_close(persistent.conv_state_indices[0], expected_conv)
-    torch.testing.assert_close(persistent.ssm_state_indices[0], expected_ssm)
+    torch.testing.assert_close(persistent.packed_state_indices[0, :, 0], expected_conv)
+    torch.testing.assert_close(persistent.packed_state_indices[0, :, 1], expected_ssm)
     for order in ([3, 2, 1, 0, 5, 4, 6], [4, 5, 0, 2, 1, 6, 3]):
         positions = torch.tensor(order)
         indices.copy_(logical_pages.index_select(0, positions))
         builder.update_persistent(persistent, batch, source)
-        torch.testing.assert_close(persistent.conv_state_indices[0], expected_conv.index_select(0, positions))
-        torch.testing.assert_close(persistent.ssm_state_indices[0], expected_ssm.index_select(0, positions))
-        assert persistent.conv_state_indices[0].data_ptr() == conv_pointer
-        assert persistent.ssm_state_indices[0].data_ptr() == ssm_pointer
+        torch.testing.assert_close(persistent.packed_state_indices[0, :, 0], expected_conv.index_select(0, positions))
+        torch.testing.assert_close(persistent.packed_state_indices[0, :, 1], expected_ssm.index_select(0, positions))
+        assert persistent.packed_state_indices[0, :, 0].data_ptr() == conv_pointer
+        assert persistent.packed_state_indices[0, :, 1].data_ptr() == ssm_pointer
 
 
 def test_npu_bounded_qwen38_gdn_decode_maps_nonintegral_conv_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1186,12 +1191,13 @@ def test_npu_bounded_qwen38_gdn_decode_maps_nonintegral_conv_rows(monkeypatch: p
     )
     result = builder.build(_input_batch(6, (1,) * 6), source)
     assert isinstance(result, GdnDecodeMetadata)
+    assert result.packed_read_state_indices is not None and result.packed_write_state_indices is not None
     torch.testing.assert_close(
-        result.conv_read_state_indices[0], torch.tensor([103, 205, 3482, 3584, -1, -1], dtype=torch.int32)
+        result.packed_read_state_indices[0, :, 0], torch.tensor([103, 205, 3482, 3584, -1, -1], dtype=torch.int32)
     )
     assert result.packed_read_state_indices.data_ptr() != result.packed_write_state_indices.data_ptr()
     torch.testing.assert_close(
-        result.ssm_read_state_indices[0], torch.tensor([2, 4, 68, 70, -1, -1], dtype=torch.int32)
+        result.packed_read_state_indices[0, :, 1], torch.tensor([2, 4, 68, 70, -1, -1], dtype=torch.int32)
     )
     torch.testing.assert_close(result.packed_read_state_indices, result.packed_write_state_indices)
 
@@ -1226,18 +1232,25 @@ def test_npu_shared_gdn_verify_updates_persistent_physical_indices(packed: bool)
     batch = _input_batch(4 if packed else 6, (1, 3) if packed else (3, 3))
     persistent = builder.allocate_persistent(batch, source)
     assert isinstance(persistent, GdnVerifyMetadata)
-    pointers = (persistent.conv_state_indices[0].data_ptr(), persistent.ssm_state_indices[0].data_ptr())
+    assert persistent.packed_state_indices is not None
+    pointers = (
+        persistent.packed_state_indices[0, :, 0].data_ptr(),
+        persistent.packed_state_indices[0, :, 1].data_ptr(),
+    )
     for ids in ([2, 4], [4, 1], [1, 3]):
         indices.copy_(torch.tensor(ids, dtype=torch.int32))
         builder.update_persistent(persistent, batch, source)
         torch.testing.assert_close(
-            persistent.conv_state_indices[0],
+            persistent.packed_state_indices[0, :, 0],
             layout.linear_state_indices(torch.tensor(ids, dtype=torch.int32), role="conv"),
         )
         torch.testing.assert_close(
-            persistent.ssm_state_indices[0], torch.tensor(ids, dtype=torch.int32) * layout.ssm_row_stride
+            persistent.packed_state_indices[0, :, 1], torch.tensor(ids, dtype=torch.int32) * layout.ssm_row_stride
         )
-        assert pointers == (persistent.conv_state_indices[0].data_ptr(), persistent.ssm_state_indices[0].data_ptr())
+        assert pointers == (
+            persistent.packed_state_indices[0, :, 0].data_ptr(),
+            persistent.packed_state_indices[0, :, 1].data_ptr(),
+        )
 
 
 def test_npu_slab_gdn_prefill_maps_distinct_read_and_write_roles() -> None:
@@ -1298,14 +1311,11 @@ def test_npu_slab_gdn_verify_refreshes_each_layers_role_rows(monkeypatch: pytest
     batch = _input_batch(12, (3, 3, 3, 3))
     persistent = builder.allocate_persistent(batch, source)
     assert isinstance(persistent, GdnVerifyMetadata)
+    assert persistent.packed_state_indices is not None
     assert persistent.layer_groups == {0: 0, 2: 1}
     packed = persistent.packed_state_indices
-    assert packed is not None and packed.shape == (2, 4, 2)
     packed_pointer = packed.data_ptr()
     assert builder._row_table.rows().data_ptr() == native_rows.data_ptr()
-    for role in (*persistent.conv_state_indices, *persistent.ssm_state_indices):
-        assert role.untyped_storage().data_ptr() == packed.untyped_storage().data_ptr()
-    pointers = tuple(tensor.data_ptr() for tensor in (*persistent.conv_state_indices, *persistent.ssm_state_indices))
     torch.testing.assert_close(
         packed,
         torch.tensor(
@@ -1322,12 +1332,7 @@ def test_npu_slab_gdn_verify_refreshes_each_layers_role_rows(monkeypatch: pytest
             [[[5, 18], [11, 42], [-1, -1], [-1, -1]], [[9, 36], [13, 48], [-1, -1], [-1, -1]]], dtype=torch.int32
         ),
     )
-    torch.testing.assert_close(persistent.conv_state_indices[0], packed[0, :, 0])
-    torch.testing.assert_close(persistent.ssm_state_indices[1], packed[1, :, 1])
-    assert packed.data_ptr() == packed_pointer
-    assert pointers == tuple(
-        tensor.data_ptr() for tensor in (*persistent.conv_state_indices, *persistent.ssm_state_indices)
-    )
+    assert persistent.packed_state_indices.data_ptr() == packed_pointer
     previous = packed.clone()
     source.linear_verify_graph = LinearVerifyGraphInputs(
         torch.tensor([1, 2, 0], dtype=torch.int32),
@@ -1338,11 +1343,12 @@ def test_npu_slab_gdn_verify_refreshes_each_layers_role_rows(monkeypatch: pytest
     )
     with pytest.raises(ValueError, match="packed state indices changed shape"):
         builder.update_persistent(persistent, _input_batch(9, (3, 3, 3)), source)
-    assert packed.shape == (2, 4, 2) and packed.data_ptr() == packed_pointer
-    torch.testing.assert_close(packed, previous)
+    assert persistent.packed_state_indices.data_ptr() == packed_pointer
+    torch.testing.assert_close(persistent.packed_state_indices, previous)
 
 
 def test_npu_slab_gdn_decode_keeps_independent_packed_read_and_write_owners(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_sentinel, write_sentinel = 19, 3
     layout = SharedKVCacheLayout(128, 8, 4, 8, 1, 32, 262144, num_linear_groups=2, num_slabs=4)
     monkeypatch.setattr(
         "xllm.python.layers.npu.qwen3_5.gdn_metadata_builder.detect_shared_kv_cache_layout", lambda caches: layout
@@ -1376,14 +1382,13 @@ def test_npu_slab_gdn_decode_keeps_independent_packed_read_and_write_owners(monk
     batch = _input_batch(4, (1, 1, 1, 1))
     persistent = builder.allocate_persistent(batch, source)
     assert isinstance(persistent, GdnDecodeMetadata)
+    assert persistent.packed_read_state_indices is not None and persistent.packed_write_state_indices is not None
     read, write = persistent.packed_read_state_indices, persistent.packed_write_state_indices
-    assert read is not None and write is not None
     assert read.data_ptr() != write.data_ptr()
     pointers = read.data_ptr(), write.data_ptr()
     torch.testing.assert_close(read, write)
-    read[0, 0, 0] = 19
-    assert persistent.conv_read_state_indices[0][0].item() == 19
-    assert persistent.conv_write_state_indices[0][0].item() == 3
+    read[0, 0, 0] = read_sentinel
+    assert persistent.packed_write_state_indices[0, 0, 0].item() == write_sentinel
 
     native_rows[0, 1] = 11
     indices.copy_(torch.tensor([2, 1, 0, -3], dtype=torch.int32))
@@ -1393,9 +1398,10 @@ def test_npu_slab_gdn_decode_keeps_independent_packed_read_and_write_owners(monk
     )
     torch.testing.assert_close(read, expected)
     torch.testing.assert_close(write, expected)
-    assert pointers == (read.data_ptr(), write.data_ptr())
-    for packed, role in ((read, persistent.ssm_read_state_indices[1]), (write, persistent.conv_write_state_indices[0])):
-        assert packed.untyped_storage().data_ptr() == role.untyped_storage().data_ptr()
+    assert pointers == (
+        persistent.packed_read_state_indices.data_ptr(),
+        persistent.packed_write_state_indices.data_ptr(),
+    )
 
     source.linear_state_read_indices = torch.tensor([1, 2, 0, -1], dtype=torch.int32)
     source.linear_state_write_indices = torch.tensor([2, 1, 0, -1], dtype=torch.int32)
@@ -1403,7 +1409,10 @@ def test_npu_slab_gdn_decode_keeps_independent_packed_read_and_write_owners(monk
         builder.update_persistent(persistent, batch, source)
     torch.testing.assert_close(read, expected)
     torch.testing.assert_close(write, expected)
-    assert pointers == (read.data_ptr(), write.data_ptr())
+    assert pointers == (
+        persistent.packed_read_state_indices.data_ptr(),
+        persistent.packed_write_state_indices.data_ptr(),
+    )
 
 
 @pytest.mark.parametrize("lengths", [(3, 3), (1, 3)], ids=["uniform", "ragged"])
@@ -1435,8 +1444,9 @@ def test_npu_shared_gdn_eager_verify_maps_logical_pages(lengths: tuple[int, int]
     )
     result = builder.build(_input_batch(sum(lengths), lengths), source)
     assert isinstance(result, GdnVerifyMetadata)
-    torch.testing.assert_close(result.conv_state_indices[0], layout.linear_state_indices(indices, role="conv"))
-    torch.testing.assert_close(result.ssm_state_indices[0], indices * layout.ssm_row_stride)
+    assert result.packed_state_indices is not None
+    torch.testing.assert_close(result.packed_state_indices[0, :, 0], layout.linear_state_indices(indices, role="conv"))
+    torch.testing.assert_close(result.packed_state_indices[0, :, 1], indices * layout.ssm_row_stride)
     torch.testing.assert_close(result.state_indices, indices)
     torch.testing.assert_close(result.num_accepted_tokens, accepted)
     if lengths[0] != 3:
@@ -1568,14 +1578,8 @@ def test_npu_shared_gdn_matches_dense_state_across_reordered_pages(width: int, p
             "packed_state_indices",
             "packed_read_state_indices",
             "packed_write_state_indices",
-            "conv_state_indices",
-            "ssm_state_indices",
             "read_state_indices",
             "write_state_indices",
-            "conv_read_state_indices",
-            "conv_write_state_indices",
-            "ssm_read_state_indices",
-            "ssm_write_state_indices",
         )
         for tensor in _flat_tensors(getattr(current, name, None))
     ]

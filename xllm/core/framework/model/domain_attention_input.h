@@ -33,6 +33,8 @@ struct PackedAttentionIntInput {
   const std::vector<int32_t>* values = nullptr;
   torch::Tensor* host_view = nullptr;
   torch::Tensor* device_view = nullptr;
+  const torch::Tensor* request_tensor = nullptr;
+  int32_t num_tokens_per_request = 0;
 };
 
 class AttentionHostInputView final {
@@ -132,6 +134,9 @@ class AttentionInputView final {
       uint64_t offset = 0;
       uint64_t bytes = 0;
       uint64_t aligned_bytes = 0;
+      int64_t num_tokens_per_request = 0;
+      int64_t num_requests = 0;
+      size_t bytes_per_request = 0;
     };
 
     auto align_up = [](uint64_t value, uint64_t alignment) {
@@ -153,8 +158,12 @@ class AttentionInputView final {
       if (source == nullptr || bytes == 0) {
         return;
       }
-      entries.emplace_back(Entry{
-          source, std::move(sizes), dtype, host_target, target, 0, bytes, 0});
+      entries.emplace_back(Entry{.source = source,
+                                 .sizes = std::move(sizes),
+                                 .dtype = dtype,
+                                 .host_target = host_target,
+                                 .target = target,
+                                 .bytes = bytes});
     };
     auto add_int_vector = [&add_raw](const std::vector<int32_t>& values,
                                      torch::Tensor* host_target,
@@ -169,30 +178,54 @@ class AttentionInputView final {
               host_target,
               target);
     };
-    auto add_cpu_tensor = [&entries, &tensor_sources](
+    auto add_tensor = [&entries](const torch::Tensor& source,
+                                 torch::Tensor* host_target,
+                                 torch::Tensor* target,
+                                 int64_t num_tokens_per_request = 0) {
+      const int64_t out_numel =
+          source.numel() *
+          (num_tokens_per_request > 0 ? num_tokens_per_request : 1);
+      if (out_numel == 0) {
+        return;
+      }
+      std::vector<int64_t> sizes = num_tokens_per_request > 0
+                                       ? std::vector<int64_t>{out_numel}
+                                       : source.sizes().vec();
+      const int64_t num_reqs = num_tokens_per_request > 0 ? source.size(0) : 0;
+      const size_t bytes_per_request =
+          num_tokens_per_request > 0
+              ? static_cast<size_t>(source.size(1)) * source.element_size()
+              : 0;
+      entries.emplace_back(Entry{
+          .source = source.data_ptr(),
+          .sizes = std::move(sizes),
+          .dtype = source.scalar_type(),
+          .host_target = host_target,
+          .target = target,
+          .bytes = static_cast<uint64_t>(out_numel * source.element_size()),
+          .num_tokens_per_request = num_tokens_per_request,
+          .num_requests = num_reqs,
+          .bytes_per_request = bytes_per_request});
+    };
+    auto add_cpu_tensor = [&add_tensor, &tensor_sources](
                               const torch::Tensor& tensor,
                               torch::Tensor* target) {
       if (!tensor.defined() || !tensor.device().is_cpu()) {
         return;
       }
       tensor_sources.emplace_back(tensor.contiguous());
-      const torch::Tensor& source = tensor_sources.back();
-      const uint64_t bytes =
-          static_cast<uint64_t>(source.numel() * source.element_size());
-      if (bytes == 0) {
-        return;
-      }
-      entries.emplace_back(Entry{source.data_ptr(),
-                                 source.sizes().vec(),
-                                 source.scalar_type(),
-                                 nullptr,
-                                 target,
-                                 0,
-                                 bytes,
-                                 0});
+      add_tensor(tensor_sources.back(), nullptr, target);
     };
 
     for (const PackedIntInput& extra : extra_int_inputs) {
+      if (extra.request_tensor != nullptr) {
+        tensor_sources.emplace_back(extra.request_tensor->contiguous());
+        add_tensor(tensor_sources.back(),
+                   extra.host_view,
+                   extra.device_view,
+                   extra.num_tokens_per_request);
+        continue;
+      }
       CHECK(extra.values != nullptr);
       add_int_vector(*extra.values, extra.host_view, extra.device_view);
     }
@@ -243,7 +276,21 @@ class AttentionInputView final {
 
     auto* host_base = static_cast<char*>(attention_host_buffer.data_ptr());
     for (const auto& entry : entries) {
-      std::memcpy(host_base + entry.offset, entry.source, entry.bytes);
+      char* dst = host_base + entry.offset;
+      if (entry.num_tokens_per_request > 0) {
+        const auto* src = static_cast<const char*>(entry.source);
+        for (int64_t req_idx = 0; req_idx < entry.num_requests; ++req_idx) {
+          const char* request_data =
+              src + static_cast<size_t>(req_idx) * entry.bytes_per_request;
+          for (int64_t repeat = 0; repeat < entry.num_tokens_per_request;
+               ++repeat) {
+            std::memcpy(dst, request_data, entry.bytes_per_request);
+            dst += entry.bytes_per_request;
+          }
+        }
+      } else {
+        std::memcpy(dst, entry.source, entry.bytes);
+      }
       if (entry.aligned_bytes > entry.bytes) {
         std::memset(host_base + entry.offset + entry.bytes,
                     0,

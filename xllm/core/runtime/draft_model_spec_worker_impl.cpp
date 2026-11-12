@@ -26,6 +26,7 @@ limitations under the License.
 
 #include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
@@ -209,6 +210,9 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
   }
   if (impl_->get_status() == WorkerImpl::Status::LOADED) {
     context_ = impl_->context_;
+    target_verify_mode_ = mtp_async::classify_target_spec_verify_mode(
+        context_.get_model_args().model_type(),
+        ModelConfig::is_python_model_impl(context_.get_model_impl()));
   }
   if (result && draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
@@ -477,6 +481,113 @@ void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input(
             ? input.host_positions().select(/*dim=*/1, row_idx)
             : torch::Tensor());
   }
+}
+
+template <typename TargetInput>
+int32_t DraftModelSpecWorkerImpl<TargetInput>::logical_block_size() const {
+  CHECK_GT(options_.block_size(), 0);
+  const int32_t kv_split_size = parallel_args_.kv_split_size_effective();
+  CHECK_GT(kv_split_size, 0);
+  return options_.block_size() * kv_split_size;
+}
+
+template <typename TargetInput>
+void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
+    TargetInput& input,
+    const std::vector<EmbeddingCache::DecodeState>& last_states) const {
+  const bool enable_cache_correction = this->enable_schedule_overlap();
+  const bool chunked_verify = uses_chunked_verify();
+  const bool positions_decoupled =
+      impl_ != nullptr &&
+      !impl_->context_.get_model_args().rope_scaling_mrope_section().empty();
+  const int32_t num_sequences = input.input_params.meta.num_sequences;
+  CHECK_EQ(last_states.size(), static_cast<size_t>(num_sequences))
+      << "decode context state count mismatch";
+
+  std::vector<int32_t> token_ids_vec;
+  std::vector<int32_t> positions_vec;
+  std::vector<int32_t> kv_seq_lens_vec;
+  token_ids_vec.reserve(num_sequences);
+  positions_vec.reserve(num_sequences);
+  kv_seq_lens_vec.reserve(static_cast<size_t>(num_sequences));
+
+  const Slice<int32_t> input_token_ids = tensor_slice(input.token_ids_host);
+  const Slice<int32_t> input_positions = tensor_slice(input.positions_host);
+  const torch::Tensor& block_tables =
+      input.input_params.attention.host.block_tables;
+  const bool clamp_active =
+      chunked_verify && block_tables.defined() && block_tables.dim() == 2;
+  const int32_t verify_lens = options_.num_speculative_tokens() + 1;
+  const int32_t allocated_kv_len =
+      clamp_active
+          ? static_cast<int32_t>(block_tables.size(1)) * logical_block_size()
+          : 0;
+
+  for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
+    CHECK_LT(static_cast<size_t>(seq_id), input_token_ids.size());
+    CHECK_LT(static_cast<size_t>(seq_id), input_positions.size());
+    const EmbeddingCache::DecodeState& state = last_states[seq_id];
+    const int32_t input_token_id = input_token_ids[seq_id];
+    const bool input_is_fake_token = input_token_id < 0;
+    const bool rewrite_fake_token =
+        enable_cache_correction && input_is_fake_token;
+    const bool use_cache_correction = rewrite_fake_token && state.valid;
+    const int32_t position_offset =
+        use_cache_correction ? state.position_offset : 0;
+    int32_t current_position = input_positions[seq_id] + position_offset;
+    int32_t current_kv_len =
+        input.input_params.attention.host.kv_seq_lens[seq_id] + position_offset;
+    int32_t expected_kv_len =
+        positions_decoupled ? current_kv_len : current_position + 1;
+    if (clamp_active && seq_id < block_tables.size(0)) {
+      const int32_t max_valid_position = allocated_kv_len - verify_lens;
+      if (current_position > max_valid_position) {
+        CHECK_GT(allocated_kv_len, 0)
+            << "decode context has empty block table, seq_id=" << seq_id;
+        CHECK_GE(max_valid_position, 0)
+            << "decode context block table is too small for validation, "
+            << "seq_id=" << seq_id << ", allocated_kv_len=" << allocated_kv_len
+            << ", verify_lens=" << verify_lens;
+        CHECK_LE(current_position - max_valid_position, verify_lens)
+            << "decode context position exceeds allocated blocks, seq_id="
+            << seq_id << ", current_position=" << current_position
+            << ", current_kv_len=" << current_kv_len
+            << ", allocated_kv_len=" << allocated_kv_len;
+        current_position = max_valid_position;
+        expected_kv_len = current_position + 1;
+        current_kv_len = std::min(current_kv_len, expected_kv_len);
+      }
+    }
+    if (chunked_verify && current_kv_len < expected_kv_len) {
+      CHECK_LE(expected_kv_len - current_kv_len, verify_lens)
+          << "decode context kv_len lag is too large, seq_id=" << seq_id
+          << ", current_position=" << current_position
+          << ", current_kv_len=" << current_kv_len;
+      current_kv_len = expected_kv_len;
+    }
+    if (chunked_verify && current_kv_len > expected_kv_len) {
+      // First decode step: the prompt KV length with a zero-initialized
+      // position; align the position to the KV context.
+      current_position = current_kv_len - 1;
+      expected_kv_len = current_kv_len;
+    }
+
+    CHECK_EQ(expected_kv_len, current_kv_len)
+        << "decode context position/kv_len mismatch, seq_id=" << seq_id
+        << ", current_position=" << current_position
+        << ", current_kv_len=" << current_kv_len;
+
+    token_ids_vec.emplace_back(rewrite_fake_token ? state.token_id
+                                                  : input_token_id);
+    positions_vec.emplace_back(current_position);
+    kv_seq_lens_vec.emplace_back(current_kv_len);
+  }
+
+  input.token_ids_host = make_pinned_cpu_tensor(token_ids_vec);
+  input.positions_host = make_pinned_cpu_tensor(positions_vec);
+  input.input_params.attention.host.kv_seq_lens = std::move(kv_seq_lens_vec);
+  input.runtime.input_host_buffer_has_layout = false;
+  input.runtime.device_tensors_ready = false;
 }
 
 template class DraftModelSpecWorkerImpl<LlmForwardInput>;

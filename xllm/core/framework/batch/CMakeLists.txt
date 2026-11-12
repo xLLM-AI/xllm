@@ -3,6 +3,21 @@ include(cc_library)
 
 cc_library(
   NAME
+    decode_input_builder
+  HDRS
+    decode_input_builder.h
+  SRCS
+    decode_input_builder.cpp
+  DEPS
+    :model
+    :common
+    :util
+    glog::glog
+    torch
+)
+
+cc_library(
+  NAME
     batch
   HDRS
     dit_batch.h
@@ -45,6 +60,7 @@ cc_library(
     :eplb
     :request
     :runtime
+    :model
     :common
     :util
     :mposition

@@ -26,6 +26,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/common/constants.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/seq_lens.h"
 #include "runtime/decode_graph_bucket.h"
@@ -226,7 +227,7 @@ std::optional<GraphLayout> get_graph_layout(
          alignment) *
         alignment;
     layout.padded_num_tokens = layout.padded_num_reqs * tokens_per_request;
-    layout.cache_pad_slot = xllm::util::kPadSlotId;
+    layout.cache_pad_slot = xllm::kPadSlotId;
   } else {
     layout.padded_num_tokens = bucket_units;
     if (layout.padded_num_tokens < tokens ||
@@ -348,7 +349,7 @@ GraphDecision MluGraphPlanner::plan(int64_t tokens,
   }
   if (config_.capabilities.graph_context_policy ==
       GraphContextPolicy::QWEN_FULL_ATTENTION) {
-    layout->cache_pad_slot = xllm::util::kPadSlotId;
+    layout->cache_pad_slot = xllm::kPadSlotId;
   }
   const int64_t capacity = params.attention.device.block_tables.defined()
                                ? config_.history_capacity

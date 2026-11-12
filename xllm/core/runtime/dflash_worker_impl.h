@@ -22,9 +22,11 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/framework/batch/decode_input_builder.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
+#include "core/util/tensor_helper.h"
 #include "framework/model/model_args.h"
 #include "runtime/draft_model_spec_worker_impl.h"
 #include "runtime/llm_worker_impl.h"
@@ -42,12 +44,6 @@ inline void invalidate_draft_model_geometry(LlmModelParams& input_params) {
   // must not reach the draft metadata builder, including during graph warmup.
   input_params.clear_linear_attention_state();
 }
-
-enum class DraftRowLayout : uint8_t {
-  SEQUENCE,
-  BLOCK_ROWS,
-  SPARSE_INDICES,
-};
 
 }  // namespace dflash_detail
 
@@ -94,16 +90,22 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                                LlmForwardInput& validate_input);
 
   int32_t draft_query_width_;
-  dflash_detail::DraftRowLayout draft_row_layout_ =
-      dflash_detail::DraftRowLayout::SEQUENCE;
-  bool draft_needs_dummy_rows_ = false;
+  bool draft_input_per_request_ = true;
+  BatchForwardType draft_forward_type_ = BatchForwardType::CHUNKED_PREFILL;
+  bool draft_needs_dummy_tokens_ = false;
+  bool sample_from_anchor_ = false;
 
  private:
+  DecodeExpansionOptions prepare_for_draft() const;
+
+  bool prepare_parallel_draft_metadata(
+      LlmForwardInput& query_input,
+      const DecodeExpansionOptions& decode_options);
+
   void fill_validate_input_from_draft_outputs(
       const DraftProposal& draft_proposal,
       LlmForwardInput& validate_input,
       Stream& compute_stream);
-
   std::optional<ForwardOutput> run_validate(const LlmForwardInput& input,
                                             const DraftProposal& draft_proposal,
                                             LlmForwardInput& validate_input);
@@ -111,10 +113,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   // Mirrors sampled tokens to rank 0 under schedule-overlap so every rank
   // commits the same prefix. No-op for a single rank.
   void maybe_broadcast_spec_tokens(torch::Tensor& tokens);
-
-  void update_decode_step_input(
-      LlmForwardInput& input,
-      const std::vector<EmbeddingCache::DecodeState>& last_states) const;
 
   std::vector<std::string> write_context_kv(
       const LlmForwardInput& input,
@@ -127,18 +125,17 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
       const SampleOutput& validate_output);
 
  protected:
-  // Shared by the DSpark/DFlash2 sampling sites.
+  torch::Tensor anchor_token_ids(const LlmForwardInput& input) const;
+
   ProcessGroup* sampling_process_group_ = nullptr;
 
-  // Block drafts (DFlash2/DSpark) condition their first step on the decode
-  // batch's first tokens.
-  torch::Tensor anchor_token_ids(const LlmForwardInput& input) const;
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;
   // Whether the target model owns recurrent (linear attention) layers.
-  // Fixed once the target finishes loading; hybrid spec-verify gates read
-  // this instead of re-scanning layer_types.
   bool target_is_hybrid_recurrent_ = false;
+
+ private:
+  CachedDeviceIndices draft_logits_indices_;
 };
 
 }  // namespace xllm

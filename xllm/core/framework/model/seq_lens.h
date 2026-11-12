@@ -25,13 +25,23 @@ limitations under the License.
 #include <numeric>
 #include <vector>
 
+#include "core/common/constants.h"
 #include "core/util/slice.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 
 namespace xllm::util {
 
-// Writes to this slot are dropped by the kernel instead of landing in block 0.
-inline constexpr int32_t kPadSlotId = -1;
+inline std::vector<torch::Tensor> gather_block_tables(
+    std::vector<std::vector<std::vector<int32_t>>>& tables) {
+  std::vector<torch::Tensor> out;
+  out.reserve(tables.size());
+  for (auto& manager_tables : tables) {
+    pad_2d_vector(manager_tables, -1);
+    out.emplace_back(create_2d_tensor(manager_tables, torch::kInt));
+  }
+  return out;
+}
 
 inline int32_t max_len(const Slice<int32_t>& lens) {
   return lens.empty() ? 0 : *std::max_element(lens.begin(), lens.end());
@@ -79,27 +89,27 @@ inline void pad_uniform_decode_lens(std::vector<int32_t>& q_seq_lens,
 }
 
 inline void fill_query_start_loc(const torch::Tensor& seq_lens,
-                                 int64_t num_sequences,
+                                 int64_t num_requests,
                                  torch::Tensor& dst) {
   torch::Tensor cumsum_dst =
-      dst.slice(/*dim=*/0, /*start=*/1, /*end=*/num_sequences + 1);
+      dst.slice(/*dim=*/0, /*start=*/1, /*end=*/num_requests + 1);
   torch::cumsum_out(
       cumsum_dst,
-      seq_lens.slice(/*dim=*/0, /*start=*/0, /*end=*/num_sequences),
+      seq_lens.slice(/*dim=*/0, /*start=*/0, /*end=*/num_requests),
       /*dim=*/0,
       /*dtype=*/torch::kInt32);
 }
 
 inline torch::Tensor make_query_start_loc(const torch::Tensor& seq_lens,
-                                          int64_t num_sequences = -1) {
+                                          int64_t num_requests = -1) {
   if (!seq_lens.defined()) {
     return {};
   }
-  num_sequences = num_sequences < 0 ? seq_lens.numel() : num_sequences;
-  torch::Tensor cumulative = torch::empty(
-      {num_sequences + 1}, seq_lens.options().dtype(torch::kInt32));
+  num_requests = num_requests < 0 ? seq_lens.numel() : num_requests;
+  torch::Tensor cumulative =
+      torch::empty({num_requests + 1}, seq_lens.options().dtype(torch::kInt32));
   cumulative[0].fill_(/*value=*/0);
-  fill_query_start_loc(seq_lens, num_sequences, cumulative);
+  fill_query_start_loc(seq_lens, num_requests, cumulative);
   return cumulative;
 }
 
@@ -176,6 +186,20 @@ inline int32_t slot_for_position(const BlockIds& block_ids,
   }
   return static_cast<int32_t>(static_cast<int64_t>(block_id) * block_size +
                               pos % block_size);
+}
+
+template <bool Ring>
+inline int32_t compute_slot_mapping(const Slice<int32_t>& block_table,
+                                    int64_t pos,
+                                    int64_t block_size) {
+  CHECK_GT(block_size, 0);
+  const int32_t slot = slot_for_position<Ring>(
+      block_table, pos, block_size, static_cast<int64_t>(block_table.size()));
+  CHECK_NE(slot, kPadSlotId)
+      << "block table index out of range or invalid block id,"
+      << " position=" << pos << ", block_size=" << block_size
+      << ", block_table_size=" << block_table.size();
+  return slot;
 }
 
 }  // namespace xllm::util

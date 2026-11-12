@@ -1213,12 +1213,8 @@ Input ForwardInputBuilder::state_to_forward_input() {
       input_params.attention.device.block_tables;
 
   // Setup grouped cache block tables.
-  input_params.multi_block_tables.reserve(state_.multi_block_tables.size());
-  for (auto& mgr_tables : state_.multi_block_tables) {
-    util::pad_2d_vector(mgr_tables, /*pad_value=*/-1);
-    input_params.multi_block_tables.emplace_back(
-        create_2d_tensor(mgr_tables, torch::kInt));
-  }
+  input_params.multi_block_tables =
+      util::gather_block_tables(state_.multi_block_tables);
 
   if (input_embeddings_vec_.size() != 0) {
     input_params.embedding.input_embedding = torch::cat(input_embeddings_vec_);

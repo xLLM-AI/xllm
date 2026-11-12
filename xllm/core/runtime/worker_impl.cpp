@@ -1248,7 +1248,6 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     Input& processed_input,
     Stream& prepare_stream,
     bool record_ready_event,
-    bool restore_linear_state,
     bool wait_for_compute_stream) {
   if (!input.json_object_state_snapshots.empty()) {
     Input restored_input = input.clone();
@@ -1257,7 +1256,6 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
                                                processed_input,
                                                prepare_stream,
                                                record_ready_event,
-                                               restore_linear_state,
                                                wait_for_compute_stream);
     return;
   }
@@ -1391,7 +1389,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
       prepare_input_params_for_linear_attention(input_params);
       // Overlap restores in the worker thread on compute_stream_, after the
       // preceding chunk finishes writing its live slots.
-      if (restore_linear_state && !enable_schedule_overlap()) {
+      if (!enable_schedule_overlap()) {
         prepare_linear_state_cache(ModelParamsView(input_params));
       }
     }
@@ -2381,26 +2379,18 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     const LlmForwardInput& input,
     LlmForwardInput& processed_input,
     Stream& prepare_stream,
-    bool record_ready_event,
-    bool restore_linear_state) {
-  prepare_work_before_execute_on_stream_impl(input,
-                                             processed_input,
-                                             prepare_stream,
-                                             record_ready_event,
-                                             restore_linear_state);
+    bool record_ready_event) {
+  prepare_work_before_execute_on_stream_impl(
+      input, processed_input, prepare_stream, record_ready_event);
 }
 
 void WorkerImpl::prepare_work_before_execute_on_stream(
     const VlmForwardInput& input,
     VlmForwardInput& processed_input,
     Stream& prepare_stream,
-    bool record_ready_event,
-    bool restore_linear_state) {
-  prepare_work_before_execute_on_stream_impl(input,
-                                             processed_input,
-                                             prepare_stream,
-                                             record_ready_event,
-                                             restore_linear_state);
+    bool record_ready_event) {
+  prepare_work_before_execute_on_stream_impl(
+      input, processed_input, prepare_stream, record_ready_event);
 }
 
 void WorkerImpl::restore_json_object_states(LlmForwardInput& input) {

@@ -28,6 +28,7 @@ limitations under the License.
 #include <type_traits>
 #include <unordered_map>
 
+#include "core/common/constants.h"
 #include "core/common/global_flags.h"
 #include "core/common/metrics.h"
 #include "core/common/types.h"
@@ -350,9 +351,8 @@ std::optional<Params> CudaGraphPersistentParam::update(
         << "padded_num_tokens must be > 0 when return_capture_params is true";
     params_for_capture.emplace(copy_graph_execution_input(params));
   }
-  const GraphExecutionInput<Params> graph_input(params);
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
-      build_graph_attention_metadata(graph_input,
+      build_graph_attention_metadata(params,
                                      args_,
                                      /*skip_cu_seq_lens=*/true);
   auto build_capture_params_if_needed = [&]() -> std::optional<Params> {
@@ -445,7 +445,7 @@ std::optional<Params> CudaGraphPersistentParam::update(
           .slice(/*dim=*/0,
                  /*start=*/actual_num_tokens,
                  /*end=*/padded_num_tokens)
-          .fill_(util::kPadSlotId);
+          .fill_(kPadSlotId);
     }
 
     // Keep metadata tensors pointing to persistent buffers used by graph

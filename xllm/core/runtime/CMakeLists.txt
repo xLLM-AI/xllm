@@ -44,7 +44,6 @@ cc_library(
     draft_model_spec_worker_impl.h
     speculative_worker_impl.h
     mtp_worker_impl.h
-    mtp_runtime_helpers.h
     suffix_worker_impl.h
     eagle3_worker_impl.h
     dflash_worker_impl.h
@@ -85,7 +84,6 @@ cc_library(
     draft_model_spec_worker_impl.cpp
     speculative_worker_impl.cpp
     mtp_worker_impl.cpp
-    mtp_runtime_helpers.cpp
     suffix_worker_impl.cpp
     eagle3_worker_impl.cpp
     dflash_worker_impl.cpp
@@ -102,6 +100,7 @@ cc_library(
     :model_context
     :request
     :speculative
+    :decode_input_builder
     :encoder_cache
     :state_dict
     :dit_cache

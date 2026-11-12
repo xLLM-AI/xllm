@@ -24,6 +24,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/common/constants.h"
 #include "core/common/metrics.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -162,9 +163,8 @@ std::optional<Params> DcuGraphPersistentParam::update(
     params_for_capture.emplace(copy_graph_execution_input(params));
   }
 
-  const GraphExecutionInput<Params> graph_input(params);
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
-      build_graph_attention_metadata(graph_input,
+      build_graph_attention_metadata(params,
                                      args_,
                                      /*skip_cu_seq_lens=*/true);
   if (params.meta.batch_forward_type.is_decode()) {
@@ -253,8 +253,7 @@ std::optional<Params> DcuGraphPersistentParam::update(
         .copy_(params.attention.device.new_cache_slots, /*non_blocking=*/true);
 
     if (padded_num_tokens > src_size) {
-      new_cache_slots_.slice(0, src_size, padded_num_tokens)
-          .fill_(util::kPadSlotId);
+      new_cache_slots_.slice(0, src_size, padded_num_tokens).fill_(kPadSlotId);
     }
 
     attn_metadata->slot_mapping = new_cache_slots(padded_num_tokens);
@@ -396,8 +395,7 @@ void DcuGraphPersistentParam::update_decode_input_buffer(
         .copy_(params.attention.device.new_cache_slots, /*non_blocking=*/true);
 
     if (padded_num_tokens > src_size) {
-      new_cache_slots_.slice(0, src_size, padded_num_tokens)
-          .fill_(util::kPadSlotId);
+      new_cache_slots_.slice(0, src_size, padded_num_tokens).fill_(kPadSlotId);
     }
   }
 

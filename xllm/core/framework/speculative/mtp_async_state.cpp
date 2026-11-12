@@ -197,18 +197,14 @@ AcceptedTokenMetadata build_accepted_token_metadata(
   return metadata;
 }
 
-torch::Tensor make_row_positions(const AcceptedState& state,
-                                 const torch::Tensor& offsets) {
+torch::Tensor make_positions(const AcceptedState& state,
+                             const torch::Tensor& offsets) {
   return state.base_positions.unsqueeze(1) +
          offsets.to(state.base_positions.options()).unsqueeze(0);
 }
 
 torch::Tensor make_kv_seq_lens(const AcceptedState& state,
-                               const torch::Tensor& offsets,
-                               bool use_chunked_prefill) {
-  if (use_chunked_prefill) {
-    return state.base_kv_seq_lens;
-  }
+                               const torch::Tensor& offsets) {
   return (state.base_kv_seq_lens.unsqueeze(1) +
           offsets.to(state.base_kv_seq_lens.options()).unsqueeze(0))
       .flatten();

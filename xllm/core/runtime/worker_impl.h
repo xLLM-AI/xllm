@@ -131,13 +131,11 @@ class WorkerImpl {
   void prepare_work_before_execute_on_stream(const LlmForwardInput& input,
                                              LlmForwardInput& processed_input,
                                              Stream& prepare_stream,
-                                             bool record_ready_event = true,
-                                             bool restore_linear_state = true);
+                                             bool record_ready_event = true);
   void prepare_work_before_execute_on_stream(const VlmForwardInput& input,
                                              VlmForwardInput& processed_input,
                                              Stream& prepare_stream,
-                                             bool record_ready_event = true,
-                                             bool restore_linear_state = true);
+                                             bool record_ready_event = true);
   // Prepare shared mappings and new block contents on the owning stream.
   void prepare_shared_kv_cache(
       const std::vector<int32_t>& full_block_rows,
@@ -437,14 +435,6 @@ class WorkerImpl {
   template <typename Input>
   void restore_json_object_states_impl(Input& input);
   template <typename Input>
-  void prepare_work_before_execute_on_stream_impl(
-      const Input& input,
-      Input& processed_input,
-      Stream& prepare_stream,
-      bool record_ready_event,
-      bool restore_linear_state,
-      bool wait_for_compute_stream = true);
-  template <typename Input>
   folly::SemiFuture<std::optional<ForwardOutput>> step_async_impl(
       const Input& input);
   template <typename Params>
@@ -455,6 +445,13 @@ class WorkerImpl {
       const Params& input_params) const;
   template <typename Params>
   bool can_skip_npu_graph_decode_sync_impl(const Params& input_params) const;
+  template <typename Input>
+  void prepare_work_before_execute_on_stream_impl(
+      const Input& input,
+      Input& processed_input,
+      Stream& prepare_stream,
+      bool record_ready_event,
+      bool wait_for_compute_stream = true);
   template <typename Params>
   void prepare_mla_prefixcache_inputs_impl(Params& input_params);
 #if defined(USE_NPU)

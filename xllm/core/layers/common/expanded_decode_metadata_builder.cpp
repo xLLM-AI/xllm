@@ -17,12 +17,16 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
+#include <numeric>
 #include <utility>
 #include <vector>
 
 #include "core/framework/model/llm_model_params.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/seq_lens.h"
 #include "core/framework/model/vlm_model_params.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm::layer {
 namespace {
@@ -37,6 +41,28 @@ std::vector<int32_t> expand_host_kv_seq_lens(
     expanded.emplace_back(kv_seq_len);
   }
   return expanded;
+}
+
+torch::Tensor expand_block_tables(const torch::Tensor& block_tables,
+                                  const std::vector<int32_t>& q_seq_lens) {
+  CHECK_EQ(block_tables.dim(), 2);
+  CHECK_GE(block_tables.size(0), static_cast<int64_t>(q_seq_lens.size()))
+      << "block table rows are fewer than sequences";
+
+  const int64_t num_tokens =
+      std::accumulate(q_seq_lens.begin(), q_seq_lens.end(), int64_t{0});
+  CHECK_GT(num_tokens, 0) << "tokenwise expansion requires query tokens";
+  const bool uniform = std::all_of(
+      q_seq_lens.begin(),
+      q_seq_lens.end(),
+      [width = q_seq_lens.front()](int32_t len) { return len == width; });
+  if (uniform) {
+    return block_tables.repeat_interleave(q_seq_lens.front(), /*dim=*/0);
+  }
+  return block_tables.repeat_interleave(
+      async_h2d_tensor(q_seq_lens, block_tables.device()),
+      /*dim=*/0,
+      /*output_size=*/num_tokens);
 }
 
 }  // namespace
@@ -116,15 +142,15 @@ void ExpandedDecodeMetadataBuilder::populate_expanded_layout(
                                      last_page_lens));
   }
 
-  torch::Tensor page_counts_tensor = torch::tensor(
+  const torch::Tensor page_counts_tensor = torch::tensor(
       page_counts, expanded_block_tables.options().dtype(torch::kInt32));
-  torch::Tensor page_offsets = torch::arange(expanded_block_tables.size(1),
-                                             expanded_block_tables.options());
-  torch::Tensor valid_pages =
+  const torch::Tensor page_offsets = torch::arange(
+      expanded_block_tables.size(1), expanded_block_tables.options());
+  const torch::Tensor valid_pages =
       page_offsets.unsqueeze(0) < page_counts_tensor.unsqueeze(1);
-
   target.graph.expanded_paged_kv_indices =
       expanded_block_tables.masked_select(valid_pages).contiguous();
+
   target.graph.expanded_paged_kv_indptr = torch::tensor(
       indptr, expanded_block_tables.options().dtype(torch::kInt32));
   target.graph.expanded_paged_kv_last_page_len = torch::tensor(
@@ -258,5 +284,47 @@ template void ExpandedDecodeMetadataBuilder::populate(ModelParamsView,
                                                       const VlmModelParams&,
                                                       const torch::Tensor&,
                                                       int32_t);
+
+void ExpandedDecodeMetadataBuilder::reset_expanded_decode_metadata(
+    ModelParamsView target) {
+  target.graph.use_expanded_decode_for_spec_verify_attention = false;
+  target.graph.expanded_kv_seq_lens = torch::Tensor();
+  target.graph.expanded_block_tables = torch::Tensor();
+  target.graph.expanded_paged_kv_indptr = torch::Tensor();
+  target.graph.expanded_paged_kv_indices = torch::Tensor();
+  target.graph.expanded_paged_kv_last_page_len = torch::Tensor();
+  target.graph.expanded_tiling_data = torch::Tensor();
+  target.graph.expanded_kv_seq_lens_vec.clear();
+}
+
+bool ExpandedDecodeMetadataBuilder::update_expanded_decode_host_metadata(
+    ModelParamsView target) {
+  reset_expanded_decode_metadata(target);
+  if (target.attention.host.q_seq_lens.empty() ||
+      target.attention.host.kv_seq_lens.empty()) {
+    return false;
+  }
+  std::vector<int32_t> expanded_kv_seq_lens = build_tokenwise_kv_seq_lens(
+      target.attention.host.q_seq_lens, target.attention.host.kv_seq_lens);
+  target.graph.use_expanded_decode_for_spec_verify_attention = true;
+  target.graph.expanded_kv_seq_lens_vec = std::move(expanded_kv_seq_lens);
+  return true;
+}
+
+void ExpandedDecodeMetadataBuilder::update_expanded_decode_metadata(
+    ModelParamsView target,
+    const torch::Device& device,
+    int32_t block_size) {
+  if (!update_expanded_decode_host_metadata(target)) {
+    return;
+  }
+  populate_expanded_layout(
+      target,
+      async_h2d_tensor(target.graph.expanded_kv_seq_lens_vec, device),
+      expand_block_tables(target.attention.device.block_tables,
+                          target.attention.host.q_seq_lens),
+      target.graph.expanded_kv_seq_lens_vec,
+      block_size);
+}
 
 }  // namespace xllm::layer

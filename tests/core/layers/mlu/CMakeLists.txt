@@ -59,7 +59,7 @@ cc_test(
     glm5_next_kpool_indexer_test.cpp
   DEPS
     :util
-    :speculative
+    :decode_input_builder
     :config
     :mlu_layers
     :common_layers

@@ -54,13 +54,6 @@ class GdnPrefillMetadata(GdnMetadata):
 class GdnDecodeMetadata(GdnMetadata):
     read_state_indices: torch.Tensor
     write_state_indices: torch.Tensor
-    # Shared physical slots expose separate row spaces for Conv and SSM
-    # states, per Linear group.  The legacy fields above remain the
-    # common-index fast path.
-    conv_read_state_indices: tuple[torch.Tensor, ...] = ()
-    conv_write_state_indices: tuple[torch.Tensor, ...] = ()
-    ssm_read_state_indices: tuple[torch.Tensor, ...] = ()
-    ssm_write_state_indices: tuple[torch.Tensor, ...] = ()
     layer_groups: Mapping[int, int] = field(default_factory=dict)
     # [layer group, batch, (Conv physical slot, SSM physical checkpoint row)].
     packed_read_state_indices: torch.Tensor | None = None
@@ -82,10 +75,6 @@ class GdnVerifyMetadata(GdnMetadata):
     # Device prefix endpoints for the fused packed verifier. Cache strides
     # and previous acceptance counts remain independent of current widths.
     cu_seqlens: torch.Tensor | None = None
-    # Physical role rows of the shared arena, per Linear group. Packed
-    # indices let the fused kernel access both independent arenas directly.
-    conv_state_indices: tuple[torch.Tensor, ...] = ()
-    ssm_state_indices: tuple[torch.Tensor, ...] = ()
     layer_groups: Mapping[int, int] = field(default_factory=dict)
     packed_state_indices: torch.Tensor | None = None
 
