@@ -24,6 +24,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/common/constants.h"
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
@@ -522,13 +523,10 @@ void AttentionMetadataBuilder::build_linear_prefill(
   const int64_t schedule_size = attn_metadata.chunk_indices.size(0);
   const int64_t max_num_programs =
       std::max(kDefaultMaxNumPrograms, schedule_size) * 2;
-  torch::Tensor batch_ptr = torch::full({max_num_programs},
-                                        util::kPadSlotId,
-                                        attn_metadata.chunk_indices.options());
-  torch::Tensor token_block_offset_ptr =
-      torch::full({max_num_programs},
-                  util::kPadSlotId,
-                  attn_metadata.chunk_indices.options());
+  torch::Tensor batch_ptr = torch::full(
+      {max_num_programs}, kPadSlotId, attn_metadata.chunk_indices.options());
+  torch::Tensor token_block_offset_ptr = torch::full(
+      {max_num_programs}, kPadSlotId, attn_metadata.chunk_indices.options());
   batch_ptr.narrow(/*dim=*/0, /*start=*/0, /*length=*/schedule_size)
       .copy_(attn_metadata.chunk_indices.select(/*dim=*/1, /*index=*/0));
   token_block_offset_ptr

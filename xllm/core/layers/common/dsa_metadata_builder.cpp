@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "attention_metadata.h"
 #include "attention_metadata_builder.h"
+#include "core/common/constants.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/util/tensor_helper.h"
 #include "dsa_metadata.h"
@@ -270,7 +271,7 @@ torch::Tensor DSAMetadataBuilder::expand_blocks_to_slots(
     int32_t batch_size,
     int64_t total_tokens) {
   const int32_t bs = gi.block_size;
-  auto slots = torch::full({total_tokens}, util::kPadSlotId, torch::kInt32);
+  auto slots = torch::full({total_tokens}, kPadSlotId, torch::kInt32);
   auto slots_acc = slots.accessor<int32_t, 1>();
   auto bt_acc = block_table.accessor<int32_t, 2>();
   const int32_t max_blocks = static_cast<int32_t>(block_table.size(1));
@@ -408,7 +409,7 @@ void DSAMetadataBuilder::process_token_group(
           ? std::max<int64_t>(graph_slot_capacity, committed_rows)
           : committed_rows;
   auto out_slots_tensor =
-      torch::full({out_slot_rows}, util::kPadSlotId, raw_bt.options());
+      torch::full({out_slot_rows}, kPadSlotId, raw_bt.options());
   auto out_slots_acc = out_slots_tensor.accessor<int32_t, 1>();
   auto raw_bt_acc = raw_bt.accessor<int32_t, 2>();
 
@@ -484,7 +485,7 @@ void DSAMetadataBuilder::process_swa_group(
           ? std::max<int64_t>(graph_slot_capacity, query_total_tokens)
           : query_total_tokens;
   auto out_slots_tensor =
-      torch::full({out_slot_rows}, util::kPadSlotId, raw_bt.options());
+      torch::full({out_slot_rows}, kPadSlotId, raw_bt.options());
   auto out_slots_acc = out_slots_tensor.accessor<int32_t, 1>();
   auto raw_bt_acc = raw_bt.accessor<int32_t, 2>();
   const int64_t semantic_cols = raw_bt.size(1);
@@ -537,8 +538,8 @@ void DSAMetadataBuilder::process_swa_group(
         std::max<int32_t>(max_dst_len, static_cast<int32_t>(storage_cols));
   }
 
-  auto new_bt = torch::full(
-      {batch_size, max_dst_len}, util::kPadSlotId, raw_bt.options());
+  auto new_bt =
+      torch::full({batch_size, max_dst_len}, kPadSlotId, raw_bt.options());
   auto new_acc = new_bt.accessor<int32_t, 2>();
   auto old_acc = raw_bt.accessor<int32_t, 2>();
 

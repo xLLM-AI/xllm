@@ -46,6 +46,14 @@ class ExpandedDecodeMetadataBuilder final {
       const std::vector<int32_t>& q_seq_lens,
       const std::vector<int32_t>& kv_seq_lens);
 
+  static void reset_expanded_decode_metadata(ModelParamsView target);
+
+  static bool update_expanded_decode_host_metadata(ModelParamsView target);
+
+  static void update_expanded_decode_metadata(ModelParamsView target,
+                                              const torch::Device& device,
+                                              int32_t block_size);
+
   static ExpandedDecodeMetadata build(const ModelParamsView& params);
 
   static void validate(const ExpandedDecodeMetadata& metadata,

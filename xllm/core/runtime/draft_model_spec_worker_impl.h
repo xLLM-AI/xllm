@@ -23,12 +23,15 @@ limitations under the License.
 
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/draft_vocab_mapping.h"
+#include "core/framework/speculative/embedding_cache.h"
+#include "core/framework/speculative/mtp_async_state.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {
 
-class EmbeddingCache;
 class LLMWorkerImpl;
+class LlmForwardInput;
+class VlmForwardInput;
 
 // Base for draft-model speculative workers (MTP, DFlash/DSpark); Suffix has no
 // draft model and derives from SpeculativeWorkerImpl directly.
@@ -105,6 +108,17 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
       const runtime::Options& target_options,
       const runtime::Options& draft_options);
 
+  // A DCP block-table entry covers one logical KV page per KV split; slot and
+  // expanded-attention metadata use this size, not the physical block size.
+  int32_t logical_block_size() const;
+  bool uses_chunked_verify() const {
+    return target_verify_mode_ != mtp_async::TargetSpecVerifyMode::GENERIC;
+  }
+
+  void update_decode_step_input(
+      TargetInput& input,
+      const std::vector<EmbeddingCache::DecodeState>& last_states) const;
+
   void prepare_draft_input(const TargetInput& input);
 
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
@@ -113,6 +127,8 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   DraftVocabMapping draft_vocab_;
 
   bool is_probabilistic_draft_ = false;
+  mtp_async::TargetSpecVerifyMode target_verify_mode_ =
+      mtp_async::TargetSpecVerifyMode::GENERIC;
 };
 
 }  // namespace xllm

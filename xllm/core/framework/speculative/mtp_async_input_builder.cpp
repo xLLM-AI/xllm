@@ -42,23 +42,6 @@ torch::Tensor build_device_cache_slots(const Input& input,
   return map_positions_to_cache_slots(
       input.input_params.attention.device.block_tables, positions, block_size);
 }
-template <typename Source>
-void apply_device_row_metadata(LlmForwardInput& input,
-                               const Source& block_table_source,
-                               const AcceptedState& state,
-                               const torch::Tensor& offsets,
-                               int32_t block_size,
-                               bool use_chunked_prefill) {
-  torch::Tensor row_positions = make_row_positions(state, offsets);
-  input.positions = row_positions.flatten().to(input.positions.options());
-  input.input_params.attention.device.new_cache_slots =
-      build_device_cache_slots(block_table_source, row_positions, block_size);
-  torch::Tensor kv_seq_lens =
-      make_kv_seq_lens(state, offsets, use_chunked_prefill);
-  input.input_params.attention.device.kv_seq_lens =
-      kv_seq_lens.to(input.input_params.attention.device.kv_seq_lens.options());
-}
-
 #if defined(USE_NPU)
 template <typename Source>
 void expand_decode_attention_metadata(LlmForwardInput& draft_input,
@@ -77,7 +60,6 @@ void apply_mtp_prepare_output(
     LlmForwardInput& draft_input,
     const Source& block_table_source,
     const kernel::npu::MtpPrepareNextDraftOutput& output,
-    bool use_chunked_prefill,
     bool rebuild_expanded_decode_metadata,
     int32_t block_size) {
   CHECK_EQ(output.token_ids.dim(), 1);
@@ -94,10 +76,7 @@ void apply_mtp_prepare_output(
   draft_input.input_params.embedding.input_embedding = output.embeddings;
   draft_input.positions = output.positions;
   const bool expanded_lengths = output.kv_seq_lens.numel() == token_count;
-  if (expanded_lengths && use_chunked_prefill) {
-    draft_input.input_params.attention.device.kv_seq_lens =
-        output.kv_seq_lens.view({-1, 2}).select(1, 1).contiguous();
-  } else if (use_chunked_prefill || expanded_lengths) {
+  if (expanded_lengths) {
     draft_input.input_params.attention.device.kv_seq_lens = output.kv_seq_lens;
   } else {
     draft_input.input_params.attention.device.kv_seq_lens =
@@ -106,7 +85,7 @@ void apply_mtp_prepare_output(
   }
   draft_input.input_params.attention.device.new_cache_slots =
       output.cache_slots;
-  if (!use_chunked_prefill && rebuild_expanded_decode_metadata) {
+  if (rebuild_expanded_decode_metadata) {
     const torch::Tensor base_lengths =
         expanded_lengths
             ? output.kv_seq_lens.view({-1, 2}).select(1, 1).contiguous()
@@ -196,7 +175,6 @@ void prepare_next_draft_from_accepted_state(
     const torch::Tensor& embedding_placeholder,
     const torch::Tensor& base_positions,
     const torch::Tensor& base_kv_seq_lens,
-    bool use_chunked_prefill,
     bool rebuild_expanded_decode_metadata,
     int32_t block_size) {
 #if defined(USE_NPU)
@@ -213,7 +191,6 @@ void prepare_next_draft_from_accepted_state(
       apply_mtp_prepare_output(draft_input,
                                block_table_source,
                                *output,
-                               use_chunked_prefill,
                                rebuild_expanded_decode_metadata,
                                block_size);
       return;
@@ -232,12 +209,12 @@ void prepare_next_draft_from_accepted_state(
       torch::TensorOptions()
           .dtype(torch::kLong)
           .device(accepted_tokens.device()));
-  apply_device_row_metadata(draft_input,
-                            block_table_source,
-                            state,
-                            extend_offsets,
-                            block_size,
-                            use_chunked_prefill);
+  const torch::Tensor positions = make_positions(state, extend_offsets);
+  draft_input.positions =
+      positions.flatten().to(draft_input.positions.options());
+  draft_input.input_params.attention.device.kv_seq_lens =
+      make_kv_seq_lens(state, extend_offsets)
+          .to(draft_input.input_params.attention.device.kv_seq_lens.options());
 
   // On rejection, redirect the shape-stabilizing repair row to a future
   // scratch position so it cannot overwrite valid draft KV state.
@@ -256,7 +233,7 @@ void prepare_next_draft_from_accepted_state(
                    /*dim=*/1)
           .flatten(/*start_dim=*/0, /*end_dim=*/1);
 #if defined(USE_NPU)
-  if (!use_chunked_prefill && rebuild_expanded_decode_metadata) {
+  if (rebuild_expanded_decode_metadata) {
     expand_decode_attention_metadata(
         draft_input,
         block_table_source,
@@ -274,7 +251,6 @@ template void prepare_next_draft_from_accepted_state(LlmForwardInput&,
                                                      const torch::Tensor&,
                                                      const torch::Tensor&,
                                                      bool,
-                                                     bool,
                                                      int32_t);
 template void prepare_next_draft_from_accepted_state(LlmForwardInput&,
                                                      const VlmForwardInput&,
@@ -283,7 +259,6 @@ template void prepare_next_draft_from_accepted_state(LlmForwardInput&,
                                                      const torch::Tensor&,
                                                      const torch::Tensor&,
                                                      const torch::Tensor&,
-                                                     bool,
                                                      bool,
                                                      int32_t);
 

@@ -28,6 +28,7 @@ limitations under the License.
 #include <type_traits>
 #include <vector>
 
+#include "core/common/constants.h"
 #include "core/common/metrics.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
@@ -513,9 +514,8 @@ std::optional<Params> MusaGraphPersistentParam::update_typed(
         << "padded_num_tokens must be > 0 when return_capture_params is true";
     params_for_capture.emplace(copy_graph_execution_input(params));
   }
-  const GraphExecutionInput<Params> graph_input(params);
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
-      build_graph_attention_metadata(graph_input,
+      build_graph_attention_metadata(params,
                                      args_,
                                      /*skip_cu_seq_lens=*/true);
 
@@ -679,8 +679,7 @@ std::optional<Params> MusaGraphPersistentParam::update_typed(
           .slice(/*dim=*/0,
                  /*start=*/actual_num_tokens,
                  /*end=*/padded_num_tokens)
-          .fill_(params.meta.batch_forward_type.is_decode() ? util::kPadSlotId
-                                                            : 0);
+          .fill_(params.meta.batch_forward_type.is_decode() ? kPadSlotId : 0);
     }
 
     if (params.attention.device.kv_cache_tokens_nums.defined()) {

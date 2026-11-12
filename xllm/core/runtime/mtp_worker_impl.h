@@ -25,9 +25,11 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/framework/speculative/mtp_json_object_state.h"
+#include "core/util/tensor_helper.h"
 #include "runtime/draft_model_spec_worker_impl.h"
 
 namespace xllm {
@@ -83,7 +85,10 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<
       TargetInput>::estimate_kv_cache_capacity_with_draft;
   using DraftModelSpecWorkerImpl<TargetInput>::get_optimization_config;
+  using DraftModelSpecWorkerImpl<TargetInput>::logical_block_size;
   using DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input;
+  using DraftModelSpecWorkerImpl<TargetInput>::target_verify_mode_;
+  using DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input;
 
   // MTP composite: leaves own model-specific NPU input preparation.
   bool owns_npu_parallel_input_prepare() const override;
@@ -133,23 +138,12 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   bool supports_expanded_spec_verify() const;
   bool should_use_explicit_spec_verify_replay_update(
       const TargetInput& input) const;
-  // A DCP block-table entry covers one logical KV page per KV split. All
-  // speculative cache-slot and expanded-attention metadata must use this
-  // logical size rather than the per-rank physical allocator block size.
-  int32_t logical_block_size() const;
   int64_t spec_verify_block_table_width(
       const torch::Tensor& block_tables) const;
   void ensure_spec_verify_control_block_table(TargetModelParams& input_params,
                                               int64_t num_sequences);
-  // Returns true when validation must use chunked-prefill to avoid the
-  // FlashInfer batch-decode read-before-write race on the bonus token.
-  bool use_chunked_prefill_spec_verify_path() const;
   bool uses_embedded_eagle3_draft() const;
   bool requires_full_target_replay() const override;
-  // Multiaxis RoPE positions can include a prompt-dependent offset and do not
-  // identify the corresponding KV cache length.
-  bool positions_are_decoupled_from_kv_length() const;
-  bool uses_step_major_validate_layout() const;
   void synchronize_embedded_eagle3_forward();
   template <typename Input>
   std::optional<ForwardOutput> run_worker_no_sync(WorkerImpl& worker,
@@ -167,9 +161,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   void prepare_draft_inputs(const TargetInput& inputs,
                             LlmForwardInput& draft_inputs,
                             int32_t position_offset);
-  void update_decode_step_input(
-      TargetInput& input,
-      const std::vector<EmbeddingCache::DecodeState>& last_states) const;
 
   // Build draft-side input from cached target context at decode step start.
   void prepare_draft_extend_inputs(
@@ -302,8 +293,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
 
   // Classified once when the corresponding models are loaded. Decode-path
   // decisions only read these closed policies.
-  mtp_async::TargetSpecVerifyMode target_spec_verify_mode_ =
-      mtp_async::TargetSpecVerifyMode::GENERIC;
   mtp_async::CombinedDraftExecutionPath combined_draft_execution_path_ =
       mtp_async::CombinedDraftExecutionPath::UNSUPPORTED;
   mtp_async::DraftPrefixPolicy draft_prefix_policy_ =
@@ -314,6 +303,8 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
     int32_t draft_position_offset;
   };
   std::optional<DraftContextReplayPolicy> draft_context_replay_policy_;
+
+  CachedDeviceIndices logits_indices_;
 
 #if defined(USE_NPU)
   // Stable-address sources consumed by the target ACL graph's leading input
@@ -328,7 +319,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // Stable validate-sampling controls for the common single-sequence greedy
   // path.  Their values depend on speculative width, not tensor-parallel
   // topology, and are rebuilt only when that width changes.
-  torch::Tensor mtp_validate_greedy_indices_;
+  CachedDeviceIndices mtp_validate_greedy_indices_;
 #endif
 };
 }  // namespace xllm

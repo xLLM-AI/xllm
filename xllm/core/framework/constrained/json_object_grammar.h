@@ -221,7 +221,6 @@ class JsonObjectGrammar final {
   std::vector<std::string> token_pieces_;
   std::unordered_set<int32_t> stop_token_ids_;
   std::vector<int32_t> reasoning_end_token_ids_;
-  std::vector<uint32_t> reasoning_bitmask_;
   std::shared_ptr<const std::vector<uint32_t>> reasoning_cached_mask_;
 
   std::shared_ptr<FilterMaskCache> filter_mask_cache_;

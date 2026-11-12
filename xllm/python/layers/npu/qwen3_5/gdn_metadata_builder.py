@@ -194,10 +194,6 @@ class Qwen3_5GdnMetadataBuilder:
             *packed_fields,
             "read_state_indices",
             "write_state_indices",
-            "conv_read_state_indices",
-            "conv_write_state_indices",
-            "ssm_read_state_indices",
-            "ssm_write_state_indices",
             "state_indices",
             "num_accepted_tokens",
             "packed_to_dense",
@@ -207,20 +203,7 @@ class Qwen3_5GdnMetadataBuilder:
             "conv_write_indices",
             "ssm_read_indices",
             "ssm_write_indices",
-            "conv_state_indices",
-            "ssm_state_indices",
         ):
-            if field_name in (
-                "conv_state_indices",
-                "ssm_state_indices",
-                "conv_read_state_indices",
-                "conv_write_state_indices",
-                "ssm_read_state_indices",
-                "ssm_write_state_indices",
-            ) and any(getattr(persistent_metadata, name, None) is not None for name in packed_fields):
-                # Compatibility role views alias the batched packed indices;
-                # copying the owner once refreshes every layer and role.
-                continue
             current = getattr(persistent_metadata, field_name, None)
             replacement = getattr(updated, field_name, None)
             if current is None or replacement is None:
@@ -317,30 +300,20 @@ class Qwen3_5GdnMetadataBuilder:
                 read_indices,
                 out=persistent_decode.packed_read_state_indices if persistent_decode is not None else None,
             )
-            packed_write = self._shared_state_indices(
-                write_indices,
-                out=persistent_decode.packed_write_state_indices if persistent_decode is not None else None,
-            )
-            if (
-                persistent_decode is not None
-                and packed_read is persistent_decode.packed_read_state_indices
-                and packed_write is persistent_decode.packed_write_state_indices
-            ):
-                return replace(
-                    persistent_decode,
-                    state_caches=self._state_caches,
-                    read_state_indices=read_indices,
-                    write_state_indices=write_indices,
-                    layer_groups=self._layer_groups,
+            packed_write_out = persistent_decode.packed_write_state_indices if persistent_decode is not None else None
+            if read_indices is write_indices:
+                packed_write = (
+                    packed_write_out.copy_(packed_read) if packed_write_out is not None else packed_read.clone()
+                )
+            else:
+                packed_write = self._shared_state_indices(
+                    write_indices,
+                    out=packed_write_out,
                 )
             return GdnDecodeMetadata(
                 self._state_caches,
                 read_indices,
                 write_indices,
-                tuple(packed_read[:, :, 0].unbind(0)),
-                tuple(packed_write[:, :, 0].unbind(0)),
-                tuple(packed_read[:, :, 1].unbind(0)),
-                tuple(packed_write[:, :, 1].unbind(0)),
                 layer_groups=self._layer_groups,
                 packed_read_state_indices=packed_read,
                 packed_write_state_indices=packed_write,
@@ -493,18 +466,8 @@ class Qwen3_5GdnMetadataBuilder:
             metadata.state_indices,
             out=persistent_metadata.packed_state_indices if persistent_metadata is not None else None,
         )
-        if persistent_metadata is not None and packed is persistent_metadata.packed_state_indices:
-            return replace(
-                metadata,
-                conv_state_indices=persistent_metadata.conv_state_indices,
-                ssm_state_indices=persistent_metadata.ssm_state_indices,
-                layer_groups=self._layer_groups,
-                packed_state_indices=packed,
-            )
         return replace(
             metadata,
-            conv_state_indices=tuple(packed[:, :, 0].unbind(0)),
-            ssm_state_indices=tuple(packed[:, :, 1].unbind(0)),
             layer_groups=self._layer_groups,
             packed_state_indices=packed,
         )

@@ -109,14 +109,14 @@ inline void fill_persistent_graph_cu_seq_lens(const Params& params,
 
 template <typename Params>
 inline std::shared_ptr<layer::AttentionMetadata> build_graph_attention_metadata(
-    const GraphExecutionInput<Params>& graph_input,
+    const Params& params,
     const ModelArgs& args,
     bool skip_cu_seq_lens) {
   const layer::AttentionMetadataBuildOptions build_options{
       .skip_cu_seq_lens = skip_cu_seq_lens};
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
       std::make_shared<layer::AttentionMetadata>(
-          layer::AttentionMetadataBuilder::build(graph_input.params(),
+          layer::AttentionMetadataBuilder::build(params,
                                                  args.enable_mla(),
                                                  /*attn_mask=*/{},
                                                  /*device=*/std::nullopt,

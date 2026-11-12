@@ -22,6 +22,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "core/common/constants.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/util/tensor_helper.h"
 #include "framework/model/model_params_view.h"
@@ -358,7 +359,7 @@ torch::Tensor DSAMetadataBuilderMlu::expand_blocks_to_slots(
     int32_t batch_size,
     int64_t total_tokens) {
   const int32_t bs = gi.block_size;
-  auto slots = torch::full({total_tokens}, util::kPadSlotId, torch::kInt32);
+  auto slots = torch::full({total_tokens}, kPadSlotId, torch::kInt32);
   auto slots_acc = slots.accessor<int32_t, 1>();
   auto bt_acc = block_table.accessor<int32_t, 2>();
   const int32_t max_blocks = block_table.size(1);
@@ -468,7 +469,7 @@ void DSAMetadataBuilderMlu::process_token_group(
   // Token caches write only the compressed rows produced by the current
   // forward step. Padded RoPE/compressor rows must not become cache writes.
   auto out_slots_tensor =
-      torch::full({committed_rows}, util::kPadSlotId, raw_bt.options());
+      torch::full({committed_rows}, kPadSlotId, raw_bt.options());
   auto out_slots_acc = out_slots_tensor.accessor<int32_t, 1>();
   auto raw_bt_acc = raw_bt.accessor<int32_t, 2>();
   const int64_t block_table_width = raw_bt.size(1);
@@ -529,7 +530,7 @@ void DSAMetadataBuilderMlu::process_swa_group(
   // Decode has one kv row; prefix slot 0 would incorrectly overwrite cache row
   // 0.
   auto out_slots_tensor =
-      torch::full({query_total_tokens}, util::kPadSlotId, raw_bt.options());
+      torch::full({query_total_tokens}, kPadSlotId, raw_bt.options());
   auto out_slots_acc = out_slots_tensor.accessor<int32_t, 1>();
   auto raw_bt_acc = raw_bt.accessor<int32_t, 2>();
   const int64_t current_cols = raw_bt.size(1);
@@ -566,8 +567,8 @@ void DSAMetadataBuilderMlu::process_swa_group(
     return;
   }
 
-  torch::Tensor new_bt = torch::full(
-      {batch_size, max_dst_len}, util::kPadSlotId, raw_bt.options());
+  torch::Tensor new_bt =
+      torch::full({batch_size, max_dst_len}, kPadSlotId, raw_bt.options());
   auto new_acc = new_bt.accessor<int32_t, 2>();
   auto old_acc = raw_bt.accessor<int32_t, 2>();
 
@@ -620,8 +621,8 @@ void DSAMetadataBuilderMlu::build_c128_meta(
       torch::TensorOptions().dtype(torch::kInt32);
   const int64_t block_table_width =
       util::kv_page_count(static_cast<int32_t>(max_context_len), block_size);
-  torch::Tensor table = torch::full(
-      {total_tokens, block_table_width}, util::kPadSlotId, int_options);
+  torch::Tensor table =
+      torch::full({total_tokens, block_table_width}, kPadSlotId, int_options);
   torch::Tensor src =
       block_table
           .to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32))

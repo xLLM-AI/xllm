@@ -22,7 +22,6 @@ limitations under the License.
 
 #include "core/framework/request/sequence.h"
 #include "core/util/tensor_helper.h"
-#include "core/util/utils.h"
 
 namespace xllm {
 

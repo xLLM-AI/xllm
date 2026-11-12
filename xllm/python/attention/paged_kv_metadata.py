@@ -20,6 +20,9 @@ from collections.abc import Sequence
 
 import torch
 
+# Must match xllm::kPaddingBlockId.
+PADDING_BLOCK_ID = 0
+
 
 def is_row_aligned_paged_kv(
     paged_kv_indptr: torch.Tensor | None,

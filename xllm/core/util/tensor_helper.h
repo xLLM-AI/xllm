@@ -145,6 +145,21 @@ inline torch::Tensor create_2d_tensor(const std::vector<std::vector<T>>& vec,
   return tensor;
 }
 
+namespace util {
+
+template <typename T>
+void pad_2d_vector(std::vector<std::vector<T>>& vec, T pad_value) {
+  size_t max_col_size = 0;
+  for (const auto& row : vec) {
+    max_col_size = std::max(max_col_size, row.size());
+  }
+  for (auto& row : vec) {
+    row.resize(max_col_size, pad_value);
+  }
+}
+
+}  // namespace util
+
 inline torch::Tensor safe_to(const torch::Tensor& t,
                              const torch::TensorOptions& options,
                              bool non_blocking = false) {
@@ -627,4 +642,18 @@ inline std::vector<int64_t> get_tensor_shape(const torch::Tensor& tensor) {
   c10::IntArrayRef sizes = tensor.sizes();
   return std::vector<int64_t>(sizes.begin(), sizes.end());
 }
+
+class CachedDeviceIndices final {
+ public:
+  template <typename Builder>
+  const torch::Tensor& get(int64_t expected_numel, Builder&& build) {
+    if (!tensor_.defined() || tensor_.numel() != expected_numel) {
+      tensor_ = build();
+    }
+    return tensor_;
+  }
+
+ private:
+  torch::Tensor tensor_;
+};
 }  // namespace xllm

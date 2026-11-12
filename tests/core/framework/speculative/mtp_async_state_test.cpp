@@ -294,13 +294,10 @@ TEST(MtpAsyncStateTest, BuildsRowMetadataForChunkedAndDecodeLayouts) {
   const torch::Tensor offsets = torch::tensor({-1, 0}, torch::kLong);
 
   EXPECT_TRUE(torch::equal(
-      make_row_positions(state, offsets),
+      make_positions(state, offsets),
       torch::tensor({{103, 104}, {201, 202}, {300, 301}}, torch::kLong)));
   EXPECT_TRUE(torch::equal(
-      make_kv_seq_lens(state, offsets, /*use_chunked_prefill=*/true),
-      state.base_kv_seq_lens));
-  EXPECT_TRUE(torch::equal(
-      make_kv_seq_lens(state, offsets, /*use_chunked_prefill=*/false),
+      make_kv_seq_lens(state, offsets),
       torch::tensor({104, 105, 202, 203, 301, 302}, torch::kLong)));
 }
 
@@ -328,14 +325,13 @@ TEST(MtpAsyncStateTest, BuildsLaterDraftMetadataFromAcceptedDeviceBase) {
   state.base_positions = torch::tensor({3, 7}, torch::kLong);
   state.base_kv_seq_lens = torch::tensor({4, 8}, torch::kInt);
   const torch::Tensor offsets = torch::tensor({2}, torch::kLong);
-  const torch::Tensor positions = make_row_positions(state, offsets);
+  const torch::Tensor positions = make_positions(state, offsets);
   const torch::Tensor block_tables =
       torch::tensor({{10, 11, 12}, {20, 21, 22}}, torch::kInt);
 
   EXPECT_TRUE(torch::equal(positions, torch::tensor({{5}, {9}}, torch::kLong)));
-  EXPECT_TRUE(torch::equal(
-      make_kv_seq_lens(state, offsets, /*use_chunked_prefill=*/false),
-      torch::tensor({6, 10}, torch::kLong)));
+  EXPECT_TRUE(torch::equal(make_kv_seq_lens(state, offsets),
+                           torch::tensor({6, 10}, torch::kLong)));
   EXPECT_TRUE(torch::equal(
       map_positions_to_cache_slots(block_tables, positions, /*block_size=*/4),
       torch::tensor({45, 89}, torch::kInt)));

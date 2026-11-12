@@ -100,12 +100,11 @@ AcceptedState build_accepted_state(const torch::Tensor& accepted_tokens,
                                    const torch::Tensor& base_positions,
                                    const torch::Tensor& base_kv_seq_lens);
 
-torch::Tensor make_row_positions(const AcceptedState& state,
-                                 const torch::Tensor& offsets);
+torch::Tensor make_positions(const AcceptedState& state,
+                             const torch::Tensor& offsets);
 
 torch::Tensor make_kv_seq_lens(const AcceptedState& state,
-                               const torch::Tensor& offsets,
-                               bool use_chunked_prefill);
+                               const torch::Tensor& offsets);
 
 // The repair row is useful only when all draft tokens were accepted. On a
 // rejection it is redirected to a future scratch position so it cannot

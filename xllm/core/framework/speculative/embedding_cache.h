@@ -133,4 +133,10 @@ class EmbeddingCache final {
   const DecodeState& get_tail(int32_t embedding_id) const;
 };
 
+std::vector<int32_t> num_accepted_tokens(
+    const EmbeddingCache* cache,
+    size_t num_sequences,
+    const std::vector<int32_t>& embedding_ids,
+    const std::vector<std::string>& request_ids);
+
 }  // namespace xllm

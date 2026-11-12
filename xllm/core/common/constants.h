@@ -22,6 +22,12 @@ namespace xllm {
 inline constexpr char kInferContentLength[] = "Infer-Content-Length";
 inline constexpr char kContentLength[] = "Content-Length";
 
+// Writes to this slot are dropped by the kernel instead of landing in block 0.
+inline constexpr int32_t kPadSlotId = -1;
+
+// The allocator reserves block 0 for padding that still needs a valid address.
+inline constexpr int32_t kPaddingBlockId = 0;
+
 // Reserved row 0 of the linear / SSM state cache, used as the padding slot for
 // padded decode batch rows. This mirrors the KV cache convention, where block
 // id 0 is permanently held for padding (see BlockManagerImpl and

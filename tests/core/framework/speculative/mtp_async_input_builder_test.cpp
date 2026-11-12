@@ -84,7 +84,6 @@ void prepare_single_sequence(LlmForwardInput& draft_input,
                                          embedding_placeholder,
                                          base_positions,
                                          base_kv_seq_lens,
-                                         /*use_chunked_prefill=*/false,
                                          rebuild_expanded_decode_metadata,
                                          kBlockSize);
 }

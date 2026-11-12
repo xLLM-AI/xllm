@@ -27,18 +27,6 @@ limitations under the License.
 namespace xllm::util {
 
 template <typename T>
-void pad_2d_vector(std::vector<std::vector<T>>& vec, T pad_value) {
-  size_t max_col_size = 0;
-  for (const auto& row : vec) {
-    max_col_size = std::max(max_col_size, row.size());
-  }
-
-  for (auto& row : vec) {
-    row.resize(max_col_size, pad_value);
-  }
-}
-
-template <typename T>
 T sum(const std::vector<T>& vec) {
   if (vec.empty()) {
     LOG(FATAL) << "vector is empty.";

@@ -582,7 +582,7 @@ JsonObjectGrammar::JsonObjectGrammar(
       stop_token_ids_(std::move(stop_token_ids)),
       reasoning_end_token_ids_(std::move(reasoning_end_token_ids)),
       filter_mask_cache_(std::make_shared<FilterMaskCache>()) {
-  reasoning_bitmask_.assign(bitmask_num_words(), 0xFFFFFFFFu);
+  std::vector<uint32_t> reasoning_bitmask(bitmask_num_words(), 0xFFFFFFFFu);
   for (const int32_t stop_token_id : stop_token_ids_) {
     if (stop_token_id < 0 ||
         static_cast<size_t>(stop_token_id) >= token_pieces_.size()) {
@@ -590,16 +590,16 @@ JsonObjectGrammar::JsonObjectGrammar(
     }
     const size_t word_index = static_cast<size_t>(stop_token_id) / 32U;
     const uint32_t bit = 1U << (static_cast<uint32_t>(stop_token_id) & 31U);
-    reasoning_bitmask_[word_index] &= ~bit;
+    reasoning_bitmask[word_index] &= ~bit;
   }
   // Clear unused high bits in the last word so padding bits stay disallowed.
   const size_t remainder = token_pieces_.size() % 32U;
-  if (remainder != 0U && !reasoning_bitmask_.empty()) {
+  if (remainder != 0U && !reasoning_bitmask.empty()) {
     const uint32_t keep_mask = (1U << static_cast<uint32_t>(remainder)) - 1U;
-    reasoning_bitmask_.back() &= keep_mask;
+    reasoning_bitmask.back() &= keep_mask;
   }
-  reasoning_cached_mask_ =
-      std::make_shared<const std::vector<uint32_t>>(reasoning_bitmask_);
+  reasoning_cached_mask_ = std::make_shared<const std::vector<uint32_t>>(
+      std::move(reasoning_bitmask));
 }
 
 std::shared_ptr<const JsonObjectGrammar>
@@ -713,9 +713,6 @@ std::vector<uint32_t> JsonObjectGrammar::compute_allowed_bitmask(
   std::vector<uint32_t> bitmask(bitmask_num_words(), 0U);
   if (!state.is_valid()) {
     return bitmask;
-  }
-  if (state.in_reasoning()) {
-    return reasoning_bitmask_;
   }
   for (size_t token_id = 0; token_id < token_pieces_.size(); ++token_id) {
     if (!state.clone_state().advance(static_cast<int32_t>(token_id))) {
