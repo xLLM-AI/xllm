@@ -15,10 +15,10 @@ limitations under the License.
 
 #pragma once
 
-#include <functional>
-#include <nlohmann/json.hpp>
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/common/types.h"
@@ -29,7 +29,8 @@ namespace function_call {
 using JsonFunction = xllm::JsonFunction;
 using JsonTool = xllm::JsonTool;
 
-struct ToolCallItem {
+class ToolCallItem final {
+ public:
   int32_t tool_index;
   std::optional<std::string> name;
   std::string parameters;  // JSON string
@@ -37,12 +38,15 @@ struct ToolCallItem {
   ToolCallItem() : tool_index(-1), parameters("") {}
 
   ToolCallItem(int32_t index,
-               const std::optional<std::string>& func_name,
-               const std::string& params)
-      : tool_index(index), name(func_name), parameters(params) {}
+               std::optional<std::string> func_name,
+               std::string params)
+      : tool_index(index),
+        name(std::move(func_name)),
+        parameters(std::move(params)) {}
 };
 
-struct StreamingParseResult {
+class StreamingParseResult final {
+ public:
   std::string normal_text;
   std::vector<ToolCallItem> calls;
 
@@ -64,21 +68,6 @@ struct StreamingParseResult {
     calls.clear();
   }
 };
-
-struct StructureInfo {
-  std::string begin;
-  std::string end;
-  std::string trigger;
-
-  StructureInfo() = default;
-
-  StructureInfo(const std::string& begin_str,
-                const std::string& end_str,
-                const std::string& trigger_str)
-      : begin(begin_str), end(end_str), trigger(trigger_str) {}
-};
-
-using GetInfoFunc = std::function<StructureInfo(const std::string&)>;
 
 }  // namespace function_call
 }  // namespace xllm

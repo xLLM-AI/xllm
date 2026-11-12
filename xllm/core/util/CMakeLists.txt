@@ -72,3 +72,18 @@ cc_library(
 )
 
 add_dependencies(util brpc-static)
+
+# JSON parsing stays independent of Torch and the rest of util.
+cc_library(
+  NAME
+    partial_json_parser
+  HDRS
+    partial_json_parser.h
+    partial_json_parser/parser.h
+    partial_json_parser/options.h
+  SRCS
+    partial_json_parser.cpp
+    partial_json_parser/parser.cpp
+  DEPS
+    nlohmann_json::nlohmann_json
+)

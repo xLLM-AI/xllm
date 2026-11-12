@@ -13,11 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "kimik2_detector.h"
+#include "function_call/kimik2_detector.h"
 
 #include <iostream>
 #include <regex>
 #include <stdexcept>
+
+#include "core/util/partial_json_parser.h"
 
 namespace xllm {
 namespace function_call {
@@ -251,7 +253,7 @@ StreamingParseResult KimiK2Detector::parse_streaming_increment(
           parsed_args = parsed_args.substr(0, end_pos);
         }
 
-        if (is_complete_json(parsed_args)) {
+        if (partial_json::is_complete_json(parsed_args)) {
           try {
             auto parsed_json = nlohmann::json::parse(parsed_args);
             prev_tool_call_arr_[current_tool_id_]["arguments"] =

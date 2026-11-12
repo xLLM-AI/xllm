@@ -37,6 +37,7 @@ limitations under the License.
 #include "llm/qwen3_moe.h"                               // IWYU pragma: keep
 #include "llm/qwen3_next.h"                              // IWYU pragma: keep
 #include "models/npu_model_metadata.h"                   // IWYU pragma: keep
+#include "vlm/deepseek_ocr.h"                            // IWYU pragma: keep
 #include "vlm/glm5_next_vlm.h"                           // IWYU pragma: keep
 #include "vlm/joyai_asr.h"                               // IWYU pragma: keep
 #include "vlm/qwen3_5.h"                                 // IWYU pragma: keep

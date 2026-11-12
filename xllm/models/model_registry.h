@@ -57,7 +57,8 @@ using MultimodalProcessorFactory =
     std::function<std::unique_ptr<MultimodalProcessorBase>(
         const ModelArgs& model_args,
         std::shared_ptr<Tokenizer> tokenizer,
-        const TokenizerArgs& tokenizer_args)>;
+        const TokenizerArgs& tokenizer_args,
+        int32_t max_sequence_length)>;
 
 using ModelArgsLoader =
     std::function<bool(const JsonReader& json, ModelArgs* args)>;
@@ -132,6 +133,11 @@ inline std::string canonical_model_registration_name(
     std::string_view model_type) {
   if (model_type == "glm5_3_flash") {
     return "glm5_next";
+  }
+  // The DeepSeek-OCR release ships HF config model_type "deepseek_vl_v2"
+  // (its architecture lineage); xllm registers the port under deepseek_ocr.
+  if (model_type == "deepseek_vl_v2") {
+    return "deepseek_ocr";
   }
   return std::string(model_type);
 }
@@ -395,18 +401,21 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 #define REGISTER_MODEL_BACKEND(ModelType, Backend) \
   REGISTER_MODEL_BACKEND_WITH_VARNAME(ModelType, ModelType, Backend)
 
-#define REGISTER_MULTIMODAL_PROCESSOR_WITH_VARNAME(              \
-    VarName, ModelType, ProcessorClass)                          \
-  const bool VarName##_multimodal_processor_registered = []() {  \
-    ModelRegistry::register_multimodal_processor_factory(        \
-        #ModelType,                                              \
-        [](const ModelArgs& model_args,                          \
-           std::shared_ptr<Tokenizer> tokenizer,                 \
-           const TokenizerArgs& tokenizer_args) {                \
-          return std::make_unique<ProcessorClass>(               \
-              model_args, std::move(tokenizer), tokenizer_args); \
-        });                                                      \
-    return true;                                                 \
+#define REGISTER_MULTIMODAL_PROCESSOR_WITH_VARNAME(                     \
+    VarName, ModelType, ProcessorClass)                                 \
+  const bool VarName##_multimodal_processor_registered = []() {         \
+    ModelRegistry::register_multimodal_processor_factory(               \
+        #ModelType,                                                     \
+        [](const ModelArgs& model_args,                                 \
+           std::shared_ptr<Tokenizer> tokenizer,                        \
+           const TokenizerArgs& tokenizer_args,                         \
+           int32_t max_sequence_length) {                               \
+          return std::make_unique<ProcessorClass>(model_args,           \
+                                                  std::move(tokenizer), \
+                                                  tokenizer_args,       \
+                                                  max_sequence_length); \
+        });                                                             \
+    return true;                                                        \
   }()
 
 #define REGISTER_MULTIMODAL_PROCESSOR(ModelType, ProcessorClass) \

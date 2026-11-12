@@ -29,7 +29,7 @@ limitations under the License.
 #include "api_service/tool_call_response.h"
 #include "chat.pb.h"
 #include "core/framework/request/request_output.h"
-#include "function_call/utils.h"
+#include "function_call/function_call_parser.h"
 
 namespace xllm::api_service {
 

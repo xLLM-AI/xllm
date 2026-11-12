@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/layers/qwen2_decoder_layer.h"
 #include "models/llm/qwen2.h"
 #include "models/model_registry.h"
+#include "processors/multimodal_processor_pipeline.h"
 #include "processors/qwen2_vl_image_processor.h"
 #include "processors/qwen2_vl_prompt_processor.h"
 #include "processors/qwen2_vl_video_processor.h"

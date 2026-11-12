@@ -33,3 +33,5 @@ cc_test(
     :util
     GTest::gtest_main
 )
+
+add_subdirectory(partial_json_parser)

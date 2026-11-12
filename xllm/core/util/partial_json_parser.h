@@ -15,14 +15,13 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <tuple>
 
-#include "core_types.h"
-
 namespace xllm {
-namespace function_call {
+namespace partial_json {
 
 // Allow flags for partial JSON parsing
 enum class Allow : int32_t {
@@ -57,13 +56,11 @@ inline Allow operator~(Allow a) {
   return static_cast<Allow>(~static_cast<int32_t>(a));
 }
 
-std::string find_common_prefix(const std::string& s1, const std::string& s2);
-
 std::tuple<nlohmann::json, int32_t> partial_json_loads(
     const std::string& input_str,
     Allow flags);
 
 bool is_complete_json(const std::string& input_str);
 
-}  // namespace function_call
+}  // namespace partial_json
 }  // namespace xllm

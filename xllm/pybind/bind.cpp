@@ -44,6 +44,7 @@ PYBIND11_MODULE(xllm_export, m) {
   py::class_<Options>(m, "Options")
       .def(py::init())
       .def_readwrite("model_path", &Options::model_path_)
+      .def_readwrite("model_impl", &Options::model_impl_)
       .def_readwrite("extension_impl", &Options::extension_impl_)
       .def_readwrite("draft_model_path", &Options::draft_model_path_)
       .def_readwrite("backend", &Options::backend_)
@@ -354,8 +355,17 @@ PYBIND11_MODULE(xllm_export, m) {
       });
 
   // 13. export VLMMaster
+  // The offline Python API has no command-line flags, so Options.model_impl
+  // is the only way to select the Python model executor there. Mirror it into
+  // the ModelConfig singleton before the engine reads it (VLMMaster and the
+  // spawned workers both consume ModelConfig, never this Options field).
   py::class_<VLMMaster>(m, "VLMMaster")
-      .def(py::init<const Options&>(),
+      .def(py::init([](const Options& options) {
+             if (!options.model_impl().empty()) {
+               ModelConfig::get_instance().model_impl(options.model_impl());
+             }
+             return std::make_unique<VLMMaster>(options);
+           }),
            py::arg("options"),
            py::call_guard<py::gil_scoped_release>())
       .def("handle_batch_request",

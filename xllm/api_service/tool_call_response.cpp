@@ -22,7 +22,6 @@ limitations under the License.
 
 #include "api_service/stream_output_parser.h"
 #include "function_call/function_call_parser.h"
-#include "function_call/utils.h"
 
 namespace xllm::api_service {
 

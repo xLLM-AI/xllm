@@ -88,7 +88,7 @@ loader；张量分布复用并行线性层和 collective。复用 mixin 前，�
 | [Qwen-Image Edit Plus](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/pipelines/pipeline_qwenimage_edit_plus.h) | Pipeline 内 Qwen2.5-VL / 外部 embedding | [Transformer](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/transformers/transformer_qwen_image.h) 已接入 SP，未显式接入 DiT TP | 已接入 step 和双流 helper | 未接入 | 按宽度并行的 VAE；pipeline 读取 `dit_enable_vae_tiling` |
 | [JoyImage Edit Plus](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/pipelines/pipeline_joyimage_edit_plus.h) | Pipeline 内 Qwen3-VL / 外部 embedding | [Transformer](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/transformers/transformer_joyimage_edit_plus.h) 已接入 SP，未显式接入 DiT TP | 已接入 step 和双流 helper | 未接入 | 复用 Wan VAE，支持宽度并行 |
 | [Wan I2V](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/pipelines/pipeline_wan_i2v.h) | Pipeline 内 UMT5 / 外部 embedding | [Transformer](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/transformers/transformer_wan.h) 已接入 TP、SP | 存在 step/单流回调；pipeline 未设置每次生成的 context | NPU Laser 用于 Q/K 等长路径；稀疏分支优先于 dense/Laser | 按宽度并行的视频 VAE |
-| [MiniMax-H3](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/pipelines/pipeline_minimax_h3.h) | 外部 H3 embedding 和 token tags；不执行原始文本编码 | [Transformer](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/transformers/transformer_minimax_h3.h) 已接入 TP、SP | 已接入 step 和 packed 单流回调；支持 None、TaylorSeer 和 FBCache | 未接入；使用 packed dense attention | 视频 VAE 支持空间 tile 分发；音频 VAE 在 TP driver 解码 |
+| [MiniMax-H3](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/pipelines/pipeline_minimax_h3.h) | 外部 H3 embedding 和 token tags；不执行原始文本编码 | [Transformer](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/transformers/transformer_minimax_h3.h) 已接入 TP、SP | 已接入 step 和 packed 单流回调；支持 None、TaylorSeer 和 FBCache | 可显式开启 NPU Laser；默认 packed dense attention；未接入稀疏路径 | 视频 VAE 支持空间 tile 分发；音频 VAE 在 TP driver 解码 |
 
 其他已注册路径包括 [LongCat-Image](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/pipelines/pipeline_longcat_image.h)、
 [LongCat-Image Edit](https://github.com/xLLM-AI/xllm/blob/main/xllm/models/dit/pipelines/pipeline_longcat_image_edit.h)、
@@ -106,7 +106,7 @@ loader；张量分布复用并行线性层和 collective。复用 mixin 前，�
 | `vae_size`、`text_encoder_tp_size` | 在同一个 world 上建立子组，不额外乘入 world size；组大小须整除 world size。所选 VAE/编码器还必须实际使用该组。H3 不执行文本编码器。 |
 | `dit_sp_communication_overlap` | 作用于模型/attention 调用处，不是新的调度模式。H3 用它控制 SP 通信；启用 overlap 不会合并独立的 Q/K/V collective。 |
 | `dit_cache_policy` 及缓存参数 | Worker 初始化会创建所选 policy，即使模型没有缓存回调。获得加速还需要回调和对应 context。Step 复用可跳过 transformer 主体，block 复用包围单个 block 调用。单流 helper 不提供 `encoder_hidden_states`；只有请求 context 显式选择 `single_stream` 时，FBCache 才会复用 packed 主干。既有双流/单流混合调用方仍保持直通行为。Fill/Control/Wan 缺少每次生成的 context 设置，不能视为已完整接入依赖该信息的 policy。选择 policy 不代表已发生缓存命中。 |
-| `dit_laser_attention_enabled` | 由 Wan attention 的 NPU dense 分支读取，Q/K 序列等长时选择 Laser，不等长时选择 `npu_fusion_attention`；稀疏分支优先。选择条件是序列长度，不是 self/cross-attention 的身份。[Laser wrapper](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/kernels/npu/xllm_ops/laser_attention.cpp) 接受 BNSD 张量，转为 FP16，并 padding 序列和 head 维度；接口不接受 H3 packed 序列边界。 |
+| `dit_laser_attention_enabled` | 由 Wan 和 H3 的 NPU attention 读取。Wan 在稀疏分支之后，对 Q/K 等长路径选择 Laser。H3 对有效长度至少为 2,048、head dimension 不超过 128 的输入选择 Laser，并先排除 SP padding。[Laser wrapper](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/kernels/npu/xllm_ops/laser_attention.cpp) 接受 BNSD 张量，保留 BF16/FP16 输入 dtype，并 padding 序列和 head 维度。 |
 | `dit_sparse_attention_*` | 接入 Wan 稀疏 attention 路径，不是 H3 或表中其他 transformer 的通用开关。 |
 | `dit_enable_vae_tiling` | 由 Qwen-Image Edit Plus pipeline 读取；不控制 H3 专用 tiling，且与 `vae_size` 含义不同。 |
 
@@ -121,8 +121,9 @@ H3 默认执行 dense 推理。TaylorSeer 和 FBCache 需要显式选择，并�
 
 H3 通过一个输出宽度为 `3 × inner_dim` 的 `ColumnParallelLinear` 融合 QKV
 投影，loader 接受分开的 Q/K/V 权重前缀。SP 在 attention 前仍分别
-交换 Q、K、V，计算后再反向交换输出。NPU attention 使用带有效段/padding 边界的
-packed TND 数据。启用 SP 时，切分前的总序列长度补齐到 `lcm(SP, 64)` 的倍数；
+交换 Q、K、V，计算后再反向交换输出。NPU 默认 attention 路径使用带有效段/padding
+边界的 packed TND 数据。显式启用的 Laser 路径先排除 SP padding，使用 BNSD 张量，
+再在输出交换前恢复 padding。启用 SP 时，切分前的总序列长度补齐到 `lcm(SP, 64)` 的倍数；
 head 数必须能被 TP × SP 整除，pipeline
 还检查视频/音频投影的整除约束。替换 attention 内核必须保留 packed 边界、padding
 排除、dtype 和布局语义。

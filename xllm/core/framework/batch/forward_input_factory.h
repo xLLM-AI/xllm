@@ -28,12 +28,15 @@ class BatchGroup;
 class EplbController;
 class ThreadPool;
 struct ModelArgs;
+class SharedKVCacheMappingTracker;
 
 struct ForwardInputFactoryOptions {
   uint32_t dp_size = 1;
   uint32_t cp_size = 1;
   int64_t max_tokens_per_batch = 0;
   bool enable_dp_global_json_object_active = false;
+  // Requires acknowledgment after every target worker accepts the input.
+  bool enable_shared_kv_cache_deltas = false;
 };
 
 // One engine-owned instance retains rank identities and reuses preparation
@@ -44,14 +47,19 @@ class ForwardInputFactory final {
   ~ForwardInputFactory();
   ForwardInputFactory(const ForwardInputFactory&) = delete;
   ForwardInputFactory& operator=(const ForwardInputFactory&) = delete;
-  ForwardInputFactory(ForwardInputFactory&&) noexcept = default;
-  ForwardInputFactory& operator=(ForwardInputFactory&&) noexcept = default;
+  ForwardInputFactory(ForwardInputFactory&&) noexcept;
+  ForwardInputFactory& operator=(ForwardInputFactory&&) noexcept;
 
   // Advances Batch/Sequence preparation state; prepare each group only once.
   void create_inputs(BatchGroup& batches,
                      const ModelArgs& model_args,
                      std::vector<LlmForwardInput>& inputs,
                      bool& is_graph_warmup);
+
+  // Call only after every TP/CP worker has successfully accepted its DP input.
+  void acknowledge_shared_kv_cache();
+  // Reset after allocating/replacing worker cache storage.
+  void reset_shared_kv_cache_mapping_tracker();
 
   // The controller remains owned by LLMEngine and must outlive this factory.
   void set_eplb_controller(EplbController* controller);
@@ -77,6 +85,8 @@ class ForwardInputFactory final {
   void annotate_eplb_inputs(PreparationState& state);
 
   ForwardInputFactoryOptions options_;
+  std::vector<std::unique_ptr<SharedKVCacheMappingTracker>>
+      dp_shared_kv_mapping_trackers_;
   std::vector<std::vector<int32_t>> dp_batch_embedding_ids_;
   std::vector<std::vector<std::string>> dp_batch_request_ids_;
   std::vector<uint64_t> dp_batch_generations_;

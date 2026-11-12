@@ -13,12 +13,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "base_format_detector.h"
+#include "function_call/base_format_detector.h"
+
+#include <absl/strings/match.h>
 
 #include <algorithm>
 #include <iostream>
 #include <regex>
 #include <sstream>
+
+#include "core/util/partial_json_parser.h"
 
 namespace xllm {
 namespace function_call {
@@ -135,7 +139,7 @@ StreamingParseResult BaseFormatDetector::parse_streaming_increment(
   // Streaming incremental parsing with tool validation.
   // This base implementation works best with formats where:
   // 1. bot_token is followed immediately by JSON (e.g., bot_token + JSON_array)
-  // 2. JSON can be parsed incrementally using partial_json_loads
+  // 2. JSON can be parsed incrementally using partial_json::partial_json_loads
   // 3. Multiple tool calls are separated by "; " or ", "
   //
   // Examples of incompatible formats (need custom implementation, may reuse
@@ -177,8 +181,10 @@ StreamingParseResult BaseFormatDetector::parse_streaming_increment(
     tool_indices_ = get_tool_indices(tools);
   }
 
-  Allow flags =
-      current_tool_name_sent_ ? Allow::ALL : (Allow::ALL & ~Allow::STR);
+  partial_json::Allow flags =
+      current_tool_name_sent_
+          ? partial_json::Allow::ALL
+          : (partial_json::Allow::ALL & ~partial_json::Allow::STR);
 
   try {
     int32_t start_idx = 0;
@@ -198,9 +204,10 @@ StreamingParseResult BaseFormatDetector::parse_streaming_increment(
     }
 
     std::string json_part = current_text.substr(start_idx);
-    auto [obj, end_idx] = partial_json_loads(json_part, flags);
+    auto [obj, end_idx] = partial_json::partial_json_loads(json_part, flags);
 
-    bool is_current_complete = is_complete_json(json_part.substr(0, end_idx));
+    bool is_current_complete =
+        partial_json::is_complete_json(json_part.substr(0, end_idx));
 
     if (obj.contains("name") && obj["name"].is_string()) {
       std::string tool_name = obj["name"].get<std::string>();
@@ -298,8 +305,8 @@ StreamingParseResult BaseFormatDetector::parse_streaming_increment(
           if (prev_args_it != prev_tool_call_arr_[current_tool_id_].end()) {
             std::string prev_args_json = prev_args_it->second;
             if (cur_args_json != prev_args_json) {
-              std::string prefix =
-                  find_common_prefix(prev_args_json, cur_args_json);
+              std::string prefix(
+                  absl::FindLongestCommonPrefix(prev_args_json, cur_args_json));
               argument_diff = prefix.substr(sent);
             }
           }

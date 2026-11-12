@@ -25,7 +25,9 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/batch_group.h"
+#include "core/framework/batch/shared_kv_cache_mapping_tracker.h"
 #include "core/framework/block/block_manager_pool.h"
+#include "core/framework/block/composite_block_manager.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
@@ -34,6 +36,8 @@ limitations under the License.
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kv_cache/block/block_manager_impl.h"
+#include "core/kv_cache/block/static_kv_cache_block_pool.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 
 namespace xllm {
 namespace {
@@ -135,6 +139,262 @@ class ScopedJsonObjectOutput final {
  private:
   bool previous_value_;
 };
+
+StaticKVCacheLayout make_publication_layout() {
+  StaticKVCacheLayoutSpec spec;
+  spec.num_slots = 64;
+  spec.num_slabs = 16;
+  spec.full_row_bytes = 16;
+  spec.conv_row_bytes = 8;
+  spec.ssm_row_bytes = 32;
+  spec.checkpoint_stride = 2;
+  spec.full_layer_ids = {0, 3};
+  spec.linear_layer_ids = {1, 2};
+  return StaticKVCacheLayout(spec);
+}
+
+BlockManager::Options make_publication_block_options() {
+  BlockManager::Options options;
+  options.num_blocks(64)
+      .block_size(4)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64)
+      .enable_shared_kv_cache(true)
+      .shared_layout(
+          std::make_shared<StaticKVCacheLayout>(make_publication_layout()))
+      .enable_prefix_cache(false);
+  return options;
+}
+
+TEST(SharedKVCacheMappingTrackerTest,
+     AbandonedPreparationRepublishesUntilConsumerAcknowledges) {
+  auto pool = std::make_shared<StaticKVCacheBlockPool>(
+      /*logical_capacity=*/64, make_publication_layout());
+  const auto ids = pool->allocate(/*num_blocks=*/2, BlockType::KV);
+  ASSERT_EQ(ids.size(), 2u);
+  const std::vector<Block> blocks = {Block(ids[0], nullptr),
+                                     Block(ids[1], nullptr)};
+  SharedKVCacheMappingTracker mapping_tracker;
+  std::vector<int32_t> initial_rows;
+  std::vector<uint64_t> initial_epochs;
+  mapping_tracker.begin();
+  mapping_tracker.append_rows(
+      pool, BlockType::KV, blocks, &initial_rows, &initial_epochs);
+  ASSERT_EQ(initial_rows.size(), 6u);
+  EXPECT_EQ(initial_epochs, (std::vector<uint64_t>{1, 1}));
+
+  std::vector<int32_t> duplicate_rows;
+  mapping_tracker.append_rows(pool, BlockType::KV, blocks, &duplicate_rows);
+  EXPECT_TRUE(duplicate_rows.empty());
+  mapping_tracker.begin();
+  std::vector<int32_t> retried_rows;
+  mapping_tracker.append_rows(pool, BlockType::KV, blocks, &retried_rows);
+  EXPECT_EQ(retried_rows, initial_rows);
+  mapping_tracker.acknowledge();
+  mapping_tracker.begin();
+  std::vector<int32_t> unchanged_rows;
+  mapping_tracker.append_rows(pool, BlockType::KV, blocks, &unchanged_rows);
+  EXPECT_TRUE(unchanged_rows.empty());
+
+  const auto next = pool->allocate(/*num_blocks=*/1, BlockType::KV);
+  ASSERT_EQ(next.size(), 1u);
+  const std::vector<Block> expanded = {
+      blocks[0], blocks[1], Block(next[0], nullptr)};
+  std::vector<int32_t> new_rows;
+  std::vector<uint64_t> new_epochs;
+  mapping_tracker.append_rows(
+      pool, BlockType::KV, expanded, &new_rows, &new_epochs);
+  ASSERT_EQ(new_rows.size(), 3u);
+  EXPECT_EQ(new_rows[0], next[0]);
+  EXPECT_EQ(new_epochs, (std::vector<uint64_t>{1}));
+}
+
+TEST(SharedKVCacheMappingTrackerTest,
+     ConsumersKeepIndependentFullAndLinearAllocationGenerations) {
+  auto pool = std::make_shared<StaticKVCacheBlockPool>(
+      /*logical_capacity=*/64, make_publication_layout());
+  const auto full = pool->allocate(/*num_blocks=*/1, BlockType::KV);
+  const auto linear = pool->allocate(/*num_blocks=*/1, BlockType::LINEAR);
+  ASSERT_EQ(full.size(), 1u);
+  ASSERT_EQ(linear.size(), 1u);
+  ASSERT_EQ(full[0], linear[0]);
+  const std::vector<Block> full_blocks = {Block(full[0], nullptr)};
+  const std::vector<Block> linear_blocks = {Block(linear[0], nullptr)};
+  SharedKVCacheMappingTracker first;
+  SharedKVCacheMappingTracker second;
+  std::vector<int32_t> first_full;
+  std::vector<int32_t> first_linear;
+  first.append_rows(pool, BlockType::KV, full_blocks, &first_full);
+  first.append_rows(pool, BlockType::LINEAR, linear_blocks, &first_linear);
+  first.acknowledge();
+  ASSERT_EQ(first_full.size(), 3u);
+  ASSERT_EQ(first_linear.size(), 5u);
+
+  std::vector<int32_t> second_full;
+  std::vector<int32_t> second_linear;
+  second.append_rows(pool, BlockType::KV, full_blocks, &second_full);
+  second.append_rows(pool, BlockType::LINEAR, linear_blocks, &second_linear);
+  EXPECT_EQ(second_full, first_full);
+  EXPECT_EQ(second_linear, first_linear);
+  second.acknowledge();
+
+  pool->release(full[0], BlockType::KV);
+  pool->release(linear[0], BlockType::LINEAR);
+  const auto reused_full = pool->allocate(/*num_blocks=*/1, BlockType::KV);
+  const auto reused_linear =
+      pool->allocate(/*num_blocks=*/1, BlockType::LINEAR);
+  ASSERT_EQ(reused_full, full);
+  ASSERT_EQ(reused_linear, linear);
+  std::vector<int32_t> reused_full_rows;
+  std::vector<int32_t> reused_linear_rows;
+  std::vector<uint64_t> reused_full_epochs;
+  first.begin();
+  first.append_rows(
+      pool, BlockType::KV, full_blocks, &reused_full_rows, &reused_full_epochs);
+  first.append_rows(
+      pool, BlockType::LINEAR, linear_blocks, &reused_linear_rows);
+  EXPECT_EQ(reused_full_rows.size(), 3u);
+  EXPECT_EQ(reused_full_epochs, (std::vector<uint64_t>{2}));
+  EXPECT_EQ(reused_linear_rows.size(), 5u);
+
+  first.acknowledge();
+  first.reset();
+  reused_full_rows.clear();
+  first.append_rows(pool, BlockType::KV, full_blocks, &reused_full_rows);
+  EXPECT_EQ(reused_full_rows.size(), 3u);
+  first.acknowledge();
+  auto replacement_pool = std::make_shared<StaticKVCacheBlockPool>(
+      /*logical_capacity=*/64, make_publication_layout());
+  const auto replacement_full =
+      replacement_pool->allocate(/*num_blocks=*/1, BlockType::KV);
+  ASSERT_EQ(replacement_full, full);
+  reused_full_rows.clear();
+  first.append_rows(
+      replacement_pool, BlockType::KV, full_blocks, &reused_full_rows);
+  EXPECT_EQ(reused_full_rows.size(), 3u);
+}
+
+TEST(ForwardInputFactoryTest,
+     SharedMappingsRequireAcknowledgmentAndResetWithWorkerStorage) {
+  const auto options = make_publication_block_options();
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  Sequence sequence = make_sequence({1, 2, 3}, "shared");
+  sequence.add_blocks(BlockType::KV, manager.allocate_blocks(BlockType::KV, 1));
+  sequence.add_blocks(BlockType::LINEAR,
+                      manager.allocate_blocks(BlockType::LINEAR, 1));
+  ModelArgs args;
+  args.layer_types({"full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"});
+  ForwardInputFactoryOptions factory_options;
+  factory_options.enable_shared_kv_cache_deltas = true;
+  ForwardInputFactory factory(factory_options);
+  std::vector<LlmForwardInput> inputs;
+  bool is_graph_warmup = false;
+  auto prepare = [&](ForwardInputFactory& selected_factory) {
+    sequence.kv_state().set_kv_cache_tokens_num(0);
+    BatchGroup batches(1);
+    batches[0].add(&sequence);
+    selected_factory.create_inputs(batches, args, inputs, is_graph_warmup);
+  };
+  prepare(factory);
+  ASSERT_EQ(inputs.size(), 1u);
+  const auto full_rows = inputs[0].input_params.embedding.full_block_slot_rows;
+  const auto linear_rows =
+      inputs[0].input_params.embedding.linear_state_slot_rows;
+  ASSERT_EQ(full_rows.size(), 3u);
+  ASSERT_EQ(linear_rows.size(), 5u);
+  prepare(factory);
+  EXPECT_EQ(inputs[0].input_params.embedding.full_block_slot_rows, full_rows);
+  EXPECT_EQ(inputs[0].input_params.embedding.linear_state_slot_rows,
+            linear_rows);
+  factory.acknowledge_shared_kv_cache();
+  prepare(factory);
+  EXPECT_TRUE(inputs[0].input_params.embedding.full_block_slot_rows.empty());
+  EXPECT_TRUE(inputs[0].input_params.embedding.full_block_lease_epochs.empty());
+  EXPECT_TRUE(inputs[0].input_params.embedding.linear_state_slot_rows.empty());
+  factory.acknowledge_shared_kv_cache();
+  factory.reset_shared_kv_cache_mapping_tracker();
+  prepare(factory);
+  EXPECT_EQ(inputs[0].input_params.embedding.full_block_slot_rows, full_rows);
+  EXPECT_EQ(inputs[0].input_params.embedding.linear_state_slot_rows,
+            linear_rows);
+
+  ForwardInputFactory snapshot_factory(ForwardInputFactoryOptions{});
+  prepare(snapshot_factory);
+  EXPECT_EQ(inputs[0].input_params.embedding.full_block_slot_rows, full_rows);
+  snapshot_factory.acknowledge_shared_kv_cache();
+  prepare(snapshot_factory);
+  EXPECT_EQ(inputs[0].input_params.embedding.full_block_slot_rows, full_rows);
+  EXPECT_EQ(inputs[0].input_params.embedding.linear_state_slot_rows,
+            linear_rows);
+}
+
+TEST(ForwardInputFactoryTest,
+     SharedMappingAcknowledgmentKeepsDpAndEmptyRankCursorsIndependent) {
+  ScopedGraphMode graph_mode(true);
+  const auto options = make_publication_block_options();
+  CompositeBlockManager first_manager(build_composite_leaves(options), options);
+  CompositeBlockManager second_manager(build_composite_leaves(options),
+                                       options);
+  Sequence first = make_sequence({1, 2, 3}, "first");
+  Sequence second = make_sequence({4, 5, 6}, "second");
+  first.add_blocks(BlockType::KV,
+                   first_manager.allocate_blocks(BlockType::KV, 1));
+  first.add_blocks(BlockType::LINEAR,
+                   first_manager.allocate_blocks(BlockType::LINEAR, 1));
+  second.add_blocks(BlockType::KV,
+                    second_manager.allocate_blocks(BlockType::KV, 1));
+  second.add_blocks(BlockType::LINEAR,
+                    second_manager.allocate_blocks(BlockType::LINEAR, 1));
+  ModelArgs args;
+  args.layer_types({"full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"});
+  ForwardInputFactoryOptions factory_options;
+  factory_options.dp_size = 2;
+  factory_options.cp_size = 2;
+  factory_options.enable_shared_kv_cache_deltas = true;
+  ForwardInputFactory factory(factory_options);
+  std::vector<LlmForwardInput> inputs;
+  bool is_graph_warmup = false;
+  auto prepare = [&](bool include_first, bool include_second) {
+    first.kv_state().set_kv_cache_tokens_num(0);
+    second.kv_state().set_kv_cache_tokens_num(0);
+    BatchGroup batches(2);
+    if (include_first) {
+      batches[0].add(&first);
+    }
+    if (include_second) {
+      batches[1].add(&second);
+    }
+    factory.create_inputs(batches, args, inputs, is_graph_warmup);
+  };
+  prepare(/*include_first=*/true, /*include_second=*/true);
+  ASSERT_EQ(inputs.size(), 2u);
+  EXPECT_EQ(inputs[0].input_params.embedding.full_block_slot_rows.size(), 3u);
+  EXPECT_EQ(inputs[1].input_params.embedding.full_block_slot_rows.size(), 3u);
+  EXPECT_EQ(inputs[0].input_params.embedding.linear_state_slot_rows.size(), 5u);
+  EXPECT_EQ(inputs[1].input_params.embedding.linear_state_slot_rows.size(), 5u);
+  factory.acknowledge_shared_kv_cache();
+  prepare(/*include_first=*/true, /*include_second=*/true);
+  EXPECT_TRUE(inputs[0].input_params.embedding.full_block_slot_rows.empty());
+  EXPECT_TRUE(inputs[1].input_params.embedding.full_block_slot_rows.empty());
+  factory.acknowledge_shared_kv_cache();
+
+  factory.reset_shared_kv_cache_mapping_tracker();
+  prepare(/*include_first=*/false, /*include_second=*/true);
+  EXPECT_TRUE(inputs[0].input_params.embedding.full_block_slot_rows.empty());
+  EXPECT_EQ(inputs[1].input_params.embedding.full_block_slot_rows.size(), 3u);
+  factory.acknowledge_shared_kv_cache();
+  prepare(/*include_first=*/true, /*include_second=*/true);
+  EXPECT_EQ(inputs[0].input_params.embedding.full_block_slot_rows.size(), 3u);
+  EXPECT_EQ(inputs[0].input_params.embedding.linear_state_slot_rows.size(), 5u);
+  EXPECT_TRUE(inputs[1].input_params.embedding.full_block_slot_rows.empty());
+  EXPECT_TRUE(inputs[1].input_params.embedding.linear_state_slot_rows.empty());
+}
 
 TEST(ForwardInputFactoryTest, AggregatesDpMetadataAndMixedForwardTypes) {
   BlockManager::Options manager_options;

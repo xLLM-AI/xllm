@@ -11,7 +11,7 @@ sidebar:
 
 ## 环境准备
 
-按照 xLLM 的 [Ascend NPU 环境指南](/zh/hardware/ascend_npu/)
+按照 xLLM [Ascend NPU 环境指南](/zh/hardware/ascend_npu/)
 准备开发环境，并在 xLLM 仓库根目录构建：
 
 ```bash
@@ -102,6 +102,23 @@ VAE 保持 FP32，每张参与的 NPU 都会加载完整的视频 VAE 权重，�
 标准权重有 56 个注意力头、96 个视频 patch 通道和 32 个音频通道；并行配置需满足
 `heads % (TP * SP) == 0`、`video_patch_dim % TP == 0` 和
 `audio_in_channels % TP == 0`。
+
+## Laser Attention
+
+在 Ascend NPU 上启用 Laser 时，将上述服务启动参数改为
+`--dit_laser_attention_enabled=true`，默认值为 `false`。继续使用本文说明的
+checkpoint、文本条件、请求字段及并行配置；启用 Laser 不会运行文本编码器。
+
+需要一起构建 xLLM 和匹配的 `xllm_ops` 子模块。更新原生算子时使用新的
+构建目录，避免复用旧的内核生成缓存。运行环境沿用上述 Ascend 环境。
+
+H3 对有效长度至少为 2,048、head dimension 不超过 128 的 self-attention
+选择 Laser，短序列使用现有 dense attention 算子。H3 会排除 SP padding，
+Laser 自行处理序列长度与 head dimension 的对齐；用户无需额外补齐输入或
+缩放输入数值范围。
+
+该选项提供 dense、非因果注意力，不增加外部 attention mask、dropout 或
+GQA 支持。下述模型和请求限制仍然适用。
 
 ## 生成音视频
 

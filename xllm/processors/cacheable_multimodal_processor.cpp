@@ -23,12 +23,64 @@ limitations under the License.
 #include <vector>
 
 namespace xllm {
+namespace {
+
+class ProcessorCacheLookupVisitor final : public MMInputItem::IVisitor {
+ public:
+  ProcessorCacheLookupVisitor(ProcessorCache& cache, size_t item_count);
+  bool visit(const MMInputItem& input) override;
+
+  std::vector<std::optional<MMDataItem>> cache_hits_;
+  std::vector<MMInputItem> miss_inputs_;
+
+ private:
+  ProcessorCache& cache_;
+};
+
+class ProcessorCacheInsertVisitor final : public MMDataItem::IVisitor {
+ public:
+  explicit ProcessorCacheInsertVisitor(ProcessorCache& cache);
+  bool visit(MMDataItem& item) override;
+
+ private:
+  ProcessorCache& cache_;
+};
+
+ProcessorCacheLookupVisitor::ProcessorCacheLookupVisitor(ProcessorCache& cache,
+                                                         size_t item_count)
+    : cache_(cache) {
+  cache_hits_.reserve(item_count);
+  miss_inputs_.reserve(item_count);
+}
+
+bool ProcessorCacheLookupVisitor::visit(const MMInputItem& input) {
+  std::optional<MMDataItem> cache_hit;
+  if (!input.is_embedding() && input.hash_key.has_value()) {
+    cache_hit = cache_.lookup(input.hash_key.value());
+  }
+  if (!cache_hit.has_value()) {
+    miss_inputs_.emplace_back(input);
+  }
+  cache_hits_.emplace_back(std::move(cache_hit));
+  return true;
+}
+
+ProcessorCacheInsertVisitor::ProcessorCacheInsertVisitor(ProcessorCache& cache)
+    : cache_(cache) {}
+
+bool ProcessorCacheInsertVisitor::visit(MMDataItem& item) {
+  if (!item.is_embedded()) {
+    cache_.insert(item.state().schedule_data().key, item);
+  }
+  return true;
+}
+
+}  // namespace
 
 CacheableMultimodalProcessor::CacheableMultimodalProcessor(
     std::unique_ptr<MultimodalProcessorBase> inner,
     int64_t max_cache_items)
-    : MultimodalProcessorBase(/*tokenizer=*/nullptr),
-      inner_(std::move(inner)),
+    : inner_(std::move(inner)),
       cache_(std::make_unique<ProcessorCache>(max_cache_items)) {
   CHECK(inner_ != nullptr);
 }

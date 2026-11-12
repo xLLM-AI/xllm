@@ -78,6 +78,11 @@ from xllm.python.attention.kda_linear_attention import (
 _SPARSE_MODE_NONE = 0
 SPARSE_MODE_RIGHT_DOWN_CAUSAL = 3
 
+# Scalar row gathers avoid launch overhead for small maps. Larger maps retain
+# the parallel Torch indexing path. Count both outputs across all Full layers,
+# including the captured table's padded capacity rather than its live width.
+_SHARED_FULL_MAPPING_MAX_FUSED_ELEMENTS = 32 * 1024
+
 _HAS_FIA_V2 = hasattr(torch.ops.npu, "npu_fused_infer_attention_score_v2") and hasattr(
     torch_npu, "_npu_fused_infer_attention_score_v2_get_max_workspace"
 )
@@ -643,8 +648,9 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._kda_validated_query_shape = None
         self._graph_metadata_updated_in_place = False
         self._active_full_layer = None
-        self._shared_full_block_tables.clear()
-        self._shared_full_slot_mappings.clear()
+        # Unbind the previous entry without clearing its cached layer views.
+        self._shared_full_block_tables = {}
+        self._shared_full_slot_mappings = {}
         self._shared_full_slot_mapping_source = None
         prepared = getattr(metadata, "prepared_attention_state", None)
         if isinstance(prepared, _PreparedMlaAttention):
@@ -2586,27 +2592,26 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         rows = self._shared_full_row_table.rows() if update else None
         block_table = self._block_table_i32
         context = get_forward_context_or_none()
+        execution_state = None if context is None else context.execution_state
 
-        def _buffer(kind: str, source: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+        def _layer_buffers(
+            kind: str, source: torch.Tensor, shape: tuple[int, ...]
+        ) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
             key = (kind, self._shared_full_layer_ids, shape)
-            if not update and (
-                context is None
-                or context.execution_state is None
-                or key not in context.execution_state.persistent_buffers
-            ):
+            if not update and (execution_state is None or key not in execution_state.persistent_buffers):
                 raise RuntimeError("shared Full replay requires metadata buffers owned by a captured graph entry")
-            return (
+            buffer = (
                 get_execution_buffer(key, lambda: source.new_empty(shape))
                 if context is not None
                 else source.new_empty(shape)
             )
-
-        if block_table is not None:
-            shape = (len(self._shared_full_layer_ids), *block_table.shape)
-            tables = _buffer("SHARED_FULL_BLOCK_TABLES", block_table, shape)
-            if update:
-                layout.full_block_table(block_table, rows, out=tables)
-            self._shared_full_block_tables = dict(zip(self._shared_full_layer_ids, tables.unbind(0)))
+            if execution_state is None:
+                return buffer, dict(zip(self._shared_full_layer_ids, buffer.unbind(0)))
+            views = execution_state.shared_full_layer_views.get(key)
+            if views is None:
+                views = dict(zip(self._shared_full_layer_ids, buffer.unbind(0)))
+                execution_state.shared_full_layer_views[key] = views
+            return buffer, views
 
         metadata = self._metadata
         slot_mapping = (
@@ -2614,13 +2619,42 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             if getattr(metadata, "has_kv_shard", False)
             else getattr(metadata, "slot_mapping", None)
         )
+        tables = None
+        if block_table is not None:
+            shape = (len(self._shared_full_layer_ids), *block_table.shape)
+            tables, self._shared_full_block_tables = _layer_buffers("SHARED_FULL_BLOCK_TABLES", block_table, shape)
         if slot_mapping is None:
+            if update and tables is not None:
+                layout.full_block_table(block_table, rows, out=tables)
             return
         shape = (len(self._shared_full_layer_ids), *slot_mapping.shape)
-        mappings = _buffer("SHARED_FULL_SLOT_MAPPINGS", slot_mapping, shape)
+        mappings, self._shared_full_slot_mappings = _layer_buffers("SHARED_FULL_SLOT_MAPPINGS", slot_mapping, shape)
         if update:
-            layout.full_slot_mapping(slot_mapping, rows, out=mappings)
-        self._shared_full_slot_mappings = dict(zip(self._shared_full_layer_ids, mappings.unbind(0)))
+            if (
+                tables is not None
+                and tables.numel() + mappings.numel() <= _SHARED_FULL_MAPPING_MAX_FUSED_ELEMENTS
+                and block_table.device.type == "npu"
+                and block_table.dtype == torch.int32
+                and slot_mapping.dtype == torch.int32
+                and block_table.is_contiguous()
+                and slot_mapping.is_contiguous()
+                and rows.dtype == torch.int32
+                and rows.stride(1) == 1
+                and rows.stride(0) >= rows.shape[1]
+            ):
+                torch.ops.xllm_ops.shared_full_indices_out(
+                    block_table,
+                    slot_mapping,
+                    rows,
+                    layout.page_size_tokens,
+                    layout.full_read_padding_row,
+                    tables,
+                    mappings,
+                )
+            else:
+                if tables is not None:
+                    layout.full_block_table(block_table, rows, out=tables)
+                layout.full_slot_mapping(slot_mapping, rows, out=mappings)
         self._shared_full_slot_mapping_source = slot_mapping
 
     def _full_slot_mapping(self, metadata: AttentionMetadata) -> torch.Tensor:

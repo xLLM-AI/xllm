@@ -33,7 +33,7 @@ limitations under the License.
 #include "core/framework/request/sequence.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/util/hash_util.h"
-#include "processors/multimodal_processor.h"
+#include "processors/multimodal_processor_pipeline.h"
 #include "processors/qwen3_vl_prompt_processor.h"
 
 namespace xllm {

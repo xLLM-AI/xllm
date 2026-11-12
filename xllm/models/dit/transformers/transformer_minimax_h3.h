@@ -38,6 +38,7 @@ limitations under the License.
 #include "models/dit/utils/dit_cache_mixin.h"
 #include "models/dit/utils/dit_parallel_mixin.h"
 #if defined(USE_NPU)
+#include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "models/dit/utils/dit_block_weight_manager.h"
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #endif
@@ -358,53 +359,71 @@ class H3AttentionImpl final : public torch::nn::Module,
         sp_size_ > 1
             ? unpad_tensor(q, kPackedSequenceTensorName, /*dim=*/1).size(1)
             : sequence_length;
-    const int64_t attention_heads = q.size(2);
-    std::vector<c10::SymInt> sequence_ends;
-    sequence_ends.reserve(2 * batch_size);
-    for (int64_t batch = 0; batch < batch_size; ++batch) {
-      sequence_ends.emplace_back(batch * sequence_length +
-                                 live_sequence_length);
-      if (live_sequence_length < sequence_length) {
-        sequence_ends.emplace_back((batch + 1) * sequence_length);
+    torch::Tensor out;
+    if (DiTConfig::get_instance().dit_laser_attention_enabled() &&
+        live_sequence_length >= 2048 && dim_head_ <= 128) {
+      // Exclude SP padding before Laser adds its own masked alignment. Keep
+      // batches independent and restore only the padding needed by all-to-all.
+      out = kernel::npu::laser_attention(
+                q.narrow(1, 0, live_sequence_length).transpose(1, 2),
+                k.narrow(1, 0, live_sequence_length).transpose(1, 2),
+                v.narrow(1, 0, live_sequence_length).transpose(1, 2),
+                std::pow(dim_head_, -0.5),
+                q.size(2))
+                .transpose(1, 2)
+                .contiguous();
+      if (sp_size_ > 1) {
+        out = pad_tensor(out, kPackedSequenceTensorName, /*dim=*/1);
       }
+    } else {
+      const int64_t attention_heads = q.size(2);
+      std::vector<c10::SymInt> sequence_ends;
+      sequence_ends.reserve(2 * batch_size);
+      for (int64_t batch = 0; batch < batch_size; ++batch) {
+        sequence_ends.emplace_back(batch * sequence_length +
+                                   live_sequence_length);
+        if (live_sequence_length < sequence_length) {
+          sequence_ends.emplace_back((batch + 1) * sequence_length);
+        }
+      }
+      const auto results =
+          at_npu::native::custom_ops::npu_fused_infer_attention_score(
+              q.reshape({-1, attention_heads, dim_head_}),
+              k.reshape({-1, attention_heads, dim_head_}),
+              v.reshape({-1, attention_heads, dim_head_}),
+              /*pse_shift=*/std::nullopt,
+              /*atten_mask=*/std::nullopt,
+              /*actual_seq_lengths=*/c10::SymIntArrayRef(sequence_ends),
+              /*actual_seq_lengths_kv=*/c10::SymIntArrayRef(sequence_ends),
+              /*dequant_scale1=*/std::nullopt,
+              /*quant_scale1=*/std::nullopt,
+              /*dequant_scale2=*/std::nullopt,
+              /*quant_scale2=*/std::nullopt,
+              /*quant_offset2=*/std::nullopt,
+              /*antiquant_scale=*/std::nullopt,
+              /*antiquant_offset=*/std::nullopt,
+              /*key_antiquant_scale=*/std::nullopt,
+              /*key_antiquant_offset=*/std::nullopt,
+              /*value_antiquant_scale=*/std::nullopt,
+              /*value_antiquant_offset=*/std::nullopt,
+              /*block_table=*/std::nullopt,
+              /*query_padding_size=*/std::nullopt,
+              /*kv_padding_size=*/std::nullopt,
+              /*key_shared_prefix=*/std::nullopt,
+              /*value_shared_prefix=*/std::nullopt,
+              /*actual_shared_prefix_len=*/std::nullopt,
+              /*query_rope=*/std::nullopt,
+              /*key_rope=*/std::nullopt,
+              /*key_rope_antiquant_scale=*/std::nullopt,
+              /*num_heads=*/attention_heads,
+              /*scale=*/std::pow(dim_head_, -0.5),
+              /*pre_tokens=*/2147483647,
+              /*next_tokens=*/2147483647,
+              /*input_layout=*/"TND",
+              /*num_key_value_heads=*/attention_heads);
+      out = std::get<0>(results).view(
+          {batch_size, sequence_length, attention_heads, dim_head_});
     }
-    const auto results =
-        at_npu::native::custom_ops::npu_fused_infer_attention_score(
-            q.reshape({-1, attention_heads, dim_head_}),
-            k.reshape({-1, attention_heads, dim_head_}),
-            v.reshape({-1, attention_heads, dim_head_}),
-            /*pse_shift=*/std::nullopt,
-            /*atten_mask=*/std::nullopt,
-            /*actual_seq_lengths=*/c10::SymIntArrayRef(sequence_ends),
-            /*actual_seq_lengths_kv=*/c10::SymIntArrayRef(sequence_ends),
-            /*dequant_scale1=*/std::nullopt,
-            /*quant_scale1=*/std::nullopt,
-            /*dequant_scale2=*/std::nullopt,
-            /*quant_scale2=*/std::nullopt,
-            /*quant_offset2=*/std::nullopt,
-            /*antiquant_scale=*/std::nullopt,
-            /*antiquant_offset=*/std::nullopt,
-            /*key_antiquant_scale=*/std::nullopt,
-            /*key_antiquant_offset=*/std::nullopt,
-            /*value_antiquant_scale=*/std::nullopt,
-            /*value_antiquant_offset=*/std::nullopt,
-            /*block_table=*/std::nullopt,
-            /*query_padding_size=*/std::nullopt,
-            /*kv_padding_size=*/std::nullopt,
-            /*key_shared_prefix=*/std::nullopt,
-            /*value_shared_prefix=*/std::nullopt,
-            /*actual_shared_prefix_len=*/std::nullopt,
-            /*query_rope=*/std::nullopt,
-            /*key_rope=*/std::nullopt,
-            /*key_rope_antiquant_scale=*/std::nullopt,
-            /*num_heads=*/attention_heads,
-            /*scale=*/std::pow(dim_head_, -0.5),
-            /*pre_tokens=*/2147483647,
-            /*next_tokens=*/2147483647,
-            /*input_layout=*/"TND",
-            /*num_key_value_heads=*/attention_heads);
-    torch::Tensor out = std::get<0>(results).view(
-        {batch_size, sequence_length, attention_heads, dim_head_});
 #else
     // SDPA has no packed-segment metadata; exclude SP padding explicitly.
     if (sp_size_ > 1) {

@@ -1,7 +1,5 @@
 include(cc_test)
 
-add_subdirectory(partial_json_parser)
-
 function(add_detector_test TEST_NAME)
   cc_test(
     CPU_ONLY

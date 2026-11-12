@@ -39,7 +39,7 @@ limitations under the License.
 #include "models/model_registry.h"
 #include "processors/glm4v_prompt_processor.h"
 #include "processors/glm4v_video_processor.h"
-#include "processors/multimodal_processor.h"
+#include "processors/multimodal_processor_pipeline.h"
 #include "processors/qwen2_vl_image_processor.h"
 
 namespace xllm {

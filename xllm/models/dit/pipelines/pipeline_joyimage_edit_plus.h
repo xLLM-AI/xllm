@@ -26,6 +26,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/model/dit_model_output.h"
@@ -484,11 +485,12 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
       CHECK(tokenizer != nullptr)
           << "Failed to load JoyImageEditPlus Qwen3-VL tokenizer";
       tokenizer_ = std::shared_ptr<Tokenizer>(std::move(tokenizer));
-      multimodal_processor_ =
-          create_multimodal_processor(text_encoder_model_args_,
-                                      tokenizer_,
-                                      /*max_cache_items=*/0,
-                                      text_encoder_loader->tokenizer_args());
+      multimodal_processor_ = create_multimodal_processor(
+          text_encoder_model_args_,
+          tokenizer_,
+          /*max_cache_items=*/0,
+          text_encoder_loader->tokenizer_args(),
+          DiTConfig::get_instance().max_sequence_length());
     }
 
     vae_->load_model(std::move(vae_loader));

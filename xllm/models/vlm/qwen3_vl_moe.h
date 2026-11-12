@@ -21,6 +21,7 @@ limitations under the License.
 #include "core/layers/qwen3_vision_layer.h"
 #include "models/llm/qwen3_moe.h"
 #include "models/model_registry.h"
+#include "processors/multimodal_processor_pipeline.h"
 #include "processors/qwen2_vl_image_processor.h"
 #include "processors/qwen3_vl_prompt_processor.h"
 #include "processors/qwen3_vl_video_processor.h"

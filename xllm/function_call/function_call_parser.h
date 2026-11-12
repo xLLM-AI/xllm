@@ -20,8 +20,8 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "base_format_detector.h"
-#include "core_types.h"
+#include "function_call/base_format_detector.h"
+#include "function_call/tool_call.h"
 
 namespace xllm {
 namespace function_call {
