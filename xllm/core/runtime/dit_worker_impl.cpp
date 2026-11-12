@@ -130,7 +130,8 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
   const auto& json_config = config::get_parsed_json_config();
   if (model_type == "MiniMaxH3ModularPipeline" &&
       !config::is_flag_specified("dit_cache_policy") &&
-      !(json_config && json_config->contains("dit_cache_policy"))) {
+      !(json_config &&
+        json_config->value<std::string>("dit_cache_policy").has_value())) {
     cache_config.selected_policy = PolicyType::None;
   }
 
