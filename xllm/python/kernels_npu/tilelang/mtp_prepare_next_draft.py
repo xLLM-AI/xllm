@@ -34,9 +34,9 @@ def prepare_vector_only_source(source: str) -> str:
 
 
 def build_mtp_prepare_next_draft_kernel(preparation_mode: int) -> tvm.tir.PrimFunc:
-    """Prepare full hidden (0), compact hidden (1), or a metadata-only prefix (2)."""
-    if preparation_mode not in (0, 1, 2):
-        raise ValueError("preparation_mode must be full (0), compact (1), or prefix (2)")
+    """Prepare full hidden (0), compact hidden (1), or int64/int32 prefixes (2/3)."""
+    if preparation_mode not in (0, 1, 2, 3):
+        raise ValueError("preparation_mode must be full (0), compact (1), or prefix int64/int32 (2/3)")
 
     @T.prim_func
     def mtp_prepare_next_draft(
@@ -62,7 +62,9 @@ def build_mtp_prepare_next_draft_kernel(preparation_mode: int) -> tvm.tir.PrimFu
         copy_cores: T.int32,
         use_shared_table: T.int32,
     ):
-        tokens = T.match_buffer(tokens_handle, (batch_size * speculative_width,), "int64")
+        tokens = T.match_buffer(
+            tokens_handle, (batch_size * speculative_width,), "int32" if preparation_mode == 3 else "int64"
+        )
         hidden = T.match_buffer(
             hidden_handle, (batch_size * (2 if preparation_mode == 1 else speculative_width) * hidden_size,), "uint16"
         )
@@ -71,42 +73,42 @@ def build_mtp_prepare_next_draft_kernel(preparation_mode: int) -> tvm.tir.PrimFu
         base_lengths = T.match_buffer(base_lengths_handle, (T.max(batch_size, 1),), "int32")
         table = T.match_buffer(
             table_handle,
-            (batch_size * (speculative_width if preparation_mode == 2 else 1) * table_columns,),
+            (batch_size * (speculative_width if preparation_mode >= 2 else 1) * table_columns,),
             "int32",
         )
         shared_table = T.match_buffer(
             shared_table_handle,
-            (batch_size * (speculative_width if preparation_mode == 2 else 1) * table_columns,),
+            (batch_size * (speculative_width if preparation_mode >= 2 else 1) * table_columns,),
             "int32",
         )
         output_tokens = T.match_buffer(
-            output_tokens_handle, (batch_size * (speculative_width if preparation_mode == 2 else 2),), "int32"
+            output_tokens_handle, (batch_size * (speculative_width if preparation_mode >= 2 else 2),), "int32"
         )
         output_hidden = T.match_buffer(output_hidden_handle, (batch_size * 2 * hidden_size,), "uint16")
         output_positions = T.match_buffer(
-            output_positions_handle, (batch_size * (speculative_width if preparation_mode == 2 else 2),), "int32"
+            output_positions_handle, (batch_size * (speculative_width if preparation_mode >= 2 else 2),), "int32"
         )
         output_lengths = T.match_buffer(
             output_lengths_handle,
             (
                 T.max(
-                    batch_size * (speculative_width if preparation_mode == 2 else (2 if preparation_mode == 1 else 1)),
+                    batch_size * (speculative_width if preparation_mode >= 2 else (2 if preparation_mode == 1 else 1)),
                     1,
                 ),
             ),
             "int32",
         )
         output_slots = T.match_buffer(
-            output_slots_handle, (batch_size * (speculative_width if preparation_mode == 2 else 2),), "int32"
+            output_slots_handle, (batch_size * (speculative_width if preparation_mode >= 2 else 2),), "int32"
         )
         output_shared_slots = T.match_buffer(
-            output_shared_slots_handle, (batch_size * (speculative_width if preparation_mode == 2 else 2),), "int32"
+            output_shared_slots_handle, (batch_size * (speculative_width if preparation_mode >= 2 else 2),), "int32"
         )
-        output_logits_indices = T.match_buffer(output_logits_indices_handle, (batch_size,), "int32")
+        output_logits_indices = T.match_buffer(output_logits_indices_handle, (T.max(batch_size, 1),), "int32")
         with T.Kernel(copy_cores, threads=1, is_npu=True) as core:
             accepted = T.alloc_var("int32")
             cache_position = T.alloc_var("int32")
-            if preparation_mode == 2:
+            if preparation_mode >= 2:
                 # Prefix rows retain the target hidden tensor as a view. Only
                 # metadata is written, including both logical and final slots.
                 if core == 0:

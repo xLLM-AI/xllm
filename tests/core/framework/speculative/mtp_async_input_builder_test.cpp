@@ -20,6 +20,8 @@ limitations under the License.
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
+#include <torch_npu/csrc/libs/init_npu.h>
+#include <torch_npu/torch_npu.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -28,6 +30,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kernels/npu/tilelang/mtp_prepare_next_draft.h"
 #include "core/kernels/xllm_torch_ops.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
@@ -515,6 +518,79 @@ TEST(MtpAsyncInputBuilderTest, SharedModulesPointToTargetModel) {
   py::object draft_embedding = draft_model.attr("model").attr("embed_tokens");
   EXPECT_TRUE(draft_lm_head.is(target_lm_head));
   EXPECT_TRUE(draft_embedding.is(target_embedding));
+}
+
+class MtpAsyncInputBuilderNpuTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
+
+  static void TearDownTestSuite() { torch_npu::finalize_npu(); }
+};
+
+TEST_F(MtpAsyncInputBuilderNpuTest,
+       PreparesInt32VerifierPrefixWithoutCopyingHidden) {
+  const torch::Device device("npu:0");
+  constexpr int64_t kWidth = 5;
+  constexpr int64_t kHiddenSize = 16;
+  const torch::Tensor tokens =
+      torch::tensor({{10, 11, -1, -1, -1}, {20, -1, -1, -1, -1}}, torch::kInt)
+          .to(device);
+  const torch::Tensor positions = torch::tensor({4, 8}, torch::kInt).to(device);
+  const torch::Tensor lengths = torch::tensor({5, 9}, torch::kInt).to(device);
+  const torch::Tensor tables =
+      torch::tensor({{10, 11, 12, 13}, {0, 0, 0, 0}}, torch::kInt)
+          .repeat_interleave(kWidth, /*dim=*/0)
+          .to(device);
+  const torch::Tensor shared_tables =
+      torch::tensor({{60, 62, 64, 66}, {60, 60, 60, 60}}, torch::kInt)
+          .repeat_interleave(kWidth, /*dim=*/0)
+          .to(device);
+  const auto prepared = kernel::npu::try_mtp_prepare_draft_prefix(
+      tokens, positions, lengths, tables, kBlockSize, shared_tables);
+  ASSERT_TRUE(prepared.has_value());
+
+  LlmForwardInput draft =
+      make_draft_input(/*batch_size=*/2, kHiddenSize, kWidth);
+  auto& attention = draft.input_params.attention.device;
+  attention.block_tables = tables;
+  attention.shared_full_block_table = shared_tables;
+  attention.shared_full_slot_mapping =
+      torch::full({2 * kWidth}, -1, tokens.options());
+  draft.sampling_params.logits_indices() = torch::zeros({2}, tokens.options());
+  const torch::Tensor hidden =
+      torch::arange(2 * kWidth * kHiddenSize, torch::kFloat)
+          .reshape({2, kWidth, kHiddenSize})
+          .to(tokens.options().dtype(torch::kBFloat16));
+
+  prepare_draft_prefix_from_target(
+      draft, tokens, hidden, positions, lengths, kBlockSize);
+
+  EXPECT_TRUE(torch::equal(
+      draft.token_ids.cpu(),
+      torch::tensor({10, 11, 0, 0, 0, 20, 0, 0, 0, 0}, torch::kInt)));
+  EXPECT_TRUE(torch::equal(
+      draft.positions.cpu(),
+      torch::tensor({4, 5, 6, 7, 8, 8, 9, 10, 11, 12}, torch::kInt)));
+  EXPECT_TRUE(torch::equal(
+      attention.kv_seq_lens.cpu(),
+      torch::tensor({5, 6, 7, 8, 9, 9, 10, 11, 12, 13}, torch::kInt)));
+  EXPECT_TRUE(torch::equal(
+      attention.new_cache_slots.cpu(),
+      torch::tensor({44, 45, 46, 47, 48, 0, 1, 2, 3, 0}, torch::kInt)));
+  EXPECT_TRUE(
+      torch::equal(attention.shared_full_slot_mapping.cpu(),
+                   torch::tensor({248, 249, 250, 251, 256, -1, -1, -1, -1, -1},
+                                 torch::kInt)));
+  EXPECT_TRUE(torch::equal(draft.sampling_params.logits_indices().cpu(),
+                           torch::tensor({1, 5}, torch::kInt)));
+  EXPECT_TRUE(
+      torch::equal(draft.input_params.embedding.input_embedding.cpu(),
+                   hidden.flatten(/*start_dim=*/0, /*end_dim=*/1).cpu()));
+  EXPECT_EQ(draft.input_params.embedding.input_embedding.data_ptr(),
+            hidden.data_ptr());
+  EXPECT_EQ(attention.shared_full_block_table.data_ptr(),
+            shared_tables.data_ptr());
+  EXPECT_TRUE(draft.runtime.device_tensors_ready);
 }
 
 }  // namespace
