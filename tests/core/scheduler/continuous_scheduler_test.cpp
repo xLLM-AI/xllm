@@ -904,9 +904,8 @@ TEST(ContinuousSchedulerTest,
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   for (bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    ScopedConfigValue<bool> mix_batch(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(64, 16, 0, 64, 1);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
