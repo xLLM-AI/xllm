@@ -315,7 +315,7 @@ std::optional<std::array<const void*, 12>> spec_verify_input_addresses(
   return addresses;
 }
 
-ModelOutput forward_eager(CausalLM* model,
+ModelOutput forward_eager(DecoderModel* model,
                           const torch::Tensor& tokens,
                           const torch::Tensor& positions,
                           std::vector<KVCache>& kv_cache,
@@ -344,7 +344,7 @@ uint64_t get_mla_graph_key(uint32_t bucket_num_tokens,
 }
 }  // namespace
 
-bool AclGraph::capture(CausalLM* model,
+bool AclGraph::capture(DecoderModel* model,
                        const runtime::Options& options,
                        const torch::Tensor& tokens,
                        const torch::Tensor& positions,
@@ -357,17 +357,12 @@ bool AclGraph::capture(CausalLM* model,
   const bool capture_static_graph_tasks = uses_static_mtp_graph_task_variant(
       params, bucket_num_tokens, options.block_size());
 
-  // Get actual num_tokens from tokens tensor
-  // const uint32_t actual_num_tokens = tokens.size(0);
-
-  auto& tensor_options = model->options();
-
+  const c10::DeviceIndex device_idx = capture_stream_->device_index();
   c10_npu::npuSynchronizeDevice();
 
   // Begin graph capture using NPUGraph mempool for temporary tensor management
   // Get current NPU stream from libtorch NPU API
-  aclrtStream stream =
-      c10_npu::getCurrentNPUStream(tensor_options.device().index()).stream();
+  aclrtStream stream = c10_npu::getCurrentNPUStream(device_idx).stream();
 
   // For hybrid models (e.g., qwen3_next with mixed GDN/full_attention layers),
   // we need to find the first Full Attention layer to get the correct kv_cache.
@@ -474,7 +469,6 @@ bool AclGraph::capture(CausalLM* model,
   // Acquire device-level lock to prevent prepare_work_before_execute from
   // executing simultaneously, which would trigger synchronous operations
   // that conflict with capture mode
-  auto device_idx = tensor_options.device().index();
   Device::empty_cache(device_idx);
 
   bool need_restore_stream = false;
@@ -533,8 +527,7 @@ bool AclGraph::capture(CausalLM* model,
         graph_.reset();
       }
       if (need_restore_stream) {
-        c10_npu::setCurrentNPUStream(
-            c10_npu::getDefaultNPUStream(tensor_options.device().index()));
+        c10_npu::setCurrentNPUStream(c10_npu::getDefaultNPUStream(device_idx));
       }
       throw;
     }
@@ -543,8 +536,7 @@ bool AclGraph::capture(CausalLM* model,
     }
     // Lock is automatically released here when lock goes out of scope
     if (need_restore_stream) {
-      c10_npu::setCurrentNPUStream(
-          c10_npu::getDefaultNPUStream(tensor_options.device().index()));
+      c10_npu::setCurrentNPUStream(c10_npu::getDefaultNPUStream(device_idx));
     }
   }
   // Capture uses padding state; replay real inputs once after capture finishes.
@@ -763,7 +755,8 @@ AclGraph::AclGraph(GraphPersistentParam& persistent_param,
                    const c10_npu::NPUStream& capture_stream)
     : persistent_param_(persistent_param) {
   capture_stream_ = capture_stream;
-  update_stream_ = c10_npu::getStreamFromPool(true, device_index);
+  update_stream_ =
+      c10_npu::getStreamFromPool(/*isHighPriority=*/true, device_index);
   CHECK_EQ(aclrtCreateEventWithFlag(&replay_input_ready_event_, ACL_EVENT_SYNC),
            ACL_SUCCESS)
       << "Failed to create ACL graph replay input-ready event";
@@ -804,7 +797,7 @@ void AclGraph::make_current_stream_wait_for_graph(aclrtStream current_stream) {
   }
 }
 
-void AclGraph::prepare_model_graph_metadata(CausalLM* model,
+void AclGraph::prepare_model_graph_metadata(DecoderModel* model,
                                             const torch::Tensor& positions,
                                             ModelParamsView& params) {
   CHECK(model != nullptr) << "ACL graph model must not be null";
@@ -841,7 +834,7 @@ bool AclGraph::has_fused_infer_attention_graph_tasks() const {
          !graph_task_context_->fused_infer_attention_tasks.empty();
 }
 
-ModelOutput AclGraph::replay(CausalLM* model,
+ModelOutput AclGraph::replay(DecoderModel* model,
                              const torch::Tensor& tokens,
                              const torch::Tensor& positions,
                              std::vector<KVCache>& kv_cache,
@@ -1023,10 +1016,9 @@ AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
                                            const ModelArgs& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
-    : model_(model), args_(args), device_(device), options_(options) {
-  initialize(model->is_hybrid_linear_attention(),
-             model->is_hybrid_linear_attention(),
-             model->supports_mla_graph_kv_bucketing());
+    : model_(&model->model()), args_(args), device_(device), options_(options) {
+  const bool is_hybrid = model_->is_hybrid_linear_attention();
+  initialize(is_hybrid, is_hybrid, model_->supports_mla_graph_kv_bucketing());
 }
 
 void AclGraphExecutorImpl::initialize(bool need_update_attn_mask,

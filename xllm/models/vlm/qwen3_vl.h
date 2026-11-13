@@ -17,7 +17,6 @@ limitations under the License.
 
 #include "core/framework/model/model_output.h"
 #include "core/framework/multimodal/mposition.h"
-#include "core/layers/common/lm_head.h"
 #include "core/layers/qwen3_vision_layer.h"
 #include "models/llm/qwen3.h"
 #include "models/model_registry.h"
@@ -320,20 +319,13 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
  public:
   Qwen3_VisionTransformerImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_model_args();
     hidden_size_ = model_args.mm_hidden_size();
-    num_heads_ = model_args.mm_num_attention_heads();
-    window_size_ = model_args.mm_window_size();
-    patch_size_ = model_args.mm_patch_size();
     spatial_merge_size_ = model_args.mm_spatial_merge_size();
-    auto& visual_indexes = model_args.mm_deepstack_visual_indexes();
-    deepstack_visual_indexes_.insert(deepstack_visual_indexes_.end(),
-                                     visual_indexes.begin(),
-                                     visual_indexes.end());
-    num_position_embeddings_ = model_args.mm_num_position_embeddings();
-    spatial_merge_unit_ =
-        static_cast<int>(spatial_merge_size_ * spatial_merge_size_);
-    num_grid_per_side_ = static_cast<int>(std::sqrt(num_position_embeddings_));
+    deepstack_visual_indexes_ = model_args.mm_deepstack_visual_indexes();
+    const auto num_position_embeddings =
+        model_args.mm_num_position_embeddings();
+    num_grid_per_side_ = static_cast<int>(std::sqrt(num_position_embeddings));
 
     patch_embed_ =
         register_module("patch_embed", Qwen3_VisionPatchEmbed(context));
@@ -345,7 +337,7 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
 
     emb_ = register_module(
         "embedding",
-        torch::nn::Embedding(num_position_embeddings_, hidden_size_));
+        torch::nn::Embedding(num_position_embeddings, hidden_size_));
     emb_->weight.set_data(emb_->weight.to(options_));
 
     merger_ = register_module("merger", Qwen3_VisionPatchMerger(context));
@@ -569,13 +561,8 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
 
  private:
   int hidden_size_ = 0;
-  int num_heads_ = 0;
-  int window_size_ = 0;
-  int patch_size_ = 0;
   int spatial_merge_size_ = 0;
   std::vector<int64_t> deepstack_visual_indexes_;
-  int spatial_merge_unit_ = 0;
-  int64_t num_position_embeddings_ = 0;
   int num_grid_per_side_ = 0;
 
   Qwen3_VisionPatchEmbed patch_embed_{nullptr};
@@ -609,8 +596,11 @@ using Qwen3VLMultimodalProcessor = MultimodalProcessor<Qwen3VLPromptProcessor,
                                                        Qwen2VLImageProcessor,
                                                        Qwen3VLVideoProcessor>;
 
-REGISTER_MULTIMODAL_PROCESSOR(qwen3_vl, Qwen3VLMultimodalProcessor);
-REGISTER_CAUSAL_VLM_MODEL(qwen3_vl, Qwen3_VLForConditionalGeneration);
+REGISTER_CAUSAL_MODEL(
+    qwen3_vl,
+    Qwen3_VLForConditionalGeneration,
+    /*priority=*/0,
+    ModelRegistry::make_multimodal_processor<Qwen3VLMultimodalProcessor>);
 REGISTER_MPOSITION_GENERATOR(qwen3_vl, Qwen3VLMPositionGenerator);
 
 const ModelArgsLoader kQwen3VLModelArgsLoader = [](const JsonReader& json,

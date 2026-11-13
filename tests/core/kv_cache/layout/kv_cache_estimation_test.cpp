@@ -649,7 +649,7 @@ TEST(KVCacheEstimationTest,
   spec.linear_layer_ids = {0, 2};
   const StaticKVLayout layout(std::move(spec));
   EXPECT_EQ(layout.num_reserved_slabs(), 2u);
-  EXPECT_EQ(layout.full_read_padding_row(), 2u);
+  EXPECT_EQ(layout.full_read_padding_page(), 2u);
   EXPECT_TRUE(layout.can_fit(/*full_blocks=*/1, /*linear_states=*/1));
   EXPECT_FALSE(layout.can_fit(/*full_blocks=*/2, /*linear_states=*/1));
 }

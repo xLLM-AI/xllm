@@ -161,13 +161,7 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
                    torch::dtype(torch::kInt).device(device));
 
   // Output tensor for hidden states
-  torch::ScalarType dtype = util::parse_dtype(args.dtype(), device);
-  if (args.dtype() == "float" || args.dtype() == "float32") {
-    LOG(WARNING)
-        << "Cuda graph executor init hidden_states compatible with float32 "
-           "dtype: float32. This should not happen in production but for test.";
-    dtype = torch::kFloat32;
-  }
+  const torch::ScalarType dtype = util::parse_dtype(args.dtype(), device);
   hidden_states_ = torch::zeros({max_tokens_per_batch, args.hidden_size()},
                                 torch::dtype(dtype).device(device));
 
@@ -193,18 +187,13 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
       0, max_seqs_per_batch + 1, torch::dtype(torch::kInt).device(device));
   persistent_kv_seq_lens_delta_ = torch::zeros(
       {max_seqs_per_batch}, torch::dtype(torch::kInt).device(device));
-  // will be updated by q_cu_seq_lens, q_cu_seq_lens is the cumulative sum of
-  // q_seq_lens
-  persistent_chunked_prefill_qo_indptr_ = torch::zeros(
-      {max_seqs_per_batch + 1}, torch::dtype(torch::kInt).device(device));
   // aux_hidden_states will be lazily initialized when needed
 }
 
-template <typename Params>
 bool CudaGraphPersistentParam::can_use_llm_decode_fast_path(
     const torch::Tensor& tokens,
     const torch::Tensor& positions,
-    const Params& params) const {
+    const ModelParamsView& params) const {
   if (!params.meta.batch_forward_type.is_decode() ||
       params.embedding.input_embedding.defined()) {
     return false;
@@ -222,11 +211,10 @@ bool CudaGraphPersistentParam::can_use_llm_decode_fast_path(
              params.attention.device.paged_kv_last_page_len);
 }
 
-template <typename Params>
 void CudaGraphPersistentParam::update_llm_decode_metadata_fast_path(
     const torch::Tensor& tokens,
     const torch::Tensor& positions,
-    const Params& params,
+    const ModelParamsView& params,
     uint32_t padded_num_tokens,
     int64_t actual_batch_size,
     int64_t actual_num_tokens) {
@@ -283,10 +271,7 @@ void CudaGraphPersistentParam::set_aux_hidden_states(
     const int64_t max_tokens_per_batch = options_.max_tokens_per_batch();
     auto shape = value.sizes().vec();
     shape[0] = max_tokens_per_batch;
-    torch::ScalarType dtype = util::parse_dtype(args_.dtype(), device_);
-    if (args_.dtype() == "float" || args_.dtype() == "float32") {
-      dtype = torch::kFloat32;
-    }
+    const torch::ScalarType dtype = util::parse_dtype(args_.dtype(), device_);
     aux_hidden_states_ =
         torch::zeros(shape, torch::dtype(dtype).device(device_));
   }
@@ -319,20 +304,18 @@ size_t CudaGraphPersistentParam::get_persistent_tensor_bytes() const {
   total += bytes(persistent_paged_kv_last_page_len_);
   total += bytes(persistent_decode_qo_indptr_);
   total += bytes(persistent_kv_seq_lens_delta_);
-  total += bytes(persistent_chunked_prefill_qo_indptr_);
   return total;
 }
 
-template <typename Params>
-std::optional<Params> CudaGraphPersistentParam::update(
+std::optional<ModelParamsView> CudaGraphPersistentParam::update(
     const torch::Tensor& tokens,
     const torch::Tensor& k_cache,
     const torch::Tensor& v_cache,
     const torch::Tensor& positions,
-    const Params& params,
+    const ModelParamsView& params,
     uint32_t padded_num_tokens,
     bool return_capture_params) {
-  std::optional<Params> params_for_capture;
+  std::optional<ModelParamsView> params_for_capture;
   if (return_capture_params) {
     CHECK_GT(padded_num_tokens, 0)
         << "padded_num_tokens must be > 0 when return_capture_params is true";
@@ -342,7 +325,8 @@ std::optional<Params> CudaGraphPersistentParam::update(
       build_graph_attention_metadata(params,
                                      args_,
                                      /*skip_cu_seq_lens=*/true);
-  auto build_capture_params_if_needed = [&]() -> std::optional<Params> {
+  auto build_capture_params_if_needed =
+      [&]() -> std::optional<ModelParamsView> {
     if (!params_for_capture) {
       return std::nullopt;
     }
@@ -711,12 +695,11 @@ std::optional<Params> CudaGraphPersistentParam::update(
                 : 0);
   }
 
-  // Return Params with persistent buffer references if requested
   return build_capture_params_if_needed();
 }
 
 // CudaGraph implementation
-bool CudaGraph::capture(CausalLM* model,
+bool CudaGraph::capture(DecoderModel* model,
                         const ModelArgs& args,
                         const runtime::Options& options,
                         const torch::Tensor& tokens,
@@ -751,12 +734,9 @@ bool CudaGraph::capture(CausalLM* model,
   std::optional<at::cuda::CUDAStreamGuard> stream_guard;
   stream_guard.emplace(capture_stream);
 
-  // auto& tensor_options = model->options();
-
   // Update persistent parameters with input data before capture (includes
   // FlashInfer plan/update).
-  auto full_attention_cache =
-      CudaGraphExecutorImpl::find_first_full_attention_cache(kv_cache);
+  auto full_attention_cache = find_first_full_attention_cache(kv_cache);
   CHECK(full_attention_cache.has_value())
       << "CUDA graph capture requires at least one full-attention KV cache";
   const torch::Tensor& k_cache = full_attention_cache->first;
@@ -889,11 +869,10 @@ bool CudaGraph::capture(CausalLM* model,
   return true;
 }
 
-template <typename Params>
 ModelOutput CudaGraph::replay(const torch::Tensor& tokens,
                               const torch::Tensor& positions,
                               std::vector<KVCache>& kv_cache,
-                              const Params& params) {
+                              const ModelParamsView& params) {
   const uint32_t actual_num_tokens = tokens.size(0);
   CHECK_LE(actual_num_tokens, padded_num_tokens_)
       << "num_tokens mismatch: expected <= " << padded_num_tokens_ << ", got "
@@ -909,8 +888,7 @@ ModelOutput CudaGraph::replay(const torch::Tensor& tokens,
   std::shared_lock<std::shared_mutex> replay_lock_guard(replay_lock);
 
   // Update persistent parameters with new input data
-  auto full_attention_cache =
-      CudaGraphExecutorImpl::find_first_full_attention_cache(kv_cache);
+  auto full_attention_cache = find_first_full_attention_cache(kv_cache);
   CHECK(full_attention_cache.has_value())
       << "CUDA graph replay requires at least one full-attention KV cache";
   const torch::Tensor& k_cache = full_attention_cache->first;
@@ -928,7 +906,7 @@ ModelOutput CudaGraph::replay(const torch::Tensor& tokens,
                                  padded_num_tokens_,
                                  /*return_capture_params=*/true);
     CHECK(updated_params_opt.has_value())
-        << "update() should return Params for piecewise replay";
+        << "update() should return ModelParamsView for piecewise replay";
 
     const auto& updated_params = updated_params_opt.value();
     CHECK(piecewise_graph_.num_runners() > 0)
@@ -977,7 +955,7 @@ CudaGraphExecutorImpl::CudaGraphExecutorImpl(CausalLM* model,
                                              const ModelArgs& args,
                                              const torch::Device& device,
                                              const runtime::Options& options)
-    : model_(model), args_(args), device_(device), options_(options) {
+    : model_(&model->model()), args_(args), device_(device), options_(options) {
   initialize();
 }
 
@@ -1004,23 +982,6 @@ void CudaGraphExecutorImpl::initialize() {
   baseline_private_pool_active_bytes_ = private_pool_usage.active_bytes;
   baseline_allocator_reserved_bytes_ =
       get_allocator_reserved_bytes(device_.index());
-}
-
-std::optional<std::pair<torch::Tensor, torch::Tensor>>
-CudaGraphExecutorImpl::find_first_full_attention_cache(
-    const std::vector<KVCache>& kv_caches) {
-  for (const auto& cache : kv_caches) {
-    if (cache.empty()) {
-      continue;
-    }
-    auto k_cache = cache.get_k_cache();
-    auto v_cache = cache.get_v_cache();
-    if (k_cache.defined() && v_cache.defined() && k_cache.numel() > 0 &&
-        v_cache.numel() > 0) {
-      return std::make_pair(std::move(k_cache), std::move(v_cache));
-    }
-  }
-  return std::nullopt;
 }
 
 // ============== VMM Allocator Support ==============
@@ -1159,10 +1120,6 @@ CudaGraphExecutorImpl::get_graph_memory_usage_stats() {
   stats.executor_total_bytes += stats.persistent_param_bytes;
 
   return stats;
-}
-
-size_t CudaGraphExecutorImpl::get_graph_memory_usage_bytes() {
-  return get_graph_memory_usage_stats().executor_total_bytes;
 }
 
 void CudaGraphExecutorImpl::log_graph_memory_after_capture() {
@@ -1446,19 +1403,5 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
   COUNTER_INC(num_model_execution_total_eager);
   return model_->forward(tokens, positions, kv_caches, params);
 }
-
-template std::optional<ModelParamsView> CudaGraphPersistentParam::update(
-    const torch::Tensor&,
-    const torch::Tensor&,
-    const torch::Tensor&,
-    const torch::Tensor&,
-    const ModelParamsView&,
-    uint32_t,
-    bool);
-
-template ModelOutput CudaGraph::replay(const torch::Tensor&,
-                                       const torch::Tensor&,
-                                       std::vector<KVCache>&,
-                                       const ModelParamsView&);
 
 }  // namespace xllm::runtime::cuda

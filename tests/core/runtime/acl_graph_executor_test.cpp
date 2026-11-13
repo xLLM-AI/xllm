@@ -208,8 +208,10 @@ const KVCache& first_full_attention_cache(
 
 // Simple CausalLM implementation for testing ACL graph executor
 // Uses basic operations to verify graph capture and replay functionality
-class SimpleCausalLM : public CausalLM {
+class SimpleCausalLM : public CausalLM, public DecoderModel {
  public:
+  DecoderModel& model() override { return *this; }
+
   SimpleCausalLM(const ModelArgs& args, const torch::Device& device)
       : args_(args), device_(device) {
     // Initialize a simple linear layer for testing
@@ -552,10 +554,8 @@ TEST(DeepseekV4ModelTest, ReturnsPreHcHiddenStatesForMtp) {
                              QuantArgs(),
                              tensor_options,
                              /*num_speculative_tokens=*/1);
-  const CausalLMFactory factory =
-      ModelRegistry::get_causallm_factory("deepseek_v4");
-  ASSERT_TRUE(static_cast<bool>(factory));
-  std::unique_ptr<CausalLM> model = factory(context);
+  std::unique_ptr<CausalLM> model =
+      std::get<std::unique_ptr<CausalLM>>(create_causal_model(context));
   ASSERT_NE(model, nullptr);
 
   const torch::Tensor pre_hc_hidden =
@@ -571,7 +571,7 @@ TEST(DeepseekV4ModelTest, ReturnsPreHcHiddenStatesForMtp) {
   std::vector<KVCache> kv_caches;
 
   const ModelOutput output =
-      model->forward(tokens, positions, kv_caches, input_params);
+      model->model().forward(tokens, positions, kv_caches, input_params);
 
   ASSERT_TRUE(output.aux_hidden_states.defined());
   EXPECT_TRUE(torch::equal(output.aux_hidden_states,

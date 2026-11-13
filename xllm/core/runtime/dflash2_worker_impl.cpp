@@ -214,7 +214,7 @@ std::pair<torch::Tensor, torch::Tensor> DFlash2WorkerImpl::run_decode_draft(
        draft_output->selected_hidden.size(-1)});
 
   const DFlash2CandidateOutput candidates =
-      draft_impl_->get_causal_lm()->dflash2_candidates(
+      draft_impl_->get_causal_lm()->model().dflash2_candidates(
           hidden_states, unary_logits, anchors);
   auto draft_proposal = sample_dflash2_path(candidates,
                                             draft_sampling_params,

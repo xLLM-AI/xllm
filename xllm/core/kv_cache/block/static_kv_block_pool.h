@@ -77,16 +77,12 @@ class StaticKVBlockPool final {
   size_t reclaimable_slab_count(BlockType type,
                                 const std::vector<int32_t>& block_ids) const;
   bool uses_slabs() const { return slab_mode_; }
-  // Final page relative to every Full layer's fixed cache base.
-  int32_t final_full_page(int32_t logical_id) const;
+  // Final pages are relative to every Full layer's fixed cache base.
   void append_final_full_pages(Slice<Block> blocks,
                                std::vector<int32_t>* pages) const;
-  int32_t scratch_full_page() const { return 0; }
   int32_t full_read_padding_page() const;
 
  private:
-  friend class StaticKVBlockPoolTestPeer;
-
   enum class SlabType : uint8_t { KV = 0, CONV = 1, SSM = 2, FREE = 3 };
 
   struct SlabAffinity {

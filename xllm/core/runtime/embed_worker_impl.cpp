@@ -29,7 +29,6 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_params_view.h"
 #include "framework/state_dict/state_dict.h"
-#include "models/model_registry.h"
 #include "util/timer.h"
 
 namespace xllm {
@@ -38,18 +37,6 @@ EmbedWorkerImpl::EmbedWorkerImpl(const ParallelArgs& parallel_args,
                                  const torch::Device& device,
                                  const runtime::Options& options)
     : WorkerImpl(parallel_args, device, options) {}
-
-bool EmbedWorkerImpl::init_model(ModelContext& context) {
-  CHECK(model_ == nullptr) << "Model is already initialized.";
-
-  // Embedding and generate share the same model factory.
-  model_ = create_llm_model(context);
-
-  // Dont find model in causal models
-  CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
-  return true;
-}
 
 std::optional<ForwardOutput> EmbedWorkerImpl::step(
     const LlmForwardInput& input) {
@@ -85,8 +72,8 @@ std::optional<ForwardOutput> EmbedWorkerImpl::step(
       input.sampling_params.is_embeddings()) {
     // create embeddings
     timer.reset();
-    auto embeddings =
-        model_->pooler(hidden_states, sampling_params.logits_indices());
+    auto embeddings = language_model_->pooler(hidden_states,
+                                              sampling_params.logits_indices());
     sample_output.embeddings = embeddings;
     COUNTER_ADD(execution_latency_seconds_sampling, timer.elapsed_seconds());
 

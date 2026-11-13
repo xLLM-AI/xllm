@@ -45,10 +45,15 @@ namespace mlu {
 namespace model {
 
 class Glm5NextModelImpl final
-    : public LlmModelImplBase<layer::Glm5NextDecoderLayer> {
+    : public Glm5NextGraphModel<LlmModelImplBase<layer::Glm5NextDecoderLayer>> {
+  using Base =
+      Glm5NextGraphModel<LlmModelImplBase<layer::Glm5NextDecoderLayer>>;
+
  public:
+  bool is_hybrid_linear_attention() { return true; }
+
   explicit Glm5NextModelImpl(const ModelContext& context)
-      : LlmModelImplBase<layer::Glm5NextDecoderLayer>(context.get_model_args()),
+      : Base(context.get_model_args()),
         device_(context.get_tensor_options().device()),
         hc_mult_(context.get_model_args().hc_mult()) {
     const ModelArgs& args = context.get_model_args();
@@ -179,23 +184,6 @@ class Glm5NextForCausalLMImpl final
  public:
   explicit Glm5NextForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<Glm5NextModel>(context) {}
-
-  bool is_hybrid_linear_attention() { return true; }
-
-  bool requires_graph_forward_metadata() override { return true; }
-
-  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
-      override {
-    return std::make_unique<Glm5NextGraphMetadataState>();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& params) override {
-    auto* graph_state = dynamic_cast<Glm5NextGraphMetadataState*>(state);
-    CHECK(graph_state != nullptr) << "GLM5 requires per-graph metadata state";
-    graph_state->prepare(positions, params);
-  }
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {

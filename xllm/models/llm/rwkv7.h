@@ -152,6 +152,8 @@ TORCH_MODULE(RWKV7Model);
 
 class RWKV7ForCausalLMImpl : public torch::nn::Module {
  public:
+  RWKV7Model& model() { return model_; }
+
   explicit RWKV7ForCausalLMImpl(const ModelContext& context) {
     const ModelArgs& args = context.get_model_args();
     const int64_t hidden_size = args.hidden_size();
@@ -167,14 +169,6 @@ class RWKV7ForCausalLMImpl : public torch::nn::Module {
             torch::nn::LinearOptions(hidden_size, vocab_size).bias(false)));
     head_->to(opts.device());
     head_->to(opts.dtype().toScalarType());
-  }
-
-  // Forward: compute hidden states for the packed token sequence.
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return model_(tokens, positions, kv_caches, input_params);
   }
 
   // Compute logits for selected token positions.
@@ -225,9 +219,6 @@ class RWKV7ForCausalLMImpl : public torch::nn::Module {
       }
     }
   }
-
-  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) {}
-  void update_expert_weight(int32_t) {}
 
  private:
   RWKV7Model model_{nullptr};

@@ -24,6 +24,8 @@ limitations under the License.
 
 #include <algorithm>
 
+#include "core/framework/model/causal_vlm.h"
+
 #if defined(USE_NPU)
 #include "acl/acl.h"
 #include "torch_npu/csrc/core/npu/NPUFunctions.h"
@@ -81,6 +83,7 @@ limitations under the License.
 #include "core/runtime/worker_memory_resources.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/model/model_params_view.h"
+#include "models/model_registry.h"
 #include "runtime/forward_params.h"
 #if defined(USE_NPU)
 #include "layers/npu/loader/rolling_weight_buffer.h"
@@ -294,6 +297,8 @@ void WorkerImpl::drain_pending_execution() {
   CHECK_EQ(prepare_stream_->synchronize(), 0);
   worker_execution_drained_ = true;
 }
+
+CausalLM* WorkerImpl::get_causal_lm() const { return language_model_; }
 
 bool WorkerImpl::has_request_state_cache() const {
   return std::any_of(
@@ -617,7 +622,7 @@ void WorkerImpl::process_group_test() {
 
 bool WorkerImpl::can_prepare_npu_graph_decode_input(
     const BatchInputMeta& meta) const {
-  return can_prepare_without_compute_stream_wait() &&
+  return model_executor_ && can_prepare_without_compute_stream_wait() &&
          enable_schedule_overlap() &&
          (meta.batch_forward_type.is_mixed() ||
           (meta.batch_forward_type.is_decode() && meta.q_max_seq_len <= 1));
@@ -1359,6 +1364,29 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
 }
 #endif
 
+bool WorkerImpl::init_model(ModelContext& context) {
+  CHECK(model_ == nullptr) << "Model is already initialized.";
+  std::visit(
+      [this, &context](auto model) {
+        CHECK(model != nullptr) << "Failed to create model.";
+        std::unique_ptr<Executor> executor;
+        if (!context.get_model_args().encoder_embedding_mode()) {
+          executor = std::make_unique<Executor>(model.get(), context, options_);
+        }
+        using ModelType = typename decltype(model)::element_type;
+        if constexpr (std::is_same_v<ModelType, CausalVLM>) {
+          language_model_ = &model->language_model();
+          vlm_model_ = model.get();
+        } else {
+          language_model_ = model.get();
+        }
+        model_ = std::move(model);
+        model_executor_ = std::move(executor);
+      },
+      create_causal_model(context));
+  return true;
+}
+
 // initialize model, cache manager. async call
 bool WorkerImpl::init_model(const std::string& model_weights_path,
                             int32_t random_seed,
@@ -1432,6 +1460,7 @@ ModelContext WorkerImpl::load_model_config(ModelArgs args,
       options_.enable_chunked_prefill(),
       ModelBatchLimits{.max_tokens_per_batch = options_.max_tokens_per_batch(),
                        .max_seqs_per_batch = options_.max_seqs_per_batch()});
+  context.set_backend(options_.backend());
   context.set_model_impl(options_.model_impl());
   context.set_extension_impl(options_.extension_impl());
   context.set_model_id(options_.model_id());

@@ -130,23 +130,15 @@ TEST(PyCausalLMMegaMoeCapacityTest,
             2560);
 }
 
-// Shared scaffolding for tests that construct a PyCausalLM: registers the
-// dependency-free BridgeTestModel and returns a CPU ModelContext carrying the
-// given model_type (the Python side instantiates BridgeTestModel regardless —
-// real model classes such as deepseek_v4 require full vocab/layer configs).
-ModelContext make_bridge_model_context(const char* model_type,
-                                       ModelArgs model_args = {},
+ModelContext make_bridge_model_context(ModelArgs model_args = {},
                                        EplbWorkerConfig eplb_config = {},
                                        int32_t num_speculative_tokens = 0) {
   {
     py::gil_scoped_acquire gil;
-    // Idempotent, but run the py::exec/registry writes only once across the
-    // truth table's per-case calls.
-    static const bool registered = [] {
+    [[maybe_unused]] static const bool registered = [] {
       register_bridge_test_model();
       return true;
     }();
-    (void)registered;
   }
   // The context only copies ParallelArgs' raw group pointers, so the group
   // must outlive every PyCausalLM built from the context. Keep it in
@@ -165,7 +157,7 @@ ModelContext make_bridge_model_context(const char* model_type,
   parallel_args.python_rendezvous_host_ = "127.0.0.1";
   parallel_args.python_rendezvous_port_ = 1;
 
-  model_args.model_type(model_type);
+  model_args.model_type(kBridgeTestModelType);
   return ModelContext(
       parallel_args,
       model_args,
@@ -193,8 +185,7 @@ TEST(PyCausalLMConfigBridgeTest,
   enabled_config.enabled = true;
   enabled_config.redundant_experts_num = 3;
   enabled_config.use_decode_only_load = true;
-  ModelContext context = make_bridge_model_context(
-      kBridgeTestModelType, ModelArgs{}, enabled_config);
+  ModelContext context = make_bridge_model_context(ModelArgs{}, enabled_config);
   const ModelContext copied_context = context;
   ModelContext quantized_context = copied_context.with_quant_args(QuantArgs{});
   enabled_config.enabled = false;
@@ -206,39 +197,49 @@ TEST(PyCausalLMConfigBridgeTest,
   disabled_parallel_args.eplb_group_ = nullptr;
   ModelContext disabled_context =
       context.with_parallel_args(disabled_parallel_args);
-  PyCausalLM enabled_model(quantized_context, kBridgeTestModelType);
+  PyCausalLM enabled_model(quantized_context);
 
   global_config.enable_eplb(true)
       .redundant_experts_num(77)
       .eplb_use_decode_only_load(true);
-  PyCausalLM disabled_model(disabled_context, kBridgeTestModelType);
+  PyCausalLM disabled_model(disabled_context);
   global_config.enable_eplb(false)
       .redundant_experts_num(5)
       .eplb_use_decode_only_load(false);
-  PyCausalLM copied_model(copied_context, kBridgeTestModelType);
+  PyCausalLM copied_model(copied_context);
 
   py::gil_scoped_acquire gil;
-  EXPECT_TRUE(enabled_model.config_dict()["enable_eplb"].cast<bool>());
-  EXPECT_EQ(
-      enabled_model.config_dict()["redundant_experts_num"].cast<int32_t>(), 3);
-  EXPECT_TRUE(
-      enabled_model.config_dict()["eplb_use_decode_only_load"].cast<bool>());
-  EXPECT_FALSE(disabled_model.config_dict()["enable_eplb"].cast<bool>());
-  EXPECT_EQ(
-      disabled_model.config_dict()["redundant_experts_num"].cast<int32_t>(), 0);
-  EXPECT_FALSE(
-      disabled_model.config_dict()["eplb_use_decode_only_load"].cast<bool>());
-  EXPECT_TRUE(copied_model.config_dict()["enable_eplb"].cast<bool>());
-  EXPECT_EQ(copied_model.config_dict()["redundant_experts_num"].cast<int32_t>(),
+  EXPECT_TRUE(enabled_model.model().config_dict()["enable_eplb"].cast<bool>());
+  EXPECT_EQ(enabled_model.model()
+                .config_dict()["redundant_experts_num"]
+                .cast<int32_t>(),
             3);
-  EXPECT_TRUE(
-      copied_model.config_dict()["eplb_use_decode_only_load"].cast<bool>());
+  EXPECT_TRUE(enabled_model.model()
+                  .config_dict()["eplb_use_decode_only_load"]
+                  .cast<bool>());
+  EXPECT_FALSE(
+      disabled_model.model().config_dict()["enable_eplb"].cast<bool>());
+  EXPECT_EQ(disabled_model.model()
+                .config_dict()["redundant_experts_num"]
+                .cast<int32_t>(),
+            0);
+  EXPECT_FALSE(disabled_model.model()
+                   .config_dict()["eplb_use_decode_only_load"]
+                   .cast<bool>());
+  EXPECT_TRUE(copied_model.model().config_dict()["enable_eplb"].cast<bool>());
+  EXPECT_EQ(copied_model.model()
+                .config_dict()["redundant_experts_num"]
+                .cast<int32_t>(),
+            3);
+  EXPECT_TRUE(copied_model.model()
+                  .config_dict()["eplb_use_decode_only_load"]
+                  .cast<bool>());
 }
 
 TEST(PyCausalLMPoolingTest,
      DefaultModelPreservesSelectedRowsWithoutNormalization) {
-  ModelContext context = make_bridge_model_context(kBridgeTestModelType);
-  PyCausalLM model(context, kBridgeTestModelType);
+  ModelContext context = make_bridge_model_context();
+  PyCausalLM model(context);
   const torch::Tensor hidden = torch::tensor({{3.0F, 4.0F}, {0.0F, 5.0F}});
   const torch::Tensor selected = torch::tensor({1, 0}, torch::kInt32);
   EXPECT_TRUE(torch::equal(model.pooler(hidden, selected),
@@ -248,15 +249,16 @@ TEST(PyCausalLMPoolingTest,
 }
 
 TEST(PyCausalLMPoolingTest, DispatchesQwen3PoolerAndPreservesEmptySelection) {
-  ModelContext context = make_bridge_model_context(kBridgeTestModelType);
-  PyCausalLM model(context, kBridgeTestModelType);
+  ModelContext context = make_bridge_model_context();
+  PyCausalLM model(context);
   {
     py::gil_scoped_acquire gil;
     py::object pooler = py::module_::import("xllm.python.models.qwen3")
                             .attr("Qwen3ForCausalLM")
-                            .attr("pooler");
-    model.python_model().attr("pooler") = py::module_::import("types").attr(
-        "MethodType")(pooler, model.python_model());
+                            .attr(/*key=*/"pooler");
+    model.model().python_model().attr(/*key=*/"pooler") =
+        py::module_::import(/*name=*/"types")
+            .attr(/*key=*/"MethodType")(pooler, model.model().python_model());
   }
   const torch::Tensor hidden = torch::tensor({{3.0F, 4.0F}, {0.0F, 5.0F}});
   const torch::Tensor selected = torch::tensor({1, 0}, torch::kInt32);
@@ -345,22 +347,18 @@ TEST(PyCausalLMConfigBridgeTest, PreservesBlockDraftWindowEnablement) {
       continue;
     }
     const bool is_dflash2 = draft_type == "dflash2";
-    const char* model_type =
-        is_dflash2 ? "DFlash2DraftModel" : "DSparkDraftModel";
-    ModelContext context =
-        make_bridge_model_context(model_type,
-                                  std::move(args),
-                                  {},
-                                  /*num_speculative_tokens=*/3);
-    PyCausalLM model(context, kBridgeTestModelType);
+    ModelContext context = make_bridge_model_context(
+        std::move(args), {}, /*num_speculative_tokens=*/3);
+    PyCausalLM model(context);
     py::gil_scoped_acquire gil;
     const char* module = is_dflash2 ? "xllm.python.models.qwen3_dflash2"
                                     : "xllm.python.models.qwen3_dspark";
     const char* config_class =
         is_dflash2 ? "DFlash2Qwen3Config" : "Qwen3DSparkConfig";
-    py::object python_config = py::module_::import(module)
-                                   .attr(config_class)
-                                   .attr("from_dict")(model.config_dict());
+    py::object python_config =
+        py::module_::import(module)
+            .attr(config_class)
+            .attr(/*key=*/"from_dict")(model.model().config_dict());
     const int32_t expected_window =
         expected_enabled ? test.window.value_or(0) : 0;
     EXPECT_EQ(python_config.attr("sliding_window").cast<int32_t>(),
@@ -374,7 +372,7 @@ TEST(PyCausalLMConfigBridgeTest, PreservesBlockDraftWindowEnablement) {
 }
 
 TEST(PyCausalLMContextKVBridgeTest, PassesSwaCacheAsSixthPythonSlot) {
-  ModelContext context = make_bridge_model_context(kBridgeTestModelType);
+  ModelContext context = make_bridge_model_context();
   PyCausalLM model(context);
 
   DeepSeekV4KVCacheTensors cache_tensors;
@@ -388,18 +386,20 @@ TEST(PyCausalLMContextKVBridgeTest, PassesSwaCacheAsSixthPythonSlot) {
   torch::Tensor cache_slots = torch::tensor({0, 1}, torch::kLong);
   LlmModelParams params_owner;
   ModelParamsView input_params(params_owner);
-  ModelOutput output = model.write_context_kv(
+  ModelOutput output = model.model().write_context_kv(
       target_hidden, positions, cache_slots, kv_caches, input_params);
 
   ASSERT_TRUE(output.hidden_states.defined());
   EXPECT_TRUE(torch::equal(output.hidden_states, target_hidden));
 
   py::gil_scoped_acquire gil;
-  py::list python_caches = model.python_model().attr("last_caches");
+  py::list python_caches =
+      model.model().python_model().attr(/*key=*/"last_caches");
   ASSERT_EQ(py::len(python_caches), 1);
   py::tuple layer_cache = python_caches[0].cast<py::tuple>();
   ASSERT_EQ(py::len(layer_cache), 20);
-  py::object bridged_swa = model.python_model().attr("last_swa");
+  py::object bridged_swa =
+      model.model().python_model().attr(/*key=*/"last_swa");
   EXPECT_TRUE(bridged_swa.is(layer_cache[5]));
   EXPECT_EQ(
       bridged_swa.attr("data_ptr")().cast<std::uintptr_t>(),

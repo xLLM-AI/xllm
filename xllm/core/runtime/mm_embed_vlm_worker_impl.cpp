@@ -24,7 +24,6 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/causal_vlm.h"
 #include "framework/model/model_params_view.h"
-#include "models/model_registry.h"
 #include "options.h"
 #include "util/timer.h"
 
@@ -36,13 +35,9 @@ MMEmbedVLMWorkerImpl::MMEmbedVLMWorkerImpl(const ParallelArgs& parallel_args,
     : WorkerImpl(parallel_args, device, options) {}
 
 bool MMEmbedVLMWorkerImpl::init_model(ModelContext& context) {
-  CHECK(model_ == nullptr) << "Model is already initialized.";
-
   context.set_encoder_embedding_mode(true);
-  model_ = create_vlm_model(context);
-  CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
-
+  WorkerImpl::init_model(context);
+  CHECK(vlm_model_ != nullptr) << "MMEmbedVLMWorkerImpl requires CausalVLM";
   return true;
 }
 
@@ -60,11 +55,8 @@ std::optional<ForwardOutput> MMEmbedVLMWorkerImpl::step(
   CHECK(input.sampling_params.is_embeddings())
       << "Only mm embedding is supported.";
 
-  // call model executor forward to get hidden states
-  CausalVLM* vlm_model = dynamic_cast<CausalVLM*>(model_.get());
-  CHECK(vlm_model != nullptr) << "Model is not a CausalVLM.";
   ModelParamsView execution_params(params);
-  auto encode_output = vlm_model->encode(execution_params);
+  auto encode_output = vlm_model_->encode(execution_params);
   const auto it = encode_output.find("image|embedding");
   if (it == encode_output.end() ||
       !std::holds_alternative<std::vector<torch::Tensor>>(it->second)) {

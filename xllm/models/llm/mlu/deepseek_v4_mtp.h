@@ -313,22 +313,6 @@ class DeepseekV4MtpForCausalLMImpl final
     lm_head_->load_state_dict(state_dict.get_dict_with_prefix(
         std::vector<std::string>{"lm_head.", "head.", "layers.0.head."}));
   }
-
-  bool requires_graph_forward_metadata() {
-    return this->model_->requires_graph_forward_metadata();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState>
-  create_graph_forward_metadata_state() {
-    return this->model_->create_graph_forward_metadata_state();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& input_params) {
-    this->model_->prepare_graph_forward_metadata(
-        state, positions, input_params);
-  }
 };
 TORCH_MODULE(DeepseekV4MtpForCausalLM);
 

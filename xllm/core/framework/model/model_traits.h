@@ -17,17 +17,20 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace xllm {
+class ModelLoader;
 class ModelParamsView;
 struct ModelGraphMetadataState;
 class KVCache;
 
 namespace layer {
+class LmHead;
 class WordEmbedding;
 }  // namespace layer
 
@@ -216,12 +219,12 @@ struct has_dspark_markov_bias<
         std::declval<const torch::Tensor&>()))>> : std::true_type {};
 
 template <typename T, typename = void>
-struct has_own_lm_head : std::false_type {};
+struct has_share_lm_head : std::false_type {};
 
 template <typename T>
-struct has_own_lm_head<
-    T,
-    std::void_t<decltype(std::declval<T>()->has_own_lm_head())>>
+struct has_share_lm_head<T,
+                         std::void_t<decltype(std::declval<T>()->share_lm_head(
+                             std::declval<layer::LmHead>()))>>
     : std::true_type {};
 
 template <typename T, typename = void>
@@ -232,6 +235,34 @@ struct has_tie_word_embeddings<
     T,
     std::void_t<decltype(std::declval<T>()->tie_word_embeddings(
         std::declval<layer::WordEmbedding>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_get_multimodal_embeddings : std::false_type {};
+
+template <typename T>
+struct has_get_multimodal_embeddings<
+    T,
+    std::void_t<decltype(std::declval<T>()->get_multimodal_embeddings(
+        std::declval<const ModelParamsView&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_prepare_expert_weight : std::false_type {};
+
+template <typename T>
+struct has_prepare_expert_weight<
+    T,
+    std::void_t<decltype(std::declval<T>()->prepare_expert_weight(
+        std::declval<int32_t>(),
+        std::declval<const std::vector<int32_t>&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_update_expert_weight : std::false_type {};
+
+template <typename T>
+struct has_update_expert_weight<
+    T,
+    std::void_t<decltype(std::declval<T>()->update_expert_weight(
+        std::declval<int32_t>()))>> : std::true_type {};
 
 }  // namespace detail
 }  // namespace xllm

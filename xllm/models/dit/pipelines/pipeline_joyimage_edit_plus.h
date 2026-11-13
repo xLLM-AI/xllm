@@ -664,11 +664,11 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
             .to(device_);
     positions = positions.to(device_);
     VlmModelParams input_params = build_text_encoder_input(tokens, mm_data);
-    ModelOutput model_output =
-        text_encoder_->forward(tokens,
-                               positions,
-                               text_encoder_empty_kv_caches_,
-                               ModelParamsView(input_params));
+    auto& decoder = text_encoder_->language_model().ptr()->model();
+    ModelOutput model_output = decoder->forward(tokens,
+                                                positions,
+                                                text_encoder_empty_kv_caches_,
+                                                ModelParamsView(input_params));
     CHECK(model_output.residual.defined())
         << "JoyImageEditPlus requires Qwen3-VL pre-norm hidden states from "
            "the TORCH backend.";

@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
+
 #include <memory>
 
 #include "core/common/constants.h"
@@ -61,5 +63,26 @@ inline void Glm5NextGraphMetadataState::prepare(const torch::Tensor& positions,
   attn.kv_seq_lens = attention.kv_seq_lens;
   attn.q_seq_lens = attention.q_seq_lens;
 }
+
+template <typename Base>
+class Glm5NextGraphModel : public Base {
+ public:
+  using Base::Base;
+
+  bool requires_graph_forward_metadata() { return true; }
+
+  std::unique_ptr<ModelGraphMetadataState>
+  create_graph_forward_metadata_state() {
+    return std::make_unique<Glm5NextGraphMetadataState>();
+  }
+
+  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
+                                      const torch::Tensor& positions,
+                                      ModelParamsView& params) {
+    auto* graph_state = dynamic_cast<Glm5NextGraphMetadataState*>(state);
+    CHECK(graph_state != nullptr) << "GLM5 requires per-graph metadata state";
+    graph_state->prepare(positions, params);
+  }
+};
 
 }  // namespace xllm::mlu::model

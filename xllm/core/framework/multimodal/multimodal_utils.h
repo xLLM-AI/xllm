@@ -18,11 +18,31 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "core/framework/multimodal/mm_batch_data.h"
 
 namespace xllm {
+
+inline torch::Tensor merge_multimodal_embeddings(torch::Tensor inputs_embeds,
+                                                 const MMBatchData& mm_data) {
+  auto merge_modality = [&](const std::string& embed_key,
+                            const std::string& mask_key) {
+    auto emb = mm_data.get<torch::Tensor>(embed_key);
+    if (!emb.has_value()) {
+      return;
+    }
+    auto mask = mm_data.get<torch::Tensor>(mask_key);
+    if (!mask.has_value()) {
+      return;
+    }
+    inputs_embeds.index_put_({mask.value()}, emb.value());
+  };
+  merge_modality(/*embed_key=*/"image|embedding", /*mask_key=*/"image|mask");
+  merge_modality(/*embed_key=*/"video|embedding", /*mask_key=*/"video|mask");
+  return inputs_embeds;
+}
 
 std::vector<int32_t> get_mm_token_nums(MMBatchData& mm_data, MMType type);
 

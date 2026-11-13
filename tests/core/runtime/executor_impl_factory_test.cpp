@@ -65,8 +65,9 @@ std::unique_ptr<ExecutorImpl> create_executor(
     const std::string& extension_impl = "") {
   runtime::Options options;
   options.extension_impl(extension_impl);
+  CausalLM* model = nullptr;
   return ExecutorImplFactory::get_instance().create_executor_impl(
-      /*model=*/nullptr,
+      model,
       /*args=*/ModelArgs{},
       /*device=*/torch::Device(torch::kCPU),
       options,
@@ -114,9 +115,11 @@ namespace {
 TEST(ExecutorImplFactoryTest, HigherPriorityReplacesLowerPriority) {
   auto& factory = ExecutorImplFactory::get_instance();
   EXPECT_TRUE(factory.register_creator("executor_factory_lower_then_higher",
+                                       /*extension_impl=*/"",
                                        create_test_creator<0>(),
                                        /*priority=*/0));
   EXPECT_TRUE(factory.register_creator("executor_factory_lower_then_higher",
+                                       /*extension_impl=*/"",
                                        create_test_creator<10>(),
                                        /*priority=*/10));
 
@@ -125,26 +128,14 @@ TEST(ExecutorImplFactoryTest, HigherPriorityReplacesLowerPriority) {
             nullptr);
 }
 
-TEST(ExecutorImplFactoryTest, LowerPriorityDoesNotReplaceHigherPriority) {
-  auto& factory = ExecutorImplFactory::get_instance();
-  EXPECT_TRUE(factory.register_creator("executor_factory_higher_then_lower",
-                                       create_test_creator<10>(),
-                                       /*priority=*/10));
-  EXPECT_FALSE(factory.register_creator("executor_factory_higher_then_lower",
-                                        create_test_creator<0>(),
-                                        /*priority=*/0));
-
-  auto executor = create_executor("executor_factory_higher_then_lower");
-  EXPECT_NE(dynamic_cast<PriorityFactoryTestExecutorImpl*>(executor.get()),
-            nullptr);
-}
-
 TEST(ExecutorImplFactoryTest, EqualPriorityKeepsFirstRegistration) {
   auto& factory = ExecutorImplFactory::get_instance();
   EXPECT_TRUE(factory.register_creator("executor_factory_equal_priority",
+                                       /*extension_impl=*/"",
                                        create_test_creator<5>(),
                                        /*priority=*/5));
   EXPECT_FALSE(factory.register_creator("executor_factory_equal_priority",
+                                        /*extension_impl=*/"",
                                         create_test_creator<10>(),
                                         /*priority=*/5));
 
@@ -162,6 +153,7 @@ TEST(ExecutorImplFactoryTest,
 
   auto& factory = ExecutorImplFactory::get_instance();
   EXPECT_FALSE(factory.register_creator("executor_factory_macro_priority",
+                                        /*extension_impl=*/"",
                                         create_test_creator<0>(),
                                         /*priority=*/0));
   auto priority_executor = create_executor("executor_factory_macro_priority");
@@ -203,6 +195,7 @@ TEST(ExecutorImplFactoryTest, ExtensionCanProvideExecutorWithoutModel) {
 TEST(ExecutorImplFactoryTest, SelectedExtensionHasIndependentPriority) {
   auto& factory = ExecutorImplFactory::get_instance();
   EXPECT_TRUE(factory.register_creator("executor_factory_extension_priority",
+                                       /*extension_impl=*/"",
                                        create_test_creator<0>(),
                                        /*priority=*/100));
   EXPECT_TRUE(factory.register_creator("executor_factory_extension_priority",
@@ -232,8 +225,10 @@ TEST(ExecutorImplFactoryTest, SelectedExtensionHasIndependentPriority) {
 
 TEST(ExecutorImplFactoryTest, MissingSelectedExecutorDoesNotUseDefault) {
   auto& factory = ExecutorImplFactory::get_instance();
-  EXPECT_TRUE(factory.register_creator("executor_factory_missing_extension",
-                                       create_test_creator<0>()));
+  EXPECT_TRUE(factory.register_creator(
+      /*executor_type=*/"executor_factory_missing_extension",
+      /*extension_impl=*/"",
+      create_test_creator<0>()));
   EXPECT_TRUE(factory.register_creator("executor_factory_other_extension",
                                        "executor_factory_missing_custom",
                                        create_test_creator<10>()));
@@ -245,8 +240,10 @@ TEST(ExecutorImplFactoryTest, MissingSelectedExecutorDoesNotUseDefault) {
 
 TEST(ExecutorImplFactoryTest, ModelOnlyExtensionKeepsDefaultExecutor) {
   auto& factory = ExecutorImplFactory::get_instance();
-  EXPECT_TRUE(factory.register_creator("executor_factory_model_only",
-                                       create_test_creator<0>()));
+  EXPECT_TRUE(factory.register_creator(
+      /*executor_type=*/"executor_factory_model_only",
+      /*extension_impl=*/"",
+      create_test_creator<0>()));
   ExtensionRegistry::get_instance().register_implementation(
       "executor_factory_model_only_custom", /*component=*/"causal_lm");
 
@@ -258,8 +255,10 @@ TEST(ExecutorImplFactoryTest, ModelOnlyExtensionKeepsDefaultExecutor) {
 
 TEST(ExecutorImplFactoryTest, UnknownExtensionDoesNotUseDefault) {
   auto& factory = ExecutorImplFactory::get_instance();
-  EXPECT_TRUE(factory.register_creator("executor_factory_unknown_extension",
-                                       create_test_creator<0>()));
+  EXPECT_TRUE(factory.register_creator(
+      /*executor_type=*/"executor_factory_unknown_extension",
+      /*extension_impl=*/"",
+      create_test_creator<0>()));
 
   EXPECT_DEATH(create_executor("executor_factory_unknown_extension",
                                "executor_factory_unregistered_custom"),

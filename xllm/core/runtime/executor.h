@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "core/framework/model_context/model_context.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/runtime/executor_impl_factory.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_output.h"
 #include "framework/model/model_params_view.h"
@@ -29,7 +30,7 @@ namespace xllm {
 
 class Executor final {
  public:
-  Executor(CausalLM* model,
+  Executor(ExecutorImplFactory::ModelRef model,
            const ModelContext& context,
            const runtime::Options& options);
 

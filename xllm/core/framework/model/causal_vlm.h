@@ -15,122 +15,57 @@ limitations under the License.
 
 #pragma once
 
-#include <c10/core/Device.h>
-#include <torch/types.h>
+#include <type_traits>
+#include <utility>
 
-#include <vector>
-
-#include "causal_lm.h"
-#include "core/framework/quantization/quant_args.h"
-#include "core/framework/state_dict/state_dict.h"
-#include "core/kv_cache/storage/kv_cache.h"
-#include "model_args.h"
-#include "model_params_view.h"
+#include "core/framework/model/causal_lm.h"
+#include "core/framework/multimodal/mm_data_item.h"
 
 namespace xllm {
 
-class CausalVLM : public CausalLM {
+class CausalVLM : public torch::nn::Module, public Model {
  public:
   ~CausalVLM() override = default;
+
+  virtual CausalLM& language_model() = 0;
+
+  torch::Tensor pooler(const torch::Tensor& hidden_states,
+                       const torch::Tensor& seleted_idxes) override {
+    return language_model().pooler(hidden_states, seleted_idxes);
+  }
+
   virtual MMDict encode(const ModelParamsView& parameters) = 0;
+
   virtual torch::Tensor get_input_embeddings(
       const torch::Tensor& input_ids,
       const ModelParamsView& input_params) = 0;
 };
 
 template <typename ModelType>
-class CausalVLMImpl : public CausalVLM {
+class CausalVLMImpl : public ModelImpl<ModelType, CausalVLM> {
+  using Base = ModelImpl<ModelType, CausalVLM>;
+  using LanguageModel =
+      std::decay_t<decltype(std::declval<ModelType>()->language_model())>;
+
  public:
   CausalVLMImpl(ModelType model, const torch::TensorOptions& options)
-      : model_(std::move(model)), options_(options) {}
+      : Base(std::move(model), options),
+        language_model_(this->model_->language_model(), options) {}
+
+  CausalLM& language_model() override { return language_model_; }
 
   MMDict encode(const ModelParamsView& parameters) override {
-    return model_->get_multimodal_embeddings(parameters);
+    return this->model_->get_multimodal_embeddings(parameters);
   }
 
   torch::Tensor get_input_embeddings(
       const torch::Tensor& input_ids,
       const ModelParamsView& input_params) override {
-    return model_->get_input_embeddings(input_ids, input_params);
+    return this->model_->get_input_embeddings(input_ids, input_params);
   }
-
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& parameters) override {
-    return model_->forward(tokens, positions, kv_caches, parameters);
-  }
-
-  bool is_hybrid_linear_attention() override {
-    if constexpr (detail::has_is_hybrid_linear_attention<ModelType>::value) {
-      return model_->is_hybrid_linear_attention();
-    } else {
-      return CausalLM::is_hybrid_linear_attention();
-    }
-  }
-
-  bool supports_mla_graph_kv_bucketing() const override {
-    if constexpr (detail::has_supports_mla_graph_kv_bucketing<
-                      ModelType>::value) {
-      return model_->supports_mla_graph_kv_bucketing();
-    }
-    return CausalLM::supports_mla_graph_kv_bucketing();
-  }
-
-  torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) override {
-    if constexpr (detail::has_pooler<ModelType>::value) {
-      return model_->pooler(hidden_states, seleted_idxes);
-    } else {
-      return CausalLM::pooler(hidden_states, seleted_idxes);
-    }
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) override {
-    return model_->logits(hidden_states, seleted_idxes);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes,
-                       torch::Tensor& out_hidden) override {
-    if constexpr (detail::has_logits_with_hidden<ModelType>::value) {
-      return model_->logits(hidden_states, seleted_idxes, out_hidden);
-    } else {
-      return CausalLM::logits(hidden_states, seleted_idxes, out_hidden);
-    }
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> loader) override {
-    model_->load_model(std::move(loader));
-  }
-
-  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
-  void update_expert_weight(int32_t) override {}
-
-  layer::LmHead get_lm_head() override {
-    if constexpr (detail::has_get_lm_head<ModelType>::value) {
-      return model_->get_lm_head();
-    } else {
-      return CausalLM::get_lm_head();
-    }
-  }
-
-  layer::WordEmbedding get_word_embedding() override {
-    if constexpr (detail::has_get_word_embedding<ModelType>::value) {
-      return model_->get_word_embedding();
-    } else {
-      return CausalLM::get_word_embedding();
-    }
-  }
-
-  torch::Device device() const override { return options_.device(); }
-
-  const torch::TensorOptions& options() const override { return options_; }
 
  private:
-  ModelType model_;
-  torch::TensorOptions options_;
+  CausalLMImpl<LanguageModel> language_model_;
 };
 
 }  // namespace xllm

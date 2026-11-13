@@ -23,8 +23,8 @@ limitations under the License.
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/multimodal/mposition.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "core/layers/common/lm_head.h"
 #include "core/layers/common/rotary_embedding_util.h"
+#include "core/layers/common/word_embedding.h"
 #include "models/model_registry.h"
 #include "models/vlm/qwen3_vl_base.h"
 #include "processors/multimodal_processor_pipeline.h"
@@ -281,15 +281,15 @@ TORCH_MODULE(Qwen3_5ForConditionalGeneration);
     return args->mm_hidden_size() / args->mm_num_attention_heads();            \
   })
 
-// qwen3_5/qwen3_5_moe are multimodal entry points. On NPU, text-only serving
-// uses qwen3_5_text/qwen3_5_moe_text from llm/qwen3_5.h because the VLM
-// request protocol currently requires array-form chat content.
-REGISTER_CAUSAL_VLM_MODEL(qwen3_5, Qwen3_5ForConditionalGeneration);
 REGISTER_MPOSITION_GENERATOR(qwen3_5, Qwen3VLMPositionGenerator);
 using Qwen35MultimodalProcessor = MultimodalProcessor<Qwen3VLPromptProcessor,
                                                       Qwen2VLImageProcessor,
                                                       Qwen3VLVideoProcessor>;
-REGISTER_MULTIMODAL_PROCESSOR(qwen3_5, Qwen35MultimodalProcessor);
+REGISTER_CAUSAL_MODEL(
+    qwen3_5,
+    Qwen3_5ForConditionalGeneration,
+    /*priority=*/0,
+    ModelRegistry::make_multimodal_processor<Qwen35MultimodalProcessor>);
 REGISTER_MODEL_ARGS(qwen3_5, [&] {
   LOAD_QWEN3_5_COMMON_ARGS();
   LOAD_QWEN3_5_VISION_ARGS();
@@ -302,9 +302,12 @@ REGISTER_MODEL_ARGS(qwen3_5, [&] {
           std::unordered_set<int32_t>({args->eos_token_id(), 248046}));
 });
 
-REGISTER_CAUSAL_VLM_MODEL(qwen3_5_moe, Qwen3_5ForConditionalGeneration);
 REGISTER_MPOSITION_GENERATOR(qwen3_5_moe, Qwen3VLMPositionGenerator);
-REGISTER_MULTIMODAL_PROCESSOR(qwen3_5_moe, Qwen35MultimodalProcessor);
+REGISTER_CAUSAL_MODEL(
+    qwen3_5_moe,
+    Qwen3_5ForConditionalGeneration,
+    /*priority=*/0,
+    ModelRegistry::make_multimodal_processor<Qwen35MultimodalProcessor>);
 REGISTER_MODEL_ARGS(qwen3_5_moe, [&] {
   LOAD_QWEN3_5_COMMON_ARGS();
   LOAD_QWEN3_5_VISION_ARGS();
@@ -332,12 +335,8 @@ REGISTER_MODEL_ARGS(qwen3_5_moe, [&] {
 
 // Text-only model registrations. On NPU these are handled by llm/qwen3_5.h.
 #if !defined(USE_NPU)
-// qwen3_5 without vision config (text-only serving).
-// Model args are already registered by the VLM registration above.
-REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen3_5_lm, qwen3_5, Qwen3_5ForCausalLM);
-REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen3_5_moe_lm,
-                                   qwen3_5_moe,
-                                   Qwen3_5ForCausalLM);
+REGISTER_MODEL_BACKEND(qwen3_5, /*backend=*/"llm");
+REGISTER_MODEL_BACKEND(qwen3_5_moe, /*backend=*/"llm");
 
 REGISTER_CAUSAL_MODEL(qwen3_5_text, Qwen3_5ForCausalLM);
 REGISTER_MODEL_ARGS(qwen3_5_text, [&] {
