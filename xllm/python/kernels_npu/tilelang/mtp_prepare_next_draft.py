@@ -69,13 +69,23 @@ def build_mtp_prepare_next_draft_kernel(preparation_mode: int) -> tvm.tir.PrimFu
         placeholder = T.match_buffer(placeholder_handle, (T.max(hidden_size, 1),), "uint16")
         base_positions = T.match_buffer(base_positions_handle, (T.max(batch_size, 1),), "int32")
         base_lengths = T.match_buffer(base_lengths_handle, (T.max(batch_size, 1),), "int32")
-        table_rows = batch_size * (speculative_width if preparation_mode == 2 else 1)
-        output_rows = batch_size * (speculative_width if preparation_mode == 2 else 2)
-        table = T.match_buffer(table_handle, (table_rows * table_columns,), "int32")
-        shared_table = T.match_buffer(shared_table_handle, (table_rows * table_columns,), "int32")
-        output_tokens = T.match_buffer(output_tokens_handle, (output_rows,), "int32")
+        table = T.match_buffer(
+            table_handle,
+            (batch_size * (speculative_width if preparation_mode == 2 else 1) * table_columns,),
+            "int32",
+        )
+        shared_table = T.match_buffer(
+            shared_table_handle,
+            (batch_size * (speculative_width if preparation_mode == 2 else 1) * table_columns,),
+            "int32",
+        )
+        output_tokens = T.match_buffer(
+            output_tokens_handle, (batch_size * (speculative_width if preparation_mode == 2 else 2),), "int32"
+        )
         output_hidden = T.match_buffer(output_hidden_handle, (batch_size * 2 * hidden_size,), "uint16")
-        output_positions = T.match_buffer(output_positions_handle, (output_rows,), "int32")
+        output_positions = T.match_buffer(
+            output_positions_handle, (batch_size * (speculative_width if preparation_mode == 2 else 2),), "int32"
+        )
         output_lengths = T.match_buffer(
             output_lengths_handle,
             (
@@ -86,8 +96,12 @@ def build_mtp_prepare_next_draft_kernel(preparation_mode: int) -> tvm.tir.PrimFu
             ),
             "int32",
         )
-        output_slots = T.match_buffer(output_slots_handle, (output_rows,), "int32")
-        output_shared_slots = T.match_buffer(output_shared_slots_handle, (output_rows,), "int32")
+        output_slots = T.match_buffer(
+            output_slots_handle, (batch_size * (speculative_width if preparation_mode == 2 else 2),), "int32"
+        )
+        output_shared_slots = T.match_buffer(
+            output_shared_slots_handle, (batch_size * (speculative_width if preparation_mode == 2 else 2),), "int32"
+        )
         output_logits_indices = T.match_buffer(output_logits_indices_handle, (batch_size,), "int32")
         with T.Kernel(copy_cores, threads=1, is_npu=True) as core:
             accepted = T.alloc_var("int32")
