@@ -25,6 +25,7 @@ limitations under the License.
 #include <boost/algorithm/string.hpp>
 #include <chrono>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -167,6 +168,12 @@ void VLMEngine::process_group_test() {
 }
 
 bool VLMEngine::init(MasterStatus master_status) {
+  return init(master_status, /*transfer_coordinator=*/nullptr);
+}
+
+bool VLMEngine::init(
+    MasterStatus master_status,
+    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
   if (!init_model(master_status)) {
     LOG(ERROR) << "Failed to init model from: " << options_.model_path();
     return false;
@@ -174,7 +181,9 @@ bool VLMEngine::init(MasterStatus master_status) {
 
   auto kv_cache_cap = estimate_kv_cache_capacity();
 
-  if (!allocate_kv_cache(kv_cache_cap)) {
+  if (!allocate_kv_cache(kv_cache_cap,
+                         /*shared_vmm_layout=*/nullptr,
+                         std::move(transfer_coordinator))) {
     LOG(ERROR) << "Failed to allocate kv cache";
     return false;
   }
@@ -255,8 +264,10 @@ KVCacheCapacity VLMEngine::estimate_kv_cache_capacity(
       .plan(initialize_virtual_memory);
 }
 
-bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap,
-                                  const VmmKVCacheLayout* shared_vmm_layout) {
+bool VLMEngine::allocate_kv_cache(
+    const KVCacheCapacity& kv_cache_cap,
+    const VmmKVCacheLayout* shared_vmm_layout,
+    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
   const bool enable_state_cache = has_linear_attention_layers(args_) ||
                                   kv_cache_cap.kpool_tail_slot_size() > 0;
 
@@ -285,6 +296,19 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap,
             << ", kv_cache_dtype: " << options_.kv_cache_dtype();
 
   const int32_t block_size = static_cast<int32_t>(kv_cache_cap.block_size());
+  HostCacheValidationOptions host_cache_validation_options{
+      .host_blocks_factor = options_.host_blocks_factor(),
+      .device_block_count = kv_cache_cap.n_blocks(),
+      .supports_host_kv_offload = Platform::supports_host_kv_offload(),
+      .enable_prefix_cache = options_.enable_prefix_cache(),
+      .enable_disagg_pd = options_.enable_disagg_pd(),
+      .enable_kvcache_store = options_.enable_kvcache_store(),
+      .instance_role = options_.instance_role(),
+      .kv_cache_dtype = options_.kv_cache_dtype(),
+      .indexer_cache_dtype =
+          KVCacheConfig::get_instance().indexer_cache_dtype(),
+      .model_type = args_.model_type(),
+  };
 
   const bool is_decode = options_.instance_role() == InstanceRole::DECODE;
   if (options_.enable_prefix_cache() && enable_state_cache && !is_decode) {
@@ -306,11 +330,12 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap,
       .kv_events_config(options_.is_draft_engine()
                             ? std::string()
                             : KVCacheConfig::get_instance().kv_events_config())
-      .host_num_blocks(0)  // no host cache for vlm engine currently.
+      .host_num_blocks(0)
       .block_size(block_size)
       .enable_linear_state(enable_state_cache)
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
+      .enable_kvcache_store(options_.enable_kvcache_store())
       .enable_vmm_kvcache(KVCacheConfig::get_instance().enable_vmm_kvcache())
       .num_layers(args_.n_layers())
       .slot_size(kv_cache_cap.slot_size())
@@ -330,15 +355,32 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap,
     options.linear_state_num_slots(
         static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()));
   }
+  if (options_.host_blocks_factor() > 1.0) {
+    const uint32_t host_kv_blocks =
+        static_cast<uint32_t>(scale_host_block_count(
+            kv_cache_cap.n_blocks(), options_.host_blocks_factor()));
+    if (enable_state_cache) {
+      std::map<BlockType, uint32_t> host_capacities;
+      host_capacities.emplace(BlockType::KV, host_kv_blocks);
+      host_capacities.emplace(BlockType::LINEAR,
+                              static_cast<uint32_t>(scale_host_block_count(
+                                  kv_cache_cap.num_linear_state_blocks(),
+                                  options_.host_blocks_factor())));
+      options.host_num_blocks_by_type(std::move(host_capacities));
+    } else {
+      options.host_num_blocks(host_kv_blocks);
+    }
+    options.enable_host_offload(true);
+  }
   auto factory_result =
       KVCacheManagerFactory::create(kv_cache_cap,
                                     args_,
                                     dp_local_tp_size_,
                                     dtype_,
                                     std::move(options),
-                                    /*transfer_coordinator=*/nullptr,
+                                    std::move(transfer_coordinator),
                                     dp_size_,
-                                    /*host_validation_options=*/std::nullopt,
+                                    std::move(host_cache_validation_options),
                                     shared_vmm_layout);
   factory_result.shape.print_shapes();
   KVCacheShape kv_cache_shape = std::move(factory_result.shape);
@@ -475,6 +517,50 @@ void VLMEngine::setup_workers(const runtime::Options& options) {
         std::make_shared<DistributedWorkerManager>(options);
   }
   worker_clients_ = distributed_worker_manager_->get_worker_clients();
+}
+
+bool VLMEngine::start_profile() {
+  std::lock_guard<std::mutex> lock(profile_mutex_);
+  if (!profile_workers(/*is_start=*/true)) {
+    if (!profile_workers(/*is_start=*/false)) {
+      LOG(ERROR) << "Failed to stop partially started VLM profiling.";
+    }
+    return false;
+  }
+  return true;
+}
+
+bool VLMEngine::stop_profile() {
+  std::lock_guard<std::mutex> lock(profile_mutex_);
+  return profile_workers(/*is_start=*/false);
+}
+
+bool VLMEngine::profile_workers(bool is_start) {
+  if (worker_clients_.empty()) {
+    LOG(ERROR) << "No worker clients available for profiling.";
+    return false;
+  }
+  std::vector<folly::SemiFuture<bool>> futures;
+  futures.reserve(worker_clients_.size());
+  for (auto& worker : worker_clients_) {
+    futures.emplace_back(is_start ? worker->start_profile_async()
+                                  : worker->stop_profile_async());
+  }
+  auto results = folly::collectAll(futures).get();
+  bool success = true;
+  for (const auto& result : results) {
+    if (result.hasException()) {
+      LOG(ERROR) << "Profiling worker RPC failed: "
+                 << result.exception().what();
+      success = false;
+      continue;
+    }
+    if (!result.value()) {
+      LOG(ERROR) << "Profiling failed on a worker (start=" << is_start << ").";
+      success = false;
+    }
+  }
+  return success;
 }
 
 }  // namespace xllm

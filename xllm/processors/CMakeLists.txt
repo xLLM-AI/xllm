@@ -43,6 +43,7 @@ cc_library(
     audio_processor.h
     image_processor.h
     prompt_processor.h
+    text_prompt_processor.h
     clip_image_processor.h
     clip_prompt_processor.h
     glm4v_image_processor.h

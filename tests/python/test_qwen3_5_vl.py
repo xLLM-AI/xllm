@@ -29,9 +29,15 @@ from xllm.python.layers.qwen3_5.attention import Qwen3_5Attention
 from xllm.python.layers.qwen3_5.common import PartialRotaryEmbedding
 from xllm.python.model_loader import ScopedWeightLoader
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
+from xllm.python.models.qwen3 import Qwen3Config
 from xllm.python.models.qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5Model
 from xllm.python.models.qwen3_5_vl import Qwen3_5ForConditionalGeneration
-from xllm.python.models.qwen3_vl import Qwen3VLVisionConfig, Qwen3VLVisionTransformer
+from xllm.python.models.qwen3_vl import (
+    Qwen3VLForConditionalGeneration,
+    Qwen3VLModel,
+    Qwen3VLVisionConfig,
+    Qwen3VLVisionTransformer,
+)
 from xllm.python.platform import current_platform
 from xllm.python.registry import get_model_class
 
@@ -49,6 +55,49 @@ class _CaptureAttention(nn.Module):
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         self.inputs = (query, key, value)
         return query
+
+
+class _IdentityVLDecoder(nn.Module):
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        residual: torch.Tensor | None,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        mrope_section: list[int] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return hidden, residual
+
+
+def test_deepstack_inputs_survive_interleaved_embedding_preparation() -> None:
+    model = Qwen3VLForConditionalGeneration.__new__(Qwen3VLForConditionalGeneration)
+    nn.Module.__init__(model)
+    cfg = Qwen3Config(hidden_size=4, n_layers=0, n_heads=1, n_kv_heads=1, head_dim=4, vocab_size=16)
+    model.model = Qwen3VLModel(cfg, torch.float32, torch.device("cpu"))
+    model.model.embed_tokens = nn.Embedding.from_pretrained(torch.arange(64).view(16, 4).float())
+    model.model.layers = nn.ModuleList([_IdentityVLDecoder()])
+    model.model.norm = _IdentityNorm()
+    model.image_token_id = 10
+    model.video_token_id = 11
+    model.visual_dim = 4
+    model.deepstack_num_level = 1
+    tokens = torch.tensor([1, 10, 11, 2])
+    image = torch.tensor([[100.0] * 4 + [10.0] * 4])
+    video = torch.tensor([[200.0] * 4 + [20.0] * 4])
+    embeddings, deepstack = model.get_input_embeddings(tokens, image, video)
+    model.get_input_embeddings(tokens, image + 1000, video + 1000)
+    expected = model.model.embed_tokens(tokens).clone()
+    expected[1] = 110
+    expected[2] = 220
+    torch.testing.assert_close(
+        model.model(tokens, torch.arange(4), embeddings, deepstack_input_embeds=deepstack), expected
+    )
+    torch.testing.assert_close(model.model(tokens, torch.arange(4)), model.model.embed_tokens(tokens))
+    text_embeddings, text_deepstack = model.get_input_embeddings(torch.tensor([3, 4]))
+    assert text_deepstack == ()
+    torch.testing.assert_close(text_embeddings, model.model.embed_tokens(torch.tensor([3, 4])))
 
 
 def _unfused_attention(attention_cls: type[Qwen3_5Attention], interleaved: bool, output_gate: bool) -> Qwen3_5Attention:
