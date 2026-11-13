@@ -19,12 +19,16 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <optional>
+#include <string_view>
 
-#include "core/framework/multimodal/content_hash.h"
 #include "util/hash_util.h"
 
 namespace xllm {
 namespace {
+
+XXH3Key cache_key(std::string_view value) {
+  return hash_string(value, /*seed=*/1024);
+}
 
 int64_t tensor_bytes(const torch::Tensor& tensor) {
   return tensor.numel() * static_cast<int64_t>(tensor.element_size());
@@ -38,8 +42,8 @@ TEST(EncoderCacheTest, InsertAndLookup) {
   torch::Tensor embedding = make_embedding(1.0);
   EncoderCache cache(/*max_bytes=*/tensor_bytes(embedding));
 
-  cache.insert(hash_string("IMAGE_0"), embedding);
-  std::optional<torch::Tensor> cached = cache.lookup(hash_string("IMAGE_0"));
+  cache.insert(cache_key("IMAGE_0"), embedding);
+  std::optional<torch::Tensor> cached = cache.lookup(cache_key("IMAGE_0"));
 
   ASSERT_TRUE(cached.has_value());
   EXPECT_TRUE(torch::equal(cached.value(), embedding));
@@ -49,7 +53,7 @@ TEST(EncoderCacheTest, LookupOnEmpty) {
   torch::Tensor embedding = make_embedding(1.0);
   EncoderCache cache(/*max_bytes=*/tensor_bytes(embedding));
 
-  std::optional<torch::Tensor> cached = cache.lookup(hash_string("IMAGE_0"));
+  std::optional<torch::Tensor> cached = cache.lookup(cache_key("IMAGE_0"));
 
   EXPECT_FALSE(cached.has_value());
 }
@@ -59,13 +63,13 @@ TEST(EncoderCacheTest, LruEvictsLeastRecentlyUsed) {
   const int64_t bytes = tensor_bytes(embedding);
   EncoderCache cache(/*max_bytes=*/bytes * 2);
 
-  cache.insert(hash_string("IMAGE_0"), make_embedding(1.0));
-  cache.insert(hash_string("IMAGE_1"), make_embedding(2.0));
-  cache.insert(hash_string("IMAGE_2"), make_embedding(3.0));
+  cache.insert(cache_key("IMAGE_0"), make_embedding(1.0));
+  cache.insert(cache_key("IMAGE_1"), make_embedding(2.0));
+  cache.insert(cache_key("IMAGE_2"), make_embedding(3.0));
 
-  EXPECT_FALSE(cache.lookup(hash_string("IMAGE_0")).has_value());
-  EXPECT_TRUE(cache.lookup(hash_string("IMAGE_1")).has_value());
-  EXPECT_TRUE(cache.lookup(hash_string("IMAGE_2")).has_value());
+  EXPECT_FALSE(cache.lookup(cache_key("IMAGE_0")).has_value());
+  EXPECT_TRUE(cache.lookup(cache_key("IMAGE_1")).has_value());
+  EXPECT_TRUE(cache.lookup(cache_key("IMAGE_2")).has_value());
 }
 
 TEST(EncoderCacheTest, LookupTouchesEntry) {
@@ -73,37 +77,59 @@ TEST(EncoderCacheTest, LookupTouchesEntry) {
   const int64_t bytes = tensor_bytes(embedding);
   EncoderCache cache(/*max_bytes=*/bytes * 2);
 
-  cache.insert(hash_string("IMAGE_0"), make_embedding(1.0));
-  cache.insert(hash_string("IMAGE_1"), make_embedding(2.0));
-  ASSERT_TRUE(cache.lookup(hash_string("IMAGE_0")).has_value());
-  cache.insert(hash_string("IMAGE_2"), make_embedding(3.0));
+  cache.insert(cache_key("IMAGE_0"), make_embedding(1.0));
+  cache.insert(cache_key("IMAGE_1"), make_embedding(2.0));
+  ASSERT_TRUE(cache.lookup(cache_key("IMAGE_0")).has_value());
+  cache.insert(cache_key("IMAGE_2"), make_embedding(3.0));
 
-  EXPECT_TRUE(cache.lookup(hash_string("IMAGE_0")).has_value());
-  EXPECT_FALSE(cache.lookup(hash_string("IMAGE_1")).has_value());
-  EXPECT_TRUE(cache.lookup(hash_string("IMAGE_2")).has_value());
+  EXPECT_TRUE(cache.lookup(cache_key("IMAGE_0")).has_value());
+  EXPECT_FALSE(cache.lookup(cache_key("IMAGE_1")).has_value());
+  EXPECT_TRUE(cache.lookup(cache_key("IMAGE_2")).has_value());
 }
 
 TEST(EncoderCacheTest, SingleEntryLargerThanCapacityIsSkipped) {
   torch::Tensor embedding = make_embedding(1.0);
   EncoderCache cache(/*max_bytes=*/tensor_bytes(embedding) - 1);
 
-  cache.insert(hash_string("IMAGE_0"), embedding);
+  cache.insert(cache_key("IMAGE_0"), embedding);
 
-  EXPECT_FALSE(cache.lookup(hash_string("IMAGE_0")).has_value());
+  EXPECT_FALSE(cache.lookup(cache_key("IMAGE_0")).has_value());
+}
+
+TEST(EncoderCacheTest, OversizedEntryDoesNotEvictCachedEntries) {
+  torch::Tensor embedding = make_embedding(1.0);
+  EncoderCache cache(/*max_bytes=*/tensor_bytes(embedding));
+  cache.insert(cache_key("retained"), embedding);
+  cache.insert(cache_key("oversized"), torch::ones({100}, torch::kFloat32));
+  EXPECT_TRUE(cache.lookup(cache_key("retained")).has_value());
+  EXPECT_FALSE(cache.lookup(cache_key("oversized")).has_value());
+}
+
+TEST(EncoderCacheTest, RetainsIndependentCopyOfNoncontiguousView) {
+  torch::Tensor source = torch::arange(24, torch::kFloat32).reshape({4, 6});
+  torch::Tensor view =
+      source.slice(/*dim=*/1, /*start=*/0, /*end=*/6, /*step=*/2);
+  torch::Tensor expected = view.clone();
+  EncoderCache cache(/*max_bytes=*/tensor_bytes(view));
+  cache.insert(cache_key("view"), view);
+  source.zero_();
+  const auto cached = cache.lookup(cache_key("view"));
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_TRUE(torch::equal(cached.value(), expected));
 }
 
 TEST(EncoderCacheTest, ClearResetsState) {
   torch::Tensor embedding = make_embedding(1.0);
   EncoderCache cache(/*max_bytes=*/tensor_bytes(embedding) * 2);
-  cache.insert(hash_string("IMAGE_0"), make_embedding(1.0));
-  cache.insert(hash_string("IMAGE_1"), make_embedding(2.0));
+  cache.insert(cache_key("IMAGE_0"), make_embedding(1.0));
+  cache.insert(cache_key("IMAGE_1"), make_embedding(2.0));
 
   cache.clear();
 
-  EXPECT_FALSE(cache.lookup(hash_string("IMAGE_0")).has_value());
-  EXPECT_FALSE(cache.lookup(hash_string("IMAGE_1")).has_value());
-  cache.insert(hash_string("IMAGE_2"), make_embedding(3.0));
-  EXPECT_TRUE(cache.lookup(hash_string("IMAGE_2")).has_value());
+  EXPECT_FALSE(cache.lookup(cache_key("IMAGE_0")).has_value());
+  EXPECT_FALSE(cache.lookup(cache_key("IMAGE_1")).has_value());
+  cache.insert(cache_key("IMAGE_2"), make_embedding(3.0));
+  EXPECT_TRUE(cache.lookup(cache_key("IMAGE_2")).has_value());
 }
 
 }  // namespace

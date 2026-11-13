@@ -45,12 +45,14 @@ void EncoderCache::insert(const XXH3Key& key, torch::Tensor embedding) {
     return;
   }
 
-  torch::Tensor owned = embedding.clone();
-  const int64_t size = static_cast<int64_t>(owned.nbytes());
+  const int64_t size = static_cast<int64_t>(embedding.nbytes());
   if (size > max_size_) {
     return;
   }
 
+  // Clone only cacheable entries; keep an independent allocation for retained
+  // slices so cache ownership does not pin the full encoder output buffer.
+  torch::Tensor owned = embedding.clone();
   evict_until_fit(size);
 
   lru_keys_.push_back(key);

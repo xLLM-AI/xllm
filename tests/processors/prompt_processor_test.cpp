@@ -18,12 +18,60 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "processors/clip_prompt_processor.h"
 #include "processors/glm4v_prompt_processor.h"
+#include "processors/kimi25_image_processor.h"
 #include "processors/qwen2_vl_prompt_processor.h"
 #include "processors/qwen3_vl_prompt_processor.h"
 
 namespace xllm {
 namespace {
+
+TEST(PromptProcessorTest, ClipExpandsMixedModalitiesInOrder) {
+  ModelArgs args;
+  args.mm_image_merge_size(1);
+  CLIPVLPromptProcessor processor(args);
+  MMData data(MMType::IMAGE | MMType::VIDEO,
+              MMDict{{"image_grid_thw", torch::tensor({{1, 1, 2}, {1, 1, 1}})},
+                     {"video_grid_thw", torch::tensor({{2, 1, 1}})}});
+  std::string prompt = "a<|image_pad|>b<|video_pad|>c<|image_pad|>d";
+  ASSERT_TRUE(processor.process(prompt, data));
+  EXPECT_EQ(
+      prompt,
+      "a<|image_pad|><|image_pad|>b<|video_pad|><|video_pad|>c<|image_pad|>d");
+}
+
+TEST(PromptProcessorTest, KimiExpandsMixedModalitiesWithoutChangingWrappers) {
+  ModelArgs args;
+  args.mm_image_merge_size(1);
+  KimiK25PromptProcessor processor(args);
+  MMData data(MMType::IMAGE | MMType::VIDEO,
+              MMDict{{"image_grid_thw", torch::tensor({{1, 1, 2}, {1, 1, 1}})},
+                     {"video_grid_thw", torch::tensor({{2, 1, 1}})}});
+  std::string prompt =
+      "a<|media_begin|>image<|media_content|><|media_pad|><|media_end|>b"
+      "<|media_begin|>video<|media_content|><|media_pad|><|media_end|>c"
+      "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>d";
+  ASSERT_TRUE(processor.process(prompt, data));
+  EXPECT_EQ(prompt,
+            "a<|media_begin|>image<|media_content|><|media_pad|><|media_pad|><|"
+            "media_end|>b"
+            "<|media_begin|>video<|media_content|><|media_pad|><|media_pad|><|"
+            "media_end|>c"
+            "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>d");
+}
+
+TEST(PromptProcessorTest, ClipAndKimiLeaveTextOnlyPromptsUnchanged) {
+  ModelArgs args;
+  CLIPVLPromptProcessor clip(args);
+  KimiK25PromptProcessor kimi(args);
+  MMData data;
+  std::string prompt = "plain text";
+  ASSERT_TRUE(clip.process(prompt, data));
+  EXPECT_EQ(prompt, "plain text");
+  ASSERT_TRUE(kimi.process(prompt, data));
+  EXPECT_EQ(prompt, "plain text");
+}
 
 TEST(PromptProcessorTest, QwenPreservesMixedImageAndVideoExpansionOrder) {
   ModelArgs args;

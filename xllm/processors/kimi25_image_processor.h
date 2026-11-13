@@ -20,7 +20,6 @@ limitations under the License.
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "core/framework/model/model_args.h"
@@ -119,12 +118,6 @@ class KimiK25VideoProcessor final : public VideoProcessor {
 };
 
 class KimiK25PromptProcessor final : public PromptProcessor {
-  enum class TokenType {
-    INVALID,
-    IMAGE,
-    VIDEO,
-  };
-
  public:
   explicit KimiK25PromptProcessor(const ModelArgs& args);
   ~KimiK25PromptProcessor() override = default;
@@ -136,8 +129,6 @@ class KimiK25PromptProcessor final : public PromptProcessor {
  private:
   std::vector<int32_t> get_media_token_counts(
       const torch::Tensor& grid_thw) const;
-  std::pair<TokenType, size_t> find_media_prompt(const std::string& prompt,
-                                                 size_t begin) const;
 
  private:
   const std::string media_pad_token_ = "<|media_pad|>";

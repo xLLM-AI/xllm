@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "core/framework/model/model_args.h"
@@ -26,12 +25,6 @@ limitations under the License.
 namespace xllm {
 
 class CLIPVLPromptProcessor final : public PromptProcessor {
-  enum class TokenType {
-    INVALID,
-    IMAGE,
-    VIDEO,
-  };
-
  public:
   explicit CLIPVLPromptProcessor(const ModelArgs& args);
 
@@ -42,9 +35,6 @@ class CLIPVLPromptProcessor final : public PromptProcessor {
   }
 
  private:
-  std::pair<TokenType, size_t> find_vision_token(const std::string& prompt,
-                                                 size_t begin);
-
   const std::string image_token_ = "<|image_pad|>";
   const std::string video_token_ = "<|video_pad|>";
   int32_t merge_size_ = 0;
