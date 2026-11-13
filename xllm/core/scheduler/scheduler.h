@@ -83,6 +83,9 @@ struct SchedulerOptions {
 
   PROPERTY(int32_t, cp_size) = 1;
 
+  // Effective KV split after parallel configuration resolution.
+  PROPERTY(int32_t, kv_split_size) = 1;
+
   // enable disaggregated PD mode.
   PROPERTY(bool, enable_disagg_pd) = false;
 
@@ -107,6 +110,8 @@ struct SchedulerOptions {
   PROPERTY(bool, enable_schedule_overlap) = true;
 
   PROPERTY(bool, enable_chunked_prefill) = true;
+
+  PROPERTY(bool, enable_mix_batch) = true;
 
   PROPERTY(bool, enable_service_routing) = false;
 
