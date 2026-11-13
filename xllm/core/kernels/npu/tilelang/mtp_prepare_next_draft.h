@@ -37,6 +37,25 @@ struct MtpPrepareNextDraftWorkspace {
   MtpPrepareNextDraftOutput output;
 };
 
+struct MtpPrepareDraftPrefixOutput {
+  torch::Tensor token_ids;
+  torch::Tensor positions;
+  torch::Tensor kv_seq_lens;
+  torch::Tensor cache_slots;
+  torch::Tensor shared_cache_slots;
+  torch::Tensor logits_indices;
+};
+
+// Each source sequence owns width identical rows in the expanded tables.
+// Hidden states are not copied; the caller retains its verifier hidden view.
+std::optional<MtpPrepareDraftPrefixOutput> try_mtp_prepare_draft_prefix(
+    const torch::Tensor& accepted_tokens,
+    const torch::Tensor& base_positions,
+    const torch::Tensor& base_kv_seq_lens,
+    const torch::Tensor& expanded_block_tables,
+    int64_t block_size,
+    const torch::Tensor& expanded_shared_block_tables = {});
+
 // Full [B,K+1,H] hidden returns B KV lengths. Compact [2B,H] hidden
 // contains previous/current rows and directly returns 2B KV lengths.
 std::optional<MtpPrepareNextDraftOutput> try_mtp_prepare_next_draft(

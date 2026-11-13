@@ -28,13 +28,16 @@ DEPENDENCY_MODULES = (kernel_impl,)
 
 @register_kernel
 class MtpPrepareNextDraftKernel(TilelangKernel):
-    DISPATCH_SCHEMA = [DispatchField("compact_hidden", "int32")]
-    SPECIALIZATIONS = [{"variant_key": f"compact_{compact}", "compact_hidden": compact} for compact in (0, 1)]
+    DISPATCH_SCHEMA = [DispatchField("preparation_mode", "int32")]
+    SPECIALIZATIONS = [
+        {"variant_key": name, "preparation_mode": mode}
+        for mode, name in ((0, "full_hidden"), (1, "compact_hidden"), (2, "verifier_prefix"))
+    ]
 
     @staticmethod
-    def generate_source(compact_hidden: int) -> str:
+    def generate_source(preparation_mode: int) -> str:
         tilelang.disable_cache()
-        kernel = build_mtp_prepare_next_draft_kernel(compact_hidden)
+        kernel = build_mtp_prepare_next_draft_kernel(preparation_mode)
         with tilelang.tvm.transform.PassContext(opt_level=3, config=MTP_PREPARE_NEXT_DRAFT_PASS_CONFIGS):
             lowered = tilelang.engine.lower(kernel)
         return prepare_vector_only_source(lowered.kernel_source)
