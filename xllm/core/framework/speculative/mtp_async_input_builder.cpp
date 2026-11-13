@@ -42,6 +42,18 @@ torch::Tensor build_device_cache_slots(const Input& input,
   return map_positions_to_cache_slots(
       input.input_params.attention.device.block_tables, positions, block_size);
 }
+
+torch::Tensor build_shared_cache_slots(const torch::Tensor& shared_block_tables,
+                                       const torch::Tensor& logical_cache_slots,
+                                       const torch::Tensor& cache_positions,
+                                       int32_t block_size) {
+  torch::Tensor slots = map_positions_to_cache_slots(
+      shared_block_tables, cache_positions, block_size);
+  // Logical page zero is writable scratch for ordinary storage. Shared read
+  // tables redirect it to immutable padding, so those writes must be skipped.
+  return torch::where(
+      logical_cache_slots >= block_size, slots, torch::full_like(slots, -1));
+}
 #if defined(USE_NPU)
 template <typename Source>
 void expand_decode_attention_metadata(LlmForwardInput& draft_input,
@@ -53,6 +65,18 @@ void expand_decode_attention_metadata(LlmForwardInput& draft_input,
       block_table_source.input_params,
       kv_seq_lens,
       block_size);
+  const auto& source_attention = block_table_source.input_params.attention;
+  auto& target_attention = draft_input.input_params.attention;
+  if (source_attention.device.shared_full_block_table.defined()) {
+    target_attention.device.shared_full_block_table =
+        source_attention.device.shared_full_block_table.repeat_interleave(
+            /*repeats=*/2, /*dim=*/0);
+    if (source_attention.host.shared_full_block_table.defined()) {
+      target_attention.host.shared_full_block_table =
+          source_attention.host.shared_full_block_table.repeat_interleave(
+              /*repeats=*/2, /*dim=*/0);
+    }
+  }
 }
 
 template <typename Source>
@@ -85,6 +109,10 @@ void apply_mtp_prepare_output(
   }
   draft_input.input_params.attention.device.new_cache_slots =
       output.cache_slots;
+  if (output.shared_cache_slots.defined()) {
+    draft_input.input_params.attention.device.shared_full_slot_mapping =
+        output.shared_cache_slots;
+  }
   if (rebuild_expanded_decode_metadata) {
     const torch::Tensor base_lengths =
         expanded_lengths
@@ -149,6 +177,18 @@ void prepare_draft_prefix_from_target(LlmForwardInput& draft_input,
           .select(1, 0);
   attention.new_cache_slots =
       map_positions_to_cache_slots(sequence_tables, kv_lengths - 1, block_size);
+  if (attention.shared_full_block_table.defined()) {
+    const torch::Tensor shared_sequence_tables =
+        attention.shared_full_block_table
+            .view(
+                {batch_size, width, attention.shared_full_block_table.size(1)})
+            .select(1, 0);
+    attention.shared_full_slot_mapping =
+        build_shared_cache_slots(shared_sequence_tables,
+                                 attention.new_cache_slots,
+                                 kv_lengths - 1,
+                                 block_size);
+  }
   attention.kv_seq_lens =
       kv_lengths.flatten().to(attention.kv_seq_lens.options());
   draft_input.positions =
@@ -186,7 +226,10 @@ void prepare_next_draft_from_accepted_state(
         base_positions,
         base_kv_seq_lens,
         block_table_source.input_params.attention.device.block_tables,
-        block_size);
+        block_size,
+        /*reusable_workspace=*/nullptr,
+        block_table_source.input_params.attention.device
+            .shared_full_block_table);
     if (output.has_value()) {
       apply_mtp_prepare_output(draft_input,
                                block_table_source,
@@ -224,6 +267,16 @@ void prepare_next_draft_from_accepted_state(
                    /*dim=*/1);
   draft_input.input_params.attention.device.new_cache_slots =
       build_device_cache_slots(block_table_source, cache_positions, block_size);
+  const torch::Tensor& shared_block_tables =
+      block_table_source.input_params.attention.device.shared_full_block_table;
+  if (shared_block_tables.defined()) {
+    draft_input.input_params.attention.device.shared_full_slot_mapping =
+        build_shared_cache_slots(
+            shared_block_tables,
+            draft_input.input_params.attention.device.new_cache_slots,
+            cache_positions,
+            block_size);
+  }
   draft_input.token_ids =
       torch::stack({state.previous_tokens, state.last_tokens}, /*dim=*/1)
           .flatten()

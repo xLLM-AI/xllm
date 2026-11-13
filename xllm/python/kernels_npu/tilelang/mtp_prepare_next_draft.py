@@ -46,17 +46,20 @@ def build_mtp_prepare_next_draft_kernel(compact_hidden: int) -> tvm.tir.PrimFunc
         base_positions_handle: T.handle,
         base_lengths_handle: T.handle,
         table_handle: T.handle,
+        shared_table_handle: T.handle,
         output_tokens_handle: T.handle,
         output_hidden_handle: T.handle,
         output_positions_handle: T.handle,
         output_lengths_handle: T.handle,
         output_slots_handle: T.handle,
+        output_shared_slots_handle: T.handle,
         batch_size: T.int32,
         speculative_width: T.int32,
         hidden_size: T.int32,
         table_columns: T.int32,
         block_size: T.int32,
         copy_cores: T.int32,
+        use_shared_table: T.int32,
     ):
         tokens = T.match_buffer(tokens_handle, (batch_size * speculative_width,), "int64")
         hidden = T.match_buffer(
@@ -66,6 +69,7 @@ def build_mtp_prepare_next_draft_kernel(compact_hidden: int) -> tvm.tir.PrimFunc
         base_positions = T.match_buffer(base_positions_handle, (T.max(batch_size, 1),), "int32")
         base_lengths = T.match_buffer(base_lengths_handle, (T.max(batch_size, 1),), "int32")
         table = T.match_buffer(table_handle, (batch_size * table_columns,), "int32")
+        shared_table = T.match_buffer(shared_table_handle, (batch_size * table_columns,), "int32")
         output_tokens = T.match_buffer(output_tokens_handle, (batch_size * 2,), "int32")
         output_hidden = T.match_buffer(output_hidden_handle, (batch_size * 2 * hidden_size,), "uint16")
         output_positions = T.match_buffer(output_positions_handle, (batch_size * 2,), "int32")
@@ -73,6 +77,7 @@ def build_mtp_prepare_next_draft_kernel(compact_hidden: int) -> tvm.tir.PrimFunc
             output_lengths_handle, (T.max(batch_size * (2 if compact_hidden == 1 else 1), 1),), "int32"
         )
         output_slots = T.match_buffer(output_slots_handle, (batch_size * 2,), "int32")
+        output_shared_slots = T.match_buffer(output_shared_slots_handle, (batch_size * 2,), "int32")
         with T.Kernel(copy_cores, threads=1, is_npu=True) as core:
             hidden_tile = T.alloc_ub((32768,), "uint16")
             accepted = T.alloc_var("int32")
@@ -106,10 +111,20 @@ def build_mtp_prepare_next_draft_kernel(compact_hidden: int) -> tvm.tir.PrimFunc
                                 cache_position = current_position - 1
                         column = T.max(cache_position, 0) // block_size
                         output_slots[row * 2 + pair] = 0
+                        if use_shared_table != 0:
+                            output_shared_slots[row * 2 + pair] = -1
                         if cache_position >= 0 and column < table_columns:
                             block_id = table[row * table_columns + column]
                             if block_id >= 0:
                                 output_slots[row * 2 + pair] = block_id * block_size + cache_position % block_size
+                            if use_shared_table != 0 and block_id > 0:
+                                # Read-padding pages must never receive writes.
+                                # Native tables already contain the final FIA page.
+                                page = shared_table[row * table_columns + column]
+                                if page >= 0:
+                                    output_shared_slots[row * 2 + pair] = (
+                                        page * block_size + cache_position % block_size
+                                    )
             # Metadata has one writer; hidden rows are disjoint, 32-byte
             # aligned DMA ranges and can be copied on independent vector cores.
             for group in T.serial(T.ceildiv(batch_size * 2, 32)):
