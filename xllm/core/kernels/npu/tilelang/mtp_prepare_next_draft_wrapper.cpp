@@ -226,7 +226,8 @@ std::optional<MtpPrepareDraftPrefixOutput> try_mtp_prepare_draft_prefix(
       !is_npu_tensor(base_kv_seq_lens) ||
       !is_npu_tensor(expanded_block_tables) || accepted_tokens.dim() != 2 ||
       expanded_block_tables.dim() != 2 ||
-      accepted_tokens.scalar_type() != torch::kLong ||
+      (accepted_tokens.scalar_type() != torch::kLong &&
+       accepted_tokens.scalar_type() != torch::kInt) ||
       base_positions.scalar_type() != torch::kInt ||
       base_kv_seq_lens.scalar_type() != torch::kInt ||
       expanded_block_tables.scalar_type() != torch::kInt ||
@@ -275,7 +276,8 @@ std::optional<MtpPrepareDraftPrefixOutput> try_mtp_prepare_draft_prefix(
   const torch::Tensor& shared_slots =
       use_shared_table ? output.shared_cache_slots : output.cache_slots;
   const auto spec = tilelang::make_mtp_prepare_next_draft_specialization(
-      tilelang::MtpPrepareNextDraftPreparationMode{2});
+      tilelang::MtpPrepareNextDraftPreparationMode{
+          accepted_tokens.scalar_type() == torch::kInt ? 3 : 2});
   const auto* entry = tilelang::find_mtp_prepare_next_draft_kernel_entry(spec);
   CHECK(entry != nullptr)
       << tilelang::available_mtp_prepare_next_draft_variant_keys();

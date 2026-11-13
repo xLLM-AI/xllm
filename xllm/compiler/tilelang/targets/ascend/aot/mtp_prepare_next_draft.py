@@ -31,7 +31,12 @@ class MtpPrepareNextDraftKernel(TilelangKernel):
     DISPATCH_SCHEMA = [DispatchField("preparation_mode", "int32")]
     SPECIALIZATIONS = [
         {"variant_key": name, "preparation_mode": mode}
-        for mode, name in ((0, "full_hidden"), (1, "compact_hidden"), (2, "verifier_prefix"))
+        for mode, name in (
+            (0, "full_hidden"),
+            (1, "compact_hidden"),
+            (2, "verifier_prefix"),
+            (3, "verifier_prefix_int32"),
+        )
     ]
 
     @staticmethod

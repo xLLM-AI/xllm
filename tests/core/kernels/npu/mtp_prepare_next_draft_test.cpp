@@ -255,8 +255,6 @@ TEST_F(MtpPrepareNextDraftTest, RejectsUnsupportedHostInputs) {
 TEST_F(MtpPrepareNextDraftTest,
        PreparesVerifierPrefixWithSharedPagesAndPadding) {
   const torch::Device device("npu:0");
-  const torch::Tensor tokens =
-      torch::tensor({{10, 11, -1}, {20, -1, -1}}, torch::kLong).to(device);
   const torch::Tensor positions = torch::tensor({4, 8}, torch::kInt).to(device);
   const torch::Tensor lengths = torch::tensor({5, 9}, torch::kInt).to(device);
   const torch::Tensor tables =
@@ -267,45 +265,55 @@ TEST_F(MtpPrepareNextDraftTest,
       torch::tensor({{60, 62, 64}, {60, 60, 60}}, torch::kInt)
           .repeat_interleave(3, /*dim=*/0)
           .to(device);
-  const auto output = try_mtp_prepare_draft_prefix(tokens,
-                                                   positions,
-                                                   lengths,
-                                                   tables,
-                                                   /*block_size=*/4,
-                                                   shared_tables);
-  ASSERT_TRUE(output.has_value());
-  EXPECT_TRUE(torch::equal(output->token_ids.cpu(),
-                           torch::tensor({10, 11, 0, 20, 0, 0}, torch::kInt)));
-  EXPECT_TRUE(torch::equal(output->positions.cpu(),
-                           torch::tensor({4, 5, 6, 8, 9, 10}, torch::kInt)));
-  EXPECT_TRUE(torch::equal(output->kv_seq_lens.cpu(),
-                           torch::tensor({5, 6, 7, 9, 10, 11}, torch::kInt)));
-  EXPECT_TRUE(torch::equal(output->cache_slots.cpu(),
-                           torch::tensor({44, 45, 46, 0, 1, 2}, torch::kInt)));
-  EXPECT_TRUE(
-      torch::equal(output->shared_cache_slots.cpu(),
-                   torch::tensor({248, 249, 250, -1, -1, -1}, torch::kInt)));
-  EXPECT_TRUE(torch::equal(output->logits_indices.cpu(),
-                           torch::tensor({1, 3}, torch::kInt)));
-
-  positions.fill_(1);
-  lengths.fill_(12);
-  tokens.fill_(-1);
-  tokens.select(/*dim=*/1, /*index=*/0).fill_(42);
-  const auto boundary = try_mtp_prepare_draft_prefix(tokens,
+  for (const torch::ScalarType token_dtype : {torch::kLong, torch::kInt}) {
+    const torch::Tensor tokens =
+        torch::tensor({{10, 11, -1}, {20, -1, -1}}, torch::kLong)
+            .to(token_dtype)
+            .to(device);
+    positions.copy_(torch::tensor({4, 8}, torch::kInt).to(device));
+    lengths.copy_(torch::tensor({5, 9}, torch::kInt).to(device));
+    const auto output = try_mtp_prepare_draft_prefix(tokens,
                                                      positions,
                                                      lengths,
                                                      tables,
                                                      /*block_size=*/4,
                                                      shared_tables);
-  ASSERT_TRUE(boundary.has_value());
-  EXPECT_TRUE(torch::equal(boundary->cache_slots.cpu(),
-                           torch::tensor({51, 0, 0, 3, 0, 0}, torch::kInt)));
-  EXPECT_TRUE(
-      torch::equal(boundary->shared_cache_slots.cpu(),
-                   torch::tensor({259, -1, -1, -1, -1, -1}, torch::kInt)));
-  EXPECT_TRUE(torch::equal(boundary->logits_indices.cpu(),
-                           torch::tensor({0, 3}, torch::kInt)));
+    ASSERT_TRUE(output.has_value());
+    EXPECT_TRUE(
+        torch::equal(output->token_ids.cpu(),
+                     torch::tensor({10, 11, 0, 20, 0, 0}, torch::kInt)));
+    EXPECT_TRUE(torch::equal(output->positions.cpu(),
+                             torch::tensor({4, 5, 6, 8, 9, 10}, torch::kInt)));
+    EXPECT_TRUE(torch::equal(output->kv_seq_lens.cpu(),
+                             torch::tensor({5, 6, 7, 9, 10, 11}, torch::kInt)));
+    EXPECT_TRUE(
+        torch::equal(output->cache_slots.cpu(),
+                     torch::tensor({44, 45, 46, 0, 1, 2}, torch::kInt)));
+    EXPECT_TRUE(
+        torch::equal(output->shared_cache_slots.cpu(),
+                     torch::tensor({248, 249, 250, -1, -1, -1}, torch::kInt)));
+    EXPECT_TRUE(torch::equal(output->logits_indices.cpu(),
+                             torch::tensor({1, 3}, torch::kInt)));
+
+    positions.fill_(1);
+    lengths.fill_(12);
+    tokens.fill_(-1);
+    tokens.select(/*dim=*/1, /*index=*/0).fill_(42);
+    const auto boundary = try_mtp_prepare_draft_prefix(tokens,
+                                                       positions,
+                                                       lengths,
+                                                       tables,
+                                                       /*block_size=*/4,
+                                                       shared_tables);
+    ASSERT_TRUE(boundary.has_value());
+    EXPECT_TRUE(torch::equal(boundary->cache_slots.cpu(),
+                             torch::tensor({51, 0, 0, 3, 0, 0}, torch::kInt)));
+    EXPECT_TRUE(
+        torch::equal(boundary->shared_cache_slots.cpu(),
+                     torch::tensor({259, -1, -1, -1, -1, -1}, torch::kInt)));
+    EXPECT_TRUE(torch::equal(boundary->logits_indices.cpu(),
+                             torch::tensor({0, 3}, torch::kInt)));
+  }
 }
 
 }  // namespace
