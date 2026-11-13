@@ -79,12 +79,12 @@ inline void append_indptr(std::vector<int32_t>& cumulative_lens,
 inline void pad_uniform_decode_lens(std::vector<int32_t>& q_seq_lens,
                                     std::vector<int32_t>& kv_seq_lens,
                                     size_t num_tokens_padded,
-                                    int32_t uniform_decode_query_len) {
+                                    int32_t num_speculative_tokens) {
   if (q_seq_lens.empty() && kv_seq_lens.empty()) {
     return;
   }
   q_seq_lens.resize(q_seq_lens.size() + num_tokens_padded,
-                    uniform_decode_query_len);
+                    num_speculative_tokens + 1);
   kv_seq_lens.resize(kv_seq_lens.size() + num_tokens_padded, /*value=*/0);
 }
 

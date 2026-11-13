@@ -647,7 +647,7 @@ TEST(HFModelLoaderTest, Qwen3DFlash2AcceptsArrayEosTokenIds) {
     EXPECT_EQ(args.stop_token_ids(),
               std::unordered_set<int32_t>({154820, 154827, 154829}));
     if (std::string(model_name) == "qwen3") {
-      EXPECT_EQ(args.dflash2_block_size(), 8);
+      EXPECT_EQ(args.block_size(), 8);
       EXPECT_EQ(args.dflash2_selector_top_k(), 16);
     }
   }
@@ -671,7 +671,7 @@ TEST(HFModelLoaderTest, Qwen3DFlash2ReadsFlatBlockGeometry) {
 
   ModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
-  EXPECT_EQ(args.dflash2_block_size(), 5);
+  EXPECT_EQ(args.block_size(), 5);
   EXPECT_EQ(args.dflash2_conv_group_size(), 2);
   EXPECT_EQ(args.dflash2_conv_kernel_size(), 3);
   EXPECT_EQ(args.dflash2_selector_rank(), 128);
@@ -713,7 +713,7 @@ TEST(HFModelLoaderTest, DeepseekV4DSparkModelArgsFrom0731Config) {
       "num_attention_heads": 32,
       "num_key_value_heads": 1,
       "compress_ratios": [1],
-      "dspark_block_size": 5,
+      "block_size": 5,
       "dspark_markov_rank": 256,
       "dspark_noise_token_id": 128799,
       "dspark_target_layer_ids": [40, 41, 42]
@@ -724,9 +724,7 @@ TEST(HFModelLoaderTest, DeepseekV4DSparkModelArgsFrom0731Config) {
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.model_type(), "deepseek_v4");
   EXPECT_EQ(args.dspark_num_layers(), 3);
-  // Base loader leaves this 0; applied later in
-  // configure_deepseek_v4_dspark_args.
-  EXPECT_EQ(args.dspark_block_size(), 0);
+  EXPECT_EQ(args.block_size(), 5);
   EXPECT_EQ(args.markov_rank(), 256);
   ASSERT_EQ(args.compress_ratios().size(), 43);
 }

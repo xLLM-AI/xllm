@@ -22,10 +22,19 @@ namespace xllm {
 class ModelConfig;
 class KVCacheConfig;
 class KVCacheStoreConfig;
+struct ModelArgs;
+struct ParallelArgs;
+namespace runtime {
+struct Options;
+}
 
 void validate_kv_cache_store_config(const std::string& model_type,
                                     const ModelConfig& model_config,
                                     const KVCacheConfig& kv_cache_config,
                                     const KVCacheStoreConfig& store_config);
+
+void validate_shared_kv_cache_config(const ModelArgs& args,
+                                     const runtime::Options& options,
+                                     const ParallelArgs& parallel_args);
 
 }  // namespace xllm

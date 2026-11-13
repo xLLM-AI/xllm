@@ -24,31 +24,15 @@ limitations under the License.
 
 namespace xllm {
 
-namespace {
-
-runtime::Options eagle3_main_options(const runtime::Options& options) {
-  auto opts = options;
-  opts.enable_schedule_overlap(false)
-      .is_draft_engine(false)
-      .enable_graph_aux_hidden_states(true);
-  return opts;
-}
-
-runtime::Options eagle3_draft_options(const runtime::Options& options) {
-  auto opts = options;
-  opts.enable_schedule_overlap(false)
-      .is_draft_engine(true)
-      .num_decoding_tokens(1)
-      .num_speculative_tokens(0)
-      .enable_graph(false)
+template <typename TargetInput>
+runtime::Options Eagle3WorkerImpl<TargetInput>::draft_options(
+    const runtime::Options& options) {
+  runtime::Options opts = MTPWorkerImpl<TargetInput>::draft_options(options);
+  opts.enable_graph(false)
       .enable_graph_mode_decode_no_padding(false)
-      .enable_prefill_piecewise_graph(false)
-      .enable_graph_aux_hidden_states(true)
-      .backend("llm");
+      .enable_prefill_piecewise_graph(false);
   return opts;
 }
-
-}  // namespace
 
 template <typename TargetInput>
 Eagle3WorkerImpl<TargetInput>::Eagle3WorkerImpl(
@@ -56,12 +40,12 @@ Eagle3WorkerImpl<TargetInput>::Eagle3WorkerImpl(
     const torch::Device& device,
     const runtime::Options& options,
     WorkerType worker_type)
-    : MTPWorkerImpl<TargetInput>(parallel_args,
-                                 device,
-                                 options,
-                                 eagle3_main_options(options),
-                                 eagle3_draft_options(options),
-                                 worker_type) {
+    : MTPWorkerImpl<TargetInput>(
+          parallel_args,
+          device,
+          options,
+          Eagle3WorkerImpl<TargetInput>::draft_options(options),
+          worker_type) {
   // Context parallelism does not expose the auxiliary hidden states.
   CHECK_LE(parallel_args.cp_size(), 1)
       << "EAGLE-3 speculative decoding does not support context parallelism "
@@ -90,8 +74,7 @@ void Eagle3WorkerImpl<TargetInput>::check_draft_input_embedding(
   }
 
   const int64_t expected_hidden_size = get_embedding_placeholder_size();
-  const int64_t draft_hidden_size =
-      draft_impl_ == nullptr ? 0 : draft_impl_->hidden_size();
+  const int64_t draft_hidden_size = draft_impl_->hidden_size();
   CHECK_EQ(embedding.dim(), 2)
       << "Eagle3 " << phase << " embedding must be a 2-D tensor, got dim "
       << embedding.dim();

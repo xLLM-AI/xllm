@@ -59,14 +59,14 @@ Qwen2DecoderLayerImpl::Qwen2DecoderLayerImpl(const ModelContext& context,
         DFlash2GroupedConv(model_args.hidden_size(),
                            model_args.dflash2_conv_kernel_size(),
                            model_args.dflash2_conv_group_size(),
-                           model_args.dflash2_block_size(),
+                           model_args.block_size(),
                            options));
     mlp_conv_ = register_module(
         "mlp_conv",
         DFlash2GroupedConv(model_args.hidden_size(),
                            model_args.dflash2_conv_kernel_size(),
                            model_args.dflash2_conv_group_size(),
-                           model_args.dflash2_block_size(),
+                           model_args.block_size(),
                            options));
   }
 }

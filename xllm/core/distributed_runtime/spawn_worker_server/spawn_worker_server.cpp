@@ -62,7 +62,6 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      int32_t global_rank,
                                      int32_t world_size,
                                      int32_t device_idx,
-                                     int32_t num_decoding_tokens,
                                      int32_t block_size,
                                      const std::string& indexer_cache_dtype,
                                      int32_t max_tokens_per_batch,
@@ -114,7 +113,6 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .world_size(world_size)
       .max_tokens_per_batch(max_tokens_per_batch)
       .max_seqs_per_batch(max_seqs_per_batch)
-      .num_decoding_tokens(num_decoding_tokens)
       .enable_speculative_decode(enable_speculative_decode)
       .enable_mtp_draft_body_tp1(enable_mtp_draft_body_tp1)
       .num_speculative_tokens(num_speculative_tokens)

@@ -131,17 +131,6 @@ std::vector<Sequence*> BatchState::group_sequences() const {
   return sequences;
 }
 
-Sequence* BatchState::group_sequence(size_t index) const {
-  for (const auto* group : sequence_groups_) {
-    if (index < group->sequences().size()) {
-      return group->sequences()[index].get();
-    }
-    index -= group->sequences().size();
-  }
-  LOG(FATAL) << "Group sequence index out of range";
-  return nullptr;
-}
-
 BatchInputData BatchState::input_data(const BatchSequencePlan& plan) {
   if (KVCacheConfig::get_instance().enable_vmm_kvcache()) {
     std::vector<Block> retained_blocks;
@@ -166,34 +155,14 @@ BatchInputData BatchState::input_data(const BatchSequencePlan& plan) {
           batch_forward_type_};
 }
 
-BatchInputData BatchState::prepare_sequence_input_data() {
-  CHECK(sequence_groups_.empty() || !sequence_plan_.empty())
-      << "Sequence input requires scheduled sequences; group-only input "
-         "requires a domain-specific input builder";
-  return input_data(sequence_plan_);
-}
-
-BatchInputData BatchState::prepare_distributed_input_data() {
+BatchInputData BatchState::prepare_batch_input() {
   CHECK(sequence_groups_.empty() || !sequence_plan_.empty())
       << "Sequence input requires scheduled sequences";
   return input_data(sequence_plan_);
 }
 
-LlmForwardInput BatchState::build_sequence_input(
-    const BatchInputData& data,
-    uint32_t num_decoding_tokens,
-    uint32_t min_decoding_batch_size,
-    const ModelArgs& args,
-    int32_t cp_size) {
-  ForwardInputBuilder builder(data, &args, cp_size);
-  auto input =
-      builder.build_forward_input(num_decoding_tokens, min_decoding_batch_size);
-  input.input_params.meta.requires_host_restore =
-      std::exchange(requires_host_restore_, false);
-  return input;
-}
-
-LlmForwardInput BatchState::build_distributed_input(
+template <typename Input>
+Input BatchState::build_forward_input(
     const BatchInputData& data,
     const ModelArgs& args,
     ThreadPool* thread_pool,
@@ -201,39 +170,24 @@ LlmForwardInput BatchState::build_distributed_input(
     SharedKVCacheMappingTracker* mapping_tracker) {
   ForwardInputBuilder builder(
       data, &args, cp_size, thread_pool, mapping_tracker);
-  auto input = builder.build_forward_input(/*num_decoding_tokens=*/0,
-                                           /*min_decoding_batch_size=*/0);
+  auto input = builder.build_forward_input<Input>();
 
   input.input_params.meta.requires_host_restore =
       std::exchange(requires_host_restore_, false);
   return input;
 }
 
-VlmForwardInput BatchState::build_vlm_sequence_input(
-    const BatchInputData& data,
-    uint32_t num_decoding_tokens,
-    uint32_t min_decoding_batch_size,
-    const ModelArgs& args,
-    int32_t cp_size) {
-  ForwardInputBuilder builder(data, &args, cp_size);
-  auto input = builder.build_vlm_forward_input(num_decoding_tokens,
-                                               min_decoding_batch_size);
-  input.input_params.meta.requires_host_restore =
-      std::exchange(requires_host_restore_, false);
-  return input;
-}
-
-VlmForwardInput BatchState::build_vlm_distributed_input(
-    const BatchInputData& data,
-    const ModelArgs& args,
-    ThreadPool* thread_pool,
-    int32_t cp_size) {
-  ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
-  auto input = builder.build_vlm_forward_input(0, 0);
-
-  input.input_params.meta.requires_host_restore =
-      std::exchange(requires_host_restore_, false);
-  return input;
-}
+template LlmForwardInput BatchState::build_forward_input<LlmForwardInput>(
+    const BatchInputData&,
+    const ModelArgs&,
+    ThreadPool*,
+    int32_t,
+    SharedKVCacheMappingTracker*);
+template VlmForwardInput BatchState::build_forward_input<VlmForwardInput>(
+    const BatchInputData&,
+    const ModelArgs&,
+    ThreadPool*,
+    int32_t,
+    SharedKVCacheMappingTracker*);
 
 }  // namespace xllm

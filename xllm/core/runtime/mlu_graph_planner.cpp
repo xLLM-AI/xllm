@@ -291,10 +291,8 @@ std::size_t GraphKeyHash::operator()(const GraphKey& key) const {
 
 int64_t get_graph_token_capacity(const runtime::Options& options,
                                  const MtpModelCapabilities& capabilities) {
-  int64_t width = 1;
-  if (options.enable_speculative_decode() && !options.is_draft_engine()) {
-    width = options.num_decoding_tokens();
-  }
+  int64_t width =
+      options.is_draft_engine() ? 1 : options.num_speculative_tokens() + 1;
   const int64_t max_requests =
       std::max<int64_t>(options.max_seqs_per_batch(), 1);
   int64_t capacity = get_bucket_num_tokens(
@@ -305,11 +303,9 @@ int64_t get_graph_token_capacity(const runtime::Options& options,
   if (!capabilities.supports_grouped_graph) {
     return capacity;
   }
-  if (options.is_draft_engine()) {
-    width = std::max<int64_t>(options.num_decoding_tokens(),
-                              options.mtp_draft_prefix_width());
-  } else if (!SpeculativeConfig::is_mtp_algorithm(
-                 options.speculative_algorithm())) {
+  width = options.num_speculative_tokens() + 1;
+  if (!options.is_draft_engine() &&
+      !SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm())) {
     width = 1;
   }
   const uint32_t requests =

@@ -51,14 +51,11 @@ SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
       << "speculative tokens should not be zero";
 
   runtime::Options dist_options = options;
-  dist_options.num_decoding_tokens(options.num_speculative_tokens() + 1);
   dist_options.enable_speculative_decode(true);
   distributed_worker_manager_ =
       std::make_shared<DistributedWorkerManager>(dist_options);
 
   runtime::Options target_engine_options = options_;
-  target_engine_options.num_decoding_tokens(options.num_speculative_tokens() +
-                                            1);
   engine_ = std::make_unique<TargetEngine>(target_engine_options,
                                            distributed_worker_manager_);
 
@@ -72,7 +69,6 @@ SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
     draft_engine_options.model_path(options_.draft_model_path().value_or(""))
         .devices(options.devices())
         .backend("llm")
-        .num_decoding_tokens(1)
         .enable_speculative_decode(/*enable_speculative_decode=*/false)
         .enable_graph(/*enable_graph=*/false)
         .is_draft_engine(true);

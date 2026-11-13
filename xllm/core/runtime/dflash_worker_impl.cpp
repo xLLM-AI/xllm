@@ -30,9 +30,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
-#include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_proposal.h"
 #if defined(USE_NPU) || defined(USE_MLU)
@@ -57,52 +55,25 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
-namespace {
 
-runtime::Options target_options(const runtime::Options& options) {
-  runtime::Options opts = options;
-  opts.enable_schedule_overlap(false)
-      .is_draft_engine(false)
-      .enable_graph_aux_hidden_states(true);
-  return opts;
-}
-
-runtime::Options draft_options(const runtime::Options& options) {
-  // DSpark sizes its attention window from num_speculative_tokens; other
-  // DFlash-style drafts still run one step at a time.
-  const bool is_dspark =
-      SpeculativeConfig::is_dspark_algorithm(options.speculative_algorithm());
-  const bool is_dflash2 =
-      SpeculativeConfig::is_dflash2_algorithm(options.speculative_algorithm());
-  const int32_t draft_num_speculative_tokens =
-      is_dspark ? options.num_speculative_tokens() : 0;
+runtime::Options DFlashWorkerImpl::draft_options(
+    const runtime::Options& options,
+    int32_t num_speculative_tokens) {
   runtime::Options opts = options;
   opts.enable_schedule_overlap(false)
       .is_draft_engine(true)
-      .num_decoding_tokens(is_dflash2 ? options.num_speculative_tokens() + 1
-                                      : 1)
-      .num_speculative_tokens(draft_num_speculative_tokens)
+      .num_speculative_tokens(num_speculative_tokens)
       .enable_graph_aux_hidden_states(false);
   return opts;
 }
 
-std::optional<ForwardOutput> run_worker_no_sync_impl(
-    WorkerImpl& worker,
-    const LlmForwardInput& input,
-    Stream& prepare_stream,
-    Stream& compute_stream,
-    LlmForwardInput* processed_output = nullptr) {
-  LlmForwardInput processed_input;
-  worker.prepare_work_before_execute_on_stream(
-      input, processed_input, prepare_stream);
-  std::optional<ForwardOutput> output = worker.execute_no_sync_on_stream(
-      processed_input,
-      compute_stream,
-      WorkerImpl::ForwardCompletion::CALLER_MANAGED);
-  if (processed_output != nullptr) {
-    *processed_output = std::move(processed_input);
-  }
-  return output;
+namespace {
+
+int32_t configure_draft_config(ModelArgs& args,
+                               const runtime::Options& options) {
+  args.layers_to_capture({});
+  args.model_type("DFlashDraftModel");
+  return options.num_speculative_tokens();
 }
 
 std::vector<int64_t> build_accepted_context_rows(
@@ -153,8 +124,8 @@ std::vector<int64_t> build_accepted_context_rows(
 bool DFlashWorkerImpl::prepare_parallel_draft_metadata(
     LlmForwardInput& query_input,
     const DecodeExpansionOptions& decode_options) {
-  scale_speculative_parallel_token_counts(query_input.input_params,
-                                          decode_options.num_val_tokens);
+  scale_speculative_parallel_token_counts(
+      query_input.input_params, decode_options.num_speculative_tokens);
   if (!draft_needs_dummy_tokens_) {
     return false;
   }
@@ -162,7 +133,7 @@ bool DFlashWorkerImpl::prepare_parallel_draft_metadata(
   std::replace(params.parallel.dp_global_token_nums.begin(),
                params.parallel.dp_global_token_nums.end(),
                0,
-               decode_options.num_val_tokens);
+               (decode_options.num_speculative_tokens + 1));
   if (params.meta.num_sequences != 0) {
     return false;
   }
@@ -178,13 +149,31 @@ bool DFlashWorkerImpl::prepare_parallel_draft_metadata(
 DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
+    : DFlashWorkerImpl(
+          parallel_args,
+          device,
+          options,
+          [&] {
+            return std::make_unique<LLMWorkerImpl>(
+                configure_draft_parallel_args(parallel_args),
+                device,
+                draft_options(options),
+                parallel_args.dp_size() > 1);
+          },
+          configure_draft_config) {}
+
+DFlashWorkerImpl::DFlashWorkerImpl(
+    const ParallelArgs& parallel_args,
+    const torch::Device& device,
+    const runtime::Options& options,
+    absl::FunctionRef<std::unique_ptr<LLMWorkerImpl>()> draft_factory,
+    int32_t (*configure_draft_config)(ModelArgs&, const runtime::Options&))
     : DraftModelSpecWorkerImpl<LlmForwardInput>(
           parallel_args,
           device,
           options,
-          target_options(options),
           WorkerType::LLM,
-          [&parallel_args, &device, &options] {
+          [&] {
             // The draft consumes the target's aux hidden states, which the
             // worker does not expose under CP; reject cp_size > 1 except
             // DeepSeek-V4 on NPU.
@@ -195,13 +184,9 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
                   << "Block-diffusion speculative decoding does not support "
                      "context parallelism (cp_size > 1).";
             }
-            return std::make_unique<LLMWorkerImpl>(
-                parallel_args, device, draft_options(options));
-          }),
-      draft_query_width_(options.num_speculative_tokens() + 1),
-      sampling_process_group_(parallel_args.tp_group_ != nullptr
-                                  ? parallel_args.tp_group_
-                                  : parallel_args.process_group_) {}
+            return draft_factory();
+          },
+          configure_draft_config) {}
 
 DFlashWorkerImpl::~DFlashWorkerImpl() {
   // Keep launch-thread-owned context alive until queued execution completes.
@@ -218,10 +203,6 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
   CHECK(::xllm::SchedulerConfig::get_instance().enable_chunked_prefill())
       << "Block-diffusion speculative decoding requires "
          "--enable_chunked_prefill=true.";
-  CHECK(SpeculativeConfig::is_probabilistic_draft_sampling_supported(
-            options_.speculative_algorithm()) ||
-        !is_probabilistic_draft_)
-      << "This drafter only supports greedy drafts.";
   // Draft config's use_sliding_window / sliding_window is intentionally
   // ignored: xLLM NPU FIA hard-codes pre_tokens=INT_MAX, next_tokens=0
   // and never plumbs sliding_window into the aclnn call. Attended kv_len
@@ -245,7 +226,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         util::is_deepseek_v4_dspark_model_type(draft_args.model_type());
     if (uses_own_head_and_embedding) {
       LOG(INFO) << "Configured DeepSeek-V4 DSpark draft block size: "
-                << draft_args.dspark_block_size();
+                << draft_args.block_size();
       LOG(INFO) << "Configured DeepSeek-V4 DSpark SAS mode: "
                 << (draft_args.dspark_use_native_sas()
                         ? "native explicit indices"
@@ -257,7 +238,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
                "accepts non-empty ori_sparse_indices and ori_win_left="
             << layer::deepseek_v4_ori_window_left(
                    draft_args.window_size(),
-                   draft_args.dspark_block_size(),
+                   draft_args.block_size(),
                    /*use_native_dspark_sas=*/true)
             << ".";
       }
@@ -299,19 +280,6 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         << "Block-diffusion mask_token_id (" << mask_token_id_
         << ") must be < target vocab_size (" << target_args.vocab_size()
         << ").";
-    if (SpeculativeConfig::is_dflash2_algorithm(
-            options_.speculative_algorithm())) {
-      const int32_t requested_block_size =
-          options_.num_speculative_tokens() + 1;
-      CHECK_EQ(requested_block_size, draft_args.dflash2_block_size())
-          << "DFlash2 runtime block size must match the checkpoint's trained "
-             "dflash_config.block_size.";
-      CHECK(!target_is_hybrid_recurrent_ ||
-            ::xllm::ExecutionConfig::get_instance().enable_graph())
-          << "DFlash2 with a hybrid recurrent target requires ACL Graph: the "
-             "expanded spec-verify replay path preserves the accepted GDN "
-             "checkpoint, while eager validation is not lossless.";
-    }
     // Context hidden comes from the target.
     const int64_t num_target_layers =
         static_cast<int64_t>(target_args.layers_to_capture().size());
@@ -323,12 +291,6 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         static_cast<int64_t>(target_args.hidden_size()) * num_target_layers;
   }
   return result;
-}
-
-std::tuple<int64_t, int64_t> DFlashWorkerImpl::estimate_kv_cache_capacity() {
-  CHECK(impl_ != nullptr);
-  return estimate_kv_cache_capacity_with_draft(target_options(options_),
-                                               draft_options(options_));
 }
 
 std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
@@ -353,7 +315,9 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   const int32_t num_sequences = query_input.input_params.meta.num_sequences;
   if (!prepare_parallel_draft_metadata(query_input, decode_options)) {
     const int32_t rows_per_sequence =
-        decode_options.per_request ? 1 : decode_options.num_val_tokens;
+        decode_options.per_request
+            ? 1
+            : (decode_options.num_speculative_tokens + 1);
     update_decode_batch_metadata(query_input.input_params,
                                  decode_options,
                                  num_sequences * rows_per_sequence);
@@ -367,8 +331,8 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   LlmForwardInput validate_input = input.clone();
   // DSpark's N-wide draft geometry must be rescaled to (N+1) for the target's
   // anchor + drafts forward.
-  scale_speculative_parallel_token_counts(
-      validate_input.input_params, options_.num_speculative_tokens() + 1);
+  scale_speculative_parallel_token_counts(validate_input.input_params,
+                                          options_.num_speculative_tokens());
   ForwardOutput output =
       run_worker_no_sync_impl(
           *impl_, validate_input, *prepare_stream_, *compute_stream_)
@@ -389,7 +353,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
                                      input,
                                      *prepare_stream_,
                                      *compute_stream_,
-                                     &processed_target_input)
+                                     processed_target_input)
                  .value();
   }
 
@@ -429,10 +393,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
     clear_all_output_embeddings(output);
   }
 
-  if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
-    return make_transfer_failure_output(std::move(output.failed_request_ids));
-  }
-  return output;
+  return finalize_step_output(std::move(output));
 }
 
 std::optional<ForwardOutput> DFlashWorkerImpl::step_decode(
@@ -477,7 +438,8 @@ DraftProposal DFlashWorkerImpl::run_decode_draft(
   // computes on device, instead of delaying the draft launch.
   prepare_validate_inputs(input, validate_input);
   // Keep draft tokens consistent across tensor-parallel ranks.
-  maybe_broadcast_spec_tokens(draft_output.sample_output.next_tokens);
+  maybe_broadcast_spec_tokens(draft_output.sample_output.next_tokens,
+                              input.sampling_params.sampling_mode());
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               draft_timer.elapsed_seconds());
 
@@ -500,7 +462,6 @@ void DFlashWorkerImpl::fill_validate_input_from_draft_outputs(
     LlmForwardInput& validate_input,
     Stream& compute_stream) {
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
-  CHECK_GT(num_speculative_tokens, 0);
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const torch::Tensor& draft_token_ids = draft_proposal.token_ids();
   CHECK(draft_token_ids.defined())
@@ -566,19 +527,16 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   // target forward and validate()'s reads share compute_stream_, so they
   // serialize without a cross-stream wait; the sync below only makes the
   // accepted tokens host-visible for the D2H copy and context-cache write.
-  maybe_broadcast_spec_tokens(val_output.next_tokens);
+  maybe_broadcast_spec_tokens(val_output.next_tokens,
+                              input.sampling_params.sampling_mode());
   compute_stream_->synchronize();
   val_output.next_tokens = to_cpu_contiguous(val_output.next_tokens);
   append_failed_request_ids(target_output,
                             write_target_context_to_cache(input, val_output));
 
-  if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
-    return make_transfer_failure_output(
-        std::move(target_output.failed_request_ids));
-  }
-  return finalize_verify_output(std::move(target_output),
-                                std::move(val_output),
-                                input.json_object_states);
+  return finalize_step_output(std::move(target_output),
+                              std::move(val_output),
+                              input.json_object_states);
 }
 
 torch::Tensor DFlashWorkerImpl::anchor_token_ids(
@@ -591,16 +549,11 @@ torch::Tensor DFlashWorkerImpl::anchor_token_ids(
   return input.token_ids_host.slice(/*dim=*/0, /*start=*/0, /*end=*/batch_size)
       .to(draft_impl_->device(), torch::kLong);
 }
-void DFlashWorkerImpl::maybe_broadcast_spec_tokens(torch::Tensor& tokens) {
-  if (get_optimization_config().enable_spec_token_broadcast) {
-    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    sync_sampling_tensor(tokens, sampling_process_group_);
-  }
-}
-
 DecodeExpansionOptions DFlashWorkerImpl::prepare_for_draft() const {
   DecodeExpansionOptions decode_options;
-  decode_options.num_val_tokens = draft_query_width_;
+  decode_options.num_speculative_tokens =
+      options_.num_speculative_tokens() -
+      static_cast<int32_t>(sample_from_anchor_);
   decode_options.block_size = options_.block_size();
   decode_options.per_request = draft_input_per_request_;
   decode_options.causal = false;
@@ -656,7 +609,7 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
   dflash_detail::invalidate_draft_model_geometry(input_params);
 
   const DecodeExpansionOptions decode_options = prepare_for_draft();
-  const int32_t query_width = decode_options.num_val_tokens;
+  const int32_t query_width = (decode_options.num_speculative_tokens + 1);
   const bool idle_rank =
       prepare_parallel_draft_metadata(query_input, decode_options);
   if (idle_rank) {
@@ -741,11 +694,13 @@ std::vector<std::string> DFlashWorkerImpl::write_context_kv(
   }();
 #endif
 
+  ModelParamsView execution_params(input.input_params);
   ModelOutput scatter_output =
-      draft_impl_->write_context_kv(context_hidden,
-                                    positions_device,
-                                    new_cache_slots_device,
-                                    input.input_params);
+      draft_impl_->get_causal_lm()->write_context_kv(context_hidden,
+                                                     positions_device,
+                                                     new_cache_slots_device,
+                                                     draft_impl_->kv_caches(),
+                                                     execution_params);
   // Model returns an empty ModelOutput (hidden_states undefined) when the
   // per-layer NPULayerSynchronizer::record_event fails mid-scatter under
   // PD-PUSH transfer. Fail fast instead of silently continuing: subsequent

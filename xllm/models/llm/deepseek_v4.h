@@ -469,6 +469,7 @@ class DeepseekV4ModelImpl
             context.get_model_args(),
             context.get_tensor_options(),
             ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
+    is_aux_hidden_capture_enabled_ = context.num_speculative_tokens() > 0;
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
@@ -1068,7 +1069,7 @@ class DeepseekV4ModelImpl
       }
     }
     torch::Tensor pre_hc_head_hidden_states;
-    if (!aux_capture_.enabled() && model_args_.num_speculative_tokens() > 0) {
+    if (!aux_capture_.enabled() && is_aux_hidden_capture_enabled_) {
       pre_hc_head_hidden_states = h;
     }
     h = hc_head(h);
@@ -1101,22 +1102,6 @@ class DeepseekV4ModelImpl
     }
     return c10::optional<torch::Tensor>(torch::empty(
         {0}, torch::dtype(torch::kInt32).device(reference.device())));
-  }
-
- private:
-  static int64_t tensor_max_or_zero(const torch::Tensor& tensor) {
-    if (!tensor.defined() || tensor.numel() == 0) {
-      return 0;
-    }
-    return tensor.max().item<int64_t>();
-  }
-
-  static int64_t pick_max_seqlen(const torch::Tensor& max_seqlen_tensor,
-                                 const torch::Tensor& fallback_tensor) {
-    if (max_seqlen_tensor.defined() && max_seqlen_tensor.numel() > 0) {
-      return max_seqlen_tensor.max().item<int64_t>();
-    }
-    return tensor_max_or_zero(fallback_tensor);
   }
 
  public:
@@ -1630,8 +1615,7 @@ class DeepseekV4ModelImpl
   }
 
   void build_dspark_swa_metadata(layer::DSAMetadata& dsa) const {
-    if (!model_args_.dspark_use_native_sas() ||
-        model_args_.dspark_block_size() <= 0) {
+    if (!model_args_.dspark_use_native_sas() || model_args_.block_size() <= 0) {
       return;
     }
     CHECK_GE(dspark_swa_layer_, 0)
@@ -1648,7 +1632,7 @@ class DeepseekV4ModelImpl
                                         dsa.actual_seq_lengths_query,
                                         dsa.actual_seq_lengths_kv,
                                         window_size_,
-                                        model_args_.dspark_block_size(),
+                                        model_args_.block_size(),
                                         dspark_swa_block_size_);
   }
 
@@ -1706,7 +1690,7 @@ class DeepseekV4ModelImpl
     // compatibility fallback uses q_len=1 with CHUNKED_PREFILL semantics.
     const bool is_prefill = params.meta.batch_forward_type.no_decode();
     const bool use_native_sas =
-        layer::deepseek_v4_use_native_sas(model_args_.dspark_block_size(),
+        layer::deepseek_v4_use_native_sas(model_args_.block_size(),
                                           model_args_.dspark_use_native_sas(),
                                           is_prefill);
     // Explicit SWA indices use decode geometry and address the persistent ring
@@ -1721,7 +1705,7 @@ class DeepseekV4ModelImpl
     // DSAttentionImpl::forward. Native DSpark decode expands the window; the
     // prefill and compatibility paths keep the DSV4 window.
     const int64_t ori_win_left = layer::deepseek_v4_ori_window_left(
-        window_size_, model_args_.dspark_block_size(), use_native_sas);
+        window_size_, model_args_.block_size(), use_native_sas);
     dsa.sparse_metadata_ori_win_left = ori_win_left;
     const int64_t sparse_topk = std::max<int64_t>(index_topk_, 1);
 
@@ -1902,6 +1886,7 @@ class DeepseekV4ModelImpl
   ParallelArgs parallel_args_;
   FlashComm1Options flash_comm1_options_;
 
+  bool is_aux_hidden_capture_enabled_ = false;
   AuxHiddenCapture aux_capture_;
 
   // DSA cache group info: built once at model init from compress_ratios
@@ -2088,8 +2073,9 @@ inline void load_deepseek_v4_model_args(const JsonReader& json,
       json.value_or<std::vector<int32_t>>("dspark_target_layer_ids",
                                           std::vector<int32_t>{})
           .size());
-  // Don't arm dspark_block_size on the shared target (enables non-causal DSpark
-  // attention there); the draft worker sets it from the checkpoint.
+  LOAD_ARG_OR_FUNC(block_size, "block_size", [&] {
+    return json.value_or<int64_t>("dspark_block_size", 0);
+  });
 
   // Token ids
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 0);

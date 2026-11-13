@@ -79,10 +79,7 @@ DcuGraphPersistentParam::DcuGraphPersistentParam(
     const ModelArgs& args,
     const torch::Device& device,
     const runtime::Options& options)
-    : args_(args),
-      device_(device),
-      options_(options),
-      num_decoding_tokens_(options.num_decoding_tokens()) {
+    : args_(args), device_(device), options_(options) {
   const int64_t max_tokens_per_batch =
       SchedulerConfig::get_instance().max_tokens_per_batch();
 
@@ -229,7 +226,7 @@ std::optional<Params> DcuGraphPersistentParam::update(
   util::pad_uniform_decode_lens(q_seq_lens_vec,
                                 kv_seq_lens_vec,
                                 padding_needed,
-                                static_cast<int32_t>(num_decoding_tokens_));
+                                options_.num_speculative_tokens());
   const auto [q_lens, q_cu_lens] =
       stage_seq_lens(q_seq_lens_vec,
                      params.attention.device.q_seq_lens,
@@ -377,7 +374,7 @@ void DcuGraphPersistentParam::update_decode_input_buffer(
   util::pad_uniform_decode_lens(q_seq_lens_vec,
                                 kv_seq_lens_vec,
                                 padding_needed,
-                                static_cast<int32_t>(num_decoding_tokens_));
+                                options_.num_speculative_tokens());
   stage_seq_lens(q_seq_lens_vec,
                  params.attention.device.q_seq_lens,
                  q_seq_lens_values_,

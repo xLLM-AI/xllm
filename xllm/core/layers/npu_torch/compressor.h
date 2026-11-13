@@ -30,12 +30,6 @@ namespace layer {
 class CompressorImpl : public torch::nn::Module {
  public:
   CompressorImpl() = default;
-  CompressorImpl(int64_t compress_ratio, int64_t head_dim);
-  CompressorImpl(
-      int64_t compress_ratio,
-      int64_t head_dim,
-      const torch::TensorOptions& options =
-          torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
   CompressorImpl(
       int64_t compress_ratio,
       int64_t head_dim,
@@ -54,7 +48,6 @@ class CompressorImpl : public torch::nn::Module {
                         torch::Tensor actual_seq_lengths_query);
 
   void load_state_dict(const StateDict& state_dict);
-  int64_t weight_bytes() const;
 
  private:
   torch::Tensor cmp_wkv_;

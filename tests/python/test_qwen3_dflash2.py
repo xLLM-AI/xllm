@@ -41,7 +41,7 @@ def _config_dict(**overrides) -> dict:
         "sliding_window": 8,
         "vocab_size": 8,
         "draft_vocab_size": 8,
-        "dflash2_block_size": 4,
+        "block_size": 4,
         "dflash2_conv_group_size": 2,
         "dflash2_conv_kernel_size": 2,
         "dflash2_selector_rank": 2,
@@ -77,7 +77,7 @@ class _StateDict:
 def test_config_accepts_nested_and_reflected_dflash_geometry() -> None:
     reflected = _config()
     nested_values = _config_dict(
-        dflash2_block_size=None,
+        block_size=None,
         dflash2_conv_group_size=None,
         dflash2_conv_kernel_size=None,
         dflash2_selector_rank=None,
@@ -94,7 +94,6 @@ def test_config_accepts_nested_and_reflected_dflash_geometry() -> None:
     nested.validate()
 
     speculators_values = _config_dict(
-        dflash2_block_size=None,
         dflash2_conv_group_size=None,
         dflash2_conv_kernel_size=None,
         dflash2_selector_rank=None,
@@ -123,7 +122,7 @@ def test_config_accepts_nested_and_reflected_dflash_geometry() -> None:
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"dflash2_block_size": 0}, "geometry values"),
+        ({"block_size": 0}, "geometry values"),
         ({"dflash2_conv_group_size": 3}, "must divide hidden_size"),
         ({"sliding_window": 0}, "positive sliding_window"),
         ({"dflash2_selector_top_k": 9}, "must not exceed vocab_size"),
@@ -138,11 +137,8 @@ def test_config_rejects_invalid_dflash2_geometry(
 
 
 def test_config_reads_flat_block_geometry() -> None:
-    # Flat top-level field names take precedence over the legacy "dflash2_*"
-    # spellings.
     config = DFlash2Qwen3Config.from_dict(
         _config_dict(
-            dflash2_block_size=None,
             block_size=5,
             conv_group_size=4,
             conv_kernel_size=3,
@@ -155,26 +151,6 @@ def test_config_reads_flat_block_geometry() -> None:
     assert config.conv_kernel_size == 3
     assert config.selector_rank == 6
     assert config.selector_top_k == 7
-
-
-def test_config_legacy_keys_still_accepted() -> None:
-    # Legacy flat "dflash2_*" keys keep working (backward compatibility).
-    config = _config()
-    assert config.block_size == 4
-    assert config.conv_group_size == 2
-    assert config.conv_kernel_size == 2
-    assert config.selector_rank == 2
-    assert config.selector_top_k == 2
-
-
-def test_config_zero_reflected_field_does_not_shadow_legacy_key() -> None:
-    # The C++ config dict reflects every ModelArgs field, so the flat dict
-    # always carries block_size=0 (the cola-dlm DiT field). A zero value must
-    # not shadow the real dflash2_* value parsed from the checkpoint.
-    config = _config(block_size=0)
-    assert config.block_size == 4
-    assert config.conv_group_size == 2
-    assert config.conv_kernel_size == 2
 
 
 def test_grouped_convolution_resets_history_at_block_boundaries() -> None:

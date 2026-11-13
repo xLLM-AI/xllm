@@ -31,7 +31,6 @@ limitations under the License.
 #include "util/utils.h"
 #include "xllm/core/kernels/npu/xllm_ops/xllm_ops_api.h"
 
-DECLARE_bool(enable_chunked_prefill);
 namespace xllm {
 namespace layer {
 namespace {
@@ -580,9 +579,6 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
                                  const torch::TensorOptions& options,
                                  int32_t layer_id)
     : num_heads_(args.n_heads()),
-      head_size_(args.head_dim()),
-      n_kv_heads_(args.n_kv_heads().value()),
-      sliding_window_(-1),
       head_dim_(args.head_dim()),
       q_lora_rank_(args.q_lora_rank()),
       o_lora_rank_(args.o_lora_rank()),
@@ -594,7 +590,7 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
       index_n_heads_(args.index_n_heads()),
       index_head_dim_(args.index_head_dim()),
       index_topk_(args.index_topk()),
-      dspark_block_size_(args.dspark_block_size()),
+      block_size_(args.block_size()),
       dspark_use_native_sas_(args.dspark_use_native_sas()) {
   const auto& compress_ratios = args.compress_ratios();
   CHECK(!compress_ratios.empty())
@@ -613,7 +609,6 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
   compress_ratio_ = static_cast<double>(compress_ratio);
 
   softmax_scale_ = std::pow(head_dim_, static_cast<double>(-0.5));
-  scale_ = static_cast<float>(softmax_scale_);
   nope_head_dim_ = head_dim_ - rope_head_dim_;
   qk_head_dim_ = nope_head_dim_ + rope_head_dim_;
 
@@ -1004,7 +999,7 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   }
 
   const bool use_native_sas = deepseek_v4_use_native_sas(
-      dspark_block_size_, dspark_use_native_sas_, use_prefill_attn);
+      block_size_, dspark_use_native_sas_, use_prefill_attn);
   std::optional<torch::Tensor> ori_sparse_indices = std::nullopt;
   if (use_native_sas && compress_ratio_i == 1) {
     CHECK(attn_metadata.explicit_swa_indices.defined())
@@ -1012,8 +1007,8 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
     ori_sparse_indices = as_optional(attn_metadata.explicit_swa_indices);
   }
 
-  const int64_t ori_win_left = deepseek_v4_ori_window_left(
-      window_size_, dspark_block_size_, use_native_sas);
+  const int64_t ori_win_left =
+      deepseek_v4_ori_window_left(window_size_, block_size_, use_native_sas);
   CHECK_EQ(attn_metadata.sparse_metadata_ori_win_left, ori_win_left)
       << "DSAttention sparse metadata belongs to incompatible model geometry; "
       << "rebuild attention metadata at the target/draft boundary.";
@@ -1144,13 +1139,6 @@ void DSAttentionImpl::load_state_dict(const StateDict& state_dict) {
   if (indexer_ && compress_ratio_ == 4) {
     indexer_->load_state_dict(state_dict.get_dict_with_prefix("indexer."));
   }
-}
-
-int64_t DSAttentionImpl::non_registered_weight_bytes() const {
-  if (!compressor_) {
-    return 0;
-  }
-  return compressor_->weight_bytes();
 }
 
 }  // namespace layer

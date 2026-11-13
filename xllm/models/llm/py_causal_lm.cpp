@@ -69,7 +69,6 @@ int64_t python_mega_moe_max_num_tokens_per_rank(int64_t max_seqs_per_batch,
                                                 int64_t num_speculative_tokens,
                                                 int64_t dp_size) {
   CHECK_GT(max_seqs_per_batch, 0);
-  CHECK_GE(num_speculative_tokens, 0);
   CHECK_GT(dp_size, 0);
 
   const int64_t speculative_width = num_speculative_tokens + 1;
@@ -86,7 +85,6 @@ int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
     int64_t num_speculative_tokens) {
   CHECK_GT(max_tokens_per_batch, 0);
   CHECK_GT(max_seqs_per_batch, 0);
-  CHECK_GE(num_speculative_tokens, 0);
 
   const int64_t speculative_width = num_speculative_tokens + 1;
   const int64_t max_decode_tokens = max_seqs_per_batch * speculative_width;
@@ -185,12 +183,12 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
           detail::python_qwen3_5_mega_moe_max_num_tokens_per_rank(
               static_cast<int64_t>(scheduler_config.max_tokens_per_batch()),
               static_cast<int64_t>(scheduler_config.max_seqs_per_batch()),
-              static_cast<int64_t>(model_args_.num_speculative_tokens()));
+              static_cast<int64_t>(context.num_speculative_tokens()));
     } else {
       comm_spec.max_num_tokens_per_rank =
           detail::python_mega_moe_max_num_tokens_per_rank(
               static_cast<int64_t>(scheduler_config.max_seqs_per_batch()),
-              static_cast<int64_t>(model_args_.num_speculative_tokens()),
+              static_cast<int64_t>(context.num_speculative_tokens()),
               dp_size_);
     }
     mega_moe_comm_resource_ =
@@ -345,6 +343,7 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   py::dict d;
   PyDictVisitor visitor(d);
   visit_properties(model_args_, visitor);
+  d["num_speculative_tokens"] = context.num_speculative_tokens();
   visit_properties(parallel_args, visitor);
   d["dtype"] = dtype_to_string(options_);
   d["device"] = c10::str(device_);

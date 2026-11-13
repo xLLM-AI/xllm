@@ -316,8 +316,6 @@ TEST(MtpAsyncInputBuilderTest, PybindViewOwnsGlobalDpKvMaxSequenceLengths) {
   metadata->kv_seq_lens_vec = {1};
   metadata->max_seq_len = 1;
   metadata->is_dummy = true;
-  EXPECT_TRUE(
-      PyAttentionMetadataView(metadata).dp_global_kv_max_seq_lens().empty());
 
   const std::vector<std::vector<int32_t>> histories = {{32769, 0}, {0, 32769}};
   for (const std::vector<int32_t>& expected : histories) {
@@ -469,7 +467,7 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   auto sparse = std::make_shared<layer::AttentionMetadata>(
       layer::AttentionMetadataBuilder::build_mtp_sparse_decode(
           table, lengths, slots, /*block_size=*/128));
-  py::object sparse_view = py::cast(PyAttentionMetadataView(sparse));
+  py::object sparse_view = py::cast(PyAttentionMetadataView(sparse, params));
   const torch::Tensor view_table =
       sparse_view.attr("block_table").cast<torch::Tensor>();
   const torch::Tensor view_lengths =

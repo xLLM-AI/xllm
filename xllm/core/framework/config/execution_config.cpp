@@ -17,7 +17,6 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/platform/platform.h"
 
 DEFINE_string(extension_impl,
@@ -234,19 +233,11 @@ DecodeGraphWarmupConfig ExecutionConfig::decode_graph_warmup_config(
     int32_t num_speculative_tokens,
     bool enable_no_padding,
     std::string_view speculative_algorithm) const {
-  // num_decoding_tokens is owned by this config.
-  DecodeGraphWarmupConfig config{
-      .num_decoding_tokens =
-          num_speculative_tokens > 0 ? num_speculative_tokens + 1 : 1,
-      .num_speculative_tokens = num_speculative_tokens,
-      .enable_graph_mode_decode_no_padding = enable_no_padding,
-      .max_graph_batch_size =
-          Platform::is_npu() ? acl_graph_decode_batch_size_limit() : 0};
-  if (num_speculative_tokens > 0 && !enable_no_padding &&
-      SpeculativeConfig::is_mtp_algorithm(speculative_algorithm)) {
-    config.draft_shapes.emplace_back(DraftGraphWarmupShape{1, false});
-  }
-  return config;
+  return {.num_speculative_tokens = num_speculative_tokens,
+          .enable_graph_mode_decode_no_padding = enable_no_padding,
+          .max_graph_batch_size =
+              Platform::is_npu() ? acl_graph_decode_batch_size_limit() : 0,
+          .speculative_algorithm = std::string(speculative_algorithm)};
 }
 
 }  // namespace xllm

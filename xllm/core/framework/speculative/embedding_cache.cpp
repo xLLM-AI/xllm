@@ -198,7 +198,6 @@ void EmbeddingCache::write_target_context(
                                           2,
                                           accepted_embeddings.size(-1)})
               : accepted_embeddings;
-  CHECK_GE(num_speculative_tokens, 0) << "invalid speculative token count";
 
   const torch::Tensor accepted_tokens_cpu =
       to_cpu_contiguous(accepted_tokens, torch::kInt64);

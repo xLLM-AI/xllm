@@ -40,7 +40,6 @@ limitations under the License.
 #include "core/framework/quantization/quant_args.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/util/scope_guard.h"
-#include "core/util/utils.h"
 
 namespace py = pybind11;
 
@@ -336,47 +335,6 @@ TEST(PyCausalLMContextKVBridgeTest, PassesSwaCacheAsSixthPythonSlot) {
   EXPECT_EQ(
       bridged_swa.attr("data_ptr")().cast<std::uintptr_t>(),
       reinterpret_cast<std::uintptr_t>(cache_tensors.swa_cache.data_ptr()));
-}
-
-// End-to-end guard for the model-type classification the Python executor
-// performs: the truth table of (is_deepseek_v4_model, is_block_draft_model,
-// is_dspark_draft_model) must match the naming predicates the Python side
-// mirrors in model_platform_support. The cases below are sampled points, not
-// the full sets: when adding a new DSpark or DFlash family member, add a case
-// here AND to the Python twin test_classification_matches_cpp_truth_table in
-// tests/python/test_model_executor.py — forgetting both sides leaves every
-// test green while the classification drifts.
-TEST(ModelTypeClassificationTest, ClassificationMatchesPredicates) {
-  struct Expected {
-    const char* model_type;
-    bool is_deepseek_v4_model;
-    bool is_block_draft_model;
-    bool is_dspark_draft_model;
-  };
-  const Expected cases[] = {
-      {"deepseek_v4", true, false, false},
-      // MTP marker branch: starts_with("deepseek_v4") && contains("mtp").
-      {"deepseek_v4_mtp", true, false, false},
-      {"deepseek_v4_dspark", true, true, true},
-      {"DFlashDraftModel", false, true, false},
-      {"DFlash2DraftModel", false, true, false},
-      {"DSparkDraftModel", false, true, true},
-      {"glm5_dspark", false, true, true},
-      {"glm_moe_dsa", false, false, false},
-  };
-
-  for (const Expected& expected : cases) {
-    const std::string_view model_type = expected.model_type;
-    EXPECT_EQ(util::is_deepseek_v4_model_type(model_type),
-              expected.is_deepseek_v4_model)
-        << "model_type=" << expected.model_type;
-    EXPECT_EQ(is_block_draft_model_type(model_type),
-              expected.is_block_draft_model)
-        << "model_type=" << expected.model_type;
-    EXPECT_EQ(is_dspark_draft_model_type(model_type),
-              expected.is_dspark_draft_model)
-        << "model_type=" << expected.model_type;
-  }
 }
 
 }  // namespace

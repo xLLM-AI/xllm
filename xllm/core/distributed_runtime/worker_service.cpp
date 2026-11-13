@@ -48,8 +48,19 @@ namespace xllm {
 namespace {
 
 std::vector<SpeculativeTokenStats> record_speculative_metrics(
-    const ForwardOutput& output) {
-  if (output.is_graph_warmup || output.spec_verify_stats.requests.empty()) {
+    const ForwardOutput& output,
+    const torch::Tensor& verify_tokens_host) {
+  if (output.is_graph_warmup) {
+    return {};
+  }
+  if (output.spec_verify_stats.requests.empty()) {
+    if (output.is_verify_stats_deferred) {
+      const SpecVerifyStats stats =
+          make_verify_stats(verify_tokens_host, output.constrained_mask);
+      SpecMetrics metrics = make_spec_metrics(stats);
+      record_spec_metrics(metrics);
+      return std::move(metrics.sequence_stats);
+    }
     return {};
   }
   SpecMetrics metrics = make_spec_metrics(output.spec_verify_stats);
@@ -418,7 +429,6 @@ void WorkerService::collect_llm_output(
     const ForwardOutput& output,
     ForwardOutput& cpu_output,
     std::vector<SpeculativeTokenStats>& stats) {
-  stats = record_speculative_metrics(output);
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
   cpu_output.failed_request_ids = output.failed_request_ids;
@@ -471,6 +481,8 @@ void WorkerService::collect_llm_output(
     copy_output_to_host();
     stream_->synchronize();
   }
+  stats =
+      record_speculative_metrics(output, cpu_output.sample_output.next_tokens);
 }
 
 void WorkerService::step_llm_model(
@@ -604,7 +616,6 @@ void WorkerService::collect_vlm_output(
     const ForwardOutput& output,
     ForwardOutput& cpu_output,
     std::vector<SpeculativeTokenStats>& stats) {
-  stats = record_speculative_metrics(output);
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
   cpu_output.failed_request_ids = output.failed_request_ids;
@@ -651,6 +662,8 @@ void WorkerService::collect_vlm_output(
   }
   copy_output_to_host();
   stream_->synchronize();
+  stats =
+      record_speculative_metrics(output, cpu_output.sample_output.next_tokens);
 }
 
 void WorkerService::step_vlm_model(

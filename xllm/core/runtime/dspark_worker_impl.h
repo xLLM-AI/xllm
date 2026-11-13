@@ -15,41 +15,11 @@ limitations under the License.
 
 #pragma once
 
-#include <functional>
-
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_proposal.h"
-#include "core/framework/speculative/draft_vocab_mapping.h"
 #include "runtime/dflash_worker_impl.h"
 
 namespace xllm {
-
-class ProcessGroup;
-
-// The DSpark Markov head: [rows] tokens in, [rows, vocab] bias out. Both
-// callers hold the draft model privately, so the head enters as a callable.
-using DSparkMarkovBias =
-    std::function<torch::Tensor(const torch::Tensor& previous_token_ids)>;
-
-// The sampled tokens must agree across TP ranks before the next step;
-// greedy argmax is rank-local, so the walker never invokes this on greedy
-// batches. The caller owns which process groups to broadcast over.
-using SyncSampledTokens = std::function<void(torch::Tensor& sampled_tokens)>;
-
-// Walks the block logits [rows, steps, vocab] step by step through
-// `markov_bias` and the shared sample(); `anchors` seed the first step.
-// `token_ids_out` borrows a preallocated [rows, steps] buffer (undefined
-// allocates). Lives next to its only model-coupled consumer, not in
-// framework/.
-DraftProposal sample_dspark_markov_block(
-    const DSparkMarkovBias& markov_bias,
-    const torch::Tensor& base_logits,
-    const torch::Tensor& anchors,
-    const SamplingParameters& sampling,
-    const SyncSampledTokens& sync_tokens,
-    bool is_probabilistic_draft,
-    torch::Tensor token_ids_out = torch::Tensor(),
-    const DraftVocabMapping& vocab_mapping = DraftVocabMapping{});
 
 class DSparkWorkerImpl final : public DFlashWorkerImpl {
  public:
@@ -66,6 +36,11 @@ class DSparkWorkerImpl final : public DFlashWorkerImpl {
  protected:
   DraftProposal run_decode_draft(const LlmForwardInput& input,
                                  LlmForwardInput& validate_input) override;
+
+ private:
+  DraftProposal sample_markov_block(const torch::Tensor& base_logits,
+                                    const torch::Tensor& anchors,
+                                    const SamplingParameters& sampling);
 };
 
 }  // namespace xllm

@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <absl/functional/function_ref.h>
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -29,7 +31,6 @@ limitations under the License.
 #include "core/util/tensor_helper.h"
 #include "framework/model/model_args.h"
 #include "runtime/draft_model_spec_worker_impl.h"
-#include "runtime/llm_worker_impl.h"
 
 namespace xllm {
 
@@ -59,9 +60,16 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                   int32_t random_seed,
                   MasterStatus master_status) override;
 
-  std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
-
  protected:
+  DFlashWorkerImpl(
+      const ParallelArgs& parallel_args,
+      const torch::Device& device,
+      const runtime::Options& options,
+      absl::FunctionRef<std::unique_ptr<LLMWorkerImpl>()> draft_factory,
+      int32_t (*configure_draft_config)(ModelArgs&, const runtime::Options&));
+
+  static runtime::Options draft_options(const runtime::Options& options,
+                                        int32_t num_speculative_tokens = 0);
   std::optional<ForwardOutput> step_prefill(
       const LlmForwardInput& input) override;
 
@@ -89,7 +97,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   void prepare_validate_inputs(const LlmForwardInput& input,
                                LlmForwardInput& validate_input);
 
-  int32_t draft_query_width_;
   bool draft_input_per_request_ = true;
   BatchForwardType draft_forward_type_ = BatchForwardType::CHUNKED_PREFILL;
   bool draft_needs_dummy_tokens_ = false;
@@ -110,10 +117,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                                             const DraftProposal& draft_proposal,
                                             LlmForwardInput& validate_input);
 
-  // Mirrors sampled tokens to rank 0 under schedule-overlap so every rank
-  // commits the same prefix. No-op for a single rank.
-  void maybe_broadcast_spec_tokens(torch::Tensor& tokens);
-
   std::vector<std::string> write_context_kv(
       const LlmForwardInput& input,
       const torch::Tensor& context_hidden,
@@ -126,8 +129,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
 
  protected:
   torch::Tensor anchor_token_ids(const LlmForwardInput& input) const;
-
-  ProcessGroup* sampling_process_group_ = nullptr;
 
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;

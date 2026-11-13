@@ -24,7 +24,7 @@ limitations under the License.
 
 namespace xllm {
 
-class VLMWorkerImpl final : public WorkerImpl {
+class VLMWorkerImpl : public WorkerImpl {
  public:
   enum class ForwardSyncPolicy : int8_t {
     LEGACY = 0,
@@ -33,7 +33,8 @@ class VLMWorkerImpl final : public WorkerImpl {
 
   VLMWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,
-                const runtime::Options& options);
+                const runtime::Options& options,
+                bool is_input_release_deferred = false);
 
   ~VLMWorkerImpl() override = default;
 

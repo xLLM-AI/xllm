@@ -25,6 +25,7 @@ limitations under the License.
 #include <limits>
 #include <numeric>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -112,39 +113,18 @@ ForwardInputBuilder::ForwardInputBuilder(
     int32_t cp_size,
     ThreadPool* thread_pool,
     SharedKVCacheMappingTracker* mapping_tracker)
-    : ForwardInputBuilder(data.sequences,
-                          data.allowed_max_tokens,
-                          data.input_embeddings,
-                          data.mm_data,
-                          data.batch_id,
-                          args,
-                          data.forward_type,
-                          cp_size,
-                          thread_pool) {
-  shared_kv_mapping_tracker_ = mapping_tracker;
-}
-
-ForwardInputBuilder::ForwardInputBuilder(
-    const std::vector<Sequence*>& sequences,
-    const std::vector<uint32_t>& allowed_max_tokens,
-    const std::vector<torch::Tensor>& input_embeddings_vec,
-    const std::vector<MMData>& mm_data_vec,
-    const uint64_t batch_id,
-    const ModelArgs* args,
-    BatchForwardType batch_forward_type,
-    int32_t cp_size,
-    ThreadPool* thread_pool)
-    : sequences_(sequences),
-      allowed_max_tokens_(allowed_max_tokens),
-      input_embeddings_vec_(input_embeddings_vec),
-      mm_data_vec_(mm_data_vec),
+    : sequences_(data.sequences),
+      allowed_max_tokens_(data.allowed_max_tokens),
+      input_embeddings_vec_(data.input_embeddings),
+      mm_data_vec_(data.mm_data),
       args_(args),
       enable_json_object_output_(
           ServiceConfig::get_instance().enable_json_object_output()),
+      num_sequences_(data.sequences.size()),
+      cp_size_(cp_size),
       thread_pool_(thread_pool),
-      num_sequences_(sequences.size()),
-      batch_id_(batch_id),
-      cp_size_(cp_size) {
+      batch_id_(data.batch_id),
+      shared_kv_mapping_tracker_(mapping_tracker) {
   build_execution_batch_ = ModelConfig::is_python_model_impl(
       ModelConfig::get_instance().model_impl());
   CHECK_GT(cp_size_, 0);
@@ -163,39 +143,39 @@ ForwardInputBuilder::ForwardInputBuilder(
   token_reserve = std::max(token_reserve, reserve_size);
   state_.flatten_tokens_vec.reserve(token_reserve);
   state_.flatten_positions_vec.reserve(token_reserve);
-  state_.sampling.reserve(sequences.size());
-  state_.mrope_positions_vec.reserve(sequences.size());
-  state_.block_tables_vec.reserve(sequences.size());
-  state_.shared_full_block_tables.reserve(sequences.size());
+  state_.sampling.reserve(data.sequences.size());
+  state_.mrope_positions_vec.reserve(data.sequences.size());
+  state_.block_tables_vec.reserve(data.sequences.size());
+  state_.shared_full_block_tables.reserve(data.sequences.size());
   state_.shared_full_slot_mapping.reserve(token_reserve);
   state_.new_token_slot_ids.reserve(token_reserve);
-  state_.kv_cache_tokens_nums.reserve(sequences.size());
+  state_.kv_cache_tokens_nums.reserve(data.sequences.size());
   if (build_execution_batch_) {
-    state_.num_scheduled_tokens.reserve(sequences.size());
-    state_.num_computed_tokens.reserve(sequences.size());
-    state_.is_prefilling.reserve(sequences.size());
+    state_.num_scheduled_tokens.reserve(data.sequences.size());
+    state_.num_computed_tokens.reserve(data.sequences.size());
+    state_.is_prefilling.reserve(data.sequences.size());
   }
   state_.paged_kv_indices.reserve(block_reserve);
-  state_.paged_kv_indptr.reserve(sequences.size() + 1);
-  state_.paged_kv_last_page_len.reserve(sequences.size());
+  state_.paged_kv_indptr.reserve(data.sequences.size() + 1);
+  state_.paged_kv_last_page_len.reserve(data.sequences.size());
   const EPLBConfig& eplb_config = EPLBConfig::get_instance();
   build_eplb_decode_token_mask_ = eplb_config.enable_eplb();
   if (build_eplb_decode_token_mask_) {
     state_.eplb_decode_token_mask.reserve(token_reserve);
   }
-  state_.seq_lens.reserve(sequences.size());
-  state_.q_seq_lens.reserve(sequences.size());
+  state_.seq_lens.reserve(data.sequences.size());
+  state_.q_seq_lens.reserve(data.sequences.size());
   is_graph_warmup_ =
       !sequences_.empty() &&
       std::all_of(sequences_.begin(), sequences_.end(), [](Sequence* sequence) {
         return sequence != nullptr && sequence->is_graph_warmup();
       });
-  state_.mtp_bootstrap_embeddings.reserve(sequences.size());
-  state_.mtp_bootstrap_row_idxes.reserve(sequences.size());
+  state_.mtp_bootstrap_embeddings.reserve(data.sequences.size());
+  state_.mtp_bootstrap_row_idxes.reserve(data.sequences.size());
   if (args_ != nullptr) {
     use_mrope_ = (args_->rope_scaling_rope_type() == "mrope");
   }
-  state_.batch_forward_type = batch_forward_type;
+  state_.batch_forward_type = data.forward_type;
 }
 
 TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
@@ -357,23 +337,6 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
     info.mappings.emplace_back(std::move(step_mapping));
   }
   return info;
-}
-
-LlmForwardInput ForwardInputBuilder::build_forward_input(
-    uint32_t num_decoding_tokens,
-    uint32_t min_decoding_batch_size) {
-  process_sequences();
-  padding_decode_batch_size(num_decoding_tokens, min_decoding_batch_size);
-
-  return state_to_forward_input<LlmForwardInput>();
-}
-
-VlmForwardInput ForwardInputBuilder::build_vlm_forward_input(
-    uint32_t num_decoding_tokens,
-    uint32_t min_decoding_batch_size) {
-  process_sequences();
-  padding_decode_batch_size(num_decoding_tokens, min_decoding_batch_size);
-  return state_to_forward_input<VlmForwardInput>();
 }
 
 void ForwardInputBuilder::process_sequences() {
@@ -1104,56 +1067,9 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
   state.block_tables_vec.emplace_back(std::move(block_ids));
 }
 
-void ForwardInputBuilder::padding_decode_batch_size(
-    uint32_t num_decoding_tokens,
-    uint32_t min_decoding_batch_size) {
-  if (num_sequences_ < min_decoding_batch_size) {
-    const uint32_t n_tokens = state_.flatten_tokens_vec.size();
-    // kv_cache is not empty in decoding phase
-    const bool in_decoding_phase = !state_.batch_forward_type.is_prefill();
-    const bool same_num_decoding_tokens =
-        state_.q_max_seq_len == num_decoding_tokens &&
-        n_tokens == num_sequences_ * num_decoding_tokens;
-    if (in_decoding_phase && same_num_decoding_tokens) {
-      // add padding tokens to the batch
-      for (int32_t i = num_sequences_; i < min_decoding_batch_size; ++i) {
-        for (int32_t k = 0; k < num_decoding_tokens; ++k) {
-          state_.flatten_tokens_vec.emplace_back(0);
-          if (!use_mrope_) {
-            state_.flatten_positions_vec.emplace_back(0);
-          } else {
-            state_.mrope_positions_vec.emplace_back(
-                torch::zeros({3, 1}, torch::kInt));
-          }
-          state_.new_token_slot_ids.emplace_back(0);
-          if (state_.shared_full_read_padding_page.has_value()) {
-            state_.shared_full_slot_mapping.emplace_back(-1);
-          }
-          if (build_eplb_decode_token_mask_) {
-            state_.eplb_decode_token_mask.emplace_back(0);
-          }
-        }
-        state_.seq_lens.emplace_back(num_decoding_tokens);
-        state_.q_seq_lens.emplace_back(num_decoding_tokens);
-        state_.block_tables_vec.emplace_back();
-        if (state_.shared_full_read_padding_page.has_value()) {
-          state_.shared_full_block_tables.emplace_back();
-        }
-        if (!state_.multi_block_tables.empty()) {
-          for (auto& mgr_tables : state_.multi_block_tables) {
-            mgr_tables.emplace_back(std::vector<int32_t>{});
-          }
-        }
-        util::append_indptr(state_.paged_kv_indptr, /*len=*/1);
-        state_.paged_kv_last_page_len.emplace_back(/*value=*/1);
-        state_.paged_kv_indices.emplace_back(/*value=*/0);
-      }
-    }
-  }
-}
-
 template <typename Input>
-Input ForwardInputBuilder::state_to_forward_input() {
+Input ForwardInputBuilder::build_forward_input() {
+  process_sequences();
   if (state_.flatten_tokens_vec.empty()) {
     return {};
   }
@@ -1241,11 +1157,7 @@ Input ForwardInputBuilder::state_to_forward_input() {
     batch_mm_data_vec.insert(batch_mm_data_vec.end(),
                              state_.scheduled_mm_data_vec.begin(),
                              state_.scheduled_mm_data_vec.end());
-    if constexpr (std::is_same_v<Input, VlmForwardInput>) {
-      input_params.multimodal.mm_data.batch(batch_mm_data_vec);
-    } else {
-      input_params.features.mm_data.batch(batch_mm_data_vec);
-    }
+    input_params.multimodal.mm_data.batch(batch_mm_data_vec);
   }
 
   // Setup block tables
@@ -1383,4 +1295,10 @@ void ForwardInputBuilder::process_multi_modal_inputs(Sequence* sequence,
     state.scheduled_mm_data_vec.emplace_back(std::move(scheduled_mm_data));
   }
 }
+
+template LlmForwardInput
+ForwardInputBuilder::build_forward_input<LlmForwardInput>();
+template VlmForwardInput
+ForwardInputBuilder::build_forward_input<VlmForwardInput>();
+
 }  // namespace xllm

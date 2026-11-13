@@ -15,9 +15,11 @@ limitations under the License.
 
 #pragma once
 
+#include <absl/functional/function_ref.h>
+
 #include <cstdint>
-#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 
@@ -28,6 +30,8 @@ limitations under the License.
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {
+
+ParallelArgs configure_draft_parallel_args(ParallelArgs parallel_args);
 
 class LLMWorkerImpl;
 class LlmForwardInput;
@@ -78,9 +82,10 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
       const ParallelArgs& parallel_args,
       const torch::Device& device,
       const runtime::Options& options,
-      const runtime::Options& target_options,
       WorkerType worker_type,
-      const std::function<std::unique_ptr<LLMWorkerImpl>()>& draft_factory);
+      absl::FunctionRef<std::unique_ptr<LLMWorkerImpl>()> draft_factory,
+      int32_t (*configure_draft_config)(ModelArgs&,
+                                        const runtime::Options&) = nullptr);
 
   virtual KVCacheShape draft_kv_cache_shape(
       const KVCacheShape& target_kv_cache_shape) const;
@@ -97,18 +102,14 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   // accepted span when allocating their embedding cache.
   virtual bool requires_full_target_replay() const { return false; }
 
+  std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
+
   void prepare_hierarchy_kv_cache_transfers();
   void finalize_hierarchy_kv_cache_transfers();
   void init_embedding_cache(int64_t num_blocks);
-  using AllocateFn = std::function<bool(WorkerImpl&, const KVCacheShape&)>;
-  bool allocate_pools(const KVCacheShape& kv_cache_shape,
-                      const AllocateFn& allocate);
-
-  // Target-side cache budget after reserving storage for the colocated draft.
-  // DeepSeek-V4's fixed SWA pools require both geometries to participate.
-  std::tuple<int64_t, int64_t> estimate_kv_cache_capacity_with_draft(
-      const runtime::Options& target_options,
-      const runtime::Options& draft_options);
+  bool allocate_pools(
+      const KVCacheShape& kv_cache_shape,
+      absl::FunctionRef<bool(WorkerImpl&, const KVCacheShape&)> allocate);
 
   // A DCP block-table entry covers one logical KV page per KV split; slot and
   // expanded-attention metadata use this size, not the physical block size.
@@ -123,12 +124,57 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   void prepare_draft_input(const TargetInput& input);
 
+  std::optional<ForwardOutput> finalize_step_output(
+      ForwardOutput output,
+      std::optional<SampleOutput> verify_output = std::nullopt,
+      const std::vector<JsonObjectGrammarState>& json_object_states = {}) const;
+
+  template <typename Input>
+  static std::optional<ForwardOutput> run_worker_no_sync_impl(
+      WorkerImpl& worker,
+      const Input& input,
+      Stream& prepare_stream,
+      Stream& compute_stream,
+      Input& processed_input) {
+    worker.prepare_work_before_execute_on_stream(
+        input,
+        processed_input,
+        prepare_stream,
+        /*record_ready_event=*/&prepare_stream != &compute_stream);
+    return worker.execute_no_sync_on_stream(
+        processed_input,
+        compute_stream,
+        WorkerImpl::ForwardCompletion::CALLER_MANAGED);
+  }
+
+  template <typename Input>
+  static std::optional<ForwardOutput> run_worker_no_sync_impl(
+      WorkerImpl& worker,
+      const Input& input,
+      Stream& prepare_stream,
+      Stream& compute_stream) {
+    Input processed_input;
+    return run_worker_no_sync_impl(
+        worker, input, prepare_stream, compute_stream, processed_input);
+  }
+
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
+
+  ModelContext load_model_config(ModelLoader& loader);
+  torch::Tensor load_draft_vocab_mapping(ModelLoader& loader);
+  KVCacheCreateOptions build_draft_kv_cache_layout(
+      const KVCacheShape& shape) const;
+  int64_t draft_num_layers() const;
+#if defined(USE_NPU)
+  void prepare_draft_padding(LlmModelParams& params,
+                             Stream* prepare_stream = nullptr);
+  DpEpPaddingCache dp_ep_padding_cache_{2};
+#endif
+  int32_t (*configure_draft_config_)(ModelArgs&, const runtime::Options&);
   std::unique_ptr<EmbeddingCache> embedding_cache_;
 
   DraftVocabMapping draft_vocab_;
 
-  bool is_probabilistic_draft_ = false;
   mtp_async::TargetSpecVerifyMode target_verify_mode_ =
       mtp_async::TargetSpecVerifyMode::GENERIC;
 };

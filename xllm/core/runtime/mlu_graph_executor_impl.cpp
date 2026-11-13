@@ -252,9 +252,6 @@ GraphPersistentParam::GraphPersistentParam(
   new_cache_slots_ = torch::zeros({max_tokens}, int_tensor_options);
   block_table_ = torch::zeros({graph_tokens_capacity, max_num_blocks_per_req},
                               int_tensor_options);
-  // MTP validate expands decode rows from N to N * (K + 1), where K is the
-  // speculative token count. Draft-extend only doubles rows, so the same
-  // bound covers both paths when speculative decode is enabled.
   q_seq_lens_ = torch::zeros({max_seq_lens}, int_tensor_options);
   kv_seq_lens_ = torch::zeros({max_seq_lens}, int_tensor_options);
   // Padding decode rows can still execute stateful graph kernels. Point them
@@ -337,7 +334,7 @@ void GraphPersistentParam::update_input_buffer(const torch::Tensor& tokens,
   util::pad_uniform_decode_lens(host.q_seq_lens,
                                 host.kv_seq_lens,
                                 extra_rows,
-                                layout.attention_row_query_len);
+                                layout.attention_row_query_len - 1);
   if (!host.kpool_query_lens.empty()) {
     host.kpool_query_lens.resize(layout.padded_num_reqs,
                                  layout.tokens_per_request);

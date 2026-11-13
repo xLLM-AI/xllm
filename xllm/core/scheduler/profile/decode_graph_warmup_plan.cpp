@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstddef>
 #include <utility>
 
+#include "core/framework/config/speculative_config.h"
 #include "platform/platform.h"
 #include "runtime/acl_graph_bucket_policy.h"
 
@@ -94,7 +95,7 @@ DecodeGraphWarmupPlan build_target_decode_graph_warmup_plan(
   }
 
   const bool use_mtp_batches =
-      warmup_config.num_decoding_tokens > 1 &&
+      warmup_config.num_speculative_tokens > 0 &&
       max_global_batch_size >= dp_size && dp_size > 0 &&
       (!warmup_config.enable_graph_mode_decode_no_padding ||
        warmup_config.max_graph_batch_size > 0);
@@ -115,7 +116,7 @@ DecodeGraphWarmupPlan build_target_decode_graph_warmup_plan(
         npu::get_acl_graph_mtp_warmup_batch_sizes(
             static_cast<uint32_t>(max_global_batch_size),
             static_cast<uint32_t>(dp_size),
-            static_cast<uint32_t>(warmup_config.num_decoding_tokens),
+            static_cast<uint32_t>(warmup_config.num_speculative_tokens),
             warmup_config.enable_graph_mode_decode_no_padding,
             static_cast<uint32_t>(warmup_config.max_graph_batch_size));
 
@@ -143,7 +144,7 @@ DecodeGraphWarmupPlan build_target_decode_graph_warmup_plan(
   std::vector<int32_t> batch_sizes = npu::get_acl_graph_mtp_warmup_batch_sizes(
       static_cast<uint32_t>(max_global_batch_size),
       static_cast<uint32_t>(dp_size),
-      static_cast<uint32_t>(warmup_config.num_decoding_tokens),
+      static_cast<uint32_t>(warmup_config.num_speculative_tokens),
       warmup_config.enable_graph_mode_decode_no_padding,
       0);
 
@@ -155,22 +156,6 @@ DecodeGraphWarmupPlan build_target_decode_graph_warmup_plan(
   return plan;
 }
 
-int64_t draft_graph_bucket(int32_t local_batch_size,
-                           int32_t max_local_batch_size,
-                           const DraftGraphWarmupShape& shape) {
-  if (shape.bucket_by_sequence) {
-    return std::min(runtime::get_decode_graph_token_bucket(
-                        local_batch_size, /*enable_no_padding=*/false),
-                    static_cast<int64_t>(max_local_batch_size)) *
-           shape.tokens_per_sequence;
-  }
-  return std::min(
-      runtime::get_decode_graph_token_bucket(
-          static_cast<int64_t>(local_batch_size) * shape.tokens_per_sequence,
-          /*enable_no_padding=*/false),
-      static_cast<int64_t>(max_local_batch_size) * shape.tokens_per_sequence);
-}
-
 }  // namespace
 
 DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
@@ -180,7 +165,9 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
   DecodeGraphWarmupPlan plan = build_target_decode_graph_warmup_plan(
       warmup_config, max_global_batch_size, dp_size);
   if (!Platform::supports_mtp_decode_graph_warmup() ||
-      warmup_config.draft_shapes.empty() ||
+      warmup_config.num_speculative_tokens == 0 ||
+      !SpeculativeConfig::is_mtp_algorithm(
+          warmup_config.speculative_algorithm) ||
       warmup_config.enable_graph_mode_decode_no_padding || dp_size <= 0 ||
       max_global_batch_size < dp_size) {
     return plan;
@@ -192,27 +179,19 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
           : max_global_batch_size / dp_size;
   std::vector<int32_t> joint_batches;
   joint_batches.reserve(plan.batch_sizes.size() +
-                        warmup_config.draft_shapes.size() *
-                            kCompatibilitySmallBatchSizes.size());
-  for (const auto& shape : warmup_config.draft_shapes) {
-    if (shape.tokens_per_sequence <= 0) {
-      continue;
-    }
-    int64_t previous_bucket = 0;
-    for (int32_t local = 1; local <= max_local_batch_size; ++local) {
-      const int64_t bucket =
-          draft_graph_bucket(local, max_local_batch_size, shape);
-      if (bucket != previous_bucket) {
-        joint_batches.emplace_back(local * dp_size);
-        previous_bucket = bucket;
-      } else {
-        joint_batches.back() = local * dp_size;
-      }
+                        kCompatibilitySmallBatchSizes.size());
+  int64_t previous_bucket = 0;
+  for (int32_t local = 1; local <= max_local_batch_size; ++local) {
+    const int64_t bucket =
+        std::min(runtime::get_decode_graph_token_bucket(local, false),
+                 static_cast<int64_t>(max_local_batch_size));
+    if (bucket != previous_bucket) {
+      joint_batches.emplace_back(local * dp_size);
+      previous_bucket = bucket;
+    } else {
+      joint_batches.back() = local * dp_size;
     }
   }
-  std::sort(joint_batches.begin(), joint_batches.end());
-  joint_batches.erase(std::unique(joint_batches.begin(), joint_batches.end()),
-                      joint_batches.end());
 
   // Seed the schedule with every independently required draft bucket. Add a
   // target representative only if its token bucket is still uncovered. In
@@ -224,7 +203,7 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
   const auto target_bucket = [&warmup_config, dp_size](int32_t batch_size) {
     return runtime::get_decode_graph_token_bucket(
         static_cast<int64_t>(batch_size / dp_size) *
-            warmup_config.num_decoding_tokens,
+            (warmup_config.num_speculative_tokens + 1),
         /*enable_no_padding=*/false);
   };
   for (const int32_t batch_size : joint_batches) {

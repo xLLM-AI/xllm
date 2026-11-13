@@ -23,8 +23,7 @@ limitations under the License.
 namespace xllm {
 
 Executor::Executor(CausalLM* model,
-                   const ModelArgs& args,
-                   const torch::Device& device,
+                   const ModelContext& context,
                    const runtime::Options& options) {
   const auto& model_config = ModelConfig::get_instance();
   std::string executor_type = model->executor_type();
@@ -37,8 +36,17 @@ Executor::Executor(CausalLM* model,
       executor_type = options.backend();
     }
   }
+  auto executor_options = options;
+  if (executor_type != "python" && executor_type != "mlu" &&
+      options.is_draft_engine()) {
+    executor_options.num_speculative_tokens(context.num_speculative_tokens());
+  }
   impl_ = ExecutorImplFactory::get_instance().create_executor_impl(
-      model, args, device, options, executor_type);
+      model,
+      context.get_model_args(),
+      context.get_tensor_options().device(),
+      executor_options,
+      executor_type);
 }
 
 void Executor::set_dp_process_group(ProcessGroup* group) {

@@ -58,19 +58,12 @@ namespace {
 constexpr int32_t kMlaGraphKvLenBucket = 2048;
 
 int64_t get_decode_graph_capacity(const runtime::Options& options) {
-  CHECK_GT(options.num_decoding_tokens(), 0)
-      << "num_decoding_tokens must be > 0 for graph capacity";
   return options.max_seqs_per_batch();
 }
 
 int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
-  CHECK_GT(options.num_decoding_tokens(), 0)
-      << "num_decoding_tokens must be > 0 for graph token capacity";
-  int64_t token_capacity = options.max_seqs_per_batch();
-
-  if (options.enable_speculative_decode() && !options.is_draft_engine()) {
-    token_capacity *= options.num_decoding_tokens();
-  }
+  const int64_t token_capacity =
+      options.max_seqs_per_batch() * (options.num_speculative_tokens() + 1);
   return runtime::get_decode_graph_token_bucket(
       token_capacity, options.enable_graph_mode_decode_no_padding());
 }
@@ -86,14 +79,14 @@ bool graph_mode_decode_no_padding_enabled() {
 
 int64_t get_hybrid_metadata_capacity(const runtime::Options& options) {
   const int64_t seq_capacity = get_decode_graph_capacity(options);
-  const int64_t num_decoding_tokens = options.num_decoding_tokens();
+  const int64_t num_speculative_tokens = options.num_speculative_tokens();
   // Bucket padding rows still consume sequence-scoped metadata:
   // 4 seqs x 5 tokens = 20 rows -> bucket 32 -> 7 metadata rows.
   const int64_t bucketed_tokens = runtime::get_decode_graph_token_bucket(
-      seq_capacity * num_decoding_tokens,
+      seq_capacity * (num_speculative_tokens + 1),
       graph_mode_decode_no_padding_enabled());
   const int64_t padded_seq_capacity =
-      (bucketed_tokens + num_decoding_tokens - 1) / num_decoding_tokens;
+      (bucketed_tokens + num_speculative_tokens) / (num_speculative_tokens + 1);
   return std::max(seq_capacity, padded_seq_capacity);
 }
 
@@ -181,21 +174,6 @@ bool can_skip_unused_expanded_verify_mask(const ModelParamsView& params,
          params.meta.batch_forward_type.is_chunked_prefill() &&
          is_hybrid_linear_attention &&
          params.graph.use_expanded_decode_for_spec_verify_attention;
-}
-
-int64_t get_spec_verify_width(const ModelParamsView& params) {
-  CHECK(params.graph.input_tokens_override.defined())
-      << "speculative verify graph update requires token inputs";
-  CHECK_EQ(params.graph.input_tokens_override.dim(), 1)
-      << "speculative verify token inputs must be flat";
-  const int64_t spec_width = params.meta.q_max_seq_len;
-  CHECK_GT(spec_width, 0) << "speculative verify width must be positive";
-  CHECK_GT(params.meta.num_sequences, 0)
-      << "speculative verify batch size must be positive";
-  CHECK_EQ(params.graph.input_tokens_override.numel(),
-           static_cast<int64_t>(params.meta.num_sequences) * spec_width)
-      << "speculative verify tokens must use compact [batch, width] layout";
-  return spec_width;
 }
 
 }  // namespace
@@ -751,7 +729,7 @@ void GraphPersistentParam::update_spec_verify_inputs(
       params.graph.input_tokens_override.defined()
           ? params.graph.input_tokens_override
           : tokens;
-  const int64_t spec_width = get_spec_verify_width(params);
+  const int64_t spec_width = params.meta.q_max_seq_len;
   const int64_t batch_size = params.meta.num_sequences;
   const int64_t total_tokens = graph_tokens.numel();
   CHECK_EQ(total_tokens, batch_size * spec_width);
@@ -863,8 +841,6 @@ std::optional<Params> GraphPersistentParam::update(
   CHECK(is_decode || is_hybrid_spec_verify_chunked_prefill)
       << "ACL graph persistent param only supports decode or hybrid "
          "spec-verify chunked prefill";
-  const int64_t decode_tokens =
-      is_decode ? std::max<int64_t>(options_.num_decoding_tokens(), 1) : 1;
   int64_t actual_batch_size = infer_actual_batch_size(params);
   if (is_chunked_prefill && params.meta.num_sequences > 0) {
     actual_batch_size = params.meta.num_sequences;
@@ -872,7 +848,8 @@ std::optional<Params> GraphPersistentParam::update(
     if (params.meta.num_sequences == 0) {
       actual_batch_size = 0;
     } else {
-      actual_batch_size = actual_num_tokens / decode_tokens;
+      actual_batch_size =
+          actual_num_tokens / (options_.num_speculative_tokens() + 1);
     }
   }
   const int32_t q_max_seq_len = std::max<int32_t>(params.meta.q_max_seq_len, 1);

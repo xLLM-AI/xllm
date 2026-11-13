@@ -66,8 +66,9 @@ void VlmForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
       empty_input.input_params.meta.batch_id = UNINITIALIZED_BATCH_ID;
       state.inputs.emplace_back(std::move(empty_input));
     } else {
-      state.inputs.emplace_back(batches[dp_rank].prepare_vlm_forward_input(
-          model_args, threadpool_.get()));
+      state.inputs.emplace_back(
+          batches[dp_rank].prepare_forward_input<VlmForwardInput>(
+              model_args, threadpool_.get()));
     }
     const auto& input = state.inputs[dp_rank];
     const auto& meta = input.input_params.meta;

@@ -41,8 +41,7 @@ bool MMEmbedVLMWorkerImpl::init_model(ModelContext& context) {
   context.set_encoder_embedding_mode(true);
   model_ = create_vlm_model(context);
   CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(
-      model_.get(), context.get_model_args(), device_, options_);
+  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
 
   return true;
 }

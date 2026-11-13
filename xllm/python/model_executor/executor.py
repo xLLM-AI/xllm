@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -56,14 +56,14 @@ if TYPE_CHECKING:
 _DISABLED_GRAPH_BACKENDS = ("", "off", "none", "0")
 
 
-def _resolve_graph_backend(config: dict) -> str:
+def _resolve_graph_backend(config: dict[str, Any]) -> str:
     graph_backend = str(config.get("python_graph_backend", "off")).lower()
     if graph_backend in _DISABLED_GRAPH_BACKENDS and config.get("enable_graph", False) and current_platform.is_npu():
         return "aclgraph"
     return graph_backend
 
 
-def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> None:
+def _validate_npu_cp_model_config(config: dict[str, Any]) -> None:
     """Mirror model-side CP admission for callers without the C++ master."""
     model_type = config.get("model_type", "")
     # DSpark drafts do not run Python CP admission; only the dense target.
@@ -85,7 +85,7 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     role = config.get("instance_role", "DEFAULT")
     if role not in ("DEFAULT", "PREFILL"):
         raise NotImplementedError("Python model-side CP supports only DEFAULT or PREFILL roles")
-    speculative = int(config.get("num_speculative_tokens", 0)) > 0 or num_decoding_tokens > 1
+    speculative = int(config.get("num_speculative_tokens", 0)) > 0
     if speculative and bool(config.get("requires_aux_hidden_capture", False)):
         raise NotImplementedError("Python model-side CP does not support aux-hidden-capture speculative algorithms")
     kv_split = int(config.get("kv_split_size", 0)) or int(config["cp_size"])
@@ -116,7 +116,7 @@ def _create_attention_backend(
     first_attention: Attention,
     device: torch.device,
     dtype: torch.dtype,
-    config: dict | None = None,
+    config: dict[str, Any] | None = None,
     max_num_reqs: int = 1,
 ) -> AttentionBackend:
     config = config or {}
@@ -136,7 +136,7 @@ def _create_attention_backend(
             rope_head_dim=int(config.get("qk_rope_head_dim", 64)),
             device=device,
             dtype=dtype,
-            dspark_block_size=int(config.get("dspark_block_size", 0)),
+            block_size=int(config.get("block_size", 0)),
             dspark_use_native_sas=bool(config.get("dspark_use_native_sas", False)),
         )
     if current_platform.is_npu():
@@ -246,19 +246,20 @@ class ModelExecutor:
     def __init__(
         self,
         model: nn.Module,
-        config: dict,
+        config: dict[str, Any],
         max_seqs_per_batch: int,
-        num_decoding_tokens: int = 1,
         acl_graph_decode_batch_size_limit: int | None = None,
     ) -> None:
         self.model = model
         configure_runtime = getattr(model, "configure_runtime", None)
         if configure_runtime is not None:
             configure_runtime(config)
-        # MTP width is a process-level graph contract.  The runner may accept
-        # fewer tokens after verification, but it must never change the
-        # capture width for a live executor.
-        self.num_speculative_tokens = int(config.get("num_speculative_tokens", 0))
+        num_speculative_tokens = int(config.get("num_speculative_tokens", 0))
+        self.num_speculative_tokens = (
+            0
+            if config.get("is_draft_engine", False) and not config.get("is_block_diffusion_algorithm", False)
+            else num_speculative_tokens
+        )
         self.execution_model = model.model
         self.supports_layerwise_kv_load = bool(
             getattr(self.execution_model, "supports_layerwise_kv_load", False)
@@ -302,7 +303,7 @@ class ModelExecutor:
                 f"Context-Parallel requires eager Prefill with graph_backend=off/aclgraph; got '{graph_backend}'"
             )
         if current_platform.is_npu() and cp_size > 1:
-            _validate_npu_cp_model_config(config, int(num_decoding_tokens))
+            _validate_npu_cp_model_config(config)
 
         self._requires_kpool_tail_cache = bool(config.get("requires_kpool_tail_cache", False))
 
@@ -333,19 +334,12 @@ class ModelExecutor:
 
         first_parameter = next(model.parameters())
         device = first_parameter.device
-        ordinary_decode = int(num_decoding_tokens) == 1
-        num_decoding_tokens = max(1, int(num_decoding_tokens), int(config.get("num_speculative_tokens", 0)) + 1)
-        if config.get("model_type") == "qwen3_5_mtp":
-            prefix_width = int(config.get("mtp_draft_prefix_width", 1))
-            if not 1 <= prefix_width <= 17:
-                raise ValueError("Qwen MTP draft prefix width must be in [1, 17]")
-            num_decoding_tokens = max(num_decoding_tokens, prefix_width)
-        # GLM MTP can prepend a repair row after all draft tokens are accepted.
-        # Two requests then need up to four attention rows, even though later
-        # draft steps still decode one token per request.
-        max_decode_rows_per_request = num_decoding_tokens
-        if config.get("model_type") == "glm_moe_dsa_mtp":
-            max_decode_rows_per_request = max(max_decode_rows_per_request, 2)
+        is_draft_tail_repair_required = (
+            config.get("is_draft_engine", False)
+            and config.get("is_mtp_algorithm", False)
+            and config.get("model_type") != "qwen3_5_mtp"
+        )
+        max_decode_rows_per_request = 2 if is_draft_tail_repair_required else num_speculative_tokens + 1
         self.attention_backend = _create_attention_backend(
             first_attention,
             device,
@@ -394,7 +388,6 @@ class ModelExecutor:
             config.get("model_type") == "qwen3_5_text"
             and bool(config.get("is_mtp_algorithm", False))
             and 1 <= self.num_speculative_tokens <= 16
-            and int(config.get("num_speculative_tokens", 0)) + 1 == int(num_decoding_tokens)
             and not config.get("is_draft_engine", False)
             and config.get("task_type", "generate") == "generate"
             and qwen_mtp_parallel
@@ -404,7 +397,6 @@ class ModelExecutor:
             and bool(config.get("is_mtp_algorithm", False))
             and config.get("is_draft_engine", False)
             and self.num_speculative_tokens == 0
-            and 1 <= num_decoding_tokens <= 17
             and config.get("task_type", "generate") == "generate"
             and qwen_mtp_parallel
         )
@@ -427,14 +419,10 @@ class ModelExecutor:
                 from xllm.python.model_executor.runners.context_kv_acl_graph import ContextKvAclGraphRunner
 
                 self.context_kv_graph_runner = ContextKvAclGraphRunner(model, device)
-                self._context_kv_draft_width = (
-                    int(config.get("num_speculative_tokens", num_decoding_tokens))
-                    if self._dspark_draft
-                    else int(model.cfg.block_size) - 1
-                )
+                self._context_kv_query_width = int(model.cfg.block_size)
+                self._context_kv_draft_width = self._context_kv_query_width - int(not self._dspark_draft)
                 if self._context_kv_draft_width <= 0:
                     raise ValueError("block-draft context graphs require a positive speculative width")
-                self._context_kv_query_width = self._context_kv_draft_width + int(not self._dspark_draft)
             from xllm.python.model_executor.runners.block_draft_acl_graph import (
                 BlockDraftAclGraphRunner,
             )
@@ -476,11 +464,10 @@ class ModelExecutor:
                     int(config["max_position_embeddings"]),
                     dp_size,
                     dp_rank,
-                    num_decoding_tokens=num_decoding_tokens,
+                    num_speculative_tokens=self.num_speculative_tokens,
                     is_spec_draft=bool(config.get("is_draft_engine", False)),
                     enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
                     enable_graph_mode_decode_no_padding=bool(config.get("enable_graph_mode_decode_no_padding", False)),
-                    spec_verify_width=self.num_speculative_tokens + 1 if self._qwen_mtp_target else 1,
                     device_kv_lengths=self._qwen_mtp_target or self._qwen_mtp_draft,
                     max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
                 )
@@ -618,17 +605,24 @@ class ModelExecutor:
             from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
             if isinstance(graph_runner, DecodeAclGraphRunner):
-                if type(graph_runner) is DecodeAclGraphRunner:
-                    # Subclasses can have a different admission/input contract.
-                    # Ordinary decode reuses its resolved values only in this call.
+                decode_metadata = None
+                graph_key = None
+                if isinstance(graph_runner, BlockDraftAclGraphRunner):
+                    if graph_runner.can_execute(input_ids, metadata, input_embedding, mtp_topk_indices):
+                        graph_key = graph_runner.warmup(
+                            input_ids,
+                            positions,
+                            metadata,
+                            input_embedding,
+                            mtp_topk_indices,
+                            eplb=eplb,
+                            pre_capture_kv_buckets=is_graph_warmup,
+                            input_batch=input_batch,
+                        )
+                else:
                     decode_metadata = graph_runner.prepare_execution(
                         input_ids, metadata, input_embedding, mtp_topk_indices, is_graph_warmup=is_graph_warmup
                     )
-                    use_graph = decode_metadata is not None
-                else:
-                    decode_metadata = None
-                    use_graph = graph_runner.can_execute(input_ids, metadata, input_embedding, mtp_topk_indices)
-                if use_graph:
                     if decode_metadata is not None:
                         graph_key = graph_runner.warmup(
                             input_ids,
@@ -641,27 +635,7 @@ class ModelExecutor:
                             is_graph_warmup=is_graph_warmup,
                             input_batch=input_batch,
                         )
-                    elif isinstance(graph_runner, BlockDraftAclGraphRunner):
-                        graph_key = graph_runner.warmup(
-                            input_ids,
-                            positions,
-                            metadata,
-                            input_embedding,
-                            mtp_topk_indices,
-                            eplb=eplb,
-                            pre_capture_kv_buckets=is_graph_warmup,
-                            input_batch=input_batch,
-                        )
-                    else:
-                        graph_key = graph_runner.warmup(
-                            input_ids,
-                            positions,
-                            metadata,
-                            input_embedding,
-                            mtp_topk_indices,
-                            eplb=eplb,
-                            input_batch=input_batch,
-                        )
+                if graph_key is not None:
                     output = graph_runner.execute(
                         input_ids,
                         positions,

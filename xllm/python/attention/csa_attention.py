@@ -79,21 +79,21 @@ def _uses_prefill_attention(metadata: AttentionMetadata) -> bool:
 
 def _deepseek_v4_ori_window_left(
     window_size: int,
-    dspark_block_size: int,
+    block_size: int,
     use_native_dspark_sas: bool,
 ) -> int:
     """Window geometry shared with layer::deepseek_v4_ori_window_left."""
-    return int(torch.ops.xllm_ops.deepseek_v4_ori_window_left(window_size, dspark_block_size, use_native_dspark_sas))
+    return int(torch.ops.xllm_ops.deepseek_v4_ori_window_left(window_size, block_size, use_native_dspark_sas))
 
 
 def _cached_ori_window_left(
     window_size: int,
-    dspark_block_size: int,
+    block_size: int,
     native_sas_by_prefill: dict[bool, bool],
 ) -> dict[bool, int]:
     """Resolve the C++ window geometry once per prefill/decode variant."""
     return {
-        use_prefill: _deepseek_v4_ori_window_left(window_size, dspark_block_size, native_sas_by_prefill[use_prefill])
+        use_prefill: _deepseek_v4_ori_window_left(window_size, block_size, native_sas_by_prefill[use_prefill])
         for use_prefill in (False, True)
     }
 
@@ -103,7 +103,7 @@ def _build_dspark_swa_indices(
     query_cu_seq_lens: torch.Tensor,
     seq_lens: torch.Tensor,
     window_size: int,
-    dspark_block_size: int,
+    block_size: int,
     cache_block_size: int,
 ) -> torch.Tensor:
     """Build the explicit ring-buffer slots consumed by native DSpark SAS."""
@@ -114,7 +114,7 @@ def _build_dspark_swa_indices(
         query_cu_seq_lens,
         seq_lens,
         window_size,
-        dspark_block_size,
+        block_size,
         cache_block_size,
     )
 
@@ -165,7 +165,7 @@ class DsaAttentionBackend(AttentionBackend):
         rope_head_dim: int,
         device: torch.device,
         dtype: torch.dtype,
-        dspark_block_size: int = 0,
+        block_size: int = 0,
         dspark_use_native_sas: bool = False,
     ) -> None:
         self.caches_info, self.group_infos = build_cache_specs(compress_ratios, window_size, n_layers)
@@ -180,7 +180,7 @@ class DsaAttentionBackend(AttentionBackend):
         self.device = device
         self.dtype = dtype
         self.scale = attn_head_dim**-0.5
-        self.dspark_block_size = dspark_block_size
+        self.block_size = block_size
         self.dspark_use_native_sas = dspark_use_native_sas
         self._dspark_swa_location: tuple[int, int, int] | None = None
         for layer_id, layer_caches in enumerate(self.caches_info):
@@ -198,13 +198,11 @@ class DsaAttentionBackend(AttentionBackend):
         # per layer per step.
         self._native_sas_by_prefill = {
             use_prefill: bool(
-                torch.ops.xllm_ops.deepseek_v4_use_native_sas(dspark_block_size, dspark_use_native_sas, use_prefill)
+                torch.ops.xllm_ops.deepseek_v4_use_native_sas(block_size, dspark_use_native_sas, use_prefill)
             )
             for use_prefill in (False, True)
         }
-        self._ori_win_left_by_prefill = _cached_ori_window_left(
-            window_size, dspark_block_size, self._native_sas_by_prefill
-        )
+        self._ori_win_left_by_prefill = _cached_ori_window_left(window_size, block_size, self._native_sas_by_prefill)
 
     def _use_native_sas(self, use_prefill: bool) -> bool:
         return self._native_sas_by_prefill[use_prefill]
@@ -588,13 +586,6 @@ class DsaAttentionBackend(AttentionBackend):
             max_seq_len_override=local_kv_max,
         )
 
-    def prepare_csa_metadata_for_forward(
-        self,
-        metadata: AttentionMetadata | None = None,
-    ) -> None:
-        """Backward-compatible alias for the canonical DSA API."""
-        self.prepare_dsa_metadata_for_forward(metadata)
-
     def select_dsa_layer_rope(
         self,
         layer_id: int,
@@ -615,15 +606,6 @@ class DsaAttentionBackend(AttentionBackend):
         compressed_metadata.layer_id = layer_id
         compressed_metadata.cos_table = pair[0].contiguous()
         compressed_metadata.sin_table = pair[1].contiguous()
-
-    def select_compressed_attention_layer_rope(
-        self,
-        layer_id: int,
-        cos_sin_cache: torch.Tensor,
-        metadata: AttentionMetadata | None = None,
-    ) -> None:
-        """Backward-compatible alias for the canonical DSA API."""
-        self.select_dsa_layer_rope(layer_id, cos_sin_cache, metadata)
 
     def _populate_compressed_attention_rope(
         self,
@@ -987,7 +969,7 @@ class DsaAttentionBackend(AttentionBackend):
             compressed_metadata.actual_seq_lengths_query,
             compressed_metadata.actual_seq_lengths_kv,
             self.window_size,
-            self.dspark_block_size,
+            self.block_size,
             cache_block_size,
         )
 

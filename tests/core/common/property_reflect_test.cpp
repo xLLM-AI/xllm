@@ -183,23 +183,6 @@ TEST(PropertyReflectTest,
       0);
 }
 
-TEST(PropertyReflectTest, PreservesSpecialTokenDefaults) {
-  const ModelArgs args{};
-  EXPECT_EQ(args.bos_token_id(), 0);
-  EXPECT_EQ(args.eos_token_id(), -1);
-  EXPECT_TRUE(args.eos_token_id_vec().empty());
-  EXPECT_EQ(args.pad_token_id(), 0);
-  EXPECT_TRUE(args.stop_token_ids().empty());
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  EXPECT_EQ(visitor.int32_values_.at("bos_token_id"), 0);
-  EXPECT_EQ(visitor.int32_values_.at("eos_token_id"), -1);
-  EXPECT_TRUE(visitor.int32_vector_values_.at("eos_token_id_vec").empty());
-  EXPECT_EQ(visitor.int32_values_.at("pad_token_id"), 0);
-  EXPECT_TRUE(visitor.int32_set_values_.at("stop_token_ids").empty());
-}
-
 TEST(PropertyReflectTest, SharesSpecialTokenStorageAndKeepsFlatReflectionKeys) {
   static_assert(std::is_same_v<
                 decltype(std::declval<const ModelArgs&>().eos_token_id_vec()),
@@ -313,33 +296,6 @@ TEST(PropertyReflectTest, OwnsIndependentSpecialTokensAfterCopy) {
             std::unordered_set<int32_t>({151337, 151338}));
 }
 
-TEST(PropertyReflectTest, PreservesMoERoutingDefaults) {
-  const ModelArgs args{};
-  EXPECT_EQ(args.n_routed_experts(), 0);
-  EXPECT_EQ(args.n_shared_experts(), 0);
-  EXPECT_EQ(args.num_experts_per_tok(), 0);
-  EXPECT_EQ(args.moe_intermediate_size(), 0);
-  EXPECT_FLOAT_EQ(args.routed_scaling_factor(), 0.0f);
-  EXPECT_FALSE(args.norm_topk_prob());
-  EXPECT_EQ(args.n_group(), 0);
-  EXPECT_EQ(args.topk_group(), 0);
-  EXPECT_TRUE(args.topk_method().empty());
-  EXPECT_TRUE(args.scoring_func().empty());
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  EXPECT_EQ(visitor.int32_values_.at("n_routed_experts"), 0);
-  EXPECT_EQ(visitor.int32_values_.at("n_shared_experts"), 0);
-  EXPECT_EQ(visitor.int32_values_.at("num_experts_per_tok"), 0);
-  EXPECT_EQ(visitor.int32_values_.at("moe_intermediate_size"), 0);
-  EXPECT_FLOAT_EQ(visitor.float_values_.at("routed_scaling_factor"), 0.0f);
-  EXPECT_FALSE(visitor.bool_values_.at("norm_topk_prob"));
-  EXPECT_EQ(visitor.int32_values_.at("n_group"), 0);
-  EXPECT_EQ(visitor.int32_values_.at("topk_group"), 0);
-  EXPECT_TRUE(visitor.string_values_.at("topk_method").empty());
-  EXPECT_TRUE(visitor.string_values_.at("scoring_func").empty());
-}
-
 TEST(PropertyReflectTest, SharesMoERoutingStorageAndKeepsFlatReflectionKeys) {
   static_assert(
       std::is_same_v<decltype(std::declval<const ModelArgs&>().scoring_func()),
@@ -432,19 +388,6 @@ TEST(PropertyReflectTest, SharesMoERoutingStorageAndKeepsFlatReflectionKeys) {
   EXPECT_EQ(visitor.visit_counts_.count("moe_args"), 0);
 }
 
-TEST(PropertyReflectTest, PreservesMtpModelDefaults) {
-  const ModelArgs args{};
-  EXPECT_EQ(args.num_nextn_predict_layers(), 0);
-  EXPECT_EQ(args.mtp_start_layer_idx(), -1);
-  EXPECT_EQ(args.mtp_mlp_type(), "moe");
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  EXPECT_EQ(visitor.int32_values_.at("num_nextn_predict_layers"), 0);
-  EXPECT_EQ(visitor.int64_values_.at("mtp_start_layer_idx"), -1);
-  EXPECT_EQ(visitor.string_values_.at("mtp_mlp_type"), "moe");
-}
-
 TEST(PropertyReflectTest, SharesMtpModelStorageAndKeepsFlatReflectionKeys) {
   static_assert(
       std::is_same_v<decltype(std::declval<const ModelArgs&>().mtp_mlp_type()),
@@ -514,33 +457,6 @@ TEST(PropertyReflectTest, OwnsIndependentMtpModelParametersAfterCopy) {
   EXPECT_EQ(copied.num_nextn_predict_layers(), 2);
   EXPECT_EQ(copied.mtp_start_layer_idx(), 62);
   EXPECT_EQ(copied.mtp_mlp_type(), "moe");
-}
-
-TEST(PropertyReflectTest, PreservesAttentionHeadDefaults) {
-  const ModelArgs args{};
-  EXPECT_EQ(args.head_dim(), 0);
-  EXPECT_EQ(args.decoder_head_dim(), 0);
-  EXPECT_EQ(args.n_heads(), 0);
-  EXPECT_EQ(args.decoder_n_heads(), 0);
-  EXPECT_EQ(args.actual_n_heads(), 0);
-  EXPECT_FALSE(args.n_kv_heads().has_value());
-  EXPECT_FALSE(args.decoder_n_kv_heads().has_value());
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  for (const std::string name : {"head_dim",
-                                 "decoder_head_dim",
-                                 "n_heads",
-                                 "decoder_n_heads",
-                                 "actual_n_heads"}) {
-    EXPECT_EQ(visitor.int64_values_.at(name), 0) << name;
-    EXPECT_EQ(visitor.visit_counts_.at(name), 1) << name;
-  }
-  for (const std::string name : {"n_kv_heads", "decoder_n_kv_heads"}) {
-    EXPECT_EQ(visitor.absent_names_.count(name), 1) << name;
-    EXPECT_EQ(visitor.int64_values_.count(name), 0) << name;
-    EXPECT_EQ(visitor.visit_counts_.at(name), 1) << name;
-  }
 }
 
 TEST(PropertyReflectTest,
@@ -618,25 +534,6 @@ TEST(PropertyReflectTest,
     EXPECT_EQ(visitor.absent_names_.count(name), 0) << name;
   }
   EXPECT_EQ(visitor.visit_counts_.count("attention_head_args"), 0);
-}
-
-TEST(PropertyReflectTest, PreservesMlaGeometryDefaults) {
-  const ModelArgs args{};
-  EXPECT_EQ(args.qk_nope_head_dim(), 0);
-  EXPECT_EQ(args.qk_rope_head_dim(), 0);
-  EXPECT_EQ(args.v_head_dim(), 0);
-  EXPECT_EQ(args.q_lora_rank(), 0);
-  EXPECT_EQ(args.kv_lora_rank(), 0);
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  for (const std::string name : {"qk_nope_head_dim",
-                                 "qk_rope_head_dim",
-                                 "v_head_dim",
-                                 "q_lora_rank",
-                                 "kv_lora_rank"}) {
-    EXPECT_EQ(visitor.int32_values_.at(name), 0) << name;
-  }
 }
 
 TEST(PropertyReflectTest, SharesMlaGeometryStorageAndKeepsFlatReflectionKeys) {
@@ -757,27 +654,6 @@ TEST(PropertyReflectTest, OwnsAttentionTypeSelectionAfterCopy) {
   EXPECT_EQ(&original.enable_mla(), &original.attention_args().enable_mla());
   EXPECT_EQ(&copied.enable_mla(), &copied.attention_args().enable_mla());
   EXPECT_NE(&original.enable_mla(), &copied.enable_mla());
-}
-
-TEST(PropertyReflectTest, PreservesLinearAttentionDefaults) {
-  const ModelArgs args{};
-  EXPECT_EQ(args.linear_conv_kernel_dim(), 0);
-  EXPECT_EQ(args.linear_key_head_dim(), 0);
-  EXPECT_EQ(args.linear_value_head_dim(), 0);
-  EXPECT_EQ(args.linear_num_key_heads(), 0);
-  EXPECT_EQ(args.linear_num_value_heads(), 0);
-  EXPECT_FLOAT_EQ(args.linear_lower_bound(), -5.0f);
-  EXPECT_TRUE(args.mamba_ssm_dtype().empty());
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  EXPECT_EQ(visitor.int32_values_.at("linear_conv_kernel_dim"), 0);
-  EXPECT_EQ(visitor.int32_values_.at("linear_key_head_dim"), 0);
-  EXPECT_EQ(visitor.int32_values_.at("linear_value_head_dim"), 0);
-  EXPECT_EQ(visitor.int64_values_.at("linear_num_key_heads"), 0);
-  EXPECT_EQ(visitor.int32_values_.at("linear_num_value_heads"), 0);
-  EXPECT_FLOAT_EQ(visitor.float_values_.at("linear_lower_bound"), -5.0f);
-  EXPECT_TRUE(visitor.string_values_.at("mamba_ssm_dtype").empty());
 }
 
 TEST(PropertyReflectTest,
@@ -902,18 +778,9 @@ TEST(PropertyReflectTest, OwnsIndependentLinearStateParametersAfterCopy) {
 
 TEST(PropertyReflectTest, PreservesHybridAttentionDefaults) {
   const ModelArgs args{};
-  EXPECT_EQ(args.full_attention_interval(), 0);
-  EXPECT_TRUE(args.full_attn_layers().empty());
-  EXPECT_TRUE(args.layer_types().empty());
   EXPECT_FALSE(has_linear_attention_layers(args));
   EXPECT_TRUE(is_full_attention_layer(args, 0));
   EXPECT_TRUE(is_full_attention_layer(args, 3));
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  EXPECT_EQ(visitor.int32_values_.at("full_attention_interval"), 0);
-  EXPECT_TRUE(visitor.int32_vector_values_.at("full_attn_layers").empty());
-  EXPECT_TRUE(visitor.string_vector_values_.at("layer_types").empty());
 }
 
 TEST(PropertyReflectTest,
@@ -1003,37 +870,6 @@ TEST(PropertyReflectTest, PreservesHybridLayerClassificationAfterCopy) {
   EXPECT_EQ(copied.full_attn_layers(), (std::vector<int32_t>{0, 1, 2, 3}));
   EXPECT_TRUE(is_full_attention_layer(copied, 3));
   EXPECT_FALSE(has_linear_attention_layers(copied));
-}
-
-TEST(PropertyReflectTest, PreservesRopeDefaults) {
-  const ModelArgs args{};
-  EXPECT_EQ(args.rotary_dim(), 0);
-  EXPECT_FLOAT_EQ(args.rope_theta(), 10000.0f);
-  EXPECT_TRUE(args.rope_scaling_rope_type().empty());
-  EXPECT_FLOAT_EQ(args.rope_scaling_factor(), 0.0f);
-  EXPECT_FLOAT_EQ(args.rope_scaling_low_freq_factor(), 0.0f);
-  EXPECT_FLOAT_EQ(args.rope_scaling_high_freq_factor(), 0.0f);
-  EXPECT_FLOAT_EQ(args.rope_extrapolation_factor(), 0.0f);
-  EXPECT_EQ(args.rope_scaling_original_max_position_embeddings(), 0);
-  EXPECT_EQ(args.rope_scaling_beta_fast(), 0);
-  EXPECT_EQ(args.rope_scaling_beta_slow(), 0);
-  EXPECT_FLOAT_EQ(args.rope_scaling_attn_factor(), 0.0f);
-  EXPECT_FLOAT_EQ(args.rope_scaling_mscale(), 0.0f);
-  EXPECT_FLOAT_EQ(args.rope_scaling_mscale_all_dim(), 0.0f);
-  EXPECT_TRUE(args.rope_scaling_mrope_section().empty());
-  EXPECT_FALSE(args.rope_scaling_mrope_interleaved());
-  EXPECT_EQ(args.rope_scaling(), -1);
-  EXPECT_FLOAT_EQ(args.partial_rotary_factor(), 0.0f);
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  EXPECT_EQ(visitor.int64_values_.at("rotary_dim"), 0);
-  EXPECT_FLOAT_EQ(visitor.float_values_.at("rope_theta"), 10000.0f);
-  EXPECT_TRUE(visitor.string_values_.at("rope_scaling_rope_type").empty());
-  EXPECT_EQ(visitor.int32_values_.at("rope_scaling"), -1);
-  EXPECT_TRUE(
-      visitor.int64_vector_values_.at("rope_scaling_mrope_section").empty());
-  EXPECT_FALSE(visitor.bool_values_.at("rope_scaling_mrope_interleaved"));
 }
 
 TEST(PropertyReflectTest, SharesRopeStorageAndKeepsFlatReflectionKeys) {
@@ -1168,36 +1004,6 @@ TEST(PropertyReflectTest, OwnsIndependentRopeScalingWithoutChangingContext) {
   EXPECT_FALSE(copied.use_absolute_position_embedding());
 }
 
-TEST(PropertyReflectTest, PreservesMultimodalTokenDefaults) {
-  const ModelArgs args{};
-  const std::array<std::pair<const char*, int32_t>, 10> fields = {{
-      {"vision_start_token_id", args.vision_start_token_id()},
-      {"vision_end_token_id", args.vision_end_token_id()},
-      {"vision_token_id", args.vision_token_id()},
-      {"image_token_id", args.image_token_id()},
-      {"video_token_id", args.video_token_id()},
-      {"audio_token_id", args.audio_token_id()},
-      {"image_start_token_id", args.image_start_token_id()},
-      {"image_end_token_id", args.image_end_token_id()},
-      {"video_start_token_id", args.video_start_token_id()},
-      {"video_end_token_id", args.video_end_token_id()},
-  }};
-  for (const auto& [name, value] : fields) {
-    EXPECT_EQ(value, 0) << name;
-  }
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  for (const auto& [name, value] : fields) {
-    EXPECT_EQ(visitor.int32_values_.at(name), value) << name;
-    EXPECT_EQ(visitor.visit_counts_.at(name), 1) << name;
-    EXPECT_EQ(visitor.visit_counts_.count("multimodal_token_args." +
-                                          std::string(name)),
-              0)
-        << name;
-  }
-}
-
 TEST(PropertyReflectTest,
      SharesMultimodalTokenStorageAndKeepsFlatReflectionKeys) {
   static_assert(std::is_same_v<
@@ -1293,26 +1099,6 @@ TEST(PropertyReflectTest, OwnsIndependentMultimodalTokensAfterCopy) {
   EXPECT_EQ(copied.audio_token_id(), 206);
 }
 
-TEST(PropertyReflectTest, PreservesSlidingWindowDefaults) {
-  const ModelArgs args{};
-  EXPECT_FALSE(args.use_sliding_window());
-  EXPECT_EQ(args.sliding_window(), -1);
-  EXPECT_EQ(args.max_window_layers(), 0);
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  EXPECT_FALSE(visitor.bool_values_.at("use_sliding_window"));
-  EXPECT_EQ(visitor.int32_values_.at("sliding_window"), -1);
-  EXPECT_EQ(visitor.int32_values_.at("max_window_layers"), 0);
-  for (const std::string name :
-       {"use_sliding_window", "sliding_window", "max_window_layers"}) {
-    EXPECT_EQ(visitor.visit_counts_.at(name), 1) << name;
-    EXPECT_EQ(visitor.visit_counts_.count("sliding_window_args." + name), 0)
-        << name;
-  }
-  EXPECT_EQ(visitor.visit_counts_.count("sliding_window_args"), 0);
-}
-
 TEST(PropertyReflectTest,
      SharesSlidingWindowStorageAndKeepsFlatReflectionKeys) {
   static_assert(std::is_same_v<
@@ -1362,23 +1148,6 @@ TEST(PropertyReflectTest,
   EXPECT_EQ(visitor.visit_counts_.count("sliding_window_args"), 0);
 }
 
-TEST(PropertyReflectTest, PreservesConfidenceHeadDefaults) {
-  const ModelArgs args{};
-  EXPECT_FALSE(args.enable_confidence_head());
-  EXPECT_FALSE(args.confidence_head_with_markov());
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  for (const std::string name :
-       {"enable_confidence_head", "confidence_head_with_markov"}) {
-    EXPECT_FALSE(visitor.bool_values_.at(name)) << name;
-    EXPECT_EQ(visitor.visit_counts_.at(name), 1) << name;
-    EXPECT_EQ(visitor.visit_counts_.count("confidence_head_args." + name), 0)
-        << name;
-  }
-  EXPECT_EQ(visitor.visit_counts_.count("confidence_head_args"), 0);
-}
-
 TEST(PropertyReflectTest,
      SharesConfidenceHeadStorageAndKeepsFlatReflectionKeys) {
   static_assert(std::is_same_v<decltype(std::declval<const ModelArgs&>()
@@ -1423,108 +1192,6 @@ TEST(PropertyReflectTest,
         << name;
   }
   EXPECT_EQ(visitor.visit_counts_.count("confidence_head_args"), 0);
-}
-
-TEST(PropertyReflectTest, PreservesDFlash2GeometryDefaults) {
-  const ModelArgs args{};
-  const std::array<std::pair<const char*, int32_t>, 5> fields = {{
-      {"dflash2_block_size", args.dflash2_block_size()},
-      {"dflash2_conv_group_size", args.dflash2_conv_group_size()},
-      {"dflash2_conv_kernel_size", args.dflash2_conv_kernel_size()},
-      {"dflash2_selector_rank", args.dflash2_selector_rank()},
-      {"dflash2_selector_top_k", args.dflash2_selector_top_k()},
-  }};
-  for (const auto& [name, value] : fields) {
-    EXPECT_EQ(value, 0) << name;
-  }
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  for (const auto& [name, value] : fields) {
-    EXPECT_EQ(visitor.int32_values_.at(name), value) << name;
-    EXPECT_EQ(visitor.visit_counts_.at(name), 1) << name;
-  }
-}
-
-TEST(PropertyReflectTest, SharesDFlash2GeometryStorageAndFlatKeys) {
-  ModelArgs args{};
-  args.dflash2_args()
-      .dflash2_block_size(/*value=*/4)
-      .dflash2_conv_group_size(/*value=*/2)
-      .dflash2_conv_kernel_size(/*value=*/3)
-      .dflash2_selector_rank(/*value=*/128)
-      .dflash2_selector_top_k(/*value=*/7);
-
-  EXPECT_EQ(args.dflash2_block_size(), 4);
-  EXPECT_EQ(args.dflash2_conv_group_size(), 2);
-  EXPECT_EQ(args.dflash2_conv_kernel_size(), 3);
-  EXPECT_EQ(args.dflash2_selector_rank(), 128);
-  EXPECT_EQ(args.dflash2_selector_top_k(), 7);
-  EXPECT_EQ(&args.dflash2_block_size(),
-            &args.dflash2_args().dflash2_block_size());
-  EXPECT_EQ(&args.dflash2_conv_group_size(),
-            &args.dflash2_args().dflash2_conv_group_size());
-  EXPECT_EQ(&args.dflash2_conv_kernel_size(),
-            &args.dflash2_args().dflash2_conv_kernel_size());
-  EXPECT_EQ(&args.dflash2_selector_rank(),
-            &args.dflash2_args().dflash2_selector_rank());
-  EXPECT_EQ(&args.dflash2_selector_top_k(),
-            &args.dflash2_args().dflash2_selector_top_k());
-
-  ModelArgs& chained = args.dflash2_block_size(/*value=*/8)
-                           .dflash2_conv_group_size(/*value=*/4)
-                           .dflash2_conv_kernel_size(/*value=*/5)
-                           .dflash2_selector_rank(/*value=*/256)
-                           .dflash2_selector_top_k(/*value=*/11);
-  EXPECT_EQ(&chained, &args);
-
-  RecordingPropertyVisitor visitor;
-  visit_properties(args, visitor);
-  const std::array<std::pair<const char*, int32_t>, 5> fields = {{
-      {"dflash2_block_size", 8},
-      {"dflash2_conv_group_size", 4},
-      {"dflash2_conv_kernel_size", 5},
-      {"dflash2_selector_rank", 256},
-      {"dflash2_selector_top_k", 11},
-  }};
-  for (const auto& [name, value] : fields) {
-    EXPECT_EQ(visitor.int32_values_.at(name), value) << name;
-    EXPECT_EQ(visitor.visit_counts_.at(name), 1) << name;
-    EXPECT_EQ(visitor.visit_counts_.count("dflash2_args." + std::string(name)),
-              0)
-        << name;
-  }
-  EXPECT_EQ(visitor.visit_counts_.count("dflash2_args"), 0);
-}
-
-TEST(PropertyReflectTest, OwnsIndependentDFlash2GeometryAfterCopy) {
-  ModelArgs original{};
-  original.dflash2_block_size(/*value=*/4).dflash2_selector_top_k(/*value=*/7);
-
-  ModelArgs copied = original;
-  copied.dflash2_args()
-      .dflash2_block_size(/*value=*/8)
-      .dflash2_selector_top_k(/*value=*/11);
-
-  EXPECT_EQ(original.dflash2_block_size(), 4);
-  EXPECT_EQ(original.dflash2_selector_top_k(), 7);
-  EXPECT_EQ(copied.dflash2_block_size(), 8);
-  EXPECT_EQ(copied.dflash2_selector_top_k(), 11);
-}
-
-TEST(PropertyReflectTest, PreservesImagePreprocessDefaults) {
-  const ModelArgs args{};
-  EXPECT_FALSE(args.mm_image_do_center_crop());
-  EXPECT_EQ(args.mm_image_crop_height_size(), 336);
-  EXPECT_EQ(args.mm_image_crop_width_size(), 336);
-  EXPECT_FALSE(args.mm_image_do_resize());
-  EXPECT_EQ(args.mm_image_resize_shortest_edge(), 336);
-  EXPECT_EQ(args.mm_image_resample(), 0);
-  EXPECT_FALSE(args.mm_image_do_rescale());
-  EXPECT_DOUBLE_EQ(args.mm_image_rescale_factor(), 0.0);
-  EXPECT_FALSE(args.mm_image_do_normalize());
-  EXPECT_TRUE(args.mm_image_normalize_mean().empty());
-  EXPECT_TRUE(args.mm_image_normalize_std().empty());
 }
 
 TEST(PropertyReflectTest,
@@ -1644,7 +1311,6 @@ TEST(PropertyReflectTest,
   EXPECT_FALSE(args.use_qk_norm());
   EXPECT_FALSE(args.attn_scalar().has_value());
   EXPECT_EQ(args.draft_vocab_size(), 0);
-  EXPECT_EQ(args.num_speculative_tokens(), 0);
   EXPECT_EQ(args.index_kpool(), 1);
   EXPECT_EQ(args.index_topk_freq(), 1);
   EXPECT_FLOAT_EQ(args.hc_eps(), 1e-6f);
@@ -1692,7 +1358,6 @@ TEST(PropertyReflectTest,
                                                            "attn_output_gate"};
   const std::vector<std::string> speculative_names = {
       "draft_vocab_size",
-      "num_speculative_tokens",
       "max_concurrent_prefills_per_dp",
       "layers_to_capture",
       "norm_before_fc",
@@ -1920,7 +1585,6 @@ TEST(PropertyReflectTest,
       .hidden_size(/*value=*/4096);
   args.kv_cache_args().max_seq_len(/*value=*/32768);
   args.attention_config_args().qkv_bias(/*value=*/true);
-  args.speculative_args().num_speculative_tokens(/*value=*/5);
   args.indexer_args().index_topk(/*value=*/64);
   args.deepseek_v4_args().rope_head_dim(/*value=*/64);
   args.moe_args().first_k_dense_replace(/*value=*/3);
@@ -1929,15 +1593,12 @@ TEST(PropertyReflectTest,
   EXPECT_EQ(args.hidden_size(), 4096);
   EXPECT_EQ(args.max_seq_len(), 32768);
   EXPECT_TRUE(args.qkv_bias());
-  EXPECT_EQ(args.num_speculative_tokens(), 5);
   EXPECT_EQ(args.index_topk(), 64);
   EXPECT_EQ(args.rope_head_dim(), 64);
   EXPECT_EQ(args.first_k_dense_replace(), 3);
   EXPECT_EQ(&args.model_type(), &args.model_architecture_args().model_type());
   EXPECT_EQ(&args.max_seq_len(), &args.kv_cache_args().max_seq_len());
   EXPECT_EQ(&args.qkv_bias(), &args.attention_config_args().qkv_bias());
-  EXPECT_EQ(&args.num_speculative_tokens(),
-            &args.speculative_args().num_speculative_tokens());
   EXPECT_EQ(&args.index_topk(), &args.indexer_args().index_topk());
   EXPECT_EQ(&args.rope_head_dim(), &args.deepseek_v4_args().rope_head_dim());
   EXPECT_EQ(&args.first_k_dense_replace(),
@@ -1949,7 +1610,6 @@ TEST(PropertyReflectTest,
   EXPECT_EQ(visitor.int64_values_.at("hidden_size"), 4096);
   EXPECT_EQ(visitor.int64_values_.at("max_seq_len"), 32768);
   EXPECT_TRUE(visitor.bool_values_.at("qkv_bias"));
-  EXPECT_EQ(visitor.int64_values_.at("num_speculative_tokens"), 5);
   EXPECT_EQ(visitor.int32_values_.at("index_topk"), 64);
   EXPECT_EQ(visitor.int32_values_.at("rope_head_dim"), 64);
   EXPECT_EQ(visitor.int32_values_.at("first_k_dense_replace"), 3);

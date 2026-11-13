@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include "core/framework/model_context/model_context.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_output.h"
@@ -29,8 +30,7 @@ namespace xllm {
 class Executor final {
  public:
   Executor(CausalLM* model,
-           const ModelArgs& args,
-           const torch::Device& device,
+           const ModelContext& context,
            const runtime::Options& options);
 
   virtual ~Executor() = default;

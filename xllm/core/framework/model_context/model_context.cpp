@@ -24,9 +24,11 @@ namespace xllm {
 ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
                            const ModelArgs& model_args,
                            const QuantArgs& quant_args,
-                           const torch::TensorOptions& tensor_options)
+                           const torch::TensorOptions& tensor_options,
+                           int32_t num_speculative_tokens)
     : parallel_args_(input_parallel_args),
       model_args_(model_args),
+      num_speculative_tokens_(num_speculative_tokens),
       quant_args_(quant_args),
       tensor_options_(tensor_options),
       stream_registry_(
@@ -36,25 +38,14 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
 
 ModelContext ModelContext::with_parallel_args(
     const ParallelArgs& parallel_args) const {
-  ModelContext derived(
-      parallel_args, model_args_, quant_args_, tensor_options_);
-  derived.model_id_ = model_id_;
-  derived.model_impl_ = model_impl_;
-  derived.extension_impl_ = extension_impl_;
-  derived.optimization_config_ = optimization_config_;
-  derived.flash_comm1_options_ = flash_comm1_options_;
-  derived.stream_registry_ = stream_registry_;
+  ModelContext derived = *this;
+  derived.parallel_args_ = parallel_args;
   return derived;
 }
 
 ModelContext ModelContext::with_quant_args(const QuantArgs& quant_args) const {
-  ModelContext derived(
-      parallel_args_, model_args_, quant_args, tensor_options_);
-  derived.model_id_ = model_id_;
-  derived.model_impl_ = model_impl_;
-  derived.extension_impl_ = extension_impl_;
-  derived.flash_comm1_options_ = flash_comm1_options_;
-  derived.stream_registry_ = stream_registry_;
+  ModelContext derived = *this;
+  derived.quant_args_ = quant_args;
   derived.derive_optimization_config();
   return derived;
 }

@@ -56,6 +56,13 @@ class WorkerRendezvous;
 class StaticKVCacheTensorAllocator;
 class LinearStateSlotTable;
 
+void build_dummy_forward_input(LlmForwardInput& input,
+                               int32_t token_count,
+                               const torch::Device& device);
+void build_dummy_forward_input(VlmForwardInput& input,
+                               int32_t token_count,
+                               const torch::Device& device);
+
 class WorkerImpl {
  public:
   enum Status : int8_t {
@@ -66,7 +73,8 @@ class WorkerImpl {
 
   WorkerImpl(const ParallelArgs& parallel_args,
              const torch::Device& device,
-             const runtime::Options& options);
+             const runtime::Options& options,
+             bool is_input_release_deferred = false);
 
   virtual ~WorkerImpl();
 
@@ -84,9 +92,18 @@ class WorkerImpl {
                           int32_t random_seed,
                           MasterStatus master_status);
 
-  virtual void load_model(std::unique_ptr<ModelLoader> loader);
+  bool init_model(std::unique_ptr<ModelLoader> loader,
+                  ModelContext context,
+                  std::unique_ptr<Tokenizer> tokenizer,
+                  int32_t random_seed,
+                  MasterStatus master_status);
+  ModelContext load_model_config(ModelArgs args,
+                                 const QuantArgs& quant_args,
+                                 int32_t num_speculative_tokens,
+                                 Tokenizer* tokenizer);
+  std::unique_ptr<Tokenizer> load_tokenizer(const ModelLoader& loader);
 
-  torch::Tensor take_draft_token_id_offsets();
+  virtual void load_model(std::unique_ptr<ModelLoader> loader);
 
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader);
 
@@ -95,15 +112,18 @@ class WorkerImpl {
   bool has_request_state_cache() const;
 
   bool uses_shared_static_kv_cache() const {
-    return static_kv_cache_allocator_ != nullptr;
+    return static_full_block_slots_ != nullptr;
   }
 
-  // Called by the speculative worker after target allocation and before draft
-  // allocation. The target owns lease initialization for both models.
-  void bind_shared_draft_kv_cache(const WorkerImpl& target);
+  KVCacheCreateOptions shared_kv_cache_layout() const;
 
   // allocate kv cache. blocking call
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
+  void allocate_kv_cache(const KVCacheShape& shape,
+                         const KVCacheCreateOptions& layout,
+                         std::shared_ptr<KVCacheTransfer> transfer = nullptr);
+  CausalLM* get_causal_lm() const { return model_.get(); }
+  std::vector<KVCache>& kv_caches() { return kv_caches_; }
 
   virtual bool allocate_kv_cache_with_transfer(
       const KVCacheShape& kv_cache_shape);
@@ -156,8 +176,11 @@ class WorkerImpl {
       const std::vector<int32_t>& linear_state_rows,
       Stream& prepare_stream);
 #if defined(USE_NPU)
-  // Builds or reuses draft decode padding on the current stream. MTP calls this
-  // while preparing B/2B metadata so the compute stream only observes hits.
+  DpEpPaddingData build_dp_ep_padding_data(
+      const std::vector<int32_t>& token_sizes,
+      const std::vector<int32_t>& raw_token_sizes,
+      bool is_prefill) const;
+
   bool uses_npu_dp_ep_padding() const;
   void prepare_dp_ep_padding(LlmModelParams& input_params);
   void prepare_dp_ep_padding(VlmModelParams& input_params);
@@ -320,6 +343,16 @@ class WorkerImpl {
 
   Status get_status() const { return status_; }
 
+  void set_input_preparer(std::function<void(LlmForwardInput&)> prepare_input) {
+    prepare_llm_input_ = std::move(prepare_input);
+  }
+
+  void set_input_preparer(std::function<void(VlmForwardInput&)> prepare_input) {
+    prepare_vlm_input_ = std::move(prepare_input);
+  }
+
+  const runtime::Options& options() const { return options_; }
+
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;
 
@@ -398,23 +431,22 @@ class WorkerImpl {
 
   bool can_prepare_npu_graph_decode_input(
       const LlmModelParams& input_params) const;
-  bool can_prepare_without_compute_stream_wait(
-      const LlmModelParams& input_params) const;
+  virtual bool can_prepare_without_compute_stream_wait() const;
   bool can_skip_npu_graph_decode_sync(const LlmModelParams& input_params) const;
   bool can_prepare_npu_graph_decode_input(
       const VlmModelParams& input_params) const;
-  bool can_prepare_without_compute_stream_wait(
-      const VlmModelParams& input_params) const;
   bool can_skip_npu_graph_decode_sync(const VlmModelParams& input_params) const;
 
-  bool allocate_kv_cache_storage(
+  void allocate_kv_cache_storage(
       const KVCacheShape& kv_cache_shape,
       bool use_huge_page_allocator = false,
-      std::shared_ptr<KVCacheTensorAllocator> tensor_allocator = nullptr);
+      std::shared_ptr<KVCacheTensorAllocator> tensor_allocator = nullptr,
+      const KVCacheCreateOptions* layout = nullptr);
 
-  // Get the effective number of layers based on whether this is a spec draft
-  // model
-  int64_t get_num_layers() const;
+  void configure_shared_kv_allocation(const KVCacheShape& kv_cache_shape,
+                                      KVCacheCreateOptions& create_options,
+                                      bool use_huge_page_allocator);
+  void register_kv_cache_transfer(const KVCacheShape& kv_cache_shape);
 
   bool wakeup_local(const WakeupOptions& options);
 
@@ -422,9 +454,6 @@ class WorkerImpl {
   bool virtual_memory_sleep(MasterStatus master_status);
 
 #if defined(USE_NPU)
-  static constexpr size_t kDraftDpEpPaddingCacheCapacity = 2;
-  DpEpPaddingCache draft_dp_ep_padding_cache_{kDraftDpEpPaddingCacheCapacity};
-
   bool wakeup_from_remote_weights(const WakeupOptions& options);
 
 #endif
@@ -432,11 +461,14 @@ class WorkerImpl {
  private:
   friend class ScheduleOverlap;
 
-  bool init_model_impl(const std::string& model_weights_path,
-                       int32_t random_seed,
+  bool init_model_impl(std::unique_ptr<ModelLoader> model_loader,
+                       ModelContext context,
+                       std::unique_ptr<Tokenizer> tokenizer,
                        MasterStatus master_status);
 
   WorkerResidencyState residency_state_;
+  std::function<void(LlmForwardInput&)> prepare_llm_input_;
+  std::function<void(VlmForwardInput&)> prepare_vlm_input_;
 
   template <typename Input>
   void prepare_schedule_overlap_impl(const Input& input);
@@ -454,17 +486,17 @@ class WorkerImpl {
   bool can_prepare_npu_graph_decode_input_impl(
       const Params& input_params) const;
   template <typename Params>
-  bool can_prepare_without_compute_stream_wait_impl(
-      const Params& input_params) const;
-  template <typename Params>
   bool can_skip_npu_graph_decode_sync_impl(const Params& input_params) const;
+  template <typename Input>
+  void prepare_dummy_input(Input& input);
   template <typename Input>
   void prepare_work_before_execute_on_stream_impl(
       const Input& input,
       Input& processed_input,
       Stream& prepare_stream,
       bool record_ready_event,
-      bool wait_for_compute_stream = true);
+      bool wait_for_compute_stream = true,
+      const std::function<void(Input&)>& prepare_input = {});
   template <typename Params>
   void prepare_mla_prefixcache_inputs_impl(Params& input_params);
 #if defined(USE_NPU)
@@ -519,7 +551,6 @@ class WorkerImpl {
   // kv caches
   std::vector<xllm::KVCache> kv_caches_;
   std::shared_ptr<StaticKVCacheTensorAllocator> static_kv_cache_allocator_;
-  std::shared_ptr<KVCacheTensorAllocator> static_draft_kv_cache_allocator_;
   std::shared_ptr<LinearStateSlotTable> static_full_block_slots_;
 
   // causal LM model
@@ -549,10 +580,6 @@ class WorkerImpl {
   std::unique_ptr<MooncakeWeightTransfer> weight_transfer_;
 
 #endif
-
-  bool is_spec_draft_ = false;
-
-  torch::Tensor draft_token_id_offsets_;
 
   Status status_ = Status::UNINITIALIZED;
 

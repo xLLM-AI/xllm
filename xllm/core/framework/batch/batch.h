@@ -74,9 +74,6 @@ class Batch final {
   // Logical execution rows.
   size_t size() const;
   bool empty() const { return state_.empty(); }
-  size_t num_scheduled_sequences() const {
-    return state_.sequence_plan().size();
-  }
   size_t num_groups() const { return state_.sequence_groups().size(); }
   const BatchSequencePlan& sequence_plan() const {
     return state_.sequence_plan();
@@ -84,25 +81,12 @@ class Batch final {
 
   Sequence* operator[](size_t index) const;
 
-  // prepare forward inputs
-  LlmForwardInput prepare_forward_input(uint32_t num_decoding_tokens,
-                                        uint32_t min_decoding_bach_size,
-                                        const ModelArgs& args,
-                                        int32_t cp_size = 1);
-
-  // Prepare LlmForwardInput for distributed transport.
-  LlmForwardInput prepare_forward_input(
+  template <typename Input = LlmForwardInput>
+  Input prepare_forward_input(
       const ModelArgs& args,
-      ThreadPool* thread_pool,
+      ThreadPool* thread_pool = nullptr,
       int32_t cp_size = 1,
       SharedKVCacheMappingTracker* mapping_tracker = nullptr);
-  VlmForwardInput prepare_vlm_forward_input(uint32_t num_decoding_tokens,
-                                            uint32_t min_decoding_batch_size,
-                                            const ModelArgs& args,
-                                            int32_t cp_size = 1);
-  VlmForwardInput prepare_vlm_forward_input(const ModelArgs& args,
-                                            ThreadPool* thread_pool,
-                                            int32_t cp_size = 1);
 
   // Apply sampled tokens or reserve/commit a pending overlap result.
   void process_sample_output(const SampleOutput& sample_output,

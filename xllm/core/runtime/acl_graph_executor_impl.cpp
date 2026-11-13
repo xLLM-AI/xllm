@@ -1203,9 +1203,10 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
   }
   // Keep actual n_tokens for replay output slicing.
   const uint32_t n_tokens = tokens_tensor.size(/*dim=*/0);
-  const uint32_t local_batch_size = n_tokens / options_.num_decoding_tokens();
+  const uint32_t local_batch_size =
+      n_tokens / (options_.num_speculative_tokens() + 1);
   const uint32_t max_local_batch_size =
-      max_local_num_tokens / options_.num_decoding_tokens();
+      max_local_num_tokens / (options_.num_speculative_tokens() + 1);
 
   // Large decode batches create too many/too large ACL graphs and may OOM.
   // Fall back to eager mode when batch size exceeds the safety threshold.
@@ -1361,7 +1362,7 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
             max_graph_batch_size,
             dp_size,
             params_single.meta.is_graph_warmup,
-            static_cast<uint32_t>(options_.num_decoding_tokens()))) {
+            static_cast<uint32_t>(options_.num_speculative_tokens()))) {
       LOG_FIRST_N(WARNING, 1)
           << "Falling back to eager mode because no ACL graph was prewarmed "
              "for no-padding decode batch_size="

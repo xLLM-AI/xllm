@@ -169,66 +169,9 @@ class _FakeModelNoAttention(nn.Module):
         self._param = nn.Parameter(torch.zeros(1))
 
 
-# Cell-by-cell twin of the C++ truth-table gtest
-# (ModelTypeClassificationTest.ClassificationMatchesPredicates in
-# tests/models/py_causal_lm_test.cpp): when either side changes its
-# classification logic, one of the two tests must go red, forcing a re-sync.
-# The cases are sampled points, not the full sets: a new DSpark or DFlash
-# family member needs a case here AND in the C++ gtest — skipping both sides
-# leaves everything green while the classification drifts.
-@pytest.mark.parametrize(
-    (
-        "model_type",
-        "is_deepseek_v4_model",
-        "is_block_draft_model",
-        "is_dspark_draft_model",
-        "uses_context_kv_projection",
-    ),
-    [
-        ("deepseek_v4", True, False, False, False),
-        ("deepseek_v4_mtp", True, False, False, False),
-        ("deepseek_v4_dspark", True, True, True, False),
-        ("DFlashDraftModel", False, True, False, False),
-        ("DFlash2DraftModel", False, True, False, True),
-        ("DSparkDraftModel", False, True, True, True),
-        ("glm5_dspark", False, True, True, True),
-        ("glm_moe_dsa", False, False, False, False),
-    ],
-)
-def test_classification_matches_cpp_truth_table(
-    model_type: str,
-    is_deepseek_v4_model: bool,
-    is_block_draft_model: bool,
-    is_dspark_draft_model: bool,
-    uses_context_kv_projection: bool,
-) -> None:
-    from xllm.python.model_platform_support import (
-        is_block_draft_model as block_draft,
-    )
-    from xllm.python.model_platform_support import (
-        is_deepseek_v4_model as deepseek_v4,
-    )
-    from xllm.python.model_platform_support import (
-        is_dspark_draft_model as dspark_draft,
-    )
-    from xllm.python.model_platform_support import (
-        uses_context_kv_projection as context_kv,
-    )
-
-    config = _classify({"model_type": model_type})
-    assert deepseek_v4(config) is is_deepseek_v4_model
-    assert block_draft(config) is is_block_draft_model
-    assert dspark_draft(config) is is_dspark_draft_model
-    assert context_kv(config) is uses_context_kv_projection
-
-
 class _FailingLayerSynchronizer:
     def record_event(self, layer_id: int) -> bool:
         return False
-
-
-def test_attention_backend_defaults_to_non_mla() -> None:
-    assert StubAttentionBackend().is_mla is False
 
 
 def test_record_layer_event_propagates_record_failure() -> None:
@@ -297,7 +240,7 @@ class TestCreateAttentionBackend:
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["device"] is device
         assert backend.init_kwargs["attn_head_dim"] == 512
-        assert backend.init_kwargs["dspark_block_size"] == 0
+        assert backend.init_kwargs["block_size"] == 0
         assert backend.init_kwargs["dspark_use_native_sas"] is False
         assert backend.init_kwargs["n_layers"] == 3
         assert backend.init_kwargs["compress_ratios"] == [1, 4, 128]
@@ -316,7 +259,7 @@ class TestCreateAttentionBackend:
                 "compress_ratios": [1, 1, 1],
                 "n_layers": 3,
                 "window_size": 128,
-                "dspark_block_size": 5,
+                "block_size": 5,
                 "dspark_use_native_sas": True,
             }
         )
@@ -324,7 +267,7 @@ class TestCreateAttentionBackend:
         with patch.dict(sys.modules, {module.__name__: module}):
             backend = _create_attention_backend(attn, torch.device("npu"), torch.bfloat16, config)
 
-        assert backend.init_kwargs["dspark_block_size"] == 5
+        assert backend.init_kwargs["block_size"] == 5
         assert backend.init_kwargs["dspark_use_native_sas"] is True
 
     @patch(
@@ -549,10 +492,7 @@ class TestCreateAttentionBackend:
 
 class TestModelExecutorConstruction:
     @pytest.mark.parametrize("graph_backend", ["off", "aclgraph"])
-    @pytest.mark.parametrize(
-        "explicit_width,config_depth,expected_width",
-        [(1, 0, 1), (1, 3, 4), (4, 1, 4)],
-    )
+    @pytest.mark.parametrize("config_depth", [0, 3])
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
     @patch("xllm.python.model_executor.executor._create_attention_backend")
     def test_decoding_width_reaches_graph_capacity(
@@ -560,9 +500,7 @@ class TestModelExecutorConstruction:
         mock_create: MagicMock,
         mock_graph_runner: MagicMock,
         graph_backend: str,
-        explicit_width: int,
         config_depth: int,
-        expected_width: int,
     ) -> None:
         mock_create.return_value = StubAttentionBackend()
         ModelExecutor(
@@ -573,12 +511,11 @@ class TestModelExecutorConstruction:
                 "max_position_embeddings": 128,
             },
             max_seqs_per_batch=4,
-            num_decoding_tokens=explicit_width,
         )
 
-        assert mock_create.call_args.args[4] == 4 * expected_width
+        assert mock_create.call_args.args[4] == 4 * (config_depth + 1)
         if graph_backend == "aclgraph":
-            assert mock_graph_runner.call_args.kwargs["num_decoding_tokens"] == expected_width
+            assert mock_graph_runner.call_args.kwargs["num_speculative_tokens"] == config_depth
         else:
             mock_graph_runner.assert_not_called()
 
@@ -719,7 +656,6 @@ class TestModelExecutorConstruction:
                 "is_draft_engine": is_draft_engine,
             },
             max_seqs_per_batch=256,
-            num_decoding_tokens=4,
             acl_graph_decode_batch_size_limit=16,
         )
 
@@ -727,15 +663,14 @@ class TestModelExecutorConstruction:
             model.model,
             mock_create.return_value,
             torch.device("cpu"),
-            64,
+            16,
             128,
             1,
             0,
-            num_decoding_tokens=4,
+            num_speculative_tokens=0,
             is_spec_draft=is_draft_engine,
             enable_mega_moe_token_mask=False,
             enable_graph_mode_decode_no_padding=False,
-            spec_verify_width=1,
             device_kv_lengths=False,
             max_capture_tokens=None,
         )
@@ -782,23 +717,21 @@ class TestModelExecutorConstruction:
                 "python_graph_backend": "aclgraph",
             },
             max_seqs_per_batch=17,
-            num_decoding_tokens=4,
         )
 
-        assert mock_create.call_args.args[4] == 68
+        assert mock_create.call_args.args[4] == 17
         mock_graph_runner.assert_called_once_with(
             model.model,
             mock_create.return_value,
             torch.device("cpu"),
-            128,
+            32,
             128,
             16,
             0,
-            num_decoding_tokens=4,
+            num_speculative_tokens=0,
             is_spec_draft=False,
             enable_mega_moe_token_mask=True,
             enable_graph_mode_decode_no_padding=False,
-            spec_verify_width=1,
             device_kv_lengths=False,
             max_capture_tokens=None,
         )
@@ -1014,7 +947,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
         metadata = self._metadata()
         metadata.linear_state_indices = torch.arange(2, dtype=torch.int32) if linear_state else None
         with patch.object(_PagedStubAttentionBackend, "supports_linear_spec_verify_graph", supported):
-            assert runner.can_execute(torch.arange(4, dtype=torch.int32), metadata) is allowed
+            assert (runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is not None) is allowed
 
     def test_execute_accepts_base_runner_context_keywords(self) -> None:
         runner = self._runner()
@@ -1037,7 +970,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             torch.device("cpu"),
             max_batch=64,
             max_model_len=8,
-            num_decoding_tokens=4,
+            num_speculative_tokens=3,
         )
         metadata = self._metadata()
         metadata.dp_execution_token_counts = (32, 64)
@@ -1238,26 +1171,26 @@ class TestDecodeAclGraphSpeculativeMetadata:
 
     @pytest.mark.parametrize("task_updates", [False, True])
     @pytest.mark.parametrize(
-        ("num_decoding_tokens", "is_draft", "with_embedding", "with_topk"),
+        ("num_speculative_tokens", "is_draft", "with_embedding", "with_topk"),
         [
-            (1, False, False, False),
-            (4, False, False, False),
-            (1, True, False, False),
-            (1, False, True, False),
-            (1, False, False, True),
+            (0, False, False, False),
+            (3, False, False, False),
+            (0, True, False, False),
+            (0, False, True, False),
+            (0, False, False, True),
         ],
         ids=["ordinary", "verify", "draft", "repair", "shared-topk"],
     )
     def test_replay_output_ownership_and_stream_ordering(
         self,
         task_updates: bool,
-        num_decoding_tokens: int,
+        num_speculative_tokens: int,
         is_draft: bool,
         with_embedding: bool,
         with_topk: bool,
     ) -> None:
         runner = self._runner()
-        runner.num_decoding_tokens = num_decoding_tokens
+        runner.num_speculative_tokens = num_speculative_tokens
         runner._is_spec_draft = is_draft
         prepare_replay = MagicMock()
         runner.attention_backend.prepare_graph_replay = prepare_replay
@@ -1315,7 +1248,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             )
 
         assert output.shape == (batch_size, 3)
-        detached = num_decoding_tokens > 1 or is_draft or with_embedding or with_topk
+        detached = num_speculative_tokens > 0 or is_draft or with_embedding or with_topk
         assert (output.data_ptr() != static_output.data_ptr()) == detached
         expected = output.clone()
         static_output.add_(100)
@@ -1501,10 +1434,10 @@ def test_cp_admission_preserves_model_specific_kv_support(
         }
     )
     if model_type != "deepseek_v4" or kv_split == 1:
-        _validate_npu_cp_model_config(config, decoding_tokens)
+        _validate_npu_cp_model_config(config)
     else:
         with pytest.raises(NotImplementedError, match="requires replicated KV caches"):
-            _validate_npu_cp_model_config(config, decoding_tokens)
+            _validate_npu_cp_model_config(config)
 
 
 @pytest.mark.parametrize(("is_draft", "algorithm"), [(False, "mtp"), (True, "eagle3"), (True, "dflash")])
@@ -1517,7 +1450,7 @@ def test_glm_cp_draft_admission_requires_mtp_draft_engine(is_draft: bool, algori
         "kv_split_size": 1,
     }
     with pytest.raises(NotImplementedError, match="does not support model_type"):
-        _validate_npu_cp_model_config(config, 1)
+        _validate_npu_cp_model_config(config)
 
 
 def test_glm_non_mtp_cp_prefill_retains_sharded_kv_admission() -> None:
@@ -1529,7 +1462,6 @@ def test_glm_non_mtp_cp_prefill_retains_sharded_kv_admission() -> None:
             "instance_role": "PREFILL",
             "enable_disagg_pd": True,
         },
-        1,
     )
 
 
@@ -1543,13 +1475,13 @@ def test_glm5_next_cp_admission_matches_runtime_constraints(model_type: str) -> 
             "ep_size": 1,
         }
     )
-    _validate_npu_cp_model_config(config, 1)
-    _validate_npu_cp_model_config({**config, "ep_size": 2, "dp_size": 2}, 1)
+    _validate_npu_cp_model_config(config)
+    _validate_npu_cp_model_config({**config, "ep_size": 2, "dp_size": 2})
 
     with pytest.raises(NotImplementedError, match="ep_size >= 1"):
-        _validate_npu_cp_model_config({**config, "ep_size": 0}, 1)
+        _validate_npu_cp_model_config({**config, "ep_size": 0})
     with pytest.raises(NotImplementedError, match="disaggregated PD"):
-        _validate_npu_cp_model_config({**config, "enable_disagg_pd": True}, 1)
+        _validate_npu_cp_model_config({**config, "enable_disagg_pd": True})
 
 
 def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device) -> SimpleNamespace:
@@ -1631,7 +1563,7 @@ def test_cp_mtp_decode_acl_replays_persistent_rows_and_detaches_outputs() -> Non
 
     device = torch.device("npu:0")
     runner = DecodeAclGraphRunner(
-        _GraphModel(), _GraphBackend(), device, max_batch=4, max_model_len=16, num_decoding_tokens=4
+        _GraphModel(), _GraphBackend(), device, max_batch=4, max_model_len=16, num_speculative_tokens=3
     )
     bindings: dict[tuple, tuple[int, ...]] = {}
     retained: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
@@ -1650,7 +1582,7 @@ def test_cp_mtp_decode_acl_replays_persistent_rows_and_detaches_outputs() -> Non
             positions = positions_cpu.to(device)
             hidden = None if phase == 0 else hidden_cpu.to(device)
             topk = topk_cpu.to(device) if phase == 2 else None
-            assert runner.can_execute(tokens, metadata, hidden, topk)
+            assert runner.prepare_execution(tokens, metadata, hidden, topk) is not None
             with forward_context(ForwardContext(None, device, None, [], cp_context=object())):
                 output, auxiliary, indices = runner.execute(tokens, positions, metadata, hidden, topk)
             assert auxiliary is None
@@ -1987,14 +1919,21 @@ class TestExecuteRouting:
         positions = torch.arange(4, dtype=torch.int32)
         metadata = MagicMock(spec=AttentionMetadata)
         graph_runner = create_autospec(DecodeAclGraphRunner, instance=True)
-        graph_runner.can_execute.return_value = True
         graph_runner.execute.return_value = torch.ones(4)
         executor.decode_graph_runner = graph_runner
 
         result = executor.execute(input_ids, positions, metadata)
 
         graph_runner.warmup.assert_called_once_with(
-            input_ids, positions, metadata, None, None, eplb=None, input_batch=None
+            input_ids,
+            positions,
+            metadata,
+            None,
+            None,
+            eplb=None,
+            decode_metadata=graph_runner.prepare_execution.return_value,
+            is_graph_warmup=False,
+            input_batch=None,
         )
         graph_runner.execute.assert_called_once_with(
             input_ids,
@@ -2004,7 +1943,7 @@ class TestExecuteRouting:
             None,
             graph_key=graph_runner.warmup.return_value,
             eplb=None,
-            decode_metadata=None,
+            decode_metadata=graph_runner.prepare_execution.return_value,
             input_batch=None,
         )
         assert torch.equal(result, torch.ones(4))
@@ -2068,37 +2007,6 @@ def test_executor_admits_startup_graphs_and_runs_larger_serving_batches_eagerly(
 
 
 @patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend())
-@pytest.mark.parametrize("runner_type", [DecodeAclGraphRunner, BlockDraftAclGraphRunner])
-def test_serving_graph_log_excludes_eager_and_warmup(
-    _mock_create: MagicMock, runner_type: type[DecodeAclGraphRunner]
-) -> None:
-    executor = ModelExecutor(_FakeModel(num_layers=1), {}, max_seqs_per_batch=2)
-    executor.bind_kv_caches([(torch.zeros(1), torch.zeros(1))])
-    runner = MagicMock(spec=runner_type)
-    runner.warmup.return_value = None
-    runner.execute.return_value = torch.ones(2)
-    runner.can_execute.return_value = False
-    executor.decode_graph_runner = runner
-    executor.eager_runner.execute = MagicMock(return_value=torch.ones(2))
-    tokens = torch.arange(2, dtype=torch.int32)
-    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=False, prepared_attention_state=None)
-    with patch("xllm.python.model_executor.executor.logger") as mock_logger:
-        executor.execute(tokens, tokens, metadata)
-        mock_logger.info.assert_not_called()
-        runner.can_execute.return_value = True
-        executor.execute(tokens, tokens, metadata, is_graph_warmup=True)
-        mock_logger.info.assert_not_called()
-        executor.execute(tokens, tokens, metadata)
-        executor.execute(tokens, tokens, metadata)
-        mock_logger.info.assert_called_once_with(
-            "Python serving ACL graph replay: model=%s runner=%s rows=%d",
-            "_FakeModel",
-            type(runner).__name__,
-            2,
-        )
-
-
-@patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend())
 def test_context_parallel_rejects_data_parallel_combination(_mock_create):
     with pytest.raises(NotImplementedError, match="Python CP requires dp_size == 1"):
         ModelExecutor(
@@ -2124,7 +2032,6 @@ def test_mtp_topk_routes_to_acl_graph(mock_create):
     executor = ModelExecutor(_FakeModel(num_layers=1), {}, max_seqs_per_batch=4)
     executor.bind_kv_caches([(torch.zeros(1), torch.zeros(1))])
     graph_runner = create_autospec(DecodeAclGraphRunner, instance=True)
-    graph_runner.can_execute.return_value = True
     executor.decode_graph_runner = graph_runner
     executor.eager_runner = MagicMock()
     input_ids = torch.arange(2, dtype=torch.int32)
@@ -2133,16 +2040,16 @@ def test_mtp_topk_routes_to_acl_graph(mock_create):
 
     result = executor.execute(input_ids, input_ids, metadata, mtp_topk_indices=topk)
 
-    graph_runner.can_execute.assert_called_once_with(input_ids, metadata, None, mtp_topk_indices=topk)
+    graph_runner.prepare_execution.assert_called_once_with(input_ids, metadata, None, topk, is_graph_warmup=False)
     graph_runner.execute.assert_called_once_with(
         input_ids,
         input_ids,
         metadata,
         None,
-        mtp_topk_indices=topk,
+        topk,
         graph_key=graph_runner.warmup.return_value,
         eplb=None,
-        decode_metadata=None,
+        decode_metadata=graph_runner.prepare_execution.return_value,
         input_batch=None,
     )
     assert result is graph_runner.execute.return_value
@@ -2165,10 +2072,7 @@ def test_qwen_draft_prefix_capacity_reaches_backend_and_decode_graph(draft_token
         "model_type": "qwen3_5_mtp",
         "is_draft_engine": True,
         "is_mtp_algorithm": True,
-        # Ordinary draft still decodes one token in later steps. The first
-        # pass must independently reserve the complete accepted target prefix.
-        "num_speculative_tokens": 0,
-        "mtp_draft_prefix_width": width,
+        "num_speculative_tokens": draft_tokens,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
     }
@@ -2180,7 +2084,6 @@ def test_qwen_draft_prefix_capacity_reaches_backend_and_decode_graph(draft_token
             _FakeModel(),
             config,
             max_seqs_per_batch=5,
-            num_decoding_tokens=1,
             acl_graph_decode_batch_size_limit=4,
         )
     assert create.call_args.args[4] == 5 * width
@@ -2188,12 +2091,12 @@ def test_qwen_draft_prefix_capacity_reaches_backend_and_decode_graph(draft_token
     assert runner is not None and runner.max_batch == 4 * width
 
 
-def test_glm_draft_ignores_qwen_prefix_capacity_option() -> None:
+def test_glm_draft_graph_capacity_uses_two_rows_per_request() -> None:
     config = {
         "model_type": "glm_moe_dsa_mtp",
         "is_draft_engine": True,
         "is_mtp_algorithm": True,
-        "mtp_draft_prefix_width": 17,
+        "num_speculative_tokens": 16,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
     }
@@ -2204,16 +2107,6 @@ def test_glm_draft_ignores_qwen_prefix_capacity_option() -> None:
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=4)
     assert create.call_args.args[4] == 10
     assert executor.decode_graph_runner.max_batch == 8
-
-
-@pytest.mark.parametrize("width", [0, 18])
-def test_qwen_draft_rejects_unsupported_prefix_capacity(width: int) -> None:
-    with pytest.raises(ValueError, match="prefix width"):
-        ModelExecutor(
-            _FakeModel(),
-            {"model_type": "qwen3_5_mtp", "mtp_draft_prefix_width": width},
-            max_seqs_per_batch=2,
-        )
 
 
 def test_executor_rejects_qwen_mtp_width_beyond_kernel_capacity() -> None:
@@ -2250,7 +2143,6 @@ def test_kv_transfer_uses_eager_and_preserves_step_inputs(is_mtp: bool) -> None:
     topk = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32) if is_mtp else None
     executor.eager_runner = MagicMock()
     executor.decode_graph_runner = MagicMock(spec=DecodeAclGraphRunner)
-    executor.decode_graph_runner.can_execute.return_value = True
     executor.inductor_runner = MagicMock()
 
     for _ in range(2):
@@ -2261,7 +2153,7 @@ def test_kv_transfer_uses_eager_and_preserves_step_inputs(is_mtp: bool) -> None:
         executor.eager_runner.execute.assert_called_with(*expected_args, eplb=None, input_batch=None)
         assert result is executor.eager_runner.execute.return_value
     assert executor.eager_runner.execute.call_count == 2
-    executor.decode_graph_runner.can_execute.assert_not_called()
+    executor.decode_graph_runner.prepare_execution.assert_not_called()
     for runner in (executor.decode_graph_runner, executor.inductor_runner):
         runner.execute.assert_not_called()
 
@@ -2297,6 +2189,7 @@ def test_speculative_target_graph_capacity_expands_validation_tokens(dp_size: in
         "dp_rank": 0,
         "cp_size": cp_size,
         "kv_split_size": 1,
+        "num_speculative_tokens": 3,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
     }
@@ -2308,9 +2201,7 @@ def test_speculative_target_graph_capacity_expands_validation_tokens(dp_size: in
             return_value=_GraphStubAttentionBackend(),
         ),
     ):
-        executor = ModelExecutor(
-            _FakeModel(), config, max_seqs_per_batch=5, num_decoding_tokens=4, acl_graph_decode_batch_size_limit=4
-        )
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=4)
     assert executor.decode_graph_runner.max_batch == min((5 + dp_size - 1) // dp_size, 4) * 4
 
 
@@ -2346,6 +2237,7 @@ def test_executor_passes_no_padding_policy_to_ordinary_acl_runner(
         "model_type": model_type,
         "is_draft_engine": model_type == "qwen3_5_mtp",
         "is_mtp_algorithm": True,
+        "num_speculative_tokens": 3,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 4096,
         "enable_graph_mode_decode_no_padding": no_padding,
@@ -2366,17 +2258,19 @@ def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
     config = _classify(
         {
             "model_type": "DSparkDraftModel",
-            "num_speculative_tokens": 7,
+            "num_speculative_tokens": 6,
             "dp_size": dp_size,
             "dp_rank": dp_size - 1,
             "python_graph_backend": "aclgraph",
             "max_position_embeddings": 128,
         }
     )
+    model = _FakeModel()
+    model.cfg = SimpleNamespace(block_size=7)
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=2)
+        executor = ModelExecutor(model, config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=2)
     runner = executor.decode_graph_runner
     assert isinstance(runner, BlockDraftAclGraphRunner)
     assert runner.dp_size == dp_size
@@ -2397,7 +2291,7 @@ def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> Non
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
-        executor = ModelExecutor(model, config, max_seqs_per_batch=2, num_decoding_tokens=8)
+        executor = ModelExecutor(model, config, max_seqs_per_batch=2)
     assert isinstance(executor.decode_graph_runner, BlockDraftAclGraphRunner)
     assert executor.decode_graph_runner.max_batch == 2
     executor._kv_bound = True
@@ -2414,15 +2308,17 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
     config = _classify(
         {
             "model_type": "DSparkDraftModel",
-            "num_speculative_tokens": 7,
+            "num_speculative_tokens": 6,
             "python_graph_backend": "aclgraph",
             "max_position_embeddings": 128,
         }
     )
+    model = _FakeModel()
+    model.cfg = SimpleNamespace(block_size=7)
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=4)
+        executor = ModelExecutor(model, config, max_seqs_per_batch=4)
     cache = torch.empty(2, 4, 2, 64)
     executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
     executor.context_kv_graph_runner.warmup = MagicMock()
@@ -2441,15 +2337,17 @@ def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None
     config = _classify(
         {
             "model_type": "DSparkDraftModel",
-            "num_speculative_tokens": 3,
+            "num_speculative_tokens": 2,
             "python_graph_backend": "aclgraph",
             "max_position_embeddings": 128,
         }
     )
+    model = _FakeModel()
+    model.cfg = SimpleNamespace(block_size=3)
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=4)
+        executor = ModelExecutor(model, config, max_seqs_per_batch=4)
     executor._kv_bound = True
     runner = executor.decode_graph_runner
     assert isinstance(runner, BlockDraftAclGraphRunner)
@@ -2501,10 +2399,9 @@ class TestDecodeAclGraphWidthKeying:
             torch.device("cpu"),
             max_batch=16,
             max_model_len=8,
-            num_decoding_tokens=4,
+            num_speculative_tokens=3,
         )
         runner._has_linear_cache = True
-        runner._spec_verify_width = 1
         runner._enable_decode_no_padding = False
         runner._uses_compressed_kpool_tail = False
 

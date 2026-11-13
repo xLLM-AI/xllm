@@ -54,10 +54,11 @@ inline uint32_t acl_graph_max_full_local_batch_size(uint32_t max_batch_size,
   return dp_size == 0 ? 0 : max_batch_size / dp_size;
 }
 
-inline bool is_acl_graph_warmup_batch_size(uint32_t batch_size,
-                                           uint32_t max_batch_size,
-                                           uint32_t dp_size,
-                                           uint32_t num_decoding_tokens = 1) {
+inline bool is_acl_graph_warmup_batch_size(
+    uint32_t batch_size,
+    uint32_t max_batch_size,
+    uint32_t dp_size,
+    uint32_t num_speculative_tokens = 0) {
   if (batch_size == 0 || max_batch_size == 0 || dp_size == 0) {
     return false;
   }
@@ -86,11 +87,13 @@ inline bool is_acl_graph_warmup_batch_size(uint32_t batch_size,
     return false;
   }
   const uint64_t token_batch_size =
-      static_cast<uint64_t>(batch_size) * num_decoding_tokens;
+      static_cast<uint64_t>(batch_size) * (num_speculative_tokens + 1);
   const uint64_t max_token_batch_size =
-      static_cast<uint64_t>(max_full_local_batch_size) * num_decoding_tokens;
-  return num_decoding_tokens > 1 && is_acl_graph_compatibility_batch_size(
-                                        token_batch_size, max_token_batch_size);
+      static_cast<uint64_t>(max_full_local_batch_size) *
+      (num_speculative_tokens + 1);
+  return num_speculative_tokens > 0 &&
+         is_acl_graph_compatibility_batch_size(token_batch_size,
+                                               max_token_batch_size);
 }
 
 inline bool is_acl_graph_decode_capture_allowed(
@@ -98,9 +101,9 @@ inline bool is_acl_graph_decode_capture_allowed(
     uint32_t max_batch_size,
     uint32_t dp_size,
     bool is_graph_warmup,
-    uint32_t num_decoding_tokens = 1) {
+    uint32_t num_speculative_tokens = 0) {
   if (is_acl_graph_warmup_batch_size(
-          batch_size, max_batch_size, dp_size, num_decoding_tokens)) {
+          batch_size, max_batch_size, dp_size, num_speculative_tokens)) {
     return true;
   }
   const uint32_t max_local_batch_size =
@@ -116,11 +119,12 @@ inline bool is_acl_graph_decode_capture_allowed(
 inline std::vector<int32_t> get_acl_graph_mtp_warmup_batch_sizes(
     uint32_t max_global_batch_size,
     uint32_t dp_size,
-    uint32_t num_decoding_tokens,
+    uint32_t num_speculative_tokens,
     bool enable_no_padding,
     uint32_t max_graph_batch_size) {
   std::vector<int32_t> batch_sizes;
-  if (max_global_batch_size == 0 || dp_size == 0 || num_decoding_tokens <= 1) {
+  if (max_global_batch_size == 0 || dp_size == 0 ||
+      num_speculative_tokens == 0) {
     return batch_sizes;
   }
 
@@ -135,13 +139,14 @@ inline std::vector<int32_t> get_acl_graph_mtp_warmup_batch_sizes(
   }
 
   const uint64_t max_graph_token_count =
-      static_cast<uint64_t>(max_graph_local_batch_size) * num_decoding_tokens;
+      static_cast<uint64_t>(max_graph_local_batch_size) *
+      (num_speculative_tokens + 1);
   int64_t last_token_bucket = 0;
   for (uint32_t local_batch_size = 1;
        local_batch_size <= max_graph_local_batch_size;
        ++local_batch_size) {
     const int64_t token_bucket = runtime::get_decode_graph_token_bucket(
-        static_cast<int64_t>(local_batch_size) * num_decoding_tokens,
+        static_cast<int64_t>(local_batch_size) * (num_speculative_tokens + 1),
         enable_no_padding);
     if (max_graph_batch_size > 0 && enable_no_padding &&
         !is_acl_graph_compatibility_batch_size(

@@ -172,32 +172,31 @@ TEST(BatchStateTest, MixedForwardTypeSurvivesAdditionalStagesAndRefreshes) {
   BatchState state;
   state.reserve(/*sequence_count=*/3, /*group_count=*/0);
   state.add(prefill_sequence, /*token_budget=*/3);
-  EXPECT_TRUE(state.prepare_sequence_input_data().forward_type.is_prefill());
+  EXPECT_TRUE(state.prepare_batch_input().forward_type.is_prefill());
   state.add(decode_sequence, /*token_budget=*/1);
-  EXPECT_TRUE(state.prepare_sequence_input_data().forward_type.is_mixed());
+  EXPECT_TRUE(state.prepare_batch_input().forward_type.is_mixed());
   state.add(chunked_sequence, /*token_budget=*/2);
-  EXPECT_TRUE(state.prepare_sequence_input_data().forward_type.is_mixed());
+  EXPECT_TRUE(state.prepare_batch_input().forward_type.is_mixed());
 
   // A reused batch must recompute its type after sequence KV state changes.
   for (auto* sequence : state.sequence_plan().sequences()) {
     sequence->kv_state().set_kv_cache_tokens_num(/*num=*/0);
   }
   state.refresh_forward_type(state.sequence_plan().sequences());
-  EXPECT_TRUE(state.prepare_sequence_input_data().forward_type.is_prefill());
+  EXPECT_TRUE(state.prepare_batch_input().forward_type.is_prefill());
   for (auto* sequence : state.sequence_plan().sequences()) {
     sequence->kv_state().set_kv_cache_tokens_num(/*num=*/1);
   }
   state.refresh_forward_type(state.sequence_plan().sequences());
-  EXPECT_TRUE(
-      state.prepare_sequence_input_data().forward_type.is_chunked_prefill());
+  EXPECT_TRUE(state.prepare_batch_input().forward_type.is_chunked_prefill());
   for (auto* sequence : state.sequence_plan().sequences()) {
     sequence->kv_state().set_kv_cache_tokens_num(/*num=*/3);
   }
   state.refresh_forward_type(state.sequence_plan().sequences());
-  EXPECT_TRUE(state.prepare_sequence_input_data().forward_type.is_decode());
+  EXPECT_TRUE(state.prepare_batch_input().forward_type.is_decode());
   prefill_sequence->kv_state().set_kv_cache_tokens_num(/*num=*/0);
   state.refresh_forward_type(state.sequence_plan().sequences());
-  EXPECT_TRUE(state.prepare_sequence_input_data().forward_type.is_mixed());
+  EXPECT_TRUE(state.prepare_batch_input().forward_type.is_mixed());
 }
 
 TEST(BatchSequencePlanTest, ReorderingMovesSequencesTogetherWithBudgets) {
@@ -299,15 +298,13 @@ TEST(BatchFactoryTest, MixedEmbeddingInputsKeepRankLocalOrderAcrossCalls) {
   auto batches = factory.create_batches(sequences, {3, 3, 3, 3});
   ASSERT_EQ(batches.size(), 9);
   ModelArgs args{};
-  const auto input = batches[8].prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, args);
+  const auto input = batches[8].prepare_forward_input(args, nullptr);
   EXPECT_TRUE(torch::equal(input.input_params.embedding.input_embedding,
                            torch::cat({first_embedding, last_embedding})));
   EXPECT_TRUE(torch::equal(
       input.token_ids,
       torch::tensor({1, 2, 3, 11, 12, 13, 21, 22, 23}, torch::kInt32)));
-  const auto other_input = batches[0].prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, args);
+  const auto other_input = batches[0].prepare_forward_input(args, nullptr);
   EXPECT_TRUE(torch::equal(other_input.input_params.embedding.input_embedding,
                            other_embedding));
 
@@ -316,8 +313,7 @@ TEST(BatchFactoryTest, MixedEmbeddingInputsKeepRankLocalOrderAcrossCalls) {
   next_sequence->add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
   auto next_batches = factory.create_batches({next_sequence}, {3});
   ASSERT_EQ(next_batches.size(), 9);
-  const auto next_input = next_batches[8].prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, args);
+  const auto next_input = next_batches[8].prepare_forward_input(args, nullptr);
   EXPECT_FALSE(next_input.input_params.embedding.input_embedding.defined());
   EXPECT_TRUE(next_batches[0].empty());
 }

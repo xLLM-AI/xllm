@@ -582,8 +582,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     if (params.enable_graph) {
       padded_metadata_rows =
           std::max<int64_t>(padded_metadata_rows, params.meta.num_sequences);
-      padded_metadata_rows = std::max<int64_t>(
-          padded_metadata_rows, model_args_.num_speculative_tokens() + 1);
     }
     if (padded_metadata_rows <= 0) {
       padded_metadata_rows = 1;

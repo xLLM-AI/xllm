@@ -90,7 +90,7 @@ TEST(DecodeGraphBucketTest, MapsTokenBucketsWithAndWithoutPadding) {
 TEST(MluGraphCapacityTest, GroupedRowsCoverRoundedRequests) {
   runtime::Options options;
   options.max_seqs_per_batch(33)
-      .num_decoding_tokens(3)
+      .num_speculative_tokens(2)
       .enable_speculative_decode(true)
       .enable_graph_mode_decode_no_padding(false)
       .speculative_algorithm("mtp");
@@ -102,8 +102,7 @@ TEST(MluGraphCapacityTest, GroupedRowsCoverRoundedRequests) {
 TEST(MluGraphCapacityTest, DraftRowsCoverIntermediateTpAlignedPrefixes) {
   runtime::Options options;
   options.max_seqs_per_batch(1)
-      .num_decoding_tokens(1)
-      .mtp_draft_prefix_width(4)
+      .num_speculative_tokens(3)
       .is_draft_engine(true)
       .world_size(16)
       .dp_size(2);
@@ -187,7 +186,6 @@ class MluGraphExecutorTest : public ::testing::Test {
     model_args_.max_position_embeddings(2048);
 
     const uint32_t block_size = 16;
-    options_.num_decoding_tokens(1);
     options_.block_size(block_size);
 
     model_ = std::make_unique<MockCausalLM>(tensor_options_);
@@ -758,7 +756,6 @@ TEST_F(MluGraphExecutorTest, UnevenDpDecodePadsToTpGraphSize) {
 TEST_F(MluGraphExecutorTest, MtpSeqLensCapacityUsesSpecFactor) {
   options_.is_draft_engine(false);
   options_.num_speculative_tokens(1);
-  options_.num_decoding_tokens(options_.num_speculative_tokens() + 1);
   options_.enable_speculative_decode(true);
   options_.max_seqs_per_batch(2);
   rebuild_impl();
@@ -787,7 +784,6 @@ TEST_F(MluGraphExecutorTest, MtpSeqLensCapacityUsesSpecFactor) {
 TEST_F(MluGraphExecutorTest, MtpSeqLensCapacityIncludesGraphPadding) {
   options_.is_draft_engine(false);
   options_.num_speculative_tokens(2);
-  options_.num_decoding_tokens(options_.num_speculative_tokens() + 1);
   options_.enable_speculative_decode(true);
   options_.max_seqs_per_batch(8);
   rebuild_impl();

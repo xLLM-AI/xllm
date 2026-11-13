@@ -28,22 +28,12 @@ namespace xllm {
 
 class JsonReader;
 
-// Describe one independently captured draft invocation. Block drafts round
-// whole requests before expanding rows; autoregressive drafts round token rows.
-struct DraftGraphWarmupShape {
-  int32_t tokens_per_sequence = 1;
-  bool bucket_by_sequence = false;
-};
-
 // Resolved decode geometry shared by scheduler profiling and graph warmup.
-// For MTP, num_decoding_tokens is the number of token rows produced per
-// sequence in a decode step; it is normally num_speculative_tokens + 1.
 struct DecodeGraphWarmupConfig {
-  int64_t num_decoding_tokens = 1;
   int32_t num_speculative_tokens = 0;
   bool enable_graph_mode_decode_no_padding = false;
   int32_t max_graph_batch_size = 0;
-  std::vector<DraftGraphWarmupShape> draft_shapes;
+  std::string speculative_algorithm;
 };
 
 class ExecutionConfig final {

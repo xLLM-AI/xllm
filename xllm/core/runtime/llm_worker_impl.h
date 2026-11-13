@@ -22,7 +22,6 @@ limitations under the License.
 #include "forward_params.h"
 #include "framework/eplb/eplb_executor.h"
 #include "framework/model/causal_lm.h"
-#include "framework/model/model_params_view.h"
 #include "options.h"
 #include "runtime/worker_impl.h"
 
@@ -37,7 +36,8 @@ class LLMWorkerImpl : public WorkerImpl {
 
   LLMWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,
-                const runtime::Options& options);
+                const runtime::Options& options,
+                bool is_input_release_deferred = false);
 
   ~LLMWorkerImpl() override = default;
 
@@ -70,35 +70,6 @@ class LLMWorkerImpl : public WorkerImpl {
   bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
                                       const Stream& signal_stream);
 #endif
-
-  // The DSpark Markov head on the private model; block drafting goes through
-  // this narrow delegate instead of a full CausalLM& escape hatch.
-  torch::Tensor dspark_markov_bias(const torch::Tensor& previous_token_ids) {
-    return model_->dspark_markov_bias(previous_token_ids);
-  }
-
-  DFlash2CandidateOutput dflash2_candidates(
-      const torch::Tensor& hidden_states,
-      const torch::Tensor& unary_logits,
-      const torch::Tensor& anchor_token_ids) {
-    return model_->dflash2_candidates(
-        hidden_states, unary_logits, anchor_token_ids);
-  }
-
-  // DFlash-specific delegate: eagerly project target hidden into the draft's
-  // per-layer KV cache. Runs outside the executor because the pass has no
-  // attention and its shape doesn't match the decode graph. See CausalLM.
-  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
-                               const torch::Tensor& positions,
-                               const torch::Tensor& device_cache_slots,
-                               LlmModelParams& input_params) {
-    ModelParamsView execution_params(input_params);
-    return model_->write_context_kv(target_hidden,
-                                    positions,
-                                    device_cache_slots,
-                                    kv_caches_,
-                                    execution_params);
-  }
 
  protected:
   torch::Tensor expert_load_data_;

@@ -47,8 +47,7 @@ bool EmbedWorkerImpl::init_model(ModelContext& context) {
 
   // Dont find model in causal models
   CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(
-      model_.get(), context.get_model_args(), device_, options_);
+  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
   return true;
 }
 

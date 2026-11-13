@@ -128,7 +128,6 @@ class HybridConv1dMockLM final : public CausalLM {
       : device_(device),
         attention_repetitions_(attention_repetitions),
         dcp_group_(dcp_group) {
-    CHECK_GT(attention_repetitions_, 0);
     linear_ = register_module(
         "linear",
         torch::nn::Linear(torch::nn::LinearOptions(kHiddenSize, kHiddenSize)));
@@ -402,7 +401,6 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
     model_args_.layer_types({"linear_attention", "full_attention"});
 
     device_ = std::make_unique<torch::Device>("npu:0");
-    options_.num_decoding_tokens(1);
     options_.block_size(kBlockSize);
     options_.max_seqs_per_batch(32);
 
@@ -570,8 +568,8 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
         create_mixed_boundary_prompts(capture_batch_size, /*token_seed=*/10);
     auto capture_batch =
         create_decode_batch_with_prompts(capture_prompts, /*token_seed=*/100);
-    auto capture_fi = capture_batch->prepare_forward_input(
-        options_.num_decoding_tokens(), 0, model_args_);
+    auto capture_fi =
+        capture_batch->prepare_forward_input(model_args_, nullptr);
     capture_fi = capture_fi.to(*device_, kDtype);
     populate_query_start_loc(capture_fi.input_params);
 
@@ -590,8 +588,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
         create_mixed_boundary_prompts(replay_batch_size, /*token_seed=*/200);
     auto replay_batch =
         create_decode_batch_with_prompts(replay_prompts, /*token_seed=*/300);
-    auto replay_fi = replay_batch->prepare_forward_input(
-        options_.num_decoding_tokens(), 0, model_args_);
+    auto replay_fi = replay_batch->prepare_forward_input(model_args_, nullptr);
     replay_fi = replay_fi.to(*device_, kDtype);
     populate_query_start_loc(replay_fi.input_params);
 
@@ -755,8 +752,7 @@ TEST_F(AclGraphTaskUpdateTest, CaptureReplayVsEagerDecodeBranch) {
     reset_sequences();
     ExecutionConfig::get_instance().enable_graph_double_buffer(double_buffer);
     auto batch = create_decode_batch(/*batch_size=*/3);
-    auto input = batch->prepare_forward_input(
-        options_.num_decoding_tokens(), 0, model_args_);
+    auto input = batch->prepare_forward_input(model_args_, nullptr);
     input = input.to(*device_, kDtype);
     populate_query_start_loc(input.input_params);
     const auto original_ids = input.input_params.embedding.linear_state_ids;
@@ -811,8 +807,7 @@ TEST_F(AclGraphTaskUpdateTest, DcpReplayUpdatesZeroShardAcrossBlockBoundary) {
   auto make_input = [&](size_t prompt_size, int32_t token_seed) {
     auto batch = create_decode_batch_with_prompts(
         {std::vector<int32_t>(prompt_size, token_seed)}, token_seed);
-    auto input = batch->prepare_forward_input(
-        options_.num_decoding_tokens(), 0, model_args_);
+    auto input = batch->prepare_forward_input(model_args_, nullptr);
     input = input.to(*device_, kDtype);
     populate_query_start_loc(input.input_params);
     return input;
@@ -858,8 +853,7 @@ TEST_F(AclGraphTaskUpdateTest,
   auto batch = create_decode_batch(/*batch_size=*/2);
   ASSERT_FALSE(batch->empty());
 
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   forward_input = forward_input.to(*device_, kDtype);
   populate_query_start_loc(forward_input.input_params);
 
@@ -903,8 +897,7 @@ TEST_F(AclGraphTaskUpdateTest,
 
   auto batch = create_decode_batch(/*batch_size=*/2);
   ASSERT_FALSE(batch->empty());
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, non_qwen_args);
+  auto forward_input = batch->prepare_forward_input(non_qwen_args, nullptr);
   forward_input = forward_input.to(*device_, kDtype);
   populate_query_start_loc(forward_input.input_params);
 
@@ -949,8 +942,7 @@ TEST_F(AclGraphTaskUpdateTest,
 
   auto batch = create_decode_batch(/*batch_size=*/kNumSequences);
   ASSERT_FALSE(batch->empty());
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   forward_input = forward_input.to(*device_, kDtype);
   setup_spec_verify_input(forward_input, kNumSequences, kNumSpecTokens);
 
@@ -981,8 +973,7 @@ TEST_F(AclGraphTaskUpdateTest,
   std::vector<std::vector<int32_t>> prompts_run1 = {{1, 3, 5, 7}, {2, 4, 6, 8}};
   auto batch1 =
       create_decode_batch_with_prompts(prompts_run1, /*token_seed=*/100);
-  auto fi1 = batch1->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto fi1 = batch1->prepare_forward_input(model_args_, nullptr);
   fi1 = fi1.to(*device_, kDtype);
   populate_query_start_loc(fi1.input_params);
 
@@ -1011,8 +1002,7 @@ TEST_F(AclGraphTaskUpdateTest,
       {10, 20, 30, 40, 50, 60, 70, 80}, {11, 22}};
   auto batch2 =
       create_decode_batch_with_prompts(prompts_run2, /*token_seed=*/200);
-  auto fi2 = batch2->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto fi2 = batch2->prepare_forward_input(model_args_, nullptr);
   fi2 = fi2.to(*device_, kDtype);
   populate_query_start_loc(fi2.input_params);
 
@@ -1056,8 +1046,7 @@ TEST_F(AclGraphTaskUpdateTest, CaptureReplayVsEagerSpecVerifyBranch) {
   auto batch = create_decode_batch(/*batch_size=*/kNumSequences);
   ASSERT_FALSE(batch->empty());
 
-  auto fi = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto fi = batch->prepare_forward_input(model_args_, nullptr);
   fi = fi.to(*device_, kDtype);
   setup_spec_verify_input(fi, kNumSequences, kNumSpecTokens);
 
@@ -1094,8 +1083,7 @@ TEST_F(AclGraphTaskUpdateTest, StaticMtpPrepareReplaysFiaSpecVerifyWidths) {
     auto batch = create_decode_batch(/*batch_size=*/1);
     ASSERT_FALSE(batch->empty());
 
-    auto forward_input = batch->prepare_forward_input(
-        options_.num_decoding_tokens(), 0, model_args_);
+    auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
     forward_input = forward_input.to(*device_, kDtype);
     setup_spec_verify_input(forward_input, /*num_sequences=*/1, spec_width);
     forward_input.input_params.graph.input_tokens_override =

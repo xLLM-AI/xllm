@@ -19,13 +19,12 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <optional>
-#include <utility>
 
 #include "common/metrics.h"
 #include "core/common/types.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/model/model_type.h"
-#include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "runtime/llm_worker_impl.h"
@@ -34,11 +33,50 @@ limitations under the License.
 
 namespace xllm {
 
+namespace {
+
+int32_t configure_draft_config(ModelArgs& args,
+                               const runtime::Options& options) {
+  const bool deepseek_v4 = util::is_deepseek_v4_model_type(args.model_type());
+  if (args.block_size() == 0) {
+    args.block_size(options.num_speculative_tokens() + 1);
+  }
+  args.layers_to_capture({});
+  if (deepseek_v4) {
+#if defined(USE_NPU)
+    CHECK_GT(args.dspark_num_layers(), 0)
+        << "DeepSeek-V4 DSpark requires at least one draft layer.";
+    args.n_layers(args.dspark_num_layers());
+    args.n_hash_layers(0);
+    args.compress_ratios(std::vector<int32_t>(args.dspark_num_layers(), 1));
+    args.dspark_use_native_sas(
+        KernelConfig::get_instance().enable_dspark_native_sas());
+#endif
+    args.model_type(std::string(kDeepseekV4DSparkModelType));
+  } else {
+    args.model_type(args.model_type() == kDSparkGLM5DraftModelType
+                        ? std::string(kDSparkGLM5DraftModelType)
+                        : "DSparkDraftModel");
+  }
+  return options.num_speculative_tokens();
+}
+}  // namespace
+
 DSparkWorkerImpl::DSparkWorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
-    : DFlashWorkerImpl(parallel_args, device, options) {
-  draft_query_width_ = options.num_speculative_tokens();
+    : DFlashWorkerImpl(
+          parallel_args,
+          device,
+          options,
+          [&] {
+            return std::make_unique<LLMWorkerImpl>(
+                configure_draft_parallel_args(parallel_args),
+                device,
+                draft_options(options, options.num_speculative_tokens() - 1),
+                parallel_args.dp_size() > 1);
+          },
+          configure_draft_config) {
   sample_from_anchor_ = true;
 }
 
@@ -52,6 +90,8 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
   }
 
   const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
+  CHECK_EQ(options_.num_speculative_tokens(), draft_args.block_size())
+      << "Runtime block size must match the draft model configuration.";
   const ModelArgs& target_args = impl_->context_.get_model_args();
   const int64_t draft_vocab_size = draft_args.draft_vocab_size() > 0
                                        ? draft_args.draft_vocab_size()
@@ -82,51 +122,29 @@ DraftProposal DSparkWorkerImpl::run_decode_draft(
   const torch::Tensor anchors = anchor_token_ids(input);
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
 
-  CHECK_GT(num_speculative_tokens, 0)
-      << "DSpark requires num_speculative_tokens > 0.";
   LlmForwardInput logits_input = query_input.clone();
   logits_input.skip_sampling_for_logits_only = true;
   logits_input.return_selected_hidden = false;
-  LlmForwardInput processed_input;
-  draft_impl_->prepare_work_before_execute_on_stream(
-      logits_input, processed_input, *prepare_stream_);
-  std::optional<ForwardOutput> draft_output =
-      draft_impl_->execute_no_sync_on_stream(
-          processed_input, *compute_stream_, ForwardCompletion::CALLER_MANAGED);
+  std::optional<ForwardOutput> draft_output = run_worker_no_sync_impl(
+      *draft_impl_, logits_input, *prepare_stream_, *compute_stream_);
   CHECK(draft_output.has_value())
       << "DSpark draft forward must return an output.";
   CHECK(draft_output->logits.defined())
       << "DSpark draft forward must return logits.";
   prepare_validate_inputs(input, validate_input);
 
-  const int64_t num_rows = draft_output->logits.size(/*dim=*/0);
-  CHECK_EQ(num_rows % num_speculative_tokens, 0)
-      << "DSpark draft logits rows must be divisible by "
-         "num_speculative_tokens.";
-  CHECK_EQ(num_rows / num_speculative_tokens, batch_size)
-      << "DSpark draft logits batch must match the decode batch.";
   torch::Tensor base_logits = draft_output->logits.view(
       {batch_size, num_speculative_tokens, draft_output->logits.size(-1)});
   DraftProposal draft_proposal;
   {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     SamplingParameters sampling_params_on_device = input.sampling_params;
-    prepare_draft_sampling(is_probabilistic_draft_, sampling_params_on_device);
+    prepare_draft_sampling(options_.enable_probabilistic_draft(),
+                           sampling_params_on_device);
     sampling_params_on_device = sampling_params_on_device.to(
         base_logits.device(), base_logits.scalar_type());
-    draft_proposal = sample_dspark_markov_block(
-        [this](const torch::Tensor& tokens) {
-          return draft_impl_->dspark_markov_bias(tokens);
-        },
-        base_logits,
-        anchors,
-        sampling_params_on_device,
-        [this](torch::Tensor& tokens) {
-          sync_sampling_tensor(tokens, sampling_process_group_);
-        },
-        is_probabilistic_draft_,
-        /*token_ids_out=*/torch::Tensor(),
-        draft_vocab_);
+    draft_proposal =
+        sample_markov_block(base_logits, anchors, sampling_params_on_device);
   }
 
   draft_proposal.keep_alive() = take_retained_inputs(*draft_output);
@@ -136,45 +154,27 @@ DraftProposal DSparkWorkerImpl::run_decode_draft(
   return draft_proposal;
 }
 
-DraftProposal sample_dspark_markov_block(
-    const DSparkMarkovBias& markov_bias,
+DraftProposal DSparkWorkerImpl::sample_markov_block(
     const torch::Tensor& base_logits,
     const torch::Tensor& anchors,
-    const SamplingParameters& sampling,
-    const SyncSampledTokens& sync_tokens,
-    bool is_probabilistic_draft,
-    torch::Tensor token_ids_out,
-    const DraftVocabMapping& vocab_mapping) {
+    const SamplingParameters& sampling) {
   const int64_t rows = base_logits.size(0);
   const int64_t steps = base_logits.size(1);
   const int64_t draft_model_vocab = base_logits.size(2);
-  CHECK_EQ(anchors.size(0), rows);
-  // markov_bias embeds anchors and rejects other dtypes with an opaque
-  // kernel error; enforce the contract here.
-  CHECK_EQ(anchors.scalar_type(), torch::kInt64);
-  CHECK_EQ(anchors.device(), base_logits.device());
-  const bool has_vocab_mapping = vocab_mapping.draft_to_target_ids_.defined();
+  const bool has_vocab_mapping = draft_vocab_.draft_to_target_ids_.defined();
   const int64_t draft_vocab =
-      has_vocab_mapping ? vocab_mapping.target_vocab_size_ : draft_model_vocab;
+      has_vocab_mapping ? draft_vocab_.target_vocab_size_ : draft_model_vocab;
   DraftProposal proposal =
-      token_ids_out.defined()
-          ? DraftProposal::from_token_buffer(
-                std::move(token_ids_out),
-                draft_vocab,
-                is_probabilistic_draft,
-                base_logits.options().dtype(torch::kFloat32))
-          : DraftProposal::preallocate(
-                rows,
-                steps,
-                draft_vocab,
-                is_probabilistic_draft,
-                anchors.options(),
-                base_logits.options().dtype(torch::kFloat32));
+      DraftProposal::preallocate(rows,
+                                 steps,
+                                 draft_vocab,
+                                 options_.enable_probabilistic_draft(),
+                                 anchors.options(),
+                                 base_logits.options().dtype(torch::kFloat32));
   auto previous = anchors;
   torch::Tensor scratch;
-  const bool needs_sync = sampling.sampling_mode() != SamplingMode::GREEDY;
   for (int64_t step = 0; step < steps; ++step) {
-    auto bias = markov_bias(previous);
+    auto bias = draft_impl_->get_causal_lm()->dspark_markov_bias(previous);
     CHECK_EQ(bias.sizes(), torch::IntArrayRef({rows, draft_model_vocab}))
         << "DSpark markov bias must be [rows, draft_model_vocab].";
     torch::Tensor step_logits;
@@ -197,16 +197,14 @@ DraftProposal sample_dspark_markov_block(
       step_logits = scratch;
     }
     auto sampled = sample(step_logits, sampling);
-    if (needs_sync) {
-      sync_tokens(sampled.next_tokens);
-    }
+    maybe_broadcast_spec_tokens(sampled.next_tokens, sampling.sampling_mode());
     if (has_vocab_mapping) {
       if (proposal.logits().has_value()) {
         sampled.draft_logits = step_logits;
-        vocab_mapping.remap(sampled, proposal.logits_at(step));
+        draft_vocab_.remap(sampled, proposal.logits_at(step));
       } else {
         sampled.draft_logits = torch::Tensor();
-        vocab_mapping.remap(sampled);
+        draft_vocab_.remap(sampled);
       }
     }
     proposal.tokens_at(step).copy_(sampled.next_tokens);

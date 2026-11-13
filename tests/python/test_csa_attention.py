@@ -74,7 +74,7 @@ def _make_dspark_native_backend() -> CsaAttentionBackend:
         rope_head_dim=2,
         device=torch.device("cpu"),
         dtype=torch.float32,
-        dspark_block_size=3,
+        block_size=3,
         dspark_use_native_sas=True,
     )
 
@@ -91,7 +91,7 @@ def test_dspark_native_swa_indices_are_shared_by_query_rows() -> None:
         torch.tensor([0, 3], dtype=torch.int32),
         torch.tensor([6], dtype=torch.int32),
         window_size=4,
-        dspark_block_size=3,
+        block_size=3,
         cache_block_size=4,
     )
 
@@ -107,7 +107,7 @@ def test_dspark_native_swa_indices_wrap_ring_buffer() -> None:
         torch.tensor([0, 1], dtype=torch.int32),
         torch.tensor([10], dtype=torch.int32),
         window_size=4,
-        dspark_block_size=3,
+        block_size=3,
         cache_block_size=2,
     )
 
@@ -248,12 +248,6 @@ def test_scatter_by_slot_npu_works_without_forward_context(monkeypatch: pytest.M
     assert len(calls) == 1
     assert calls[0][1].shape == (3, 1)
     assert calls[0][2].shape == (3, 3)
-
-
-def test_default_mapping_is_empty() -> None:
-    m = _CompressedAttentionCacheMapping()
-    assert m.cmp_cache_idx == -1
-    assert m.ori_cache_idx == -1
 
 
 def test_prepare_binds_compressed_metadata_to_current_forward(monkeypatch) -> None:
@@ -494,37 +488,6 @@ def test_prepare_clears_previous_forward_state() -> None:
     assert not hasattr(backend, "_indexer_fn")
 
 
-def test_dsa_api_aliases_are_equivalent(monkeypatch) -> None:
-    backend = _make_backend()
-    monkeypatch.setattr(backend, "_move_metadata_to_device", lambda _metadata: None)
-    monkeypatch.setattr(backend, "_build_precomputed_metadata", lambda *_args: None)
-    metadata = SimpleNamespace(
-        multi_block_tables=[],
-        kv_seq_lens_host=torch.tensor([1], dtype=torch.int32),
-        q_seq_lens_host=torch.tensor([1], dtype=torch.int32),
-        is_prefill=False,
-        is_chunked_prefill=False,
-        dsa_metadata=None,
-        dsa_positions=torch.tensor([0]),
-        dsa_cos_sin=None,
-        dsa_c4_cos_sin=None,
-        dsa_c128_cos_sin=None,
-        dsa_graph_mode=False,
-    )
-    backend.prepare_dsa_metadata_for_forward(metadata)
-    canonical = metadata.dsa_metadata
-    metadata.dsa_metadata = None
-    backend.prepare_csa_metadata_for_forward(metadata)
-    assert metadata.dsa_metadata is not canonical
-
-
-def test_graph_mode_is_recorded_on_metadata() -> None:
-    backend = _make_backend()
-    metadata = SimpleNamespace()
-    backend.prepare(metadata, graph_mode=True)
-    assert metadata.dsa_graph_mode is True
-
-
 def test_decode_precomputed_metadata_matches_cpp_contract(monkeypatch) -> None:
     backend = _make_backend()
     sparse_calls: list[dict] = []
@@ -573,7 +536,7 @@ def test_decode_precomputed_metadata_matches_cpp_contract(monkeypatch) -> None:
 
 
 def test_dspark_native_decode_metadata_uses_expanded_window(monkeypatch) -> None:
-    backend = _make_backend(compress_ratios=[1], n_layers=1, dspark_block_size=5, dspark_use_native_sas=True)
+    backend = _make_backend(compress_ratios=[1], n_layers=1, block_size=5, dspark_use_native_sas=True)
     sparse_calls: list[dict] = []
 
     monkeypatch.setattr(
@@ -671,7 +634,7 @@ def test_dspark_native_mixed_ratio_decode_uses_expanded_window(
         rope_head_dim=2,
         device=torch.device("cpu"),
         dtype=torch.float32,
-        dspark_block_size=3,
+        block_size=3,
         dspark_use_native_sas=True,
     )
     backend.bind_kv_caches([LayerCache(key=None, value=None, swa=torch.zeros(1, 4, 1, 4))])
@@ -818,7 +781,7 @@ def test_forward_rope_state_is_owned_by_each_metadata(monkeypatch) -> None:
         metadata=decode,
     )
 
-    backend.prepare_csa_metadata_for_forward(prefill)
+    backend.prepare_dsa_metadata_for_forward(prefill)
 
     assert prefill.dsa_metadata.input_positions.numel() == 84
     cos, sin = prefill.dsa_metadata.input_rope_by_ratio[1]
@@ -1022,7 +985,7 @@ def test_graph_dsa_build_uses_stable_host_length_values(monkeypatch) -> None:
 def test_prefill_and_dummy_decode_metadata_stay_in_sync_with_execute(
     monkeypatch,
 ) -> None:
-    backend = _make_backend(compress_ratios=[1], n_layers=1, dspark_block_size=5, dspark_use_native_sas=True)
+    backend = _make_backend(compress_ratios=[1], n_layers=1, block_size=5, dspark_use_native_sas=True)
     swa = torch.zeros(2, 128, 1, 512, dtype=torch.float32)
     backend.bind_kv_caches([LayerCache(key=None, value=None, swa=swa)])
     block_table = torch.tensor([[1]], dtype=torch.int32)

@@ -20,30 +20,6 @@ limitations under the License.
 
 namespace xllm {
 
-class ProcessGroup;
-
-// Gumbel-noise walk of the DFlash2 candidate tree; undefined noise (greedy
-// draft) degrades to the raw argmax. TP noise consensus is the caller's.
-DraftProposal sample_dflash2_path(
-    const DFlash2CandidateOutput& candidates,
-    const SamplingParameters& sampling_params,
-    torch::Tensor gumbel_noise,
-    int64_t vocab_size,
-    torch::Tensor token_ids_out = torch::Tensor());
-// Selector noise for the DFlash2 candidate walk; only a deterministic draft
-// (SamplingMode::GREEDY) returns an undefined tensor — callers key
-// is_probabilistic_draft off that. A MIXED batch still draws noise (the
-// 0.0 greedy-row sentinel keeps its greedy rows). With a non-null
-// sampling_group the noise is broadcast from rank 0 so every rank walks the
-// same candidates. batch_size is the row count the noise must match — the
-// caller's own geometry, not derived from the sampling params.
-torch::Tensor broadcast_gumbel_noise(int64_t batch_size,
-                                     const SamplingParameters& sampling,
-                                     int64_t num_steps,
-                                     int64_t num_classes,
-                                     const torch::Device& device,
-                                     ProcessGroup* sampling_group);
-
 class DFlash2WorkerImpl final : public DFlashWorkerImpl {
  public:
   DFlash2WorkerImpl(const ParallelArgs& parallel_args,

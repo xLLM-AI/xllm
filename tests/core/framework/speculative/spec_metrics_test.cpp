@@ -30,18 +30,10 @@ namespace {
 using testutil::make_rejection_params;
 using testutil::random_sample_from_probs;
 
-SpecMetrics calculate_from_widths(const torch::Tensor& tokens,
-                                  const std::vector<int32_t>& num_draft_tokens,
-                                  const std::vector<int32_t>& accepted) {
-  return make_spec_metrics(
-      make_verify_stats(tokens, &num_draft_tokens, accepted, {}));
-}
-
 TEST(SpeculativeTokenStatsTest, CountsTokensPerSequence) {
   const torch::Tensor tokens = torch::tensor(
       {{10, 11, 12, -1, -1, -1}, {20, 21, 22, 23, 24, 25}}, torch::kInt32);
-  const std::vector<int32_t> full_width_drafts = {5, 5};
-  const auto metrics = calculate_from_widths(tokens, full_width_drafts, {2, 5});
+  const auto metrics = make_spec_metrics(make_verify_stats(tokens, {}));
 
   EXPECT_EQ(metrics.num_accepted_tokens_per_pos,
             (std::vector<int64_t>{2, 2, 1, 1, 1}));
@@ -52,45 +44,14 @@ TEST(SpeculativeTokenStatsTest, CountsTokensPerSequence) {
   EXPECT_EQ(metrics.sequence_stats[1].verified_rounds, 1);
 }
 
-TEST(SpeculativeTokenStatsTest, CountsAdaptiveTokensPerSequence) {
-  const torch::Tensor tokens = torch::tensor(
-      {{10, 11, 12, -1, -1}, {20, 21, 22, -1, -1}, {30, 31, 32, 33, -1}},
-      torch::kInt32);
-  const std::vector<int32_t> num_draft_tokens = {4, 2, 0};
-  const std::vector<int32_t> num_accepted_tokens = {2, 2, 0};
-  const SpecMetrics aggregate =
-      calculate_from_widths(tokens, num_draft_tokens, num_accepted_tokens);
-  EXPECT_EQ(aggregate.num_accepted_tokens_per_pos,
-            (std::vector<int64_t>{2, 2}));
-
-  ASSERT_EQ(aggregate.sequence_stats.size(), 3);
-  EXPECT_EQ(aggregate.sequence_stats[0].accepted_tokens, 2);
-  EXPECT_EQ(aggregate.sequence_stats[0].proposed_tokens, 4);
-  EXPECT_EQ(aggregate.sequence_stats[1].accepted_tokens, 2);
-  EXPECT_EQ(aggregate.sequence_stats[1].proposed_tokens, 2);
-  EXPECT_EQ(aggregate.sequence_stats[2].accepted_tokens, 0);
-  EXPECT_EQ(aggregate.sequence_stats[2].proposed_tokens, 0);
-  for (const SpeculativeTokenStats& row_stats : aggregate.sequence_stats) {
-    EXPECT_EQ(row_stats.verified_rounds, 1);
-  }
-}
-
-TEST(SpeculativeTokenStatsTest, DefaultsDoNotInferRoundsFromTokenCounts) {
-  const SpeculativeTokenStats empty;
-  EXPECT_EQ(empty.verified_rounds, 0);
-  const SpeculativeTokenStats legacy{2, 7};
-  EXPECT_EQ(legacy.verified_rounds, 0);
-}
-
-TEST(SpeculativeTokenStatsTest, CountsOneRoundForEveryVerifiedRowAndBudget) {
+TEST(SpeculativeTokenStatsTest, CountsOneRoundForEveryVerifiedRow) {
   for (const torch::ScalarType dtype : {torch::kInt32, torch::kInt64}) {
     const auto tokens = torch::tensor({{10, -1, -1, -1, -1, -1, -1, -1},
                                        {20, 21, -1, -1, -1, -1, -1, -1},
                                        {30, 31, 32, 33, 34, 35, 36, 37},
                                        {40, -1, -1, -1, -1, -1, -1, -1}},
                                       dtype);
-    const auto metrics =
-        calculate_from_widths(tokens, {7, 2, 7, 0}, {0, 1, 7, 0});
+    const auto metrics = make_spec_metrics(make_verify_stats(tokens, {}));
     ASSERT_EQ(metrics.sequence_stats.size(), 4U);
     const std::vector<int64_t> accepted{0, 1, 7, 0};
     for (size_t row = 0; row < accepted.size(); ++row) {
@@ -107,8 +68,6 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
   // One-hot logits make the greedy target deterministic: draft columns force
   // tokens 9/2/3, the bonus column always picks 8.
   const int64_t vocab_size = 10;
-  const torch::Tensor target_tokens = torch::tensor(
-      {{9, 2, 3}, {1, 9, 3}, {1, 2, 9}, {1, 2, 3}}, torch::kInt64);
   torch::Tensor target_logits =
       torch::zeros({4, 4, vocab_size}, torch::kFloat32);
   target_logits.scatter_(
@@ -130,7 +89,7 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
           torch::kInt64)));
 
   const auto output_stats =
-      calculate_from_widths(masked_tokens, {3, 3, 3, 3}, {0, 1, 2, 3});
+      make_spec_metrics(make_verify_stats(masked_tokens, {}));
   const auto& stats = output_stats.sequence_stats;
   ASSERT_EQ(stats.size(), 4);
   for (size_t row = 0; row < stats.size(); ++row) {
@@ -170,8 +129,7 @@ TEST(SpeculativeTokenStatsTest, BlockRandomExcludesTargetTokens) {
           torch::kInt64)));
 
   const auto stats =
-      calculate_from_widths(masked_tokens, {3, 3, 3, 3}, {0, 1, 2, 3})
-          .sequence_stats;
+      make_spec_metrics(make_verify_stats(masked_tokens, {})).sequence_stats;
   ASSERT_EQ(stats.size(), 4);
   for (size_t row = 0; row < stats.size(); ++row) {
     EXPECT_EQ(stats[row].accepted_tokens, static_cast<int64_t>(row));
@@ -183,7 +141,6 @@ TEST(SpeculativeTokenStatsTest, BlockRandomExcludesTargetTokens) {
 TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
   const torch::Tensor num_draft_tokens =
       torch::tensor({{1}, {1}}, torch::kInt64);
-  const torch::Tensor target_tokens = torch::tensor({{9}, {1}}, torch::kInt64);
   const int64_t vocab_size = 10;
   torch::Tensor target_logits =
       torch::zeros({2, 2, vocab_size}, torch::kFloat32);
@@ -197,7 +154,8 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
                        DraftProposal(num_draft_tokens),
                        testutil::flatten_rows(target_logits));
   const auto stats =
-      calculate_from_widths(sampled.next_tokens, {1, 1}, {0, 1}).sequence_stats;
+      make_spec_metrics(make_verify_stats(sampled.next_tokens, {}))
+          .sequence_stats;
   ASSERT_EQ(stats.size(), 2);
   EXPECT_EQ(stats[0].accepted_tokens, 0);
   EXPECT_EQ(stats[0].proposed_tokens, 1);
@@ -219,7 +177,8 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
   ASSERT_TRUE(
       torch::equal(bonus_only_tokens, torch::full({2, 1}, 8, torch::kInt64)));
   const auto zero_stats =
-      calculate_from_widths(bonus_only_tokens, {0, 0}, {0, 0}).sequence_stats;
+      make_spec_metrics(make_verify_stats(bonus_only_tokens, {}))
+          .sequence_stats;
   ASSERT_EQ(zero_stats.size(), 2);
   for (const SpeculativeTokenStats& row_stats : zero_stats) {
     EXPECT_EQ(row_stats.accepted_tokens, 0);
