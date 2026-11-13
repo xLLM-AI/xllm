@@ -2,6 +2,8 @@
 title: "Code Architecture and Request Flow"
 ---
 
+For diffusion inference, see [DiT Architecture and Capability Matrix](/en/dev_guide/dit_architecture/).
+
 ## Start with these files
 
 Follow this order on your first pass. Read the named functions and their

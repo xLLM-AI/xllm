@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "fbcache_taylorseer.h"
 
+#include <utility>
+
 namespace xllm {
 
 void FBCacheTaylorSeer::init(const DiTCacheConfig& cfg,
@@ -37,6 +39,13 @@ void FBCacheTaylorSeer::init(const DiTCacheConfig& cfg,
   DiTCacheConfig ts_cfg;
   ts_cfg.taylorseer.n_derivatives = cfg.fbcachetaylorseer.n_derivatives;
   taylorseer->init(ts_cfg, parallel_args);
+  reset_cache();
+}
+
+void FBCacheTaylorSeer::reset_cache() {
+  DitCacheImpl::reset_cache();
+  use_cache_ = false;
+  taylorseer->reset_cache();
 }
 
 bool FBCacheTaylorSeer::on_before_block(const CacheBlockIn& block_input) {
@@ -55,7 +64,7 @@ CacheBlockOut FBCacheTaylorSeer::on_after_block(
         get_tensor_or_empty(block_input.tensors, "hidden_states");
     out_map["encoder_hidden_states"] =
         get_tensor_or_empty(block_input.tensors, "encoder_hidden_states");
-    return CacheBlockOut(out_map);
+    return CacheBlockOut(std::move(out_map));
   }
 
   auto hidden_states =
@@ -87,7 +96,7 @@ CacheBlockOut FBCacheTaylorSeer::on_after_block(
   out_map["hidden_states"] = std::move(output_hidden_states);
   out_map["encoder_hidden_states"] = std::move(output_encoder_hidden_states);
 
-  return CacheBlockOut(out_map);
+  return CacheBlockOut(std::move(out_map));
 }
 
 bool FBCacheTaylorSeer::on_before_step(const CacheStepIn& stepin) {
@@ -129,7 +138,7 @@ CacheStepOut FBCacheTaylorSeer::on_after_step(const CacheStepIn& stepin) {
   TensorMap out_map;
   auto hidden_states = get_tensor_or_empty(stepin.tensors, "hidden_states");
   out_map["hidden_states"] = std::move(hidden_states);
-  return CacheStepOut(out_map);
+  return CacheStepOut(std::move(out_map));
 }
 
 std::pair<torch::Tensor, torch::Tensor>

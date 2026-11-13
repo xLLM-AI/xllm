@@ -259,7 +259,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `dit_cache_policy` | `string` | `"TaylorSeer"` | DiT cache policy, for example `None`, `FBCache`, `TaylorSeer`, `FBCacheTaylorSeer`, or `ResidualCache`. |
 | `dit_cache_warmup_steps` | `int64` | `0` | Number of warmup steps. |
 | `dit_cache_n_derivatives` | `int64` | `3` | Number of derivatives to use in TaylorSeer. |
-| `dit_cache_skip_interval_steps` | `int64` | `3` | Interval steps to skip for derivative calculation. |
+| `dit_cache_skip_interval_steps` | `int64` | `3` | Refresh interval for `TaylorSeer` and `ResidualCache`; must be greater than `0`. For `TaylorSeer`, `1` computes every step. Ignored by other policies. |
 | `dit_cache_residual_diff_threshold` | `double` | `0.09` | Residual difference threshold for cache reuse. |
 | `dit_cache_start_steps` | `int64` | `5` | Number of steps to skip at the start. |
 | `dit_cache_end_steps` | `int64` | `5` | Number of steps to skip at the end. |

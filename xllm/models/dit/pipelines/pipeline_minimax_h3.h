@@ -328,6 +328,8 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         scheduler_.timesteps().to(torch::kCPU);
     const torch::Tensor audio_timesteps_cpu =
         audio_scheduler_.timesteps().to(torch::kCPU);
+    DiTCache::get_instance().set_context(
+        {.infer_steps = scheduler_.timesteps().numel(), .single_stream = true});
     std::function<void(int32_t)> before_layer_cb;
     std::function<void(int32_t)> after_layer_cb;
 #if defined(USE_NPU)
@@ -365,7 +367,8 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                                 layout.audio_indices,
                                 layout.text_indices,
                                 before_layer_cb,
-                                after_layer_cb);
+                                after_layer_cb,
+                                /*step_idx=*/step + 1);
       video_rows = step_generated_rows(video_rows,
                                        prediction.sample,
                                        layout.num_condition_video_rows,
@@ -378,8 +381,9 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                                        audio_timestep);
     }
 
+    // Release denoising history before VAE decoding allocates its activations.
+    DiTCache::get_instance().set_context({});
     if (!is_video_vae_worker_) {
-      synchronize_tp_ranks();
       return DiTForwardOutput();
     }
 
@@ -408,7 +412,6 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
 
     torch::Tensor video = vae_->decode_to_pixels(video_latent);
     if (!is_tp_driver_) {
-      synchronize_tp_ranks();
       return DiTForwardOutput();
     }
 
@@ -427,7 +430,6 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     DiTForwardOutput output;
     output.tensors = {video};
     output.audio_tensors = {audio};
-    synchronize_tp_ranks();
     return output;
   }
 
@@ -736,13 +738,6 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     if (tp_active()) {
       tp_group_->broadcast(tensor, /*root_rank=*/0);
     }
-  }
-
-  void synchronize_tp_ranks() const {
-    if (!tp_active()) {
-      return;
-    }
-    tp_group_->barrier();
   }
 
   PackedLayout build_layout(

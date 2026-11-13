@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/layers/common/linear.h"
+#include "models/dit/utils/dit_cache_mixin.h"
 #include "models/dit/utils/dit_parallel_mixin.h"
 #if defined(USE_NPU)
 #include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -770,15 +771,21 @@ struct MiniMaxH3TransformerConditioning {
   std::pair<torch::Tensor, torch::Tensor> rotary;
 };
 
-class MiniMaxH3Transformer3DModelImpl final
-    : public torch::nn::Module,
-      public dit::SequenceParallelMixin {
+class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
+                                              public dit::SequenceParallelMixin,
+                                              public dit::DiTCacheMixin {
  public:
   explicit MiniMaxH3Transformer3DModelImpl(const DiTModelContext& context)
       : dit::SequenceParallelMixin(
             /*process_group=*/context.get_parallel_args().dit_sp_group_),
         options_(context.get_tensor_options()) {
     using namespace minimax_h3;
+    const PolicyType cache_policy = context.get_dit_config().selected_policy;
+    CHECK(cache_policy == PolicyType::None ||
+          cache_policy == PolicyType::TaylorSeer ||
+          cache_policy == PolicyType::FBCache)
+        << "MiniMax-H3 supports None, TaylorSeer and FBCache cache policies";
+    use_cache_ = cache_policy != PolicyType::None;
     const ParallelArgs& parallel_args = context.get_parallel_args();
     CHECK(parallel_args.tp_size() == 1 ||
           parallel_args.dit_tp_group_ != nullptr)
@@ -787,6 +794,8 @@ class MiniMaxH3Transformer3DModelImpl final
           parallel_args.dit_sp_group_ != nullptr)
         << "MiniMax-H3 SP requires a DiT SP process group";
     use_rolling_load_ = dit_rolling_load_enabled(parallel_args);
+    CHECK(!use_rolling_load_ || cache_policy != PolicyType::FBCache)
+        << "MiniMax-H3 FBCache does not support rolling weight loading";
     const ModelArgs& model_args = context.get_model_args("transformer");
     const int64_t heads = model_args.n_heads();
     const int64_t head_dim = model_args.head_dim();
@@ -1022,7 +1031,8 @@ class MiniMaxH3Transformer3DModelImpl final
       const torch::Tensor& audio_indices,
       const torch::Tensor& text_indices,
       std::function<void(int32_t)> before_layer_cb = nullptr,
-      std::function<void(int32_t)> after_layer_cb = nullptr) {
+      std::function<void(int32_t)> after_layer_cb = nullptr,
+      int64_t step_idx = 1) {
     const torch::Tensor& text_embeds = conditioning.text_embeds;
     const int64_t batch = text_embeds.size(0);
     const int64_t sequence_length = position_ids.size(0);
@@ -1082,31 +1092,49 @@ class MiniMaxH3Transformer3DModelImpl final
     torch::Tensor timestep_indices_long = timestep_indices.to(torch::kLong);
     torch::Tensor adaln_indices =
         timestep_indices_long * 3 + token_tags.to(torch::kLong);
-    auto run_blocks =
-        [this, &temb, &conditioning, &before_layer_cb, &after_layer_cb](
-            torch::Tensor local_packed,
-            const torch::Tensor& local_adaln_indices,
-            const torch::Tensor& local_timestep_indices) {
-          int32_t block_index = 0;
-          for (auto& block : *blocks_) {
-            if (before_layer_cb) {
-              before_layer_cb(block_index);
-            }
-            local_packed = block->as<minimax_h3::H3TransformerBlock>()->forward(
-                local_packed,
+    auto run_blocks = [this,
+                       &temb,
+                       &conditioning,
+                       &before_layer_cb,
+                       &after_layer_cb,
+                       step_idx](torch::Tensor local_packed,
+                                 const torch::Tensor& local_adaln_indices,
+                                 const torch::Tensor& local_timestep_indices) {
+      const torch::Tensor original_hidden_states = local_packed;
+      const auto run_block = [&](int64_t index, const torch::Tensor& hidden) {
+        const int32_t block_index = static_cast<int32_t>(index);
+        if (before_layer_cb) {
+          before_layer_cb(block_index);
+        }
+        torch::Tensor output =
+            blocks_[index]->as<minimax_h3::H3TransformerBlock>()->forward(
+                hidden,
                 temb,
                 local_adaln_indices,
                 conditioning.rotary.first,
                 conditioning.rotary.second);
-            if (after_layer_cb) {
-              after_layer_cb(block_index);
-            }
-            ++block_index;
-          }
-          local_packed =
-              norm_out_->forward(local_packed, temb, local_timestep_indices);
-          return local_packed;
-        };
+        if (after_layer_cb) {
+          after_layer_cb(block_index);
+        }
+        return output;
+      };
+      if (use_cache_) {
+        exec_cache_step(step_idx, local_packed, original_hidden_states, [&]() {
+          exec_cached_single_blocks(static_cast<int64_t>(blocks_->size()),
+                                    local_packed,
+                                    original_hidden_states,
+                                    run_block);
+        });
+      } else {
+        for (int64_t index = 0; index < static_cast<int64_t>(blocks_->size());
+             ++index) {
+          local_packed = run_block(index, local_packed);
+        }
+      }
+      // Output normalization depends on the current timestep and must run
+      // even when cached block activations replace the transformer body.
+      return norm_out_->forward(local_packed, temb, local_timestep_indices);
+    };
     // Preserve the reference's TP-local full-row FP32 GEMM geometry before
     // selecting media rows; its rounding affects the denoising trajectory.
     const auto project_heads = [this,
@@ -1242,6 +1270,7 @@ class MiniMaxH3Transformer3DModelImpl final
   torch::TensorOptions options_;
   torch::ScalarType attention_dtype_ = torch::kFloat32;
   bool use_rolling_load_ = false;
+  bool use_cache_ = false;
   int64_t hidden_size_;
   int64_t freq_dim_;
   int64_t audio_in_channels_;

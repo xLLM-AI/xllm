@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <tuple>
+#include <utility>
 
 #include "core/framework/dit_cache/dit_cache.h"
 
@@ -85,7 +86,7 @@ class DiTCacheMixin {
     TensorMap step_in_map = {
         {"hidden_states", hidden_states},
         {"original_hidden_states", original_hidden_states}};
-    CacheStepIn stepin_before(step_idx, step_in_map);
+    CacheStepIn stepin_before(step_idx, std::move(step_in_map));
     bool use_step_cache = cache.on_before_step(stepin_before, use_cfg);
 
     if (!use_step_cache) {
@@ -95,7 +96,7 @@ class DiTCacheMixin {
     TensorMap step_after_map = {
         {"hidden_states", hidden_states},
         {"original_hidden_states", original_hidden_states}};
-    CacheStepIn stepin_after(step_idx, step_after_map);
+    CacheStepIn stepin_after(step_idx, std::move(step_after_map));
     CacheStepOut stepout_after = cache.on_after_step(stepin_after, use_cfg);
     hidden_states = stepout_after.tensors.at("hidden_states");
   }
@@ -134,7 +135,7 @@ class DiTCacheMixin {
           {"encoder_hidden_states", encoder_hidden_states},
           {"original_hidden_states", original_hidden_states},
           {"original_encoder_hidden_states", original_encoder_hidden_states}};
-      CacheBlockIn blockin_after(block_id, block_after_map);
+      CacheBlockIn blockin_after(block_id, std::move(block_after_map));
       CacheBlockOut blockout_after =
           cache.on_after_block(blockin_after, use_cfg);
 
@@ -152,11 +153,9 @@ class DiTCacheMixin {
   // preceding double-stream loop (keeping ResidualCache's block boundaries
   // accurate across both loops).
   //
-  // NOTE: the after-block map intentionally omits `encoder_hidden_states`. For
-  // FBCache-family policies the absence of that key forces a pass-through on
-  // single-stream blocks (see FBCache::on_after_block). Models that instead
-  // want the cache to engage on the single stream must drive DiTCache directly
-  // rather than use this helper.
+  // The after-block map omits encoder_hidden_states. FBCache-family policies
+  // engage here only when the request context explicitly selects single_stream;
+  // existing mixed dual-/single-stream callers retain their pass-through path.
   template <typename BlockFn>
   void exec_cached_single_blocks(int64_t num_blocks,
                                  torch::Tensor& hidden_states,
@@ -178,7 +177,7 @@ class DiTCacheMixin {
       TensorMap block_after_map = {
           {"hidden_states", hidden_states},
           {"original_hidden_states", original_hidden_states}};
-      CacheBlockIn blockin_after(block_id, block_after_map);
+      CacheBlockIn blockin_after(block_id, std::move(block_after_map));
       CacheBlockOut blockout_after =
           cache.on_after_block(blockin_after, use_cfg);
 

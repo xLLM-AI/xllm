@@ -27,14 +27,13 @@ python setup.py build --device npu
 
 使用 `MiniMaxAI/MiniMax-H3` 根目录的 Diffusers 组件格式。
 `model_index.json` 的 `_class_name` 应为 `MiniMaxH3ModularPipeline`，
-其中声明的组件目录均需保留。下面下载已验证版本的组件：
+其中声明的组件目录均需保留。准备好 Hugging Face 的 `hf` CLI 后，
+将组件下载到自己的权重目录：
 
 ```bash
-export HF_ENDPOINT=https://hf-mirror.com
-export HF_HOME=/data/models/.cache/huggingface
-export MODEL_PATH=/data/models/MiniMax-H3
+export MODEL_PATH=/path/to/MiniMax-H3
 
-uvx --from huggingface_hub==1.33.0 hf download MiniMaxAI/MiniMax-H3 \
+hf download MiniMaxAI/MiniMax-H3 \
   --revision 42ed227ee7df40d41602854ae760620d6eb651fe \
   --local-dir "$MODEL_PATH" \
   --include model_index.json --include 'transformer/*' \
@@ -46,8 +45,10 @@ uvx --from huggingface_hub==1.33.0 hf download MiniMaxAI/MiniMax-H3 \
 ## 文本条件
 
 当前 H3 管线要求调用方提供与模型配套的文本编码器生成的文本条件，
-不会仅根据 `input.prompt` 自动执行文本编码。准备一个 `conditioning.pt`
-文件，包含以下字段；文本条件必须与请求提示词一致：
+不会仅根据 `input.prompt` 自动执行文本编码。xLLM 当前不提供 H3 文本编码的
+预处理命令；以下请求从已有编码器输出开始，不能直接仅用原始文本运行。
+先取得配套 H3 编码器生成的特征和 token 标签，再将包含以下字段的 PyTorch
+字典保存为 `conditioning.pt`。提示词、特征和标签必须来自同一次编码：
 
 | 字段 | 类型与形状 | 说明 |
 | --- | --- | --- |
@@ -65,14 +66,14 @@ token 标签放在该张量的 `parameters.prompt_token_tags.int64_tensor_param`
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export MODEL_PATH=/data/models/MiniMax-H3
+export MODEL_PATH=/path/to/MiniMax-H3
 export XLLM_BINARY=/path/to/xllm
 export OMP_NUM_THREADS=8
 export HCCL_BUFFSIZE=256
 
 python -m xllm.launch_server serve --binary-path="$XLLM_BINARY" \
   --nnodes=4 --backend=dit --model="$MODEL_PATH" --model_id=minimax-h3 \
-  --tp_size=2 --sp_size=2 --cfg_size=1 --vae_size=1 \
+  --tp_size=2 --sp_size=2 --cfg_size=1 --vae_size=4 \
   --text_encoder_tp_size=1 --dit_h3_task_type=fl2va --dit_cache_policy=None \
   --dit_laser_attention_enabled=false --dit_sparse_attention_enabled=false \
   --master_node_addr=127.0.0.1:19885 --host=127.0.0.1 --port=8000 \
@@ -81,10 +82,21 @@ python -m xllm.launch_server serve --binary-path="$XLLM_BINARY" \
 
 八卡时，设置 `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`，并修改以下参数：
 
-| 配置 | `--nnodes` | `--tp_size` | `--sp_size` |
-| --- | --- | --- | --- |
-| 四卡 | `4` | `2` | `2` |
-| 八卡 | `8` | `2` | `4` |
+| 配置 | `--nnodes` | `--tp_size` | `--sp_size` | `--vae_size` |
+| --- | --- | --- | --- | --- |
+| 四卡 | `4` | `2` | `2` | `4` |
+| 八卡 | `8` | `2` | `4` | `8` |
+
+`--vae_size` 设置独立于 TP/SP 的 VAE 进程组大小，不计入
+`TP * SP * CFG * DP` 的乘积；其值必须为正数，且能整除 `--nnodes`。
+上述配置将视频空间切片分配到所有 NPU 上解码，再聚合、拼接输出；
+该参数不会并行音频 VAE 解码。
+VAE 保持 FP32，每张参与的 NPU 都会加载完整的视频 VAE 权重，并保存聚合后的切片；
+启用前需为这些权重和解码中间张量留出显存。
+
+设置 `--vae_size=1` 可使用本地 VAE 解码，无需更改 TP/SP 配置。
+未触发空间切片或切片数小于 VAE 组大小时，各参与 rank 使用本地解码路径，
+不会因增加 `--vae_size` 获得切片并行收益。
 
 `--max_body_size` 为生成结果的内部传输预留空间，不能按压缩后 MP4 的大小设置。
 标准权重有 56 个注意力头、96 个视频 patch 通道和 32 个音频通道；并行配置需满足
@@ -172,3 +184,40 @@ ffprobe -v error -show_entries \
 当前服务仅支持 batch 1 和 `num_videos_per_prompt=1`。分辨率和帧数会按模型要求
 对齐，对齐后时长需在 5～15 秒之间；上述请求生成 1344×768、124 帧、24 FPS 的音视频。
 其他任务、权重格式、精度和并行布局需单独验证。
+
+## Transformer 缓存
+
+H3 默认使用完整计算。要开启 TaylorSeer 近似缓存，必须显式指定
+`--dit_cache_policy=TaylorSeer`，或在 JSON 配置中设置
+`"dit_cache_policy": "TaylorSeer"`。对于 50 步请求，可将服务启动命令中的缓存参数改为：
+
+```bash
+--dit_cache_policy=TaylorSeer \
+--dit_cache_warmup_steps=45 \
+--dit_cache_skip_interval_steps=2 \
+--dit_cache_n_derivatives=1
+```
+
+计算间隔必须大于零；设为 `1` 时每个去噪步都完整计算。预热步数和导数阶数必须
+非负。缓存历史按请求和 SP 分片隔离。缓存近似的是 video/audio/text 打包序列的
+Transformer block 输出；依赖当前时间步的输出归一化、媒体投影、采样器更新和
+VAE 解码仍正常执行。近似缓存会改变数值结果，需要针对实际任务验证生成质量。
+使用 `--dit_cache_policy=None` 可恢复完整计算。
+
+要用 FBCache 替换 TaylorSeer 或完整计算，请将服务启动命令中的缓存参数
+替换为以下内容。这组设置用于 50 步请求；文本条件和 HTTP 请求格式保持一致：
+
+```bash
+--dit_cache_policy=FBCache \
+--dit_cache_warmup_steps=45 \
+--dit_cache_residual_diff_threshold=0.09
+```
+
+预热步数和残差阈值必须非负。阈值设为 `0` 时不复用缓存；预热步数不小于请求的
+去噪步数时，每步也均完整计算。近似复用会改变数值结果，需针对实际任务同时检查
+视频和音频质量来选择参数。
+
+FBCache 不能与滚动加载权重同时使用。TP=1 时必须显式设置
+`--enable_rolling_load=false`，此时单个设备须能容纳完整常驻权重及推理工作区；
+关闭滚动加载并不保证 TP=1 能够装下模型。显存不足时，请使用上面的多卡布局。
+H3 仅支持 `None`、`TaylorSeer` 和 `FBCache`，不支持 `FBCacheTaylorSeer`。

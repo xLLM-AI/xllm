@@ -259,7 +259,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_cache_policy` | `string` | `"TaylorSeer"` | DiT cache 策略，例如 `None`、`FBCache`、`TaylorSeer`、`FBCacheTaylorSeer`、`ResidualCache`。 |
 | `dit_cache_warmup_steps` | `int64` | `0` | warmup step 数量。 |
 | `dit_cache_n_derivatives` | `int64` | `3` | TaylorSeer 使用的 derivative 数量。 |
-| `dit_cache_skip_interval_steps` | `int64` | `3` | derivative 计算的跳步间隔。 |
+| `dit_cache_skip_interval_steps` | `int64` | `3` | `TaylorSeer` 和 `ResidualCache` 的刷新间隔，必须大于 `0`。对 `TaylorSeer`，`1` 表示每步都计算；其他策略不使用此参数。 |
 | `dit_cache_residual_diff_threshold` | `double` | `0.09` | cache reuse 的 residual difference 阈值。 |
 | `dit_cache_start_steps` | `int64` | `5` | 起始阶段跳过的 step 数。 |
 | `dit_cache_end_steps` | `int64` | `5` | 末尾阶段跳过的 step 数。 |

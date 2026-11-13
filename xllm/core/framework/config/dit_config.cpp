@@ -182,8 +182,14 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
   const DiTConfig default_config;
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, max_requests_per_batch);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, dit_cache_policy);
+  // H3 treats an omitted policy as None, so preserve explicit default choices.
+  const auto& json_config = config::get_parsed_json_config();
+  if (dit_cache_policy() != default_config.dit_cache_policy() ||
+      config::is_flag_specified("dit_cache_policy") ||
+      (json_config &&
+       json_config->value<std::string>("dit_cache_policy").has_value())) {
+    config_json["dit_cache_policy"] = dit_cache_policy();
+  }
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_cache_warmup_steps);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

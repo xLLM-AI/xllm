@@ -23,38 +23,33 @@ namespace xllm {
 
 using TensorMap = std::unordered_map<std::string, torch::Tensor>;
 
+// Request denoising steps are one-based; 0 is the legacy standalone default.
+// Transformer block IDs are zero-based.
+// Callback payloads own their maps; tensor storage remains shared.
 struct CacheStepIn {
   int64_t step_id = 0;
   TensorMap tensors;
-
-  CacheStepIn(int64_t step_id) : step_id(step_id) {}
-  CacheStepIn(int64_t step_id, const TensorMap& tensors)
-      : step_id(step_id), tensors(tensors) {}
 };
 
 struct CacheStepOut {
   TensorMap tensors;
-  CacheStepOut(const TensorMap& tensors) : tensors(tensors) {}
 };
 
 struct CacheBlockIn {
   int64_t block_id = 0;
   TensorMap tensors;
-
-  CacheBlockIn(int64_t block_id) : block_id(block_id) {}
-  CacheBlockIn(int64_t block_id, const TensorMap& tensors)
-      : block_id(block_id), tensors(tensors) {}
 };
 
 struct CacheBlockOut {
   TensorMap tensors;
-  CacheBlockOut(const TensorMap& tensors) : tensors(tensors) {}
 };
 
 // Per-generation params, refreshed on every forward() before the denoise loop.
 struct CacheContext {
   int64_t infer_steps = 0;
   int64_t num_blocks = 0;
+  // The cached body has one packed stream rather than separate encoder states.
+  bool single_stream = false;
 };
 
 }  // namespace xllm

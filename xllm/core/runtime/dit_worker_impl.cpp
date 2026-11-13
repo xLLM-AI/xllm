@@ -29,6 +29,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/common/global_flags.h"
 #include "core/common/types.h"
+#include "core/framework/config/config_utils.h"
 #include "core/framework/config/dit_config.h"
 #include "core/framework/model_loader/dit_model_loader.h"
 #include "core/platform/device.h"
@@ -124,6 +125,16 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
     model_type = options_.model_id();
   }
 
+  // H3 was dense before cache integration. Preserve that default while
+  // respecting explicit CLI and JSON policy choices, including TaylorSeer.
+  const auto& json_config = config::get_parsed_json_config();
+  if (model_type == "MiniMaxH3ModularPipeline" &&
+      !config::is_flag_specified("dit_cache_policy") &&
+      !(json_config &&
+        json_config->value<std::string>("dit_cache_policy").has_value())) {
+    cache_config.selected_policy = PolicyType::None;
+  }
+
   dit_context_ = DiTModelContext(parallel_args_,
                                  loader->get_model_args(),
                                  loader->get_quant_args(),
@@ -171,8 +182,10 @@ std::optional<ForwardOutput> DiTWorkerImpl::step(
   torch::DeviceGuard device_guard(device_);
   Timer timer;
   DiTForwardInput input_on_device = inputs.to(device_);
+  DiTCache::get_instance().set_context({});
   DiTForwardOutput output =
       dit_model_executor_->forward(input_on_device.model_params);
+  DiTCache::get_instance().set_context({});
 
   const int32_t ret = device_.synchronize_default_stream();
   CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
