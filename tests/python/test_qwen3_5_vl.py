@@ -257,3 +257,35 @@ def test_partial_mrope_matches_axis_frequency_reference(interleaved: bool, axes:
     torch.testing.assert_close(rotary(positions, values), expected)
     decode_positions = torch.tensor([7, 8])
     torch.testing.assert_close(rotary(decode_positions, values), rotary(decode_positions.expand(3, -1), values))
+
+
+@pytest.mark.parametrize("device_type", ["cpu", "npu"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_interleaved_visual_rows_preserve_text_and_source(device_type: str, dtype: torch.dtype) -> None:
+    if device_type == "npu" and current_platform.device_type() != "npu":
+        pytest.skip("NPU is unavailable")
+    model = _model().to(device=device_type, dtype=dtype)
+    tokens = torch.tensor([10, 1, 11, 10, 2, 11], device=device_type)
+    image = torch.arange(16, device=device_type, dtype=dtype).reshape(4, 4)[::2]
+    video = torch.arange(8, device=device_type, dtype=torch.float32).reshape(2, 4) + 100
+    image_before = image.clone()
+    video_before = video.clone()
+    expected = model.model.embed_tokens(tokens).clone()
+    expected[0] = image[0]
+    expected[3] = image[1]
+    expected[2] = video[0].to(dtype)
+    expected[5] = video[1].to(dtype)
+
+    actual = model.get_input_embeddings(tokens, image, video)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(image, image_before, rtol=0, atol=0)
+    torch.testing.assert_close(video, video_before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "grid,expected",
+    [([[1, 4, 6]], [24]), ([[2, 4, 6], [1, 2, 4], [3, 2, 2]], [24, 48, 56, 60, 64, 68])],
+)
+def test_frame_boundaries_preserve_image_and_video_order(grid: list[list[int]], expected: list[int]) -> None:
+    assert Qwen3VLVisionTransformer._compute_frame_boundaries(grid) == expected

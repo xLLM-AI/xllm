@@ -43,7 +43,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5ForCausalLM):
         """Encode image patches or video frames with the shared vision tower."""
         return self.vision_model(
             pixel_values.to(device=self.device, dtype=self.dtype),
-            grid_thw.to(device=self.device, dtype=torch.int32),
+            grid_thw,
         )
 
     def get_input_embeddings(
@@ -54,23 +54,22 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5ForCausalLM):
     ) -> torch.Tensor:
         """Merge the current chunk's visual rows selected by the C++ MM gather."""
         modalities = [(image_embeds, self.image_token_id), (video_embeds, self.video_token_id)]
-        masks = []
+        visual_rows = []
         for embeds, token_id in modalities:
             if embeds is None:
                 continue
-            mask = input_ids == token_id
-            expected_shape = (int(mask.sum().item()), self.cfg.hidden_size)
+            indices = (input_ids == token_id).nonzero().flatten()
+            expected_shape = (indices.numel(), self.cfg.hidden_size)
             if tuple(embeds.shape) != expected_shape:
                 raise ValueError(f"visual embedding shape {tuple(embeds.shape)} does not match {expected_shape}")
             if expected_shape[0] == 0:
                 continue
-            masks.append((embeds, mask))
+            visual_rows.append((embeds, indices))
 
         inputs_embeds = self.model.embed_tokens(input_ids)
-        for embeds, mask in masks:
-            inputs_embeds.masked_scatter_(
-                mask.unsqueeze(-1), embeds.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype)
-            )
+        for embeds, indices in visual_rows:
+            # Copy whole token rows; elementwise masked_scatter uses AI CPU on Ascend.
+            inputs_embeds.index_copy_(0, indices, embeds.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype))
         return inputs_embeds
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
