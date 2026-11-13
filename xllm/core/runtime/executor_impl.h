@@ -54,6 +54,31 @@ class ExecutorImpl {
                           std::vector<KVCache>& kv_caches,
                           const ModelParamsView& params) = 0;
 
+  // Runs the logits stage as part of the execution. The ACL graph executor
+  // captures it inside the decode graph; other executors project eagerly via
+  // project_after_forward.
+  virtual ModelOutput run(const torch::Tensor& tokens,
+                          const torch::Tensor& positions,
+                          std::vector<KVCache>& kv_caches,
+                          const ModelParamsView& params,
+                          const torch::Tensor& logits_indices) {
+    return run(tokens, positions, kv_caches, params);
+  }
+
+  // Eager logits projection for paths where the executor ran the model
+  // forward without the logits stage.
+  static void project_after_forward(ModelOutput& output,
+                                    CausalLM* model,
+                                    const torch::Tensor& logits_indices) {
+    if (!output.logits.defined() && logits_indices.defined() &&
+        logits_indices.numel() > 0) {
+      torch::Tensor selected_hidden;
+      model->project_lm_head(
+          output.hidden_states, logits_indices, selected_hidden, output.logits);
+      output.selected_hidden_states = std::move(selected_hidden);
+    }
+  }
+
   virtual void prepare_graph_input(const torch::Tensor& /*tokens*/,
                                    const torch::Tensor& /*positions*/,
                                    std::vector<KVCache>& /*kv_caches*/,

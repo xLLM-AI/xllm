@@ -926,9 +926,9 @@ WorkerImpl::estimate_kv_cache_capacity_async() {
 torch::Tensor WorkerImpl::remap_logits_indices(
     const torch::Tensor& logits_indices,
     const ParallelInput& parallel_input,
-    const torch::Tensor& hidden_states) const {
+    int64_t num_hidden_rows) const {
   const auto& mapping = context_.get_parallel_args().mapping_data();
-  const int64_t hidden_num_rows = hidden_states.size(0);
+  const int64_t hidden_num_rows = num_hidden_rows;
   if (!logits_indices.defined() || logits_indices.numel() == 0 ||
       mapping.empty() || !mapping.contains("attnDp") ||
       !mapping["attnDp"].contains("rank") ||
@@ -970,7 +970,7 @@ torch::Tensor WorkerImpl::remap_logits_indices(
     if (max_logical_selected < padding_cpu.numel()) {
       return padding_cpu.index_select(/*dim=*/0, logical_selected_cpu)
           .to(torch::dtype(logits_indices.scalar_type())
-                  .device(hidden_states.device()),
+                  .device(logits_indices.device()),
               /*non_blocking=*/false)
           .contiguous();
     }
@@ -985,9 +985,7 @@ torch::Tensor WorkerImpl::remap_logits_indices(
     return logits_indices;
   }
 
-  torch::Tensor remapped =
-      logits_indices.to(hidden_states.device(), /*non_blocking=*/false)
-          .contiguous();
+  torch::Tensor remapped = logits_indices.contiguous();
   return (remapped + dp_offset).to(remapped.scalar_type()).contiguous();
 }
 

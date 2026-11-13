@@ -154,7 +154,7 @@ bool resolve_model_registration(const std::string& model_type,
                 canonical_model_type, extension_impl));
       } else if (model_component == "causal_vlm") {
         selected_extension_model =
-            static_cast<bool>(ModelRegistry::get_causalvlm_factory(
+            static_cast<bool>(ModelRegistry::get_vlm_factory(
                 canonical_model_type, extension_impl));
       }
       if (!selected_extension_model) {
@@ -314,25 +314,25 @@ bool ModelRegistry::register_causallm_factory(std::string name,
   return true;
 }
 
-void ModelRegistry::register_causalvlm_factory(const std::string& name,
-                                               CausalVLMFactory factory) {
-  register_causalvlm_factory(name, std::move(factory), /*priority=*/0);
+void ModelRegistry::register_vlm_factory(const std::string& name,
+                                         VlmFactory factory) {
+  register_vlm_factory(name, std::move(factory), /*priority=*/0);
 }
 
-bool ModelRegistry::register_causalvlm_factory(std::string name,
-                                               CausalVLMFactory factory,
-                                               int32_t priority) {
-  return register_causalvlm_factory(
+bool ModelRegistry::register_vlm_factory(std::string name,
+                                         VlmFactory factory,
+                                         int32_t priority) {
+  return register_vlm_factory(
       std::move(name), "native", std::move(factory), priority);
 }
 
-bool ModelRegistry::register_causalvlm_factory(std::string name,
-                                               std::string implementation,
-                                               CausalVLMFactory factory,
-                                               int32_t priority) {
+bool ModelRegistry::register_vlm_factory(std::string name,
+                                         std::string implementation,
+                                         VlmFactory factory,
+                                         int32_t priority) {
   CHECK(factory != nullptr) << "Cannot register an empty causal VLM factory";
   ModelRegistry* instance = get_instance();
-  auto& factories = instance->model_registry_[name].causal_vlm_factories;
+  auto& factories = instance->model_registry_[name].vlm_factories;
   implementation = canonical_model_impl(std::move(implementation));
   auto it = factories.find(implementation);
   if (it != factories.end() && priority <= it->second.priority) {
@@ -343,9 +343,8 @@ bool ModelRegistry::register_causalvlm_factory(std::string name,
     ExtensionRegistry::get_instance().register_implementation(implementation,
                                                               "causal_vlm");
   }
-  factories.insert_or_assign(
-      std::move(implementation),
-      CausalVLMRegistration{std::move(factory), priority});
+  factories.insert_or_assign(std::move(implementation),
+                             VlmRegistration{std::move(factory), priority});
   instance->model_backend_[std::move(name)] = "vlm";
   return true;
 }
@@ -442,11 +441,11 @@ CausalLMFactory ModelRegistry::get_causallm_factory(
   return registration->second.factory;
 }
 
-CausalVLMFactory ModelRegistry::get_causalvlm_factory(const std::string& name) {
-  return get_causalvlm_factory(name, "native");
+VlmFactory ModelRegistry::get_vlm_factory(const std::string& name) {
+  return get_vlm_factory(name, "native");
 }
 
-CausalVLMFactory ModelRegistry::get_causalvlm_factory(
+VlmFactory ModelRegistry::get_vlm_factory(
     const std::string& name,
     const std::string& implementation_key) {
   const ModelRegistry* instance = get_instance();
@@ -454,9 +453,9 @@ CausalVLMFactory ModelRegistry::get_causalvlm_factory(
   if (model == instance->model_registry_.end()) {
     return nullptr;
   }
-  const auto registration = model->second.causal_vlm_factories.find(
+  const auto registration = model->second.vlm_factories.find(
       canonical_model_impl(implementation_key));
-  if (registration == model->second.causal_vlm_factories.end()) {
+  if (registration == model->second.vlm_factories.end()) {
     return nullptr;
   }
   return registration->second.factory;
@@ -590,12 +589,6 @@ std::string resolve_dit_pipeline_type(
 }
 
 }  // namespace util
-
-void ModelRegistry::register_mtp_shared_weight_owner(const std::string& name) {
-  auto& capabilities = get_instance()->model_registry_[name].mtp_capabilities;
-  capabilities.native_draft_owns_embedding_and_lm_head = true;
-  capabilities.python_draft_owns_embedding_and_lm_head = true;
-}
 
 void ModelRegistry::register_mtp_args_adapter(const std::string& name,
                                               MtpArgsAdapter adapter) {
@@ -751,7 +744,7 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
   return nullptr;
 }
 
-std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
+std::unique_ptr<CausalLM> create_vlm_model(const ModelContext& context) {
   if (!validate_implementation_selection(context)) {
     return nullptr;
   }
@@ -767,7 +760,7 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
     const std::string direct_name = canonical_model_registration_name(
         context.get_model_args().model_type());
     auto direct_factory =
-        ModelRegistry::get_causalvlm_factory(direct_name, extension_impl);
+        ModelRegistry::get_vlm_factory(direct_name, extension_impl);
     if (!direct_factory) {
       LOG(ERROR) << "Missing causal_vlm extension for model type: "
                  << direct_name << " with extension_impl=" << extension_impl;
@@ -788,8 +781,7 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
     return nullptr;
   }
 
-  auto factory =
-      ModelRegistry::get_causalvlm_factory(resolved_name, model_impl);
+  auto factory = ModelRegistry::get_vlm_factory(resolved_name, model_impl);
   if (factory) {
     return factory(context);
   }

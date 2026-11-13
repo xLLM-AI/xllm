@@ -47,6 +47,7 @@ limitations under the License.
 #include "core/runtime/acl_graph_executor_impl.h"
 #include "core/runtime/base_executor_impl.h"
 #include "core/runtime/options.h"
+#include "core/util/tensor_helper.h"
 #include "tests/npu_test_environment.h"
 
 #if defined(__GNUC__)
@@ -333,10 +334,13 @@ class HybridConv1dMockLM final : public CausalLM {
     return opts;
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) override {
-    return torch::randn({hidden_states.size(0), kVocabSize},
-                        torch::dtype(kDtype).device(device_));
+  void project_lm_head(const torch::Tensor& hidden_states,
+                       const torch::Tensor& selected_idxes,
+                       torch::Tensor& out_hidden,
+                       torch::Tensor& logits) override {
+    gather_rows_if_defined(hidden_states, selected_idxes, out_hidden);
+    logits = torch::randn({out_hidden.size(0), kVocabSize},
+                          torch::dtype(kDtype).device(device_));
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) override {}

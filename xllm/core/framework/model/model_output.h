@@ -32,6 +32,11 @@ struct ModelOutput {
   torch::Tensor aux_hidden_states;
   // Backend-neutral state emitted for the next MTP draft step.
   MtpTopkStatePtr mtp_topk_state;
+  // Filled when the executor ran the logits stage (in-graph or eager) from the
+  // caller-provided logits indices: [num_selected, vocab_size].
+  torch::Tensor logits;
+  // Selected rows in logits order, when requested: [num_selected, hidden_size].
+  torch::Tensor selected_hidden_states;
 
   ModelOutput() = default;
 

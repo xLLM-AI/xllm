@@ -42,6 +42,13 @@ class Executor final {
                       std::vector<KVCache>& kv_caches,
                       const ModelParamsView& params);
 
+  // Runs the logits stage inside the executor (in-graph where supported).
+  ModelOutput forward(const torch::Tensor& tokens,
+                      const torch::Tensor& positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelParamsView& params,
+                      const torch::Tensor& logits_indices);
+
   void prepare_graph_input(const torch::Tensor& tokens,
                            const torch::Tensor& positions,
                            std::vector<KVCache>& kv_caches,

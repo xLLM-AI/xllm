@@ -416,19 +416,7 @@ class DFlash2Qwen3ForCausalLMImpl final
   using Base = ::xllm::LlmForCausalLMImplBase<DFlash2Qwen3Model>;
 
   explicit DFlash2Qwen3ForCausalLMImpl(const ModelContext& context)
-      : Base(context) {}
-
-  using Base::logits;
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes,
-                       torch::Tensor& out_hidden) {
-    out_hidden = selected_idxes.defined()
-                     ? hidden_states.index_select(
-                           /*dim=*/0, selected_idxes.to(torch::kLong))
-                     : hidden_states;
-    return lm_head_(out_hidden);
-  }
+      : Base(context, /*defer_head=*/true) {}  // borrows the target head
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "") override {

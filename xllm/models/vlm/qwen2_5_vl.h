@@ -16,11 +16,12 @@ limitations under the License.
 #pragma once
 
 #include "core/framework/config/model_config.h"
+#include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/multimodal/mposition.h"
-#include "core/layers/common/lm_head.h"
 #include "core/layers/qwen2_5_vision_layer.h"
 #include "core/layers/qwen2_decoder_layer.h"
+#include "core/util/tensor_helper.h"
 #include "models/llm/qwen2.h"
 #include "models/model_registry.h"
 #include "processors/multimodal_processor_pipeline.h"
@@ -476,7 +477,9 @@ struct Qwen2_5_VLVideoInputs {
   torch::Tensor second_per_grid_ts;
 };
 
-class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
+class Qwen2_5_VLForConditionalGenerationImpl
+    : public torch::nn::Module,
+      public ::xllm::detail::VlmLanguageModelHost<QWen2ForCausalLM> {
  public:
   Qwen2_5_VLForConditionalGenerationImpl(const ModelContext& context)
       : model_args_(context.get_model_args()),
@@ -589,13 +592,6 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     return inputs_embeds;
   }
 
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return language_model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
     auto h = hidden_states;
@@ -605,17 +601,11 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
       return h;
     }
 
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
+    torch::Tensor gathered;
+    gather_rows_if_defined(h, seleted_idxes, gathered);
     auto pooler_output = torch::nn::functional::normalize(
-        h, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+        gathered, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
     return pooler_output;
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) {
@@ -629,23 +619,11 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     }
   }
 
-  layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
-
-  layer::WordEmbedding get_word_embedding() {
-    return language_model_->get_word_embedding();
-  }
-
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    language_model_->set_word_embedding(word_embedding);
-  }
-
  private:
   ModelArgs model_args_;
   torch::TensorOptions options_;
 
   Qwen2_5_VisionTransformer visual_{nullptr};
-  QWen2ForCausalLM language_model_{nullptr};
 };
 TORCH_MODULE(Qwen2_5_VLForConditionalGeneration);
 

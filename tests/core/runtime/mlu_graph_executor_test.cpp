@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/runtime/graph_execution_input.h"
 #include "core/runtime/mlu_graph_planner.h"
+#include "core/util/tensor_helper.h"
 #include "mlu_graph_executor_impl.h"
 #include "models/llm/mlu/mtp_topk_state.h"
 #include "platform/device.h"
@@ -139,10 +140,12 @@ class MockCausalLM : public CausalLM {
     output.mtp_topk_state = mtp_topk_state_;
     return output;
   }
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) override {
-    (void)seleted_idxes;
-    return hidden_states;
+  void project_lm_head(const torch::Tensor& hidden_states,
+                       const torch::Tensor& seleted_idxes,
+                       torch::Tensor& out_hidden,
+                       torch::Tensor& logits) override {
+    gather_rows_if_defined(hidden_states, seleted_idxes, out_hidden);
+    logits = out_hidden;
   }
   int32_t forward_cnt() const { return forward_cnt_; }
   int64_t last_tokens_size() const { return last_tokens_size_; }

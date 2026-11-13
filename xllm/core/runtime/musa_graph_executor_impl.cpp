@@ -1879,6 +1879,16 @@ ModelOutput MusaGraphExecutorImpl::run(const torch::Tensor& tokens,
   return run_typed(model_, tokens, positions, kv_caches, params);
 }
 
+ModelOutput MusaGraphExecutorImpl::run(const torch::Tensor& tokens,
+                                       const torch::Tensor& positions,
+                                       std::vector<KVCache>& kv_caches,
+                                       const ModelParamsView& params,
+                                       const torch::Tensor& logits_indices) {
+  ModelOutput output = run(tokens, positions, kv_caches, params);
+  project_after_forward(output, model_, logits_indices);
+  return output;
+}
+
 uint32_t MusaGraphExecutorImpl::get_bucket_num_tokens(
     uint32_t num_tokens) const {
   return static_cast<uint32_t>(::xllm::runtime::get_decode_graph_token_bucket(

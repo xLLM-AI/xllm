@@ -1316,6 +1316,16 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
   return run_typed(model_, tokens, positions, kv_caches, params);
 }
 
+ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
+                                       const torch::Tensor& positions,
+                                       std::vector<KVCache>& kv_caches,
+                                       const ModelParamsView& params,
+                                       const torch::Tensor& logits_indices) {
+  ModelOutput output = run(tokens, positions, kv_caches, params);
+  project_after_forward(output, model_, logits_indices);
+  return output;
+}
+
 template <typename Model, typename Params>
 ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
                                              const torch::Tensor& tokens,

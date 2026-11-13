@@ -21,14 +21,15 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "core/layers/common/lm_head.h"
 #include "core/layers/common/rms_norm.h"
+#include "core/util/tensor_helper.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -153,27 +154,13 @@ class LlmModelImplBase : public torch::nn::Module {
 };
 
 template <typename LlmModelType>
-class LlmForCausalLMImplBase : public torch::nn::Module {
+class LlmForCausalLMImplBase : public torch::nn::Module,
+                               public detail::LmHeadOwner {
  public:
-  LlmForCausalLMImplBase(const ModelContext& context) {
-    tie_word_embeddings = context.get_model_args().tie_word_embeddings();
-    embedding_mode_ = context.get_model_args().embedding_mode();
-    // register submodules
+  explicit LlmForCausalLMImplBase(const ModelContext& context,
+                                  bool defer_head = false) {
     model_ = register_module("model", LlmModelType(context));
-    // DFlash2 shares the target lm-head after loading.  Avoid registering a
-    // draft-local copy: assigning lm_head_ later does not remove an already
-    // registered module, so the unused vocabulary projection would otherwise
-    // remain resident on the device.
-    const bool shares_target_lm_head =
-        is_dflash2_draft_model_type(context.get_model_args().model_type());
-    if (!embedding_mode_ && !shares_target_lm_head) {
-      lm_head_ = register_module("lm_head", layer::LmHead(context));
-    } else if (embedding_mode_) {
-      LOG(INFO) << "Skip registering lm_head in embedding mode.";
-    } else {
-      LOG(INFO) << "Skip registering draft-local lm_head for DFlash2; the "
-                   "target lm_head will be shared after model loading.";
-    }
+    this->init_lm_head(*this, context, defer_head);
   }
 
   torch::Tensor get_input_embeddings(torch::Tensor input_ids) {
@@ -198,47 +185,10 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     return model_->forward(tokens, positions, kv_caches, input_params);
   }
 
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // returns: [num_tokens, vocab_size]
-  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes) {
-    CHECK(!lm_head_.is_empty())
-        << "lm_head is not initialized in embedding mode.";
-    // select tokens if provided
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    return lm_head_(h);
-  }
-
-  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes,
-                               torch::Tensor& out_hidden) {
-    if (seleted_idxes.defined()) {
-      out_hidden = hidden_states.index_select(/*dim=*/0, seleted_idxes);
-    } else {
-      out_hidden = hidden_states;
-    }
-    return logits(out_hidden, torch::Tensor());
-  }
-
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // returns: [num_seqs, hidden_size]
-  virtual torch::Tensor pooler(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    return h;
-  }
-
   virtual void load_model(
       std::unique_ptr<ModelLoader> loader,
       std::string prefix = "model." /*llm model weight prefix*/) {
+    this->load_lm_head_weights(loader);
     for (const auto& state_dict : loader->get_state_dicts()) {
       // The same model_type may come from checkpoints with different top-level
       // weight prefixes. Try these candidate prefixes in order to improve
@@ -249,25 +199,6 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
                                    prefix,
                                    "model.",
                                    ""}));
-
-      if (!embedding_mode_) {
-        if (tie_word_embeddings) {
-          auto lm_head_state_dict =
-              state_dict->get_dict_with_prefix(std::vector<std::string>{
-                  prefix + "embed_tokens.", "embed_tokens.", "embed."});
-          lm_head_->load_state_dict(lm_head_state_dict);
-        } else {
-          auto lm_head_state_dict = state_dict->get_dict_with_prefix(
-              std::vector<std::string>{"lm_head.",
-                                       "model.lm_head.",
-                                       "model.head.",
-                                       "head.",
-                                       prefix,
-                                       prefix + "lm_head.",
-                                       prefix + "head."});
-          lm_head_->load_state_dict(lm_head_state_dict);
-        }
-      }
     }
   }
 
@@ -281,14 +212,6 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     return true;
   }
 
-  virtual layer::LmHead get_lm_head() {
-    CHECK(!lm_head_.is_empty())
-        << "lm_head is not initialized in embedding mode.";
-    return lm_head_;
-  }
-
-  virtual void set_lm_head(layer::LmHead& head) { lm_head_ = head; }
-
   virtual layer::WordEmbedding get_word_embedding() {
     return model_->get_word_embedding();
   }
@@ -300,10 +223,6 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
  protected:
   // parameter members, must be registered
   LlmModelType model_{nullptr};
-  bool tie_word_embeddings{false};
-  bool embedding_mode_{false};
-  // test
-  layer::LmHead lm_head_{nullptr};
 };
 
 }  // namespace xllm

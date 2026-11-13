@@ -48,6 +48,12 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
 
+  ModelOutput run(const torch::Tensor& tokens,
+                  const torch::Tensor& positions,
+                  std::vector<KVCache>& kv_caches,
+                  const ModelParamsView& params,
+                  const torch::Tensor& logits_indices) override;
+
  private:
   // Caller holds the GIL.
   void bind_kv_caches(std::vector<KVCache>& kv_caches);

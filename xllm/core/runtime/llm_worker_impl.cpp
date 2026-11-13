@@ -237,8 +237,24 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
 
   // call model executor forward to get hidden states
   ModelParamsView execution_params(input.input_params);
-  auto model_output = model_executor_->forward(
-      input.token_ids, input.positions, kv_caches_, execution_params);
+  // The logits row selection is request-side data (the DP remap needs only
+  // the padded token-row count), so it can ride the executor call and run
+  // the logits stage inside the executor.
+  torch::Tensor logits_indices;
+  if (sampling_params.num_sample_seqs() > 0) {
+    logits_indices = remap_logits_indices(sampling_params.logits_indices(),
+                                          execution_params.parallel,
+                                          input.token_ids.size(0));
+    if (logits_indices.device() != input.token_ids.device()) {
+      logits_indices = logits_indices.to(input.token_ids.device(),
+                                         /*non_blocking=*/false);
+    }
+  }
+  auto model_output = model_executor_->forward(input.token_ids,
+                                               input.positions,
+                                               kv_caches_,
+                                               execution_params,
+                                               logits_indices);
   if (eplb_executor_ != nullptr) {
     eplb_executor_->finish_eplb_step();
   }
@@ -246,41 +262,9 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     return make_transfer_failure_output(wait_kv_push());
   }
 
-  torch::Tensor logits;
-  torch::Tensor lm_head_input_indices;
-  torch::Tensor selected_hidden;
-  if (sampling_params.num_sample_seqs() > 0) {
-    torch::Tensor logits_indices =
-        remap_logits_indices(sampling_params.logits_indices(),
-                             execution_params.parallel,
-                             model_output.hidden_states);
-    if (logits_indices.device() != model_output.hidden_states.device()) {
-      logits_indices = logits_indices
-                           .to(model_output.hidden_states.device(),
-                               /*non_blocking=*/false)
-                           .contiguous();
-    }
-    lm_head_input_indices = logits_indices;
-    const bool need_selected_hidden =
-        input.return_selected_hidden ||
-        (options_.cp_size() > 1 && options_.enable_speculative_decode());
-    if (need_selected_hidden) {
-      // Emit both selected hidden and logits from a single lm_head pass so the
-      // ConfidenceHead and CP speculative paths can consume hidden without a
-      // second projection.
-      logits = model_->logits(
-          model_output.hidden_states, logits_indices, selected_hidden);
-      if (!selected_hidden.defined()) {
-        // Models with only the two-argument logits overload leave this unset.
-        // Gather in logits order: equal row counts do not imply an identity
-        // permutation of the selected indices.
-        selected_hidden = model_output.hidden_states.index_select(
-            /*dim=*/0, logits_indices.to(torch::kLong));
-      }
-    } else {
-      logits = model_->logits(model_output.hidden_states, logits_indices);
-    }
-  }
+  torch::Tensor logits = model_output.logits;
+  torch::Tensor lm_head_input_indices = logits_indices;
+  torch::Tensor selected_hidden = model_output.selected_hidden_states;
 
   ForwardOutput output;
   output.mtp_topk_state = std::move(model_output.mtp_topk_state);

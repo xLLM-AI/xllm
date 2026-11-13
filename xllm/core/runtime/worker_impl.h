@@ -277,24 +277,12 @@ class WorkerImpl {
     return context_.get_model_args().hidden_size();
   }
 
-  virtual layer::LmHead get_lm_head() { return model()->get_lm_head(); }
-
-  virtual void set_lm_head(layer::LmHead& head) { model()->set_lm_head(head); }
-
-  virtual layer::WordEmbedding get_word_embedding() {
-    return model()->get_word_embedding();
-  }
-
-  virtual void set_word_embedding(layer::WordEmbedding& embedding) {
-    model()->set_word_embedding(embedding);
-  }
-
-  bool share_weights_from(WorkerImpl& source) {
-    // Weight sharing uses the owned language model.
-    if (model_ == nullptr || source.model_ == nullptr) {
-      return false;
+  void share_weights_from(WorkerImpl& target) {
+    if (model_ == nullptr || target.model_ == nullptr) {
+      return;
     }
-    return model_->share_weights_from(*source.model_);
+    model_->share_lm_head(*target.model_);
+    model_->share_embed_tokens(*target.model_);
   }
 
   bool enable_schedule_overlap() const {
@@ -370,7 +358,7 @@ class WorkerImpl {
   // Map shard-local selections to the rows consumed by the LM head.
   torch::Tensor remap_logits_indices(const torch::Tensor& logits_indices,
                                      const ParallelInput& parallel_input,
-                                     const torch::Tensor& hidden_states) const;
+                                     int64_t num_hidden_rows) const;
   // Prepare (reset/restore/direct-read) the recurrent slots on the caller's
   // current stream. Overlap callers must use compute_stream_ after the
   // preceding forward.

@@ -53,6 +53,7 @@ limitations under the License.
 #include "core/runtime/dflash_worker_impl.h"
 #include "core/runtime/options.h"
 #include "core/runtime/speculative_worker_impl.h"
+#include "core/util/tensor_helper.h"
 #include "models/llm/deepseek_v4.h"
 #include "models/llm/dspark_weight_source.h"
 #include "models/model_registry.h"
@@ -349,12 +350,15 @@ class SimpleCausalLM : public CausalLM {
   }
 
   // Implement required virtual functions
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) override {
+  void project_lm_head(const torch::Tensor& hidden_states,
+                       const torch::Tensor& selected_idxes,
+                       torch::Tensor& out_hidden,
+                       torch::Tensor& logits) override {
     // Simple logits computation
     const int64_t vocab_size = std::max(args_.vocab_size(), 1000L);
-    return torch::randn({hidden_states.size(0), vocab_size},
-                        torch::dtype(torch::kFloat32).device(device_));
+    gather_rows_if_defined(hidden_states, selected_idxes, out_hidden);
+    logits = torch::randn({out_hidden.size(0), vocab_size},
+                          torch::dtype(torch::kFloat32).device(device_));
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) override {
