@@ -21,6 +21,8 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
+#include "models/dit/utils/minimax_h3_qualified_vae.h"
+
 namespace xllm {
 
 // The framework Ulysses all-to-all (parallel_state::all_to_all_4D) scatters the
@@ -42,7 +44,6 @@ inline constexpr int64_t kMiniMaxH3LocalHeadsPerRank = 4;
 inline constexpr int64_t kMiniMaxH3WorldSize = 16;
 inline constexpr int64_t kMiniMaxH3DpSize = 1;
 inline constexpr int64_t kMiniMaxH3CfgSize = 1;
-inline constexpr int64_t kMiniMaxH3VaeSize = 1;
 inline constexpr int64_t kMiniMaxH3TextEncoderTpSize = 1;
 
 struct MiniMaxH3Topology {
@@ -78,7 +79,8 @@ inline bool minimax_h3_topology_is_valid(const MiniMaxH3Topology& topology) {
          topology.tp_size == kMiniMaxH3TpSize &&
          topology.sp_size == kMiniMaxH3SpSize &&
          topology.cfg_size == kMiniMaxH3CfgSize &&
-         topology.vae_size == kMiniMaxH3VaeSize &&
+         minimax_h3_qualified_vae_size_is_valid(topology.world_size,
+                                                topology.vae_size) &&
          topology.text_encoder_tp_size == kMiniMaxH3TextEncoderTpSize;
 }
 

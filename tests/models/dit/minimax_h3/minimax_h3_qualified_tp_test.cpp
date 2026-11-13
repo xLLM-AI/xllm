@@ -30,6 +30,7 @@ namespace {
 
 TEST(QualifiedTpContract, AcceptsOnlyA3SixteenCardTp2U8) {
   EXPECT_TRUE(minimax_h3_topology_is_valid({16, 1, 2, 8, 1, 1, 1}));
+  EXPECT_TRUE(minimax_h3_topology_is_valid({16, 1, 2, 8, 1, 16, 1}));
   EXPECT_FALSE(minimax_h3_topology_is_valid({16, 1, 16, 1, 1, 1, 1}));
   EXPECT_FALSE(minimax_h3_topology_is_valid({16, 1, 2, 8, 1, 2, 1}));
   EXPECT_FALSE(minimax_h3_topology_is_valid({1, 1, 1, 1, 1, 1, 1}));
@@ -38,14 +39,13 @@ TEST(QualifiedTpContract, AcceptsOnlyA3SixteenCardTp2U8) {
 
 TEST(QualifiedTpContract, FrameworkMapsRanksToTpAndUlyssesCoordinates) {
   RankGenerator generator(16);
-  std::vector<int32_t> sizes{2, 8, 1, 1};
-  std::vector<std::string> order{"tp", "sp", "cfg", "dp"};
-  const auto groups = generator.get_ranks_mapping(sizes, order);
-  ASSERT_EQ(groups.at("tp").size(), 8);
-  ASSERT_EQ(groups.at("sp").size(), 2);
+  const std::vector<int32_t> sizes{2, 8, 1, 1};
+  const std::vector<std::string> order{"tp", "sp", "cfg", "dp"};
   for (int32_t rank = 0; rank < 16; ++rank) {
-    EXPECT_EQ(groups.at("tp")[rank / 2][rank % 2], rank);
-    EXPECT_EQ(groups.at("sp")[rank % 2][rank / 2], rank);
+    const RankGroup tp = generator.get_rank_group("tp", sizes, order, rank);
+    const RankGroup sp = generator.get_rank_group("sp", sizes, order, rank);
+    EXPECT_EQ(tp.ranks[rank % 2], rank);
+    EXPECT_EQ(sp.ranks[rank / 2], rank);
   }
 }
 

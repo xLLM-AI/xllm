@@ -30,8 +30,8 @@ cc_test(
 cc_test(
   NAME minimax_h3_tp_test
   CPU_ONLY
-  SRCS minimax_h3_qualified_tp_test.cpp
-  DEPS :parallel_state torch GTest::gtest_main
+  SRCS minimax_h3_qualified_tp_test.cpp minimax_h3_vae_parallel_test.cpp
+  DEPS glog::glog torch GTest::gtest_main
 )
 
 cc_test(

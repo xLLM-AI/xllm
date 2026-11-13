@@ -21,6 +21,7 @@ limitations under the License.
 #include <array>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -1190,6 +1191,25 @@ class AutoencoderKLMiniMaxH3AudioImpl final : public torch::nn::Module {
     mean_proj_->verify_loaded_weights(prefix + "mean_proj.");
     dec_in_proj_->verify_loaded_weights(prefix + "dec_in_proj.");
     decoder_->verify_loaded_weights(prefix + "decoder.");
+  }
+
+  int64_t resident_module_bytes() const {
+    int64_t bytes = 0;
+    const auto accumulate = [&bytes](const auto& item) {
+      const int64_t element_size =
+          static_cast<int64_t>(item.value().element_size());
+      CHECK_LE(item.value().numel(),
+               (std::numeric_limits<int64_t>::max() - bytes) / element_size)
+          << "MiniMax-H3 audio VAE resident byte count overflow";
+      bytes += item.value().numel() * element_size;
+    };
+    for (const auto& item : named_parameters(/*recurse=*/true)) {
+      accumulate(item);
+    }
+    for (const auto& item : named_buffers(/*recurse=*/true)) {
+      accumulate(item);
+    }
+    return bytes;
   }
 
  private:

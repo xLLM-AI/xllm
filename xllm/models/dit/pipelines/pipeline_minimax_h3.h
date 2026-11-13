@@ -25,6 +25,7 @@ limitations under the License.
 #include <cstdlib>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -44,6 +45,7 @@ limitations under the License.
 #include <acl/acl.h>
 
 #include "core/layers/npu/loader/rolling_weight_buffer.h"
+#include "core/platform/device.h"
 #endif
 #include "models/dit/autoencoders/autoencoder_kl_minimax_h3_audio.h"
 #include "models/dit/autoencoders/autoencoder_kl_minimax_h3_video.h"
@@ -59,6 +61,7 @@ limitations under the License.
 #include "models/dit/utils/minimax_h3_execution_metrics.h"
 #include "models/dit/utils/minimax_h3_phase_timing.h"
 #include "models/dit/utils/minimax_h3_qualified_execution_context.h"
+#include "models/dit/utils/minimax_h3_qualified_vae.h"
 #include "models/dit/utils/minimax_h3_rainfusion_observer.h"
 #include "models/dit/utils/minimax_h3_rainfusion_resources.h"
 #include "models/dit/utils/util.h"
@@ -149,8 +152,7 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
 
   bool qualified_owns_vaes_for_test() const {
     CHECK(construction_ == H3BackendConstruction::A3_16CARD);
-    CHECK(static_cast<bool>(vae_) == static_cast<bool>(audio_vae_));
-    return static_cast<bool>(vae_);
+    return static_cast<bool>(vae_) && static_cast<bool>(audio_vae_);
   }
 
   DiTForwardOutput qualified_owner_phase_for_test(
@@ -267,6 +269,10 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         CHECK_EQ(parallel.world_size(), 1);
         CHECK_EQ(parallel.rank(), 0);
         CHECK_EQ(parallel.vae_size(), 1);
+        qualified_reference_encode_owner_ = true;
+        qualified_video_vae_worker_ = true;
+        qualified_audio_decode_owner_ = true;
+        qualified_output_owner_ = true;
       } else {
         CHECK(minimax_h3_topology_is_valid({parallel.world_size(),
                                             parallel.dp_size(),
@@ -285,9 +291,23 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         CHECK_EQ(parallel.dit_tp_group_->rank(), parallel.rank() % 2);
         CHECK_EQ(parallel.dit_sp_group_->rank(), parallel.rank() / 2);
         qualified_world_group_ = parallel.process_group_;
+        const MiniMaxH3QualifiedVaePlan vae_plan =
+            minimax_h3_qualified_vae_plan(
+                parallel.world_size(), parallel.rank(), parallel.vae_size());
+        qualified_reference_encode_owner_ = vae_plan.reference_encode_owner;
+        qualified_video_vae_worker_ = vae_plan.video_vae_worker;
+        qualified_collaborative_video_decode_ =
+            vae_plan.collaborative_video_decode;
+        qualified_audio_decode_owner_ = vae_plan.audio_decode_owner;
+        qualified_output_owner_ = vae_plan.output_owner;
+        if (qualified_collaborative_video_decode_) {
+          CHECK(parallel.dit_vae_group_ != nullptr);
+          CHECK_EQ(parallel.dit_vae_group_->world_size(),
+                   kMiniMaxH3QualifiedParallelVaeSize);
+          CHECK_EQ(parallel.dit_vae_group_->rank(), parallel.rank());
+        }
       }
       qualified_shape_ = h3_qualified_shape_from_args(transformer_args);
-      qualified_output_owner_ = parallel.rank() == 0;
       // Reserve the phase status before requests; initialization failures are
       // propagated by the worker initialization protocol.
       qualified_phase_status_ = torch::ones({1}, options_.dtype(torch::kInt32));
@@ -348,13 +368,23 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     }
     if (construction_ == H3BackendConstruction::NATIVE
             ? is_video_vae_worker_
-            : qualified_output_owner_) {
+            : qualified_video_vae_worker_) {
+      ProcessGroup* decoder_tp_group = nullptr;
+      if (qualified_collaborative_video_decode_) {
+        decoder_tp_group = context.get_parallel_args().dit_tp_group_;
+      }
       vae_ = register_module(
-          "vae", AutoencoderKLMiniMaxH3(context.get_model_context("vae")));
+          "vae",
+          AutoencoderKLMiniMaxH3(context.get_model_context("vae"),
+                                 qualified_collaborative_video_decode_,
+                                 /*enable_reference_encoder=*/
+                                 !qualified_collaborative_video_decode_ ||
+                                     qualified_reference_encode_owner_,
+                                 decoder_tp_group));
     }
     if (construction_ == H3BackendConstruction::NATIVE
             ? is_tp_driver_
-            : qualified_output_owner_) {
+            : qualified_audio_decode_owner_) {
       audio_vae_ = register_module(
           "audio_vae",
           AutoencoderKLMiniMaxH3Audio(context.get_model_context("audio_vae")));
@@ -724,9 +754,24 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   void load_qualified(std::unique_ptr<DiTModelLoader> loader) {
     CHECK(loader != nullptr);
     CHECK(loader->has_component("transformer_ref"));
+    CHECK(loader->has_component("vae"));
+    CHECK(loader->has_component("audio_vae"));
     qualified_denoiser_->load(std::make_unique<H3QualifiedWeightSource>(
         loader->take_component_loader("transformer_ref"), qualified_shape_));
-    if (qualified_output_owner_) {
+    if (qualified_collaborative_video_decode_) {
+      run_qualified_phase("parallel VAE HBM preflight",
+                          [&] { preflight_qualified_parallel_vae_hbm(); });
+      run_qualified_phase("parallel video VAE load", [&] {
+        vae_->load_model(loader->take_component_loader("vae"));
+        vae_->to(options_.device(), torch::kFloat32);
+      });
+      run_qualified_phase("audio VAE load", [&] {
+        if (qualified_audio_decode_owner_) {
+          audio_vae_->load_model(loader->take_component_loader("audio_vae"));
+          audio_vae_->to(options_.device(), torch::kFloat32);
+        }
+      });
+    } else if (qualified_output_owner_) {
       vae_->load_model(loader->take_component_loader("vae"));
       audio_vae_->load_model(loader->take_component_loader("audio_vae"));
       vae_->to(options_.device(), torch::kFloat32);
@@ -741,6 +786,101 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     }
   }
 
+  void preflight_qualified_parallel_vae_hbm() const {
+    if (!qualified_collaborative_video_decode_ || !vae_) {
+      throw std::logic_error(
+          "MiniMax-H3 parallel VAE HBM preflight has no video VAE worker");
+    }
+#if defined(USE_NPU)
+    if (options_.device().is_cpu()) {
+      throw std::runtime_error(
+          "MiniMax-H3 parallel VAE requires an Ascend NPU device");
+    }
+    Device device(options_.device());
+    device.set_device();
+    const int64_t available_bytes = device.free_memory();
+    const int64_t video_weight_bytes = vae_->resident_module_bytes();
+    const int64_t audio_weight_bytes =
+        qualified_audio_decode_owner_ ? audio_vae_->resident_module_bytes() : 0;
+    if (video_weight_bytes >
+        std::numeric_limits<int64_t>::max() - audio_weight_bytes) {
+      throw std::runtime_error(
+          "MiniMax-H3 parallel VAE resident byte count overflow");
+    }
+    const int64_t resident_weight_bytes =
+        video_weight_bytes + audio_weight_bytes;
+    const int64_t decode_reserve_bytes =
+        minimax_h3_parallel_vae_decode_reserve_bytes(qualified_output_owner_);
+    if (!minimax_h3_parallel_vae_hbm_preflight_passes(
+            available_bytes, resident_weight_bytes, decode_reserve_bytes)) {
+      throw std::runtime_error(
+          "MiniMax-H3 parallel VAE HBM preflight failed: available=" +
+          std::to_string(available_bytes) +
+          " resident_weights=" + std::to_string(resident_weight_bytes) +
+          " video_weights=" + std::to_string(video_weight_bytes) +
+          " audio_weights=" + std::to_string(audio_weight_bytes) +
+          " decode_reserve=" + std::to_string(decode_reserve_bytes) +
+          " owner=" + std::to_string(qualified_output_owner_));
+    }
+    LOG(INFO) << "MiniMax-H3 parallel VAE HBM preflight passed: available="
+              << available_bytes
+              << " resident_weights=" << resident_weight_bytes
+              << " video_weights=" << video_weight_bytes
+              << " audio_weights=" << audio_weight_bytes
+              << " decode_reserve=" << decode_reserve_bytes
+              << " owner=" << qualified_output_owner_;
+#else
+    throw std::runtime_error("MiniMax-H3 parallel VAE requires an NPU build");
+#endif
+  }
+
+  // Decode-entry re-check: the load-time preflight cannot see the denoise pool
+  // high-water, so it false-negatively passes (HBM-C C-1). Re-validate free HBM
+  // at decode entry, inside run_qualified_phase so a shortfall fails closed on
+  // all ranks via the world16 allreduce BEFORE any tile is decoded. Admission
+  // is role-aware: a nonowner hard-fails below its 1.5 GiB reserve (its new
+  // risk surface); the owner only logs available vs the 4.75 GiB reserve
+  // because aclrt raw free excludes the torch allocator pool reuse that lets
+  // rank0 survive larger peaks (see
+  // minimax_h3_parallel_vae_decode_entry_hard_fails).
+  void validate_qualified_parallel_vae_decode_hbm() const {
+    if (!qualified_collaborative_video_decode_) {
+      return;
+    }
+#if defined(USE_NPU)
+    if (options_.device().is_cpu()) {
+      throw std::runtime_error(
+          "MiniMax-H3 parallel VAE requires an Ascend NPU device");
+    }
+    Device device(options_.device());
+    device.set_device();
+    const int64_t available_bytes = device.free_memory();
+    const int64_t decode_reserve_bytes =
+        minimax_h3_parallel_vae_decode_reserve_bytes(qualified_output_owner_);
+    if (minimax_h3_parallel_vae_decode_entry_hard_fails(
+            qualified_output_owner_, available_bytes, decode_reserve_bytes)) {
+      throw std::runtime_error(
+          "MiniMax-H3 parallel VAE decode-time HBM guard failed: available=" +
+          std::to_string(available_bytes) +
+          " required_reserve=" + std::to_string(decode_reserve_bytes) +
+          " owner=" + std::to_string(qualified_output_owner_));
+    }
+    if (available_bytes < decode_reserve_bytes) {
+      LOG(WARNING) << "MiniMax-H3 parallel VAE decode-time HBM below owner"
+                   << " reserve (log-only admission): available="
+                   << available_bytes << " reserve=" << decode_reserve_bytes;
+      return;
+    }
+    LOG(INFO) << "MiniMax-H3 parallel VAE decode-time HBM guard passed:"
+              << " available=" << available_bytes
+              << " reserve=" << decode_reserve_bytes
+              << " owner=" << qualified_output_owner_;
+#else
+    throw std::runtime_error(
+        "MiniMax-H3 parallel VAE decode-time guard requires an NPU build");
+#endif
+  }
+
   // This is an explicit cross-rank failure boundary. After an owner or
   // follower allocation fails, every rank sees failure before the broadcast.
   void run_qualified_phase(const std::string& phase,
@@ -750,6 +890,10 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
       work();
     } catch (const std::exception& error) {
       LOG(ERROR) << "MiniMax-H3 qualified " << phase << ": " << error.what();
+      qualified_phase_status_.zero_();
+    } catch (...) {
+      LOG(ERROR) << "MiniMax-H3 qualified " << phase
+                 << ": unknown non-standard exception";
       qualified_phase_status_.zero_();
     }
     int32_t participants = 1;
@@ -883,7 +1027,7 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                                                  shape.reference_latent_t,
                                                  shape.reference_latent_h,
                                                  shape.reference_latent_w};
-      if (qualified_output_owner_) {
+      if (qualified_reference_encode_owner_) {
         torch::Tensor image = reference.tensor.squeeze(0).to(torch::kCPU);
         media.reference_pixels =
             visual_processor_
@@ -893,8 +1037,10 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                 .unsqueeze(2)
                 .to(options_.device());
         media.reference_latent =
-            vae_->encode_reference_condition(
-                    media.reference_pixels, trace, /*normalize_on_cpu=*/true)
+            vae_->encode_reference_condition(media.reference_pixels,
+                                             trace,
+                                             /*normalize_on_cpu=*/true,
+                                             /*parallel_tiles=*/false)
                 .contiguous();
         if (media.reference_latent.sizes().vec() != reference_shape ||
             media.reference_latent.scalar_type() != torch::kFloat32) {
@@ -1001,16 +1147,28 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   }
 
   DiTForwardOutput decode_qualified_output(const H3QualifiedRequest& request) {
-    torch::Tensor video_latent = unpatchify_video(
-        generated_rows(request.video_rows, request.condition_video_rows),
-        request.target.latent_t,
-        request.target.latent_h,
-        request.target.latent_w);
+    torch::Tensor video_latent = normalized_qualified_video_latent(request);
     torch::Tensor audio_latent = unpatchify_audio(
         generated_rows(request.audio_rows, request.condition_audio_rows),
         request.target.audio_t);
     torch::Tensor video =
         vae_->decode_to_pixels(vae_->denormalize_latents(video_latent));
+    return decode_qualified_audio_output(request, video, audio_latent);
+  }
+
+  torch::Tensor normalized_qualified_video_latent(
+      const H3QualifiedRequest& request) const {
+    return unpatchify_video(
+        generated_rows(request.video_rows, request.condition_video_rows),
+        request.target.latent_t,
+        request.target.latent_h,
+        request.target.latent_w);
+  }
+
+  DiTForwardOutput decode_qualified_audio_output(
+      const H3QualifiedRequest& request,
+      const torch::Tensor& video,
+      const torch::Tensor& audio_latent) {
     torch::Tensor audio = audio_vae_->decode(
         audio_vae_->denormalize_latents(audio_latent).to(torch::kFloat32));
     CHECK_GE(audio.size(2), request.audio_output_samples);
@@ -1026,6 +1184,41 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     run_qualified_phase("output decode", [&] {
       if (qualified_output_owner_) {
         output = owner_work();
+      }
+    });
+    return output;
+  }
+
+  DiTForwardOutput run_qualified_output_decode(
+      const H3QualifiedRequest& request) {
+    if (!qualified_collaborative_video_decode_) {
+      return run_qualified_owner_output(
+          [&] { return decode_qualified_output(request); });
+    }
+
+    torch::Tensor video_latent;
+    run_qualified_phase("video latent preparation", [&] {
+      CHECK(qualified_video_vae_worker_);
+      video_latent =
+          vae_->denormalize_latents(normalized_qualified_video_latent(request));
+    });
+
+    // All ranks agree on HBM admission before entering the VAE group.
+    run_qualified_phase("parallel VAE decode HBM admission",
+                        [&] { validate_qualified_parallel_vae_decode_hbm(); });
+
+    torch::Tensor video;
+    run_qualified_phase("parallel video decode",
+                        [&] { video = vae_->decode_to_pixels(video_latent); });
+
+    DiTForwardOutput output;
+    run_qualified_phase("audio and output decode", [&] {
+      if (qualified_output_owner_) {
+        // Same rule for the audio extent: derived, never the literal 207.
+        torch::Tensor audio_latent = unpatchify_audio(
+            generated_rows(request.audio_rows, request.condition_audio_rows),
+            request.target.audio_t);
+        output = decode_qualified_audio_output(request, video, audio_latent);
       }
     });
     return output;
@@ -1067,9 +1260,9 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
 #endif
     timer.advance(H3TimingPhase::DENOISE);
     denoise_qualified_request(request, &execution);
+    execution.cache.reset();
     timer.advance(H3TimingPhase::DECODE);
-    DiTForwardOutput output = run_qualified_owner_output(
-        [&] { return decode_qualified_output(request); });
+    DiTForwardOutput output = run_qualified_output_decode(request);
     run_qualified_phase("final synchronize", [&] {
       finish_h3_qualified_request(execution.metrics, options_.device());
     });
@@ -2000,6 +2193,10 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   bool is_video_vae_worker_ = true;
   std::string task_type_;
   H3BackendConstruction construction_ = H3BackendConstruction::NATIVE;
+  bool qualified_reference_encode_owner_ = false;
+  bool qualified_video_vae_worker_ = false;
+  bool qualified_collaborative_video_decode_ = false;
+  bool qualified_audio_decode_owner_ = false;
   bool qualified_output_owner_ = false;
   ProcessGroup* qualified_world_group_ = nullptr;
   torch::Tensor qualified_phase_status_;

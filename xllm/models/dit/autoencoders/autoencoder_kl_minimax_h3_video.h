@@ -21,10 +21,13 @@ limitations under the License.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <numbers>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,6 +38,7 @@ limitations under the License.
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
 #include "models/dit/utils/diagonal_gaussian_distribution.h"
+#include "models/dit/utils/minimax_h3_qualified_vae.h"
 #include "models/dit/utils/util.h"
 #include "models/model_registry.h"
 #if defined(USE_NPU)
@@ -620,6 +624,41 @@ class AttentionImpl final : public torch::nn::Module {
 };
 TORCH_MODULE(Attention);
 
+// Pair-local readiness separates recoverable local work from the next data
+// collective. The enclosing VAE stage converges failures across the eight
+// pairs.
+struct DecoderTp2Context {
+  ProcessGroup& group;
+  torch::Tensor& status;
+};
+
+template <typename Work>
+void run_decoder_tp2_stage(const DecoderTp2Context* tp2,
+                           const char* phase,
+                           const Work& work) {
+  if (tp2 == nullptr) {
+    work();
+    return;
+  }
+
+  std::exception_ptr local_error;
+  try {
+    work();
+  } catch (...) {
+    local_error = std::current_exception();
+  }
+  tp2->status.fill_(local_error == nullptr ? 1 : 0);
+  tp2->group.allreduce(tp2->status);
+  if (tp2->status.item<int32_t>() == tp2->group.world_size()) {
+    return;
+  }
+  if (local_error != nullptr) {
+    std::rethrow_exception(local_error);
+  }
+  throw std::runtime_error("MiniMax-H3 VAE decoder TP2 peer failed in " +
+                           std::string(phase));
+}
+
 class FeedForwardImpl final : public torch::nn::Module {
  public:
   FeedForwardImpl(int64_t hidden_size, int64_t ffn_dim) {
@@ -750,7 +789,8 @@ TORCH_MODULE(TransformerBlock);
 
 class ViTDecoder3dImpl final : public torch::nn::Module {
  public:
-  explicit ViTDecoder3dImpl(const ModelArgs& args) {
+  explicit ViTDecoder3dImpl(const ModelArgs& args, int32_t tp_rank = -1)
+      : partition_rank_(tp_rank) {
     latent_channels_ = args.latent_channels();
     output_channels_ = args.out_channels();
     patch_t_ = product_checked(args.temporal_downsample_factors());
@@ -788,7 +828,14 @@ class ViTDecoder3dImpl final : public torch::nn::Module {
         "register_tokens",
         torch::zeros({1, register_tokens_count_, hidden_size}));
     blocks_ = register_module("transformer_blocks", torch::nn::ModuleList());
-    for (int64_t layer = 0; layer < layers; ++layer) {
+    CHECK_GE(partition_rank_, -1);
+    CHECK_LE(partition_rank_, 1);
+    const int64_t layer_count =
+        partition_rank_ < 0
+            ? layers
+            : layers / 2 + (partition_rank_ == 1 ? layers % 2 : 0);
+    layer_offset_ = partition_rank_ == 1 ? layers / 2 : 0;
+    for (int64_t layer = 0; layer < layer_count; ++layer) {
       blocks_->push_back(
           TransformerBlock(hidden_size, heads, head_dim, ffn_dim, norm_eps));
     }
@@ -804,70 +851,104 @@ class ViTDecoder3dImpl final : public torch::nn::Module {
                 .bias(true)));
   }
 
-  torch::Tensor forward(const torch::Tensor& latent) {
-    const int64_t batch_size = latent.size(0);
-    const int64_t num_frames = latent.size(2);
-    const int64_t height = latent.size(3);
-    const int64_t width = latent.size(4);
-    torch::Tensor hidden_states =
-        latent.permute({0, 2, 3, 4, 1})
-            .reshape(
-                {batch_size, num_frames * height * width, latent_channels_});
-    hidden_states = proj_in_->forward(hidden_states);
-    const int64_t num_patches = hidden_states.size(1);
-    torch::Tensor register_tokens =
-        register_tokens_.expand({batch_size, -1, -1});
-    torch::Tensor class_token = torch::zeros_like(hidden_states.slice(1, 0, 1));
-    hidden_states =
-        torch::cat({hidden_states, register_tokens, class_token}, 1);
+  torch::Tensor forward(const torch::Tensor& latent,
+                        const DecoderTp2Context* tp2 = nullptr) {
+    CHECK_EQ(partition_rank_ < 0, tp2 == nullptr);
+    torch::Tensor output;
+    torch::Tensor hidden_states;
+    std::pair<torch::Tensor, torch::Tensor> rotary;
+    int64_t batch_size = 0;
+    int64_t num_frames = 0;
+    int64_t height = 0;
+    int64_t width = 0;
+    int64_t num_patches = 0;
+    run_decoder_tp2_stage(tp2, "decoder input preparation", [&] {
+      batch_size = latent.size(0);
+      num_frames = latent.size(2);
+      height = latent.size(3);
+      width = latent.size(4);
+      hidden_states =
+          latent.permute({0, 2, 3, 4, 1})
+              .reshape(
+                  {batch_size, num_frames * height * width, latent_channels_});
+      hidden_states = proj_in_->forward(hidden_states);
+      num_patches = hidden_states.size(1);
+      torch::Tensor register_tokens =
+          register_tokens_.expand({batch_size, -1, -1});
+      torch::Tensor class_token =
+          torch::zeros_like(hidden_states.slice(1, 0, 1));
+      hidden_states =
+          torch::cat({hidden_states, register_tokens, class_token}, 1);
 
-    torch::TensorOptions position_options =
-        torch::TensorOptions().dtype(torch::kFloat32).device(latent.device());
-    const auto center_grid = [&position_options](int64_t extent) {
-      return 2.0 *
-                 (torch::arange(
-                      0.5, static_cast<double>(extent), 1.0, position_options) /
-                  static_cast<double>(extent)) -
-             1.0;
+      torch::TensorOptions position_options =
+          torch::TensorOptions().dtype(torch::kFloat32).device(latent.device());
+      const auto center_grid = [&position_options](int64_t extent) {
+        return 2.0 * (torch::arange(0.5,
+                                    static_cast<double>(extent),
+                                    1.0,
+                                    position_options) /
+                      static_cast<double>(extent)) -
+               1.0;
+      };
+      torch::Tensor grid_t = center_grid(num_frames);
+      torch::Tensor grid_h = center_grid(height);
+      torch::Tensor grid_w = center_grid(width);
+      torch::Tensor position_ids = torch::stack(
+          {grid_t.view({num_frames, 1, 1}).expand({num_frames, height, width}),
+           grid_h.view({1, height, 1}).expand({num_frames, height, width}),
+           grid_w.view({1, 1, width}).expand({num_frames, height, width})},
+          -1);
+      position_ids = position_ids.reshape({1, num_patches, 3})
+                         .expand({batch_size, -1, -1});
+      torch::Tensor suffix = torch::zeros(
+          {batch_size, register_tokens_count_ + 1, 3}, position_options);
+      position_ids = torch::cat({position_ids, suffix}, 1);
+      rotary = rope_->forward(position_ids);
+    });
+    const auto run_local_blocks = [&] {
+      for (const auto& block : *blocks_) {
+        hidden_states = block->as<TransformerBlock>()->forward(
+            hidden_states, rotary.first, rotary.second);
+      }
     };
-    torch::Tensor grid_t = center_grid(num_frames);
-    torch::Tensor grid_h = center_grid(height);
-    torch::Tensor grid_w = center_grid(width);
-    torch::Tensor position_ids = torch::stack(
-        {grid_t.view({num_frames, 1, 1}).expand({num_frames, height, width}),
-         grid_h.view({1, height, 1}).expand({num_frames, height, width}),
-         grid_w.view({1, 1, width}).expand({num_frames, height, width})},
-        -1);
-    position_ids =
-        position_ids.reshape({1, num_patches, 3}).expand({batch_size, -1, -1});
-    torch::Tensor suffix = torch::zeros(
-        {batch_size, register_tokens_count_ + 1, 3}, position_options);
-    position_ids = torch::cat({position_ids, suffix}, 1);
-    std::pair<torch::Tensor, torch::Tensor> rotary =
-        rope_->forward(position_ids);
-    for (size_t layer = 0; layer < blocks_->size(); ++layer) {
-      hidden_states = blocks_[layer]->as<TransformerBlock>()->forward(
-          hidden_states, rotary.first, rotary.second);
+    if (tp2 == nullptr) {
+      run_local_blocks();
+    } else {
+      // Whole consecutive blocks preserve the native GEMM dimensions, bias
+      // application, and residual order. Broadcast only copies activations;
+      // no floating-point reduction joins partial FFN results.
+      for (int32_t stage = 0; stage < 2; ++stage) {
+        run_decoder_tp2_stage(tp2, "decoder block partition", [&] {
+          if (partition_rank_ == stage) {
+            run_local_blocks();
+          }
+          CHECK(hidden_states.is_contiguous());
+        });
+        // A transport failure is terminal; never vote on a failed pair group.
+        tp2->group.broadcast(hidden_states, stage);
+      }
     }
-    hidden_states = norm_out_->forward(hidden_states);
-    hidden_states = proj_out_->forward(hidden_states);
-    hidden_states = hidden_states.slice(1, 0, num_patches);
-    hidden_states = hidden_states.view({batch_size,
-                                        num_frames,
-                                        height,
-                                        width,
-                                        output_channels_,
-                                        patch_t_,
-                                        patch_h_,
-                                        patch_w_});
-    hidden_states =
-        hidden_states.permute({0, 4, 1, 5, 2, 6, 3, 7}).contiguous();
-    hidden_states = hidden_states.reshape({batch_size,
-                                           output_channels_,
-                                           num_frames * patch_t_,
-                                           height * patch_h_,
-                                           width * patch_w_});
-    return hidden_states;
+    run_decoder_tp2_stage(tp2, "decoder output preparation", [&] {
+      hidden_states = norm_out_->forward(hidden_states);
+      hidden_states = proj_out_->forward(hidden_states);
+      hidden_states = hidden_states.slice(1, 0, num_patches);
+      hidden_states = hidden_states.view({batch_size,
+                                          num_frames,
+                                          height,
+                                          width,
+                                          output_channels_,
+                                          patch_t_,
+                                          patch_h_,
+                                          patch_w_});
+      hidden_states =
+          hidden_states.permute({0, 4, 1, 5, 2, 6, 3, 7}).contiguous();
+      output = hidden_states.reshape({batch_size,
+                                      output_channels_,
+                                      num_frames * patch_t_,
+                                      height * patch_h_,
+                                      width * patch_w_});
+    });
+    return output;
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -882,7 +963,7 @@ class ViTDecoder3dImpl final : public torch::nn::Module {
                         register_tokens_,
                         is_register_tokens_loaded_);
     dit::load_module_list<TransformerBlock>(
-        *blocks_, state_dict, "transformer_blocks.");
+        *blocks_, state_dict, "transformer_blocks.", layer_offset_);
     weight::load_weight(state_dict,
                         "norm_out.weight",
                         norm_out_->weight,
@@ -904,8 +985,8 @@ class ViTDecoder3dImpl final : public torch::nn::Module {
         << "bias is not loaded for " << prefix + "proj_in.bias";
     CHECK(is_register_tokens_loaded_)
         << "parameter is not loaded for " << prefix + "register_tokens";
-    dit::verify_module_list<TransformerBlock>(*blocks_,
-                                              prefix + "transformer_blocks.");
+    dit::verify_module_list<TransformerBlock>(
+        *blocks_, prefix + "transformer_blocks.", layer_offset_);
     CHECK(is_norm_out_weight_loaded_)
         << "weight is not loaded for " << prefix + "norm_out.weight";
     CHECK(is_norm_out_bias_loaded_)
@@ -917,6 +998,8 @@ class ViTDecoder3dImpl final : public torch::nn::Module {
   }
 
  private:
+  int32_t partition_rank_;
+  size_t layer_offset_ = 0;
   int64_t latent_channels_ = 0;
   int64_t output_channels_ = 0;
   int64_t patch_t_ = 0;
@@ -954,8 +1037,13 @@ struct MiniMaxH3ReferenceEncodeTrace {
 
 class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
  public:
-  explicit AutoencoderKLMiniMaxH3Impl(const ModelContext& context)
-      : vae_group_(context.get_parallel_args().dit_vae_group_) {
+  explicit AutoencoderKLMiniMaxH3Impl(const ModelContext& context,
+                                      bool collective_failure_agreement = false,
+                                      bool enable_reference_encoder = true,
+                                      ProcessGroup* decoder_tp_group = nullptr)
+      : vae_group_(context.get_parallel_args().dit_vae_group_),
+        decoder_tp_group_(decoder_tp_group),
+        collective_failure_agreement_(collective_failure_agreement) {
     const ModelArgs& args = context.get_model_args();
     const int32_t vae_size = context.get_parallel_args().vae_size();
     CHECK_GT(vae_size, 0);
@@ -993,15 +1081,41 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
         "pixel_std",
         torch::tensor(std::vector<float>{0.229f, 0.224f, 0.225f}, stats_options)
             .view({1, 3, 1, 1, 1}));
-    encoder_ = register_module("encoder", minimax_h3_video::Encoder3d(args));
-    quant_conv_ =
-        register_module("quant_conv",
-                        minimax_h3_video::Conv3d1x1(2 * latent_channels_,
-                                                    2 * latent_channels_));
+    if (collective_failure_agreement_) {
+      CHECK(vae_group_ != nullptr && vae_group_->world_size() > 1)
+          << "MiniMax-H3 VAE collective agreement requires parallel workers";
+      tile_collective_status_ =
+          register_buffer("tile_collective_status",
+                          torch::ones({1}, stats_options.dtype(torch::kInt32)));
+    }
+    decode_owner_ = !collective_failure_agreement_ ||
+                    (vae_group_ != nullptr && vae_group_->rank() == 0);
+    int32_t decoder_tp_rank = -1;
+    if (decoder_tp_group_ != nullptr) {
+      const auto& parallel = context.get_parallel_args();
+      CHECK(collective_failure_agreement_ && vae_group_ != nullptr);
+      CHECK_EQ(vae_group_->world_size(), 16);
+      CHECK_EQ(vae_group_->rank(), parallel.rank());
+      CHECK_EQ(decoder_tp_group_, parallel.dit_tp_group_);
+      CHECK_EQ(decoder_tp_group_->world_size(), 2);
+      decoder_tp_rank = decoder_tp_group_->rank();
+      CHECK_EQ(decoder_tp_rank, vae_group_->rank() % 2);
+      decoder_tp_status_ =
+          register_buffer("decoder_tp_status",
+                          torch::ones({1}, stats_options.dtype(torch::kInt32)));
+    }
+    if (enable_reference_encoder) {
+      encoder_ = register_module("encoder", minimax_h3_video::Encoder3d(args));
+      quant_conv_ =
+          register_module("quant_conv",
+                          minimax_h3_video::Conv3d1x1(2 * latent_channels_,
+                                                      2 * latent_channels_));
+    }
     post_quant_conv_ = register_module(
         "post_quant_conv",
         minimax_h3_video::Conv3d1x1(latent_channels_, latent_channels_));
-    decoder_ = register_module("decoder", minimax_h3_video::ViTDecoder3d(args));
+    decoder_ = register_module(
+        "decoder", minimax_h3_video::ViTDecoder3d(args, decoder_tp_rank));
   }
 
   torch::Tensor encode_keyframe_condition(const torch::Tensor& pixels) {
@@ -1013,7 +1127,10 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
   torch::Tensor encode_reference_condition(
       const torch::Tensor& pixels,
       MiniMaxH3ReferenceEncodeTrace* trace = nullptr,
-      bool normalize_on_cpu = false) {
+      bool normalize_on_cpu = false,
+      bool parallel_tiles = true) {
+    TORCH_CHECK(encoder_ && quant_conv_,
+                "MiniMax-H3 reference encoding requires an encoder worker");
     CHECK_EQ(pixels.dim(), 5)
         << "MiniMax-H3 reference VAE expects [B,3,T,H,W] pixels";
     CHECK_EQ(pixels.size(0), 1);
@@ -1023,7 +1140,7 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
     torch::Tensor pixel_std = pixel_std_tensor_.to(pixels.device());
     torch::Tensor normalized_pixels =
         (pixels.to(torch::kFloat32) / 255.0 - pixel_mean) / pixel_std;
-    torch::Tensor moments = encode_moments(normalized_pixels);
+    torch::Tensor moments = encode_moments(normalized_pixels, parallel_tiles);
     if (trace != nullptr) {
       trace->normalized_pixels = normalized_pixels;
       trace->moments = moments;
@@ -1077,29 +1194,51 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
         std::max<int64_t>(1,
                           (num_tokens + pad_tokens) / tokens_chunk_size_ -
                               static_cast<int64_t>(token_drop_ > 0));
-    torch::Tensor padded = pad_by_repeating_last_frame(latent, pad_tokens);
-
+    torch::Tensor padded;
     std::vector<torch::Tensor> decoded_chunks;
-    decoded_chunks.reserve(static_cast<size_t>(num_chunks + 1));
+    run_parallel_stage("temporal padding", [&] {
+      padded = pad_by_repeating_last_frame(latent, pad_tokens);
+      decoded_chunks.reserve(static_cast<size_t>(num_chunks + 1));
+    });
+
     torch::Tensor overlap;
     for (int64_t chunk_index = 0; chunk_index < num_chunks; ++chunk_index) {
       const int64_t start = chunk_index * tokens_chunk_size_;
-      torch::Tensor clip = decode_clip(
-          padded.slice(2, start, start + tokens_chunk_size_ + token_overlap_));
-      for (int64_t section = 0; section < 2; ++section) {
-        const int64_t frame_start = section * chunk_num_frames_;
-        torch::Tensor section_frames =
-            clip.slice(2, frame_start, frame_start + chunk_num_frames_);
-        torch::Tensor chunk = section_frames.slice(2, frame_pre_padding_);
-        if (section == 0) {
-          if (overlap.defined()) {
-            chunk = blend(overlap, chunk, frame_overlap_, 2);
-          }
-          decoded_chunks.emplace_back(chunk);
-        } else {
-          overlap = chunk;
-        }
+      torch::Tensor chunk_latent;
+      auto slice_chunk = [&] {
+        chunk_latent =
+            padded.slice(2, start, start + tokens_chunk_size_ + token_overlap_);
+      };
+      if (decoder_tp_group_ != nullptr) {
+        run_parallel_stage("temporal input slice", slice_chunk);
+      } else {
+        slice_chunk();
       }
+      torch::Tensor clip = decode_clip(chunk_latent);
+      run_parallel_stage("temporal chunk assembly", [&] {
+        if (!decode_owner_) {
+          // `clip` is undefined on a collaborative nonowner; the agreement
+          // below still runs identically on every rank.
+          return;
+        }
+        for (int64_t section = 0; section < 2; ++section) {
+          const int64_t frame_start = section * chunk_num_frames_;
+          torch::Tensor section_frames =
+              clip.slice(2, frame_start, frame_start + chunk_num_frames_);
+          torch::Tensor chunk = section_frames.slice(2, frame_pre_padding_);
+          if (section == 0) {
+            if (overlap.defined()) {
+              chunk = blend(overlap, chunk, frame_overlap_, 2);
+            }
+            decoded_chunks.emplace_back(chunk);
+          } else {
+            overlap = chunk;
+          }
+        }
+      });
+    }
+    if (!decode_owner_) {
+      return torch::Tensor();  // collaborative nonowner: undefined full video
     }
     if (overlap.defined()) {
       decoded_chunks.emplace_back(overlap);
@@ -1122,20 +1261,23 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
   // Decodes latents to BTCHW video in [0, 1].
   torch::Tensor decode_to_pixels(const torch::Tensor& latent) {
     torch::Tensor decoded = decode(latent);
-    torch::Tensor pixel_mean = pixel_mean_tensor_.to(decoded.device());
-    torch::Tensor pixel_std = pixel_std_tensor_.to(decoded.device());
-    decoded = decoded.to(torch::kFloat32);
-    decoded.mul_(pixel_std).add_(pixel_mean).clamp_(0.0, 1.0);
-    return decoded.permute({0, 2, 1, 3, 4}).contiguous();
+    if (!decode_owner_) {
+      // Collaborative nonowner never builds the full video; return undefined.
+      return decoded;
+    }
+    return minimax_h3_vae_affine_to_pixels(
+        std::move(decoded), pixel_mean_tensor_, pixel_std_tensor_);
   }
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
     CHECK(loader != nullptr) << "MiniMax-H3 video VAE loader must not be null";
     load_config(loader->model_weights_path() + "/config.json");
     for (const auto& state_dict : loader->get_state_dicts()) {
-      encoder_->load_state_dict(state_dict->get_dict_with_prefix("encoder."));
-      quant_conv_->load_state_dict(
-          state_dict->get_dict_with_prefix("quant_conv."));
+      if (encoder_) {
+        encoder_->load_state_dict(state_dict->get_dict_with_prefix("encoder."));
+        quant_conv_->load_state_dict(
+            state_dict->get_dict_with_prefix("quant_conv."));
+      }
       post_quant_conv_->load_state_dict(
           state_dict->get_dict_with_prefix("post_quant_conv."));
       decoder_->load_state_dict(state_dict->get_dict_with_prefix("decoder."));
@@ -1144,10 +1286,31 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    encoder_->verify_loaded_weights(prefix + "encoder.");
-    quant_conv_->verify_loaded_weights(prefix + "quant_conv.");
+    if (encoder_) {
+      encoder_->verify_loaded_weights(prefix + "encoder.");
+      quant_conv_->verify_loaded_weights(prefix + "quant_conv.");
+    }
     post_quant_conv_->verify_loaded_weights(prefix + "post_quant_conv.");
     decoder_->verify_loaded_weights(prefix + "decoder.");
+  }
+
+  int64_t resident_module_bytes() const {
+    int64_t bytes = 0;
+    const auto accumulate = [&bytes](const auto& item) {
+      const int64_t element_size =
+          static_cast<int64_t>(item.value().element_size());
+      CHECK_LE(item.value().numel(),
+               (std::numeric_limits<int64_t>::max() - bytes) / element_size)
+          << "MiniMax-H3 video VAE resident byte count overflow";
+      bytes += item.value().numel() * element_size;
+    };
+    for (const auto& item : named_parameters(/*recurse=*/true)) {
+      accumulate(item);
+    }
+    for (const auto& item : named_buffers(/*recurse=*/true)) {
+      accumulate(item);
+    }
+    return bytes;
   }
 
  private:
@@ -1164,9 +1327,10 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
         << "MiniMax-H3 video VAE latent channel mismatch";
   }
 
-  torch::Tensor encode_moments(const torch::Tensor& pixels) {
+  torch::Tensor encode_moments(const torch::Tensor& pixels,
+                               bool parallel_tiles) {
     if (pixels.size(2) == 1) {
-      return encode_clip(pixels);
+      return encode_clip(pixels, parallel_tiles);
     }
     torch::Tensor padded = pixels;
     const int64_t pad_frames =
@@ -1177,7 +1341,8 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
     clips.reserve(static_cast<size_t>(num_clips));
     for (int64_t index = 0; index < num_clips; ++index) {
       clips.emplace_back(encode_clip(
-          padded.slice(2, index * clip_length_, (index + 1) * clip_length_)));
+          padded.slice(2, index * clip_length_, (index + 1) * clip_length_),
+          parallel_tiles));
     }
     torch::Tensor moments = torch::cat(clips, 2);
     if (token_drop_ > 0) {
@@ -1186,7 +1351,7 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
     return moments;
   }
 
-  torch::Tensor encode_clip(const torch::Tensor& pixels) {
+  torch::Tensor encode_clip(const torch::Tensor& pixels, bool parallel_tiles) {
     const int64_t height = pixels.size(3);
     const int64_t width = pixels.size(4);
     if (height <= tile_sample_height_ && width <= tile_sample_width_) {
@@ -1196,8 +1361,10 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
         split_tiles(height, tile_sample_height_, tile_sample_overlap_height_);
     TileLayout width_layout =
         split_tiles(width, tile_sample_width_, tile_sample_overlap_width_);
-    std::vector<std::vector<torch::Tensor>> tiles =
-        run_tiles(height_layout, width_layout, [&](size_t row, size_t column) {
+    std::vector<std::vector<torch::Tensor>> tiles = run_tiles(
+        height_layout,
+        width_layout,
+        [&](size_t row, size_t column) {
           torch::Tensor tile =
               pixels
                   .slice(3,
@@ -1208,7 +1375,8 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
                          width_layout.starts[column] +
                              width_layout.lengths[column]);
           return quant_conv_->forward(encoder_->forward(tile));
-        });
+        },
+        parallel_tiles);
     const auto to_latent_overlaps =
         [this](const std::vector<int64_t>& overlaps) {
           std::vector<int64_t> latent_overlaps;
@@ -1223,49 +1391,152 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
                         to_latent_overlaps(width_layout.overlaps));
   }
 
+  template <typename GetLatent>
+  torch::Tensor decode_tile(const GetLatent& get_latent) {
+    if (decoder_tp_group_ == nullptr) {
+      return decoder_->forward(post_quant_conv_->forward(get_latent()));
+    }
+
+    const minimax_h3_video::DecoderTp2Context tp2{*decoder_tp_group_,
+                                                  decoder_tp_status_};
+    torch::Tensor post_quant;
+    minimax_h3_video::run_decoder_tp2_stage(&tp2, "tile input", [&] {
+      post_quant = post_quant_conv_->forward(get_latent());
+    });
+    return decoder_->forward(post_quant, &tp2);
+  }
+
   torch::Tensor decode_clip(const torch::Tensor& latent) {
     const int64_t sample_height = latent.size(3) * spatial_ratio_;
     const int64_t sample_width = latent.size(4) * spatial_ratio_;
     if (sample_height <= tile_sample_height_ &&
         sample_width <= tile_sample_width_) {
-      torch::Tensor post_quant = post_quant_conv_->forward(latent);
-      return decoder_->forward(post_quant);
+      torch::Tensor decoded;
+      run_parallel_stage("untiled decode", [&] {
+        if (decode_owner_ ||
+            (decoder_tp_group_ != nullptr && vae_group_->rank() == 1)) {
+          torch::Tensor output = decode_tile([&] { return latent; });
+          if (decode_owner_) {
+            decoded = std::move(output);
+          }
+        }
+      });
+      return decoded;
     }
-    TileLayout height_layout = split_tiles(
-        sample_height, tile_sample_height_, tile_sample_overlap_height_);
-    TileLayout width_layout = split_tiles(
-        sample_width, tile_sample_width_, tile_sample_overlap_width_);
-    std::vector<std::vector<torch::Tensor>> tiles =
-        run_tiles(height_layout, width_layout, [&](size_t row, size_t column) {
-          const int64_t y_start = height_layout.starts[row] / spatial_ratio_;
-          const int64_t y_length = height_layout.lengths[row] / spatial_ratio_;
-          const int64_t x_start = width_layout.starts[column] / spatial_ratio_;
-          const int64_t x_length =
-              width_layout.lengths[column] / spatial_ratio_;
-          torch::Tensor tile = latent.slice(3, y_start, y_start + y_length)
-                                   .slice(4, x_start, x_start + x_length);
-          torch::Tensor post_quant = post_quant_conv_->forward(tile);
-          return decoder_->forward(post_quant);
-        });
-    torch::Tensor decoded =
-        stitch_tiles(tiles, height_layout.overlaps, width_layout.overlaps);
+    TileLayout height_layout;
+    TileLayout width_layout;
+    auto prepare_layout = [&] {
+      height_layout = split_tiles(
+          sample_height, tile_sample_height_, tile_sample_overlap_height_);
+      width_layout = split_tiles(
+          sample_width, tile_sample_width_, tile_sample_overlap_width_);
+    };
+    const bool paired_decode = decoder_tp_group_ != nullptr;
+    if (paired_decode) {
+      run_parallel_stage("tile layout", prepare_layout);
+    } else {
+      prepare_layout();
+    }
+    std::vector<std::vector<torch::Tensor>> tiles = run_tiles(
+        height_layout,
+        width_layout,
+        [&](size_t row, size_t column) {
+          return decode_tile([&] {
+            const int64_t y_start = height_layout.starts[row] / spatial_ratio_;
+            const int64_t y_length =
+                height_layout.lengths[row] / spatial_ratio_;
+            const int64_t x_start =
+                width_layout.starts[column] / spatial_ratio_;
+            const int64_t x_length =
+                width_layout.lengths[column] / spatial_ratio_;
+            return latent.slice(3, y_start, y_start + y_length)
+                .slice(4, x_start, x_start + x_length);
+          });
+        },
+        /*parallel_tiles=*/true,
+        paired_decode);
+    torch::Tensor decoded;
+    run_parallel_stage("tile stitch", [&] {
+      if (decode_owner_) {
+        decoded =
+            stitch_tiles(tiles, height_layout.overlaps, width_layout.overlaps);
+      }
+    });
     return decoded;
+  }
+
+  template <typename Work>
+  void run_parallel_stage(
+      const char* phase,
+      const Work& work,
+      MiniMaxH3VaeCollectiveState* collective_state = nullptr) {
+    if (!collective_failure_agreement_) {
+      work();
+      return;
+    }
+
+    std::exception_ptr local_error;
+    try {
+      work();
+    } catch (...) {
+      local_error = std::current_exception();
+    }
+    const bool local_succeeded = local_error == nullptr;
+    if (collective_state != nullptr) {
+      collective_state->local_preparation_finished(local_succeeded);
+    }
+    tile_collective_status_.fill_(local_succeeded ? 1 : 0);
+    vae_group_->allreduce(tile_collective_status_);
+    const bool all_succeeded =
+        tile_collective_status_.item<int32_t>() == vae_group_->world_size();
+    if (collective_state != nullptr) {
+      collective_state->agreement_finished(all_succeeded);
+    }
+    if (all_succeeded) {
+      return;
+    }
+
+    if (local_error != nullptr) {
+      try {
+        std::rethrow_exception(local_error);
+      } catch (const std::exception& error) {
+        LOG(ERROR) << "MiniMax-H3 parallel VAE " << phase
+                   << " failed locally: " << error.what();
+      } catch (...) {
+        LOG(ERROR) << "MiniMax-H3 parallel VAE " << phase
+                   << " failed locally with an unknown exception";
+      }
+    }
+    throw std::runtime_error("MiniMax-H3 parallel VAE " + std::string(phase) +
+                             " failed before collective continuation");
   }
 
   template <typename TileFunction>
   std::vector<std::vector<torch::Tensor>> run_tiles(
       const TileLayout& height_layout,
       const TileLayout& width_layout,
-      const TileFunction& tile_fn) const {
+      const TileFunction& tile_fn,
+      bool parallel_tiles = true,
+      bool paired_decode = false) {
     const size_t column_count = width_layout.starts.size();
     const size_t tile_count = height_layout.starts.size() * column_count;
-    std::vector<std::vector<torch::Tensor>> tiles(height_layout.starts.size());
-    for (std::vector<torch::Tensor>& row : tiles) {
-      row.resize(column_count);
+    std::vector<std::vector<torch::Tensor>> tiles;
+    auto prepare_slots = [&] {
+      tiles.resize(height_layout.starts.size());
+      for (std::vector<torch::Tensor>& row : tiles) {
+        row.resize(column_count);
+      }
+    };
+    if (paired_decode) {
+      run_parallel_stage("tile slots", prepare_slots);
+    } else {
+      prepare_slots();
     }
 
-    if (vae_group_ == nullptr || vae_group_->world_size() == 1 ||
-        tile_count < static_cast<size_t>(vae_group_->world_size())) {
+    if (!parallel_tiles || vae_group_ == nullptr ||
+        vae_group_->world_size() == 1) {
+      // No VAE group to agree over, so this is genuinely serial inside ONE
+      // process. This is the only case that may execute every tile locally.
       for (size_t tile_index = 0; tile_index < tile_count; ++tile_index) {
         const size_t row = tile_index / column_count;
         const size_t column = tile_index % column_count;
@@ -1277,35 +1548,180 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
     const size_t world_size = static_cast<size_t>(vae_group_->world_size());
     const size_t rank = static_cast<size_t>(vae_group_->rank());
     const size_t max_local_count = (tile_count + world_size - 1) / world_size;
+    std::vector<size_t> local_indices;
     std::vector<torch::Tensor> local_tiles;
-    local_tiles.reserve(max_local_count);
-    for (size_t tile_index = rank; tile_index < tile_count;
-         tile_index += world_size) {
-      local_tiles.emplace_back(
-          tile_fn(tile_index / column_count, tile_index % column_count));
+    auto prepare_local_slots = [&] {
+      local_indices =
+          minimax_h3_vae_local_tile_indices(tile_count, world_size, rank);
+      local_tiles.reserve(max_local_count);
+    };
+    if (paired_decode) {
+      run_parallel_stage("local tile slots", prepare_local_slots);
+    } else {
+      prepare_local_slots();
+    }
+    // ACTUAL tile and transfer counts per rank, so a receipt records what this
+    // rank really owned and moved rather than what the layout implies.
+    // parallel_tiles=false and world_size==1 already returned above on the
+    // native serial path.
+    LOG(INFO) << "G6_VAE_TILES rank=" << rank << " world_size=" << world_size
+              << " tile_count=" << tile_count
+              << " rows=" << height_layout.starts.size()
+              << " cols=" << column_count
+              << " max_local_count=" << max_local_count
+              << " local_owned=" << local_indices.size() << " policy="
+              << (tile_count < world_size ? "small_tile_owner_only"
+                                          : "distributed_allgather")
+              << " agreement=" << collective_failure_agreement_
+              << " decode_owner=" << decode_owner_
+              << " decoder_tp=" << (paired_decode ? 2 : 1);
+
+    if (tile_count < world_size) {
+      if (!collective_failure_agreement_) {
+        // NATIVE small-tile semantics preserved EXACTLY as before the port:
+        // this single process runs every tile serially. There is no VAE
+        // agreement on this path, so there is nothing to converge and no owner
+        // role to honour.
+        for (size_t tile_index = 0; tile_index < tile_count; ++tile_index) {
+          const size_t row = tile_index / column_count;
+          const size_t column = tile_index % column_count;
+          tiles[row][column] = tile_fn(row, column);
+        }
+        return tiles;
+      }
+      // The owner (and its TP partner when enabled) decodes small tile sets.
+      run_parallel_stage("small-tile owner-only decode", [&] {
+        if (!decode_owner_ && !(paired_decode && rank == 1)) {
+          return;
+        }
+        for (size_t tile_index = 0; tile_index < tile_count; ++tile_index) {
+          const size_t row = tile_index / column_count;
+          const size_t column = tile_index % column_count;
+          torch::Tensor tile = tile_fn(row, column);
+          if (decode_owner_) {
+            tiles[row][column] = std::move(tile);
+          }
+        }
+      });
+      return tiles;
     }
 
-    // Tile dimensions are equal; pad only the local tile count for allgather.
-    torch::Tensor local_stack =
-        torch::stack(local_tiles, /*dim=*/0).contiguous();
-    if (local_tiles.size() < max_local_count) {
-      std::vector<int64_t> padding_shape = local_stack.sizes().vec();
-      padding_shape[0] =
-          static_cast<int64_t>(max_local_count - local_tiles.size());
-      local_stack =
-          torch::cat(
-              {local_stack, torch::zeros(padding_shape, local_stack.options())},
-              /*dim=*/0)
-              .contiguous();
+    if (!collective_failure_agreement_) {
+      for (size_t tile_index : local_indices) {
+        local_tiles.emplace_back(
+            tile_fn(tile_index / column_count, tile_index % column_count));
+      }
+      torch::Tensor local_stack =
+          torch::stack(local_tiles, /*dim=*/0).contiguous();
+      if (local_tiles.size() < max_local_count) {
+        std::vector<int64_t> padding_shape = local_stack.sizes().vec();
+        padding_shape[0] =
+            static_cast<int64_t>(max_local_count - local_tiles.size());
+        local_stack =
+            torch::cat({local_stack,
+                        torch::zeros(padding_shape, local_stack.options())},
+                       /*dim=*/0)
+                .contiguous();
+      }
+      torch::Tensor gathered = vae_group_->allgather_base_sync(local_stack);
+      for (size_t tile_index = 0; tile_index < tile_count; ++tile_index) {
+        const size_t row = tile_index / column_count;
+        const size_t column = tile_index % column_count;
+        const MiniMaxH3VaeGatherCoordinate coordinate =
+            minimax_h3_vae_gather_coordinate(tile_index, world_size);
+        tiles[row][column] =
+            gathered[static_cast<int64_t>(coordinate.rank)]
+                    [static_cast<int64_t>(coordinate.local_slot)];
+      }
+      return tiles;
     }
-    torch::Tensor gathered = vae_group_->allgather_base_sync(local_stack);
-    for (size_t tile_index = 0; tile_index < tile_count; ++tile_index) {
-      const size_t row = tile_index / column_count;
-      const size_t column = tile_index % column_count;
-      tiles[row][column] =
-          gathered[static_cast<int64_t>(tile_index % world_size)]
-                  [static_cast<int64_t>(tile_index / world_size)];
+
+    torch::Tensor local_stack;
+    MiniMaxH3VaeCollectiveState collective_state;
+    run_parallel_stage(
+        "local tile preparation",
+        [&] {
+          if (paired_decode) {
+            // Both TP ranks run the same tiles in the same order. Keep the
+            // original VAE tile ownership for the following gather and stitch.
+            const size_t pair_start = rank - decoder_tp_group_->rank();
+            for (size_t first = pair_start; first < tile_count;
+                 first += world_size) {
+              const size_t end = std::min(first + 2, tile_count);
+              for (size_t index = first; index < end; ++index) {
+                torch::Tensor tile =
+                    tile_fn(index / column_count, index % column_count);
+                if (index % world_size == rank) {
+                  local_tiles.emplace_back(std::move(tile));
+                }
+              }
+            }
+          } else {
+            for (size_t tile_index : local_indices) {
+              local_tiles.emplace_back(tile_fn(tile_index / column_count,
+                                               tile_index % column_count));
+            }
+          }
+
+          // Tile dimensions are equal; only the local tile count is padded.
+          local_stack = torch::stack(local_tiles, /*dim=*/0).contiguous();
+          if (local_tiles.size() < max_local_count) {
+            std::vector<int64_t> padding_shape = local_stack.sizes().vec();
+            padding_shape[0] =
+                static_cast<int64_t>(max_local_count - local_tiles.size());
+            local_stack =
+                torch::cat({local_stack,
+                            torch::zeros(padding_shape, local_stack.options())},
+                           /*dim=*/0)
+                    .contiguous();
+          }
+        },
+        &collective_state);
+
+    torch::Tensor gathered;
+    run_parallel_stage("allgather output allocation", [&] {
+      std::vector<int64_t> gathered_shape;
+      gathered_shape.reserve(static_cast<size_t>(local_stack.dim()) + 1);
+      gathered_shape.emplace_back(static_cast<int64_t>(world_size));
+      gathered_shape.insert(gathered_shape.end(),
+                            local_stack.sizes().begin(),
+                            local_stack.sizes().end());
+      gathered = torch::empty(gathered_shape, local_stack.options());
+    });
+
+    // G-1: the allgather transfer rides inside the reorder agreement's failure
+    // wrapper. A transfer/wait failure is captured, not thrown here, so every
+    // rank still reaches the vae-group "tile reorder" allreduce and converges
+    // before any rank throws (no cross-communicator hang against the world16
+    // run_qualified_phase allreduce).
+    std::exception_ptr transfer_error;
+    try {
+      vae_group_->allgather_base_async(local_stack, gathered)->wait();
+    } catch (...) {
+      transfer_error = std::current_exception();
     }
+    collective_state.allgather_finished();
+
+    run_parallel_stage("tile reorder", [&] {
+      if (transfer_error != nullptr) {
+        std::rethrow_exception(transfer_error);
+      }
+      if (!decode_owner_) {
+        // Release the symmetric allgather buffer at once; never build views.
+        gathered = torch::Tensor();
+        return;
+      }
+      for (size_t tile_index = 0; tile_index < tile_count; ++tile_index) {
+        const size_t row = tile_index / column_count;
+        const size_t column = tile_index % column_count;
+        const MiniMaxH3VaeGatherCoordinate coordinate =
+            minimax_h3_vae_gather_coordinate(tile_index, world_size);
+        tiles[row][column] =
+            gathered[static_cast<int64_t>(coordinate.rank)]
+                    [static_cast<int64_t>(coordinate.local_slot)];
+      }
+    });
+    collective_state.reorder_finished();
     return tiles;
   }
 
@@ -1422,6 +1838,9 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
   int64_t tile_sample_overlap_width_ = 64;
   // Non-owning; ParallelArgs owns the process group.
   ProcessGroup* vae_group_ = nullptr;
+  ProcessGroup* decoder_tp_group_ = nullptr;
+  bool collective_failure_agreement_ = false;
+  bool decode_owner_ = true;
   minimax_h3_video::Encoder3d encoder_{nullptr};
   minimax_h3_video::Conv3d1x1 quant_conv_{nullptr};
   minimax_h3_video::Conv3d1x1 post_quant_conv_{nullptr};
@@ -1435,6 +1854,8 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
   torch::Tensor latents_std_tensor_;
   torch::Tensor pixel_mean_tensor_;
   torch::Tensor pixel_std_tensor_;
+  torch::Tensor tile_collective_status_;
+  torch::Tensor decoder_tp_status_;
 
   // Pads the temporal dimension (dim 2) by repeating the last frame.
   static torch::Tensor pad_by_repeating_last_frame(const torch::Tensor& x,

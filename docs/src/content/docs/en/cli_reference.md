@@ -151,7 +151,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `tp_size` | `int64` | `1` | Tensor parallelism size. Only used for DiT models. |
 | `sp_size` | `int64` | `1` | Sequence parallelism size. Only used for DiT models. |
 | `cfg_size` | `int64` | `1` | Classifier-free guidance parallelism size. Only used for DiT models. |
-| `vae_size` | `int64` | `1` | VAE patch parallelism size. Only used for DiT models. |
+| `vae_size` | `int64` | `1` | VAE patch parallelism size for DiT models. The qualified MiniMax-H3 Ref2VA profile supports `1` (serial) or `16` (parallel video decode). |
 | `communication_backend` | `string` | `"hccl"` | NPU communication backend, for example `lccl` or `hccl`. Uses `hccl` when DP is enabled. |
 | `enable_mm_encoder_dp` | `bool` | `false` | Whether to enable encoder data parallelism for multimodal models. |
 | `enable_multi_stream_parallel` | `bool` | `false` | Whether to enable computation/communication parallelism with two streams and two micro batches in the prefill stage. See [Multi-Stream Parallelism](/en/features/multi_streams/). |

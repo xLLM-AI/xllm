@@ -151,7 +151,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `tp_size` | `int64` | `1` | Tensor parallel 规模，仅 DiT 模型使用。 |
 | `sp_size` | `int64` | `1` | Sequence parallel 规模，仅 DiT 模型使用。 |
 | `cfg_size` | `int64` | `1` | Classifier-free guidance parallel 规模，仅 DiT 模型使用。 |
-| `vae_size` | `int64` | `1` | VAE patch parallel 规模，仅 DiT 模型使用。 |
+| `vae_size` | `int64` | `1` | DiT 模型的 VAE patch 并行度。MiniMax-H3 Ref2VA 的 A3 16 卡配置支持 `1`（串行）或 `16`（并行视频解码）。 |
 | `communication_backend` | `string` | `"hccl"` | NPU 通信后端，例如 `lccl`、`hccl`；启用 DP 时使用 `hccl`。 |
 | `enable_mm_encoder_dp` | `bool` | `false` | 是否为多模态模型启用 encoder data parallel。 |
 | `enable_multi_stream_parallel` | `bool` | `false` | 是否在 prefill 阶段通过双 stream 和双 micro batch 启用计算通信并行；详见 [多流并行](/zh/features/multi_streams/)。 |
