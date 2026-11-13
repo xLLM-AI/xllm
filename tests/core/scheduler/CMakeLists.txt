@@ -41,10 +41,10 @@ target_link_libraries(scheduler_test
 # Reservation expiry is host-only and must not initialize the device runtime.
 cc_test(
   NAME
-    pd_reservation_releases_test
+    cancelled_pd_reservations_test
   CPU_ONLY
   SRCS
-    pd_reservation_releases_test.cpp
+    cancelled_pd_reservations_test.cpp
   DEPS
     absl::hash
     GTest::gtest_main

@@ -29,13 +29,13 @@ namespace xllm {
 // Remembers cancelled reservation identities so a delayed AddNewRequests cannot
 // resurrect them. The scheduler serializes access with its waiting-request
 // lock.
-class PDReservationReleases final {
+class CancelledPDReservations final {
  public:
   using Clock = std::chrono::steady_clock;
 
-  PDReservationReleases() = default;
-  PDReservationReleases(const PDReservationReleases&) = delete;
-  PDReservationReleases& operator=(const PDReservationReleases&) = delete;
+  CancelledPDReservations() = default;
+  CancelledPDReservations(const CancelledPDReservations&) = delete;
+  CancelledPDReservations& operator=(const CancelledPDReservations&) = delete;
 
   // Explicit times support deterministic expiry tests; callers supply monotonic
   // times under the same lock, keeping the list ordered by expiry.
@@ -47,11 +47,11 @@ class PDReservationReleases final {
     auto it = index_.find(identity);
     if (it != index_.end()) {
       it->second->expires_at = now + kRetention;
-      releases_.splice(releases_.end(), releases_, it->second);
+      cancellations_.splice(cancellations_.end(), cancellations_, it->second);
       return;
     }
-    releases_.emplace_back(Entry{std::move(identity), now + kRetention});
-    auto entry = std::prev(releases_.end());
+    cancellations_.emplace_back(Entry{std::move(identity), now + kRetention});
+    auto entry = std::prev(cancellations_.end());
     index_.emplace(entry->identity, entry);
   }
 
@@ -70,14 +70,15 @@ class PDReservationReleases final {
   };
 
   void prune(Clock::time_point now) {
-    while (!releases_.empty() && releases_.front().expires_at <= now) {
-      index_.erase(releases_.front().identity);
-      releases_.pop_front();
+    while (!cancellations_.empty() &&
+           cancellations_.front().expires_at <= now) {
+      index_.erase(cancellations_.front().identity);
+      cancellations_.pop_front();
     }
   }
 
   static constexpr std::chrono::minutes kRetention{5};
-  std::list<Entry> releases_;
+  std::list<Entry> cancellations_;
   std::unordered_map<Identity, std::list<Entry>::iterator, absl::Hash<Identity>>
       index_;
 };

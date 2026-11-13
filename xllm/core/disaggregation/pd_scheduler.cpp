@@ -58,6 +58,8 @@ namespace {
 
 using RequestPtr = std::shared_ptr<Request>;
 
+constexpr int32_t kDecodeAllocationRetryBackoffMs = 10;
+
 // Returns true when |a| has lower scheduling priority than |b| (i.e. |a|
 // should be dispatched after |b|).  std::priority_queue is a max-heap, so the
 // comparator that returns true for "lower priority" places the highest-priority
@@ -577,6 +579,9 @@ void PDScheduler::dispatch_requests() {
         // of the MPMC queue, which is not FIFO across HTTP threads.
         pending.push(request);
         release_admission.dismiss();
+        // Decode cache pressure can last for an entire generation. Avoid
+        // repeatedly issuing allocation RPCs while capacity is unchanged.
+        absl::SleepFor(absl::Milliseconds(kDecodeAllocationRetryBackoffMs));
       }
     } else {
       for (auto& sequence : request->sequences()) {
@@ -967,7 +972,7 @@ bool PDScheduler::release_reservation(const std::string& req_id,
   std::shared_ptr<Request> request;
   {
     std::lock_guard<std::mutex> lock(received_request_map_mutex_);
-    released_reservations_.record(req_id, reservation_id);
+    cancelled_reservations_.record(req_id, reservation_id);
     auto it = received_request_map_.find(req_id);
     if (it == received_request_map_.end() ||
         it->second->state().pd_reservation_id != reservation_id) {
@@ -987,7 +992,7 @@ bool PDScheduler::decode_schedule(std::shared_ptr<Request>& request,
 
   {
     std::unique_lock<std::mutex> lock(received_request_map_mutex_);
-    const bool released = released_reservations_.contains(
+    const bool released = cancelled_reservations_.contains(
         request->request_id(), request->state().pd_reservation_id);
     if (released || received_request_map_.find(request->request_id()) !=
                         received_request_map_.end()) {

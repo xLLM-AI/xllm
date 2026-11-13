@@ -30,7 +30,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/disaggregation/pd_reservation_releases.h"
+#include "core/disaggregation/cancelled_pd_reservations.h"
 #include "core/disaggregation/pd_service.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "disagg_pd.pb.h"
@@ -314,7 +314,7 @@ class PDScheduler : public ContinuousScheduler<> {
   // instance_to_received_requests_map_ when the request is processed.
   std::unordered_map<std::string, std::string> request_to_instance_map_;
   std::mutex received_request_map_mutex_;
-  PDReservationReleases released_reservations_;
+  CancelledPDReservations cancelled_reservations_;
 
   // Lock for multi-threaded read-write linked instances
   std::mutex linked_instances_mutex_;
