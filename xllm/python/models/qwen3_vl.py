@@ -543,12 +543,15 @@ class Qwen3VLVisionTransformer(nn.Module):
         return torch.cat(outputs, dim=0)
 
     @staticmethod
-    def _compute_cu_seqlens(grid_thw: torch.Tensor, device: torch.device) -> torch.Tensor:
-        """Cumulative sequence lengths for per-frame varlen attention."""
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            dim=0, dtype=torch.int32
-        )
-        return torch.cat([torch.zeros(1, dtype=torch.int32, device=device), cu_seqlens])
+    def _compute_frame_boundaries(grid_thw: list[list[int]]) -> list[int]:
+        """Return cumulative patch counts for each frame in image/video order."""
+        boundaries = []
+        total = 0
+        for frames, height, width in grid_thw:
+            for _ in range(frames):
+                total += height * width
+                boundaries.append(total)
+        return boundaries
 
     # -- forward -----------------------------------------------------------
 
@@ -588,13 +591,9 @@ class Qwen3VLVisionTransformer(nn.Module):
         rotary_cos_full = torch.cat((rotary_cos, rotary_cos), dim=-1).reshape(1, -1, 1, head_dim)
         rotary_sin_full = torch.cat((rotary_sin, rotary_sin), dim=-1).reshape(1, -1, 1, head_dim)
 
-        # Cumulative per-frame sequence lengths for varlen attention. The CPU
-        # python list is materialized ONCE here (a single d2h sync) and reused
-        # by all 27 layers — mirrors vllm-ascend's sequence_lengths pre-compute
-        # hook (its seq_lens_cpu_cache), which exists precisely to avoid a
-        # per-layer .cpu().tolist() sync point.
-        cu_seqlens = self._compute_cu_seqlens(grid_thw.to(device=self.device), self.device)
-        actual_seq: list[int] = cu_seqlens[1:].cpu().tolist()
+        # Attention consumes host frame boundaries. Reuse the host grid rather
+        # than launching device prefix sums followed by a blocking copy back.
+        actual_seq = self._compute_frame_boundaries(grid_thw_list)
 
         # Transformer blocks with deepstack feature collection
         deepstack_features: list[torch.Tensor] = []
@@ -922,7 +921,6 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             ``(total_image_tokens, out_hidden_size * (1 + num_deepstacks))``.
         """
         pixel_values = pixel_values.to(dtype=self.vision_model.dtype, device=self.vision_model.device)
-        grid_thw = grid_thw.to(dtype=torch.int32, device=self.vision_model.device)
         image_embeds = self.vision_model(pixel_values, grid_thw)
         return image_embeds
 
