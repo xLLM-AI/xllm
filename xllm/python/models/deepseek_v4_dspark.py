@@ -22,9 +22,9 @@ from typing import Any
 
 import torch
 
-from xllm.python import distributed
 from xllm.python.attention.backend import LayerCacheInput, normalize_layer_caches
 from xllm.python.layers.layernorm import RMSNorm
+from xllm.python.layers.linear import ColumnParallelLinear
 from xllm.python.layers.qlinear import QLinear
 from xllm.python.model_executor.forward_context import LayerSynchronizer
 from xllm.python.model_loader import W8A8WeightLoader
@@ -39,15 +39,6 @@ from xllm.python.models.deepseek_v4 import (
     _require_tensor,
 )
 from xllm.python.models.dspark import DSparkForCausalLMBase
-
-
-class _DSparkQuantAwareLinear(QLinear):
-    """FP or dynamic-W8A8 linear; the fp weight is dropped when quantized."""
-
-    def resolve_quant(self, has_quant_tensors: bool) -> None:
-        super().resolve_quant(has_quant_tensors)
-        if self.use_w8a8:
-            self.register_parameter("weight", None)
 
 
 @dataclass
@@ -111,7 +102,7 @@ class DeepseekV4DSparkModel(DeepseekV4Model):
         device: torch.device,
     ) -> None:
         super().__init__(cfg, dtype, device)
-        self.main_proj = _DSparkQuantAwareLinear(
+        self.main_proj = QLinear(
             cfg.hidden_size * cfg.dspark_num_layers,
             cfg.hidden_size,
             dtype=dtype,
@@ -190,19 +181,15 @@ class DeepseekV4DSparkForCausalLM(
         )
         self.cfg = cfg
         self.model = DeepseekV4DSparkModel(cfg, dtype, device)
-        self.lm_head = _DSparkQuantAwareLinear(
+        self.lm_head = ColumnParallelLinear(
             cfg.hidden_size,
             cfg.vocab_size // cfg.tp_size,
+            cfg.tp_size,
+            gather_output=True,
             dtype=dtype,
             device=device,
             kind="dynamic",
         )
-
-    def compute_logits(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
-        logits = super().compute_logits(hidden, selected_idxes)
-        if self.cfg.tp_size > 1:
-            logits = distributed.tp_all_gather(logits, dim=-1, world_size=self.cfg.tp_size)
-        return logits
 
     def write_context_kv(
         self,
@@ -225,7 +212,7 @@ class DeepseekV4DSparkForCausalLM(
         loader: W8A8WeightLoader,
         checkpoint_module: str,
         parameter_module: str,
-        linear: _DSparkQuantAwareLinear,
+        linear: QLinear,
         *,
         shard_dim: int | None = None,
     ) -> None:
@@ -244,6 +231,7 @@ class DeepseekV4DSparkForCausalLM(
             return
 
         linear.resolve_quant(True)
+        linear.register_parameter("weight", None)
         # Same key policy as the shared dynamic-W8A8 projection loader; the
         # resolved _w8a8 submodule registers weight/weight_scale/weight_offset
         # under parameter_module + "._w8a8.*" for copy_in.

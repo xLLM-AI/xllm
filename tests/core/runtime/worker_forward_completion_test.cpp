@@ -78,7 +78,13 @@ class CompletionTestModel final : public CausalVLM {
  public:
   CompletionTestModel(const ModelContext& context,
                       std::shared_ptr<ForwardObservation> observation)
-      : options_(context.get_tensor_options()),
+      : CausalVLM([observation](const torch::Tensor&) {
+          observation->logits_saw_sampling_history =
+              observation->sampling_params != nullptr &&
+              observation->sampling_params->prefix_tokens().defined();
+          return observation->logits;
+        }),
+        options_(context.get_tensor_options()),
         observation_(std::move(observation)) {}
 
   ModelOutput forward(const torch::Tensor& tokens,
@@ -104,14 +110,6 @@ class CompletionTestModel final : public CausalVLM {
       output.hidden_states = observation_->hidden_states;
     }
     return output;
-  }
-
-  torch::Tensor logits(const torch::Tensor& /*hidden_states*/,
-                       const torch::Tensor& /*selected_idxes*/) override {
-    observation_->logits_saw_sampling_history =
-        observation_->sampling_params != nullptr &&
-        observation_->sampling_params->prefix_tokens().defined();
-    return observation_->logits;
   }
 
   void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {

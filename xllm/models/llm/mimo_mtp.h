@@ -227,21 +227,11 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
 TORCH_MODULE(MiMoMtpModel);
 
 class MiMoMtpForCausalLMImpl final
-    : public LlmForCausalLMImplBase<MiMoMtpModel> {
+    : public LlmForCausalLMImplBase<MiMoMtpModel, BodyWeightPrefix::kExact> {
  public:
   explicit MiMoMtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<MiMoMtpModel>(context,
-                                             /*share_lm_head=*/true) {}
-
-  void load_model(
-      std::unique_ptr<ModelLoader> loader,
-      std::string prefix = "model." /*llm model weight prefix*/) override {
-    // Only load MTP model weights, skip lm_head (shared with target model)
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-    model_->verify_loaded_weights();
-  }
+      : LlmForCausalLMImplBase(context,
+                               /*share_lm_head=*/true) {}
 };
 TORCH_MODULE(MiMoMtpForCausalLM);
 

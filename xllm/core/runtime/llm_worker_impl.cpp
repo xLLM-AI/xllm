@@ -248,37 +248,25 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   torch::Tensor logits;
   torch::Tensor lm_head_input_indices;
   torch::Tensor selected_hidden;
-  if (sampling_params.num_sample_seqs() > 0) {
-    torch::Tensor logits_indices =
+  const bool should_compute_logits = sampling_params.num_sample_seqs() > 0;
+  if (should_compute_logits) {
+    lm_head_input_indices =
         remap_logits_indices(sampling_params.logits_indices(),
                              execution_params.parallel,
                              model_output.hidden_states);
-    if (logits_indices.device() != model_output.hidden_states.device()) {
-      logits_indices = logits_indices
-                           .to(model_output.hidden_states.device(),
-                               /*non_blocking=*/false)
-                           .contiguous();
+    if (lm_head_input_indices.device() != model_output.hidden_states.device()) {
+      lm_head_input_indices =
+          lm_head_input_indices
+              .to(model_output.hidden_states.device(), /*non_blocking=*/false)
+              .contiguous();
     }
-    lm_head_input_indices = logits_indices;
     const bool need_selected_hidden =
         input.return_selected_hidden ||
         (options_.cp_size() > 1 && options_.enable_speculative_decode());
-    if (need_selected_hidden) {
-      // Emit both selected hidden and logits from a single lm_head pass so the
-      // ConfidenceHead and CP speculative paths can consume hidden without a
-      // second projection.
-      logits = model_->logits(
-          model_output.hidden_states, logits_indices, selected_hidden);
-      if (!selected_hidden.defined()) {
-        // Models with only the two-argument logits overload leave this unset.
-        // Gather in logits order: equal row counts do not imply an identity
-        // permutation of the selected indices.
-        selected_hidden = model_output.hidden_states.index_select(
-            /*dim=*/0, logits_indices.to(torch::kLong));
-      }
-    } else {
-      logits = model_->logits(model_output.hidden_states, logits_indices);
-    }
+    logits = model_->logits_processor(
+        model_output.hidden_states,
+        lm_head_input_indices,
+        need_selected_hidden ? &selected_hidden : nullptr);
   }
 
   ForwardOutput output;
@@ -292,7 +280,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                    dp_driver_ ||
                                    options_.enable_speculative_decode();
   if (return_model_output) {
-    if (sampling_params.num_sample_seqs() > 0) {
+    if (should_compute_logits) {
       output.selected_hidden = selected_hidden;
       output.logprobs = sampling_params.logprobs();
       output.max_top_logprobs = sampling_params.max_top_logprobs();

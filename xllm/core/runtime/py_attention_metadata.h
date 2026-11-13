@@ -91,7 +91,6 @@ class PyAttentionMetadataView final {
   pybind11::object has_initial_state() const;
   const std::vector<int32_t>& dp_execution_token_counts() const;
   const std::vector<int32_t>& raw_dp_execution_token_counts() const;
-  const std::vector<int32_t>& dp_global_sequence_nums() const;
   const std::vector<int32_t>& dp_global_kv_max_seq_lens() const;
   const std::vector<int32_t>& dp_is_decode() const;
   pybind11::object q_seq_lens() const;
@@ -139,11 +138,10 @@ class PyAttentionMetadataView final {
   std::vector<int64_t> num_accepted_tokens_host_values_;
   std::vector<int32_t> dp_execution_token_counts_;
   std::vector<int32_t> raw_dp_execution_token_counts_;
-  std::vector<int32_t> dp_global_sequence_nums_;
   std::vector<int32_t> dp_global_kv_max_seq_lens_;
   std::vector<int32_t> dp_is_decode_;
-  std::shared_ptr<void> prepared_attention_holder_;
-  std::shared_ptr<void> dsa_metadata_holder_;
+  std::shared_ptr<PyObject> prepared_attention_holder_;
+  std::shared_ptr<PyObject> dsa_metadata_holder_;
   torch::Tensor dsa_positions_;
   torch::Tensor dsa_cos_sin_;
   torch::Tensor dsa_c4_cos_sin_;

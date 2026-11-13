@@ -196,7 +196,7 @@ class _PagedRunner:
         hidden = self.executor.execute(input_ids, positions, metadata)
         self.last_hidden = hidden
         self.last_metadata = metadata
-        logits = self.model.compute_logits(hidden, None)
+        logits = self.model.lm_head(hidden)
         return list(logits.split(query_lengths))
 
 

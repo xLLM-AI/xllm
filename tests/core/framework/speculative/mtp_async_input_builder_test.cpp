@@ -429,16 +429,9 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
       py::arg("page_size") = kBlockSize, py::arg("is_mla") = false);
 
   ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
-  // MTP may rewrite num_sequences to execution rows. The Python graph limit
-  // must use the original requests, including a truly empty peer rank.
-  params.meta.num_sequences = 6;
   params.parallel.dp_global_token_nums = {6, 0};
-  params.parallel.dp_global_sequence_nums = {3, 0};
   params.parallel = params.parallel.to(torch::Device(torch::kCPU));
   py::object py_metadata = py::cast(PyAttentionMetadataView(metadata, params));
-  EXPECT_EQ(
-      py_metadata.attr("dp_global_sequence_nums").cast<std::vector<int32_t>>(),
-      (std::vector<int32_t>{3, 0}));
   EXPECT_EQ(py_metadata.attr("dp_execution_token_counts")
                 .cast<std::vector<int32_t>>(),
             (std::vector<int32_t>{6, 1}));

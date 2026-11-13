@@ -11,6 +11,7 @@ cc_library(
     hf_model_loader.h
     dit_model_loader.h
     model_loader.h
+    model_weight_loader.h
   SRCS
     hf_model_args.cpp
     hf_model_config.cpp

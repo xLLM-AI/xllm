@@ -17,6 +17,8 @@ limitations under the License.
 
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model_loader/model_loader.h"
+#include "core/framework/model_loader/model_weight_loader.h"
 #include "core/framework/multimodal/mm_data_item.h"
 #include "core/layers/common/lm_head.h"
 #include "models/model_registry.h"
@@ -186,44 +188,20 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
     return language_model_->pooler(hidden_states, seleted_idxes);
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader) {
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      visual_->load_state_dict(
-          state_dict->get_dict_with_prefix("model.visual."));
-    }
-
-#if defined(USE_NPU)
-    if constexpr (requires {
-                    visual_->verify_loaded_weights("model.visual.");
-                    visual_->merge_loaded_weights();
-                  }) {
-      visual_->verify_loaded_weights("model.visual.");
-      visual_->merge_loaded_weights();
-    }
-#endif
-
-    if (!model_args_.encoder_embedding_mode()) {
-      language_model_->load_model(std::move(loader), "model.language_model.");
-    }
+    layer::LmHead lm_head{nullptr};
+    load_model_weights(*this,
+                       loader->get_state_dicts(),
+                       lm_head,
+                       kLanguageWeightPrefix,
+                       model_args_.encoder_embedding_mode());
   }
 
-  bool is_hybrid_linear_attention() {
-    if constexpr (detail::has_is_hybrid_linear_attention<
-                      LanguageModel>::value) {
-      return language_model_->is_hybrid_linear_attention();
-    }
-    return false;
-  }
+  auto& vision_model() { return *visual_; }
+  auto& language_model() { return *language_model_; }
 
-  layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  layer::WordEmbedding get_word_embedding() {
-    return language_model_->get_word_embedding();
-  }
+  static constexpr const char* kVisionWeightPrefix = "model.visual.";
+  static constexpr const char* kLanguageWeightPrefix = "model.language_model.";
 
  protected:
   ModelArgs model_args_;

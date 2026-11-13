@@ -300,7 +300,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
           ModelClass model(context);                               \
           model->eval();                                           \
           return std::make_unique<xllm::CausalLMImpl<ModelClass>>( \
-              std::move(model), context.get_tensor_options());     \
+              std::move(model), context);                          \
         } __VA_OPT__(, ) __VA_ARGS__);                             \
     return true;                                                   \
   }()
@@ -344,7 +344,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
           ModelClass model(context);                                \
           model->eval();                                            \
           return std::make_unique<xllm::CausalVLMImpl<ModelClass>>( \
-              std::move(model), context.get_tensor_options());      \
+              std::move(model), context);                           \
         } __VA_OPT__(, ) __VA_ARGS__);                              \
     return true;                                                    \
   }()

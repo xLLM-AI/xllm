@@ -84,14 +84,6 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& selected_idxes) override;
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) override;
-
-  // Expose selected hidden rows to MTP and reuse the projection path.
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes,
-                       torch::Tensor& out_hidden) override;
-
   ModelOutput write_context_kv(const torch::Tensor& target_hidden,
                                const torch::Tensor& positions,
                                const torch::Tensor& device_cache_slots,
@@ -153,7 +145,6 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   std::string python_model_name_;
   torch::TensorOptions options_;
   torch::Device device_;
-  bool enable_mla_ = false;
 
   int64_t tp_size_ = 1;
   int64_t tp_rank_ = 0;

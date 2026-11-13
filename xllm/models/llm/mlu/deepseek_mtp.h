@@ -49,21 +49,12 @@ class DeepseekMtpModelImpl
 TORCH_MODULE(DeepseekMtpModel);
 
 class DeepseekMtpForCausalLMImpl
-    : public LlmForCausalLMImplBase<DeepseekMtpModel> {
+    : public LlmForCausalLMImplBase<DeepseekMtpModel,
+                                    BodyWeightPrefix::kExact> {
  public:
   DeepseekMtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekMtpModel>(context,
-                                                 /*share_lm_head=*/true) {}
-
-  void load_model(
-      std::unique_ptr<ModelLoader> loader,
-      std::string prefix = "model." /*llm model weight prefix*/) override {
-    // no need to load lm_head since it shares the same weights with main models
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-    model_->verify_loaded_weights();
-  }
+      : LlmForCausalLMImplBase(context,
+                               /*share_lm_head=*/true) {}
 };
 TORCH_MODULE(DeepseekMtpForCausalLM);
 

@@ -389,7 +389,6 @@ def test_dspark_dp_graph_admits_an_idle_rank_full_block() -> None:
     runner = _block_draft_runner(max_batch=8, dp_size=2, dp_rank=0)
     metadata = _block_draft_metadata(torch.zeros(1, 1, dtype=torch.int32))
     metadata.dp_execution_token_counts = (2, 6)
-    metadata.dp_global_sequence_nums = (0, 3)
     metadata.dp_is_decode = (1, 1)
     metadata.slot_mapping.fill_(-1)
     metadata.kv_seq_lens.fill_(1)
@@ -2016,7 +2015,6 @@ def test_mla_speculative_decode_ignores_unused_linear_state_rows(speculative_tok
     metadata = _metadata(torch.arange(rows, dtype=torch.int32))
     metadata.linear_state_indices = torch.tensor([-1], dtype=torch.int32)
     metadata.has_initial_state = torch.zeros(1, dtype=torch.bool)
-    metadata.dp_global_sequence_nums = (1,) * dp_size
     metadata.dp_execution_token_counts = (rows,) * dp_size
     metadata.dp_global_kv_max_seq_lens = (rows,) * dp_size
     metadata.dp_is_decode = (1,) * dp_size

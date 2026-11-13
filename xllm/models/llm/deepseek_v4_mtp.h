@@ -970,40 +970,15 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
 TORCH_MODULE(DeepseekV4MtpModel);
 
 class DeepseekV4MtpForCausalLMImpl final
-    : public LlmForCausalLMImplBase<DeepseekV4MtpModel> {
+    : public LlmForCausalLMImplBase<DeepseekV4MtpModel,
+                                    BodyWeightPrefix::kExact> {
  public:
   explicit DeepseekV4MtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekV4MtpModel>(context) {}
+      : LlmForCausalLMImplBase(context) {}
 
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "model.") override {
-    LlmForCausalLMImplBase<DeepseekV4MtpModel>::load_lm_head(loader, prefix);
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-    model_->verify_loaded_weights(prefix);
-  }
-
-  void load_lm_head(const StateDict& state_dict,
-                    const std::string& prefix) override {
-    lm_head_->load_state_dict(
-        state_dict.get_dict_with_prefix(prefix + "layers.0.head."));
-  }
-
-  bool requires_graph_forward_metadata() {
-    return this->model_->requires_graph_forward_metadata();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState>
-  create_graph_forward_metadata_state() {
-    return this->model_->create_graph_forward_metadata_state();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& input_params) {
-    this->model_->prepare_graph_forward_metadata(
-        state, positions, input_params);
+  StateDict lm_head_weights(const StateDict& state_dict,
+                            const std::string& prefix) override {
+    return state_dict.get_dict_with_prefix(prefix + "layers.0.head.");
   }
 };
 TORCH_MODULE(DeepseekV4MtpForCausalLM);

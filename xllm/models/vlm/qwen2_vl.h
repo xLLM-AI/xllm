@@ -29,43 +29,6 @@ limitations under the License.
 
 namespace xllm {
 
-class Qwen2_VisionPatchEmbedImpl : public torch::nn::Module {
- public:
-  Qwen2_VisionPatchEmbedImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
-    auto options = context.get_tensor_options();
-
-    auto in_features = model_args.mm_num_channels() *
-                       model_args.mm_temporal_patch_size() *
-                       model_args.mm_patch_size() * model_args.mm_patch_size();
-
-    auto out_features = model_args.mm_hidden_size();
-
-    proj_ = register_module(
-        "proj",
-        torch::nn::Linear(
-            torch::nn::LinearOptions(in_features, out_features).bias(false)));
-
-    proj_->weight.set_data(proj_->weight.to(options));
-  }
-
-  torch::Tensor forward(torch::Tensor x) { return proj_(x); }
-
-  void load_state_dict(const StateDict& state_dict) {
-    auto weight = state_dict.get_tensor("proj.weight");
-    if (weight.defined()) {
-      weight = weight.reshape({weight.size(0), -1});
-      DCHECK_EQ(proj_->weight.sizes(), weight.sizes())
-          << "proj weight size mismatch for " << name();
-      proj_->weight.data().copy_(weight);
-    }
-  }
-
- private:
-  torch::nn::Linear proj_{nullptr};
-};
-TORCH_MODULE(Qwen2_VisionPatchEmbed);
-
 class Qwen2_VisionRotaryEmbeddingImpl : public torch::nn::Module {
  public:
   Qwen2_VisionRotaryEmbeddingImpl(const ModelContext& context) {
@@ -209,8 +172,8 @@ class Qwen2_VisionTransformerImpl : public torch::nn::Module {
 
     spatial_merge_size_ = model_args.mm_spatial_merge_size();
 
-    patch_embed_ =
-        register_module("patch_embed", Qwen2_VisionPatchEmbed(context));
+    patch_embed_ = register_module(
+        /*name=*/"patch_embed", Qwen2_5_VisionPatchEmbed(context));
     rotary_pos_emb_ =
         register_module("rotary_pos_emb", Qwen2_VisionRotaryEmbedding(context));
     blocks_ = register_module("blocks", torch::nn::ModuleList());
@@ -321,7 +284,7 @@ class Qwen2_VisionTransformerImpl : public torch::nn::Module {
  private:
   int spatial_merge_size_ = 0;
 
-  Qwen2_VisionPatchEmbed patch_embed_{nullptr};
+  Qwen2_5_VisionPatchEmbed patch_embed_{nullptr};
   Qwen2_VisionRotaryEmbedding rotary_pos_emb_{nullptr};
   torch::nn::ModuleList blocks_{nullptr};
   std::vector<layer::Qwen2_VisionLayer> layers_;
@@ -331,17 +294,6 @@ class Qwen2_VisionTransformerImpl : public torch::nn::Module {
   torch::Tensor m_sin;
 };
 TORCH_MODULE(Qwen2_VisionTransformer);
-
-struct Qwen2_VLImageInputs {
-  torch::Tensor pixel_values;
-  torch::Tensor image_grid_thw;
-};
-
-struct Qwen2_VLVideoInputs {
-  torch::Tensor pixel_values_videos;
-  torch::Tensor video_grid_thw;
-  torch::Tensor second_per_grid_ts;
-};
 
 class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
  public:
@@ -354,61 +306,30 @@ class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
         register_module("language_model", QWen2ForCausalLM(context));
   }
 
-  void prepare_encoder_input(const ModelParamsView& input_params,
-                             std::optional<Qwen2_VLImageInputs>& image_inputs,
-                             std::optional<Qwen2_VLVideoInputs>& video_inputs) {
-    const auto& mm_data = input_params.multimodal().mm_data;
-    torch::Tensor pixel_values;
-    if (const auto& res = mm_data.get<torch::Tensor>("pixel_values"))
-      pixel_values = res.value();
-
-    torch::Tensor image_grid_thw;
-    if (const auto& res = mm_data.get<torch::Tensor>("image_grid_thw"))
-      image_grid_thw = res.value();
-
-    torch::Tensor pixel_values_videos;
-    if (const auto& res = mm_data.get<torch::Tensor>("pixel_values_videos"))
-      pixel_values_videos = res.value();
-
-    torch::Tensor video_grid_thw;
-    if (const auto& res = mm_data.get<torch::Tensor>("video_grid_thw"))
-      video_grid_thw = res.value();
-
-    torch::Tensor second_per_grid_ts;
-    if (const auto& res = mm_data.get<torch::Tensor>("second_per_grid_ts"))
-      second_per_grid_ts = res.value();
-
-    if (pixel_values.defined() && image_grid_thw.defined())
-      image_inputs = Qwen2_VLImageInputs{pixel_values, image_grid_thw};
-
-    if (pixel_values_videos.defined() && video_grid_thw.defined() &&
-        second_per_grid_ts.defined())
-      video_inputs = Qwen2_VLVideoInputs{
-          pixel_values_videos, video_grid_thw, second_per_grid_ts};
-  }
-
   MMDict get_multimodal_embeddings(const ModelParamsView& input_params) {
-    std::optional<Qwen2_VLImageInputs> image_input;
-    std::optional<Qwen2_VLVideoInputs> video_input;
-    prepare_encoder_input(input_params, image_input, video_input);
-    auto merge_size = model_args_.mm_image_merge_size();
-    MMDict multimodal_embeds;
-    if (image_input) {
-      // visual
-      auto image_embeds = visual_(image_input->pixel_values.to(options_),
-                                  image_input->image_grid_thw);
-      auto image_tokens =
-          (image_input->image_grid_thw.prod(-1) / merge_size / merge_size)
-              .cpu()
-              .contiguous()
-              .to(torch::kLong);
-
-      std::vector<int64_t> image_tokens_vec(
-          image_tokens.data_ptr<int64_t>(),
-          image_tokens.data_ptr<int64_t>() + image_tokens.numel());
-      multimodal_embeds["image|embedding"] =
-          image_embeds.split(image_tokens_vec, /*dim=*/0);
+    const auto& mm_data = input_params.multimodal().mm_data;
+    auto pixel_values = mm_data.get<torch::Tensor>(/*key=*/"pixel_values")
+                            .value_or(torch::Tensor());
+    auto image_grid_thw = mm_data.get<torch::Tensor>(/*key=*/"image_grid_thw")
+                              .value_or(torch::Tensor());
+    if (!pixel_values.defined() || !image_grid_thw.defined()) {
+      return {};
     }
+
+    auto image_embeds = visual_(pixel_values.to(options_), image_grid_thw);
+    const auto merge_size = model_args_.mm_image_merge_size();
+    auto image_tokens =
+        (image_grid_thw.prod(/*dim=*/-1) / merge_size / merge_size)
+            .cpu()
+            .contiguous()
+            .to(torch::kLong);
+
+    std::vector<int64_t> image_tokens_vec(
+        image_tokens.data_ptr<int64_t>(),
+        image_tokens.data_ptr<int64_t>() + image_tokens.numel());
+    MMDict multimodal_embeds;
+    multimodal_embeds["image|embedding"] =
+        image_embeds.split(image_tokens_vec, /*dim=*/0);
     return multimodal_embeds;
   }
 
@@ -440,41 +361,17 @@ class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
     return inputs_embeds;
   }
 
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return language_model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
     namespace F = torch::nn::functional;
-    return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));
+    return F::normalize(language_model_->pooler(hidden_states, seleted_idxes));
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
+  auto& vision_model() { return *visual_; }
+  auto& language_model() { return *language_model_; }
 
-  void load_model(std::unique_ptr<ModelLoader> loader) {
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      visual_->load_state_dict(state_dict->get_dict_with_prefix("visual."));
-    }
-    if (!model_args_.encoder_embedding_mode()) {
-      language_model_->load_model(std::move(loader));
-    }
-  }
-
-  layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  layer::WordEmbedding get_word_embedding() {
-    return language_model_->get_word_embedding();
-  }
+  static constexpr const char* kVisionWeightPrefix = "visual.";
+  static constexpr const char* kLanguageWeightPrefix = "model.";
 
  private:
   ModelArgs model_args_;

@@ -20,7 +20,7 @@ import torch
 
 from xllm.python.model_executor.cp_utils import CpContext
 from xllm.python.model_executor.forward_context import get_forward_context, record_layer_event
-from xllm.python.models.deepseek_v32_mtp import DeepseekV32MtpModel, _compute_mtp_logits, _load_mtp_weights
+from xllm.python.models.deepseek_v32_mtp import DeepseekV32MtpModel, _load_mtp_weights
 from xllm.python.models.glm5_2 import (
     Glm52Config,
     Glm52DecoderLayer,
@@ -114,12 +114,6 @@ class Glm52MtpForCausalLM(Glm52ForCausalLM):
     def __init__(self, config: dict) -> None:
         super().__init__(config, build_model=False)
         self.model = Glm52MtpModel(self.cfg, self.dtype, self.device)
-
-    def compute_logits(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
-        return _compute_mtp_logits(self.model, self.lm_head, hidden, selected_idxes)
-
-    def compute_greedy_tokens(self, hidden: torch.Tensor) -> torch.Tensor:
-        return super().compute_greedy_tokens(hidden)
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         _load_mtp_weights(self, super().load_weights, state_dicts, tp_rank, tp_size)

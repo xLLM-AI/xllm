@@ -39,11 +39,6 @@ class RegistryTestModel final : public CausalVLM {
     return {};
   }
 
-  torch::Tensor logits(const torch::Tensor& /*hidden_states*/,
-                       const torch::Tensor& /*selected_idxes*/) override {
-    return {};
-  }
-
   void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {}
 
   torch::Device device() const override { return torch::Device(torch::kCPU); }

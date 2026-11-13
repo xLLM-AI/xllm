@@ -153,6 +153,8 @@ class DeepseekV32ForCausalLMImpl
  public:
   DeepseekV32ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<DeepseekV32Model>(context) {}
+
+  void verify_model_weights(const std::string&) override {}
 };
 TORCH_MODULE(DeepseekV32ForCausalLM);
 

@@ -23,7 +23,7 @@ namespace layer {
 class LmHead : public torch::nn::ModuleHolder<ColumnParallelLinearImpl> {
  public:
   using torch::nn::ModuleHolder<ColumnParallelLinearImpl>::ModuleHolder;
-  using Impl __attribute__((__unused__)) = ColumnParallelLinearImpl;
+  using Impl = ColumnParallelLinearImpl;
 
   LmHead(const ModelContext& context)
       : ModuleHolder(std::make_shared<ColumnParallelLinearImpl>(context)) {}
