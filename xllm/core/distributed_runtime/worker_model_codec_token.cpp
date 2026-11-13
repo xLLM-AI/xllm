@@ -21,7 +21,6 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/worker_model_codec.h"
-#include "core/framework/config/eplb_config.h"
 #include "core/runtime/forward_params.h"
 #include "core/util/tensor_codec.h"
 #include "core/util/tensor_helper.h"
@@ -290,14 +289,12 @@ bool encode_token_output(
     }
   }
 
-  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-    pb_forward_output->set_prepared_token(output.prepared_token);
-    if (output.expert_load_data.defined()) {
-      Slice<int64_t> expert_load_data_flattened_slice =
-          tensor_slice<int64_t>(output.expert_load_data.view({-1}));
-      ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_expert_load_data(),
-                          expert_load_data_flattened_slice);
-    }
+  pb_forward_output->set_prepared_token(output.prepared_token);
+  if (output.expert_load_data.defined()) {
+    Slice<int64_t> expert_load_data_flattened_slice =
+        tensor_slice<int64_t>(output.expert_load_data.view({-1}));
+    ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_expert_load_data(),
+                        expert_load_data_flattened_slice);
   }
 
   for (const JsonObjectOutputError& error : output.json_object_errors) {

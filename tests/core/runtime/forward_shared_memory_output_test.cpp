@@ -170,7 +170,6 @@ TEST_F(ForwardSharedMemoryOutputTest,
 
 TEST_F(ForwardSharedMemoryOutputTest,
        TokenDomainsPreserveCombinedOutputAfterSourceMutation) {
-  EPLBConfig::get_instance().enable_eplb(true);
   for (const auto& [write, read] : kTokenOutputMethods) {
     ForwardOutput source;
     source.sample_output.next_tokens =
@@ -231,8 +230,63 @@ TEST_F(ForwardSharedMemoryOutputTest,
 }
 
 TEST_F(ForwardSharedMemoryOutputTest,
-       OversizedTokenFieldsPreserveEveryPublishedPayloadByte) {
+       EplbPayloadSurvivesGlobalConfigurationChanges) {
+  for (bool global_enabled : {false, true}) {
+    SCOPED_TRACE(global_enabled);
+    for (bool has_sampled_tokens : {false, true}) {
+      SCOPED_TRACE(has_sampled_tokens);
+      for (const auto& [write, read] : kTokenOutputMethods) {
+        EPLBConfig::get_instance().enable_eplb(global_enabled);
+        ForwardOutput source;
+        if (has_sampled_tokens) {
+          source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
+        }
+        source.expert_load_data =
+            torch::tensor({{0, 2}, {3, 0}}, torch::kInt64);
+        source.prepared_token = 0;
+        ASSERT_TRUE((writer_.get()->*write)(source, {}));
+        source.expert_load_data.zero_();
+        source.prepared_token = -1;
+        EPLBConfig::get_instance().enable_eplb(!global_enabled);
+
+        RawForwardOutput output;
+        ASSERT_TRUE((reader_.get()->*read)(output));
+        EXPECT_EQ(output.outputs.size(), has_sampled_tokens ? 1 : 0);
+        EXPECT_EQ(output.expert_load_data, (std::vector<int64_t>{0, 2, 3, 0}));
+        EXPECT_EQ(output.prepared_token, 0);
+      }
+    }
+  }
+}
+
+TEST_F(ForwardSharedMemoryOutputTest,
+       EplbTokensAndDefaultsDoNotRequireExpertLoads) {
   EPLBConfig::get_instance().enable_eplb(true);
+  for (bool has_sampled_tokens : {false, true}) {
+    SCOPED_TRACE(has_sampled_tokens);
+    for (int64_t prepared_token : {-1, 42}) {
+      SCOPED_TRACE(prepared_token);
+      for (const auto& [write, read] : kTokenOutputMethods) {
+        ForwardOutput source;
+        if (has_sampled_tokens) {
+          source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
+        }
+        source.prepared_token = prepared_token;
+        ASSERT_TRUE((writer_.get()->*write)(source, {}));
+        RawForwardOutput output;
+        output.prepared_token = 81;
+        output.expert_load_data = {9};
+        ASSERT_TRUE((reader_.get()->*read)(output));
+        EXPECT_EQ(output.outputs.size(), has_sampled_tokens ? 1 : 0);
+        EXPECT_TRUE(output.expert_load_data.empty());
+        EXPECT_EQ(output.prepared_token, prepared_token);
+      }
+    }
+  }
+}
+
+TEST_F(ForwardSharedMemoryOutputTest,
+       OversizedTokenFieldsPreserveEveryPublishedPayloadByte) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
   ASSERT_TRUE(writer_->llm_output_write(source, {}));
