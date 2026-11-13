@@ -20,6 +20,7 @@ limitations under the License.
 #include <string>
 
 #include "core/common/macros.h"
+#include "core/framework/eplb/eplb_options.h"
 #include "core/framework/parallel_state/process_group.h"
 
 namespace xllm {
@@ -180,6 +181,9 @@ struct ParallelArgs {
 
   // Parallel topology metadata for expert dispatch.
   PROPERTY(nlohmann::json, mapping_data);
+
+  // Model layers use the same startup snapshot as worker bootstrap.
+  PROPERTY(EplbWorkerConfig, eplb_worker_config);
 
 #if defined(USE_NPU)
 

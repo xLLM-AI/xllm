@@ -48,7 +48,6 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/common/constants.h"
 #include "core/common/flash_comm1_context.h"
-#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/kv_cache_store_config_validation.h"
@@ -310,10 +309,11 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
       dp_driver_(is_dp_driver(parallel_args)),
       schedule_overlap_(
           is_driver(),
-          EPLBConfig::get_instance().enable_eplb(),
+          options.eplb_worker_config().enabled,
           options.enable_schedule_overlap() || is_input_release_deferred),
       device_(device),
       parallel_args_(parallel_args) {
+  parallel_args_.eplb_worker_config(options_.eplb_worker_config());
   device_.set_device();
   device_.init_device_context();
   threadpool_.schedule([this]() mutable { device_.set_device(); });

@@ -19,6 +19,9 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
+#include "core/framework/config/eplb_config.h"
+#include "core/framework/config/kernel_config.h"
+#include "core/util/scope_guard.h"
 #include "layers/npu_torch/deepseek_v4_eplb_load_utils.h"
 #include "layers/npu_torch/fused_moe.h"
 
@@ -33,6 +36,61 @@ torch::Tensor remap_with_log2phy(const torch::Tensor& ids,
 }
 
 }  // namespace
+
+TEST(DeepseekV4EplbTest, NativeExpertStorageUsesInjectedWorkerConfig) {
+  EPLBConfig& global_config = EPLBConfig::get_instance();
+  const bool previous_enabled = global_config.enable_eplb();
+  const int32_t previous_redundancy = global_config.redundant_experts_num();
+  KernelConfig& kernel_config = KernelConfig::get_instance();
+  const bool previous_mega_moe = kernel_config.enable_mega_moe();
+  ScopeGuard restore([&]() {
+    global_config.enable_eplb(previous_enabled);
+    global_config.redundant_experts_num(previous_redundancy);
+    kernel_config.enable_mega_moe(previous_mega_moe);
+  });
+  kernel_config.enable_mega_moe(false);
+
+  const torch::Device device(torch::kCPU);
+  ProcessGroup tp_group(/*rank=*/0, /*world_size=*/1, device);
+  ProcessGroup ep_group(/*rank=*/0, /*world_size=*/2, device);
+  ProcessGroup eplb_group(/*rank=*/0, /*world_size=*/2, device);
+  ParallelArgs parallel_args(/*rank=*/0,
+                             /*world_size=*/2,
+                             /*dp_size=*/1,
+                             /*cp_size=*/1,
+                             /*process_group=*/nullptr,
+                             /*ep_size=*/2);
+  parallel_args.tp_group_ = &tp_group;
+  parallel_args.moe_ep_group_ = &ep_group;
+  parallel_args.eplb_group_ = &eplb_group;
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .hidden_size(4)
+      .moe_intermediate_size(8)
+      .n_routed_experts(8)
+      .num_experts_per_tok(1)
+      .hidden_act("silu");
+  const auto tensor_options = torch::TensorOptions().device(device);
+
+  for (bool enabled : {false, true}) {
+    for (int32_t redundancy : {0, 2}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "enabled=" << enabled << ", redundancy=" << redundancy);
+      global_config.enable_eplb(!enabled);
+      global_config.redundant_experts_num(3);
+      parallel_args.eplb_worker_config(EplbWorkerConfig{
+          .enabled = enabled, .redundant_experts_num = redundancy});
+      FusedMoEImpl model(model_args,
+                         FusedMoEArgs{},
+                         QuantArgs{},
+                         parallel_args,
+                         tensor_options);
+      const int64_t expected_experts = enabled ? 4 + redundancy : 4;
+      EXPECT_EQ(model.named_parameters()["w13"].size(0), expected_experts);
+      EXPECT_EQ(model.named_parameters()["w2"].size(0), expected_experts);
+    }
+  }
+}
 
 TEST(DeepseekV4EplbTest, DispatchFfnWorkspaceTracksActualTokenCapacity) {
   EXPECT_EQ(dsv4_eplb::dispatch_ffn_max_output_size(

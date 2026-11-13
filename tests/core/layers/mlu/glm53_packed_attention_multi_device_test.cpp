@@ -127,7 +127,7 @@ void run_packed_chain(int32_t rank, int32_t port) {
   const auto options =
       torch::TensorOptions().dtype(torch::kBFloat16).device(device.unwrap());
   ParallelConfig::get_instance().kv_split_size(4);
-  CollectiveCommunicator communicator(rank, 8, 1, 1, 4);
+  CollectiveCommunicator communicator(rank, 8, 1, 1, 4, EplbWorkerConfig{});
   communicator.create_process_groups("127.0.0.1:" + std::to_string(port),
                                      device.unwrap());
   const ParallelArgs& parallel = *communicator.parallel_args();
