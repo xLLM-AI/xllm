@@ -40,7 +40,9 @@ void prepare_draft_prefix_from_target(LlmForwardInput& draft_input,
 
 // Applies accepted target state to the fixed [repair, current] draft layout.
 // The NPU path uses one fused preparation kernel when possible and otherwise
-// falls back to equivalent Torch tensor operations.
+// falls back to equivalent Torch tensor operations. Shared storage uses the
+// source's final page table to refresh physical token slots in the same update;
+// the template's speculative positions never remain authoritative for writes.
 template <typename Source>
 void prepare_next_draft_from_accepted_state(
     LlmForwardInput& draft_input,

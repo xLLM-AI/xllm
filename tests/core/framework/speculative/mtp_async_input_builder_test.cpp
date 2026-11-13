@@ -43,14 +43,16 @@ namespace {
 
 constexpr int32_t kBlockSize = 4;
 
-LlmForwardInput make_draft_input(int64_t batch_size, int64_t hidden_size) {
+LlmForwardInput make_draft_input(int64_t batch_size,
+                                 int64_t hidden_size,
+                                 int64_t query_width = 2) {
   LlmForwardInput input;
-  input.token_ids = torch::zeros({batch_size * 2}, torch::kInt);
-  input.positions = torch::zeros({batch_size * 2}, torch::kInt);
+  input.token_ids = torch::zeros({batch_size * query_width}, torch::kInt);
+  input.positions = torch::zeros({batch_size * query_width}, torch::kInt);
   input.input_params.embedding.input_embedding =
-      torch::zeros({batch_size * 2, hidden_size}, torch::kFloat32);
+      torch::zeros({batch_size * query_width, hidden_size}, torch::kFloat32);
   input.input_params.attention.device.kv_seq_lens =
-      torch::zeros({batch_size * 2}, torch::kInt);
+      torch::zeros({batch_size * query_width}, torch::kInt);
   return input;
 }
 
@@ -140,6 +142,95 @@ TEST(MtpAsyncInputBuilderTest, CanSkipExpandedMetadataRebuild) {
       torch::equal(draft_input.input_params.attention.device.block_tables,
                    template_block_tables));
   EXPECT_FALSE(draft_input.input_params.graph.expanded_kv_seq_lens.defined());
+}
+
+TEST(MtpAsyncInputBuilderTest,
+     RefreshesSharedRepairSlotsFromAcceptedDeviceState) {
+  const torch::Tensor logical_tables =
+      torch::tensor({{10, 11, 12}, {20, 21, 22}, {0, 0, 0}}, torch::kInt);
+  const torch::Tensor shared_tables =
+      torch::tensor({{60, 62, 64}, {100, 102, 104}, {60, 60, 60}}, torch::kInt);
+  LlmForwardInput source;
+  source.input_params.attention.device.block_tables = logical_tables;
+  source.input_params.attention.host.block_tables = logical_tables;
+  source.input_params.attention.device.shared_full_block_table = shared_tables;
+  source.input_params.attention.host.shared_full_block_table = shared_tables;
+  source.input_params.attention.host.kv_seq_lens = {8, 8, 6};
+  const torch::Tensor accepted_tokens =
+      torch::tensor({{10, 11, 12}, {20, -1, -1}, {30, -1, -1}}, torch::kLong);
+  const torch::Tensor hidden = torch::ones({3, 3, 2});
+  const torch::Tensor placeholder = torch::zeros({2});
+  const torch::Tensor base_positions = torch::tensor({4, 6, 4}, torch::kInt);
+  const torch::Tensor base_lengths = torch::tensor({5, 7, 5}, torch::kInt);
+
+  for (const bool rebuild : {false, true}) {
+    LlmForwardInput draft =
+        make_draft_input(/*batch_size=*/3, /*hidden_size=*/2);
+    auto& attention = draft.input_params.attention.device;
+    attention.block_tables = logical_tables.repeat_interleave(2, /*dim=*/0);
+    attention.shared_full_block_table =
+        shared_tables.repeat_interleave(2, /*dim=*/0);
+    attention.shared_full_slot_mapping = torch::full({6}, -1, torch::kInt);
+    const torch::Tensor template_shared_table =
+        attention.shared_full_block_table;
+
+    prepare_next_draft_from_accepted_state(draft,
+                                           source,
+                                           accepted_tokens,
+                                           hidden,
+                                           placeholder,
+                                           base_positions,
+                                           base_lengths,
+                                           rebuild,
+                                           kBlockSize);
+
+    // A full acceptance repairs the previous position; a rejection redirects
+    // repair beyond the live prefix. Logical padding cannot write read-padding.
+    EXPECT_TRUE(
+        torch::equal(attention.new_cache_slots,
+                     torch::tensor({46, 47, 88, 87, 2, 1}, torch::kInt)));
+    EXPECT_TRUE(
+        torch::equal(attention.shared_full_slot_mapping,
+                     torch::tensor({250, 251, 416, 411, -1, -1}, torch::kInt)));
+    EXPECT_TRUE(torch::equal(attention.shared_full_block_table,
+                             shared_tables.repeat_interleave(2, /*dim=*/0)));
+    if (!rebuild) {
+      EXPECT_EQ(attention.shared_full_block_table.data_ptr(),
+                template_shared_table.data_ptr());
+    }
+  }
+}
+
+TEST(MtpAsyncInputBuilderTest, RefreshesSharedVerifierPrefixSlots) {
+  LlmForwardInput draft = make_draft_input(/*batch_size=*/2,
+                                           /*hidden_size=*/2,
+                                           /*query_width=*/3);
+  auto& attention = draft.input_params.attention.device;
+  const torch::Tensor logical_tables =
+      torch::tensor({{10, 11}, {0, 0}}, torch::kInt);
+  const torch::Tensor shared_tables =
+      torch::tensor({{60, 62}, {60, 60}}, torch::kInt);
+  attention.block_tables = logical_tables.repeat_interleave(3, /*dim=*/0);
+  attention.shared_full_block_table =
+      shared_tables.repeat_interleave(3, /*dim=*/0);
+  attention.shared_full_slot_mapping = torch::full({6}, -1, torch::kInt);
+  draft.sampling_params.logits_indices() = torch::zeros({2}, torch::kInt);
+
+  prepare_draft_prefix_from_target(
+      draft,
+      torch::tensor({{10, 11, -1}, {20, -1, -1}}, torch::kLong),
+      torch::ones({2, 3, 2}),
+      torch::tensor({4, 4}, torch::kInt),
+      torch::tensor({5, 5}, torch::kInt),
+      kBlockSize);
+
+  EXPECT_TRUE(torch::equal(attention.new_cache_slots,
+                           torch::tensor({44, 45, 46, 0, 1, 2}, torch::kInt)));
+  EXPECT_TRUE(
+      torch::equal(attention.shared_full_slot_mapping,
+                   torch::tensor({248, 249, 250, -1, -1, -1}, torch::kInt)));
+  EXPECT_TRUE(torch::equal(draft.sampling_params.logits_indices(),
+                           torch::tensor({1, 3}, torch::kInt)));
 }
 
 TEST(MtpAsyncInputBuilderTest, BuildsTokenwiseSpecVerifyKvLengths) {

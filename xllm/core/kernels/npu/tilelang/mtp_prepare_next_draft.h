@@ -28,6 +28,7 @@ struct MtpPrepareNextDraftOutput {
   torch::Tensor positions;
   torch::Tensor kv_seq_lens;
   torch::Tensor cache_slots;
+  torch::Tensor shared_cache_slots;
 };
 
 // Owns the fixed-address output for one MTP metadata variant. The owner
@@ -46,6 +47,7 @@ std::optional<MtpPrepareNextDraftOutput> try_mtp_prepare_next_draft(
     const torch::Tensor& base_kv_seq_lens,
     const torch::Tensor& block_tables,
     int64_t block_size,
-    MtpPrepareNextDraftWorkspace* reusable_workspace = nullptr);
+    MtpPrepareNextDraftWorkspace* reusable_workspace = nullptr,
+    const torch::Tensor& shared_block_tables = {});
 
 }  // namespace xllm::kernel::npu

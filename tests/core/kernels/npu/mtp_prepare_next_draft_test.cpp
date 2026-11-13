@@ -20,6 +20,8 @@ limitations under the License.
 #include <torch_npu/csrc/libs/init_npu.h>
 #include <torch_npu/torch_npu.h>
 
+#include <vector>
+
 namespace xllm::kernel::npu {
 namespace {
 
@@ -168,6 +170,68 @@ TEST_F(MtpPrepareNextDraftTest, ReusesOutputsAndConvertsInt64Metadata) {
                            torch::tensor({127, 128}, torch::kInt)));
   EXPECT_TRUE(
       torch::equal(second->cache_slots.cpu(), torch::zeros({2}, torch::kInt)));
+}
+
+TEST_F(MtpPrepareNextDraftTest, RefreshesSharedSlotsAcrossAcceptanceAndPages) {
+  const torch::Device device("npu:0");
+  const torch::Tensor tokens =
+      torch::tensor({{10, 11, 12}, {20, -1, -1}, {30, -1, -1}}, torch::kLong)
+          .to(device);
+  const torch::Tensor positions =
+      torch::tensor({4, 6, 4}, torch::kInt).to(device);
+  const torch::Tensor lengths =
+      torch::tensor({5, 7, 5}, torch::kInt).to(device);
+  const torch::Tensor tables =
+      torch::tensor({{10, 11, 12}, {20, 21, 22}, {0, 0, 0}}, torch::kInt)
+          .to(device);
+  const torch::Tensor shared_tables =
+      torch::tensor({{60, 62, 64}, {100, 102, 104}, {60, 60, 60}}, torch::kInt)
+          .to(device);
+  MtpPrepareNextDraftWorkspace workspace;
+  for (const bool compact : {false, true}) {
+    const torch::Tensor hidden = torch::ones(
+        compact ? std::vector<int64_t>{6, 16} : std::vector<int64_t>{3, 3, 16},
+        tokens.options().dtype(torch::kBFloat16));
+    const torch::Tensor placeholder = torch::zeros({16}, hidden.options());
+    const auto output = try_mtp_prepare_next_draft(tokens,
+                                                   hidden,
+                                                   placeholder,
+                                                   positions,
+                                                   lengths,
+                                                   tables,
+                                                   /*block_size=*/4,
+                                                   &workspace,
+                                                   shared_tables);
+    ASSERT_TRUE(output.has_value());
+    EXPECT_TRUE(
+        torch::equal(output->cache_slots.cpu(),
+                     torch::tensor({46, 47, 88, 87, 2, 1}, torch::kInt)));
+    EXPECT_TRUE(
+        torch::equal(output->shared_cache_slots.cpu(),
+                     torch::tensor({250, 251, 416, 411, -1, -1}, torch::kInt)));
+
+    // Rejection moves the repair write into the following page. Reusing the
+    // output addresses must refresh physical slots rather than retain a
+    // template.
+    const torch::Tensor shared_slots = output->shared_cache_slots;
+    positions.fill_(10);
+    const auto out_of_range = try_mtp_prepare_next_draft(tokens,
+                                                         hidden,
+                                                         placeholder,
+                                                         positions,
+                                                         lengths,
+                                                         tables,
+                                                         /*block_size=*/4,
+                                                         &workspace,
+                                                         shared_tables);
+    ASSERT_TRUE(out_of_range.has_value());
+    EXPECT_EQ(shared_slots.data_ptr(),
+              out_of_range->shared_cache_slots.data_ptr());
+    EXPECT_TRUE(
+        torch::equal(out_of_range->shared_cache_slots.cpu(),
+                     torch::tensor({-1, -1, -1, 419, -1, -1}, torch::kInt)));
+    positions.copy_(torch::tensor({4, 6, 4}, torch::kInt).to(device));
+  }
 }
 
 TEST_F(MtpPrepareNextDraftTest, RejectsUnsupportedHostInputs) {

@@ -112,7 +112,8 @@ std::optional<MtpPrepareNextDraftOutput> try_mtp_prepare_next_draft(
     const torch::Tensor& base_kv_seq_lens,
     const torch::Tensor& block_tables,
     int64_t block_size,
-    MtpPrepareNextDraftWorkspace* reusable_workspace) {
+    MtpPrepareNextDraftWorkspace* reusable_workspace,
+    const torch::Tensor& shared_block_tables) {
   if (!is_supported_mtp_prepare_input(accepted_tokens,
                                       accepted_embeddings,
                                       embedding_placeholder,
@@ -120,6 +121,14 @@ std::optional<MtpPrepareNextDraftOutput> try_mtp_prepare_next_draft(
                                       base_kv_seq_lens,
                                       block_tables,
                                       block_size)) {
+    return std::nullopt;
+  }
+  const bool use_shared_table = shared_block_tables.defined();
+  if (use_shared_table &&
+      (shared_block_tables.device() != accepted_tokens.device() ||
+       shared_block_tables.scalar_type() != torch::kInt ||
+       shared_block_tables.sizes() != block_tables.sizes() ||
+       !shared_block_tables.is_contiguous())) {
     return std::nullopt;
   }
 
@@ -163,6 +172,15 @@ std::optional<MtpPrepareNextDraftOutput> try_mtp_prepare_next_draft(
                 {accepted_embeddings.dim() == 2 ? batch_size * 2 : batch_size},
                 int_options);
   ensure_tensor(output.cache_slots, {batch_size * 2}, int_options);
+  if (use_shared_table) {
+    ensure_tensor(output.shared_cache_slots, {batch_size * 2}, int_options);
+  } else {
+    output.shared_cache_slots = torch::Tensor();
+  }
+  const torch::Tensor& shared_table_input =
+      use_shared_table ? shared_block_tables : block_table_input;
+  const torch::Tensor& shared_slot_output =
+      use_shared_table ? output.shared_cache_slots : output.cache_slots;
 
   const auto spec = tilelang::make_mtp_prepare_next_draft_specialization(
       tilelang::MtpPrepareNextDraftCompactHidden{
@@ -178,17 +196,20 @@ std::optional<MtpPrepareNextDraftOutput> try_mtp_prepare_next_draft(
             static_cast<uint8_t*>(position_rows.data_ptr()),
             static_cast<uint8_t*>(kv_seq_len_rows.data_ptr()),
             static_cast<uint8_t*>(block_table_input.data_ptr()),
+            static_cast<uint8_t*>(shared_table_input.data_ptr()),
             static_cast<uint8_t*>(output.token_ids.data_ptr()),
             static_cast<uint8_t*>(output.embeddings.data_ptr()),
             static_cast<uint8_t*>(output.positions.data_ptr()),
             static_cast<uint8_t*>(output.kv_seq_lens.data_ptr()),
             static_cast<uint8_t*>(output.cache_slots.data_ptr()),
+            static_cast<uint8_t*>(shared_slot_output.data_ptr()),
             static_cast<int32_t>(batch_size),
             static_cast<int32_t>(accepted_tokens.size(1)),
             static_cast<int32_t>(hidden_size),
             static_cast<int32_t>(block_tables.size(1)),
             static_cast<int32_t>(block_size),
             static_cast<int32_t>(std::min(batch_size * 2, int64_t{32})),
+            static_cast<int32_t>(use_shared_table),
             stream);
   return output;
 }
