@@ -32,6 +32,7 @@ limitations under the License.
 namespace xllm {
 
 class PyCausalLM;
+class EncoderCache;
 
 class __attribute__((visibility("hidden"))) PyExecutorImpl final
     : public ExecutorImpl {
@@ -62,6 +63,7 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
   pybind11::object py_executor_;
   bool requires_input_batch_metadata_ = false;
   bool supports_layerwise_kv_load_ = false;
+  std::unique_ptr<EncoderCache> encoder_cache_;
   bool kv_bound_ = false;
   int64_t kv_layer_count_ = 0;
 };

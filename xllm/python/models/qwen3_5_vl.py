@@ -33,6 +33,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5ForCausalLM):
         if self.vision_cfg.out_hidden_size != config["hidden_size"]:
             raise ValueError("vision output dimension must match the language model hidden size")
         super().__init__(config)
+        self.supports_mtp_kv_capacity_graph = self.cfg.num_experts == 0
         self.image_token_id = int(config.get("image_token_id", 248056))
         self.video_token_id = int(config.get("video_token_id", 248057))
         self.vision_model = Qwen3VLVisionTransformer(
