@@ -32,6 +32,7 @@ from xllm.python.model_executor.runners.block_draft_acl_graph import (
     BlockDraftAclGraphRunner,
 )
 from xllm.python.model_executor.runners.decode_acl_graph import (
+    DecodeAclGraphMetadata,
     DecodeAclGraphRunner,
 )
 
@@ -46,6 +47,7 @@ def _runner(
     enable_graph_mode_decode_no_padding: bool = False,
     enable_mega_moe_token_mask: bool = False,
     device_kv_lengths: bool = False,
+    kv_capacity_graphs: bool = False,
     max_capture_tokens: int | None = None,
 ) -> DecodeAclGraphRunner:
     attention_backend = SimpleNamespace(page_size=4, is_mla=False, create_graph_block_tables=lambda *_: ())
@@ -61,6 +63,7 @@ def _runner(
         enable_graph_mode_decode_no_padding=enable_graph_mode_decode_no_padding,
         enable_mega_moe_token_mask=enable_mega_moe_token_mask,
         device_kv_lengths=device_kv_lengths,
+        kv_capacity_graphs=kv_capacity_graphs,
         max_capture_tokens=max_capture_tokens,
     )
 
@@ -87,15 +90,15 @@ def _metadata(linear_state_indices: torch.Tensor, rows: int | None = None) -> Si
     )
 
 
-def _capacity_metadata(rows: int, kv_length: int = 1, query_width: int = 1) -> SimpleNamespace:
+def _capacity_metadata(rows: int, kv_length: int = 1, query_width: int = 1, page_size: int = 4) -> SimpleNamespace:
     metadata = _metadata(torch.arange(rows // query_width, dtype=torch.int32), rows)
-    pages = (kv_length + 3) // 4
+    pages = (kv_length + page_size - 1) // page_size
     metadata.block_table = torch.arange(1, rows * pages + 1, dtype=torch.int32).reshape(rows, pages)
     metadata.kv_seq_lens.fill_(kv_length)
     metadata.kv_seq_lens_host_values = [kv_length] * rows
     metadata.kv_cu_seq_lens = None
     metadata.paged_kv_indptr, metadata.paged_kv_indices, metadata.paged_kv_last_page_len = (
-        build_row_aligned_paged_kv_metadata(metadata.block_table, metadata.kv_seq_lens_host_values, 4)
+        build_row_aligned_paged_kv_metadata(metadata.block_table, metadata.kv_seq_lens_host_values, page_size)
     )
     if query_width > 1:
         metadata.is_spec_verify = True
@@ -143,8 +146,14 @@ def test_shared_kda_verify_still_requires_role_specific_graph_support(spec_verif
     assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), _capacity_metadata(4, query_width=2)) is None
 
 
-def test_decode_startup_captures_all_kv_capacities_from_short_metadata() -> None:
-    runner = _runner(max_batch=4, max_model_len=512, device_kv_lengths=True)
+@pytest.mark.parametrize("device_kv_lengths", [False, True], ids=["host-lengths", "device-lengths"])
+def test_decode_startup_captures_all_kv_capacities_from_short_metadata(device_kv_lengths: bool) -> None:
+    runner = _runner(
+        max_batch=4,
+        max_model_len=512,
+        device_kv_lengths=device_kv_lengths,
+        kv_capacity_graphs=True,
+    )
     tokens = torch.arange(3, dtype=torch.int32)
     metadata = _capacity_metadata(3)
     captured_pages: list[int] = []
@@ -167,6 +176,49 @@ def test_decode_startup_captures_all_kv_capacities_from_short_metadata() -> None
             assert key[-1] == expected_pages
             assert key in runner._graphs
         assert captured_pages == [4, 32, 129]
+
+
+@pytest.mark.parametrize("device_kv_lengths", [False, True], ids=["host-lengths", "device-lengths"])
+@pytest.mark.parametrize("query_width", [1, 4], ids=["decode", "mtp-verify"])
+def test_capacity_warmup_bounds_long_synthetic_lengths_without_mutating_source(
+    device_kv_lengths: bool, query_width: int
+) -> None:
+    runner = _runner(max_batch=8, max_model_len=65536, device_kv_lengths=device_kv_lengths, kv_capacity_graphs=True)
+    runner.attention_backend.page_size = 128
+    metadata = _capacity_metadata(8, 2048, query_width, page_size=128)
+    metadata.kv_cu_seq_lens = torch.arange(9, dtype=torch.int32) * 2048
+    tokens = torch.arange(8, dtype=torch.int32)
+    original_table = metadata.block_table.clone()
+    resolved = runner._decode_metadata(metadata, runner._expanded_verify_view(metadata))
+    captured_pages: list[int] = []
+
+    def _capture(
+        *_args: object,
+        graph_key: tuple[object, ...],
+        decode_metadata: DecodeAclGraphMetadata,
+        kv_capacity_pages: int,
+        **_: object,
+    ) -> None:
+        bound = kv_capacity_pages * 128
+        assert max(decode_metadata.kv_seq_lens_host_values) <= bound
+        assert decode_metadata.kv_seq_lens.tolist() == decode_metadata.kv_seq_lens_host_values
+        assert decode_metadata.block_table.shape[1] <= kv_capacity_pages
+        assert decode_metadata.paged_kv_indptr[-1].item() == decode_metadata.paged_kv_indices.numel()
+        assert decode_metadata.paged_kv_last_page_len.tolist() == [128] * 8
+        if kv_capacity_pages == 4:
+            assert decode_metadata.kv_seq_lens_host_values == [512] * 8
+            assert decode_metadata.kv_cu_seq_lens is None
+        captured_pages.append(kv_capacity_pages)
+        runner._graphs[graph_key] = AclGraphEntry()
+
+    with patch.object(runner, "_prepare_graph_entry", side_effect=_capture):
+        runner.warmup(tokens, tokens, metadata, decode_metadata=resolved, is_graph_warmup=True)
+        assert captured_pages == [4, 32, 256, 513]
+        assert runner.warmup(tokens, tokens, metadata)[-1] == 32
+    assert metadata.kv_seq_lens_host_values == [2048] * 8
+    assert metadata.kv_seq_lens.tolist() == [2048] * 8
+    assert metadata.kv_cu_seq_lens.tolist() == [2048 * i for i in range(9)]
+    torch.testing.assert_close(metadata.block_table, original_table)
 
 
 def test_decode_startup_tracks_sparse_prefix_rows_and_expanded_verify_separately() -> None:
@@ -205,8 +257,16 @@ def test_decode_startup_tracks_sparse_prefix_rows_and_expanded_verify_separately
 
 
 @pytest.mark.parametrize("missing_variant", ["capacity", "embedding", "topk", "query_layout"])
-def test_admitted_decode_shape_still_rejects_missing_graph_variants(missing_variant: str) -> None:
-    runner = _runner(max_batch=4, max_model_len=512, device_kv_lengths=True)
+@pytest.mark.parametrize("device_kv_lengths", [False, True], ids=["host-lengths", "device-lengths"])
+def test_admitted_decode_shape_still_rejects_missing_graph_variants(
+    missing_variant: str, device_kv_lengths: bool
+) -> None:
+    runner = _runner(
+        max_batch=4,
+        max_model_len=512,
+        device_kv_lengths=device_kv_lengths,
+        kv_capacity_graphs=True,
+    )
     tokens = torch.arange(4, dtype=torch.int32)
     metadata = _capacity_metadata(4)
 

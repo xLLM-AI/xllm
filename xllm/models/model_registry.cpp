@@ -33,6 +33,8 @@ limitations under the License.
 #include "llm/py_causal_lm.h"
 #include "models.h"
 #include "processors/cacheable_multimodal_processor.h"
+#include "processors/multimodal_processor_pipeline.h"
+#include "processors/text_prompt_processor.h"
 
 namespace {
 
@@ -677,6 +679,13 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
 
   MultimodalProcessorFactory multimodal_processor_factory =
       ModelRegistry::get_multimodal_processor_factory(resolved_name);
+  if (multimodal_processor_factory == nullptr &&
+      ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl()) &&
+      ModelRegistry::get_model_backend(resolved_name) == "llm") {
+    return std::make_unique<MultimodalProcessor<TextPromptProcessor>>(
+        model_args, std::move(tokenizer), tokenizer_args, max_sequence_length);
+  }
   CHECK(multimodal_processor_factory != nullptr)
       << "Missing multimodal processor for model type: " << model_type;
   std::unique_ptr<MultimodalProcessorBase> processor =

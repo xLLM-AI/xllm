@@ -25,6 +25,7 @@ limitations under the License.
 #include "processors/cacheable_multimodal_processor.h"
 #include "processors/multimodal_processor_pipeline.h"
 #include "processors/qwen3_vl_prompt_processor.h"
+#include "processors/text_prompt_processor.h"
 
 namespace xllm {
 namespace {
@@ -45,6 +46,7 @@ class FixedTokenizer final : public Tokenizer {
 
 TEST(MultimodalProcessorTest, PaddingIsSelectedPerProcessor) {
   ModelArgs args;
+  args.image_token_id(100).video_token_id(101);
   TokenizerArgs tokenizer_args;
   tokenizer_args.pad_token("<pad>");
   auto tokenizer = std::make_shared<FixedTokenizer>();
@@ -63,6 +65,20 @@ TEST(MultimodalProcessorTest, PaddingIsSelectedPerProcessor) {
   EXPECT_EQ(ids, (std::vector<int32_t>{17, 18}));
   ASSERT_TRUE(shorter.process_prompt(prompt, data, ids));
   EXPECT_EQ(ids, (std::vector<int32_t>{17, 18}));
+}
+
+TEST(MultimodalProcessorTest, TextModelUsesTokenizerWithoutVisualSpans) {
+  MultimodalProcessor<TextPromptProcessor> processor(
+      ModelArgs{}, std::make_shared<FixedTokenizer>(), TokenizerArgs{});
+  std::string prompt = "hello";
+  MMData data(MMType::NONE, MMItemVec{});
+  std::vector<int32_t> ids;
+  ASSERT_TRUE(processor.process_prompt(prompt, data, ids));
+  EXPECT_EQ(prompt, "hello");
+  EXPECT_EQ(ids, (std::vector<int32_t>{17, 18}));
+
+  MMData image_data(MMType::IMAGE, MMItemVec{MMDataItem(MMType::IMAGE)});
+  EXPECT_FALSE(processor.process_prompt(prompt, image_data, ids));
 }
 
 class CountingImageProcessor final : public ImageProcessor {
@@ -90,11 +106,11 @@ TEST(MultimodalProcessorTest, CacheRestoresMixedHitsAndMissesInInputOrder) {
       4);
   MMInputItem first;
   first.type = MMType::IMAGE;
-  first.hash_key = hash_string("first");
+  first.hash_key = hash_string(/*value=*/"first", /*seed=*/0);
   first.decode_image = torch::ones({3, 2, 2});
   MMInputItem second;
   second.type = MMType::IMAGE;
-  second.hash_key = hash_string("second");
+  second.hash_key = hash_string(/*value=*/"second", /*seed=*/0);
   second.decode_image = torch::zeros({3, 2, 2});
   MMData output;
   ASSERT_TRUE(processor.process_multimodal(MMInput({first}), output));

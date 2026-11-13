@@ -165,9 +165,11 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   CHECK(!speculative_error.has_value()) << speculative_error.value();
   validate_layerwise_split_size_startup_config(
       options_, model_type, options_.nnodes());
-  CHECK(options_.host_blocks_factor() <= 1.0)
-      << "Basic host KV cache offload supports the LLM engine and "
-         "model-based speculative engines only.";
+  CHECK(options_.host_blocks_factor() <= 1.0 || !use_speculative_engine ||
+        SpeculativeConfig::supports_host_kv_cache(
+            options_.speculative_algorithm()))
+      << "Host KV cache requires ordinary generation or model-based "
+         "speculative decoding.";
 
   runtime::Options engine_options;
   engine_options.model_path(options_.model_path())
@@ -199,6 +201,17 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       .max_cache_size(options_.max_cache_size())
       .max_encoder_cache_size(options_.max_encoder_cache_size())
       .max_processor_cache_items(options_.max_processor_cache_items())
+      .host_blocks_factor(options_.host_blocks_factor())
+      .enable_kvcache_store(options_.enable_kvcache_store())
+      .store_protocol(options_.store_protocol())
+      .store_rdma_devices(options_.store_rdma_devices())
+      .store_master_server_address(options_.store_master_server_address())
+      .store_metadata_server(options_.store_metadata_server())
+      .store_local_hostname(options_.store_local_hostname())
+      .prefetch_batch_size(options_.prefetch_batch_size())
+      .prefetch_timeout(options_.prefetch_timeout())
+      .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
+      .kv_cache_dtype(options_.kv_cache_dtype())
       .max_linear_state_cache_slots(options_.max_linear_state_cache_slots())
       .enable_mla(options_.enable_mla())
       .enable_flashcomm1(options_.enable_flashcomm1())
@@ -207,6 +220,7 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       .mmrs_comm_mode(options_.mmrs_comm_mode())
       .instance_role(options_.instance_role())
       .enable_disagg_pd(options_.enable_disagg_pd())
+      .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
       .max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .enable_graph(options_.enable_graph())
@@ -235,19 +249,7 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
             options_.speculative_suffix_cache_max_depth())
         .speculative_suffix_max_cached_requests(
             options_.speculative_suffix_max_cached_requests())
-        .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
-        .transfer_listen_port(options_.transfer_listen_port())
-        .host_blocks_factor(options_.host_blocks_factor())
-        .enable_kvcache_store(options_.enable_kvcache_store())
-        .store_protocol(options_.store_protocol())
-        .store_rdma_devices(options_.store_rdma_devices())
-        .store_master_server_address(options_.store_master_server_address())
-        .store_metadata_server(options_.store_metadata_server())
-        .store_local_hostname(options_.store_local_hostname())
-        .prefetch_batch_size(options_.prefetch_batch_size())
-        .prefetch_timeout(options_.prefetch_timeout())
-        .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
-        .kv_cache_dtype(options_.kv_cache_dtype());
+        .transfer_listen_port(options_.transfer_listen_port());
     speculative_engine_ =
         std::make_unique<SpeculativeEngineBase<VLMEngine>>(engine_options);
     draft_model_residency_coordinator_ =
@@ -298,7 +300,8 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
         options_.master_status(), prepare_draft, kv_transfer_coordinator_));
     finish_engine_initialization(speculative_engine_.get());
   } else {
-    CHECK(vlm_engine_->init(options_.master_status()));
+    CHECK(
+        vlm_engine_->init(options_.master_status(), kv_transfer_coordinator_));
     finish_engine_initialization(vlm_engine_.get());
   }
 

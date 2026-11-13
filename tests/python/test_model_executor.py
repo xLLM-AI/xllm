@@ -591,7 +591,6 @@ class TestModelExecutorConstruction:
         config = {"python_graph_backend": "off"}
         executor = ModelExecutor(model, config, max_seqs_per_batch=4)
 
-        assert executor._num_attention_layers == 3
         assert executor.decode_graph_runner is None
         assert executor.inductor_runner is None
 
@@ -734,6 +733,7 @@ class TestModelExecutorConstruction:
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
             device_kv_lengths=False,
+            kv_capacity_graphs=False,
             max_capture_tokens=None,
         )
 
@@ -797,6 +797,7 @@ class TestModelExecutorConstruction:
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
             device_kv_lengths=False,
+            kv_capacity_graphs=False,
             max_capture_tokens=None,
         )
 
@@ -2007,6 +2008,43 @@ class TestExecuteRouting:
         assert torch.equal(result, torch.ones(4))
 
 
+def test_explicit_deepstack_inputs_reach_eager_decoder_without_stale_state() -> None:
+    class VisualDecoder(nn.Module):
+        def forward(
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            input_embedding: torch.Tensor | None = None,
+            *,
+            deepstack_input_embeds: tuple[torch.Tensor, ...] = (),
+        ) -> torch.Tensor:
+            hidden = input_ids.float().unsqueeze(-1) if input_embedding is None else input_embedding
+            for features in deepstack_input_embeds:
+                hidden = hidden + features
+            return hidden
+
+    model = _FakeModel(num_layers=1)
+    model.model = VisualDecoder()
+    backend = StubAttentionBackend()
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(model, {"python_graph_backend": "off"}, max_seqs_per_batch=4)
+    executor.bind_kv_caches([(torch.zeros(1), torch.zeros(1))])
+    executor.decode_graph_runner = create_autospec(DecodeAclGraphRunner, instance=True)
+    executor.inductor_runner = MagicMock()
+    tokens = torch.tensor([1, 2])
+    positions = torch.tensor([0, 1])
+    metadata = SimpleNamespace(is_prefill=True, is_chunked_prefill=False, is_spec_verify=False)
+    embeddings = torch.tensor([[10.0], [20.0]])
+    features = (torch.tensor([[3.0], [5.0]]),)
+    result = executor.execute(tokens, positions, metadata, embeddings, deepstack_input_embeds=features)
+    torch.testing.assert_close(result, torch.tensor([[13.0], [25.0]]))
+    executor.decode_graph_runner.execute.assert_not_called()
+    executor.inductor_runner.execute.assert_not_called()
+    executor.decode_graph_runner = None
+    executor.inductor_runner = None
+    torch.testing.assert_close(executor.execute(tokens, positions, metadata), tokens.float().unsqueeze(-1))
+
+
 def test_executor_admits_startup_graphs_and_runs_larger_serving_batches_eagerly() -> None:
     backend = _PagedStubAttentionBackend()
     model = _FakeModel(num_layers=1)
@@ -2226,6 +2264,35 @@ def test_executor_rejects_qwen_mtp_width_beyond_kernel_capacity() -> None:
             {"model_type": "qwen3_5_text", "is_mtp_algorithm": True, "num_speculative_tokens": 17},
             max_seqs_per_batch=2,
         )
+
+
+@pytest.mark.parametrize(
+    "model_type,vlm_capability,expected",
+    [("qwen3_5_text", False, True), ("qwen3_5", True, True), ("qwen3_5", False, False)],
+)
+def test_qwen_mtp_capacity_graph_requires_model_support(model_type: str, vlm_capability: bool, expected: bool) -> None:
+    model = _FakeModel()
+    model.supports_mtp_kv_capacity_graph = vlm_capability
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend",
+        return_value=_GraphStubAttentionBackend(),
+    ):
+        executor = ModelExecutor(
+            model,
+            {
+                "model_type": model_type,
+                "is_mtp_algorithm": True,
+                "num_speculative_tokens": 3,
+                "python_graph_backend": "aclgraph",
+                "max_position_embeddings": 128,
+            },
+            max_seqs_per_batch=2,
+            num_decoding_tokens=4,
+        )
+    runner = executor.decode_graph_runner
+    assert runner._kv_capacity_graphs == expected
+    assert runner._device_kv_lengths == (expected and not vlm_capability)
+    assert runner._spec_verify_width == (4 if expected else 1)
 
 
 @pytest.mark.parametrize("is_mtp", [False, True])
