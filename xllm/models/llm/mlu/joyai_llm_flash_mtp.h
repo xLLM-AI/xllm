@@ -18,26 +18,9 @@ limitations under the License.
 
 namespace xllm::mlu::model {
 
-class JoyAILLMFlashMtpForCausalLMImpl
-    : public LlmForCausalLMImplBase<DeepseekMtpModel> {
- public:
-  JoyAILLMFlashMtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekMtpModel>(context,
-                                                 /*share_lm_head=*/true) {}
-
-  void load_model(
-      std::unique_ptr<ModelLoader> loader,
-      std::string prefix = "model." /*llm model weight prefix*/) override {
-    // no need to load lm_head since it shares the same weights with main model
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-    model_->verify_loaded_weights();
-  }
-};
-TORCH_MODULE(JoyAILLMFlashMtpForCausalLM);
-
-REGISTER_CAUSAL_MODEL(joyai_llm_flash_mtp, JoyAILLMFlashMtpForCausalLM);
+const bool joyai_llm_flash_mtp_registered =
+    register_causal_model_with_deferred_head<DeepseekMtpForCausalLM>(
+        /*name=*/"joyai_llm_flash_mtp");
 
 REGISTER_MODEL_ARGS(joyai_llm_flash_mtp, [&] {
   LOAD_ARG_OR(model_type, "model_type", "joyai_llm_flash_mtp");

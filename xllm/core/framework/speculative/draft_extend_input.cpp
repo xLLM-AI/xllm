@@ -25,14 +25,12 @@ limitations under the License.
 
 namespace xllm {
 
-void output_spec_hidden_states(
-    SampleOutput& sample_output,
-    const ModelOutput& model_output,
-    const torch::Tensor& logits_indices,
-    const torch::Tensor& gathered_sample_hidden_states,
-    const BatchInputMeta& meta,
-    bool is_draft_engine,
-    bool cp_enabled) {
+void output_spec_hidden_states(SampleOutput& sample_output,
+                               const ModelOutput& model_output,
+                               const torch::Tensor& logits_indices,
+                               torch::Tensor sample_hidden_states,
+                               const BatchInputMeta& meta,
+                               bool is_draft_engine) {
   const bool is_target_prefill_or_verify =
       !is_draft_engine &&
       (!meta.batch_forward_type.is_decode() || meta.q_max_seq_len > 1);
@@ -40,31 +38,17 @@ void output_spec_hidden_states(
       get_hidden_states_for_drafter(model_output);
   CHECK(target_hidden_states.defined())
       << "speculative hidden states are undefined";
-  torch::Tensor sample_hidden_states;
-  if (logits_indices.defined()) {
-    // The lm_head selection contains primary rows, not auxiliary rows.
-    const bool has_aux = model_output.aux_hidden_states.defined();
-    if (cp_enabled && !is_target_prefill_or_verify && !has_aux) {
-      CHECK(gathered_sample_hidden_states.defined())
-          << "gathered selected hidden is required on the CP decode path";
-    }
-    if (gathered_sample_hidden_states.defined() && !has_aux) {
-      sample_hidden_states = gathered_sample_hidden_states;
-    } else {
-      sample_hidden_states = target_hidden_states.index_select(
-          /*dim=*/0,
-          logits_indices.to(torch::dtype(torch::kLong)
-                                .device(target_hidden_states.device())));
-    }
-    CHECK_EQ(sample_hidden_states.dim(), 2);
-    CHECK_EQ(sample_hidden_states.size(0), logits_indices.numel())
-        << "selected speculative hidden must match logits_indices rows";
+  if (model_output.aux_hidden_states.defined() && logits_indices.defined()) {
+    sample_hidden_states = target_hidden_states.index_select(
+        /*dim=*/0,
+        logits_indices.to(
+            torch::dtype(/*dtype=*/torch::kLong).device(target_hidden_states.device())));
   }
   if (is_target_prefill_or_verify) {
     sample_output.embeddings = target_hidden_states;
-    sample_output.selected_embeddings = sample_hidden_states;
+    sample_output.selected_embeddings = std::move(sample_hidden_states);
   } else {
-    sample_output.embeddings = sample_hidden_states;
+    sample_output.embeddings = std::move(sample_hidden_states);
   }
 }
 
@@ -78,10 +62,6 @@ void prepare_first_draft_inputs(EmbeddingCache& embedding_cache,
                                 ForwardOutput& output) {
   const torch::Tensor& sample_hidden_states =
       output.sample_output.selected_embeddings;
-  CHECK(sample_hidden_states.defined())
-      << "target worker must populate "
-         "selected_embeddings on the speculative "
-         "prefill path";
   embedding_cache.write_prefill_target_context(
       input.input_params.embedding.embedding_ids,
       input.input_params.embedding.request_ids,

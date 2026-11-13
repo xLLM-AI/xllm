@@ -29,88 +29,6 @@ limitations under the License.
 
 namespace xllm {
 
-class Qwen2_VisionPatchEmbedImpl : public torch::nn::Module {
- public:
-  Qwen2_VisionPatchEmbedImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
-    auto options = context.get_tensor_options();
-
-    auto in_features = model_args.mm_num_channels() *
-                       model_args.mm_temporal_patch_size() *
-                       model_args.mm_patch_size() * model_args.mm_patch_size();
-
-    auto out_features = model_args.mm_hidden_size();
-
-    proj_ = register_module(
-        "proj",
-        torch::nn::Linear(
-            torch::nn::LinearOptions(in_features, out_features).bias(false)));
-
-    proj_->weight.set_data(proj_->weight.to(options));
-  }
-
-  torch::Tensor forward(torch::Tensor x) { return proj_(x); }
-
-  void load_state_dict(const StateDict& state_dict) {
-    auto weight = state_dict.get_tensor("proj.weight");
-    if (weight.defined()) {
-      weight = weight.reshape({weight.size(0), -1});
-      DCHECK_EQ(proj_->weight.sizes(), weight.sizes())
-          << "proj weight size mismatch for " << name();
-      proj_->weight.data().copy_(weight);
-    }
-  }
-
- private:
-  torch::nn::Linear proj_{nullptr};
-};
-TORCH_MODULE(Qwen2_VisionPatchEmbed);
-
-class Qwen2_VisionRotaryEmbeddingImpl : public torch::nn::Module {
- public:
-  Qwen2_VisionRotaryEmbeddingImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
-    auto options = context.get_tensor_options();
-
-    dim_ = model_args.mm_head_dim() / 2;
-    theta_ = 10000.0;
-
-    auto opts = options.dtype(torch::kFloat32);
-    auto inv_freq =
-        1.0 / torch::pow(theta_, torch::arange(0, dim_, 2, opts) / dim_);
-    inv_freq_ = register_buffer("inv_freq", inv_freq);
-  }
-
-  void update_freqs_cache(int64_t seqlen) {
-    if (seqlen <= seq_len_cached_) return;
-
-    seqlen *= 2;
-    seq_len_cached_ = seqlen;
-
-    auto options = torch::TensorOptions()
-                       .dtype(torch::kFloat32)
-                       .device(inv_freq_.device());
-    inv_freq_ =
-        1.0 / torch::pow(theta_, torch::arange(0, dim_, 2, options) / dim_);
-    auto seq = torch::arange(seqlen, options);
-    freqs_cached_ = torch::outer(seq, inv_freq_);
-  }
-
-  torch::Tensor forward(int seqlen) {
-    update_freqs_cache(seqlen);
-    return freqs_cached_.slice(0, 0, seqlen);
-  }
-
- private:
-  int64_t dim_ = 0;
-  double theta_ = 0.0;
-
-  int64_t seq_len_cached_ = 0;
-  torch::Tensor inv_freq_;
-  torch::Tensor freqs_cached_;
-};
-TORCH_MODULE(Qwen2_VisionRotaryEmbedding);
-
 class Qwen2_VisionPatchMergerImpl : public torch::nn::Module {
  public:
   Qwen2_VisionPatchMergerImpl(const ModelContext& context) {
@@ -208,10 +126,10 @@ class Qwen2_VisionTransformerImpl : public torch::nn::Module {
 
     spatial_merge_size_ = model_args.mm_spatial_merge_size();
 
-    patch_embed_ =
-        register_module("patch_embed", Qwen2_VisionPatchEmbed(context));
-    rotary_pos_emb_ =
-        register_module("rotary_pos_emb", Qwen2_VisionRotaryEmbedding(context));
+    patch_embed_ = register_module(
+        /*name=*/"patch_embed", Qwen2_5_VisionPatchEmbed(context));
+    rotary_pos_emb_ = register_module(/*name=*/"rotary_pos_emb",
+                                      Qwen2_5_VisionRotaryEmbedding(context));
     blocks_ = register_module("blocks", torch::nn::ModuleList());
 
     for (int32_t idx = 0; idx < model_args.mm_num_hidden_layers(); idx++) {
@@ -313,8 +231,8 @@ class Qwen2_VisionTransformerImpl : public torch::nn::Module {
  private:
   int spatial_merge_size_ = 0;
 
-  Qwen2_VisionPatchEmbed patch_embed_{nullptr};
-  Qwen2_VisionRotaryEmbedding rotary_pos_emb_{nullptr};
+  Qwen2_5_VisionPatchEmbed patch_embed_{nullptr};
+  Qwen2_5_VisionRotaryEmbedding rotary_pos_emb_{nullptr};
   torch::nn::ModuleList blocks_{nullptr};
   std::vector<layer::Qwen2_VisionLayer> layers_;
   Qwen2_VisionPatchMerger merger_{nullptr};
@@ -377,41 +295,20 @@ class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
     return inputs_embeds;
   }
 
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return language_model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
     namespace F = torch::nn::functional;
-    return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));
+    return F::normalize(language_model_->pooler(hidden_states, seleted_idxes));
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
+  bool encoder_embedding_mode() const {
+    return model_args_.encoder_embedding_mode();
   }
+  auto& vision_model() { return *visual_; }
+  auto& language_model() { return language_model_; }
 
-  void load_model(std::unique_ptr<ModelLoader> loader) {
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      visual_->load_state_dict(state_dict->get_dict_with_prefix("visual."));
-    }
-    if (!model_args_.encoder_embedding_mode()) {
-      language_model_->load_model(std::move(loader));
-    }
-  }
-
-  layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  layer::WordEmbedding get_word_embedding() {
-    return language_model_->get_word_embedding();
-  }
+  static constexpr const char* kVisionWeightPrefix = "visual.";
+  static constexpr const char* kLanguageWeightPrefix = "model.";
 
  private:
   ModelArgs model_args_;
@@ -477,9 +374,7 @@ REGISTER_MODEL_ARGS(qwen2_vl, [&] {
   LOAD_ARG_OR(mm_spatial_merge_size, "vision_config.spatial_merge_size", 2);
   LOAD_ARG_OR(mm_spatial_patch_size, "vision_config.spatial_patch_size", 14);
   LOAD_ARG_OR(mm_temporal_patch_size, "vision_config.temporal_patch_size", 2);
-  LOAD_ARG_OR_FUNC(mm_head_dim, "head_dim", [&] {
-    return args->mm_hidden_size() / args->mm_num_attention_heads();
-  });
+  args->mm_head_dim() = args->mm_hidden_size() / args->mm_num_attention_heads();
 
   LOAD_ARG_OR(rope_scaling_rope_type, "rope_scaling.type", "mrope");
   LOAD_ARG(rope_scaling_mrope_section, "rope_scaling.mrope_section");

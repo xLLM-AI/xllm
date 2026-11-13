@@ -74,10 +74,10 @@ struct ForwardObservation {
   std::shared_ptr<KVPushSynchronizerImpl> push_synchronizer;
 };
 
-class CompletionTestModel final : public CausalVLM {
+class CompletionLanguageModel final : public CausalLM {
  public:
-  CompletionTestModel(const ModelContext& context,
-                      std::shared_ptr<ForwardObservation> observation)
+  CompletionLanguageModel(const ModelContext& context,
+                          std::shared_ptr<ForwardObservation> observation)
       : options_(context.get_tensor_options()),
         observation_(std::move(observation)) {}
 
@@ -106,14 +106,6 @@ class CompletionTestModel final : public CausalVLM {
     return output;
   }
 
-  torch::Tensor logits(const torch::Tensor& /*hidden_states*/,
-                       const torch::Tensor& /*selected_idxes*/) override {
-    observation_->logits_saw_sampling_history =
-        observation_->sampling_params != nullptr &&
-        observation_->sampling_params->prefix_tokens().defined();
-    return observation_->logits;
-  }
-
   void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {
     observation_->weights_loaded = true;
   }
@@ -128,17 +120,45 @@ class CompletionTestModel final : public CausalVLM {
 
   void update_expert_weight(int32_t /*layer_id*/) override {}
 
-  MMDict encode(const ModelParamsView& /*parameters*/) override { return {}; }
-
-  torch::Tensor get_input_embeddings(
-      const torch::Tensor& /*input_ids*/,
-      const ModelParamsView& /*input_params*/) override {
-    return {};
+  torch::Tensor logits_processor(const torch::Tensor&) override {
+    observation_->logits_saw_sampling_history =
+        observation_->sampling_params != nullptr &&
+        observation_->sampling_params->prefix_tokens().defined();
+    return observation_->logits;
   }
 
  private:
   torch::TensorOptions options_;
   std::shared_ptr<ForwardObservation> observation_;
+};
+
+class CompletionTestModel final : public CausalVLM {
+ public:
+  CompletionTestModel(const ModelContext& context,
+                      std::shared_ptr<ForwardObservation> observation)
+      : language_model_(context, std::move(observation)) {}
+
+  CausalLM& language_model() override { return language_model_; }
+
+  void load_model(std::unique_ptr<ModelLoader> loader) override {
+    language_model_.load_model(std::move(loader));
+  }
+
+  torch::Device device() const override { return language_model_.device(); }
+
+  const torch::TensorOptions& options() const override {
+    return language_model_.options();
+  }
+
+  MMDict encode(const ModelParamsView&) override { return {}; }
+
+  torch::Tensor get_input_embeddings(const torch::Tensor&,
+                                     const ModelParamsView&) override {
+    return {};
+  }
+
+ private:
+  CompletionLanguageModel language_model_;
 };
 
 class DeferredPushTransfer final : public KVTransfer {
@@ -476,16 +496,22 @@ class WorkerForwardCompletionTest
                                    "_" +
                                    std::to_string(next_model_id.fetch_add(1));
     const std::weak_ptr<ForwardObservation> weak_observation = observation;
-    const auto make_model = [weak_observation](const ModelContext& context) {
-      return std::make_unique<CompletionTestModel>(context,
-                                                   weak_observation.lock());
-    };
     if (!ModelRegistry::register_causallm_factory(
-            model_name, "native", make_model)) {
+            model_name,
+            /*implementation=*/"native",
+            [weak_observation](const ModelContext& context) {
+              return std::make_unique<CompletionLanguageModel>(
+                  context, weak_observation.lock());
+            })) {
       return false;
     }
     if (!ModelRegistry::register_causalvlm_factory(
-            model_name, "native", make_model)) {
+            model_name,
+            /*implementation=*/"native",
+            [weak_observation](const ModelContext& context) {
+              return std::make_unique<CompletionTestModel>(
+                  context, weak_observation.lock());
+            })) {
       return false;
     }
     ModelArgs args;

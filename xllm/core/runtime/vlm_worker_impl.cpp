@@ -59,9 +59,11 @@ bool VLMWorkerImpl::init_model(ModelContext& context) {
 
   // initialize model
   context.set_encoder_embedding_mode(false);
-  model_ = create_vlm_model(context);
-  CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
+  auto model = create_vlm_model(context);
+  CHECK(model != nullptr) << "Failed to create model.";
+  model_executor_ = std::make_unique<Executor>(model.get(), context, options_);
+  language_model_ = &model->language_model();
+  model_ = std::move(model);
   model_executor_->set_dp_process_group(
       context.get_parallel_args().dp_local_process_group_);
   return true;
@@ -135,37 +137,36 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
   };
 
   const auto& sampling_params = input.sampling_params;
-  ModelOutput model_output;
+  const bool enable_speculative_decode = options_.enable_speculative_decode();
+  ModelParamsView params(input.input_params);
+  auto model_output = model_executor_->forward(
+      input.token_ids, input.positions, kv_caches_, params);
   torch::Tensor logits;
   torch::Tensor lm_head_input_indices;
-  torch::Tensor selected_hidden_from_lm_head;
-  {
-    ModelParamsView params(input.input_params);
-    model_output = model_executor_->forward(
-        input.token_ids, input.positions, kv_caches_, params);
-    if (sampling_params.num_sample_seqs() > 0) {
+  torch::Tensor sample_hidden_states;
+  const bool should_compute_logits = sampling_params.num_sample_seqs() > 0;
+  if (should_compute_logits) {
+    lm_head_input_indices =
+        remap_logits_indices(sampling_params.logits_indices(),
+                             params.parallel,
+                             model_output.hidden_states);
+    if (lm_head_input_indices.device() != model_output.hidden_states.device()) {
       lm_head_input_indices =
-          remap_logits_indices(sampling_params.logits_indices(),
-                               params.parallel,
-                               model_output.hidden_states);
+          lm_head_input_indices.to(model_output.hidden_states.device());
     }
-  }
-
-  if (sampling_params.num_sample_seqs() > 0) {
-    if (options_.enable_speculative_decode()) {
-      logits = model_->logits(model_output.hidden_states,
-                              lm_head_input_indices,
-                              selected_hidden_from_lm_head);
-    } else {
-      logits =
-          model_->logits(model_output.hidden_states, lm_head_input_indices);
+    auto logits_input = model_output.hidden_states.index_select(
+        /*dim=*/0, lm_head_input_indices);
+    logits = language_model_->logits_processor(logits_input);
+    if (enable_speculative_decode &&
+        !model_output.aux_hidden_states.defined()) {
+      sample_hidden_states = std::move(logits_input);
     }
   }
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
-      !options_.enable_speculative_decode()) {
+      !enable_speculative_decode) {
     if (sync_policy == ForwardSyncPolicy::LEGACY) {
       const int32_t ret = device_.synchronize_default_stream();
       CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
@@ -174,7 +175,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
   }
 
   ForwardOutput output;
-  if (sampling_params.num_sample_seqs() > 0) {
+  if (should_compute_logits) {
     output.logprobs = sampling_params.logprobs();
     output.max_top_logprobs = sampling_params.max_top_logprobs();
     if (!input.skip_sampling_for_logits_only) {
@@ -189,14 +190,13 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
     output.logits = logits;
   }
 
-  if (options_.enable_speculative_decode()) {
+  if (enable_speculative_decode) {
     output_spec_hidden_states(output.sample_output,
                               model_output,
                               lm_head_input_indices,
-                              selected_hidden_from_lm_head,
+                              std::move(sample_hidden_states),
                               input.input_params.meta,
-                              options_.is_draft_engine(),
-                              /*cp_enabled=*/options_.cp_size() > 1);
+                              options_.is_draft_engine());
   }
 
   output.failed_request_ids = wait_kv_push();

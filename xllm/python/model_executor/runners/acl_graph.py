@@ -81,7 +81,6 @@ class StaticGraphAttentionMetadata:
     linear_state_write_indices: torch.Tensor | None = None
     has_initial_state: torch.Tensor | None = None
     dp_execution_token_counts: Sequence[int] = ()
-    dp_global_sequence_nums: tuple[int, ...] = ()
     dp_is_decode: tuple[int, ...] = ()
     q_seq_lens: torch.Tensor | None = None
     kpool_query_lens: tuple[int, ...] = ()

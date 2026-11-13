@@ -322,16 +322,10 @@ TORCH_MODULE(MiniMaxM2Model);
 
 class MiniMaxM2ForCausalLMImpl : public LlmForCausalLMImplBase<MiniMaxM2Model> {
  public:
+  static constexpr const char* kDecoderCheckpointPrefix = kWeightPrefix;
+
   explicit MiniMaxM2ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase(context) {}
-
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "model.") override {
-    load_lm_head(loader, prefix);
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-  }
 };
 TORCH_MODULE(MiniMaxM2ForCausalLM);
 

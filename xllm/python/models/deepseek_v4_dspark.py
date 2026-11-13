@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -37,17 +37,9 @@ from xllm.python.models.deepseek_v4 import (
     _find_checkpoint_prefix,
     _require_checkpoint_key,
     _require_tensor,
+    find_checkpoint_key,
 )
 from xllm.python.models.dspark import DSparkForCausalLMBase
-
-
-class _DSparkQuantAwareLinear(QLinear):
-    """FP or dynamic-W8A8 linear; the fp weight is dropped when quantized."""
-
-    def resolve_quant(self, has_quant_tensors: bool) -> None:
-        super().resolve_quant(has_quant_tensors)
-        if self.use_w8a8:
-            self.register_parameter("weight", None)
 
 
 @dataclass
@@ -107,7 +99,7 @@ class DeepseekV4DSparkModel(DeepseekV4Model):
         device: torch.device,
     ) -> None:
         super().__init__(cfg, dtype, device)
-        self.main_proj = _DSparkQuantAwareLinear(
+        self.main_proj = QLinear(
             cfg.hidden_size * cfg.dspark_num_layers,
             cfg.hidden_size,
             dtype=dtype,
@@ -161,6 +153,18 @@ class DeepseekV4DSparkModel(DeepseekV4Model):
         return projected
 
 
+class _DSparkLmHead(QLinear):
+    def __init__(self, cfg: DeepseekV4DSparkConfig, dtype: torch.dtype, device: torch.device) -> None:
+        super().__init__(cfg.hidden_size, cfg.vocab_size // cfg.tp_size, dtype=dtype, device=device, kind="dynamic")
+        self.tp_size = cfg.tp_size
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logits = super().forward(x)
+        if self.tp_size > 1:
+            return distributed.tp_all_gather(logits, dim=-1, world_size=self.tp_size)
+        return logits
+
+
 class DeepseekV4DSparkForCausalLM(
     DeepseekV4ForCausalLM,
     DSparkForCausalLMBase,
@@ -186,19 +190,7 @@ class DeepseekV4DSparkForCausalLM(
         )
         self.cfg = cfg
         self.model = DeepseekV4DSparkModel(cfg, dtype, device)
-        self.lm_head = _DSparkQuantAwareLinear(
-            cfg.hidden_size,
-            cfg.vocab_size // cfg.tp_size,
-            dtype=dtype,
-            device=device,
-            kind="dynamic",
-        )
-
-    def compute_logits(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
-        logits = super().compute_logits(hidden, selected_idxes)
-        if self.cfg.tp_size > 1:
-            logits = distributed.tp_all_gather(logits, dim=-1, world_size=self.cfg.tp_size)
-        return logits
+        self.lm_head = _DSparkLmHead(cfg, dtype, device)
 
     def write_context_kv(
         self,
@@ -221,7 +213,7 @@ class DeepseekV4DSparkForCausalLM(
         loader: W8A8WeightLoader,
         checkpoint_module: str,
         parameter_module: str,
-        linear: _DSparkQuantAwareLinear,
+        linear: QLinear,
         *,
         shard_dim: int | None = None,
     ) -> None:
@@ -240,6 +232,7 @@ class DeepseekV4DSparkForCausalLM(
             return
 
         linear.resolve_quant(True)
+        linear.register_parameter("weight", None)
         # Same key policy as the shared dynamic-W8A8 projection loader; the
         # resolved _w8a8 submodule registers weight/weight_scale/weight_offset
         # under parameter_module + "._w8a8.*" for copy_in.
@@ -319,7 +312,7 @@ class DeepseekV4DSparkForCausalLM(
             ),
         )
 
-        embed_key = _require_checkpoint_key(
+        embed_key = find_checkpoint_key(
             loader,
             (
                 first_prefix + "embed.weight",
@@ -327,12 +320,14 @@ class DeepseekV4DSparkForCausalLM(
                 "embed.weight",
                 "embed_tokens.weight",
             ),
-            "DeepSeek-V4 DSpark embedding weight",
         )
-        loader.copy_in(
-            "model.embed_tokens.weight",
-            loader.shard(loader.get_tensor(embed_key), dim=1),
-        )
+        if embed_key is None:
+            self.model.add_module("embed_tokens", None)
+        else:
+            loader.copy_in(
+                "model.embed_tokens.weight",
+                loader.shard(loader.get_tensor(embed_key), dim=1),
+            )
         norm_key = _require_checkpoint_key(
             loader,
             (last_prefix + "norm.weight", "norm.weight", "final_layernorm.weight"),
@@ -364,15 +359,17 @@ class DeepseekV4DSparkForCausalLM(
                 ),
             )
 
-        head_key = _require_checkpoint_key(
+        head_key = find_checkpoint_key(
             loader,
             (last_prefix + "head.weight", "head.weight", "lm_head.weight"),
-            "DeepSeek-V4 DSpark output head",
         )
-        self._load_quant_aware_linear(
-            loader,
-            head_key.removesuffix(".weight"),
-            "lm_head",
-            self.lm_head,
-            shard_dim=0,
-        )
+        if head_key is None:
+            self.add_module("lm_head", None)
+        else:
+            self._load_quant_aware_linear(
+                loader,
+                head_key.removesuffix(".weight"),
+                "lm_head",
+                cast(_DSparkLmHead, self.lm_head),
+                shard_dim=0,
+            )

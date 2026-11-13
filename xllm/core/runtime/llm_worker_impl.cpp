@@ -108,11 +108,11 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
 #endif
 
   // Try to create a causal LM model
-  model_ = create_llm_model(context);
-
-  // Dont find model in causal models
-  CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
+  auto model = create_llm_model(context);
+  CHECK(model != nullptr) << "Failed to create model.";
+  model_executor_ = std::make_unique<Executor>(model.get(), context, options_);
+  language_model_ = model.get();
+  model_ = std::move(model);
   model_executor_->set_dp_process_group(
       context.get_parallel_args().dp_local_process_group_);
 
@@ -133,7 +133,8 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
     // MTP draft MoE layers still write to their own load buffer, but only
     // the target reports loads and consumes EPLB prepare/update commands.
     if (!options_.is_draft_engine()) {
-      eplb_executor_ = std::make_unique<EplbExecutor>(*model_, device_);
+      eplb_executor_ =
+          std::make_unique<EplbExecutor>(*language_model_, device_);
     }
   }
   return true;
@@ -246,36 +247,25 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   torch::Tensor logits;
   torch::Tensor lm_head_input_indices;
   torch::Tensor selected_hidden;
-  if (sampling_params.num_sample_seqs() > 0) {
-    torch::Tensor logits_indices =
+  const bool should_compute_logits = sampling_params.num_sample_seqs() > 0;
+  if (should_compute_logits) {
+    lm_head_input_indices =
         remap_logits_indices(sampling_params.logits_indices(),
                              execution_params.parallel,
                              model_output.hidden_states);
-    if (logits_indices.device() != model_output.hidden_states.device()) {
-      logits_indices = logits_indices
-                           .to(model_output.hidden_states.device(),
-                               /*non_blocking=*/false)
-                           .contiguous();
+    if (lm_head_input_indices.device() != model_output.hidden_states.device()) {
+      lm_head_input_indices =
+          lm_head_input_indices
+              .to(model_output.hidden_states.device(), /*non_blocking=*/false)
+              .contiguous();
     }
-    lm_head_input_indices = logits_indices;
-    const bool need_selected_hidden =
-        input.return_selected_hidden ||
-        (options_.cp_size() > 1 && options_.enable_speculative_decode());
-    if (need_selected_hidden) {
-      // Emit both selected hidden and logits from a single lm_head pass so the
-      // ConfidenceHead and CP speculative paths can consume hidden without a
-      // second projection.
-      logits = model_->logits(
-          model_output.hidden_states, logits_indices, selected_hidden);
-      if (!selected_hidden.defined()) {
-        // Models with only the two-argument logits overload leave this unset.
-        // Gather in logits order: equal row counts do not imply an identity
-        // permutation of the selected indices.
-        selected_hidden = model_output.hidden_states.index_select(
-            /*dim=*/0, logits_indices.to(torch::kLong));
-      }
-    } else {
-      logits = model_->logits(model_output.hidden_states, logits_indices);
+    auto logits_input = model_output.hidden_states.index_select(
+        /*dim=*/0, lm_head_input_indices);
+    logits = language_model_->logits_processor(logits_input);
+    if (input.return_selected_hidden ||
+        (options_.enable_speculative_decode() &&
+         !model_output.aux_hidden_states.defined())) {
+      selected_hidden = std::move(logits_input);
     }
   }
 
@@ -290,8 +280,10 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                    dp_driver_ ||
                                    options_.enable_speculative_decode();
   if (return_model_output) {
-    if (sampling_params.num_sample_seqs() > 0) {
-      output.selected_hidden = selected_hidden;
+    if (should_compute_logits) {
+      if (input.return_selected_hidden) {
+        output.selected_hidden = selected_hidden;
+      }
       output.logprobs = sampling_params.logprobs();
       output.max_top_logprobs = sampling_params.max_top_logprobs();
       if (!input.skip_sampling_for_logits_only) {
@@ -318,10 +310,9 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       output_spec_hidden_states(output.sample_output,
                                 model_output,
                                 lm_head_input_indices,
-                                selected_hidden,
+                                std::move(selected_hidden),
                                 input.input_params.meta,
-                                options_.is_draft_engine(),
-                                /*cp_enabled=*/options_.cp_size() > 1);
+                                options_.is_draft_engine());
     }
   }
 

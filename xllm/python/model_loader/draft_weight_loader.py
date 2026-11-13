@@ -38,7 +38,11 @@ class _DraftModelWithConfig(Protocol):
 
 
 class _DraftEmbedding(_DraftModelWithConfig, Protocol):
-    embed_tokens: HiddenParallelEmbedding | None
+    @property
+    def embed_tokens(self) -> HiddenParallelEmbedding | None: ...
+
+    @embed_tokens.setter
+    def embed_tokens(self, module: HiddenParallelEmbedding) -> None: ...
 
 
 class _DraftLMHead(_DraftModelWithConfig, Protocol):

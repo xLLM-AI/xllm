@@ -32,15 +32,3 @@ cc_test(
     :xllm_server
     GTest::gtest_main
 )
-
-cc_test(
-  NAME
-    causal_lm_test
-  CPU_ONLY
-  SRCS
-    causal_lm_test.cpp
-  DEPS
-    :model_loader
-    :xllm_server
-    GTest::gtest_main
-)

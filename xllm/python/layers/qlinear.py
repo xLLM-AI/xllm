@@ -75,8 +75,8 @@ class QLinear(nn.Module):
             self._w8a8.process_weights_after_loading()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.use_w8a8 is None:
-            raise RuntimeError("QLinear.forward before resolve_quant")
+        if self.use_w8a8 is False:
+            return torch.nn.functional.linear(x, self.weight, self.bias)
         if self.use_w8a8:
             return self._w8a8(x)
-        return torch.nn.functional.linear(x, self.weight, self.bias)
+        raise RuntimeError("QLinear.forward before resolve_quant")

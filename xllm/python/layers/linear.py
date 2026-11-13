@@ -72,32 +72,6 @@ class ColumnParallelLinear(nn.Module):
             out = distributed.tp_all_gather(out, dim=-1, world_size=self.tp_size)
         return out
 
-    def greedy_tokens(self, x: torch.Tensor) -> torch.Tensor:
-        """Select global token IDs without gathering the vocabulary logits."""
-        logits = torch.nn.functional.linear(x, self.weight, self.bias)
-        if self.tp_size == 1:
-            return logits.argmax(dim=-1)
-        # Pack both candidates in one collective. A float32 exactly represents
-        # every local vocabulary index in this supported range, and every
-        # fp16/bf16/fp32 score. Global IDs are assembled in int64 afterwards.
-        partition_size = self.weight.shape[0]
-        if partition_size > 2**24 or logits.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-            raise ValueError("greedy TP candidates require fp16/bf16/fp32 logits and at most 2**24 local tokens")
-        scores, indices = logits.max(dim=-1)
-        del logits
-        candidates = torch.stack((scores.float(), indices.float()), dim=-1)
-        candidates = distributed.tp_all_gather(candidates, dim=-1, world_size=self.tp_size)
-        candidates = candidates.view(*indices.shape, self.tp_size, 2)
-        # Rank-ordered contiguous shards make the first winning rank/token
-        # exactly the first global argmax, including ties and NaN scores.
-        winner = candidates[..., 0].argmax(dim=-1)
-        # The winner identifies the rank whose local index is needed. Gather
-        # that one value directly instead of building a rank range and doing a
-        # masked sum. This keeps the candidate communication and the original
-        # argmax tie/NaN behavior while removing two small decode-side ops.
-        local_ids = candidates[..., 1].gather(-1, winner.unsqueeze(-1)).squeeze(-1).to(torch.long)
-        return local_ids + winner * partition_size
-
 
 class RowParallelLinear(nn.Module):
     """Linear sharded on the input dim (dim 1): each rank owns

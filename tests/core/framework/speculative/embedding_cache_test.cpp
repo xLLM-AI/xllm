@@ -311,8 +311,7 @@ TEST(EmbeddingCacheTest, SpeculativeHiddenSelectionPreservesDrafterSource) {
                               indices,
                               gathered_primary,
                               meta,
-                              /*is_draft_engine=*/false,
-                              /*cp_enabled=*/true);
+                              /*is_draft_engine=*/false);
     EXPECT_TRUE(tensor_equal(
         is_target_prefill ? output.selected_embeddings : output.embeddings,
         selected_aux));
@@ -330,8 +329,7 @@ TEST(EmbeddingCacheTest, SpeculativeHiddenSelectionPreservesDrafterSource) {
                             indices,
                             gathered_primary,
                             meta,
-                            /*is_draft_engine=*/false,
-                            /*cp_enabled=*/true);
+                            /*is_draft_engine=*/false);
   EXPECT_TRUE(tensor_equal(output.embeddings, gathered_primary));
 }
 

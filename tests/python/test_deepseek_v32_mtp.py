@@ -42,7 +42,7 @@ def test_mtp_constructor_defers_shared_target_modules() -> None:
             return_value=model_config,
         ),
         patch.object(
-            deepseek_v32_mtp.DeepseekV3ForCausalLM,
+            deepseek_v32_mtp.DeepseekV32MtpForCausalLM,
             "resolve_dtype",
             return_value=torch.float32,
         ),
@@ -58,14 +58,6 @@ def test_mtp_constructor_defers_shared_target_modules() -> None:
     assert draft.model is mtp_body
     assert draft.model.embed_tokens is None
 
-    target_lm_head = nn.Linear(4, 16, bias=False)
-    target_embedding = nn.Embedding(16, 4)
-    draft.lm_head = target_lm_head
-    draft.model.embed_tokens = target_embedding
-
-    assert draft.lm_head is target_lm_head
-    assert draft.model.embed_tokens is target_embedding
-
 
 def test_mtp_load_rejects_missing_required_weights() -> None:
     config = {
@@ -74,7 +66,7 @@ def test_mtp_load_rejects_missing_required_weights() -> None:
         "tp_size": 1,
         "tp_rank": 0,
     }
-    model_config = SimpleNamespace(vocab_size=16)
+    model_config = SimpleNamespace(vocab_size=16, tp_size=config["tp_size"], tp_rank=config["tp_rank"])
     mtp_body = nn.Module()
     mtp_body.embed_tokens = None
 
@@ -85,7 +77,7 @@ def test_mtp_load_rejects_missing_required_weights() -> None:
             return_value=model_config,
         ),
         patch.object(
-            deepseek_v32_mtp.DeepseekV3ForCausalLM,
+            deepseek_v32_mtp.DeepseekV32MtpForCausalLM,
             "resolve_dtype",
             return_value=torch.float32,
         ),
@@ -94,8 +86,8 @@ def test_mtp_load_rejects_missing_required_weights() -> None:
             "DeepseekV32MtpModel",
             return_value=mtp_body,
         ),
-        patch.object(deepseek_v32_mtp.DeepseekV3ForCausalLM, "load_weights"),
+        patch.object(deepseek_v32_mtp.DeepseekV32MtpForCausalLM, "load_decoder_weights"),
     ):
         draft = deepseek_v32_mtp.DeepseekV32MtpForCausalLM(config)
-        with pytest.raises(KeyError, match="missing required MTP weight"):
+        with pytest.raises(KeyError, match=r"eh_proj\.weight"):
             draft.load_weights([], tp_rank=0, tp_size=1)

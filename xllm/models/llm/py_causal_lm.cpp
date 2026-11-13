@@ -48,21 +48,6 @@ namespace py = pybind11;
 
 namespace xllm {
 
-namespace {
-
-PyCausalLM* get_py_causal_lm(CausalLM& target, const char* module_name) {
-  auto* target_model = dynamic_cast<PyCausalLM*>(&target);
-  if (target_model == nullptr) {
-    LOG(WARNING) << "Cannot share " << module_name
-                 << ": target model is not a PyCausalLM; draft will keep its "
-                    "own weights.";
-    return nullptr;
-  }
-  return target_model;
-}
-
-}  // namespace
-
 namespace detail {
 
 int64_t python_mega_moe_max_num_tokens_per_rank(int64_t max_seqs_per_batch,
@@ -100,8 +85,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
     : model_args_(context.get_model_args()),
       python_model_name_(std::move(python_model_name)),
       options_(context.get_tensor_options()),
-      device_(context.get_tensor_options().device()),
-      enable_mla_(context.get_model_args().enable_mla()) {
+      device_(context.get_tensor_options().device()) {
   ensure_python_interpreter();
 
   const ParallelArgs& parallel_args = context.get_parallel_args();
@@ -413,12 +397,13 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
 
 void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
   const auto& state_dicts = loader->get_state_dicts();
-  load_d2t(state_dicts);
+  d2t_ = torch::Tensor();
   py::gil_scoped_acquire gil;
   ensure_xllm_weight_loader_module();
 
   py::list py_state_dicts;
   for (const auto& sd : state_dicts) {
+    load_draft_token_offsets(*sd, d2t_);
     py_state_dicts.append(
         py::cast(PyStateDict(sd.get()), py::return_value_policy::move));
   }
@@ -457,29 +442,10 @@ torch::Tensor PyCausalLM::pooler(const torch::Tensor& hidden_states,
   return CausalLM::pooler(hidden_states, selected_idxes);
 }
 
-torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
-                                 const torch::Tensor& seleted_idxes) {
+torch::Tensor PyCausalLM::logits_processor(const torch::Tensor& hidden_states) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
-  py::object selected = optional_tensor(seleted_idxes);
-  py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
-  return out.cast<torch::Tensor>();
-}
-
-torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
-                                 const torch::Tensor& seleted_idxes,
-                                 torch::Tensor& out_hidden) {
-  torch::NoGradGuard no_grad;
-  // Select the draft's hidden rows once and reuse the two-argument
-  // projection path, avoiding a second Python-side index_select.
-  if (seleted_idxes.defined() && seleted_idxes.numel() > 0) {
-    const auto idxes = seleted_idxes.to(
-        torch::dtype(torch::kLong).device(hidden_states.device()));
-    out_hidden = hidden_states.index_select(/*dim=*/0, idxes);
-    return logits(out_hidden, /*seleted_idxes=*/torch::Tensor());
-  }
-  out_hidden = hidden_states;
-  return logits(hidden_states, seleted_idxes);
+  return py_model_.attr(/*key=*/"lm_head")(hidden_states).cast<torch::Tensor>();
 }
 
 ModelOutput PyCausalLM::write_context_kv(
@@ -685,27 +651,58 @@ void PyCausalLM::eplb_wait_batch_isend_irecv() {
 }
 
 void PyCausalLM::share_lm_head(CausalLM& target) {
-  auto* target_model = get_py_causal_lm(target, "lm_head");
-  if (target_model == nullptr) {
-    return;
-  }
   py::gil_scoped_acquire gil;
   if (py_model_.attr("lm_head").is_none()) {
-    py_model_.attr("lm_head") = target_model->py_model_.attr("lm_head");
+    auto* target_model = dynamic_cast<PyCausalLM*>(&target);
+    CHECK(target_model != nullptr)
+        << "A missing Python draft head requires a Python target";
+    py::object target_head = target_model->py_model_.attr(/*key=*/"lm_head");
+    CHECK(!target_head.is_none())
+        << "Target model has no loaded Python LM head";
+    py_model_.attr(/*key=*/"lm_head") = target_head;
   }
 }
 
 void PyCausalLM::share_embed_tokens(CausalLM& target) {
-  auto* target_model = get_py_causal_lm(target, "embed_tokens");
-  if (target_model == nullptr) {
-    return;
-  }
   py::gil_scoped_acquire gil;
   py::object draft_model = py_model_.attr("model");
   if (draft_model.attr("embed_tokens").is_none()) {
-    draft_model.attr("embed_tokens") =
+    auto* target_model = dynamic_cast<PyCausalLM*>(&target);
+    CHECK(target_model != nullptr)
+        << "A missing Python draft embedding requires a Python target";
+    py::object target_embedding =
         target_model->py_model_.attr("model").attr("embed_tokens");
+    CHECK(!target_embedding.is_none())
+        << "Target model has no loaded Python word embedding";
+    draft_model.attr(/*key=*/"embed_tokens") = target_embedding;
   }
+}
+
+PyCausalVLM::PyCausalVLM(const ModelContext& context,
+                         std::string python_model_name)
+    : language_model_(context, std::move(python_model_name)) {}
+
+CausalLM& PyCausalVLM::language_model() { return language_model_; }
+
+MMDict PyCausalVLM::encode(const ModelParamsView&) {
+  LOG(FATAL) << "PyExecutorImpl drives the Python model's encode via pybind.";
+  return {};
+}
+
+torch::Tensor PyCausalVLM::get_input_embeddings(const torch::Tensor&,
+                                                const ModelParamsView&) {
+  LOG(FATAL) << "PyExecutorImpl drives the Python model's input embeddings.";
+  return {};
+}
+
+void PyCausalVLM::load_model(std::unique_ptr<ModelLoader> loader) {
+  language_model_.load_model(std::move(loader));
+}
+
+torch::Device PyCausalVLM::device() const { return language_model_.device(); }
+
+const torch::TensorOptions& PyCausalVLM::options() const {
+  return language_model_.options();
 }
 
 }  // namespace xllm

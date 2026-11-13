@@ -27,14 +27,12 @@ class LlmForwardInput;
 class ForwardOutput;
 class EmbeddingCache;
 
-void output_spec_hidden_states(
-    SampleOutput& sample_output,
-    const ModelOutput& model_output,
-    const torch::Tensor& logits_indices,
-    const torch::Tensor& gathered_sample_hidden_states,
-    const BatchInputMeta& meta,
-    bool is_draft_engine,
-    bool cp_enabled);
+void output_spec_hidden_states(SampleOutput& sample_output,
+                               const ModelOutput& model_output,
+                               const torch::Tensor& logits_indices,
+                               torch::Tensor sample_hidden_states,
+                               const BatchInputMeta& meta,
+                               bool is_draft_engine);
 
 void clear_all_output_embeddings(ForwardOutput& output);
 

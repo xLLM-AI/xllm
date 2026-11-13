@@ -79,7 +79,6 @@ class VlmForwardInput final {
     inputs.transfer_kv_infos = transfer_kv_infos;
     inputs.input_host_sample_count = input_host_sample_count;
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
-    inputs.return_selected_hidden = return_selected_hidden;
     inputs.sample_sequence_ids = sample_sequence_ids;
     inputs.sample_prior_output_rows = sample_prior_output_rows;
     inputs.json_object_states = json_object_states;
@@ -127,10 +126,6 @@ class VlmForwardInput final {
   // If true, skip sampler forward and keep raw logits; the speculative
   // consumer applies the sampling transforms itself.
   bool skip_sampling_for_logits_only = false;
-  // If true, populate ForwardOutput.selected_hidden with hidden states matching
-  // the `logits` selection layout. Used by DSpark ConfidenceHead which needs
-  // pre-lm_head hidden states of the draft tokens.
-  bool return_selected_hidden = false;
 
   // kv info for disaggregated prefill/decode
   std::vector<TransferKVInfo> transfer_kv_infos;
@@ -239,7 +234,6 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target,
   draft.json_object_states = target.json_object_states;
   draft.json_object_state_snapshots = target.json_object_state_snapshots;
   draft.skip_sampling_for_logits_only = target.skip_sampling_for_logits_only;
-  draft.return_selected_hidden = target.return_selected_hidden;
   draft.transfer_kv_infos = target.transfer_kv_infos;
   draft.runtime = target.runtime;
   draft.runtime.input_host_buffer_has_layout = false;

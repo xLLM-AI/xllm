@@ -69,17 +69,25 @@ class Qwen3_5MtpForCausalLM(Qwen3_5ForCausalLM):
         shared = ScopedWeightLoader(
             state_dicts,
             src_prefixes=("model.language_model.", "language_model.model.", "model.", ""),
-        ).bind_source_root("embed_tokens.weight")
-        shared.load_tensor(
-            self.model.embed_tokens.weight, "embed_tokens.weight", dim=1, rank=tp_rank, world_size=tp_size
         )
-        if self.cfg.tie_word_embeddings:
-            shared.load_tensor(self.lm_head.weight, "embed_tokens.weight", dim=0, rank=tp_rank, world_size=tp_size)
+        if shared.has("embed_tokens.weight"):
+            shared.load_tensor(
+                self.model.embed_tokens.weight, "embed_tokens.weight", dim=1, rank=tp_rank, world_size=tp_size
+            )
         else:
-            ScopedWeightLoader(
+            self.model.add_module("embed_tokens", None)
+        if self.cfg.tie_word_embeddings:
+            head_weights, head_key = shared, "embed_tokens.weight"
+        else:
+            head_weights = ScopedWeightLoader(
                 state_dicts,
                 src_prefixes=("", "model.", "language_model.", "model.language_model."),
-            ).load_tensor(self.lm_head.weight, "lm_head.weight", dim=0, rank=tp_rank, world_size=tp_size)
+            )
+            head_key = "lm_head.weight"
+        if head_weights.has(head_key):
+            head_weights.load_tensor(self.lm_head.weight, head_key, dim=0, rank=tp_rank, world_size=tp_size)
+        else:
+            self.add_module("lm_head", None)
         mtp = load_causal_lm_weights(
             self.model,
             None,

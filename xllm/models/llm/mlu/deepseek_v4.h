@@ -330,40 +330,13 @@ void DeepseekV4Base::prepare_graph_forward_metadata(
 class DeepseekV4ForCausalLMImpl final
     : public LlmForCausalLMImplBase<DeepseekV4Model> {
  public:
+  static constexpr const char* kDecoderCheckpointPrefix = "";
+
   explicit DeepseekV4ForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekV4Model>(context) {}
+      : LlmForCausalLMImplBase(context) {}
 
-  bool requires_graph_forward_metadata() {
-    return this->model_->requires_graph_forward_metadata();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState>
-  create_graph_forward_metadata_state() {
-    return this->model_->create_graph_forward_metadata_state();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& input_params) {
-    this->model_->prepare_graph_forward_metadata(
-        state, positions, input_params);
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "model.") override {
-    for (const std::unique_ptr<StateDict>& state_dict :
-         loader->get_state_dicts()) {
-      std::unordered_map<std::string, torch::Tensor> remapped_dict;
-      for (auto it = state_dict->begin(); it != state_dict->end(); ++it) {
-        remapped_dict[detail::normalize_model_parameter_name(
-            it->first, prefix)] = it->second;
-      }
-
-      StateDict remapped_state_dict(remapped_dict);
-      load_lm_head(remapped_state_dict, "");
-      model_->load_state_dict(remapped_state_dict);
-    }
-  }
+  static constexpr auto kNormalizeCheckpoint =
+      detail::normalize_model_state_dict;
 };
 TORCH_MODULE(DeepseekV4ForCausalLM);
 

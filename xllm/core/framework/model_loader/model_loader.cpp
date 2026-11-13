@@ -27,6 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/model_config.h"
+#include "core/framework/model/model_weight_loader.h"
 #include "core/framework/model_loader/hf_model_loader.h"
 
 namespace xllm {
@@ -56,6 +57,16 @@ std::unique_ptr<ModelLoader> ModelLoader::create(std::string model_weights_path,
   }
 
   return nullptr;
+}
+
+void load_draft_token_offsets(const StateDict& state_dict,
+                              torch::Tensor& offsets) {
+  if (!offsets.defined()) {
+    const torch::Tensor d2t = state_dict.get_tensor(/*tensor_name=*/"d2t");
+    if (d2t.defined()) {
+      offsets = d2t.clone();
+    }
+  }
 }
 
 }  // namespace xllm

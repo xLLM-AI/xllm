@@ -119,7 +119,7 @@ class WorkerImpl {
   void allocate_kv_cache(const KVCacheShape& shape,
                          const KVCacheCreateOptions& layout,
                          std::shared_ptr<KVTransfer> transfer = nullptr);
-  CausalLM* get_causal_lm() const { return model_.get(); }
+  CausalLM* get_causal_lm() const;
   std::vector<KVCache>& kv_caches() { return kv_caches_; }
 
   virtual bool allocate_kv_cache_with_transfer(
@@ -459,7 +459,8 @@ class WorkerImpl {
   std::shared_ptr<LinearStateSlotTable> static_full_block_slots_;
 
   // causal LM model
-  std::unique_ptr<CausalLM> model_;
+  std::unique_ptr<Model> model_;
+  CausalLM* language_model_ = nullptr;
 
   std::unique_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;

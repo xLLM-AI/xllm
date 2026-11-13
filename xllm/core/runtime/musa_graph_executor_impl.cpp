@@ -1631,14 +1631,10 @@ void MusaGraphExecutorImpl::prepare_graph_embedding(
     return;
   }
 
-  auto embed_layer = model_->get_word_embedding();
-  if (embed_layer.is_empty()) {
-    return;
-  }
-
   // IndexSelect cannot be captured on MUSA. The persistent update copies
   // these embeddings before capture/replay binds the persistent buffer.
-  graph_input.mutable_params().embedding.input_embedding = embed_layer(tokens);
+  graph_input.mutable_params().embedding.input_embedding =
+      model_->get_input_embeddings(tokens);
 }
 
 ModelOutput MusaGraphExecutorImpl::run(const torch::Tensor& tokens,

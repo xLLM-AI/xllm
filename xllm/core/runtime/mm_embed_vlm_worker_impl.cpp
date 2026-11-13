@@ -39,9 +39,10 @@ bool MMEmbedVLMWorkerImpl::init_model(ModelContext& context) {
   CHECK(model_ == nullptr) << "Model is already initialized.";
 
   context.set_encoder_embedding_mode(true);
-  model_ = create_vlm_model(context);
-  CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
+  auto model = create_vlm_model(context);
+  CHECK(model != nullptr) << "Failed to create model.";
+  model_executor_ = std::make_unique<Executor>(model.get(), context, options_);
+  model_ = std::move(model);
 
   return true;
 }
@@ -61,10 +62,9 @@ std::optional<ForwardOutput> MMEmbedVLMWorkerImpl::step(
       << "Only mm embedding is supported.";
 
   // call model executor forward to get hidden states
-  CausalVLM* vlm_model = dynamic_cast<CausalVLM*>(model_.get());
-  CHECK(vlm_model != nullptr) << "Model is not a CausalVLM.";
   ModelParamsView execution_params(params);
-  auto encode_output = vlm_model->encode(execution_params);
+  auto encode_output =
+      static_cast<CausalVLM&>(*model_).encode(execution_params);
   const auto it = encode_output.find("image|embedding");
   if (it == encode_output.end() ||
       !std::holds_alternative<std::vector<torch::Tensor>>(it->second)) {

@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 
 from xllm.python.model_executor.cp_utils import CpContext
 from xllm.python.model_executor.forward_context import get_forward_context, record_layer_event
-from xllm.python.models.deepseek_v32_mtp import DeepseekV32MtpModel, _compute_mtp_logits, _load_mtp_weights
+from xllm.python.models.deepseek_v32_mtp import DeepseekV32MtpModel, load_mtp_weights
 from xllm.python.models.glm5_2 import (
     Glm52Config,
     Glm52DecoderLayer,
@@ -28,6 +30,9 @@ from xllm.python.models.glm5_2 import (
     _attn_dp_gather_inputs,
     _attn_dp_owner_rows,
 )
+
+if TYPE_CHECKING:
+    from xllm.python.model_loader import StateDictLike
 
 
 def _resolve_mtp_topk_reuse(cfg: Glm52Config) -> tuple[bool, ...]:
@@ -115,11 +120,5 @@ class Glm52MtpForCausalLM(Glm52ForCausalLM):
         super().__init__(config, build_model=False)
         self.model = Glm52MtpModel(self.cfg, self.dtype, self.device)
 
-    def compute_logits(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
-        return _compute_mtp_logits(self.model, self.lm_head, hidden, selected_idxes)
-
-    def compute_greedy_tokens(self, hidden: torch.Tensor) -> torch.Tensor:
-        return super().compute_greedy_tokens(hidden)
-
-    def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        _load_mtp_weights(self, super().load_weights, state_dicts, tp_rank, tp_size)
+    def load_weights(self, state_dicts: list[StateDictLike], tp_rank: int, tp_size: int) -> None:
+        load_mtp_weights(self, state_dicts)

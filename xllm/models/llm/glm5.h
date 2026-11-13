@@ -34,13 +34,6 @@ class Glm5ForCausalLMImpl : public LlmForCausalLMImplBase<Glm5Model> {
  public:
   Glm5ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<Glm5Model>(context) {}
-
-  void load_model(
-      std::unique_ptr<ModelLoader> loader,
-      std::string prefix = "model." /*llm model weight prefix*/) override {
-    LlmForCausalLMImplBase<Glm5Model>::load_model(std::move(loader), prefix);
-    model_->verify_loaded_weights();
-  }
 };
 TORCH_MODULE(Glm5ForCausalLM);
 

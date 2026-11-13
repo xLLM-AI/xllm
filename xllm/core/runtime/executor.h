@@ -27,12 +27,17 @@ limitations under the License.
 
 namespace xllm {
 
+class CausalVLM;
+
 class Executor final {
  public:
   Executor(CausalLM* model,
            const ModelContext& context,
            const runtime::Options& options);
 
+  Executor(CausalVLM* model,
+           const ModelContext& context,
+           const runtime::Options& options);
   virtual ~Executor() = default;
 
   void set_dp_process_group(ProcessGroup* group);

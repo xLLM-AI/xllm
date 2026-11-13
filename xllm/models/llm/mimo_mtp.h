@@ -223,24 +223,17 @@ TORCH_MODULE(MiMoMtpModel);
 class MiMoMtpForCausalLMImpl final
     : public LlmForCausalLMImplBase<MiMoMtpModel> {
  public:
-  explicit MiMoMtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<MiMoMtpModel>(context,
-                                             /*share_lm_head=*/true) {}
+  static constexpr const char* kDecoderCheckpointPrefix = kWeightPrefix;
 
-  void load_model(
-      std::unique_ptr<ModelLoader> loader,
-      std::string prefix = "model." /*llm model weight prefix*/) override {
-    // Only load MTP model weights, skip lm_head (shared with target model)
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-    model_->verify_loaded_weights();
-  }
+  explicit MiMoMtpForCausalLMImpl(const ModelContext& context)
+      : LlmForCausalLMImplBase(context) {}
 };
 TORCH_MODULE(MiMoMtpForCausalLM);
 
 // register the causal model
-REGISTER_CAUSAL_MODEL(mimo_mtp, MiMoMtpForCausalLM);
+const bool mimo_mtp_registered =
+    register_causal_model_with_deferred_head<MiMoMtpForCausalLM>(
+        /*name=*/"mimo_mtp");
 
 // register the model args
 // example config: /root/models2/MiMo-7B-Base/config.json

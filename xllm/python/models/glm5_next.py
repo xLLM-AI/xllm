@@ -169,7 +169,6 @@ class Glm5NextConfig:
     max_position_embeddings: int = 1104096
     hidden_act: str = "silu"
     attention_bias: bool = False
-    tie_word_embeddings: bool = False
     # MLA
     q_lora_rank: int = 1536
     kv_lora_rank: int = 512
@@ -292,7 +291,6 @@ class Glm5NextConfig:
             max_position_embeddings=int(pick("max_position_embeddings", default=1104096)),
             hidden_act=str(pick("hidden_act", default="silu")),
             attention_bias=bool(pick("attention_bias", default=False)),
-            tie_word_embeddings=bool(pick("tie_word_embeddings", default=False)),
             q_lora_rank=int(pick("q_lora_rank", default=1536)),
             kv_lora_rank=int(pick("kv_lora_rank", default=512)),
             qk_nope_head_dim=int(pick("qk_nope_head_dim", default=256)),
@@ -857,24 +855,6 @@ class Glm5NextIndexer(nn.Module):
         keep = pool_valid.any(0)
         return pool_keys[:, keep], pool_indices[:, keep], pool_valid[:, keep]
 
-    def get_packed_states(
-        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor, key: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Per-token indexer cache row ``[B, S, head_dim*2+1]`` =
-        [k(128), gate(128), valid(1)]. NoPE: no RoPE applied to k."""
-        k, gate_scores = self.get_kpool_states(hidden_states, key)
-        valid_channel = attention_mask.to(k.dtype).unsqueeze(-1)
-        return torch.cat([k, gate_scores, valid_channel], dim=-1)
-
-    def get_kpool_states(
-        self,
-        hidden_states: torch.Tensor,
-        key: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Project the raw K/gate rows retained only by the incomplete tail."""
-        key = self.wk(hidden_states) if key is None else key
-        return self.k_norm(key), F.linear(hidden_states, self.index_kpool_compress_gate)
-
     def _select_topk_fused_pa(
         self,
         query: torch.Tensor,
@@ -1215,7 +1195,8 @@ class Glm5NextIndexer(nn.Module):
                 query_lens_device,
             )
         if self.index_kpool_compress:
-            raw_k, gate_scores = self.get_kpool_states(hidden_states, key)
+            raw_k = self.k_norm(key)
+            gate_scores = F.linear(hidden_states, self.index_kpool_compress_gate)
             if uses_compressed_tail:
                 if kpool is None or kpool.tail_read_indices is None or kpool.tail_write_indices is None:
                     raise RuntimeError("compressed kPool requires linear-state read/write indices")
@@ -2045,11 +2026,9 @@ class Glm5NextMoE(nn.Module):
             if self.cfg.eplv2_shared_overlap and self.gate.weight.device.type in ("npu", "privateuseone"):
                 self._shared_stream = shared_expert_stream(self.gate.weight.device)
 
-    def _topk(self, hidden_states: torch.Tensor):
+    def _topk(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         cfg = self.cfg
-        hidden_states = hidden_states.view(-1, cfg.hidden_size)
-        router_logits = F.linear(hidden_states.float(), self.gate.weight.float())
-        scores = router_logits.sigmoid()
+        scores = F.linear(hidden_states.float(), self.gate.weight.float()).sigmoid()
         scores_for_choice = scores + self.e_score_correction_bias
         group_scores = (
             scores_for_choice.view(-1, cfg.n_group, cfg.n_routed_experts // cfg.n_group).topk(2, dim=-1)[0].sum(dim=-1)
@@ -2068,7 +2047,7 @@ class Glm5NextMoE(nn.Module):
         if cfg.norm_topk_prob:
             topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
         topk_weights = topk_weights * cfg.routed_scaling_factor
-        return router_logits, topk_weights, topk_indices
+        return topk_weights, topk_indices
 
     def forward(
         self,
@@ -2096,7 +2075,7 @@ class Glm5NextMoE(nn.Module):
         """Retain the established BF16 TP-only expert and reduction path."""
         orig_shape = hidden_states.shape
         flat = hidden_states.view(-1, self.hidden)
-        _, topk_weights, topk_indices = self._topk(hidden_states)
+        topk_weights, topk_indices = self._topk(flat)
         out = self.experts(flat, topk_indices, topk_weights).view(*orig_shape)
         final = out + self.shared_experts(hidden_states)
         if self.cfg.tp_size > 1:
@@ -2280,7 +2259,7 @@ class Glm5NextHyperConnection(nn.Module):
     ``collapsed`` is the single-sequence input to feed the sublayer.
     """
 
-    def __init__(self, cfg: Glm5NextConfig, dtype: torch.dtype, device: torch.device) -> None:
+    def __init__(self, cfg: Glm5NextConfig, device: torch.device) -> None:
         super().__init__()
         self.hc_mult = cfg.hc_mult
         self.hc_sinkhorn_iters = cfg.hc_sinkhorn_iters
@@ -2331,13 +2310,6 @@ class Glm5NextHyperConnection(nn.Module):
         return post, comb, collapsed
 
 
-class Glm5NextHyperHead(nn.Module):
-    """Final mHC stream collapse — unweighted mean over the hc_mult streams."""
-
-    def forward(self, hidden_streams: torch.Tensor) -> torch.Tensor:
-        return hidden_streams.mean(dim=2)
-
-
 # ---------------------------------------------------------------------------
 # Decoder layer + model
 # ---------------------------------------------------------------------------
@@ -2365,8 +2337,8 @@ class Glm5NextDecoderLayer(nn.Module):
         else:
             self.mlp = Glm5NextMLP(cfg, cfg.intermediate_size, dtype, device)
         # mHC residual sites (always on, per reference — `mhc` config is not consulted).
-        self.attn_hc = Glm5NextHyperConnection(cfg, dtype, device)
-        self.ffn_hc = Glm5NextHyperConnection(cfg, dtype, device)
+        self.attn_hc = Glm5NextHyperConnection(cfg, device)
+        self.ffn_hc = Glm5NextHyperConnection(cfg, device)
 
     def forward(
         self,
@@ -2532,14 +2504,12 @@ class Glm5NextModel(nn.Module):
             [Glm5NextDecoderLayer(cfg, i, dtype, device, comm_policy=self._comm_policy) for i in range(cfg.n_layers)]
         )
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
-        self.hc_head = Glm5NextHyperHead()
         # Collapse each captured layer's mHC streams to the single residual stream
         # the draft consumes; capture_layer applies this only on captured layers.
-        hc_head = self.hc_head
         hidden_size = cfg.hidden_size
         self.aux_hidden_capture = AuxHiddenCapture(
             cfg.layers_to_capture,
-            transform=lambda streams: hc_head(streams).reshape(-1, hidden_size),
+            transform=lambda streams: streams.mean(dim=2).reshape(-1, hidden_size),
         )
 
     def forward(
@@ -2610,13 +2580,7 @@ class Glm5NextModel(nn.Module):
                 captured_hidden = input_layout.gather(hidden.reshape(-1, *hidden.shape[2:])).unsqueeze(0)
             self.aux_hidden_capture.capture_layer(layer.layer_id, captured_hidden, None, aux_hidden_buffer)
             record_layer_event(layer.layer_id)
-        # Final collapse: unweighted mean over the streams, then RMSNorm
-        # (reference `self.norm(self.hc_head(hidden_states))`, line 1537).
-        # Flatten [B, S, D] -> [B*S, D]: the engine's compute_logits does
-        # ``hidden.index_select(0, selected_idxes)`` where selected_idxes are
-        # token ids in the flattened sequence, so a 3-D output would select the
-        # wrong (batch) axis and gather out of range for multi-token prefill.
-        h = self.norm(self.hc_head(hidden)).view(-1, self.cfg.hidden_size)
+        h = self.norm(hidden.mean(dim=2)).view(-1, self.cfg.hidden_size)
         # The last MoE layer leaves SP-local rows and CP merge indexes
         # owner_rank * total_local, so restore the full CP-local layout first.
         # Capture already gathered aux rows before the SP split.
@@ -2711,17 +2675,6 @@ class Glm5NextForCausalLM(PyModelBase):
         # this cast — the reference's conv1d is also bf16 after .to(dtype).
         self.to(device=device, dtype=dtype)
 
-    def forward(
-        self, input_ids: torch.Tensor, position_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        hidden = self.model(input_ids, position_ids, attention_mask=attention_mask)
-        # With layers_to_capture the body returns (hidden, aux_hidden) for the
-        # draft's context projection; the CausalLM wrapper itself consumes only
-        # the logits hidden state.
-        if isinstance(hidden, tuple):
-            hidden = hidden[0]
-        return self.lm_head(hidden)
-
     # -- weight loading ---------------------------------------------------
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         L = QLinearWeightLoader(
@@ -2815,10 +2768,10 @@ class Glm5NextForCausalLM(PyModelBase):
         # Splits kv_b_proj.weight into absorbed W_UK / W_UV (NoPE path).
         self.model.layers[i].self_attn.process_weights_after_loading()
 
-    def _load_kda_attn(self, L, attn: str, i: int) -> None:
+    def _load_kda_attn(self, L: QLinearWeightLoader, attn: str, i: int) -> None:
         """Load floating-point KDA inputs; per-projection W8A8 is not supported here."""
         layer = self.get_submodule(attn.rstrip("."))
-        input_weights = []
+        input_weights: list[torch.Tensor] = []
         for projection, size_attr, shard_dim in _KDA_IN_PROJ:
             weight = L.get_tensor(attn + projection + ".weight")
             if not weight.is_floating_point() or L.probe_quant(attn, projection):
@@ -2842,14 +2795,18 @@ class Glm5NextForCausalLM(PyModelBase):
         # order [q_loc|k_loc|v_loc] matches mixed_qkv. (A single contiguous
         # narrow of the cat'd tensor would cross the q/k boundary.) Fake
         # single-key checkpoint is only run at tp==1, where the shard is a no-op.
-        if L.find(attn + "conv1d.weight") is not None:
-            conv = L.get_tensor(attn + "conv1d.weight")
-            if L.tp_size > 1:
-                conv = L.shard(conv, dim=0)
+        conv_weight = layer.get_parameter("conv_weight")
+        packed_conv = attn + "conv1d.weight"
+        if L.has(packed_conv):
+            L.load_tensor(conv_weight, packed_conv, dim=0, rank=L.tp_rank, world_size=L.tp_size)
         else:
-            parts = [L.get_tensor(attn + n + "_conv1d.weight") for n in ("q", "k", "v")]
-            conv = torch.cat([L.shard(p, dim=0) for p in parts] if L.tp_size > 1 else parts, dim=0)
-        L.copy_in(attn + "conv_weight", conv)
+            L.load_fused(
+                conv_weight,
+                [attn + name + "_conv1d.weight" for name in ("q", "k", "v")],
+                attn + "conv_weight",
+                rank=L.tp_rank,
+                world_size=L.tp_size,
+            )
         # o_proj: row-parallel QLinear — shard the INPUT dim (dim 1, qkv_dim) so
         # each rank's [hidden, qkv_dim_local] weight consumes its head-subset's
         # partial output; the forward all-reduces the partials.
