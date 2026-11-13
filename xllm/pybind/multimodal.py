@@ -86,7 +86,7 @@ def preprocess(lst: list[str], model: str) -> dict[str, Any]:
     return {key: try_cat_feature(val) for key, val in data.items()}
 
 
-def preprocess_tensors(tensors, model: str) -> dict[str, Any]:
+def preprocess_tensors(tensors: list[torch.Tensor], model: str) -> dict[str, Any]:
     """Preprocess already-decoded images (uint8 [C,H,W] RGB torch tensors).
 
     Used by the Python model-executor online path: the C++ side decodes
@@ -94,19 +94,25 @@ def preprocess_tensors(tensors, model: str) -> dict[str, Any]:
     preprocessing (smart_resize / normalize / patchify) here to the HF
     AutoImageProcessor, so no per-model C++ image processor is needed.
     """
-    import numpy as np
-
-    images = []
-    for t in tensors:
-        arr = t.permute(1, 2, 0).contiguous().numpy()  # [H, W, C] RGB
-        if arr.dtype != np.uint8:
-            arr = arr.astype(np.uint8)
-        images.append(Image.fromarray(arr, mode="RGB"))
     image_processor = __cache_image_processor(model, trust_remote_code=True)
     if image_processor is None:
         raise RuntimeError(
             f"HF AutoImageProcessor unavailable for {model}; the caller should fall back to the C++ image processor."
         )
+
+    if getattr(image_processor, "backend", None) == "torchvision":
+        # This backend accepts decoded CHW tensors directly; PIL would copy the
+        # image to HWC and back before the same resize/normalize operations.
+        images = tensors
+    else:
+        import numpy as np
+
+        images = []
+        for tensor in tensors:
+            arr = tensor.permute(1, 2, 0).contiguous().numpy()
+            if arr.dtype != np.uint8:
+                arr = arr.astype(np.uint8)
+            images.append(Image.fromarray(arr, mode="RGB"))
 
     data = image_processor.preprocess(images, return_tensors="pt").data
     return {key: try_cat_feature(val) for key, val in data.items()}
