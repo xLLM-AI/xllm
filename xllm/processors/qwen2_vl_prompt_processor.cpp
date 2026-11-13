@@ -16,8 +16,9 @@ limitations under the License.
 #include "processors/qwen2_vl_prompt_processor.h"
 
 #include <algorithm>
-#include <cassert>
 #include <cstdint>
+
+#include "processors/vision_token_scanner.h"
 
 namespace xllm {
 
@@ -76,7 +77,9 @@ bool Qwen2VLPromptProcessor::process(std::string& prompt,
   int32_t* index = nullptr;
 
   size_t begin = 0;
-  auto pair = find_vision_token(prompt, begin);
+  VisionTokenScanner scanner(prompt, image_token_, video_token_);
+  using TokenType = VisionTokenScanner::TokenType;
+  auto pair = scanner.find_next(begin);
   while (pair.second != std::string::npos) {
     data.append(prompt, begin, pair.second - begin);
     if (pair.first == TokenType::IMAGE) {
@@ -99,7 +102,7 @@ bool Qwen2VLPromptProcessor::process(std::string& prompt,
 
     ++(*index);
     begin = pair.second + token->size();
-    pair = find_vision_token(prompt, begin);
+    pair = scanner.find_next(begin);
   }
 
   if (begin < prompt.size()) {
@@ -142,24 +145,6 @@ bool Qwen2VLPromptProcessor::find_mm_spans(
     start = std::next(vision_end_it);
   }
   return true;
-}
-
-std::pair<Qwen2VLPromptProcessor::TokenType, size_t>
-Qwen2VLPromptProcessor::find_vision_token(const std::string& prompt,
-                                          size_t begin) {
-  auto img_pos = prompt.find(image_token_, begin);
-  auto vid_pos = prompt.find(video_token_, begin);
-
-  if (img_pos == std::string::npos && vid_pos == std::string::npos) {
-    return {TokenType::INVALID, std::string::npos};
-  } else if (vid_pos == std::string::npos) {
-    return {TokenType::IMAGE, img_pos};
-  } else if (img_pos == std::string::npos) {
-    return {TokenType::VIDEO, vid_pos};
-  } else {
-    return img_pos < vid_pos ? std::make_pair(TokenType::IMAGE, img_pos)
-                             : std::make_pair(TokenType::VIDEO, vid_pos);
-  }
 }
 
 }  // namespace xllm

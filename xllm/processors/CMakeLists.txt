@@ -40,6 +40,7 @@ cc_library(
     multimodal_processor.h
     multimodal_processor_pipeline.h
     processor_util.h
+    vision_token_scanner.h
     audio_processor.h
     image_processor.h
     prompt_processor.h

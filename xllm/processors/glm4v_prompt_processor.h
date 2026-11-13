@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "core/framework/model/model_args.h"
@@ -26,12 +25,6 @@ limitations under the License.
 namespace xllm {
 
 class GLM4VPromptProcessor final : public PromptProcessor {
-  enum class TokenType {
-    INVALID,
-    IMAGE,
-    VIDEO,
-  };
-
  public:
   explicit GLM4VPromptProcessor(const ModelArgs& args);
 
@@ -40,8 +33,6 @@ class GLM4VPromptProcessor final : public PromptProcessor {
                      MMData& mm_data) override;
 
  private:
-  std::pair<TokenType, size_t> find_vision_token(const std::string& prompt,
-                                                 size_t begin);
   std::vector<double> build_timestamps(const std::vector<double>& timestamps,
                                        size_t num_frames);
   std::string format_timestamp_str(double timestamp);
