@@ -70,6 +70,7 @@ class EagerRunner(BaseRunner):
         eplb: EplbRuntimeState | None = None,
         kv_load: KVLoadContext | None = None,
         input_batch: InputBatch | None = None,
+        deepstack_input_embeds: tuple[torch.Tensor, ...] | None = None,
     ) -> ModelExecutionOutput:
         cp_context = None
         is_mla = self.attention_backend.is_mla
@@ -133,7 +134,11 @@ class EagerRunner(BaseRunner):
                 kv_load=kv_load,
             )
         ):
-            if mtp_topk_indices is not None:
+            if deepstack_input_embeds is not None:
+                output = self.model(
+                    input_ids, positions, input_embedding, deepstack_input_embeds=deepstack_input_embeds
+                )
+            elif mtp_topk_indices is not None:
                 output = self.model(input_ids, positions, input_embedding, mtp_topk_indices)
             # Draft-MTP steps carry the target's (or previous draft step's)
             # hidden state as input_embedding; the MTP body fuses it with the

@@ -757,20 +757,16 @@ class Qwen3VLModel(nn.Module):
             nn.ModuleList([Qwen3DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)]),
         )
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
-        # Set externally by get_input_embeddings before the runner kicks in.
-        self._inputs_embeds: torch.Tensor | None = None
-        self.deepstack_input_embeds: list[torch.Tensor] | None = None
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        input_embedding: torch.Tensor | None = None,
+        *,
+        deepstack_input_embeds: tuple[torch.Tensor, ...] = (),
     ) -> torch.Tensor:
-        if self._inputs_embeds is not None:
-            hidden = self._inputs_embeds
-            self._inputs_embeds = None
-        else:
-            hidden = self.embed_tokens(input_ids)
+        hidden = self.embed_tokens(input_ids) if input_embedding is None else input_embedding
 
         positions = positions.to(torch.int64).contiguous()
         cos, sin = None, None
@@ -791,12 +787,10 @@ class Qwen3VLModel(nn.Module):
             hidden, residual = layer(hidden, residual, positions, cos_sin_cache, cos, sin, mrope_sec)
             # Deepstack injection: add deepstack embeds after the first
             # N layers.
-            if self.deepstack_input_embeds is not None and i < len(self.deepstack_input_embeds):
-                hidden = hidden + self.deepstack_input_embeds[i]
+            if i < len(deepstack_input_embeds):
+                hidden = hidden + deepstack_input_embeds[i]
 
         hidden, _ = self.norm(hidden, residual)
-        # Clear deepstack embeds after use.
-        self.deepstack_input_embeds = None
         return hidden
 
 
@@ -931,7 +925,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         input_ids: torch.Tensor,
         image_embeds: torch.Tensor | None = None,
         video_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Stage 2: merge text + multimodal embeddings.
 
         Each present modality's embedding is scattered at its placeholder-token
@@ -940,10 +934,8 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         shared deepstack buffer. The two masks are disjoint, so image and video
         coexist in one batch.
 
-        This assumes every multimodal token is in the current batch (i.e.
-        enable_chunked_prefill=False): the mask spans the full flattened batch and
-        embedding rows are matched left-to-right. Sets ``_inputs_embeds`` and
-        ``deepstack_input_embeds`` for the runner-driven ``Qwen3VLModel.forward``.
+        The C++ gather selects the current chunk's visual rows. Return both
+        decoder inputs explicitly so a later request cannot overwrite them.
         """
         inputs_embeds = self.model.embed_tokens(input_ids)
 
@@ -954,11 +946,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             modalities.append((video_embeds, self.video_token_id))
 
         if not modalities:
-            # No multimodal tokens in this step (text-only prefill / decode):
-            # keep the attributes clear so the runner falls back to embed_tokens.
-            self.model._inputs_embeds = None
-            self.model.deepstack_input_embeds = None
-            return inputs_embeds
+            return inputs_embeds, ()
 
         visual_dim = self.visual_dim
         num_level = self.deepstack_num_level
@@ -979,16 +967,11 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
                 continue
             _scatter_multimodal(inputs_embeds, deepstack_acc, embeds, mask, visual_dim, num_level)
 
+        deepstack_inputs: tuple[torch.Tensor, ...] = ()
         if deepstack_acc is not None:
-            # Reshape: (seq_len, num_level, visual_dim) -> list of tensors.
             deepstack_acc = deepstack_acc.view(seq_len, num_level, visual_dim)
-            self.model.deepstack_input_embeds = [deepstack_acc[:, i, :].contiguous() for i in range(num_level)]
-        else:
-            self.model.deepstack_input_embeds = None
-
-        # Store inputs_embeds for the runner to pick up.
-        self.model._inputs_embeds = inputs_embeds
-        return inputs_embeds
+            deepstack_inputs = tuple(deepstack_acc[:, i, :].contiguous() for i in range(num_level))
+        return inputs_embeds, deepstack_inputs
 
     # ------------------------------------------------------------------
     # Weight loading

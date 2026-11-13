@@ -192,7 +192,7 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
     if constexpr (std::is_same_v<TargetEngine, LLMEngine>) {
       return engine_->allocate_kv_cache(capacity, transfer_coordinator, layout);
     } else {
-      return engine_->allocate_kv_cache(capacity, layout);
+      return engine_->allocate_kv_cache(capacity, layout, transfer_coordinator);
     }
   };
 

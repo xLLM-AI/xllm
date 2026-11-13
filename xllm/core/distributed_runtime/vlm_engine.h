@@ -19,6 +19,7 @@ limitations under the License.
 #include <gflags/gflags.h>
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "common/macros.h"
@@ -34,6 +35,7 @@ limitations under the License.
 namespace xllm {
 
 class VmmKVCacheLayout;
+class KVCacheTransferCoordinatorBase;
 
 class VLMEngine : public Engine {
  public:
@@ -54,6 +56,12 @@ class VLMEngine : public Engine {
   }
 
   bool init(MasterStatus master_status) override;
+  bool init(
+      MasterStatus master_status,
+      std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator);
+
+  bool start_profile() override;
+  bool stop_profile() override;
 
   std::vector<RawForwardOutput> collect_step_outputs(const BatchGroup& batch);
 
@@ -64,9 +72,12 @@ class VLMEngine : public Engine {
   KVCacheCapacity estimate_kv_cache_capacity(
       bool initialize_virtual_memory = true);
   bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap,
-                         const VmmKVCacheLayout* shared_vmm_layout = nullptr);
+                         const VmmKVCacheLayout* shared_vmm_layout = nullptr,
+                         std::shared_ptr<KVCacheTransferCoordinatorBase>
+                             transfer_coordinator = nullptr);
   void setup_workers(const runtime::Options& options);
   void process_group_test();
+  bool profile_workers(bool is_start);
 
  private:
   // options
@@ -87,6 +98,7 @@ class VLMEngine : public Engine {
       nullptr;
 
   std::unique_ptr<VlmForwardInputFactory> forward_input_factory_;
+  std::mutex profile_mutex_;
 };
 
 }  // namespace xllm

@@ -382,8 +382,8 @@ class ModelExecutor:
         # and DeepSeek-V4 DSpark do not.
         self._independent_block_draft = uses_context_kv_projection(config)
         kv_split_size = int(config.get("kv_split_size", 0)) or cp_size
-        # Multimodal aliases own per-step embedding state outside decode graph inputs.
-        self._qwen_gdn = config.get("model_type") in ("qwen3_5_text", "qwen3_5_moe_text")
+        vlm_mtp_capacity = bool(getattr(model, "supports_mtp_kv_capacity_graph", False))
+        self._qwen_gdn = config.get("model_type") in ("qwen3_5_text", "qwen3_5_moe_text") or vlm_mtp_capacity
         qwen_mtp_parallel = dp_size == cp_size == kv_split_size == self.layerwise_split_size == 1
         qwen_mtp_requested = bool(config.get("is_mtp_algorithm", False)) and (
             (self._qwen_gdn and self.num_speculative_tokens > 0) or config.get("model_type") == "qwen3_5_mtp"
@@ -391,7 +391,7 @@ class ModelExecutor:
         if qwen_mtp_requested and self._qwen_gdn and not 1 <= self.num_speculative_tokens <= 16:
             raise NotImplementedError("Python Qwen MTP supports 1 to 16 speculative tokens")
         self._qwen_mtp_target = (
-            config.get("model_type") == "qwen3_5_text"
+            (config.get("model_type") == "qwen3_5_text" or vlm_mtp_capacity)
             and bool(config.get("is_mtp_algorithm", False))
             and 1 <= self.num_speculative_tokens <= 16
             and int(config.get("num_speculative_tokens", 0)) + 1 == int(num_decoding_tokens)
@@ -481,7 +481,10 @@ class ModelExecutor:
                     enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
                     enable_graph_mode_decode_no_padding=bool(config.get("enable_graph_mode_decode_no_padding", False)),
                     spec_verify_width=self.num_speculative_tokens + 1 if self._qwen_mtp_target else 1,
-                    device_kv_lengths=self._qwen_mtp_target or self._qwen_mtp_draft,
+                    # Keep VLM target's live-length TND attention: switching
+                    # to masked BNSD can change BF16 verify outputs.
+                    device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
+                    kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
                     max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
                 )
         else:
@@ -563,6 +566,7 @@ class ModelExecutor:
         *,
         kv_load_synchronizer: KVLoadSynchronizer | None = None,
         kv_load_layers_per_event: int = 1,
+        deepstack_input_embeds: tuple[torch.Tensor, ...] | None = None,
     ) -> ModelExecutionOutput:
         input_batch = None
         if self.requires_input_batch_metadata:
@@ -589,6 +593,7 @@ class ModelExecutor:
         eplb = None
         if expert_load_data is not None:
             eplb = EplbRuntimeState(expert_load_data, eplb_decode_token_mask, is_graph_warmup)
+        visual_inputs = {} if deepstack_input_embeds is None else {"deepstack_input_embeds": deepstack_input_embeds}
         if kv_load_synchronizer is not None:
             if (
                 not self.supports_layerwise_kv_load
@@ -608,11 +613,14 @@ class ModelExecutor:
                 eplb=eplb,
                 kv_load=kv_load,
                 input_batch=input_batch,
+                **visual_inputs,
             )
         # Transfer completion events belong to this step. Graph replay cannot
         # record them through Python, and compilation must not retain a prior
         # step's synchronizer. Decode steps without a transfer can use graphs.
-        graph_runner = self.decode_graph_runner if layer_synchronizer is None else None
+        graph_runner = (
+            self.decode_graph_runner if layer_synchronizer is None and deepstack_input_embeds is None else None
+        )
         if graph_runner is not None and (eplb is None or current_platform.is_npu()):
             from xllm.python.model_executor.runners.block_draft_acl_graph import BlockDraftAclGraphRunner
             from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
@@ -693,7 +701,12 @@ class ModelExecutor:
                     eplb=eplb,
                     input_batch=input_batch,
                 )
-        if mtp_topk_indices is None and self.inductor_runner is not None and layer_synchronizer is None:
+        if (
+            mtp_topk_indices is None
+            and self.inductor_runner is not None
+            and layer_synchronizer is None
+            and deepstack_input_embeds is None
+        ):
             return self.inductor_runner.execute(
                 input_ids,
                 positions,
@@ -712,4 +725,5 @@ class ModelExecutor:
             mtp_topk_indices,
             eplb=eplb,
             input_batch=input_batch,
+            **visual_inputs,
         )

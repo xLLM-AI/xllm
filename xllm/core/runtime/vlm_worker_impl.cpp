@@ -176,8 +176,10 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
     return output;
   }
 
-  auto ret = device_.synchronize_default_stream();
-  (void)ret;
+  if (!can_skip_npu_graph_decode_sync(input.input_params)) {
+    const int32_t ret = device_.synchronize_default_stream();
+    CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
+  }
   return output;
 }
 

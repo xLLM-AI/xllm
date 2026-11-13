@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/encoder_cache/encoder_cache.h"
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
@@ -177,6 +178,10 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       enable_mla_(args.enable_mla()) {
   CHECK(py_causal_lm_ != nullptr) << "PyExecutorImpl requires PyCausalLM";
   CHECK_GT(dummy_token_count_, 0);
+  if (options_.backend() == "vlm" && options_.max_encoder_cache_size() > 0) {
+    encoder_cache_ = std::make_unique<EncoderCache>(
+        options_.max_encoder_cache_size() * 1024 * 1024);
+  }
   py::gil_scoped_acquire gil;
   ensure_xllm_runtime_module();
   py::module_ executor_module =
@@ -311,6 +316,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
   py::object input_embedding =
       optional_tensor(params.embedding.input_embedding);
+  py::object deepstack_input_embeds = py::none();
   py::object topk_indices = mtp_topk_indices(params);
   torch::Tensor execution_tokens =
       spec_verify::materialize_graph_speculative_verify_tokens(tokens,
@@ -320,6 +326,10 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   // this step's chunk rows and builds modality masks before Python merges them.
   if (params.has_multimodal() && params.multimodal().mm_data.valid()) {
     auto& mm_data = params.multimodal().mm_data;
+    if (encoder_cache_) {
+      EncoderCacheLookupVisitor lookup(encoder_cache_.get());
+      CHECK(mm_data.foreach (lookup));
+    }
     EncoderInputGatherVisitor input_gather;
     CHECK(mm_data.foreach (input_gather));
     CHECK(input_gather.finish(mm_data));
@@ -387,6 +397,10 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
     EncoderOutputScatterVisitor scatter(encoded);
     CHECK(mm_data.foreach (scatter));
     CHECK(scatter.finish());
+    if (encoder_cache_) {
+      EncoderCacheInsertVisitor insert(encoder_cache_.get());
+      CHECK(mm_data.foreach (insert));
+    }
     EncoderEmbeddingGatherVisitor gather(device_,
                                          mm_data.type(),
                                          params.attention.host.kv_seq_lens,
@@ -413,8 +427,12 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
     } else if (!image_embeds.is_none() || !video_embeds.is_none()) {
       py::object visual_embedding = top_model.attr("get_input_embeddings")(
           execution_tokens, image_embeds, video_embeds);
-      if (args_.model_type() == "qwen3_5" ||
-          args_.model_type() == "qwen3_5_moe") {
+      if (args_.model_type() == "qwen3_vl") {
+        py::tuple visual_inputs = visual_embedding.cast<py::tuple>();
+        input_embedding = visual_inputs[0];
+        deepstack_input_embeds = visual_inputs[1];
+      } else if (args_.model_type() == "qwen3_5" ||
+                 args_.model_type() == "qwen3_5_moe") {
         // Qwen3.5 passes chunk-local visual rows explicitly; no mutable
         // embedding state can survive into subsequent decode steps.
         input_embedding = std::move(visual_embedding);
@@ -449,10 +467,12 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   py::object eplb_decode_token_mask =
       optional_tensor(params.expert.eplb_decode_token_mask);
 
-  // Qwen3-VL retains its DeepStack merge state and two-argument decoder.
-  // Qwen3.5 visual prefill instead passes its embedding as the third argument.
-  // Pure decode has no visual embedding and uses the captured token path.
+  // Qwen visual prefill owns explicit per-step embeddings. Its pure decode
+  // retains the captured token path without model-local visual state.
   py::kwargs graph_kwargs;
+  if (!deepstack_input_embeds.is_none()) {
+    graph_kwargs["deepstack_input_embeds"] = deepstack_input_embeds;
+  }
   if (layerwise_kv_load) {
     graph_kwargs["kv_load_synchronizer"] =
         py::cast(params.parallel.layer_wise_load_synchronizer);

@@ -32,7 +32,7 @@ logic:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.distributed as dist
@@ -80,6 +80,7 @@ class DecodeAclGraphMetadata:
     paged_kv_indptr: torch.Tensor
     paged_kv_indices: torch.Tensor
     paged_kv_last_page_len: torch.Tensor
+    kv_cu_seq_lens: torch.Tensor | None = None
 
 
 def _same_npu_stream(lhs: object, rhs: object) -> bool:
@@ -121,6 +122,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         enable_graph_mode_decode_no_padding: bool = False,
         spec_verify_width: int = 1,
         device_kv_lengths: bool = False,
+        kv_capacity_graphs: bool = False,
         max_capture_tokens: int | None = None,
     ) -> None:
         super().__init__(model, attention_backend, device)
@@ -141,8 +143,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if not 1 <= spec_verify_width <= 17 or (is_spec_draft and spec_verify_width != 1):
             raise ValueError("Speculative verify graph width must be in [1, 17], with width one for draft models")
         self._spec_verify_width = spec_verify_width
-        if device_kv_lengths and dp_size != 1:
-            raise ValueError("Device-length ACL graphs require DP size one")
+        # Capacity tiers bound static KV storage independently of the
+        # attention operator's live-length or Device-mask protocol.
+        self._kv_capacity_graphs = kv_capacity_graphs or device_kv_lengths
+        if self._kv_capacity_graphs and dp_size != 1:
+            raise ValueError("KV-capacity ACL graphs require DP size one")
         self._device_kv_lengths = device_kv_lengths
         self._has_index_cache = False
         self._has_linear_cache = False
@@ -313,7 +318,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # count does not imply coverage of smaller shapes. Select eager for
         # unsupported shapes before execution; missing variants still fail.
         if (
-            self._device_kv_lengths
+            self._kv_capacity_graphs
             and not is_graph_warmup
             and (padded_batch_size, is_expanded_spec_verify) not in self._startup_batch_shapes
         ):
@@ -547,6 +552,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             paged_kv_indptr=paged_kv_indptr,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len,
+            kv_cu_seq_lens=None if expanded is not None else metadata.kv_cu_seq_lens,
         )
 
     def _expanded_verify_view(self, metadata: AttentionMetadata) -> ExpandedDecodeMetadata | None:
@@ -715,7 +721,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             kpool_query_lens=kpool_query_lens,
             expanded_query_lens=expanded_query_lens,
         )
-        if self._device_kv_lengths:
+        if self._kv_capacity_graphs:
             if not kv_capacity_pages:
                 kv_capacity_pages = self._capacity_pages(
                     self._decode_metadata(metadata, expanded) if decode_metadata is None else decode_metadata
@@ -733,6 +739,30 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if max(metadata.kv_seq_lens_host_values) > metadata.block_table.shape[1] * self._logical_page_size:
             raise ValueError("Host KV upper bound exceeds the source block table")
         return pages
+
+    def _capacity_warmup_metadata(
+        self, metadata: DecodeAclGraphMetadata, capacity_pages: int
+    ) -> DecodeAclGraphMetadata:
+        """Fit synthetic attention inputs to this tier without changing the producer."""
+        capacity = capacity_pages * self._logical_page_size
+        lengths = metadata.kv_seq_lens_host_values
+        if max(lengths) <= capacity:
+            return metadata
+        lengths = [min(length, capacity) for length in lengths]
+        block_table = metadata.block_table[:, :capacity_pages].contiguous()
+        indptr, indices, last_page_len = build_row_aligned_paged_kv_metadata(
+            block_table, lengths, self._logical_page_size
+        )
+        return replace(
+            metadata,
+            block_table=block_table,
+            kv_seq_lens=metadata.kv_seq_lens.clamp(max=capacity),
+            kv_seq_lens_host_values=lengths,
+            paged_kv_indptr=indptr,
+            paged_kv_indices=indices,
+            paged_kv_last_page_len=last_page_len,
+            kv_cu_seq_lens=None,
+        )
 
     def warmup(
         self,
@@ -760,7 +790,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             expanded,
             decode_metadata=decode_metadata,
         )
-        if self._device_kv_lengths:
+        if self._kv_capacity_graphs:
             if not is_graph_warmup:
                 if graph_key not in self._graphs:
                     raise RuntimeError(
@@ -768,6 +798,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     )
                 return graph_key
             capacity_pages = kv_capacity_buckets(self._capacity_page_limit())
+            if decode_metadata is None:
+                decode_metadata = self._decode_metadata(metadata, expanded)
             previous_count = len(self._graphs)
             for pages in capacity_pages:
                 capacity_key, _, _ = self._resolve_graph_key(
@@ -792,7 +824,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     eplb=eplb,
                     input_batch=input_batch,
                     expanded=expanded,
-                    decode_metadata=decode_metadata,
+                    decode_metadata=self._capacity_warmup_metadata(decode_metadata, pages),
                     kv_capacity_pages=pages,
                     allow_capacity_capture=True,
                 )
@@ -998,7 +1030,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
 
         if expanded is None:
             expanded = self._expanded_verify_view(metadata)
-        if self._device_kv_lengths:
+        if self._kv_capacity_graphs:
             if decode_metadata is None:
                 decode_metadata = self._decode_metadata(metadata, expanded)
             selected_pages = self._capacity_pages(decode_metadata)
@@ -1021,13 +1053,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 decode_metadata=decode_metadata,
             )
             resolved_spans = (kpool_spans, expanded_spans)
-        if self._device_kv_lengths and graph_key[-1] != kv_capacity_pages:
+        if self._kv_capacity_graphs and graph_key[-1] != kv_capacity_pages:
             raise ValueError("KV capacity graph key differs from its metadata")
         entry = self._graphs.get(graph_key)
         first_capture = entry is None
         decode_kwargs = {} if decode_metadata is None else {"decode_metadata": decode_metadata}
         if entry is None:
-            if self._device_kv_lengths and not allow_capacity_capture:
+            if self._kv_capacity_graphs and not allow_capacity_capture:
                 raise RuntimeError("KV capacity graph was not captured during startup warmup")
             entry = self._allocate_entry(
                 padded_batch_size,
@@ -1037,7 +1069,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 expanded=expanded,
                 kpool_query_lens=None if resolved_spans is None else resolved_spans[0],
                 expanded_query_lens=None if resolved_spans is None else resolved_spans[1],
-                **({"kv_capacity_pages": kv_capacity_pages} if self._device_kv_lengths else {}),
+                **({"kv_capacity_pages": kv_capacity_pages} if self._kv_capacity_graphs else {}),
                 **decode_kwargs,
             )
             self._graphs[graph_key] = entry
@@ -1467,7 +1499,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         )
         cumulative_kv_seq_lens = self._cumulative_lengths(
             kv_seq_lens,
-            None if expanded is not None else metadata.kv_cu_seq_lens,
+            decode_metadata.kv_cu_seq_lens,
         )
         if self._device_kv_lengths and not self.attention_backend.is_mla:
             # Ordinary FIA consumes the block table and per-row lengths.
