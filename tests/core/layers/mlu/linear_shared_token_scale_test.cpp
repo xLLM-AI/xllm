@@ -35,7 +35,7 @@ void run_row_quantization(int32_t rank, int32_t port, bool compressed) {
   dev.set_device();
   const torch::Device device = dev.unwrap();
   ParallelConfig::get_instance().kv_split_size(1);
-  CollectiveCommunicator communicator(rank, 2, 1, 1, 1);
+  CollectiveCommunicator communicator(rank, 2, 1, 1, 1, EplbWorkerConfig{});
   communicator.create_process_groups("127.0.0.1:" + std::to_string(port),
                                      device);
   const ParallelArgs& parallel = *communicator.parallel_args();

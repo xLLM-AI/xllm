@@ -248,6 +248,19 @@ endif()
 if(USE_NPU OR USE_MLU)
   cc_test(
     NAME
+      eplb_worker_options_test
+    SRCS
+      eplb_worker_options_test.cpp
+    DEPS
+      :runtime
+      :model_loader
+      :batch
+      :kv_cache
+      :platform
+      GTest::gtest_main
+  )
+  cc_test(
+    NAME
       mtp_host_offload_test
     SRCS
       mtp_host_offload_test.cpp
@@ -260,6 +273,7 @@ if(USE_NPU OR USE_MLU)
       GTest::gtest_main
   )
   if(USE_MLU)
+    target_link_libraries(eplb_worker_options_test PRIVATE torch_mlu)
     target_link_libraries(mtp_host_offload_test PRIVATE torch_mlu)
   endif()
 endif()

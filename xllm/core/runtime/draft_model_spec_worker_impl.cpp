@@ -27,7 +27,6 @@ limitations under the License.
 #include <utility>
 
 #include "core/common/types.h"
-#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -684,7 +683,7 @@ DraftModelSpecWorkerImpl<TargetInput>::finalize_step_output(
     std::optional<SampleOutput> verify_output,
     const std::vector<JsonObjectGrammarState>& json_object_states) const {
   if (!this->enable_schedule_overlap() && !this->is_driver() &&
-      !EPLBConfig::get_instance().enable_eplb()) {
+      !this->options_.eplb_worker_config().enabled) {
     return make_transfer_failure_output(std::move(output.failed_request_ids));
   }
   if (verify_output) {
