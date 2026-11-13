@@ -56,11 +56,9 @@ class PyExpandedDecodeMetadataView final {
 
 class PyAttentionMetadataView final {
  public:
-  explicit PyAttentionMetadataView(
-      std::shared_ptr<layer::AttentionMetadata> metadata);
   PyAttentionMetadataView(std::shared_ptr<layer::AttentionMetadata> metadata,
                           const ModelParamsView& params,
-                          int32_t dummy_token_count = 1);
+                          int32_t num_speculative_tokens = 0);
 
   const torch::Tensor& slot_mapping() const;
   pybind11::object local_slot_mapping() const;

@@ -67,49 +67,32 @@ std::vector<Sequence*> Batch::get_sequences() const {
   return state_.group_sequences();
 }
 
-LlmForwardInput Batch::prepare_forward_input(uint32_t num_decoding_tokens,
-                                             uint32_t min_decoding_batch_size,
-                                             const ModelArgs& args,
-                                             int32_t cp_size) {
-  const auto data = state_.prepare_sequence_input_data();
-  output_handler_.prepare(data);
-  return state_.build_sequence_input(
-      data, num_decoding_tokens, min_decoding_batch_size, args, cp_size);
-}
-
-LlmForwardInput Batch::prepare_forward_input(
+template <typename Input>
+Input Batch::prepare_forward_input(
     const ModelArgs& args,
     ThreadPool* thread_pool,
     int32_t cp_size,
     SharedKVCacheMappingTracker* mapping_tracker) {
-  const auto data = state_.prepare_distributed_input_data();
+  const auto data = state_.prepare_batch_input();
   output_handler_.prepare(data);
-  return state_.build_distributed_input(
+  return state_.build_forward_input<Input>(
       data, args, thread_pool, cp_size, mapping_tracker);
 }
+
+template LlmForwardInput Batch::prepare_forward_input<LlmForwardInput>(
+    const ModelArgs&,
+    ThreadPool*,
+    int32_t,
+    SharedKVCacheMappingTracker*);
+template VlmForwardInput Batch::prepare_forward_input<VlmForwardInput>(
+    const ModelArgs&,
+    ThreadPool*,
+    int32_t,
+    SharedKVCacheMappingTracker*);
 
 void Batch::process_sample_output(const RawForwardOutput& output,
                                   BatchOutputAction action) {
   output_handler_.process_sample_output(get_sequences(), output, action);
-}
-
-VlmForwardInput Batch::prepare_vlm_forward_input(
-    uint32_t num_decoding_tokens,
-    uint32_t min_decoding_batch_size,
-    const ModelArgs& args,
-    int32_t cp_size) {
-  const auto data = state_.prepare_sequence_input_data();
-  output_handler_.prepare(data);
-  return state_.build_vlm_sequence_input(
-      data, num_decoding_tokens, min_decoding_batch_size, args, cp_size);
-}
-
-VlmForwardInput Batch::prepare_vlm_forward_input(const ModelArgs& args,
-                                                 ThreadPool* thread_pool,
-                                                 int32_t cp_size) {
-  const auto data = state_.prepare_distributed_input_data();
-  output_handler_.prepare(data);
-  return state_.build_vlm_distributed_input(data, args, thread_pool, cp_size);
 }
 
 void Batch::process_sample_output(const SampleOutput& output,

@@ -54,19 +54,7 @@ def is_deepseek_v4_model(config: dict) -> bool:
     )
 
 
-# Block-diffusion draft model types (mirrors
-# is_block_draft_model_type / is_dspark_draft_model_type in
-# xllm/core/framework/model/model_args.h).
 _DSPARK_DRAFT_MODEL_TYPES = ("DSparkDraftModel", "glm5_dspark", "deepseek_v4_dspark")
-_BLOCK_DRAFT_MODEL_TYPES = (
-    "DFlashDraftModel",
-    "DFlash2DraftModel",
-) + _DSPARK_DRAFT_MODEL_TYPES
-
-
-def is_block_draft_model(config: dict) -> bool:
-    """Whether the config describes a block-diffusion draft (DFlash/DFlash2/DSpark)."""
-    return config.get("model_type", "") in _BLOCK_DRAFT_MODEL_TYPES
 
 
 def is_dspark_draft_model(config: dict) -> bool:

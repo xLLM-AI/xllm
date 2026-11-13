@@ -228,19 +228,14 @@ const layer::ExpandedDecodeMetadata& PyExpandedDecodeMetadataView::metadata()
 }
 
 PyAttentionMetadataView::PyAttentionMetadataView(
-    std::shared_ptr<layer::AttentionMetadata> metadata)
+    std::shared_ptr<layer::AttentionMetadata> metadata,
+    const ModelParamsView& params,
+    int32_t num_speculative_tokens)
     : metadata_(std::move(metadata)),
       kv_seq_lens_host_(
           make_host_int32_view(metadata_, metadata_->kv_seq_lens_vec)),
       q_seq_lens_host_(
-          make_host_int32_view(metadata_, metadata_->q_seq_lens_vec)) {}
-
-PyAttentionMetadataView::PyAttentionMetadataView(
-    std::shared_ptr<layer::AttentionMetadata> metadata,
-    const ModelParamsView& params,
-    int32_t dummy_token_count)
-    : PyAttentionMetadataView(std::move(metadata)) {
-  CHECK_GT(dummy_token_count, 0);
+          make_host_int32_view(metadata_, metadata_->q_seq_lens_vec)) {
   if (!params.multi_block_tables.empty()) {
     new_cache_slots_host_values_ = params.attention.host.new_cache_slots;
   }
@@ -280,7 +275,7 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   std::replace(dp_execution_token_counts_.begin(),
                dp_execution_token_counts_.end(),
                /*old_value=*/0,
-               dummy_token_count);
+               num_speculative_tokens + 1);
   dp_is_decode_ = params.parallel.dp_is_decode;
   if (params.enable_graph && raw_dp_execution_token_counts_.empty()) {
     // Prepared ordinary decode has one token per actual sequence, before

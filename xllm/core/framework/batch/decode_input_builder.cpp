@@ -319,7 +319,7 @@ DecodeBuildBuffers expand_decode_inputs(
     const DecodeBatchContext& ctx,
     const DecodeExpansionOptions& decode_options) {
   const int32_t num_reqs = ctx.num_requests;
-  const int32_t num_val_tokens = decode_options.num_val_tokens;
+  const int32_t num_val_tokens = (decode_options.num_speculative_tokens + 1);
   const int32_t total = num_reqs * num_val_tokens;
   DecodeBuildBuffers buf;
 
@@ -429,7 +429,7 @@ template void build_decode_metadata(VlmModelParams&,
 
 void build_idle_decode_input(LlmForwardInput& input,
                              const DecodeExpansionOptions& decode_options) {
-  const int32_t query_width = decode_options.num_val_tokens;
+  const int32_t query_width = (decode_options.num_speculative_tokens + 1);
   CHECK(decode_options.mask_token_id.has_value());
   DecodeBuildBuffers buf;
   buf.out_block_table_stride = 1;

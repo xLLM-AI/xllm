@@ -20,8 +20,6 @@ limitations under the License.
 namespace py = pybind11;
 #include <torch/torch.h>
 
-#include <atomic>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -78,8 +76,6 @@ namespace py = pybind11;
 #include "parser/reasoning_parser.h"
 #include "server/xllm_server_registry.h"
 using namespace xllm;
-
-static std::atomic<uint32_t> signal_received{0};
 
 namespace {
 
@@ -249,13 +245,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
 }
 
 }  // namespace
-
-void shutdown_handler(int signal) {
-  // Async-signal-safe only: _Exit skips atexit/static teardown, which would
-  // release the embedded-CPython pybind11 objects without the GIL.
-  static_cast<void>(signal);
-  std::_Exit(1);
-}
 
 void validate_config(const std::string& model_type) {
   ModelConfig& model_config = ModelConfig::get_instance();

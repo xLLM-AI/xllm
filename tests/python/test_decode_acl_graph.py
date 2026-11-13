@@ -41,8 +41,7 @@ def _runner(
     max_batch: int = 8,
     max_model_len: int = 8,
     dp_size: int = 1,
-    num_decoding_tokens: int = 1,
-    spec_verify_width: int = 1,
+    num_speculative_tokens: int = 0,
     enable_graph_mode_decode_no_padding: bool = False,
     enable_mega_moe_token_mask: bool = False,
     device_kv_lengths: bool = False,
@@ -56,8 +55,7 @@ def _runner(
         max_batch=max_batch,
         max_model_len=max_model_len,
         dp_size=dp_size,
-        num_decoding_tokens=num_decoding_tokens,
-        spec_verify_width=spec_verify_width,
+        num_speculative_tokens=num_speculative_tokens,
         enable_graph_mode_decode_no_padding=enable_graph_mode_decode_no_padding,
         enable_mega_moe_token_mask=enable_mega_moe_token_mask,
         device_kv_lengths=device_kv_lengths,
@@ -116,7 +114,7 @@ def _capacity_metadata(rows: int, kv_length: int = 1, query_width: int = 1) -> S
 
 
 def test_shared_gdn_verify_admission_uses_bound_model_capability() -> None:
-    runner = _runner(num_decoding_tokens=2, spec_verify_width=2)
+    runner = _runner(num_speculative_tokens=1)
     builder = SimpleNamespace(supports_linear_spec_verify_graph=False)
 
     def bind(_caches: list[LayerCache]) -> None:
@@ -134,9 +132,8 @@ def test_shared_gdn_verify_admission_uses_bound_model_capability() -> None:
     )
 
 
-@pytest.mark.parametrize("spec_verify_width", [1, 2])
-def test_shared_kda_verify_still_requires_role_specific_graph_support(spec_verify_width: int) -> None:
-    runner = _runner(num_decoding_tokens=2, spec_verify_width=spec_verify_width)
+def test_shared_kda_verify_still_requires_role_specific_graph_support() -> None:
+    runner = _runner(num_speculative_tokens=1)
     runner.attention_backend.shared_kv_layout = object()
     runner.attention_backend.supports_linear_spec_verify_graph = False
 
@@ -172,7 +169,7 @@ def test_decode_startup_captures_all_kv_capacities_from_short_metadata() -> None
 def test_decode_startup_tracks_sparse_prefix_rows_and_expanded_verify_separately() -> None:
     runner = _runner(
         max_batch=160,
-        num_decoding_tokens=5,
+        num_speculative_tokens=4,
         enable_graph_mode_decode_no_padding=True,
         device_kv_lengths=True,
     )
@@ -189,18 +186,20 @@ def test_decode_startup_tracks_sparse_prefix_rows_and_expanded_verify_separately
             metadata = _capacity_metadata(rows)
             assert runner.prepare_execution(tokens, metadata, is_graph_warmup=True) is not None
             runner.warmup(tokens, tokens, metadata, is_graph_warmup=True)
-            assert runner.can_execute(tokens, metadata)
+            assert runner.prepare_execution(tokens, metadata) is not None
 
         missing_tokens = torch.arange(16, dtype=torch.int32)
-        assert not runner.can_execute(missing_tokens, _capacity_metadata(16))
+        assert runner.prepare_execution(missing_tokens, _capacity_metadata(16)) is None
         tokens = torch.arange(75, dtype=torch.int32)
         expanded_metadata = _capacity_metadata(75, query_width=5)
-        assert not runner.can_execute(tokens, expanded_metadata)
+        assert runner.prepare_execution(tokens, expanded_metadata) is None
         assert runner.prepare_execution(tokens, expanded_metadata, is_graph_warmup=True) is not None
         runner.warmup(tokens, tokens, expanded_metadata, is_graph_warmup=True)
-        assert runner.can_execute(tokens, expanded_metadata)
-        assert runner.can_execute(tokens, _capacity_metadata(75))
-        assert not runner.can_execute(torch.arange(15, dtype=torch.int32), _capacity_metadata(15, query_width=5))
+        assert runner.prepare_execution(tokens, expanded_metadata) is not None
+        assert runner.prepare_execution(tokens, _capacity_metadata(75)) is not None
+        assert (
+            runner.prepare_execution(torch.arange(15, dtype=torch.int32), _capacity_metadata(15, query_width=5)) is None
+        )
         assert capture.call_count == 3
 
 
@@ -925,7 +924,7 @@ def test_block_draft_inherited_execute_keeps_entry_preparation_signature() -> No
 @pytest.mark.parametrize("mode", ["plain", "mtp_target", "spec_draft"])
 def test_replay_selects_stream_and_preserves_output_ownership(has_tasks: bool, has_mtp_inputs: bool, mode: str) -> None:
     runner = _runner()
-    runner.num_decoding_tokens = 4 if mode == "mtp_target" else 1
+    runner.num_speculative_tokens = (4 if mode == "mtp_target" else 1) - 1
     runner._is_spec_draft = mode == "spec_draft"
     caller = Mock()
     capture = Mock()
@@ -1316,8 +1315,7 @@ def test_capture_preserves_live_state_until_first_replay(
     runner = _runner(
         max_batch=max(8, 2 * width),
         max_model_len=max(8, 2 * width),
-        num_decoding_tokens=width,
-        spec_verify_width=1 if is_mla else width,
+        num_speculative_tokens=width - 1,
         enable_graph_mode_decode_no_padding=no_padding,
     )
     runner.attention_backend.is_mla = is_mla
@@ -1495,7 +1493,7 @@ def test_dsa_graph_tables_use_compressed_block_counts() -> None:
     metadata.kv_seq_lens_host_values = None
     metadata.paged_kv_indptr = torch.tensor([0, 1], dtype=torch.int32)
     metadata.paged_kv_last_page_len = torch.tensor([1], dtype=torch.int32)
-    assert not runner.can_execute(torch.arange(4, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None
 
 
 def test_dsa_graph_refreshes_every_manager_and_clears_tails() -> None:
@@ -1626,7 +1624,7 @@ def test_dp_empty_rank_uses_group_wide_acl_graph_bucket(capacity: int, peer_rows
     metadata.dp_execution_token_counts = (peer_rows, 1)
     metadata.dp_is_decode = (1, 1)
     input_ids = torch.zeros(1, dtype=torch.int32)
-    assert runner.can_execute(input_ids, metadata) is (padded_rows is not None)
+    assert (runner.prepare_execution(input_ids, metadata) is not None) is (padded_rows is not None)
     if padded_rows is None:
         with pytest.raises(ValueError, match="decode batch exceeds ACL graph capacity"):
             runner._padded_batch_size(1, metadata)
@@ -1643,9 +1641,9 @@ def test_dp_acl_graph_rejects_invalid_peers(counts: tuple[int, ...], phases: tup
     metadata.dp_is_decode = phases
     if len(counts) != 2:
         with pytest.raises(RuntimeError, match="valid dp_execution_token_counts"):
-            runner.can_execute(torch.zeros(3, dtype=torch.int32), metadata)
+            runner.prepare_execution(torch.zeros(3, dtype=torch.int32), metadata)
     else:
-        assert not runner.can_execute(torch.zeros(3, dtype=torch.int32), metadata)
+        assert runner.prepare_execution(torch.zeros(3, dtype=torch.int32), metadata) is None
 
 
 def test_dp_graph_variant_ids_distinguish_mtp_input_signatures() -> None:
@@ -1831,7 +1829,7 @@ def test_dsv4_decode_admits_scheduler_slots_when_top_level_mapping_is_empty() ->
     metadata.multi_block_tables = (torch.tensor([[10, 0], [20, 0], [30, 0], [40, 0]], dtype=torch.int32),)
     metadata.new_cache_slots_host_values = [301, 302, 401, 402]
 
-    assert runner.can_execute(torch.arange(4, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is not None
     assert runner._effective_slot_mapping(metadata, 4, torch.device("cpu")).tolist() == [
         301,
         302,
@@ -1910,8 +1908,8 @@ def test_dp_real_and_dummy_decode_share_graph_admission() -> None:
     )
     input_ids = torch.tensor([1], dtype=torch.int32)
 
-    assert real_runner.can_execute(input_ids, make_metadata(is_dummy=False))
-    assert dummy_runner.can_execute(input_ids, make_metadata(is_dummy=True))
+    assert real_runner.prepare_execution(input_ids, make_metadata(is_dummy=False)) is not None
+    assert dummy_runner.prepare_execution(input_ids, make_metadata(is_dummy=True)) is not None
 
 
 def test_decode_rejects_mismatched_linear_state_validity_mask() -> None:
@@ -1919,7 +1917,7 @@ def test_decode_rejects_mismatched_linear_state_validity_mask() -> None:
     metadata = _metadata(torch.arange(4, dtype=torch.int32))
     metadata.has_initial_state = torch.ones(3, dtype=torch.int32)
 
-    assert not runner.can_execute(torch.arange(4, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None
 
 
 def test_capture_token_limit_bounds_graph_admission() -> None:
@@ -1927,7 +1925,7 @@ def test_capture_token_limit_bounds_graph_admission() -> None:
     with patch.object(runner, "_has_compatible_decode_metadata", return_value=True):
         for rows, expected in ((8, True), (16, True), (24, False)):
             metadata = _metadata(torch.arange(rows, dtype=torch.int32))
-            assert runner.can_execute(torch.arange(rows), metadata) is expected
+            assert (runner.prepare_execution(torch.arange(rows), metadata) is not None) is expected
 
 
 def test_decode_rejects_mismatched_linear_state_indices_without_cache_probe() -> None:
@@ -1936,7 +1934,7 @@ def test_decode_rejects_mismatched_linear_state_indices_without_cache_probe() ->
     metadata.linear_state_indices = torch.arange(3, dtype=torch.int32)
 
     with patch.object(runner, "_has_compatible_index_history", side_effect=AssertionError):
-        assert not runner.can_execute(torch.arange(4, dtype=torch.int32), metadata)
+        assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None
 
 
 @pytest.mark.parametrize("speculative_tokens", [3, 7], ids=["mtp", "dspark"])
@@ -1951,7 +1949,7 @@ def test_mla_speculative_decode_ignores_unused_linear_state_rows(speculative_tok
         max_batch=dp_size * rows,
         max_model_len=32,
         dp_size=dp_size,
-        num_decoding_tokens=rows,
+        num_speculative_tokens=rows - 1,
     )
     runner.bind_layer_caches([LayerCache(torch.zeros(1), torch.zeros(1), index=torch.zeros(1))])
     metadata = _metadata(torch.arange(rows, dtype=torch.int32))
@@ -1962,7 +1960,7 @@ def test_mla_speculative_decode_ignores_unused_linear_state_rows(speculative_tok
     metadata.dp_global_kv_max_seq_lens = (rows,) * dp_size
     metadata.dp_is_decode = (1,) * dp_size
 
-    assert runner.can_execute(torch.arange(rows, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.arange(rows, dtype=torch.int32), metadata) is not None
 
 
 @pytest.mark.parametrize("cache_slot", ["conv", "ssm"])
@@ -1974,7 +1972,7 @@ def test_hybrid_mla_rejects_mismatched_recurrent_metadata(cache_slot: str, inval
     metadata = _metadata(torch.arange(4, dtype=torch.int32))
     setattr(metadata, invalid_field, torch.zeros(1, dtype=torch.int32))
 
-    assert not runner.can_execute(torch.arange(4, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None
 
 
 def test_mla_admission_retains_index_history_capacity_check() -> None:
@@ -1985,4 +1983,4 @@ def test_mla_admission_retains_index_history_capacity_check() -> None:
     metadata = _metadata(torch.arange(4, dtype=torch.int32))
     metadata.linear_state_indices = torch.tensor([-1], dtype=torch.int32)
 
-    assert not runner.can_execute(torch.arange(4, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None

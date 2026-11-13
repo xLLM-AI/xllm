@@ -53,8 +53,8 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
     return output;
   } else {
     LlmForwardInput new_input = input.clone();
-    scale_speculative_parallel_token_counts(
-        new_input.input_params, options_.num_speculative_tokens() + 1);
+    scale_speculative_parallel_token_counts(new_input.input_params,
+                                            options_.num_speculative_tokens());
 
     auto future = impl_->step_async(new_input);
     ForwardOutput output = std::move(future).get().value();

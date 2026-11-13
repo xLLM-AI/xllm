@@ -85,7 +85,8 @@ class DeepseekV4ModelImpl final
   explicit DeepseekV4ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::DeepseekV4DecoderLayer>(
             "deepseek_v4",
-            context.get_model_args()) {
+            context.get_model_args()),
+        is_aux_hidden_capture_enabled_(context.num_speculative_tokens() > 0) {
     const ModelArgs& model_args = context.get_model_args();
     const torch::TensorOptions options = context.get_tensor_options();
     const ParallelArgs& parallel_args = context.get_parallel_args();
@@ -252,7 +253,7 @@ class DeepseekV4ModelImpl final
     h = hc_head_(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
     ModelOutput out(hidden_states, residual_out);
-    if (model_args_.num_speculative_tokens() > 0) {
+    if (is_aux_hidden_capture_enabled_) {
       out.aux_hidden_states = pre_hc_head_h.flatten(1);
     }
     return out;
@@ -264,6 +265,7 @@ class DeepseekV4ModelImpl final
   using DeepseekV4Base::requires_graph_forward_metadata;
 
  private:
+  bool is_aux_hidden_capture_enabled_ = false;
   layer::MHCHead hc_head_{nullptr};
   int64_t num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;

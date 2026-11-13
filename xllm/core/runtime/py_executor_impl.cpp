@@ -171,12 +171,10 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
                                const runtime::Options& options)
     : py_causal_lm_(dynamic_cast<PyCausalLM*>(model)),
       args_(args),
-      dummy_token_count_(dummy_token_count(args)),
       device_(device),
       options_(options),
       enable_mla_(args.enable_mla()) {
   CHECK(py_causal_lm_ != nullptr) << "PyExecutorImpl requires PyCausalLM";
-  CHECK_GT(dummy_token_count_, 0);
   py::gil_scoped_acquire gil;
   ensure_xllm_runtime_module();
   py::module_ executor_module =
@@ -184,12 +182,13 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   // These values belong to the executor, not the checkpoint. In particular,
   // the MTP draft has different speculative options from its target.
   py::dict executor_config = py_causal_lm_->config_dict().attr("copy")();
+  num_speculative_tokens_ =
+      executor_config["num_speculative_tokens"].cast<int32_t>();
   executor_config["enable_disagg_pd"] = options_.enable_disagg_pd();
   executor_config["instance_role"] = options_.instance_role().to_string();
   executor_config["task_type"] = options_.task_type();
   executor_config["max_encoder_cache_size"] = options_.max_encoder_cache_size();
   executor_config["num_speculative_tokens"] = options_.num_speculative_tokens();
-  executor_config["mtp_draft_prefix_width"] = options_.mtp_draft_prefix_width();
   executor_config["engine_type"] = SpeculativeConfig::uses_ssm_engine(
                                        options_.draft_model_path().value_or(""),
                                        options_.speculative_algorithm(),
@@ -218,17 +217,15 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   // full-block ACL runner when the worker requests graph execution.
   const bool independent_block_graph =
       Platform::is_npu() && is_dflash2_draft_model_type(args_.model_type()) &&
-      options_.enable_graph() && options_.num_decoding_tokens() > 1;
+      options_.enable_graph() && options_.num_speculative_tokens() > 0;
   if (independent_block_graph) {
-    executor_config["enable_graph"] = options_.enable_graph();
-    executor_config["python_graph_backend"] =
-        options_.enable_graph() ? "aclgraph" : "off";
+    executor_config["enable_graph"] = true;
+    executor_config["python_graph_backend"] = "aclgraph";
   }
   py_executor_ = executor_module.attr("ModelExecutor")(
       py_causal_lm_->python_model(),
       executor_config,
       options_.max_seqs_per_batch(),
-      options_.num_decoding_tokens(),
       ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
   py_causal_lm_->set_context_kv_graph_runner(
       py_executor_.attr("context_kv_graph_runner"));
@@ -302,7 +299,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   bind_kv_caches(kv_caches);
 
   py::object py_metadata = py::cast(
-      PyAttentionMetadataView(attn_metadata, params, dummy_token_count_));
+      PyAttentionMetadataView(attn_metadata, params, num_speculative_tokens_));
   py::object py_input_batch_metadata =
       requires_input_batch_metadata_
           ? py::cast(ExecutionBatchMetadata(params.meta.execution_batch))

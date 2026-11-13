@@ -22,15 +22,15 @@ limitations under the License.
 
 namespace xllm::spawn_worker_protocol {
 
-inline constexpr int32_t kArgumentCount = 41;
-inline constexpr int32_t kMinimumArgumentCount = 34;
-inline constexpr int32_t kIndexerCacheDtypeArgumentIndex = 34;
-inline constexpr int32_t kEnableMtpDraftBodyTp1ArgumentIndex = 35;
-inline constexpr int32_t kTextEncoderTpSizeArgumentIndex = 36;
-inline constexpr int32_t kEnableProbabilisticDraftArgumentIndex = 37;
-inline constexpr int32_t kKvSplitSizeArgumentIndex = 38;
-inline constexpr int32_t kModelImplArgumentIndex = 39;
-inline constexpr int32_t kExtensionImplArgumentIndex = 40;
+inline constexpr int32_t kArgumentCount = 40;
+inline constexpr int32_t kMinimumArgumentCount = 33;
+inline constexpr int32_t kIndexerCacheDtypeArgumentIndex = 33;
+inline constexpr int32_t kEnableMtpDraftBodyTp1ArgumentIndex = 34;
+inline constexpr int32_t kTextEncoderTpSizeArgumentIndex = 35;
+inline constexpr int32_t kEnableProbabilisticDraftArgumentIndex = 36;
+inline constexpr int32_t kKvSplitSizeArgumentIndex = 37;
+inline constexpr int32_t kModelImplArgumentIndex = 38;
+inline constexpr int32_t kExtensionImplArgumentIndex = 39;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
 
 inline std::optional<std::string> parse_indexer_cache_dtype(

@@ -629,7 +629,7 @@ class CancelledOverlapEngine final : public FakeEngine {
       if (batch.empty()) {
         continue;
       }
-      batch.prepare_forward_input(1, 0, model_args());
+      batch.prepare_forward_input(model_args());
       RawForwardOutput output;
       for (Sequence* sequence : batch.get_sequences()) {
         RawSampleOutput sample;
@@ -1700,8 +1700,7 @@ TEST(ContinuousSchedulerFactoryTest,
   ASSERT_EQ(batches.size(), 1);
   ASSERT_EQ(batches[0].size(), 1);
 
-  const auto forward_input =
-      batches[0].prepare_forward_input(1, 0, ModelArgs());
+  const auto forward_input = batches[0].prepare_forward_input(ModelArgs());
   EXPECT_TRUE(
       forward_input.input_params.meta.batch_forward_type.is_chunked_prefill());
   EXPECT_FALSE(forward_input.input_params.meta.batch_forward_type.is_mixed());

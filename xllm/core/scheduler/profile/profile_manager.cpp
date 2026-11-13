@@ -82,12 +82,11 @@ int32_t decode_warmup_token_bucket(const DecodeGraphWarmupPlan& plan,
                                    int32_t dp_size) {
   CHECK_GT(global_batch_size, 0);
   CHECK_GT(dp_size, 0);
-  CHECK_GT(plan.warmup_config.num_decoding_tokens, 0);
   const int32_t local_sequence_batch_size =
       (global_batch_size + dp_size - 1) / dp_size;
   const int64_t num_token_rows =
       static_cast<int64_t>(local_sequence_batch_size) *
-      plan.warmup_config.num_decoding_tokens;
+      (plan.warmup_config.num_speculative_tokens + 1);
   return static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
       num_token_rows, plan.warmup_config.enable_graph_mode_decode_no_padding));
 }
@@ -794,13 +793,10 @@ std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
   req_state.is_graph_warmup = is_graph_warmup;
   const int32_t num_speculative_tokens =
       decode_graph_warmup_plan_.warmup_config.num_speculative_tokens;
-  const int64_t num_decoding_tokens =
-      decode_graph_warmup_plan_.warmup_config.num_decoding_tokens;
-  CHECK_GT(num_decoding_tokens, 0);
   size_t seq_capacity = static_cast<size_t>(total_length) +
-                        static_cast<size_t>(num_decoding_tokens);
+                        static_cast<size_t>(num_speculative_tokens + 1);
   if (options_.enable_schedule_overlap()) {
-    seq_capacity += static_cast<size_t>(num_decoding_tokens);
+    seq_capacity += static_cast<size_t>(num_speculative_tokens + 1);
   }
   req_state.seq_capacity = seq_capacity;
   auto request = std::make_shared<Request>(

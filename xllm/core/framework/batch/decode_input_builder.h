@@ -118,7 +118,7 @@ void update_kv_lengths_and_slots(Params& params, DecodeBuildBuffers& buf) {
 }
 
 struct DecodeInputOptions {
-  int32_t num_val_tokens = 1;
+  int32_t num_speculative_tokens = 0;
   bool per_request = false;
   BatchForwardType forward_type = BatchForwardType::DECODE;
   // Emit query_start_loc (leading 0) instead of cu_num_tokens (zero-free).
@@ -136,11 +136,11 @@ DecodeBuildBuffers expand_decode_inputs(
     const DecodeBatchContext& ctx,
     const DecodeExpansionOptions& decode_options);
 
-inline DecodeExpansionOptions make_verify_layout(int32_t num_val_tokens,
+inline DecodeExpansionOptions make_verify_layout(int32_t num_speculative_tokens,
                                                  int32_t block_size,
                                                  bool chunked) {
   DecodeExpansionOptions decode_options;
-  decode_options.num_val_tokens = num_val_tokens;
+  decode_options.num_speculative_tokens = num_speculative_tokens;
   decode_options.block_size = block_size;
   decode_options.per_request = chunked;
   decode_options.forward_type =
@@ -156,10 +156,12 @@ void update_decode_batch_metadata(Params& input_params,
   input_params.meta.num_sequences = num_requests;
   if (!decode_options.per_request && !decode_options.causal &&
       input_params.meta.actual_num_sequences > 0) {
-    input_params.meta.actual_num_sequences *= decode_options.num_val_tokens;
+    input_params.meta.actual_num_sequences *=
+        (decode_options.num_speculative_tokens + 1);
   }
   input_params.meta.q_max_seq_len =
-      decode_options.per_request ? decode_options.num_val_tokens : 1;
+      decode_options.per_request ? (decode_options.num_speculative_tokens + 1)
+                                 : 1;
   input_params.meta.batch_forward_type = decode_options.forward_type;
 }
 

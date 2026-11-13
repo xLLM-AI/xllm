@@ -20,7 +20,6 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "core/framework/config/model_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
@@ -29,8 +28,6 @@ limitations under the License.
 #include "core/platform/platform.h"
 #include "core/runtime/llm_worker_impl.h"
 #include "core/runtime/options.h"
-#include "core/util/scope_guard.h"
-#include "core/util/slice.h"
 
 namespace xllm {
 namespace {
@@ -233,90 +230,5 @@ TEST_F(WorkerHierarchyKVCacheTransferTest,
 }
 
 }  // namespace
-TEST_F(WorkerHierarchyKVCacheTransferTest,
-       EmptyHybridTargetInitializesAndResetsAcceptedTokens) {
-  ModelArgs model_args = make_model_args();
-  model_args.full_attention_interval(2).num_speculative_tokens(3);
-  runtime::Options options = make_runtime_options(0.0);
-  options.world_size(2)
-      .dp_size(2)
-      .num_decoding_tokens(4)
-      .enable_speculative_decode(true)
-      .enable_schedule_overlap(false);
-  const ParallelArgs parallel_args(
-      /*rank=*/1,
-      /*world_size=*/2,
-      /*dp_size=*/2,
-      /*process_group=*/nullptr);
-  TestHierarchyWorker worker(
-      parallel_args, device_->unwrap(), options, model_args);
-
-  for (bool has_previous_acceptance : {false, true}) {
-    LlmForwardInput input;
-    input.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
-    input.input_params.parallel.dp_global_token_nums = {4, 0};
-    input.input_params.parallel.raw_dp_global_token_nums = {4, 0};
-    if (has_previous_acceptance) {
-      input.input_params.num_accepted_tokens_host = {4, 2};
-      input.input_params.num_accepted_tokens =
-          torch::tensor({4, 2}, torch::kInt32);
-    }
-    LlmForwardInput prepared;
-    worker.prepare_work_before_execute(input, prepared);
-
-    EXPECT_EQ(prepared.input_params.meta.num_sequences, 0);
-    EXPECT_EQ(prepared.token_ids.numel(), 4);
-    EXPECT_EQ(prepared.input_params.num_accepted_tokens_host,
-              std::vector<int64_t>({1}));
-    const torch::Tensor& accepted = prepared.input_params.num_accepted_tokens;
-    ASSERT_TRUE(accepted.defined());
-    EXPECT_EQ(accepted.scalar_type(), torch::kInt32);
-    EXPECT_EQ(accepted.device(), device_->unwrap());
-    EXPECT_TRUE(torch::equal(accepted.cpu(), torch::ones({1}, torch::kInt32)));
-    EXPECT_TRUE(
-        torch::equal(prepared.input_params.embedding.linear_state_indices.cpu(),
-                     torch::zeros({4}, torch::kInt32)));
-  }
-}
-
-TEST_F(WorkerHierarchyKVCacheTransferTest,
-       EmptyNonSpeculativeOrDenseTargetLeavesAcceptanceAbsent) {
-  auto& model_config = ModelConfig::get_instance();
-  const auto model_impl = model_config.model_impl();
-  ScopeGuard restore_model_impl([&] { model_config.model_impl(model_impl); });
-  model_config.model_impl("python");
-  for (int32_t decoding_tokens : {1, 4}) {
-    ModelArgs model_args = make_model_args();
-    model_args.full_attention_interval(decoding_tokens == 1 ? 2 : 1)
-        .num_speculative_tokens(decoding_tokens - 1);
-    runtime::Options options = make_runtime_options(0.0);
-    options.world_size(2)
-        .dp_size(2)
-        .num_decoding_tokens(decoding_tokens)
-        .enable_speculative_decode(decoding_tokens > 1)
-        .enable_schedule_overlap(false);
-    const ParallelArgs parallel_args(
-        /*rank=*/1,
-        /*world_size=*/2,
-        /*dp_size=*/2,
-        /*process_group=*/nullptr);
-    TestHierarchyWorker worker(
-        parallel_args, device_->unwrap(), options, model_args);
-
-    LlmForwardInput input;
-    input.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
-    input.input_params.parallel.dp_global_token_nums = {4, 0};
-    input.input_params.parallel.raw_dp_global_token_nums = {4, 0};
-    LlmForwardInput prepared;
-    worker.prepare_work_before_execute(input, prepared);
-
-    const auto& execution = prepared.input_params.meta.execution_batch;
-    EXPECT_EQ(execution.num_reqs, 0);
-    EXPECT_EQ(execution.num_tokens, prepared.token_ids.numel());
-    EXPECT_EQ(execution.query_start_loc, std::vector<int32_t>({0}));
-    EXPECT_TRUE(prepared.input_params.num_accepted_tokens_host.empty());
-    EXPECT_FALSE(prepared.input_params.num_accepted_tokens.defined());
-  }
-}
 
 }  // namespace xllm

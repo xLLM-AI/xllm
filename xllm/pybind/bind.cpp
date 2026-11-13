@@ -63,8 +63,14 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("max_seqs_per_batch", &Options::max_seqs_per_batch_)
       .def_readwrite("max_tokens_per_chunk_for_prefill",
                      &Options::max_tokens_per_chunk_for_prefill_)
-      .def_readwrite("num_speculative_tokens",
-                     &Options::num_speculative_tokens_)
+      .def_property(
+          "num_speculative_tokens",
+          [](const Options& options) {
+            return options.num_speculative_tokens();
+          },
+          [](Options& options, int32_t value) {
+            options.num_speculative_tokens(value);
+          })
       .def_readwrite("speculative_algorithm", &Options::speculative_algorithm_)
       .def_readwrite("num_request_handling_threads",
                      &Options::num_request_handling_threads_)

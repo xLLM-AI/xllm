@@ -106,7 +106,6 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
   registration.kv_cache_shape = kv_cache_shape;
   registration.create_options = create_options;
   registration.producer_stream = compute_stream;
-  registration.store_key_component = "main";
   register_cache(std::move(registration));
   CHECK(finalize_registration());
 }
@@ -144,6 +143,10 @@ HierarchyKVCacheTransfer::CacheHandle HierarchyKVCacheTransfer::register_cache(
   domain.create_options = std::move(registration.create_options);
   domain.producer_stream = registration.producer_stream;
   domain.store_key_component = std::move(registration.store_key_component);
+  if (domain.store_key_component.empty()) {
+    domain.store_key_component =
+        domain.role == CacheRole::TARGET ? "main" : "draft";
+  }
   const CacheHandle handle = domain.handle;
   cache_domains_.emplace_back(std::move(domain));
   return handle;

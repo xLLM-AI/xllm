@@ -47,6 +47,9 @@ REGISTER_MODEL_ARGS(glm5_dspark, [&] {
   SET_ARG(use_sliding_window, false);
   SET_ARG(sliding_window, -1);
   SET_ARG(tie_word_embeddings, false);
+  LOAD_ARG_OR_FUNC(block_size, "block_size", [&] {
+    return json.value_or<int64_t>("dspark_block_size", 0);
+  });
   LOAD_ARG_OR(markov_rank, "markov_rank", 256);
   LOAD_ARG_OR(enable_confidence_head, "enable_confidence_head", false);
   LOAD_ARG_OR(

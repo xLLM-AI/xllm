@@ -582,7 +582,6 @@ void init_shared_counts(const ModelArgs& model_args,
   CHECK_GT(capacity->num_full_attention_layers(), 0);
   CHECK_GT(capacity->num_linear_attention_layers(), 0);
   CHECK_EQ(options.layerwise_split_size, 1);
-  CHECK_GE(options.num_speculative_tokens, 0);
   CHECK_EQ(options.max_linear_state_cache_slots, 0)
       << "Shared static storage derives linear capacity from its arena.";
   CHECK_EQ(options.kv_cache_dtype, "auto")
@@ -975,8 +974,7 @@ KVCacheCapacity KVCacheEstimator::estimate(
       options.enable_prefix_cache() && !is_mtp_draft_engine;
   estimate_options.enable_disagg_pd = options.enable_disagg_pd();
   estimate_options.instance_role = options.instance_role();
-  estimate_options.num_speculative_tokens =
-      static_cast<int64_t>(options.num_speculative_tokens());
+  estimate_options.num_speculative_tokens = options.num_speculative_tokens();
   if (!context.is_multimodal) {
     estimate_options.dp_size = options.dp_size();
     estimate_options.enable_dp_fair_token_budget =
@@ -1124,7 +1122,6 @@ KVCacheCapacity estimate_kv_cache_capacity(
         << "Compressed KPool requires owned layer caches.";
     CHECK_EQ(options.dtype, torch::kBFloat16);
     CHECK_EQ(options.block_size % model_args.index_kpool(), 0);
-    CHECK_GE(options.num_speculative_tokens, 0);
     if (uses_compressed_kpool_tail_cache(model_args)) {
       // Preserve one complete pool plus speculative rows that may be rejected.
       // The verify base token advances the committed sequence and is already

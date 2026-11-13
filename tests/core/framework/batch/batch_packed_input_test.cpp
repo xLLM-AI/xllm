@@ -619,17 +619,11 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearReadWriteIds) {
 
   std::vector<Sequence*> sequences = {&seq, &second_sequence};
   std::vector<uint32_t> budgets = {4, 4};
-  ForwardInputBuilder builder(sequences,
-                              budgets,
-                              {},
-                              {},
-                              /*batch_id=*/1,
-                              nullptr,
-                              BatchForwardType::DECODE);
+  const BatchInputData batch_input_data{
+      sequences, {}, budgets, {}, {}, 1, BatchForwardType::DECODE};
+  ForwardInputBuilder builder(batch_input_data, nullptr);
 
-  LlmForwardInput input =
-      builder.build_forward_input(/*num_decoding_tokens=*/1,
-                                  /*min_decoding_batch_size=*/0);
+  LlmForwardInput input = builder.build_forward_input();
   ASSERT_EQ(input.input_params.meta.num_sequences, 2);
   input.input_params.meta.requires_host_restore = true;
   input.input_params.embedding.linear_state_ids = {7, 8};
@@ -1027,17 +1021,11 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> budgets = {4};
-  ForwardInputBuilder builder(sequences,
-                              budgets,
-                              {},
-                              {},
-                              /*batch_id=*/1,
-                              nullptr,
-                              BatchForwardType::DECODE);
+  const BatchInputData batch_input_data{
+      sequences, {}, budgets, {}, {}, 1, BatchForwardType::DECODE};
+  ForwardInputBuilder builder(batch_input_data, nullptr);
 
-  LlmForwardInput input =
-      builder.build_forward_input(/*num_decoding_tokens=*/1,
-                                  /*min_decoding_batch_size=*/0);
+  LlmForwardInput input = builder.build_forward_input();
   // A single temperature=1.0 sequence builds a uniform RANDOM batch, which
   // carries no do_sample (only mixed batches do); the packed roundtrip must
   // still restore the sampling mode and the per-sequence fields below.
@@ -1586,15 +1574,10 @@ TEST(BatchPackedInputTest, PackedProtoLazyToPreservesJsonMetadata) {
 
   std::vector<Sequence*> sequences = {&sequence};
   std::vector<uint32_t> allowed_max_tokens = {4};
-  ForwardInputBuilder builder(sequences,
-                              allowed_max_tokens,
-                              {},
-                              {},
-                              /*batch_id=*/2,
-                              nullptr,
-                              BatchForwardType::DECODE);
-  LlmForwardInput input = builder.build_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0);
+  const BatchInputData batch_input_data{
+      sequences, {}, allowed_max_tokens, {}, {}, 2, BatchForwardType::DECODE};
+  ForwardInputBuilder builder(batch_input_data, nullptr);
+  LlmForwardInput input = builder.build_forward_input();
 
   JsonObjectGrammar grammar({"{", "}", "stop"}, /*stop_token_ids=*/{2});
   JsonObjectGrammarState state = grammar.initial_state();

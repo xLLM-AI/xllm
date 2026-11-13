@@ -47,18 +47,18 @@ TEST(AclGraphBucketPolicyUnitTest, AdmitsNoPaddingMtpTokenBuckets) {
       /*batch_size=*/12,
       /*max_batch_size=*/16,
       /*dp_size=*/1,
-      /*num_decoding_tokens=*/4));
+      3));
   EXPECT_FALSE(npu::is_acl_graph_warmup_batch_size(
       /*batch_size=*/11,
       /*max_batch_size=*/16,
       /*dp_size=*/1,
-      /*num_decoding_tokens=*/4));
+      3));
   EXPECT_TRUE(npu::is_acl_graph_decode_capture_allowed(
       /*batch_size=*/12,
       /*max_batch_size=*/16,
       /*dp_size=*/1,
       /*is_graph_warmup=*/false,
-      /*num_decoding_tokens=*/4));
+      3));
 }
 
 TEST(AclGraphBucketPolicyUnitTest, AdmitsNonDivisibleDpMtpTailBucket) {
@@ -67,13 +67,13 @@ TEST(AclGraphBucketPolicyUnitTest, AdmitsNonDivisibleDpMtpTailBucket) {
       /*max_batch_size=*/7,
       /*dp_size=*/2,
       /*is_graph_warmup=*/false,
-      /*num_decoding_tokens=*/4));
+      3));
   EXPECT_TRUE(npu::is_acl_graph_decode_capture_allowed(
       /*batch_size=*/4,
       /*max_batch_size=*/7,
       /*dp_size=*/2,
       /*is_graph_warmup=*/false,
-      /*num_decoding_tokens=*/4));
+      3));
 }
 
 TEST(AclGraphBucketPolicyUnitTest, AppliesWarmupCapacityInLocalDpUnits) {

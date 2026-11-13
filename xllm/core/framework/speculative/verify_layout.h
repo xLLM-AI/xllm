@@ -34,13 +34,7 @@ struct SpecVerifyStats {
   std::vector<RequestStats> requests;
 };
 
-// Builds the per-request verify stats for one [batch, width] verify output.
-// per_seq_draft_counts carries the pruned widths when adaptive pruning shrank
-// individual sequences; null means every sequence used the full width-1 draft.
-SpecVerifyStats make_verify_stats(
-    const torch::Tensor& next_tokens,
-    const std::vector<int32_t>* per_seq_draft_counts,
-    const std::vector<int32_t>& num_accepted_tokens,
-    const std::vector<char>& constrained_mask);
+SpecVerifyStats make_verify_stats(const torch::Tensor& next_tokens,
+                                  const std::vector<char>& constrained_mask);
 
 }  // namespace xllm

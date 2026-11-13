@@ -110,6 +110,7 @@ cc_library(
     :worker_memory_resources
     :global_virtual_memory_region
     :kv_cache
+    :kv_cache_store_config_validation
     :kv_cache_estimation
     :static_kv_cache_tensor_allocator
     :virtual_memory_kv_cache_storage
@@ -131,6 +132,7 @@ cc_library(
     glog::glog
     Folly::folly
     absl::strings
+    absl::function_ref
     absl::synchronization
     absl::flat_hash_map
     absl::inlined_vector

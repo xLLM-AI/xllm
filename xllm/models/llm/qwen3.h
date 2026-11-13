@@ -327,11 +327,11 @@ REGISTER_MODEL_ARGS(qwen3, [&] {
   LOAD_ARG_OR(enable_confidence_head, "enable_confidence_head", false);
   LOAD_ARG_OR(
       confidence_head_with_markov, "confidence_head_with_markov", false);
-  // Key fallback order: "dflash_config.*" container first, then the flat
-  // top-level field, then the legacy "dflash2_*" spelling.
-  LOAD_ARG_OR_FUNC(dflash2_block_size, "dflash_config.block_size", [&] {
+  LOAD_ARG_OR_FUNC(block_size, "dflash_config.block_size", [&] {
     return json.value_or<int32_t>(
-        std::vector<std::string>{"block_size", "dflash2_block_size"}, 0);
+        std::vector<std::string>{
+            "block_size", "dflash2_block_size", "dspark_block_size"},
+        0);
   });
   LOAD_ARG_OR_FUNC(
       dflash2_conv_group_size, "dflash_config.conv_group_size", [&] {

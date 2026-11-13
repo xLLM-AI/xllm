@@ -248,9 +248,6 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* world_size_ptr = world_size_str.c_str();
   std::string device_idx_str = std::to_string(d.index());
   const char* device_idx_ptr = device_idx_str.c_str();
-  std::string num_decoding_tokens_str =
-      std::to_string(options.num_decoding_tokens());
-  const char* num_decoding_tokens_ptr = num_decoding_tokens_str.c_str();
   std::string block_size_str = std::to_string(options.block_size());
   const char* block_size_ptr = block_size_str.c_str();
   std::string max_tokens_per_batch_str =
@@ -348,7 +345,6 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         global_rank_ptr,
                         world_size_ptr,
                         device_idx_ptr,
-                        num_decoding_tokens_ptr,
                         block_size_ptr,
                         max_tokens_per_batch_ptr,
                         max_seqs_per_batch_ptr,

@@ -17,33 +17,16 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <sstream>
 #include <string>
 #include <tuple>
 #include <vector>
 
-#if defined(USE_NPU)
-#ifdef TORCH_HIGHER_THAN_PTA6
-#include <torch_npu/csrc/core/npu/NPUFormat.h>
-#else
-#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
-#endif
-#endif
-
 #include "kernels/ops_api.h"
 
-DECLARE_bool(enable_chunked_prefill);
 namespace xllm {
 namespace layer {
 
 namespace {
-
-int64_t tensor_bytes(const torch::Tensor& tensor) {
-  if (!tensor.defined()) {
-    return 0;
-  }
-  return tensor.numel() * tensor.element_size();
-}
 
 torch::Tensor get_first_defined_tensor(const StateDict& state_dict,
                                        const std::vector<std::string>& names) {
@@ -56,37 +39,7 @@ torch::Tensor get_first_defined_tensor(const StateDict& state_dict,
   return torch::Tensor();
 }
 
-std::string list_available_keys(const StateDict& state_dict) {
-  std::ostringstream os;
-  int count = 0;
-  for (const auto& kv : state_dict) {
-    if (count++ > 0) {
-      os << ", ";
-    }
-    os << kv.first;
-    if (count >= 20) {
-      os << ", ...";
-      break;
-    }
-  }
-  return os.str();
-}
-
 }  // namespace
-
-CompressorImpl::CompressorImpl(int64_t compress_ratio, int64_t head_dim)
-    : CompressorImpl(
-          compress_ratio,
-          head_dim,
-          64,
-          2,
-          1e-6,
-          torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU)) {}
-
-CompressorImpl::CompressorImpl(int64_t compress_ratio,
-                               int64_t head_dim,
-                               const torch::TensorOptions& options)
-    : CompressorImpl(compress_ratio, head_dim, 64, 2, 1e-6, options) {}
 
 CompressorImpl::CompressorImpl(int64_t compress_ratio,
                                int64_t head_dim,
@@ -215,8 +168,6 @@ void CompressorImpl::load_state_dict(const StateDict& state_dict) {
   }
 
   auto coff = enable_compressor_overlap_ ? 2 : 1;
-  const bool is_npu_device =
-      options_.device().type() == c10::DeviceType::PrivateUse1;
 
   if (wkv.defined()) {
     cmp_wkv_ = wkv.to(options_);
@@ -263,11 +214,6 @@ void CompressorImpl::load_state_dict(const StateDict& state_dict) {
         << "cmp_ape device mismatch, expected: " << options_.device()
         << ", actual: " << cmp_ape_.device();
   }
-}
-
-int64_t CompressorImpl::weight_bytes() const {
-  return tensor_bytes(cmp_wkv_) + tensor_bytes(cmp_wgate_) +
-         tensor_bytes(cmp_norm_) + tensor_bytes(cmp_ape_);
 }
 
 }  // namespace layer

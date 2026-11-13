@@ -36,7 +36,6 @@ limitations under the License.
 
 namespace xllm {
 
-class ForwardInputBuilderTestPeer;
 struct ModelArgs;
 class SharedKVCacheMappingTracker;
 
@@ -48,32 +47,13 @@ class ForwardInputBuilder final {
                       ThreadPool* thread_pool = nullptr,
                       SharedKVCacheMappingTracker* mapping_tracker = nullptr);
 
-  explicit ForwardInputBuilder(
-      const std::vector<Sequence*>& sequences,
-      const std::vector<uint32_t>& allowed_max_tokens,
-      const std::vector<torch::Tensor>& input_embeddings_vec,
-      const std::vector<MMData>& mm_data_vec,
-      const uint64_t batch_id,
-      const ModelArgs* args,
-      BatchForwardType batch_forward_type,
-      int32_t cp_size = 1,
-      ThreadPool* thread_pool = nullptr);
-
-  LlmForwardInput build_forward_input(uint32_t num_decoding_tokens,
-                                      uint32_t min_decoding_batch_size);
-  VlmForwardInput build_vlm_forward_input(uint32_t num_decoding_tokens,
-                                          uint32_t min_decoding_batch_size);
+  template <typename Input = LlmForwardInput>
+  Input build_forward_input();
 
  private:
-  friend class ForwardInputBuilderTestPeer;
-
   // Core building methods
   void process_sequences();
   void process_sequences_multithreaded();
-  template <typename Input>
-  Input state_to_forward_input();
-  void padding_decode_batch_size(uint32_t num_decoding_tokens,
-                                 uint32_t min_decoding_batch_size);
 
   static TransferKVInfo build_step_transfer_info(
       const TransferKVInfo& full_info,
@@ -132,10 +112,6 @@ class ForwardInputBuilder final {
     std::vector<torch::Tensor> mtp_bootstrap_embeddings;
     std::vector<TransferKVInfo> transfer_kv_infos;
     std::vector<MMData> scheduled_mm_data_vec;
-
-    // for continuous kvcache
-    std::vector<int64_t> new_cache_slot_offsets;  //[n_tokens]
-    std::vector<int64_t> kv_cache_start_offsets;  //[n_seq]
 
     // for flashinfer
     std::vector<int32_t> paged_kv_indptr = {0};

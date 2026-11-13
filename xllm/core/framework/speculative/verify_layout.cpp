@@ -15,51 +15,33 @@ limitations under the License.
 
 #include "core/framework/speculative/verify_layout.h"
 
-#include <glog/logging.h>
-
-#include <algorithm>
 #include <cstddef>
+
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 
-SpecVerifyStats make_verify_stats(
-    const torch::Tensor& next_tokens,
-    const std::vector<int32_t>* per_seq_draft_counts,
-    const std::vector<int32_t>& num_accepted_tokens,
-    const std::vector<char>& constrained_mask) {
-  CHECK(next_tokens.defined()) << "verify output tokens are undefined";
-  CHECK_EQ(next_tokens.dim(), 2)
-      << "verify output tokens should be [batch, width]";
+SpecVerifyStats make_verify_stats(const torch::Tensor& next_tokens,
+                                  const std::vector<char>& constrained_mask) {
   const int64_t batch_size = next_tokens.size(0);
   const int64_t num_verify_tokens = next_tokens.size(1);
-  CHECK_GT(batch_size, 0) << "verify output needs at least one row";
-  CHECK_GE(num_verify_tokens, 1)
-      << "verify output needs a committed token column";
   const int32_t max_draft_tokens = static_cast<int32_t>(num_verify_tokens) - 1;
-  const bool have_per_seq = per_seq_draft_counts != nullptr;
   const bool have_constrained = !constrained_mask.empty();
-  if (have_constrained) {
-    CHECK_EQ(constrained_mask.size(), static_cast<size_t>(batch_size))
-        << "constrained_mask must be empty or match the batch size";
-  }
-  if (have_per_seq) {
-    CHECK_EQ(per_seq_draft_counts->size(), static_cast<size_t>(batch_size))
-        << "per-sequence draft count batch mismatch";
-  }
-  CHECK_EQ(num_accepted_tokens.size(), static_cast<size_t>(batch_size))
-      << "accepted token count batch mismatch";
+  const torch::Tensor host_tokens =
+      to_cpu_contiguous(next_tokens, torch::kInt32);
+  const Slice<int32_t> tokens = tensor_slice<int32_t>(host_tokens);
   SpecVerifyStats stats;
   stats.requests.resize(static_cast<size_t>(batch_size));
   for (size_t seq_id = 0; seq_id < stats.requests.size(); ++seq_id) {
     SpecVerifyStats::RequestStats& request = stats.requests[seq_id];
-    request.num_draft_tokens =
-        have_per_seq
-            ? std::clamp((*per_seq_draft_counts)[seq_id], 0, max_draft_tokens)
-            : max_draft_tokens;
-    request.num_accepted_tokens = num_accepted_tokens[seq_id];
-    // Accepted drafts always land inside the row's verified slots.
-    CHECK_LE(request.num_accepted_tokens, request.num_draft_tokens)
-        << "accepted token count exceeds the row's verified width";
+    request.num_draft_tokens = max_draft_tokens;
+    int32_t accepted = 0;
+    while (accepted < num_verify_tokens &&
+           tokens[static_cast<size_t>(seq_id) * num_verify_tokens + accepted] >=
+               0) {
+      ++accepted;
+    }
+    request.num_accepted_tokens = accepted - 1;
     request.json_constrained =
         have_constrained && constrained_mask[seq_id] != 0;
   }

@@ -40,20 +40,6 @@ inline constexpr bool is_dflash2_draft_model_type(std::string_view model_type) {
   return model_type == kDFlash2DraftModelType;
 }
 
-// DSpark draft model types (Qwen/DSparkDraftModel, GLM5, DeepSeek-V4).
-inline constexpr bool is_dspark_draft_model_type(std::string_view model_type) {
-  return model_type == "DSparkDraftModel" ||
-         model_type == kDSparkGLM5DraftModelType ||
-         model_type == kDeepseekV4DSparkModelType;
-}
-
-// All block-diffusion draft model families (DFlash/DFlash2/DSpark).
-inline constexpr bool is_block_draft_model_type(std::string_view model_type) {
-  return model_type == "DFlashDraftModel" ||
-         is_dflash2_draft_model_type(model_type) ||
-         is_dspark_draft_model_type(model_type);
-}
-
 class TokenEmbeddingArgs final {
  public:
   REFLECT_PROPERTIES(TokenEmbeddingArgs);
@@ -266,7 +252,6 @@ class DFlash2Args final {
  public:
   REFLECT_PROPERTIES(DFlash2Args);
 
-  PROPERTY(int32_t, dflash2_block_size) = 0;
   PROPERTY(int32_t, dflash2_conv_group_size) = 0;
   PROPERTY(int32_t, dflash2_conv_kernel_size) = 0;
   PROPERTY(int32_t, dflash2_selector_rank) = 0;
@@ -286,6 +271,7 @@ class ModelArchitectureArgs final {
   PROPERTY(int64_t, n_layers) = 0;
   PROPERTY(int64_t, n_encoder_layers) = 0;
   PROPERTY(int64_t, max_position_embeddings) = 0;
+  PROPERTY(int64_t, block_size) = 0;
   PROPERTY(bool, use_absolute_position_embedding) = false;
   PROPERTY(float, initializer_range) = 0.02f;
   PROPERTY(float, rms_norm_eps) = 0.0f;
@@ -325,7 +311,6 @@ class SpeculativeArgs final {
   REFLECT_PROPERTIES(SpeculativeArgs);
 
   PROPERTY(int64_t, draft_vocab_size) = 0;
-  PROPERTY(int64_t, num_speculative_tokens) = 0;
   PROPERTY(int32_t, max_concurrent_prefills_per_dp) = 0;
   PROPERTY(std::vector<int32_t>, layers_to_capture) = {};
   PROPERTY(bool, norm_before_fc) = false;
@@ -389,7 +374,6 @@ class DSparkArgs final {
 
   PROPERTY(int64_t, markov_rank) = 0;
   PROPERTY(int32_t, dspark_num_layers) = 0;
-  PROPERTY(int32_t, dspark_block_size) = 0;
   PROPERTY(bool, dspark_use_native_sas) = false;
 };
 
@@ -622,7 +606,6 @@ class DitArgs final {
   PROPERTY(int64_t, heads) = 0;
   PROPERTY(int64_t, rope_dim) = 0;
   PROPERTY(int64_t, expand_ratio) = 0;
-  PROPERTY(int64_t, block_size) = 0;
   PROPERTY(int64_t, latent_dim) = 0;
   PROPERTY(bool, qk_bias) = false;
   PROPERTY(float, norm_eps) = 1e-5f;
@@ -704,6 +687,7 @@ struct ModelArgs {
   FORWARD_PROPERTY(int64_t, n_layers, model_architecture_args);
   FORWARD_PROPERTY(int64_t, n_encoder_layers, model_architecture_args);
   FORWARD_PROPERTY(int64_t, max_position_embeddings, model_architecture_args);
+  FORWARD_PROPERTY(int64_t, block_size, model_architecture_args);
   FORWARD_PROPERTY(bool,
                    use_absolute_position_embedding,
                    model_architecture_args);
@@ -752,7 +736,6 @@ struct ModelArgs {
 
   FORWARD_PROPERTY(int64_t, markov_rank, dspark_args);
   FORWARD_PROPERTY(int32_t, dspark_num_layers, dspark_args);
-  FORWARD_PROPERTY(int32_t, dspark_block_size, dspark_args);
   FORWARD_PROPERTY(bool, dspark_use_native_sas, dspark_args);
 
   PROPERTY(ConfidenceHeadArgs, confidence_head_args);
@@ -762,7 +745,6 @@ struct ModelArgs {
 
   PROPERTY(DFlash2Args, dflash2_args);
 
-  FORWARD_PROPERTY(int32_t, dflash2_block_size, dflash2_args);
   FORWARD_PROPERTY(int32_t, dflash2_conv_group_size, dflash2_args);
   FORWARD_PROPERTY(int32_t, dflash2_conv_kernel_size, dflash2_args);
   FORWARD_PROPERTY(int32_t, dflash2_selector_rank, dflash2_args);
@@ -1073,7 +1055,6 @@ struct ModelArgs {
   FORWARD_PROPERTY(bool, sliding_window_non_causal, sliding_window_args);
   FORWARD_PROPERTY(int32_t, max_window_layers, sliding_window_args);
 
-  FORWARD_PROPERTY(int64_t, num_speculative_tokens, speculative_args);
   FORWARD_PROPERTY(int32_t, max_concurrent_prefills_per_dp, speculative_args);
   FORWARD_PROPERTY(std::vector<int32_t>, layers_to_capture, speculative_args);
   FORWARD_PROPERTY(bool, norm_before_fc, speculative_args);
@@ -1178,7 +1159,6 @@ struct ModelArgs {
   FORWARD_PROPERTY(int64_t, heads, dit_args);
   FORWARD_PROPERTY(int64_t, rope_dim, dit_args);
   FORWARD_PROPERTY(int64_t, expand_ratio, dit_args);
-  FORWARD_PROPERTY(int64_t, block_size, dit_args);
   FORWARD_PROPERTY(int64_t, latent_dim, dit_args);
   FORWARD_PROPERTY(bool, qk_bias, dit_args);
   FORWARD_PROPERTY(float, norm_eps, dit_args);
@@ -1283,13 +1263,6 @@ inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
 inline bool is_glm5_next_target_model_type(std::string_view model_type) {
   return model_type == "glm5_3_flash" || model_type == "glm5_next" ||
          model_type == "glm5_next_text";
-}
-
-// NPU MTP targets whose num_speculative_tokens flows from engine Options into
-// ModelArgs; other targets keep the checkpoint default.
-inline bool uses_mtp_target_spec_width(std::string_view model_type) {
-  return is_glm5_next_target_model_type(model_type) ||
-         util::is_deepseek_v4_model_type(model_type);
 }
 
 // DeepSeek-V4 MTP stashes the pre-hc_head 3D hidden flattened to
@@ -1466,7 +1439,6 @@ inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << ", sliding_window: " << args.sliding_window();
   os << ", max_window_layers: " << args.max_window_layers();
   os << ", query_num: " << args.query_num();
-  os << ", num_speculative_tokens: " << args.num_speculative_tokens();
   os << ", in_channels: " << args.in_channels();
   os << ", out_channels: " << args.out_channels();
   os << ", down_block_types: [";
@@ -1522,13 +1494,6 @@ inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << ", max_image_seq_len: " << args.max_image_seq_len();
   os << "]";
   return os;
-}
-
-// Speculative decoding extends decode from one token to
-// num_speculative_tokens + 1 rows per sequence; the dummy forward of an idle
-// shard must mirror that width to keep DP collectives row-aligned.
-inline int32_t dummy_token_count(const ModelArgs& args) {
-  return args.num_speculative_tokens() + 1;
 }
 
 }  // namespace xllm

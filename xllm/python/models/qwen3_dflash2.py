@@ -34,7 +34,6 @@ from xllm.python.models.qwen3_dflash import (
 
 @dataclass
 class DFlash2Qwen3Config(DFlashQwen3Config):
-    block_size: int = 0
     conv_group_size: int = 0
     conv_kernel_size: int = 0
     selector_rank: int = 0
@@ -47,13 +46,6 @@ class DFlash2Qwen3Config(DFlashQwen3Config):
         dflash_config = nested if isinstance(nested, dict) else {}
 
         def pick(field_name: str) -> int:
-            # Key fallback order: "dflash_config.*" container first, then
-            # the flat top-level field, then the legacy "dflash2_*" spelling.
-            # Non-positive candidates are treated as unset: the C++ config
-            # dict reflects every ModelArgs field, so the flat top level
-            # always carries e.g. block_size=0 (the cola-dlm DiT field)
-            # alongside the real dflash2_* value, and falling back through a
-            # zero would silently shadow the legacy key.
             for source in (dflash_config.get(field_name), d.get(field_name), d.get(f"dflash2_{field_name}")):
                 if source is not None and source > 0:
                     return int(source)
@@ -61,7 +53,6 @@ class DFlash2Qwen3Config(DFlashQwen3Config):
 
         return cls(
             **base.__dict__,
-            block_size=pick("block_size"),
             conv_group_size=pick("conv_group_size"),
             conv_kernel_size=pick("conv_kernel_size"),
             selector_rank=pick("selector_rank"),

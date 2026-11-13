@@ -61,6 +61,7 @@ class DFlashQwen3Config(Qwen3Config):
     supports_reduced_draft_vocab: ClassVar[bool] = False
 
     draft_vocab_size: int = 0
+    block_size: int = 0
     world_size: int = 1
 
     @classmethod
@@ -86,6 +87,13 @@ class DFlashQwen3Config(Qwen3Config):
         return cls(
             **base.__dict__,
             draft_vocab_size=draft_vocab_size,
+            block_size=int(
+                (d.get("dflash_config") or {}).get("block_size")
+                or d.get("block_size")
+                or d.get("dflash2_block_size")
+                or d.get("dspark_block_size")
+                or 0
+            ),
             world_size=int(d.get("world_size", base.tp_size * base.dp_size)),
         )
 

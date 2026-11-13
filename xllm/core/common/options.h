@@ -34,7 +34,9 @@ class Options {
 
   std::string to_string() const;
 
- private:
+  int32_t num_speculative_tokens() const { return num_speculative_tokens_; }
+  Options& num_speculative_tokens(int32_t value) &;
+
   PROPERTY(std::string, model_path);
 
   PROPERTY(std::string, model_id);
@@ -87,8 +89,8 @@ class Options {
   // the max tokens per chunk for request in prefill stage.
   PROPERTY(int32_t, max_tokens_per_chunk_for_prefill);
 
-  // sps tokens
-  PROPERTY(int32_t, num_speculative_tokens) = 0;
+ private:
+  int32_t num_speculative_tokens_ = 0;
 
   PROPERTY(std::string, speculative_algorithm) = "MTP";
 

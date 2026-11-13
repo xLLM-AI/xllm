@@ -56,7 +56,7 @@ class DeepseekV4DSparkConfig(DeepseekV4Config):
 
     dspark_num_layers: int = 0
     dspark_target_layer_ids: tuple[int, ...] = ()
-    dspark_block_size: int = 0
+    block_size: int = 0
     dspark_noise_token_id: int = 0
     markov_rank: int = 0
     enable_confidence_head: bool = False
@@ -76,7 +76,7 @@ class DeepseekV4DSparkConfig(DeepseekV4Config):
             compress_ratios=[1] * num_layers,
             dspark_num_layers=num_layers,
             dspark_target_layer_ids=target_layer_ids,
-            dspark_block_size=int(d.get("dspark_block_size", 0)),
+            block_size=int(d.get("block_size") or d.get("dspark_block_size") or 0),
             dspark_noise_token_id=int(d.get("dspark_noise_token_id", 0)),
             markov_rank=int(d.get("markov_rank", d.get("dspark_markov_rank", 0))),
             enable_confidence_head=bool(d.get("enable_confidence_head", False)),

@@ -146,8 +146,8 @@ TEST(DecodeInputBuilderTest,
     SCOPED_TRACE(chunked);
     LlmForwardInput input = make_shared_forward_input();
     const DecodeBatchContext context = make_decode_batch_context(input);
-    const DecodeExpansionOptions options = make_verify_layout(
-        /*num_val_tokens=*/2, /*block_size=*/4, chunked);
+    const DecodeExpansionOptions options =
+        make_verify_layout(1, /*block_size=*/4, chunked);
     DecodeBuildBuffers buffers = expand_decode_inputs(context, options);
     EXPECT_EQ(buffers.out_new_cache_slots,
               std::vector<int32_t>({7, 8, 23, 24}));
@@ -182,8 +182,8 @@ TEST(DecodeInputBuilderTest, VerifyPaddingNeverWritesFiniteReadPage) {
   input.input_params.attention.host.shared_full_slot_mapping =
       torch::tensor({kPadSlotId}, torch::kInt);
   const DecodeBatchContext context = make_decode_batch_context(input);
-  const DecodeExpansionOptions options = make_verify_layout(
-      /*num_val_tokens=*/1, /*block_size=*/4, /*chunked=*/false);
+  const DecodeExpansionOptions options =
+      make_verify_layout(0, /*block_size=*/4, /*chunked=*/false);
   DecodeBuildBuffers buffers = expand_decode_inputs(context, options);
   build_decode_metadata(input.input_params, buffers, options);
 
@@ -293,8 +293,8 @@ TEST(DecodeInputBuilderTest, VlmVerifyRowsPreserveVisionState) {
 TEST(DecodeInputBuilderTest, ChunkedExpansionCommitsPerRequestLengths) {
   auto [input, ctx] = make_two_request_ctx();
 
-  const DecodeExpansionOptions decode_options = make_verify_layout(
-      /*num_val_tokens=*/3, /*block_size=*/4, /*chunked=*/true);
+  const DecodeExpansionOptions decode_options =
+      make_verify_layout(2, /*block_size=*/4, /*chunked=*/true);
   DecodeBuildBuffers buf = expand_decode_inputs(ctx, decode_options);
   build_decode_metadata(input.input_params, buf, decode_options);
 
@@ -309,8 +309,8 @@ TEST(DecodeInputBuilderTest, ChunkedExpansionCommitsPerRequestLengths) {
 TEST(DecodeInputBuilderTest, FlatExpansionCommitsOneRowPerToken) {
   auto [input, ctx] = make_two_request_ctx();
 
-  const DecodeExpansionOptions decode_options = make_verify_layout(
-      /*num_val_tokens=*/2, /*block_size=*/4, /*chunked=*/false);
+  const DecodeExpansionOptions decode_options =
+      make_verify_layout(1, /*block_size=*/4, /*chunked=*/false);
   DecodeBuildBuffers buf = expand_decode_inputs(ctx, decode_options);
 
   EXPECT_EQ(buf.out_token_ids, std::vector<int32_t>({10, -1, 20, -1}));
@@ -335,7 +335,7 @@ TEST(DecodeInputBuilderTest, NonCausalTokensShareFullQueryKvLength) {
                                     kv_seq_lens);
   const DecodeBatchContext ctx = make_decode_batch_context(input);
 
-  const DecodeExpansionOptions decode_options{{3,
+  const DecodeExpansionOptions decode_options{{2,
                                                false,
                                                BatchForwardType::DECODE,
                                                /*leading_zero_cu=*/false,

@@ -455,7 +455,7 @@ bool load_hf_model_args(const std::filesystem::path& model_weights_path,
   // switch. Resolve that default before reflection loses the distinction
   // between an absent switch and an explicit false; keep target defaults.
   if (resolved_model_type == "qwen3" &&
-      (args->markov_rank() > 0 || args->dflash2_block_size() > 0) &&
+      (args->markov_rank() > 0 || args->block_size() > 0) &&
       !reader.value<bool>("use_sliding_window").has_value()) {
     args->use_sliding_window(args->sliding_window() > 0);
   }

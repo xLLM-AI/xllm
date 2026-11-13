@@ -138,7 +138,7 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
     head_dim_ = args.head_dim();
     rms_norm_eps_ = args.rms_norm_eps();
     sliding_window_ = args.sliding_window();
-    block_size_ = args.dflash2_block_size();
+    block_size_ = args.block_size();
     CHECK_GT(sliding_window_, 0);
     CHECK_GT(block_size_, 0);
 

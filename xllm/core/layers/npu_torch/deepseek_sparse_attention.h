@@ -104,14 +104,9 @@ class DSAttentionImpl : public torch::nn::Module {
                         KVCache& kv_cache);
 
   void load_state_dict(const StateDict& state_dict);
-  int64_t non_registered_weight_bytes() const;
 
  private:
   int64_t num_heads_;
-  int64_t head_size_;
-  float scale_;
-  int64_t n_kv_heads_;
-  int64_t sliding_window_;
   int64_t head_dim_;
 
   int64_t n_local_heads_;
@@ -133,7 +128,7 @@ class DSAttentionImpl : public torch::nn::Module {
   int64_t index_n_heads_ = 0;
   int64_t index_head_dim_ = 0;
   int64_t index_topk_ = 0;
-  int64_t dspark_block_size_ = 0;
+  int64_t block_size_ = 0;
   bool dspark_use_native_sas_ = false;
 
   double rope_theta_ = 10000.0;

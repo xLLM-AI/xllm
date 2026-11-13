@@ -48,14 +48,11 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   ~MTPWorkerImpl() override;
 
  protected:
-  // For derived classes (e.g. Eagle3WorkerImpl) that need custom options for
-  // target and draft models. `options` is passed to WorkerImpl (preserves
-  // enable_schedule_overlap etc.), `target_options` / `draft_options` are used
-  // to create the respective workers.
+  static runtime::Options draft_options(const runtime::Options& options);
+
   MTPWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,
                 const runtime::Options& options,
-                const runtime::Options& target_options,
                 const runtime::Options& draft_options,
                 WorkerType worker_type);
 
@@ -64,15 +61,12 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                   int32_t random_seed,
                   MasterStatus master_status) override;
 
-  std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
-
  protected:
   using typename DraftModelSpecWorkerImpl<TargetInput>::TargetModelParams;
   using DraftModelSpecWorkerImpl<TargetInput>::compute_stream_;
   using DraftModelSpecWorkerImpl<TargetInput>::context_;
   using DraftModelSpecWorkerImpl<TargetInput>::device_;
   using DraftModelSpecWorkerImpl<TargetInput>::draft_impl_;
-  using DraftModelSpecWorkerImpl<TargetInput>::is_probabilistic_draft_;
   using DraftModelSpecWorkerImpl<TargetInput>::dtype_;
   using DraftModelSpecWorkerImpl<TargetInput>::embedding_cache_;
   using DraftModelSpecWorkerImpl<TargetInput>::impl_;
@@ -82,9 +76,9 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<TargetInput>::threadpool_;
   using DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_shape;
   using DraftModelSpecWorkerImpl<TargetInput>::enable_schedule_overlap;
-  using DraftModelSpecWorkerImpl<
-      TargetInput>::estimate_kv_cache_capacity_with_draft;
-  using DraftModelSpecWorkerImpl<TargetInput>::get_optimization_config;
+  using DraftModelSpecWorkerImpl<TargetInput>::run_worker_no_sync_impl;
+  using DraftModelSpecWorkerImpl<TargetInput>::finalize_step_output;
+  using SpeculativeWorkerImpl<TargetInput>::maybe_broadcast_spec_tokens;
   using DraftModelSpecWorkerImpl<TargetInput>::logical_block_size;
   using DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input;
   using DraftModelSpecWorkerImpl<TargetInput>::target_verify_mode_;
@@ -101,7 +95,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       const TargetInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
       TargetInput& validate_input,
-      int32_t num_val_tokens,
+      int32_t num_speculative_tokens,
       Stream& compute_stream);
   std::optional<ForwardOutput> run_validate(
       const TargetInput& input,
@@ -209,9 +203,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   bool device_target_context_ready_for_batch(const TargetInput& input) const;
   void flush_pending_target_context(size_t keep_latest = 0);
   const PendingTargetContext& latest_pending_target_context() const;
-  torch::Tensor snapshot_pending_target_tokens();
   void drain_pending_execution() override;
-  void retire_legacy_prelaunch();
   bool supports_combined_first_draft_execution() const;
   bool can_use_combined_first_draft() const;
   bool can_prelaunch_next_first_draft(const TargetInput& input) const;
@@ -289,7 +281,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       mtp_async::DraftPrefixPolicy::TAIL_REPAIR;
   struct DraftContextReplayPolicy {
     bool full_target_replay;
-    int32_t target_expansion_width;
+    int32_t num_speculative_tokens;
     int32_t draft_position_offset;
   };
   std::optional<DraftContextReplayPolicy> draft_context_replay_policy_;

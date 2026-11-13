@@ -413,7 +413,7 @@ inline void clear_all_sampling_fields(SamplingParameters& sampling_params) {
 // Params for a logits-only validate forward (see clear_all_sampling_fields).
 inline void expand_sampling_params_for_verify(
     SamplingParameters& sampling_params,
-    int64_t repeats,
+    int64_t num_speculative_tokens,
     int64_t total_num_val_tokens,
     const torch::Device& device,
     torch::Tensor cached_indices = torch::Tensor()) {
@@ -421,7 +421,8 @@ inline void expand_sampling_params_for_verify(
   sampling_params.logits_indices() =
       cached_indices.defined() ? std::move(cached_indices)
                                : arange_indices(total_num_val_tokens, device);
-  repeat_interleave_if_defined(sampling_params.do_sample(), repeats);
+  repeat_interleave_if_defined(sampling_params.do_sample(),
+                               num_speculative_tokens + 1);
 }
 
 // Advance the compact generated suffix with a padded accepted-token prefix.

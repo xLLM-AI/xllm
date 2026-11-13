@@ -99,7 +99,7 @@ def test_linear_verify_bucketing_preserves_complete_requests(
     runner: DecodeAclGraphRunner, no_padding: bool, requests: int, width: int
 ) -> None:
     runner.max_batch = 32 * width
-    runner.num_decoding_tokens = width
+    runner.num_speculative_tokens = width - 1
     runner._model_owns_linear_spec_verify = True
     runner._enable_decode_no_padding = no_padding
     metadata = SimpleNamespace(is_spec_verify=True)
@@ -113,7 +113,7 @@ def test_linear_verify_bucketing_preserves_complete_requests(
 
 def test_no_padding_retains_mtp_width_and_capacity_validation(runner: DecodeAclGraphRunner) -> None:
     runner.max_batch = 160
-    runner.num_decoding_tokens = 5
+    runner.num_speculative_tokens = 5 - 1
     runner._model_owns_linear_spec_verify = True
     runner._enable_decode_no_padding = True
     metadata = SimpleNamespace(is_spec_verify=True)
@@ -130,7 +130,7 @@ def test_no_padding_keeps_dp_ranks_on_a_shared_token_shape(
 ) -> None:
     runner.dp_size = 2
     runner.max_batch = 160
-    runner.num_decoding_tokens = 5
+    runner.num_speculative_tokens = 5 - 1
     runner._model_owns_linear_spec_verify = True
     runner._enable_decode_no_padding = no_padding
     metadata = SimpleNamespace(is_spec_verify=True, dp_execution_token_counts=(115, 120))
@@ -417,7 +417,7 @@ def test_direct_runner_calls_decode_current_metadata_without_retained_state(runn
     input_ids = torch.tensor([10, 20], dtype=torch.int32)
     metadata = _metadata()
     with patch.object(runner, "_decode_metadata", wraps=runner._decode_metadata) as decode:
-        assert runner.can_execute(input_ids, metadata) is True
+        assert runner.prepare_execution(input_ids, metadata) is not None
         graph_key = runner.warmup(input_ids, input_ids, metadata)
         entry = runner._graphs[graph_key]
         decode.reset_mock()

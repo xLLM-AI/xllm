@@ -411,7 +411,6 @@ class AclGraphExecutorTest : public ::testing::Test {
     device_ = std::make_unique<torch::Device>("npu:0");
 
     // Set up runtime options
-    options_.num_decoding_tokens(1);
     options_.block_size(4);
 
     // Create simple model
@@ -509,8 +508,7 @@ TEST_F(AclGraphExecutorTest, GraphExecutorVsEagerExecution) {
   ASSERT_FALSE(batch->empty());
 
   // Prepare forward input
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   forward_input = forward_input.to(*device_, torch::kFloat32);
 
   std::cout << "forward_input.token_ids: " << forward_input.token_ids
@@ -562,8 +560,7 @@ TEST_F(AclGraphExecutorTest, GraphReplayConsistency) {
   ASSERT_FALSE(batch->empty());
 
   // Prepare forward input
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   forward_input = forward_input.to(*device_, torch::kFloat32);
 
   // Create ACL graph executor
@@ -598,10 +595,7 @@ TEST_F(AclGraphExecutorTest, PreservesAuxHiddenStatesAcrossGraphReplay) {
   auto batch = CreateTestBatch();
   ASSERT_FALSE(batch->empty());
 
-  auto forward_input =
-      batch->prepare_forward_input(options_.num_decoding_tokens(),
-                                   /*min_decoding_batch_size=*/0,
-                                   model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   forward_input = forward_input.to(*device_, /*dtype=*/torch::kFloat32);
 
   SimpleCausalLM* simple_model = dynamic_cast<SimpleCausalLM*>(model_.get());
@@ -662,7 +656,6 @@ TEST(DeepseekV4ModelTest, ReturnsPreHcHiddenStatesForMtp) {
   model_args.index_head_dim(0);
   model_args.qk_rope_head_dim(0);
   model_args.o_lora_rank(0);
-  model_args.num_speculative_tokens(1);
 
   const torch::Device device("npu:0");
   const torch::TensorOptions tensor_options =
@@ -672,8 +665,11 @@ TEST(DeepseekV4ModelTest, ReturnsPreHcHiddenStatesForMtp) {
   ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, &process_group);
   parallel_args.tp_group_ = &process_group;
-  const ModelContext context(
-      parallel_args, model_args, QuantArgs(), tensor_options);
+  const ModelContext context(parallel_args,
+                             model_args,
+                             QuantArgs(),
+                             tensor_options,
+                             /*num_speculative_tokens=*/1);
   const CausalLMFactory factory =
       ModelRegistry::get_causallm_factory("deepseek_v4");
   ASSERT_TRUE(static_cast<bool>(factory));
@@ -748,8 +744,7 @@ TEST_F(AclGraphExecutorTest, DifferentBatchSizes) {
     }
 
     // Prepare forward input
-    auto forward_input = batch->prepare_forward_input(
-        options_.num_decoding_tokens(), 0, model_args_);
+    auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
     forward_input = forward_input.to(*device_, torch::kFloat32);
     // Test graph execution
     auto output =
@@ -764,7 +759,7 @@ TEST_F(AclGraphExecutorTest, DifferentBatchSizes) {
 
     // Verify output shape
     EXPECT_EQ(output.hidden_states.size(0),
-              batch_size * options_.num_decoding_tokens())
+              batch_size * (options_.num_speculative_tokens() + 1))
         << "Batch size: " << batch_size;
     EXPECT_EQ(output.hidden_states.size(1), model_args_.hidden_size())
         << "Batch size: " << batch_size;
@@ -814,8 +809,7 @@ TEST_F(AclGraphExecutorTest, DecodeBatchSizeThresholdFallsBackToEager) {
     batch->add(&sequence);
   }
 
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   forward_input = forward_input.to(*device_, torch::kFloat32);
   forward_input.input_params.enable_graph = true;
   forward_input.input_params.attn_metadata =
@@ -838,7 +832,7 @@ TEST_F(AclGraphExecutorTest, DecodeBatchSizeThresholdFallsBackToEager) {
                           {ModelParamsView(forward_input.input_params)});
 
   EXPECT_EQ(graph_out.hidden_states.size(0),
-            batch_size * options_.num_decoding_tokens());
+            batch_size * (options_.num_speculative_tokens() + 1));
   EXPECT_EQ(graph_out.hidden_states.size(1), model_args_.hidden_size());
   auto* simple_model = dynamic_cast<SimpleCausalLM*>(model_.get());
   ASSERT_NE(simple_model, nullptr);
@@ -872,8 +866,7 @@ TEST_F(AclGraphExecutorTest, NoPaddingBucketCapturesOnlyForWarmup) {
     batch->add(&sequence);
   }
 
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   forward_input = forward_input.to(*device_, torch::kFloat32);
   forward_input.input_params.enable_graph = true;
   forward_input.input_params.attn_metadata =
@@ -920,7 +913,7 @@ TEST_F(AclGraphExecutorTest, NoPaddingBucketCapturesOnlyForWarmup) {
       old_decode_batch_size_limit);
 
   EXPECT_EQ(graph_out.hidden_states.size(0),
-            batch_size * options_.num_decoding_tokens());
+            batch_size * (options_.num_speculative_tokens() + 1));
   EXPECT_EQ(graph_out.hidden_states.size(1), model_args_.hidden_size());
   EXPECT_TRUE(torch::allclose(eager_out.hidden_states,
                               graph_out.hidden_states,
@@ -928,7 +921,7 @@ TEST_F(AclGraphExecutorTest, NoPaddingBucketCapturesOnlyForWarmup) {
                               /*atol=*/1e-6));
   EXPECT_TRUE(simple_model->last_forward_enabled_graph());
   EXPECT_EQ(warmup_graph_out.hidden_states.size(0),
-            batch_size * options_.num_decoding_tokens());
+            batch_size * (options_.num_speculative_tokens() + 1));
   EXPECT_EQ(warmup_graph_out.hidden_states.size(1), model_args_.hidden_size());
   EXPECT_TRUE(torch::allclose(eager_out.hidden_states,
                               warmup_graph_out.hidden_states,
@@ -943,8 +936,7 @@ TEST_F(AclGraphExecutorTest, AclGraphExecutorVsBaseExecutorImpl) {
   ASSERT_FALSE(batch->empty());
 
   // Prepare forward input
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   forward_input = forward_input.to(*device_, torch::kFloat32);
   // Test NPU Executor Impl (original implementation)
   auto npu_executor = std::make_unique<BaseExecutorImpl>(
@@ -988,8 +980,7 @@ TEST_F(AclGraphExecutorTest, AclGraphExecutorVsBaseExecutorImplMultipleRuns) {
   ASSERT_FALSE(batch->empty());
 
   // Prepare forward input
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   forward_input = forward_input.to(*device_, torch::kFloat32);
   // Create both executors
   auto npu_executor = std::make_unique<BaseExecutorImpl>(
@@ -1071,8 +1062,7 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
   seq.add_blocks(BlockType::LINEAR, linear_state_slot);
   ASSERT_NE(expected_embedding_id, expected_linear_state_id);
 
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   ASSERT_EQ(forward_input.input_params.meta.num_sequences, 1);
   ASSERT_EQ(forward_input.input_params.embedding.linear_state_ids.size(), 1);
   EXPECT_EQ(forward_input.input_params.embedding.linear_state_ids[0],
@@ -1113,7 +1103,7 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
   options.block_size(4);
   options.max_seqs_per_batch(10);
   options.max_tokens_per_batch(64);
-  options.num_decoding_tokens(3);
+  options.num_speculative_tokens(2);
   options.enable_speculative_decode(true);
   options.is_draft_engine(false);
 
@@ -1127,7 +1117,7 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
   const int64_t expected_token_capacity =
       runtime::get_decode_graph_token_bucket(
           static_cast<int64_t>(options.max_seqs_per_batch()) *
-              options.num_decoding_tokens(),
+              (options.num_speculative_tokens() + 1),
           options.enable_graph_mode_decode_no_padding());
   EXPECT_EQ(persistent_param.persistent_block_tables().size(0),
             expected_token_capacity);
@@ -1202,7 +1192,7 @@ TEST_P(HybridSpecVerifyPaddingTest, MetadataCoversBucketPadding) {
   options.block_size(4);
   options.max_seqs_per_batch(4);
   options.max_tokens_per_batch(64);
-  options.num_decoding_tokens(kSpecWidth);
+  options.num_speculative_tokens(kSpecWidth - 1);
   options.enable_speculative_decode(true);
   options.is_draft_engine(false);
 
@@ -1312,7 +1302,7 @@ TEST(AclGraphPersistentParamTest,
   options.block_size(4);
   options.max_seqs_per_batch(4);
   options.max_tokens_per_batch(16);
-  options.num_decoding_tokens(kSpecWidth);
+  options.num_speculative_tokens(kSpecWidth - 1);
   options.enable_speculative_decode(true);
   options.is_draft_engine(false);
 
@@ -1386,9 +1376,7 @@ TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
   options.block_size(4);
   options.max_seqs_per_batch(10);
   options.max_tokens_per_batch(64);
-  options.num_decoding_tokens(3);
-  options.enable_speculative_decode(true);
-  options.is_draft_engine(false);
+  options.num_speculative_tokens(2);
 
   const torch::Device device("npu:0");
   const torch::TensorOptions tensor_options =
@@ -1400,11 +1388,11 @@ TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
   const int64_t expected_target_capacity =
       runtime::get_decode_graph_token_bucket(
           static_cast<int64_t>(options.max_seqs_per_batch()) *
-              options.num_decoding_tokens(),
+              (options.num_speculative_tokens() + 1),
           options.enable_graph_mode_decode_no_padding());
   EXPECT_EQ(target_param.aux_hidden_states().size(0), expected_target_capacity);
 
-  options.is_draft_engine(true);
+  options.num_speculative_tokens(0);
   ::xllm::npu::GraphPersistentParam draft_param(args, device, options);
   draft_param.set_aux_hidden_states(aux_hidden_states.slice(
       /*dim=*/0, /*start=*/0, /*end=*/options.max_seqs_per_batch()));
@@ -1459,7 +1447,7 @@ TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
   params.parallel.dp_global_token_nums = {2, 0, 4};
   params.parallel.raw_dp_global_token_nums = {1, 0, 3};
 
-  scale_speculative_parallel_token_counts(params, /*multiplier=*/5);
+  scale_speculative_parallel_token_counts(params, 4);
 
   EXPECT_EQ(params.parallel.dp_global_token_nums,
             (std::vector<int32_t>{10, 0, 20}));
@@ -1532,7 +1520,7 @@ TEST(AclGraphPersistentParamTest, SpecVerifyGraphUpdateSupportsRuntimeBatch) {
   options.block_size(4);
   options.max_seqs_per_batch(4);
   options.max_tokens_per_batch(16);
-  options.num_decoding_tokens(kSpecWidth);
+  options.num_speculative_tokens(kSpecWidth - 1);
   options.enable_speculative_decode(true);
   options.is_draft_engine(false);
 
@@ -1688,11 +1676,8 @@ TEST(AclGraphPersistentParamTest, DecodeUpdatesEplbMaskWithoutSpecAttention) {
       .max_position_embeddings(16)
       .head_dim(0);
   runtime::Options options;
-  options.max_tokens_per_batch(8)
-      .max_seqs_per_batch(4)
-      .num_decoding_tokens(1)
-      .block_size(4)
-      .dp_size(1);
+  options.max_tokens_per_batch(8).max_seqs_per_batch(4).block_size(4).dp_size(
+      1);
   npu::GraphPersistentParam persistent_params(
       args, torch::Device(torch::kCPU), options);
 
@@ -1748,11 +1733,8 @@ TEST(AclGraphPersistentParamTest, DecodePadsEachDpRankEplbMaskIndependently) {
       .max_position_embeddings(16)
       .head_dim(0);
   runtime::Options options;
-  options.max_tokens_per_batch(8)
-      .max_seqs_per_batch(4)
-      .num_decoding_tokens(1)
-      .block_size(4)
-      .dp_size(2);
+  options.max_tokens_per_batch(8).max_seqs_per_batch(4).block_size(4).dp_size(
+      2);
   npu::GraphPersistentParam persistent_params(
       args, torch::Device(torch::kCPU), options);
 
@@ -1787,8 +1769,7 @@ TEST_F(AclGraphExecutorTest, GraphExecutorUsesFirstFullAttentionKvCache) {
   auto batch = CreateTestBatch();
   ASSERT_FALSE(batch->empty());
 
-  auto forward_input = batch->prepare_forward_input(
-      options_.num_decoding_tokens(), 0, model_args_);
+  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
   forward_input = forward_input.to(*device_, torch::kFloat32);
 
   auto conv_cache =

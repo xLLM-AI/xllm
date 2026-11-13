@@ -574,9 +574,11 @@ class ForwardOutput final {
   // Optional CPU token snapshot, valid after ready_event. Device next_tokens
   // remains available for continuation; serializers can reuse this D2H copy.
   torch::Tensor next_tokens_host;
-  // Non-empty requests is the sole marker of a verify result (ordinary decode
-  // emits 1-D tokens); consumed before proto/shared-memory serialization.
+  // Schedule-overlap tails defer the stats build to the consumer; local
+  // runtime handles only, not in proto/shm.
   SpecVerifyStats spec_verify_stats;
+  bool is_verify_stats_deferred = false;
+  std::vector<char> constrained_mask;
   std::vector<JsonObjectOutputError> json_object_errors;
   std::vector<std::string> failed_request_ids;
   // Keep no-sync input tensor handles alive until downstream consumers finish

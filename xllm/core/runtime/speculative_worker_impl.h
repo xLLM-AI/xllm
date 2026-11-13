@@ -32,6 +32,13 @@ namespace xllm {
 
 class JsonObjectGrammarState;
 
+void prepare_dummy_input(LlmForwardInput& input,
+                         const ModelContext& context,
+                         const torch::Device& device);
+void prepare_dummy_input(VlmForwardInput& input,
+                         const ModelContext& context,
+                         const torch::Device& device);
+
 // Returns whether this rank may execute the multi-step speculative decode
 // plan for the current global DP batch.
 bool should_run_speculative_decode(const LlmModelParams& params);
@@ -39,9 +46,9 @@ bool should_run_speculative_decode(const VlmModelParams& params);
 
 // Keep padded and raw DP token-count views in the same speculative layout.
 void scale_speculative_parallel_token_counts(LlmModelParams& params,
-                                             int32_t multiplier);
+                                             int32_t num_speculative_tokens);
 void scale_speculative_parallel_token_counts(VlmModelParams& params,
-                                             int32_t multiplier);
+                                             int32_t num_speculative_tokens);
 
 // Shared tail of run_validate: marks the output as a speculative decode
 // verify result, attaches the row metadata, clears embeddings, and installs
@@ -129,6 +136,15 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   };
 
  protected:
+#if defined(USE_NPU)
+  template <typename Params>
+  void prepare_target_padding(Params& params);
+#endif
+
+  bool can_prepare_without_compute_stream_wait() const override {
+    return false;
+  }
+
   bool prepare_model_decode_continuation(
       TargetInput& inputs,
       const ForwardOutput& prior_output) override;
@@ -145,14 +161,11 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   void prepare_validate_inputs(const TargetInput& inputs,
                                TargetInput& validate_inputs);
 
-  bool should_broadcast_spec_tokens(bool enable_spec_token_broadcast,
-                                    bool all_greedy_sample) const {
-    const bool use_orthogonal_cp_consensus =
-        parallel_args_.cp_size() > 1 && parallel_args_.tp_group_ != nullptr &&
-        parallel_args_.cp_group_ != nullptr &&
-        parallel_args_.cp_group_ != parallel_args_.tp_group_;
-    return use_orthogonal_cp_consensus ||
-           (enable_spec_token_broadcast && !all_greedy_sample);
+  bool use_orthogonal_cp_consensus() const {
+    return parallel_args_.cp_size() > 1 &&
+           parallel_args_.tp_group_ != nullptr &&
+           parallel_args_.cp_group_ != nullptr &&
+           parallel_args_.cp_group_ != parallel_args_.tp_group_;
   }
 
   // Speculative state is replicated across every model rank within one DP
@@ -164,17 +177,23 @@ class SpeculativeWorkerImpl : public WorkerImpl {
     ProcessGroup* tp_group = parallel_args_.tp_group_ != nullptr
                                  ? parallel_args_.tp_group_
                                  : parallel_args_.process_group_;
-    const bool use_orthogonal_cp_consensus =
-        parallel_args_.cp_size() > 1 && parallel_args_.tp_group_ != nullptr &&
-        parallel_args_.cp_group_ != nullptr &&
-        parallel_args_.cp_group_ != parallel_args_.tp_group_;
-    if (!use_orthogonal_cp_consensus) {
+    if (!use_orthogonal_cp_consensus()) {
       sync_sampling_tensor(tokens, tp_group);
       return;
     }
 
     sync_sampling_tensor(tokens, parallel_args_.tp_group_);
     sync_sampling_tensor(tokens, parallel_args_.cp_group_);
+  }
+
+  void maybe_broadcast_spec_tokens(torch::Tensor& tokens,
+                                   SamplingMode sampling_mode) const {
+    if (use_orthogonal_cp_consensus() ||
+        (get_optimization_config().enable_spec_token_broadcast &&
+         sampling_mode != SamplingMode::GREEDY)) {
+      c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+      broadcast_spec_tokens(tokens);
+    }
   }
 
   void finalize_output_on_stream(ForwardOutput& output,

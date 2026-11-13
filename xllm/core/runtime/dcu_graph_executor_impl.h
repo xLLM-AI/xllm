@@ -107,8 +107,6 @@ class DcuGraphPersistentParam final {
 
   std::size_t get_persistent_tensor_bytes() const;
 
-  bool use_mrope() const { return use_mrope_; }
-
  private:
   torch::Tensor q_seq_lens_values(uint32_t size) const {
     return size > 0 ? q_seq_lens_values_.slice(0, 0, size) : q_seq_lens_values_;
@@ -152,7 +150,6 @@ class DcuGraphPersistentParam final {
   runtime::Options options_;
 
   bool use_mrope_ = false;
-  uint32_t num_decoding_tokens_ = 1;
 
   // persistent input tensors
   torch::Tensor tokens_;

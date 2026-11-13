@@ -53,7 +53,8 @@ class ModelContext {
   ModelContext(const ParallelArgs& input_parallel_args,
                const ModelArgs& model_args,
                const QuantArgs& quant_args,
-               const torch::TensorOptions& tensor_options);
+               const torch::TensorOptions& tensor_options,
+               int32_t num_speculative_tokens = 0);
 
   const ModelArgs& get_model_args() const { return model_args_; }
 
@@ -80,6 +81,8 @@ class ModelContext {
   void set_flash_comm1_options(const FlashComm1Options& options) {
     flash_comm1_options_ = options;
   }
+
+  int32_t num_speculative_tokens() const { return num_speculative_tokens_; }
 
   ModelContext with_parallel_args(const ParallelArgs& parallel_args) const;
 
@@ -112,6 +115,7 @@ class ModelContext {
   std::string model_impl_;
   std::string extension_impl_;
   ModelArgs model_args_;
+  int32_t num_speculative_tokens_ = 0;
   QuantArgs quant_args_;
   ParallelArgs parallel_args_;
   torch::TensorOptions tensor_options_;

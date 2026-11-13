@@ -98,45 +98,6 @@ class ScopedModelImplSnapshot final {
   std::string model_impl_;
 };
 
-TEST(DecodeGraphWarmupConfigTest, OrdinaryTargetUsesSingleTokenShape) {
-  ExecutionConfig config;
-  config.acl_graph_decode_batch_size_limit(7);
-  const DecodeGraphWarmupConfig warmup_config =
-      config.decode_graph_warmup_config(
-          /*num_speculative_tokens=*/0,
-          /*enable_no_padding=*/false);
-
-  EXPECT_EQ(warmup_config.num_decoding_tokens, 1);
-  EXPECT_EQ(warmup_config.num_speculative_tokens, 0);
-  EXPECT_FALSE(warmup_config.enable_graph_mode_decode_no_padding);
-  EXPECT_EQ(warmup_config.max_graph_batch_size, Platform::is_npu() ? 7 : 0);
-}
-
-TEST(DecodeGraphWarmupConfigTest, PreservesResolvedSpeculativeTargetWidth) {
-  ExecutionConfig config;
-  config.acl_graph_decode_batch_size_limit(9);
-  const DecodeGraphWarmupConfig warmup_config =
-      config.decode_graph_warmup_config(
-          /*num_speculative_tokens=*/3,
-          /*enable_no_padding=*/false);
-
-  EXPECT_EQ(warmup_config.num_decoding_tokens, 4);
-  EXPECT_EQ(warmup_config.num_speculative_tokens, 3);
-  EXPECT_EQ(warmup_config.max_graph_batch_size, Platform::is_npu() ? 9 : 0);
-}
-
-TEST(DecodeGraphWarmupConfigTest, PaddingFollowsTargetOptions) {
-  ExecutionConfig config;
-  for (bool enable_no_padding : {false, true}) {
-    config.enable_graph_mode_decode_no_padding(!enable_no_padding);
-    EXPECT_EQ(config
-                  .decode_graph_warmup_config(
-                      /*num_speculative_tokens=*/3, enable_no_padding)
-                  .enable_graph_mode_decode_no_padding,
-              enable_no_padding);
-  }
-}
-
 TEST(StepTimeProfilePlanTest, NeverExceedsConfiguredSequenceCapacity) {
   const std::vector<int32_t> batch_sizes =
       build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/16);
@@ -208,12 +169,10 @@ Sequence make_sequence(size_t index, const std::vector<int32_t>& tokens) {
 }
 
 DecodeGraphWarmupConfig make_decode_graph_warmup_config(
-    int64_t num_decoding_tokens,
     int32_t num_speculative_tokens,
     bool enable_no_padding,
     int32_t max_graph_batch_size = 0) {
   DecodeGraphWarmupConfig warmup_config;
-  warmup_config.num_decoding_tokens = num_decoding_tokens;
   warmup_config.num_speculative_tokens = num_speculative_tokens;
   warmup_config.enable_graph_mode_decode_no_padding = enable_no_padding;
   warmup_config.max_graph_batch_size = max_graph_batch_size;
@@ -375,8 +334,7 @@ class LinearProfileGraphWarmupTest
         .max_seqs_per_batch(sequence_budget)
         .enable_schedule_overlap(std::get<0>(GetParam()))
         .decode_graph_warmup_config(
-            make_decode_graph_warmup_config(std::get<1>(GetParam()) + 1,
-                                            std::get<1>(GetParam()),
+            make_decode_graph_warmup_config(std::get<1>(GetParam()),
                                             /*enable_no_padding=*/false));
     return options;
   }
@@ -527,7 +485,6 @@ TEST(DecodeGraphWarmupPlanTest, CoversEveryPaddedMtpTokenBucket) {
   }
 
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/4,
       /*num_speculative_tokens=*/3,
       /*enable_no_padding=*/false);
   const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
@@ -537,28 +494,6 @@ TEST(DecodeGraphWarmupPlanTest, CoversEveryPaddedMtpTokenBucket) {
       plan.batch_sizes,
       (std::vector<int32_t>{
           1, 2, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64}));
-}
-
-TEST(DecodeGraphWarmupPlanTest, ResolvesIndependentDraftInvocationShapes) {
-  ExecutionConfig execution;
-  auto config = execution.decode_graph_warmup_config(3, false, "mTp");
-  ASSERT_EQ(config.draft_shapes.size(), 1);
-  EXPECT_EQ(config.draft_shapes.front().tokens_per_sequence, 1);
-  EXPECT_FALSE(config.draft_shapes.front().bucket_by_sequence);
-
-  config = execution.decode_graph_warmup_config(1, false, "MTP");
-  ASSERT_EQ(config.draft_shapes.size(), 1);
-  EXPECT_EQ(config.draft_shapes.front().tokens_per_sequence, 1);
-
-  for (const std::string algorithm :
-       {"DFlash", "DFlash2", "DSpark", "Suffix"}) {
-    EXPECT_TRUE(execution.decode_graph_warmup_config(7, false, algorithm)
-                    .draft_shapes.empty());
-  }
-  EXPECT_TRUE(execution.decode_graph_warmup_config(0, false, "MTP")
-                  .draft_shapes.empty());
-  EXPECT_TRUE(execution.decode_graph_warmup_config(3, true, "MTP")
-                  .draft_shapes.empty());
 }
 
 TEST(DecodeGraphWarmupPlanTest, JointCoverageUsesLocalDpGeometryAndGraphLimit) {
@@ -581,18 +516,11 @@ TEST(DecodeGraphWarmupPlanTest, JointCoverageUsesLocalDpGeometryAndGraphLimit) {
           const auto plan =
               build_decode_graph_warmup_plan(config, global_capacity, dp_size);
           const int32_t local_limit = std::min(local_capacity, 8);
-          const auto graph_rows =
-              [local_limit](int32_t count, int32_t rows, bool by_sequence) {
-                return by_sequence
-                           ? std::min(runtime::get_decode_graph_token_bucket(
-                                          count, false),
-                                      static_cast<int64_t>(local_limit)) *
-                                 rows
-                           : std::min(
-                                 runtime::get_decode_graph_token_bucket(
-                                     static_cast<int64_t>(count) * rows, false),
-                                 static_cast<int64_t>(local_limit) * rows);
-              };
+          const auto graph_rows = [local_limit](int32_t count) {
+            return std::min(
+                runtime::get_decode_graph_token_bucket(count, false),
+                static_cast<int64_t>(local_limit));
+          };
           for (int32_t local = 1; local <= local_limit; ++local) {
             const int64_t target_bucket =
                 runtime::get_decode_graph_token_bucket(
@@ -607,18 +535,15 @@ TEST(DecodeGraphWarmupPlanTest, JointCoverageUsesLocalDpGeometryAndGraphLimit) {
                                  (width + 1),
                              false) == target_bucket;
                 }));
-            for (const auto& shape : config.draft_shapes) {
-              const int64_t expected = graph_rows(
-                  local, shape.tokens_per_sequence, shape.bucket_by_sequence);
-              EXPECT_TRUE(std::any_of(
-                  plan.batch_sizes.begin(),
-                  plan.batch_sizes.end(),
-                  [&](int32_t global) {
-                    return global <= local_limit * dp_size &&
-                           graph_rows(global / dp_size,
-                                      shape.tokens_per_sequence,
-                                      shape.bucket_by_sequence) == expected;
-                  }));
+            if (algorithm == "MTP") {
+              const int64_t expected = graph_rows(local);
+              EXPECT_TRUE(
+                  std::any_of(plan.batch_sizes.begin(),
+                              plan.batch_sizes.end(),
+                              [&](int32_t global) {
+                                return global <= local_limit * dp_size &&
+                                       graph_rows(global / dp_size) == expected;
+                              }));
             }
           }
           EXPECT_EQ(plan.batch_sizes.back(), global_capacity);
@@ -657,7 +582,6 @@ TEST(DecodeGraphWarmupPlanTest, UsesLocalDpBatchesAndKeepsPartialBatch) {
   }
 
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/4,
       /*num_speculative_tokens=*/0,
       /*enable_no_padding=*/false);
   const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
@@ -672,7 +596,6 @@ TEST(DecodeGraphWarmupPlanTest, Dp32C64UsesLocalGraphBuckets) {
   }
 
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/4,
       /*num_speculative_tokens=*/3,
       /*enable_no_padding=*/false);
   const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
@@ -690,7 +613,6 @@ TEST(DecodeGraphWarmupPlanTest,
   }
 
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/4,
       /*num_speculative_tokens=*/3,
       /*enable_no_padding=*/false,
       /*max_graph_batch_size=*/16);
@@ -708,7 +630,6 @@ TEST(DecodeGraphWarmupPlanTest,
   }
 
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/2,
       /*num_speculative_tokens=*/1,
       /*enable_no_padding=*/false,
       /*max_graph_batch_size=*/16);
@@ -728,7 +649,6 @@ TEST(DecodeGraphWarmupPlanTest, GraphLimitIsLocalAcrossDpGroups) {
   }
 
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/6,
       /*num_speculative_tokens=*/5,
       /*enable_no_padding=*/false,
       /*max_graph_batch_size=*/16);
@@ -740,9 +660,10 @@ TEST(DecodeGraphWarmupPlanTest, GraphLimitIsLocalAcrossDpGroups) {
   EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{4, 8, 20, 32, 40, 52, 64}));
 
   std::vector<int64_t> warmed_buckets;
+  warmed_buckets.reserve(plan.batch_sizes.size());
   for (const int32_t batch_size : plan.batch_sizes) {
     const int64_t num_tokens = static_cast<int64_t>(batch_size / dp_size) *
-                               warmup_config.num_decoding_tokens;
+                               (warmup_config.num_speculative_tokens + 1);
     warmed_buckets.push_back(runtime::get_decode_graph_token_bucket(
         num_tokens, /*enable_no_padding=*/false));
   }
@@ -751,7 +672,7 @@ TEST(DecodeGraphWarmupPlanTest, GraphLimitIsLocalAcrossDpGroups) {
                                     warmup_config.max_graph_batch_size);
        ++local_batch_size) {
     const int64_t num_tokens = static_cast<int64_t>(local_batch_size) *
-                               warmup_config.num_decoding_tokens;
+                               (warmup_config.num_speculative_tokens + 1);
     const int64_t bucket = runtime::get_decode_graph_token_bucket(
         num_tokens, /*enable_no_padding=*/false);
     EXPECT_NE(std::find(warmed_buckets.begin(), warmed_buckets.end(), bucket),
@@ -763,7 +684,6 @@ TEST(DecodeGraphWarmupPlanTest, GraphLimitIsLocalAcrossDpGroups) {
 
 TEST(DecodeGraphWarmupPlanTest, NoPaddingKeepsCompatibilityBatches) {
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/4,
       /*num_speculative_tokens=*/3,
       /*enable_no_padding=*/true);
   const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
@@ -780,7 +700,6 @@ TEST(DecodeGraphWarmupPlanTest,
   }
 
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/4,
       /*num_speculative_tokens=*/3,
       /*enable_no_padding=*/true,
       /*max_graph_batch_size=*/16);
@@ -796,7 +715,6 @@ TEST(DecodeGraphWarmupPlanTest, NoPaddingMtpKeepsNonDivisibleDpTailBuckets) {
   }
 
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/4,
       /*num_speculative_tokens=*/3,
       /*enable_no_padding=*/true,
       /*max_graph_batch_size=*/16);
@@ -808,13 +726,11 @@ TEST(DecodeGraphWarmupPlanTest, NoPaddingMtpKeepsNonDivisibleDpTailBuckets) {
 
 TEST(DecodeGraphWarmupPlanTest, PreservesSuppliedWarmupConfig) {
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/4,
       /*num_speculative_tokens=*/3,
       /*enable_no_padding=*/false);
   const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
       warmup_config, /*max_global_batch_size=*/16, /*dp_size=*/1);
 
-  EXPECT_EQ(plan.warmup_config.num_decoding_tokens, 4);
   EXPECT_EQ(plan.warmup_config.num_speculative_tokens, 3);
   EXPECT_FALSE(plan.warmup_config.enable_graph_mode_decode_no_padding);
   EXPECT_EQ(plan.warmup_config.max_graph_batch_size, 0);
@@ -827,7 +743,6 @@ TEST(DecodeGraphWarmupPlanTest, PreservesSuppliedWarmupConfig) {
 
 TEST(DecodeGraphWarmupPlanTest, RespectsReducedWarmupCapacity) {
   const DecodeGraphWarmupConfig warmup_config = make_decode_graph_warmup_config(
-      /*num_decoding_tokens=*/1,
       /*num_speculative_tokens=*/0,
       /*enable_no_padding=*/false);
   const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
@@ -1061,8 +976,7 @@ TEST(GraphWarmupTest, PythonNoPaddingWarmsEverySequenceCount) {
             .enable_profile_kv_blocks(false)
             .instance_role(InstanceRole::DECODE)
             .decode_graph_warmup_config(
-                make_decode_graph_warmup_config(num_speculative_tokens + 1,
-                                                num_speculative_tokens,
+                make_decode_graph_warmup_config(num_speculative_tokens,
                                                 no_padding,
                                                 /*max_graph_batch_size=*/4));
 

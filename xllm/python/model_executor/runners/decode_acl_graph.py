@@ -114,12 +114,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
         max_model_len: int,
         dp_size: int = 1,
         dp_rank: int = 0,
-        num_decoding_tokens: int = 1,
+        num_speculative_tokens: int = 0,
         enable_mega_moe_token_mask: bool = False,
         *,
         is_spec_draft: bool = False,
         enable_graph_mode_decode_no_padding: bool = False,
-        spec_verify_width: int = 1,
         device_kv_lengths: bool = False,
         max_capture_tokens: int | None = None,
     ) -> None:
@@ -128,7 +127,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.dp_rank = dp_rank
         self.max_batch = (max_batch + dp_size - 1) // dp_size
         self.max_model_len = max_model_len
-        self.num_decoding_tokens = max(1, int(num_decoding_tokens))
+        self.num_speculative_tokens = num_speculative_tokens
         self._is_spec_draft = is_spec_draft
         self._max_capture_tokens = max_capture_tokens
         self._enable_decode_no_padding = enable_graph_mode_decode_no_padding
@@ -138,9 +137,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if enable_graph_mode_decode_no_padding:
             self._capture_error_mode = "thread_local"
         self._serial_workspace_pool: list[torch.Tensor] | None = [] if enable_graph_mode_decode_no_padding else None
-        if not 1 <= spec_verify_width <= 17 or (is_spec_draft and spec_verify_width != 1):
-            raise ValueError("Speculative verify graph width must be in [1, 17], with width one for draft models")
-        self._spec_verify_width = spec_verify_width
         if device_kv_lengths and dp_size != 1:
             raise ValueError("Device-length ACL graphs require DP size one")
         self._device_kv_lengths = device_kv_lengths
@@ -232,15 +228,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
             cache.conv[0].zero_()
             cache.ssm[:stride].zero_()
 
-    def can_execute(
-        self,
-        input_ids: torch.Tensor,
-        metadata: AttentionMetadata,
-        input_embedding: torch.Tensor | None = None,
-        mtp_topk_indices: torch.Tensor | None = None,
-    ) -> bool:
-        return self.prepare_execution(input_ids, metadata, input_embedding, mtp_topk_indices) is not None
-
     def prepare_execution(
         self,
         input_ids: torch.Tensor,
@@ -270,7 +257,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             return None
         if is_expanded_spec_verify and self._model_owns_linear_spec_verify:
             query_lens = self._expanded_query_lens(metadata)
-            if _uniform_span_width(query_lens) != self.num_decoding_tokens:
+            if _uniform_span_width(query_lens) != self.num_speculative_tokens + 1:
                 return None
 
         # Linear verify requires a backend recurrent-state protocol.
@@ -280,7 +267,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
             and not self.attention_backend.is_mla
             and linear_indices is not None
             and linear_indices.numel() > 0
-            and self._spec_verify_width == 1
             and not self.attention_backend.supports_linear_spec_verify_graph
             and not self._model_owns_linear_spec_verify
         ):
@@ -441,7 +427,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 raise RuntimeError("DP index-history lengths must be nonnegative host integers")
             # All ranks, including dummy ranks, decide from the same logical history.
             # Target verify appends rows after the scheduler publishes its plan.
-            max_verify_kv = max(global_kv_lengths) + self.num_decoding_tokens - 1
+            max_verify_kv = max(global_kv_lengths) + self.num_speculative_tokens
             return max_verify_kv <= max_kv_cap
 
         return block_table.shape[1] * self._logical_page_size <= max_kv_cap
@@ -455,11 +441,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
             batch_size = max(execution_counts)
         if batch_size > self.max_batch:
             raise ValueError("decode batch exceeds ACL graph capacity")
-        if (
-            (self._has_linear_cache or self._model_owns_linear_spec_verify) and metadata.is_spec_verify
-        ) or self._spec_verify_width > 1:
+        if (self._has_linear_cache or self._model_owns_linear_spec_verify) and metadata.is_spec_verify:
             # Recurrent verify buckets must contain complete requests.
-            width = self._spec_verify_width if self._spec_verify_width > 1 else self.num_decoding_tokens
+            width = self.num_speculative_tokens + 1
             if batch_size % width:
                 raise ValueError("linear verify graph requires complete fixed-width requests")
             if self._enable_decode_no_padding:
@@ -938,7 +922,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 entry.static_output,
                 batch_size,
                 detach=(
-                    self.num_decoding_tokens > 1
+                    self.num_speculative_tokens > 0
                     or self._is_spec_draft
                     or input_embedding is not None
                     or mtp_topk_indices is not None
@@ -1191,9 +1175,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if expanded is None:
             expanded = self._expanded_verify_view(metadata)
         is_expanded = expanded is not None
-        has_linear_verify_state = is_expanded and (
-            self._has_linear_cache or self._model_owns_linear_spec_verify or self._spec_verify_width > 1
-        )
+        has_linear_verify_state = is_expanded and (self._has_linear_cache or self._model_owns_linear_spec_verify)
         if decode_metadata is None:
             decode_metadata = self._decode_metadata(metadata, expanded)
         paged_kv_indptr = decode_metadata.paged_kv_indptr

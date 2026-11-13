@@ -67,13 +67,6 @@ struct Options {
   // active linear-state slots. 0 derives capacity from the KV cache budget.
   PROPERTY(int64_t, max_linear_state_cache_slots) = 0;
 
-  // number of decoding tokens per sequence
-  // in speculative decoding, it is the number of speculative tokens + 1
-  PROPERTY(int64_t, num_decoding_tokens) = 1;
-  // Parent MTP width retained for draft-only execution capacity; the draft
-  // itself still has num_speculative_tokens == 0.
-  PROPERTY(int32_t, mtp_draft_prefix_width) = 1;
-
   // the number of speculative tokens per step
   PROPERTY(int32_t, num_speculative_tokens) = 0;
 
