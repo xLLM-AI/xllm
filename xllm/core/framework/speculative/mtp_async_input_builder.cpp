@@ -165,6 +165,30 @@ void prepare_draft_prefix_from_target(LlmForwardInput& draft_input,
   CHECK(draft_input.sampling_params.logits_indices().defined());
   CHECK_EQ(draft_input.sampling_params.logits_indices().numel(), batch_size);
 
+#if defined(USE_NPU)
+  const auto prepared = kernel::npu::try_mtp_prepare_draft_prefix(
+      accepted_tokens,
+      base_positions,
+      base_kv_seq_lens,
+      attention.block_tables,
+      block_size,
+      attention.shared_full_block_table);
+  if (prepared.has_value()) {
+    draft_input.token_ids = prepared->token_ids;
+    draft_input.positions = prepared->positions;
+    attention.kv_seq_lens = prepared->kv_seq_lens;
+    attention.new_cache_slots = prepared->cache_slots;
+    if (prepared->shared_cache_slots.defined()) {
+      attention.shared_full_slot_mapping = prepared->shared_cache_slots;
+    }
+    draft_input.input_params.embedding.input_embedding =
+        target_hidden.flatten(/*start_dim=*/0, /*end_dim=*/1);
+    draft_input.sampling_params.logits_indices() = prepared->logits_indices;
+    draft_input.runtime.device_tensors_ready = true;
+    return;
+  }
+#endif
+
   const torch::Tensor offsets =
       torch::arange(width, accepted_tokens.options().dtype(torch::kLong));
   const torch::Tensor positions =

@@ -183,7 +183,7 @@ std::optional<MtpPrepareNextDraftOutput> try_mtp_prepare_next_draft(
       use_shared_table ? output.shared_cache_slots : output.cache_slots;
 
   const auto spec = tilelang::make_mtp_prepare_next_draft_specialization(
-      tilelang::MtpPrepareNextDraftCompactHidden{
+      tilelang::MtpPrepareNextDraftPreparationMode{
           accepted_embeddings.dim() == 2 ? 1 : 0});
   const auto* entry = tilelang::find_mtp_prepare_next_draft_kernel_entry(spec);
   CHECK(entry != nullptr)
@@ -203,12 +203,105 @@ std::optional<MtpPrepareNextDraftOutput> try_mtp_prepare_next_draft(
             static_cast<uint8_t*>(output.kv_seq_lens.data_ptr()),
             static_cast<uint8_t*>(output.cache_slots.data_ptr()),
             static_cast<uint8_t*>(shared_slot_output.data_ptr()),
+            static_cast<uint8_t*>(output.cache_slots.data_ptr()),
             static_cast<int32_t>(batch_size),
             static_cast<int32_t>(accepted_tokens.size(1)),
             static_cast<int32_t>(hidden_size),
             static_cast<int32_t>(block_tables.size(1)),
             static_cast<int32_t>(block_size),
             static_cast<int32_t>(std::min(batch_size * 2, int64_t{32})),
+            static_cast<int32_t>(use_shared_table),
+            stream);
+  return output;
+}
+
+std::optional<MtpPrepareDraftPrefixOutput> try_mtp_prepare_draft_prefix(
+    const torch::Tensor& accepted_tokens,
+    const torch::Tensor& base_positions,
+    const torch::Tensor& base_kv_seq_lens,
+    const torch::Tensor& expanded_block_tables,
+    int64_t block_size,
+    const torch::Tensor& expanded_shared_block_tables) {
+  if (!is_npu_tensor(accepted_tokens) || !is_npu_tensor(base_positions) ||
+      !is_npu_tensor(base_kv_seq_lens) ||
+      !is_npu_tensor(expanded_block_tables) || accepted_tokens.dim() != 2 ||
+      expanded_block_tables.dim() != 2 ||
+      accepted_tokens.scalar_type() != torch::kLong ||
+      base_positions.scalar_type() != torch::kInt ||
+      base_kv_seq_lens.scalar_type() != torch::kInt ||
+      expanded_block_tables.scalar_type() != torch::kInt ||
+      !accepted_tokens.is_contiguous() || !base_positions.is_contiguous() ||
+      !base_kv_seq_lens.is_contiguous() ||
+      !expanded_block_tables.is_contiguous() || block_size <= 0 ||
+      block_size > kMaxOffset) {
+    return std::nullopt;
+  }
+  const int64_t batch_size = accepted_tokens.size(0);
+  const int64_t width = accepted_tokens.size(1);
+  const int64_t rows = accepted_tokens.numel();
+  const torch::Device device = accepted_tokens.device();
+  if (batch_size <= 0 || width < 2 || width > 17 || rows > kMaxOffset ||
+      base_positions.numel() != batch_size ||
+      base_kv_seq_lens.numel() != batch_size ||
+      expanded_block_tables.size(0) != rows ||
+      expanded_block_tables.size(1) <= 0 ||
+      expanded_block_tables.numel() > kMaxOffset ||
+      base_positions.device() != device ||
+      base_kv_seq_lens.device() != device ||
+      expanded_block_tables.device() != device) {
+    return std::nullopt;
+  }
+  const bool use_shared_table = expanded_shared_block_tables.defined();
+  if (use_shared_table &&
+      (expanded_shared_block_tables.device() != device ||
+       expanded_shared_block_tables.scalar_type() != torch::kInt ||
+       expanded_shared_block_tables.sizes() != expanded_block_tables.sizes() ||
+       !expanded_shared_block_tables.is_contiguous())) {
+    return std::nullopt;
+  }
+  const torch::TensorOptions int_options =
+      accepted_tokens.options().dtype(torch::kInt);
+  MtpPrepareDraftPrefixOutput output{
+      .token_ids = torch::empty({rows}, int_options),
+      .positions = torch::empty({rows}, int_options),
+      .kv_seq_lens = torch::empty({rows}, int_options),
+      .cache_slots = torch::empty({rows}, int_options),
+      .shared_cache_slots = use_shared_table ? torch::empty({rows}, int_options)
+                                             : torch::Tensor(),
+      .logits_indices = torch::empty({batch_size}, int_options),
+  };
+  const torch::Tensor& shared_table =
+      use_shared_table ? expanded_shared_block_tables : expanded_block_tables;
+  const torch::Tensor& shared_slots =
+      use_shared_table ? output.shared_cache_slots : output.cache_slots;
+  const auto spec = tilelang::make_mtp_prepare_next_draft_specialization(
+      tilelang::MtpPrepareNextDraftPreparationMode{2});
+  const auto* entry = tilelang::find_mtp_prepare_next_draft_kernel_entry(spec);
+  CHECK(entry != nullptr)
+      << tilelang::available_mtp_prepare_next_draft_variant_keys();
+  aclrtStream stream = c10_npu::getCurrentNPUStream(device.index()).stream();
+  // Prefix specialization does not read/copy hidden buffers. Existing output
+  // pointers fill the unused ABI positions without allocating placeholders.
+  entry->fn(static_cast<uint8_t*>(accepted_tokens.data_ptr()),
+            static_cast<uint8_t*>(accepted_tokens.data_ptr()),
+            static_cast<uint8_t*>(accepted_tokens.data_ptr()),
+            static_cast<uint8_t*>(base_positions.data_ptr()),
+            static_cast<uint8_t*>(base_kv_seq_lens.data_ptr()),
+            static_cast<uint8_t*>(expanded_block_tables.data_ptr()),
+            static_cast<uint8_t*>(shared_table.data_ptr()),
+            static_cast<uint8_t*>(output.token_ids.data_ptr()),
+            static_cast<uint8_t*>(output.token_ids.data_ptr()),
+            static_cast<uint8_t*>(output.positions.data_ptr()),
+            static_cast<uint8_t*>(output.kv_seq_lens.data_ptr()),
+            static_cast<uint8_t*>(output.cache_slots.data_ptr()),
+            static_cast<uint8_t*>(shared_slots.data_ptr()),
+            static_cast<uint8_t*>(output.logits_indices.data_ptr()),
+            static_cast<int32_t>(batch_size),
+            static_cast<int32_t>(width),
+            /*hidden_size=*/1,
+            static_cast<int32_t>(expanded_block_tables.size(1)),
+            static_cast<int32_t>(block_size),
+            /*copy_cores=*/1,
             static_cast<int32_t>(use_shared_table),
             stream);
   return output;
