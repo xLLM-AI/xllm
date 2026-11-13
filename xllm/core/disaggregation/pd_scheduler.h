@@ -15,10 +15,8 @@ limitations under the License.
 
 #pragma once
 
-#include <absl/hash/hash.h>
 #include <brpc/channel.h>
 
-#include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +30,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/disaggregation/pd_reservation_releases.h"
 #include "core/disaggregation/pd_service.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "disagg_pd.pb.h"
@@ -315,11 +314,7 @@ class PDScheduler : public ContinuousScheduler<> {
   // instance_to_received_requests_map_ when the request is processed.
   std::unordered_map<std::string, std::string> request_to_instance_map_;
   std::mutex received_request_map_mutex_;
-  using ReservationIdentity = std::pair<std::string, std::string>;
-  std::unordered_map<ReservationIdentity,
-                     std::chrono::steady_clock::time_point,
-                     absl::Hash<ReservationIdentity>>
-      released_reservations_;
+  PDReservationReleases released_reservations_;
 
   // Lock for multi-threaded read-write linked instances
   std::mutex linked_instances_mutex_;

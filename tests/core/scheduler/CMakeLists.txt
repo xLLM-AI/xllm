@@ -37,3 +37,15 @@ target_link_libraries(scheduler_test
                       $<$<BOOL:${USE_NPU}>:ascendcl>
                       $<$<BOOL:${USE_NPU}>:hccl>
                       $<$<BOOL:${USE_NPU}>:c_sec>)
+
+# Reservation expiry is host-only and must not initialize the device runtime.
+cc_test(
+  NAME
+    pd_reservation_releases_test
+  CPU_ONLY
+  SRCS
+    pd_reservation_releases_test.cpp
+  DEPS
+    absl::hash
+    GTest::gtest_main
+)

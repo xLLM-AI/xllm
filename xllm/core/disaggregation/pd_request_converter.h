@@ -22,6 +22,10 @@ limitations under the License.
 
 namespace xllm {
 
+class Request;
+
+void fill_pd_request(Request& request, proto::DisaggRequest* req);
+
 RequestSamplingParam make_pd_sampling_param(const proto::DisaggRequest& req);
 
 SchedulerParam make_pd_scheduler_param(const proto::DisaggRequest& req);

@@ -4,6 +4,7 @@ cc_library(
   NAME
     disaggregation
   HDRS
+    pd_reservation_releases.h
     pd_scheduler.h
     pd_service.h
     pd_service_impl.h
