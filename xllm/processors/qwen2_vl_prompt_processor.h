@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
-#include <utility>
 
 #include "core/framework/model/model_args.h"
 #include "processors/prompt_processor.h"
@@ -25,12 +24,6 @@ limitations under the License.
 namespace xllm {
 
 class Qwen2VLPromptProcessor final : public PromptProcessor {
-  enum class TokenType {
-    INVALID,
-    IMAGE,
-    VIDEO,
-  };
-
  public:
   explicit Qwen2VLPromptProcessor(const ModelArgs& args);
 
@@ -39,9 +32,6 @@ class Qwen2VLPromptProcessor final : public PromptProcessor {
                      MMData& mm_data) override;
 
  private:
-  std::pair<TokenType, size_t> find_vision_token(const std::string& prompt,
-                                                 size_t begin);
-
   const std::string image_token_ = "<|image_pad|>";
   const std::string video_token_ = "<|video_pad|>";
   int32_t vision_start_token_id_;

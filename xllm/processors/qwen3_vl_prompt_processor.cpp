@@ -18,8 +18,9 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
-#include <cassert>
 #include <cstdio>
+
+#include "processors/vision_token_scanner.h"
 
 namespace xllm {
 
@@ -35,12 +36,14 @@ Qwen3VLPromptProcessor::Qwen3VLPromptProcessor(const ModelArgs& args) {
 bool Qwen3VLPromptProcessor::process(std::string& prompt,
                                      const MMData& mm_data) {
   torch::Tensor image_grid_thw;
-  if (auto res = mm_data.get<torch::Tensor>("image_grid_thw"))
+  if (auto res = mm_data.get<torch::Tensor>("image_grid_thw")) {
     image_grid_thw = res.value();
+  }
 
   torch::Tensor video_grid_thw;
-  if (auto res = mm_data.get<torch::Tensor>("video_grid_thw"))
+  if (auto res = mm_data.get<torch::Tensor>("video_grid_thw")) {
     video_grid_thw = res.value();
+  }
 
   if (!image_grid_thw.defined() && !video_grid_thw.defined()) {
     return true;
@@ -81,7 +84,9 @@ bool Qwen3VLPromptProcessor::process(std::string& prompt,
   int32_t video_index = 0;
 
   size_t begin = 0;
-  auto pair = find_vision_token(prompt, begin);
+  VisionTokenScanner scanner(prompt, image_token_, video_token_);
+  using TokenType = VisionTokenScanner::TokenType;
+  auto pair = scanner.find_next(begin);
 
   while (pair.second != std::string::npos) {
     if (pair.first == TokenType::IMAGE) {
@@ -142,10 +147,12 @@ bool Qwen3VLPromptProcessor::process(std::string& prompt,
       LOG(FATAL) << "Unexpected token type encountered.";
     }
 
-    pair = find_vision_token(prompt, begin);
+    pair = scanner.find_next(begin);
   }
 
-  if (begin < prompt.size()) data.append(prompt, begin, std::string::npos);
+  if (begin < prompt.size()) {
+    data.append(prompt, begin, std::string::npos);
+  }
   prompt = std::move(data);
   return true;
 }
@@ -169,6 +176,7 @@ bool Qwen3VLPromptProcessor::find_mm_spans(
   int32_t video_span_start = -1;
   int32_t video_span_end = -1;
   std::vector<uint8_t> video_mask;
+  int32_t video_token_count = 0;
 
   while (true) {
     auto vision_start_it =
@@ -205,6 +213,7 @@ bool Qwen3VLPromptProcessor::find_mm_spans(
         video_span_start = offset + 1;
         video_span_end = video_span_start;
         video_mask.clear();
+        video_token_count = 0;
       }
 
       CHECK(video_frames_left > 0);
@@ -216,8 +225,9 @@ bool Qwen3VLPromptProcessor::find_mm_spans(
       }
       for (auto token_it = vision_start_it + 1; token_it != vision_end_it;
            ++token_it) {
-        video_mask.push_back(
-            static_cast<uint8_t>(*token_it == video_token_id_));
+        const bool is_video_token = *token_it == video_token_id_;
+        video_mask.emplace_back(static_cast<uint8_t>(is_video_token));
+        video_token_count += static_cast<int32_t>(is_video_token);
       }
       video_span_end = frame_span_end;
       --video_frames_left;
@@ -231,9 +241,7 @@ bool Qwen3VLPromptProcessor::find_mm_spans(
                 {static_cast<int64_t>(video_mask.size())},
                 torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU))
                 .clone();
-        const torch::Tensor& mask = item.state().mm_token_mask();
-        item.mutable_state().mutable_mm_token_num() =
-            static_cast<int32_t>(mask.sum().item<int64_t>());
+        item.mutable_state().mutable_mm_token_num() = video_token_count;
 
         ++global_mm_index;
         ++video_index;
@@ -243,23 +251,6 @@ bool Qwen3VLPromptProcessor::find_mm_spans(
     start = std::next(vision_end_it);
   }
   return true;
-}
-
-std::pair<Qwen3VLPromptProcessor::TokenType, size_t>
-Qwen3VLPromptProcessor::find_vision_token(const std::string& prompt,
-                                          size_t begin) {
-  auto img_pos = prompt.find(image_token_, begin);
-  auto vid_pos = prompt.find(video_token_, begin);
-
-  if (img_pos == std::string::npos && vid_pos == std::string::npos)
-    return {TokenType::INVALID, std::string::npos};
-  else if (vid_pos == std::string::npos)
-    return {TokenType::IMAGE, img_pos};
-  else if (img_pos == std::string::npos)
-    return {TokenType::VIDEO, vid_pos};
-  else
-    return img_pos < vid_pos ? std::make_pair(TokenType::IMAGE, img_pos)
-                             : std::make_pair(TokenType::VIDEO, vid_pos);
 }
 
 std::vector<double> Qwen3VLPromptProcessor::build_timestamps(
@@ -272,24 +263,20 @@ std::vector<double> Qwen3VLPromptProcessor::build_timestamps(
     return std::vector<double>(num_frames, 0.0);
   }
 
-  std::vector<double> ts = timestamps;
-  const size_t rem = ts.size() % static_cast<size_t>(merge_size);
-  if (rem != 0) {
-    ts.insert(ts.end(), static_cast<size_t>(merge_size) - rem, ts.back());
-  }
-
+  const size_t group_size = static_cast<size_t>(merge_size);
+  const size_t group_count =
+      timestamps.size() / group_size + (timestamps.size() % group_size != 0);
+  const size_t selected_count = std::min(num_frames, group_count);
   std::vector<double> out;
-  out.reserve(ts.size() / static_cast<size_t>(merge_size));
-
-  for (size_t i = 0; i < ts.size(); i += static_cast<size_t>(merge_size)) {
-    out.push_back((ts[i] + ts[i + static_cast<size_t>(merge_size) - 1]) / 2.0);
+  out.reserve(num_frames);
+  for (size_t group = 0; group < selected_count; ++group) {
+    const size_t first = group * group_size;
+    const size_t last =
+        first + std::min(group_size, timestamps.size() - first) - 1;
+    out.emplace_back((timestamps[first] + timestamps[last]) / 2.0);
   }
-
-  if (out.size() > num_frames) {
-    out.resize(num_frames);
-  }
-  while (out.size() < num_frames) {
-    out.push_back(out.back());
+  if (out.size() < num_frames) {
+    out.resize(num_frames, out.back());
   }
 
   return out;

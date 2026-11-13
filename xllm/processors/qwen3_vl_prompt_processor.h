@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "core/framework/model/model_args.h"
@@ -26,12 +25,6 @@ limitations under the License.
 namespace xllm {
 
 class Qwen3VLPromptProcessor final : public PromptProcessor {
-  enum class TokenType {
-    INVALID,
-    IMAGE,
-    VIDEO,
-  };
-
  public:
   explicit Qwen3VLPromptProcessor(const ModelArgs& args);
 
@@ -40,9 +33,6 @@ class Qwen3VLPromptProcessor final : public PromptProcessor {
                      MMData& mm_data) override;
 
  private:
-  std::pair<TokenType, size_t> find_vision_token(const std::string& prompt,
-                                                 size_t begin);
-
   std::vector<double> build_timestamps(const std::vector<double>& timestamps,
                                        size_t num_frames,
                                        int32_t merge_size);

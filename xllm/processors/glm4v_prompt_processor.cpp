@@ -18,6 +18,8 @@ limitations under the License.
 #include <cstdint>
 #include <cstdio>
 
+#include "processors/vision_token_scanner.h"
+
 namespace xllm {
 
 GLM4VPromptProcessor::GLM4VPromptProcessor(const ModelArgs& args) {
@@ -79,7 +81,9 @@ bool GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
   int32_t image_index = 0;
   int32_t video_index = 0;
   size_t begin = 0;
-  auto pair = find_vision_token(prompt, begin);
+  VisionTokenScanner scanner(prompt, image_token_, video_token_);
+  using TokenType = VisionTokenScanner::TokenType;
+  auto pair = scanner.find_next(begin);
 
   while (pair.second != std::string::npos) {
     data.append(prompt, begin, pair.second - begin);
@@ -94,7 +98,7 @@ bool GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
       begin = pair.second + image_token_.size();
     } else if (pair.first == TokenType::VIDEO) {
       auto num_frames = video_grid_thw[video_index][0].item<int32_t>();
-      auto timestamps = video_metadata[video_index].timestamps;
+      const auto& timestamps = video_metadata[video_index].timestamps;
       CHECK(!timestamps.empty());
 
       auto selected = build_timestamps(timestamps, num_frames);
@@ -115,7 +119,7 @@ bool GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
     } else {
       LOG(FATAL) << "Unexpected token type encountered.";
     }
-    pair = find_vision_token(prompt, begin);
+    pair = scanner.find_next(begin);
   }
 
   if (begin < prompt.size()) {
@@ -134,6 +138,7 @@ bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
   bool is_video = false;
   int32_t video_offset = 0;
   std::vector<uint8_t> video_mask;
+  int32_t video_token_count = 0;
   auto& mm_items = mm_data.items<MMItemVec>();
 
   for (size_t idx = 0; idx < tokens_num; ++idx) {
@@ -142,6 +147,7 @@ bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
       is_video = true;
       video_offset = idx + 1;
       video_mask.clear();
+      video_token_count = 0;
       continue;
     } else if (token == video_end_token_id_) {
       if (is_video) {
@@ -155,14 +161,15 @@ bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
                 torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU))
                 .clone();
         item.mutable_state().mutable_mm_token_mask() = mask;
-        item.mutable_state().mutable_mm_token_num() =
-            static_cast<int32_t>(mask.sum().item<int64_t>());
+        item.mutable_state().mutable_mm_token_num() = video_token_count;
       }
       is_video = false;
       continue;
     }
     if (is_video) {
-      video_mask.push_back(token == image_token_id_);
+      const bool is_image_token = token == image_token_id_;
+      video_mask.emplace_back(static_cast<uint8_t>(is_image_token));
+      video_token_count += static_cast<int32_t>(is_image_token);
       continue;
     }
     if (token == image_start_token_id_) {
@@ -183,24 +190,6 @@ bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
     }
   }
   return true;
-}
-
-std::pair<GLM4VPromptProcessor::TokenType, size_t>
-GLM4VPromptProcessor::find_vision_token(const std::string& prompt,
-                                        size_t begin) {
-  auto img_pos = prompt.find(image_token_, begin);
-  auto vid_pos = prompt.find(video_token_, begin);
-
-  if (img_pos == std::string::npos && vid_pos == std::string::npos) {
-    return {TokenType::INVALID, std::string::npos};
-  } else if (vid_pos == std::string::npos) {
-    return {TokenType::IMAGE, img_pos};
-  } else if (img_pos == std::string::npos) {
-    return {TokenType::VIDEO, vid_pos};
-  } else {
-    return img_pos < vid_pos ? std::make_pair(TokenType::IMAGE, img_pos)
-                             : std::make_pair(TokenType::VIDEO, vid_pos);
-  }
 }
 
 std::vector<double> GLM4VPromptProcessor::build_timestamps(
