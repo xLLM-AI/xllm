@@ -658,30 +658,22 @@ class DeepseekV4ModelImpl
 
   void prepare_expert_weight(int32_t layer_id,
                              const std::vector<int32_t>& expert_ids) {
-    CHECK_GE(layer_id, 0) << "DeepSeek V4 EPLB layer id must be non-negative.";
-    CHECK_LT(layer_id, static_cast<int32_t>(layers_.size()))
-        << "DeepSeek V4 EPLB layer id out of range: " << layer_id;
+    layer_id = eplb_layer_id(layer_id);
     layers_[layer_id]->prepare_expert_weight(expert_ids);
   }
 
   void update_expert_weight(int32_t layer_id) {
-    CHECK_GE(layer_id, 0) << "DeepSeek V4 EPLB layer id must be non-negative.";
-    CHECK_LT(layer_id, static_cast<int32_t>(layers_.size()))
-        << "DeepSeek V4 EPLB layer id out of range: " << layer_id;
+    layer_id = eplb_layer_id(layer_id);
     layers_[layer_id]->update_expert_weight();
   }
 
   void start_expert_weight_transfer(int32_t layer_id) {
-    CHECK_GE(layer_id, 0) << "DeepSeek V4 EPLB layer id must be non-negative.";
-    CHECK_LT(layer_id, static_cast<int32_t>(layers_.size()))
-        << "DeepSeek V4 EPLB layer id out of range: " << layer_id;
+    layer_id = eplb_layer_id(layer_id);
     layers_[layer_id]->start_expert_weight_transfer();
   }
 
   bool last_prepare_expert_weight_ok(int32_t layer_id) const {
-    CHECK_GE(layer_id, 0) << "DeepSeek V4 EPLB layer id must be non-negative.";
-    CHECK_LT(layer_id, static_cast<int32_t>(layers_.size()))
-        << "DeepSeek V4 EPLB layer id out of range: " << layer_id;
+    layer_id = eplb_layer_id(layer_id);
     return layers_[layer_id]->last_prepare_expert_weight_ok();
   }
 
@@ -1075,6 +1067,14 @@ class DeepseekV4ModelImpl
   }
 
  private:
+  int32_t eplb_layer_id(int32_t layer_id) const {
+    layer_id += model_args_.first_k_dense_replace();
+    CHECK_GE(layer_id, 0) << "DeepSeek V4 EPLB layer id must be non-negative.";
+    CHECK_LT(layer_id, static_cast<int32_t>(layers_.size()))
+        << "DeepSeek V4 EPLB layer id out of range: " << layer_id;
+    return layer_id;
+  }
+
   static c10::optional<torch::Tensor> as_optional_tensor(
       const torch::Tensor& tensor) {
     if (tensor.defined() && tensor.numel() > 0) {
@@ -1809,48 +1809,7 @@ class DeepseekV4ForCausalLMImpl
     : public LlmForCausalLMImplBase<DeepseekV4Model> {
  public:
   explicit DeepseekV4ForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekV4Model>(context),
-        first_k_dense_replace_(
-            context.get_model_args().first_k_dense_replace()) {}
-
-  bool requires_graph_forward_metadata() {
-    return this->model_->requires_graph_forward_metadata();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState>
-  create_graph_forward_metadata_state() {
-    return this->model_->create_graph_forward_metadata_state();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& input_params) {
-    this->model_->prepare_graph_forward_metadata(
-        state, positions, input_params);
-  }
-
-  void prepare_expert_weight(int32_t layer_id,
-                             const std::vector<int32_t>& expert_ids) override {
-    this->model_->prepare_expert_weight(layer_id + first_k_dense_replace_,
-                                        expert_ids);
-  }
-
-  void update_expert_weight(int32_t layer_id) override {
-    this->model_->update_expert_weight(layer_id + first_k_dense_replace_);
-  }
-
-  void start_expert_weight_transfer(int32_t layer_id) {
-    this->model_->start_expert_weight_transfer(layer_id +
-                                               first_k_dense_replace_);
-  }
-
-  bool last_prepare_expert_weight_ok(int32_t layer_id) const {
-    return this->model_->last_prepare_expert_weight_ok(layer_id +
-                                                       first_k_dense_replace_);
-  }
-
- private:
-  int32_t first_k_dense_replace_;
+      : LlmForCausalLMImplBase<DeepseekV4Model>(context) {}
 };
 TORCH_MODULE(DeepseekV4ForCausalLM);
 

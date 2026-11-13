@@ -34,7 +34,6 @@ cc_library(
     common
     util
     encoder_cache
-    :parallel_state
     glog::glog
     OpenSSL::Crypto
     absl::strings

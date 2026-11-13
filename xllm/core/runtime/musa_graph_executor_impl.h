@@ -55,8 +55,6 @@ using c10::musa::MUSAStream;
 
 namespace xllm::runtime::musa {
 
-using MusaMemPool = c10::musa::MemPool;
-
 // Helper class to hold persistent parameters for MUSA graph execution
 // Multiple MusaGraph instances can share the same MusaGraphPersistentParam
 // object
@@ -200,23 +198,12 @@ class MusaGraphPersistentParam final {
   }
 
  private:
-  template <typename Params>
-  std::optional<Params> update_typed(const torch::Tensor& tokens,
-                                     const torch::Tensor& k_cache,
-                                     const torch::Tensor& v_cache,
-                                     const torch::Tensor& positions,
-                                     const Params& params,
-                                     uint32_t padded_num_tokens,
-                                     bool return_capture_params);
-
-  template <typename Params>
   bool can_use_llm_decode_fast_path(const torch::Tensor& tokens,
                                     const torch::Tensor& positions,
-                                    const Params& params) const;
-  template <typename Params>
+                                    const ModelParamsView& params) const;
   void update_llm_decode_metadata_fast_path(const torch::Tensor& tokens,
                                             const torch::Tensor& positions,
-                                            const Params& params,
+                                            const ModelParamsView& params,
                                             uint32_t padded_num_tokens,
                                             int64_t actual_batch_size,
                                             int64_t actual_num_tokens);
@@ -261,7 +248,7 @@ class MusaGraph final {
 
   // Capture computation graph for given bucket num_tokens
 
-  bool capture(CausalLM* model,
+  bool capture(DecoderModel* model,
                const ModelArgs& args,
                const runtime::Options& options,
                const torch::Tensor& tokens,
@@ -269,8 +256,7 @@ class MusaGraph final {
                const ModelParamsView& params,
                std::vector<KVCache>& kv_cache,
                uint32_t bucket_num_tokens,
-               const c10::musa::MempoolId_t& pool,
-               MusaMemPool* pool_ptr = nullptr);
+               const c10::musa::MempoolId_t& pool);
 
   // Replay captured graph with new input data
 
@@ -285,23 +271,6 @@ class MusaGraph final {
   }
 
  private:
-  template <typename Params, typename Model>
-  bool capture_typed(Model* model,
-                     const ModelArgs& args,
-                     const runtime::Options& options,
-                     const torch::Tensor& tokens,
-                     const torch::Tensor& positions,
-                     const Params& params,
-                     std::vector<KVCache>& kv_cache,
-                     uint32_t bucket_num_tokens,
-                     const c10::musa::MempoolId_t& pool,
-                     MusaMemPool* pool_ptr);
-  template <typename Params>
-  ModelOutput replay_typed(const torch::Tensor& tokens,
-                           const torch::Tensor& positions,
-                           std::vector<KVCache>& kv_cache,
-                           const Params& params);
-
   // Refresh the persistent host mirrors used by the Mate FFI batch_decode
   // run() call. Lazily allocates pinned CPU buffers sized to worst case (set
   // by MusaGraphPersistentParam at executor construction), then copies the
@@ -406,23 +375,9 @@ class MusaGraphExecutorImpl final : public ExecutorImpl {
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
 
-  // Return current graph executor memory usage in bytes (including persistent
-  // parameters). Exposed for tests and diagnostics.
-  size_t get_graph_memory_usage_bytes();
-
-  static std::optional<std::pair<torch::Tensor, torch::Tensor>>
-  find_first_full_attention_cache(const std::vector<KVCache>& kv_caches);
-
  private:
   // not own
-  CausalLM* model_;
-
-  template <typename Model, typename Params>
-  ModelOutput run_typed(Model* model,
-                        const torch::Tensor& tokens,
-                        const torch::Tensor& positions,
-                        std::vector<KVCache>& kv_caches,
-                        const Params& params);
+  DecoderModel* model_;
 
   ModelArgs args_;
   torch::Device device_;
@@ -449,49 +404,9 @@ class MusaGraphExecutorImpl final : public ExecutorImpl {
       const torch::Tensor& hidden_states,
       uint32_t n_tokens) const;
 
-  template <typename Model, typename Params>
-  void prepare_graph_embedding(Model* model,
-                               const torch::Tensor& tokens,
-                               GraphExecutionInput<Params>& graph_input) const;
-
-  // Get MUSA graph memory pool id for capture. When VMM is enabled, uses
-  // per-shape MemPool under (physical_pool_id, shape_id). Same physical_pool_id
-  // => reuse across different shapes (e.g. prefill vs decode are different
-  // pools).
-  c10::musa::MempoolId_t get_mem_pool(uint32_t physical_pool_id = 0,
-                                      uint32_t shape_id = 0);
-
-  // Switch VMM allocator to a new virtual address space before capture for the
-  // given physical pool. Enables physical memory reuse within that pool across
-  // shapes (max(shape) instead of sum(shape)).
-  void reset_vmm_allocator_offset(uint32_t physical_pool_id);
-
-  struct VmmPoolState;
-
-  struct GraphMemoryUsageStats {
-    size_t executor_total_bytes = 0;
-    size_t persistent_param_bytes = 0;
-    size_t allocated_pool_bytes = 0;
-    size_t active_pool_bytes = 0;
-    size_t pool_high_water_mark_bytes = 0;
-  };
-
-  VmmPoolState& get_or_create_vmm_pool_state(uint32_t physical_pool_id);
-  MusaMemPool* get_or_create_vmm_mempool(uint32_t physical_pool_id,
-                                         uint32_t shape_id);
-  MusaMemPool* get_vmm_mempool(uint32_t physical_pool_id, uint32_t shape_id);
-  GraphMemoryUsageStats get_graph_memory_usage_stats();
-  void log_graph_memory_after_capture();
-
-  std::mutex vmm_mutex_;
-  std::unordered_map<uint32_t, std::unique_ptr<VmmPoolState>> vmm_pools_;
-
-  size_t baseline_private_pool_reserved_bytes_ = 0;
-  size_t baseline_private_pool_allocated_bytes_ = 0;
-  size_t baseline_private_pool_active_bytes_ = 0;
-  size_t baseline_allocator_reserved_bytes_ = 0;
-
-  size_t last_logged_executor_total_bytes_ = 0;
+  void prepare_graph_embedding(
+      const torch::Tensor& tokens,
+      GraphExecutionInput<ModelParamsView>& graph_input) const;
 
   // Get the MUSA-compatible capture stream for the current thread.
   // Each thread automatically gets its own high-priority capture stream

@@ -37,7 +37,6 @@ limitations under the License.
 #endif
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_extend_input.h"
-#include "models/model_registry.h"
 #include "runtime/executor.h"
 #include "util/env_var.h"
 #include "util/threadpool.h"
@@ -74,7 +73,6 @@ LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
 }
 
 bool LLMWorkerImpl::init_model(ModelContext& context) {
-  CHECK(model_ == nullptr) << "Model is already initialized.";
   const auto& model_config = ModelConfig::get_instance();
 #if defined(USE_MUSA)
   static const bool use_pool_compute_stream = util::get_bool_env(
@@ -109,12 +107,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   }
 #endif
 
-  // Try to create a causal LM model
-  model_ = create_llm_model(context);
-
-  // Dont find model in causal models
-  CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
+  WorkerImpl::init_model(context);
   model_executor_->set_dp_process_group(
       context.get_parallel_args().dp_local_process_group_);
 
@@ -135,7 +128,8 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
     // MTP draft MoE layers still write to their own load buffer, but only
     // the target reports loads and consumes EPLB prepare/update commands.
     if (!options_.is_draft_engine()) {
-      eplb_executor_ = std::make_unique<EplbExecutor>(*model_, device_);
+      eplb_executor_ =
+          std::make_unique<EplbExecutor>(language_model_->model(), device_);
     }
   }
   return true;
@@ -267,7 +261,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       // Emit both selected hidden and logits from a single lm_head pass so the
       // ConfidenceHead and CP speculative paths can consume hidden without a
       // second projection.
-      logits = model_->logits(
+      logits = language_model_->logits(
           model_output.hidden_states, logits_indices, selected_hidden);
       if (!selected_hidden.defined()) {
         // Models with only the two-argument logits overload leave this unset.
@@ -277,7 +271,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
             /*dim=*/0, logits_indices.to(torch::kLong));
       }
     } else {
-      logits = model_->logits(model_output.hidden_states, logits_indices);
+      logits =
+          language_model_->logits(model_output.hidden_states, logits_indices);
     }
   }
 

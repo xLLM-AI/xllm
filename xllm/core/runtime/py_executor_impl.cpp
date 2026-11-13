@@ -87,14 +87,14 @@ void register_xllm_runtime_module(py::module_& m) {
       .def("size", &LayerSynchronizer::size);
 
   m.def("tp_all_reduce", [](torch::Tensor tensor) {
-    PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+    PyModel* py_causal_lm = PyModel::active_instance();
     if (py_causal_lm != nullptr) {
       py_causal_lm->tp_all_reduce(tensor);
     }
     return tensor;
   });
   m.def("tp_all_gather", [](torch::Tensor tensor, int64_t dim) {
-    PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+    PyModel* py_causal_lm = PyModel::active_instance();
     if (py_causal_lm != nullptr) {
       return py_causal_lm->tp_all_gather(tensor, dim);
     }
@@ -103,21 +103,21 @@ void register_xllm_runtime_module(py::module_& m) {
   m.def("dp_all_gather",
         [](torch::Tensor tensor,
            const std::vector<int32_t>& execution_token_counts) {
-          PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+          PyModel* py_causal_lm = PyModel::active_instance();
           if (py_causal_lm != nullptr) {
             return py_causal_lm->dp_all_gather(tensor, execution_token_counts);
           }
           return tensor;
         });
   m.def("moe_tp_all_reduce", [](torch::Tensor tensor) {
-    PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+    PyModel* py_causal_lm = PyModel::active_instance();
     if (py_causal_lm != nullptr) {
       py_causal_lm->moe_tp_all_reduce(tensor);
     }
     return tensor;
   });
   m.def("moe_ep_all_reduce", [](torch::Tensor tensor) {
-    PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+    PyModel* py_causal_lm = PyModel::active_instance();
     if (py_causal_lm != nullptr) {
       py_causal_lm->moe_ep_all_reduce(tensor);
     }
@@ -125,16 +125,16 @@ void register_xllm_runtime_module(py::module_& m) {
   });
   m.def("eplb_batch_isend_irecv",
         [](py::list operation_types, py::list tensors, py::list remote_ranks) {
-          PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+          PyModel* py_causal_lm = PyModel::active_instance();
           CHECK(py_causal_lm != nullptr)
-              << "EPLB P2P transfer requires an active PyCausalLM.";
+              << "EPLB P2P transfer requires an active PyModel.";
           py_causal_lm->eplb_batch_isend_irecv(
               operation_types, tensors, remote_ranks);
         });
   m.def("eplb_wait_batch_isend_irecv", []() {
-    PyCausalLM* py_causal_lm = PyCausalLM::active_instance();
+    PyModel* py_causal_lm = PyModel::active_instance();
     CHECK(py_causal_lm != nullptr)
-        << "EPLB P2P transfer requires an active PyCausalLM.";
+        << "EPLB P2P transfer requires an active PyModel.";
     py_causal_lm->eplb_wait_batch_isend_irecv();
   });
 
@@ -182,12 +182,12 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
                                const ModelArgs& args,
                                const torch::Device& device,
                                const runtime::Options& options)
-    : py_causal_lm_(dynamic_cast<PyCausalLM*>(model)),
+    : model_(dynamic_cast<PyModel*>(&model->model())),
       args_(args),
       device_(device),
       options_(options),
       enable_mla_(args.enable_mla()) {
-  CHECK(py_causal_lm_ != nullptr) << "PyExecutorImpl requires PyCausalLM";
+  CHECK(model_ != nullptr) << "PyExecutorImpl requires PyModel";
   if (options_.backend() == "vlm" && options_.max_encoder_cache_size() > 0) {
     encoder_cache_ = std::make_unique<EncoderCache>(
         options_.max_encoder_cache_size() * 1024 * 1024);
@@ -198,7 +198,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       py::module_::import("xllm.python.model_executor.executor");
   // These values belong to the executor, not the checkpoint. In particular,
   // the MTP draft has different speculative options from its target.
-  py::dict executor_config = py_causal_lm_->config_dict().attr("copy")();
+  py::dict executor_config = model_->config_dict().attr(/*key=*/"copy")();
   num_speculative_tokens_ =
       executor_config["num_speculative_tokens"].cast<int32_t>();
   executor_config["enable_disagg_pd"] = options_.enable_disagg_pd();
@@ -244,11 +244,11 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
     executor_config["python_graph_backend"] = "aclgraph";
   }
   py_executor_ = executor_module.attr("ModelExecutor")(
-      py_causal_lm_->python_model(),
+      model_->python_model(),
       executor_config,
       options_.max_seqs_per_batch(),
       ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
-  py_causal_lm_->set_context_kv_graph_runner(
+  model_->set_context_kv_graph_runner(
       py_executor_.attr("context_kv_graph_runner"));
   requires_input_batch_metadata_ =
       py_executor_.attr("requires_input_batch_metadata").cast<bool>();
@@ -257,8 +257,8 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
 }
 
 PyExecutorImpl::~PyExecutorImpl() {
-  if (PyCausalLM::active_instance() == py_causal_lm_) {
-    PyCausalLM::set_active_instance(nullptr);
+  if (PyModel::active_instance() == model_) {
+    PyModel::set_active_instance(/*model=*/nullptr);
   }
   clear_python_object(py_executor_);
 }
@@ -286,7 +286,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
                                 std::vector<KVCache>& kv_caches,
                                 const ModelParamsView& params) {
   torch::NoGradGuard no_grad;
-  PyCausalLM::set_active_instance(py_causal_lm_);
+  PyModel::set_active_instance(model_);
 
   // Build or reuse attention metadata.
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
@@ -313,11 +313,10 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
           << "Python model Host KV reload failed.";
     }
   }
-  if (!enable_mla_ && py_causal_lm_->cp_size() == 1 &&
-      py_causal_lm_->kv_split_size() > 1) {
+  if (!enable_mla_ && model_->cp_size() == 1 && model_->kv_split_size() > 1) {
     const KVShardLayout layout(options_.block_size(),
-                               py_causal_lm_->kv_split_size(),
-                               py_causal_lm_->kv_split_rank());
+                               model_->kv_split_size(),
+                               model_->kv_split_rank());
     attn_metadata->kv_shard_batch_metadata =
         layer::build_kv_shard_batch_metadata(*attn_metadata, layout);
   }
@@ -369,7 +368,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
     CHECK_EQ(input_features.defined(), speech_lengths.defined())
         << "input_features and speech_lengths must be provided together";
 
-    py::object top_model = py_causal_lm_->python_model();
+    py::object top_model = model_->python_model();
     MMDict encoded;
     // Models whose image encoder needs every gathered multimodal key (e.g.
     // DeepSeek-OCR's separate global-view and crop tensors) expose

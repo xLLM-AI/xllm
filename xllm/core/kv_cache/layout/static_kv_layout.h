@@ -89,8 +89,6 @@ class StaticKVLayout final {
   size_t full_pages_per_slab() const { return slice_bytes_ / full_row_bytes(); }
   size_t max_slab_count() const;
   size_t objects_per_slab(KVCacheTensorRole role) const;
-  size_t layer_bank_index(int64_t layer_id) const;
-  size_t scratch_full_page() const { return 0; }
   size_t full_read_padding_page() const { return full_read_padding_row_; }
   size_t num_slots() const { return spec_.num_slots; }
   size_t full_row_bytes() const { return spec_.full_row_bytes; }
@@ -98,9 +96,6 @@ class StaticKVLayout final {
   size_t ssm_row_bytes() const { return spec_.ssm_row_bytes; }
   size_t full_pair_bytes() const { return full_pair_bytes_; }
   size_t ssm_bundle_bytes() const { return ssm_bundle_bytes_; }
-  // Shared by every Full layer and never targeted by cache writes. Logical
-  // ID zero still maps to writable scratch at row zero for scatter updates.
-  size_t full_read_padding_row() const { return full_read_padding_row_; }
   size_t full_layer_count() const { return spec_.full_layer_ids.size(); }
   size_t linear_layer_count() const { return spec_.linear_layer_ids.size(); }
   size_t num_linear_groups() const { return 2 * linear_layer_count(); }
@@ -110,16 +105,9 @@ class StaticKVLayout final {
   // Capacity of an empty arena, including typed-slab fragmentation and IDs.
   bool can_fit(size_t full_blocks, size_t linear_states) const;
 
-  size_t page_bytes() const { return slab_bytes(); }
-  size_t pages_per_slot() const { return 1; }
   size_t slot_bytes() const { return slab_bytes(); }
-  size_t full_page_payload_bytes() const { return full_pair_bytes(); }
-  size_t linear_page_payload_bytes() const {
-    return spec_.conv_row_bytes + ssm_bundle_bytes();
-  }
   size_t row_bytes(KVCacheTensorRole role) const;
   size_t row_index(size_t slab, KVCacheTensorRole role) const;
-  size_t role_row_stride(KVCacheTensorRole role) const;
   size_t checkpoint_stride() const { return spec_.checkpoint_stride; }
   size_t bytes_used() const { return bytes_used_; }
   torch::ScalarType dtype(KVCacheTensorRole role) const;

@@ -146,7 +146,7 @@ VLMMaster::VLMMaster(const Options& options)
   CHECK(!EPLBConfig::get_instance().enable_eplb())
       << "EPLB does not support VLM engines because VLMEngine has no EPLB "
          "control plane.";
-  resolve_npu_kernel_backend(&options_, /*model_component=*/"causal_vlm");
+  resolve_npu_kernel_backend(options_);
 #endif
   CHECK(!options_.enable_disagg_pd() ||
         options_.kv_cache_transfer_mode() != "PULL")
@@ -397,7 +397,9 @@ VLMMaster::VLMMaster(const Options& options)
                                         model_args_,
                                         tokenizer_,
                                         options_.max_processor_cache_items(),
-                                        engine->tokenizer_args());
+                                        engine->tokenizer_args(),
+                                        /*max_sequence_length=*/0,
+                                        options_.extension_impl());
       },
       vlm_engine_.get(),
       speculative_engine_.get());
@@ -731,15 +733,6 @@ void VLMMaster::count_chat_tokens(
         std::move(messages), params, MMInput{}, count);
     callback(std::move(status), count);
   });
-}
-
-bool VLMMaster::handle_rpc_response(const RequestOutput& output) {
-  if (xservice_client_ == nullptr) {
-    return false;
-  }
-  auto accepted = xservice_client_->generations({output});
-  CHECK_EQ(accepted.size(), 1);
-  return accepted.front();
 }
 
 std::vector<bool> VLMMaster::handle_rpc_responses(

@@ -61,22 +61,16 @@ class CudaGraphPersistentParam {
 
   ~CudaGraphPersistentParam() = default;
 
-  // Update persistent tensors with new input data
-  // If return_capture_params is true, returns a ModelParamsView with
-  // persistent buffer references. padded_num_tokens must be > 0 when
-  // return_capture_params is true, used for build new ModelParamsView for
-  // capture. If return_capture_params is false, only updates persistent buffers
-  // and returns std::nullopt.
-  template <typename Params>
-  std::optional<Params> update(const torch::Tensor& tokens,
-                               const torch::Tensor& k_cache,
-                               const torch::Tensor& v_cache,
-                               const torch::Tensor& positions,
-                               const Params& params,
-                               uint32_t padded_num_tokens = 0,
-                               bool return_capture_params = false);
+  // Capture requires positive padded_num_tokens. The returned view
+  // references the persistent buffers.
+  std::optional<ModelParamsView> update(const torch::Tensor& tokens,
+                                        const torch::Tensor& k_cache,
+                                        const torch::Tensor& v_cache,
+                                        const torch::Tensor& positions,
+                                        const ModelParamsView& params,
+                                        uint32_t padded_num_tokens = 0,
+                                        bool return_capture_params = false);
 
-  // Getter methods for persistent tensors
   torch::Tensor persistent_tokens(uint32_t actual_tokens) const {
     if (actual_tokens > 0) {
       return persistent_tokens_.slice(
@@ -97,13 +91,6 @@ class CudaGraphPersistentParam {
           /*dim=*/0, /*start=*/0, /*end=*/actual_tokens);
     }
     return persistent_new_cache_slots_;
-  }
-  torch::Tensor persistent_block_tables(uint32_t actual_batch_size) const {
-    if (actual_batch_size > 0) {
-      return persistent_block_tables_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
-    }
-    return persistent_block_tables_;
   }
   torch::Tensor hidden_states(uint32_t actual_tokens) const {
     if (actual_tokens > 0) {
@@ -178,14 +165,12 @@ class CudaGraphPersistentParam {
   }
 
  private:
-  template <typename Params>
   bool can_use_llm_decode_fast_path(const torch::Tensor& tokens,
                                     const torch::Tensor& positions,
-                                    const Params& params) const;
-  template <typename Params>
+                                    const ModelParamsView& params) const;
   void update_llm_decode_metadata_fast_path(const torch::Tensor& tokens,
                                             const torch::Tensor& positions,
-                                            const Params& params,
+                                            const ModelParamsView& params,
                                             uint32_t padded_num_tokens,
                                             int64_t actual_batch_size,
                                             int64_t actual_num_tokens);
@@ -212,9 +197,6 @@ class CudaGraphPersistentParam {
   torch::Tensor persistent_paged_kv_last_page_len_;
   torch::Tensor persistent_decode_qo_indptr_;
   torch::Tensor persistent_kv_seq_lens_delta_;
-
-  // TODO maybe not used. or use q_cu_seq_lens instead.
-  torch::Tensor persistent_chunked_prefill_qo_indptr_;
 };
 
 // CUDA graph executor using libtorch CUDAGraph for memory management
@@ -232,7 +214,7 @@ class CudaGraph {
         is_piecewise_(is_piecewise) {}
 
   // Capture computation graph for given bucket num_tokens
-  bool capture(CausalLM* model,
+  bool capture(DecoderModel* model,
                const ModelArgs& args,
                const runtime::Options& options,
                const torch::Tensor& tokens,
@@ -244,11 +226,10 @@ class CudaGraph {
                TorchMemPool* pool_ptr = nullptr);
 
   // Replay captured graph with new input data
-  template <typename Params>
   ModelOutput replay(const torch::Tensor& tokens,
                      const torch::Tensor& positions,
                      std::vector<KVCache>& kv_cache,
-                     const Params& params);
+                     const ModelParamsView& params);
 
   // Get the hidden states from the last capture
   torch::Tensor get_hidden_states(uint32_t actual_num_tokens) const {
@@ -256,18 +237,6 @@ class CudaGraph {
   }
 
  private:
-  template <typename Model, typename Params>
-  bool capture_typed(Model* model,
-                     const ModelArgs& args,
-                     const runtime::Options& options,
-                     const torch::Tensor& tokens,
-                     const torch::Tensor& positions,
-                     const Params& params,
-                     std::vector<KVCache>& kv_cache,
-                     uint32_t bucket_num_tokens,
-                     const at::cuda::MempoolId_t& pool,
-                     TorchMemPool* pool_ptr);
-
   // Destroy captured work before releasing its native input owner.
   std::optional<ModelParamsView> capture_params_;
 
@@ -305,23 +274,10 @@ class CudaGraphExecutorImpl final : public ExecutorImpl {
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
 
-  // Return current graph executor memory usage in bytes (including persistent
-  // parameters). Exposed for tests and diagnostics.
-  size_t get_graph_memory_usage_bytes();
-
-  static std::optional<std::pair<torch::Tensor, torch::Tensor>>
-  find_first_full_attention_cache(const std::vector<KVCache>& kv_caches);
-
  private:
   // not own
-  CausalLM* model_ = nullptr;
+  DecoderModel* model_ = nullptr;
 
-  template <typename Model, typename Params>
-  ModelOutput run_typed(Model* model,
-                        const torch::Tensor& tokens,
-                        const torch::Tensor& positions,
-                        std::vector<KVCache>& kv_caches,
-                        const Params& params);
   void initialize();
 
   ModelArgs args_;

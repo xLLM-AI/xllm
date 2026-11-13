@@ -21,15 +21,34 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
+#include <vector>
 
 #include "core/common/global_flags.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model/seq_lens.h"
+#include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 
 namespace xllm {
+
+inline std::optional<std::pair<torch::Tensor, torch::Tensor>>
+find_first_full_attention_cache(const std::vector<KVCache>& kv_caches) {
+  for (const auto& cache : kv_caches) {
+    if (cache.empty()) {
+      continue;
+    }
+    auto k_cache = cache.get_k_cache();
+    auto v_cache = cache.get_v_cache();
+    if (k_cache.defined() && v_cache.defined() && k_cache.numel() > 0 &&
+        v_cache.numel() > 0) {
+      return std::make_pair(std::move(k_cache), std::move(v_cache));
+    }
+  }
+  return std::nullopt;
+}
 
 // ModelParamsView retains its cloned owner. Tensor handles share storage.
 inline ModelParamsView copy_graph_execution_input(

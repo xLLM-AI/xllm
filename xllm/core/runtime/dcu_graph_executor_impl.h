@@ -257,7 +257,7 @@ class DcuGraphExecutorImpl final : public ExecutorImpl {
   static DcuStream get_capture_stream(c10::DeviceIndex device_index);
 
  private:
-  CausalLM* model_;  // not owned
+  DecoderModel* model_;  // not owned
   // not owned
 
   ModelArgs args_;

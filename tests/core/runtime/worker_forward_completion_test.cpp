@@ -65,8 +65,10 @@ struct ForwardObservation {
   bool weights_loaded = false;
 };
 
-class CompletionTestModel final : public CausalVLM {
+class CompletionTestModel final : public CausalLM, public DecoderModel {
  public:
+  DecoderModel& model() override { return *this; }
+
   CompletionTestModel(const ModelContext& context,
                       std::shared_ptr<ForwardObservation> observation)
       : options_(context.get_tensor_options()),
@@ -102,20 +104,6 @@ class CompletionTestModel final : public CausalVLM {
   torch::Device device() const override { return options_.device(); }
 
   const torch::TensorOptions& options() const override { return options_; }
-
-  void prepare_expert_weight(
-      int32_t /*layer_id*/,
-      const std::vector<int32_t>& /*expert_ids*/) override {}
-
-  void update_expert_weight(int32_t /*layer_id*/) override {}
-
-  MMDict encode(const ModelParamsView& /*parameters*/) override { return {}; }
-
-  torch::Tensor get_input_embeddings(
-      const torch::Tensor& /*input_ids*/,
-      const ModelParamsView& /*input_params*/) override {
-    return {};
-  }
 
  private:
   torch::TensorOptions options_;
@@ -308,11 +296,7 @@ class WorkerForwardCompletionTest
       return std::make_unique<CompletionTestModel>(context,
                                                    weak_observation.lock());
     };
-    if (!ModelRegistry::register_causallm_factory(
-            model_name, "native", make_model)) {
-      return false;
-    }
-    if (!ModelRegistry::register_causalvlm_factory(
+    if (!ModelRegistry::register_model_factory(
             model_name, "native", make_model)) {
       return false;
     }

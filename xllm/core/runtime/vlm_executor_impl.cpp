@@ -27,27 +27,23 @@ limitations under the License.
 
 namespace xllm {
 
-VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
+VlmExecutorImpl::VlmExecutorImpl(CausalVLM* model,
                                  const ModelArgs& args,
                                  const torch::Device& device,
                                  const runtime::Options& options)
-    : model_(dynamic_cast<CausalVLM*>(model)),
-      args_(args),
-      device_(device),
-      options_(options) {
-  if (options_.max_encoder_cache_size() > 0) {
+    : model_(model),
+      decoder_(model->language_model().model()),
+      collapse_mrope_(args.rope_scaling_rope_type() == "mrope"),
+      device_(device) {
+  if (options.max_encoder_cache_size() > 0) {
     encoder_cache_ = std::make_unique<EncoderCache>(
-        options_.max_encoder_cache_size() * 1024 * 1024);
+        options.max_encoder_cache_size() * 1024 * 1024);
   }
 
   if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
     llm_executor_ = ExecutorImplFactory::get_instance().create_executor_impl(
-        model, args, device, options, Platform::type_str());
+        &model->language_model(), args, device, options, Platform::type_str());
   }
-}
-
-MMDict VlmExecutorImpl::encode(const ModelParamsView& params) {
-  return model_->encode(params);
 }
 
 void VlmExecutorImpl::clear_multimodal_cache() {
@@ -74,7 +70,7 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
     if (llm_executor_) {
       return llm_executor_->run(tokens, decode_positions, kv_caches, params);
     }
-    return model_->forward(tokens, decode_positions, kv_caches, params);
+    return decoder_.forward(tokens, decode_positions, kv_caches, params);
   }
 
   if (encoder_cache_) {
@@ -86,7 +82,7 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
   mm_data.foreach (input_gather);
   CHECK(input_gather.finish(mm_data));
 
-  MMDict embedding = encode(params);
+  MMDict embedding = model_->encode(params);
   EncoderOutputScatterVisitor scatter(embedding);
   mm_data.foreach (scatter);
   CHECK(scatter.finish());
@@ -110,7 +106,7 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
     return llm_executor_->run(tokens, positions, kv_caches, params);
   }
 
-  return model_->forward(tokens, positions, kv_caches, params);
+  return decoder_.forward(tokens, positions, kv_caches, params);
 }
 
 void VlmExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
@@ -134,7 +130,7 @@ void VlmExecutorImpl::set_dp_process_group(ProcessGroup* group) {
 
 torch::Tensor VlmExecutorImpl::collapse_mrope_decode_positions(
     const torch::Tensor& positions) const {
-  if (args_.rope_scaling_rope_type() == "mrope" && positions.dim() == 2) {
+  if (collapse_mrope_ && positions.dim() == 2) {
     return positions[0].contiguous();
   }
   return positions;

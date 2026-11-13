@@ -96,13 +96,9 @@ int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
 
 }  // namespace detail
 
-PyCausalLM::PyCausalLM(const ModelContext& context,
-                       std::string python_model_name)
+PyModel::PyModel(const ModelContext& context)
     : model_args_(context.get_model_args()),
-      python_model_name_(std::move(python_model_name)),
-      options_(context.get_tensor_options()),
-      device_(context.get_tensor_options().device()),
-      enable_mla_(context.get_model_args().enable_mla()) {
+      device_(context.get_tensor_options().device()) {
   ensure_python_interpreter();
 
   const ParallelArgs& parallel_args = context.get_parallel_args();
@@ -313,27 +309,25 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
                          layerwise_group_index);
     }
   }
-  const std::string module_name =
-      python_model_name_.empty()
-          ? (context.get_model_args().model_type().empty()
-                 ? std::string("Qwen3ForCausalLM")
-                 : context.get_model_args().model_type())
-          : python_model_name_;
+  const auto& model_type = context.get_model_args().model_type();
+  py::str model_name = model_type.empty() ? py::str(/*c=*/"Qwen3ForCausalLM")
+                                          : py::str(model_type);
   py::module_ registry = py::module_::import("xllm.python.registry");
-  py::object model_cls = registry.attr("get_model_class")(py::str(module_name));
+  py::object model_cls = registry.attr(/*key=*/"get_model_class")(
+      model_name, py::arg(/*name=*/"backend") = context.get_backend());
   config_dict_ = build_config_dict(context);
   py_model_ = model_cls(config_dict_);
   py_model_.attr("eval")();
 }
 
-PyCausalLM::~PyCausalLM() {
+PyModel::~PyModel() {
   clear_python_object(context_kv_graph_runner_);
   clear_python_object(python_kv_caches_);
   clear_python_object(py_model_);
   clear_python_object(config_dict_);
 }
 
-const py::object& PyCausalLM::get_or_build_python_kv_caches(
+const py::object& PyModel::get_or_build_python_kv_caches(
     std::vector<KVCache>& kv_caches) {
   if (!python_kv_caches_) {
     python_kv_caches_ = build_python_kv_caches(kv_caches);
@@ -341,14 +335,14 @@ const py::object& PyCausalLM::get_or_build_python_kv_caches(
   return python_kv_caches_;
 }
 
-py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
+py::dict PyModel::build_config_dict(const ModelContext& context) const {
   const auto& parallel_args = context.get_parallel_args();
   py::dict d;
   PyDictVisitor visitor(d);
   visit_properties(model_args_, visitor);
   d["num_speculative_tokens"] = context.num_speculative_tokens();
   visit_properties(parallel_args, visitor);
-  d["dtype"] = dtype_to_string(options_);
+  d["dtype"] = dtype_to_string(context.get_tensor_options());
   d["device"] = c10::str(device_);
   const EplbWorkerConfig& eplb_config = parallel_args.eplb_worker_config();
   d["enable_eplb"] = eplb_config.enabled;
@@ -413,7 +407,7 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   return d;
 }
 
-void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
+void PyModel::load_model(std::unique_ptr<ModelLoader> loader) {
   py::gil_scoped_acquire gil;
   auto& state_dicts = loader->get_state_dicts();
   ensure_xllm_weight_loader_module();
@@ -437,58 +431,20 @@ void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
   }
 }
 
-ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,
-                                const torch::Tensor& positions,
-                                std::vector<KVCache>& kv_caches,
-                                const ModelParamsView& parameters) {
-  LOG(FATAL) << "PyCausalLM::forward() must not be called directly. "
+ModelOutput PyModel::forward(const torch::Tensor& tokens,
+                             const torch::Tensor& positions,
+                             std::vector<KVCache>& kv_caches,
+                             const ModelParamsView& parameters) {
+  LOG(FATAL) << "PyModel::forward() must not be called directly. "
              << "Python model forward goes through PyExecutorImpl.";
   return ModelOutput(torch::Tensor());
 }
 
-torch::Tensor PyCausalLM::pooler(const torch::Tensor& hidden_states,
-                                 const torch::Tensor& selected_idxes) {
-  torch::NoGradGuard no_grad;
-  py::gil_scoped_acquire gil;
-  if (py::hasattr(py_model_, "pooler")) {
-    return py_model_
-        .attr("pooler")(hidden_states, optional_tensor(selected_idxes))
-        .cast<torch::Tensor>();
-  }
-  return CausalLM::pooler(hidden_states, selected_idxes);
-}
-
-torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
-                                 const torch::Tensor& seleted_idxes) {
-  torch::NoGradGuard no_grad;
-  py::gil_scoped_acquire gil;
-  py::object selected = optional_tensor(seleted_idxes);
-  py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
-  return out.cast<torch::Tensor>();
-}
-
-torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
-                                 const torch::Tensor& seleted_idxes,
-                                 torch::Tensor& out_hidden) {
-  torch::NoGradGuard no_grad;
-  // Select the draft's hidden rows once and reuse the two-argument
-  // projection path, avoiding a second Python-side index_select.
-  if (seleted_idxes.defined() && seleted_idxes.numel() > 0) {
-    const auto idxes = seleted_idxes.to(
-        torch::dtype(torch::kLong).device(hidden_states.device()));
-    out_hidden = hidden_states.index_select(/*dim=*/0, idxes);
-    return logits(out_hidden, /*seleted_idxes=*/torch::Tensor());
-  }
-  out_hidden = hidden_states;
-  return logits(hidden_states, seleted_idxes);
-}
-
-ModelOutput PyCausalLM::write_context_kv(
-    const torch::Tensor& target_hidden,
-    const torch::Tensor& positions,
-    const torch::Tensor& device_cache_slots,
-    std::vector<KVCache>& kv_caches,
-    const ModelParamsView& input_params) {
+ModelOutput PyModel::write_context_kv(const torch::Tensor& target_hidden,
+                                      const torch::Tensor& positions,
+                                      const torch::Tensor& device_cache_slots,
+                                      std::vector<KVCache>& kv_caches,
+                                      const ModelParamsView& input_params) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
   py::object layer_synchronizer = py::none();
@@ -517,7 +473,7 @@ ModelOutput PyCausalLM::write_context_kv(
   return ModelOutput(output.cast<torch::Tensor>());
 }
 
-DFlash2CandidateOutput PyCausalLM::dflash2_candidates(
+DFlash2CandidateOutput PyModel::dflash2_candidates(
     const torch::Tensor& hidden_states,
     const torch::Tensor& unary_logits,
     const torch::Tensor& anchor_token_ids) {
@@ -537,7 +493,7 @@ DFlash2CandidateOutput PyCausalLM::dflash2_candidates(
   return candidates;
 }
 
-torch::Tensor PyCausalLM::dspark_markov_bias(
+torch::Tensor PyModel::dspark_markov_bias(
     const torch::Tensor& previous_token_ids) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
@@ -545,8 +501,8 @@ torch::Tensor PyCausalLM::dspark_markov_bias(
       .cast<torch::Tensor>();
 }
 
-void PyCausalLM::prepare_expert_weight(int32_t layer_id,
-                                       const std::vector<int32_t>& expert_ids) {
+void PyModel::prepare_expert_weight(int32_t layer_id,
+                                    const std::vector<int32_t>& expert_ids) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
   if (!py::hasattr(py_model_, "prepare_expert_weight")) {
@@ -559,7 +515,7 @@ void PyCausalLM::prepare_expert_weight(int32_t layer_id,
   last_prepare_expert_weight_ok_[layer_id] = prepare_ok;
 }
 
-void PyCausalLM::start_expert_weight_transfer(int32_t layer_id) {
+void PyModel::start_expert_weight_transfer(int32_t layer_id) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
   if (!py::hasattr(py_model_, "start_expert_weight_transfer")) {
@@ -569,7 +525,7 @@ void PyCausalLM::start_expert_weight_transfer(int32_t layer_id) {
   py_model_.attr("start_expert_weight_transfer")(layer_id);
 }
 
-void PyCausalLM::update_expert_weight(int32_t layer_id) {
+void PyModel::update_expert_weight(int32_t layer_id) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
   if (!py::hasattr(py_model_, "update_expert_weight")) {
@@ -579,27 +535,24 @@ void PyCausalLM::update_expert_weight(int32_t layer_id) {
   py_model_.attr("update_expert_weight")(layer_id);
 }
 
-bool PyCausalLM::last_prepare_expert_weight_ok(int32_t layer_id) const {
+bool PyModel::last_prepare_expert_weight_ok(int32_t layer_id) const {
   const auto result = last_prepare_expert_weight_ok_.find(layer_id);
   return result == last_prepare_expert_weight_ok_.end() || result->second;
 }
 
-thread_local PyCausalLM* PyCausalLM::active_instance_ = nullptr;
+thread_local PyModel* PyModel::active_instance_ = nullptr;
 
-PyCausalLM* PyCausalLM::active_instance() { return active_instance_; }
+PyModel* PyModel::active_instance() { return active_instance_; }
 
-void PyCausalLM::set_active_instance(PyCausalLM* py_causal_lm) {
-  active_instance_ = py_causal_lm;
-}
+void PyModel::set_active_instance(PyModel* model) { active_instance_ = model; }
 
-void PyCausalLM::tp_all_reduce(torch::Tensor& tensor) {
+void PyModel::tp_all_reduce(torch::Tensor& tensor) {
   if (tp_group_ != nullptr) {
     tp_group_->allreduce(tensor);
   }
 }
 
-torch::Tensor PyCausalLM::tp_all_gather(const torch::Tensor& tensor,
-                                        int64_t dim) {
+torch::Tensor PyModel::tp_all_gather(const torch::Tensor& tensor, int64_t dim) {
   if (tp_group_ == nullptr) {
     return tensor;
   }
@@ -626,27 +579,27 @@ torch::Tensor PyCausalLM::tp_all_gather(const torch::Tensor& tensor,
   return gathered.reshape(output_shape).contiguous();
 }
 
-torch::Tensor PyCausalLM::dp_all_gather(
+torch::Tensor PyModel::dp_all_gather(
     const torch::Tensor& tensor,
     const std::vector<int32_t>& execution_token_counts) {
   return parallel_state::gather(tensor, dp_group_, execution_token_counts);
 }
 
-void PyCausalLM::moe_tp_all_reduce(torch::Tensor& tensor) {
+void PyModel::moe_tp_all_reduce(torch::Tensor& tensor) {
   if (moe_tp_group_ != nullptr) {
     moe_tp_group_->allreduce(tensor);
   }
 }
 
-void PyCausalLM::moe_ep_all_reduce(torch::Tensor& tensor) {
+void PyModel::moe_ep_all_reduce(torch::Tensor& tensor) {
   if (moe_ep_group_ != nullptr) {
     moe_ep_group_->allreduce(tensor);
   }
 }
 
-void PyCausalLM::eplb_batch_isend_irecv(const py::list& operation_types,
-                                        const py::list& tensors,
-                                        const py::list& remote_ranks) {
+void PyModel::eplb_batch_isend_irecv(const py::list& operation_types,
+                                     const py::list& tensors,
+                                     const py::list& remote_ranks) {
   CHECK_EQ(operation_types.size(), tensors.size())
       << "EPLB P2P operation types and tensors must align.";
   CHECK_EQ(operation_types.size(), remote_ranks.size())
@@ -673,7 +626,7 @@ void PyCausalLM::eplb_batch_isend_irecv(const py::list& operation_types,
 #endif
 }
 
-void PyCausalLM::eplb_wait_batch_isend_irecv() {
+void PyModel::eplb_wait_batch_isend_irecv() {
 #if defined(USE_NPU)
   if (eplb_p2p_work_ == nullptr) {
     return;
@@ -685,14 +638,53 @@ void PyCausalLM::eplb_wait_batch_isend_irecv() {
 #endif
 }
 
+torch::Tensor PyCausalLM::pooler(const torch::Tensor& hidden_states,
+                                 const torch::Tensor& selected_idxes) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  if (py::hasattr(model_->python_model(), /*name=*/"pooler")) {
+    return model_->python_model()
+        .attr(/*key=*/"pooler")(hidden_states, optional_tensor(selected_idxes))
+        .cast<torch::Tensor>();
+  }
+  return CausalLM::pooler(hidden_states, selected_idxes);
+}
+
+torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
+                                 const torch::Tensor& seleted_idxes) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  py::object selected = optional_tensor(seleted_idxes);
+  py::object out = model_->python_model().attr(/*key=*/"compute_logits")(
+      hidden_states, selected);
+  return out.cast<torch::Tensor>();
+}
+
+torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
+                                 const torch::Tensor& seleted_idxes,
+                                 torch::Tensor& out_hidden) {
+  torch::NoGradGuard no_grad;
+  // Select the draft's hidden rows once and reuse the two-argument
+  // projection path, avoiding a second Python-side index_select.
+  if (seleted_idxes.defined() && seleted_idxes.numel() > 0) {
+    const auto idxes = seleted_idxes.to(
+        torch::dtype(torch::kLong).device(hidden_states.device()));
+    out_hidden = hidden_states.index_select(/*dim=*/0, idxes);
+    return logits(out_hidden, /*seleted_idxes=*/torch::Tensor());
+  }
+  out_hidden = hidden_states;
+  return logits(hidden_states, seleted_idxes);
+}
+
 void PyCausalLM::share_lm_head(CausalLM& target) {
   auto* target_model = get_py_causal_lm(target, "lm_head");
   if (target_model == nullptr) {
     return;
   }
   py::gil_scoped_acquire gil;
-  if (py_model_.attr("lm_head").is_none()) {
-    py_model_.attr("lm_head") = target_model->py_model_.attr("lm_head");
+  if (model_->python_model().attr(/*key=*/"lm_head").is_none()) {
+    model_->python_model().attr(/*key=*/"lm_head") =
+        target_model->model_->python_model().attr(/*key=*/"lm_head");
   }
 }
 
@@ -702,10 +694,12 @@ void PyCausalLM::share_embed_tokens(CausalLM& target) {
     return;
   }
   py::gil_scoped_acquire gil;
-  py::object draft_model = py_model_.attr("model");
-  if (draft_model.attr("embed_tokens").is_none()) {
-    draft_model.attr("embed_tokens") =
-        target_model->py_model_.attr("model").attr("embed_tokens");
+  py::object draft_model = model_->python_model().attr(/*key=*/"model");
+  if (draft_model.attr(/*key=*/"embed_tokens").is_none()) {
+    draft_model.attr(/*key=*/"embed_tokens") =
+        target_model->model_->python_model()
+            .attr(/*key=*/"model")
+            .attr(/*key=*/"embed_tokens");
   }
 }
 

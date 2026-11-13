@@ -317,7 +317,7 @@ std::optional<std::array<const void*, 12>> spec_verify_input_addresses(
   return addresses;
 }
 
-ModelOutput forward_eager(CausalLM* model,
+ModelOutput forward_eager(DecoderModel* model,
                           const torch::Tensor& tokens,
                           const torch::Tensor& positions,
                           std::vector<KVCache>& kv_cache,
@@ -327,7 +327,7 @@ ModelOutput forward_eager(CausalLM* model,
   return model->forward(materialized_tokens, positions, kv_cache, params);
 }
 
-bool is_mla_graph_eagle3_target(const CausalLM* model,
+bool is_mla_graph_eagle3_target(const DecoderModel* model,
                                 const runtime::Options& options) {
   return model->supports_mla_graph_kv_bucketing() &&
          options.enable_speculative_decode() && !options.is_draft_engine() &&
@@ -354,7 +354,7 @@ uint64_t get_mla_graph_key(uint32_t bucket_num_tokens,
 }
 }  // namespace
 
-bool AclGraph::capture(CausalLM* model,
+bool AclGraph::capture(DecoderModel* model,
                        const runtime::Options& options,
                        const torch::Tensor& tokens,
                        const torch::Tensor& positions,
@@ -367,17 +367,11 @@ bool AclGraph::capture(CausalLM* model,
   const bool capture_static_graph_tasks = uses_static_mtp_graph_task_variant(
       params, bucket_num_tokens, options.block_size());
 
-  // Get actual num_tokens from tokens tensor
-  // const uint32_t actual_num_tokens = tokens.size(0);
-
-  auto& tensor_options = model->options();
-
   c10_npu::npuSynchronizeDevice();
 
   // Begin graph capture using NPUGraph mempool for temporary tensor management
   // Get current NPU stream from libtorch NPU API
-  aclrtStream stream =
-      c10_npu::getCurrentNPUStream(tensor_options.device().index()).stream();
+  aclrtStream stream = c10_npu::getCurrentNPUStream(device_index_).stream();
 
   // For hybrid models (e.g., qwen3_next with mixed GDN/full_attention layers),
   // we need to find the first Full Attention layer to get the correct kv_cache.
@@ -485,8 +479,7 @@ bool AclGraph::capture(CausalLM* model,
   // Acquire device-level lock to prevent prepare_work_before_execute from
   // executing simultaneously, which would trigger synchronous operations
   // that conflict with capture mode
-  auto device_idx = tensor_options.device().index();
-  Device::empty_cache(device_idx);
+  Device::empty_cache(device_index_);
 
   bool need_restore_stream = false;
   graph_stream_ = stream;
@@ -494,11 +487,11 @@ bool AclGraph::capture(CausalLM* model,
   // capture lock scope
   {
     auto& capture_lock =
-        ::xllm::npu::DeviceCaptureLock::get_instance().get_lock(device_idx);
+        ::xllm::npu::DeviceCaptureLock::get_instance().get_lock(device_index_);
     std::lock_guard<std::mutex> lock_guard(capture_lock);
 
-    if (c10_npu::getCurrentNPUStream(device_idx) ==
-        c10_npu::getDefaultNPUStream(device_idx)) {
+    if (c10_npu::getCurrentNPUStream(device_index_) ==
+        c10_npu::getDefaultNPUStream(device_index_)) {
       c10_npu::setCurrentNPUStream(capture_stream_.value());
       aclrtSynchronizeStream(capture_stream_.value().stream());
       graph_stream_ = capture_stream_.value().stream();
@@ -545,7 +538,7 @@ bool AclGraph::capture(CausalLM* model,
       }
       if (need_restore_stream) {
         c10_npu::setCurrentNPUStream(
-            c10_npu::getDefaultNPUStream(tensor_options.device().index()));
+            c10_npu::getDefaultNPUStream(device_index_));
       }
       throw;
     }
@@ -554,8 +547,7 @@ bool AclGraph::capture(CausalLM* model,
     }
     // Lock is automatically released here when lock goes out of scope
     if (need_restore_stream) {
-      c10_npu::setCurrentNPUStream(
-          c10_npu::getDefaultNPUStream(tensor_options.device().index()));
+      c10_npu::setCurrentNPUStream(c10_npu::getDefaultNPUStream(device_index_));
     }
   }
   // Capture uses padding state; replay real inputs once after capture finishes.
@@ -778,11 +770,10 @@ AclGraph::~AclGraph() {
   }
 }
 
-void AclGraph::initialize_streams(c10::DeviceIndex device_index,
-                                  const c10_npu::NPUStream& capture_stream) {
+void AclGraph::initialize_streams(const c10_npu::NPUStream& capture_stream) {
   capture_stream_ = capture_stream;
-  update_stream_ = c10_npu::getStreamFromPool(true, device_index);
-  device_index_ = device_index;
+  update_stream_ =
+      c10_npu::getStreamFromPool(/*isHighPriority=*/true, device_index_);
   CHECK_EQ(aclrtCreateEventWithFlag(&replay_input_ready_event_, ACL_EVENT_SYNC),
            ACL_SUCCESS)
       << "Failed to create ACL graph replay input-ready event";
@@ -792,7 +783,7 @@ void AclGraph::initialize_streams(c10::DeviceIndex device_index,
   VLOG(kGraphExecutorLogVerboseLevel)
       << "Initialized capture_stream"
       << ", id: " << capture_stream_.value().id()
-      << ", device_index: " << static_cast<int32_t>(device_index);
+      << ", device_index: " << static_cast<int32_t>(device_index_);
 }
 
 void AclGraph::make_graph_wait_for_current_stream(aclrtStream current_stream) {
@@ -823,7 +814,7 @@ void AclGraph::make_current_stream_wait_for_graph(aclrtStream current_stream) {
   }
 }
 
-void AclGraph::prepare_model_graph_metadata(CausalLM* model,
+void AclGraph::prepare_model_graph_metadata(DecoderModel* model,
                                             const torch::Tensor& positions,
                                             ModelParamsView& params) {
   CHECK(model != nullptr) << "ACL graph model must not be null";
@@ -860,7 +851,7 @@ bool AclGraph::has_fused_infer_attention_graph_tasks() const {
          !graph_task_context_->fused_infer_attention_tasks.empty();
 }
 
-ModelOutput AclGraph::replay(CausalLM* model,
+ModelOutput AclGraph::replay(DecoderModel* model,
                              const torch::Tensor& tokens,
                              const torch::Tensor& positions,
                              std::vector<KVCache>& kv_cache,
@@ -1040,10 +1031,9 @@ AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
                                            const ModelArgs& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
-    : model_(model), args_(args), device_(device), options_(options) {
-  initialize(model->is_hybrid_linear_attention(),
-             model->is_hybrid_linear_attention(),
-             model->supports_mla_graph_kv_bucketing());
+    : model_(&model->model()), args_(args), device_(device), options_(options) {
+  const bool is_hybrid = model_->is_hybrid_linear_attention();
+  initialize(is_hybrid, is_hybrid, model_->supports_mla_graph_kv_bucketing());
 }
 
 void AclGraphExecutorImpl::initialize(bool need_update_attn_mask,
@@ -1073,33 +1063,19 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
                                       const torch::Tensor& positions,
                                       std::vector<KVCache>& kv_caches,
                                       const ModelParamsView& params) {
-  return run_typed(model_, tokens, positions, kv_caches, params);
-}
-
-template <typename Model, typename Params>
-ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
-                                            const torch::Tensor& tokens,
-                                            const torch::Tensor& positions,
-                                            std::vector<KVCache>& kv_caches,
-                                            const Params& params) {
   auto run_eager = [&]() {
-    Params eager_params = copy_graph_execution_input(params);
+    ModelParamsView eager_params = copy_graph_execution_input(params);
     eager_params.enable_graph = false;
     eager_params.attn_metadata.reset();
-    return forward_eager(model, tokens, positions, kv_caches, eager_params);
+    return forward_eager(model_, tokens, positions, kv_caches, eager_params);
   };
-  // no mirco batch in decode phase
-  const torch::Tensor& tokens_tensor = tokens;
-  const torch::Tensor& positions_tensor = positions;
-  const Params& params_single = params;
-  const bool in_decoding_phase =
-      params_single.meta.batch_forward_type.is_decode();
+  const bool in_decoding_phase = params.meta.batch_forward_type.is_decode();
   const bool in_spec_verify_phase =
-      params_single.is_spec_verify &&
-      params_single.meta.batch_forward_type.is_chunked_prefill();
+      params.is_spec_verify &&
+      params.meta.batch_forward_type.is_chunked_prefill();
   VLOG(50) << "in_decoding_phase: " << in_decoding_phase
            << " in_spec_verify_phase: " << in_spec_verify_phase
-           << " q_max_seq_len: " << params_single.meta.q_max_seq_len
+           << " q_max_seq_len: " << params.meta.q_max_seq_len
            << " n_layers: " << args_.n_layers();
   if ((!in_decoding_phase && !in_spec_verify_phase) || args_.n_layers() == 1) {
     VLOG(kGraphExecutorLogVerboseLevel)
@@ -1107,7 +1083,7 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
     COUNTER_INC(num_model_execution_total_eager);
     return run_eager();
   }
-  if (in_spec_verify_phase && !model->is_hybrid_linear_attention()) {
+  if (in_spec_verify_phase && !model_->is_hybrid_linear_attention()) {
     LOG_FIRST_N(WARNING, 1)
         << "Falling back to eager mode for spec verify because the "
            "chunked-prefill validate graph path is currently only adapted "
@@ -1131,7 +1107,7 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
     COUNTER_INC(num_model_execution_total_eager);
     return run_eager();
   }
-  if (is_mla_graph_eagle3_target(model, options_)) {
+  if (is_mla_graph_eagle3_target(model_, options_)) {
     LOG_FIRST_N(WARNING, 1)
         << "Falling back to eager mode for MLA Eagle3 target validation; the "
            "ACL graph path is not adapted for Eagle3 aux hidden-state "
@@ -1141,10 +1117,10 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
   }
 
   const std::vector<int32_t>& dp_token_nums =
-      params_single.parallel.dp_global_token_nums;
-  if (!is_qwen3_5_dp_graph_step_supported(args_, options_, params_single)) {
+      params.parallel.dp_global_token_nums;
+  if (!is_qwen3_5_dp_graph_step_supported(args_, options_, params)) {
     const std::vector<int32_t>& raw_dp_token_nums =
-        params_single.parallel.raw_dp_global_token_nums;
+        params.parallel.raw_dp_global_token_nums;
     // Qwen3.5 DP graph is currently validated only with decode padding.
     // No-padding changes graph bucketing and MTP input updates, so a locally
     // prewarmed graph does not establish cross-rank replay compatibility.
@@ -1161,31 +1137,29 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
   }
 
   if (in_decoding_phase && dp_token_nums.size() > 1) {
-    if (params_single.parallel.dp_is_decode.size() !=
-        params_single.parallel.dp_global_token_nums.size()) {
+    if (params.parallel.dp_is_decode.size() !=
+        params.parallel.dp_global_token_nums.size()) {
       LOG_FIRST_N(WARNING, 1)
           << "Falling back to eager mode because dp_is_decode size ("
-          << params_single.parallel.dp_is_decode.size()
+          << params.parallel.dp_is_decode.size()
           << ") does not match dp_global_token_nums size ("
-          << params_single.parallel.dp_global_token_nums.size()
+          << params.parallel.dp_global_token_nums.size()
           << "); ACL graph decode requires valid DP forward metadata. "
-          << "dp_global_token_nums="
-          << params_single.parallel.dp_global_token_nums
-          << ", dp_is_decode=" << params_single.parallel.dp_is_decode;
+          << "dp_global_token_nums=" << params.parallel.dp_global_token_nums
+          << ", dp_is_decode=" << params.parallel.dp_is_decode;
       COUNTER_INC(num_model_execution_total_eager);
       return run_eager();
     }
 
-    if (std::find(params_single.parallel.dp_is_decode.begin(),
-                  params_single.parallel.dp_is_decode.end(),
-                  0) != params_single.parallel.dp_is_decode.end()) {
+    if (std::ranges::find(params.parallel.dp_is_decode, /*value=*/0) !=
+        params.parallel.dp_is_decode.end()) {
       LOG_FIRST_N(WARNING, 1)
           << "Falling back to eager mode because not all DP ranks are in "
              "decode phase; ACL graph decode requires all DP ranks to be "
              "decode to avoid using prefill or chunked-prefill token counts "
              "as graph bucket size. dp_global_token_nums="
-          << params_single.parallel.dp_global_token_nums
-          << ", dp_is_decode=" << params_single.parallel.dp_is_decode;
+          << params.parallel.dp_global_token_nums
+          << ", dp_is_decode=" << params.parallel.dp_is_decode;
       COUNTER_INC(num_model_execution_total_eager);
       return run_eager();
     }
@@ -1194,13 +1168,12 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
   // Only use acl graph in decode phase for performance optimization
   // For DP, all ranks use the largest rank-local token count as the graph key;
   // a local shard can be empty on some ranks.
-  uint32_t max_local_num_tokens = tokens_tensor.size(/*dim=*/0);
-  if (params_single.parallel.dp_global_token_nums.size() > 1) {
-    max_local_num_tokens =
-        util::max(params_single.parallel.dp_global_token_nums);
+  uint32_t max_local_num_tokens = tokens.size(/*dim=*/0);
+  if (params.parallel.dp_global_token_nums.size() > 1) {
+    max_local_num_tokens = util::max(params.parallel.dp_global_token_nums);
   }
   // Keep actual n_tokens for replay output slicing.
-  const uint32_t n_tokens = tokens_tensor.size(/*dim=*/0);
+  const uint32_t n_tokens = tokens.size(/*dim=*/0);
   const uint32_t local_batch_size =
       n_tokens / (options_.num_speculative_tokens() + 1);
   const uint32_t max_local_batch_size =
@@ -1231,8 +1204,7 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
 
   // Check if conditions are suitable for graph execution (replay or capture)
   const auto max_seq_len = args_.max_position_embeddings();
-  const bool seq_len_supported =
-      params_single.meta.kv_max_seq_len <= max_seq_len;
+  const bool seq_len_supported = params.meta.kv_max_seq_len <= max_seq_len;
 
   // Combined condition for graph capture support
   // ACL graph executor only supports single tensor inputs (no micro-batching)
@@ -1242,8 +1214,8 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
   if (!capture_supported) {
     LOG_FIRST_N(WARNING, 1)
         << "Falling back to eager mode because kv_max_seq_len ("
-        << params_single.meta.kv_max_seq_len << ") > max_seq_len ("
-        << max_seq_len << "). This message is logged only once. "
+        << params.meta.kv_max_seq_len << ") > max_seq_len (" << max_seq_len
+        << "). This message is logged only once. "
         << "Monitor counter 'num_model_execution_total_eager' for frequency.";
     COUNTER_INC(num_model_execution_total_eager);
     return run_eager();
@@ -1263,12 +1235,12 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
 
   uint64_t attention_plan_class = 0;
   const bool needs_attention_plan_class =
-      params_single.is_spec_verify &&
-      params_single.meta.batch_forward_type.is_chunked_prefill() &&
-      params_single.graph.spec_verify_source_addresses_stable;
+      params.is_spec_verify &&
+      params.meta.batch_forward_type.is_chunked_prefill() &&
+      params.graph.spec_verify_source_addresses_stable;
   if (needs_attention_plan_class) {
     const uint64_t lookup_key = spec_verify_attention_plan_lookup_key(
-        bucket_num_tokens, params_single, options_.block_size());
+        bucket_num_tokens, params, options_.block_size());
     if (auto plan_class = find_spec_verify_attention_plan_class(lookup_key)) {
       attention_plan_class = plan_class.value();
     }
@@ -1279,14 +1251,13 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
       auto [k_cache, v_cache] = find_attention_plan_kv_cache(kv_caches);
       auto descriptor =
           active_persistent_param.classify_spec_verify_paged_attention_plan(
-              tokens_tensor, k_cache, v_cache, params_single);
+              tokens, k_cache, v_cache, params);
       if (!descriptor.has_value()) {
         LOG_FIRST_N(ERROR, 1)
             << "Falling back to eager speculative verification because the "
                "paged-attention tiling layout cannot be classified safely.";
         COUNTER_INC(num_model_execution_total_eager);
-        return forward_eager(
-            model, tokens, positions, kv_caches, params_single);
+        return forward_eager(model_, tokens, positions, kv_caches, params);
       }
       std::lock_guard<std::mutex> lock(graph_slots_mutex_);
       auto descriptor_it =
@@ -1313,7 +1284,7 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
   }
 
   const uint64_t graph_key =
-      get_graph_key(bucket_num_tokens, params_single, attention_plan_class);
+      get_graph_key(bucket_num_tokens, params, attention_plan_class);
   std::shared_ptr<AclGraph> replay_graph;
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
@@ -1324,16 +1295,16 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
   }
 
   if (replay_graph != nullptr) {
-    if (params_single.parallel.layer_wise_load_synchronizer != nullptr) {
-      CHECK(params_single.parallel.layer_wise_load_synchronizer
+    if (params.parallel.layer_wise_load_synchronizer != nullptr) {
+      CHECK(params.parallel.layer_wise_load_synchronizer
                 ->wait_all_on_current_stream())
           << "failed to wait for Host cache loads before ACL graph replay";
     }
     // Replay the existing graph
     VLOG(kGraphExecutorLogVerboseLevel)
         << "AclGraphExecutorImpl::run() in replay mode";
-    ModelOutput result = replay_graph->replay(
-        model, tokens_tensor, positions_tensor, kv_caches, params_single);
+    ModelOutput result =
+        replay_graph->replay(model_, tokens, positions, kv_caches, params);
     // Handle aux_hidden_states based on options
     if (options_.enable_graph_aux_hidden_states()) {
       torch::Tensor aux_hidden_states =
@@ -1359,7 +1330,7 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
             max_local_batch_size,
             max_graph_batch_size,
             dp_size,
-            params_single.meta.is_graph_warmup,
+            params.meta.is_graph_warmup,
             static_cast<uint32_t>(options_.num_speculative_tokens()))) {
       LOG_FIRST_N(WARNING, 1)
           << "Falling back to eager mode because no ACL graph was prewarmed "
@@ -1387,11 +1358,11 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
                                  active_slot.graph_capture_stream.value());
   VLOG(kGraphExecutorLogVerboseLevel)
       << "AclGraphExecutorImpl::run() in capture mode";
-  const bool capture_success = graph->capture(model,
+  const bool capture_success = graph->capture(model_,
                                               options_,
-                                              tokens_tensor,
-                                              positions_tensor,
-                                              params_single,
+                                              tokens,
+                                              positions,
+                                              params,
                                               kv_caches,
                                               bucket_num_tokens,
                                               active_slot.graph_pool);
@@ -1404,7 +1375,7 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
             << ") done";
 
   const bool static_mtp_variant = uses_static_mtp_graph_task_variant(
-      params_single, bucket_num_tokens, options_.block_size());
+      params, bucket_num_tokens, options_.block_size());
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
     if (static_mtp_variant) {
@@ -1459,9 +1430,8 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
         params.parallel.dp_global_token_nums.size()) {
       return;
     }
-    if (std::find(params.parallel.dp_is_decode.begin(),
-                  params.parallel.dp_is_decode.end(),
-                  0) != params.parallel.dp_is_decode.end()) {
+    if (std::ranges::find(params.parallel.dp_is_decode, /*value=*/0) !=
+        params.parallel.dp_is_decode.end()) {
       return;
     }
   }

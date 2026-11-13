@@ -24,6 +24,8 @@ limitations under the License.
 
 #include <algorithm>
 
+#include "core/framework/model/causal_vlm.h"
+
 #if defined(USE_NPU)
 #include "acl/acl.h"
 #include "torch_npu/csrc/core/npu/NPUFunctions.h"
@@ -83,6 +85,7 @@ limitations under the License.
 #include "core/runtime/worker_memory_resources.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/model/model_params_view.h"
+#include "models/model_registry.h"
 #include "runtime/forward_params.h"
 #if defined(USE_NPU)
 #include "layers/npu/loader/rolling_weight_buffer.h"
@@ -708,7 +711,7 @@ void WorkerImpl::process_group_test() {
 template <typename Params>
 bool WorkerImpl::can_prepare_npu_graph_decode_input_impl(
     const Params& input_params) const {
-  return can_prepare_without_compute_stream_wait() &&
+  return model_executor_ && can_prepare_without_compute_stream_wait() &&
          enable_schedule_overlap() &&
          input_params.meta.batch_forward_type.has_decode();
 }
@@ -1525,6 +1528,29 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
 }
 #endif
 
+bool WorkerImpl::init_model(ModelContext& context) {
+  CHECK(model_ == nullptr) << "Model is already initialized.";
+  std::visit(
+      [this, &context](auto model) {
+        CHECK(model != nullptr) << "Failed to create model.";
+        std::unique_ptr<Executor> executor;
+        if (!context.get_model_args().encoder_embedding_mode()) {
+          executor = std::make_unique<Executor>(model.get(), context, options_);
+        }
+        using ModelType = typename decltype(model)::element_type;
+        if constexpr (std::is_same_v<ModelType, CausalVLM>) {
+          language_model_ = &model->language_model();
+          vlm_model_ = model.get();
+        } else {
+          language_model_ = model.get();
+        }
+        model_ = std::move(model);
+        model_executor_ = std::move(executor);
+      },
+      create_causal_model(context));
+  return true;
+}
+
 // initialize model, cache manager. async call
 bool WorkerImpl::init_model(const std::string& model_weights_path,
                             int32_t random_seed,
@@ -1598,6 +1624,7 @@ ModelContext WorkerImpl::load_model_config(ModelArgs args,
   auto tensor_options = torch::dtype(dtype).device(device_);
   ModelContext context(
       parallel_args_, args, quant_args, tensor_options, num_speculative_tokens);
+  context.set_backend(options_.backend());
   context.set_model_impl(ModelConfig::get_instance().model_impl());
   context.set_extension_impl(options_.extension_impl());
   context.set_model_id(options_.model_id());

@@ -23,7 +23,6 @@ limitations under the License.
 #include <mutex>
 #include <string>
 #include <thread>
-#include <type_traits>
 #include <vector>
 
 #include "core/framework/model/causal_lm.h"
@@ -31,12 +30,7 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-static_assert(std::is_same_v<decltype(EplbInfo::prepare_token), int64_t>);
-static_assert(std::is_same_v<decltype(EplbInfo::activation_token), int64_t>);
-static_assert(
-    std::is_constructible_v<EplbExecutor, CausalLM&, const torch::Device&>);
-
-class RecordingModel final : public CausalLM {
+class RecordingModel final : public DecoderModel {
  public:
   ModelOutput forward(const torch::Tensor&,
                       const torch::Tensor&,
@@ -44,17 +38,6 @@ class RecordingModel final : public CausalLM {
                       const ModelParamsView&) override {
     return {};
   }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor&) override {
-    return hidden_states;
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {}
-
-  torch::Device device() const override { return options_.device(); }
-
-  const torch::TensorOptions& options() const override { return options_; }
 
   void prepare_expert_weight(int32_t layer_id,
                              const std::vector<int32_t>&) override {
@@ -78,7 +61,6 @@ class RecordingModel final : public CausalLM {
   }
 
  private:
-  torch::TensorOptions options_ = torch::TensorOptions().device(torch::kCPU);
   mutable std::mutex events_mutex_;
   std::vector<std::string> events_;
 };
