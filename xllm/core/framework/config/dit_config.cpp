@@ -120,6 +120,13 @@ DEFINE_bool(
     "Check qualified MiniMax-H3 block finite values and padded heads; "
     "enables per-block device-to-host synchronization for correctness gates.");
 
+DEFINE_bool(
+    dit_h3_rainfusion_enabled,
+    false,
+    "Enable MiniMax-H3 RainFusion for the qualified A3 TP2xU8 profile; "
+    "defaults to sparse-middle-steps. Set XLLM_H3_RAINFUSION_POLICY "
+    "to sparse-middle-layers to sparsify the middle layers of every step.");
+
 DEFINE_int64(dit_generation_image_area_max,
              0,
              "Maximum allowed image area (width * height) for image generation "
@@ -200,6 +207,7 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_execution_profile);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_phase_timing);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_correctness_diagnostics);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_rainfusion_enabled);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_generation_image_area_max);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_vae_image_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_enable_vae_tiling);
@@ -238,6 +246,7 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_execution_profile);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_phase_timing);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_correctness_diagnostics);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_rainfusion_enabled);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_generation_image_area_max);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_vae_image_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_enable_vae_tiling);
@@ -308,6 +317,8 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
       config_json, default_config, dit_h3_phase_timing);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_h3_correctness_diagnostics);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_h3_rainfusion_enabled);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_generation_image_area_max);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

@@ -131,6 +131,11 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
 
   const DiTConfig& config = DiTConfig::get_instance();
   const bool qualified = config.dit_h3_execution_profile() != "native";
+  if (config.dit_h3_rainfusion_enabled() && !qualified) {
+    LOG(ERROR)
+        << "MiniMax-H3 RainFusion requires the qualified execution profile";
+    return false;
+  }
   if (qualified) {
     if (LoadConfig::get_instance().enable_rolling_load()) {
       LOG(ERROR) << "Qualified MiniMax-H3 requires resident weights; "

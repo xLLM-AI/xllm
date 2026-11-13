@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/framework/parallel_state/parallel_args.h"
 #include "models/dit/utils/minimax_h3_execution_metrics.h"
 #include "models/dit/utils/minimax_h3_qualified_input.h"
+#include "models/dit/utils/minimax_h3_rainfusion_context.h"
 
 namespace xllm {
 
@@ -40,6 +41,7 @@ struct H3QualifiedCacheProbeRows {
 struct H3QualifiedExecutionContext {
   H3QualifiedExecutionMetrics metrics;
   H3QualifiedLaunchSnapshot qkv_launches;
+  H3RainfusionRequestState rainfusion;
   std::unique_ptr<SimilarityResidualCacheState> cache;
   H3QualifiedCacheProbeRows probe_rows;
   ProcessGroup* consensus_group = nullptr;

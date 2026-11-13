@@ -36,6 +36,7 @@ limitations under the License.
 #include "models/dit/transformers/minimax_h3_tp_layout.h"
 #include "models/dit/utils/minimax_h3_execution_metrics.h"
 #include "models/dit/utils/minimax_h3_qkv_layout.h"
+#include "models/dit/utils/minimax_h3_qualified_attention.h"
 
 namespace xllm {
 
@@ -277,12 +278,14 @@ class MiniMaxH3TpUaaAttentionImpl final : public torch::nn::Module {
   // `cu_seqlens` must cover the rows the attention actually sees: the local
   // row count when sp_size == 1, and local_rows * sp_size (the full packed
   // sequence) after the Ulysses transpose.
-  torch::Tensor forward(const torch::Tensor& input,
-                        const std::optional<torch::Tensor>& rope_frequencies,
-                        const torch::Tensor& cu_seqlens,
-                        MiniMaxH3UaaWorkspace* workspace = nullptr,
-                        bool verify_intermediates = false,
-                        H3QualifiedLaunchSnapshot* qkv_launches = nullptr) {
+  torch::Tensor forward(
+      const torch::Tensor& input,
+      const std::optional<torch::Tensor>& rope_frequencies,
+      const torch::Tensor& cu_seqlens,
+      MiniMaxH3UaaWorkspace* workspace = nullptr,
+      bool verify_intermediates = false,
+      H3QualifiedLaunchSnapshot* qkv_launches = nullptr,
+      MiniMaxH3RainfusionExecutionContext* rainfusion = nullptr) {
     verify_loaded_weights();
     if (!input.defined() || input.dim() != 2 ||
         input.scalar_type() != torch::kBFloat16 ||
@@ -389,10 +392,11 @@ class MiniMaxH3TpUaaAttentionImpl final : public torch::nn::Module {
     const std::vector<int64_t> local_head_shape = {
         full_rows, local_heads_, head_dim_};
     torch::Tensor attention =
-        minimax_h3_segmented_sdpa(query_full.view(local_head_shape),
-                                  key_full.view(local_head_shape),
-                                  value_full.view(local_head_shape),
-                                  cu_seqlens);
+        minimax_h3_qualified_attention(query_full.view(local_head_shape),
+                                       key_full.view(local_head_shape),
+                                       value_full.view(local_head_shape),
+                                       cu_seqlens,
+                                       rainfusion);
 
     // ── inverse Ulysses transpose, dummy-zero guard, then trim 32 -> 28 ──
     torch::Tensor restored = minimax_h3_sp_all_to_all_reverse(
@@ -739,7 +743,8 @@ class MiniMaxH3TpUaaBlockImpl final : public torch::nn::Module {
       const torch::Tensor& cu_seqlens,
       MiniMaxH3UaaWorkspace* workspace = nullptr,
       bool verify_intermediates = false,
-      H3QualifiedLaunchSnapshot* qkv_launches = nullptr) {
+      H3QualifiedLaunchSnapshot* qkv_launches = nullptr,
+      MiniMaxH3RainfusionExecutionContext* rainfusion = nullptr) {
     verify_loaded_weights();
     torch::Tensor parameters = adaln_proj_->forward(time_embedding);
     MiniMaxH3ResidualBranchTrace trace;
@@ -764,7 +769,8 @@ class MiniMaxH3TpUaaBlockImpl final : public torch::nn::Module {
                                             cu_seqlens,
                                             workspace,
                                             verify_intermediates,
-                                            qkv_launches);
+                                            qkv_launches,
+                                            rainfusion);
     trace.attention_delta = trace.gate_msa * trace.attention_output;
     torch::Tensor after_attention = input + trace.attention_delta;
     trace.norm2_output = norm2_->forward(after_attention);
@@ -784,7 +790,8 @@ class MiniMaxH3TpUaaBlockImpl final : public torch::nn::Module {
       const torch::Tensor& cu_seqlens,
       MiniMaxH3UaaWorkspace* workspace = nullptr,
       bool verify_intermediates = false,
-      H3QualifiedLaunchSnapshot* qkv_launches = nullptr) {
+      H3QualifiedLaunchSnapshot* qkv_launches = nullptr,
+      MiniMaxH3RainfusionExecutionContext* rainfusion = nullptr) {
     verify_loaded_weights();
     torch::Tensor parameters = adaln_proj_->forward(time_embedding);
     torch::Tensor after_attention;
@@ -802,7 +809,8 @@ class MiniMaxH3TpUaaBlockImpl final : public torch::nn::Module {
                                                       cu_seqlens,
                                                       workspace,
                                                       verify_intermediates,
-                                                      qkv_launches);
+                                                      qkv_launches,
+                                                      rainfusion);
       after_attention = input + gate_msa * attention_output;
     }
     torch::Tensor shift_mlp =

@@ -109,13 +109,20 @@ class H3QualifiedDenoiser final {
     CHECK(weights_loaded_) << "Qualified weights are not loaded";
     CHECK_GE(input.step_index, 0);
     CHECK_LT(input.step_index, 49);
-    if (execution != nullptr && execution->cache != nullptr && !resident_) {
+    if (execution != nullptr &&
+        (execution->cache != nullptr ||
+         execution->rainfusion.policy.enabled()) &&
+        !resident_) {
       throw std::invalid_argument(
-          "H3 CacheDiT requires the resident qualified denoiser");
+          "H3 CacheDiT and RainFusion require the resident qualified denoiser");
     }
     const int64_t before_blocks = resident_ ? resident_->block_forwards() : 0;
     SimilarityResidualCacheDecision cache_decision;
     MiniMaxH3DenoiserOutput result;
+    MiniMaxH3RainfusionExecutionContext* active_rf =
+        execution != nullptr ? active_h3_rainfusion_context(
+                                   execution->rainfusion, input.step_index)
+                             : nullptr;
     if (resident_) {
       result = resident_->forward(request.layout,
                                   input.video_rows.squeeze(0),
@@ -128,7 +135,8 @@ class H3QualifiedDenoiser final {
                                   diagnostics_.retain_model_boundary,
                                   diagnostics_.verify_intermediates,
                                   execution,
-                                  &cache_decision);
+                                  &cache_decision,
+                                  active_rf);
     } else {
       result = streaming_->forward(*weight_source_,
                                    request.layout,

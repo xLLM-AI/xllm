@@ -106,6 +106,36 @@ TEST(DiTConfigTest, H3ExecutionProfileIsOptInAndRoundTripsJson) {
             "a3_16card_tp2_u8_ref2va_v1");
 }
 
+TEST(DiTConfigTest, H3RainfusionIsOptInAndRoundTripsJson) {
+  // from_json synchronizes FLAGS; each scope is an independent config load.
+  {
+    google::FlagSaver flag_saver;
+    DiTConfig config;
+    EXPECT_FALSE(config.dit_h3_rainfusion_enabled());
+    nlohmann::ordered_json output = nlohmann::ordered_json::object();
+    config.append_config_json(output);
+    EXPECT_FALSE(output.contains("dit_h3_rainfusion_enabled"));
+    config.from_json(
+        config::parse_json_string(R"({"dit_h3_rainfusion_enabled":true})"));
+    EXPECT_TRUE(config.dit_h3_rainfusion_enabled());
+    EXPECT_FALSE(config.dit_sparse_attention_enabled());
+    EXPECT_EQ(config.dit_h3_execution_profile(), "native");
+    config.append_config_json(output);
+    EXPECT_EQ(output.at("dit_h3_rainfusion_enabled"), true);
+  }
+  {
+    google::FlagSaver flag_saver;
+    DiTConfig config;
+    config.dit_h3_rainfusion_enabled(true);
+    config.from_json(
+        config::parse_json_string(R"({"dit_h3_rainfusion_enabled":false})"));
+    EXPECT_FALSE(config.dit_h3_rainfusion_enabled());
+    nlohmann::ordered_json output = nlohmann::ordered_json::object();
+    config.append_config_json(output);
+    EXPECT_FALSE(output.contains("dit_h3_rainfusion_enabled"));
+  }
+}
+
 TEST(DiTConfigTest, H3MeasurementAndCorrectnessAreIndependentOptIns) {
   DiTConfig config;
   EXPECT_FALSE(config.dit_h3_phase_timing());

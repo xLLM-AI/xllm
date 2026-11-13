@@ -23,7 +23,6 @@ limitations under the License.
 #include "core/common/macros.h"
 #include "core/common/types.h"
 #include "core/framework/config/dit_config.h"
-#include "core/framework/multimodal/minimax_h3_reference_geometry.h"
 #include "core/framework/multimodal/mm_codec.h"
 #include "core/framework/request/dit_source_decoder.h"
 #include "core/framework/request/minimax_h3_conditioning.h"
@@ -633,19 +632,18 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
       return;
     }
   }
-  // The qualified backend serves one frozen generation contract. Reject
-  // client-controlled mismatches before they enter the distributed worker.
+  // The worker aligns request geometry and validates the normalized duration.
   if (qualified_profile &&
-      (generation_params.width != 1344 || generation_params.height != 768 ||
-       generation_params.num_frames != 124 ||
+      (generation_params.width <= 0 || generation_params.height <= 0 ||
+       generation_params.num_frames <= 0 ||
        generation_params.video_fps != 24.0 ||
        generation_params.audio_sampling_rate != 32000 ||
        generation_params.num_inference_steps != 50 ||
        generation_params.num_videos_per_prompt != 1)) {
-    request_parse_status =
-        Status(StatusCode::INVALID_ARGUMENT,
-               "qualified MiniMax-H3 requires 1344x768, 124 frames, 24fps, "
-               "audio32000, the 50-point schedule and one video per prompt");
+    request_parse_status = Status(
+        StatusCode::INVALID_ARGUMENT,
+        "qualified MiniMax-H3 requires positive width/height/num_frames, "
+        "24fps, audio32000, the 50-point schedule and one video per prompt");
     return;
   }
 
@@ -675,15 +673,6 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
             Status(StatusCode::INVALID_ARGUMENT,
                    "qualified MiniMax-H3 reference aspect ratio must be within "
                    "1:4 and 4:1");
-        return;
-      }
-      // The qualified VAE spatial ratio is 16 and its patch size is 2.
-      const auto reference_size = minimax_h3_reference_image_size(
-          pixels.size(1), pixels.size(2), /*short_edge=*/2048, /*multiple=*/32);
-      if (reference_size != std::pair<int64_t, int64_t>{2048, 5536}) {
-        request_parse_status =
-            Status(StatusCode::INVALID_ARGUMENT,
-                   "qualified MiniMax-H3 reference must resolve to 2048x5536");
         return;
       }
     }

@@ -36,8 +36,13 @@ struct H3QualifiedRequest {
   torch::Tensor audio_sigmas;
   int64_t condition_video_rows = 0;
   int64_t condition_audio_rows = 0;
-  int64_t audio_output_samples = 165600;
+  int64_t audio_output_samples = 0;
+  H3TargetLatents target;
 };
+
+inline constexpr int64_t kH3QualifiedLatentChannels = 24;
+inline constexpr int64_t kH3QualifiedAudioLatentChannels = 32;
+inline constexpr int64_t kH3QualifiedAudioSamplesPerLatentFrame = 800;
 
 struct H3QualifiedPreparedMedia {
   torch::Tensor reference_latent;
@@ -57,20 +62,46 @@ inline torch::Tensor h3_qualified_sigmas(float shift) {
 }
 
 inline std::array<torch::Tensor, 3> h3_qualified_generation_noise(
-    int64_t seed) {
+    int64_t seed,
+    const H3TargetLatents& target,
+    int64_t reference_latent_t,
+    int64_t reference_latent_h,
+    int64_t reference_latent_w) {
   if (seed < 0) {
     throw std::invalid_argument(
         "MiniMax-H3 qualified seed must be nonnegative");
+  }
+  if (target.latent_t <= 0 || target.latent_h <= 0 || target.latent_w <= 0 ||
+      target.audio_t <= 0 || target.audio_channels <= 0 ||
+      reference_latent_t <= 0 || reference_latent_h <= 0 ||
+      reference_latent_w <= 0) {
+    throw std::invalid_argument(
+        "MiniMax-H3 qualified noise requires a positive derived shape");
   }
   torch::Generator generator = torch::make_generator<torch::CPUGeneratorImpl>();
   generator.set_current_seed(static_cast<uint64_t>(seed));
   const auto options =
       torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32);
-  // The three RNG calls and their shapes are part of the frozen contract.
+  // Preserve the RNG draw order for a given request shape.
   std::array<torch::Tensor, 3> noise;
-  noise[0] = torch::randn({1, 24, 1, 128, 346}, generator, options);
-  noise[1] = torch::randn({1, 24, 37, 48, 84}, generator, options);
-  noise[2] = torch::randn({414, 32}, generator, options);
+  noise[0] = torch::randn({1,
+                           kH3QualifiedLatentChannels,
+                           reference_latent_t,
+                           reference_latent_h,
+                           reference_latent_w},
+                          generator,
+                          options);
+  noise[1] = torch::randn({1,
+                           kH3QualifiedLatentChannels,
+                           target.latent_t,
+                           target.latent_h,
+                           target.latent_w},
+                          generator,
+                          options);
+  noise[2] = torch::randn(
+      {target.audio_t * target.audio_channels, kH3QualifiedAudioLatentChannels},
+      generator,
+      options);
   return noise;
 }
 
@@ -78,28 +109,38 @@ inline H3QualifiedRequest build_qualified_request(
     const torch::Tensor& condition_hidden,
     const torch::Tensor& condition_tags,
     const H3QualifiedPreparedMedia& media,
-    int64_t seed) {
-  const std::vector<int64_t> reference_shape{1, 24, 1, 128, 346};
+    int64_t seed,
+    const H3TargetLatents& target,
+    int64_t reference_latent_t,
+    int64_t reference_latent_h,
+    int64_t reference_latent_w) {
+  const std::vector<int64_t> reference_shape{1,
+                                             kH3QualifiedLatentChannels,
+                                             reference_latent_t,
+                                             reference_latent_h,
+                                             reference_latent_w};
   if (!media.reference_latent.defined() ||
       media.reference_latent.sizes().vec() != reference_shape ||
       media.reference_latent.scalar_type() != torch::kFloat32) {
     throw std::invalid_argument(
-        "MiniMax-H3 reference latent must be FP32 [1,24,1,128,346]");
+        "MiniMax-H3 reference latent must be FP32 with the derived shape");
   }
-  const H3TargetLatents target{.audio_t = 207,
-                               .audio_channels = 2,
-                               .latent_t = 37,
-                               .latent_h = 48,
-                               .latent_w = 84};
   const std::vector<H3ReferenceBlock> references{
       {.kind = H3ReferenceBlockKind::IMAGE,
-       .latent_t = 1,
-       .latent_h = 128,
-       .latent_w = 346}};
+       .latent_t = reference_latent_t,
+       .latent_h = reference_latent_h,
+       .latent_w = reference_latent_w}};
   H3QualifiedRequest request;
+  // Use the same storage alignment for both qualified attention paths.
   request.layout = minimax_h3_build_ref2va_packed_layout(
-      condition_hidden, condition_tags, target, references);
-  auto noise = h3_qualified_generation_noise(seed);
+      condition_hidden,
+      condition_tags,
+      target,
+      references,
+      /*sequence_length=*/std::nullopt,
+      /*alignment=*/minimax_h3_packing_detail::kH3RainfusionStorageAlignment);
+  auto noise = h3_qualified_generation_noise(
+      seed, target, reference_latent_t, reference_latent_h, reference_latent_w);
   const torch::Device device = media.reference_latent.device();
   const torch::Tensor timestep =
       torch::tensor(
@@ -114,7 +155,12 @@ inline H3QualifiedRequest build_qualified_request(
           .unsqueeze(0)
           .contiguous();
   request.audio_rows = noise[2].to(device).unsqueeze(0).contiguous();
-  request.condition_video_rows = 11072;
+  const H3Slice reference_rows =
+      request.layout.reference_blocks.at(0).row_slice;
+  request.condition_video_rows = reference_rows.stop - reference_rows.start;
+  request.target = target;
+  request.audio_output_samples =
+      target.audio_t * kH3QualifiedAudioSamplesPerLatentFrame;
   request.video_sigmas = h3_qualified_sigmas(12.0F);
   request.audio_sigmas = h3_qualified_sigmas(3.0F);
   return request;

@@ -41,6 +41,7 @@ from scripts.build_support.env import (
     set_musa_envs,
     set_npu_envs,
 )
+from scripts.build_support.h3_build_profile import resolve_h3_build_profile
 from scripts.build_support.npu_ops import stage_npu_ops_vendor as _stage_npu_ops_vendor
 from scripts.build_support.utils import (
     check_and_install_pre_commit,
@@ -63,9 +64,7 @@ from scripts.logger import logger
 BUILD_EXPORT: bool = True
 
 
-def _maybe_compile_tilelang_kernels(device: str, jobs: int | str | None = None) -> None:
-    if device != "npu":
-        return
+def _maybe_compile_tilelang_kernels(cmake_overrides: list[str], jobs: int | str | None = None) -> None:
     target_platform = get_ascend_platform()
 
     output_root = os.path.join(get_cmake_dir(), "xllm", "compiler", "tilelang")
@@ -85,6 +84,17 @@ def _maybe_compile_tilelang_kernels(device: str, jobs: int | str | None = None) 
         "--device",
         target_platform,
     ]
+    options = {}
+    for argument in cmake_overrides:
+        key, separator, value = argument.partition("=")
+        if separator and key.startswith("-D"):
+            options[key[2:].split(":", 1)[0]] = value
+    profile = resolve_h3_build_profile(options.get("XLLM_BUILD_PROFILE"))
+    enable_rainfusion = options.get("XLLM_ENABLE_H3_RAINFUSION", "").upper() in ("ON", "TRUE", "YES", "1")
+    if enable_rainfusion != (profile is not None):
+        raise ValueError("XLLM_ENABLE_H3_RAINFUSION and the H3 build profile must be enabled together")
+    if profile is not None:
+        cmd.extend(["--build-profile", profile.name, "--enable-h3-rainfusion"])
     if jobs is not None:
         cmd.extend(["--jobs", str(jobs)])
     logger.info("compiling TileLang kernels via source-tree launcher")
@@ -418,10 +428,11 @@ class ExtBuild(build_ext):
         if self.device != "maca":
             cmake_args += ["-DUSE_CCACHE=ON"]
 
+        cmake_overrides = [item for item in os.environ.get("CMAKE_ARGS", "").split(" ") if item]
         if self.device == "npu":
             cmake_args += ["-DUSE_NPU=ON"]
             set_npu_envs()
-            _maybe_compile_tilelang_kernels(self.device, self.tilelang_jobs)
+            _maybe_compile_tilelang_kernels(cmake_overrides, self.tilelang_jobs)
         elif self.device == "mlu":
             cmake_args += ["-DUSE_MLU=ON"]
             set_mlu_envs()
@@ -505,8 +516,7 @@ class ExtBuild(build_ext):
 
         # Adding CMake arguments set as environment variable
         # (needed e.g. to build for ARM OSx on conda-forge)
-        if "CMAKE_ARGS" in os.environ:
-            cmake_args += [item for item in os.environ["CMAKE_ARGS"].split(" ") if item]
+        cmake_args += cmake_overrides
 
         # check if torch binary is built with cxx11 abi
         if get_cxx_abi():

@@ -4,6 +4,12 @@ import argparse
 from pathlib import Path
 
 from scripts.build_support.env import set_npu_envs
+from scripts.build_support.h3_build_profile import (
+    H3_BUILD_PROFILE,
+    resolve_h3_build_profile,
+    validate_h3_build_profile,
+    validate_h3_tilelang_root,
+)
 from scripts.logger import logger
 
 from ..common.toolchain import prepare_tilelang_import
@@ -46,11 +52,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Maximum parallel workers for compiling TileLang variants, e.g. --jobs 16.",
     )
+    parser.add_argument("--build-profile", choices=["native", H3_BUILD_PROFILE], default="native")
+    parser.add_argument("--enable-h3-rainfusion", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    profile = resolve_h3_build_profile(args.build_profile)
+    if args.enable_h3_rainfusion and profile is None:
+        raise ValueError("--enable-h3-rainfusion requires --build-profile " + H3_BUILD_PROFILE)
+    if profile is not None:
+        if args.target != "ascend":
+            raise ValueError("The H3 RainFusion profile only supports --target ascend")
+        validate_h3_build_profile(profile, device=args.device)
     output_root = Path(args.output_root).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -60,6 +75,8 @@ def main(argv: list[str] | None = None) -> None:
         set_npu_envs()
         tilelang_root = prepare_tilelang_import()
         check_tilelang_artifacts(tilelang_root)
+        if profile is not None:
+            validate_h3_tilelang_root(profile, tilelang_root)
         from ..targets.ascend.build import build_kernels
 
         manifests = build_kernels(
@@ -68,6 +85,7 @@ def main(argv: list[str] | None = None) -> None:
             force=args.force,
             device=args.device,
             jobs=args.jobs,
+            enable_h3_rainfusion=profile is not None,
         )
     elif args.target == "cuda":
         from ..targets.cuda.build import build_kernels

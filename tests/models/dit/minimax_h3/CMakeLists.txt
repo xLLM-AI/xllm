@@ -63,3 +63,10 @@ if(USE_NPU)
     DEPS :parallel_state torch GTest::gtest_main
   )
 endif()
+
+cc_test(
+  NAME minimax_h3_rainfusion_policy_test
+  CPU_ONLY
+  SRCS minimax_h3_rainfusion_policy_test.cpp
+  DEPS :config torch GTest::gtest_main
+)

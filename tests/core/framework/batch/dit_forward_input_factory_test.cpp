@@ -249,6 +249,7 @@ TEST(H3ExecutionMetricsTest,
      RainFusionWindowUsesActualDeltasAndHalfOpenBounds) {
   H3QualifiedExecutionMetrics metrics;
   metrics.request_id = "fixture-rf-counter-arithmetic";
+  metrics.rf_policy = kH3SparseMiddleSteps;
   metrics.rf_ready = true;
   H3QualifiedLaunchSnapshot totals;
   for (int64_t step = 0; step < 49; ++step) {

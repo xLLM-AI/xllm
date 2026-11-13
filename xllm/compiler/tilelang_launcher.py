@@ -27,6 +27,11 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=False,
         help="Compile TileLang kernels and emit manifests.",
     )
+    subparsers.add_parser(
+        "prepare-ascend",
+        add_help=False,
+        help="Install and verify the TileLang Ascend wheel.",
+    )
     return parser
 
 
@@ -40,6 +45,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "compile-kernels":
         from compiler.tilelang.cli.compile_kernels import main as entrypoint
+    elif args.command == "prepare-ascend":
+        from compiler.tilelang.cli.prepare_ascend import main as entrypoint
     else:  # pragma: no cover - argparse enforces choices
         raise ValueError(f"Unsupported TileLang launcher command: {args.command}")
 

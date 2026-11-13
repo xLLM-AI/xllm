@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 
+from scripts.build_support.h3_build_profile import H3_BUILD_PROFILE, resolve_h3_build_profile
 from scripts.logger import logger
-
-from ..bootstrap import PREPARE_ASCEND_COMMAND, prepare_ascend
+from xllm.compiler.tilelang.bootstrap import PREPARE_ASCEND_COMMAND, prepare_ascend
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -26,6 +26,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Force reinstalling the TileLang Ascend wheel even when it looks ready.",
     )
+    parser.add_argument("--build-profile", choices=["native", H3_BUILD_PROFILE], default="native")
     return parser.parse_args(argv)
 
 
@@ -35,6 +36,7 @@ def main(argv: list[str] | None = None) -> None:
         args.target_platform,
         args.arch,
         force=args.force,
+        profile=resolve_h3_build_profile(args.build_profile),
     )
     logger.info(f"tilelang is ready under: {tilelang_root}")
     logger.info("Next step: run your usual `python setup.py build ...` or `python setup.py test ...` command.")

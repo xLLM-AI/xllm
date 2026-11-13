@@ -130,3 +130,18 @@ cc_test(
     glog::glog
     unified_dlog
 )
+
+if(XLLM_ENABLE_H3_RAINFUSION)
+  cc_test(
+    NAME
+      h3_rainfusion_runtime_test
+    SRCS
+      h3_rainfusion_runtime_test.cpp
+    DEPS
+      :tilelang_kernels
+      torch
+      GTest::gtest_main
+      glog::glog
+      unified_dlog
+  )
+endif()

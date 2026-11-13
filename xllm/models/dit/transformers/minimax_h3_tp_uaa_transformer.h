@@ -84,15 +84,17 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
   // hidden / rope / combined_indices are this rank's row shard; cu_seqlens
   // describes the FULL packed sequence, which is what every rank sees after the
   // Ulysses transpose.
-  torch::Tensor forward(const torch::Tensor& hidden,
-                        const torch::Tensor& time_embedding,
-                        const torch::Tensor& combined_indices,
-                        const torch::Tensor& rope_frequencies,
-                        const torch::Tensor& cu_seqlens,
-                        const MiniMaxH3LayerObserver& observer = nullptr,
-                        int64_t step = 0,
-                        bool verify_intermediates = false,
-                        H3QualifiedLaunchSnapshot* qkv_launches = nullptr) {
+  torch::Tensor forward(
+      const torch::Tensor& hidden,
+      const torch::Tensor& time_embedding,
+      const torch::Tensor& combined_indices,
+      const torch::Tensor& rope_frequencies,
+      const torch::Tensor& cu_seqlens,
+      const MiniMaxH3LayerObserver& observer = nullptr,
+      int64_t step = 0,
+      bool verify_intermediates = false,
+      H3QualifiedLaunchSnapshot* qkv_launches = nullptr,
+      MiniMaxH3RainfusionExecutionContext* rainfusion = nullptr) {
     if (loaded_block_count_ != kResidentBlockCount) {
       throw std::logic_error(
           "MiniMax-H3 resident transformer does not hold all 50 blocks");
@@ -111,7 +113,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                               observer,
                               step,
                               verify_intermediates,
-                              qkv_launches);
+                              qkv_launches,
+                              rainfusion);
     }
     return current;
   }
@@ -126,7 +129,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
       H3QualifiedExecutionContext& execution,
       const MiniMaxH3LayerObserver& observer = nullptr,
       bool verify_intermediates = false,
-      H3QualifiedLaunchSnapshot* qkv_launches = nullptr) {
+      H3QualifiedLaunchSnapshot* qkv_launches = nullptr,
+      MiniMaxH3RainfusionExecutionContext* rainfusion = nullptr) {
     if (loaded_block_count_ != kResidentBlockCount ||
         execution.cache == nullptr) {
       throw std::logic_error(
@@ -153,7 +157,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                                observer,
                                step,
                                verify_intermediates,
-                               qkv_launches);
+                               qkv_launches,
+                               rainfusion);
         });
   }
 
@@ -199,8 +204,12 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                               const MiniMaxH3LayerObserver& observer,
                               int64_t step,
                               bool verify_intermediates,
-                              H3QualifiedLaunchSnapshot* qkv_launches) {
+                              H3QualifiedLaunchSnapshot* qkv_launches,
+                              MiniMaxH3RainfusionExecutionContext* rainfusion) {
     MiniMaxH3TpUaaBlock& block = block_layers_[static_cast<size_t>(layer)];
+    if (rainfusion != nullptr && !rainfusion->policy.includes_layer(layer)) {
+      rainfusion = nullptr;
+    }
     torch::Tensor current;
     if (observer) {
       MiniMaxH3ResidualBranchTrace trace = block->forward(input,
@@ -210,7 +219,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                                                           cu_seqlens,
                                                           workspace_.get(),
                                                           verify_intermediates,
-                                                          qkv_launches);
+                                                          qkv_launches,
+                                                          rainfusion);
       current = trace.output;
       observer(step, layer, trace);
     } else {
@@ -221,7 +231,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                                            cu_seqlens,
                                            workspace_.get(),
                                            verify_intermediates,
-                                           qkv_launches);
+                                           qkv_launches,
+                                           rainfusion);
     }
     if (verify_intermediates && !torch::isfinite(current).all().item<bool>()) {
       LOG(FATAL) << "MiniMax-H3 resident block " << layer
@@ -374,7 +385,8 @@ class MiniMaxH3TpUaaResidentDenoiserImpl final : public torch::nn::Module {
       bool retain_model_boundary = false,
       bool verify_intermediates = false,
       H3QualifiedExecutionContext* execution = nullptr,
-      SimilarityResidualCacheDecision* cache_decision = nullptr) {
+      SimilarityResidualCacheDecision* cache_decision = nullptr,
+      MiniMaxH3RainfusionExecutionContext* rainfusion = nullptr) {
     verify_fixed_weights();
     const int64_t before_blocks = transformer_->block_forwards();
     if (cache_decision != nullptr) {
@@ -453,7 +465,8 @@ class MiniMaxH3TpUaaResidentDenoiserImpl final : public torch::nn::Module {
           *execution,
           observer,
           verify_intermediates,
-          execution != nullptr ? &execution->qkv_launches : nullptr);
+          execution != nullptr ? &execution->qkv_launches : nullptr,
+          rainfusion);
       local_hidden_out = std::move(cached.hidden);
       if (cache_decision != nullptr) {
         *cache_decision = cached.decision;
@@ -468,7 +481,8 @@ class MiniMaxH3TpUaaResidentDenoiserImpl final : public torch::nn::Module {
           observer,
           step,
           verify_intermediates,
-          execution != nullptr ? &execution->qkv_launches : nullptr);
+          execution != nullptr ? &execution->qkv_launches : nullptr,
+          rainfusion);
     }
     hidden = parallel_state::gather(
         local_hidden_out.contiguous(), sp_group_, /*dim=*/0);

@@ -130,6 +130,8 @@ struct H3PackedLayout {
 namespace minimax_h3_packing_detail {
 
 inline constexpr int64_t kSequenceAlignment = 64;
+// The qualified RainFusion K/V pack uses 256-row tiles.
+inline constexpr int64_t kH3RainfusionStorageAlignment = 256;
 inline constexpr int64_t kPatchHeight = 2;
 inline constexpr int64_t kPatchWidth = 2;
 inline constexpr int64_t kTextDimension = 5120;
@@ -470,7 +472,8 @@ inline H3PackedLayout minimax_h3_build_ref2va_packed_layout(
     const torch::Tensor& condition_tags,
     const H3TargetLatents& target,
     const std::vector<H3ReferenceBlock>& reference_blocks,
-    std::optional<int64_t> sequence_length = std::nullopt) {
+    std::optional<int64_t> sequence_length = std::nullopt,
+    int64_t alignment = minimax_h3_packing_detail::kSequenceAlignment) {
   using namespace minimax_h3_packing_detail;
   validate_condition(condition_hidden, condition_tags);
   validate_target(target);
@@ -506,19 +509,24 @@ inline H3PackedLayout minimax_h3_build_ref2va_packed_layout(
   used_length = checked_add(used_length, target_audio_rows, "sequence");
   used_length = checked_add(used_length, target_video_rows, "sequence");
 
+  if (alignment <= 0) {
+    fail("sequence alignment must be positive");
+  }
   int64_t aligned_length = 0;
   if (sequence_length.has_value()) {
     aligned_length = *sequence_length;
     if (aligned_length < used_length) {
       fail("explicit sequence length is smaller than used rows");
     }
-    if (aligned_length % kSequenceAlignment != 0) {
-      fail("explicit sequence length must be divisible by 64");
+    if (aligned_length % alignment != 0) {
+      fail(
+          "explicit sequence length must be divisible by the requested "
+          "alignment");
     }
   } else {
     aligned_length =
-        checked_add(used_length, kSequenceAlignment - 1, "aligned sequence");
-    aligned_length = aligned_length / kSequenceAlignment * kSequenceAlignment;
+        checked_add(used_length, alignment - 1, "aligned sequence");
+    aligned_length = aligned_length / alignment * alignment;
   }
   if (aligned_length > std::numeric_limits<int32_t>::max()) {
     fail("aligned sequence length exceeds int32 cu_seqlens capacity");

@@ -22,6 +22,7 @@ limitations under the License.
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -58,6 +59,8 @@ limitations under the License.
 #include "models/dit/utils/minimax_h3_execution_metrics.h"
 #include "models/dit/utils/minimax_h3_phase_timing.h"
 #include "models/dit/utils/minimax_h3_qualified_execution_context.h"
+#include "models/dit/utils/minimax_h3_rainfusion_observer.h"
+#include "models/dit/utils/minimax_h3_rainfusion_resources.h"
 #include "models/dit/utils/util.h"
 #include "models/model_registry.h"
 
@@ -214,6 +217,29 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         qkv_overlap != config.dit_sp_communication_overlap()) {
       throw std::invalid_argument(
           "H3 qualified QKV overlap flags must be paired");
+    }
+    qualified_rainfusion_policy_ =
+        resolve_h3_rainfusion_policy(config.dit_h3_rainfusion_enabled(),
+                                     std::getenv(kH3RainfusionPolicyEnv));
+    if (qualified_rainfusion_policy_.enabled()) {
+      if (construction_ != H3BackendConstruction::A3_16CARD) {
+        throw std::invalid_argument(
+            "H3 RainFusion requires the qualified A3 TP2xU8 profile");
+      }
+#if defined(USE_NPU)
+      qualified_rainfusion_resources_ =
+          std::make_unique<H3QualifiedRainfusionResources>(options_.device());
+#else
+      throw std::invalid_argument("H3 RainFusion requires the NPU backend");
+#endif
+    }
+    if (construction_ == H3BackendConstruction::A3_16CARD) {
+      const auto& policy = qualified_rainfusion_policy_;
+      LOG(INFO) << "H3 RainFusion policy: rank="
+                << context.get_parallel_args().rank()
+                << " policy=" << policy.name << " steps=[" << policy.step_begin
+                << "," << policy.step_end << ") layers=[" << policy.layer_begin
+                << "," << policy.layer_end << ")";
     }
     phase_timing_enabled_ = DiTConfig::get_instance().dit_h3_phase_timing();
     const ParallelArgs& timing_parallel = context.get_parallel_args();
@@ -739,6 +765,88 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     }
   }
 
+  struct H3QualifiedShapePlan {
+    H3TargetLatents target;
+    int64_t reference_latent_t = 1;
+    int64_t reference_latent_h = 0;
+    int64_t reference_latent_w = 0;
+    int64_t reference_canvas_h = 0;
+    int64_t reference_canvas_w = 0;
+  };
+
+  H3QualifiedShapePlan derive_qualified_shape(
+      const DiTModelParams& input) const {
+    const DiTGenerationParams& params = input.generation_params;
+    if (input.batch_size != 1 || params.num_videos_per_prompt != 1) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified input requires batch1 and one video per "
+          "prompt");
+    }
+    if (params.audio_sampling_rate != audio_processor_->sampling_rate()) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified sampling_rate must match the audio VAE config");
+    }
+    if (params.num_inference_steps != 50) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified input requires the frozen 50-point schedule");
+    }
+    if (!std::isfinite(params.video_fps) || params.video_fps <= 0.0) {
+      throw std::invalid_argument("MiniMax-H3 fps must be finite and positive");
+    }
+    if (input.media_sources.size() != 1) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified input requires exactly one reference");
+    }
+    H3QualifiedShapePlan plan;
+    if (params.height <= 0 || params.width <= 0 || params.num_frames <= 0) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified request shape must be positive");
+    }
+    const int64_t height =
+        visual_processor_->align_canvas_pixels(params.height);
+    const int64_t width = visual_processor_->align_canvas_pixels(params.width);
+    const int64_t num_frames =
+        visual_processor_->align_target_frames(params.num_frames);
+    const double duration = static_cast<double>(num_frames) / params.video_fps;
+    if (duration < min_duration_seconds_ || duration > max_duration_seconds_) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified duration is outside the supported 5-15s range");
+    }
+    plan.target.latent_t = visual_processor_->encode_latent_frames(num_frames);
+    plan.target.latent_h = height / vae_spatial_ratio_;
+    plan.target.latent_w = width / vae_spatial_ratio_;
+    plan.target.audio_t =
+        audio_processor_->audio_latents_for_video(num_frames, params.video_fps);
+    plan.target.audio_channels = 2;
+    // Reference canvas is derived from the request's reference tensor, which
+    // every rank holds, so the follower can size its broadcast buffer
+    // identically.
+    const torch::Tensor& reference = input.media_sources.at(0).tensor;
+    if (reference.dim() != 4 || reference.size(0) != 1) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified reference must be [1,C,H,W]");
+    }
+    const auto canvas = visual_processor_->resolve_reference_image_size(
+        reference.size(2), reference.size(3));
+    plan.reference_canvas_h = canvas.first;
+    plan.reference_canvas_w = canvas.second;
+    if (plan.reference_canvas_h <= 0 || plan.reference_canvas_w <= 0 ||
+        plan.reference_canvas_h % vae_spatial_ratio_ != 0 ||
+        plan.reference_canvas_w % vae_spatial_ratio_ != 0) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified reference canvas is not VAE-ratio aligned");
+    }
+    plan.reference_latent_h = plan.reference_canvas_h / vae_spatial_ratio_;
+    plan.reference_latent_w = plan.reference_canvas_w / vae_spatial_ratio_;
+    if (plan.target.latent_t <= 0 || plan.target.latent_h <= 0 ||
+        plan.target.latent_w <= 0 || plan.target.audio_t <= 0 ||
+        plan.reference_latent_h <= 0 || plan.reference_latent_w <= 0) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified derived shape must be strictly positive");
+    }
+    return plan;
+  }
+
   H3QualifiedRequest prepare_qualified_request(
       const DiTModelParams& input,
       MiniMaxH3ReferenceEncodeTrace* trace = nullptr) {
@@ -746,17 +854,12 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     std::optional<NamedTensorConstRef> source;
     const std::vector<int64_t>* tags = nullptr;
     int64_t seed = 42;
+    // Validate on every rank before allocating broadcast buffers.
+    H3QualifiedShapePlan shape;
+    run_qualified_phase("shape derivation",
+                        [&] { shape = derive_qualified_shape(input); });
     run_qualified_phase("reference preparation", [&] {
       const auto& params = input.generation_params;
-      if (input.batch_size != 1 || params.num_videos_per_prompt != 1 ||
-          params.width != 1344 || params.height != 768 ||
-          params.num_frames != 124 || params.video_fps != 24.0 ||
-          params.audio_sampling_rate != 32000 ||
-          params.num_inference_steps != 50) {
-        throw std::invalid_argument(
-            "MiniMax-H3 qualified input requires batch1, 1344x768, 124 frames, "
-            "24fps, audio32000 and the frozen 50-point schedule");
-      }
       source = input.tensor_sources.get_named_tensor("prompt_embed");
       if (!source.has_value() || input.media_sources.size() != 1) {
         throw std::invalid_argument("MiniMax-H3 qualified input is incomplete");
@@ -775,17 +878,17 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         throw std::invalid_argument("MiniMax-H3 qualified prompt tags missing");
       }
       seed = params.seed_is_set ? params.seed : 42;
+      const std::vector<int64_t> reference_shape{1,
+                                                 kH3QualifiedLatentChannels,
+                                                 shape.reference_latent_t,
+                                                 shape.reference_latent_h,
+                                                 shape.reference_latent_w};
       if (qualified_output_owner_) {
         torch::Tensor image = reference.tensor.squeeze(0).to(torch::kCPU);
-        const auto size = visual_processor_->resolve_reference_image_size(
-            image.size(1), image.size(2));
-        if (size.first != 2048 || size.second != 5536) {
-          throw std::invalid_argument(
-              "MiniMax-H3 qualified reference canvas must be 2048x5536");
-        }
         media.reference_pixels =
             visual_processor_
-                ->prepare_reference_image(image, size.first, size.second)
+                ->prepare_reference_image(
+                    image, shape.reference_canvas_h, shape.reference_canvas_w)
                 .unsqueeze(0)
                 .unsqueeze(2)
                 .to(options_.device());
@@ -793,15 +896,14 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
             vae_->encode_reference_condition(
                     media.reference_pixels, trace, /*normalize_on_cpu=*/true)
                 .contiguous();
-        if (media.reference_latent.sizes().vec() !=
-                std::vector<int64_t>({1, 24, 1, 128, 346}) ||
+        if (media.reference_latent.sizes().vec() != reference_shape ||
             media.reference_latent.scalar_type() != torch::kFloat32) {
           throw std::invalid_argument(
               "MiniMax-H3 qualified encoded reference metadata mismatch");
         }
       } else {
         media.reference_latent =
-            torch::empty({1, 24, 1, 128, 346}, options_.dtype(torch::kFloat32));
+            torch::empty(reference_shape, options_.dtype(torch::kFloat32));
       }
     });
     if (qualified_world_group_ != nullptr) {
@@ -813,7 +915,11 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
           source->get().tensor.to(torch::kCPU),
           torch::tensor(*tags, torch::dtype(torch::kInt64)).unsqueeze(0),
           media,
-          seed);
+          seed,
+          shape.target,
+          shape.reference_latent_t,
+          shape.reference_latent_h,
+          shape.reference_latent_w);
     });
     return request;
   }
@@ -853,8 +959,9 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                                             plan.unique_timesteps,
                                             plan.inverse_indices,
                                             step};
-      const H3QualifiedLaunchSnapshot before =
-          execution != nullptr ? execution->qkv_launches
+      const H3QualifiedLaunchSnapshot launch_before =
+          execution != nullptr ? h3_qualified_launch_snapshot(
+                                     *execution, execution->qkv_launches)
                                : H3QualifiedLaunchSnapshot{};
       H3QualifiedPrediction prediction =
           qualified_denoiser_->predict_step(request, step_input, execution);
@@ -887,8 +994,8 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
             step,
             prediction.cache_hit,
             prediction.executed_blocks,
-            before,
-            execution->qkv_launches);
+            launch_before,
+            h3_qualified_launch_snapshot(*execution, execution->qkv_launches));
       }
     }
   }
@@ -896,11 +1003,12 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   DiTForwardOutput decode_qualified_output(const H3QualifiedRequest& request) {
     torch::Tensor video_latent = unpatchify_video(
         generated_rows(request.video_rows, request.condition_video_rows),
-        37,
-        48,
-        84);
+        request.target.latent_t,
+        request.target.latent_h,
+        request.target.latent_w);
     torch::Tensor audio_latent = unpatchify_audio(
-        generated_rows(request.audio_rows, request.condition_audio_rows), 207);
+        generated_rows(request.audio_rows, request.condition_audio_rows),
+        request.target.audio_t);
     torch::Tensor video =
         vae_->decode_to_pixels(vae_->denormalize_latents(video_latent));
     torch::Tensor audio = audio_vae_->decode(
@@ -948,6 +1056,15 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     execution.metrics.qkv_observed =
         construction_ == H3BackendConstruction::A3_16CARD;
     execution.metrics.request_id = std::move(request_id);
+    execution.rainfusion.policy = qualified_rainfusion_policy_;
+    execution.metrics.rf_policy = qualified_rainfusion_policy_;
+#if defined(USE_NPU)
+    if (qualified_rainfusion_policy_.enabled()) {
+      // Execution stays at this address until request completion: the resource
+      // owner borrows its request-local launch counters after setup consensus.
+      qualified_rainfusion_resources_->prepare(request, execution);
+    }
+#endif
     timer.advance(H3TimingPhase::DENOISE);
     denoise_qualified_request(request, &execution);
     timer.advance(H3TimingPhase::DECODE);
@@ -1892,6 +2009,11 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   DiTCacheConfig qualified_cache_config_;
   std::optional<ParallelArgs> qualified_parallel_args_;
   std::unique_ptr<H3QualifiedDenoiser> qualified_denoiser_;
+  H3RainfusionPolicy qualified_rainfusion_policy_ = kH3SparseNone;
+#if defined(USE_NPU)
+  std::unique_ptr<H3QualifiedRainfusionResources>
+      qualified_rainfusion_resources_;
+#endif
   int64_t patch_h_;
   int64_t patch_w_;
   int64_t video_latent_channels_;

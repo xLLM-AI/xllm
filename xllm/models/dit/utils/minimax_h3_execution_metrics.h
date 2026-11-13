@@ -26,6 +26,7 @@ limitations under the License.
 
 #include "core/framework/model/dit_model_params.h"
 #include "core/framework/request/minimax_h3_conditioning.h"
+#include "models/dit/utils/minimax_h3_rainfusion_policy.h"
 
 #if defined(USE_NPU)
 #include <torch_npu/csrc/core/npu/NPUStream.h>
@@ -76,6 +77,7 @@ struct H3QualifiedExecutionMetrics {
   std::vector<int64_t> hit_steps;
   std::vector<H3QualifiedStepObservation> observed_steps;
   bool qkv_observed = false;
+  H3RainfusionPolicy rf_policy = kH3SparseNone;
   bool rf_ready = false;
   std::string fallback_reason;
   bool completion_synchronized = false;
@@ -144,8 +146,15 @@ inline void record_h3_qualified_execution_step(
         "H3 QKV submission/wait observations disagree with actual blocks");
   }
   observation.dense_blocks = actual_blocks - observation.rf_blocks;
-  const bool active = metrics.rf_ready && step >= 8 && step < 36;
-  if (observation.rf_blocks != (active ? actual_blocks : 0) ||
+  int64_t expected_rf = 0;
+  if (metrics.rf_ready && metrics.rf_policy.includes_step(step)) {
+    const auto& policy = metrics.rf_policy;
+    expected_rf = cache_hit
+                      ? policy.layer_count(0, metrics.front_blocks) +
+                            policy.layer_count(50 - metrics.back_blocks, 50)
+                      : policy.layer_count(0, 50);
+  }
+  if (observation.rf_blocks != expected_rf ||
       observation.selector_launches != observation.rf_blocks ||
       observation.attention_launches != observation.rf_blocks) {
     throw std::logic_error(
@@ -225,7 +234,10 @@ inline void emit_h3_qualified_execution_summary(
       {"front_blocks", metrics.front_blocks},
       {"back_blocks", metrics.back_blocks},
       {"cache_hit_steps", metrics.hit_steps},
-      {"rf_window", {8, 36}},
+      {"rf_policy", metrics.rf_policy.name},
+      {"rf_window", {metrics.rf_policy.step_begin, metrics.rf_policy.step_end}},
+      {"rf_layer_window",
+       {metrics.rf_policy.layer_begin, metrics.rf_policy.layer_end}},
       {"rf_blocks", metrics.rf_executed_blocks},
       {"dense_blocks", metrics.dense_executed_blocks},
       {"executed_blocks", metrics.executed_blocks},

@@ -280,6 +280,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_h3_execution_profile` | `string` | `"native"` | MiniMax-H3 执行配置：`native` 或 `a3_16card_tp2_u8_ref2va_v1`。16 卡后端启用前，后者会在模型加载前被拒绝。 |
 | `dit_h3_phase_timing` | `bool` | `false` | 测量 MiniMax-H3 加载、准备、去噪、解码耗时，仅在阶段边界同步设备。端到端吞吐测量须关闭。启用时要求单请求 forward 且恰好一个 prompt_embed。 |
 | `dit_h3_correctness_diagnostics` | `bool` | `false` | 开启 qualified MiniMax-H3 每层有限值及 dummy-head 检查。正确性验收开启，性能测量关闭；启动和输入验证始终保留。 |
+| `dit_h3_rainfusion_enabled` | `bool` | `false` | 在已验证的 A3 执行配置中启用 MiniMax-H3 RainFusion。服务启动时用 <code>XLLM_H3_RAINFUSION_POLICY</code> 选择 <code>sparse-middle-steps</code>（未设置时的默认策略）或 <code>sparse-middle-layers</code>。 |
 | `dit_enable_vae_tiling` | `bool` | `false` | 是否启用 VAE tiling，目前仅支持 `qwen-image-edit-plus`。 |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE 用于计算维度的 image size。 |
 | `dit_sparse_attention_enabled` | `bool` | `false` | 是否为 WAN 启用 block-wise sparse attention / RainFusion。 |
@@ -288,3 +289,16 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_sparse_attention_sparse_start_step` | `int64` | `0` | 开始使用 sparse attention 的 step 索引；此前的 step 使用 dense attention。 |
 | `dit_sparse_attention_version` | `string` | `"rain_fusion"` | sparse attention 版本：`rain_fusion`（frame-pairing + `aclnnRainFusionAttention`）或 `sparse_attention`（block-decompose + `aclnnBlockSparseAttention`）。 |
 | `dit_sparse_attention_mask_refresh_steps` | `int64` | `1` | 每 N 个 diffusion step 重新计算一次 block sparse mask；`1` 表示每步都算，值越大 mask 复用越久。 |
+
+### 在 Ascend A3 上构建 MiniMax-H3 RainFusion
+
+在配有 CANN 9.1、Python 3.12 和 PyTorch `2.10.0+cpu` 的 AArch64 构建环境中，
+准备锁定版本的 Torch NPU 和 TileLang wheel，然后启用 RainFusion 构建配置。
+
+```bash
+python xllm/compiler/tilelang_launcher.py prepare-ascend --target-platform a3 --arch arm --build-profile h3_a3_rf_cann91_cp312
+CMAKE_ARGS="-DXLLM_BUILD_PROFILE=h3_a3_rf_cann91_cp312 -DXLLM_ENABLE_H3_RAINFUSION=ON" python setup.py build --device npu
+```
+
+使用 `a3_16card_tp2_u8_ref2va_v1` 执行配置，并打开 `dit_h3_rainfusion_enabled`。
+有效请求的打包形状超出已编译的 RainFusion 容量时，使用 dense attention。

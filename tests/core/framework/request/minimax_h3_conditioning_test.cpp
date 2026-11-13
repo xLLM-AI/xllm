@@ -369,12 +369,10 @@ TEST_F(MiniMaxH3ConditioningTest,
 }
 
 TEST_F(MiniMaxH3ConditioningTest,
-       QualifiedGeometryRejectsEachMismatchBeforeEnqueue) {
+       QualifiedParametersRejectInvalidShapeAndFixedSettings) {
   using MutateParameters = std::function<void(proto::VideoParameters*)>;
   const std::vector<std::pair<std::string, MutateParameters>> cases = {
-      {"width", [](auto* params) { params->set_size("1280*768"); }},
-      {"height", [](auto* params) { params->set_size("1344*720"); }},
-      {"frames", [](auto* params) { params->set_num_frames(125); }},
+      {"frames", [](auto* params) { params->set_num_frames(0); }},
       {"fps", [](auto* params) { params->set_fps(25.0); }},
       {"sampling_rate", [](auto* params) { params->set_sampling_rate(44100); }},
       {"steps", [](auto* params) { params->set_num_inference_steps(49); }},
@@ -417,11 +415,16 @@ TEST_F(MiniMaxH3ConditioningTest,
 
   request.mutable_parameters()->set_sampling_rate(32000);
   request.mutable_parameters()->set_num_videos_per_prompt(1);
+  request.mutable_parameters()->set_size("1440*736");
+  request.mutable_parameters()->set_num_frames(125);
   request.mutable_parameters()->set_seed(123);
   const DiTRequestParams explicit_params(request, "rid", "rtime");
   ASSERT_TRUE(explicit_params.request_parse_status.ok());
   EXPECT_TRUE(
       explicit_params.verify_params([](DiTRequestOutput) { return true; }));
+  EXPECT_EQ(explicit_params.generation_params.width, 1440);
+  EXPECT_EQ(explicit_params.generation_params.height, 736);
+  EXPECT_EQ(explicit_params.generation_params.num_frames, 125);
   EXPECT_TRUE(explicit_params.generation_params.seed_is_set);
   EXPECT_EQ(explicit_params.generation_params.seed, 123);
 }
@@ -469,8 +472,7 @@ TEST_F(MiniMaxH3ConditioningTest,
 TEST_F(MiniMaxH3ConditioningTest,
        QualifiedReferenceGeometryRejectsBeforeEnqueue) {
   // Every PNG has a matching raw CHW digest: this exercises geometry, not a
-  // malformed image or failed provenance check. Boundary ratios are allowed
-  // by native geometry, but still do not produce the qualified canvas.
+  // malformed image or failed provenance check.
   const std::vector<std::pair<std::string, std::string>> cases = {
       {"iVBORw0KGgoAAAANSUhEUgAAAAUAAAABCAIAAACZnPOkAAAADUlEQVR4nGNgZGJGRgAA9gA"
        "fgt4GDAAAAABJRU5ErkJggg==",
@@ -478,15 +480,6 @@ TEST_F(MiniMaxH3ConditioningTest,
       {"iVBORw0KGgoAAAANSUhEUgAAAAEAAAAFCAIAAAAL5hHIAAAADklEQVR4nGNgZGJmQMMAATY"
        "AH63p8oEAAAAASUVORK5CYII=",
        "712f7599fd71bfc42004260d9b8c690126c1142c84287a0bb097f3e30e16a030"},
-      {"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgZGIGAAAOAAf"
-       "Xb+R4AAAAAElFTkSuQmCC",
-       "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"},
-      {"iVBORw0KGgoAAAANSUhEUgAAAAQAAAABCAIAAAB2XpiaAAAADUlEQVR4nGNgZGKGIwAAoQA"
-       "ZlmqabgAAAABJRU5ErkJggg==",
-       "c814bd1acd92fcf2f7e38558b07266882886117227a58838b493cdbbcda8c0db"},
-      {"iVBORw0KGgoAAAANSUhEUgAAAAEAAAAECAIAAADAusJtAAAADklEQVR4nGNgZGJmQMIAAMg"
-       "AGYgwva4AAAAASUVORK5CYII=",
-       "c814bd1acd92fcf2f7e38558b07266882886117227a58838b493cdbbcda8c0db"},
   };
   for (const auto& [png, digest] : cases) {
     proto::VideoGenerationRequest request = condition_request();
@@ -510,6 +503,32 @@ TEST_F(MiniMaxH3ConditioningTest,
       return true;
     }));
     EXPECT_EQ(callbacks, 1);
+  }
+}
+
+TEST_F(MiniMaxH3ConditioningTest,
+       QualifiedReferenceGeometryAcceptsBoundaryRatios) {
+  const std::vector<std::pair<std::string, std::string>> cases = {
+      {"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgZGIGAAAOAAf"
+       "Xb+R4AAAAAElFTkSuQmCC",
+       "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"},
+      {"iVBORw0KGgoAAAANSUhEUgAAAAQAAAABCAIAAAB2XpiaAAAADUlEQVR4nGNgZGKGIwAAoQA"
+       "ZlmqabgAAAABJRU5ErkJggg==",
+       "c814bd1acd92fcf2f7e38558b07266882886117227a58838b493cdbbcda8c0db"},
+      {"iVBORw0KGgoAAAANSUhEUgAAAAEAAAAECAIAAADAusJtAAAADklEQVR4nGNgZGJmQMIAAMg"
+       "AGYgwva4AAAAASUVORK5CYII=",
+       "c814bd1acd92fcf2f7e38558b07266882886117227a58838b493cdbbcda8c0db"},
+  };
+  for (const auto& [png, digest] : cases) {
+    auto request = condition_request();
+    request.mutable_input()->mutable_media_sources(0)->set_base64(png);
+    (*request.mutable_input()
+          ->mutable_prompt_embed()
+          ->mutable_parameters())["minimax_h3.reference_pixels_digest"]
+        .set_string_param(digest);
+    const DiTRequestParams params(request, "rid", "rtime");
+    EXPECT_TRUE(params.request_parse_status.ok())
+        << params.request_parse_status.message();
   }
 }
 
