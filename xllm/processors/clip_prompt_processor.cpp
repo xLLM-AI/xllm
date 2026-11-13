@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <cstdint>
 
+#include "processors/vision_token_scanner.h"
+
 namespace xllm {
 
 CLIPVLPromptProcessor::CLIPVLPromptProcessor(const ModelArgs& args) {
@@ -70,7 +72,9 @@ bool CLIPVLPromptProcessor::process(std::string& prompt,
   int32_t* index = nullptr;
 
   size_t begin = 0;
-  auto pair = find_vision_token(prompt, begin);
+  VisionTokenScanner scanner(prompt, image_token_, video_token_);
+  using TokenType = VisionTokenScanner::TokenType;
+  auto pair = scanner.find_next(begin);
   while (pair.second != std::string::npos) {
     data.append(prompt, begin, pair.second - begin);
     if (pair.first == TokenType::IMAGE) {
@@ -93,7 +97,7 @@ bool CLIPVLPromptProcessor::process(std::string& prompt,
 
     ++(*index);
     begin = pair.second + token->size();
-    pair = find_vision_token(prompt, begin);
+    pair = scanner.find_next(begin);
   }
 
   if (begin < prompt.size()) {
@@ -101,24 +105,6 @@ bool CLIPVLPromptProcessor::process(std::string& prompt,
   }
   prompt = std::move(data);
   return true;
-}
-
-std::pair<CLIPVLPromptProcessor::TokenType, size_t>
-CLIPVLPromptProcessor::find_vision_token(const std::string& prompt,
-                                         size_t begin) {
-  auto img_pos = prompt.find(image_token_, begin);
-  auto vid_pos = prompt.find(video_token_, begin);
-
-  if (img_pos == std::string::npos && vid_pos == std::string::npos) {
-    return {TokenType::INVALID, std::string::npos};
-  } else if (vid_pos == std::string::npos) {
-    return {TokenType::IMAGE, img_pos};
-  } else if (img_pos == std::string::npos) {
-    return {TokenType::VIDEO, vid_pos};
-  } else {
-    return img_pos < vid_pos ? std::make_pair(TokenType::IMAGE, img_pos)
-                             : std::make_pair(TokenType::VIDEO, vid_pos);
-  }
 }
 
 }  // namespace xllm

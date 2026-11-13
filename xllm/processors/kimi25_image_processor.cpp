@@ -13,6 +13,7 @@ you may not use this file except in compliance with the License.
 
 #include "glog/logging.h"
 #include "processors/transforms.h"
+#include "processors/vision_token_scanner.h"
 
 namespace xllm {
 namespace {
@@ -652,10 +653,12 @@ bool KimiK25PromptProcessor::process(std::string& prompt,
   int32_t video_index = 0;
   int32_t* index = nullptr;
   const std::vector<int32_t>* token_counts = nullptr;
-  std::string prefix;
+  const std::string* prefix = nullptr;
 
   size_t begin = 0;
-  auto pair = find_media_prompt(prompt, begin);
+  VisionTokenScanner scanner(prompt, image_prompt_, video_prompt_);
+  using TokenType = VisionTokenScanner::TokenType;
+  auto pair = scanner.find_next(begin);
 
   while (pair.second != std::string::npos) {
     data.append(prompt, begin, pair.second - begin);
@@ -663,11 +666,11 @@ bool KimiK25PromptProcessor::process(std::string& prompt,
     if (pair.first == TokenType::IMAGE) {
       token_counts = &image_token_counts;
       index = &image_index;
-      prefix = image_prompt_prefix_;
+      prefix = &image_prompt_prefix_;
     } else if (pair.first == TokenType::VIDEO) {
       token_counts = &video_token_counts;
       index = &video_index;
-      prefix = video_prompt_prefix_;
+      prefix = &video_prompt_prefix_;
     } else {
       LOG(FATAL) << "Unexpected Kimi media token type.";
     }
@@ -675,7 +678,7 @@ bool KimiK25PromptProcessor::process(std::string& prompt,
     CHECK_LT(*index, static_cast<int32_t>(token_counts->size()))
         << "media placeholder count does not match processed media count";
 
-    data.append(prefix);
+    data.append(*prefix);
     int32_t token_num = (*token_counts)[*index];
     while (token_num > 0) {
       data.append(media_pad_token_);
@@ -687,7 +690,7 @@ bool KimiK25PromptProcessor::process(std::string& prompt,
     begin =
         pair.second + (pair.first == TokenType::IMAGE ? image_prompt_.size()
                                                       : video_prompt_.size());
-    pair = find_media_prompt(prompt, begin);
+    pair = scanner.find_next(begin);
   }
 
   if (begin < prompt.size()) {
@@ -756,25 +759,6 @@ std::vector<int32_t> KimiK25PromptProcessor::get_media_token_counts(
                               merge_length);
   }
   return token_counts;
-}
-
-std::pair<KimiK25PromptProcessor::TokenType, size_t>
-KimiK25PromptProcessor::find_media_prompt(const std::string& prompt,
-                                          size_t begin) const {
-  size_t img_pos = prompt.find(image_prompt_, begin);
-  size_t vid_pos = prompt.find(video_prompt_, begin);
-
-  if (img_pos == std::string::npos && vid_pos == std::string::npos) {
-    return {TokenType::INVALID, std::string::npos};
-  }
-  if (vid_pos == std::string::npos) {
-    return {TokenType::IMAGE, img_pos};
-  }
-  if (img_pos == std::string::npos) {
-    return {TokenType::VIDEO, vid_pos};
-  }
-  return img_pos < vid_pos ? std::make_pair(TokenType::IMAGE, img_pos)
-                           : std::make_pair(TokenType::VIDEO, vid_pos);
 }
 
 }  // namespace xllm
