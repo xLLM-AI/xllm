@@ -69,22 +69,26 @@ class OverlapTestWorker final : public WorkerImpl {
   explicit OverlapTestWorker(
       std::vector<std::optional<ForwardOutput>> outputs,
       bool driver = true,
-      ContinuationMode continuation_mode = ContinuationMode::CUSTOM_REBUILD)
+      ContinuationMode continuation_mode = ContinuationMode::CUSTOM_REBUILD,
+      EplbWorkerConfig eplb_config = {})
       : OverlapTestWorker(std::move(outputs),
                           ParallelArgs(/*rank=*/driver ? 0 : 1,
                                        /*world_size=*/2,
                                        /*dp_size=*/1,
                                        /*process_group=*/nullptr),
-                          continuation_mode) {}
+                          continuation_mode,
+                          /*speculative_decode=*/false,
+                          eplb_config) {}
 
   OverlapTestWorker(
       std::vector<std::optional<ForwardOutput>> outputs,
       const ParallelArgs& parallel_args,
       ContinuationMode continuation_mode = ContinuationMode::CUSTOM_REBUILD,
-      bool speculative_decode = false)
+      bool speculative_decode = false,
+      EplbWorkerConfig eplb_config = {})
       : WorkerImpl(parallel_args,
                    torch::Device(torch::kPrivateUse1, /*index=*/0),
-                   options(speculative_decode)),
+                   options(speculative_decode, eplb_config)),
         outputs_(std::move(outputs)),
         continuation_mode_(continuation_mode) {}
 
@@ -152,10 +156,12 @@ class OverlapTestWorker final : public WorkerImpl {
   }
 
  private:
-  static runtime::Options options(bool speculative_decode) {
+  static runtime::Options options(bool speculative_decode,
+                                  EplbWorkerConfig eplb_config) {
     runtime::Options options;
     options.enable_schedule_overlap(true);
     options.enable_speculative_decode(speculative_decode);
+    options.eplb_worker_config(eplb_config);
     return options;
   }
 
@@ -688,6 +694,7 @@ TYPED_TEST(ScheduleOverlapTest,
 }
 
 TYPED_TEST(ScheduleOverlapTest, NonDriverContinuesWithoutHostConsumption) {
+  ScopedConfigValue<bool> eplb(EPLBConfig::get_instance().enable_eplb(), true);
   OverlapTestWorker worker({token_output(17), token_output(23)},
                            /*driver=*/false);
   auto first = worker.step_async(step_input<TypeParam>(/*decode=*/false))
@@ -716,13 +723,16 @@ TYPED_TEST(ScheduleOverlapTest, NonDriverContinuesWithoutHostConsumption) {
 
 TYPED_TEST(ScheduleOverlapTest,
            EplbNonDriverPublishesTokenlessMetadataWithFixedPolicy) {
-  ScopedConfigValue<bool> eplb(EPLBConfig::get_instance().enable_eplb(), true);
+  ScopedConfigValue<bool> eplb(EPLBConfig::get_instance().enable_eplb(), false);
   ForwardOutput output;
   output.expert_load_data = torch::tensor({3, 5}, torch::kInt64);
   output.prepared_token = 11;
-  OverlapTestWorker worker({std::move(output)}, /*driver=*/false);
+  OverlapTestWorker worker({std::move(output)},
+                           /*driver=*/false,
+                           OverlapTestWorker::ContinuationMode::CUSTOM_REBUILD,
+                           EplbWorkerConfig{.enabled = true});
   ScopedConfigValue<bool> changed_eplb(EPLBConfig::get_instance().enable_eplb(),
-                                       false);
+                                       true);
   auto step = worker.step_async(step_input<TypeParam>(/*decode=*/false))
                   .toUnsafeFuture();
   step.wait(2s);

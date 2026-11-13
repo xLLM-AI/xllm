@@ -31,7 +31,6 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/constants.h"
-#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
@@ -864,7 +863,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
       output, *compute_stream_, enable_schedule_overlap());
 
   if (!enable_schedule_overlap() && !this->is_driver() &&
-      !::xllm::EPLBConfig::get_instance().enable_eplb()) {
+      !this->options_.eplb_worker_config().enabled) {
     return make_transfer_failure_output(std::move(output.failed_request_ids));
   }
   return output;
@@ -1519,7 +1518,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
   }
 
   if (!enable_schedule_overlap() && !this->is_driver() &&
-      !::xllm::EPLBConfig::get_instance().enable_eplb()) {
+      !this->options_.eplb_worker_config().enabled) {
     return make_transfer_failure_output(
         std::move(target_output.failed_request_ids));
   }

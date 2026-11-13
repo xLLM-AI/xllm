@@ -25,7 +25,6 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
-#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
@@ -119,7 +118,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   model_executor_->set_dp_process_group(
       context.get_parallel_args().dp_local_process_group_);
 
-  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+  if (options_.eplb_worker_config().enabled) {
     const auto& args = context.get_model_args();
     const auto& parallel_args = context.get_parallel_args();
     const int32_t num_layers = args.n_layers() - args.first_k_dense_replace();
@@ -128,7 +127,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
     const int32_t num_device_experts = eplb::local_physical_experts_num(
         args.n_routed_experts(),
         eplb_device_num,
-        EPLBConfig::get_instance().redundant_experts_num());
+        options_.eplb_worker_config().redundant_experts_num);
     // TODO: support virtual memory.
     expert_load_data_ = torch::zeros(
         {num_layers, num_device_experts},

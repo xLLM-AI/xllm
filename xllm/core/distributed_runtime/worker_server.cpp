@@ -174,8 +174,13 @@ void WorkerServer::create_server(const runtime::Options& options,
         options.text_encoder_tp_size());
     comm = std::move(dit_comm);
   } else {
-    auto common_comm = std::make_unique<CollectiveCommunicator>(
-        worker_global_rank, world_size, dp_size, ep_size, cp_size);
+    auto common_comm =
+        std::make_unique<CollectiveCommunicator>(worker_global_rank,
+                                                 world_size,
+                                                 dp_size,
+                                                 ep_size,
+                                                 cp_size,
+                                                 options.eplb_worker_config());
     comm = std::move(common_comm);
   }
 
@@ -328,6 +333,12 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
       enable_mtp_draft_body_tp1_str.c_str();
   const char* enable_probabilistic_draft_ptr =
       options.enable_probabilistic_draft() ? "1" : "0";
+  const EplbWorkerConfig& eplb_worker_config = options.eplb_worker_config();
+  const char* enable_eplb_ptr = eplb_worker_config.enabled ? "1" : "0";
+  const std::string redundant_experts_num_str =
+      std::to_string(eplb_worker_config.redundant_experts_num);
+  const char* use_decode_only_load_ptr =
+      eplb_worker_config.use_decode_only_load ? "1" : "0";
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
@@ -383,6 +394,9 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         kv_split_size_ptr,
                         options.model_impl().c_str(),
                         options.extension_impl().c_str(),
+                        enable_eplb_ptr,
+                        redundant_experts_num_str.c_str(),
+                        use_decode_only_load_ptr,
                         nullptr};
   static_assert(std::size(argv) == spawn_worker_protocol::kArgumentCount + 1);
   pid_t pid;

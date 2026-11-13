@@ -123,6 +123,10 @@ LLMMaster::LLMMaster(const Options& options)
   controller_config.policy.eplb_policy_kind = eplb_config.eplb_policy_kind();
 
   runtime::Options engine_options;
+  engine_options.eplb_worker_config(EplbWorkerConfig{
+      .enabled = controller_config.enabled,
+      .redundant_experts_num = controller_config.policy.redundant_experts_num,
+      .use_decode_only_load = eplb_config.eplb_use_decode_only_load()});
   engine_options.eplb_controller_config(std::move(controller_config));
   engine_options.model_path(options_.model_path())
       .model_id(options_.model_id())

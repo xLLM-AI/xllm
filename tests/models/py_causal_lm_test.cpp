@@ -28,6 +28,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/model/llm_model_params.h"
 #include "core/framework/model/model_args.h"
@@ -135,7 +136,8 @@ TEST(PyCausalLMMegaMoeCapacityTest,
 // given model_type (the Python side instantiates BridgeTestModel regardless —
 // real model classes such as deepseek_v4 require full vocab/layer configs).
 ModelContext make_bridge_model_context(const char* model_type,
-                                       ModelArgs model_args = {}) {
+                                       ModelArgs model_args = {},
+                                       EplbWorkerConfig eplb_config = {}) {
   {
     py::gil_scoped_acquire gil;
     // Idempotent, but run the py::exec/registry writes only once across the
@@ -158,6 +160,8 @@ ModelContext make_bridge_model_context(const char* model_type,
                              &process_group);
   parallel_args.tp_group_ = &process_group;
   parallel_args.moe_tp_group_ = &process_group;
+  parallel_args.eplb_worker_config(eplb_config);
+  parallel_args.eplb_group_ = eplb_config.enabled ? &process_group : nullptr;
   parallel_args.python_rendezvous_host_ = "127.0.0.1";
   parallel_args.python_rendezvous_port_ = 1;
 
@@ -167,6 +171,67 @@ ModelContext make_bridge_model_context(const char* model_type,
       model_args,
       QuantArgs(),
       torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+}
+
+TEST(PyCausalLMConfigBridgeTest,
+     PreservesIndependentEplbSnapshotsAcrossContextCopies) {
+  EPLBConfig& global_config = EPLBConfig::get_instance();
+  const bool previous_enabled = global_config.enable_eplb();
+  const int32_t previous_redundancy = global_config.redundant_experts_num();
+  const bool previous_decode_only = global_config.eplb_use_decode_only_load();
+  ScopeGuard restore_config([&] {
+    global_config.enable_eplb(previous_enabled)
+        .redundant_experts_num(previous_redundancy)
+        .eplb_use_decode_only_load(previous_decode_only);
+  });
+  global_config.enable_eplb(false)
+      .redundant_experts_num(99)
+      .eplb_use_decode_only_load(false);
+
+  EplbWorkerConfig enabled_config;
+  enabled_config.enabled = true;
+  enabled_config.redundant_experts_num = 3;
+  enabled_config.use_decode_only_load = true;
+  ModelContext context = make_bridge_model_context(
+      kBridgeTestModelType, ModelArgs{}, enabled_config);
+  const ModelContext copied_context = context;
+  ModelContext quantized_context = copied_context.with_quant_args(QuantArgs{});
+  enabled_config.enabled = false;
+  enabled_config.redundant_experts_num = 0;
+  enabled_config.use_decode_only_load = false;
+
+  ParallelArgs disabled_parallel_args = context.get_parallel_args();
+  disabled_parallel_args.eplb_worker_config(enabled_config);
+  disabled_parallel_args.eplb_group_ = nullptr;
+  ModelContext disabled_context =
+      context.with_parallel_args(disabled_parallel_args);
+  PyCausalLM enabled_model(quantized_context, kBridgeTestModelType);
+
+  global_config.enable_eplb(true)
+      .redundant_experts_num(77)
+      .eplb_use_decode_only_load(true);
+  PyCausalLM disabled_model(disabled_context, kBridgeTestModelType);
+  global_config.enable_eplb(false)
+      .redundant_experts_num(5)
+      .eplb_use_decode_only_load(false);
+  PyCausalLM copied_model(copied_context, kBridgeTestModelType);
+
+  py::gil_scoped_acquire gil;
+  EXPECT_TRUE(enabled_model.config_dict()["enable_eplb"].cast<bool>());
+  EXPECT_EQ(
+      enabled_model.config_dict()["redundant_experts_num"].cast<int32_t>(), 3);
+  EXPECT_TRUE(
+      enabled_model.config_dict()["eplb_use_decode_only_load"].cast<bool>());
+  EXPECT_FALSE(disabled_model.config_dict()["enable_eplb"].cast<bool>());
+  EXPECT_EQ(
+      disabled_model.config_dict()["redundant_experts_num"].cast<int32_t>(), 0);
+  EXPECT_FALSE(
+      disabled_model.config_dict()["eplb_use_decode_only_load"].cast<bool>());
+  EXPECT_TRUE(copied_model.config_dict()["enable_eplb"].cast<bool>());
+  EXPECT_EQ(copied_model.config_dict()["redundant_experts_num"].cast<int32_t>(),
+            3);
+  EXPECT_TRUE(
+      copied_model.config_dict()["eplb_use_decode_only_load"].cast<bool>());
 }
 
 TEST(PyCausalLMPoolingTest,

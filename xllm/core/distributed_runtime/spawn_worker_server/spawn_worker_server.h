@@ -21,6 +21,7 @@ limitations under the License.
 #include <string>
 
 #include "core/common/types.h"
+#include "core/framework/eplb/eplb_options.h"
 
 namespace xllm {
 
@@ -67,7 +68,8 @@ class SpawnWorkerServer final {
                              bool enable_mtp_draft_body_tp1,
                              bool enable_probabilistic_draft,
                              const std::string& model_impl,
-                             const std::string& extension_impl);
+                             const std::string& extension_impl,
+                             EplbWorkerConfig eplb_worker_config);
 
   ~SpawnWorkerServer();
 

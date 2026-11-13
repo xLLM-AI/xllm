@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "core/common/native_library.h"
 #include "core/distributed_runtime/spawn_worker_server/spawn_worker_protocol.h"
@@ -66,6 +67,9 @@ limitations under the License.
 // @kv_split_size
 // @model_impl
 // @extension_impl
+// @enable_eplb
+// @redundant_experts_num
+// @use_decode_only_load
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -80,6 +84,15 @@ int main(int argc, char* argv[]) {
                     "indexer_cache_dtype. Defaulting indexer_cache_dtype to "
                  << xllm::spawn_worker_protocol::kDefaultIndexerCacheDtype
                  << ".";
+  }
+
+  std::optional<xllm::EplbWorkerConfig> eplb_worker_config =
+      xllm::spawn_worker_protocol::parse_eplb_worker_config(argc, argv);
+  if (!eplb_worker_config.has_value()) {
+    LOG(ERROR) << "Spawn worker process received invalid EPLB args. Expected "
+                  "enable_eplb and use_decode_only_load as 0 or 1, and a "
+                  "non-negative int32 redundant_experts_num.";
+    return 1;
   }
 
   xllm::load_native_libraries();
@@ -193,7 +206,12 @@ int main(int argc, char* argv[]) {
       << ", enable_probabilistic_draft = " << enable_probabilistic_draft
       << ", kv_split_size = " << kv_split_size
       << ", model_impl = " << model_impl
-      << ", extension_impl = " << extension_impl;
+      << ", extension_impl = " << extension_impl
+      << ", enable_eplb = " << eplb_worker_config->enabled
+      << ", redundant_experts_num = "
+      << eplb_worker_config->redundant_experts_num
+      << ", use_decode_only_load = "
+      << eplb_worker_config->use_decode_only_load;
 
   xllm::SpawnWorkerServer worker(master_node_addr,
                                  local_rank,
@@ -234,7 +252,8 @@ int main(int argc, char* argv[]) {
                                  enable_mtp_draft_body_tp1,
                                  enable_probabilistic_draft,
                                  model_impl,
-                                 extension_impl);
+                                 extension_impl,
+                                 std::move(eplb_worker_config.value()));
 
   worker.run();
 

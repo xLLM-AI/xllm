@@ -1020,7 +1020,8 @@ void run_rank(int32_t rank, int32_t port, int32_t batch, int32_t history) {
                               kRanks,
                               /*dp_size=*/1,
                               /*ep_size=*/kRanks,
-                              /*cp_size=*/kCp);
+                              /*cp_size=*/kCp,
+                              EplbWorkerConfig{});
   comm.create_process_groups("127.0.0.1:" + std::to_string(port), device);
   const ParallelArgs& parallel = *comm.parallel_args();
   CHECK_EQ(parallel.tp_group_->world_size(), kTp);

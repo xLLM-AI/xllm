@@ -21,6 +21,8 @@ limitations under the License.
 #include <signal.h>
 #include <unistd.h>
 
+#include <utility>
+
 #include "core/common/global_flags.h"
 #include "core/distributed_runtime/worker_server.h"
 #include "core/framework/config/distributed_config.h"
@@ -96,7 +98,8 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      bool enable_mtp_draft_body_tp1,
                                      bool enable_probabilistic_draft,
                                      const std::string& model_impl,
-                                     const std::string& extension_impl) {
+                                     const std::string& extension_impl,
+                                     EplbWorkerConfig eplb_worker_config) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -111,6 +114,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .backend(backend)
       .model_impl(model_impl)
       .extension_impl(extension_impl)
+      .eplb_worker_config(std::move(eplb_worker_config))
       .world_size(world_size)
       .max_tokens_per_batch(max_tokens_per_batch)
       .max_seqs_per_batch(max_seqs_per_batch)
