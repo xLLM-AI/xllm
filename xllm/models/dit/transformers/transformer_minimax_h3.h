@@ -49,6 +49,17 @@ limitations under the License.
 namespace xllm {
 namespace minimax_h3 {
 
+inline bool uses_a3_tp2_sp8_head_padding(int64_t heads,
+                                         int64_t head_dim,
+                                         int64_t tp_size,
+                                         int64_t sp_size) {
+#if defined(USE_NPU)
+  return heads == 56 && head_dim == 128 && tp_size == 2 && sp_size == 8;
+#else
+  return false;
+#endif
+}
+
 constexpr char kPackedSequenceTensorName[] = "packed";
 constexpr int64_t kPackedSequenceAlignment = 64;
 
@@ -284,7 +295,9 @@ class H3AttentionImpl final : public torch::nn::Module,
     CHECK_EQ(heads % tp_size, 0)
         << "MiniMax-H3 attention heads must be divisible by TP size";
     local_heads_ = heads / tp_size;
-    CHECK_EQ(local_heads_ % sp_size_, 0)
+    pad_sp_heads_ =
+        uses_a3_tp2_sp8_head_padding(heads, dim_head_, tp_size, sp_size_);
+    CHECK(local_heads_ % sp_size_ == 0 || pad_sp_heads_)
         << "MiniMax-H3 local attention heads must be divisible by SP size";
     const int64_t inner_dim = heads * dim_head;
     const QuantArgs& quant_args = context.get_quant_args();
@@ -326,6 +339,14 @@ class H3AttentionImpl final : public torch::nn::Module,
     for (size_t index = 0; index < projections.size(); ++index) {
       qkv_tensor[index] = projections[index].contiguous().view(
           {batch_size, local_sequence_length, local_heads_, dim_head_});
+      if (pad_sp_heads_) {
+        // Ulysses scatters equal head shards. The extra four zero heads carry
+        // no weights and are discarded after the inverse all-to-all.
+        const torch::Tensor dummy =
+            torch::zeros({batch_size, local_sequence_length, 4, dim_head_},
+                         qkv_tensor[index].options());
+        qkv_tensor[index] = torch::cat({qkv_tensor[index], dummy}, /*dim=*/2);
+      }
       if (sp_size_ > 1) {
         qkv_work[index] = parallel_state::all_to_all_4D(
             qkv_tensor[index],
@@ -449,6 +470,9 @@ class H3AttentionImpl final : public torch::nn::Module,
                                                     process_group_);
       out = out_work();
     }
+    if (pad_sp_heads_) {
+      out = out.narrow(/*dim=*/2, /*start=*/0, local_heads_).contiguous();
+    }
     out =
         out.view({batch_size, local_sequence_length, local_heads_ * dim_head_});
     return to_out_->forward(out.reshape({-1, local_heads_ * dim_head_}))
@@ -475,6 +499,7 @@ class H3AttentionImpl final : public torch::nn::Module,
   int64_t local_heads_;
   int64_t dim_head_;
   int64_t sp_size_;
+  bool pad_sp_heads_ = false;
   layer::ColumnParallelLinear to_qkv_{nullptr};
   layer::RowParallelLinear to_out_{nullptr};
   H3RMSNorm norm_q_{nullptr};
@@ -830,7 +855,10 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
     CHECK_GT(time_embed_hidden_dim, 0);
     CHECK_GT(time_embed_dim, 0);
     CHECK_GT(rope_freq_dim, 0);
-    CHECK_EQ(heads % (parallel_args.tp_size() * parallel_args.sp_size()), 0)
+    CHECK(
+        heads % (parallel_args.tp_size() * parallel_args.sp_size()) == 0 ||
+        uses_a3_tp2_sp8_head_padding(
+            heads, head_dim, parallel_args.tp_size(), parallel_args.sp_size()))
         << "MiniMax-H3 attention heads must be divisible by TP size times SP "
            "size";
     video_patch_dim_ =
