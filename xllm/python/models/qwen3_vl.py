@@ -27,7 +27,7 @@ Deepstack flow:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -41,6 +41,10 @@ from xllm.python.layers import (
     RMSNorm,
     RotaryEmbedding,
     RowParallelLinear,
+)
+from xllm.python.model_executor.runners.vision_acl_graph import (
+    VisionAclGraphRunner,
+    build_vision_graph_runner,
 )
 from xllm.python.model_loader import (
     ParallelLoadContext,
@@ -904,6 +908,8 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
 
         # Vision tower
         self.vision_model = Qwen3VLVisionTransformer(vision_cfg, dtype=dtype, device=device, tp_size=text_cfg.tp_size)
+        # Armed by configure_runtime when the worker runs graph execution.
+        self._vision_graph_runner: VisionAclGraphRunner | None = None
 
         # LLM (self.model is required by PyModelBase / the executor runner)
         self.model = Qwen3VLModel(text_cfg, dtype=dtype, device=device)  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -924,6 +930,16 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
     # Connection logic: ViT → LLM
     # ------------------------------------------------------------------
 
+    def configure_runtime(self, config: Mapping[str, object]) -> None:
+        """Arm vision encoder graphs when the worker runs graph execution.
+
+        The encoder is not part of the decode graph, so a deployment with
+        ``enable_graph`` still dispatches every encoder operator from the Host
+        on each image. Capture is per encode shape; see
+        :class:`VisionAclGraphRunner`.
+        """
+        self._vision_graph_runner = build_vision_graph_runner(self.vision_model, config)
+
     def encode(
         self,
         pixel_values: torch.Tensor,
@@ -942,6 +958,8 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         pixel_values = pixel_values.to(dtype=self.vision_model.dtype, device=self.vision_model.device)
         # The grid is read on the Host once here, at the boundary that owns it.
         grid_thw_list = _host_grid_rows(grid_thw)
+        if self._vision_graph_runner is not None:
+            return self._vision_graph_runner.execute(pixel_values, grid_thw_list)
         return self.vision_model(pixel_values, grid_thw_list)
 
     def get_input_embeddings(

@@ -19,6 +19,17 @@ In the xLLM engine, Graph Mode provides the following:
 ### Piecewise Graph
   - When some operators do not support graph capture and thus break the full graph, each segment (piece) after the break is captured as a separate graph. This maximizes graph-mode benefits even when the full graph cannot be captured, and is commonly used for prefill and chunked prefill.
 
+### Multimodal Encoder Graph
+  - `enable_graph` captures decode steps, so the vision encoder still dispatches one operator at a
+    time from the Host. With `enable_graph_mm_encoder`, Python Qwen3-VL captures a separate encoder
+    graph per **encode shape** -- the grid (`t`/`h`/`w`, in order) of every image in one encode
+    call. The encode shape fixes every tensor shape and every Host scalar inside the encoder (patch count, frame
+    boundaries, rotary tables, interpolation weights), so replay only writes the new pixels and the
+    Host attention lengths captured inside the graph stay correct without task updates. A shape is
+    captured on its first occurrence and replayed afterwards, and replay reproduces the eager output
+    bit for bit. `mm_encoder_graph_capture_shapes` bounds how many shapes are captured; the rest
+    stay eager. Both flags apply to the serving command line, and the encoder stays eager in
+    offline inference.
 ### Multi-Shape Reusable Memory Pool
   - To avoid waste from separate memory buffers (input, output, and intermediate tensors) per shape, we use an expandable memory pool. Multiple shapes share the pool base address, with different shapes using different offsets from that base.
 
