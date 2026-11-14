@@ -15,6 +15,9 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+#include <optional>
+
 namespace xllm {
-bool initialize_npu_startup();
+bool initialize_npu_startup(std::optional<int32_t> device_index = std::nullopt);
 }  // namespace xllm
