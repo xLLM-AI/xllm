@@ -1,0 +1,182 @@
+# Copyright 2026 The xLLM Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+###################################################################################################
+## [RUNTIME 1/3] CANN base and runtime libraries
+## @see https://www.hiascend.com/developer/ascendhub/detail/17da20d1c2b6493cb38765adeba85884
+###################################################################################################
+
+ARG CANN_IMAGE_TAG="9.1.0-910b-openeuler24.03-py3.12"
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:${CANN_IMAGE_TAG} AS runtime-cann
+
+# Build with the repository root as context:
+# docker build --network=host -f docker/Dockerfile.a2 .
+# Python metadata and wheel ABI must match the selected CANN base image.
+ARG PYTHON_VERSION="3.12.13"
+ARG PYTHON_MAJOR_VERSION="3.12"
+ARG PYTHON_SHORT_VERSION="312"
+
+ENV TZ=Asia/Shanghai \
+    PYTHON_VERSION=${PYTHON_VERSION} \
+    PYTHON_MAJOR_VERSION=${PYTHON_MAJOR_VERSION} \
+    PYTHON_SHORT_VERSION=${PYTHON_SHORT_VERSION}
+
+ARG ETCD_VERSION="3.6.1"
+COPY docker/install_runtime.sh /opt/xllm/docker/install_runtime.sh
+RUN bash /opt/xllm/docker/install_runtime.sh
+
+###################################################################################################
+## [RUNTIME 2/3] Python runtime dependencies
+###################################################################################################
+FROM runtime-cann AS runtime-torch
+
+# Select the CPU wheels before installing dependencies from the default index.
+ARG TORCH_VERSION="2.10.0"
+ARG TORCHVISION_VERSION="0.25.0"
+ARG TORCH_INDEX_URL="https://download.pytorch.org/whl/cpu"
+RUN pip3 install --no-cache-dir --progress-bar off \
+    "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+    --index-url "${TORCH_INDEX_URL}"
+
+ARG PROTOBUF_VERSION="7.36.2"
+ARG TORCH_NPU_VERSION="2.10.0.post4"
+ARG SAFETENSORS_VERSION="0.8.0"
+ARG TQDM_VERSION="4.70.1"
+ARG TRANSFORMERS_VERSION="5.23.0"
+ARG TRITON_VERSION="3.5.0"
+ARG TRITON_ASCEND_VERSION="3.2.2"
+ARG TILELANG_VERSION="0.1.4"
+ARG TILELANG_BUILD="ubuntu.24.3.cann910"
+ARG TILELANG_RELEASE_TAG="TileLang-ascend-v0.1.2.000-release"
+
+COPY docker/requirements.txt /opt/xllm/docker/requirements.txt
+COPY docker/ascend/requirements.txt /opt/xllm/docker/ascend/requirements.txt
+# Kernel wheels declare test tools as dependencies. Install the inference
+# dependencies first, then omit those test tools from the runtime image.
+RUN pip3 install --no-cache-dir --progress-bar off \
+    -r /opt/xllm/docker/requirements.txt \
+    && pip3 install --no-cache-dir --progress-bar off --no-deps \
+        -r /opt/xllm/docker/ascend/requirements.txt \
+    && pip3 uninstall -y argparse
+
+###################################################################################################
+## [RUNTIME 3/3] xllm runtime: ATB plugin and Ascend environment
+## runtime image = the three RUNTIME stages (--target xllm-runtime);
+## xllm-built files ship in xllm's wheel / deps bundle, not here
+###################################################################################################
+FROM runtime-torch AS xllm-runtime
+
+# Runtime component release versions.
+ARG ATB_PLUGIN_RELEASE_TAG="v0.10.0"
+
+COPY docker/ascend/install_runtime.sh /opt/xllm/docker/install_runtime.sh
+RUN bash /opt/xllm/docker/install_runtime.sh
+
+# The Python extension needs tcmalloc loaded at startup on AArch64.
+# Keep libc first in symbol lookup, including for its allocation functions.
+ENV LD_PRELOAD="libc.so.6:libtcmalloc.so.4"
+
+# runtime envs
+ENV PYTHONPATH="${ASCEND_HOME_PATH}/python/site-packages:${ASCEND_HOME_PATH}/opp/built-in/op_impl/ai_core/tbe:${ASCEND_TOOLKIT_LATEST_HOME}/python/site-packages:${ASCEND_TOOLKIT_LATEST_HOME}/opp/built-in/op_impl/ai_core/tbe" \
+    PYTORCH_NPU_ALLOC_CONF="expandable_segments:True" \
+    NPU_MEMORY_FRACTION=0.98 \
+    ATB_WORKSPACE_MEM_ALLOC_ALG_TYPE=3 \
+    ATB_WORKSPACE_MEM_ALLOC_GLOBAL=1 \
+    OMP_NUM_THREADS=12 \
+    HCCL_EXEC_TIMEOUT=0 \
+    HCCL_CONNECT_TIMEOUT=7200 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONIOENCODING=utf-8 \
+    ATB_LOG_LEVEL=ERROR \
+    ATB_LOG_TO_FILE=0 \
+    ASCEND_GLOBAL_EVENT_ENABLE=0 \
+    ASCEND_SLOG_PRINT_TO_STDOUT=0 \
+    ATB_OPSRUNNER_KERNEL_CACHE_GLOBAL_COUNT=16
+
+COPY docker/ascend/entrypoint.sh /opt/xllm/docker/entrypoint.sh
+ENTRYPOINT ["bash", "/opt/xllm/docker/entrypoint.sh"]
+CMD ["/bin/bash"]
+
+###################################################################################################
+## [RELEASE] install a pre-built wheel without adding development tools
+###################################################################################################
+FROM xllm-runtime AS xllm-release
+
+# Place the matching wheel in dist/ and pass its filename with --build-arg.
+ARG XLLM_WHEEL
+RUN --mount=type=bind,source=dist,target=/tmp/wheels,ro \
+    pip3 install --no-cache-dir --progress-bar off "/tmp/wheels/${XLLM_WHEEL}"
+
+WORKDIR /workspace
+ENTRYPOINT ["bash", "/opt/xllm/docker/entrypoint.sh", "xllm", "serve"]
+CMD ["--help"]
+
+###################################################################################################
+## [DEV] build toolchains, profiling, benchmarks and development tools
+###################################################################################################
+FROM xllm-runtime AS xllm-development
+
+# Toolchain versions.
+# Match the C++11 ABI vcpkg tag in CMakeLists.txt.
+ARG VCPKG_VERSION="2024.02.14"
+ARG VCPKG_BUILD_JOBS="32"
+ARG LIBBOUNDSCHECK_VERSION="v1.1.16"
+
+ENV CARGO_HOME=/root/.cargo
+ENV PATH=${CARGO_HOME}/bin:$PATH
+ENV RUSTUP_DIST_SERVER=""
+ENV RUSTUP_UPDATE_ROOT=""
+ENV VCPKG_DEFAULT_TRIPLET="arm64-linux" \
+    VCPKG_TARGET_TRIPLET="arm64-linux" \
+    VCPKG_ROOT="/vcpkg" \
+    VCPKG_OVERLAY_TRIPLETS="/vcpkg/triplets/community" \
+    VCPKG_FORCE_SYSTEM_BINARIES=1 \
+    VCPKG_BINARY_SOURCES="clear;files,/opt/xllm/vcpkg-cache,read;default,readwrite"
+ENV PATH=/usr/local/go/bin:${PATH} \
+    GOTOOLCHAIN=local \
+    GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+
+COPY vcpkg.json /opt/xllm/vcpkg-manifest/vcpkg.json
+COPY docker/install_development.sh docker/install_mooncake_dependencies.sh /opt/xllm/docker/
+COPY third_party/Mooncake/dependencies.sh /opt/xllm/third_party/Mooncake/dependencies.sh
+RUN --mount=type=bind,source=third_party/Mooncake,target=/opt/xllm/third_party/Mooncake,ro \
+    bash /opt/xllm/docker/install_development.sh
+
+ARG MODELSCOPE_VERSION="1.40.1"
+ARG MINDSTUDIO_RELEASE_TAG="tag_MindStudio_26.1.0.B100_002"
+ARG MSMODELSLIM_VERSION="26.1.0"
+ARG MSPROBE_VERSION="26.1.0.post1"
+ARG MSPROF_ANALYZE_VERSION="26.1.0"
+ARG MSINSIGHT_VERSION="26.1.0"
+ARG IPYTHON_MAX_VERSION="9"
+ARG SETUPTOOLS_MAX_VERSION="81.0.0"
+# Keep format tool versions aligned with .pre-commit-config.yaml.
+ARG CLANG_FORMAT_VERSION="20.1.6"
+ARG RUFF_VERSION="0.14.0"
+ARG EVALSCOPE_VERSION="1.15.0"
+ARG PYARROW_VERSION="21.0.0"
+
+COPY docker/requirements-dev.txt /opt/xllm/docker/requirements-dev.txt
+COPY docker/ascend/requirements-dev.txt /opt/xllm/docker/ascend/requirements-dev.txt
+RUN pip3 install --no-cache-dir --progress-bar off \
+    -r /opt/xllm/docker/ascend/requirements-dev.txt
+
+ENV PIP_PROGRESS_BAR=off
+RUN HANDLERS_PATH=$(python3 -c "import mindstudio_insight_jupyterlab as m; print(m.__path__[0])")/handlers.py \
+    && sed -i 's/127.0.0.1/0.0.0.0/g' "$HANDLERS_PATH"
+
+ENV XLLM_USE_INSTALLED_TORCH_NPU=1
+RUN cp /root/.bashrc /etc/xllm-bashrc
+ENV CCACHE_NOHASHDIR=1
