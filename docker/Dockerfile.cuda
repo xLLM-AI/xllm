@@ -183,6 +183,16 @@ RUN set -eux; \
 
 ENV VCPKG_ROOT=/vcpkg
 
+# Install chip-independent build dependencies from the pinned Mooncake sources.
+COPY docker/install_mooncake_dependencies.sh /opt/xllm/docker/install_mooncake_dependencies.sh
+COPY third_party/Mooncake/dependencies.sh /opt/xllm/third_party/Mooncake/dependencies.sh
+ENV PATH=/usr/local/go/bin:$PATH \
+    GOTOOLCHAIN=local \
+    GOPROXY="https://goproxy.cn|https://goproxy.io|direct"
+RUN --mount=type=bind,source=third_party/Mooncake,target=/opt/xllm/third_party/Mooncake,ro \
+    bash /opt/xllm/docker/install_mooncake_dependencies.sh \
+    && GO_INSTALL_DIR=/usr/local/go bash /opt/xllm/docker/install_mooncake_dependencies.sh --ensure-go
+
 # Cleanup
 RUN if [[ -n "${GIT_HTTPS_MIRROR_PREFIX}" ]]; then \
       git config --global --unset-all url."${GIT_HTTPS_MIRROR_PREFIX}".insteadOf 2>/dev/null || true; \
@@ -191,4 +201,5 @@ RUN if [[ -n "${GIT_HTTPS_MIRROR_PREFIX}" ]]; then \
     uv cache clean
 
 USER root
+ENV CCACHE_NOHASHDIR=1
 CMD ["/bin/bash"]
