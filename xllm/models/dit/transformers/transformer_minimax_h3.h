@@ -18,18 +18,21 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "core/framework/config/dit_config.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/dit_cache/similarity_residual_cache.h"
 #include "core/framework/model_context/dit_model_context.h"
 #include "core/framework/model_loader/dit_model_loader.h"
 #include "core/framework/state_dict/state_dict.h"
@@ -796,6 +799,12 @@ struct MiniMaxH3TransformerConditioning {
   std::pair<torch::Tensor, torch::Tensor> rotary;
 };
 
+struct MiniMaxH3RequestCache {
+  SimilarityResidualCacheState state;
+  torch::Tensor target_rows;
+  int64_t used_rows;
+};
+
 class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
                                               public dit::SequenceParallelMixin,
                                               public dit::DiTCacheMixin {
@@ -805,12 +814,15 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
             /*process_group=*/context.get_parallel_args().dit_sp_group_),
         options_(context.get_tensor_options()) {
     using namespace minimax_h3;
-    const PolicyType cache_policy = context.get_dit_config().selected_policy;
+    const DiTCacheConfig& cache_config = context.get_dit_config();
+    const PolicyType cache_policy = cache_config.selected_policy;
     CHECK(cache_policy == PolicyType::None ||
           cache_policy == PolicyType::TaylorSeer ||
-          cache_policy == PolicyType::FBCache)
-        << "MiniMax-H3 supports None, TaylorSeer and FBCache cache policies";
-    use_cache_ = cache_policy != PolicyType::None;
+          cache_policy == PolicyType::FBCache ||
+          cache_policy == PolicyType::CACHE_DIT)
+        << "MiniMax-H3 supports None, TaylorSeer, FBCache and CacheDiT";
+    use_cache_ = cache_policy == PolicyType::TaylorSeer ||
+                 cache_policy == PolicyType::FBCache;
     const ParallelArgs& parallel_args = context.get_parallel_args();
     CHECK(parallel_args.tp_size() == 1 ||
           parallel_args.dit_tp_group_ != nullptr)
@@ -826,6 +838,25 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
     const int64_t head_dim = model_args.head_dim();
     hidden_size_ = model_args.hidden_size();
     const int64_t num_layers = model_args.num_layers();
+    if (cache_policy == PolicyType::CACHE_DIT) {
+      CHECK(options_.device().is_privateuseone() &&
+            uses_a3_tp2_sp8_head_padding(heads,
+                                         head_dim,
+                                         parallel_args.tp_size(),
+                                         parallel_args.sp_size()) &&
+            parallel_args.world_size() == 16 && parallel_args.dp_size() == 1 &&
+            parallel_args.cfg_size() == 1 && !use_rolling_load_ &&
+            DiTConfig::get_instance().dit_h3_task_type() == "ref2va")
+          << "MiniMax-H3 CacheDiT requires resident NPU Ref2VA with TP2 SP8";
+      cache_group_ = parallel_args.process_group_;
+      CHECK(cache_group_ != nullptr);
+      CHECK_EQ(cache_group_->world_size(), parallel_args.world_size());
+      SimilarityResidualCacheState::validate_options(cache_config.cache_dit);
+      CHECK_LT(cache_config.cache_dit.front_blocks, num_layers);
+      CHECK_LT(cache_config.cache_dit.back_blocks,
+               num_layers - cache_config.cache_dit.front_blocks);
+      cache_options_ = cache_config.cache_dit;
+    }
     const int64_t num_refiner_layers = model_args.num_refiner_layers();
     const int64_t ffn_dim = model_args.ffn_dim();
     const int64_t in_channels = model_args.in_channels();
@@ -967,6 +998,45 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
 
   bool rolling_load_enabled() const { return use_rolling_load_; }
 
+  std::optional<MiniMaxH3RequestCache> make_request_cache(
+      int64_t sequence_length,
+      int64_t audio_start,
+      int64_t video_start) const {
+    if (!cache_options_) {
+      return std::nullopt;
+    }
+    // Match the same contiguous SP partition used by sequence_parallel_forward.
+    const int64_t sp_size = process_group_->world_size();
+    const int64_t alignment =
+        std::lcm(sp_size, minimax_h3::kPackedSequenceAlignment);
+    const int64_t padding =
+        (alignment - sequence_length % alignment) % alignment;
+    const int64_t local_rows = (sequence_length + padding) / sp_size;
+    const int64_t start = process_group_->rank() * local_rows;
+    const int64_t used_rows =
+        std::clamp(sequence_length - start, int64_t{0}, local_rows);
+    CHECK_GE(audio_start, 0);
+    CHECK_GE(video_start, audio_start);
+    CHECK_GE(sequence_length, video_start);
+    CHECK_GT(sequence_length, audio_start)
+        << "MiniMax-H3 CacheDiT requires generated video or audio rows";
+    // Match the original cache policy's video-then-audio reduction order.
+    std::vector<int64_t> local_targets;
+    const auto append = [&](int64_t begin, int64_t end) {
+      for (int64_t row = std::max(begin, start);
+           row < std::min(end, start + used_rows);
+           ++row) {
+        local_targets.push_back(row - start);
+      }
+    };
+    append(video_start, sequence_length);
+    append(audio_start, video_start);
+    return MiniMaxH3RequestCache{
+        SimilarityResidualCacheState(*cache_options_),
+        torch::tensor(local_targets, torch::kInt64).to(options_.device()),
+        used_rows};
+  }
+
 #if defined(USE_NPU)
   // Pack only after apply_reference_precision has established the final dtype.
   void prepare_for_rolling_load() {
@@ -1060,7 +1130,8 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
       const torch::Tensor& text_indices,
       std::function<void(int32_t)> before_layer_cb = nullptr,
       std::function<void(int32_t)> after_layer_cb = nullptr,
-      int64_t step_idx = 1) {
+      int64_t step_idx = 1,
+      MiniMaxH3RequestCache* request_cache = nullptr) {
     const torch::Tensor& text_embeds = conditioning.text_embeds;
     const int64_t batch = text_embeds.size(0);
     const int64_t sequence_length = position_ids.size(0);
@@ -1125,6 +1196,7 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
                        &conditioning,
                        &before_layer_cb,
                        &after_layer_cb,
+                       request_cache,
                        step_idx](torch::Tensor local_packed,
                                  const torch::Tensor& local_adaln_indices,
                                  const torch::Tensor& local_timestep_indices) {
@@ -1146,7 +1218,39 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
         }
         return output;
       };
-      if (use_cache_) {
+      if (request_cache != nullptr) {
+        CHECK_EQ(local_packed.size(0), 1);
+        const int64_t step = step_idx - 1;
+        auto& cache = request_cache->state;
+        const int64_t middle_start = cache.front_blocks();
+        const int64_t block_count = static_cast<int64_t>(blocks_->size());
+        const int64_t tail_start = block_count - cache.back_blocks();
+        int64_t executed_blocks = 0;
+        const auto execute = [&](int64_t start, int64_t end) {
+          for (int64_t index = start; index < end; ++index) {
+            local_packed = run_block(index, local_packed);
+            ++executed_blocks;
+          }
+        };
+        execute(0, middle_start);
+        const torch::Tensor front = local_packed;
+        const auto decision =
+            cache.decide(step,
+                         (front - original_hidden_states).squeeze(0),
+                         request_cache->used_rows,
+                         cache_group_,
+                         request_cache->target_rows);
+        if (decision.hit) {
+          local_packed = cache.apply(step, front);
+        } else {
+          execute(middle_start, tail_start);
+          cache.record_dense(step, front, local_packed);
+        }
+        execute(tail_start, block_count);
+        VLOG(1) << "MiniMax-H3 CacheDiT rank=" << cache_group_->rank()
+                << " step=" << step << " hit=" << decision.hit
+                << " executed_blocks=" << executed_blocks;
+      } else if (use_cache_) {
         exec_cache_step(step_idx, local_packed, original_hidden_states, [&]() {
           exec_cached_single_blocks(static_cast<int64_t>(blocks_->size()),
                                     local_packed,
@@ -1299,6 +1403,8 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
   torch::ScalarType attention_dtype_ = torch::kFloat32;
   bool use_rolling_load_ = false;
   bool use_cache_ = false;
+  std::optional<CacheDiTOptions> cache_options_;
+  ProcessGroup* cache_group_ = nullptr;
   int64_t hidden_size_;
   int64_t freq_dim_;
   int64_t audio_in_channels_;

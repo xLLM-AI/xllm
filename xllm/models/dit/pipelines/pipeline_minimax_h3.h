@@ -330,6 +330,8 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         audio_scheduler_.timesteps().to(torch::kCPU);
     DiTCache::get_instance().set_context(
         {.infer_steps = scheduler_.timesteps().numel(), .single_stream = true});
+    auto request_cache = transformer_->make_request_cache(
+        layout.sequence_length, layout.audio_start, layout.video_start);
     std::function<void(int32_t)> before_layer_cb;
     std::function<void(int32_t)> after_layer_cb;
 #if defined(USE_NPU)
@@ -368,7 +370,8 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                                 layout.text_indices,
                                 before_layer_cb,
                                 after_layer_cb,
-                                /*step_idx=*/step + 1);
+                                /*step_idx=*/step + 1,
+                                request_cache ? &*request_cache : nullptr);
       video_rows = step_generated_rows(video_rows,
                                        prediction.sample,
                                        layout.num_condition_video_rows,
@@ -382,6 +385,7 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     }
 
     // Release denoising history before VAE decoding allocates its activations.
+    request_cache.reset();
     DiTCache::get_instance().set_context({});
     if (!is_video_vae_worker_) {
       return DiTForwardOutput();

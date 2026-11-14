@@ -13,6 +13,7 @@ cc_library(
   fbcache_taylorseer.h
   taylorseer.h
   residual_cache.h
+  similarity_residual_cache.h
  SRCS
   dit_cache_impl.cpp
   dit_cache.cpp
@@ -21,6 +22,7 @@ cc_library(
   fbcache_taylorseer.cpp
   taylorseer.cpp
   residual_cache.cpp
+  similarity_residual_cache.cpp
  DEPS
   torch
   glog::glog
