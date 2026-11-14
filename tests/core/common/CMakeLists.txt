@@ -2,6 +2,13 @@ include(cc_test)
 
 cc_test(
   NO_NPU_RUNTIME
+  NAME validated_property_test
+  SRCS validated_property_test.cpp
+  DEPS GTest::gtest_main
+)
+
+cc_test(
+  NO_NPU_RUNTIME
   NAME property_reflect_test
   SRCS property_reflect_test.cpp
   DEPS GTest::gtest_main proto::xllm_proto torch

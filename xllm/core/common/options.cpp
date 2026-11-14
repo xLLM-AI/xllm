@@ -13,16 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "options.h"
-
-#include <algorithm>
+#include "core/common/options.h"
 
 namespace xllm {
-Options& Options::num_speculative_tokens(int32_t value) & {
-  num_speculative_tokens_ = std::max(value, 0);
-  return *this;
-}
-
 std::string Options::to_string() const {
   std::stringstream ss;
   ss << "Options: [";

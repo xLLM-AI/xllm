@@ -20,6 +20,15 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+TEST(OptionsTest, SpeculativeTokenCountRemainsNonnegative) {
+  Options options;
+  EXPECT_EQ(options.num_speculative_tokens(), 0);
+  options.num_speculative_tokens(/*value=*/4);
+  EXPECT_EQ(options.num_speculative_tokens(), 4);
+  options.num_speculative_tokens(/*value=*/-1);
+  EXPECT_EQ(options.num_speculative_tokens(), 0);
+}
+
 TEST(OptionsTest, ContextParallelDefaultsToOne) {
   Options options;
 
