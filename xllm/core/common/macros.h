@@ -23,32 +23,8 @@ limitations under the License.
 
 namespace xllm {
 
-// PROPERTY generates the const/non-const/rvalue getters and fluent setters for
-// a field, plus a lightweight reflection registration so the field can be
-// iterated generically (see property_reflect.h). The registration targets
-// `xllm_property_owner_t`, which is `void` (a no-op) unless the struct opts in
-// via REFLECT_PROPERTIES(<StructName>) -- so this augmentation is inert for
-// every struct that does not reflect. The field member stays the last token so
-// callers can still write `PROPERTY(T, name) = <default>;`.
-#define PROPERTY(T, property)                                                  \
- public:                                                                       \
-  [[nodiscard]] const T& property() const& noexcept { return property##_; }    \
-  [[nodiscard]] T& property() & noexcept { return property##_; }               \
-  [[nodiscard]] T&& property() && noexcept { return std::move(property##_); }  \
-                                                                               \
-  auto property(const T& value) & -> decltype(*this) {                         \
-    property##_ = value;                                                       \
-    return *this;                                                              \
-  }                                                                            \
-                                                                               \
-  auto property(T&& value) & -> decltype(*this) {                              \
-    property##_ = std::move(value);                                            \
-    return *this;                                                              \
-  }                                                                            \
-                                                                               \
-  void property(const T& value) && = delete;                                   \
-  void property(T&& value) && = delete;                                        \
-                                                                               \
+// Register a property through its read-only accessor.
+#define PROPERTY_REFLECTION(property)                                          \
   template <typename XllmReflectOwner_ = xllm_property_owner_t>                \
   static void xllm_reflect_emit_##property(const void* xllm_reflect_owner_,    \
                                            ::xllm::PropertyVisitor& xllm_v_) { \
@@ -62,8 +38,56 @@ namespace xllm {
   }                                                                            \
   static inline const int xllm_reflect_reg_##property =                        \
       ::xllm::reflect::register_property<xllm_property_owner_t>(               \
-          #property, &xllm_reflect_emit_##property<>);                         \
-                                                                               \
+          #property, &xllm_reflect_emit_##property<>);
+
+// PROPERTY generates the const/non-const/rvalue getters and fluent setters for
+// a field, plus a lightweight reflection registration so the field can be
+// iterated generically (see property_reflect.h). The registration targets
+// `xllm_property_owner_t`, which is `void` (a no-op) unless the struct opts in
+// via REFLECT_PROPERTIES(<StructName>) -- so this augmentation is inert for
+// every struct that does not reflect. The field member stays the last token so
+// callers can still write `PROPERTY(T, name) = <default>;`.
+#define PROPERTY(T, property)                                                 \
+ public:                                                                      \
+  [[nodiscard]] const T& property() const& noexcept { return property##_; }   \
+  [[nodiscard]] T& property() & noexcept { return property##_; }              \
+  [[nodiscard]] T&& property() && noexcept { return std::move(property##_); } \
+                                                                              \
+  auto property(const T& value) & -> decltype(*this) {                        \
+    property##_ = value;                                                      \
+    return *this;                                                             \
+  }                                                                           \
+                                                                              \
+  auto property(T&& value) & -> decltype(*this) {                             \
+    property##_ = std::move(value);                                           \
+    return *this;                                                             \
+  }                                                                           \
+                                                                              \
+  void property(const T& value) && = delete;                                  \
+  void property(T&& value) && = delete;                                       \
+                                                                              \
+  PROPERTY_REFLECTION(property)                                               \
+                                                                              \
+  T property##_
+
+// The validator returns the value to store, allowing input correction. Unlike
+// PROPERTY, validated properties expose neither mutable getters nor public
+// storage. Defaults must already be valid; initializers do not run the
+// validator.
+#define VALIDATED_PROPERTY(T, property, validator)         \
+ public:                                                   \
+  [[nodiscard]] T property() const { return property##_; } \
+                                                           \
+  auto property(T value) & -> decltype(*this) {            \
+    property##_ = (validator)(std::move(value));           \
+    return *this;                                          \
+  }                                                        \
+                                                           \
+  void property(T value) && = delete;                      \
+                                                           \
+  PROPERTY_REFLECTION(property)                            \
+                                                           \
+ private:                                                  \
   T property##_
 
 // Keep a property's established accessors when its storage moves into a nested

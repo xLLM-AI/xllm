@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include <algorithm>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -33,9 +34,6 @@ class Options {
   ~Options() = default;
 
   std::string to_string() const;
-
-  int32_t num_speculative_tokens() const { return num_speculative_tokens_; }
-  Options& num_speculative_tokens(int32_t value) &;
 
   PROPERTY(std::string, model_path);
 
@@ -89,8 +87,9 @@ class Options {
   // the max tokens per chunk for request in prefill stage.
   PROPERTY(int32_t, max_tokens_per_chunk_for_prefill);
 
- private:
-  int32_t num_speculative_tokens_ = 0;
+  VALIDATED_PROPERTY(int32_t, num_speculative_tokens, [](int32_t value) {
+    return std::max(value, int32_t{0});
+  }) = 0;
 
   PROPERTY(std::string, speculative_algorithm) = "MTP";
 
