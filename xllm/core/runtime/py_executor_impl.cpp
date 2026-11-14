@@ -48,6 +48,7 @@ limitations under the License.
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include "platform/npu/npu_layer_synchronizer.h"
+#include "platform/npu/py_device_capture_guard.h"
 #endif
 
 namespace py = pybind11;
@@ -137,6 +138,17 @@ void register_xllm_runtime_module(py::module_& m) {
   });
 
 #if defined(USE_NPU)
+  py::class_<npu::PyDeviceCaptureGuard>(m, "DeviceCaptureLock")
+      .def(py::init<int32_t>(), py::arg("device_index"))
+      .def("__enter__",
+           &npu::PyDeviceCaptureGuard::acquire,
+           py::call_guard<py::gil_scoped_release>())
+      .def("__exit__",
+           [](npu::PyDeviceCaptureGuard& self,
+              const py::object& /*unused*/,
+              const py::object& /*unused*/,
+              const py::object& /*unused*/) { self.release(); });
+
   py::class_<NPULayerSynchronizerImpl,
              std::shared_ptr<NPULayerSynchronizerImpl>>(m, "LayerSynchronizer")
       .def("record_event",
@@ -213,6 +225,10 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       ExecutionConfig::get_instance().block_draft_graph_warmup_max_kv_len();
   executor_config["enable_graph_mode_decode_no_padding"] =
       ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding();
+  executor_config["enable_graph_mm_encoder"] =
+      ExecutionConfig::get_instance().enable_graph_mm_encoder();
+  executor_config["mm_encoder_graph_capture_shapes"] =
+      ExecutionConfig::get_instance().mm_encoder_graph_capture_shapes();
   // DFlash2 defaults to eager in the model config. Enable its independent
   // full-block ACL runner when the worker requests graph execution.
   const bool independent_block_graph =

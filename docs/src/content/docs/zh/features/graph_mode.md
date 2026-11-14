@@ -19,6 +19,14 @@ xLLM 支持 Graph Mode，通过预捕获计算图并在后续执行中重放，�
 ### Piecewise Graph
   - 当部分算子不支持 graph 导致整图无法捕获（break graph）时，对 break 之后的各段（piece）分别捕获 graph。这样在无法整图捕获的情况下，仍能尽可能获得 graph mode 的收益，常用于 prefill、chunked_prefill 等场景。
 
+### 多模态编码器图
+  - `enable_graph` 捕获的是 decode 阶段，视觉编码器仍然逐算子由 Host 下发。开启
+    `enable_graph_mm_encoder` 后，Python Qwen3-VL 按 **一次 encode 调用的 shape**
+    （各图片的 `t`/`h`/`w` 及其顺序）捕获独立的 encoder 图：该 shape 决定了
+    编码器内部的全部形状与 Host 标量（patch 数、帧边界、rotary 表、插值权重），因此重放只需写入新的
+    pixel 数据，图内的 Host attention 长度无需更新。首次遇到某 shape 时捕获，之后相同 shape 直接重放，
+    重放结果与 eager 逐位一致。捕获数量由 `mm_encoder_graph_capture_shapes` 限制，超出的 shape 保持 eager。
+    这两项只在服务端命令行生效，offline 推理路径上编码器保持 eager。
 ### 多 shape 复用的显存池
   - 为了避免不同 shape 的 graph capture 分别占用独立显存，我们让不同 capture 使用不同虚拟地址空间，并共享同一组底层物理内存；同时，输入 tensor 通过持久化 buffer 与 slice 方式复用。
  
