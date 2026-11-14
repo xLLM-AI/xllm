@@ -16,7 +16,6 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
-#include <torch_npu/torch_npu.h>
 
 #include <string>
 #include <tuple>
@@ -31,17 +30,6 @@ namespace {
 
 constexpr int64_t kHeadSize = 256;
 constexpr double kRmsNormEps = 1e-6;
-
-class TileLangSplitQkvRmsnormMRopeWrapperTest : public ::testing::Test {
- protected:
-  static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
-
-  static void TearDownTestSuite() {
-    torch_npu::finalize_npu();
-    aclrtResetDevice(0);
-    aclFinalize();
-  }
-};
 
 struct SplitQkvTestCase {
   std::string name;
@@ -302,8 +290,8 @@ void run_case(const SplitQkvTestCase& test_case) {
       << "gate mismatch, max_diff=" << max_abs_diff(gate_out, gate_ref);
 }
 
-TEST_F(TileLangSplitQkvRmsnormMRopeWrapperTest,
-       BuildGatherPatternMatchesReference) {
+TEST(TileLangSplitQkvRmsnormMRopeWrapperTest,
+     BuildGatherPatternMatchesReference) {
   const torch::Device device("npu:0");
   const std::vector<int64_t> mrope_section = {11, 11, 10};
   const int64_t rope_dim = 64;
@@ -354,7 +342,7 @@ TEST_F(TileLangSplitQkvRmsnormMRopeWrapperTest,
   EXPECT_EQ(interleaved[255].item<int32_t>(), 0);
 }
 
-TEST_F(TileLangSplitQkvRmsnormMRopeWrapperTest, MatchesTorchReference) {
+TEST(TileLangSplitQkvRmsnormMRopeWrapperTest, MatchesTorchReference) {
   const std::vector<SplitQkvTestCase> cases = {
       {.name = "tiny_t1_q16_kv4",
        .num_tokens = 1,
