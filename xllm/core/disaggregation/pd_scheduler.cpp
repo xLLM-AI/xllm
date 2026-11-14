@@ -28,6 +28,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/common/types.h"
+#include "core/disaggregation/pd_request_converter.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/framework/config/disagg_pd_config.h"
@@ -57,7 +58,7 @@ namespace {
 
 using RequestPtr = std::shared_ptr<Request>;
 
-constexpr std::chrono::minutes kReservationReleaseRetention{5};
+constexpr int32_t kDecodeAllocationRetryBackoffMs = 10;
 
 // Returns true when |a| has lower scheduling priority than |b| (i.e. |a|
 // should be dispatched after |b|).  std::priority_queue is a max-heap, so the
@@ -96,81 +97,6 @@ void drain_dispatch_queue(
     }
     pending->push(std::move(incoming));
   }
-}
-
-// Keep request-to-wire conversion separate from dispatch admission and retries.
-void fill_pd_request(Request& request, proto::DisaggRequest* req) {
-  RequestState& state = request.state();
-  req->set_req_id(request.request_id());
-  req->set_reservation_id(state.pd_reservation_id);
-  req->set_service_req_id(request.service_request_id());
-  req->set_source_xservice_addr(request.source_xservice_addr());
-  req->set_tokens_num(state.prompt_tokens.size());
-  req->set_prompt(state.prompt);
-  req->set_response_type(state.response_type);
-  req->set_model(state.response_model);
-  req->mutable_tools()->Assign(state.response_tools.begin(),
-                               state.response_tools.end());
-  req->set_tool_choice(state.response_tool_choice);
-  *req->mutable_chat_template_kwargs() = state.response_chat_template_kwargs;
-  *req->mutable_stream_options() = state.response_stream_options;
-  ADD_VECTOR_TO_PROTO(req->mutable_prompt_tokens(), state.prompt_tokens);
-  req->set_stream(state.stream);
-  req->set_x_request_id(request.x_request_id());
-  req->set_x_request_time(request.x_request_time());
-  req->set_seq_capacity(state.seq_capacity);
-  req->set_max_tokens(state.stopping_checker.get_max_generated_tokens());
-  req->set_max_context_len(state.stopping_checker.get_max_context_len());
-  req->set_ignore_eos(state.stopping_checker.get_ignore_eos());
-  req->set_eos_token_id(state.stopping_checker.get_eos_token());
-  if (!state.stopping_checker.get_stop_tokens().empty()) {
-    ADD_VECTOR_TO_PROTO(req->mutable_stop_token_ids(),
-                        state.stopping_checker.get_stop_tokens());
-  }
-  const auto& stop_sequences = state.stopping_checker.get_stop_sequences();
-  const auto& stop_strings = state.stopping_checker.get_stop_strings();
-  for (size_t index = 0; index < stop_sequences.size(); ++index) {
-    auto* proto_seq = req->add_stop_sequences();
-    ADD_VECTOR_TO_PROTO(proto_seq->mutable_seq_tokens(), stop_sequences[index]);
-    if (index < stop_strings.size()) {
-      proto_seq->set_stop_string(stop_strings[index]);
-    }
-  }
-  req->set_n(state.n);
-  req->set_best_of(state.best_of);
-  req->set_frequency_penalty(state.sampling_param.frequency_penalty);
-  req->set_presence_penalty(state.sampling_param.presence_penalty);
-  req->set_repetition_penalty(state.sampling_param.repetition_penalty);
-  req->set_temperature(state.sampling_param.temperature);
-  req->set_top_p(state.sampling_param.top_p);
-  req->set_min_p(state.sampling_param.min_p);
-  const RequestSamplingParam& sampling = state.sampling_param;
-  if (sampling.seed.has_value()) {
-    req->set_seed(*sampling.seed);
-  }
-  req->set_min_tokens(sampling.min_tokens);
-  req->set_vocab_size(sampling.vocab_size);
-  req->mutable_logit_bias()->insert(sampling.logit_bias.begin(),
-                                    sampling.logit_bias.end());
-  if (sampling.allowed_token_ids.has_value()) {
-    ADD_VECTOR_TO_PROTO(req->mutable_allowed_token_ids(),
-                        sampling.allowed_token_ids.value());
-  }
-  ADD_VECTOR_TO_PROTO(req->mutable_all_stop_token_ids(),
-                      sampling.all_stop_token_ids);
-  for (const auto& word : sampling.bad_words_token_ids) {
-    ADD_VECTOR_TO_PROTO(req->add_bad_words_token_ids()->mutable_seq_tokens(),
-                        word);
-  }
-  req->set_top_k(state.sampling_param.top_k);
-  req->set_logprobs(state.sampling_param.logprobs);
-  req->set_top_logprobs(state.sampling_param.top_logprobs);
-  req->set_is_embeddings(state.sampling_param.is_embeddings);
-  req->set_echo(state.echo);
-  req->set_skip_special_tokens(state.skip_special_tokens);
-  req->set_include_stop_str_in_output(state.include_stop_str_in_output);
-  req->set_json_object(state.sampling_param.json_object);
-  req->set_json_reasoning_enabled(state.json_reasoning_enabled);
 }
 
 void send_reservation_release(const std::string& req_id,
@@ -653,6 +579,9 @@ void PDScheduler::dispatch_requests() {
         // of the MPMC queue, which is not FIFO across HTTP threads.
         pending.push(request);
         release_admission.dismiss();
+        // Decode cache pressure can last for an entire generation. Avoid
+        // repeatedly issuing allocation RPCs while capacity is unchanged.
+        absl::SleepFor(absl::Milliseconds(kDecodeAllocationRetryBackoffMs));
       }
     } else {
       for (auto& sequence : request->sequences()) {
@@ -1043,13 +972,7 @@ bool PDScheduler::release_reservation(const std::string& req_id,
   std::shared_ptr<Request> request;
   {
     std::lock_guard<std::mutex> lock(received_request_map_mutex_);
-    const std::chrono::steady_clock::time_point now =
-        std::chrono::steady_clock::now();
-    std::erase_if(released_reservations_,
-                  [now](const auto& entry) { return entry.second <= now; });
-    released_reservations_.insert_or_assign(
-        ReservationIdentity{req_id, reservation_id},
-        now + kReservationReleaseRetention);
+    cancelled_reservations_.record(req_id, reservation_id);
     auto it = received_request_map_.find(req_id);
     if (it == received_request_map_.end() ||
         it->second->state().pd_reservation_id != reservation_id) {
@@ -1069,17 +992,8 @@ bool PDScheduler::decode_schedule(std::shared_ptr<Request>& request,
 
   {
     std::unique_lock<std::mutex> lock(received_request_map_mutex_);
-    bool released = false;
-    if (!released_reservations_.empty()) {
-      auto marker = released_reservations_.find(ReservationIdentity{
-          request->request_id(), request->state().pd_reservation_id});
-      if (marker != released_reservations_.end()) {
-        released = marker->second > std::chrono::steady_clock::now();
-        if (!released) {
-          released_reservations_.erase(marker);
-        }
-      }
-    }
+    const bool released = cancelled_reservations_.contains(
+        request->request_id(), request->state().pd_reservation_id);
     if (released || received_request_map_.find(request->request_id()) !=
                         received_request_map_.end()) {
       LOG(ERROR) << "Decode rejected duplicate or released reservation, "

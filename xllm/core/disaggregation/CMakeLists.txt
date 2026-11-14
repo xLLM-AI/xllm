@@ -4,6 +4,7 @@ cc_library(
   NAME
     disaggregation
   HDRS
+    cancelled_pd_reservations.h
     pd_scheduler.h
     pd_service.h
     pd_service_impl.h
