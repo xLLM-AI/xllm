@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/parallel_topology.h"
@@ -199,7 +200,9 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
 #endif
 
   py::gil_scoped_acquire gil;
-  const bool is_deepseek_v4 = model_args_.model_type() == "deepseek_v4";
+  const bool is_deepseek_v4 =
+      model_args_.model_type() == util::kDeepseekV4ModelType ||
+      util::is_deepseek_v41_model_type(model_args_.model_type());
   const bool needs_python_process_group =
       !is_deepseek_v4 || dp_size_ > 1 || cp_size_ > 1;
   if (needs_python_process_group) {

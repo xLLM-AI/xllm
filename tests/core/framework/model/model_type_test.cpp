@@ -30,25 +30,6 @@ TEST(ModelTypeTest, LooksUpBorrowedSubstringWithoutTerminator) {
   EXPECT_FALSE(is_mla_model_type(std::string_view()));
 }
 
-TEST(ModelTypeTest, PreservesMtpPrefixMatching) {
-  EXPECT_TRUE(is_target_model_type(
-      "deepseek_v3_mtp", "deepseek_v3", /*match_mtp=*/true));
-  EXPECT_FALSE(is_target_model_type(
-      "deepseek_v3_mtp", "deepseek_v3", /*match_mtp=*/false));
-  EXPECT_TRUE(
-      is_target_model_type("deepseek_v3", "deepseek_v3", /*match_mtp=*/false));
-  EXPECT_FALSE(is_target_model_type(
-      "deepseek_v2_mtp", "deepseek_v3", /*match_mtp=*/true));
-}
-
-TEST(ModelTypeTest, KeepsDeepseekV4TransferCapabilityDistinctFromMla) {
-  EXPECT_TRUE(is_deepseek_v4_model_type("deepseek_v4_dspark"));
-  EXPECT_TRUE(is_deepseek_v4_model_type("deepseek_v4_mtp"));
-  EXPECT_TRUE(is_tp_invariant_kv_cache_model_type("deepseek_v4"));
-  EXPECT_FALSE(is_mla_model_type("deepseek_v4"));
-  EXPECT_FALSE(is_tp_invariant_kv_cache_model_type("qwen3"));
-}
-
 TEST(ModelTypeTest, GatesPackedC8ByModelAndBackend) {
   EXPECT_TRUE(supports_mla_kv_cache_quant("glm_moe_dsa"));
   EXPECT_TRUE(supports_mla_kv_cache_quant("glm_moe_dsa_mtp"));

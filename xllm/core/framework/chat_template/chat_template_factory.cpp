@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "core/framework/chat_template/chat_template.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/tokenizer/tokenizer_args.h"
 #include "framework/chat_template/deepseek_v32_cpp_template.h"
 #include "framework/chat_template/deepseek_v4_cpp_template.h"
@@ -34,13 +35,14 @@ std::unique_ptr<ChatTemplate> ChatTemplateFactory::create(
       LOG(INFO) << "Using native C++ chat template for "
                 << "model_type: " << model_type;
       return std::make_unique<DeepseekV32CppTemplate>(tokenizer_args);
-    } else if (model_type == "deepseek_v4") {
+    } else if (model_type == util::kDeepseekV4ModelType ||
+               util::is_deepseek_v41_model_type(model_type)) {
       LOG(INFO) << "Using native C++ chat template for "
                 << "model_type: " << model_type;
       return std::make_unique<DeepseekV4CppTemplate>(tokenizer_args);
     } else {
-      LOG(FATAL) << "cpp_chat_template only support deepseekv32 and deepseekv4 "
-                    "models currently.";
+      LOG(FATAL) << "cpp_chat_template only support deepseekv32, deepseekv4 "
+                    "and deepseekv41 models currently.";
     }
   }
   LOG(INFO) << "Using Jinja chat template for "

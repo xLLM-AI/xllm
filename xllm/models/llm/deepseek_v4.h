@@ -564,88 +564,7 @@ class DeepseekV4ModelImpl
       layers_.push_back(layer);
     }
 
-    // Build DSA caches_info from compress_ratios
-    const auto& compress_ratios = model_args.compress_ratios();
-    const int32_t window_size = model_args.window_size();
-    // TODO: Wire runtime block_size into model metadata so this stays aligned
-    // with the DSv4 KV cache and block manager when the default changes.
-    const int32_t base_block_size = 128;  // default block size
-    CHECK_EQ(KVCacheConfig::get_instance().block_size(), base_block_size)
-        << "DeepSeek V4 currently only supports block_size=128.";
-
-    std::unordered_map<DSAGroupKey, int32_t, DSAGroupKeyHash> group_key_map;
-    auto register_group =
-        [&](DSACacheType type, int32_t ratio, int32_t block_size) -> int32_t {
-      DSAGroupKey key{ratio, type, block_size};
-      auto it = group_key_map.find(key);
-      if (it != group_key_map.end()) {
-        return it->second;
-      }
-      const int32_t gid = static_cast<int32_t>(group_infos_.size());
-      group_key_map.emplace(key, gid);
-      group_infos_.push_back({type, ratio, block_size});
-      return gid;
-    };
-
-    // Keep DSA group ids consistent with BlockManagerPool manager order:
-    // 1) sliding-window manager first
-    // 2) token managers in first-seen compress_ratio order
-    register_group(DSACacheType::SLIDING_WINDOW, 1, window_size);
-    for (const auto ratio : compress_ratios) {
-      const int32_t cr = deepseek_v4_normalize_compress_ratio(ratio);
-      if (cr == 4 || cr == 128) {
-        register_group(DSACacheType::TOKEN, cr, base_block_size);
-      }
-    }
-
-    caches_info_.resize(model_args.n_layers());
-
-    for (int32_t layer_id = 0; layer_id < model_args.n_layers(); ++layer_id) {
-      int32_t cr = (layer_id < static_cast<int32_t>(compress_ratios.size()))
-                       ? compress_ratios[layer_id]
-                       : 1;
-      cr = deepseek_v4_normalize_compress_ratio(cr);
-      // Build per-layer cache specs based on compress_ratio
-      struct CacheEntry {
-        DSACacheType type;
-        int32_t ratio;
-        int32_t block_size;
-      };
-      std::vector<CacheEntry> layer_caches;
-
-      if (cr == 1) {
-        // C1: 1 cache (swa)
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-      } else if (cr == 4) {
-        // C4: 8 caches
-        // compress_kv(TOKEN,4,128), compress_index(TOKEN,4,128),
-        // swa(SW,1,window), kv_state(SW,1,window), score_state(SW,1,window),
-        // idx_kv_state(SW,1,window), idx_score_state(SW,1,window),
-        // indexer_scale(TOKEN,4,128)
-        layer_caches.push_back({DSACacheType::TOKEN, 4, base_block_size});
-        layer_caches.push_back({DSACacheType::TOKEN, 4, base_block_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::TOKEN, 4, base_block_size});
-      } else if (cr == 128) {
-        // C128: 4 caches
-        // compress_kv(TOKEN,128,128), swa(SW,1,window),
-        // kv_state(SW,1,window), score_state(SW,1,window)
-        layer_caches.push_back({DSACacheType::TOKEN, 128, base_block_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-        layer_caches.push_back({DSACacheType::SLIDING_WINDOW, 1, window_size});
-      }
-
-      for (const auto& ce : layer_caches) {
-        const int32_t gid = register_group(ce.type, ce.ratio, ce.block_size);
-        caches_info_[layer_id].push_back(
-            {gid, ce.type, ce.ratio, ce.block_size});
-      }
-    }
+    deepseek_v4_build_cache_specs(model_args, caches_info_, group_infos_);
 
     // Locate the first SWA cache so build_dspark_swa_metadata doesn't rescan
     // caches_info_ on every model forward.
@@ -1994,16 +1913,7 @@ inline void load_deepseek_v4_model_args(const JsonReader& json,
   });
   LOAD_ARG_OR(hidden_act, "hidden_act", "silu");
   LOAD_ARG_OR_FUNC(intermediate_size, "intermediate_size", [&] {
-    if (args->intermediate_size() > 0) {
-      return args->intermediate_size();
-    }
-    if (args->moe_intermediate_size() > 0) {
-      return static_cast<int64_t>(args->moe_intermediate_size());
-    }
-    if (args->hidden_size() > 0) {
-      return args->hidden_size() * 4;
-    }
-    return int64_t{0};
+    return resolve_dense_intermediate_size(*args);
   });
 
   // Norm / RoPE
@@ -2135,8 +2045,6 @@ inline void normalize_deepseek_v4_args(ModelArgs* args) {
 
 inline void validate_deepseek_v4_args(const ModelArgs& args,
                                       const DeepseekV4ArgsPolicy& policy) {
-  CHECK(!policy.supported_compress_ratios.empty())
-      << "deepseek_v4 internal supported_compress_ratios must not be empty";
   CHECK(policy.supported_compress_ratios.count(policy.default_compress_ratio) >
         0)
       << "deepseek_v4 config default_compress_ratio("

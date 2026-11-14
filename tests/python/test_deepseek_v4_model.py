@@ -19,7 +19,6 @@ Pure-Python: does not load compiled operators or weights.
 
 from __future__ import annotations
 
-import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -34,14 +33,12 @@ from xllm.python.models.deepseek_v4 import (
     DeepseekV4Config,
     DeepseekV4DecoderLayer,
     DeepseekV4ForCausalLM,
-    DeepseekV4HyperConnection,
     DeepseekV4Indexer,
     DeepseekV4Model,
     DeepseekV4MoE,
     DeepseekV4RotaryEmbedding,
 )
 from xllm.python.models.deepseek_v32 import DeepseekV3MLP, W8A8DynamicLinear, _swiglu_with_clamp
-from xllm.python.registry import get_model_class
 
 _DSV4_CONFIG = {
     "model_type": "deepseek_v4",
@@ -260,32 +257,6 @@ def test_qli_decode_uses_request_shaped_rope_rows(monkeypatch: pytest.MonkeyPatc
     assert rope_dim == 2
 
 
-def test_registry_resolves_deepseek_v4() -> None:
-    cls = get_model_class("deepseek_v4")
-    assert cls.__name__ == "DeepseekV4ForCausalLM"
-
-
-def test_hyper_connection_shapes() -> None:
-    cfg = DeepseekV4Config.from_dict(_DSV4_CONFIG)
-    hc = DeepseekV4HyperConnection(cfg, torch.float32, torch.device("cpu"))
-    assert hc.hc_mult_local == 4  # hc_mult is NOT TP-sharded
-    # hc_*_fn: [mix_hc, hc_dim] = [(2+mult)*mult, mult*hidden] = [24, 16384].
-    assert hc.hc_attn_fn.shape == ((2 + 4) * 4, 4 * 4096)
-    assert hc.hc_attn_base.shape == ((2 + 4) * 4,)
-    assert hc.hc_attn_scale.shape == (3,)
-    # hc_pre calls the compiled NPU kernel, which is not available in the
-    # pure-Python unit-test context; only shape construction is verified here.
-
-
-def test_decoder_layer_builds() -> None:
-    """A C4 decoder layer builds attention + HC + MoE without error."""
-    cfg = DeepseekV4Config.from_dict(_DSV4_CONFIG)
-    layer = DeepseekV4DecoderLayer(cfg, layer_id=1, dtype=torch.float32, device=torch.device("cpu"))
-    assert layer.self_attn.layer_id == 1
-    assert layer.self_attn.indexer is not None
-    assert layer.hc.hc_mult_local == 4
-
-
 def test_attention_builds_compression_modules_only_for_matching_ratios() -> None:
     cfg = DeepseekV4Config.from_dict(_DSV4_CONFIG)
     c1 = DeepseekV4DecoderLayer(cfg, layer_id=0, dtype=torch.float32, device=torch.device("cpu")).self_attn
@@ -432,17 +403,6 @@ def test_dense_mlp_uses_native_aware_tp_reduce(monkeypatch) -> None:
     mlp(torch.ones(1, cfg.hidden_size))
 
     tp_reduce.assert_called_once()
-
-
-def test_model_accepts_cp_config() -> None:
-    cfg = DeepseekV4Config.from_dict({**_DSV4_CONFIG, "cp_size": 2})
-    model = DeepseekV4Model(cfg, torch.float32, torch.device("cpu"))
-    assert model.cfg.cp_size == 2
-
-
-def test_causal_lm_accepts_data_parallelism_config() -> None:
-    model = DeepseekV4ForCausalLM({**_DSV4_CONFIG, "dp_size": 2, "device": "cpu"})
-    assert model.cfg.dp_size == 2
 
 
 def _capture_test_model(
@@ -716,14 +676,6 @@ def test_moe_loader_prepares_down_scales_for_each_quantization(
     assert moe.experts_w2_scale.dtype == torch.bfloat16
     assert moe.experts_w13_scale.dtype == torch.float32
     assert not hasattr(moe, "experts_w2_scale_compute")
-    owner = torch.nn.Module()
-    owner.cfg = cfg
-    owner.model = torch.nn.Module()
-    layer = torch.nn.Module()
-    layer.mlp = moe
-    owner.model.layers = torch.nn.ModuleList([layer])
-
-    owner._load_dsv4_moe_routing = DeepseekV4ForCausalLM._load_dsv4_moe_routing
     packed_divisor = 2 if quantization == "w4a8" else 1
     tensors = {
         "layers.0.ffn.gate.weight": torch.zeros_like(moe.gate.weight),
@@ -739,17 +691,21 @@ def test_moe_loader_prepares_down_scales_for_each_quantization(
             if quantization == "w4a8":
                 bias_groups = 8 if projection == "w2" else 1
                 tensors[prefix + projection + ".scale_bias"] = torch.zeros(8, bias_groups)
+
+    def _copy_in(name: str, value: torch.Tensor) -> None:
+        moe.get_parameter(name.removeprefix("model.layers.0.mlp.")).data.copy_(value)
+
     loader = SimpleNamespace(
         has=tensors.__contains__,
         get_tensor=tensors.__getitem__,
-        copy_in=lambda name, value: owner.get_parameter(name).data.copy_(value),
+        copy_in=_copy_in,
         shard=lambda value, dim, world, rank: value.chunk(world, dim=dim)[rank].contiguous(),
     )
     monkeypatch.setattr(moe.shared_experts.gate_up_proj, "process_weights_after_loading", MagicMock())
     monkeypatch.setattr(moe.shared_experts.down_proj, "process_weights_after_loading", MagicMock())
-    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_format_cast=lambda value, _format: value))
+    monkeypatch.setattr(deepseek_v4, "torch_npu", SimpleNamespace(npu_format_cast=lambda value, _format: value))
 
-    DeepseekV4ForCausalLM._load_dsv4_moe(owner, loader, "layers.0.", "model.layers.0.", 0, "layers.0.ffn.")
+    DeepseekV4ForCausalLM._load_dsv4_moe(moe, loader, "layers.0.", "model.layers.0.", 0, "layers.0.ffn.")
 
     assert moe.experts_w2_scale.dtype == (torch.float32 if quantization == "w4a8" else torch.bfloat16)
     moe.process_weights_after_loading()

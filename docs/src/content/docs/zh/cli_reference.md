@@ -41,7 +41,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `limit_image_per_prompt` | `int32` | `8` | 每个 prompt 允许的最大图片数量，仅用于多模态模型。 |
 | `max_encoder_cache_size` | `int64` | `0` | 每个 worker 的 encoder cache 最大显存大小，单位 MB；`0` 表示禁用 encoder cache。 |
 | `reasoning_parser` | `string` | `""` | reasoning 交互解析器，例如 `auto`、`glm45`、`glm47`、`glm5`、`qwen3`、`qwen35`、`deepseek-r1`。 |
-| `tool_call_parser` | `string` | `""` | tool-call 交互解析器，例如 `auto`、`qwen25`、`qwen3`、`qwen35`、`qwen3_coder`、`kimi_k2`、`deepseekv3`、`deepseekv32`、`deepseekv4`、`glm45`、`glm47`、`glm5`。 |
+| `tool_call_parser` | `string` | `""` | tool-call 交互解析器，例如 `auto`、`qwen25`、`qwen3`、`qwen35`、`qwen3_coder`、`kimi_k2`、`deepseekv3`、`deepseekv32`、`deepseekv4`、`deepseekv41`、`glm45`、`glm47`、`glm5`。 |
 | `enable_qwen3_reranker` | `bool` | `false` | 是否启用 Qwen3 reranker。 |
 | `flashinfer_workspace_buffer_size` | `int32` | `134217728` | FlashInfer split-k attention 中用于保存中间 attention 结果的预留 workspace 大小，默认 128 MiB。 |
 | `enable_return_mm_full_embeddings` | `bool` | `false` | VLM 模型是否返回 ViT embedding 与序列 embedding。 |
@@ -49,7 +49,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `use_audio_in_video` | `bool` | `false` | 输入为视频时，是否同时解码音频和视频。 |
 | `audio_max_upload_file_mb` | `int32` | `25` | 语音转文本音频上传大小上限，单位 MiB，必须为正数。 |
 | `audio_max_decode_duration_s` | `int32` | `600` | 语音转文本音频解码后的时长上限，单位秒。`0` 表示不限制。 |
-| `use_cpp_chat_template` | `bool` | `true` | 对支持的模型使用原生 C++ chat template，例如 `deepseek_v32`、`deepseek_v4`；设为 `false` 可回退到 Jinja 以便调试。 |
+| `use_cpp_chat_template` | `bool` | `true` | 对支持的模型使用原生 C++ chat template，例如 `deepseek_v32`、`deepseek_v4`、`deepseek_v41`；设为 `false` 可回退到 Jinja 以便调试。 |
 
 ## LoadConfig
 

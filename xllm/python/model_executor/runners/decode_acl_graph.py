@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -80,6 +81,7 @@ class DecodeAclGraphMetadata:
     paged_kv_indptr: torch.Tensor
     paged_kv_indices: torch.Tensor
     paged_kv_last_page_len: torch.Tensor
+    token_capacity_bucket: int | None = None
 
 
 def _same_npu_stream(lhs: object, rhs: object) -> bool:
@@ -96,6 +98,27 @@ def _uniform_span_width(spans: tuple[int, ...]) -> int | None:
     if not spans or any(length != spans[0] for length in spans):
         return None
     return spans[0]
+
+
+class _DsaDerivedMetadataView:
+    """Derive unused flat fields from DSA manager tables to satisfy generic graph buffer shapes."""
+
+    __slots__ = ("_base", "block_table", "slot_mapping", "multi_block_tables")
+
+    def __init__(
+        self,
+        base: AttentionMetadata,
+        block_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        multi_block_tables: tuple[torch.Tensor, ...],
+    ) -> None:
+        self._base = base
+        self.block_table = block_table
+        self.slot_mapping = slot_mapping
+        self.multi_block_tables = multi_block_tables
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._base, name)
 
 
 class DecodeAclGraphRunner(AclGraphRunner):
@@ -242,6 +265,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         The caller owns this result for one execution only. Keep it local to
         that call so scheduler updates are decoded again on the next step.
         """
+        metadata = self._normalize_dsa_metadata(metadata)
+        if not getattr(self.attention_backend, "moe_graph_capturable", True):
+            return None
         if input_ids.dim() != 1:
             return None
         try:
@@ -388,7 +414,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
             except RuntimeError as error:
                 return reject_layout(str(error))
         if self.dp_size > 1:
-            # DP ranks share one graph shape, so a missing or malformed
             # Execution counts cannot silently fall back to eager: divergent
             # execution paths across ranks would deadlock HCCL collectives.
             if execution_counts[self.dp_rank] != input_ids.shape[0]:
@@ -397,7 +422,48 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     f"rank={self.dp_rank}, rows={input_ids.shape[0]}, "
                     f"counts={execution_counts}"
                 )
+        group_infos = getattr(self.attention_backend, "group_infos", None)
+        if group_infos is not None:
+            source_tables = list(getattr(metadata, "multi_block_tables", ()) or ())
+            if not source_tables or len(source_tables) < len(group_infos):
+                return None
+        granularity = int(getattr(self.attention_backend, "graph_token_capacity_granularity", 0) or 0)
+        if granularity:
+            bucket = self._token_capacity_bucket(metadata, decode_metadata)
+            if bucket <= 0:
+                return None
+            if bucket > (self.max_model_len + granularity - 1) // granularity:
+                return None
         return decode_metadata
+
+    def _normalize_dsa_metadata(
+        self,
+        metadata: AttentionMetadata,
+    ) -> AttentionMetadata:
+        """Normalize busy and dummy DSA batches alike so every DP rank selects the same runner."""
+        if isinstance(metadata, _DsaDerivedMetadataView):
+            return metadata
+        group_infos = getattr(self.attention_backend, "group_infos", None)
+        if group_infos is None:
+            return metadata
+        tables = list(getattr(metadata, "multi_block_tables", ()) or ())
+        if not tables:
+            if not bool(getattr(metadata, "is_dummy", False)):
+                return metadata
+            tables = [torch.zeros((1, 1), dtype=torch.int32) for _ in group_infos]
+        elif len(tables) < len(group_infos) or tables[0].dim() != 2:
+            return metadata
+        block_table = getattr(metadata, "block_table", None)
+        if block_table is None:
+            block_table = tables[0]
+        slot_mapping = getattr(metadata, "slot_mapping", None)
+        if slot_mapping is None or slot_mapping.numel() != block_table.shape[0]:
+            slot_dtype = slot_mapping.dtype if slot_mapping is not None else torch.int64
+            slot_mapping = torch.zeros(block_table.shape[0], dtype=slot_dtype, device=block_table.device)
+        return cast(
+            "AttentionMetadata",
+            _DsaDerivedMetadataView(metadata, block_table, slot_mapping, tuple(tables)),
+        )
 
     def _has_compatible_index_history(self, metadata: AttentionMetadata, block_table: torch.Tensor) -> bool:
         if not self._has_index_cache:
@@ -698,6 +764,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             mtp_topk_indices,
             kpool_query_lens=kpool_query_lens,
             expanded_query_lens=expanded_query_lens,
+            token_capacity_bucket=self._token_capacity_bucket(metadata, decode_metadata),
         )
         if self._device_kv_lengths:
             if not kv_capacity_pages:
@@ -731,6 +798,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         is_graph_warmup: bool = False,
         input_batch: InputBatch | None = None,
     ) -> _GraphKey:
+        metadata = self._normalize_dsa_metadata(metadata)
         batch_size = input_ids.shape[0]
         padded_batch_size = self._padded_batch_size(batch_size, metadata)
 
@@ -891,6 +959,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         decode_metadata: DecodeAclGraphMetadata | None = None,
         input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput:
+        metadata = self._normalize_dsa_metadata(metadata)
         batch_size = input_ids.shape[0]
         if graph_key is not None:
             self._synchronize_dp_graph_execute(input_ids)
@@ -1024,6 +1093,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 **({"kv_capacity_pages": kv_capacity_pages} if self._device_kv_lengths else {}),
                 **decode_kwargs,
             )
+            # Replay must keep the gather capacity used at capture.
+            entry.static_metadata.dsa_graph_token_capacity = self._token_capacity_bucket(
+                metadata, decode_metadata
+            ) * int(getattr(self.attention_backend, "graph_token_capacity_granularity", 0) or 0)
             self._graphs[graph_key] = entry
 
         if self._stream is None:
@@ -1106,6 +1179,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         *,
         kpool_query_lens: tuple[int, ...] = (),
         expanded_query_lens: tuple[int, ...] = (),
+        token_capacity_bucket: int = 0,
     ) -> _GraphKey:
         """Return the key for a shape- and metadata-specific graph."""
         topk_signature = (None, None, None)
@@ -1127,7 +1201,37 @@ class DecodeAclGraphRunner(AclGraphRunner):
             *topk_signature,
             kpool_query_lens,
             expanded_query_lens,
+            token_capacity_bucket,
         )
+
+    def _token_capacity_bucket(
+        self,
+        metadata: AttentionMetadata,
+        decode_metadata: DecodeAclGraphMetadata | None = None,
+    ) -> int:
+        granularity = int(getattr(self.attention_backend, "graph_token_capacity_granularity", 0) or 0)
+        if not granularity:
+            return 0
+        if decode_metadata is not None and decode_metadata.token_capacity_bucket is not None:
+            return decode_metadata.token_capacity_bucket
+        if self.dp_size > 1:
+            global_lengths = getattr(metadata, "dp_global_kv_max_seq_lens", None)
+            max_ctx = max((int(value) for value in global_lengths or ()), default=0)
+        else:
+            expanded = resolve_expanded_decode_metadata(metadata)
+            host_values = (
+                expanded.kv_seq_lens_host_values
+                if expanded is not None
+                else getattr(metadata, "kv_seq_lens_host_values", None)
+            )
+            if not host_values:
+                kv_seq_lens = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
+                host_values = kv_seq_lens.tolist() if kv_seq_lens is not None else []
+            max_ctx = max((int(value) for value in host_values), default=0)
+        bucket = (max_ctx + granularity - 1) // granularity
+        if decode_metadata is not None:
+            decode_metadata.token_capacity_bucket = bucket
+        return bucket
 
     def _padded_kpool_query_lens(
         self,
@@ -1725,7 +1829,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
 
     @staticmethod
     def _effective_slot_mapping(
-        metadata: AttentionMetadata,
+        metadata: AttentionMetadata | _DsaDerivedMetadataView,
         token_count: int,
         device: torch.device,
     ) -> torch.Tensor:
@@ -1734,14 +1838,17 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if slot_mapping is not None and slot_mapping.dim() == 1 and slot_mapping.numel() == token_count:
             return slot_mapping.to(device=device, dtype=torch.int32).contiguous()
         host_slots = getattr(metadata, "new_cache_slots_host_values", None)
-        if host_slots is None or len(host_slots) != token_count:
-            raise RuntimeError("ACL graph decode requires one scheduler cache slot per token")
-        return torch.tensor(host_slots, dtype=torch.int32, device=device)
+        if host_slots is not None and len(host_slots) == token_count:
+            return torch.tensor(host_slots, dtype=torch.int32, device=device)
+        if isinstance(metadata, _DsaDerivedMetadataView):
+            # DSA exports no flat slots; zero placeholders satisfy graph buffer shapes without adding readers.
+            return torch.zeros(token_count, dtype=torch.int32, device=device)
+        raise RuntimeError("ACL graph decode requires one scheduler cache slot per token")
 
     @staticmethod
     def _fill_new_cache_slots_host_metadata(
         entry: AclGraphEntry,
-        metadata: AttentionMetadata,
+        metadata: AttentionMetadata | _DsaDerivedMetadataView,
         batch_size: int,
     ) -> None:
         """Copy scheduler-resolved physical DSA slots into graph metadata."""
@@ -1753,7 +1860,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
             entry.static_metadata.new_cache_slots_host_values = []
             return
         if len(source_slots) < batch_size:
-            raise RuntimeError("decode ACL graph requires one host cache slot per token")
+            if not isinstance(metadata, _DsaDerivedMetadataView):
+                raise RuntimeError("decode ACL graph requires one host cache slot per token")
+            entry.static_metadata.new_cache_slots_host_values = []
+            return
         real_slots = [int(slot) for slot in source_slots[:batch_size]]
         padding_slots = [0] * (entry.batch_size - batch_size)
         entry.static_metadata.new_cache_slots_host_values = real_slots + padding_slots

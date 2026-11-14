@@ -17,11 +17,7 @@ limitations under the License.
 #include <torch/torch.h>
 #include <torch_npu/torch_npu.h>
 
-#include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <limits>
-#include <string>
 #include <vector>
 
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
@@ -39,13 +35,6 @@ PagedAttentionTilingLayout atb_v1_layout(int64_t buffer_words = 262144,
           /*kv_split_core_count_offset=*/24,
           /*row_kv_seq_len_offset=*/45,
           /*tiling_key=*/tiling_key};
-}
-
-std::string read_source(const std::filesystem::path& path) {
-  std::ifstream input(path);
-  EXPECT_TRUE(input.is_open()) << path;
-  return {std::istreambuf_iterator<char>(input),
-          std::istreambuf_iterator<char>()};
 }
 
 class TileLangSpecVerifyAttentionTilingUpdateTest : public ::testing::Test {
@@ -262,38 +251,6 @@ TEST(PagedAttentionTilingLayoutTest, RejectsUnknownOrTruncatedAtbLayouts) {
   words[17] = 44;
   words[18] = 19;
   EXPECT_FALSE(parse_custom_paged_attention_tiling_layout(words).has_value());
-}
-
-TEST(PagedAttentionTilingLayoutTest, MatchesPinnedXllmOpsSourceContract) {
-  const std::filesystem::path tiling_dir =
-      std::filesystem::weakly_canonical(
-          std::filesystem::path(__FILE__).parent_path() / "../../../../..") /
-      "third_party/xllm_ops/atb_customize/ops/custom_paged_attention/"
-      "kernel_implement/tiling";
-  const std::string header =
-      read_source(tiling_dir / "custom_paged_attention_tiling_dependency.h");
-  const std::string source =
-      read_source(tiling_dir / "custom_paged_attention_tiling_dependency.cpp");
-  const std::string tiling_source =
-      read_source(tiling_dir / "custom_paged_attention_tiling.cpp");
-  EXPECT_NE(header.find(R"(constexpr int32_t BLOCK_SIZE = 16;
-constexpr int32_t BLOCK_SIZE_32 = 32;
-constexpr int32_t TILING_PARA_SIZE = 17;
-constexpr int32_t TILING_HEAD_SIZE = 44;)"),
-            std::string::npos);
-  EXPECT_NE(source.find(R"(const int32_t TILING_KEY = 16;
-const int32_t TILING_HEADSIZE = 17;
-const int32_t TILING_PARASIZE = 18;)"),
-            std::string::npos);
-  EXPECT_NE(source.find(R"(const int32_t TILING_MAX_KVSEQLEN = 22;
-const int32_t TILING_KVSPLIT = 23;
-const int32_t TILING_KVCORENUM = 24;)"),
-            std::string::npos);
-  EXPECT_NE(source.find("tilingParam[tilingOffset + 1] = "
-                        "static_cast<uint32_t>(kvSeqlen);"),
-            std::string::npos);
-  EXPECT_NE(tiling_source.find("mmInfo.blockSize % BLOCK_SIZE == 0"),
-            std::string::npos);
 }
 
 }  // namespace

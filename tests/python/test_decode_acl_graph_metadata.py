@@ -281,7 +281,11 @@ def test_capture_passes_runner_error_mode_to_npu_graph(
     assert graph_context.call_args.kwargs["stream"] is stream
 
 
-def test_metadata_is_decoded_once_for_new_and_cached_graph_steps(runner: DecodeAclGraphRunner) -> None:
+@pytest.mark.parametrize("granularity", [0, 1])
+def test_metadata_is_decoded_once_for_new_and_cached_graph_steps(
+    runner: DecodeAclGraphRunner, granularity: int
+) -> None:
+    runner.attention_backend.graph_token_capacity_granularity = granularity
     input_ids = torch.tensor([10, 20], dtype=torch.int32)
     positions = torch.tensor([1, 4], dtype=torch.int32)
     metadata = _metadata()
@@ -299,6 +303,7 @@ def test_metadata_is_decoded_once_for_new_and_cached_graph_steps(runner: DecodeA
             output = runner.execute(input_ids, positions, metadata, graph_key=graph_key, decode_metadata=decoded)
             entry = runner._graphs[graph_key]
 
+            assert entry.static_metadata.dsa_graph_token_capacity == (5 + step if granularity else 0)
             assert output.shape == (2, 2)
             assert decode.call_count == step + 1
             assert build_paging.call_count == step + 1
@@ -314,8 +319,8 @@ def test_metadata_is_decoded_once_for_new_and_cached_graph_steps(runner: DecodeA
             metadata.kv_seq_lens.add_(1)
             metadata.kv_seq_lens_host_values[:] = metadata.kv_seq_lens.tolist()
 
-    runner._capture.assert_called_once()
-    assert entry.graph.replay.call_count == 2
+    assert runner._capture.call_count == (2 if granularity else 1)
+    assert sum(entry.graph.replay.call_count for entry in runner._graphs.values()) == 2
 
 
 def test_executor_decodes_metadata_once_per_step_with_new_and_cached_graphs(

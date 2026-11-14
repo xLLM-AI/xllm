@@ -20,6 +20,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/model_type.h"
 
 DEFINE_string(model_id, "", "hf model name.");
 
@@ -123,14 +124,16 @@ DEFINE_int32(audio_max_decode_duration_s,
 DEFINE_bool(use_cpp_chat_template,
             true,
             "Use native C++ chat template for supported models "
-            "(e.g. deepseek_v32, deepseek_v4) instead of Jinja. "
+            "(e.g. deepseek_v32, deepseek_v4, deepseek_v41) instead of Jinja. "
             "Set to false to fallback to Jinja for debugging.");
 
 namespace xllm {
 namespace {
 
 bool is_cpp_chat_template_supported_model(const std::string& model_type) {
-  return model_type == "deepseek_v32" || model_type == "deepseek_v4";
+  return model_type == "deepseek_v32" ||
+         model_type == util::kDeepseekV4ModelType ||
+         util::is_deepseek_v41_model_type(model_type);
 }
 
 bool is_qwen3_5_model_type(std::string_view model_type) {

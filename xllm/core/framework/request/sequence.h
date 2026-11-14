@@ -411,9 +411,6 @@ class Sequence {
   void set_host_cache_match(size_t restore_tokens, size_t copy_units);
   void set_host_cache_restore(size_t restore_tokens, size_t copy_units);
   void clear_host_cache_match();
-  bool has_host_cache_match() const {
-    return effective_restore_tokens_.has_value();
-  }
   size_t host_cache_copy_units() const { return host_cache_copy_units_; }
   // Scheduler-owned H2D aliases move to the batch before transfer submission.
   std::shared_ptr<KVCacheBlockLease> retain_host_restore_blocks(
@@ -439,7 +436,6 @@ class Sequence {
 
   bool check_need_unique_tokens() { return need_unique_tokens_; }
 
-  LogprobState* logprob_state() { return &logprob_state_; }
   void set_estimated_latency(double estimated_latency) {
     estimated_latency_ = estimated_latency;
   }

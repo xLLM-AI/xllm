@@ -497,6 +497,145 @@ def test_qwen35_bf16_grouped_moe_uses_native_layout(
     )
 
 
+def test_bf16_grouped_moe_pre_down_scales_fp32_swiglu_before_the_down_gemm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hidden = torch.empty(2, 4, dtype=torch.bfloat16)
+    topk_weights = torch.tensor([[0.25, 0.5], [0.75, 1.0]], dtype=torch.float32)
+    topk_ids = torch.tensor([[4, 9], [5, 0]], dtype=torch.int32)
+    w13 = torch.empty(4, 4, 8, dtype=torch.bfloat16)
+    w2 = torch.empty(4, 4, 4, dtype=torch.bfloat16)
+    expanded = torch.empty(4, 4, dtype=torch.bfloat16)
+    row_ids = torch.tensor([0, 0, 1, 3], dtype=torch.int32)
+    expert_tokens = torch.tensor([1, 1, 0, 0], dtype=torch.int64)
+    gate = torch.tensor(
+        [
+            [3.0, -3.0, 0.5, -0.5],
+            [1.0, 2.0, -2.0, 0.0],
+            [0.25, 0.5, 0.75, 1.0],
+            [-1.0, -2.0, -3.0, -4.0],
+        ],
+        dtype=torch.bfloat16,
+    )
+    up = torch.tensor(
+        [
+            [3.0, -3.0, 0.5, -0.5],
+            [-1.0, 1.0, 2.5, -2.5],
+            [0.1, 0.2, 0.3, 0.4],
+            [4.0, 5.0, 6.0, 7.0],
+        ],
+        dtype=torch.bfloat16,
+    )
+    gate_up = torch.cat((gate, up), dim=-1)
+    expert_output = torch.tensor(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [5.0, 6.0, 7.0, 8.0],
+            [9.0, 10.0, 11.0, 12.0],
+            [float("nan")] * 4,
+        ],
+        dtype=torch.bfloat16,
+    )
+    unpermuted = torch.zeros(2, 4, dtype=torch.float32)
+    init_routing = MagicMock(return_value=(expanded, row_ids, expert_tokens, torch.empty(0)))
+    group_gemm = MagicMock(side_effect=(gate_up, expert_output))
+    token_unpermute = MagicMock(return_value=unpermuted)
+    clipped_swiglu = MagicMock(
+        return_value=torch.nn.functional.silu(gate.float().clamp(max=2.0)) * up.float().clamp(min=-2.0, max=2.0)
+    )
+    monkeypatch.setattr(moe, "_group_gemm", group_gemm)
+    monkeypatch.setattr(moe.torch_npu, "npu_moe_init_routing_v2", init_routing)
+    monkeypatch.setattr(moe.torch_npu, "npu_moe_token_unpermute", token_unpermute)
+    monkeypatch.setattr(moe.torch_npu, "npu_clipped_swiglu", clipped_swiglu)
+
+    result = moe.grouped_moe_bf16(hidden, topk_weights, topk_ids, w13, w2, 16, 4, 4, 2.0, True)
+
+    torch.testing.assert_close(clipped_swiglu.call_args.args[0], gate_up.float())
+    assert clipped_swiglu.call_args.kwargs == {
+        "dim": -1,
+        "alpha": 1.0,
+        "limit": 2.0,
+        "bias": 0.0,
+        "interleaved": False,
+    }
+
+    assert result is unpermuted
+    init_kwargs = init_routing.call_args.kwargs
+    assert init_kwargs["active_expert_range"] == [4, 8]
+    assert init_kwargs["active_num"] == hidden.shape[0] * topk_ids.shape[1]
+    assert init_kwargs["expert_num"] == 16
+    assert init_kwargs["quant_mode"] == -1
+    first_gemm, second_gemm = (call.kwargs for call in group_gemm.call_args_list)
+    assert first_gemm["x"] is expanded
+    assert first_gemm["weight"] is w13
+    assert torch.equal(first_gemm["group_list"], expert_tokens)
+    assert second_gemm["weight"] is w2
+    assert second_gemm["x"].dtype is torch.bfloat16
+    assert second_gemm["output_dtype"] is torch.bfloat16
+    packed = torch.tensor([0.25, 0.75, 0.0, 0.0])
+    expected_act = torch.nn.functional.silu(gate.float().clamp(max=2.0)) * up.float().clamp(min=-2.0, max=2.0)
+    expected_act = (expected_act * packed[:, None]).to(torch.bfloat16)
+    assert torch.equal(second_gemm["x"], expected_act)
+    unpermute_kwargs = token_unpermute.call_args.kwargs
+    expected_permuted = torch.tensor(
+        [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]
+    )
+    assert unpermute_kwargs["permuted_tokens"].dtype is torch.float32
+    assert torch.equal(unpermute_kwargs["permuted_tokens"], expected_permuted)
+    assert torch.equal(unpermute_kwargs["sorted_indices"], row_ids)
+    assert torch.equal(unpermute_kwargs["probs"], torch.tensor([[1.0, 0.0], [1.0, 0.0]]))
+
+
+def test_bf16_grouped_moe_pre_down_zero_tokens_skips_npu_kernels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forbidden = MagicMock(side_effect=AssertionError("zero-token MoE must not launch NPU kernels"))
+    monkeypatch.setattr(moe, "_group_gemm", forbidden)
+    monkeypatch.setattr(moe.torch_npu, "npu_moe_init_routing_v2", forbidden)
+    monkeypatch.setattr(moe.torch_npu, "npu_moe_token_unpermute", forbidden)
+
+    result = moe.grouped_moe_bf16(
+        torch.empty(0, 4, dtype=torch.bfloat16),
+        torch.empty(0, 2, dtype=torch.float32),
+        torch.empty(0, 2, dtype=torch.int32),
+        torch.empty(4, 4, 8, dtype=torch.bfloat16),
+        torch.empty(4, 4, 4, dtype=torch.bfloat16),
+        16,
+        0,
+        4,
+        2.0,
+        True,
+    )
+
+    assert result.shape == (0, 4)
+    assert result.dtype is torch.float32
+    assert not forbidden.called
+
+
+@pytest.mark.parametrize("router_weight_before_down", [False, True])
+def test_bf16_grouped_moe_fake_dispatch_has_expected_dtype(
+    router_weight_before_down: bool,
+) -> None:
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    with FakeTensorMode():
+        result = moe.grouped_moe_bf16(
+            torch.empty(2, 4, dtype=torch.bfloat16),
+            torch.empty(2, 2, dtype=torch.float32),
+            torch.empty(2, 2, dtype=torch.int32),
+            torch.empty(4, 4, 8, dtype=torch.bfloat16),
+            torch.empty(4, 4, 4, dtype=torch.bfloat16),
+            16,
+            4,
+            4,
+            2.0,
+            router_weight_before_down,
+        )
+    assert result.shape == (2, 4)
+    expected_dtype = torch.float32 if router_weight_before_down else torch.bfloat16
+    assert result.dtype is expected_dtype
+
+
 @pytest.mark.parametrize("noncontiguous", (False, True))
 def test_encode_mega_moe_scale_uses_prepared_fp32_inputs(
     monkeypatch: pytest.MonkeyPatch,

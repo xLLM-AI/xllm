@@ -41,7 +41,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `limit_image_per_prompt` | `int32` | `8` | Maximum number of images per prompt. Only applies to multimodal models. |
 | `max_encoder_cache_size` | `int64` | `0` | Maximum GPU/NPU memory size in MB for the encoder cache per worker. `0` disables the encoder cache. |
 | `reasoning_parser` | `string` | `""` | Reasoning parser, for example `auto`, `glm45`, `glm47`, `glm5`, `qwen3`, `qwen35`, or `deepseek-r1`. |
-| `tool_call_parser` | `string` | `""` | Tool-call parser, for example `auto`, `qwen25`, `qwen3`, `qwen35`, `qwen3_coder`, `kimi_k2`, `deepseekv3`, `deepseekv32`, `deepseekv4`, `glm45`, `glm47`, or `glm5`. |
+| `tool_call_parser` | `string` | `""` | Tool-call parser, for example `auto`, `qwen25`, `qwen3`, `qwen35`, `qwen3_coder`, `kimi_k2`, `deepseekv3`, `deepseekv32`, `deepseekv4`, `deepseekv41`, `glm45`, `glm47`, or `glm5`. |
 | `enable_qwen3_reranker` | `bool` | `false` | Whether to enable the Qwen3 reranker. |
 | `flashinfer_workspace_buffer_size` | `int32` | `134217728` | Reserved FlashInfer workspace buffer for intermediate attention results in split-k attention. Default is 128 MiB. |
 | `enable_return_mm_full_embeddings` | `bool` | `false` | Whether VLM models return ViT embeddings and sequence embeddings. |
@@ -49,7 +49,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `use_audio_in_video` | `bool` | `false` | Whether to decode both audio and video when the input is a video. |
 | `audio_max_upload_file_mb` | `int32` | `25` | Maximum speech-to-text audio upload size in MiB. Must be positive. |
 | `audio_max_decode_duration_s` | `int32` | `600` | Maximum decoded speech-to-text audio duration in seconds. `0` disables the limit. |
-| `use_cpp_chat_template` | `bool` | `true` | Use native C++ chat templates for supported models, for example `deepseek_v32` and `deepseek_v4`. Set to `false` to fall back to Jinja for debugging. |
+| `use_cpp_chat_template` | `bool` | `true` | Use native C++ chat templates for supported models, for example `deepseek_v32`, `deepseek_v4`, and `deepseek_v41`. Set to `false` to fall back to Jinja for debugging. |
 
 ## LoadConfig
 

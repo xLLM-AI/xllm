@@ -29,6 +29,7 @@ MODEL_PLATFORM_SUPPORT: dict[str, dict[str, bool]] = {
     "deepseek_v4": {"cuda": False, "npu": True},
     "deepseek_v4_mtp": {"cuda": False, "npu": True},
     "deepseek_v4_dspark": {"cuda": False, "npu": True},
+    "deepseek_v41": {"cuda": False, "npu": True},
     "glm5_2": {"cuda": False, "npu": True},
     "glm5_2_mtp": {"cuda": False, "npu": True},
     "glm5_next": {"cuda": False, "npu": True},
@@ -49,6 +50,7 @@ def is_deepseek_v4_model(config: dict) -> bool:
     model_type = config.get("model_type", "")
     return (
         model_type == "deepseek_v4"
+        or model_type == "deepseek_v41"
         or model_type == "deepseek_v4_dspark"
         or (model_type.startswith("deepseek_v4") and "mtp" in model_type)
     )

@@ -25,6 +25,7 @@ limitations under the License.
 #include <type_traits>
 #include <utility>
 
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_args.h"
@@ -727,6 +728,67 @@ TEST(HFModelLoaderTest, DeepseekV4DSparkModelArgsFrom0731Config) {
   EXPECT_EQ(args.block_size(), 5);
   EXPECT_EQ(args.markov_rank(), 256);
   ASSERT_EQ(args.compress_ratios().size(), 43);
+}
+
+TEST(HFModelLoaderTest, DeepseekV41ModelArgsFromConfig) {
+  auto loader = ModelRegistry::get_model_args_loader("deepseek_v41");
+  ASSERT_NE(loader, nullptr);
+
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "model_type": "deepseek_v41",
+      "image_token_id": 129264,
+      "quantization_config": {
+        "scale_fmt": "ue8m0"
+      },
+      "text_config": {
+        "sliding_window": 128,
+        "compress_ratios": [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+                            2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                            1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+        "kv_source_layer_ids": [20, 8, 2, 14, 8],
+        "index_source_layer_ids": [2, 8, 14, 20, 24, 28, 32, 36],
+        "candidate_source_layer_id": 20,
+        "engram_layer_ids": [1, 14],
+        "engram_pad_token_id": 2,
+        "engram_num_embeddings": [384006168, 384016682]
+      }
+    }
+  )json"));
+
+  ModelArgs args;
+  ASSERT_TRUE(loader(reader, &args));
+
+  EXPECT_EQ(args.compress_ratios(),
+            std::vector<int32_t>({0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+                                  2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                                  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0}));
+
+  EXPECT_EQ(args.kv_source_layer_ids(), std::vector<int32_t>({2, 8, 14, 20}));
+}
+
+TEST(HFModelLoaderDeathTest, DeepseekV41RejectsMismatchedSwaWindow) {
+  auto loader = ModelRegistry::get_model_args_loader("deepseek_v41");
+  ASSERT_NE(loader, nullptr);
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "model_type": "deepseek_v41",
+      "text_config": {
+        "num_hidden_layers": 1,
+        "compress_ratios": [0],
+        "sliding_window": 256
+      }
+    }
+  )json"));
+  EXPECT_DEATH(
+      {
+        KVCacheConfig::get_instance().block_size(128);
+        ModelArgs args;
+        (void)loader(reader, &args);
+      },
+      "window_size must match block_size");
 }
 #endif
 

@@ -357,6 +357,25 @@ class DeepseekV4Args final {
   PROPERTY(std::string, scale_fmt);
 };
 
+class DeepseekV41Args final {
+ public:
+  REFLECT_PROPERTIES(DeepseekV41Args);
+
+  PROPERTY(std::vector<int32_t>, kv_source_layer_ids);
+  PROPERTY(std::vector<int32_t>, index_source_layer_ids);
+  PROPERTY(int32_t, candidate_source_layer_id) = -1;
+  PROPERTY(int32_t, candidate_topk_blocks) = 2048;
+  PROPERTY(int32_t, candidate_block_size) = 8;
+  PROPERTY(std::vector<int32_t>, engram_layer_ids);
+  PROPERTY(std::vector<int64_t>, engram_num_embeddings);
+  PROPERTY(int32_t, engram_max_ngram_size) = 0;
+  PROPERTY(int32_t, engram_vocab_size) = 0;
+  PROPERTY(int32_t, engram_n_heads) = 0;
+  PROPERTY(int32_t, engram_head_dim) = 0;
+  PROPERTY(int32_t, engram_pad_token_id) = -1;
+  PROPERTY(int32_t, engram_compressed_vocab_size) = 0;
+};
+
 // Hyperconnection topology and sinkhorn normalization configuration.
 class HyperconnectionArgs final {
  public:
@@ -868,6 +887,28 @@ struct ModelArgs {
   FORWARD_PROPERTY(float, beta_fast, deepseek_v4_args);
   FORWARD_PROPERTY(float, beta_slow, deepseek_v4_args);
   FORWARD_PROPERTY(std::string, scale_fmt, deepseek_v4_args);
+
+  PROPERTY(DeepseekV41Args, deepseek_v41_args);
+
+  FORWARD_PROPERTY(std::vector<int32_t>,
+                   kv_source_layer_ids,
+                   deepseek_v41_args);
+  FORWARD_PROPERTY(std::vector<int32_t>,
+                   index_source_layer_ids,
+                   deepseek_v41_args);
+  FORWARD_PROPERTY(int32_t, candidate_source_layer_id, deepseek_v41_args);
+  FORWARD_PROPERTY(int32_t, candidate_topk_blocks, deepseek_v41_args);
+  FORWARD_PROPERTY(int32_t, candidate_block_size, deepseek_v41_args);
+  FORWARD_PROPERTY(std::vector<int32_t>, engram_layer_ids, deepseek_v41_args);
+  FORWARD_PROPERTY(std::vector<int64_t>,
+                   engram_num_embeddings,
+                   deepseek_v41_args);
+  FORWARD_PROPERTY(int32_t, engram_max_ngram_size, deepseek_v41_args);
+  FORWARD_PROPERTY(int32_t, engram_vocab_size, deepseek_v41_args);
+  FORWARD_PROPERTY(int32_t, engram_n_heads, deepseek_v41_args);
+  FORWARD_PROPERTY(int32_t, engram_head_dim, deepseek_v41_args);
+  FORWARD_PROPERTY(int32_t, engram_pad_token_id, deepseek_v41_args);
+  FORWARD_PROPERTY(int32_t, engram_compressed_vocab_size, deepseek_v41_args);
 
   PROPERTY(HyperconnectionArgs, hyperconnection_args);
 
@@ -1494,6 +1535,20 @@ inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << ", max_image_seq_len: " << args.max_image_seq_len();
   os << "]";
   return os;
+}
+
+inline int64_t resolve_dense_intermediate_size(const ModelArgs& args) {
+  if (args.intermediate_size() > 0) {
+    return args.intermediate_size();
+  }
+  if (args.moe_intermediate_size() > 0) {
+    return static_cast<int64_t>(args.moe_intermediate_size());
+  }
+  constexpr int64_t kDefaultDenseMultiplier = 4;
+  if (args.hidden_size() > 0) {
+    return args.hidden_size() * kDefaultDenseMultiplier;
+  }
+  return int64_t{0};
 }
 
 }  // namespace xllm
