@@ -20,7 +20,6 @@ Prefill uses FIA TND with causal mask; decode uses FIA TND with block_table.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -293,7 +292,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._page_size: int | None = None
         self._metadata: AttentionMetadata | _PreparedMlaAttention | None = None
         self._paged_graph_state: PagedAttentionGraphState | None = None
-        self._graph_metadata_updated_in_place = False
         self._use_expanded_decode = False
         self._block_table_i32: torch.Tensor | None = None
         self._block_attention_masks: dict[tuple[object, ...], torch.Tensor] = {}
@@ -327,7 +325,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._kv_owner_representatives: torch.Tensor | None = None
         self._materialized_block_table: torch.Tensor | None = None
         self._sfa_page_layout: _SfaPageLayout | None = None
-        self._graph_index_history_max_kv: int | None = None
         self._causal_mask: torch.Tensor | None = None
 
     def _get_causal_mask(self) -> torch.Tensor:
@@ -367,21 +364,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if block_table is None:
             raise RuntimeError("indexer_block_table needs a paged block_table")
         return block_table
-
-    @property
-    def graph_index_history_max_kv(self) -> int:
-        """Static KV-length cap for the kPool graph gather.
-
-        The graph branch of ``gather_index_history`` densifies each sequence
-        to a fixed ``[num_seqs, max_kv, width]`` buffer; sizing it by the full
-        block-table capacity (max_position_embeddings can be 1M) is not
-        viable. Decode steps whose block table exceeds this cap fall back to
-        the eager runner (see DecodeAclGraphRunner), which keeps the dynamic
-        gather. Override with XLLM_GRAPH_INDEX_HISTORY_MAX_KV.
-        """
-        if self._graph_index_history_max_kv is None:
-            self._graph_index_history_max_kv = int(os.environ.get("XLLM_GRAPH_INDEX_HISTORY_MAX_KV", "32768"))
-        return self._graph_index_history_max_kv
 
     @property
     def is_mla(self) -> bool:
@@ -459,10 +441,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             "q cumulative sequence lengths must contain either one value per "
             "sequence or a leading zero plus one value per sequence"
         )
-
-    @property
-    def supports_prepared_metadata(self) -> bool:
-        return True
 
     def prepare_metadata(
         self,
@@ -660,7 +638,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._windowed_block_tables.clear()
         self._block_draft_metadata = None
         self._kda_validated_query_shape = None
-        self._graph_metadata_updated_in_place = False
         self._active_full_layer = None
         # Unbind the previous entry without clearing its cached layer views.
         self._shared_full_block_tables = {}
@@ -686,7 +663,9 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             self._mla_actual_seq_kv_host = prepared.kv_lengths if self.requires_host_kv_lengths else None
             self._mla_max_seqlen_q = prepared.max_query_len
             self._mla_max_seqlen_k = (
-                _mla_graph_max_seqlen_k(prepared.block_table, self.page_size) if graph_mode else prepared.max_seq_len
+                _mla_graph_max_seqlen_k(prepared.block_table, self.logical_page_size)
+                if graph_mode
+                else prepared.max_seq_len
             )
             # Slot input storage is reused across batches. Segment tables
             # belong to one forward, even when their source view is unchanged.
@@ -914,25 +893,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             self._mla_max_seqlen_k = 0
 
         self._prepare_kv_shard_materialization(metadata)
-        # MTP's role owns these int32 tensors and updates them in place before
-        # replay. The backend already borrows the same storage; copying it to
-        # itself again adds Host dispatch without changing any captured input.
-        # Converted, expanded, Host-length and sharded layouts still need the
-        # regular update path. Query ends in this sparse layout are constant.
-        self._graph_metadata_updated_in_place = (
-            graph_mode
-            and owned_metadata
-            and self._uses_sparse_mla
-            and not self._use_expanded_decode
-            and not metadata.is_prefill
-            and not metadata.is_chunked_prefill
-            and not getattr(metadata, "has_kv_shard", False)
-            and metadata.q_cu_seq_lens is None
-            and block_table is not None
-            and block_table.dtype == torch.int32
-            and kv_seq_lens is not None
-            and kv_seq_lens.dtype == torch.int32
-        )
 
     def _prepare_paged_graph(self, *, workspace_kv_length: int | None = None) -> None:
         if self._block_table_i32 is None:
@@ -984,11 +944,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._paged_graph_state = state
         self._actual_seq_q = state.query
         self._actual_seq_kv = state.kv
-
-    @property
-    def graph_metadata_updated_in_place(self) -> bool:
-        """Whether all dynamic graph metadata borrows the role's owned storage."""
-        return self._graph_metadata_updated_in_place
 
     def _allocate_graph_workspace(
         self,
@@ -1608,13 +1563,11 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if slot_mapping.numel() == 0:
             return
         cache_view = index_cache.view(-1, index_cache.size(-1))
-        # ScatterNdUpdateV2 skips negative slots on device. Keep the row count
-        # static: nonzero would synchronize the captured ACLGraph stream.
         scatter_indices = slot_mapping.reshape(-1, 1)
-        kernels.scatter_nd_update(cache_view, scatter_indices, values)
+        kernels.scatter_cache_by_slot(cache_view, scatter_indices, values)
         if index_cache_scale is not None and scales is not None:
             scale_view = index_cache_scale.view(-1, index_cache_scale.size(-1))
-            kernels.scatter_nd_update(
+            kernels.scatter_cache_by_slot(
                 scale_view,
                 scatter_indices,
                 scales,
@@ -1693,6 +1646,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     def gather_index_history(
         self,
         layer: Attention,
+        seq_start: int | None = None,
+        seq_stop: int | None = None,
     ) -> torch.Tensor:
         """Gather the kPool packed history into a dense ``[B, kv_len, W]`` tensor.
 
@@ -1702,6 +1657,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         rows per block (the last block yields only ``last_page_len``).
         ``kv_len`` is padded to the max across the batch; out-of-range rows
         are zeroed so ``valid`` channels read as false downstream.
+
+        ``seq_start``/``seq_stop`` restrict the gather to a bounded row range
+        of the authoritative indexer block table. The selection owner uses
+        them to score a byte-bounded batch of sequences at a time, so no
+        whole-batch history buffer is ever materialized (the graph fallback
+        with a full captured table capacity would otherwise be O(B * capacity
+        * width) bytes).
         """
         assert self._metadata is not None, "gather_index_history called before prepare()"
         index_cache = self._kv_caches[layer.layer_id].index
@@ -1715,36 +1677,29 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if kv_seq_lens is None:
             raise RuntimeError("gather_index_history needs prepared device KV lengths")
         num_seqs = block_table.shape[0]
+        start = 0 if seq_start is None else max(0, min(int(seq_start), num_seqs))
+        stop = num_seqs if seq_stop is None else max(start, min(int(seq_stop), num_seqs))
+        num_seqs = stop - start
 
         if in_acl_graph():
-            # Graph branch: fixed shapes only (no .item()/host sync). Gather
-            # the block table in one vectorized index_select up to a static
-            # max_kv (replay-stable; capped by graph_index_history_max_kv —
-            # the runner falls back to eager beyond it). Rows past each
-            # sequence's live length are zeroed by an explicit kv_seq_lens
-            # mask: the valid channel alone cannot be trusted because a
-            # recycled block still carries a previous owner's valid=1 rows,
-            # and a padded block-table column points at block 0.
-            max_kv = min(
-                block_table.shape[1] * block_size,
-                self.graph_index_history_max_kv,
-            )
-            num_blocks = (max_kv + block_size - 1) // block_size
+            max_kv = block_table.shape[1] * block_size
+            if num_seqs <= 0:
+                return torch.empty(0, max_kv, width, dtype=index_cache.dtype, device=device)
             out = torch.empty(num_seqs, max_kv, width, dtype=index_cache.dtype, device=device)
             flat = index_cache.view(-1, width)
-            bt = block_table[:num_seqs, :num_blocks].to(torch.int64)
+            bt = block_table[start:stop].to(torch.int64)
             block_offsets = torch.arange(block_size, device=device)
             slot_ids = (bt[:, :, None] * block_size + block_offsets[None, None, :]).reshape(num_seqs, max_kv)
             gathered = flat.index_select(0, slot_ids.reshape(-1)).view(num_seqs, max_kv, width)
-            row_valid = torch.arange(max_kv, device=device)[None, :] < kv_seq_lens[:num_seqs].to(torch.int64)[:, None]
+            row_valid = torch.arange(max_kv, device=device)[None, :] < kv_seq_lens[start:stop].to(torch.int64)[:, None]
             torch.mul(gathered, row_valid[:, :, None].to(out.dtype), out=out)
             return out
 
-        kv_lens = kv_seq_lens[:num_seqs].to(torch.int64)
+        kv_lens = kv_seq_lens[start:stop].to(torch.int64)
 
         max_kv = int(kv_lens.max().item()) if num_seqs > 0 else 0
         flat = index_cache.view(-1, width)
-        bt = block_table[:num_seqs].to(torch.int64)
+        bt = block_table[start:stop].to(torch.int64)
         out = torch.zeros(num_seqs, max_kv, width, dtype=index_cache.dtype, device=device)
         for b in range(num_seqs):
             kl = int(kv_lens[b].item())

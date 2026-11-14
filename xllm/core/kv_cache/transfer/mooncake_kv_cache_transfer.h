@@ -27,11 +27,9 @@ namespace xllm {
 // Default and VirtualMemory subclasses inherit this class (single inheritance).
 class MooncakeKVCacheTransferBase : public KVCacheTransfer {
  public:
-  MooncakeKVCacheTransferBase(
-      const int32_t device_id,
-      const uint16_t listen_port,
-      const torch::Device& device,
-      std::unique_ptr<MooncakeKVCacheTransferEngine> engine);
+  MooncakeKVCacheTransferBase(const int32_t device_id,
+                              const uint16_t listen_port,
+                              const torch::Device& device);
   ~MooncakeKVCacheTransferBase() override = default;
 
   void initialize(int32_t device_id) override;
@@ -83,12 +81,6 @@ class MooncakeKVCacheTransferDefault final
                                  const uint16_t listen_port,
                                  const torch::Device& device,
                                  const std::string& model_type);
-  MooncakeKVCacheTransferDefault(
-      const int32_t device_id,
-      const uint16_t listen_port,
-      const torch::Device& device,
-      const std::string& model_type,
-      std::unique_ptr<MooncakeKVCacheTransferEngine> engine);
 
   void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                          const KVCacheShape& kv_cache_shape,
@@ -149,7 +141,8 @@ class MooncakeKVCacheTransferDefault final
 
   // Register per-layer K/V tensor memory.
   void register_kv_cache_impl(const std::vector<xllm::KVCache>& kv_caches,
-                              int64_t ssm_checkpoint_stride);
+                              int64_t ssm_checkpoint_stride,
+                              int64_t replicated_block_pages);
 
   bool has_v_cache_ = true;
   BufLayout main_layout_;

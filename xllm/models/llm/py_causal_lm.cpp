@@ -394,7 +394,6 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   d["flashcomm1_min_prefill_tokens"] = flash_comm1_options.min_prefill_tokens;
   d["enable_mmrs_fusion"] = flash_comm1_options.enable_mmrs_fusion;
   d["mmrs_comm_mode"] = flash_comm1_options.mmrs_comm_mode;
-  d["enable_fused_mc2"] = KernelConfig::get_instance().enable_fused_mc2() > 0;
   if (is_glm5_next_target_model_type(model_args_.model_type())) {
     d["expert_parallel_degree"] = eplb_config.expert_parallel_degree();
   }

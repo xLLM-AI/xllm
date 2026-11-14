@@ -1216,6 +1216,12 @@ struct ModelArgs {
   FORWARD_PROPERTY(std::string, time_shift_type, scheduler_args);
 };
 
+inline bool is_paged_kv_layer_type(std::string_view layer_type) {
+  return layer_type == "full_attention" || layer_type == "attention" ||
+         layer_type == "deepseek_sparse_attention" ||
+         layer_type == "sliding_attention";
+}
+
 // Qwen hybrid models may describe full-attention layers explicitly via
 // layer_types or implicitly via full_attention_interval.
 inline bool is_full_attention_layer(const ModelArgs& args, int64_t layer_id) {
@@ -1223,12 +1229,7 @@ inline bool is_full_attention_layer(const ModelArgs& args, int64_t layer_id) {
   if (layer_id >= 0 &&
       layer_id < static_cast<int64_t>(hybrid_layer_types.size())) {
     const auto& layer_type = hybrid_layer_types[layer_id];
-    // deepseek_sparse_attention (glm5_next DSA layers) is a full-attention
-    // variant: it uses paged KV, not the linear (conv/ssm) state cache. Treat
-    // it as full attention here so capacity estimation and per-layer dispatch
-    // classify it correctly (mirrors is_linear_attention_layer's exclusion).
-    return layer_type == "full_attention" || layer_type == "attention" ||
-           layer_type == "deepseek_sparse_attention";
+    return is_paged_kv_layer_type(layer_type);
   }
 
   int32_t attention_interval = args.full_attention_interval();
@@ -1244,9 +1245,7 @@ inline bool has_linear_attention_layers(const ModelArgs& args) {
     return std::any_of(hybrid_layer_types.begin(),
                        hybrid_layer_types.end(),
                        [](const std::string& layer_type) {
-                         return layer_type != "full_attention" &&
-                                layer_type != "attention" &&
-                                layer_type != "deepseek_sparse_attention";
+                         return !is_paged_kv_layer_type(layer_type);
                        });
   }
   return args.full_attention_interval() > 1;

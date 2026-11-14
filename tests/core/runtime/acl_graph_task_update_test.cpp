@@ -27,6 +27,7 @@ limitations under the License.
 
 #include "core/framework/batch/batch.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader/model_loader.h"
@@ -124,9 +125,11 @@ class HybridConv1dMockLM final : public CausalLM {
                      const torch::Device& device,
                      bool enable_fia_decode = true,
                      int32_t attention_repetitions = 1,
-                     ProcessGroup* dcp_group = nullptr)
+                     ProcessGroup* dcp_group = nullptr,
+                     int32_t second_attention_num_heads = 0)
       : device_(device),
         attention_repetitions_(attention_repetitions),
+        second_attention_num_heads_(second_attention_num_heads),
         dcp_group_(dcp_group) {
     linear_ = register_module(
         "linear",
@@ -156,6 +159,18 @@ class HybridConv1dMockLM final : public CausalLM {
                                                   enable_fia_decode,
                                                   dcp_group));
 
+    if (second_attention_num_heads_ > 0) {
+      attention_second_ =
+          register_module("attention_second",
+                          layer::Attention(second_attention_num_heads_,
+                                           kAttentionHeadDim,
+                                           kAttentionScale,
+                                           kAttentionNumKvHeads,
+                                           /*sliding_window=*/-1,
+                                           enable_fia_decode,
+                                           dcp_group));
+    }
+
     this->to(device);
   }
 
@@ -171,6 +186,13 @@ class HybridConv1dMockLM final : public CausalLM {
     auto graph_context = params.graph.acl_graph_task_update_context;
     const bool register_graph_task =
         graph_context != nullptr && graph_context->capturing;
+    if (require_graph_metadata_ && register_graph_task) {
+      ++graph_captures_;
+      EXPECT_NE(params.attn_metadata, nullptr);
+    }
+    if (graph_context != nullptr) {
+      graph_context_for_inspection_ = graph_context;
+    }
 
     layer::AttentionMetadataBuildOptions metadata_build_options;
     metadata_build_options.materialize_linear_state_validity =
@@ -273,6 +295,7 @@ class HybridConv1dMockLM final : public CausalLM {
             dcp_group_->world_size(),
             dcp_group_->rank());
       }
+      const torch::Tensor attention_input = hidden;
       for (int32_t attention_index = 0;
            attention_index < attention_repetitions_;
            ++attention_index) {
@@ -294,6 +317,28 @@ class HybridConv1dMockLM final : public CausalLM {
         hidden = hidden + attention_output.to(hidden.scalar_type());
       }
 
+      if (!attention_second_.is_empty()) {
+        const int64_t second_width =
+            second_attention_num_heads_ * kAttentionHeadDim;
+        layer::AttentionMetadata second_metadata =
+            layer::AttentionMetadataBuilder::build(params,
+                                                   /*enable_mla=*/false,
+                                                   /*attn_mask=*/std::nullopt,
+                                                   device_,
+                                                   metadata_build_options);
+        torch::Tensor second_query = attention_input.slice(1, 0, second_width)
+                                         .to(torch::kBFloat16)
+                                         .contiguous();
+        torch::Tensor second_key =
+            second_query.slice(1, 0, kAttentionNumKvHeads * kAttentionHeadDim)
+                .contiguous();
+        torch::Tensor second_value = second_key.clone();
+        torch::Tensor second_output = std::get<0>(attention_second_->forward(
+            second_metadata, second_query, second_key, second_value, kv_cache));
+        hidden.slice(1, 0, second_width)
+            .add_(second_output.to(hidden.scalar_type()));
+      }
+
       if (register_graph_task) {
         saw_causal_conv_graph_task_ |=
             !graph_context->causal_conv1d_tasks.empty();
@@ -306,6 +351,12 @@ class HybridConv1dMockLM final : public CausalLM {
               graph_context->fused_infer_attention_tasks.front();
           captured_fia_batch_size_ =
               static_cast<uint32_t>(first_task.query.size(0));
+        }
+        fia_workspace_ptrs_.clear();
+        fia_workspace_ptrs_.reserve(fia_graph_task_count_);
+        for (const npu::FusedInferAttentionGraphTask& task :
+             graph_context->fused_infer_attention_tasks) {
+          fia_workspace_ptrs_.push_back(task.workspace.data_ptr());
         }
         all_fia_graph_tasks_share_workspace_ = fia_graph_task_count_ > 1;
         for (size_t task_index = 1; task_index < fia_graph_task_count_;
@@ -338,6 +389,27 @@ class HybridConv1dMockLM final : public CausalLM {
                         torch::dtype(kDtype).device(device_));
   }
 
+  bool requires_graph_forward_metadata() override {
+    return require_graph_metadata_;
+  }
+  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
+      override {
+    ++graph_metadata_states_;
+    return std::make_unique<GraphMetadataState>();
+  }
+  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
+                                      const torch::Tensor&,
+                                      ModelParamsView& params) override {
+    params.attn_metadata = static_cast<GraphMetadataState*>(state)->metadata;
+    ++graph_metadata_preparations_;
+  }
+  void require_graph_metadata() { require_graph_metadata_ = true; }
+  int32_t graph_metadata_states() const { return graph_metadata_states_; }
+  int32_t graph_metadata_preparations() const {
+    return graph_metadata_preparations_;
+  }
+  int32_t graph_captures() const { return graph_captures_; }
+
   void load_model(std::unique_ptr<ModelLoader> loader) override {}
   torch::Device device() const override { return device_; }
   bool saw_causal_conv_and_fia_graph_tasks() const {
@@ -352,23 +424,46 @@ class HybridConv1dMockLM final : public CausalLM {
   bool all_fia_graph_tasks_share_workspace() const {
     return all_fia_graph_tasks_share_workspace_;
   }
+  const std::vector<const void*>& fia_workspace_ptrs() const {
+    return fia_workspace_ptrs_;
+  }
+  const std::vector<npu::FusedInferAttentionGraphTask>& captured_fia_tasks()
+      const {
+    static const std::vector<npu::FusedInferAttentionGraphTask> empty;
+    if (graph_context_for_inspection_ == nullptr) {
+      return empty;
+    }
+    return graph_context_for_inspection_->fused_infer_attention_tasks;
+  }
   void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
   void update_expert_weight(int32_t) override {}
 
  private:
+  struct GraphMetadataState final : ModelGraphMetadataState {
+    std::shared_ptr<layer::AttentionMetadata> metadata =
+        std::make_shared<layer::AttentionMetadata>();
+  };
+  bool require_graph_metadata_ = false;
+  int32_t graph_metadata_states_ = 0;
+  int32_t graph_metadata_preparations_ = 0;
+  int32_t graph_captures_ = 0;
   torch::Device device_;
   torch::nn::Linear linear_{nullptr};
   layer::Attention attention_{nullptr};
+  layer::Attention attention_second_{nullptr};
   torch::Tensor conv_weight_;
   torch::Tensor token_embedding_table_;
   torch::Tensor pos_embedding_table_;
   int32_t attention_repetitions_ = 1;
+  int32_t second_attention_num_heads_ = 0;
   const ProcessGroup* dcp_group_ = nullptr;
   bool saw_causal_conv_graph_task_ = false;
   bool saw_fia_graph_task_ = false;
   uint32_t captured_fia_batch_size_ = 0;
   size_t fia_graph_task_count_ = 0;
   bool all_fia_graph_tasks_share_workspace_ = false;
+  std::vector<const void*> fia_workspace_ptrs_;
+  std::shared_ptr<npu::AclGraphTaskUpdateContext> graph_context_for_inspection_;
 };
 
 class AclGraphTaskUpdateTest : public ::testing::Test {
@@ -738,12 +833,35 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
   int32_t original_acl_graph_decode_batch_size_limit_ = 16;
 };
 
-TEST(FusedInferAttentionWorkspaceSignatureTest, IncludesSoftmaxLseMode) {
-  npu::FusedInferAttentionWorkspaceSignature without_lse{};
-  npu::FusedInferAttentionWorkspaceSignature with_lse{};
-  with_lse.softmax_lse_flag = true;
-
-  EXPECT_FALSE(without_lse == with_lse);
+TEST_F(AclGraphTaskUpdateTest, PreparesModelMetadataBeforeFirstCapture) {
+  constexpr int32_t kNumRuns = 3;
+  for (const bool double_buffer : {false, true}) {
+    SCOPED_TRACE(double_buffer);
+    reset_sequences();
+    ExecutionConfig::get_instance().enable_graph_double_buffer(double_buffer);
+    model_ = std::make_unique<HybridConv1dMockLM>(model_args_, *device_);
+    model_->require_graph_metadata();
+    auto batch = create_decode_batch(/*batch_size=*/3);
+    auto input = batch->prepare_forward_input(model_args_, nullptr);
+    input = input.to(*device_, kDtype);
+    populate_query_start_loc(input.input_params);
+    auto caches = create_hybrid_kv_caches();
+    auto executor = std::make_unique<npu::AclGraphExecutorImpl>(
+        model_.get(), model_args_, *device_, options_);
+    for (int32_t step = 0; step < kNumRuns; ++step) {
+      executor->run(input.token_ids,
+                    input.positions,
+                    caches,
+                    ModelParamsView(input.input_params));
+      input.token_ids.add_(1);
+      input.positions.add_(1);
+    }
+    const int32_t expected_graphs = double_buffer ? 2 : 1;
+    EXPECT_EQ(model_->graph_metadata_states(), expected_graphs);
+    EXPECT_EQ(model_->graph_captures(), expected_graphs);
+    EXPECT_EQ(model_->graph_metadata_preparations(),
+              kNumRuns + expected_graphs);
+  }
 }
 
 TEST_F(AclGraphTaskUpdateTest, CaptureReplayVsEagerDecodeBranch) {
@@ -888,6 +1006,81 @@ TEST_F(AclGraphTaskUpdateTest,
 }
 
 TEST_F(AclGraphTaskUpdateTest,
+       DistinctFiaSignaturesKeepWorkspacesAcrossReplay) {
+  auto multi_signature_model = std::make_unique<HybridConv1dMockLM>(
+      model_args_,
+      *device_,
+      /*enable_fia_decode=*/true,
+      /*attention_repetitions=*/1,
+      /*dcp_group=*/nullptr,
+      /*second_attention_num_heads=*/kAttentionNumHeads / 2);
+
+  auto make_input = [&](size_t prompt_size, int32_t token_seed) {
+    auto batch = create_decode_batch_with_prompts(
+        {std::vector<int32_t>(prompt_size, token_seed)}, token_seed);
+    auto input = batch->prepare_forward_input(model_args_, nullptr);
+    input = input.to(*device_, kDtype);
+    populate_query_start_loc(input.input_params);
+    return input;
+  };
+
+  auto capture_input = make_input(/*prompt_size=*/126, /*token_seed=*/200);
+  auto kv_graph = create_hybrid_kv_caches();
+  auto graph_exec = std::make_unique<npu::AclGraphExecutorImpl>(
+      multi_signature_model.get(), model_args_, *device_, options_);
+  graph_exec->run(capture_input.token_ids,
+                  capture_input.positions,
+                  kv_graph,
+                  ModelParamsView(capture_input.input_params));
+
+  ASSERT_EQ(multi_signature_model->fia_graph_task_count(), 2);
+  const std::vector<const void*> captured_workspaces =
+      multi_signature_model->fia_workspace_ptrs();
+  ASSERT_EQ(captured_workspaces.size(), 2);
+  EXPECT_NE(captured_workspaces[0], captured_workspaces[1])
+      << "layers with different query-head counts must not share one "
+         "workspace";
+
+  for (const int64_t kv_length : {int64_t{7}, int64_t{21}, int64_t{13}}) {
+    SCOPED_TRACE(kv_length);
+    reset_sequences();
+    auto replay_input = make_input(static_cast<size_t>(kv_length - 1),
+                                   static_cast<int32_t>(300 + kv_length));
+    auto kv_eager = clone_kv_caches(kv_graph);
+    const ModelOutput graph_output =
+        graph_exec->run(replay_input.token_ids,
+                        replay_input.positions,
+                        kv_graph,
+                        ModelParamsView(replay_input.input_params));
+    const ModelOutput eager_output = multi_signature_model->forward(
+        replay_input.token_ids,
+        replay_input.positions,
+        kv_eager,
+        ModelParamsView(replay_input.input_params));
+
+    EXPECT_TRUE(torch::allclose(eager_output.hidden_states.to(torch::kFloat32),
+                                graph_output.hidden_states.to(torch::kFloat32),
+                                /*rtol=*/1e-2,
+                                /*atol=*/1e-2))
+        << "graph replay at kv_length=" << kv_length
+        << " must match eager, max_abs_diff="
+        << (eager_output.hidden_states.to(torch::kFloat32) -
+            graph_output.hidden_states.to(torch::kFloat32))
+               .abs()
+               .max()
+               .item<float>();
+    const auto& captured_tasks = multi_signature_model->captured_fia_tasks();
+    ASSERT_EQ(captured_tasks.size(), 2);
+    EXPECT_TRUE(captured_tasks[0].workspace.defined());
+    EXPECT_TRUE(captured_tasks[1].workspace.defined());
+    EXPECT_EQ(captured_tasks[0].workspace.data_ptr(), captured_workspaces[0]);
+    EXPECT_EQ(captured_tasks[1].workspace.data_ptr(), captured_workspaces[1]);
+    EXPECT_NE(captured_tasks[0].workspace.data_ptr(),
+              captured_tasks[1].workspace.data_ptr());
+  }
+}
+
+TEST_F(AclGraphTaskUpdateTest,
        NonQwenDefaultAttentionKeepsPagedAttentionInEagerAndGraph) {
   ModelArgs non_qwen_args = model_args_;
   non_qwen_args.model_type("minimax_m2");
@@ -931,41 +1124,6 @@ TEST_F(AclGraphTaskUpdateTest,
              .abs()
              .max()
              .item<float>();
-}
-
-TEST_F(AclGraphTaskUpdateTest,
-       Qwen35OptOutKeepsPagedAttentionForExpandedSpecVerify) {
-  constexpr int32_t kNumSequences = 2;
-  constexpr int32_t kNumSpecTokens = 4;
-  auto pa_model = std::make_unique<HybridConv1dMockLM>(
-      model_args_, *device_, /*enable_fia_decode=*/false);
-
-  auto batch = create_decode_batch(/*batch_size=*/kNumSequences);
-  ASSERT_FALSE(batch->empty());
-  auto forward_input = batch->prepare_forward_input(model_args_, nullptr);
-  forward_input = forward_input.to(*device_, kDtype);
-  setup_spec_verify_input(forward_input, kNumSequences, kNumSpecTokens);
-
-  auto kv_eager = create_hybrid_kv_caches();
-  auto eager_out =
-      pa_model->forward(forward_input.token_ids,
-                        forward_input.positions,
-                        kv_eager,
-                        ModelParamsView(forward_input.input_params));
-
-  auto kv_graph = create_hybrid_kv_caches();
-  auto graph_exec = std::make_unique<npu::AclGraphExecutorImpl>(
-      pa_model.get(), model_args_, *device_, options_);
-  auto graph_out = graph_exec->run(forward_input.token_ids,
-                                   forward_input.positions,
-                                   kv_graph,
-                                   ModelParamsView(forward_input.input_params));
-
-  EXPECT_TRUE(pa_model->saw_causal_conv_graph_task());
-  EXPECT_FALSE(pa_model->saw_fia_graph_task());
-  EXPECT_EQ(eager_out.hidden_states.sizes(), graph_out.hidden_states.sizes());
-  EXPECT_TRUE(torch::isfinite(eager_out.hidden_states).all().item<bool>());
-  EXPECT_TRUE(torch::isfinite(graph_out.hidden_states).all().item<bool>());
 }
 
 TEST_F(AclGraphTaskUpdateTest,

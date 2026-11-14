@@ -55,9 +55,6 @@ void register_attention_metadata_views(py::module_& module) {
       .def_property_readonly(
           "paged_kv_last_page_len",
           &PyExpandedDecodeMetadataView::paged_kv_last_page_len)
-      .def_property_readonly(
-          "paged_attention_tiling_data",
-          &PyExpandedDecodeMetadataView::paged_attention_tiling_data)
       .def_property_readonly("kv_seq_lens_host",
                              &PyExpandedDecodeMetadataView::kv_seq_lens_host)
       .def_property_readonly(
@@ -139,9 +136,6 @@ void register_attention_metadata_views(py::module_& module) {
           &PyAttentionMetadataView::raw_dp_execution_token_counts)
       .def_property_readonly("dp_global_sequence_nums",
                              &PyAttentionMetadataView::dp_global_sequence_nums)
-      .def_property_readonly(
-          "dp_global_kv_max_seq_lens",
-          &PyAttentionMetadataView::dp_global_kv_max_seq_lens)
       .def_property_readonly("dp_is_decode",
                              &PyAttentionMetadataView::dp_is_decode)
       .def_property_readonly("q_seq_lens", &PyAttentionMetadataView::q_seq_lens)
@@ -209,10 +203,6 @@ py::object PyExpandedDecodeMetadataView::paged_kv_last_page_len() const {
   return optional_tensor(metadata().paged_kv_last_page_len);
 }
 
-py::object PyExpandedDecodeMetadataView::paged_attention_tiling_data() const {
-  return optional_tensor(metadata().paged_attention_tiling_data);
-}
-
 py::object PyExpandedDecodeMetadataView::kv_seq_lens_host() const {
   return optional_tensor(metadata().kv_seq_lens_host);
 }
@@ -271,7 +261,6 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   // contribute the model's complete dummy input, which may be a draft block.
   dp_execution_token_counts_ = params.parallel.dp_global_token_nums;
   dp_global_sequence_nums_ = params.parallel.dp_global_sequence_nums;
-  dp_global_kv_max_seq_lens_ = params.parallel.dp_global_kv_max_seq_lens;
   std::replace(dp_execution_token_counts_.begin(),
                dp_execution_token_counts_.end(),
                /*old_value=*/0,
@@ -409,11 +398,6 @@ PyAttentionMetadataView::raw_dp_execution_token_counts() const {
 const std::vector<int32_t>& PyAttentionMetadataView::dp_global_sequence_nums()
     const {
   return dp_global_sequence_nums_;
-}
-
-const std::vector<int32_t>& PyAttentionMetadataView::dp_global_kv_max_seq_lens()
-    const {
-  return dp_global_kv_max_seq_lens_;
 }
 
 const std::vector<int32_t>& PyAttentionMetadataView::dp_is_decode() const {

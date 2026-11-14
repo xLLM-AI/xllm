@@ -61,6 +61,10 @@ torch::Tensor localize_kv_shard_context_lens(
     const torch::Tensor& global_context_lens,
     const KVShardLayout& layout);
 
+torch::Tensor expand_replicated_block_table(
+    const torch::Tensor& logical_block_table,
+    int64_t replicated_block_pages);
+
 KVShardCausalSelectorMetadata build_kv_shard_causal_selector_metadata(
     const AttentionMetadata& attention_metadata,
     const KVShardLayout& layout);

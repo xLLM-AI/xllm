@@ -173,3 +173,93 @@ def kpool_rows(
     begin = tl.load(starts + req, req < N, 0x7FFFFFFFFFFFFFFF)
     row = tl.sum((token[:, None] >= begin[None, :]).to(tl.int32), 1) - 1
     tl.store(rows + token, row, token < tokens)
+
+
+# Four-query KPool verification adapted from vLLM-MLU kpool_logits.py
+# at commit 0029935c161e38d3979a67593bc5cacc1fffd939.
+
+
+@triton.jit(do_not_specialize=["scale", "table_width"])
+def score_verify_pools(
+    query: tl.tensor,
+    weights: tl.tensor,
+    cache: tl.tensor,
+    table: tl.tensor,
+    positions: tl.tensor,
+    rows: tl.tensor,
+    query_starts: tl.tensor,
+    output: tl.tensor,
+    tokens: tl.int64,
+    capacity: tl.int64,
+    cache_blocks: tl.int64,
+    table_width: tl.int64,
+    output_stride: tl.int64,
+    scale: tl.float32,
+    BLOCK_POOLS: tl.constexpr,
+    TILES_PER_PROGRAM: tl.constexpr,
+) -> None:
+    """Score a request's at-most-four live queries against each shared key tile.
+
+    The caller selects this path for T4 verify batches; replay may shorten or
+    mask individual requests. Q/cache are contiguous BF16, weights/output FP32,
+    with H=32, D=128 and four compressed pools per physical cache page.
+    """
+    request_id = tl.program_id(0)
+    begin = tl.load(query_starts + request_id).to(tl.int64)
+    end = tl.load(query_starts + request_id + 1).to(tl.int64)
+    t = tl.arange(0, 4)
+    h = tl.arange(0, 32)
+    d = tl.arange(0, 128)
+    query_ids = begin + t
+    query_valid = (query_ids < end) & (query_ids < tokens)
+    request = tl.load(rows + begin, (begin < end) & (begin < tokens), 0).to(tl.int64)
+    request_valid = (request >= 0) & (request < tl.num_programs(0))
+    safe_request = tl.where(request_valid, request, 0)
+    lengths = tl.load(positions + query_ids, query_valid, -1).to(tl.int64) + 1
+    live_pools = tl.minimum(tl.maximum(lengths, 0) // 4, tl.minimum(capacity, table_width * 4))
+    query_values = tl.load(
+        query + query_ids[None, :, None] * 4096 + h[:, None, None] * 128 + d[None, None, :],
+        query_valid[None, :, None],
+        0.0,
+    ).reshape(128, 128)
+    head_weights = tl.load(
+        weights + query_ids[None, :] * 32 + h[:, None],
+        query_valid[None, :],
+        0.0,
+    ).to(tl.float32)
+    first_tile = tl.program_id(1) * TILES_PER_PROGRAM
+    for tile in range(first_tile, first_tile + TILES_PER_PROGRAM):
+        pools = tile * BLOCK_POOLS + tl.arange(0, BLOCK_POOLS)
+        logical_pages = tile * (BLOCK_POOLS // 4) + tl.arange(0, BLOCK_POOLS // 4)
+        page_live = (logical_pages < table_width) & request_valid
+        pages = tl.load(
+            table + safe_request * table_width + logical_pages,
+            page_live,
+            -1,
+        ).to(tl.int64)
+        page_live &= (pages >= 0) & (pages < cache_blocks)
+        safe_pages = tl.where(page_live, pages, 0)
+        keys = tl.load(
+            cache + safe_pages[:, None] * 512 + tl.arange(0, 512)[None, :],
+            cache_blocks > 0,
+            0.0,
+            cache_modifier=".cg",
+        ).reshape(BLOCK_POOLS, 128)
+        dots = tl.dot(query_values, tl.trans(keys), allow_tf32=False).to(tl.float32)
+        dots = dots.reshape(32, 4, BLOCK_POOLS)
+        weighted = tl.maximum(dots * scale, 0.0) * head_weights[:, :, None]
+        scores = tl.sum(weighted, 0)
+        pool_valid = tl.broadcast_to(page_live[:, None], (BLOCK_POOLS // 4, 4)).reshape(BLOCK_POOLS)
+        valid = pool_valid[None, :] & (pools[None, :] < live_pools[:, None])
+        tl.store(
+            output + query_ids[:, None] * output_stride + pools[None, :],
+            tl.where(valid, scores, -float("inf")),
+            query_valid[:, None] & (pools[None, :] < capacity),
+        )
+        if request_id == tl.num_programs(0) - 1:
+            for padding_row in range(end, tokens):
+                tl.store(
+                    output + padding_row * output_stride + pools,
+                    -float("inf"),
+                    pools < capacity,
+                )

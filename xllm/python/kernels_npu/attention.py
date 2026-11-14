@@ -23,6 +23,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .linear import atb_matmul_ein_sum
+
 _MIN_PAD_HEAD_DIM = 64
 _MAX_PAD_HEAD_DIM = 128
 _FIA_BLOCK_SIZE = 128
@@ -30,6 +32,13 @@ _FIA_FULL_ATTENTION_TOKENS = 2147483647
 
 reshape_paged_cache = torch.ops.xllm_ops.reshape_paged_cache
 update_decode_graph_metadata = torch.ops.xllm_ops.update_decode_graph_metadata
+
+
+def batch_matmul_transpose(x: torch.Tensor, weight: torch.Tensor, *, graph_mode: bool) -> torch.Tensor:
+    """Project MLA rows [T,H,D] with weight [H,D,O] into [T,H,O]."""
+    if graph_mode and x.dtype == torch.bfloat16:
+        return atb_matmul_ein_sum(x, weight)
+    return torch.bmm(x.transpose(0, 1), weight).transpose(0, 1)
 
 
 def vision_fusion_attention(
@@ -96,6 +105,7 @@ def vision_fusion_attention(
 
 
 __all__ = [
+    "batch_matmul_transpose",
     "reshape_paged_cache",
     "update_decode_graph_metadata",
     "vision_fusion_attention",

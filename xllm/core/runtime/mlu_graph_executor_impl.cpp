@@ -32,6 +32,7 @@ limitations under the License.
 #include "compiler/triton/include/jit_kernel.h"
 #include "core/common/constants.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/model/model_params_view.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/runtime/graph_execution_input.h"
@@ -107,14 +108,6 @@ xllm::ModelOutput make_graph_output(const torch::Tensor& hidden_states,
 int64_t extra_rows_of(const xllm::mlu::GraphLayout& layout) {
   return (layout.padded_num_reqs - layout.num_reqs) *
          layout.tokens_per_request / layout.attention_row_query_len;
-}
-
-xllm::GraphExecutionInput<xllm::ModelParamsView> prepare_graph_input(
-    const xllm::ModelParamsView& params,
-    int64_t padding_num_tokens) {
-  xllm::GraphExecutionInput<xllm::ModelParamsView> graph_input(params);
-  graph_input.pad_dp_token_counts(static_cast<int32_t>(padding_num_tokens));
-  return graph_input;
 }
 
 enum class GraphAction : int8_t { EAGER, CAPTURE, REPLAY };
@@ -435,8 +428,9 @@ void MluGraph::prepare_model_graph_metadata(CausalLM* model,
   if (!model_graph_metadata_state_) {
     model_graph_metadata_state_ = model->create_graph_forward_metadata_state();
   }
-  auto graph_input =
-      prepare_graph_input(params, plan_.layout.padded_num_tokens);
+  xllm::GraphExecutionInput<xllm::ModelParamsView> graph_input(params);
+  graph_input.pad_dp_token_counts(
+      static_cast<int32_t>(plan_.layout.padded_num_tokens));
   ModelParamsView& graph_params = graph_input.mutable_params();
   // Captured metadata must use bucket-shaped tensors.
   const ModelParamsView& captured = params_.value();
@@ -749,8 +743,9 @@ ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
     existing->update_input_buffer(model_, tokens, positions, params);
     result = existing->replay();
   } else {
-    auto graph_input =
-        prepare_graph_input(params, plan->layout.padded_num_tokens);
+    xllm::GraphExecutionInput<xllm::ModelParamsView> graph_input(params);
+    graph_input.pad_dp_token_counts(
+        static_cast<int32_t>(plan->layout.padded_num_tokens));
     if (mtp_capabilities_.model_family == MtpModelFamily::GLM5 ||
         mtp_capabilities_.model_family == MtpModelFamily::QWEN35) {
       if (!params.is_spec_verify &&

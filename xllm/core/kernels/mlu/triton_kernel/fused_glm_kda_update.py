@@ -233,36 +233,57 @@ def fused_glm_kda_update_kernel(
     )
     pid = tl.program_id(0)
     num_jobs = tl.num_programs(0)
+    NK, NV = (triton.cdiv(K, BK), triton.cdiv(V, BV))
     NUM_HV_BLOCKS: tl.constexpr = triton.cdiv(HV, BLOCK_HV)
-    TOTAL_BLOCKS = N * NUM_HV_BLOCKS
-    o_T = tl.arange(0, BLOCK_QUERY_LEN)
-    for flat_pid in range(pid, TOTAL_BLOCKS, num_jobs):
-        i_hv_block = flat_pid // N
-        i_n = flat_pid % N
-        o_k = tl.arange(0, BK)
-        o_v = tl.arange(0, BV)
+    TOTAL_BLOCKS = NK * NV * N * NUM_HV_BLOCKS
+    num_percore = TOTAL_BLOCKS // num_jobs
+    num_actual_per_core = num_percore
+    remainder = TOTAL_BLOCKS % num_jobs
+    num_actual_per_core += (pid < remainder).to(tl.int64)
+    core_start = pid
+    o_T = tl.arange(0, BLOCK_QUERY_LEN * BLOCK_N)
+    HEADS_PER_Q: tl.constexpr = HV // H
+    BH: tl.constexpr = BLOCK_HV // HEADS_PER_Q
+    id = tl.zeros([], tl.int32)
+    while id < num_actual_per_core:
+        tl.static_assert(BLOCK_N == 1)
+        flat_pid = id * num_jobs + core_start
+        i_hv_block = flat_pid // (NK * N * NV)
+        flat_tile_pid = flat_pid % (NK * N * NV)
+        i_k = flat_tile_pid % NK
+        i_n = flat_tile_pid // NK % N
+        i_v = flat_tile_pid // (NK * N)
+        o_k = i_k * BK + tl.arange(0, BK)
+        o_v = i_v * BV + tl.arange(0, BV)
+        numN = tl.minimum(BLOCK_N, num_actual_per_core - id)
+        numN = tl.minimum(numN, N - i_n)
+        end_N = i_n + numN
         rangeN = i_n + tl.arange(0, BLOCK_N)
         rangeS = i_n + tl.arange(0, BLOCK_N + 1)
+        mask_N = (rangeN < end_N) & (rangeN < N)
+        mask_S = (rangeS < end_N + 1) & (rangeS <= N)
         if IS_VARLEN:
-            cu_seqlens_ = tl.load(cu_seqlens + rangeS).to(tl.int32)
+            cu_seqlens_ = tl.load(cu_seqlens + rangeS, mask=mask_S).to(tl.int32)
+        state_idxs = tl.zeros((BLOCK_N, 1), tl.int32)
         i_t_inits = tl.zeros((BLOCK_N,), tl.int32)
         cu_seqlens_ = tl.zeros((BLOCK_N + 1,), tl.int32) if not IS_VARLEN else cu_seqlens_
         state_idxs = tl.load(
             ssm_state_indices
             + (rangeN * stride_indices_seq)[:, None]
             + tl.arange(0, triton.next_power_of_2(stride_indices_seq))[None, :],
-            mask=tl.arange(0, triton.next_power_of_2(stride_indices_seq))[None, :] < stride_indices_seq,
+            mask=mask_N[:, None]
+            & (tl.arange(0, triton.next_power_of_2(stride_indices_seq))[None, :] < stride_indices_seq),
             other=0,
         ).to(tl.int32)
         if IS_SPEC_DECODING:
-            i_t_inits = tl.load(num_accepted_tokens + rangeN)
+            i_t_inits = tl.load(num_accepted_tokens + rangeN, mask=mask_N)
         if IS_VARLEN:
-            max_block_query_len = cu_seqlens_[BLOCK_N] - cu_seqlens_[0]
+            max_block_query_len = cu_seqlens_[numN] - cu_seqlens_[0]
             start_T = cu_seqlens_[0]
         else:
-            max_block_query_len = T
+            max_block_query_len = numN * T
             start_T = i_n * T
-        if not BOUNDED_QUERY or max_block_query_len > BLOCK_QUERY_LEN:
+        if IS_KDA and (not BOUNDED_QUERY):
             _glm_kda_window(
                 A_log,
                 a,
@@ -282,7 +303,7 @@ def fused_glm_kda_update_kernel(
                 o_v,
                 i_hv_block,
                 i_n,
-                BLOCK_N,
+                numN,
                 T,
                 KDA_GATE_LOWER_BOUND,
                 H,
@@ -302,95 +323,235 @@ def fused_glm_kda_update_kernel(
             )
         else:
             mask_T = o_T < max_block_query_len
-            hv_start = i_hv_block * BLOCK_HV
-            o_hv_block = tl.arange(0, BLOCK_HV) + hv_start
-            b_vals = tl.load(b + (start_T + o_T)[:, None] * HV + o_hv_block[None, :], mask=mask_T[:, None]).to(
-                tl.float32
-            )
+            mask_k = o_k < K
+            mask_v = o_v < V
+            mask_h = mask_v[:, None] & mask_k[None, :]
+            hv_start_lo = i_hv_block * BLOCK_HV
+            hv_start_hi = hv_start_lo + BLOCK_HV
+            b_offsets = hv_start_lo + tl.arange(0, BLOCK_HV)
+            mask_ab = mask_T[:, None] & (b_offsets[None, :] < HV)
+            b_vals = tl.load(b + (start_T + o_T)[:, None] * HV + b_offsets[None, :], mask=mask_ab).to(tl.float32)
             b_beta = tl.sigmoid(b_vals)
             b_beta = tl.trans(b_beta)
-            p_qs = q + (start_T + o_T)[:, None, None] * (H * K) + o_hv_block[None, :, None] * K + o_k[None, None, :]
-            p_ks = k + (start_T + o_T)[:, None, None] * (H * K) + o_hv_block[None, :, None] * K + o_k[None, None, :]
-            p_vs = v + (start_T + o_T)[:, None, None] * (HV * V) + o_hv_block[None, :, None] * V + o_v[None, None, :]
-            qs = tl.load(p_qs, mask=mask_T[:, None, None]).to(tl.float32)
-            ks = tl.load(p_ks, mask=mask_T[:, None, None]).to(tl.float32)
-            vs = tl.load(p_vs, mask=mask_T[:, None, None]).to(tl.float32)
-            qs = qs.reshape((BLOCK_QUERY_LEN * BLOCK_HV, BK))
-            ks = ks.reshape((BLOCK_QUERY_LEN * BLOCK_HV, BK))
-            qs = qs * tl.rsqrt(tl.sum(qs * qs, 1) + 1e-06)[:, None]
-            ks = ks * tl.rsqrt(tl.sum(ks * ks, 1) + 1e-06)[:, None]
-            qs = qs * scale
-            qs = qs.reshape((BLOCK_QUERY_LEN, BLOCK_HV, BK))
-            ks = ks.reshape((BLOCK_QUERY_LEN, BLOCK_HV, BK))
-            a_vals = tl.load(
-                a + (start_T + o_T)[:, None, None] * (HV * K) + o_hv_block[None, :, None] * K + o_k[None, None, :],
-                mask=mask_T[:, None, None],
-            ).to(tl.float32)
-            dt_bias_b = tl.load(dt_bias + o_hv_block[:, None] * BK + tl.arange(0, BK)[None, :])
-            A_log_b = tl.load(A_log + o_hv_block).to(tl.float32)
-            xs = a_vals + dt_bias_b[None, :, :]
-            log_gate = KDA_GATE_LOWER_BOUND * tl.sigmoid(tl.exp(A_log_b)[None, :, None] * xs)
-            b_gs = tl.exp(log_gate)
-            qs = tl.permute(qs, (1, 0, 2))
-            ks = tl.permute(ks, (1, 0, 2))
-            vs = tl.permute(vs, (1, 0, 2))
-            b_gs = tl.permute(b_gs, (1, 0, 2))
-            query_key_products = tl.sum(qs * ks, 2)
-            b_os = tl.zeros((BLOCK_HV, BLOCK_QUERY_LEN, BV), tl.float32)
-            p_os = o + (start_T + o_T)[:, None, None] * (HV * V) + o_hv_block[None, :, None] * V + o_v[None, None, :]
-            bos = start_T
-            num_tokens = max_block_query_len
-            if IS_SPEC_DECODING:
-                i_t_init = i_t_inits[0] - 1
-            else:
-                i_t_init = 0
-            state_idx = state_idxs[0, i_t_init].to(tl.int64)
-            valid_state = state_idx > 0
-            state_idx = tl.where(valid_state, state_idx, 0)
-            num_tokens = tl.where(valid_state, num_tokens, 0)
-            if num_tokens != 0:
-                for local_i_hv in range(0, BLOCK_HV, 1):
-                    gi_hv = hv_start + local_i_hv
-                    b_h = tl.zeros([BV, BK], dtype=tl.float32)
-                    p_h0 = h0 + state_idx * stride_init_state_token
-                    p_h0 = p_h0 + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
-                    b_h += tl.load(p_h0, mask=valid_state, other=0)
-                    for pair_start in range(0, num_tokens, 4):
-                        for token_offset in tl.static_range(4):
-                            i_t_raw = pair_start + token_offset
-                            if i_t_raw < num_tokens:
-                                b_q = qs[local_i_hv, i_t_raw, :]
-                                b_k = ks[local_i_hv, i_t_raw, :]
-                                b_v = vs[local_i_hv, i_t_raw, :]
-                                b_h *= b_gs[local_i_hv, i_t_raw, :][None, :]
-                                columns = tl.arange(0, 2)
-                                rhs = tl.where(
-                                    columns[:, None] == 0,
-                                    b_k[None, :],
-                                    b_q[None, :],
-                                )
-                                projections = tl.dot(rhs, tl.trans(b_h), allow_tf32=False)
-                                projection_k = projections[0, :]
-                                projection_q = projections[1, :]
-                                b_v = b_v - projection_k
-                                b_v *= b_beta[local_i_hv, i_t_raw]
-                                b_h = b_h + b_v[:, None] * b_k[None, :]
-                                b_os[local_i_hv, i_t_raw, :] = (
-                                    projection_q + b_v * query_key_products[local_i_hv, i_t_raw]
-                                )
-                                if INPLACE_FINAL_STATE:
-                                    final_state_idx = state_idxs[0, i_t_raw].to(tl.int64)
-                                    valid_final_state = final_state_idx > 0
-                                    final_state_idx = tl.where(valid_final_state, final_state_idx, 0)
-                                    p_ht = ht + final_state_idx * stride_final_state_token
-                                    p_ht = p_ht + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
-                                    tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=valid_final_state)
-                                else:
-                                    p_ht = ht + (bos + i_t_raw) * stride_final_state_token
-                                    p_ht = p_ht + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
-                                    tl.store(p_ht, b_h.to(p_ht.dtype.element_ty))
-            tl.store(
-                p_os,
-                tl.permute(b_os, (1, 0, 2)).to(p_os.dtype.element_ty),
-                mask=mask_T[:, None, None] & valid_state,
-            )
+            for hv_start in range(hv_start_lo, hv_start_hi, BLOCK_HV):
+                o_h_block = tl.arange(0, BLOCK_HV // (HV // H)) + hv_start // (HV // H)
+                o_hv_block = tl.arange(0, BLOCK_HV) + hv_start
+                mask_hb = o_h_block < H
+                mask_hvb = o_hv_block < HV
+                p_qs = (
+                    q + (start_T + 0 + o_T)[:, None, None] * (H * K) + o_h_block[None, :, None] * K + o_k[None, None, :]
+                )
+                p_ks = (
+                    k + (start_T + 0 + o_T)[:, None, None] * (H * K) + o_h_block[None, :, None] * K + o_k[None, None, :]
+                )
+                p_vs = (
+                    v
+                    + (start_T + 0 + o_T)[:, None, None] * (HV * V)
+                    + o_hv_block[None, :, None] * V
+                    + o_v[None, None, :]
+                )
+                mask_qks = mask_k[None, None, :] & mask_T[:, None, None] & mask_hb[None, :, None]
+                mask_hvs = mask_v[None, None, :] & mask_T[:, None, None] & mask_hvb[None, :, None]
+                qs = tl.load(p_qs, mask=mask_qks).to(tl.float32)
+                ks = tl.load(p_ks, mask=mask_qks).to(tl.float32)
+                vs = tl.load(p_vs, mask=mask_hvs).to(tl.float32)
+                qs = qs.reshape((BLOCK_QUERY_LEN * BLOCK_N * BH, BK))
+                ks = ks.reshape((BLOCK_QUERY_LEN * BLOCK_N * BH, BK))
+                qs = qs * tl.rsqrt(tl.sum(qs * qs, 1) + 1e-06)[:, None]
+                ks = ks * tl.rsqrt(tl.sum(ks * ks, 1) + 1e-06)[:, None]
+                qs = qs * scale
+                qs = qs.reshape((BLOCK_QUERY_LEN * BLOCK_N, BH, BK))
+                ks = ks.reshape((BLOCK_QUERY_LEN * BLOCK_N, BH, BK))
+                gate_mask = mask_k[None, None, :] & mask_T[:, None, None] & mask_hvb[None, :, None]
+                a_vals = tl.load(
+                    a
+                    + (start_T + 0 + o_T)[:, None, None] * (HV * K)
+                    + o_hv_block[None, :, None] * K
+                    + o_k[None, None, :],
+                    mask=gate_mask,
+                ).to(tl.float32)
+                dt_bias_b = tl.load(dt_bias + o_hv_block[:, None] * BK + tl.arange(0, BK)[None, :])
+                A_log_b = tl.load(A_log + o_hv_block).to(tl.float32)
+                xs = a_vals + dt_bias_b[None, :, :]
+                log_gate = KDA_GATE_LOWER_BOUND * tl.sigmoid(tl.exp(A_log_b)[None, :, None] * xs)
+                b_gs = tl.exp(log_gate)
+                qs = tl.permute(qs, (1, 0, 2))
+                ks = tl.permute(ks, (1, 0, 2))
+                vs = tl.permute(vs, (1, 0, 2))
+                b_gs = tl.permute(b_gs, (1, 0, 2))
+                query_key_products = tl.sum(qs * ks, 2)
+                cum_tokens = tl.zeros([], tl.int64)
+                b_os = tl.zeros((BLOCK_HV, BLOCK_QUERY_LEN * BLOCK_N, BV), tl.float32)
+                p_os = (
+                    o
+                    + (start_T + 0 + o_T)[:, None, None] * (HV * V)
+                    + o_hv_block[None, :, None] * V
+                    + o_v[None, None, :]
+                )
+                token_valid = tl.zeros((BLOCK_QUERY_LEN * BLOCK_N,), dtype=tl.int1)
+                for i_n_off in range(0, numN, 1):
+                    if IS_VARLEN:
+                        bos, eos = (cu_seqlens_[i_n_off], cu_seqlens_[i_n_off + 1])
+                        num_tokens = eos - bos
+                    else:
+                        bos = (i_n + i_n_off) * T
+                        eos = bos + T
+                        num_tokens = T
+                    num_tokens_real = num_tokens
+                    valid_state = True
+                    state_idx = 0
+                    if IS_SPEC_DECODING:
+                        i_t_init = i_t_inits[i_n_off] - 1
+                    else:
+                        i_t_init = 0
+                    state_idx = state_idxs[i_n_off, i_t_init].to(tl.int64)
+                    valid_state = state_idx > 0
+                    state_idx = tl.where(valid_state, state_idx, 0)
+                    num_tokens = tl.where(valid_state, num_tokens, 0)
+                    if num_tokens == 0:
+                        pass
+                    else:
+                        for local_i_hv in range(0, BLOCK_HV, 1):
+                            gi_hv = hv_start + local_i_hv
+                            i_h = local_i_hv // HEADS_PER_Q
+                            b_h = tl.zeros([BV, BK], dtype=tl.float32)
+                            p_h0 = h0 + state_idx * stride_init_state_token
+                            p_h0 = p_h0 + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                            b_h += tl.load(p_h0, mask=mask_h & valid_state, other=0)
+                            for pair_start in range(0, num_tokens, 4):
+                                i_t_raw = pair_start + 0
+                                if i_t_raw < num_tokens:
+                                    i_t = i_t_raw + cum_tokens
+                                    b_q = qs[i_h, i_t, i_k * BK : i_k * BK + BK]
+                                    b_k = ks[i_h, i_t, i_k * BK : i_k * BK + BK]
+                                    b_v = vs[local_i_hv, i_t, :]
+                                    b_h *= b_gs[local_i_hv, i_t, :][None, :]
+                                    columns = tl.arange(0, 2)
+                                    rhs = tl.where(
+                                        columns[:, None] == 0,
+                                        b_k[None, :],
+                                        tl.where(columns[:, None] == 1, b_q[None, :], 0.0),
+                                    )
+                                    projections = tl.dot(rhs, tl.trans(b_h), allow_tf32=False)
+                                    projection_k = projections[0, :]
+                                    projection_q = projections[1, :]
+                                    b_v = b_v - projection_k
+                                    b_v *= b_beta[local_i_hv, i_t]
+                                    state_0 = b_h + b_v[:, None] * b_k[None, :]
+                                    b_h = state_0
+                                    b_os[local_i_hv, i_t, :] = projection_q + b_v * query_key_products[i_h, i_t]
+                                    if INPLACE_FINAL_STATE:
+                                        final_state_idx = state_idxs[i_n_off, i_t_raw].to(tl.int64)
+                                        valid_final_state = final_state_idx > 0
+                                        final_state_idx = tl.where(valid_final_state, final_state_idx, 0)
+                                        p_ht = ht + final_state_idx * stride_final_state_token
+                                        p_ht = p_ht + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                                        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h & valid_final_state)
+                                    else:
+                                        p_ht = ht + (bos + i_t_raw) * stride_final_state_token
+                                        p_ht = p_ht + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                                        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+                                i_t_raw = pair_start + 1
+                                if i_t_raw < num_tokens:
+                                    i_t = i_t_raw + cum_tokens
+                                    b_q = qs[i_h, i_t, i_k * BK : i_k * BK + BK]
+                                    b_k = ks[i_h, i_t, i_k * BK : i_k * BK + BK]
+                                    b_v = vs[local_i_hv, i_t, :]
+                                    b_h *= b_gs[local_i_hv, i_t, :][None, :]
+                                    columns = tl.arange(0, 2)
+                                    rhs = tl.where(
+                                        columns[:, None] == 0,
+                                        b_k[None, :],
+                                        tl.where(columns[:, None] == 1, b_q[None, :], 0.0),
+                                    )
+                                    projections = tl.dot(rhs, tl.trans(b_h), allow_tf32=False)
+                                    projection_k = projections[0, :]
+                                    projection_q = projections[1, :]
+                                    b_v = b_v - projection_k
+                                    b_v *= b_beta[local_i_hv, i_t]
+                                    state_1 = b_h + b_v[:, None] * b_k[None, :]
+                                    b_h = state_1
+                                    b_os[local_i_hv, i_t, :] = projection_q + b_v * query_key_products[i_h, i_t]
+                                    if INPLACE_FINAL_STATE:
+                                        final_state_idx = state_idxs[i_n_off, i_t_raw].to(tl.int64)
+                                        valid_final_state = final_state_idx > 0
+                                        final_state_idx = tl.where(valid_final_state, final_state_idx, 0)
+                                        p_ht = ht + final_state_idx * stride_final_state_token
+                                        p_ht = p_ht + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                                        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h & valid_final_state)
+                                    else:
+                                        p_ht = ht + (bos + i_t_raw) * stride_final_state_token
+                                        p_ht = p_ht + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                                        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+                                i_t_raw = pair_start + 2
+                                if i_t_raw < num_tokens:
+                                    i_t = i_t_raw + cum_tokens
+                                    b_q = qs[i_h, i_t, i_k * BK : i_k * BK + BK]
+                                    b_k = ks[i_h, i_t, i_k * BK : i_k * BK + BK]
+                                    b_v = vs[local_i_hv, i_t, :]
+                                    b_h *= b_gs[local_i_hv, i_t, :][None, :]
+                                    columns = tl.arange(0, 2)
+                                    rhs = tl.where(
+                                        columns[:, None] == 0,
+                                        b_k[None, :],
+                                        tl.where(columns[:, None] == 1, b_q[None, :], 0.0),
+                                    )
+                                    projections = tl.dot(rhs, tl.trans(b_h), allow_tf32=False)
+                                    projection_k = projections[0, :]
+                                    projection_q = projections[1, :]
+                                    b_v = b_v - projection_k
+                                    b_v *= b_beta[local_i_hv, i_t]
+                                    state_2 = b_h + b_v[:, None] * b_k[None, :]
+                                    b_h = state_2
+                                    b_os[local_i_hv, i_t, :] = projection_q + b_v * query_key_products[i_h, i_t]
+                                    if INPLACE_FINAL_STATE:
+                                        final_state_idx = state_idxs[i_n_off, i_t_raw].to(tl.int64)
+                                        valid_final_state = final_state_idx > 0
+                                        final_state_idx = tl.where(valid_final_state, final_state_idx, 0)
+                                        p_ht = ht + final_state_idx * stride_final_state_token
+                                        p_ht = p_ht + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                                        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h & valid_final_state)
+                                    else:
+                                        p_ht = ht + (bos + i_t_raw) * stride_final_state_token
+                                        p_ht = p_ht + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                                        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+                                i_t_raw = pair_start + 3
+                                if i_t_raw < num_tokens:
+                                    i_t = i_t_raw + cum_tokens
+                                    b_q = qs[i_h, i_t, i_k * BK : i_k * BK + BK]
+                                    b_k = ks[i_h, i_t, i_k * BK : i_k * BK + BK]
+                                    b_v = vs[local_i_hv, i_t, :]
+                                    b_h *= b_gs[local_i_hv, i_t, :][None, :]
+                                    columns = tl.arange(0, 2)
+                                    rhs = tl.where(
+                                        columns[:, None] == 0,
+                                        b_k[None, :],
+                                        tl.where(columns[:, None] == 1, b_q[None, :], 0.0),
+                                    )
+                                    projections = tl.dot(rhs, tl.trans(b_h), allow_tf32=False)
+                                    projection_k = projections[0, :]
+                                    projection_q = projections[1, :]
+                                    b_v = b_v - projection_k
+                                    b_v *= b_beta[local_i_hv, i_t]
+                                    state_3 = b_h + b_v[:, None] * b_k[None, :]
+                                    b_h = state_3
+                                    b_os[local_i_hv, i_t, :] = projection_q + b_v * query_key_products[i_h, i_t]
+                                    if INPLACE_FINAL_STATE:
+                                        final_state_idx = state_idxs[i_n_off, i_t_raw].to(tl.int64)
+                                        valid_final_state = final_state_idx > 0
+                                        final_state_idx = tl.where(valid_final_state, final_state_idx, 0)
+                                        p_ht = ht + final_state_idx * stride_final_state_token
+                                        p_ht = p_ht + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                                        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h & valid_final_state)
+                                    else:
+                                        p_ht = ht + (bos + i_t_raw) * stride_final_state_token
+                                        p_ht = p_ht + gi_hv * V * K + o_v[:, None] * K + o_k[None, :]
+                                        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+                    token_valid = token_valid | (o_T >= cum_tokens) & (o_T < cum_tokens + num_tokens_real) & valid_state
+                    cum_tokens += num_tokens_real
+                tl.store(
+                    p_os,
+                    tl.permute(b_os, (1, 0, 2)).to(p_os.dtype.element_ty),
+                    mask=mask_hvs & token_valid[:, None, None],
+                )
+        id += numN.to(tl.int32)

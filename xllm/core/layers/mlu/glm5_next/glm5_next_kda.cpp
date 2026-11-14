@@ -16,8 +16,12 @@ limitations under the License.
 #include "layers/mlu/glm5_next/glm5_next_kda.h"
 
 #include <glog/logging.h>
+#include <torch/torch.h>
 
+#include <array>
 #include <cmath>
+#include <cstdint>
+#include <numeric>
 #include <optional>
 #include <tuple>
 #include <vector>
@@ -27,6 +31,7 @@ limitations under the License.
 #include "framework/state_dict/utils.h"
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
+#include "kernels/param.h"
 #include "layers/common/attention_metadata_builder.h"
 #include "layers/mlu/linear_attention_utils.h"
 
@@ -35,11 +40,13 @@ namespace layer {
 
 namespace {
 
-torch::Tensor l2_normalize(const torch::Tensor& input) {
-  return input /
-         torch::sqrt(torch::sum(input * input, /*dim=*/-1, /*keepdim=*/true) +
-                     1e-6f);
-}
+constexpr std::array<const char*, 6> kInputProjectionNames = {
+    "q_proj.weight",
+    "k_proj.weight",
+    "v_proj.weight",
+    "b_proj.weight",
+    "f_a_proj.weight",
+    "g_a_proj.weight"};
 
 void load_column_linear(ColumnParallelLinear& linear,
                         const StateDict& state_dict,
@@ -63,37 +70,6 @@ void load_conv_linear(ColumnParallelLinear& linear,
 
 }  // namespace
 
-torch::Tensor glm5_next_safe_gate(const torch::Tensor& raw_gate,
-                                  const torch::Tensor& A_log,
-                                  const torch::Tensor& dt_bias,
-                                  float lower_bound) {
-  CHECK(raw_gate.dim() == 3 || raw_gate.dim() == 4)
-      << "GLM5-Next KDA raw gate must be [T, H, K] or [B, T, H, K]";
-  CHECK_EQ(A_log.dim(), 1) << "GLM5-Next KDA A_log must be [H]";
-  CHECK_EQ(dt_bias.dim(), 1) << "GLM5-Next KDA dt_bias must be [H * K]";
-  CHECK_LT(lower_bound, 0.0f) << "GLM5-Next KDA lower bound must be negative";
-
-  const int64_t num_heads = raw_gate.size(-2);
-  const int64_t head_dim = raw_gate.size(-1);
-  CHECK_EQ(A_log.size(0), num_heads)
-      << "GLM5-Next KDA A_log head dimension mismatch";
-  CHECK_EQ(dt_bias.size(0), num_heads * head_dim)
-      << "GLM5-Next KDA dt_bias dimension mismatch";
-
-  std::vector<int64_t> head_shape(static_cast<size_t>(raw_gate.dim() - 2), 1);
-  head_shape.push_back(num_heads);
-  head_shape.push_back(1);
-  std::vector<int64_t> bias_shape(static_cast<size_t>(raw_gate.dim() - 2), 1);
-  bias_shape.push_back(num_heads);
-  bias_shape.push_back(head_dim);
-
-  torch::Tensor gate_fp32 = raw_gate.to(torch::kFloat32);
-  torch::Tensor a_scale =
-      torch::exp(A_log.to(torch::kFloat32)).view(head_shape);
-  torch::Tensor bias = dt_bias.to(torch::kFloat32).view(bias_shape);
-  return lower_bound * torch::sigmoid(a_scale * (gate_fp32 + bias));
-}
-
 torch::Tensor glm5_next_kda_apply_output_gate(
     const torch::Tensor& normalized,
     const torch::Tensor& output_gate) {
@@ -102,90 +78,59 @@ torch::Tensor glm5_next_kda_apply_output_gate(
   return gated.to(normalized.scalar_type());
 }
 
-std::tuple<torch::Tensor, torch::Tensor> glm5_next_kda_eager_recurrence(
-    const torch::Tensor& q,
-    const torch::Tensor& k,
-    const torch::Tensor& v,
-    const torch::Tensor& log_gate,
-    const torch::Tensor& beta,
-    const torch::Tensor& initial_state,
-    bool l2norm_qk) {
-  CHECK_EQ(q.dim(), 4) << "GLM5-Next KDA q must be [B, T, H, K]";
-  CHECK_EQ(k.sizes(), q.sizes()) << "GLM5-Next KDA q/k shape mismatch";
-  CHECK_EQ(v.dim(), 4) << "GLM5-Next KDA v must be [B, T, H, V]";
-  CHECK_EQ(v.size(0), q.size(0)) << "GLM5-Next KDA v batch mismatch";
-  CHECK_EQ(v.size(1), q.size(1)) << "GLM5-Next KDA v token mismatch";
-  CHECK_EQ(v.size(2), q.size(2)) << "GLM5-Next KDA v head mismatch";
-  CHECK_EQ(initial_state.dim(), 4)
-      << "GLM5-Next KDA state must be [B, H, V, K]";
-  CHECK_EQ(initial_state.size(0), q.size(0))
-      << "GLM5-Next KDA state batch mismatch";
-  CHECK_EQ(initial_state.size(1), q.size(2))
-      << "GLM5-Next KDA state head mismatch";
-  CHECK_EQ(initial_state.size(2), v.size(3))
-      << "GLM5-Next KDA state value dimension mismatch";
-  CHECK_EQ(initial_state.size(3), q.size(3))
-      << "GLM5-Next KDA state key dimension mismatch";
+Glm5NextKDAInputProjectionImpl::Glm5NextKDAInputProjectionImpl(
+    int64_t hidden_size,
+    int64_t num_heads,
+    int64_t head_dim,
+    int32_t rank,
+    int32_t tp_size,
+    const torch::TensorOptions& options)
+    : rank_(rank), tp_size_(tp_size) {
+  const int64_t local_heads = num_heads / tp_size_;
+  const int64_t local_size = local_heads * head_dim;
+  shard_sizes_ = {
+      local_size, local_size, local_size, local_heads, head_dim, head_dim};
+  const int64_t output_size =
+      std::accumulate(shard_sizes_.begin(), shard_sizes_.end(), int64_t{0});
+  weight_ =
+      register_parameter("weight",
+                         torch::empty({output_size, hidden_size}, options),
+                         /*requires_grad=*/false);
+}
 
-  torch::Tensor gate = log_gate;
-  if (gate.dim() == 3) {
-    gate = gate.unsqueeze(/*dim=*/0);
+void Glm5NextKDAInputProjectionImpl::load_state_dict(
+    const StateDict& state_dict) {
+  int64_t offset = 0;
+  for (size_t index = 0; index < shard_sizes_.size(); ++index) {
+    torch::Tensor destination = weight_.narrow(0, offset, shard_sizes_[index]);
+    offset += shard_sizes_[index];
+    if (loaded_[index]) {
+      continue;
+    }
+    weight::load_sharded_weight(state_dict,
+                                kInputProjectionNames[index],
+                                /*dim=*/0,
+                                index < 4 ? rank_ : 0,
+                                index < 4 ? tp_size_ : 1,
+                                destination,
+                                loaded_[index]);
   }
-  CHECK_EQ(gate.sizes(), q.sizes())
-      << "GLM5-Next KDA per-key gate shape mismatch";
+}
 
-  torch::Tensor beta_values = beta;
-  if (beta_values.dim() == 2) {
-    beta_values = beta_values.unsqueeze(/*dim=*/0);
+void Glm5NextKDAInputProjectionImpl::verify_loaded_weights(
+    const std::string& prefix) const {
+  for (size_t index = 0; index < loaded_.size(); ++index) {
+    CHECK(loaded_[index]) << "Missing required weight after all shards loaded: "
+                          << prefix << kInputProjectionNames[index];
   }
-  CHECK_EQ(beta_values.dim(), 3)
-      << "GLM5-Next KDA beta must be [T, H] or [B, T, H]";
-  CHECK_EQ(beta_values.size(0), q.size(0))
-      << "GLM5-Next KDA beta batch mismatch";
-  CHECK_EQ(beta_values.size(1), q.size(1))
-      << "GLM5-Next KDA beta token mismatch";
-  CHECK_EQ(beta_values.size(2), q.size(2))
-      << "GLM5-Next KDA beta head mismatch";
+}
 
-  torch::Tensor q_fp32 = q.to(torch::kFloat32);
-  torch::Tensor k_fp32 = k.to(torch::kFloat32);
-  if (l2norm_qk) {
-    q_fp32 = l2_normalize(q_fp32);
-    k_fp32 = l2_normalize(k_fp32);
-  }
-  const double scale = 1.0 / std::sqrt(static_cast<double>(q.size(/*dim=*/3)));
-  q_fp32 = q_fp32 * scale;
-
-  torch::Tensor state = initial_state.to(torch::kFloat32).clone();
-  torch::Tensor v_fp32 = v.to(torch::kFloat32);
-  torch::Tensor gate_fp32 = gate.to(torch::kFloat32);
-  torch::Tensor beta_fp32 = torch::sigmoid(beta_values.to(torch::kFloat32));
-  std::vector<torch::Tensor> outputs;
-  outputs.reserve(static_cast<size_t>(q.size(/*dim=*/1)));
-
-  for (int64_t token = 0; token < q.size(/*dim=*/1); ++token) {
-    torch::Tensor q_t = q_fp32.select(/*dim=*/1, token);
-    torch::Tensor k_t = k_fp32.select(/*dim=*/1, token);
-    torch::Tensor v_t = v_fp32.select(/*dim=*/1, token);
-    torch::Tensor gate_t = gate_fp32.select(/*dim=*/1, token);
-    torch::Tensor beta_t = beta_fp32.select(/*dim=*/1, token);
-
-    state = state * torch::exp(gate_t).unsqueeze(/*dim=*/-2);
-    torch::Tensor prediction =
-        torch::sum(state * k_t.unsqueeze(/*dim=*/-2), /*dim=*/-1);
-    torch::Tensor delta = (v_t - prediction) * beta_t.unsqueeze(/*dim=*/-1);
-    state = state + delta.unsqueeze(/*dim=*/-1) * k_t.unsqueeze(/*dim=*/-2);
-    outputs.push_back(
-        torch::sum(state * q_t.unsqueeze(/*dim=*/-2), /*dim=*/-1));
-  }
-
-  torch::Tensor output;
-  if (outputs.empty()) {
-    output = torch::empty({q.size(0), 0, q.size(2), v.size(3)}, v.options());
-  } else {
-    output = torch::stack(outputs, /*dim=*/1).to(v.scalar_type());
-  }
-  return {output, state};
+torch::Tensor Glm5NextKDAInputProjectionImpl::forward(
+    const torch::Tensor& hidden_states) {
+  kernel::MatmulParams params;
+  params.a = hidden_states;
+  params.b = weight_;
+  return kernel::matmul(params);
 }
 
 Glm5NextKDAImpl::Glm5NextKDAImpl(const ModelArgs& args,
@@ -219,50 +164,14 @@ Glm5NextKDAImpl::Glm5NextKDAImpl(const ModelArgs& args,
   local_projection_size_ = local_num_heads_ * head_dim_;
   const QuantArgs no_quant_args{};
 
-  q_proj_ = register_module("q_proj",
-                            ColumnParallelLinear(args.hidden_size(),
-                                                 projection_size_,
-                                                 /*bias=*/false,
-                                                 /*gather_output=*/false,
-                                                 no_quant_args,
-                                                 parallel_args.tp_group_,
-                                                 options));
-  k_proj_ = register_module("k_proj",
-                            ColumnParallelLinear(args.hidden_size(),
-                                                 projection_size_,
-                                                 /*bias=*/false,
-                                                 /*gather_output=*/false,
-                                                 no_quant_args,
-                                                 parallel_args.tp_group_,
-                                                 options));
-  v_proj_ = register_module("v_proj",
-                            ColumnParallelLinear(args.hidden_size(),
-                                                 projection_size_,
-                                                 /*bias=*/false,
-                                                 /*gather_output=*/false,
-                                                 no_quant_args,
-                                                 parallel_args.tp_group_,
-                                                 options));
-  b_proj_ = register_module("b_proj",
-                            ColumnParallelLinear(args.hidden_size(),
+  in_proj_qkvbfg_a_ =
+      register_module("in_proj_qkvbfg_a",
+                      Glm5NextKDAInputProjection(args.hidden_size(),
                                                  num_heads_,
-                                                 /*bias=*/false,
-                                                 /*gather_output=*/false,
-                                                 no_quant_args,
-                                                 parallel_args.tp_group_,
+                                                 head_dim_,
+                                                 static_cast<int32_t>(rank_),
+                                                 static_cast<int32_t>(tp_size_),
                                                  options));
-  f_a_proj_ = register_module("f_a_proj",
-                              ReplicatedLinear(args.hidden_size(),
-                                               head_dim_,
-                                               /*bias=*/false,
-                                               no_quant_args,
-                                               options));
-  g_a_proj_ = register_module("g_a_proj",
-                              ReplicatedLinear(args.hidden_size(),
-                                               head_dim_,
-                                               /*bias=*/false,
-                                               no_quant_args,
-                                               options));
   f_b_proj_ = register_module("f_b_proj",
                               ColumnParallelLinear(head_dim_,
                                                    projection_size_,
@@ -341,19 +250,9 @@ Glm5NextKDAImpl::Glm5NextKDAImpl(const ModelContext& context)
                       context.get_model_args().linear_lower_bound()) {}
 
 void Glm5NextKDAImpl::load_state_dict(const StateDict& state_dict) {
-  load_column_linear(q_proj_, state_dict, "q_proj.");
-  load_column_linear(k_proj_, state_dict, "k_proj.");
-  load_column_linear(v_proj_, state_dict, "v_proj.");
-  load_column_linear(b_proj_, state_dict, "b_proj.");
+  in_proj_qkvbfg_a_->load_state_dict(state_dict);
   load_column_linear(f_b_proj_, state_dict, "f_b_proj.");
   load_column_linear(g_b_proj_, state_dict, "g_b_proj.");
-
-  if (!f_a_proj_->is_weight_loaded()) {
-    f_a_proj_->load_state_dict(state_dict.get_dict_with_prefix("f_a_proj."));
-  }
-  if (!g_a_proj_->is_weight_loaded()) {
-    g_a_proj_->load_state_dict(state_dict.get_dict_with_prefix("g_a_proj."));
-  }
 
   load_conv_linear(q_conv1d_, state_dict, "q_conv1d");
   load_conv_linear(k_conv1d_, state_dict, "k_conv1d");
@@ -396,24 +295,7 @@ void Glm5NextKDAImpl::load_state_dict(const StateDict& state_dict) {
 }
 
 void Glm5NextKDAImpl::verify_loaded_weights(const std::string& prefix) const {
-  CHECK(q_proj_ && q_proj_->is_weight_loaded())
-      << "Missing required weight after all shards loaded: " << prefix
-      << "q_proj.weight";
-  CHECK(k_proj_ && k_proj_->is_weight_loaded())
-      << "Missing required weight after all shards loaded: " << prefix
-      << "k_proj.weight";
-  CHECK(v_proj_ && v_proj_->is_weight_loaded())
-      << "Missing required weight after all shards loaded: " << prefix
-      << "v_proj.weight";
-  CHECK(b_proj_ && b_proj_->is_weight_loaded())
-      << "Missing required weight after all shards loaded: " << prefix
-      << "b_proj.weight";
-  CHECK(f_a_proj_ && f_a_proj_->is_weight_loaded())
-      << "Missing required weight after all shards loaded: " << prefix
-      << "f_a_proj.weight";
-  CHECK(g_a_proj_ && g_a_proj_->is_weight_loaded())
-      << "Missing required weight after all shards loaded: " << prefix
-      << "g_a_proj.weight";
+  in_proj_qkvbfg_a_->verify_loaded_weights(prefix);
   CHECK(f_b_proj_ && f_b_proj_->is_weight_loaded())
       << "Missing required weight after all shards loaded: " << prefix
       << "f_b_proj.weight";
@@ -466,18 +348,21 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
            "Span";
   }
 
-  torch::Tensor q = q_proj_->forward(hidden_states);
-  torch::Tensor k = k_proj_->forward(hidden_states);
-  torch::Tensor v = v_proj_->forward(hidden_states);
-  torch::Tensor mixed_qkv = torch::cat({q, k, v}, /*dim=*/-1);
-  torch::Tensor beta = b_proj_->forward(hidden_states).contiguous();
-  torch::Tensor raw_gate = f_b_proj_->forward(f_a_proj_->forward(hidden_states))
+  torch::Tensor projected = in_proj_qkvbfg_a_->forward(hidden_states);
+  const auto projections = projected.split_with_sizes(
+      {3 * local_projection_size_, local_num_heads_, head_dim_, head_dim_}, -1);
+  torch::Tensor mixed_qkv = projections[0].contiguous();
+  torch::Tensor beta = projections[1].contiguous();
+  torch::Tensor raw_gate = f_b_proj_->forward(projections[2].contiguous())
                                .view({num_tokens, local_num_heads_, head_dim_})
                                .contiguous();
   torch::Tensor output_gate =
-      g_b_proj_->forward(g_a_proj_->forward(hidden_states))
+      g_b_proj_->forward(projections[3].contiguous())
           .view({num_tokens, local_num_heads_, head_dim_})
           .contiguous();
+  torch::Tensor q;
+  torch::Tensor k;
+  torch::Tensor v;
 
   torch::Tensor conv_cache = kv_cache.get_conv_cache().transpose(-1, -2);
   torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
@@ -522,25 +407,25 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
     std::tie(q, k, v) = split_mixed_qkv(
         mixed_qkv, local_num_heads_, local_num_heads_, head_dim_, head_dim_);
 
-    torch::Tensor log_gate =
-        glm5_next_safe_gate(raw_gate, A_log_, dt_bias_, gate_lower_bound_);
-    torch::Tensor activated_beta = torch::sigmoid(beta.to(torch::kFloat32));
     torch::Tensor initial_state = ssm_cache.index({state_base_indices});
     initial_state.index_put_(
         {~attn_metadata.has_initial_states, torch::indexing::Ellipsis}, 0.0f);
     torch::Tensor cu_seqlens = attn_metadata.q_cu_seq_lens.contiguous();
     torch::Tensor final_state;
     std::tie(core_output, final_state) =
-        chunk_kda_->forward(q,
-                            k,
-                            v,
-                            log_gate,
-                            activated_beta,
-                            initial_state,
-                            cu_seqlens,
-                            attn_metadata.chunk_indices,
-                            /*output_final_state=*/true,
-                            /*use_qk_l2norm=*/true);
+        chunk_kda_->forward_raw_gate(q,
+                                     k,
+                                     v,
+                                     raw_gate,
+                                     A_log_,
+                                     dt_bias_,
+                                     gate_lower_bound_,
+                                     beta,
+                                     initial_state,
+                                     cu_seqlens,
+                                     attn_metadata.chunk_indices,
+                                     /*output_final_state=*/true,
+                                     /*use_qk_l2norm=*/true);
     core_output = core_output.squeeze(/*dim=*/0).contiguous();
     ssm_cache.index_put_({state_base_indices},
                          final_state.to(ssm_cache.scalar_type()));

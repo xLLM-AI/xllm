@@ -194,15 +194,27 @@ class KdaLinearAttentionMixin:
                 num_rows = int(mixed_qkv.shape[2])
                 q_seq_lens = getattr(metadata, "q_seq_lens", None)
                 n_groups = int(q_seq_lens.numel()) if q_seq_lens is not None else int(q_cu_raw.numel()) - 1
-                if num_seqs > 0 and n_groups > 0 and (num_rows % n_groups == 0):
+                spec_width = int(getattr(metadata, "spec_group_width", 0) or 0)
+                full_rows = n_groups * spec_width if spec_width > 1 and n_groups > 0 else num_rows
+                uniform = num_seqs > 0 and n_groups > 0 and full_rows == num_rows and num_rows % n_groups == 0
+                padded_tail = num_seqs > 0 and n_groups > 0 and spec_width > 1 and 0 < full_rows < num_rows
+                if uniform or padded_tail:
+                    row_count = full_rows if padded_tail else num_rows
+                    group_width = spec_width if padded_tail else num_rows // n_groups
                     if idx.numel() == num_rows:
-                        group_idx = idx.view(n_groups, num_rows // n_groups)[:, 0].contiguous()
+                        group_idx = idx[:row_count] if padded_tail else idx
+                        group_idx = group_idx.view(n_groups, group_width)[:, 0].contiguous()
                     else:
                         group_idx = idx
-                    return self._spec_verify(
-                        mixed_qkv,
-                        forget_gate.gate_from_raw(raw_gate_proj),
-                        beta,
+                    verify_qkv = mixed_qkv[:, :, :row_count] if padded_tail else mixed_qkv
+                    verify_gate = forget_gate.gate_from_raw(
+                        raw_gate_proj[:, :row_count] if padded_tail else raw_gate_proj
+                    )
+                    verify_beta = beta[:, :row_count] if padded_tail else beta
+                    verify_out = self._spec_verify(
+                        verify_qkv,
+                        verify_gate,
+                        verify_beta,
                         conv_weight,
                         activation,
                         group_idx,
@@ -212,6 +224,12 @@ class KdaLinearAttentionMixin:
                         recurrent_kda,
                         layer_id,
                     )
+                    if not padded_tail or verify_out.shape[1] == num_rows:
+                        return verify_out
+                    tail = verify_out.new_zeros(
+                        (verify_out.shape[0], num_rows - verify_out.shape[1], *verify_out.shape[2:])
+                    )
+                    return torch.cat((verify_out, tail), dim=1)
             q_rows = 0 if in_graph else (int(q_cu_raw.numel()) - 1 if q_cu_raw is not None else 0)
             per_row_idx = None
             per_row_cu = None
@@ -308,7 +326,6 @@ class KdaLinearAttentionMixin:
             mixed_qkv = self._causal_conv1d(mixed_qkv, conv_state, conv_weight, activation, is_prefill=is_prefill)
         else:
             q_cu = metadata.q_cu_seq_lens
-            assert q_cu is not None, "multi-sequence linear attention needs q_cu_seq_lens"
             host_values = getattr(metadata, "q_cu_seq_lens_host_values", None)
             if host_values is not None and len(host_values) == num_seqs + 1:
                 q_cu_list = host_values
@@ -332,7 +349,6 @@ class KdaLinearAttentionMixin:
                     if q_cu.device.type != "cpu":
                         raise RuntimeError("NPU KDA multi-sequence prefill requires host q_cu_seq_lens metadata")
                     q_cu_list = [int(value) for value in q_cu.to(torch.int64).tolist()]
-            del host_values
             mixed_qkv = self._causal_conv1d(
                 mixed_qkv, conv_state, conv_weight, activation, query_start_loc=q_cu_list, is_prefill=is_prefill
             )
@@ -422,12 +438,8 @@ class KdaLinearAttentionMixin:
             q_in = kernels.l2_norm(query)
             k_in = kernels.l2_norm(key)
             v_in = value.to(torch.bfloat16).contiguous()
-            cu_seqlens = (
-                q_cu.to(torch.int32)
-                if num_seqs != batch_size
-                else torch.tensor([0, seq_len], dtype=torch.int32, device=device)
-            )
-            if cu_seqlens.numel() > 2:
+            cu_seqlens = q_cu_list if num_seqs != batch_size else [0, seq_len]
+            if len(cu_seqlens) > 2:
                 # Seq-wise prefill: one single-sequence chunk_kda_fwd per
                 # sequence. A merged multi-sequence prefill (engine batches the
                 # concurrent requests' prefills) leaves per-seq conv/ssm state
@@ -453,7 +465,7 @@ class KdaLinearAttentionMixin:
                         layout="BSND",
                         initial_state=ssm_state[s : s + 1],
                         output_final_state=True,
-                        cu_seqlens=torch.tensor([0, int(t1 - t0)], dtype=torch.int32, device=device),
+                        cu_seqlens=[0, int(t1 - t0)],
                         return_intermediate_states=False,
                         state_v_first=True,
                         **_gate_kwargs,

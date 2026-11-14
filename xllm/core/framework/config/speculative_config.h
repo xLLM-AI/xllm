@@ -88,6 +88,14 @@ class SpeculativeConfig final {
            is_block_diffusion_algorithm(algorithm);
   }
 
+  static int64_t draft_replicated_block_pages(std::string_view algorithm,
+                                              int64_t kv_split_size) {
+    return kv_split_size > 1 && (is_dflash_algorithm(algorithm) ||
+                                 is_dflash2_algorithm(algorithm))
+               ? kv_split_size
+               : 1;
+  }
+
   // DFlash2 carries the dense proposal only when probabilistic rejection
   // requires it; greedy-only DFlash and Suffix stay out.
   static bool is_probabilistic_draft_sampling_supported(

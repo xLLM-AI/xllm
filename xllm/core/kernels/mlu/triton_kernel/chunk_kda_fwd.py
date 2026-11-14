@@ -43,6 +43,7 @@ def tmo_chunk_kda_gate_kernel(
     qg: tl.tensor,
     kg: tl.tensor,
     log_gate: tl.tensor,
+    gate_cumsum: tl.tensor,
     q: tl.tensor,
     k: tl.tensor,
     normalized_q: tl.tensor,
@@ -97,6 +98,12 @@ def tmo_chunk_kda_gate_kernel(
                 0.0,
             ),
             axis=0,
+        )
+        gate_last_offsets = (slot * H + head) * D + dimensions
+        tl.store(
+            gate_cumsum + gate_last_offsets,
+            last_cumulative,
+            mask=dimension_mask,
         )
         # Keep cumulative gates in log space: exp(-cumsum) overflows at BT64.
         positive_decay = tl.extra.mlu.libdevice.fast_expf(cumulative_values)
@@ -156,6 +163,7 @@ def tmo_chunk_kda_kkt_kernel(
     BC: tl.constexpr,
     BN: tl.constexpr,
     BK: tl.constexpr,
+    RAW_BETA: tl.constexpr = False,
 ) -> None:
     pid = tl.program_id(0)
     program_count = tl.num_programs(0)
@@ -212,6 +220,8 @@ def tmo_chunk_kda_kkt_kernel(
                 mask=row_mask,
                 other=0.0,
             ).to(tl.float32)
+            if RAW_BETA:
+                beta_values = tl.sigmoid(beta_values)
             lower_values *= beta_values[:, None]
             valid_matrix = row_mask[:, None] & column_mask[None, :]
             lower_values = tl.where(valid_matrix & (rows[:, None] > columns[None, :]), lower_values, 0.0)
@@ -319,7 +329,7 @@ def tmo_chunk_kda_state_kernel(
     qg: tl.tensor,
     kg: tl.tensor,
     aq: tl.tensor,
-    cumulative_gate: tl.tensor,
+    gate_cumsum: tl.tensor,
     input_state: tl.tensor,
     final_state: tl.tensor,
     output: tl.tensor,
@@ -421,9 +431,7 @@ def tmo_chunk_kda_state_kernel(
                 )
 
                 last_gate_one = tl.load(
-                    cumulative_gate + workspace_base + (valid_rows - 1) * D + key_offsets,
-                    mask=valid_rows > 0,
-                    other=0.0,
+                    gate_cumsum + (slot * H + head) * D + key_offsets,
                 ).to(tl.float32)
                 state_one *= tl.extra.mlu.libdevice.fast_expf(last_gate_one)[None, :]
                 kg_one = tl.load(
@@ -438,3 +446,265 @@ def tmo_chunk_kda_state_kernel(
             state_one,
             mask=value_mask[:, None],
         )
+
+
+@triton.jit(do_not_specialize=["CHUNK_BASE", "SLOTS"])
+def tmo_chunk_kda_optimized_raw_gate_kernel(
+    v: tl.tensor,
+    raw_beta: tl.tensor,
+    w: tl.tensor,
+    u: tl.tensor,
+    qg: tl.tensor,
+    kg: tl.tensor,
+    raw_gate: tl.tensor,
+    a_log: tl.tensor,
+    dt_bias: tl.tensor,
+    gate_lower_bound: float,
+    gate_cumsum: tl.tensor,
+    q: tl.tensor,
+    k: tl.tensor,
+    normalized_q: tl.tensor,
+    normalized_k: tl.tensor,
+    cumulative_gate: tl.tensor,
+    cu_seqlens: tl.tensor,
+    chunk_indices: tl.tensor,
+    CHUNK_BASE: tl.int64,
+    SLOTS: tl.int64,
+    H: tl.constexpr,
+    BT: tl.constexpr,
+    D: tl.constexpr,
+    BK: tl.constexpr,
+) -> None:
+    pid = tl.program_id(0)
+    program_count = tl.num_programs(0)
+    key_blocks: tl.constexpr = triton.cdiv(D, BK)
+    total_jobs = SLOTS * H * key_blocks
+    row_offsets = tl.arange(0, BT)
+    key_offsets = tl.arange(0, BK)
+
+    for flat_job in range(pid, total_jobs, program_count):
+        key_block = flat_job % key_blocks
+        head = (flat_job // key_blocks) % H
+        slot = flat_job // (key_blocks * H)
+        metadata_slot = CHUNK_BASE + slot
+        sequence = tl.load(chunk_indices + metadata_slot * 2).to(tl.int32)
+        local_chunk = tl.load(chunk_indices + metadata_slot * 2 + 1).to(tl.int32)
+        sequence_begin = tl.load(cu_seqlens + sequence).to(tl.int32)
+        sequence_end = tl.load(cu_seqlens + sequence + 1).to(tl.int32)
+        chunk_start = local_chunk * BT
+        valid_rows = tl.minimum(BT, sequence_end - sequence_begin - chunk_start)
+
+        rows = row_offsets
+        dimensions = key_block * BK + key_offsets
+        row_mask = rows < valid_rows
+        dimension_mask = dimensions < D
+        input_offsets = (sequence_begin + chunk_start + rows[:, None]) * H * D + head * D + dimensions[None, :]
+        input_mask = row_mask[:, None] & dimension_mask[None, :]
+        raw_values = tl.load(
+            raw_gate + input_offsets,
+            mask=input_mask,
+            other=0.0,
+        ).to(tl.float32)
+        bias_values = tl.load(
+            dt_bias + head * D + dimensions,
+            mask=dimension_mask,
+            other=0.0,
+        ).to(tl.float32)
+        gate_scale = tl.exp(tl.load(a_log + head).to(tl.float32))
+        # Padding must contribute zero to the cumulative gate.
+        gate_values = tl.where(
+            input_mask,
+            gate_lower_bound * tl.sigmoid(gate_scale * (raw_values + bias_values[None, :])),
+            0.0,
+        )
+        cumulative_values = tl.cumsum(gate_values, axis=0)
+        output_offsets = (slot * H + head) * BT * D + rows[:, None] * D + dimensions[None, :]
+        output_mask = row_mask[:, None] & dimension_mask[None, :]
+        last_cumulative = tl.sum(
+            tl.where(
+                rows[:, None] == valid_rows - 1,
+                cumulative_values,
+                0.0,
+            ),
+            axis=0,
+        )
+        gate_last_offsets = (slot * H + head) * D + dimensions
+        tl.store(
+            gate_cumsum + gate_last_offsets,
+            last_cumulative,
+            mask=dimension_mask,
+        )
+        positive_decay = tl.extra.mlu.libdevice.fast_expf(cumulative_values)
+        tl.store(cumulative_gate + output_offsets, cumulative_values, mask=output_mask)
+        q_values = tl.load(q + input_offsets, mask=output_mask, other=0.0).to(tl.float32)
+        q_inverse_norm = tl.rsqrt(tl.sum(q_values * q_values, axis=1) + 1.0e-6)
+        normalized_q_values = q_values * q_inverse_norm[:, None] * 0.08838834764831845
+        tl.store(normalized_q + output_offsets, normalized_q_values, mask=output_mask)
+        tl.store(
+            qg + output_offsets,
+            tl.where(output_mask, normalized_q_values * positive_decay, 0.0),
+        )
+        beta_values = tl.where(
+            row_mask,
+            tl.sigmoid(
+                tl.load(
+                    raw_beta + (sequence_begin + chunk_start + rows) * H + head,
+                    mask=row_mask,
+                    other=0.0,
+                ).to(tl.float32)
+            ),
+            0.0,
+        )
+        k_values = tl.load(k + input_offsets, mask=output_mask, other=0.0).to(tl.float32)
+        k_inverse_norm = tl.rsqrt(tl.sum(k_values * k_values, axis=1) + 1.0e-6)
+        normalized_k_values = k_values * k_inverse_norm[:, None]
+        tl.store(normalized_k + output_offsets, normalized_k_values, mask=output_mask)
+        tl.store(
+            w + output_offsets,
+            tl.where(output_mask, normalized_k_values * positive_decay * beta_values[:, None], 0.0),
+        )
+        relative_decay = tl.extra.mlu.libdevice.fast_expf(last_cumulative[None, :] - cumulative_values)
+        tl.store(
+            kg + output_offsets,
+            tl.where(output_mask, normalized_k_values * relative_decay, 0.0),
+        )
+        v_values = tl.load(v + input_offsets, mask=output_mask, other=0.0).to(tl.float32)
+        u_output_offsets = (slot * H + head) * BT * D + dimensions[None, :] * BT + rows[:, None]
+        tl.store(
+            u + u_output_offsets,
+            tl.where(output_mask, v_values * beta_values[:, None], 0.0),
+        )
+
+
+@triton.jit(do_not_specialize=["CHUNK_BASE", "SLOTS", "N"])
+def tmo_chunk_kda_optimized_state_kernel(
+    inverse: tl.tensor,
+    w: tl.tensor,
+    u: tl.tensor,
+    qg: tl.tensor,
+    kg: tl.tensor,
+    aq: tl.tensor,
+    gate_cumsum: tl.tensor,
+    input_state: tl.tensor,
+    final_state: tl.tensor,
+    output: tl.tensor,
+    cu_seqlens: tl.tensor,
+    chunk_indices: tl.tensor,
+    CHUNK_BASE: tl.int64,
+    SLOTS: tl.int64,
+    N: tl.int64,
+    H: tl.constexpr,
+    BT: tl.constexpr,
+    D: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+) -> None:
+    pid = tl.program_id(0)
+    program_count = tl.num_programs(0)
+    value_blocks: tl.constexpr = triton.cdiv(D, BV)
+    total_jobs = H * value_blocks
+    row_offsets = tl.arange(0, BT)
+    key_offsets = tl.arange(0, BK)
+    value_offsets = tl.arange(0, BV)
+    solve_rows = tl.arange(0, BT)
+
+    for flat_job in range(pid, total_jobs, program_count):
+        value_block = flat_job % value_blocks
+        head = (flat_job // value_blocks) % H
+        values = value_block * BV + value_offsets
+        value_mask = values < D
+        global_chunk = 0
+        for sequence in range(0, N):
+            sequence_begin = tl.load(cu_seqlens + sequence).to(tl.int32)
+            sequence_end = tl.load(cu_seqlens + sequence + 1).to(tl.int32)
+            sequence_length = sequence_end - sequence_begin
+            sequence_chunks = (sequence_length + BT - 1) // BT
+            sequence_chunk_start = global_chunk
+            global_chunk += sequence_chunks
+            first_slot = tl.maximum(sequence_chunk_start - CHUNK_BASE, 0)
+            stop_slot = tl.minimum(sequence_chunk_start + sequence_chunks - CHUNK_BASE, SLOTS)
+            state_base = (sequence * H + head) * D * D
+            state_one_offsets = state_base + values[:, None] * D + key_offsets[None, :]
+            state_one = tl.load(
+                input_state + state_one_offsets,
+                mask=value_mask[:, None],
+                other=0.0,
+            ).to(tl.float32)
+
+            for slot in range(first_slot, stop_slot):
+                local_chunk = (CHUNK_BASE + slot - sequence_chunk_start).to(tl.int32)
+                chunk_start = local_chunk * BT
+                valid_rows = tl.minimum(BT, sequence_length - chunk_start)
+                row_mask = row_offsets < valid_rows
+                workspace_base = (slot * H + head) * BT * D
+                w_one_offsets = workspace_base + row_offsets[:, None] * D + key_offsets[None, :]
+                w_one = tl.load(
+                    w + w_one_offsets,
+                    mask=row_mask[:, None],
+                    other=0.0,
+                ).to(tl.float32)
+                u_offsets = workspace_base + values[:, None] * BT + row_offsets[None, :]
+                u_values = tl.load(
+                    u + u_offsets,
+                    mask=value_mask[:, None] & row_mask[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                new_values = u_values - tl.dot(
+                    state_one,
+                    tl.trans(w_one),
+                    allow_tf32=False,
+                )
+
+                inverse_base = (slot * H + head) * BT * BT
+                inverse_offsets = inverse_base + solve_rows[:, None] * BT + solve_rows[None, :]
+                inverse_values = tl.load(inverse + inverse_offsets).to(tl.float32)
+                inverse_values = tl.where(solve_rows[:, None] >= solve_rows[None, :], inverse_values, 0.0)
+                new_values = tl.dot(new_values, tl.trans(inverse_values), allow_tf32=False)
+
+                qg_one = tl.load(
+                    qg + w_one_offsets,
+                    mask=row_mask[:, None],
+                    other=0.0,
+                ).to(tl.float32)
+                output_values = tl.dot(
+                    state_one,
+                    tl.trans(qg_one),
+                    allow_tf32=False,
+                )
+                aq_base = (slot * H + head) * BT * BT
+                aq_offsets = aq_base + row_offsets[:, None] * BT + row_offsets[None, :]
+                aq_values = tl.load(aq + aq_offsets).to(tl.float32)
+                aq_values = tl.where(
+                    row_offsets[:, None] >= row_offsets[None, :],
+                    aq_values,
+                    0.0,
+                )
+                output_values += tl.dot(
+                    new_values,
+                    tl.trans(aq_values),
+                    allow_tf32=False,
+                )
+                global_tokens = sequence_begin + chunk_start + row_offsets
+                output_offsets = global_tokens[:, None] * H * D + head * D + values[None, :]
+                tl.store(
+                    output + output_offsets,
+                    tl.trans(output_values),
+                    mask=row_mask[:, None] & value_mask[None, :],
+                )
+
+                last_gate_one = tl.load(
+                    gate_cumsum + (slot * H + head) * D + key_offsets,
+                ).to(tl.float32)
+                state_one *= tl.extra.mlu.libdevice.fast_expf(last_gate_one)[None, :]
+                kg_one = tl.load(
+                    kg + w_one_offsets,
+                    mask=row_mask[:, None],
+                    other=0.0,
+                ).to(tl.float32)
+                state_one += tl.dot(new_values, kg_one, allow_tf32=False)
+
+            tl.store(
+                final_state + state_one_offsets,
+                state_one,
+                mask=value_mask[:, None],
+            )

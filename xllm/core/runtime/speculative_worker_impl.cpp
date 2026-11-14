@@ -357,7 +357,7 @@ bool SpeculativeWorkerImpl<TargetInput>::prepare_model_decode_continuation(
   // Only decode batches need draft input rebuilding.
   auto& input_params = inputs.input_params;
   const int32_t num_sequences = input_params.meta.num_sequences;
-  const int32_t block_size = options_.block_size();
+  const int32_t block_size = logical_block_size();
 
   const torch::Tensor last_token_ids =
       to_cpu_contiguous(prior_output.sample_output.next_tokens.flatten());
@@ -446,7 +446,7 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   const int32_t num_sequences = input_params.meta.num_sequences;
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
-  const int32_t block_size = options_.block_size();
+  const int32_t block_size = logical_block_size();
   // Hybrid targets (for example Qwen3.8 GDN) mark validation as spec-verify
   // before entering this generic builder.  They must keep one sequence row
   // with an N+1-token query so recurrent state is checkpointed and committed

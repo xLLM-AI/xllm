@@ -143,25 +143,31 @@ class Glm5NextModelImpl final
         *modified_input_params.attn_metadata;
 
     std::optional<torch::Tensor> residual;
+    std::optional<layer::PendingMHC> pending_mhc;
     layer::DsaTopkRelay topk_relay;
     for (size_t layer_id = 0; layer_id < layers_.size(); ++layer_id) {
       if (!modified_input_params.synchronize_layer(
               static_cast<uint32_t>(layer_id))) {
         return ModelOutput();
       }
-      hidden_states = layers_[layer_id]->forward(hidden_states,
-                                                 residual,
-                                                 positions,
-                                                 attn_metadata,
-                                                 kv_caches[layer_id],
-                                                 modified_input_params,
-                                                 &topk_relay);
+      hidden_states = layers_[layer_id]->forward(
+          hidden_states,
+          residual,
+          positions,
+          attn_metadata,
+          kv_caches[layer_id],
+          modified_input_params,
+          &topk_relay,
+          &pending_mhc,
+          /*is_last_layer=*/layer_id + 1 == layers_.size());
       if (!modified_input_params.record_layer(static_cast<uint32_t>(layer_id),
                                               hidden_states.device())) {
         return ModelOutput();
       }
     }
 
+    CHECK(!pending_mhc.has_value())
+        << "GLM5-Next final layer must materialize pending mHC state.";
     CHECK_EQ(hidden_states.dim(), 3)
         << "GLM5-Next mHC output must retain the residual-stream dimension.";
     CHECK_EQ(hidden_states.size(-2), hc_mult_)
@@ -193,16 +199,16 @@ class Glm5NextForCausalLMImpl final
 
   bool is_hybrid_linear_attention() { return true; }
 
-  bool requires_graph_forward_metadata() override { return true; }
+  bool requires_graph_forward_metadata() { return true; }
 
-  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
-      override {
+  std::unique_ptr<ModelGraphMetadataState>
+  create_graph_forward_metadata_state() {
     return std::make_unique<Glm5NextGraphMetadataState>();
   }
 
   void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
                                       const torch::Tensor& positions,
-                                      ModelParamsView& params) override {
+                                      ModelParamsView& params) {
     auto* graph_state = dynamic_cast<Glm5NextGraphMetadataState*>(state);
     CHECK(graph_state != nullptr) << "GLM5 requires per-graph metadata state";
     graph_state->prepare(positions, params);

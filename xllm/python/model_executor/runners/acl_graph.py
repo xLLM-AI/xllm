@@ -82,6 +82,7 @@ class StaticGraphAttentionMetadata:
     dp_global_sequence_nums: tuple[int, ...] = ()
     dp_is_decode: tuple[int, ...] = ()
     q_seq_lens: torch.Tensor | None = None
+    spec_group_width: int = 0
     kpool_query_lens: tuple[int, ...] = ()
     kpool_query_lens_device: torch.Tensor | None = None
     expanded_decode_metadata: ExpandedDecodeMetadata | None = None

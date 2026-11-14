@@ -146,7 +146,6 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   const bool has_pending_storage = pending_mhc != nullptr;
   const bool has_pending = has_pending_storage && pending_mhc->has_value();
   const MHCFusionPlan mhc_plan = resolve_mhc_fusion({
-      .optimization_enabled = true,
       .is_prefill = attn_metadata.is_prefill,
       .is_chunked_prefill = attn_metadata.is_chunked_prefill,
       .supports_fused_mhc = attn_hc_pre_->supports_fused_mhc() &&

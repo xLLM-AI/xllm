@@ -161,6 +161,11 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   void prepare_validate_inputs(const TargetInput& inputs,
                                TargetInput& validate_inputs);
 
+  int32_t logical_block_size() const {
+    return static_cast<int32_t>(options_.block_size()) *
+           parallel_args_.kv_split_size_effective();
+  }
+
   bool use_orthogonal_cp_consensus() const {
     return parallel_args_.cp_size() > 1 &&
            parallel_args_.tp_group_ != nullptr &&

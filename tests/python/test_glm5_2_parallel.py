@@ -1126,7 +1126,6 @@ def _expanded_decode_metadata(num_tokens: int) -> SimpleNamespace:
         paged_kv_indptr=torch.arange(num_tokens + 1, dtype=torch.int32),
         paged_kv_indices=torch.zeros(num_tokens, dtype=torch.int32),
         paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32),
-        paged_attention_tiling_data=None,
         kv_seq_lens_host=None,
         kv_seq_lens_host_values=[1] * num_tokens,
     )

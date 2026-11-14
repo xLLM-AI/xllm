@@ -621,6 +621,14 @@ void GraphPersistentParam::update_eplb_decode_token_mask(
   }
 }
 
+torch::Tensor GraphPersistentParam::expanded_block_tables_view(
+    int64_t num_tokens,
+    int64_t block_table_width) const {
+  return persistent_expanded_block_tables_.flatten()
+      .narrow(0, 0, num_tokens * block_table_width)
+      .view({num_tokens, block_table_width});
+}
+
 std::vector<int32_t>
 GraphPersistentParam::update_expanded_spec_decode_attention(
     const ModelParamsView& input_params,
@@ -630,8 +638,6 @@ GraphPersistentParam::update_expanded_spec_decode_attention(
       << "expanded spec decode attention is only for spec verify";
   CHECK(input_params.meta.batch_forward_type.is_chunked_prefill())
       << "expanded spec decode attention expects chunked prefill";
-  CHECK(input_params.graph.use_expanded_decode_for_spec_verify_attention)
-      << "MTP worker must prepare expanded spec-verify graph input";
   CHECK(input_params.graph.expanded_kv_seq_lens.defined())
       << "expanded spec-verify kv seq lens must be defined";
   CHECK(input_params.graph.expanded_block_tables.defined())
@@ -675,12 +681,15 @@ GraphPersistentParam::update_expanded_spec_decode_attention(
 
   const int64_t block_table_len =
       input_params.graph.expanded_block_tables.size(1);
-  persistent_expanded_block_tables_
-      .slice(/*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens)
-      .zero_();
-  persistent_expanded_block_tables_
-      .slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
-      .slice(/*dim=*/1, /*start=*/0, /*end=*/block_table_len)
+  const int64_t persistent_width =
+      input_params.graph.spec_verify_source_addresses_stable
+          ? block_table_len
+          : persistent_expanded_block_tables_.size(1);
+  auto block_tables =
+      expanded_block_tables_view(padded_num_tokens, persistent_width);
+  block_tables.zero_();
+  block_tables.narrow(0, 0, actual_num_tokens)
+      .narrow(1, 0, block_table_len)
       .copy_(input_params.graph.expanded_block_tables, /*non_blocking=*/true);
   return expanded_kv_seq_lens_vec;
 }
@@ -813,8 +822,7 @@ void GraphPersistentParam::update_spec_verify_inputs(
   expanded_kv_seq_lens_.narrow(0, 0, total_tokens)
       .copy_(params.graph.expanded_kv_seq_lens.narrow(0, 0, total_tokens),
              true);
-  persistent_expanded_block_tables_.narrow(0, 0, total_tokens)
-      .narrow(1, 0, expanded_block_table_len)
+  expanded_block_tables_view(total_tokens, expanded_block_table_len)
       .copy_(params.graph.expanded_block_tables, true);
 }
 
@@ -1185,18 +1193,10 @@ std::optional<Params> GraphPersistentParam::update(
         params, actual_num_tokens, padded_num_tokens);
   }
   const auto expanded_block_tables_for_graph = [&]() {
-    torch::Tensor block_tables = persistent_expanded_block_tables_.slice(
-        /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
-    if (params.graph.spec_verify_source_addresses_stable) {
-      // Stable verify graphs include the active width in their graph key.
-      return block_tables.narrow(
-          /*dim=*/1,
-          /*start=*/0,
-          /*length=*/params.graph.expanded_block_tables.size(1));
-    }
-    // Generic graphs key only on token shape, so retain the fixed persistent
-    // width used by main instead of binding a request-dependent view.
-    return block_tables;
+    const int64_t width = params.graph.spec_verify_source_addresses_stable
+                              ? params.graph.expanded_block_tables.size(1)
+                              : persistent_expanded_block_tables_.size(1);
+    return expanded_block_tables_view(padded_num_tokens, width);
   };
   if (supports_mla_graph_kv_bucketing_) {
     CHECK_LE(static_cast<size_t>(padded_batch_size),

@@ -417,15 +417,15 @@ Status MooncakeKVCacheTransferState::set_cache_peer(
                   "local cache layout is not registered");
   }
 
-  std::optional<ReshardPlanTemplate> plan;
+  std::optional<std::vector<StridedRegionTemplate>> plan;
   if (mode == CachePeerMode::ACTIVE) {
-    ReshardPlanTemplate active_plan;
+    std::vector<StridedRegionTemplate> active_plan;
     const Status plan_status = ReshardPlanner().build_outgoing_plan(
         *local_manifest, peer_manifest, &active_plan);
     if (!plan_status.ok()) {
       return plan_status;
     }
-    if (active_plan.regions.empty()) {
+    if (active_plan.empty()) {
       return Status(StatusCode::INVALID_ARGUMENT,
                     "active cache peer requires a non-empty plan");
     }
@@ -481,34 +481,13 @@ Status MooncakeKVCacheTransferState::set_cache_peer(
   return Status();
 }
 
-bool MooncakeKVCacheTransferState::has_outgoing_plan(
-    const std::string& remote_addr,
-    CacheNamespace cache_namespace) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  const auto link_it = cache_peer_links_.find(remote_addr);
-  if (link_it == cache_peer_links_.end() || !link_it->second.plan.has_value()) {
-    return false;
-  }
-  return std::any_of(link_it->second.plan->regions.begin(),
-                     link_it->second.plan->regions.end(),
-                     [cache_namespace](const StridedRegionTemplate& region) {
-                       return region.cache_namespace == cache_namespace;
-                     });
-}
-
-bool MooncakeKVCacheTransferState::has_reshard_plan(
-    const std::string& remote_addr) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return cache_peer_links_.find(remote_addr) != cache_peer_links_.end();
-}
-
 Status MooncakeKVCacheTransferState::bind_outgoing_regions(
     const std::string& remote_addr,
     const std::vector<KVTransferMapping>& mappings,
     CacheNamespace cache_namespace,
     int64_t layer_id,
     std::vector<ByteRegion>* regions) const {
-  std::optional<ReshardPlanTemplate> plan;
+  std::optional<std::vector<StridedRegionTemplate>> plan;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto link_it = cache_peer_links_.find(remote_addr);
@@ -536,7 +515,7 @@ Status MooncakeKVCacheTransferState::bind_outgoing_regions_explicit(
     CacheNamespace cache_namespace,
     int64_t layer_id,
     std::vector<ByteRegion>* regions) const {
-  std::optional<ReshardPlanTemplate> plan;
+  std::optional<std::vector<StridedRegionTemplate>> plan;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto link_it = cache_peer_links_.find(remote_addr);
@@ -641,10 +620,7 @@ bool MooncakeKVCacheTransferEngine::get_remote_virtual_offsets(
     const std::vector<uint64_t>& block_ids,
     WorkerCacheLayoutManifest* manifest,
     std::vector<VirtualKVCacheLayerGlobalOffsets>* layer_offsets,
-    VirtualKVCachePullSession* session) {
-  if (session != nullptr) {
-    *session = VirtualKVCachePullSession();
-  }
+    VirtualKVCachePullSession& session) {
   if (manifest == nullptr || layer_offsets == nullptr) {
     return false;
   }
@@ -761,18 +737,15 @@ bool MooncakeKVCacheTransferEngine::get_remote_virtual_offsets(
            peer.mode == peer_snapshot.mode;
   };
   const auto publish_offsets = [&]() {
-    if (session != nullptr) {
-      session->link_epoch = peer_snapshot.link_epoch;
-      session->source_cluster_id = remote_manifest.cluster_id;
-      session->source_addr = remote_manifest.addr;
-      session->source_incarnation = remote_manifest.incarnation_id;
-      session->source_layout_generation = remote_manifest.layout_generation;
-      session->destination_cluster_id = local_manifest->cluster_id;
-      session->destination_addr = local_manifest->addr;
-      session->destination_incarnation = local_manifest->incarnation_id;
-      session->destination_layout_generation =
-          local_manifest->layout_generation;
-    }
+    session.link_epoch = peer_snapshot.link_epoch;
+    session.source_cluster_id = remote_manifest.cluster_id;
+    session.source_addr = remote_manifest.addr;
+    session.source_incarnation = remote_manifest.incarnation_id;
+    session.source_layout_generation = remote_manifest.layout_generation;
+    session.destination_cluster_id = local_manifest->cluster_id;
+    session.destination_addr = local_manifest->addr;
+    session.destination_incarnation = local_manifest->incarnation_id;
+    session.destination_layout_generation = local_manifest->layout_generation;
     *manifest = peer_snapshot.source_manifest;
     *layer_offsets = std::move(offsets);
     return true;
@@ -1069,17 +1042,6 @@ Status MooncakeKVCacheTransferEngine::set_virtual_memory_provider(
                                                   std::move(provider));
 }
 
-bool MooncakeKVCacheTransferEngine::has_outgoing_plan(
-    const std::string& remote_addr,
-    CacheNamespace cache_namespace) const {
-  return cache_state_.has_outgoing_plan(remote_addr, cache_namespace);
-}
-
-bool MooncakeKVCacheTransferEngine::has_reshard_plan(
-    const std::string& remote_addr) const {
-  return cache_state_.has_reshard_plan(remote_addr);
-}
-
 Status MooncakeKVCacheTransferEngine::bind_outgoing_regions(
     const std::string& remote_addr,
     const std::vector<KVTransferMapping>& mappings,
@@ -1216,9 +1178,6 @@ bool MooncakeKVCacheTransferEngine::move_memory_regions_with_session(
   }
   return move_memory_regions(remote_addr, regions, move_opcode);
 }
-
-MooncakeKVCacheTransferService::MooncakeKVCacheTransferService()
-    : state_(MooncakeKVCacheTransferState::shared_instance()) {}
 
 MooncakeKVCacheTransferService::MooncakeKVCacheTransferService(
     std::shared_ptr<MooncakeKVCacheTransferState> state)

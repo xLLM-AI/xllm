@@ -42,7 +42,6 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #if defined(USE_NPU)
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
-#include "core/layers/common/expanded_decode_metadata_builder.h"
 #endif
 #include "core/common/types.h"
 #include "core/framework/batch/decode_input_builder.h"
@@ -53,6 +52,7 @@ limitations under the License.
 #include "core/framework/speculative/rejection_sampler.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
+#include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/platform/platform.h"
 #include "core/util/tensor_helper.h"
 #include "models/model_registry.h"
@@ -704,6 +704,9 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     TargetInput new_input = input.clone();
     scale_speculative_parallel_token_counts(new_input.input_params,
                                             options_.num_speculative_tokens());
+    if (impl_->has_request_state_cache()) {
+      new_input.input_params.is_spec_verify = true;
+    }
     ForwardOutput output = run_worker_no_sync_impl(*impl_,
                                                    new_input,
                                                    *prepare_stream_,

@@ -98,7 +98,7 @@ def test_owner_local_index_write_ignores_non_owned_slots(dtype: torch.dtype, slo
         var.index_copy_(0, indices[valid], updates[valid])
 
     with patch(
-        "xllm.python.attention.npu_paged_attention.kernels.scatter_nd_update",
+        "xllm.python.attention.npu_paged_attention.kernels.scatter_cache_by_slot",
         side_effect=scatter,
         create=True,
     ):

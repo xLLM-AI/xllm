@@ -141,9 +141,14 @@ def _create_attention_backend(
         )
     if current_platform.is_npu():
         dcp_group = distributed.dcp_group(device)
+        replicated_block_draft = bool(config.get("is_draft_engine", False)) and model_type in (
+            "DFlashDraftModel",
+            "DFlash2DraftModel",
+        )
         if (
             dcp_group is not None
             and dcp_group.size() > 1
+            and not replicated_block_draft
             and (int(config.get("cp_size", 1)) == 1 or model_type in ("glm_moe_dsa", "glm_moe_dsa_mtp"))
         ):
             if model_type in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):

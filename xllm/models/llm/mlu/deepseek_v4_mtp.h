@@ -129,7 +129,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module,
            "size. n_heads="
         << n_heads << ", local_tp_size=" << dp_local_tp_size;
     hc_mult_ = model_args_.hc_mult();
-    window_size_ = model_args_.window_size_;
+    window_size_ = model_args_.window_size();
 
     init_rope(model_args_, options);
     init_hadamard(model_args_, options);

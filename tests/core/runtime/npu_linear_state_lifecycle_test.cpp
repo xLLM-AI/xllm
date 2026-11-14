@@ -281,10 +281,7 @@ class NpuLinearStateLifecycleTest
     input.input_params.meta.q_max_seq_len = 1;
     input.input_params.meta.batch_forward_type = forward_type;
     input.input_params.is_spec_verify = is_spec_verify;
-    input.input_params.attention.host.q_seq_lens.reserve(rows + 1);
-    for (int32_t row = 0; row <= rows; ++row) {
-      input.input_params.attention.host.q_seq_lens.push_back(row);
-    }
+    input.input_params.attention.host.q_seq_lens.assign(rows, 1);
     input.input_params.attention.host.kv_cache_tokens_nums =
         std::move(cached_tokens);
     input.input_params.embedding.linear_state_ids = std::move(write_ids);

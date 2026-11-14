@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 _EXPORTS = {
     "activation": ("silu_and_mul", "fused_sigmoid_mul"),
     "attention": (
+        "batch_matmul_transpose",
         "reshape_paged_cache",
         "update_decode_graph_metadata",
         "vision_fusion_attention",
@@ -134,6 +135,7 @@ _EXPORTS = {
         "supports_pool_key_indexer",
         "quant_lightning_indexer",
         "quant_lightning_indexer_metadata",
+        "scatter_cache_by_slot",
         "scatter_nd_update",
         "sparse_flash_attention",
         "sparse_flash_attention_out",
@@ -165,6 +167,7 @@ __all__ = [
     "fused_sigmoid_mul",
     "silu_and_mul",
     "dequant_swiglu_quant",
+    "batch_matmul_transpose",
     "reshape_paged_cache",
     "update_decode_graph_metadata",
     "vision_fusion_attention",
@@ -224,6 +227,7 @@ __all__ = [
     "supports_pool_key_indexer",
     "quant_lightning_indexer",
     "quant_lightning_indexer_metadata",
+    "scatter_cache_by_slot",
     "scatter_nd_update",
     "sparse_flash_attention",
     "sparse_flash_attention_out",

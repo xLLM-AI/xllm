@@ -471,6 +471,12 @@ class LlmForwardInput final {
                   torch::TensorOptions().dtype(torch::kUInt8).device(device),
                   true);
       plan.bind_device_views(inputs.runtime.device_input_buffer, device);
+    } else {
+      for (const auto& entry : plan.entries) {
+        *entry.target = torch::empty(
+            entry.host_tensor.sizes(),
+            entry.host_tensor.options().device(device).pinned_memory(false));
+      }
     }
 
     inputs.runtime.device_tensors_ready = true;
