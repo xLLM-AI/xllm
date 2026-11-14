@@ -39,7 +39,9 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/parallel_config_validation.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "framework/chat_template/chat_template_factory.h"
@@ -121,6 +123,10 @@ LLMMaster::LLMMaster(const Options& options)
   controller_config.policy.eplb_policy_kind = eplb_config.eplb_policy_kind();
 
   runtime::Options engine_options;
+  engine_options.eplb_worker_config(EplbWorkerConfig{
+      .enabled = controller_config.enabled,
+      .redundant_experts_num = controller_config.policy.redundant_experts_num,
+      .use_decode_only_load = eplb_config.eplb_use_decode_only_load()});
   engine_options.eplb_controller_config(std::move(controller_config));
   engine_options.model_path(options_.model_path())
       .model_id(options_.model_id())
@@ -264,6 +270,8 @@ LLMMaster::LLMMaster(const Options& options)
       .nnodes(options_.nnodes())
       .dp_size(options_.dp_size())
       .cp_size(options_.cp_size())
+      .kv_split_size(ParallelConfig::get_instance().kv_split_size_effective())
+      .enable_mix_batch(SchedulerConfig::get_instance().enable_mix_batch())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
       .enable_chunked_prefill(options_.enable_chunked_prefill())

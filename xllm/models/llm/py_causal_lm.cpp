@@ -135,8 +135,8 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
   moe_tp_size_ = (moe_tp_group_ != nullptr) ? moe_tp_group_->world_size() : 1;
   moe_tp_rank_ = (moe_tp_group_ != nullptr) ? moe_tp_group_->rank() : 0;
   ep_rank_ = (moe_ep_group_ != nullptr) ? moe_ep_group_->rank() : 0;
-  const auto& eplb_config = EPLBConfig::get_instance();
-  if (eplb_config.enable_eplb()) {
+  const EplbWorkerConfig& eplb_config = parallel_args.eplb_worker_config();
+  if (eplb_config.enabled) {
     CHECK(parallel_args.eplb_group_ != nullptr)
         << "Python EPLB requires a dedicated EPLB process group.";
     eplb_group_ = parallel_args.eplb_group_;
@@ -155,8 +155,9 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
       model_type == "qwen3_5_moe" || model_type == "qwen3_5_moe_text";
   const bool enable_glm_mega_moe =
       kernel_config.enable_mega_moe() && model_type == "glm_moe_dsa" &&
-      ep_size_ > 1 && eplb_config.expert_parallel_degree() == 2 &&
-      !eplb_config.enable_eplb();
+      ep_size_ > 1 &&
+      EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
+      !eplb_config.enabled;
   const bool enable_qwen3_5_mega_moe =
       kernel_config.enable_mega_moe() && is_qwen3_5_mega_moe_model;
   if (enable_qwen3_5_mega_moe) {
@@ -348,10 +349,10 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   visit_properties(parallel_args, visitor);
   d["dtype"] = dtype_to_string(options_);
   d["device"] = c10::str(device_);
-  const auto& eplb_config = EPLBConfig::get_instance();
-  d["enable_eplb"] = eplb_config.enable_eplb();
-  d["redundant_experts_num"] = eplb_config.redundant_experts_num();
-  d["eplb_use_decode_only_load"] = eplb_config.eplb_use_decode_only_load();
+  const EplbWorkerConfig& eplb_config = parallel_args.eplb_worker_config();
+  d["enable_eplb"] = eplb_config.enabled;
+  d["redundant_experts_num"] = eplb_config.redundant_experts_num;
+  d["eplb_use_decode_only_load"] = eplb_config.use_decode_only_load;
   d["use_ctc"] = ModelConfig::get_instance().use_ctc();
   // Checkpoint directory: python models use it to discover side-car files
   // shipped with the weights (e.g. optional/quarot.safetensors).
@@ -397,7 +398,8 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   d["mmrs_comm_mode"] = flash_comm1_options.mmrs_comm_mode;
   d["enable_fused_mc2"] = KernelConfig::get_instance().enable_fused_mc2() > 0;
   if (is_glm5_next_target_model_type(model_args_.model_type())) {
-    d["expert_parallel_degree"] = eplb_config.expert_parallel_degree();
+    d["expert_parallel_degree"] =
+        EPLBConfig::get_instance().expert_parallel_degree();
   }
   if (mega_moe_comm_resource_ != nullptr) {
     d["enable_mega_moe"] = true;

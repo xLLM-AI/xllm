@@ -94,6 +94,8 @@ struct Options {
 
   PROPERTY(EplbControllerConfig, eplb_controller_config);
 
+  PROPERTY(EplbWorkerConfig, eplb_worker_config);
+
   PROPERTY(int32_t, world_size) = 1;
 
   // task type, support 'generate' and 'embed' currently

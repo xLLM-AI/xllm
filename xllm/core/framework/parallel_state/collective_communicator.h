@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/eplb/eplb_options.h"
 #include "core/framework/parallel_state/collective_communicator_base.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/parallel_state/process_group.h"
@@ -27,7 +28,8 @@ class CollectiveCommunicator final : public CollectiveCommunicatorBase {
                          int32_t world_size,
                          int32_t dp_size,
                          int32_t ep_size,
-                         int32_t cp_size);
+                         int32_t cp_size,
+                         EplbWorkerConfig eplb_worker_config);
   ~CollectiveCommunicator() override = default;
 
   void create_process_groups(const std::string& master_addr,

@@ -38,4 +38,12 @@ struct EplbControllerConfig {
   EplbOptions policy;
 };
 
+// Worker and model startup configuration, shared by target and draft roles.
+// Controller creation and rebalance policy remain target-engine concerns.
+struct EplbWorkerConfig {
+  bool enabled = false;
+  int32_t redundant_experts_num = 1;
+  bool use_decode_only_load = false;
+};
+
 }  // namespace xllm

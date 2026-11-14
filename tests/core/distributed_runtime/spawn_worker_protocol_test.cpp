@@ -171,5 +171,141 @@ TEST(SpawnWorkerProtocolTest,
   EXPECT_EQ(parse_extension_impl(kArgumentCount + 1, argv.data()), "custom");
 }
 
+TEST(SpawnWorkerProtocolTest, PreservesExplicitEplbWorkerConfig) {
+  std::vector<std::string> arguments(kArgumentCount, "unused");
+  arguments[kEnableEplbArgumentIndex] = "1";
+  arguments[kRedundantExpertsNumArgumentIndex] = "4";
+  arguments[kUseDecodeOnlyLoadArgumentIndex] = "1";
+  std::vector<char*> argv = mutable_argv(&arguments);
+
+  const std::optional<EplbWorkerConfig> config =
+      parse_eplb_worker_config(kArgumentCount, argv.data());
+
+  ASSERT_TRUE(config.has_value());
+  EXPECT_TRUE(config->enabled);
+  EXPECT_EQ(config->redundant_experts_num, 4);
+  EXPECT_TRUE(config->use_decode_only_load);
+}
+
+TEST(SpawnWorkerProtocolTest, PreservesLoadPolicyWhenEplbIsDisabled) {
+  std::vector<std::string> arguments(kArgumentCount, "unused");
+  arguments[kEnableEplbArgumentIndex] = "0";
+  arguments[kRedundantExpertsNumArgumentIndex] = "0";
+  arguments[kUseDecodeOnlyLoadArgumentIndex] = "1";
+  std::vector<char*> argv = mutable_argv(&arguments);
+
+  const std::optional<EplbWorkerConfig> config =
+      parse_eplb_worker_config(kArgumentCount, argv.data());
+
+  ASSERT_TRUE(config.has_value());
+  EXPECT_FALSE(config->enabled);
+  EXPECT_EQ(config->redundant_experts_num, 0);
+  EXPECT_TRUE(config->use_decode_only_load);
+}
+
+TEST(SpawnWorkerProtocolTest, DefaultsEplbWorkerConfigForLegacyArguments) {
+  for (int32_t argc = kMinimumArgumentCount; argc <= kEnableEplbArgumentIndex;
+       ++argc) {
+    SCOPED_TRACE(argc);
+    std::vector<std::string> arguments(argc, "unused");
+    std::vector<char*> argv = mutable_argv(&arguments);
+
+    const std::optional<EplbWorkerConfig> config =
+        parse_eplb_worker_config(argc, argv.data());
+
+    ASSERT_TRUE(config.has_value());
+    EXPECT_FALSE(config->enabled);
+    EXPECT_EQ(config->redundant_experts_num, 1);
+    EXPECT_FALSE(config->use_decode_only_load);
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, RejectsPartialEplbWorkerConfig) {
+  for (int32_t argc = kEnableEplbArgumentIndex + 1; argc < kArgumentCount;
+       ++argc) {
+    SCOPED_TRACE(argc);
+    std::vector<std::string> arguments(argc, "1");
+    std::vector<char*> argv = mutable_argv(&arguments);
+
+    EXPECT_FALSE(parse_eplb_worker_config(argc, argv.data()).has_value());
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, RejectsInvalidEplbBooleanValues) {
+  for (const int32_t index :
+       {kEnableEplbArgumentIndex, kUseDecodeOnlyLoadArgumentIndex}) {
+    SCOPED_TRACE(index);
+    for (const char* invalid : {"", "2", "-1", "true", "1tail", " 1"}) {
+      SCOPED_TRACE(invalid);
+      std::vector<std::string> arguments(kArgumentCount, "1");
+      arguments[index] = invalid;
+      std::vector<char*> argv = mutable_argv(&arguments);
+
+      EXPECT_FALSE(
+          parse_eplb_worker_config(kArgumentCount, argv.data()).has_value());
+    }
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, RejectsInvalidRedundantExpertCounts) {
+  for (const char* invalid :
+       {"", "-1", "2147483648", "-2147483649", "1tail", " 1", "+1"}) {
+    SCOPED_TRACE(invalid);
+    std::vector<std::string> arguments(kArgumentCount, "1");
+    arguments[kRedundantExpertsNumArgumentIndex] = invalid;
+    std::vector<char*> argv = mutable_argv(&arguments);
+
+    EXPECT_FALSE(
+        parse_eplb_worker_config(kArgumentCount, argv.data()).has_value());
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, AcceptsMaximumRedundantExpertCount) {
+  std::vector<std::string> arguments(kArgumentCount, "1");
+  arguments[kRedundantExpertsNumArgumentIndex] = "2147483647";
+  std::vector<char*> argv = mutable_argv(&arguments);
+
+  const std::optional<EplbWorkerConfig> config =
+      parse_eplb_worker_config(kArgumentCount, argv.data());
+
+  ASSERT_TRUE(config.has_value());
+  EXPECT_EQ(config->redundant_experts_num, 2147483647);
+}
+
+TEST(SpawnWorkerProtocolTest, RejectsMissingEplbWorkerArguments) {
+  EXPECT_FALSE(parse_eplb_worker_config(kArgumentCount, nullptr).has_value());
+  std::vector<std::string> arguments(kMinimumArgumentCount - 1, "1");
+  std::vector<char*> argv = mutable_argv(&arguments);
+  EXPECT_FALSE(parse_eplb_worker_config(kMinimumArgumentCount - 1, argv.data())
+                   .has_value());
+
+  for (int32_t index = kEnableEplbArgumentIndex; index < kArgumentCount;
+       ++index) {
+    SCOPED_TRACE(index);
+    std::vector<std::string> current_arguments(kArgumentCount, "1");
+    std::vector<char*> current_argv = mutable_argv(&current_arguments);
+    current_argv[index] = nullptr;
+
+    EXPECT_FALSE(parse_eplb_worker_config(kArgumentCount, current_argv.data())
+                     .has_value());
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, PreservesEplbConfigWithUnknownTrailingArguments) {
+  std::vector<std::string> arguments(kArgumentCount + 1, "unused");
+  arguments[kEnableEplbArgumentIndex] = "1";
+  arguments[kRedundantExpertsNumArgumentIndex] = "8";
+  arguments[kUseDecodeOnlyLoadArgumentIndex] = "0";
+  std::vector<char*> argv = mutable_argv(&arguments);
+
+  const std::optional<EplbWorkerConfig> config =
+      parse_eplb_worker_config(kArgumentCount + 1, argv.data());
+
+  ASSERT_TRUE(config.has_value());
+  EXPECT_TRUE(config->enabled);
+  EXPECT_EQ(config->redundant_experts_num, 8);
+  EXPECT_FALSE(config->use_decode_only_load);
+}
+
 }  // namespace
 }  // namespace xllm::spawn_worker_protocol

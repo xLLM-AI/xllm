@@ -29,7 +29,6 @@ limitations under the License.
 #include <variant>
 
 #include "core/common/global_flags.h"
-#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
 #if defined(USE_MUSA)
@@ -3527,8 +3526,7 @@ bool ForwardSharedMemoryTransport::write_token_output(
   const uint64_t embedding_count =
       embeddings.defined() ? static_cast<uint64_t>(embeddings.size(-1)) : 0;
   const uint64_t expert_count =
-      output.expert_load_data.defined() &&
-              ::xllm::EPLBConfig::get_instance().enable_eplb()
+      output.expert_load_data.defined()
           ? static_cast<uint64_t>(output.expert_load_data.numel())
           : 0;
   const uint64_t token_bytes =

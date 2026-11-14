@@ -23,6 +23,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/config/eplb_config.h"
+
 namespace xllm {
 namespace {
 
@@ -43,7 +45,15 @@ class VlmCodec final {
 using TokenCodecs = ::testing::Types<LlmCodec, VlmCodec>;
 
 template <typename Codec>
-class WorkerModelTokenCodecTest : public ::testing::Test {};
+class WorkerModelTokenCodecTest : public ::testing::Test {
+ protected:
+  ~WorkerModelTokenCodecTest() override {
+    EPLBConfig::get_instance().enable_eplb(previous_eplb_);
+  }
+
+ private:
+  const bool previous_eplb_ = EPLBConfig::get_instance().enable_eplb();
+};
 
 TYPED_TEST_SUITE(WorkerModelTokenCodecTest, TokenCodecs);
 
@@ -80,13 +90,13 @@ TYPED_TEST(WorkerModelTokenCodecTest,
                                         {torch::tensor({3.0f})}};
 
   source.json_object_errors = {{"sequence-0", "invalid JSON"}};
+  source.prepared_token = 42;
+  source.expert_load_data = torch::tensor({9}, torch::kInt64);
   // Token domains do not serialize diffusion output.
   source.dit_forward_output.tensors = {torch::Tensor()};
   source.dit_forward_output.text_output = {"unused"};
   typename TypeParam::Response encoded;
   ASSERT_TRUE(TypeParam::encode(source, {{1, 2}, {2, 3}}, &encoded));
-  encoded.set_prepared_token(42);
-  encoded.add_expert_load_data(9);
   RawForwardOutput decoded = original_output();
   ASSERT_TRUE(TypeParam::decode(encoded, decoded));
 
@@ -112,6 +122,58 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   EXPECT_EQ(decoded.json_object_errors[0].message, "invalid JSON");
   EXPECT_TRUE(decoded.dit_forward_output.tensors.empty());
   EXPECT_TRUE(decoded.dit_forward_output.text_output.empty());
+}
+
+TYPED_TEST(WorkerModelTokenCodecTest,
+           EplbPayloadSurvivesGlobalConfigurationChanges) {
+  for (bool global_enabled : {false, true}) {
+    SCOPED_TRACE(global_enabled);
+    for (bool has_sampled_tokens : {false, true}) {
+      SCOPED_TRACE(has_sampled_tokens);
+      EPLBConfig::get_instance().enable_eplb(global_enabled);
+      ForwardOutput source;
+      if (has_sampled_tokens) {
+        source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
+      }
+      source.expert_load_data = torch::tensor({{0, 2}, {3, 0}}, torch::kInt64);
+      source.prepared_token = 0;
+      typename TypeParam::Response encoded;
+      ASSERT_TRUE(TypeParam::encode(source, {}, &encoded));
+      source.expert_load_data.zero_();
+      source.prepared_token = -1;
+      EPLBConfig::get_instance().enable_eplb(!global_enabled);
+
+      RawForwardOutput decoded;
+      ASSERT_TRUE(TypeParam::decode(encoded, decoded));
+      EXPECT_EQ(decoded.outputs.size(), has_sampled_tokens ? 1 : 0);
+      EXPECT_EQ(decoded.expert_load_data, (std::vector<int64_t>{0, 2, 3, 0}));
+      EXPECT_EQ(decoded.prepared_token, 0);
+    }
+  }
+}
+
+TYPED_TEST(WorkerModelTokenCodecTest,
+           EplbTokensAndDefaultsDoNotRequireExpertLoads) {
+  EPLBConfig::get_instance().enable_eplb(true);
+  for (bool has_sampled_tokens : {false, true}) {
+    SCOPED_TRACE(has_sampled_tokens);
+    for (int64_t prepared_token : {-1, 42}) {
+      SCOPED_TRACE(prepared_token);
+      ForwardOutput source;
+      if (has_sampled_tokens) {
+        source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
+      }
+      source.prepared_token = prepared_token;
+      typename TypeParam::Response encoded;
+      ASSERT_TRUE(TypeParam::encode(source, {}, &encoded));
+      RawForwardOutput decoded = original_output();
+      decoded.expert_load_data = {9};
+      ASSERT_TRUE(TypeParam::decode(encoded, decoded));
+      EXPECT_EQ(decoded.outputs.size(), has_sampled_tokens ? 1 : 0);
+      EXPECT_TRUE(decoded.expert_load_data.empty());
+      EXPECT_EQ(decoded.prepared_token, prepared_token);
+    }
+  }
 }
 
 TYPED_TEST(WorkerModelTokenCodecTest,
@@ -254,6 +316,8 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   ASSERT_TRUE(TypeParam::encode(ForwardOutput{}, {}, &encoded));
   ASSERT_TRUE(TypeParam::decode(encoded, decoded));
   EXPECT_TRUE(decoded.outputs.empty());
+  EXPECT_TRUE(decoded.expert_load_data.empty());
+  EXPECT_EQ(decoded.prepared_token, -1);
 }
 
 TEST(WorkerModelDitCodecTest,

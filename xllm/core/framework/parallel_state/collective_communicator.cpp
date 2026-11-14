@@ -158,11 +158,13 @@ std::string get_context_parallel_group_host(int32_t group_root_rank,
 
 }  // namespace
 
-CollectiveCommunicator::CollectiveCommunicator(int32_t global_rank,
-                                               int32_t world_size,
-                                               int32_t dp_size,
-                                               int32_t ep_size,
-                                               int32_t cp_size)
+CollectiveCommunicator::CollectiveCommunicator(
+    int32_t global_rank,
+    int32_t world_size,
+    int32_t dp_size,
+    int32_t ep_size,
+    int32_t cp_size,
+    EplbWorkerConfig eplb_worker_config)
     : CollectiveCommunicatorBase(global_rank, world_size),
       parallel_args_(std::make_unique<ParallelArgs>(global_rank,
                                                     world_size,
@@ -170,6 +172,7 @@ CollectiveCommunicator::CollectiveCommunicator(int32_t global_rank,
                                                     cp_size,
                                                     nullptr,
                                                     ep_size)) {
+  parallel_args_->eplb_worker_config(std::move(eplb_worker_config));
   const ParallelConfig& config = ParallelConfig::get_instance();
   parallel_args_->kv_split_size(config.kv_split_size());
   parallel_args_->layerwise_split_size(config.layerwise_split_size());
@@ -443,7 +446,7 @@ void CollectiveCommunicator::create_process_groups(
       port += topology.moe_ep().count;
     }
 #endif
-    if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+    if (parallel_args_->eplb_worker_config().enabled) {
       eplb_group_ = create_process_group(global_rank,
                                          topology.moe_ep().rank,
                                          topology.moe_ep().ranks,

@@ -2,6 +2,18 @@ include(cc_test)
 
 cc_test(
   NAME
+    collective_communicator_test
+  CPU_ONLY
+  SRCS
+    collective_communicator_test.cpp
+  DEPS
+    :parallel_state
+    :config
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     parallel_topology_test
   CPU_ONLY
   SRCS

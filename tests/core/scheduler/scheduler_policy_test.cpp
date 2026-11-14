@@ -597,6 +597,85 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
 
 }  // namespace
 
+TEST(SchedulerBatchModeTest, ExplicitOptionsOverrideConflictingGlobals) {
+  ScopedConfigValue<bool> mix_batch_guard(
+      SchedulerConfig::get_instance().enable_mix_batch(), false);
+  ScopedConfigValue<int32_t> kv_split_guard(
+      ParallelConfig::get_instance().kv_split_size(), 2);
+  SchedulerOptions mixed;
+  SchedulerOptions exclusive;
+  exclusive.enable_mix_batch(false);
+  SchedulerOptions kv_sharded;
+  kv_sharded.kv_split_size(2);
+
+  EXPECT_TRUE(create_batch_mode(mixed).enable_mix_batch);
+  EXPECT_FALSE(create_batch_mode(exclusive).enable_mix_batch);
+  EXPECT_FALSE(create_batch_mode(kv_sharded).enable_mix_batch);
+
+  SchedulerConfig::get_instance().enable_mix_batch(true);
+  ParallelConfig::get_instance().kv_split_size(1);
+
+  EXPECT_TRUE(create_batch_mode(mixed).enable_mix_batch);
+  EXPECT_FALSE(create_batch_mode(exclusive).enable_mix_batch);
+  EXPECT_FALSE(create_batch_mode(kv_sharded).enable_mix_batch);
+}
+
+TEST(SchedulerBatchModeTest, ParallelAndSpeculativeLayoutsExcludeMixedBatches) {
+  SchedulerOptions context_parallel;
+  context_parallel.cp_size(2);
+  SchedulerOptions kv_sharded;
+  kv_sharded.kv_split_size(2);
+  SchedulerOptions speculative;
+  speculative.num_speculative_tokens(1);
+
+  for (const SchedulerOptions* options :
+       {&context_parallel, &kv_sharded, &speculative}) {
+    const BatchMode mode = create_batch_mode(*options);
+    EXPECT_FALSE(mode.enable_mix_batch);
+    EXPECT_TRUE(mode.enable_chunked_prefill);
+    EXPECT_EQ(mode.priority_strategy, "fcfs");
+  }
+}
+
+TEST(SchedulerBatchModeTest, NonChunkedPrefillUsesExclusiveBatches) {
+  SchedulerOptions options;
+  options.enable_chunked_prefill(false).priority_strategy("deadline");
+
+  const BatchMode mode = create_batch_mode(options);
+
+  EXPECT_FALSE(mode.enable_mix_batch);
+  EXPECT_FALSE(mode.enable_chunked_prefill);
+  EXPECT_EQ(mode.priority_strategy, "deadline");
+}
+
+TEST(SchedulerBatchModeTest, MultiSloRequiresChunkingButRetainsMixSelection) {
+  for (const bool enable_mix_batch : {false, true}) {
+    SchedulerOptions options;
+    options.enable_mix_batch(enable_mix_batch)
+        .enable_chunked_prefill(false)
+        .priority_strategy("multi_slo_and_prio");
+
+    const BatchMode mode = create_batch_mode(options);
+
+    EXPECT_EQ(mode.enable_mix_batch, enable_mix_batch);
+    EXPECT_TRUE(mode.enable_chunked_prefill);
+    EXPECT_EQ(mode.priority_strategy, "multi_slo_and_prio");
+    EXPECT_FALSE(options.enable_chunked_prefill());
+  }
+}
+
+TEST(SchedulerBatchModeTest, DisaggregatedPrefillUsesExclusiveBatches) {
+  SchedulerOptions options;
+  options.instance_role(InstanceRole::PREFILL);
+  EXPECT_TRUE(create_batch_mode(options).enable_mix_batch);
+
+  options.enable_disagg_pd(true);
+  EXPECT_FALSE(create_batch_mode(options).enable_mix_batch);
+
+  options.instance_role(InstanceRole::DECODE);
+  EXPECT_TRUE(create_batch_mode(options).enable_mix_batch);
+}
+
 // TEST-1:
 // Three independent prefill requests, according to the configs,
 // verify how many tokens are processed in one scheduling.
@@ -613,6 +692,7 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
     SCOPED_TRACE(idx);
     SchedulerOptions opt =
         create_scheduler_options(10000, 256, 0, chunk_size[idx], 1);
+    opt.kv_split_size(kv_split_size[idx]);
     ScopedConfigValue<int32_t> kv_split_guard(
         ParallelConfig::get_instance().kv_split_size(), kv_split_size[idx]);
     auto engine =
@@ -644,8 +724,6 @@ TEST(SchedulerPolicyTest, NonChunkedPrefillAssignsDpBeforeFairBudget) {
       SchedulerConfig::get_instance().enable_dp_fair_token_budget(), true);
   ScopedConfigValue<bool> chunked_prefill_guard(
       SchedulerConfig::get_instance().enable_chunked_prefill(), false);
-  ScopedConfigValue<bool> mix_batch_guard(
-      SchedulerConfig::get_instance().enable_mix_batch(), false);
   constexpr int32_t kDpSize = 4;
   SchedulerOptions options = create_scheduler_options(
       /*max_tokens_per_batch=*/64,
@@ -653,6 +731,7 @@ TEST(SchedulerPolicyTest, NonChunkedPrefillAssignsDpBeforeFairBudget) {
       /*num_speculative_tokens=*/0,
       /*max_tokens_per_chunk_for_prefill=*/64,
       /*dp_size=*/kDpSize);
+  options.enable_mix_batch(false);
   options.enable_chunked_prefill() = false;
   options.enable_disagg_pd() = true;
   options.instance_role() = InstanceRole::PREFILL;
@@ -686,8 +765,6 @@ TEST(SchedulerPolicyTest, NonChunkedPrefillAssignsDpBeforeFairBudget) {
 }
 
 TEST(SchedulerPolicyTest, UnifiedPrefixHitIncludesScheduledSuffixCapacity) {
-  ScopedConfigValue<bool> mix_batch_guard(
-      SchedulerConfig::get_instance().enable_mix_batch(), true);
   constexpr int32_t kBlockSize = 128;
   constexpr int32_t kPrefixTokens = 256;
   constexpr int32_t kPromptTokens = 2313;
@@ -700,6 +777,7 @@ TEST(SchedulerPolicyTest, UnifiedPrefixHitIncludesScheduledSuffixCapacity) {
       /*max_tokens_per_chunk_for_prefill=*/kChunkTokens,
       /*dp_size=*/1,
       /*priority_strategy=*/"multi_slo_and_prio");
+  opt.enable_mix_batch(true);
   auto engine = std::make_unique<FakeEngine>(
       /*num_blocks=*/64, kBlockSize, /*enable_prefix_cache=*/true);
 
@@ -795,9 +873,8 @@ TEST(SchedulerPolicyTest, LinearSchedulingPreservesReadSourceAcrossPolicies) {
         KVCacheConfig::get_instance().enable_prefix_cache(), prefix_cache);
     for (const std::string strategy : {"fcfs", "multi_slo_and_prio"}) {
       for (const bool mix_batch : {false, true}) {
-        ScopedConfigValue<bool> mix_guard(
-            SchedulerConfig::get_instance().enable_mix_batch(), mix_batch);
         auto options = create_scheduler_options(256, 16, 0, 256, 1, strategy);
+        options.enable_mix_batch(mix_batch);
         FakeEngine engine(128,
                           128,
                           prefix_cache,
@@ -838,8 +915,6 @@ TEST(SchedulerPolicyTest, LinearSchedulingPreservesReadSourceAcrossPolicies) {
 TEST(SchedulerPolicyTest, DecodeFirstSkipsRedistributionForLinearModels) {
   ScopedConfigValue<bool> chunked_guard(
       SchedulerConfig::get_instance().enable_chunked_prefill(), true);
-  ScopedConfigValue<bool> mix_guard(
-      SchedulerConfig::get_instance().enable_mix_batch(), true);
   ScopedConfigValue<int32_t> stride_guard(
       SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   for (const bool prefix_cache : {false, true}) {
@@ -847,6 +922,7 @@ TEST(SchedulerPolicyTest, DecodeFirstSkipsRedistributionForLinearModels) {
         KVCacheConfig::get_instance().enable_prefix_cache(), prefix_cache);
     for (const bool overlap : {false, true}) {
       auto options = create_scheduler_options(6, 8, 0, 4, 1);
+      options.enable_mix_batch(true);
       options.enable_schedule_overlap(overlap);
       FakeEngine engine(64,
                         2,
@@ -894,8 +970,6 @@ TEST(SchedulerPolicyTest, DecodeQueuePlansColdBestOfCandidatesAsPrefill) {
       ScopedConfigValue<bool> cache_guard(
           KVCacheConfig::get_instance().enable_prefix_cache(), prefix_cache);
       for (const bool mix_batch : {false, true}) {
-        ScopedConfigValue<bool> mix_guard(
-            SchedulerConfig::get_instance().enable_mix_batch(), mix_batch);
         for (const int32_t speculative_tokens : {0, 2}) {
           SCOPED_TRACE(::testing::Message()
                        << "token_budget=" << token_budget << ", prefix_cache="
@@ -909,6 +983,7 @@ TEST(SchedulerPolicyTest, DecodeQueuePlansColdBestOfCandidatesAsPrefill) {
                             speculative_tokens);
           auto options = create_scheduler_options(
               token_budget, 8, speculative_tokens, 4, 1);
+          options.enable_mix_batch(mix_batch);
           options.enable_schedule_overlap(false);
           TestableContinuousScheduler scheduler(&engine, options);
           auto requests =
@@ -966,8 +1041,6 @@ TEST(SchedulerPolicyTest, LinearLatencySchedulingRespectsRemainingTokenBudget) {
         SCOPED_TRACE(::testing::Message() << "token_budget=" << token_budget
                                           << ", prefix_cache=" << prefix_cache
                                           << ", mix_batch=" << mix_batch);
-        ScopedConfigValue<bool> mix_guard(
-            SchedulerConfig::get_instance().enable_mix_batch(), mix_batch);
         auto options =
             create_scheduler_options(token_budget,
                                      /*max_seqs_per_batch=*/16,
@@ -979,6 +1052,7 @@ TEST(SchedulerPolicyTest, LinearLatencySchedulingRespectsRemainingTokenBudget) {
                                      /*enable_latency_aware_schedule=*/true,
                                      /*max_global_ttft_ms=*/1000000,
                                      /*max_global_tpot_ms=*/1000000);
+        options.enable_mix_batch(mix_batch);
         FakeEngine engine(128,
                           128,
                           prefix_cache,
@@ -2518,8 +2592,6 @@ TEST(SchedulerPolicyTest, FullFootprintAdmitsBothWhenFits) {
 TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
   ScopedConfigValue<bool> prefix_cache_guard(
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
-  ScopedConfigValue<bool> mix_batch_guard(
-      SchedulerConfig::get_instance().enable_mix_batch(), true);
   ScopedConfigValue<int32_t> chunk_size_guard(
       SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 2);
   for (const uint32_t linear_slots : {1u, 4u}) {
@@ -2536,6 +2608,7 @@ TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
         .shared_linear_state_slots(linear_slots);
     FakeEngine engine(std::make_unique<BlockManagerPool>(pool_options));
     SchedulerOptions options = create_scheduler_options(4, 4, 0, 2, 1);
+    options.enable_mix_batch(true);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -2597,8 +2670,6 @@ TEST(SchedulerPolicyTest, StaleCapacityReservesFullPromptBeforeFirstChunk) {
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   for (bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     for (size_t advisory_capacity : {0u, 1u}) {
       SCOPED_TRACE(advisory_capacity);
       SchedulerOptions options = create_scheduler_options(
@@ -2607,6 +2678,7 @@ TEST(SchedulerPolicyTest, StaleCapacityReservesFullPromptBeforeFirstChunk) {
           /*num_speculative_tokens=*/0,
           /*max_tokens_per_chunk_for_prefill=*/4,
           /*dp_size=*/1);
+      options.enable_mix_batch(enable_mix_batch);
       options.enable_chunked_prefill(true)
           .enable_schedule_overlap(false)
           .disable_log_stats(true);
@@ -2650,14 +2722,13 @@ TEST(SchedulerPolicyTest, StaleCapacityDefersFailedFullPromptReservation) {
   for (bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
 
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
         /*max_tokens_per_batch=*/4,
         /*max_seqs_per_batch=*/1,
         /*num_speculative_tokens=*/0,
         /*max_tokens_per_chunk_for_prefill=*/4,
         /*dp_size=*/1);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -2735,14 +2806,13 @@ TEST(SchedulerPolicyTest, PersistentPrefillAllocationFailureUnblocksFollower) {
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   for (const bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
         /*max_tokens_per_batch=*/4,
         /*max_seqs_per_batch=*/1,
         /*num_speculative_tokens=*/0,
         /*max_tokens_per_chunk_for_prefill=*/4,
         /*dp_size=*/1);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -2799,14 +2869,13 @@ TEST(SchedulerPolicyTest, SuccessfulPrefillResetsAllocationFailureWindow) {
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   for (const bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
         /*max_tokens_per_batch=*/4,
         /*max_seqs_per_batch=*/1,
         /*num_speculative_tokens=*/0,
         /*max_tokens_per_chunk_for_prefill=*/4,
         /*dp_size=*/1);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -2862,14 +2931,13 @@ TEST(SchedulerPolicyTest, TransientDecodeAllocationFailurePreservesRequest) {
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   for (bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
         /*max_tokens_per_batch=*/4,
         /*max_seqs_per_batch=*/1,
         /*num_speculative_tokens=*/0,
         /*max_tokens_per_chunk_for_prefill=*/4,
         /*dp_size=*/1);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -2939,14 +3007,13 @@ TEST(SchedulerPolicyTest, TransientDecodeAllocationFailurePreservesRequest) {
 TEST(SchedulerPolicyTest, DecodeAllocationFailureDefersNewPrefill) {
   ScopedConfigValue<bool> prefix_cache_guard(
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
-  ScopedConfigValue<bool> mix_batch_guard(
-      SchedulerConfig::get_instance().enable_mix_batch(), true);
   SchedulerOptions options = create_scheduler_options(
       /*max_tokens_per_batch=*/16,
       /*max_seqs_per_batch=*/3,
       /*num_speculative_tokens=*/0,
       /*max_tokens_per_chunk_for_prefill=*/4,
       /*dp_size=*/1);
+  options.enable_mix_batch(true);
   options.enable_chunked_prefill(true)
       .enable_schedule_overlap(false)
       .disable_log_stats(true);
@@ -3018,14 +3085,13 @@ TEST(SchedulerPolicyTest, ChunkAllocationFailureDefersOtherPrefillQueue) {
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   for (const bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
         /*max_tokens_per_batch=*/4,
         /*max_seqs_per_batch=*/2,
         /*num_speculative_tokens=*/0,
         /*max_tokens_per_chunk_for_prefill=*/4,
         /*dp_size=*/1);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -3106,14 +3172,13 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsDecodeBeyondArena) {
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   for (bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
         /*max_tokens_per_batch=*/8,
         /*max_seqs_per_batch=*/1,
         /*num_speculative_tokens=*/0,
         /*max_tokens_per_chunk_for_prefill=*/8,
         /*dp_size=*/1);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -3159,14 +3224,13 @@ TEST(SchedulerPolicyTest, IdleChunkContinuationExceedsUtilizationThreshold) {
       0.5);
   for (bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
         /*max_tokens_per_batch=*/20,
         /*max_seqs_per_batch=*/1,
         /*num_speculative_tokens=*/0,
         /*max_tokens_per_chunk_for_prefill=*/20,
         /*dp_size=*/1);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -3220,14 +3284,13 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsPromptWithoutReservation) {
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   for (bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
         /*max_tokens_per_batch=*/4,
         /*max_seqs_per_batch=*/1,
         /*num_speculative_tokens=*/0,
         /*max_tokens_per_chunk_for_prefill=*/4,
         /*dp_size=*/1);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -3268,14 +3331,13 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsBestOfWithoutReservation) {
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
   for (bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
         /*max_tokens_per_batch=*/16,
         /*max_seqs_per_batch=*/2,
         /*num_speculative_tokens=*/0,
         /*max_tokens_per_chunk_for_prefill=*/4,
         /*dp_size=*/1);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -3320,8 +3382,6 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsPromptWithActiveRequest) {
         {true, "multi_slo_and_prio"}}) {
     SCOPED_TRACE(enable_mix_batch);
     SCOPED_TRACE(priority_strategy);
-    ScopedConfigValue<bool> mix_batch_guard(
-        SchedulerConfig::get_instance().enable_mix_batch(), enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
         /*max_tokens_per_batch=*/16,
         /*max_seqs_per_batch=*/2,
@@ -3329,6 +3389,7 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsPromptWithActiveRequest) {
         /*max_tokens_per_chunk_for_prefill=*/4,
         /*dp_size=*/1,
         priority_strategy);
+    options.enable_mix_batch(enable_mix_batch);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);
@@ -3382,14 +3443,13 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsPromptWithActiveRequest) {
 TEST(SchedulerPolicyTest, BestOfAllocationFailureKeepsSuccessfulSequence) {
   ScopedConfigValue<bool> prefix_cache_guard(
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
-  ScopedConfigValue<bool> mix_batch_guard(
-      SchedulerConfig::get_instance().enable_mix_batch(), false);
   SchedulerOptions options = create_scheduler_options(
       /*max_tokens_per_batch=*/16,
       /*max_seqs_per_batch=*/2,
       /*num_speculative_tokens=*/0,
       /*max_tokens_per_chunk_for_prefill=*/4,
       /*dp_size=*/1);
+  options.enable_mix_batch(false);
   options.enable_chunked_prefill(true)
       .enable_schedule_overlap(false)
       .disable_log_stats(true);
@@ -3445,14 +3505,13 @@ TEST(SchedulerPolicyTest, BestOfAllocationFailureKeepsSuccessfulSequence) {
 TEST(SchedulerPolicyTest, BestOfAllocationFailurePreservesExistingChunk) {
   ScopedConfigValue<bool> prefix_cache_guard(
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
-  ScopedConfigValue<bool> mix_batch_guard(
-      SchedulerConfig::get_instance().enable_mix_batch(), false);
   SchedulerOptions options = create_scheduler_options(
       /*max_tokens_per_batch=*/16,
       /*max_seqs_per_batch=*/2,
       /*num_speculative_tokens=*/0,
       /*max_tokens_per_chunk_for_prefill=*/4,
       /*dp_size=*/1);
+  options.enable_mix_batch(false);
   options.enable_chunked_prefill(true)
       .enable_schedule_overlap(false)
       .disable_log_stats(true);
@@ -3501,14 +3560,13 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
       KVCacheConfig::get_instance().enable_prefix_cache(), true);
   ScopedConfigValue<bool> in_batch_prefix_cache_guard(
       KVCacheConfig::get_instance().enable_in_batch_prefix_cache(), false);
-  ScopedConfigValue<bool> mix_batch_guard(
-      SchedulerConfig::get_instance().enable_mix_batch(), false);
   SchedulerOptions options = create_scheduler_options(
       /*max_tokens_per_batch=*/16,
       /*max_seqs_per_batch=*/2,
       /*num_speculative_tokens=*/0,
       /*max_tokens_per_chunk_for_prefill=*/4,
       /*dp_size=*/1);
+  options.enable_mix_batch(false);
   options.enable_chunked_prefill(true)
       .enable_schedule_overlap(false)
       .disable_log_stats(true);

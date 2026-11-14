@@ -605,12 +605,11 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   num_experts_per_rank_ = num_experts / ep_size;
   start_expert_id_ = ep_rank * num_experts_per_rank_;
   redundant_experts_num_ =
-      ::xllm::EPLBConfig::get_instance().redundant_experts_num();
+      parallel_args_.eplb_worker_config().redundant_experts_num;
   CHECK_GE(redundant_experts_num_, 0)
       << "DeepSeek-V4 EPLB redundant_experts_num must be non-negative.";
   enable_eplb_ = is_deepseek_v4_ &&
-                 ::xllm::EPLBConfig::get_instance().enable_eplb() &&
-                 ep_size > 1;
+                 parallel_args_.eplb_worker_config().enabled && ep_size > 1;
   reserve_eplb_staging_buffers_ = dsv4_eplb::should_reserve_staging_buffers(
       enable_eplb_, model_args.model_type());
   device_experts_num_ =
@@ -1057,7 +1056,7 @@ void FusedMoEImpl::record_eplb_expert_load(
     return;
   }
   const bool decode_only =
-      ::xllm::EPLBConfig::get_instance().eplb_use_decode_only_load();
+      parallel_args_.eplb_worker_config().use_decode_only_load;
   CHECK_GE(input_params.expert.expert_load_data.dim(), 2)
       << "DeepSeek-V4 EPLB expert_load_data must be 2D.";
   CHECK_GT(input_params.expert.expert_load_data.size(0), eplb_layer_id_)
@@ -1114,7 +1113,7 @@ void FusedMoEImpl::record_eplb_dispatch_expert_load(
     return;
   }
   const bool decode_only =
-      ::xllm::EPLBConfig::get_instance().eplb_use_decode_only_load();
+      parallel_args_.eplb_worker_config().use_decode_only_load;
   if (decode_only && !all_dp_ranks_are_decode(input_params)) {
     return;
   }
@@ -2631,7 +2630,7 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
         all_dp_ranks_are_decode(input_params));
   }
   const bool decode_only =
-      ::xllm::EPLBConfig::get_instance().eplb_use_decode_only_load();
+      parallel_args_.eplb_worker_config().use_decode_only_load;
   if (decode_only && !all_dp_ranks_are_decode(input_params)) {
     record_eplb_expert_load(
         ids_2d, input_params, /*routed_tokens_are_dp_gathered=*/false);
