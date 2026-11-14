@@ -1,0 +1,88 @@
+[
+  {
+    "op": "T5SplitQkvAppendCache",
+    "language": "cpp",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "float16",
+          "bfloat16"
+        ]
+      },
+      {
+        "name": "pastKey",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "float16",
+          "bfloat16"
+        ]
+      },
+      {
+        "name": "pastValue",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "float16",
+          "bfloat16"
+        ]
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "float16",
+          "bfloat16"
+        ]
+      },
+      {
+        "name": "key",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "float16",
+          "bfloat16"
+        ]
+      },
+      {
+        "name": "value",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "float16",
+          "bfloat16"
+        ]
+      }
+    ],
+    "attr": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "default_value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "default_value": 1
+      }
+    ]
+  }
+]
