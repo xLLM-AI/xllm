@@ -1,5 +1,18 @@
 include(cc_test)
 
+if(USE_NPU)
+  cc_test(
+    NAME vlm_host_metadata_transport_test
+    INCLUDES ${PROJECT_SOURCE_DIR}
+    SRCS vlm_host_metadata_transport_test.cpp
+    DEPS :runtime GTest::gtest_main nnopbase
+  )
+  target_link_options(vlm_host_metadata_transport_test PRIVATE
+    "-Wl,--whole-archive"
+    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+    "-Wl,--no-whole-archive")
+endif()
+
 cc_test(
   NO_NPU_RUNTIME
   NAME executor_impl_factory_test

@@ -371,6 +371,36 @@ class Qwen3VLVisionBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _VisionHostMetadata:
+    """Per-encode grid and attention lengths derived from the same CPU input."""
+
+    grid_thw: tuple[tuple[int, int, int], ...]
+    actual_seq: list[int]
+
+    @classmethod
+    def from_grid(cls, grid_thw: torch.Tensor, num_patches: int, spatial_merge_size: int) -> _VisionHostMetadata:
+        if grid_thw.device.type != "cpu":
+            raise ValueError("Qwen3-VL grid_thw must remain on CPU during input preparation")
+        if grid_thw.ndim != 2 or grid_thw.shape[1] != 3 or grid_thw.shape[0] == 0:
+            raise ValueError("grid_thw must have nonempty shape (num_items, 3)")
+        if grid_thw.dtype not in (torch.int32, torch.int64):
+            raise ValueError("grid_thw must contain integer T/H/W values")
+
+        rows = tuple((t, h, w) for t, h, w in grid_thw.tolist())
+        actual_seq: list[int] = []
+        cumulative = 0
+        for t, h, w in rows:
+            if min(t, h, w) <= 0 or h % spatial_merge_size or w % spatial_merge_size:
+                raise ValueError("grid dimensions must be positive with H/W divisible by spatial_merge_size")
+            for _ in range(t):
+                cumulative += h * w
+                actual_seq.append(cumulative)
+        if cumulative != num_patches:
+            raise ValueError(f"grid describes {cumulative} patches, but pixel_values has {num_patches} rows")
+        return cls(rows, actual_seq)
+
+
 class Qwen3VLVisionTransformer(nn.Module):
     """Qwen3-VL vision tower with deepstack feature extraction.
 
@@ -486,7 +516,7 @@ class Qwen3VLVisionTransformer(nn.Module):
 
         return torch.stack([hpos_ids, wpos_ids], dim=-1)
 
-    def _compute_rot_pos_emb(self, grid_thw_list: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_rot_pos_emb(self, grid_thw_list: Sequence[Sequence[int]]) -> tuple[torch.Tensor, torch.Tensor]:
         pos_ids = []
         for t, h, w in grid_thw_list:
             ids = self._rot_pos_ids(h, w, self.spatial_merge_size, self.device)
@@ -497,7 +527,7 @@ class Qwen3VLVisionTransformer(nn.Module):
         cos, sin = self.rotary_pos_emb(pos_ids)
         return cos, sin
 
-    def _fast_pos_embed_interpolate(self, grid_thw_list: list[list[int]]) -> torch.Tensor:
+    def _fast_pos_embed_interpolate(self, grid_thw_list: Sequence[Sequence[int]]) -> torch.Tensor:
         """Bilinearly interpolate the learned pos_embed to each image's grid."""
         num_grid = self.num_grid_per_side
         m_size = self.spatial_merge_size
@@ -555,7 +585,7 @@ class Qwen3VLVisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        grid_thw: torch.Tensor,
+        grid_thw: torch.Tensor | _VisionHostMetadata,
     ) -> torch.Tensor:
         hidden_states = pixel_values.to(device=self.device, dtype=self.dtype, non_blocking=True)
 
@@ -570,8 +600,9 @@ class Qwen3VLVisionTransformer(nn.Module):
         )
         hidden_states = self.patch_embed(hidden_states).view(L, self.hidden_size)
 
-        # Convert grid_thw to list for position computations
-        grid_thw_list = grid_thw.tolist()
+        # Qwen3-VL prepares host metadata before staging pixels. Other users of
+        # the shared tower (including Qwen3.5) retain their Tensor input path.
+        grid_thw_list = grid_thw.grid_thw if isinstance(grid_thw, _VisionHostMetadata) else grid_thw.tolist()
 
         # Add position embeddings
         pos_embeds = self._fast_pos_embed_interpolate(grid_thw_list)
@@ -588,13 +619,11 @@ class Qwen3VLVisionTransformer(nn.Module):
         rotary_cos_full = torch.cat((rotary_cos, rotary_cos), dim=-1).reshape(1, -1, 1, head_dim)
         rotary_sin_full = torch.cat((rotary_sin, rotary_sin), dim=-1).reshape(1, -1, 1, head_dim)
 
-        # Cumulative per-frame sequence lengths for varlen attention. The CPU
-        # python list is materialized ONCE here (a single d2h sync) and reused
-        # by all 27 layers — mirrors vllm-ascend's sequence_lengths pre-compute
-        # hook (its seq_lens_cpu_cache), which exists precisely to avoid a
-        # per-layer .cpu().tolist() sync point.
-        cu_seqlens = self._compute_cu_seqlens(grid_thw.to(device=self.device), self.device)
-        actual_seq: list[int] = cu_seqlens[1:].cpu().tolist()
+        if isinstance(grid_thw, _VisionHostMetadata):
+            actual_seq = grid_thw.actual_seq
+        else:
+            cu_seqlens = self._compute_cu_seqlens(grid_thw.to(device=self.device), self.device)
+            actual_seq = cu_seqlens[1:].cpu().tolist()
 
         # Transformer blocks with deepstack feature collection
         deepstack_features: list[torch.Tensor] = []
@@ -915,15 +944,15 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
 
         Args:
             pixel_values: ``(total_patches, C*t*p*p)`` flattened patches.
-            grid_thw: ``(num_images, 3)`` T/H/W per image.
+            grid_thw: CPU integer ``(num_items, 3)`` T/H/W per image/video.
 
         Returns:
             ``image_embeds`` of shape
             ``(total_image_tokens, out_hidden_size * (1 + num_deepstacks))``.
         """
+        metadata = _VisionHostMetadata.from_grid(grid_thw, pixel_values.shape[0], self.vision_model.spatial_merge_size)
         pixel_values = pixel_values.to(dtype=self.vision_model.dtype, device=self.vision_model.device)
-        grid_thw = grid_thw.to(dtype=torch.int32, device=self.vision_model.device)
-        image_embeds = self.vision_model(pixel_values, grid_thw)
+        image_embeds = self.vision_model(pixel_values, metadata)
         return image_embeds
 
     def get_input_embeddings(
@@ -940,10 +969,10 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         shared deepstack buffer. The two masks are disjoint, so image and video
         coexist in one batch.
 
-        This assumes every multimodal token is in the current batch (i.e.
-        enable_chunked_prefill=False): the mask spans the full flattened batch and
-        embedding rows are matched left-to-right. Sets ``_inputs_embeds`` and
-        ``deepstack_input_embeds`` for the runner-driven ``Qwen3VLModel.forward``.
+        EncoderEmbeddingGatherVisitor supplies rows for the current scheduled
+        token window, matched left-to-right against its placeholders. Sets
+        ``_inputs_embeds`` and ``deepstack_input_embeds`` for the runner-driven
+        ``Qwen3VLModel.forward``.
         """
         inputs_embeds = self.model.embed_tokens(input_ids)
 
@@ -974,9 +1003,12 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             )
 
         for embeds, token_id in modalities:
-            mask = input_ids == token_id
-            if not mask.any():
+            # The host token counts used by split_by_token_nums and the gather
+            # already determine this step's embedding rows. Do not read back a
+            # device reduction just to decide whether there is work to scatter.
+            if embeds.shape[0] == 0:
                 continue
+            mask = input_ids == token_id
             _scatter_multimodal(inputs_embeds, deepstack_acc, embeds, mask, visual_dim, num_level)
 
         if deepstack_acc is not None:

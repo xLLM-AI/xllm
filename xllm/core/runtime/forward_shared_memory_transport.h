@@ -17,6 +17,7 @@ limitations under the License.
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -130,6 +131,9 @@ class ForwardSharedMemoryTransport final {
   static bool can_write_input(const LlmForwardInput& input,
                               size_t segment_size);
 
+  // Configure after model initialization, before publishing its first input.
+  void set_keep_vision_grid_on_cpu(bool enabled);
+
   bool input_write(const VlmForwardInput& input);
   bool input_read(VlmForwardInput& input,
                   const torch::Device& device,
@@ -162,6 +166,11 @@ class ForwardSharedMemoryTransport final {
   void clear();
 
  private:
+  friend class ForwardSharedMemoryTransportTestPeer;
+
+  // Test-only observation point; configured before starting the reader.
+  std::function<void()> input_wait_observer_;
+
   bool write_token_output(
       const ForwardOutput& output,
       const std::vector<SpeculativeTokenStats>& speculative_token_stats,
@@ -181,6 +190,7 @@ class ForwardSharedMemoryTransport final {
 
   SharedMemoryManager segment_;
   std::atomic<bool> input_read_stopped_{false};
+  std::atomic<bool> keep_vision_grid_on_cpu_{false};
   ForwardType forward_type_;
   uint64_t last_version_ = 0;
   void* metadata_addr_ = nullptr;

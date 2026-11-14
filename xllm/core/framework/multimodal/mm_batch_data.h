@@ -29,6 +29,9 @@ limitations under the License.
 
 namespace xllm {
 
+// Grid keys whose values describe image/video patch layout.
+bool is_vision_grid_key(const MMKey& key);
+
 class MMBatchData {
  public:
   MMBatchData() = default;
@@ -44,9 +47,10 @@ class MMBatchData {
   bool has(const MMKey& key) const;
   void get(const MMKey& key, std::vector<torch::Tensor>& vec) const;
 
-  void to(const torch::Device& device);
+  void to(const torch::Device& device, bool keep_vision_grid_on_cpu = false);
   static MMBatchData to(const MMBatchData& mm_data,
-                        const torch::Device& device);
+                        const torch::Device& device,
+                        bool keep_vision_grid_on_cpu = false);
 
   void batch(std::vector<MMData> mm_datas);
 
