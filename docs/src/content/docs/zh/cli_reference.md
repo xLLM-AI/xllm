@@ -233,7 +233,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_prefill_piecewise_graph` | `bool` | `false` | 是否在 prefill 阶段启用 piecewise CUDA graph；attention 使用 eager 模式，其他操作捕获进 CUDA graph。 |
 | `enable_graph_vmm_pool` | `bool` | `true` | 是否启用 VMM-backed CUDA graph memory pool，用于多 shape graph 的显存复用。 |
 | `max_tokens_for_graph_mode` | `int32` | `2048` | 图执行最大 token 数；`0` 表示不限制。 |
-| `acl_graph_decode_batch_size_limit` | `int32` | `16` | NPU 上 ACL graph 的 decode batch size 阈值；实际 decode batch size 超过该值时，ACL graph decode 会回退到 eager 模式以避免 OOM。 |
+| `acl_graph_decode_batch_size_limit` | `int32` | 未开推测解码为 `32`，否则为 `16` | NPU 上 ACL graph 的 decode batch size 阈值；实际 decode batch size 超过该值时，ACL graph decode 会回退到 eager 模式以避免 OOM。未显式设置时与推测行共享的抓图预算 `32 / (num_speculative_tokens + 1)` 比较，仅在预算更高时抬高，不会下调；因此推测 token 数为 2 及以上时仍保持 `16`，而非更小的预算值。需要更紧的上限时必须显式设置该参数（命令行或 config JSON 均可），显式给定的值不会被改动。 |
 | `block_draft_graph_warmup_max_kv_len` | `int32` | `0` | 仅为 Python block draft 的独立 ACL graph（DSpark/DFlash2，包括 GLM MLA draft）预捕获按 2 的幂增长的 KV 容量桶。`0` 覆盖完整模型上下文；正数预捕获到覆盖该长度的容量桶；`-1` 保留按需捕获。已有 warmup 必需的形状始终保留，即使超过正数上限。超过预捕获上界的请求仍可在线扩桶。更多容量桶会增加启动时间和 draft 图显存占用；不改变 target、MTP、context-write 或可选整轮 unified graph 的预热策略。 |
 | `enable_shm` | `bool` | `false` | 是否为模型执行启用共享内存。 |
 | `use_contiguous_input_buffer` | `bool` | `true` | 是否使用连续的 device input buffer 执行模型。 |

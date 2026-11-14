@@ -438,6 +438,56 @@ int run() {
     config::dump_startup_config();
   }
 
+  // The decode-graph admission ceiling is one constant, but the capture budget
+  // it stands in for is shared with the speculative rows: the deployment
+  // recipes cap it at 32 / (num_speculative_tokens + 1). Holding the constant
+  // at its one-draft-token value rejects larger decode batches when
+  // speculation is off, which drops those steps to eager execution. Derive the
+  // default from that budget, raising it only, so a deployment already running
+  // below the budget keeps the ceiling it had.
+  //
+  // This sits after the dump rather than in validate_config because the dump
+  // is documented as a base config to relaunch from. A derived ceiling written
+  // there would read back as the operator's own, and relaunching that base
+  // with speculation on would keep a ceiling meant for a deployment without
+  // it, admitting more captured rows than the shared budget allows. Only the
+  // graph runners read the ceiling, long after startup.
+  //
+  // An operator supplies the ceiling on the command line or in the config
+  // JSON. is_flag_specified() reports only the command line, because the JSON
+  // writeback assigns FLAGS_ directly and never clears gflags' is_default bit,
+  // so the JSON property is read too. Read it the way the assignment reads it,
+  // through value<>() rather than key presence, so that a null entry counts as
+  // unsupplied here exactly as it does there.
+  const SpeculativeConfig& speculative_config =
+      SpeculativeConfig::get_instance();
+  const auto& json_config = config::get_parsed_json_config();
+  const bool decode_limit_was_supplied =
+      config::is_flag_specified("acl_graph_decode_batch_size_limit") ||
+      (json_config.has_value() &&
+       json_config->value<int32_t>("acl_graph_decode_batch_size_limit")
+           .has_value());
+  if (!decode_limit_was_supplied) {
+    constexpr int32_t kAclGraphDecodeCaptureBudget = 32;
+    // Nothing rejects a negative speculative count at startup, and validating
+    // that flag is not this derivation's job. Reading a non-positive count as
+    // "speculation is off" matches how the rest of startup reads it and keeps
+    // the denominator positive.
+    const int32_t speculative_tokens =
+        speculative_config.num_speculative_tokens() > 0
+            ? speculative_config.num_speculative_tokens()
+            : 0;
+    const int32_t budgeted_limit =
+        kAclGraphDecodeCaptureBudget / (speculative_tokens + 1);
+    if (budgeted_limit > execution_config.acl_graph_decode_batch_size_limit()) {
+      LOG(INFO) << "Raising acl_graph_decode_batch_size_limit from "
+                << execution_config.acl_graph_decode_batch_size_limit()
+                << " to " << budgeted_limit << " for " << speculative_tokens
+                << " speculative tokens.";
+      execution_config.acl_graph_decode_batch_size_limit(budgeted_limit);
+    }
+  }
+
   // Create Master
   Options options = create_options(
       service_config.host() + ":" + std::to_string(service_config.port()),
