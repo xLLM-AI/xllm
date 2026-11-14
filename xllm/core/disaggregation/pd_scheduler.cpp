@@ -27,7 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
-#include "core/common/types.h"
+#include "core/disaggregation/pd_request_converter.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/framework/config/disagg_pd_config.h"
@@ -35,11 +35,12 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/kv_cache/transfer/pd_topology_guard.h"
+#include "core/scheduler/profile/profile_manager.h"
 #include "core/util/scope_guard.h"
 #include "core/util/tensor_codec.h"
 #include "disagg_pd.pb.h"
-#include "distributed_runtime/engine.h"
 #include "distributed_runtime/xservice_client.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/request/request.h"
@@ -66,8 +67,7 @@ constexpr std::chrono::minutes kReservationReleaseRetention{5};
 // wait_dequeue_timed(online) / try_dequeue(offline) loop:
 //   1. online requests always come before offline ones, and
 //   2. within each group the earliest created_time wins.
-class RequestPriorityComparator final {
- public:
+struct RequestPriorityComparator {
   bool operator()(const RequestPtr& a, const RequestPtr& b) const {
     const bool a_online = !a->offline();
     const bool b_online = !b->offline();
@@ -96,81 +96,6 @@ void drain_dispatch_queue(
     }
     pending->push(std::move(incoming));
   }
-}
-
-// Keep request-to-wire conversion separate from dispatch admission and retries.
-void fill_pd_request(Request& request, proto::DisaggRequest* req) {
-  RequestState& state = request.state();
-  req->set_req_id(request.request_id());
-  req->set_reservation_id(state.pd_reservation_id);
-  req->set_service_req_id(request.service_request_id());
-  req->set_source_xservice_addr(request.source_xservice_addr());
-  req->set_tokens_num(state.prompt_tokens.size());
-  req->set_prompt(state.prompt);
-  req->set_response_type(state.response_type);
-  req->set_model(state.response_model);
-  req->mutable_tools()->Assign(state.response_tools.begin(),
-                               state.response_tools.end());
-  req->set_tool_choice(state.response_tool_choice);
-  *req->mutable_chat_template_kwargs() = state.response_chat_template_kwargs;
-  *req->mutable_stream_options() = state.response_stream_options;
-  ADD_VECTOR_TO_PROTO(req->mutable_prompt_tokens(), state.prompt_tokens);
-  req->set_stream(state.stream);
-  req->set_x_request_id(request.x_request_id());
-  req->set_x_request_time(request.x_request_time());
-  req->set_seq_capacity(state.seq_capacity);
-  req->set_max_tokens(state.stopping_checker.get_max_generated_tokens());
-  req->set_max_context_len(state.stopping_checker.get_max_context_len());
-  req->set_ignore_eos(state.stopping_checker.get_ignore_eos());
-  req->set_eos_token_id(state.stopping_checker.get_eos_token());
-  if (!state.stopping_checker.get_stop_tokens().empty()) {
-    ADD_VECTOR_TO_PROTO(req->mutable_stop_token_ids(),
-                        state.stopping_checker.get_stop_tokens());
-  }
-  const auto& stop_sequences = state.stopping_checker.get_stop_sequences();
-  const auto& stop_strings = state.stopping_checker.get_stop_strings();
-  for (size_t index = 0; index < stop_sequences.size(); ++index) {
-    auto* proto_seq = req->add_stop_sequences();
-    ADD_VECTOR_TO_PROTO(proto_seq->mutable_seq_tokens(), stop_sequences[index]);
-    if (index < stop_strings.size()) {
-      proto_seq->set_stop_string(stop_strings[index]);
-    }
-  }
-  req->set_n(state.n);
-  req->set_best_of(state.best_of);
-  req->set_frequency_penalty(state.sampling_param.frequency_penalty);
-  req->set_presence_penalty(state.sampling_param.presence_penalty);
-  req->set_repetition_penalty(state.sampling_param.repetition_penalty);
-  req->set_temperature(state.sampling_param.temperature);
-  req->set_top_p(state.sampling_param.top_p);
-  req->set_min_p(state.sampling_param.min_p);
-  const RequestSamplingParam& sampling = state.sampling_param;
-  if (sampling.seed.has_value()) {
-    req->set_seed(*sampling.seed);
-  }
-  req->set_min_tokens(sampling.min_tokens);
-  req->set_vocab_size(sampling.vocab_size);
-  req->mutable_logit_bias()->insert(sampling.logit_bias.begin(),
-                                    sampling.logit_bias.end());
-  if (sampling.allowed_token_ids.has_value()) {
-    ADD_VECTOR_TO_PROTO(req->mutable_allowed_token_ids(),
-                        sampling.allowed_token_ids.value());
-  }
-  ADD_VECTOR_TO_PROTO(req->mutable_all_stop_token_ids(),
-                      sampling.all_stop_token_ids);
-  for (const auto& word : sampling.bad_words_token_ids) {
-    ADD_VECTOR_TO_PROTO(req->add_bad_words_token_ids()->mutable_seq_tokens(),
-                        word);
-  }
-  req->set_top_k(state.sampling_param.top_k);
-  req->set_logprobs(state.sampling_param.logprobs);
-  req->set_top_logprobs(state.sampling_param.top_logprobs);
-  req->set_is_embeddings(state.sampling_param.is_embeddings);
-  req->set_echo(state.echo);
-  req->set_skip_special_tokens(state.skip_special_tokens);
-  req->set_include_stop_str_in_output(state.include_stop_str_in_output);
-  req->set_json_object(state.sampling_param.json_object);
-  req->set_json_reasoning_enabled(state.json_reasoning_enabled);
 }
 
 void send_reservation_release(const std::string& req_id,
@@ -298,13 +223,11 @@ PDScheduler::~PDScheduler() {
 }
 
 void PDScheduler::initialize_rpc_server(const std::string& server_name) {
-  // wait rpc server initialized
   auto rpc_server = ServerRegistry::get_instance().get_server(server_name);
   while (!rpc_server || !rpc_server->has_initialized()) {
     absl::SleepFor(absl::Milliseconds(100));
     rpc_server = ServerRegistry::get_instance().get_server(server_name);
   }
-  // connect to master service
   xservice_client_ = XServiceClient::get_instance();
   if (!xservice_client_->initialize_done()) {
     LOG(FATAL) << "XServiceClient not init.";
@@ -320,7 +243,6 @@ void PDScheduler::initialize_rpc_server(const std::string& server_name) {
 }
 
 void PDScheduler::register_instance_info(const std::string& server_name) {
-  // register instance info
   instance_info_.name = xservice_client_->get_instance_name();
   auto rpc_server = ServerRegistry::get_instance().get_server(server_name);
   instance_info_.rpc_address = rpc_server->listen_address();
@@ -333,7 +255,6 @@ void PDScheduler::register_instance_info(const std::string& server_name) {
       instance_info_.cluster_ids, instance_info_.addrs, instance_info_.ports);
   instance_info_.dp_size = options_.dp_size();
 
-  // Get total physical pages per worker (for etcd registration)
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_vmm_kvcache()) {
     auto& memory_coordinator = DistributedVmmCoordinator::get_instance();
@@ -347,18 +268,15 @@ void PDScheduler::register_instance_info(const std::string& server_name) {
 
 void PDScheduler::profile_ttft() {
   LOG(INFO) << "Start profiling TTFT.";
-  // get the maximum prefill token length
-  auto& model_args = engine_->model_args();
+  auto& model_args = *model_args_;
   int32_t max_context_len = model_args.max_position_embeddings();
   if (!options_.enable_chunked_prefill()) {
     max_context_len =
         std::min(max_context_len, options_.max_tokens_per_batch());
   }
 
-  // warm up
   profile_manager_->run_request(max_context_len, 0);
 
-  // get TTFT starting from max_context_len
   for (int32_t token_length = max_context_len; token_length > 1;
        token_length *= 0.9) {
     double latency = profile_manager_->run_request(token_length, 0);
@@ -369,31 +287,27 @@ void PDScheduler::profile_ttft() {
 
 void PDScheduler::profile_tpot() {
   LOG(INFO) << "Start profiling TPOT.";
-  // get the maximum token length
-  auto& model_args = engine_->model_args();
+  auto& model_args = *model_args_;
   int32_t max_context_len = model_args.max_position_embeddings();
   if (!options_.enable_chunked_prefill()) {
     max_context_len =
         std::min(max_context_len, options_.max_tokens_per_batch());
   }
 
-  const size_t resource_capacity = kv_cache_manager_->admission_capacity(0);
-  int32_t block_size = kv_cache_manager_->block_size();
+  const size_t resource_capacity = block_manager_pool_->admission_capacity(0);
+  const int32_t block_size = block_manager_pool_->block_size();
   int32_t max_seqs_per_batch = options_.max_seqs_per_batch();
-  const size_t request_units = kv_cache_manager_->sequence_resource_units(
-      (max_context_len / block_size + 1) * block_size);
-  int32_t max_batch_size = resource_capacity / request_units;
+  int32_t max_batch_size =
+      resource_capacity / block_manager_pool_->sequence_resource_units(
+                              (max_context_len / block_size + 1) * block_size);
 
-  // warm up
   profile_manager_->run_request(
       max_context_len, max_context_len - 1, max_batch_size);
 
-  // get TPOT starting from max_context_len, dividing the token length by 2 in
-  // each loop iteration. Skip small token lengths to speed up profiling.
   for (int32_t token_length = max_context_len; token_length > 64;
        token_length >>= 1) {
     max_batch_size =
-        resource_capacity / kv_cache_manager_->sequence_resource_units(
+        resource_capacity / block_manager_pool_->sequence_resource_units(
                                 (token_length / block_size + 1) * block_size);
     int32_t current_max_batch_size = max_batch_size > max_seqs_per_batch
                                          ? max_seqs_per_batch
@@ -409,20 +323,20 @@ void PDScheduler::profile_tpot() {
 }
 
 void PDScheduler::start_rpc_server(PDServiceOptions response_options) {
-  auto service =
-      std::make_unique<PDService>(this, engine_, std::move(response_options));
-  const int32_t port = ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
+  std::unique_ptr<PDService> service =
+      std::make_unique<PDService>(this, std::move(response_options));
   auto rpc_server =
       ServerRegistry::get_instance().register_server(server_name_);
   if (!rpc_server->start(std::move(service))) {
+    const int32_t port =
+        ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
     LOG(ERROR) << "Failed to start brpc disagg pd server on port " << port;
     return;
   }
 }
 
 void PDScheduler::step(const absl::Duration& timeout) {
-  ContinuousSchedulerBase::step(timeout);
-  // Send first generation token to decode instance.
+  ContinuousScheduler::step(timeout);
   // Always check (not gated on last_step_prefill_) because chunked prefill
   // mode does not set that flag and a chunked prefill may complete at any step.
   // prefill_send_first_generation() internally checks
@@ -433,7 +347,7 @@ void PDScheduler::step(const absl::Duration& timeout) {
 }
 
 size_t PDScheduler::num_queued_requests() const {
-  return ContinuousSchedulerBase::num_queued_requests() +
+  return ContinuousScheduler::num_queued_requests() +
          pending_dispatch_requests_;
 }
 
@@ -459,7 +373,7 @@ bool PDScheduler::enqueue_dispatched_request(std::shared_ptr<Request> request) {
   {
     std::lock_guard<std::mutex> lock(request_admission_mutex_);
     CHECK_GT(pending_dispatch_requests_, 0u);
-    queued = ContinuousSchedulerBase::enqueue_ready_request(request);
+    queued = ContinuousScheduler::enqueue_ready_request(request);
     --pending_dispatch_requests_;
   }
   if (!queued) {
@@ -472,7 +386,6 @@ bool PDScheduler::enqueue_dispatched_request(std::shared_ptr<Request> request) {
   return queued;
 }
 
-// prefill send new request to remote instance
 void PDScheduler::dispatch_requests() {
   PendingQueue pending;
   while (true) {
@@ -595,10 +508,9 @@ void PDScheduler::dispatch_requests() {
     }
 
     Timer decode_allocation_timer;
-    proto::DisaggRequests reqs;
-    proto::DisaggResponses resps;
+    xllm::proto::DisaggRequests reqs;
+    xllm::proto::DisaggResponses resps;
     reqs.set_prefill_name(xservice_client_->get_instance_name());
-    // The RPC supports batches; dispatch admits one request at a time.
     fill_pd_request(*request, reqs.add_reqs());
     reqs.mutable_cluster_infos()->mutable_cluster_ids()->Add(
         instance_info_.cluster_ids.begin(), instance_info_.cluster_ids.end());
@@ -610,7 +522,6 @@ void PDScheduler::dispatch_requests() {
     const double allocation_prepare_seconds =
         decode_allocation_timer.elapsed_seconds();
 
-    // TODO: sync rpc here currently
     brpc::Controller cntl;
     Timer allocation_rpc_timer;
     stub->AddNewRequests(&cntl, &reqs, &resps, nullptr);
@@ -633,7 +544,6 @@ void PDScheduler::dispatch_requests() {
 
     CHECK_EQ(resps.resps_size(), 1)
         << "selected_instance : " << selected_instance;
-    // insert instance name to linked_instance_
     {
       std::lock_guard<std::mutex> lock(linked_instances_mutex_);
       linked_instance_.emplace(selected_instance);
@@ -648,12 +558,12 @@ void PDScheduler::dispatch_requests() {
                    << request->state().prompt_tokens.size()
                    << ", selected_instance=" << selected_instance;
         do_permanent_rejection(request, resp.status_code());
-      } else {
-        // Keep created_time order: retry from the local pending queue instead
-        // of the MPMC queue, which is not FIFO across HTTP threads.
-        pending.push(request);
-        release_admission.dismiss();
+        continue;
       }
+      // Keep created_time order: retry from the local pending queue instead
+      // of the MPMC queue, which is not FIFO across HTTP threads.
+      pending.push(request);
+      release_admission.dismiss();
     } else {
       for (auto& sequence : request->sequences()) {
         TransferKVInfo info;
@@ -734,7 +644,6 @@ void PDScheduler::dispatch_requests() {
       enqueue_dispatched_request(request);
     }
     VLOG(1) << "Prefill Decode allocation request_id=" << request->request_id()
-            << ", request_count=1"
             << ", prepare_ms=" << allocation_prepare_seconds * 1000.0
             << ", rpc_ms=" << allocation_rpc_seconds * 1000.0 << ", total_ms="
             << decode_allocation_timer.elapsed_seconds() * 1000.0;
@@ -755,9 +664,6 @@ void PDScheduler::prefill_send_first_generation() {
       }
       // Retain the accepting peer until FirstGeneration succeeds so a failed
       // handoff can release the matching decode reservation.
-      if (requests.empty()) {
-        requests.reserve(running_requests_.size());
-      }
       requests.emplace_back(std::move(request));
     }
   }
@@ -768,14 +674,13 @@ void PDScheduler::prefill_send_first_generation() {
 
   prefill_threadpool_.schedule([this,
                                 requests = std::move(requests)]() mutable {
-    // send request first token to remote instance
     // TODO: here we only support one sequence for now.
     auto fail_request = [this](const std::shared_ptr<Request>& request,
                                Status status) {
       release_failed_request(request);
       output_dispatcher_->process_failed_request(request, status);
       output_dispatcher_->wait_completion();
-      release_request_blocks(request, /*cache_prefix=*/true);
+      deallocate_sequences(*request, /*cache_prefix=*/true);
     };
     for (auto& request : requests) {
       if (request->cancelled()) {
@@ -860,7 +765,7 @@ void PDScheduler::prefill_send_first_generation() {
             group->add_ids(static_cast<uint64_t>(block.id()));
           }
         }
-        if (has_linear_attention_layers(engine_->model_args())) {
+        if (has_linear_attention_layers(*model_args_)) {
           const int32_t linear_state_id = sequence->get_linear_state_slot_id();
           CHECK_GE(linear_state_id, 0)
               << "Prefill did not allocate a linear-state slot.";
@@ -871,9 +776,7 @@ void PDScheduler::prefill_send_first_generation() {
         gen->set_dp_size(instance_info_.dp_size);
         gen->set_dp_rank(sequence->dp_rank());
       }
-      if (options_.num_speculative_tokens() > 0 &&
-          SpeculativeConfig::requires_bootstrap_hidden(
-              SpeculativeConfig::get_instance().speculative_algorithm())) {
+      if (requires_bootstrap_hidden_) {
         torch::Tensor embedding =
             request->sequences()[0]->get_mtp_bootstrap_embedding();
         if (!embedding.defined()) {
@@ -898,7 +801,6 @@ void PDScheduler::prefill_send_first_generation() {
       }
       const double prepare_seconds = first_generation_timer.elapsed_seconds();
 
-      // send first gens to remote instance
       proto::DisaggPDService_Stub* stub = nullptr;
       {
         std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
@@ -1014,17 +916,20 @@ void PDScheduler::release_request_blocks(std::shared_ptr<Request> request,
   enqueue_request_block_release(std::move(request), cache_prefix).get();
 }
 
-void PDScheduler::complete_request_block_release(RequestBlockRelease& release) {
-  if (release.cache_prefix) {
-    kv_cache_manager_->deallocate(release.request.get());
-  } else {
-    for (const auto& sequence : release.request->sequences()) {
-      if (sequence == nullptr) {
-        continue;
-      }
-      engine_->block_manager_pool()->deallocate_without_cache(sequence.get());
+void PDScheduler::deallocate_sequences(Request& request, bool cache_prefix) {
+  if (cache_prefix) {
+    block_manager_pool_->deallocate(&request);
+    return;
+  }
+  for (auto& sequence : request.sequences()) {
+    if (sequence != nullptr) {
+      block_manager_pool_->deallocate_without_cache(sequence.get());
     }
   }
+}
+
+void PDScheduler::complete_request_block_release(RequestBlockRelease& release) {
+  deallocate_sequences(*release.request, release.cache_prefix);
   release.completion.set_value();
 }
 
@@ -1057,7 +962,7 @@ bool PDScheduler::release_reservation(const std::string& req_id,
     }
     request = take_waiting_request(req_id);
   }
-  release_request_blocks(std::move(request), /*cache_prefix=*/false);
+  deallocate_sequences(*request, /*cache_prefix=*/false);
   return true;
 }
 
@@ -1086,7 +991,7 @@ bool PDScheduler::decode_schedule(std::shared_ptr<Request>& request,
                  << "request_id=" << request->request_id()
                  << ", reservation_id=" << request->state().pd_reservation_id;
       lock.unlock();
-      release_request_blocks(request, /*cache_prefix=*/false);
+      deallocate_sequences(*request, /*cache_prefix=*/false);
       return false;
     }
     received_request_map_[request->request_id()] = request;
@@ -1135,7 +1040,7 @@ bool PDScheduler::decode_recv_first_generation(
   auto& sequences = request->sequences();
   bool kv_restored = false;
   ScopeGuard release_unqueued_blocks([this, &request, &kv_restored] {
-    release_request_blocks(std::move(request), kv_restored);
+    deallocate_sequences(*request, /*cache_prefix=*/kv_restored);
   });
   if (sequences.empty() || sequences[0] == nullptr) {
     LOG(ERROR) << "Request has no valid sequences, request_id: " << req_id;
@@ -1152,11 +1057,7 @@ bool PDScheduler::decode_recv_first_generation(
   }
   request->record_num_prefix_cache_tokens(
       static_cast<size_t>(num_cached_tokens));
-  const bool requires_bootstrap_hidden =
-      options_.num_speculative_tokens() > 0 &&
-      SpeculativeConfig::requires_bootstrap_hidden(
-          SpeculativeConfig::get_instance().speculative_algorithm());
-  if (requires_bootstrap_hidden) {
+  if (requires_bootstrap_hidden_) {
     const int32_t slot_id = sequence->get_embedding_block_id();
     if (slot_id < 0) {
       LOG(ERROR) << "Invalid MTP bootstrap slot, request_id: " << req_id;
@@ -1325,34 +1226,50 @@ void PDScheduler::restore_disaggregated_latency(
   }
 }
 
+void PDScheduler::start_runtime(PDServiceOptions response_options) {
+  CHECK(distributed_worker_manager_ != nullptr)
+      << "Disaggregated PD requires a distributed worker manager.";
+  CHECK(kv_transfer_coordinator_ != nullptr)
+      << "Disaggregated PD requires a KV cache transfer coordinator.";
+  dispatch_thread_ =
+      std::make_unique<std::thread>(&PDScheduler::dispatch_requests, this);
+  server_name_.append(std::to_string(options_.server_idx()));
+  rpc_server_thread_ = std::make_unique<std::thread>(
+      [this, response_options = std::move(response_options)]() mutable {
+        start_rpc_server(std::move(response_options));
+      });
+  initialize_rpc_server(server_name_);
+  register_instance_info(server_name_);
+  if (!options_.disable_ttft_profiling() &&
+      options_.instance_role().value() == InstanceRole::MIX) {
+    profile_ttft();
+    profile_tpot();
+  }
+}
+
 bool PDScheduler::try_allocate(Sequence* sequence) {
   // When the KV Cache usage reaches the threshold, prefill requests will no
   // longer be scheduled to avoid frequent preemption.
-  return kv_cache_manager_->kv_cache_utilization() <
+  return block_manager_pool_->kv_cache_utilization() <
              ::xllm::SchedulerConfig::get_instance()
                  .prefill_scheduling_memory_usage_threshold() &&
-         kv_cache_manager_->try_allocate(sequence);
+         block_manager_pool_->try_allocate(sequence);
 }
 
 bool PDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
   CHECK(sequence != nullptr);
-  const BlockManagerPool* block_manager = engine_->block_manager_pool();
-  CHECK(block_manager != nullptr);
-  const BlockManagerPool::Options& block_options = block_manager->options();
+  const BlockManagerPool::Options& block_options =
+      block_manager_pool_->options();
   if (block_options.enable_vmm_kvcache() ||
       !block_options.manager_types().empty() ||
       (block_options.enable_host_offload() &&
        options_.instance_role() != InstanceRole::DECODE)) {
     return false;
   }
-  if (block_options.enable_shared_kv_cache()) {
-    return block_manager->exceeds_total_capacity(sequence,
-                                                 sequence->num_prompt_tokens());
-  }
   return ::xllm::exceeds_decode_capacity(
       sequence->num_prompt_tokens(),
-      static_cast<size_t>(block_manager->block_size()),
-      static_cast<size_t>(block_manager->num_blocks()));
+      static_cast<size_t>(block_manager_pool_->block_size()),
+      static_cast<size_t>(block_manager_pool_->num_blocks()));
 }
 
 void PDScheduler::do_permanent_rejection(
@@ -1367,7 +1284,7 @@ void PDScheduler::do_permanent_rejection(
                        : StatusCode::RESOURCE_EXHAUSTED,
        invalid_request ? "Decode rejected invalid PD service metadata"
                        : "Request prompt exceeds decode KV cache capacity"});
-  release_request_blocks(request, /*cache_prefix=*/true);
+  deallocate_sequences(*request, /*cache_prefix=*/true);
   std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
   req_to_channel_map_.erase(request->request_id());
 }

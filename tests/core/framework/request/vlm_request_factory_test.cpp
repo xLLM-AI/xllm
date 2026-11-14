@@ -254,7 +254,7 @@ TEST_F(VLMRequestFactoryTest, MtpAcceptsMinimumLengthWithOverlap) {
   ASSERT_NE(request, nullptr);
   EXPECT_FALSE(capture.called);
   EXPECT_EQ(request->state().sampling_param.min_tokens, 32U);
-  EXPECT_TRUE(request->state().sampling_param.device_min_tokens);
+  EXPECT_TRUE(request->state().sampling_param.device_min_tokens());
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
 }
 
@@ -279,7 +279,7 @@ TEST_F(VLMRequestFactoryTest, MtpAcceptsSamplingControlsWithOverlap) {
   EXPECT_FALSE(capture.called);
   const auto& sampling = request->state().sampling_param;
   EXPECT_EQ(sampling.seed, 42);
-  EXPECT_TRUE(sampling.device_min_tokens);
+  EXPECT_TRUE(sampling.device_min_tokens());
   EXPECT_FALSE(sampling.bad_words_token_ids.empty());
 }
 
@@ -307,7 +307,7 @@ TEST_F(VLMRequestFactoryTest, SamplingControlsAreIndependentOfRuntimeOptions) {
   const auto& sampling = request->state().sampling_param;
   EXPECT_EQ(sampling.seed, 42);
   EXPECT_EQ(sampling.min_tokens, 16U);
-  EXPECT_TRUE(sampling.device_min_tokens);
+  EXPECT_TRUE(sampling.device_min_tokens());
   EXPECT_FALSE(sampling.bad_words_token_ids.empty());
   EXPECT_EQ(sampling.logit_bias.at(1), 2.0F);
   EXPECT_EQ(sampling.allowed_token_ids, sp.allowed_token_ids);

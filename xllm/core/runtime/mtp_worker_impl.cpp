@@ -328,7 +328,7 @@ runtime::Options MTPWorkerImpl<TargetInput>::draft_options(
   }
   draft_options.backend("llm")
       .enable_schedule_overlap(false)
-      .is_draft_engine(true)
+      .is_draft_model(true)
       .enable_graph_aux_hidden_states(true);
   return draft_options;
 }

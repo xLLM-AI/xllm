@@ -9,6 +9,7 @@ cc_library(
   HDRS
     scheduler_policy.h
     continuous_scheduler.h
+    scheduler_callbacks.h
     request_output_dispatcher.h
     scheduler.h
     dit_scheduler.h

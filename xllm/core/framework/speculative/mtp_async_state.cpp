@@ -55,7 +55,7 @@ TargetSpecVerifyMode classify_target_spec_verify_mode(
   }
   if (is_python_model &&
       (model_type == "deepseek_v32" || model_type == "deepseek_v4" ||
-       model_type == kDeepseekV4DSparkModelType ||
+       model_type == util::kDeepseekV4DSparkModelType ||
        model_type == "glm_moe_dsa")) {
     return TargetSpecVerifyMode::EXPANDED_VERIFY;
   }

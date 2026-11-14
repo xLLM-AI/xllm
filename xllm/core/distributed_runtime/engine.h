@@ -15,71 +15,125 @@ limitations under the License.
 
 #pragma once
 
-#include <glog/logging.h>
-
+#include <functional>
 #include <memory>
+#include <optional>
+#include <vector>
 
 #include "common/types.h"
+#include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/distributed_runtime/model_residency_coordinator.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "runtime/options.h"
+#include "runtime/worker_client.h"
 
 namespace xllm {
 
+class ModelLoader;
+class KVCacheCapacity;
+class KVCacheShape;
+
+// Prepares model residency (virtual memory pages) before worker weights load.
+using ModelInitCallback = std::function<
+    bool(const ModelLoader&, int64_t, int32_t, int32_t, MasterStatus)>;
+
+inline ModelInitCallback make_model_init_callback(
+    ModelResidencyCoordinator* coordinator) {
+  return [coordinator](const ModelLoader& model_loader,
+                       int64_t num_layers,
+                       int32_t dp_size,
+                       int32_t tp_size,
+                       MasterStatus status) {
+    return coordinator->initialize_model(
+        model_loader, num_layers, dp_size, tp_size, status);
+  };
+}
+
 class Engine {
  public:
-  virtual ~Engine() = default;
+  explicit Engine(const runtime::Options& options,
+                  std::shared_ptr<DistributedWorkerManager>
+                      distributed_worker_manager = nullptr)
+      : options_(options),
+        distributed_worker_manager_(std::move(distributed_worker_manager)) {}
 
-  virtual bool init() { return true; };
+  ~Engine() = default;
 
-  virtual bool init(MasterStatus master_status) { return true; };
-
-  // return the tokenizer
-  virtual const Tokenizer* tokenizer() const { return tokenizer_.get(); }
-
-  // return the block manager
-  virtual BlockManagerPool* block_manager_pool() const {
-    auto p = reinterpret_cast<BlockManagerPool*>(kv_cache_manager_.get());
-    if (!p) {
-      LOG(FATAL) << "kv_cache_manager_ is not BlockManagerPool type!";
-    }
-    return p;
+  std::shared_ptr<DistributedWorkerManager> get_distributed_worker_manager()
+      const {
+    return distributed_worker_manager_;
   }
 
-  // return the model args
-  virtual const ModelArgs& model_args() const { return args_; }
+  const Tokenizer* tokenizer() const { return tokenizer_.get(); }
 
-  // return the tokenizer args
-  virtual const TokenizerArgs& tokenizer_args() const {
-    return tokenizer_args_;
+  BlockManagerPool* block_manager_pool() const {
+    return block_manager_pool_.get();
   }
 
-  // Start/stop online timeline profiling on all workers. CUDA only for now.
-  virtual bool start_profile() {
-    LOG(ERROR) << "start_profile is not implemented for this engine!";
-    return false;
-  };
+  const ModelArgs& model_args() const { return args_; }
 
-  virtual bool stop_profile() {
-    LOG(ERROR) << "stop_profile is not implemented for this engine!";
-    return false;
-  };
+  const TokenizerArgs& tokenizer_args() const { return tokenizer_args_; }
 
  protected:
-  // model args
+  bool dispatch_model_load(const ModelLoader& model_loader,
+                           const ModelArgs& model_args,
+                           MasterStatus master_status,
+                           const ModelInitCallback& prepare_model);
+
+  bool init_draft_model(const ModelInitCallback& prepare_model);
+
+  bool is_multimodal() const {
+    return EngineType(options_.backend()) == EngineType::VLM;
+  }
+
+  void log_capacity_and_validate_chunked_prefill(
+      const KVCacheCapacity& kv_cache_cap,
+      bool enable_state_cache) const;
+
+  bool allocate_kv_cache_on_workers(const KVCacheShape& kv_cache_shape,
+                                    bool use_transfer_path = false);
+
+  std::optional<KVCacheCapacity> init_draft_and_estimate_capacity(
+      const ModelInitCallback& prepare_model);
+
+  void setup_workers();
+
+  bool load_model_to_workers(const std::string& model_path,
+                             MasterStatus master_status);
+
+  void process_group_test();
+
   ModelArgs args_;
 
-  // Tokenizer args
+  runtime::Options options_;
+
+  std::vector<std::shared_ptr<WorkerClient>> worker_clients_;
+
+  uint32_t dp_size() const { return options_.dp_size(); }
+
+  // Effective TP width (MLU=dp_local; NPU=dp_local/cp).
+  uint32_t dp_local_tp_size_ = 1;
+
+  size_t worker_clients_num() const { return worker_clients_.size(); }
+
   TokenizerArgs tokenizer_args_;
 
-  // kv cache manager
-  // support `block manager` and `virtual memory manager` currently.
-  std::unique_ptr<KVCacheManager> kv_cache_manager_;
+  // Device allocations absent from the worker memory snapshot.
+  int64_t reserved_memory_bytes_ = 0;
 
-  // tokenizer
+  std::unique_ptr<BlockManagerPool> block_manager_pool_;
+
+  ModelArgs draft_args_;
+
   std::unique_ptr<Tokenizer> tokenizer_;
+
+  torch::ScalarType dtype_;
+
+  std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_ =
+      nullptr;
 };
 
 }  // namespace xllm

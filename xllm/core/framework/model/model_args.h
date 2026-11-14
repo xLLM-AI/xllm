@@ -16,6 +16,8 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -33,9 +35,6 @@ namespace xllm {
 
 inline constexpr std::string_view kDFlash2DraftModelType = "DFlash2DraftModel";
 inline constexpr std::string_view kDSparkGLM5DraftModelType = "glm5_dspark";
-inline constexpr std::string_view kDeepseekV4DSparkModelType =
-    "deepseek_v4_dspark";
-
 inline constexpr bool is_dflash2_draft_model_type(std::string_view model_type) {
   return model_type == kDFlash2DraftModelType;
 }
@@ -1258,6 +1257,26 @@ inline bool has_linear_attention_layers(const ModelArgs& args) {
 inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
   return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
          model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
+}
+
+inline void reconcile_vocab_size(ModelArgs& args,
+                                 int64_t tokenizer_vocab_size) {
+  const int64_t model_vocab_size = args.vocab_size();
+  if (tokenizer_vocab_size == model_vocab_size) {
+    return;
+  }
+  // use tokenizer vocab size if model vocab size is not set
+  if (model_vocab_size <= 0) {
+    LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab size: "
+                 << tokenizer_vocab_size;
+    args.vocab_size(tokenizer_vocab_size);
+  } else if (tokenizer_vocab_size > model_vocab_size) {
+    LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: " << tokenizer_vocab_size
+                 << ", model: " << model_vocab_size;
+  } else {
+    LOG(INFO) << "Tokenizer/model vocab differ: tokenizer="
+              << tokenizer_vocab_size << ", model=" << model_vocab_size;
+  }
 }
 
 inline bool is_glm5_next_target_model_type(std::string_view model_type) {

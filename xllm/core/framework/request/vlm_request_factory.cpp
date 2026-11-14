@@ -191,7 +191,6 @@ std::shared_ptr<Request> VLMRequestFactory::build_request(
   const size_t best_of = sp.best_of.value_or(sp.n);
 
   RequestSamplingParam sampling_param = sp.to_sampling_param(best_of);
-  sampling_param.device_min_tokens = sp.min_tokens > 0;
   if (const auto error =
           sp.prepare_sampling_constraints(sampling_param,
                                           tokenizer_,

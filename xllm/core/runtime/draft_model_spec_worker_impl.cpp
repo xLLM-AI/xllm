@@ -225,7 +225,7 @@ namespace {
 runtime::Options target_options(const runtime::Options& options) {
   runtime::Options opts = options;
   opts.enable_schedule_overlap(false)
-      .is_draft_engine(false)
+      .is_draft_model(false)
       .enable_graph_aux_hidden_states(true);
   return opts;
 }
@@ -308,9 +308,9 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
       options.max_linear_state_cache_slots();
   estimate_options.linear_state_cache_block_limit =
       get_npu_linear_state_cache_block_limit(model_args.model_type());
-  estimate_options.is_draft_engine = options.is_draft_engine();
+  estimate_options.is_draft_model = options.is_draft_model();
   estimate_options.enable_chunked_prefill = options.enable_chunked_prefill();
-  estimate_options.enable_schedule_overlap = options.enable_schedule_overlap();
+
   const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
   estimate_options.enable_prefix_cache =
       kv_cache_config.enable_prefix_cache() &&

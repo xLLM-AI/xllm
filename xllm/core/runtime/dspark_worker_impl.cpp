@@ -52,7 +52,7 @@ int32_t configure_draft_config(ModelArgs& args,
     args.dspark_use_native_sas(
         KernelConfig::get_instance().enable_dspark_native_sas());
 #endif
-    args.model_type(std::string(kDeepseekV4DSparkModelType));
+    args.model_type(std::string(util::kDeepseekV4DSparkModelType));
   } else {
     args.model_type(args.model_type() == kDSparkGLM5DraftModelType
                         ? std::string(kDSparkGLM5DraftModelType)

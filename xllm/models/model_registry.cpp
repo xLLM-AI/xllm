@@ -637,9 +637,9 @@ int64_t ModelRegistry::get_graph_kv_capacity(const std::string& name,
 
 void ModelRegistry::configure_mtp_args(ModelArgs& args,
                                        std::string_view algorithm,
-                                       bool is_draft_engine,
+                                       bool is_draft_model,
                                        bool is_python_model) {
-  if (!is_draft_engine || !SpeculativeConfig::is_mtp_algorithm(algorithm)) {
+  if (!is_draft_model || !SpeculativeConfig::is_mtp_algorithm(algorithm)) {
     return;
   }
   const auto& models = get_instance()->model_registry_;

@@ -38,7 +38,7 @@ Executor::Executor(CausalLM* model,
   }
   auto executor_options = options;
   if (executor_type != "python" && executor_type != "mlu" &&
-      options.is_draft_engine()) {
+      options.is_draft_model()) {
     executor_options.num_speculative_tokens(context.num_speculative_tokens());
   }
   impl_ = ExecutorImplFactory::get_instance().create_executor_impl(

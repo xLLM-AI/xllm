@@ -24,6 +24,8 @@ limitations under the License.
 
 #include "core/common/metrics.h"
 #include "core/common/types.h"
+#include "core/framework/allocator/virtual_memory/physical_page_pool.h"
+#include "core/framework/allocator/vmm_arena_capacity.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -41,6 +43,7 @@ limitations under the License.
 #include "core/util/tensor_helper.h"
 #include "core/util/tensor_options.h"
 #include "framework/model/model_args.h"
+#include "models/model_registry.h"
 #include "util/pretty_print.h"
 #include "util/utils.h"
 
@@ -193,7 +196,7 @@ int64_t layerwise_split_block_count(const ModelArgs& model_args,
 
 bool enable_hybrid_spec_verify(const ModelArgs& model_args,
                                const KVCacheEstimateOptions& options) {
-  return options.num_speculative_tokens > 0 && !options.is_draft_engine &&
+  return options.num_speculative_tokens > 0 && !options.is_draft_model &&
          options.instance_role != InstanceRole::PREFILL &&
          (is_qwen3_5_target_model_type(model_args.model_type()) ||
           is_glm5_next_target_model_type(model_args.model_type()));
@@ -741,7 +744,31 @@ void init_standard_counts(const ModelArgs& model_args,
   CHECK_GT(kv_cache_cap->n_blocks(), 0) << "no n_blocks for kv cache";
 }
 
+int64_t worker_available_budget(const KVCacheMemorySnapshot& snapshot,
+                                const runtime::Options& options,
+                                int64_t reserved_memory_bytes) {
+  int64_t available_memory = snapshot.available_memory - reserved_memory_bytes;
+  if (options.max_memory_utilization() < 1.0) {
+    const int64_t buffer_memory = static_cast<int64_t>(std::ceil(
+        snapshot.total_memory * (1.0 - options.max_memory_utilization())));
+    available_memory -= buffer_memory;
+  }
+  if (options.max_cache_size() > 0) {
+    available_memory = std::min(available_memory, options.max_cache_size());
+  }
+  return available_memory;
+}
+
 }  // namespace
+
+bool vmm_budget_replaces_worker_memory(bool is_multimodal) {
+  return KVCacheConfig::get_instance().enable_vmm_kvcache() && !is_multimodal;
+}
+
+bool vmm_pool_serves_budget(bool is_multimodal) {
+  return vmm_budget_replaces_worker_memory(is_multimodal) &&
+         PhysicalPagePool::get_instance().is_initialized();
+}
 
 KPoolCacheLayout default_kpool_layout() {
   return Platform::is_mlu() ? KPoolCacheLayout::COMPRESSED_WITH_TAIL
@@ -780,78 +807,6 @@ SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
   CHECK_GT(n_blocks, 0) << "no memory for a shared KPool block";
   target_cap.n_blocks(n_blocks).cache_size_in_bytes(budget);
   draft_cap.n_blocks(n_blocks).cache_size_in_bytes(budget);
-  return {std::move(target_cap), std::move(draft_cap)};
-}
-
-SharedStaticKVCachePlan plan_shared_static_kv_cache(
-    KVCacheCapacity target_cap,
-    KVCacheCapacity draft_cap,
-    const ModelArgs& target_args,
-    int64_t world_size,
-    torch::ScalarType dtype) {
-  CHECK_GT(world_size, 0);
-  CHECK_GT(target_cap.shared_slot_bytes(), 0);
-  CHECK_EQ(target_cap.linear_cache_size_in_bytes(), 0);
-  CHECK_EQ(draft_cap.shared_slot_bytes(), 0);
-  CHECK_EQ(draft_cap.num_linear_attention_layers(), 0);
-  CHECK_EQ(draft_cap.linear_cache_size_in_bytes(), 0);
-  CHECK_EQ(draft_cap.num_full_attention_layers(), draft_cap.n_layers());
-  CHECK_GT(draft_cap.n_layers(), 0);
-  CHECK_EQ(draft_cap.index_block_bytes(), 0);
-  CHECK_EQ(draft_cap.scale_slot_size(), 0);
-  CHECK_EQ(target_cap.block_size(), draft_cap.block_size());
-  CHECK_EQ(target_cap.slot_size(), draft_cap.slot_size())
-      << "Shared draft requires the target Full row geometry";
-  const int64_t budget = std::min(target_cap.cache_size_in_bytes(),
-                                  draft_cap.cache_size_in_bytes());
-  StaticKVCacheLayoutSpec spec = shared_layout_spec(
-      target_args,
-      target_cap,
-      dtype,
-      std::max<int64_t>(target_args.linear_num_key_heads() / world_size, 1),
-      std::max<int64_t>(target_args.linear_num_value_heads() / world_size, 1));
-  spec.draft_layer_count = static_cast<size_t>(draft_cap.n_layers());
-  const StaticKVCacheLayout layout(std::move(spec));
-  const int64_t slab_bytes = static_cast<int64_t>(layout.slab_bytes());
-  int64_t slabs = std::min(budget / slab_bytes,
-                           static_cast<int64_t>(layout.max_slab_count()));
-  const int64_t full_pages = static_cast<int64_t>(layout.full_pages_per_slab());
-  slabs = std::min(slabs,
-                   std::numeric_limits<int32_t>::max() /
-                       target_cap.block_size() / full_pages);
-  const auto slabs_for = [&layout](size_t count, KVCacheTensorRole role) {
-    const size_t per_slab = layout.objects_per_slab(role);
-    return count / per_slab + static_cast<size_t>(count % per_slab != 0);
-  };
-  const int64_t reserved_slabs =
-      static_cast<int64_t>(layout.num_reserved_slabs());
-  const int64_t minimum_slabs = static_cast<int64_t>(
-      reserved_slabs + slabs_for(1, KVCacheTensorRole::KEY) +
-      slabs_for(layout.linear_objects_per_state(), KVCacheTensorRole::CONV) +
-      slabs_for(layout.linear_objects_per_state(), KVCacheTensorRole::SSM));
-  CHECK_GE(slabs, minimum_slabs)
-      << "Shared target and draft budget cannot fit one hybrid sequence";
-  const int64_t full_block_bytes =
-      static_cast<int64_t>(layout.bank_count() * layout.full_bundle_bytes());
-  const int64_t state_bytes = static_cast<int64_t>(
-      layout.linear_layer_count() *
-      (layout.conv_row_bytes() + layout.ssm_bundle_bytes()));
-  const int64_t slots =
-      std::min<int64_t>(1 + (slabs - reserved_slabs) * slab_bytes /
-                                std::min(full_block_bytes, state_bytes),
-                        std::numeric_limits<int32_t>::max());
-  target_cap.n_blocks(slots)
-      .num_linear_state_blocks(slots)
-      .shared_draft_layers(draft_cap.n_layers())
-      .shared_slot_bytes(slab_bytes)
-      .shared_slab_count(slabs)
-      .shared_min_slab_count(minimum_slabs)
-      .shared_reserved_slab_count(reserved_slabs)
-      .cache_size_in_bytes(slabs * slab_bytes);
-  // Target owns the arena; the draft only borrows its companion-bank views.
-  draft_cap.n_blocks(slots)
-      .shared_draft_layers(draft_cap.n_layers())
-      .cache_size_in_bytes(0);
   return {std::move(target_cap), std::move(draft_cap)};
 }
 
@@ -923,16 +878,11 @@ int64_t KVCacheEstimator::estimate_memory_budget(
     GAUGE_SET(weight_size_in_kilobytes,
               (total_memory - available_memory) / 1024);
     GAUGE_SET(total_memory_size_in_kilobytes, total_memory / 1024);
-    if (options.max_memory_utilization() < 1.0) {
-      const int64_t buffer_memory = static_cast<int64_t>(
-          std::ceil(total_memory * (1.0 - options.max_memory_utilization())));
-      available_memory -= buffer_memory;
-    }
-    if (options.max_cache_size() > 0) {
-      available_memory = std::min(available_memory, options.max_cache_size());
-    }
-    available_memory -= encoder_cache_reserved_bytes;
-    cache_size_in_bytes = std::min(cache_size_in_bytes, available_memory);
+    cache_size_in_bytes =
+        std::min(cache_size_in_bytes,
+                 worker_available_budget(
+                     memory, options, context.reserved_memory_bytes) -
+                     encoder_cache_reserved_bytes);
   }
   return cache_size_in_bytes;
 }
@@ -944,7 +894,7 @@ KVCacheCapacity KVCacheEstimator::estimate(
   estimate_options.dtype = context.dtype;
   estimate_options.enable_shared_kv_cache =
       KVCacheConfig::get_instance().enable_shared_kv_cache() &&
-      !options.is_draft_engine();
+      !options.is_draft_model();
   estimate_options.kv_cache_dtype = options.kv_cache_dtype();
   estimate_options.indexer_cache_dtype =
       ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype();
@@ -964,11 +914,11 @@ KVCacheCapacity KVCacheEstimator::estimate(
       options.max_linear_state_cache_slots();
   estimate_options.linear_state_cache_block_limit =
       context.linear_state_cache_block_limit;
-  estimate_options.is_draft_engine = options.is_draft_engine();
+  estimate_options.is_draft_model = options.is_draft_model();
   estimate_options.enable_chunked_prefill = options.enable_chunked_prefill();
   estimate_options.enable_schedule_overlap = options.enable_schedule_overlap();
   const bool is_mtp_draft_engine =
-      options.is_draft_engine() &&
+      options.is_draft_model() &&
       SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm());
   estimate_options.enable_prefix_cache =
       options.enable_prefix_cache() && !is_mtp_draft_engine;
@@ -979,11 +929,11 @@ KVCacheCapacity KVCacheEstimator::estimate(
     estimate_options.dp_size = options.dp_size();
     estimate_options.enable_dp_fair_token_budget =
         ::xllm::SchedulerConfig::get_instance().enable_dp_fair_token_budget();
-    if (options.enable_mtp_draft_body_tp1() && options.is_draft_engine()) {
+    if (options.enable_mtp_draft_body_tp1() && options.is_draft_model()) {
       estimate_options.world_size = 1;
     }
     estimate_options.layerwise_split_size =
-        options.is_draft_engine()
+        options.is_draft_model()
             ? 1
             : ParallelConfig::get_instance().layerwise_split_size();
   }
@@ -1112,7 +1062,7 @@ KVCacheCapacity estimate_kv_cache_capacity(
   kv_cache_cap.linear_conv_state_len(model_args.linear_conv_kernel_dim() - 1 +
                                      num_speculative_tokens);
   kv_cache_cap.linear_ssm_checkpoint_stride(num_speculative_tokens + 1);
-  if (options.is_draft_engine && model_args.num_nextn_predict_layers() > 0) {
+  if (options.is_draft_model && model_args.num_nextn_predict_layers() > 0) {
     kv_cache_cap.n_layers(model_args.num_nextn_predict_layers());
   }
 
@@ -1145,6 +1095,158 @@ KVCacheCapacity estimate_kv_cache_capacity(
     init_standard_counts(model_args, options, &kv_cache_cap);
   }
   return kv_cache_cap;
+}
+
+namespace {
+
+KVCacheCapacity combine_target_and_draft_kv_cache_capacity(
+    const KVCacheCapacity& target_cap,
+    const ModelArgs& target_args,
+    const ModelArgs& draft_args,
+    const KVCacheCapacity& draft_cap) {
+  CHECK_GT(target_cap.cache_size_in_bytes(), 0)
+      << "no memory for target kv cache";
+  CHECK_GT(draft_cap.cache_size_in_bytes(), 0)
+      << "no memory for draft kv cache";
+  CHECK_EQ(target_cap.block_size(), draft_cap.block_size())
+      << "target and draft kv cache block size must be the same";
+  CHECK_GT(target_cap.block_size(), 0)
+      << "kv cache block size must be greater than 0";
+
+  const int64_t cache_size_in_bytes = std::min(target_cap.cache_size_in_bytes(),
+                                               draft_cap.cache_size_in_bytes());
+
+  int64_t n_blocks = 0;
+  if (target_cap.kpool_tail_slot_size() > 0 &&
+      draft_cap.kpool_tail_slot_size() > 0) {
+    const SharedKPoolPlan plan =
+        plan_shared_kpool(target_cap, draft_cap, draft_args);
+    n_blocks = plan.target.n_blocks();
+  } else {
+    const int64_t linear_cache_size_in_bytes =
+        target_cap.linear_cache_size_in_bytes() +
+        draft_cap.linear_cache_size_in_bytes();
+    CHECK_GT(cache_size_in_bytes, linear_cache_size_in_bytes)
+        << "no memory left for speculative full-attention kv cache after "
+           "reserving target and draft state caches, cache_size: "
+        << cache_size_in_bytes
+        << ", linear_cache_size: " << linear_cache_size_in_bytes;
+
+    // The draft KV cache is allocated from the draft's own KVCacheShape, so
+    // its per-block cost uses the draft's own slot size, which may exceed the
+    // target's (e.g. a full-attention draft against an MLA target).
+    const int64_t draft_full_attention_block_size_in_bytes =
+        standard_full_cache_block_size_in_bytes(draft_cap);
+    const int32_t layerwise_split_size =
+        ParallelConfig::get_instance().layerwise_split_size();
+    if (layerwise_split_size > 1) {
+      n_blocks = estimate_layerwise_split_block_count(
+          target_args,
+          layerwise_split_size,
+          target_cap,
+          cache_size_in_bytes - linear_cache_size_in_bytes,
+          draft_full_attention_block_size_in_bytes);
+    } else {
+      const int64_t full_attention_block_size_in_bytes =
+          standard_full_cache_block_size_in_bytes(target_cap) +
+          draft_full_attention_block_size_in_bytes;
+      CHECK_GT(full_attention_block_size_in_bytes, 0)
+          << "speculative kv cache block size in bytes must be greater than 0";
+
+      n_blocks = (cache_size_in_bytes - linear_cache_size_in_bytes) /
+                 full_attention_block_size_in_bytes;
+    }
+  }
+  CHECK_GT(n_blocks, 0) << "no memory for kv cache";
+
+  KVCacheCapacity combined = target_cap;
+  combined.n_blocks() = n_blocks;
+  combined.cache_size_in_bytes() = cache_size_in_bytes;
+  return combined;
+}
+
+KVCacheCapacity estimate_side_capacity(
+    const ModelArgs& model_args,
+    const runtime::Options& options,
+    torch::ScalarType dtype,
+    int64_t world_size,
+    const std::vector<KVCacheMemorySnapshot>& worker_memory,
+    bool is_multimodal,
+    int64_t reserved_memory_bytes) {
+  KVCacheEstimateContext context;
+  context.dtype = dtype;
+  context.world_size = world_size;
+  context.is_multimodal = is_multimodal;
+  context.reserved_memory_bytes = reserved_memory_bytes;
+  context.linear_state_cache_block_limit =
+      get_npu_linear_state_cache_block_limit(model_args.model_type());
+  const KVCacheConfig& config = KVCacheConfig::get_instance();
+  const auto& phy_pool = PhysicalPagePool::get_instance();
+  if (vmm_pool_serves_budget(is_multimodal)) {
+    context.virtual_memory_cache_size =
+        static_cast<int64_t>(phy_pool.num_total()) *
+        config.phy_page_granularity_size();
+  } else {
+    context.worker_memory = worker_memory;
+    if (vmm_budget_replaces_worker_memory(is_multimodal)) {
+      // The pool is not up yet: bound the estimate by every worker's VMM
+      // arena startup capacity; the pool is sized from the final estimate.
+      const int64_t encoder_bytes =
+          is_multimodal ? options.max_encoder_cache_size() * 1024 * 1024 : 0;
+      int64_t initial_bytes = std::numeric_limits<int64_t>::max();
+      for (const KVCacheMemorySnapshot& memory : context.worker_memory) {
+        const VmmArenaCapacity arena =
+            calculate_vmm_arena_capacity(memory.available_memory,
+                                         memory.total_memory,
+                                         config.max_memory_utilization(),
+                                         config.vmm_elastic(),
+                                         config.max_cache_size(),
+                                         reserved_memory_bytes + encoder_bytes);
+        initial_bytes = std::min(initial_bytes, arena.initial_bytes);
+      }
+      // Persistent states must fit startup memory, rather than the larger
+      // virtual arena that an elastic pool can grow into later.
+      context.virtual_memory_cache_size = initial_bytes;
+    }
+  }
+  return KVCacheEstimator(model_args).estimate(options, context);
+}
+
+bool target_draft_capacity_passes_through(const KVCacheCapacity& target_cap) {
+  return target_cap.c4_count() > 0 || target_cap.c128_count() > 0;
+}
+
+}  // namespace
+
+KVCacheCapacity estimate_target_and_draft_capacity(
+    const KVCacheModelEstimate& target,
+    const std::optional<KVCacheModelEstimate>& draft,
+    int64_t world_size,
+    const std::vector<KVCacheMemorySnapshot>& worker_memory,
+    bool is_multimodal,
+    int64_t reserved_memory_bytes) {
+  KVCacheCapacity result = estimate_side_capacity(target.args,
+                                                  target.options,
+                                                  target.dtype,
+                                                  world_size,
+                                                  worker_memory,
+                                                  is_multimodal,
+                                                  reserved_memory_bytes);
+  const bool estimate_draft =
+      draft.has_value() && !target_draft_capacity_passes_through(result);
+  if (estimate_draft) {
+    const KVCacheCapacity draft_cap =
+        estimate_side_capacity(draft->args,
+                               draft->options,
+                               draft->dtype,
+                               world_size,
+                               worker_memory,
+                               /*is_multimodal=*/false,
+                               reserved_memory_bytes);
+    result = combine_target_and_draft_kv_cache_capacity(
+        result, target.args, draft->args, draft_cap);
+  }
+  return result;
 }
 
 }  // namespace xllm

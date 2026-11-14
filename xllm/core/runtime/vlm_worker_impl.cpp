@@ -134,8 +134,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 
-  if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
-      !options_.enable_speculative_decode()) {
+  if (suppresses_step_output()) {
     if (sync_policy == ForwardSyncPolicy::LEGACY) {
       auto ret = device_.synchronize_default_stream();
       (void)ret;
@@ -162,7 +161,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
   if (options_.enable_speculative_decode()) {
     const bool is_target_prefill =
         !input.input_params.meta.batch_forward_type.is_decode() &&
-        !options_.is_draft_engine();
+        !options_.is_draft_model();
     output_spec_hidden_states(output.sample_output,
                               model_output,
                               lm_head_input_indices,

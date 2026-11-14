@@ -65,7 +65,7 @@ bool dp_tokens_equal(const std::vector<int32_t>& dp_token_nums) {
 bool allows_graph_mode(const xllm::runtime::Options& options,
                        const xllm::MtpModelCapabilities& capabilities,
                        const xllm::ModelParamsView& params) {
-  if (options.is_draft_engine()) {
+  if (options.is_draft_model()) {
     return params.meta.batch_forward_type.is_decode();
   }
   if (options.enable_speculative_decode() &&
@@ -106,7 +106,7 @@ uint32_t get_graph_dp_tokens(int64_t actual_tokens,
 
 bool supports_ordinary_graph(const xllm::runtime::Options& options,
                              const xllm::ModelParamsView& params) {
-  if (params.is_spec_verify || options.is_draft_engine() ||
+  if (params.is_spec_verify || options.is_draft_model() ||
       !params.meta.batch_forward_type.is_decode() ||
       params.meta.q_max_seq_len == 0 ||
       has_zero_tokens(params.parallel.dp_global_token_nums)) {
@@ -292,7 +292,7 @@ std::size_t GraphKeyHash::operator()(const GraphKey& key) const {
 int64_t get_graph_token_capacity(const runtime::Options& options,
                                  const MtpModelCapabilities& capabilities) {
   int64_t width =
-      options.is_draft_engine() ? 1 : options.num_speculative_tokens() + 1;
+      options.is_draft_model() ? 1 : options.num_speculative_tokens() + 1;
   const int64_t max_requests =
       std::max<int64_t>(options.max_seqs_per_batch(), 1);
   int64_t capacity = get_bucket_num_tokens(
@@ -304,7 +304,7 @@ int64_t get_graph_token_capacity(const runtime::Options& options,
     return capacity;
   }
   width = options.num_speculative_tokens() + 1;
-  if (!options.is_draft_engine() &&
+  if (!options.is_draft_model() &&
       !SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm())) {
     width = 1;
   }
@@ -328,7 +328,7 @@ GraphDecision MluGraphPlanner::plan(int64_t tokens,
     return EagerReason::NON_DECODE;
   }
   const bool grouped = config_.capabilities.supports_grouped_graph &&
-                       (config_.state_required || options.is_draft_engine() ||
+                       (config_.state_required || options.is_draft_model() ||
                         params.is_spec_verify);
   if (params.mtp_topk_state != nullptr ||
       (grouped ? !supports_grouped_graph(options, params)

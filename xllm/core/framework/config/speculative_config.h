@@ -55,11 +55,36 @@ class SpeculativeConfig final {
     return boost::iequals(algorithm, "Suffix");
   }
 
-  static bool uses_ssm_engine(std::string_view draft_model_path,
-                              std::string_view algorithm,
-                              int32_t num_speculative_tokens) {
-    return !draft_model_path.empty() ||
-           (is_suffix_algorithm(algorithm) && num_speculative_tokens > 0);
+  // External draft model loaded alongside the target (Suffix never loads one).
+  template <typename OptionsT>
+  static bool loads_draft_model(const OptionsT& options) {
+    return !is_suffix_algorithm(options.speculative_algorithm()) &&
+           options.num_speculative_tokens() > 0 &&
+           !options.draft_model_path().value_or("").empty();
+  }
+
+  // Speculative pipeline active: an external draft model or the draft-free
+  // Suffix algorithm.
+  template <typename OptionsT>
+  static bool uses_speculative_pipeline(const OptionsT& options) {
+    return !options.draft_model_path().value_or("").empty() ||
+           (is_suffix_algorithm(options.speculative_algorithm()) &&
+            options.num_speculative_tokens() > 0);
+  }
+
+  // Copies user-facing speculative options; shared by the LLM and VLM masters.
+  template <typename FromOptions, typename ToOptions>
+  static void apply_speculative_options(const FromOptions& from,
+                                        ToOptions& to) {
+    to.draft_model_path(from.draft_model_path().value_or(""))
+        .num_speculative_tokens(from.num_speculative_tokens())
+        .speculative_algorithm(from.speculative_algorithm())
+        .enable_probabilistic_draft(from.enable_probabilistic_draft())
+        .enable_mtp_draft_body_tp1(from.enable_mtp_draft_body_tp1())
+        .speculative_suffix_cache_max_depth(
+            from.speculative_suffix_cache_max_depth())
+        .speculative_suffix_max_cached_requests(
+            from.speculative_suffix_max_cached_requests());
   }
 
   static bool is_mtp_algorithm(std::string_view algorithm) {

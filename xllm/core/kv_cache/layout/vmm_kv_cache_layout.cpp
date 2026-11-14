@@ -27,8 +27,7 @@ namespace xllm {
 VmmKVCacheLayout::VmmKVCacheLayout(const KVCacheCapacity& capacity,
                                    const ModelArgs& model_args,
                                    int64_t world_size,
-                                   torch::ScalarType dtype,
-                                   bool is_draft_engine) {
+                                   torch::ScalarType dtype) {
   const KVCacheShape shape(capacity, model_args, world_size);
   CHECK(shape.has_value_cache_shape());
   CHECK_EQ(capacity.scale_slot_size(), 0)
@@ -45,7 +44,7 @@ VmmKVCacheLayout::VmmKVCacheLayout(const KVCacheCapacity& capacity,
       << "Virtual memory does not support the NPU NZ KV cache layout.";
 #endif
   const KVCacheCreateOptions create_options =
-      get_kv_cache_create_options(model_args, shape, is_draft_engine);
+      get_kv_cache_create_options(model_args, shape, /*is_draft_model=*/false);
   size_t full_attention_layers = 0;
   for (int64_t layer_id = 0; layer_id < capacity.n_layers(); ++layer_id) {
     if (!create_options.enable_linear_attention() ||
@@ -90,18 +89,6 @@ VmmKVCacheLayout::VmmKVCacheLayout(const KVCacheCapacity& capacity,
       tensor_counts_.emplace_back(indexer_count);
     }
   }
-}
-
-void VmmKVCacheLayout::append(VmmKVCacheLayout layout) {
-  tensor_block_bytes_.reserve(tensor_block_bytes_.size() +
-                              layout.tensor_block_bytes_.size());
-  tensor_counts_.reserve(tensor_counts_.size() + layout.tensor_counts_.size());
-  tensor_block_bytes_.insert(tensor_block_bytes_.end(),
-                             layout.tensor_block_bytes_.begin(),
-                             layout.tensor_block_bytes_.end());
-  tensor_counts_.insert(tensor_counts_.end(),
-                        layout.tensor_counts_.begin(),
-                        layout.tensor_counts_.end());
 }
 
 VirtualKVCachePageLayout VmmKVCacheLayout::page_layout(size_t page_size) const {

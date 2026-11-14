@@ -701,7 +701,7 @@ TEST_F(LLMRequestFactoryTest, MtpMinimumLengthIsIndependentOfOverlap) {
     ASSERT_NE(request, nullptr);
     EXPECT_FALSE(capture.called);
     EXPECT_EQ(request->state().sampling_param.min_tokens, 2048U);
-    EXPECT_TRUE(request->state().sampling_param.device_min_tokens);
+    EXPECT_TRUE(request->state().sampling_param.device_min_tokens());
   }
 }
 
@@ -737,7 +737,7 @@ TEST_F(LLMRequestFactoryTest, MtpSamplingControlsAreIndependentOfOverlap) {
     EXPECT_FALSE(capture.called);
     const auto& sampling = request->state().sampling_param;
     EXPECT_EQ(sampling.seed, 42);
-    EXPECT_TRUE(sampling.device_min_tokens);
+    EXPECT_TRUE(sampling.device_min_tokens());
     EXPECT_FALSE(sampling.bad_words_token_ids.empty());
   }
 }

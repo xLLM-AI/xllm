@@ -19,14 +19,14 @@ limitations under the License.
 
 #include <utility>
 
+#include "core/disaggregation/pd_scheduler.h"
+#include "core/util/tensor_codec.h"
+
 namespace xllm {
 
-PDService::PDService(PDScheduler* scheduler,
-                     Engine* engine,
-                     PDServiceOptions response_options)
+PDService::PDService(PDScheduler* scheduler, PDServiceOptions response_options)
     : pd_service_impl_(
           std::make_unique<PDServiceImpl>(scheduler,
-                                          engine,
                                           std::move(response_options))) {}
 
 void PDService::ReleaseReservation(

@@ -70,7 +70,7 @@ def _validate_npu_cp_model_config(config: dict[str, Any]) -> None:
     is_glm5_next = model_type in GLM5_NEXT_TARGET_FAMILY
     is_glm_mtp_draft = (
         model_type == "glm_moe_dsa_mtp"
-        and config.get("is_draft_engine", False)
+        and config.get("is_draft_model", False)
         and bool(config.get("is_mtp_algorithm", False))
     )
     if model_type not in ("qwen3", "glm_moe_dsa", "deepseek_v4") and not is_glm5_next and not is_glm_mtp_draft:
@@ -78,7 +78,7 @@ def _validate_npu_cp_model_config(config: dict[str, Any]) -> None:
             f"Python model-side CP does not support model_type={model_type!r}; "
             "supported models are qwen3, glm_moe_dsa, deepseek_v4, "
             "glm5_next, glm5_3_flash, glm5_next_text and "
-            "glm_moe_dsa_mtp draft engines"
+            "glm_moe_dsa_mtp draft models"
         )
     if config.get("task_type", "generate") != "generate":
         raise NotImplementedError("Python model-side CP supports only the generate task")
@@ -93,7 +93,7 @@ def _validate_npu_cp_model_config(config: dict[str, Any]) -> None:
     if model_type == "deepseek_v4" and kv_split != 1:
         raise NotImplementedError("Python DeepSeek-V4 CP requires replicated KV caches; use kv_split_size=1")
     if is_glm5_next:
-        if config.get("engine_type", "LLM") == "SSM":
+        if speculative:
             raise NotImplementedError(
                 "Python GLM-5 Next CP does not support target-side speculative verification; "
                 "run speculation on a cp_size=1 Decode instance"
@@ -257,13 +257,13 @@ class ModelExecutor:
         num_speculative_tokens = int(config.get("num_speculative_tokens", 0))
         self.num_speculative_tokens = (
             0
-            if config.get("is_draft_engine", False) and not config.get("is_block_diffusion_algorithm", False)
+            if config.get("is_draft_model", False) and not config.get("is_block_diffusion_algorithm", False)
             else num_speculative_tokens
         )
         self.execution_model = model.model
         self.supports_layerwise_kv_load = bool(
             getattr(self.execution_model, "supports_layerwise_kv_load", False)
-        ) and not config.get("is_draft_engine", False)
+        ) and not config.get("is_draft_model", False)
         self._kv_bound = False
         cp_size = int(config.get("cp_size", 1))
         cp_rank = int(config.get("cp_rank", 0))
@@ -335,7 +335,7 @@ class ModelExecutor:
         first_parameter = next(model.parameters())
         device = first_parameter.device
         is_draft_tail_repair_required = (
-            config.get("is_draft_engine", False)
+            config.get("is_draft_model", False)
             and config.get("is_mtp_algorithm", False)
             and config.get("model_type") != "qwen3_5_mtp"
         )
@@ -388,14 +388,14 @@ class ModelExecutor:
             config.get("model_type") == "qwen3_5_text"
             and bool(config.get("is_mtp_algorithm", False))
             and 1 <= self.num_speculative_tokens <= 16
-            and not config.get("is_draft_engine", False)
+            and not config.get("is_draft_model", False)
             and config.get("task_type", "generate") == "generate"
             and qwen_mtp_parallel
         )
         self._qwen_mtp_draft = (
             config.get("model_type") == "qwen3_5_mtp"
             and bool(config.get("is_mtp_algorithm", False))
-            and config.get("is_draft_engine", False)
+            and config.get("is_draft_model", False)
             and self.num_speculative_tokens == 0
             and config.get("task_type", "generate") == "generate"
             and qwen_mtp_parallel
@@ -465,7 +465,7 @@ class ModelExecutor:
                     dp_size,
                     dp_rank,
                     num_speculative_tokens=self.num_speculative_tokens,
-                    is_spec_draft=bool(config.get("is_draft_engine", False)),
+                    is_draft_model=bool(config.get("is_draft_model", False)),
                     enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
                     enable_graph_mode_decode_no_padding=bool(config.get("enable_graph_mode_decode_no_padding", False)),
                     device_kv_lengths=self._qwen_mtp_target or self._qwen_mtp_draft,

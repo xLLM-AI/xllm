@@ -537,7 +537,7 @@ TEST(MooncakeVirtualKVCacheTransferTest,
                                             /*dp_size=*/1),
                                   model_args,
                                   kBlockTokens,
-                                  /*is_spec_draft=*/false);
+                                  /*is_draft_model=*/false);
 
   transfer.register_kv_cache(caches, shape, torch::kBFloat16);
 
@@ -676,7 +676,7 @@ class MooncakeVirtualKVCachePullTest : public testing::Test {
                                                 /*dp_size=*/1),
                                       model_args,
                                       kBlockTokens,
-                                      /*is_spec_draft=*/false);
+                                      /*is_draft_model=*/false);
     transfer_->register_kv_cache(caches, shape, torch::kBFloat16);
 
     mapping_.group_id = cache_group_id(BlockType::KV);
@@ -2580,7 +2580,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                             /*dp_size=*/1),
                                   model_args,
                                   /*block_token_capacity=*/0,
-                                  /*is_spec_draft=*/false);
+                                  /*is_draft_model=*/false);
 
   proto::KVCacheShape proto_shape;
   for (int64_t dim : {2, 1, 6}) {
@@ -2658,7 +2658,7 @@ TEST(MooncakeKVCacheTransferDefaultTest, RegistersCompressedIndexAndKpoolTail) {
                                               /*dp_size=*/1),
                                     args,
                                     /*block_token_capacity=*/16,
-                                    /*is_spec_draft=*/false);
+                                    /*is_draft_model=*/false);
     transfer.register_kv_cache(caches, shape, torch::kBFloat16);
 
     const auto& manifests = transfer.local_cache_layout_.tensors;
@@ -2728,7 +2728,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                             /*dp_size=*/1),
                                   model_args,
                                   /*block_token_capacity=*/3,
-                                  /*is_spec_draft=*/false);
+                                  /*is_draft_model=*/false);
   const KVCacheShape main_shape(cache_capacity, model_args, /*world_size=*/2);
   std::vector<KVCache> main_caches;
   main_caches.emplace_back(
@@ -2741,7 +2741,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                             /*dp_size=*/1),
                                   model_args,
                                   /*block_token_capacity=*/3,
-                                  /*is_spec_draft=*/true);
+                                  /*is_draft_model=*/true);
   const KVCacheShape draft_shape(cache_capacity, model_args, /*world_size=*/1);
   std::vector<KVCache> draft_caches;
   draft_caches.emplace_back(
@@ -2903,7 +2903,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
 
   folly::SemiFuture<std::vector<std::string>> future =
       transfer.push_kv_blocks_async(
-          {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
+          {info}, parallel_args, synchronizer, /*is_draft_model=*/false);
   const std::vector<std::string> results = std::move(future).get();
   EXPECT_EQ(results, (std::vector<std::string>{"req"}));
   EXPECT_TRUE(engine_observer->move_calls.empty());
@@ -2990,7 +2990,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
 
   folly::SemiFuture<std::vector<std::string>> future =
       transfer.push_kv_blocks_async(
-          {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
+          {info}, parallel_args, synchronizer, /*is_draft_model=*/false);
   const std::vector<std::string> results = std::move(future).get();
   EXPECT_EQ(results, (std::vector<std::string>{"req"}));
   EXPECT_TRUE(engine_observer->move_calls.empty());
@@ -3023,7 +3023,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
 
   folly::SemiFuture<std::vector<std::string>> future =
       transfer.push_kv_blocks_async(
-          {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
+          {info}, parallel_args, synchronizer, /*is_draft_model=*/false);
   const std::vector<std::string> results = std::move(future).get();
   EXPECT_EQ(results, (std::vector<std::string>{"req"}));
   EXPECT_TRUE(engine_observer->move_calls.empty());
@@ -3243,7 +3243,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   const std::vector<std::string> results =
       local_transfer.push_kv_blocks(merged_infos,
                                     synchronizer,
-                                    /*is_spec_draft=*/false,
+                                    /*is_draft_model=*/false,
                                     /*kv_split_rank=*/0,
                                     /*kv_split_size=*/1);
   EXPECT_TRUE(results.empty());
@@ -3331,7 +3331,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   const std::vector<std::string> results =
       transfer.push_kv_blocks(merged_infos,
                               synchronizer,
-                              /*is_spec_draft=*/false,
+                              /*is_draft_model=*/false,
                               /*kv_split_rank=*/0,
                               /*kv_split_size=*/1);
   EXPECT_EQ(results, (std::vector<std::string>{"req"}));

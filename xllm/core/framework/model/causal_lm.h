@@ -161,7 +161,7 @@ class CausalLM : public torch::nn::Module, public Model {
     return {};
   }
 
-  // DSpark-specific low-rank Markov projection. The draft worker owns the
+  // DSpark-specific low-rank Markov projection. The draft model owns the
   // sequential sampling lifecycle; the model owns only the trained weights and
   // bias computation.
   virtual torch::Tensor dspark_markov_bias(

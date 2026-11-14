@@ -22,9 +22,23 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/config/speculative_config.h"
+#include "core/framework/model/aux_hidden_capture.h"
+#include "core/runtime/options.h"
 #include "core/util/json_reader.h"
 
 namespace xllm {
+
+namespace {
+
+void apply_block_diffusion_target_capture(ModelArgs& args,
+                                          const std::string& draft_model_path) {
+  CHECK(!draft_model_path.empty())
+      << "Block-diffusion target requires a draft checkpoint.";
+  args.layers_to_capture(read_capture_layer_ids(draft_model_path));
+}
+
+}  // namespace
 
 std::vector<int32_t> boundary_to_post_layer_ids(
     std::vector<int32_t> boundary_ids) {
@@ -73,6 +87,41 @@ std::vector<int32_t> read_capture_layer_ids(
          "aux_hidden_state_layer_ids: "
       << config_path;
   return capture_layer_ids;
+}
+
+void configure_speculative_model_args(ModelArgs& args,
+                                      const runtime::Options& options) {
+  if (!options.enable_speculative_decode()) {
+    return;
+  }
+  const std::string& speculative_algorithm = options.speculative_algorithm();
+  const bool is_block_diffusion =
+      SpeculativeConfig::is_block_diffusion_algorithm(speculative_algorithm);
+
+  if (is_block_diffusion) {
+    apply_block_diffusion_target_capture(
+        args, options.draft_model_path().value_or(""));
+  }
+#if defined(USE_NPU)
+  if (!options.is_draft_model() &&
+      SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm) &&
+      args.layers_to_capture().empty()) {
+    std::vector<int32_t> capture_layer_ids;
+    if (SpeculativeConfig::is_eagle3_algorithm(speculative_algorithm) &&
+        options.draft_model_path().has_value()) {
+      // Eagle3.1 pins capture layers in the draft config; legacy configs
+      // fall back to the default below.
+      capture_layer_ids = read_capture_layer_ids(*options.draft_model_path(),
+                                                 /*required=*/false);
+    }
+    if (capture_layer_ids.empty()) {
+      const int32_t num_layers = static_cast<int32_t>(args.n_layers());
+      capture_layer_ids =
+          AuxHiddenCapture::legacy_default_capture_layer_ids(num_layers);
+    }
+    args.layers_to_capture(std::move(capture_layer_ids));
+  }
+#endif
 }
 
 }  // namespace xllm

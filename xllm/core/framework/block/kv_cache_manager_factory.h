@@ -22,17 +22,17 @@ limitations under the License.
 #include <optional>
 
 #include "core/framework/block/block_manager_pool.h"
+#include "core/framework/model/model_args.h"
+#include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 
 namespace xllm {
 
 class KVCacheTransferCoordinatorBase;
-class ModelArgs;
-class VmmKVCacheLayout;
 
 struct KVCacheManagerFactoryResult final {
-  std::unique_ptr<KVCacheManager> manager;
+  std::unique_ptr<BlockManagerPool> manager;
   KVCacheShape shape;
 };
 
@@ -47,8 +47,7 @@ class KVCacheManagerFactory final {
       std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
       int32_t dp_size = 1,
       std::optional<HostCacheValidationOptions> host_validation_options =
-          std::nullopt,
-      const VmmKVCacheLayout* shared_vmm_layout = nullptr);
+          std::nullopt);
 };
 
 }  // namespace xllm

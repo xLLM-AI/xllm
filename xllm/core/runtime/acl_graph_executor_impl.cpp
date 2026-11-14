@@ -331,7 +331,7 @@ ModelOutput forward_eager(CausalLM* model,
 bool is_mla_graph_eagle3_target(const CausalLM* model,
                                 const runtime::Options& options) {
   return model->supports_mla_graph_kv_bucketing() &&
-         options.enable_speculative_decode() && !options.is_draft_engine() &&
+         options.enable_speculative_decode() && !options.is_draft_model() &&
          SpeculativeConfig::is_eagle3_algorithm(
              options.speculative_algorithm());
 }

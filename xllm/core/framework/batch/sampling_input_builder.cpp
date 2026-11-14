@@ -110,11 +110,8 @@ SamplingParameters SamplingInputBuilder::build() {
   int64_t vocab_size = 0;
   for (const auto* params : params_) {
     need_constraints = need_constraints || !params->logit_bias.empty() ||
-                       params->allowed_token_ids.has_value() ||
-                       (params->min_tokens > 0 && !params->device_min_tokens);
-    need_device_min_tokens =
-        need_device_min_tokens ||
-        (params->device_min_tokens && params->min_tokens > 0);
+                       params->allowed_token_ids.has_value();
+    need_device_min_tokens = need_device_min_tokens || params->min_tokens > 0;
     need_seed = need_seed || params->seed.has_value();
     max_words = std::max(max_words, params->bad_words_token_ids.size());
     for (const auto& word : params->bad_words_token_ids) {
@@ -130,7 +127,6 @@ SamplingParameters SamplingInputBuilder::build() {
     const float blocked = -std::numeric_limits<float>::infinity();
     for (size_t row = 0; row < size(); ++row) {
       const auto& params = *params_[row];
-      const Sequence* sequence = sequences_[row];
       if (params.allowed_token_ids.has_value()) {
         std::fill_n(rows[row].data(), vocab_size, blocked);
         for (int32_t token : *params.allowed_token_ids) {
@@ -139,15 +135,6 @@ SamplingParameters SamplingInputBuilder::build() {
       }
       for (const auto& [token, bias] : params.logit_bias) {
         rows[row][token] += bias;
-      }
-      const size_t generated =
-          sequence == nullptr ? 0 : sequence->num_generated_tokens();
-      if (!params.device_min_tokens && generated < params.min_tokens) {
-        for (int32_t token : params.all_stop_token_ids) {
-          if (token >= 0 && token < vocab_size) {
-            rows[row][token] = blocked;
-          }
-        }
       }
     }
   }
@@ -197,7 +184,7 @@ SamplingParameters SamplingInputBuilder::build() {
     for (size_t row = 0; row < size(); ++row) {
       const auto& params = *params_[row];
       const Sequence* sequence = sequences_[row];
-      const int64_t minimum = params.device_min_tokens ? params.min_tokens : 0;
+      const int64_t minimum = params.min_tokens;
       const int64_t generated =
           sequence == nullptr ? 0 : sequence->num_generated_tokens();
       const int64_t prompt_end =

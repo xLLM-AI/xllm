@@ -39,6 +39,14 @@ struct KVCacheMemorySnapshot {
   int64_t total_memory = 0;
 };
 
+// True when the VMM physical-page budget replaces the worker-memory snapshot
+// as the KV budget source.
+bool vmm_budget_replaces_worker_memory(bool is_multimodal);
+
+// True when the VMM page pool is up and its budget replaces the worker
+// snapshots entirely (so the poll can be skipped).
+bool vmm_pool_serves_budget(bool is_multimodal);
+
 // Runtime memory observations; budgeting stays in the estimator.
 struct KVCacheEstimateContext {
   torch::ScalarType dtype = torch::kBFloat16;
@@ -72,7 +80,7 @@ struct KVCacheEstimateOptions {
   int64_t max_tokens_per_chunk_for_prefill = 0;
   int64_t max_linear_state_cache_slots = 0;
   int64_t linear_state_cache_block_limit = 0;
-  bool is_draft_engine = false;
+  bool is_draft_model = false;
   bool enable_prefix_cache = false;
   bool enable_shared_kv_cache = false;
   int32_t layerwise_split_size = 1;
@@ -155,18 +163,21 @@ SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
                                   KVCacheCapacity draft_cap,
                                   const ModelArgs& draft_args);
 
-// Target Full/GDN and the co-located Full-only draft share one physical arena
-// and the same final Full pages. The draft capacity owns no separate storage.
-struct SharedStaticKVCachePlan {
-  KVCacheCapacity target;
-  KVCacheCapacity draft;
+// One side of a joint target+draft capacity estimation; holds references.
+struct KVCacheModelEstimate final {
+  const ModelArgs& args;
+  const runtime::Options& options;
+  torch::ScalarType dtype;
 };
 
-SharedStaticKVCachePlan plan_shared_static_kv_cache(
-    KVCacheCapacity target_cap,
-    KVCacheCapacity draft_cap,
-    const ModelArgs& target_args,
+// Joint target+draft estimation from one worker-memory snapshot; the
+// returned capacity carries the shared block count.
+KVCacheCapacity estimate_target_and_draft_capacity(
+    const KVCacheModelEstimate& target,
+    const std::optional<KVCacheModelEstimate>& draft,
     int64_t world_size,
-    torch::ScalarType dtype);
+    const std::vector<KVCacheMemorySnapshot>& worker_memory,
+    bool is_multimodal,
+    int64_t reserved_memory_bytes);
 
 }  // namespace xllm

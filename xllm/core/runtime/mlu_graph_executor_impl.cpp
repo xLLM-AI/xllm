@@ -781,7 +781,7 @@ ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
               << plan->layout.padded_num_reqs
               << ", tokens_per_request=" << plan->layout.tokens_per_request
               << ", grouped=" << plan->key.grouped
-              << ", draft=" << options_.is_draft_engine()
+              << ", draft=" << options_.is_draft_model()
               << ", verify=" << params.is_spec_verify
               << ", padded_num_tokens=" << plan->layout.padded_num_tokens;
     log_memory_after_capture();
