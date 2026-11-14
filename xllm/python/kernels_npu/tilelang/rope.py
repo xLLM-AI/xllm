@@ -4,8 +4,7 @@ import logging
 
 import tilelang
 import tilelang.language as T
-
-from .utils import (
+from xllm_kernel.utils.tilelang import (
     DEFAULT_ASCEND_PASS_CONFIGS,
     detect_vec_core_num,
 )

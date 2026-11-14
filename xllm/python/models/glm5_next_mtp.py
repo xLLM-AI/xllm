@@ -40,8 +40,8 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from xllm_kernel.ops import normalization
 
-from xllm.python import kernels
 from xllm.python.layers.embedding import HiddenParallelEmbedding
 from xllm.python.layers.layernorm import RMSNorm
 from xllm.python.layers.linear import ColumnParallelLinear
@@ -184,7 +184,7 @@ class Glm5NextMtpModel(nn.Module):
         carried = token_hidden if input_embedding is None else input_embedding.reshape(token_hidden.shape)
 
         # Fuse the two eh-input RMSNorms + concat into one kernel.
-        eh = kernels.fused_eh_norm(
+        eh = normalization.fused_eh_norm(
             token_hidden,
             carried,
             self.enorm.weight,

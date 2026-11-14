@@ -5,8 +5,7 @@ import tilelang
 import tilelang.language as T
 import torch
 import torch.nn.functional as F
-
-from .utils import detect_vec_core_num
+from xllm_kernel.utils.tilelang import detect_vec_core_num
 
 VEC_NUM = 2
 

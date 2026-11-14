@@ -54,6 +54,14 @@ from xllm.python.model_loader import (
 )
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
+from xllm.python.platform import current_platform
+
+if current_platform.is_npu():
+    from xllm_kernel.ops import normalization
+    from xllm_kernel.ops.normalization import fused_qk_norm_rope
+else:
+    from xllm.python.kernels_cuda import normalization
+    from xllm.python.kernels_cuda.rotary_embedding import fused_qk_norm_rope
 
 
 @dataclass
@@ -194,12 +202,12 @@ class Qwen3Attention(nn.Module):
             # cos_sin_cache here is the [max_pos, head_dim]=[cos_half|sin_half]
             # table; q/k stay 2D [N, num_heads*head_dim] as npu_mrope requires.
             num_tokens = qkv.size(0)
-            q = torch.ops.xllm_ops.rms_norm(
+            q = normalization.rms_norm(
                 qkv[:, : self.q_size].reshape(num_tokens * self.num_heads, self.head_dim),
                 self.q_norm.weight,
                 self.q_norm.eps,
             ).view(num_tokens, self.q_size)
-            k = torch.ops.xllm_ops.rms_norm(
+            k = normalization.rms_norm(
                 qkv[:, self.q_size : self.q_size + self.kv_size].reshape(num_tokens * self.num_kv_heads, self.head_dim),
                 self.k_norm.weight,
                 self.k_norm.eps,
@@ -216,7 +224,7 @@ class Qwen3Attention(nn.Module):
                 cache_mode="interleave",
             )
         else:
-            q, k, v = kernels.fused_qk_norm_rope(
+            q, k, v = fused_qk_norm_rope(
                 qkv,
                 num_heads_q=self.num_heads,
                 num_heads_k=self.num_kv_heads,

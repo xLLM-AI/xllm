@@ -26,7 +26,7 @@ from tests.python.qwen3_5_test_utils import (
     make_config as _config,
 )
 from xllm.python import kernels
-from xllm.python.layers.layernorm import GemmaRMSNorm
+from xllm.python.layers.layernorm import GemmaRMSNorm, normalization
 from xllm.python.layers.qwen3_5.common import PartialRotaryEmbedding
 from xllm.python.layers.qwen3_5.decoder_layer import (
     get_qwen3_5_decoder_layer_class,
@@ -237,7 +237,7 @@ def test_gemma_rms_norm_delegates_to_backend_kernel(
         return value * torch.rsqrt(variance + eps) * (weight + 1.0)
 
     monkeypatch.setattr(
-        kernels,
+        normalization,
         "gemma_rms_norm",
         backend_gemma_rms_norm,
         raising=False,

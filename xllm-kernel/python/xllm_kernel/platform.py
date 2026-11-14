@@ -183,10 +183,9 @@ def _npu_chip_from_acl() -> str | None:
 class Platform:
     """Streamlined hardware-typing facade shared by the worker and launcher.
 
-    All methods are classmethods, so the launcher's auto-tuning profiles call
-    ``Platform.is_npu()`` on the class while worker code reaches the same
-    queries through the ``current_platform`` singleton -- the sglang usage
-    idiom. Detection results are cached for the process lifetime.
+    Callers share the lazy ``current_platform`` singleton, for example
+    ``current_platform.is_npu()``. Its classmethods share detection results
+    cached for the process lifetime.
     """
 
     @classmethod

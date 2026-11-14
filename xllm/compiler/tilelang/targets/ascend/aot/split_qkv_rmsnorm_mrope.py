@@ -16,14 +16,8 @@ import argparse
 from pathlib import Path
 
 import tilelang
-
-from xllm.python.kernels_npu.tilelang import (
-    split_qkv_rmsnorm_mrope as kernel_impl,
-)
-from xllm.python.kernels_npu.tilelang import (
-    utils as tilelang_utils,
-)
-from xllm.python.kernels_npu.tilelang.split_qkv_rmsnorm_mrope import (
+from xllm_kernel.ops.normalization import _tilelang as kernel_impl
+from xllm_kernel.ops.normalization._tilelang import (
     ALL_HEAD_CONFIGS,
     DEFAULT_DTYPE,
     DEFAULT_MROPE_SECTION,
@@ -42,6 +36,7 @@ from xllm.python.kernels_npu.tilelang.split_qkv_rmsnorm_mrope import (
     build_split_qkv_rmsnorm_mrope_kernel,
     detect_vec_core_num,
 )
+from xllm_kernel.utils import tilelang as tilelang_utils
 
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 

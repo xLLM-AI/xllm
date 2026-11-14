@@ -16,12 +16,10 @@ import argparse
 from pathlib import Path
 
 import tilelang
+from xllm_kernel.utils import tilelang as tilelang_utils
 
 from xllm.python.kernels_npu.tilelang import (
     rope as kernel_impl,
-)
-from xllm.python.kernels_npu.tilelang import (
-    utils as tilelang_utils,
 )
 from xllm.python.kernels_npu.tilelang.rope import (
     DEFAULT_ASCEND_PASS_CONFIGS,

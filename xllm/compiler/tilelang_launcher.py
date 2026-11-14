@@ -12,7 +12,7 @@ def _bootstrap_import_paths() -> None:
     # Direct script execution exposes compiler/triton as the top-level Triton
     # package. Keep this directory out of the search path for external imports.
     sys.path[:] = [path for path in sys.path if Path(path).resolve() != compiler_dir]
-    for path in (repo_root, package_root):
+    for path in (repo_root, package_root, repo_root / "xllm-kernel" / "python"):
         path_str = str(path)
         if path_str not in sys.path:
             sys.path.insert(0, path_str)

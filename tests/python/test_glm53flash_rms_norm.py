@@ -80,13 +80,13 @@ def test_gated_rms_norm_uses_sigmoid_fused_kernel_once(
         raise AssertionError("GLM sigmoid gate must not use the SiLU-gated op")
 
     monkeypatch.setattr(
-        glm5_next.kernels,
+        glm5_next.normalization,
         "rms_norm_sigmoid_gated",
         _rms_norm_sigmoid_gated,
         raising=False,
     )
     monkeypatch.setattr(
-        glm5_next.kernels,
+        glm5_next.normalization,
         "rms_norm_gated",
         _unexpected_silu_kernel,
         raising=False,

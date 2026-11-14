@@ -21,9 +21,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from xllm_kernel.ops import normalization as npu_normalization
 
 from tests.python.qwen3_5_test_utils import ConstantModule, StateDict, gemma_rms_norm, make_config
-from xllm.python import kernels
+from xllm.python.layers.layernorm import normalization
 from xllm.python.layers.npu.qwen3_5.attention import NpuQwen3_5Attention
 from xllm.python.layers.qwen3_5.attention import Qwen3_5Attention
 from xllm.python.layers.qwen3_5.common import PartialRotaryEmbedding
@@ -86,7 +87,8 @@ def test_unfused_attention_accepts_multimodal_positions(
     interleaved: bool,
     output_gate: bool,
 ) -> None:
-    monkeypatch.setattr(kernels, "gemma_rms_norm", gemma_rms_norm)
+    monkeypatch.setattr(normalization, "gemma_rms_norm", gemma_rms_norm)
+    monkeypatch.setattr(npu_normalization, "gemma_rms_norm", gemma_rms_norm)
     layer = _unfused_attention(attention_cls, interleaved, output_gate)
     assert not layer.use_fused_qkv
     query = torch.arange(128, dtype=torch.float32).reshape(2, 2, 32) / 64 - 0.5

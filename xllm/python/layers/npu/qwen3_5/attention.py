@@ -17,8 +17,8 @@
 from __future__ import annotations
 
 import torch
+from xllm_kernel.ops import normalization
 
-from xllm.python import kernels
 from xllm.python.layers.flash_comm1 import get_flash_comm1_context
 from xllm.python.layers.npu.flash_comm1 import FlashComm1RowParallelLinear
 from xllm.python.layers.npu.layernorm import NpuGemmaRMSNorm
@@ -54,7 +54,7 @@ class NpuQwen3_5Attention(Qwen3_5Attention):
             and self.attn_output_gate
             and len(cfg.rope_scaling_mrope_section) == 3
             and rotary_dim == 64
-            and kernels.has_split_qkv_rmsnorm_mrope_specialization(
+            and normalization.has_split_qkv_rmsnorm_mrope_specialization(
                 self.num_heads,
                 self.num_kv_heads,
                 self.head_dim,
@@ -62,7 +62,7 @@ class NpuQwen3_5Attention(Qwen3_5Attention):
         )
         self._weights_reordered = False
         if self.use_fused_qkv:
-            gather_pattern = kernels.build_split_qkv_rmsnorm_mrope_gather_pattern(
+            gather_pattern = normalization.build_split_qkv_rmsnorm_mrope_gather_pattern(
                 rotary_dim,
                 cfg.rope_scaling_mrope_section,
                 cfg.rope_scaling_mrope_interleaved,
@@ -123,7 +123,7 @@ class NpuQwen3_5Attention(Qwen3_5Attention):
             if not isinstance(mrope_cos_sin, torch.Tensor):
                 raise TypeError("invalid cached Qwen3.5 mRoPE cosine/sine tensor")
         qkvg = self.qkv_proj(hidden)
-        query, key, value, gate = kernels.split_qkv_rmsnorm_mrope(
+        query, key, value, gate = normalization.split_qkv_rmsnorm_mrope(
             qkvg,
             self.q_norm.weight,
             self.k_norm.weight,

@@ -14,8 +14,7 @@
 
 import tilelang.language as T
 from tilelang import tvm
-
-from .utils import detect_vec_core_num
+from xllm_kernel.utils.tilelang import detect_vec_core_num
 
 DEFAULT_TASK_COUNT = detect_vec_core_num()
 VEC_NUM = 2

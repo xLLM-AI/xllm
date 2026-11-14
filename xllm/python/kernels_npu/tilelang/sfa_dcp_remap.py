@@ -22,8 +22,7 @@ Serving and ACL graph use the AOT wrapper ``sfa_dcp_remap``.
 import tilelang
 import tilelang.language as T
 import torch
-
-from xllm.python.kernels_npu.tilelang.utils import (
+from xllm_kernel.utils.tilelang import (
     detect_vec_core_num,
     mte2_notify_v,
     mte2_wait_mte3,

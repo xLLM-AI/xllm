@@ -58,9 +58,13 @@ def initialize_runtime() -> None:
     elif current_platform.is_npu():
         xllm_kernel = _load_kernel_package()
 
+        from xllm_kernel.ops.normalization import OPERATIONS
+
         from scripts.logger import logger
 
-        prepared = xllm_kernel.initialize(device="npu", operations=("rms_norm",))
+        prepared = xllm_kernel.initialize(
+            device="npu", operations=tuple(operation.contract.operation for operation in OPERATIONS)
+        )
         for operation, kernel in prepared.items():
             logger.info("Python kernel %s: %s (generation=%s)", operation, kernel.spec.name, kernel.generation)
         backend_name = "xllm.python.kernels_npu"
