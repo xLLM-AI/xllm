@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import platform
 import struct
 import subprocess
@@ -7,6 +8,12 @@ import sys
 from pathlib import Path
 
 from scripts.build_support.env import set_npu_envs
+from scripts.build_support.h3_build_profile import (
+    H3BuildProfile,
+    install_locked_wheel,
+    validate_h3_build_profile,
+    validate_h3_tilelang_root,
+)
 from scripts.logger import logger
 
 from .common.toolchain import find_installed_tilelang_root, prepare_tilelang_import, repo_root
@@ -27,7 +34,7 @@ TILELANG_ASCEND_WHEELS: dict[tuple[str, str], str] = {
     (
         "a3",
         "arm",
-    ): "https://gitcode.com/xLLM-AI/tilelang-ascend/releases/download/v0.1.1.010-release/tilelang-0.1.0%2Bascendc_pto.56d3f9b8.a3.cann850-cp311-cp311-linux_aarch64.whl",
+    ): "https://gitcode.com/xLLM-AI/tilelang-ascend/releases/download/v0.1.1.010-release/tilelang-0.1.0%2Bascendc_pto.56d3f9b8.a2.cann850-cp311-cp311-linux_aarch64.whl",
 }
 
 
@@ -36,6 +43,14 @@ REQUIRED_TILELANG_FILES = (
     "lib/libtilelang_module.so",
     "lib/libtilelang.so",
     "lib/libtvm.so",
+    "3rdparty/catlass/include/catlass/catlass.hpp",
+    "3rdparty/shmem/include/shmem.h",
+    "3rdparty/shmem/src/device/shmemi_device_common.h",
+    "src/tl_templates/ascend/common.h",
+)
+
+REQUIRED_TILELANG_SOURCE_FILES = (
+    "tilelang/__init__.py",
     "3rdparty/catlass/include/catlass/catlass.hpp",
     "3rdparty/shmem/include/shmem.h",
     "3rdparty/shmem/src/device/shmemi_device_common.h",
@@ -62,7 +77,9 @@ def _resolve_wheel_location(target_platform: str, arch: str) -> str | Path:
 
 def tilelang_artifacts_ready(tilelang_root: str | Path) -> bool:
     tl_root = Path(tilelang_root).resolve()
-    return all((tl_root / path).exists() for path in REQUIRED_TILELANG_FILES)
+    packaged_ready = all((tl_root / path).exists() for path in REQUIRED_TILELANG_FILES)
+    source_ready = all((tl_root / path).exists() for path in REQUIRED_TILELANG_SOURCE_FILES)
+    return packaged_ready or source_ready
 
 
 # Expected ELF e_machine value per host architecture, used to fail fast when
@@ -92,6 +109,8 @@ def check_tilelang_artifacts(tilelang_root: str | Path) -> None:
     obscure ``-I`` include errors deep inside the build.
     """
     tl_root = Path(tilelang_root).resolve()
+    if all((tl_root / path).exists() for path in REQUIRED_TILELANG_SOURCE_FILES):
+        return
     missing = [name for name in REQUIRED_TILELANG_FILES if not (tl_root / name).exists()]
     if missing:
         raise RuntimeError(
@@ -128,7 +147,28 @@ def ensure_ascend_ready() -> Path:
     return tilelang_root
 
 
-def prepare_ascend(target_platform: str, arch: str, *, force: bool = False) -> Path:
+def prepare_ascend(
+    target_platform: str, arch: str, *, force: bool = False, profile: H3BuildProfile | None = None
+) -> Path:
+    if profile is not None:
+        if arch != "arm":
+            raise ValueError("The H3 RainFusion build profile requires --arch arm")
+        validate_h3_build_profile(profile, device=target_platform, require_torch_npu=False, require_tilelang=False)
+        for name, version, wheel, sha256 in (
+            ("torch_npu", profile.torch_npu_version, profile.torch_npu_wheel, profile.torch_npu_sha256),
+            ("tilelang", profile.tilelang_version, profile.tilelang_wheel, profile.tilelang_sha256),
+        ):
+            try:
+                installed = importlib.metadata.version(name)
+            except importlib.metadata.PackageNotFoundError:
+                installed = None
+            if force or installed != version:
+                install_locked_wheel(wheel, sha256)
+        validate_h3_build_profile(profile, device=target_platform)
+        root = ensure_ascend_ready()
+        validate_h3_tilelang_root(profile, root)
+        check_tilelang_artifacts(root)
+        return root
     set_npu_envs()
     try:
         import Cython  # noqa: F401

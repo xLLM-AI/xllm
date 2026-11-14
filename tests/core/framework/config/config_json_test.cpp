@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/distributed_config.h"
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -38,6 +39,121 @@ limitations under the License.
 
 namespace xllm {
 namespace {
+
+TEST(DiTConfigTest, CacheDiTDefaultsAndExplicitZeroRoundTrip) {
+  DiTConfig config;
+  EXPECT_EQ(config.dit_cache_policy(), "TaylorSeer");
+  EXPECT_EQ(config.dit_cachedit_warmup_steps(), 30);
+  EXPECT_DOUBLE_EQ(config.dit_cachedit_residual_diff_threshold(), 0.04);
+  EXPECT_EQ(config.dit_cachedit_max_cached_steps(), 4);
+  EXPECT_EQ(config.dit_cachedit_max_consecutive_hits(), 1);
+  EXPECT_EQ(config.dit_cachedit_front_blocks(), 1);
+  EXPECT_EQ(config.dit_cachedit_back_blocks(), 0);
+  EXPECT_TRUE(config.dit_cachedit_linear_residual_prediction());
+  const JsonReader json = config::parse_json_string(
+      R"({"dit_cache_policy":"CacheDiT","dit_cachedit_warmup_steps":0,
+          "dit_cachedit_max_cached_steps":0,
+          "dit_cachedit_linear_residual_prediction":false})");
+  config.from_json(json);
+  EXPECT_EQ(config.dit_cachedit_warmup_steps(), 0);
+  EXPECT_EQ(config.dit_cachedit_max_cached_steps(), 0);
+  EXPECT_FALSE(config.dit_cachedit_linear_residual_prediction());
+  nlohmann::ordered_json output = nlohmann::ordered_json::object();
+  config.append_config_json(output);
+  EXPECT_EQ(output.at("dit_cachedit_warmup_steps"), 0);
+  EXPECT_EQ(output.at("dit_cachedit_max_cached_steps"), 0);
+  EXPECT_EQ(output.at("dit_cachedit_linear_residual_prediction"), false);
+  const auto& names = DiTConfig::option_category().option_names;
+  for (const std::string& name : {"dit_cachedit_warmup_steps",
+                                  "dit_cachedit_residual_diff_threshold",
+                                  "dit_cachedit_max_cached_steps",
+                                  "dit_cachedit_max_consecutive_hits",
+                                  "dit_cachedit_front_blocks",
+                                  "dit_cachedit_back_blocks",
+                                  "dit_cachedit_linear_residual_prediction"}) {
+    google::CommandLineFlagInfo info;
+    EXPECT_TRUE(google::GetCommandLineFlagInfo(name.c_str(), &info));
+    EXPECT_NE(std::find(names.begin(), names.end(), name), names.end());
+  }
+}
+
+TEST(DiTConfigTest, QkvDomainsAreOptInAndKeepExistingOverlapDefault) {
+  DiTConfig config;
+  EXPECT_TRUE(config.dit_sp_communication_overlap());
+  EXPECT_FALSE(config.dit_sp_qkv_communication_overlap());
+  config.from_json(config::parse_json_string(
+      R"({"dit_sp_qkv_communication_overlap":true})"));
+  EXPECT_TRUE(config.dit_sp_qkv_communication_overlap());
+  nlohmann::ordered_json output = nlohmann::ordered_json::object();
+  config.append_config_json(output);
+  EXPECT_EQ(output.at("dit_sp_qkv_communication_overlap"), true);
+}
+
+TEST(DiTConfigTest, H3ExecutionProfileIsOptInAndRoundTripsJson) {
+  DiTConfig config;
+  EXPECT_EQ(config.dit_h3_execution_profile(), "native");
+  EXPECT_EQ(config.dit_h3_task_type(), "fl2va");
+  nlohmann::ordered_json output = nlohmann::ordered_json::object();
+  config.append_config_json(output);
+  EXPECT_FALSE(output.contains("dit_h3_execution_profile"));
+  const JsonReader json = config::parse_json_string(
+      R"({"dit_h3_execution_profile":"a3_16card_tp2_u8_ref2va_v1"})");
+  config.from_json(json);
+  EXPECT_EQ(config.dit_h3_execution_profile(), "a3_16card_tp2_u8_ref2va_v1");
+  EXPECT_EQ(config.dit_h3_task_type(), "fl2va");
+  config.append_config_json(output);
+  EXPECT_EQ(output.at("dit_h3_execution_profile"),
+            "a3_16card_tp2_u8_ref2va_v1");
+}
+
+TEST(DiTConfigTest, H3RainfusionIsOptInAndRoundTripsJson) {
+  // from_json synchronizes FLAGS; each scope is an independent config load.
+  {
+    google::FlagSaver flag_saver;
+    DiTConfig config;
+    EXPECT_FALSE(config.dit_h3_rainfusion_enabled());
+    nlohmann::ordered_json output = nlohmann::ordered_json::object();
+    config.append_config_json(output);
+    EXPECT_FALSE(output.contains("dit_h3_rainfusion_enabled"));
+    config.from_json(
+        config::parse_json_string(R"({"dit_h3_rainfusion_enabled":true})"));
+    EXPECT_TRUE(config.dit_h3_rainfusion_enabled());
+    EXPECT_FALSE(config.dit_sparse_attention_enabled());
+    EXPECT_EQ(config.dit_h3_execution_profile(), "native");
+    config.append_config_json(output);
+    EXPECT_EQ(output.at("dit_h3_rainfusion_enabled"), true);
+  }
+  {
+    google::FlagSaver flag_saver;
+    DiTConfig config;
+    config.dit_h3_rainfusion_enabled(true);
+    config.from_json(
+        config::parse_json_string(R"({"dit_h3_rainfusion_enabled":false})"));
+    EXPECT_FALSE(config.dit_h3_rainfusion_enabled());
+    nlohmann::ordered_json output = nlohmann::ordered_json::object();
+    config.append_config_json(output);
+    EXPECT_FALSE(output.contains("dit_h3_rainfusion_enabled"));
+  }
+}
+
+TEST(DiTConfigTest, H3MeasurementAndCorrectnessAreIndependentOptIns) {
+  DiTConfig config;
+  EXPECT_FALSE(config.dit_h3_phase_timing());
+  EXPECT_FALSE(config.dit_h3_correctness_diagnostics());
+  nlohmann::ordered_json output = nlohmann::ordered_json::object();
+  config.append_config_json(output);
+  EXPECT_FALSE(output.contains("dit_h3_phase_timing"));
+  EXPECT_FALSE(output.contains("dit_h3_correctness_diagnostics"));
+  config.from_json(config::parse_json_string(
+      R"({"dit_h3_phase_timing":true,"dit_h3_correctness_diagnostics":true})"));
+  EXPECT_TRUE(config.dit_h3_phase_timing());
+  EXPECT_TRUE(config.dit_h3_correctness_diagnostics());
+  config.dit_h3_phase_timing(false);
+  EXPECT_TRUE(config.dit_h3_correctness_diagnostics());
+  config.append_config_json(output);
+  EXPECT_FALSE(output.contains("dit_h3_phase_timing"));
+  EXPECT_EQ(output.at("dit_h3_correctness_diagnostics"), true);
+}
 
 inline constexpr std::string_view kInlineConfig = R"json({
   "block_size": 16,

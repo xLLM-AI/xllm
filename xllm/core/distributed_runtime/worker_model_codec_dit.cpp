@@ -26,9 +26,23 @@ limitations under the License.
 
 namespace xllm {
 
+bool encode_dit_failure(const Status& status,
+                        proto::DITForwardResponse* response) {
+  if (response == nullptr || status.ok()) {
+    return false;
+  }
+  proto::DITForwardResponse encoded_response;
+  auto* encoded_status = encoded_response.mutable_execution_status();
+  encoded_status->set_code(static_cast<uint32_t>(status.code()));
+  encoded_status->set_message(status.message());
+  response->Swap(&encoded_response);
+  return true;
+}
+
 bool encode_dit_output(const ForwardOutput& output,
                        proto::DITForwardResponse* response) {
-  if (response == nullptr) {
+  if (response == nullptr ||
+      !valid_dit_output_mode(output.dit_forward_output)) {
     return false;
   }
   Timer timer;
@@ -61,6 +75,21 @@ bool encode_dit_output(const ForwardOutput& output,
   encoded_output->mutable_text_output()->Add(
       output.dit_forward_output.text_output.begin(),
       output.dit_forward_output.text_output.end());
+  for (const DiTEncodedMedia& media : output.dit_forward_output.encoded_media) {
+    if (!valid_dit_encoded_media(media)) {
+      return false;
+    }
+    auto* encoded = encoded_output->add_encoded_media();
+    encoded->set_data(media.data);
+    encoded->set_mime_type(media.mime_type);
+    encoded->set_container(media.container);
+    encoded->set_width(media.width);
+    encoded->set_height(media.height);
+    encoded->set_num_frames(media.num_frames);
+    encoded->set_fps(media.fps);
+    encoded->set_audio_sample_rate(media.audio_sample_rate);
+    encoded->set_audio_channels(media.audio_channels);
+  }
   response->Swap(&encoded_response);
   COUNTER_ADD(proto_latency_seconds_o2proto, timer.elapsed_seconds());
   return true;
@@ -70,7 +99,25 @@ bool decode_dit_output(const proto::DITForwardResponse& response,
                        RawForwardOutput& output) {
   Timer timer;
   RawForwardOutput decoded_output;
+  if (response.has_execution_status()) {
+    const auto& status = response.execution_status();
+    const StatusCode code =
+        status.code() <= static_cast<uint32_t>(StatusCode::RATE_LIMITED)
+            ? static_cast<StatusCode>(status.code())
+            : StatusCode::UNKNOWN;
+    decoded_output.dit_execution_status = Status(code, status.message());
+    if (!decoded_output.dit_execution_status.ok()) {
+      output = std::move(decoded_output);
+      return true;
+    }
+  }
   const proto::DiTForwardOutput& encoded_output = response.dit_forward_output();
+  if (encoded_output.encoded_media_size() > 0 &&
+      (encoded_output.tensors().tensors_size() > 0 ||
+       encoded_output.audio_tensors().tensors_size() > 0 ||
+       encoded_output.text_output_size() > 0)) {
+    return false;
+  }
   decoded_output.dit_forward_output.tensors.reserve(
       encoded_output.tensors().tensors_size());
   for (const proto::Tensor& encoded_tensor :
@@ -96,6 +143,25 @@ bool decode_dit_output(const proto::DITForwardResponse& response,
   }
   decoded_output.dit_forward_output.text_output.assign(
       encoded_output.text_output().begin(), encoded_output.text_output().end());
+  decoded_output.dit_forward_output.encoded_media.reserve(
+      encoded_output.encoded_media_size());
+  for (const auto& encoded : encoded_output.encoded_media()) {
+    DiTEncodedMedia media;
+    media.data = encoded.data();
+    media.mime_type = encoded.mime_type();
+    media.container = encoded.container();
+    media.width = encoded.width();
+    media.height = encoded.height();
+    media.num_frames = encoded.num_frames();
+    media.fps = encoded.fps();
+    media.audio_sample_rate = encoded.audio_sample_rate();
+    media.audio_channels = encoded.audio_channels();
+    if (!valid_dit_encoded_media(media)) {
+      return false;
+    }
+    decoded_output.dit_forward_output.encoded_media.emplace_back(
+        std::move(media));
+  }
   output = std::move(decoded_output);
   COUNTER_ADD(proto_latency_seconds_proto2o, timer.elapsed_seconds());
   return true;

@@ -240,7 +240,10 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   encoded.add_json_object_errors()->set_message("stale");
   ASSERT_TRUE(TypeParam::encode(source, {}, &encoded));
   RawForwardOutput decoded = original_output();
+  decoded.dit_execution_status =
+      Status(StatusCode::UNKNOWN, "previous DiT failure");
   ASSERT_TRUE(TypeParam::decode(encoded, decoded));
+  EXPECT_TRUE(decoded.dit_execution_status.ok());
   ASSERT_EQ(decoded.outputs.size(), 1);
   ASSERT_EQ(decoded.outputs[0].tokens.size(), 1);
   EXPECT_EQ(decoded.outputs[0].tokens[0].id, -1);
@@ -305,6 +308,113 @@ TEST(WorkerModelDitCodecTest,
   EXPECT_TRUE(decoded.dit_forward_output.tensors.empty());
   EXPECT_TRUE(decoded.dit_forward_output.audio_tensors.empty());
   EXPECT_TRUE(decoded.dit_forward_output.text_output.empty());
+}
+
+TEST(WorkerModelDitCodecTest,
+     FailureRoundTripClearsPreviousPayloadAndThenRecovers) {
+  proto::DITForwardResponse encoded;
+  encoded.mutable_dit_forward_output()->add_text_output("stale");
+  ASSERT_TRUE(
+      encode_dit_failure({StatusCode::RESOURCE_EXHAUSTED, "out"}, &encoded));
+  EXPECT_FALSE(encoded.has_dit_forward_output());
+  RawForwardOutput output = original_output();
+  ASSERT_TRUE(decode_dit_output(encoded, output));
+  EXPECT_EQ(output.dit_execution_status.code(), StatusCode::RESOURCE_EXHAUSTED);
+  EXPECT_EQ(output.dit_execution_status.message(), "out");
+  EXPECT_TRUE(output.outputs.empty());
+  EXPECT_TRUE(output.dit_forward_output.tensors.empty());
+  EXPECT_TRUE(output.dit_forward_output.text_output.empty());
+  ForwardOutput success;
+  success.dit_forward_output.text_output = {"next"};
+  ASSERT_TRUE(encode_dit_output(success, &encoded));
+  EXPECT_FALSE(encoded.has_execution_status());
+  ASSERT_TRUE(decode_dit_output(encoded, output));
+  EXPECT_TRUE(output.dit_execution_status.ok());
+  EXPECT_EQ(output.dit_forward_output.text_output,
+            (std::vector<std::string>{"next"}));
+}
+
+TEST(WorkerModelDitCodecTest, UnknownStatusDoesNotTruncateToSuccess) {
+  proto::DITForwardResponse encoded;
+  encoded.mutable_execution_status()->set_code(256);
+  encoded.mutable_execution_status()->set_message("unknown remote code");
+  // A failure must not try to decode an abandoned malformed success payload.
+  encoded.mutable_dit_forward_output()->mutable_tensors()->add_tensors();
+  RawForwardOutput output = original_output();
+  ASSERT_TRUE(decode_dit_output(encoded, output));
+  EXPECT_EQ(output.dit_execution_status.code(), StatusCode::UNKNOWN);
+  EXPECT_EQ(output.dit_execution_status.message(), "unknown remote code");
+  EXPECT_TRUE(output.dit_forward_output.tensors.empty());
+  EXPECT_TRUE(output.outputs.empty());
+}
+
+TEST(WorkerModelDitCodecTest,
+     FailureEncoderRejectsOkWithoutMutatingDestination) {
+  proto::DITForwardResponse encoded;
+  encoded.mutable_dit_forward_output()->add_text_output("unchanged");
+  const std::string original = encoded.SerializeAsString();
+  EXPECT_FALSE(encode_dit_failure(Status(), &encoded));
+  EXPECT_EQ(encoded.SerializeAsString(), original);
+  EXPECT_FALSE(encode_dit_failure({StatusCode::UNKNOWN, "bad"}, nullptr));
+}
+
+TEST(WorkerModelDitCodecTest, EncodedMediaOwnsBytesAcrossFailureAndSuccess) {
+  ForwardOutput source;
+  source.dit_forward_output.encoded_media = {{.data = std::string("A\0B", 3),
+                                              .mime_type = "video/mp4",
+                                              .container = "mp4",
+                                              .width = 2,
+                                              .height = 2,
+                                              .num_frames = 1,
+                                              .fps = 25.0,
+                                              .audio_sample_rate = 32000,
+                                              .audio_channels = 2}};
+  proto::DITForwardResponse wire;
+  ASSERT_TRUE(encode_dit_output(source, &wire));
+  RawForwardOutput output;
+  ASSERT_TRUE(decode_dit_output(wire, output));
+  wire.Clear();
+  ASSERT_EQ(output.dit_forward_output.encoded_media.size(), 1u);
+  const DiTEncodedMedia& media =
+      output.dit_forward_output.encoded_media.front();
+  EXPECT_EQ(media.data, std::string("A\0B", 3));
+  EXPECT_EQ(media.mime_type, "video/mp4");
+  EXPECT_EQ(media.container, "mp4");
+  EXPECT_EQ(media.width, 2);
+  EXPECT_EQ(media.height, 2);
+  EXPECT_EQ(media.num_frames, 1);
+  EXPECT_DOUBLE_EQ(media.fps, 25.0);
+  EXPECT_EQ(media.audio_sample_rate, 32000);
+  EXPECT_EQ(media.audio_channels, 2);
+  ASSERT_TRUE(encode_dit_failure({StatusCode::UNKNOWN, "failed"}, &wire));
+  ASSERT_TRUE(decode_dit_output(wire, output));
+  EXPECT_TRUE(output.dit_forward_output.encoded_media.empty());
+  EXPECT_FALSE(output.dit_execution_status.ok());
+  ASSERT_TRUE(encode_dit_output(source, &wire));
+  ASSERT_TRUE(decode_dit_output(wire, output));
+  EXPECT_TRUE(output.dit_execution_status.ok());
+  EXPECT_EQ(output.dit_forward_output.encoded_media.front().data,
+            std::string("A\0B", 3));
+}
+
+TEST(WorkerModelDitCodecTest, MalformedEncodedMediaPreservesDestination) {
+  ForwardOutput source;
+  source.dit_forward_output.encoded_media = {
+      {.data = "media", .mime_type = "video/mp4", .container = "mp4"}};
+  proto::DITForwardResponse wire;
+  ASSERT_TRUE(encode_dit_output(source, &wire));
+  wire.mutable_dit_forward_output()->mutable_encoded_media(0)->clear_data();
+  RawForwardOutput destination = original_output();
+  EXPECT_FALSE(decode_dit_output(wire, destination));
+  expect_original_output(destination);
+  ASSERT_TRUE(encode_dit_output(source, &wire));
+  wire.mutable_dit_forward_output()->add_text_output("mixed");
+  EXPECT_FALSE(decode_dit_output(wire, destination));
+  expect_original_output(destination);
+  const std::string original = wire.SerializeAsString();
+  source.dit_forward_output.text_output = {"mixed"};
+  EXPECT_FALSE(encode_dit_output(source, &wire));
+  EXPECT_EQ(wire.SerializeAsString(), original);
 }
 
 TEST(WorkerModelDitCodecTest, InvalidTensorEncodePreservesDestination) {

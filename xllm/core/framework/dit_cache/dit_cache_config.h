@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+
 namespace xllm {
 
 enum class PolicyType {
@@ -22,7 +24,8 @@ enum class PolicyType {
   FBCache,
   TaylorSeer,
   FBCacheTaylorSeer,
-  ResidualCache
+  ResidualCache,
+  CACHE_DIT
 };
 
 struct DiTBaseCacheOptions {
@@ -68,6 +71,17 @@ struct ResidualCacheOptions {
   int64_t skip_interval_steps = 3;
 };
 
+// Request-local similarity policy; deliberately separate from ResidualCache.
+struct CacheDiTOptions {
+  int64_t warmup_steps = 0;
+  float residual_diff_threshold = 0.04F;
+  int64_t max_cached_steps = -1;
+  int64_t max_consecutive_hits = 1;
+  int64_t front_blocks = 1;
+  int64_t back_blocks = 0;
+  bool linear_residual_prediction = false;
+};
+
 struct DiTCacheConfig {
   DiTCacheConfig() = default;
 
@@ -85,6 +99,8 @@ struct DiTCacheConfig {
 
   // the configuration for ResidualCache policy.
   ResidualCacheOptions residual_cache;
+
+  CacheDiTOptions cache_dit;
 };
 
 }  // namespace xllm

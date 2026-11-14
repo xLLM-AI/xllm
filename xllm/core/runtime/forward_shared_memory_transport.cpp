@@ -16,6 +16,7 @@ limitations under the License.
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -65,6 +66,10 @@ static inline bool(unlikely)(bool x) { return x; }
 namespace xllm {
 
 namespace {
+constexpr uint64_t kDiTOutputMagic = 0x0054554f54494458ULL;
+constexpr uint64_t kDiTStatusHeaderBytes =
+    sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint64_t);
+
 template <typename T>
 constexpr size_t type_size = sizeof(T);
 
@@ -277,10 +282,55 @@ inline size_t get_vector_tensor_size(
   return size;
 }
 
-inline size_t get_dit_forward_output_size(const DiTForwardOutput& output) {
-  return get_vector_tensor_size(output.tensors) +
-         get_string_vector_size(output.text_output) +
-         get_vector_tensor_size(output.audio_tensors);
+std::optional<uint64_t> get_dit_forward_output_size(
+    const DiTForwardOutput& output,
+    uint64_t capacity) {
+  uint64_t total = 0;
+  const auto add = [&total, capacity](uint64_t bytes) {
+    if (bytes > capacity - total) {
+      return false;
+    }
+    total += bytes;
+    return true;
+  };
+  for (const auto* tensors : {&output.tensors, &output.audio_tensors}) {
+    if (tensors->size() >
+            static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+        !add(sizeof(int32_t))) {
+      return std::nullopt;
+    }
+    for (const torch::Tensor& tensor : *tensors) {
+      if (!add(sizeof(uint64_t)) ||
+          !add(static_cast<uint64_t>(tensor.dim()) * sizeof(int64_t)) ||
+          !add(sizeof(int8_t)) || !add(sizeof(uint64_t)) ||
+          !add(tensor.nbytes())) {
+        return std::nullopt;
+      }
+    }
+  }
+  if (!add(sizeof(uint64_t))) {
+    return std::nullopt;
+  }
+  for (const std::string& text : output.text_output) {
+    if (!add(sizeof(uint64_t)) || !add(text.size())) {
+      return std::nullopt;
+    }
+  }
+  if (!add(sizeof(uint64_t))) {
+    return std::nullopt;
+  }
+  for (const DiTEncodedMedia& media : output.encoded_media) {
+    for (const std::string* value :
+         {&media.data, &media.mime_type, &media.container}) {
+      if (!add(sizeof(uint64_t)) || !add(value->size())) {
+        return std::nullopt;
+      }
+    }
+    if (!add(5 * sizeof(int32_t) + sizeof(double))) {
+      return std::nullopt;
+    }
+  }
+  return total;
 }
 
 template <typename T>
@@ -880,6 +930,18 @@ inline void write_dit_forward_output(char*& buffer,
   write_vector_tensor(buffer, output.tensors);
   write_string_vector(buffer, output.text_output);
   write_vector_tensor(buffer, output.audio_tensors);
+  write_data(buffer, static_cast<uint64_t>(output.encoded_media.size()));
+  for (const DiTEncodedMedia& media : output.encoded_media) {
+    write_string(buffer, media.data);
+    write_string(buffer, media.mime_type);
+    write_string(buffer, media.container);
+    write_data(buffer, media.width);
+    write_data(buffer, media.height);
+    write_data(buffer, media.num_frames);
+    write_data(buffer, media.fps);
+    write_data(buffer, media.audio_sample_rate);
+    write_data(buffer, media.audio_channels);
+  }
 }
 
 inline void safe_advance_buffer(const char*& buffer, size_t offset) {
@@ -3686,36 +3748,69 @@ bool ForwardSharedMemoryTransport::vlm_output_read(RawForwardOutput& output) {
   return read_token_output(output, /*domain=*/"VLM");
 }
 
+size_t ForwardSharedMemoryTransport::minimum_dit_output_size() {
+  return sizeof(ControlMetadata) + kDiTStatusHeaderBytes;
+}
+
 bool ForwardSharedMemoryTransport::dit_output_write(
-    const DiTForwardOutput& output) {
-  for (const torch::Tensor& tensor : output.tensors) {
-    if (!valid_dense_output_tensor(tensor)) {
-      LOG(ERROR) << "Invalid DiT shared-memory output tensor";
-      return false;
-    }
-  }
-  for (const torch::Tensor& tensor : output.audio_tensors) {
-    if (!valid_dense_output_tensor(tensor)) {
-      LOG(ERROR) << "Invalid DiT shared-memory audio output tensor";
-      return false;
-    }
-  }
-  const bool has_output = !output.tensors.empty() ||
-                          !output.audio_tensors.empty() ||
-                          !output.text_output.empty();
-  // Preserve the existing RAW_OUTPUT framing while writing only DiT data.
-  uint64_t payload_bytes =
-      3 * sizeof(uint64_t) + sizeof(int64_t) + sizeof(bool);
-  if (has_output) {
-    payload_bytes += get_dit_forward_output_size(output);
-  }
-  if (size() < static_cast<int64_t>(sizeof(ControlMetadata)) ||
-      payload_bytes > static_cast<uint64_t>(size()) - sizeof(ControlMetadata)) {
-    LOG(ERROR) << "DiT shared-memory output size exceeds segment capacity";
+    const DiTForwardOutput& output,
+    const Status& status) {
+  if (size() < static_cast<int64_t>(minimum_dit_output_size())) {
     return false;
+  }
+  const uint64_t capacity =
+      static_cast<uint64_t>(size()) - sizeof(ControlMetadata);
+  Status terminal_status = status;
+  if (terminal_status.ok()) {
+    const bool valid = valid_dit_output_mode(output) &&
+                       std::all_of(output.encoded_media.begin(),
+                                   output.encoded_media.end(),
+                                   valid_dit_encoded_media) &&
+                       std::all_of(output.tensors.begin(),
+                                   output.tensors.end(),
+                                   valid_dense_output_tensor) &&
+                       std::all_of(output.audio_tensors.begin(),
+                                   output.audio_tensors.end(),
+                                   valid_dense_output_tensor);
+    if (!valid) {
+      terminal_status =
+          Status(StatusCode::UNKNOWN, "Invalid DiT shared-memory output");
+    }
+  }
+  const bool has_output =
+      !output.tensors.empty() || !output.audio_tensors.empty() ||
+      !output.text_output.empty() || !output.encoded_media.empty();
+  constexpr uint64_t kRawHeaderBytes =
+      3 * sizeof(uint64_t) + sizeof(int64_t) + sizeof(bool);
+  uint64_t payload_bytes = kDiTStatusHeaderBytes + kRawHeaderBytes;
+  if (terminal_status.ok()) {
+    std::optional<uint64_t> model_bytes;
+    if (payload_bytes <= capacity) {
+      model_bytes = has_output ? get_dit_forward_output_size(
+                                     output, capacity - payload_bytes)
+                               : std::optional<uint64_t>(0);
+    }
+    if (!model_bytes) {
+      terminal_status = Status(StatusCode::RESOURCE_EXHAUSTED,
+                               "DiT output exceeds shared-memory capacity");
+    } else {
+      payload_bytes += *model_bytes;
+    }
   }
   char* cursor = static_cast<char*>(base_address()) + sizeof(ControlMetadata);
   const char* payload_begin = cursor;
+  write_data(cursor, kDiTOutputMagic);
+  write_data(cursor, static_cast<uint32_t>(terminal_status.code()));
+  if (!terminal_status.ok()) {
+    const uint64_t message_bytes = std::min<uint64_t>(
+        terminal_status.message().size(), capacity - kDiTStatusHeaderBytes);
+    write_data(cursor, message_bytes);
+    std::memcpy(cursor, terminal_status.message().data(), message_bytes);
+    std::atomic_thread_fence(std::memory_order_release);
+    control_ptr_->version = ++last_version_;
+    return true;
+  }
+  write_data(cursor, uint64_t{0});  // successful status has no error message
   write_data(cursor, uint64_t{0});  // token rows
   write_data(cursor, uint64_t{0});  // JSON errors
   write_data(cursor, uint64_t{0});  // expert loads
@@ -3736,12 +3831,29 @@ bool ForwardSharedMemoryTransport::dit_output_read(RawForwardOutput& output) {
   }
   last_version_ = control_ptr_->version;
   std::atomic_thread_fence(std::memory_order_acquire);
-  if (size() < static_cast<int64_t>(sizeof(ControlMetadata))) {
+  if (size() < static_cast<int64_t>(minimum_dit_output_size())) {
     return false;
   }
   ShmOutputReader reader(
       static_cast<const char*>(base_address()) + sizeof(ControlMetadata),
       static_cast<uint64_t>(size()) - sizeof(ControlMetadata));
+  RawForwardOutput decoded;
+  uint64_t magic = 0;
+  uint32_t code = 0;
+  std::string message;
+  if (!reader.read(magic) || magic != kDiTOutputMagic || !reader.read(code) ||
+      !reader.read_string(message)) {
+    return false;
+  }
+  const StatusCode status_code =
+      code <= static_cast<uint32_t>(StatusCode::RATE_LIMITED)
+          ? static_cast<StatusCode>(code)
+          : StatusCode::UNKNOWN;
+  decoded.dit_execution_status = Status(status_code, std::move(message));
+  if (!decoded.dit_execution_status.ok()) {
+    output = std::move(decoded);
+    return true;
+  }
   uint64_t token_rows = 0;
   uint64_t json_errors = 0;
   uint64_t expert_loads = 0;
@@ -3755,7 +3867,6 @@ bool ForwardSharedMemoryTransport::dit_output_read(RawForwardOutput& output) {
     LOG(ERROR) << "Invalid DiT shared-memory output fields";
     return false;
   }
-  RawForwardOutput decoded;
   if (has_output) {
     if (!reader.read_tensors(decoded.dit_forward_output.tensors)) {
       return false;
@@ -3764,6 +3875,28 @@ bool ForwardSharedMemoryTransport::dit_output_read(RawForwardOutput& output) {
       return false;
     }
     if (!reader.read_tensors(decoded.dit_forward_output.audio_tensors)) {
+      return false;
+    }
+    uint64_t encoded_count = 0;
+    constexpr uint64_t kEncodedMediaRecordBytes =
+        3 * sizeof(uint64_t) + 5 * sizeof(int32_t) + sizeof(double);
+    if (!reader.read_count(encoded_count, kEncodedMediaRecordBytes)) {
+      return false;
+    }
+    auto& encoded_media = decoded.dit_forward_output.encoded_media;
+    encoded_media.resize(encoded_count);
+    for (DiTEncodedMedia& media : encoded_media) {
+      if (!reader.read_string(media.data) ||
+          !reader.read_string(media.mime_type) ||
+          !reader.read_string(media.container) || !reader.read(media.width) ||
+          !reader.read(media.height) || !reader.read(media.num_frames) ||
+          !reader.read(media.fps) || !reader.read(media.audio_sample_rate) ||
+          !reader.read(media.audio_channels) ||
+          !valid_dit_encoded_media(media)) {
+        return false;
+      }
+    }
+    if (!valid_dit_output_mode(decoded.dit_forward_output)) {
       return false;
     }
   }

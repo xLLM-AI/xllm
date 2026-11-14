@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "core/framework/parallel_state/collective_communicator_base.h"
 #include "core/framework/parallel_state/dit_mapping.h"
+#include "core/framework/parallel_state/dit_sp_qkv_domains.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/parallel_state/process_group.h"
 
@@ -31,7 +32,8 @@ class DiTCollectiveCommunicator : public CollectiveCommunicatorBase {
                             int32_t dit_sp_size,
                             int32_t dit_cfg_size,
                             int32_t dit_vae_size,
-                            int32_t dit_text_encoder_tp_size);
+                            int32_t dit_text_encoder_tp_size,
+                            DiTSpQkvCommunicationOptions qkv_options = {});
 
   ~DiTCollectiveCommunicator() = default;
 
@@ -47,6 +49,12 @@ class DiTCollectiveCommunicator : public CollectiveCommunicatorBase {
       const torch::Device& device);
 
  private:
+  void create_sp_qkv_comm_domains(const torch::Device& device);
+
+  DiTSpQkvCommunicationOptions qkv_options_;
+  std::unique_ptr<ProcessGroup> dit_sp_q_domain_;
+  std::unique_ptr<ProcessGroup> dit_sp_k_domain_;
+  std::unique_ptr<ProcessGroup> dit_sp_v_domain_;
   int32_t port_ = 0;
   std::string host_ = "";
   std::unique_ptr<DiTMapping> dit_mapping_{nullptr};

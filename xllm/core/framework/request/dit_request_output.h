@@ -49,6 +49,12 @@ struct DiTGenerationOutput {
   // the width of the generated image/video.
   int32_t width;
 
+  // Container metadata is populated only for pre-encoded results.
+  std::string mime_type;
+  std::string container;
+  int32_t audio_sample_rate = 0;
+  int32_t audio_channels = 0;
+
   // seed used for generation (only valid when seed_is_set is true).
   int64_t seed = 0;
 

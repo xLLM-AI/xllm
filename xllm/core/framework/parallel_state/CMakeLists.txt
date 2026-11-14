@@ -7,6 +7,7 @@ cc_library(
     mapping_npu.h
     npu_dp_ep_padding.h
     dit_mapping.h
+    dit_sp_qkv_domains.h
     rank_generator.h
     parallel_args.h
     parallel_state.h
@@ -26,6 +27,7 @@ cc_library(
     mapping_npu.cpp
     npu_dp_ep_padding.cpp
     dit_mapping.cpp
+    dit_sp_qkv_domains.cpp
     parallel_state.cpp
     parallel_state_async.cpp
     process_group.cpp

@@ -23,6 +23,7 @@ limitations under the License.
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -34,6 +35,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/execution_config.h"
+#include "core/runtime/dit_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 #include "util/net.h"
 
@@ -234,6 +236,69 @@ TEST_F(ShmChannelTest, ReadsDitOutputWithoutRpcExecution) {
   EXPECT_EQ(service_.execution_count(), 0);
 }
 
+TEST_F(ShmChannelTest, DitFailureDoesNotReexecuteAndNextReadRecovers) {
+  ASSERT_TRUE(
+      writer_->dit_output_write({}, {StatusCode::RESOURCE_EXHAUSTED, "out"}));
+  OutputPromise promise;
+  auto future = promise.getSemiFuture();
+  channel_->execute_dit_model_async(DiTForwardInput(), promise);
+  ASSERT_TRUE(future.isReady());
+  try {
+    std::move(future).get();
+    FAIL() << "expected published DiT failure";
+  } catch (const DiTForwardExecutionError& error) {
+    EXPECT_EQ(error.status().code(), StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_EQ(error.status().message(), "out");
+  }
+  EXPECT_EQ(service_.execution_count(), 0);
+  DiTForwardOutput source;
+  source.text_output = {"after failure"};
+  ASSERT_TRUE(writer_->dit_output_write(source));
+  OutputPromise next_promise;
+  auto next = next_promise.getSemiFuture();
+  channel_->execute_dit_model_async(DiTForwardInput(), next_promise);
+  const auto output = std::move(next).get(std::chrono::seconds(5));
+  ASSERT_TRUE(output.has_value());
+  EXPECT_EQ(output->dit_forward_output.text_output, source.text_output);
+  EXPECT_TRUE(output->dit_execution_status.ok());
+  EXPECT_EQ(service_.execution_count(), 0);
+}
+
+TEST_F(ShmChannelTest, DitMalformedFrameCompletesExceptionAndNextReadRecovers) {
+  ASSERT_TRUE(writer_->dit_output_write({}));
+  const uint64_t bad_magic = 0;
+  char* payload =
+      static_cast<char*>(writer_->base_address()) + sizeof(ControlMetadata);
+  std::memcpy(payload, &bad_magic, sizeof(bad_magic));
+  OutputPromise promise;
+  auto future = promise.getSemiFuture();
+  channel_->execute_dit_model_async(DiTForwardInput(), promise);
+  ASSERT_TRUE(future.isReady());
+  try {
+    std::move(future).get();
+    FAIL() << "expected malformed frame error";
+  } catch (const DiTForwardExecutionError& error) {
+    EXPECT_EQ(error.status().code(), StatusCode::UNKNOWN);
+  }
+  ASSERT_TRUE(writer_->dit_output_write({}));
+  OutputPromise next_promise;
+  auto next = next_promise.getSemiFuture();
+  channel_->execute_dit_model_async(DiTForwardInput(), next_promise);
+  ASSERT_TRUE(std::move(next).get(std::chrono::seconds(5)).has_value());
+  EXPECT_EQ(service_.execution_count(), 0);
+}
+
+TEST_F(ShmChannelTest, DitRejectsOutputCapacityBelowFailureHeader) {
+  options_.backend("dit").output_shm_size(
+      ForwardSharedMemoryTransport::minimum_dit_output_size() - 1);
+  EXPECT_DEATH(
+      {
+        ShmChannel too_small(
+            /*dp_group=*/0, /*rank=*/2, /*is_driver=*/false, options_);
+      },
+      "minimum|DiT|DIT");
+}
+
 TEST_F(ShmChannelTest, InputWriteFailureFallsBackBeforePublishingRequest) {
   constexpr uint64_t kSmallInputBytes = 64;
   options_.input_shm_size(kSmallInputBytes);
@@ -282,15 +347,12 @@ TEST_F(ShmChannelTest, DitOverflowFallsBackForEveryRankAndStaysOnBrpc) {
 }
 
 TEST_F(ShmChannelTest, DecodeFailureDoesNotReexecuteAndNextReadRecovers) {
-  const std::array<std::function<void(OutputPromise&)>, 3> execute = {
+  const std::array<std::function<void(OutputPromise&)>, 2> execute = {
       [this](OutputPromise& promise) {
         channel_->execute_llm_model_async(LlmForwardInput(), promise);
       },
       [this](OutputPromise& promise) {
         channel_->execute_vlm_model_async(VlmForwardInput(), promise);
-      },
-      [this](OutputPromise& promise) {
-        channel_->execute_dit_model_async(DiTForwardInput(), promise);
       }};
   for (const auto& execute_model : execute) {
     ASSERT_TRUE(writer_->llm_output_write(ForwardOutput(), {}));

@@ -151,7 +151,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `tp_size` | `int64` | `1` | Tensor parallelism size. Only used for DiT models. |
 | `sp_size` | `int64` | `1` | Sequence parallelism size. Only used for DiT models. |
 | `cfg_size` | `int64` | `1` | Classifier-free guidance parallelism size. Only used for DiT models. |
-| `vae_size` | `int64` | `1` | VAE patch parallelism size. Only used for DiT models. |
+| `vae_size` | `int64` | `1` | VAE patch parallelism size for DiT models. The qualified MiniMax-H3 Ref2VA profile supports `1` (serial) or `16` (parallel video decode). |
 | `communication_backend` | `string` | `"hccl"` | NPU communication backend, for example `lccl` or `hccl`. Uses `hccl` when DP is enabled. |
 | `enable_mm_encoder_dp` | `bool` | `false` | Whether to enable encoder data parallelism for multimodal models. |
 | `enable_multi_stream_parallel` | `bool` | `false` | Whether to enable computation/communication parallelism with two streams and two micro batches in the prefill stage. See [Multi-Stream Parallelism](/en/features/multi_streams/). |
@@ -265,10 +265,22 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `dit_cache_end_steps` | `int64` | `5` | Number of steps to skip at the end. |
 | `dit_cache_start_blocks` | `int64` | `5` | Number of blocks to skip at the start. |
 | `dit_cache_end_blocks` | `int64` | `5` | Number of blocks to skip at the end. |
+| `dit_cachedit_warmup_steps` | `int64` | `30` | CacheDiT zero-based warmup steps. |
+| `dit_cachedit_residual_diff_threshold` | `double` | `0.04` | CacheDiT relative L1 threshold. |
+| `dit_cachedit_max_cached_steps` | `int64` | `4` | CacheDiT total hit limit; -1 means unlimited, 0 disables hits. |
+| `dit_cachedit_max_consecutive_hits` | `int64` | `1` | CacheDiT consecutive hit limit. |
+| `dit_cachedit_front_blocks` | `int64` | `1` | CacheDiT front blocks executed on every step. |
+| `dit_cachedit_back_blocks` | `int64` | `0` | CacheDiT back blocks executed on every step. |
+| `dit_cachedit_linear_residual_prediction` | `bool` | `true` | Enable CacheDiT linear residual prediction. |
 | `dit_sp_communication_overlap` | `bool` | `true` | Whether to overlap communication and computation for sequence parallelism. |
+| `dit_sp_qkv_communication_overlap` | `bool` | `false` | Enable three QKV domains only for the qualified H3 TP2/SP8 profile. |
 | `dit_debug_print` | `bool` | `false` | Whether to print debug information for DiT models. |
 | `dit_generation_image_area_max` | `int64` | `0` | Maximum allowed image area (`width * height`) for image generation requests. `0` means no limit. |
 | `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 task type: `fl2va` or `ref2va`. |
+| `dit_h3_execution_profile` | `string` | `"native"` | MiniMax-H3 execution profile: `native` or `a3_16card_tp2_u8_ref2va_v1`. The qualified profile remains unavailable until the 16-card backend is enabled. |
+| `dit_h3_phase_timing` | `bool` | `false` | Measure MiniMax-H3 load, prepare, denoise and decode phases with device synchronization only at phase boundaries. Disable for end-to-end throughput measurements. Requires a single-request forward and exactly one prompt_embed when enabled. |
+| `dit_h3_correctness_diagnostics` | `bool` | `false` | Enable qualified MiniMax-H3 per-block finite-value and dummy-head checks. Correctness gates enable it; performance runs disable it. Startup and input validation remain enabled. |
+| `dit_h3_rainfusion_enabled` | `bool` | `false` | Enable MiniMax-H3 RainFusion on the qualified A3 execution profile. At server startup, set <code>XLLM_H3_RAINFUSION_POLICY</code> to <code>sparse-middle-steps</code> (the default when unset) or <code>sparse-middle-layers</code>. |
 | `dit_enable_vae_tiling` | `bool` | `false` | Whether to enable VAE tiling. Currently only supported for `qwen-image-edit-plus`. |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE image size used to calculate dimensions. |
 | `dit_sparse_attention_enabled` | `bool` | `false` | Whether to enable block-wise sparse attention / RainFusion for WAN. |
@@ -277,3 +289,18 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `dit_sparse_attention_sparse_start_step` | `int64` | `0` | Sparse attention step index to start sparse attention. Steps before this use dense attention. |
 | `dit_sparse_attention_version` | `string` | `"rain_fusion"` | Sparse attention version: `rain_fusion` (frame-pairing + `aclnnRainFusionAttention`) or `sparse_attention` (block-decompose + `aclnnBlockSparseAttention`). |
 | `dit_sparse_attention_mask_refresh_steps` | `int64` | `1` | Recompute the block sparse mask every N diffusion steps. `1` means every step, higher values reuse the mask longer. |
+
+### Build MiniMax-H3 RainFusion on Ascend A3
+
+In an AArch64 build environment with CANN 9.1, Python 3.12 and PyTorch
+`2.10.0+cpu`, prepare the pinned Torch NPU and TileLang wheels, then build with
+the RainFusion profile.
+
+```bash
+python xllm/compiler/tilelang_launcher.py prepare-ascend --target-platform a3 --arch arm --build-profile h3_a3_rf_cann91_cp312
+CMAKE_ARGS="-DXLLM_BUILD_PROFILE=h3_a3_rf_cann91_cp312 -DXLLM_ENABLE_H3_RAINFUSION=ON" python setup.py build --device npu
+```
+
+Enable `dit_h3_rainfusion_enabled` with the `a3_16card_tp2_u8_ref2va_v1`
+execution profile. Valid requests whose packed geometry exceeds the compiled
+RainFusion capacity use dense attention.

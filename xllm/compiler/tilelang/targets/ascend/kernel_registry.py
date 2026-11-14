@@ -165,9 +165,14 @@ def _load_registered_kernel_family(
     )
 
 
-def registered_families() -> dict[str, RegisteredKernelFamily]:
+H3_RAINFUSION_KERNELS = frozenset({"h3_ref2va_rf_v2_selector", "h3_rainfusion_attention"})
+
+
+def registered_families(*, enable_h3_rainfusion: bool = False) -> dict[str, RegisteredKernelFamily]:
     families: dict[str, RegisteredKernelFamily] = {}
     for module_name in _iter_kernel_module_names():
+        if module_name in H3_RAINFUSION_KERNELS and not enable_h3_rainfusion:
+            continue
         family = _load_registered_kernel_family(module_name)
         if family is None:
             continue
@@ -179,8 +184,12 @@ def registered_families() -> dict[str, RegisteredKernelFamily]:
 
 def get_default_families(
     kernel_names: list[str] | None = None,
+    *,
+    enable_h3_rainfusion: bool = False,
 ) -> list[RegisteredKernelFamily]:
-    families = registered_families()
+    if not enable_h3_rainfusion and H3_RAINFUSION_KERNELS.intersection(kernel_names or ()):
+        raise ValueError("H3 RainFusion kernels require the explicit H3 build profile")
+    families = registered_families(enable_h3_rainfusion=enable_h3_rainfusion)
     if kernel_names is None:
         return list(families.values())
     missing = [name for name in kernel_names if name not in families]

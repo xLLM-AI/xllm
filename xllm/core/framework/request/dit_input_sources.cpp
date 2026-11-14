@@ -271,7 +271,10 @@ DiTTensorSources DiTTensorSources::to(const torch::Device& device,
   DiTTensorSources result;
   result.entries_.reserve(entries_.size());
   for (const NamedTensor& input : entries_) {
-    result.add(input.name, input.tensor.to(device, dtype), input.parameters);
+    const torch::ScalarType target_dtype =
+        input.tensor.is_floating_point() ? dtype : input.tensor.scalar_type();
+    result.add(
+        input.name, input.tensor.to(device, target_dtype), input.parameters);
   }
   return result;
 }

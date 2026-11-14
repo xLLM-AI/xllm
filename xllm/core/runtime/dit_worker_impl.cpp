@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "dit_worker_impl.h"
+#include "core/runtime/dit_worker_impl.h"
 
 #include <c10/core/DeviceGuard.h>
 #include <folly/Unit.h>
@@ -21,8 +21,10 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <exception>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 
 #include "common/metrics.h"
@@ -31,7 +33,9 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/dit_config.h"
+#include "core/framework/config/load_config.h"
 #include "core/framework/model_loader/dit_model_loader.h"
+#include "core/framework/request/minimax_h3_conditioning.h"
 #include "core/platform/device.h"
 #include "core/util/tensor_options.h"
 #include "framework/dit_cache/dit_cache.h"
@@ -83,6 +87,23 @@ DiTCacheConfig parse_dit_cache_from_flags() {
         ::xllm::DiTConfig::get_instance().dit_cache_end_blocks();
     cache_config.residual_cache.skip_interval_steps =
         ::xllm::DiTConfig::get_instance().dit_cache_skip_interval_steps();
+  } else if (DiTConfig::get_instance().dit_cache_policy() == "CacheDiT") {
+    const auto& config = DiTConfig::get_instance();
+    if (config.dit_h3_execution_profile() != kMiniMaxH3ExecutionProfile) {
+      throw std::invalid_argument(
+          "CacheDiT requires the qualified MiniMax-H3 execution profile");
+    }
+    cache_config.selected_policy = PolicyType::CACHE_DIT;
+    auto& options = cache_config.cache_dit;
+    options.warmup_steps = config.dit_cachedit_warmup_steps();
+    options.residual_diff_threshold =
+        static_cast<float>(config.dit_cachedit_residual_diff_threshold());
+    options.max_cached_steps = config.dit_cachedit_max_cached_steps();
+    options.max_consecutive_hits = config.dit_cachedit_max_consecutive_hits();
+    options.front_blocks = config.dit_cachedit_front_blocks();
+    options.back_blocks = config.dit_cachedit_back_blocks();
+    options.linear_residual_prediction =
+        config.dit_cachedit_linear_residual_prediction();
   } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() == "None") {
     cache_config.selected_policy = PolicyType::None;
   }
@@ -108,6 +129,45 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
                                MasterStatus master_status) {
   CHECK(dit_model_ == nullptr) << "Model is already initialized.";
 
+  const DiTConfig& config = DiTConfig::get_instance();
+  const bool qualified = config.dit_h3_execution_profile() != "native";
+  if (config.dit_h3_rainfusion_enabled() && !qualified) {
+    LOG(ERROR)
+        << "MiniMax-H3 RainFusion requires the qualified execution profile";
+    return false;
+  }
+  if (qualified) {
+    if (LoadConfig::get_instance().enable_rolling_load()) {
+      LOG(ERROR) << "Qualified MiniMax-H3 requires resident weights; "
+                    "rolling load is unsupported";
+      return false;
+    }
+#if !defined(USE_NPU)
+    LOG(ERROR) << "MiniMax-H3 qualified execution requires an Ascend build";
+    return false;
+#else
+    if (config.dit_h3_execution_profile() != kMiniMaxH3ExecutionProfile ||
+        device_.unwrap().type() != torch::kPrivateUse1 ||
+        config.dit_h3_task_type() != "ref2va" ||
+        config.max_requests_per_batch() != 1) {
+      LOG(ERROR) << "MiniMax-H3 qualified execution requires the A3 16-card "
+                    "ref2va profile, an NPU device and batch limit 1";
+      return false;
+    }
+    // Only the qualified CacheDiT policy is enabled at this stage.
+    if ((config.dit_cache_policy() != "None" &&
+         config.dit_cache_policy() != "CacheDiT") ||
+        config.dit_sp_communication_overlap() !=
+            config.dit_sp_qkv_communication_overlap() ||
+        config.dit_sparse_attention_enabled() ||
+        config.dit_laser_attention_enabled()) {
+      LOG(ERROR) << "MiniMax-H3 requires cache=None/CacheDiT, paired QKV "
+                    "overlap flags, and sparse/laser attention disabled";
+      return false;
+    }
+#endif
+  }
+
   // set same random seed for all worker
   device_.set_seed(random_seed);
 
@@ -118,6 +178,11 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
   DiTCacheConfig cache_config = parse_dit_cache_from_flags();
 
   auto model_type = loader->get_model_type();
+  if (qualified && model_type != "MiniMaxH3ModularPipeline") {
+    LOG(ERROR) << "MiniMax-H3 qualified execution requires a "
+                  "MiniMaxH3ModularPipeline model index";
+    return false;
+  }
 
   if (!ModelRegistry::has_dit_model_factory(model_type)) {
     LOG(WARNING) << "could not find model_type: " << model_type
@@ -164,9 +229,12 @@ folly::SemiFuture<bool> DiTWorkerImpl::init_model_async(
                         random_seed,
                         master_status,
                         promise]() mutable {
-    bool status =
-        this->init_model(model_weights_path, random_seed, master_status);
-    promise->setValue(status);
+    try {
+      promise->setValue(
+          this->init_model(model_weights_path, random_seed, master_status));
+    } catch (...) {
+      promise->setException(folly::exception_wrapper(std::current_exception()));
+    }
   });
   return future;
 }
@@ -188,7 +256,11 @@ std::optional<ForwardOutput> DiTWorkerImpl::step(
   DiTCache::get_instance().set_context({});
 
   const int32_t ret = device_.synchronize_default_stream();
-  CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
+  if (ret != 0) {
+    throw DiTForwardExecutionError(
+        {StatusCode::UNKNOWN,
+         "DiT device synchronization failed: " + std::to_string(ret)});
+  }
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 
   // DiT currently does not support DP, so is_driver() identifies global rank 0.
@@ -205,11 +277,15 @@ folly::SemiFuture<std::optional<ForwardOutput>> DiTWorkerImpl::step_async(
     const DiTForwardInput& inputs) {
   folly::Promise<std::optional<ForwardOutput>> promise;
   auto future = promise.getSemiFuture();
-  threadpool_.schedule(
-      [this, input = inputs, promise = std::move(promise)]() mutable {
-        auto output = this->step(input);
-        promise.setValue(output);
-      });
+  threadpool_.schedule([this,
+                        input = inputs,
+                        promise = std::move(promise)]() mutable {
+    try {
+      promise.setValue(this->step(input));
+    } catch (...) {
+      promise.setException(folly::exception_wrapper(std::current_exception()));
+    }
+  });
   return future;
 }
 
@@ -235,8 +311,12 @@ folly::SemiFuture<folly::Unit> DiTWorkerImpl::process_group_test_async() {
   folly::Promise<folly::Unit> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
-    this->process_group_test();
-    promise.setValue();
+    try {
+      this->process_group_test();
+      promise.setValue();
+    } catch (...) {
+      promise.setException(folly::exception_wrapper(std::current_exception()));
+    }
   });
   return future;
 }

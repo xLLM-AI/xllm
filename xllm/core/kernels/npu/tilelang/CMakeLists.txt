@@ -119,7 +119,7 @@ endfunction()
 #   NAME foo
 #   WRAPPER_SRCS foo_wrapper.cpp
 # )
-set(TILELANG_KERNEL_SRCS)
+set(TILELANG_KERNEL_SRCS h3_rainfusion_runtime.cpp)
 set(TILELANG_KERNEL_PRIVATE_DEFINITIONS)
 
 tilelang_register_runtime_kernel(
@@ -207,6 +207,18 @@ tilelang_register_runtime_kernel(
   WRAPPER_SRCS sfa_dcp_remap_wrapper.cpp
 )
 
+if(XLLM_ENABLE_H3_RAINFUSION)
+  tilelang_register_runtime_kernel(
+    NAME h3_ref2va_rf_v2_selector
+    WRAPPER_SRCS h3_ref2va_rf_v2_selector_wrapper.cpp
+  )
+  tilelang_register_runtime_kernel(
+    NAME h3_rainfusion_attention
+    WRAPPER_SRCS h3_rainfusion_attention_wrapper.cpp
+  )
+  list(APPEND TILELANG_KERNEL_PRIVATE_DEFINITIONS XLLM_ENABLE_H3_RAINFUSION)
+endif()
+
 cc_library(
   NAME
     tilelang_kernels
@@ -214,6 +226,7 @@ cc_library(
     dispatch_registry.h
     tilelang_ops_api.h
     mtp_prepare_next_draft.h
+    h3_rainfusion_runtime.h
   SRCS
     ${TILELANG_KERNEL_SRCS}
   DEPS

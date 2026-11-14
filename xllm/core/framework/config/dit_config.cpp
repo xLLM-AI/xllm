@@ -23,7 +23,7 @@ DEFINE_int32(max_requests_per_batch, 1, "Max number of request per batch.");
 DEFINE_string(dit_cache_policy,
               "TaylorSeer",
               "The policy of dit cache(e.g. None, FBCache, TaylorSeer, "
-              "FBCacheTaylorSeer, ResidualCache).");
+              "FBCacheTaylorSeer, ResidualCache, CacheDiT).");
 
 DEFINE_int64(dit_cache_warmup_steps, 0, "The number of warmup steps.");
 
@@ -53,9 +53,41 @@ DEFINE_int64(dit_cache_end_blocks,
              5,
              "The number of blocks to skip at the end.");
 
+DEFINE_int64(dit_cachedit_warmup_steps,
+             30,
+             "CacheDiT zero-based warmup steps.");
+
+DEFINE_double(dit_cachedit_residual_diff_threshold,
+              0.04,
+              "CacheDiT relative L1 threshold.");
+
+DEFINE_int64(dit_cachedit_max_cached_steps,
+             4,
+             "CacheDiT total hit limit; -1 means unlimited, 0 disables hits.");
+
+DEFINE_int64(dit_cachedit_max_consecutive_hits,
+             1,
+             "CacheDiT consecutive hit limit.");
+
+DEFINE_int64(dit_cachedit_front_blocks,
+             1,
+             "CacheDiT front blocks executed on every step.");
+
+DEFINE_int64(dit_cachedit_back_blocks,
+             0,
+             "CacheDiT back blocks executed on every step.");
+
+DEFINE_bool(dit_cachedit_linear_residual_prediction,
+            true,
+            "Enable CacheDiT linear residual prediction.");
+
 DEFINE_bool(dit_sp_communication_overlap,
             true,
             "Communication & Computation overlap for sequence parallel");
+
+DEFINE_bool(dit_sp_qkv_communication_overlap,
+            false,
+            "Use three QKV communication domains for qualified H3 TP2/SP8.");
 
 DEFINE_bool(dit_debug_print,
             false,
@@ -69,6 +101,31 @@ DEFINE_bool(dit_laser_attention_enabled,
 DEFINE_string(dit_h3_task_type,
               "fl2va",
               "MiniMax-H3 task type: fl2va or ref2va.");
+
+DEFINE_string(dit_h3_execution_profile,
+              "native",
+              "MiniMax-H3 execution profile: native or "
+              "a3_16card_tp2_u8_ref2va_v1 (qualification required).");
+
+DEFINE_bool(dit_h3_phase_timing,
+            false,
+            "Measure MiniMax-H3 pipeline phases with device synchronization at "
+            "phase boundaries; disable for end-to-end throughput runs. When "
+            "enabled, requires a single-request forward and exactly one "
+            "prompt_embed.");
+
+DEFINE_bool(
+    dit_h3_correctness_diagnostics,
+    false,
+    "Check qualified MiniMax-H3 block finite values and padded heads; "
+    "enables per-block device-to-host synchronization for correctness gates.");
+
+DEFINE_bool(
+    dit_h3_rainfusion_enabled,
+    false,
+    "Enable MiniMax-H3 RainFusion for the qualified A3 TP2xU8 profile; "
+    "defaults to sparse-middle-steps. Set XLLM_H3_RAINFUSION_POLICY "
+    "to sparse-middle-layers to sparsify the middle layers of every step.");
 
 DEFINE_int64(dit_generation_image_area_max,
              0,
@@ -135,10 +192,22 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_end_steps);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_start_blocks);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_end_blocks);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cachedit_warmup_steps);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cachedit_residual_diff_threshold);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cachedit_max_cached_steps);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cachedit_max_consecutive_hits);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cachedit_front_blocks);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cachedit_back_blocks);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cachedit_linear_residual_prediction);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sp_communication_overlap);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sp_qkv_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_laser_attention_enabled);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_task_type);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_execution_profile);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_phase_timing);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_correctness_diagnostics);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_rainfusion_enabled);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_generation_image_area_max);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_vae_image_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_enable_vae_tiling);
@@ -162,10 +231,22 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_end_steps);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_start_blocks);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_end_blocks);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cachedit_warmup_steps);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cachedit_residual_diff_threshold);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cachedit_max_cached_steps);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cachedit_max_consecutive_hits);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cachedit_front_blocks);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cachedit_back_blocks);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cachedit_linear_residual_prediction);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sp_communication_overlap);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sp_qkv_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_laser_attention_enabled);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_task_type);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_execution_profile);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_phase_timing);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_correctness_diagnostics);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_rainfusion_enabled);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_generation_image_area_max);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_vae_image_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_enable_vae_tiling);
@@ -207,13 +288,37 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_cache_end_blocks);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_cachedit_warmup_steps);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_cachedit_residual_diff_threshold);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_cachedit_max_cached_steps);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_cachedit_max_consecutive_hits);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_cachedit_front_blocks);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_cachedit_back_blocks);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_cachedit_linear_residual_prediction);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_sp_communication_overlap);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_sp_qkv_communication_overlap);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_debug_print);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_laser_attention_enabled);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_h3_task_type);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_h3_execution_profile);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_h3_phase_timing);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_h3_correctness_diagnostics);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_h3_rainfusion_enabled);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_generation_image_area_max);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

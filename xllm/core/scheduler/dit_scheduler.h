@@ -62,6 +62,10 @@ class DiTAsyncResponseProcessor final {
   bool disable_log_stats_ = false;
 };
 
+void fail_dit_requests(std::vector<std::shared_ptr<DiTRequest>>& requests,
+                       DiTAsyncResponseProcessor& processor,
+                       const Status& status);
+
 class DiTScheduler : public SchedulerBase {
  public:
   struct Options {

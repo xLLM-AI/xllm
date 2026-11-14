@@ -113,6 +113,20 @@ TEST(MMServiceUtilsTest, FillsBinaryMediaSource) {
   EXPECT_EQ(payload, "prefixmedia");
 }
 
+TEST(MMServiceUtilsTest, EncodedMediaWithNulPreservesBinaryAndBase64Bytes) {
+  const std::string bytes("A\0B", 3);
+  proto::MediaSource source;
+  std::string payload = "prefix";
+  fill_media_source(bytes, "video", true, source, payload);
+  EXPECT_EQ(source.binary().offset(), 6u);
+  EXPECT_EQ(source.binary().length(), 3u);
+  EXPECT_EQ(payload.substr(6), bytes);
+  payload.clear();
+  fill_media_source(bytes, "video", false, source, payload);
+  EXPECT_EQ(source.base64(), "QQBC");
+  EXPECT_FALSE(source.has_binary());
+}
+
 TEST(MMServiceUtilsTest, RejectsInvalidMessageContentType) {
   proto::MMChatRequest request;
   proto::MMInputData* content = request.add_messages()->add_content();

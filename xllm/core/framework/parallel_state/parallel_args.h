@@ -20,6 +20,7 @@ limitations under the License.
 #include <string>
 
 #include "core/common/macros.h"
+#include "core/framework/parallel_state/dit_sp_qkv_domains.h"
 #include "core/framework/parallel_state/process_group.h"
 
 namespace xllm {
@@ -229,6 +230,7 @@ struct ParallelArgs {
   // ProcessGroups for DiT models
   ProcessGroup* dit_tp_group_ = nullptr;
   ProcessGroup* dit_sp_group_ = nullptr;
+  DiTSpQkvDomains dit_sp_qkv_domains_;
   ProcessGroup* dit_cfg_group_ = nullptr;
   ProcessGroup* dit_dp_group_ = nullptr;
   ProcessGroup* dit_vae_group_ = nullptr;

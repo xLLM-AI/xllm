@@ -57,7 +57,7 @@ def prepend_pythonpath(env: dict[str, str], path: str) -> None:
 
 def prepare_tilelang_import(tilelang_root: str | Path | None = None) -> Path:
     tl_root = Path(tilelang_root).resolve() if tilelang_root is not None else resolve_tilelang_root()
-    import_path = tl_root.parent
+    import_path = tl_root if (tl_root / "tilelang" / "__init__.py").is_file() else tl_root.parent
     source_root = repo_root()
     import_paths = [
         str(source_root),

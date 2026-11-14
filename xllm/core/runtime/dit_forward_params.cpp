@@ -168,7 +168,7 @@ bool DiTForwardInput::from_proto(const proto::DiTForwardInput& proto_input) {
 }
 
 bool DiTForwardOutput::to_proto(proto::DiTForwardOutput* proto_output) const {
-  if (proto_output == nullptr) {
+  if (proto_output == nullptr || !valid_dit_output_mode(*this)) {
     return false;
   }
 
@@ -196,11 +196,32 @@ bool DiTForwardOutput::to_proto(proto::DiTForwardOutput* proto_output) const {
   }
   encoded_output.mutable_text_output()->Add(text_output.begin(),
                                             text_output.end());
+  for (const DiTEncodedMedia& media : encoded_media) {
+    if (!valid_dit_encoded_media(media)) {
+      return false;
+    }
+    auto* encoded = encoded_output.add_encoded_media();
+    encoded->set_data(media.data);
+    encoded->set_mime_type(media.mime_type);
+    encoded->set_container(media.container);
+    encoded->set_width(media.width);
+    encoded->set_height(media.height);
+    encoded->set_num_frames(media.num_frames);
+    encoded->set_fps(media.fps);
+    encoded->set_audio_sample_rate(media.audio_sample_rate);
+    encoded->set_audio_channels(media.audio_channels);
+  }
   proto_output->Swap(&encoded_output);
   return true;
 }
 
 bool DiTForwardOutput::from_proto(const proto::DiTForwardOutput& proto_output) {
+  if (proto_output.encoded_media_size() > 0 &&
+      (proto_output.tensors().tensors_size() > 0 ||
+       proto_output.audio_tensors().tensors_size() > 0 ||
+       proto_output.text_output_size() > 0)) {
+    return false;
+  }
   DiTForwardOutput decoded_output;
   const auto& proto_tensors = proto_output.tensors().tensors();
   decoded_output.tensors.reserve(proto_tensors.size());
@@ -224,6 +245,23 @@ bool DiTForwardOutput::from_proto(const proto::DiTForwardOutput& proto_output) {
   }
   decoded_output.text_output.assign(proto_output.text_output().begin(),
                                     proto_output.text_output().end());
+  decoded_output.encoded_media.reserve(proto_output.encoded_media_size());
+  for (const auto& encoded : proto_output.encoded_media()) {
+    DiTEncodedMedia media;
+    media.data = encoded.data();
+    media.mime_type = encoded.mime_type();
+    media.container = encoded.container();
+    media.width = encoded.width();
+    media.height = encoded.height();
+    media.num_frames = encoded.num_frames();
+    media.fps = encoded.fps();
+    media.audio_sample_rate = encoded.audio_sample_rate();
+    media.audio_channels = encoded.audio_channels();
+    if (!valid_dit_encoded_media(media)) {
+      return false;
+    }
+    decoded_output.encoded_media.emplace_back(std::move(media));
+  }
   *this = std::move(decoded_output);
   return true;
 }

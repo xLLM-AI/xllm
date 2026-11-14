@@ -51,10 +51,22 @@ class DiTConfig final {
          "dit_cache_end_steps",
          "dit_cache_start_blocks",
          "dit_cache_end_blocks",
+         "dit_cachedit_warmup_steps",
+         "dit_cachedit_residual_diff_threshold",
+         "dit_cachedit_max_cached_steps",
+         "dit_cachedit_max_consecutive_hits",
+         "dit_cachedit_front_blocks",
+         "dit_cachedit_back_blocks",
+         "dit_cachedit_linear_residual_prediction",
          "dit_sp_communication_overlap",
+         "dit_sp_qkv_communication_overlap",
          "dit_debug_print",
          "dit_laser_attention_enabled",
          "dit_h3_task_type",
+         "dit_h3_execution_profile",
+         "dit_h3_phase_timing",
+         "dit_h3_correctness_diagnostics",
+         "dit_h3_rainfusion_enabled",
          "dit_generation_image_area_max",
          "dit_vae_image_size",
          "dit_enable_vae_tiling",
@@ -88,13 +100,36 @@ class DiTConfig final {
 
   PROPERTY(int64_t, dit_cache_end_blocks) = 5;
 
+  PROPERTY(int64_t, dit_cachedit_warmup_steps) = 30;
+
+  PROPERTY(double, dit_cachedit_residual_diff_threshold) = 0.04;
+
+  PROPERTY(int64_t, dit_cachedit_max_cached_steps) = 4;
+
+  PROPERTY(int64_t, dit_cachedit_max_consecutive_hits) = 1;
+
+  PROPERTY(int64_t, dit_cachedit_front_blocks) = 1;
+
+  PROPERTY(int64_t, dit_cachedit_back_blocks) = 0;
+
+  PROPERTY(bool, dit_cachedit_linear_residual_prediction) = true;
+
   PROPERTY(bool, dit_sp_communication_overlap) = true;
+
+  PROPERTY(bool, dit_sp_qkv_communication_overlap) = false;
 
   PROPERTY(bool, dit_debug_print) = false;
 
   PROPERTY(bool, dit_laser_attention_enabled) = false;
 
   PROPERTY(std::string, dit_h3_task_type) = "fl2va";
+
+  PROPERTY(std::string, dit_h3_execution_profile) = "native";
+
+  PROPERTY(bool, dit_h3_phase_timing) = false;
+
+  PROPERTY(bool, dit_h3_correctness_diagnostics) = false;
+  PROPERTY(bool, dit_h3_rainfusion_enabled) = false;
 
   PROPERTY(int64_t, dit_generation_image_area_max) = 0;
 

@@ -104,9 +104,14 @@ target_link_libraries(forward_input_factory_test
                       $<$<BOOL:${USE_NPU}>:nnopbase>)
 
 foreach(factory IN ITEMS vlm dit)
+  set(factory_cpu_only)
+  if(factory STREQUAL "dit")
+    set(factory_cpu_only CPU_ONLY)
+  endif()
   cc_test(
     NAME
       ${factory}_forward_input_factory_test
+    ${factory_cpu_only}
     SRCS
       ${factory}_forward_input_factory_test.cpp
     DEPS

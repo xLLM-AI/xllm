@@ -7,6 +7,7 @@ cc_library(
     download_headers.h
     mm_batch_data.h
     mm_codec.h
+    dit_media_encoder.h
     mm_data.h
     mm_data_item.h
     mm_visitor.h
@@ -21,6 +22,7 @@ cc_library(
     download_headers.cpp
     mm_batch_data.cpp
     mm_codec.cpp
+    dit_media_encoder.cpp
     mm_data.cpp
     mm_data_item.cpp
     mm_visitor.cpp

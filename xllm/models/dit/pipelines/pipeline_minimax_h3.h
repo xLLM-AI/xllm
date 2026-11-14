@@ -22,9 +22,13 @@ limitations under the License.
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,18 +39,31 @@ limitations under the License.
 #include "core/framework/model/dit_model_params.h"
 #include "core/framework/model_context/dit_model_context.h"
 #include "core/framework/model_loader/dit_model_loader.h"
+#include "core/framework/request/minimax_h3_conditioning.h"
+#include "core/runtime/dit_forward_params.h"
 #if defined(USE_NPU)
+#include <acl/acl.h>
+
 #include "core/layers/npu/loader/rolling_weight_buffer.h"
+#include "core/platform/device.h"
 #endif
 #include "models/dit/autoencoders/autoencoder_kl_minimax_h3_audio.h"
 #include "models/dit/autoencoders/autoencoder_kl_minimax_h3_video.h"
 #include "models/dit/processors/minimax_h3_audio_processor.h"
 #include "models/dit/processors/minimax_h3_visual_processor.h"
 #include "models/dit/schedulers/minimax_h3_scheduler.h"
+#include "models/dit/transformers/minimax_h3_qualified_denoiser.h"
 #include "models/dit/transformers/transformer_minimax_h3.h"
 #if defined(USE_NPU)
 #include "models/dit/utils/dit_block_weight_manager.h"
 #endif
+#include "models/dit/utils/minimax_h3_backend_selection.h"
+#include "models/dit/utils/minimax_h3_execution_metrics.h"
+#include "models/dit/utils/minimax_h3_phase_timing.h"
+#include "models/dit/utils/minimax_h3_qualified_execution_context.h"
+#include "models/dit/utils/minimax_h3_qualified_vae.h"
+#include "models/dit/utils/minimax_h3_rainfusion_observer.h"
+#include "models/dit/utils/minimax_h3_rainfusion_resources.h"
 #include "models/dit/utils/util.h"
 #include "models/model_registry.h"
 
@@ -84,6 +101,96 @@ struct MiniMaxH3TimestepLayout {
 class MiniMaxH3PipelineImpl final : public torch::nn::Module {
  public:
   explicit MiniMaxH3PipelineImpl(const DiTModelContext& context)
+      : MiniMaxH3PipelineImpl(context, select_production_construction(), {}) {}
+
+  static std::unique_ptr<MiniMaxH3PipelineImpl> create_reference_for_test(
+      const DiTModelContext& context,
+      H3QualifiedDiagnostics diagnostics = {}) {
+    return std::unique_ptr<MiniMaxH3PipelineImpl>(
+        new MiniMaxH3PipelineImpl(context,
+                                  H3BackendConstruction::REFERENCE_TEST,
+                                  std::move(diagnostics)));
+  }
+
+  // Explicit test factory selects the same resident constructor and load path
+  // as the qualified service; it never substitutes the world-one backend.
+  static std::unique_ptr<MiniMaxH3PipelineImpl> create_qualified_for_test(
+      const DiTModelContext& context,
+      H3QualifiedDiagnostics diagnostics = {}) {
+    CHECK(select_production_construction() == H3BackendConstruction::A3_16CARD);
+    return std::unique_ptr<MiniMaxH3PipelineImpl>(new MiniMaxH3PipelineImpl(
+        context, H3BackendConstruction::A3_16CARD, std::move(diagnostics)));
+  }
+
+  H3QualifiedRequest prepare_qualified_for_test(const DiTModelParams& input) {
+    CHECK(construction_ == H3BackendConstruction::A3_16CARD);
+    torch::NoGradGuard no_grad;
+    return prepare_qualified_request(input);
+  }
+
+  H3QualifiedRequest denoise_qualified_for_test(H3QualifiedRequest request,
+                                                int64_t steps = 49) {
+    CHECK(construction_ == H3BackendConstruction::A3_16CARD);
+    CHECK(steps == 1 || steps == 49);
+    torch::NoGradGuard no_grad;
+    denoise_qualified_request(request, nullptr, steps);
+    return request;
+  }
+
+  std::pair<torch::Tensor, torch::Tensor> qualified_latents_for_test(
+      const H3QualifiedRequest& request) {
+    CHECK(construction_ == H3BackendConstruction::A3_16CARD);
+    return {unpatchify_video(generated_rows(request.video_rows,
+                                            request.condition_video_rows),
+                             37,
+                             48,
+                             84),
+            unpatchify_audio(generated_rows(request.audio_rows,
+                                            request.condition_audio_rows),
+                             207)};
+  }
+
+  bool qualified_owns_vaes_for_test() const {
+    CHECK(construction_ == H3BackendConstruction::A3_16CARD);
+    return static_cast<bool>(vae_) && static_cast<bool>(audio_vae_);
+  }
+
+  DiTForwardOutput qualified_owner_phase_for_test(
+      const std::function<DiTForwardOutput()>& owner_work) {
+    CHECK(construction_ == H3BackendConstruction::A3_16CARD);
+    return run_qualified_owner_output(owner_work);
+  }
+
+  void qualified_phase_for_test(const std::function<void()>& work) {
+    CHECK(construction_ == H3BackendConstruction::A3_16CARD);
+    run_qualified_phase("injected failure", work);
+  }
+
+  H3QualifiedRequest prepare_reference_for_test(
+      const DiTModelParams& input,
+      MiniMaxH3ReferenceEncodeTrace* trace = nullptr) {
+    CHECK(construction_ == H3BackendConstruction::REFERENCE_TEST);
+    torch::NoGradGuard no_grad;
+    return prepare_qualified_request(input, trace);
+  }
+
+  H3QualifiedRequest denoise_reference_for_test(H3QualifiedRequest request) {
+    CHECK(construction_ == H3BackendConstruction::REFERENCE_TEST);
+    torch::NoGradGuard no_grad;
+    denoise_qualified_request(request);
+    return request;
+  }
+
+ private:
+  static H3BackendConstruction select_production_construction() {
+    return select_h3_production_construction(
+        DiTConfig::get_instance().dit_h3_execution_profile(),
+        LoadConfig::get_instance().enable_rolling_load());
+  }
+
+  MiniMaxH3PipelineImpl(const DiTModelContext& context,
+                        H3BackendConstruction construction,
+                        H3QualifiedDiagnostics diagnostics)
       : options_(context.get_tensor_options()),
         tp_group_(context.get_parallel_args().dit_tp_group_),
         vae_group_(context.get_parallel_args().dit_vae_group_),
@@ -91,11 +198,120 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         is_vae_parallel_enabled_(vae_group_ != nullptr &&
                                  vae_group_->world_size() > 1),
         is_video_vae_worker_(is_vae_parallel_enabled_ || is_tp_driver_),
-        task_type_(DiTConfig::get_instance().dit_h3_task_type()) {
+        task_type_(DiTConfig::get_instance().dit_h3_task_type()),
+        construction_(construction) {
     CHECK(task_type_ == "fl2va" || task_type_ == "ref2va")
         << "MiniMax-H3 dit_h3_task_type must be fl2va or ref2va";
+    if (context.get_dit_config().selected_policy == PolicyType::CACHE_DIT &&
+        (construction_ != H3BackendConstruction::A3_16CARD ||
+         LoadConfig::get_instance().enable_rolling_load())) {
+      throw std::invalid_argument(
+          "H3 CacheDiT requires qualified resident execution without rolling "
+          "load");
+    }
+    const DiTConfig& config = DiTConfig::get_instance();
+    const bool qkv_overlap = config.dit_sp_qkv_communication_overlap();
+    if (qkv_overlap && construction_ != H3BackendConstruction::A3_16CARD) {
+      throw std::invalid_argument(
+          "H3 three-domain QKV requires qualified execution");
+    }
+    if (construction_ == H3BackendConstruction::A3_16CARD &&
+        qkv_overlap != config.dit_sp_communication_overlap()) {
+      throw std::invalid_argument(
+          "H3 qualified QKV overlap flags must be paired");
+    }
+    qualified_rainfusion_policy_ =
+        resolve_h3_rainfusion_policy(config.dit_h3_rainfusion_enabled(),
+                                     std::getenv(kH3RainfusionPolicyEnv));
+    if (qualified_rainfusion_policy_.enabled()) {
+      if (construction_ != H3BackendConstruction::A3_16CARD) {
+        throw std::invalid_argument(
+            "H3 RainFusion requires the qualified A3 TP2xU8 profile");
+      }
+#if defined(USE_NPU)
+      qualified_rainfusion_resources_ =
+          std::make_unique<H3QualifiedRainfusionResources>(options_.device());
+#else
+      throw std::invalid_argument("H3 RainFusion requires the NPU backend");
+#endif
+    }
+    if (construction_ == H3BackendConstruction::A3_16CARD) {
+      const auto& policy = qualified_rainfusion_policy_;
+      LOG(INFO) << "H3 RainFusion policy: rank="
+                << context.get_parallel_args().rank()
+                << " policy=" << policy.name << " steps=[" << policy.step_begin
+                << "," << policy.step_end << ") layers=[" << policy.layer_begin
+                << "," << policy.layer_end << ")";
+    }
+    phase_timing_enabled_ = DiTConfig::get_instance().dit_h3_phase_timing();
+    const ParallelArgs& timing_parallel = context.get_parallel_args();
+    phase_timing_metadata_.profile =
+        construction_ == H3BackendConstruction::NATIVE
+            ? "native"
+            : (construction_ == H3BackendConstruction::REFERENCE_TEST
+                   ? "reference_test"
+                   : "a3_16card_tp2_u8_ref2va_v1");
+    phase_timing_metadata_.global_rank = timing_parallel.rank();
+    phase_timing_metadata_.world_size = timing_parallel.world_size();
+    phase_timing_metadata_.tp_size = timing_parallel.tp_size();
+    phase_timing_metadata_.sp_size = timing_parallel.sp_size();
+    diagnostics.verify_intermediates =
+        diagnostics.verify_intermediates ||
+        DiTConfig::get_instance().dit_h3_correctness_diagnostics();
     const ModelArgs& transformer_args = context.get_model_args("transformer");
     const ModelArgs& vae_args = context.get_model_args("vae");
+    if (construction_ != H3BackendConstruction::NATIVE) {
+      CHECK_EQ(task_type_, "ref2va");
+      const ParallelArgs& parallel = context.get_parallel_args();
+      qualified_cache_config_ = context.get_dit_config();
+      qualified_parallel_args_ = parallel;
+      if (construction_ == H3BackendConstruction::REFERENCE_TEST) {
+        CHECK_EQ(parallel.world_size(), 1);
+        CHECK_EQ(parallel.rank(), 0);
+        CHECK_EQ(parallel.vae_size(), 1);
+        qualified_reference_encode_owner_ = true;
+        qualified_video_vae_worker_ = true;
+        qualified_audio_decode_owner_ = true;
+        qualified_output_owner_ = true;
+      } else {
+        CHECK(minimax_h3_topology_is_valid({parallel.world_size(),
+                                            parallel.dp_size(),
+                                            parallel.tp_size(),
+                                            parallel.sp_size(),
+                                            parallel.cfg_size(),
+                                            parallel.vae_size(),
+                                            parallel.text_encoder_tp_size()}));
+        CHECK(parallel.process_group_ != nullptr);
+        CHECK(parallel.dit_tp_group_ != nullptr);
+        CHECK(parallel.dit_sp_group_ != nullptr);
+        CHECK_EQ(parallel.process_group_->world_size(), 16);
+        CHECK_EQ(parallel.dit_tp_group_->world_size(), 2);
+        CHECK_EQ(parallel.dit_sp_group_->world_size(), 8);
+        CHECK_EQ(parallel.process_group_->rank(), parallel.rank());
+        CHECK_EQ(parallel.dit_tp_group_->rank(), parallel.rank() % 2);
+        CHECK_EQ(parallel.dit_sp_group_->rank(), parallel.rank() / 2);
+        qualified_world_group_ = parallel.process_group_;
+        const MiniMaxH3QualifiedVaePlan vae_plan =
+            minimax_h3_qualified_vae_plan(
+                parallel.world_size(), parallel.rank(), parallel.vae_size());
+        qualified_reference_encode_owner_ = vae_plan.reference_encode_owner;
+        qualified_video_vae_worker_ = vae_plan.video_vae_worker;
+        qualified_collaborative_video_decode_ =
+            vae_plan.collaborative_video_decode;
+        qualified_audio_decode_owner_ = vae_plan.audio_decode_owner;
+        qualified_output_owner_ = vae_plan.output_owner;
+        if (qualified_collaborative_video_decode_) {
+          CHECK(parallel.dit_vae_group_ != nullptr);
+          CHECK_EQ(parallel.dit_vae_group_->world_size(),
+                   kMiniMaxH3QualifiedParallelVaeSize);
+          CHECK_EQ(parallel.dit_vae_group_->rank(), parallel.rank());
+        }
+      }
+      qualified_shape_ = h3_qualified_shape_from_args(transformer_args);
+      // Reserve the phase status before requests; initialization failures are
+      // propagated by the worker initialization protocol.
+      qualified_phase_status_ = torch::ones({1}, options_.dtype(torch::kInt32));
+    }
     const int32_t vae_size = context.get_parallel_args().vae_size();
     CHECK_GT(vae_size, 0);
     CHECK(vae_size == 1 || vae_group_ != nullptr)
@@ -122,7 +338,10 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     CHECK_GT(text_hidden_size_, 0);
     CHECK_GT(vae_spatial_ratio_, 0);
     CHECK_GT(vae_temporal_ratio_, 0);
-    LOG(INFO) << "Initializing MiniMax-H3 " << task_type_ << " native pipeline";
+    LOG(INFO) << "Initializing MiniMax-H3 " << task_type_
+              << (construction_ == H3BackendConstruction::NATIVE
+                      ? " native pipeline"
+                      : " qualified reference pipeline");
     visual_processor_ =
         register_module("visual_processor",
                         MiniMaxH3VisualProcessor(
@@ -132,19 +351,47 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         "audio_processor",
         MiniMaxH3AudioProcessor(context.get_model_context("audio_vae"),
                                 /*channel_count=*/audio_channels_));
-    transformer_ =
-        register_module("transformer", MiniMaxH3Transformer3DModel(context));
-    if (is_video_vae_worker_) {
-      vae_ = register_module(
-          "vae", AutoencoderKLMiniMaxH3(context.get_model_context("vae")));
+    if (construction_ == H3BackendConstruction::NATIVE) {
+      transformer_ =
+          register_module("transformer", MiniMaxH3Transformer3DModel(context));
+    } else if (construction_ == H3BackendConstruction::REFERENCE_TEST) {
+      qualified_denoiser_ = std::make_unique<H3QualifiedDenoiser>(
+          options_, std::move(diagnostics));
+    } else {
+      qualified_denoiser_ = std::make_unique<H3QualifiedDenoiser>(
+          context.get_parallel_args().dit_tp_group_,
+          context.get_parallel_args().dit_sp_group_,
+          options_,
+          std::move(diagnostics),
+          context.get_parallel_args().dit_sp_qkv_domains_,
+          qkv_overlap);
     }
-    if (is_tp_driver_) {
+    if (construction_ == H3BackendConstruction::NATIVE
+            ? is_video_vae_worker_
+            : qualified_video_vae_worker_) {
+      ProcessGroup* decoder_tp_group = nullptr;
+      if (qualified_collaborative_video_decode_) {
+        decoder_tp_group = context.get_parallel_args().dit_tp_group_;
+      }
+      vae_ = register_module(
+          "vae",
+          AutoencoderKLMiniMaxH3(context.get_model_context("vae"),
+                                 qualified_collaborative_video_decode_,
+                                 /*enable_reference_encoder=*/
+                                 !qualified_collaborative_video_decode_ ||
+                                     qualified_reference_encode_owner_,
+                                 decoder_tp_group));
+    }
+    if (construction_ == H3BackendConstruction::NATIVE
+            ? is_tp_driver_
+            : qualified_audio_decode_owner_) {
       audio_vae_ = register_module(
           "audio_vae",
           AutoencoderKLMiniMaxH3Audio(context.get_model_context("audio_vae")));
     }
   }
 
+ public:
 #if defined(USE_NPU)
   ~MiniMaxH3PipelineImpl() override {
     if (use_rolling_load_) {
@@ -160,7 +407,30 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
 #endif
 
   DiTForwardOutput forward(const DiTModelParams& input) {
+    if (construction_ == H3BackendConstruction::NATIVE) {
+      return forward_native(input);
+    }
+    return forward_qualified(input);
+  }
+
+  void load_model(std::unique_ptr<DiTModelLoader> loader) {
+    H3PhaseTimer timer = make_phase_timer({}, 0);
+    timer.start(H3TimingPhase::LOAD);
+    if (construction_ == H3BackendConstruction::NATIVE) {
+      load_native(std::move(loader));
+    } else {
+      load_qualified(std::move(loader));
+    }
+    timer.finish();
+  }
+
+ private:
+  DiTForwardOutput forward_native(const DiTModelParams& input) {
     torch::NoGradGuard no_grad;
+    H3PhaseTimer timer = make_phase_timer(
+        phase_timing_enabled_ ? h3_execution_request_id(input) : std::string(),
+        input.generation_params.num_inference_steps);
+    timer.start(H3TimingPhase::PREPARE);
     CHECK_EQ(input.batch_size, 1)
         << "MiniMax-H3 native T2VA currently supports batch_size=1";
     // The request boundary already rejects num_videos_per_prompt != 1; this
@@ -316,6 +586,7 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     const MiniMaxH3TransformerConditioning conditioning =
         transformer_->prepare_conditioning(prompt_embeds, layout.position_ids);
 
+    timer.advance(H3TimingPhase::DENOISE);
     const int64_t num_inference_steps = generation_params.num_inference_steps;
     scheduler_.set_timesteps(num_inference_steps, options_.device());
     audio_scheduler_.set_timesteps(num_inference_steps, options_.device());
@@ -383,7 +654,9 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
 
     // Release denoising history before VAE decoding allocates its activations.
     DiTCache::get_instance().set_context({});
+    timer.advance(H3TimingPhase::DECODE);
     if (!is_video_vae_worker_) {
+      timer.finish();
       return DiTForwardOutput();
     }
 
@@ -412,6 +685,7 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
 
     torch::Tensor video = vae_->decode_to_pixels(video_latent);
     if (!is_tp_driver_) {
+      timer.finish();
       return DiTForwardOutput();
     }
 
@@ -430,10 +704,11 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     DiTForwardOutput output;
     output.tensors = {video};
     output.audio_tensors = {audio};
+    timer.finish();
     return output;
   }
 
-  void load_model(std::unique_ptr<DiTModelLoader> loader) {
+  void load_native(std::unique_ptr<DiTModelLoader> loader) {
     CHECK(loader != nullptr) << "MiniMax-H3 loader must not be null";
     LOG(INFO) << "MiniMax-H3 " << task_type_ << " loading model from "
               << loader->model_root_path();
@@ -476,6 +751,558 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   }
 
  private:
+  void load_qualified(std::unique_ptr<DiTModelLoader> loader) {
+    CHECK(loader != nullptr);
+    CHECK(loader->has_component("transformer_ref"));
+    CHECK(loader->has_component("vae"));
+    CHECK(loader->has_component("audio_vae"));
+    qualified_denoiser_->load(std::make_unique<H3QualifiedWeightSource>(
+        loader->take_component_loader("transformer_ref"), qualified_shape_));
+    if (qualified_collaborative_video_decode_) {
+      run_qualified_phase("parallel VAE HBM preflight",
+                          [&] { preflight_qualified_parallel_vae_hbm(); });
+      run_qualified_phase("parallel video VAE load", [&] {
+        vae_->load_model(loader->take_component_loader("vae"));
+        vae_->to(options_.device(), torch::kFloat32);
+      });
+      run_qualified_phase("audio VAE load", [&] {
+        if (qualified_audio_decode_owner_) {
+          audio_vae_->load_model(loader->take_component_loader("audio_vae"));
+          audio_vae_->to(options_.device(), torch::kFloat32);
+        }
+      });
+    } else if (qualified_output_owner_) {
+      vae_->load_model(loader->take_component_loader("vae"));
+      audio_vae_->load_model(loader->take_component_loader("audio_vae"));
+      vae_->to(options_.device(), torch::kFloat32);
+      audio_vae_->to(options_.device(), torch::kFloat32);
+    }
+    if (loader->has_component("scheduler")) {
+      scheduler_.load_model(loader->take_component_loader("scheduler"));
+    }
+    if (loader->has_component("audio_scheduler")) {
+      audio_scheduler_.load_model(
+          loader->take_component_loader("audio_scheduler"));
+    }
+  }
+
+  void preflight_qualified_parallel_vae_hbm() const {
+    if (!qualified_collaborative_video_decode_ || !vae_) {
+      throw std::logic_error(
+          "MiniMax-H3 parallel VAE HBM preflight has no video VAE worker");
+    }
+#if defined(USE_NPU)
+    if (options_.device().is_cpu()) {
+      throw std::runtime_error(
+          "MiniMax-H3 parallel VAE requires an Ascend NPU device");
+    }
+    Device device(options_.device());
+    device.set_device();
+    const int64_t available_bytes = device.free_memory();
+    const int64_t video_weight_bytes = vae_->resident_module_bytes();
+    const int64_t audio_weight_bytes =
+        qualified_audio_decode_owner_ ? audio_vae_->resident_module_bytes() : 0;
+    if (video_weight_bytes >
+        std::numeric_limits<int64_t>::max() - audio_weight_bytes) {
+      throw std::runtime_error(
+          "MiniMax-H3 parallel VAE resident byte count overflow");
+    }
+    const int64_t resident_weight_bytes =
+        video_weight_bytes + audio_weight_bytes;
+    const int64_t decode_reserve_bytes =
+        minimax_h3_parallel_vae_decode_reserve_bytes(qualified_output_owner_);
+    if (!minimax_h3_parallel_vae_hbm_preflight_passes(
+            available_bytes, resident_weight_bytes, decode_reserve_bytes)) {
+      throw std::runtime_error(
+          "MiniMax-H3 parallel VAE HBM preflight failed: available=" +
+          std::to_string(available_bytes) +
+          " resident_weights=" + std::to_string(resident_weight_bytes) +
+          " video_weights=" + std::to_string(video_weight_bytes) +
+          " audio_weights=" + std::to_string(audio_weight_bytes) +
+          " decode_reserve=" + std::to_string(decode_reserve_bytes) +
+          " owner=" + std::to_string(qualified_output_owner_));
+    }
+    LOG(INFO) << "MiniMax-H3 parallel VAE HBM preflight passed: available="
+              << available_bytes
+              << " resident_weights=" << resident_weight_bytes
+              << " video_weights=" << video_weight_bytes
+              << " audio_weights=" << audio_weight_bytes
+              << " decode_reserve=" << decode_reserve_bytes
+              << " owner=" << qualified_output_owner_;
+#else
+    throw std::runtime_error("MiniMax-H3 parallel VAE requires an NPU build");
+#endif
+  }
+
+  // Decode-entry re-check: the load-time preflight cannot see the denoise pool
+  // high-water, so it false-negatively passes (HBM-C C-1). Re-validate free HBM
+  // at decode entry, inside run_qualified_phase so a shortfall fails closed on
+  // all ranks via the world16 allreduce BEFORE any tile is decoded. Admission
+  // is role-aware: a nonowner hard-fails below its 1.5 GiB reserve (its new
+  // risk surface); the owner only logs available vs the 4.75 GiB reserve
+  // because aclrt raw free excludes the torch allocator pool reuse that lets
+  // rank0 survive larger peaks (see
+  // minimax_h3_parallel_vae_decode_entry_hard_fails).
+  void validate_qualified_parallel_vae_decode_hbm() const {
+    if (!qualified_collaborative_video_decode_) {
+      return;
+    }
+#if defined(USE_NPU)
+    if (options_.device().is_cpu()) {
+      throw std::runtime_error(
+          "MiniMax-H3 parallel VAE requires an Ascend NPU device");
+    }
+    Device device(options_.device());
+    device.set_device();
+    const int64_t available_bytes = device.free_memory();
+    const int64_t decode_reserve_bytes =
+        minimax_h3_parallel_vae_decode_reserve_bytes(qualified_output_owner_);
+    if (minimax_h3_parallel_vae_decode_entry_hard_fails(
+            qualified_output_owner_, available_bytes, decode_reserve_bytes)) {
+      throw std::runtime_error(
+          "MiniMax-H3 parallel VAE decode-time HBM guard failed: available=" +
+          std::to_string(available_bytes) +
+          " required_reserve=" + std::to_string(decode_reserve_bytes) +
+          " owner=" + std::to_string(qualified_output_owner_));
+    }
+    if (available_bytes < decode_reserve_bytes) {
+      LOG(WARNING) << "MiniMax-H3 parallel VAE decode-time HBM below owner"
+                   << " reserve (log-only admission): available="
+                   << available_bytes << " reserve=" << decode_reserve_bytes;
+      return;
+    }
+    LOG(INFO) << "MiniMax-H3 parallel VAE decode-time HBM guard passed:"
+              << " available=" << available_bytes
+              << " reserve=" << decode_reserve_bytes
+              << " owner=" << qualified_output_owner_;
+#else
+    throw std::runtime_error(
+        "MiniMax-H3 parallel VAE decode-time guard requires an NPU build");
+#endif
+  }
+
+  // This is an explicit cross-rank failure boundary. After an owner or
+  // follower allocation fails, every rank sees failure before the broadcast.
+  void run_qualified_phase(const std::string& phase,
+                           const std::function<void()>& work) {
+    qualified_phase_status_.fill_(1);
+    try {
+      work();
+    } catch (const std::exception& error) {
+      LOG(ERROR) << "MiniMax-H3 qualified " << phase << ": " << error.what();
+      qualified_phase_status_.zero_();
+    } catch (...) {
+      LOG(ERROR) << "MiniMax-H3 qualified " << phase
+                 << ": unknown non-standard exception";
+      qualified_phase_status_.zero_();
+    }
+    int32_t participants = 1;
+    if (qualified_world_group_ != nullptr) {
+      participants = qualified_world_group_->world_size();
+      qualified_world_group_->allreduce(qualified_phase_status_);
+    }
+    if (qualified_phase_status_.item<int32_t>() != participants) {
+      throw DiTForwardExecutionError(
+          Status(StatusCode::UNKNOWN,
+                 "MiniMax-H3 qualified " + phase +
+                     " failed; see the failing rank log"));
+    }
+  }
+
+  struct H3QualifiedShapePlan {
+    H3TargetLatents target;
+    int64_t reference_latent_t = 1;
+    int64_t reference_latent_h = 0;
+    int64_t reference_latent_w = 0;
+    int64_t reference_canvas_h = 0;
+    int64_t reference_canvas_w = 0;
+  };
+
+  H3QualifiedShapePlan derive_qualified_shape(
+      const DiTModelParams& input) const {
+    const DiTGenerationParams& params = input.generation_params;
+    if (input.batch_size != 1 || params.num_videos_per_prompt != 1) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified input requires batch1 and one video per "
+          "prompt");
+    }
+    if (params.audio_sampling_rate != audio_processor_->sampling_rate()) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified sampling_rate must match the audio VAE config");
+    }
+    if (params.num_inference_steps != 50) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified input requires the frozen 50-point schedule");
+    }
+    if (!std::isfinite(params.video_fps) || params.video_fps <= 0.0) {
+      throw std::invalid_argument("MiniMax-H3 fps must be finite and positive");
+    }
+    if (input.media_sources.size() != 1) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified input requires exactly one reference");
+    }
+    H3QualifiedShapePlan plan;
+    if (params.height <= 0 || params.width <= 0 || params.num_frames <= 0) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified request shape must be positive");
+    }
+    const int64_t height =
+        visual_processor_->align_canvas_pixels(params.height);
+    const int64_t width = visual_processor_->align_canvas_pixels(params.width);
+    const int64_t num_frames =
+        visual_processor_->align_target_frames(params.num_frames);
+    const double duration = static_cast<double>(num_frames) / params.video_fps;
+    if (duration < min_duration_seconds_ || duration > max_duration_seconds_) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified duration is outside the supported 5-15s range");
+    }
+    plan.target.latent_t = visual_processor_->encode_latent_frames(num_frames);
+    plan.target.latent_h = height / vae_spatial_ratio_;
+    plan.target.latent_w = width / vae_spatial_ratio_;
+    plan.target.audio_t =
+        audio_processor_->audio_latents_for_video(num_frames, params.video_fps);
+    plan.target.audio_channels = 2;
+    // Reference canvas is derived from the request's reference tensor, which
+    // every rank holds, so the follower can size its broadcast buffer
+    // identically.
+    const torch::Tensor& reference = input.media_sources.at(0).tensor;
+    if (reference.dim() != 4 || reference.size(0) != 1) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified reference must be [1,C,H,W]");
+    }
+    const auto canvas = visual_processor_->resolve_reference_image_size(
+        reference.size(2), reference.size(3));
+    plan.reference_canvas_h = canvas.first;
+    plan.reference_canvas_w = canvas.second;
+    if (plan.reference_canvas_h <= 0 || plan.reference_canvas_w <= 0 ||
+        plan.reference_canvas_h % vae_spatial_ratio_ != 0 ||
+        plan.reference_canvas_w % vae_spatial_ratio_ != 0) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified reference canvas is not VAE-ratio aligned");
+    }
+    plan.reference_latent_h = plan.reference_canvas_h / vae_spatial_ratio_;
+    plan.reference_latent_w = plan.reference_canvas_w / vae_spatial_ratio_;
+    if (plan.target.latent_t <= 0 || plan.target.latent_h <= 0 ||
+        plan.target.latent_w <= 0 || plan.target.audio_t <= 0 ||
+        plan.reference_latent_h <= 0 || plan.reference_latent_w <= 0) {
+      throw std::invalid_argument(
+          "MiniMax-H3 qualified derived shape must be strictly positive");
+    }
+    return plan;
+  }
+
+  H3QualifiedRequest prepare_qualified_request(
+      const DiTModelParams& input,
+      MiniMaxH3ReferenceEncodeTrace* trace = nullptr) {
+    H3QualifiedPreparedMedia media;
+    std::optional<NamedTensorConstRef> source;
+    const std::vector<int64_t>* tags = nullptr;
+    int64_t seed = 42;
+    // Validate on every rank before allocating broadcast buffers.
+    H3QualifiedShapePlan shape;
+    run_qualified_phase("shape derivation",
+                        [&] { shape = derive_qualified_shape(input); });
+    run_qualified_phase("reference preparation", [&] {
+      const auto& params = input.generation_params;
+      source = input.tensor_sources.get_named_tensor("prompt_embed");
+      if (!source.has_value() || input.media_sources.size() != 1) {
+        throw std::invalid_argument("MiniMax-H3 qualified input is incomplete");
+      }
+      const torch::Tensor& hidden = source->get().tensor;
+      const MediaNamedTensor& reference = input.media_sources.at(0);
+      if (hidden.dim() != 3 || hidden.size(0) != 1 ||
+          hidden.size(2) != text_hidden_size_ || reference.tensor.dim() != 4 ||
+          reference.tensor.size(0) != 1) {
+        throw std::invalid_argument(
+            "MiniMax-H3 qualified batched input shape mismatch");
+      }
+      tags = get_tensor_parameter<std::vector<int64_t>>(
+          source->get().parameters, "prompt_token_tags");
+      if (tags == nullptr) {
+        throw std::invalid_argument("MiniMax-H3 qualified prompt tags missing");
+      }
+      seed = params.seed_is_set ? params.seed : 42;
+      const std::vector<int64_t> reference_shape{1,
+                                                 kH3QualifiedLatentChannels,
+                                                 shape.reference_latent_t,
+                                                 shape.reference_latent_h,
+                                                 shape.reference_latent_w};
+      if (qualified_reference_encode_owner_) {
+        torch::Tensor image = reference.tensor.squeeze(0).to(torch::kCPU);
+        media.reference_pixels =
+            visual_processor_
+                ->prepare_reference_image(
+                    image, shape.reference_canvas_h, shape.reference_canvas_w)
+                .unsqueeze(0)
+                .unsqueeze(2)
+                .to(options_.device());
+        media.reference_latent =
+            vae_->encode_reference_condition(media.reference_pixels,
+                                             trace,
+                                             /*normalize_on_cpu=*/true,
+                                             /*parallel_tiles=*/false)
+                .contiguous();
+        if (media.reference_latent.sizes().vec() != reference_shape ||
+            media.reference_latent.scalar_type() != torch::kFloat32) {
+          throw std::invalid_argument(
+              "MiniMax-H3 qualified encoded reference metadata mismatch");
+        }
+      } else {
+        media.reference_latent =
+            torch::empty(reference_shape, options_.dtype(torch::kFloat32));
+      }
+    });
+    if (qualified_world_group_ != nullptr) {
+      qualified_world_group_->broadcast(media.reference_latent, 0);
+    }
+    H3QualifiedRequest request;
+    run_qualified_phase("request packing", [&] {
+      request = build_qualified_request(
+          source->get().tensor.to(torch::kCPU),
+          torch::tensor(*tags, torch::dtype(torch::kInt64)).unsqueeze(0),
+          media,
+          seed,
+          shape.target,
+          shape.reference_latent_t,
+          shape.reference_latent_h,
+          shape.reference_latent_w);
+    });
+    return request;
+  }
+
+  void initialize_qualified_schedule(const H3QualifiedRequest& request) {
+    scheduler_.set_timesteps(49, options_.device());
+    audio_scheduler_.set_timesteps(49, options_.device());
+    const torch::Tensor video = scheduler_.timesteps().to(torch::kCPU);
+    const torch::Tensor audio = audio_scheduler_.timesteps().to(torch::kCPU);
+    CHECK(torch::equal(video, 1.0 - request.video_sigmas.slice(0, 0, 49)))
+        << "Qualified video schedule differs from the frozen shift12 clock";
+    CHECK(torch::equal(audio, 1.0 - request.audio_sigmas.slice(0, 0, 49)))
+        << "Qualified audio schedule differs from the frozen shift3 clock";
+    CHECK_EQ(video[0].item<float>(), 0.0F);
+    CHECK_EQ(audio[0].item<float>(), 0.0F);
+  }
+
+  void denoise_qualified_request(
+      H3QualifiedRequest& request,
+      H3QualifiedExecutionContext* execution = nullptr,
+      int64_t steps = 49) {
+    initialize_qualified_schedule(request);
+    const torch::Tensor video_time = scheduler_.timesteps().to(torch::kCPU);
+    const torch::Tensor audio_time =
+        audio_scheduler_.timesteps().to(torch::kCPU);
+    const auto& diagnostics = qualified_denoiser_->diagnostics();
+    for (int64_t step = 0; step < steps; ++step) {
+      if (diagnostics.before_step) {
+        diagnostics.before_step(step, request);
+      }
+      MiniMaxH3RowTimestepPlan plan =
+          minimax_h3_build_row_timestep_plan(request.layout,
+                                             video_time[step].item<float>(),
+                                             audio_time[step].item<float>());
+      const H3QualifiedStepInput step_input{request.video_rows,
+                                            request.audio_rows,
+                                            plan.unique_timesteps,
+                                            plan.inverse_indices,
+                                            step};
+      const H3QualifiedLaunchSnapshot launch_before =
+          execution != nullptr ? h3_qualified_launch_snapshot(
+                                     *execution, execution->qkv_launches)
+                               : H3QualifiedLaunchSnapshot{};
+      H3QualifiedPrediction prediction =
+          qualified_denoiser_->predict_step(request, step_input, execution);
+      torch::Tensor video_x0;
+      torch::Tensor audio_x0;
+      request.video_rows = step_generated_rows(
+          request.video_rows,
+          prediction.video_velocity,
+          request.condition_video_rows,
+          scheduler_,
+          scheduler_.timesteps()[step],
+          diagnostics.after_scheduler ? &video_x0 : nullptr);
+      request.audio_rows = step_generated_rows(
+          request.audio_rows,
+          prediction.audio_velocity,
+          request.condition_audio_rows,
+          audio_scheduler_,
+          audio_scheduler_.timesteps()[step],
+          diagnostics.after_scheduler ? &audio_x0 : nullptr);
+      if (diagnostics.after_scheduler) {
+        diagnostics.after_scheduler(step, video_x0, audio_x0);
+      }
+      if (diagnostics.after_update) {
+        diagnostics.after_update(step, request);
+      }
+      if (execution != nullptr) {
+        record_h3_qualified_execution_step(
+            execution->metrics,
+            static_cast<int32_t>(phase_timing_metadata_.global_rank),
+            step,
+            prediction.cache_hit,
+            prediction.executed_blocks,
+            launch_before,
+            h3_qualified_launch_snapshot(*execution, execution->qkv_launches));
+      }
+    }
+  }
+
+  DiTForwardOutput decode_qualified_output(const H3QualifiedRequest& request) {
+    torch::Tensor video_latent = normalized_qualified_video_latent(request);
+    torch::Tensor audio_latent = unpatchify_audio(
+        generated_rows(request.audio_rows, request.condition_audio_rows),
+        request.target.audio_t);
+    torch::Tensor video =
+        vae_->decode_to_pixels(vae_->denormalize_latents(video_latent));
+    return decode_qualified_audio_output(request, video, audio_latent);
+  }
+
+  torch::Tensor normalized_qualified_video_latent(
+      const H3QualifiedRequest& request) const {
+    return unpatchify_video(
+        generated_rows(request.video_rows, request.condition_video_rows),
+        request.target.latent_t,
+        request.target.latent_h,
+        request.target.latent_w);
+  }
+
+  DiTForwardOutput decode_qualified_audio_output(
+      const H3QualifiedRequest& request,
+      const torch::Tensor& video,
+      const torch::Tensor& audio_latent) {
+    torch::Tensor audio = audio_vae_->decode(
+        audio_vae_->denormalize_latents(audio_latent).to(torch::kFloat32));
+    CHECK_GE(audio.size(2), request.audio_output_samples);
+    DiTForwardOutput output;
+    output.tensors = {video};
+    output.audio_tensors = {audio.slice(2, 0, request.audio_output_samples)};
+    return output;
+  }
+
+  DiTForwardOutput run_qualified_owner_output(
+      const std::function<DiTForwardOutput()>& owner_work) {
+    DiTForwardOutput output;
+    run_qualified_phase("output decode", [&] {
+      if (qualified_output_owner_) {
+        output = owner_work();
+      }
+    });
+    return output;
+  }
+
+  DiTForwardOutput run_qualified_output_decode(
+      const H3QualifiedRequest& request) {
+    if (!qualified_collaborative_video_decode_) {
+      return run_qualified_owner_output(
+          [&] { return decode_qualified_output(request); });
+    }
+
+    torch::Tensor video_latent;
+    run_qualified_phase("video latent preparation", [&] {
+      CHECK(qualified_video_vae_worker_);
+      video_latent =
+          vae_->denormalize_latents(normalized_qualified_video_latent(request));
+    });
+
+    // All ranks agree on HBM admission before entering the VAE group.
+    run_qualified_phase("parallel VAE decode HBM admission",
+                        [&] { validate_qualified_parallel_vae_decode_hbm(); });
+
+    torch::Tensor video;
+    run_qualified_phase("parallel video decode",
+                        [&] { video = vae_->decode_to_pixels(video_latent); });
+
+    DiTForwardOutput output;
+    run_qualified_phase("audio and output decode", [&] {
+      if (qualified_output_owner_) {
+        // Same rule for the audio extent: derived, never the literal 207.
+        torch::Tensor audio_latent = unpatchify_audio(
+            generated_rows(request.audio_rows, request.condition_audio_rows),
+            request.target.audio_t);
+        output = decode_qualified_audio_output(request, video, audio_latent);
+      }
+    });
+    return output;
+  }
+
+  DiTForwardOutput forward_qualified(const DiTModelParams& input) {
+    torch::NoGradGuard no_grad;
+    std::string request_id = h3_execution_request_id(input);
+    H3PhaseTimer timer = make_phase_timer(request_id,
+                                          /*denoise_steps=*/49);
+    timer.start(H3TimingPhase::PREPARE);
+    H3QualifiedRequest request = prepare_qualified_request(input);
+    H3QualifiedExecutionContext execution;
+    const auto prepare_execution = [&] {
+      execution = make_h3_qualified_execution_context(request,
+                                                      qualified_cache_config_,
+                                                      *qualified_parallel_args_,
+                                                      /*infer_steps=*/49,
+                                                      options_.device());
+    };
+    if (qualified_cache_config_.selected_policy == PolicyType::CACHE_DIT) {
+      // All ranks finish row-index/state setup before any rank starts step 0.
+      run_qualified_phase("cache setup", prepare_execution);
+    } else {
+      // The dense path creates no probe tensor or extra cache collective.
+      prepare_execution();
+    }
+    execution.metrics.qkv_observed =
+        construction_ == H3BackendConstruction::A3_16CARD;
+    execution.metrics.request_id = std::move(request_id);
+    execution.rainfusion.policy = qualified_rainfusion_policy_;
+    execution.metrics.rf_policy = qualified_rainfusion_policy_;
+#if defined(USE_NPU)
+    if (qualified_rainfusion_policy_.enabled()) {
+      // Execution stays at this address until request completion: the resource
+      // owner borrows its request-local launch counters after setup consensus.
+      qualified_rainfusion_resources_->prepare(request, execution);
+    }
+#endif
+    timer.advance(H3TimingPhase::DENOISE);
+    denoise_qualified_request(request, &execution);
+    execution.cache.reset();
+    timer.advance(H3TimingPhase::DECODE);
+    DiTForwardOutput output = run_qualified_output_decode(request);
+    run_qualified_phase("final synchronize", [&] {
+      finish_h3_qualified_request(execution.metrics, options_.device());
+    });
+    timer.finish();
+    emit_h3_qualified_execution_summary(
+        execution.metrics,
+        static_cast<int32_t>(phase_timing_metadata_.global_rank));
+    return output;
+  }
+
+  H3PhaseTimer make_phase_timer(std::string request_id, int64_t denoise_steps) {
+    H3PhaseTimingMetadata metadata = phase_timing_metadata_;
+    metadata.request_id = std::move(request_id);
+    metadata.denoise_steps = denoise_steps;
+    metadata.output_owner = construction_ == H3BackendConstruction::NATIVE
+                                ? is_tp_driver_
+                                : qualified_output_owner_;
+    metadata.rolling_load = use_rolling_load_;
+    metadata.correctness_diagnostics =
+        qualified_denoiser_ != nullptr &&
+        qualified_denoiser_->diagnostics().verify_intermediates;
+    return H3PhaseTimer(phase_timing_enabled_, std::move(metadata), [this] {
+#if defined(USE_NPU)
+      if (!options_.device().is_cpu()) {
+        torch::DeviceGuard guard(options_.device());
+        const aclError result = aclrtSynchronizeDevice();
+        if (result != ACL_SUCCESS) {
+          throw DiTForwardExecutionError(
+              Status(StatusCode::UNKNOWN,
+                     "MiniMax-H3 phase timing device synchronization failed: " +
+                         std::to_string(result)));
+        }
+      }
+#else
+      CHECK(options_.device().is_cpu())
+          << "MiniMax-H3 phase timing supports CPU and Ascend NPU";
+#endif
+    });
+  }
+
   void validate_media_sources(const DiTMediaSources& media_sources) const {
     size_t image_count = 0;
     size_t video_count = 0;
@@ -613,16 +1440,17 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                                     const torch::Tensor& prediction,
                                     int64_t num_condition_rows,
                                     Scheduler& scheduler,
-                                    const torch::Tensor& timestep) {
+                                    const torch::Tensor& timestep,
+                                    torch::Tensor* denoised_output = nullptr) {
     if (num_condition_rows > 0) {
       torch::Tensor generated_rows = rows.slice(1, num_condition_rows);
       torch::Tensor generated_prediction =
           prediction.slice(1, num_condition_rows);
-      generated_rows.copy_(
-          scheduler.step(generated_prediction, timestep, generated_rows));
+      generated_rows.copy_(scheduler.step(
+          generated_prediction, timestep, generated_rows, denoised_output));
       return rows;
     }
-    return scheduler.step(prediction, timestep, rows);
+    return scheduler.step(prediction, timestep, rows, denoised_output);
   }
 
   static torch::Tensor generated_rows(const torch::Tensor& rows,
@@ -1364,6 +2192,25 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   bool is_vae_parallel_enabled_ = false;
   bool is_video_vae_worker_ = true;
   std::string task_type_;
+  H3BackendConstruction construction_ = H3BackendConstruction::NATIVE;
+  bool qualified_reference_encode_owner_ = false;
+  bool qualified_video_vae_worker_ = false;
+  bool qualified_collaborative_video_decode_ = false;
+  bool qualified_audio_decode_owner_ = false;
+  bool qualified_output_owner_ = false;
+  ProcessGroup* qualified_world_group_ = nullptr;
+  torch::Tensor qualified_phase_status_;
+  bool phase_timing_enabled_ = false;
+  H3PhaseTimingMetadata phase_timing_metadata_;
+  H3QualifiedShapeConfig qualified_shape_;
+  DiTCacheConfig qualified_cache_config_;
+  std::optional<ParallelArgs> qualified_parallel_args_;
+  std::unique_ptr<H3QualifiedDenoiser> qualified_denoiser_;
+  H3RainfusionPolicy qualified_rainfusion_policy_ = kH3SparseNone;
+#if defined(USE_NPU)
+  std::unique_ptr<H3QualifiedRainfusionResources>
+      qualified_rainfusion_resources_;
+#endif
   int64_t patch_h_;
   int64_t patch_w_;
   int64_t video_latent_channels_;

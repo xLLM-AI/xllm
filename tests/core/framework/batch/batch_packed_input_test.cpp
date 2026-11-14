@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/model/dit_model_params.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/request/minimax_h3_conditioning.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/runtime/dit_forward_params.h"
@@ -1517,6 +1518,42 @@ TEST(BatchPackedInputTest,
   EXPECT_EQ(prepared.tensor_sources.entries()[0].parameters, latent_parameters);
   EXPECT_TRUE(torch::equal(prepared.tensor_sources.entries()[0].tensor,
                            torch::tensor({1.5f, 2.5f}, torch::kBFloat16)));
+}
+
+TEST(BatchPackedInputTest, DiTConditionMetadataAndHashesSurvivePayloadRelease) {
+  constexpr char kHiddenDigest[] =
+      "84ff92691f909a05b224e1c56abb4864f01b4f8e3c854e4bb4c7baf1d3f6d652";
+  const TensorParameters parameters = {
+      {"minimax_h3.schema",
+       std::string("xllm.minimax_h3.text_conditioning/v1")},
+      {"minimax_h3.token_count", int64_t{1}},
+      {"minimax_h3.hidden_digest", std::string(kHiddenDigest)},
+      {"prompt_token_tags", std::vector<int64_t>{0}}};
+  DiTForwardInput unpacked;
+  {
+    DiTForwardInput source;
+    source.model_params.batch_size = 1;
+    source.model_params.tensor_sources.add(
+        "prompt_embed", torch::zeros({1, 5120}, torch::kBFloat16), parameters);
+    source.model_params.tensor_sources.add(
+        "tags", torch::tensor({16777217}, torch::kInt64));
+    proto::PackedForwardInput packed;
+    ASSERT_TRUE(source.to_packed_proto(&packed));
+    ASSERT_TRUE(unpacked.from_packed_proto(packed));
+    packed.mutable_payload()->assign(packed.payload().size(), '\0');
+  }
+  const DiTModelParams prepared =
+      unpacked.model_params.to(torch::Device(torch::kCPU));
+  unpacked = DiTForwardInput();
+  const auto condition =
+      prepared.tensor_sources.get_named_tensor("prompt_embed");
+  ASSERT_TRUE(condition.has_value());
+  EXPECT_EQ(condition->get().parameters, parameters);
+  EXPECT_EQ(minimax_h3_tensor_sha256(condition->get().tensor), kHiddenDigest);
+  const auto tags = prepared.tensor_sources.get("tags");
+  ASSERT_TRUE(tags.has_value());
+  EXPECT_EQ(tags->scalar_type(), torch::kInt64);
+  EXPECT_EQ(tags->item<int64_t>(), 16777217);
 }
 
 TEST(BatchPackedInputTest, NativeDiTPackedProtoRoundTripsEmptyInput) {

@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/distributed_runtime/dit_engine.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/request/dit_request.h"
+#include "core/framework/request/minimax_h3_conditioning.h"
 #include "core/util/blocking_counter.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
@@ -79,6 +80,16 @@ bool is_compatible_dit_batch_request(
   }
   const auto& batch_input = batch_state.input_params();
   const auto& candidate_input = candidate_state.input_params();
+  const auto batch_prompt =
+      batch_input.tensor_sources.get_named_tensor("prompt_embed");
+  const auto candidate_prompt =
+      candidate_input.tensor_sources.get_named_tensor("prompt_embed");
+  if ((batch_prompt &&
+       has_minimax_h3_condition_metadata(batch_prompt->get().parameters)) ||
+      (candidate_prompt &&
+       has_minimax_h3_condition_metadata(candidate_prompt->get().parameters))) {
+    return false;
+  }
   return batch_input.media_sources.batch_signature_matches(
              candidate_input.media_sources) &&
          batch_input.tensor_sources.batch_signature_matches(
@@ -87,6 +98,15 @@ bool is_compatible_dit_batch_request(
 }
 
 }  // namespace
+
+void fail_dit_requests(std::vector<std::shared_ptr<DiTRequest>>& requests,
+                       DiTAsyncResponseProcessor& processor,
+                       const Status& status) {
+  for (auto& request : requests) {
+    processor.process_failed_request(std::move(request), status);
+  }
+  requests.clear();
+}
 
 DiTAsyncResponseProcessor::DiTAsyncResponseProcessor(bool disable_log_stats)
     : response_threadpool_(
@@ -188,9 +208,24 @@ void DiTDynamicBatchScheduler::step(const absl::Duration& timeout) {
     return;
   }
 
-  auto output = engine_->step(batches);
-
-  // process request output in batch
+  try {
+    engine_->step(batches);
+  } catch (const DiTForwardExecutionError& error) {
+    fail_dit_requests(running_requests_, *response_handler_, error.status());
+    return;
+  } catch (const std::exception& error) {
+    fail_dit_requests(running_requests_,
+                      *response_handler_,
+                      {StatusCode::UNKNOWN, error.what()});
+    return;
+  } catch (...) {
+    fail_dit_requests(running_requests_,
+                      *response_handler_,
+                      {StatusCode::UNKNOWN, "unknown DiT execution error"});
+    return;
+  }
+  // Response delivery may already have queued successful callbacks. It must not
+  // enter the execution-failure path and deliver those requests a second time.
   process_batch_output();
 }
 

@@ -33,13 +33,15 @@ def build_kernels(
     force: bool = False,
     device: str | None = None,
     jobs: int | str | None = None,
+    *,
+    enable_h3_rainfusion: bool = False,
 ) -> list[KernelFamilyManifest]:
     context = resolve_build_context(
         device=device,
         bisheng_executable=find_required_executable("bisheng"),
     )
     manifests = []
-    for family in get_default_families(kernel_names):
+    for family in get_default_families(kernel_names, enable_h3_rainfusion=enable_h3_rainfusion):
         manifests.append(
             _build_kernel_family(
                 family,

@@ -116,6 +116,27 @@ class BuildCommandsTest(unittest.TestCase):
                 self.assertEqual(build.call_args.args[3]["OPS_CPU_NUMBER"], expected)
                 self.assertIn("-j8", build.call_args.args[2])
 
+    def test_tilelang_aot_uses_the_h3_cmake_profile(self) -> None:
+        profile = "h3_a3_rf_cann91_cp312"
+        overrides = [
+            f"-DXLLM_BUILD_PROFILE:STRING={profile}",
+            "-DXLLM_ENABLE_H3_RAINFUSION:BOOL=ON",
+        ]
+        with (
+            mock.patch.object(self.setup, "get_ascend_platform", return_value="a3"),
+            mock.patch.object(self.setup.subprocess, "check_call") as call,
+        ):
+            self.setup._maybe_compile_tilelang_kernels([])
+            self.assertNotIn("--build-profile", call.call_args.args[0])
+            self.setup._maybe_compile_tilelang_kernels(overrides)
+            self.assertEqual(
+                call.call_args.args[0][-3:],
+                ["--build-profile", profile, "--enable-h3-rainfusion"],
+            )
+            with self.assertRaises(ValueError):
+                self.setup._maybe_compile_tilelang_kernels(overrides[:1])
+            self.assertEqual(call.call_count, 2)
+
     def test_test_command_builds_the_test_tree(self) -> None:
         for device, cmake in (("npu", "cmake"), ("maca", "cmake_maca")):
             with self.subTest(device=device), mock.patch.object(self.setup.subprocess, "check_call") as call:

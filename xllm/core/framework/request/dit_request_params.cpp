@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/config/dit_config.h"
 #include "core/framework/multimodal/mm_codec.h"
 #include "core/framework/request/dit_source_decoder.h"
+#include "core/framework/request/minimax_h3_conditioning.h"
 #include "core/util/tensor_codec.h"
 #include "core/util/utils.h"
 #include "core/util/uuid.h"
@@ -206,6 +207,22 @@ void fill_generation_params(DiTGenerationParams& generation_params,
   }
 }
 
+// minimax_h3.* conditioning metadata is only valid on the video generation
+// endpoint under the qualified ref2va profile. Reject incompatible endpoints
+// at the request boundary so unvalidated metadata never reaches the
+// endpoint-agnostic worker profile and encode gates.
+Status reject_minimax_h3_metadata_outside_video(
+    const DiTTensorSources& tensor_sources) {
+  for (const auto& entry : tensor_sources.entries()) {
+    if (has_minimax_h3_condition_metadata(entry.parameters)) {
+      return Status(StatusCode::INVALID_ARGUMENT,
+                    "minimax_h3 condition metadata is only valid on the "
+                    "video generation endpoint");
+    }
+  }
+  return Status{};
+}
+
 }  // namespace
 
 // Rejects MiniMax-H3 video requests whose client-controlled inputs the
@@ -381,6 +398,8 @@ DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
       return;
     }
   }
+  request_parse_status =
+      reject_minimax_h3_metadata_outside_video(input_params.tensor_sources);
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +447,8 @@ DiTRequestParams::DiTRequestParams(const proto::TextGenerationRequest& request,
       generation_params.repetition_penalty = params.repetition_penalty();
     }
   }
+  request_parse_status =
+      reject_minimax_h3_metadata_outside_video(input_params.tensor_sources);
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +529,8 @@ DiTRequestParams::DiTRequestParams(const proto::AudioGenerationRequest& request,
   if (input.has_prompt_text()) {
     input_params.audio_prompt_text = input.prompt_text();
   }
+  request_parse_status =
+      reject_minimax_h3_metadata_outside_video(input_params.tensor_sources);
 }
 
 // ---------------------------------------------------------------------------
@@ -529,8 +552,36 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
         request.parameters().sampling_rate();
   }
 
+  const bool qualified_profile =
+      DiTConfig::get_instance().dit_h3_execution_profile() ==
+      kMiniMaxH3ExecutionProfile;
+  if (qualified_profile &&
+      (!request.has_input() || !request.input().has_prompt_embed() ||
+       !has_minimax_h3_condition_metadata(request.input().prompt_embed()))) {
+    request_parse_status =
+        Status(StatusCode::INVALID_ARGUMENT,
+               "qualified MiniMax-H3 requires attested prompt_embed metadata");
+    return;
+  }
+
   if (request.has_input()) {
     const auto& input = request.input();
+    if (input.has_prompt_embed() &&
+        has_minimax_h3_condition_metadata(input.prompt_embed())) {
+      const DiTConfig& config = DiTConfig::get_instance();
+      if (config.dit_h3_execution_profile() != kMiniMaxH3ExecutionProfile ||
+          config.dit_h3_task_type() != "ref2va") {
+        request_parse_status =
+            Status(StatusCode::INVALID_ARGUMENT,
+                   "qualified MiniMax-H3 ref2va profile is not enabled");
+        return;
+      }
+      request_parse_status = validate_minimax_h3_condition_wire(
+          input.prompt_embed(), request_payload);
+      if (!request_parse_status.ok()) {
+        return;
+      }
+    }
     if (!fill_input_params(
             input_params, input, request_payload, request_parse_status)) {
       return;
@@ -579,6 +630,51 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
     apply_output_type(output_type, params, request_parse_status);
     if (!request_parse_status.ok()) {
       return;
+    }
+  }
+  // The worker aligns request geometry and validates the normalized duration.
+  if (qualified_profile &&
+      (generation_params.width <= 0 || generation_params.height <= 0 ||
+       generation_params.num_frames <= 0 ||
+       generation_params.video_fps != 24.0 ||
+       generation_params.audio_sampling_rate != 32000 ||
+       generation_params.num_inference_steps != 50 ||
+       generation_params.num_videos_per_prompt != 1)) {
+    request_parse_status = Status(
+        StatusCode::INVALID_ARGUMENT,
+        "qualified MiniMax-H3 requires positive width/height/num_frames, "
+        "24fps, audio32000, the 50-point schedule and one video per prompt");
+    return;
+  }
+
+  const auto condition =
+      input_params.tensor_sources.get_named_tensor("prompt_embed");
+  if (condition.has_value() &&
+      has_minimax_h3_condition_metadata(condition->get().parameters)) {
+    if (generation_params.num_videos_per_prompt != 1) {
+      request_parse_status =
+          Status(StatusCode::INVALID_ARGUMENT,
+                 "qualified MiniMax-H3 requires one video per prompt");
+      return;
+    }
+    request_parse_status = validate_minimax_h3_condition(
+        condition->get(), input_params.media_sources);
+    if (!request_parse_status.ok()) {
+      return;
+    }
+    if (qualified_profile) {
+      // The condition validator established exactly one positive RGB CHW image.
+      // Reject untrusted geometry before the processor's native CHECK boundary.
+      const auto& pixels = input_params.media_sources.at(0).tensor;
+      const double ratio = static_cast<double>(pixels.size(2)) /
+                           static_cast<double>(pixels.size(1));
+      if (ratio < 0.25 || ratio > 4.0) {
+        request_parse_status =
+            Status(StatusCode::INVALID_ARGUMENT,
+                   "qualified MiniMax-H3 reference aspect ratio must be within "
+                   "1:4 and 4:1");
+        return;
+      }
     }
   }
 }

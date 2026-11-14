@@ -151,7 +151,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `tp_size` | `int64` | `1` | Tensor parallel 规模，仅 DiT 模型使用。 |
 | `sp_size` | `int64` | `1` | Sequence parallel 规模，仅 DiT 模型使用。 |
 | `cfg_size` | `int64` | `1` | Classifier-free guidance parallel 规模，仅 DiT 模型使用。 |
-| `vae_size` | `int64` | `1` | VAE patch parallel 规模，仅 DiT 模型使用。 |
+| `vae_size` | `int64` | `1` | DiT 模型的 VAE patch 并行度。MiniMax-H3 Ref2VA 的 A3 16 卡配置支持 `1`（串行）或 `16`（并行视频解码）。 |
 | `communication_backend` | `string` | `"hccl"` | NPU 通信后端，例如 `lccl`、`hccl`；启用 DP 时使用 `hccl`。 |
 | `enable_mm_encoder_dp` | `bool` | `false` | 是否为多模态模型启用 encoder data parallel。 |
 | `enable_multi_stream_parallel` | `bool` | `false` | 是否在 prefill 阶段通过双 stream 和双 micro batch 启用计算通信并行；详见 [多流并行](/zh/features/multi_streams/)。 |
@@ -265,10 +265,22 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_cache_end_steps` | `int64` | `5` | 末尾阶段跳过的 step 数。 |
 | `dit_cache_start_blocks` | `int64` | `5` | 起始阶段跳过的 block 数。 |
 | `dit_cache_end_blocks` | `int64` | `5` | 末尾阶段跳过的 block 数。 |
+| `dit_cachedit_warmup_steps` | `int64` | `30` | CacheDiT 预热步数；采样步从 0 开始。 |
+| `dit_cachedit_residual_diff_threshold` | `double` | `0.04` | CacheDiT 相对 L1 差异阈值。 |
+| `dit_cachedit_max_cached_steps` | `int64` | `4` | CacheDiT 总命中上限；-1 表示无限制，0 表示不命中。 |
+| `dit_cachedit_max_consecutive_hits` | `int64` | `1` | CacheDiT 连续命中上限。 |
+| `dit_cachedit_front_blocks` | `int64` | `1` | CacheDiT 每步实际执行的前部 block 数。 |
+| `dit_cachedit_back_blocks` | `int64` | `0` | CacheDiT 每步实际执行的后部 block 数。 |
+| `dit_cachedit_linear_residual_prediction` | `bool` | `true` | 启用 CacheDiT 线性残差预测。 |
 | `dit_sp_communication_overlap` | `bool` | `true` | 是否为 sequence parallel 启用通信与计算的 overlap。 |
+| `dit_sp_qkv_communication_overlap` | `bool` | `false` | 仅为经验证的 H3 TP2/SP8 配置启用三个独立 QKV 通信域。 |
 | `dit_debug_print` | `bool` | `false` | 是否打印 DiT 模型 debug 信息。 |
 | `dit_generation_image_area_max` | `int64` | `0` | 图像生成请求允许的最大图像面积（宽 * 高）；`0` 表示不限制。 |
 | `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 任务类型：`fl2va` 或 `ref2va`。 |
+| `dit_h3_execution_profile` | `string` | `"native"` | MiniMax-H3 执行配置：`native` 或 `a3_16card_tp2_u8_ref2va_v1`。16 卡后端启用前，后者会在模型加载前被拒绝。 |
+| `dit_h3_phase_timing` | `bool` | `false` | 测量 MiniMax-H3 加载、准备、去噪、解码耗时，仅在阶段边界同步设备。端到端吞吐测量须关闭。启用时要求单请求 forward 且恰好一个 prompt_embed。 |
+| `dit_h3_correctness_diagnostics` | `bool` | `false` | 开启 qualified MiniMax-H3 每层有限值及 dummy-head 检查。正确性验收开启，性能测量关闭；启动和输入验证始终保留。 |
+| `dit_h3_rainfusion_enabled` | `bool` | `false` | 在已验证的 A3 执行配置中启用 MiniMax-H3 RainFusion。服务启动时用 <code>XLLM_H3_RAINFUSION_POLICY</code> 选择 <code>sparse-middle-steps</code>（未设置时的默认策略）或 <code>sparse-middle-layers</code>。 |
 | `dit_enable_vae_tiling` | `bool` | `false` | 是否启用 VAE tiling，目前仅支持 `qwen-image-edit-plus`。 |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE 用于计算维度的 image size。 |
 | `dit_sparse_attention_enabled` | `bool` | `false` | 是否为 WAN 启用 block-wise sparse attention / RainFusion。 |
@@ -277,3 +289,16 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_sparse_attention_sparse_start_step` | `int64` | `0` | 开始使用 sparse attention 的 step 索引；此前的 step 使用 dense attention。 |
 | `dit_sparse_attention_version` | `string` | `"rain_fusion"` | sparse attention 版本：`rain_fusion`（frame-pairing + `aclnnRainFusionAttention`）或 `sparse_attention`（block-decompose + `aclnnBlockSparseAttention`）。 |
 | `dit_sparse_attention_mask_refresh_steps` | `int64` | `1` | 每 N 个 diffusion step 重新计算一次 block sparse mask；`1` 表示每步都算，值越大 mask 复用越久。 |
+
+### 在 Ascend A3 上构建 MiniMax-H3 RainFusion
+
+在配有 CANN 9.1、Python 3.12 和 PyTorch `2.10.0+cpu` 的 AArch64 构建环境中，
+准备锁定版本的 Torch NPU 和 TileLang wheel，然后启用 RainFusion 构建配置。
+
+```bash
+python xllm/compiler/tilelang_launcher.py prepare-ascend --target-platform a3 --arch arm --build-profile h3_a3_rf_cann91_cp312
+CMAKE_ARGS="-DXLLM_BUILD_PROFILE=h3_a3_rf_cann91_cp312 -DXLLM_ENABLE_H3_RAINFUSION=ON" python setup.py build --device npu
+```
+
+使用 `a3_16card_tp2_u8_ref2va_v1` 执行配置，并打开 `dit_h3_rainfusion_enabled`。
+有效请求的打包形状超出已编译的 RainFusion 容量时，使用 dense attention。

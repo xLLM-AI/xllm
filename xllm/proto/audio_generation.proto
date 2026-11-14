@@ -87,6 +87,12 @@ message AudioGenData {
 
   // Seed used for generating this audio clip
   int64 seed = 2;
+
+  // Present for worker-encoded media only.
+  optional string mime_type = 3;
+  optional string container = 4;
+  optional int32 audio_sample_rate = 5;
+  optional int32 audio_channels = 6;
 }
 
 // Output container for audio generation task results

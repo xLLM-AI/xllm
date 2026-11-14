@@ -16,17 +16,21 @@ limitations under the License.
 
 #pragma once
 
+#include <folly/Try.h>
 #include <gflags/gflags.h>
 
 #include <memory>
 
 #include "common/macros.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/distributed_runtime/engine.h"
 #include "core/framework/batch/dit_forward_input_factory.h"
-#include "engine.h"
 #include "framework/batch/dit_batch.h"
 
 namespace xllm {
+
+DiTForwardOutput select_dit_driver_output(
+    std::vector<folly::Try<std::optional<RawForwardOutput>>>& results);
 
 class DiTEngine : public Engine {
  public:

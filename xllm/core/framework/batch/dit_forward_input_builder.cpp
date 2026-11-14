@@ -20,9 +20,12 @@ limitations under the License.
 
 #include <cstddef>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "core/framework/config/dit_config.h"
+#include "core/framework/request/minimax_h3_conditioning.h"
 
 namespace {
 
@@ -166,6 +169,35 @@ DiTForwardInput DiTForwardInputBuilder::build_forward_input() const {
     }
     model_params.tensor_sources.add(
         tensor_input.name, batch_tensors(tensors), tensor_input.parameters);
+  }
+
+  const auto& config = DiTConfig::get_instance();
+  if (config.dit_h3_execution_profile() == kMiniMaxH3ExecutionProfile ||
+      config.dit_h3_phase_timing()) {
+    if (requests_.size() != 1 || requests_[0]->request_id().empty()) {
+      throw std::invalid_argument(
+          "H3 observation forward input requires one nonempty server request "
+          "ID");
+    }
+    bool assigned = false;
+    for (NamedTensor& tensor : model_params.tensor_sources.entries()) {
+      if (tensor.name == "prompt_embed") {
+        if (assigned) {
+          throw std::invalid_argument(
+              "H3 observation forward input contains duplicate prompt_embed");
+        }
+        // Overwrite any client-supplied value. Never derive identity from the
+        // conditioning digest: repeated requests may use identical inputs.
+        tensor.parameters.insert_or_assign(
+            std::string(kMiniMaxH3InternalRequestId),
+            requests_[0]->request_id());
+        assigned = true;
+      }
+    }
+    if (!assigned) {
+      throw std::invalid_argument(
+          "H3 observation forward input is missing prompt_embed");
+    }
   }
 
   return input;
