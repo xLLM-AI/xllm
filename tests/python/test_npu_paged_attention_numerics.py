@@ -1323,7 +1323,7 @@ def test_windowed_draft_attention_matches_global_reference_across_long_contexts(
                     keys = key_host[physical_pages, offsets].float().repeat_interleave(heads // kv_heads, dim=1)
                     values = value_host[physical_pages, offsets].float().repeat_interleave(heads // kv_heads, dim=1)
                     q = query_host[row * width + column].float()
-                    scores = torch.einsum("hd,thd->ht", q, keys) * dimension**-0.5
+                    scores = torch.bmm(keys.transpose(0, 1), q.unsqueeze(-1)).squeeze(-1) * dimension**-0.5
                     expected = torch.einsum("ht,thd->hd", scores.softmax(-1), values)
                     torch.testing.assert_close(actual_host[row, column], expected, rtol=_OUTPUT_RTOL, atol=_OUTPUT_ATOL)
                     torch.testing.assert_close(
