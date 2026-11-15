@@ -15,6 +15,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <utility>
 
 #include "core/common/macros.h"
@@ -94,7 +95,8 @@ bool valid_token_output(const torch::Tensor& next_tokens,
 bool append_token(const Token& token,
                   const torch::Tensor& token_embeddings,
                   proto::SquenceOutput* sequence_output,
-                  butil::IOBuf* attachment) {
+                  butil::IOBuf* attachment,
+                  std::optional<size_t> embedding_offset = std::nullopt) {
   proto::Token* pb_token = sequence_output->add_tokens();
   pb_token->set_id(token.id);
   if (token.logprob.has_value()) {
@@ -114,11 +116,16 @@ bool append_token(const Token& token,
   }
   if (token_embeddings.defined()) {
     constexpr size_t kMinAttachedEmbeddingBytes = 64 * 1024;
-    if (attachment != nullptr &&
-        token_embeddings.nbytes() >= kMinAttachedEmbeddingBytes) {
+    if (embedding_offset.has_value() ||
+        (attachment != nullptr &&
+         token_embeddings.nbytes() >= kMinAttachedEmbeddingBytes)) {
       auto* slice = pb_token->mutable_embeddings()->mutable_attachment_slice();
-      slice->set_offset(attachment->size());
+      slice->set_offset(embedding_offset.has_value() ? *embedding_offset
+                                                     : attachment->size());
       slice->set_count(token_embeddings.numel());
+      if (embedding_offset.has_value()) {
+        return true;
+      }
       // Keep immutable source storage alive until BRPC releases the payload.
       return token_embeddings.nbytes() <= 0xFFFFFFFFULL - 100 &&
              attachment->append_user_data(token_embeddings.data_ptr(),
@@ -275,6 +282,21 @@ bool encode_token_output(
     return false;
   }
 
+  constexpr size_t kMinAttachedEmbeddingBatchBytes = 64 * 1024;
+  const bool attach_embedding_batch =
+      attachment != nullptr && embeddings.defined() && embeddings.dim() == 2 &&
+      embeddings.nbytes() >= kMinAttachedEmbeddingBatchBytes &&
+      embeddings.nbytes() <= 0xFFFFFFFFULL - 100;
+  if (attach_embedding_batch) {
+    // Rank-two outputs emit every row. Reference the batch once instead of
+    // retaining a Tensor owner and an IOBuf block for each small vector.
+    if (encoded_attachment.append_user_data(embeddings.data_ptr(),
+                                            embeddings.nbytes(),
+                                            [embeddings](void*) {}) != 0) {
+      return false;
+    }
+  }
+
   pb_forward_output->mutable_outputs()->Reserve(num_seqs);
   for (int32_t output_idx = 0; output_idx < num_seqs; ++output_idx) {
     proto::SquenceOutput* pb_seq_out = pb_forward_output->add_outputs();
@@ -312,7 +334,12 @@ bool encode_token_output(
               token,
               token_embeddings,
               pb_seq_out,
-              attachment == nullptr ? nullptr : &encoded_attachment)) {
+              attachment == nullptr ? nullptr : &encoded_attachment,
+              attach_embedding_batch
+                  ? std::optional<size_t>(
+                        static_cast<size_t>(output_idx) *
+                        static_cast<size_t>(embeddings.size(1)) * sizeof(float))
+                  : std::nullopt)) {
         return false;
       }
     }
