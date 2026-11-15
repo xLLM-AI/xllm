@@ -130,7 +130,8 @@ class NpuRuntimeTest(unittest.TestCase):
         package_dir.mkdir(parents=True, exist_ok=True)
         binary = package_dir / "xllm"
         binary.write_text(
-            f"#!{sys.executable}\n"
+            # Inspect the inherited environment before installed site hooks run.
+            f"#!{sys.executable} -S\n"
             "import json, os\n"
             "print(json.dumps({name: os.environ.get(name) for name in "
             "('LD_LIBRARY_PATH', 'ASCEND_CUSTOM_OPP_PATH', 'ASCEND_OPP_PATH')}))\n",

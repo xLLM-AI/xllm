@@ -52,11 +52,15 @@ class UtilDependenciesTest(unittest.TestCase):
 
     def test_build_dependencies_do_not_point_to_project_layers(self) -> None:
         project_targets = set()
+        util_targets = set()
         for cmake in _XLLM_ROOT.rglob("CMakeLists.txt"):
             contents = re.sub(r"#[^\n]*", "", cmake.read_text())
-            project_targets.update(re.findall(r"cc_library\s*\(\s*NAME\s+(\w+)", contents))
-            project_targets.update(re.findall(r"add_library\s*\(\s*(\w+)", contents))
-        project_targets.difference_update({"util", "xllm_proto"})
+            targets = set(re.findall(r"cc_library\s*\(\s*NAME\s+(\w+)", contents))
+            targets.update(re.findall(r"add_library\s*\(\s*(\w+)", contents))
+            project_targets.update(targets)
+            if cmake.is_relative_to(_UTIL_ROOT):
+                util_targets.update(targets)
+        project_targets.difference_update(util_targets | {"xllm_proto"})
 
         cmake = re.sub(r"#[^\n]*", "", (_UTIL_ROOT / "CMakeLists.txt").read_text())
         # Target names cannot occur in filenames; tokenizing also handles the
