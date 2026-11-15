@@ -18,6 +18,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/runtime/forward_params.h"
+#include "core/util/binary_payload.h"
 #include "worker.pb.h"
 
 namespace xllm {
@@ -26,15 +27,19 @@ namespace xllm {
 // the destination unchanged.
 bool encode_llm_output(const ForwardOutput& output,
                        const std::vector<SpeculativeTokenStats>& stats,
-                       proto::LLMForwardResponse* response);
+                       proto::LLMForwardResponse* response,
+                       butil::IOBuf* attachment = nullptr);
 bool decode_llm_output(const proto::LLMForwardResponse& response,
-                       RawForwardOutput& output);
+                       RawForwardOutput& output,
+                       const BinaryPayload* attachment = nullptr);
 
 bool encode_vlm_output(const ForwardOutput& output,
                        const std::vector<SpeculativeTokenStats>& stats,
-                       proto::VLMForwardResponse* response);
+                       proto::VLMForwardResponse* response,
+                       butil::IOBuf* attachment = nullptr);
 bool decode_vlm_output(const proto::VLMForwardResponse& response,
-                       RawForwardOutput& output);
+                       RawForwardOutput& output,
+                       const BinaryPayload* attachment = nullptr);
 
 bool encode_dit_output(const ForwardOutput& output,
                        proto::DITForwardResponse* response);

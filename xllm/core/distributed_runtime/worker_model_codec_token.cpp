@@ -121,7 +121,8 @@ void append_token(const Token& token,
 template <typename Response>
 bool decode_token_output(const Response& response,
                          RawForwardOutput& output,
-                         const char* model_name) {
+                         const char* model_name,
+                         const BinaryPayload* attachment) {
   Timer timer;
   RawForwardOutput decoded_output;
   decoded_output.expert_load_data.assign(response.expert_load_data().begin(),
@@ -162,7 +163,10 @@ bool decode_token_output(const Response& response,
     sample.mm_embeddings.reserve(sequence.mm_embeddings().tensors_size());
     for (const proto::Tensor& encoded_tensor :
          sequence.mm_embeddings().tensors()) {
-      torch::Tensor tensor = util::proto_to_torch(encoded_tensor);
+      torch::Tensor tensor =
+          attachment == nullptr
+              ? util::proto_to_torch(encoded_tensor)
+              : util::proto_to_torch(encoded_tensor, *attachment);
       if (!tensor.defined()) {
         LOG(ERROR) << "Failed to deserialize " << model_name
                    << " multimodal embedding tensor";
@@ -188,16 +192,18 @@ bool encode_token_output(
     const ForwardOutput& output,
     const std::vector<SpeculativeTokenStats>& speculative_token_stats,
     Response* response,
-    const char* model_name) {
+    const char* model_name,
+    butil::IOBuf* attachment) {
   const auto& next_tokens = output.sample_output.next_tokens;
   const auto& logprobs = output.sample_output.logprobs;
   const auto& top_tokens = output.sample_output.top_tokens;
   const auto& top_logprobs = output.sample_output.top_logprobs;
   const auto& embeddings = output.sample_output.embeddings;
   const auto& mm_embeddings = output.sample_output.mm_embeddings;
-  if (response == nullptr) {
+  if (response == nullptr || (attachment != nullptr && !attachment->empty())) {
     return false;
   }
+  butil::IOBuf encoded_attachment;
   Response encoded_output;
   Response* pb_forward_output = &encoded_output;
   Timer timer;
@@ -272,9 +278,17 @@ bool encode_token_output(
           static_cast<int32_t>(tensors.size()));
       for (const torch::Tensor& tensor : tensors) {
         if (!tensor.defined() || !tensor.device().is_cpu() ||
-            !tensor.is_contiguous() ||
-            !util::torch_to_proto(
-                tensor, pb_seq_out->mutable_mm_embeddings()->add_tensors())) {
+            !tensor.is_contiguous()) {
+          return false;
+        }
+        proto::Tensor* encoded_tensor =
+            pb_seq_out->mutable_mm_embeddings()->add_tensors();
+        constexpr size_t kMinAttachedTensorBytes = 64 * 1024;
+        const bool use_attachment =
+            attachment != nullptr && tensor.nbytes() >= kMinAttachedTensorBytes;
+        if (!(use_attachment ? util::torch_to_proto(
+                                   tensor, encoded_tensor, encoded_attachment)
+                             : util::torch_to_proto(tensor, encoded_tensor))) {
           return false;
         }
       }
@@ -309,6 +323,9 @@ bool encode_token_output(
   ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_failed_request_ids(),
                       output.failed_request_ids);
   response->Swap(pb_forward_output);
+  if (attachment != nullptr) {
+    attachment->swap(encoded_attachment);
+  }
   COUNTER_ADD(proto_latency_seconds_o2proto, timer.elapsed_seconds());
   return true;
 }
@@ -317,24 +334,28 @@ bool encode_token_output(
 
 bool encode_llm_output(const ForwardOutput& output,
                        const std::vector<SpeculativeTokenStats>& stats,
-                       proto::LLMForwardResponse* response) {
-  return encode_token_output(output, stats, response, "llm");
+                       proto::LLMForwardResponse* response,
+                       butil::IOBuf* attachment) {
+  return encode_token_output(output, stats, response, "llm", attachment);
 }
 
 bool decode_llm_output(const proto::LLMForwardResponse& response,
-                       RawForwardOutput& output) {
-  return decode_token_output(response, output, "llm");
+                       RawForwardOutput& output,
+                       const BinaryPayload* attachment) {
+  return decode_token_output(response, output, "llm", attachment);
 }
 
 bool encode_vlm_output(const ForwardOutput& output,
                        const std::vector<SpeculativeTokenStats>& stats,
-                       proto::VLMForwardResponse* response) {
-  return encode_token_output(output, stats, response, "vlm");
+                       proto::VLMForwardResponse* response,
+                       butil::IOBuf* attachment) {
+  return encode_token_output(output, stats, response, "vlm", attachment);
 }
 
 bool decode_vlm_output(const proto::VLMForwardResponse& response,
-                       RawForwardOutput& output) {
-  return decode_token_output(response, output, "vlm");
+                       RawForwardOutput& output,
+                       const BinaryPayload* attachment) {
+  return decode_token_output(response, output, "vlm", attachment);
 }
 
 }  // namespace xllm

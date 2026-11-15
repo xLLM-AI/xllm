@@ -561,7 +561,8 @@ bool CommChannel::get_last_llm_step_result_async(
     return false;
   }
   RawForwardOutput output;
-  if (!decode_llm_output(response, output)) {
+  const BinaryPayload attachment(controller.response_attachment());
+  if (!decode_llm_output(response, output, &attachment)) {
     LOG(ERROR) << "Failed to decode last LLM step result";
     promise.setValue(std::optional<RawForwardOutput>{});
     return false;
@@ -582,7 +583,8 @@ bool CommChannel::get_last_vlm_step_result_async(
     return false;
   }
   RawForwardOutput output;
-  if (!decode_vlm_output(response, output)) {
+  const BinaryPayload attachment(controller.response_attachment());
+  if (!decode_vlm_output(response, output, &attachment)) {
     LOG(ERROR) << "Failed to decode last VLM step result";
     promise.setValue(std::optional<RawForwardOutput>{});
     return false;
@@ -617,7 +619,8 @@ void ExecuteLLMModelClosure::Run() {
     return;
   }
   RawForwardOutput output;
-  if (!decode_llm_output(pb_output, output)) {
+  const BinaryPayload attachment(cntl.response_attachment());
+  if (!decode_llm_output(pb_output, output, &attachment)) {
     LOG(ERROR) << "Failed to decode LLM model output";
     promise.setValue(std::optional<RawForwardOutput>{});
     return;
@@ -694,7 +697,8 @@ void ExecuteVLMModelClosure::Run() {
     return;
   }
   RawForwardOutput output;
-  if (!decode_vlm_output(pb_output, output)) {
+  const BinaryPayload attachment(cntl.response_attachment());
+  if (!decode_vlm_output(pb_output, output, &attachment)) {
     LOG(ERROR) << "Failed to decode VLM model output";
     promise.setValue(std::optional<RawForwardOutput>{});
     return;

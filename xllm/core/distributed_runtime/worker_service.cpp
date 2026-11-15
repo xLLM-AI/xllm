@@ -581,7 +581,11 @@ void WorkerService::ExecuteLLMModel(
     ForwardOutput cpu_output;
     std::vector<SpeculativeTokenStats> speculative_token_stats;
     step_llm_model(input, cpu_output, speculative_token_stats);
-    if (!encode_llm_output(cpu_output, speculative_token_stats, response)) {
+    if (!encode_llm_output(cpu_output,
+                           speculative_token_stats,
+                           response,
+                           &static_cast<brpc::Controller*>(controller)
+                                ->response_attachment())) {
       controller->SetFailed("Failed to serialize LLM model output");
       return;
     }
@@ -612,7 +616,11 @@ void WorkerService::GetLastLLMStepResult(
       collect_llm_output(*output, cpu_output, speculative_token_stats);
     }
     // Embedding-only results are valid completed outputs.
-    if (!encode_llm_output(cpu_output, speculative_token_stats, response)) {
+    if (!encode_llm_output(cpu_output,
+                           speculative_token_stats,
+                           response,
+                           &static_cast<brpc::Controller*>(controller)
+                                ->response_attachment())) {
       controller->SetFailed("Failed to serialize LLM last-step output");
     }
   });
@@ -765,7 +773,11 @@ void WorkerService::ExecuteVLMModel(
     ForwardOutput cpu_output;
     std::vector<SpeculativeTokenStats> speculative_token_stats;
     step_vlm_model(input, cpu_output, speculative_token_stats);
-    if (!encode_vlm_output(cpu_output, speculative_token_stats, response)) {
+    if (!encode_vlm_output(cpu_output,
+                           speculative_token_stats,
+                           response,
+                           &static_cast<brpc::Controller*>(controller)
+                                ->response_attachment())) {
       controller->SetFailed("Failed to serialize VLM model output");
       return;
     }
@@ -796,7 +808,11 @@ void WorkerService::GetLastVLMStepResult(
       collect_vlm_output(*output, cpu_output, speculative_token_stats);
     }
     // Embedding-only results are valid completed outputs.
-    if (!encode_vlm_output(cpu_output, speculative_token_stats, response)) {
+    if (!encode_vlm_output(cpu_output,
+                           speculative_token_stats,
+                           response,
+                           &static_cast<brpc::Controller*>(controller)
+                                ->response_attachment())) {
       controller->SetFailed("Failed to serialize VLM last-step output");
     }
   });
