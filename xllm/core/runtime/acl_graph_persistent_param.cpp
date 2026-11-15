@@ -620,14 +620,22 @@ void GraphPersistentParam::update_eplb_decode_token_mask(
   }
 }
 
-torch::Tensor GraphPersistentParam::compact_expanded_block_tables(
-    int64_t num_tokens,
-    int64_t block_table_width) const {
-  // Stable verify graphs key on active width and need dense rows for ATB and
-  // static MTP tasks. Narrowing columns would retain the capacity stride.
-  return persistent_expanded_block_tables_.view({-1})
-      .narrow(/*dim=*/0, /*start=*/0, /*length=*/num_tokens * block_table_width)
-      .view({num_tokens, block_table_width});
+torch::Tensor GraphPersistentParam::expanded_block_tables_for_graph(
+    const ModelParamsView& input_params,
+    uint32_t padded_num_tokens) const {
+  CHECK_LE(padded_num_tokens, persistent_expanded_block_tables_.size(0));
+  const int64_t active_width = input_params.graph.expanded_block_tables.size(1);
+  CHECK_LE(active_width, persistent_expanded_block_tables_.size(1));
+  if (input_params.graph.spec_verify_source_addresses_stable) {
+    // Stable verify graph keys include the active width. Pack rows into the
+    // same preallocated storage so narrowing the width cannot leave a strided
+    // table, and capture and producer-stream refresh use identical addresses.
+    return persistent_expanded_block_tables_.view({-1})
+        .narrow(0, 0, static_cast<int64_t>(padded_num_tokens) * active_width)
+        .view({static_cast<int64_t>(padded_num_tokens), active_width});
+  }
+  // Generic graphs key only on token shape and retain their fixed row stride.
+  return persistent_expanded_block_tables_.narrow(0, 0, padded_num_tokens);
 }
 
 std::vector<int32_t>
@@ -684,13 +692,10 @@ GraphPersistentParam::update_expanded_spec_decode_attention(
 
   const int64_t block_table_len =
       input_params.graph.expanded_block_tables.size(1);
-  torch::Tensor expanded_block_tables =
-      input_params.graph.spec_verify_source_addresses_stable
-          ? compact_expanded_block_tables(padded_num_tokens, block_table_len)
-          : persistent_expanded_block_tables_.slice(
-                /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
-  expanded_block_tables.zero_();
-  expanded_block_tables.slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
+  torch::Tensor block_tables =
+      expanded_block_tables_for_graph(input_params, padded_num_tokens);
+  block_tables.zero_();
+  block_tables.slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
       .slice(/*dim=*/1, /*start=*/0, /*end=*/block_table_len)
       .copy_(input_params.graph.expanded_block_tables, /*non_blocking=*/true);
   return expanded_kv_seq_lens_vec;
@@ -793,10 +798,7 @@ void GraphPersistentParam::update_spec_verify_inputs(
   CHECK_GE(params.graph.expanded_block_tables.size(0), total_tokens);
 
   const int64_t block_table_len = attention.block_tables.size(1);
-  const int64_t expanded_block_table_len =
-      params.graph.expanded_block_tables.size(1);
   CHECK_LE(block_table_len, persistent_block_tables_.size(1));
-  CHECK_LE(expanded_block_table_len, persistent_expanded_block_tables_.size(1));
 
   persistent_positions_.narrow(0, 0, total_tokens).copy_(positions, true);
   q_seq_lens_.narrow(0, 0, batch_size)
@@ -824,7 +826,7 @@ void GraphPersistentParam::update_spec_verify_inputs(
   expanded_kv_seq_lens_.narrow(0, 0, total_tokens)
       .copy_(params.graph.expanded_kv_seq_lens.narrow(0, 0, total_tokens),
              true);
-  compact_expanded_block_tables(total_tokens, expanded_block_table_len)
+  expanded_block_tables_for_graph(params, padded_num_tokens)
       .copy_(params.graph.expanded_block_tables, true);
 }
 
@@ -1194,18 +1196,6 @@ std::optional<Params> GraphPersistentParam::update(
     expanded_kv_seq_lens_vec = update_expanded_spec_decode_attention(
         params, actual_num_tokens, padded_num_tokens);
   }
-  const auto expanded_block_tables_for_graph = [&]() {
-    torch::Tensor block_tables = persistent_expanded_block_tables_.slice(
-        /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
-    if (params.graph.spec_verify_source_addresses_stable) {
-      // Stable verify graphs include the active width in their graph key.
-      return compact_expanded_block_tables(
-          padded_num_tokens, params.graph.expanded_block_tables.size(1));
-    }
-    // Generic graphs key only on token shape, so retain the fixed persistent
-    // width used by main instead of binding a request-dependent view.
-    return block_tables;
-  };
   if (supports_mla_graph_kv_bucketing_) {
     CHECK_LE(static_cast<size_t>(padded_batch_size),
              persistent_host_kv_seq_lens_.size())
@@ -1236,7 +1226,8 @@ std::optional<Params> GraphPersistentParam::update(
         plan_params.attention.host.kv_seq_lens = expanded_kv_seq_lens_vec;
         plan_params.attention.host.q_seq_lens =
             std::vector<int32_t>(static_cast<size_t>(padded_num_tokens), 1);
-        plan_block_tables = expanded_block_tables_for_graph();
+        plan_block_tables =
+            expanded_block_tables_for_graph(params, padded_num_tokens);
         plan_params.attention.device.block_tables = plan_block_tables;
       } else {
         plan_params.meta.num_sequences =
@@ -1456,7 +1447,7 @@ std::optional<Params> GraphPersistentParam::update(
           *graph_params,
           expanded_kv_seq_lens_.slice(
               /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens),
-          expanded_block_tables_for_graph(),
+          expanded_block_tables_for_graph(params, padded_num_tokens),
           expanded_kv_seq_lens_vec,
           options_.block_size());
       graph_params->graph.expanded_tiling_data =

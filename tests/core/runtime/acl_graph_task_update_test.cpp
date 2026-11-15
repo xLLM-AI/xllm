@@ -167,6 +167,10 @@ class HybridConv1dMockLM final : public CausalLM {
     auto graph_context = params.graph.acl_graph_task_update_context;
     const bool register_graph_task =
         graph_context != nullptr && graph_context->capturing;
+    if (register_graph_task &&
+        params.graph.use_expanded_decode_for_spec_verify_attention) {
+      captured_spec_verify_block_tables_ = params.graph.expanded_block_tables;
+    }
 
     layer::AttentionMetadataBuildOptions metadata_build_options;
     metadata_build_options.materialize_linear_state_validity =
@@ -348,6 +352,9 @@ class HybridConv1dMockLM final : public CausalLM {
   bool all_fia_graph_tasks_share_workspace() const {
     return all_fia_graph_tasks_share_workspace_;
   }
+  const torch::Tensor& captured_spec_verify_block_tables() const {
+    return captured_spec_verify_block_tables_;
+  }
   void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
   void update_expert_weight(int32_t) override {}
 
@@ -358,6 +365,7 @@ class HybridConv1dMockLM final : public CausalLM {
   torch::Tensor conv_weight_;
   torch::Tensor token_embedding_table_;
   torch::Tensor pos_embedding_table_;
+  torch::Tensor captured_spec_verify_block_tables_;
   int32_t attention_repetitions_ = 1;
   const ProcessGroup* dcp_group_ = nullptr;
   bool saw_causal_conv_graph_task_ = false;
@@ -1095,8 +1103,14 @@ TEST_F(AclGraphTaskUpdateTest, StaticMtpPrepareReplaysFiaSpecVerifyWidths) {
                     kv_graph,
                     ModelParamsView(forward_input.input_params));
     ASSERT_TRUE(fia_model->saw_causal_conv_and_fia_graph_tasks());
+    const torch::Tensor& captured_block_tables =
+        fia_model->captured_spec_verify_block_tables();
+    ASSERT_TRUE(captured_block_tables.defined());
+    ASSERT_TRUE(captured_block_tables.is_contiguous());
+    EXPECT_EQ(captured_block_tables.sizes(),
+              forward_input.input_params.graph.expanded_block_tables.sizes());
+    const void* captured_block_table_storage = captured_block_tables.data_ptr();
 
-    auto kv_eager = clone_kv_caches(kv_graph);
     forward_input.input_params.meta.is_graph_warmup = false;
     const auto& expanded_kv_seq_lens =
         forward_input.input_params.graph.expanded_kv_seq_lens_vec;
@@ -1126,32 +1140,45 @@ TEST_F(AclGraphTaskUpdateTest, StaticMtpPrepareReplaysFiaSpecVerifyWidths) {
                                                               signal_stream));
     }
 
-    ASSERT_TRUE(
-        graph_exec->prepare_static_mtp_graph_tasks(signal, signal_stream));
-    forward_input.input_params.graph.spec_verify_static_graph_tasks_prepared =
-        true;
-    auto graph_out =
-        graph_exec->run(forward_input.token_ids,
-                        forward_input.positions,
-                        kv_graph,
-                        ModelParamsView(forward_input.input_params));
-    auto eager_out =
-        fia_model->forward(forward_input.token_ids,
-                           forward_input.positions,
-                           kv_eager,
-                           ModelParamsView(forward_input.input_params));
+    for (int32_t replay_index = 0; replay_index < 2; ++replay_index) {
+      SCOPED_TRACE("replay_index=" + std::to_string(replay_index));
+      if (replay_index > 0) {
+        forward_input.token_ids.add_(1);
+      }
+      auto kv_eager = clone_kv_caches(kv_graph);
+      ASSERT_TRUE(
+          graph_exec->prepare_static_mtp_graph_tasks(signal, signal_stream));
+      forward_input.input_params.graph.spec_verify_static_graph_tasks_prepared =
+          true;
+      auto graph_out =
+          graph_exec->run(forward_input.token_ids,
+                          forward_input.positions,
+                          kv_graph,
+                          ModelParamsView(forward_input.input_params));
+      auto eager_out =
+          fia_model->forward(forward_input.token_ids,
+                             forward_input.positions,
+                             kv_eager,
+                             ModelParamsView(forward_input.input_params));
 
-    EXPECT_EQ(eager_out.hidden_states.sizes(), graph_out.hidden_states.sizes());
-    EXPECT_TRUE(torch::allclose(eager_out.hidden_states.to(torch::kFloat32),
-                                graph_out.hidden_states.to(torch::kFloat32),
-                                /*rtol=*/1e-2,
-                                /*atol=*/1e-2))
-        << "Static MTP FIA prepare must match eager replay, max_abs_diff="
-        << (eager_out.hidden_states.to(torch::kFloat32) -
-            graph_out.hidden_states.to(torch::kFloat32))
-               .abs()
-               .max()
-               .item<float>();
+      EXPECT_TRUE(captured_block_tables.is_contiguous());
+      EXPECT_EQ(captured_block_tables.data_ptr(), captured_block_table_storage);
+      EXPECT_TRUE(
+          torch::equal(captured_block_tables,
+                       forward_input.input_params.graph.expanded_block_tables));
+      EXPECT_EQ(eager_out.hidden_states.sizes(),
+                graph_out.hidden_states.sizes());
+      EXPECT_TRUE(torch::allclose(eager_out.hidden_states.to(torch::kFloat32),
+                                  graph_out.hidden_states.to(torch::kFloat32),
+                                  /*rtol=*/1e-2,
+                                  /*atol=*/1e-2))
+          << "Static MTP FIA prepare must match eager replay, max_abs_diff="
+          << (eager_out.hidden_states.to(torch::kFloat32) -
+              graph_out.hidden_states.to(torch::kFloat32))
+                 .abs()
+                 .max()
+                 .item<float>();
+    }
   }
 }
 

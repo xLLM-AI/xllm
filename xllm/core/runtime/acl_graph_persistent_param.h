@@ -251,13 +251,14 @@ class GraphPersistentParam final {
                                    aclrtStream stream,
                                    bool copy_to_device = true);
 
-  torch::Tensor compact_expanded_block_tables(int64_t num_tokens,
-                                              int64_t block_table_width) const;
-
   std::vector<int32_t> update_expanded_spec_decode_attention(
       const ModelParamsView& input_params,
       uint32_t actual_num_tokens,
       uint32_t padded_num_tokens);
+
+  torch::Tensor expanded_block_tables_for_graph(
+      const ModelParamsView& input_params,
+      uint32_t padded_num_tokens) const;
 
   const ModelArgs& args_;
   const torch::Device& device_;
