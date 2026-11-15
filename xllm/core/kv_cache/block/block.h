@@ -42,8 +42,10 @@ class BlockManager;
 // cache group). A block carries no type identity itself; the owning
 // BlockManager decides which key to store it under when it fills the state.
 enum class BlockType : int8_t {
-  KV = 0,         // normal/Qwen flat attention KV, exported to block_tables
-  SWA = 1,        // DSV4 sliding window, exported to multi_block_tables[0]
+  KV = 0,   // normal/Qwen flat attention KV, exported to block_tables
+  SWA = 1,  // DSV4 sliding window, exported to multi_block_tables[0]
+  C1 = 6,
+  C2 = 7,
   C4 = 2,         // DSV4 compressed, exported to multi_block_tables[1]
   C128 = 3,       // DSV4 compressed, exported to multi_block_tables[2]
   EMBEDDING = 4,  // per-sequence spec-decode embedding-row slot, exported via
@@ -51,15 +53,18 @@ enum class BlockType : int8_t {
                   // for proto BlockType wire compatibility.
   LINEAR = 5,     // per-sequence linear-state (GDN recurrent) live slot, drawn
                   // from LinearStateBlockManager; exported via
-  // get_linear_block_id() (linear_state_ids). Also the cache group
-  // for the conv/ssm recurrent-state KV tensors.
+                  // get_linear_block_id() (linear_state_ids). Also the cache
+                  // group for the conv/ssm recurrent-state KV tensors.
 };
 
 // Fixed column order of worker multi_block_tables. The exported tables must
 // follow this order so they line up with the worker-side DSA group_infos; it
 // must never depend on std::map iteration order or config traversal order.
-inline constexpr std::array<BlockType, 3> kMultiBlockExportOrder = {
+// V4 exports [SWA, C4, C128]; V4.1 exports [SWA, C1, C2].
+inline constexpr std::array<BlockType, 5> kMultiBlockExportOrder = {
     BlockType::SWA,
+    BlockType::C1,
+    BlockType::C2,
     BlockType::C4,
     BlockType::C128};
 
@@ -77,6 +82,8 @@ inline constexpr bool is_kv_split_cache_block_type(BlockType type) {
   switch (type) {
     case BlockType::KV:
     case BlockType::SWA:
+    case BlockType::C1:
+    case BlockType::C2:
     case BlockType::C4:
     case BlockType::C128:
       return true;
@@ -94,6 +101,10 @@ inline constexpr std::optional<BlockType> block_type_from_cache_group_id(
       return BlockType::KV;
     case cache_group_id(BlockType::SWA):
       return BlockType::SWA;
+    case cache_group_id(BlockType::C1):
+      return BlockType::C1;
+    case cache_group_id(BlockType::C2):
+      return BlockType::C2;
     case cache_group_id(BlockType::C4):
       return BlockType::C4;
     case cache_group_id(BlockType::C128):

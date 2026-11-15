@@ -28,12 +28,16 @@ limitations under the License.
 
 namespace xllm {
 
+struct ModelArgs;
+
 class Options {
  public:
   Options() = default;
   ~Options() = default;
 
   std::string to_string() const;
+
+  void validate(const ModelArgs& model_args) const;
 
   PROPERTY(std::string, model_path);
 

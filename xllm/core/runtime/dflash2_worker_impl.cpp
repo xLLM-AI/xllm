@@ -171,14 +171,9 @@ DFlash2WorkerImpl::DFlash2WorkerImpl(const ParallelArgs& parallel_args,
           parallel_args,
           device,
           options,
-          [&] {
-            return std::make_unique<LLMWorkerImpl>(
-                configure_draft_parallel_args(parallel_args),
-                device,
-                DFlashWorkerImpl::draft_options(
-                    options, options.num_speculative_tokens()),
-                parallel_args.dp_size() > 1);
-          },
+          configure_draft_parallel_args(parallel_args),
+          DFlashWorkerImpl::draft_options(options,
+                                          options.num_speculative_tokens()),
           configure_draft_config) {}
 
 DraftProposal DFlash2WorkerImpl::run_decode_draft(

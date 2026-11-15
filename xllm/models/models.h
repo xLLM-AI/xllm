@@ -25,6 +25,7 @@ limitations under the License.
 #include "dit/pipelines/pipeline_qwenimage_edit_plus.h"  // IWYU pragma: keep
 #include "dit/pipelines/pipeline_wan_i2v.h"              // IWYU pragma: keep
 #include "llm/deepseek_v4.h"                             // IWYU pragma: keep
+#include "llm/deepseek_v41.h"                            // IWYU pragma: keep
 #include "llm/deepseek_v4_dspark.h"                      // IWYU pragma: keep
 #include "llm/deepseek_v4_mtp.h"                         // IWYU pragma: keep
 #include "llm/glm5_dspark.h"                             // IWYU pragma: keep

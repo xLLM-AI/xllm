@@ -18,6 +18,15 @@ limitations under the License.
 #include <string_view>
 #include <unordered_set>
 
+namespace xllm {
+
+inline bool is_deepseek_v4_family(std::string_view model_type) {
+  return model_type == "deepseek_v4" || model_type == "deepseek_v41" ||
+         model_type == "deepseek_v4_dspark" || model_type == "deepseek_v4_mtp";
+}
+
+}  // namespace xllm
+
 namespace xllm::util {
 
 inline const std::unordered_set<std::string_view>& mla_model_type_set() {
@@ -42,54 +51,6 @@ inline const std::unordered_set<std::string_view>& mla_model_type_set() {
 
 inline bool is_mla_model_type(std::string_view model_type) {
   return mla_model_type_set().contains(model_type);
-}
-
-inline bool has_mtp_model_type_marker(std::string_view model_type) {
-  return model_type.find("mtp") != std::string_view::npos;
-}
-
-inline bool starts_with_model_type(std::string_view model_type,
-                                   std::string_view target_model_type) {
-  return model_type.size() >= target_model_type.size() &&
-         model_type.compare(0, target_model_type.size(), target_model_type) ==
-             0;
-}
-
-inline bool is_target_mtp_model_type(std::string_view model_type,
-                                     std::string_view target_model_type) {
-  return starts_with_model_type(model_type, target_model_type) &&
-         has_mtp_model_type_marker(model_type);
-}
-
-inline constexpr std::string_view kDeepseekV4DSparkModelType =
-    "deepseek_v4_dspark";
-
-inline bool is_deepseek_v4_dspark_model_type(std::string_view model_type) {
-  return model_type == kDeepseekV4DSparkModelType;
-}
-
-inline bool is_deepseek_v4_model_type(std::string_view model_type) {
-  constexpr std::string_view kTargetModelType = "deepseek_v4";
-  return model_type == kTargetModelType ||
-         is_deepseek_v4_dspark_model_type(model_type) ||
-         is_target_mtp_model_type(model_type, kTargetModelType);
-}
-
-// Returns whether a model's KV cache can be transferred between different TP
-// sizes without concatenating TP-local head shards. This is a PD cache-layout
-// capability, not an attention-runtime classification: DeepSeek-V4 DSA has
-// TP-invariant cache blocks even though it does not use the generic MLA path.
-inline bool is_tp_invariant_kv_cache_model_type(std::string_view model_type) {
-  return is_mla_model_type(model_type) || is_deepseek_v4_model_type(model_type);
-}
-
-inline bool is_target_model_type(std::string_view model_type,
-                                 std::string_view target_model_type,
-                                 bool match_mtp) {
-  if (model_type == target_model_type) {
-    return true;
-  }
-  return match_mtp && is_target_mtp_model_type(model_type, target_model_type);
 }
 
 // SFA C8: packed [int8 nope | bf16 rope | fp32 scale] KV cache. Currently only

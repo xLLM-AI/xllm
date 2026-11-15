@@ -343,14 +343,6 @@ class WorkerImpl {
 
   Status get_status() const { return status_; }
 
-  void set_input_preparer(std::function<void(LlmForwardInput&)> prepare_input) {
-    prepare_llm_input_ = std::move(prepare_input);
-  }
-
-  void set_input_preparer(std::function<void(VlmForwardInput&)> prepare_input) {
-    prepare_vlm_input_ = std::move(prepare_input);
-  }
-
   const runtime::Options& options() const { return options_; }
 
   // model context, includes model args, parallel args and date type etc.
@@ -362,6 +354,13 @@ class WorkerImpl {
 
  protected:
   virtual void prepare_expert_input(ExpertInput& /*input*/) const {}
+
+  virtual void prepare_model_input(LlmForwardInput& input) {
+    prepare_dummy_input(input);
+  }
+  virtual void prepare_model_input(VlmForwardInput& input) {
+    prepare_dummy_input(input);
+  }
 
   torch::Tensor select_hidden_states_for_embedding(
       const ModelOutput& model_output) const;
@@ -467,8 +466,6 @@ class WorkerImpl {
                        MasterStatus master_status);
 
   WorkerResidencyState residency_state_;
-  std::function<void(LlmForwardInput&)> prepare_llm_input_;
-  std::function<void(VlmForwardInput&)> prepare_vlm_input_;
 
   template <typename Input>
   void prepare_schedule_overlap_impl(const Input& input);
@@ -490,13 +487,10 @@ class WorkerImpl {
   template <typename Input>
   void prepare_dummy_input(Input& input);
   template <typename Input>
-  void prepare_work_before_execute_on_stream_impl(
-      const Input& input,
-      Input& processed_input,
-      Stream& prepare_stream,
-      bool record_ready_event,
-      bool wait_for_compute_stream = true,
-      const std::function<void(Input&)>& prepare_input = {});
+  void prepare_work_before_execute_on_stream_impl(const Input& input,
+                                                  Input& processed_input,
+                                                  Stream& prepare_stream,
+                                                  bool record_ready_event);
   template <typename Params>
   void prepare_mla_prefixcache_inputs_impl(Params& input_params);
 #if defined(USE_NPU)

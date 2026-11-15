@@ -151,7 +151,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
                                              options.device());
     }
 
-    deepseek_v4_build_cache_specs(model_args_, caches_info_, group_infos_);
+    build_deepseek_v4_cache_config(model_args_, caches_info_, group_infos_);
     align_cache_specs_to_dsv4_managers();
 
     mtp_layers_.reserve(mtp_n_layers);
@@ -189,24 +189,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
       layer->verify_loaded_weights();
     }
   }
-
-  void merge_loaded_weights() {
-    for (const auto& layer : mtp_layers_) {
-      UNUSED_PARAMETER(layer);
-    }
-  }
-
-  void merge_and_move_pinned_host() { merge_loaded_weights(); }
-
-  void free_weights() {}
-
-  void reload_weights() {}
-
-  void reload_non_decoder_weights() {}
-
-  void reload_weights_from_device() {}
-
-  void refresh_rolling_weights() {}
 
   layer::WordEmbedding get_word_embedding() { return embed_tokens_; }
 

@@ -23,6 +23,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kv_cache/block/block.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
@@ -268,7 +269,7 @@ void HierarchyKVCacheTransfer::shutdown() {
 
 int32_t HierarchyKVCacheTransfer::domain_group_id(CacheHandle handle,
                                                   BlockType block_type) {
-  constexpr int32_t kBlockTypeCount = cache_group_id(BlockType::LINEAR) + 1;
+  constexpr int32_t kBlockTypeCount = cache_group_id(BlockType::C2) + 1;
   CHECK_LE(handle,
            static_cast<CacheHandle>(
                (std::numeric_limits<int32_t>::max() - kBlockTypeCount + 1) /

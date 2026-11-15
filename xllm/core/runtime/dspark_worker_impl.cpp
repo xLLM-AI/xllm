@@ -37,7 +37,7 @@ namespace {
 
 int32_t configure_draft_config(ModelArgs& args,
                                const runtime::Options& options) {
-  const bool deepseek_v4 = util::is_deepseek_v4_model_type(args.model_type());
+  const bool deepseek_v4 = is_deepseek_v4_family(args.model_type());
   if (args.block_size() == 0) {
     args.block_size(options.num_speculative_tokens() + 1);
   }
@@ -52,7 +52,7 @@ int32_t configure_draft_config(ModelArgs& args,
     args.dspark_use_native_sas(
         KernelConfig::get_instance().enable_dspark_native_sas());
 #endif
-    args.model_type(std::string(kDeepseekV4DSparkModelType));
+    args.model_type("deepseek_v4_dspark");
   } else {
     args.model_type(args.model_type() == kDSparkGLM5DraftModelType
                         ? std::string(kDSparkGLM5DraftModelType)
@@ -69,13 +69,8 @@ DSparkWorkerImpl::DSparkWorkerImpl(const ParallelArgs& parallel_args,
           parallel_args,
           device,
           options,
-          [&] {
-            return std::make_unique<LLMWorkerImpl>(
-                configure_draft_parallel_args(parallel_args),
-                device,
-                draft_options(options, options.num_speculative_tokens() - 1),
-                parallel_args.dp_size() > 1);
-          },
+          configure_draft_parallel_args(parallel_args),
+          draft_options(options, options.num_speculative_tokens() - 1),
           configure_draft_config) {
   sample_from_anchor_ = true;
 }
@@ -100,7 +95,7 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
         draft_vocab_.draft_to_target_ids_.defined())
       << "A reduced draft vocabulary requires a DSpark d2t mapping.";
 
-  if (util::is_deepseek_v4_dspark_model_type(draft_args.model_type())) {
+  if (draft_args.model_type() == "deepseek_v4_dspark") {
     draft_input_per_request_ = draft_args.dspark_use_native_sas();
     draft_forward_type_ = BatchForwardType::DECODE;
   }

@@ -160,6 +160,13 @@ void pad_2d_vector(std::vector<std::vector<T>>& vec, T pad_value) {
 
 }  // namespace util
 
+inline void move_tensor_to_device_if_needed(torch::Tensor& tensor,
+                                            const torch::Device& device) {
+  if (tensor.defined() && tensor.device() != device) {
+    tensor = tensor.to(device, /*non_blocking=*/false).contiguous();
+  }
+}
+
 inline torch::Tensor safe_to(const torch::Tensor& t,
                              const torch::TensorOptions& options,
                              bool non_blocking = false) {

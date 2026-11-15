@@ -206,7 +206,7 @@ std::optional<std::string> validate_context_parallel_config(
     if (options.task_type() != "generate") {
       return "Model-side CP supports only the generate task";
     }
-    const bool is_dsv4_model = util::is_deepseek_v4_model_type(model_type);
+    const bool is_dsv4_model = is_deepseek_v4_family(model_type);
     if (engine_type == EngineType::SSM &&
         SpeculativeConfig::requires_aux_hidden_capture(
             options.speculative_algorithm()) &&

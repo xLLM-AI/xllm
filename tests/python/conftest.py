@@ -101,13 +101,53 @@ def _rms_norm_sigmoid_gated(
     return (x * weight.to(torch.float32) * gate.sigmoid()).to(input_dtype)
 
 
+def _grouped_moe_bf16_reference(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    num_total_experts: int,
+    start_expert_id: int,
+    num_experts_per_rank: int,
+    swiglu_limit: float = 0.0,
+    router_weight_before_down: bool = False,
+) -> torch.Tensor:
+    del num_total_experts
+    dtype = hidden_states.dtype
+    inter = w13.shape[-1] // 2
+    gate_w = w13[:, :, :inter].transpose(1, 2).contiguous()
+    up_w = w13[:, :, inter:].transpose(1, 2).contiguous()
+    down_w = w2.transpose(1, 2).contiguous()
+    out_dtype = torch.float32 if router_weight_before_down else dtype
+    output = torch.zeros(hidden_states.shape[0], w2.shape[-1], dtype=out_dtype, device=hidden_states.device)
+    for slot in range(num_experts_per_rank):
+        rows, slots = (topk_ids == start_expert_id + slot).nonzero(as_tuple=True)
+        if rows.numel() == 0:
+            continue
+        gate = torch.nn.functional.linear(hidden_states[rows], gate_w[slot]).float()
+        up = torch.nn.functional.linear(hidden_states[rows], up_w[slot]).float()
+        if 0.0 < swiglu_limit < 1_000_000.0:
+            gate = gate.clamp(max=swiglu_limit)
+            up = up.clamp(min=-swiglu_limit, max=swiglu_limit)
+        activated = torch.nn.functional.silu(gate) * up
+        route_weight = topk_weights[rows, slots]
+        if router_weight_before_down:
+            contribution = torch.nn.functional.linear((activated * route_weight[:, None]).to(dtype), down_w[slot])
+            output.index_add_(0, rows, contribution.float())
+        else:
+            contribution = torch.nn.functional.linear(activated.to(dtype), down_w[slot]).to(dtype)
+            output.index_add_(0, rows, (contribution * route_weight[:, None]).to(out_dtype))
+    return output
+
+
 @pytest.fixture(autouse=True)
-def _glm_cpu_normalization(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Use CPU references only in GLM unit tests; keep real NPU dispatch."""
+def _model_cpu_normalization(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     if request.module.__name__.rsplit(".", 1)[-1] not in {
         "test_glm5_next_kda",
         "test_glm5_next_dsa",
         "test_glm53flash_rms_norm",
+        "test_deepseek_v41_model",
     }:
         return
     from xllm.python import kernels
@@ -125,3 +165,21 @@ def _glm_cpu_normalization(request: pytest.FixtureRequest, monkeypatch: pytest.M
 
     monkeypatch.setattr(kernels, "rms_norm", rms_norm)
     monkeypatch.setattr(kernels, "rms_norm_sigmoid_gated", gated_rms_norm)
+
+
+@pytest.fixture(autouse=True)
+def _v41_cpu_grouped_moe(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if request.module.__name__.rsplit(".", 1)[-1] != "test_deepseek_v41_model":
+        return
+    from xllm.python import kernels
+
+    native = getattr(kernels, "grouped_moe_bf16", None)
+
+    def grouped_moe_bf16(hidden_states: torch.Tensor, *args: object, **kwargs: object) -> torch.Tensor:
+        if hidden_states.device.type == "cpu":
+            return _grouped_moe_bf16_reference(hidden_states, *args, **kwargs)
+        if native is None:
+            raise NotImplementedError("grouped_moe_bf16 is unavailable on this backend")
+        return native(hidden_states, *args, **kwargs)
+
+    monkeypatch.setattr(kernels, "grouped_moe_bf16", grouped_moe_bf16, raising=False)

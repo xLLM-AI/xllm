@@ -331,22 +331,32 @@ DraftModelSpecWorkerImpl<TargetInput>::DraftModelSpecWorkerImpl(
     const torch::Device& device,
     const runtime::Options& options,
     WorkerType worker_type,
-    absl::FunctionRef<std::unique_ptr<LLMWorkerImpl>()> draft_factory,
+    const ParallelArgs& draft_parallel_args,
+    const runtime::Options& draft_opts,
     int32_t (*configure_draft_config)(ModelArgs&, const runtime::Options&))
     : SpeculativeWorkerImpl<TargetInput>(parallel_args,
                                          device,
                                          options,
                                          target_options(options),
                                          worker_type),
-      draft_impl_(draft_factory()),
-      configure_draft_config_(configure_draft_config) {
-  draft_impl_->set_input_preparer(
-      std::function<void(LlmForwardInput&)>([this](LlmForwardInput& input) {
-        ::xllm::prepare_dummy_input(input, draft_impl_->context_, device_);
+      draft_impl_([&] {
+        auto prepare_input = [this](LlmForwardInput& input) {
+          ::xllm::prepare_dummy_input(input, draft_impl_->context_, device_);
 #if defined(USE_NPU)
-        prepare_draft_padding(input.input_params);
+          prepare_draft_padding(input.input_params);
 #endif
-      }));
+        };
+        return std::make_unique<
+            SpeculativeModelWorkerImpl<LLMWorkerImpl,
+                                       LlmForwardInput,
+                                       decltype(prepare_input)>>(
+            std::move(prepare_input),
+            draft_parallel_args,
+            device,
+            draft_opts,
+            parallel_args.dp_size() > 1);
+      }()),
+      configure_draft_config_(configure_draft_config) {
 }
 
 template <typename TargetInput>
@@ -444,7 +454,7 @@ DraftModelSpecWorkerImpl<TargetInput>::estimate_kv_cache_capacity() {
   const int64_t total_memory = std::min(target_total_bytes, draft_total_bytes);
 
   const ModelArgs& target_model_args = impl_->context_.get_model_args();
-  if (!util::is_deepseek_v4_model_type(target_model_args.model_type())) {
+  if (!is_deepseek_v4_family(target_model_args.model_type())) {
     return {cache_size_in_bytes, total_memory};
   }
 

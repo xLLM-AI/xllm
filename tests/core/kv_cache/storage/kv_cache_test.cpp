@@ -728,6 +728,88 @@ TEST(KVCacheTest, DeepSeekV4DSparkUsesGroupedSwaCaches) {
   }
 }
 
+TEST(KVCacheTest, DeepSeekV41TokenGroupsUseModelDtypeIndexCache) {
+  constexpr int64_t kSwaCount = 10;
+  constexpr int64_t kC1Count = 8;
+  constexpr int64_t kC2Count = 4;
+  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kHeadDim = 16;
+  constexpr int64_t kIndexHeadDim = 8;
+
+  KVCacheCapacity capacity;
+  capacity.block_size(kBlockSize)
+      .swa_count(kSwaCount)
+      .c1_count(kC1Count)
+      .c2_count(kC2Count);
+
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v41");
+  const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+  ASSERT_TRUE(shape.has_grouped_cache_layout());
+  EXPECT_EQ(shape.key_cache_shape(),
+            (std::vector<int64_t>{kSwaCount, kC1Count, kC2Count}));
+
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kBFloat16)
+      .num_layers(6)
+      .model_type("deepseek_v41")
+      .block_size(kBlockSize)
+      .head_dim(kHeadDim)
+      .index_head_dim(kIndexHeadDim)
+      .window_size(128)
+      .compress_ratios({0, 0, 2, 2, 1, 1})
+      .kv_source_layer_ids({2, 4});
+
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+
+  ASSERT_EQ(caches.size(), 6u);
+
+  for (const int64_t layer_idx : {0, 1, 3, 5}) {
+    SCOPED_TRACE("layer " + std::to_string(layer_idx));
+    EXPECT_EQ(shape_vec(caches[layer_idx].get_swa_cache()),
+              dsv4_block_shape(kSwaCount, kBlockSize, 1, kHeadDim));
+    EXPECT_FALSE(caches[layer_idx].get_k_cache().defined());
+    EXPECT_FALSE(caches[layer_idx].get_index_cache().defined());
+    EXPECT_FALSE(caches[layer_idx].get_compress_kv_state().defined());
+    EXPECT_FALSE(caches[layer_idx].get_compress_score_state().defined());
+  }
+
+  EXPECT_EQ(shape_vec(caches[2].get_k_cache()),
+            dsv4_block_shape(kC2Count, kBlockSize, 1, kHeadDim));
+  EXPECT_EQ(shape_vec(caches[2].get_index_cache()),
+            dsv4_block_shape(kC2Count, kBlockSize, 1, kIndexHeadDim));
+  EXPECT_EQ(shape_vec(caches[2].get_swa_cache()),
+            dsv4_block_shape(kSwaCount, kBlockSize, 1, kHeadDim));
+  EXPECT_EQ(shape_vec(caches[2].get_compress_kv_state()),
+            (std::vector<int64_t>{kSwaCount, kBlockSize, kHeadDim}));
+  EXPECT_EQ(shape_vec(caches[2].get_compress_score_state()),
+            (std::vector<int64_t>{kSwaCount, kBlockSize, kHeadDim}));
+  EXPECT_EQ(caches[2].get_compress_kv_state().dtype(), torch::kFloat32);
+  EXPECT_EQ(caches[2].get_compress_score_state().dtype(), torch::kFloat32);
+  EXPECT_EQ(caches[2].get_index_cache().dtype(), torch::kBFloat16);
+  EXPECT_EQ(caches[2].get_k_cache().dtype(), torch::kBFloat16);
+
+  EXPECT_EQ(shape_vec(caches[4].get_k_cache()),
+            dsv4_block_shape(kC1Count, kBlockSize, 1, kHeadDim));
+  EXPECT_EQ(shape_vec(caches[4].get_index_cache()),
+            dsv4_block_shape(kC1Count, kBlockSize, 1, kIndexHeadDim));
+  EXPECT_EQ(shape_vec(caches[4].get_swa_cache()),
+            dsv4_block_shape(kSwaCount, kBlockSize, 1, kHeadDim));
+  EXPECT_FALSE(caches[4].get_compress_kv_state().defined());
+  EXPECT_FALSE(caches[4].get_compress_score_state().defined());
+  EXPECT_EQ(caches[4].get_index_cache().dtype(), torch::kBFloat16);
+
+  ExpectTensorGroup(caches[2], KVCacheTensorRole::WINDOW, BlockType::SWA);
+  ExpectTensorGroup(caches[2], KVCacheTensorRole::KEY, BlockType::C2);
+  ExpectTensorGroup(caches[2], KVCacheTensorRole::INDEX, BlockType::C2);
+  ExpectTensorGroup(caches[2], KVCacheTensorRole::KV_STATE, BlockType::SWA);
+  ExpectTensorGroup(caches[2], KVCacheTensorRole::SCORE_STATE, BlockType::SWA);
+  ExpectTensorGroup(caches[4], KVCacheTensorRole::KEY, BlockType::C1);
+  ExpectTensorGroup(caches[4], KVCacheTensorRole::INDEX, BlockType::C1);
+}
+
 TEST(KVCacheTest, DeepSeekV4MtpKeepsGroupedCacheClassification) {
   KVCacheCapacity capacity;
   capacity.block_size(128).swa_count(10).c4_count(32).c128_count(1);

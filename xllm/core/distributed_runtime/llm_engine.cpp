@@ -352,16 +352,12 @@ bool LLMEngine::allocate_kv_cache(
       .enable_kvcache_store = options_.enable_kvcache_store(),
       .instance_role = options_.instance_role(),
       .supports_grouped_cache_offload =
-          util::is_deepseek_v4_model_type(args_.model_type()),
+          is_deepseek_v4_family(args_.model_type()) &&
+          args_.model_type() != "deepseek_v41",
       .kv_cache_dtype = options_.kv_cache_dtype(),
       .indexer_cache_dtype = kv_cache_config.indexer_cache_dtype(),
       .model_type = args_.model_type(),
   };
-  // DECODE-side skips LINEAR prefix cache by role (see
-  // composite_block_manager.cpp::leaf_participates_in_prefix_cache), so the
-  // chunked-prefill + chunk-stride guards below are only meaningful for
-  // PREFILL / MIX. On DECODE the linear-state cache is disabled anyway and
-  // pd_launch.sh legitimately sets --enable_chunked_prefill=false.
   const bool is_decode = options_.instance_role() == InstanceRole::DECODE;
   if (options_.enable_prefix_cache() && enable_state_cache && !is_decode) {
     const auto& scheduler_config = ::xllm::SchedulerConfig::get_instance();
@@ -410,26 +406,23 @@ bool LLMEngine::allocate_kv_cache(
     options.linear_state_num_slots(
         static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()));
   }
-  if (util::is_deepseek_v4_model_type(args_.model_type())) {
+  if (is_deepseek_v4_family(args_.model_type())) {
     constexpr uint32_t kManagerTypeBlockManagerImpl = 0;
     constexpr uint32_t kManagerTypeSlidingWindowBlockManager = 1;
 
     std::vector<uint32_t> manager_types{kManagerTypeSlidingWindowBlockManager};
-    std::vector<uint32_t> manager_compress_ratios{
-        0};  // unused for sliding window manager
-    std::vector<uint32_t> token_manager_ratios;
-    token_manager_ratios.reserve(2);
-    for (const int32_t ratio : args_.compress_ratios()) {
-      if (ratio == 4 || ratio == 128) {
-        const uint32_t ratio_u32 = static_cast<uint32_t>(ratio);
-        if (std::find(token_manager_ratios.begin(),
-                      token_manager_ratios.end(),
-                      ratio_u32) == token_manager_ratios.end()) {
-          token_manager_ratios.push_back(ratio_u32);
-        }
+    std::vector<uint32_t> manager_compress_ratios{0};
+    manager_types.reserve(5);
+    manager_compress_ratios.reserve(5);
+    const std::pair<uint32_t, int64_t> token_pools[] = {
+        {1, kv_cache_cap.c1_count()},
+        {2, kv_cache_cap.c2_count()},
+        {4, kv_cache_cap.c4_count()},
+        {128, kv_cache_cap.c128_count()}};
+    for (const auto& [ratio, count] : token_pools) {
+      if (count == 0) {
+        continue;
       }
-    }
-    for (const uint32_t ratio : token_manager_ratios) {
       manager_types.push_back(kManagerTypeBlockManagerImpl);
       manager_compress_ratios.push_back(ratio);
     }

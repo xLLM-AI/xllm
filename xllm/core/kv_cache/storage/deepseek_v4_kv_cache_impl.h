@@ -85,7 +85,6 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
     const KVCacheCreateOptions& create_options,
     int64_t layer_idx);
 
-std::string dsv4_shape_summary(const DeepSeekV4KVCacheTensors& tensors,
-                               int32_t compress_ratio);
+std::string dsv4_shape_summary(const DeepSeekV4KVCacheTensors& tensors);
 
 }  // namespace xllm

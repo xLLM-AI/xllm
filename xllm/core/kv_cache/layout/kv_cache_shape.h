@@ -105,7 +105,6 @@ class KVCacheShape final {
     GROUPED_POOL = 1,
   };
 
-  void init_dsv4_pool_shape(const KVCacheCapacity& kv_cache_cap);
   void init_key_cache_shape(const KVCacheCapacity& kv_cache_cap,
                             const ModelArgs& model_args,
                             int64_t world_size);
@@ -124,7 +123,6 @@ class KVCacheShape final {
                             const ModelArgs& model_args,
                             int64_t world_size);
   void apply_device_layout(const ModelArgs& model_args);
-  void print_dsv4_pool_shape() const;
 
   static const std::vector<int64_t>& empty_shape();
 

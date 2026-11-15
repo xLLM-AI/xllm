@@ -129,7 +129,7 @@ void ForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
           !input.json_object_states.empty() ||
           !input.json_object_state_snapshots.empty();
     }
-    if (util::is_deepseek_v4_model_type(model_args.model_type())) {
+    if (is_deepseek_v4_family(model_args.model_type())) {
       const int64_t actual_scheduled_tokens =
           static_cast<int64_t>(input.host_token_ids().numel());
       CHECK_LE(actual_scheduled_tokens, options_.max_tokens_per_batch)

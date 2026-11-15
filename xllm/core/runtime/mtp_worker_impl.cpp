@@ -231,33 +231,6 @@ void replace_host_token_placeholders(Input& input,
   }
 }
 
-ParallelArgs mtp_draft_parallel_args(const ParallelArgs& parallel_args,
-                                     const runtime::Options& options) {
-  if (!options.enable_mtp_draft_body_tp1()) {
-    return parallel_args;
-  }
-  CHECK(parallel_args.single_rank_group_ != nullptr)
-      << "MTP draft body TP1 requires a single-rank process group";
-  ParallelArgs draft_args = parallel_args;
-  draft_args.kv_transfer_groups_ = parallel_args.kv_transfer_groups();
-  draft_args.rank(0)
-      .world_size(1)
-      .dp_size(1)
-      .ep_size(1)
-      .cp_size(1)
-      .tp_size(1)
-      .sp_size(1);
-  draft_args.mapping_data(nlohmann::json{});
-  draft_args.process_group_ = parallel_args.single_rank_group_;
-  draft_args.dp_local_process_group_ = parallel_args.single_rank_group_;
-  draft_args.lm_head_group_ = parallel_args.tp_group_;
-  draft_args.tp_group_ = parallel_args.single_rank_group_;
-  draft_args.cp_group_ = parallel_args.single_rank_group_;
-  draft_args.moe_ep_group_ = parallel_args.single_rank_group_;
-  draft_args.moe_tp_group_ = parallel_args.single_rank_group_;
-  return draft_args;
-}
-
 void check_mtp_decode_states(
     const std::vector<EmbeddingCache::DecodeState>& states,
     const std::vector<std::string>& request_ids,
@@ -356,14 +329,33 @@ MTPWorkerImpl<TargetInput>::MTPWorkerImpl(const ParallelArgs& parallel_args,
           device,
           options,
           worker_type,
-          [&parallel_args, &device, &options, &draft_opts] {
-            return std::make_unique<LLMWorkerImpl>(
-                configure_draft_parallel_args(
-                    mtp_draft_parallel_args(parallel_args, options)),
-                device,
-                draft_opts,
-                parallel_args.dp_size() > 1);
-          }) {}
+          configure_draft_parallel_args([&] {
+            if (!options.enable_mtp_draft_body_tp1()) {
+              return parallel_args;
+            }
+            CHECK(parallel_args.single_rank_group_ != nullptr)
+                << "MTP draft body TP1 requires a single-rank process group";
+            ParallelArgs draft_args = parallel_args;
+            draft_args.kv_transfer_groups_ = parallel_args.kv_transfer_groups();
+            draft_args.rank(0)
+                .world_size(1)
+                .dp_size(1)
+                .ep_size(1)
+                .cp_size(1)
+                .tp_size(1)
+                .sp_size(1);
+            draft_args.mapping_data(nlohmann::json{});
+            draft_args.process_group_ = parallel_args.single_rank_group_;
+            draft_args.dp_local_process_group_ =
+                parallel_args.single_rank_group_;
+            draft_args.lm_head_group_ = parallel_args.tp_group_;
+            draft_args.tp_group_ = parallel_args.single_rank_group_;
+            draft_args.cp_group_ = parallel_args.single_rank_group_;
+            draft_args.moe_ep_group_ = parallel_args.single_rank_group_;
+            draft_args.moe_tp_group_ = parallel_args.single_rank_group_;
+            return draft_args;
+          }()),
+          draft_opts) {}
 
 template <typename TargetInput>
 MTPWorkerImpl<TargetInput>::~MTPWorkerImpl() {
