@@ -26,16 +26,17 @@ class MoeExpandInputMluTest
     : public ::testing::TestWithParam<torch::ScalarType> {};
 
 TEST_P(MoeExpandInputMluTest, ReusesByteBufferWithoutOverwritingPadding) {
-  torch::Device device(torch::kPrivateUse1, /*index=*/0);
+  torch::Device device(/*type=*/torch::kPrivateUse1, /*index=*/0);
   torch::DeviceGuard guard(device);
   constexpr int64_t kHiddenSize = 128;
-  torch::Tensor input_cpu = torch::arange(5 * kHiddenSize)
-                                .remainder(17)
-                                .reshape({5, kHiddenSize})
+  torch::Tensor input_cpu = torch::arange(/*end=*/5 * kHiddenSize)
+                                .remainder(/*other=*/17)
+                                .reshape(/*shape=*/{5, kHiddenSize})
                                 .to(GetParam());
-  torch::Tensor indices_cpu = torch::tensor({4, 0, 4, 1, 3, 1}, torch::kInt32);
-  torch::Tensor expected =
-      input_cpu.index_select(/*dim=*/0, indices_cpu.to(torch::kInt64));
+  torch::Tensor indices_cpu = torch::tensor(/*tensor_data=*/{4, 0, 4, 1, 3, 1},
+                                            /*options=*/torch::kInt32);
+  torch::Tensor expected = input_cpu.index_select(
+      /*dim=*/0, indices_cpu.to(/*dtype=*/torch::kInt64));
 
   kernel::MoeExpandInputParams params;
   params.input = input_cpu.to(device);
@@ -48,29 +49,31 @@ TEST_P(MoeExpandInputMluTest, ReusesByteBufferWithoutOverwritingPadding) {
   int64_t row_bytes = kHiddenSize * params.input.element_size();
   int64_t token_count = indices_cpu.numel();
   torch::Tensor storage =
-      torch::full({(token_count + 2) * row_bytes},
-                  -1,
-                  params.input.options().dtype(torch::kChar));
+      torch::full(/*size=*/{(token_count + 2) * row_bytes},
+                  /*fill_value=*/-1,
+                  params.input.options().dtype(/*dtype=*/torch::kChar));
   torch::Tensor output_bytes =
       storage.slice(/*dim=*/0, row_bytes, (token_count + 1) * row_bytes);
-  params.output =
-      view_as_dtype(output_bytes, GetParam()).view({token_count, kHiddenSize});
+  params.output = view_as_dtype(output_bytes, GetParam())
+                      .view(/*size=*/{token_count, kHiddenSize});
 
   torch::Tensor output = kernel::moe_expand_input(params);
   EXPECT_EQ(output.data_ptr(), output_bytes.data_ptr());
   EXPECT_TRUE(torch::equal(output.cpu(), expected));
 
-  params.input.add_(1);
+  params.input.add_(/*other=*/1);
   torch::Tensor reused = kernel::moe_expand_input(params);
   EXPECT_EQ(reused.data_ptr(), output_bytes.data_ptr());
   EXPECT_TRUE(torch::equal(reused.cpu(), expected + 1));
   EXPECT_TRUE(torch::equal(allocated.cpu(), expected));
 
   torch::Tensor storage_cpu = storage.cpu();
-  EXPECT_TRUE(
-      storage_cpu.slice(/*dim=*/0, 0, row_bytes).eq(-1).all().item<bool>());
+  EXPECT_TRUE(storage_cpu.slice(/*dim=*/0, /*start=*/0, row_bytes)
+                  .eq(/*other=*/-1)
+                  .all()
+                  .item<bool>());
   EXPECT_TRUE(storage_cpu.slice(/*dim=*/0, (token_count + 1) * row_bytes)
-                  .eq(-1)
+                  .eq(/*other=*/-1)
                   .all()
                   .item<bool>());
 }
