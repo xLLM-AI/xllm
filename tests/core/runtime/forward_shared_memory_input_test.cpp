@@ -335,5 +335,62 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
       torch::equal(decoded.positions, torch::tensor({0, 1}, torch::kInt32)));
 }
 
+using VlmForwardSharedMemoryInputTest =
+    ForwardSharedMemoryInputTest<VlmForwardInput>;
+
+TEST_F(VlmForwardSharedMemoryInputTest,
+       PackedVisualPayloadSurvivesSourceAndProtoRelease) {
+  const auto expected = torch::arange(12, torch::kFloat32).reshape({3, 4});
+  VlmForwardInput lazy;
+  {
+    VlmForwardInput source = make_input<VlmForwardInput>({});
+    auto pixels = expected.clone();
+    source.input_params.multimodal.mm_data.batch({MMData(
+        MMType::IMAGE,
+        MMItemVec{MMDataItem(MMType::IMAGE, {{"pixel_values", pixels}})})});
+    proto::PackedForwardInput packed;
+    ASSERT_TRUE(source.to_packed_proto(&packed));
+    pixels.zero_();
+    ASSERT_TRUE(lazy.from_packed_proto(packed));
+  }
+  const VlmForwardInput decoded =
+      lazy.to(torch::Device(torch::kCPU), torch::kFloat32);
+  const auto pixels =
+      decoded.input_params.multimodal.mm_data.get<torch::Tensor>(
+          "pixel_values");
+  ASSERT_TRUE(pixels.has_value());
+  EXPECT_TRUE(torch::equal(*pixels, expected));
+}
+
+TEST_F(VlmForwardSharedMemoryInputTest,
+       SharedVisualPayloadSurvivesPublisherSourceRelease) {
+  const auto expected = torch::arange(12, torch::kFloat32).reshape({3, 4});
+  const std::string name = "/xllm_visual_input_" + std::to_string(getpid());
+  bool creator = false;
+  ForwardSharedMemoryTransport writer(
+      name, /*size=*/1 << 20, creator, ForwardType::RAW_INPUT);
+  ForwardSharedMemoryTransport reader(
+      name, /*size=*/1 << 20, creator, ForwardType::RAW_INPUT);
+  {
+    VlmForwardInput source = make_input<VlmForwardInput>({});
+    auto pixels = expected.clone();
+    source.input_params.multimodal.mm_data.batch({MMData(
+        MMType::IMAGE,
+        MMItemVec{MMDataItem(MMType::IMAGE, {{"pixel_values", pixels}})})});
+    ASSERT_TRUE(writer.input_write(source));
+    pixels.zero_();
+  }
+  VlmForwardInput decoded;
+  ASSERT_TRUE(reader.input_read(
+      decoded,
+      torch::Device(torch::kCPU),
+      InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  const auto pixels =
+      decoded.input_params.multimodal.mm_data.get<torch::Tensor>(
+          "pixel_values");
+  ASSERT_TRUE(pixels.has_value());
+  EXPECT_TRUE(torch::equal(*pixels, expected));
+}
+
 }  // namespace
 }  // namespace xllm
