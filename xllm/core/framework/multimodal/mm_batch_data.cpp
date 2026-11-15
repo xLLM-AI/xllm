@@ -13,14 +13,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "mm_batch_data.h"
+#include "core/framework/multimodal/mm_batch_data.h"
 
 #include <cstring>
 
+#include "core/framework/multimodal/mm_visitor.h"
 #include "core/util/tensor_codec.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
-#include "mm_visitor.h"
 #include "tensor.pb.h"
 #include "worker.pb.h"
 
@@ -101,6 +101,13 @@ void MMBatchData::batch(std::vector<MMData> mm_datas) {
 
   MMDict dict;
   for (auto& pair : visitor.datas_) {
+    if (pair.second.size() == 1 && pair.second.front().defined() &&
+        pair.second.front().dim() > 0) {
+      // Retain a single contiguous input instead of copying the full visual
+      // payload before transport and again when the receiver rebuilds it.
+      dict[pair.first] = pair.second.front().contiguous();
+      continue;
+    }
     torch::Tensor tar;
     if (safe_concat(pair.second, tar)) {
       dict[pair.first] = tar;
