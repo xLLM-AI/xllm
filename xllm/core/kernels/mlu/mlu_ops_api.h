@@ -254,7 +254,8 @@ torch::Tensor moe_expand_input(
     const torch::Tensor& gather_index,
     const std::optional<torch::Tensor>& cusum_token_count,
     int64_t start_expert_id,
-    int64_t expert_size);
+    int64_t expert_size,
+    const std::optional<torch::Tensor>& output = std::nullopt);
 
 torch::Tensor moe_combine_result(
     const torch::Tensor& input,

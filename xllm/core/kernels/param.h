@@ -613,6 +613,9 @@ struct MoeExpandInputParams {
   // Number of experts to process in this call.
   // Must be >= 0.
   int64_t expert_size;
+  // Optional MLU output buffer, with the input dtype and shape
+  // [expand_token_num, hidden_size].
+  std::optional<torch::Tensor> output = std::nullopt;
   // ========== Torch ILU related parameters ==========
   // Inverse mapping of gather_idx.
   // Shape: [expand_token_num].
