@@ -48,7 +48,6 @@ void FusedMoEImpl::select_experts_all2all(
   }
 
   // Step 2: expand and quantize input if needed
-  torch::Tensor expand_hidden_states;
   torch::Tensor hidden_states_scale;
 
   // All2All path: use full token count (no slicing)
@@ -75,7 +74,7 @@ void FusedMoEImpl::select_experts_all2all(
     scaled_quantize_params.active_coef = 1.0;
     scaled_quantize_params.is_gated = false;
     scaled_quantize_params.quant_type = torch::kChar;
-    std::tie(expand_hidden_states, hidden_states_scale) =
+    std::tie(std::ignore, hidden_states_scale) =
         xllm::kernel::scaled_quantize(scaled_quantize_params);
     // since view_as_dtype has not supported stride yet,
     // we need to copy the scale output to the dispatch buffer
@@ -92,12 +91,9 @@ void FusedMoEImpl::select_experts_all2all(
     moe_expand_input_params.cusum_token_count = std::nullopt;
     moe_expand_input_params.start_expert_id = 0;
     moe_expand_input_params.expert_size = num_total_experts_;
-    expand_hidden_states =
-        xllm::kernel::moe_expand_input(moe_expand_input_params);
-    // use copy to place the output inside the dispatch buffer
-    torch::Tensor dispatch_tensor =
-        view_as_dtype(expand_hidden_states, torch::kChar);
-    dispatch_send_token_tensor.copy_(dispatch_tensor);
+    moe_expand_input_params.output = view_as_dtype(
+        dispatch_send_token_tensor, hidden_states_2d.scalar_type());
+    xllm::kernel::moe_expand_input(moe_expand_input_params);
   }
 
   // collect the selected tensor

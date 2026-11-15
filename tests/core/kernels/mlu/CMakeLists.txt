@@ -18,6 +18,18 @@ cc_test(
 
 cc_test(
   NAME
+    moe_expand_input_mlu_test
+  SRCS
+    moe_expand_input_test.cpp
+  DEPS
+    :kernels
+    torch
+    glog::glog
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     scaled_quantize_mlu_test
   SRCS
     scaled_quantize_test.cpp
