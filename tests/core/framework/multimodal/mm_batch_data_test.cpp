@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <future>
 #include <utility>
 #include <vector>
 
@@ -76,6 +77,58 @@ TEST(MMBatchDataTest, MultipleImagesKeepTheirInputOrder) {
   const auto gathered = batch.get<torch::Tensor>("pixel_values");
   ASSERT_TRUE(gathered.has_value());
   EXPECT_TRUE(torch::equal(*gathered, torch::cat({first, second})));
+}
+
+TEST(MMBatchDataTest, MultipleImagesRemainAvailableAfterMoveAndSourceRelease) {
+  MMBatchData moved;
+  {
+    const MMBatchData source({make_image(torch::full({2, 3}, 1.0)),
+                              make_image(torch::full({1, 3}, 2.0))});
+    // Reading the derived dictionary before moving must not discard the items.
+    ASSERT_TRUE(source.get<torch::Tensor>("pixel_values").has_value());
+    moved = MMBatchData::to(source, torch::Device(torch::kCPU));
+  }
+  const auto pixels = moved.get<torch::Tensor>("pixel_values");
+  ASSERT_TRUE(pixels.has_value());
+  EXPECT_TRUE(torch::equal(
+      *pixels, torch::tensor({{1., 1., 1.}, {1., 1., 1.}, {2., 2., 2.}})));
+  ASSERT_EQ(moved.mm_data_vec().size(), 2);
+}
+
+TEST(MMBatchDataTest, EncoderReplacementDiscardsPendingRawInputs) {
+  MMBatchData batch(
+      {make_image(torch::ones({2, 3})), make_image(torch::zeros({1, 3}))});
+  const auto embeddings = torch::full({3, 4}, 2.0);
+  batch.replace({{"image|embedding", embeddings}});
+  batch.to(torch::Device(torch::kCPU));
+  EXPECT_FALSE(batch.has("pixel_values"));
+  const auto gathered = batch.get<torch::Tensor>("image|embedding");
+  ASSERT_TRUE(gathered.has_value());
+  EXPECT_TRUE(torch::equal(*gathered, embeddings));
+}
+
+TEST(MMBatchDataTest,
+     BatchCopiesSupportConcurrentAggregationAndProtoRoundTrip) {
+  const MMBatchData batch(
+      {make_image(torch::ones({2, 3})), make_image(torch::zeros({1, 3}))});
+  auto read = [batch] { return batch.get<torch::Tensor>("pixel_values"); };
+  auto first = std::async(std::launch::async, read);
+  auto second = std::async(std::launch::async, read);
+  const auto expected = torch::cat({torch::ones({2, 3}), torch::zeros({1, 3})});
+  const auto first_pixels = first.get();
+  const auto second_pixels = second.get();
+  ASSERT_TRUE(first_pixels.has_value());
+  ASSERT_TRUE(second_pixels.has_value());
+  EXPECT_TRUE(torch::equal(*first_pixels, expected));
+  EXPECT_TRUE(torch::equal(*second_pixels, expected));
+  proto::MMData wire;
+  ASSERT_TRUE(mmdata_to_proto(batch, &wire));
+  MMBatchData decoded;
+  ASSERT_TRUE(proto_to_mmdata(wire, &decoded));
+  ASSERT_EQ(decoded.mm_data_vec().size(), 2);
+  const auto restored = decoded.get<torch::Tensor>("pixel_values");
+  ASSERT_TRUE(restored.has_value());
+  EXPECT_TRUE(torch::equal(*restored, expected));
 }
 
 TEST(MMBatchDataTest, ScalarAndIncompatibleInputsRemainTensorLists) {
