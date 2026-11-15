@@ -13,6 +13,7 @@ limitations under the License.
 
 #include "core/runtime/forward_shared_memory_transport.h"
 
+#include <butil/iobuf.h>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
@@ -2440,13 +2441,27 @@ bool input_layout_fits(const RawInputLayoutHeader& layout,
 template <typename Input>
 bool packed_proto_to_forward_input_impl(
     const proto::PackedForwardInput& packed_forward_input,
-    Input& forward_input) {
+    Input& forward_input,
+    const butil::IOBuf* attachment = nullptr) {
   const std::string& payload = packed_forward_input.payload();
+  if (attachment != nullptr && !payload.empty()) {
+    return false;
+  }
+  // Validate the fixed header before allocating the final host owner.
+  char header[kPackedInputHeaderBytes];
+  const size_t payload_size =
+      attachment != nullptr ? attachment->size() : payload.size();
+  const char* header_data = payload.data();
+  if (attachment != nullptr) {
+    if (payload_size < sizeof(header) ||
+        attachment->copy_to(header, sizeof(header)) != sizeof(header)) {
+      return false;
+    }
+    header_data = header;
+  }
   RawInputLayoutHeader layout;
-  if (!read_input_layout(payload.data(),
-                         payload.size(),
-                         packed_input_domain<Input>(),
-                         layout)) {
+  if (!read_input_layout(
+          header_data, payload_size, packed_input_domain<Input>(), layout)) {
     return false;
   }
   if (packed_forward_input.has_sample_count() &&
@@ -2463,16 +2478,21 @@ bool packed_proto_to_forward_input_impl(
       ExecutionConfig::get_instance().use_contiguous_input_buffer();
 #endif
   forward_input.runtime.input_host_buffer =
-      torch::empty({static_cast<int64_t>(payload.size())},
+      torch::empty({static_cast<int64_t>(payload_size)},
                    torch::TensorOptions()
                        .dtype(torch::kUInt8)
                        .device(torch::kCPU)
                        // Contiguous device preparation reuses an owned pinned
                        // payload; ordinary host decoding stays pageable.
                        .pinned_memory(use_pinned_memory));
-  std::memcpy(forward_input.runtime.input_host_buffer.data_ptr(),
-              payload.data(),
-              payload.size());
+  void* destination = forward_input.runtime.input_host_buffer.data_ptr();
+  if (attachment != nullptr) {
+    if (attachment->copy_to(destination, payload_size) != payload_size) {
+      return false;
+    }
+  } else {
+    std::memcpy(destination, payload.data(), payload_size);
+  }
   forward_input.runtime.input_host_buffer_has_layout = true;
   forward_input.runtime.device_tensors_ready = false;
   forward_input.input_host_sample_count =
@@ -3141,7 +3161,8 @@ namespace {
 template <typename Input>
 bool token_input_to_packed_proto(
     const Input& input,
-    proto::PackedForwardInput* packed_forward_input) {
+    proto::PackedForwardInput* packed_forward_input,
+    butil::IOBuf* attachment = nullptr) {
   CHECK(packed_forward_input != nullptr);
 
   const auto& sampling = input.sampling_params;
@@ -3162,15 +3183,30 @@ bool token_input_to_packed_proto(
   const int32_t sample_count = static_cast<int32_t>(num_seqs);
   const RawInputLayoutHeader layout = calculate_forward_input_layout(input);
   const uint64_t payload_size = get_input_layout_size(layout);
-  std::string payload;
-  payload.resize(static_cast<size_t>(payload_size));
-
-  char* payload_ptr = &payload[0];
-  serialize_forward_input(input, layout, payload_ptr);
-  CHECK_EQ(payload_ptr, &payload[0] + payload.size())
-      << "packed forward input payload size mismatch";
-
-  packed_forward_input->mutable_payload()->swap(payload);
+  if (attachment != nullptr) {
+    // IOBuf external blocks use a uint32 capacity with reserved overhead.
+    if (!attachment->empty() || payload_size > 0xFFFFFFFFULL - 100) {
+      return false;
+    }
+    auto payload = std::make_unique<char[]>(static_cast<size_t>(payload_size));
+    char* cursor = payload.get();
+    serialize_forward_input(input, layout, cursor);
+    CHECK_EQ(cursor, payload.get() + payload_size);
+    if (attachment->append_user_data(
+            payload.get(), payload_size, [](void* data) {
+              delete[] static_cast<char*>(data);
+            }) != 0) {
+      return false;
+    }
+    payload.release();
+    packed_forward_input->clear_payload();
+  } else {
+    std::string payload(static_cast<size_t>(payload_size), '\0');
+    char* cursor = payload.data();
+    serialize_forward_input(input, layout, cursor);
+    CHECK_EQ(cursor, payload.data() + payload.size());
+    packed_forward_input->mutable_payload()->swap(payload);
+  }
   packed_forward_input->set_sample_count(sample_count);
   return true;
 }
@@ -3209,6 +3245,28 @@ bool VlmForwardInput::from_packed_proto(
 bool LlmForwardInput::from_packed_proto(
     const proto::PackedForwardInput& packed_forward_input) {
   return packed_proto_to_forward_input_impl(packed_forward_input, *this);
+}
+
+bool LlmForwardInput::to_packed_attachment(proto::PackedForwardInput* metadata,
+                                           butil::IOBuf& attachment) const {
+  return token_input_to_packed_proto(*this, metadata, &attachment);
+}
+
+bool LlmForwardInput::from_packed_attachment(
+    const proto::PackedForwardInput& metadata,
+    const butil::IOBuf& attachment) {
+  return packed_proto_to_forward_input_impl(metadata, *this, &attachment);
+}
+
+bool VlmForwardInput::to_packed_attachment(proto::PackedForwardInput* metadata,
+                                           butil::IOBuf& attachment) const {
+  return token_input_to_packed_proto(*this, metadata, &attachment);
+}
+
+bool VlmForwardInput::from_packed_attachment(
+    const proto::PackedForwardInput& metadata,
+    const butil::IOBuf& attachment) {
+  return packed_proto_to_forward_input_impl(metadata, *this, &attachment);
 }
 
 bool DiTForwardInput::to_packed_proto(

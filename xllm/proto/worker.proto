@@ -368,6 +368,8 @@ message PackedForwardInput {
   // Workers must use the same runtime schema version. Readers
   // reject unversioned payloads and unsupported versions before materializing
   // tensors.
+  // LLM/VLM BRPC calls carry these bytes in request_attachment instead.
+  // An empty payload selects attachment transport; both must not be populated.
   bytes payload = 1;
   // Optional token-domain overlap hint, checked against the sampling row
   // count (SamplingParameters::num_sample_seqs) during worker preparation.

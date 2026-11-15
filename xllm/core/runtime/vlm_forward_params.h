@@ -49,6 +49,10 @@ class VlmForwardInput final {
 
   bool to_packed_proto(proto::PackedForwardInput* packed_forward_input) const;
   bool from_packed_proto(const proto::PackedForwardInput& packed_forward_input);
+  bool to_packed_attachment(proto::PackedForwardInput* metadata,
+                            butil::IOBuf& attachment) const;
+  bool from_packed_attachment(const proto::PackedForwardInput& metadata,
+                              const butil::IOBuf& attachment);
 
   VlmForwardInput clone() const {
     VlmForwardInput inputs;
