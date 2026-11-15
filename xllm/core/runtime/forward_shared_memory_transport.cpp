@@ -70,6 +70,7 @@ template <typename T>
 constexpr size_t type_size = sizeof(T);
 
 constexpr std::uintptr_t kCudaZeroCopyAlignment = 16;
+constexpr uint64_t kMinBorrowedTensorBytes = 64 * 1024;
 constexpr uint64_t kRawInputTensorArenaAlignment =
     static_cast<uint64_t>(kCudaZeroCopyAlignment);
 
@@ -164,6 +165,8 @@ bool read_input_layout(const char* payload,
 struct RawInputSectionCursor final {
   char* ptr = nullptr;
   uint64_t size = 0;
+  butil::IOBuf* attachment = nullptr;
+  bool write_ok = true;
 };
 
 struct RawInputSerializeContext final {
@@ -305,7 +308,9 @@ inline void write_bytes(RawInputSectionCursor& cursor,
   if (bytes == 0) {
     return;
   }
-  if (cursor.ptr != nullptr) {
+  if (cursor.attachment != nullptr) {
+    cursor.write_ok &= cursor.attachment->append(data, bytes) == 0;
+  } else if (cursor.ptr != nullptr) {
     std::memcpy(cursor.ptr, data, bytes);
     cursor.ptr += bytes;
   }
@@ -316,7 +321,11 @@ inline void write_padding(RawInputSectionCursor& cursor, uint64_t bytes) {
   if (bytes == 0) {
     return;
   }
-  if (cursor.ptr != nullptr) {
+  if (cursor.attachment != nullptr) {
+    static constexpr char kPadding[kRawInputTensorArenaAlignment] = {};
+    CHECK_LT(bytes, sizeof(kPadding));
+    cursor.write_ok &= cursor.attachment->append(kPadding, bytes) == 0;
+  } else if (cursor.ptr != nullptr) {
     std::memset(cursor.ptr, 0, bytes);
     cursor.ptr += bytes;
   }
@@ -411,7 +420,20 @@ inline void write_tensor(RawInputSerializeContext& context,
     return;
   }
 
-  if (context.tensor_arena.ptr != nullptr) {
+  if (context.tensor_arena.attachment != nullptr) {
+    torch::Tensor owner = to_cpu_contiguous(tensor);
+    // Keep small tensors packed into IOBuf blocks instead of adding an
+    // external block and a retained Tensor handle for every scalar field.
+    if (tensor_data_bytes >= kMinBorrowedTensorBytes) {
+      context.tensor_arena.write_ok &=
+          context.tensor_arena.attachment->append_user_data(
+              owner.data_ptr(), tensor_data_bytes, [owner](void*) {}) == 0;
+      context.tensor_arena.size += tensor_data_bytes;
+    } else {
+      write_bytes(
+          context.tensor_arena, owner.const_data_ptr(), tensor_data_bytes);
+    }
+  } else if (context.tensor_arena.ptr != nullptr) {
     if (tensor.device().is_cpu() && tensor.is_contiguous()) {
       write_bytes(
           context.tensor_arena, tensor.const_data_ptr(), tensor_data_bytes);
@@ -3188,17 +3210,43 @@ bool token_input_to_packed_proto(
     if (!attachment->empty() || payload_size > 0xFFFFFFFFULL - 100) {
       return false;
     }
-    auto payload = std::make_unique<char[]>(static_cast<size_t>(payload_size));
-    char* cursor = payload.get();
-    serialize_forward_input(input, layout, cursor);
-    CHECK_EQ(cursor, payload.get() + payload_size);
-    if (attachment->append_user_data(
-            payload.get(), payload_size, [](void* data) {
-              delete[] static_cast<char*>(data);
-            }) != 0) {
-      return false;
+    if (payload_size < kMinBorrowedTensorBytes) {
+      auto payload =
+          std::make_unique<char[]>(static_cast<size_t>(payload_size));
+      char* cursor = payload.get();
+      serialize_forward_input(input, layout, cursor);
+      CHECK_EQ(cursor, payload.get() + payload_size);
+      if (attachment->append_user_data(
+              payload.get(), payload_size, [](void* data) {
+                delete[] static_cast<char*>(data);
+              }) != 0) {
+        return false;
+      }
+      payload.release();
+    } else {
+      // Only metadata is contiguous on the sender. Tensor bytes keep their
+      // existing storage until the final IOBuf reference is released.
+      auto descriptor = std::make_unique<char[]>(
+          static_cast<size_t>(layout.tensor_arena_offset));
+      char* cursor = descriptor.get();
+      write_input_layout(cursor, layout, packed_input_domain<Input>());
+      butil::IOBuf encoded;
+      if (encoded.append_user_data(
+              descriptor.get(), layout.tensor_arena_offset, [](void* data) {
+                delete[] static_cast<char*>(data);
+              }) != 0) {
+        return false;
+      }
+      descriptor.release();
+      RawInputSerializeContext context{{cursor, 0}, {nullptr, 0, &encoded}};
+      serialize_forward_input_sections(input, context);
+      CHECK_EQ(context.descriptor.size, layout.descriptor_bytes);
+      CHECK_EQ(context.tensor_arena.size, layout.tensor_arena_bytes);
+      if (!context.tensor_arena.write_ok) {
+        return false;
+      }
+      attachment->swap(encoded);
     }
-    payload.release();
     packed_forward_input->clear_payload();
   } else {
     std::string payload(static_cast<size_t>(payload_size), '\0');
