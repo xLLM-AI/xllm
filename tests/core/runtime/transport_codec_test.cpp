@@ -472,6 +472,93 @@ TEST(TransportCodecTest, BinaryTensorAttachmentPreservesHalfTypesAndOffsets) {
   }
 }
 
+TEST(TransportCodecTest, EmbeddingAttachmentPreservesLifetimeAndTokenRows) {
+  proto::LLMForwardResponse encoded;
+  butil::IOBuf attachment;
+  {
+    ForwardOutput source;
+    source.sample_output.next_tokens =
+        torch::tensor({{7, 8}, {9, -1}}, torch::kInt32);
+    source.sample_output.embeddings =
+        torch::arange(4 * 16384, torch::kFloat32).reshape({2, 2, 16384});
+    source.sample_output.mm_embeddings = {{torch::ones({16384})}};
+    ASSERT_TRUE(encode_llm_output(source, /*stats=*/{}, &encoded, &attachment));
+    EXPECT_EQ(attachment.backing_block(0).data(),
+              source.sample_output.embeddings.const_data_ptr());
+    EXPECT_TRUE(encoded.outputs(0).tokens(0).embeddings().vals().empty());
+    EXPECT_EQ(
+        encoded.outputs(0).tokens(1).embeddings().attachment_slice().offset(),
+        16384 * sizeof(float));
+  }
+  RawForwardOutput decoded;
+  {
+    const BinaryPayload payload(attachment);
+    attachment.clear();
+    ASSERT_TRUE(decode_llm_output(encoded, decoded, &payload));
+  }
+  ASSERT_EQ(decoded.outputs.size(), 2);
+  ASSERT_EQ(decoded.outputs[0].tokens.size(), 2);
+  ASSERT_EQ(decoded.outputs[1].tokens.size(), 1);
+  EXPECT_EQ(decoded.outputs[0].tokens[0].embeddings.size(), 16384);
+  EXPECT_FLOAT_EQ(decoded.outputs[0].tokens[0].embeddings.front(), 0);
+  EXPECT_FLOAT_EQ(decoded.outputs[0].tokens[1].embeddings.back(), 32767);
+  EXPECT_FLOAT_EQ(decoded.outputs[1].tokens[0].embeddings.front(), 32768);
+  EXPECT_TRUE(
+      torch::equal(decoded.outputs[0].mm_embeddings[0], torch::ones({16384})));
+}
+
+TEST(TransportCodecTest, EmbeddingAttachmentRejectsMalformedSlicesAtomically) {
+  ForwardOutput source;
+  source.sample_output.embeddings = torch::ones({1, 16384});
+  proto::VLMForwardResponse encoded;
+  butil::IOBuf attachment;
+  ASSERT_TRUE(encode_vlm_output(source, /*stats=*/{}, &encoded, &attachment));
+  RawForwardOutput destination;
+  destination.prepared_token = 123;
+  EXPECT_FALSE(decode_vlm_output(encoded, destination));
+  const BinaryPayload payload(attachment);
+  auto* embeddings =
+      encoded.mutable_outputs(0)->mutable_tokens(0)->mutable_embeddings();
+  embeddings->add_vals(1.0f);
+  EXPECT_FALSE(decode_vlm_output(encoded, destination, &payload));
+  embeddings->clear_vals();
+  auto* slice = embeddings->mutable_attachment_slice();
+  slice->set_count(0);
+  EXPECT_FALSE(decode_vlm_output(encoded, destination, &payload));
+  slice->set_count(16384);
+  slice->set_offset(1);
+  EXPECT_FALSE(decode_vlm_output(encoded, destination, &payload));
+  slice->set_offset(0);
+  attachment.pop_back(1);
+  const BinaryPayload truncated(attachment);
+  EXPECT_FALSE(decode_vlm_output(encoded, destination, &truncated));
+  EXPECT_EQ(destination.prepared_token, 123);
+}
+
+TEST(TransportCodecTest, EmbeddingAttachmentKeepsSmallAndLegacyOutputsInline) {
+  for (const int64_t elements : {16383, 16384}) {
+    ForwardOutput source;
+    source.sample_output.embeddings =
+        torch::arange(elements, torch::kFloat32).reshape({1, elements});
+    for (const bool attached : {false, true}) {
+      proto::LLMForwardResponse encoded;
+      butil::IOBuf attachment;
+      ASSERT_TRUE(encode_llm_output(
+          source, /*stats=*/{}, &encoded, attached ? &attachment : nullptr));
+      EXPECT_EQ(
+          encoded.outputs(0).tokens(0).embeddings().has_attachment_slice(),
+          attached && elements == 16384);
+      const BinaryPayload payload(attachment);
+      RawForwardOutput decoded;
+      ASSERT_TRUE(decode_llm_output(encoded, decoded, &payload));
+      EXPECT_EQ(decoded.outputs[0].tokens[0].id, -1);
+      EXPECT_EQ(decoded.outputs[0].tokens[0].embeddings.size(), elements);
+      EXPECT_FLOAT_EQ(decoded.outputs[0].tokens[0].embeddings.back(),
+                      elements - 1);
+    }
+  }
+}
+
 TEST(TransportCodecTest, DiTOutputRoundTripPreservesTensorAndTextPayloads) {
   ForwardOutput source;
   source.dit_forward_output.tensors = {torch::tensor({5.0f, 6.0f})};
