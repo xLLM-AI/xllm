@@ -91,9 +91,10 @@ bool valid_token_output(const torch::Tensor& next_tokens,
   return true;
 }
 
-void append_token(const Token& token,
+bool append_token(const Token& token,
                   const torch::Tensor& token_embeddings,
-                  proto::SquenceOutput* sequence_output) {
+                  proto::SquenceOutput* sequence_output,
+                  butil::IOBuf* attachment) {
   proto::Token* pb_token = sequence_output->add_tokens();
   pb_token->set_id(token.id);
   if (token.logprob.has_value()) {
@@ -112,10 +113,23 @@ void append_token(const Token& token,
     pb_token->add_top_logprobs(top_logprob);
   }
   if (token_embeddings.defined()) {
+    constexpr size_t kMinAttachedEmbeddingBytes = 64 * 1024;
+    if (attachment != nullptr &&
+        token_embeddings.nbytes() >= kMinAttachedEmbeddingBytes) {
+      auto* slice = pb_token->mutable_embeddings()->mutable_attachment_slice();
+      slice->set_offset(attachment->size());
+      slice->set_count(token_embeddings.numel());
+      // Keep immutable source storage alive until BRPC releases the payload.
+      return token_embeddings.nbytes() <= 0xFFFFFFFFULL - 100 &&
+             attachment->append_user_data(token_embeddings.data_ptr(),
+                                          token_embeddings.nbytes(),
+                                          [token_embeddings](void*) {}) == 0;
+    }
     Slice<float> embedding_slice = tensor_slice<float>(token_embeddings);
     ADD_VECTOR_TO_PROTO(pb_token->mutable_embeddings()->mutable_vals(),
                         embedding_slice);
   }
+  return true;
 }
 
 template <typename Response>
@@ -156,8 +170,26 @@ bool decode_token_output(const Response& response,
                                       token.top_tokens().end());
       decoded_token.top_logprobs.assign(token.top_logprobs().begin(),
                                         token.top_logprobs().end());
-      decoded_token.embeddings.assign(token.embeddings().vals().begin(),
-                                      token.embeddings().vals().end());
+      const auto& embeddings = token.embeddings();
+      if (embeddings.has_attachment_slice()) {
+        const auto& slice = embeddings.attachment_slice();
+        if (attachment == nullptr || !embeddings.vals().empty() ||
+            slice.count() == 0 || slice.offset() > attachment->size() ||
+            slice.count() >
+                (attachment->size() - slice.offset()) / sizeof(float)) {
+          LOG(ERROR) << "Invalid " << model_name << " embedding attachment";
+          return false;
+        }
+        decoded_token.embeddings.resize(slice.count());
+        if (!attachment->copy_to(slice.offset(),
+                                 slice.count() * sizeof(float),
+                                 decoded_token.embeddings.data())) {
+          return false;
+        }
+      } else {
+        decoded_token.embeddings.assign(embeddings.vals().begin(),
+                                        embeddings.vals().end());
+      }
       sample.tokens.emplace_back(std::move(decoded_token));
     }
     sample.mm_embeddings.reserve(sequence.mm_embeddings().tensors_size());
@@ -258,7 +290,13 @@ bool encode_token_output(
         }
         const auto token_embeddings =
             curr_embeddings.defined() ? curr_embeddings[i] : curr_embeddings;
-        append_token(token, token_embeddings, pb_seq_out);
+        if (!append_token(
+                token,
+                token_embeddings,
+                pb_seq_out,
+                attachment == nullptr ? nullptr : &encoded_attachment)) {
+          return false;
+        }
       }
     } else {
       pb_seq_out->mutable_tokens()->Reserve(1);
@@ -270,7 +308,13 @@ bool encode_token_output(
       }
       const auto token_embeddings =
           embeddings.defined() ? embeddings[output_idx] : embeddings;
-      append_token(token, token_embeddings, pb_seq_out);
+      if (!append_token(
+              token,
+              token_embeddings,
+              pb_seq_out,
+              attachment == nullptr ? nullptr : &encoded_attachment)) {
+        return false;
+      }
     }
     if (output_idx < static_cast<int32_t>(mm_embeddings.size())) {
       const auto& tensors = mm_embeddings[output_idx];

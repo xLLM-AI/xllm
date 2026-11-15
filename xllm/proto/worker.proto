@@ -391,6 +391,12 @@ message DITForwardRequest {
 
 message Embeddings {
   repeated float vals = 1;
+  // FP32 values in the BRPC response attachment; exclusive with vals.
+  message AttachmentSlice {
+    uint64 offset = 1;
+    uint64 count = 2;
+  }
+  AttachmentSlice attachment_slice = 2;
 }
 
 message Token {
