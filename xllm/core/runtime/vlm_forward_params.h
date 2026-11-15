@@ -49,6 +49,8 @@ class VlmForwardInput final {
 
   bool to_packed_proto(proto::PackedForwardInput* packed_forward_input) const;
   bool from_packed_proto(const proto::PackedForwardInput& packed_forward_input);
+  // Large continuous CPU tensors are retained by the attachment. Callers must
+  // keep their storage immutable until the attachment is released.
   bool to_packed_attachment(proto::PackedForwardInput* metadata,
                             butil::IOBuf& attachment) const;
   bool from_packed_attachment(const proto::PackedForwardInput& metadata,

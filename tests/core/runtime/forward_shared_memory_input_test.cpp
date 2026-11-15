@@ -427,6 +427,61 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
       torch::equal(decoded.token_ids, torch::tensor({11, 23}, torch::kInt32)));
 }
 
+TYPED_TEST(ForwardSharedMemoryInputTest,
+           AttachmentRetainsLargeTensorStorageAfterSourceRelease) {
+  proto::PackedForwardInput metadata;
+  butil::IOBuf attachment;
+  std::string expected_payload;
+  const void* tensor_storage = nullptr;
+  {
+    TypeParam source = make_input<TypeParam>({});
+    source.token_ids = torch::arange(32768, torch::kInt32);
+    tensor_storage = source.token_ids.const_data_ptr();
+    proto::PackedForwardInput packed;
+    ASSERT_TRUE(source.to_packed_proto(&packed));
+    expected_payload = packed.payload();
+    ASSERT_TRUE(source.to_packed_attachment(&metadata, attachment));
+    bool retained_tensor_storage = false;
+    for (size_t index = 0; index < attachment.backing_block_num(); ++index) {
+      retained_tensor_storage |=
+          attachment.backing_block(index).data() == tensor_storage;
+    }
+    EXPECT_TRUE(retained_tensor_storage);
+  }
+  std::string actual_payload;
+  attachment.copy_to(&actual_payload);
+  EXPECT_EQ(actual_payload, expected_payload);
+  TypeParam lazy;
+  ASSERT_TRUE(lazy.from_packed_attachment(metadata, attachment));
+  attachment.clear();
+  const TypeParam decoded =
+      lazy.to(torch::Device(torch::kCPU), torch::kFloat32);
+  EXPECT_TRUE(
+      torch::equal(decoded.token_ids, torch::arange(32768, torch::kInt32)));
+}
+
+TYPED_TEST(ForwardSharedMemoryInputTest,
+           AttachmentMaterializesLargeNoncontiguousTensor) {
+  proto::PackedForwardInput metadata;
+  butil::IOBuf attachment;
+  {
+    TypeParam source = make_input<TypeParam>({});
+    source.token_ids =
+        torch::arange(65536, torch::kInt32)
+            .slice(/*dim=*/0, /*start=*/0, /*end=*/65536, /*step=*/2);
+    ASSERT_FALSE(source.token_ids.is_contiguous());
+    ASSERT_TRUE(source.to_packed_attachment(&metadata, attachment));
+    source.token_ids.zero_();
+  }
+  TypeParam lazy;
+  ASSERT_TRUE(lazy.from_packed_attachment(metadata, attachment));
+  attachment.clear();
+  const TypeParam decoded =
+      lazy.to(torch::Device(torch::kCPU), torch::kFloat32);
+  EXPECT_TRUE(torch::equal(decoded.token_ids,
+                           torch::arange(0, 65536, 2, torch::kInt32)));
+}
+
 TYPED_TEST(ForwardSharedMemoryInputTest, RejectsInvalidAttachmentEnvelope) {
   TypeParam source = make_input<TypeParam>({});
   proto::PackedForwardInput metadata;
