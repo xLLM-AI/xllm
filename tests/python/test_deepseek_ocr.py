@@ -117,10 +117,10 @@ class TestTokenGridContract:
             torch.nn.init.constant_(model.image_newline, -1.0)
             torch.nn.init.constant_(model.view_seperator, -2.0)
 
-            pixel_values = torch.zeros(1, 3, BASE_SIZE, BASE_SIZE)
-            crops = torch.zeros(2 * 2, 3, CROP_SIZE, CROP_SIZE)
-            spatial = torch.tensor([[2, 2]])
-            embeds = model.encode(pixel_values, crops, spatial, BASE_SIZE, CROP_SIZE)
+        pixel_values = torch.zeros(1, 3, BASE_SIZE, BASE_SIZE)
+        crops = torch.zeros(2 * 2, 3, CROP_SIZE, CROP_SIZE)
+        spatial = torch.tensor([[2, 2]])
+        embeds = model.encode(pixel_values, crops, spatial, BASE_SIZE, CROP_SIZE)
 
         n_crops_rows = (10 * 2 + 1) * (10 * 2)  # q_crop=10, 2x2 crop grid: 20 rows of 21
         n_global_rows = 16 * 17  # q_base=16: 16 rows of (16 tokens + 1 newline)
