@@ -17,10 +17,9 @@ limitations under the License.
 
 namespace xllm::testing {
 
-// Mirror xllm.cpp::main()::init_npu_python_runtime(): aclInit tolerating
-// ACL_ERROR_INTERNAL_ERROR, Py_InitializeEx, import torch_npu + _npu_init(),
-// then PyEval_SaveThread() to release the GIL. Idempotent — safe to call from
-// multiple Environments in the same process.
+// Initialize ACL and embedded Python, then release the GIL after initializing
+// this binary's pybind11 thread state. Idempotent — safe to call from multiple
+// Environments in the same process.
 void init_npu_test_runtime();
 
 // Reacquire the GIL and finalize NPU queues before static resources are
