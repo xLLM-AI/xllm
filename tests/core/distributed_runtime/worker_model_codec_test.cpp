@@ -96,9 +96,10 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   source.dit_forward_output.tensors = {torch::Tensor()};
   source.dit_forward_output.text_output = {"unused"};
   typename TypeParam::Response encoded;
-  ASSERT_TRUE(TypeParam::encode(source, {{1, 2}, {2, 3}}, &encoded));
+  ASSERT_TRUE(TypeParam::encode(
+      source, {{1, 2}, {2, 3}}, &encoded, /*attachment=*/nullptr));
   RawForwardOutput decoded = original_output();
-  ASSERT_TRUE(TypeParam::decode(encoded, decoded));
+  ASSERT_TRUE(TypeParam::decode(encoded, decoded, /*attachment=*/nullptr));
 
   ASSERT_EQ(decoded.outputs.size(), 2);
   ASSERT_EQ(decoded.outputs[0].tokens.size(), 1);
@@ -138,13 +139,14 @@ TYPED_TEST(WorkerModelTokenCodecTest,
       source.expert_load_data = torch::tensor({{0, 2}, {3, 0}}, torch::kInt64);
       source.prepared_token = 0;
       typename TypeParam::Response encoded;
-      ASSERT_TRUE(TypeParam::encode(source, {}, &encoded));
+      ASSERT_TRUE(
+          TypeParam::encode(source, {}, &encoded, /*attachment=*/nullptr));
       source.expert_load_data.zero_();
       source.prepared_token = -1;
       EPLBConfig::get_instance().enable_eplb(!global_enabled);
 
       RawForwardOutput decoded;
-      ASSERT_TRUE(TypeParam::decode(encoded, decoded));
+      ASSERT_TRUE(TypeParam::decode(encoded, decoded, /*attachment=*/nullptr));
       EXPECT_EQ(decoded.outputs.size(), has_sampled_tokens ? 1 : 0);
       EXPECT_EQ(decoded.expert_load_data, (std::vector<int64_t>{0, 2, 3, 0}));
       EXPECT_EQ(decoded.prepared_token, 0);
@@ -165,10 +167,11 @@ TYPED_TEST(WorkerModelTokenCodecTest,
       }
       source.prepared_token = prepared_token;
       typename TypeParam::Response encoded;
-      ASSERT_TRUE(TypeParam::encode(source, {}, &encoded));
+      ASSERT_TRUE(
+          TypeParam::encode(source, {}, &encoded, /*attachment=*/nullptr));
       RawForwardOutput decoded = original_output();
       decoded.expert_load_data = {9};
-      ASSERT_TRUE(TypeParam::decode(encoded, decoded));
+      ASSERT_TRUE(TypeParam::decode(encoded, decoded, /*attachment=*/nullptr));
       EXPECT_EQ(decoded.outputs.size(), has_sampled_tokens ? 1 : 0);
       EXPECT_TRUE(decoded.expert_load_data.empty());
       EXPECT_EQ(decoded.prepared_token, prepared_token);
@@ -201,12 +204,14 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   invalid_inputs[7].sample_output.mm_embeddings = {{torch::Tensor()}};
 
   for (const ForwardOutput& invalid : invalid_inputs) {
-    EXPECT_FALSE(TypeParam::encode(invalid, {}, &destination));
+    EXPECT_FALSE(
+        TypeParam::encode(invalid, {}, &destination, /*attachment=*/nullptr));
     EXPECT_EQ(destination.SerializeAsString(), original);
   }
-  EXPECT_FALSE(TypeParam::encode(valid, {{1, 2}}, &destination));
+  EXPECT_FALSE(
+      TypeParam::encode(valid, {{1, 2}}, &destination, /*attachment=*/nullptr));
   EXPECT_EQ(destination.SerializeAsString(), original);
-  EXPECT_FALSE(TypeParam::encode(valid, {}, nullptr));
+  EXPECT_FALSE(TypeParam::encode(valid, {}, nullptr, /*attachment=*/nullptr));
 }
 
 TYPED_TEST(WorkerModelTokenCodecTest,
@@ -216,7 +221,8 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   invalid_inputs[1].add_outputs()->mutable_mm_embeddings()->add_tensors();
   for (const typename TypeParam::Response& invalid : invalid_inputs) {
     RawForwardOutput destination = original_output();
-    EXPECT_FALSE(TypeParam::decode(invalid, destination));
+    EXPECT_FALSE(
+        TypeParam::decode(invalid, destination, /*attachment=*/nullptr));
     expect_original_output(destination);
   }
 }
@@ -237,9 +243,10 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   source.sample_output.mm_embeddings = {{torch::tensor({1.0f, 2.0f})},
                                         {torch::tensor({3.0f})}};
   typename TypeParam::Response encoded;
-  ASSERT_TRUE(TypeParam::encode(source, {{1, 2}, {2, 2}}, &encoded));
+  ASSERT_TRUE(TypeParam::encode(
+      source, {{1, 2}, {2, 2}}, &encoded, /*attachment=*/nullptr));
   RawForwardOutput decoded;
-  ASSERT_TRUE(TypeParam::decode(encoded, decoded));
+  ASSERT_TRUE(TypeParam::decode(encoded, decoded, /*attachment=*/nullptr));
   ASSERT_EQ(decoded.outputs.size(), 2);
   ASSERT_EQ(decoded.outputs[0].tokens.size(), 1);
   EXPECT_EQ(decoded.outputs[0].tokens[0].id, 7);
@@ -269,12 +276,14 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   ForwardOutput source;
   source.sample_output.next_tokens = torch::empty({0, 2}, torch::kInt64);
   source.sample_output.mm_embeddings = {{torch::tensor({1.0f})}};
-  EXPECT_FALSE(TypeParam::encode(source, {}, &destination));
+  EXPECT_FALSE(
+      TypeParam::encode(source, {}, &destination, /*attachment=*/nullptr));
   EXPECT_EQ(destination.SerializeAsString(), original);
 
   source.sample_output.mm_embeddings.clear();
   source.sample_output.embeddings = torch::ones({1, 2, 1}, torch::kFloat32);
-  EXPECT_FALSE(TypeParam::encode(source, {}, &destination));
+  EXPECT_FALSE(
+      TypeParam::encode(source, {}, &destination, /*attachment=*/nullptr));
   EXPECT_EQ(destination.SerializeAsString(), original);
 }
 
@@ -284,9 +293,9 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   source.sample_output.next_tokens = torch::empty({1, 0}, torch::kInt64);
   source.sample_output.mm_embeddings = {{torch::tensor({1.0f, 2.0f})}};
   typename TypeParam::Response encoded;
-  ASSERT_TRUE(TypeParam::encode(source, {}, &encoded));
+  ASSERT_TRUE(TypeParam::encode(source, {}, &encoded, /*attachment=*/nullptr));
   RawForwardOutput decoded;
-  ASSERT_TRUE(TypeParam::decode(encoded, decoded));
+  ASSERT_TRUE(TypeParam::decode(encoded, decoded, /*attachment=*/nullptr));
   ASSERT_EQ(decoded.outputs.size(), 1);
   EXPECT_TRUE(decoded.outputs[0].tokens.empty());
   ASSERT_EQ(decoded.outputs[0].mm_embeddings.size(), 1);
@@ -300,9 +309,9 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   source.sample_output.embeddings = torch::tensor({{1.0f, 2.0f}});
   typename TypeParam::Response encoded;
   encoded.add_json_object_errors()->set_message("stale");
-  ASSERT_TRUE(TypeParam::encode(source, {}, &encoded));
+  ASSERT_TRUE(TypeParam::encode(source, {}, &encoded, /*attachment=*/nullptr));
   RawForwardOutput decoded = original_output();
-  ASSERT_TRUE(TypeParam::decode(encoded, decoded));
+  ASSERT_TRUE(TypeParam::decode(encoded, decoded, /*attachment=*/nullptr));
   ASSERT_EQ(decoded.outputs.size(), 1);
   ASSERT_EQ(decoded.outputs[0].tokens.size(), 1);
   EXPECT_EQ(decoded.outputs[0].tokens[0].id, -1);
@@ -313,8 +322,9 @@ TYPED_TEST(WorkerModelTokenCodecTest,
   EXPECT_TRUE(decoded.json_object_errors.empty());
   EXPECT_TRUE(decoded.dit_forward_output.text_output.empty());
 
-  ASSERT_TRUE(TypeParam::encode(ForwardOutput{}, {}, &encoded));
-  ASSERT_TRUE(TypeParam::decode(encoded, decoded));
+  ASSERT_TRUE(
+      TypeParam::encode(ForwardOutput{}, {}, &encoded, /*attachment=*/nullptr));
+  ASSERT_TRUE(TypeParam::decode(encoded, decoded, /*attachment=*/nullptr));
   EXPECT_TRUE(decoded.outputs.empty());
   EXPECT_TRUE(decoded.expert_load_data.empty());
   EXPECT_EQ(decoded.prepared_token, -1);

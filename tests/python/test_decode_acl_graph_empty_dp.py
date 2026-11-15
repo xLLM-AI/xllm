@@ -184,7 +184,7 @@ def _dsa_runner(**backend_overrides: object) -> DecodeAclGraphRunner:
         nn.Identity(),
         backend,
         torch.device("cpu"),
-        max_batch=4,
+        max_batch=8,
         max_model_len=512,
         dp_size=2,
         dp_rank=1,
