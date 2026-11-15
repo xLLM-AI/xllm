@@ -131,6 +131,7 @@ cc_library(
     :eplb
     glog::glog
     Folly::folly
+    brpc
     absl::strings
     absl::function_ref
     absl::synchronization

@@ -595,14 +595,17 @@ bool CommChannel::execute_llm_model_with_brpc(
     const LlmForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
   proto::LLMForwardRequest request;
-  if (!input.to_packed_proto(request.mutable_packed_input())) {
+  auto done = std::make_unique<ExecuteLLMModelClosure>();
+  if (!input.to_packed_attachment(request.mutable_packed_input(),
+                                  done->cntl.request_attachment())) {
     LOG(ERROR) << "Failed to pack LlmForwardInput for remote execution";
     promise.setValue(std::optional<RawForwardOutput>{});
     return false;
   }
-  auto* done = new ExecuteLLMModelClosure();
   done->promise = std::move(promise);
-  stub_->ExecuteLLMModel(&done->cntl, &request, &done->pb_output, done);
+  auto* closure = done.release();
+  stub_->ExecuteLLMModel(
+      &closure->cntl, &request, &closure->pb_output, closure);
   return true;
 }
 
@@ -669,14 +672,17 @@ bool CommChannel::execute_vlm_model_with_brpc(
     const VlmForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
   proto::VLMForwardRequest request;
-  if (!input.to_packed_proto(request.mutable_packed_input())) {
+  auto done = std::make_unique<ExecuteVLMModelClosure>();
+  if (!input.to_packed_attachment(request.mutable_packed_input(),
+                                  done->cntl.request_attachment())) {
     LOG(ERROR) << "Failed to pack VlmForwardInput for remote execution";
     promise.setValue(std::optional<RawForwardOutput>{});
     return false;
   }
-  auto* done = new ExecuteVLMModelClosure();
   done->promise = std::move(promise);
-  stub_->ExecuteVLMModel(&done->cntl, &request, &done->pb_output, done);
+  auto* closure = done.release();
+  stub_->ExecuteVLMModel(
+      &closure->cntl, &request, &closure->pb_output, closure);
   return true;
 }
 

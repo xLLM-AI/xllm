@@ -568,7 +568,13 @@ void WorkerService::ExecuteLLMModel(
     }
     LlmForwardInput input;
     // The native reader checks schema, layout, and domain before preparation.
-    if (!input.from_packed_proto(request->packed_input())) {
+    const auto& attachment =
+        static_cast<brpc::Controller*>(controller)->request_attachment();
+    const bool decoded =
+        attachment.empty()
+            ? input.from_packed_proto(request->packed_input())
+            : input.from_packed_attachment(request->packed_input(), attachment);
+    if (!decoded) {
       controller->SetFailed("Invalid LLM input domain, schema, or layout");
       return;
     }
@@ -746,7 +752,13 @@ void WorkerService::ExecuteVLMModel(
     }
     VlmForwardInput input;
     // The native reader checks schema, layout, and domain before preparation.
-    if (!input.from_packed_proto(request->packed_input())) {
+    const auto& attachment =
+        static_cast<brpc::Controller*>(controller)->request_attachment();
+    const bool decoded =
+        attachment.empty()
+            ? input.from_packed_proto(request->packed_input())
+            : input.from_packed_attachment(request->packed_input(), attachment);
+    if (!decoded) {
       controller->SetFailed("Invalid VLM input domain, schema, or layout");
       return;
     }

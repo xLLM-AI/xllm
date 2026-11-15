@@ -45,6 +45,10 @@ limitations under the License.
 #include "runtime/dit_forward_params.h"
 #include "runtime/forward_runtime_state.h"
 
+namespace butil {
+class IOBuf;
+}
+
 namespace xllm {
 
 namespace proto {
@@ -362,6 +366,10 @@ class LlmForwardInput final {
 
   bool to_packed_proto(proto::PackedForwardInput* packed_forward_input) const;
   bool from_packed_proto(const proto::PackedForwardInput& packed_forward_input);
+  bool to_packed_attachment(proto::PackedForwardInput* metadata,
+                            butil::IOBuf& attachment) const;
+  bool from_packed_attachment(const proto::PackedForwardInput& metadata,
+                              const butil::IOBuf& attachment);
 
   LlmForwardInput clone() const {
     LlmForwardInput inputs;

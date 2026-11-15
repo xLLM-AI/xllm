@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <butil/iobuf.h>
 #include <gtest/gtest.h>
 #include <unistd.h>
 
@@ -390,6 +391,60 @@ TEST_F(VlmForwardSharedMemoryInputTest,
           "pixel_values");
   ASSERT_TRUE(pixels.has_value());
   EXPECT_TRUE(torch::equal(*pixels, expected));
+}
+
+TYPED_TEST(ForwardSharedMemoryInputTest,
+           AttachmentPreservesValuesAfterTransportRelease) {
+  TypeParam source = make_input<TypeParam>({});
+  source.token_ids = torch::tensor({11, 23}, torch::kInt32);
+  proto::PackedForwardInput metadata;
+  butil::IOBuf attachment;
+  ASSERT_TRUE(source.to_packed_attachment(&metadata, attachment));
+  EXPECT_TRUE(metadata.payload().empty());
+
+  // Force the receive path to span several independently owned IOBuf blocks.
+  std::string bytes;
+  attachment.copy_to(&bytes);
+  attachment.clear();
+  butil::IOBuf fragmented;
+  for (size_t offset = 0; offset < bytes.size(); offset += 7) {
+    const size_t length = std::min(size_t{7}, bytes.size() - offset);
+    char* block = new char[length];
+    std::memcpy(block, bytes.data() + offset, length);
+    ASSERT_EQ(fragmented.append_user_data(
+                  block,
+                  length,
+                  [](void* data) { delete[] static_cast<char*>(data); }),
+              0);
+  }
+  TypeParam lazy;
+  ASSERT_TRUE(lazy.from_packed_attachment(metadata, fragmented));
+  fragmented.clear();
+  source.token_ids.zero_();
+  const TypeParam decoded =
+      lazy.to(torch::Device(torch::kCPU), torch::kFloat32);
+  EXPECT_TRUE(
+      torch::equal(decoded.token_ids, torch::tensor({11, 23}, torch::kInt32)));
+}
+
+TYPED_TEST(ForwardSharedMemoryInputTest, RejectsInvalidAttachmentEnvelope) {
+  TypeParam source = make_input<TypeParam>({});
+  proto::PackedForwardInput metadata;
+  butil::IOBuf attachment;
+  ASSERT_TRUE(source.to_packed_attachment(&metadata, attachment));
+  TypeParam decoded;
+  metadata.set_payload("ambiguous");
+  EXPECT_FALSE(decoded.from_packed_attachment(metadata, attachment));
+  metadata.clear_payload();
+  butil::IOBuf truncated;
+  truncated.append("short", 5);
+  EXPECT_FALSE(decoded.from_packed_attachment(metadata, truncated));
+  std::string bytes;
+  attachment.copy_to(&bytes);
+  bytes[sizeof(uint64_t)] ^= 1;
+  butil::IOBuf wrong_version;
+  wrong_version.append(bytes);
+  EXPECT_FALSE(decoded.from_packed_attachment(metadata, wrong_version));
 }
 
 }  // namespace
