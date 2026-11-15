@@ -24,7 +24,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/model_args.h"
-#include "core/framework/model/model_type.h"
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/util/utils.h"
@@ -34,12 +33,8 @@ namespace xllm {
 
 enum class MtpProjectionType { CONCAT_EH_PROJ, ADD_EH_PROJ };
 
-inline bool is_deepseek_v4_mtp_model(const ModelArgs& model_args) {
-  return util::is_target_mtp_model_type(model_args.model_type(), "deepseek_v4");
-}
-
 inline MtpProjectionType get_mtp_projection_type(const ModelArgs& model_args) {
-  if (is_deepseek_v4_mtp_model(model_args)) {
+  if (model_args.model_type() == "deepseek_v4_mtp") {
     return MtpProjectionType::ADD_EH_PROJ;
   }
   return MtpProjectionType::CONCAT_EH_PROJ;
@@ -84,13 +79,13 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
                                                   options));
     }
     const int32_t decoder_layer_index =
-        is_deepseek_v4_mtp_model(model_args_)
+        model_args_.model_type() == "deepseek_v4_mtp"
             ? std::min<int32_t>(layer_index, model_args_.n_layers() - 1)
             : layer_index;
     mtp_block_ = register_module(
         "mtp_block", DecoderLayerType(context, decoder_layer_index));
 
-    if (is_deepseek_v4_mtp_model(model_args_)) {
+    if (model_args_.model_type() == "deepseek_v4_mtp") {
       const int64_t hc_mult = model_args_.hc_mult();
       const int64_t hc_dim = hc_mult * model_args_.hidden_size();
       auto hc_options = options.dtype(torch::kFloat32);
@@ -181,7 +176,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
         << "embedding is not defined in input_params.embedding.input_embedding";
     torch::Tensor previous_hidden_states = embedding_data;
     torch::Tensor hidden_states;
-    if (is_deepseek_v4_mtp_model(model_args_)) {
+    if (model_args_.model_type() == "deepseek_v4_mtp") {
       const int64_t hidden = model_args_.hidden_size();
       const int64_t hc_mult = model_args_.hc_mult();
       const int64_t aux_hidden = hc_mult * hidden;
@@ -227,7 +222,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
                                     input_params,
                                     input_ids);
 
-    if (is_deepseek_v4_mtp_model(model_args_)) {
+    if (model_args_.model_type() == "deepseek_v4_mtp") {
       if (aux_hidden_states != nullptr) {
         *aux_hidden_states = hidden_states;
       }
@@ -257,7 +252,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
       eh_proj_->load_state_dict(state_dict.get_dict_with_prefix("eh_proj."));
     }
     mtp_block_->load_state_dict(state_dict);
-    if (is_deepseek_v4_mtp_model(model_args_)) {
+    if (model_args_.model_type() == "deepseek_v4_mtp") {
       LOAD_WEIGHT(hc_head_fn);
       LOAD_WEIGHT(hc_head_base);
       LOAD_WEIGHT(hc_head_scale);

@@ -33,8 +33,36 @@ _MOE_QUANT_BUFFER_NAMES = [
 ]
 
 
-def _moe_quant_buffers() -> dict[str, torch.Tensor]:
-    return {"model.layers.0.mlp." + name: torch.empty(0) for name in _MOE_QUANT_BUFFER_NAMES}
+class _StubDeepseekV4MoE(torch.nn.Module):
+    def __init__(
+        self,
+        cfg: SimpleNamespace,
+        *,
+        hash_layer: bool = True,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        start_expert_id: int = 0,
+        num_experts_per_rank: int = 1,
+    ) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.hash_layer = hash_layer
+        self.moe_tp_size = moe_tp_size
+        self.moe_tp_rank = moe_tp_rank
+        self.start_expert_id = start_expert_id
+        self.num_experts_per_rank = num_experts_per_rank
+        self.w4a8_dynamic = False
+        self.process_calls = 0
+        for name in ("experts_w13", "experts_w2"):
+            self.register_parameter(
+                name,
+                torch.nn.Parameter(torch.empty(0, dtype=torch.int8), requires_grad=False),
+            )
+        for name in _MOE_QUANT_BUFFER_NAMES:
+            self.register_buffer(name, torch.empty(0))
+
+    def process_weights_after_loading(self) -> None:
+        self.process_calls += 1
 
 
 @pytest.mark.parametrize(
@@ -111,28 +139,17 @@ def test_moe_loader_uses_native_projection_names_and_local_expert_range() -> Non
         ].contiguous(),
         copy_in=copied.__setitem__,
     )
-    mlp = SimpleNamespace(
+    mlp = _StubDeepseekV4MoE(
+        SimpleNamespace(moe_intermediate_size=4, hidden_size=3),
         hash_layer=True,
         moe_tp_size=2,
         moe_tp_rank=1,
         start_expert_id=3,
         num_experts_per_rank=1,
     )
-    parameters = {
-        "model.layers.0.mlp.experts_w13": torch.nn.Parameter(torch.empty(0, dtype=torch.int8), requires_grad=False),
-        "model.layers.0.mlp.experts_w2": torch.nn.Parameter(torch.empty(0, dtype=torch.int8), requires_grad=False),
-    }
-    buffers = _moe_quant_buffers()
-    owner = SimpleNamespace(
-        cfg=SimpleNamespace(moe_intermediate_size=4, hidden_size=3),
-        model=SimpleNamespace(layers=[SimpleNamespace(mlp=mlp)]),
-        get_parameter=lambda name: parameters[name],
-        get_buffer=lambda name: buffers[name],
-        _load_dsv4_moe_routing=DeepseekV4ForCausalLM._load_dsv4_moe_routing,
-    )
 
     DeepseekV4ForCausalLM._load_dsv4_moe(
-        owner,
+        mlp,
         loader,
         "layers.0.",
         "model.layers.0.",
@@ -141,7 +158,7 @@ def test_moe_loader_uses_native_projection_names_and_local_expert_range() -> Non
     )
 
     torch.testing.assert_close(
-        parameters["model.layers.0.mlp.experts_w13"][0],
+        mlp.experts_w13[0],
         torch.cat([tensors[expert_prefix + "gate_proj.weight"][2:], tensors[expert_prefix + "up_proj.weight"][2:]]),
     )
     torch.testing.assert_close(
@@ -219,20 +236,14 @@ def test_load_weights_reaches_routed_expert_aliases(
             self.copy_in(name, self.shard(self.get_tensor(name), dim))
 
     monkeypatch.setattr(deepseek_v4_module, "W8A8WeightLoader", FakeWeightLoader)
-    process_calls = 0
 
-    def _record_process() -> None:
-        nonlocal process_calls
-        process_calls += 1
-
-    mlp = SimpleNamespace(
+    mlp = _StubDeepseekV4MoE(
+        SimpleNamespace(moe_intermediate_size=4, hidden_size=3),
         hash_layer=True,
         moe_tp_size=1,
         moe_tp_rank=0,
         start_expert_id=0,
         num_experts_per_rank=1,
-        experts_w13=torch.empty(0),
-        process_weights_after_loading=_record_process,
     )
     attention = SimpleNamespace(
         indexer=None,
@@ -242,11 +253,6 @@ def test_load_weights_reaches_routed_expert_aliases(
     def _load_attention(*_args: object, **_kwargs: object) -> SimpleNamespace:
         return attention
 
-    parameters = {
-        "model.layers.0.mlp.experts_w13": torch.nn.Parameter(torch.empty(0, dtype=torch.int8), requires_grad=False),
-        "model.layers.0.mlp.experts_w2": torch.nn.Parameter(torch.empty(0, dtype=torch.int8), requires_grad=False),
-    }
-    buffers = _moe_quant_buffers()
     owner = SimpleNamespace(
         cfg=SimpleNamespace(
             tp_size=1,
@@ -257,18 +263,15 @@ def test_load_weights_reaches_routed_expert_aliases(
             hidden_size=3,
         ),
         model=SimpleNamespace(layers=[SimpleNamespace(self_attn=attention, mlp=mlp)]),
-        get_parameter=parameters.__getitem__,
-        get_buffer=buffers.__getitem__,
         _load_dsv4_attention=_load_attention,
-        _load_dsv4_moe_routing=DeepseekV4ForCausalLM._load_dsv4_moe_routing,
+        _load_dsv4_moe=DeepseekV4ForCausalLM._load_dsv4_moe,
     )
-    owner._load_dsv4_moe = MethodType(DeepseekV4ForCausalLM._load_dsv4_moe, owner)
     owner._load_dsv4_decoder_layer = MethodType(DeepseekV4ForCausalLM._load_dsv4_decoder_layer, owner)
 
     DeepseekV4ForCausalLM.load_weights(owner, [], tp_rank=0, tp_size=1)
 
     torch.testing.assert_close(
-        parameters["model.layers.0.mlp.experts_w13"][0],
+        mlp.experts_w13[0],
         torch.cat(
             [
                 tensors[expert_prefix + gate_name + ".weight"],
@@ -276,10 +279,10 @@ def test_load_weights_reaches_routed_expert_aliases(
             ]
         ),
     )
-    assert process_calls == 1
+    assert mlp.process_calls == 1
 
 
-def _minimal_moe_loader_state(tensors: dict[str, torch.Tensor]) -> tuple[SimpleNamespace, SimpleNamespace]:
+def _minimal_moe_loader_state(tensors: dict[str, torch.Tensor]) -> tuple[_StubDeepseekV4MoE, SimpleNamespace]:
     copied: dict[str, torch.Tensor] = {}
     loader = SimpleNamespace(
         has=tensors.__contains__,
@@ -287,27 +290,8 @@ def _minimal_moe_loader_state(tensors: dict[str, torch.Tensor]) -> tuple[SimpleN
         shard=lambda tensor, dim, world=None, rank=None: tensor,
         copy_in=copied.__setitem__,
     )
-    mlp = SimpleNamespace(
-        hash_layer=True,
-        moe_tp_size=1,
-        moe_tp_rank=0,
-        start_expert_id=0,
-        num_experts_per_rank=1,
-        w4a8_dynamic=False,
-    )
-    parameters = {
-        "model.layers.0.mlp.experts_w13": torch.nn.Parameter(torch.empty(0, dtype=torch.int8), requires_grad=False),
-        "model.layers.0.mlp.experts_w2": torch.nn.Parameter(torch.empty(0, dtype=torch.int8), requires_grad=False),
-    }
-    buffers = _moe_quant_buffers()
-    owner = SimpleNamespace(
-        cfg=SimpleNamespace(moe_intermediate_size=4, hidden_size=4),
-        model=SimpleNamespace(layers=[SimpleNamespace(mlp=mlp)]),
-        get_parameter=parameters.__getitem__,
-        get_buffer=buffers.__getitem__,
-        _load_dsv4_moe_routing=DeepseekV4ForCausalLM._load_dsv4_moe_routing,
-    )
-    return owner, loader
+    mlp = _StubDeepseekV4MoE(SimpleNamespace(moe_intermediate_size=4, hidden_size=4))
+    return mlp, loader
 
 
 @pytest.mark.parametrize(
@@ -331,11 +315,11 @@ def test_moe_loader_rejects_invalid_quantized_weight_layout(
         expert_prefix + "up_proj.weight": torch.ones(4, 4, dtype=torch.int8),
         expert_prefix + "down_proj.weight": torch.ones(4, 4, dtype=torch.int8),
     }
-    owner, loader = _minimal_moe_loader_state(tensors)
+    mlp, loader = _minimal_moe_loader_state(tensors)
 
     with pytest.raises(ValueError, match=error):
         DeepseekV4ForCausalLM._load_dsv4_moe(
-            owner,
+            mlp,
             loader,
             "layers.0.",
             "model.layers.0.",
@@ -356,11 +340,11 @@ def test_moe_loader_rejects_missing_quantization_scale() -> None:
         expert_prefix + "gate_proj.weight_scale": torch.ones(4, 1),
         expert_prefix + "up_proj.weight_scale": torch.ones(4, 1),
     }
-    owner, loader = _minimal_moe_loader_state(tensors)
+    mlp, loader = _minimal_moe_loader_state(tensors)
 
     with pytest.raises(KeyError, match="expert 0 down scale not found"):
         DeepseekV4ForCausalLM._load_dsv4_moe(
-            owner,
+            mlp,
             loader,
             "layers.0.",
             "model.layers.0.",
@@ -388,10 +372,10 @@ def test_moe_loader_loads_packed_w4a8_expert_tensors() -> None:
         expert_prefix + "up_proj.scale_bias": torch.ones(4, 1),
         expert_prefix + "down_proj.scale_bias": torch.ones(4, 1),
     }
-    owner, loader = _minimal_moe_loader_state(tensors)
+    mlp, loader = _minimal_moe_loader_state(tensors)
 
     DeepseekV4ForCausalLM._load_dsv4_moe(
-        owner,
+        mlp,
         loader,
         "layers.0.",
         "model.layers.0.",
@@ -399,10 +383,9 @@ def test_moe_loader_loads_packed_w4a8_expert_tensors() -> None:
         source_prefix=prefix,
     )
 
-    mlp = owner.model.layers[0].mlp
     assert mlp.w4a8_dynamic
-    assert owner.get_parameter("model.layers.0.mlp.experts_w13").shape == (1, 4, 4)
-    assert owner.get_parameter("model.layers.0.mlp.experts_w2").shape == (1, 2, 4)
+    assert mlp.get_parameter("experts_w13").shape == (1, 4, 4)
+    assert mlp.get_parameter("experts_w2").shape == (1, 2, 4)
     for name, shape in (
         ("experts_w13_scale", (1, 8, 1)),
         ("experts_w13_scale_second", (1, 8, 1)),
@@ -411,7 +394,7 @@ def test_moe_loader_loads_packed_w4a8_expert_tensors() -> None:
         ("experts_w2_scale_second", (1, 4, 1)),
         ("experts_w2_scale_bias", (1, 4, 1)),
     ):
-        assert owner.get_buffer("model.layers.0.mlp." + name).shape == shape
+        assert mlp.get_buffer(name).shape == shape
 
 
 def test_moe_loader_rejects_packed_w4a8_with_odd_hidden_size() -> None:
@@ -424,12 +407,12 @@ def test_moe_loader_rejects_packed_w4a8_with_odd_hidden_size() -> None:
         expert_prefix + "up_proj.weight": torch.ones(2, 5, dtype=torch.int8),
         expert_prefix + "down_proj.weight": torch.ones(2, 4, dtype=torch.int8),
     }
-    owner, loader = _minimal_moe_loader_state(tensors)
-    owner.cfg.hidden_size = 5
+    mlp, loader = _minimal_moe_loader_state(tensors)
+    mlp.cfg.hidden_size = 5
 
     with pytest.raises(ValueError, match="requires an even hidden size"):
         DeepseekV4ForCausalLM._load_dsv4_moe(
-            owner,
+            mlp,
             loader,
             "layers.0.",
             "model.layers.0.",
@@ -450,13 +433,11 @@ def test_moe_loader_preserves_legacy_shared_up_projection_scale() -> None:
         expert_prefix + "w1.weight_scale": torch.tensor([[1.0], [2.0], [3.0], [4.0]]),
         expert_prefix + "w2.weight_scale": torch.ones(4, 1),
     }
-    owner, loader = _minimal_moe_loader_state(tensors)
+    mlp, loader = _minimal_moe_loader_state(tensors)
 
-    DeepseekV4ForCausalLM._load_dsv4_moe(
-        owner, loader, "layers.0.", "model.layers.0.", layer_id=0, source_prefix=prefix
-    )
+    DeepseekV4ForCausalLM._load_dsv4_moe(mlp, loader, "layers.0.", "model.layers.0.", layer_id=0, source_prefix=prefix)
 
     torch.testing.assert_close(
-        owner.get_buffer("model.layers.0.mlp.experts_w13_scale")[0],
+        mlp.get_buffer("experts_w13_scale")[0],
         torch.tensor([[1.0], [2.0], [3.0], [4.0], [1.0], [2.0], [3.0], [4.0]]),
     )

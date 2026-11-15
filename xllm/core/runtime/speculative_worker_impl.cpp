@@ -169,23 +169,31 @@ SpeculativeWorkerImpl<TargetInput>::SpeculativeWorkerImpl(
     const runtime::Options& target_options,
     WorkerType worker_type)
     : WorkerImpl(parallel_args, device, options, parallel_args.dp_size() > 1) {
+  auto prepare_input = [this](TargetInput& input) {
+    ::xllm::prepare_dummy_input(input, impl_->context_, device_);
+#if defined(USE_NPU)
+    prepare_target_padding(input.input_params);
+#endif
+  };
+  auto make_impl = [&]<typename BaseWorker>() {
+    return std::make_unique<
+        SpeculativeModelWorkerImpl<BaseWorker,
+                                   TargetInput,
+                                   decltype(prepare_input)>>(
+        std::move(prepare_input),
+        parallel_args,
+        device,
+        target_options,
+        parallel_args.dp_size() > 1);
+  };
   if (worker_type == WorkerType::LLM) {
-    impl_ = std::make_unique<LLMWorkerImpl>(
-        parallel_args, device, target_options, parallel_args.dp_size() > 1);
+    impl_ = make_impl.template operator()<LLMWorkerImpl>();
   } else if (worker_type == WorkerType::VLM) {
-    impl_ = std::make_unique<VLMWorkerImpl>(
-        parallel_args, device, target_options, parallel_args.dp_size() > 1);
+    impl_ = make_impl.template operator()<VLMWorkerImpl>();
   } else {
     LOG(FATAL) << "Unsupported speculative worker type: "
                << worker_type.to_string();
   }
-  impl_->set_input_preparer(
-      std::function<void(TargetInput&)>([this](TargetInput& input) {
-        ::xllm::prepare_dummy_input(input, impl_->context_, device_);
-#if defined(USE_NPU)
-        prepare_target_padding(input.input_params);
-#endif
-      }));
 }
 
 #if defined(USE_NPU)

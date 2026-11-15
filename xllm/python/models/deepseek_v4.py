@@ -36,7 +36,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, TypeVar
 
 import torch
 import torch.nn as nn
@@ -284,6 +284,9 @@ def _compress_kv(
 # ---------------------------------------------------------------------------
 
 
+_ConfigT = TypeVar("_ConfigT", bound="DeepseekV4Config")
+
+
 @dataclass
 class DeepseekV4Config:
     """DeepSeek-V4 model config (DSV3.2 MLA fields + DSV4-specific fields)."""
@@ -351,7 +354,7 @@ class DeepseekV4Config:
     num_speculative_tokens: int = 0
 
     @classmethod
-    def from_dict(cls, d: dict) -> DeepseekV4Config:
+    def from_dict(cls: type[_ConfigT], d: dict) -> _ConfigT:
         rs_raw = d.get("rope_scaling")
         rs = rs_raw if isinstance(rs_raw, dict) else {}
 
@@ -371,19 +374,19 @@ class DeepseekV4Config:
             value = rs.get(nested_key)
             return default if value in (None, 0, 0.0) else value
 
-        n_layers = int(_pick(d, "num_hidden_layers", "n_layers", default=43))
+        n_layers = int(_pick(d, "num_hidden_layers", "n_layers", default=cls.n_layers))
         compress_ratios = [1 if int(ratio) <= 1 else int(ratio) for ratio in d.get("compress_ratios", [])]
         if len(compress_ratios) < n_layers:
             compress_ratios.extend([1] * (n_layers - len(compress_ratios)))
 
         return cls(
-            model_type=_pick(d, "model_type", default="deepseek_v4"),
-            hidden_size=int(_pick(d, "hidden_size", default=4096)),
+            model_type=_pick(d, "model_type", default=cls.model_type),
+            hidden_size=int(_pick(d, "hidden_size", default=cls.hidden_size)),
             n_layers=n_layers,
             n_heads=int(_pick(d, "n_heads", "num_attention_heads", default=64)),
             head_dim=int(_pick(d, "head_dim", default=512)),
             vocab_size=int(_pick(d, "vocab_size", default=129280)),
-            rms_norm_eps=float(_pick(d, "rms_norm_eps", default=1e-6)),
+            rms_norm_eps=float(_pick(d, "rms_norm_eps", default=cls.rms_norm_eps)),
             rope_theta=float(_pick(d, "rope_theta", default=10000.0)),
             max_position_embeddings=int(_pick(d, "max_position_embeddings", default=1048576)),
             original_max_position_embeddings=int(
@@ -398,7 +401,7 @@ class DeepseekV4Config:
             rope_beta_slow=int(rope_value("beta_slow", "beta_slow", 1, "rope_scaling_beta_slow")),
             rope_mscale=float(rope_value("rope_scaling_attn_factor", "attn_factor", 1.0)),
             rope_mscale_all_dim=1.0,
-            q_lora_rank=int(_pick(d, "q_lora_rank", default=1024)),
+            q_lora_rank=int(_pick(d, "q_lora_rank", default=cls.q_lora_rank)),
             qk_rope_head_dim=int(_pick(d, "qk_rope_head_dim", default=64)),
             rope_head_dim=int(_pick(d, "qk_rope_head_dim", default=64)),
             o_lora_rank=int(_pick(d, "o_lora_rank", default=1024)),
@@ -418,11 +421,11 @@ class DeepseekV4Config:
             scoring_func=_pick(d, "scoring_func", default="sqrtsoftplus"),
             scale_fmt=_pick(d, "scale_fmt", default="ue8m0"),
             index_head_dim=int(_pick(d, "index_head_dim", default=128)),
-            index_n_heads=int(_pick(d, "index_n_heads", default=64)),
+            index_n_heads=int(_pick(d, "index_n_heads", default=cls.index_n_heads)),
             index_topk=int(_pick(d, "index_topk", default=512)),
-            n_routed_experts=int(_pick(d, "n_routed_experts", default=256)),
+            n_routed_experts=int(_pick(d, "n_routed_experts", default=cls.n_routed_experts)),
             n_shared_experts=int(_pick(d, "n_shared_experts", default=1)),
-            moe_intermediate_size=int(_pick(d, "moe_intermediate_size", default=2048)),
+            moe_intermediate_size=int(_pick(d, "moe_intermediate_size", default=cls.moe_intermediate_size)),
             swiglu_limit=float(_pick(d, "swiglu_limit", default=10.0)),
             first_k_dense_replace=int(_pick(d, "first_k_dense_replace", default=0)),
             moe_layer_freq=int(_pick(d, "moe_layer_freq", default=1)),
@@ -555,29 +558,15 @@ class DeepseekV4RotaryEmbedding(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class DeepseekV4HyperConnection(nn.Module):
-    """HyperConnection residual path (hc_pre + hc_post).
-
-    Faithful port of the C++ ``DeepseekV4DecoderLayerImpl::hc_pre``/``hc_post``
-    (deepseek_v4_decoder_layer.cpp:238+), which call the registered NPU
-    ``hc_pre``/``hc_post`` kernels. hc_pre mixes the hc_mult parallel residual
-    streams into one sub-block input (via Sinkhorn); hc_post combines the
-    sub-block output with the residual. Weight shapes match the checkpoint:
-    ``hc_fn = [mix_hc, hc_dim]`` where ``mix_hc = (2+hc_mult)*hc_mult`` and
-    ``hc_dim = hc_mult*hidden``; ``hc_base = [mix_hc]``; ``hc_scale = [3]``.
-    """
-
-    def __init__(self, cfg: DeepseekV4Config, dtype: torch.dtype, device: torch.device) -> None:
+class _DeepseekHyperConnection(nn.Module):
+    def __init__(self, cfg: DeepseekV4Config, device: torch.device) -> None:
         super().__init__()
         self.hc_mult = cfg.hc_mult
         self.hc_eps = cfg.hc_eps
         self.norm_eps = cfg.rms_norm_eps
         self.sinkhorn_iters = cfg.hc_sinkhorn_iters
-        hidden = cfg.hidden_size
-        # hc_mult is a fixed model constant; NOT TP-sharded (C++ matches).
-        self.hc_mult_local = cfg.hc_mult
         mix_hc = (2 + cfg.hc_mult) * cfg.hc_mult
-        hc_dim = cfg.hc_mult * hidden
+        hc_dim = cfg.hc_mult * cfg.hidden_size
         # hc_fn/scale/base per sub-block. C++ registers these as float32.
         for part in ("attn", "ffn"):
             self.register_parameter(
@@ -592,6 +581,22 @@ class DeepseekV4HyperConnection(nn.Module):
                 f"hc_{part}_scale",
                 nn.Parameter(torch.empty(3, dtype=torch.float32, device=device)),
             )
+
+
+class DeepseekV4HyperConnection(_DeepseekHyperConnection):
+    """HyperConnection residual path (hc_pre + hc_post).
+
+    Faithful port of the C++ ``DeepseekV4DecoderLayerImpl::hc_pre``/``hc_post``
+    (deepseek_v4_decoder_layer.cpp:238+), which call the registered NPU
+    ``hc_pre``/``hc_post`` kernels. hc_pre mixes the hc_mult parallel residual
+    streams into one sub-block input (via Sinkhorn); hc_post combines the
+    sub-block output with the residual. Weight shapes match the checkpoint:
+    ``hc_fn = [mix_hc, hc_dim]`` where ``mix_hc = (2+hc_mult)*hc_mult`` and
+    ``hc_dim = hc_mult*hidden``; ``hc_base = [mix_hc]``; ``hc_scale = [3]``.
+    """
+
+    def __init__(self, cfg: DeepseekV4Config, dtype: torch.dtype, device: torch.device) -> None:
+        super().__init__(cfg, device)
 
     def hc_pre(
         self,
@@ -1333,8 +1338,6 @@ class DeepseekV4MoE(nn.Module):
             # stores each W4 output pair in one int8 row; after transpose the
             # operator consumes NZ/INT32 packed weights and int64 bit-cast
             # per-channel scales plus the summed scale_bias.
-            import torch_npu
-
             def _pack(weight: torch.Tensor) -> torch.Tensor:
                 weight = torch_npu.npu_format_cast(weight.transpose(1, 2).contiguous(), 29)
                 return weight.view(torch.int32).contiguous()
@@ -2025,7 +2028,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
         mlp = self.model.layers[layer_id].mlp
         if hasattr(mlp, "experts_w13"):
             moe_prefix = _resolve_dsv4_moe_prefix(loader, checkpoint_prefix, description)
-            self._load_dsv4_moe(loader, checkpoint_prefix, parameter_prefix, layer_id, moe_prefix)
+            self._load_dsv4_moe(mlp, loader, checkpoint_prefix, parameter_prefix, layer_id, moe_prefix)
             mlp.process_weights_after_loading()
         else:
             self._load_dsv4_dense_mlp(loader, checkpoint_prefix, parameter_prefix, mlp)
@@ -2194,23 +2197,16 @@ class DeepseekV4ForCausalLM(PyModelBase):
             loader.get_tensor(bias_key),
         )
 
+    @staticmethod
     def _load_dsv4_moe(
-        self,
+        mlp: DeepseekV4MoE,
         loader: W8A8WeightLoader,
         ck: str,
         pm: str,
         layer_id: int,
         source_prefix: str,
     ) -> None:
-        """Stage DSV4 MoE weights for DeepseekV4MoE (hash routing + EP sharding).
-
-        Loads gate.weight + tid2eid (hash layers) + per-expert w1/w2/w3
-        (only local EP experts, fused into w13=w1+w3) + shared_experts.
-        Mirrors C++ FusedMoEImpl::load_experts (fused_moe.cpp:1938+).
-        """
-
-        cfg = self.cfg
-        mlp = self.model.layers[layer_id].mlp
+        cfg = mlp.cfg
         gate_prefix = _find_checkpoint_prefix(
             loader,
             (
@@ -2221,23 +2217,23 @@ class DeepseekV4ForCausalLM(PyModelBase):
         )
         if gate_prefix is None:
             raise KeyError(f"DeepSeek-V4 layer {layer_id} routing gate weight not found")
-        self._load_dsv4_moe_routing(loader, gate_prefix, pm, mlp, layer_id)
+        DeepseekV4ForCausalLM._load_dsv4_moe_routing(loader, gate_prefix, pm, mlp, layer_id)
         # Per-expert w1+w3 -> fused w13, w2 -> w2 (int8 + scale).
         # EP: only load local experts [start_expert_id, start_expert_id + num_experts_per_rank).
         tp = mlp.moe_tp_size
         tp_rank = mlp.moe_tp_rank
         start = mlp.start_expert_id
         nepr = mlp.num_experts_per_rank
-        w13 = self.get_parameter(pm + "mlp.experts_w13")
-        w2 = self.get_parameter(pm + "mlp.experts_w2")
-        w13_scale = self.get_buffer(pm + "mlp.experts_w13_scale")
-        w13_scale_second = self.get_buffer(pm + "mlp.experts_w13_scale_second")
-        w2_scale = self.get_buffer(pm + "mlp.experts_w2_scale")
-        w2_scale_second = self.get_buffer(pm + "mlp.experts_w2_scale_second")
-        w13_offset = self.get_buffer(pm + "mlp.experts_w13_offset")
-        w2_offset = self.get_buffer(pm + "mlp.experts_w2_offset")
-        w13_scale_bias = self.get_buffer(pm + "mlp.experts_w13_scale_bias")
-        w2_scale_bias = self.get_buffer(pm + "mlp.experts_w2_scale_bias")
+        w13 = mlp.get_parameter("experts_w13")
+        w2 = mlp.get_parameter("experts_w2")
+        w13_scale = mlp.get_buffer("experts_w13_scale")
+        w13_scale_second = mlp.get_buffer("experts_w13_scale_second")
+        w2_scale = mlp.get_buffer("experts_w2_scale")
+        w2_scale_second = mlp.get_buffer("experts_w2_scale_second")
+        w13_offset = mlp.get_buffer("experts_w13_offset")
+        w2_offset = mlp.get_buffer("experts_w2_offset")
+        w13_scale_bias = mlp.get_buffer("experts_w13_scale_bias")
+        w2_scale_bias = mlp.get_buffer("experts_w2_scale_bias")
 
         def _shard_fused(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
             """Shard w1/w3 independently, matching LOAD_MOE_FUSED_WEIGHT."""

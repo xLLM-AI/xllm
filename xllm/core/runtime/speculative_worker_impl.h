@@ -58,6 +58,29 @@ ForwardOutput finalize_verify_output(
     SampleOutput val_output,
     const std::vector<JsonObjectGrammarState>& json_object_states);
 
+template <typename BaseWorker, typename Input, typename PrepareInput>
+class SpeculativeModelWorkerImpl final : public BaseWorker {
+ public:
+  template <typename... Args>
+  explicit SpeculativeModelWorkerImpl(PrepareInput prepare_input,
+                                      Args&&... args)
+      : BaseWorker(std::forward<Args>(args)...),
+        prepare_input_(std::move(prepare_input)) {}
+
+ protected:
+  using BaseWorker::prepare_model_input;
+
+  void prepare_model_input(Input& input) override { prepare_input_(input); }
+
+  bool owns_npu_parallel_input_prepare() const override { return false; }
+  bool can_prepare_without_compute_stream_wait() const override {
+    return false;
+  }
+
+ private:
+  PrepareInput prepare_input_;
+};
+
 // Base class for all speculative decoding workers.
 // Provides common logic: target model management, step dispatch, and
 // sampling parameter updates. Subclasses implement algorithm-specific

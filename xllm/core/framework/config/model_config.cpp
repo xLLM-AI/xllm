@@ -123,14 +123,15 @@ DEFINE_int32(audio_max_decode_duration_s,
 DEFINE_bool(use_cpp_chat_template,
             true,
             "Use native C++ chat template for supported models "
-            "(e.g. deepseek_v32, deepseek_v4) instead of Jinja. "
+            "(e.g. deepseek_v32, deepseek_v4, deepseek_v41) instead of Jinja. "
             "Set to false to fallback to Jinja for debugging.");
 
 namespace xllm {
 namespace {
 
 bool is_cpp_chat_template_supported_model(const std::string& model_type) {
-  return model_type == "deepseek_v32" || model_type == "deepseek_v4";
+  return model_type == "deepseek_v32" || model_type == "deepseek_v4" ||
+         model_type == "deepseek_v41";
 }
 
 bool is_qwen3_5_model_type(std::string_view model_type) {

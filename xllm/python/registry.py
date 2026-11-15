@@ -12,12 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model registry: maps a HF architecture name to its Python model class.
-
-Mirrors vLLM's ``_MODELS`` / ``EntryClass`` table. The C++ side resolves the
-class by the model's architecture (or model_type) string.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -155,6 +149,12 @@ def _register_builtin_models() -> None:
         "DeepseekV4ForCausalLM",
         "DeepseekV4ForCausalLM",
         "deepseek_v4",
+    )
+    _register_model_path(
+        "xllm.python.models.deepseek_v41",
+        "DeepseekV41ForCausalLM",
+        "DeepseekV41ForCausalLM",
+        "deepseek_v41",
     )
 
     _register_model_path(

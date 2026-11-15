@@ -199,7 +199,8 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
 #endif
 
   py::gil_scoped_acquire gil;
-  const bool is_deepseek_v4 = model_args_.model_type() == "deepseek_v4";
+  const bool is_deepseek_v4 = model_args_.model_type() == "deepseek_v4" ||
+                              model_args_.model_type() == "deepseek_v41";
   const bool needs_python_process_group =
       !is_deepseek_v4 || dp_size_ > 1 || cp_size_ > 1;
   if (needs_python_process_group) {

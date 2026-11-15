@@ -146,23 +146,11 @@ class ScopedAtenLoadThreads {
   bool active_ = false;
 };
 
-void move_tensor_to_device_if_needed(torch::Tensor& tensor,
-                                     const torch::Device& device) {
-  if (tensor.defined() && tensor.device() != device) {
-    tensor = tensor.to(device, /*non_blocking=*/false).contiguous();
-  }
-}
-
-// LlmForwardInput::to(device) returns early when device_tensors_ready is set.
-// Nested step_async (e.g. MTP target/draft) can leave CP-remapped control
-// tensors on CPU while model tensors are already on NPU.
 template <typename Input>
 void ensure_forward_input_device_tensors(Input& input,
                                          const torch::Device& device) {
   move_tensor_to_device_if_needed(input.token_ids, device);
   move_tensor_to_device_if_needed(input.positions, device);
-  move_tensor_to_device_if_needed(
-      input.input_params.embedding.mtp_shifted_token_ids, device);
   move_tensor_to_device_if_needed(input.sampling_params.logits_indices(),
                                   device);
 }
@@ -583,7 +571,8 @@ void WorkerImpl::allocate_kv_cache_storage(
       .head_dim(args.head_dim())
       .index_head_dim(std::max(args.index_head_dim(), 1))
       .window_size(std::max(args.window_size(), 1))
-      .compress_ratios(args.compress_ratios());
+      .compress_ratios(args.compress_ratios())
+      .kv_source_layer_ids(args.kv_source_layer_ids());
 #if defined(USE_NPU)
   create_options.enable_kv_cache_huge_page_allocator(use_huge_page_allocator);
 #endif
@@ -765,8 +754,7 @@ bool WorkerImpl::can_prepare_npu_graph_decode_input(
 bool WorkerImpl::can_prepare_without_compute_stream_wait() const {
 #if defined(USE_NPU)
   const auto& config = ExecutionConfig::get_instance();
-  return !prepare_llm_input_ && !prepare_vlm_input_ && config.enable_graph() &&
-         config.enable_graph_double_buffer() &&
+  return config.enable_graph() && config.enable_graph_double_buffer() &&
          (options_.backend() == "llm" || options_.backend() == "vlm");
 #else
   return false;
@@ -1104,18 +1092,12 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     const Input& input,
     Input& processed_input,
     Stream& prepare_stream,
-    bool record_ready_event,
-    bool wait_for_compute_stream,
-    const std::function<void(Input&)>& prepare_input) {
+    bool record_ready_event) {
   if (!input.json_object_state_snapshots.empty()) {
     Input restored_input = input.clone();
     restore_json_object_states(restored_input);
-    prepare_work_before_execute_on_stream_impl(restored_input,
-                                               processed_input,
-                                               prepare_stream,
-                                               record_ready_event,
-                                               wait_for_compute_stream,
-                                               prepare_input);
+    prepare_work_before_execute_on_stream_impl(
+        restored_input, processed_input, prepare_stream, record_ready_event);
     return;
   }
 #if defined(USE_NPU)
@@ -1137,8 +1119,8 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
   }
 #endif
   c10::StreamGuard stream_guard = prepare_stream.set_stream_guard();
-  if (enable_schedule_overlap() && wait_for_compute_stream &&
-      !can_prepare_without_compute_stream_wait() && compute_stream_) {
+  if (enable_schedule_overlap() && !can_prepare_without_compute_stream_wait() &&
+      compute_stream_) {
     prepare_stream.wait_stream(*compute_stream_);
   }
   CHECK(prepare_stream.wait_event(input.runtime.metadata_ready_event))
@@ -1157,11 +1139,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
 
     auto& input_params = processed_input.input_params;
 
-    if (prepare_input) {
-      prepare_input(processed_input);
-    } else {
-      prepare_dummy_input(processed_input);
-    }
+    prepare_model_input(processed_input);
     if (input_params.meta.num_sequences == 0 &&
         (!processed_input.token_ids.defined() ||
          processed_input.token_ids.numel() == 0)) {
@@ -1180,7 +1158,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
       prepare_mla_prefixcache_inputs(input_params);
     }
 
-    if (!prepare_input && owns_npu_parallel_input_prepare()) {
+    if (owns_npu_parallel_input_prepare()) {
       prepare_dp_ep_padding(processed_input.input_params);
     }
     prepare_expert_input(input_params.expert);
@@ -2052,12 +2030,8 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     LlmForwardInput& processed_input,
     Stream& prepare_stream,
     bool record_ready_event) {
-  prepare_work_before_execute_on_stream_impl(input,
-                                             processed_input,
-                                             prepare_stream,
-                                             record_ready_event,
-                                             true,
-                                             prepare_llm_input_);
+  prepare_work_before_execute_on_stream_impl(
+      input, processed_input, prepare_stream, record_ready_event);
 }
 
 void WorkerImpl::prepare_work_before_execute_on_stream(
@@ -2065,12 +2039,8 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     VlmForwardInput& processed_input,
     Stream& prepare_stream,
     bool record_ready_event) {
-  prepare_work_before_execute_on_stream_impl(input,
-                                             processed_input,
-                                             prepare_stream,
-                                             record_ready_event,
-                                             true,
-                                             prepare_vlm_input_);
+  prepare_work_before_execute_on_stream_impl(
+      input, processed_input, prepare_stream, record_ready_event);
 }
 
 void WorkerImpl::restore_json_object_states(LlmForwardInput& input) {

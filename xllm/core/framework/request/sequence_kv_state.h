@@ -85,7 +85,6 @@ class KVCacheState {
                                 std::vector<Block>&& blocks,
                                 size_t num_shared_blocks,
                                 size_t cache_publish_cursor);
-  void incr_shared_blocks_num(BlockType type, size_t num);
   void set_shared_blocks_num(BlockType type, size_t num);
   // Drop all blocks held under `type` (releases their Block refs and removes
   // the map entry).
@@ -117,9 +116,6 @@ class KVCacheState {
   const std::map<BlockType, size_t>& num_cached_blocks() const;
   void set_num_cached_blocks(BlockType type, size_t n);
 
-  void set_slice_window_size(uint32_t size);
-  void update_slice_window_pos();
-
   size_t current_max_tokens_capacity() const;
 
   // Groups exported to the worker's multi_block_tables, in the fixed
@@ -150,7 +146,6 @@ class KVCacheState {
   }
 
   size_t next_transfer_block_idx() const;
-  void set_next_transfer_block_idx(size_t idx);
   void advance_transfer_block_idx(size_t idx);
 
   size_t next_group_transfer_block_idx(BlockType type) const;
@@ -195,13 +190,6 @@ class KVCacheState {
 
   // Pre-grow cache insert cursor per block type. See num_cached_blocks() above.
   std::map<BlockType, size_t> num_cached_blocks_;
-
-  // Sliding-window cursor for legacy callers. CompositeBlockManager keeps DSA
-  // SWA block vectors in absolute logical block order and leaves expired
-  // logical positions invalid.
-  uint32_t slice_window_pos_ = 0;
-  uint32_t slice_window_size_ = 0;
-  uint32_t slice_window_buffer_ = 0;
 
   // Number of local KV blocks already pushed to the decode instance.
   // Used for incremental push in chunked prefill + PD disagg mode.

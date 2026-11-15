@@ -25,15 +25,9 @@ from xllm.python import kernels
 from xllm.python.attention import csa_attention as csa_attention_module
 from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.csa_attention import (
-    COMPRESSED_SPARSE_ATTENTION,
-    HEAVILY_COMPRESSED_ATTENTION,
-    SLIDING_ATTENTION,
-    CsaAttentionBackend,
-    _attention_type_for_compress_ratio,
+    DsaAttentionBackend,
     _build_dspark_swa_indices,
-    _CompressedAttentionCacheMapping,
     _deepseek_v4_ori_window_left,
-    _get_layer_cache_tensor,
     _scatter_by_slot,
 )
 from xllm.python.model_executor.v4_cp_context import (
@@ -41,7 +35,7 @@ from xllm.python.model_executor.v4_cp_context import (
 )
 
 
-def _make_backend(**overrides: object) -> CsaAttentionBackend:
+def _make_backend(**overrides: object) -> DsaAttentionBackend:
     compress_ratios = [0, 4, 128]
     kwargs = dict(
         compress_ratios=compress_ratios,
@@ -57,12 +51,12 @@ def _make_backend(**overrides: object) -> CsaAttentionBackend:
         dtype=torch.bfloat16,
     )
     kwargs.update(overrides)
-    return CsaAttentionBackend(**kwargs)
+    return DsaAttentionBackend(**kwargs)
 
 
-def _make_dspark_native_backend() -> CsaAttentionBackend:
+def _make_dspark_native_backend() -> DsaAttentionBackend:
     """Small fp32 geometry with the native DSpark SAS gate enabled."""
-    return CsaAttentionBackend(
+    return DsaAttentionBackend(
         compress_ratios=[1],
         window_size=4,
         n_layers=1,
@@ -135,30 +129,6 @@ def test_dspark_native_swa_indices_map_expanded_metadata_ring() -> None:
         torch.testing.assert_close(compressed_metadata.explicit_swa_indices[row, 0, :6], expected)
 
 
-def test_compress_ratio_per_layer() -> None:
-    b = _make_backend()
-    assert b._layer_compress_ratio(0) == 1
-    assert b._layer_compress_ratio(1) == 4
-    assert b._layer_compress_ratio(2) == 128
-
-
-@pytest.mark.parametrize(
-    ("compress_ratio", "attention_type"),
-    [
-        (1, SLIDING_ATTENTION),
-        (4, COMPRESSED_SPARSE_ATTENTION),
-        (128, HEAVILY_COMPRESSED_ATTENTION),
-    ],
-)
-def test_official_attention_type_names(compress_ratio: int, attention_type: str) -> None:
-    assert _attention_type_for_compress_ratio(compress_ratio) == attention_type
-
-
-def test_unsupported_compression_ratio_has_clear_error() -> None:
-    with pytest.raises(ValueError, match="unsupported DeepSeek-V4 compression ratio"):
-        _attention_type_for_compress_ratio(8)
-
-
 def test_resolve_cache_mapping_csa() -> None:
     """CSA layer: compressed/index caches plus sliding-window state caches."""
     b = _make_backend()
@@ -192,14 +162,6 @@ def test_resolve_cache_mapping_sliding_attention() -> None:
     assert m.cmp_cache_idx == -1
     assert m.ori_cache_idx == 0
     assert m.index_cache_idx == -1
-
-
-def test_get_layer_cache_tensor_bounds() -> None:
-    tensors = [[torch.empty(0)], [torch.zeros(2), torch.zeros(3)]]
-    assert _get_layer_cache_tensor(tensors, 0, 0).numel() == 0
-    assert _get_layer_cache_tensor(tensors, 1, 1).numel() == 3
-    assert _get_layer_cache_tensor(tensors, 5, 0) is None  # bad layer
-    assert _get_layer_cache_tensor(tensors, 1, 9) is None  # bad cache idx
 
 
 def test_scatter_by_slot_writes_rows() -> None:
@@ -292,7 +254,7 @@ def test_prepare_binds_compressed_metadata_to_current_forward(monkeypatch) -> No
 
 def test_prepare_clamps_target_block_tables_to_draft_groups(monkeypatch) -> None:
     """An MTP draft backend consumes only its registered SWA manager table."""
-    backend = CsaAttentionBackend(
+    backend = DsaAttentionBackend(
         compress_ratios=[1],
         window_size=128,
         n_layers=1,
@@ -603,7 +565,7 @@ def test_dspark_native_attention_uses_explicit_swa_indices(monkeypatch) -> None:
         calls.append(kwargs)
         return kwargs["q"].clone(), torch.empty(0)
 
-    monkeypatch.setattr(csa_attention_module, "_sparse_attn_sharedkv", fake_sparse_attn)
+    monkeypatch.setattr(kernels, "sparse_attn_sharedkv", fake_sparse_attn)
     layer = SimpleNamespace(layer_id=0, attn_sink=None, attn_sink_loaded=False)
     query = torch.zeros(3, 2, 4)
     kv = torch.arange(12, dtype=torch.float32).view(3, 1, 4)
@@ -622,7 +584,7 @@ def test_dspark_native_mixed_ratio_decode_uses_expanded_window(
     monkeypatch: pytest.MonkeyPatch,
     compress_ratio: int,
 ) -> None:
-    backend = CsaAttentionBackend(
+    backend = DsaAttentionBackend(
         compress_ratios=[compress_ratio],
         window_size=4,
         n_layers=1,
@@ -673,8 +635,8 @@ def test_dspark_native_mixed_ratio_decode_uses_expanded_window(
         raising=False,
     )
     monkeypatch.setattr(
-        csa_attention_module,
-        "_sparse_attn_sharedkv",
+        kernels,
+        "sparse_attn_sharedkv",
         lambda **kwargs: (calls.append(kwargs) or kwargs["q"].clone(), torch.empty(0)),
     )
     backend._build_precomputed_metadata(compressed_metadata, metadata)
@@ -922,6 +884,7 @@ def test_graph_dsa_refresh_preserves_tensor_addresses() -> None:
     def make_metadata(value: int, seq_rows: int) -> SimpleNamespace:
         return SimpleNamespace(
             seq_lens=torch.full((seq_rows,), value, dtype=torch.int32),
+            seq_lens_q_host=[value] * seq_rows,
             block_tables=[[torch.full((seq_rows, 2), value, dtype=torch.int32)]],
             slot_mappings=[[torch.full((seq_rows,), value, dtype=torch.int32)]],
             input_rope_by_ratio={
@@ -944,7 +907,7 @@ def test_graph_dsa_refresh_preserves_tensor_addresses() -> None:
     block_table_ptr = persistent.block_tables[0][0].data_ptr()
     rope_ptr = persistent.input_rope_by_ratio[1][0].data_ptr()
 
-    CsaAttentionBackend._copy_graph_dsa_metadata(persistent, refreshed)
+    DsaAttentionBackend._copy_graph_dsa_metadata(persistent, refreshed)
 
     assert persistent.seq_lens.data_ptr() == seq_lens_ptr
     assert persistent.seq_lens.tolist() == [7, 7, 0, 0]
@@ -1000,7 +963,7 @@ def test_prefill_and_dummy_decode_metadata_stay_in_sync_with_execute(
         calls.append(kwargs)
         return kwargs["q"].clone(), torch.empty(0)
 
-    monkeypatch.setattr(csa_attention_module, "_sparse_attn_sharedkv", fake_sparse_attn)
+    monkeypatch.setattr(kernels, "sparse_attn_sharedkv", fake_sparse_attn)
     monkeypatch.setattr(
         kernels,
         "sparse_attn_sharedkv_metadata",

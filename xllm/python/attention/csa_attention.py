@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -181,7 +181,6 @@ class DsaAttentionBackend(AttentionBackend):
         self.dtype = dtype
         self.scale = attn_head_dim**-0.5
         self.block_size = block_size
-        self.dspark_use_native_sas = dspark_use_native_sas
         self._dspark_swa_location: tuple[int, int, int] | None = None
         for layer_id, layer_caches in enumerate(self.caches_info):
             for cache_id, cache_info in enumerate(layer_caches):
@@ -357,6 +356,7 @@ class DsaAttentionBackend(AttentionBackend):
             max_query_len=max_query_len,
             max_seq_len=max_seq_len,
         )
+        compressed_metadata.graph_token_capacity = int(getattr(metadata, "dsa_graph_token_capacity", 0) or 0)
         # Synthetic warmup metadata may omit rotary caches.
         if getattr(metadata, "dsa_cos_sin", None) is not None and metadata.dsa_cos_sin.numel() > 0:
             compressed_metadata.input_rope_by_ratio = self._build_dsa_rope_metadata(compressed_metadata, metadata)
@@ -497,10 +497,12 @@ class DsaAttentionBackend(AttentionBackend):
             cls._copy_graph_tensor(persistent_pair[0], refreshed_pair[0], f"input_rope[{ratio}].cos")
             cls._copy_graph_tensor(persistent_pair[1], refreshed_pair[1], f"input_rope[{ratio}].sin")
 
+        persistent.seq_lens_q_host = refreshed.seq_lens_q_host
         persistent.max_query_len = refreshed.max_query_len
         persistent.max_seq_len = refreshed.max_seq_len
         persistent.sparse_metadata_ori_win_left = refreshed.sparse_metadata_ori_win_left
         persistent.is_acl_graph = refreshed.is_acl_graph
+        persistent.graph_token_capacity = int(getattr(refreshed, "graph_token_capacity", 0) or 0)
         persistent.precomputed_metadata_inputs = refreshed.precomputed_metadata_inputs
 
     @staticmethod
@@ -543,7 +545,7 @@ class DsaAttentionBackend(AttentionBackend):
         metadata = self._metadata if metadata is None else metadata
         if metadata is None or metadata.dsa_metadata is None:
             raise RuntimeError("compressed-attention metadata must be prepared before CP localization")
-        dsa = metadata.dsa_metadata
+        dsa = cast("DsaMetadata", metadata.dsa_metadata)
 
         dsa.v4_cp_context = cp_context
 
@@ -553,6 +555,7 @@ class DsaAttentionBackend(AttentionBackend):
 
         q_lens = torch.tensor(local_q, dtype=torch.int32, device=device)
         dsa.seq_lens_q = q_lens
+        dsa.seq_lens_q_host = local_q
         actual_q = torch.cat(
             (
                 torch.zeros(1, dtype=torch.int32, device=device),
@@ -800,7 +803,9 @@ class DsaAttentionBackend(AttentionBackend):
             ori_sparse_indices = compressed_metadata.explicit_swa_indices
             if ori_sparse_indices is None:
                 raise RuntimeError("Native DeepSeek-V4 DSpark requires precomputed SWA indices")
-        out, _lse = _sparse_attn_sharedkv(
+        from xllm.python import kernels
+
+        out, _lse = kernels.sparse_attn_sharedkv(
             q=q,
             ori_kv=ori_kv_for_attn,
             cmp_kv=cmp_kv if compress_ratio > 1 else None,
@@ -1097,11 +1102,6 @@ class DsaAttentionBackend(AttentionBackend):
                     layer_tensors[index] = move(tensor)
 
 
-# Keep the historical import stable.  There is one implementation and one
-# runtime type for C1/C4/C128; CSA is only the name of the ratio-4 path.
-CsaAttentionBackend = DsaAttentionBackend
-
-
 # ---------------------------------------------------------------------------
 # Helpers (faithful ports of C++ free functions).
 # ---------------------------------------------------------------------------
@@ -1248,10 +1248,3 @@ def _scatter_by_slot(
         slots[:update_rows][valid],
         value_2d[:update_rows][valid].to(cache.dtype),
     )
-
-
-def _sparse_attn_sharedkv(**kwargs):
-    """Thin indirection so the backend can be unit-tested without the kernel."""
-    from xllm.python import kernels
-
-    return kernels.sparse_attn_sharedkv(**kwargs)

@@ -15,7 +15,28 @@ limitations under the License.
 
 #include "core/common/options.h"
 
+#include <glog/logging.h>
+
+#include "core/framework/model/model_args.h"
+
 namespace xllm {
+
+void Options::validate(const ModelArgs& model_args) const {
+  if (model_args.model_type() == "deepseek_v41") {
+    CHECK(!enable_kvcache_store() && host_blocks_factor() <= 1.0)
+        << "DeepSeek-V4.1 does not support KV cache Store or host offload: "
+           "restore for the grouped KV (C1/C2) is not implemented.";
+    const bool speculative_requested = num_speculative_tokens() > 0 ||
+                                       !draft_model_path().value_or("").empty();
+    CHECK(!speculative_requested)
+        << "DeepSeek-V4.1 does not support speculative decoding: grouped KV "
+           "(C1/C2) is not implemented in the speculative path.";
+    CHECK(!enable_disagg_pd())
+        << "DeepSeek-V4.1 does not support disaggregated PD: the grouped "
+           "TOKEN KV (C1/C2) transfer path is not implemented.";
+  }
+}
+
 std::string Options::to_string() const {
   std::stringstream ss;
   ss << "Options: [";

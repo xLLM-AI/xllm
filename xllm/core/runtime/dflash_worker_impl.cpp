@@ -149,44 +149,37 @@ bool DFlashWorkerImpl::prepare_parallel_draft_metadata(
 DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
-    : DFlashWorkerImpl(
-          parallel_args,
-          device,
-          options,
-          [&] {
-            return std::make_unique<LLMWorkerImpl>(
-                configure_draft_parallel_args(parallel_args),
-                device,
-                draft_options(options),
-                parallel_args.dp_size() > 1);
-          },
-          configure_draft_config) {}
+    : DFlashWorkerImpl(parallel_args,
+                       device,
+                       options,
+                       configure_draft_parallel_args(parallel_args),
+                       draft_options(options),
+                       configure_draft_config) {}
 
 DFlashWorkerImpl::DFlashWorkerImpl(
     const ParallelArgs& parallel_args,
     const torch::Device& device,
     const runtime::Options& options,
-    absl::FunctionRef<std::unique_ptr<LLMWorkerImpl>()> draft_factory,
+    const ParallelArgs& draft_parallel_args,
+    const runtime::Options& draft_opts,
     int32_t (*configure_draft_config)(ModelArgs&, const runtime::Options&))
-    : DraftModelSpecWorkerImpl<LlmForwardInput>(
-          parallel_args,
-          device,
-          options,
-          WorkerType::LLM,
-          [&] {
-            // The draft consumes the target's aux hidden states, which the
-            // worker does not expose under CP; reject cp_size > 1 except
-            // DeepSeek-V4 on NPU.
-            if (parallel_args.cp_size() > 1) {
-              CHECK(Platform::is_npu() &&
-                    util::is_deepseek_v4_model_type(get_model_type(
-                        options.model_path(), options.backend())))
-                  << "Block-diffusion speculative decoding does not support "
-                     "context parallelism (cp_size > 1).";
-            }
-            return draft_factory();
-          },
-          configure_draft_config) {}
+    : DraftModelSpecWorkerImpl<LlmForwardInput>(parallel_args,
+                                                device,
+                                                options,
+                                                WorkerType::LLM,
+                                                draft_parallel_args,
+                                                draft_opts,
+                                                configure_draft_config) {
+  // The draft consumes the target's aux hidden states, which the
+  // worker does not expose under CP; reject cp_size > 1 except
+  // DeepSeek-V4 on NPU.
+  if (parallel_args.cp_size() > 1) {
+    CHECK(Platform::is_npu() && is_deepseek_v4_family(get_model_type(
+                                    options.model_path(), options.backend())))
+        << "Block-diffusion speculative decoding does not support "
+           "context parallelism (cp_size > 1).";
+  }
+}
 
 DFlashWorkerImpl::~DFlashWorkerImpl() {
   // Keep launch-thread-owned context alive until queued execution completes.
@@ -223,7 +216,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     // mtp.<last>.head tensors (with the draft-side QuaRot transform); replacing
     // them after load destroys proposal quality.
     const bool uses_own_head_and_embedding =
-        util::is_deepseek_v4_dspark_model_type(draft_args.model_type());
+        draft_args.model_type() == "deepseek_v4_dspark";
     if (uses_own_head_and_embedding) {
       LOG(INFO) << "Configured DeepSeek-V4 DSpark draft block size: "
                 << draft_args.block_size();

@@ -41,7 +41,7 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config_validation.h"
 #include "core/framework/config/speculative_config.h"
-#include "core/framework/model_loader/hf_model_config.h"
+#include "core/framework/model_loader/hf_model_args.h"
 #include "framework/chat_template/chat_template_factory.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
@@ -63,19 +63,21 @@ namespace xllm {
 
 LLMMaster::LLMMaster(const Options& options)
     : Master(options), master_status_(options.master_status()) {
-  options_.enable_mla(should_enable_mla(
-      std::filesystem::path(options_.model_path()), options_.backend()));
 #if defined(USE_NPU)
   resolve_npu_kernel_backend(&options_, /*model_component=*/"causal_lm");
 #endif
+  CHECK(load_hf_model_args(
+      options_.model_path(), options_.backend(), &model_args_))
+      << "Failed to load model args from " << options_.model_path();
+  options_.enable_mla(model_args_.enable_mla());
   const bool use_ssm_engine = SpeculativeConfig::uses_ssm_engine(
       options_.draft_model_path().value_or(""),
       options_.speculative_algorithm(),
       options_.num_speculative_tokens());
   const EngineType engine_type =
       use_ssm_engine ? EngineType::SSM : EngineType::LLM;
-  const std::string model_type =
-      get_model_type(options_.model_path(), options_.backend());
+  const std::string& model_type = model_args_.model_type();
+  options_.validate(model_args_);
   const std::optional<std::string> cp_error = validate_context_parallel_config(
       options_, engine_type, model_type, options_.nnodes());
   CHECK(!cp_error.has_value()) << cp_error.value();

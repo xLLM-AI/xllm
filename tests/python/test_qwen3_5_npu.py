@@ -94,17 +94,25 @@ from xllm.python.model_executor.runners.eager import EagerRunner
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 from xllm.python.models.qwen3_5 import Qwen3_5Config
 
-kernels.gemma_rms_norm = _gemma_rms_norm
-kernels.moe_fused_topk = MagicMock()
-kernels.grouped_moe_bf16 = MagicMock()
-kernels.prepare_row_parallel_weight = MagicMock(side_effect=lambda weight: (weight, False))
-distributed.all_gather_variable = MagicMock()
-distributed.all_gather = MagicMock()
-distributed.gather_dp_execution_tokens = MagicMock()
-distributed.all_reduce_ = MagicMock()
-distributed.tp_all_reduce = MagicMock()
-distributed.moe_tp_all_reduce = MagicMock()
-distributed.moe_ep_all_reduce = MagicMock()
+
+@pytest.fixture(autouse=True)
+def _isolate_kernel_and_distributed_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kernels, "gemma_rms_norm", _gemma_rms_norm, raising=False)
+    monkeypatch.setattr(kernels, "moe_fused_topk", MagicMock(), raising=False)
+    monkeypatch.setattr(kernels, "grouped_moe_bf16", MagicMock(), raising=False)
+    monkeypatch.setattr(
+        kernels, "prepare_row_parallel_weight", MagicMock(side_effect=lambda weight: (weight, False)), raising=False
+    )
+    for operation in (
+        "all_gather_variable",
+        "all_gather",
+        "gather_dp_execution_tokens",
+        "all_reduce_",
+        "tp_all_reduce",
+        "moe_tp_all_reduce",
+        "moe_ep_all_reduce",
+    ):
+        monkeypatch.setattr(distributed, operation, MagicMock())
 
 
 @pytest.fixture
@@ -466,7 +474,6 @@ def test_npu_gdn_loads_native_conv_weight_layout() -> None:
         "out_proj.weight": torch.zeros(8, 8),
     }
     layer.load_weights(ScopedWeightLoader([_StateDict(tensors)]), ParallelLoadContext(tp_rank=0, tp_size=1))
-    assert layer.conv1d_weight.shape == (4, 24)
     torch.testing.assert_close(layer.conv1d_weight, checkpoint_conv.squeeze(1).transpose(0, 1))
 
 

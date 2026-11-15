@@ -83,7 +83,8 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
       const torch::Device& device,
       const runtime::Options& options,
       WorkerType worker_type,
-      absl::FunctionRef<std::unique_ptr<LLMWorkerImpl>()> draft_factory,
+      const ParallelArgs& draft_parallel_args,
+      const runtime::Options& draft_opts,
       int32_t (*configure_draft_config)(ModelArgs&,
                                         const runtime::Options&) = nullptr);
 

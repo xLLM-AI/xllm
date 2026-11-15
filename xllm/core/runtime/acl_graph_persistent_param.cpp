@@ -219,7 +219,7 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // attention plan for each request.
   need_update_attention_plan_ =
       (args.model_type() != "deepseek_v32" &&
-       !util::is_deepseek_v4_model_type(args.model_type()) &&
+       !is_deepseek_v4_family(args.model_type()) &&
        args.model_type() != "glm_moe_dsa" && !supports_mla_graph_kv_bucketing_);
 
   const int64_t max_tokens_per_batch = options.max_tokens_per_batch();
