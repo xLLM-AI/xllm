@@ -17,7 +17,9 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <array>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -30,7 +32,6 @@ limitations under the License.
 #include "processors/audio_processor.h"
 #include "processors/image_processor.h"
 #include "processors/multimodal_processor.h"
-#include "processors/processor_util.h"
 #include "processors/prompt_processor.h"
 #include "processors/video_processor.h"
 
@@ -127,6 +128,26 @@ class MultimodalProcessor final : public MultimodalProcessorPipeline {
   }
 
  private:
+  struct ImageBatchBucket {
+    std::vector<size_t> indices;
+    std::vector<torch::Tensor> images;
+  };
+
+  static auto group_images_by_shape(const std::vector<torch::Tensor>& images) {
+    using ImageShape = std::array<int64_t, 3>;
+    std::map<ImageShape, ImageBatchBucket> buckets;
+    const size_t image_size = images.size();
+    for (size_t index = 0; index < image_size; ++index) {
+      const torch::Tensor& image = images[index];
+      const auto sizes = image.sizes();
+      ImageShape shape = {sizes[0], sizes[1], sizes[2]};
+      ImageBatchBucket& bucket = buckets[shape];
+      bucket.indices.push_back(index);
+      bucket.images.push_back(image);
+    }
+    return buckets;
+  }
+
   bool process_images(const std::vector<torch::Tensor>& images,
                       std::vector<MMDataItem>& output_items) const {
     output_items.clear();
