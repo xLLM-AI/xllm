@@ -126,7 +126,7 @@ function(cc_test)
         "$<BUILD_INTERFACE:${COMMON_INCLUDE_DIRS}>"
       )
       target_link_libraries(xllm_npu_test_runtime PUBLIC
-        GTest::gtest ascendcl Python::Python torch_npu torch_python
+        GTest::gtest ascendcl Python::Python pybind11::embed torch_npu torch_python
       )
     endif()
     target_link_libraries(${CC_TEST_NAME} PRIVATE xllm_npu_test_runtime)

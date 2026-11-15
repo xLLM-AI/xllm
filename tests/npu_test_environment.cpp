@@ -18,19 +18,19 @@ limitations under the License.
 #include <Python.h>
 #include <acl/acl.h>
 #include <gtest/gtest.h>
+#include <pybind11/embed.h>
 
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 
 namespace xllm::testing {
 
 namespace {
 
-// Main-thread state saved by init_npu_test_runtime(). Test tear-down code
-// reacquires the GIL here so pybind11 objects held by torch_npu / torch can
-// dec_ref safely during process exit (otherwise pybind11 aborts with
-// PyGILState_Check failure).
-PyThreadState* g_saved_thread_state = nullptr;
+// The main thread reacquires the GIL during test teardown so Python objects
+// held by torch_npu / torch can be destroyed safely during process exit.
+std::unique_ptr<pybind11::gil_scoped_release> g_gil_release;
 
 }  // namespace
 
@@ -77,15 +77,15 @@ void init_npu_test_runtime() {
     std::abort();
   }
 
-  // 4. Release the GIL so torch_npu's C++ entry points can PyGILState_Ensure
-  //    without deadlocking against the main thread.
-  g_saved_thread_state = PyEval_SaveThread();
+  // 4. Initialize this binary's pybind11 internals while the main thread owns
+  //    the GIL. Otherwise a worker's first acquire can cache a temporary Python
+  //    thread state that PyGILState_Release has already deleted.
+  g_gil_release = std::make_unique<pybind11::gil_scoped_release>();
 }
 
 void finalize_npu_test_runtime() {
-  if (g_saved_thread_state != nullptr) {
-    PyEval_RestoreThread(g_saved_thread_state);
-    g_saved_thread_state = nullptr;
+  if (g_gil_release != nullptr) {
+    g_gil_release.reset();
     // Embedded Python does not run atexit hooks at C++ process exit. The
     // framework shutdown drains used devices and also supports CPU-only tests.
     const int shutdown_ret = PyRun_SimpleString(
