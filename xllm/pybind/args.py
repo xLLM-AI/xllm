@@ -183,14 +183,6 @@ class ArgumentParser:
             "--max_tokens_for_graph_mode", type=int, default=2048, help="Maximum number of tokens for graph execution."
         )
         self.parser.add_argument(
-            "--enable_shm",
-            nargs="?",
-            const=True,
-            default=False,
-            type=_str_to_bool,
-            help="Use shared memory for inter-process communication in the single-machine multi-GPU scenario.",
-        )
-        self.parser.add_argument(
             "--input_shm_size", type=int, default=1024, help="The size of input shared memory in MB."
         )
         self.parser.add_argument(

@@ -143,7 +143,6 @@ do
     --enable_schedule_overlap=true \
     --enable_graph=true \
     --node_rank=$i \
-    --enable_shm=true \
     --task="generate" \
     --max_concurrent_requests=8 \
     --backend llm \

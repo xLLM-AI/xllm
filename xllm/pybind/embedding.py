@@ -54,7 +54,6 @@ class Embedding:
         enable_graph_mode_decode_no_padding: bool = False,
         enable_prefill_piecewise_graph: bool = False,
         max_tokens_for_graph_mode: int = 2048,
-        enable_shm: bool = False,
         is_local: bool = True,
         input_shm_size: int = 1024,
         output_shm_size: int = 128,
@@ -109,7 +108,6 @@ class Embedding:
         options.max_tokens_for_graph_mode = max_tokens_for_graph_mode
         options.enable_offline_inference = True
         options.spawn_worker_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-        options.enable_shm = enable_shm
         options.is_local = is_local
         options.input_shm_size = input_shm_size
         options.output_shm_size = output_shm_size

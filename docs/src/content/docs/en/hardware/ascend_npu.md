@@ -121,7 +121,6 @@ xllm serve \
   --enable_prefix_cache=false \
   --enable_chunked_prefill=true \
   --enable_schedule_overlap=true \
-  --enable_shm=true \
   --enable_graph=true
 ```
 

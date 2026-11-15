@@ -41,7 +41,7 @@ class ShmChannel : public CommChannel {
       folly::Promise<std::optional<RawForwardOutput>>& promise) override;
 
  private:
-  bool enable_shm_ = false;
+  bool shm_available_ = true;
   size_t input_shm_size_ = 0;
   std::unique_ptr<ForwardSharedMemoryTransport> input_shm_manager_ = nullptr;
   std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager_ = nullptr;

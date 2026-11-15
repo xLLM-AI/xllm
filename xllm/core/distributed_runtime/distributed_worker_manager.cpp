@@ -309,21 +309,24 @@ bool DistributedWorkerManager::unlink_p2p(
   return true;
 }
 
-namespace {
-std::unique_ptr<CommChannel> create_channel(const std::string& worker_addr,
-                                            int32_t rank,
-                                            int32_t dp_local_tp_size,
-                                            const runtime::Options& options) {
+std::unique_ptr<CommChannel> DistributedWorkerManager::create_channel(
+    const std::string& worker_addr,
+    int32_t rank,
+    int32_t dp_local_tp_size,
+    const runtime::Options& options) {
   std::unique_ptr<CommChannel> channel;
 
   if (net::extract_ip(options.master_node_addr().value_or("")) ==
-          net::extract_ip(worker_addr) &&
-      options.enable_shm()) {
+      net::extract_ip(worker_addr)) {
     const int32_t dp_group = rank / dp_local_tp_size;
     const bool is_driver = rank % dp_local_tp_size == 0;
     channel = std::make_unique<ShmChannel>(dp_group, rank, is_driver, options);
+    LOG(INFO) << "Worker rank " << rank << " at " << worker_addr
+              << " uses shared-memory model transport";
   } else {
     channel = std::make_unique<CommChannel>();
+    LOG(INFO) << "Worker rank " << rank << " at " << worker_addr
+              << " uses RPC model transport";
   }
 
   channel->init_brpc(worker_addr);
@@ -331,6 +334,7 @@ std::unique_ptr<CommChannel> create_channel(const std::string& worker_addr,
   return channel;
 }
 
+namespace {
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 void setup_numa_affinity_and_isolation(
     const runtime::Options& options,

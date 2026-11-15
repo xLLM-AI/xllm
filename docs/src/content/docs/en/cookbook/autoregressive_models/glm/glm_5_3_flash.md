@@ -148,7 +148,6 @@ for ((i=0; i<NNODES; i++)); do
     --enable_prefix_cache=false \
     --max_tokens_per_chunk_for_prefill=8192 \
     --enable_mix_batch=false \
-    --enable_shm=false \
     --enable_graph=true \
     --model_impl=python \
     --backend=vlm \

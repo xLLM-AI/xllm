@@ -42,7 +42,6 @@ xllm serve \
   --enable_prefix_cache=false \
   --enable_chunked_prefill=false \
   --enable_schedule_overlap=false \
-  --enable_shm=false \
   --limit_image_per_prompt=4
 ```
 

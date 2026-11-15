@@ -234,7 +234,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .max_global_ttft_ms(profile_config.max_global_ttft_ms())
       .max_global_tpot_ms(profile_config.max_global_tpot_ms())
       .max_requests_per_batch(dit_config.max_requests_per_batch())
-      .enable_shm(execution_config.enable_shm())
       .input_shm_size(execution_config.input_shm_size())
       .output_shm_size(execution_config.output_shm_size())
       .kv_cache_dtype(kv_cache_config.kv_cache_dtype())

@@ -39,7 +39,6 @@ xllm --model=/path/to/Qwen3-8B \
   --enable_prefix_cache=false \
   --enable_chunked_prefill=true \
   --enable_schedule_overlap=true \
-  --enable_shm=false \
   --reasoning_parser=qwen3 \
   --tool_call_parser=qwen3
 ```

@@ -163,7 +163,6 @@ do
     --dit_sparse_attention_enabled=false \
     --dit_sparse_attention_sparsity=0.8 \
     --dit_sparse_attention_sparse_start_step=15 \
-    --enable_shm=true \
     --node_rank=$i > $LOG_FILE 2>&1 &
 done
 ```

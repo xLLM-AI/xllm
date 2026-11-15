@@ -30,8 +30,7 @@ xllm --model=/path/to/Qwen3-VL-8B-Instruct \
   --max_memory_utilization=0.86 \
   --enable_prefix_cache=false \
   --enable_chunked_prefill=false \
-  --enable_schedule_overlap=false \
-  --enable_shm=false
+  --enable_schedule_overlap=false
 ```
 
 请将此示例作为独立部署运行。如果同时运行多个服务，需要分别分配设备、master 地址和通信端口。等待模型加载完成后再发送请求。

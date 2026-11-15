@@ -29,6 +29,7 @@ limitations under the License.
 
 namespace xllm {
 
+class CommChannel;
 class WorkerServer;
 class ThreadPool;
 class DistributedWorkerManagerTest;
@@ -81,6 +82,12 @@ class DistributedWorkerManager final {
 
   explicit DistributedWorkerManager(
       std::vector<std::shared_ptr<WorkerClient>> worker_clients);
+
+  static std::unique_ptr<CommChannel> create_channel(
+      const std::string& worker_addr,
+      int32_t rank,
+      int32_t dp_local_tp_size,
+      const runtime::Options& options);
 
   void start_worker_servers(const runtime::Options& options,
                             const std::string& master_node_addr);

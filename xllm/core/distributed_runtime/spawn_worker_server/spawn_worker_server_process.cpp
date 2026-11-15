@@ -41,7 +41,7 @@ limitations under the License.
 // @block_size
 // @max_tokens_per_batch
 // @max_seqs_per_batch
-// @enable_shm
+// @reserved_transport_argument
 // @is_local
 // @task_type
 // @worker_type
@@ -97,7 +97,7 @@ int main(int argc, char* argv[]) {
   int32_t block_size = static_cast<int32_t>(atoi(argv[6]));
   int32_t max_tokens_per_batch = static_cast<int32_t>(atoi(argv[7]));
   int32_t max_seqs_per_batch = static_cast<int32_t>(atoi(argv[8]));
-  int32_t enable_shm = static_cast<int32_t>(atoi(argv[9]));
+  // argv[9] is reserved to preserve the spawn protocol argument positions.
   int32_t is_local = static_cast<int32_t>(atoi(argv[10]));
   std::string task_type = std::string(argv[11]);
   std::string worker_type = std::string(argv[12]);
@@ -169,7 +169,6 @@ int main(int argc, char* argv[]) {
       << ", device_idx = " << device_idx << ", block_size = " << block_size
       << ", max_tokens_per_batch = " << max_tokens_per_batch
       << ", max_seqs_per_batch = " << max_seqs_per_batch
-      << ", enable_shm = " << (enable_shm > 0)
       << ", input_shm_size = " << input_shm_size
       << ", output_shm_size = " << output_shm_size
       << ", is_local = " << (is_local > 0) << ", global_rank = " << global_rank
@@ -217,7 +216,6 @@ int main(int argc, char* argv[]) {
                                    indexer_cache_dtype,
                                    max_tokens_per_batch,
                                    max_seqs_per_batch,
-                                   enable_shm > 0,
                                    input_shm_size,
                                    output_shm_size,
                                    is_local > 0,

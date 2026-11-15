@@ -199,8 +199,7 @@ void WorkerServer::create_server(const runtime::Options& options,
   std::unique_ptr<Worker> worker = std::make_unique<Worker>(
       worker_parallel_args, device, options, worker_type);
   worker_service->set_worker(std::move(worker));
-  bool create_shm =
-      options.enable_shm() && input_shm_manager && output_shm_manager;
+  const bool create_shm = input_shm_manager && output_shm_manager;
   if (create_shm) {
     worker_service->create_polling_shm_thread(std::move(input_shm_manager),
                                               std::move(output_shm_manager));
@@ -256,8 +255,6 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   std::string max_seqs_per_batch_str =
       std::to_string(options.max_seqs_per_batch());
   const char* max_seqs_per_batch_ptr = max_seqs_per_batch_str.c_str();
-  std::string enable_shm_str = std::to_string(options.enable_shm());
-  const char* enable_shm_ptr = enable_shm_str.c_str();
   std::string input_shm_size_str = std::to_string(options.input_shm_size());
   const char* input_shm_size_ptr = input_shm_size_str.c_str();
   std::string output_shm_size_str = std::to_string(options.output_shm_size());
@@ -348,7 +345,7 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         block_size_ptr,
                         max_tokens_per_batch_ptr,
                         max_seqs_per_batch_ptr,
-                        enable_shm_ptr,
+                        "1",  // Reserved legacy transport argument.
                         is_local_ptr,
                         options.task_type().c_str(),
                         worker_type_ptr,
@@ -399,7 +396,7 @@ void WorkerServer::prepare_shm(
     const runtime::Options& options,
     std::unique_ptr<ForwardSharedMemoryTransport>& input_shm_manager,
     std::unique_ptr<ForwardSharedMemoryTransport>& output_shm_manager) {
-  if (options.is_local() && options.enable_shm()) {
+  if (options.is_local()) {
     bool is_creator;
     int32_t dp_local_tp_size =
         parallel_args.world_size() / parallel_args.dp_size();

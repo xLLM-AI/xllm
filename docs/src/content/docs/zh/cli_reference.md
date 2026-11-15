@@ -224,6 +224,8 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 ## ExecutionConfig
 
+模型传输方式自动选择：与 master 同机的 worker 使用共享内存，其他机器上的 worker 使用 RPC，无需配置传输开关。
+
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
 | `extension_impl` | `string` | `""` | 为模型、执行器等注册组件选择原生扩展实现族；空值保留原有选择方式。所选实现族必须已注册；该实现族未注册的组件继续使用原有选择方式。 |
@@ -235,7 +237,6 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `max_tokens_for_graph_mode` | `int32` | `2048` | 图执行最大 token 数；`0` 表示不限制。 |
 | `acl_graph_decode_batch_size_limit` | `int32` | `16` | NPU 上 ACL graph 的 decode batch size 阈值；实际 decode batch size 超过该值时，ACL graph decode 会回退到 eager 模式以避免 OOM。 |
 | `block_draft_graph_warmup_max_kv_len` | `int32` | `0` | 仅为 Python block draft 的独立 ACL graph（DSpark/DFlash2，包括 GLM MLA draft）预捕获按 2 的幂增长的 KV 容量桶。`0` 覆盖完整模型上下文；正数预捕获到覆盖该长度的容量桶；`-1` 保留按需捕获。已有 warmup 必需的形状始终保留，即使超过正数上限。超过预捕获上界的请求仍可在线扩桶。更多容量桶会增加启动时间和 draft 图显存占用；不改变 target、MTP、context-write 或可选整轮 unified graph 的预热策略。 |
-| `enable_shm` | `bool` | `false` | 是否为模型执行启用共享内存。 |
 | `use_contiguous_input_buffer` | `bool` | `true` | 是否使用连续的 device input buffer 执行模型。 |
 | `input_shm_size` | `uint64` | `1024` | 输入共享内存大小，默认 1GB。 |
 | `output_shm_size` | `uint64` | `128` | 输出共享内存大小，默认 128MB。 |

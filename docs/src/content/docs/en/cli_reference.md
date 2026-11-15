@@ -224,6 +224,8 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 
 ## ExecutionConfig
 
+Model transport is selected automatically: workers on the master host use shared memory, and workers on other hosts use RPC. No transport enablement flag is required.
+
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `extension_impl` | `string` | `""` | Native extension implementation family for registered components, including models and executors. An empty value preserves normal selection. The selected family must be registered; components without registrations in that family keep their normal selection. |
@@ -235,7 +237,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `max_tokens_for_graph_mode` | `int32` | `2048` | Maximum number of tokens for graph execution. `0` means no limit. |
 | `acl_graph_decode_batch_size_limit` | `int32` | `16` | Decode batch size threshold for ACL graph on NPU. When the actual decode batch size exceeds this value, ACL graph decode falls back to eager mode to avoid OOM. |
 | `block_draft_graph_warmup_max_kv_len` | `int32` | `0` | Pre-capture power-of-two KV capacity buckets for independent Python block-draft ACL graphs (DSpark/DFlash2, including GLM MLA drafts). `0` covers the full model context; a positive value selects the bucket covering that length; `-1` retains lazy capacity capture. Required existing warmup shapes are always retained, even above a positive limit. Requests beyond the warmup limit can still grow graphs lazily. More buckets increase startup time and draft graph memory. Does not change target, MTP, context-write or optional whole-round unified graph warmup. |
-| `enable_shm` | `bool` | `false` | Whether to enable shared memory for model execution. |
 | `use_contiguous_input_buffer` | `bool` | `true` | Whether to use a contiguous device input buffer for model execution. |
 | `input_shm_size` | `uint64` | `1024` | Input shared-memory size. Default is 1GB. |
 | `output_shm_size` | `uint64` | `128` | Output shared-memory size. Default is 128MB. |

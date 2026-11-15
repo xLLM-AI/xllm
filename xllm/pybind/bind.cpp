@@ -113,7 +113,6 @@ PYBIND11_MODULE(xllm_export, m) {
                      &Options::enable_offline_inference_)
       .def_readwrite("disable_log_stats", &Options::disable_log_stats_)
       .def_readwrite("spawn_worker_path", &Options::spawn_worker_path_)
-      .def_readwrite("enable_shm", &Options::enable_shm_)
       .def_readwrite("input_shm_size", &Options::input_shm_size_)
       .def_readwrite("output_shm_size", &Options::output_shm_size_)
       .def_readwrite("is_local", &Options::is_local_)
