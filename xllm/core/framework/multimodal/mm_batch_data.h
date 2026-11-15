@@ -17,14 +17,15 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <variant>
 #include <vector>
 
-#include "mm_data.h"
-#include "mm_type.h"
+#include "core/framework/multimodal/mm_data.h"
+#include "core/framework/multimodal/mm_type.h"
 #include "worker.pb.h"
 
 namespace xllm {
@@ -39,7 +40,7 @@ class MMBatchData {
   bool valid() const { return type_ != MMType::NONE; }
 
   uint32_t type() const { return type_; }
-  const MMDict& data() const { return data_; }
+  const MMDict& data() const;
 
   bool has(const MMKey& key) const;
   void get(const MMKey& key, std::vector<torch::Tensor>& vec) const;
@@ -54,15 +55,16 @@ class MMBatchData {
   std::optional<T> get(const MMKey& key) const {
     if (!valid()) return std::nullopt;
 
-    const auto& itor = data_.find(key);
-    if (itor != data_.end()) {
+    const auto& dict = data();
+    const auto& itor = dict.find(key);
+    if (itor != dict.end()) {
       return std::get<T>(itor->second);
     } else {
       return std::nullopt;
     }
   }
 
-  void replace(MMDict data) { data_ = std::move(data); }
+  void replace(MMDict data);
   const std::vector<MMData>& mm_data_vec() const { return mm_datas_; }
 
   bool foreach (MMData::IVisitor& v) {
@@ -83,8 +85,11 @@ class MMBatchData {
   void debug_print() const;
 
  private:
+  class TensorAggregation;
+
   uint32_t type_ = MMType::NONE;
   MMDict data_;
+  std::shared_ptr<TensorAggregation> aggregation_;
   std::vector<MMData> mm_datas_;
 };
 

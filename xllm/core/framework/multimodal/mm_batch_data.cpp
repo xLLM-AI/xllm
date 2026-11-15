@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/framework/multimodal/mm_batch_data.h"
 
 #include <cstring>
+#include <mutex>
 
 #include "core/framework/multimodal/mm_visitor.h"
 #include "core/util/tensor_codec.h"
@@ -25,6 +26,39 @@ limitations under the License.
 #include "worker.pb.h"
 
 namespace xllm {
+
+class MMBatchData::TensorAggregation final {
+ public:
+  explicit TensorAggregation(
+      std::unordered_map<MMKey, std::vector<torch::Tensor>> tensors)
+      : tensors_(std::move(tensors)) {}
+
+  const MMDict& data() {
+    // Batch copies can be read by independent worker dispatches.
+    std::call_once(materialized_, [this] {
+      for (auto& [key, tensors] : tensors_) {
+        if (tensors.size() == 1 && tensors.front().defined() &&
+            tensors.front().dim() > 0) {
+          data_[key] = tensors.front().contiguous();
+          continue;
+        }
+        torch::Tensor gathered;
+        if (safe_concat(tensors, gathered)) {
+          data_[key] = std::move(gathered);
+        } else {
+          data_[key] = std::move(tensors);
+        }
+      }
+      tensors_.clear();
+    });
+    return data_;
+  }
+
+ private:
+  std::once_flag materialized_;
+  std::unordered_map<MMKey, std::vector<torch::Tensor>> tensors_;
+  MMDict data_;
+};
 
 MMBatchData::MMBatchData(std::vector<MMData> data) {
   this->batch(std::move(data));
@@ -36,15 +70,17 @@ MMBatchData::MMBatchData(uint32_t type, MMDict items)
 bool MMBatchData::has(const MMKey& key) const {
   if (!valid()) return false;
 
-  const auto& itor = data_.find(key);
-  return itor != data_.end();
+  const auto& dict = data();
+  const auto& itor = dict.find(key);
+  return itor != dict.end();
 }
 
 void MMBatchData::get(const MMKey& key, std::vector<torch::Tensor>& vec) const {
   if (!valid()) return;
 
-  const auto& itor = data_.find(key);
-  if (itor == data_.end()) return;
+  const auto& dict = data();
+  const auto& itor = dict.find(key);
+  if (itor == dict.end()) return;
 
   if (std::holds_alternative<torch::Tensor>(itor->second)) {
     vec.push_back(std::get<torch::Tensor>(itor->second));
@@ -69,13 +105,11 @@ void move_dict_to_device(MMDict& dict, const torch::Device& device) {
 }  // namespace
 
 void MMBatchData::to(const torch::Device& device) {
-  move_dict_to_device(data_, device);
+  if (!aggregation_) {
+    move_dict_to_device(data_, device);
+  }
 
-  // Move per-item tensors (raw inputs and user-supplied embeddings) too. The
-  // executor re-gathers inputs from per-item MMDataItem data() before running
-  // the encoder, so a move limited to the top-level data_ dict would be
-  // clobbered by that gather. Normalizing here keeps device movement in the
-  // single input_params.to path instead of scattered per-visitor safe_to calls.
+  // Item-backed dictionaries are derived again after moving their sources.
   for (auto& mm_data : mm_datas_) {
     if (mm_data.hold<MMItemVec>()) {
       for (auto& item : mm_data.items<MMItemVec>()) {
@@ -84,6 +118,9 @@ void MMBatchData::to(const torch::Device& device) {
     } else if (mm_data.hold<MMDict>()) {
       move_dict_to_device(mm_data.items<MMDict>(), device);
     }
+  }
+  if (aggregation_) {
+    batch(std::move(mm_datas_));
   }
 }
 
@@ -99,25 +136,18 @@ void MMBatchData::batch(std::vector<MMData> mm_datas) {
   CollectMMDataTensorVisitor visitor;
   this->foreach (static_cast<MMData::IVisitor&>(visitor));
 
-  MMDict dict;
-  for (auto& pair : visitor.datas_) {
-    if (pair.second.size() == 1 && pair.second.front().defined() &&
-        pair.second.front().dim() > 0) {
-      // Retain a single contiguous input instead of copying the full visual
-      // payload before transport and again when the receiver rebuilds it.
-      dict[pair.first] = pair.second.front().contiguous();
-      continue;
-    }
-    torch::Tensor tar;
-    if (safe_concat(pair.second, tar)) {
-      dict[pair.first] = tar;
-    } else {
-      dict[pair.first] = std::move(pair.second);
-    }
-  }
-
   type_ = visitor.type_;
-  data_ = std::move(dict);
+  data_.clear();
+  aggregation_ = std::make_shared<TensorAggregation>(std::move(visitor.datas_));
+}
+
+const MMDict& MMBatchData::data() const {
+  return aggregation_ ? aggregation_->data() : data_;
+}
+
+void MMBatchData::replace(MMDict data) {
+  aggregation_.reset();
+  data_ = std::move(data);
 }
 
 void MMBatchData::debug_print() const {
@@ -128,7 +158,7 @@ void MMBatchData::debug_print() const {
     mm_data.debug_print();
   }
   LOG(INFO) << "=============== mm batch data dict data ================";
-  for (const auto& pair : data_) {
+  for (const auto& pair : data()) {
     if (std::holds_alternative<torch::Tensor>(pair.second)) {
       torch::Tensor item = std::get<torch::Tensor>(pair.second);
       LOG(INFO) << " single tensor, key:" << pair.first
