@@ -212,8 +212,8 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     return get_word_embedding()(input_ids);
   }
 
-  torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
+  virtual torch::Tensor pooler(const torch::Tensor& hidden_states,
+                               const torch::Tensor& seleted_idxes) {
     auto h = hidden_states;
     if (seleted_idxes.defined()) {
       h = h.index_select(/*dim=*/0, seleted_idxes);

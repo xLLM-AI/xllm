@@ -1324,12 +1324,17 @@ TEST(AclGraphPersistentParamTest,
       torch::arange(kSpecWidth, int_options);
   params.attention.device.block_tables =
       torch::zeros({1, kActiveBlockTableWidth}, int_options);
+  params.attention.device.q_cu_seq_lens =
+      torch::tensor({0, kSpecWidth}, int_options);
+  params.embedding.linear_state_indices = torch::tensor({1}, int_options);
+  params.num_accepted_tokens = torch::tensor({1}, int_options);
   params.graph.use_expanded_decode_for_spec_verify_attention = true;
   params.graph.expanded_kv_seq_lens =
       torch::tensor({15, 16, 17, 18, 19, 20}, int_options);
   params.graph.expanded_kv_seq_lens_vec = {15, 16, 17, 18, 19, 20};
   params.graph.expanded_block_tables =
-      torch::zeros({kSpecWidth, kActiveBlockTableWidth}, int_options);
+      torch::arange(kSpecWidth * kActiveBlockTableWidth, int_options)
+          .view({kSpecWidth, kActiveBlockTableWidth});
 
   const auto tokens = torch::arange(kSpecWidth, int_options);
   const auto positions = torch::arange(kSpecWidth, int_options);
@@ -1345,6 +1350,17 @@ TEST(AclGraphPersistentParamTest,
   EXPECT_EQ(generic->graph.expanded_block_tables.size(0), kSpecWidth);
   EXPECT_EQ(generic->graph.expanded_block_tables.size(1), capacity);
   EXPECT_TRUE(generic->graph.expanded_block_tables.is_contiguous());
+  EXPECT_TRUE(torch::equal(
+      generic->graph.expanded_block_tables.narrow(1, 0, kActiveBlockTableWidth),
+      params.graph.expanded_block_tables));
+  EXPECT_EQ(
+      generic->graph.expanded_block_tables
+          .narrow(1, kActiveBlockTableWidth, capacity - kActiveBlockTableWidth)
+          .count_nonzero()
+          .item<int64_t>(),
+      0);
+  const void* persistent_storage =
+      generic->graph.expanded_block_tables.data_ptr();
 
   params.graph.spec_verify_source_addresses_stable = true;
   auto stable = persistent_param.update(tokens,
@@ -1358,6 +1374,46 @@ TEST(AclGraphPersistentParamTest,
   EXPECT_EQ(stable->graph.expanded_block_tables.size(0), kSpecWidth);
   EXPECT_EQ(stable->graph.expanded_block_tables.size(1),
             kActiveBlockTableWidth);
+  EXPECT_TRUE(stable->graph.expanded_block_tables.is_contiguous());
+  EXPECT_EQ(stable->graph.expanded_block_tables.data_ptr(), persistent_storage);
+  EXPECT_TRUE(torch::equal(stable->graph.expanded_block_tables,
+                           params.graph.expanded_block_tables));
+
+  for (int32_t replay_index = 0; replay_index < 2; ++replay_index) {
+    params.graph.expanded_block_tables.add_(1);
+    persistent_param.update_spec_verify_inputs(
+        tokens,
+        positions,
+        params,
+        kSpecWidth,
+        npu::SpecVerifyInputUpdateScope::ALL_INPUTS);
+    EXPECT_EQ(stable->graph.expanded_block_tables.data_ptr(),
+              persistent_storage);
+    EXPECT_TRUE(torch::equal(stable->graph.expanded_block_tables,
+                             params.graph.expanded_block_tables));
+  }
+
+  params.graph.spec_verify_source_addresses_stable = false;
+  auto generic_replay = persistent_param.update(tokens,
+                                                torch::Tensor(),
+                                                torch::Tensor(),
+                                                positions,
+                                                params,
+                                                kSpecWidth,
+                                                true);
+  ASSERT_TRUE(generic_replay.has_value());
+  EXPECT_TRUE(generic_replay->graph.expanded_block_tables.is_contiguous());
+  EXPECT_EQ(generic_replay->graph.expanded_block_tables.data_ptr(),
+            persistent_storage);
+  EXPECT_TRUE(torch::equal(generic_replay->graph.expanded_block_tables.narrow(
+                               1, 0, kActiveBlockTableWidth),
+                           params.graph.expanded_block_tables));
+  EXPECT_EQ(
+      generic_replay->graph.expanded_block_tables
+          .narrow(1, kActiveBlockTableWidth, capacity - kActiveBlockTableWidth)
+          .count_nonzero()
+          .item<int64_t>(),
+      0);
 }
 
 TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
