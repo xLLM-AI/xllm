@@ -133,7 +133,7 @@ class MultimodalProcessor final : public MultimodalProcessorPipeline {
     std::vector<torch::Tensor> images;
   };
 
-  static auto group_images_by_shape(const std::vector<torch::Tensor>& images) {
+  auto group_images_by_shape(const std::vector<torch::Tensor>& images) const {
     using ImageShape = std::array<int64_t, 3>;
     std::map<ImageShape, ImageBatchBucket> buckets;
     const size_t image_size = images.size();
