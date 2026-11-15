@@ -559,6 +559,74 @@ TEST(TransportCodecTest, EmbeddingAttachmentKeepsSmallAndLegacyOutputsInline) {
   }
 }
 
+TEST(TransportCodecTest,
+     EmbeddingBatchRetainsOneBlockAndPreservesMixedOutputs) {
+  proto::VLMForwardResponse encoded;
+  butil::IOBuf attachment;
+  {
+    ForwardOutput source;
+    source.sample_output.embeddings =
+        torch::arange(4 * 4096, torch::kFloat32).reshape({4, 4096});
+    source.sample_output.mm_embeddings = {{torch::ones({16384})}};
+    ASSERT_TRUE(encode_vlm_output(source, /*stats=*/{}, &encoded, &attachment));
+    EXPECT_EQ(attachment.backing_block_num(), 2);
+    EXPECT_EQ(attachment.backing_block(0).data(),
+              source.sample_output.embeddings.const_data_ptr());
+    EXPECT_EQ(encoded.outputs(0)
+                  .mm_embeddings()
+                  .tensors(0)
+                  .parameters()
+                  .at("offset")
+                  .int64_param(),
+              4 * 4096 * sizeof(float));
+    for (int32_t row = 0; row < 4; ++row) {
+      const auto& embeddings = encoded.outputs(row).tokens(0).embeddings();
+      EXPECT_TRUE(embeddings.vals().empty());
+      EXPECT_EQ(embeddings.attachment_slice().offset(),
+                row * 4096 * sizeof(float));
+      EXPECT_EQ(embeddings.attachment_slice().count(), 4096);
+    }
+  }
+  const BinaryPayload payload(attachment);
+  attachment.clear();
+  RawForwardOutput decoded;
+  ASSERT_TRUE(decode_vlm_output(encoded, decoded, &payload));
+  ASSERT_EQ(decoded.outputs.size(), 4);
+  for (int32_t row = 0; row < 4; ++row) {
+    const auto& values = decoded.outputs[row].tokens[0].embeddings;
+    ASSERT_EQ(values.size(), 4096);
+    EXPECT_FLOAT_EQ(values.front(), row * 4096);
+    EXPECT_FLOAT_EQ(values.back(), (row + 1) * 4096 - 1);
+    EXPECT_EQ(decoded.outputs[row].tokens[0].id, -1);
+  }
+  EXPECT_TRUE(
+      torch::equal(decoded.outputs[0].mm_embeddings[0], torch::ones({16384})));
+}
+
+TEST(TransportCodecTest, EmbeddingBatchThresholdKeepsSmallBatchesInline) {
+  for (const int64_t rows : {3, 4}) {
+    ForwardOutput source;
+    source.sample_output.next_tokens = torch::arange(rows, torch::kInt32);
+    source.sample_output.embeddings = torch::ones({rows, 4096});
+    proto::LLMForwardResponse encoded;
+    butil::IOBuf attachment;
+    ASSERT_TRUE(encode_llm_output(source, /*stats=*/{}, &encoded, &attachment));
+    EXPECT_EQ(attachment.empty(), rows == 3);
+    const BinaryPayload payload(attachment);
+    RawForwardOutput decoded;
+    ASSERT_TRUE(decode_llm_output(encoded, decoded, &payload));
+    ASSERT_EQ(decoded.outputs.size(), rows);
+    for (int64_t row = 0; row < rows; ++row) {
+      EXPECT_EQ(
+          encoded.outputs(row).tokens(0).embeddings().has_attachment_slice(),
+          rows == 4);
+      EXPECT_EQ(decoded.outputs[row].tokens[0].id, row);
+      EXPECT_EQ(decoded.outputs[row].tokens[0].embeddings,
+                std::vector<float>(4096, 1.0f));
+    }
+  }
+}
+
 TEST(TransportCodecTest, DiTOutputRoundTripPreservesTensorAndTextPayloads) {
   ForwardOutput source;
   source.dit_forward_output.tensors = {torch::tensor({5.0f, 6.0f})};
