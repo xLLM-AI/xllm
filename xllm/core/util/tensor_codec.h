@@ -42,6 +42,12 @@ bool torch_to_proto(const torch::Tensor& torch_tensor,
                     proto::Tensor* proto_tensor,
                     std::string& binary_payload);
 
+// Retains contiguous CPU storage until the attachment is released. Callers
+// must keep the source storage immutable during transmission.
+bool torch_to_proto(const torch::Tensor& torch_tensor,
+                    proto::Tensor* proto_tensor,
+                    butil::IOBuf& binary_payload);
+
 torch::ScalarType datatype_proto_to_torch(const std::string& proto_datatype);
 
 std::string torch_datatype_to_proto(torch::ScalarType torch_dtype);

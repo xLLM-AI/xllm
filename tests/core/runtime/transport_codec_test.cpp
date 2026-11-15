@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/kv_cache/transfer/prefetch_result.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/forward_shared_memory_transport.h"
+#include "core/util/tensor_codec.h"
 #include "worker.pb.h"
 
 namespace xllm {
@@ -388,6 +389,87 @@ TEST(TransportCodecTest, OutputRoundTripPreservesTokenAndTensorPayloads) {
   ASSERT_EQ(decoded.json_object_errors.size(), 1);
   EXPECT_EQ(decoded.json_object_errors[0].sample_sequence_id, "sequence-0");
   EXPECT_EQ(decoded.json_object_errors[0].message, "invalid JSON");
+}
+
+TEST(TransportCodecTest,
+     MultimodalAttachmentRetainsStorageAndDecodesMixedTensors) {
+  proto::VLMForwardResponse encoded;
+  butil::IOBuf attachment;
+  {
+    ForwardOutput source;
+    source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
+    source.sample_output.mm_embeddings = {
+        {torch::arange(32768, torch::kFloat32).reshape({128, 256}),
+         torch::tensor({3.0f, 4.0f})}};
+    ASSERT_TRUE(encode_vlm_output(source, /*stats=*/{}, &encoded, &attachment));
+    const auto& large = encoded.outputs(0).mm_embeddings().tensors(0);
+    EXPECT_FALSE(large.has_contents());
+    EXPECT_TRUE(large.parameters().at("is_binary").bool_param());
+    EXPECT_TRUE(encoded.outputs(0).mm_embeddings().tensors(1).has_contents());
+    EXPECT_EQ(attachment.backing_block(0).data(),
+              source.sample_output.mm_embeddings[0][0].const_data_ptr());
+  }
+  RawForwardOutput decoded;
+  {
+    const BinaryPayload payload(attachment);
+    attachment.clear();
+    ASSERT_TRUE(decode_vlm_output(encoded, decoded, &payload));
+  }
+  ASSERT_EQ(decoded.outputs.size(), 1);
+  EXPECT_EQ(decoded.outputs[0].tokens[0].id, 7);
+  ASSERT_EQ(decoded.outputs[0].mm_embeddings.size(), 2);
+  EXPECT_TRUE(
+      torch::equal(decoded.outputs[0].mm_embeddings[0],
+                   torch::arange(32768, torch::kFloat32).reshape({128, 256})));
+  EXPECT_TRUE(torch::equal(decoded.outputs[0].mm_embeddings[1],
+                           torch::tensor({3.0f, 4.0f})));
+}
+
+TEST(TransportCodecTest,
+     MultimodalAttachmentRejectsTruncatedPayloadWithoutReplacingOutput) {
+  ForwardOutput source;
+  source.sample_output.mm_embeddings = {
+      {torch::ones({32768}, torch::kFloat32)}};
+  proto::LLMForwardResponse encoded;
+  butil::IOBuf attachment;
+  ASSERT_TRUE(encode_llm_output(source, /*stats=*/{}, &encoded, &attachment));
+  attachment.pop_back(1);
+  const BinaryPayload truncated(attachment);
+  RawForwardOutput destination;
+  destination.prepared_token = 123;
+  EXPECT_FALSE(decode_llm_output(encoded, destination, &truncated));
+  EXPECT_EQ(destination.prepared_token, 123);
+}
+
+TEST(TransportCodecTest,
+     MultimodalAttachmentEncodeFailurePreservesDestinations) {
+  ForwardOutput source;
+  source.sample_output.mm_embeddings = {
+      {torch::ones({32768}, torch::kFloat32), torch::Tensor()}};
+  proto::VLMForwardResponse destination;
+  destination.set_prepared_token(123);
+  butil::IOBuf attachment;
+  EXPECT_FALSE(
+      encode_vlm_output(source, /*stats=*/{}, &destination, &attachment));
+  EXPECT_EQ(destination.prepared_token(), 123);
+  EXPECT_TRUE(attachment.empty());
+}
+
+TEST(TransportCodecTest, BinaryTensorAttachmentPreservesHalfTypesAndOffsets) {
+  for (const torch::ScalarType dtype : {torch::kFloat16, torch::kBFloat16}) {
+    const torch::Tensor source = torch::arange(4096, torch::kFloat32).to(dtype);
+    butil::IOBuf attachment;
+    ASSERT_EQ(attachment.append("prefix", 6), 0);
+    proto::Tensor metadata;
+    ASSERT_TRUE(util::torch_to_proto(source, &metadata, attachment));
+    EXPECT_EQ(metadata.parameters().at("offset").int64_param(), 6);
+    const BinaryPayload payload(attachment);
+    attachment.clear();
+    const torch::Tensor decoded = util::proto_to_torch(metadata, payload);
+    ASSERT_TRUE(decoded.defined());
+    EXPECT_EQ(decoded.scalar_type(), dtype);
+    EXPECT_TRUE(torch::equal(decoded, source));
+  }
 }
 
 TEST(TransportCodecTest, DiTOutputRoundTripPreservesTensorAndTextPayloads) {

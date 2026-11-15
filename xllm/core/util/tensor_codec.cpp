@@ -401,9 +401,12 @@ torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor) {
   return tensor;
 }
 
-bool torch_to_proto(const torch::Tensor& torch_tensor,
-                    proto::Tensor* proto_tensor,
-                    std::string& binary_payload) {
+namespace {
+template <typename AppendPayload>
+bool encode_binary_tensor(const torch::Tensor& torch_tensor,
+                          proto::Tensor* proto_tensor,
+                          size_t offset,
+                          AppendPayload&& append_payload) {
   if (!torch_tensor.defined() || torch_tensor.numel() == 0) {
     LOG(ERROR) << "Cannot serialize an undefined or empty binary Tensor";
     return false;
@@ -436,7 +439,6 @@ bool torch_to_proto(const torch::Tensor& torch_tensor,
     return false;
   }
   const size_t byte_length = element_count * element_size;
-  const size_t offset = binary_payload.size();
   if (offset > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
       byte_length > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
     LOG(ERROR) << "Binary Tensor offset or byte length exceeds int64 range";
@@ -446,10 +448,38 @@ bool torch_to_proto(const torch::Tensor& torch_tensor,
   (*parameters)["is_binary"].set_bool_param(true);
   (*parameters)["offset"].set_int64_param(static_cast<int64_t>(offset));
   (*parameters)["len"].set_int64_param(static_cast<int64_t>(byte_length));
-  binary_payload.append(
-      static_cast<const char*>(contiguous_tensor.const_data_ptr()),
-      byte_length);
-  return true;
+  return append_payload(contiguous_tensor, byte_length);
+}
+
+}  // namespace
+
+bool torch_to_proto(const torch::Tensor& torch_tensor,
+                    proto::Tensor* proto_tensor,
+                    std::string& binary_payload) {
+  return encode_binary_tensor(
+      torch_tensor,
+      proto_tensor,
+      binary_payload.size(),
+      [&](const torch::Tensor& tensor, size_t bytes) {
+        binary_payload.append(static_cast<const char*>(tensor.const_data_ptr()),
+                              bytes);
+        return true;
+      });
+}
+
+bool torch_to_proto(const torch::Tensor& torch_tensor,
+                    proto::Tensor* proto_tensor,
+                    butil::IOBuf& binary_payload) {
+  return encode_binary_tensor(
+      torch_tensor,
+      proto_tensor,
+      binary_payload.size(),
+      [&](const torch::Tensor& owner, size_t bytes) {
+        // External IOBuf blocks have a uint32 capacity with reserved overhead.
+        return bytes <= 0xFFFFFFFFULL - 100 &&
+               binary_payload.append_user_data(
+                   owner.data_ptr(), bytes, [owner](void*) {}) == 0;
+      });
 }
 
 bool torch_to_proto(const torch::Tensor& torch_tensor,
