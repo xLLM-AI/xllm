@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/distributed_runtime/comm_channel.h"
 
 #include <brpc/closure_guard.h>
+#include <brpc/controller.h>
 #include <brpc/server.h>
 #include <butil/endpoint.h>
 #include <folly/ScopeGuard.h>
@@ -132,9 +133,14 @@ class ModelRoutingService final : public proto::DistributeWorker {
                        proto::LLMForwardResponse* response,
                        google::protobuf::Closure* done) override {
     brpc::ClosureGuard guard(done);
+    const auto& attachment =
+        static_cast<brpc::Controller*>(controller)->request_attachment();
+    uint8_t domain = 0;
     if (!request->has_packed_input() ||
-        request->packed_input().payload().size() < 11 ||
-        static_cast<uint8_t>(request->packed_input().payload()[10]) != 1) {
+        !request->packed_input().payload().empty() ||
+        attachment.copy_to(&domain, sizeof(domain), /*pos=*/10) !=
+            sizeof(domain) ||
+        domain != 1) {
       controller->SetFailed("Unexpected packed input domain");
       return;
     }
@@ -146,9 +152,14 @@ class ModelRoutingService final : public proto::DistributeWorker {
                        proto::VLMForwardResponse* response,
                        google::protobuf::Closure* done) override {
     brpc::ClosureGuard guard(done);
+    const auto& attachment =
+        static_cast<brpc::Controller*>(controller)->request_attachment();
+    uint8_t domain = 0;
     if (!request->has_packed_input() ||
-        request->packed_input().payload().size() < 11 ||
-        static_cast<uint8_t>(request->packed_input().payload()[10]) != 2) {
+        !request->packed_input().payload().empty() ||
+        attachment.copy_to(&domain, sizeof(domain), /*pos=*/10) !=
+            sizeof(domain) ||
+        domain != 2) {
       controller->SetFailed("Unexpected packed input domain");
       return;
     }
