@@ -92,6 +92,8 @@ class VLMMaster : public Master {
   const std::string& model_type() const { return model_args_.model_type(); }
 
  private:
+  void warmup_multimodal();
+
   std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator_;
 
   // The LLM draft prepares VirtualMemory pages before loading worker weights.
