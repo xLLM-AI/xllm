@@ -65,6 +65,12 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
                       std::string python_model_name = {});
   ~PyCausalLM() override;
 
+  bool supports_greedy_tokens() const override {
+    return supports_greedy_tokens_;
+  }
+  torch::Tensor greedy_tokens(const torch::Tensor& hidden_states,
+                              const torch::Tensor& selected_idxes) override;
+
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
                       std::vector<KVCache>& kv_caches,
@@ -156,6 +162,7 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   torch::TensorOptions options_;
   torch::Device device_;
   bool enable_mla_ = false;
+  bool supports_greedy_tokens_ = false;
 
   int64_t tp_size_ = 1;
   int64_t tp_rank_ = 0;

@@ -245,6 +245,19 @@ class SamplingParameters final {
            !return_logits();
   }
 
+  // Metadata-only gate: never synchronize a device tensor to choose the
+  // output head. Defined constraint tensors conservatively require logits.
+  bool can_sample_without_logits() const {
+    return is_all_greedy() && !is_embeddings() && max_top_logprobs() == 0 &&
+           !repetition_penalties().defined() &&
+           !frequency_penalties().defined() &&
+           !presence_penalties().defined() && !filter_bitmask().defined() &&
+           !logits_bias().defined() && !min_token_positions().defined() &&
+           !min_tokens_remaining().defined() && !min_token_ids().defined() &&
+           !bad_words().defined() && !bad_word_suffix().defined() &&
+           !prefix_tokens().defined();
+  }
+
   // Fails fast unless the batch is mixed (see do_sample()).
   const torch::Tensor& require_do_sample() const {
     CHECK(do_sample().defined())

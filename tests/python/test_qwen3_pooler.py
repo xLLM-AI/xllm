@@ -174,3 +174,24 @@ def test_generation_checkpoint_still_requires_untied_output_head(config: dict[st
 def test_generation_still_requires_vocab_divisible_by_tp(config: dict[str, object]) -> None:
     with pytest.raises(AssertionError):
         Qwen3ForCausalLM(config | {"vocab_size": 9, "tp_size": 2})
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("indices", [None, [], [2, 0, 2]])
+def test_greedy_output_matches_full_logits(
+    model: Qwen3ForCausalLM, dtype: torch.dtype, indices: list[int] | None
+) -> None:
+    model.to(dtype=dtype)
+    with torch.no_grad():
+        model.lm_head.weight.copy_(torch.arange(32).reshape(8, 4))
+    assert model.supports_greedy_tokens()
+    hidden = torch.tensor([[1, 2, 3, 4], [-1, -2, -3, -4], [0, 0, 0, 0]], dtype=dtype)
+    selected = None if indices is None else torch.tensor(indices, dtype=torch.int64)
+    for value in (hidden, -hidden):
+        expected = model.compute_logits(value, selected).argmax(-1)
+        torch.testing.assert_close(model.compute_greedy_tokens(value, selected), expected, rtol=0, atol=0)
+
+
+def test_embedding_model_does_not_advertise_greedy_output(config: dict[str, object]) -> None:
+    config["embedding_mode"] = True
+    assert not Qwen3ForCausalLM(config).supports_greedy_tokens()

@@ -121,6 +121,16 @@ class CausalLM : public torch::nn::Module, public Model {
     return logits(hidden_states, seleted_idxes);
   }
 
+  // Call only when supports_greedy_tokens() and the request needs no logits
+  // processing or distribution outputs. All TP ranks must participate.
+  virtual bool supports_greedy_tokens() const { return false; }
+
+  virtual torch::Tensor greedy_tokens(const torch::Tensor& hidden_states,
+                                      const torch::Tensor& selected_idxes) {
+    NOT_IMPLEMENTED();
+    return {};
+  }
+
   virtual bool share_weights_from(CausalLM& /*source*/) { return false; }
 
   virtual void prepare_expert_weight(

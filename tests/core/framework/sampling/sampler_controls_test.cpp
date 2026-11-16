@@ -16,6 +16,9 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <functional>
+#include <vector>
+
 #include "core/framework/sampling/logits_processor.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/rejection_sampler.h"
@@ -27,6 +30,53 @@ namespace {
 SamplingParameters make_sampling_params(int64_t rows, bool random) {
   return testutil::make_sampling_params(
       rows, random ? SamplingMode::RANDOM : SamplingMode::GREEDY);
+}
+
+TEST(SamplerControlsTest,
+     CandidateOutputRejectsConstraintsAndDistributionOutputs) {
+  auto params = make_sampling_params(1, false);
+  EXPECT_TRUE(params.can_sample_without_logits());
+  const std::vector<std::function<void(SamplingParameters&)>> constraints = {
+      [](SamplingParameters& p) {
+        p.repetition_penalties() = torch::empty({0});
+      },
+      [](SamplingParameters& p) {
+        p.frequency_penalties() = torch::empty({0});
+      },
+      [](SamplingParameters& p) { p.presence_penalties() = torch::empty({0}); },
+      [](SamplingParameters& p) { p.filter_bitmask() = torch::empty({0}); },
+      [](SamplingParameters& p) { p.logits_bias() = torch::empty({0}); },
+      [](SamplingParameters& p) {
+        p.min_token_positions() = torch::empty({0});
+      },
+      [](SamplingParameters& p) {
+        p.min_tokens_remaining() = torch::empty({0});
+      },
+      [](SamplingParameters& p) { p.min_token_ids() = torch::empty({0}); },
+      [](SamplingParameters& p) { p.bad_words() = torch::empty({0}); },
+      [](SamplingParameters& p) { p.bad_word_suffix() = torch::empty({0}); },
+      [](SamplingParameters& p) { p.prefix_tokens() = torch::empty({0}); },
+      [](SamplingParameters& p) { p.logprobs() = true; },
+      [](SamplingParameters& p) { p.return_logits() = true; },
+      [](SamplingParameters& p) { p.is_embeddings() = true; },
+      [](SamplingParameters& p) { p.max_top_logprobs() = 1; },
+      [](SamplingParameters& p) { p.sampling_mode() = SamplingMode::RANDOM; },
+      [](SamplingParameters& p) { p.sampling_mode() = SamplingMode::MIXED; },
+  };
+  for (const auto& constrain : constraints) {
+    auto constrained = params;
+    constrain(constrained);
+    EXPECT_FALSE(constrained.can_sample_without_logits());
+  }
+  // The existing sampler skips these transforms for a greedy batch too.
+  params.temperatures() = torch::tensor({0.0F});
+  params.top_k() = torch::tensor({1});
+  params.top_p() = torch::tensor({0.5F});
+  params.min_p() = torch::tensor({0.2F});
+  EXPECT_TRUE(params.can_sample_without_logits());
+  torch::Tensor logits = torch::tensor({{1.0F, 5.0F, 2.0F}});
+  EXPECT_TRUE(
+      torch::equal(sample(logits, params).next_tokens, logits.argmax(-1)));
 }
 
 TEST(SamplerControlsTest, GreedyHonorsBiasAndAllowedTokenMask) {
