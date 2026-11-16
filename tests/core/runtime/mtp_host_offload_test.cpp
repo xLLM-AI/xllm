@@ -24,8 +24,10 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model_loader/model_loader.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
@@ -142,6 +144,37 @@ class RecordingTransferWorker final : public LLMWorkerImpl {
   uint32_t prefetch_count_ = 0;
 };
 
+class CacheAllocationModel final : public CausalLM {
+ public:
+  explicit CacheAllocationModel(torch::TensorOptions options)
+      : options_(std::move(options)) {}
+
+  ModelOutput forward(const torch::Tensor& /*tokens*/,
+                      const torch::Tensor& /*positions*/,
+                      std::vector<KVCache>& /*kv_caches*/,
+                      const ModelParamsView& /*parameters*/) override {
+    ADD_FAILURE() << "Cache allocation must not execute the model.";
+    return {};
+  }
+
+  torch::Tensor logits(const torch::Tensor& /*hidden_states*/,
+                       const torch::Tensor& /*selected_indices*/) override {
+    ADD_FAILURE() << "Cache allocation must not compute logits.";
+    return {};
+  }
+
+  void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {}
+  void prepare_expert_weight(
+      int32_t /*layer_id*/,
+      const std::vector<int32_t>& /*expert_ids*/) override {}
+  void update_expert_weight(int32_t /*layer_id*/) override {}
+  torch::Device device() const override { return options_.device(); }
+  const torch::TensorOptions& options() const override { return options_; }
+
+ private:
+  const torch::TensorOptions options_;
+};
+
 class HierarchyTransferTestWorker : public LLMWorkerImpl {
  public:
   HierarchyTransferTestWorker(const ParallelArgs& parallel_args,
@@ -150,6 +183,8 @@ class HierarchyTransferTestWorker : public LLMWorkerImpl {
                               const ModelArgs& model_args)
       : LLMWorkerImpl(parallel_args, device, options) {
     dtype_ = torch::kFloat32;
+    model_ = std::make_unique<CacheAllocationModel>(
+        torch::TensorOptions().dtype(dtype_).device(device));
     context_ =
         ModelContext(parallel_args,
                      model_args,

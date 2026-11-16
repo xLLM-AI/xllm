@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from types import ModuleType
 from typing import Any
 
@@ -38,14 +39,19 @@ _CACHE_MODE = 1  # krope_ctkv
 _QUANT_MODE = 0  # per_tensor_quant_asymm
 
 
-def _require_mla_preprocess_v2() -> ModuleType:
+@pytest.fixture(name="mla")
+def _mla_with_internal_format() -> Iterator[ModuleType]:
     if not hasattr(torch, "npu") or not torch.npu.is_available():
         pytest.skip("requires an available Ascend NPU")
     from xllm.python.kernels_npu import mla
 
     if not mla.has_mla_preprocess_v2():
         pytest.skip("aclnnMlaPreprocessV2 is not available in the loaded runtime")
-    return mla
+    # Fused MLA weights require NZ storage. Restore the process setting afterward.
+    previous = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
+    torch.npu.config.allow_internal_format = True
+    yield mla
+    torch.npu.config.allow_internal_format = previous in ("enable", b"enable")
 
 
 def _make_inputs(mla: ModuleType) -> dict[str, torch.Tensor | int | float | bool]:
@@ -195,8 +201,7 @@ def _run_low_level_op(inputs: dict[str, Any]) -> tuple[torch.Tensor, ...]:
     )
 
 
-def test_mla_preprocess_v2_q_b_preserves_logical_weight() -> None:
-    mla = _require_mla_preprocess_v2()
+def test_mla_preprocess_v2_q_b_preserves_logical_weight(mla: ModuleType) -> None:
     device = torch.device("npu")
     head_dim = _QK_NOPE_HEAD_DIM + _QK_ROPE_HEAD_DIM
     rows = _NUM_HEADS * head_dim
@@ -224,8 +229,7 @@ def test_mla_preprocess_v2_q_b_preserves_logical_weight() -> None:
     torch.testing.assert_close(prepared_bias.cpu(), bias.cpu()[expected_rows])
 
 
-def test_mla_preprocess_v2_writes_outputs_and_selected_cache_slots() -> None:
-    mla = _require_mla_preprocess_v2()
+def test_mla_preprocess_v2_writes_outputs_and_selected_cache_slots(mla: ModuleType) -> None:
     inputs = _make_inputs(mla)
 
     q_latent, kv_cache, q_pe, rope_cache, q_c = _run_low_level_op(inputs)
@@ -243,8 +247,7 @@ def test_mla_preprocess_v2_writes_outputs_and_selected_cache_slots() -> None:
     assert torch.isnan(rope_cache[1]).all()
 
 
-def test_mla_preprocess_v2_python_wrapper_matches_low_level_op() -> None:
-    mla = _require_mla_preprocess_v2()
+def test_mla_preprocess_v2_python_wrapper_matches_low_level_op(mla: ModuleType) -> None:
     low_level_inputs = _make_inputs(mla)
     # Rebuild with the same seed: clone() can discard private NPU formats.
     wrapper_inputs = _make_inputs(mla)

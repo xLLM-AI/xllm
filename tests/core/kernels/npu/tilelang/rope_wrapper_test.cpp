@@ -16,7 +16,6 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
-#include <torch_npu/torch_npu.h>
 
 #include <functional>
 #include <iostream>
@@ -29,16 +28,7 @@ limitations under the License.
 namespace xllm::kernel::npu::tilelang {
 namespace {
 
-class TileLangRopeWrapperTest : public ::testing::Test {
- protected:
-  static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
-
-  static void TearDownTestSuite() {
-    torch_npu::finalize_npu();
-    aclrtResetDevice(0);
-    aclFinalize();
-  }
-};
+class TileLangRopeWrapperTest : public ::testing::Test {};
 
 struct RopeTestCase {
   std::string name;

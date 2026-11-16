@@ -15,7 +15,6 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include <torch/torch.h>
-#include <torch_npu/torch_npu.h>
 
 #include <vector>
 
@@ -26,9 +25,6 @@ namespace {
 
 class TileLangSpecVerifyTokenUpdateTest : public ::testing::Test {
  protected:
-  static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
-  static void TearDownTestSuite() { torch_npu::finalize_npu(); }
-
   const torch::Device device_{"npu:0"};
   const torch::TensorOptions i32_ =
       torch::TensorOptions().dtype(torch::kInt32).device(device_);

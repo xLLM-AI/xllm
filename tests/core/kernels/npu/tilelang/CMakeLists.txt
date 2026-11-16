@@ -53,6 +53,10 @@ cc_test(
     unified_dlog
 )
 
+target_compile_definitions(spec_verify_attention_tiling_update_wrapper_test PRIVATE
+  XLLM_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+
 cc_test(
   NAME
     fused_gdn_gating_wrapper_test

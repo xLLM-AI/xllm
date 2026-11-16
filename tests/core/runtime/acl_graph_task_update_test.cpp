@@ -17,7 +17,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
-#include <torch_npu/torch_npu.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include <cstdlib>
 #include <memory>
@@ -72,14 +72,10 @@ class AclGraphTaskUpdateTestEnvironment : public ::testing::Environment {
     if (ret != 0) {
       LOG(ERROR) << "ACL set device id: 0 failed, ret:" << ret;
     }
-    torch_npu::init_npu("npu:0");
   }
 
   void TearDown() override {
     google::ShutdownGoogleLogging();
-    torch_npu::finalize_npu();
-    aclrtResetDevice(0);
-    aclFinalize();
 
     xllm::testing::finalize_npu_test_runtime();
   }

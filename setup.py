@@ -682,8 +682,12 @@ class ExtBuildSingleTest(ExtBuild):
                 raise
         else:
             logger.info(f"🚀 Running test: {test_executable}")
+            # Match the native executable environment configured by cc_test.
+            test_env = env.copy()
+            if self.device == "npu":
+                test_env["LD_PRELOAD"] = "libtcmalloc.so.4"
             try:
-                subprocess.check_call([test_executable], cwd=os.path.dirname(test_executable), env=env)
+                subprocess.check_call([test_executable], cwd=os.path.dirname(test_executable), env=test_env)
                 logger.info(f"✅ Test {self.test_name} passed!")
             except subprocess.CalledProcessError as e:
                 logger.exception(f"❌ Test {self.test_name} failed with exit code {e.returncode}")
