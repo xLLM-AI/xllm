@@ -559,6 +559,8 @@ class ExtBuild(build_ext):
         # Build every native executable shipped in the wheel so stale Mooncake
         # binaries cannot be reused from a previous build directory.
         build_targets = [ext.name, "mooncake_master", "mooncake_client", "stage_mooncake_ha_runtime"]
+        if self.device == "npu":
+            build_targets.append("xllm_kernel_native")
         if BUILD_EXPORT:
             build_targets.append("export_module")
         build_cmd = [cmake_cmd, "--build", ".", "--verbose"] + build_args + ["--target"]
@@ -600,6 +602,27 @@ class ExtBuild(build_ext):
             _stage_python_kernel_package(py_pkg_src, py_pkg_dst, self.device)
 
         _stage_triton_npu_runtime_binaries(self.base_dir, extdir, self.device)
+
+        if self.device == "npu":
+            kernel_dir = os.path.join(os.path.dirname(extdir), "xllm_kernel")
+            os.makedirs(kernel_dir, exist_ok=True)
+            subprocess.check_call(
+                [
+                    cmake_cmd,
+                    "--install",
+                    os.path.join(cmake_dir, "xllm-kernel"),
+                    "--prefix",
+                    kernel_dir,
+                ],
+                env=env,
+            )
+
+            # Source workers import this same package before installed packages.
+            # A symlink keeps native and Python hosts on one physical library.
+            source_library = os.path.join(self.base_dir, "xllm-kernel", "python", "xllm_kernel", "libxllm_kernel.so")
+            if os.path.lexists(source_library):
+                os.unlink(source_library)
+            os.symlink(os.path.join(kernel_dir, "libxllm_kernel.so"), source_library)
 
         _stage_npu_ops_vendor(self.base_dir, extdir, self.device, env)
 

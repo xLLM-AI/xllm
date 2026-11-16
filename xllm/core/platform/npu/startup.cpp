@@ -46,6 +46,7 @@ limitations under the License.
 #include "core/platform/device_name_utils.h"
 #include "core/platform/npu/native_host_path.h"
 #include "core/platform/npu/vendor_paths.h"
+#include "xllm_kernel/native/runtime.h"
 
 namespace py = pybind11;
 
@@ -736,6 +737,7 @@ std::vector<int32_t> default_npu_cpu_affinity(int32_t node_rank,
 }
 
 bool initialize_npu_startup(std::optional<int32_t> device_index) {
+  xllm_kernel::native::configure_resources();
   if (!configure_bundled_npu_ops()) {
     return false;
   }

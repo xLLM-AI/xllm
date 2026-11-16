@@ -59,3 +59,7 @@ compile_commands.json
 /local
 /logs
 /log
+
+# Native kernel source-run link and relocated wheel output.
+/xllm-kernel/python/xllm_kernel/libxllm_kernel.so
+/dist

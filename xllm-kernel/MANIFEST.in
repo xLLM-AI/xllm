@@ -1,2 +1,7 @@
 # Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
-global-exclude *.so *.pyc
+include CMakeLists.txt
+recursive-include cmake *.cmake.in
+recursive-include include *.h
+recursive-include csrc *.cpp
+recursive-include python/xllm_kernel/opp *
+global-exclude *.pyc

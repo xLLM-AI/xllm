@@ -15,7 +15,7 @@ function(xllm_configure_npu_runtime target)
   foreach(property BUILD_RPATH INSTALL_RPATH)
     get_property(existing TARGET ${target} PROPERTY ${property})
     set_property(TARGET ${target} PROPERTY ${property}
-      "$ORIGIN/opp/vendors/custom_xllm_math/op_api/lib;${existing}")
+      "$ORIGIN/../xllm_kernel;$ORIGIN/opp/vendors/custom_xllm_math/op_api/lib;${existing}")
   endforeach()
   get_target_property(type ${target} TYPE)
   if(type STREQUAL "EXECUTABLE")

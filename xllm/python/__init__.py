@@ -44,11 +44,13 @@ def _load_kernel_package() -> ModuleType:
     return importlib.import_module("xllm_kernel")
 
 
-def initialize_runtime() -> None:
+def initialize_runtime(*, operations: tuple[str, ...] | None = None) -> None:
     """Initialize and publish the active platform's Python kernel package."""
 
     global _runtime_kernels
     if _runtime_kernels is not None:
+        if operations is not None and _runtime_kernels.__name__.endswith("kernels_npu"):
+            _load_kernel_package().initialize(device="npu", operations=operations)
         return
 
     from xllm.python.platform import current_platform
@@ -58,9 +60,16 @@ def initialize_runtime() -> None:
     elif current_platform.is_npu():
         xllm_kernel = _load_kernel_package()
 
-        from scripts.logger import logger
+        from xllm_kernel.native import load_native
 
-        prepared = xllm_kernel.initialize(device="npu", operations=("rms_norm",))
+        from scripts.logger import logger
+        from xllm.python.kernel_requirements import NPU_WORKER_OPERATIONS
+
+        load_native()
+
+        prepared = xllm_kernel.initialize(
+            device="npu", operations=NPU_WORKER_OPERATIONS if operations is None else operations
+        )
         for operation, kernel in prepared.items():
             logger.info("Python kernel %s: %s (generation=%s)", operation, kernel.spec.name, kernel.generation)
         backend_name = "xllm.python.kernels_npu"

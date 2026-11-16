@@ -10,6 +10,7 @@ cc_library(
   SRCS
     startup.cpp
   DEPS
+    xllm_kernel_native
     :config
     :platform
     absl::strings

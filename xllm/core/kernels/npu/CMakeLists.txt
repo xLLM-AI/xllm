@@ -44,6 +44,7 @@ cc_library(
     w4a8_dynamic_moe_preprocess.cpp
     npu_ops_library.cpp
   DEPS
+    xllm_kernel_native
     :util
     # collectives.cpp issues raw Hccl* calls on the caller's stream.
     hccl

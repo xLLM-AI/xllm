@@ -1,0 +1,9 @@
+# Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+if(@XLLM_KERNEL_USE_NPU@)
+  find_dependency(glog CONFIG REQUIRED)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/xllm_kernel_native_targets.cmake")
+check_required_components(xllm_kernel)

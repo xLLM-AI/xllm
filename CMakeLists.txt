@@ -904,5 +904,13 @@ endif()
 # Define the extension SDK before adding sibling directories so the build-tree
 # target is visible to xllm, tests, and downstream extension fixtures.
 include(native_extension)
+if(USE_NPU)
+  set(XLLM_KERNEL_USE_NPU ON CACHE BOOL "Build kernel Ascend runtime" FORCE)
+  add_subdirectory(xllm-kernel)
+  if(CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+    set_target_properties(xllm_kernel_native PROPERTIES LIBRARY_OUTPUT_DIRECTORY
+      "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/../xllm_kernel")
+  endif()
+endif()
 add_subdirectory(xllm)
 add_subdirectory(tests)

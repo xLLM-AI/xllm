@@ -43,6 +43,7 @@ cc_library(
   INCLUDES
     ${PROJECT_SOURCE_DIR}/third_party/xllm_ops/build/autogen
   DEPS
+    xllm_kernel_native
     :util
     atb
     Python::Python
