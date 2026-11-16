@@ -34,7 +34,7 @@ SamplingParameters make_sampling_params(int64_t rows, bool random) {
 
 TEST(SamplerControlsTest,
      CandidateOutputRejectsConstraintsAndDistributionOutputs) {
-  auto params = make_sampling_params(1, false);
+  auto params = make_sampling_params(/*rows=*/1, /*random=*/false);
   EXPECT_TRUE(params.can_sample_without_logits());
   const std::vector<std::function<void(SamplingParameters&)>> constraints = {
       [](SamplingParameters& p) {
@@ -75,8 +75,8 @@ TEST(SamplerControlsTest,
   params.min_p() = torch::tensor({0.2F});
   EXPECT_TRUE(params.can_sample_without_logits());
   torch::Tensor logits = torch::tensor({{1.0F, 5.0F, 2.0F}});
-  EXPECT_TRUE(
-      torch::equal(sample(logits, params).next_tokens, logits.argmax(-1)));
+  EXPECT_TRUE(torch::equal(sample(logits, params).next_tokens,
+                           logits.argmax(/*dim=*/-1)));
 }
 
 TEST(SamplerControlsTest, GreedyHonorsBiasAndAllowedTokenMask) {
