@@ -302,6 +302,9 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._actual_seq_lens: list[int] | None = None
         self._actual_seq_q: list[int] = []
         self._actual_seq_kv: list[int] = []
+        # Reused across steps: one query row per sequence makes this ramp a
+        # function of the batch width alone.
+        self._decode_query_ramp: list[int] = []
         self._mla_actual_seq_q: torch.Tensor | None = None
         self._mla_actual_seq_kv: torch.Tensor | None = None
         # Dense (FIA v2) MLA state: host cumulative seq-lens consumed by
@@ -819,11 +822,16 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                     kv_seq_lens_host_values = kv_seq_lens_host_values[:real_batch]
                 else:
                     raise RuntimeError("host KV lengths must have one entry per block-table row")
-            self._actual_seq_q: list[int] = (
-                list(self._actual_seq_lens)
-                if graph_prefill and self._actual_seq_lens is not None
-                else list(range(1, real_batch + 1))
-            )
+            if graph_prefill and self._actual_seq_lens is not None:
+                self._actual_seq_q = list(self._actual_seq_lens)
+            else:
+                # Plain decode carries one query row per sequence, so the ramp
+                # depends only on the batch width and repeats verbatim on every
+                # step that keeps a shape. Keep it instead of rebuilding the
+                # list each step.
+                if len(self._decode_query_ramp) != real_batch:
+                    self._decode_query_ramp = list(range(1, real_batch + 1))
+                self._actual_seq_q = self._decode_query_ramp
             self._actual_seq_kv: list[int] = list(kv_seq_lens_host_values)
         else:
             self._actual_seq_q = []
