@@ -32,6 +32,7 @@ limitations under the License.
 #include "util/threadpool.h"
 
 namespace xllm {
+class ForwardInputEncoding;
 
 // Light client for call local thread worker,
 // which just a wrapper of worker instance.
@@ -103,13 +104,15 @@ class WorkerClient {
   // Remote execution path: send LlmForwardInput transport payload and decode
   // worker response as RawForwardOutput for distributed engine handling.
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
-      const LlmForwardInput& inputs);
+      const LlmForwardInput& inputs,
+      std::shared_ptr<ForwardInputEncoding> encoding = nullptr);
 
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const DiTForwardInput& inputs);
 
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
-      const VlmForwardInput& inputs);
+      const VlmForwardInput& inputs,
+      std::shared_ptr<ForwardInputEncoding> encoding = nullptr);
 
   virtual folly::SemiFuture<folly::Unit> process_group_test_async();
 

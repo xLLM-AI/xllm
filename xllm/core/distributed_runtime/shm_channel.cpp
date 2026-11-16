@@ -53,7 +53,8 @@ ShmChannel::ShmChannel(int dp_group,
 
 void ShmChannel::execute_llm_model_async(
     const LlmForwardInput& input,
-    folly::Promise<std::optional<RawForwardOutput>>& promise) {
+    folly::Promise<std::optional<RawForwardOutput>>& promise,
+    ForwardInputEncoding* encoding) {
   if (enable_shm_) {
     const bool input_fits = input_shm_manager_
                                 ? input_shm_manager_->input_write(input)
@@ -75,7 +76,7 @@ void ShmChannel::execute_llm_model_async(
       return;
     }
   }
-  execute_llm_model_with_brpc(input, promise);
+  execute_llm_model_with_brpc(input, promise, encoding);
 }
 
 void ShmChannel::execute_dit_model_async(
@@ -107,7 +108,8 @@ void ShmChannel::execute_dit_model_async(
 
 void ShmChannel::execute_vlm_model_async(
     const VlmForwardInput& input,
-    folly::Promise<std::optional<RawForwardOutput>>& promise) {
+    folly::Promise<std::optional<RawForwardOutput>>& promise,
+    ForwardInputEncoding* encoding) {
   if (enable_shm_) {
     const bool input_fits = input_shm_manager_
                                 ? input_shm_manager_->input_write(input)
@@ -129,7 +131,7 @@ void ShmChannel::execute_vlm_model_async(
       return;
     }
   }
-  execute_vlm_model_with_brpc(input, promise);
+  execute_vlm_model_with_brpc(input, promise, encoding);
 }
 
 }  // namespace xllm
