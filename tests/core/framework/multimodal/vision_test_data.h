@@ -25,7 +25,7 @@ namespace xllm::test {
 
 inline MMBatchData make_vision_batch(int64_t frames, float pixel_value = 1.0F) {
   MMItemVec items;
-  items.reserve(2);
+  items.reserve(/*new_cap=*/2);
   items.emplace_back(
       MMType::IMAGE,
       MMDict{{"image_grid_thw", torch::tensor({{1, 4, 4}}, torch::kInt32)},
@@ -37,7 +37,7 @@ inline MMBatchData make_vision_batch(int64_t frames, float pixel_value = 1.0F) {
            torch::tensor({{frames, int64_t{4}, int64_t{4}}}, torch::kInt64)},
           {"pixel_values_videos", torch::full({frames * 16, 8}, pixel_value)}});
   std::vector<MMData> requests;
-  requests.reserve(1);
+  requests.reserve(/*new_cap=*/1);
   requests.emplace_back(MMType::IMAGE | MMType::VIDEO, std::move(items));
   return MMBatchData(std::move(requests));
 }

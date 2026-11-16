@@ -80,7 +80,7 @@ TEST(MMBatchDataTest, HostGridPolicyPreservesDictionaryTensorVectors) {
   EXPECT_EQ(pixels.front().device().type(), torch::kMeta);
 
   std::vector<MMData> requests;
-  requests.reserve(1);
+  requests.reserve(/*new_cap=*/1);
   requests.emplace_back(MMType::VIDEO, data);
   MMBatchData batch(std::move(requests));
   batch.to(torch::Device(torch::kMeta), /*keep_vision_grid_on_cpu=*/true);

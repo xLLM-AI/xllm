@@ -46,7 +46,7 @@ class VlmHostMetadataTransportTest : public ::testing::Test {
   void SetUp() override {
     previous_contiguous_ =
         ExecutionConfig::get_instance().use_contiguous_input_buffer();
-    ExecutionConfig::get_instance().use_contiguous_input_buffer(true);
+    ExecutionConfig::get_instance().use_contiguous_input_buffer(/*value=*/true);
   }
 
   void TearDown() override {
@@ -99,7 +99,7 @@ TEST_F(VlmHostMetadataTransportTest, PackedInputPreservesHostGridPolicy) {
   VlmForwardInput lazy;
   ASSERT_TRUE(lazy.from_packed_proto(packed));
   ASSERT_FALSE(lazy.input_params.multimodal.mm_data.valid());
-  const torch::Device device(torch::kPrivateUse1, 0);
+  const torch::Device device(torch::kPrivateUse1, /*index=*/0);
   auto prepared =
       lazy.to(device, torch::kFloat32, /*keep_vision_grid_on_cpu=*/true);
   ASSERT_TRUE(prepared.runtime.device_tensors_ready);
@@ -126,7 +126,7 @@ TEST_F(VlmHostMetadataTransportTest,
   ASSERT_TRUE(is_creator);
   ForwardSharedMemoryTransport reader(
       name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
-  const torch::Device device(torch::kPrivateUse1, 0);
+  const torch::Device device(torch::kPrivateUse1, /*index=*/0);
   VlmForwardInput first;
   std::promise<void> entered_wait;
   auto entered = entered_wait.get_future();
@@ -141,7 +141,7 @@ TEST_F(VlmHostMetadataTransportTest,
         first, device, InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ);
   });
   const std::future_status wait_status =
-      entered.wait_for(std::chrono::seconds(5));
+      entered.wait_for(std::chrono::seconds(/*count=*/5));
   // Publish only after the reader has entered wait_for_input. A policy cached
   // before the wait will deterministically retain the old false value.
   reader.set_keep_vision_grid_on_cpu(/*enabled=*/true);
@@ -165,7 +165,7 @@ TEST_F(VlmHostMetadataTransportTest,
 
 TEST_F(VlmHostMetadataTransportTest,
        DeferredPrepareOwnsPayloadAcrossReuseAndUnmapping) {
-  const torch::Device device(torch::kPrivateUse1, 0);
+  const torch::Device device(torch::kPrivateUse1, /*index=*/0);
   VlmForwardInput first;
   VlmForwardInput second;
   {
@@ -212,7 +212,8 @@ TEST_F(VlmHostMetadataTransportTest,
             .value()
             .cpu();
     EXPECT_TRUE(torch::equal(old_pixels, torch::ones_like(old_pixels)));
-    EXPECT_TRUE(torch::equal(new_pixels, torch::full_like(new_pixels, 7)));
+    EXPECT_TRUE(torch::equal(new_pixels,
+                             torch::full_like(new_pixels, /*fill_value=*/7)));
   }
 }
 
