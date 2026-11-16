@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "comm_channel.h"
+#include "core/distributed_runtime/comm_channel.h"
 
 #include <brpc/controller.h>
 #include <glog/logging.h>
@@ -25,6 +25,7 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "core/distributed_runtime/worker_model_codec.h"
 #include "core/kv_cache/transfer/kv_transport_codec.h"
+#include "core/runtime/forward_input_encoding.h"
 #include "runtime/vlm_forward_params.h"
 
 namespace xllm {
@@ -253,8 +254,9 @@ bool CommChannel::pull_kv_blocks(
 
 void CommChannel::execute_llm_model_async(
     const LlmForwardInput& input,
-    folly::Promise<std::optional<RawForwardOutput>>& promise) {
-  execute_llm_model_with_brpc(input, promise);
+    folly::Promise<std::optional<RawForwardOutput>>& promise,
+    ForwardInputEncoding* encoding) {
+  execute_llm_model_with_brpc(input, promise, encoding);
 }
 
 bool CommChannel::process_group_test() {
@@ -595,11 +597,17 @@ bool CommChannel::get_last_vlm_step_result_async(
 
 bool CommChannel::execute_llm_model_with_brpc(
     const LlmForwardInput& input,
-    folly::Promise<std::optional<RawForwardOutput>>& promise) {
+    folly::Promise<std::optional<RawForwardOutput>>& promise,
+    ForwardInputEncoding* encoding) {
   proto::LLMForwardRequest request;
   auto done = std::make_unique<ExecuteLLMModelClosure>();
-  if (!input.to_packed_attachment(request.mutable_packed_input(),
-                                  done->cntl.request_attachment())) {
+  const bool encoded =
+      encoding ? encoding->encode(input,
+                                  request.mutable_packed_input(),
+                                  done->cntl.request_attachment())
+               : input.to_packed_attachment(request.mutable_packed_input(),
+                                            done->cntl.request_attachment());
+  if (!encoded) {
     LOG(ERROR) << "Failed to pack LlmForwardInput for remote execution";
     promise.setValue(std::optional<RawForwardOutput>{});
     return false;
@@ -667,17 +675,24 @@ void ExecuteDITModelClosure::Run() {
 
 void CommChannel::execute_vlm_model_async(
     const VlmForwardInput& input,
-    folly::Promise<std::optional<RawForwardOutput>>& promise) {
-  execute_vlm_model_with_brpc(input, promise);
+    folly::Promise<std::optional<RawForwardOutput>>& promise,
+    ForwardInputEncoding* encoding) {
+  execute_vlm_model_with_brpc(input, promise, encoding);
 }
 
 bool CommChannel::execute_vlm_model_with_brpc(
     const VlmForwardInput& input,
-    folly::Promise<std::optional<RawForwardOutput>>& promise) {
+    folly::Promise<std::optional<RawForwardOutput>>& promise,
+    ForwardInputEncoding* encoding) {
   proto::VLMForwardRequest request;
   auto done = std::make_unique<ExecuteVLMModelClosure>();
-  if (!input.to_packed_attachment(request.mutable_packed_input(),
-                                  done->cntl.request_attachment())) {
+  const bool encoded =
+      encoding ? encoding->encode(input,
+                                  request.mutable_packed_input(),
+                                  done->cntl.request_attachment())
+               : input.to_packed_attachment(request.mutable_packed_input(),
+                                            done->cntl.request_attachment());
+  if (!encoded) {
     LOG(ERROR) << "Failed to pack VlmForwardInput for remote execution";
     promise.setValue(std::optional<RawForwardOutput>{});
     return false;

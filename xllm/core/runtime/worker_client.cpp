@@ -69,7 +69,9 @@ WorkerClient::estimate_kv_cache_capacity_async() {
 }
 
 folly::SemiFuture<std::optional<RawForwardOutput>>
-WorkerClient::step_remote_async(const LlmForwardInput& input) {
+WorkerClient::step_remote_async(
+    const LlmForwardInput& input,
+    std::shared_ptr<ForwardInputEncoding> /*encoding*/) {
   LOG(FATAL) << "WorkerClient Method step_remote_async with LlmForwardInput "
                 "param is UnImplemented.";
   return folly::makeSemiFuture(std::optional<RawForwardOutput>(std::nullopt));
@@ -82,7 +84,9 @@ WorkerClient::step_remote_async(const DiTForwardInput& /*input*/) {
 }
 
 folly::SemiFuture<std::optional<RawForwardOutput>>
-WorkerClient::step_remote_async(const VlmForwardInput& /*input*/) {
+WorkerClient::step_remote_async(
+    const VlmForwardInput& /*input*/,
+    std::shared_ptr<ForwardInputEncoding> /*encoding*/) {
   LOG(FATAL) << "Native VLM local execution requires step_async";
   return folly::makeSemiFuture(std::optional<RawForwardOutput>{});
 }

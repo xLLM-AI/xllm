@@ -33,6 +33,7 @@ limitations under the License.
 
 namespace xllm {
 class VlmForwardInput;
+class ForwardInputEncoding;
 
 class CommChannel {
  public:
@@ -75,7 +76,8 @@ class CommChannel {
 
   virtual void execute_llm_model_async(
       const LlmForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
+      folly::Promise<std::optional<RawForwardOutput>>& promise,
+      ForwardInputEncoding* encoding = nullptr);
 
   virtual void execute_dit_model_async(
       const DiTForwardInput& input,
@@ -83,7 +85,8 @@ class CommChannel {
 
   virtual void execute_vlm_model_async(
       const VlmForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
+      folly::Promise<std::optional<RawForwardOutput>>& promise,
+      ForwardInputEncoding* encoding = nullptr);
 
   virtual bool process_group_test();
 
@@ -124,7 +127,8 @@ class CommChannel {
  protected:
   bool execute_llm_model_with_brpc(
       const LlmForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
+      folly::Promise<std::optional<RawForwardOutput>>& promise,
+      ForwardInputEncoding* encoding = nullptr);
 
   bool execute_dit_model_with_brpc(
       const DiTForwardInput& input,
@@ -132,7 +136,8 @@ class CommChannel {
 
   bool execute_vlm_model_with_brpc(
       const VlmForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
+      folly::Promise<std::optional<RawForwardOutput>>& promise,
+      ForwardInputEncoding* encoding = nullptr);
 
  private:
   brpc::Channel channel_;

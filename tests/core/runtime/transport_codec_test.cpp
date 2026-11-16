@@ -21,6 +21,7 @@ limitations under the License.
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -28,13 +29,65 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/kv_cache/transfer/kv_transport_codec.h"
 #include "core/kv_cache/transfer/prefetch_result.h"
+#include "core/runtime/forward_input_encoding.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/forward_shared_memory_transport.h"
+#include "core/runtime/vlm_forward_params.h"
 #include "core/util/tensor_codec.h"
 #include "worker.pb.h"
 
 namespace xllm {
 namespace {
+
+template <typename Input>
+void expect_shared_forward_encoding() {
+  Input input;
+  input.token_ids = torch::arange(32768, torch::kInt32);
+  input.positions = torch::tensor({0, 1}, torch::kInt32);
+  proto::PackedForwardInput expected_metadata;
+  butil::IOBuf expected_payload;
+  ASSERT_TRUE(input.to_packed_attachment(&expected_metadata, expected_payload));
+  std::string expected;
+  expected_payload.copy_to(&expected);
+
+  ForwardInputEncoding encoding;
+  constexpr size_t kWorkers = 8;
+  std::array<proto::PackedForwardInput, kWorkers> metadata;
+  std::array<butil::IOBuf, kWorkers> payloads;
+  std::array<bool, kWorkers> succeeded{};
+  std::vector<std::thread> workers;
+  workers.reserve(kWorkers);
+  for (size_t rank = 0; rank < kWorkers; ++rank) {
+    workers.emplace_back([&, rank] {
+      succeeded[rank] = encoding.encode(input, &metadata[rank], payloads[rank]);
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+  for (size_t rank = 0; rank < kWorkers; ++rank) {
+    ASSERT_TRUE(succeeded[rank]);
+    EXPECT_EQ(metadata[rank].SerializeAsString(),
+              expected_metadata.SerializeAsString());
+    std::string actual;
+    payloads[rank].copy_to(&actual);
+    EXPECT_EQ(actual, expected);
+    ASSERT_EQ(payloads[rank].backing_block_num(),
+              payloads[0].backing_block_num());
+    for (size_t block = 0; block < payloads[0].backing_block_num(); ++block) {
+      EXPECT_EQ(payloads[rank].backing_block(block).data(),
+                payloads[0].backing_block(block).data());
+    }
+  }
+}
+
+TEST(TransportCodecTest, LlmFanoutSharesEncodedBlocksAcrossConcurrentWorkers) {
+  expect_shared_forward_encoding<LlmForwardInput>();
+}
+
+TEST(TransportCodecTest, VlmFanoutSharesEncodedBlocksAcrossConcurrentWorkers) {
+  expect_shared_forward_encoding<VlmForwardInput>();
+}
 
 class ScopedRawOutputTransport final {
  public:

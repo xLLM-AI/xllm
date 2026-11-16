@@ -30,7 +30,8 @@ class ShmChannel : public CommChannel {
 
   void execute_llm_model_async(
       const LlmForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise) override;
+      folly::Promise<std::optional<RawForwardOutput>>& promise,
+      ForwardInputEncoding* encoding = nullptr) override;
 
   void execute_dit_model_async(
       const DiTForwardInput& input,
@@ -38,7 +39,8 @@ class ShmChannel : public CommChannel {
 
   void execute_vlm_model_async(
       const VlmForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise) override;
+      folly::Promise<std::optional<RawForwardOutput>>& promise,
+      ForwardInputEncoding* encoding = nullptr) override;
 
  private:
   bool enable_shm_ = false;

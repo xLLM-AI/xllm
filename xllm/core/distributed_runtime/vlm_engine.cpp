@@ -43,6 +43,7 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/runtime/forward_input_encoding.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/tensor_options.h"
 #include "framework/block/kv_cache_manager_factory.h"
@@ -55,6 +56,7 @@ limitations under the License.
 #include "util/env_var.h"
 #include "util/pretty_print.h"
 #include "util/utils.h"
+
 namespace xllm {
 
 namespace {
@@ -380,13 +382,20 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
 
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
   futures.reserve(worker_clients_num_);
+  std::vector<std::shared_ptr<ForwardInputEncoding>> encodings;
+  encodings.reserve(forward_inputs.size());
+  for (size_t dp_rank = 0; dp_rank < forward_inputs.size(); ++dp_rank) {
+    encodings.emplace_back(dp_local_tp_size_ > 1
+                               ? std::make_shared<ForwardInputEncoding>()
+                               : nullptr);
+  }
 
   // update dp related global parameters and then execute model
   for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
        ++worker_rank) {
     int32_t dp_rank = worker_rank / dp_local_tp_size_;
     futures.emplace_back(worker_clients_[worker_rank]->step_remote_async(
-        forward_inputs[dp_rank]));
+        forward_inputs[dp_rank], encodings[dp_rank]));
   }
 
   // wait for the all future to complete

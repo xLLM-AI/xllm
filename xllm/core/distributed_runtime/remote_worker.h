@@ -36,6 +36,7 @@ limitations under the License.
 #include "worker.pb.h"
 
 namespace xllm {
+class ForwardInputEncoding;
 
 class RemoteWorker : public WorkerClient {
  public:
@@ -95,13 +96,15 @@ class RemoteWorker : public WorkerClient {
 
   // Run the model and return the output.
   folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
-      const LlmForwardInput& inputs) override;
+      const LlmForwardInput& inputs,
+      std::shared_ptr<ForwardInputEncoding> encoding = nullptr) override;
 
   folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const DiTForwardInput& inputs) override;
 
   folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
-      const VlmForwardInput& inputs) override;
+      const VlmForwardInput& inputs,
+      std::shared_ptr<ForwardInputEncoding> encoding = nullptr) override;
 
   folly::SemiFuture<folly::Unit> process_group_test_async() override;
 

@@ -116,13 +116,17 @@ RemoteWorker::estimate_kv_cache_capacity_async() {
 }
 
 folly::SemiFuture<std::optional<RawForwardOutput>>
-RemoteWorker::step_remote_async(const LlmForwardInput& input) {
+RemoteWorker::step_remote_async(
+    const LlmForwardInput& input,
+    std::shared_ptr<ForwardInputEncoding> encoding) {
   folly::Promise<std::optional<RawForwardOutput>> promise;
   auto future = promise.getSemiFuture();
-  threadpool_.schedule(
-      [this, input = input.clone(), promise = std::move(promise)]() mutable {
-        channel_->execute_llm_model_async(input, promise);
-      });
+  threadpool_.schedule([this,
+                        input = input.clone(),
+                        encoding = std::move(encoding),
+                        promise = std::move(promise)]() mutable {
+    channel_->execute_llm_model_async(input, promise, encoding.get());
+  });
   return future;
 }
 
@@ -138,13 +142,17 @@ RemoteWorker::step_remote_async(const DiTForwardInput& input) {
 }
 
 folly::SemiFuture<std::optional<RawForwardOutput>>
-RemoteWorker::step_remote_async(const VlmForwardInput& input) {
+RemoteWorker::step_remote_async(
+    const VlmForwardInput& input,
+    std::shared_ptr<ForwardInputEncoding> encoding) {
   folly::Promise<std::optional<RawForwardOutput>> promise;
   auto future = promise.getSemiFuture();
-  threadpool_.schedule(
-      [this, input = input.clone(), promise = std::move(promise)]() mutable {
-        channel_->execute_vlm_model_async(input, promise);
-      });
+  threadpool_.schedule([this,
+                        input = input.clone(),
+                        encoding = std::move(encoding),
+                        promise = std::move(promise)]() mutable {
+    channel_->execute_vlm_model_async(input, promise, encoding.get());
+  });
   return future;
 }
 

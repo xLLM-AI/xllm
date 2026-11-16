@@ -30,6 +30,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -140,11 +141,10 @@ class ShmChannelTest : public ::testing::Test {
     EXPECT_TRUE(writer.input_write(input));
   }
 
-  template <typename Input>
-  void expect_group_input_fallback(
-      const Input& oversized,
-      const Input& small,
-      void (ShmChannel::*execute)(const Input&, OutputPromise&)) {
+  template <typename Input, typename Execute>
+  void expect_group_input_fallback(const Input& oversized,
+                                   const Input& small,
+                                   Execute execute) {
     ASSERT_FALSE(
         ForwardSharedMemoryTransport::can_write_input(oversized, kInputBytes));
     ASSERT_TRUE(
@@ -161,7 +161,15 @@ class ShmChannelTest : public ::testing::Test {
       for (ShmChannel* channel : channels) {
         OutputPromise promise;
         auto future = promise.getSemiFuture();
-        (channel->*execute)(*input, promise);
+        if constexpr (std::is_invocable_v<Execute,
+                                          ShmChannel*,
+                                          const Input&,
+                                          OutputPromise&,
+                                          ForwardInputEncoding*>) {
+          (channel->*execute)(*input, promise, nullptr);
+        } else {
+          (channel->*execute)(*input, promise);
+        }
         ASSERT_TRUE(std::move(future).get().has_value());
       }
     }
