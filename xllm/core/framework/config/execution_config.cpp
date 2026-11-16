@@ -47,6 +47,22 @@ DEFINE_int32(block_draft_graph_warmup_max_kv_len,
              "Requests beyond the warmup limit can still grow graphs lazily. "
              "Does not change target or MTP graph warmup.");
 
+DEFINE_bool(enable_graph_mm_encoder,
+            false,
+            "Whether to capture the Python Qwen3-VL multimodal encoder as ACL "
+            "graphs. Requires enable_graph. The encoder is captured per encode "
+            "shape and replayed for every later encode of the same shape, "
+            "which removes its Host dispatch from the request.");
+
+DEFINE_int32(mm_encoder_graph_capture_shapes,
+             8,
+             "How many encode shapes the Python Qwen3-VL multimodal encoder "
+             "may capture as ACL graphs, when enable_graph_mm_encoder is set. "
+             "A shape is the grid of every image in one encode call; it is "
+             "captured on its first occurrence and replayed for every later "
+             "encode of the same shape, while shapes beyond this count stay "
+             "eager.");
+
 DEFINE_bool(enable_graph_double_buffer,
             true,
             "Whether to enable double-buffered ACL graph persistent params "
@@ -135,6 +151,8 @@ void ExecutionConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(disable_graph_warmup);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(block_draft_graph_warmup_max_kv_len);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph_mm_encoder);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(mm_encoder_graph_capture_shapes);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph_double_buffer);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph_mode_decode_no_padding);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_prefill_piecewise_graph);
@@ -157,6 +175,8 @@ void ExecutionConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph);
   XLLM_CONFIG_ASSIGN_FROM_JSON(disable_graph_warmup);
   XLLM_CONFIG_ASSIGN_FROM_JSON(block_draft_graph_warmup_max_kv_len);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph_mm_encoder);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(mm_encoder_graph_capture_shapes);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph_double_buffer);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph_mode_decode_no_padding);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_prefill_piecewise_graph);
@@ -185,6 +205,10 @@ void ExecutionConfig::append_config_json(
       config_json, default_config, disable_graph_warmup);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, block_draft_graph_warmup_max_kv_len);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_graph_mm_encoder);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, mm_encoder_graph_capture_shapes);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_graph_double_buffer);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

@@ -26,6 +26,7 @@ cc_library(
     npu_layer_synchronizer.h
     npu_batch_memcpy.h
     device_capture_lock.h
+    py_device_capture_guard.h
     acl_graph_task_update_context.h
     npu_profiler.h
     npu_torch_profiler.h

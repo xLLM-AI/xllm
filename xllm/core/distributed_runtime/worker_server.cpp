@@ -89,7 +89,14 @@ void WorkerServer::create_server(const runtime::Options& options,
             options.enable_graph_mode_decode_no_padding())
         .enable_prefill_piecewise_graph(
             options.enable_prefill_piecewise_graph())
-        .max_tokens_for_graph_mode(options.max_tokens_for_graph_mode());
+        .max_tokens_for_graph_mode(options.max_tokens_for_graph_mode())
+        // Offline workers receive graph settings through runtime::Options, and
+        // the multimodal encoder graph has no slot there or in the spawn
+        // protocol. Leaving the gflags in force here would capture on a
+        // setting the offline caller can neither reach nor size, so the
+        // encoder stays eager on this path. Every offline worker evaluates
+        // this branch, so all ranks agree.
+        .enable_graph_mm_encoder(/*enable_graph_mm_encoder=*/false);
   }
 #if defined(USE_NPU)
   KernelConfig::get_instance().npu_kernel_backend(options.npu_kernel_backend());

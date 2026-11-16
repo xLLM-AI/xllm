@@ -27,7 +27,7 @@ Deepstack flow:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -41,6 +41,10 @@ from xllm.python.layers import (
     RMSNorm,
     RotaryEmbedding,
     RowParallelLinear,
+)
+from xllm.python.model_executor.runners.vision_acl_graph import (
+    VisionAclGraphRunner,
+    build_vision_graph_runner,
 )
 from xllm.python.model_loader import (
     ParallelLoadContext,
@@ -371,6 +375,20 @@ class Qwen3VLVisionBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+def _host_grid_rows(grid_thw: torch.Tensor | list[list[int]]) -> list[list[int]]:
+    """Return the image grid as Host rows, converting a device tensor if given.
+
+    Every shape and every Host scalar in the encoder follows from the grid, so
+    reading it inside the encoder's forward puts a synchronizing copy there,
+    which an ACL graph capture rejects. Qwen3-VL therefore resolves it in
+    ``encode``. The Qwen3.5 composer still hands this tower a device tensor and
+    is not captured, so that form is converted here rather than rejected.
+    """
+    if not isinstance(grid_thw, torch.Tensor):
+        return grid_thw
+    return [[int(t), int(h), int(w)] for t, h, w in grid_thw.tolist()]
+
+
 class Qwen3VLVisionTransformer(nn.Module):
     """Qwen3-VL vision tower with deepstack feature extraction.
 
@@ -558,8 +576,16 @@ class Qwen3VLVisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        grid_thw: torch.Tensor,
+        grid_thw_list: list[list[int]] | torch.Tensor,
     ) -> torch.Tensor:
+        """Encode patches for the frames described by ``grid_thw_list``.
+
+        The grid is wanted as Host rows: every shape and every Host scalar in
+        this forward follows from it, so resolving it at the caller keeps this
+        body free of synchronizing copies. A caller that still passes a device
+        tensor is served too, by converting it here.
+        """
+        grid_thw_list = _host_grid_rows(grid_thw_list)
         hidden_states = pixel_values.to(device=self.device, dtype=self.dtype, non_blocking=True)
 
         # Patch embedding
@@ -572,9 +598,6 @@ class Qwen3VLVisionTransformer(nn.Module):
             self.patch_size,
         )
         hidden_states = self.patch_embed(hidden_states).view(L, self.hidden_size)
-
-        # Convert grid_thw to list for position computations
-        grid_thw_list = grid_thw.tolist()
 
         # Add position embeddings
         pos_embeds = self._fast_pos_embed_interpolate(grid_thw_list)
@@ -885,6 +908,8 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
 
         # Vision tower
         self.vision_model = Qwen3VLVisionTransformer(vision_cfg, dtype=dtype, device=device, tp_size=text_cfg.tp_size)
+        # Armed by configure_runtime when the worker runs graph execution.
+        self._vision_graph_runner: VisionAclGraphRunner | None = None
 
         # LLM (self.model is required by PyModelBase / the executor runner)
         self.model = Qwen3VLModel(text_cfg, dtype=dtype, device=device)  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -905,6 +930,16 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
     # Connection logic: ViT → LLM
     # ------------------------------------------------------------------
 
+    def configure_runtime(self, config: Mapping[str, object]) -> None:
+        """Arm vision encoder graphs when the worker runs graph execution.
+
+        The encoder is not part of the decode graph, so a deployment with
+        ``enable_graph`` still dispatches every encoder operator from the Host
+        on each image. Capture is per encode shape; see
+        :class:`VisionAclGraphRunner`.
+        """
+        self._vision_graph_runner = build_vision_graph_runner(self.vision_model, config)
+
     def encode(
         self,
         pixel_values: torch.Tensor,
@@ -921,8 +956,11 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             ``(total_image_tokens, out_hidden_size * (1 + num_deepstacks))``.
         """
         pixel_values = pixel_values.to(dtype=self.vision_model.dtype, device=self.vision_model.device)
-        image_embeds = self.vision_model(pixel_values, grid_thw)
-        return image_embeds
+        # The grid is read on the Host once here, at the boundary that owns it.
+        grid_thw_list = _host_grid_rows(grid_thw)
+        if self._vision_graph_runner is not None:
+            return self._vision_graph_runner.execute(pixel_values, grid_thw_list)
+        return self.vision_model(pixel_values, grid_thw_list)
 
     def get_input_embeddings(
         self,
