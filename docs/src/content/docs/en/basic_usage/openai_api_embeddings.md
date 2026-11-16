@@ -28,8 +28,7 @@ xllm --model=/path/to/Qwen3-8B \
   --max_memory_utilization=0.86 \
   --enable_prefix_cache=false \
   --enable_chunked_prefill=false \
-  --enable_schedule_overlap=false \
-  --enable_shm=false
+  --enable_schedule_overlap=false
 ```
 
 Run this as a separate deployment. Concurrent servers need separate devices, master addresses, and communication ports. After model loading, query `/v1/models` to confirm the model ID.

@@ -147,7 +147,6 @@ do
     --enable_return_mm_full_embeddings 1 \
     --max_sequence_length=512 \
     --task="embed" \
-    --enable_shm=true \
     --node_rank=$i > "$LOG_FILE" 2>&1 &
 done
 ```
@@ -215,7 +214,6 @@ do
     --enable_schedule_overlap=false \
     --use_contiguous_input_buffer=false \
     --dit_debug_print=true \
-    --enable_shm=true \
     --node_rank=$i > $LOG_FILE 2>&1 &
 done
 ```

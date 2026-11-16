@@ -224,6 +224,8 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 ## ExecutionConfig
 
+模型传输方式自动选择：与 master 同机的 worker 使用共享内存，其他机器上的 worker 使用 RPC，无需配置传输开关。
+
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
 | `extension_impl` | `string` | `""` | 为模型、执行器等注册组件选择原生扩展实现族；空值保留原有选择方式。所选实现族必须已注册；该实现族未注册的组件继续使用原有选择方式。 |
@@ -237,7 +239,6 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_graph_mm_encoder` | `bool` | `false` | 是否把 Python Qwen3-VL 的多模态编码器（ViT）捕获为 ACL graph。需要同时开启 `enable_graph`。`enable_graph` 只捕获 decode 阶段，带图请求的编码器仍逐算子由 Host 下发（单卡 910B2 实测约 29 ms，且与图片大小无关）；开启本项后该段 Host 下发被消除，重放结果与 eager 逐位一致。捕获的 shape 数量由 `mm_encoder_graph_capture_shapes` 限制。本项只在服务端命令行生效：offline 推理（Python `LLM`/`VLM` 接口）不向 worker 传递它，编码器在该路径上保持 eager。 |
 | `mm_encoder_graph_capture_shapes` | `int32` | `8` | `enable_graph_mm_encoder` 开启时，Python Qwen3-VL 多模态编码器最多捕获多少种 encode shape。一种 shape 是一次 encode 调用中所有图片的 grid（`t`/`h`/`w` 及其顺序）；首次遇到时捕获，之后相同 shape 直接重放，超出该数量的 shape 保持 eager，且该判定在编码器执行之前做出。`0` 同样表示不捕获。每种 shape 额外占用的显存随其 patch 数增长：单卡 910B2 实测 256～784 patch 约 30～40 MB，3136 patch 约 120 MB；但图池跨 shape 共享，后续捕获比最初几次便宜，在更大 shape 之后捕获的 shape 甚至会把显存还回去。一次捕获了 64 种 shape 的 MMBench 实测中，free HBM 总共下降约 1.1 GB，平均约 17 MB/shape。捕获发生在 KV cache 分配之后，占用的是 `max_memory_utilization` 留下的余量，不改变 KV cache 容量。该数量应按部署的 shape 数设置：固定分辨率、低并发时 shape 很少；高并发会把多张图片合并到同一次 encode，自由分辨率的图片流量则会用满任何实际取值，超出的部分保持 eager。 |
 | `block_draft_graph_warmup_max_kv_len` | `int32` | `0` | 仅为 Python block draft 的独立 ACL graph（DSpark/DFlash2，包括 GLM MLA draft）预捕获按 2 的幂增长的 KV 容量桶。`0` 覆盖完整模型上下文；正数预捕获到覆盖该长度的容量桶；`-1` 保留按需捕获。已有 warmup 必需的形状始终保留，即使超过正数上限。超过预捕获上界的请求仍可在线扩桶。更多容量桶会增加启动时间和 draft 图显存占用；不改变 target、MTP、context-write 或可选整轮 unified graph 的预热策略。 |
-| `enable_shm` | `bool` | `false` | 是否为模型执行启用共享内存。 |
 | `use_contiguous_input_buffer` | `bool` | `true` | 是否使用连续的 device input buffer 执行模型。 |
 | `input_shm_size` | `uint64` | `1024` | 输入共享内存大小，默认 1GB。 |
 | `output_shm_size` | `uint64` | `128` | 输出共享内存大小，默认 128MB。 |

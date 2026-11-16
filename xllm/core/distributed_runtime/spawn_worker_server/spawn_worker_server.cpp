@@ -66,7 +66,6 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      const std::string& indexer_cache_dtype,
                                      int32_t max_tokens_per_batch,
                                      int32_t max_seqs_per_batch,
-                                     bool enable_shm,
                                      uint64_t input_shm_size,
                                      uint64_t output_shm_size,
                                      bool is_local,
@@ -128,7 +127,6 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
       .text_encoder_tp_size(effective_text_encoder_tp_size)
-      .enable_shm(enable_shm)
       .input_shm_size(input_shm_size)
       .output_shm_size(output_shm_size)
       .is_local(is_local)

@@ -37,7 +37,6 @@ class SpawnWorkerServer final {
                              const std::string& indexer_cache_dtype,
                              int32_t max_tokens_per_batch,
                              int32_t max_seqs_per_batch,
-                             bool enable_shm,
                              uint64_t input_shm_size,
                              uint64_t output_shm_size,
                              bool is_local,

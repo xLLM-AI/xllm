@@ -1,4 +1,4 @@
-# ASCEND_RT_VISIBLE_DEVICES=0 python generate_vlm.py --model /path/to/Qwen2.5-VL-7B-Instruct/ --max_seqs_per_batch 4 --enable_shm
+# ASCEND_RT_VISIBLE_DEVICES=0 python generate_vlm.py --model /path/to/Qwen2.5-VL-7B-Instruct/ --max_seqs_per_batch 4
 
 # from xllm import VLM
 import base64

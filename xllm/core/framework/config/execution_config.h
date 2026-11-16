@@ -68,7 +68,6 @@ class ExecutionConfig final {
          "enable_graph_vmm_pool",
          "max_tokens_for_graph_mode",
          "acl_graph_decode_batch_size_limit",
-         "enable_shm",
          "use_contiguous_input_buffer",
          "input_shm_size",
          "output_shm_size",
@@ -107,8 +106,6 @@ class ExecutionConfig final {
   PROPERTY(int32_t, max_tokens_for_graph_mode) = 2048;
 
   PROPERTY(int32_t, acl_graph_decode_batch_size_limit) = 16;
-
-  PROPERTY(bool, enable_shm) = false;
 
   PROPERTY(bool, use_contiguous_input_buffer) = true;
 

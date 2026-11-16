@@ -87,8 +87,7 @@ class ShmChannelTest : public ::testing::Test {
               0);
     ASSERT_EQ(server_.Start("127.0.0.1:0", nullptr), 0);
     address_ = butil::endpoint2str(server_.listen_address()).c_str();
-    options_.enable_shm(true)
-        .master_node_addr(address_)
+    options_.master_node_addr(address_)
         .input_shm_size(kInputBytes)
         .output_shm_size(kOutputBytes);
     channel_ = std::make_unique<ShmChannel>(

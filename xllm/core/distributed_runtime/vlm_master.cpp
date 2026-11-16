@@ -191,7 +191,6 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       .enable_offline_inference(options_.enable_offline_inference())
       .disable_log_stats(options_.disable_log_stats())
       .spawn_worker_path(options_.spawn_worker_path())
-      .enable_shm(options_.enable_shm())
       .input_shm_size(options_.input_shm_size() * 1024 * 1024)
       .output_shm_size(options_.output_shm_size() * 1024 * 1024)
       .is_local(options_.is_local())

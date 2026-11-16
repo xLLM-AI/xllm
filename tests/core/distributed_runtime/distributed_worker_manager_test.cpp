@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/distributed_runtime/distributed_worker_manager.h"
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <cstdint>
 #include <memory>
@@ -23,6 +24,8 @@ limitations under the License.
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "core/distributed_runtime/shm_channel.h"
 
 namespace xllm {
 namespace {
@@ -111,6 +114,13 @@ class DistributedWorkerManagerTest : public ::testing::Test {
         new DistributedWorkerManager(std::move(worker_clients)));
   }
 
+  static std::unique_ptr<CommChannel> make_channel(
+      const std::string& worker_addr,
+      const runtime::Options& options) {
+    return DistributedWorkerManager::create_channel(
+        worker_addr, /*rank=*/0, /*dp_local_tp_size=*/1, options);
+  }
+
   static bool has_link_threadpool(const DistributedWorkerManager& manager) {
     return manager.link_threadpool_ != nullptr;
   }
@@ -121,6 +131,28 @@ class DistributedWorkerManagerTest : public ::testing::Test {
   }
   static std::vector<uint16_t> ports() { return {1001, 1002}; }
 };
+
+TEST_F(DistributedWorkerManagerTest, UsesSharedMemoryForLocalWorkers) {
+  runtime::Options options;
+  options
+      .master_node_addr("127.0.0.1:" + std::to_string(40000 + getpid() % 10000))
+      .input_shm_size(1024 * 1024)
+      .output_shm_size(1024 * 1024);
+
+  auto channel = make_channel("localhost:12345", options);
+
+  EXPECT_NE(dynamic_cast<ShmChannel*>(channel.get()), nullptr);
+}
+
+TEST_F(DistributedWorkerManagerTest, UsesRpcForRemoteWorkers) {
+  runtime::Options options;
+  options.master_node_addr("192.0.2.1:12345");
+
+  auto channel = make_channel("192.0.2.2:12345", options);
+
+  EXPECT_EQ(dynamic_cast<ShmChannel*>(channel.get()), nullptr);
+  EXPECT_NE(channel, nullptr);
+}
 
 TEST_F(DistributedWorkerManagerTest, AppendsCacheEndpointsInWorkerRankOrder) {
   auto first = std::make_shared<RecordingWorkerClient>();

@@ -289,7 +289,6 @@ DECLARE_string(reasoning_parser);
 DECLARE_string(tool_call_parser);
 
 // --- execution config ---
-DECLARE_bool(enable_shm);
 
 DECLARE_bool(use_contiguous_input_buffer);
 

@@ -30,8 +30,7 @@ xllm --model=/path/to/Qwen3-VL-8B-Instruct \
   --max_memory_utilization=0.86 \
   --enable_prefix_cache=false \
   --enable_chunked_prefill=false \
-  --enable_schedule_overlap=false \
-  --enable_shm=false
+  --enable_schedule_overlap=false
 ```
 
 Run this as a separate deployment from the text-generation example. If servers run concurrently, allocate separate devices, master addresses, and communication ports. Wait for model loading before sending requests.
