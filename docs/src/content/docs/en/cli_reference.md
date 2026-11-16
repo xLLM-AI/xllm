@@ -20,6 +20,8 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 |:----------|:-----|:--------|:------------|
 | `host` | `string` | `""` | Host name or IP for the bRPC server. |
 | `port` | `int32` | `8010` | Port for the bRPC server. |
+| `enable_cpu_affinity` | `bool` | `true` | Bind each serving process and its threads before runtime initialization. Set to `false` to preserve the inherited CPU affinity. |
+| `cpu_affinity` | `string` | `""` | JSON array with one nonempty CPU ID list per global `node_rank`, e.g. `[[0,1],[2,3]]` for two ranks. IDs must be allowed by the process's inherited CPU affinity. On NPU, an empty string selects device-local CPUs automatically and divides shared CPU ranges among local ranks. Ignored when `enable_cpu_affinity=false`. |
 | `rpc_idle_timeout_s` | `int32` | `-1` | Close the connection when there are no read/write operations during the last `rpc_idle_timeout_s` seconds. `-1` waits indefinitely. |
 | `rpc_channel_timeout_ms` | `int32` | `-1` | Maximum bRPC Channel duration in milliseconds. `-1` waits indefinitely. |
 | `max_reconnect_count` | `int32` | `40` | Maximum number of reconnect attempts from a worker to a server. |

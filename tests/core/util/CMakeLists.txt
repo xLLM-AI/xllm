@@ -1,5 +1,19 @@
 include(cc_test)
 
+# Topology checks must run before automatic NPU runtime initialization.
+cc_test(
+  NAME
+    cpu_affinity_test
+  CPU_ONLY
+  SRCS
+    cpu_affinity_test.cpp
+  DEPS
+    :util
+    :config
+    $<$<BOOL:${USE_NPU}>:npu_startup>
+    GTest::gtest_main
+)
+
 cc_test(
   NAME
     util_test

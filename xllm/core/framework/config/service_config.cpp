@@ -15,12 +15,27 @@ limitations under the License.
 
 #include "core/framework/config/service_config.h"
 
+#include <glog/logging.h>
+
+#include <limits>
+#include <nlohmann/json.hpp>
+
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 
 DEFINE_string(host, "", "Host name for brpc server.");
 
 DEFINE_int32(port, 8010, "Port for brpc server.");
+
+DEFINE_bool(enable_cpu_affinity,
+            true,
+            "Bind serving processes to CPUs before runtime initialization.");
+
+DEFINE_string(cpu_affinity,
+              "",
+              "JSON array of CPU ID lists indexed by global node_rank, e.g. "
+              "[[0,1],[2,3]]. Empty selects device-local CPUs automatically "
+              "on NPU. Ignored when enable_cpu_affinity=false.");
 
 DEFINE_int32(
     rpc_idle_timeout_s,
@@ -95,6 +110,8 @@ namespace xllm {
 void ServiceConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(host);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(port);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_cpu_affinity);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(cpu_affinity);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(rpc_idle_timeout_s);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(rpc_channel_timeout_ms);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_reconnect_count);
@@ -114,6 +131,8 @@ void ServiceConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(host);
   // don't read rank-related config
   // XLLM_CONFIG_ASSIGN_FROM_JSON(port);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_cpu_affinity);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(cpu_affinity);
   XLLM_CONFIG_ASSIGN_FROM_JSON(rpc_idle_timeout_s);
   XLLM_CONFIG_ASSIGN_FROM_JSON(rpc_channel_timeout_ms);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_reconnect_count);
@@ -135,6 +154,10 @@ void ServiceConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, host);
   // only dump rank-0 port
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, port);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_cpu_affinity);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, cpu_affinity);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, rpc_idle_timeout_s);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
@@ -166,6 +189,30 @@ void ServiceConfig::append_config_json(
 ServiceConfig& ServiceConfig::get_instance() {
   static ServiceConfig config;
   return config;
+}
+
+std::vector<int32_t> ServiceConfig::cpu_affinity_for_rank(
+    int32_t node_rank,
+    int32_t nnodes) const {
+  if (!enable_cpu_affinity() || cpu_affinity().empty()) {
+    return {};
+  }
+  const auto ranks = nlohmann::json::parse(
+      cpu_affinity(), nullptr, /*allow_exceptions=*/false);
+  CHECK(ranks.is_array() && ranks.size() == static_cast<size_t>(nnodes))
+      << "cpu_affinity must contain one CPU ID list per global node_rank";
+  CHECK_GE(node_rank, 0);
+  CHECK_LT(node_rank, nnodes);
+  for (const auto& cpus : ranks) {
+    CHECK(cpus.is_array() && !cpus.empty())
+        << "cpu_affinity entries must be nonempty CPU ID lists";
+    for (const auto& cpu : cpus) {
+      CHECK(cpu.is_number_integer() && cpu >= 0 &&
+            cpu <= std::numeric_limits<int32_t>::max())
+          << "cpu_affinity CPU IDs must be nonnegative integers";
+    }
+  }
+  return ranks[node_rank].get<std::vector<int32_t>>();
 }
 
 void ServiceConfig::initialize() {

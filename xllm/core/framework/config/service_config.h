@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdint>
 #include <nlohmann/json_fwd.hpp>
 #include <string>
+#include <vector>
 
 #include "core/common/macros.h"
 #include "core/framework/config/option_category.h"
@@ -38,11 +39,16 @@ class ServiceConfig final {
   void append_config_json(nlohmann::ordered_json& config_json) const;
   void initialize();
 
+  std::vector<int32_t> cpu_affinity_for_rank(int32_t node_rank,
+                                             int32_t nnodes) const;
+
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {
         "SERVICE OPTIONS",
         {"host",
          "port",
+         "enable_cpu_affinity",
+         "cpu_affinity",
          "rpc_idle_timeout_s",
          "rpc_channel_timeout_ms",
          "max_reconnect_count",
@@ -62,6 +68,10 @@ class ServiceConfig final {
   PROPERTY(std::string, host);
 
   PROPERTY(int32_t, port) = 8010;
+
+  PROPERTY(bool, enable_cpu_affinity) = true;
+
+  PROPERTY(std::string, cpu_affinity);
 
   PROPERTY(int32_t, rpc_idle_timeout_s) = -1;
 
