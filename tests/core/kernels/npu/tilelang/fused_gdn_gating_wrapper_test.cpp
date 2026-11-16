@@ -15,7 +15,6 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include <torch/torch.h>
-#include <torch_npu/torch_npu.h>
 
 #include <string>
 #include <utility>
@@ -26,12 +25,7 @@ limitations under the License.
 namespace xllm::kernel::npu::tilelang {
 namespace {
 
-class TileLangFusedGdnGatingWrapperTest : public ::testing::Test {
- protected:
-  static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
-
-  static void TearDownTestSuite() { torch_npu::finalize_npu(); }
-};
+class TileLangFusedGdnGatingWrapperTest : public ::testing::Test {};
 
 struct FusedGdnGatingTestCase {
   std::string name;

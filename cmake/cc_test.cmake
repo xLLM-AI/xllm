@@ -132,6 +132,13 @@ function(cc_test)
     target_link_libraries(${CC_TEST_NAME} PRIVATE xllm_npu_test_runtime)
   endif()
 
+  # Native NPU executables need tcmalloc consistently. The libc-first
+  # preload used by the Python image can crash brpc in native tests.
+  set(_cc_test_environment "${CC_TEST_ENVIRONMENT}")
+  if(USE_NPU)
+    list(PREPEND _cc_test_environment "LD_PRELOAD=libtcmalloc.so.4")
+  endif()
+
   add_dependencies(all_tests ${CC_TEST_NAME})
 
   if(CC_TEST_DISCOVER_TESTS)
@@ -145,12 +152,12 @@ function(cc_test)
       TEST_LIST _cc_test_${CC_TEST_NAME}_tests
       PROPERTIES ${_cc_test_discovery_properties}
     )
-    if(NOT "${CC_TEST_ENVIRONMENT}" STREQUAL "")
+    if(NOT "${_cc_test_environment}" STREQUAL "")
       set(_cc_test_properties_file
         "${CMAKE_CURRENT_BINARY_DIR}/${CC_TEST_NAME}-properties.cmake")
       file(GENERATE OUTPUT "${_cc_test_properties_file}"
         CONTENT "set_tests_properties(\${_cc_test_${CC_TEST_NAME}_tests}
-  PROPERTIES ENVIRONMENT [==[${CC_TEST_ENVIRONMENT}]==])")
+  PROPERTIES ENVIRONMENT [==[${_cc_test_environment}]==])")
       set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
         "${_cc_test_properties_file}")
     endif()
@@ -190,9 +197,9 @@ function(cc_test)
       APPEND PROPERTY LABELS cpu)
   endif()
 
-  if(CC_TEST_ENVIRONMENT)
+  if(_cc_test_environment)
     set_tests_properties(${_cc_test_${CC_TEST_NAME}_tests}
-      PROPERTIES ENVIRONMENT "${CC_TEST_ENVIRONMENT}")
+      PROPERTIES ENVIRONMENT "${_cc_test_environment}")
   endif()
   #add_test(NAME ${CC_TEST_NAME} COMMAND ${CC_TEST_NAME} ${CC_TEST_ARGS})
 endfunction()

@@ -16,7 +16,6 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
-#include <torch_npu/torch_npu.h>
 
 #include <functional>
 #include <iostream>
@@ -32,12 +31,7 @@ namespace {
 constexpr int32_t kWidth = 4;
 constexpr int32_t kStateLen = kWidth - 1;
 
-class TileLangCausalConv1dDecodeWrapperTest : public ::testing::Test {
- protected:
-  static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
-
-  static void TearDownTestSuite() { torch_npu::finalize_npu(); }
-};
+class TileLangCausalConv1dDecodeWrapperTest : public ::testing::Test {};
 
 torch::Tensor causal_conv1d_decode_cpu_ref(const torch::Tensor& x,
                                            const torch::Tensor& conv_state,

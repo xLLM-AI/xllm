@@ -31,17 +31,10 @@ namespace py = pybind11;
 namespace xllm {
 namespace {
 
-std::filesystem::path source_root() {
-  std::filesystem::path root(__FILE__);
-  for (int32_t depth = 0; depth < 5; ++depth) {
-    root = root.parent_path();
-  }
-  return root;
-}
-
 py::dict load_cases() {
   const std::filesystem::path cases =
-      std::filesystem::path(__FILE__).parent_path() / "glm5_next_moe_cases.py";
+      std::filesystem::path(XLLM_TEST_SOURCE_DIR) /
+      "tests/core/kernels/npu/glm5_next_moe_cases.py";
   return py::module_::import("runpy")
       .attr("run_path")(cases.string())
       .cast<py::dict>();
@@ -73,7 +66,7 @@ class Glm5NextMoeTest : public ::testing::Test {
     py::gil_scoped_acquire gil;
     try {
       py::module_::import("sys").attr("path").attr("insert")(
-          0, source_root().string());
+          0, XLLM_TEST_SOURCE_DIR);
       // npu_test_environment.cpp already initialized torch and torch_npu.
       // The full-model bootstrap also loads optional attention operator
       // libraries; do not mutate the initialized ACL vendor set in a local MoE

@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "core/platform/npu/npu_runtime.h"
 
+#include <c10/util/ScopeExit.h>
 #include <glog/logging.h>
 #include <pybind11/embed.h>
 #include <torch_npu/csrc/core/npu/NPUFunctions.h>
@@ -30,12 +31,13 @@ void init_npu(int32_t device_index) {
       << "Initialize the process Python runtime before initializing an NPU";
 
   const c10::DeviceIndex index = static_cast<c10::DeviceIndex>(device_index);
+  // CPython and torch_npu must share the same registered worker thread state.
+  const PyGILState_STATE gil_state = PyGILState_Ensure();
+  auto gil_guard =
+      c10::make_scope_exit([gil_state]() { PyGILState_Release(gil_state); });
   // Preserve the caller's device selection during Python lazy initialization.
   c10_npu::set_device(index);
-  {
-    pybind11::gil_scoped_acquire gil;
-    pybind11::module_::import("torch_npu.npu").attr("init")();
-  }
+  pybind11::module_::import("torch_npu.npu").attr("init")();
   c10_npu::set_device(index);
 }
 

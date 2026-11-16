@@ -23,7 +23,6 @@ limitations under the License.
 
 #if defined(USE_NPU)
 #include <acl/acl.h>
-#include <torch_npu/torch_npu.h>
 
 #include "tests/npu_test_environment.h"
 #endif
@@ -44,16 +43,10 @@ class SharedVMMAllocatorTestEnvironment : public ::testing::Environment {
     if (ret != 0) {
       LOG(ERROR) << "ACL set device id: 0 failed, ret:" << ret;
     }
-    torch_npu::init_npu("npu:0");
 #endif
   }
 
   void TearDown() override {
-#if defined(USE_NPU)
-    torch_npu::finalize_npu();
-    aclrtResetDevice(0);
-    aclFinalize();
-#endif
     google::ShutdownGoogleLogging();
 #if defined(USE_NPU)
     xllm::testing::finalize_npu_test_runtime();

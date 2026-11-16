@@ -15,7 +15,6 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include <torch/torch.h>
-#include <torch_npu/torch_npu.h>
 
 #include <filesystem>
 #include <fstream>
@@ -50,9 +49,6 @@ std::string read_source(const std::filesystem::path& path) {
 
 class TileLangSpecVerifyAttentionTilingUpdateTest : public ::testing::Test {
  protected:
-  static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
-  static void TearDownTestSuite() { torch_npu::finalize_npu(); }
-
   torch::Tensor run_update(
       const std::vector<int32_t>& kv_seq_lens,
       int64_t spec_width,
@@ -266,8 +262,7 @@ TEST(PagedAttentionTilingLayoutTest, RejectsUnknownOrTruncatedAtbLayouts) {
 
 TEST(PagedAttentionTilingLayoutTest, MatchesPinnedXllmOpsSourceContract) {
   const std::filesystem::path tiling_dir =
-      std::filesystem::weakly_canonical(
-          std::filesystem::path(__FILE__).parent_path() / "../../../../..") /
+      std::filesystem::path(XLLM_TEST_SOURCE_DIR) /
       "third_party/xllm_ops/atb_customize/ops/custom_paged_attention/"
       "kernel_implement/tiling";
   const std::string header =

@@ -45,6 +45,10 @@ class FixedTokenizer final : public Tokenizer {
 
 TEST(MultimodalProcessorTest, PaddingIsSelectedPerProcessor) {
   ModelArgs args;
+  args.vision_start_token_id(10);
+  args.vision_end_token_id(11);
+  args.image_token_id(12);
+  args.video_token_id(13);
   TokenizerArgs tokenizer_args;
   tokenizer_args.pad_token("<pad>");
   auto tokenizer = std::make_shared<FixedTokenizer>();

@@ -20,8 +20,6 @@ limitations under the License.
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
-#include <torch_npu/csrc/libs/init_npu.h>
-#include <torch_npu/torch_npu.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -518,12 +516,7 @@ TEST(MtpAsyncInputBuilderTest, SharedModulesPointToTargetModel) {
   EXPECT_TRUE(draft_embedding.is(target_embedding));
 }
 
-class MtpAsyncInputBuilderNpuTest : public ::testing::Test {
- protected:
-  static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
-
-  static void TearDownTestSuite() { torch_npu::finalize_npu(); }
-};
+class MtpAsyncInputBuilderNpuTest : public ::testing::Test {};
 
 TEST_F(MtpAsyncInputBuilderNpuTest,
        PreparesInt32VerifierPrefixWithoutCopyingHidden) {

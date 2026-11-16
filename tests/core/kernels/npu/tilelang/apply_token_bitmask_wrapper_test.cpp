@@ -16,7 +16,6 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
-#include <torch_npu/torch_npu.h>
 
 #include <chrono>
 #include <cstdint>
@@ -34,12 +33,7 @@ limitations under the License.
 namespace xllm::kernel::npu::tilelang {
 namespace {
 
-class ApplyTokenBitmaskWrapperTest : public ::testing::Test {
- protected:
-  static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
-
-  static void TearDownTestSuite() { torch_npu::finalize_npu(); }
-};
+class ApplyTokenBitmaskWrapperTest : public ::testing::Test {};
 
 torch::Tensor apply_reference_on_device(torch::Tensor logits,
                                         const torch::Tensor& bitmask) {

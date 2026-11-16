@@ -17,20 +17,13 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include <torch/torch.h>
-#include <torch_npu/csrc/libs/init_npu.h>
-#include <torch_npu/torch_npu.h>
 
 #include <vector>
 
 namespace xllm::kernel::npu {
 namespace {
 
-class MtpPrepareNextDraftTest : public ::testing::Test {
- protected:
-  static void SetUpTestSuite() { torch_npu::init_npu("npu:0"); }
-
-  static void TearDownTestSuite() { torch_npu::finalize_npu(); }
-};
+class MtpPrepareNextDraftTest : public ::testing::Test {};
 
 TEST_F(MtpPrepareNextDraftTest, ProducesExpectedOutputsForMixedAcceptance) {
   constexpr int32_t kBlockSize = 4;

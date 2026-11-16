@@ -34,6 +34,12 @@ cc_test(
     pybind11::embed
 )
 
+# ccache can rewrite __FILE__ relative to the build root. Python cases need
+# an absolute source path independent of CTest working directories.
+target_compile_definitions(glm5_next_moe_test PRIVATE
+  XLLM_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+
 # Temporarily disabled: Dsv4ScatterCache tests are unstable in the current
 # NPU test environment.
 # cc_test(
