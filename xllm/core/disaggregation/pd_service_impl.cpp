@@ -301,10 +301,10 @@ void PDServiceImpl::decode_recv_new_requests(
   }
 }
 
-// TODO: support embedding later, now we only support tokens
 void PDServiceImpl::decode_recv_first_generation(
     const proto::DisaggGenerationsRequests* request,
-    proto::Status* response) {
+    proto::Status* response,
+    const BinaryPayload& attachment) {
   // TODO: we only support one request generation currently
   for (auto& gen : request->multi_gens()) {
     // Process the first token from the tokens array
@@ -333,7 +333,13 @@ void PDServiceImpl::decode_recv_first_generation(
     torch::Tensor mtp_bootstrap_embedding;
     if (gen.has_mtp_bootstrap_embedding()) {
       mtp_bootstrap_embedding =
-          util::proto_to_torch(gen.mtp_bootstrap_embedding());
+          util::proto_to_torch(gen.mtp_bootstrap_embedding(), attachment);
+      if (!mtp_bootstrap_embedding.defined()) {
+        LOG(ERROR) << "Invalid MTP bootstrap embedding, request_id: "
+                   << gen.req_id();
+        response->set_ok(false);
+        return;
+      }
     }
 
     bool success = scheduler_->decode_recv_first_generation(

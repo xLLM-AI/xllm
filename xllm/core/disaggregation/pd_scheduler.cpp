@@ -716,6 +716,7 @@ void PDScheduler::prefill_send_first_generation() {
       Timer first_generation_timer;
       // TODO: support batch request later
       proto::DisaggGenerationsRequests gens;
+      brpc::Controller cntl;
       auto gen = gens.mutable_multi_gens()->Add();
       gen->set_req_id(request->request_id());
       gen->set_reservation_id(request->state().pd_reservation_id);
@@ -814,8 +815,19 @@ void PDScheduler::prefill_send_first_generation() {
           continue;
         }
         torch::Tensor embedding_cpu = safe_to(embedding, torch::kCPU);
-        if (!util::torch_to_proto(embedding_cpu,
-                                  gen->mutable_mtp_bootstrap_embedding())) {
+        // Match the large-output attachment threshold; keep small bootstrap
+        // vectors inline to avoid extra IOBuf segments.
+        constexpr size_t kAttachmentThreshold = 64 * 1024;
+        auto* encoded_embedding = gen->mutable_mtp_bootstrap_embedding();
+        const bool use_attachment =
+            embedding_cpu.nbytes() >= kAttachmentThreshold;
+        const bool encoded =
+            use_attachment
+                ? util::torch_to_proto(embedding_cpu,
+                                       encoded_embedding,
+                                       cntl.request_attachment())
+                : util::torch_to_proto(embedding_cpu, encoded_embedding);
+        if (!encoded) {
           LOG(ERROR) << "Failed to serialize MTP bootstrap embedding, "
                      << "request_id: " << request->request_id();
           fail_request(request,
@@ -837,7 +849,6 @@ void PDScheduler::prefill_send_first_generation() {
 
       // TODO: Async call later
       proto::Status resp;
-      brpc::Controller cntl;
       Timer rpc_timer;
       gen->set_upstream_elapsed_seconds(request->end_to_end_latency_seconds());
       stub->FirstGeneration(&cntl, &gens, &resp, nullptr);

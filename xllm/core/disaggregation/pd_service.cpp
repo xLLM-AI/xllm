@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/disaggregation/pd_service.h"
 
 #include <brpc/closure_guard.h>
+#include <brpc/controller.h>
 
 #include <utility>
 
@@ -48,15 +49,15 @@ void PDService::AddNewRequests(
   pd_service_impl_->decode_recv_new_requests(request, response);
 }
 
-// TODO: support embedding later, now we only support tokens
-void PDService::FirstGeneration(
-    ::google::protobuf::RpcController* /*controller*/,
-    const proto::DisaggGenerationsRequests* request,
-    proto::Status* response,
-    ::google::protobuf::Closure* done) {
+void PDService::FirstGeneration(::google::protobuf::RpcController* controller,
+                                const proto::DisaggGenerationsRequests* request,
+                                proto::Status* response,
+                                ::google::protobuf::Closure* done) {
   // Receive first token from Prefill, schedule the request to running queue
   brpc::ClosureGuard done_guard(done);
-  pd_service_impl_->decode_recv_first_generation(request, response);
+  const auto* cntl = static_cast<brpc::Controller*>(controller);
+  const BinaryPayload attachment(cntl->request_attachment());
+  pd_service_impl_->decode_recv_first_generation(request, response, attachment);
 }
 
 void PDService::LinkInstance(::google::protobuf::RpcController* /*controller*/,

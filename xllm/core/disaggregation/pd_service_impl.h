@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "core/distributed_runtime/xservice_client.h"
 #include "core/framework/constrained/json_object_grammar.h"
+#include "core/util/binary_payload.h"
 #include "disagg_pd.pb.h"
 
 namespace xllm {
@@ -53,7 +54,8 @@ class PDServiceImpl {
 
   virtual void decode_recv_first_generation(
       const proto::DisaggGenerationsRequests* request,
-      proto::Status* response);
+      proto::Status* response,
+      const BinaryPayload& attachment = {});
 
   virtual void link_instance(const proto::InstanceClusterInfo* request,
                              proto::Status* response);
