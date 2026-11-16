@@ -96,6 +96,40 @@ TEST(TensorProtoTest, ContentsTensorRemainsSupportedWithPayloadOverload) {
   EXPECT_TRUE(torch::equal(output, input));
 }
 
+TEST(TensorProtoTest, BootstrapAttachmentRetainsBfloat16Storage) {
+  const torch::Tensor expected =
+      torch::arange(32768, torch::dtype(torch::kFloat32))
+          .to(torch::kBFloat16)
+          .reshape({1, 32768});
+  proto::Tensor metadata;
+  butil::IOBuf attachment;
+  {
+    const torch::Tensor source = expected.clone();
+    ASSERT_TRUE(util::torch_to_proto(source, &metadata, attachment));
+    EXPECT_EQ(attachment.backing_block(0).data(), source.const_data_ptr());
+  }
+  EXPECT_FALSE(metadata.has_contents());
+  EXPECT_EQ(attachment.size(), expected.nbytes());
+  const BinaryPayload received(attachment);
+  attachment.clear();
+
+  const torch::Tensor decoded = util::proto_to_torch(metadata, received);
+  ASSERT_TRUE(decoded.defined());
+  EXPECT_TRUE(torch::equal(decoded, expected));
+  EXPECT_EQ(decoded.scalar_type(), torch::kBFloat16);
+  EXPECT_EQ(decoded.sizes(), expected.sizes());
+}
+
+TEST(TensorProtoTest, BootstrapAttachmentRejectsTruncatedTensor) {
+  const torch::Tensor source = torch::ones({1, 32768}, torch::kBFloat16);
+  proto::Tensor metadata;
+  butil::IOBuf attachment;
+  ASSERT_TRUE(util::torch_to_proto(source, &metadata, attachment));
+  attachment.pop_back(1);
+  EXPECT_FALSE(
+      util::proto_to_torch(metadata, BinaryPayload(attachment)).defined());
+}
+
 TEST(TensorProtoTest, RejectsMalformedBinaryDescriptors) {
   proto::Tensor proto_tensor;
   proto_tensor.set_datatype("FP32");
