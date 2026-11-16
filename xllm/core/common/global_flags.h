@@ -27,6 +27,10 @@ DECLARE_string(host);
 
 DECLARE_int32(port);
 
+DECLARE_bool(enable_cpu_affinity);
+
+DECLARE_string(cpu_affinity);
+
 DECLARE_int32(rpc_idle_timeout_s);
 
 DECLARE_int32(num_threads);

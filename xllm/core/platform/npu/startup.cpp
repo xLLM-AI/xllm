@@ -18,9 +18,12 @@ limitations under the License.
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 #include <acl/acl.h>
+#include <dlfcn.h>
+#include <driver/ascend_hal.h>
 #include <fcntl.h>
 #include <glog/logging.h>
 #include <pybind11/embed.h>
+#include <sched.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
@@ -29,6 +32,7 @@ limitations under the License.
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -47,6 +51,58 @@ namespace py = pybind11;
 
 namespace xllm {
 namespace {
+std::vector<int32_t> device_local_cpus(
+    int32_t device_index,
+    const std::vector<int32_t>& allowed_cpus) {
+  int32_t driver_id = 0;
+  CHECK_EQ(aclrtGetLogicDevIdByUserDevId(device_index, &driver_id), ACL_SUCCESS)
+      << "Cannot map visible NPU " << device_index << " to its driver ID";
+  const auto get_device_info = reinterpret_cast<decltype(&halGetDeviceInfo)>(
+      dlsym(RTLD_DEFAULT, "halGetDeviceInfo"));
+  CHECK(get_device_info != nullptr) << "halGetDeviceInfo is unavailable";
+  int64_t bdf = 0;
+  CHECK_EQ(get_device_info(static_cast<uint32_t>(driver_id),
+                           MODULE_TYPE_PCIE,
+                           INFO_TYPE_ID,
+                           &bdf),
+           DRV_ERROR_NONE)
+      << "Cannot query PCI address for NPU " << device_index;
+  char pci_address[16];
+  std::snprintf(pci_address,
+                sizeof(pci_address),
+                "0000:%02x:%02x.%x",
+                static_cast<uint32_t>((bdf >> 8) & 0xff),
+                static_cast<uint32_t>((bdf >> 3) & 0x1f),
+                static_cast<uint32_t>(bdf & 7));
+  std::ifstream input(std::string("/sys/bus/pci/devices/") + pci_address +
+                      "/local_cpulist");
+  std::string cpu_list;
+  CHECK(static_cast<bool>(input >> cpu_list))
+      << "Cannot read local CPU topology for NPU " << device_index
+      << "; specify --cpu_affinity or --enable_cpu_affinity=false";
+  std::vector<int32_t> cpus;
+  cpus.reserve(allowed_cpus.size());
+  const std::vector<std::string> ranges = absl::StrSplit(cpu_list, ',');
+  for (const std::string& range : ranges) {
+    int32_t first = 0;
+    int32_t last = 0;
+    const int32_t fields = std::sscanf(range.c_str(), "%d-%d", &first, &last);
+    CHECK_GT(fields, 0) << "Invalid CPU topology: " << cpu_list;
+    if (fields == 1) {
+      last = first;
+    }
+    for (int32_t cpu = first; cpu <= last; ++cpu) {
+      if (std::binary_search(allowed_cpus.begin(), allowed_cpus.end(), cpu)) {
+        cpus.emplace_back(cpu);
+      }
+    }
+  }
+  CHECK(!cpus.empty())
+      << "No device-local CPU is allowed for NPU " << device_index
+      << "; specify --cpu_affinity or --enable_cpu_affinity=false";
+  return cpus;
+}
+
 bool configure_bundled_npu_ops() {
   static const int32_t kStartupAnchor = 0;
   std::error_code error;
@@ -638,6 +694,46 @@ class VendorConfigLock {
   }
 };
 }  // namespace
+
+std::vector<int32_t> default_npu_cpu_affinity(int32_t node_rank,
+                                              int32_t nnodes) {
+  CHECK_GE(node_rank, 0);
+  CHECK_LT(node_rank, nnodes);
+  uint32_t visible_devices = 0;
+  CHECK_EQ(aclrtGetDeviceCount(&visible_devices), ACL_SUCCESS);
+  CHECK_GT(visible_devices, 0);
+  const int32_t device_count = static_cast<int32_t>(visible_devices);
+  const int32_t local_rank = node_rank % device_count;
+  const int32_t local_ranks =
+      std::min(device_count, nnodes - (node_rank - local_rank));
+  cpu_set_t allowed;
+  CHECK_EQ(sched_getaffinity(0, sizeof(allowed), &allowed), 0);
+  std::vector<int32_t> allowed_cpus;
+  allowed_cpus.reserve(CPU_COUNT(&allowed));
+  for (int32_t cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+    if (CPU_ISSET(cpu, &allowed)) {
+      allowed_cpus.emplace_back(cpu);
+    }
+  }
+  const auto cpus = device_local_cpus(local_rank, allowed_cpus);
+  int32_t peers = 0;
+  int32_t peer_index = 0;
+  for (int32_t device = 0; device < local_ranks; ++device) {
+    if (device_local_cpus(device, allowed_cpus) != cpus) {
+      continue;
+    }
+    ++peers;
+    if (device < local_rank) {
+      ++peer_index;
+    }
+  }
+  CHECK_GE(cpus.size(), static_cast<size_t>(peers))
+      << "Not enough device-local CPUs; specify --cpu_affinity";
+  // Partition a shared locality among this machine's participating ranks.
+  const size_t first = cpus.size() * peer_index / peers;
+  const size_t last = cpus.size() * (peer_index + 1) / peers;
+  return {cpus.begin() + first, cpus.begin() + last};
+}
 
 bool initialize_npu_startup(std::optional<int32_t> device_index) {
   if (!configure_bundled_npu_ops()) {

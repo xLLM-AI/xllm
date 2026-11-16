@@ -17,7 +17,10 @@ limitations under the License.
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace xllm {
+std::vector<int32_t> default_npu_cpu_affinity(int32_t node_rank,
+                                              int32_t nnodes);
 bool initialize_npu_startup(std::optional<int32_t> device_index = std::nullopt);
 }  // namespace xllm

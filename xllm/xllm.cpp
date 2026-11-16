@@ -69,6 +69,7 @@ namespace py = pybind11;
 #include "core/platform/npu/startup.h"
 #endif
 #include "core/framework/model/model_path.h"
+#include "core/util/cpu_affinity.h"
 #include "core/util/net.h"
 #include "core/util/utils.h"
 #include "core/util/verbose_trace_logger.h"
@@ -521,11 +522,30 @@ int main(int argc, char** argv) {
   google::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging("xllm");
   initialize_configs();
-  xllm::load_native_libraries();
 
   const ServiceConfig& service_config = ServiceConfig::get_instance();
   const DistributedConfig& distributed_config =
       DistributedConfig::get_instance();
+  if (service_config.enable_cpu_affinity()) {
+    auto cpus = service_config.cpu_affinity_for_rank(
+        distributed_config.node_rank(), distributed_config.nnodes());
+#if defined(USE_NPU)
+    if (cpus.empty()) {
+      cpus = default_npu_cpu_affinity(distributed_config.node_rank(),
+                                      distributed_config.nnodes());
+    }
+#endif
+    if (!cpus.empty()) {
+      bind_process_to_cpus(cpus);
+    }
+  }
+#if defined(USE_NPU)
+  // CPU placement belongs to the service configuration. Prevent TorchNPU's
+  // environment policy from replacing it when its runtime is initialized.
+  CHECK_EQ(unsetenv("CPU_AFFINITY_CONF"), 0);
+#endif
+  xllm::load_native_libraries();
+
   const std::string verbose_trace_log_path =
       resolve_verbose_trace_log_path(service_config.verbose_trace_log_path(),
                                      distributed_config.nnodes(),

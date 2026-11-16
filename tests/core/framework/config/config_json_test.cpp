@@ -35,9 +35,25 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/service_config.h"
 
 namespace xllm {
 namespace {
+
+TEST(ServiceConfigTest, CpuAffinityJsonAndCommandLineOverride) {
+  google::FlagSaver flag_saver;
+  ServiceConfig config;
+  EXPECT_TRUE(config.enable_cpu_affinity());
+  config.from_json(
+      config::parse_json_string(R"({"cpu_affinity":"[[0,1],[2,3]]"})"));
+  EXPECT_EQ(config.cpu_affinity_for_rank(1, 2), (std::vector<int32_t>{2, 3}));
+  google::SetCommandLineOption("enable_cpu_affinity", "false");
+  config.from_flags();
+  config.from_json(
+      config::parse_json_string(R"({"enable_cpu_affinity":true})"));
+  EXPECT_FALSE(config.enable_cpu_affinity());
+  EXPECT_TRUE(config.cpu_affinity_for_rank(1, 2).empty());
+}
 
 inline constexpr std::string_view kInlineConfig = R"json({
   "block_size": 16,

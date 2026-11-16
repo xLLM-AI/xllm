@@ -67,6 +67,9 @@ class CpuAffinity final {
 // current process affinity mask. Returns 0 on success and -1 on failure.
 int32_t bind_thread_to_cpu_core(int32_t cpu_core);
 
+// Apply at startup: bind existing threads; later threads inherit the mask.
+void bind_process_to_cpus(const std::vector<int32_t>& cpu_ids);
+
 // A folly::ThreadFactory that names worker threads (via NamedThreadFactory)
 // and binds each newly created thread to a CPU core from `cpu_cores`.
 // Cores are dispatched round-robin in the order they appear in `cpu_cores`.

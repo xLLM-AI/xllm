@@ -23,6 +23,8 @@ limitations under the License.
 #include <cctype>
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -56,6 +58,30 @@ const cpu_set_t& initial_process_cpu_set() {
 }
 
 }  // namespace
+
+void bind_process_to_cpus(const std::vector<int32_t>& cpu_ids) {
+  CHECK(!cpu_ids.empty()) << "Process CPU affinity must not be empty";
+  cpu_set_t allowed;
+  CHECK_EQ(sched_getaffinity(0, sizeof(allowed), &allowed), 0)
+      << "Cannot query process CPU affinity: " << std::strerror(errno);
+  cpu_set_t selected;
+  CPU_ZERO(&selected);
+  for (int32_t cpu : cpu_ids) {
+    CHECK(cpu >= 0 && cpu < CPU_SETSIZE && CPU_ISSET(cpu, &allowed))
+        << "CPU " << cpu << " is outside the process's allowed CPU set";
+    CPU_SET(cpu, &selected);
+  }
+  // Linked libraries can create threads before main. Include those threads
+  // rather than changing only the main thread's affinity.
+  for (const auto& task :
+       std::filesystem::directory_iterator("/proc/self/task")) {
+    const pid_t tid =
+        static_cast<pid_t>(std::stoi(task.path().filename().string()));
+    CHECK_EQ(sched_setaffinity(tid, sizeof(selected), &selected), 0)
+        << "Cannot bind thread " << tid << ": " << std::strerror(errno);
+  }
+  LOG(INFO) << "Process CPU affinity: " << nlohmann::json(cpu_ids).dump();
+}
 
 int32_t bind_thread_to_cpu_core(int32_t cpu_core) {
   if (cpu_core < 0 || cpu_core >= CPU_SETSIZE) {

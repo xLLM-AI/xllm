@@ -20,6 +20,8 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 |:---------|:-----|:-------|:---------|
 | `host` | `string` | `""` | bRPC 服务监听的主机名或 IP。 |
 | `port` | `int32` | `8010` | bRPC 服务监听端口。 |
+| `enable_cpu_affinity` | `bool` | `true` | 在 runtime 初始化前为各服务进程及其线程绑核。设为 `false` 保留继承的 CPU affinity。 |
+| `cpu_affinity` | `string` | `""` | 按全局 `node_rank` 索引的 JSON 数组，每个 rank 对应一个非空 CPU ID 列表，例如双 rank 使用 `[[0,1],[2,3]]`。CPU 必须在进程继承的可用范围内。NPU 下空字符串表示自动选取设备相邻 CPU，并在共享同一范围的本机 rank 间划分。`enable_cpu_affinity=false` 时忽略此参数。 |
 | `rpc_idle_timeout_s` | `int32` | `-1` | 连接在最近 `rpc_idle_timeout_s` 秒内无读写操作时关闭；`-1` 表示无限等待。 |
 | `rpc_channel_timeout_ms` | `int32` | `-1` | bRPC Channel 的最大等待时间，单位毫秒；`-1` 表示无限等待。 |
 | `max_reconnect_count` | `int32` | `40` | worker 尝试连接 server 的最大重连次数。 |
