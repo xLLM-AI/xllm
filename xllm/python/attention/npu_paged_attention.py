@@ -293,7 +293,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._page_size: int | None = None
         self._metadata: AttentionMetadata | _PreparedMlaAttention | None = None
         self._paged_graph_state: PagedAttentionGraphState | None = None
-        self._graph_metadata_updated_in_place = False
         self._use_expanded_decode = False
         self._block_table_i32: torch.Tensor | None = None
         self._block_attention_masks: dict[tuple[object, ...], torch.Tensor] = {}
@@ -460,10 +459,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             "sequence or a leading zero plus one value per sequence"
         )
 
-    @property
-    def supports_prepared_metadata(self) -> bool:
-        return True
-
     def prepare_metadata(
         self,
         metadata: AttentionMetadata,
@@ -626,9 +621,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         metadata: AttentionMetadata,
         *,
         graph_mode: bool = False,
-        owned_metadata: bool = False,
     ) -> None:
-        self._prepare(metadata, graph_mode=graph_mode, owned_metadata=owned_metadata, update_shared_full_tables=True)
+        self._prepare(metadata, graph_mode=graph_mode, update_shared_full_tables=True)
 
     def prepare_graph_replay(self, metadata: AttentionMetadata) -> None:
         context = get_forward_context_or_none()
@@ -642,16 +636,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         # Device-length graphs retain prepared metadata inside capture and
         # calculate physical tables there. Ordinary decode does not retain
         # prepared metadata, so replay must continue updating on the Host.
-        self._prepare(
-            metadata, graph_mode=True, owned_metadata=False, update_shared_full_tables=not graph_owns_full_tables
-        )
+        self._prepare(metadata, graph_mode=True, update_shared_full_tables=not graph_owns_full_tables)
 
     def _prepare(
         self,
         metadata: AttentionMetadata,
         *,
         graph_mode: bool,
-        owned_metadata: bool,
         update_shared_full_tables: bool,
     ) -> None:
         # Device KV lengths can change between forwards while the prepared
@@ -660,7 +651,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._windowed_block_tables.clear()
         self._block_draft_metadata = None
         self._kda_validated_query_shape = None
-        self._graph_metadata_updated_in_place = False
         self._active_full_layer = None
         # Unbind the previous entry without clearing its cached layer views.
         self._shared_full_block_tables = {}
@@ -859,7 +849,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             else:
                 batch = kv_seq_lens.size(0)
                 actual_seq_q = torch.arange(1, batch + 1, dtype=torch.int32, device=mla_device)
-            if graph_mode and not owned_metadata:
+            if graph_mode:
                 graph_batch = int(actual_seq_kv.numel())
                 self._mla_actual_seq_q = get_execution_buffer(
                     ("MLA_ACTUAL_SEQ_Q", graph_batch, str(mla_device), actual_seq_q.dtype),
@@ -914,25 +904,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             self._mla_max_seqlen_k = 0
 
         self._prepare_kv_shard_materialization(metadata)
-        # MTP's role owns these int32 tensors and updates them in place before
-        # replay. The backend already borrows the same storage; copying it to
-        # itself again adds Host dispatch without changing any captured input.
-        # Converted, expanded, Host-length and sharded layouts still need the
-        # regular update path. Query ends in this sparse layout are constant.
-        self._graph_metadata_updated_in_place = (
-            graph_mode
-            and owned_metadata
-            and self._uses_sparse_mla
-            and not self._use_expanded_decode
-            and not metadata.is_prefill
-            and not metadata.is_chunked_prefill
-            and not getattr(metadata, "has_kv_shard", False)
-            and metadata.q_cu_seq_lens is None
-            and block_table is not None
-            and block_table.dtype == torch.int32
-            and kv_seq_lens is not None
-            and kv_seq_lens.dtype == torch.int32
-        )
 
     def _prepare_paged_graph(self, *, workspace_kv_length: int | None = None) -> None:
         if self._block_table_i32 is None:
@@ -984,11 +955,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._paged_graph_state = state
         self._actual_seq_q = state.query
         self._actual_seq_kv = state.kv
-
-    @property
-    def graph_metadata_updated_in_place(self) -> bool:
-        """Whether all dynamic graph metadata borrows the role's owned storage."""
-        return self._graph_metadata_updated_in_place
 
     def _allocate_graph_workspace(
         self,
@@ -1137,7 +1103,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
 
         # Explicit standard FIA mode identifies a block draft; an ordinary
         # sliding-window decoder must not acquire its shared-anchor geometry.
-        block_window = getattr(layer, "sliding_window", 0) > 0 and layer.fia_sparse_mode == _SPARSE_MODE_NONE
+        block_window = layer.fia_sparse_mode == _SPARSE_MODE_NONE and layer.sliding_window > 0
         if block_window and metadata.block_table is None:
             raise ValueError("windowed block drafts require a paged KV block table")
         kernels.reshape_paged_cache(self._full_slot_mapping(metadata), k_3d, v_3d, k_cache, v_cache)
@@ -2038,14 +2004,14 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     def _block_attention_mask(
         self, prepared: _PreparedPagedAttention, layer: Attention, keys: torch.Tensor | None = None
     ) -> torch.Tensor:
-        block_window = getattr(layer, "sliding_window", 0) > 0 and layer.fia_sparse_mode == _SPARSE_MODE_NONE
-        if block_window:
-            policy = ("block", layer.sliding_window, layer.causal)
-        elif layer.fia_sparse_mode == 4:
-            policy = ("band", layer.fia_pre_tokens, layer.fia_next_tokens)
-        else:
-            policy = None
-        cache_key = (policy, prepared.kv_capacity if keys is None else keys.shape[-1], keys is not None)
+        block_window = layer.fia_sparse_mode == _SPARSE_MODE_NONE and layer.sliding_window > 0
+        cache_key = (
+            block_window,
+            layer.sliding_window if block_window or layer.fia_sparse_mode == 4 else None,
+            layer.causal if block_window else False,
+            prepared.kv_capacity if keys is None else keys.shape[-1],
+            keys is not None,
+        )
         mask = self._block_attention_masks.get(cache_key)
         if mask is None:
             width = prepared.query_lengths[0]
@@ -2062,8 +2028,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             elif layer.fia_sparse_mode == 4:
                 query_positions = lengths - width
                 query_positions = query_positions + torch.arange(width, device=lengths.device).view(1, 1, -1, 1)
-                mask = mask | (keys < query_positions - layer.fia_pre_tokens)
-                mask = mask | (keys > query_positions + layer.fia_next_tokens)
+                mask = mask | (keys < query_positions - (layer.sliding_window - 1))
             mask = mask.expand(-1, 1, width, -1).contiguous()
             self._block_attention_masks[cache_key] = mask
         return mask
@@ -2204,13 +2169,14 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         layer: Attention,
     ) -> torch.Tensor:
         actual_seq = self._cumulative_seq_lens(metadata, num_tokens)
-        block_window = getattr(layer, "sliding_window", 0) > 0 and layer.fia_sparse_mode == _SPARSE_MODE_NONE
+        block_window = layer.fia_sparse_mode == _SPARSE_MODE_NONE and layer.sliding_window > 0
         atten_mask = (
-            self._get_causal_mask() if (layer.causal or layer.fia_use_attention_mask) and not block_window else None
+            self._get_causal_mask() if (layer.causal or layer.fia_sparse_mode == 4) and not block_window else None
         )
         sparse_mode = layer.fia_sparse_mode
         if sparse_mode is None:
             sparse_mode = SPARSE_MODE_RIGHT_DOWN_CAUSAL if layer.causal else _SPARSE_MODE_NONE
+        pre_tokens = layer.sliding_window - 1 if sparse_mode == 4 else 2147483647
 
         # Prefix-cache hit (or chunked prefill with prior context): part of the
         # KV already lives in the paged cache, so this forward only carries the
@@ -2295,8 +2261,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 num_key_value_heads=self.num_kv_heads,
                 block_size=block_size,
                 sparse_mode=sparse_mode,
-                pre_tokens=layer.fia_pre_tokens,
-                next_tokens=layer.fia_next_tokens,
+                pre_tokens=pre_tokens,
+                next_tokens=2147483647,
                 softmax_lse_flag=False,
             )
             return output.reshape(num_tokens, self.num_heads * self.head_dim)
@@ -2314,8 +2280,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             input_layout="TND",
             num_key_value_heads=self.num_kv_heads,
             sparse_mode=sparse_mode,
-            pre_tokens=layer.fia_pre_tokens,
-            next_tokens=layer.fia_next_tokens,
+            pre_tokens=pre_tokens,
+            next_tokens=2147483647,
             softmax_lse_flag=False,
         )
         return output.reshape(num_tokens, self.num_heads * self.head_dim)

@@ -145,9 +145,6 @@ class DFlash2Qwen3DecoderLayer(Qwen3DecoderLayer):
     ) -> None:
         super().__init__(cfg, layer_id, dtype, device, causal=causal)
         self.self_attn.attn.fia_sparse_mode = 4
-        self.self_attn.attn.fia_pre_tokens = cfg.sliding_window - 1
-        self.self_attn.attn.fia_next_tokens = cfg.block_size - 1
-        self.self_attn.attn.fia_use_attention_mask = True
         self.attention_conv = DFlash2GroupedConv(
             cfg.hidden_size,
             cfg.conv_kernel_size,

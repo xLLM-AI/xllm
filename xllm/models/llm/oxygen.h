@@ -25,10 +25,10 @@ class OxygenModelImpl : public QWen3ModelImpl {
  public:
   OxygenModelImpl(const ModelContext& context) : QWen3ModelImpl(context) {}
 
-  virtual ModelOutput forward(torch::Tensor tokens,
-                              torch::Tensor positions,
-                              std::vector<KVCache>& kv_caches,
-                              const ModelParamsView& input_params) {
+  ModelOutput forward(torch::Tensor tokens,
+                      torch::Tensor positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelParamsView& input_params) override {
     const bool use_deepstack = input_params.has_multimodal() &&
                                !input_params.multimodal().deep_stacks.empty();
     ModelParamsView& input_params_new =
@@ -56,7 +56,7 @@ class OxygenModelImpl : public QWen3ModelImpl {
     if (!input_params_new.attn_metadata) {
       input_params_new.attn_metadata =
           std::make_shared<layer::AttentionMetadata>(
-              get_attention_metadata(input_params_new, h));
+              get_attention_metadata(input_params_new));
     }
 
     auto& attn_metadata = *(input_params_new.attn_metadata);

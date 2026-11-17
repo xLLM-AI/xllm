@@ -98,7 +98,7 @@ def _assert_fia_capacity_graphs(rows: int, graph_owners: list[object], *, padded
         def forward(self, tokens: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
             metadata = get_forward_context().metadata
             if padded:
-                layer = SimpleNamespace(causal=False, fia_use_attention_mask=False, fia_sparse_mode=0)
+                layer = SimpleNamespace(causal=False, fia_sparse_mode=0, sliding_window=0)
                 return backend._prefill(query, query, query, key, value, metadata, tokens.numel(), layer)
             return backend._decode(query, key, value, metadata, tokens.numel())
 

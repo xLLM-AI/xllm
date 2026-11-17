@@ -299,8 +299,6 @@ from xllm.python.model_executor import executor as executor_module
 
 
 class FakeBackend:
-    supports_prepared_metadata = False
-
     def __init__(self, **kwargs):
         pass
 

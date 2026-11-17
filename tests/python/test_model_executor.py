@@ -2006,10 +2006,6 @@ def test_mtp_topk_routes_to_acl_graph(mock_create):
 
 
 class _GraphStubAttentionBackend(StubAttentionBackend):
-    @property
-    def supports_prepared_metadata(self) -> bool:
-        return True
-
     def prepare_metadata(self, metadata: AttentionMetadata, *, device_kv_lengths: bool = False) -> object:
         return SimpleNamespace(source=metadata.q_cu_seq_lens_host_values, device_kv_lengths=device_kv_lengths)
 

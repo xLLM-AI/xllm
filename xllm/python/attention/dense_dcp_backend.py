@@ -83,7 +83,6 @@ class DenseDcpAttentionBackend(NpuPagedAttentionBackend):
         metadata: AttentionMetadata,
         *,
         graph_mode: bool = False,
-        owned_metadata: bool = False,
     ) -> None:
         self._fia.prepare(metadata, graph_mode=graph_mode)
 

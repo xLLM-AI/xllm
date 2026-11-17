@@ -335,8 +335,6 @@ class ModelExecutor:
         attention_layers = [module for module in model.modules() if isinstance(module, Attention)]
         if not attention_layers:
             raise ValueError("Python model does not contain an Attention layer")
-        for layer in attention_layers:
-            layer.cache_transfer_enabled = bool(config.get("enable_disagg_pd", False))
 
         # GLM-Next mixes DSA (MLA) and KDA (linear-attention) layers with
         # different head/dim configs; the paged backend only serves the DSA
@@ -522,7 +520,7 @@ class ModelExecutor:
     @staticmethod
     def _attention_config(
         layer: Attention,
-    ) -> tuple[int, int, int, float, int, bool, int | None, int, int, bool]:
+    ) -> tuple[int, int, int, float, int, bool, int | None]:
         return (
             layer.num_heads,
             layer.num_kv_heads,
@@ -531,9 +529,6 @@ class ModelExecutor:
             layer.sliding_window,
             layer.causal,
             layer.fia_sparse_mode,
-            layer.fia_pre_tokens,
-            layer.fia_next_tokens,
-            layer.fia_use_attention_mask,
         )
 
     def bind_kv_caches(self, kv_caches: list[LayerCacheInput]) -> None:

@@ -903,10 +903,6 @@ class AttentionBackend(ABC):
         """Whether expanded speculative verification can capture linear state."""
         return False
 
-    @property
-    def supports_prepared_metadata(self) -> bool:
-        return False
-
     def prepare_metadata(self, metadata: AttentionMetadata) -> object:
         """Build private Host metadata without changing an active forward."""
         raise NotImplementedError("attention backend does not support private prepared metadata")

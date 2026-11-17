@@ -23,7 +23,6 @@ from xllm.python.models.qwen3_dflash2 import (
     DFlash2CandidateSelector,
     DFlash2Qwen3Config,
     DFlash2Qwen3ForCausalLM,
-    DFlash2Qwen3Model,
 )
 
 
@@ -200,20 +199,6 @@ def test_candidate_selector_builds_topk_edge_logits() -> None:
     expected_edges = torch.tensor([[[[11.0, 4.0], [11.0, 4.0]], [[19.0, 9.0], [5.0, 12.0]]]])
     torch.testing.assert_close(candidate_ids, torch.tensor([[[1, 3], [2, 0]]]), rtol=0, atol=0)
     torch.testing.assert_close(edge_logits, expected_edges, rtol=0, atol=0)
-
-
-def test_dflash2_model_uses_band_attention_and_shared_target_weights() -> None:
-    config = _config()
-    model = DFlash2Qwen3Model(config, torch.float32, torch.device("cpu"))
-    attention = model.layers[0].self_attn.attn
-
-    assert model.embed_tokens is None
-    assert not attention.causal
-    assert attention.fia_sparse_mode == 4
-    assert attention.fia_pre_tokens == config.sliding_window - 1
-    assert attention.fia_next_tokens == config.block_size - 1
-    assert attention.fia_use_attention_mask
-    assert attention.sliding_window == config.sliding_window
 
 
 def test_checkpoint_preserves_draft_owned_vocabulary_weights(

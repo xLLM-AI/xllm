@@ -26,10 +26,10 @@ from xllm.python.layers.attention import Attention
 
 def block_draft_window_context(layer: Attention) -> int | None:
     """Return the oldest possible key's distance from the block anchor."""
-    if layer.fia_sparse_mode == 0 and getattr(layer, "sliding_window", 0) > 0:
+    if layer.fia_sparse_mode == 0 and layer.sliding_window > 0:
         return layer.sliding_window
-    if layer.fia_sparse_mode == 4 and 0 <= layer.fia_pre_tokens < 2147483647:
-        return layer.fia_pre_tokens
+    if layer.fia_sparse_mode == 4 and 0 <= layer.sliding_window - 1 < 2147483647:
+        return layer.sliding_window - 1
     return None
 
 
