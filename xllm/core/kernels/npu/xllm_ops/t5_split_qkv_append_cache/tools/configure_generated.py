@@ -58,3 +58,29 @@ cmake_text = (
     cmake_text[: minimum.end()] + '\ninclude_directories("${CMAKE_CURRENT_SOURCE_DIR}")' + cmake_text[minimum.end() :]
 )
 cmake_path.write_text(cmake_text, encoding="utf-8", newline="\n")
+
+# Opbuild compiles host sources in a separate Make invocation. It does not
+# inherit the directory's include_directories setting.
+host_path = root / "op_host/CMakeLists.txt"
+host_text = host_path.read_text(encoding="utf-8")
+codegen_calls = list(re.finditer(r"\bnpu_op_code_gen\s*\(", host_text))
+if len(codegen_calls) != 1:
+    raise RuntimeError("Unexpected msopgen scaffold: expected one npu_op_code_gen call")
+position = codegen_calls[0].end()
+host_text = host_text[:position] + '\n    COMPILE_OPTIONS "-I${CMAKE_CURRENT_SOURCE_DIR}/.."' + host_text[position:]
+host_path.write_text(host_text, encoding="utf-8", newline="\n")
+
+# Kernel packaging also invokes its compiler outside normal CMake targets.
+kernel_path = root / "op_kernel/CMakeLists.txt"
+kernel_text = kernel_path.read_text(encoding="utf-8")
+kernel_calls = list(re.finditer(r"\bnpu_op_kernel_sources\s*\(\s*(\w+)", kernel_text))
+if len(kernel_calls) != 1:
+    raise RuntimeError("Unexpected msopgen scaffold: expected one npu_op_kernel_sources call")
+position = kernel_calls[0].start()
+target = kernel_calls[0].group(1)
+kernel_text = (
+    kernel_text[:position]
+    + f'npu_op_kernel_options({target} ALL OPTIONS "-I${{CMAKE_CURRENT_SOURCE_DIR}}/..")\n\n'
+    + kernel_text[position:]
+)
+kernel_path.write_text(kernel_text, encoding="utf-8", newline="\n")
