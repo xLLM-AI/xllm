@@ -1,6 +1,7 @@
-# Preserve archive ownership during the directory-only migration. The packed
-# input codec is also called by runtime; splitting targets follows separately.
+# Keep existing archive ownership while codec dependencies are separated.
 target_sources(runtime PRIVATE
+  packed_forward_codec.h
+  packed_forward_codec.cpp
   forward_shared_memory_transport.h
   forward_shared_memory_transport.cpp
 )

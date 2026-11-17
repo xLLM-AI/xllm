@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/runtime/forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/transport/forward_shared_memory_transport.h"
+#include "core/transport/packed_forward_codec.h"
 #include "core/util/tensor_codec.h"
 #include "worker.pb.h"
 
@@ -87,6 +88,44 @@ TEST(TransportCodecTest, LlmFanoutSharesEncodedBlocksAcrossConcurrentWorkers) {
 
 TEST(TransportCodecTest, VlmFanoutSharesEncodedBlocksAcrossConcurrentWorkers) {
   expect_shared_forward_encoding<VlmForwardInput>();
+}
+
+TEST(TransportCodecTest, PackedBufferMatchesRpcPayloadWithoutShmControl) {
+  LlmForwardInput input;
+  input.token_ids = torch::arange(32, torch::kInt32);
+  proto::PackedForwardInput expected;
+  ASSERT_TRUE(input.to_packed_proto(&expected));
+  const size_t capacity = sizeof(uint64_t) + expected.payload().size();
+  std::vector<char> bytes(capacity);
+  PackedForwardCodec codec(bytes.data(), static_cast<int64_t>(bytes.size()));
+  ASSERT_TRUE(codec.input_write(input));
+  uint64_t payload_size = 0;
+  std::memcpy(&payload_size, bytes.data(), sizeof(payload_size));
+  EXPECT_EQ(payload_size, expected.payload().size());
+  EXPECT_EQ(std::string(bytes.data() + sizeof(payload_size), payload_size),
+            expected.payload());
+  EXPECT_TRUE(PackedForwardCodec::can_write_input(input, capacity));
+  EXPECT_FALSE(PackedForwardCodec::can_write_input(input, capacity - 1));
+  PackedForwardCodec undersized(bytes.data(),
+                                static_cast<int64_t>(capacity - 1));
+  EXPECT_FALSE(undersized.input_write(input));
+}
+
+TEST(TransportCodecTest, PackedOutputRoundTripWithoutSharedMemory) {
+  std::vector<char> bytes(4096);
+  PackedForwardCodec codec(bytes.data(), static_cast<int64_t>(bytes.size()));
+  ForwardOutput source;
+  source.sample_output.next_tokens = torch::tensor({7, 9}, torch::kInt32);
+  source.prepared_token = 42;
+  ASSERT_TRUE(codec.write_token_output(source, {}, "LLM"));
+  RawForwardOutput decoded;
+  ASSERT_TRUE(codec.read_token_output(decoded, "LLM"));
+  ASSERT_EQ(decoded.outputs.size(), 2);
+  ASSERT_EQ(decoded.outputs[0].tokens.size(), 1);
+  ASSERT_EQ(decoded.outputs[1].tokens.size(), 1);
+  EXPECT_EQ(decoded.outputs[0].tokens[0].id, 7);
+  EXPECT_EQ(decoded.outputs[1].tokens[0].id, 9);
+  EXPECT_EQ(decoded.prepared_token, 42);
 }
 
 class ScopedRawOutputTransport final {
