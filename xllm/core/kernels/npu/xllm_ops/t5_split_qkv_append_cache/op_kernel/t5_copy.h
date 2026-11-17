@@ -127,27 +127,31 @@ class T5Copy final {
       return;
     }
     auto local = queue_.AllocTensor<uint16_t>();
-    // The plain DMA path requires a complete 32-byte block count. Inspect the
-    // actual GM addresses too: contiguous storage-offset views may be
-    // unaligned.
-    const bool aligned =
+    // Each DMA direction requires complete 32-byte blocks and alignment of
+    // its own GM address. An unaligned input does not require a padded store
+    // when the output is aligned, and vice versa.
+    const bool full_blocks = (n & 15) == 0;
+    const bool load_aligned =
         aligned_fragments_ ||
-        (((n & 15) == 0) &&
+        (full_blocks &&
          ((reinterpret_cast<uint64_t>(src.GetPhyAddr() + src_offset) & 31) ==
-          0) &&
+          0));
+    const bool store_aligned =
+        aligned_fragments_ ||
+        (full_blocks &&
          ((reinterpret_cast<uint64_t>(dst.GetPhyAddr() + dst_offset) & 31) ==
           0));
     AscendC::DataCopyExtParams params{
         1, n * static_cast<uint32_t>(sizeof(uint16_t)), 0, 0, 0};
     AscendC::DataCopyPadExtParams<uint16_t> padding{false, 0, 0, 0};
-    if (aligned) {
+    if (load_aligned) {
       AscendC::DataCopy(local, src[src_offset], n);
     } else {
       AscendC::DataCopyPad(local, src[src_offset], params, padding);
     }
     queue_.EnQue(local);
     local = queue_.DeQue<uint16_t>();
-    if (aligned) {
+    if (store_aligned) {
       AscendC::DataCopy(dst[dst_offset], local, n);
     } else {
       AscendC::DataCopyPad(dst[dst_offset], local, params);
