@@ -202,11 +202,12 @@
     },
     {
       "path": "direct/CMakeLists.txt",
-      "sha256": "0fac874a95ff26971ceb9414302d7be22604a3ad301b6725540a4c6be25be711"
+      "sha256": "60c68c4313d1cc716a1bd199ff59fa09332c1ea3c7d665f6a08e6e89ce05e75d"
     },
     {
       "path": "csrc/torch_binding.cpp",
       "sha256": "70217c9142f3835be3770884b1154383784cb9f817c3b0d43abb7cedddd27f8a"
     }
-  ]
+  ],
+  "runtime_changed_files_hash_basis": "Exact tested Git commit blobs; not Windows working-tree line endings."
 }
