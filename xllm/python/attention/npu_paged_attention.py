@@ -2036,7 +2036,9 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                     if prepared.workspace_query_capacity
                     else None
                 ),
-                output=get_execution_buffer(("BOUNDED_FIA_OUTPUT", query.shape[0]), lambda: torch.empty_like(query)),
+                output=None
+                if context.execution_state.serial_buffers is not None
+                else get_execution_buffer(("BOUNDED_FIA_OUTPUT", query.shape[0]), lambda: torch.empty_like(query)),
                 lse=get_execution_buffer(
                     ("BOUNDED_FIA_LSE", query.shape[0]),
                     lambda: torch.empty(0, device=query.device, dtype=query.dtype),
@@ -2051,9 +2053,19 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 raise RuntimeError("shared bounded graph block-table shape changed during replay")
             state.block_table.copy_(translated_table)
 
+        output = state.output
+        if output is None:
+            output = torch.empty_like(query)
+        # Serial graphs reuse their capture pool. Keep owners alive through
+        # this call, but do not pin each shape's mask and activations in tasks.
+        borrow_buffers = graph_context is not None and state.output is None
+        captured_query = borrow_acl_graph_tensor(query) if borrow_buffers else query
+        captured_mask = borrow_acl_graph_tensor(mask) if borrow_buffers else mask
+        captured_output = borrow_acl_graph_tensor(output) if borrow_buffers else output
+
         fia_out = self._fused_attention.out
         options = {
-            "atten_mask": mask,
+            "atten_mask": captured_mask,
             "block_table": state.block_table,
             "actual_seq_lengths": state.query,
             "actual_seq_lengths_kv": state.kv,
@@ -2067,13 +2079,15 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             "next_tokens": 2147483647,
             "softmax_lse_flag": False,
             "workspace": state.workspace,
-            "out": [state.output, state.lse],
+            "out": [captured_output, state.lse],
         }
         if graph_context is None:
+            # Capture warmup acquires the scratch here: a workspace first
+            # requested during capture stays pinned in that graph's pool.
             fia_out(query, key, value, **options)
         else:
-            graph_context.capture_task(fia_out, query, key, value, **options)
-        return state.output
+            graph_context.capture_task(fia_out, captured_query, key, value, **options)
+        return output
 
     def _prefill(
         self,
