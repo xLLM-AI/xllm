@@ -747,6 +747,7 @@ def main() -> int:
             for case in cases:
                 if case.get("generalization", {}).get("measure"):
                     generalization["benchmarks"].append(h.benchmark(case, None))
+            supplement["finished_utc"] = _stamp()
             _validate_records(result, generalization, supplement, fixtures)
             generalization["status"] = "PASS"
             supplement["status"] = "PASS"
