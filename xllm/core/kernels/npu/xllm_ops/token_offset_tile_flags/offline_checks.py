@@ -36,6 +36,12 @@ ROOT = Path(__file__).resolve().parent
 ensure_fixtures(ROOT)
 
 
+def _require(condition: Any, message: str) -> None:
+    # Emulator bounds checks must also raise under `python -O` / PYTHONOPTIMIZE.
+    if not condition:
+        raise AssertionError(message)
+
+
 class Array(np.ndarray):
     def to(self, dtype: Any) -> Any:
         return self.astype(dtype).view(Array)
@@ -70,7 +76,7 @@ class Language:
     def load(pointer: Any, mask: Any = True, other: Any = 0) -> Any:
         ids, mask = np.broadcast_arrays(pointer.index, mask)
         selected = ids[mask]
-        assert (selected >= 0).all() and (selected < len(pointer.buffer)).all(), "unmasked out-of-bounds read"
+        _require((selected >= 0).all() and (selected < len(pointer.buffer)).all(), "unmasked out-of-bounds read")
         result = np.full(ids.shape, other, dtype=pointer.buffer.dtype)
         result[mask] = pointer.buffer[selected]
         return _array(result)
@@ -79,7 +85,7 @@ class Language:
     def store(pointer: Any, value: Any, mask: Any = True) -> Any:
         ids, mask, value = np.broadcast_arrays(pointer.index, mask, value)
         selected = ids[mask]
-        assert (selected >= 0).all() and (selected < len(pointer.buffer)).all(), "out-of-bounds write"
+        _require((selected >= 0).all() and (selected < len(pointer.buffer)).all(), "out-of-bounds write")
         pointer.buffer[selected] = value[mask]
 
     @staticmethod
@@ -138,7 +144,7 @@ def _emulate(values: Any, attrs: Any) -> Any:
         language.pid = pid
         language.row = row
         kernel(pointers[0], pointers[1], pointers[2], Pointer(out), len(values[0]), rows * k, t, k, lanes, group)
-    assert not (out == 255).any(), "unwritten output"
+    _require(not (out == 255).any(), "unwritten output")
     return out.tolist()
 
 

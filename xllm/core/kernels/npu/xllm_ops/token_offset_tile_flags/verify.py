@@ -25,10 +25,12 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
 import traceback
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,25 @@ from fixtures import ensure_fixtures
 from statistics_utils import paired_statistics
 
 ROOT = Path(__file__).resolve().parent
+
+FROZEN_FIXTURE_NAMES = ("任务书.md", "case.json", "op.json", "generate_data.py", "golden.py")
+SUPPLEMENT_SCOPE = (
+    "Two unchanged public performance fixtures, independent CPU golden, two-stream retained outputs, "
+    "one-call allocator peaks and twenty-call release. No performance rerun, cold prepare timing, "
+    "dynamic-input or storage-rebinding claim."
+)
+MEMORY_SCOPE = (
+    "Warmed one-call PyTorch NPU active allocation increment; both prepared objects, input tensors and "
+    "baseline static layout remain alive. Includes output and visible temporaries; excludes persistent "
+    "prepared storage, total HBM and untracked CANN/UB scratch."
+)
+PEAK_DEFINITION = "PyTorch active allocation; not total HBM or all runtime scratch"
+
+
+def _require(condition: Any, message: str) -> None:
+    # Acceptance gates must also raise under `python -O` / PYTHONOPTIMIZE.
+    if not condition:
+        raise AssertionError(message)
 
 
 def _load_module(name: Any, path: Any) -> Any:
@@ -53,6 +74,10 @@ def _stamp() -> Any:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
+def _golden_sha256(expected: Any) -> Any:
+    return hashlib.sha256(json.dumps(expected, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def _source_hashes() -> Any:
     return {
         str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -61,6 +86,11 @@ def _source_hashes() -> Any:
         and p.suffix in (".py", ".json", ".md", ".zip")
         and not any(s in p.parts for s in ("results", "task_submission", "verification", "__pycache__"))
     }
+
+
+def _fixtures_unmodified(fixtures: Any) -> Any:
+    with zipfile.ZipFile(ROOT / "official.zip") as archive:
+        return all((fixtures / name).read_bytes() == archive.read(name) for name in FROZEN_FIXTURE_NAMES)
 
 
 def _environment(torch: Any) -> Any:
@@ -92,8 +122,6 @@ def _environment(torch: Any) -> Any:
     except (OSError, subprocess.TimeoutExpired) as exc:
         info["npu_smi"] = str(exc)
     # Unknown or mismatched evidence must never certify the official environment.
-    import re
-
     configured_root = os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_TOOLKIT_HOME")
     active_files = {p: v for p, v in files.items() if configured_root and Path(p).is_relative_to(Path(configured_root))}
     # Ascend A3 SoC names, consistent with vllm-ascend/device/hardware.py.
@@ -139,13 +167,13 @@ class Harness:
         return tensors, attrs, expected
 
     def _check_output(self, out: Any, expected: Any) -> Any:
-        assert list(out.shape) == [len(expected)], "wrong output shape"
-        assert out.dtype == self._torch.uint8, "wrong output dtype"
-        assert out.device == self._torch.device("npu:0"), "wrong output device"
-        assert out.is_contiguous(), "noncontiguous output"
+        _require(list(out.shape) == [len(expected)], "wrong output shape")
+        _require(out.dtype == self._torch.uint8, "wrong output dtype")
+        _require(out.device == self._torch.device("npu:0"), "wrong output device")
+        _require(out.is_contiguous(), "noncontiguous output")
         actual = out.detach().cpu().tolist()
         mismatches = sum(a != b for a, b in zip(actual, expected))
-        assert mismatches == 0, f"{mismatches} output mismatches"
+        _require(mismatches == 0, f"{mismatches} output mismatches")
         return mismatches
 
     @staticmethod
@@ -161,12 +189,13 @@ class Harness:
         prepared = self._solution.prepare(inputs, attrs)
         baseline = self._golden.reference("baseline").prepare(inputs, attrs, {"rows": len(inputs[2])})
         outs = [prepared.run(), prepared.run(), baseline(), baseline(), self._solution.run(inputs, attrs)]
-        for out in outs:
-            self._check_output(out, expected)
-        assert self._independent(outs, inputs), "shared output storage"
-        assert before == [x.cpu().tolist() for x in inputs], "input mutated"
+        counts = [self._check_output(out, expected) for out in outs]
+        independent = self._independent(outs, inputs)
+        _require(independent, "shared output storage")
+        unchanged = before == [x.cpu().tolist() for x in inputs]
+        _require(unchanged, "input mutated")
         if case.get("offset"):
-            assert all(x.storage_offset() == 1 for x in inputs)
+            _require(all(x.storage_offset() == 1 for x in inputs), "lost nonzero storage offset")
         result = {
             "id": case["id"],
             "status": "PASS",
@@ -174,15 +203,16 @@ class Harness:
             "input_shapes": [list(x.shape) for x in inputs],
             "attributes": attrs,
             "checks": {
-                "candidate_mismatches": 0,
-                "baseline_mismatches": 0,
-                "shape": True,
-                "dtype": True,
-                "npu": True,
-                "contiguous": True,
-                "inputs_unchanged": True,
-                "independent_storage": True,
+                "candidate_mismatches": counts[0] + counts[1] + counts[4],
+                "baseline_mismatches": counts[2] + counts[3],
+                "shape": all(list(x.shape) == [len(expected)] for x in outs),
+                "dtype": all(x.dtype == self._torch.uint8 for x in outs),
+                "npu": all(x.device == self._torch.device("npu:0") for x in outs),
+                "contiguous": all(x.is_contiguous() for x in outs),
+                "inputs_unchanged": unchanged,
+                "independent_storage": independent,
             },
+            "golden_sha256": _golden_sha256(expected),
             "storage_offsets": [x.storage_offset() for x in inputs],
         }
         self._emit("accuracy", result)
@@ -262,7 +292,7 @@ class Harness:
             self._check_output(consumed, expected_new)
             retained.append(out)
         self._check_output(original, expected)
-        assert self._independent([original, *retained], inputs)
+        _require(self._independent([original, *retained], inputs), "dynamic outputs share storage")
         # Rebind the same tensor objects to different legal storage offsets.
         # A prepared call must dereference the current pointers, not old buffers.
         rebound_values = [[8, 9, 10, 11, 12, 13, 14, 15], [0, 4, 8], [4, 4], [0, 2, 4]]
@@ -272,7 +302,7 @@ class Harness:
         rebound = prepared.run()
         self._check_output(rebound, [1, 0, 1, 0])
         self._check_output(original, expected)
-        assert self._independent([original, *retained, rebound], inputs)
+        _require(self._independent([original, *retained, rebound], inputs), "rebound outputs share storage")
         record = {
             "id": "current_values_current_stream",
             "status": "PASS",
@@ -342,7 +372,7 @@ class Harness:
             npu.synchronize()
             active_after_each.append(npu.memory_allocated())
         after = npu.memory_allocated()
-        assert before == after_one == after and all(x == before for x in active_after_each), "allocation leak"
+        _require(before == after_one == after and all(x == before for x in active_after_each), "allocation leak")
         return {
             "status": "PASS",
             "warmup_calls": 3,
@@ -356,11 +386,10 @@ class Harness:
             "active_after_each_release_bytes": active_after_each,
             "active_after_repeat_release_bytes": after,
             "residual_active_bytes": after - before,
-            "measurement_scope": "PyTorch active allocation; output and visible temporaries; "
-            "both prepared objects and inputs retained; excludes total HBM and untracked runtime scratch",
+            "measurement_scope": MEMORY_SCOPE,
         }
 
-    def engineering(self, case: Any) -> Any:
+    def engineering(self, case: Any, frozen_verify_case: Any) -> Any:
         inputs, attrs, expected = self._inputs(case)
         before = [x.cpu().tolist() for x in inputs]
         candidate = self._solution.prepare(inputs, attrs)
@@ -377,32 +406,256 @@ class Harness:
         for stream in streams:
             stream.synchronize()
         mismatches = [self._check_output(x, expected) for x in outputs]
-        assert self._independent(outputs, inputs), "two-stream storage alias"
+        independent = self._independent(outputs, inputs)
+        _require(independent, "two-stream storage alias")
         del outputs
         self._torch.npu.synchronize()
         record = {
             "id": case["id"],
             "status": "PASS",
+            "frozen_verify_case": frozen_verify_case,
             "common_warmup_calls_per_path": 3,
             "two_streams": {
                 "status": "PASS",
                 "streams": 2,
                 "outputs_per_stream": 3,
                 "golden_mismatches_per_output": mismatches,
-                "retained_outputs_independent": True,
-                "outputs_independent_of_inputs": True,
+                "retained_outputs_independent": independent,
+                "outputs_independent_of_inputs": independent,
             },
             "candidate": self._memory_path(candidate.run, expected),
             "baseline": self._memory_path(baseline, expected),
         }
-        assert before == [x.cpu().tolist() for x in inputs]
-        record["inputs_unchanged"] = True
+        unchanged = before == [x.cpu().tolist() for x in inputs]
+        _require(unchanged, "engineering inputs mutated")
+        record["inputs_unchanged"] = unchanged
         record["baseline_minus_candidate_peak_bytes"] = (
             record["baseline"]["one_call_peak_increment_bytes"] - record["candidate"]["one_call_peak_increment_bytes"]
         )
         record["memory_difference_is_observation_only"] = True
         self._emit("memory", record)
         return record
+
+
+def _engineering_summary(cases: Any) -> Any:
+    small = next(c for c in cases if c["id"] == "flags_perf_small")
+    candidate = small["candidate"]
+    two_streams = all(c["two_streams"]["status"] == "PASS" for c in cases)
+    independent = all(
+        c["two_streams"]["retained_outputs_independent"] and c["two_streams"]["outputs_independent_of_inputs"]
+        for c in cases
+    )
+    released = all(
+        rec["residual_active_bytes"] == 0
+        and rec["active_before_bytes"] == rec["active_after_repeat_release_bytes"]
+        and rec["repeat_golden_mismatches"] == [0] * rec["repeat_calls"]
+        for c in cases
+        for rec in (c["candidate"], c["baseline"])
+    )
+    return {
+        "two_streams": "PASS" if two_streams else "FAIL",
+        "retained_outputs_independent": "PASS" if independent else "FAIL",
+        "repeat20_released": "PASS" if released else "FAIL",
+        "active_before_bytes": candidate["active_before_bytes"],
+        "active_after_bytes": candidate["active_after_repeat_release_bytes"],
+        "peak_increment_bytes": candidate["one_call_peak_increment_bytes"],
+        "output_bytes": candidate["output_bytes"],
+        "peak_definition": PEAK_DEFINITION,
+    }
+
+
+def _validate_supplement(supplement: Any, want: Any, cases: Any) -> None:
+    for key in ("schema_version", "task", "kind", "device_requested"):
+        _require(supplement.get(key) == want[key], f"engineering_supplement {key} != {want[key]!r}")
+    for key in ("started_utc", "finished_utc", "scope"):
+        _require(isinstance(supplement.get(key), str) and supplement[key], f"engineering_supplement missing {key}")
+    _require(supplement["device_setup_attempted"] is True, "engineering_supplement: device setup was not attempted")
+    _require(supplement["performance_measured"] is False, "engineering_supplement: performance is out of scope")
+    _require(
+        supplement["memory_gain_required"] is False, "engineering_supplement: memory gain must stay observation-only"
+    )
+    _require(supplement["frozen_results_modified"] is False, "engineering_supplement: frozen results were modified")
+    environment = supplement["environment"]
+    for key, value in want["environment"].items():
+        if key == "versions":
+            for name in value:
+                _require(
+                    environment.get("versions", {}).get(name) not in (None, "", "NOT_FOUND"),
+                    f"engineering_supplement environment missing version: {name}",
+                )
+        else:
+            _require(
+                isinstance(environment.get(key), str) and environment[key],
+                f"engineering_supplement environment missing {key}",
+            )
+    records = {c["id"]: c for c in supplement["cases"]}
+    _require(
+        len(records) == len(supplement["cases"]) == len(want["cases"]),
+        "engineering_supplement case records do not match the mandatory list",
+    )
+    for want_case in want["cases"]:
+        got = records.get(want_case["id"])
+        _require(got is not None, f"missing engineering_supplement case: {want_case['id']}")
+        _require(got["status"] == "PASS", f"engineering_supplement case not PASS: {want_case['id']}")
+        frozen = got["frozen_verify_case"]
+        source = cases[want_case["id"]]
+        for key in ("id", "status", "checks", "shape", "input_shapes", "attributes"):
+            _require(
+                frozen.get(key) == source.get(key), f"frozen_verify_case of {want_case['id']} diverges from result.json"
+            )
+        _require(
+            got["common_warmup_calls_per_path"] == want_case["common_warmup_calls_per_path"],
+            f"{want_case['id']}: wrong common warmup count",
+        )
+        streams = got["two_streams"]
+        _require(
+            streams["status"] == "PASS" and streams["streams"] == 2 and streams["outputs_per_stream"] == 3,
+            f"{want_case['id']}: two-stream protocol not fulfilled",
+        )
+        _require(streams["golden_mismatches_per_output"] == [0] * 6, f"{want_case['id']}: retained output mismatches")
+        _require(
+            streams["retained_outputs_independent"] is True and streams["outputs_independent_of_inputs"] is True,
+            f"{want_case['id']}: retained outputs alias each other or the inputs",
+        )
+        for path in ("candidate", "baseline"):
+            rec = got[path]
+            _require(rec["status"] == "PASS", f"{want_case['id']} {path}: memory path not PASS")
+            _require(
+                rec["warmup_calls"] == 3 and rec["repeat_calls"] == 20, f"{want_case['id']} {path}: wrong call counts"
+            )
+            _require(rec["single_call_golden_mismatches"] == 0, f"{want_case['id']} {path}: single-call mismatch")
+            _require(rec["repeat_golden_mismatches"] == [0] * 20, f"{want_case['id']} {path}: repeat-call mismatch")
+            _require(
+                rec["active_before_bytes"]
+                == rec["active_after_one_release_bytes"]
+                == rec["active_after_repeat_release_bytes"],
+                f"{want_case['id']} {path}: active allocation did not return to its starting level",
+            )
+            _require(rec["residual_active_bytes"] == 0, f"{want_case['id']} {path}: residual allocation")
+            _require(rec["output_bytes"] == source["shape"][0], f"{want_case['id']} {path}: wrong output byte count")
+            _require(
+                isinstance(rec["measurement_scope"], str) and rec["measurement_scope"],
+                f"{want_case['id']} {path}: measurement_scope missing",
+            )
+        _require(got["inputs_unchanged"] is True, f"{want_case['id']}: inputs mutated")
+        _require(
+            got["baseline_minus_candidate_peak_bytes"]
+            == got["baseline"]["one_call_peak_increment_bytes"] - got["candidate"]["one_call_peak_increment_bytes"],
+            f"{want_case['id']}: peak difference does not match the measured peaks",
+        )
+        _require(
+            got["memory_difference_is_observation_only"] is True, f"{want_case['id']}: memory gain claimed as a gate"
+        )
+
+
+def _validate_generalization(generalization: Any, fixtures: Any) -> None:
+    config = fixtures["generalization"]
+    records = {c["id"]: c for c in generalization["cases"]}
+    _require(
+        set(records) == set(config["case_ids"]) and len(records) == len(generalization["cases"]),
+        "generalization case records do not match the mandatory list",
+    )
+    checks_template = fixtures["expected_checks"]["result.json"]["cases"][0]["checks"]
+    for case in fixtures["input_cases"]:
+        spec = case.get("generalization")
+        if not spec:
+            continue
+        record = records[case["id"]]
+        _require(record["status"] == "PASS", f"generalization case not PASS: {case['id']}")
+        for key, value in checks_template.items():
+            _require(record["checks"].get(key) == value, f"generalization {case['id']} check {key} is not {value}")
+        _require(record["shape"] == spec["output_shape"], f"generalization {case['id']}: wrong output shape")
+        _require(record["input_shapes"] == spec["input_shapes"], f"generalization {case['id']}: wrong input shapes")
+        if "expected_sha256" in spec:
+            _require(
+                record["golden_sha256"] == spec["expected_sha256"],
+                f"generalization {case['id']}: golden output differs from the frozen expected_sha256",
+            )
+    measured = {b["id"]: b for b in generalization["benchmarks"]}
+    _require(
+        set(measured) == set(config["diagnostic_ids"]) and len(measured) == len(generalization["benchmarks"]),
+        "generalization paired timings do not match the mandatory list",
+    )
+    for case_id in config["diagnostic_ids"]:
+        record = measured[case_id]
+        _require(record["status"] == "MEASURED", f"generalization timing not MEASURED: {case_id}")
+        _require(
+            len(record["baseline_round_us"]) == len(record["candidate_round_us"]) == 6,
+            f"generalization timing {case_id}: six paired rounds are required",
+        )
+
+
+def _validate_records(result: Any, generalization: Any, supplement: Any, fixtures: Any) -> None:
+    """Consume every mandatory checklist record; record counts alone never certify a run."""
+    expected = fixtures["expected_checks"]["result.json"]
+    cases = {c["id"]: c for c in result["cases"]}
+    _require(
+        len(cases) == len(result["cases"]) == len(expected["cases"]),
+        "result.json case records do not match the mandatory list",
+    )
+    for want in expected["cases"]:
+        got = cases.get(want["id"])
+        _require(got is not None, f"missing mandatory case record: {want['id']}")
+        _require(got["status"] == "PASS", f"case not PASS: {want['id']}")
+        for key, value in want["checks"].items():
+            _require(got["checks"].get(key) == value, f"case {want['id']} check {key} is not {value}")
+        for key in ("shape", "input_shapes", "attributes"):
+            _require(got.get(key) == want[key], f"case {want['id']} {key} differs from the fixture")
+    negative = {n["id"]: n for n in result["negative"]}
+    _require(
+        len(negative) == len(result["negative"]) == len(expected["negative"]),
+        "negative records do not match the mandatory list",
+    )
+    for want in expected["negative"]:
+        got = negative.get(want["id"])
+        _require(got is not None and got["status"] == "PASS", f"negative check not PASS: {want['id']}")
+        _require(got["exception"] in ("TypeError", "ValueError"), f"negative {want['id']} raised {got['exception']}")
+    _require(result["dynamic"]["status"] == "PASS", "dynamic input/stream record not PASS")
+    _validate_supplement(supplement, fixtures["supplement_checks"]["engineering_supplement"], cases)
+    summary = result["engineering"]
+    for key, value in expected["engineering"].items():
+        _require(key in summary, f"engineering summary missing mandatory field: {key}")
+        if value == "PASS":
+            _require(summary[key] == "PASS", f"engineering summary {key} not PASS")
+    _require(
+        summary["active_before_bytes"] == summary["active_after_bytes"],
+        "engineering summary: active allocation did not return to its starting level",
+    )
+    _require(
+        summary["peak_increment_bytes"] >= summary["output_bytes"] > 0,
+        "engineering summary: implausible peak/output byte counts",
+    )
+    _require(
+        isinstance(summary["peak_definition"], str) and summary["peak_definition"],
+        "engineering summary: peak_definition missing",
+    )
+    small = next(c for c in supplement["cases"] if c["id"] == "flags_perf_small")["candidate"]
+    _require(
+        summary["active_before_bytes"] == small["active_before_bytes"],
+        "engineering summary disagrees with the measured small-case record",
+    )
+    _require(
+        summary["active_after_bytes"] == small["active_after_repeat_release_bytes"],
+        "engineering summary disagrees with the measured small-case record",
+    )
+    _require(
+        summary["peak_increment_bytes"] == small["one_call_peak_increment_bytes"],
+        "engineering summary disagrees with the measured small-case record",
+    )
+    _require(
+        summary["output_bytes"] == small["output_bytes"],
+        "engineering summary disagrees with the measured small-case record",
+    )
+    primary = [c for c in fixtures["input_cases"] if c.get("performance")]
+    _require(len(result["benchmarks"]) == len(primary), "primary benchmark count mismatch")
+    for index, (filename, path) in enumerate(fixtures["required_comparisons"]):
+        _require(filename == "result.json", f"unsupported required comparison file: {filename}")
+        match = re.fullmatch(r"benchmarks\[(\d+)\]", path)
+        _require(match is not None, f"unsupported required comparison path: {path}")
+        record = result["benchmarks"][int(match.group(1))]
+        _require(record["id"] == primary[index]["id"], f"required comparison {path} is not {primary[index]['id']}")
+        _require(record["status"] == "PASS", f"primary performance gate failed: {record['id']}")
+    _validate_generalization(generalization, fixtures)
 
 
 def main() -> int:
@@ -425,7 +678,22 @@ def main() -> int:
         "source_sha256": _source_hashes(),
     }
     generalization = {"status": "NOT_RUN", "cases": [], "benchmarks": []}
-    engineering = {"status": "NOT_RUN", "cases": []}
+    supplement = {
+        "schema_version": 1,
+        "task": "flags",
+        "kind": "engineering_supplement",
+        "status": "NOT_RUN",
+        "device_requested": "npu:0",
+        "started_utc": _stamp(),
+        "cases": [],
+        "device_setup_attempted": False,
+        "performance_measured": False,
+        "scope": SUPPLEMENT_SCOPE,
+        "memory_gain_required": False,
+        "frozen_results_modified": False,
+        "environment": {},
+        "finished_utc": None,
+    }
     _dump(outdir / "result.json", result)
     code = 1
     with (outdir / "raw.log").open("w", encoding="utf-8") as log:
@@ -436,13 +704,27 @@ def main() -> int:
             if not torch.npu.is_available():
                 raise RuntimeError("No NPU available")
             torch.npu.set_device(0)
+            supplement["device_setup_attempted"] = True
             result["environment"] = _environment(torch)
+            import triton
+
+            supplement["environment"] = {
+                "python": platform.python_version(),
+                "platform": platform.platform(),
+                "machine": platform.machine(),
+                "device": "npu:0",
+                "device_name": result["environment"]["device_name"],
+                "versions": {k: result["environment"]["versions"][k] for k in ("torch", "torch-npu", "triton-ascend")},
+                "triton_target": str(triton.runtime.driver.active.get_current_target()),
+            }
             import solution
 
             fixtures = json.loads((args.fixtures / "case.json").read_text(encoding="utf-8"))
             result["fixture_sha256"] = {
                 p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in args.fixtures.iterdir() if p.is_file()
             }
+            if args.fixtures == ROOT / "official":
+                _require(_fixtures_unmodified(args.fixtures), "frozen task attachments were modified")
             golden = _load_module("task10_golden", args.fixtures / "golden.py")
             generator = _load_module("task10_generator", args.fixtures / "generate_data.py")
             h = Harness(torch, solution, golden, generator, log)
@@ -456,21 +738,18 @@ def main() -> int:
             primary = [c for c in cases if c.get("performance")]
             result["negative"] = h.negatives(primary[0])
             result["dynamic"] = h.dynamic()
+            verified = {c["id"]: c for c in result["cases"]}
             for case in primary:
-                engineering["cases"].append(h.engineering(case))
-            engineering["status"] = "PASS"
-            result["engineering"] = engineering
+                supplement["cases"].append(h.engineering(case, verified[case["id"]]))
+            result["engineering"] = _engineering_summary(supplement["cases"])
             for case in primary:
                 result["benchmarks"].append(h.benchmark(case, fixtures["acceptance"]["max_mean_us"][case["id"]]))
             for case in cases:
                 if case.get("generalization", {}).get("measure"):
                     generalization["benchmarks"].append(h.benchmark(case, None))
+            _validate_records(result, generalization, supplement, fixtures)
             generalization["status"] = "PASS"
-            assert len(result["cases"]) == 10 and len(generalization["cases"]) == 4
-            assert len(result["negative"]) == 9 and len(engineering["cases"]) == 2
-            assert len(result["benchmarks"]) == len(generalization["benchmarks"]) == 2
-            if not all(x["status"] == "PASS" for x in result["benchmarks"]):
-                raise AssertionError("official performance gate failed")
+            supplement["status"] = "PASS"
             if not result["environment"]["official_environment_verified"]:
                 result["status"] = "ENVIRONMENT_UNVERIFIED"
                 result["error"] = (
@@ -488,9 +767,10 @@ def main() -> int:
             print(json.dumps({"error": result["error"]}), file=sys.stderr)
         finally:
             result["finished_utc"] = _stamp()
+            supplement["finished_utc"] = _stamp()
             _dump(outdir / "result.json", result)
             _dump(outdir / "generalization.json", generalization)
-            _dump(outdir / "engineering_supplement.json", engineering)
+            _dump(outdir / "engineering_supplement.json", supplement)
             print(json.dumps({"results": str(outdir), "status": result["status"]}), flush=True)
     return code
 
