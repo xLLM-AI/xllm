@@ -17,16 +17,18 @@ Set up an xLLM environment for Ascend NPU and start a service with the unified `
 
 Run the following commands on the host. Choose one development image for your hardware:
 
+Browse the [Ascend ARM64 development image tags](https://quay.io/repository/xllm-ai/xllm?tab=tags) for A2 and A3.
+
 | Hardware | Host CPU | Development image |
 | --- | --- | --- |
 | Ascend A2 | x86_64 | `quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911` |
-| Ascend A2 | ARM64 | `quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911` |
-| Ascend A3 | ARM64 | `quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911` |
+| Ascend A2 | ARM64 | `quay.io/xllm-ai/xllm:latest-a2-arm64` |
+| Ascend A3 | ARM64 | `quay.io/xllm-ai/xllm:latest-a3-arm64` |
 
 The example below selects A3 ARM64; change `XLLM_IMAGE` for another platform.
 
 ```bash
-XLLM_IMAGE="quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911"
+XLLM_IMAGE="quay.io/xllm-ai/xllm:latest-a3-arm64"
 docker pull "$XLLM_IMAGE"
 ```
 

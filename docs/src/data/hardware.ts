@@ -21,6 +21,7 @@ export interface HardwareConfig {
 }
 
 const quay = 'quay.io/jd_xllm/xllm-ai:';
+const npuDevQuay = 'quay.io/xllm-ai/xllm:';
 const npuDocker: DockerRunConfig = {
 	container: 'xllm-npu',
 	options: [
@@ -48,7 +49,7 @@ export const hardwareConfigs: readonly HardwareConfig[] = [
 			},
 			arm: {
 				release: `${quay}xllm-0.10.0-release-hb-rc2-arm`,
-				dev: `${quay}xllm-dev-a2-arm-cann9-20260911`,
+				dev: `${npuDevQuay}latest-a2-arm64`,
 			},
 		},
 	},
@@ -57,7 +58,7 @@ export const hardwareConfigs: readonly HardwareConfig[] = [
 		images: {
 			arm: {
 				release: `${quay}xllm-0.10.0-release-hc-rc2-arm`,
-				dev: `${quay}xllm-dev-a3-arm-cann9-20260911`,
+				dev: `${npuDevQuay}latest-a3-arm64`,
 			},
 		},
 	},

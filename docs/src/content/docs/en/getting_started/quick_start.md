@@ -21,7 +21,7 @@ Install Docker and the appropriate accelerator drivers on the host first. NVIDIA
 
 The commands create named containers that remain after you exit. To re-enter a stopped container, run `docker start -ai <container-name>`, replacing `<container-name>` with the value of `--name` (for example, `xllm-npu`). To try a different image or hardware setup, choose an unused `--name` in the new `docker run` command. Restarting an existing container keeps its original image and configuration.
 
-Browse the [Ascend and NVIDIA image tags](https://quay.io/repository/jd_xllm/xllm-ai?tab=tags), or see the full setup instructions for your hardware:
+See the full setup instructions for your hardware:
 
 - [Ascend NPU (A2 / A3)](/en/hardware/ascend_npu/)
 - [NVIDIA GPU](/en/hardware/nvidia_gpu/)
