@@ -106,8 +106,7 @@ def test_dcp_derived_buffers_are_not_direct_metadata_consumers(prepared_backend:
     metadata = _prepared_metadata()
     metadata.q_cu_seq_lens = None
     with forward_context(_cpu_context(AclGraphExecutionState({}))):
-        prepared_backend.prepare(metadata, graph_mode=True, owned_metadata=True)
-    assert not prepared_backend.graph_metadata_updated_in_place
+        prepared_backend.prepare(metadata, graph_mode=True)
     assert prepared_backend._local_slot_mapping.data_ptr() != metadata.slot_mapping.data_ptr()
     assert prepared_backend._sfa_metadata.dcp_context.seq_lens.data_ptr() != metadata.kv_seq_lens.data_ptr()
 

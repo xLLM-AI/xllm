@@ -643,7 +643,7 @@ def test_dspark_graph_capacity_does_not_use_model_maximum() -> None:
 def test_windowed_block_draft_reuses_one_source_capacity_across_contexts(sparse_mode: int) -> None:
     from xllm.python.layers.attention import Attention
 
-    model = nn.ModuleList([Attention(4, 1, 64, 0.125, 2048, 0, fia_sparse_mode=sparse_mode, fia_pre_tokens=2047)])
+    model = nn.ModuleList([Attention(4, 1, 64, 0.125, 2048, 0, fia_sparse_mode=sparse_mode)])
     backend = _FakeBlockDraftAttentionBackend()
     backend.logical_page_size = 128
     runner = BlockDraftAclGraphRunner(model, backend, torch.device("cpu"), max_batch=1, max_model_len=65537)

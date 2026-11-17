@@ -19,7 +19,6 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -237,18 +236,14 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
       params.k_cache = kv_caches[i].get_k_cache();
       params.v_cache = kv_caches[i].get_v_cache();
       params.slot_mapping = device_cache_slots;
-      CHECK_EQ(params.key.dim(), 3);
-      CHECK_EQ(params.value->dim(), 3);
       CHECK_EQ(params.k_cache.dim(), 4);
       CHECK_EQ(params.v_cache->dim(), 4);
-      CHECK_EQ(params.key.size(0), params.slot_mapping.numel());
       CHECK_EQ(params.key.size(1), params.k_cache.size(2))
           << "DFlash2 context key/cache KV-head mismatch; key="
           << params.key.sizes() << ", cache=" << params.k_cache.sizes();
       CHECK_EQ(params.key.size(2), params.k_cache.size(3))
           << "DFlash2 context key/cache head-dim mismatch; key="
           << params.key.sizes() << ", cache=" << params.k_cache.sizes();
-      CHECK_EQ(params.value->sizes(), params.key.sizes());
       CHECK_EQ(params.v_cache->sizes(), params.k_cache.sizes());
       kernel::reshape_paged_cache(params);
       if (input_params.parallel.layer_synchronizer != nullptr &&
@@ -262,13 +257,9 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
 
  protected:
   layer::AttentionMetadata get_attention_metadata(
-      const ModelParamsView& params,
-      const torch::Tensor& h) override {
+      const ModelParamsView& params) override {
     layer::AttentionMetadata metadata =
-        QWen3ModelImpl::get_attention_metadata(params, h);
-    // DFlash2 jointly denoises the whole query block. Keep the 2048x2048 FIA
-    // optimized mask built by the base metadata path and use band mode to
-    // expose the full proposal block within the checkpoint's sliding window.
+        QWen3ModelImpl::get_attention_metadata(params);
     metadata.is_causal = false;
 #if defined(USE_NPU)
     metadata.fia_sparse_mode = 4;
@@ -276,41 +267,6 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
     metadata.fia_next_tokens = block_size_ - 1;
 #endif
     return metadata;
-  }
-
-  torch::Tensor gen_append_attn_mask(int32_t q_len,
-                                     int32_t kv_len,
-                                     int32_t max_kv_len,
-                                     torch::Dtype dtype,
-                                     torch::Device device) override {
-    CHECK_GT(q_len, 0);
-    CHECK_GE(kv_len, q_len);
-    CHECK_GE(max_kv_len, kv_len);
-
-    const torch::TensorOptions index_options =
-        torch::TensorOptions().dtype(torch::kLong).device(device);
-    const torch::Tensor key_positions =
-        torch::arange(max_kv_len, index_options).view({1, max_kv_len});
-    const torch::Tensor query_offsets =
-        torch::arange(q_len, index_options).view({q_len, 1});
-    const int64_t first_query_position = kv_len - q_len;
-    const torch::Tensor first_visible_key =
-        query_offsets + first_query_position - (sliding_window_ - 1);
-    const torch::Tensor last_visible_key =
-        query_offsets + first_query_position + (block_size_ - 1);
-    const torch::Tensor masked = key_positions.lt(first_visible_key) |
-                                 key_positions.gt(last_visible_key) |
-                                 key_positions.ge(kv_len);
-
-    // Match AttentionMask's numeric convention: fp16 uses -inf while other
-    // dtypes use the FIA-compatible finite sentinel.
-    const float mask_value = dtype == torch::kFloat16
-                                 ? -std::numeric_limits<float>::infinity()
-                                 : -9984.0f;
-    const torch::TensorOptions mask_options =
-        torch::TensorOptions().dtype(dtype).device(device);
-    return torch::zeros({q_len, max_kv_len}, mask_options)
-        .masked_fill(masked, mask_value);
   }
 
  private:
@@ -324,7 +280,6 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
 
   torch::Tensor apply_rope(const torch::Tensor& key,
                            const torch::Tensor& positions) const {
-    CHECK(rotary_embedding_ != nullptr);
     return std::get<1>(rotary_embedding_->forward(key, key, positions));
   }
 
@@ -422,7 +377,7 @@ class DFlash2Qwen3ForCausalLMImpl final
 
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& selected_idxes,
-                       torch::Tensor& out_hidden) {
+                       torch::Tensor& out_hidden) override {
     out_hidden = selected_idxes.defined()
                      ? hidden_states.index_select(
                            /*dim=*/0, selected_idxes.to(torch::kLong))

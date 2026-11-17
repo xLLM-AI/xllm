@@ -154,10 +154,8 @@ def test_prefill_allocates_mask_only_for_consumer(masked: bool, monkeypatch: pyt
     cache = backend._kv_caches[0].key
     layer = SimpleNamespace(
         causal=masked,
-        fia_use_attention_mask=False,
         fia_sparse_mode=None,
-        fia_pre_tokens=2147483647,
-        fia_next_tokens=0,
+        sliding_window=0,
     )
     for _ in range(2):
         backend._prefill(q, kv, kv, cache, cache, metadata, 2, layer)
@@ -1045,16 +1043,12 @@ def test_block_attention_reads_accepted_device_lengths(width: int, window: int |
     assert metadata.prepared_attention_state.actual_seq_kv == [137, 143]
     layer = SimpleNamespace(
         causal=width == 1,
-        fia_use_attention_mask=False,
         fia_sparse_mode=None,
-        fia_pre_tokens=2147483647,
-        fia_next_tokens=0,
+        sliding_window=0,
     )
     if window is not None:
-        layer.fia_use_attention_mask = True
         layer.fia_sparse_mode = 4
-        layer.fia_pre_tokens = window - 1
-        layer.fia_next_tokens = width - 1
+        layer.sliding_window = window
     backend.prepare(metadata)
     actual = backend._prefill(query, query, query, cache, values, metadata, 2 * width, layer)
     metadata.kv_seq_lens_host_values = [130, 139]
@@ -1102,11 +1096,8 @@ def test_block_graph_replay_matches_eager_after_kv_length_changes(
     )
     layer = SimpleNamespace(
         causal=bool(block_causal),
-        fia_use_attention_mask=window is not None,
         fia_sparse_mode=0 if block_causal is not None else (4 if window is not None else None),
-        fia_pre_tokens=window - 1 if window is not None else 2147483647,
-        fia_next_tokens=width - 1,
-        sliding_window=window if block_causal is not None else 0,
+        sliding_window=window or 0,
     )
     runner = BlockDraftAclGraphRunner(torch.nn.Identity(), backend, device, 1, capacity)
     entry = runner._allocate_entry(tokens, tokens, metadata, sequence_count=1, page_table_capacity=32)
@@ -1161,10 +1152,8 @@ def test_block_attention_shares_masks_per_forward_and_refreshes_device_lengths(m
         return query.clone(), torch.empty(0)
 
     monkeypatch.setattr(torch.ops.npu, "npu_fused_infer_attention_score", attention)
-    full = SimpleNamespace(causal=False, fia_use_attention_mask=False, fia_sparse_mode=None)
-    window = SimpleNamespace(
-        causal=False, fia_use_attention_mask=True, fia_sparse_mode=4, fia_pre_tokens=2, fia_next_tokens=1
-    )
+    full = SimpleNamespace(causal=False, fia_sparse_mode=None, sliding_window=0)
+    window = SimpleNamespace(causal=False, fia_sparse_mode=4, sliding_window=3)
     metadata.kv_seq_lens.copy_(torch.tensor([5, 3], dtype=torch.int32))
     backend.prepare(metadata)
     backend._prefill(query, query, query, cache, cache, metadata, 4, full)
@@ -1267,7 +1256,6 @@ def test_windowed_draft_uses_explicit_mask_in_eager_and_prepared_paths(
     cache = torch.zeros(4, 128, 2, 64)
     layer = SimpleNamespace(
         causal=causal,
-        fia_use_attention_mask=False,
         fia_sparse_mode=0,
         sliding_window=2,
     )

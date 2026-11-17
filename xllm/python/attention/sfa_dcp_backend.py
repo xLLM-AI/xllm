@@ -122,11 +122,8 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
         metadata: AttentionMetadata,
         *,
         graph_mode: bool = False,
-        owned_metadata: bool = False,
     ) -> None:
-        super().prepare(metadata, graph_mode=graph_mode, owned_metadata=owned_metadata)
-        # DCP derives separate buffers; updating the source arena is insufficient.
-        self._graph_metadata_updated_in_place = False
+        super().prepare(metadata, graph_mode=graph_mode)
         self._sfa_metadata = None
         if self._kv_layout is None or self._builder is None:
             return

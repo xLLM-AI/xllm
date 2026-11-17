@@ -38,9 +38,6 @@ def _attention(policy: str, window: int = 2048) -> Attention:
         layer_id=0,
         causal=policy == "dspark_causal",
         fia_sparse_mode=4 if policy == "dflash2" else 0,
-        fia_pre_tokens=window - 1,
-        fia_next_tokens=7,
-        fia_use_attention_mask=True,
     )
 
 

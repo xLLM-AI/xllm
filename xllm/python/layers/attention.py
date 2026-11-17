@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Attention layer that delegates runtime execution to the current backend.
-
-The layer owns layer-local attention semantics. Wrapper state, plan, workspace
-and KV cache reside in the FlashInferBackend, accessed via ForwardContext.
-"""
+"""Attention layer that delegates runtime execution to the current backend."""
 
 from __future__ import annotations
 
@@ -51,9 +47,6 @@ class Attention(nn.Module):
         layer_id: int,
         causal: bool = True,
         fia_sparse_mode: int | None = None,
-        fia_pre_tokens: int = 2147483647,
-        fia_next_tokens: int = 2147483647,
-        fia_use_attention_mask: bool = False,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -64,12 +57,6 @@ class Attention(nn.Module):
         self.layer_id = layer_id
         self.causal = causal
         self.fia_sparse_mode = fia_sparse_mode
-        self.fia_pre_tokens = fia_pre_tokens
-        self.fia_next_tokens = fia_next_tokens
-        self.fia_use_attention_mask = fia_use_attention_mask
-        # External transfers update framework-owned caches only. Derived
-        # model-local caches must be reconstructed from those tensors.
-        self.cache_transfer_enabled = False
 
     def forward(
         self,

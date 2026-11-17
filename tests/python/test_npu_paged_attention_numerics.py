@@ -1105,9 +1105,6 @@ def test_windowed_draft_attention_matches_global_reference_across_long_contexts(
         0,
         causal=policy == "dspark_causal",
         fia_sparse_mode=4 if policy == "dflash2" else 0,
-        fia_pre_tokens=2047,
-        fia_next_tokens=width - 1,
-        fia_use_attention_mask=True,
     )
     slots = []
 
