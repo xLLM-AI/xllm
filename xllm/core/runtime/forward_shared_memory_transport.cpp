@@ -2333,8 +2333,6 @@ inline void deserialize_forward_input_payload(
   read_vector(context, input_params.embedding.full_block_slot_rows);
   read_vector(context, input_params.embedding.full_block_lease_epochs);
   read_vector(context, input_params.embedding.extra_token_ids);
-  read_tensor(context, input_params.mtp_shifted_token_ids, stream);
-  read_tensor(context, input_params.embedding.mtp_shifted_token_ids, stream);
   read_vector(context, input_params.embedding.mtp_bootstrap_row_idxes);
   read_tensor(context, input_params.embedding.mtp_bootstrap_embeddings, stream);
   if constexpr (std::is_same_v<Input, VlmForwardInput>) {
@@ -2682,8 +2680,6 @@ inline void serialize_forward_input_sections(
   write_vector(context.descriptor,
                input_params.embedding.full_block_lease_epochs);
   write_vector(context.descriptor, input_params.embedding.extra_token_ids);
-  write_tensor(context, input_params.mtp_shifted_token_ids);
-  write_tensor(context, input_params.embedding.mtp_shifted_token_ids);
   write_vector(context.descriptor,
                input_params.embedding.mtp_bootstrap_row_idxes);
   write_tensor(context, input_params.embedding.mtp_bootstrap_embeddings);

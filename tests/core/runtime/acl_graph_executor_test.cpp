@@ -1340,8 +1340,7 @@ TEST(AclGraphPersistentParamTest,
                                          kSpecWidth,
                                          true);
   ASSERT_TRUE(generic.has_value());
-  const int64_t capacity =
-      spec_verify::speculative_verify_block_table_capacity(32, 4);
+  const int64_t capacity = speculative_verify_block_table_capacity(32, 4);
   EXPECT_EQ(generic->graph.expanded_block_tables.size(0), kSpecWidth);
   EXPECT_EQ(generic->graph.expanded_block_tables.size(1), capacity);
   EXPECT_TRUE(generic->graph.expanded_block_tables.is_contiguous());

@@ -362,9 +362,6 @@ class LlmEmbeddingInput final {
   // extra token ids for each sequence, and -1 for last chunk
   std::vector<int32_t> extra_token_ids;
 
-  // Precomputed shifted token ids for MTP prefill, aligned with tokens.
-  torch::Tensor mtp_shifted_token_ids;
-
   // Pending PD handoff bootstrap rows for the first MTP decode step.
   std::vector<int32_t> mtp_bootstrap_row_idxes;
   torch::Tensor mtp_bootstrap_embeddings;
@@ -383,7 +380,6 @@ class LlmEmbeddingInput final {
     out.full_block_lease_epochs = full_block_lease_epochs;
     out.request_ids = request_ids;
     out.extra_token_ids = extra_token_ids;
-    out.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);
     out.mtp_bootstrap_row_idxes = mtp_bootstrap_row_idxes;
     out.mtp_bootstrap_embeddings =
         safe_to(mtp_bootstrap_embeddings, device, true);
@@ -607,9 +603,6 @@ class VlmEmbeddingInput final {
   // extra token ids for each sequence, and -1 for last chunk
   std::vector<int32_t> extra_token_ids;
 
-  // Precomputed shifted token ids for MTP prefill, aligned with tokens.
-  torch::Tensor mtp_shifted_token_ids;
-
   // Pending PD handoff bootstrap rows for the first MTP decode step.
   std::vector<int32_t> mtp_bootstrap_row_idxes;
   torch::Tensor mtp_bootstrap_embeddings;
@@ -628,7 +621,6 @@ class VlmEmbeddingInput final {
     out.full_block_lease_epochs = full_block_lease_epochs;
     out.request_ids = request_ids;
     out.extra_token_ids = extra_token_ids;
-    out.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);
     out.mtp_bootstrap_row_idxes = mtp_bootstrap_row_idxes;
     out.mtp_bootstrap_embeddings =
         safe_to(mtp_bootstrap_embeddings, device, true);

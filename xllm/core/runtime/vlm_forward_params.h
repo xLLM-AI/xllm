@@ -302,8 +302,6 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target,
   params.embedding.embedding_ids = source.embedding.embedding_ids;
   params.embedding.request_ids = source.embedding.request_ids;
   params.embedding.extra_token_ids = source.embedding.extra_token_ids;
-  params.embedding.mtp_shifted_token_ids =
-      source.embedding.mtp_shifted_token_ids;
   params.embedding.mtp_bootstrap_row_idxes =
       source.embedding.mtp_bootstrap_row_idxes;
   params.embedding.mtp_bootstrap_embeddings =
@@ -339,7 +337,6 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target,
   params.graph.spec_verify_static_graph_tasks_prepared =
       source.graph.spec_verify_static_graph_tasks_prepared;
   params.multi_block_tables = source.multi_block_tables;
-  params.mtp_shifted_token_ids = source.mtp_shifted_token_ids;
   params.is_spec_verify = source.is_spec_verify;
   params.prefill_without_cache = source.prefill_without_cache;
   params.num_accepted_tokens = source.num_accepted_tokens;

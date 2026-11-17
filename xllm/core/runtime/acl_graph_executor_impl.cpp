@@ -323,8 +323,7 @@ ModelOutput forward_eager(CausalLM* model,
                           std::vector<KVCache>& kv_cache,
                           const ModelParamsView& params) {
   torch::Tensor materialized_tokens =
-      spec_verify::materialize_graph_speculative_verify_tokens(tokens,
-                                                               params.graph);
+      materialize_graph_speculative_verify_tokens(tokens, params.graph);
   return model->forward(materialized_tokens, positions, kv_cache, params);
 }
 

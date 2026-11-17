@@ -605,9 +605,6 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     state_.extra_token_ids.insert(state_.extra_token_ids.end(),
                                   state.extra_token_ids.begin(),
                                   state.extra_token_ids.end());
-    state_.mtp_shifted_token_ids.insert(state_.mtp_shifted_token_ids.end(),
-                                        state.mtp_shifted_token_ids.begin(),
-                                        state.mtp_shifted_token_ids.end());
     state_.eplb_decode_token_mask.insert(state_.eplb_decode_token_mask.end(),
                                          state.eplb_decode_token_mask.begin(),
                                          state.eplb_decode_token_mask.end());
@@ -1209,15 +1206,6 @@ Input ForwardInputBuilder::build_forward_input() {
   input_params.embedding.full_block_lease_epochs =
       std::move(state_.full_block_lease_epochs);
   input_params.embedding.extra_token_ids = std::move(state_.extra_token_ids);
-  if (!state_.mtp_shifted_token_ids.empty()) {
-    // Write both the upstream "root" path (consumed by non-CP MTP code paths
-    // and by the existing shm serializer) and the CP-specific embedding path
-    // (consumed by mtp_worker_impl). Both fields share the same tensor
-    // storage; assigning the second handle does not copy the values.
-    auto mtp_tensor = make_cpu_tensor(state_.mtp_shifted_token_ids);
-    input_params.embedding.mtp_shifted_token_ids = mtp_tensor;
-    input_params.mtp_shifted_token_ids = mtp_tensor;
-  }
   if (!state_.mtp_bootstrap_embeddings.empty()) {
     CHECK_EQ(state_.mtp_bootstrap_row_idxes.size(),
              state_.mtp_bootstrap_embeddings.size());

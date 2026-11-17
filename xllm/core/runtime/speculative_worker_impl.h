@@ -24,6 +24,8 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/framework/parallel_state/process_group.h"
+#include "core/framework/speculative/draft_proposal.h"
+#include "core/framework/speculative/spec_verify.h"
 #include "framework/sampling/sampling_params.h"
 #include "runtime/options.h"
 #include "runtime/worker_impl.h"

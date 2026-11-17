@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_proposal.h"
+#include "core/framework/speculative/spec_verify.h"
 #if defined(USE_NPU) || defined(USE_MLU)
 #include "core/kv_cache/transfer/mooncake_kv_cache_transfer.h"
 #endif
@@ -46,7 +47,6 @@ limitations under the License.
 #include "core/framework/model/model_type.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/framework/speculative/draft_extend_input.h"
-#include "core/framework/speculative/spec_verify.h"
 #include "core/platform/platform.h"
 #include "core/util/tensor_helper.h"
 #include "runtime/llm_worker_impl.h"
@@ -509,11 +509,11 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
               target_timer.elapsed_seconds());
 
   Timer validation_timer;
-  SampleOutput val_output = spec_verify::run_rejection_sampling(
-      input.sampling_params,
-      draft_proposal,
-      target_output.logits,
-      target_output.sample_output.embeddings);
+  SampleOutput val_output =
+      run_rejection_sampling(input.sampling_params,
+                             draft_proposal,
+                             target_output.logits,
+                             target_output.sample_output.embeddings);
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               validation_timer.elapsed_seconds());
 

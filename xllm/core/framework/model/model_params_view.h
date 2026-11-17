@@ -33,7 +33,6 @@ class EmbeddingInputView final {
         linear_state_read_indices(common.linear_state_read_indices),
         request_ids(common.request_ids),
         extra_token_ids(spec.extra_token_ids),
-        mtp_shifted_token_ids(spec.mtp_shifted_token_ids),
         mtp_bootstrap_row_idxes(spec.mtp_bootstrap_row_idxes),
         mtp_bootstrap_embeddings(spec.mtp_bootstrap_embeddings) {}
   torch::Tensor& input_embedding;
@@ -44,7 +43,6 @@ class EmbeddingInputView final {
   torch::Tensor& linear_state_read_indices;
   std::vector<std::string>& request_ids;
   std::vector<int32_t>& extra_token_ids;
-  torch::Tensor& mtp_shifted_token_ids;
   std::vector<int32_t>& mtp_bootstrap_row_idxes;
   torch::Tensor& mtp_bootstrap_embeddings;
 };
@@ -243,7 +241,6 @@ class ModelParamsView final {
   GraphInputView graph;
   std::vector<int64_t>& linear_state_validity_mask;
   std::vector<torch::Tensor>& multi_block_tables;
-  torch::Tensor& mtp_shifted_token_ids;
   bool& is_spec_verify;
   bool& prefill_without_cache;
   torch::Tensor& num_accepted_tokens;
@@ -266,7 +263,6 @@ class ModelParamsView final {
         graph(owner.graph, spec.graph),
         linear_state_validity_mask(owner.linear_state_validity_mask),
         multi_block_tables(spec.multi_block_tables),
-        mtp_shifted_token_ids(spec.mtp_shifted_token_ids),
         is_spec_verify(spec.is_spec_verify),
         prefill_without_cache(spec.prefill_without_cache),
         num_accepted_tokens(spec.num_accepted_tokens),

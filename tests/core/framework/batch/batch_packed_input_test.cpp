@@ -1199,7 +1199,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
   LlmModelParams owner;
   ModelParamsView params(owner);
   const torch::Tensor values = torch::tensor({1, 2}, torch::kInt32);
-  params.embedding.mtp_shifted_token_ids = values;
   params.embedding.mtp_bootstrap_embeddings = values;
   params.embedding.extra_token_ids = {3};
   params.embedding.mtp_bootstrap_row_idxes = {4};
@@ -1216,7 +1215,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
   params.graph.spec_verify_source_addresses_stable = true;
   params.graph.spec_verify_static_graph_tasks_prepared = true;
   params.multi_block_tables = {values};
-  params.mtp_shifted_token_ids = values;
   params.is_spec_verify = true;
   params.num_accepted_tokens = values;
   params.num_accepted_tokens_host = {6};
@@ -1226,7 +1224,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
   ModelParamsView converted = params.clone().to(target_device).view();
 
   const std::vector<torch::Tensor> transferred_tensors = {
-      converted.embedding.mtp_shifted_token_ids,
       converted.embedding.mtp_bootstrap_embeddings,
       converted.graph.expanded_kv_seq_lens,
       converted.graph.expanded_block_tables,
@@ -1236,7 +1233,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
       converted.graph.expanded_tiling_data,
       converted.graph.input_tokens_override,
       converted.graph.spec_verify_draft_token_sources.at(0),
-      converted.mtp_shifted_token_ids,
       converted.num_accepted_tokens};
   for (const auto& tensor : transferred_tensors) {
     ASSERT_TRUE(tensor.defined());
