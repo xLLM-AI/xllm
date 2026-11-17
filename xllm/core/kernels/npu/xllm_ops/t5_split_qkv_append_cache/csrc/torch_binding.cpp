@@ -307,9 +307,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> execute(
   const auto [b, h, l, d] = shape;
   c10::DeviceGuard device_guard(xs[0].device());
   const auto options = xs[0].options().requires_grad(false);
-  Tensors out{torch::empty({b, h, 1, d}, options),
-              torch::empty({b, h, l + 1, d}, options),
-              torch::empty({b, h, l + 1, d}, options)};
+  Tensors out{at::empty({b, h, 1, d}, options),
+              at::empty({b, h, l + 1, d}, options),
+              at::empty({b, h, l + 1, d}, options)};
   auto stream = c10_npu::getCurrentNPUStream(xs[0].device().index());
   // Official stream() drains pending host submissions, not device work. This
   // preserves ordering with preceding PyTorch operations without another host
