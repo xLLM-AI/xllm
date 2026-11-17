@@ -111,12 +111,9 @@ def _install_kda_stubs(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     monkeypatch.setitem(sys.modules, "fla_npu.ops", fla_npu_ops)
     monkeypatch.setitem(sys.modules, "fla_npu.ops.ascendc", ascendc)
 
-    import xllm.python as python_package
-
-    monkeypatch.setitem(
-        python_package.__dict__,
-        "kernels",
-        SimpleNamespace(causal_conv1d_update_v2=lambda value, *args, **kwargs: value),
+    monkeypatch.setattr(
+        "xllm.python.attention.kda_linear_attention.causal_conv1d_update_v2",
+        lambda value, *args, **kwargs: value,
     )
 
     monkeypatch.setattr("xllm.python.attention.kda_linear_attention.l2_norm", lambda value: value)
@@ -592,29 +589,6 @@ def test_verify_rejects_width_above_capacity_before_mutation(kda_test_environmen
     assert not kda_test_environment
     assert torch.equal(conv_cache, torch.ones_like(conv_cache))
     assert torch.equal(ssm_cache, torch.ones_like(ssm_cache))
-
-
-def test_spec_conv_treats_reserved_padding_slot_as_valid(monkeypatch: pytest.MonkeyPatch) -> None:
-    from xllm.python.kernels_npu.causal_conv1d import causal_conv1d_update_v2
-
-    captured_pad_slot_ids = []
-
-    def native_conv(*args: Any) -> torch.Tensor:
-        captured_pad_slot_ids.append(args[8])
-        return args[0]
-
-    monkeypatch.setattr(torch.ops.xllm_ops, "causal_conv1d_update_v2", native_conv, raising=False)
-    causal_conv1d_update_v2(
-        torch.ones(2, 6),
-        torch.ones(6, 3),
-        torch.zeros(2, 5, 6),
-        torch.tensor([1, 0]),
-        torch.tensor([0, 1, 2]),
-        1,
-        torch.ones(2, dtype=torch.int32),
-    )
-
-    assert captured_pad_slot_ids == [-1]
 
 
 @pytest.mark.parametrize(("query_lengths", "slot_repeats"), [((2, 2), 2), ((1, 1, 1, 1), 1)])

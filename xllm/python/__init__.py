@@ -68,6 +68,7 @@ def initialize_runtime() -> None:
                 "fused_recurrent_gated_delta_rule",
                 "fused_sigmoid_gating_delta_rule_update",
                 "fused_qkvzba_split_reshape_cat",
+                "causal_conv1d_update_v2",
             ),
         )
         for operation, kernel in prepared.items():

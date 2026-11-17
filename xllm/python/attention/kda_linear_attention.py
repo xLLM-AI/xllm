@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from xllm_kernel.ops import l2_norm
+from xllm_kernel.ops.attention.kda import causal_conv1d_update_v2
 
 from xllm.python.attention.backend import resolve_linear_state_io_indices
 from xllm.python.model_executor.forward_context import (
@@ -98,8 +99,6 @@ class KdaLinearAttentionMixin:
         ``KdaForgetGate.gate_from_raw``.
         """
         from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
-
-        from xllm.python import kernels
 
         metadata = self._metadata
         assert metadata is not None, "execute_linear called before prepare()"
@@ -526,8 +525,6 @@ class KdaLinearAttentionMixin:
         recurrent_kda: Callable[..., Any],
         layer_id: int,
     ) -> torch.Tensor:
-        from xllm.python import kernels
-
         device = mixed_qkv.device
         num_seqs = idx.shape[0]
         if num_seqs == 0 or mixed_qkv.ndim != 3 or mixed_qkv.shape[0] != 1 or mixed_qkv.shape[2] % num_seqs:
@@ -597,7 +594,7 @@ class KdaLinearAttentionMixin:
             self._kda_query_start_locs[qsl_key] = qsl_buf
 
         conv_input = mixed_qkv.transpose(1, 2).reshape(-1, conv_dim).contiguous()
-        conv_out = kernels.causal_conv1d_update_v2(
+        conv_out = causal_conv1d_update_v2(
             conv_input,
             conv_weight.t(),
             conv_cache,

@@ -24,7 +24,7 @@ class _Vendor:
         return lambda *args, **kwargs: (args[0], None)
 
 
-def test_gdn_public_catalog_is_sdk_free(tmp_path: Path) -> None:
+def test_attention_public_catalog_is_sdk_free(tmp_path: Path) -> None:
     script = """
 import importlib.abc
 import sys
@@ -38,14 +38,16 @@ class BlockDeviceImports(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockDeviceImports())
 from xllm_kernel.catalog import load_operations
 from xllm_kernel.ops import fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat
-from xllm_kernel.ops.attention.gdn import OPERATIONS
+from xllm_kernel.ops.attention.gdn import OPERATIONS as GDN_OPERATIONS
+from xllm_kernel.ops.attention.kda import OPERATIONS as KDA_OPERATIONS, causal_conv1d_update_v2
 catalog = {operation.contract.operation: operation for operation in load_operations()}
-for operation in OPERATIONS:
+for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     name = operation.contract.operation
     assert catalog[name] is operation
     assert operation.implementations == ('npu.triton.' + name,)
     assert operation.prepared is None
     assert operation.backends[0].requires == ('torch_npu', 'triton')
+assert callable(causal_conv1d_update_v2)
 assert all(callable(fn) for fn in (fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat))
 """
     env = {**os.environ, "PYTHONPATH": str(Path(xllm_kernel.__file__).resolve().parent.parent)}
@@ -116,6 +118,7 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
         "xllm_kernel.ops.normalization.torch",
         "xllm_kernel.ops.normalization.triton",
         "xllm_kernel.ops.attention.gdn.triton",
+        "xllm_kernel.ops.attention.kda.triton",
     )
     for name in modules:
         monkeypatch.delitem(sys.modules, name, raising=False)
