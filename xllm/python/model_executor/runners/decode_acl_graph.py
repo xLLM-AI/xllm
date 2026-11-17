@@ -127,9 +127,9 @@ class _DsaGraphMetadataView:
 class DecodeAclGraphRunner(AclGraphRunner):
     """Owns static inputs and lazily captures decode graphs on a private stream.
 
-    Exact-shape entries share maximum-capacity inputs and borrow graph-pool
-    outputs. MTP outputs are detached from replay buffers. Taskless graphs
-    replay on the caller's stream.
+    Serialized entries share maximum-capacity inputs and borrow graph-pool
+    outputs, with or without padding. MTP outputs are detached from replay
+    buffers. Taskless graphs replay on the caller's stream.
     """
 
     def __init__(
@@ -164,8 +164,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # runner's owned static buffers.
         if enable_graph_mode_decode_no_padding:
             self._capture_error_mode = "thread_local"
-        self._serial_workspace_pool: list[torch.Tensor] | None = [] if enable_graph_mode_decode_no_padding else None
-        self._serial_buffers = AclGraphBufferPool(self.max_batch) if enable_graph_mode_decode_no_padding else None
+        self._serial_workspace_pool: list[torch.Tensor] | None = []
+        self._serial_buffers = AclGraphBufferPool(self.max_batch)
         # Capacity tiers bound static KV storage independently of the
         # attention operator's live-length or Device-mask protocol.
         self._kv_capacity_graphs = kv_capacity_graphs or device_kv_lengths
@@ -1308,8 +1308,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
             )
         return query_lens + (query_width,) * ((padded_num_tokens - num_tokens) // query_width)
 
-    def _retain_graph_output(self, output: ModelExecutionOutput) -> ModelExecutionOutput:
-        if self._serial_buffers is None:
+    def _retain_graph_output(self, entry: AclGraphEntry, output: ModelExecutionOutput) -> ModelExecutionOutput:
+        if entry.execution_state.serial_buffers is None:
             return output
 
         # All output-producing operators allocate normally inside capture.

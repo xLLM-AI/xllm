@@ -145,12 +145,10 @@ def _assert_fia_capacity_graphs(rows: int, graph_owners: list[object], *, padded
     assert set(by_capacity) == {4, 32, 65}
     assert len(entries) == 3
     addresses = {capacity: entry.static_metadata.block_table.data_ptr() for capacity, entry in by_capacity.items()}
-    # Serialized exact-shape entries borrow one maximum-capacity table;
-    # padded entries keep their own storage for each capacity tier.
-    assert len(set(addresses.values())) == (3 if padded else 1)
+    assert len(set(addresses.values())) == 1
     # Only a runner that shares one scratch allocation across its entries can
     # afford the bounded FIA workspace.
-    expected_state = set() if padded else {rows}
+    expected_state = {graph_rows}
     for capacity, entry in by_capacity.items():
         assert set(entry.execution_state.paged_attention) == expected_state
         assert entry.static_metadata.block_table.shape == (graph_rows, capacity)

@@ -44,8 +44,9 @@ _INDEX_GUARD_SIZE = 37
 _INDEX_GUARD_VALUE = -123456789
 
 
+@pytest.mark.parametrize("no_padding", [False, True], ids=["padded", "exact-shape"])
 @torch.inference_mode()
-def test_serial_fia_buffers_match_private_graphs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_serial_fia_buffers_match_private_graphs(no_padding: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     """Alternate shapes and caller streams without retaining captured storage."""
     from xllm.python.attention.backend import LayerCache
     from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
@@ -87,7 +88,7 @@ def test_serial_fia_buffers_match_private_graphs(monkeypatch: pytest.MonkeyPatch
         backend = NpuPagedAttentionBackend(heads, 1, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
         backend.bind_kv_caches(caches)
         runner = DecodeAclGraphRunner(
-            _FiaModel(backend), backend, device, 512, 262144, enable_graph_mode_decode_no_padding=True
+            _FiaModel(backend), backend, device, 512, 262144, enable_graph_mode_decode_no_padding=no_padding
         )
         if not shared:
             runner._serial_workspace_pool = None

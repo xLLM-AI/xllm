@@ -1495,7 +1495,7 @@ def test_untyped_verify_reuses_row_aligned_paging_metadata() -> None:
 
 @pytest.mark.parametrize("dp_size", [1, 2])
 def test_fill_entry_refreshes_mega_moe_mask_in_place(dp_size: int) -> None:
-    runner = _runner(dp_size=dp_size, enable_mega_moe_token_mask=True)
+    runner = _runner(max_batch=8 * dp_size, dp_size=dp_size, enable_mega_moe_token_mask=True)
     input_ids = torch.arange(4, dtype=torch.int32)
     positions = torch.arange(4, dtype=torch.int32)
     metadata = _metadata(torch.arange(4, dtype=torch.int32))
