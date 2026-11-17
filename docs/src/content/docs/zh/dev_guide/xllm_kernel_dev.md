@@ -23,7 +23,7 @@ alias、支持设备与输入域；实现既可以复用厂商算子，也可以
 | `python/xllm_kernel/ops/<operation>/` | 算子契约、公共 API、实现与注册 |
 | `python/xllm_kernel/registry.py` | `OpContract`、`KernelSpec`、`PreparedKernel` 与注册表 |
 | `python/xllm_kernel/{catalog,runtime,selection}.py` | 发现算子、加载依赖、选择实现并发布绑定 |
-| `python/xllm_kernel/custom_ops.py` | 本包 Torch schema、设备实现与 fake 注册 |
+| `python/xllm_kernel/custom_ops.py` | 本包 Torch schema 与真实设备实现注册 |
 | `csrc/<solution>/` | 原生扩展源文件与设备 launcher bridge 的目录约定 |
 | `pyproject.toml`、`setup.py`、`MANIFEST.in` | 包元数据、扩展构建与分发产物 |
 | `python/xllm_kernel/numerics/<operation>.py` | 算子专属参数、输入、reference、容差与 suite |
@@ -139,16 +139,16 @@ from xllm_kernel.custom_ops import register_custom_op
 # Python 实现：显式声明 mutation 和 dispatch key。
 register_custom_op(
     "my_op", my_kernel, mutates_args=(),
-    dispatch_key="PrivateUse1", fake_impl=my_fake,
+    dispatch_key="PrivateUse1",
 )
 
-# 已有 C++ schema：先加载对应扩展，只补充 fake。
-register_custom_op("my_native_op", fake_impl=my_native_fake)
+# 已有 C++ schema：先加载对应扩展，再复用其真实实现。
+native_op = register_custom_op("my_native_op")
 ```
 
 - 原生扩展放在 `csrc/<solution>/`，同步配置 `setup.py`、源码 manifest 和 wheel 产物。
 - 扩展加载与注册在准备阶段完成并复用。
-- fake 用于推导 shape、dtype、device 等元信息，不能替代数值验证。
+- 使用真实实现验证输出、mutation/alias、stream 和 graph；该注册接口不提供 FakeTensor 实现。
 
 ### 3.4 公共 API 与模型接入
 
@@ -161,7 +161,7 @@ register_custom_op("my_native_op", fake_impl=my_native_fake)
    OPERATIONS = (OPERATION,)
    ```
 
-   包含多个算子的分组应在元组中列出所有声明，例如 `ops/normalization/__init__.py` 中的三个归一化算子。
+   包含多个算子的分组应在元组中列出所有声明，例如 `ops/normalization/__init__.py` 中的多个归一化算子。
 2. 将分组模块加入 `catalog._BUILTINS`，并从 `ops/__init__.py` 导出公共 API。
 3. 公共 API 通过对应的 `OPERATION.get_prepared()` 获取固定绑定；模型初始化时将算子名称而非分组名称加入 `operations`。
 4. 接入模型或 layer 调用点。自定义 kernel 需要数值或性能验证时，再添加离线 suite；原生 Torch 适配器无需重复添加数值对比 suite。

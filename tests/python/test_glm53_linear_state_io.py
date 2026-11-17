@@ -116,8 +116,10 @@ def _install_kda_stubs(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     monkeypatch.setitem(
         python_package.__dict__,
         "kernels",
-        SimpleNamespace(l2_norm=lambda value: value, causal_conv1d_update_v2=lambda value, *args, **kwargs: value),
+        SimpleNamespace(causal_conv1d_update_v2=lambda value, *args, **kwargs: value),
     )
+
+    monkeypatch.setattr("xllm.python.attention.kda_linear_attention.l2_norm", lambda value: value)
 
     return kernel_calls
 

@@ -120,14 +120,6 @@ def _split_qkv_rmsnorm_mrope_fake(
     )
 
 
-def _l2_norm_fake(
-    input: torch.Tensor,
-    eps: float,
-) -> torch.Tensor:
-    del eps
-    return torch.empty_like(input)
-
-
 def _atb_matmul_ein_sum_fake(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     if input.ndim != 3 or weight.ndim != 3:
         raise ValueError("ATB EIN_SUM expects [T,H,D] input and [H,D,O] weight")
@@ -1327,7 +1319,6 @@ register_fake("xllm_ops::npu_reduce_scatter", _npu_reduce_scatter_fake)
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::rms_norm_gated", _rms_norm_gated_fake)
 register_fake("xllm_ops::fused_add_gemma_rms_norm", _fused_add_gemma_rms_norm_fake)
-register_fake("xllm_ops::l2_norm", _l2_norm_fake)
 register_fake("xllm_ops::atb_matmul_ein_sum", _atb_matmul_ein_sum_fake)
 register_fake("xllm_ops::atb_matmul_ein_sum_out", _atb_matmul_ein_sum_out_fake)
 register_fake("xllm_ops::moe_gating_top_k_softmax", _moe_gating_top_k_softmax_fake)

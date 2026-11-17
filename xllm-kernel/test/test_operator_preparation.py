@@ -20,7 +20,7 @@ class _Vendor:
         return lambda *args, **kwargs: (args[0], None)
 
 
-def test_all_backend_modules_register_unique_variants_and_execute_public_binding(
+def test_torch_backend_modules_register_unique_variants_and_execute_public_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: PlatformEnum.NPU))
@@ -28,7 +28,7 @@ def test_all_backend_modules_register_unique_variants_and_execute_public_binding
     monkeypatch.setattr(KernelRegistry, "_instance", registry)
     monkeypatch.setitem(sys.modules, "torch_npu", _Vendor())
     monkeypatch.setattr(torch, "npu", SimpleNamespace(get_device_name=lambda: "Ascend910B2"), raising=False)
-    operations = load_operations()
+    operations = tuple(operation for operation in load_operations() if operation.contract.operation != "l2_norm")
     for operation in operations:
         for backend in operation.backends:
             monkeypatch.delitem(sys.modules, backend.module, raising=False)
@@ -75,7 +75,11 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
     monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: platform))
     monkeypatch.delitem(sys.modules, "torch_npu", raising=False)
     monkeypatch.setattr(sys, "meta_path", [_BlockNpuImports(), *sys.meta_path])
-    modules = ("xllm_kernel.ops.activation.torch", "xllm_kernel.ops.normalization.torch")
+    modules = (
+        "xllm_kernel.ops.activation.torch",
+        "xllm_kernel.ops.normalization.torch",
+        "xllm_kernel.ops.normalization.triton",
+    )
     for name in modules:
         monkeypatch.delitem(sys.modules, name, raising=False)
     try:

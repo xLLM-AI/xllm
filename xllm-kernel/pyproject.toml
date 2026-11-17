@@ -6,12 +6,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "xllm-kernel"
 version = "0.1.0"
-description = "Python kernel contracts and native NPU adapters for xLLM"
+description = "Python kernel contracts and NPU implementations for xLLM"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 
-# Torch and torch_npu are provided by the matching NPU environment.
+# Torch, torch_npu and Triton Ascend come from the matching NPU environment.
 # Do not install a generic Torch wheel over a vendor-specific deployment.
 [tool.setuptools.packages.find]
 where = ["python"]
