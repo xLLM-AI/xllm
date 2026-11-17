@@ -303,6 +303,24 @@ def test_mapping_mutation_above_float_mantissa_is_exact() -> None:
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize(("blocks", "row_gather"), [(8192, True), (8193, False)])
+def test_row_gather_cutoff(blocks: int, row_gather: bool) -> None:
+    page = (1 << 24) + 1
+    m = torch.zeros(blocks, device=_DEVICE, dtype=torch.int32)
+    m[0] = page
+    x = torch.tensor([[0]], device=_DEVICE, dtype=torch.int32)
+    cu = torch.tensor([0, 1], device=_DEVICE, dtype=torch.int32)
+    plan = prepare([x, m, cu], {})
+    assert plan.row_gather is row_gather
+    actual = plan.run()
+    torch.testing.assert_close(
+        actual,
+        torch.tensor([page], device=_DEVICE, dtype=torch.int32),
+        rtol=0,
+        atol=0,
+    )
+
+
 def test_wide_mapping_uses_exact_int32_path() -> None:
     blocks = (1 << 20) + 1
     m = torch.zeros(blocks, device=_DEVICE, dtype=torch.int32)

@@ -13,7 +13,7 @@
 | `host/packed_host.cpp` | 主机侧 C++ 规划：cu 校验、页号范围、P、层/页形状、元素上限 |
 | `host/build_host.py` | 用 torch 的 Ninja 引导器编译主机扩展，带缓存 |
 | `build.py` | 显式构建入口 |
-| `tests/test_packed_page_indices_npu.py` | 29 项真机测试 |
+| `tests/test_packed_page_indices_npu.py` | 31 项真机测试 |
 | `tools/make_reports.py` | 从官方验收 JSON 生成 xlsx 报告与 `generalization.json` |
 | `evidence/` | 官方功能门禁与配对计时的原始 JSON/日志 |
 | `task_submission/` | 任务书要求的七份自验证材料与打包结果 |
@@ -58,7 +58,7 @@ out[l, cu[r] + j] = M[l, X[r, j]] otherwise
 ## 验证
 
 ```bash
-# 29 项真机测试
+# 31 项真机测试
 PYTHONPATH=. python3 -m pytest tests/test_packed_page_indices_npu.py -q
 
 # 官方功能与工程门禁（输出文件必须不存在）

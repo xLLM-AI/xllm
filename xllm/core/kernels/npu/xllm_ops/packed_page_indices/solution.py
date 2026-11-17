@@ -40,6 +40,7 @@ class _Prepared:
         self.attributes = plan.attributes
         self.shape = plan.shape
         self.n = plan.n
+        self.row_gather = plan.row_gather
         self.info = info
 
     def run(self) -> torch.Tensor:
