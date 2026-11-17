@@ -24,8 +24,10 @@ kernel. ``PackedPageIndicesPlan.run`` reads the current contents of the inputs
 and the current NPU stream, then returns a freshly allocated output. Inputs are
 never modified and an output never aliases an input.
 
-A Triton tensor holds at most ``2**20`` elements, so the mapping row is kept in
-one tensor only when ``B <= 2**20``. Inside that path the row is split into
+The register path keeps two float32 copies of the mapping row, so it is used
+only when ``B <= 8192``. On Ascend910_9362 the unified buffer holds 1572864
+bits: ``B=16384`` compiles at about two thirds of that budget and ``B=32768``
+overflows it, so 8192 keeps a 2x margin. Inside that path the row is split into
 16-bit halves: both halves stay below ``2**16`` and are therefore exact in
 float32, and the int32 page number is reassembled with integer arithmetic.
 Larger mappings take one exact int32 load per valid element. Neither path ever
