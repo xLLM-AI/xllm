@@ -2028,12 +2028,14 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         state = context.execution_state.paged_attention.get(state_key)
         if state is None:
             state = PagedAttentionGraphState(
+                # Acquire serial scratch during eager warmup so each captured
+                # shape does not retain its own implicit FIA workspace.
                 workspace=(
                     get_execution_workspace(
                         ("BOUNDED_FIA_WORKSPACE", workspace_rows, prepared.kv_capacity),
                         _allocate_workspace,
                     )
-                    if prepared.workspace_query_capacity
+                    if prepared.workspace_query_capacity or context.execution_state.serial_workspace_pool is not None
                     else None
                 ),
                 output=get_execution_buffer(("BOUNDED_FIA_OUTPUT", query.shape[0]), lambda: torch.empty_like(query)),

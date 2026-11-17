@@ -149,8 +149,12 @@ def _assert_fia_capacity_graphs(rows: int, graph_owners: list[object], *, padded
     # Only a runner that shares one scratch allocation across its entries can
     # afford the bounded FIA workspace.
     expected_state = {graph_rows}
+    assert runner._serial_workspace_pool is not None
     for capacity, entry in by_capacity.items():
         assert set(entry.execution_state.paged_attention) == expected_state
+        workspace = entry.execution_state.paged_attention[graph_rows].workspace
+        assert workspace is not None
+        assert any(workspace.data_ptr() == buffer.data_ptr() for buffer in runner._serial_workspace_pool)
         assert entry.static_metadata.block_table.shape == (graph_rows, capacity)
         assert entry.static_metadata.block_table.is_contiguous()
         assert entry.static_metadata.block_table.data_ptr() != table.data_ptr()
