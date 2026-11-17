@@ -95,13 +95,13 @@ class ShmChannelTest : public ::testing::Test {
     channel_ = std::make_unique<ShmChannel>(
         /*dp_group=*/0, /*rank=*/0, /*is_driver=*/false, options_);
     ASSERT_TRUE(channel_->init_brpc(address_));
-    const std::string name = ForwardSharedMemoryTransport::create_unique_name(
+    const std::string name = SharedMemoryTransport::create_unique_name(
         "xllm_" + net::extract_port(address_),
         /*dp_group=*/0,
         ForwardType::RAW_OUTPUT,
         /*rank=*/0);
     bool is_creator = true;
-    writer_ = std::make_unique<ForwardSharedMemoryTransport>(
+    writer_ = std::make_unique<SharedMemoryTransport>(
         name, kOutputBytes, is_creator, ForwardType::RAW_OUTPUT);
     ASSERT_FALSE(is_creator);
   }
@@ -127,16 +127,15 @@ class ShmChannelTest : public ::testing::Test {
     ASSERT_TRUE(input.to_packed_proto(&packed));
     const size_t segment_size =
         sizeof(ControlMetadata) + sizeof(uint64_t) + packed.payload().size();
-    EXPECT_TRUE(
-        ForwardSharedMemoryTransport::can_write_input(input, segment_size));
+    EXPECT_TRUE(SharedMemoryTransport::can_write_input(input, segment_size));
     EXPECT_FALSE(
-        ForwardSharedMemoryTransport::can_write_input(input, segment_size - 1));
-    EXPECT_FALSE(ForwardSharedMemoryTransport::can_write_input(input, 0));
+        SharedMemoryTransport::can_write_input(input, segment_size - 1));
+    EXPECT_FALSE(SharedMemoryTransport::can_write_input(input, 0));
     bool is_creator = false;
-    ForwardSharedMemoryTransport writer(writer_->name() + "_input_capacity",
-                                        segment_size,
-                                        is_creator,
-                                        ForwardType::RAW_INPUT);
+    SharedMemoryTransport writer(writer_->name() + "_input_capacity",
+                                 segment_size,
+                                 is_creator,
+                                 ForwardType::RAW_INPUT);
     ASSERT_TRUE(is_creator);
     EXPECT_TRUE(writer.input_write(input));
   }
@@ -146,9 +145,8 @@ class ShmChannelTest : public ::testing::Test {
                                    const Input& small,
                                    Execute execute) {
     ASSERT_FALSE(
-        ForwardSharedMemoryTransport::can_write_input(oversized, kInputBytes));
-    ASSERT_TRUE(
-        ForwardSharedMemoryTransport::can_write_input(small, kInputBytes));
+        SharedMemoryTransport::can_write_input(oversized, kInputBytes));
+    ASSERT_TRUE(SharedMemoryTransport::can_write_input(small, kInputBytes));
     use_driver_channel();
     ShmChannel follower(
         /*dp_group=*/0, /*rank=*/1, /*is_driver=*/false, options_);
@@ -174,13 +172,13 @@ class ShmChannelTest : public ::testing::Test {
       }
     }
     EXPECT_EQ(service_.execution_count(), 4);
-    const std::string name = ForwardSharedMemoryTransport::create_unique_name(
+    const std::string name = SharedMemoryTransport::create_unique_name(
         "xllm_" + net::extract_port(address_),
         /*dp_group=*/0,
         ForwardType::RAW_INPUT,
         /*rank=*/0);
     bool is_creator = true;
-    ForwardSharedMemoryTransport input_reader(
+    SharedMemoryTransport input_reader(
         name, kInputBytes, is_creator, ForwardType::RAW_INPUT);
     ASSERT_FALSE(is_creator);
     EXPECT_EQ(static_cast<const ControlMetadata*>(input_reader.base_address())
@@ -196,7 +194,7 @@ class ShmChannelTest : public ::testing::Test {
   ShmFallbackService service_;
   brpc::Server server_;
   std::unique_ptr<ShmChannel> channel_;
-  std::unique_ptr<ForwardSharedMemoryTransport> writer_;
+  std::unique_ptr<SharedMemoryTransport> writer_;
 };
 
 TEST_F(ShmChannelTest, ReadsLlmOutputWithoutRpcExecution) {
@@ -254,13 +252,13 @@ TEST_F(ShmChannelTest, InputWriteFailureFallsBackBeforePublishingRequest) {
   ASSERT_EQ(output->outputs.size(), 1);
   EXPECT_EQ(output->outputs[0].tokens[0].id, 99);
   EXPECT_EQ(service_.execution_count(), 1);
-  const std::string name = ForwardSharedMemoryTransport::create_unique_name(
+  const std::string name = SharedMemoryTransport::create_unique_name(
       "xllm_" + net::extract_port(address_),
       /*dp_group=*/0,
       ForwardType::RAW_INPUT,
       /*rank=*/0);
   bool is_creator = true;
-  ForwardSharedMemoryTransport input_reader(
+  SharedMemoryTransport input_reader(
       name, kSmallInputBytes, is_creator, ForwardType::RAW_INPUT);
   ASSERT_FALSE(is_creator);
   EXPECT_EQ(

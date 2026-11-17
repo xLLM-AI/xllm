@@ -25,7 +25,7 @@ limitations under the License.
 #include <thread>
 
 #include "common/macros.h"
-#include "core/transport/forward_shared_memory_transport.h"
+#include "core/transport/shared_memory_transport.h"
 #include "distributed_runtime/worker_service.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_params_view.h"
@@ -77,8 +77,8 @@ class WorkerServer {
                            WorkerType& worker_type);
 
   void create_shared_memory_polling(
-      std::unique_ptr<ForwardSharedMemoryTransport> input_shm_manager,
-      std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
+      std::unique_ptr<SharedMemoryTransport> input_shm_manager,
+      std::unique_ptr<SharedMemoryTransport> output_shm_manager);
 
   void stop_spawn_worker();
 
@@ -86,11 +86,10 @@ class WorkerServer {
                         proto::AddressInfo& addr_info,
                         proto::CommUniqueIdList& uids);
 
-  void prepare_shm(
-      const ParallelArgs& parallel_args,
-      const runtime::Options& options,
-      std::unique_ptr<ForwardSharedMemoryTransport>& input_shm_manager,
-      std::unique_ptr<ForwardSharedMemoryTransport>& output_shm_manager);
+  void prepare_shm(const ParallelArgs& parallel_args,
+                   const runtime::Options& options,
+                   std::unique_ptr<SharedMemoryTransport>& input_shm_manager,
+                   std::unique_ptr<SharedMemoryTransport>& output_shm_manager);
 
  private:
   std::unique_ptr<std::thread> worker_thread_;

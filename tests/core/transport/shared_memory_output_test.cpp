@@ -28,16 +28,16 @@ limitations under the License.
 
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
-#include "core/transport/forward_shared_memory_transport.h"
+#include "core/transport/shared_memory_transport.h"
 
 namespace xllm {
 namespace {
 
 constexpr std::array kTokenOutputMethods = {
-    std::pair{&ForwardSharedMemoryTransport::llm_output_write,
-              &ForwardSharedMemoryTransport::llm_output_read},
-    std::pair{&ForwardSharedMemoryTransport::vlm_output_write,
-              &ForwardSharedMemoryTransport::vlm_output_read}};
+    std::pair{&SharedMemoryTransport::llm_output_write,
+              &SharedMemoryTransport::llm_output_read},
+    std::pair{&SharedMemoryTransport::vlm_output_write,
+              &SharedMemoryTransport::vlm_output_read}};
 
 template <typename Value>
 void append_wire_value(std::string& frame, const Value& value) {
@@ -59,7 +59,7 @@ std::string make_metadata_frame() {
   return frame;
 }
 
-class ForwardSharedMemoryOutputTest : public ::testing::Test {
+class SharedMemoryOutputTest : public ::testing::Test {
  protected:
   void SetUp() override {
     auto& execution_config = ExecutionConfig::get_instance();
@@ -70,13 +70,13 @@ class ForwardSharedMemoryOutputTest : public ::testing::Test {
     const std::string prefix =
         "forward_output_" + std::to_string(getpid()) + "_" +
         ::testing::UnitTest::GetInstance()->current_test_info()->name();
-    const std::string name = ForwardSharedMemoryTransport::create_unique_name(
+    const std::string name = SharedMemoryTransport::create_unique_name(
         prefix, /*dp_group=*/0, ForwardType::RAW_OUTPUT, /*rank=*/0);
     bool is_creator = false;
-    writer_ = std::make_unique<ForwardSharedMemoryTransport>(
+    writer_ = std::make_unique<SharedMemoryTransport>(
         name, kSegmentBytes, is_creator, ForwardType::RAW_OUTPUT);
     ASSERT_TRUE(is_creator);
-    reader_ = std::make_unique<ForwardSharedMemoryTransport>(
+    reader_ = std::make_unique<SharedMemoryTransport>(
         name, kSegmentBytes, is_creator, ForwardType::RAW_OUTPUT);
     ASSERT_FALSE(is_creator);
   }
@@ -112,12 +112,11 @@ class ForwardSharedMemoryOutputTest : public ::testing::Test {
   static constexpr size_t kSegmentBytes = 4096;
   bool previous_contiguous_ = false;
   bool previous_eplb_ = false;
-  std::unique_ptr<ForwardSharedMemoryTransport> writer_;
-  std::unique_ptr<ForwardSharedMemoryTransport> reader_;
+  std::unique_ptr<SharedMemoryTransport> writer_;
+  std::unique_ptr<SharedMemoryTransport> reader_;
 };
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       LlmPreservesSpeculativeTokensAndJsonErrors) {
+TEST_F(SharedMemoryOutputTest, LlmPreservesSpeculativeTokensAndJsonErrors) {
   ForwardOutput source;
   source.sample_output.next_tokens =
       torch::tensor({{10, 11, -1}, {20, 21, 22}}, torch::kInt64);
@@ -144,8 +143,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   EXPECT_EQ(output.json_object_errors[0].message, "invalid prior token");
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       VlmPreservesMultimodalOutputAndTopTokens) {
+TEST_F(SharedMemoryOutputTest, VlmPreservesMultimodalOutputAndTopTokens) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
   source.sample_output.logprobs = torch::tensor({-0.5f});
@@ -168,7 +166,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
                            source.sample_output.mm_embeddings[0][0]));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
+TEST_F(SharedMemoryOutputTest,
        TokenDomainsPreserveCombinedOutputAfterSourceMutation) {
   EPLBConfig::get_instance().enable_eplb(true);
   for (const auto& [write, read] : kTokenOutputMethods) {
@@ -230,7 +228,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   }
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
+TEST_F(SharedMemoryOutputTest,
        OversizedTokenFieldsPreserveEveryPublishedPayloadByte) {
   EPLBConfig::get_instance().enable_eplb(true);
   ForwardOutput source;
@@ -274,7 +272,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   EXPECT_EQ(output.outputs[0].tokens[0].id, 7);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
+TEST_F(SharedMemoryOutputTest,
        TokenDomainsReadOwnedMetadataWithCompatibleRowFraming) {
   RawForwardOutput output;
   const torch::Tensor expected_tags = torch::tensor({0, 1}, torch::kInt64);
@@ -316,7 +314,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
                    expected_tags));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
+TEST_F(SharedMemoryOutputTest,
        MalformedMetadataFieldsFailWithoutMutatingOutput) {
   const std::array<size_t, 3> malformed_offsets = {
       0, sizeof(uint64_t), make_metadata_frame().size() - 3 * sizeof(uint64_t)};
@@ -339,8 +337,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   }
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       MetadataFramingIsIncludedInTokenCapacityChecks) {
+TEST_F(SharedMemoryOutputTest, MetadataFramingIsIncludedInTokenCapacityChecks) {
   // This embedding fits only when the required metadata count is omitted.
   constexpr size_t kFixedFrameBytes = 8 * sizeof(uint64_t) +
                                       4 * sizeof(int64_t) + 2 * sizeof(bool) +
@@ -366,8 +363,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   }
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       TokenDomainsRejectAudioWithoutPublishing) {
+TEST_F(SharedMemoryOutputTest, TokenDomainsRejectAudioWithoutPublishing) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
   ASSERT_TRUE(writer_->llm_output_write(source, {}));
@@ -382,7 +378,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   }
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
+TEST_F(SharedMemoryOutputTest,
        VlmPreservesSpeculativeTokensWithMultimodalOutput) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({{7, 8, -1}}, torch::kInt64);
@@ -399,7 +395,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
                            source.sample_output.mm_embeddings[0][0]));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
+TEST_F(SharedMemoryOutputTest,
        VlmEmptySpeculativeColumnsPreserveMultimodalRows) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::empty({1, 0}, torch::kInt64);
@@ -414,8 +410,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
                            source.sample_output.mm_embeddings[0][0]));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       VlmEmptyTokenVectorPreservesMultimodalRows) {
+TEST_F(SharedMemoryOutputTest, VlmEmptyTokenVectorPreservesMultimodalRows) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::empty({0}, torch::kInt32);
   source.sample_output.mm_embeddings = {{torch::tensor({1.0f, 2.0f})}};
@@ -430,7 +425,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
                            source.sample_output.mm_embeddings[0][0]));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, EmptyTokenOutputClearsPreviousPayload) {
+TEST_F(SharedMemoryOutputTest, EmptyTokenOutputClearsPreviousPayload) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
   ASSERT_TRUE(writer_->llm_output_write(source, {}));
@@ -445,7 +440,7 @@ TEST_F(ForwardSharedMemoryOutputTest, EmptyTokenOutputClearsPreviousPayload) {
   EXPECT_EQ(output.prepared_token, -1);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, DiTPreservesTextOnlyOutput) {
+TEST_F(SharedMemoryOutputTest, DiTPreservesTextOnlyOutput) {
   DiTForwardOutput source;
   source.text_output = {"diffusion text", ""};
   ASSERT_TRUE(writer_->dit_output_write(source));
@@ -457,8 +452,7 @@ TEST_F(ForwardSharedMemoryOutputTest, DiTPreservesTextOnlyOutput) {
   EXPECT_EQ(output.dit_forward_output.text_output, source.text_output);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       DiTPreservesAudioOnlyOutputAfterSourceMutation) {
+TEST_F(SharedMemoryOutputTest, DiTPreservesAudioOnlyOutputAfterSourceMutation) {
   DiTForwardOutput source;
   source.audio_tensors = {torch::tensor({0.25f, -0.5f})};
   ASSERT_TRUE(writer_->dit_output_write(source));
@@ -472,8 +466,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
                            torch::tensor({0.25f, -0.5f})));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       LlmAllowsMissingExpertDataWhenEplbIsEnabled) {
+TEST_F(SharedMemoryOutputTest, LlmAllowsMissingExpertDataWhenEplbIsEnabled) {
   EPLBConfig::get_instance().enable_eplb(true);
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
@@ -486,7 +479,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   EXPECT_EQ(output.prepared_token, 81);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, VlmPreservesEplbExpertLoads) {
+TEST_F(SharedMemoryOutputTest, VlmPreservesEplbExpertLoads) {
   EPLBConfig::get_instance().enable_eplb(true);
   ForwardOutput source;
   source.expert_load_data = torch::tensor({{1, 2}, {3, 4}}, torch::kInt64);
@@ -499,7 +492,7 @@ TEST_F(ForwardSharedMemoryOutputTest, VlmPreservesEplbExpertLoads) {
   EXPECT_EQ(output.prepared_token, 19);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, TokenReadsClearPreviousDiTData) {
+TEST_F(SharedMemoryOutputTest, TokenReadsClearPreviousDiTData) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
   ASSERT_TRUE(writer_->llm_output_write(source, {}));
@@ -515,7 +508,7 @@ TEST_F(ForwardSharedMemoryOutputTest, TokenReadsClearPreviousDiTData) {
   EXPECT_TRUE(output.json_object_errors.empty());
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, EmptyDiTReadClearsPreviousOutput) {
+TEST_F(SharedMemoryOutputTest, EmptyDiTReadClearsPreviousOutput) {
   DiTForwardOutput source;
   source.text_output = {"first output"};
   source.tensors = {torch::ones({2})};
@@ -531,8 +524,7 @@ TEST_F(ForwardSharedMemoryOutputTest, EmptyDiTReadClearsPreviousOutput) {
   EXPECT_TRUE(output.dit_forward_output.audio_tensors.empty());
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       DiTTensorsSurviveOverwriteAndSegmentRelease) {
+TEST_F(SharedMemoryOutputTest, DiTTensorsSurviveOverwriteAndSegmentRelease) {
   const torch::Tensor expected = torch::tensor({1.0f, 2.0f, 3.0f});
   const torch::Tensor expected_audio = torch::tensor({0.25f, -0.5f});
   DiTForwardOutput source;
@@ -557,7 +549,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
             (std::vector<std::string>{"first"}));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, VlmTensorsSurviveSubsequentOutputWrites) {
+TEST_F(SharedMemoryOutputTest, VlmTensorsSurviveSubsequentOutputWrites) {
   const torch::Tensor expected = torch::tensor({1.0f, 2.0f});
   ForwardOutput source;
   source.sample_output.mm_embeddings = {{expected}};
@@ -571,8 +563,7 @@ TEST_F(ForwardSharedMemoryOutputTest, VlmTensorsSurviveSubsequentOutputWrites) {
   EXPECT_TRUE(torch::equal(output.outputs[0].mm_embeddings[0], expected));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       OverflowDiTWritePreservesPublishedOutput) {
+TEST_F(SharedMemoryOutputTest, OverflowDiTWritePreservesPublishedOutput) {
   DiTForwardOutput valid;
   valid.text_output = {"first"};
   ASSERT_TRUE(writer_->dit_output_write(valid));
@@ -594,7 +585,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   EXPECT_EQ(output.dit_forward_output.text_output, valid.text_output);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, InvalidDiTTensorDoesNotPublishOutput) {
+TEST_F(SharedMemoryOutputTest, InvalidDiTTensorDoesNotPublishOutput) {
   DiTForwardOutput source;
   source.tensors = {torch::Tensor()};
   EXPECT_FALSE(writer_->dit_output_write(source));
@@ -603,8 +594,7 @@ TEST_F(ForwardSharedMemoryOutputTest, InvalidDiTTensorDoesNotPublishOutput) {
   EXPECT_EQ(published_version(), 0);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       InvalidDiTAudioTensorDoesNotPublishOutput) {
+TEST_F(SharedMemoryOutputTest, InvalidDiTAudioTensorDoesNotPublishOutput) {
   DiTForwardOutput source;
   source.audio_tensors = {torch::Tensor()};
   EXPECT_FALSE(writer_->dit_output_write(source));
@@ -615,8 +605,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   EXPECT_EQ(published_version(), 0);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       MalformedAudioTensorSizeFailsWithoutMutation) {
+TEST_F(SharedMemoryOutputTest, MalformedAudioTensorSizeFailsWithoutMutation) {
   DiTForwardOutput source;
   source.audio_tensors = {torch::ones({2})};
   ASSERT_TRUE(writer_->dit_output_write(source));
@@ -637,8 +626,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
             (std::vector<std::string>{"previous"}));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       TokenReaderRejectsDiTOutputWithoutMutation) {
+TEST_F(SharedMemoryOutputTest, TokenReaderRejectsDiTOutputWithoutMutation) {
   DiTForwardOutput source;
   source.text_output = {"diffusion"};
   ASSERT_TRUE(writer_->dit_output_write(source));
@@ -648,7 +636,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   EXPECT_EQ(output.prepared_token, 81);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
+TEST_F(SharedMemoryOutputTest,
        MalformedReadAllowsSubsequentOutputToBeConsumed) {
   ASSERT_TRUE(writer_->llm_output_write(ForwardOutput(), {}));
   const uint64_t invalid_count = std::numeric_limits<uint64_t>::max();
@@ -665,7 +653,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   EXPECT_EQ(output.outputs[0].tokens[0].id, 7);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, MalformedTensorSizeFailsWithoutMutation) {
+TEST_F(SharedMemoryOutputTest, MalformedTensorSizeFailsWithoutMutation) {
   DiTForwardOutput source;
   source.tensors = {torch::ones({2})};
   ASSERT_TRUE(writer_->dit_output_write(source));
@@ -686,7 +674,7 @@ TEST_F(ForwardSharedMemoryOutputTest, MalformedTensorSizeFailsWithoutMutation) {
             (std::vector<std::string>{"previous"}));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
+TEST_F(SharedMemoryOutputTest,
        ZeroSpeculativeRowsRejectMultimodalRowsWithoutPublishing) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::empty({0, 2}, torch::kInt64);
@@ -696,8 +684,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   EXPECT_EQ(published_version(), 0);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       InvalidTokenWritesPreservePublishedOutput) {
+TEST_F(SharedMemoryOutputTest, InvalidTokenWritesPreservePublishedOutput) {
   ForwardOutput valid;
   valid.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
   ASSERT_TRUE(writer_->llm_output_write(valid, {}));
@@ -714,8 +701,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   EXPECT_EQ(output.outputs[0].tokens[0].id, 7);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest,
-       DiTReaderRejectsTokenOutputWithoutMutation) {
+TEST_F(SharedMemoryOutputTest, DiTReaderRejectsTokenOutputWithoutMutation) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
   ASSERT_TRUE(writer_->llm_output_write(source, {}));
@@ -726,7 +712,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
             (std::vector<std::string>{"previous"}));
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, MalformedCountFailsWithoutMutation) {
+TEST_F(SharedMemoryOutputTest, MalformedCountFailsWithoutMutation) {
   ForwardOutput source;
   ASSERT_TRUE(writer_->llm_output_write(source, {}));
   const uint64_t invalid_count = std::numeric_limits<uint64_t>::max();

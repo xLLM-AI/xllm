@@ -23,7 +23,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/transport/comm_channel.h"
-#include "core/transport/forward_shared_memory_transport.h"
+#include "core/transport/shared_memory_transport.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_params_view.h"

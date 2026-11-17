@@ -43,7 +43,7 @@ limitations under the License.
 #include "core/runtime/dit_forward_params.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
-#include "core/transport/forward_shared_memory_transport.h"
+#include "core/transport/shared_memory_transport.h"
 #include "worker.pb.h"
 
 namespace xllm {
@@ -89,7 +89,7 @@ void expect_input_read_cancellation(const std::string& suffix) {
   const std::string name =
       "shm_input_cancel_" + std::to_string(getpid()) + "_" + suffix;
   bool is_creator = false;
-  ForwardSharedMemoryTransport reader(
+  SharedMemoryTransport reader(
       name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
   auto read_input = [&reader]() {
     Input input;
@@ -110,16 +110,15 @@ void expect_input_read_cancellation(const std::string& suffix) {
   EXPECT_FALSE(read_input());
 }
 
-TEST(ForwardSharedMemoryShutdownTest,
-     CancellationDoesNotPublishOrConsumeInput) {
+TEST(SharedMemoryShutdownTest, CancellationDoesNotPublishOrConsumeInput) {
   ScopedContiguousInputBuffer contiguous_input_buffer(/*enabled=*/false);
   const std::string name = "shm_input_local_stop_" + std::to_string(getpid());
   bool is_creator = false;
-  ForwardSharedMemoryTransport writer(
+  SharedMemoryTransport writer(
       name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
-  ForwardSharedMemoryTransport stopped_reader(
+  SharedMemoryTransport stopped_reader(
       name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
-  ForwardSharedMemoryTransport active_reader(
+  SharedMemoryTransport active_reader(
       name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
   stopped_reader.stop_input_read();
   DiTForwardInput source;
@@ -297,20 +296,19 @@ TYPED_TEST(NoncontiguousSharedMemoryInputTest,
           torch::tensor({1}, torch::kInt32);
       TypeParam retained;
       {
-        const std::string shm_name =
-            ForwardSharedMemoryTransport::create_unique_name(
-                "batch_test_noncontiguous_input",
-                /*dp_group=*/0,
-                ForwardType::RAW_INPUT,
-                /*rank=*/0);
+        const std::string shm_name = SharedMemoryTransport::create_unique_name(
+            "batch_test_noncontiguous_input",
+            /*dp_group=*/0,
+            ForwardType::RAW_INPUT,
+            /*rank=*/0);
         bool is_creator = false;
-        ForwardSharedMemoryTransport writer(
+        SharedMemoryTransport writer(
             shm_name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
         bool is_reader_creator = false;
-        ForwardSharedMemoryTransport reader(shm_name,
-                                            /*size=*/1 << 20,
-                                            is_reader_creator,
-                                            ForwardType::RAW_INPUT);
+        SharedMemoryTransport reader(shm_name,
+                                     /*size=*/1 << 20,
+                                     is_reader_creator,
+                                     ForwardType::RAW_INPUT);
         ASSERT_TRUE(writer.input_write(source));
         ASSERT_TRUE(reader.input_read(retained, device, policy));
         // Check ownership before unmapping so a regression fails safely.
@@ -473,22 +471,21 @@ TEST(BatchPackedInputTest, MaterializedShmReadRebindsTaggedTensorArena) {
 
   LlmForwardInput materialized_input;
   {
-    const std::string shm_name =
-        ForwardSharedMemoryTransport::create_unique_name(
-            "batch_test_materialized_tagged_input",
-            /*dp_group=*/0,
-            ForwardType::RAW_INPUT,
-            /*rank=*/0);
+    const std::string shm_name = SharedMemoryTransport::create_unique_name(
+        "batch_test_materialized_tagged_input",
+        /*dp_group=*/0,
+        ForwardType::RAW_INPUT,
+        /*rank=*/0);
     bool is_creator = false;
-    ForwardSharedMemoryTransport writer_manager(shm_name,
-                                                /*size=*/1 << 20,
-                                                is_creator,
-                                                ForwardType::RAW_INPUT);
+    SharedMemoryTransport writer_manager(shm_name,
+                                         /*size=*/1 << 20,
+                                         is_creator,
+                                         ForwardType::RAW_INPUT);
     bool is_reader_creator = false;
-    ForwardSharedMemoryTransport reader_manager(shm_name,
-                                                /*size=*/1 << 20,
-                                                is_reader_creator,
-                                                ForwardType::RAW_INPUT);
+    SharedMemoryTransport reader_manager(shm_name,
+                                         /*size=*/1 << 20,
+                                         is_reader_creator,
+                                         ForwardType::RAW_INPUT);
     ASSERT_TRUE(writer_manager.input_write(source));
     reader_manager.input_read(
         materialized_input,
@@ -812,7 +809,7 @@ void expect_packed_sample_count_mismatch_rejected() {
       "Packed sample count does not match the sampling sequence count");
 }
 
-TEST(ForwardSharedMemoryShutdownTest, CancelsIdleReadsForEveryInputDomain) {
+TEST(SharedMemoryShutdownTest, CancelsIdleReadsForEveryInputDomain) {
   expect_input_read_cancellation<LlmForwardInput>("llm");
   expect_input_read_cancellation<VlmForwardInput>("vlm");
   expect_input_read_cancellation<DiTForwardInput>("dit");
@@ -1150,16 +1147,15 @@ TEST(BatchPackedInputTest, NativeVlmSharedMemoryRetainsVisionAfterOverwrite) {
   VlmForwardInput lazy_input;
   {
     const std::string shm_name =
-        ForwardSharedMemoryTransport::create_unique_name(
-            "batch_test_native_vlm",
-            /*dp_group=*/0,
-            ForwardType::RAW_INPUT,
-            /*rank=*/0);
+        SharedMemoryTransport::create_unique_name("batch_test_native_vlm",
+                                                  /*dp_group=*/0,
+                                                  ForwardType::RAW_INPUT,
+                                                  /*rank=*/0);
     bool is_creator = false;
-    ForwardSharedMemoryTransport writer(
+    SharedMemoryTransport writer(
         shm_name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
     bool is_reader_creator = false;
-    ForwardSharedMemoryTransport reader(
+    SharedMemoryTransport reader(
         shm_name, /*size=*/1 << 20, is_reader_creator, ForwardType::RAW_INPUT);
     auto source = make_vlm_transport_input();
     ASSERT_TRUE(writer.input_write(source));

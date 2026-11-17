@@ -50,13 +50,13 @@ enum class ForwardType : int8_t {
 };
 
 // Owns a shared segment and transports forward messages in its wire format.
-class ForwardSharedMemoryTransport final {
+class SharedMemoryTransport final {
  public:
-  explicit ForwardSharedMemoryTransport(const std::string& name,
-                                        size_t size,
-                                        bool& is_creator,
-                                        ForwardType type);
-  ~ForwardSharedMemoryTransport();
+  explicit SharedMemoryTransport(const std::string& name,
+                                 size_t size,
+                                 bool& is_creator,
+                                 ForwardType type);
+  ~SharedMemoryTransport();
 
   void* base_address() const { return segment_.base_address(); }
   int64_t size() const { return segment_.size(); }

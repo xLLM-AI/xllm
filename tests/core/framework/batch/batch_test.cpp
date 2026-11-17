@@ -47,7 +47,7 @@ limitations under the License.
 #include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/kv_cache.h"
-#include "core/transport/forward_shared_memory_transport.h"
+#include "core/transport/shared_memory_transport.h"
 #include "core/util/scope_guard.h"
 #include "core/util/slice.h"
 #include "core/util/tensor_helper.h"
@@ -1916,15 +1916,15 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
       torch::tensor({{static_cast<int32_t>(-1)}},
                     torch::TensorOptions().dtype(torch::kInt32));
   bool is_creator = false;
-  auto shm_name = ForwardSharedMemoryTransport::create_unique_name(
-      "batch_test_forward_input",
-      /*dp_group=*/0,
-      ForwardType::RAW_INPUT,
-      /*rank=*/0);
-  ForwardSharedMemoryTransport writer_manager(
+  auto shm_name =
+      SharedMemoryTransport::create_unique_name("batch_test_forward_input",
+                                                /*dp_group=*/0,
+                                                ForwardType::RAW_INPUT,
+                                                /*rank=*/0);
+  SharedMemoryTransport writer_manager(
       shm_name, 1 << 20, is_creator, ForwardType::RAW_INPUT);
   bool is_reader_creator = false;
-  ForwardSharedMemoryTransport reader_manager(
+  SharedMemoryTransport reader_manager(
       shm_name, 1 << 20, is_reader_creator, ForwardType::RAW_INPUT);
 
   ASSERT_TRUE(writer_manager.input_write(input));
@@ -1984,21 +1984,20 @@ TEST(BatchTest, NativeDiTShmRoundTripOwnsTensorSourcesAcrossSegmentOverwrite) {
   DiTForwardInput round_trip;
   {
     const std::string shm_name =
-        ForwardSharedMemoryTransport::create_unique_name(
-            "batch_test_native_dit",
-            /*dp_group=*/0,
-            ForwardType::RAW_INPUT,
-            /*rank=*/0);
+        SharedMemoryTransport::create_unique_name("batch_test_native_dit",
+                                                  /*dp_group=*/0,
+                                                  ForwardType::RAW_INPUT,
+                                                  /*rank=*/0);
     bool is_creator = false;
-    ForwardSharedMemoryTransport writer_manager(shm_name,
-                                                /*size=*/1 << 20,
-                                                is_creator,
-                                                ForwardType::RAW_INPUT);
+    SharedMemoryTransport writer_manager(shm_name,
+                                         /*size=*/1 << 20,
+                                         is_creator,
+                                         ForwardType::RAW_INPUT);
     bool is_reader_creator = false;
-    ForwardSharedMemoryTransport reader_manager(shm_name,
-                                                /*size=*/1 << 20,
-                                                is_reader_creator,
-                                                ForwardType::RAW_INPUT);
+    SharedMemoryTransport reader_manager(shm_name,
+                                         /*size=*/1 << 20,
+                                         is_reader_creator,
+                                         ForwardType::RAW_INPUT);
     ASSERT_TRUE(writer_manager.input_write(input));
     reader_manager.input_read(round_trip);
 
@@ -2106,15 +2105,15 @@ TEST(BatchTest, ForwardOutputProtoRoundTripPreservesJsonObjectErrors) {
 
 TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
   bool is_creator = false;
-  const std::string shm_name = ForwardSharedMemoryTransport::create_unique_name(
-      "batch_test_forward_output",
-      /*dp_group=*/0,
-      ForwardType::RAW_OUTPUT,
-      /*rank=*/0);
-  ForwardSharedMemoryTransport writer_manager(
+  const std::string shm_name =
+      SharedMemoryTransport::create_unique_name("batch_test_forward_output",
+                                                /*dp_group=*/0,
+                                                ForwardType::RAW_OUTPUT,
+                                                /*rank=*/0);
+  SharedMemoryTransport writer_manager(
       shm_name, 1 << 20, is_creator, ForwardType::RAW_OUTPUT);
   bool is_reader_creator = false;
-  ForwardSharedMemoryTransport reader_manager(
+  SharedMemoryTransport reader_manager(
       shm_name, 1 << 20, is_reader_creator, ForwardType::RAW_OUTPUT);
   const torch::Tensor next_tokens =
       torch::tensor({{30, 31, -1}, {40, 41, 42}}, torch::kInt64);
@@ -3323,15 +3322,15 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
   forward_input.transfer_kv_infos.emplace_back(std::move(transfer_info));
 
   bool is_creator = false;
-  auto shm_name = ForwardSharedMemoryTransport::create_unique_name(
-      "batch_test_linear_state",
-      /*dp_group=*/0,
-      ForwardType::RAW_INPUT,
-      /*rank=*/0);
-  ForwardSharedMemoryTransport writer_manager(
+  auto shm_name =
+      SharedMemoryTransport::create_unique_name("batch_test_linear_state",
+                                                /*dp_group=*/0,
+                                                ForwardType::RAW_INPUT,
+                                                /*rank=*/0);
+  SharedMemoryTransport writer_manager(
       shm_name, 1 << 20, is_creator, ForwardType::RAW_INPUT);
   bool is_reader_creator = false;
-  ForwardSharedMemoryTransport reader_manager(
+  SharedMemoryTransport reader_manager(
       shm_name, 1 << 20, is_reader_creator, ForwardType::RAW_INPUT);
   ASSERT_TRUE(writer_manager.input_write(forward_input));
 
@@ -3385,14 +3384,14 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesEmptyRankTensors) {
 
   bool is_creator = false;
   auto shm_name =
-      ForwardSharedMemoryTransport::create_unique_name("batch_test_empty_rank",
-                                                       /*dp_group=*/0,
-                                                       ForwardType::RAW_INPUT,
-                                                       /*rank=*/0);
-  ForwardSharedMemoryTransport writer_manager(
+      SharedMemoryTransport::create_unique_name("batch_test_empty_rank",
+                                                /*dp_group=*/0,
+                                                ForwardType::RAW_INPUT,
+                                                /*rank=*/0);
+  SharedMemoryTransport writer_manager(
       shm_name, 1 << 20, is_creator, ForwardType::RAW_INPUT);
   bool is_reader_creator = false;
-  ForwardSharedMemoryTransport reader_manager(
+  SharedMemoryTransport reader_manager(
       shm_name, 1 << 20, is_reader_creator, ForwardType::RAW_INPUT);
   ASSERT_TRUE(writer_manager.input_write(forward_input));
 

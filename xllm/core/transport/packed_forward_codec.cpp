@@ -3361,12 +3361,16 @@ bool PackedForwardCodec::input_write(const DiTForwardInput& input) {
 }
 
 bool PackedForwardCodec::input_read(DiTForwardInput& input) {
+  constexpr int64_t kPrefixSize = sizeof(uint64_t);
+  if (size() < kPrefixSize) {
+    return false;
+  }
   const char* cursor = static_cast<const char*>(base_address());
   uint64_t payload_size = 0;
   read_data(cursor, payload_size);
-  const uint64_t overhead = sizeof(uint64_t);
-  CHECK_GE(size(), overhead);
-  CHECK_LE(payload_size, size() - overhead);
+  if (payload_size > static_cast<uint64_t>(size() - kPrefixSize)) {
+    return false;
+  }
   CHECK(deserialize_dit_input_payload(cursor, payload_size, input))
       << "Invalid native DiT input domain, schema, or layout";
   return true;
@@ -3398,11 +3402,16 @@ bool PackedForwardCodec::read_token_input(
     Input& input,
     const torch::Device& device,
     InputDeviceMaterializationPolicy policy) {
+  constexpr int64_t kPrefixSize = sizeof(uint64_t);
+  if (size() < kPrefixSize) {
+    return false;
+  }
   const char* data_ptr = static_cast<char*>(base_address());
   uint64_t total_size;
   read_data(data_ptr, total_size);
-  CHECK_LE(total_size, size() - sizeof(uint64_t))
-      << "Shared memory input payload exceeds the segment";
+  if (total_size > static_cast<uint64_t>(size() - kPrefixSize)) {
+    return false;
+  }
   RawInputLayoutHeader layout;
   CHECK(read_input_layout(
       data_ptr, total_size, packed_input_domain<Input>(), layout))

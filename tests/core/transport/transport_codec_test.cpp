@@ -32,8 +32,8 @@ limitations under the License.
 #include "core/runtime/forward_input_encoding.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
-#include "core/transport/forward_shared_memory_transport.h"
 #include "core/transport/packed_forward_codec.h"
+#include "core/transport/shared_memory_transport.h"
 #include "core/util/tensor_codec.h"
 #include "worker.pb.h"
 
@@ -88,6 +88,40 @@ TEST(TransportCodecTest, LlmFanoutSharesEncodedBlocksAcrossConcurrentWorkers) {
 
 TEST(TransportCodecTest, VlmFanoutSharesEncodedBlocksAcrossConcurrentWorkers) {
   expect_shared_forward_encoding<VlmForwardInput>();
+}
+
+TEST(TransportCodecTest, RejectsTruncatedPackedInputBuffers) {
+  for (int64_t capacity = -1; capacity < static_cast<int64_t>(sizeof(uint64_t));
+       ++capacity) {
+    std::vector<char> bytes(capacity > 0 ? capacity : 0);
+    PackedForwardCodec codec(bytes.data(), capacity);
+    LlmForwardInput llm;
+    VlmForwardInput vlm;
+    DiTForwardInput dit;
+    EXPECT_FALSE(codec.input_read(
+        llm,
+        torch::Device(torch::kCPU),
+        InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+    EXPECT_FALSE(codec.input_read(
+        vlm,
+        torch::Device(torch::kCPU),
+        InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+    EXPECT_FALSE(codec.input_read(dit));
+  }
+  uint64_t payload_size = 1;
+  PackedForwardCodec codec(&payload_size, sizeof(payload_size));
+  LlmForwardInput llm;
+  VlmForwardInput vlm;
+  DiTForwardInput dit;
+  EXPECT_FALSE(codec.input_read(
+      llm,
+      torch::Device(torch::kCPU),
+      InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  EXPECT_FALSE(codec.input_read(
+      vlm,
+      torch::Device(torch::kCPU),
+      InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  EXPECT_FALSE(codec.input_read(dit));
 }
 
 TEST(TransportCodecTest, PackedBufferMatchesRpcPayloadWithoutShmControl) {
@@ -170,7 +204,7 @@ StoragePrefetchRequest make_prefetch_request() {
 }
 
 bool write_shared_tokens(
-    ForwardSharedMemoryTransport& writer,
+    SharedMemoryTransport& writer,
     const torch::Tensor& tokens,
     const std::vector<SpeculativeTokenStats>& stats,
     int64_t prepared_token = -1,
@@ -799,16 +833,16 @@ TEST(TransportCodecTest, MissingLegacyVerifiedRoundsDecodeAsZeroOnReuse) {
 TEST(TransportCodecTest,
      SharedOutputPreservesVerifiedRoundsAndFollowingFields) {
   const ScopedRawOutputTransport host_only;
-  const std::string name = ForwardSharedMemoryTransport::create_unique_name(
+  const std::string name = SharedMemoryTransport::create_unique_name(
       "verified_rounds_" + std::to_string(static_cast<int64_t>(getpid())),
       /*dp_group=*/0,
       ForwardType::RAW_OUTPUT,
       /*rank=*/0);
   bool writer_is_creator = false;
-  ForwardSharedMemoryTransport writer(
+  SharedMemoryTransport writer(
       name, /*size=*/4096, writer_is_creator, ForwardType::RAW_OUTPUT);
   bool reader_is_creator = false;
-  ForwardSharedMemoryTransport reader(
+  SharedMemoryTransport reader(
       name, /*size=*/4096, reader_is_creator, ForwardType::RAW_OUTPUT);
   constexpr int64_t kLargeRoundCount = (int64_t{1} << 33) + 7;
   const std::vector<SpeculativeTokenStats> stats{
