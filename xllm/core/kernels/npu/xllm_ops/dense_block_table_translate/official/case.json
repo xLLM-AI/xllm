@@ -1,0 +1,1084 @@
+{
+  "task_number": 4,
+  "input_cases": [
+    {
+      "id": "dense_literal",
+      "values": [
+        [
+          [
+            0,
+            2,
+            -1
+          ],
+          [
+            3,
+            1,
+            -2
+          ]
+        ],
+        [
+          [
+            3,
+            0,
+            6,
+            1
+          ],
+          [
+            5,
+            2,
+            7,
+            4
+          ]
+        ]
+      ],
+      "expected": [
+        [
+          [
+            3,
+            6,
+            -1
+          ],
+          [
+            1,
+            0,
+            -1
+          ]
+        ],
+        [
+          [
+            5,
+            7,
+            -1
+          ],
+          [
+            4,
+            2,
+            -1
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "dense_single",
+      "values": [
+        [
+          [
+            0,
+            -2,
+            3
+          ]
+        ],
+        [
+          3,
+          0,
+          6,
+          1
+        ]
+      ],
+      "expected": [
+        [
+          3,
+          -1,
+          1
+        ]
+      ]
+    },
+    {
+      "id": "dense_empty_requests",
+      "requests": 0,
+      "columns": 3
+    },
+    {
+      "id": "dense_empty_columns",
+      "requests": 3,
+      "columns": 0
+    },
+    {
+      "id": "dense_odd_offset",
+      "requests": 7,
+      "columns": 33,
+      "layers": 3,
+      "blocks": 129,
+      "offset": true
+    },
+    {
+      "id": "dense_all_padding",
+      "values": [
+        [
+          [
+            -1,
+            -7
+          ]
+        ],
+        [
+          [
+            3,
+            0,
+            6,
+            1
+          ],
+          [
+            5,
+            2,
+            7,
+            4
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "dense_max_i32",
+      "values": [
+        [
+          [
+            0,
+            1,
+            -1
+          ]
+        ],
+        [
+          [
+            2147483647,
+            0
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "dense_boundary257",
+      "requests": 3,
+      "columns": 257,
+      "layers": 1,
+      "blocks": 257
+    },
+    {
+      "id": "dense_perf_small",
+      "requests": 8,
+      "columns": 64,
+      "layers": 8,
+      "blocks": 1024,
+      "performance": true
+    },
+    {
+      "id": "dense_perf_large",
+      "requests": 64,
+      "columns": 256,
+      "layers": 32,
+      "blocks": 4096,
+      "performance": true
+    },
+    {
+      "id": "dense_route_below",
+      "requests": 32,
+      "columns": 255,
+      "layers": 4,
+      "blocks": 1021,
+      "seed": 411,
+      "generalization": {
+        "purpose": "32 个请求、4 层，每请求 255 个逻辑页，共 32,640 个输出，覆盖 32,768 元素切换阈值下方的奇数行宽。",
+        "measure": true,
+        "expected_sha256": "06a0c38dafe1bd8294e69527fed5ee57505e11d28faec232b5190ad2b578aefc",
+        "input_shapes": [
+          [
+            32,
+            255
+          ],
+          [
+            4,
+            1021
+          ]
+        ],
+        "output_shape": [
+          4,
+          32,
+          255
+        ]
+      }
+    },
+    {
+      "id": "dense_route_at",
+      "requests": 32,
+      "columns": 256,
+      "layers": 4,
+      "blocks": 1021,
+      "seed": 411,
+      "generalization": {
+        "purpose": "同一映射表和随机种子，每个请求加一列后恰有 32,768 个输出，覆盖稠密翻译的大输入分支。",
+        "measure": true,
+        "expected_sha256": "c7308d759f586ffa5c9305970e70379d8f214020d2213e6611e83b2043c788af",
+        "input_shapes": [
+          [
+            32,
+            256
+          ],
+          [
+            4,
+            1021
+          ]
+        ],
+        "output_shape": [
+          4,
+          32,
+          256
+        ]
+      }
+    },
+    {
+      "id": "dense_many_short_single",
+      "requests": 257,
+      "columns": 3,
+      "layers": 1,
+      "single": true,
+      "blocks": 5,
+      "seed": 413,
+      "generalization": {
+        "purpose": "257 个短请求共用一维映射表。仅 5 个逻辑页号反复出现，检查输出保留 [257,3] 而不额外添加层维。",
+        "measure": false,
+        "expected_sha256": "e510a69d23fafadd8c69e9f3f01016d7d3b1578e46a6762465063d2899371463",
+        "input_shapes": [
+          [
+            257,
+            3
+          ],
+          [
+            5
+          ]
+        ],
+        "output_shape": [
+          257,
+          3
+        ]
+      }
+    },
+    {
+      "id": "dense_alias_and_padding",
+      "values": [
+        [
+          [
+            -2147483648,
+            4,
+            4,
+            1,
+            -9,
+            4
+          ],
+          [
+            2,
+            0,
+            -3,
+            2,
+            3,
+            1
+          ]
+        ],
+        [
+          [
+            100,
+            10,
+            10,
+            90,
+            10
+          ],
+          [
+            4,
+            2,
+            1,
+            0,
+            4
+          ],
+          [
+            100,
+            10,
+            10,
+            90,
+            10
+          ]
+        ]
+      ],
+      "expected": [
+        [
+          [
+            -1,
+            10,
+            10,
+            10,
+            -1,
+            10
+          ],
+          [
+            10,
+            100,
+            -1,
+            10,
+            90,
+            10
+          ]
+        ],
+        [
+          [
+            -1,
+            4,
+            4,
+            2,
+            -1,
+            4
+          ],
+          [
+            1,
+            4,
+            -1,
+            1,
+            0,
+            2
+          ]
+        ],
+        [
+          [
+            -1,
+            10,
+            10,
+            10,
+            -1,
+            10
+          ],
+          [
+            10,
+            100,
+            -1,
+            10,
+            90,
+            10
+          ]
+        ]
+      ],
+      "generalization": {
+        "purpose": "三个层映射中两层相同、一层不同，多个逻辑页映射到同一物理页。手算验证重复访问、层间独立与 INT32_MIN 等负填充统一输出 −1。",
+        "measure": false,
+        "expected_sha256": "d646144f413adb85bac3b771d2c9dbcc6fdc9d7b33b73764c9c77844b97defe8",
+        "input_shapes": [
+          [
+            2,
+            6
+          ],
+          [
+            3,
+            5
+          ]
+        ],
+        "output_shape": [
+          3,
+          2,
+          6
+        ]
+      }
+    }
+  ],
+  "expected_checks": {
+    "result.json": {
+      "cases": [
+        {
+          "id": "dense_literal",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            2,
+            2,
+            3
+          ],
+          "input_shapes": [
+            [
+              2,
+              3
+            ],
+            [
+              2,
+              4
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "dense_single",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            1,
+            3
+          ],
+          "input_shapes": [
+            [
+              1,
+              3
+            ],
+            [
+              4
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "dense_empty_requests",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            2,
+            0,
+            3
+          ],
+          "input_shapes": [
+            [
+              0,
+              3
+            ],
+            [
+              2,
+              31
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "dense_empty_columns",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            2,
+            3,
+            0
+          ],
+          "input_shapes": [
+            [
+              3,
+              0
+            ],
+            [
+              2,
+              31
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "dense_odd_offset",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            3,
+            7,
+            33
+          ],
+          "input_shapes": [
+            [
+              7,
+              33
+            ],
+            [
+              3,
+              129
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "dense_all_padding",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            2,
+            1,
+            2
+          ],
+          "input_shapes": [
+            [
+              1,
+              2
+            ],
+            [
+              2,
+              4
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "dense_max_i32",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            1,
+            1,
+            3
+          ],
+          "input_shapes": [
+            [
+              1,
+              3
+            ],
+            [
+              1,
+              2
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "dense_boundary257",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            1,
+            3,
+            257
+          ],
+          "input_shapes": [
+            [
+              3,
+              257
+            ],
+            [
+              1,
+              257
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "dense_perf_small",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            8,
+            8,
+            64
+          ],
+          "input_shapes": [
+            [
+              8,
+              64
+            ],
+            [
+              8,
+              1024
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "dense_perf_large",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            32,
+            64,
+            256
+          ],
+          "input_shapes": [
+            [
+              64,
+              256
+            ],
+            [
+              32,
+              4096
+            ]
+          ],
+          "attributes": {}
+        }
+      ],
+      "negative": [
+        {
+          "id": "input_count",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "unknown_attribute",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "cpu_input",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "dtype",
+          "status": "PASS",
+          "exception": "TypeError"
+        },
+        {
+          "id": "noncontiguous",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "negative_mapping",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "logical_address_out_of_range",
+          "status": "PASS",
+          "exception": "ValueError"
+        }
+      ],
+      "dynamic_updates": {
+        "dense_perf_small": [
+          {
+            "id": "logical_values_changed",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          },
+          {
+            "id": "mapping_values_changed",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          }
+        ],
+        "dense_perf_large": [
+          {
+            "id": "logical_values_changed",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          },
+          {
+            "id": "mapping_values_changed",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          },
+          {
+            "id": "large_path_int32_output_boundary",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          }
+        ]
+      },
+      "engineering": {
+        "two_streams": "PASS",
+        "retained_outputs_independent": "PASS",
+        "repeat20_released": "PASS",
+        "active_before_bytes": 35840,
+        "active_after_bytes": 35840,
+        "peak_increment_bytes": 16896,
+        "output_bytes": 16384,
+        "baseline_peak_increment_bytes": 103936,
+        "baseline_output_bytes": 16384,
+        "baseline_active_before_bytes": 35840,
+        "baseline_active_after_bytes": 35840,
+        "candidate_minus_baseline_peak_bytes": -87040,
+        "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+      },
+      "engineering_by_case": {
+        "dense_perf_small": {
+          "two_streams": "PASS",
+          "retained_outputs_independent": "PASS",
+          "repeat20_released": "PASS",
+          "active_before_bytes": 35840,
+          "active_after_bytes": 35840,
+          "peak_increment_bytes": 16896,
+          "output_bytes": 16384,
+          "baseline_peak_increment_bytes": 103936,
+          "baseline_output_bytes": 16384,
+          "baseline_active_before_bytes": 35840,
+          "baseline_active_after_bytes": 35840,
+          "candidate_minus_baseline_peak_bytes": -87040,
+          "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+        },
+        "dense_perf_large": {
+          "two_streams": "PASS",
+          "retained_outputs_independent": "PASS",
+          "repeat20_released": "PASS",
+          "active_before_bytes": 590848,
+          "active_after_bytes": 590848,
+          "peak_increment_bytes": 2378240,
+          "output_bytes": 2097152,
+          "baseline_peak_increment_bytes": 4344320,
+          "baseline_output_bytes": 2097152,
+          "baseline_active_before_bytes": 590848,
+          "baseline_active_after_bytes": 590848,
+          "candidate_minus_baseline_peak_bytes": -1966080,
+          "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+        }
+      }
+    }
+  },
+  "supplement_checks": {},
+  "required_comparisons": [
+    [
+      "result.json",
+      "benchmarks[0]"
+    ],
+    [
+      "result.json",
+      "benchmarks[1]"
+    ]
+  ],
+  "performance_reference": {
+    "number": "04",
+    "title": "稠密block table地址翻译",
+    "path": "operators/task04_dense",
+    "functional_records": 22,
+    "functional_pass": true,
+    "source_current": true,
+    "environment": {
+      "utc": "2026-10-31T09:22:29.316497+00:00",
+      "hostname": "A03-R40-I191-103-4100002.JD.LOCAL",
+      "python": "3.11.14",
+      "device": "Ascend910_9382",
+      "versions": {
+        "torch": "2.9.0+cpu",
+        "torch-npu": "2.9.0.post1+gitee7ba04",
+        "triton-ascend": "3.2.0.dev20260322"
+      },
+      "triton_target": "GPUTarget(backend='npu', arch='Ascend910_9382', warp_size=0)",
+      "source_sha256": {
+        "baseline.py": "6d98cd2b488406c2f62b7c645c42a8e08e0e4ff07ce05e85d13998de8842cfb6",
+        "case.json": "097ccc01feaead1ee414d2f97bb134cd77585f47ea34ec8f88abf03f291ea12f",
+        "contract.py": "4efc5856a7bf1419250058325b85d64c6179366416c24da181fff2e40b955720",
+        "generate_data.py": "5d5db7c8e8023345d3cd25681f407e8ddf91d765f6af450cd66d00239d967cd0",
+        "golden.py": "eea770d39b01302ee80b7692f3b930a143a40bf64aae8d5aa11a062eb7d7f0a8",
+        "metadata.json": "7fd797efb33b66cf913b3c9a66afbc91b7e27e450c6c63322113f2aa3f72f1bf",
+        "native_dense.cpp": "e50c47bcc398cfe1ce78e70060a21c02ba6fc2e4c12c9ebad1b47f4661dc7439",
+        "paired_statistics.py": "fc4b75b3a17618bad99d79243833815fd686fed2fd457cee7ef9cfa137128f56",
+        "probe130_native.py": "3fa65478779e59ebbdbf4145adaaed58b1c76fdfcdfafc59cd28f04cae1d86bf",
+        "probe_gather.py": "f16aaf8190647b48e1d94345d643d19f818c6fe5569a9f7db1cfcbfb51f37508",
+        "probe_profile.py": "c4940671b3116bba23aa4c8b312edb15967274732b76a973dfcf666788f8fe2a",
+        "probe_variants.py": "251dcd8779bf289454ee866e8e0a68efd9a94a7df7ae9b6570bfca8540e7590e",
+        "solution.py": "b1c1ec0ac3eb8629a1d1ebb95b6b611ccdceea526a80c2e9835d50201fe44622",
+        "verify.py": "0a5a38a72de61077ed1d8c4eb039382657a51d35c963adf5d5ce8bf09235c5d1"
+      }
+    },
+    "metrics": [
+      {
+        "id": "dense_perf_small",
+        "baseline_key": "baseline",
+        "required": true,
+        "source_file": "task_submission/result.json",
+        "source_path": "benchmarks[0]",
+        "baseline_mean_us": 82.83747583333333,
+        "candidate_mean_us": 58.57702333333333,
+        "saved_mean_us": 24.2604525,
+        "baseline_median_us": 82.06426,
+        "candidate_median_us": 58.21652,
+        "saved_median_us": 23.84774,
+        "baseline_rounds_us": [
+          77.87617999999999,
+          83.741575,
+          80.983,
+          83.14552,
+          78.792585,
+          92.48599499999999
+        ],
+        "candidate_rounds_us": [
+          59.31653,
+          61.415695,
+          57.895265,
+          57.356165000000004,
+          56.940709999999996,
+          58.537775
+        ],
+        "saved_mean_ci95_us": [
+          20.960443333333334,
+          28.635294999999992
+        ],
+        "iterations": 200,
+        "warmup": 50,
+        "original_unit": "us",
+        "round_order": [
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ],
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ],
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ]
+        ],
+        "measurement_protocol": null,
+        "call_pair_order": null
+      },
+      {
+        "id": "dense_perf_large",
+        "baseline_key": "baseline",
+        "required": true,
+        "source_file": "task_submission/result.json",
+        "source_path": "benchmarks[1]",
+        "baseline_mean_us": 89.08335999999998,
+        "candidate_mean_us": 54.353813333333335,
+        "saved_mean_us": 34.72954666666665,
+        "baseline_median_us": 88.256135,
+        "candidate_median_us": 54.345715,
+        "saved_median_us": 33.91042,
+        "baseline_rounds_us": [
+          96.65963,
+          90.166125,
+          83.32242500000001,
+          86.346145,
+          85.152385,
+          92.85345
+        ],
+        "candidate_rounds_us": [
+          54.137685,
+          54.42874,
+          54.26269,
+          54.612790000000004,
+          54.233435,
+          54.447540000000004
+        ],
+        "saved_mean_ci95_us": [
+          31.238018333333336,
+          38.66582916666667
+        ],
+        "iterations": 200,
+        "warmup": 50,
+        "original_unit": "us",
+        "round_order": [
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ],
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ],
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ]
+        ],
+        "measurement_protocol": null,
+        "call_pair_order": null
+      }
+    ],
+    "result_sources": [
+      {
+        "path": "task_submission/result.json",
+        "sha256": "1f4f5045d2a968dcb102a49efca1a8fab01b6620d06f8d54e2658596584218e8"
+      }
+    ],
+    "source_hashes": {
+      "baseline.py": "6d98cd2b488406c2f62b7c645c42a8e08e0e4ff07ce05e85d13998de8842cfb6",
+      "case.json": "097ccc01feaead1ee414d2f97bb134cd77585f47ea34ec8f88abf03f291ea12f",
+      "contract.py": "4efc5856a7bf1419250058325b85d64c6179366416c24da181fff2e40b955720",
+      "generate_data.py": "5d5db7c8e8023345d3cd25681f407e8ddf91d765f6af450cd66d00239d967cd0",
+      "golden.py": "eea770d39b01302ee80b7692f3b930a143a40bf64aae8d5aa11a062eb7d7f0a8",
+      "metadata.json": "7fd797efb33b66cf913b3c9a66afbc91b7e27e450c6c63322113f2aa3f72f1bf",
+      "native_dense.cpp": "e50c47bcc398cfe1ce78e70060a21c02ba6fc2e4c12c9ebad1b47f4661dc7439",
+      "paired_statistics.py": "fc4b75b3a17618bad99d79243833815fd686fed2fd457cee7ef9cfa137128f56",
+      "probe130_native.py": "3fa65478779e59ebbdbf4145adaaed58b1c76fdfcdfafc59cd28f04cae1d86bf",
+      "probe_gather.py": "f16aaf8190647b48e1d94345d643d19f818c6fe5569a9f7db1cfcbfb51f37508",
+      "probe_profile.py": "c4940671b3116bba23aa4c8b312edb15967274732b76a973dfcf666788f8fe2a",
+      "probe_variants.py": "251dcd8779bf289454ee866e8e0a68efd9a94a7df7ae9b6570bfca8540e7590e",
+      "solution.py": "b1c1ec0ac3eb8629a1d1ebb95b6b611ccdceea526a80c2e9835d50201fe44622",
+      "verify.py": "0a5a38a72de61077ed1d8c4eb039382657a51d35c963adf5d5ce8bf09235c5d1"
+    },
+    "memory": [
+      {
+        "id": "dense_perf_small",
+        "baseline_bytes": 103936,
+        "candidate_bytes": 16896,
+        "residual_bytes": 0,
+        "output_bytes": 16384,
+        "checks": "{\"two_streams\":\"PASS\",\"retained_outputs_independent\":\"PASS\",\"repeat20_released\":\"PASS\",\"active_before_bytes\":35840,\"active_after_bytes\":35840,\"peak_increment_bytes\":16896,\"output_bytes\":16384,\"baseline_peak_increment_bytes\":103936,\"baseline_output_bytes\":16384,\"baseline_active_before_bytes\":35840,\"baseline_active_after_bytes\":35840,\"candidate_minus_baseline_peak_bytes\":-87040,\"peak_definition\":\"Warmed PyTorch active allocation for one complete pr…（完整记录见 JSON）",
+        "status": "工程检查通过；峰值观测",
+        "measurement_scope": "活跃分配增量"
+      },
+      {
+        "id": "dense_perf_large",
+        "baseline_bytes": 4344320,
+        "candidate_bytes": 2378240,
+        "residual_bytes": 0,
+        "output_bytes": 2097152,
+        "checks": "{\"two_streams\":\"PASS\",\"retained_outputs_independent\":\"PASS\",\"repeat20_released\":\"PASS\",\"active_before_bytes\":590848,\"active_after_bytes\":590848,\"peak_increment_bytes\":2378240,\"output_bytes\":2097152,\"baseline_peak_increment_bytes\":4344320,\"baseline_output_bytes\":2097152,\"baseline_active_before_bytes\":590848,\"baseline_active_after_bytes\":590848,\"candidate_minus_baseline_peak_bytes\":-1966080,\"peak_definition\":\"Warmed PyTorch active allocation for on…（完整记录见 JSON）",
+        "status": "工程检查通过；峰值观测",
+        "measurement_scope": "活跃分配增量"
+      }
+    ]
+  },
+  "acceptance": {
+    "unit": "us",
+    "resamples": 10000,
+    "seed": 20261031,
+    "percentile": "linear",
+    "historical_results_are_not_new_passes": true,
+    "max_mean_us": {
+      "dense_perf_small": 75,
+      "dense_perf_large": 60
+    },
+    "measurement_protocol": {
+      "warmup": 50,
+      "rounds": 6,
+      "iterations_per_round": 200,
+      "execution_order": "alternate baseline and candidate; retain all paired rounds",
+      "timed_entry": "prepared.run",
+      "includes": [
+        "Python submission",
+        "new outputs and per-call temporary allocations",
+        "device execution and completion synchronization"
+      ],
+      "excludes": [
+        "input generation and transfer",
+        "one-time validation",
+        "prepare",
+        "CPU golden",
+        "first compilation"
+      ],
+      "latency_unit": "us",
+      "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+      "target_statistic": "arithmetic mean of six per-round per-call latencies",
+      "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+    },
+    "rule": "all required comparisons: candidate mean latency <= case max_mean_us; positive mean and median paired time saving; lower bound of paired bootstrap mean-saving 95% CI > 0"
+  },
+  "source_sha256": {
+    "reference": {
+      "public_api.py": "eea770d39b01302ee80b7692f3b930a143a40bf64aae8d5aa11a062eb7d7f0a8",
+      "baseline.py": "6d98cd2b488406c2f62b7c645c42a8e08e0e4ff07ce05e85d13998de8842cfb6",
+      "contract.py": "4efc5856a7bf1419250058325b85d64c6179366416c24da181fff2e40b955720"
+    },
+    "functional": {
+      "functional_checks.py": "71bc86d32b60e22efc99990169e83563abe8f7382507a39fa25adbc61a68a1b8",
+      "golden.py": "eea770d39b01302ee80b7692f3b930a143a40bf64aae8d5aa11a062eb7d7f0a8",
+      "baseline.py": "6d98cd2b488406c2f62b7c645c42a8e08e0e4ff07ce05e85d13998de8842cfb6",
+      "contract.py": "4efc5856a7bf1419250058325b85d64c6179366416c24da181fff2e40b955720",
+      "generate_data.py": "5d5db7c8e8023345d3cd25681f407e8ddf91d765f6af450cd66d00239d967cd0"
+    }
+  },
+  "generalization": {
+    "case_ids": [
+      "dense_route_below",
+      "dense_route_at",
+      "dense_many_short_single",
+      "dense_alias_and_padding"
+    ],
+    "diagnostic_ids": [
+      "dense_route_below",
+      "dense_route_at"
+    ],
+    "correctness_required": true,
+    "performance_gate": null
+  }
+}

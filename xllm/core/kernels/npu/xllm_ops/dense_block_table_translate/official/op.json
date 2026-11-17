@@ -1,0 +1,72 @@
+[
+  {
+    "op": "DenseBlockTableTranslate",
+    "language": "python",
+    "interface": "输入连续NPU int32 `X[R,C]` 与 `M[B]` 或 `M[L,B]`，attributes为空。输出独立连续int32 `[R,C]` 或 `[L,R,C]`；规则为X<0输出−1，否则输出M[layer,X]。M非负；非负逻辑地址须小于B。`prepare(inputs,{})` 一次校验并持有输入；返回对象 `run()` 每次读取当前X/M并分配新输出。直接 `run(inputs,{})` 包含prepare。",
+    "parameters": [
+      {
+        "name": "prepare([X,M],{})",
+        "description": "X为int32[R,C]，M为int32[B]或[L,B]；一次检查并返回prepared对象"
+      },
+      {
+        "name": "prepared.run()",
+        "description": "当前NPU stream；每次读取当前X/M并分配输出"
+      },
+      {
+        "name": "输出",
+        "description": "int32[R,C]或[L,R,C]；负X写−1；其他位置查表M"
+      },
+      {
+        "name": "run([X,M],{})",
+        "description": "同上；包含prepare开销的便捷完整入口"
+      }
+    ],
+    "golden": "`values, attrs = generate_data.generate(case)`；`golden.calculate(values, attrs, single)` 返回 CPU 列表标杆。`single` 根据 M 是一维还是二维确定；构造空张量时按 case 中的维度恢复 shape，不能仅由空列表推断。",
+    "constraints": "prepare包含CPU回读校验，稳态时间不代表首次调用。prepare后shape/dtype/device和合法值域须保持；改变形状需重新prepare。动态值更新已有测试；本题未单列set_重绑定验收，不将05／06的额外覆盖外推到本项。",
+    "input_desc": [
+      {
+        "name": "X",
+        "param_type": "required",
+        "shape": [
+          "R",
+          "C"
+        ],
+        "type": [
+          "int32"
+        ],
+        "format": [
+          "ND"
+        ]
+      },
+      {
+        "name": "M",
+        "param_type": "required",
+        "shape": [
+          "B or L,B"
+        ],
+        "type": [
+          "int32"
+        ],
+        "format": [
+          "ND"
+        ]
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "output",
+        "param_type": "required",
+        "shape": [
+          "R,C or L,R,C"
+        ],
+        "type": [
+          "int32"
+        ],
+        "format": [
+          "ND"
+        ]
+      }
+    ],
+    "attr": []
+  }
+]
