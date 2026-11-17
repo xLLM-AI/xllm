@@ -296,24 +296,6 @@ def _causal_conv1d_qkv_prefill_fake(
     return q, k, v
 
 
-def _fused_sigmoid_gating_delta_rule_decode_fake(
-    a_log: torch.Tensor,
-    a: torch.Tensor,
-    dt_bias: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    b: torch.Tensor,
-    ssm_state: torch.Tensor,
-    state_indices: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    scale: float,
-) -> torch.Tensor:
-    del a_log, a, dt_bias, k, b, ssm_state, state_indices, cu_seqlens, scale
-    # Output shape matches v: [num_tokens, num_value_heads, value_dim]
-    return torch.empty_like(v)
-
-
 def _fused_add_rms_norm_fake(
     input: torch.Tensor,
     residual: torch.Tensor,
@@ -1330,10 +1312,6 @@ register_fake("xllm_ops::mega_gdn_mtp_decode", _mega_gdn_mtp_decode_fake)
 register_fake("xllm_ops::mega_gdn_mtp_decode_varlen", _mega_gdn_mtp_decode_varlen_fake)
 register_fake("xllm_ops::causal_conv1d", _causal_conv1d_fake)
 register_fake("xllm_ops::causal_conv1d_qkv_prefill", _causal_conv1d_qkv_prefill_fake)
-register_fake(
-    "xllm_ops::fused_sigmoid_gating_delta_rule_decode",
-    _fused_sigmoid_gating_delta_rule_decode_fake,
-)
 register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
 register_fake("xllm_ops::mega_moe", _mega_moe_fake)

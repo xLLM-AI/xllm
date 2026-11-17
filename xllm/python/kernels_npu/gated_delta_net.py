@@ -21,6 +21,11 @@ the existing Python composition for paths not migrated to MegaGdn yet.
 from __future__ import annotations
 
 import torch
+from xllm_kernel.ops.attention.gdn import (
+    fused_qkvzba_split_reshape_cat,
+    fused_recurrent_gated_delta_rule,
+    fused_sigmoid_gating_delta_rule_update,
+)
 
 
 def mega_gdn_prefill(
@@ -226,15 +231,16 @@ def fused_sigmoid_gating_delta_rule_decode(
         a_log: Per-head log decay of shape ``[num_value_heads]``.
         dt_bias: Per-head timestep bias of shape ``[num_value_heads]``.
         initial_state: Recurrent state pool, updated in place.
-            Shape ``[num_slots, num_value_heads, value_dim, key_dim]``.
+            Shape ``[num_slots, num_value_heads, key_dim, value_dim]``.
         state_indices: State slot of every sequence.
         scale: Query scale.
 
     Returns:
-        Output of shape ``[batch_size, 1, num_value_heads, value_head_dim]``.
+        Output of shape ``[batch_size, 1, 1, num_value_heads, 128]``,
+        preserving the existing wrapper's additional sequence dimension.
     """
     batch = mixed_qkv.shape[0]
-    num_value_heads, value_dim, key_dim = initial_state.shape[-3:]
+    num_value_heads, key_dim, value_dim = initial_state.shape[-3:]
     qkv_dim = mixed_qkv.shape[1]
     query_key_dim = qkv_dim - num_value_heads * value_dim
     query_dim = query_key_dim // 2
@@ -258,10 +264,10 @@ def fused_sigmoid_gating_delta_rule_decode(
     # cu_seqlens for decode: each seq has 1 token.
     cu_seqlens = torch.arange(batch + 1, dtype=torch.int32, device=mixed_qkv.device)
 
-    output = torch.ops.xllm_ops.fused_sigmoid_gating_delta_rule_decode(
-        a_log,
+    output = fused_sigmoid_gating_delta_rule_update(
+        a_log.float(),
         a.unsqueeze(1),
-        dt_bias,
+        dt_bias.float(),
         q.contiguous(),
         k.contiguous(),
         v.contiguous(),
@@ -314,6 +320,9 @@ def chunk_gated_delta_rule(
 
 
 __all__ = [
+    "fused_recurrent_gated_delta_rule",
+    "fused_sigmoid_gating_delta_rule_update",
+    "fused_qkvzba_split_reshape_cat",
     "mega_gdn_decode",
     "mega_gdn_mtp_decode",
     "mega_gdn_mtp_decode_varlen",

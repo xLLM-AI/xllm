@@ -93,11 +93,18 @@ def test_legacy_shim_and_glm_shared_layer_use_same_binding() -> None:
 def test_initialization_is_idempotent_and_policy_is_fixed() -> None:
     plan = prepare_rms_norm()
     initialize_runtime()
-    assert initialize(device="npu", operations=("rms_norm", "l2_norm"))["rms_norm"] is plan
+    operations = (
+        "rms_norm",
+        "l2_norm",
+        "fused_recurrent_gated_delta_rule",
+        "fused_sigmoid_gating_delta_rule_update",
+        "fused_qkvzba_split_reshape_cat",
+    )
+    assert initialize(device="npu", operations=operations)["rms_norm"] is plan
     with pytest.raises(RuntimeError, match="restart"):
         initialize(device="cuda")
     with pytest.raises(RuntimeError, match="restart"):
-        initialize(device="npu", operations=("rms_norm", "l2_norm"), execution_mode="changed")
+        initialize(device="npu", operations=operations, execution_mode="changed")
     importlib.import_module("xllm.python.kernels_npu._custom_op")
     assert prepare_rms_norm() is plan
 

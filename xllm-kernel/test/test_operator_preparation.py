@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import importlib
+import os
+import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
+import xllm_kernel
 from xllm_kernel.catalog import load_operations
 from xllm_kernel.platform import Platform, PlatformEnum
 from xllm_kernel.registry import KernelRegistry
@@ -20,6 +24,34 @@ class _Vendor:
         return lambda *args, **kwargs: (args[0], None)
 
 
+def test_gdn_public_catalog_is_sdk_free(tmp_path: Path) -> None:
+    script = """
+import importlib.abc
+import sys
+from typing import Any
+
+class BlockDeviceImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> None:
+        if fullname.split('.')[0] in {'torch', 'torch_npu', 'triton', 'xllm'}:
+            raise AssertionError(f'unexpected dependency: {fullname}')
+
+sys.meta_path.insert(0, BlockDeviceImports())
+from xllm_kernel.catalog import load_operations
+from xllm_kernel.ops import fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat
+from xllm_kernel.ops.attention.gdn import OPERATIONS
+catalog = {operation.contract.operation: operation for operation in load_operations()}
+for operation in OPERATIONS:
+    name = operation.contract.operation
+    assert catalog[name] is operation
+    assert operation.implementations == ('npu.triton.' + name,)
+    assert operation.prepared is None
+    assert operation.backends[0].requires == ('torch_npu', 'triton')
+assert all(callable(fn) for fn in (fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat))
+"""
+    env = {**os.environ, "PYTHONPATH": str(Path(xllm_kernel.__file__).resolve().parent.parent)}
+    subprocess.run([sys.executable, "-S", "-c", script], cwd=tmp_path, env=env, check=True)
+
+
 def test_torch_backend_modules_register_unique_variants_and_execute_public_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -28,7 +60,11 @@ def test_torch_backend_modules_register_unique_variants_and_execute_public_bindi
     monkeypatch.setattr(KernelRegistry, "_instance", registry)
     monkeypatch.setitem(sys.modules, "torch_npu", _Vendor())
     monkeypatch.setattr(torch, "npu", SimpleNamespace(get_device_name=lambda: "Ascend910B2"), raising=False)
-    operations = tuple(operation for operation in load_operations() if operation.contract.operation != "l2_norm")
+    operations = tuple(
+        operation
+        for operation in load_operations()
+        if any(backend.module.endswith(".torch") for backend in operation.backends)
+    )
     for operation in operations:
         for backend in operation.backends:
             monkeypatch.delitem(sys.modules, backend.module, raising=False)
@@ -79,6 +115,7 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
         "xllm_kernel.ops.activation.torch",
         "xllm_kernel.ops.normalization.torch",
         "xllm_kernel.ops.normalization.triton",
+        "xllm_kernel.ops.attention.gdn.triton",
     )
     for name in modules:
         monkeypatch.delitem(sys.modules, name, raising=False)
