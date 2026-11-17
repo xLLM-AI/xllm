@@ -16,8 +16,7 @@ limitations under the License. -->
 
 ## Image naming
 
-Release and development images use the repository `xllm-ai/xllm` and the tag format
-`<version>-<device>-<cpu>`:
+Release and development images use the tag format `<version>-<device>-<cpu>`:
 
 | Field | Values |
 | --- | --- |
@@ -25,10 +24,13 @@ Release and development images use the repository `xllm-ai/xllm` and the tag for
 | `device` | `a2`, `a3`, or `cuda`. |
 | `cpu` | `x86_64` or `arm64`. |
 
+Ascend ARM64 development images are published at
+[`quay.io/xllm-ai/xllm`](https://quay.io/repository/xllm-ai/xllm?tab=tags).
+
 For example, `xllm-ai/xllm:v0.10.0-a2-arm64` contains xLLM 0.10.0 for A2
 on ARM64. Its development-image counterpart is
-`xllm-ai/xllm:latest-a2-arm64`. Other development tags include
-`xllm-ai/xllm:latest-a3-arm64` and `xllm-ai/xllm:latest-cuda-x86_64`.
+`quay.io/xllm-ai/xllm:latest-a2-arm64`. Other development tags include
+`quay.io/xllm-ai/xllm:latest-a3-arm64` and `xllm-ai/xllm:latest-cuda-x86_64`.
 The CPU tag must match the image architecture: Docker's `linux/amd64`
 platform uses the `x86_64` tag, and `linux/arm64` uses `arm64`.
 
@@ -120,7 +122,7 @@ A fresh development container already satisfies the dependency checks used by
 
 ```bash
 docker build --network=host -f docker/Dockerfile.a2 \
-  --target xllm-development -t xllm-ai/xllm:latest-a2-arm64 .
+  --target xllm-development -t quay.io/xllm-ai/xllm:latest-a2-arm64 .
 ```
 
 For a CUDA development image on x86_64:

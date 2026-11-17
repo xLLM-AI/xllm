@@ -21,7 +21,7 @@ sidebar:
 
 上述命令创建的命名容器在退出后仍会保留。重新进入已停止的容器时，运行 `docker start -ai <container-name>`，将 `<container-name>` 替换为 `--name` 的值（例如 `xllm-npu`）。若要尝试其他镜像或硬件配置，请为新的 `docker run` 命令选择一个未使用的 `--name`。重启已有容器会保留其原始镜像和配置。
 
-可浏览 [昇腾和 NVIDIA 镜像标签](https://quay.io/repository/jd_xllm/xllm-ai?tab=tags)，或查看对应硬件的完整配置指南：
+查看对应硬件的完整配置指南：
 
 - [昇腾 NPU（A2 / A3）](/zh/hardware/ascend_npu/)
 - [英伟达 GPU](/zh/hardware/nvidia_gpu/)

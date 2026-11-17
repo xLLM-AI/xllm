@@ -17,16 +17,18 @@ sidebar:
 
 以下命令在宿主机执行。根据硬件选择一个开发镜像：
 
+A2 和 A3 的 ARM64 开发镜像见 [镜像标签列表](https://quay.io/repository/xllm-ai/xllm?tab=tags)。
+
 | 硬件 | 宿主机 CPU | 开发镜像 |
 | --- | --- | --- |
 | Ascend A2 | x86_64 | `quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911` |
-| Ascend A2 | ARM64 | `quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911` |
-| Ascend A3 | ARM64 | `quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911` |
+| Ascend A2 | ARM64 | `quay.io/xllm-ai/xllm:latest-a2-arm64` |
+| Ascend A3 | ARM64 | `quay.io/xllm-ai/xllm:latest-a3-arm64` |
 
 下方示例选择 A3 ARM64；其他平台请修改 `XLLM_IMAGE`。
 
 ```bash
-XLLM_IMAGE="quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911"
+XLLM_IMAGE="quay.io/xllm-ai/xllm:latest-a3-arm64"
 docker pull "$XLLM_IMAGE"
 ```
 
