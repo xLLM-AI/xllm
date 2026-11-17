@@ -84,14 +84,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<TargetInput>::target_verify_mode_;
   using DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input;
 
-  using WorkerImpl::prepare_model_input;
-
-  void prepare_model_input(TargetInput& input) override {
-    move_tensor_to_device_if_needed(
-        input.input_params.embedding.mtp_shifted_token_ids, device_);
-    WorkerImpl::prepare_model_input(input);
-  }
-
   // MTP composite: leaves own model-specific NPU input preparation.
   bool owns_npu_parallel_input_prepare() const override;
 
@@ -122,11 +114,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                                            const std::string& /*phase*/) const {
   }
   virtual bool share_target_lm_head_with_draft() const { return true; }
-
-  SampleOutput validate(SamplingParameters sampling_params,
-                        const DraftProposal& draft_proposal,
-                        const ForwardOutput& target_output,
-                        int32_t num_speculative_tokens);
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.

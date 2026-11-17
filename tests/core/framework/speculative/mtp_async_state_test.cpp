@@ -136,16 +136,11 @@ TEST(MtpAsyncStateTest, ExtractsTargetBaseKvLengthsFromVerifyLayouts) {
 }
 
 TEST(MtpAsyncStateTest, ComputesSharedSpecVerifyBlockTableCapacity) {
-  EXPECT_EQ(spec_verify::speculative_verify_block_table_capacity(262144, 16),
-            16385);
-  EXPECT_EQ(spec_verify::speculative_verify_block_table_capacity(262144, 32),
-            8193);
-  EXPECT_EQ(spec_verify::speculative_verify_block_table_capacity(262144, 64),
-            4097);
-  EXPECT_EQ(spec_verify::speculative_verify_block_table_capacity(262144, 128),
-            2049);
-  EXPECT_EQ(spec_verify::speculative_verify_block_table_capacity(300000, 128),
-            2345);
+  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 16), 16385);
+  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 32), 8193);
+  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 64), 4097);
+  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 128), 2049);
+  EXPECT_EQ(speculative_verify_block_table_capacity(300000, 128), 2345);
 }
 
 TEST(MtpAsyncStateTest, AcceptsPrimaryOrModelManagedBlockTableLayouts) {
@@ -155,17 +150,17 @@ TEST(MtpAsyncStateTest, AcceptsPrimaryOrModelManagedBlockTableLayouts) {
       torch::zeros({2, 2}, torch::kInt32),
   };
 
-  EXPECT_TRUE(spec_verify::has_speculative_verify_block_table_layout(
+  EXPECT_TRUE(has_speculative_verify_block_table_layout(
       primary, /*multi_block_tables=*/{}, /*num_sequences=*/2));
-  EXPECT_TRUE(spec_verify::has_speculative_verify_block_table_layout(
+  EXPECT_TRUE(has_speculative_verify_block_table_layout(
       torch::Tensor(), model_managed, /*num_sequences=*/2));
-  EXPECT_FALSE(spec_verify::has_speculative_verify_block_table_layout(
+  EXPECT_FALSE(has_speculative_verify_block_table_layout(
       torch::Tensor(), /*multi_block_tables=*/{}, /*num_sequences=*/2));
-  EXPECT_FALSE(spec_verify::has_speculative_verify_block_table_layout(
+  EXPECT_FALSE(has_speculative_verify_block_table_layout(
       torch::Tensor(),
       {torch::zeros({1, 3}, torch::kInt32)},
       /*num_sequences=*/2));
-  EXPECT_FALSE(spec_verify::has_speculative_verify_block_table_layout(
+  EXPECT_FALSE(has_speculative_verify_block_table_layout(
       torch::zeros({2, 4}, torch::kInt64),
       model_managed,
       /*num_sequences=*/2));
@@ -173,10 +168,9 @@ TEST(MtpAsyncStateTest, AcceptsPrimaryOrModelManagedBlockTableLayouts) {
 
 #if defined(USE_NPU)
 TEST(MtpAsyncStateTest, BuildsPinnedZeroFilledSpecVerifyControlBlockTable) {
-  const torch::Tensor control =
-      spec_verify::make_speculative_verify_control_block_table(
-          /*num_sequences=*/3,
-          /*block_table_capacity=*/17);
+  const torch::Tensor control = make_speculative_verify_control_block_table(
+      /*num_sequences=*/3,
+      /*block_table_capacity=*/17);
 
   EXPECT_TRUE(control.device().is_cpu());
   EXPECT_TRUE(control.is_pinned());
@@ -196,8 +190,7 @@ TEST(MtpAsyncStateTest, MaterializesDraftColumnsForEagerFallback) {
       torch::tensor({12, 22}, torch::kLong)};
 
   torch::Tensor materialized =
-      spec_verify::materialize_speculative_verify_tokens(verify_tokens,
-                                                         draft_sources);
+      materialize_speculative_verify_tokens(verify_tokens, draft_sources);
 
   EXPECT_EQ(materialized.data_ptr(), verify_tokens.data_ptr());
   EXPECT_TRUE(torch::equal(
@@ -207,7 +200,7 @@ TEST(MtpAsyncStateTest, MaterializesDraftColumnsForEagerFallback) {
 TEST(MtpAsyncStateTest, LeavesOrdinaryEagerTokensUnchanged) {
   const torch::Tensor verify_tokens = torch::tensor({10, 11}, torch::kInt);
   torch::Tensor materialized =
-      spec_verify::materialize_speculative_verify_tokens(verify_tokens, {});
+      materialize_speculative_verify_tokens(verify_tokens, {});
 
   EXPECT_EQ(materialized.data_ptr(), verify_tokens.data_ptr());
   EXPECT_TRUE(torch::equal(materialized, verify_tokens));
@@ -225,8 +218,7 @@ TEST(MtpAsyncStateTest, SelectsGraphVerifyTokenOverrideForEagerExecution) {
       torch::tensor({12, 22}, torch::kLong)};
 
   torch::Tensor materialized =
-      spec_verify::materialize_graph_speculative_verify_tokens(tokens,
-                                                               graph_input);
+      materialize_graph_speculative_verify_tokens(tokens, graph_input);
 
   EXPECT_EQ(materialized.data_ptr(),
             graph_input.input_tokens_override.data_ptr());

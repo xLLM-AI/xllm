@@ -25,8 +25,6 @@ class DraftProposal;
 class GraphInputView;
 class SampleOutput;
 
-namespace spec_verify {
-
 // Expanded verify needs a primary block-table tensor for its generic graph
 // metadata. Model-managed cache layouts instead carry every real cache table
 // in multi_block_tables, so the primary table may be intentionally absent.
@@ -70,6 +68,5 @@ SampleOutput run_rejection_sampling(SamplingParameters sampling_params,
                                     const DraftProposal& draft_proposal,
                                     const torch::Tensor& target_logits,
                                     const torch::Tensor& target_hidden_states);
-}  // namespace spec_verify
 
 }  // namespace xllm

@@ -24,8 +24,6 @@ limitations under the License.
 
 namespace xllm {
 
-namespace spec_verify {
-
 bool has_speculative_verify_block_table_layout(
     const torch::Tensor& block_tables,
     const std::vector<torch::Tensor>& multi_block_tables,
@@ -117,7 +115,5 @@ SampleOutput run_rejection_sampling(SamplingParameters sampling_params,
   }
   return sample_output;
 }
-
-}  // namespace spec_verify
 
 }  // namespace xllm

@@ -106,7 +106,6 @@ class ForwardInputBuilder final {
     std::vector<uint64_t> full_block_lease_epochs;
     std::vector<std::string> request_ids;
     std::vector<int32_t> extra_token_ids;
-    std::vector<int32_t> mtp_shifted_token_ids;
     std::vector<int32_t> eplb_decode_token_mask;
     std::vector<int32_t> mtp_bootstrap_row_idxes;
     std::vector<torch::Tensor> mtp_bootstrap_embeddings;

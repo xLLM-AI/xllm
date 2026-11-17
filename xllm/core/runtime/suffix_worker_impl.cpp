@@ -221,7 +221,10 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   SampleOutput val_output;
   {
     AUTO_COUNTER(speculative_execution_latency_seconds_validation);
-    val_output = validate(input.sampling_params, draft_proposal, target_output);
+    val_output = run_rejection_sampling(input.sampling_params,
+                                        draft_proposal,
+                                        target_output.logits,
+                                        target_output.sample_output.embeddings);
   }
 
   if (has_request_ids) {
@@ -264,25 +267,6 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   return finalize_verify_output(std::move(target_output),
                                 std::move(val_output),
                                 input.json_object_states);
-}
-
-SampleOutput SuffixWorkerImpl::validate(SamplingParameters sampling_params,
-                                        const DraftProposal& draft_proposal,
-                                        const ForwardOutput& target_output) {
-  const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;
-  const int32_t batch_size =
-      static_cast<int32_t>(draft_proposal.token_ids().size(/*dim=*/0));
-  CHECK_EQ(target_output.logits.size(/*dim=*/0),
-           static_cast<int64_t>(batch_size) * num_val_tokens)
-      << "suffix validate logits shape mismatch";
-
-  // The suffix draft carries no model distribution (q = 1 deterministic
-  // suggestion), so the rejection sampler's no-logits path applies.
-  return spec_verify::run_rejection_sampling(
-      std::move(sampling_params),
-      draft_proposal,
-      target_output.logits,
-      target_output.sample_output.embeddings);
 }
 
 }  // namespace xllm

@@ -539,14 +539,14 @@ bool MTPWorkerImpl<TargetInput>::should_use_explicit_spec_verify_replay_update(
       !::xllm::ExecutionConfig::get_instance()
            .enable_graph_mode_decode_no_padding() ||
       !supports_expanded_spec_verify() || options_.block_size() <= 0 ||
-      !spec_verify::has_speculative_verify_block_table_layout(
+      !has_speculative_verify_block_table_layout(
           block_tables, input.input_params.multi_block_tables, num_sequences)) {
     return false;
   }
   const int64_t block_table_width =
       block_tables.defined()
           ? spec_verify_block_table_width(block_tables)
-          : spec_verify::speculative_verify_block_table_capacity(
+          : speculative_verify_block_table_capacity(
                 impl_->context_.get_model_args().max_position_embeddings(),
                 logical_block_size());
   if (block_table_width <= 0 ||
@@ -567,10 +567,9 @@ template <typename TargetInput>
 int64_t MTPWorkerImpl<TargetInput>::spec_verify_block_table_width(
     const torch::Tensor& block_tables) const {
   CHECK(block_tables.defined() && block_tables.dim() == 2);
-  const int64_t declared_capacity =
-      spec_verify::speculative_verify_block_table_capacity(
-          impl_->context_.get_model_args().max_position_embeddings(),
-          logical_block_size());
+  const int64_t declared_capacity = speculative_verify_block_table_capacity(
+      impl_->context_.get_model_args().max_position_embeddings(),
+      logical_block_size());
   CHECK_LE(block_tables.size(1), declared_capacity)
       << "block table width exceeds the model position capacity";
   return declared_capacity;
@@ -586,10 +585,9 @@ void MTPWorkerImpl<TargetInput>::ensure_spec_verify_control_block_table(
   }
   CHECK(!input_params.multi_block_tables.empty())
       << "missing model-managed block tables for spec verify";
-  const int64_t block_table_capacity =
-      spec_verify::speculative_verify_block_table_capacity(
-          impl_->context_.get_model_args().max_position_embeddings(),
-          logical_block_size());
+  const int64_t block_table_capacity = speculative_verify_block_table_capacity(
+      impl_->context_.get_model_args().max_position_embeddings(),
+      logical_block_size());
   CHECK_GT(num_sequences, 0);
   CHECK_GT(block_table_capacity, 0);
 
@@ -599,8 +597,8 @@ void MTPWorkerImpl<TargetInput>::ensure_spec_verify_control_block_table(
       spec_verify_control_block_table_buffer_.size(0) < row_capacity ||
       spec_verify_control_block_table_buffer_.size(1) < block_table_capacity) {
     spec_verify_control_block_table_buffer_ =
-        spec_verify::make_speculative_verify_control_block_table(
-            row_capacity, block_table_capacity);
+        make_speculative_verify_control_block_table(row_capacity,
+                                                    block_table_capacity);
   }
 
   block_tables = spec_verify_control_block_table_buffer_
@@ -2806,23 +2804,10 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     ++step;
   }
 
-  return validate(std::move(sampling_params),
-                  proposal,
-                  target_output,
-                  num_speculative_tokens);
-}
-
-template <typename TargetInput>
-SampleOutput MTPWorkerImpl<TargetInput>::validate(
-    SamplingParameters sampling_params,
-    const DraftProposal& draft_proposal,
-    const ForwardOutput& target_output,
-    int32_t num_speculative_tokens) {
-  return spec_verify::run_rejection_sampling(
-      std::move(sampling_params),
-      draft_proposal,
-      target_output.logits,
-      target_output.sample_output.embeddings);
+  return run_rejection_sampling(std::move(sampling_params),
+                                proposal,
+                                target_output.logits,
+                                target_output.sample_output.embeddings);
 }
 
 template class MTPWorkerImpl<LlmForwardInput>;

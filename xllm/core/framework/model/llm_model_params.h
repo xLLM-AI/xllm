@@ -39,7 +39,6 @@ class LlmModelParams final {
     out.expert = expert;
     out.graph = graph;
     out.multi_block_tables = multi_block_tables;
-    out.mtp_shifted_token_ids = mtp_shifted_token_ids;
     out.linear_state_validity_mask = linear_state_validity_mask;
     out.is_spec_verify = is_spec_verify;
     out.prefill_without_cache = prefill_without_cache;
@@ -71,7 +70,6 @@ class LlmModelParams final {
       params.multi_block_tables.emplace_back(
           safe_to(table, table.options().device(torch::kCPU), true));
     }
-    params.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);
     materialize_linear_state_indices(params.embedding, device);
 #if defined(USE_MUSA)
     params.attn_metadata = attn_metadata;
@@ -128,7 +126,6 @@ class LlmModelParams final {
   ExpertInput expert;
   LlmGraphInput graph;
   std::vector<torch::Tensor> multi_block_tables;
-  torch::Tensor mtp_shifted_token_ids;
   std::vector<int64_t> linear_state_validity_mask;
   bool is_spec_verify = false;
   bool prefill_without_cache = false;

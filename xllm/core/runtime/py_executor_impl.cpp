@@ -332,8 +332,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   py::object deepstack_input_embeds = py::none();
   py::object topk_indices = mtp_topk_indices(params);
   torch::Tensor execution_tokens =
-      spec_verify::materialize_graph_speculative_verify_tokens(tokens,
-                                                               params.graph);
+      materialize_graph_speculative_verify_tokens(tokens, params.graph);
 
   // Full encoder outputs belong to the MM items; the shared gather selects
   // this step's chunk rows and builds modality masks before Python merges them.

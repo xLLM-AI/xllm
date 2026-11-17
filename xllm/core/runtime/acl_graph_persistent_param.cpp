@@ -284,8 +284,7 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // Block table tensors with maximum possible size
   const int64_t block_size = options.block_size();
   const int64_t max_block_table_len =
-      spec_verify::speculative_verify_block_table_capacity(max_seq_len,
-                                                           block_size);
+      speculative_verify_block_table_capacity(max_seq_len, block_size);
   persistent_block_tables_ =
       torch::zeros({metadata_capacity, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
