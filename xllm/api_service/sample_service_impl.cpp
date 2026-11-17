@@ -24,6 +24,7 @@ limitations under the License.
 #include <mutex>
 #include <utility>
 
+#include "api_service/generation_master.h"
 #include "common/instance_name.h"
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/master_manager.h"
@@ -115,8 +116,8 @@ uint32_t get_requested_logprobs(const proto::SampleRequest& request) {
              : sample_service_internal::kDefaultSampleLogprobs;
 }
 
-Status get_rate_limit_status(LLMMaster* master) {
-  return master->get_rate_limiter()->acquire();
+Status get_rate_limit_status(const GenerationMaster& master) {
+  return master.get_rate_limiter()->acquire();
 }
 
 }  // namespace
@@ -262,7 +263,7 @@ bool build_response(const std::string& request_id,
 }  // namespace sample_service_internal
 
 SampleServiceImpl::SampleServiceImpl(
-    LLMMaster* master,
+    Master* master,
     const std::vector<std::string>& models,
     std::shared_ptr<MasterManager> master_manager)
     : APIServiceImpl(models), master_manager_(std::move(master_manager)) {
@@ -282,9 +283,9 @@ bool SampleServiceImpl::process_request(const proto::SampleRequest& request,
     return false;
   }
 
-  auto master = std::dynamic_pointer_cast<LLMMaster>(
-      master_manager_->find_master(request.model()));
-  if (master == nullptr) {
+  auto master =
+      GenerationMaster::from(master_manager_->find_master(request.model()));
+  if (!master) {
     *status = Status(StatusCode::UNKNOWN, "Model not supported");
     return false;
   }
@@ -317,7 +318,7 @@ bool SampleServiceImpl::process_request(const proto::SampleRequest& request,
     return true;
   }
 
-  *status = get_rate_limit_status(master.get());
+  *status = get_rate_limit_status(*master);
   if (!status->ok()) {
     return false;
   }
@@ -386,9 +387,9 @@ void SampleServiceImpl::process_async_impl(std::shared_ptr<SampleCall> call) {
     return;
   }
 
-  auto master = std::dynamic_pointer_cast<LLMMaster>(
-      master_manager_->find_master(request.model()));
-  if (master == nullptr) {
+  auto master =
+      GenerationMaster::from(master_manager_->find_master(request.model()));
+  if (!master) {
     call->finish_with_error(StatusCode::UNKNOWN, "Model not supported");
     return;
   }
@@ -423,7 +424,7 @@ void SampleServiceImpl::process_async_impl(std::shared_ptr<SampleCall> call) {
     return;
   }
 
-  status = get_rate_limit_status(master.get());
+  status = get_rate_limit_status(*master);
   if (!status.ok()) {
     call->finish_with_error(status.code(), status.message());
     return;

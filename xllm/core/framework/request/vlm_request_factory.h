@@ -17,7 +17,9 @@ limitations under the License.
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -39,6 +41,8 @@ limitations under the License.
 namespace xllm {
 
 class Tokenizer;
+class Call;
+class JsonObjectGrammar;
 
 // Factory that assembles a domain Request aggregate for the VLM path from raw
 // user input (a text prompt with multimodal data, or chat messages plus a
@@ -51,12 +55,16 @@ class Tokenizer;
 // limiter); the owner must outlive the factory.
 class VLMRequestFactory final {
  public:
+  using RpcResponseHandler =
+      std::function<std::vector<bool>(const std::vector<RequestOutput>&)>;
+
   VLMRequestFactory(MultimodalProcessorBase* processor,
                     JinjaChatTemplate* chat_template,
                     const Tokenizer* tokenizer,
                     const ModelArgs* model_args,
                     const Options* options,
-                    RateLimiter* rate_limiter);
+                    RateLimiter* rate_limiter,
+                    RpcResponseHandler rpc_response_handler = {});
 
   // completion: a text prompt plus already-decoded multimodal data.
   std::shared_ptr<Request> create(
@@ -64,6 +72,17 @@ class VLMRequestFactory final {
       MMData mm_data,
       const RequestParams& sp,
       OutputCallback callback,
+      std::chrono::steady_clock::time_point arrival_time =
+          std::chrono::steady_clock::now());
+
+  std::shared_ptr<Request> create(
+      std::string prompt,
+      std::optional<std::vector<int32_t>> prompt_tokens,
+      MMData mm_data,
+      const RequestParams& sp,
+      std::optional<Call*> call,
+      OutputCallback callback,
+      std::optional<ChatTemplateGenerationMode> generation_mode = std::nullopt,
       std::chrono::steady_clock::time_point arrival_time =
           std::chrono::steady_clock::now());
 
@@ -78,13 +97,46 @@ class VLMRequestFactory final {
       std::chrono::steady_clock::time_point arrival_time =
           std::chrono::steady_clock::now());
 
+  std::shared_ptr<Request> create(
+      std::vector<Message> messages,
+      std::optional<std::vector<int32_t>> prompt_tokens,
+      const RequestParams& sp,
+      MMInput mm_input,
+      std::optional<Call*> call,
+      OutputCallback callback,
+      bool use_prompt_as_is = false,
+      std::chrono::steady_clock::time_point arrival_time =
+          std::chrono::steady_clock::now());
+
+  // Includes processor-expanded image/video/audio placeholders, without
+  // constructing a Request or taking a generation rate-limit slot.
+  Status count_chat_tokens(std::vector<Message> messages,
+                           const RequestParams& sp,
+                           MMInput mm_input,
+                           int32_t& token_count);
+
  private:
+  struct PreparedPrompt {
+    std::string text;
+    MMData mm_data;
+    std::optional<ChatTemplateGenerationMode> generation_mode;
+  };
+
+  std::optional<PreparedPrompt> prepare_chat_prompt(
+      std::vector<Message> messages,
+      const RequestParams& sp,
+      MMInput mm_input,
+      bool use_prompt_as_is,
+      const OutputCallback& callback);
+
   std::shared_ptr<Request> build_request(
       std::string prompt,
       std::vector<int32_t> prompt_tokens,
       MMData mm_data,
       const RequestParams& sp,
+      std::optional<Call*> call,
       OutputCallback callback,
+      std::optional<ChatTemplateGenerationMode> generation_mode,
       std::chrono::steady_clock::time_point arrival_time);
 
   // Builds the stopping checker, encoding any stop sequences. Returns
@@ -96,12 +148,22 @@ class VLMRequestFactory final {
       int32_t max_context_len,
       const OutputCallback& callback);
 
+  bool apply_json_object_grammar(
+      RequestState& state,
+      const RequestParams& sp,
+      std::optional<ChatTemplateGenerationMode> generation_mode,
+      const OutputCallback& callback);
+
   MultimodalProcessorBase* processor_ = nullptr;
   JinjaChatTemplate* chat_template_ = nullptr;
   const Tokenizer* tokenizer_ = nullptr;
   const ModelArgs* model_args_ = nullptr;
   const Options* options_ = nullptr;
   RateLimiter* rate_limiter_ = nullptr;
+  OutputsFunc batch_callback_;
+  std::mutex json_object_grammar_mutex_;
+  std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;
+  std::shared_ptr<const JsonObjectGrammar> json_reasoning_grammar_;
 };
 
 }  // namespace xllm

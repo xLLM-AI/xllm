@@ -226,8 +226,7 @@ void Request::handle_last_token() {
   }
 }
 
-RequestOutput Request::generate_output(const Tokenizer& tokenizer,
-                                       ThreadPool* thread_pool) {
+Usage Request::usage() const {
   // summarize statistics for all sequences
   Usage usage;
   usage.num_prompt_tokens = state_.prompt_tokens.size();
@@ -241,14 +240,18 @@ RequestOutput Request::generate_output(const Tokenizer& tokenizer,
            static_cast<size_t>(std::numeric_limits<int32_t>::max()));
   usage.num_cached_tokens = static_cast<int32_t>(num_prefix_cache_tokens_);
   usage.num_total_tokens = usage.num_prompt_tokens + usage.num_generated_tokens;
+  return usage;
+}
 
+RequestOutput Request::generate_output(const Tokenizer& tokenizer,
+                                       ThreadPool* thread_pool) {
   RequestOutput output;
   output.request_id = request_id_;
   output.service_request_id = service_request_id_;
   output.target_xservice_addr = source_xservice_addr_;
   output.stream = state_.stream;
   output.response_formatter = state_.response_formatter;
-  output.usage = usage;
+  output.usage = usage();
   output.input_audio_duration_s = state_.input_audio_duration_s;
   output.finished = finished();
   output.cancelled = cancelled();

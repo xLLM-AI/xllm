@@ -30,6 +30,7 @@ limitations under the License.
 #include <utility>
 
 #include "api_service/chat_response_builder.h"
+#include "api_service/generation_master.h"
 #include "api_service/openai_http.h"
 #include "api_service/response_usage.h"
 #include "api_service/stream_output_parser.h"
@@ -111,14 +112,14 @@ bool send_result_to_client_brpc(const std::shared_ptr<ChatCall>& call,
   return call->write_and_finish(call->response());
 }
 
-LLMMaster* check_master(LLMMaster* master) {
+Master* check_master(Master* master) {
   CHECK(master != nullptr);
   return master;
 }
 
 }  // namespace
 
-ChatServiceImpl::ChatServiceImpl(LLMMaster* master,
+ChatServiceImpl::ChatServiceImpl(Master* master,
                                  const std::vector<std::string>& models,
                                  std::shared_ptr<MasterManager> master_manager)
     : APIServiceImpl(models),
@@ -130,10 +131,9 @@ ChatServiceImpl::ChatServiceImpl(LLMMaster* master,
   CHECK(master_manager_ != nullptr);
 }
 
-std::shared_ptr<LLMMaster> ChatServiceImpl::get_model_master(
+std::optional<GenerationMaster> ChatServiceImpl::get_model_master(
     const std::string& model) const {
-  return std::dynamic_pointer_cast<LLMMaster>(
-      master_manager_->find_master(model));
+  return GenerationMaster::from(master_manager_->find_master(model));
 }
 
 void ChatServiceImpl::process_async_rpc_impl(
@@ -161,7 +161,7 @@ void ChatServiceImpl::process_request_from_service(
   };
   const auto& model = rpc_request.model();
   auto master = get_model_master(model);
-  if (unlikely(master == nullptr)) {
+  if (unlikely(!master)) {
     CALLBACK_WITH_ERROR(StatusCode::UNKNOWN,
                         "Model not supported",
                         service_request_id,
@@ -180,7 +180,6 @@ void ChatServiceImpl::process_request_from_service(
     return;
   }
 
-  // LLMMaster path (existing logic)
   // Check if the request is being rate-limited.
   const Status admission = master->get_rate_limiter()->acquire();
   if (!admission.ok()) {
@@ -265,8 +264,8 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
   }
   const auto& model = rpc_request.model();
 
-  std::shared_ptr<LLMMaster> master = get_model_master(model);
-  if (unlikely(master == nullptr)) {
+  auto master = get_model_master(model);
+  if (unlikely(!master)) {
     call->finish_with_error(StatusCode::NOT_FOUND,
                             "The model `" + model + "` does not exist.",
                             "model");
@@ -457,8 +456,10 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
   // schedule the request
   master_->handle_request(
       std::move(messages),
+      /*prompt_tokens=*/std::nullopt,
       std::move(request_params),
       std::move(mm_input),
+      call.get(),
       [call,
        model,
        master = master_,

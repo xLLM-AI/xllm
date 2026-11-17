@@ -66,6 +66,9 @@ bool MiniCPMPromptProcessor::process(std::string& prompt,
   }
   text_chunks.push_back(prompt.substr(last_pos));
 
+  if (text_chunks.size() != image_size_list.size() + 1) {
+    return false;
+  }
   std::string new_prompt;
   for (size_t i = 0; i < image_size_list.size(); ++i) {
     new_prompt += text_chunks[i];
@@ -79,6 +82,9 @@ bool MiniCPMPromptProcessor::process(std::string& prompt,
 bool MiniCPMPromptProcessor::find_mm_spans(
     const std::vector<int32_t>& token_ids,
     MMData& mm_data) {
+  if (mm_data.empty()) {
+    return true;
+  }
   int32_t global_mm_index = 0;
   int32_t offset = 0;
   auto& mm_items = mm_data.items<MMItemVec>();
@@ -88,18 +94,26 @@ bool MiniCPMPromptProcessor::find_mm_spans(
   for (size_t idx = 0; idx < tokens_num; ++idx) {
     int32_t token = token_ids[idx];
     if (token == im_start_id_) {
+      if (in_image || global_mm_index >= mm_items.size()) {
+        return false;
+      }
       in_image = true;
       offset = static_cast<int32_t>(idx) + 1;
       span_tokens.clear();
       continue;
     }
     if (token == im_end_id_) {
-      if (!in_image) {
-        continue;
+      if (!in_image || global_mm_index >= mm_items.size()) {
+        return false;
       }
       in_image = false;
       int32_t length = static_cast<int32_t>(span_tokens.size());
       auto& item = mm_items[global_mm_index++];
+      if (item.type() != MMType::IMAGE ||
+          std::count(span_tokens.begin(), span_tokens.end(), unk_id_) !=
+              image_feature_size_) {
+        return false;
+      }
       item.mutable_state().mutable_token_pos() = {offset, length};
       if (length == 0) {
         item.mutable_state().mutable_mm_token_num() = 0;
@@ -126,7 +140,7 @@ bool MiniCPMPromptProcessor::find_mm_spans(
     }
     span_tokens.push_back(token);
   }
-  return true;
+  return !in_image && global_mm_index == mm_items.size();
 }
 
 std::string MiniCPMPromptProcessor::get_image_id_placeholder(

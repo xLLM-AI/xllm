@@ -28,6 +28,7 @@ limitations under the License.
 #include <utility>
 
 #include "api_service/completion_response_builder.h"
+#include "api_service/generation_master.h"
 #include "api_service/openai_batch.h"
 #include "api_service/response_usage.h"
 #include "common/instance_name.h"
@@ -96,7 +97,7 @@ bool send_completion_result_to_client(
 }  // namespace
 
 CompletionServiceImpl::CompletionServiceImpl(
-    LLMMaster* master,
+    Master* master,
     const std::vector<std::string>& models,
     std::shared_ptr<MasterManager> master_manager)
     : APIServiceImpl(models), master_manager_(std::move(master_manager)) {
@@ -104,10 +105,9 @@ CompletionServiceImpl::CompletionServiceImpl(
   CHECK(master_manager_ != nullptr);
 }
 
-std::shared_ptr<LLMMaster> CompletionServiceImpl::get_model_master(
+std::optional<GenerationMaster> CompletionServiceImpl::get_model_master(
     const std::string& model) const {
-  return std::dynamic_pointer_cast<LLMMaster>(
-      master_manager_->find_master(model));
+  return GenerationMaster::from(master_manager_->find_master(model));
 }
 
 // complete_async for brpc from xllm_service
@@ -136,7 +136,7 @@ void CompletionServiceImpl::process_request_from_service(
   };
   const auto& model = rpc_request.model();
   auto master = get_model_master(model);
-  if (unlikely(master == nullptr)) {
+  if (unlikely(!master)) {
     CALLBACK_WITH_ERROR(StatusCode::UNKNOWN,
                         "Model not supported",
                         service_request_id,
@@ -210,15 +210,17 @@ void CompletionServiceImpl::process_async_impl(
     return;
   }
   const auto& model = rpc_request.model();
-  std::shared_ptr<LLMMaster> master = get_model_master(model);
-  if (unlikely(master == nullptr)) {
+  auto master = get_model_master(model);
+  if (unlikely(!master)) {
     call->finish_with_error(StatusCode::NOT_FOUND,
                             "The model `" + model + "` does not exist.",
                             "model");
     return;
   }
 
-  const Status admission = master->get_rate_limiter()->acquire();
+  const int32_t num_requests =
+      rpc_request.prompts().empty() ? 1 : rpc_request.prompts_size();
+  const Status admission = master->get_rate_limiter()->acquire(num_requests);
   if (unlikely(!admission.ok())) {
     call->finish_with_error(admission.code(), admission.message());
     return;

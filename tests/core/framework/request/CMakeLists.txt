@@ -7,6 +7,7 @@ cc_test(
   SRCS
     vlm_request_factory_test.cpp
   DEPS
+    :api_service
     :common
     :config
     :request

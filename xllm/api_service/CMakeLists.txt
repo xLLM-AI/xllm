@@ -38,6 +38,7 @@ cc_library(
     openai_batch.h
     api_service.h
     api_service_impl.h
+    generation_master.h
     control_service_impl.h
     call.h
     request_id.h

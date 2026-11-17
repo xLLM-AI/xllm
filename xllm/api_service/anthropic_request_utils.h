@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -34,9 +36,12 @@ Status validate_anthropic_request(
 
 Status validate_anthropic_backend(
     const proto::AnthropicMessagesRequest& request,
-    bool count_tokens = false);
+    bool count_tokens = false,
+    bool supports_images = false,
+    int32_t image_limit = std::numeric_limits<int32_t>::max());
 
 std::vector<Message> build_anthropic_messages(
-    const proto::AnthropicMessagesRequest& request);
+    const proto::AnthropicMessagesRequest& request,
+    bool supports_images = false);
 
 }  // namespace xllm::api_service

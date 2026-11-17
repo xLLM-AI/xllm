@@ -44,6 +44,8 @@ class VLMWorkerImpl : public WorkerImpl {
   std::optional<ForwardOutput> step(const VlmForwardInput& input) override;
 
  protected:
+  bool virtual_memory_sleep(MasterStatus master_status) override;
+
   std::optional<ForwardOutput> step_for_schedule_overlap(
       const VlmForwardInput& input,
       const std::function<void()>& prepare_sampling = {}) override;

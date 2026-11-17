@@ -34,6 +34,9 @@ class RateLimiter final {
   // The rejection status distinguishes the concurrency limit from sleep.
   Status acquire();
 
+  // Reserves one slot per request in a batch, or leaves the counter unchanged.
+  Status acquire(int32_t num_requests);
+
   bool is_limited() { return !acquire().ok(); }
 
   void decrease_one_request();

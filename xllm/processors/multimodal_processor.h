@@ -33,7 +33,12 @@ class MultimodalProcessorBase {
   virtual ~MultimodalProcessorBase() = default;
   virtual bool process_prompt(std::string& prompt,
                               MMData& mm_data,
-                              std::vector<int32_t>& token_ids) = 0;
+                              std::vector<int32_t>& token_ids,
+                              bool add_special_tokens = true) = 0;
+  // Supplied tokens are authoritative; only model padding and multimodal
+  // span preparation are applied, without running the tokenizer again.
+  virtual bool process_prompt_tokens(MMData& mm_data,
+                                     std::vector<int32_t>& token_ids) = 0;
   virtual bool process_multimodal(const MMInput& inputs,
                                   MMData& data) const = 0;
 };

@@ -95,6 +95,38 @@ TEST(RequestParamsTest, ParsesJsonObjectResponseFormat) {
   EXPECT_TRUE(params.response_format_error.empty());
 }
 
+TEST(RequestParamsTest, MultimodalJsonResponseFormatSurvivesWireParsing) {
+  ScopedJsonObjectOutput enabled(/*enabled=*/true);
+  proto::MMChatRequest request;
+  ASSERT_TRUE(google::protobuf::util::JsonStringToMessage(
+                  R"({"response_format":{"type":"json_object"}})", &request)
+                  .ok());
+  RequestParams params(request, "", "");
+  EXPECT_EQ(params.response_format, ResponseFormatType::JSON_OBJECT);
+  EXPECT_TRUE(params.response_format_error.empty());
+}
+
+TEST(RequestParamsTest, MultimodalResponseFormatUsesSameFeatureGateAndErrors) {
+  for (const bool enabled : {false, true}) {
+    ScopedJsonObjectOutput feature_gate(enabled);
+    proto::MMChatRequest request;
+    request.mutable_response_format()->set_type("json_object");
+    RequestParams params(request, "", "");
+    EXPECT_EQ(
+        params.response_format,
+        enabled ? ResponseFormatType::JSON_OBJECT : ResponseFormatType::NONE);
+    request.mutable_response_format()->set_type("json_schema");
+    RequestParams unsupported(request, "", "");
+    std::optional<Status> received_status;
+    EXPECT_FALSE(unsupported.verify_params([&](RequestOutput output) {
+      received_status = output.status;
+      return false;
+    }));
+    ASSERT_TRUE(received_status.has_value());
+    EXPECT_EQ(received_status->code(), StatusCode::INVALID_ARGUMENT);
+  }
+}
+
 TEST(RequestParamsTest, IgnoresJsonObjectResponseFormatWhenDisabled) {
   ScopedJsonObjectOutput disabled(/*enabled=*/false);
   proto::ChatRequest request;

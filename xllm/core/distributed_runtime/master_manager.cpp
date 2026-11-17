@@ -33,6 +33,23 @@ MasterManager::MasterHandle make_external_master_handle(Master* master) {
   return MasterManager::MasterHandle(master, [](Master* /*unused*/) {});
 }
 
+template <typename Function>
+bool dispatch_generation_master(Master* master,
+                                const char* unsupported_message,
+                                std::string* error_message,
+                                Function&& function) {
+  if (auto* llm = dynamic_cast<LLMMaster*>(master)) {
+    return function(llm);
+  }
+  if (auto* vlm = dynamic_cast<VLMMaster*>(master)) {
+    return function(vlm);
+  }
+  if (error_message != nullptr) {
+    *error_message = unsupported_message;
+  }
+  return false;
+}
+
 }  // namespace
 
 MasterManager::~MasterManager() { shutdown(); }
@@ -221,61 +238,64 @@ bool MasterManager::sleep(const std::string& model_id,
     return false;
   }
 
-  auto* llm_master = dynamic_cast<LLMMaster*>(master.get());
-  if (llm_master == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "Sleep is only supported for LLM masters";
-    }
-    return false;
-  }
-  if (llm_master->is_sleeping()) {
-    LOG(INFO) << "Master for model " << model_id << " is already sleeping";
-    if (error_message != nullptr) {
-      *error_message = "Master for model is already sleeping";
-    }
-    return false;
-  }
+  return dispatch_generation_master(
+      master.get(),
+      "Sleep is only supported for text generation masters",
+      error_message,
+      [&](auto* generation_master) {
+        if (generation_master->is_sleeping()) {
+          LOG(INFO) << "Master for model " << model_id
+                    << " is already sleeping";
+          if (error_message != nullptr) {
+            *error_message = "Master for model is already sleeping";
+          }
+          return false;
+        }
 
-  RateLimiter* rate_limiter = master->get_rate_limiter();
-  if (!rate_limiter->try_set_sleeping()) {
-    const int32_t num_requests = rate_limiter->get_num_concurrent_requests();
-    LOG(ERROR) << "Cannot sleep model " << model_id << " with " << num_requests
-               << " in-flight requests";
-    if (error_message != nullptr) {
-      *error_message = "Cannot sleep model with in-flight requests";
-    }
-    return false;
-  }
+        RateLimiter* rate_limiter = master->get_rate_limiter();
+        if (!rate_limiter->try_set_sleeping()) {
+          const int32_t num_requests =
+              rate_limiter->get_num_concurrent_requests();
+          LOG(ERROR) << "Cannot sleep model " << model_id << " with "
+                     << num_requests << " in-flight requests";
+          if (error_message != nullptr) {
+            *error_message = "Cannot sleep model with in-flight requests";
+          }
+          return false;
+        }
 
-  const MasterStatus previous_status = llm_master->get_master_status();
-  llm_master->set_master_status(master_status);
-  if (llm_master->sleep()) {
-    return true;
-  }
+        const MasterStatus previous_status =
+            generation_master->get_master_status();
+        generation_master->set_master_status(master_status);
+        if (generation_master->sleep()) {
+          return true;
+        }
 
-  // Worker RPC failure cannot undo released mappings. Keep admission blocked
-  // until wakeup has restored memory and every worker has acknowledged it.
-  if (llm_master->requires_wakeup()) {
-    LOG(ERROR) << "Failed to sleep model " << model_id
-               << "; memory remains suspended and admission is blocked";
-    if (error_message != nullptr) {
-      *error_message =
-          "Failed to sleep model; memory remains suspended, retry wakeup";
-    }
-    return false;
-  }
+        // Worker RPC failure cannot undo released mappings. Keep admission
+        // blocked until wakeup has restored memory and every worker has
+        // acknowledged it.
+        if (generation_master->requires_wakeup()) {
+          LOG(ERROR) << "Failed to sleep model " << model_id
+                     << "; memory remains suspended and admission is blocked";
+          if (error_message != nullptr) {
+            *error_message =
+                "Failed to sleep model; memory remains suspended, retry wakeup";
+          }
+          return false;
+        }
 
-  llm_master->set_master_status(previous_status);
-  if (!rate_limiter->try_wakeup()) {
-    LOG(ERROR) << "Failed to restore rate limiter for model " << model_id
-               << " after sleep failure";
-  }
-  LOG(ERROR) << "Failed to sleep model " << model_id << " from status "
-             << previous_status.to_proto();
-  if (error_message != nullptr) {
-    *error_message = "Failed to sleep model";
-  }
-  return false;
+        generation_master->set_master_status(previous_status);
+        if (!rate_limiter->try_wakeup()) {
+          LOG(ERROR) << "Failed to restore rate limiter for model " << model_id
+                     << " after sleep failure";
+        }
+        LOG(ERROR) << "Failed to sleep model " << model_id << " from status "
+                   << previous_status.to_proto();
+        if (error_message != nullptr) {
+          *error_message = "Failed to sleep model";
+        }
+        return false;
+      });
 }
 
 bool MasterManager::wakeup(const std::string& model_id,
@@ -291,56 +311,58 @@ bool MasterManager::wakeup(const std::string& model_id,
     return false;
   }
 
-  auto* llm_master = dynamic_cast<LLMMaster*>(master.get());
-  if (llm_master == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "Wakeup is only supported for LLM masters";
-    }
-    return false;
-  }
-  if (!llm_master->is_sleeping()) {
-    LOG(INFO) << "Master for model " << model_id << " is already awake";
-    if (error_message != nullptr) {
-      *error_message = "Master for model is already awake";
-    }
-    return false;
-  }
+  return dispatch_generation_master(
+      master.get(),
+      "Wakeup is only supported for text generation masters",
+      error_message,
+      [&](auto* generation_master) {
+        if (!generation_master->is_sleeping()) {
+          LOG(INFO) << "Master for model " << model_id << " is already awake";
+          if (error_message != nullptr) {
+            *error_message = "Master for model is already awake";
+          }
+          return false;
+        }
 
-  RateLimiter* rate_limiter = master->get_rate_limiter();
-  if (!rate_limiter->is_sleeping()) {
-    LOG(ERROR) << "Cannot wakeup model " << model_id
-               << " because its rate limiter is not sleeping";
-    if (error_message != nullptr) {
-      *error_message = "Cannot wakeup model with an inconsistent rate limiter";
-    }
-    return false;
-  }
+        RateLimiter* rate_limiter = master->get_rate_limiter();
+        if (!rate_limiter->is_sleeping()) {
+          LOG(ERROR) << "Cannot wakeup model " << model_id
+                     << " because its rate limiter is not sleeping";
+          if (error_message != nullptr) {
+            *error_message =
+                "Cannot wakeup model with an inconsistent rate limiter";
+          }
+          return false;
+        }
 
-  const bool has_remote_weights = !options.remote_addrs.empty();
-  const bool wakeup_succeeded =
-      has_remote_weights ? llm_master->wakeup(options) : llm_master->wakeup();
-  if (!wakeup_succeeded) {
-    LOG(ERROR) << "Failed to wakeup model " << model_id
-               << (has_remote_weights ? " with remote weight transfer" : "");
-    if (error_message != nullptr) {
-      *error_message =
-          has_remote_weights
-              ? "Failed to wakeup model with remote weight transfer"
-              : "Failed to wakeup model";
-    }
-    return false;
-  }
+        const bool has_remote_weights = !options.remote_addrs.empty();
+        const bool wakeup_succeeded = has_remote_weights
+                                          ? generation_master->wakeup(options)
+                                          : generation_master->wakeup();
+        if (!wakeup_succeeded) {
+          LOG(ERROR) << "Failed to wakeup model " << model_id
+                     << (has_remote_weights ? " with remote weight transfer"
+                                            : "");
+          if (error_message != nullptr) {
+            *error_message =
+                has_remote_weights
+                    ? "Failed to wakeup model with remote weight transfer"
+                    : "Failed to wakeup model";
+          }
+          return false;
+        }
 
-  if (!rate_limiter->try_wakeup()) {
-    LOG(ERROR) << "Failed to restore rate limiter for model " << model_id;
-    if (error_message != nullptr) {
-      *error_message = "Failed to restore rate limiter";
-    }
-    return false;
-  }
+        if (!rate_limiter->try_wakeup()) {
+          LOG(ERROR) << "Failed to restore rate limiter for model " << model_id;
+          if (error_message != nullptr) {
+            *error_message = "Failed to restore rate limiter";
+          }
+          return false;
+        }
 
-  llm_master->set_master_status(MasterStatus::WAKEUP);
-  return true;
+        generation_master->set_master_status(MasterStatus::WAKEUP);
+        return true;
+      });
 }
 
 bool MasterManager::link_p2p(const std::string& model_id,
@@ -355,20 +377,19 @@ bool MasterManager::link_p2p(const std::string& model_id,
     return false;
   }
 
-  auto* llm_master = dynamic_cast<LLMMaster*>(master.get());
-  if (llm_master == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "P2P linking is only supported for LLM masters";
-    }
-    return false;
-  }
-  if (!llm_master->link_p2p(remote_addrs)) {
-    if (error_message != nullptr) {
-      *error_message = "Failed to link P2P peers";
-    }
-    return false;
-  }
-  return true;
+  return dispatch_generation_master(
+      master.get(),
+      "P2P linking is only supported for text generation masters",
+      error_message,
+      [&](auto* generation_master) {
+        if (!generation_master->link_p2p(remote_addrs)) {
+          if (error_message != nullptr) {
+            *error_message = "Failed to link P2P peers";
+          }
+          return false;
+        }
+        return true;
+      });
 }
 
 bool MasterManager::unlink_p2p(const std::string& model_id,
@@ -383,20 +404,19 @@ bool MasterManager::unlink_p2p(const std::string& model_id,
     return false;
   }
 
-  auto* llm_master = dynamic_cast<LLMMaster*>(master.get());
-  if (llm_master == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "P2P unlinking is only supported for LLM masters";
-    }
-    return false;
-  }
-  if (!llm_master->unlink_p2p(remote_addrs)) {
-    if (error_message != nullptr) {
-      *error_message = "Failed to unlink P2P peers";
-    }
-    return false;
-  }
-  return true;
+  return dispatch_generation_master(
+      master.get(),
+      "P2P unlinking is only supported for text generation masters",
+      error_message,
+      [&](auto* generation_master) {
+        if (!generation_master->unlink_p2p(remote_addrs)) {
+          if (error_message != nullptr) {
+            *error_message = "Failed to unlink P2P peers";
+          }
+          return false;
+        }
+        return true;
+      });
 }
 
 bool MasterManager::start_profile(std::string* error_message) {

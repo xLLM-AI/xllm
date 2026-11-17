@@ -294,5 +294,64 @@ TEST(AnthropicRequestUtilsTest, AcceptsPydanticNumericBooleanCoercions) {
   EXPECT_FALSE(request.tools(0).defer_loading());
 }
 
+TEST(AnthropicRequestUtilsTest, PreservesImagesForMultimodalModelsOnly) {
+  const auto request = parse_request(R"({"model":"test","max_tokens":16,
+    "messages":[{"role":"user","content":[
+      {"type":"text","text":"describe"},
+      {"type":"image","source":{"type":"base64","media_type":"image/png","data":"YWJj"}},
+      {"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}
+    ]}]})");
+  EXPECT_FALSE(api_service::validate_anthropic_backend(request).ok());
+  EXPECT_FALSE(
+      api_service::validate_anthropic_backend(request, false, true, 1).ok());
+  EXPECT_FALSE(
+      api_service::validate_anthropic_backend(request, true, true, 1).ok());
+  EXPECT_TRUE(
+      api_service::validate_anthropic_backend(request, false, true, 2).ok());
+  ASSERT_TRUE(
+      api_service::validate_anthropic_backend(request, false, true).ok());
+  EXPECT_TRUE(
+      api_service::validate_anthropic_backend(request, true, true).ok());
+  const auto messages = api_service::build_anthropic_messages(request, true);
+  ASSERT_EQ(messages.size(), 1);
+  const auto& content = std::get<MMContentVec>(messages[0].content);
+  ASSERT_EQ(content.size(), 3);
+  EXPECT_EQ(content[0].text, "describe");
+  EXPECT_EQ(content[1].type, "image_url");
+  EXPECT_EQ(content[1].image_url.url, "data:image/png;base64,YWJj");
+  EXPECT_EQ(content[2].image_url.url, "https://example.com/a.png");
+}
+
+TEST(AnthropicRequestUtilsTest, PreservesToolResultImagesAndRejectsBadSources) {
+  auto request = parse_request(R"({"model":"test","max_tokens":16,
+    "messages":[{"role":"user","content":[
+      {"type":"tool_result","tool_use_id":"call_1","content":[
+        {"type":"text","text":"result"},
+        {"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}
+      ]}]}]})");
+  EXPECT_FALSE(api_service::validate_anthropic_backend(request).ok());
+  EXPECT_FALSE(
+      api_service::validate_anthropic_backend(request, true, true, 0).ok());
+  ASSERT_TRUE(
+      api_service::validate_anthropic_backend(request, false, true).ok());
+  const auto messages = api_service::build_anthropic_messages(request, true);
+  ASSERT_EQ(messages.size(), 1);
+  EXPECT_EQ(messages[0].role, "tool");
+  EXPECT_EQ(messages[0].tool_call_id, "call_1");
+  const auto& content = std::get<MMContentVec>(messages[0].content);
+  ASSERT_EQ(content.size(), 2);
+  EXPECT_EQ(content[0].text, "result");
+  EXPECT_EQ(content[1].image_url.url, "https://example.com/a.png");
+  auto& image = (*request.mutable_messages(0)
+                      ->mutable_content_blocks()
+                      ->mutable_blocks(0)
+                      ->mutable_content_list()
+                      ->mutable_items(1)
+                      ->mutable_fields())["source"];
+  image.mutable_struct_value()->mutable_fields()->erase("url");
+  EXPECT_FALSE(
+      api_service::validate_anthropic_backend(request, true, true).ok());
+}
+
 }  // namespace
 }  // namespace xllm

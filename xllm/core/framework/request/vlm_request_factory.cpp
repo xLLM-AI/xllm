@@ -17,9 +17,11 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -28,6 +30,9 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/common/message.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/service_config.h"
+#include "core/framework/constrained/json_object_grammar.h"
+#include "core/framework/model/vocab_validation.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "framework/tokenizer/tokenizer.h"
@@ -37,6 +42,20 @@ limitations under the License.
 namespace xllm {
 
 namespace {
+
+bool get_enable_thinking(const nlohmann::json& kwargs) {
+  if (!kwargs.contains("enable_thinking") && !kwargs.contains("thinking")) {
+    return !ModelConfig::get_instance().reasoning_parser().empty();
+  }
+  bool enabled = false;
+  for (const char* key : {"enable_thinking", "thinking"}) {
+    const auto it = kwargs.find(key);
+    if (it != kwargs.end() && it->is_boolean()) {
+      enabled = enabled || it->get<bool>();
+    }
+  }
+  return enabled;
+}
 
 // Extracts the final prompt from a single message, concatenating its text
 // contents in order and skipping non-text (image/video/audio) contents.
@@ -96,7 +115,8 @@ VLMRequestFactory::VLMRequestFactory(MultimodalProcessorBase* processor,
                                      const Tokenizer* tokenizer,
                                      const ModelArgs* model_args,
                                      const Options* options,
-                                     RateLimiter* rate_limiter)
+                                     RateLimiter* rate_limiter,
+                                     RpcResponseHandler rpc_response_handler)
     : processor_(processor),
       chat_template_(chat_template),
       tokenizer_(tokenizer),
@@ -109,6 +129,16 @@ VLMRequestFactory::VLMRequestFactory(MultimodalProcessorBase* processor,
   CHECK(model_args_ != nullptr);
   CHECK(options_ != nullptr);
   CHECK(rate_limiter_ != nullptr);
+  if (options_->enable_service_routing()) {
+    CHECK(rpc_response_handler != nullptr);
+    batch_callback_ = [handler = std::move(rpc_response_handler)](
+                          const std::vector<RequestOutput>& outputs) {
+      for (const auto& output : outputs) {
+        output.log_request_status();
+      }
+      return handler(outputs);
+    };
+  }
 }
 
 std::shared_ptr<Request> VLMRequestFactory::create(
@@ -117,31 +147,80 @@ std::shared_ptr<Request> VLMRequestFactory::create(
     const RequestParams& sp,
     OutputCallback callback,
     std::chrono::steady_clock::time_point arrival_time) {
+  return create(std::move(prompt),
+                std::nullopt,
+                std::move(mm_data),
+                sp,
+                std::nullopt,
+                std::move(callback),
+                std::nullopt,
+                arrival_time);
+}
+
+std::shared_ptr<Request> VLMRequestFactory::create(
+    std::string prompt,
+    std::optional<std::vector<int32_t>> prompt_tokens,
+    MMData mm_data,
+    const RequestParams& sp,
+    std::optional<Call*> call,
+    OutputCallback callback,
+    std::optional<ChatTemplateGenerationMode> generation_mode,
+    std::chrono::steady_clock::time_point arrival_time) {
   // Guard the rate-limit slot acquired at the service entry. build_request
   // installs its own guard, so we dismiss ours before forwarding.
   xllm::ScopeGuard rate_limit_guard(
       [this] { rate_limiter_->decrease_one_request(); });
 
-  if (prompt.empty() && mm_data.empty()) {
+  if (prompt.empty() && mm_data.empty() && !prompt_tokens.has_value()) {
     LOG(ERROR) << "Prompt and multimodal data cannot be both empty.";
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Prompt and multimodal data are both empty.");
+                        "Prompt and multimodal data are both empty.",
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
     return nullptr;
   }
 
-  std::vector<int32_t> prompt_tokens;
-  if (!processor_->process_prompt(prompt, mm_data, prompt_tokens)) {
+  const bool supplied_tokens = prompt_tokens.has_value();
+  std::vector<int32_t> tokens =
+      supplied_tokens ? std::move(*prompt_tokens) : std::vector<int32_t>{};
+  if (supplied_tokens && model_args_->vocab_size() > 0) {
+    if (const auto invalid =
+            util::find_out_of_vocab_token(tokens, model_args_->vocab_size())) {
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                          "Prompt token id out of vocabulary range: " +
+                              std::to_string(*invalid),
+                          sp.service_request_id,
+                          sp.source_xservice_addr);
+      return nullptr;
+    }
+  }
+  const bool processed =
+      supplied_tokens ? processor_->process_prompt_tokens(mm_data, tokens)
+                      : processor_->process_prompt(
+                            prompt, mm_data, tokens, sp.add_special_tokens);
+  if (!processed) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Failed to process prompt.");
+                        "Failed to process prompt.",
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
+    return nullptr;
+  }
+  if (tokens.empty()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "Prompt tokens are empty.",
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
     return nullptr;
   }
 
   rate_limit_guard.dismiss();
   return build_request(std::move(prompt),
-                       std::move(prompt_tokens),
+                       std::move(tokens),
                        std::move(mm_data),
                        sp,
+                       call,
                        std::move(callback),
+                       generation_mode,
                        arrival_time);
 }
 
@@ -150,7 +229,9 @@ std::shared_ptr<Request> VLMRequestFactory::build_request(
     std::vector<int32_t> prompt_tokens,
     MMData mm_data,
     const RequestParams& sp,
+    std::optional<Call*> call,
     OutputCallback callback,
+    std::optional<ChatTemplateGenerationMode> generation_mode,
     std::chrono::steady_clock::time_point arrival_time) {
   // Guard the rate-limit slot acquired at the service entry. Any early
   // return below releases it; success path dismisses right before Request
@@ -166,24 +247,36 @@ std::shared_ptr<Request> VLMRequestFactory::build_request(
   }
   if (prompt_tokens.size() >= static_cast<size_t>(prompt_token_limit)) {
     LOG(ERROR) << "Prompt is too long: " << prompt_tokens.size();
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, "Prompt is too long");
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "Prompt is too long",
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
     return nullptr;
   }
 
-  const uint32_t remaining =
-      static_cast<uint32_t>(max_context_len - prompt_tokens.size());
-  if (sp.min_tokens > remaining) {
-    CALLBACK_WITH_ERROR(
-        StatusCode::INVALID_ARGUMENT,
-        "The remaining model context cannot satisfy min_tokens");
+  const int32_t generated_context_len =
+      max_context_len - options_->num_speculative_tokens();
+  const int64_t remaining = static_cast<int64_t>(generated_context_len) -
+                            static_cast<int64_t>(prompt_tokens.size());
+  if (remaining <= 0 || sp.min_tokens > static_cast<uint64_t>(remaining)) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "The remaining model context cannot satisfy min_tokens",
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
     return nullptr;
   }
   const uint32_t max_tokens =
-      sp.max_tokens == 0 ? remaining : std::min(sp.max_tokens, remaining);
+      sp.max_tokens == 0
+          ? static_cast<uint32_t>(remaining)
+          : std::min(sp.max_tokens, static_cast<uint32_t>(remaining));
+  const uint32_t effective_max_tokens =
+      sp.is_sample_request
+          ? std::max(max_tokens, static_cast<uint32_t>(sp.sample_slots.size()))
+          : max_tokens;
 
   // allocate enough capacity for prompt tokens, max tokens, and speculative
   // tokens, TODO: add image token size as well.
-  size_t capacity = prompt_tokens.size() + max_tokens +
+  size_t capacity = prompt_tokens.size() + effective_max_tokens +
                     options_->num_speculative_tokens() + /*bonus_token*/ 1;
   if (options_->enable_schedule_overlap()) {
     capacity += options_->num_speculative_tokens() + 1;
@@ -192,27 +285,68 @@ std::shared_ptr<Request> VLMRequestFactory::build_request(
 
   RequestSamplingParam sampling_param = sp.to_sampling_param(best_of);
   sampling_param.device_min_tokens = sp.min_tokens > 0;
+  sampling_param.json_object =
+      ServiceConfig::get_instance().enable_json_object_output() &&
+      sp.response_format == ResponseFormatType::JSON_OBJECT;
   if (const auto error =
           sp.prepare_sampling_constraints(sampling_param,
                                           tokenizer_,
                                           model_args_->vocab_size(),
                                           model_args_->eos_token_id(),
                                           model_args_->stop_token_ids())) {
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, *error);
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        *error,
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
     return nullptr;
   }
   // Model-aware complement to verify_params' 2000 cap: an oversized top-k
   // would throw inside the sampler and take the whole batch down with it.
   if (const auto error =
           sampling_param.top_logprobs_vocab_error(model_args_->vocab_size())) {
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, *error);
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        *error,
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
     return nullptr;
   }
 
-  std::optional<StoppingChecker> stopping_checker =
-      build_stopping_checker(sp, max_tokens, max_context_len, callback);
+  std::optional<StoppingChecker> stopping_checker = build_stopping_checker(
+      sp, effective_max_tokens, generated_context_len, callback);
   if (!stopping_checker.has_value()) {
     return nullptr;
+  }
+  if (options_->task_type() != "embed" && options_->task_type() != "mm_embed" &&
+      stopping_checker->check(prompt_tokens, prompt_tokens.size()) !=
+          FinishReason::NONE) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "Invalid Prompt",
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
+    return nullptr;
+  }
+
+  if (sp.stop.has_value()) {
+    std::vector<std::vector<int32_t>> generated_sequences;
+    std::vector<std::string> generated_strings;
+    // Byte-level tokenizers can merge a stop string with following whitespace.
+    // Keep these variants out of prompt validation, as on the LLM path.
+    for (const auto& stop : *sp.stop) {
+      for (const std::string_view suffix : {"\n", "\r\n", " "}) {
+        std::string candidate(stop);
+        candidate.append(suffix);
+        std::vector<int32_t> token_ids;
+        if (tokenizer_->encode(candidate, &token_ids) && !token_ids.empty() &&
+            std::find(generated_sequences.begin(),
+                      generated_sequences.end(),
+                      token_ids) == generated_sequences.end()) {
+          generated_sequences.push_back(std::move(token_ids));
+          generated_strings.push_back(stop);
+        }
+      }
+    }
+    stopping_checker->set_generated_stop_sequences(
+        std::move(generated_sequences), std::move(generated_strings));
   }
 
   // results cannot be streamed when best_of != n
@@ -235,7 +369,11 @@ std::shared_ptr<Request> VLMRequestFactory::build_request(
                          sp.skip_special_tokens,
                          options_->enable_schedule_overlap(),
                          callback,
-                         nullptr);
+                         batch_callback_,
+                         sp.decode_address,
+                         call);
+  req_state.scheduler_param = sp.to_scheduler_param();
+  req_state.sample_slots = sp.sample_slots;
   req_state.arrival_time = arrival_time;
   if (req_state.mm_data.has(MMType::AUDIO)) {
     std::vector<AudioMetadata> audio_metadata;
@@ -245,6 +383,18 @@ std::shared_ptr<Request> VLMRequestFactory::build_request(
     }
   }
   req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
+  if (!sp.source_xservice_addr.empty()) {
+    req_state.response_type = sp.response_type;
+    req_state.response_model = sp.response_model;
+    req_state.response_tools = sp.response_tools;
+    req_state.response_tool_choice = sp.response_tool_choice;
+    req_state.response_chat_template_kwargs = sp.response_chat_template_kwargs;
+    req_state.response_stream_options = sp.response_stream_options;
+  }
+  if (req_state.sampling_param.json_object &&
+      !apply_json_object_grammar(req_state, sp, generation_mode, callback)) {
+    return nullptr;
+  }
 
   rate_limit_guard.dismiss();
   // add one sequence, rest will be added by scheduler
@@ -277,7 +427,9 @@ std::optional<StoppingChecker> VLMRequestFactory::build_stopping_checker(
       std::vector<int32_t> tmp_tokens;
       if (!tokenizer_->encode(s, &tmp_tokens)) {
         CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                            "Failed to encode stop sequence");
+                            "Failed to encode stop sequence",
+                            sp.service_request_id,
+                            sp.source_xservice_addr);
         LOG(ERROR) << "Failed to encode stop sequence: " << s;
         return std::nullopt;
       }
@@ -295,85 +447,186 @@ std::optional<StoppingChecker> VLMRequestFactory::build_stopping_checker(
                          sp.min_tokens);
 }
 
+bool VLMRequestFactory::apply_json_object_grammar(
+    RequestState& state,
+    const RequestParams& sp,
+    std::optional<ChatTemplateGenerationMode> generation_mode,
+    const OutputCallback& callback) {
+  if (generation_mode == ChatTemplateGenerationMode::UNKNOWN) {
+    CALLBACK_WITH_ERROR(
+        StatusCode::INVALID_ARGUMENT,
+        "JSON object constraint requires a recognizable chat generation mode",
+        sp.service_request_id,
+        sp.source_xservice_addr);
+    return false;
+  }
+  const bool reasoning_enabled =
+      generation_mode.has_value()
+          ? generation_mode == ChatTemplateGenerationMode::REASONING
+          : get_enable_thinking(sp.chat_template_kwargs);
+  std::lock_guard<std::mutex> lock(json_object_grammar_mutex_);
+  auto& grammar =
+      reasoning_enabled ? json_reasoning_grammar_ : json_object_grammar_;
+  if (grammar == nullptr) {
+    std::string error;
+    grammar =
+        JsonObjectGrammar::create_from_tokenizer(*tokenizer_,
+                                                 model_args_->eos_token_id(),
+                                                 model_args_->stop_token_ids(),
+                                                 model_args_->vocab_size(),
+                                                 reasoning_enabled,
+                                                 &error);
+    if (grammar == nullptr) {
+      CALLBACK_WITH_ERROR(
+          StatusCode::INVALID_ARGUMENT,
+          "Failed to initialize json_object constraint: " + error,
+          sp.service_request_id,
+          sp.source_xservice_addr);
+      return false;
+    }
+  }
+  state.json_object_grammar = grammar;
+  state.json_reasoning_enabled = reasoning_enabled;
+  return true;
+}
+
 std::shared_ptr<Request> VLMRequestFactory::create(
     std::vector<Message> messages,
     const RequestParams& sp,
-    MMInput mm_inputs,
+    MMInput mm_input,
     OutputCallback callback,
     bool use_prompt_as_is,
     std::chrono::steady_clock::time_point arrival_time) {
-  // Guard the rate-limit slot acquired at the service entry. The next hop
-  // (create(prompt, ...)) installs its own guard, so we dismiss ours before
-  // forwarding.
-  xllm::ScopeGuard rate_limit_guard(
-      [this] { rate_limiter_->decrease_one_request(); });
+  return create(std::move(messages),
+                std::nullopt,
+                sp,
+                std::move(mm_input),
+                std::nullopt,
+                std::move(callback),
+                use_prompt_as_is,
+                arrival_time);
+}
 
+std::shared_ptr<Request> VLMRequestFactory::create(
+    std::vector<Message> messages,
+    std::optional<std::vector<int32_t>> prompt_tokens,
+    const RequestParams& sp,
+    MMInput mm_input,
+    std::optional<Call*> call,
+    OutputCallback callback,
+    bool use_prompt_as_is,
+    std::chrono::steady_clock::time_point arrival_time) {
+  ScopeGuard rate_limit_guard(
+      [this] { rate_limiter_->decrease_one_request(); });
+  auto prepared = prepare_chat_prompt(
+      std::move(messages), sp, std::move(mm_input), use_prompt_as_is, callback);
+  if (!prepared.has_value()) {
+    return nullptr;
+  }
+  rate_limit_guard.dismiss();
+  return create(std::move(prepared->text),
+                std::move(prompt_tokens),
+                std::move(prepared->mm_data),
+                sp,
+                call,
+                std::move(callback),
+                prepared->generation_mode,
+                arrival_time);
+}
+
+std::optional<VLMRequestFactory::PreparedPrompt>
+VLMRequestFactory::prepare_chat_prompt(std::vector<Message> messages,
+                                       const RequestParams& sp,
+                                       MMInput mm_inputs,
+                                       bool use_prompt_as_is,
+                                       const OutputCallback& callback) {
   if (mm_inputs.empty()) {
     static MMInputTransfer mm_input_transfer;
     Timer load_timer;
-    MMErrCode code = mm_input_transfer.trans(messages, mm_inputs);
+    const MMErrCode code = mm_input_transfer.trans(messages, mm_inputs);
     HISTOGRAM_OBSERVE(mm_input_loading_latency_milliseconds,
                       static_cast<int64_t>(load_timer.elapsed_milliseconds()));
     if (code != MMErrCode::SUCCESS) {
-      std::string error_message = MMErrToString(code);
-      LOG(ERROR) << error_message;
-      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, error_message);
-      return nullptr;
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                          MMErrToString(code),
+                          sp.service_request_id,
+                          sp.source_xservice_addr);
+      return std::nullopt;
     }
   }
 
   MMData mm_data;
   if (!mm_inputs.empty()) {
     Timer preprocess_timer;
-    bool ok = processor_->process_multimodal(mm_inputs, mm_data);
+    const bool processed = processor_->process_multimodal(mm_inputs, mm_data);
     HISTOGRAM_OBSERVE(
         mm_preprocess_latency_milliseconds,
         static_cast<int64_t>(preprocess_timer.elapsed_milliseconds()));
-    if (!ok) {
+    if (!processed) {
       CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                          "Failed to process multimodal input.");
-      return nullptr;
+                          "Failed to process multimodal input.",
+                          sp.service_request_id,
+                          sp.source_xservice_addr);
+      return std::nullopt;
     }
   }
 
   Timer timer;
   std::optional<std::string> prompt;
+  std::optional<ChatTemplateGenerationMode> generation_mode;
   if (use_prompt_as_is) {
-    // The request hands in a final prompt that is already assembled with
-    // the chat template; reuse it as-is to avoid double assembly.
-    VLOG(1) << "Offline request: use the prompt as-is, skip chat template "
-               "application.";
     prompt = join_message_texts(messages);
     if (!prompt.has_value()) {
-      // Loud failure for direct callers; the request entry validates the
-      // shape earlier, so this only fires on a missed contract violation.
       throw_prompt_as_is_error(messages);
     }
   } else {
-    // Server-side template context for audio models (audio_token_id set):
-    // the CTC region follows --use_ctc, so the rendered prompt and the
-    // embedding injection cannot disagree. A request kwarg of the same name
-    // is overridden on purpose.
-    nlohmann::ordered_json chat_template_kwargs = sp.chat_template_kwargs;
+    nlohmann::ordered_json kwargs = sp.chat_template_kwargs;
     if (model_args_->audio_token_id() != 0) {
-      chat_template_kwargs["use_ctc"] = ModelConfig::get_instance().use_ctc();
+      kwargs["use_ctc"] = ModelConfig::get_instance().use_ctc();
     }
-    prompt = chat_template_->apply(messages, sp.tools, chat_template_kwargs);
+    auto rendered =
+        chat_template_->apply_with_generation_mode(messages, sp.tools, kwargs);
+    if (rendered.has_value()) {
+      prompt = std::move(rendered->prompt);
+      generation_mode = rendered->generation_mode;
+    }
   }
   if (!prompt.has_value()) {
-    std::string error_message = "Failed to construct prompt from messages";
-    LOG(ERROR) << error_message;
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, error_message);
-    return nullptr;
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "Failed to construct prompt from messages",
+                        sp.service_request_id,
+                        sp.source_xservice_addr);
+    return std::nullopt;
   }
   COUNTER_ADD(chat_template_latency_seconds, timer.elapsed_seconds());
+  return PreparedPrompt{
+      std::move(*prompt), std::move(mm_data), generation_mode};
+}
 
-  rate_limit_guard.dismiss();
-  return create(std::move(prompt.value()),
-                std::move(mm_data),
-                sp,
-                std::move(callback),
-                arrival_time);
+Status VLMRequestFactory::count_chat_tokens(std::vector<Message> messages,
+                                            const RequestParams& sp,
+                                            MMInput mm_input,
+                                            int32_t& token_count) {
+  Status error;
+  const OutputCallback callback = [&error](const RequestOutput& output) {
+    error = output.status.value();
+    return true;
+  };
+  auto prepared = prepare_chat_prompt(std::move(messages),
+                                      sp,
+                                      std::move(mm_input),
+                                      /*use_prompt_as_is=*/false,
+                                      callback);
+  if (!prepared.has_value()) {
+    return error;
+  }
+  std::vector<int32_t> tokens;
+  if (!processor_->process_prompt(
+          prepared->text, prepared->mm_data, tokens, sp.add_special_tokens)) {
+    return Status(StatusCode::INVALID_ARGUMENT, "Failed to process prompt");
+  }
+  token_count = static_cast<int32_t>(tokens.size());
+  return Status();
 }
 
 }  // namespace xllm

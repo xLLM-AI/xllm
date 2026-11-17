@@ -33,11 +33,11 @@ MultimodalProcessorPipeline::MultimodalProcessorPipeline(
 
 MultimodalProcessorPipeline::~MultimodalProcessorPipeline() = default;
 
-bool MultimodalProcessorPipeline::tokenize(
-    const std::string& prompt,
-    std::vector<int32_t>& token_ids) const {
+bool MultimodalProcessorPipeline::tokenize(const std::string& prompt,
+                                           std::vector<int32_t>& token_ids,
+                                           bool add_special_tokens) const {
   Timer timer;
-  if (!tokenizer_->encode(prompt, &token_ids)) {
+  if (!tokenizer_->encode(prompt, &token_ids, add_special_tokens)) {
     LOG(ERROR) << "Failed to encode prompt: " + prompt;
     return false;
   }

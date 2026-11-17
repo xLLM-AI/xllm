@@ -121,6 +121,9 @@ MMErrCode MMInputTransfer::trans(const std::vector<Message>& messages,
 
   for (size_t idx = 0; idx < messages.size(); ++idx) {
     const auto& message = messages[idx];
+    if (std::holds_alternative<std::string>(message.content)) {
+      continue;
+    }
     const auto& mmc = std::get<MMContentVec>(message.content);
 
     MMErrCode code = this->trans_parallel(mmc, ins, inputs.payload());

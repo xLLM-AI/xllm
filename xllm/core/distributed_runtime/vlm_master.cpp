@@ -136,7 +136,8 @@ std::optional<std::string> join_message_texts(
 
 }  // namespace
 
-VLMMaster::VLMMaster(const Options& options) : Master(options) {
+VLMMaster::VLMMaster(const Options& options)
+    : Master(options), master_status_(options.master_status()) {
   options_.enable_mla(should_enable_mla(
       std::filesystem::path(options_.model_path()), options_.backend()));
 #if defined(USE_NPU)
@@ -264,6 +265,18 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   } else {
     vlm_engine_ = std::make_unique<VLMEngine>(engine_options);
   }
+  distributed_worker_manager_ = dispatch_engine(
+      [](auto* engine) { return engine->get_distributed_worker_manager(); },
+      vlm_engine_.get(),
+      speculative_engine_.get());
+  if (vlm_engine_ != nullptr) {
+    model_residency_coordinator_ = std::make_shared<ModelResidencyCoordinator>(
+        ModelResidencyCoordinator::Options{
+            .enabled = KVCacheConfig::get_instance().enable_vmm_kvcache() ||
+                       LoadConfig::get_instance().enable_vmm_weights(),
+            .model_id = engine_options.model_id()},
+        distributed_worker_manager_);
+  }
   if (!is_leader()) {
     return;
   }
@@ -273,18 +286,15 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
           .dp_size = options_.dp_size(),
           .prefetch_timeout_ms = options_.prefetch_timeout(),
           .prefetch_batch_size = options_.prefetch_batch_size()},
-      dispatch_engine(
-          [](auto* engine) { return engine->get_distributed_worker_manager(); },
-          vlm_engine_.get(),
-          speculative_engine_.get()));
+      distributed_worker_manager_);
 
   auto finish_engine_initialization = [this](auto* engine) {
     model_args_ = engine->model_args();
     if (options_.enable_service_routing()) {
-      XServiceClient* xservice_client = XServiceClient::get_instance();
-      CHECK(xservice_client->init(options_.etcd_addr().value_or(""),
-                                  options_.instance_name().value_or(""),
-                                  options_.etcd_namespace().value_or("")))
+      xservice_client_ = XServiceClient::get_instance();
+      CHECK(xservice_client_->init(options_.etcd_addr().value_or(""),
+                                   options_.instance_name().value_or(""),
+                                   options_.etcd_namespace().value_or("")))
           << "XServiceClient init fail!";
     }
   };
@@ -302,8 +312,18 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
         options_.master_status(), prepare_draft, kv_transfer_coordinator_));
     finish_engine_initialization(speculative_engine_.get());
   } else {
-    CHECK(
-        vlm_engine_->init(options_.master_status(), kv_transfer_coordinator_));
+    const VLMEngine::ModelInitCallback prepare_model =
+        [this](const ModelLoader& loader,
+               int64_t num_layers,
+               int32_t dp_size,
+               int32_t tp_size,
+               MasterStatus status) {
+          return model_residency_coordinator_->initialize_model(
+              loader, num_layers, dp_size, tp_size, status);
+        };
+    CHECK(vlm_engine_->init(
+        master_status_, prepare_model, kv_transfer_coordinator_));
+    CHECK(model_residency_coordinator_->finish_initialization(master_status_));
     finish_engine_initialization(vlm_engine_.get());
   }
 
@@ -319,6 +339,7 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
               options_.num_speculative_tokens(),
               options_.enable_graph_mode_decode_no_padding(),
               options_.speculative_algorithm()))
+      .nnodes(options_.nnodes())
       .dp_size(options_.dp_size())
       .cp_size(options_.cp_size())
       .enable_disagg_pd(options_.enable_disagg_pd())
@@ -328,17 +349,24 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
       .enable_service_routing(options_.enable_service_routing())
       .disable_log_stats(options_.disable_log_stats())
+      .priority_strategy(options_.priority_strategy())
+      .enable_profile_step_time(options_.enable_profile_step_time())
+      .enable_profile_token_budget(options_.enable_profile_token_budget())
+      .enable_latency_aware_schedule(options_.enable_latency_aware_schedule())
+      .profile_max_prompt_length(options_.profile_max_prompt_length())
+      .enable_profile_kv_blocks(options_.enable_profile_kv_blocks())
       .disable_ttft_profiling(options_.disable_ttft_profiling())
+      .max_global_ttft_ms(options_.max_global_ttft_ms())
+      .max_global_tpot_ms(options_.max_global_tpot_ms())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
       .server_idx(options_.server_idx());
   dispatch_engine(
       [&](auto* engine) {
-        scheduler_ = create_continuous_scheduler(
-            engine,
-            scheduler_options,
-            engine->get_distributed_worker_manager(),
-            /*model_residency_coordinator=*/nullptr,
-            kv_transfer_coordinator_);
+        scheduler_ = create_continuous_scheduler(engine,
+                                                 scheduler_options,
+                                                 distributed_worker_manager_,
+                                                 model_residency_coordinator_,
+                                                 kv_transfer_coordinator_);
       },
       vlm_engine_.get(),
       speculative_engine_.get());
@@ -362,12 +390,16 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       vlm_engine_.get(),
       speculative_engine_.get());
 
-  request_factory_ = std::make_unique<VLMRequestFactory>(processor_.get(),
-                                                         chat_template_.get(),
-                                                         tokenizer_.get(),
-                                                         &model_args_,
-                                                         &options_,
-                                                         get_rate_limiter());
+  request_factory_ = std::make_unique<VLMRequestFactory>(
+      processor_.get(),
+      chat_template_.get(),
+      tokenizer_.get(),
+      &model_args_,
+      &options_,
+      get_rate_limiter(),
+      [this](const std::vector<RequestOutput>& outputs) {
+        return handle_rpc_responses(outputs);
+      });
 
   Tokenizer* request_tokenizer = tokenizer_.get();
   threadpool_ = std::make_unique<ThreadPool>(
@@ -378,7 +410,7 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
 }
 
 VLMMaster::~VLMMaster() {
-  stoped_.store(true, std::memory_order_relaxed);
+  stoped_.store(true, std::memory_order_release);
 
   // Drain and join the request thread pool before any of the members its
   // worker lambdas touch are destroyed. Those lambdas dereference
@@ -397,10 +429,39 @@ VLMMaster::~VLMMaster() {
   }
 }
 
+void VLMMaster::handle_request(
+    std::string prompt,
+    std::optional<std::vector<int32_t>> prompt_tokens,
+    RequestParams sp,
+    std::optional<Call*> call,
+    OutputCallback callback) {
+  schedule_completion(std::move(prompt),
+                      std::move(prompt_tokens),
+                      MMData{},
+                      std::move(sp),
+                      call,
+                      std::move(callback));
+}
+
 void VLMMaster::handle_request(std::string prompt,
                                MMData mm_data,
                                RequestParams sp,
                                OutputCallback callback) {
+  schedule_completion(std::move(prompt),
+                      std::nullopt,
+                      std::move(mm_data),
+                      std::move(sp),
+                      std::nullopt,
+                      std::move(callback));
+}
+
+void VLMMaster::schedule_completion(
+    std::string prompt,
+    std::optional<std::vector<int32_t>> prompt_tokens,
+    MMData mm_data,
+    RequestParams sp,
+    std::optional<Call*> call,
+    OutputCallback callback) {
   const auto arrival_time = std::chrono::steady_clock::now();
   scheduler_->incr_pending_requests(1);
   auto cb = [callback = std::move(callback)](const RequestOutput& output) {
@@ -410,6 +471,8 @@ void VLMMaster::handle_request(std::string prompt,
 
   threadpool_->schedule([this,
                          prompt = std::move(prompt),
+                         prompt_tokens = std::move(prompt_tokens),
+                         call,
                          mm_data = std::move(mm_data),
                          sp = std::move(sp),
                          arrival_time,
@@ -431,9 +494,12 @@ void VLMMaster::handle_request(std::string prompt,
 
     rate_limit_guard.dismiss();
     auto request = request_factory_->create(std::move(prompt),
+                                            std::move(prompt_tokens),
                                             std::move(mm_data),
                                             sp,
+                                            call,
                                             std::move(callback),
+                                            std::nullopt,
                                             arrival_time);
     if (!request) {
       return;
@@ -441,10 +507,27 @@ void VLMMaster::handle_request(std::string prompt,
 
     if (!scheduler_->add_request(request)) {
       request->state().output_func(
-          Status{StatusCode::RESOURCE_EXHAUSTED,
-                 "No available resources to schedule request"});
+          RequestOutput{Status{StatusCode::RESOURCE_EXHAUSTED,
+                               "No available resources to schedule request"},
+                        request->service_request_id(),
+                        request->source_xservice_addr()});
     }
   });
+}
+
+void VLMMaster::handle_request(
+    std::vector<Message> messages,
+    std::optional<std::vector<int32_t>> prompt_tokens,
+    RequestParams sp,
+    std::optional<Call*> call,
+    OutputCallback callback) {
+  handle_request(std::move(messages),
+                 std::move(prompt_tokens),
+                 std::move(sp),
+                 MMInput{},
+                 call,
+                 std::move(callback),
+                 /*use_prompt_as_is=*/false);
 }
 
 void VLMMaster::handle_request(std::vector<Message> messages,
@@ -452,6 +535,23 @@ void VLMMaster::handle_request(std::vector<Message> messages,
                                MMInput mm_input,
                                OutputCallback callback,
                                bool use_prompt_as_is) {
+  handle_request(std::move(messages),
+                 std::nullopt,
+                 std::move(sp),
+                 std::move(mm_input),
+                 std::nullopt,
+                 std::move(callback),
+                 use_prompt_as_is);
+}
+
+void VLMMaster::handle_request(
+    std::vector<Message> messages,
+    std::optional<std::vector<int32_t>> prompt_tokens,
+    RequestParams sp,
+    MMInput mm_input,
+    std::optional<Call*> call,
+    OutputCallback callback,
+    bool use_prompt_as_is) {
   const auto arrival_time = std::chrono::steady_clock::now();
   // Offline-only guard: fail loudly on the caller thread (pybind surfaces
   // the exception to the Python caller) before any scheduling side effect.
@@ -467,6 +567,8 @@ void VLMMaster::handle_request(std::vector<Message> messages,
 
   threadpool_->schedule([this,
                          messages = std::move(messages),
+                         prompt_tokens = std::move(prompt_tokens),
+                         call,
                          sp = std::move(sp),
                          mm_input = std::move(mm_input),
                          use_prompt_as_is,
@@ -488,8 +590,10 @@ void VLMMaster::handle_request(std::vector<Message> messages,
 
     rate_limit_guard.dismiss();
     auto request = request_factory_->create(std::move(messages),
+                                            std::move(prompt_tokens),
                                             sp,
                                             std::move(mm_input),
+                                            call,
                                             std::move(callback),
                                             use_prompt_as_is,
                                             arrival_time);
@@ -499,16 +603,30 @@ void VLMMaster::handle_request(std::vector<Message> messages,
 
     if (!scheduler_->add_request(request)) {
       request->state().output_func(
-          Status{StatusCode::RESOURCE_EXHAUSTED,
-                 "No available resources to schedule request"});
+          RequestOutput{Status{StatusCode::RESOURCE_EXHAUSTED,
+                               "No available resources to schedule request"},
+                        request->service_request_id(),
+                        request->source_xservice_addr()});
     }
   });
+}
+
+void VLMMaster::handle_batch_request(std::vector<std::string> prompts,
+                                     std::vector<RequestParams> params,
+                                     BatchOutputCallback callback) {
+  std::vector<MMData> mm_data(prompts.size());
+  handle_batch_request(std::move(prompts),
+                       std::move(mm_data),
+                       std::move(params),
+                       std::move(callback));
 }
 
 void VLMMaster::handle_batch_request(std::vector<std::string> prompts,
                                      std::vector<MMData> mm_datas,
                                      std::vector<RequestParams> sps,
                                      BatchOutputCallback callback) {
+  CHECK_EQ(prompts.size(), mm_datas.size())
+      << "Number of prompts and multimodal payloads should be the same";
   CHECK(prompts.size() == sps.size() || sps.size() == 1)
       << "Number of prompts and sampling parameters should be the same";
 
@@ -586,6 +704,73 @@ void VLMMaster::handle_batch_request(
   }
 }
 
+void VLMMaster::count_chat_tokens(
+    std::vector<Message> messages,
+    RequestParams params,
+    std::function<void(Status, int32_t)> callback) {
+  threadpool_->schedule([this,
+                         messages = std::move(messages),
+                         params = std::move(params),
+                         callback = std::move(callback)]() mutable {
+    ScopeGuard rate_limit_guard(
+        [this] { get_rate_limiter()->decrease_one_request(); });
+    int32_t count = 0;
+    Status status = request_factory_->count_chat_tokens(
+        std::move(messages), params, MMInput{}, count);
+    callback(std::move(status), count);
+  });
+}
+
+bool VLMMaster::handle_rpc_response(const RequestOutput& output) {
+  if (xservice_client_ == nullptr) {
+    return false;
+  }
+  auto accepted = xservice_client_->generations({output});
+  CHECK_EQ(accepted.size(), 1);
+  return accepted.front();
+}
+
+std::vector<bool> VLMMaster::handle_rpc_responses(
+    const std::vector<RequestOutput>& outputs) {
+  if (xservice_client_ == nullptr) {
+    return std::vector<bool>(outputs.size(), false);
+  }
+  return xservice_client_->generations(outputs);
+}
+
+bool VLMMaster::sleep() {
+  if (vlm_engine_ == nullptr) {
+    LOG(ERROR) << "Sleep is not supported for speculative engines.";
+    return false;
+  }
+  return model_residency_coordinator_->sleep(master_status_);
+}
+
+bool VLMMaster::requires_wakeup() const {
+  return model_residency_coordinator_ != nullptr &&
+         model_residency_coordinator_->is_suspended();
+}
+
+bool VLMMaster::wakeup() { return wakeup(WakeupOptions{}); }
+
+bool VLMMaster::wakeup(const WakeupOptions& options) {
+  if (vlm_engine_ == nullptr) {
+    LOG(ERROR) << "Wakeup is not supported for speculative engines.";
+    return false;
+  }
+  WakeupOptions restore_options = options;
+  restore_options.master_status = master_status_;
+  return model_residency_coordinator_->wakeup(restore_options);
+}
+
+bool VLMMaster::link_p2p(const std::vector<std::string>& remote_addrs) {
+  return distributed_worker_manager_->link_p2p(remote_addrs);
+}
+
+bool VLMMaster::unlink_p2p(const std::vector<std::string>& remote_addrs) {
+  return distributed_worker_manager_->unlink_p2p(remote_addrs);
+}
+
 void VLMMaster::run() {
   if (!is_leader()) {
     Master::run();
@@ -602,13 +787,15 @@ void VLMMaster::run() {
   loop_thread_ = std::thread([this]() {
     running_.store(true, std::memory_order_relaxed);
     const auto timeout = absl::Milliseconds(500);
-    while (!stoped_.load(std::memory_order_relaxed)) {
+    while (!stoped_.load(std::memory_order_acquire) ||
+           scheduler_->has_pending_prefetch()) {
       scheduler_->step(timeout);
     }
     running_.store(false, std::memory_order_relaxed);
   });
 
-  if (!options_.enable_offline_inference() && !options_.enable_disagg_pd() &&
+  if (!is_sleeping() && !requires_wakeup() &&
+      !options_.enable_offline_inference() && !options_.enable_disagg_pd() &&
       !ExecutionConfig::get_instance().disable_graph_warmup() &&
       model_args_.image_token_id() != 0) {
     warmup_multimodal();

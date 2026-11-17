@@ -97,6 +97,9 @@ bool GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
       ++image_index;
       begin = pair.second + image_token_.size();
     } else if (pair.first == TokenType::VIDEO) {
+      if (!video_grid_thw.defined() || video_index >= video_grid_thw.size(0)) {
+        return false;
+      }
       auto num_frames = video_grid_thw[video_index][0].item<int32_t>();
       const auto& timestamps = video_metadata[video_index].timestamps;
       CHECK(!timestamps.empty());
@@ -131,6 +134,11 @@ bool GLM4VPromptProcessor::process(std::string& prompt, const MMData& mm_data) {
 
 bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
                                          MMData& mm_data) {
+  if (mm_data.empty()) {
+    return true;
+  }
+  bool in_image = false;
+  const int32_t merge_length = merge_size_ * merge_size_;
   const size_t tokens_num = token_ids.size();
   int32_t global_mm_index = 0;
   int32_t image_span_offset = 0;
@@ -144,6 +152,9 @@ bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
   for (size_t idx = 0; idx < tokens_num; ++idx) {
     auto token = token_ids[idx];
     if (token == video_start_token_id_) {
+      if (is_video || in_image || global_mm_index >= mm_items.size()) {
+        return false;
+      }
       is_video = true;
       video_offset = idx + 1;
       video_mask.clear();
@@ -151,7 +162,15 @@ bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
       continue;
     } else if (token == video_end_token_id_) {
       if (is_video) {
+        if (global_mm_index >= mm_items.size()) {
+          return false;
+        }
         auto& item = mm_items[global_mm_index++];
+        const auto grid = item.get<torch::Tensor>("video_grid_thw");
+        if (item.type() != MMType::VIDEO || !grid.has_value() ||
+            video_token_count != grid->prod().item<int64_t>() / merge_length) {
+          return false;
+        }
         int32_t video_length = static_cast<int32_t>(video_mask.size());
         item.mutable_state().mutable_token_pos() = {video_offset, video_length};
         auto mask =
@@ -162,6 +181,8 @@ bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
                 .clone();
         item.mutable_state().mutable_mm_token_mask() = mask;
         item.mutable_state().mutable_mm_token_num() = video_token_count;
+      } else {
+        return false;
       }
       is_video = false;
       continue;
@@ -173,12 +194,29 @@ bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
       continue;
     }
     if (token == image_start_token_id_) {
+      if (in_image || global_mm_index >= mm_items.size()) {
+        return false;
+      }
+      in_image = true;
       image_span_offset = idx + 1;
     }
     if (token == image_token_id_) {
+      if (!in_image) {
+        return false;
+      }
       ++image_span_length;
     } else if (token == image_end_token_id_) {
+      if (!in_image || global_mm_index >= mm_items.size() ||
+          idx != static_cast<size_t>(image_span_offset + image_span_length)) {
+        return false;
+      }
       auto& item = mm_items[global_mm_index++];
+      const auto grid = item.get<torch::Tensor>("image_grid_thw");
+      if (item.type() != MMType::IMAGE || !grid.has_value() ||
+          image_span_length != grid->prod().item<int64_t>() / merge_length) {
+        return false;
+      }
+      in_image = false;
       item.mutable_state().mutable_token_pos() = {image_span_offset,
                                                   image_span_length};
       auto mask = torch::ones(
@@ -189,7 +227,7 @@ bool GLM4VPromptProcessor::find_mm_spans(const std::vector<int32_t>& token_ids,
       image_span_length = 0;
     }
   }
-  return true;
+  return !is_video && !in_image && global_mm_index == mm_items.size();
 }
 
 std::vector<double> GLM4VPromptProcessor::build_timestamps(

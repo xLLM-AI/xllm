@@ -15,7 +15,11 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
+
 #include <atomic>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -39,6 +43,8 @@ namespace xllm {
 
 class ModelResidencyCoordinator;
 class KVTransferCoordinator;
+class Call;
+class XServiceClient;
 
 class VLMMaster : public Master {
  public:
@@ -46,6 +52,26 @@ class VLMMaster : public Master {
   ~VLMMaster() override;
 
   const ModelArgs* model_args() const override { return &model_args_; }
+
+  void handle_request(std::string prompt,
+                      std::optional<std::vector<int32_t>> prompt_tokens,
+                      RequestParams sp,
+                      std::optional<Call*> call,
+                      OutputCallback callback);
+
+  void handle_request(std::vector<Message> messages,
+                      std::optional<std::vector<int32_t>> prompt_tokens,
+                      RequestParams sp,
+                      std::optional<Call*> call,
+                      OutputCallback callback);
+
+  void handle_request(std::vector<Message> messages,
+                      std::optional<std::vector<int32_t>> prompt_tokens,
+                      RequestParams sp,
+                      MMInput mm_input,
+                      std::optional<Call*> call,
+                      OutputCallback callback,
+                      bool use_prompt_as_is = false);
 
   // completion
   void handle_request(std::string prompt,
@@ -61,6 +87,10 @@ class VLMMaster : public Master {
                       bool use_prompt_as_is = false);
 
   // batch completion
+  void handle_batch_request(std::vector<std::string> prompts,
+                            std::vector<RequestParams> sps,
+                            BatchOutputCallback callback);
+
   void handle_batch_request(std::vector<std::string> prompts,
                             std::vector<MMData> mm_datas,
                             std::vector<RequestParams> sps,
@@ -78,6 +108,25 @@ class VLMMaster : public Master {
                             std::vector<RequestParams> sps,
                             BatchOutputCallback callback);
 
+  void count_chat_tokens(std::vector<Message> messages,
+                         RequestParams params,
+                         std::function<void(Status, int32_t)> callback);
+
+  bool handle_rpc_response(const RequestOutput& output);
+  std::vector<bool> handle_rpc_responses(
+      const std::vector<RequestOutput>& outputs);
+
+  const Tokenizer& tokenizer() const {
+    CHECK(tokenizer_ != nullptr)
+        << "tokenizer() is only available on the leader rank (node_rank == 0).";
+    return *tokenizer_;
+  }
+
+  const ChatTemplate& chat_template() const {
+    CHECK(chat_template_ != nullptr);
+    return *chat_template_;
+  }
+
   // start the handling loop
   void run() override;
 
@@ -87,14 +136,35 @@ class VLMMaster : public Master {
   bool start_profile();
   bool stop_profile();
 
+  MasterStatus get_master_status() const { return master_status_; }
+  bool is_sleeping() const { return master_status_ != MasterStatus::WAKEUP; }
+  void set_master_status(MasterStatus status) { master_status_ = status; }
+  bool sleep();
+  bool requires_wakeup() const;
+  bool wakeup();
+  bool wakeup(const WakeupOptions& options);
+  bool link_p2p(const std::vector<std::string>& remote_addrs);
+  bool unlink_p2p(const std::vector<std::string>& remote_addrs);
+
   int get_image_limit() { return options_.limit_image_per_prompt(); }
 
   const std::string& model_type() const { return model_args_.model_type(); }
 
  private:
+  void schedule_completion(std::string prompt,
+                           std::optional<std::vector<int32_t>> prompt_tokens,
+                           MMData mm_data,
+                           RequestParams sp,
+                           std::optional<Call*> call,
+                           OutputCallback callback);
+
   void warmup_multimodal();
 
+  MasterStatus master_status_;
+  std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
+  std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator_;
   std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator_;
+  XServiceClient* xservice_client_ = nullptr;
 
   // The LLM draft prepares VirtualMemory pages before loading worker weights.
   std::unique_ptr<ModelResidencyCoordinator> draft_model_residency_coordinator_;

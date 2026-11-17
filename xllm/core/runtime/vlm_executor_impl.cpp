@@ -50,6 +50,15 @@ MMDict VlmExecutorImpl::encode(const ModelParamsView& params) {
   return model_->encode(params);
 }
 
+void VlmExecutorImpl::clear_multimodal_cache() {
+  if (encoder_cache_ != nullptr) {
+    encoder_cache_->clear();
+  }
+  if (llm_executor_ != nullptr) {
+    llm_executor_->clear_multimodal_cache();
+  }
+}
+
 ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
                                  const torch::Tensor& positions,
                                  std::vector<KVCache>& kv_caches,

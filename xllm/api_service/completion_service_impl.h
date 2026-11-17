@@ -21,11 +21,13 @@ limitations under the License.
 
 #include "api_service_impl.h"
 #include "completion.pb.h"
+#include "generation_master.h"
 #include "stream_call.h"
 
 namespace xllm {
 
 class MasterManager;
+class Master;
 
 using CompletionCall =
     StreamCall<proto::CompletionRequest, proto::CompletionResponse>;
@@ -33,7 +35,7 @@ using CompletionCall =
 // a class to handle completion requests
 class CompletionServiceImpl final : public APIServiceImpl<CompletionCall> {
  public:
-  CompletionServiceImpl(LLMMaster* master,
+  CompletionServiceImpl(Master* master,
                         const std::vector<std::string>& models,
                         std::shared_ptr<MasterManager> master_manager);
 
@@ -46,7 +48,8 @@ class CompletionServiceImpl final : public APIServiceImpl<CompletionCall> {
   void process_request_from_service(const proto::CompletionRequest& request,
                                     const std::string& x_request_id = "",
                                     const std::string& x_request_time = "");
-  std::shared_ptr<LLMMaster> get_model_master(const std::string& model) const;
+  std::optional<GenerationMaster> get_model_master(
+      const std::string& model) const;
   DISALLOW_COPY_AND_ASSIGN(CompletionServiceImpl);
   std::shared_ptr<MasterManager> master_manager_;
 };

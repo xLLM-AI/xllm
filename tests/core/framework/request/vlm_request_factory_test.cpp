@@ -25,6 +25,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "api_service/call.h"
 #include "common/options.h"
 #include "common/rate_limiter.h"
 #include "core/common/message.h"
@@ -52,8 +53,11 @@ class FakeProcessor final : public MultimodalProcessorBase {
   FakeProcessor() = default;
 
   bool process_prompt(std::string& /*prompt*/,
-                      MMData& /*mm_data*/,
-                      std::vector<int32_t>& token_ids) override {
+                      MMData& mm_data,
+                      std::vector<int32_t>& token_ids,
+                      bool add_special_tokens = true) override {
+    last_add_special_tokens_ = add_special_tokens;
+    last_multimodal_type_ = mm_data.type();
     if (!process_prompt_succeed_) {
       return false;
     }
@@ -61,8 +65,14 @@ class FakeProcessor final : public MultimodalProcessorBase {
     return true;
   }
 
+  bool process_prompt_tokens(MMData& /*mm_data*/,
+                             std::vector<int32_t>& /*token_ids*/) override {
+    return process_prompt_succeed_;
+  }
+
   bool process_multimodal(const MMInput& /*inputs*/,
-                          MMData& /*data*/) const override {
+                          MMData& data) const override {
+    data = processed_data_;
     return process_multimodal_succeed_;
   }
 
@@ -74,10 +84,28 @@ class FakeProcessor final : public MultimodalProcessorBase {
     prompt_tokens_ = std::move(tokens);
   }
 
+  void set_processed_data(MMData data) { processed_data_ = std::move(data); }
+  bool last_add_special_tokens() const { return last_add_special_tokens_; }
+  uint32_t last_multimodal_type() const { return last_multimodal_type_; }
+
  private:
   bool process_prompt_succeed_ = true;
   bool process_multimodal_succeed_ = true;
   std::vector<int32_t> prompt_tokens_{1, 2, 3};
+  MMData processed_data_;
+  bool last_add_special_tokens_ = true;
+  uint32_t last_multimodal_type_ = static_cast<uint32_t>(MMType::NONE);
+};
+
+class DisconnectableCall final : public Call {
+ public:
+  explicit DisconnectableCall(brpc::Controller* controller)
+      : Call(controller) {}
+  bool is_disconnected() const override { return disconnected_; }
+  void disconnect() { disconnected_ = true; }
+
+ private:
+  bool disconnected_ = false;
 };
 
 // Jinja chat template stub. The base constructor parses a trivial literal
@@ -403,6 +431,190 @@ TEST_F(VLMRequestFactoryTest,
       request->server_elapsed_seconds(arrival_time + std::chrono::seconds(7));
   ASSERT_TRUE(elapsed.has_value());
   EXPECT_DOUBLE_EQ(*elapsed, 7.0);
+}
+
+TEST_F(VLMRequestFactoryTest, SuppliedTokensDoNotRequirePromptText) {
+  auto factory = make_factory();
+  CallbackCapture capture;
+  RequestParams params;
+  auto request = factory->create("",
+                                 std::vector<int32_t>{7, 8, 9},
+                                 MMData{},
+                                 params,
+                                 std::nullopt,
+                                 make_capture_callback(&capture));
+  ASSERT_NE(request, nullptr);
+  EXPECT_EQ(request->state().prompt_tokens, (std::vector<int32_t>{7, 8, 9}));
+  EXPECT_FALSE(capture.called);
+  request.reset();
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
+TEST_F(VLMRequestFactoryTest, RejectsSuppliedTokensOutsideVocabulary) {
+  auto factory = make_factory();
+  RequestParams params;
+  params.service_request_id = "routed-request";
+  params.source_xservice_addr = "source-service";
+  RequestOutput failure;
+  auto request = factory->create("",
+                                 std::vector<int32_t>{1000},
+                                 MMData{},
+                                 params,
+                                 std::nullopt,
+                                 [&failure](const RequestOutput& output) {
+                                   failure = output;
+                                   return false;
+                                 });
+  EXPECT_EQ(request, nullptr);
+  ASSERT_TRUE(failure.status.has_value());
+  EXPECT_EQ(failure.status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(failure.service_request_id, params.service_request_id);
+  EXPECT_EQ(failure.target_xservice_addr, params.source_xservice_addr);
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
+TEST_F(VLMRequestFactoryTest, RequestObservesClientDisconnection) {
+  auto factory = make_factory();
+  brpc::Controller controller;
+  DisconnectableCall call(&controller);
+  CallbackCapture capture;
+  auto request = factory->create("",
+                                 std::vector<int32_t>{7},
+                                 MMData{},
+                                 RequestParams{},
+                                 &call,
+                                 make_capture_callback(&capture));
+  ASSERT_NE(request, nullptr);
+  request->update_connection_status();
+  EXPECT_FALSE(request->cancelled());
+  call.disconnect();
+  request->update_connection_status();
+  EXPECT_TRUE(request->cancelled());
+}
+
+TEST_F(VLMRequestFactoryTest, TokenCountAndGenerationUseSamePreparedPrompt) {
+  auto factory = make_factory();
+  RequestParams params;
+  params.add_special_tokens = false;
+  std::vector<Message> messages;
+  messages.emplace_back("user", std::string("hello"));
+  int32_t count = 0;
+  ASSERT_TRUE(
+      factory->count_chat_tokens(messages, params, MMInput{}, count).ok());
+  EXPECT_FALSE(processor_->last_add_special_tokens());
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
+  CallbackCapture capture;
+  auto request = factory->create(
+      std::move(messages), params, MMInput{}, make_capture_callback(&capture));
+  ASSERT_NE(request, nullptr);
+  EXPECT_EQ(count, request->state().prompt_tokens.size());
+  EXPECT_EQ(count, 3);
+}
+
+TEST_F(VLMRequestFactoryTest, TokenCountIncludesMultimodalProcessorExpansion) {
+  auto factory = make_factory();
+  processor_->set_processed_data(
+      MMData(MMType::IMAGE, MMItemVec{MMDataItem(MMType::IMAGE)}));
+  processor_->set_prompt_tokens({1, 2, 3, 4, 5, 6});
+  MMInputItem image;
+  image.type = MMType::IMAGE;
+  image.decode_image = torch::ones({3, 2, 2});
+  int32_t count = 0;
+  std::vector<Message> messages;
+  messages.emplace_back("user", std::string("image question"));
+  ASSERT_TRUE(
+      factory
+          ->count_chat_tokens(
+              std::move(messages), RequestParams{}, MMInput({image}), count)
+          .ok());
+  EXPECT_EQ(count, 6);
+  EXPECT_EQ(processor_->last_multimodal_type(),
+            static_cast<uint32_t>(MMType::IMAGE));
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
+}
+
+TEST_F(VLMRequestFactoryTest, CountingDoesNotApplyGenerationContextLimit) {
+  auto factory = make_factory(/*vocab_size=*/1000, /*max_position=*/8);
+  processor_->set_prompt_tokens(std::vector<int32_t>(12, 1));
+  std::vector<Message> messages;
+  messages.emplace_back("user", std::string("long prompt"));
+  int32_t count = 0;
+  ASSERT_TRUE(factory
+                  ->count_chat_tokens(
+                      std::move(messages), RequestParams{}, MMInput{}, count)
+                  .ok());
+  EXPECT_EQ(count, 12);
+  CallbackCapture capture;
+  EXPECT_EQ(factory->create("long prompt",
+                            MMData{},
+                            RequestParams{},
+                            make_capture_callback(&capture)),
+            nullptr);
+  ASSERT_TRUE(capture.status.has_value());
+  EXPECT_EQ(capture.status->message(), "Prompt is too long");
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
+TEST_F(VLMRequestFactoryTest, CountingFailureDoesNotReleaseGenerationSlot) {
+  auto factory = make_factory();
+  processor_->set_process_prompt_succeed(false);
+  int32_t count = 0;
+  std::vector<Message> messages;
+  messages.emplace_back("user", std::string("hello"));
+  const Status status = factory->count_chat_tokens(
+      std::move(messages), RequestParams{}, MMInput{}, count);
+  EXPECT_EQ(status.code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
+}
+
+TEST_F(VLMRequestFactoryTest, SpeculativeTokensReserveModelContext) {
+  auto factory = make_factory(/*vocab_size=*/1000, /*max_position=*/8);
+  options_.num_speculative_tokens(4);
+  RequestParams params;
+  params.min_tokens = 2;
+  CallbackCapture capture;
+  EXPECT_EQ(factory->create(
+                "hello", MMData{}, params, make_capture_callback(&capture)),
+            nullptr);
+  ASSERT_TRUE(capture.status.has_value());
+  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
+TEST_F(VLMRequestFactoryTest,
+       RoutedRequestKeepsResponseMetadataAndBatchCallback) {
+  auto initial_factory = make_factory();
+  initial_factory.reset();
+  options_.enable_service_routing(true);
+  size_t forwarded = 0;
+  VLMRequestFactory factory(
+      processor_.get(),
+      chat_template_.get(),
+      tokenizer_.get(),
+      &model_args_,
+      &options_,
+      &rate_limiter_,
+      [&forwarded](const std::vector<RequestOutput>& outputs) {
+        forwarded += outputs.size();
+        return std::vector<bool>(outputs.size(), true);
+      });
+  RequestParams params;
+  params.source_xservice_addr = "source-service";
+  params.service_request_id = "service-request";
+  params.response_model = "response-model";
+  params.decode_address = "decode-address";
+  params.ttft_slo_ms = 123;
+  CallbackCapture capture;
+  auto request = factory.create(
+      "hello", MMData{}, params, make_capture_callback(&capture));
+  ASSERT_NE(request, nullptr);
+  EXPECT_EQ(request->state().response_model, params.response_model);
+  EXPECT_EQ(request->state().decode_address, params.decode_address);
+  EXPECT_EQ(request->state().scheduler_param.ttft_slo_ms, params.ttft_slo_ms);
+  ASSERT_TRUE(request->state().outputs_func);
+  EXPECT_EQ(request->state().outputs_func({RequestOutput{}}),
+            (std::vector<bool>{true}));
+  EXPECT_EQ(forwarded, 1);
 }
 
 }  // namespace

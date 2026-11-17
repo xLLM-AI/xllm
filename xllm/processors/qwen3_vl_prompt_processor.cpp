@@ -90,6 +90,9 @@ bool Qwen3VLPromptProcessor::process(std::string& prompt,
 
   while (pair.second != std::string::npos) {
     if (pair.first == TokenType::IMAGE) {
+      if (!image_grid_thw.defined() || image_index >= image_grid_thw.size(0)) {
+        return false;
+      }
       data.append(prompt, begin, pair.second - begin);
 
       auto token_num =
@@ -102,6 +105,9 @@ bool Qwen3VLPromptProcessor::process(std::string& prompt,
       begin = pair.second + image_token_.size();
 
     } else if (pair.first == TokenType::VIDEO) {
+      if (!video_grid_thw.defined() || video_index >= video_grid_thw.size(0)) {
+        return false;
+      }
       const size_t pos = pair.second;
       const size_t vs_len = vision_start_token_.size();
       const size_t ve_len = vision_end_token_.size();
@@ -160,6 +166,12 @@ bool Qwen3VLPromptProcessor::process(std::string& prompt,
 bool Qwen3VLPromptProcessor::find_mm_spans(
     const std::vector<int32_t>& token_ids,
     MMData& mm_data) {
+  if (mm_data.empty()) {
+    return true;
+  }
+  int64_t image_tokens = 0;
+  int64_t video_tokens = 0;
+  const int32_t merge_length = merge_size_ * merge_size_;
   auto start = token_ids.begin();
   int32_t global_mm_index = 0;
   int32_t offset = 0;
@@ -186,15 +198,28 @@ bool Qwen3VLPromptProcessor::find_mm_spans(
     }
     auto vision_end_it =
         std::find(vision_start_it + 1, token_ids.end(), vision_end_token_id_);
-    CHECK(vision_end_it != token_ids.end());
+    if (vision_end_it == token_ids.end() ||
+        vision_end_it == vision_start_it + 1 ||
+        global_mm_index >= mm_items.size()) {
+      return false;
+    }
 
     offset = std::distance(token_ids.begin(), vision_start_it);
     length = std::distance(vision_start_it + 1, vision_end_it);
 
     int32_t first_token = *(vision_start_it + 1);
     if (first_token == image_token_id_) {
-      CHECK(global_mm_index < mm_items.size());
       auto& item = mm_items[global_mm_index];
+      const auto grid = item.get<torch::Tensor>("image_grid_thw");
+      if (video_frames_left != 0 || item.type() != MMType::IMAGE ||
+          !grid.has_value() ||
+          length != grid->prod().item<int64_t>() / merge_length ||
+          !std::all_of(vision_start_it + 1, vision_end_it, [this](int32_t id) {
+            return id == image_token_id_;
+          })) {
+        return false;
+      }
+      image_tokens += length;
       item.mutable_state().mutable_token_pos() = {offset + 1, length};
       item.mutable_state().mutable_mm_token_mask() = torch::ones(
           {length},
@@ -204,10 +229,11 @@ bool Qwen3VLPromptProcessor::find_mm_spans(
 
     } else if (first_token == video_token_id_) {
       if (video_frames_left == 0) {
-        CHECK(video_grid_thw.defined() && video_grid_thw.numel() > 0)
-            << "video token exists but video_grid_thw is missing";
-        CHECK(video_index < video_grid_thw.size(0));
-        CHECK(global_mm_index < mm_items.size());
+        if (!video_grid_thw.defined() ||
+            video_index >= video_grid_thw.size(0) ||
+            mm_items[global_mm_index].type() != MMType::VIDEO) {
+          return false;
+        }
 
         video_frames_left = video_grid_thw[video_index][0].item<int32_t>();
         video_span_start = offset + 1;
@@ -216,7 +242,15 @@ bool Qwen3VLPromptProcessor::find_mm_spans(
         video_token_count = 0;
       }
 
-      CHECK(video_frames_left > 0);
+      const int64_t expected_frame_tokens =
+          video_grid_thw[video_index][1].item<int64_t>() *
+          video_grid_thw[video_index][2].item<int64_t>() / merge_length;
+      const int64_t frame_tokens =
+          std::count(vision_start_it + 1, vision_end_it, video_token_id_);
+      if (video_frames_left <= 0 || frame_tokens != expected_frame_tokens) {
+        return false;
+      }
+      video_tokens += frame_tokens;
       const int32_t frame_span_start = offset + 1;
       const int32_t frame_span_end = frame_span_start + length;
       if (video_span_end < frame_span_start) {
@@ -246,11 +280,17 @@ bool Qwen3VLPromptProcessor::find_mm_spans(
         ++global_mm_index;
         ++video_index;
       }
+    } else {
+      return false;
     }
 
     start = std::next(vision_end_it);
   }
-  return true;
+  return video_frames_left == 0 && global_mm_index == mm_items.size() &&
+         std::count(token_ids.begin(), token_ids.end(), image_token_id_) ==
+             image_tokens &&
+         std::count(token_ids.begin(), token_ids.end(), video_token_id_) ==
+             video_tokens;
 }
 
 std::vector<double> Qwen3VLPromptProcessor::build_timestamps(
