@@ -42,4 +42,10 @@ file(WRITE "${T5_CONFIG_FILE}" "${T5_CONFIG}")
 include(${ASCEND_CANN_PACKAGE_PATH}/tools/tikcpp/ascendc_kernel_cmake/ascendc.cmake)
 ascendc_library(t5_direct SHARED t5_direct.cpp)
 
-target_include_directories(t5_direct PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
+# CANN forwards this interface property to its separate device build projects.
+get_filename_component(T5_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+ascendc_include_directories(t5_direct PRIVATE "${T5_PROJECT_ROOT}")
+get_target_property(T5_DEVICE_INCLUDES t5_direct_interface INCLUDES)
+if(NOT "${T5_PROJECT_ROOT}" IN_LIST T5_DEVICE_INCLUDES)
+  message(FATAL_ERROR "CANN direct precompile/device include path was not registered")
+endif()
