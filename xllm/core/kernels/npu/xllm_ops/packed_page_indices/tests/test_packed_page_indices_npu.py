@@ -22,7 +22,7 @@ import torch
 if not hasattr(torch, "npu") or not torch.npu.is_available():
     pytest.skip("NPU required", allow_module_level=True)
 
-from xllm.python.kernels_npu.triton.packed_page_indices import prepare  # noqa: E402
+from solution import prepare  # noqa: E402
 
 _DEVICE = "npu:0"
 
@@ -361,7 +361,7 @@ def test_non_dict_attributes_are_rejected() -> None:
 
 def test_run_equals_prepare_and_run() -> None:
     x, m, cu = _base_inputs()
-    from xllm.python.kernels_npu.triton.packed_page_indices import run
+    from solution import run
 
     torch.testing.assert_close(
         run([x, m, cu], {}),

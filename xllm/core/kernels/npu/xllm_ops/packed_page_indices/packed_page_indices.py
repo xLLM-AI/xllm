@@ -34,7 +34,7 @@ rounds a page number through a float.
 
 from __future__ import annotations
 
-from typing import Protocol, Sequence
+from typing import Sequence
 
 import torch
 import triton
@@ -44,10 +44,6 @@ from triton.runtime.driver import driver
 _ROWS_PER_PROGRAM = 8
 _COLUMN_BLOCK_LIMIT = 2048
 _ROW_GATHER_LIMIT = 1 << 20
-
-
-class Prepared(Protocol):
-    def run(self) -> torch.Tensor: ...
 
 
 @triton.jit

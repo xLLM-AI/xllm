@@ -1,0 +1,129 @@
+PackedPageIndices 内存自验证日志
+来源：golden.py --verify-functional 的 engineering_by_case 与 large_single_layer 原样输出
+环境时间（UTC）：2026-11-17T05:43:33.173296+00:00
+设备：Ascend910_9362
+
+{
+  "engineering_by_case": {
+    "packed_perf_small": {
+      "two_streams": "PASS",
+      "retained_outputs_independent": "PASS",
+      "repeat20_released": "PASS",
+      "active_before_bytes": 38912,
+      "active_after_bytes": 38912,
+      "peak_increment_bytes": 9216,
+      "output_bytes": 9184,
+      "baseline_peak_increment_bytes": 23552,
+      "baseline_output_bytes": 9184,
+      "baseline_active_before_bytes": 38912,
+      "baseline_active_after_bytes": 38912,
+      "candidate_minus_baseline_peak_bytes": -14336,
+      "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+    },
+    "packed_perf_large": {
+      "two_streams": "PASS",
+      "retained_outputs_independent": "PASS",
+      "repeat20_released": "PASS",
+      "active_before_bytes": 654848,
+      "active_after_bytes": 654848,
+      "peak_increment_bytes": 1011200,
+      "output_bytes": 1010944,
+      "baseline_peak_increment_bytes": 2126336,
+      "baseline_output_bytes": 1010944,
+      "baseline_active_before_bytes": 654848,
+      "baseline_active_after_bytes": 654848,
+      "candidate_minus_baseline_peak_bytes": -1115136,
+      "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+    }
+  },
+  "large_single_layer": {
+    "id": "packed_large_single_layer",
+    "status": "PASS",
+    "checks": {
+      "candidate_mismatches": 0,
+      "baseline_mismatches": 0,
+      "shape": true,
+      "dtype": true,
+      "npu": true,
+      "contiguous": true,
+      "inputs_unchanged": true,
+      "independent_storage": true
+    },
+    "shape": [
+      32768
+    ],
+    "input_shapes": [
+      [
+        1,
+        32768
+      ],
+      [
+        1
+      ],
+      [
+        2
+      ]
+    ],
+    "attributes": {}
+  },
+  "storage_rebindings": {
+    "packed_perf_small": [
+      {
+        "id": "mapping_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "logical_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "cu_set_storage_same_total",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      }
+    ],
+    "packed_perf_large": [
+      {
+        "id": "mapping_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "logical_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "cu_set_storage_same_total",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      }
+    ]
+  }
+}

@@ -1,0 +1,683 @@
+{
+  "task": "packed",
+  "scope": "functional",
+  "status": "PASS",
+  "cases": [
+    {
+      "id": "packed_literal",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        2,
+        3
+      ],
+      "input_shapes": [
+        [
+          3,
+          3
+        ],
+        [
+          2,
+          4
+        ],
+        [
+          4
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_prefix_padding",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        2,
+        4
+      ],
+      "input_shapes": [
+        [
+          2,
+          3
+        ],
+        [
+          2,
+          4
+        ],
+        [
+          3
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_single",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        2
+      ],
+      "input_shapes": [
+        [
+          1,
+          2
+        ],
+        [
+          4
+        ],
+        [
+          2
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_empty_requests",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        2,
+        0
+      ],
+      "input_shapes": [
+        [
+          0,
+          3
+        ],
+        [
+          2,
+          31
+        ],
+        [
+          1
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_zero_counts",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        2,
+        0
+      ],
+      "input_shapes": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          4
+        ],
+        [
+          3
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_empty_columns",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        2,
+        0
+      ],
+      "input_shapes": [
+        [
+          3,
+          0
+        ],
+        [
+          2,
+          31
+        ],
+        [
+          4
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_offset",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        3,
+        84
+      ],
+      "input_shapes": [
+        [
+          7,
+          33
+        ],
+        [
+          3,
+          129
+        ],
+        [
+          8
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_boundary257",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        1,
+        243
+      ],
+      "input_shapes": [
+        [
+          3,
+          257
+        ],
+        [
+          1,
+          257
+        ],
+        [
+          4
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_perf_small",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        8,
+        287
+      ],
+      "input_shapes": [
+        [
+          8,
+          64
+        ],
+        [
+          8,
+          1024
+        ],
+        [
+          9
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_perf_large",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        32,
+        7898
+      ],
+      "input_shapes": [
+        [
+          64,
+          256
+        ],
+        [
+          32,
+          4096
+        ],
+        [
+          65
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_skew_valid_prefix",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        3,
+        10
+      ],
+      "input_shapes": [
+        [
+          6,
+          9
+        ],
+        [
+          3,
+          4
+        ],
+        [
+          7
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_route_32736",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        32,
+        1023
+      ],
+      "input_shapes": [
+        [
+          7,
+          385
+        ],
+        [
+          32,
+          67
+        ],
+        [
+          8
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_route_32768",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        32,
+        1024
+      ],
+      "input_shapes": [
+        [
+          7,
+          385
+        ],
+        [
+          32,
+          67
+        ],
+        [
+          8
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_single_long_rows",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        4698
+      ],
+      "input_shapes": [
+        [
+          9,
+          1025
+        ],
+        [
+          67
+        ],
+        [
+          10
+        ]
+      ],
+      "attributes": {}
+    }
+  ],
+  "negative": [
+    {
+      "id": "input_count",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "unknown_attribute",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "cpu_input",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "dtype",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "noncontiguous",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "negative_mapping",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "logical_address_out_of_range",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "nonmonotonic_cu",
+      "status": "PASS",
+      "exception": "ValueError"
+    }
+  ],
+  "dynamic_updates": {
+    "packed_perf_small": [
+      {
+        "id": "logical_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "mapping_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "cu_counts_changed_same_total",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      }
+    ],
+    "packed_perf_large": [
+      {
+        "id": "logical_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "mapping_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "large_path_int32_output_boundary",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "cu_counts_changed_same_total",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      }
+    ]
+  },
+  "engineering_by_case": {
+    "packed_perf_small": {
+      "two_streams": "PASS",
+      "retained_outputs_independent": "PASS",
+      "repeat20_released": "PASS",
+      "active_before_bytes": 38912,
+      "active_after_bytes": 38912,
+      "peak_increment_bytes": 9216,
+      "output_bytes": 9184,
+      "baseline_peak_increment_bytes": 23552,
+      "baseline_output_bytes": 9184,
+      "baseline_active_before_bytes": 38912,
+      "baseline_active_after_bytes": 38912,
+      "candidate_minus_baseline_peak_bytes": -14336,
+      "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+    },
+    "packed_perf_large": {
+      "two_streams": "PASS",
+      "retained_outputs_independent": "PASS",
+      "repeat20_released": "PASS",
+      "active_before_bytes": 654848,
+      "active_after_bytes": 654848,
+      "peak_increment_bytes": 1011200,
+      "output_bytes": 1010944,
+      "baseline_peak_increment_bytes": 2126336,
+      "baseline_output_bytes": 1010944,
+      "baseline_active_before_bytes": 654848,
+      "baseline_active_after_bytes": 654848,
+      "candidate_minus_baseline_peak_bytes": -1115136,
+      "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+    }
+  },
+  "storage_rebindings": {
+    "packed_perf_small": [
+      {
+        "id": "mapping_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "logical_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "cu_set_storage_same_total",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      }
+    ],
+    "packed_perf_large": [
+      {
+        "id": "mapping_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "logical_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "cu_set_storage_same_total",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      }
+    ]
+  },
+  "environment": {
+    "utc": "2026-11-17T05:43:33.173296+00:00",
+    "hostname": "8770793c13374301b95ada0f37cf1fc5",
+    "python": "3.11.4",
+    "device": "Ascend910_9362",
+    "versions": {
+      "torch": "2.7.1+cpu",
+      "torch-npu": "2.7.1.post4",
+      "triton-ascend": "3.2.1"
+    },
+    "triton_target": "GPUTarget(backend='npu', arch='Ascend910_9362', warp_size=0)",
+    "source_sha256": {
+      "baseline.py": "2a64eae708a9d7cefb034cf41d25e36ffc02350665dce7758c43a2072e55553d",
+      "case.json": "63fe2022eed796d675ef60ee5c6786eea2fac12f9bbf9335e0c7a72e4aeff42b",
+      "contract.py": "08caacee40811608c1ec149342fe5fb77af93b5d1f1e257127738f5296afbbc9",
+      "functional_checks.py": "a5f3d1d7506d542eab7968c6ffe8fed8acae7ac85839120c4e10733bf2443a71",
+      "generate_data.py": "a27cf622f54df8d56b88d8cf81351cad73bfdb171fea3b361c433344df3474a4",
+      "golden.py": "3ea21768bb38440d59c46000c88901992ec35accda233eef43d3a9950b75a6a9"
+    }
+  },
+  "large_single_layer": {
+    "id": "packed_large_single_layer",
+    "status": "PASS",
+    "checks": {
+      "candidate_mismatches": 0,
+      "baseline_mismatches": 0,
+      "shape": true,
+      "dtype": true,
+      "npu": true,
+      "contiguous": true,
+      "inputs_unchanged": true,
+      "independent_storage": true
+    },
+    "shape": [
+      32768
+    ],
+    "input_shapes": [
+      [
+        1,
+        32768
+      ],
+      [
+        1
+      ],
+      [
+        2
+      ]
+    ],
+    "attributes": {}
+  }
+}
