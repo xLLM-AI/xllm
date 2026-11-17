@@ -23,7 +23,8 @@ namespace xllm::mlu::model {
 class Glm5MtpForCausalLMImpl : public LlmForCausalLMImplBase<DeepseekMtpModel> {
  public:
   Glm5MtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekMtpModel>(context) {}
+      : LlmForCausalLMImplBase<DeepseekMtpModel>(context,
+                                                 /*share_lm_head=*/true) {}
 
   void load_model(
       std::unique_ptr<ModelLoader> loader,
@@ -60,7 +61,6 @@ REGISTER_MODEL_ARGS(
         return std::vector<int>{154820, 154827, 154829};
       });
       LOAD_ARG_OR(bos_token_id, "bos_token_id", 0);
-      LOAD_ARG_OR(rope_theta, "rope_parameters.rope_theta", 1000000.0f);
       LOAD_ARG_OR(use_sliding_window, "use_sliding_window", false);
       LOAD_ARG_OR(sliding_window, "sliding_window", 4096);
       LOAD_ARG_OR(max_window_layers, "max_window_layers", 78);
@@ -95,8 +95,6 @@ REGISTER_MODEL_ARGS(
                   false);
 
       // Computed parameters
-      // the original head_dim in glm5 config seem useless
-      // here we use args->qk_nope_head_dim() + args->qk_rope_head_dim()
       SET_ARG(head_dim, 256);
       LOAD_ARG_OR_FUNC(
           rotary_dim, "rotary_dim", [&] { return args->qk_rope_head_dim(); });

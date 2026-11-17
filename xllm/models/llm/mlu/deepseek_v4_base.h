@@ -21,7 +21,6 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -167,17 +166,6 @@ inline std::string normalize_model_parameter_name(std::string name,
     }
   }
   return remap_parameter_name(name);
-}
-
-inline std::optional<std::string> normalize_lm_head_parameter_name(
-    std::string name) {
-  if (strip_prefix(&name, "lm_head.")) {
-    return name;
-  }
-  if (strip_prefix(&name, "head.")) {
-    return name;
-  }
-  return std::nullopt;
 }
 
 }  // namespace detail

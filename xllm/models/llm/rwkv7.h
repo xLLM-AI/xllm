@@ -226,10 +226,8 @@ class RWKV7ForCausalLMImpl : public torch::nn::Module {
     }
   }
 
-  // Required by CausalLMImpl (no-ops for non-MoE models)
-  void prepare_expert_weight(int32_t /*layer_id*/,
-                             const std::vector<int32_t>& /*expert_ids*/) {}
-  void update_expert_weight(int32_t /*layer_id*/) {}
+  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) {}
+  void update_expert_weight(int32_t) {}
 
  private:
   RWKV7Model model_{nullptr};

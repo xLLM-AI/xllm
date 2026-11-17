@@ -32,27 +32,6 @@ limitations under the License.
 #include "models/model_registry.h"
 
 namespace xllm {
-namespace dspark_detail {
-
-template <typename Module>
-void load_vocab_weight(VocabularyWeightSelector& selector,
-                       const StateDict& dedicated_state_dict,
-                       const StateDict& fallback_state_dict,
-                       Module& module) {
-  if (dedicated_state_dict.size() > 0 &&
-      selector.should_load(/*dedicated=*/true)) {
-    module->load_state_dict(dedicated_state_dict);
-    selector.mark_loaded(/*dedicated=*/true);
-  }
-  if (fallback_state_dict.size() > 0 &&
-      selector.should_load(/*dedicated=*/false)) {
-    module->load_state_dict(fallback_state_dict);
-    selector.mark_loaded(/*dedicated=*/false);
-  }
-}
-
-}  // namespace dspark_detail
-
 // DeepSeek-V4-0731 stores the DSpark draft in mtp.0/1/2. Unlike the preview
 // model's serial MTP layer, these are ordinary V4 decoder layers: target layer
 // outputs are combined once and written as shared context KV for every draft
@@ -84,6 +63,7 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
   }
 
   void load_state_dict(const StateDict& state_dict) override {
+    using Source = dspark_detail::VocabularyWeightSource;
     const int32_t last_layer = static_cast<int32_t>(layers_.size()) - 1;
     CHECK_GE(last_layer, 0);
 
@@ -105,8 +85,16 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
     // layouts, but make the dedicated tensor win regardless of shard order.
     StateDict dedicated_embed = first.get_dict_with_prefix("embed.");
     StateDict fallback_embed = state_dict.get_dict_with_prefix("embed.");
-    dspark_detail::load_vocab_weight(
-        embedding_source_, dedicated_embed, fallback_embed, embed_tokens_);
+    if (dedicated_embed.size() > 0 &&
+        embedding_source_.should_load(Source::DEDICATED)) {
+      embed_tokens_->load_state_dict(dedicated_embed);
+      embedding_source_.mark_loaded(Source::DEDICATED);
+    }
+    if (fallback_embed.size() > 0 &&
+        embedding_source_.should_load(Source::TARGET_FALLBACK)) {
+      embed_tokens_->load_state_dict(fallback_embed);
+      embedding_source_.mark_loaded(Source::TARGET_FALLBACK);
+    }
 
     StateDict last = state_dict.get_dict_with_prefix(
         "mtp." + std::to_string(last_layer) + ".");
@@ -178,24 +166,34 @@ class DeepseekV4DSparkForCausalLMImpl final
       : LlmForCausalLMImplBase<DeepseekV4DSparkModel>(context) {}
 
   void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "") override {
-    UNUSED_PARAMETER(prefix);
-    const int32_t last_layer = model_->last_dspark_layer_index();
-    CHECK_GE(last_layer, 0);
+                  std::string = "") override {
+    LlmForCausalLMImplBase<DeepseekV4DSparkModel>::load_lm_head(loader);
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(*state_dict);
-      StateDict dedicated_head = state_dict->get_dict_with_prefix(
-          "mtp." + std::to_string(last_layer) + ".head.");
-      StateDict fallback_head = state_dict->get_dict_with_prefix("head.");
-      dspark_detail::load_vocab_weight(
-          head_source_, dedicated_head, fallback_head, lm_head_);
     }
     model_->verify_dspark_weights();
-    CHECK(head_source_.loaded() && lm_head_->is_weight_loaded())
+    CHECK(lm_head_->is_weight_loaded())
         << "Failed to load DeepSeek-V4 DSpark vocabulary head from mtp."
-        << last_layer << ".head.weight or head.weight.";
-    LOG(INFO) << "Loaded DeepSeek-V4 DSpark LM head from "
-              << head_source_.source_name() << ".";
+        << model_->last_dspark_layer_index() << ".head.weight or head.weight.";
+  }
+
+  void load_lm_head(const StateDict& state_dict,
+                    const std::string& /*prefix*/) override {
+    using Source = dspark_detail::VocabularyWeightSource;
+    const int32_t last_layer = model_->last_dspark_layer_index();
+    StateDict dedicated_head = state_dict.get_dict_with_prefix(
+        "mtp." + std::to_string(last_layer) + ".head.");
+    StateDict fallback_head = state_dict.get_dict_with_prefix("head.");
+    if (dedicated_head.size() > 0 &&
+        head_source_.should_load(Source::DEDICATED)) {
+      lm_head_->load_state_dict(dedicated_head);
+      head_source_.mark_loaded(Source::DEDICATED);
+    }
+    if (fallback_head.size() > 0 &&
+        head_source_.should_load(Source::TARGET_FALLBACK)) {
+      lm_head_->load_state_dict(fallback_head);
+      head_source_.mark_loaded(Source::TARGET_FALLBACK);
+    }
   }
 
   torch::Tensor dspark_markov_bias(

@@ -29,6 +29,7 @@ limitations under the License.
 #include <boost/algorithm/string.hpp>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <string>

@@ -58,17 +58,10 @@ class Qwen2_VisionPatchEmbedImpl : public torch::nn::Module {
       DCHECK_EQ(proj_->weight.sizes(), weight.sizes())
           << "proj weight size mismatch for " << name();
       proj_->weight.data().copy_(weight);
-      proj_weight_loaded_ = true;
     }
   }
 
-  void verify_loaded_weights(const std::string& prefix) const {
-    CHECK(proj_weight_loaded_)
-        << "weight is not loaded for " << prefix + "proj.weight";
-  }
-
  private:
-  bool proj_weight_loaded_ = false;
   torch::nn::Linear proj_{nullptr};
 };
 TORCH_MODULE(Qwen2_VisionPatchEmbed);
@@ -123,8 +116,6 @@ class Qwen2_VisionPatchMergerImpl : public torch::nn::Module {
   Qwen2_VisionPatchMergerImpl(const ModelContext& context) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
-    auto quant_args = context.get_quant_args();
-    auto parallel_args = context.get_parallel_args();
 
     int64_t d_model = model_args.mm_projection_dim();  // out_hidden_size
     int64_t context_dim = model_args.mm_hidden_size();
@@ -164,14 +155,12 @@ class Qwen2_VisionPatchMergerImpl : public torch::nn::Module {
       CHECK_EQ(norm_->weight.sizes(), norm_weight.sizes())
           << "weight size mismatch for " << name();
       norm_->weight.data().copy_(norm_weight);
-      is_norm_weight_loaded = true;
     }
     const auto norm_bias = norm_dict.get_tensor("bias");
     if (norm_bias.defined()) {
       CHECK_EQ(norm_->bias.sizes(), norm_bias.sizes())
           << "bias size mismatch for " << name();
       norm_->bias.data().copy_(norm_bias);
-      is_norm_bias_loaded = true;
     }
     const auto& fc1_dict = state_dict.get_dict_with_prefix("mlp.0.");
     const auto& fc1_weight = fc1_dict.get_tensor("weight");
@@ -179,14 +168,12 @@ class Qwen2_VisionPatchMergerImpl : public torch::nn::Module {
       CHECK_EQ(std::get<0>(layers_)->weight.sizes(), fc1_weight.sizes())
           << "weight size mismatch for " << name();
       std::get<0>(layers_)->weight.data().copy_(fc1_weight);
-      is_fc1_weight_loaded = true;
     }
     const auto fc1_bias = fc1_dict.get_tensor("bias");
     if (fc1_bias.defined()) {
       CHECK_EQ(std::get<0>(layers_)->bias.sizes(), fc1_bias.sizes())
           << "bias size mismatch for " << name();
       std::get<0>(layers_)->bias.data().copy_(fc1_bias);
-      is_fc1_bias_loaded = true;
     }
 
     const auto& fc2_dict = state_dict.get_dict_with_prefix("mlp.2.");
@@ -195,30 +182,13 @@ class Qwen2_VisionPatchMergerImpl : public torch::nn::Module {
       CHECK_EQ(std::get<2>(layers_)->weight.sizes(), fc2_weight.sizes())
           << "weight size mismatch for " << name();
       std::get<2>(layers_)->weight.data().copy_(fc2_weight);
-      is_fc2_weight_loaded = true;
     }
     const auto fc2_bias = fc2_dict.get_tensor("bias");
     if (fc2_bias.defined()) {
       CHECK_EQ(std::get<2>(layers_)->bias.sizes(), fc2_bias.sizes())
           << "bias size mismatch for " << name();
       std::get<2>(layers_)->bias.data().copy_(fc2_bias);
-      is_fc2_bias_loaded = true;
     }
-  }
-
-  void verify_loaded_weights(const std::string& prefix) const {
-    CHECK(is_fc1_weight_loaded)
-        << "weight is not loaded for " << prefix + "mlp.0" + ".weight";
-    CHECK(is_fc1_bias_loaded)
-        << "bias is not loaded for " << prefix + "mlp.0" + ".bias";
-    CHECK(is_fc2_weight_loaded)
-        << "weight is not loaded for " << prefix + "mlp.2" + ".weight";
-    CHECK(is_fc2_bias_loaded)
-        << "bias is not loaded for " << prefix + "mlp.2" + ".bias";
-    CHECK(is_norm_weight_loaded)
-        << "weight is not loaded for " << prefix + "ln_q" + ".weight";
-    CHECK(is_norm_bias_loaded)
-        << "bias is not loaded for " << prefix + "ln_q" + ".bias";
   }
 
  private:
@@ -229,12 +199,6 @@ class Qwen2_VisionPatchMergerImpl : public torch::nn::Module {
       nullptr,
       nullptr,
       nullptr};
-  bool is_fc1_weight_loaded = false;
-  bool is_fc1_bias_loaded = false;
-  bool is_fc2_weight_loaded = false;
-  bool is_fc2_bias_loaded = false;
-  bool is_norm_weight_loaded = false;
-  bool is_norm_bias_loaded = false;
 };
 TORCH_MODULE(Qwen2_VisionPatchMerger);
 
@@ -242,16 +206,8 @@ class Qwen2_VisionTransformerImpl : public torch::nn::Module {
  public:
   Qwen2_VisionTransformerImpl(const ModelContext& context) {
     auto model_args = context.get_model_args();
-    auto options = context.get_tensor_options();
 
-    hidden_size_ = model_args.mm_hidden_size();
-    num_heads_ = model_args.mm_num_attention_heads();
-
-    window_size_ = model_args.mm_window_size();
-    patch_size_ = model_args.mm_patch_size();
     spatial_merge_size_ = model_args.mm_spatial_merge_size();
-    spatial_merge_unit_ = static_cast<int>(std::pow(spatial_merge_size_, 2));
-    // mlp_ratio_ = model_args.mm_mlp_ratio();
 
     patch_embed_ =
         register_module("patch_embed", Qwen2_VisionPatchEmbed(context));
@@ -323,7 +279,6 @@ class Qwen2_VisionTransformerImpl : public torch::nn::Module {
     hidden_states = patch_embed_(hidden_states);
     //  compute position embedding
     auto rotary_pos_emb = rot_pos_emb(grid_thw);
-    auto seq_len = hidden_states.sizes()[0];
 
     // compute cu_seqlens
     auto cu_seqlens = torch::repeat_interleave(
@@ -364,14 +319,7 @@ class Qwen2_VisionTransformerImpl : public torch::nn::Module {
   }
 
  private:
-  int hidden_size_ = 0;
-  int num_heads_ = 0;
-  int window_size_ = 0;
-  int patch_size_ = 0;
   int spatial_merge_size_ = 0;
-  std::unordered_set<int> fullatt_block_indexes_;
-  int spatial_merge_unit_ = 0;
-  // int mlp_ratio_ = 4;
 
   Qwen2_VisionPatchEmbed patch_embed_{nullptr};
   Qwen2_VisionRotaryEmbedding rotary_pos_emb_{nullptr};
@@ -381,7 +329,6 @@ class Qwen2_VisionTransformerImpl : public torch::nn::Module {
 
   torch::Tensor m_cos;
   torch::Tensor m_sin;
-  int device_id = 0;
 };
 TORCH_MODULE(Qwen2_VisionTransformer);
 
@@ -525,14 +472,8 @@ class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
   }
 
   layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
-
   layer::WordEmbedding get_word_embedding() {
     return language_model_->get_word_embedding();
-  }
-
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    language_model_->set_word_embedding(word_embedding);
   }
 
  private:

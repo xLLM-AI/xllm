@@ -105,12 +105,8 @@ class CausalVLMImpl : public CausalVLM {
     model_->load_model(std::move(loader));
   }
 
-  virtual void prepare_expert_weight(int32_t layer_id,
-                                     const std::vector<int32_t>& expert_ids) {
-    return;
-  }
-
-  void update_expert_weight(int32_t layer_id) override { return; }
+  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
+  void update_expert_weight(int32_t) override {}
 
   layer::LmHead get_lm_head() override {
     if constexpr (detail::has_get_lm_head<ModelType>::value) {
@@ -120,27 +116,11 @@ class CausalVLMImpl : public CausalVLM {
     }
   }
 
-  void set_lm_head(layer::LmHead& head) override {
-    if constexpr (detail::has_set_lm_head<ModelType>::value) {
-      model_->set_lm_head(head);
-    } else {
-      CausalLM::set_lm_head(head);
-    }
-  }
-
   layer::WordEmbedding get_word_embedding() override {
     if constexpr (detail::has_get_word_embedding<ModelType>::value) {
       return model_->get_word_embedding();
     } else {
       return CausalLM::get_word_embedding();
-    }
-  }
-
-  void set_word_embedding(layer::WordEmbedding& embedding) override {
-    if constexpr (detail::has_set_word_embedding<ModelType>::value) {
-      model_->set_word_embedding(embedding);
-    } else {
-      CausalLM::set_word_embedding(embedding);
     }
   }
 

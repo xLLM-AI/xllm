@@ -31,7 +31,6 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
  public:
   Qwen3MoeModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::Qwen3MoeDecoderLayer>(
-            "qwen3_moe",
             context.get_model_args()) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
@@ -147,8 +146,6 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
       }
 #if defined(USE_CUDA) || defined(USE_MUSA)
       attn_metadata.plan_info->layer_id = i;
-#endif
-#if defined(USE_CUDA)
 #endif
       auto& layer = layers_[i];
       h = layer->forward(h,
@@ -314,7 +311,7 @@ REGISTER_MODEL_ARGS(qwen3_moe, [&] {
   SET_ARG(stop_token_ids, std::unordered_set<int32_t>({args->eos_token_id()}));
 
   // arguments to be compatible with other fused moe models
-  LOAD_ARG_OR(n_routed_experts, "num_experts", 128);
+  SET_ARG(n_routed_experts, args->num_experts());
   SET_ARG(n_shared_experts, 0);
   SET_ARG(scoring_func, "softmax");
   SET_ARG(topk_method, "");

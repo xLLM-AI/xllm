@@ -49,21 +49,22 @@ namespace py = pybind11;
 
 namespace xllm {
 
-namespace detail {
+namespace {
 
-void share_python_model_weights(py::object& draft_model,
-                                const py::object& target_model) {
-  // Keep the draft's own head/embedding when the checkpoint ships them (DSpark
-  // carries a trained mask-token basis); borrow the target's only when None.
-  if (draft_model.attr("lm_head").is_none()) {
-    draft_model.attr("lm_head") = target_model.attr("lm_head");
+PyCausalLM* get_py_causal_lm(CausalLM& target, const char* module_name) {
+  auto* target_model = dynamic_cast<PyCausalLM*>(&target);
+  if (target_model == nullptr) {
+    LOG(WARNING) << "Cannot share " << module_name
+                 << ": target model is not a PyCausalLM; draft will keep its "
+                    "own weights.";
+    return nullptr;
   }
-  py::object draft_body = draft_model.attr("model");
-  py::object target_body = target_model.attr("model");
-  if (draft_body.attr("embed_tokens").is_none()) {
-    draft_body.attr("embed_tokens") = target_body.attr("embed_tokens");
-  }
+  return target_model;
 }
+
+}  // namespace
+
+namespace detail {
 
 int64_t python_mega_moe_max_num_tokens_per_rank(int64_t max_seqs_per_batch,
                                                 int64_t num_speculative_tokens,
@@ -682,15 +683,28 @@ void PyCausalLM::eplb_wait_batch_isend_irecv() {
 #endif
 }
 
-bool PyCausalLM::share_weights_from(CausalLM& source) {
-  auto* source_model = dynamic_cast<PyCausalLM*>(&source);
-  if (source_model == nullptr) {
-    return false;
+void PyCausalLM::share_lm_head(CausalLM& target) {
+  auto* target_model = get_py_causal_lm(target, "lm_head");
+  if (target_model == nullptr) {
+    return;
   }
-
   py::gil_scoped_acquire gil;
-  detail::share_python_model_weights(py_model_, source_model->py_model_);
-  return true;
+  if (py_model_.attr("lm_head").is_none()) {
+    py_model_.attr("lm_head") = target_model->py_model_.attr("lm_head");
+  }
+}
+
+void PyCausalLM::share_embed_tokens(CausalLM& target) {
+  auto* target_model = get_py_causal_lm(target, "embed_tokens");
+  if (target_model == nullptr) {
+    return;
+  }
+  py::gil_scoped_acquire gil;
+  py::object draft_model = py_model_.attr("model");
+  if (draft_model.attr("embed_tokens").is_none()) {
+    draft_model.attr("embed_tokens") =
+        target_model->py_model_.attr("model").attr("embed_tokens");
+  }
 }
 
 }  // namespace xllm

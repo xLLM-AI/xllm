@@ -27,17 +27,11 @@ enum class VocabularyWeightSource : uint8_t {
 
 class VocabularyWeightSelector final {
  public:
-  bool should_load(bool dedicated) const {
-    if (dedicated) {
-      return source_ != VocabularyWeightSource::DEDICATED;
-    }
-    return source_ == VocabularyWeightSource::NONE;
+  bool should_load(VocabularyWeightSource source) const {
+    return source > source_;
   }
 
-  void mark_loaded(bool dedicated) {
-    source_ = dedicated ? VocabularyWeightSource::DEDICATED
-                        : VocabularyWeightSource::TARGET_FALLBACK;
-  }
+  void mark_loaded(VocabularyWeightSource source) { source_ = source; }
 
   bool loaded() const { return source_ != VocabularyWeightSource::NONE; }
 

@@ -31,7 +31,6 @@ struct Qwen3_VLImageInputs {
 struct Qwen3_VLVideoInputs {
   torch::Tensor pixel_values_videos;
   torch::Tensor video_grid_thw;
-  torch::Tensor second_per_grid_ts;
 };
 
 template <typename VisionTransformer, typename LanguageModel>
@@ -222,14 +221,8 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
   }
 
   layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
-
   layer::WordEmbedding get_word_embedding() {
     return language_model_->get_word_embedding();
-  }
-
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    language_model_->set_word_embedding(word_embedding);
   }
 
  protected:

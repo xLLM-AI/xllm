@@ -22,7 +22,8 @@ class JoyAILLMFlashMtpForCausalLMImpl
     : public LlmForCausalLMImplBase<DeepseekMtpModel> {
  public:
   JoyAILLMFlashMtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekMtpModel>(context) {}
+      : LlmForCausalLMImplBase<DeepseekMtpModel>(context,
+                                                 /*share_lm_head=*/true) {}
 
   void load_model(
       std::unique_ptr<ModelLoader> loader,
@@ -74,9 +75,7 @@ REGISTER_MODEL_ARGS(joyai_llm_flash_mtp, [&] {
   LOAD_ARG_OR(num_nextn_predict_layers, "num_nextn_predict_layers", 1);
   SET_ARG(mtp_mlp_type, "dense");
 
-  LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
-    return 256;  // args->qk_nope_head_dim() + args->qk_rope_head_dim();
-  });
+  LOAD_ARG_OR(head_dim, "head_dim", 256);
   LOAD_ARG_OR_FUNC(
       rotary_dim, "rotary_dim", [&] { return args->qk_rope_head_dim(); });
 

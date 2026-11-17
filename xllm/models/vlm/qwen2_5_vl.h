@@ -124,8 +124,6 @@ class Qwen2_5_VisionPatchMergerImpl : public torch::nn::Module {
   Qwen2_5_VisionPatchMergerImpl(const ModelContext& context) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
-    auto quant_args = context.get_quant_args();
-    auto parallel_args = context.get_parallel_args();
 
     int64_t d_model = model_args.mm_projection_dim();  // out_hidden_size
     int context_dim = model_args.mm_hidden_size();
@@ -166,14 +164,12 @@ class Qwen2_5_VisionPatchMergerImpl : public torch::nn::Module {
       CHECK_EQ(std::get<0>(layers_)->weight.sizes(), cpl_weight.sizes())
           << "weight size mismatch for " << name();
       std::get<0>(layers_)->weight.data().copy_(cpl_weight);
-      is_cpl_weight_loaded = true;
     }
     const auto cpl_bias = cpl_dict.get_tensor("bias");
     if (cpl_bias.defined()) {
       CHECK_EQ(std::get<0>(layers_)->bias.sizes(), cpl_bias.sizes())
           << "bias size mismatch for " << name();
       std::get<0>(layers_)->bias.data().copy_(cpl_bias);
-      is_cpl_bias_loaded = true;
     }
 
     const auto& rpl_dict = state_dict.get_dict_with_prefix("mlp.2.");
@@ -182,14 +178,12 @@ class Qwen2_5_VisionPatchMergerImpl : public torch::nn::Module {
       CHECK_EQ(std::get<2>(layers_)->weight.sizes(), rpl_weight.sizes())
           << "weight size mismatch for " << name();
       std::get<2>(layers_)->weight.data().copy_(rpl_weight);
-      is_rpl_weight_loaded = true;
     }
     const auto rpl_bias = rpl_dict.get_tensor("bias");
     if (rpl_bias.defined()) {
       CHECK_EQ(std::get<2>(layers_)->bias.sizes(), rpl_bias.sizes())
           << "bias size mismatch for " << name();
       std::get<2>(layers_)->bias.data().copy_(rpl_bias);
-      is_rpl_bias_loaded = true;
     }
   }
 
@@ -202,10 +196,6 @@ class Qwen2_5_VisionPatchMergerImpl : public torch::nn::Module {
       nullptr,
       nullptr,
       nullptr};
-  bool is_cpl_weight_loaded = false;
-  bool is_cpl_bias_loaded = false;
-  bool is_rpl_weight_loaded = false;
-  bool is_rpl_bias_loaded = false;
 };
 TORCH_MODULE(Qwen2_5_VisionPatchMerger);
 
@@ -213,10 +203,6 @@ class Qwen2_5_VisionTransformerImpl : public torch::nn::Module {
  public:
   Qwen2_5_VisionTransformerImpl(const ModelContext& context) {
     auto model_args = context.get_model_args();
-    auto options = context.get_tensor_options();
-
-    hidden_size_ = model_args.mm_hidden_size();
-    num_heads_ = model_args.mm_num_attention_heads();
 
     window_size_ = model_args.mm_window_size();
     patch_size_ = model_args.mm_patch_size();
@@ -445,8 +431,6 @@ class Qwen2_5_VisionTransformerImpl : public torch::nn::Module {
   }
 
  private:
-  int hidden_size_ = 0;
-  int num_heads_ = 0;
   int window_size_ = 0;
   int patch_size_ = 0;
   int spatial_merge_size_ = 0;
@@ -461,7 +445,6 @@ class Qwen2_5_VisionTransformerImpl : public torch::nn::Module {
 
   torch::Tensor m_cos;
   torch::Tensor m_sin;
-  int device_id = 0;
 };
 TORCH_MODULE(Qwen2_5_VisionTransformer);
 
@@ -630,14 +613,8 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
   }
 
   layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
-
   layer::WordEmbedding get_word_embedding() {
     return language_model_->get_word_embedding();
-  }
-
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    language_model_->set_word_embedding(word_embedding);
   }
 
  private:

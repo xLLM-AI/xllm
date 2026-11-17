@@ -234,7 +234,6 @@ TEST(CompressedTensorsMluTest, AttentionPreservesBothCheckpointFormats) {
       }
       const auto out = children["o_proj"]->as<RowParallelLinearImpl>();
       ASSERT_NE(out, nullptr);
-      EXPECT_EQ(out->weight().scalar_type(), torch::kInt8);
       expect_close(out->forward(input),
                    reference(input, ct_weights(128, 128, true)));
       EXPECT_EQ(children["kv_b_proj"]

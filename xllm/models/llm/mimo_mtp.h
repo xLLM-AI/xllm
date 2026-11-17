@@ -140,13 +140,6 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
     norm_ = register_module("norm", layer::RMSNorm(context));
 
     dp_size_ = parallel_args.dp_size();
-    dp_local_tp_size_ = parallel_args.world_size() / dp_size_;
-    dp_rank_ = parallel_args.rank() / dp_local_tp_size_;
-    rank_ = parallel_args.rank();
-  }
-
-  torch::Tensor get_input_embeddings(torch::Tensor input_ids) {
-    return embed_tokens_(input_ids);
   }
 
   ModelOutput forward(torch::Tensor tokens,
@@ -220,16 +213,13 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
   layer::WordEmbedding get_word_embedding() { return embed_tokens_; }
 
   void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    embed_tokens_ = word_embedding;
+    embed_tokens_ = replace_module("embed_tokens", word_embedding);
   }
 
  private:
   ModelArgs model_args_;
   std::vector<MiMoMtpDecoderLayer> mtp_layers_;
-  int32_t dp_rank_;
-  int32_t rank_;
   int32_t dp_size_;
-  int32_t dp_local_tp_size_;
   torch::Device device_;
   layer::WordEmbedding embed_tokens_{nullptr};
   layer::RMSNorm norm_{nullptr};
@@ -240,7 +230,8 @@ class MiMoMtpForCausalLMImpl final
     : public LlmForCausalLMImplBase<MiMoMtpModel> {
  public:
   explicit MiMoMtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<MiMoMtpModel>(context) {}
+      : LlmForCausalLMImplBase<MiMoMtpModel>(context,
+                                             /*share_lm_head=*/true) {}
 
   void load_model(
       std::unique_ptr<ModelLoader> loader,

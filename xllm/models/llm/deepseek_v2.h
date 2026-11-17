@@ -80,13 +80,6 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     }
 
     dp_size_ = parallel_args.dp_size();
-    std::vector<int64_t> indices;
-    dp_local_tp_size_ = parallel_args.world_size() / dp_size_;
-    dp_rank_ = parallel_args.rank() / dp_local_tp_size_;
-    rank_ = parallel_args.rank();
-    for (int i = 0; i < parallel_args.world_size(); i += dp_local_tp_size_) {
-      indices.push_back(i);
-    }
   }
 
  public:
@@ -158,7 +151,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
   layer::WordEmbedding get_word_embedding() { return embed_tokens_; }
 
   void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    embed_tokens_ = word_embedding;
+    embed_tokens_ = replace_module("embed_tokens", word_embedding);
   }
 
  protected:
@@ -235,10 +228,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
  private:
   torch::nn::ModuleList blocks_{nullptr};
   std::vector<layer::DeepseekV2DecoderLayer> layers_;
-  int32_t dp_rank_;
-  int32_t rank_;
   int32_t dp_size_;
-  int32_t dp_local_tp_size_;
   torch::Device device_;
   layer::WordEmbedding embed_tokens_{nullptr};
   layer::RMSNorm norm_{nullptr};
@@ -254,14 +244,9 @@ class DeepseekV2ForCausalLMImpl
   void load_model(
       std::unique_ptr<ModelLoader> loader,
       std::string prefix = "model." /*llm model weight prefix*/) override {
+    LlmForCausalLMImplBase<DeepseekV2Model>::load_lm_head(loader, prefix);
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-      if (tie_word_embeddings) {
-        lm_head_->load_state_dict(
-            state_dict->get_dict_with_prefix(prefix + "embed_tokens."));
-      } else {
-        lm_head_->load_state_dict(state_dict->get_dict_with_prefix("lm_head."));
-      }
     }
     model_->verify_loaded_weights();
   }

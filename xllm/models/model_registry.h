@@ -102,8 +102,6 @@ enum class GraphContextPolicy : int8_t {
 
 struct MtpModelCapabilities {
   bool native_draft_requires_accepted_span_replay = false;
-  bool native_draft_owns_embedding_and_lm_head = false;
-  bool python_draft_owns_embedding_and_lm_head = false;
   bool allow_tail_fallback = false;
   MtpModelFamily model_family = MtpModelFamily::NONE;
   bool supports_causal_replay = false;
@@ -193,8 +191,6 @@ class ModelRegistry {
 
   static void register_dcp_capability(const std::string& name);
   static bool supports_dcp(const std::string& name);
-
-  static void register_mtp_shared_weight_owner(const std::string& name);
 
   static void register_mtp_args_adapter(const std::string& name,
                                         MtpArgsAdapter adapter);

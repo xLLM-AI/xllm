@@ -41,14 +41,9 @@ class Model {
     NOT_IMPLEMENTED();
     return nullptr;
   }
-  virtual void set_lm_head(layer::LmHead& head) { NOT_IMPLEMENTED(); }
   virtual layer::WordEmbedding get_word_embedding() {
     NOT_IMPLEMENTED();
     return nullptr;
-  }
-
-  virtual void set_word_embedding(layer::WordEmbedding& embedding) {
-    NOT_IMPLEMENTED();
   }
 
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader) {

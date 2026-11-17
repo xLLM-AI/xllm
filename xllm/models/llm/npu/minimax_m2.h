@@ -34,9 +34,9 @@ limitations under the License.
 #include "core/framework/model_loader/model_loader.h"
 #include "core/layers/common/attention_mask.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "core/layers/common/lm_head.h"
 #include "core/layers/common/word_embedding.h"
 #include "core/layers/npu_torch/minimax_m2_decode_layer.h"
+#include "models/llm/llm_model_base.h"
 
 namespace xllm::npu::model {
 
@@ -200,6 +200,7 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
     const auto& parallel_args = context.get_parallel_args();
 
     enable_mla_ = model_args.enable_mla();
+    hidden_size_ = model_args.hidden_size();
 
     embed_tokens_ =
         register_module("embed_tokens",
@@ -273,14 +274,10 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
     norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
   }
 
-  torch::Tensor get_input_embeddings(torch::Tensor input_ids) {
-    return embed_tokens_(input_ids);
-  }
-
   layer::WordEmbedding get_word_embedding() { return embed_tokens_; }
 
   void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    embed_tokens_ = word_embedding;
+    embed_tokens_ = replace_module("embed_tokens", word_embedding);
   }
 
  private:
@@ -329,75 +326,18 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
 };
 TORCH_MODULE(MiniMaxM2Model);
 
-class MiniMaxM2ForCausalLMImpl : public torch::nn::Module {
+class MiniMaxM2ForCausalLMImpl : public LlmForCausalLMImplBase<MiniMaxM2Model> {
  public:
-  explicit MiniMaxM2ForCausalLMImpl(const ModelContext& context) {
-    tie_word_embeddings_ = context.get_model_args().tie_word_embeddings();
-    model_ = register_module("model", MiniMaxM2Model(context));
-    lm_head_ = register_module("lm_head", layer::LmHead(context));
-  }
-
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return model_(tokens, positions, kv_caches, input_params);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) {
-    auto h = hidden_states;
-    if (selected_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, selected_idxes);
-    }
-    return lm_head_(h);
-  }
-
-  torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) {
-    if (selected_idxes.defined()) {
-      return hidden_states.index_select(/*dim=*/0, selected_idxes);
-    }
-    return hidden_states;
-  }
+  explicit MiniMaxM2ForCausalLMImpl(const ModelContext& context)
+      : LlmForCausalLMImplBase(context) {}
 
   void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "model.") {
+                  std::string prefix = "model.") override {
+    load_lm_head(loader, prefix);
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-      if (tie_word_embeddings_) {
-        lm_head_->load_state_dict(
-            state_dict->get_dict_with_prefix(prefix + "embed_tokens."));
-      } else {
-        lm_head_->load_state_dict(state_dict->get_dict_with_prefix("lm_head."));
-      }
     }
   }
-
-  void prepare_expert_weight(int32_t layer_id,
-                             const std::vector<int32_t>& expert_ids) {
-    (void)layer_id;
-    (void)expert_ids;
-  }
-
-  void update_expert_weight(int32_t layer_id) { (void)layer_id; }
-
-  layer::LmHead get_lm_head() { return lm_head_; }
-
-  void set_lm_head(layer::LmHead& head) { lm_head_ = head; }
-
-  layer::WordEmbedding get_word_embedding() {
-    return model_->get_word_embedding();
-  }
-
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    model_->set_word_embedding(word_embedding);
-  }
-
- private:
-  MiniMaxM2Model model_{nullptr};
-  bool tie_word_embeddings_ = false;
-  layer::LmHead lm_head_{nullptr};
 };
 TORCH_MODULE(MiniMaxM2ForCausalLM);
 
