@@ -1,6 +1,5 @@
 {
   "original_repository": "https://github.com/wangzhao-11a/t5-qkv-append-cache",
-  "tested_runtime_commit": "f52671207769bf5f334972c997743eb6aa6f91b3",
   "upstream_base": "261274e5f45449e98d7740144c3a958a29f1fd3e",
   "imported_files": [
     {
@@ -152,8 +151,62 @@
       "sha256": "cb21f41dc6cd884493e8d3e57caf9b16c75ec3b932d8197cef51aa2050a7df0f"
     }
   ],
-  "changes": "Copyright, naming, type annotations, braces/format and standalone-root include paths; no new kernel algorithm.",
   "original_npu_evidence": "https://github.com/wangzhao-11a/t5-qkv-append-cache/tree/874f2bbbb385bc032d004735ae524244401a29ce/reports/accepted_f526712",
-  "this_pr_npu_validation": "not_run; require CANN rebuild and device validation before merge",
-  "frozen_reference_files_unchanged": true
+  "this_pr_npu_validation": {
+    "status": "passed",
+    "runtime_commit": "cbe5ac665188298435b25ce1b36a3ece252ef769",
+    "soc": "Ascend910_9382",
+    "cann": "9.1.0",
+    "driver": "26.1.1",
+    "functional": {
+      "public_accuracy": 35,
+      "extended_accuracy": 150,
+      "engineering": 15,
+      "memory": 20
+    },
+    "initial_fixed_cases_passed": 10,
+    "additional_fresh_process_runs": 5,
+    "passed_cases_in_each_repeat": 10,
+    "report": "reports/pr2656_a3_20261116/README.md",
+    "evidence_sha256": "59c0c4f78b0fd10a1bfd41163eac0f9ee14a2e6f79069eab63dede362c53e3ef",
+    "top_level_xllm_integration_validated": false,
+    "task_requested_driver_validated": false
+  },
+  "frozen_reference_files_unchanged": true,
+  "original_tested_runtime_commit": "f52671207769bf5f334972c997743eb6aa6f91b3",
+  "tested_runtime_commit": "cbe5ac665188298435b25ce1b36a3ece252ef769",
+  "original_import_changes": "Copyright, naming, type annotations, braces/format and standalone-root include paths; no new kernel algorithm.",
+  "changes": "Independent DMA load/store alignment from a201; official CANN custom-compiler include propagation; baseline ATen output factories restored. Frozen reference bytes unchanged.",
+  "original_pr_head": "4649db26897d128389140138e1821d14aa5fb5e0",
+  "standalone_alignment_source": "a2013d56db4ff8367160b157335d2ff670aad411",
+  "preserved_baselines": [
+    "c9decf212667337d518e3a1d48dc3e07cd5fef0e",
+    "f52671207769bf5f334972c997743eb6aa6f91b3",
+    "a2013d56db4ff8367160b157335d2ff670aad411",
+    "4649db26897d128389140138e1821d14aa5fb5e0",
+    "f990af10d8cbfb7b2d1873b593bdfb7a2c73e5ce"
+  ],
+  "upstream_review": {
+    "main_commit": "6d25e84948409a3e2f0e9183a4c7f067a1eb9a39",
+    "component_path_commits": [],
+    "note": "Read-only upstream recheck; original base retained, no unmerged community PR imported."
+  },
+  "runtime_changed_files": [
+    {
+      "path": "op_kernel/t5_copy.h",
+      "sha256": "e31fab4775acacdfb417ad55dc3fef6fce90b62e5af28b479b16cbb7c14d8dad"
+    },
+    {
+      "path": "tools/configure_generated.py",
+      "sha256": "8172a2c718dc531b57fa46e44f7dcc60ad6a8b1fc7e5c117970e2c000cc976a9"
+    },
+    {
+      "path": "direct/CMakeLists.txt",
+      "sha256": "0fac874a95ff26971ceb9414302d7be22604a3ad301b6725540a4c6be25be711"
+    },
+    {
+      "path": "csrc/torch_binding.cpp",
+      "sha256": "70217c9142f3835be3770884b1154383784cb9f817c3b0d43abb7cedddd27f8a"
+    }
+  ]
 }

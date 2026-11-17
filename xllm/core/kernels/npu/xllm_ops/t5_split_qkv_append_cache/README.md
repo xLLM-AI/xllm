@@ -39,8 +39,9 @@ allocates new outputs.
 
 The kernel partitions the outputs into 32,768-element tiles and uses up to 48
 vector cores, with two 64 KiB DMA buffers. It gathers cache fragments into each
-core's own output interval. Aligned fragments use ordinary DMA; other fragments
-use the padded copy API. Large outputs use a bounded cached key suffix and
+core's own output interval. Load and store alignment are checked independently:
+an unaligned source can use a padded load while its aligned output uses ordinary
+DMA. Large outputs use a bounded cached key suffix and
 bypass L2 for the remaining key and value output. The policy is specific to the
 910_9382 working set and is not a performance claim for other devices.
 
@@ -107,18 +108,29 @@ calls, including fresh output allocation and synchronized ACLNN completion.
 
 ## Provenance and current review status
 
-The implementation was imported from the accepted standalone runtime
+The implementation was originally imported from the standalone runtime
 [`f526712`](https://github.com/wangzhao-11a/t5-qkv-append-cache/commit/f52671207769bf5f334972c997743eb6aa6f91b3).
-That original runtime passed all 10 fixed performance cases on Ascend910_9382
-with driver 26.1.1. The large FP16/BF16 cases measured 70.22155 / 70.20120 us
-against 75 / 77 us limits in the accepted full run. These measurements are not a
-guarantee across processes, devices, drivers or this source port.
-
 The [original reports and binary manifest](https://github.com/wangzhao-11a/t5-qkv-append-cache/tree/874f2bbbb385bc032d004735ae524244401a29ce/reports/accepted_f526712)
-remain separate from this PR. This port changes naming, formatting, annotations,
-include paths and validation-tool integration. **It has not yet been rebuilt with
-CANN or validated on an NPU; it needs both before merge.** See
-`source_provenance.json` for original per-file hashes and the upstream base.
+remain separate from this PR. The later standalone alignment fix
+[`a2013d5`](https://github.com/wangzhao-11a/t5-qkv-append-cache/commit/a2013d56db4ff8367160b157335d2ff670aad411)
+is now ported here, with explicit CANN custom-compiler include registration and
+the original `at::empty` output factories preserved.
+
+The actual port at
+[`cbe5ac66`](https://github.com/wangzhao-11a/xllm/commit/cbe5ac665188298435b25ce1b36a3ece252ef769)
+was rebuilt and validated on A3 (Ascend910_9382, CANN 9.1.0, driver 26.1.1).
+Public accuracy 35/35, extended accuracy 150/150, engineering 15/15 and memory
+20/20 passed. The first fixed performance run and five additional fresh-process
+runs each passed 10/10. Across the five repeats, the largest case medians were
+70.30915 us for FP16 and 70.24015 us for BF16, against 75 / 77 us limits.
+
+The [A3 report and original evidence](reports/pr2656_a3_20261116/README.md)
+include the failed intermediate port and the preserved standalone control.
+These results validate this standalone component in the recorded environment;
+they do not validate the top-level xLLM build/model path or driver `25.5.t6.b001`.
+The externally reported discrete latency levels have not been established as a
+single root cause. See `source_provenance.json` for original per-file hashes,
+preserved baselines and the exact tested port commit.
 The earlier design discussion is [PR #2604](https://github.com/xLLM-AI/xllm/pull/2604).
 
 Files in `reference/` are frozen task inputs, excluded from formatting. Their
