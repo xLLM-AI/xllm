@@ -20,6 +20,7 @@ limitations under the License.
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -38,6 +39,7 @@ limitations under the License.
 #include "core/framework/config/parallel_config_validation.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model_loader/hf_model_config.h"
+#include "core/framework/multimodal/mm_codec.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/model/model_args.h"
@@ -605,6 +607,58 @@ void VLMMaster::run() {
     }
     running_.store(false, std::memory_order_relaxed);
   });
+
+  if (!options_.enable_offline_inference() && !options_.enable_disagg_pd() &&
+      !ExecutionConfig::get_instance().disable_graph_warmup() &&
+      model_args_.image_token_id() != 0) {
+    warmup_multimodal();
+  }
+}
+
+void VLMMaster::warmup_multimodal() {
+  // Token-only graph warmup never runs image preprocessing, the vision
+  // encoder or visual embedding injection. Use the serving path before ready.
+  const int64_t image_size =
+      model_args_.mm_image_size() > 0 ? model_args_.mm_image_size() : 448;
+  // Include larger square, portrait and landscape inputs so dynamic-resolution
+  // models also exercise larger vision inputs and chunked prefill.
+  const std::vector<std::pair<int64_t, int64_t>> image_sizes = {
+      {image_size, image_size}, {896, 896}, {1792, 1344}, {1344, 1792}};
+  OpenCVImageEncoder encoder;
+  for (const auto& [height, width] : image_sizes) {
+    Timer timer;
+    const torch::Tensor image = torch::zeros(
+        {3, height, width},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+    std::string payload;
+    CHECK(encoder.encode(image, payload)) << "Failed to encode warmup image";
+    std::vector<Message> messages = build_user_messages_from_image_urls(
+        "Describe the image.",
+        {"data:image/png;binary," + std::to_string(payload.size())});
+
+    RequestParams params;
+    params.request_id = "vlm-image-warmup-" + std::to_string(width) + "x" +
+                        std::to_string(height);
+    params.max_tokens = 1;
+    params.temperature = 0.0f;
+    std::promise<void> completion;
+    std::future<void> result = completion.get_future();
+    CHECK(get_rate_limiter()->acquire().ok());
+    handle_request(
+        std::move(messages),
+        std::move(params),
+        MMInput(std::move(payload)),
+        [&completion](const RequestOutput& output) {
+          CHECK(!output.status.has_value() || output.status->ok())
+              << "VLM image warmup failed: " << output.status->message();
+          CHECK(output.finished) << "VLM image warmup did not finish";
+          completion.set_value();
+          return true;
+        });
+    result.get();
+    LOG(INFO) << "VLM image warmup completed: image=" << width << "x" << height
+              << ", latency=" << timer.elapsed_milliseconds() << " ms";
+  }
 }
 
 void VLMMaster::generate() {
