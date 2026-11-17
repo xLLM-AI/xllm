@@ -62,6 +62,7 @@ def prepare_tilelang_import(tilelang_root: str | Path | None = None) -> Path:
     import_paths = [
         str(source_root),
         str(source_root / "xllm"),
+        str(source_root / "xllm-kernel" / "python"),
         str(import_path),
     ]
     os.environ["TL_ROOT"] = str(tl_root)

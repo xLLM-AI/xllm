@@ -15,12 +15,11 @@
 # limitations under the License.
 
 import enum
-import logging
 
 import tilelang
 import tilelang.language as T
 
-from .utils import (
+from xllm_kernel.utils.tilelang import (
     detect_vec_core_num,
     mte2_notify_mte3,
     mte2_notify_v,
@@ -33,8 +32,6 @@ from .utils import (
     v_notify_mte3,
     v_wait_mte2,
 )
-
-logger = logging.getLogger(__name__)
 
 COS_SIN_MERGED_LAYOUT = "token_3rope"
 DEFAULT_DTYPE = "bf16"
@@ -766,6 +763,8 @@ def _run_ref_check(
     is_interleaved: bool,
 ) -> None:
     import torch
+
+    from scripts.logger import logger
 
     if not hasattr(torch, "npu") or not torch.npu.is_available():
         logger.warning("Skip split_qkv_rmsnorm_mrope reference check: NPU is not available")

@@ -18,11 +18,7 @@ The schemas live in ``xllm/core/kernels/npu/npu_ops_library.cpp``. Every
 operator that a compiled graph may contain needs its shape and dtype contract
 declared here, otherwise tracing fails when it reaches the call.
 
-Two schemas in that file have no fake here on purpose:
-
-* ``fused_qk_norm_rope`` is declared but has no ``TORCH_LIBRARY_IMPL`` entry
-  for ``PrivateUse1``; NPU runs the Triton kernel in ``rotary_embedding.py``.
-* ``apply_rotary_embedding`` is reached from C++ only.
+``apply_rotary_embedding`` is reached from C++ only.
 
 Importing this module registers all of them; the package ``__init__`` does so
 before exposing any kernel.
@@ -57,35 +53,6 @@ def register_fake(qualname: str, fake_impl: Callable) -> None:
     torch.library.register_fake(qualname)(fake_impl)
 
 
-def _rms_norm_fake(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-) -> torch.Tensor:
-    del weight, eps
-    return torch.empty_like(input)
-
-
-def _rms_norm_gated_fake(
-    input: torch.Tensor,
-    gate: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-) -> torch.Tensor:
-    del gate, weight, eps
-    return torch.empty_like(input)
-
-
-def _fused_add_gemma_rms_norm_fake(
-    input: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    del weight, eps
-    return torch.empty_like(input), torch.empty_like(residual)
-
-
 def _moe_gating_top_k_softmax_fake(
     input: torch.Tensor,
     topk: int,
@@ -97,35 +64,6 @@ def _moe_gating_top_k_softmax_fake(
         input.new_empty(output_shape),
         input.new_empty(output_shape, dtype=torch.int32),
     )
-
-
-def _split_qkv_rmsnorm_mrope_fake(
-    qkvg: torch.Tensor,
-    q_weight: torch.Tensor,
-    k_weight: torch.Tensor,
-    cos_sin: torch.Tensor,
-    gather_pattern: torch.Tensor,
-    eps: float,
-    num_q_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    del q_weight, k_weight, cos_sin, gather_pattern, eps
-    num_tokens = qkvg.shape[0]
-    return (
-        qkvg.new_empty((num_tokens, num_q_heads, head_size)),
-        qkvg.new_empty((num_tokens, num_kv_heads, head_size)),
-        qkvg.new_empty((num_tokens, num_kv_heads, head_size)),
-        qkvg.new_empty((num_tokens, num_q_heads, head_size)),
-    )
-
-
-def _l2_norm_fake(
-    input: torch.Tensor,
-    eps: float,
-) -> torch.Tensor:
-    del eps
-    return torch.empty_like(input)
 
 
 def _atb_matmul_ein_sum_fake(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -320,16 +258,6 @@ def _fused_sigmoid_gating_delta_rule_decode_fake(
     del a_log, a, dt_bias, k, b, ssm_state, state_indices, cu_seqlens, scale
     # Output shape matches v: [num_tokens, num_value_heads, value_dim]
     return torch.empty_like(v)
-
-
-def _fused_add_rms_norm_fake(
-    input: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    del weight, eps
-    return input, residual
 
 
 def _silu_and_mul_fake(input: torch.Tensor) -> torch.Tensor:
@@ -803,13 +731,6 @@ def _scatter_nd_update_fake(
 
 # Matches kDsaMetadataBufferElements in xllm_ops_api.h.
 _DSA_METADATA_BUFFER_ELEMENTS = 1024
-
-
-def _rms_norm_dynamic_quant_fake(
-    input: torch.Tensor, weight: torch.Tensor, eps: float
-) -> tuple[torch.Tensor, torch.Tensor]:
-    del weight, eps
-    return input.new_empty(input.shape, dtype=torch.int8), input.new_empty(input.shape[:-1], dtype=torch.float32)
 
 
 def _npu_inplace_partial_rotary_mul_fake(
@@ -1324,14 +1245,9 @@ register_fake("xllm_ops::shared_full_indices_out", _shared_full_indices_out_fake
 register_fake("xllm_ops::npu_all_reduce", _npu_all_reduce_fake)
 register_fake("xllm_ops::npu_all_gather", _npu_all_gather_fake)
 register_fake("xllm_ops::npu_reduce_scatter", _npu_reduce_scatter_fake)
-register_fake("xllm_ops::rms_norm", _rms_norm_fake)
-register_fake("xllm_ops::rms_norm_gated", _rms_norm_gated_fake)
-register_fake("xllm_ops::fused_add_gemma_rms_norm", _fused_add_gemma_rms_norm_fake)
-register_fake("xllm_ops::l2_norm", _l2_norm_fake)
 register_fake("xllm_ops::atb_matmul_ein_sum", _atb_matmul_ein_sum_fake)
 register_fake("xllm_ops::atb_matmul_ein_sum_out", _atb_matmul_ein_sum_out_fake)
 register_fake("xllm_ops::moe_gating_top_k_softmax", _moe_gating_top_k_softmax_fake)
-register_fake("xllm_ops::split_qkv_rmsnorm_mrope", _split_qkv_rmsnorm_mrope_fake)
 register_fake("xllm_ops::chunk_gated_delta_rule", _chunk_gated_delta_rule_fake)
 register_fake("xllm_ops::mega_gdn_prefill", _mega_gdn_prefill_fake)
 register_fake("xllm_ops::mega_gdn_decode", _mega_gdn_decode_fake)
@@ -1343,7 +1259,6 @@ register_fake(
     "xllm_ops::fused_sigmoid_gating_delta_rule_decode",
     _fused_sigmoid_gating_delta_rule_decode_fake,
 )
-register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
 register_fake("xllm_ops::mega_moe", _mega_moe_fake)
 register_fake("xllm_ops::reshape_paged_cache", _reshape_paged_cache_fake)
@@ -1374,7 +1289,6 @@ register_fake(
 register_fake("xllm_ops::lightning_indexer", _lightning_indexer_fake)
 register_fake("xllm_ops::lightning_indexer_out", _lightning_indexer_out_fake)
 register_fake("xllm_ops::scatter_nd_update", _scatter_nd_update_fake)
-register_fake("xllm_ops::rms_norm_dynamic_quant", _rms_norm_dynamic_quant_fake)
 register_fake(
     "xllm_ops::npu_inplace_partial_rotary_mul",
     _npu_inplace_partial_rotary_mul_fake,

@@ -6,13 +6,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from xllm_kernel.ops.activation import CONTRACT
-from xllm_kernel.platform import Platform, PlatformEnum
+from xllm_kernel.platform import PlatformEnum, current_platform
 from xllm_kernel.registry import register_kernel
 
 if TYPE_CHECKING:
     import torch
 
-if Platform.is_npu():
+if current_platform.is_npu():
     import torch_npu
 
     _npu_swiglu = torch_npu.npu_swiglu

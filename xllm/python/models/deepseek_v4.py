@@ -42,6 +42,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_npu
+from xllm_kernel.ops import normalization
 
 from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.csa_attention import (
@@ -848,9 +849,11 @@ class DeepseekV4Attention(Attention):
         # re-quant). The indexer reuses the same qr + qr_pertoken_scale in
         # build_query, so stash them on the backend for _run_indexer.
         q_a = self.q_a_proj(hidden)
-        qr, qr_pertoken_scale = kernels.rms_norm_dynamic_quant(q_a, self.q_a_layernorm.weight, self.cfg.rms_norm_eps)
+        qr, qr_pertoken_scale = normalization.rms_norm_dynamic_quant(
+            q_a, self.q_a_layernorm.weight, self.cfg.rms_norm_eps
+        )
         q = self.q_b_proj.forward_quantized(qr, qr_pertoken_scale).view(num_tokens, self.num_heads_local, self.head_dim)
-        q = kernels.rms_norm(q, self.q_rms_gamma, self.cfg.rms_norm_eps)
+        q = normalization.rms_norm(q, self.q_rms_gamma, self.cfg.rms_norm_eps)
 
         # The compact Python cache stores half-width per-token cos/sin; expand
         # it to the C++ interleaved [M, rope_head_dim] kernel layout.

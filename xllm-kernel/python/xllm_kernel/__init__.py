@@ -14,7 +14,24 @@
 
 """Python kernel contracts for xLLM; import does not load Torch or a device SDK."""
 
-from xllm_kernel.ops.normalization import prepare_rms_norm
+from xllm_kernel.ops.normalization import (
+    build_split_qkv_rmsnorm_mrope_gather_pattern,
+    fused_add_gemma_rms_norm,
+    fused_add_rms_norm,
+    fused_add_rms_norm_dynamic_quant,
+    fused_eh_norm,
+    fused_qk_norm_rope,
+    gemma_rms_norm,
+    has_split_qkv_rmsnorm_mrope_specialization,
+    l2_norm,
+    layer_norm,
+    prepare_rms_norm,
+    rms_norm,
+    rms_norm_dynamic_quant,
+    rms_norm_gated,
+    rms_norm_sigmoid_gated,
+    split_qkv_rmsnorm_mrope,
+)
 from xllm_kernel.platform import CpuArchEnum, Platform, PlatformEnum, current_platform
 from xllm_kernel.registry import register_kernel
 from xllm_kernel.runtime import initialize
@@ -25,9 +42,24 @@ __all__ = [
     "CpuArchEnum",
     "Platform",
     "PlatformEnum",
+    "build_split_qkv_rmsnorm_mrope_gather_pattern",
     "current_platform",
+    "fused_add_gemma_rms_norm",
+    "fused_add_rms_norm",
+    "fused_add_rms_norm_dynamic_quant",
+    "fused_eh_norm",
+    "fused_qk_norm_rope",
+    "gemma_rms_norm",
+    "has_split_qkv_rmsnorm_mrope_specialization",
     "initialize",
+    "l2_norm",
+    "layer_norm",
     "prepare_rms_norm",
     "register_kernel",
+    "rms_norm",
+    "rms_norm_dynamic_quant",
+    "rms_norm_gated",
+    "rms_norm_sigmoid_gated",
     "select_kernel",
+    "split_qkv_rmsnorm_mrope",
 ]

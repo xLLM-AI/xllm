@@ -15,8 +15,7 @@
 # limitations under the License.
 import tilelang
 import tilelang.language as T
-
-from .utils import DEFAULT_ASCEND_PASS_CONFIGS, SUPPORTED_SPEC_VERIFY_WIDTHS
+from xllm_kernel.utils.tilelang import DEFAULT_ASCEND_PASS_CONFIGS, SUPPORTED_SPEC_VERIFY_WIDTHS
 
 SYMBOL_NUM_ROWS = T.symbolic("num_rows")
 SYMBOL_TILING_WORDS = T.symbolic("tiling_words")

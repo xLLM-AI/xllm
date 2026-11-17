@@ -51,6 +51,7 @@ from tests.python.qwen3_5_test_utils import (
     make_moe_checkpoint as _moe_checkpoint,
 )
 from xllm.python import distributed, kernels
+from xllm.python.kernels_cuda import normalization
 from xllm.python.kernels_cuda.moe import supports_cutlass_moe
 from xllm.python.layers.cuda.qwen3_5.attention import CudaQwen3_5Attention
 from xllm.python.layers.cuda.qwen3_5.decoder_layer import CudaQwen3_5DecoderLayer
@@ -65,7 +66,7 @@ from xllm.python.models import qwen3_5 as qwen3_5_model
 from xllm.python.models.qwen3_5 import Qwen3_5Config, Qwen3_5ForCausalLM, Qwen3_5Model
 
 kernels.supports_cutlass_moe = supports_cutlass_moe
-kernels.gemma_rms_norm = _gemma_rms_norm
+normalization.gemma_rms_norm = _gemma_rms_norm
 kernels.moe_fused_topk = MagicMock()
 kernels.cutlass_fused_moe = MagicMock()
 kernels.fused_moe = MagicMock()

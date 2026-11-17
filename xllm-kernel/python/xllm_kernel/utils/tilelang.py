@@ -1,3 +1,4 @@
+# Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 """Helpers shared only by the independent Ascend TileLang kernels."""
 
 import tilelang.language as T

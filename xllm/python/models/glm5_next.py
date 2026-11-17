@@ -47,6 +47,8 @@ try:
 except ImportError:
     torch_npu = None  # type: ignore[assignment]
 
+from xllm_kernel.ops import normalization
+
 from xllm.python import distributed, kernels
 from xllm.python.attention.backend import MlaIndexContext
 from xllm.python.attention.mla_index_context import (
@@ -146,8 +148,8 @@ class _RMSNormGated(nn.Module):
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         # Fused sigmoid-gated kernel (one launch over all rows). Must be the
-        # sigmoid-gated kernel — never kernels.rms_norm_gated, which is SiLU.
-        return kernels.rms_norm_sigmoid_gated(x, gate, self.weight, self.variance_epsilon)
+        # sigmoid-gated kernel — never normalization.rms_norm_gated, which is SiLU.
+        return normalization.rms_norm_sigmoid_gated(x, gate, self.weight, self.variance_epsilon)
 
 
 # ---------------------------------------------------------------------------

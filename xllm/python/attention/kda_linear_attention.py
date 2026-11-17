@@ -20,6 +20,7 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Any
 
 import torch
+from xllm_kernel.ops import normalization
 
 from xllm.python.attention.backend import resolve_linear_state_io_indices
 from xllm.python.model_executor.forward_context import (
@@ -419,8 +420,8 @@ class KdaLinearAttentionMixin:
             # concurrent requests flattened to [1, 2, ...]) surfaced it.
             core_attn_out = core_attn_out.to(query.dtype).reshape(hidden_shape)
         else:
-            q_in = kernels.l2_norm(query)
-            k_in = kernels.l2_norm(key)
+            q_in = normalization.l2_norm(query)
+            k_in = normalization.l2_norm(key)
             v_in = value.to(torch.bfloat16).contiguous()
             cu_seqlens = (
                 q_cu.to(torch.int32)

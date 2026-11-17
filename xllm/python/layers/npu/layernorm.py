@@ -18,8 +18,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-
-from xllm.python import kernels
+from xllm_kernel.ops import normalization
 
 
 class NpuGemmaRMSNorm(nn.Module):
@@ -42,8 +41,8 @@ class NpuGemmaRMSNorm(nn.Module):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
-            return kernels.gemma_rms_norm(x, self.weight, self.eps)
-        return kernels.fused_add_gemma_rms_norm(
+            return normalization.gemma_rms_norm(x, self.weight, self.eps)
+        return normalization.fused_add_gemma_rms_norm(
             x,
             residual,
             self.weight,

@@ -21,8 +21,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-
-from .utils import get_vectorcore_num
+from xllm_kernel.utils.triton import get_vectorcore_num
 
 
 @triton.jit

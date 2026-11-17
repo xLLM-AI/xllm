@@ -3,8 +3,7 @@ import argparse
 import tilelang
 import torch
 from tilelang import language as T
-
-from .utils import detect_vec_core_num
+from xllm_kernel.utils.tilelang import detect_vec_core_num
 
 tilelang.cache.clear_cache()
 

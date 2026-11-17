@@ -24,7 +24,7 @@ torch_npu = pytest.importorskip(
     reason="GLM-5.3-Flash fused RMSNorm tests require torch_npu",
 )
 
-from xllm.python.kernels_npu.triton.rms_norm import (  # noqa: E402
+from xllm_kernel.ops.normalization import (  # noqa: E402
     rms_norm_sigmoid_gated,
 )
 

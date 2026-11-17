@@ -88,7 +88,7 @@ def _rms_norm_sigmoid_gated(
     weight: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    """CPU reference for kernels_npu rms_norm_sigmoid_gated.
+    """CPU reference for xllm_kernel rms_norm_sigmoid_gated.
 
     Matches the Triton kernel contract: RMSNorm over the last dim, scaled by
     ``weight`` and gated by ``sigmoid(gate)``. Used by pure-Python model
@@ -110,10 +110,10 @@ def _glm_cpu_normalization(request: pytest.FixtureRequest, monkeypatch: pytest.M
         "test_glm53flash_rms_norm",
     }:
         return
-    from xllm.python import kernels
+    from xllm_kernel.ops import normalization
 
-    native_rms_norm = kernels.rms_norm
-    native_gated_rms_norm = kernels.rms_norm_sigmoid_gated
+    native_rms_norm = normalization.rms_norm
+    native_gated_rms_norm = normalization.rms_norm_sigmoid_gated
 
     def rms_norm(value: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
         operation = _rms_norm if value.device.type == "cpu" else native_rms_norm
@@ -123,5 +123,5 @@ def _glm_cpu_normalization(request: pytest.FixtureRequest, monkeypatch: pytest.M
         operation = _rms_norm_sigmoid_gated if value.device.type == "cpu" else native_gated_rms_norm
         return operation(value, gate, weight, eps)
 
-    monkeypatch.setattr(kernels, "rms_norm", rms_norm)
-    monkeypatch.setattr(kernels, "rms_norm_sigmoid_gated", gated_rms_norm)
+    monkeypatch.setattr(normalization, "rms_norm", rms_norm)
+    monkeypatch.setattr(normalization, "rms_norm_sigmoid_gated", gated_rms_norm)

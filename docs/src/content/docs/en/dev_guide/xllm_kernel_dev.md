@@ -111,10 +111,10 @@ The following example registers RMSNorm through a vendor API:
 ```python
 import torch
 
-from xllm_kernel import Platform, PlatformEnum, register_kernel
+from xllm_kernel import PlatformEnum, current_platform, register_kernel
 from xllm_kernel.ops.normalization import RMS_NORM_CONTRACT
 
-if Platform.is_npu():
+if current_platform.is_npu():
     import torch_npu
 
     _native_rms_norm = torch_npu.npu_rms_norm
@@ -201,7 +201,7 @@ dependencies. To add an operator:
    ```
 
    Groups with several operators export every declaration in that tuple, as
-   `ops/normalization/__init__.py` does for the three normalization operators.
+   `ops/normalization/__init__.py` does for the normalization operators and fused-QKV helpers.
 2. Add the group module to `catalog._BUILTINS` and export its public API
    from `ops/__init__.py`.
 3. Have the public API obtain its fixed binding through `OPERATION.get_prepared()`;
