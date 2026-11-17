@@ -28,7 +28,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
-#include "core/transport/forward_shared_memory_transport.h"
+#include "core/transport/shared_memory_transport.h"
 #include "worker.pb.h"
 
 namespace xllm {
@@ -73,7 +73,7 @@ Input make_input(const LayerOffsets& offsets) {
 }
 
 template <typename Input>
-class ForwardSharedMemoryInputTest : public ::testing::Test {
+class SharedMemoryInputTest : public ::testing::Test {
  protected:
   void SetUp() override {
     previous_contiguous_ =
@@ -92,17 +92,16 @@ class ForwardSharedMemoryInputTest : public ::testing::Test {
 
 using TokenInputTypes = ::testing::Types<LlmForwardInput, VlmForwardInput>;
 
-TYPED_TEST_SUITE(ForwardSharedMemoryInputTest, TokenInputTypes);
+TYPED_TEST_SUITE(SharedMemoryInputTest, TokenInputTypes);
 
 template <typename Input>
-class ForwardSharedFullLeaseInputTest
-    : public ForwardSharedMemoryInputTest<Input> {};
+class SharedMemoryFullLeaseInputTest : public SharedMemoryInputTest<Input> {};
 
 using SharedFullLeaseInputTypes =
     ::testing::Types<LlmForwardInput, VlmForwardInput>;
-TYPED_TEST_SUITE(ForwardSharedFullLeaseInputTest, SharedFullLeaseInputTypes);
+TYPED_TEST_SUITE(SharedMemoryFullLeaseInputTest, SharedFullLeaseInputTypes);
 
-TYPED_TEST(ForwardSharedFullLeaseInputTest,
+TYPED_TEST(SharedMemoryFullLeaseInputTest,
            PackedInputPreservesFullLeasesAfterSourceRelease) {
   constexpr uint64_t kReusedEpoch = (uint64_t{1} << 35) + 7;
   const std::vector<int32_t> expected_rows = {
@@ -154,7 +153,7 @@ TYPED_TEST(ForwardSharedFullLeaseInputTest,
             60);
 }
 
-TYPED_TEST(ForwardSharedFullLeaseInputTest,
+TYPED_TEST(SharedMemoryFullLeaseInputTest,
            SharedMemoryReplacesFullLeaseEpochsOnFollowingInput) {
   std::string name = "forward_full_leases_" + std::to_string(getpid()) + "_" +
                      ::testing::UnitTest::GetInstance()
@@ -163,10 +162,10 @@ TYPED_TEST(ForwardSharedFullLeaseInputTest,
   std::replace(name.begin(), name.end(), '/', '_');
   bool is_creator = false;
   constexpr size_t kSegmentBytes = 1 << 20;
-  ForwardSharedMemoryTransport writer(
+  SharedMemoryTransport writer(
       name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
   ASSERT_TRUE(is_creator);
-  ForwardSharedMemoryTransport reader(
+  SharedMemoryTransport reader(
       name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
   ASSERT_FALSE(is_creator);
   TypeParam source = make_input<TypeParam>({});
@@ -174,8 +173,7 @@ TYPED_TEST(ForwardSharedFullLeaseInputTest,
       4, 120, 122, 6, 180, 182};
   constexpr uint64_t kReusedEpoch = uint64_t{1} << 36;
   source.input_params.embedding.full_block_lease_epochs = {1, kReusedEpoch};
-  ASSERT_TRUE(
-      ForwardSharedMemoryTransport::can_write_input(source, kSegmentBytes));
+  ASSERT_TRUE(SharedMemoryTransport::can_write_input(source, kSegmentBytes));
   ASSERT_TRUE(writer.input_write(source));
   TypeParam decoded;
   ASSERT_TRUE(reader.input_read(
@@ -208,7 +206,7 @@ TYPED_TEST(ForwardSharedFullLeaseInputTest,
   EXPECT_TRUE(decoded.input_params.embedding.full_block_lease_epochs.empty());
 }
 
-TYPED_TEST(ForwardSharedMemoryInputTest, RejectsPreviousPackedInputSchema) {
+TYPED_TEST(SharedMemoryInputTest, RejectsPreviousPackedInputSchema) {
   const TypeParam source = make_input<TypeParam>(make_sparse_role_offsets());
   proto::PackedForwardInput packed;
   ASSERT_TRUE(source.to_packed_proto(&packed));
@@ -222,8 +220,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest, RejectsPreviousPackedInputSchema) {
   EXPECT_FALSE(decoded.from_packed_proto(packed));
 }
 
-TYPED_TEST(ForwardSharedMemoryInputTest,
-           PackedInputPreservesExecutionMetadata) {
+TYPED_TEST(SharedMemoryInputTest, PackedInputPreservesExecutionMetadata) {
   TypeParam source = make_input<TypeParam>(make_sparse_role_offsets());
   source.input_params.meta.execution_batch = {1, 2, {2}, {17}, {0, 2}, {1}};
   proto::PackedForwardInput packed;
@@ -241,7 +238,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
   EXPECT_EQ(batch.is_prefilling, (std::vector<uint8_t>{1}));
 }
 
-TYPED_TEST(ForwardSharedMemoryInputTest,
+TYPED_TEST(SharedMemoryInputTest,
            PackedProtoPreservesSparseIndexOffsetsAfterSourceRelease) {
   const LayerOffsets expected = make_sparse_role_offsets();
   TypeParam lazy_input;
@@ -267,7 +264,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
             (std::vector<uint64_t>{8, 1, 9}));
 }
 
-TYPED_TEST(ForwardSharedMemoryInputTest,
+TYPED_TEST(SharedMemoryInputTest,
            SharedMemoryReplacesSparseIndexOffsetsOnFollowingInput) {
   std::string name = "forward_input_offsets_" + std::to_string(getpid()) + "_" +
                      ::testing::UnitTest::GetInstance()
@@ -276,16 +273,15 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
   std::replace(name.begin(), name.end(), '/', '_');
   bool is_creator = false;
   constexpr size_t kSegmentBytes = 1 << 20;
-  ForwardSharedMemoryTransport writer(
+  SharedMemoryTransport writer(
       name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
   ASSERT_TRUE(is_creator);
-  ForwardSharedMemoryTransport reader(
+  SharedMemoryTransport reader(
       name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
   ASSERT_FALSE(is_creator);
   const LayerOffsets expected = make_sparse_role_offsets();
   TypeParam source = make_input<TypeParam>(expected);
-  ASSERT_TRUE(
-      ForwardSharedMemoryTransport::can_write_input(source, kSegmentBytes));
+  ASSERT_TRUE(SharedMemoryTransport::can_write_input(source, kSegmentBytes));
   ASSERT_TRUE(writer.input_write(source));
   source.transfer_kv_infos.clear();
 
@@ -312,7 +308,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
                       shorter);
 }
 
-TYPED_TEST(ForwardSharedMemoryInputTest,
+TYPED_TEST(SharedMemoryInputTest,
            PackedInputPreservesNoncontiguousCpuTensorValues) {
   TypeParam source = make_input<TypeParam>({});
   source.token_ids = torch::tensor({11, 0, 23, 0}, torch::kInt32)
@@ -336,10 +332,9 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
       torch::equal(decoded.positions, torch::tensor({0, 1}, torch::kInt32)));
 }
 
-using VlmForwardSharedMemoryInputTest =
-    ForwardSharedMemoryInputTest<VlmForwardInput>;
+using VlmSharedMemoryInputTest = SharedMemoryInputTest<VlmForwardInput>;
 
-TEST_F(VlmForwardSharedMemoryInputTest,
+TEST_F(VlmSharedMemoryInputTest,
        PackedVisualPayloadSurvivesSourceAndProtoRelease) {
   const auto expected = torch::arange(12, torch::kFloat32).reshape({3, 4});
   VlmForwardInput lazy;
@@ -363,14 +358,14 @@ TEST_F(VlmForwardSharedMemoryInputTest,
   EXPECT_TRUE(torch::equal(*pixels, expected));
 }
 
-TEST_F(VlmForwardSharedMemoryInputTest,
+TEST_F(VlmSharedMemoryInputTest,
        SharedVisualPayloadSurvivesPublisherSourceRelease) {
   const auto expected = torch::arange(12, torch::kFloat32).reshape({3, 4});
   const std::string name = "/xllm_visual_input_" + std::to_string(getpid());
   bool creator = false;
-  ForwardSharedMemoryTransport writer(
+  SharedMemoryTransport writer(
       name, /*size=*/1 << 20, creator, ForwardType::RAW_INPUT);
-  ForwardSharedMemoryTransport reader(
+  SharedMemoryTransport reader(
       name, /*size=*/1 << 20, creator, ForwardType::RAW_INPUT);
   {
     VlmForwardInput source = make_input<VlmForwardInput>({});
@@ -393,7 +388,7 @@ TEST_F(VlmForwardSharedMemoryInputTest,
   EXPECT_TRUE(torch::equal(*pixels, expected));
 }
 
-TYPED_TEST(ForwardSharedMemoryInputTest,
+TYPED_TEST(SharedMemoryInputTest,
            AttachmentPreservesValuesAfterTransportRelease) {
   TypeParam source = make_input<TypeParam>({});
   source.token_ids = torch::tensor({11, 23}, torch::kInt32);
@@ -427,7 +422,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
       torch::equal(decoded.token_ids, torch::tensor({11, 23}, torch::kInt32)));
 }
 
-TYPED_TEST(ForwardSharedMemoryInputTest,
+TYPED_TEST(SharedMemoryInputTest,
            AttachmentRetainsLargeTensorStorageAfterSourceRelease) {
   proto::PackedForwardInput metadata;
   butil::IOBuf attachment;
@@ -460,7 +455,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
       torch::equal(decoded.token_ids, torch::arange(32768, torch::kInt32)));
 }
 
-TYPED_TEST(ForwardSharedMemoryInputTest,
+TYPED_TEST(SharedMemoryInputTest,
            AttachmentMaterializesLargeNoncontiguousTensor) {
   proto::PackedForwardInput metadata;
   butil::IOBuf attachment;
@@ -482,7 +477,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
                            torch::arange(0, 65536, 2, torch::kInt32)));
 }
 
-TYPED_TEST(ForwardSharedMemoryInputTest, RejectsInvalidAttachmentEnvelope) {
+TYPED_TEST(SharedMemoryInputTest, RejectsInvalidAttachmentEnvelope) {
   TypeParam source = make_input<TypeParam>({});
   proto::PackedForwardInput metadata;
   butil::IOBuf attachment;

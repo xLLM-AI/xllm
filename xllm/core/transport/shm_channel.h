@@ -15,7 +15,7 @@ limitations under the License.
 
 #pragma once
 #include "core/transport/comm_channel.h"
-#include "core/transport/forward_shared_memory_transport.h"
+#include "core/transport/shared_memory_transport.h"
 #include "runtime/options.h"
 
 namespace xllm {
@@ -45,8 +45,8 @@ class ShmChannel : public CommChannel {
  private:
   bool enable_shm_ = false;
   size_t input_shm_size_ = 0;
-  std::unique_ptr<ForwardSharedMemoryTransport> input_shm_manager_ = nullptr;
-  std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager_ = nullptr;
+  std::unique_ptr<SharedMemoryTransport> input_shm_manager_ = nullptr;
+  std::unique_ptr<SharedMemoryTransport> output_shm_manager_ = nullptr;
 };
 
 }  // namespace xllm

@@ -35,17 +35,17 @@ ShmChannel::ShmChannel(int dp_group,
   std::string name_prefix =
       "xllm_" + net::extract_port(options.master_node_addr().value_or(""));
   if (is_driver) {
-    auto name = ForwardSharedMemoryTransport::create_unique_name(
+    auto name = SharedMemoryTransport::create_unique_name(
         name_prefix, dp_group, ForwardType::RAW_INPUT, rank);
-    input_shm_manager_ = std::make_unique<ForwardSharedMemoryTransport>(
+    input_shm_manager_ = std::make_unique<SharedMemoryTransport>(
         name, options.input_shm_size(), is_creator, ForwardType::RAW_INPUT);
     LOG(INFO) << "Create input shared memory manager with name: " << name
               << " and size: " << options.input_shm_size();
   }
 
-  auto name = ForwardSharedMemoryTransport::create_unique_name(
+  auto name = SharedMemoryTransport::create_unique_name(
       name_prefix, dp_group, ForwardType::RAW_OUTPUT, rank);
-  output_shm_manager_ = std::make_unique<ForwardSharedMemoryTransport>(
+  output_shm_manager_ = std::make_unique<SharedMemoryTransport>(
       name, options.output_shm_size(), is_creator, ForwardType::RAW_OUTPUT);
   LOG(INFO) << "Create output shared memory manager with name: " << name
             << " and size: " << options.output_shm_size();
@@ -56,10 +56,10 @@ void ShmChannel::execute_llm_model_async(
     folly::Promise<std::optional<RawForwardOutput>>& promise,
     ForwardInputEncoding* encoding) {
   if (enable_shm_) {
-    const bool input_fits = input_shm_manager_
-                                ? input_shm_manager_->input_write(input)
-                                : ForwardSharedMemoryTransport::can_write_input(
-                                      input, input_shm_size_);
+    const bool input_fits =
+        input_shm_manager_
+            ? input_shm_manager_->input_write(input)
+            : SharedMemoryTransport::can_write_input(input, input_shm_size_);
     if (!input_fits) {
       enable_shm_ = false;
       LOG(ERROR) << "LLM shared-memory input write failed, fallback to brpc";
@@ -83,10 +83,10 @@ void ShmChannel::execute_dit_model_async(
     const DiTForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
   if (enable_shm_) {
-    const bool input_fits = input_shm_manager_
-                                ? input_shm_manager_->input_write(input)
-                                : ForwardSharedMemoryTransport::can_write_input(
-                                      input, input_shm_size_);
+    const bool input_fits =
+        input_shm_manager_
+            ? input_shm_manager_->input_write(input)
+            : SharedMemoryTransport::can_write_input(input, input_shm_size_);
     if (!input_fits) {
       enable_shm_ = false;
       LOG(ERROR) << "DIT shared-memory input write failed, fallback to brpc";
@@ -111,10 +111,10 @@ void ShmChannel::execute_vlm_model_async(
     folly::Promise<std::optional<RawForwardOutput>>& promise,
     ForwardInputEncoding* encoding) {
   if (enable_shm_) {
-    const bool input_fits = input_shm_manager_
-                                ? input_shm_manager_->input_write(input)
-                                : ForwardSharedMemoryTransport::can_write_input(
-                                      input, input_shm_size_);
+    const bool input_fits =
+        input_shm_manager_
+            ? input_shm_manager_->input_write(input)
+            : SharedMemoryTransport::can_write_input(input, input_shm_size_);
     if (!input_fits) {
       enable_shm_ = false;
       LOG(ERROR) << "VLM shared-memory input write failed, fallback to brpc";

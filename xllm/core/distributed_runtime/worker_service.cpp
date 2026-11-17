@@ -371,8 +371,8 @@ void WorkerService::set_worker(std::unique_ptr<Worker> worker) {
 }
 
 void WorkerService::create_polling_shm_thread(
-    std::unique_ptr<ForwardSharedMemoryTransport> input_shm_manager,
-    std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager) {
+    std::unique_ptr<SharedMemoryTransport> input_shm_manager,
+    std::unique_ptr<SharedMemoryTransport> output_shm_manager) {
   CHECK(!polling_thread_) << "SHM polling thread has already been created.";
   input_shm_manager_ = std::move(input_shm_manager);
   if (options_.backend() == "llm") {
@@ -523,7 +523,7 @@ void WorkerService::step_llm_model(
 }
 
 void WorkerService::poll_llm_shm(
-    std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager) {
+    std::unique_ptr<SharedMemoryTransport> output_shm_manager) {
   device_.set_device();
   // Graph updates must stay on the ordered worker stream.
   const InputDeviceMaterializationPolicy policy =
@@ -716,7 +716,7 @@ void WorkerService::step_vlm_model(
 }
 
 void WorkerService::poll_vlm_shm(
-    std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager) {
+    std::unique_ptr<SharedMemoryTransport> output_shm_manager) {
   device_.set_device();
   const InputDeviceMaterializationPolicy policy =
       options_.enable_schedule_overlap() && options_.enable_graph()
@@ -846,7 +846,7 @@ void WorkerService::step_dit_model(const DiTForwardInput& input,
 }
 
 void WorkerService::poll_dit_shm(
-    std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager) {
+    std::unique_ptr<SharedMemoryTransport> output_shm_manager) {
   device_.set_device();
 
   while (true) {
