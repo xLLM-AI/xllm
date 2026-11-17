@@ -27,8 +27,8 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/config/execution_config.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/forward_shared_memory_transport.h"
 #include "core/runtime/vlm_forward_params.h"
+#include "core/transport/forward_shared_memory_transport.h"
 #include "worker.pb.h"
 
 namespace xllm {

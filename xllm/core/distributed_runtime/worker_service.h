@@ -18,7 +18,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "runtime/forward_shared_memory_transport.h"
+#include "core/transport/forward_shared_memory_transport.h"
 #include "runtime/worker.h"
 #include "worker.pb.h"
 

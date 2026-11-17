@@ -36,8 +36,6 @@ cc_library(
     distributed_worker_manager.h
     remote_worker.h
     worker_server.h
-    comm_channel.h
-    shm_channel.h
     heartbeat_callback_registry.h
     http_callback_channel_cache.h
     kv_transfer_topology.h
@@ -54,8 +52,6 @@ cc_library(
     kv_transfer_coordinator.cpp
     remote_worker.cpp
     worker_server.cpp
-    comm_channel.cpp
-    shm_channel.cpp
     xservice_client.cpp
     model_residency_coordinator.cpp
     kv_capacity_planner.cpp

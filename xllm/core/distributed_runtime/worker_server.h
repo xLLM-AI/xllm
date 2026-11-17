@@ -25,12 +25,12 @@ limitations under the License.
 #include <thread>
 
 #include "common/macros.h"
+#include "core/transport/forward_shared_memory_transport.h"
 #include "distributed_runtime/worker_service.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_params_view.h"
 #include "runtime/executor.h"
 #include "runtime/forward_params.h"
-#include "runtime/forward_shared_memory_transport.h"
 #include "runtime/options.h"
 #include "runtime/worker_impl.h"
 #include "worker.pb.h"

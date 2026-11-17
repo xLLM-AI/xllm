@@ -26,12 +26,12 @@ limitations under the License.
 
 #include "core/common/health_check_manager.h"
 #include "core/distributed_runtime/collective_service.h"
-#include "core/distributed_runtime/comm_channel.h"
 #include "core/distributed_runtime/remote_worker.h"
-#include "core/distributed_runtime/shm_channel.h"
 #include "core/distributed_runtime/worker_server.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/parallel_state/parallel_args.h"
+#include "core/transport/comm_channel.h"
+#include "core/transport/shm_channel.h"
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 #include "core/platform/numa_utils.h"
 #endif

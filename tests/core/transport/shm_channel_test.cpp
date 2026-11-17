@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/shm_channel.h"
+#include "core/transport/shm_channel.h"
 
 #include <brpc/closure_guard.h>
 #include <brpc/server.h>

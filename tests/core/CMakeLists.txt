@@ -8,3 +8,5 @@ add_subdirectory(platform)
 add_subdirectory(runtime)
 add_subdirectory(scheduler)
 add_subdirectory(util)
+
+add_subdirectory(transport)

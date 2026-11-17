@@ -49,7 +49,6 @@ cc_library(
     dflash_worker_impl.h
     dflash2_worker_impl.h
     dspark_worker_impl.h
-    forward_shared_memory_transport.h
     worker_rendezvous.h
   SRCS
     decode_graph_bucket.cpp
@@ -89,7 +88,6 @@ cc_library(
     dflash_worker_impl.cpp
     dflash2_worker_impl.cpp
     dspark_worker_impl.cpp
-    forward_shared_memory_transport.cpp
   DEPS
     :content_hash
     :suffix_decoding
