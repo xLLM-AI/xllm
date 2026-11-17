@@ -1753,11 +1753,9 @@ def test_kda_dense_conv_dispatches_fused_activation(
 
 @pytest.mark.parametrize("value_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("kernel_width", [2, 4])
-def test_kda_verify_uses_framework_native_conv(
+def test_kda_verify_uses_kernel_package_conv(
     monkeypatch: pytest.MonkeyPatch, value_dtype: torch.dtype, kernel_width: int
 ) -> None:
-    from xllm.python import kernels
-
     backend = NpuPagedAttentionBackend.__new__(NpuPagedAttentionBackend)
     backend._kda_checkpoint_stride = 2
     backend._kda_query_start_locs = {}
@@ -1796,7 +1794,7 @@ def test_kda_verify_uses_framework_native_conv(
         assert kwargs["ssm_state_indices"].tolist() == [[2, 3]]
         return query
 
-    monkeypatch.setattr(kernels, "causal_conv1d_update_v2", native_conv)
+    monkeypatch.setattr("xllm.python.attention.kda_linear_attention.causal_conv1d_update_v2", native_conv)
     for kv_length in (1, 50):
         metadata.kv_seq_lens = torch.tensor([kv_length])
         output = backend._spec_verify(

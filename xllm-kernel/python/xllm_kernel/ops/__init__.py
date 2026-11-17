@@ -7,9 +7,11 @@ from xllm_kernel.ops.attention.gdn import (
     fused_recurrent_gated_delta_rule,
     fused_sigmoid_gating_delta_rule_update,
 )
+from xllm_kernel.ops.attention.kda import causal_conv1d_update_v2
 from xllm_kernel.ops.normalization import fused_add_rms_norm, l2_norm, layer_norm, rms_norm
 
 __all__ = [
+    "causal_conv1d_update_v2",
     "fused_add_rms_norm",
     "fused_qkvzba_split_reshape_cat",
     "fused_recurrent_gated_delta_rule",
