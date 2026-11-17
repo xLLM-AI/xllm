@@ -1,0 +1,48 @@
+{
+  "status": "PASS",
+  "base_case": "packed_perf_small",
+  "negative": [
+    {
+      "id": "input_count",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "unknown_attribute",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "cpu_input",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "dtype",
+      "status": "PASS",
+      "exception": "TypeError"
+    },
+    {
+      "id": "noncontiguous",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "negative_mapping",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "logical_address_out_of_range",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "nonmonotonic_cu",
+      "status": "PASS",
+      "exception": "ValueError"
+    }
+  ],
+  "direct_run": "PASS",
+  "direct_run_independent": "PASS"
+}
