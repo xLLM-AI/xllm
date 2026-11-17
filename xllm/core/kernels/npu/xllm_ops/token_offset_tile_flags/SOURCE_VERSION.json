@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/Wzy-wm/xllm",
+  "branch": "codex/task10-token-offset-tile-flags",
+  "directory": "xllm/core/kernels/npu/xllm_ops/token_offset_tile_flags",
+  "source_commit": "b7702458df0ef2d0f3053a8b81d2a03c9da67c17",
+  "tested_source": "Operator and verification Python files match source_commit; execution hashes are recorded in source_sha256.json."
+}

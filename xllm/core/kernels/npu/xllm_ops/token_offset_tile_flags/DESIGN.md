@@ -80,7 +80,7 @@ verify.py 使用原始 generate_data 和独立 golden，覆盖全部 14 个正�
 
 已执行的 CPU 测试通过 NumPy 解释实际 kernel 函数体，与原始 golden 比较 14 个公开输入和
 350 个随机输入，并测试值域校验与配对统计；它仅作为辅助检查。
-提交版的真机完整验收记录位于 `verification/`，实测状态以 `result.json` 为准。
+真机完整验收记录位于 `verification/`，实测状态以 `result.json` 为准。
 环境为 Ascend910_9362（A3）、CANN 9.1.0、torch 2.7.1+cpu、torch_npu 2.7.1.post4、triton-ascend 3.2.1。
 两项主性能须通过完整四项性能判据，逐轮数值与判断见 `result.json`。
 14 个正向、9 个负向、动态更新、非零存储偏移/重绑定及两组双流/内存检查均通过。

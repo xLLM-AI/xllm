@@ -1,0 +1,940 @@
+{
+  "status": "PASS",
+  "started_utc": "2026-11-17T04:40:18.064480+00:00",
+  "cases": [
+    {
+      "id": "flags_literal",
+      "status": "PASS",
+      "shape": [
+        8
+      ],
+      "input_shapes": [
+        [
+          15
+        ],
+        [
+          5
+        ],
+        [
+          4
+        ],
+        [
+          5
+        ]
+      ],
+      "attributes": {
+        "tile_size": 4,
+        "max_tiles_per_seq": 2
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_empty_requests",
+      "status": "PASS",
+      "shape": [
+        0
+      ],
+      "input_shapes": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ],
+      "attributes": {
+        "tile_size": 4,
+        "max_tiles_per_seq": 2
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_empty_offsets",
+      "status": "PASS",
+      "shape": [
+        4
+      ],
+      "input_shapes": [
+        [
+          0
+        ],
+        [
+          3
+        ],
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ],
+      "attributes": {
+        "tile_size": 4,
+        "max_tiles_per_seq": 2
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_segment_padding",
+      "status": "PASS",
+      "shape": [
+        4
+      ],
+      "input_shapes": [
+        [
+          10
+        ],
+        [
+          3
+        ],
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ],
+      "attributes": {
+        "tile_size": 4,
+        "max_tiles_per_seq": 2
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_tile1",
+      "status": "PASS",
+      "shape": [
+        85
+      ],
+      "input_shapes": [
+        [
+          78
+        ],
+        [
+          6
+        ],
+        [
+          5
+        ],
+        [
+          6
+        ]
+      ],
+      "attributes": {
+        "tile_size": 1,
+        "max_tiles_per_seq": 17
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "id": "flags_nonpower3",
+      "status": "PASS",
+      "shape": [
+        25
+      ],
+      "input_shapes": [
+        [
+          54
+        ],
+        [
+          6
+        ],
+        [
+          5
+        ],
+        [
+          6
+        ]
+      ],
+      "attributes": {
+        "tile_size": 3,
+        "max_tiles_per_seq": 5
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_tail129",
+      "status": "PASS",
+      "shape": [
+        15
+      ],
+      "input_shapes": [
+        [
+          1270
+        ],
+        [
+          6
+        ],
+        [
+          5
+        ],
+        [
+          6
+        ]
+      ],
+      "attributes": {
+        "tile_size": 128,
+        "max_tiles_per_seq": 3
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_max4096",
+      "status": "PASS",
+      "shape": [
+        4
+      ],
+      "input_shapes": [
+        [
+          8191
+        ],
+        [
+          3
+        ],
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ],
+      "attributes": {
+        "tile_size": 4096,
+        "max_tiles_per_seq": 2
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_perf_small",
+      "status": "PASS",
+      "shape": [
+        136
+      ],
+      "input_shapes": [
+        [
+          16356
+        ],
+        [
+          9
+        ],
+        [
+          8
+        ],
+        [
+          9
+        ]
+      ],
+      "attributes": {
+        "tile_size": 128,
+        "max_tiles_per_seq": 17
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_perf_large",
+      "status": "PASS",
+      "shape": [
+        2080
+      ],
+      "input_shapes": [
+        [
+          261648
+        ],
+        [
+          33
+        ],
+        [
+          32
+        ],
+        [
+          33
+        ]
+      ],
+      "attributes": {
+        "tile_size": 128,
+        "max_tiles_per_seq": 65
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "negative": [
+    {
+      "id": "input_count",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "unknown_attribute",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "cpu_input",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "dtype",
+      "status": "PASS",
+      "exception": "TypeError"
+    },
+    {
+      "id": "noncontiguous",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "zero_tile",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "oversize_tile",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "non_dense_output_offsets",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "length_exceeds_segment",
+      "status": "PASS",
+      "exception": "ValueError"
+    }
+  ],
+  "engineering": {
+    "status": "PASS",
+    "cases": [
+      {
+        "id": "flags_perf_small",
+        "status": "PASS",
+        "common_warmup_calls_per_path": 3,
+        "two_streams": {
+          "status": "PASS",
+          "streams": 2,
+          "outputs_per_stream": 3,
+          "golden_mismatches_per_output": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "retained_outputs_independent": true,
+          "outputs_independent_of_inputs": true
+        },
+        "candidate": {
+          "status": "PASS",
+          "warmup_calls": 3,
+          "active_before_bytes": 87040,
+          "one_call_peak_increment_bytes": 512,
+          "output_bytes": 136,
+          "single_call_golden_mismatches": 0,
+          "active_after_one_release_bytes": 87040,
+          "repeat_calls": 20,
+          "repeat_golden_mismatches": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "active_after_each_release_bytes": [
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040
+          ],
+          "active_after_repeat_release_bytes": 87040,
+          "residual_active_bytes": 0,
+          "measurement_scope": "PyTorch active allocation; output and visible temporaries; both prepared objects and inputs retained; excludes total HBM and untracked runtime scratch"
+        },
+        "baseline": {
+          "status": "PASS",
+          "warmup_calls": 3,
+          "active_before_bytes": 87040,
+          "one_call_peak_increment_bytes": 507904,
+          "output_bytes": 136,
+          "single_call_golden_mismatches": 0,
+          "active_after_one_release_bytes": 87040,
+          "repeat_calls": 20,
+          "repeat_golden_mismatches": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "active_after_each_release_bytes": [
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040,
+            87040
+          ],
+          "active_after_repeat_release_bytes": 87040,
+          "residual_active_bytes": 0,
+          "measurement_scope": "PyTorch active allocation; output and visible temporaries; both prepared objects and inputs retained; excludes total HBM and untracked runtime scratch"
+        },
+        "inputs_unchanged": true,
+        "baseline_minus_candidate_peak_bytes": 507392,
+        "memory_difference_is_observation_only": true
+      },
+      {
+        "id": "flags_perf_large",
+        "status": "PASS",
+        "common_warmup_calls_per_path": 3,
+        "two_streams": {
+          "status": "PASS",
+          "streams": 2,
+          "outputs_per_stream": 3,
+          "golden_mismatches_per_output": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "retained_outputs_independent": true,
+          "outputs_independent_of_inputs": true
+        },
+        "candidate": {
+          "status": "PASS",
+          "warmup_calls": 3,
+          "active_before_bytes": 1118208,
+          "one_call_peak_increment_bytes": 2560,
+          "output_bytes": 2080,
+          "single_call_golden_mismatches": 0,
+          "active_after_one_release_bytes": 1118208,
+          "repeat_calls": 20,
+          "repeat_golden_mismatches": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "active_after_each_release_bytes": [
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208
+          ],
+          "active_after_repeat_release_bytes": 1118208,
+          "residual_active_bytes": 0,
+          "measurement_scope": "PyTorch active allocation; output and visible temporaries; both prepared objects and inputs retained; excludes total HBM and untracked runtime scratch"
+        },
+        "baseline": {
+          "status": "PASS",
+          "warmup_calls": 3,
+          "active_before_bytes": 1118208,
+          "one_call_peak_increment_bytes": 7724032,
+          "output_bytes": 2080,
+          "single_call_golden_mismatches": 0,
+          "active_after_one_release_bytes": 1118208,
+          "repeat_calls": 20,
+          "repeat_golden_mismatches": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "active_after_each_release_bytes": [
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208,
+            1118208
+          ],
+          "active_after_repeat_release_bytes": 1118208,
+          "residual_active_bytes": 0,
+          "measurement_scope": "PyTorch active allocation; output and visible temporaries; both prepared objects and inputs retained; excludes total HBM and untracked runtime scratch"
+        },
+        "inputs_unchanged": true,
+        "baseline_minus_candidate_peak_bytes": 7721472,
+        "memory_difference_is_observation_only": true
+      }
+    ]
+  },
+  "benchmarks": [
+    {
+      "id": "flags_perf_small",
+      "baseline_round_us": [
+        280.506905,
+        261.13597500000003,
+        263.48316,
+        259.74837,
+        262.89634,
+        260.72401
+      ],
+      "candidate_round_us": [
+        45.421715,
+        45.138305,
+        45.14801,
+        45.359315,
+        45.413365,
+        45.144605000000006
+      ],
+      "baseline_mean_us": 264.74912666666665,
+      "candidate_mean_us": 45.27088583333333,
+      "mean_difference_us": 219.47824083333333,
+      "median_difference_us": 216.762495,
+      "paired_mean_difference_ci95_us": [
+        215.56959416666666,
+        225.86129916666667
+      ],
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear"
+      },
+      "limit_us": 85,
+      "checks": {
+        "mean_improved": true,
+        "median_improved": true,
+        "paired_ci_lower_positive": true,
+        "within_target": true
+      },
+      "status": "PASS",
+      "warmup": 50,
+      "iterations": 200,
+      "execution_order": [
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ]
+      ],
+      "timed_entry": "complete prepared.run plus final device synchronization"
+    },
+    {
+      "id": "flags_perf_large",
+      "baseline_round_us": [
+        482.98256,
+        483.08561,
+        482.66805,
+        482.699,
+        483.385825,
+        482.66745000000003
+      ],
+      "candidate_round_us": [
+        73.49683,
+        73.53448,
+        73.48818,
+        73.08076,
+        73.50698,
+        73.152015
+      ],
+      "baseline_mean_us": 482.9147491666667,
+      "candidate_mean_us": 73.37654083333334,
+      "mean_difference_us": 409.5382083333334,
+      "median_difference_us": 409.348275,
+      "paired_mean_difference_ci95_us": [
+        409.36578499999996,
+        409.7040875
+      ],
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear"
+      },
+      "limit_us": 85,
+      "checks": {
+        "mean_improved": true,
+        "median_improved": true,
+        "paired_ci_lower_positive": true,
+        "within_target": true
+      },
+      "status": "PASS",
+      "warmup": 50,
+      "iterations": 200,
+      "execution_order": [
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ]
+      ],
+      "timed_entry": "complete prepared.run plus final device synchronization"
+    }
+  ],
+  "source_sha256": {
+    "DESIGN.md": "379e5d32310690d29865aa2b73bfe8e7d84bfb5c6deb6feb030fe97930c0590f",
+    "README.md": "e1dba434a40d39feb49f6b75ba0fe12ad3138f60e557590a7053fb1df2fadf6f",
+    "SOURCE_VERSION.json": "9311a5df35712cff36cc0d7539c8d419e4583d9b0f9490068ac5739102321ec5",
+    "__init__.py": "d49bf25ce7d02a6bd6c35f614d9f583ac02457d8e542ae911f3672d37a9e8fdf",
+    "fixtures.py": "c1958189121c828f893ab68abbf248fc5b12805713a41d6d45a6d310f1e9f097",
+    "kernels.py": "61203996fd30cc4a4fc17dc7817c96f08a44b49dcb8e774ff0c71b430c11544c",
+    "official/case.json": "63e146023f7a72840e6e74605c796c6ec99169e7dfd52a715c89679f825238eb",
+    "official/generate_data.py": "6a33d9e412d15681f8b155a128fc5158e3dc0dff108492bf9541124c457830ed",
+    "official/golden.py": "ec77b83130a9872977e7e38d4065d006b5065c39b1baf2a6f05b291f37bd7cc0",
+    "official/op.json": "fb3328cea6dc54257ebb7be854951ab2ca6d5ffec9d49f76c8751b805cac95c1",
+    "official/任务书.md": "ac8f7462fe1dc2f98df202dd9b52d20aceda06461d074046c9bbac565595c4cc",
+    "official.zip": "f29adfe16a4a7352de37405ff85fa82846ad93a3c2f13e6e732e0382bf01e48c",
+    "offline_checks.py": "b836ca7d39aed0eaa7992886827e3b979be14e719709300c73f19f92a3b81979",
+    "run_guard.py": "ceab5d2280682575ddd367cf66ccbc5aacd2d777cb04ccad450c490a5e50d082",
+    "solution.py": "28d4d5058ccd082881dda28982b0424e2a25b96c74c9705033d9352da9dbacbc",
+    "statistics_utils.py": "966bedb24a147dc01ad289aba2d7b2e2d9f2abc933041a8c80bf8c75d9fe2c49",
+    "validation.py": "5ca75101b8f2eb8417d289eca93f84b9f7371a4b36acc9a7f97427fbfc1640c3",
+    "verify.py": "335ef7bb42b38dea631b294e93c11a701d39d581d40d45129edc37c2bab6cc26"
+  },
+  "environment": {
+    "python": "3.11.4 (main, Mar  9 2026, 01:22:03) [GCC 9.4.0]",
+    "platform": "Linux-5.10.0-182.0.0.95.r2220_156.hce2.aarch64-aarch64-with-glibc2.31",
+    "versions": {
+      "torch": "2.7.1+cpu",
+      "torch-npu": "2.7.1.post4",
+      "triton-ascend": "3.2.1",
+      "numpy": "1.26.4"
+    },
+    "device_name": "Ascend910_9362",
+    "device": "npu:0",
+    "cann_version_files": {
+      "/home/developer/Ascend/cann-9.1.0/aarch64-linux/ascend_toolkit_install.info": "package_name=Ascend-cann-toolkit\nversion=9.1.0\ninnerversion=V100R001C11SPC001B243\ncompatible_version=[V100R001C15],[V100R001C21],[V100R001C23],[V100R001C10]\narch=aarch64\nos=linux\npath=/home/developer/Ascend/cann-9.1.0\n",
+      "/home/developer/Ascend/cann-9.1.0/arm64-linux/ascend_toolkit_install.info": "package_name=Ascend-cann-toolkit\nversion=9.1.0\ninnerversion=V100R001C11SPC001B243\ncompatible_version=[V100R001C15],[V100R001C21],[V100R001C23],[V100R001C10]\narch=aarch64\nos=linux\npath=/home/developer/Ascend/cann-9.1.0\n",
+      "/home/developer/Ascend/cann-9.1.0/opp/version.info": "Version=9.1.0\nversion_dir=cann\nrequired_package_runtime_version=\">=8.5\"\nrequired_package_ge-executor_version=\">=8.5\"\nrequired_package_metadef_version=\">=8.5\"\nrequired_package_asc-devkit_version=\">=8.5\"\nrequired_package_bisheng-compiler_version=\">=8.5\"\ntimestamp=20260730_231653901\n",
+      "/home/developer/Ascend/cann-9.1.0/compiler/version.info": "Version=9.1.0\nversion_dir=cann\nrequired_package_runtime_version=\"9.1\"\nrequired_package_ge-executor_version=\"9.1\"\nrequired_package_metadef_version=\"9.1\"\nrequired_package_bisheng-compiler_version=\"9.1\"\nrequired_package_tbe-tik_version=\"9.1\"\ntimestamp=20260730_231653901\n"
+    },
+    "npu_smi": "+------------------------------------------------------------------------------------------------+\n| npu-smi 25.5.5                   Version: 25.5.5                                               |\n+---------------------------+---------------+----------------------------------------------------+\n| NPU   Name                | Health        | Power(W)    Temp(C)           Hugepages-Usage(page)|\n| Chip  Phy-ID              | Bus-Id        | AICore(%)   Memory-Usage(MB)  HBM-Usage(MB)        |\n+===========================+===============+====================================================+\n| 6     Ascend910           | OK            | 181.3       47                0    / 0             |\n| 0     12                  | 0000:0A:00.0  | 0           0    / 0          3195 / 65536         |\n+------------------------------------------------------------------------------------------------+\n| 6     Ascend910           | OK            | -           48                0    / 0             |\n| 1     13                  | 0000:0B:00.0  | 0           0    / 0          2873 / 65536         |\n+===========================+===============+====================================================+\n+---------------------------+---------------+----------------------------------------------------+\n| NPU     Chip              | Process id    | Process name             | Process memory(MB)      |\n+===========================+===============+====================================================+\n| 6       0                 | 28782         | python3                  | 113                     |\n+===========================+===============+====================================================+\n",
+    "a3_verified": true,
+    "cann_910_verified": true,
+    "official_environment_verified": true
+  },
+  "fixture_sha256": {
+    "op.json": "fb3328cea6dc54257ebb7be854951ab2ca6d5ffec9d49f76c8751b805cac95c1",
+    "任务书.md": "ac8f7462fe1dc2f98df202dd9b52d20aceda06461d074046c9bbac565595c4cc",
+    "case.json": "63e146023f7a72840e6e74605c796c6ec99169e7dfd52a715c89679f825238eb",
+    "generate_data.py": "6a33d9e412d15681f8b155a128fc5158e3dc0dff108492bf9541124c457830ed",
+    "golden.py": "ec77b83130a9872977e7e38d4065d006b5065c39b1baf2a6f05b291f37bd7cc0"
+  },
+  "dynamic": {
+    "id": "current_values_current_stream",
+    "status": "PASS",
+    "updates": 2,
+    "nonzero_storage_offset": true,
+    "prior_outputs_unchanged": true,
+    "storage_rebinding": true
+  },
+  "finished_utc": "2026-11-17T04:41:06.754332+00:00"
+}

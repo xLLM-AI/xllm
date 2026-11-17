@@ -1,0 +1,307 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "id": "flags_interior_last_and_logical_tail",
+      "status": "PASS",
+      "shape": [
+        8
+      ],
+      "input_shapes": [
+        [
+          39
+        ],
+        [
+          3
+        ],
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ],
+      "attributes": {
+        "tile_size": 5,
+        "max_tiles_per_seq": 4
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_near_int32_limit",
+      "status": "PASS",
+      "shape": [
+        3
+      ],
+      "input_shapes": [
+        [
+          9
+        ],
+        [
+          2
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ],
+      "attributes": {
+        "tile_size": 3,
+        "max_tiles_per_seq": 3
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_nonpower_255",
+      "status": "PASS",
+      "shape": [
+        171
+      ],
+      "input_shapes": [
+        [
+          41274
+        ],
+        [
+          10
+        ],
+        [
+          9
+        ],
+        [
+          10
+        ]
+      ],
+      "attributes": {
+        "tile_size": 255,
+        "max_tiles_per_seq": 19
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_nonpower_257",
+      "status": "PASS",
+      "shape": [
+        171
+      ],
+      "input_shapes": [
+        [
+          41598
+        ],
+        [
+          10
+        ],
+        [
+          9
+        ],
+        [
+          10
+        ]
+      ],
+      "attributes": {
+        "tile_size": 257,
+        "max_tiles_per_seq": 19
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "benchmarks": [
+    {
+      "id": "flags_nonpower_255",
+      "baseline_round_us": [
+        263.95958,
+        262.101255,
+        264.71521,
+        260.448695,
+        264.76211,
+        261.46513500000003
+      ],
+      "candidate_round_us": [
+        45.530474999999996,
+        45.397014999999996,
+        45.590725,
+        45.567225,
+        45.46407,
+        45.538525
+      ],
+      "baseline_mean_us": 262.9086641666667,
+      "candidate_mean_us": 45.514672499999996,
+      "mean_difference_us": 217.39399166666672,
+      "median_difference_us": 217.49591750000002,
+      "paired_mean_difference_ci95_us": [
+        216.06662416666668,
+        218.66306583333335
+      ],
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear"
+      },
+      "limit_us": null,
+      "checks": {
+        "mean_improved": true,
+        "median_improved": true,
+        "paired_ci_lower_positive": true
+      },
+      "status": "MEASURED",
+      "warmup": 50,
+      "iterations": 200,
+      "execution_order": [
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ]
+      ],
+      "timed_entry": "complete prepared.run plus final device synchronization"
+    },
+    {
+      "id": "flags_nonpower_257",
+      "baseline_round_us": [
+        264.19653999999997,
+        261.110475,
+        264.21394,
+        261.61394,
+        264.11663500000003,
+        260.55485
+      ],
+      "candidate_round_us": [
+        45.77928,
+        45.258559999999996,
+        45.938885,
+        45.653974999999996,
+        45.663775,
+        45.402465
+      ],
+      "baseline_mean_us": 262.63439666666665,
+      "candidate_mean_us": 45.61615666666666,
+      "mean_difference_us": 217.01824,
+      "median_difference_us": 217.20641250000003,
+      "paired_mean_difference_ci95_us": [
+        215.94771583333332,
+        218.00156916666666
+      ],
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear"
+      },
+      "limit_us": null,
+      "checks": {
+        "mean_improved": true,
+        "median_improved": true,
+        "paired_ci_lower_positive": true
+      },
+      "status": "MEASURED",
+      "warmup": 50,
+      "iterations": 200,
+      "execution_order": [
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ]
+      ],
+      "timed_entry": "complete prepared.run plus final device synchronization"
+    }
+  ]
+}

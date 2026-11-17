@@ -1,0 +1,70 @@
+{
+  "run": "20261117T044018064415Z",
+  "status": "PASS",
+  "environment": {
+    "python": "3.11.4 (main, Mar  9 2026, 01:22:03) [GCC 9.4.0]",
+    "platform": "Linux-5.10.0-182.0.0.95.r2220_156.hce2.aarch64-aarch64-with-glibc2.31",
+    "versions": {
+      "torch": "2.7.1+cpu",
+      "torch-npu": "2.7.1.post4",
+      "triton-ascend": "3.2.1",
+      "numpy": "1.26.4"
+    },
+    "device_name": "Ascend910_9362",
+    "device": "npu:0",
+    "cann_version_files": {
+      "/home/developer/Ascend/cann-9.1.0/aarch64-linux/ascend_toolkit_install.info": "package_name=Ascend-cann-toolkit\nversion=9.1.0\ninnerversion=V100R001C11SPC001B243\ncompatible_version=[V100R001C15],[V100R001C21],[V100R001C23],[V100R001C10]\narch=aarch64\nos=linux\npath=/home/developer/Ascend/cann-9.1.0\n",
+      "/home/developer/Ascend/cann-9.1.0/arm64-linux/ascend_toolkit_install.info": "package_name=Ascend-cann-toolkit\nversion=9.1.0\ninnerversion=V100R001C11SPC001B243\ncompatible_version=[V100R001C15],[V100R001C21],[V100R001C23],[V100R001C10]\narch=aarch64\nos=linux\npath=/home/developer/Ascend/cann-9.1.0\n",
+      "/home/developer/Ascend/cann-9.1.0/opp/version.info": "Version=9.1.0\nversion_dir=cann\nrequired_package_runtime_version=\">=8.5\"\nrequired_package_ge-executor_version=\">=8.5\"\nrequired_package_metadef_version=\">=8.5\"\nrequired_package_asc-devkit_version=\">=8.5\"\nrequired_package_bisheng-compiler_version=\">=8.5\"\ntimestamp=20260730_231653901\n",
+      "/home/developer/Ascend/cann-9.1.0/compiler/version.info": "Version=9.1.0\nversion_dir=cann\nrequired_package_runtime_version=\"9.1\"\nrequired_package_ge-executor_version=\"9.1\"\nrequired_package_metadef_version=\"9.1\"\nrequired_package_bisheng-compiler_version=\"9.1\"\nrequired_package_tbe-tik_version=\"9.1\"\ntimestamp=20260730_231653901\n"
+    },
+    "npu_smi": "+------------------------------------------------------------------------------------------------+\n| npu-smi 25.5.5                   Version: 25.5.5                                               |\n+---------------------------+---------------+----------------------------------------------------+\n| NPU   Name                | Health        | Power(W)    Temp(C)           Hugepages-Usage(page)|\n| Chip  Phy-ID              | Bus-Id        | AICore(%)   Memory-Usage(MB)  HBM-Usage(MB)        |\n+===========================+===============+====================================================+\n| 6     Ascend910           | OK            | 181.3       47                0    / 0             |\n| 0     12                  | 0000:0A:00.0  | 0           0    / 0          3195 / 65536         |\n+------------------------------------------------------------------------------------------------+\n| 6     Ascend910           | OK            | -           48                0    / 0             |\n| 1     13                  | 0000:0B:00.0  | 0           0    / 0          2873 / 65536         |\n+===========================+===============+====================================================+\n+---------------------------+---------------+----------------------------------------------------+\n| NPU     Chip              | Process id    | Process name             | Process memory(MB)      |\n+===========================+===============+====================================================+\n| 6       0                 | 28782         | python3                  | 113                     |\n+===========================+===============+====================================================+\n",
+    "a3_verified": true,
+    "cann_910_verified": true,
+    "official_environment_verified": true
+  },
+  "source_sha256": {
+    "DESIGN.md": "379e5d32310690d29865aa2b73bfe8e7d84bfb5c6deb6feb030fe97930c0590f",
+    "README.md": "e1dba434a40d39feb49f6b75ba0fe12ad3138f60e557590a7053fb1df2fadf6f",
+    "SOURCE_VERSION.json": "9311a5df35712cff36cc0d7539c8d419e4583d9b0f9490068ac5739102321ec5",
+    "__init__.py": "d49bf25ce7d02a6bd6c35f614d9f583ac02457d8e542ae911f3672d37a9e8fdf",
+    "fixtures.py": "c1958189121c828f893ab68abbf248fc5b12805713a41d6d45a6d310f1e9f097",
+    "kernels.py": "61203996fd30cc4a4fc17dc7817c96f08a44b49dcb8e774ff0c71b430c11544c",
+    "official/case.json": "63e146023f7a72840e6e74605c796c6ec99169e7dfd52a715c89679f825238eb",
+    "official/generate_data.py": "6a33d9e412d15681f8b155a128fc5158e3dc0dff108492bf9541124c457830ed",
+    "official/golden.py": "ec77b83130a9872977e7e38d4065d006b5065c39b1baf2a6f05b291f37bd7cc0",
+    "official/op.json": "fb3328cea6dc54257ebb7be854951ab2ca6d5ffec9d49f76c8751b805cac95c1",
+    "official/任务书.md": "ac8f7462fe1dc2f98df202dd9b52d20aceda06461d074046c9bbac565595c4cc",
+    "official.zip": "f29adfe16a4a7352de37405ff85fa82846ad93a3c2f13e6e732e0382bf01e48c",
+    "offline_checks.py": "b836ca7d39aed0eaa7992886827e3b979be14e719709300c73f19f92a3b81979",
+    "run_guard.py": "ceab5d2280682575ddd367cf66ccbc5aacd2d777cb04ccad450c490a5e50d082",
+    "solution.py": "28d4d5058ccd082881dda28982b0424e2a25b96c74c9705033d9352da9dbacbc",
+    "statistics_utils.py": "966bedb24a147dc01ad289aba2d7b2e2d9f2abc933041a8c80bf8c75d9fe2c49",
+    "validation.py": "5ca75101b8f2eb8417d289eca93f84b9f7371a4b36acc9a7f97427fbfc1640c3",
+    "verify.py": "335ef7bb42b38dea631b294e93c11a701d39d581d40d45129edc37c2bab6cc26"
+  }
+}
+{"time":"2026-11-17T04:40:28.051371+00:00","kind":"accuracy","id":"flags_literal","status":"PASS","shape":[8],"input_shapes":[[15],[5],[4],[5]],"attributes":{"tile_size":4,"max_tiles_per_seq":2},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:28.052873+00:00","kind":"accuracy","id":"flags_empty_requests","status":"PASS","shape":[0],"input_shapes":[[0],[1],[0],[1]],"attributes":{"tile_size":4,"max_tiles_per_seq":2},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:28.055336+00:00","kind":"accuracy","id":"flags_empty_offsets","status":"PASS","shape":[4],"input_shapes":[[0],[3],[2],[3]],"attributes":{"tile_size":4,"max_tiles_per_seq":2},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:31.828860+00:00","kind":"accuracy","id":"flags_segment_padding","status":"PASS","shape":[4],"input_shapes":[[10],[3],[2],[3]],"attributes":{"tile_size":4,"max_tiles_per_seq":2},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:33.559320+00:00","kind":"accuracy","id":"flags_tile1","status":"PASS","shape":[85],"input_shapes":[[78],[6],[5],[6]],"attributes":{"tile_size":1,"max_tiles_per_seq":17},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[1,1,1,1]}
+{"time":"2026-11-17T04:40:37.306674+00:00","kind":"accuracy","id":"flags_nonpower3","status":"PASS","shape":[25],"input_shapes":[[54],[6],[5],[6]],"attributes":{"tile_size":3,"max_tiles_per_seq":5},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:39.756070+00:00","kind":"accuracy","id":"flags_tail129","status":"PASS","shape":[15],"input_shapes":[[1270],[6],[5],[6]],"attributes":{"tile_size":128,"max_tiles_per_seq":3},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:41.902331+00:00","kind":"accuracy","id":"flags_max4096","status":"PASS","shape":[4],"input_shapes":[[8191],[3],[2],[3]],"attributes":{"tile_size":4096,"max_tiles_per_seq":2},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:44.393829+00:00","kind":"accuracy","id":"flags_perf_small","status":"PASS","shape":[136],"input_shapes":[[16356],[9],[8],[9]],"attributes":{"tile_size":128,"max_tiles_per_seq":17},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:46.951512+00:00","kind":"accuracy","id":"flags_perf_large","status":"PASS","shape":[2080],"input_shapes":[[261648],[33],[32],[33]],"attributes":{"tile_size":128,"max_tiles_per_seq":65},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:50.748843+00:00","kind":"accuracy","id":"flags_interior_last_and_logical_tail","status":"PASS","shape":[8],"input_shapes":[[39],[3],[2],[3]],"attributes":{"tile_size":5,"max_tiles_per_seq":4},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:54.516739+00:00","kind":"accuracy","id":"flags_near_int32_limit","status":"PASS","shape":[3],"input_shapes":[[9],[2],[1],[2]],"attributes":{"tile_size":3,"max_tiles_per_seq":3},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:40:57.302630+00:00","kind":"accuracy","id":"flags_nonpower_255","status":"PASS","shape":[171],"input_shapes":[[41274],[10],[9],[10]],"attributes":{"tile_size":255,"max_tiles_per_seq":19},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:41:00.018477+00:00","kind":"accuracy","id":"flags_nonpower_257","status":"PASS","shape":[171],"input_shapes":[[41598],[10],[9],[10]],"attributes":{"tile_size":257,"max_tiles_per_seq":19},"checks":{"candidate_mismatches":0,"baseline_mismatches":0,"shape":true,"dtype":true,"npu":true,"contiguous":true,"inputs_unchanged":true,"independent_storage":true},"storage_offsets":[0,0,0,0]}
+{"time":"2026-11-17T04:41:00.022270+00:00","kind":"negative","id":"input_count","status":"PASS","exception":"ValueError"}
+{"time":"2026-11-17T04:41:00.024892+00:00","kind":"negative","id":"unknown_attribute","status":"PASS","exception":"ValueError"}
+{"time":"2026-11-17T04:41:00.027576+00:00","kind":"negative","id":"cpu_input","status":"PASS","exception":"ValueError"}
+{"time":"2026-11-17T04:41:00.030253+00:00","kind":"negative","id":"dtype","status":"PASS","exception":"TypeError"}
+{"time":"2026-11-17T04:41:00.035200+00:00","kind":"negative","id":"noncontiguous","status":"PASS","exception":"ValueError"}
+{"time":"2026-11-17T04:41:00.037848+00:00","kind":"negative","id":"zero_tile","status":"PASS","exception":"ValueError"}
+{"time":"2026-11-17T04:41:00.040487+00:00","kind":"negative","id":"oversize_tile","status":"PASS","exception":"ValueError"}
+{"time":"2026-11-17T04:41:00.046364+00:00","kind":"negative","id":"non_dense_output_offsets","status":"PASS","exception":"ValueError"}
+{"time":"2026-11-17T04:41:00.049504+00:00","kind":"negative","id":"length_exceeds_segment","status":"PASS","exception":"ValueError"}
+{"time":"2026-11-17T04:41:03.819767+00:00","kind":"dynamic","id":"current_values_current_stream","status":"PASS","updates":2,"nonzero_storage_offset":true,"prior_outputs_unchanged":true,"storage_rebinding":true}

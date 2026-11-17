@@ -9,7 +9,7 @@
 - 已实现 `solution.py`、Triton 融合核和一次性输入校验。
 - 已实现官方精度、非法输入、性能和内存验收入口 `verify.py`。
 - CPU 内核逻辑模拟：14 个公开输入、350 个随机输入通过；值域校验和配对统计通过。
-- 提交版的 A3 / CANN 9.1.0 实测结果见随附 `result.json` 与 `verification/`，两项主性能均要求不超过 85µs。
+-  A3 / CANN 9.1.0 实测结果见随附 `result.json` 与 `verification/`，主性能小输入 45.270886µs、大输入 73.376541µs，均通过 85µs 上限和同机收益判据。
 - 三份 Excel、三份日志、步骤说明和机器可读证据随工程交付；源码与验收报告通过本 GitHub PR 提交。
 
 ## 环境
@@ -72,3 +72,13 @@ task_submission/
 向 https://github.com/xLLM-AI/xllm/tree/main/xllm/core/kernels/npu/xllm_ops 提交 PR，
 随附设计文档、代码、测试和自验证材料，并注明个人仓库地址、分支、目录和固定 commit。
 本次任务书未提供审核人、平台验收按钮或审批时限；本工程不推定这些流程。
+
+## 源码定位
+
+个人仓库：https://github.com/Wzy-wm/xllm
+
+分支：`codex/task10-token-offset-tile-flags`
+
+固定源码 commit：`b7702458df0ef2d0f3053a8b81d2a03c9da67c17`
+
+工程目录：`xllm/core/kernels/npu/xllm_ops/token_offset_tile_flags`
