@@ -19,7 +19,6 @@ cc_library(
     model_args.h
     model_params_view.h
     mtp_topk_state.h
-  SRCS
   DEPS
     :common
     :common_layers

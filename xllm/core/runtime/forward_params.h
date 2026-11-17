@@ -533,14 +533,6 @@ class LlmForwardInput final {
     return torch::Tensor();
   }
 
-  void print() const {
-    LOG(INFO) << "  token_ids: " << token_ids << std::endl;
-    LOG(INFO) << "  positions: " << positions << std::endl;
-    ModelParamsView(input_params).print();
-    LOG(INFO) << " params.logits_indices " << sampling_params.logits_indices();
-    LOG(INFO) << " params.do_sample " << sampling_params.do_sample();
-  }
-
   // flatten token ids
   torch::Tensor token_ids;
   // flatten positions

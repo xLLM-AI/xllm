@@ -22,10 +22,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <fstream>
 #include <optional>
-#include <source_location>
-#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -52,12 +49,6 @@ const ValueType* get_tensor_parameter(const TensorParameters& parameters,
   return std::get_if<ValueType>(&iterator->second);
 }
 
-inline bool is_cpu_int_tensor(const torch::Tensor& tensor, int32_t dimensions) {
-  return tensor.defined() && tensor.device().is_cpu() &&
-         tensor.scalar_type() == torch::kInt32 && tensor.dim() == dimensions &&
-         tensor.is_contiguous();
-}
-
 // CHECKed flat borrow; T defaults to int32, the dominant token/length type.
 template <typename T = int32_t>
 inline Slice<T> tensor_slice(const torch::Tensor& tensor) {
@@ -65,15 +56,6 @@ inline Slice<T> tensor_slice(const torch::Tensor& tensor) {
   CHECK(tensor.device().is_cpu()) << "tensor_slice requires a CPU tensor";
   CHECK(tensor.is_contiguous()) << "tensor_slice requires contiguous storage";
   return {tensor.const_data_ptr<T>(), static_cast<size_t>(tensor.numel())};
-}
-
-// Lenient twin of tensor_slice: empty view instead of CHECK on empty input.
-inline std::span<const int32_t> int_span(const torch::Tensor& tensor) {
-  if (!tensor.defined() || tensor.numel() == 0) {
-    return {};
-  }
-  return {tensor.const_data_ptr<int32_t>(),
-          static_cast<uint64_t>(tensor.numel())};
 }
 
 // Gather one column along `dim` and drop the gathered dim.
@@ -253,74 +235,6 @@ inline torch::Tensor async_h2d_tensor(const std::vector<T>& values,
   return async_h2d_tensor(values, torch::TensorOptions().device(device));
 }
 
-inline std::vector<char> get_the_bytes(std::string filename) {
-  std::ifstream input(filename, std::ios::binary);
-  std::vector<char> bytes((std::istreambuf_iterator<char>(input)),
-                          (std::istreambuf_iterator<char>()));
-
-  input.close();
-  return bytes;
-}
-
-inline torch::Tensor load_tensor(std::string filename) {
-  std::vector<char> f = get_the_bytes(filename);
-  torch::IValue x = torch::pickle_load(f);
-  torch::Tensor my_tensor = x.toTensor();
-  return my_tensor;
-}
-
-inline void print_tensor(
-    const torch::Tensor& tensor,
-    const std::string& tensor_name = "tensor",
-    int num = 10,
-    bool part = true,
-    bool print_value = true,
-    const std::source_location& loc = std::source_location::current()) {
-  auto& log_stream =
-      google::LogMessage(
-          loc.file_name(), static_cast<int>(loc.line()), google::GLOG_INFO)
-          .stream();
-  if (!tensor.defined()) {
-    log_stream << tensor_name << ", Undefined tensor." << std::endl;
-    return;
-  }
-
-  log_stream << tensor_name << ": " << tensor.sizes()
-             << ", dtype: " << tensor.dtype() << ", device: " << tensor.device()
-             << std::endl;
-
-  if (!print_value) {
-    return;
-  }
-
-  if (part) {
-    const auto& flat_tensor = tensor.contiguous().view(-1);
-    int max_elements = std::min(static_cast<int>(flat_tensor.size(0)), num);
-    // const auto& front_elements = flat_tensor.slice(0, 0, max_elements);
-    const auto& front_elements =
-        flat_tensor.slice(0, 0, max_elements).to(torch::kCPU);
-    log_stream << "First " << max_elements << " elements: \n"
-               << front_elements << std::endl;
-
-    int back_num = flat_tensor.size(0) > num ? num : flat_tensor.size(0);
-    // const auto& back_elements = flat_tensor.slice(0, flat_tensor.size(0) -
-    // back_num, flat_tensor.size(0));
-    const auto& back_elements =
-        flat_tensor
-            .slice(0, flat_tensor.size(0) - back_num, flat_tensor.size(0))
-            .to(torch::kCPU);
-    log_stream << "Last " << back_num << " elements: \n"
-               << back_elements << std::endl;
-  } else {
-    log_stream << "All: \n" << tensor.to(torch::kCPU) << std::endl;
-  }
-}
-
-inline bool file_exists(const std::string& path) {
-  std::ifstream file(path);
-  return file.good();
-}
-
 inline bool tensor_batch_signature_matches(const torch::Tensor& lhs,
                                            const torch::Tensor& rhs) {
   if (!lhs.defined() || !rhs.defined()) {
@@ -336,18 +250,6 @@ inline bool tensor_batch_signature_matches(const torch::Tensor& lhs,
     }
   }
   return true;
-}
-
-inline torch::Tensor safe_concat(const torch::Tensor& t1,
-                                 const torch::Tensor& t2,
-                                 const uint32_t dim) {
-  if (t1.defined() && t2.defined()) {
-    return torch::cat({t1, t2}, dim);
-  } else if (!t1.defined()) {
-    return t2;
-  } else {
-    return t1;
-  }
 }
 
 inline bool safe_concat(const std::vector<torch::Tensor>& vec,
@@ -393,18 +295,6 @@ inline bool safe_concat(const std::vector<torch::Tensor>& vec,
   } else {
     return false;
   }
-}
-
-// save torch tensor to .pt file as pickle format, which is same as torch.save
-// in python. .pt file can be loaded by torch.load in python. file_path must end
-// with ".pt".
-inline void save_tensor_as_pickle(const torch::Tensor& tensor,
-                                  const std::string& file_path) {
-  std::vector<char> pickled = torch::pickle_save(tensor);
-  std::ofstream ofs(file_path, std::ios::binary);
-  CHECK(ofs.good()) << "Cannot open file: " << file_path;
-  ofs.write(pickled.data(), static_cast<std::streamsize>(pickled.size()));
-  CHECK(ofs.good()) << "Write failed to: " << file_path;
 }
 
 // Computes the new shape for tensor view casting between dtypes by bytes, for

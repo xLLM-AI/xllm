@@ -63,7 +63,6 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
-constexpr uint64_t MBUF_SIZE = 128 * 1024 * 1024;
 
 namespace {
 constexpr size_t kMaxPendingTargetContexts = 2;
@@ -363,15 +362,6 @@ MTPWorkerImpl<TargetInput>::~MTPWorkerImpl() {
 }
 
 template <typename TargetInput>
-void MTPWorkerImpl<TargetInput>::drain_pending_execution() {
-  if (execution_drained_) {
-    return;
-  }
-  DraftModelSpecWorkerImpl<TargetInput>::drain_pending_execution();
-  execution_drained_ = true;
-}
-
-template <typename TargetInput>
 bool MTPWorkerImpl<TargetInput>::init_model(
     const std::string& model_weights_path,
     int32_t random_seed,
@@ -396,42 +386,6 @@ bool MTPWorkerImpl<TargetInput>::init_model(
         ModelRegistry::get_mtp_capabilities(resolved_draft_model_name);
     const bool is_python_draft = ModelConfig::is_python_model_impl(
         draft_impl_->context_.get_model_impl());
-    const bool use_tp1_draft_body =
-        options_.enable_mtp_draft_body_tp1() &&
-        combined_draft_execution_path_ ==
-            mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
-    const bool draft_owns_shared_weights =
-        use_tp1_draft_body ||
-        (is_python_draft
-             ? draft_capabilities.python_draft_owns_embedding_and_lm_head
-             : draft_capabilities.native_draft_owns_embedding_and_lm_head);
-#if defined(USE_MLU)
-    if (!is_python_draft && !use_tp1_draft_body) {
-      if (!draft_impl_->context_.get_model_args().embedding_mode() &&
-          share_target_lm_head_with_draft() &&
-          !draft_impl_->get_lm_head()->is_weight_loaded()) {
-        auto head = impl_->get_lm_head();
-        draft_impl_->set_lm_head(head);
-      }
-      if (!draft_impl_->get_word_embedding()->is_weight_loaded()) {
-        auto embedding = impl_->get_word_embedding();
-        draft_impl_->set_word_embedding(embedding);
-      }
-    } else
-#endif
-        if (!draft_owns_shared_weights) {
-      const bool python_weights_shared =
-          draft_impl_->share_weights_from(*impl_);
-      if (!python_weights_shared) {
-        const bool share_lm_head = share_target_lm_head_with_draft();
-        if (share_lm_head) {
-          auto head = impl_->get_lm_head();
-          draft_impl_->set_lm_head(head);
-        }
-        auto word_embedding = impl_->get_word_embedding();
-        draft_impl_->set_word_embedding(word_embedding);
-      }
-    }
     if (impl_->get_status() != WorkerImpl::Status::UNINITIALIZED) {
       // Resolve tail-extend vs accepted-span replay once both models have
       // loaded, before embedding/KV cache allocation.
@@ -883,8 +837,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
       latest_pending_target_context().base_positions;
   const torch::Tensor target_base_kv_seq_lens =
       latest_pending_target_context().base_kv_seq_lens;
-  const StreamEventPtr target_context_ready_event =
-      latest_pending_target_context().ready_event;
   if (pending_draft_context_.output.has_value() &&
       !use_prelaunched_first_draft) {
     // A batch transition invalidates the speculative prelaunch.  Drain it
@@ -1291,7 +1243,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
                           num_speculative_tokens);
   }
 
-  const int64_t num_val_tokens = options_.num_speculative_tokens() + 1;
+  const int64_t num_val_tokens = num_speculative_tokens + 1;
   torch::Tensor validate_positions = validate_input.positions;
   CHECK_EQ(validate_positions.numel(), batch_size * num_val_tokens)
       << "validate positions must contain one row per speculative token";
@@ -1459,22 +1411,18 @@ void MTPWorkerImpl<TargetInput>::stage_target_context_write(
     torch::Tensor base_kv_seq_lens,
     StreamEventPtr ready_event,
     torch::Tensor accepted_tokens_host,
-    std::vector<size_t> failed_rows,
-    torch::Tensor accepted_count_host,
-    bool allow_immutable_compact_view) {
+    std::vector<size_t> failed_rows) {
   PendingTargetContext context;
   context.generation = next_pending_target_generation_++;
   context.embedding_ids = input.input_params.embedding.embedding_ids;
   context.request_ids = input.input_params.embedding.request_ids;
   context.accepted_tokens = validate_output.next_tokens;
   context.accepted_tokens_host = std::move(accepted_tokens_host);
-  context.accepted_count_host = std::move(accepted_count_host);
   context.accepted_embeddings = validate_output.embeddings;
   context.base_positions = std::move(base_positions);
   context.base_kv_seq_lens = std::move(base_kv_seq_lens);
   context.failed_rows = std::move(failed_rows);
   context.ready_event = std::move(ready_event);
-  context.allow_immutable_compact_view = allow_immutable_compact_view;
   if (pending_target_context_queue_.size() >= kMaxPendingTargetContexts) {
     flush_pending_target_context(/*keep_latest=*/kMaxPendingTargetContexts - 1);
   }
@@ -1557,14 +1505,11 @@ void MTPWorkerImpl<TargetInput>::flush_pending_target_context(
     CHECK(embedding_cache_ != nullptr)
         << "embedding_cache_ must be initialized before target cache write";
     if (pending.failed_rows.empty()) {
-      embedding_cache_->write_target_context(
-          pending.embedding_ids,
-          pending.request_ids,
-          pending.accepted_tokens_host,
-          pending.accepted_embeddings,
-          pending.accepted_count_host,
-          options_.num_speculative_tokens(),
-          pending.allow_immutable_compact_view);
+      embedding_cache_->write_target_context(pending.embedding_ids,
+                                             pending.request_ids,
+                                             pending.accepted_tokens_host,
+                                             pending.accepted_embeddings,
+                                             options_.num_speculative_tokens());
     } else {
       CHECK(pending.request_ids.empty() ||
             pending.request_ids.size() == pending.embedding_ids.size())
@@ -1600,17 +1545,9 @@ void MTPWorkerImpl<TargetInput>::flush_pending_target_context(
             row_request_ids,
             pending.accepted_tokens_host.narrow(
                 /*dim=*/0, /*start=*/sequence_index, /*length=*/1),
-            pending.accepted_embeddings.dim() == 2
-                ? pending.accepted_embeddings.narrow(
-                      /*dim=*/0, /*start=*/sequence_index * 2, /*length=*/2)
-                : pending.accepted_embeddings.narrow(
-                      /*dim=*/0, /*start=*/sequence_index, /*length=*/1),
-            pending.accepted_count_host.defined()
-                ? pending.accepted_count_host.narrow(
-                      /*dim=*/0, /*start=*/sequence_index, /*length=*/1)
-                : torch::Tensor(),
-            options_.num_speculative_tokens(),
-            pending.allow_immutable_compact_view);
+            pending.accepted_embeddings.narrow(
+                /*dim=*/0, /*start=*/sequence_index, /*length=*/1),
+            options_.num_speculative_tokens());
       }
     }
   }

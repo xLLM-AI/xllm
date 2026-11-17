@@ -313,26 +313,6 @@ class WorkerImpl {
     return context_.get_model_args().hidden_size();
   }
 
-  virtual layer::LmHead get_lm_head() { return model()->get_lm_head(); }
-
-  virtual void set_lm_head(layer::LmHead& head) { model()->set_lm_head(head); }
-
-  virtual layer::WordEmbedding get_word_embedding() {
-    return model()->get_word_embedding();
-  }
-
-  virtual void set_word_embedding(layer::WordEmbedding& embedding) {
-    model()->set_word_embedding(embedding);
-  }
-
-  bool share_weights_from(WorkerImpl& source) {
-    // Weight sharing uses the owned language model.
-    if (model_ == nullptr || source.model_ == nullptr) {
-      return false;
-    }
-    return model_->share_weights_from(*source.model_);
-  }
-
   bool enable_schedule_overlap() const {
     return options_.enable_schedule_overlap_;
   }
@@ -558,8 +538,6 @@ class WorkerImpl {
   std::unique_ptr<Executor> model_executor_;
 
   bool worker_execution_drained_ = false;
-
-  InstanceRole instance_role_ = InstanceRole::DEFAULT;
 
   std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
   std::optional<HierarchyKVCacheTransfer::CacheRole> hierarchy_kv_cache_role_;

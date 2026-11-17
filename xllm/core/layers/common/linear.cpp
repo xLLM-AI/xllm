@@ -47,7 +47,6 @@ struct Fp8PartitionInfo {
   std::vector<int64_t> logical_widths;
 
   bool empty() const { return scales.empty(); }
-  size_t size() const { return scales.size(); }
 };
 
 inline float compute_max_scale(const std::vector<float>& scales) {
@@ -407,22 +406,6 @@ bool load_shared_tensor_from_prefixes_or_fail(
   tensor.copy_(first_candidate.view(tensor.sizes()));
   tensor_is_loaded = true;
   return true;
-}
-
-void collapse_shared_tensor_to_scalar_or_fail(torch::Tensor& tensor,
-                                              const char* name) {
-  // W8A8 fused input_scale/offset should be same
-  CHECK(tensor.defined()) << name << " must be defined.";
-  CHECK_GT(tensor.numel(), 0) << name << " must contain at least one element.";
-  if (tensor.numel() <= 1) {
-    return;
-  }
-  auto flattened = tensor.flatten();
-  auto first = flattened.slice(0, 0, 1).expand_as(flattened);
-  CHECK(tensors_allclose_as_fp32(flattened, first))
-      << "Shared tensor value for " << name
-      << " in fused static W8A8 should be same.";
-  tensor = tensor.flatten().slice(0, 0, 1);
 }
 
 torch::Tensor npu_w8a8_linear_forward(
@@ -1384,12 +1367,9 @@ void QKVParallelLinearImpl::load_state_dict(
 
     // Build partition info for Q/K/V
     Fp8PartitionInfo partition_info;
-    int64_t num_heads_per_partition = num_heads_ / world_size_;
-    int64_t num_kv_heads_per_partition = num_kv_heads_ / world_size_;
-    partition_info.logical_widths = {
-        num_heads_per_partition * head_size_,      // Q
-        num_kv_heads_per_partition * head_size_,   // K
-        num_kv_heads_per_partition * head_size_};  // V
+    partition_info.logical_widths = {num_heads_ * head_size_,
+                                     num_kv_heads_ * head_size_,
+                                     num_kv_heads_ * head_size_};
 
     for (const auto& prefix : prefixes) {
       auto scale_tensor = state_dict.get_tensor(prefix + "weight_scale");

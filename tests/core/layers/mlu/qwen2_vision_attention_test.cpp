@@ -187,9 +187,6 @@ TEST_F(Qwen2VisionAttentionTest, SmoothQuantQkvLoadsAndRuns) {
 
   ASSERT_TRUE(qkv->is_weight_loaded());
   EXPECT_TRUE(torch::equal(qkv->weight(), qweight));
-  EXPECT_TRUE(torch::equal(qkv->per_channel_scale(), scale));
-  ASSERT_TRUE(qkv->smooth().has_value());
-  EXPECT_TRUE(torch::equal(qkv->smooth().value(), smooth));
 
   torch::Tensor input = test::seeded_tensor("qwen2_vision_qkv.smoothquant",
                                             {4, hidden_size},

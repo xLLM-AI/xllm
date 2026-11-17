@@ -52,16 +52,14 @@ TORCH_MODULE(Qwen3NextModel);
 class Qwen3NextForCausalLMImpl : public Qwen3HybridForCausalLMImplBase {
  public:
   explicit Qwen3NextForCausalLMImpl(const ModelContext& context)
-      : Qwen3NextForCausalLMImpl(context, /*init_model=*/true) {}
+      : Qwen3NextForCausalLMImpl(
+            context,
+            std::make_shared<Qwen3NextModelImpl>(context)) {}
 
  protected:
-  explicit Qwen3NextForCausalLMImpl(const ModelContext& context,
-                                    bool init_model)
-      : Qwen3HybridForCausalLMImplBase(context) {
-    if (init_model) {
-      set_model_module(std::make_shared<Qwen3NextModelImpl>(context));
-    }
-  }
+  Qwen3NextForCausalLMImpl(const ModelContext& context,
+                           Qwen3HybridModelModulePtr model)
+      : Qwen3HybridForCausalLMImplBase(context, std::move(model)) {}
 };
 TORCH_MODULE(Qwen3NextForCausalLM);
 

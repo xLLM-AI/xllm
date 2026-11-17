@@ -28,7 +28,6 @@ struct ModelGraphMetadataState;
 class KVCache;
 
 namespace layer {
-class LmHead;
 class WordEmbedding;
 }  // namespace layer
 
@@ -40,15 +39,6 @@ template <typename T>
 struct has_get_lm_head<T,
                        std::void_t<decltype(std::declval<T>()->get_lm_head())>>
     : std::true_type {};
-
-template <typename T, typename = void>
-struct has_set_lm_head : std::false_type {};
-
-template <typename T>
-struct has_set_lm_head<T,
-                       std::void_t<decltype(std::declval<T>()->set_lm_head(
-                           std::declval<layer::LmHead&>()))>> : std::true_type {
-};
 
 template <typename T, typename = void>
 struct has_get_word_embedding : std::false_type {};
@@ -224,6 +214,24 @@ struct has_dspark_markov_bias<
     T,
     std::void_t<decltype(std::declval<T>()->dspark_markov_bias(
         std::declval<const torch::Tensor&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_own_lm_head : std::false_type {};
+
+template <typename T>
+struct has_own_lm_head<
+    T,
+    std::void_t<decltype(std::declval<T>()->has_own_lm_head())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_tie_word_embeddings : std::false_type {};
+
+template <typename T>
+struct has_tie_word_embeddings<
+    T,
+    std::void_t<decltype(std::declval<T>()->tie_word_embeddings(
+        std::declval<layer::WordEmbedding>()))>> : std::true_type {};
 
 }  // namespace detail
 }  // namespace xllm

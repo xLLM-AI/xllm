@@ -166,37 +166,6 @@ class ModelParamsView final {
     linear_state_validity_mask.clear();
   }
 
-  void print() const {
-    LOG(INFO) << "ModelParamsView: batch_forward_type is "
-              << meta.batch_forward_type.to_string() << " , num_sequences is "
-              << meta.num_sequences << " , kv_max_seq_len is "
-              << meta.kv_max_seq_len << " , q_max_seq_len is "
-              << meta.q_max_seq_len;
-    LOG(INFO) << "ModelParamsView: attention.host.kv_seq_lens is "
-              << attention.host.kv_seq_lens;
-    LOG(INFO) << "ModelParamsView: attention.host.q_seq_lens is "
-              << attention.host.q_seq_lens;
-    LOG(INFO) << "ModelParamsView: batch_forward_type is "
-              << meta.batch_forward_type.to_string();
-    print_tensor(
-        attention.device.kv_seq_lens, "ModelParamsView: kv_seq_lens", 4);
-    print_tensor(attention.device.q_seq_lens, "ModelParamsView: q_seq_lens", 4);
-    print_tensor(
-        attention.device.q_cu_seq_lens, "ModelParamsView: q_cu_seq_lens", 4);
-    print_tensor(attention.device.new_cache_slots,
-                 "ModelParamsView: new_cache_slots",
-                 4);
-    print_tensor(
-        attention.device.block_tables, "ModelParamsView: block_tables", 4);
-    LOG(INFO) << "ModelParamsView: dp_global_token_nums is "
-              << parallel.dp_global_token_nums
-              << ", dp_is_decode: " << parallel.dp_is_decode;
-    LOG(INFO) << "ModelParamsView: is_spec_verify is " << is_spec_verify;
-    print_tensor(num_accepted_tokens,
-                 "ModelParamsView: num_accepted_tokens",
-                 /*max_elements=*/4);
-  }
-
   bool synchronize_layer(int64_t layer_idx) const {
     if (parallel.layer_wise_load_synchronizer == nullptr) {
       return true;

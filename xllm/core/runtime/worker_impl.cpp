@@ -36,6 +36,7 @@ limitations under the License.
 #include <future>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -98,52 +99,32 @@ limitations under the License.
 
 namespace xllm {
 
-constexpr uint64_t MBUF_SIZE = 128 * 1024 * 1024;
 constexpr uint32_t BATCH_COPY_MAX_SIZE = 4096;
 constexpr uint32_t TIMEOUT_S = 60;      // second
 constexpr uint32_t TIMEOUT_MS = 60000;  // millisecond
 
 namespace {
 
-// During TP model initialization, each rank loads weights concurrently.
-// MoE weight assembly (especially stack/cat on large expert tensors) runs on
-// CPU and is backed by ATen intra-op thread pools.
-//
-// If every TP rank also uses many intra-op threads, we get severe CPU
-// oversubscription and memory-bandwidth contention:
-//   1) many processes run large stack/cat at the same time
-//   2) each process fans out into multiple CPU workers
-//   3) host-side contention dominates load time even when I/O is fast
-//
-// For the weight-loading window only, forcing ATen to 1 thread reduces this
-// cross-rank contention and usually lowers end-to-end load latency in TP mode.
-// We restore the previous thread count immediately after load_model() returns,
-// so runtime compute behavior remains unchanged.
+// Limit CPU thread contention while ranks load weights concurrently.
 class ScopedAtenLoadThreads {
  public:
-  explicit ScopedAtenLoadThreads(int32_t target_threads)
-      : prev_threads_(at::get_num_threads()) {
-    if (target_threads > 0 && prev_threads_ != target_threads) {
-      torch::set_num_threads(target_threads);
-      active_ = true;
+  ScopedAtenLoadThreads() : prev_threads_(at::get_num_threads()) {
+    if (prev_threads_ != 1) {
+      torch::set_num_threads(/*num_threads=*/1);
     }
   }
 
   ~ScopedAtenLoadThreads() {
-    if (active_) {
+    if (prev_threads_ != 1) {
       torch::set_num_threads(prev_threads_);
     }
   }
 
-  // Non-copyable and non-movable
   ScopedAtenLoadThreads(const ScopedAtenLoadThreads&) = delete;
   ScopedAtenLoadThreads& operator=(const ScopedAtenLoadThreads&) = delete;
-  ScopedAtenLoadThreads(ScopedAtenLoadThreads&&) = delete;
-  ScopedAtenLoadThreads& operator=(ScopedAtenLoadThreads&&) = delete;
 
  private:
-  int32_t prev_threads_ = 0;
-  bool active_ = false;
+  int32_t prev_threads_;
 };
 
 template <typename Input>
@@ -182,16 +163,9 @@ LinearStateInputRows get_host_linear_state_rows(Params& input_params) {
   }
   const std::vector<int32_t>& host_q_seq_lens =
       input_params.attention.host.q_seq_lens;
-  int64_t num_reqs = static_cast<int64_t>(host_q_seq_lens.size());
-  if (num_reqs == 0) {
-    num_reqs = input_params.meta.num_sequences;
-  }
-  if (num_reqs == 0 && input_params.attention.device.block_tables.defined()) {
-    num_reqs = input_params.attention.device.block_tables.size(0);
-  }
-  if (num_reqs == 0 && input_params.embedding.linear_state_indices.defined()) {
-    num_reqs = input_params.embedding.linear_state_indices.numel();
-  }
+  const int64_t num_reqs = host_q_seq_lens.empty()
+                               ? input_params.meta.num_sequences
+                               : static_cast<int64_t>(host_q_seq_lens.size());
 
 #if defined(USE_NPU) || defined(USE_MUSA)
   util::fill_query_start_loc(
@@ -1663,24 +1637,21 @@ bool WorkerImpl::init_model_impl(std::unique_ptr<ModelLoader> model_loader,
     tp_world_size = parallel_args_.tp_group_->world_size();
   }
 
-  std::unique_ptr<ScopedAtenLoadThreads> scoped_load_threads;
   const int32_t prev_threads = torch::get_num_threads();
   LOG(INFO) << "Temporarily setting ATen threads to 1 during weight loading"
             << ", tp_world_size=" << tp_world_size
             << ", prev_threads=" << prev_threads;
-  scoped_load_threads =
-      std::make_unique<ScopedAtenLoadThreads>(/*target_threads=*/1);
-
-  if (master_status == MasterStatus::WAKEUP) {
-    this->load_model(std::move(model_loader));
-  } else if (master_status == MasterStatus::LIGHT_SLEEP) {
-    this->lazy_load_model(std::move(model_loader));
+  {
+    ScopedAtenLoadThreads scoped_load_threads;
+    if (master_status == MasterStatus::WAKEUP) {
+      this->load_model(std::move(model_loader));
+    } else if (master_status == MasterStatus::LIGHT_SLEEP) {
+      this->lazy_load_model(std::move(model_loader));
+    }
   }
 
-  if (scoped_load_threads) {
-    LOG(INFO) << "Weight loading completed, restored ATen threads="
-              << torch::get_num_threads();
-  }
+  LOG(INFO) << "Weight loading completed, restored ATen threads="
+            << torch::get_num_threads();
 
   status_ = Status::LOADED;
   return true;
@@ -1988,17 +1959,17 @@ void WorkerImpl::prepare_mla_prefixcache_inputs_impl(Params& input_params) {
   if (!has_prefixcache_metadata) {
     return;
   }
-  int32_t sum_prefix = input_params.attention.device.kv_cache_tokens_nums.sum()
-                           .template item<int>();
+  const auto& q_seq_lens = input_params.attention.host.q_seq_lens;
+  const auto& cached_tokens = input_params.attention.host.kv_cache_tokens_nums;
+  const int32_t sum_prefix =
+      std::accumulate(cached_tokens.begin(), cached_tokens.end(), int32_t{0});
   input_params.attention.device.history_compressed_kv =
       torch::empty({sum_prefix, context_.get_model_args().kv_lora_rank()},
-                   torch::TensorOptions().dtype(dtype_).pinned_memory(true))
-          .to(device_);
+                   torch::TensorOptions().dtype(dtype_).device(device_));
 
   input_params.attention.device.history_k_rope =
       torch::empty({sum_prefix, context_.get_model_args().qk_rope_head_dim()},
-                   torch::TensorOptions().dtype(dtype_).pinned_memory(true))
-          .to(device_);
+                   torch::TensorOptions().dtype(dtype_).device(device_));
 
   input_params.attention.device.ring_cur_seqlen =
       torch::stack({input_params.attention.device.q_seq_lens,
@@ -2011,10 +1982,16 @@ void WorkerImpl::prepare_mla_prefixcache_inputs_impl(Params& input_params) {
            input_params.attention.device.kv_cache_tokens_nums.to(device_)})
           .to(device_);
 
-  input_params.attention.host.ring_cur_seqlen =
-      tensor_to_vector<int32_t>(input_params.attention.device.ring_cur_seqlen);
-  input_params.attention.host.ring_cache_seqlen = tensor_to_vector<int32_t>(
-      input_params.attention.device.ring_cache_seqlen);
+  input_params.attention.host.ring_cur_seqlen = q_seq_lens;
+  input_params.attention.host.ring_cur_seqlen.insert(
+      input_params.attention.host.ring_cur_seqlen.end(),
+      q_seq_lens.begin(),
+      q_seq_lens.end());
+  input_params.attention.host.ring_cache_seqlen = q_seq_lens;
+  input_params.attention.host.ring_cache_seqlen.insert(
+      input_params.attention.host.ring_cache_seqlen.end(),
+      cached_tokens.begin(),
+      cached_tokens.end());
 }
 
 void WorkerImpl::prepare_mla_prefixcache_inputs(LlmModelParams& input_params) {

@@ -48,6 +48,15 @@ inline StateDict get_lm_head_dict(const StateDict& state_dict) {
   return StateDict({}, "");
 }
 
+inline StateDict get_embed_tokens_dict(const StateDict& state_dict) {
+  static const std::vector<std::string> kEmbeddingPrefixes = {
+      "model.language_model.embed_tokens.",
+      "language_model.model.embed_tokens.",
+      "model.embed_tokens.",
+      "embed_tokens."};
+  return state_dict.get_dict_with_prefix(kEmbeddingPrefixes);
+}
+
 inline bool load_model_args(const JsonReader& json,
                             ModelArgs* args,
                             const std::string& base_type,
@@ -173,59 +182,36 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
   }
 
   void load_state_dict(const StateDict& state_dict) override {
-    load_shared_embeddings(state_dict);
-    load_mtp_state_dict(state_dict);
-  }
-
-  void load_shared_embeddings(const StateDict& state_dict) {
-    StateDict embedding_state_dict =
-        state_dict.get_dict_with_prefix("embed_tokens.");
-    if (embedding_state_dict.get_tensor("weight").defined()) {
-      shared_embedding_loaded_ = true;
-    }
-    embed_tokens_->load_state_dict(embedding_state_dict);
-  }
-
-  void load_mtp_state_dict(const StateDict& state_dict) {
-    if (state_dict.get_tensor("pre_fc_norm_embedding.weight").defined()) {
-      pre_fc_norm_embedding_loaded_ = true;
-    }
-    if (state_dict.get_tensor("pre_fc_norm_hidden.weight").defined()) {
-      pre_fc_norm_hidden_loaded_ = true;
-    }
-    if (state_dict.get_tensor("fc.weight").defined() ||
-        state_dict.get_tensor("fc.qweight").defined()) {
-      fc_loaded_ = true;
-    }
-    if (state_dict.get_tensor("norm.weight").defined()) {
-      norm_loaded_ = true;
-    }
-
+    embed_tokens_->load_state_dict(
+        qwen3_5_mtp::get_embed_tokens_dict(state_dict));
+    static const std::vector<std::string> kMtpPrefixes = {"mtp.", "model.mtp."};
+    StateDict mtp_dict = state_dict.get_dict_with_prefix(kMtpPrefixes);
     pre_fc_norm_embedding_->load_state_dict(
-        state_dict.get_dict_with_prefix("pre_fc_norm_embedding."));
+        mtp_dict.get_dict_with_prefix("pre_fc_norm_embedding."));
     pre_fc_norm_hidden_->load_state_dict(
-        state_dict.get_dict_with_prefix("pre_fc_norm_hidden."));
-    fc_->load_state_dict(state_dict.get_dict_with_prefix("fc."));
+        mtp_dict.get_dict_with_prefix("pre_fc_norm_hidden."));
+    fc_->load_state_dict(mtp_dict.get_dict_with_prefix("fc."));
     for (size_t i = 0; i < layers_.size(); ++i) {
       layers_[i]->load_state_dict(
-          state_dict.get_dict_with_prefix("layers." + std::to_string(i) + "."));
+          mtp_dict.get_dict_with_prefix("layers." + std::to_string(i) + "."));
     }
-    norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
+    norm_->load_state_dict(mtp_dict.get_dict_with_prefix("norm."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const override {
-    CHECK(shared_embedding_loaded_)
-        << "Failed to find shared embedding weights for qwen3.5 mtp draft "
+    CHECK(embed_tokens_->is_weight_loaded())
+        << "Failed to find embedding weights for qwen3.5 mtp draft "
            "model";
-    CHECK(pre_fc_norm_embedding_loaded_)
+    CHECK(pre_fc_norm_embedding_->is_weight_loaded())
         << "Failed to find mtp pre_fc_norm_embedding weights for qwen3.5 mtp "
            "draft model";
-    CHECK(pre_fc_norm_hidden_loaded_)
+    CHECK(pre_fc_norm_hidden_->is_weight_loaded())
         << "Failed to find mtp pre_fc_norm_hidden weights for qwen3.5 mtp "
            "draft model";
-    CHECK(fc_loaded_) << "Failed to find mtp fc weights for qwen3.5 mtp draft "
-                         "model";
-    CHECK(norm_loaded_)
+    CHECK(fc_->is_weight_loaded())
+        << "Failed to find mtp fc weights for qwen3.5 mtp draft "
+           "model";
+    CHECK(norm_->is_weight_loaded())
         << "Failed to find mtp norm weights for qwen3.5 mtp draft model";
     for (size_t i = 0; i < layers_.size(); ++i) {
       layers_[i]->verify_loaded_weights(prefix + "layers." + std::to_string(i) +
@@ -244,64 +230,34 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
   layer::Qwen3NextRMSNorm pre_fc_norm_embedding_{nullptr};
   layer::Qwen3NextRMSNorm pre_fc_norm_hidden_{nullptr};
   layer::ReplicatedLinear fc_{nullptr};
-  bool shared_embedding_loaded_ = false;
-  bool pre_fc_norm_embedding_loaded_ = false;
-  bool pre_fc_norm_hidden_loaded_ = false;
-  bool fc_loaded_ = false;
-  bool norm_loaded_ = false;
 };
 
 class Qwen3_5MtpForCausalLMImplBase : public Qwen3HybridForCausalLMImplBase {
  public:
   void load_model(std::unique_ptr<ModelLoader> loader) {
-    static const std::vector<std::string> kEmbeddingPrefixes = {
-        "model.language_model.", "language_model.model.", "model.", ""};
-    static const std::vector<std::string> kMtpPrefixes = {"mtp.", "model.mtp."};
-    bool lm_head_loaded = false;
-
+    Qwen3HybridForCausalLMImplBase::load_lm_head(loader);
     for (const std::unique_ptr<StateDict>& state_dict :
          loader->get_state_dicts()) {
-      StateDict shared_embedding_state_dict =
-          state_dict->get_dict_with_prefix(kEmbeddingPrefixes);
-      StateDict mtp_state_dict = state_dict->get_dict_with_prefix(kMtpPrefixes);
-
-      mtp_model_->load_shared_embeddings(shared_embedding_state_dict);
-      mtp_model_->load_mtp_state_dict(mtp_state_dict);
-
-      if (tie_word_embeddings_) {
-        lm_head_->load_state_dict(
-            shared_embedding_state_dict.get_dict_with_prefix("embed_tokens."));
-        if (shared_embedding_state_dict.get_tensor("embed_tokens.weight")
-                .defined()) {
-          lm_head_loaded = true;
-        }
-      } else {
-        StateDict lm_head_state_dict =
-            qwen3_5_mtp::get_lm_head_dict(*state_dict);
-        lm_head_->load_state_dict(lm_head_state_dict);
-        if (lm_head_state_dict.get_tensor("weight").defined() ||
-            lm_head_state_dict.get_tensor("qweight").defined()) {
-          lm_head_loaded = true;
-        }
-      }
+      model_->load_state_dict(*state_dict);
     }
 
-    CHECK(lm_head_loaded)
+    model_->verify_loaded_weights("mtp.");
+    CHECK(lm_head_->is_weight_loaded())
         << "Failed to find lm_head weights for qwen3.5 mtp draft model";
-    mtp_model_->verify_loaded_weights("mtp.");
+  }
+
+  void load_lm_head(const StateDict& state_dict,
+                    const std::string& /*prefix*/) override {
+    lm_head_->load_state_dict(
+        tie_word_embeddings_ ? qwen3_5_mtp::get_embed_tokens_dict(state_dict)
+                             : qwen3_5_mtp::get_lm_head_dict(state_dict));
   }
 
  protected:
   Qwen3_5MtpForCausalLMImplBase(
       const ModelContext& context,
       std::shared_ptr<Qwen3_5MtpModelImplBase> mtp_model)
-      : Qwen3HybridForCausalLMImplBase(context),
-        mtp_model_(std::move(mtp_model)) {
-    set_model_module(mtp_model_);
-  }
-
- private:
-  std::shared_ptr<Qwen3_5MtpModelImplBase> mtp_model_;
+      : Qwen3HybridForCausalLMImplBase(context, std::move(mtp_model)) {}
 };
 
 }  // namespace xllm

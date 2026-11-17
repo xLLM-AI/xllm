@@ -40,7 +40,6 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
-#include "core/layers/npu_torch/deepseek_sparse_attention.h"
 #endif
 #include "core/common/types.h"
 #include "core/framework/batch/decode_input_builder.h"
@@ -211,46 +210,6 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
   }
 
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
-    const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-    // DeepSeek-V4 DSpark checkpoints carry trained mtp.0.embed /
-    // mtp.<last>.head tensors (with the draft-side QuaRot transform); replacing
-    // them after load destroys proposal quality.
-    const bool uses_own_head_and_embedding =
-        draft_args.model_type() == "deepseek_v4_dspark";
-    if (uses_own_head_and_embedding) {
-      LOG(INFO) << "Configured DeepSeek-V4 DSpark draft block size: "
-                << draft_args.block_size();
-      LOG(INFO) << "Configured DeepSeek-V4 DSpark SAS mode: "
-                << (draft_args.dspark_use_native_sas()
-                        ? "native explicit indices"
-                        : "CANN 9.0-compatible q_len=1 fallback");
-#if defined(USE_NPU)
-      if (draft_args.dspark_use_native_sas()) {
-        LOG(WARNING)
-            << "Native DeepSeek-V4 DSpark SAS requires an operator that "
-               "accepts non-empty ori_sparse_indices and ori_win_left="
-            << layer::deepseek_v4_ori_window_left(
-                   draft_args.window_size(),
-                   draft_args.block_size(),
-                   /*use_native_dspark_sas=*/true)
-            << ".";
-      }
-#endif
-      // Keep the trained mtp.0.embed and mtp.<last>.head modules loaded by
-      // DeepseekV4DSparkForCausalLMImpl. Sharing the target modules here makes
-      // the draft backbone/Markov head project through the wrong vocabulary
-      // basis and reduces acceptance to near-random levels.
-    } else {
-      const bool python_weights_shared =
-          draft_impl_->WorkerImpl::share_weights_from(*impl_);
-      if (!python_weights_shared) {
-        auto head = impl_->get_lm_head();
-        draft_impl_->set_lm_head(head);
-        auto word_embedding = impl_->get_word_embedding();
-        draft_impl_->set_word_embedding(word_embedding);
-      }
-    }
-
     JsonReader reader;
     const std::string config_path = model_weights_path + "/config.json";
     CHECK(reader.parse(config_path))
@@ -263,12 +222,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         << "Block-diffusion draft config requires mask_token_id, "
            "dflash_config.mask_token_id, or dspark_noise_token_id.";
 
-    const int64_t draft_vocab_size = draft_args.draft_vocab_size() > 0
-                                         ? draft_args.draft_vocab_size()
-                                         : draft_args.vocab_size();
     const ModelArgs& target_args = impl_->context_.get_model_args();
-    CHECK_GT(draft_vocab_size, 0)
-        << "Block-diffusion draft vocab_size must be set.";
     CHECK_LT(mask_token_id_, target_args.vocab_size())
         << "Block-diffusion mask_token_id (" << mask_token_id_
         << ") must be < target vocab_size (" << target_args.vocab_size()

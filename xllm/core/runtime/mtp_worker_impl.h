@@ -113,7 +113,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   virtual void check_draft_input_embedding(const torch::Tensor& /*embedding*/,
                                            const std::string& /*phase*/) const {
   }
-  virtual bool share_target_lm_head_with_draft() const { return true; }
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.
@@ -155,8 +154,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
 
   struct PendingTargetContext {
     uint64_t generation = 0;
-    torch::Tensor accepted_count_host;
-    bool allow_immutable_compact_view = false;
     std::vector<int32_t> embedding_ids;
     std::vector<std::string> request_ids;
     // Both tensors stay on device.  A steady-state overlap step consumes them
@@ -189,16 +186,13 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                                   torch::Tensor base_kv_seq_lens,
                                   StreamEventPtr ready_event,
                                   torch::Tensor accepted_tokens_host,
-                                  std::vector<size_t> failed_rows,
-                                  torch::Tensor accepted_count_host = {},
-                                  bool allow_immutable_compact_view = false);
+                                  std::vector<size_t> failed_rows);
   torch::Tensor acquire_accepted_tokens_host_buffer(
       const torch::Tensor& accepted_tokens);
   bool pending_target_context_matches(const TargetInput& input) const;
   bool device_target_context_ready_for_batch(const TargetInput& input) const;
   void flush_pending_target_context(size_t keep_latest = 0);
   const PendingTargetContext& latest_pending_target_context() const;
-  void drain_pending_execution() override;
   bool supports_combined_first_draft_execution() const;
   bool can_use_combined_first_draft() const;
   bool can_prelaunch_next_first_draft(const TargetInput& input) const;
@@ -235,7 +229,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // without waiting for target verification to finish.
   std::deque<PendingTargetContext> pending_target_context_queue_;
   uint64_t next_pending_target_generation_ = 1;
-  bool execution_drained_ = false;
   std::vector<torch::Tensor> accepted_tokens_host_pool_;
   std::vector<int32_t> device_context_ready_embedding_ids_;
   std::vector<std::string> device_context_ready_request_ids_;

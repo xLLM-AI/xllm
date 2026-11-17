@@ -130,9 +130,9 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
  public:
   explicit DFlash2Qwen3ModelImpl(const ModelContext& context)
       : ::xllm::QWen3ModelImpl(context),
-        selector_(context.get_model_args(), context.get_tensor_options()) {
+        selector_(context.get_model_args(), context.get_tensor_options()),
+        parallel_args_(context.get_parallel_args()) {
     const ModelArgs& args = context.get_model_args();
-    const ParallelArgs& parallel_args = context.get_parallel_args();
     tensor_options_ = context.get_tensor_options();
     head_dim_ = args.head_dim();
     rms_norm_eps_ = args.rms_norm_eps();
@@ -141,13 +141,13 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
     CHECK_GT(sliding_window_, 0);
     CHECK_GT(block_size_, 0);
 
-    const int32_t dp_size = parallel_args.dp_size();
-    const int32_t cp_size = parallel_args.cp_size();
+    const int32_t dp_size = parallel_args_.dp_size();
+    const int32_t cp_size = parallel_args_.cp_size();
     CHECK_GT(dp_size, 0);
     CHECK_GT(cp_size, 0);
-    CHECK_EQ(parallel_args.world_size() % (dp_size * cp_size), 0);
-    tp_size_ = parallel_args.world_size() / (dp_size * cp_size);
-    tp_rank_ = parallel_args.rank() % tp_size_;
+    CHECK_EQ(parallel_args_.world_size() % (dp_size * cp_size), 0);
+    tp_size_ = parallel_args_.world_size() / (dp_size * cp_size);
+    tp_rank_ = parallel_args_.rank() % tp_size_;
 
     fc_ = register_module("fc",
                           layer::AddMatmul(args.hidden_size() * args.n_layers(),
@@ -168,6 +168,17 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
   }
 
   void load_state_dict(const StateDict& state_dict) override {
+    if (state_dict.get_tensor("embed_tokens.weight").defined()) {
+      if (embed_tokens_.is_empty()) {
+        auto embedding = layer::WordEmbedding(model_args_.vocab_size(),
+                                              model_args_.hidden_size(),
+                                              parallel_args_,
+                                              tensor_options_);
+        set_word_embedding(embedding);
+      }
+      embed_tokens_->load_state_dict(
+          state_dict.get_dict_with_prefix("embed_tokens."));
+    }
     fc_->load_state_dict(state_dict.get_dict_with_prefix("fc."));
     hidden_norm_->load_state_dict(
         state_dict.get_dict_with_prefix("hidden_norm."));
@@ -355,6 +366,7 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
   torch::Tensor fused_kv_weight_;
   torch::Tensor k_norm_weight_;
   torch::TensorOptions tensor_options_;
+  ParallelArgs parallel_args_;
   int64_t head_dim_ = 0;
   int64_t local_kv_heads_ = 0;
   double rms_norm_eps_ = 1e-6;
@@ -371,19 +383,7 @@ class DFlash2Qwen3ForCausalLMImpl final
   using Base = ::xllm::LlmForCausalLMImplBase<DFlash2Qwen3Model>;
 
   explicit DFlash2Qwen3ForCausalLMImpl(const ModelContext& context)
-      : Base(context) {}
-
-  using Base::logits;
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes,
-                       torch::Tensor& out_hidden) override {
-    out_hidden = selected_idxes.defined()
-                     ? hidden_states.index_select(
-                           /*dim=*/0, selected_idxes.to(torch::kLong))
-                     : hidden_states;
-    return lm_head_(out_hidden);
-  }
+      : Base(context, /*share_lm_head=*/true) {}
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "") override {

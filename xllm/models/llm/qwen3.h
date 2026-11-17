@@ -28,8 +28,7 @@ namespace xllm {
 class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
  public:
   QWen3ModelImpl(const ModelContext& context)
-      : LlmModelImplBase<layer::Qwen3DecoderLayer>("qwen3",
-                                                   context.get_model_args()) {
+      : LlmModelImplBase<layer::Qwen3DecoderLayer>(context.get_model_args()) {
     // register submodules
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
@@ -44,11 +43,6 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
 
     layers_.reserve(model_args.n_layers());
     norm_ = register_module("norm", layer::RMSNorm(context));
-    // DFlash2 consumes the target model's embedding table.  Do not allocate a
-    // draft-local copy here: set_word_embedding() binds the shared target
-    // module after both workers finish loading.  Merely replacing the holder
-    // after register_module() would leave the original large-vocabulary module
-    // owned by torch::nn::Module and keep its device memory alive.
     if (!is_dflash2_draft_model_type(model_args.model_type())) {
       embed_tokens_ =
           register_module("embed_tokens", layer::WordEmbedding(context));

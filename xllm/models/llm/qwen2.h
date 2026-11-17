@@ -24,8 +24,7 @@ namespace xllm {
 class QWen2ModelImpl : public LlmModelImplBase<layer::Qwen2DecoderLayer> {
  public:
   QWen2ModelImpl(const ModelContext& context)
-      : LlmModelImplBase<layer::Qwen2DecoderLayer>("qwen2",
-                                                   context.get_model_args()) {
+      : LlmModelImplBase<layer::Qwen2DecoderLayer>(context.get_model_args()) {
     // register submodules
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();

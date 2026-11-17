@@ -1450,19 +1450,20 @@ TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
 }
 
 TEST(DSparkWorkerWeightsTest, DedicatedVocabularyOverridesFallbackInAnyOrder) {
+  using Source = dspark_detail::VocabularyWeightSource;
   dspark_detail::VocabularyWeightSelector fallback_first;
-  EXPECT_TRUE(fallback_first.should_load(/*dedicated=*/false));
-  fallback_first.mark_loaded(/*dedicated=*/false);
-  EXPECT_TRUE(fallback_first.should_load(/*dedicated=*/true));
-  fallback_first.mark_loaded(/*dedicated=*/true);
-  EXPECT_FALSE(fallback_first.should_load(/*dedicated=*/true));
-  EXPECT_FALSE(fallback_first.should_load(/*dedicated=*/false));
+  EXPECT_TRUE(fallback_first.should_load(Source::TARGET_FALLBACK));
+  fallback_first.mark_loaded(Source::TARGET_FALLBACK);
+  EXPECT_TRUE(fallback_first.should_load(Source::DEDICATED));
+  fallback_first.mark_loaded(Source::DEDICATED);
+  EXPECT_FALSE(fallback_first.should_load(Source::DEDICATED));
+  EXPECT_FALSE(fallback_first.should_load(Source::TARGET_FALLBACK));
 
   dspark_detail::VocabularyWeightSelector dedicated_first;
-  EXPECT_TRUE(dedicated_first.should_load(/*dedicated=*/true));
-  dedicated_first.mark_loaded(/*dedicated=*/true);
-  EXPECT_FALSE(dedicated_first.should_load(/*dedicated=*/false));
-  EXPECT_FALSE(dedicated_first.should_load(/*dedicated=*/true));
+  EXPECT_TRUE(dedicated_first.should_load(Source::DEDICATED));
+  dedicated_first.mark_loaded(Source::DEDICATED);
+  EXPECT_FALSE(dedicated_first.should_load(Source::TARGET_FALLBACK));
+  EXPECT_FALSE(dedicated_first.should_load(Source::DEDICATED));
 }
 
 TEST(SpeculativeWorkerDispatchTest, DecodeRequiresEveryDpRankToDecode) {

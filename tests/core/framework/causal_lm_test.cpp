@@ -23,9 +23,6 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-// A model that only implements the 2-arg logits, like the models on the
-// generic LlmForCausalLMImplBase whose lm_head cannot emit the selected
-// hidden in the same projection.
 class TwoArgLogitsModel {
  public:
   ModelOutput forward(const torch::Tensor& tokens,
@@ -58,13 +55,8 @@ class TwoArgLogitsModel {
 
   void load_model(std::unique_ptr<ModelLoader> loader) { (void)loader; }
 
-  void prepare_expert_weight(int32_t layer_id,
-                             const std::vector<int32_t>& expert_ids) {
-    (void)layer_id;
-    (void)expert_ids;
-  }
-
-  void update_expert_weight(int32_t layer_id) { (void)layer_id; }
+  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) {}
+  void update_expert_weight(int32_t) {}
 };
 
 class CausalLMImplLogitsWithHiddenTest : public ::testing::Test {
@@ -90,21 +82,8 @@ TEST_F(CausalLMImplLogitsWithHiddenTest,
 
   torch::Tensor expected =
       hidden.index_select(/*dim=*/0, idxes.to(torch::kLong));
-  EXPECT_TRUE(out_hidden.defined());
   EXPECT_TRUE(torch::equal(out_hidden, expected));
   EXPECT_TRUE(torch::equal(logits, lm_.logits(hidden, idxes)));
-}
-
-TEST_F(CausalLMImplLogitsWithHiddenTest, PassesThroughHiddenWithoutSelection) {
-  torch::Tensor hidden = make_hidden();
-  torch::Tensor undefined_idxes;
-
-  torch::Tensor out_hidden;
-  torch::Tensor logits = lm_.logits(hidden, undefined_idxes, out_hidden);
-
-  EXPECT_TRUE(out_hidden.defined());
-  EXPECT_TRUE(torch::equal(out_hidden, hidden));
-  EXPECT_TRUE(torch::equal(logits, lm_.logits(hidden, undefined_idxes)));
 }
 
 }  // namespace

@@ -38,6 +38,8 @@ limitations under the License.
 #include "core/framework/quantization/quant_args.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/layers/common/lm_head.h"
+#include "core/layers/common/word_embedding.h"
 
 namespace xllm {
 
@@ -121,7 +123,8 @@ class CausalLM : public torch::nn::Module, public Model {
     return logits(hidden_states, seleted_idxes);
   }
 
-  virtual bool share_weights_from(CausalLM& /*source*/) { return false; }
+  virtual void share_lm_head(CausalLM&) {}
+  virtual void share_embed_tokens(CausalLM&) {}
 
   virtual void prepare_expert_weight(
       int32_t layer_id,
@@ -250,6 +253,10 @@ class CausalLMImpl : public CausalLM {
 
   void load_model(std::unique_ptr<ModelLoader> loader) override {
     model_->load_model(std::move(loader));
+    if constexpr (detail::has_tie_word_embeddings<ModelType>::value &&
+                  detail::has_get_word_embedding<ModelType>::value) {
+      model_->tie_word_embeddings(model_->get_word_embedding());
+    }
   }
 
   ModelOutput write_context_kv(const torch::Tensor& target_hidden,
@@ -356,14 +363,6 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
-  void set_lm_head(layer::LmHead& head) override {
-    if constexpr (detail::has_set_lm_head<ModelType>::value) {
-      model_->set_lm_head(head);
-    } else {
-      CausalLM::set_lm_head(head);
-    }
-  }
-
   layer::WordEmbedding get_word_embedding() override {
     if constexpr (detail::has_get_word_embedding<ModelType>::value) {
       return model_->get_word_embedding();
@@ -372,11 +371,20 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
-  void set_word_embedding(layer::WordEmbedding& embedding) override {
-    if constexpr (detail::has_set_word_embedding<ModelType>::value) {
-      model_->set_word_embedding(embedding);
-    } else {
-      CausalLM::set_word_embedding(embedding);
+  void share_lm_head(CausalLM& target_model) override {
+    if constexpr (detail::has_own_lm_head<ModelType>::value) {
+      model_->share_lm_head(target_model.get_lm_head());
+    }
+  }
+
+  void share_embed_tokens(CausalLM& target_model) override {
+    if constexpr (detail::has_get_word_embedding<ModelType>::value &&
+                  detail::has_set_word_embedding<ModelType>::value) {
+      auto own = model_->get_word_embedding();
+      if (own.is_empty() || !own->is_weight_loaded()) {
+        auto embedding = target_model.get_word_embedding();
+        model_->set_word_embedding(embedding);
+      }
     }
   }
 

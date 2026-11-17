@@ -277,13 +277,6 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     }
   }
 
-  virtual void prepare_expert_weight(int32_t layer_id,
-                                     const std::vector<int32_t>& expert_ids) {
-    return;
-  }
-
-  virtual void update_expert_weight(int32_t layer_id) { return; }
-
  private:
   layer::RMSNorm enorm_{nullptr};
   layer::RMSNorm hnorm_{nullptr};
@@ -373,17 +366,6 @@ class MtpModelImplBase : public torch::nn::Module {
 
     // get dp size and rank
     dp_size_ = parallel_args.dp_size();
-    std::vector<int64_t> indices;
-    dp_local_tp_size_ = parallel_args.world_size() / dp_size_;
-    dp_rank_ = parallel_args.rank() / dp_local_tp_size_;
-    rank_ = parallel_args.rank();
-    for (size_t i = 0; i < parallel_args.world_size(); i += dp_local_tp_size_) {
-      indices.push_back(i);
-    }
-  }
-
-  torch::Tensor get_input_embeddings(torch::Tensor input_ids) {
-    return embed_tokens_(input_ids);
   }
 
   // Provide batched signature to satisfy callers that pass vectors
@@ -470,7 +452,7 @@ class MtpModelImplBase : public torch::nn::Module {
   layer::WordEmbedding get_word_embedding() { return embed_tokens_; }
 
   void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    embed_tokens_ = word_embedding;
+    embed_tokens_ = this->replace_module("embed_tokens", word_embedding);
   }
 
  private:
@@ -478,10 +460,7 @@ class MtpModelImplBase : public torch::nn::Module {
   std::vector<DecoderLayerType> mtp_layers_;
   int32_t mtp_start_layer_idx_;
   int32_t mtp_end_layer_idx_;
-  int32_t dp_rank_;
-  int32_t rank_;
   int32_t dp_size_;
-  int32_t dp_local_tp_size_;
   torch::Device device_;
   layer::WordEmbedding embed_tokens_{nullptr};
   layer::RMSNorm norm_{nullptr};

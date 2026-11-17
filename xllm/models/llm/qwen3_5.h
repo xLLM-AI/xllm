@@ -49,13 +49,8 @@ TORCH_MODULE(Qwen3_5Model);
 class Qwen3_5ForCausalLMImpl : public Qwen3NextForCausalLMImpl {
  public:
   explicit Qwen3_5ForCausalLMImpl(const ModelContext& context)
-      : Qwen3NextForCausalLMImpl(context, /*init_model=*/false) {
-    set_model_module(std::make_shared<Qwen3_5ModelImpl>(context));
-  }
-
-  torch::Tensor get_input_embeddings(torch::Tensor input_ids) {
-    return get_word_embedding()(input_ids);
-  }
+      : Qwen3NextForCausalLMImpl(context,
+                                 std::make_shared<Qwen3_5ModelImpl>(context)) {}
 
   void load_model(std::unique_ptr<ModelLoader> loader) {
     Qwen3NextForCausalLMImpl::load_model(
@@ -63,7 +58,7 @@ class Qwen3_5ForCausalLMImpl : public Qwen3NextForCausalLMImpl {
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader,
-                  const std::string& model_prefix) {
+                  std::string model_prefix) override {
     Qwen3NextForCausalLMImpl::load_model(
         std::move(loader), model_prefix, "lm_head.");
   }

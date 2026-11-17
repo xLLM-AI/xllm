@@ -66,7 +66,6 @@ class OxygenVisionPatchEmbedImpl : public torch::nn::Module {
       DCHECK_EQ(proj_->weight.sizes(), weight.sizes())
           << "proj weight size mismatch for " << name();
       proj_->weight.data().copy_(weight);
-      proj_weight_loaded_ = true;
     }
     auto bias = state_dict.get_tensor("proj.bias");
     if (bias.defined()) {
@@ -74,20 +73,10 @@ class OxygenVisionPatchEmbedImpl : public torch::nn::Module {
       DCHECK_EQ(proj_->bias.sizes(), bias.sizes())
           << "proj bias size mismatch for " << name();
       proj_->bias.data().copy_(bias);
-      proj_bias_loaded_ = true;
     }
   }
 
-  void verify_loaded_weights(const std::string& prefix) const {
-    CHECK(proj_weight_loaded_)
-        << "weight is not loaded for " << prefix + "proj.weight";
-    CHECK(proj_bias_loaded_)
-        << "bias is not loaded for " << prefix + "proj.bias";
-  }
-
  private:
-  bool proj_weight_loaded_ = false;
-  bool proj_bias_loaded_ = false;
   torch::nn::Linear proj_{nullptr};
 };
 TORCH_MODULE(OxygenVisionPatchEmbed);
@@ -177,13 +166,7 @@ class OxygenVisionEmbeddingsImpl : public torch::nn::Module {
     auto weight = state_dict.get_tensor("position_embedding.weight");
     if (weight.defined()) {
       position_embedding_->weight.data().copy_(weight);
-      position_embedding_weight_loaded_ = true;
     }
-  }
-
-  void verify_loaded_weights(const std::string& prefix) const {
-    CHECK(position_embedding_weight_loaded_)
-        << "weight is not loaded for " << prefix + "position_embedding.weight";
   }
 
  private:
@@ -191,7 +174,7 @@ class OxygenVisionEmbeddingsImpl : public torch::nn::Module {
   int64_t image_size_ = 0;
   int64_t patch_size_ = 0;
   int64_t num_positions_ = 0;
-  bool position_embedding_weight_loaded_ = false;
+
   torch::nn::Embedding position_embedding_{nullptr};
 };
 TORCH_MODULE(OxygenVisionEmbeddings);
@@ -248,58 +231,37 @@ class OxygenVisionPatchMergerImpl : public torch::nn::Module {
       CHECK_EQ(norm_->weight.sizes(), norm_weight.sizes())
           << "weight size mismatch for " << name();
       norm_->weight.data().copy_(norm_weight);
-      is_norm_weight_loaded = true;
     }
     const auto norm_bias = norm_dict.get_tensor("bias");
     if (norm_bias.defined()) {
       CHECK_EQ(norm_->bias.sizes(), norm_bias.sizes())
           << "bias size mismatch for " << name();
       norm_->bias.data().copy_(norm_bias);
-      is_norm_bias_loaded = true;
     }
 
     const auto& proj_dict = state_dict.get_dict_with_prefix("proj.");
     const auto& proj_weight = proj_dict.get_tensor("weight");
     if (proj_weight.defined()) {
       proj_->weight.data().copy_(proj_weight);
-      is_proj_weight_loaded = true;
     }
 
     const auto& up_dict = state_dict.get_dict_with_prefix("up_proj.");
     const auto& up_weight = up_dict.get_tensor("weight");
     if (up_weight.defined()) {
       up_->weight.data().copy_(up_weight);
-      is_up_weight_loaded = true;
     }
 
     const auto& down_dict = state_dict.get_dict_with_prefix("down_proj.");
     const auto& down_weight = down_dict.get_tensor("weight");
     if (down_weight.defined()) {
       down_->weight.data().copy_(down_weight);
-      is_down_weight_loaded = true;
     }
 
     const auto& gate_dict = state_dict.get_dict_with_prefix("gate_proj.");
     const auto& gate_weight = gate_dict.get_tensor("weight");
     if (gate_weight.defined()) {
       gate_->weight.data().copy_(gate_weight);
-      is_gate_weight_loaded = true;
     }
-  }
-
-  void verify_loaded_weights(const std::string& prefix) const {
-    CHECK(is_proj_weight_loaded)
-        << "weight is not loaded for " << prefix + "proj_weight" + ".weight";
-    CHECK(is_up_weight_loaded)
-        << "weight is not loaded for " << prefix + "up_weight" + ".weight";
-    CHECK(is_down_weight_loaded)
-        << "weight is not loaded for " << prefix + "down_weight" + ".weight";
-    CHECK(is_gate_weight_loaded)
-        << "weight is not loaded for " << prefix + "gate_weight" + ".weight";
-    CHECK(is_norm_weight_loaded)
-        << "weight is not loaded for " << prefix + "norm" + ".weight";
-    CHECK(is_norm_bias_loaded)
-        << "bias is not loaded for " << prefix + "norm" + ".bias";
   }
 
  private:
@@ -311,13 +273,6 @@ class OxygenVisionPatchMergerImpl : public torch::nn::Module {
   torch::nn::GELU act_{nullptr};
   torch::nn::SiLU silu_{nullptr};
   torch::TensorOptions options_;
-
-  bool is_proj_weight_loaded = false;
-  bool is_up_weight_loaded = false;
-  bool is_down_weight_loaded = false;
-  bool is_gate_weight_loaded = false;
-  bool is_norm_weight_loaded = false;
-  bool is_norm_bias_loaded = false;
 };
 TORCH_MODULE(OxygenVisionPatchMerger);
 
@@ -435,10 +390,7 @@ class OxygenVisionTransformerImpl : public torch::nn::Module {
     auto h_times_w = (grid_h * grid_w).squeeze(1);
     auto repeats = grid_t.squeeze(1);
     auto repeated = torch::repeat_interleave(h_times_w, repeats, 0);
-    c10::optional<torch::ScalarType> cumsum_dtype;
-
-    cumsum_dtype = torch::kInt32;
-    auto cu_seqlens = torch::cumsum(repeated, 0, cumsum_dtype);
+    auto cu_seqlens = torch::cumsum(repeated, 0, torch::kInt32);
     namespace F = torch::nn::functional;
     cu_seqlens = F::pad(
         cu_seqlens, F::PadFuncOptions({1, 0}).mode(torch::kConstant).value(0));
@@ -475,56 +427,26 @@ class OxygenVisionTransformerImpl : public torch::nn::Module {
         state_dict.get_dict_with_prefix("patch_embed."));
     embeddings_->load_state_dict(
         state_dict.get_dict_with_prefix("embeddings."));
-    const auto& norm_weight =
-        state_dict.get_dict_with_prefix("post_conv_layernorm.")
-            .get_tensor("weight");
-    if (norm_weight.defined()) {
-      CHECK_EQ(post_conv_layernorm_->weight().sizes(), norm_weight.sizes())
-          << "weight size mismatch for " << name();
-      post_conv_layernorm_->weight().data().copy_(norm_weight);
-      is_post_conv_layernorm_weight_loaded = true;
-    }
+    post_conv_layernorm_->load_state_dict(
+        state_dict.get_dict_with_prefix("post_conv_layernorm."));
     for (int idx = 0; idx < layers_.size(); ++idx) {
       layers_[idx]->load_state_dict(state_dict.get_dict_with_prefix(
           "blocks." + std::to_string(idx) + "."));
     }
 
-    const auto& post_norm_weight =
-        state_dict.get_dict_with_prefix("post_layernorm.").get_tensor("weight");
-    if (post_norm_weight.defined()) {
-      CHECK_EQ(post_layernorm_->weight().sizes(), post_norm_weight.sizes())
-          << "weight size mismatch for " << name();
-      post_layernorm_->weight().data().copy_(post_norm_weight);
-      is_post_layernorm_weight_loaded = true;
-    }
+    post_layernorm_->load_state_dict(
+        state_dict.get_dict_with_prefix("post_layernorm."));
     const auto& downsample_dict =
         state_dict.get_dict_with_prefix("downsample.");
     const auto& downsample_weight = downsample_dict.get_tensor("weight");
     const auto& downsample_bias = downsample_dict.get_tensor("bias");
     if (downsample_weight.defined()) {
       downsample_->weight.data().copy_(downsample_weight);
-      is_downsample_weight_loaded_ = true;
     }
     if (downsample_bias.defined()) {
       downsample_->bias.data().copy_(downsample_bias);
-      is_downsample_bias_loaded_ = true;
     }
     merger_->load_state_dict(state_dict.get_dict_with_prefix("merger."));
-  }
-
-  void verify_loaded_weights(const std::string& prefix) const {
-    patch_embed_->verify_loaded_weights(prefix + "patch_embed.");
-    embeddings_->verify_loaded_weights(prefix + "embeddings.");
-    CHECK(is_post_conv_layernorm_weight_loaded)
-        << "weight is not loaded for " << prefix + "post_conv_layernorm.weight";
-    CHECK(is_post_layernorm_weight_loaded)
-        << "weight is not loaded for " << prefix + "post_layernorm.weight";
-    merger_->verify_loaded_weights(prefix + "merger.");
-
-    CHECK(is_downsample_weight_loaded_)
-        << "weight is not loaded for " << prefix + "downsample.weight";
-    CHECK(is_downsample_bias_loaded_)
-        << "bias is not loaded for " << prefix + "downsample.bias";
   }
 
  private:
@@ -542,12 +464,6 @@ class OxygenVisionTransformerImpl : public torch::nn::Module {
   std::vector<layer::OxygenVisionLayer> layers_;
   OxygenVisionPatchMerger merger_{nullptr};
   torch::TensorOptions options_;
-  bool is_post_conv_layernorm_weight_loaded = false;
-  bool is_post_layernorm_weight_loaded = false;
-  bool is_downsample_weight_loaded_ = false;
-  bool is_downsample_bias_loaded_ = false;
-  torch::Tensor m_cos;
-  torch::Tensor m_sin;
 };
 TORCH_MODULE(OxygenVisionTransformer);
 
@@ -614,6 +530,7 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
     }
     if (video_input) {
       std::vector<torch::Tensor> temp_frames_hw;
+      std::vector<int64_t> split_sizes;
       for (int i = 0; i < video_input->video_grid_thw.size(0); ++i) {
         auto t = video_input->video_grid_thw[i][0].item<int32_t>();
         auto h = video_input->video_grid_thw[i][1].item<int32_t>();
@@ -621,23 +538,12 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
         auto repeated_row =
             torch::tensor({1, h, w}).unsqueeze(0).repeat({t, 1});
         temp_frames_hw.push_back(repeated_row);
+        split_sizes.push_back(t * h * w / merge_size / merge_size);
       }
       auto flatten_video_grid_thw = torch::cat(temp_frames_hw, 0);
       // visual
       auto video_embeds = visual_(video_input->pixel_values_videos.to(options_),
                                   flatten_video_grid_thw);
-      // Split based on original video count, not frame count
-      // video_grid_thw has shape [num_videos, 3], video_embeds is flattened
-      // We need to split video_embeds back to match num_videos
-      std::vector<int64_t> split_sizes;
-      for (int i = 0; i < video_input->video_grid_thw.size(0); ++i) {
-        auto t = video_input->video_grid_thw[i][0].item<int32_t>();
-        auto h = video_input->video_grid_thw[i][1].item<int32_t>();
-        auto w = video_input->video_grid_thw[i][2].item<int32_t>();
-        // Tokens for this video = t frames * (h * w / merge_size / merge_size)
-        auto tokens = t * h * w / merge_size / merge_size;
-        split_sizes.push_back(tokens);
-      }
       multimodal_embeds["video|embedding"] = video_embeds.split(split_sizes, 0);
     }
     return multimodal_embeds;
@@ -692,14 +598,8 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
   }
 
   layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
-
   layer::WordEmbedding get_word_embedding() {
     return language_model_->get_word_embedding();
-  }
-
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    language_model_->set_word_embedding(word_embedding);
   }
 
  private:
@@ -776,7 +676,5 @@ REGISTER_MODEL_ARGS(oxygenvlm, [&] {
     args->rope_scaling_rope_type() = "mrope";
   LOAD_ARG_OR(mm_intermediate_size, "vision_config.intermediate_size", 4096);
 });
-
-#undef LOAD_OXYGENVLM_MODEL_ARGS
 
 }  // namespace xllm

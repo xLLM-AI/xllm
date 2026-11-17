@@ -411,6 +411,8 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
                           draft_vocab_size,
                           impl_->context_.get_model_args().vocab_size(),
                           device_);
+    draft_impl_->get_causal_lm()->share_lm_head(*impl_->get_causal_lm());
+    draft_impl_->get_causal_lm()->share_embed_tokens(*impl_->get_causal_lm());
   }
   return result;
 }
@@ -742,8 +744,6 @@ void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
           : 0;
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    CHECK_LT(static_cast<size_t>(seq_id), input_token_ids.size());
-    CHECK_LT(static_cast<size_t>(seq_id), input_positions.size());
     const EmbeddingCache::DecodeState& state = last_states[seq_id];
     const int32_t input_token_id = input_token_ids[seq_id];
     const bool input_is_fake_token = input_token_id < 0;

@@ -35,9 +35,9 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/attention_mask.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "core/layers/common/lm_head.h"
 #include "core/layers/common/qwen3_next_rms_norm.h"
 #include "core/layers/common/word_embedding.h"
+#include "models/llm/llm_model_base.h"
 #if defined(USE_NPU)
 #include "core/layers/npu_torch/qwen3_next_hybrid_decoder_layer_base.h"
 #elif defined(USE_MLU)
@@ -242,7 +242,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
   layer::WordEmbedding get_word_embedding() override { return embed_tokens_; }
 
   void set_word_embedding(layer::WordEmbedding& word_embedding) override {
-    embed_tokens_ = word_embedding;
+    embed_tokens_ = this->replace_module("embed_tokens", word_embedding);
   }
 
   void add_decoder_layer(layer::Qwen3HybridDecoderLayerModulePtr layer) {
@@ -306,34 +306,12 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
   AuxHiddenCapture aux_capture_;
 };
 
-class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
+class Qwen3HybridForCausalLMImplBase
+    : public LlmForCausalLMImplBase<Qwen3HybridModelModulePtr> {
  public:
-  explicit Qwen3HybridForCausalLMImplBase(const ModelContext& context) {
-    tie_word_embeddings_ = context.get_model_args().tie_word_embeddings();
-    lm_head_ = register_module("lm_head", layer::LmHead(context));
-  }
-
-  // tokens: [num_tokens]
-  // positions: [num_tokens] token pos in the sequence
-  // returns: [num_tokens, hidden_size]
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // returns: [num_tokens, vocab_size]
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    return lm_head_(h);
-  }
+  Qwen3HybridForCausalLMImplBase(const ModelContext& context,
+                                 Qwen3HybridModelModulePtr model)
+      : LlmForCausalLMImplBase(context, std::move(model)) {}
 
   // hidden_states: [num_tokens, hidden_size]
   // seleted_idxes: [num_tokens]
@@ -352,7 +330,7 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader,
-                  const std::string& model_prefix) {
+                  std::string model_prefix) override {
     load_model(std::move(loader), model_prefix, "lm_head.");
   }
 
@@ -367,6 +345,9 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
     for (const auto& state_dict : loader->get_state_dicts()) {
       auto model_state_dict = state_dict->get_dict_with_prefix(model_prefix);
       model_->load_state_dict(model_state_dict);
+      if (lm_head_.is_empty()) {
+        continue;
+      }
 
       auto lm_head_state_dict =
           state_dict->get_dict_with_prefix(lm_head_prefix);
@@ -382,34 +363,7 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
     model_->verify_loaded_weights(model_prefix);
   }
 
-  virtual void prepare_expert_weight(int32_t layer_id,
-                                     const std::vector<int32_t>& expert_ids) {
-    return;
-  }
-  virtual void update_expert_weight(int32_t layer_id) { return; }
-
   bool is_hybrid_linear_attention() { return true; }
-
-  layer::LmHead get_lm_head() { return lm_head_; }
-
-  void set_lm_head(layer::LmHead& head) { lm_head_ = head; }
-
-  layer::WordEmbedding get_word_embedding() {
-    return model_->get_word_embedding();
-  }
-
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    model_->set_word_embedding(word_embedding);
-  }
-
-  void set_model_module(Qwen3HybridModelModulePtr model) {
-    model_ = register_module("model", std::move(model));
-  }
-
- protected:
-  bool tie_word_embeddings_{false};
-  layer::LmHead lm_head_{nullptr};
-  Qwen3HybridModelModulePtr model_;
 };
 
 }  // namespace xllm

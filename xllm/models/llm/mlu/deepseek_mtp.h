@@ -52,7 +52,8 @@ class DeepseekMtpForCausalLMImpl
     : public LlmForCausalLMImplBase<DeepseekMtpModel> {
  public:
   DeepseekMtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekMtpModel>(context) {}
+      : LlmForCausalLMImplBase<DeepseekMtpModel>(context,
+                                                 /*share_lm_head=*/true) {}
 
   void load_model(
       std::unique_ptr<ModelLoader> loader,

@@ -35,7 +35,6 @@ limitations under the License.
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/py_attention_metadata.h"
-#include "models/llm/py_causal_lm.h"
 
 namespace py = pybind11;
 
@@ -493,33 +492,8 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   EXPECT_EQ(view_slots.item<int32_t>(), 1408);
 }
 
-TEST(MtpAsyncInputBuilderTest, SharedModulesPointToTargetModel) {
-  py::gil_scoped_acquire gil;
-  py::module_ types = py::module_::import("types");
-  py::object target_lm_head = py::module_::import("builtins").attr("object")();
-  py::object target_embedding =
-      py::module_::import("builtins").attr("object")();
-  py::object target_body =
-      types.attr("SimpleNamespace")(py::arg("embed_tokens") = target_embedding);
-  py::object target_model = types.attr("SimpleNamespace")(
-      py::arg("lm_head") = target_lm_head, py::arg("model") = target_body);
-  py::object draft_body =
-      types.attr("SimpleNamespace")(py::arg("embed_tokens") = py::none());
-  py::object draft_model = types.attr("SimpleNamespace")(
-      py::arg("lm_head") = py::none(), py::arg("model") = draft_body);
-
-  ::xllm::detail::share_python_model_weights(draft_model, target_model);
-
-  py::object draft_lm_head = draft_model.attr("lm_head");
-  py::object draft_embedding = draft_model.attr("model").attr("embed_tokens");
-  EXPECT_TRUE(draft_lm_head.is(target_lm_head));
-  EXPECT_TRUE(draft_embedding.is(target_embedding));
-}
-
-class MtpAsyncInputBuilderNpuTest : public ::testing::Test {};
-
-TEST_F(MtpAsyncInputBuilderNpuTest,
-       PreparesInt32VerifierPrefixWithoutCopyingHidden) {
+TEST(MtpAsyncInputBuilderNpuTest,
+     PreparesInt32VerifierPrefixWithoutCopyingHidden) {
   const torch::Device device("npu:0");
   constexpr int64_t kWidth = 5;
   constexpr int64_t kHiddenSize = 16;

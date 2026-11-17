@@ -28,7 +28,6 @@ class MiniMaxM2ModelImpl
  public:
   explicit MiniMaxM2ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::MiniMaxM2DecoderLayer>(
-            "minimax_m2",
             context.get_model_args()) {
     const auto& model_args = context.get_model_args();
 

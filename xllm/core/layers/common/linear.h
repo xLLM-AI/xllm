@@ -91,6 +91,10 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
     }
     return weight_;
   }
+  void tie_weights(const torch::Tensor& weight) {
+    weight_.set_data(weight);
+    weight_is_loaded_ = true;
+  }
   torch::Tensor per_channel_scale() const { return per_channel_scale_; }
   torch::Tensor weight_scale() const { return weight_scale_; }
   bool uses_w8a8_dynamic_quant() const;
@@ -205,13 +209,6 @@ class QKVParallelLinearImpl : public torch::nn::Module {
     }
     return weight_;
   }
-  torch::Tensor per_channel_scale() const { return per_channel_scale_; }
-  std::optional<torch::Tensor> smooth() const {
-    if (smooth_is_loaded_) {
-      return smooth_;
-    }
-    return std::nullopt;
-  }
   bool is_weight_loaded() const {
     if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
       return qweight_is_loaded_ && per_channel_scale_is_loaded_ &&
@@ -323,22 +320,6 @@ class RowParallelLinearImpl : public torch::nn::Module {
   void pretty_print(std::ostream& stream) const {
     stream << name() << " " << weight_.sizes() << " " << weight_.device();
   }
-
-  // return the weight (for testing)
-  torch::Tensor weight() const {
-    if (qweight_is_loaded_) {
-      return qweight_;
-    }
-    return weight_;
-  }
-  torch::Tensor per_channel_scale() const { return per_channel_scale_; }
-  std::optional<torch::Tensor> smooth() const {
-    if (smooth_is_loaded_) {
-      return smooth_;
-    }
-    return std::nullopt;
-  }
-  ProcessGroup* process_group() const { return process_group_; }
 
   bool is_weight_loaded() const {
     if (quant_args_.quant_method() == kQuantMethodSmoothquant) {

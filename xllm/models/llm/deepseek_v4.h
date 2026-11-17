@@ -456,12 +456,77 @@ inline void build_dcp_local_seq_lens(
   dsa.max_seq_len = local_kv_max;
 }
 
+inline void normalize_graph_metadata_input_params(ModelParamsView& params) {
+  const int64_t actual_metadata_rows =
+      std::max<int64_t>(params.meta.actual_num_sequences, 0);
+  int64_t padded_metadata_rows = actual_metadata_rows;
+  if (params.enable_graph) {
+    padded_metadata_rows =
+        std::max<int64_t>(padded_metadata_rows, params.meta.num_sequences);
+  }
+  if (padded_metadata_rows <= 0) {
+    padded_metadata_rows = 1;
+  }
+
+  auto trim_lens_vec = [padded_metadata_rows,
+                        actual_metadata_rows](std::vector<int32_t>& lens) {
+    lens.resize(static_cast<size_t>(padded_metadata_rows), 0);
+    std::fill(lens.begin() + actual_metadata_rows, lens.end(), 0);
+  };
+
+  // Graph forward tensors are padded to the decode bucket. Build metadata
+  // for the same padded row count so compressor/attention inputs agree.
+  trim_lens_vec(params.attention.host.kv_seq_lens);
+  trim_lens_vec(params.attention.host.q_seq_lens);
+  params.meta.num_sequences = static_cast<int32_t>(padded_metadata_rows);
+  params.meta.actual_num_sequences = static_cast<int32_t>(actual_metadata_rows);
+}
+
+inline void fill_empty_dp_rank_graph_metadata_input_params(
+    ModelParamsView& params,
+    int32_t group_count,
+    int32_t min_kv_len) {
+  params.attn_metadata = nullptr;
+  const int64_t metadata_batch_size =
+      std::max<int64_t>(params.meta.num_sequences, 1);
+  params.meta.num_sequences = static_cast<int32_t>(metadata_batch_size);
+  params.meta.kv_max_seq_len =
+      std::max<int32_t>(params.meta.kv_max_seq_len, min_kv_len);
+  params.meta.q_max_seq_len = 1;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+
+  bool has_full_multi_block_tables =
+      static_cast<int32_t>(params.multi_block_tables.size()) == group_count;
+  if (has_full_multi_block_tables) {
+    for (const auto& block_table : params.multi_block_tables) {
+      if (!block_table.defined() || block_table.dim() != 2 ||
+          block_table.size(0) < metadata_batch_size) {
+        has_full_multi_block_tables = false;
+        break;
+      }
+    }
+  }
+  if (has_full_multi_block_tables) {
+    return;
+  }
+
+  auto cpu_int_options = torch::TensorOptions()
+                             .dtype(torch::kInt32)
+                             .device(torch::kCPU)
+                             .pinned_memory(true);
+  params.multi_block_tables.clear();
+  params.multi_block_tables.reserve(group_count);
+  for (int32_t manager_id = 0; manager_id < group_count; ++manager_id) {
+    params.multi_block_tables.emplace_back(
+        torch::zeros({metadata_batch_size, 1}, cpu_int_options));
+  }
+}
+
 class DeepseekV4ModelImpl
     : public LlmModelImplBase<layer::DeepseekV4DecoderLayer> {
  public:
   explicit DeepseekV4ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::DeepseekV4DecoderLayer>(
-            "deepseek_v4",
             context.get_model_args()),
         parallel_args_(context.get_parallel_args()),
         flash_comm1_options_(context.get_flash_comm1_options()),
@@ -665,7 +730,11 @@ class DeepseekV4ModelImpl
       // would capture a too-small packed metadata buffer and later replay can
       // exceed that persistent capacity when another DP shard has real tokens.
       if (modified_input_params.meta.num_sequences > 0) {
-        fill_empty_dp_rank_graph_metadata_input_params(modified_input_params);
+        fill_empty_dp_rank_graph_metadata_input_params(
+            modified_input_params,
+            static_cast<int32_t>(group_infos_.size()),
+            static_cast<int32_t>(
+                std::max<int64_t>({index_topk_, window_size_, 1})));
       } else {
         fill_empty_dp_rank_input_params(modified_input_params);
       }
@@ -1143,41 +1212,6 @@ class DeepseekV4ModelImpl
   }
 
  private:
-  void normalize_graph_metadata_input_params(ModelParamsView& params) const {
-    int64_t actual_metadata_rows =
-        std::max<int64_t>(params.meta.actual_num_sequences, 0);
-    int64_t padded_metadata_rows = actual_metadata_rows;
-    if (params.enable_graph) {
-      padded_metadata_rows =
-          std::max<int64_t>(padded_metadata_rows, params.meta.num_sequences);
-    }
-    if (padded_metadata_rows <= 0) {
-      padded_metadata_rows = 1;
-    }
-    actual_metadata_rows =
-        std::min<int64_t>(actual_metadata_rows, padded_metadata_rows);
-
-    auto trim_lens_vec = [padded_metadata_rows,
-                          actual_metadata_rows](std::vector<int32_t>& lens) {
-      if (lens.empty()) {
-        lens.assign(static_cast<size_t>(padded_metadata_rows), 0);
-      } else if (static_cast<int64_t>(lens.size()) < padded_metadata_rows) {
-        lens.resize(static_cast<size_t>(padded_metadata_rows), 0);
-      } else {
-        lens.resize(static_cast<size_t>(padded_metadata_rows));
-      }
-      std::fill(lens.begin() + actual_metadata_rows, lens.end(), 0);
-    };
-
-    // Graph forward tensors are padded to the decode bucket. Build metadata
-    // for the same padded row count so compressor/attention inputs agree.
-    trim_lens_vec(params.attention.host.kv_seq_lens);
-    trim_lens_vec(params.attention.host.q_seq_lens);
-    params.meta.num_sequences = static_cast<int32_t>(padded_metadata_rows);
-    params.meta.actual_num_sequences =
-        static_cast<int32_t>(actual_metadata_rows);
-  }
-
   std::shared_ptr<layer::AttentionMetadata>
   build_attention_metadata_for_forward(const torch::Tensor& positions,
                                        const ModelParamsView& input_params) {
@@ -1272,60 +1306,6 @@ class DeepseekV4ModelImpl
       block_num = std::max<int64_t>(block_num, 1);
       params.multi_block_tables.emplace_back(
           torch::zeros({1, block_num}, cpu_int_options));
-    }
-  }
-
-  void fill_empty_dp_rank_graph_metadata_input_params(
-      ModelParamsView& params) const {
-    params.attn_metadata = nullptr;
-    const int64_t metadata_batch_size =
-        std::max<int64_t>(params.meta.num_sequences, 1);
-    // See fill_empty_dp_rank_input_params: the dummy kv length must be able to
-    // hold the configured sparse top-k / sliding window, otherwise the DSA
-    // metadata AICPU kernels reject cmp_topk/sparse_count > kv_len.
-    const int32_t dummy_kv_len =
-        static_cast<int32_t>(std::max<int64_t>({index_topk_, window_size_, 1}));
-    params.meta.num_sequences = static_cast<int32_t>(metadata_batch_size);
-    params.meta.kv_max_seq_len =
-        std::max<int32_t>(params.meta.kv_max_seq_len, dummy_kv_len);
-    params.meta.q_max_seq_len = 1;
-    params.meta.batch_forward_type = BatchForwardType::DECODE;
-
-    auto pad_lens_vec = [metadata_batch_size](std::vector<int32_t>& lens,
-                                              int32_t fill_value) {
-      lens.resize(static_cast<size_t>(metadata_batch_size), fill_value);
-      for (int32_t& len : lens) {
-        len = std::max<int32_t>(len, fill_value);
-      }
-    };
-    pad_lens_vec(params.attention.host.kv_seq_lens, dummy_kv_len);
-    pad_lens_vec(params.attention.host.q_seq_lens, 1);
-
-    const int32_t manager_num = static_cast<int32_t>(group_infos_.size());
-    bool has_full_multi_block_tables =
-        static_cast<int32_t>(params.multi_block_tables.size()) == manager_num;
-    if (has_full_multi_block_tables) {
-      for (const auto& block_table : params.multi_block_tables) {
-        if (!block_table.defined() || block_table.dim() != 2 ||
-            block_table.size(0) < metadata_batch_size) {
-          has_full_multi_block_tables = false;
-          break;
-        }
-      }
-    }
-    if (has_full_multi_block_tables) {
-      return;
-    }
-
-    auto cpu_int_options = torch::TensorOptions()
-                               .dtype(torch::kInt32)
-                               .device(torch::kCPU)
-                               .pinned_memory(true);
-    params.multi_block_tables.clear();
-    params.multi_block_tables.reserve(manager_num);
-    for (int32_t manager_id = 0; manager_id < manager_num; ++manager_id) {
-      params.multi_block_tables.emplace_back(
-          torch::zeros({metadata_batch_size, 1}, cpu_int_options));
     }
   }
 
@@ -1833,12 +1813,6 @@ class DeepseekV4ForCausalLMImpl
         first_k_dense_replace_(
             context.get_model_args().first_k_dense_replace()) {}
 
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "model.") override {
-    LlmForCausalLMImplBase<DeepseekV4Model>::load_model(std::move(loader),
-                                                        std::move(prefix));
-  }
-
   bool requires_graph_forward_metadata() {
     return this->model_->requires_graph_forward_metadata();
   }
@@ -1865,12 +1839,12 @@ class DeepseekV4ForCausalLMImpl
     this->model_->update_expert_weight(layer_id + first_k_dense_replace_);
   }
 
-  void start_expert_weight_transfer(int32_t layer_id) override {
+  void start_expert_weight_transfer(int32_t layer_id) {
     this->model_->start_expert_weight_transfer(layer_id +
                                                first_k_dense_replace_);
   }
 
-  bool last_prepare_expert_weight_ok(int32_t layer_id) const override {
+  bool last_prepare_expert_weight_ok(int32_t layer_id) const {
     return this->model_->last_prepare_expert_weight_ok(layer_id +
                                                        first_k_dense_replace_);
   }
@@ -1923,11 +1897,9 @@ inline void load_deepseek_v4_model_args(const JsonReader& json,
 
   LOAD_ARG_OR_FUNC(
       rope_theta, "rope_theta", [&] { return args->rope_theta(); });
-  LOAD_ARG_OR(rope_head_dim, "qk_rope_head_dim", 64);
+  SET_ARG(rope_head_dim, args->qk_rope_head_dim());
 
   // LoRA / groups
-  LOAD_ARG_OR(q_lora_rank, "q_lora_rank", 1024);
-  LOAD_ARG_OR(o_lora_rank, "o_lora_rank", 1024);
   LOAD_ARG_OR(o_groups, "o_groups", 8);
 
   // --------------------------------------------------------------------------
