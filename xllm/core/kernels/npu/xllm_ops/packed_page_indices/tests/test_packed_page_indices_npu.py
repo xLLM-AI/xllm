@@ -273,6 +273,19 @@ def test_current_stream_is_used() -> None:
     torch.testing.assert_close(actual, _reference(x, m, cu).to(_DEVICE), rtol=0, atol=0)
 
 
+def test_large_physical_pages_are_exact_at_prepare_time() -> None:
+    x = torch.tensor([[0, 1]], device=_DEVICE, dtype=torch.int32)
+    m = torch.tensor([1 << 24, (1 << 24) + 1], device=_DEVICE, dtype=torch.int32)
+    cu = torch.tensor([0, 2], device=_DEVICE, dtype=torch.int32)
+    actual = prepare([x, m, cu], {}).run()
+    torch.testing.assert_close(
+        actual,
+        torch.tensor([1 << 24, (1 << 24) + 1], device=_DEVICE, dtype=torch.int32),
+        rtol=0,
+        atol=0,
+    )
+
+
 def test_mapping_mutation_above_float_mantissa_is_exact() -> None:
     counts = [64, 64, 64, 64, 31, 0, 0, 0]
     x = _x(8, 64, counts, 1024, seed=47)
@@ -351,6 +364,15 @@ def test_invalid_inputs_are_rejected(mutation: str) -> None:
         raise AssertionError(mutation)
     with pytest.raises((TypeError, ValueError)):
         prepare(inputs, attributes)
+
+
+def test_non_nd_storage_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    import torch_npu
+
+    x, m, cu = _base_inputs()
+    monkeypatch.setattr(torch_npu, "get_npu_format", lambda tensor: "FRACTAL_NZ")
+    with pytest.raises(ValueError, match="ND storage"):
+        prepare([x, m, cu], {})
 
 
 def test_non_dict_attributes_are_rejected() -> None:

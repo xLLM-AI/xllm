@@ -1,6 +1,6 @@
 PackedPageIndices 内存自验证日志
 来源：golden.py --verify-functional 的 engineering_by_case 与 large_single_layer 原样输出
-环境时间（UTC）：2026-11-17T05:43:33.173296+00:00
+环境时间（UTC）：2026-11-17T05:59:43.872768+00:00
 设备：Ascend910_9362
 
 {

@@ -79,16 +79,18 @@ X, M, cu (NPU)
 
 | 条件 | 路径 | 原因 |
 | --- | --- | --- |
-| `B ≤ 2^20` | 映射行载入 Triton 张量，寄存器 gather 复用 | 快；`2^20` 是 Triton 张量元素上限 |
-| `B > 2^20` | 每个有效元素一次精确 int32 指针加载 | 映射行放不进 Triton 张量 |
+| `B ≤ 8192` | 映射行载入 Triton 张量，寄存器 gather 复用 | 两行 float32 占 64 KiB，约为 UB 预算的三分之一 |
+| `B > 8192` | 每个有效元素一次精确 int32 指针加载 | 更宽的行会超出 UB |
 
-快速路径把映射行拆成高 16 位与低 16 位两个张量。两部分都小于 `2^16`，float32 可以精确表示；gather 后用 `high * 65536 + low` 在 int32 里重组。这样即使 `M` 在 `prepare` 之后被改写为 `2^24+1` 这类超出 float32 尾数精度的值，输出仍逐位精确，不会舍入。
+快速路径把映射行拆成高 16 位与低 16 位两个张量。物理页号非负，`high ≤ 32767`、`low < 65536`，两者在 float32 中精确；gather 后用 `high * 65536 + low` 在 int32 里重组，任意合法的 int32 物理页号都逐位精确。
+
+阈值按实测确定：本实例 UB 为 `1572864` bit，`B=16384` 时两行 float32 约占三分之二，`B=32768` 报 `ub overflow`。取 `8192` 留 2 倍余量，避免换 CANN 或 triton-ascend 版本后合法映射编译失败。
 
 慢速路径直接对 `M[l, page]` 做 int32 加载，值域不受限制。
 
 ## 5. 精确性论证
 
-- 快速路径：`page < B ≤ 2^20`，拆成 `high = page >> 16 < 2^4`、`low = page & 0xFFFF < 2^16`；两者在 float32 中精确，gather 不改变整数；重组在 int32 中完成，`high * 65536 + low < 2^20`。
+- 快速路径：物理页号是 int32 非负值，拆成 `high = value >> 16 ≤ 32767` 与 `low = value & 0xFFFF < 2^16`；两者在 float32 中精确，gather 不改变整数；重组在 int32 中完成，结果与原值逐位相同。
 - 慢速路径：`tl.load` 返回 int32，无浮点中转。
 - 负值：掩码后写 -1，不参与地址计算。
 - 空请求、`C=0`、`P=0`：网格至少为 1，掩码为空，输出为空张量，不启动核。
@@ -98,6 +100,8 @@ X, M, cu (NPU)
 - `prepare` 编译一次并缓存 `CompiledKernel`；之后每次 `run` 直接调用 `compiled.run`，绕开 Triton JIT 的 Python 派发。
 - `run` 通过 `triton.runtime.driver.active.get_current_stream(device)` 读取调用时的 stream，不缓存 stream、不建图。
 - `run` 每次 `torch.empty` 新输出；调用方可以保留多份输出，互不影响。
+- 输入必须是 ND 存储。`is_contiguous()` 对 FRACTAL_NZ 张量仍为真，而核按 ND 行主序做指针运算，因此 `prepare` 用 `torch_npu.get_npu_format` 拒绝非 ND 存储。
+- `prepare` 的编译与 `run` 的启动都在计划所属设备的上下文中执行；当前设备已经匹配时跳过上下文切换，避免给计时路径增加固定开销。
 - `prepared.inputs` 是可变列表，核启动时重新读取其中张量的当前指针；同形状 `set_` 后无需重新 `prepare`。
 
 ## 7. 内存

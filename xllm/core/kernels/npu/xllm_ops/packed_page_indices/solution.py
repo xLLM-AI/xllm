@@ -77,6 +77,7 @@ def prepare(
             raise ValueError(f"{name} must be int32, got {tensor.dtype}")
         if not tensor.is_contiguous():
             raise ValueError(f"{name} must be contiguous")
+        _kernel.require_nd_storage(tensor, name)
     if x.dim() != 2:
         raise ValueError(f"X must be 2-D, got {tuple(x.shape)}")
     if m.dim() not in (1, 2):

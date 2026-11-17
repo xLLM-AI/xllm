@@ -13,7 +13,7 @@
 | `host/packed_host.cpp` | 主机侧 C++ 规划：cu 校验、页号范围、P、层/页形状、元素上限 |
 | `host/build_host.py` | 用 torch 的 Ninja 引导器编译主机扩展，带缓存 |
 | `build.py` | 显式构建入口 |
-| `tests/test_packed_page_indices_npu.py` | 27 项真机测试 |
+| `tests/test_packed_page_indices_npu.py` | 29 项真机测试 |
 | `tools/make_reports.py` | 从官方验收 JSON 生成 xlsx 报告与 `generalization.json` |
 | `evidence/` | 官方功能门禁与配对计时的原始 JSON/日志 |
 | `task_submission/` | 任务书要求的七份自验证材料与打包结果 |
@@ -46,7 +46,7 @@ prepared = prepare([x, m, cu], {})
 out = prepared.run()
 ```
 
-`X` 为 `[R, C]` int32，`M` 为 `[B]` 或 `[L, B]`，`cu` 为 `[R+1]`，三者在同一 NPU 上连续，允许非零 `storage_offset`。输出为 `[P]` 或 `[L, P]`，`P = cu[-1]`。
+`X` 为 `[R, C]` int32，`M` 为 `[B]` 或 `[L, B]`，`cu` 为 `[R+1]`，三者在同一 NPU 上连续、为 ND 存储，允许非零 `storage_offset`。输出为 `[P]` 或 `[L, P]`，`P = cu[-1]`。
 
 ```text
 out[l, cu[r] + j] = -1            if X[r, j] < 0
@@ -58,7 +58,7 @@ out[l, cu[r] + j] = M[l, X[r, j]] otherwise
 ## 验证
 
 ```bash
-# 27 项真机测试
+# 29 项真机测试
 PYTHONPATH=. python3 -m pytest tests/test_packed_page_indices_npu.py -q
 
 # 官方功能与工程门禁（输出文件必须不存在）
@@ -74,8 +74,8 @@ python3 bench.py --package /mnt/workspace/pkg --implementation . --output eviden
 
 | 用例 | 目标 | 基线均值 | 提交均值 | 均值差 | 95% CI 下界 | 结论 |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `packed_perf_small` | ≤ 40 μs | 121.96 μs | 38.13 μs | 83.83 μs | 81.34 μs | PASS |
-| `packed_perf_large` | ≤ 75 μs | 120.12 μs | 45.73 μs | 74.39 μs | 73.38 μs | PASS |
+| `packed_perf_small` | ≤ 40 μs | 124.15 μs | 37.93 μs | 86.22 μs | 84.13 μs | PASS |
+| `packed_perf_large` | ≤ 75 μs | 122.78 μs | 45.75 μs | 77.03 μs | 75.79 μs | PASS |
 
 功能门禁：14 个正向用例、8 个非法输入、7 项动态更新、6 项存储重绑定、单层大输入全部 PASS；两组性能输入的活跃分配在释放后回到测量前水平。详见 `task_submission/` 与 `evidence/`。
 

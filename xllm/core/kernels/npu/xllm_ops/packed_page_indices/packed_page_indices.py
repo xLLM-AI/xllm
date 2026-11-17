@@ -43,7 +43,35 @@ from triton.runtime.driver import driver
 
 _ROWS_PER_PROGRAM = 8
 _COLUMN_BLOCK_LIMIT = 2048
-_ROW_GATHER_LIMIT = 1 << 20
+# The gather path keeps two float32 copies of the mapping row (high and low
+# 16-bit halves) live across all row iterations. On Ascend910_9362 the
+# unified buffer holds 1572864 bits: B=16384 compiles at about two thirds of
+# that budget and B=32768 overflows it. 8192 keeps a 2x margin so another
+# CANN or triton-ascend build cannot turn a legal mapping into a compile
+# failure. Wider mappings use the exact pointer-load path.
+_ROW_GATHER_LIMIT = 1 << 13
+_ACL_FORMAT_ND = "ND"
+_ACL_FORMAT_ND_CODE = 2
+
+
+def require_nd_storage(tensor: torch.Tensor, name: str) -> None:
+    """Reject tensors whose storage is not plain ND.
+
+    ``is_contiguous()`` stays true for a FRACTAL_NZ tensor while the kernel
+    walks row-major ND addresses, so a format check is the only way to keep
+    the pointer arithmetic honest. ``npu_format_cast`` to ND is the caller's
+    job because a conversion would change the caller's storage identity.
+    """
+    import torch_npu
+
+    getter = getattr(torch_npu, "get_npu_format", None)
+    if getter is None:
+        raise RuntimeError(
+            "torch_npu.get_npu_format is required to verify ND storage"
+        )
+    value = getter(tensor)
+    if value not in (_ACL_FORMAT_ND, _ACL_FORMAT_ND_CODE):
+        raise ValueError(f"{name} must use ND storage, got {value}")
 
 
 @triton.jit
@@ -168,23 +196,24 @@ class PackedPageIndicesPlan:
         )
 
         x, m, cu = inputs
-        probe = torch.empty(self.shape, dtype=self.dtype, device=self.device)
-        compiled = _packed_page_indices_kernel.warmup(
-            x,
-            m,
-            cu,
-            probe,
-            columns,
-            blocks,
-            total,
-            x.shape[0],
-            SINGLE=single,
-            ROWS_PER_PROGRAM=self.rows,
-            BLOCK=self.block,
-            BLOCK_BLOCKS=self.block_blocks,
-            ROW_GATHER=self.row_gather,
-            grid=self.grid,
-        )
+        with torch.npu.device(self.device.index):
+            probe = torch.empty(self.shape, dtype=self.dtype, device=self.device)
+            compiled = _packed_page_indices_kernel.warmup(
+                x,
+                m,
+                cu,
+                probe,
+                columns,
+                blocks,
+                total,
+                x.shape[0],
+                SINGLE=single,
+                ROWS_PER_PROGRAM=self.rows,
+                BLOCK=self.block,
+                BLOCK_BLOCKS=self.block_blocks,
+                ROW_GATHER=self.row_gather,
+                grid=self.grid,
+            )
         for attribute in (
             "run",
             "function",
@@ -224,6 +253,14 @@ class PackedPageIndicesPlan:
             raise RuntimeError(f"cu length changed from {self.cu_length} to {cu.numel()}")
         if tuple(m.shape) != self.m_shape:
             raise RuntimeError(f"M shape changed from {self.m_shape} to {tuple(m.shape)}")
+        if torch.npu.current_device() == self.device.index:
+            self._dispatch(x, m, cu, out)
+        else:
+            with torch.npu.device(self.device.index):
+                self._dispatch(x, m, cu, out)
+        return out
+
+    def _dispatch(self, x, m, cu, out) -> None:
         grid0, grid1, grid2 = self.grid
         stream = driver.active.get_current_stream(self.device.index)
         self._launch(
@@ -245,7 +282,6 @@ class PackedPageIndicesPlan:
             self.total,
             x.shape[0],
         )
-        return out
 
 
 def _require(condition: bool, message: str) -> None:
@@ -294,6 +330,7 @@ def prepare(
             raise ValueError(f"{name} must be int32, got {tensor.dtype}")
         if not tensor.is_contiguous():
             raise ValueError(f"{name} must be contiguous")
+        require_nd_storage(tensor, name)
     if x.dim() != 2:
         raise ValueError(f"X must be 2-D, got {tuple(x.shape)}")
     if cu.dim() != 1:
