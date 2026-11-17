@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/runtime/forward_params.h"
+#include "core/transport/packed_forward_codec.h"
 #include "core/util/shared_memory_manager.h"
 #include "worker.pb.h"
 
@@ -46,11 +47,6 @@ enum class ForwardType : int8_t {
   PB_OUTPUT = 2,
   RAW_INPUT = 3,
   RAW_OUTPUT = 4,
-};
-
-enum class InputDeviceMaterializationPolicy : int8_t {
-  MATERIALIZE_ON_READ = 0,
-  DEFER_TO_WORKER_PREPARE,
 };
 
 // Owns a shared segment and transports forward messages in its wire format.
@@ -162,22 +158,10 @@ class ForwardSharedMemoryTransport final {
   void clear();
 
  private:
-  bool write_token_output(
-      const ForwardOutput& output,
-      const std::vector<SpeculativeTokenStats>& speculative_token_stats,
-      const char* domain);
-
-  bool read_token_output(RawForwardOutput& output, const char* domain);
-
-  template <typename Input>
-  bool write_token_input(const Input& input);
-
   bool wait_for_input();
-
-  template <typename Input>
-  bool read_token_input(Input& input,
-                        const torch::Device& device,
-                        InputDeviceMaterializationPolicy policy);
+  void wait_for_output();
+  void publish();
+  PackedForwardCodec codec() const;
 
   SharedMemoryManager segment_;
   std::atomic<bool> input_read_stopped_{false};
