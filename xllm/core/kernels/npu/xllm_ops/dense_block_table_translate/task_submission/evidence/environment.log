@@ -1,0 +1,35 @@
+/opt/buildtools/Python-3.11.4/lib/python3.11/site-packages/torch_npu/utils/_path_manager.py:66: UserWarning: Permission mismatch: The owner of /opt/buildtools/Python-3.11.4/lib/python3.11/site-packages/torch_npu/lib/libop_plugin_atb.so does not match.
+  warnings.warn(f"Permission mismatch: The owner of {path} does not match.")
+{
+  "python": "3.11.4 (main, Mar  9 2026, 01:22:03) [GCC 9.4.0]",
+  "platform": "Linux-5.10.0-182.0.0.95.r2220_156.hce2.aarch64-aarch64-with-glibc2.31",
+  "commands": {
+    "npu-smi info": {
+      "returncode": 0,
+      "stdout": "+------------------------------------------------------------------------------------------------+\n| npu-smi 25.5.5                   Version: 25.5.5                                               |\n+---------------------------+---------------+----------------------------------------------------+\n| NPU   Name                | Health        | Power(W)    Temp(C)           Hugepages-Usage(page)|\n| Chip  Phy-ID              | Bus-Id        | AICore(%)   Memory-Usage(MB)  HBM-Usage(MB)        |\n+===========================+===============+====================================================+\n| 6     Ascend910           | OK            | 166.4       47                0    / 0             |\n| 0     12                  | 0000:0A:00.0  | 0           0    / 0          3137 / 65536         |\n+------------------------------------------------------------------------------------------------+\n| 6     Ascend910           | OK            | -           47                0    / 0             |\n| 1     13                  | 0000:0B:00.0  | 0           0    / 0          2873 / 65536         |\n+===========================+===============+====================================================+\n+---------------------------+---------------+----------------------------------------------------+\n| NPU     Chip              | Process id    | Process name             | Process memory(MB)      |\n+===========================+===============+====================================================+\n| No running processes found in NPU 6                                                            |\n+===========================+===============+====================================================+\n",
+      "stderr": ""
+    },
+    "c++ --version": {
+      "returncode": 0,
+      "stdout": "c++ (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0\nCopyright (C) 2019 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+      "stderr": ""
+    },
+    "ninja --version": {
+      "returncode": 0,
+      "stdout": "1.13.2.git.kitware.jobserver-pipe-1\n",
+      "stderr": ""
+    }
+  },
+  "cann_files": {
+    "/home/developer/Ascend/cann-9.1.0/aarch64-linux/ascend_toolkit_install.info": "package_name=Ascend-cann-toolkit\nversion=9.1.0\ninnerversion=V100R001C11SPC001B243\ncompatible_version=[V100R001C15],[V100R001C21],[V100R001C23],[V100R001C10]\narch=aarch64\nos=linux\npath=/home/developer/Ascend/cann-9.1.0\n"
+  },
+  "packages": {
+    "torch": "2.7.1+cpu",
+    "torch-npu": "2.7.1.post4",
+    "triton-ascend": "3.2.1",
+    "numpy": "1.26.4",
+    "ninja": "1.13.2"
+  },
+  "device": "Ascend910_9362",
+  "triton_target": "GPUTarget(backend='npu', arch='Ascend910_9362', warp_size=0)"
+}

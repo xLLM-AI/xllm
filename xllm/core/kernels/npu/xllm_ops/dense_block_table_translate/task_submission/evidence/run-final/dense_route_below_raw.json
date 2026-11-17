@@ -1,0 +1,130 @@
+{
+  "id": "dense_route_below",
+  "rounds": [
+    {
+      "round": 0,
+      "order": [
+        "baseline",
+        "candidate"
+      ],
+      "baseline": {
+        "elapsed_ns": 20360501,
+        "iterations": 200,
+        "latency_us": 101.80250500000001
+      },
+      "candidate": {
+        "elapsed_ns": 9060043,
+        "iterations": 200,
+        "latency_us": 45.300214999999994
+      }
+    },
+    {
+      "round": 1,
+      "order": [
+        "candidate",
+        "baseline"
+      ],
+      "candidate": {
+        "elapsed_ns": 8999701,
+        "iterations": 200,
+        "latency_us": 44.998504999999994
+      },
+      "baseline": {
+        "elapsed_ns": 21249885,
+        "iterations": 200,
+        "latency_us": 106.249425
+      }
+    },
+    {
+      "round": 2,
+      "order": [
+        "baseline",
+        "candidate"
+      ],
+      "baseline": {
+        "elapsed_ns": 20368142,
+        "iterations": 200,
+        "latency_us": 101.84071
+      },
+      "candidate": {
+        "elapsed_ns": 9002141,
+        "iterations": 200,
+        "latency_us": 45.010705
+      }
+    },
+    {
+      "round": 3,
+      "order": [
+        "candidate",
+        "baseline"
+      ],
+      "candidate": {
+        "elapsed_ns": 9009982,
+        "iterations": 200,
+        "latency_us": 45.049910000000004
+      },
+      "baseline": {
+        "elapsed_ns": 21080398,
+        "iterations": 200,
+        "latency_us": 105.40199000000001
+      }
+    },
+    {
+      "round": 4,
+      "order": [
+        "baseline",
+        "candidate"
+      ],
+      "baseline": {
+        "elapsed_ns": 20696054,
+        "iterations": 200,
+        "latency_us": 103.48027
+      },
+      "candidate": {
+        "elapsed_ns": 9052333,
+        "iterations": 200,
+        "latency_us": 45.261665
+      }
+    },
+    {
+      "round": 5,
+      "order": [
+        "candidate",
+        "baseline"
+      ],
+      "candidate": {
+        "elapsed_ns": 9018452,
+        "iterations": 200,
+        "latency_us": 45.09226
+      },
+      "baseline": {
+        "elapsed_ns": 21180262,
+        "iterations": 200,
+        "latency_us": 105.90131
+      }
+    }
+  ],
+  "protocol": {
+    "warmup": 50,
+    "rounds": 6,
+    "iterations_per_round": 200,
+    "execution_order": "alternate baseline and candidate; retain all paired rounds",
+    "timed_entry": "prepared.run",
+    "includes": [
+      "Python submission",
+      "new outputs and per-call temporary allocations",
+      "device execution and completion synchronization"
+    ],
+    "excludes": [
+      "input generation and transfer",
+      "one-time validation",
+      "prepare",
+      "CPU golden",
+      "first compilation"
+    ],
+    "latency_unit": "us",
+    "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+    "target_statistic": "arithmetic mean of six per-round per-call latencies",
+    "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+  }
+}

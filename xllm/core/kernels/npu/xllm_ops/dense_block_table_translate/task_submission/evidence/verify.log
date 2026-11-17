@@ -1,0 +1,47 @@
+/opt/buildtools/Python-3.11.4/lib/python3.11/site-packages/torch_npu/utils/_path_manager.py:66: UserWarning: Permission mismatch: The owner of /opt/buildtools/Python-3.11.4/lib/python3.11/site-packages/torch_npu/lib/libop_plugin_atb.so does not match.
+  warnings.warn(f"Permission mismatch: The owner of {path} does not match.")
+{"id": "dense_literal", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_single", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_empty_requests", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_empty_columns", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_odd_offset", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_all_padding", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_max_i32", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_boundary257", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_perf_small", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS", "streams_cpu_oracle": {"status": "PASS", "candidate_retained": 6, "baseline_retained": 6, "compared_with": "independent CPU oracle", "distinct_storage": 12, "baseline_repeat20_before_bytes": 35840, "baseline_repeat20_after_bytes": 35840}}
+{"id": "dense_perf_small", "round": 0, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20954604, "iterations": 200, "latency_us": 104.77302}, "candidate": {"elapsed_ns": 9169428, "iterations": 200, "latency_us": 45.847139999999996}}
+{"id": "dense_perf_small", "round": 1, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9189668, "iterations": 200, "latency_us": 45.948339999999995}, "baseline": {"elapsed_ns": 21083299, "iterations": 200, "latency_us": 105.416495}}
+{"id": "dense_perf_small", "round": 2, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20374312, "iterations": 200, "latency_us": 101.87156}, "candidate": {"elapsed_ns": 9101215, "iterations": 200, "latency_us": 45.506074999999996}}
+{"id": "dense_perf_small", "round": 3, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9076024, "iterations": 200, "latency_us": 45.380120000000005}, "baseline": {"elapsed_ns": 20228806, "iterations": 200, "latency_us": 101.14403}}
+{"id": "dense_perf_small", "round": 4, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20279408, "iterations": 200, "latency_us": 101.39703999999999}, "candidate": {"elapsed_ns": 9056263, "iterations": 200, "latency_us": 45.281315}}
+{"id": "dense_perf_small", "round": 5, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9079194, "iterations": 200, "latency_us": 45.39597}, "baseline": {"elapsed_ns": 21283076, "iterations": 200, "latency_us": 106.41538}}
+{"id": "dense_perf_large", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS", "streams_cpu_oracle": {"status": "PASS", "candidate_retained": 6, "baseline_retained": 6, "compared_with": "independent CPU oracle", "distinct_storage": 12, "baseline_repeat20_before_bytes": 590848, "baseline_repeat20_after_bytes": 590848}}
+{"id": "dense_perf_large", "round": 0, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20442865, "iterations": 200, "latency_us": 102.214325}, "candidate": {"elapsed_ns": 9026122, "iterations": 200, "latency_us": 45.13061}}
+{"id": "dense_perf_large", "round": 1, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9091864, "iterations": 200, "latency_us": 45.45932}, "baseline": {"elapsed_ns": 21113280, "iterations": 200, "latency_us": 105.56639999999999}}
+{"id": "dense_perf_large", "round": 2, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20415164, "iterations": 200, "latency_us": 102.07582000000001}, "candidate": {"elapsed_ns": 9019492, "iterations": 200, "latency_us": 45.09746}}
+{"id": "dense_perf_large", "round": 3, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9032502, "iterations": 200, "latency_us": 45.162510000000005}, "baseline": {"elapsed_ns": 20879481, "iterations": 200, "latency_us": 104.39740499999999}}
+{"id": "dense_perf_large", "round": 4, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20608920, "iterations": 200, "latency_us": 103.0446}, "candidate": {"elapsed_ns": 9040412, "iterations": 200, "latency_us": 45.202059999999996}}
+{"id": "dense_perf_large", "round": 5, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9095345, "iterations": 200, "latency_us": 45.476725}, "baseline": {"elapsed_ns": 20812449, "iterations": 200, "latency_us": 104.06224499999999}}
+{"id": "dense_route_below", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_route_below", "round": 0, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20360501, "iterations": 200, "latency_us": 101.80250500000001}, "candidate": {"elapsed_ns": 9060043, "iterations": 200, "latency_us": 45.300214999999994}}
+{"id": "dense_route_below", "round": 1, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 8999701, "iterations": 200, "latency_us": 44.998504999999994}, "baseline": {"elapsed_ns": 21249885, "iterations": 200, "latency_us": 106.249425}}
+{"id": "dense_route_below", "round": 2, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20368142, "iterations": 200, "latency_us": 101.84071}, "candidate": {"elapsed_ns": 9002141, "iterations": 200, "latency_us": 45.010705}}
+{"id": "dense_route_below", "round": 3, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9009982, "iterations": 200, "latency_us": 45.049910000000004}, "baseline": {"elapsed_ns": 21080398, "iterations": 200, "latency_us": 105.40199000000001}}
+{"id": "dense_route_below", "round": 4, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20696054, "iterations": 200, "latency_us": 103.48027}, "candidate": {"elapsed_ns": 9052333, "iterations": 200, "latency_us": 45.261665}}
+{"id": "dense_route_below", "round": 5, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9018452, "iterations": 200, "latency_us": 45.09226}, "baseline": {"elapsed_ns": 21180262, "iterations": 200, "latency_us": 105.90131}}
+{"id": "dense_route_at", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_route_at", "round": 0, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20361761, "iterations": 200, "latency_us": 101.80880499999999}, "candidate": {"elapsed_ns": 8956749, "iterations": 200, "latency_us": 44.783745}}
+{"id": "dense_route_at", "round": 1, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9092904, "iterations": 200, "latency_us": 45.46452}, "baseline": {"elapsed_ns": 21078289, "iterations": 200, "latency_us": 105.391445}}
+{"id": "dense_route_at", "round": 2, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20357531, "iterations": 200, "latency_us": 101.787655}, "candidate": {"elapsed_ns": 9015122, "iterations": 200, "latency_us": 45.07561}}
+{"id": "dense_route_at", "round": 3, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9003061, "iterations": 200, "latency_us": 45.015305}, "baseline": {"elapsed_ns": 20937004, "iterations": 200, "latency_us": 104.68502000000001}}
+{"id": "dense_route_at", "round": 4, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20566659, "iterations": 200, "latency_us": 102.83329499999999}, "candidate": {"elapsed_ns": 9044573, "iterations": 200, "latency_us": 45.222865}}
+{"id": "dense_route_at", "round": 5, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9005771, "iterations": 200, "latency_us": 45.028855}, "baseline": {"elapsed_ns": 20944234, "iterations": 200, "latency_us": 104.72117}}
+{"id": "dense_many_short_single", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_alias_and_padding", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+Using /mnt/workspace/task04_pr_20261117/extensions as PyTorch extensions root...
+Emitting ninja build file /mnt/workspace/task04_pr_20261117/extensions/dense_block_table_native/build.ninja...
+Building extension module dense_block_table_native...
+Using envvar MAX_JOBS (2) as the number of workers...
+ninja: no work to do.
+Loading extension module dense_block_table_native...
+{"status": "PASS", "scope": "functional_engineering_performance"}

@@ -1,0 +1,55 @@
+{
+  "source": "task_submission/evidence/run-final/result.json",
+  "engineering_by_case": {
+    "dense_perf_small": {
+      "two_streams": "PASS",
+      "retained_outputs_independent": "PASS",
+      "repeat20_released": "PASS",
+      "active_before_bytes": 35840,
+      "active_after_bytes": 35840,
+      "peak_increment_bytes": 16896,
+      "output_bytes": 16384,
+      "baseline_peak_increment_bytes": 39936,
+      "baseline_output_bytes": 16384,
+      "baseline_active_before_bytes": 35840,
+      "baseline_active_after_bytes": 35840,
+      "candidate_minus_baseline_peak_bytes": -23040,
+      "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+    },
+    "dense_perf_large": {
+      "two_streams": "PASS",
+      "retained_outputs_independent": "PASS",
+      "repeat20_released": "PASS",
+      "active_before_bytes": 590848,
+      "active_after_bytes": 590848,
+      "peak_increment_bytes": 2097664,
+      "output_bytes": 2097152,
+      "baseline_peak_increment_bytes": 4344320,
+      "baseline_output_bytes": 2097152,
+      "baseline_active_before_bytes": 590848,
+      "baseline_active_after_bytes": 590848,
+      "candidate_minus_baseline_peak_bytes": -2246656,
+      "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+    }
+  },
+  "streams_cpu_oracle": {
+    "dense_perf_small": {
+      "status": "PASS",
+      "candidate_retained": 6,
+      "baseline_retained": 6,
+      "compared_with": "independent CPU oracle",
+      "distinct_storage": 12,
+      "baseline_repeat20_before_bytes": 35840,
+      "baseline_repeat20_after_bytes": 35840
+    },
+    "dense_perf_large": {
+      "status": "PASS",
+      "candidate_retained": 6,
+      "baseline_retained": 6,
+      "compared_with": "independent CPU oracle",
+      "distinct_storage": 12,
+      "baseline_repeat20_before_bytes": 590848,
+      "baseline_repeat20_after_bytes": 590848
+    }
+  }
+}

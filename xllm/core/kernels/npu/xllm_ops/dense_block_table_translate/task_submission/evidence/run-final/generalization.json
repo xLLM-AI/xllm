@@ -1,0 +1,213 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "id": "dense_route_below",
+      "status": "PASS",
+      "actual_sha256": "06a0c38dafe1bd8294e69527fed5ee57505e11d28faec232b5190ad2b578aefc"
+    },
+    {
+      "id": "dense_route_at",
+      "status": "PASS",
+      "actual_sha256": "c7308d759f586ffa5c9305970e70379d8f214020d2213e6611e83b2043c788af"
+    },
+    {
+      "id": "dense_many_short_single",
+      "status": "PASS",
+      "actual_sha256": "e510a69d23fafadd8c69e9f3f01016d7d3b1578e46a6762465063d2899371463"
+    },
+    {
+      "id": "dense_alias_and_padding",
+      "status": "PASS",
+      "actual_sha256": "d646144f413adb85bac3b771d2c9dbcc6fdc9d7b33b73764c9c77844b97defe8"
+    }
+  ],
+  "benchmarks": [
+    {
+      "id": "dense_route_below",
+      "required": false,
+      "status": "MEASURED",
+      "baseline_rounds_us": [
+        101.80250500000001,
+        106.249425,
+        101.84071,
+        105.40199000000001,
+        103.48027,
+        105.90131
+      ],
+      "candidate_rounds_us": [
+        45.300214999999994,
+        44.998504999999994,
+        45.010705,
+        45.049910000000004,
+        45.261665,
+        45.09226
+      ],
+      "baseline_mean_us": 104.11270166666667,
+      "candidate_mean_us": 45.118876666666665,
+      "baseline_median_us": 104.44113000000002,
+      "candidate_median_us": 45.071085000000004,
+      "saved_mean_us": 58.993825,
+      "saved_median_us": 59.37004500000001,
+      "saved_mean_ci95_us": [
+        57.48459333333334,
+        60.44843749999999
+      ],
+      "max_mean_us": null,
+      "checks": {
+        "positive_mean_saving": true,
+        "positive_median_saving": true,
+        "positive_ci95_lower": true,
+        "target_mean": true
+      },
+      "resamples": 10000,
+      "seed": 20261031,
+      "rng": "numpy.random.default_rng/PCG64",
+      "percentile": "linear",
+      "measurement_protocol": {
+        "warmup": 50,
+        "rounds": 6,
+        "iterations_per_round": 200,
+        "execution_order": "alternate baseline and candidate; retain all paired rounds",
+        "timed_entry": "prepared.run",
+        "includes": [
+          "Python submission",
+          "new outputs and per-call temporary allocations",
+          "device execution and completion synchronization"
+        ],
+        "excludes": [
+          "input generation and transfer",
+          "one-time validation",
+          "prepare",
+          "CPU golden",
+          "first compilation"
+        ],
+        "latency_unit": "us",
+        "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+        "target_statistic": "arithmetic mean of six per-round per-call latencies",
+        "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+      },
+      "round_order": [
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ]
+      ],
+      "raw_file": "dense_route_below_raw.json",
+      "backend": "triton"
+    },
+    {
+      "id": "dense_route_at",
+      "required": false,
+      "status": "MEASURED",
+      "baseline_rounds_us": [
+        101.80880499999999,
+        105.391445,
+        101.787655,
+        104.68502000000001,
+        102.83329499999999,
+        104.72117
+      ],
+      "candidate_rounds_us": [
+        44.783745,
+        45.46452,
+        45.07561,
+        45.015305,
+        45.222865,
+        45.028855
+      ],
+      "baseline_mean_us": 103.53789833333333,
+      "candidate_mean_us": 45.098483333333334,
+      "baseline_median_us": 103.7591575,
+      "candidate_median_us": 45.0522325,
+      "saved_mean_us": 58.439415,
+      "saved_median_us": 58.706925,
+      "saved_mean_ci95_us": [
+        57.36526416666666,
+        59.41977083333333
+      ],
+      "max_mean_us": null,
+      "checks": {
+        "positive_mean_saving": true,
+        "positive_median_saving": true,
+        "positive_ci95_lower": true,
+        "target_mean": true
+      },
+      "resamples": 10000,
+      "seed": 20261031,
+      "rng": "numpy.random.default_rng/PCG64",
+      "percentile": "linear",
+      "measurement_protocol": {
+        "warmup": 50,
+        "rounds": 6,
+        "iterations_per_round": 200,
+        "execution_order": "alternate baseline and candidate; retain all paired rounds",
+        "timed_entry": "prepared.run",
+        "includes": [
+          "Python submission",
+          "new outputs and per-call temporary allocations",
+          "device execution and completion synchronization"
+        ],
+        "excludes": [
+          "input generation and transfer",
+          "one-time validation",
+          "prepare",
+          "CPU golden",
+          "first compilation"
+        ],
+        "latency_unit": "us",
+        "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+        "target_statistic": "arithmetic mean of six per-round per-call latencies",
+        "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+      },
+      "round_order": [
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ]
+      ],
+      "raw_file": "dense_route_at_raw.json",
+      "backend": "triton"
+    }
+  ]
+}
