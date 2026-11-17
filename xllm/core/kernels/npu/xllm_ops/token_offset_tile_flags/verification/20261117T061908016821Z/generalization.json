@@ -35,6 +35,7 @@
         "inputs_unchanged": true,
         "independent_storage": true
       },
+      "golden_sha256": "7c44d3526fd9b4d4bc1cb0a8909b5056f1e2f58db45d114af3e1100bb7c02f1b",
       "storage_offsets": [
         0,
         0,
@@ -76,6 +77,7 @@
         "inputs_unchanged": true,
         "independent_storage": true
       },
+      "golden_sha256": "7ff52993d5d3cb149089942de7fc7a6511db2671cf2125976c081ad6fff89772",
       "storage_offsets": [
         0,
         0,
@@ -117,6 +119,7 @@
         "inputs_unchanged": true,
         "independent_storage": true
       },
+      "golden_sha256": "d629af56872314c57476055e14ef2e9f5ddd7d9723937a209929707283c1e209",
       "storage_offsets": [
         0,
         0,
@@ -158,6 +161,7 @@
         "inputs_unchanged": true,
         "independent_storage": true
       },
+      "golden_sha256": "d629af56872314c57476055e14ef2e9f5ddd7d9723937a209929707283c1e209",
       "storage_offsets": [
         0,
         0,
@@ -170,28 +174,28 @@
     {
       "id": "flags_nonpower_255",
       "baseline_round_us": [
-        263.95958,
-        262.101255,
-        264.71521,
-        260.448695,
-        264.76211,
-        261.46513500000003
+        281.949275,
+        280.843115,
+        282.973435,
+        277.857435,
+        282.609075,
+        277.105575
       ],
       "candidate_round_us": [
-        45.530474999999996,
-        45.397014999999996,
-        45.590725,
-        45.567225,
-        45.46407,
-        45.538525
+        50.34896,
+        49.959955,
+        49.52395,
+        50.028254999999994,
+        51.278870000000005,
+        49.384550000000004
       ],
-      "baseline_mean_us": 262.9086641666667,
-      "candidate_mean_us": 45.514672499999996,
-      "mean_difference_us": 217.39399166666672,
-      "median_difference_us": 217.49591750000002,
+      "baseline_mean_us": 280.55631833333337,
+      "candidate_mean_us": 50.087423333333334,
+      "mean_difference_us": 230.46889500000003,
+      "median_difference_us": 231.40209000000004,
       "paired_mean_difference_ci95_us": [
-        216.06662416666668,
-        218.66306583333335
+        228.8856291666667,
+        232.05216083333332
       ],
       "bootstrap": {
         "resamples": 10000,
@@ -238,28 +242,28 @@
     {
       "id": "flags_nonpower_257",
       "baseline_round_us": [
-        264.19653999999997,
-        261.110475,
-        264.21394,
-        261.61394,
-        264.11663500000003,
-        260.55485
+        281.353315,
+        279.012595,
+        282.175975,
+        278.47979,
+        278.77589,
+        277.17413
       ],
       "candidate_round_us": [
-        45.77928,
-        45.258559999999996,
-        45.938885,
-        45.653974999999996,
-        45.663775,
-        45.402465
+        48.901095,
+        49.799755,
+        48.939995,
+        49.915355000000005,
+        50.52211,
+        48.506445
       ],
-      "baseline_mean_us": 262.63439666666665,
-      "candidate_mean_us": 45.61615666666666,
-      "mean_difference_us": 217.01824,
-      "median_difference_us": 217.20641250000003,
+      "baseline_mean_us": 279.4952825,
+      "candidate_mean_us": 49.4307925,
+      "mean_difference_us": 230.06448999999998,
+      "median_difference_us": 229.5243675,
       "paired_mean_difference_ci95_us": [
-        215.94771583333332,
-        218.00156916666666
+        228.58615916666668,
+        231.65623916666664
       ],
       "bootstrap": {
         "resamples": 10000,

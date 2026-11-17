@@ -1,7 +1,7 @@
 {
-  "DESIGN.md": "379e5d32310690d29865aa2b73bfe8e7d84bfb5c6deb6feb030fe97930c0590f",
-  "README.md": "e1dba434a40d39feb49f6b75ba0fe12ad3138f60e557590a7053fb1df2fadf6f",
-  "SOURCE_VERSION.json": "9311a5df35712cff36cc0d7539c8d419e4583d9b0f9490068ac5739102321ec5",
+  "DESIGN.md": "58f77ca1c5115ed9c4214649ac0851f7844abd113b265eafce043bad0ca11895",
+  "README.md": "956f9cf6f08383ec20452baf4a8eea1998640492fef7cd3e98e22e6294205639",
+  "SOURCE_VERSION.json": "4e27d38b9dda17d8fccc7d2199cb7c9edd487bfe153e4002f1a6db2a891cf4b6",
   "__init__.py": "d49bf25ce7d02a6bd6c35f614d9f583ac02457d8e542ae911f3672d37a9e8fdf",
   "fixtures.py": "c1958189121c828f893ab68abbf248fc5b12805713a41d6d45a6d310f1e9f097",
   "kernels.py": "61203996fd30cc4a4fc17dc7817c96f08a44b49dcb8e774ff0c71b430c11544c",
@@ -11,10 +11,10 @@
   "official/op.json": "fb3328cea6dc54257ebb7be854951ab2ca6d5ffec9d49f76c8751b805cac95c1",
   "official/任务书.md": "ac8f7462fe1dc2f98df202dd9b52d20aceda06461d074046c9bbac565595c4cc",
   "official.zip": "f29adfe16a4a7352de37405ff85fa82846ad93a3c2f13e6e732e0382bf01e48c",
-  "offline_checks.py": "b836ca7d39aed0eaa7992886827e3b979be14e719709300c73f19f92a3b81979",
+  "offline_checks.py": "5b67f451712dacca1592870d1f4315e74f81b8b6e6b764d20f74f389408cacb0",
   "run_guard.py": "ceab5d2280682575ddd367cf66ccbc5aacd2d777cb04ccad450c490a5e50d082",
   "solution.py": "28d4d5058ccd082881dda28982b0424e2a25b96c74c9705033d9352da9dbacbc",
   "statistics_utils.py": "966bedb24a147dc01ad289aba2d7b2e2d9f2abc933041a8c80bf8c75d9fe2c49",
   "validation.py": "5ca75101b8f2eb8417d289eca93f84b9f7371a4b36acc9a7f97427fbfc1640c3",
-  "verify.py": "335ef7bb42b38dea631b294e93c11a701d39d581d40d45129edc37c2bab6cc26"
+  "verify.py": "5c221bb190a6f6049d6a41a0194cb1010469ebf0a64d392d925858bbf366a0bf"
 }
