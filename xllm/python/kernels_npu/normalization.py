@@ -55,19 +55,6 @@ def fused_add_rms_norm_dynamic_quant(
 rms_norm_dynamic_quant = torch.ops.xllm_ops.rms_norm_dynamic_quant
 
 
-def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Normalize the last dimension of ``value`` to unit L2 norm.
-
-    Args:
-        value: Tensor whose last dimension is normalized.
-        eps: Added to the squared norm before the reciprocal square root.
-
-    Returns:
-        A tensor with the shape and dtype of ``value``.
-    """
-    return torch.ops.xllm_ops.l2_norm(value, eps)
-
-
 def rms_norm_gated(
     value: torch.Tensor,
     gate: torch.Tensor,
@@ -149,7 +136,6 @@ __all__ = [
     "fused_add_gemma_rms_norm",
     "fused_add_rms_norm_dynamic_quant",
     "rms_norm_dynamic_quant",
-    "l2_norm",
     "rms_norm_gated",
     "rms_norm_sigmoid_gated",
     "fused_eh_norm",

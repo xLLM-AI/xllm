@@ -31,7 +31,7 @@ Directories are organized by responsibility:
 | `python/xllm_kernel/ops/<operation>/` | Operator contracts, public APIs, implementations, and registration |
 | `python/xllm_kernel/registry.py` | `OpContract`, `KernelSpec`, `PreparedKernel`, and the registry |
 | `python/xllm_kernel/{catalog,runtime,selection}.py` | Discover operators, load dependencies, select implementations, and publish bindings |
-| `python/xllm_kernel/custom_ops.py` | Register package-owned Torch schemas, device implementations, and fakes |
+| `python/xllm_kernel/custom_ops.py` | Register package-owned Torch schemas and real device implementations |
 | `csrc/<solution>/` | Directory convention for native extension sources and device launcher bridges |
 | `pyproject.toml`, `setup.py`, `MANIFEST.in` | Package metadata, extension builds, and distribution artifacts |
 | `python/xllm_kernel/numerics/<operation>.py` | Operator-specific arguments, inputs, references, tolerances, and suite |
@@ -174,18 +174,18 @@ from xllm_kernel.custom_ops import register_custom_op
 # Python implementation: declare mutation and the dispatch key explicitly.
 register_custom_op(
     "my_op", my_kernel, mutates_args=(),
-    dispatch_key="PrivateUse1", fake_impl=my_fake,
+    dispatch_key="PrivateUse1",
 )
 
-# Existing C++ schema: load its extension first, then add only the fake.
-register_custom_op("my_native_op", fake_impl=my_native_fake)
+# Existing C++ schema: load its extension first, then reuse its implementation.
+native_op = register_custom_op("my_native_op")
 ```
 
 - Place native extensions in `csrc/<solution>/` and update `setup.py`, source
   manifests, and wheel artifacts together.
 - Load extensions and register operators during preparation, then reuse that state.
-- Fakes infer metadata such as shape, dtype, and device; they do not replace
-  numerical validation.
+- Validate real implementations with output, mutation/alias, stream and graph tests.
+  This registration helper does not provide FakeTensor implementations.
 
 ### 3.4 Public API and model integration
 
@@ -201,7 +201,7 @@ dependencies. To add an operator:
    ```
 
    Groups with several operators export every declaration in that tuple, as
-   `ops/normalization/__init__.py` does for the three normalization operators.
+   `ops/normalization/__init__.py` does for its normalization operators.
 2. Add the group module to `catalog._BUILTINS` and export its public API
    from `ops/__init__.py`.
 3. Have the public API obtain its fixed binding through `OPERATION.get_prepared()`;
