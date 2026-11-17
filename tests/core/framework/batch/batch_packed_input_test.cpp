@@ -42,8 +42,8 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/runtime/dit_forward_params.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/forward_shared_memory_transport.h"
 #include "core/runtime/vlm_forward_params.h"
+#include "core/transport/forward_shared_memory_transport.h"
 #include "worker.pb.h"
 
 namespace xllm {

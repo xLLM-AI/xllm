@@ -11,7 +11,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/runtime/forward_shared_memory_transport.h"
+#include "core/transport/forward_shared_memory_transport.h"
 
 #include <butil/iobuf.h>
 #include <gflags/gflags.h>

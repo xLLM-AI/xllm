@@ -14,8 +14,8 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
-#include "core/distributed_runtime/comm_channel.h"
-#include "runtime/forward_shared_memory_transport.h"
+#include "core/transport/comm_channel.h"
+#include "core/transport/forward_shared_memory_transport.h"
 #include "runtime/options.h"
 
 namespace xllm {

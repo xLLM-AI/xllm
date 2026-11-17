@@ -31,8 +31,8 @@ limitations under the License.
 #include "core/kv_cache/transfer/prefetch_result.h"
 #include "core/runtime/forward_input_encoding.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/forward_shared_memory_transport.h"
 #include "core/runtime/vlm_forward_params.h"
+#include "core/transport/forward_shared_memory_transport.h"
 #include "core/util/tensor_codec.h"
 #include "worker.pb.h"
 

@@ -19,10 +19,11 @@ limitations under the License.
 #include <folly/futures/Future.h>
 #include <torch/types.h>
 
-#include "comm_channel.h"
 #include "common/macros.h"
 #include "common/types.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/transport/comm_channel.h"
+#include "core/transport/forward_shared_memory_transport.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_params_view.h"
@@ -30,7 +31,6 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "runtime/executor.h"
 #include "runtime/forward_params.h"
-#include "runtime/forward_shared_memory_transport.h"
 #include "runtime/worker_client.h"
 #include "util/threadpool.h"
 #include "worker.pb.h"

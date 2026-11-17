@@ -47,6 +47,7 @@ limitations under the License.
 #include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/transport/forward_shared_memory_transport.h"
 #include "core/util/scope_guard.h"
 #include "core/util/slice.h"
 #include "core/util/tensor_helper.h"
@@ -62,7 +63,6 @@ limitations under the License.
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "runtime/dit_forward_params.h"
-#include "runtime/forward_shared_memory_transport.h"
 #include "tests/core/framework/sampling/sampling_test_utils.h"
 #include "worker.pb.h"
 

@@ -28,7 +28,7 @@ limitations under the License.
 
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
-#include "core/runtime/forward_shared_memory_transport.h"
+#include "core/transport/forward_shared_memory_transport.h"
 
 namespace xllm {
 namespace {
