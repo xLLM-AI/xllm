@@ -342,6 +342,9 @@ class AclGraphRunner(BaseRunner):
         if positions is not None and (positions.dim() != 1 or positions.numel() != metadata_row_count):
             raise RuntimeError("ACL graph decode positions must contain one value per token")
 
+    def _retain_graph_output(self, output: ModelExecutionOutput) -> ModelExecutionOutput:
+        return output
+
     def _capture(
         self,
         entry: AclGraphEntry,
@@ -385,6 +388,7 @@ class AclGraphRunner(BaseRunner):
             ),
         ):
             entry.static_output = self._forward_static(entry)
+        entry.static_output = self._retain_graph_output(entry.static_output)
         entry.graph_tasks = capture_context.tasks
         logger.info(
             "Python ACL graph captured: model=%s bucket=%d mtp_topk=%s tasks=%d",

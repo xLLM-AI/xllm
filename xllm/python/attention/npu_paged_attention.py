@@ -52,6 +52,7 @@ from xllm.python.attention.mla_index_context import is_compact_kpool_tail
 from xllm.python.attention.paged_kv_metadata import PADDING_BLOCK_ID
 from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
+    borrow_acl_graph_tensor,
     copy_into_execution_buffer,
     get_execution_buffer,
     get_execution_workspace,
@@ -209,7 +210,8 @@ class PagedAttentionGraphState:
     # None lets CANN size its own scratch, which is far smaller than the
     # shape-independent maximum the recurrent verifier must reserve.
     workspace: torch.Tensor | None
-    output: torch.Tensor
+    # Serial entries allocate outputs inside capture for graph-pool reuse.
+    output: torch.Tensor | None
     lse: torch.Tensor
     block_table: torch.Tensor
     query: list[int]
@@ -938,7 +940,9 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                         actual_seq_kv=workspace_actual_seq_kv,
                     ),
                 ),
-                output=get_execution_buffer(
+                output=None
+                if graph_state.serial_buffers is not None
+                else get_execution_buffer(
                     ("FIA_OUTPUT", graph_batch_size),
                     lambda: torch.empty(
                         graph_batch_size, self.num_heads, self.head_dim, dtype=self.dtype, device=self.device
@@ -2367,19 +2371,25 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if graph_context is not None or (context.execution_state is not None and state is not None):
             if state is None:
                 raise RuntimeError("ACL graph output buffer is not prepared")
+            output = state.output
+            if output is None:
+                output = torch.empty(q_3d.shape, dtype=self.dtype, device=self.device)
+            borrow_buffers = graph_context is not None and state.output is None
+            captured_query = borrow_acl_graph_tensor(q_3d) if borrow_buffers else q_3d
+            captured_output = borrow_acl_graph_tensor(output) if borrow_buffers else output
             graph_options = {
                 **options,
                 "actual_seq_lengths": state.query,
                 "actual_seq_lengths_kv": state.kv,
                 "block_table": state.block_table,
                 "workspace": state.workspace,
-                "out": [state.output, state.lse],
+                "out": [captured_output, state.lse],
             }
             if graph_context is None:
                 self._paged_fia.out(q_3d, k_flat, v_flat, **graph_options)
             else:
-                graph_context.capture_task(self._paged_fia.out, q_3d, k_flat, v_flat, **graph_options)
-            return state.output.reshape(num_tokens, self.num_heads * self.head_dim)
+                graph_context.capture_task(self._paged_fia.out, captured_query, k_flat, v_flat, **graph_options)
+            return output.reshape(num_tokens, self.num_heads * self.head_dim)
 
         output, _ = self._paged_fia(
             q_3d,

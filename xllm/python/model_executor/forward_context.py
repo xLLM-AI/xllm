@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
+from math import prod
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 import torch
@@ -114,6 +115,34 @@ class AclGraphTask:
 
 
 @dataclass(slots=True)
+class AclGraphBufferPool:
+    """Maximum-capacity storage borrowed by serialized decode graph entries."""
+
+    max_batch: int
+    buffers: dict[tuple[object, ...], torch.Tensor] = field(default_factory=dict)
+
+    def get(
+        self,
+        key: tuple[object, ...],
+        shape: tuple[int, ...],
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+        capacity: int | None = None,
+    ) -> torch.Tensor:
+        if capacity is None:
+            capacity = self.max_batch * prod(shape[1:]) if shape else 1
+        storage_key = (key, dtype, device, capacity)
+        buffer = self.buffers.get(storage_key)
+        if buffer is None:
+            buffer = torch.empty(capacity, dtype=dtype, device=device)
+            self.buffers[storage_key] = buffer
+        # Reserve the maximum on first use so larger shapes keep the address
+        # already recorded by smaller captured graphs.
+        return buffer[: prod(shape)].view(shape)
+
+
+@dataclass(slots=True)
 class AclGraphExecutionState:
     """Persistent resources owned by one model-execution graph entry."""
 
@@ -128,6 +157,7 @@ class AclGraphExecutionState:
     # Only runners that serialize graph replay may supply this pool. Growing
     # it never replaces an allocation already referenced by a captured graph.
     serial_workspace_pool: list[torch.Tensor] | None = None
+    serial_buffers: AclGraphBufferPool | None = None
     # Layer views borrow the fixed mapping outputs of this graph entry.
     shared_full_layer_views: dict[tuple[object, ...], dict[int, torch.Tensor]] = field(default_factory=dict)
     mla_fia_lengths: tuple[list[int], list[int]] = field(default_factory=lambda: ([], []))
@@ -232,6 +262,17 @@ def wait_for_kv_layer(layer_id: int) -> None:
         if ctx.acl_graph is not None or ctx.execution_state is not None:
             raise RuntimeError("Per-batch Host KV load dependencies cannot be captured in a graph")
         ctx.kv_load.wait_layer(layer_id)
+
+
+def borrow_acl_graph_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Keep a captured address without pinning its graph-pool allocation.
+
+    The graph must outlive this handle. Consume the tensor before another
+    graph using the same pool replays and overwrites its storage.
+    """
+    import torch_npu
+
+    return torch_npu._C._weak_ref_tensor(tensor)
 
 
 def get_execution_buffer(
