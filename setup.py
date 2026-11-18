@@ -526,6 +526,15 @@ class ExtBuild(build_ext):
         logger.info(f"CMake Args: {cmake_args}")
         logger.info(f"Env: {env}")
 
+        # Native tests also initialize the Python runtime, so build its binding
+        # before dispatching to the product, single-test or all-tests path.
+        if self.device == "npu":
+            subprocess.check_call(
+                [sys.executable, "setup.py", "build_ext", "--inplace", "--build-lib", os.path.dirname(extdir)],
+                cwd=os.path.join(self.base_dir, "xllm-kernel"),
+                env=env,
+            )
+
         self.build_cmake_targets(ext, cmake_args, build_args, env, extdir)
 
     def _configure_cmake(self, cmake_cmd: str, cmake_args: list[str], env: dict[str, str]) -> list[str]:

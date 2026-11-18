@@ -120,30 +120,6 @@ def _split_qkv_rmsnorm_mrope_fake(
     )
 
 
-def _atb_matmul_ein_sum_fake(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    if input.ndim != 3 or weight.ndim != 3:
-        raise ValueError("ATB EIN_SUM expects [T,H,D] input and [H,D,O] weight")
-    if input.shape[0] == 0 or input.shape[1] == 0 or input.shape[2] == 0 or weight.shape[2] == 0:
-        raise ValueError("ATB EIN_SUM requires nonempty dimensions")
-    if input.shape[1] != weight.shape[0] or input.shape[2] != weight.shape[1]:
-        raise ValueError("ATB EIN_SUM head or reduction dimension mismatch")
-    if input.dtype != torch.bfloat16 or weight.dtype != input.dtype:
-        raise ValueError("ATB EIN_SUM requires matching bf16 inputs")
-    if input.device.type != "npu" or input.device != weight.device:
-        raise ValueError("ATB EIN_SUM requires inputs on the same NPU")
-    if not weight.is_contiguous():
-        raise ValueError("ATB EIN_SUM weight must be contiguous")
-    return input.new_empty((input.shape[0], input.shape[1], weight.shape[2]))
-
-
-def _atb_matmul_ein_sum_out_fake(input: torch.Tensor, weight: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
-    if out.shape != (input.shape[0], input.shape[1], weight.shape[2]):
-        raise ValueError("ATB EIN_SUM output must be [T,H,O]")
-    if out.dtype != input.dtype or out.device != input.device or not out.is_contiguous():
-        raise ValueError("ATB EIN_SUM output must be contiguous with the input dtype and device")
-    return out
-
-
 def _chunk_gated_delta_rule_fake(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1301,8 +1277,6 @@ register_fake("xllm_ops::npu_reduce_scatter", _npu_reduce_scatter_fake)
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::rms_norm_gated", _rms_norm_gated_fake)
 register_fake("xllm_ops::fused_add_gemma_rms_norm", _fused_add_gemma_rms_norm_fake)
-register_fake("xllm_ops::atb_matmul_ein_sum", _atb_matmul_ein_sum_fake)
-register_fake("xllm_ops::atb_matmul_ein_sum_out", _atb_matmul_ein_sum_out_fake)
 register_fake("xllm_ops::moe_gating_top_k_softmax", _moe_gating_top_k_softmax_fake)
 register_fake("xllm_ops::split_qkv_rmsnorm_mrope", _split_qkv_rmsnorm_mrope_fake)
 register_fake("xllm_ops::chunk_gated_delta_rule", _chunk_gated_delta_rule_fake)

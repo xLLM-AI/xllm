@@ -40,6 +40,7 @@ from xllm_kernel.catalog import load_operations
 from xllm_kernel.ops import fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat
 from xllm_kernel.ops.attention.gdn import OPERATIONS as GDN_OPERATIONS
 from xllm_kernel.ops.attention.kda import OPERATIONS as KDA_OPERATIONS, causal_conv1d_update_v2
+from xllm_kernel.ops.gemm import OPERATIONS as GEMM_OPERATIONS, matmul_ein_sum, matmul_ein_sum_out
 catalog = {operation.contract.operation: operation for operation in load_operations()}
 for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     name = operation.contract.operation
@@ -47,6 +48,12 @@ for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     assert operation.implementations == ('npu.triton.' + name,)
     assert operation.prepared is None
     assert operation.backends[0].requires == ('torch_npu', 'triton')
+for operation in GEMM_OPERATIONS:
+    name = operation.contract.operation
+    assert catalog[name] is operation
+    assert operation.implementations == ('npu.atb.' + name,)
+    assert operation.prepared is None
+assert callable(matmul_ein_sum) and callable(matmul_ein_sum_out)
 assert callable(causal_conv1d_update_v2)
 assert all(callable(fn) for fn in (fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat))
 """
@@ -119,6 +126,7 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
         "xllm_kernel.ops.normalization.triton",
         "xllm_kernel.ops.attention.gdn.triton",
         "xllm_kernel.ops.attention.kda.triton",
+        "xllm_kernel.ops.gemm.atb",
     )
     for name in modules:
         monkeypatch.delitem(sys.modules, name, raising=False)

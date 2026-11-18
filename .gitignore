@@ -45,6 +45,7 @@ MANIFEST
 *.egg-info/
 xllm/*.pyd
 xllm/*.so
+xllm-kernel/python/xllm_kernel/_atb.so
 xllm/version.py
 __pycache__/
 .pkl_memoize_py3/

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import torch
 import torch_npu
+from xllm_kernel.ops.gemm import matmul_ein_sum as atb_matmul_ein_sum
+from xllm_kernel.ops.gemm import matmul_ein_sum_out as atb_matmul_ein_sum_out
 
 _FRACTAL_NZ_FORMAT = 29
 
@@ -73,26 +75,6 @@ def prepare_quant_weight(
     if weight.device.type == "cpu":
         return transposed
     return torch_npu.npu_format_cast(transposed, _FRACTAL_NZ_FORMAT)
-
-
-def atb_matmul_ein_sum(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """Run fixed ATB MATMUL_EIN_SUM: [T,H,D],[H,D,O]->[T,H,O].
-
-    Both operands must be BF16 tensors on the same NPU in ND format. Weight
-    must be contiguous; a strided input is copied to contiguous storage.
-    This is ATB's fixed matmul mode, not a general einsum expression parser.
-    """
-    return torch.ops.xllm_ops.atb_matmul_ein_sum(x, weight)
-
-
-def atb_matmul_ein_sum_out(x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
-    """Run fixed ATB EIN_SUM directly into a caller-owned ND output.
-
-    The output must be contiguous BF16 [T,H,O] on the operands' NPU and
-    must not alias either operand. The math and input packing match the
-    allocating variant.
-    """
-    return torch.ops.xllm_ops.atb_matmul_ein_sum_out(x, weight, out)
 
 
 __all__ = [
