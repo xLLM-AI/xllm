@@ -24,10 +24,13 @@ limitations under the License.
 
 namespace xllm_kernel {
 
+inline bool is_base_format(int64_t format) {
+  return format == ACL_FORMAT_ND || format == ACL_FORMAT_NCHW ||
+         format == ACL_FORMAT_NHWC || format == ACL_FORMAT_NCDHW;
+}
+
 inline void check_base_format(const torch::Tensor& tensor) {
-  int64_t format = at_npu::native::get_npu_format(tensor);
-  CHECK(format == ACL_FORMAT_ND || format == ACL_FORMAT_NCHW ||
-        format == ACL_FORMAT_NHWC || format == ACL_FORMAT_NCDHW)
+  CHECK(is_base_format(at_npu::native::get_npu_format(tensor)))
       << "MLA projection requires ND/base format";
 }
 

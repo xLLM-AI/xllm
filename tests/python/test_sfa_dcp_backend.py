@@ -24,6 +24,7 @@ import torch
 
 pytest.importorskip("torch_npu", reason="SFA DCP backend tests import the NPU attention backend")
 
+from xllm.python import kernels
 from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.npu_paged_attention import write_mla_paged_cache
 from xllm.python.attention.sfa_dcp_backend import SfaDcpAttentionBackend
@@ -341,7 +342,7 @@ def test_execute_mla_preserves_fused_cache_write(
     output = torch.empty_like(query)
     backend._impl._execute_sparse_flash_attention_process.return_value = output
     reshape = MagicMock()
-    monkeypatch.setattr(torch.ops.xllm_ops, "reshape_paged_cache", reshape, raising=False)
+    monkeypatch.setattr(kernels, "reshape_paged_cache", reshape)
     context = ForwardContext(
         attention_backend=backend,
         device=torch.device("cpu"),
@@ -480,7 +481,7 @@ def test_write_mla_paged_cache_nope_reuses_latent_cache() -> None:
     k_latent = torch.randn(2, 1, 16)
     nope_cache = torch.randn(4, 8, 1, 16)
     slots = torch.zeros(2, dtype=torch.int32)
-    with patch.object(torch.ops.xllm_ops, "reshape_paged_cache", create=True) as reshape:
+    with patch.object(kernels, "reshape_paged_cache") as reshape:
         write_mla_paged_cache(slots, k_latent, None, nope_cache, None)
     assert reshape.call_args.args == (slots, k_latent, k_latent, nope_cache, nope_cache)
 
@@ -490,7 +491,7 @@ def test_write_mla_paged_cache_nope_ignores_zero_width_rope_cache() -> None:
     nope_cache = torch.randn(4, 8, 1, 16)
     rope_cache = torch.empty(4, 8, 1, 0)
     slots = torch.zeros(2, dtype=torch.int32)
-    with patch.object(torch.ops.xllm_ops, "reshape_paged_cache", create=True) as reshape:
+    with patch.object(kernels, "reshape_paged_cache") as reshape:
         write_mla_paged_cache(slots, k_latent, None, nope_cache, rope_cache)
     assert reshape.call_args.args[4] is nope_cache
 
@@ -501,7 +502,7 @@ def test_write_mla_paged_cache_keeps_glm52_rope() -> None:
     nope_cache = torch.randn(4, 8, 1, 16)
     rope_cache = torch.randn(4, 8, 1, 4)
     slots = torch.zeros(2, dtype=torch.int32)
-    with patch.object(torch.ops.xllm_ops, "reshape_paged_cache", create=True) as reshape:
+    with patch.object(kernels, "reshape_paged_cache") as reshape:
         write_mla_paged_cache(slots, k_latent, k_pe, nope_cache, rope_cache)
     assert reshape.call_args.args == (slots, k_latent, k_pe, nope_cache, rope_cache)
 
@@ -546,7 +547,7 @@ def test_execute_mla_nope_accepts_none_q_pe_and_k_pe() -> None:
     assert backend._impl is not None
     with (
         forward_context(context),
-        patch.object(torch.ops.xllm_ops, "reshape_paged_cache", create=True) as reshape_paged_cache,
+        patch.object(kernels, "reshape_paged_cache") as reshape_paged_cache,
         patch.object(backend._impl, "_record_dcp_kv_gather_context"),
         patch.object(backend._impl, "_record_query_gather_context") as record_query,
         patch.object(

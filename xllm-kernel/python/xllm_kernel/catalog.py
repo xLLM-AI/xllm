@@ -58,8 +58,10 @@ _BUILTINS = (
     "xllm_kernel.ops.normalization",
     "xllm_kernel.ops.activation",
     "xllm_kernel.ops.gemm",
+    "xllm_kernel.ops.kv_cache",
     "xllm_kernel.ops.attention.gdn",
     "xllm_kernel.ops.attention.kda",
+    "xllm_kernel.ops.positional_encoding",
 )
 
 

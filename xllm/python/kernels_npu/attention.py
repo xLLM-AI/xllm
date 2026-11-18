@@ -22,13 +22,13 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from xllm_kernel.ops import reshape_paged_cache
 
 _MIN_PAD_HEAD_DIM = 64
 _MAX_PAD_HEAD_DIM = 128
 _FIA_BLOCK_SIZE = 128
 _FIA_FULL_ATTENTION_TOKENS = 2147483647
 
-reshape_paged_cache = torch.ops.xllm_ops.reshape_paged_cache
 update_decode_graph_metadata = torch.ops.xllm_ops.update_decode_graph_metadata
 
 

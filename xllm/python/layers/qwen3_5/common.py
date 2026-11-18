@@ -20,6 +20,7 @@ from typing import Protocol
 
 import torch
 import torch.nn as nn
+from xllm_kernel.ops import partial_rotary_embedding
 
 
 class Qwen3_5AttentionConfig(Protocol):
@@ -134,16 +135,7 @@ class PartialRotaryEmbedding(nn.Module):
         gathered = self.cos_sin_cache.index_select(0, positions_t.view(-1))
         return gathered.view(positions.size(1), -1)
 
-    @staticmethod
-    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-        first, second = x.chunk(2, dim=-1)
-        return torch.cat((-second, first), dim=-1)
-
     def forward(self, positions: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        rotary, passthrough = x.split(
-            [self.rotary_dim, self.head_dim - self.rotary_dim],
-            dim=-1,
-        )
         pos = positions.to(torch.long)
         cached = self.cos_sin_cache[pos]
         half_rotary_dim = self.rotary_dim // 2
@@ -154,10 +146,7 @@ class PartialRotaryEmbedding(nn.Module):
                 raise ValueError("multimodal positions require three axes and mrope_section")
             cos_half = self._merge_mrope_axes(cos_half)
             sin_half = self._merge_mrope_axes(sin_half)
-        cos = torch.cat((cos_half, cos_half), dim=-1).unsqueeze(1)
-        sin = torch.cat((sin_half, sin_half), dim=-1).unsqueeze(1)
-        rotary = rotary * cos + self._rotate_half(rotary) * sin
-        return torch.cat((rotary, passthrough), dim=-1)
+        return partial_rotary_embedding(x, cos_half, sin_half)
 
     def _merge_mrope_axes(self, values: torch.Tensor) -> torch.Tensor:
         if self.mrope_interleaved:

@@ -1,5 +1,5 @@
 # Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
-"""Build Python kernels and the optional NPU ATB projection binding."""
+"""Build Python kernels and the optional NPU device binding."""
 
 import os
 from importlib.util import find_spec
@@ -18,10 +18,15 @@ if (npu_spec := find_spec("torch_npu")) is not None:
     extensions.append(
         CppExtension(
             "xllm_kernel._atb",
-            sources=["csrc/atb/matmul_ein_sum.cpp"],
+            sources=[
+                "csrc/atb/matmul_ein_sum.cpp",
+                "csrc/atb/reshape_paged_cache.cpp",
+                "csrc/npu/reshape_paged_cache.cpp",
+            ],
             include_dirs=[
                 str(Path(__file__).resolve().parent),
                 str(npu_root / "include"),
+                str(npu_root / "include" / "third_party" / "op-plugin"),
                 str(ascend_root / "include"),
                 str(atb_root / "include"),
             ],
