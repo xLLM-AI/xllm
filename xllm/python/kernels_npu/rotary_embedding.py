@@ -203,16 +203,6 @@ def inplace_partial_rotary_mul(
     )
 
 
-@interleaved_rotary_embedding.register_fake
-def _interleaved_rotary_embedding_fake(
-    value: torch.Tensor,
-    cosine: torch.Tensor,
-    sine: torch.Tensor,
-) -> torch.Tensor:
-    del cosine, sine
-    return torch.empty_like(value)
-
-
 def mrope(
     positions: torch.Tensor,
     q: torch.Tensor,

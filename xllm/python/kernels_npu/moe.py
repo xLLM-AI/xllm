@@ -585,34 +585,6 @@ def grouped_moe_bf16(
     )
 
 
-@grouped_moe_bf16.register_fake
-def _grouped_moe_bf16_fake(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-    num_total_experts: int,
-    start_expert_id: int,
-    num_experts_per_rank: int,
-    swiglu_limit: float = 0.0,
-    router_weight_before_down: bool = False,
-) -> torch.Tensor:
-    del (
-        topk_weights,
-        topk_ids,
-        w13,
-        w2,
-        num_total_experts,
-        start_expert_id,
-        num_experts_per_rank,
-        swiglu_limit,
-    )
-    if router_weight_before_down:
-        return torch.empty_like(hidden_states, dtype=torch.float32)
-    return torch.empty_like(hidden_states)
-
-
 def _grouped_moe_with_selected_experts_impl(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -711,105 +683,6 @@ def grouped_moe_with_selected_experts(
         num_experts_per_rank,
         swiglu_limit,
     )
-
-
-@grouped_moe.register_fake
-def _grouped_moe_fake(
-    hidden_states: torch.Tensor,
-    gating_output: torch.Tensor,
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    correction_bias: torch.Tensor | None,
-    topk: int,
-    topk_group: int,
-    num_expert_groups: int,
-    renormalize: bool,
-    routed_scaling_factor: float,
-    active_expert_range: list[int] | None = None,
-    *,
-    expert_tokens_num_type: int = 0,
-    group_list_type: int = 0,
-) -> torch.Tensor:
-    del (
-        gating_output,
-        w13,
-        w2,
-        w13_scale,
-        w2_scale,
-        correction_bias,
-        topk,
-        topk_group,
-        num_expert_groups,
-        renormalize,
-        routed_scaling_factor,
-        active_expert_range,
-        expert_tokens_num_type,
-        group_list_type,
-    )
-    return torch.empty_like(hidden_states)
-
-
-@grouped_moe_with_routing.register_fake
-def _grouped_moe_with_routing_fake(
-    hidden_states: torch.Tensor,
-    gating_output: torch.Tensor,
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    correction_bias: torch.Tensor | None,
-    topk: int,
-    topk_group: int,
-    num_expert_groups: int,
-    renormalize: bool,
-    routed_scaling_factor: float,
-    active_expert_range: list[int] | None = None,
-    *,
-    expert_tokens_num_type: int = 0,
-    group_list_type: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    del (
-        w13,
-        w2,
-        w13_scale,
-        w2_scale,
-        correction_bias,
-        topk_group,
-        num_expert_groups,
-        renormalize,
-        routed_scaling_factor,
-        active_expert_range,
-        expert_tokens_num_type,
-        group_list_type,
-    )
-    num_tokens = hidden_states.shape[0]
-    expanded = hidden_states.new_empty((num_tokens * topk, hidden_states.shape[1]))
-    probs = gating_output.new_empty((num_tokens, topk))
-    row_idx = torch.empty((num_tokens * topk,), dtype=torch.int32, device=hidden_states.device)
-    return expanded, probs, row_idx
-
-
-@grouped_moe_with_selected_experts.register_fake
-def _grouped_moe_with_selected_experts_fake(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    w13_offset: torch.Tensor | None = None,
-    w2_offset: torch.Tensor | None = None,
-    num_total_experts: int = -1,
-    start_expert_id: int = 0,
-    num_experts_per_rank: int = -1,
-    swiglu_limit: float = 0.0,
-) -> torch.Tensor:
-    del topk_weights, topk_ids, w13, w2, w13_scale, w2_scale, w13_offset, w2_offset
-    del num_total_experts, start_expert_id, num_experts_per_rank, swiglu_limit
-    return torch.empty_like(hidden_states)
 
 
 def _grouped_w8a8_experts(
@@ -1153,41 +1026,6 @@ def ep_moe_w8a8(
     return routed_output.reshape(original_shape)
 
 
-@ep_moe_w8a8.register_fake
-def _ep_moe_w8a8_fake(
-    hidden: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    group_ep: str,
-    ep_size: int,
-    ep_rank: int,
-    num_experts: int,
-    x_active_mask: torch.Tensor | None = None,
-    swiglu_limit: float = 10.0,
-    use_all_to_all: bool = False,
-) -> torch.Tensor:
-    del (
-        topk_weights,
-        topk_ids,
-        w13,
-        w2,
-        w13_scale,
-        w2_scale,
-        group_ep,
-        ep_size,
-        ep_rank,
-        num_experts,
-        x_active_mask,
-        swiglu_limit,
-        use_all_to_all,
-    )
-    return torch.empty_like(hidden)
-
-
 def moe_fused_topk(
     gating_output: torch.Tensor,
     topk: int,
@@ -1347,22 +1185,6 @@ def mega_moe(
     return output
 
 
-@moe_gate_routing.register_fake
-def _moe_gate_routing_fake(
-    gating_output: torch.Tensor,
-    correction_bias: torch.Tensor | None,
-    topk: int,
-    topk_group: int,
-    num_expert_groups: int,
-    renormalize: bool,
-    routed_scaling_factor: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    num_tokens = gating_output.shape[0]
-    topk_weights = torch.empty(num_tokens, topk, dtype=gating_output.dtype, device=gating_output.device)
-    topk_ids = torch.empty(num_tokens, topk, dtype=torch.int32, device=gating_output.device)
-    return topk_weights, topk_ids
-
-
 def _moe_expert_compute_impl(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -1483,20 +1305,6 @@ def moe_expert_compute(
     )
 
 
-@moe_expert_compute.register_fake
-def _moe_expert_compute_fake(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    topk: int,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
 def moe_expert_compute_with_routing(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -1548,23 +1356,6 @@ def _moe_expert_compute_permuted(
     )
 
 
-@_moe_expert_compute_permuted.register_fake
-def _moe_expert_compute_permuted_fake(
-    hidden_states: torch.Tensor,
-    topk_ids: torch.Tensor,
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    topk: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    del w13, w13_scale, w2_scale
-    active_num = hidden_states.shape[0] * topk
-    permuted_output = hidden_states.new_empty((active_num, hidden_states.shape[1]))
-    sorted_indices = topk_ids.new_empty((active_num,), dtype=torch.int32)
-    return permuted_output, sorted_indices
-
-
 @torch.library.custom_op("xllm_python::moe_token_dispatch", mutates_args=())
 def moe_token_dispatch(
     hidden_states: torch.Tensor,
@@ -1586,21 +1377,6 @@ def moe_token_dispatch(
     )
 
 
-@moe_token_dispatch.register_fake
-def _moe_token_dispatch_fake(
-    hidden_states: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk: int,
-    num_experts: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    active_num = hidden_states.shape[0] * topk
-    sorted_hidden_i8 = hidden_states.new_empty((active_num, hidden_states.shape[1]), dtype=torch.int8)
-    expanded_row_idx = topk_ids.new_empty((active_num,), dtype=torch.int32)
-    group_list = topk_ids.new_empty((num_experts,), dtype=torch.int64)
-    pertoken_scale = hidden_states.new_empty((active_num, 1), dtype=torch.float32)
-    return sorted_hidden_i8, expanded_row_idx, group_list, pertoken_scale
-
-
 @torch.library.custom_op("xllm_python::moe_gmm1", mutates_args=())
 def moe_gmm1(
     sorted_hidden_i8: torch.Tensor,
@@ -1610,21 +1386,6 @@ def moe_gmm1(
     group_list: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return _grouped_matmul_swiglu_quant_v2(sorted_hidden_i8, w13, w13_scale, pertoken_scale, group_list)
-
-
-@moe_gmm1.register_fake
-def _moe_gmm1_fake(
-    sorted_hidden_i8: torch.Tensor,
-    w13: torch.Tensor,
-    w13_scale: torch.Tensor,
-    pertoken_scale: torch.Tensor,
-    group_list: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    active_num = sorted_hidden_i8.shape[0]
-    inter_size = w13.shape[1] // 2
-    act_i8 = sorted_hidden_i8.new_empty((active_num, inter_size), dtype=torch.int8)
-    act_pt = pertoken_scale.new_empty((active_num, 1), dtype=torch.float32)
-    return act_i8, act_pt
 
 
 @torch.library.custom_op("xllm_python::moe_gmm2_combine", mutates_args=())
@@ -1649,19 +1410,6 @@ def moe_gmm2_combine(
         sorted_indices=expanded_row_idx.abs(),
         probs=_unpermute_probs(topk_weights, output),
     )
-
-
-@moe_gmm2_combine.register_fake
-def _moe_gmm2_combine_fake(
-    act_i8: torch.Tensor,
-    act_pertoken_scale: torch.Tensor,
-    w2: torch.Tensor,
-    w2_scale: torch.Tensor,
-    group_list: torch.Tensor,
-    expanded_row_idx: torch.Tensor,
-    topk_weights: torch.Tensor,
-) -> torch.Tensor:
-    return topk_weights.new_empty((topk_weights.shape[0], w2.shape[-1]), dtype=torch.bfloat16)
 
 
 __all__ = [

@@ -68,9 +68,7 @@ kernel 包则导出无状态函数，因此 attention 后端的选择由 executo
 平台包负责其硬件相关内容：
 
 - Triton、FlashInfer 和厂商库的调用入口，按框架放入 `triton/`、`flashinfer/` 等子目录；
-- Python 实现算子的 `torch.library.custom_op` 注册及 FakeTensor 契约；
-- C++ 算子的 FakeTensor 契约，集中在 `_custom_op.py`；
-- 张量修改声明与 `torch.compile` 计算图边界；
+- Python 实现算子的 `torch.library.custom_op` 注册和张量修改声明；
 - kernel 所需的权重布局。
 
 TileLang、Triton、FlashInfer 等较重的调用实现保持在语义算子函数内部延迟导入，
@@ -84,7 +82,7 @@ kernels_npu/
 └── triton/
 ```
 
-它们只依赖各自的 DSL、框架和内部辅助模块，不导入 NPU 语义 API、`_custom_op.py`、
+它们只依赖各自的 DSL、框架和内部辅助模块，不导入 NPU 语义 API、
 `torch.ops.xllm_ops`、AOT 编译器或 xLLM 原生扩展。因此 C++ 构建工具可以在
 xLLM 二进制尚未生成时导入同一份 Python DSL 实现。
 
@@ -157,9 +155,7 @@ server 启动时已经具备原生代码，随后才嵌入 Python；构建流程
 `xllm.python.kernels` 属性和 `sys.modules` 中的对应条目。磁盘上没有 `kernels/`
 目录，这些导入方式指向同一个已选定的平台包。
 
-NPU 初始化先导入 `_custom_op.py`，注册原生算子的 FakeTensor 实现，再按照 `_EXPORTS`
-导入语义模块并发布函数。CUDA 在导入平台包时加载 Python 算子封装，但同样把原生算子的
-FakeTensor 注册延迟到 runtime 钩子。FakeTensor 实现用于描述计算图追踪时的算子行为。
+NPU 初始化按照 `_EXPORTS` 导入语义模块并发布函数。CUDA 在导入平台包时加载 Python 算子封装。
 
 每个解释器在成功初始化后复用现有状态。模型创建、权重加载和进程组配置分别进行；
 各 worker 或 pytest 进程拥有各自的初始化状态。
@@ -239,9 +235,9 @@ layer 的修改。修改 C++ 或编译为原生 AOT 产物的 Python DSL kernel 
 2. 原生构建使用 TileLang 实现时，在 `xllm/compiler/tilelang/targets/ascend/aot/`
    添加薄适配器，不复制 DSL 程序主体。
 3. 在平台对应的算子模块及包导出中绑定名称：NPU 更新 `_EXPORTS`，CUDA 更新显式导入，
-   并更新 `__all__`。需要稳定计算图节点、FakeTensor 传播或张量修改追踪时，注册
-   `custom_op` 及其 FakeTensor 实现。C++ 算子的 FakeTensor 契约放在平台的 `_custom_op.py`。
-4. 添加该平台的底层数值测试和计算图、FakeTensor 测试。不为对齐导出列表而在其他平台添加占位实现。
+   并更新 `__all__`。需要接入 PyTorch 算子分发时，使用 `torch.library.custom_op` 注册，
+   并在 schema 中声明对输入张量的修改。
+4. 添加该平台的底层数值测试和计算图捕获及回放测试。不为对齐导出列表而在其他平台添加占位实现。
 5. 算子改变模型支持范围时，更新 `model_platform_support.py`。
 6. 确认依赖仍然从 models 经 layers 指向 kernels，没有反向依赖。
 
@@ -249,11 +245,9 @@ layer 的修改。修改 C++ 或编译为原生 AOT 产物的 Python DSL kernel 
 
 1. 在现有平台包旁创建 `kernels_<device>/`，实现该平台首批模型所需的 API。
 2. 保持包独立：管理自己的导出，不导入其他平台包。
-3. 添加 `_custom_op.py`，实现该平台 C++ 算子的 FakeTensor 契约。
-   在原生算子注册后，通过包的 `_initialize_runtime()` 钩子导入它。
-4. 修改 `xllm-kernel/python/xllm_kernel/platform.py` 中的 `Platform`，扩展 `PlatformEnum` 和
+3. 修改 `xllm-kernel/python/xllm_kernel/platform.py` 中的 `Platform`，扩展 `PlatformEnum` 和
    `_torch_device_type()`，使其识别 `<device>`；在 `xllm.python.initialize_runtime()`
    中增加对应分支。
-5. `python setup.py build --device <device>` 随后会暂存该包。
+4. `python setup.py build --device <device>` 随后会暂存该包。
    对应包尚不存在时，该设备的构建会记录已有平台包，并且不打包任何平台 kernel 包。
-6. 只有平台路径通过功能测试后，才在 `model_platform_support.py` 中标记模型支持该平台。
+5. 只有平台路径通过功能测试后，才在 `model_platform_support.py` 中标记模型支持该平台。

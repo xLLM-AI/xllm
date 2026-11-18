@@ -245,7 +245,6 @@ def _initialize_runtime() -> None:
     if _runtime_initialized:
         return
 
-    importlib.import_module(f"{__name__}._custom_op")
     exported: dict[str, Any] = {}
     for module_name, names in _EXPORTS.items():
         module = importlib.import_module(f"{__name__}.{module_name}")

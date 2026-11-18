@@ -29,7 +29,7 @@ from xllm.python.attention.npu_paged_attention import (  # noqa: E402
     NpuPagedAttentionBackend,
     PagedAttentionGraphState,
 )
-from xllm.python.kernels_npu import _custom_op, sparse_attention  # noqa: E402
+from xllm.python.kernels_npu import sparse_attention  # noqa: E402
 from xllm.python.model_executor.forward_context import ForwardContext, forward_context  # noqa: E402
 
 
@@ -1747,9 +1747,8 @@ def test_sparse_attention_preserves_output_storage_across_dispatch(layout: str, 
         allocating.assert_not_called()
 
 
-@pytest.mark.parametrize("fake", [False, True])
 @pytest.mark.parametrize("invalid", ["shape", "dtype", "device", "contiguous"])
-def test_direct_sparse_attention_matches_output_contract(fake: bool, invalid: str) -> None:
+def test_direct_sparse_attention_matches_output_contract(invalid: str) -> None:
     query = torch.ones(2, 2, 4, dtype=torch.bfloat16)
     output = _invalid_sparse_attention_output(query, invalid)
     args = _sparse_attention_out_args(query, output, "TND")
@@ -1757,10 +1756,7 @@ def test_direct_sparse_attention_matches_output_contract(fake: bool, invalid: st
         patch.object(torch.ops.xllm_ops, "sparse_flash_attention_lse_out", create=True) as native,
         pytest.raises(ValueError, match=invalid),
     ):
-        if fake:
-            _custom_op._sparse_flash_attention_lse_out_fake(*args[:-1], 2**63 - 1, 2**63 - 1, 2, False, output)
-        else:
-            sparse_attention.sparse_flash_attention_lse_out(*args)
+        sparse_attention.sparse_flash_attention_lse_out(*args)
     native.assert_not_called()
 
 

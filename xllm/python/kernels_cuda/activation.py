@@ -45,11 +45,4 @@ def _silu_and_mul_triton(value: torch.Tensor) -> torch.Tensor:
     return triton_silu_and_mul(value)
 
 
-@_silu_and_mul_triton.register_fake
-def _silu_and_mul_triton_fake(value: torch.Tensor) -> torch.Tensor:
-    shape = list(value.shape)
-    shape[-1] //= 2
-    return value.new_empty(shape)
-
-
 __all__ = ["silu_and_mul", "dequant_swiglu_quant"]

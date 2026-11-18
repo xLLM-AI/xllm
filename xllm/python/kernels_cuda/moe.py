@@ -115,18 +115,6 @@ def fused_moe(
     return triton_fused_moe(hidden_states, topk_ids, topk_weights, w13, w2)
 
 
-@fused_moe.register_fake
-def _fused_moe_fake(
-    hidden_states: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-) -> torch.Tensor:
-    del topk_ids, topk_weights, w13, w2
-    return torch.empty_like(hidden_states)
-
-
 def prepare_grouped_moe_weights(
     w13: torch.Tensor,
     w2: torch.Tensor,

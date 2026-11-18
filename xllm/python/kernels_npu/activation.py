@@ -53,12 +53,6 @@ def fused_sigmoid_mul(input: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     return output.reshape(input.shape)
 
 
-@fused_sigmoid_mul.register_fake
-def _fused_sigmoid_mul_fake(input: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-    _check_output_gate(input, gate)
-    return input.new_empty(input.shape)
-
-
 def dequant_swiglu_quant(
     value: torch.Tensor,
     weight_scale: torch.Tensor,

@@ -46,19 +46,6 @@ def causal_conv1d_prefill(
     )
 
 
-@causal_conv1d_prefill.register_fake
-def _causal_conv1d_prefill_fake(
-    value: torch.Tensor,
-    weight: torch.Tensor,
-    conv_state: torch.Tensor,
-    state_indices: torch.Tensor,
-    has_initial_state: torch.Tensor,
-    query_start_loc: torch.Tensor,
-) -> torch.Tensor:
-    del weight, conv_state, state_indices, has_initial_state, query_start_loc
-    return torch.empty_like(value)
-
-
 @torch.library.custom_op(
     "xllm_triton::causal_conv1d_decode",
     mutates_args=("conv_state",),
@@ -80,17 +67,6 @@ def causal_conv1d_decode(
         conv_state,
         state_indices,
     )
-
-
-@causal_conv1d_decode.register_fake
-def _causal_conv1d_decode_fake(
-    value: torch.Tensor,
-    weight: torch.Tensor,
-    conv_state: torch.Tensor,
-    state_indices: torch.Tensor,
-) -> torch.Tensor:
-    del weight, conv_state, state_indices
-    return torch.empty_like(value)
 
 
 __all__ = ["causal_conv1d_prefill", "causal_conv1d_decode"]
