@@ -166,8 +166,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
             self._capture_error_mode = "thread_local"
         self._serial_workspace_pool: list[torch.Tensor] | None = []
         self._serial_buffers = AclGraphBufferPool(self.max_batch)
-        # Capacity tiers bound static KV storage independently of the
-        # attention operator's live-length or Device-mask protocol.
+        # Device masks need compact capacity tiers. Host-length FIA updates
+        # its live lengths between replays and uses a single full-width graph.
         self._kv_capacity_graphs = kv_capacity_graphs or device_kv_lengths
         if self._kv_capacity_graphs and dp_size != 1:
             raise ValueError("KV-capacity ACL graphs require DP size one")
@@ -788,13 +788,17 @@ class DecodeAclGraphRunner(AclGraphRunner):
     def _capacity_page_limit(self) -> int:
         return (self.max_model_len + self._logical_page_size - 1) // self._logical_page_size + 1
 
+    def _capacity_tiers(self) -> tuple[int, ...]:
+        page_limit = self._capacity_page_limit()
+        return kv_capacity_buckets(page_limit) if self._device_kv_lengths else (page_limit,)
+
     def _capacity_pages(self, metadata: DecodeAclGraphMetadata) -> int:
         pages = kv_capacity_bucket(
             metadata.kv_seq_lens_host_values, self._logical_page_size, self._capacity_page_limit()
         )
         if max(metadata.kv_seq_lens_host_values) > metadata.block_table.shape[1] * self._logical_page_size:
             raise ValueError("Host KV upper bound exceeds the source block table")
-        return pages
+        return pages if self._device_kv_lengths else self._capacity_page_limit()
 
     def _capacity_warmup_metadata(
         self, metadata: DecodeAclGraphMetadata, capacity_pages: int
@@ -854,7 +858,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                         f"KV capacity graph was not captured during startup warmup: graph_key={graph_key!r}"
                     )
                 return graph_key
-            capacity_pages = kv_capacity_buckets(self._capacity_page_limit())
+            capacity_pages = self._capacity_tiers()
             if decode_metadata is None:
                 decode_metadata = self._decode_metadata(metadata, expanded)
             previous_count = len(self._graphs)
@@ -1095,7 +1099,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             selected_pages = self._capacity_pages(decode_metadata)
             if not kv_capacity_pages:
                 kv_capacity_pages = selected_pages
-            if kv_capacity_pages not in kv_capacity_buckets(self._capacity_page_limit()):
+            if kv_capacity_pages not in self._capacity_tiers():
                 raise ValueError("KV capacity graph has an unsupported KV capacity")
             if not allow_capacity_capture and selected_pages != kv_capacity_pages:
                 raise ValueError("KV capacity graph capacity does not match the current Host upper bound")
@@ -1419,6 +1423,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # in padded draft buckets. GDN state slots remain logical sequences.
         graph_query_lens = (1,) * padded_batch_size if self._device_kv_lengths else expanded_graph_query_lens
         entry.static_metadata = StaticGraphAttentionMetadata(
+            fia_workspace_kv_length=(
+                kv_capacity_pages * self._logical_page_size
+                if kv_capacity_pages and not self._device_kv_lengths
+                else None
+            ),
+            fixed_graph_kv_bound=self._device_kv_lengths and self._is_spec_draft,
             slot_mapping=self._allocate_static_tensor(
                 "slot_mapping",
                 (padded_batch_size,),

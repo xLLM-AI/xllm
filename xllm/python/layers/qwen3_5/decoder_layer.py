@@ -142,6 +142,7 @@ class Qwen3_5DecoderLayer(nn.Module):
         hidden: torch.Tensor,
         residual: torch.Tensor | None,
         positions: torch.Tensor,
+        mrope_cos_sin: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         self._prepare_forward()
         if residual is None:
@@ -150,7 +151,7 @@ class Qwen3_5DecoderLayer(nn.Module):
         else:
             hidden, residual = self.input_layernorm(hidden, residual)
         if self.layer_type == "full_attention":
-            hidden = self.self_attn(positions, hidden)
+            hidden = self.self_attn(positions, hidden, mrope_cos_sin)
         else:
             hidden = self.linear_attn(hidden)
         hidden, residual = self.post_attention_layernorm(hidden, residual)

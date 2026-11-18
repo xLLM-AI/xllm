@@ -190,6 +190,7 @@ def _model() -> Qwen3_5ForConditionalGeneration:
     model.video_token_id = 11
     decoder = Qwen3_5Model.__new__(Qwen3_5Model)
     nn.Module.__init__(decoder)
+    decoder._use_fused_mrope = False
     decoder.embed_tokens = nn.Embedding.from_pretrained(torch.arange(64).view(16, 4).float())
     decoder.layers = nn.ModuleList()
     decoder.norm = _IdentityNorm()

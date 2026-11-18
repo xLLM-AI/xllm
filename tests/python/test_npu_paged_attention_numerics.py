@@ -88,7 +88,13 @@ def test_serial_fia_buffers_match_private_graphs(no_padding: bool, monkeypatch: 
         backend = NpuPagedAttentionBackend(heads, 1, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
         backend.bind_kv_caches(caches)
         runner = DecodeAclGraphRunner(
-            _FiaModel(backend), backend, device, 512, 262144, enable_graph_mode_decode_no_padding=no_padding
+            _FiaModel(backend),
+            backend,
+            device,
+            512,
+            262144,
+            enable_graph_mode_decode_no_padding=no_padding,
+            kv_capacity_graphs=shared,
         )
         if not shared:
             runner._serial_workspace_pool = None
@@ -102,7 +108,7 @@ def test_serial_fia_buffers_match_private_graphs(no_padding: bool, monkeypatch: 
         tokens = torch.zeros(rows, dtype=torch.int32, device=device)
         inputs[rows] = (tokens, query_host[:rows].to(device).reshape(rows, heads * dimension))
         table = torch.arange(pages, dtype=torch.int32, device=device).expand(rows, -1).contiguous()
-        for length in sorted({length for size, length in sequence if size == rows} | {32769}):
+        for length in sorted({length for size, length in sequence if size == rows} | {7, 32769}):
             indptr, indices, last_page = build_row_aligned_paged_kv_metadata(table, [length] * rows, page_size)
             metadata_by_shape[rows, length] = StaticGraphAttentionMetadata(
                 slot_mapping=torch.full((rows,), -1, dtype=torch.int32, device=device),
@@ -116,8 +122,10 @@ def test_serial_fia_buffers_match_private_graphs(no_padding: bool, monkeypatch: 
                 paged_kv_indices=indices,
                 paged_kv_last_page_len=last_page,
             )
-        for runner in runners:
-            runner.warmup(tokens, tokens, metadata_by_shape[rows, 32769], inputs[rows][1], is_graph_warmup=True)
+        # Start the shared TND graph at a short length. Its workspace must
+        # handle a longer request without capturing another capacity tier.
+        for runner, warmup_length in zip(runners, (32769, 7)):
+            runner.warmup(tokens, tokens, metadata_by_shape[rows, warmup_length], inputs[rows][1], is_graph_warmup=True)
 
     entries = list(runners[1]._graphs.values())
     for name in ("static_input_ids", "static_positions", "static_input_embedding"):
@@ -1155,6 +1163,8 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(
         return metadata
 
     runner.warmup(tokens, tokens, _metadata_for(8, dummy=shared_draft), is_graph_warmup=True)
+    assert runner._graphs
+    assert all(not entry.graph_tasks for entry in runner._graphs.values())
     # With zero queries and keys, attention must average the entire live
     # prefix. This distinguishes a frozen short capture bound from the mask.
     for length in (129, 1875, 7, 1987):

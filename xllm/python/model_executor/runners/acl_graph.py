@@ -62,6 +62,8 @@ class StaticGraphAttentionMetadata:
     kv_cu_seq_lens: torch.Tensor | None = None
     kv_seq_lens_host: torch.Tensor | None = None
     kv_seq_lens_host_values: list[int] | None = None
+    fia_workspace_kv_length: int | None = None
+    fixed_graph_kv_bound: bool = False
     q_seq_lens_host: torch.Tensor | None = None
     new_cache_slots_host_values: list[int] | None = None
     paged_kv_indptr_host: torch.Tensor | None = None

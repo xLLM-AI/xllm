@@ -27,7 +27,6 @@ from xllm.python.layers.qwen3_5.common import (
     PartialRotaryEmbedding,
     Qwen3_5AttentionConfig,
 )
-from xllm.python.model_executor.forward_context import get_forward_context_or_none
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 
 
@@ -101,6 +100,7 @@ class NpuQwen3_5Attention(Qwen3_5Attention):
         self,
         positions: torch.Tensor,
         hidden: torch.Tensor,
+        mrope_cos_sin: torch.Tensor | None = None,
     ) -> torch.Tensor:
         flash_comm1 = get_flash_comm1_context()
         if flash_comm1 is not None:
@@ -110,18 +110,9 @@ class NpuQwen3_5Attention(Qwen3_5Attention):
         if self._mrope_gather_pattern is None:
             raise RuntimeError("fused QKV mRoPE gather pattern is unavailable")
 
-        mrope_cos_sin: object
-        context = get_forward_context_or_none()
-        if context is None:
+        # Standalone layer callers do not have a model-level rotary input.
+        if mrope_cos_sin is None:
             mrope_cos_sin = self.rotary.build_mrope_cos_sin(positions)
-        else:
-            cache_key = (__name__, "mrope_cos_sin", id(self.rotary))
-            mrope_cos_sin = context.layer_shared_cache.get(cache_key)
-            if mrope_cos_sin is None:
-                mrope_cos_sin = self.rotary.build_mrope_cos_sin(positions)
-                context.layer_shared_cache[cache_key] = mrope_cos_sin
-            if not isinstance(mrope_cos_sin, torch.Tensor):
-                raise TypeError("invalid cached Qwen3.5 mRoPE cosine/sine tensor")
         qkvg = self.qkv_proj(hidden)
         query, key, value, gate = kernels.split_qkv_rmsnorm_mrope(
             qkvg,

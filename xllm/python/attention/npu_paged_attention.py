@@ -820,7 +820,9 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 # Direct prefill FIA does not use decode's .out workspace.
                 self._paged_graph_state = None
             else:
-                self._prepare_paged_graph()
+                # Live lengths can grow after the warmup capture. Size the
+                # workspace for the graph's bound without changing task lengths.
+                self._prepare_paged_graph(workspace_kv_length=getattr(metadata, "fia_workspace_kv_length", None))
 
         # Pre-cache MLA (sparse SFA) seq-lens once per step; shared by
         # execute_mla / mla_index_context instead of re-derived per layer.
@@ -2135,12 +2137,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 # exact device lengths; never read acceptance back to Host.
                 widths = prepared.query_lengths
                 left_context = block_draft_window_context(layer)
+                update_kv_bound = shares_execution_workspace() and not getattr(metadata, "fixed_graph_kv_bound", False)
                 if left_context is None:
                     atten_mask = self._block_attention_mask(prepared, layer)
                     block_table = self._block_table_i32
                     kv_lengths = prepared.actual_seq_kv
                     context = get_forward_context_or_none()
-                    if context is not None and context.acl_graph is not None and not shares_execution_workspace():
+                    if context is not None and context.acl_graph is not None and not update_kv_bound:
                         # This direct FIA call cannot update Host arguments on
                         # replay. The Device mask limits the capacity bound.
                         kv_lengths = [prepared.kv_capacity] * len(widths)
@@ -2154,7 +2157,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 # mask and the same paged KV without a Host length readback.
                 query = q_3d.view(len(widths), widths[0], self.num_heads, self.head_dim)
                 query = query.transpose(1, 2).contiguous()
-                if left_context is None and shares_execution_workspace():
+                if left_context is None and update_kv_bound:
                     output = self._bounded_paged_graph_attention(
                         query, k_flat, v_flat, atten_mask, prepared, block_size
                     )
@@ -2324,16 +2327,16 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             # The speculative prefix is committed on Device after Host
             # preparation. Capture fixed Host capacities and mask their tail
             # from the live Slot lengths, including inside ACL graph replay.
-            bounded = shares_execution_workspace()
+            shared_workspace = shares_execution_workspace()
             lengths = prepared.device_kv_lengths.view(-1, 1, 1, 1)
             # A captured graph pins this capacity-wide mask. Inside one, the
             # layers of a forward share a single pooled mask; eager callers
             # may change Device lengths between calls and must rebuild it.
             mask_key = ("decode", prepared.kv_capacity)
-            mask = self._block_attention_masks.get(mask_key) if bounded else None
+            mask = self._block_attention_masks.get(mask_key) if shared_workspace else None
             if mask is None:
                 keys = torch.arange(prepared.kv_capacity, dtype=torch.int32, device=q_3d.device).view(1, 1, 1, -1)
-                if bounded:
+                if shared_workspace:
                     elements = num_tokens * prepared.kv_capacity
                     mask = get_execution_workspace(
                         ("DEVICE_LENGTH_DECODE_MASK", num_tokens, prepared.kv_capacity),
@@ -2344,7 +2347,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 else:
                     mask = (keys >= lengths).contiguous()
             query = q_3d.view(num_tokens, 1, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-            if bounded:
+            if shared_workspace and not getattr(metadata, "fixed_graph_kv_bound", False):
                 # FIA reads every captured KV position even when the mask
                 # hides it, so replay must refresh the Host upper bounds.
                 output = self._bounded_paged_graph_attention(query, k_flat, v_flat, mask, prepared, block_size)
