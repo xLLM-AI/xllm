@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
-import torch_npu
+from xllm_kernel.ops import get_fused_attention
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.backend import (
@@ -83,10 +83,6 @@ SPARSE_MODE_RIGHT_DOWN_CAUSAL = 3
 # the parallel Torch indexing path. Count both outputs across all Full layers,
 # including the captured table's padded capacity rather than its live width.
 _SHARED_FULL_MAPPING_MAX_FUSED_ELEMENTS = 32 * 1024
-
-_HAS_FIA_V2 = hasattr(torch.ops.npu, "npu_fused_infer_attention_score_v2") and hasattr(
-    torch_npu, "_npu_fused_infer_attention_score_v2_get_max_workspace"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,7 +268,9 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self.sliding_window = sliding_window
         self.dtype = dtype
         self.device = device
-        self._use_fia_v2 = _HAS_FIA_V2
+        self._fused_attention = get_fused_attention()
+        self._fia_with_rope = self._fused_attention.with_separate_rope
+        self._paged_fia = self._fia_with_rope or self._fused_attention
         self._is_mla = is_mla
         self._uses_sparse_mla = False
         self._kda_checkpoint_stride: int | None = None
@@ -309,9 +307,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         # sparse MLA never pays the D2H or allocates these.
         self._mla_actual_seq_q_host: list[int] | None = None
         self._mla_actual_seq_kv_host: list[int] | None = None
-        self._mla_graph_workspaces: dict[tuple[int, ...], torch.Tensor] = {}
-        self._mla_graph_outputs: dict[tuple[int, ...], torch.Tensor] = {}
-        self._mla_graph_lses: dict[tuple[int, ...], torch.Tensor] = {}
         # CP MLA index contexts are requested once per decoder layer. Keep the
         # segment-row block-table view for the current forward so every layer
         # reuses the same contiguous tensor instead of launching another
@@ -672,8 +667,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             self._actual_seq_kv = []
             self._mla_actual_seq_q = prepared.actual_seq_q
             self._mla_actual_seq_kv = prepared.actual_seq_kv
-            self._mla_actual_seq_q_host = prepared.query_ends if self.requires_host_kv_lengths else None
-            self._mla_actual_seq_kv_host = prepared.kv_lengths if self.requires_host_kv_lengths else None
+            self._set_mla_host_lengths(prepared.query_ends, prepared.kv_lengths, graph_mode=graph_mode)
             self._mla_max_seqlen_q = prepared.max_query_len
             self._mla_max_seqlen_k = (
                 _mla_graph_max_seqlen_k(prepared.block_table, self.page_size) if graph_mode else prepared.max_seq_len
@@ -865,14 +859,17 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 self._mla_actual_seq_q = actual_seq_q
                 self._mla_actual_seq_kv = actual_seq_kv
             if self.requires_host_kv_lengths:
-                if metadata.is_prefill or metadata.is_chunked_prefill:
-                    self._mla_actual_seq_q_host = actual_seq_q.cpu().tolist()
-                else:
-                    self._mla_actual_seq_q_host = list(range(1, int(actual_seq_kv.numel()) + 1))
-                if kv_seq_lens_host_values is not None:
-                    self._mla_actual_seq_kv_host = list(kv_seq_lens_host_values)
-                else:
-                    self._mla_actual_seq_kv_host = actual_seq_kv.cpu().tolist()
+                query_ends = (
+                    actual_seq_q.cpu().tolist()
+                    if metadata.is_prefill or metadata.is_chunked_prefill
+                    else list(range(1, int(actual_seq_kv.numel()) + 1))
+                )
+                kv_lengths = (
+                    list(kv_seq_lens_host_values)
+                    if kv_seq_lens_host_values is not None
+                    else actual_seq_kv.cpu().tolist()
+                )
+                self._set_mla_host_lengths(query_ends, kv_lengths, graph_mode=graph_mode)
             else:
                 self._mla_actual_seq_q_host = None
                 self._mla_actual_seq_kv_host = None
@@ -904,6 +901,21 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             self._mla_max_seqlen_k = 0
 
         self._prepare_kv_shard_materialization(metadata)
+
+    def _set_mla_host_lengths(self, query: list[int], kv: list[int], *, graph_mode: bool) -> None:
+        if not self.requires_host_kv_lengths:
+            self._mla_actual_seq_q_host = self._mla_actual_seq_kv_host = None
+            return
+        context = get_forward_context_or_none() if graph_mode else None
+        if context is not None and context.execution_state is not None:
+            # Deferred task updates keep these lists even when another entry
+            # prepares the same backend. Refresh contents on entry activation.
+            host_query, host_kv = context.execution_state.mla_fia_lengths
+            host_query[:] = query
+            host_kv[:] = kv
+            query, kv = host_query, host_kv
+        self._mla_actual_seq_q_host = query
+        self._mla_actual_seq_kv_host = kv
 
     def _prepare_paged_graph(self, *, workspace_kv_length: int | None = None) -> None:
         if self._block_table_i32 is None:
@@ -980,23 +992,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             dtype=self.dtype,
             device=self.device,
         )
-        if self._use_fia_v2:
-            return torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                query=dummy_q,
-                key=dummy_kv,
-                value=dummy_kv,
-                block_table=block_table,
-                input_layout="TND",
-                block_size=block_size,
-                actual_seq_qlen=self._actual_seq_q,
-                actual_seq_kvlen=workspace_actual_seq_kv,
-                num_key_value_heads=self.num_kv_heads,
-                num_query_heads=self.num_heads,
-                sparse_mode=_SPARSE_MODE_NONE,
-                softmax_scale=self.scale,
-                return_softmax_lse=False,
-            )
-        return torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+        return self._paged_fia.workspace(
             query=dummy_q,
             key=dummy_kv,
             value=dummy_kv,
@@ -1815,7 +1811,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         capacity constant and recompute the mask from Slot KV lengths inside
         capture, so accepted-prefix changes never expose stale cache rows.
         """
-        if not self._mla_block_draft or not self._use_fia_v2:
+        if not self._mla_block_draft or self._fia_with_rope is None:
             raise RuntimeError("non-causal MLA requires the MLA block-draft FIA v2 backend")
         lengths = self._mla_actual_seq_kv
         query_ends = self._mla_actual_seq_q_host
@@ -1831,68 +1827,25 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             keys = torch.arange(capacity, device=q_latent.device).view(1, 1, 1, -1)
             mask = (keys >= lengths.view(-1, 1, 1, 1)).expand(-1, 1, widths[0], -1).contiguous()
             self._block_attention_masks[mask_key] = mask
-        output, _ = torch.ops.npu.npu_fused_infer_attention_score_v2(
+        output, _ = self._fia_with_rope(
             q_latent,
             nope_cache.flatten(2),
             nope_cache.flatten(2),
             query_rope=q_pe,
             key_rope=rope_cache.flatten(2),
             atten_mask=mask,
-            actual_seq_qlen=query_ends,
-            actual_seq_kvlen=[capacity] * len(query_ends),
+            actual_seq_lengths=query_ends,
+            actual_seq_lengths_kv=[capacity] * len(query_ends),
             block_table=block_table,
-            num_query_heads=layer.num_heads,
+            num_heads=layer.num_heads,
             num_key_value_heads=1,
-            softmax_scale=layer.scale,
+            scale=layer.scale,
             input_layout="TND",
             sparse_mode=_SPARSE_MODE_NONE,
             block_size=nope_cache.shape[1],
-            return_softmax_lse=False,
+            softmax_lse_flag=False,
         )
         return output
-
-    def _mla_dense_fia_v2_out(
-        self,
-        q_latent: torch.Tensor,
-        q_pe: torch.Tensor,
-        nope_cache: torch.Tensor,
-        rope_cache: torch.Tensor,
-        block_table: torch.Tensor,
-        workspace: torch.Tensor,
-        output: torch.Tensor,
-        softmax_lse: torch.Tensor,
-    ) -> None:
-        if self._mla_actual_seq_q_host is None:
-            raise RuntimeError("dense MLA requires query sequence lengths")
-        if self._mla_actual_seq_kv_host is None:
-            raise RuntimeError("dense MLA requires KV sequence lengths")
-        block_size = nope_cache.size(1)
-        nope_flat = nope_cache.view(nope_cache.size(0), block_size, -1)
-        rope_flat = rope_cache.view(rope_cache.size(0), block_size, -1)
-        is_prefill = bool(
-            self._metadata is not None and (self._metadata.is_prefill or self._metadata.is_chunked_prefill)
-        )
-        torch.ops.npu.npu_fused_infer_attention_score_v2.out(
-            q_latent,
-            nope_flat,
-            nope_flat,
-            query_rope=q_pe,
-            key_rope=rope_flat,
-            pse_shift=None,
-            atten_mask=self._get_causal_mask() if is_prefill else None,
-            actual_seq_qlen=self._mla_actual_seq_q_host,
-            actual_seq_kvlen=self._mla_actual_seq_kv_host,
-            block_table=block_table,
-            num_query_heads=self.num_heads,
-            num_key_value_heads=1,
-            softmax_scale=self.scale,
-            input_layout="TND",
-            sparse_mode=(SPARSE_MODE_RIGHT_DOWN_CAUSAL if is_prefill else _SPARSE_MODE_NONE),
-            block_size=block_size,
-            return_softmax_lse=False,
-            workspace=workspace,
-            out=[output, softmax_lse],
-        )
 
     def _mla_dense_fia_v2(
         self,
@@ -1904,7 +1857,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         layer_id: int,
     ) -> torch.Tensor:
         """Run dense absorbed MLA with FIA v2 and separate RoPE caches."""
-        if not self._use_fia_v2:
+        fia = self._fia_with_rope
+        if fia is None:
             raise RuntimeError("dense MLA requires FIA v2 support")
         if self._mla_actual_seq_q_host is None:
             raise RuntimeError("dense MLA requires query sequence lengths")
@@ -1922,79 +1876,45 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             "key_rope": rope_flat,
             "pse_shift": None,
             "atten_mask": self._get_causal_mask() if is_prefill else None,
-            "actual_seq_qlen": self._mla_actual_seq_q_host,
-            "actual_seq_kvlen": self._mla_actual_seq_kv_host,
+            "actual_seq_lengths": self._mla_actual_seq_q_host,
+            "actual_seq_lengths_kv": self._mla_actual_seq_kv_host,
             "block_table": block_table,
-            "num_query_heads": self.num_heads,
+            "num_heads": self.num_heads,
             "num_key_value_heads": 1,
-            "softmax_scale": self.scale,
+            "scale": self.scale,
             "input_layout": "TND",
             "sparse_mode": (SPARSE_MODE_RIGHT_DOWN_CAUSAL if is_prefill else _SPARSE_MODE_NONE),
             "block_size": block_size,
-            "return_softmax_lse": False,
+            "softmax_lse_flag": False,
         }
 
-        graph_context = get_forward_context().acl_graph
-        if graph_context is None:
-            output, _ = torch.ops.npu.npu_fused_infer_attention_score_v2(
+        context = get_forward_context()
+        if context.execution_state is None:
+            if context.acl_graph is not None:
+                raise RuntimeError("dense MLA graph attention requires an execution entry")
+            output, _ = fia(q_latent, nope_flat, nope_flat, **common_kwargs)
+            return output
+
+        key = (layer_id, q_latent.device, q_latent.dtype, *q_latent.shape)
+        output = get_execution_buffer(("MLA_DENSE_OUTPUT", *key), lambda: torch.empty_like(q_latent), shared=True)
+        softmax_lse = get_execution_buffer(("MLA_DENSE_LSE", *key), lambda: q_latent.new_empty(0), shared=True)
+        workspace = get_execution_buffer(
+            ("MLA_DENSE_WORKSPACE", *key),
+            lambda: fia.workspace(q_latent, nope_flat, nope_flat, **common_kwargs),
+            shared=True,
+        )
+        if context.acl_graph is None:
+            fia.out(q_latent, nope_flat, nope_flat, workspace=workspace, out=[output, softmax_lse], **common_kwargs)
+        else:
+            context.acl_graph.capture_task(
+                fia.out,
                 q_latent,
                 nope_flat,
                 nope_flat,
+                workspace=workspace,
+                out=[output, softmax_lse],
                 **common_kwargs,
             )
-            return output
-
-        output_key = ("MLA_DENSE_OUTPUT", layer_id, str(q_latent.device), q_latent.dtype) + tuple(q_latent.shape)
-        graph_state = get_forward_context().execution_state
-        if graph_state is None:
-            output = self._mla_graph_outputs.get(output_key)
-            if output is None:
-                output = torch.empty_like(q_latent)
-                self._mla_graph_outputs[output_key] = output
-                self._mla_graph_lses[output_key] = torch.empty(
-                    0,
-                    dtype=q_latent.dtype,
-                    device=q_latent.device,
-                )
-            softmax_lse = self._mla_graph_lses[output_key]
-            workspace = self._mla_graph_workspaces.get(output_key)
-            if workspace is None:
-                workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                    q_latent,
-                    nope_flat,
-                    nope_flat,
-                    **common_kwargs,
-                )
-                self._mla_graph_workspaces[output_key] = workspace
-        else:
-            output = get_execution_buffer(output_key, lambda: torch.empty_like(q_latent), shared=True)
-            softmax_lse = get_execution_buffer(
-                ("MLA_DENSE_LSE",) + output_key[1:],
-                lambda: torch.empty(0, dtype=q_latent.dtype, device=q_latent.device),
-                shared=True,
-            )
-            workspace = get_execution_buffer(
-                ("MLA_DENSE_WORKSPACE",) + output_key[1:],
-                lambda: torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                    q_latent,
-                    nope_flat,
-                    nope_flat,
-                    **common_kwargs,
-                ),
-                shared=True,
-            )
-
-        graph_context.capture_task(
-            self._mla_dense_fia_v2_out,
-            q_latent,
-            q_pe,
-            nope_cache,
-            rope_cache,
-            block_table,
-            workspace,
-            output,
-            softmax_lse,
-        )
         return output
 
     # ------------------------------------------------------------------
@@ -2075,7 +1995,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             workspace_query = query.new_empty((workspace_rows, *query.shape[1:]))
             workspace_mask = mask.new_empty((workspace_rows, *mask.shape[1:]))
             workspace_table = translated_table.new_empty((workspace_rows, translated_table.shape[1]))
-            return torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+            return self._fused_attention.workspace(
                 query=workspace_query,
                 key=key,
                 value=value,
@@ -2127,34 +2047,28 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 raise RuntimeError("shared bounded graph block-table shape changed during replay")
             state.block_table.copy_(translated_table)
 
-        def _update_bounded_fia_args() -> None:
-            torch.ops.npu.npu_fused_infer_attention_score.out(
-                query,
-                key,
-                value,
-                atten_mask=mask,
-                block_table=state.block_table,
-                actual_seq_lengths=state.query,
-                actual_seq_lengths_kv=state.kv,
-                num_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                scale=self.scale,
-                input_layout="BNSD",
-                block_size=block_size,
-                sparse_mode=_SPARSE_MODE_NONE,
-                pre_tokens=2147483647,
-                next_tokens=2147483647,
-                softmax_lse_flag=False,
-                workspace=state.workspace,
-                out=[state.output, state.lse],
-            )
-
+        fia_out = self._fused_attention.out
+        options = {
+            "atten_mask": mask,
+            "block_table": state.block_table,
+            "actual_seq_lengths": state.query,
+            "actual_seq_lengths_kv": state.kv,
+            "num_heads": self.num_heads,
+            "num_key_value_heads": self.num_kv_heads,
+            "scale": self.scale,
+            "input_layout": "BNSD",
+            "block_size": block_size,
+            "sparse_mode": _SPARSE_MODE_NONE,
+            "pre_tokens": 2147483647,
+            "next_tokens": 2147483647,
+            "softmax_lse_flag": False,
+            "workspace": state.workspace,
+            "out": [state.output, state.lse],
+        }
         if graph_context is None:
-            # Capture warmup acquires the scratch here: a workspace first
-            # requested during capture stays pinned in that graph's pool.
-            _update_bounded_fia_args()
-            return state.output
-        graph_context.capture_task(_update_bounded_fia_args)
+            fia_out(query, key, value, **options)
+        else:
+            graph_context.capture_task(fia_out, query, key, value, **options)
         return state.output
 
     def _prefill(
@@ -2227,7 +2141,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                         query, k_flat, v_flat, atten_mask, prepared, block_size
                     )
                     return output.transpose(1, 2).reshape(num_tokens, self.num_heads * self.head_dim)
-                output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                output, _ = self._fused_attention(
                     query,
                     k_flat,
                     v_flat,
@@ -2246,7 +2160,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                     softmax_lse_flag=False,
                 )
                 return output.transpose(1, 2).reshape(num_tokens, self.num_heads * self.head_dim)
-            output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+            output, _ = self._fused_attention(
                 q_3d,
                 k_flat,
                 v_flat,
@@ -2267,7 +2181,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             )
             return output.reshape(num_tokens, self.num_heads * self.head_dim)
 
-        output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+        output, _ = self._fused_attention(
             q_3d,
             k_3d,
             v_3d,
@@ -2345,7 +2259,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         kv_prefix_k = kv_global_k.index_select(0, cp_context.kv_gather_index).contiguous()
         kv_prefix_v = kv_global_v.index_select(0, cp_context.kv_gather_index).contiguous()
 
-        output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+        output, _ = self._fused_attention(
             q_real,
             kv_prefix_k,
             kv_prefix_v,
@@ -2372,66 +2286,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     # ------------------------------------------------------------------
     # Decode: FIA with block_table (paged KV, no gather)
     # ------------------------------------------------------------------
-
-    def _fia_out(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        block_size: int,
-        *,
-        actual_seq_q: list[int] | torch.Tensor,
-        actual_seq_kv: list[int] | torch.Tensor,
-        block_table: torch.Tensor,
-        workspace: torch.Tensor,
-        output: torch.Tensor,
-        lse: torch.Tensor,
-    ) -> None:
-        # Every mutable argument belongs to the captured entry. A deferred
-        # update never resolves parameters through the backend's active state.
-        if self._use_fia_v2:
-            torch.ops.npu.npu_fused_infer_attention_score_v2.out(
-                q,
-                k,
-                v,
-                query_rope=None,
-                key_rope=None,
-                pse_shift=None,
-                atten_mask=None,
-                actual_seq_qlen=actual_seq_q,
-                actual_seq_kvlen=actual_seq_kv,
-                block_table=block_table,
-                num_query_heads=self.num_heads,
-                softmax_scale=self.scale,
-                input_layout="TND",
-                num_key_value_heads=self.num_kv_heads,
-                sparse_mode=_SPARSE_MODE_NONE,
-                block_size=block_size,
-                return_softmax_lse=False,
-                workspace=workspace,
-                out=[output, lse],
-            )
-            return
-
-        torch.ops.npu.npu_fused_infer_attention_score.out(
-            q,
-            k,
-            v,
-            pse_shift=None,
-            atten_mask=None,
-            actual_seq_lengths=actual_seq_q,
-            actual_seq_lengths_kv=actual_seq_kv,
-            block_table=block_table,
-            num_heads=self.num_heads,
-            scale=self.scale,
-            input_layout="TND",
-            num_key_value_heads=self.num_kv_heads,
-            sparse_mode=_SPARSE_MODE_NONE,
-            block_size=block_size,
-            softmax_lse_flag=False,
-            workspace=workspace,
-            out=[output, lse],
-        )
 
     def _decode(
         self,
@@ -2477,7 +2331,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 # hides it, so replay must refresh the Host upper bounds.
                 output = self._bounded_paged_graph_attention(query, k_flat, v_flat, mask, prepared, block_size)
                 return output.transpose(1, 2).reshape(num_tokens, self.num_heads * self.head_dim)
-            output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+            output, _ = self._fused_attention(
                 query,
                 k_flat,
                 v_flat,
@@ -2497,71 +2351,45 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             )
             return output.transpose(1, 2).reshape(num_tokens, self.num_heads * self.head_dim)
 
-        graph_context = get_forward_context().acl_graph
-        if graph_context is not None:
-            state = self._paged_graph_state
+        context = get_forward_context()
+        graph_context = context.acl_graph
+        state = self._paged_graph_state
+        options = {
+            "atten_mask": None,
+            "num_heads": self.num_heads,
+            "scale": self.scale,
+            "input_layout": "TND",
+            "num_key_value_heads": self.num_kv_heads,
+            "sparse_mode": _SPARSE_MODE_NONE,
+            "block_size": block_size,
+            "softmax_lse_flag": False,
+        }
+        if graph_context is not None or (context.execution_state is not None and state is not None):
             if state is None:
                 raise RuntimeError("ACL graph output buffer is not prepared")
-            actual_seq_q = state.query
-            actual_seq_kv = state.kv
-            block_table = state.block_table
-            workspace = state.workspace
-            output = state.output
-            lse = state.lse
+            graph_options = {
+                **options,
+                "actual_seq_lengths": state.query,
+                "actual_seq_lengths_kv": state.kv,
+                "block_table": state.block_table,
+                "workspace": state.workspace,
+                "out": [state.output, state.lse],
+            }
+            if graph_context is None:
+                self._paged_fia.out(q_3d, k_flat, v_flat, **graph_options)
+            else:
+                graph_context.capture_task(self._paged_fia.out, q_3d, k_flat, v_flat, **graph_options)
+            return state.output.reshape(num_tokens, self.num_heads * self.head_dim)
 
-            graph_context.capture_task(
-                self._fia_out,
-                q_3d,
-                k_flat,
-                v_flat,
-                block_size,
-                actual_seq_q=actual_seq_q,
-                actual_seq_kv=actual_seq_kv,
-                block_table=block_table,
-                workspace=workspace,
-                output=output,
-                lse=lse,
-            )
-            return output.reshape(num_tokens, self.num_heads * self.head_dim)
-
-        if self._use_fia_v2:
-            output, _ = torch.ops.npu.npu_fused_infer_attention_score_v2(
-                q_3d,
-                k_flat,
-                v_flat,
-                query_rope=None,
-                key_rope=None,
-                pse_shift=None,
-                atten_mask=None,
-                actual_seq_qlen=self._actual_seq_q[:num_tokens],
-                actual_seq_kvlen=self._actual_seq_kv[:num_tokens],
-                block_table=self._block_table_i32,
-                num_query_heads=self.num_heads,
-                softmax_scale=self.scale,
-                input_layout="TND",
-                num_key_value_heads=self.num_kv_heads,
-                sparse_mode=_SPARSE_MODE_NONE,
-                block_size=block_size,
-                return_softmax_lse=False,
-            )
-        else:
-            output, _ = torch.ops.npu.npu_fused_infer_attention_score(
-                q_3d,
-                k_flat,
-                v_flat,
-                pse_shift=None,
-                atten_mask=None,
-                actual_seq_lengths=self._actual_seq_q[:num_tokens],
-                actual_seq_lengths_kv=self._actual_seq_kv[:num_tokens],
-                block_table=self._block_table_i32,
-                num_heads=self.num_heads,
-                scale=self.scale,
-                input_layout="TND",
-                num_key_value_heads=self.num_kv_heads,
-                sparse_mode=_SPARSE_MODE_NONE,
-                block_size=block_size,
-                softmax_lse_flag=False,
-            )
+        output, _ = self._paged_fia(
+            q_3d,
+            k_flat,
+            v_flat,
+            actual_seq_lengths=self._actual_seq_q[:num_tokens],
+            actual_seq_lengths_kv=self._actual_seq_kv[:num_tokens],
+            block_table=self._block_table_i32,
+            **options,
+        )
         return output.reshape(num_tokens, self.num_heads * self.head_dim)
 
     # ------------------------------------------------------------------

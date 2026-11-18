@@ -25,7 +25,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-torch_npu = pytest.importorskip("torch_npu", reason="Dense DCP backend tests import the NPU attention backend")
+pytest.importorskip("torch_npu", reason="Dense DCP backend tests import the NPU attention backend")
 
 from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.dense_dcp_backend import DenseDcpAttentionBackend
@@ -163,7 +163,7 @@ def _mock_dcp_exchange(result: torch.Tensor | None = None) -> Iterator[tuple[Mag
     pack = patch("xllm.python.attention.dense_dcp_backend.pack_dcp_output_lse")
     combine = patch(
         "xllm.python.attention.dense_dcp_backend.fused_dcp_lse_combine",
-        side_effect=lambda *args, **kwargs: (kwargs["output"] if result is None else kwargs["output"].copy_(result)),
+        side_effect=lambda *args, **kwargs: kwargs["output"] if result is None else kwargs["output"].copy_(result),
     )
     exchange = patch("xllm.python.attention.dense_dcp_backend.dist.all_to_all_single")
     with pack as pack_mock, combine as combine_mock, exchange as exchange_mock:
@@ -393,11 +393,7 @@ def test_chunked_prefill_participates_when_prefix_is_remote_only() -> None:
             return_value=gathered_query,
         ),
         patch("xllm.python.attention.dense_dcp_backend.kernels.reshape_paged_cache", create=True),
-        patch.object(
-            torch.ops.npu,
-            "npu_fused_infer_attention_score",
-            return_value=(current_output, current_lse),
-        ) as current_attention,
+        patch.object(backend, "_fused_attention", return_value=(current_output, current_lse)) as current_attention,
         patch.object(backend._fia, "run") as context_attention,
         _mock_dcp_exchange(merged) as (pack, combine, _),
     ):
@@ -467,12 +463,9 @@ def test_prepare_graph_buffers_use_gathered_query_head_shape() -> None:
 
     with (
         forward_context(_context(backend, metadata, execution_state)),
-        patch.object(
-            torch_npu,
-            "_npu_fused_infer_attention_score_get_max_workspace",
-            return_value=torch.empty(16, dtype=torch.uint8),
-        ),
+        patch.object(backend._fia, "_fia") as fia,
     ):
+        fia.workspace.return_value = torch.empty(16, dtype=torch.uint8)
         backend.prepare(metadata, graph_mode=True)
 
     buffers = backend._fia._buffers
@@ -488,10 +481,9 @@ def test_graph_prepare_reuses_buffers_and_queries_workspace_only_once() -> None:
     context = _context(backend, metadata, AclGraphExecutionState({}))
     with (
         forward_context(context),
-        patch.object(
-            torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", return_value=torch.empty(16)
-        ) as workspace,
+        patch.object(backend._fia, "_fia") as fia,
     ):
+        fia.workspace.return_value = torch.empty(16)
         backend.prepare(metadata, graph_mode=True)
         first = backend._fia._buffers
         metadata.kv_seq_lens_host = torch.tensor([8, 13])
@@ -499,13 +491,13 @@ def test_graph_prepare_reuses_buffers_and_queries_workspace_only_once() -> None:
             backend.prepare(metadata, graph_mode=True)
         allocate.assert_not_called()
         second = backend._fia._buffers
-    workspace.assert_called_once()
+    fia.workspace.assert_called_once()
     assert first is not None and second is not None
     assert first.output is second.output
     assert first.lse is second.lse
     assert first.workspace is second.workspace
     assert first.block_table is metadata.block_table
-    assert workspace.call_args.args[1].data_ptr() == backend._kv_caches[0].key.data_ptr()
+    assert fia.workspace.call_args.args[1].data_ptr() == backend._kv_caches[0].key.data_ptr()
 
 
 @pytest.mark.parametrize(("second_bucket", "share_workspace"), [(1, False), (2, False), (2, True)])
@@ -529,14 +521,13 @@ def test_graph_tasks_keep_entry_resources_and_layer_operands_after_switching_buc
         calls.append((query, key, value, {**kwargs, "actual_seq_lengths_kv": list(kwargs["actual_seq_lengths_kv"])}))
 
     with (
-        patch.object(
-            torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", side_effect=lambda *a, **k: torch.empty(16)
-        ),
-        patch.object(torch.ops.npu.npu_fused_infer_attention_score, "out", side_effect=record_fia),
+        patch.object(backend._fia, "_fia") as fia,
         patch.object(torch.npu, "ExternalEvent", side_effect=lambda: MagicMock()),
         patch.object(torch.npu, "graph_task_group_begin"),
         patch.object(torch.npu, "graph_task_group_end", side_effect=lambda _: object()),
     ):
+        fia.workspace.side_effect = lambda *args, **kwargs: torch.empty(16)
+        fia.out.side_effect = record_fia
         with forward_context(replace(context_a, acl_graph=capture_a)):
             backend.prepare(metadata_a, graph_mode=True)
             module_a = context_a.layer_shared_cache[DenseDcpMetadata]
@@ -591,7 +582,7 @@ def test_pure_prefill_uses_current_kv_even_if_upstream_supplies_a_block_table(wi
         forward_context(_context(backend, metadata)),
         patch("xllm.python.attention.dense_dcp_backend.start_all_gather") as gather,
         patch("xllm.python.attention.dense_dcp_backend.kernels.reshape_paged_cache", create=True),
-        patch.object(torch.ops.npu, "npu_fused_infer_attention_score", return_value=(expected, None)) as fia,
+        patch.object(backend, "_fused_attention", return_value=(expected, None)) as fia,
     ):
         backend.prepare(metadata)
         result = backend.execute(query, key, value, SimpleNamespace(causal=True, layer_id=0))
@@ -610,12 +601,13 @@ def test_graph_capture_failure_closes_task_group_without_registering_a_task() ->
     capture = AclGraphCaptureContext(object(), [])
     with (
         forward_context(replace(context, acl_graph=capture)),
-        patch.object(torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", return_value=torch.empty(16)),
-        patch.object(torch.ops.npu.npu_fused_infer_attention_score, "out", side_effect=RuntimeError("FIA failed")),
+        patch.object(backend._fia, "_fia") as fia,
         patch.object(torch.npu, "ExternalEvent"),
         patch.object(torch.npu, "graph_task_group_begin") as begin,
         patch.object(torch.npu, "graph_task_group_end") as end,
     ):
+        fia.workspace.return_value = torch.empty(16)
+        fia.out.side_effect = RuntimeError("FIA failed")
         backend.prepare(metadata, graph_mode=True)
         with pytest.raises(RuntimeError, match="FIA failed"):
             backend._fia.run(
@@ -635,8 +627,9 @@ def test_graph_prepare_rejects_replacing_an_entry_block_table() -> None:
     context = _context(backend, metadata, AclGraphExecutionState({}))
     with (
         forward_context(context),
-        patch.object(torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", return_value=torch.empty(16)),
+        patch.object(backend._fia, "_fia") as fia,
     ):
+        fia.workspace.return_value = torch.empty(16)
         backend.prepare(metadata, graph_mode=True)
         metadata.block_table = metadata.block_table.clone()
         with pytest.raises(RuntimeError, match="address changed"):

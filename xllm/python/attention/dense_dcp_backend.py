@@ -207,7 +207,7 @@ class DenseDcpAttentionBackend(NpuPagedAttentionBackend):
         value: torch.Tensor,
         metadata: DenseDcpMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.ops.npu.npu_fused_infer_attention_score(
+        return self._fused_attention(
             query,
             key,
             value,
