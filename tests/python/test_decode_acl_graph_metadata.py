@@ -24,6 +24,7 @@ import torch.nn as nn
 
 from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_metadata
 from xllm.python.model_executor.executor import ModelExecutor
+from xllm.python.model_executor.forward_context import AclGraphExecutionState
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner
 from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
@@ -268,7 +269,7 @@ def test_capture_passes_runner_error_mode_to_npu_graph(
     entry.static_metadata = _metadata()
     entry.static_input_ids = torch.arange(3)
     entry.static_mtp_topk_indices = None
-    entry.execution_state = None
+    entry.execution_state = AclGraphExecutionState({})
     stream = Mock()
     graph_context = Mock(return_value=nullcontext())
     monkeypatch.setattr(torch.npu, "NPUGraph", Mock(), raising=False)

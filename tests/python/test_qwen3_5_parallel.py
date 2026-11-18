@@ -98,6 +98,7 @@ def test_model_records_pd_layer_events_in_order() -> None:
             hidden: torch.Tensor,
             residual: torch.Tensor | None,
             _positions: torch.Tensor,
+            _mrope_cos_sin: torch.Tensor | None = None,
         ) -> tuple[torch.Tensor, torch.Tensor | None]:
             return hidden + 1, residual
 
@@ -120,6 +121,7 @@ def test_model_records_pd_layer_events_in_order() -> None:
     model = Qwen3_5Model.__new__(Qwen3_5Model)
     torch.nn.Module.__init__(model)
     model._inputs_embeds = None
+    model._use_fused_mrope = False
     model.embed_tokens = torch.nn.Identity()
     model.layers = torch.nn.ModuleList(DecoderLayer() for _ in range(3))
     model.norm = FinalNorm()

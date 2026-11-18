@@ -43,6 +43,7 @@ class Qwen3_5MtpModel(Qwen3_5Model):
         positions: torch.Tensor,
         input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        mrope_cos_sin = self.rotary.build_mrope_cos_sin(positions) if self._use_fused_mrope else None
         embedding = self.embed_tokens(input_ids)
         carried = embedding if input_embedding is None else input_embedding
         if carried.shape != embedding.shape:
@@ -53,7 +54,7 @@ class Qwen3_5MtpModel(Qwen3_5Model):
             hidden = flash_comm1.shard(hidden)
         residual: torch.Tensor | None = None
         for layer_id, layer in enumerate(self.layers):
-            hidden, residual = layer(hidden, residual, positions)
+            hidden, residual = layer(hidden, residual, positions, mrope_cos_sin)
             record_layer_event(layer_id)
         hidden, _ = self.norm(hidden, residual)
         return hidden if flash_comm1 is None else flash_comm1.gather(hidden)

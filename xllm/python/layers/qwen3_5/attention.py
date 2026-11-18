@@ -112,6 +112,7 @@ class Qwen3_5Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden: torch.Tensor,
+        mrope_cos_sin: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if positions.dim() not in (1, 2) or (positions.dim() == 2 and positions.shape[0] != 3):
             raise ValueError("unfused Qwen3.5 attention requires [N] or [3, N] positions")

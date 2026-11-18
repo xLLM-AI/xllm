@@ -56,9 +56,11 @@ from xllm.python.attention.paged_kv_metadata import (
     is_row_aligned_paged_kv,
 )
 from xllm.python.model_executor.forward_context import (
+    AclGraphBufferPool,
     AclGraphExecutionState,
     EplbRuntimeState,
     LayerSynchronizer,
+    borrow_acl_graph_tensor,
 )
 from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner, StaticGraphAttentionMetadata
@@ -125,8 +127,9 @@ class _DsaGraphMetadataView:
 class DecodeAclGraphRunner(AclGraphRunner):
     """Owns static inputs and lazily captures decode graphs on a private stream.
 
-    Inputs are copied into entry-owned storage; MTP outputs are detached from
-    replay buffers. Taskless graphs replay on the caller's stream.
+    Serialized entries share maximum-capacity inputs and borrow graph-pool
+    outputs, with or without padding. MTP outputs are detached from replay
+    buffers. Taskless graphs replay on the caller's stream.
     """
 
     def __init__(
@@ -161,9 +164,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # runner's owned static buffers.
         if enable_graph_mode_decode_no_padding:
             self._capture_error_mode = "thread_local"
-        self._serial_workspace_pool: list[torch.Tensor] | None = [] if enable_graph_mode_decode_no_padding else None
-        # Capacity tiers bound static KV storage independently of the
-        # attention operator's live-length or Device-mask protocol.
+        self._serial_workspace_pool: list[torch.Tensor] | None = []
+        self._serial_buffers = AclGraphBufferPool(self.max_batch)
+        # Device masks need compact capacity tiers. Host-length FIA updates
+        # its live lengths between replays and uses a single full-width graph.
         self._kv_capacity_graphs = kv_capacity_graphs or device_kv_lengths
         if self._kv_capacity_graphs and dp_size != 1:
             raise ValueError("KV-capacity ACL graphs require DP size one")
@@ -183,6 +187,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self._stream: torch.npu.Stream | None = None
         self._update_done_event: torch.npu.Event | None = None
         self._update_done_recorded = False
+        self._update_done_caller_stream: torch.npu.Stream | None = None
         self._taskless_replay_stream: torch.npu.Stream | None = None
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
@@ -783,13 +788,17 @@ class DecodeAclGraphRunner(AclGraphRunner):
     def _capacity_page_limit(self) -> int:
         return (self.max_model_len + self._logical_page_size - 1) // self._logical_page_size + 1
 
+    def _capacity_tiers(self) -> tuple[int, ...]:
+        page_limit = self._capacity_page_limit()
+        return kv_capacity_buckets(page_limit) if self._device_kv_lengths else (page_limit,)
+
     def _capacity_pages(self, metadata: DecodeAclGraphMetadata) -> int:
         pages = kv_capacity_bucket(
             metadata.kv_seq_lens_host_values, self._logical_page_size, self._capacity_page_limit()
         )
         if max(metadata.kv_seq_lens_host_values) > metadata.block_table.shape[1] * self._logical_page_size:
             raise ValueError("Host KV upper bound exceeds the source block table")
-        return pages
+        return pages if self._device_kv_lengths else self._capacity_page_limit()
 
     def _capacity_warmup_metadata(
         self, metadata: DecodeAclGraphMetadata, capacity_pages: int
@@ -849,7 +858,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                         f"KV capacity graph was not captured during startup warmup: graph_key={graph_key!r}"
                     )
                 return graph_key
-            capacity_pages = kv_capacity_buckets(self._capacity_page_limit())
+            capacity_pages = self._capacity_tiers()
             if decode_metadata is None:
                 decode_metadata = self._decode_metadata(metadata, expanded)
             previous_count = len(self._graphs)
@@ -1052,6 +1061,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         else:
             self._taskless_replay_stream = replay_stream
         self._update_done_recorded = has_task_updates
+        self._update_done_caller_stream = current_stream if has_task_updates else None
         # The graph replay waits on each task's external event, but the task
         # update itself runs on a separate stream.  Schedule-overlap returns
         # to C++ without a device-wide synchronize, so the next MTP draft or
@@ -1089,7 +1099,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             selected_pages = self._capacity_pages(decode_metadata)
             if not kv_capacity_pages:
                 kv_capacity_pages = selected_pages
-            if kv_capacity_pages not in kv_capacity_buckets(self._capacity_page_limit()):
+            if kv_capacity_pages not in self._capacity_tiers():
                 raise ValueError("KV capacity graph has an unsupported KV capacity")
             if not allow_capacity_capture and selected_pages != kv_capacity_pages:
                 raise ValueError("KV capacity graph capacity does not match the current Host upper bound")
@@ -1111,9 +1121,39 @@ class DecodeAclGraphRunner(AclGraphRunner):
         entry = self._graphs.get(graph_key)
         first_capture = entry is None
         decode_kwargs = {} if decode_metadata is None else {"decode_metadata": decode_metadata}
+        if entry is None and self._kv_capacity_graphs and not allow_capacity_capture:
+            raise RuntimeError("KV capacity graph was not captured during startup warmup")
+
+        if self._stream is None:
+            self._stream = torch.npu.Stream(device=input_ids.device)
+
+        current_stream = torch.npu.current_stream()
+        # The previous replay may still be reading the capture buffers on the
+        # graph stream while the scheduler prepares the next step on the
+        # current stream.  Wait before mutating static inputs/metadata; the
+        # later graph-stream wait only orders the new replay after these
+        # writes and cannot protect this earlier update.
+        if self._update_done_recorded:
+            # Task updates run on a separate stream and read the same static
+            # metadata tensors that _fill_entry mutates.  Waiting only for the
+            # graph replay leaves that read/write pair unordered when the
+            # scheduler advances quickly under overlap.
+            assert self._update_done_event is not None
+            # execute() already orders the previous caller after replay.
+            # A different caller must also wait before reusing shared inputs.
+            if self._serial_buffers is not None and not _same_npu_stream(
+                current_stream, self._update_done_caller_stream
+            ):
+                current_stream.wait_stream(self._stream)
+            current_stream.wait_event(self._update_done_event)
+
+        if self._taskless_replay_stream is not None and not _same_npu_stream(
+            current_stream, self._taskless_replay_stream
+        ):
+            current_stream.wait_stream(self._taskless_replay_stream)
+
+        # New entries also initialize views of the shared input buffers.
         if entry is None:
-            if self._kv_capacity_graphs and not allow_capacity_capture:
-                raise RuntimeError("KV capacity graph was not captured during startup warmup")
             entry = self._allocate_entry(
                 padded_batch_size,
                 input_ids,
@@ -1130,28 +1170,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 metadata, decode_metadata
             ) * int(getattr(self.attention_backend, "graph_token_capacity_granularity", 0) or 0)
             self._graphs[graph_key] = entry
-
-        if self._stream is None:
-            self._stream = torch.npu.Stream(device=input_ids.device)
-
-        # The previous replay may still be reading the capture buffers on the
-        # graph stream while the scheduler prepares the next step on the
-        # current stream.  Wait before mutating static inputs/metadata; the
-        # later graph-stream wait only orders the new replay after these
-        # writes and cannot protect this earlier update.
-        if self._update_done_recorded:
-            # Task updates run on a separate stream and read the same static
-            # metadata tensors that _fill_entry mutates.  Waiting only for the
-            # graph replay leaves that read/write pair unordered when the
-            # scheduler advances quickly under overlap.
-            assert self._update_done_event is not None
-            torch.npu.current_stream().wait_event(self._update_done_event)
-
-        current_stream = torch.npu.current_stream()
-        if self._taskless_replay_stream is not None and not _same_npu_stream(
-            current_stream, self._taskless_replay_stream
-        ):
-            current_stream.wait_stream(self._taskless_replay_stream)
 
         self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=first_capture)
 
@@ -1294,6 +1312,34 @@ class DecodeAclGraphRunner(AclGraphRunner):
             )
         return query_lens + (query_width,) * ((padded_num_tokens - num_tokens) // query_width)
 
+    def _retain_graph_output(self, entry: AclGraphEntry, output: ModelExecutionOutput) -> ModelExecutionOutput:
+        if entry.execution_state.serial_buffers is None:
+            return output
+
+        # All output-producing operators allocate normally inside capture.
+        # Let the graph pool reuse those allocations for subsequent shapes.
+        if isinstance(output, torch.Tensor):
+            return borrow_acl_graph_tensor(output)
+        hidden = borrow_acl_graph_tensor(output[0])
+        auxiliary = None if output[1] is None else borrow_acl_graph_tensor(output[1])
+        if len(output) == 2:
+            return hidden, auxiliary
+        third = None if output[2] is None else borrow_acl_graph_tensor(output[2])
+        return hidden, auxiliary, third
+
+    def _allocate_static_tensor(
+        self,
+        name: str,
+        shape: tuple[int, ...],
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+        capacity: int | None = None,
+    ) -> torch.Tensor:
+        if self._serial_buffers is None:
+            return torch.zeros(shape, dtype=dtype, device=device)
+        return self._serial_buffers.get(("input", name), shape, dtype=dtype, device=device, capacity=capacity).zero_()
+
     def _allocate_entry(
         self,
         padded_batch_size: int,
@@ -1329,11 +1375,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
             )
             self._max_blocks_per_sequence = max_blocks_per_sequence
 
-        static_block_table = torch.zeros(
-            padded_batch_size,
-            kv_capacity_pages or self._max_blocks_per_sequence,
+        static_block_table = self._allocate_static_tensor(
+            "block_table",
+            (padded_batch_size, kv_capacity_pages or self._max_blocks_per_sequence),
             dtype=torch.int32,
             device=device,
+            capacity=self.max_batch * self._max_blocks_per_sequence,
         )
         shared_layout = self._shared_kv_layout()
         shared_full_padding = (
@@ -1348,14 +1395,21 @@ class DecodeAclGraphRunner(AclGraphRunner):
         entry.graph = None
         entry.static_output = None
         entry.graph_tasks = []
-        entry.execution_state = AclGraphExecutionState({}, serial_workspace_pool=self._serial_workspace_pool)
+        entry.execution_state = AclGraphExecutionState(
+            {}, serial_workspace_pool=self._serial_workspace_pool, serial_buffers=self._serial_buffers
+        )
         entry.replay_logged = False
-        entry.static_input_ids = torch.zeros(padded_batch_size, dtype=input_ids.dtype, device=device)
-        entry.static_positions = torch.zeros(padded_batch_size, dtype=torch.int32, device=device)
+        entry.static_input_ids = self._allocate_static_tensor(
+            "input_ids", (padded_batch_size,), dtype=input_ids.dtype, device=device
+        )
+        entry.static_positions = self._allocate_static_tensor(
+            "positions", (padded_batch_size,), dtype=torch.int32, device=device
+        )
         entry.static_input_embedding = None
         entry.static_mtp_topk_indices = None
         if mtp_topk_indices is not None:
-            entry.static_mtp_topk_indices = torch.zeros(
+            entry.static_mtp_topk_indices = self._allocate_static_tensor(
+                "mtp_topk_indices",
                 (padded_batch_size, *mtp_topk_indices.shape[1:]),
                 dtype=mtp_topk_indices.dtype,
                 device=mtp_topk_indices.device,
@@ -1369,26 +1423,38 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # in padded draft buckets. GDN state slots remain logical sequences.
         graph_query_lens = (1,) * padded_batch_size if self._device_kv_lengths else expanded_graph_query_lens
         entry.static_metadata = StaticGraphAttentionMetadata(
-            slot_mapping=torch.zeros(
-                padded_batch_size,
+            fia_workspace_kv_length=(
+                kv_capacity_pages * self._logical_page_size
+                if kv_capacity_pages and not self._device_kv_lengths
+                else None
+            ),
+            fixed_graph_kv_bound=self._device_kv_lengths and self._is_spec_draft,
+            slot_mapping=self._allocate_static_tensor(
+                "slot_mapping",
+                (padded_batch_size,),
                 dtype=torch.int32,
                 device=device,
             ),
-            paged_kv_indptr=torch.zeros(
-                padded_batch_size + 1,
+            paged_kv_indptr=self._allocate_static_tensor(
+                "paged_kv_indptr",
+                (padded_batch_size + 1,),
                 dtype=paged_kv_indptr.dtype,
                 device=device,
+                capacity=self.max_batch + 1,
             ),
             paged_kv_indices=self._paged_kv_indices_buffer,
-            paged_kv_last_page_len=torch.zeros(
-                padded_batch_size,
+            paged_kv_last_page_len=self._allocate_static_tensor(
+                "paged_kv_last_page_len",
+                (padded_batch_size,),
                 dtype=paged_kv_last_page_len.dtype,
                 device=device,
             ),
-            kv_cu_seq_lens=torch.zeros(
-                padded_batch_size + 1,
+            kv_cu_seq_lens=self._allocate_static_tensor(
+                "kv_cu_seq_lens",
+                (padded_batch_size + 1,),
                 dtype=torch.int32,
                 device=device,
+                capacity=self.max_batch + 1,
             ),
             q_cu_seq_lens=(
                 torch.arange(padded_batch_size + 1, dtype=torch.int32, device=device)
@@ -1404,8 +1470,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 if graph_query_lens
                 else None
             ),
-            linear_state_indices=torch.zeros(
-                len(expanded_graph_query_lens) if has_linear_verify_state else padded_batch_size,
+            linear_state_indices=self._allocate_static_tensor(
+                "linear_state_indices",
+                (len(expanded_graph_query_lens) if has_linear_verify_state else padded_batch_size,),
                 dtype=torch.int32,
                 device=device,
             ),
@@ -1446,7 +1513,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 else None
             ),
         )
-        entry.kv_seq_lens_delta = torch.empty(padded_batch_size, dtype=torch.int32, device=device)
+        entry.kv_seq_lens_delta = self._allocate_static_tensor(
+            "kv_seq_lens_delta", (padded_batch_size,), dtype=torch.int32, device=device
+        )
         entry.expanded_query_cu_seq_lens = (
             torch.arange(padded_batch_size + 1, dtype=torch.int32, device=device) if is_expanded else None
         )
@@ -1677,9 +1746,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
             if input_embedding.shape[0] != batch_size:
                 raise ValueError("ACL graph input_embedding token count must match input_ids")
             if entry.static_input_embedding is None:
-                entry.static_input_embedding = torch.zeros(
-                    entry.batch_size,
-                    input_embedding.shape[-1],
+                entry.static_input_embedding = self._allocate_static_tensor(
+                    "input_embedding",
+                    (entry.batch_size, input_embedding.shape[-1]),
                     dtype=input_embedding.dtype,
                     device=input_embedding.device,
                 )

@@ -129,11 +129,15 @@ class PartialRotaryEmbedding(nn.Module):
 
     def build_mrope_cos_sin(self, positions: torch.Tensor) -> torch.Tensor:
         """Gather the three-axis cosine/sine rows consumed by fused mRoPE."""
+        rows = positions.shape[-1]
+        cos_sin = self.cos_sin_cache.new_empty((rows, 3 * self.rotary_dim))
         if positions.dim() == 1:
-            return self.cos_sin_cache.index_select(0, positions).repeat(1, 3)
-        positions_t = positions.permute(1, 0).contiguous()
-        gathered = self.cos_sin_cache.index_select(0, positions_t.view(-1))
-        return gathered.view(positions.size(1), -1)
+            gathered = self.cos_sin_cache.index_select(0, positions)
+            cos_sin.view(rows, 3, self.rotary_dim).copy_(gathered.unsqueeze(1))
+        else:
+            indices = positions.transpose(0, 1).contiguous().view(-1)
+            torch.index_select(self.cos_sin_cache, 0, indices, out=cos_sin.view(-1, self.rotary_dim))
+        return cos_sin
 
     def forward(self, positions: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         pos = positions.to(torch.long)

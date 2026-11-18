@@ -22,12 +22,37 @@ import pytest
 import torch
 
 from xllm.python.model_executor.forward_context import (
+    AclGraphBufferPool,
     AclGraphExecutionState,
     ForwardContext,
     forward_context,
     get_execution_buffer,
     get_execution_workspace,
 )
+
+
+def test_serial_buffers_reserve_maximum_capacity_before_larger_shapes() -> None:
+    pool = AclGraphBufferPool(32)
+    device = torch.device("cpu")
+    small = pool.get(("input",), (2, 4), dtype=torch.float32, device=device)
+    small.fill_(7)
+    largest = pool.get(("input",), (32, 4), dtype=torch.float32, device=device)
+    assert largest.data_ptr() == small.data_ptr()
+    assert largest.untyped_storage().nbytes() == 32 * 4 * 4
+    torch.testing.assert_close(largest[:2], torch.full((2, 4), 7.0))
+    largest.fill_(3)
+    torch.testing.assert_close(small, torch.full((2, 4), 3.0))
+
+
+def test_serial_block_tables_share_storage_across_capacity_tiers() -> None:
+    pool = AclGraphBufferPool(8)
+    device = torch.device("cpu")
+    short = pool.get(("table",), (2, 4), dtype=torch.int32, device=device, capacity=8 * 33)
+    long = pool.get(("table",), (8, 33), dtype=torch.int32, device=device, capacity=8 * 33)
+    assert short.is_contiguous() and long.is_contiguous()
+    assert short.data_ptr() == long.data_ptr()
+    short.copy_(torch.arange(8).reshape(2, 4))
+    torch.testing.assert_close(long.view(-1)[:8], torch.arange(8, dtype=torch.int32))
 
 
 @contextmanager

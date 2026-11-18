@@ -144,7 +144,7 @@ def test_shared_kda_verify_still_requires_role_specific_graph_support() -> None:
 
 
 @pytest.mark.parametrize("device_kv_lengths", [False, True], ids=["host-lengths", "device-lengths"])
-def test_decode_startup_captures_all_kv_capacities_from_short_metadata(device_kv_lengths: bool) -> None:
+def test_decode_startup_captures_kv_capacities_from_short_metadata(device_kv_lengths: bool) -> None:
     runner = _runner(
         max_batch=4,
         max_model_len=512,
@@ -165,14 +165,15 @@ def test_decode_startup_captures_all_kv_capacities_from_short_metadata(device_kv
     with patch.object(runner, "_prepare_graph_entry", side_effect=_prepare_entry):
         runner.warmup(tokens, tokens, metadata, is_graph_warmup=True)
         runner.warmup(tokens, tokens, metadata, is_graph_warmup=True)
-        assert captured_pages == [4, 32, 129]
+        expected_tiers = [4, 32, 129] if device_kv_lengths else [129]
+        assert captured_pages == expected_tiers
         for length, expected_pages in ((1, 4), (128, 32), (512, 129)):
             runtime_metadata = _capacity_metadata(3, length)
             assert runner.prepare_execution(tokens, runtime_metadata) is not None
             key = runner.warmup(tokens, tokens, runtime_metadata)
-            assert key[-1] == expected_pages
+            assert key[-1] == (expected_pages if device_kv_lengths else 129)
             assert key in runner._graphs
-        assert captured_pages == [4, 32, 129]
+        assert captured_pages == expected_tiers
 
 
 @pytest.mark.parametrize("device_kv_lengths", [False, True], ids=["host-lengths", "device-lengths"])
@@ -210,8 +211,8 @@ def test_capacity_warmup_bounds_long_synthetic_lengths_without_mutating_source(
 
     with patch.object(runner, "_prepare_graph_entry", side_effect=_capture):
         runner.warmup(tokens, tokens, metadata, decode_metadata=resolved, is_graph_warmup=True)
-        assert captured_pages == [4, 32, 256, 513]
-        assert runner.warmup(tokens, tokens, metadata)[-1] == 32
+        assert captured_pages == ([4, 32, 256, 513] if device_kv_lengths else [513])
+        assert runner.warmup(tokens, tokens, metadata)[-1] == (32 if device_kv_lengths else 513)
     assert metadata.kv_seq_lens_host_values == [2048] * 8
     assert metadata.kv_seq_lens.tolist() == [2048] * 8
     assert metadata.kv_cu_seq_lens.tolist() == [2048 * i for i in range(9)]
@@ -287,7 +288,7 @@ def test_admitted_decode_shape_still_rejects_missing_graph_variants(
         assert runner.prepare_execution(tokens, metadata, embedding, topk) is not None
         with pytest.raises(RuntimeError, match="not captured during startup warmup: graph_key="):
             runner.warmup(tokens, tokens, metadata, embedding, topk)
-        assert capture.call_count == 3
+        assert capture.call_count == (3 if device_kv_lengths else 1)
 
 
 def test_failed_decode_startup_capture_does_not_admit_shape() -> None:
@@ -1495,7 +1496,7 @@ def test_untyped_verify_reuses_row_aligned_paging_metadata() -> None:
 
 @pytest.mark.parametrize("dp_size", [1, 2])
 def test_fill_entry_refreshes_mega_moe_mask_in_place(dp_size: int) -> None:
-    runner = _runner(dp_size=dp_size, enable_mega_moe_token_mask=True)
+    runner = _runner(max_batch=8 * dp_size, dp_size=dp_size, enable_mega_moe_token_mask=True)
     input_ids = torch.arange(4, dtype=torch.int32)
     positions = torch.arange(4, dtype=torch.int32)
     metadata = _metadata(torch.arange(4, dtype=torch.int32))

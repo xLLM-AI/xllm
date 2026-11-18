@@ -62,6 +62,8 @@ class StaticGraphAttentionMetadata:
     kv_cu_seq_lens: torch.Tensor | None = None
     kv_seq_lens_host: torch.Tensor | None = None
     kv_seq_lens_host_values: list[int] | None = None
+    fia_workspace_kv_length: int | None = None
+    fixed_graph_kv_bound: bool = False
     q_seq_lens_host: torch.Tensor | None = None
     new_cache_slots_host_values: list[int] | None = None
     paged_kv_indptr_host: torch.Tensor | None = None
@@ -342,6 +344,9 @@ class AclGraphRunner(BaseRunner):
         if positions is not None and (positions.dim() != 1 or positions.numel() != metadata_row_count):
             raise RuntimeError("ACL graph decode positions must contain one value per token")
 
+    def _retain_graph_output(self, entry: AclGraphEntry, output: ModelExecutionOutput) -> ModelExecutionOutput:
+        return output
+
     def _capture(
         self,
         entry: AclGraphEntry,
@@ -385,6 +390,7 @@ class AclGraphRunner(BaseRunner):
             ),
         ):
             entry.static_output = self._forward_static(entry)
+        entry.static_output = self._retain_graph_output(entry, entry.static_output)
         entry.graph_tasks = capture_context.tasks
         logger.info(
             "Python ACL graph captured: model=%s bucket=%d mtp_topk=%s tasks=%d",

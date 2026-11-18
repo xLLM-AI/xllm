@@ -315,6 +315,9 @@ class Qwen3_5Model(nn.Module):
             Sequence[Qwen3_5DecoderLayer],
             nn.ModuleList(decoder_layer_cls(cfg, i, dtype, device, self.rotary) for i in range(cfg.n_layers)),
         )
+        self._use_fused_mrope = any(
+            layer.layer_type == "full_attention" and layer.self_attn.use_fused_qkv for layer in self.layers
+        )
         self.norm = decoder_layer_cls.normalization_cls(
             cfg.hidden_size,
             cfg.rms_norm_eps,
@@ -329,6 +332,7 @@ class Qwen3_5Model(nn.Module):
         positions: torch.Tensor,
         input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        mrope_cos_sin = self.rotary.build_mrope_cos_sin(positions) if self._use_fused_mrope else None
         hidden = self.embed_tokens(input_ids) if input_embedding is None else input_embedding
         flash_comm1 = get_flash_comm1_context()
         if flash_comm1 is not None:
@@ -336,7 +340,7 @@ class Qwen3_5Model(nn.Module):
         residual: torch.Tensor | None = None
         aux_hidden_buffer = self.aux_hidden_capture.create_buffer(hidden)
         for layer_id, layer in enumerate(self.layers):
-            hidden, residual = layer(hidden, residual, positions)
+            hidden, residual = layer(hidden, residual, positions, mrope_cos_sin)
             self.aux_hidden_capture.capture_layer(layer_id, hidden, residual, aux_hidden_buffer)
             record_layer_event(layer_id)
         hidden, _ = self.norm(hidden, residual)

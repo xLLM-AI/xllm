@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -49,10 +50,16 @@ class _Decoder(nn.Module):
         self, cfg: Qwen3_5Config, _layer_id: int, dtype: torch.dtype, device: torch.device, _rotary: nn.Module
     ) -> None:
         super().__init__()
+        self.layer_type = cfg.layer_types[_layer_id]
+        self.self_attn = SimpleNamespace(use_fused_qkv=False)
         self.weight = nn.Parameter(torch.ones(cfg.hidden_size, dtype=dtype, device=device))
 
     def forward(
-        self, hidden: torch.Tensor, _residual: torch.Tensor | None, _positions: torch.Tensor
+        self,
+        hidden: torch.Tensor,
+        _residual: torch.Tensor | None,
+        _positions: torch.Tensor,
+        _mrope_cos_sin: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return hidden * self.weight, hidden
 

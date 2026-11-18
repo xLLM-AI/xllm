@@ -57,7 +57,11 @@ class _ResidualLayer(nn.Module):
         self.delta = delta
 
     def forward(
-        self, hidden: torch.Tensor, residual: torch.Tensor | None, positions: torch.Tensor
+        self,
+        hidden: torch.Tensor,
+        residual: torch.Tensor | None,
+        positions: torch.Tensor,
+        mrope_cos_sin: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         del positions
         residual = hidden if residual is None else hidden + residual
@@ -74,6 +78,7 @@ def test_target_captures_unnormalized_post_layer_streams(capture_layers: tuple[i
     model = Qwen3_5Model.__new__(Qwen3_5Model)
     nn.Module.__init__(model)
     model._inputs_embeds = None
+    model._use_fused_mrope = False
     model.embed_tokens = nn.Identity()
     model.layers = nn.ModuleList(_ResidualLayer(delta) for delta in (1.0, 2.0, 3.0))
     model.norm = _FinalNorm()
@@ -97,6 +102,7 @@ def test_target_capture_gathers_flashcomm1_rows(
     model = Qwen3_5Model.__new__(Qwen3_5Model)
     nn.Module.__init__(model)
     model._inputs_embeds = None
+    model._use_fused_mrope = False
     model.embed_tokens = nn.Identity()
     model.layers = nn.ModuleList(_ResidualLayer(delta) for delta in (1.0, 2.0, 3.0))
     model.norm = _FinalNorm()

@@ -43,6 +43,120 @@ _INDEX_GUARD_SIZE = 37
 _INDEX_GUARD_VALUE = -123456789
 
 
+@pytest.mark.parametrize("no_padding", [False, True], ids=["padded", "exact-shape"])
+@torch.inference_mode()
+def test_serial_fia_buffers_match_private_graphs(no_padding: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Alternate shapes and caller streams without retaining captured storage."""
+    from xllm.python.attention.backend import LayerCache
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+    from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_metadata
+    from xllm.python.model_executor.forward_context import get_forward_context
+    from xllm.python.model_executor.runners.acl_graph import StaticGraphAttentionMetadata
+    from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
+
+    monkeypatch.setattr("xllm.python.model_executor.runners.acl_graph._GRAPH_POOL", None)
+    device = torch.device("npu:0")
+    heads, dimension, page_size, pages = 6, 256, 128, 2049
+    generator = torch.Generator().manual_seed(73119)
+    key_host = (torch.randn(32896, dimension, generator=generator) * 0.5).to(torch.bfloat16)
+    value_host = torch.randn(32896, dimension, generator=generator).to(torch.bfloat16)
+    query_host = torch.randn(512, heads, dimension, generator=generator).to(torch.bfloat16)
+    key = torch.zeros(pages, page_size, 1, dimension, device=device, dtype=torch.bfloat16)
+    value = torch.zeros_like(key)
+    key.view(-1, dimension)[:32896].copy_(key_host)
+    value.view(-1, dimension)[:32896].copy_(value_host)
+    caches = [LayerCache(key=key, value=value)]
+
+    class _FiaModel(torch.nn.Module):
+        def __init__(self, backend: NpuPagedAttentionBackend) -> None:
+            super().__init__()
+            self.backend = backend
+
+        def forward(
+            self, input_ids: torch.Tensor, positions: torch.Tensor, input_embedding: torch.Tensor
+        ) -> torch.Tensor:
+            rows = input_ids.numel()
+            query = input_embedding.view(rows, heads, dimension)
+            metadata = get_forward_context().metadata
+            # Consume the first layer before the second can reuse its allocation.
+            first = self.backend._decode(query, key, value, metadata, rows) * 0.25
+            return first + self.backend._decode(query * -0.5, key, value, metadata, rows)
+
+    runners = []
+    for shared in (False, True):
+        backend = NpuPagedAttentionBackend(heads, 1, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
+        backend.bind_kv_caches(caches)
+        runner = DecodeAclGraphRunner(
+            _FiaModel(backend),
+            backend,
+            device,
+            512,
+            262144,
+            enable_graph_mode_decode_no_padding=no_padding,
+            kv_capacity_graphs=shared,
+        )
+        if not shared:
+            runner._serial_workspace_pool = None
+            runner._serial_buffers = None
+        runner.bind_layer_caches(caches)
+        runners.append(runner)
+
+    sequence = ((512, 7), (4, 32769), (128, 129), (512, 2049), (4, 7), (128, 2049)) * 2
+    inputs, metadata_by_shape = {}, {}
+    for rows in (4, 128, 512):
+        tokens = torch.zeros(rows, dtype=torch.int32, device=device)
+        inputs[rows] = (tokens, query_host[:rows].to(device).reshape(rows, heads * dimension))
+        table = torch.arange(pages, dtype=torch.int32, device=device).expand(rows, -1).contiguous()
+        for length in sorted({length for size, length in sequence if size == rows} | {7, 32769}):
+            indptr, indices, last_page = build_row_aligned_paged_kv_metadata(table, [length] * rows, page_size)
+            metadata_by_shape[rows, length] = StaticGraphAttentionMetadata(
+                slot_mapping=torch.full((rows,), -1, dtype=torch.int32, device=device),
+                block_table=table,
+                kv_seq_lens=torch.full((rows,), length, dtype=torch.int32, device=device),
+                kv_seq_lens_host_values=[length] * rows,
+                q_seq_lens=torch.ones(rows, dtype=torch.int32, device=device),
+                q_cu_seq_lens=torch.arange(rows + 1, dtype=torch.int32, device=device),
+                q_cu_seq_lens_host_values=list(range(rows + 1)),
+                paged_kv_indptr=indptr,
+                paged_kv_indices=indices,
+                paged_kv_last_page_len=last_page,
+            )
+        # Start the shared TND graph at a short length. Its workspace must
+        # handle a longer request without capturing another capacity tier.
+        for runner, warmup_length in zip(runners, (32769, 7)):
+            runner.warmup(tokens, tokens, metadata_by_shape[rows, warmup_length], inputs[rows][1], is_graph_warmup=True)
+
+    entries = list(runners[1]._graphs.values())
+    for name in ("static_input_ids", "static_positions", "static_input_embedding"):
+        assert len({getattr(entry, name).data_ptr() for entry in entries}) == 1
+    assert len({entry.static_metadata.block_table.data_ptr() for entry in entries}) == 1
+    assert all(entry.execution_state.paged_attention[entry.batch_size].output is None for entry in entries)
+
+    # Prepare source tensors before switching streams; enqueue all replays
+    # without synchronizing between them to exercise the runner's dependencies.
+    torch.npu.synchronize()
+    streams = [torch.npu.current_stream(), torch.npu.Stream(device=device)]
+    outputs = [[], []]
+    for runner, results in zip(runners, outputs):
+        for iteration, (rows, length) in enumerate(sequence):
+            tokens, query = inputs[rows]
+            with torch.npu.stream(streams[iteration % 2]):
+                results.append(runner.execute(tokens, tokens, metadata_by_shape[rows, length], query))
+        # Both runners use the same graph pool; serialize the comparison modes.
+        torch.npu.synchronize()
+        assert len(runner._graphs) == 3
+
+    for (rows, length), private, shared in zip(sequence, *outputs):
+        private, shared = [output.cpu().float().view(rows, heads, dimension) for output in (private, shared)]
+        torch.testing.assert_close(shared, private, rtol=0, atol=0)
+        scores = torch.einsum("rhd,kd->rhk", query_host[:rows].float(), key_host[:length].float()) * dimension**-0.5
+        first = (torch.softmax(scores, dim=-1) @ value_host[:length].float()).to(torch.bfloat16).float()
+        second = (torch.softmax(scores * -0.5, dim=-1) @ value_host[:length].float()).to(torch.bfloat16).float()
+        expected = (first * 0.25 + second).to(torch.bfloat16).float()
+        epsilon = torch.finfo(torch.bfloat16).eps
+        torch.testing.assert_close(private, expected, rtol=2 * epsilon, atol=epsilon)
+
+
 def _guarded_shared_indices(shape: tuple[int, ...], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     storage = torch.full((prod(shape) + 2 * _INDEX_GUARD_SIZE,), _INDEX_GUARD_VALUE, dtype=torch.int32, device=device)
     return storage, storage.narrow(0, _INDEX_GUARD_SIZE, prod(shape)).view(shape)
@@ -1048,6 +1162,8 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(
         return metadata
 
     runner.warmup(tokens, tokens, _metadata_for(8, dummy=shared_draft), is_graph_warmup=True)
+    assert runner._graphs
+    assert all(not entry.graph_tasks for entry in runner._graphs.values())
     # With zero queries and keys, attention must average the entire live
     # prefix. This distinguishes a frozen short capture bound from the mask.
     for length in (129, 1875, 7, 1987):

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -39,31 +40,43 @@ def _graph_owners() -> list[object]:
 
 
 @pytest.mark.parametrize("rows", [2, 8], ids=["two-rows", "eight-expanded-rows"])
+@pytest.mark.parametrize("prefill", [False, True], ids=["decode", "draft-prefill"])
 @torch.inference_mode()
-def test_fia_capacity_graphs_preserve_full_context_across_tiers(rows: int, _graph_owners: list[object]) -> None:
+def test_fia_capacity_graphs_preserve_full_context_across_tiers(
+    rows: int, prefill: bool, _graph_owners: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
     torch.npu.set_device(0)
     task_stream = torch.npu.Stream(device=torch.device("npu:0"))
     task_stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(task_stream):
-        _assert_fia_capacity_graphs(rows, _graph_owners)
+        _assert_fia_capacity_graphs(rows, _graph_owners, monkeypatch, prefill=prefill)
     torch.npu.current_stream().wait_stream(task_stream)
     torch.npu.synchronize()
 
 
 @torch.inference_mode()
-def test_padded_device_length_graph_preserves_full_context(_graph_owners: list[object]) -> None:
+def test_padded_device_length_graph_preserves_full_context(
+    _graph_owners: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
     torch.npu.set_device(0)
     task_stream = torch.npu.Stream(device=torch.device("npu:0"))
     task_stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(task_stream):
-        _assert_fia_capacity_graphs(3, _graph_owners, padded=True)
+        _assert_fia_capacity_graphs(3, _graph_owners, monkeypatch, padded=True, prefill=True)
     torch.npu.current_stream().wait_stream(task_stream)
     torch.npu.synchronize()
 
 
-def _assert_fia_capacity_graphs(rows: int, graph_owners: list[object], *, padded: bool = False) -> None:
+def _assert_fia_capacity_graphs(
+    rows: int,
+    graph_owners: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    padded: bool = False,
+    prefill: bool = False,
+) -> None:
     from xllm.python.attention.backend import LayerCache
-    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend, _PreparedPagedAttention
     from xllm.python.model_executor.forward_context import get_forward_context
     from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
@@ -93,11 +106,28 @@ def _assert_fia_capacity_graphs(rows: int, graph_owners: list[object], *, padded
     backend = NpuPagedAttentionBackend(heads, 1, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
     cache = LayerCache(key=key, value=value)
     backend.bind_kv_caches([cache])
+    captured_owners: list[tuple[weakref.ReferenceType[torch.Tensor], ...]] = []
+    bounded_attention = backend._bounded_paged_graph_attention
+
+    def observe_captured_owners(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor,
+        prepared: _PreparedPagedAttention,
+        block_size: int,
+    ) -> torch.Tensor:
+        output = bounded_attention(query, key, value, mask, prepared, block_size)
+        if get_forward_context().acl_graph is not None:
+            captured_owners.append(tuple(weakref.ref(tensor) for tensor in (query, mask, output)))
+        return output
+
+    monkeypatch.setattr(backend, "_bounded_paged_graph_attention", observe_captured_owners)
 
     class AttentionProbe(torch.nn.Module):
         def forward(self, tokens: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
             metadata = get_forward_context().metadata
-            if padded:
+            if prefill:
                 layer = SimpleNamespace(causal=False, fia_sparse_mode=0, sliding_window=0)
                 return backend._prefill(query, query, query, key, value, metadata, tokens.numel(), layer)
             return backend._decode(query, key, value, metadata, tokens.numel())
@@ -145,10 +175,15 @@ def _assert_fia_capacity_graphs(rows: int, graph_owners: list[object], *, padded
     assert set(by_capacity) == {4, 32, 65}
     assert len(entries) == 3
     addresses = {capacity: entry.static_metadata.block_table.data_ptr() for capacity, entry in by_capacity.items()}
-    assert len(set(addresses.values())) == 3
-    # Only a runner that shares one scratch allocation across its entries can
-    # afford the bounded FIA workspace.
-    expected_state = set() if padded else {rows}
+    assert len(set(addresses.values())) == 1
+    # Replay below must remain correct after the captured owning tensors die.
+    # Draft prefill creates a mask in each graph; only the last forward's
+    # backend cache may still own one. Decode masks have a separate serial pool.
+    assert len(captured_owners) == len(entries)
+    assert all(query_ref() is None and output_ref() is None for query_ref, _, output_ref in captured_owners)
+    if prefill:
+        assert all(mask_ref() is None for _, mask_ref, _ in captured_owners[:-1])
+    expected_state = {graph_rows}
     for capacity, entry in by_capacity.items():
         assert set(entry.execution_state.paged_attention) == expected_state
         assert entry.static_metadata.block_table.shape == (graph_rows, capacity)
@@ -192,10 +227,9 @@ def _assert_fia_capacity_graphs(rows: int, graph_owners: list[object], *, padded
             assert not torch.allclose(expected_tensor, torch.stack(truncated), rtol=0.01, atol=0.01)
         if live != capacity * page_size:
             assert not torch.allclose(expected_tensor, torch.stack(unmasked), rtol=0.01, atol=0.01)
-        if not padded:
-            # Replay prepares a fresh Slot view, so the captured FIA must read
-            # this step's Host bound instead of the whole capacity tier.
-            assert by_capacity[capacity].execution_state.paged_attention[rows].kv == [host_bound] * rows
+        # Replay prepares a fresh Slot view, so the captured FIA must read
+        # this step's Host bound instead of the whole capacity tier.
+        assert by_capacity[capacity].execution_state.paged_attention[graph_rows].kv[:rows] == [host_bound] * rows
         compact = by_capacity[capacity].static_metadata.block_table
         torch.testing.assert_close(compact[:rows].cpu(), current_table[:, :capacity])
         assert compact.data_ptr() == addresses[capacity]
