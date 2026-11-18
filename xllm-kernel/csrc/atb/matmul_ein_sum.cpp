@@ -19,15 +19,8 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
-#include <torch_npu/csrc/core/npu/NPUGraphsUtils.h>
-#include <torch_npu/csrc/core/npu/NPUStream.h>
-#include <torch_npu/csrc/core/npu/NPUWorkspaceAllocator.h>
-#include <torch_npu/csrc/framework/OpCommand.h>
 
-#include <memory>
-#include <unordered_map>
-
-#include "csrc/atb/atb_projection.h"
+#include "csrc/atb/atb_operation.h"
 #include "csrc/atb/utils.h"
 
 namespace xllm_kernel {
@@ -40,48 +33,18 @@ void run_projection(const torch::Tensor& input,
   atb::VariantPack pack;
   pack.inTensors = {to_atb_tensor(packed), to_atb_tensor(weight)};
   pack.outTensors = {to_atb_tensor(output)};
-  aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
-  bool capturing = static_cast<int32_t>(
-                       c10_npu::currentStreamCaptureStatusMayInitCtx()) != 0;
-  if (capturing) {
-    // Match the existing Python bridge: setup and graph-pool allocation happen
-    // on the capture thread; the operation is released after submission.
-    auto projection = std::make_shared<AtbProjection>(stream);
-    uint64_t workspace_size = projection->setup(pack);
-    torch::Tensor workspace =
-        torch::empty({static_cast<int64_t>(workspace_size)},
-                     input.options().dtype(torch::kUInt8));
-    auto call =
-        [projection, pack, workspace, workspace_size, packed, weight, output]()
-        -> int {
-      projection->execute(pack, workspace.data_ptr(), workspace_size);
-      return 0;
-    };
-    at_npu::native::OpCommand::RunOpApiV2("XllmKernelMatmulEinSum", call);
-    return;
-  }
-
-  auto call = [pack, stream, packed, weight, output]() -> int {
-    // ATB setup mutates the operation. Keep the eager cache local to the
-    // execution thread and stream; graph captures own separate operations.
-    static thread_local std::unordered_map<aclrtStream,
-                                           std::unique_ptr<AtbProjection>>
-        cache;
-    auto& projection = cache[stream];
-    if (!projection) {
-      projection = std::make_unique<AtbProjection>(stream);
-    }
-    uint64_t workspace_size = projection->setup(pack);
-    torch::Tensor workspace;
-    void* workspace_ptr = nullptr;
-    if (workspace_size != 0) {
-      workspace = at_npu::native::allocate_workspace(workspace_size, stream);
-      workspace_ptr = workspace.data_ptr();
-    }
-    projection->execute(pack, workspace_ptr, workspace_size);
-    return 0;
-  };
-  at_npu::native::OpCommand::RunOpApiV2("XllmKernelMatmulEinSum", call);
+  atb::infer::LinearParam param;
+  param.transposeA = false;
+  param.transposeB = false;
+  param.hasBias = false;
+  param.enAccum = false;
+  param.outDataType = ACL_DT_UNDEFINED;
+  param.matmulType = atb::infer::LinearParam::MATMUL_EIN_SUM;
+  run_atb_operation("XllmKernelMatmulEinSum",
+                    param,
+                    /*variant=*/0,
+                    std::move(pack),
+                    {packed, weight, output});
 }
 
 torch::Tensor matmul_ein_sum(const torch::Tensor& input,

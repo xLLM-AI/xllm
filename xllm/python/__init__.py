@@ -54,6 +54,7 @@ def initialize_runtime() -> None:
     from xllm.python.platform import current_platform
 
     if current_platform.is_cuda():
+        _load_kernel_package().initialize(device="cuda", operations=("partial_rotary_embedding",))
         backend_name = "xllm.python.kernels_cuda"
     elif current_platform.is_npu():
         xllm_kernel = _load_kernel_package()
@@ -71,6 +72,8 @@ def initialize_runtime() -> None:
                 "fused_sigmoid_gating_delta_rule_update",
                 "fused_qkvzba_split_reshape_cat",
                 "causal_conv1d_update_v2",
+                "partial_rotary_embedding",
+                "reshape_paged_cache",
             ),
         )
         for operation, kernel in prepared.items():

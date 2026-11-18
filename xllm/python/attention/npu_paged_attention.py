@@ -240,7 +240,7 @@ def write_mla_paged_cache(
     else:
         k_pe_3d = k_latent_3d
         rope_cache = nope_cache
-    torch.ops.xllm_ops.reshape_paged_cache(
+    kernels.reshape_paged_cache(
         slot_mapping,
         k_latent_3d,
         k_pe_3d,
@@ -1177,7 +1177,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 raise RuntimeError("CP prefill does not support SFA C8 packed KV cache")
             if metadata.slot_mapping is None:
                 raise RuntimeError("CP prefill requires a global MLA slot mapping")
-            torch.ops.xllm_ops.reshape_paged_cache(
+            kernels.reshape_paged_cache(
                 metadata.slot_mapping,
                 k_latent_3d,
                 k_latent_3d,
@@ -1300,7 +1300,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         global_rope = cp_gather_kv(k_pe_3d, cp_context).contiguous()
         cache_slots = metadata.local_slot_mapping if metadata.has_kv_shard else metadata.slot_mapping
         assert cache_slots is not None
-        torch.ops.xllm_ops.reshape_paged_cache(
+        kernels.reshape_paged_cache(
             cache_slots,
             global_latent,
             global_rope,

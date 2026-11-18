@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 import torch_npu
+from xllm_kernel.ops import reshape_paged_cache
 
 from xllm.python.model_executor.forward_context import get_forward_context_or_none
 
@@ -262,7 +263,7 @@ def _write_mla_kv_cache(
         rope_cos,
         rope_sin,
     ).view(num_tokens, 1, qk_rope_head_dim)
-    torch.ops.xllm_ops.reshape_paged_cache(
+    reshape_paged_cache(
         slot_mapping,
         k_latent,
         k_pe,

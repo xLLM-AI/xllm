@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from xllm.python import kernels
 from xllm.python.attention.npu_paged_attention import (  # noqa: E402
     NpuPagedAttentionBackend,
     _build_stable_sfa_page_layout,
@@ -344,7 +345,7 @@ def test_mla_nope_cp_uses_global_rows_and_skips_rope_cache() -> None:
             "xllm.python.attention.npu_paged_attention.get_forward_context",
             return_value=SimpleNamespace(cp_context=cp_context),
         ),
-        patch.object(torch.ops.xllm_ops, "reshape_paged_cache", create=True) as reshape,
+        patch.object(kernels, "reshape_paged_cache") as reshape,
         patch.object(backend, "_mla_sparse", return_value=torch.ones_like(q_latent)) as sparse,
     ):
         output = backend.execute_mla(q_latent, None, k_latent, None, layer, topk)
@@ -411,7 +412,7 @@ def test_mla_cp_uses_one_paged_sequence_per_zigzag_segment_and_reuses_lengths(
             "xllm.python.attention.npu_paged_attention.cp_gather_kv",
             side_effect=lambda tensor, _context: tensor,
         ),
-        patch.object(torch.ops.xllm_ops, "reshape_paged_cache", create=True),
+        patch.object(kernels, "reshape_paged_cache"),
         patch.object(
             backend,
             "_mla_sparse",

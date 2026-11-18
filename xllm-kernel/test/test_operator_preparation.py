@@ -38,6 +38,7 @@ class BlockDeviceImports(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockDeviceImports())
 from xllm_kernel.catalog import load_operations
 from xllm_kernel.ops import fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat
+from xllm_kernel.ops import partial_rotary_embedding, reshape_paged_cache
 from xllm_kernel.ops.attention.gdn import OPERATIONS as GDN_OPERATIONS
 from xllm_kernel.ops.attention.kda import OPERATIONS as KDA_OPERATIONS, causal_conv1d_update_v2
 from xllm_kernel.ops.gemm import OPERATIONS as GEMM_OPERATIONS, matmul_ein_sum, matmul_ein_sum_out
@@ -55,10 +56,47 @@ for operation in GEMM_OPERATIONS:
     assert operation.prepared is None
 assert callable(matmul_ein_sum) and callable(matmul_ein_sum_out)
 assert callable(causal_conv1d_update_v2)
+assert callable(reshape_paged_cache) and callable(partial_rotary_embedding)
+cache = catalog["reshape_paged_cache"].contract
+assert cache.mutates == ("key_cache", "value_cache") and cache.aliases_inputs
+rope = catalog["partial_rotary_embedding"].contract
+assert rope.mutates == () and not rope.aliases_inputs
 assert all(callable(fn) for fn in (fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat))
 """
     env = {**os.environ, "PYTHONPATH": str(Path(xllm_kernel.__file__).resolve().parent.parent)}
     subprocess.run([sys.executable, "-S", "-c", script], cwd=tmp_path, env=env, check=True)
+
+
+@pytest.mark.parametrize(("generation", "solution"), [("a2", "atb"), ("a3", "atb"), ("a5", "aclnn")])
+def test_cache_backend_follows_ascend_generation(
+    monkeypatch: pytest.MonkeyPatch, generation: str, solution: str
+) -> None:
+    module_name = "xllm_kernel.ops.kv_cache.npu"
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: PlatformEnum.NPU))
+    monkeypatch.setattr(Platform, "get_ascend_soc_generation", classmethod(lambda cls: generation))
+    monkeypatch.setattr(KernelRegistry, "_instance", KernelRegistry())
+    monkeypatch.setattr(xllm_kernel, "_npu_binding", object(), raising=False)
+    atb, a5 = object(), object()
+    monkeypatch.setattr(
+        torch.ops,
+        "xllm_kernel",
+        SimpleNamespace(
+            reshape_paged_cache_atb=SimpleNamespace(default=atb),
+            reshape_paged_cache_a5=SimpleNamespace(default=a5),
+        ),
+    )
+    from xllm_kernel.ops.kv_cache import RESHAPE_PAGED_CACHE_CONTRACT
+
+    try:
+        importlib.import_module(module_name)
+        registry = KernelRegistry.get()
+        registry.freeze()
+        plan = registry.prepare(RESHAPE_PAGED_CACHE_CONTRACT, device="npu", execution_mode="aclgraph")
+        assert plan.spec.solution == solution
+        assert plan.function is (a5 if generation == "a5" else atb)
+    finally:
+        sys.modules.pop(module_name, None)
 
 
 def test_torch_backend_modules_register_unique_variants_and_execute_public_binding(
@@ -127,6 +165,7 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
         "xllm_kernel.ops.attention.gdn.triton",
         "xllm_kernel.ops.attention.kda.triton",
         "xllm_kernel.ops.gemm.atb",
+        "xllm_kernel.ops.kv_cache.npu",
     )
     for name in modules:
         monkeypatch.delitem(sys.modules, name, raising=False)

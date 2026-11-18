@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import torch
 
 from xllm_kernel.ops.gemm import MATMUL_EIN_SUM_CONTRACT, MATMUL_EIN_SUM_OUT_CONTRACT
@@ -12,9 +10,8 @@ from xllm_kernel.platform import PlatformEnum, current_platform
 from xllm_kernel.registry import register_kernel
 
 if current_platform.is_npu():
-    import torch_npu  # noqa: F401
+    from xllm_kernel import _npu_binding  # noqa: F401
 
-    torch.ops.load_library(str(Path(__file__).resolve().parents[2] / "_atb.so"))
     for _contract in (MATMUL_EIN_SUM_CONTRACT, MATMUL_EIN_SUM_OUT_CONTRACT):
         register_kernel(
             name="npu.atb." + _contract.operation,

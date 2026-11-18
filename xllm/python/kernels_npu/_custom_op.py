@@ -312,17 +312,6 @@ def _mega_moe_fake(
     return y, expert_token_nums
 
 
-def _reshape_paged_cache_fake(
-    slot_mapping: torch.Tensor,
-    keys: torch.Tensor,
-    values: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-) -> torch.Tensor:
-    del slot_mapping, keys, values, value_cache
-    return key_cache
-
-
 def _mla_preprocess_v2_fake(
     input: torch.Tensor,
     gamma0: torch.Tensor,
@@ -1289,7 +1278,6 @@ register_fake("xllm_ops::causal_conv1d_qkv_prefill", _causal_conv1d_qkv_prefill_
 register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
 register_fake("xllm_ops::mega_moe", _mega_moe_fake)
-register_fake("xllm_ops::reshape_paged_cache", _reshape_paged_cache_fake)
 register_fake("xllm_ops::mla_preprocess_v2", _mla_preprocess_v2_fake)
 register_fake("xllm_ops::update_decode_graph_metadata", _update_decode_graph_metadata_fake)
 register_fake("xllm_ops::quant_matmul", _quant_matmul_fake)
