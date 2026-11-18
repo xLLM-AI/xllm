@@ -24,13 +24,6 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-// Empty block list returned by read views when a BlockType is absent from the
-// map. Static so the returned Slice / reference stays valid.
-const std::vector<Block>& empty_blocks() {
-  static const std::vector<Block> kEmpty;
-  return kEmpty;
-}
-
 void try_replace_unique_blocks(std::vector<Block>&& matched_shared_blocks,
                                uint32_t* num_owned_shared_blocks,
                                std::vector<Block>* owned_blocks) {
@@ -72,7 +65,7 @@ void KVCacheState::incr_kv_cache_tokens_num_up_to(size_t new_target) {
 
 Slice<Block> KVCacheState::blocks(BlockType type) const {
   const auto it = composite_blocks_.find(type);
-  return it == composite_blocks_.end() ? Slice<Block>(empty_blocks())
+  return it == composite_blocks_.end() ? Slice<Block>()
                                        : Slice<Block>(it->second);
 }
 
@@ -383,7 +376,6 @@ void KVCacheState::reset() {
   prefix_cache_matched_ = false;
   num_owned_shared_blocks_.clear();
   num_cached_blocks_.clear();
-  pushed_local_block_count_ = 0;
   for (auto& [type, blocks] : composite_blocks_) {
     Block::release(std::move(blocks));
   }

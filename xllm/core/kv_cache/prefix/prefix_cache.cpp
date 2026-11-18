@@ -18,8 +18,6 @@ limitations under the License.
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
 
-#include <iostream>
-#include <thread>
 #include <utility>
 
 #include "core/framework/multimodal/mm_data.h"
@@ -36,7 +34,6 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
     return std::vector<Block>();
   }
 
-  total_blocks_.fetch_add(n_blocks);
   const int64_t now = absl::ToUnixMicros(absl::Now());
 
   std::vector<Block> blocks;
@@ -94,8 +91,6 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
     Node* node = node_list.pop_front();
     lru_lst_.push_back(node);
   }
-
-  matched_blocks_.fetch_add(blocks.size());
 
   return blocks;
 }
@@ -181,7 +176,6 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
 
       cached_blocks_.emplace(std::make_pair(token_hash_key, new_node));
 
-      num_blocks_++;
       if (event_journal_ && event_journal_->enabled()) {
         std::string parent =
             block_idx == 0
@@ -210,12 +204,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
   return n_tokens;
 }
 
-size_t PrefixCache::insert(const std::vector<Block>& blocks) {
-  Slice<Block> slice(blocks);
-  return insert(slice);
-}
-
-size_t PrefixCache::insert(Slice<Block>& blocks) {
+size_t PrefixCache::insert(Slice<Block> blocks) {
   const int64_t now = absl::ToUnixMicros(absl::Now());
   DNodeList node_list;
   XXH3Key token_hash_key;
@@ -243,7 +232,6 @@ size_t PrefixCache::insert(Slice<Block>& blocks) {
 
       cached_blocks_.emplace(std::make_pair(token_hash_key, new_node));
 
-      num_blocks_++;
       if (event_journal_ && event_journal_->enabled()) {
         event_journal_->store_copy(
             event_scope_,
@@ -260,16 +248,6 @@ size_t PrefixCache::insert(Slice<Block>& blocks) {
   return blocks.size() * block_size_;
 }
 
-Block PrefixCache::find(const XXH3Key& hash) {
-  auto iter = cached_blocks_.find(hash);
-  if (iter == cached_blocks_.end()) {
-    return Block();
-  }
-  iter->second->last_access_time = absl::ToUnixMicros(absl::Now());
-  lru_lst_.move_back(iter->second);
-  return iter->second->block;
-}
-
 bool PrefixCache::contains(const XXH3Key& hash) const {
   return cached_blocks_.find(hash) != cached_blocks_.end();
 }
@@ -280,7 +258,7 @@ bool PrefixCache::owns(const Block& block) const {
 
 std::vector<PrefixCacheEntry> PrefixCache::entries() const {
   std::vector<PrefixCacheEntry> result;
-  result.reserve(num_blocks_);
+  result.reserve(cached_blocks_.size());
   for (const Node* node = lru_lst_.lst_front.next; node != &lru_lst_.lst_back;
        node = node->next) {
     result.emplace_back(PrefixCacheEntry{
@@ -315,7 +293,6 @@ PrefixCache::Node* PrefixCache::evict_node(Node* node) {
                            KVCacheEventJournal::encode_hash(hash.data));
   }
   delete node;
-  --num_blocks_;
   return next;
 }
 
@@ -329,17 +306,9 @@ bool PrefixCache::evict_block(const XXH3Key& hash) {
 }
 
 size_t PrefixCache::evict(size_t n_blocks) {
-  if (num_blocks_ == 0 || lru_lst_.is_empty()) {
-    return 0;
-  }
-
   size_t evict_count = 0;
   Node* iter_node = lru_lst_.get_first();
-  while (evict_count < n_blocks) {
-    if (lru_lst_.is_last(iter_node)) {
-      break;
-    }
-
+  while (evict_count < n_blocks && !lru_lst_.is_last(iter_node)) {
     if (iter_node->block.is_shared()) {  // in use
       iter_node = iter_node->next;
 
@@ -351,36 +320,6 @@ size_t PrefixCache::evict(size_t n_blocks) {
   }
 
   return evict_count;
-}
-
-uint32_t PrefixCache::compute_hash_keys(const Slice<int32_t>& token_ids,
-                                        std::vector<Block>& blocks,
-                                        const size_t cached_blocks) {
-  if (blocks.size() == 0) {
-    return 0;
-  }
-  int32_t block_size = blocks[0].size();
-  const size_t n_blocks = (token_ids.size() + block_size - 1) / block_size;
-  if (blocks.size() > n_blocks) {
-    LOG(ERROR) << "token ids do not cover the allocate block.";
-    return 0;
-  }
-  size_t full_block_size =
-      std::min(token_ids.size() / block_size, blocks.size());
-
-  for (size_t i = cached_blocks; i < full_block_size; i++) {
-    if (i == 0) {
-      xxh3_128bits_hash(nullptr,
-                        token_ids.slice(i * block_size, (i + 1) * block_size),
-                        blocks[i].get_mutable_hash_value());
-    } else {
-      xxh3_128bits_hash(blocks[i - 1].get_mutable_hash_value(),
-                        token_ids.slice(i * block_size, (i + 1) * block_size),
-                        blocks[i].get_mutable_hash_value());
-    }
-  }
-
-  return full_block_size;
 }
 
 }  // namespace xllm

@@ -184,12 +184,6 @@ class BlockManager {
   // call BlockManager to free block used by Block.
   virtual void free(int32_t block_id) = 0;
 
-  // allocate a list of blocks, used for unit test
-  // virtual std::vector<Block> allocate(uint32_t n_blocks) = 0;
-
-  // allocate a block, used for unit test
-  virtual Block allocate() = 0;
-
   // get number of total blocks
   virtual size_t num_total_blocks() const = 0;
   // Physical KV keeps its static capacity; VmmKV supplies a live budget.

@@ -63,10 +63,6 @@ class VmmKVPageAllocatorImpl final : public VmmKVPageAllocator {
                       int64_t num_layers,
                       size_t physical_pages_per_virtual_page = 0,
                       size_t max_virtual_pages = 0);
-  // The caller must stop model operations and destroy every page-state user
-  // first. Refuses live allocations or an unfinished residency transition.
-  // Drains preallocation, releases resident reserves, then forgets the model.
-  bool unregister_model(const std::string& model_id);
   // Stops and joins background allocation before backend resources disappear.
   // No caller may start further allocator operations after shutdown begins.
   void shutdown();
@@ -79,7 +75,6 @@ class VmmKVPageAllocatorImpl final : public VmmKVPageAllocator {
       const std::string& model_id,
       int32_t dp_rank,
       const std::vector<int64_t>& virtual_page_ids) override;
-  void trim_kv_cache(const std::string& model_id, int32_t dp_rank) override;
 
   // begin_* freezes allocation, recycling and preallocation until finish_*.
   // Suspend also drains every reserved or executing mapping batch before
@@ -96,19 +91,10 @@ class VmmKVPageAllocatorImpl final : public VmmKVPageAllocator {
 
   size_t get_num_available_virt_pages(const std::string& model_id,
                                       int32_t dp_rank) const override;
-  size_t get_num_free_virt_pages(const std::string& model_id,
-                                 int32_t dp_rank) const;
-  size_t get_num_inuse_virt_pages(const std::string& model_id,
-                                  int32_t dp_rank) const override;
-  size_t get_num_reserved_virt_pages(const std::string& model_id,
-                                     int32_t dp_rank) const override;
   size_t get_num_total_virt_pages(const std::string& model_id) const;
   int64_t get_virt_page_id(int64_t block_id,
                            size_t block_memory_size) const override;
-  int64_t get_offset(int64_t virtual_page_id) const;
   size_t page_size() const override { return page_size_; }
-  int64_t num_layers(const std::string& model_id) const;
-  size_t phy_pages_per_virt_page(const std::string& model_id) const override;
 
  private:
   static constexpr size_t kMinReservedPages = 8;
@@ -140,17 +126,13 @@ class VmmKVPageAllocatorImpl final : public VmmKVPageAllocator {
   };
 
   struct ModelState {
-    int64_t num_layers = 0;
     size_t num_total_virt_pages = 0;
     size_t phy_pages_per_virt_page = 0;
     size_t min_reserved_pages = kMinReservedPages;
     size_t max_reserved_pages = kMaxReservedPages;
     bool ready_for_preallocation = false;
-    bool unregistering = false;
     bool suspended = false;
-    bool kv_cache_mapped = true;
     ModelTransition transition = ModelTransition::IDLE;
-    size_t transition_waiters = 0;
     size_t pending_map_ops = 0;
     std::vector<DpGroupPages> dp_group_pages;
   };
@@ -167,6 +149,7 @@ class VmmKVPageAllocatorImpl final : public VmmKVPageAllocator {
                                  std::unique_lock<std::mutex>& lock);
   KVCacheMappingPlan snapshot_pages(const ModelState& state) const;
   void validate_dp_rank(int32_t dp_rank) const;
+  int64_t get_offset(int64_t virtual_page_id) const;
   bool map_virtual_pages(const std::string& model_id,
                          int32_t dp_rank,
                          const std::vector<int64_t>& virtual_page_ids,

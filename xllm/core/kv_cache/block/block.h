@@ -122,10 +122,10 @@ class Block final {
  public:
   ~Block();
 
-  Block() = default;
+  Block() noexcept : size_(0), pin_block_(false), hash_value_{} {}
   Block(int32_t id, BlockManager* allocator);
 
-  Block(const Block& other);
+  Block(const Block& other, bool pin_block = false);
   Block& operator=(const Block& other);
 
   Block(Block&& other) noexcept;
@@ -136,25 +136,23 @@ class Block final {
   // still uses the ordinary destructor, which only drops a cache reference.
   static void release(std::vector<Block> blocks);
 
-  // get the block id
   constexpr int32_t id() const { return id_; }
 
-  // get the block size
   constexpr uint32_t size() const { return size_; }
 
-  // get the reference count, 0 if the block is invalid after move
   uint32_t ref_count() const {
-    return ref_count_ == nullptr ? 0
-                                 : ref_count_->load(std::memory_order_acquire);
+    return static_cast<uint32_t>(load_packed_ref_counts());
   }
 
-  // check if the block is shared
+  uint32_t unpinned_ref_count() const {
+    const uint64_t counts = load_packed_ref_counts();
+    return static_cast<uint32_t>(counts) - static_cast<uint32_t>(counts >> 32);
+  }
+
   bool is_shared() const { return ref_count() > 1; }
 
-  // check if the block is valid
   bool is_valid() const { return id_ >= 0 && ref_count_ != nullptr; }
 
-  // owner manager that allocated this block.
   BlockManager* manager() const { return manager_; }
 
   // Reassign this block's owning manager. Used by concurrency wrappers (e.g.
@@ -167,36 +165,33 @@ class Block final {
   // for recording the hash value of the current block and previous blocks.
   // hash_value_ = Hash(current_block, Hash(pre_block)).
   const uint8_t* get_immutable_hash_value() const { return hash_value_; }
-  uint8_t* get_mutable_hash_value() { return hash_value_; }
 
   void set_hash_value(const uint8_t* hash_value) {
     memcpy(hash_value_, hash_value, XXH3_128BITS_HASH_VALUE_LEN);
   }
 
-  constexpr uint32_t get_hash_value_len() const {
-    return XXH3_128BITS_HASH_VALUE_LEN;
+ private:
+  uint64_t load_packed_ref_counts() const {
+    return ref_count_ == nullptr ? 0
+                                 : ref_count_->load(std::memory_order_acquire);
   }
 
- private:
-  // increase reference count
-  void inc_ref_count();
+  uint64_t ref_count_delta() const {
+    return 1 + (static_cast<uint64_t>(pin_block_) << 32);
+  }
 
-  // decrease reference count
+  void inc_ref_count();
   void dec_ref_count();
 
-  // block id
   int32_t id_ = -1;
 
-  // block size
-  uint32_t size_ = 0;
+  uint32_t size_ : 31;
+  bool pin_block_ : 1;
 
-  // reference count, shared across Block aliases of the same physical block.
-  // Atomic because aliases are copied/destroyed across threads outside the
-  // owning BlockManager's lock (e.g. disagg-PD scheduler match vs. prefill
-  // threadpool sequence teardown), so inc/dec must not race.
-  std::atomic<uint32_t>* ref_count_ = nullptr;
+  // Aliases change both counts atomically outside the manager's lock.
+  // Total references occupy the low half and pins occupy the high half.
+  std::atomic<uint64_t>* ref_count_ = nullptr;
 
-  // manager that manages this block
   BlockManager* manager_ = nullptr;
 
   uint8_t hash_value_[XXH3_128BITS_HASH_VALUE_LEN];
@@ -207,15 +202,11 @@ class Block final {
 class KVCacheBlockLease final {
  public:
   explicit KVCacheBlockLease(std::vector<Block> blocks);
+  KVCacheBlockLease(KVCacheBlockLease&&) noexcept = default;
   ~KVCacheBlockLease();
 
  private:
   std::vector<Block> blocks_;
 };
-
-// equal operator, mainly used for testing
-inline constexpr bool operator==(const Block& lhs, const Block& rhs) {
-  return lhs.id() == rhs.id();
-}
 
 }  // namespace xllm

@@ -25,14 +25,18 @@ class Stream;
 class WorkerImpl;
 class VlmForwardInput;
 
+namespace runtime {
+struct Options;
+}  // namespace runtime
+
 // Coordinates one overlap step on the worker's FIFO execution thread. It owns
 // continuation provenance, stream dependencies and host publication while the
 // worker supplies model execution capabilities.
 class ScheduleOverlap final {
  public:
   ScheduleOverlap(bool is_driver,
-                  bool enable_eplb,
-                  bool retire_unconsumed_inputs);
+                  const runtime::Options& options,
+                  bool is_input_release_deferred);
 
   // Runs the complete overlap protocol using the worker's current execution
   // resources and model-specific hooks.
@@ -42,7 +46,7 @@ class ScheduleOverlap final {
                                        VlmForwardInput& input);
 
   // May be called by the host consumer concurrently with the execution thread.
-  ForwardOutput consume();
+  std::optional<ForwardOutput> consume();
   void shutdown();
 
  private:
@@ -61,6 +65,8 @@ class ScheduleOverlap final {
                              const ForwardOutput& prior_output,
                              bool use_graph_decode_input);
 
+  const bool publish_output_;
+  const bool wait_worker_completion_;
   ScheduleOverlapState state_;
 };
 

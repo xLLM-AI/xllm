@@ -167,20 +167,9 @@ class HostOffloadPageAllocator final : public VmmKVPageAllocator {
     }
   }
 
-  void trim_kv_cache(const std::string& /*model_id*/,
-                     int32_t /*dp_rank*/) override {}
-
   size_t get_num_available_virt_pages(const std::string& /*model_id*/,
                                       int32_t /*dp_rank*/) const override {
     return max_pages_ - mapped_pages_.size();
-  }
-  size_t get_num_inuse_virt_pages(const std::string& /*model_id*/,
-                                  int32_t /*dp_rank*/) const override {
-    return mapped_pages_.size();
-  }
-  size_t get_num_reserved_virt_pages(const std::string& /*model_id*/,
-                                     int32_t /*dp_rank*/) const override {
-    return mapped_pages_.empty() ? 1 : 0;
   }
   int64_t get_virt_page_id(int64_t block_id,
                            size_t block_memory_size) const override {
@@ -188,10 +177,6 @@ class HostOffloadPageAllocator final : public VmmKVPageAllocator {
            static_cast<int64_t>(page_size());
   }
   size_t page_size() const override { return 64; }
-  size_t phy_pages_per_virt_page(
-      const std::string& /*model_id*/) const override {
-    return 4;
-  }
 
   size_t mapped_pages() const { return mapped_pages_.size(); }
   size_t mapping_count() const { return mapping_count_; }
@@ -1749,6 +1734,9 @@ TEST_F(HierarchyBlockManagerPoolTest,
   Sequence sequence = make_test_sequence(/*index=*/0, tokens);
 
   ASSERT_TRUE(pool.allocate(&sequence, kFirstChunkTokens));
+  const Block execution_block(
+      sequence.kv_state().blocks(/*type=*/BlockType::C4).front(),
+      /*pin_block=*/true);
   EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 0u);
 
   sequence.kv_state().set_kv_cache_tokens_num(kFirstChunkTokens);

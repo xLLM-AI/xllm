@@ -51,7 +51,7 @@ class WorkerServiceOutputTest : public ::testing::Test {
   void collect(const ForwardOutput& source, ForwardOutput& destination) {
     runtime::Options options;
     options.backend("llm");
-    WorkerService service(options, torch::Device("npu:0"), nullptr);
+    WorkerService service(options, torch::Device(/*device_string=*/"npu:0"));
     collect(service, source, destination);
   }
 };
@@ -62,7 +62,7 @@ TEST_F(WorkerServiceOutputTest, WaitsForPendingCpuTokenSnapshot) {
   using namespace std::chrono_literals;
   runtime::Options options;
   options.backend("llm").enable_schedule_overlap(true);
-  WorkerService service(options, torch::Device("npu:0"), nullptr);
+  WorkerService service(options, torch::Device(/*device_string=*/"npu:0"));
   Stream producer(torch::Device("npu:0"));
   ForwardOutput source;
   source.next_tokens_host = torch::full({1}, -1, torch::kInt64);
@@ -402,12 +402,11 @@ void expect_rpc_rejection(runtime::Options options,
   Response response;
   CountingClosure done;
   auto completed = done.get_future();
-  // The injected constructor marks the service initialized. A null Worker
-  // ensures rejected requests cannot accidentally enter model execution.
-  auto service = initialized ? std::make_unique<WorkerService>(
-                                   options, torch::Device("npu:0"), nullptr)
-                             : std::make_unique<WorkerService>(
-                                   options, torch::Device("npu:0"));
+  auto service = std::make_unique<WorkerService>(
+      options, torch::Device(/*device_string=*/"npu:0"));
+  if (initialized) {
+    service->set_worker(/*worker=*/nullptr);
+  }
   (service.get()->*rpc)(&controller, &request, &response, &done);
   EXPECT_EQ(completed.wait_for(std::chrono::seconds(5)),
             std::future_status::ready);

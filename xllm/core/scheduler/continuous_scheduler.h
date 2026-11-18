@@ -43,6 +43,7 @@ limitations under the License.
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/kv_cache/block/block.h"
 #include "core/scheduler/kv_cache_prefetcher.h"
 #include "core/scheduler/profile/profile_manager.h"
 #include "core/scheduler/request_output_dispatcher.h"
@@ -205,10 +206,6 @@ class ContinuousSchedulerBase : public Scheduler {
   // token budget for each running sequence
   std::vector<size_t> running_sequences_budgets_;
 
-  // preemptible requests that hold cache slots, sorted by priority from high to
-  // low.
-  std::deque<std::shared_ptr<Request>> preemptable_requests_;
-
   std::shared_ptr<CancelRequestQueue> cancel_request_queue_;
 
   std::unique_ptr<RequestOutputDispatcher> output_dispatcher_;
@@ -217,7 +214,6 @@ class ContinuousSchedulerBase : public Scheduler {
   std::unique_ptr<SchedulerMetrics> scheduler_metrics_;
 
   bool enable_prefix_cache_ = false;
-  bool enable_in_batch_prefix_cache_ = false;
 
   // the number of requests that are waiting to be scheduled
   std::atomic<size_t> pending_requests_{0};
@@ -246,8 +242,7 @@ class ContinuousSchedulerBase : public Scheduler {
 
   int32_t min_speculative_tokens_required_ = 0;
 
-  // build a batch of requests from the priority queue
-  virtual BatchGroup prepare_batch();
+  BatchGroup prepare_batch();
 
   // tokenizer
   std::unique_ptr<Tokenizer> tokenizer_;
@@ -260,6 +255,8 @@ class ContinuousSchedulerBase : public Scheduler {
     // Keep requests alive until their non-owning Batch views are destroyed.
     std::vector<std::shared_ptr<Request>> requests;
     BatchGroup batches;
+    std::optional<KVCacheBlockLease> cache_block_lease;
+    bool drain_next_batch = false;
   };
 
   std::optional<PendingStep> pending_step_;
@@ -280,6 +277,7 @@ class ContinuousSchedulerBase : public Scheduler {
   bool step_with_schedule_overlap(const absl::Duration& timeout);
 
   void complete_pending_step();
+  bool requires_pd_kv_retirement() const;
 
   void refresh_sequences_from_requests(
       const std::vector<std::shared_ptr<Request>>& requests,

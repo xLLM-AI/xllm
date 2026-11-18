@@ -33,12 +33,15 @@ namespace xllm {
 // leaves that need it.
 class ConcurrentBlockManagerImpl : public BlockManager {
  public:
+  static std::unique_ptr<BlockManager> wrap_if_needed(
+      std::unique_ptr<BlockManager> leaf,
+      const BlockManager::Options& options);
+
   explicit ConcurrentBlockManagerImpl(std::unique_ptr<BlockManager> inner);
   ~ConcurrentBlockManagerImpl() override = default;
 
   // Block-level primitives.
   std::vector<Block> allocate(size_t num_blocks) override;
-  Block allocate() override;
   void deallocate(const Slice<Block>& blocks) override;
   void release(std::span<Block> blocks) override;
   void free(int32_t block_id) override;

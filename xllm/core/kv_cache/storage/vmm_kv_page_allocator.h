@@ -42,20 +42,14 @@ class VmmKVPageAllocator {
       const std::string& model_id,
       int32_t dp_rank,
       const std::vector<int64_t>& virtual_page_ids) = 0;
-  virtual void trim_kv_cache(const std::string& model_id, int32_t dp_rank) = 0;
 
   // Includes resident reserve pages and currently budgeted growth. This is
   // a scheduling hint; alloc_kv_cache_page performs the actual reservation.
   virtual size_t get_num_available_virt_pages(const std::string& model_id,
                                               int32_t dp_rank) const = 0;
-  virtual size_t get_num_inuse_virt_pages(const std::string& model_id,
-                                          int32_t dp_rank) const = 0;
-  virtual size_t get_num_reserved_virt_pages(const std::string& model_id,
-                                             int32_t dp_rank) const = 0;
   virtual int64_t get_virt_page_id(int64_t block_id,
                                    size_t block_memory_size) const = 0;
   virtual size_t page_size() const = 0;
-  virtual size_t phy_pages_per_virt_page(const std::string& model_id) const = 0;
 };
 
 }  // namespace xllm

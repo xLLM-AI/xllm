@@ -66,7 +66,6 @@ void publish_blocks(Sequence* seq,
   const size_t token_end = end * block_size + block_hash_lookahead(hasher_type);
   KVCacheState& kv = seq->kv_state();
   std::vector<Block>* blocks = kv.mutable_blocks(type);
-  CHECK(blocks != nullptr);
   CHECK_LE(end, blocks->size());
   seq->update_block_hashes(static_cast<uint32_t>(block_size), hasher_type);
   leaf.cache(seq->hash_tokens(hasher_type).slice(0, token_end),
@@ -88,18 +87,6 @@ inline BlockType block_type_from_compress_ratio(uint32_t ratio) {
     return BlockType::C4;
   }
   return BlockType::C128;
-}
-
-// Wrap the leaf in a concurrency adapter when sequence-level calls may run
-// off the scheduler thread (disagg PD / kvcache store / host-offload).
-std::unique_ptr<BlockManager> maybe_concurrent(
-    std::unique_ptr<BlockManager> leaf,
-    const BlockManager::Options& options) {
-  if (options.enable_disagg_pd() || options.enable_kvcache_store() ||
-      options.enable_host_offload()) {
-    return std::make_unique<ConcurrentBlockManagerImpl>(std::move(leaf));
-  }
-  return leaf;
 }
 
 // Choose the paged virtual memory manager or the flat free-list manager.
@@ -381,14 +368,14 @@ CompositeBlockManager::LeafMap build_composite_leaves(
         .block_size(chunk_stride)
         .enable_prefix_cache(prefill_prefix_cache)
         .instance_is_decode(is_decode);
-    leaves.emplace(
-        BlockType::LINEAR,
-        CompositeBlockManager::LeafEntry{
-            maybe_concurrent(std::make_unique<LinearStateBlockManager>(
-                                 std::move(linear_opts)),
-                             options),
-            /*participates_in_admission=*/false,
-            /*supports_prefix_cache=*/prefill_prefix_cache});
+    leaves.emplace(/*key=*/BlockType::LINEAR,
+                   CompositeBlockManager::LeafEntry{
+                       ConcurrentBlockManagerImpl::wrap_if_needed(
+                           std::make_unique<LinearStateBlockManager>(
+                               std::move(linear_opts)),
+                           options),
+                       /*participates_in_admission=*/false,
+                       /*supports_prefix_cache=*/prefill_prefix_cache});
   }
 
   if (options.manager_types().empty()) {
@@ -399,8 +386,8 @@ CompositeBlockManager::LeafMap build_composite_leaves(
     leaves.emplace(
         BlockType::KV,
         CompositeBlockManager::LeafEntry{
-            maybe_concurrent(make_kv_leaf(kv_opts, dp_rank, page_allocator),
-                             options),
+            ConcurrentBlockManagerImpl::wrap_if_needed(
+                make_kv_leaf(kv_opts, dp_rank, page_allocator), options),
             /*participates_in_admission=*/true,
             /*supports_prefix_cache=*/prefix_cache_on});
     return leaves;
@@ -431,7 +418,7 @@ CompositeBlockManager::LeafMap build_composite_leaves(
       // exactly right. Cross-leaf min happens in the composite.
       leaves.emplace(key,
                      CompositeBlockManager::LeafEntry{
-                         maybe_concurrent(
+                         ConcurrentBlockManagerImpl::wrap_if_needed(
                              std::make_unique<BlockManagerImpl>(opts), options),
                          /*participates_in_admission=*/true,
                          /*supports_prefix_cache=*/compressed_prefix_cache});
@@ -455,7 +442,7 @@ CompositeBlockManager::LeafMap build_composite_leaves(
       leaves.emplace(
           BlockType::SWA,
           CompositeBlockManager::LeafEntry{
-              maybe_concurrent(
+              ConcurrentBlockManagerImpl::wrap_if_needed(
                   std::make_unique<SlidingWindowBlockManager>(opts), options),
               /*participates_in_admission=*/false,
               /*supports_prefix_cache=*/prefill_prefix_cache});
@@ -587,7 +574,7 @@ void CompositeBlockManager::publish_completed_prefix(Sequence* seq,
       continue;
     }
     std::vector<Block>* blocks = kv.mutable_blocks(type);
-    if (blocks == nullptr || blocks->empty()) {
+    if (blocks->empty()) {
       continue;
     }
     const size_t num_full =

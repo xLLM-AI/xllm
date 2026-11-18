@@ -53,7 +53,7 @@ class ScheduleOverlapState final {
   // Only valid for host-visible ranks. Waits for publication or shutdown and
   // consumes the publication flag. Returns a copy when relevant to the caller.
   // The cached prior output is retained for the next overlapped device step.
-  ForwardOutput consume();
+  std::optional<ForwardOutput> consume();
 
   // Wakes blocked producer and consumer calls. Cached device state is kept
   // intact so destruction can drain already submitted work safely.
@@ -62,7 +62,6 @@ class ScheduleOverlapState final {
   // These accessors are for the single producer thread that executes the next
   // overlapped step. They borrow state owned by this object.
   const ForwardOutput& prior_output() const { return prior_output_; }
-  const std::vector<std::string>& request_ids() const { return request_ids_; }
   const std::vector<std::string>& sample_sequence_ids() const {
     return sample_sequence_ids_;
   }

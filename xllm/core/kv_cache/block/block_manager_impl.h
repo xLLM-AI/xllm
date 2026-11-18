@@ -104,12 +104,6 @@ class BlockManagerImpl : public BlockManager {
   // call BlockManager to free block used by Block.
   void free(int32_t block_id) override;
 
-  // allocate a list of blocks
-  // std::vector<Block> allocate(uint32_t n_blocks) override;
-
-  // allocate a block
-  Block allocate() override;
-
   // total blocks num
   size_t num_total_blocks() const override {
     return options_.shared_block_pool()
@@ -137,7 +131,7 @@ class BlockManagerImpl : public BlockManager {
  private:
   // check if has enough slots, if not, try to evict some blocks
   // from the prefix cache
-  bool has_enough_blocks(uint32_t num_blocks);
+  bool has_enough_blocks(size_t num_blocks);
 
  protected:
   // prefix cache

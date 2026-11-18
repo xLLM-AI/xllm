@@ -16,8 +16,6 @@ limitations under the License.
 
 #include "core/kv_cache/block/block_manager_impl.h"
 
-#include <unordered_set>
-
 #include "core/framework/request/sequence.h"
 #include "core/kv_cache/prefix/prefix_cache_factory.h"
 namespace xllm {
@@ -70,7 +68,7 @@ BlockManagerImpl::BlockManagerImpl(const Options& options)
     usage_accounted_ids_.assign(total_blocks, 0);
     return;
   }
-  num_free_blocks_.store(total_blocks, std::memory_order_relaxed);
+  num_free_blocks_.store(total_blocks - 1, std::memory_order_relaxed);
   usage_accounted_ids_.assign(total_blocks, 0);
   free_blocks_.reserve(total_blocks);
   for (int32_t i = 0; i < total_blocks; ++i) {
@@ -79,8 +77,7 @@ BlockManagerImpl::BlockManagerImpl(const Options& options)
   }
 
   // reserve block 0 for padding
-  padding_block_ = allocate();
-  CHECK_EQ(padding_block_.id(), 0) << "Padding block id should be 0";
+  padding_block_ = Block(/*id=*/0, this);
 }
 
 std::vector<Block> BlockManagerImpl::allocate(size_t num_blocks) {
@@ -112,10 +109,9 @@ std::vector<Block> BlockManagerImpl::allocate_with_placement(
   if (!has_enough_blocks(num_blocks)) {
     return {};
   }
-  CHECK(num_blocks <= num_free_blocks_) << "Not enough blocks available";
   std::vector<Block> blocks;
   blocks.reserve(num_blocks);
-  for (uint32_t i = 0; i < num_blocks; ++i) {
+  for (size_t i = 0; i < num_blocks; ++i) {
     size_t prev_count =
         num_free_blocks_.fetch_sub(1, std::memory_order_relaxed);
     const int32_t block_id = free_blocks_[prev_count - 1];
@@ -124,7 +120,6 @@ std::vector<Block> BlockManagerImpl::allocate_with_placement(
     blocks.emplace_back(block_id, this);
   }
 
-  // const auto block_ids = allocate(num_blocks);
   num_used_blocks_.fetch_add(num_blocks, std::memory_order_relaxed);
   return blocks;
 }
@@ -144,20 +139,9 @@ void BlockManagerImpl::deallocate(const Slice<Block>& blocks) {
             ? block.ref_count() <= 2u
             : (!options_.shared_block_pool() || block.ref_count() == 1u);
     if (logically_released && clear_used(usage_accounted_ids_, block.id())) {
-      if (num_used_blocks_ == 0) {
-        LOG(ERROR) << "num_used_blocks_==0 cannot fetch_sub for id:"
-                   << block.id()
-                   << ", total block size: " << num_total_blocks();
-        std::unordered_set<int32_t> block_id_set;
-        block_id_set.insert(block.id());
-        std::string error_msg = "Block already released: ";
-        for (auto& id : free_blocks_) {
-          if (block_id_set.count(id) != 0) {
-            error_msg.append(std::to_string(id)).append(" ");
-          }
-        }
-        LOG(FATAL) << error_msg;
-      }
+      CHECK_GT(num_used_blocks_.load(std::memory_order_relaxed), 0u)
+          << "Cannot release used block " << block.id()
+          << ", total blocks: " << num_total_blocks();
       num_used_blocks_.fetch_sub(1, std::memory_order_relaxed);
       if (options_.shared_block_pool()) {
         options_.shared_block_pool()->mark_inactive(block.id(), block_type());
@@ -201,7 +185,7 @@ void BlockManagerImpl::set_prefix_dependency(const XXH3Key& hash,
   }
 }
 
-bool BlockManagerImpl::has_enough_blocks(uint32_t num_blocks) {
+bool BlockManagerImpl::has_enough_blocks(size_t num_blocks) {
   const size_t free_blocks = num_free_blocks();
   if (num_blocks <= free_blocks) {
     return true;
@@ -213,11 +197,9 @@ bool BlockManagerImpl::has_enough_blocks(uint32_t num_blocks) {
   if (num_blocks <= num_free_blocks()) {
     return true;
   }
-  if (!options_.shared_block_pool()) {
-    LOG(WARNING) << "Potential block leak, free blocks in allocator: "
-                 << num_free_blocks_
-                 << " blocks in prefix cache: " << num_blocks_in_prefix_cache();
-  }
+  LOG(WARNING) << "Potential block leak, free blocks in allocator: "
+               << num_free_blocks_
+               << " blocks in prefix cache: " << num_blocks_in_prefix_cache();
   return false;
 }
 
@@ -271,18 +253,6 @@ void BlockManagerImpl::cache(const std::vector<Block>& blocks) {
     // Add the kv cache to the prefix cache
     prefix_cache_->insert(blocks);
   }
-}
-
-// allocate a block id
-Block BlockManagerImpl::allocate() {
-  if (options_.shared_block_pool()) {
-    std::vector<Block> blocks = allocate(1);
-    return blocks.empty() ? Block() : std::move(blocks[0]);
-  }
-  CHECK(num_free_blocks_ > 0) << "No more blocks available";
-  size_t prev_count = num_free_blocks_.fetch_sub(1, std::memory_order_relaxed);
-  const int32_t block_id = free_blocks_[prev_count - 1];
-  return {block_id, this};
 }
 
 // caller should make sure the block_id is valid

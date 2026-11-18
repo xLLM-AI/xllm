@@ -17,35 +17,19 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <utility>
-
 #include "core/framework/request/sequence.h"
 
 namespace xllm {
-namespace {
 
-// One physical id == one block; no prefix cache; blocks live under the
-// EMBEDDING slot of the sequence's KVCacheState. id 0 stays the reserved
-// padding slot (BlockManagerImpl reserves it in its ctor), so usable ids are
-// [1, n-1].
-BlockManager::Options make_embedding_block_options(uint32_t num_blocks) {
-  BlockManager::Options options;
-  options.num_blocks(num_blocks);
-  options.block_size(/*unused, one id == one block=*/1);
-  options.enable_prefix_cache(false);
-  options.enable_disagg_pd(false);
-  options.block_type(BlockType::EMBEDDING);
-  return options;
-}
-
-}  // namespace
-
-EmbeddingBlockManager::EmbeddingBlockManager(uint32_t num_blocks,
-                                             std::string resource_name,
-                                             std::string exhaustion_message)
-    : BlockManagerImpl(make_embedding_block_options(num_blocks)),
-      resource_name_(std::move(resource_name)),
-      exhaustion_message_(std::move(exhaustion_message)) {}
+EmbeddingBlockManager::EmbeddingBlockManager(uint32_t num_blocks)
+    : BlockManagerImpl([num_blocks] {
+        Options options;
+        options.num_blocks(num_blocks)
+            .block_size(/*value=*/1)
+            .enable_prefix_cache(/*value=*/false)
+            .block_type(/*value=*/BlockType::EMBEDDING);
+        return options;
+      }()) {}
 
 std::optional<std::vector<Block>> EmbeddingBlockManager::allocate_for_sequence(
     Sequence* seq,
@@ -60,51 +44,12 @@ std::optional<std::vector<Block>> EmbeddingBlockManager::allocate_for_sequence(
   }
   std::vector<Block> blocks = allocate(1);
   if (blocks.empty()) {
-    LOG(ERROR) << "Failed to allocate " << resource_name_
-               << "! free=" << num_free_blocks()
-               << ", used=" << num_used_blocks()
-               << ", total=" << num_total_blocks()
-               << (exhaustion_message_.empty() ? "" : ". ")
-               << exhaustion_message_;
+    LOG(ERROR) << "Failed to allocate embedding block! free="
+               << num_free_blocks() << ", used=" << num_used_blocks()
+               << ", total=" << num_total_blocks();
     return std::nullopt;
   }
   return blocks;
-}
-
-Block EmbeddingBlockManager::allocate() {
-  // Surface exhaustion with this resource's identity instead of the generic
-  // base message, then delegate to the counting allocate(1) path (the base
-  // zero-arg allocate() skips num_used accounting -- it exists for padding).
-  // The base ctor's padding reservation runs before this vtable entry is
-  // active, so it still uses BlockManagerImpl::allocate().
-  CHECK_GT(num_free_blocks(), 0u)
-      << (exhaustion_message_.empty()
-              ? "No more " + resource_name_ + " blocks available"
-              : exhaustion_message_);
-  std::vector<Block> blocks = BlockManagerImpl::allocate(1);
-  CHECK_EQ(blocks.size(), 1u);
-  return std::move(blocks[0]);
-}
-
-std::vector<Block> EmbeddingBlockManager::allocate_shared(
-    const Slice<int32_t>& /*token_ids*/,
-    const Slice<Block>& /*existed_shared_blocks*/,
-    const MMData& /*mm_data*/,
-    const Slice<XXH3Key>& /*block_hashes*/) {
-  NOT_IMPLEMENTED();
-  return {};
-}
-
-void EmbeddingBlockManager::cache(const Slice<int32_t>& /*token_ids*/,
-                                  std::vector<Block>& /*blocks*/,
-                                  size_t /*existed_shared_blocks_num*/,
-                                  const MMData& /*mm_data*/,
-                                  const Slice<XXH3Key>& /*block_hashes*/) {
-  NOT_IMPLEMENTED();
-}
-
-void EmbeddingBlockManager::cache(const std::vector<Block>& /*blocks*/) {
-  NOT_IMPLEMENTED();
 }
 
 }  // namespace xllm

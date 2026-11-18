@@ -328,23 +328,6 @@ WorkerService::WorkerService(runtime::Options options,
       /*pool_name=*/"WorkerService.request");
 }
 
-WorkerService::WorkerService(runtime::Options options,
-                             const torch::Device& device,
-                             std::unique_ptr<Worker> worker)
-    : options_(options),
-      initialized_(true),
-      device_(device),
-      worker_(std::move(worker)) {
-  device_.set_device();
-  device_.init_device_context();
-  stream_ = device_.get_stream_from_pool();
-  threadpool_ = std::make_unique<ThreadPool>(
-      /*num_threads=*/4,
-      /*init_func=*/[this]() mutable { device_.set_device(); },
-      /*cpu_binding=*/false,
-      /*pool_name=*/"WorkerService.request");
-}
-
 WorkerService::~WorkerService() {
   begin_shutdown();
   if (polling_thread_ && polling_thread_->joinable()) {
@@ -610,9 +593,14 @@ void WorkerService::GetLastLLMStepResult(
       return;
     }
     auto output = std::move(worker_->get_last_step_result_async()).get();
+    if (!output) {
+      controller->SetFailed(
+          /*reason=*/"Worker stopped before delivering the step result");
+      return;
+    }
     ForwardOutput cpu_output;
     std::vector<SpeculativeTokenStats> speculative_token_stats;
-    if (output.has_value()) {
+    if (worker_->is_driver() || options_.eplb_worker_config().enabled) {
       collect_llm_output(*output, cpu_output, speculative_token_stats);
     }
     // Embedding-only results are valid completed outputs.
@@ -802,9 +790,14 @@ void WorkerService::GetLastVLMStepResult(
       return;
     }
     auto output = std::move(worker_->get_last_step_result_async()).get();
+    if (!output) {
+      controller->SetFailed(
+          /*reason=*/"Worker stopped before delivering the step result");
+      return;
+    }
     ForwardOutput cpu_output;
     std::vector<SpeculativeTokenStats> speculative_token_stats;
-    if (output.has_value()) {
+    if (worker_->is_driver() || options_.eplb_worker_config().enabled) {
       collect_vlm_output(*output, cpu_output, speculative_token_stats);
     }
     // Embedding-only results are valid completed outputs.
