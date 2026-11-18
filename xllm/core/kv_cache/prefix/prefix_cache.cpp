@@ -18,8 +18,6 @@ limitations under the License.
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
 
-#include <iostream>
-#include <thread>
 #include <utility>
 
 #include "core/framework/multimodal/mm_data.h"
@@ -36,7 +34,6 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
     return std::vector<Block>();
   }
 
-  total_blocks_.fetch_add(n_blocks);
   const int64_t now = absl::ToUnixMicros(absl::Now());
 
   std::vector<Block> blocks;
@@ -46,19 +43,15 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
                 existed_shared_blocks.begin(),
                 existed_shared_blocks.begin() + start_block);
 
-  DNodeList node_list;
+  auto batch_begin = lru_lst_.end();
 
-  // Look up one block by its chained hash; on hit, record the block and move
-  // its LRU node to the front of the working list. Returns false on miss.
   auto match_block = [&](const XXH3Key& token_hash_key) -> bool {
     auto iter = cached_blocks_.find(token_hash_key);
     if (iter == cached_blocks_.end()) {
       return false;
     }
-    blocks.emplace_back(iter->second->block);
-    iter->second->last_access_time = now;
-    lru_lst_.remove_node(iter->second);
-    node_list.push_front(iter->second);
+    blocks.emplace_back(iter->second.block_);
+    batch_begin = touch_node(iter->second, batch_begin, now);
     return true;
   };
 
@@ -89,14 +82,6 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
     }
   }
 
-  // update LRU list
-  while (!node_list.is_empty()) {
-    Node* node = node_list.pop_front();
-    lru_lst_.push_back(node);
-  }
-
-  matched_blocks_.fetch_add(blocks.size());
-
   return blocks;
 }
 
@@ -114,9 +99,8 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
   if (n_blocks <= existed_shared_blocks_num) {
     return n_blocks * block_size_;
   }
-  // truncate the token ids and blocks to boundary
 
-  DNodeList node_list;
+  auto batch_begin = lru_lst_.end();
 
   // Fill `token_hash_key` with the chained hash of block `block_idx`, reusing
   // the precomputed hash when it covers all blocks, otherwise computing it.
@@ -151,73 +135,36 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
     fill_block_hash(block_idx);
     blocks[block_idx].set_hash_value(token_hash_key.data);
 
-    auto iter = cached_blocks_.find(token_hash_key);
-    if (iter != cached_blocks_.end()) {
-      iter->second->last_access_time = now;
-      iter->second->chain_known = true;
-      iter->second->block_index = block_idx;
-      iter->second->parent =
-          block_idx == 0
-              ? std::nullopt
-              : std::optional<XXH3Key>(
-                    XXH3Key(blocks[block_idx - 1].get_immutable_hash_value()));
+    const bool inserted =
+        cache_node(batch_begin, token_hash_key, blocks[block_idx], now);
+    batch_begin->chain_known_ = true;
+    batch_begin->block_index_ = block_idx;
+    auto& parent = batch_begin->parent_;
+    parent = block_idx == 0
+                 ? std::nullopt
+                 : std::make_optional<XXH3Key>(
+                       blocks[block_idx - 1].get_immutable_hash_value());
 
-      lru_lst_.remove_node(iter->second);
-      node_list.push_front(iter->second);
-    } else {
-      Node* new_node = new Node();
-
-      new_node->block = blocks[block_idx];
-      cached_block_ids_.insert(new_node->block.id());
-      new_node->last_access_time = now;
-      new_node->chain_known = true;
-      new_node->block_index = block_idx;
-      if (block_idx != 0) {
-        new_node->parent =
-            XXH3Key(blocks[block_idx - 1].get_immutable_hash_value());
-      }
-
-      node_list.push_front(new_node);
-
-      cached_blocks_.emplace(std::make_pair(token_hash_key, new_node));
-
-      num_blocks_++;
-      if (event_journal_ && event_journal_->enabled()) {
-        std::string parent =
-            block_idx == 0
-                ? std::string()
-                : KVCacheEventJournal::encode_hash(
-                      blocks[block_idx - 1].get_immutable_hash_value());
-        const size_t begin = block_idx * block_size_;
-        std::vector<int32_t> tokens(token_ids.begin() + begin,
-                                    token_ids.begin() + begin + block_size_);
-        event_journal_->store(
-            event_scope_,
-            KVCacheEventJournal::encode_hash(token_hash_key.data),
-            std::move(parent),
-            std::move(tokens),
-            static_cast<uint32_t>(block_idx));
-      }
+    if (inserted && event_journal_ && event_journal_->enabled()) {
+      const size_t begin = block_idx * block_size_;
+      std::vector<int32_t> tokens(token_ids.begin() + begin,
+                                  token_ids.begin() + begin + block_size_);
+      event_journal_->store(
+          event_scope_,
+          KVCacheEventJournal::encode_hash(token_hash_key.data),
+          parent ? KVCacheEventJournal::encode_hash(parent->data)
+                 : std::string(),
+          std::move(tokens),
+          static_cast<uint32_t>(block_idx));
     }
   }
 
-  const size_t n_tokens = n_blocks * block_size_;
-  while (!node_list.is_empty()) {
-    Node* node = node_list.pop_front();
-    lru_lst_.push_back(node);
-  }
-
-  return n_tokens;
+  return n_blocks * block_size_;
 }
 
-size_t PrefixCache::insert(const std::vector<Block>& blocks) {
-  Slice<Block> slice(blocks);
-  return insert(slice);
-}
-
-size_t PrefixCache::insert(Slice<Block>& blocks) {
+size_t PrefixCache::insert(Slice<Block> blocks) {
   const int64_t now = absl::ToUnixMicros(absl::Now());
-  DNodeList node_list;
+  auto batch_begin = lru_lst_.end();
   XXH3Key token_hash_key;
 
   for (size_t i = 0; i < blocks.size(); i++) {
@@ -226,48 +173,14 @@ size_t PrefixCache::insert(Slice<Block>& blocks) {
     }
     token_hash_key.set(blocks[i].get_immutable_hash_value());
 
-    auto iter = cached_blocks_.find(token_hash_key);
-    if (iter != cached_blocks_.end()) {
-      iter->second->last_access_time = now;
-
-      lru_lst_.remove_node(iter->second);
-      node_list.push_front(iter->second);
-    } else {
-      Node* new_node = new Node();
-
-      new_node->block = blocks[i];
-      cached_block_ids_.insert(new_node->block.id());
-      new_node->last_access_time = now;
-
-      node_list.push_front(new_node);
-
-      cached_blocks_.emplace(std::make_pair(token_hash_key, new_node));
-
-      num_blocks_++;
-      if (event_journal_ && event_journal_->enabled()) {
-        event_journal_->store_copy(
-            event_scope_,
-            KVCacheEventJournal::encode_hash(token_hash_key.data));
-      }
+    if (cache_node(batch_begin, token_hash_key, blocks[i], now) &&
+        event_journal_ && event_journal_->enabled()) {
+      event_journal_->store_copy(
+          event_scope_, KVCacheEventJournal::encode_hash(token_hash_key.data));
     }
   }
 
-  while (!node_list.is_empty()) {
-    Node* node = node_list.pop_front();
-    lru_lst_.push_back(node);
-  }
-
   return blocks.size() * block_size_;
-}
-
-Block PrefixCache::find(const XXH3Key& hash) {
-  auto iter = cached_blocks_.find(hash);
-  if (iter == cached_blocks_.end()) {
-    return Block();
-  }
-  iter->second->last_access_time = absl::ToUnixMicros(absl::Now());
-  lru_lst_.move_back(iter->second);
-  return iter->second->block;
 }
 
 bool PrefixCache::contains(const XXH3Key& hash) const {
@@ -280,107 +193,67 @@ bool PrefixCache::owns(const Block& block) const {
 
 std::vector<PrefixCacheEntry> PrefixCache::entries() const {
   std::vector<PrefixCacheEntry> result;
-  result.reserve(num_blocks_);
-  for (const Node* node = lru_lst_.lst_front.next; node != &lru_lst_.lst_back;
-       node = node->next) {
+  result.reserve(cached_blocks_.size());
+  for (const Node& node : lru_lst_) {
     result.emplace_back(PrefixCacheEntry{
-        .hash = XXH3Key(node->block.get_immutable_hash_value()),
-        .parent = node->parent,
-        .dependency = node->dependency,
-        .block_id = node->block.id(),
-        .block_index = node->block_index,
-        .last_access_time = node->last_access_time,
-        .chain_known = node->chain_known,
-        .evictable = !node->block.is_shared(),
+        .hash = XXH3Key(node.block_.get_immutable_hash_value()),
+        .parent = node.parent_,
+        .dependency = node.dependency_,
+        .block_id = node.block_.id(),
+        .block_index = node.block_index_,
+        .last_access_time = node.last_access_time_,
+        .chain_known = node.chain_known_,
+        .evictable = !node.block_.is_shared(),
     });
   }
   return result;
 }
 
-void PrefixCache::set_dependency(const XXH3Key& hash,
-                                 const XXH3Key& dependency) {
+void PrefixCache::set_dependency(const XXH3Key& hash, XXH3Key dependency) {
   const auto it = cached_blocks_.find(hash);
   if (it != cached_blocks_.end()) {
-    it->second->dependency = dependency;
+    it->second.dependency_ = std::move(dependency);
   }
 }
 
-PrefixCache::Node* PrefixCache::evict_node(Node* node) {
-  Node* next = lru_lst_.remove_node(node);
-  const XXH3Key hash(node->block.get_immutable_hash_value());
-  cached_blocks_.erase(hash);
-  cached_block_ids_.erase(node->block.id());
+PrefixCache::DNodeList::iterator PrefixCache::evict_node(
+    decltype(cached_blocks_)::iterator it) {
+  auto& node = it->second;
+  cached_block_ids_.erase(node.block_.id());
+  auto next = lru_lst_.erase(lru_lst_.iterator_to(node));
+  auto removed = cached_blocks_.extract(it);
   if (event_journal_ && event_journal_->enabled()) {
-    event_journal_->remove(event_scope_,
-                           KVCacheEventJournal::encode_hash(hash.data));
+    event_journal_->remove(
+        event_scope_, KVCacheEventJournal::encode_hash(removed.key().data));
   }
-  delete node;
-  --num_blocks_;
   return next;
 }
 
 bool PrefixCache::evict_block(const XXH3Key& hash) {
   const auto it = cached_blocks_.find(hash);
-  if (it == cached_blocks_.end() || it->second->block.is_shared()) {
+  if (it == cached_blocks_.end() || it->second.block_.is_shared()) {
     return false;
   }
-  evict_node(it->second);
+  evict_node(it);
   return true;
 }
 
 size_t PrefixCache::evict(size_t n_blocks) {
-  if (num_blocks_ == 0 || lru_lst_.is_empty()) {
-    return 0;
-  }
-
   size_t evict_count = 0;
-  Node* iter_node = lru_lst_.get_first();
-  while (evict_count < n_blocks) {
-    if (lru_lst_.is_last(iter_node)) {
-      break;
-    }
-
-    if (iter_node->block.is_shared()) {  // in use
-      iter_node = iter_node->next;
-
+  auto iter_node = lru_lst_.begin();
+  const auto end = lru_lst_.end();
+  while (evict_count < n_blocks && iter_node != end) {
+    if (iter_node->block_.is_shared()) {
+      ++iter_node;
       continue;
     }
 
-    iter_node = evict_node(iter_node);
+    const XXH3Key hash(iter_node->block_.get_immutable_hash_value());
+    iter_node = evict_node(cached_blocks_.find(hash));
     ++evict_count;
   }
 
   return evict_count;
-}
-
-uint32_t PrefixCache::compute_hash_keys(const Slice<int32_t>& token_ids,
-                                        std::vector<Block>& blocks,
-                                        const size_t cached_blocks) {
-  if (blocks.size() == 0) {
-    return 0;
-  }
-  int32_t block_size = blocks[0].size();
-  const size_t n_blocks = (token_ids.size() + block_size - 1) / block_size;
-  if (blocks.size() > n_blocks) {
-    LOG(ERROR) << "token ids do not cover the allocate block.";
-    return 0;
-  }
-  size_t full_block_size =
-      std::min(token_ids.size() / block_size, blocks.size());
-
-  for (size_t i = cached_blocks; i < full_block_size; i++) {
-    if (i == 0) {
-      xxh3_128bits_hash(nullptr,
-                        token_ids.slice(i * block_size, (i + 1) * block_size),
-                        blocks[i].get_mutable_hash_value());
-    } else {
-      xxh3_128bits_hash(blocks[i - 1].get_mutable_hash_value(),
-                        token_ids.slice(i * block_size, (i + 1) * block_size),
-                        blocks[i].get_mutable_hash_value());
-    }
-  }
-
-  return full_block_size;
 }
 
 }  // namespace xllm

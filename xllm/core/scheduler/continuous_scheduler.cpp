@@ -26,6 +26,7 @@ limitations under the License.
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "core/common/types.h"
@@ -40,6 +41,7 @@ limitations under the License.
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/kv_cache/block/block.h"
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler_policy.h"
 #include "core/util/timer.h"
@@ -394,6 +396,8 @@ BatchGroup ContinuousSchedulerBase::prepare_batch() {
 
   // Strategy-driven scheduling
   policy_->schedule(state, budget, finished);
+  collect_current_batch_ = budget.kv_allocation_deferred && pending_step_ &&
+                           pending_step_->cache_block_lease;
 
   // Finalize
   if (!finished.empty()) {
@@ -439,9 +443,10 @@ SchedulerState ContinuousSchedulerBase::make_state() {
           [this](const std::shared_ptr<Request>& request) {
             release_failed_request(request);
           },
-      .has_pending_vmm_batch =
-          KVCacheConfig::get_instance().enable_vmm_kvcache() &&
-          pending_step_.has_value(),
+      .has_pending_kv_batch =
+          pending_step_.has_value() &&
+          (KVCacheConfig::get_instance().enable_vmm_kvcache() ||
+           pending_step_->cache_block_lease.has_value()),
   };
 }
 
@@ -521,6 +526,8 @@ bool ContinuousSchedulerBase::step_with_schedule_overlap(
     const absl::Duration& timeout) {
   // get a new batch of requests
   BatchGroup batch = schedule_request(timeout);
+  const bool collect_current_batch =
+      std::exchange(collect_current_batch_, /*new_value=*/false);
   bool cur_batch_all_empty =
       std::all_of(batch.begin(), batch.end(), [](const Batch& one_batch) {
         return one_batch.empty();
@@ -529,7 +536,33 @@ bool ContinuousSchedulerBase::step_with_schedule_overlap(
     return false;
   }
 
+  std::optional<KVCacheBlockLease> cache_block_lease;
   if (!cur_batch_all_empty) {
+    if (options_.enable_disagg_pd() &&
+        options_.instance_role() == InstanceRole::DECODE) {
+      // Remote Prefill can overwrite recycled blocks before Decode finishes.
+      size_t block_count = 0;
+      for (Sequence* sequence : running_sequences_) {
+        for (const auto& group : sequence->kv_state().block_groups()) {
+          block_count += group.size();
+        }
+      }
+
+      std::vector<Block> blocks;
+      blocks.reserve(block_count);
+      for (Sequence* sequence : running_sequences_) {
+        for (const auto& group : sequence->kv_state().block_groups()) {
+          for (const Block& block : group) {
+            if (block.is_valid()) {
+              blocks.emplace_back(block, /*pin_block=*/true);
+            }
+          }
+        }
+      }
+      if (!blocks.empty()) {
+        cache_block_lease.emplace(std::move(blocks));
+      }
+    }
     step_callback_(batch);
   }
 
@@ -549,12 +582,20 @@ bool ContinuousSchedulerBase::step_with_schedule_overlap(
   // Reuse the retired request vector's capacity across steady-state steps.
   pending_step_->batches = std::move(batch);
   pending_step_->requests = running_requests_;
+  if (cache_block_lease) {
+    pending_step_->cache_block_lease.emplace(std::move(*cache_block_lease));
+  }
+  if (collect_current_batch) {
+    // A partial batch must not renew the deferral into the next round.
+    complete_pending_step();
+    pending_step_.reset();
+  }
   return true;
 }
 
 void ContinuousSchedulerBase::complete_pending_step() {
-  CHECK(pending_step_.has_value());
   result_callback_(pending_step_->batches);
+  pending_step_->cache_block_lease.reset();
   process_batch_output(pending_step_->requests);
 }
 

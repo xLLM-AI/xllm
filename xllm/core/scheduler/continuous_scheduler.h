@@ -42,6 +42,7 @@ limitations under the License.
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/kv_cache/block/block.h"
 #include "core/scheduler/kv_cache_prefetcher.h"
 #include "core/scheduler/profile/profile_manager.h"
 #include "core/scheduler/request_output_dispatcher.h"
@@ -262,9 +263,11 @@ class ContinuousSchedulerBase : public Scheduler {
     // Keep requests alive until their non-owning Batch views are destroyed.
     std::vector<std::shared_ptr<Request>> requests;
     BatchGroup batches;
+    std::optional<KVCacheBlockLease> cache_block_lease;
   };
 
   std::optional<PendingStep> pending_step_;
+  bool collect_current_batch_ = false;
 
   std::vector<Sequence*> output_sequences_;
 

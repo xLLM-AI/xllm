@@ -706,8 +706,8 @@ TEST(SchedulerPolicyTest, PrioritySettingsOverrideConflictingGlobals) {
           std::tuple{0.0, true, 1.0, 30000, Urgency::URGENT, true},
           std::tuple{0.0, true, 10.0, 30000, Urgency::URGENT, false},
           std::tuple{0.0, false, 1.0, 30000, Urgency::URGENT, false}}) {
-      SCOPED_TRACE(std::make_tuple(
-          mix_batch, aggressive_coeff, prevent_starvation, starve_threshold));
+      SCOPED_TRACE(::testing::PrintToString(std::make_tuple(
+          mix_batch, aggressive_coeff, prevent_starvation, starve_threshold)));
       SchedulerOptions options =
           create_scheduler_options(8, 1, 0, 8, 1, "multi_slo_and_prio", false);
       options.enable_mix_batch(mix_batch)
@@ -1494,7 +1494,7 @@ TEST(SchedulerPolicyTest, UnifiedReclaimsMutuallyBlockedChunksWhenIdle) {
         .options = options,
         .min_speculative_tokens_required = 0,
         .enable_prefix_cache = false,
-        .has_pending_vmm_batch = pending_release,
+        .has_pending_kv_batch = pending_release,
     };
     const ScheduleBudget initial_budget{
         .remaining_token_budget = 32,
@@ -1810,7 +1810,7 @@ TEST_P(PendingVmmBatchPolicyTest, RetainsRequestsUntilBatchReleasesBlocks) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = false,
-      .has_pending_vmm_batch = true,
+      .has_pending_kv_batch = true,
   };
   const ScheduleBudget initial_budget{
       .remaining_token_budget = 1024,
@@ -1834,7 +1834,7 @@ TEST_P(PendingVmmBatchPolicyTest, RetainsRequestsUntilBatchReleasesBlocks) {
   }
 
   pending_blocks.clear();
-  state.has_pending_vmm_batch = false;
+  state.has_pending_kv_batch = false;
   budget = initial_budget;
   policy->schedule(state, budget, finished);
 

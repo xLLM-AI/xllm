@@ -18,7 +18,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <atomic>
+#include <boost/intrusive/list.hpp>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -61,7 +61,7 @@ class PrefixCache {
 
   explicit PrefixCache(uint32_t block_size,
                        BlockHasherType hasher_type = BlockHasherType::TEXT)
-      : block_size_(block_size), hasher_type_(hasher_type), num_blocks_(0) {}
+      : block_size_(block_size), hasher_type_(hasher_type) {}
 
   virtual ~PrefixCache() {
     if (event_journal_) {
@@ -74,7 +74,7 @@ class PrefixCache {
 
   void set_event_sink(std::shared_ptr<KVCacheEventJournal> journal,
                       KVCacheEventScope scope) {
-    CHECK_EQ(num_blocks_, 0);
+    CHECK(cached_blocks_.empty());
     CHECK(hasher_type_ == BlockHasherType::TEXT);
     event_journal_ = std::move(journal);
     event_scope_ = std::move(scope);
@@ -104,13 +104,8 @@ class PrefixCache {
                         const Slice<XXH3Key>& block_hashes = {});
 
   // Insert already-hashed blocks (hash stamped by the caller).
-  virtual size_t insert(Slice<Block>& blocks);
-  virtual size_t insert(const std::vector<Block>& blocks);
+  size_t insert(Slice<Block> blocks);
 
-  // Point-lookup by chained hash key. `find` hits refresh LRU recency and
-  // return the block; `contains` is LRU-neutral. Both return an invalid
-  // Block / false on miss.
-  Block find(const XXH3Key& hash);
   bool contains(const XXH3Key& hash) const;
 
   // Physical ownership is independent of a handle's hash: transfer aliases
@@ -122,113 +117,69 @@ class PrefixCache {
 
   std::vector<PrefixCacheEntry> entries() const;
   bool evict_block(const XXH3Key& hash);
-  void set_dependency(const XXH3Key& hash, const XXH3Key& dependency);
+  void set_dependency(const XXH3Key& hash, XXH3Key dependency);
 
-  virtual size_t num_blocks() const {
-    CHECK(num_blocks_ == cached_blocks_.size()) << "check block num failed";
-    return num_blocks_;
-  }
-
-  float block_match_rate() {
-    if (total_blocks_.load() == 0) {
-      return 0;
-    } else {
-      return static_cast<float>(matched_blocks_.load()) / total_blocks_.load();
-    }
-  }
-
-  static uint32_t compute_hash_keys(const Slice<int32_t>& token_ids,
-                                    std::vector<Block>& blocks,
-                                    const size_t cached_blocks = 0);
+  size_t num_blocks() const { return cached_blocks_.size(); }
 
  protected:
   std::shared_ptr<KVCacheEventJournal> event_journal_;
   KVCacheEventScope event_scope_;
-  struct Node {
-    Block block;
-    std::optional<XXH3Key> parent;
-    std::optional<XXH3Key> dependency;
-    bool chain_known = false;
-    size_t block_index = 0;
-    int64_t last_access_time = 0;
-    Node* prev = nullptr;
-    Node* next = nullptr;
+  using NodeHook = boost::intrusive::list_member_hook<
+      boost::intrusive::link_mode<boost::intrusive::normal_link>>;
+
+  class Node final {
+   public:
+    Node(const Block& block, int64_t now)
+        : block_(block), last_access_time_(now) {}
+
+    Block block_;
+    std::optional<XXH3Key> parent_;
+    std::optional<XXH3Key> dependency_;
+    bool chain_known_ = false;
+    size_t block_index_ = 0;
+    int64_t last_access_time_;
+    NodeHook lru_hook_;
   };
 
-  struct DNodeList {
-    DNodeList() {
-      lst_front.next = &lst_back;
-      lst_back.prev = &lst_front;
+  using DNodeList = boost::intrusive::list<
+      Node,
+      boost::intrusive::member_hook<Node, NodeHook, &Node::lru_hook_>,
+      boost::intrusive::constant_time_size<false>>;
+
+  // Keep touched blocks in reverse order for suffix-first eviction.
+  DNodeList::iterator touch_node(Node& node,
+                                 DNodeList::iterator before,
+                                 int64_t now) {
+    node.last_access_time_ = now;
+    auto pos = lru_lst_.iterator_to(node);
+    lru_lst_.splice(before, lru_lst_, pos);
+    return pos;
+  }
+
+  bool cache_node(DNodeList::iterator& before,
+                  const XXH3Key& hash,
+                  const Block& block,
+                  int64_t now) {
+    auto [it, inserted] = cached_blocks_.try_emplace(hash, block, now);
+    auto& node = it->second;
+    if (inserted) {
+      cached_block_ids_.insert(node.block_.id());
+      before = lru_lst_.insert(before, node);
+    } else {
+      before = touch_node(node, before, now);
     }
+    return inserted;
+  }
 
-    ~DNodeList() {
-      Node* node = lst_front.next;
-      while (node != &lst_back) {
-        Node* next = node->next;
-        delete node;
-        node = next;
-      }
-    }
-
-    bool is_empty() { return lst_front.next == &lst_back; }
-
-    Node* remove_node(Node* node) {
-      Node* next_node = node->next;
-      node->prev->next = next_node;
-      next_node->prev = node->prev;
-      return next_node;
-    }
-
-    bool is_last(Node* node) { return node == &lst_back; }
-
-    void push_front(Node* node) {
-      node->next = lst_front.next;
-      lst_front.next->prev = node;
-      node->prev = &lst_front;
-      lst_front.next = node;
-    }
-
-    Node* get_first() { return lst_front.next; }
-
-    Node* pop_front() {
-      if (lst_front.next == &lst_back) {
-        return nullptr;
-      }
-      Node* node = lst_front.next;
-      lst_front.next = node->next;
-      node->next->prev = &lst_front;
-      return node;
-    }
-
-    void push_back(Node* node) {
-      node->prev = lst_back.prev;
-      node->next = &lst_back;
-      lst_back.prev->next = node;
-      lst_back.prev = node;
-    }
-
-    void move_back(Node* node) {
-      remove_node(node);
-      push_back(node);
-    }
-
-    Node lst_front;
-    Node lst_back;
-  };
-
-  DNodeList lru_lst_;
   uint32_t block_size_;
   BlockHasherType hasher_type_;
-  size_t num_blocks_ = 0;
-  std::unordered_map<XXH3Key, Node*, FixedStringKeyHash, FixedStringKeyEqual>
+  std::unordered_map<XXH3Key, Node, FixedStringKeyHash, FixedStringKeyEqual>
       cached_blocks_;
-
+  DNodeList lru_lst_;
   std::unordered_set<int32_t> cached_block_ids_;
 
-  std::atomic<uint64_t> total_blocks_{0}, matched_blocks_{0};
-
  private:
-  Node* evict_node(Node* node);
+  DNodeList::iterator evict_node(decltype(cached_blocks_)::iterator it);
 };
 
 }  // namespace xllm

@@ -383,7 +383,6 @@ void KVCacheState::reset() {
   prefix_cache_matched_ = false;
   num_owned_shared_blocks_.clear();
   num_cached_blocks_.clear();
-  pushed_local_block_count_ = 0;
   for (auto& [type, blocks] : composite_blocks_) {
     Block::release(std::move(blocks));
   }
