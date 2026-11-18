@@ -32,8 +32,12 @@ for architecture, public APIs, operator development, and validation.
 Run the following from the **xLLM repository root**:
 
 ```bash
-python -m pip install --no-deps -e ./xllm-kernel
+python -m pip install --no-build-isolation --no-deps -e ./xllm-kernel
 ```
+
+For NPU builds and execution, activate the matching Torch/torch_npu, CANN and ATB
+environment first. Disabling build isolation lets the native extension use those
+installed headers and libraries.
 
 ### Use xllm-kernel with the xLLM wheel
 

@@ -60,7 +60,7 @@ class BuildCommandsTest(unittest.TestCase):
         return command
 
     def _build_targets(self, command: Command) -> None:
-        command.build_cmake_targets(self.ext, [], ["--config", "Release", "-j8"], self.env, str(self.extdir), "xllm")
+        command.build_cmake_targets(self.ext, [], ["--config", "Release", "-j8"], self.env, str(self.extdir))
 
     def test_product_build_excludes_tests_and_shares_one_build_invocation(self) -> None:
         command = self._command(self.setup.ExtBuild)
@@ -110,11 +110,60 @@ class BuildCommandsTest(unittest.TestCase):
                     mock.patch.object(self.setup, "_maybe_compile_tilelang_kernels"),
                     mock.patch.object(self.setup, "get_cxx_abi", return_value=True),
                     mock.patch.object(self.setup, "configure_ccache"),
+                    mock.patch.object(self.setup.subprocess, "check_call"),
                     mock.patch.object(command, "build_cmake_targets") as build,
                 ):
                     command.build_extension(self.ext)
                 self.assertEqual(build.call_args.args[3]["OPS_CPU_NUMBER"], expected)
                 self.assertIn("-j8", build.call_args.args[2])
+
+    def test_python_binding_is_ready_before_each_npu_target_path(self) -> None:
+        for command_type in (self.setup.ExtBuild, self.setup.ExtBuildSingleTest, self.setup.TestUT):
+            for device, fails in (("npu", False), ("npu", True), ("cuda", False)):
+                with self.subTest(command=command_type.__name__, device=device, fails=fails):
+                    command = self._command(command_type, device)
+                    command.build_temp = str(self.cmake_dir)
+                    command.test_name = "npu_xllm_ops_test"
+                    calls = mock.Mock()
+                    if fails:
+                        calls.native.side_effect = subprocess.CalledProcessError(1, "kernel build")
+                    with (
+                        mock.patch.dict(os.environ, {"MAX_JOBS": "2"}, clear=True),
+                        mock.patch.object(command, "get_ext_fullpath", return_value=str(self.extdir / "xllm")),
+                        mock.patch.object(
+                            self.setup,
+                            "set_npu_envs",
+                            side_effect=lambda: os.environ.update(NPU_HOME_PATH="/host/cann"),
+                        ),
+                        mock.patch.object(self.setup, "set_cuda_envs"),
+                        mock.patch.object(self.setup, "_maybe_compile_tilelang_kernels"),
+                        mock.patch.object(self.setup, "get_cxx_abi", return_value=True),
+                        mock.patch.object(self.setup, "configure_ccache"),
+                        mock.patch.object(self.setup.subprocess, "check_call", calls.native),
+                        mock.patch.object(command, "build_cmake_targets", calls.targets),
+                    ):
+                        if fails:
+                            with self.assertRaises(subprocess.CalledProcessError):
+                                command.build_extension(self.ext)
+                        else:
+                            command.build_extension(self.ext)
+
+                    if device != "npu":
+                        calls.native.assert_not_called()
+                        calls.targets.assert_called_once()
+                        continue
+                    calls.native.assert_called_once()
+                    native = calls.native.call_args
+                    self.assertEqual(native.args[0][:4], [sys.executable, "setup.py", "build_ext", "--inplace"])
+                    self.assertEqual(native.kwargs["cwd"], str(self.root / "xllm-kernel"))
+                    self.assertEqual(native.kwargs["env"]["NPU_HOME_PATH"], "/host/cann")
+                    if fails:
+                        calls.targets.assert_not_called()
+                    else:
+                        calls.targets.assert_called_once()
+                        self.assertEqual([call[0] for call in calls.mock_calls], ["native", "targets"])
+                        self.assertEqual(native.args[0][-2:], ["--build-lib", str(self.extdir.parent)])
+                        self.assertEqual(native.kwargs["env"], calls.targets.call_args.args[3])
 
     def test_test_command_builds_the_test_tree(self) -> None:
         for device, cmake in (("npu", "cmake"), ("maca", "cmake_maca")):

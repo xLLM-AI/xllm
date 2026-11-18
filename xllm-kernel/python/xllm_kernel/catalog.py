@@ -57,6 +57,7 @@ class Operation:
 _BUILTINS = (
     "xllm_kernel.ops.normalization",
     "xllm_kernel.ops.activation",
+    "xllm_kernel.ops.gemm",
     "xllm_kernel.ops.attention.gdn",
     "xllm_kernel.ops.attention.kda",
 )

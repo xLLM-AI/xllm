@@ -65,6 +65,8 @@ def initialize_runtime() -> None:
             operations=(
                 "rms_norm",
                 "l2_norm",
+                "matmul_ein_sum",
+                "matmul_ein_sum_out",
                 "fused_recurrent_gated_delta_rule",
                 "fused_sigmoid_gating_delta_rule_update",
                 "fused_qkvzba_split_reshape_cat",

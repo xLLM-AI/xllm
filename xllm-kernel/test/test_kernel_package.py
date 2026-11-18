@@ -412,6 +412,41 @@ def test_main_wheel_includes_independent_package(tmp_path: Path, monkeypatch: py
     )
 
 
+@pytest.mark.parametrize("toolkit_env", ["host", "vendor", "both"])
+def test_npu_extension_uses_configured_toolkit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, toolkit_env: str
+) -> None:
+    pytest.importorskip("torch.utils.cpp_extension")
+    host_root = tmp_path / "host-cann"
+    vendor_root = tmp_path / "vendor-cann"
+    monkeypatch.delenv("NPU_HOME_PATH", raising=False)
+    monkeypatch.delenv("ASCEND_HOME_PATH", raising=False)
+    if toolkit_env in {"host", "both"}:
+        monkeypatch.setenv("NPU_HOME_PATH", str(host_root))
+    if toolkit_env in {"vendor", "both"}:
+        monkeypatch.setenv("ASCEND_HOME_PATH", str(vendor_root))
+    monkeypatch.setenv("ATB_HOME_PATH", str(tmp_path / "atb"))
+    original_find_spec = importlib.util.find_spec
+
+    def _find_spec(name: str, package: str | None = None) -> Any:
+        if name == "torch_npu":
+            return SimpleNamespace(origin=str(tmp_path / "torch_npu/__init__.py"))
+        return original_find_spec(name, package)
+
+    monkeypatch.setattr(importlib.util, "find_spec", _find_spec)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(setuptools, "setup", lambda **kwargs: captured.update(kwargs))
+    runpy.run_path(str(_ROOT / "xllm-kernel/setup.py"), run_name="__main__")
+    (extension,) = captured["ext_modules"]
+    expected_root = vendor_root if toolkit_env == "vendor" else host_root
+    other_root = host_root if toolkit_env == "vendor" else vendor_root
+    assert extension.name == "xllm_kernel._atb"
+    assert str(expected_root / "include") in extension.include_dirs
+    assert str(expected_root / "lib64") in extension.library_dirs
+    assert str(other_root / "include") not in extension.include_dirs
+    assert str(other_root / "lib64") not in extension.library_dirs
+
+
 def test_launcher_and_legacy_path_share_kernel_platform_without_sdk(tmp_path: Path) -> None:
     script = """
 import importlib.abc

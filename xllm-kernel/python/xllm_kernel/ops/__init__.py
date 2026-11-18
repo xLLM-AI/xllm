@@ -8,6 +8,7 @@ from xllm_kernel.ops.attention.gdn import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from xllm_kernel.ops.attention.kda import causal_conv1d_update_v2
+from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out
 from xllm_kernel.ops.normalization import fused_add_rms_norm, l2_norm, layer_norm, rms_norm
 
 __all__ = [
@@ -19,5 +20,7 @@ __all__ = [
     "l2_norm",
     "layer_norm",
     "rms_norm",
+    "matmul_ein_sum",
+    "matmul_ein_sum_out",
     "silu_and_mul",
 ]
