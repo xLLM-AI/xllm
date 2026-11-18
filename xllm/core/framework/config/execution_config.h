@@ -76,7 +76,8 @@ class ExecutionConfig final {
          "python_graph_backend",
          "enable_fia_decode",
          "enable_dsa_multi_stream",
-         "enable_attn_dp_weight_sharding"}};
+         "enable_attn_dp_weight_sharding",
+         "enable_npu_column_parallel_weight_layout"}};
     return kOptionCategory;
   }
 
@@ -125,6 +126,9 @@ class ExecutionConfig final {
   PROPERTY(bool, enable_dsa_multi_stream) = false;
 
   PROPERTY(bool, enable_attn_dp_weight_sharding) = false;
+
+  // Experimental NPU-only layout preparation for Python ColumnParallelLinear.
+  PROPERTY(bool, enable_npu_column_parallel_weight_layout) = false;
 };
 
 }  // namespace xllm

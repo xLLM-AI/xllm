@@ -247,6 +247,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `random_seed` | `int32` | `-1` | Random seed for the random number generator. `-1` means no fixed seed. |
 | `enable_dsa_multi_stream` | `bool` | `false` | Local overlap in the Python GLM indexer: K/weights projections run on a side stream and stay fused when query/cache rows match; the main stream joins before updating the index cache. Non-interleaved RoPE additionally overlaps Q projection/RoPE with cache preparation. Main attention preparation finishes before the indexer. Requires a supported model backend and stream-capable device. |
 | `enable_attn_dp_weight_sharding` | `bool` | `false` | Shard Python GLM MLA head-dependent attention weights across TP and DP. Requires DP > 1, CP = 1, layerwise split = 1, and attention heads divisible by TP × DP. Attention still executes TP-local heads on each token owner, with three collectives per layer. MoE uses its independent MoE TP/EP groups. |
+| `enable_npu_column_parallel_weight_layout` | `bool` | `false` | Experimentally prepares Python Qwen3/Qwen3-VL ColumnParallel weights in an NPU-specific layout after loading. Keep disabled unless matched end-to-end measurements show a repeatable benefit. |
 
 ## KernelConfig
 

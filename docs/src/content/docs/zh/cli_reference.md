@@ -247,6 +247,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `random_seed` | `int32` | `-1` | 随机数生成器 seed；`-1` 表示不固定 seed。 |
 | `enable_dsa_multi_stream` | `bool` | `false` | 为 Python GLM indexer 启用局部并行：K/weights 投影在辅助流执行，query/cache 行相同时保留融合投影；主流同步后再更新 index cache。非 interleaved RoPE 还可并行 Q 投影/RoPE 与 cache 准备。主 attention 准备完成后才执行 indexer。要求模型后端和设备流能力均受支持。 |
 | `enable_attn_dp_weight_sharding` | `bool` | `false` | 在 Python GLM MLA 中，将依赖 attention head 的权重按 TP × DP 切分。要求 DP > 1、CP = 1、layerwise split = 1，attention head 数能被 TP × DP 整除。每个 token owner 仍执行普通 TP 的本地 heads，每层使用三次通信；MoE 使用独立的 MoE TP/EP 分组。 |
+| `enable_npu_column_parallel_weight_layout` | `bool` | `false` | 实验性地在加载后为 Python Qwen3/Qwen3-VL 的 ColumnParallel 权重准备 NPU 专用布局。除非端到端对比显示可重复收益，否则应保持关闭。 |
 
 ## KernelConfig
 
