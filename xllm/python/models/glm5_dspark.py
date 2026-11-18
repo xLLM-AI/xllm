@@ -20,8 +20,8 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+from xllm_kernel.ops import reshape_paged_cache
 
-from xllm.python import kernels
 from xllm.python.layers import Attention, GatedMLP, RMSNorm, RotaryEmbedding, RowParallelLinear
 from xllm.python.layers.rotary_embedding import apply_rotary_half, gather_half_rope_cos_sin
 from xllm.python.model_executor.forward_context import LayerSynchronizer, get_forward_context, record_layer_event
@@ -217,7 +217,7 @@ class Glm5DSparkModel(nn.Module):
             if cache[0] is None or cache[1] is None:
                 raise RuntimeError(f"MLA draft KV cache is missing for layer {layer.layer_id}")
             latent, rope = layer.self_attn.project_context(hidden, cos, sin)
-            kernels.reshape_paged_cache(cache_slots, latent, rope, cache[0], cache[1])
+            reshape_paged_cache(cache_slots, latent, rope, cache[0], cache[1])
             if layer_synchronizer is not None and layer_synchronizer.record_event(layer.layer_id) is False:
                 return None
         return hidden

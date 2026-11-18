@@ -29,6 +29,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from xllm_kernel.ops import matmul_ein_sum, matmul_ein_sum_out
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.backend import (
@@ -1166,10 +1167,10 @@ class DeepseekV3MLAAttention(Attention):
         if context.execution_state is not None and self._use_fused_mla_decode:
             value_shape = (attn_out.shape[0], self.num_heads_local, self.v_head_dim)
             v_full = torch.empty(value_shape, dtype=attn_out.dtype, device=attn_out.device)
-            kernels.atb_matmul_ein_sum_out(attn_out, self.W_UV, v_full)
+            matmul_ein_sum_out(attn_out, self.W_UV, v_full)
             v_full = v_full.view(attn_out.shape[0], self.num_heads_local * self.v_head_dim)
         else:
-            v_full = kernels.atb_matmul_ein_sum(attn_out, self.W_UV)
+            v_full = matmul_ein_sum(attn_out, self.W_UV)
             v_full = v_full.reshape(attn_out.shape[0], self.num_heads_local * self.v_head_dim)
         if context.execution_state is None:
             return self._reduce_attention_output(self.o_proj(v_full))
@@ -1220,7 +1221,7 @@ class DeepseekV3MLAAttention(Attention):
             self.qk_nope_head_dim + self.qk_rope_head_dim,
         )
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        q_latent = kernels.atb_matmul_ein_sum(q_nope, self.W_UK)
+        q_latent = matmul_ein_sum(q_nope, self.W_UK)
         q_pe = _interleave_rope_with(q_rope, rope_cos, rope_sin)
         k_latent_raw, k_rope_raw = kv.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_latent = self.kv_a_layernorm(k_latent_raw)

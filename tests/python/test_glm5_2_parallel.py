@@ -360,10 +360,9 @@ def test_glm_dsa_projections_precede_indexer(monkeypatch: pytest.MonkeyPatch, mo
     )
     monkeypatch.setattr(deepseek_v32, "_interleave_rope_with", lambda tensor, _cos, _sin: tensor)
     monkeypatch.setattr(
-        glm5_2.kernels,
-        "atb_matmul_ein_sum",
+        deepseek_v32,
+        "matmul_ein_sum",
         lambda lhs, rhs: torch.einsum("thd,hdo->tho", lhs, rhs),
-        raising=False,
     )
 
     rope = model.model.rotary(torch.arange(num_tokens))

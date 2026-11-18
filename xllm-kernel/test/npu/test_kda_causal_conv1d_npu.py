@@ -161,10 +161,7 @@ def test_output_full_state_and_replay(width: int, mode: str, state_view: bool, g
                 torch.testing.assert_close(tensor.cpu(), original, rtol=0, atol=0)
 
 
-def test_default_slots_reserved_slot_zero_and_kernel_export() -> None:
-    from xllm.python import kernels
-
-    assert kernels.causal_conv1d_update_v2 is causal_conv1d_update_v2
+def test_default_slots_use_reserved_slot_zero() -> None:
     value = torch.ones(2, 17, dtype=torch.bfloat16).npu()
     weight = torch.ones(17, 2, dtype=torch.bfloat16).npu()
     state = torch.zeros(3, 1, 17, dtype=torch.bfloat16).npu()
@@ -172,28 +169,6 @@ def test_default_slots_reserved_slot_zero_and_kernel_export() -> None:
     torch.testing.assert_close(result.cpu(), torch.ones(2, 17, dtype=torch.bfloat16), rtol=0, atol=0)
     torch.testing.assert_close(state.cpu()[:2], torch.ones(2, 1, 17, dtype=torch.bfloat16), rtol=0, atol=0)
     assert torch.count_nonzero(state.cpu()[2]) == 0
-
-
-@pytest.mark.parametrize("width", [2, 4, 6])
-@pytest.mark.parametrize("verify", [False, True])
-def test_legacy_bridge_output_and_full_state(width: int, verify: bool) -> None:
-    torch.manual_seed(52)
-    lengths = [2, 3] if verify else [1, 1]
-    max_len = max(lengths)
-    value = torch.randn(sum(lengths), 257, dtype=torch.bfloat16).npu()
-    weight = (torch.randn(257, width) * 0.2).bfloat16().npu()
-    bias = torch.randn(257, dtype=torch.bfloat16).npu()
-    state = torch.randn(5, width + max_len + 1, 257, dtype=torch.bfloat16).npu()
-    legacy_state = state.clone()
-    indices = torch.tensor([3, 0], dtype=torch.int32).npu()
-    qsl = torch.tensor([0, lengths[0], sum(lengths)], dtype=torch.int32).npu()
-    accepted = torch.tensor([2, 3], dtype=torch.int32).npu() if verify else None
-    output = causal_conv1d_update_v2(value, weight, state, indices, qsl, max_len, accepted, bias)
-    legacy_output = torch.ops.xllm_ops.causal_conv1d_update_v2(
-        value, legacy_state.transpose(1, 2), weight, True, bias, indices, qsl, max_len, -1, accepted
-    )
-    torch.testing.assert_close(output.cpu(), legacy_output.cpu(), rtol=0, atol=0)
-    torch.testing.assert_close(state.cpu(), legacy_state.cpu(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("invalid", ["weight", "capacity", "indices", "accepted", "lengths", "bias", "dtype"])

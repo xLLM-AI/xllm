@@ -23,8 +23,9 @@ from typing import ClassVar
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from xllm_kernel.ops import reshape_paged_cache
 
-from xllm.python import distributed, kernels
+from xllm.python import distributed
 from xllm.python.layers import RMSNorm
 from xllm.python.model_executor.forward_context import LayerSynchronizer
 from xllm.python.model_loader import (
@@ -299,7 +300,7 @@ class DFlashQwen3Model(Qwen3Model):
             key_cache, value_cache = cache[0], cache[1]
             if key_cache is None or value_cache is None:
                 raise RuntimeError(f"draft KV cache is missing for layer {layer_id}")
-            kernels.reshape_paged_cache(
+            reshape_paged_cache(
                 cache_slots,
                 all_keys[layer_id].contiguous(),
                 all_values[layer_id],

@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import torch
-from xllm_kernel.ops.attention.kda import causal_conv1d_update_v2
 
 
 def causal_conv1d_qkv_prefill(
@@ -104,5 +103,4 @@ def causal_conv1d_decode(
 __all__ = [
     "causal_conv1d_qkv_prefill",
     "causal_conv1d_decode",
-    "causal_conv1d_update_v2",
 ]

@@ -37,6 +37,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from xllm_kernel.ops import matmul_ein_sum
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.attn_dp_collectives import (
@@ -726,7 +727,7 @@ class Glm52MLAAttention(DeepseekV3MLAAttention):
         )
         q = q.view(hidden.shape[0], self.weight_heads_local, self.qk_nope_head_dim + self.qk_rope_head_dim)
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        q_latent = kernels.atb_matmul_ein_sum(q_nope, self.W_UK)
+        q_latent = matmul_ein_sum(q_nope, self.W_UK)
         owner_query = q_head_all_to_all_dp_tp(
             torch.cat((q_latent, q_rope), dim=-1),
             layout,
@@ -750,7 +751,7 @@ class Glm52MLAAttention(DeepseekV3MLAAttention):
         if self.o_proj._dynamic_activation:
             if self.W_UV_owner.numel() == 0:
                 raise RuntimeError("dynamic attention DP requires full owner-local W_UV weights")
-            owner_value = kernels.atb_matmul_ein_sum(attn_out, self.W_UV_owner)
+            owner_value = matmul_ein_sum(attn_out, self.W_UV_owner)
             owner_value = owner_value.reshape(local_tokens, self.num_heads_local * self.v_head_dim)
             value_i8, scale = kernels.dynamic_quant(owner_value)
             weight_value, weight_scale = quantized_value_all_to_all_dp_tp(
@@ -779,7 +780,7 @@ class Glm52MLAAttention(DeepseekV3MLAAttention):
                 self.cfg.tp_rank,
                 self.cfg.dp_rank,
             )
-            value = kernels.atb_matmul_ein_sum(weight_latent, self.W_UV)
+            value = matmul_ein_sum(weight_latent, self.W_UV)
             output = self.o_proj(value.reshape(hidden.shape[0], self.weight_heads_local * self.v_head_dim))
         output_dtype = output.dtype
         output = o_all_reduce_dp_tp(output.float(), layout, padded_tokens, self.cfg.dp_size)

@@ -54,20 +54,6 @@ def test_numeric_shape_alias_and_mutation(shape: tuple[int, ...], eps: float, st
     torch.testing.assert_close(value.cpu(), before, rtol=0, atol=0)
 
 
-def test_matches_legacy_operator() -> None:
-    import torch
-    from xllm_kernel.ops import l2_norm
-
-    torch.manual_seed(42)
-    value = torch.randn(17, 192, dtype=torch.bfloat16, device="npu")
-    before = value.cpu()
-    output = l2_norm(value)
-    legacy = torch.ops.xllm_ops.l2_norm(value, 1e-6)
-    torch.testing.assert_close(output, legacy, rtol=0.01, atol=0.002)
-    torch.testing.assert_close(value.cpu(), before, rtol=0, atol=0)
-    assert output.data_ptr() != value.data_ptr()
-
-
 def test_standalone_package_runs_without_xllm_host(tmp_path: Path) -> None:
     import subprocess
     import sys

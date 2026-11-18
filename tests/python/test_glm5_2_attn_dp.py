@@ -161,9 +161,7 @@ def _run_attention(global_rank: int, rendezvous: str, tp_size: int, dp_size: int
             )
             with (
                 forward_context(context),
-                patch.object(
-                    glm5_2.kernels, "atb_matmul_ein_sum", side_effect=lambda a, b: torch.einsum("thd,hdk->thk", a, b)
-                ),
+                patch.object(glm5_2, "matmul_ein_sum", side_effect=lambda a, b: torch.einsum("thd,hdk->thk", a, b)),
                 patch.object(glm5_2.kernels, "dynamic_quant", side_effect=_quantize),
                 patch.object(glm5_2, "_interleave_rope_with", side_effect=lambda q, cos, sin: q),
                 patch.object(collectives, "_all_reduce", dist.all_reduce),

@@ -271,41 +271,6 @@ def test_fused_gating_varlen_negative_slot_and_full_state(normalize: bool, graph
         torch.testing.assert_close(state.cpu(), expected_pool, rtol=5e-4, atol=2e-5)
 
 
-def test_legacy_python_decode_uses_package_state_update() -> None:
-    from xllm.python.kernels_npu.gated_delta_net import fused_sigmoid_gating_delta_rule_decode
-
-    torch.manual_seed(45)
-    q, k, v, _, _ = _inputs(3, 2, 4)
-    packed = torch.cat([q.flatten(2), k.flatten(2), v.flatten(2)], dim=-1).squeeze(0)
-    a = torch.randn(3, 4, dtype=torch.bfloat16).npu()
-    b = torch.randn_like(a)
-    a_log, bias = torch.randn(4).npu(), torch.randn(4).npu()
-    state = torch.randn(5, 4, 128, 128).npu() * 0.02
-    baseline = state.cpu()
-    indices = torch.tensor([3, 1, 4], dtype=torch.int32).npu()
-    actual = fused_sigmoid_gating_delta_rule_decode(packed, a, b, a_log, bias, state, indices, 0.125)
-    torch.npu.synchronize()
-    gate = -a_log.cpu().exp() * torch.nn.functional.softplus(a.cpu().float() + bias.cpu())
-    beta = b.cpu().float().sigmoid()
-    expected_pool, expected_output = baseline.clone(), []
-    for token, slot in enumerate(indices.cpu().tolist()):
-        result, checkpoints = _reference(
-            q[0, token : token + 1],
-            k[0, token : token + 1],
-            v[0, token : token + 1],
-            gate[token : token + 1],
-            beta[token : token + 1],
-            baseline[slot],
-            True,
-            0.125,
-        )
-        expected_pool[slot] = checkpoints[-1]
-        expected_output.append(result)
-    assert actual.shape == (3, 1, 1, 4, 128)
-    torch.testing.assert_close(actual.cpu().reshape(3, 4, 128), torch.cat(expected_output), rtol=0.016, atol=2e-4)
-    torch.testing.assert_close(state.cpu(), expected_pool, rtol=5e-4, atol=2e-5)
-
-
 @pytest.mark.parametrize("invalid", ["q_dtype", "state_layout", "verify_copy", "g_shape"])
 def test_rejected_recurrent_contract_leaves_state_unchanged(invalid: str) -> None:
     q, k, v, g, beta = _inputs(2, 1, 2)

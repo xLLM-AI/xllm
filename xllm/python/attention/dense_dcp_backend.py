@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+from xllm_kernel.ops import reshape_paged_cache
 
-from xllm.python import kernels
 from xllm.python.attention.backend import (
     AttentionMetadata,
     LayerCache,
@@ -113,7 +113,7 @@ class DenseDcpAttentionBackend(NpuPagedAttentionBackend):
         if dcp_metadata.is_chunked_prefill or not dcp_metadata.is_prefill:
             query_gather = start_all_gather(query, dim=1, group=self._dcp_group)
 
-        kernels.reshape_paged_cache(
+        reshape_paged_cache(
             dcp_metadata.local_slot_mapping,
             key,
             value,

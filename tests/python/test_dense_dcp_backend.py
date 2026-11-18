@@ -236,7 +236,7 @@ def test_execute_gathers_query_heads_and_writes_only_local_slots(graph_metadata:
             return_value=gathered_query,
         ),
         patch(
-            "xllm.python.attention.dense_dcp_backend.kernels.reshape_paged_cache",
+            "xllm.python.attention.dense_dcp_backend.reshape_paged_cache",
             create=True,
         ) as reshape_cache,
         patch.object(
@@ -304,7 +304,7 @@ def test_chunked_prefill_merges_current_chunk_with_sharded_prefix() -> None:
             return_value=gathered_query,
         ),
         patch(
-            "xllm.python.attention.dense_dcp_backend.kernels.reshape_paged_cache",
+            "xllm.python.attention.dense_dcp_backend.reshape_paged_cache",
             create=True,
         ) as reshape_cache,
         patch.object(
@@ -392,7 +392,7 @@ def test_chunked_prefill_participates_when_prefix_is_remote_only() -> None:
             "xllm.python.attention.dense_dcp_backend.finish_all_gather",
             return_value=gathered_query,
         ),
-        patch("xllm.python.attention.dense_dcp_backend.kernels.reshape_paged_cache", create=True),
+        patch("xllm.python.attention.dense_dcp_backend.reshape_paged_cache", create=True),
         patch.object(backend, "_fused_attention", return_value=(current_output, current_lse)) as current_attention,
         patch.object(backend._fia, "run") as context_attention,
         _mock_dcp_exchange(merged) as (pack, combine, _),
@@ -435,7 +435,7 @@ def test_decode_marks_empty_local_kv_shards_with_negative_infinity() -> None:
             "xllm.python.attention.dense_dcp_backend.finish_all_gather",
             return_value=gathered_query,
         ),
-        patch("xllm.python.attention.dense_dcp_backend.kernels.reshape_paged_cache", create=True),
+        patch("xllm.python.attention.dense_dcp_backend.reshape_paged_cache", create=True),
         patch.object(
             backend._fia,
             "run",
@@ -581,7 +581,7 @@ def test_pure_prefill_uses_current_kv_even_if_upstream_supplies_a_block_table(wi
     with (
         forward_context(_context(backend, metadata)),
         patch("xllm.python.attention.dense_dcp_backend.start_all_gather") as gather,
-        patch("xllm.python.attention.dense_dcp_backend.kernels.reshape_paged_cache", create=True),
+        patch("xllm.python.attention.dense_dcp_backend.reshape_paged_cache", create=True),
         patch.object(backend, "_fused_attention", return_value=(expected, None)) as fia,
     ):
         backend.prepare(metadata)
@@ -661,7 +661,7 @@ def test_merge_scratch_is_shared_within_an_entry_but_not_between_entries() -> No
                 "xllm.python.attention.dense_dcp_backend.finish_all_gather",
                 return_value=gathered_query,
             ),
-            patch("xllm.python.attention.dense_dcp_backend.kernels.reshape_paged_cache", create=True),
+            patch("xllm.python.attention.dense_dcp_backend.reshape_paged_cache", create=True),
             _mock_dcp_exchange() as (pack, _, exchange),
         ):
             output = backend.execute(query, key, value, layer)
