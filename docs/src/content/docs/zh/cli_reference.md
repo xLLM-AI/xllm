@@ -35,6 +35,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
+| `enable_greedy_output` | `bool` | `false` | 为无约束 greedy 的 Python Qwen3 dense 请求启用候选输出（TP，DP=CP=1）。需要 logits、约束、selected hidden 或推测解码时保留完整 logits 路径；不包含输出头入图。 |
 | `model_id` | `string` | `""` | Hugging Face 模型名称，非路径。 |
 | `model` | `string` | `""` | Hugging Face 模型名称或模型路径。 |
 | `backend` | `string` | `""` | 后端模型类型；`llm` 表示纯文本模型，`vlm` 表示多模态模型，`dit` 表示扩散模型。 |

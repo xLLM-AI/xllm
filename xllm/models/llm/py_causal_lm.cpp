@@ -322,6 +322,10 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
   config_dict_ = build_config_dict(context);
   py_model_ = model_cls(config_dict_);
   py_model_.attr("eval")();
+  supports_greedy_tokens_ =
+      ModelConfig::get_instance().enable_greedy_output() &&
+      py::hasattr(py_model_, "supports_greedy_tokens") &&
+      py_model_.attr("supports_greedy_tokens")().cast<bool>();
 }
 
 PyCausalLM::~PyCausalLM() {
@@ -441,6 +445,16 @@ ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,
   LOG(FATAL) << "PyCausalLM::forward() must not be called directly. "
              << "Python model forward goes through PyExecutorImpl.";
   return ModelOutput(torch::Tensor());
+}
+
+torch::Tensor PyCausalLM::greedy_tokens(const torch::Tensor& hidden_states,
+                                        const torch::Tensor& selected_idxes) {
+  torch::NoGradGuard no_grad;
+  py::gil_scoped_acquire gil;
+  return py_model_
+      .attr("compute_greedy_tokens")(hidden_states,
+                                     optional_tensor(selected_idxes))
+      .cast<torch::Tensor>();
 }
 
 torch::Tensor PyCausalLM::pooler(const torch::Tensor& hidden_states,

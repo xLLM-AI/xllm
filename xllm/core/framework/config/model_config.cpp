@@ -44,6 +44,12 @@ DEFINE_string(model_impl,
               "C++ model; 'python' runs the graph via the embedded Python "
               "interpreter ('python' model package).");
 
+DEFINE_bool(
+    enable_greedy_output,
+    false,
+    "Enable candidate-only output for unconstrained greedy Python Qwen3 "
+    "requests. Unsupported requests retain full logits.");
+
 DEFINE_string(task,
               "generate",
               "The task to use the model for(e.g. generate, embed, mm_embed).");
@@ -146,6 +152,7 @@ void ModelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(model_id);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(model);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(model_impl);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_greedy_output);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(python_model_path);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(backend);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(task);
@@ -219,6 +226,7 @@ void ModelConfig::normalize_cpp_chat_template(const std::string& model_type) {
 void ModelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(model_id);
   XLLM_CONFIG_ASSIGN_FROM_JSON(model_impl);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_greedy_output);
   XLLM_CONFIG_ASSIGN_FROM_JSON(backend);
   XLLM_CONFIG_ASSIGN_FROM_JSON(task);
   XLLM_CONFIG_ASSIGN_FROM_JSON(use_ctc);
@@ -245,6 +253,8 @@ void ModelConfig::append_config_json(
       config_json, default_config, model_id);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, model_impl);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_greedy_output);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, backend);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, task);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, use_ctc);

@@ -247,6 +247,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   torch::Tensor logits;
+  torch::Tensor greedy_tokens;
   torch::Tensor lm_head_input_indices;
   torch::Tensor selected_hidden;
   if (sampling_params.num_sample_seqs() > 0) {
@@ -264,7 +265,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     const bool need_selected_hidden =
         input.return_selected_hidden ||
         (options_.cp_size() > 1 && options_.enable_speculative_decode());
-    if (need_selected_hidden) {
+    const bool use_greedy_output =
+        model_->supports_greedy_tokens() &&
+        sampling_params.can_sample_without_logits() &&
+        !input.skip_sampling_for_logits_only && !need_selected_hidden &&
+        !options_.enable_speculative_decode() && options_.cp_size() == 1;
+    if (use_greedy_output) {
+      greedy_tokens =
+          model_->greedy_tokens(model_output.hidden_states, logits_indices);
+    } else if (need_selected_hidden) {
       // Emit both selected hidden and logits from a single lm_head pass so the
       // ConfidenceHead and CP speculative paths can consume hidden without a
       // second projection.
@@ -302,6 +311,9 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
           prepare_sampling();
         }
         auto sample_output = [&]() {
+          if (greedy_tokens.defined()) {
+            return SampleOutput{.next_tokens = greedy_tokens};
+          }
           if (!sampling_params.min_token_positions().defined()) {
             return sample(logits, sampling_params);
           }

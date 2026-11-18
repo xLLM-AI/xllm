@@ -54,6 +54,7 @@ class ModelConfig final {
         {"model_id",
          "model",
          "model_impl",
+         "enable_greedy_output",
          "backend",
          "task",
          "use_ctc",
@@ -80,6 +81,8 @@ class ModelConfig final {
   PROPERTY(std::string, model);
 
   PROPERTY(std::string, model_impl);
+
+  PROPERTY(bool, enable_greedy_output) = false;
 
   PROPERTY(std::string, python_model_path);
 

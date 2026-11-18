@@ -406,6 +406,19 @@ class Qwen3ForCausalLM(PyModelBase):
                 device=device,
             )
 
+    def supports_greedy_tokens(self) -> bool:
+        return (
+            type(self.lm_head) is ColumnParallelLinear
+            and self.lm_head.weight.dtype in (torch.float16, torch.bfloat16, torch.float32)
+            and self.lm_head.weight.shape[0] <= 2**24
+            and self.cfg.dp_size == 1
+        )
+
+    def compute_greedy_tokens(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
+        if selected_idxes is not None and selected_idxes.numel() > 0:
+            hidden = hidden.index_select(0, selected_idxes)
+        return self.lm_head.greedy_tokens(hidden)
+
     def pooler(self, hidden_states: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
         """Pool the scheduler-selected final token rows, matching ATB Qwen3.
 
