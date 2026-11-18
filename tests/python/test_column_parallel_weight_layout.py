@@ -33,7 +33,12 @@ def test_column_parallel_weight_preparation_is_idempotent(monkeypatch: pytest.Mo
     x = torch.tensor([[1.0, -2.0, 3.0]])
     expected = torch.nn.functional.linear(x, layer.weight, layer.bias)
     prepare = Mock(side_effect=lambda weight: (weight.transpose(0, 1).contiguous(), True))
-    monkeypatch.setattr(linear.kernels, "prepare_column_parallel_weight", prepare)
+    monkeypatch.setattr(
+        linear.kernels,
+        "prepare_column_parallel_weight",
+        prepare,
+        raising=False,
+    )
 
     layer.process_weights_after_loading()
     actual = layer(x)
@@ -60,7 +65,12 @@ def test_column_parallel_weight_preparation_is_idempotent(monkeypatch: pytest.Mo
 def test_column_parallel_weight_layout_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     layer = linear.ColumnParallelLinear(3, 5, 1)
     prepare = Mock()
-    monkeypatch.setattr(linear.kernels, "prepare_column_parallel_weight", prepare)
+    monkeypatch.setattr(
+        linear.kernels,
+        "prepare_column_parallel_weight",
+        prepare,
+        raising=False,
+    )
 
     layer.process_weights_after_loading()
 
@@ -95,6 +105,7 @@ def test_greedy_tokens_uses_vocab_shard_size_after_weight_layout(
             linear.kernels,
             "prepare_column_parallel_weight",
             lambda weight: (weight.transpose(0, 1).contiguous(), True),
+            raising=False,
         )
         layer.process_weights_after_loading()
 
