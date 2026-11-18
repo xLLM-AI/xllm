@@ -465,17 +465,6 @@ def broadcast_(x: torch.Tensor, src: int, group_name: str = "tp") -> None:
     dist.broadcast(x, src=ranks[src], group=group)
 
 
-@broadcast_.register_fake
-def _(x: torch.Tensor, src: int, group_name: str = "tp") -> None:
-    del src, group_name
-    return None
-
-
-@all_reduce_.register_fake
-def _(x: torch.Tensor, group_name: str = "tp") -> None:
-    return None
-
-
 def _normalize_gather_dim(x: torch.Tensor, dim: int) -> int:
     if not -x.ndim <= dim < x.ndim:
         raise IndexError(f"all-gather dimension {dim} out of range for {x.ndim}-D input")
@@ -495,11 +484,6 @@ def reduce_scatter(x: torch.Tensor, world_size: int, group_name: str = "tp") -> 
     else:
         dist.reduce_scatter_tensor(output, input, group=group)
     return output
-
-
-@reduce_scatter.register_fake
-def _(x: torch.Tensor, world_size: int, group_name: str = "tp") -> torch.Tensor:
-    return x.new_empty((x.shape[0] // world_size, *x.shape[1:]))
 
 
 @torch.library.custom_op("xllm_ops::matmul_reduce_scatter", mutates_args=())
@@ -532,13 +516,6 @@ def matmul_reduce_scatter(
     return output
 
 
-@matmul_reduce_scatter.register_fake
-def _(
-    x: torch.Tensor, weight: torch.Tensor, world_size: int, comm_mode: str = "aiv", group_name: str = "tp"
-) -> torch.Tensor:
-    return x.new_empty((x.shape[0] // world_size, weight.shape[1]))
-
-
 def _contiguous_gather_input(x: torch.Tensor) -> torch.Tensor:
     """Prepare logical tensor values for the ND all-gather transport."""
     contiguous = x.contiguous()
@@ -566,14 +543,6 @@ def all_gather(x: torch.Tensor, dim: int, world_size: int, group_name: str = "tp
         shape[dim] *= world_size
         return gathered.view(shape)
     return torch.cat(gathered.unbind(0), dim=dim)
-
-
-@all_gather.register_fake
-def _(x: torch.Tensor, dim: int, world_size: int, group_name: str = "tp") -> torch.Tensor:
-    dim = _normalize_gather_dim(x, dim)
-    shape = list(x.shape)
-    shape[dim] *= world_size
-    return x.new_empty(shape)
 
 
 @torch.library.custom_op("xllm_ops::all_gather_variable", mutates_args=())
@@ -611,19 +580,6 @@ def all_gather_variable(
         empty_shape[0] = 0
         return x.new_empty(empty_shape)
     return torch.cat(valid_chunks, dim=0)
-
-
-@all_gather_variable.register_fake
-def _(
-    x: torch.Tensor,
-    token_counts: list[int],
-    rank: int,
-    group_name: str,
-) -> torch.Tensor:
-    del rank, group_name
-    shape = list(x.shape)
-    shape[0] = sum(token_counts)
-    return x.new_empty(shape)
 
 
 def all_to_all_single_(
@@ -708,11 +664,6 @@ def all_to_all_single(
     """Exchange equal first-dimension chunks among ranks in ``group_name``."""
     group = get_process_group(input.device, group_name)
     all_to_all_single_(output, input, group)
-
-
-@all_to_all_single.register_fake
-def _(output: torch.Tensor, input: torch.Tensor, group_name: str = "tp") -> None:
-    del output, input, group_name
 
 
 def gather_dp_execution_tokens(

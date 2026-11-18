@@ -67,34 +67,6 @@ def fused_gdn_prefill_post_conv(
     )
 
 
-@fused_gdn_prefill_post_conv.register_fake
-def _fused_gdn_prefill_post_conv_fake(
-    mixed_qkv: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_log: torch.Tensor,
-    dt_bias: torch.Tensor,
-    num_key_heads: int,
-    key_head_dim: int,
-    value_head_dim: int,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
-    del b, dt_bias
-    num_tokens = mixed_qkv.shape[0]
-    num_value_heads = a_log.numel()
-    q = mixed_qkv.new_empty(num_tokens, num_key_heads, key_head_dim)
-    k = torch.empty_like(q)
-    v = mixed_qkv.new_empty(num_tokens, num_value_heads, value_head_dim)
-    g = a.new_empty(num_tokens, num_value_heads, dtype=torch.float32)
-    beta = torch.empty_like(g)
-    return q, k, v, g, beta
-
-
 @torch.library.custom_op(
     "xllm_triton::fused_recurrent_gdn_packed_decode",
     mutates_args=("initial_state",),
@@ -123,28 +95,6 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         initial_state,
         state_indices,
         scale,
-    )
-
-
-@fused_recurrent_gated_delta_rule_packed_decode.register_fake
-def _fused_recurrent_gated_delta_rule_packed_decode_fake(
-    mixed_qkv: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_log: torch.Tensor,
-    dt_bias: torch.Tensor,
-    initial_state: torch.Tensor,
-    state_indices: torch.Tensor,
-    scale: float,
-) -> torch.Tensor:
-    del a, b, a_log, dt_bias, state_indices, scale
-    return torch.empty(
-        mixed_qkv.shape[0],
-        1,
-        initial_state.shape[-3],
-        initial_state.shape[-2],
-        dtype=mixed_qkv.dtype,
-        device=mixed_qkv.device,
     )
 
 
@@ -182,21 +132,6 @@ def chunk_gated_delta_rule(
         )
         return output.squeeze(0), final_state
     raise ValueError(f"unsupported GDN prefill backend: {backend}")
-
-
-@chunk_gated_delta_rule.register_fake
-def _chunk_gated_delta_rule_fake(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    initial_state: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    backend: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    del q, k, g, beta, cu_seqlens, backend
-    return torch.empty_like(v), torch.empty_like(initial_state)
 
 
 __all__ = [

@@ -52,12 +52,6 @@ def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return triton_l2_norm(value, eps)
 
 
-@l2_norm.register_fake
-def _l2_norm_fake(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    del eps
-    return torch.empty_like(value)
-
-
 @torch.library.custom_op("xllm_triton::rms_norm_gated", mutates_args=())
 def rms_norm_gated(
     value: torch.Tensor,
@@ -71,17 +65,6 @@ def rms_norm_gated(
     )
 
     return triton_rms_norm_gated(value, gate, weight, eps)
-
-
-@rms_norm_gated.register_fake
-def _rms_norm_gated_fake(
-    value: torch.Tensor,
-    gate: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    del gate, weight, eps
-    return torch.empty_like(value)
 
 
 __all__ = [

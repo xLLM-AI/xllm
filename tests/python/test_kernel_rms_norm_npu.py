@@ -12,18 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native RMSNorm adapter: GLM-5.3 shapes, aliases, fake, streams and ACLGraph."""
+"""Native RMSNorm adapter: GLM-5.3 shapes, aliases, streams and ACLGraph."""
 
 from __future__ import annotations
 
-import importlib
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 import torch
-from torch._subclasses.fake_tensor import FakeTensorMode
 from xllm_kernel import initialize, prepare_rms_norm
 from xllm_kernel.ops import rms_norm
 
@@ -97,7 +95,6 @@ def test_initialization_is_idempotent_and_policy_is_fixed() -> None:
         initialize(device="cuda")
     with pytest.raises(RuntimeError, match="restart"):
         initialize(device="npu", operations=("rms_norm",), execution_mode="eager")
-    importlib.import_module("xllm.python.kernels_npu._custom_op")
     assert prepare_rms_norm() is plan
 
 
@@ -123,30 +120,9 @@ for dtype in (torch.float16, torch.bfloat16, torch.float32):
     torch.testing.assert_close(
         rms_norm(value, weight, 1e-5), torch_npu.npu_rms_norm(value, weight, epsilon=1e-5)[0], rtol=0, atol=0
     )
-from torch._subclasses.fake_tensor import FakeTensorMode
-with FakeTensorMode():
-    value = torch.empty(7, 512, device='npu')
-    weight = torch.empty(512, device='npu')
-    assert rms_norm(value, weight, 1e-5).shape == value.shape
 assert initialize(device='npu', operations=('rms_norm',)) is plan
 """
     subprocess.run([sys.executable, "-c", script], cwd=tmp_path, check=True)
-
-
-def test_fake_preserves_existing_native_contract() -> None:
-    with FakeTensorMode():
-        value = torch.empty(7, 576, dtype=torch.bfloat16, device="npu")[:, :512]
-        weight = torch.empty(512, dtype=value.dtype, device="npu")
-        output = rms_norm(value, weight, 1e-5)
-        expected = torch.ops.xllm_ops.rms_norm(value, weight, 1e-5)
-        assert output is not value and output is not weight
-        assert output._base is None
-        assert (output.shape, output.dtype, output.device, output.stride()) == (
-            expected.shape,
-            expected.dtype,
-            expected.device,
-            expected.stride(),
-        )
 
 
 def test_nondefault_stream_producer_and_consumer() -> None:

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import pytest
 import torch
-from torch._subclasses.fake_tensor import FakeTensorMode
 
 from xllm.python import kernels
 
@@ -122,25 +121,12 @@ def test_current_stream_and_device_guard() -> None:
     _assert_close(result, reference)
 
 
-def test_fake_tensor_and_compile_schema() -> None:
-    with FakeTensorMode():
-        x = torch.empty(3, 1024, dtype=torch.bfloat16, device="npu")
-        gate = torch.empty(3, 4, 512, dtype=torch.bfloat16, device="npu")[:, :, 256:]
-        out = kernels.fused_sigmoid_mul(x, gate)
-        assert out.shape == x.shape and out.dtype == x.dtype and out.is_contiguous()
-    x, gate, _, _ = _case(3, 4, 256, torch.bfloat16, "interleaved")
-    # Fullgraph verifies the operator schema/FakeTensor boundary; device capture
-    # is tested separately above, rather than claiming eager backend is AOT.
-    compiled = torch.compile(kernels.fused_sigmoid_mul, backend="eager", fullgraph=True)
-    _assert_close(compiled(x, gate), x * torch.sigmoid(gate.reshape_as(x)))
-
-
 def test_operator_schema_alias_contract() -> None:
     x, gate, _, _ = _case(3, 4, 256, torch.bfloat16, "interleaved")
     torch.library.opcheck(
         torch.ops.xllm_python.fused_sigmoid_mul.default,
         (x, gate),
-        test_utils=("test_schema", "test_faketensor"),
+        test_utils=("test_schema",),
     )
 
 

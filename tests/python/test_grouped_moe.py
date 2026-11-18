@@ -155,30 +155,6 @@ def test_moe_expert_compute_with_routing_preserves_metadata_without_unpermute(
     assert torch.equal(indices, sorted_indices)
 
 
-def test_moe_routing_metadata_keeps_probabilities_during_fake_capture() -> None:
-    from torch._subclasses.fake_tensor import FakeTensorMode
-
-    with FakeTensorMode():
-        hidden = torch.empty(2, 4, dtype=torch.bfloat16)
-        probs = torch.empty(2, 2, dtype=torch.float32)
-        ids = torch.empty(2, 2, dtype=torch.int32)
-        output, retained_probs, indices = moe.moe_expert_compute_with_routing(
-            hidden,
-            probs,
-            ids,
-            torch.empty(4, 4, 8, dtype=torch.int8),
-            torch.empty(4, 4, 4, dtype=torch.int8),
-            torch.empty(4, 8, dtype=torch.float32),
-            torch.empty(4, 4, dtype=torch.bfloat16),
-            2,
-        )
-        assert retained_probs is probs
-        assert output.shape == (4, 4)
-        assert output.dtype == torch.bfloat16
-        assert indices.shape == (4,)
-        assert indices.dtype == torch.int32
-
-
 @pytest.mark.parametrize("active_range", [None, [0, 4], [1, 3]])
 def test_grouped_moe_retains_partial_expert_probability_mask(
     monkeypatch: pytest.MonkeyPatch,
@@ -611,30 +587,6 @@ def test_bf16_grouped_moe_pre_down_zero_tokens_skips_npu_kernels(
     assert not forbidden.called
 
 
-@pytest.mark.parametrize("router_weight_before_down", [False, True])
-def test_bf16_grouped_moe_fake_dispatch_has_expected_dtype(
-    router_weight_before_down: bool,
-) -> None:
-    from torch._subclasses.fake_tensor import FakeTensorMode
-
-    with FakeTensorMode():
-        result = moe.grouped_moe_bf16(
-            torch.empty(2, 4, dtype=torch.bfloat16),
-            torch.empty(2, 2, dtype=torch.float32),
-            torch.empty(2, 2, dtype=torch.int32),
-            torch.empty(4, 4, 8, dtype=torch.bfloat16),
-            torch.empty(4, 4, 4, dtype=torch.bfloat16),
-            16,
-            4,
-            4,
-            2.0,
-            router_weight_before_down,
-        )
-    assert result.shape == (2, 4)
-    expected_dtype = torch.float32 if router_weight_before_down else torch.bfloat16
-    assert result.dtype is expected_dtype
-
-
 @pytest.mark.parametrize("noncontiguous", (False, True))
 def test_encode_mega_moe_scale_uses_prepared_fp32_inputs(
     monkeypatch: pytest.MonkeyPatch,
@@ -687,25 +639,6 @@ def test_npu_softmax_topk_uses_graph_safe_native_op(
     native_topk.assert_called_once_with(logits, 2, renormalize)
     torch.testing.assert_close(actual_weights, weights)
     torch.testing.assert_close(actual_ids, expert_ids)
-
-
-def test_npu_softmax_topk_fake_preserves_bfloat16_dtype() -> None:
-    from xllm.python.kernels_npu import _custom_op as custom_op
-
-    logits = torch.empty((2, 4), dtype=torch.bfloat16, device="meta")
-
-    weights, expert_ids = custom_op._moe_gating_top_k_softmax_fake(
-        logits,
-        topk=2,
-        normalize=True,
-    )
-
-    assert weights.shape == (2, 2)
-    assert weights.dtype == torch.bfloat16
-    assert weights.device.type == "meta"
-    assert expert_ids.shape == (2, 2)
-    assert expert_ids.dtype == torch.int32
-    assert expert_ids.device.type == "meta"
 
 
 def test_grouped_matmul_swiglu_quant_v2_requests_int8_output(

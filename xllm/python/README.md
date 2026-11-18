@@ -66,10 +66,8 @@ A platform package owns everything specific to its hardware:
 
 - Triton, FlashInfer and vendor-library launchers, under a per-framework
   subdirectory (`triton/`, `flashinfer/`);
-- `torch.library` `custom_op` registration and FakeTensor contracts for the
+- `torch.library.custom_op` registration and mutation declarations for the
   operators it implements in Python;
-- FakeTensor contracts for its C++ operators, collected in `_custom_op.py`;
-- mutation declarations and `torch.compile` graph boundaries;
 - the weight layouts its kernels require.
 
 Heavy launchers (TileLang, Triton, FlashInfer) stay lazily imported inside the
@@ -85,7 +83,7 @@ kernels_npu/
 ```
 
 They depend only on their DSL/framework packages and their own helpers. They do
-not import the NPU semantic API, `_custom_op.py`, `torch.ops.xllm_ops`, the AOT
+not import the NPU semantic API, `torch.ops.xllm_ops`, the AOT
 compiler, or the native xLLM extension. This lets C++ build tooling import the
 same Python DSL implementation before the xLLM binary exists.
 
@@ -175,11 +173,9 @@ package's `_initialize_runtime()` hook, and publishes the result both as the
 `xllm.python.kernels` attribute and in `sys.modules`. There is no `kernels/`
 directory. These import forms resolve to the same selected package.
 
-NPU initialization imports `_custom_op.py` to register native FakeTensor
-implementations, then uses `_EXPORTS` to import semantic modules and publish
-their functions. CUDA imports its Python operator wrappers when its package
-is imported, but defers native FakeTensor registration to its runtime hook.
-FakeTensor implementations describe operators for graph tracing.
+NPU initialization uses `_EXPORTS` to import semantic modules and publish their
+functions. CUDA imports its Python operator wrappers directly from the platform
+package.
 
 Successful initialization is reused within each interpreter. Model creation,
 weight loading, and process-group setup happen separately; each worker or
@@ -277,11 +273,9 @@ compiled into native AOT artifacts require rebuilding those artifacts.
    the program body there.
 3. Bind the name in that platform's family module and package exports
    (`_EXPORTS` for NPU, explicit imports for CUDA), and update `__all__`.
-   Register a `custom_op` and its FakeTensor implementation when
-   the computation needs a stable graph node, FakeTensor propagation, or
-   mutation tracking. FakeTensor contracts for C++ operators go in the
-   platform's `_custom_op.py`.
-4. Add launcher-level numerical tests and graph/FakeTensor tests for that
+   Use `torch.library.custom_op` when you need a Torch dispatcher entry and
+   declare any mutations in its schema.
+4. Add launcher-level numerical and graph capture/replay tests for that
    platform. Do not add peer stubs solely to keep export lists aligned.
 5. Update `model_platform_support.py` when the operator changes the supported
    model set.
@@ -294,13 +288,10 @@ compiled into native AOT artifacts require rebuilding those artifacts.
    needed by the first models targeted for the platform.
 2. Keep the package independent: it owns its exports and does not import a
    peer.
-3. Add `_custom_op.py` with the FakeTensor implementations of the platform's
-   C++ operators. Import it from the package's `_initialize_runtime()` hook
-   after native operators have been registered.
-4. Teach `Platform` in `xllm-kernel/python/xllm_kernel/platform.py` to report `<device>` (extend
+3. Teach `Platform` in `xllm-kernel/python/xllm_kernel/platform.py` to report `<device>` (extend
    `PlatformEnum` and `_torch_device_type()`) and add the matching
    branch to `xllm.python.initialize_runtime()`.
-5. `python setup.py build --device <device>` then stages it. Before that, a build
+4. `python setup.py build --device <device>` then stages it. Before that, a build
    for the device logs the packages that do exist and ships none of them.
-6. Mark a model supported in `model_platform_support.py` only after its
+5. Mark a model supported in `model_platform_support.py` only after its
    platform path passes functional tests.

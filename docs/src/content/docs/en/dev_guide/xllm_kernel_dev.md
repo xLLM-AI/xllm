@@ -185,7 +185,6 @@ native_op = register_custom_op("my_native_op")
   manifests, and wheel artifacts together.
 - Load extensions and register operators during preparation, then reuse that state.
 - Validate real implementations with output, mutation/alias, stream and graph tests.
-  This registration helper does not provide FakeTensor implementations.
 
 ### 3.4 Public API and model integration
 

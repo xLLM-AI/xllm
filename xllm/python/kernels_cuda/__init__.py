@@ -105,12 +105,6 @@ from .sparse_attention import (
     sparse_flash_attention_out,
 )
 
-
-def _initialize_runtime() -> None:
-    """Register native-op FakeTensor implementations when CUDA is selected."""
-    from . import _custom_op  # noqa: F401
-
-
 __all__ = [
     "rms_norm",
     "gemma_rms_norm",

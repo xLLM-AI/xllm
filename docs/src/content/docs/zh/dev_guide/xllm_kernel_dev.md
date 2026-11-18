@@ -148,7 +148,7 @@ native_op = register_custom_op("my_native_op")
 
 - 原生扩展放在 `csrc/<solution>/`，同步配置 `setup.py`、源码 manifest 和 wheel 产物。
 - 扩展加载与注册在准备阶段完成并复用。
-- 使用真实实现验证输出、mutation/alias、stream 和 graph；该注册接口不提供 FakeTensor 实现。
+- 使用真实实现验证输出、mutation/alias、stream 和 graph。
 
 ### 3.4 公共 API 与模型接入
 
