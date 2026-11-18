@@ -21,11 +21,6 @@ the existing Python composition for paths not migrated to MegaGdn yet.
 from __future__ import annotations
 
 import torch
-from xllm_kernel.ops.attention.gdn import (
-    fused_qkvzba_split_reshape_cat,
-    fused_recurrent_gated_delta_rule,
-    fused_sigmoid_gating_delta_rule_update,
-)
 
 
 def mega_gdn_prefill(
@@ -212,74 +207,6 @@ def fused_gdn_gating(
     return g_out, beta_out
 
 
-def fused_sigmoid_gating_delta_rule_decode(
-    mixed_qkv: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_log: torch.Tensor,
-    dt_bias: torch.Tensor,
-    initial_state: torch.Tensor,
-    state_indices: torch.Tensor,
-    scale: float,
-) -> torch.Tensor:
-    """Advance the recurrent state by one token per sequence.
-
-    Args:
-        mixed_qkv: Packed projection of shape ``[batch_size, qkv_size]``.
-        a: Gate projection of shape ``[batch_size, num_value_heads]``.
-        b: Beta projection of shape ``[batch_size, num_value_heads]``.
-        a_log: Per-head log decay of shape ``[num_value_heads]``.
-        dt_bias: Per-head timestep bias of shape ``[num_value_heads]``.
-        initial_state: Recurrent state pool, updated in place.
-            Shape ``[num_slots, num_value_heads, key_dim, value_dim]``.
-        state_indices: State slot of every sequence.
-        scale: Query scale.
-
-    Returns:
-        Output of shape ``[batch_size, 1, 1, num_value_heads, 128]``,
-        preserving the existing wrapper's additional sequence dimension.
-    """
-    batch = mixed_qkv.shape[0]
-    num_value_heads, key_dim, value_dim = initial_state.shape[-3:]
-    qkv_dim = mixed_qkv.shape[1]
-    query_key_dim = qkv_dim - num_value_heads * value_dim
-    query_dim = query_key_dim // 2
-    num_key_heads = query_dim // key_dim
-
-    # Split mixed_qkv
-    q_flat = mixed_qkv[:, :query_dim]
-    k_flat = mixed_qkv[:, query_dim : 2 * query_dim]
-    v_flat = mixed_qkv[:, 2 * query_dim :]
-
-    q = q_flat.view(batch, num_key_heads, key_dim)
-    k = k_flat.view(batch, num_key_heads, key_dim)
-    v = v_flat.view(batch, num_value_heads, value_dim)
-
-    # Kernel expects [batch, seq_len, heads, dim] — add seq dim for decode
-    q = q.unsqueeze(1)  # [batch, 1, num_key_heads, key_dim]
-    k = k.unsqueeze(1)  # [batch, 1, num_key_heads, key_dim]
-    v = v.unsqueeze(1)  # [batch, 1, num_value_heads, value_dim]
-
-    # Kernel does l2norm, gating, GQA expansion, and recurrence internally.
-    # cu_seqlens for decode: each seq has 1 token.
-    cu_seqlens = torch.arange(batch + 1, dtype=torch.int32, device=mixed_qkv.device)
-
-    output = fused_sigmoid_gating_delta_rule_update(
-        a_log.float(),
-        a.unsqueeze(1),
-        dt_bias.float(),
-        q.contiguous(),
-        k.contiguous(),
-        v.contiguous(),
-        b.unsqueeze(1),
-        initial_state,
-        state_indices,
-        cu_seqlens,
-        scale,
-    )
-    return output.unsqueeze(1)
-
-
 def chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -320,14 +247,10 @@ def chunk_gated_delta_rule(
 
 
 __all__ = [
-    "fused_recurrent_gated_delta_rule",
-    "fused_sigmoid_gating_delta_rule_update",
-    "fused_qkvzba_split_reshape_cat",
     "mega_gdn_decode",
     "mega_gdn_mtp_decode",
     "mega_gdn_mtp_decode_varlen",
     "mega_gdn_prefill",
     "fused_gdn_gating",
-    "fused_sigmoid_gating_delta_rule_decode",
     "chunk_gated_delta_rule",
 ]

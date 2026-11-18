@@ -16,8 +16,8 @@ r"""Profile ATB and transpose-BMM device kernels with the Ascend NPU profiler.
 
 This is a manual profiling workload, not a pytest correctness test.
 Run from the repository root in an NPU container with the CANN/ATB environment
-loaded, matching torch/torch_npu packages, and this checkout's built xllm_export
-available to ``import xllm``. The examples below use CANN 9.0 msprof's positional
+loaded, matching torch/torch_npu packages, and the standalone xllm-kernel package
+installed. The examples below use CANN 9.0 msprof's positional
 application syntax; check the installed ``msprof --help`` for other versions.
 Use a free device and a new output directory for each capture.
 
@@ -51,13 +51,9 @@ and is not model E2E latency. This example adds no host timer or graph replay.
 from __future__ import annotations
 
 import argparse
-import os
-import sys
 
 import torch
-import torch_npu
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import torch_npu  # noqa: F401
 
 
 def main() -> None:
@@ -77,17 +73,18 @@ def main() -> None:
         parser.error("q_split input layout requires --projection q")
 
     torch.npu.set_device(args.device)
-    import xllm
-    from xllm.python.kernels_npu.linear import atb_matmul_ein_sum
+    from xllm_kernel import initialize
+    from xllm_kernel.ops import matmul_ein_sum
 
-    _ = xllm.xllm_export
+    if args.implementation == "atb":
+        initialize(device="npu", operations=("matmul_ein_sum",))
     dim, out_dim = (192, 512) if args.projection == "q" else (512, 256)
     generator = torch.Generator().manual_seed(20260923)
     input_dim = dim + 64 if args.input_layout == "q_split" else dim
     backing = torch.randn((args.tokens, args.heads, input_dim), generator=generator, dtype=torch.bfloat16).npu()
     x = backing[..., :dim]
     weight = torch.randn((args.heads, dim, out_dim), generator=generator, dtype=torch.bfloat16).npu()
-    kernel = atb_matmul_ein_sum if args.implementation == "atb" else torch.ops.npu.npu_transpose_batchmatmul
+    kernel = matmul_ein_sum if args.implementation == "atb" else torch.ops.npu.npu_transpose_batchmatmul
     kwargs = {} if args.implementation == "atb" else {"perm_x1": (1, 0, 2), "perm_x2": (0, 1, 2), "perm_y": (1, 0, 2)}
     with torch.inference_mode():
         for _ in range(args.warmup):

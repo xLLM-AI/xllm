@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import torch
 import torch_npu
-from xllm_kernel.ops.gemm import matmul_ein_sum as atb_matmul_ein_sum
-from xllm_kernel.ops.gemm import matmul_ein_sum_out as atb_matmul_ein_sum_out
 
 _FRACTAL_NZ_FORMAT = 29
 
@@ -79,8 +77,6 @@ def prepare_quant_weight(
 
 __all__ = [
     "grouped_linear",
-    "atb_matmul_ein_sum",
-    "atb_matmul_ein_sum_out",
     "prepare_row_parallel_weight",
     "prepare_quant_weight",
 ]

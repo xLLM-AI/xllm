@@ -20,6 +20,7 @@ import pytest
 import torch
 
 from xllm.python import distributed, kernels
+from xllm.python.models import qwen3_dflash
 from xllm.python.models.qwen3 import Qwen3Model
 from xllm.python.models.qwen3_dflash import (
     DFlashContextProjection,
@@ -190,7 +191,7 @@ def test_context_projection_writes_each_layer_cache(monkeypatch: pytest.MonkeyPa
         trace.append(("event", layer_id))
 
     monkeypatch.setattr(kernels, "rms_norm", _rms_norm, raising=False)
-    monkeypatch.setattr(kernels, "reshape_paged_cache", _write_cache, raising=False)
+    monkeypatch.setattr(qwen3_dflash, "reshape_paged_cache", _write_cache)
     synchronizer = Mock(record_event=Mock(side_effect=_record_event))
     hidden = torch.tensor([[2.0, 2.0], [2.0, -2.0]])
     positions, slots = torch.tensor([1, 2]), torch.tensor([3, 1], dtype=torch.int32)

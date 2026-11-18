@@ -28,8 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
-from xllm.python import kernels
+from xllm_kernel.ops import reshape_paged_cache
 
 pytest.importorskip("torch_npu", reason="requires the real NPU backend")
 
@@ -1369,7 +1368,7 @@ def test_refreshed_attention_hidden_matches_reexecuted_first_body(draft_width: i
     first_backend = backend_for(2 * batch, [0, 0, 1, 1], first_lengths)
 
     def refresh() -> torch.Tensor:
-        kernels.reshape_paged_cache(slots, key_rows, value_rows, key, value)
+        reshape_paged_cache(slots, key_rows, value_rows, key, value)
         output = refresh_backend._decode(query, key, value, refresh_backend._metadata, rows)
         selected.copy_(row_starts + accepted.to(torch.int64) - 1)
         owned.copy_(output.view(rows, hidden_size).index_select(0, selected))
@@ -1434,7 +1433,7 @@ def test_refreshed_attention_hidden_matches_reexecuted_first_body(draft_width: i
 
         gather = torch.tensor(first_indices, device=device, dtype=torch.int64)
         first_lengths.copy_(torch.tensor(first_lengths_host, device=device, dtype=torch.int32))
-        kernels.reshape_paged_cache(
+        reshape_paged_cache(
             torch.tensor(first_slots, device=device, dtype=torch.int32),
             key_rows.index_select(0, gather),
             value_rows.index_select(0, gather),

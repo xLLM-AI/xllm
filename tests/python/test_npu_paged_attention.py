@@ -551,7 +551,7 @@ def test_verify_routes_only_prepared_device_lengths_to_single_query_decode(prepa
     context = ForwardContext(backend, torch.device("cpu"), metadata, backend._kv_caches)
     with (
         forward_context(context),
-        patch("xllm.python.attention.npu_paged_attention.kernels.reshape_paged_cache"),
+        patch("xllm.python.attention.npu_paged_attention.reshape_paged_cache"),
         patch.object(backend, "_prefill", return_value=query) as prefill,
         patch.object(backend, "_decode", return_value=query) as decode,
     ):

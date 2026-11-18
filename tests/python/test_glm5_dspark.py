@@ -23,6 +23,7 @@ import torch.nn.functional as F
 from xllm.python import kernels
 from xllm.python.model_executor.forward_context import ForwardContext, forward_context
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
+from xllm.python.models import glm5_dspark
 from xllm.python.models.glm5_dspark import Glm5DSparkConfig, Glm5DSparkForCausalLM, _apply_rope
 
 
@@ -173,7 +174,7 @@ def test_context_writes_compressed_latent_and_rotary_cache_only(
         rope_cache.flatten(0, 1)[slots[valid]] = rope[valid]
         calls.append((latent.shape, rope.shape))
 
-    monkeypatch.setattr(kernels, "reshape_paged_cache", scatter)
+    monkeypatch.setattr(glm5_dspark, "reshape_paged_cache", scatter)
     caches = [(torch.full((1, 8, 1, 4), 42.0), torch.full((1, 8, 1, 2), 43.0)) for _ in range(2)]
     hidden = torch.randn(3, 16)
     model.write_context_kv(hidden, torch.arange(3), torch.tensor([1, -1, 3]), caches, None)

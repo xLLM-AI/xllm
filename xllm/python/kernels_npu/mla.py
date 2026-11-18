@@ -18,11 +18,10 @@ from __future__ import annotations
 
 import torch
 import torch_npu
-from xllm_kernel.ops import reshape_paged_cache
+from xllm_kernel.ops import matmul_ein_sum, reshape_paged_cache
 
 from xllm.python.model_executor.forward_context import get_forward_context_or_none
 
-from .linear import atb_matmul_ein_sum
 from .normalization import rms_norm, rms_norm_dynamic_quant
 from .quantization import dynamic_quant, quant_matmul, quant_matmul_out, quantize_per_tensor
 
@@ -347,7 +346,7 @@ def deepseek_mla_preprocess_decode(
         qk_nope_head_dim + qk_rope_head_dim,
     )
     q_nope, q_rope = q.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
-    q_latent = atb_matmul_ein_sum(q_nope, w_uk)
+    q_latent = matmul_ein_sum(q_nope, w_uk)
     num_tokens = hidden.shape[0]
     q_pe = torch_npu.npu_interleave_rope(
         q_rope.view(num_tokens, num_heads, 1, qk_rope_head_dim),
@@ -486,7 +485,7 @@ def deepseek_mla_preprocess_decode_dynamic(
         qk_nope_head_dim + qk_rope_head_dim,
     )
     q_nope, q_rope = q.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
-    q_latent = atb_matmul_ein_sum(q_nope, w_uk)
+    q_latent = matmul_ein_sum(q_nope, w_uk)
     num_tokens = hidden.shape[0]
     q_pe = torch_npu.npu_interleave_rope(
         q_rope.view(num_tokens, num_heads, 1, qk_rope_head_dim),

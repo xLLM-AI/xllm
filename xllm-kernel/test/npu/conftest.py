@@ -1,11 +1,24 @@
 # Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
-"""Initialize the matching host once for native-adapter integration tests."""
+"""Prepare the migrated NPU operators directly from the kernel package."""
 
 import pytest
 
 pytest.importorskip("torch_npu", reason="NPU integration tests require torch_npu")
 
-from xllm import xllm_export  # noqa: F401
-from xllm.python import initialize_runtime
+from xllm_kernel import initialize
 
-initialize_runtime()
+
+@pytest.fixture(scope="session", autouse=True)
+def _prepare_kernels() -> None:
+    initialize(
+        device="npu",
+        operations=(
+            "l2_norm",
+            "fused_recurrent_gated_delta_rule",
+            "fused_sigmoid_gating_delta_rule_update",
+            "fused_qkvzba_split_reshape_cat",
+            "causal_conv1d_update_v2",
+            "matmul_ein_sum",
+            "matmul_ein_sum_out",
+        ),
+    )

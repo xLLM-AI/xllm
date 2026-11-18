@@ -645,7 +645,6 @@ def test_npu_decode_uses_mega_fusion_boundary(monkeypatch: pytest.MonkeyPatch) -
     calls.attach_mock(rms, "rms")
     monkeypatch.setattr(kernels, "mega_gdn_decode", mega, raising=False)
     monkeypatch.setattr(kernels, "causal_conv1d_decode", MagicMock(), raising=False)
-    monkeypatch.setattr(kernels, "fused_sigmoid_gating_delta_rule_decode", MagicMock(), raising=False)
     monkeypatch.setattr(kernels, "rms_norm_gated", rms, raising=False)
 
     cfg = _linear_config(
@@ -727,7 +726,6 @@ def test_npu_decode_uses_mega_fusion_boundary(monkeypatch: pytest.MonkeyPatch) -
     qkvz_forward.assert_called_once()
     ba_forward.assert_called_once()
     kernels.causal_conv1d_decode.assert_not_called()
-    kernels.fused_sigmoid_gating_delta_rule_decode.assert_not_called()
     rms.assert_not_called()
 
 

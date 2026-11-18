@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from xllm_kernel.ops import get_fused_attention, reshape_paged_cache
+from xllm_kernel.ops import get_fused_attention
 
 _MIN_PAD_HEAD_DIM = 64
 _MAX_PAD_HEAD_DIM = 128
@@ -96,7 +96,6 @@ def vision_fusion_attention(
 
 
 __all__ = [
-    "reshape_paged_cache",
     "update_decode_graph_metadata",
     "vision_fusion_attention",
 ]

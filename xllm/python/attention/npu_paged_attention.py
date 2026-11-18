@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
-from xllm_kernel.ops import get_fused_attention
+from xllm_kernel.ops import get_fused_attention, reshape_paged_cache
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.backend import (
@@ -236,7 +236,7 @@ def write_mla_paged_cache(
     else:
         k_pe_3d = k_latent_3d
         rope_cache = nope_cache
-    kernels.reshape_paged_cache(
+    reshape_paged_cache(
         slot_mapping,
         k_latent_3d,
         k_pe_3d,
@@ -1102,7 +1102,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         block_window = layer.fia_sparse_mode == _SPARSE_MODE_NONE and layer.sliding_window > 0
         if block_window and metadata.block_table is None:
             raise ValueError("windowed block drafts require a paged KV block table")
-        kernels.reshape_paged_cache(self._full_slot_mapping(metadata), k_3d, v_3d, k_cache, v_cache)
+        reshape_paged_cache(self._full_slot_mapping(metadata), k_3d, v_3d, k_cache, v_cache)
 
         prepared = getattr(metadata, "prepared_attention_state", None)
         if (
@@ -1173,7 +1173,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 raise RuntimeError("CP prefill does not support SFA C8 packed KV cache")
             if metadata.slot_mapping is None:
                 raise RuntimeError("CP prefill requires a global MLA slot mapping")
-            kernels.reshape_paged_cache(
+            reshape_paged_cache(
                 metadata.slot_mapping,
                 k_latent_3d,
                 k_latent_3d,
@@ -1296,7 +1296,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         global_rope = cp_gather_kv(k_pe_3d, cp_context).contiguous()
         cache_slots = metadata.local_slot_mapping if metadata.has_kv_shard else metadata.slot_mapping
         assert cache_slots is not None
-        kernels.reshape_paged_cache(
+        reshape_paged_cache(
             cache_slots,
             global_latent,
             global_rope,
@@ -2235,7 +2235,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         kv_global_v = cp_gather_kv(v_3d, cp_context)
 
         # Persist the full global-order KV into this rank's paged cache.
-        kernels.reshape_paged_cache(
+        reshape_paged_cache(
             self._full_slot_mapping(metadata),
             kv_global_k.contiguous(),
             kv_global_v.contiguous(),
