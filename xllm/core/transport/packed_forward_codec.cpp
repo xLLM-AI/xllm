@@ -3371,9 +3371,7 @@ bool PackedForwardCodec::input_read(DiTForwardInput& input) {
   if (payload_size > static_cast<uint64_t>(size() - kPrefixSize)) {
     return false;
   }
-  CHECK(deserialize_dit_input_payload(cursor, payload_size, input))
-      << "Invalid native DiT input domain, schema, or layout";
-  return true;
+  return deserialize_dit_input_payload(cursor, payload_size, input);
 }
 
 template <typename Input>
@@ -3413,9 +3411,10 @@ bool PackedForwardCodec::read_token_input(
     return false;
   }
   RawInputLayoutHeader layout;
-  CHECK(read_input_layout(
-      data_ptr, total_size, packed_input_domain<Input>(), layout))
-      << "Invalid token input domain, schema, or layout";
+  if (!read_input_layout(
+          data_ptr, total_size, packed_input_domain<Input>(), layout)) {
+    return false;
+  }
   bool materialize_device_buffer = false;
 #if defined(USE_NPU)
   materialize_device_buffer =

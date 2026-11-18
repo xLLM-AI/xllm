@@ -37,7 +37,7 @@ class PackedForwardCodec final {
   explicit PackedForwardCodec(void* data,
                               int64_t capacity,
                               Stream* stream = nullptr)
-      : data_(data), capacity_(capacity), stream_(stream) {}
+      : data_(data), capacity_(capacity < 0 ? 0 : capacity), stream_(stream) {}
 
   static bool can_write_input(const LlmForwardInput& input, size_t capacity);
   static bool can_write_input(const VlmForwardInput& input, size_t capacity);

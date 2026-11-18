@@ -124,6 +124,32 @@ TEST(TransportCodecTest, RejectsTruncatedPackedInputBuffers) {
   EXPECT_FALSE(codec.input_read(dit));
 }
 
+TEST(TransportCodecTest, RejectsStructurallyTruncatedPackedInputs) {
+  std::vector<char> bytes(sizeof(uint64_t) + 1);
+  const uint64_t payload_size = 1;
+  std::memcpy(bytes.data(), &payload_size, sizeof(payload_size));
+  PackedForwardCodec codec(bytes.data(), bytes.size());
+  LlmForwardInput llm;
+  VlmForwardInput vlm;
+  DiTForwardInput dit;
+  EXPECT_FALSE(codec.input_read(
+      llm,
+      torch::Device(torch::kCPU),
+      InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  EXPECT_FALSE(codec.input_read(
+      vlm,
+      torch::Device(torch::kCPU),
+      InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  EXPECT_FALSE(codec.input_read(dit));
+}
+
+TEST(TransportCodecTest, RejectsEncodingIntoNegativeCapacity) {
+  PackedForwardCodec codec(nullptr, -1);
+  EXPECT_FALSE(codec.input_write(LlmForwardInput{}));
+  EXPECT_FALSE(codec.input_write(VlmForwardInput{}));
+  EXPECT_FALSE(codec.input_write(DiTForwardInput{}));
+}
+
 TEST(TransportCodecTest, PackedBufferMatchesRpcPayloadWithoutShmControl) {
   LlmForwardInput input;
   input.token_ids = torch::arange(32, torch::kInt32);
