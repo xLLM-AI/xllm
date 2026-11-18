@@ -40,7 +40,12 @@ def configure_npu_runtime(binary_path: str) -> Path | None:
     Return the validated API library for callers loading an extension in the
     current process; changing LD_LIBRARY_PATH only affects future processes.
     """
-    opp_root = Path(binary_path).resolve().parent / "opp"
+    binary = Path(binary_path)
+    kernel_vendor = binary.absolute().parent.parent / "xllm_kernel/ascendc_opp/xllm_kernel"
+    if kernel_vendor.is_dir():
+        _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", kernel_vendor)
+
+    opp_root = binary.resolve().parent / "opp"
     if not os.path.lexists(opp_root):
         return
 

@@ -11,11 +11,12 @@ from xllm_kernel.ops.attention.gdn import (
 from xllm_kernel.ops.attention.kda import causal_conv1d_update_v2
 from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out
 from xllm_kernel.ops.kv_cache import reshape_paged_cache
-from xllm_kernel.ops.normalization import fused_add_rms_norm, l2_norm, layer_norm, rms_norm
+from xllm_kernel.ops.normalization import fused_add_gemma_rms_norm, fused_add_rms_norm, l2_norm, layer_norm, rms_norm
 from xllm_kernel.ops.positional_encoding import partial_rotary_embedding
 
 __all__ = [
     "causal_conv1d_update_v2",
+    "fused_add_gemma_rms_norm",
     "fused_add_rms_norm",
     "fused_qkvzba_split_reshape_cat",
     "fused_recurrent_gated_delta_rule",

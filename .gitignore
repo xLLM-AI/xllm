@@ -60,3 +60,6 @@ compile_commands.json
 /local
 /logs
 /log
+
+# Generated CANN operator package for in-place builds.
+/xllm-kernel/python/xllm_kernel/ascendc_opp/

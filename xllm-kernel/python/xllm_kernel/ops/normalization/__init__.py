@@ -13,6 +13,9 @@ from xllm_kernel.platform import PlatformEnum
 from xllm_kernel.registry import OpContract, PreparedKernel
 
 FUSED_ADD_RMS_NORM_CONTRACT = OpContract("fused_add_rms_norm", 1, (), False, "fp32_residual_norm_cast")
+FUSED_ADD_GEMMA_RMS_NORM_CONTRACT = OpContract(
+    "fused_add_gemma_rms_norm", 1, (), False, "fp32_residual_gemma_norm_cast"
+)
 LAYER_NORM_CONTRACT = OpContract("layer_norm", 1, (), False, "fp32_norm_cast")
 RMS_NORM_CONTRACT = OpContract("rms_norm", 1, (), False, "fp32_norm_cast")
 L2_NORM_CONTRACT = OpContract("l2_norm", 1, (), False, "fp32_sum_squares_eps_rsqrt_cast")
@@ -63,7 +66,25 @@ RMS_NORM_OPERATION = Operation(
     ),
 )
 
-OPERATIONS = (FUSED_ADD_RMS_NORM_OPERATION, LAYER_NORM_OPERATION, RMS_NORM_OPERATION, L2_NORM_OPERATION)
+FUSED_ADD_GEMMA_RMS_NORM_OPERATION = Operation(
+    FUSED_ADD_GEMMA_RMS_NORM_CONTRACT,
+    (
+        BackendModule(
+            module="xllm_kernel.ops.normalization.ascendc",
+            platform=PlatformEnum.NPU,
+            requires=("torch_npu",),
+            implementations=("npu.ascendc.fused_add_gemma_rms_norm",),
+        ),
+    ),
+)
+
+OPERATIONS = (
+    FUSED_ADD_RMS_NORM_OPERATION,
+    FUSED_ADD_GEMMA_RMS_NORM_OPERATION,
+    LAYER_NORM_OPERATION,
+    RMS_NORM_OPERATION,
+    L2_NORM_OPERATION,
+)
 
 
 def l2_norm(input: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -87,6 +108,17 @@ def fused_add_rms_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Execute the startup binding without selection or retry."""
     return FUSED_ADD_RMS_NORM_OPERATION.get_prepared().function(value, residual, weight, eps)
+
+
+def fused_add_gemma_rms_norm(
+    value: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return Gemma RMSNorm of the residual sum and the sum in fresh tensors.
+
+    The kernel uses an effective weight of 1 + weight. Inputs share a dtype
+    (FP16, BF16 or FP32). Weight describes the normalized trailing dimensions.
+    """
+    return FUSED_ADD_GEMMA_RMS_NORM_OPERATION.get_prepared().function(value, residual, weight, eps)
 
 
 def layer_norm(value: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float) -> torch.Tensor:

@@ -14,6 +14,7 @@ def _prepare_kernels() -> None:
         device="npu",
         operations=(
             "l2_norm",
+            "fused_add_gemma_rms_norm",
             "fused_recurrent_gated_delta_rule",
             "fused_sigmoid_gating_delta_rule_update",
             "fused_qkvzba_split_reshape_cat",

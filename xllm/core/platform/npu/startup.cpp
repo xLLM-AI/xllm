@@ -114,14 +114,23 @@ bool configure_bundled_npu_ops() {
   }
   namespace fs = std::filesystem;
   const fs::path bundle = host.parent_path() / "opp/vendors/custom_xllm_math";
-  if (!fs::exists(bundle)) {
+  const bool has_bundle = fs::exists(bundle);
+  const bool is_python = ModelConfig::is_python_model_impl(
+      ModelConfig::get_instance().model_impl());
+  // CANN discovers operator packages during initialization, before Python model
+  // startup.
+  const fs::path kernel_vendor =
+      host.parent_path().parent_path() / "xllm_kernel/ascendc_opp/xllm_kernel";
+  const bool has_kernel_vendor = is_python && fs::is_directory(kernel_vendor);
+  if (!has_bundle && !has_kernel_vendor) {
     return true;
   }
-  if (!fs::is_regular_file(bundle / "op_api/lib/libcust_opapi.so") ||
-      !fs::is_directory(bundle / "op_impl") ||
-      fs::is_empty(bundle / "op_impl") ||
-      !fs::is_directory(bundle / "op_proto") ||
-      fs::is_empty(bundle / "op_proto")) {
+  if (has_bundle &&
+      (!fs::is_regular_file(bundle / "op_api/lib/libcust_opapi.so") ||
+       !fs::is_directory(bundle / "op_impl") ||
+       fs::is_empty(bundle / "op_impl") ||
+       !fs::is_directory(bundle / "op_proto") ||
+       fs::is_empty(bundle / "op_proto"))) {
     LOG(ERROR) << "incomplete bundled NPU ops under " << bundle
                << "; reinstall the xllm wheel";
     return false;
@@ -131,13 +140,18 @@ bool configure_bundled_npu_ops() {
   if (custom != nullptr) {
     existing = absl::StrSplit(custom, ':', absl::SkipEmpty());
   }
+  if (has_kernel_vendor &&
+      std::find(existing.begin(), existing.end(), kernel_vendor.string()) ==
+          existing.end()) {
+    existing.push_back(kernel_vendor.string());
+  }
   const char* opp = std::getenv("ASCEND_OPP_PATH");
   const fs::path system_vendors =
       opp == nullptr || *opp == '\0' ? fs::path{} : fs::path(opp) / "vendors";
-  const bool is_python = ModelConfig::is_python_model_impl(
-      ModelConfig::get_instance().model_impl());
   const std::string paths = absl::StrJoin(
-      bundled_npu_vendor_paths(bundle, system_vendors, existing, is_python),
+      has_bundle ? bundled_npu_vendor_paths(
+                       bundle, system_vendors, existing, is_python)
+                 : existing,
       ":");
   if (::setenv("ASCEND_CUSTOM_OPP_PATH", paths.c_str(), /*overwrite=*/1) != 0) {
     LOG(ERROR) << "cannot register bundled NPU ops: " << std::strerror(errno);
