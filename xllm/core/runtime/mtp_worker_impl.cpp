@@ -492,6 +492,7 @@ bool MTPWorkerImpl<TargetInput>::should_use_explicit_spec_verify_replay_update(
   if (!::xllm::ExecutionConfig::get_instance().enable_graph() ||
       !::xllm::ExecutionConfig::get_instance()
            .enable_graph_mode_decode_no_padding() ||
+      ModelConfig::is_python_model_impl(context_.get_model_impl()) ||
       !supports_expanded_spec_verify() || options_.block_size() <= 0 ||
       !has_speculative_verify_block_table_layout(
           block_tables, input.input_params.multi_block_tables, num_sequences)) {
