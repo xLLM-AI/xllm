@@ -74,6 +74,7 @@ def initialize_runtime() -> None:
                 "causal_conv1d_update_v2",
                 "partial_rotary_embedding",
                 "reshape_paged_cache",
+                "fused_attention",
             ),
         )
         for operation, kernel in prepared.items():

@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -38,7 +39,7 @@ class BlockDeviceImports(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockDeviceImports())
 from xllm_kernel.catalog import load_operations
 from xllm_kernel.ops import fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat
-from xllm_kernel.ops import partial_rotary_embedding, reshape_paged_cache
+from xllm_kernel.ops import get_fused_attention, partial_rotary_embedding, reshape_paged_cache
 from xllm_kernel.ops.attention.gdn import OPERATIONS as GDN_OPERATIONS
 from xllm_kernel.ops.attention.kda import OPERATIONS as KDA_OPERATIONS, causal_conv1d_update_v2
 from xllm_kernel.ops.gemm import OPERATIONS as GEMM_OPERATIONS, matmul_ein_sum, matmul_ein_sum_out
@@ -57,6 +58,10 @@ for operation in GEMM_OPERATIONS:
 assert callable(matmul_ein_sum) and callable(matmul_ein_sum_out)
 assert callable(causal_conv1d_update_v2)
 assert callable(reshape_paged_cache) and callable(partial_rotary_embedding)
+fia = catalog["fused_attention"]
+assert callable(get_fused_attention)
+assert fia.contract.mutates == ("workspace", "out") and fia.contract.aliases_inputs
+assert fia.prepared is None
 cache = catalog["reshape_paged_cache"].contract
 assert cache.mutates == ("key_cache", "value_cache") and cache.aliases_inputs
 rope = catalog["partial_rotary_embedding"].contract
@@ -95,6 +100,65 @@ def test_cache_backend_follows_ascend_generation(
         plan = registry.prepare(RESHAPE_PAGED_CACHE_CONTRACT, device="npu", execution_mode="aclgraph")
         assert plan.spec.solution == solution
         assert plan.function is (a5 if generation == "a5" else atb)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.parametrize("has_split_rope", [False, True])
+def test_fused_attention_prepares_optional_split_rope_and_preserves_graph_buffers(
+    monkeypatch: pytest.MonkeyPatch, has_split_rope: bool
+) -> None:
+    from xllm_kernel.ops import get_fused_attention
+    from xllm_kernel.ops.attention.fia import FUSED_ATTENTION_OPERATION
+
+    module_name = "xllm_kernel.ops.attention.fia.npu"
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: PlatformEnum.NPU))
+    registry = KernelRegistry()
+    monkeypatch.setattr(KernelRegistry, "_instance", registry)
+    v1, v2 = SimpleNamespace(default=Mock(), out=Mock()), SimpleNamespace(default=Mock(), out=Mock())
+    workspace_v1, workspace_v2 = Mock(), Mock()
+    npu = SimpleNamespace(npu_fused_infer_attention_score=v1)
+    vendor = SimpleNamespace(_npu_fused_infer_attention_score_get_max_workspace=workspace_v1)
+    if has_split_rope:
+        npu.npu_fused_infer_attention_score_v2 = v2
+        vendor._npu_fused_infer_attention_score_v2_get_max_workspace = workspace_v2
+    monkeypatch.setattr(torch.ops, "npu", npu)
+    monkeypatch.setitem(sys.modules, "torch_npu", vendor)
+    try:
+        importlib.import_module(module_name)
+        registry.freeze()
+        plan = registry.prepare(FUSED_ATTENTION_OPERATION.contract, device="npu", execution_mode="aclgraph")
+        monkeypatch.setattr(FUSED_ATTENTION_OPERATION, "prepared", plan)
+        fia = get_fused_attention()
+        assert fia.run is v1.default and fia.out is v1.out and fia.workspace is workspace_v1
+        if not has_split_rope:
+            assert fia.with_separate_rope is None
+            return
+
+        query = torch.empty(2, 1, 8)
+        lengths = [1, 3]
+        out = [torch.empty_like(query), torch.empty(0)]
+        workspace = torch.empty(16)
+        split_rope = fia.with_separate_rope
+        assert split_rope is not None
+        split_rope.out(
+            query,
+            query,
+            query,
+            actual_seq_lengths_kv=lengths,
+            num_heads=1,
+            scale=0.25,
+            softmax_lse_flag=False,
+            workspace=workspace,
+            out=out,
+        )
+        kwargs = v2.out.call_args.kwargs
+        assert kwargs["actual_seq_kvlen"] is lengths
+        assert kwargs["workspace"] is workspace and kwargs["out"] is out
+        assert kwargs["num_query_heads"] == 1 and kwargs["softmax_scale"] == 0.25
+        assert kwargs["return_softmax_lse"] is False
+        v1.out.assert_not_called()
     finally:
         sys.modules.pop(module_name, None)
 

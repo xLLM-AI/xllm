@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from xllm_kernel.ops import reshape_paged_cache
+from xllm_kernel.ops import get_fused_attention, reshape_paged_cache
 
 _MIN_PAD_HEAD_DIM = 64
 _MAX_PAD_HEAD_DIM = 128
@@ -64,7 +64,7 @@ def vision_fusion_attention(
         head_dim = q.shape[-1]
         if _MIN_PAD_HEAD_DIM < head_dim < _MAX_PAD_HEAD_DIM:
             q, k, v = (F.pad(tensor, (0, _MAX_PAD_HEAD_DIM - head_dim)) for tensor in (q, k, v))
-        output, _ = torch_npu.npu_fused_infer_attention_score(
+        output, _ = get_fused_attention()(
             query=q.contiguous(),
             key=k.contiguous(),
             value=v.contiguous(),

@@ -14,6 +14,8 @@
 
 """Tests for the NPU paged-attention backend."""
 
+from dataclasses import replace
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -148,7 +150,7 @@ def test_prefill_allocates_mask_only_for_consumer(masked: bool, monkeypatch: pyt
         masks.append(kwargs["atten_mask"])
         return q, None
 
-    monkeypatch.setattr(torch.ops.npu, "npu_fused_infer_attention_score", attention, raising=False)
+    monkeypatch.setattr(backend, "_fused_attention", replace(backend._fused_attention, run=attention))
     q = torch.zeros(2, 8, 64)
     kv = torch.zeros(2, 2, 64)
     cache = backend._kv_caches[0].key
@@ -514,7 +516,7 @@ def test_prepared_device_decode_masks_newly_rejected_tail(monkeypatch: pytest.Mo
         assert kwargs["actual_seq_lengths"] == [1, 1]
         return query, None
 
-    monkeypatch.setattr(torch.ops.npu, "npu_fused_infer_attention_score", attention, raising=False)
+    monkeypatch.setattr(backend, "_fused_attention", replace(backend._fused_attention, run=attention))
     cache = backend._kv_caches[0].key
     query = torch.zeros(2, 8, 64)
     backend._decode(query, cache, cache, metadata, 2)
@@ -545,7 +547,7 @@ def test_verify_routes_only_prepared_device_lengths_to_single_query_decode(prepa
     backend.prepare(metadata)
     query = torch.zeros(2, 8 * 64)
     key = value = torch.zeros(2, 2 * 64)
-    layer = SimpleNamespace(layer_id=0, causal=True)
+    layer = SimpleNamespace(layer_id=0, causal=True, fia_sparse_mode=None, sliding_window=0)
     context = ForwardContext(backend, torch.device("cpu"), metadata, backend._kv_caches)
     with (
         forward_context(context),
@@ -578,46 +580,32 @@ def test_prepared_block_query_uses_cumulative_query_ends() -> None:
     assert prepared.actual_seq_q == [4, 8]
 
 
-@pytest.mark.parametrize("use_fia_v2", [False, True])
 @pytest.mark.parametrize(
     ("query_ends", "batch_size", "query_tokens"),
     [([7], 1, 7), ([4, 8], 2, 8), ([1, 2], 2, 2), ([], 2, 2)],
 )
 def test_graph_workspace_uses_packed_query_token_count(
-    use_fia_v2: bool,
     query_ends: list[int],
     batch_size: int,
     query_tokens: int,
 ) -> None:
     backend = _ordinary_backend()
-    backend._use_fia_v2 = use_fia_v2
     backend._actual_seq_q = list(query_ends)
     backend._actual_seq_kv = [6] * batch_size
     block_table = torch.zeros(batch_size, 2, dtype=torch.int32)
     kv_capacity = [256] * batch_size
     workspace = torch.empty(1, dtype=torch.uint8)
-    helper_name = (
-        "_npu_fused_infer_attention_score_v2_get_max_workspace"
-        if use_fia_v2
-        else "_npu_fused_infer_attention_score_get_max_workspace"
-    )
-
-    with patch(
-        f"xllm.python.attention.npu_paged_attention.torch_npu.{helper_name}",
-        return_value=workspace,
-        create=True,
-    ) as allocate:
+    with patch.object(backend, "_paged_fia") as fia:
+        fia.workspace.return_value = workspace
         result = backend._allocate_graph_workspace(batch_size, block_table, actual_seq_kv=kv_capacity)
 
     assert result is workspace
-    allocate.assert_called_once()
-    kwargs = allocate.call_args.kwargs
+    fia.workspace.assert_called_once()
+    kwargs = fia.workspace.call_args.kwargs
     assert kwargs["query"].shape == (query_tokens, backend.num_heads, backend.head_dim)
     assert kwargs["block_table"] is block_table
-    query_lengths_key = "actual_seq_qlen" if use_fia_v2 else "actual_seq_lengths"
-    kv_lengths_key = "actual_seq_kvlen" if use_fia_v2 else "actual_seq_lengths_kv"
-    assert kwargs[query_lengths_key] == query_ends
-    assert kwargs[kv_lengths_key] == kv_capacity
+    assert kwargs["actual_seq_lengths"] == query_ends
+    assert kwargs["actual_seq_lengths_kv"] == kv_capacity
 
 
 @pytest.mark.parametrize("invalid", ["dtype", "query", "kv", "verify", "shard", "expanded"])
@@ -676,7 +664,6 @@ def test_mla_block_mask_tracks_device_lengths_and_keeps_noncausal_queries(
 ) -> None:
     backend = _mla_backend()
     backend._mla_block_draft = True
-    backend._use_fia_v2 = True
     backend._mla_actual_seq_q_host = [3]
     backend._mla_actual_seq_kv = torch.tensor([5], dtype=torch.int32)
     query = torch.zeros(3, 2, 4)
@@ -690,7 +677,7 @@ def test_mla_block_mask_tracks_device_lengths_and_keeps_noncausal_queries(
         calls.append(kwargs)
         return query, torch.empty(0)
 
-    monkeypatch.setattr(torch.ops.npu, "npu_fused_infer_attention_score_v2", fia)
+    monkeypatch.setattr(backend, "_fia_with_rope", fia)
     layer = SimpleNamespace(num_heads=2, scale=0.5)
     backend._mla_block_fia_v2(query, query_rope, cache, rope_cache, table, layer)
     mask = calls[-1]["atten_mask"]
@@ -698,7 +685,7 @@ def test_mla_block_mask_tracks_device_lengths_and_keeps_noncausal_queries(
     assert not mask[..., :5].any()
     assert mask[..., 5:].all()
     assert calls[-1]["sparse_mode"] == 0
-    assert calls[-1]["actual_seq_kvlen"] == [8]
+    assert calls[-1]["actual_seq_lengths_kv"] == [8]
     # Every query can see the complete draft block, not only its causal prefix.
     assert torch.equal(mask[0, 0, 0], mask[0, 0, 2])
     backend._mla_actual_seq_kv.fill_(3)
@@ -929,6 +916,86 @@ def test_prepared_decode_uses_warmed_graph_state(is_mla: bool) -> None:
         assert backend._actual_seq_lens is None
 
 
+def test_dense_mla_task_updates_use_the_captured_entry_lengths() -> None:
+    from xllm_kernel.ops.attention.fia import FusedAttention
+
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _mla_backend()
+    calls = []
+    workspaces = []
+
+    def allocate_workspace(*args: object, **options: object) -> torch.Tensor:
+        workspace = torch.empty(1)
+        workspaces.append(workspace)
+        return workspace
+
+    def run_out(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, **options: object) -> None:
+        calls.append(
+            (
+                list(options["actual_seq_lengths_kv"]),
+                options["block_table"],
+                options["workspace"],
+                options["out"][0],
+            )
+        )
+
+    def eager(*args: object, **options: object) -> tuple[torch.Tensor, torch.Tensor]:
+        raise AssertionError("graph warmup must exercise the prepared out variant")
+
+    backend._fia_with_rope = FusedAttention(eager, run_out, allocate_workspace)
+    contexts = []
+    updates = []
+    outputs = []
+    query = torch.zeros(2, 2, 512)
+    rope = torch.zeros(2, 2, 64)
+    cache = torch.zeros(4, 128, 1, 512)
+    rope_cache = torch.zeros(4, 128, 1, 64)
+
+    def capture_task(function: object, *args: object, **options: object) -> None:
+        update = partial(function, *args, **options)
+        update()
+        updates.append(update)
+
+    for step, lengths in enumerate(([12, 3], [56, 42])):
+        metadata = _mla_metadata()
+        metadata.block_table = metadata.block_table.flip(0).clone() if step else metadata.block_table.clone()
+        metadata.kv_seq_lens_host_values = list(lengths)
+        metadata.kv_seq_lens.copy_(torch.tensor(lengths))
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata)
+        context = ForwardContext(backend, torch.device("cpu"), metadata, [], execution_state=AclGraphExecutionState({}))
+        contexts.append(context)
+        with forward_context(context):
+            backend.prepare(metadata, graph_mode=True)
+            warm_output = backend._mla_dense_fia_v2(query, rope, cache, rope_cache, backend._block_table_i32, 0)
+        with forward_context(replace(context, acl_graph=SimpleNamespace(capture_task=capture_task))):
+            output = backend._mla_dense_fia_v2(query, rope, cache, rope_cache, backend._block_table_i32, 0)
+        assert output is warm_output
+        outputs.append(output)
+
+    assert len(workspaces) == 2
+    calls.clear()
+    for index, lengths in ((0, [15, 4]), (1, [62, 43]), (0, [17, 6])):
+        context = contexts[index]
+        metadata = context.metadata
+        metadata.kv_seq_lens_host_values = list(lengths)
+        metadata.kv_seq_lens.copy_(torch.tensor(lengths))
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata)
+        with forward_context(context):
+            backend.prepare_graph_replay(metadata)
+        # Run outside the active context, as the update stream does.
+        updates[1 - index]()
+        updates[index]()
+        assert calls[-1] == (lengths, metadata.block_table, workspaces[index], outputs[index])
+        other = contexts[1 - index]
+        assert calls[-2] == (
+            other.metadata.kv_seq_lens_host_values,
+            other.metadata.block_table,
+            workspaces[1 - index],
+            outputs[1 - index],
+        )
+
+
 def test_prepared_decode_updates_captured_lists_without_mutating_snapshots() -> None:
     from xllm.python.model_executor.forward_context import AclGraphExecutionState
 
@@ -1151,7 +1218,7 @@ def test_block_attention_shares_masks_per_forward_and_refreshes_device_lengths(m
         calls.append(kwargs)
         return query.clone(), torch.empty(0)
 
-    monkeypatch.setattr(torch.ops.npu, "npu_fused_infer_attention_score", attention)
+    monkeypatch.setattr(backend, "_fused_attention", replace(backend._fused_attention, run=attention))
     full = SimpleNamespace(causal=False, fia_sparse_mode=None, sliding_window=0)
     window = SimpleNamespace(causal=False, fia_sparse_mode=4, sliding_window=3)
     metadata.kv_seq_lens.copy_(torch.tensor([5, 3], dtype=torch.int32))
@@ -1251,7 +1318,7 @@ def test_windowed_draft_uses_explicit_mask_in_eager_and_prepared_paths(
         calls.append(kwargs)
         return query.clone(), torch.empty(0)
 
-    monkeypatch.setattr(torch.ops.npu, "npu_fused_infer_attention_score", _attention)
+    monkeypatch.setattr(backend, "_fused_attention", replace(backend._fused_attention, run=_attention))
     query = torch.zeros(4, 8, 64)
     cache = torch.zeros(4, 128, 2, 64)
     layer = SimpleNamespace(

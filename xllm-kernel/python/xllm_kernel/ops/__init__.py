@@ -2,6 +2,7 @@
 """SDK-free public operator APIs."""
 
 from xllm_kernel.ops.activation import silu_and_mul
+from xllm_kernel.ops.attention.fia import get_fused_attention
 from xllm_kernel.ops.attention.gdn import (
     fused_qkvzba_split_reshape_cat,
     fused_recurrent_gated_delta_rule,
@@ -19,6 +20,7 @@ __all__ = [
     "fused_qkvzba_split_reshape_cat",
     "fused_recurrent_gated_delta_rule",
     "fused_sigmoid_gating_delta_rule_update",
+    "get_fused_attention",
     "l2_norm",
     "layer_norm",
     "rms_norm",

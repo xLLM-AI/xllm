@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-import torch_npu
+from xllm_kernel.ops import get_fused_attention
 
 from xllm.python.attention.backend import AttentionMetadata, LayerCache
 from xllm.python.attention.dense_dcp_metadata import DenseDcpMetadata
@@ -54,6 +54,7 @@ class DenseDcpFia:
         self._head_dim = head_dim
         self._scale = scale
         self._dtype = dtype
+        self._fia = get_fused_attention()
         self._cache: LayerCache | None = None
         self._buffers: _FiaBuffers | None = None
 
@@ -96,7 +97,7 @@ class DenseDcpFia:
         # and actual caches instead of allocating dummy Q/KV on every prepare.
         workspace = get_execution_workspace(
             ("DENSE_DCP_FIA_WORKSPACE", *key),
-            lambda: torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+            lambda: self._fia.workspace(
                 output,
                 key_cache.view(key_cache.shape[0], block_size, -1),
                 value_cache.view(value_cache.shape[0], block_size, -1),
@@ -132,16 +133,14 @@ class DenseDcpFia:
         if graph_context is None:
             if metadata.block_table is None:
                 raise RuntimeError("Dense DCP cached FIA requires a block table")
-            return torch.ops.npu.npu_fused_infer_attention_score(
-                query, key, value, **self._kwargs(metadata, metadata.block_table, block_size)
-            )
+            return self._fia(query, key, value, **self._kwargs(metadata, metadata.block_table, block_size))
 
         buffers = self._buffers
         if buffers is None or buffers.block_table is not metadata.block_table:
             raise RuntimeError("Dense DCP graph FIA resources are not prepared for this entry")
 
         graph_context.capture_task(
-            torch.ops.npu.npu_fused_infer_attention_score.out,
+            self._fia.out,
             query,
             key,
             value,
