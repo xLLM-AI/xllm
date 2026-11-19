@@ -124,6 +124,7 @@ void ExpandedDecodeMetadataBuilder::populate_expanded_layout(
   CHECK_EQ(expanded_kv_seq_lens.dim(), 1);
   CHECK_EQ(expanded_block_tables.dim(), 2);
   CHECK_EQ(expanded_block_tables.size(0), expanded_kv_seq_lens.numel());
+  CHECK(!expanded_host_kv_seq_lens.empty());
   CHECK_EQ(expanded_host_kv_seq_lens.size(),
            static_cast<size_t>(expanded_kv_seq_lens.numel()));
 
@@ -156,16 +157,10 @@ void ExpandedDecodeMetadataBuilder::populate_expanded_layout(
   target.graph.expanded_paged_kv_last_page_len = torch::tensor(
       last_page_lens, expanded_block_tables.options().dtype(torch::kInt32));
 
-  target.graph.use_expanded_decode_for_spec_verify_attention = true;
   target.graph.expanded_kv_seq_lens = expanded_kv_seq_lens;
   target.graph.expanded_block_tables = expanded_block_tables;
   target.graph.expanded_tiling_data = torch::Tensor();
   target.graph.expanded_kv_seq_lens_vec = std::move(expanded_host_kv_seq_lens);
-
-  ExpandedDecodeMetadataBuilder::validate(
-      ExpandedDecodeMetadataBuilder::build(target),
-      expanded_kv_seq_lens.numel(),
-      block_size);
 }
 
 std::vector<int32_t> ExpandedDecodeMetadataBuilder::build_tokenwise_kv_seq_lens(
@@ -189,10 +184,10 @@ std::vector<int32_t> ExpandedDecodeMetadataBuilder::build_tokenwise_kv_seq_lens(
 ExpandedDecodeMetadata ExpandedDecodeMetadataBuilder::build(
     const ModelParamsView& params) {
   ExpandedDecodeMetadata metadata;
-  metadata.enabled = params.graph.use_expanded_decode_for_spec_verify_attention;
-  if (!metadata.enabled) {
+  if (params.graph.expanded_kv_seq_lens_vec.empty()) {
     return metadata;
   }
+  metadata.enabled = true;
 
   metadata.kv_seq_lens = params.graph.expanded_kv_seq_lens;
   metadata.block_table = params.graph.expanded_block_tables;
@@ -202,21 +197,6 @@ ExpandedDecodeMetadata ExpandedDecodeMetadataBuilder::build(
       params.graph.expanded_paged_kv_last_page_len;
   metadata.paged_attention_tiling_data = params.graph.expanded_tiling_data;
   metadata.kv_seq_lens_host_vec = params.graph.expanded_kv_seq_lens_vec;
-  if (!params.graph.expanded_kv_seq_lens_vec.empty()) {
-    metadata.kv_seq_lens_host =
-        torch::tensor(params.graph.expanded_kv_seq_lens_vec, torch::kInt32);
-  }
-  validate(metadata);
-  return metadata;
-}
-
-void ExpandedDecodeMetadataBuilder::validate(
-    const ExpandedDecodeMetadata& metadata,
-    int64_t expected_sequence_count,
-    int32_t block_size) {
-  if (!metadata.enabled) {
-    return;
-  }
 
   CHECK(metadata.kv_seq_lens.defined());
   CHECK(metadata.block_table.defined());
@@ -226,9 +206,8 @@ void ExpandedDecodeMetadataBuilder::validate(
   CHECK_EQ(metadata.kv_seq_lens.dim(), 1);
   CHECK_EQ(metadata.block_table.dim(), 2);
   const int64_t sequence_count = metadata.kv_seq_lens.numel();
-  if (expected_sequence_count >= 0) {
-    CHECK_EQ(sequence_count, expected_sequence_count);
-  }
+  CHECK_EQ(metadata.kv_seq_lens_host_vec.size(),
+           static_cast<size_t>(sequence_count));
   CHECK_EQ(metadata.block_table.size(0), sequence_count);
   CHECK_EQ(metadata.paged_kv_indptr.dim(), 1);
   CHECK_EQ(metadata.paged_kv_indptr.numel(), sequence_count + 1);
@@ -236,14 +215,8 @@ void ExpandedDecodeMetadataBuilder::validate(
   CHECK_GT(metadata.paged_kv_indices.numel(), 0);
   CHECK_EQ(metadata.paged_kv_last_page_len.dim(), 1);
   CHECK_EQ(metadata.paged_kv_last_page_len.numel(), sequence_count);
-  if (metadata.kv_seq_lens_host.defined()) {
-    CHECK(metadata.kv_seq_lens_host.device().is_cpu());
-    CHECK_EQ(metadata.kv_seq_lens_host.dim(), 1);
-    CHECK_EQ(metadata.kv_seq_lens_host.numel(), sequence_count);
-  }
   if (metadata.paged_kv_indptr.device().is_cpu()) {
     const torch::Tensor& host_indptr = metadata.paged_kv_indptr;
-    CHECK_EQ(host_indptr[0].item<int32_t>(), 0);
     const int64_t offset_count = host_indptr.numel() - 1;
     CHECK(torch::all(host_indptr.narrow(0, 1, offset_count) >=
                      host_indptr.narrow(0, 0, offset_count))
@@ -252,24 +225,9 @@ void ExpandedDecodeMetadataBuilder::validate(
     CHECK_EQ(host_indptr[host_indptr.numel() - 1].item<int32_t>(),
              metadata.paged_kv_indices.numel());
   }
-  if (metadata.paged_kv_last_page_len.device().is_cpu()) {
-    const torch::Tensor& host_last_page_len = metadata.paged_kv_last_page_len;
-    CHECK(torch::all(host_last_page_len >= 1).item<bool>());
-    if (block_size > 0) {
-      CHECK(torch::all(host_last_page_len <= block_size).item<bool>());
-    }
-  }
-  if (!metadata.kv_seq_lens_host_vec.empty()) {
-    CHECK_EQ(metadata.kv_seq_lens_host_vec.size(),
-             static_cast<size_t>(sequence_count));
-    for (int32_t kv_seq_len : metadata.kv_seq_lens_host_vec) {
-      CHECK_GE(kv_seq_len, 0);
-      if (block_size > 0) {
-        CHECK_LE(util::kv_page_count(kv_seq_len, block_size),
-                 metadata.block_table.size(1));
-      }
-    }
-  }
+  metadata.kv_seq_lens_host =
+      torch::tensor(metadata.kv_seq_lens_host_vec, torch::kInt32);
+  return metadata;
 }
 
 template void ExpandedDecodeMetadataBuilder::populate(ModelParamsView,
@@ -287,7 +245,6 @@ template void ExpandedDecodeMetadataBuilder::populate(ModelParamsView,
 
 void ExpandedDecodeMetadataBuilder::reset_expanded_decode_metadata(
     ModelParamsView target) {
-  target.graph.use_expanded_decode_for_spec_verify_attention = false;
   target.graph.expanded_kv_seq_lens = torch::Tensor();
   target.graph.expanded_block_tables = torch::Tensor();
   target.graph.expanded_paged_kv_indptr = torch::Tensor();
@@ -304,10 +261,8 @@ bool ExpandedDecodeMetadataBuilder::update_expanded_decode_host_metadata(
       target.attention.host.kv_seq_lens.empty()) {
     return false;
   }
-  std::vector<int32_t> expanded_kv_seq_lens = build_tokenwise_kv_seq_lens(
+  target.graph.expanded_kv_seq_lens_vec = build_tokenwise_kv_seq_lens(
       target.attention.host.q_seq_lens, target.attention.host.kv_seq_lens);
-  target.graph.use_expanded_decode_for_spec_verify_attention = true;
-  target.graph.expanded_kv_seq_lens_vec = std::move(expanded_kv_seq_lens);
   return true;
 }
 

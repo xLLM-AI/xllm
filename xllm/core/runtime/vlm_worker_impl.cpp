@@ -190,14 +190,12 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
   }
 
   if (options_.enable_speculative_decode()) {
-    const bool is_target_prefill =
-        !input.input_params.meta.batch_forward_type.is_decode() &&
-        !options_.is_draft_engine();
     output_spec_hidden_states(output.sample_output,
                               model_output,
                               lm_head_input_indices,
                               selected_hidden_from_lm_head,
-                              is_target_prefill,
+                              input.input_params.meta,
+                              options_.is_draft_engine(),
                               /*cp_enabled=*/options_.cp_size() > 1);
   }
 
@@ -207,7 +205,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
     return output;
   }
 
-  if (!can_skip_npu_graph_decode_sync(input.input_params)) {
+  if (!can_skip_npu_graph_decode_sync(input.input_params.meta)) {
     const int32_t ret = device_.synchronize_default_stream();
     CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
   }

@@ -368,8 +368,9 @@ void build_decode_metadata(Params& input_params,
                            DecodeBuildBuffers& buf,
                            const DecodeInputOptions& decode_options) {
   input_params.attention.host.q_cu_seq_lens =
-      decode_options.leading_zero_cu ? util::query_start_loc(buf.out_q_seq_lens)
-                                     : util::cu_num_tokens(buf.out_q_seq_lens);
+      decode_options.per_request || !decode_options.causal
+          ? util::query_start_loc(buf.out_q_seq_lens)
+          : util::cu_num_tokens(buf.out_q_seq_lens);
   input_params.attention.host.q_seq_lens = std::move(buf.out_q_seq_lens);
   update_kv_lengths_and_slots(input_params, buf);
   if (!buf.out_multi_block_tables.empty()) {
@@ -414,9 +415,8 @@ void build_decode_metadata(Params& input_params,
         static_cast<int32_t>(execution_batch.num_scheduled_tokens.size());
     fill_request_layout(execution_batch,
                         std::span<const int32_t>(buf.out_positions));
-    execution_batch.is_prefilling.assign(
-        execution_batch.num_reqs,
-        input_params.meta.batch_forward_type.no_decode());
+    execution_batch.is_prefilling.assign(execution_batch.num_reqs,
+                                         /*value=*/false);
   }
 }
 
@@ -454,9 +454,7 @@ void build_idle_decode_input(LlmForwardInput& input,
   input.positions_host = make_cpu_tensor(buf.out_positions);
   input.token_ids = input.token_ids_host;
   input.positions = input.positions_host;
-  DecodeExpansionOptions idle_options = decode_options;
-  idle_options.leading_zero_cu = true;
-  build_decode_metadata(input.input_params, buf, idle_options);
+  build_decode_metadata(input.input_params, buf, decode_options);
 }
 
 template <typename Input>

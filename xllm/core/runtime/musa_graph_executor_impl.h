@@ -201,15 +201,6 @@ class MusaGraphPersistentParam final {
 
  private:
   template <typename Params>
-  std::optional<Params> update_typed(const torch::Tensor& tokens,
-                                     const torch::Tensor& k_cache,
-                                     const torch::Tensor& v_cache,
-                                     const torch::Tensor& positions,
-                                     const Params& params,
-                                     uint32_t padded_num_tokens,
-                                     bool return_capture_params);
-
-  template <typename Params>
   bool can_use_llm_decode_fast_path(const torch::Tensor& tokens,
                                     const torch::Tensor& positions,
                                     const Params& params) const;
@@ -285,23 +276,6 @@ class MusaGraph final {
   }
 
  private:
-  template <typename Params, typename Model>
-  bool capture_typed(Model* model,
-                     const ModelArgs& args,
-                     const runtime::Options& options,
-                     const torch::Tensor& tokens,
-                     const torch::Tensor& positions,
-                     const Params& params,
-                     std::vector<KVCache>& kv_cache,
-                     uint32_t bucket_num_tokens,
-                     const c10::musa::MempoolId_t& pool,
-                     MusaMemPool* pool_ptr);
-  template <typename Params>
-  ModelOutput replay_typed(const torch::Tensor& tokens,
-                           const torch::Tensor& positions,
-                           std::vector<KVCache>& kv_cache,
-                           const Params& params);
-
   // Refresh the persistent host mirrors used by the Mate FFI batch_decode
   // run() call. Lazily allocates pinned CPU buffers sized to worst case (set
   // by MusaGraphPersistentParam at executor construction), then copies the
@@ -417,13 +391,6 @@ class MusaGraphExecutorImpl final : public ExecutorImpl {
   // not own
   CausalLM* model_;
 
-  template <typename Model, typename Params>
-  ModelOutput run_typed(Model* model,
-                        const torch::Tensor& tokens,
-                        const torch::Tensor& positions,
-                        std::vector<KVCache>& kv_caches,
-                        const Params& params);
-
   ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
@@ -441,18 +408,13 @@ class MusaGraphExecutorImpl final : public ExecutorImpl {
   // this assumption must be revisited.
   c10::musa::MempoolId_t graph_pool_;
 
-  // Get bucket num_tokens for given num_tokens.
-  // Decode: 1/2/4/8 then multiples of 16, or exact when no_padding is enabled.
-  uint32_t get_bucket_num_tokens(uint32_t num_tokens) const;
-
   ModelOutput attach_aux_hidden_states_if_needed(
       const torch::Tensor& hidden_states,
       uint32_t n_tokens) const;
 
-  template <typename Model, typename Params>
-  void prepare_graph_embedding(Model* model,
-                               const torch::Tensor& tokens,
-                               GraphExecutionInput<Params>& graph_input) const;
+  void prepare_graph_embedding(
+      const torch::Tensor& tokens,
+      GraphExecutionInput<ModelParamsView>& graph_input) const;
 
   // Get MUSA graph memory pool id for capture. When VMM is enabled, uses
   // per-shape MemPool under (physical_pool_id, shape_id). Same physical_pool_id

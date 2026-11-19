@@ -159,7 +159,9 @@ void materialize_linear_state_validity(
     const AttentionMetadataBuildOptions& build_options,
     AttentionMetadata& attn_metadata) {
   const bool needs_initial_states =
-      !attn_metadata.is_spec_verify &&
+      (build_options.is_draft_engine ||
+       !params.meta.batch_forward_type.is_decode() ||
+       params.meta.q_max_seq_len <= 1) &&
       (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill);
   if (!needs_initial_states) {
     return;
@@ -220,6 +222,15 @@ AttentionMetadata build_common_attention_metadata(
     const std::optional<torch::Tensor>& attn_mask,
     const AttentionMetadataBuildOptions& build_options) {
   AttentionMetadata attn_metadata;
+  const auto forward_type = params.meta.batch_forward_type;
+  const bool is_decode = forward_type.is_decode();
+  attn_metadata.num_speculative_tokens = params.meta.num_speculative_tokens;
+  attn_metadata.batch_forward_type = forward_type;
+  attn_metadata.is_prefill = forward_type.is_prefill();
+  attn_metadata.is_chunked_prefill =
+      forward_type.is_mixed() || forward_type.is_chunked_prefill() ||
+      (is_decode && build_options.chunked_block_diffusion.value_or(
+                        params.meta.q_max_seq_len > 1));
 #if defined(USE_MUSA)
   if (params.attn_metadata != nullptr) {
     attn_metadata.fa3_metadata = params.attn_metadata->fa3_metadata;
@@ -255,7 +266,6 @@ AttentionMetadata build_common_attention_metadata(
   attn_metadata.use_dense_flash_attention =
       params.graph.use_dense_flash_attention;
 #endif
-  attn_metadata.is_spec_verify = params.is_spec_verify;
 
   // for flashinfer
   attn_metadata.paged_kv_indptr = params.attention.device.paged_kv_indptr;
@@ -283,19 +293,8 @@ AttentionMetadata build_common_attention_metadata(
 #if defined(USE_NPU)
   attn_metadata.acl_graph_task_update_context =
       params.graph.acl_graph_task_update_context;
-  // Determine if we should use ACL graph mode:
-  // - --enable_graph=true
-  // - Must be decode phase or spec-verify chunked prefill
-  // - tiling_data must be available
-  bool is_decode = !params.meta.batch_forward_type.is_prefill() &&
-                   !params.meta.batch_forward_type.is_mixed() &&
-                   !params.meta.batch_forward_type.is_chunked_prefill();
-  bool is_spec_verify_chunked_prefill =
-      params.is_spec_verify &&
-      params.meta.batch_forward_type.is_chunked_prefill();
   bool use_acl_graph = ::xllm::ExecutionConfig::get_instance().enable_graph() &&
-                       params.enable_graph &&
-                       (is_decode || is_spec_verify_chunked_prefill) &&
+                       params.enable_graph && is_decode &&
                        params.graph.tiling_data.defined();
   if (use_acl_graph) {
     // ACL graph mode: use CustomPagedAttention with tiling_data on device
@@ -323,7 +322,11 @@ AttentionMetadata build_common_attention_metadata(
     attn_metadata.kv_cu_seq_lens_host_vec =
         util::cu_num_tokens<int64_t>(params.attention.host.kv_seq_lens);
   }
-  if (!is_decode) {
+  const bool needs_fia_mask =
+      (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) &&
+      params.graph.expanded_kv_seq_lens_vec.empty() &&
+      !(is_decode && build_options.is_draft_engine);
+  if (needs_fia_mask) {
     constexpr int64_t kFiaSplitFuseMaskSize = 2048;
     torch::Device mask_device = torch::kCPU;
     if (params.attention.device.q_seq_lens.defined()) {
@@ -341,11 +344,6 @@ AttentionMetadata build_common_attention_metadata(
             .contiguous();
   }
 #endif
-  attn_metadata.is_chunked_prefill =
-      params.meta.batch_forward_type.is_mixed() ||
-      params.meta.batch_forward_type.is_chunked_prefill();
-  attn_metadata.is_prefill = params.meta.batch_forward_type.is_prefill();
-  attn_metadata.is_mixed = params.meta.batch_forward_type.is_mixed();
   attn_metadata.prefill_without_cache = params.prefill_without_cache;
 
   // MLA-family MLU paths require per-sequence q/kv lengths during prefill.
@@ -451,26 +449,6 @@ AttentionMetadata build_common_attention_metadata(
 
 }  // namespace
 
-AttentionMetadata AttentionMetadataBuilder::build_mtp_sparse_decode(
-    const torch::Tensor& block_table,
-    const torch::Tensor& kv_seq_lens,
-    const torch::Tensor& slots,
-    int32_t block_size) {
-  CHECK_EQ(block_table.dim(), 2);
-  CHECK_EQ(kv_seq_lens.dim(), 1);
-  CHECK_EQ(slots.dim(), 1);
-  CHECK_EQ(block_table.size(0), kv_seq_lens.numel());
-  CHECK_EQ(slots.numel(), kv_seq_lens.numel());
-  CHECK_GT(block_size, 0);
-  AttentionMetadata metadata{};
-  metadata.block_table = block_table;
-  metadata.kv_seq_lens = kv_seq_lens;
-  metadata.slot_mapping = slots;
-  metadata.max_query_len = 1;
-  metadata.max_seq_len = block_table.size(1) * block_size;
-  return metadata;
-}
-
 AttentionMetadata AttentionMetadataBuilder::build(
     const ModelParamsView& params,
     bool enable_mla,
@@ -518,12 +496,13 @@ torch::Tensor AttentionMetadataBuilder::build_chunk_indices(
   return torch::stack({batch, local_chunks}, /*dim=*/1).to(torch::kInt32);
 }
 
-void AttentionMetadataBuilder::build_linear_prefill(
+bool AttentionMetadataBuilder::build_linear_prefill(
     AttentionMetadata& attn_metadata,
     int64_t block_size) {
-  if (attn_metadata.is_spec_verify ||
+  if ((attn_metadata.batch_forward_type.is_decode() &&
+       attn_metadata.max_query_len > 1) ||
       (!attn_metadata.is_prefill && !attn_metadata.is_chunked_prefill)) {
-    return;
+    return false;
   }
 
   constexpr int64_t kDefaultMaxNumPrograms = 1024;
@@ -545,6 +524,7 @@ void AttentionMetadataBuilder::build_linear_prefill(
   attn_metadata.batch = std::move(batch_ptr);
   attn_metadata.token_block_offset = std::move(token_block_offset_ptr);
   attn_metadata.tot = static_cast<int32_t>(schedule_size);
+  return true;
 }
 
 }  // namespace xllm::layer

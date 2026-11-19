@@ -176,8 +176,10 @@ void register_attention_metadata_views(py::module_& module) {
       .def_property_readonly("is_chunked_prefill",
                              &PyAttentionMetadataView::is_chunked_prefill)
       .def_property_readonly("is_mixed", &PyAttentionMetadataView::is_mixed)
-      .def_property_readonly("is_spec_verify",
-                             &PyAttentionMetadataView::is_spec_verify)
+      .def_property_readonly(/*name=*/"num_speculative_tokens",
+                             &PyAttentionMetadataView::num_speculative_tokens)
+      .def_property_readonly(/*name=*/"is_target_verify",
+                             &PyAttentionMetadataView::is_target_verify)
       .def_property_readonly("is_dummy", &PyAttentionMetadataView::is_dummy);
 }
 
@@ -230,12 +232,21 @@ const layer::ExpandedDecodeMetadata& PyExpandedDecodeMetadataView::metadata()
 PyAttentionMetadataView::PyAttentionMetadataView(
     std::shared_ptr<layer::AttentionMetadata> metadata,
     const ModelParamsView& params,
-    int32_t num_speculative_tokens)
+    bool is_draft_engine)
     : metadata_(std::move(metadata)),
       kv_seq_lens_host_(
           make_host_int32_view(metadata_, metadata_->kv_seq_lens_vec)),
       q_seq_lens_host_(
           make_host_int32_view(metadata_, metadata_->q_seq_lens_vec)) {
+  if (params.meta.batch_forward_type.is_decode() && !is_draft_engine) {
+    const auto& batch = params.meta.execution_batch;
+    const int32_t num_requests =
+        batch.num_reqs > 0 ? batch.num_reqs : params.meta.num_sequences;
+    is_target_verify_ =
+        num_requests > 0 && (metadata_->max_query_len > 1 ||
+                             (metadata_->slot_mapping.defined() &&
+                              metadata_->slot_mapping.numel() > num_requests));
+  }
   if (!params.multi_block_tables.empty()) {
     new_cache_slots_host_values_ = params.attention.host.new_cache_slots;
   }
@@ -249,7 +260,7 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   num_accepted_tokens_host_values_ = params.num_accepted_tokens_host;
   if (!params.embedding.linear_state_read_ids.empty() &&
       (metadata_->is_prefill || metadata_->is_chunked_prefill) &&
-      params.meta.batch_forward_type.no_decode() && !params.is_spec_verify) {
+      params.meta.batch_forward_type.no_decode()) {
     CHECK(linear_state_indices_.defined());
     CHECK_EQ(params.embedding.linear_state_read_ids.size(),
              params.embedding.linear_state_ids.size());
@@ -275,7 +286,7 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   std::replace(dp_execution_token_counts_.begin(),
                dp_execution_token_counts_.end(),
                /*old_value=*/0,
-               num_speculative_tokens + 1);
+               metadata_->num_speculative_tokens + 1);
   dp_is_decode_ = params.parallel.dp_is_decode;
   if (params.enable_graph && raw_dp_execution_token_counts_.empty()) {
     // Prepared ordinary decode has one token per actual sequence, before
@@ -537,7 +548,9 @@ bool PyAttentionMetadataView::is_chunked_prefill() const {
   return metadata_->is_chunked_prefill;
 }
 
-bool PyAttentionMetadataView::is_mixed() const { return metadata_->is_mixed; }
+bool PyAttentionMetadataView::is_mixed() const {
+  return metadata_->batch_forward_type.is_mixed();
+}
 
 py::object PyAttentionMetadataView::num_accepted_tokens() const {
   return optional_tensor(num_accepted_tokens_);
@@ -548,8 +561,8 @@ PyAttentionMetadataView::num_accepted_tokens_host_values() const {
   return num_accepted_tokens_host_values_;
 }
 
-bool PyAttentionMetadataView::is_spec_verify() const {
-  return metadata_->is_spec_verify;
+int32_t PyAttentionMetadataView::num_speculative_tokens() const {
+  return metadata_->num_speculative_tokens;
 }
 
 bool PyAttentionMetadataView::is_dummy() const { return metadata_->is_dummy; }

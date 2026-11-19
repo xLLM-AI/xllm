@@ -120,49 +120,31 @@ void update_kv_lengths_and_slots(Params& params, DecodeBuildBuffers& buf) {
 struct DecodeInputOptions {
   int32_t num_speculative_tokens = 0;
   bool per_request = false;
-  BatchForwardType forward_type = BatchForwardType::DECODE;
-  // Emit query_start_loc (leading 0) instead of cu_num_tokens (zero-free).
-  bool leading_zero_cu = false;
   bool causal = true;
 };
 
 struct DecodeExpansionOptions : DecodeInputOptions {
   int32_t block_size = 0;
-  std::optional<int32_t> mask_token_id;
-  bool sample_from_anchor = false;
+  std::optional<int32_t> mask_token_id = std::nullopt;
 };
 
 DecodeBuildBuffers expand_decode_inputs(
     const DecodeBatchContext& ctx,
     const DecodeExpansionOptions& decode_options);
 
-inline DecodeExpansionOptions make_verify_layout(int32_t num_speculative_tokens,
-                                                 int32_t block_size,
-                                                 bool chunked) {
-  DecodeExpansionOptions decode_options;
-  decode_options.num_speculative_tokens = num_speculative_tokens;
-  decode_options.block_size = block_size;
-  decode_options.per_request = chunked;
-  decode_options.forward_type =
-      chunked ? BatchForwardType::CHUNKED_PREFILL : BatchForwardType::DECODE;
-  decode_options.leading_zero_cu = chunked;
-  return decode_options;
-}
-
 template <typename Params>
 void update_decode_batch_metadata(Params& input_params,
                                   const DecodeInputOptions& decode_options,
                                   int32_t num_requests) {
   input_params.meta.num_sequences = num_requests;
+  const int32_t num_decoding_tokens = decode_options.num_speculative_tokens + 1;
   if (!decode_options.per_request && !decode_options.causal &&
       input_params.meta.actual_num_sequences > 0) {
-    input_params.meta.actual_num_sequences *=
-        (decode_options.num_speculative_tokens + 1);
+    input_params.meta.actual_num_sequences *= num_decoding_tokens;
   }
   input_params.meta.q_max_seq_len =
-      decode_options.per_request ? (decode_options.num_speculative_tokens + 1)
-                                 : 1;
-  input_params.meta.batch_forward_type = decode_options.forward_type;
+      decode_options.per_request ? num_decoding_tokens : 1;
+  input_params.meta.batch_forward_type = BatchForwardType::DECODE;
 }
 
 template <typename Params>

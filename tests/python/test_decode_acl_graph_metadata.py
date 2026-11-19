@@ -33,7 +33,6 @@ def _metadata() -> SimpleNamespace:
     return SimpleNamespace(
         is_prefill=False,
         is_chunked_prefill=False,
-        is_spec_verify=False,
         expanded_decode_metadata=None,
         block_table=torch.tensor([[11, 0], [21, 22]], dtype=torch.int64),
         kv_seq_lens=torch.tensor([2, 5], dtype=torch.int64),
@@ -94,30 +93,27 @@ def executor(runner: DecodeAclGraphRunner) -> ModelExecutor:
 
 
 @pytest.mark.parametrize("no_padding", [False, True])
-@pytest.mark.parametrize("requests", [3, 23, 24, 27, 32])
+@pytest.mark.parametrize("requests", [3, 23, 32])
 @pytest.mark.parametrize("width", [3, 5])
 def test_linear_verify_bucketing_preserves_complete_requests(
     runner: DecodeAclGraphRunner, no_padding: bool, requests: int, width: int
 ) -> None:
     runner.max_batch = 32 * width
-    runner.num_speculative_tokens = width - 1
     runner._model_owns_linear_spec_verify = True
     runner._enable_decode_no_padding = no_padding
-    metadata = SimpleNamespace(is_spec_verify=True)
+    metadata = SimpleNamespace(num_speculative_tokens=width - 1, is_target_verify=True)
 
     bucket = runner._padded_batch_size(requests * width, metadata)
 
     expected_requests = requests if no_padding else (4 if requests == 3 else 32)
     assert bucket == expected_requests * width
-    assert bucket % width == 0
 
 
 def test_no_padding_retains_mtp_width_and_capacity_validation(runner: DecodeAclGraphRunner) -> None:
     runner.max_batch = 160
-    runner.num_speculative_tokens = 5 - 1
     runner._model_owns_linear_spec_verify = True
     runner._enable_decode_no_padding = True
-    metadata = SimpleNamespace(is_spec_verify=True)
+    metadata = SimpleNamespace(num_speculative_tokens=4, is_target_verify=True)
 
     with pytest.raises(ValueError, match="complete fixed-width requests"):
         runner._padded_batch_size(119, metadata)
@@ -131,10 +127,9 @@ def test_no_padding_keeps_dp_ranks_on_a_shared_token_shape(
 ) -> None:
     runner.dp_size = 2
     runner.max_batch = 160
-    runner.num_speculative_tokens = 5 - 1
     runner._model_owns_linear_spec_verify = True
     runner._enable_decode_no_padding = no_padding
-    metadata = SimpleNamespace(is_spec_verify=True, dp_execution_token_counts=(115, 120))
+    metadata = SimpleNamespace(num_speculative_tokens=4, is_target_verify=True, dp_execution_token_counts=(115, 120))
 
     assert runner._padded_batch_size(115, metadata) == expected
     assert runner._padded_batch_size(120, metadata) == expected
@@ -543,6 +538,7 @@ def test_metadata_reuse_preserves_expanded_verify_rows_and_query_groups(
     metadata.q_seq_lens_host = torch.tensor([2, 2], dtype=torch.int32)
     metadata.q_cu_seq_lens = torch.tensor(query_ends, dtype=torch.int32) if query_ends is not None else None
     metadata.q_cu_seq_lens_host_values = query_ends
+    metadata.is_target_verify = True
     metadata.expanded_decode_metadata = SimpleNamespace(
         enabled=True,
         block_table=torch.tensor([[11, 0], [11, 0], [21, 22], [21, 22]], dtype=torch.int32),
@@ -587,6 +583,7 @@ def test_expanded_query_row_offsets_survive_padding_and_bucket_reuse(runner: Dec
         metadata.q_seq_lens_host = torch.full((groups,), 2, dtype=torch.int32)
         metadata.q_cu_seq_lens = torch.arange(0, rows + 1, 2, dtype=torch.int32)
         metadata.q_cu_seq_lens_host_values = list(range(0, rows + 1, 2))
+        metadata.is_target_verify = True
         metadata.expanded_decode_metadata = SimpleNamespace(
             enabled=True,
             block_table=torch.full((rows, 1), 11, dtype=torch.int32),

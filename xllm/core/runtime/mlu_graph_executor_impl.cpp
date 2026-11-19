@@ -751,11 +751,13 @@ ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
   } else {
     auto graph_input =
         prepare_graph_input(params, plan->layout.padded_num_tokens);
+    const bool is_target_verify = !options_.is_draft_engine() &&
+                                  params.meta.batch_forward_type.is_decode() &&
+                                  params.meta.q_max_seq_len > 1;
     if (mtp_capabilities_.model_family == MtpModelFamily::GLM5 ||
         mtp_capabilities_.model_family == MtpModelFamily::QWEN35) {
-      if (!params.is_spec_verify &&
-          (params.num_accepted_tokens.defined() ||
-           !params.num_accepted_tokens_host.empty())) {
+      if (!is_target_verify && (params.num_accepted_tokens.defined() ||
+                                !params.num_accepted_tokens_host.empty())) {
         auto& graph_params = graph_input.mutable_params();
         graph_params.num_accepted_tokens = torch::Tensor();
         graph_params.num_accepted_tokens_host.clear();
@@ -782,7 +784,7 @@ ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
               << ", tokens_per_request=" << plan->layout.tokens_per_request
               << ", grouped=" << plan->key.grouped
               << ", draft=" << options_.is_draft_engine()
-              << ", verify=" << params.is_spec_verify
+              << ", verify=" << is_target_verify
               << ", padded_num_tokens=" << plan->layout.padded_num_tokens;
     log_memory_after_capture();
   }

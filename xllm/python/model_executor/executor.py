@@ -607,7 +607,7 @@ class ModelExecutor:
             if (
                 not self.supports_layerwise_kv_load
                 or enable_graph
-                or metadata.is_spec_verify
+                or getattr(metadata, "is_target_verify", False)
                 or not (metadata.is_prefill or metadata.is_chunked_prefill)
             ):
                 raise ValueError("Layerwise Host KV load requires a supported eager prefill model")

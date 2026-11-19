@@ -90,7 +90,7 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
     ) -> bool:
         if input_ids.dim() != 1:
             return False
-        if not metadata.is_chunked_prefill or metadata.is_prefill or metadata.is_spec_verify:
+        if not metadata.is_chunked_prefill or metadata.is_prefill or getattr(metadata, "is_target_verify", False):
             return False
         if input_embedding is not None or mtp_topk_indices is not None:
             return False
@@ -412,6 +412,7 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
             block_table=static_block_table,
             kv_seq_lens=static_kv_lens,
             is_chunked_prefill=True,
+            num_speculative_tokens=getattr(metadata, "num_speculative_tokens", 0),
             dp_execution_token_counts=(token_count,) * self.dp_size if self.dp_size > 1 else (),
             dp_is_decode=(1,) * self.dp_size if self.dp_size > 1 else (),
         )

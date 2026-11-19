@@ -68,7 +68,8 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
 
   // Decode uses identical mRoPE rows and lets the graph embed persistent
   // tokens.
-  if (params.meta.batch_forward_type.is_decode() && !mm_data.valid()) {
+  if (params.meta.batch_forward_type.is_decode() &&
+      params.meta.q_max_seq_len <= 1 && !mm_data.valid()) {
     const torch::Tensor decode_positions =
         collapse_mrope_decode_positions(positions);
     if (llm_executor_) {

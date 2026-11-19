@@ -75,9 +75,7 @@ DSparkWorkerImpl::DSparkWorkerImpl(const ParallelArgs& parallel_args,
           options,
           configure_draft_parallel_args(parallel_args),
           draft_options(options, options.num_speculative_tokens() - 1),
-          configure_draft_config) {
-  sample_from_anchor_ = true;
-}
+          configure_draft_config) {}
 
 bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
                                   int32_t random_seed,
@@ -93,12 +91,18 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
       << "Runtime block size must match the draft model configuration.";
   if (draft_args.model_type() == "deepseek_v4_dspark") {
     draft_input_per_request_ = draft_args.dspark_use_native_sas();
-    draft_forward_type_ = BatchForwardType::DECODE;
   }
   draft_needs_dummy_tokens_ =
       draft_input_per_request_ &&
       ModelConfig::is_python_model_impl(context_.get_model_impl());
   return result;
+}
+
+DecodeExpansionOptions DSparkWorkerImpl::prepare_for_draft() const {
+  auto decode_options = DFlashWorkerImpl::prepare_for_draft();
+  decode_options.num_speculative_tokens =
+      draft_impl_->options().num_speculative_tokens();
+  return decode_options;
 }
 
 std::pair<torch::Tensor, torch::Tensor> DSparkWorkerImpl::run_decode_draft(

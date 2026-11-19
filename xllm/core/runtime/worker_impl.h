@@ -26,12 +26,15 @@ limitations under the License.
 
 #include "common/types.h"
 #include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
+#include "core/framework/config/execution_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/hierarchy_kv_transfer.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
 #include "core/kv_cache/transfer/kv_transfer.h"
 #include "core/runtime/schedule_overlap.h"
 #include "core/runtime/worker_residency_state.h"
+#include "core/util/tensor_helper.h"
 #include "executor.h"
 #include "forward_params.h"
 #include "framework/model/causal_lm.h"
@@ -47,6 +50,7 @@ limitations under the License.
 #include "util/threadpool.h"
 #if defined(USE_NPU)
 #include "core/framework/model_loader/weight/mooncake_weight_transfer.h"
+#include "core/platform/npu/device_capture_lock.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
 #endif
 
@@ -56,12 +60,34 @@ class WorkerRendezvous;
 class StaticKVTensorAllocator;
 class LinearStateSlotTable;
 
-void build_dummy_forward_input(LlmForwardInput& input,
-                               int32_t token_count,
-                               const torch::Device& device);
-void build_dummy_forward_input(VlmForwardInput& input,
-                               int32_t token_count,
-                               const torch::Device& device);
+template <typename Input>
+void build_dummy_forward_input(Input& input,
+                               int32_t num_speculative_tokens,
+                               const torch::Device& device) {
+  const int32_t num_decoding_tokens = num_speculative_tokens + 1;
+  auto token_options = input.token_ids.defined()
+                           ? input.token_ids.options()
+                           : torch::TensorOptions().dtype(torch::kInt32);
+  auto position_options = input.positions.defined()
+                              ? input.positions.options()
+                              : torch::TensorOptions().dtype(torch::kInt32);
+  input.token_ids =
+      torch::ones({num_decoding_tokens}, token_options.device(device));
+  input.positions =
+      torch::arange(num_decoding_tokens, position_options.device(device));
+  input.input_params.embedding.linear_state_indices = torch::zeros(
+      {num_decoding_tokens}, token_options.dtype(torch::kInt32).device(device));
+  if (ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl())) {
+    auto& execution_batch = input.input_params.meta.execution_batch;
+    execution_batch.num_reqs = 0;
+    execution_batch.num_tokens = num_decoding_tokens;
+    execution_batch.num_scheduled_tokens.clear();
+    execution_batch.num_computed_tokens.clear();
+    execution_batch.is_prefilling.clear();
+    execution_batch.query_start_loc = {0};
+  }
+}
 
 class WorkerImpl {
  public:
@@ -150,21 +176,11 @@ class WorkerImpl {
   virtual bool link_p2p(const std::string& remote_addr);
   virtual bool unlink_p2p(const std::string& remote_addr);
 
-  // prepare work before model execution
-  virtual void prepare_work_before_execute(const LlmForwardInput& inputs,
-                                           LlmForwardInput& processed_inputs);
-  virtual void restore_json_object_states(LlmForwardInput& input);
-  virtual void prepare_work_before_execute(const VlmForwardInput& inputs,
-                                           VlmForwardInput& processed_inputs);
-  virtual void restore_json_object_states(VlmForwardInput& input);
-  void prepare_work_before_execute_on_stream(const LlmForwardInput& input,
-                                             LlmForwardInput& processed_input,
-                                             Stream& prepare_stream,
-                                             bool record_ready_event = true);
-  void prepare_work_before_execute_on_stream(const VlmForwardInput& input,
-                                             VlmForwardInput& processed_input,
-                                             Stream& prepare_stream,
-                                             bool record_ready_event = true);
+  template <typename Input>
+  void prepare_work_before_execute(const Input& input,
+                                   Input& processed_input,
+                                   Stream* prepare_stream = nullptr,
+                                   bool record_ready_event = true);
   // Prepare shared mappings and new block contents on the owning stream.
   void initialize_shared_full_blocks(
       const std::vector<int32_t>& full_block_rows,
@@ -182,19 +198,17 @@ class WorkerImpl {
       bool is_prefill) const;
 
   bool uses_npu_dp_ep_padding() const;
-  void prepare_dp_ep_padding(LlmModelParams& input_params);
-  void prepare_dp_ep_padding(VlmModelParams& input_params);
-  void prepare_dp_ep_padding_on_stream(LlmModelParams& input_params,
-                                       Stream& prepare_stream);
-  void prepare_dp_ep_padding_on_stream(VlmModelParams& input_params,
-                                       Stream& prepare_stream);
+  bool use_prefill_dp_ep_padding(const BatchInputMeta& meta) const;
+  void prepare_dp_ep_padding(const ModelParamsView& params) const;
+  void prepare_dp_ep_padding_on_stream(const ModelParamsView& params,
+                                       Stream& prepare_stream) const;
 #endif
 
   // False on composites where only leaf workers consume parallel metadata.
   virtual bool owns_npu_parallel_input_prepare() const { return true; }
 
   // Lazily create (or return) the worker-local JSON grammar. Thread-safe.
-  std::shared_ptr<const JsonObjectGrammar> ensure_json_object_grammar(
+  virtual std::shared_ptr<const JsonObjectGrammar> ensure_json_object_grammar(
       bool reasoning_enabled);
 
   virtual std::optional<ForwardOutput> step(const DiTForwardInput& inputs);
@@ -358,8 +372,20 @@ class WorkerImpl {
   // Orders linear-state restoration after input preparation on the compute
   // stream. Leaf workers use this before their no-sync forward; composite
   // workers use it before their regular step dispatch.
-  void prepare_schedule_overlap(const LlmForwardInput& input);
-  void prepare_schedule_overlap(const VlmForwardInput& input);
+  template <typename Input>
+  void prepare_schedule_overlap(const Input& input) {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
+    defined(USE_MUSA)
+    if (has_request_state_cache()) {
+      c10::StreamGuard compute_guard = compute_stream_->set_stream_guard();
+      CHECK(compute_stream_->wait_event(input.runtime.metadata_ready_event))
+          << "failed to wait input metadata ready event on compute stream";
+      prepare_linear_state_cache(ModelParamsView(input.input_params));
+    }
+#else
+    (void)input;
+#endif
+  }
   // Keep no-sync inputs alive until their compute stream work is complete.
   // Overlap callers request an event; composite callers retire the ownership
   // through their own completion path.
@@ -398,21 +424,14 @@ class WorkerImpl {
   // current stream. Overlap callers must use compute_stream_ after the
   // preceding forward.
   void prepare_linear_state_cache(const ModelParamsView& params);
-  // Only used for deepseek chunked prefill ops on npu device
-  void prepare_mla_prefixcache_inputs(LlmModelParams& input_params);
-  void prepare_mla_prefixcache_inputs(VlmModelParams& input_params);
 
   void init_hierarchy_kv_transfer(
       const KVCacheShape& kv_cache_shape,
       const KVCacheCreateOptions& kv_cache_create_options);
 
-  bool can_prepare_npu_graph_decode_input(
-      const LlmModelParams& input_params) const;
   virtual bool can_prepare_without_compute_stream_wait() const;
-  bool can_skip_npu_graph_decode_sync(const LlmModelParams& input_params) const;
-  bool can_prepare_npu_graph_decode_input(
-      const VlmModelParams& input_params) const;
-  bool can_skip_npu_graph_decode_sync(const VlmModelParams& input_params) const;
+  bool can_prepare_npu_graph_decode_input(const BatchInputMeta& meta) const;
+  bool can_skip_npu_graph_decode_sync(const BatchInputMeta& meta) const;
 
   void allocate_kv_cache_storage(
       const KVCacheShape& kv_cache_shape,
@@ -448,39 +467,25 @@ class WorkerImpl {
 
   WorkerResidencyState residency_state_;
 
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
+    defined(USE_MUSA)
+  void prepare_execution_metadata(const ModelParamsView& params);
+#endif
   template <typename Input>
-  void prepare_schedule_overlap_impl(const Input& input);
-
+  void restore_json_object_states(Input& input);
   template <typename Input>
   std::optional<ForwardOutput> step_for_schedule_overlap_impl(
       const Input& input,
       const std::function<void()>& prepare_sampling);
   template <typename Input>
-  void restore_json_object_states_impl(Input& input);
-  template <typename Input>
   folly::SemiFuture<std::optional<ForwardOutput>> step_async_impl(
       const Input& input);
-  template <typename Params>
-  bool can_prepare_npu_graph_decode_input_impl(
-      const Params& input_params) const;
-  template <typename Params>
-  bool can_skip_npu_graph_decode_sync_impl(const Params& input_params) const;
   template <typename Input>
   void prepare_dummy_input(Input& input);
-  template <typename Input>
-  void prepare_work_before_execute_on_stream_impl(const Input& input,
-                                                  Input& processed_input,
-                                                  Stream& prepare_stream,
-                                                  bool record_ready_event);
-  template <typename Params>
-  void prepare_mla_prefixcache_inputs_impl(Params& input_params);
 #if defined(USE_NPU)
-  template <typename Params>
-  void prepare_dp_ep_padding_impl(Params& input_params);
-  template <typename Params>
-  void prepare_dp_ep_padding_on_stream_impl(Params& input_params,
-                                            Stream& prepare_stream);
+  void prepare_mla_prefixcache_inputs(const ModelParamsView& input_params);
 #endif
+  bool use_chunked_decode_attention(const BatchInputMeta& meta) const;
 
  protected:
   // Borrowed model access; specialized workers retain ownership.
@@ -557,5 +562,98 @@ class WorkerImpl {
 
   std::string model_weights_path_;
 };
+
+template <typename Input>
+void WorkerImpl::prepare_work_before_execute(const Input& input,
+                                             Input& processed_input,
+                                             Stream* prepare_stream,
+                                             bool record_ready_event) {
+  if (!input.json_object_state_snapshots.empty()) {
+    Input restored_input = input.clone();
+    restore_json_object_states(restored_input);
+    prepare_work_before_execute(
+        restored_input, processed_input, prepare_stream, record_ready_event);
+    return;
+  }
+  Stream& stream =
+      prepare_stream == nullptr ? *prepare_stream_ : *prepare_stream;
+#if defined(USE_NPU)
+  // Serialize prepare-stream H2D copies with ACL graph capture.
+  std::optional<std::unique_lock<std::mutex>> lock_guard;
+  if (ExecutionConfig::get_instance().enable_graph()) {
+    lock_guard.emplace(
+        npu::DeviceCaptureLock::get_instance().get_lock(device_.index()));
+  }
+#endif
+  c10::StreamGuard stream_guard = stream.set_stream_guard();
+  if (enable_schedule_overlap() && !can_prepare_without_compute_stream_wait() &&
+      compute_stream_) {
+    stream.wait_stream(*compute_stream_);
+  }
+  CHECK(stream.wait_event(input.runtime.metadata_ready_event))
+      << "failed to wait input metadata ready event on worker prepare stream";
+
+  processed_input = input.to(device_, dtype_);
+  // Packed RPC/SHM inputs may deserialize JSON snapshots during Input::to.
+  if (processed_input.json_object_states.empty() &&
+      !processed_input.json_object_state_snapshots.empty()) {
+    restore_json_object_states(processed_input);
+  }
+  move_tensor_to_device_if_needed(processed_input.token_ids, device_);
+  move_tensor_to_device_if_needed(processed_input.positions, device_);
+  move_tensor_to_device_if_needed(
+      processed_input.sampling_params.logits_indices(), device_);
+
+  auto& params = processed_input.input_params;
+  params.meta.num_speculative_tokens = options_.num_speculative_tokens();
+  prepare_model_input(processed_input);
+  if (params.meta.num_sequences != 0 ||
+      (processed_input.token_ids.defined() &&
+       processed_input.token_ids.numel() != 0)) {
+    prepare_shared_kv_cache(params.embedding.full_block_slot_rows,
+                            params.embedding.full_block_lease_epochs,
+                            params.embedding.linear_state_slot_rows,
+                            stream);
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
+    defined(USE_MUSA)
+    ModelParamsView execution_params(params);
+    prepare_execution_metadata(execution_params);
+#if defined(USE_NPU)
+    if (can_prepare_npu_graph_decode_input(params.meta)) {
+      model_executor_->prepare_graph_input(processed_input.token_ids,
+                                           processed_input.positions,
+                                           kv_caches_,
+                                           execution_params);
+    }
+#endif
+#endif
+  }
+
+  processed_input.runtime.metadata_ready_event =
+      record_ready_event ? stream.record_event_or_sync() : nullptr;
+}
+
+template <typename Input>
+void WorkerImpl::restore_json_object_states(Input& input) {
+  std::vector<JsonObjectGrammarState> states;
+  states.reserve(input.json_object_state_snapshots.size());
+  for (const auto& snapshot : input.json_object_state_snapshots) {
+    if (!snapshot.enabled) {
+      states.emplace_back();
+      continue;
+    }
+
+    std::shared_ptr<const JsonObjectGrammar> grammar =
+        ensure_json_object_grammar(snapshot.reasoning_enabled);
+    CHECK(grammar != nullptr) << "Failed to restore JSON object grammar";
+
+    JsonObjectGrammarState state = grammar->restore_state(snapshot);
+    CHECK(state.is_valid())
+        << "Serialized JSON object grammar state is invalid";
+    states.push_back(std::move(state));
+  }
+  input.json_object_states = std::move(states);
+  input.json_object_state_snapshots.clear();
+}
 
 }  // namespace xllm

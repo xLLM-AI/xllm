@@ -212,7 +212,10 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
     KVCache& kv_cache,
     const ModelParamsView& input_params) {
   int64_t num_tokens = hidden_states.size(0);
-  if (input_params.is_spec_verify) {
+  const bool is_target_verify =
+      input_params.meta.batch_forward_type.is_decode() &&
+      input_params.meta.q_max_seq_len > 1;
+  if (is_target_verify) {
     CHECK(attn_metadata.is_chunked_prefill)
         << "Qwen3.5 MLU GDN Spec Verify requires chunked-prefill Dense "
            "Validate Span";
@@ -239,7 +242,7 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
   torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
   const int64_t checkpoint_stride = KVCacheShape::linear_ssm_checkpoint_stride(
       kv_cache.get_conv_cache().size(0), ssm_cache.size(0));
-  if (input_params.is_spec_verify) {
+  if (is_target_verify) {
     CHECK_EQ(checkpoint_stride, attn_metadata.max_query_len)
         << "Qwen3.5 MLU GDN Spec Verify checkpoint_stride must equal "
            "q_max_seq_len";
@@ -256,7 +259,7 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
   torch::Tensor linear_state_base_indices =
       build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
 
-  if (input_params.is_spec_verify) {
+  if (is_target_verify) {
     mixed_qkv = xllm::kernel::mlu::causal_conv1d_update_decode(
         mixed_qkv,
         conv_cache,

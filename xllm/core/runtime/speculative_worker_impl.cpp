@@ -24,7 +24,6 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
-#include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/model/model_type.h"
 #include "core/framework/speculative/draft_config.h"
 #include "core/framework/speculative/verify_layout.h"
@@ -40,126 +39,6 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
-
-namespace {
-template <typename Input>
-void prepare_dummy_input_impl(Input& input,
-                              const ModelContext& context,
-                              const torch::Device& device) {
-  auto& params = input.input_params;
-  const auto& args = context.get_model_args();
-  const auto& parallel = context.get_parallel_args();
-  const bool idle_block =
-      params.meta.num_sequences == 0 && context.num_speculative_tokens() > 0;
-  const bool empty =
-      params.meta.num_sequences == 0 &&
-      (!input.token_ids.defined() || input.token_ids.numel() == 0);
-  if (!(empty || idle_block) || params.meta.batch_forward_type.is_empty() ||
-      (parallel.dp_size() <= 1 && parallel.ep_size() <= 1 &&
-       parallel.mapping_data().empty())) {
-    return;
-  }
-  const int32_t tokens = context.num_speculative_tokens() + 1;
-  build_dummy_forward_input(input, tokens, device);
-  if (context.num_speculative_tokens() > 0 &&
-      has_linear_attention_layers(args)) {
-    params.num_accepted_tokens_host.assign(1, 1);
-    params.num_accepted_tokens =
-        torch::ones({1}, input.token_ids.options().dtype(torch::kInt32));
-  }
-  if (idle_block) {
-    params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
-    params.meta.q_max_seq_len = tokens;
-    params.meta.kv_max_seq_len = tokens;
-    params.embedding.input_embedding = torch::Tensor();
-    params.attn_metadata.reset();
-    params.attention = {};
-    params.attention.host.q_seq_lens = {tokens};
-    params.attention.host.q_cu_seq_lens = {0, tokens};
-    params.attention.host.kv_seq_lens = {tokens};
-    params.attention.host.kv_cache_tokens_nums = {0};
-    params.attention.host.new_cache_slots.assign(tokens, -1);
-    params.attention.rebuild_device_buffer(device);
-  }
-}
-}  // namespace
-
-void prepare_dummy_input(LlmForwardInput& input,
-                         const ModelContext& context,
-                         const torch::Device& device) {
-  prepare_dummy_input_impl(input, context, device);
-}
-
-void prepare_dummy_input(VlmForwardInput& input,
-                         const ModelContext& context,
-                         const torch::Device& device) {
-  prepare_dummy_input_impl(input, context, device);
-}
-
-namespace {
-template <typename Params>
-bool should_run_speculative_decode_impl(const Params& params) {
-  if (!params.meta.batch_forward_type.is_decode()) {
-    return false;
-  }
-
-  const auto& dp_token_nums = params.parallel.dp_global_token_nums;
-  const auto& dp_is_decode = params.parallel.dp_is_decode;
-  if (dp_is_decode.empty()) {
-    return dp_token_nums.size() <= 1;
-  }
-  if (dp_is_decode.size() != dp_token_nums.size()) {
-    return false;
-  }
-
-  // Idle DP ranks (no scheduled tokens this step) must not veto speculative
-  // decode for the active ranks. Under enable_graph=False these idle ranks keep
-  // dp_is_decode=0 (the backfill in llm_engine only fires when enable_graph=
-  // True), which made an all-of-ones check fail for any bs<dp_size batch and
-  // silently fell back to the non-speculative path (validate never ran). Only
-  // ranks that actually carry tokens gate the decision; require every such rank
-  // to be in decode.
-  bool any_active = false;
-  for (size_t i = 0; i < dp_is_decode.size(); ++i) {
-    if (dp_token_nums[i] == 0) {
-      continue;  // idle rank: does not participate in the vote
-    }
-    any_active = true;
-    if (dp_is_decode[i] != 1) {
-      return false;
-    }
-  }
-  return any_active;
-}
-
-template <typename Params>
-void scale_speculative_parallel_token_counts_impl(
-    Params& params,
-    int32_t num_speculative_tokens) {
-  scale_parallel_token_counts(params.parallel, num_speculative_tokens + 1);
-  params.expert.eplb_decode_token_mask = eplb::expand_decode_token_mask(
-      params.expert.eplb_decode_token_mask, num_speculative_tokens + 1);
-}
-
-}  // namespace
-
-bool should_run_speculative_decode(const LlmModelParams& params) {
-  return should_run_speculative_decode_impl(params);
-}
-
-bool should_run_speculative_decode(const VlmModelParams& params) {
-  return should_run_speculative_decode_impl(params);
-}
-
-void scale_speculative_parallel_token_counts(LlmModelParams& params,
-                                             int32_t num_speculative_tokens) {
-  scale_speculative_parallel_token_counts_impl(params, num_speculative_tokens);
-}
-
-void scale_speculative_parallel_token_counts(VlmModelParams& params,
-                                             int32_t num_speculative_tokens) {
-  scale_speculative_parallel_token_counts_impl(params, num_speculative_tokens);
-}
 
 template <typename TargetInput>
 SpeculativeWorkerImpl<TargetInput>::SpeculativeWorkerImpl(
@@ -208,6 +87,7 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_target_padding(
   const auto& raw_tokens = params.parallel.raw_dp_global_token_nums;
   const bool graph_decode =
       params.meta.batch_forward_type.is_decode() &&
+      params.meta.q_max_seq_len <= 1 &&
       ExecutionConfig::get_instance().enable_graph() && tokens.size() > 1 &&
       params.parallel.dp_is_decode.size() == tokens.size() &&
       std::all_of(params.parallel.dp_is_decode.begin(),
@@ -232,7 +112,7 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_target_padding(
       return;
     }
   }
-  impl_->prepare_dp_ep_padding(params);
+  impl_->prepare_dp_ep_padding(ModelParamsView(params));
 }
 #endif
 
@@ -337,7 +217,7 @@ std::optional<ForwardOutput> SpeculativeWorkerImpl<TargetInput>::step(
   auto& mutable_params = input.input_params;
   set_hierarchy_layer_synchronizer(mutable_params);
   const bool run_speculative_decode =
-      should_run_speculative_decode(input.input_params);
+      should_run_speculative_decode(mutable_params);
   if (input.input_params.meta.num_sequences == 0 ||
       input.token_ids.numel() == 0) {
     if (input.input_params.meta.batch_forward_type.is_decode() &&
@@ -432,7 +312,8 @@ ForwardOutput finalize_verify_output(
 template <typename TargetInput>
 void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
     const TargetInput& input,
-    TargetInput& validate_input) {
+    TargetInput& validate_input,
+    bool expand_decode_metadata_per_token) {
   // Clear the transform fields on the host copy first so .to() skips them;
   // expand_sampling_params_for_verify later installs the validate-row idxes.
   // The JSON grammar states are not consumed by the logits-only validate
@@ -455,16 +336,12 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
   const int32_t block_size = options_.block_size();
-  // Hybrid targets (for example Qwen3.8 GDN) mark validation as spec-verify
-  // before entering this generic builder.  They must keep one sequence row
-  // with an N+1-token query so recurrent state is checkpointed and committed
-  // by the model's spec-verify kernel instead of being expanded into N+1
-  // independent decode rows.
-  const bool use_chunked_spec_verify = input.input_params.is_spec_verify;
   DecodeBatchContext batch_ctx = make_decode_batch_context(input);
 
-  DecodeExpansionOptions decode_options = make_verify_layout(
-      num_speculative_tokens, block_size, use_chunked_spec_verify);
+  const DecodeExpansionOptions decode_options{
+      {.num_speculative_tokens = num_speculative_tokens,
+       .per_request = !expand_decode_metadata_per_token},
+      block_size};
   DecodeBuildBuffers buf = expand_decode_inputs(batch_ctx, decode_options);
 
   build_decode_input(validate_input, buf, decode_options, device_);
@@ -475,15 +352,11 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
                                     total_num_val_tokens,
                                     device_);
 
-  scale_speculative_parallel_token_counts(input_params, num_speculative_tokens);
+  scale_speculative_parallel_token_counts(
+      input_params, decode_options.num_speculative_tokens);
   validate_input.runtime.device_tensors_ready = true;
 }
 
-template <typename TargetInput>
-void SpeculativeWorkerImpl<TargetInput>::restore_json_object_states(
-    TargetInput& input) {
-  impl_->restore_json_object_states(input);
-}
 template class SpeculativeWorkerImpl<LlmForwardInput>;
 template class SpeculativeWorkerImpl<VlmForwardInput>;
 

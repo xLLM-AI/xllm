@@ -28,6 +28,7 @@ namespace ffi = tvm::ffi;
 #include <optional>
 #include <string>
 
+#include "core/framework/batch/batch_forward_type.h"
 #include "dsa_metadata.h"
 #include "layers/common/kv_shard_batch_metadata.h"
 
@@ -137,9 +138,10 @@ struct AttentionMetadata {
   int64_t max_seq_len;
   int64_t total_kv_len = 0;
   std::string compute_dtype;
+  BatchForwardType batch_forward_type;
   bool is_prefill;
   bool is_chunked_prefill;
-  bool is_mixed = false;
+  int32_t num_speculative_tokens = 0;
   // Run prefill attention without writing key/value tensors to paged cache.
   bool prefill_without_cache = false;
   bool is_dummy;
@@ -152,8 +154,6 @@ struct AttentionMetadata {
   // Spec-verify ACL graph can run full attention as expanded decode while GDN
   // layers keep the original spec-verify metadata.
   ExpandedDecodeMetadata expanded_decode;
-  // Shared by NPU ACL graph and MUSA FlashInfer expanded-decode routing.
-  bool is_spec_verify = false;
 
   // for mrope
   torch::Tensor mrope_cos;

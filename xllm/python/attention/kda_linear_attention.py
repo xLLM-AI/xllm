@@ -119,7 +119,7 @@ class KdaLinearAttentionMixin:
         gate_lb = forget_gate.safe_gate_lower_bound
         read_idx, idx = resolve_linear_state_io_indices(metadata)
         is_prefill = metadata.is_prefill or metadata.is_chunked_prefill
-        is_spec_verify = getattr(metadata, "is_spec_verify", False)
+        is_spec_verify = getattr(metadata, "is_target_verify", False)
         if is_spec_verify and idx is None:
             raise RuntimeError("KDA spec-verify requires linear-state slots")
         num_seqs = idx.shape[0] if idx is not None else batch_size
@@ -534,7 +534,7 @@ class KdaLinearAttentionMixin:
         q_seq_lens_host = getattr(metadata, "q_seq_lens_host", None)
         if (
             not in_graph
-            and getattr(metadata, "is_spec_verify", False)
+            and getattr(metadata, "is_target_verify", False)
             and q_seq_lens_host is not None
             and q_seq_lens_host.numel() == num_seqs
             and self._kda_validated_query_shape != (num_seqs, rows_per_seq)

@@ -81,7 +81,7 @@ class EagerRunner(BaseRunner):
         use_cp_context = (
             not is_dummy
             and self.cp_size > 1
-            and not metadata.is_spec_verify
+            and not getattr(metadata, "is_target_verify", False)
             and resolve_expanded_decode_metadata(metadata) is None
             and (metadata.is_prefill or (is_mla and metadata.is_chunked_prefill))
         )

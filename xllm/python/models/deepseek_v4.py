@@ -1733,12 +1733,10 @@ class _DeepseekV4ForwardSetup:
             raise RuntimeError(f"{model_name} requires prepare_dsa_metadata_for_forward")
         prepare_dsa(metadata)
 
-    def _build_cp_context(
-        self, backend: Any, metadata: Any, positions: torch.Tensor, *, allow_spec_verify: bool = False
-    ) -> DeepseekV4CpContext | None:
+    def _build_cp_context(self, backend: Any, metadata: Any, positions: torch.Tensor) -> DeepseekV4CpContext | None:
         if (
             getattr(metadata, "is_dummy", False)
-            or (not allow_spec_verify and getattr(metadata, "is_spec_verify", False))
+            or getattr(metadata, "is_target_verify", False)
             or not (metadata.is_prefill or metadata.is_chunked_prefill)
         ):
             return None

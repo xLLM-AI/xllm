@@ -30,8 +30,8 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/model_params_view.h"
 #include "core/kv_cache/storage/kv_cache.h"
-#include "core/runtime/graph_execution_input.h"
 #include "core/runtime/mlu_graph_planner.h"
 #include "mlu_graph_executor_impl.h"
 #include "models/llm/mlu/mtp_topk_state.h"
@@ -470,7 +470,8 @@ TEST_F(MluGraphExecutorTest, SpecVerifyFallsBackAndNonSpecStillCaptures) {
 
   const int32_t batch_size = 5;
   auto spec_input = prepare_inputs(batch_size, /*seed=*/13);
-  spec_input.input_params.is_spec_verify = true;
+  spec_input.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
+  spec_input.input_params.meta.q_max_seq_len = 2;
 
   const int32_t start_cnt = model_->forward_cnt();
   auto first_spec_output = impl_
@@ -623,7 +624,7 @@ TEST_F(MluGraphExecutorTest, LinearStatePaddingTailUsesPaddingId) {
   first_plan.layout.padded_num_reqs = 4;
   first_plan.layout.padded_num_tokens = 4;
   ModelParamsView graph_params =
-      copy_graph_execution_input(ModelParamsView(first_input.input_params));
+      ModelParamsView(first_input.input_params).clone().view();
   param.bind_buffers(graph_params, first_plan);
   param.update_input_buffer(first_input.token_ids,
                             first_input.positions,

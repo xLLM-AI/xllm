@@ -84,7 +84,6 @@ def _metadata(linear_state_indices: torch.Tensor, rows: int | None = None) -> Si
         expanded_decode_metadata=None,
         is_prefill=False,
         is_chunked_prefill=False,
-        is_spec_verify=False,
     )
 
 
@@ -99,7 +98,8 @@ def _capacity_metadata(rows: int, kv_length: int = 1, query_width: int = 1, page
         build_row_aligned_paged_kv_metadata(metadata.block_table, metadata.kv_seq_lens_host_values, page_size)
     )
     if query_width > 1:
-        metadata.is_spec_verify = True
+        metadata.num_speculative_tokens = query_width - 1
+        metadata.is_target_verify = True
         metadata.q_seq_lens_host = torch.full((rows // query_width,), query_width, dtype=torch.int32)
         metadata.q_cu_seq_lens = torch.arange(0, rows + 1, query_width, dtype=torch.int32)
         metadata.expanded_decode_metadata = SimpleNamespace(
@@ -345,7 +345,6 @@ def _block_draft_metadata(block_table: torch.Tensor) -> SimpleNamespace:
     return SimpleNamespace(
         is_prefill=False,
         is_chunked_prefill=True,
-        is_spec_verify=False,
         q_seq_lens=torch.full((sequence_count,), query_width, dtype=torch.int32),
         q_cu_seq_lens=torch.tensor([0, *query_ends], dtype=torch.int32),
         q_cu_seq_lens_host_values=query_ends,
@@ -1222,6 +1221,7 @@ def test_accepted_counts_refresh_in_stable_graph_buffer() -> None:
     metadata = _metadata(torch.tensor([1, 2], dtype=torch.int32), rows=4)
     metadata.q_seq_lens_host = torch.tensor([2, 2], dtype=torch.int32)
     metadata.q_cu_seq_lens = torch.tensor([0, 2, 4], dtype=torch.int32)
+    metadata.is_target_verify = True
     metadata.expanded_decode_metadata = SimpleNamespace(
         enabled=True,
         kv_seq_lens=metadata.kv_seq_lens,
@@ -1398,7 +1398,8 @@ def test_capture_preserves_live_state_until_first_replay(
     metadata.num_accepted_tokens = torch.tensor([width, 1], dtype=torch.int32) if width > 1 else None
     metadata.num_accepted_tokens_host_values = (width, 1) if width > 1 else ()
     if width > 1:
-        metadata.is_spec_verify = True
+        metadata.num_speculative_tokens = width - 1
+        metadata.is_target_verify = True
         metadata.q_seq_lens_host = torch.full((slots.numel(),), width, dtype=torch.int32)
         metadata.q_cu_seq_lens = torch.arange(slots.numel() + 1, dtype=torch.int32) * width
         metadata.expanded_decode_metadata = SimpleNamespace(
@@ -1484,7 +1485,10 @@ def test_capture_preserves_live_state_until_first_replay(
 
 def test_untyped_verify_reuses_row_aligned_paging_metadata() -> None:
     runner = _runner()
-    metadata = _metadata(torch.tensor([1, 2], dtype=torch.int32), rows=4)
+    metadata = _metadata(torch.arange(4, dtype=torch.int32))
+    metadata.linear_state_indices = None
+    metadata.num_speculative_tokens = 1
+    metadata.is_target_verify = True
 
     expanded = runner._expanded_verify_view(metadata)
 

@@ -251,7 +251,6 @@ def test_prefill_accepts_native_slot_cumulative_ends(end_only: bool) -> None:
         linear_state_read_indices=None,
         linear_state_write_indices=None,
         is_dummy=False,
-        is_spec_verify=False,
         is_prefill=True,
         is_chunked_prefill=False,
         q_seq_lens_host=torch.tensor([2, 3], dtype=torch.int32),
@@ -279,7 +278,8 @@ def test_verify_metadata_keeps_previous_accepted_checkpoint(expanded: bool) -> N
         num_accepted_tokens=counts,
         num_accepted_tokens_host_values=(1, 5),
         is_dummy=False,
-        is_spec_verify=True,
+        is_target_verify=True,
+        max_query_len=2,
     )
     actual = _verify_builder().build(_gdn_input_batch((8, 8)), metadata)
     assert isinstance(actual, GdnVerifyMetadata)
@@ -299,7 +299,8 @@ def test_verify_rejects_query_width_exceeding_checkpoint_stride() -> None:
         num_accepted_tokens=torch.ones(2, dtype=torch.int32),
         num_accepted_tokens_host_values=(1, 1),
         is_dummy=False,
-        is_spec_verify=True,
+        is_target_verify=True,
+        max_query_len=2,
     )
     with pytest.raises(ValueError, match="checkpoint stride"):
         _verify_builder().build(_gdn_input_batch((9, 9)), metadata)
@@ -376,7 +377,8 @@ def test_fixed_verify_routes_to_dense_kernel_without_host_lengths(monkeypatch: p
             num_accepted_tokens=torch.tensor([1, width], dtype=torch.int32),
             num_accepted_tokens_host_values=(),
             is_dummy=False,
-            is_spec_verify=True,
+            is_target_verify=True,
+            max_query_len=2,
         ),
     )
     verify = MagicMock(return_value=torch.ones(2, width, 1, 128, dtype=torch.bfloat16))

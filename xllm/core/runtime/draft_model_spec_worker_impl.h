@@ -137,10 +137,10 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
       Stream& compute_stream,
       WorkerImpl::ForwardCompletion completion =
           WorkerImpl::ForwardCompletion::CALLER_RETAINS_INPUT) {
-    worker.prepare_work_before_execute_on_stream(
+    worker.prepare_work_before_execute(
         input,
         forward_input,
-        prepare_stream,
+        &prepare_stream,
         /*record_ready_event=*/&prepare_stream != &compute_stream);
     return worker.execute_no_sync_on_stream(
         forward_input, compute_stream, completion);

@@ -186,7 +186,8 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   }
 
   LlmForwardInput validate_input;
-  prepare_validate_inputs(input, validate_input);
+  prepare_validate_inputs(
+      input, validate_input, /*expand_decode_metadata_per_token=*/true);
   auto& validate_token_ids = validate_input.token_ids;
   for (int32_t i = 0; i < num_speculative_tokens; ++i) {
     std::vector<int32_t> draft_col;

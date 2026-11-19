@@ -314,8 +314,6 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target,
   params.graph.use_dense_flash_attention =
       source.graph.use_dense_flash_attention;
 #endif
-  params.graph.use_expanded_decode_for_spec_verify_attention =
-      source.graph.use_expanded_decode_for_spec_verify_attention;
   params.graph.expanded_kv_seq_lens = source.graph.expanded_kv_seq_lens;
   params.graph.expanded_block_tables = source.graph.expanded_block_tables;
   params.graph.expanded_paged_kv_indptr = source.graph.expanded_paged_kv_indptr;
@@ -337,7 +335,6 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target,
   params.graph.spec_verify_static_graph_tasks_prepared =
       source.graph.spec_verify_static_graph_tasks_prepared;
   params.multi_block_tables = source.multi_block_tables;
-  params.is_spec_verify = source.is_spec_verify;
   params.prefill_without_cache = source.prefill_without_cache;
   params.num_accepted_tokens = source.num_accepted_tokens;
   params.mtp_topk_state = source.mtp_topk_state;

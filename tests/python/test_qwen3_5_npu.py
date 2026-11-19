@@ -676,7 +676,6 @@ def test_npu_decode_uses_mega_fusion_boundary(monkeypatch: pytest.MonkeyPatch) -
         is_prefill=False,
         is_chunked_prefill=False,
         is_dummy=False,
-        is_spec_verify=False,
     )
     context = ForwardContext(
         attention_backend=None,
@@ -791,7 +790,6 @@ def test_npu_gdn_uses_npu_prefill_fusion_boundary(
         is_prefill=True,
         is_chunked_prefill=False,
         is_dummy=False,
-        is_spec_verify=False,
     )
     context = ForwardContext(
         attention_backend=None,
@@ -861,7 +859,8 @@ def test_npu_mtp_gdn_keeps_logical_state_rows(
         linear_state_write_indices=write,
         num_accepted_tokens=accepted,
         num_accepted_tokens_host_values=(),
-        is_spec_verify=True,
+        is_target_verify=True,
+        max_query_len=2,
         is_prefill=False,
         is_chunked_prefill=legacy_chunked,
         is_mixed=False,
@@ -908,7 +907,8 @@ def test_npu_mtp_gdn_accepts_padded_graph_rows() -> None:
         linear_state_write_indices=state_indices,
         num_accepted_tokens=accepted,
         num_accepted_tokens_host_values=(2,) * 22 + (1,) * 10,
-        is_spec_verify=True,
+        is_target_verify=True,
+        max_query_len=2,
         is_prefill=False,
         is_chunked_prefill=True,
     )
@@ -964,7 +964,8 @@ def test_npu_mtp_gdn_rejects_unsupported_checkpoint_width(width: int) -> None:
         slot_mapping=torch.zeros(width, dtype=torch.int32),
         linear_state_indices=torch.ones(1, dtype=torch.int32),
         num_accepted_tokens=torch.ones(1, dtype=torch.int32),
-        is_spec_verify=True,
+        is_target_verify=True,
+        max_query_len=2,
         is_prefill=False,
         is_chunked_prefill=False,
         is_mixed=False,
@@ -1120,7 +1121,6 @@ def test_npu_bounded_qwen38_gdn_prefill_maps_conv_rows_after_page_boundaries(mon
         q_seq_lens_host=torch.ones(6, dtype=torch.int32),
         q_cu_seq_lens=torch.arange(7, dtype=torch.int32),
         q_cu_seq_lens_host_values=list(range(7)),
-        is_spec_verify=False,
         is_prefill=False,
         is_chunked_prefill=True,
     )
@@ -1152,7 +1152,8 @@ def test_npu_bounded_qwen38_gdn_verify_refreshes_persistent_physical_indices(
         num_accepted_tokens=accepted,
         is_prefill=False,
         is_chunked_prefill=False,
-        is_spec_verify=True,
+        is_target_verify=True,
+        max_query_len=2,
     )
     if mode != "eager":
         source.linear_verify_graph = LinearVerifyGraphInputs(
@@ -1190,7 +1191,6 @@ def test_npu_bounded_qwen38_gdn_decode_maps_nonintegral_conv_rows(monkeypatch: p
     indices = torch.tensor([1, 2, 34, 35, -1, -2], dtype=torch.int32)
     source = SimpleNamespace(
         linear_state_indices=indices,
-        is_spec_verify=False,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -1233,7 +1233,9 @@ def test_npu_shared_gdn_verify_updates_persistent_physical_indices(packed: bool)
         None if packed else torch.arange(6, dtype=torch.int64),
         endpoints,
     )
-    source = SimpleNamespace(linear_verify_graph=graph, is_prefill=False, is_chunked_prefill=False, is_spec_verify=True)
+    source = SimpleNamespace(
+        linear_verify_graph=graph, is_prefill=False, is_chunked_prefill=False, is_target_verify=True, max_query_len=2
+    )
     batch = _input_batch(4 if packed else 6, (1, 3) if packed else (3, 3))
     persistent = builder.allocate_persistent(batch, source)
     assert isinstance(persistent, GdnVerifyMetadata)
@@ -1312,7 +1314,7 @@ def test_npu_slab_gdn_verify_refreshes_each_layers_role_rows(monkeypatch: pytest
         torch.arange(12),
         torch.arange(12),
     )
-    source = SimpleNamespace(linear_verify_graph=graph, is_spec_verify=True)
+    source = SimpleNamespace(linear_verify_graph=graph, is_target_verify=True, max_query_len=2)
     batch = _input_batch(12, (3, 3, 3, 3))
     persistent = builder.allocate_persistent(batch, source)
     assert isinstance(persistent, GdnVerifyMetadata)
@@ -1381,9 +1383,7 @@ def test_npu_slab_gdn_decode_keeps_independent_packed_read_and_write_owners(monk
     builder = Qwen3_5GdnMetadataBuilder(cfg)
     builder.bind_layer_caches(caches)
     indices = torch.tensor([1, 2, 0, -1], dtype=torch.int32)
-    source = SimpleNamespace(
-        linear_state_indices=indices, is_spec_verify=False, is_prefill=False, is_chunked_prefill=False
-    )
+    source = SimpleNamespace(linear_state_indices=indices, is_prefill=False, is_chunked_prefill=False)
     batch = _input_batch(4, (1, 1, 1, 1))
     persistent = builder.allocate_persistent(batch, source)
     assert isinstance(persistent, GdnDecodeMetadata)
@@ -1443,7 +1443,8 @@ def test_npu_shared_gdn_eager_verify_maps_logical_pages(lengths: tuple[int, int]
         num_accepted_tokens=accepted,
         num_accepted_tokens_host_values=(1, 2),
         q_seq_lens_host=torch.tensor(lengths, dtype=torch.int32),
-        is_spec_verify=True,
+        is_target_verify=True,
+        max_query_len=2,
         is_prefill=False,
         is_chunked_prefill=True,
     )
@@ -1472,7 +1473,6 @@ def test_npu_shared_gdn_ordinary_decode_rejects_verify_checkpoints(width: int) -
     builder.bind_layer_caches(_shared_gdn_caches(width))
     source = SimpleNamespace(
         linear_state_indices=torch.tensor([1, 3], dtype=torch.int32),
-        is_spec_verify=False,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -1550,7 +1550,8 @@ def test_npu_shared_gdn_matches_dense_state_across_reordered_pages(width: int, p
         num_accepted_tokens=accepted,
         num_accepted_tokens_host_values=(1, 1),
         q_seq_lens_host=torch.tensor(lengths, dtype=torch.int32),
-        is_spec_verify=width != 1,
+        is_target_verify=True,
+        max_query_len=width,
         is_prefill=False,
         is_chunked_prefill=width != 1,
     )
@@ -1743,7 +1744,6 @@ def test_npu_shared_gdn_prefill_matches_dense_state_across_chunks(
             q_seq_lens_host=torch.tensor(lengths, dtype=torch.int32),
             q_cu_seq_lens=torch.tensor(batch.query_start_loc, device=device, dtype=torch.int32),
             q_cu_seq_lens_host_values=list(batch.query_start_loc),
-            is_spec_verify=False,
             is_prefill=step == 0,
             is_chunked_prefill=step != 0,
         )
@@ -1801,7 +1801,6 @@ def test_npu_mega_prefill_metadata_is_shared_within_one_forward() -> None:
         is_prefill=True,
         is_chunked_prefill=False,
         is_dummy=False,
-        is_spec_verify=False,
     )
     context = ForwardContext(
         None,

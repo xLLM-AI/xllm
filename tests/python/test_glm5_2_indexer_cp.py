@@ -116,7 +116,6 @@ def _backend_and_metadata(
         is_prefill=True,
         is_chunked_prefill=False,
         is_mixed=False,
-        is_spec_verify=False,
         has_kv_shard=False,
         kv_split_size=1,
     )

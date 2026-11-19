@@ -35,6 +35,8 @@ class DSparkWorkerImpl final : public DFlashWorkerImpl {
                   MasterStatus master_status) override;
 
  protected:
+  DecodeExpansionOptions prepare_for_draft() const override;
+
   std::pair<torch::Tensor, torch::Tensor> run_decode_draft(
       const LlmForwardInput& input,
       LlmForwardInput& validate_input,

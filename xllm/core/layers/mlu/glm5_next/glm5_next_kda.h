@@ -42,17 +42,6 @@ torch::Tensor glm5_next_safe_gate(const torch::Tensor& raw_gate,
                                   const torch::Tensor& dt_bias,
                                   float lower_bound);
 
-// Correctness-first KDA recurrence used by the MLU prefill fallback. State is
-// laid out as [batch, heads, value_dim, key_dim].
-std::tuple<torch::Tensor, torch::Tensor> glm5_next_kda_eager_recurrence(
-    const torch::Tensor& q,
-    const torch::Tensor& k,
-    const torch::Tensor& v,
-    const torch::Tensor& log_gate,
-    const torch::Tensor& beta,
-    const torch::Tensor& initial_state,
-    bool l2norm_qk);
-
 // GLM-5-Next uses a sigmoid output gate after RMSNorm. This intentionally
 // differs from Qwen's SiLU-gated RMSNorm.
 torch::Tensor glm5_next_kda_apply_output_gate(const torch::Tensor& normalized,

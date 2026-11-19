@@ -157,7 +157,7 @@ std::optional<Params> DcuGraphPersistentParam::update(
 
   std::optional<Params> params_for_capture;
   if (return_capture_params) {
-    params_for_capture.emplace(copy_graph_execution_input(params));
+    params_for_capture.emplace(params.clone().view());
   }
 
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
@@ -174,13 +174,9 @@ std::optional<Params> DcuGraphPersistentParam::update(
   }
 
   const auto build_capture_params_if_needed = [&]() -> std::optional<Params> {
-    if (!return_capture_params) {
+    if (!params_for_capture) {
       return std::nullopt;
     }
-
-    CHECK(params_for_capture.has_value())
-        << "params_for_capture should exist when return_capture_params=true";
-
     params_for_capture->enable_graph = true;
     params_for_capture->attn_metadata = attn_metadata;
 
@@ -436,7 +432,7 @@ Params DcuGraphPersistentParam::init_decode_params(
     uint32_t graph_max_seq_len) {
   update_decode_input_buffer(tokens, positions, params, padded_num_tokens);
 
-  Params decode_params = copy_graph_execution_input(params);
+  Params decode_params = params.clone().view();
   decode_params.enable_graph = true;
   decode_params.attention.device.q_seq_lens =
       q_seq_lens_values(padded_num_tokens);
@@ -583,11 +579,6 @@ bool DcuGraph::capture(ModelType* model,
         tokens, positions, params, padded_num_tokens_, graph_max_seq_len));
   }
 
-  CHECK(graph_params_opt.has_value())
-      << "DcuGraphPersistentParam::update should return native input "
-         "parameters "
-         "during capture";
-
   VLOG(1) << "DCU graph capture begin, bucket_num_tokens=" << bucket_num_tokens
           << ", actual_num_tokens=" << actual_num_tokens
           << ", graph_max_seq_len=" << graph_max_seq_len
@@ -599,7 +590,7 @@ bool DcuGraph::capture(ModelType* model,
     model->forward(persistent_param_.persistent_tokens(padded_num_tokens_),
                    persistent_param_.persistent_positions(padded_num_tokens_),
                    kv_cache,
-                   graph_params_opt.value());
+                   *graph_params_opt);
 
     auto& capture = ::xllm::runtime::dcu::GlobalCaptureInstance::get_instance();
 
@@ -609,7 +600,7 @@ bool DcuGraph::capture(ModelType* model,
         persistent_param_.persistent_tokens(padded_num_tokens_),
         persistent_param_.persistent_positions(padded_num_tokens_),
         kv_cache,
-        graph_params_opt.value());
+        *graph_params_opt);
 
     persistent_param_.set_hidden_states(forward_result.hidden_states);
 
@@ -628,7 +619,7 @@ bool DcuGraph::capture(ModelType* model,
         persistent_param_.persistent_tokens(padded_num_tokens_),
         persistent_param_.persistent_positions(padded_num_tokens_),
         kv_cache,
-        graph_params_opt.value());
+        *graph_params_opt);
 
     persistent_param_.set_hidden_states(forward_result.hidden_states);
 
@@ -822,7 +813,8 @@ ModelOutput DcuGraphExecutorImpl::run_impl(ModelType* model,
                                            std::vector<KVCache>& kv_caches,
                                            const Params& params) {
   const bool is_prefill = params.meta.batch_forward_type.is_prefill();
-  const bool is_decode = params.meta.batch_forward_type.is_decode();
+  const bool is_decode = params.meta.batch_forward_type.is_decode() &&
+                         params.meta.q_max_seq_len <= 1;
 
   VLOG(1) << "DCU executor run: "
           << "is_prefill=" << is_prefill << ", is_decode=" << is_decode

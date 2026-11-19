@@ -317,14 +317,12 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     }
 
     if (options_.enable_speculative_decode()) {
-      const bool is_target_prefill =
-          !input.input_params.meta.batch_forward_type.is_decode() &&
-          !options_.is_draft_engine();
       output_spec_hidden_states(output.sample_output,
                                 model_output,
                                 lm_head_input_indices,
                                 selected_hidden,
-                                is_target_prefill,
+                                input.input_params.meta,
+                                options_.is_draft_engine(),
                                 /*cp_enabled=*/options_.cp_size() > 1);
     }
   }
@@ -334,7 +332,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
 #if defined(USE_NPU)
   should_sync_default_stream =
       !return_model_output ||
-      !can_skip_npu_graph_decode_sync(input.input_params);
+      !can_skip_npu_graph_decode_sync(input.input_params.meta);
 #endif
   if (sync_policy != ForwardSyncPolicy::NO_SYNC && should_sync_default_stream) {
     int ret = device_.synchronize_default_stream();

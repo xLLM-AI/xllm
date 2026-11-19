@@ -179,8 +179,10 @@ class LifecycleWorker final : public LLMWorkerImpl {
     if (enable_schedule_overlap()) {
       prepare_work_before_execute(input, processed);
     } else {
-      prepare_work_before_execute_on_stream(
-          input, processed, *compute_stream_, /*record_ready_event=*/false);
+      prepare_work_before_execute(input,
+                                  processed,
+                                  compute_stream_.get(),
+                                  /*record_ready_event=*/false);
     }
   }
 
@@ -271,8 +273,7 @@ class NpuLinearStateLifecycleTest
       std::vector<int32_t> write_ids,
       std::vector<int32_t> read_ids,
       std::vector<int32_t> cached_tokens,
-      BatchForwardType forward_type = BatchForwardType::PREFILL,
-      bool is_spec_verify = false) {
+      BatchForwardType forward_type = BatchForwardType::PREFILL) {
     LlmForwardInput input;
     const int32_t rows = static_cast<int32_t>(write_ids.size());
     input.token_ids = torch::ones({rows}, torch::kInt32);
@@ -280,7 +281,6 @@ class NpuLinearStateLifecycleTest
     input.input_params.meta.num_sequences = rows;
     input.input_params.meta.q_max_seq_len = 1;
     input.input_params.meta.batch_forward_type = forward_type;
-    input.input_params.is_spec_verify = is_spec_verify;
     input.input_params.attention.host.q_seq_lens.assign(rows, 1);
     input.input_params.attention.host.kv_cache_tokens_nums =
         std::move(cached_tokens);
@@ -383,13 +383,6 @@ TEST_P(NpuLinearStateLifecycleTest, RotatesDecodeSlots) {
   verify();
 }
 
-TEST_P(NpuLinearStateLifecycleTest, RotatesSpeculativeVerifySlots) {
-  LlmForwardInput input =
-      prepare({2}, {1}, {2050}, BatchForwardType::DECODE, true);
-  run(input, {1});
-  verify();
-}
-
 TEST_P(NpuLinearStateLifecycleTest, PreservesPaddingSlot) {
   LlmForwardInput input = prepare({2, 0}, {2, 0}, {0, 128});
   run(input, {0, 0});
@@ -417,8 +410,10 @@ TEST_P(NpuLinearStateLifecycleTest, PreservesColdSlotsDuringPrepare) {
 }
 
 TEST_P(NpuLinearStateLifecycleTest, PreparesExpandedSpeculativeRows) {
-  LlmForwardInput input =
-      prepare({2, 3}, {1, 3}, {2048, 0}, BatchForwardType::DECODE, true);
+  LlmForwardInput input = prepare({2, 3},
+                                  {1, 3},
+                                  {2048, 0},
+                                  /*forward_type=*/BatchForwardType::DECODE);
   input.input_params.linear_state_validity_mask = {1, 1, 1, 0, 0, 0};
   worker_->prepare_state(input.input_params);
   run(input, {1, 1, 1, 0, 0, 0});

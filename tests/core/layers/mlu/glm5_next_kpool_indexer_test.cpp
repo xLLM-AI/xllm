@@ -987,7 +987,8 @@ TEST(Glm5NextKPoolIndexerTest, VerifyGraphRejectsAndResumesFromRestoredTail) {
   torch::Tensor live_queries = queries.narrow(0, 6, 6).clone();
   torch::Tensor live_positions = positions.narrow(0, 6, 6).clone();
   meta.is_prefill = false;
-  meta.is_spec_verify = true;
+  meta.batch_forward_type = BatchForwardType::DECODE;
+  meta.max_query_len = 2;
   meta.kv_seq_lens.fill_(12);
   meta.kv_seq_lens_vec = {12};
   prepare_glm5_next_kpool_metadata(meta, device);

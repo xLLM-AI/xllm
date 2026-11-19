@@ -55,6 +55,7 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/profile_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
@@ -127,15 +128,6 @@ class ScopedAtenLoadThreads {
   int32_t prev_threads_;
 };
 
-template <typename Input>
-void ensure_forward_input_device_tensors(Input& input,
-                                         const torch::Device& device) {
-  move_tensor_to_device_if_needed(input.token_ids, device);
-  move_tensor_to_device_if_needed(input.positions, device);
-  move_tensor_to_device_if_needed(input.sampling_params.logits_indices(),
-                                  device);
-}
-
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
     defined(USE_MUSA)
 struct LinearStateInputRows {
@@ -149,8 +141,8 @@ struct LinearStateInputRows {
 // NPU, CUDA, and MUSA workers carry the same host attention views, so they
 // derive linear-state rows identically. NPU and MUSA models also read back
 // parallel.query_start_loc.
-template <typename Params>
-LinearStateInputRows get_host_linear_state_rows(Params& input_params) {
+LinearStateInputRows get_host_linear_state_rows(
+    const ModelParamsView& input_params) {
   // Early-return on dummy/empty-shard inputs. Under dp>1, an empty shard is
   // padded with a fake token by worker_impl but its GDN-related tensors
   // (attention.device.kv_cache_tokens_nums etc.) are left undefined. Reading
@@ -183,9 +175,8 @@ LinearStateInputRows get_host_linear_state_rows(Params& input_params) {
   // metadata only for real sequences. Spec-verify intentionally expands each
   // logical row, so retain its repeated-row mask behavior.
   const int64_t cached_row_count = static_cast<int64_t>(cached_tokens.size());
-  if (!input_params.is_spec_verify &&
-      input_params.meta.batch_forward_type.is_decode() &&
-      num_reqs > cached_row_count) {
+  if (input_params.meta.batch_forward_type.is_decode() &&
+      input_params.meta.q_max_seq_len <= 1 && num_reqs > cached_row_count) {
     active_rows = cached_row_count;
   }
 #endif
@@ -194,8 +185,8 @@ LinearStateInputRows get_host_linear_state_rows(Params& input_params) {
 #endif
 
 #if defined(USE_MLU)
-template <typename Params>
-LinearStateInputRows get_mlu_linear_state_rows(Params& input_params) {
+LinearStateInputRows get_mlu_linear_state_rows(
+    const ModelParamsView& input_params) {
   const std::vector<int32_t>& cached_tokens =
       input_params.attention.host.kv_cache_tokens_nums;
   const std::vector<int32_t>& host_q_seq_lens =
@@ -229,7 +220,8 @@ LinearStateInputRows get_mlu_linear_state_rows(Params& input_params) {
       << ", slot_rows=" << slot_rows;
   // Spec verification expands rows but keeps a sequence-scoped validity mask.
   CHECK(slot_rows == active_rows ||
-        (input_params.is_spec_verify && slot_rows == sequence_rows))
+        (input_params.meta.batch_forward_type.is_decode() &&
+         input_params.meta.q_max_seq_len > 1 && slot_rows == sequence_rows))
       << "invalid MLU linear-state slot layout: sequence_rows=" << sequence_rows
       << ", active_rows=" << active_rows << ", slot_rows=" << slot_rows;
   return {cached_tokens, active_rows, /*empty_shard=*/false};
@@ -238,8 +230,8 @@ LinearStateInputRows get_mlu_linear_state_rows(Params& input_params) {
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
     defined(USE_MUSA)
-template <typename Params>
-void prepare_input_params_for_linear_attention(Params& input_params) {
+void prepare_input_params_for_linear_attention(
+    const ModelParamsView& input_params) {
 #if defined(USE_MLU)
   LinearStateInputRows rows = get_mlu_linear_state_rows(input_params);
 #else
@@ -254,32 +246,6 @@ void prepare_input_params_for_linear_attention(Params& input_params) {
 }
 #endif
 
-template <typename Input>
-void build_dummy_forward_input_impl(Input& input,
-                                    int32_t token_count,
-                                    const torch::Device& device) {
-  auto token_options = input.token_ids.defined()
-                           ? input.token_ids.options()
-                           : torch::TensorOptions().dtype(torch::kInt32);
-  auto position_options = input.positions.defined()
-                              ? input.positions.options()
-                              : torch::TensorOptions().dtype(torch::kInt32);
-  input.token_ids = torch::ones({token_count}, token_options.device(device));
-  input.positions = torch::arange(token_count, position_options.device(device));
-  input.input_params.embedding.linear_state_indices = torch::zeros(
-      {token_count}, token_options.dtype(torch::kInt32).device(device));
-  if (ModelConfig::is_python_model_impl(
-          ModelConfig::get_instance().model_impl())) {
-    auto& execution_batch = input.input_params.meta.execution_batch;
-    execution_batch.num_reqs = 0;
-    execution_batch.num_tokens = token_count;
-    execution_batch.num_scheduled_tokens.clear();
-    execution_batch.num_computed_tokens.clear();
-    execution_batch.is_prefilling.clear();
-    execution_batch.query_start_loc.assign(1, 0);
-  }
-}
-
 bool is_dp_driver(const ParallelArgs& parallel_args) {
   const int32_t tp_size = parallel_args.world_size() /
                           (parallel_args.dp_size() * parallel_args.cp_size());
@@ -288,18 +254,6 @@ bool is_dp_driver(const ParallelArgs& parallel_args) {
 }
 
 }  // namespace
-
-void build_dummy_forward_input(LlmForwardInput& input,
-                               int32_t token_count,
-                               const torch::Device& device) {
-  build_dummy_forward_input_impl(input, token_count, device);
-}
-
-void build_dummy_forward_input(VlmForwardInput& input,
-                               int32_t token_count,
-                               const torch::Device& device) {
-  build_dummy_forward_input_impl(input, token_count, device);
-}
 
 WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
                        const torch::Device& device,
@@ -705,22 +659,12 @@ void WorkerImpl::process_group_test() {
   parallel_state::gather(tensor, parallel_args_.process_group_);
 }
 
-template <typename Params>
-bool WorkerImpl::can_prepare_npu_graph_decode_input_impl(
-    const Params& input_params) const {
+bool WorkerImpl::can_prepare_npu_graph_decode_input(
+    const BatchInputMeta& meta) const {
   return can_prepare_without_compute_stream_wait() &&
          enable_schedule_overlap() &&
-         input_params.meta.batch_forward_type.has_decode();
-}
-
-bool WorkerImpl::can_prepare_npu_graph_decode_input(
-    const LlmModelParams& input_params) const {
-  return can_prepare_npu_graph_decode_input_impl(input_params);
-}
-
-bool WorkerImpl::can_prepare_npu_graph_decode_input(
-    const VlmModelParams& input_params) const {
-  return can_prepare_npu_graph_decode_input_impl(input_params);
+         (meta.batch_forward_type.is_mixed() ||
+          (meta.batch_forward_type.is_decode() && meta.q_max_seq_len <= 1));
 }
 
 bool WorkerImpl::can_prepare_without_compute_stream_wait() const {
@@ -733,27 +677,16 @@ bool WorkerImpl::can_prepare_without_compute_stream_wait() const {
 #endif
 }
 
-template <typename Params>
-bool WorkerImpl::can_skip_npu_graph_decode_sync_impl(
-    const Params& input_params) const {
+bool WorkerImpl::can_skip_npu_graph_decode_sync(
+    const BatchInputMeta& meta) const {
 #if defined(USE_NPU)
-  return can_prepare_npu_graph_decode_input(input_params) &&
-         input_params.meta.batch_forward_type.is_decode() &&
+  return meta.batch_forward_type.is_decode() &&
+         can_prepare_npu_graph_decode_input(meta) &&
          options_.kv_cache_transfer_mode() != "PUSH";
 #else
-  (void)input_params;
+  (void)meta;
   return false;
 #endif
-}
-
-bool WorkerImpl::can_skip_npu_graph_decode_sync(
-    const LlmModelParams& input_params) const {
-  return can_skip_npu_graph_decode_sync_impl(input_params);
-}
-
-bool WorkerImpl::can_skip_npu_graph_decode_sync(
-    const VlmModelParams& input_params) const {
-  return can_skip_npu_graph_decode_sync_impl(input_params);
 }
 
 folly::SemiFuture<std::tuple<int64_t, int64_t>>
@@ -850,7 +783,7 @@ void WorkerImpl::prepare_linear_state_cache(const ModelParamsView& params) {
       ModelConfig::get_instance().model_impl());
   reads_distinct_state =
       (is_python_model && is_glm5_next_target_model_type(args.model_type()) &&
-       params.meta.batch_forward_type.no_decode() && !params.is_spec_verify) ||
+       params.meta.batch_forward_type.no_decode()) ||
       (!is_python_model && is_qwen3_5_target_model_type(args.model_type()));
 #endif
   restore_linear_state_slots(kv_caches_,
@@ -859,31 +792,6 @@ void WorkerImpl::prepare_linear_state_cache(const ModelParamsView& params) {
                              params.linear_state_validity_mask,
                              reads_distinct_state);
 #endif
-}
-
-template <typename Input>
-void WorkerImpl::prepare_schedule_overlap_impl(const Input& input) {
-#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
-    defined(USE_MUSA)
-  if (has_request_state_cache()) {
-    c10::StreamGuard compute_guard = compute_stream_->set_stream_guard();
-    if (input.runtime.metadata_ready_event != nullptr) {
-      CHECK(compute_stream_->wait_event(input.runtime.metadata_ready_event))
-          << "failed to wait input metadata ready event on compute stream";
-    }
-    prepare_linear_state_cache(ModelParamsView(input.input_params));
-  }
-#else
-  (void)input;
-#endif
-}
-
-void WorkerImpl::prepare_schedule_overlap(const LlmForwardInput& input) {
-  prepare_schedule_overlap_impl(input);
-}
-
-void WorkerImpl::prepare_schedule_overlap(const VlmForwardInput& input) {
-  prepare_schedule_overlap_impl(input);
 }
 
 template <typename Input>
@@ -929,31 +837,32 @@ DpEpPaddingData WorkerImpl::build_dp_ep_padding_data(
   return padding.build();
 }
 
-template <typename Params>
-void WorkerImpl::prepare_dp_ep_padding_impl(Params& input_params) {
-  if (!uses_npu_dp_ep_padding()) {
-    return;
+bool WorkerImpl::use_chunked_decode_attention(
+    const BatchInputMeta& meta) const {
+  if (!options_.is_draft_engine()) {
+    return meta.batch_forward_type.is_decode() && meta.q_max_seq_len > 1;
   }
-  input_params.parallel.dp_ep_padding_data = build_dp_ep_padding_data(
-      input_params.parallel.dp_global_token_nums,
-      input_params.parallel.raw_dp_global_token_nums,
-      input_params.meta.batch_forward_type.no_decode());
+  return meta.batch_forward_type.is_decode() &&
+         SpeculativeConfig::chunked_block_diffusion(
+             options_.speculative_algorithm(),
+             context_.get_model_args().model_type())
+             .value_or(/*default_value=*/false);
 }
 
-void WorkerImpl::prepare_dp_ep_padding(LlmModelParams& input_params) {
-  prepare_dp_ep_padding_impl(input_params);
+bool WorkerImpl::use_prefill_dp_ep_padding(const BatchInputMeta& meta) const {
+  return meta.batch_forward_type.no_decode() ||
+         use_chunked_decode_attention(meta);
 }
 
-void WorkerImpl::prepare_dp_ep_padding(VlmModelParams& input_params) {
-  prepare_dp_ep_padding_impl(input_params);
+void WorkerImpl::prepare_dp_ep_padding(const ModelParamsView& params) const {
+  params.parallel.dp_ep_padding_data =
+      build_dp_ep_padding_data(params.parallel.dp_global_token_nums,
+                               params.parallel.raw_dp_global_token_nums,
+                               use_prefill_dp_ep_padding(params.meta));
 }
 
-template <typename Params>
-void WorkerImpl::prepare_dp_ep_padding_on_stream_impl(Params& input_params,
-                                                      Stream& prepare_stream) {
-  if (!uses_npu_dp_ep_padding()) {
-    return;
-  }
+void WorkerImpl::prepare_dp_ep_padding_on_stream(const ModelParamsView& params,
+                                                 Stream& prepare_stream) const {
   std::optional<std::unique_lock<std::mutex>> lock_guard;
   if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
     auto& capture_lock =
@@ -962,25 +871,9 @@ void WorkerImpl::prepare_dp_ep_padding_on_stream_impl(Params& input_params,
     lock_guard.emplace(capture_lock);
   }
   c10::StreamGuard stream_guard = prepare_stream.set_stream_guard();
-  prepare_dp_ep_padding(input_params);
-}
-
-void WorkerImpl::prepare_dp_ep_padding_on_stream(LlmModelParams& input_params,
-                                                 Stream& prepare_stream) {
-  prepare_dp_ep_padding_on_stream_impl(input_params, prepare_stream);
-}
-
-void WorkerImpl::prepare_dp_ep_padding_on_stream(VlmModelParams& input_params,
-                                                 Stream& prepare_stream) {
-  prepare_dp_ep_padding_on_stream_impl(input_params, prepare_stream);
+  prepare_dp_ep_padding(params);
 }
 #endif
-
-void WorkerImpl::prepare_work_before_execute(const LlmForwardInput& input,
-                                             LlmForwardInput& processed_input) {
-  prepare_work_before_execute_on_stream(
-      input, processed_input, *prepare_stream_);
-}
 
 void WorkerImpl::initialize_shared_full_blocks(
     const std::vector<int32_t>& full_block_rows,
@@ -1055,158 +948,38 @@ void WorkerImpl::prepare_dummy_input(Input& input) {
       !params.meta.batch_forward_type.is_empty() &&
       (parallel_args_.dp_size() > 1 || parallel_args_.ep_size() > 1 ||
        !parallel_args_.mapping_data().empty())) {
-    build_dummy_forward_input(input, 1, device_);
+    build_dummy_forward_input(input, /*num_speculative_tokens=*/0, device_);
   }
 }
-
-template <typename Input>
-void WorkerImpl::prepare_work_before_execute_on_stream_impl(
-    const Input& input,
-    Input& processed_input,
-    Stream& prepare_stream,
-    bool record_ready_event) {
-  if (!input.json_object_state_snapshots.empty()) {
-    Input restored_input = input.clone();
-    restore_json_object_states(restored_input);
-    prepare_work_before_execute_on_stream_impl(
-        restored_input, processed_input, prepare_stream, record_ready_event);
-    return;
-  }
-#if defined(USE_NPU)
-  // Without device_capture_lock, ACL graph capture will be interrupted by the
-  // synchronization H2D of data update streams asynchronously scheduled by
-  // other threads, even if the capture and synchronization streams are not
-  // the same, and even if capture_mode is set to
-  // ACL_MODEL_RI_CAPTURE_MODE_THREAD_LOCAL.
-  // The possible reason is that ACL graph capture may use additional
-  // auxiliary streams, and these auxiliary streams might be the same as the
-  // asynchronously scheduled data update streams.
-
-  std::optional<std::unique_lock<std::mutex>> lock_guard;
-  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
-    auto& capture_lock =
-        ::xllm::npu::DeviceCaptureLock::get_instance().get_lock(
-            device_.index());
-    lock_guard.emplace(capture_lock);
-  }
-#endif
-  c10::StreamGuard stream_guard = prepare_stream.set_stream_guard();
-  if (enable_schedule_overlap() && !can_prepare_without_compute_stream_wait() &&
-      compute_stream_) {
-    prepare_stream.wait_stream(*compute_stream_);
-  }
-  CHECK(prepare_stream.wait_event(input.runtime.metadata_ready_event))
-      << "failed to wait input metadata ready event on worker prepare stream";
-
-  auto prepare_device_on_stream = [&]() {
-    processed_input = input.to(device_, dtype_);
-    // Packed RPC/SHM inputs deserialize JSON snapshots inside
-    // Input::to. Restore them before speculative dispatch so MTP sees
-    // the grammar rows.
-    if (processed_input.json_object_states.empty() &&
-        !processed_input.json_object_state_snapshots.empty()) {
-      restore_json_object_states(processed_input);
-    }
-    ensure_forward_input_device_tensors(processed_input, device_);
-
-    auto& input_params = processed_input.input_params;
-
-    prepare_model_input(processed_input);
-    if (input_params.meta.num_sequences == 0 &&
-        (!processed_input.token_ids.defined() ||
-         processed_input.token_ids.numel() == 0)) {
-      return;
-    }
-
-    // Initialize newly allocated shared rows and publish their mappings.
-    prepare_shared_kv_cache(input_params.embedding.full_block_slot_rows,
-                            input_params.embedding.full_block_lease_epochs,
-                            input_params.embedding.linear_state_slot_rows,
-                            prepare_stream);
-
-#if defined(USE_NPU)
-    if (context_.get_model_args().enable_mla() &&
-        input_params.meta.batch_forward_type.is_chunked_prefill()) {
-      prepare_mla_prefixcache_inputs(input_params);
-    }
-
-    if (owns_npu_parallel_input_prepare()) {
-      prepare_dp_ep_padding(processed_input.input_params);
-    }
-    prepare_expert_input(input_params.expert);
-#endif
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
     defined(USE_MUSA)
-    // SpeculativeWorkerImpl carries the target model context but delegates
-    // target/draft execution to its inner workers and therefore owns no KV
-    // cache itself.  In particular, a Qwen3.5/3.8 target advertises linear
-    // attention while the outer DFlash worker's kv_caches_ is empty.  Let the
-    // inner target worker (which owns the recurrent cache) perform preparation
-    // and restore; attempting it here would treat target cache operations as
-    // draft operations and fail discover_num_slots().
-    if (has_request_state_cache()) {
-      prepare_input_params_for_linear_attention(input_params);
-      // Overlap restores in the worker thread on compute_stream_, after the
-      // preceding chunk finishes writing its live slots.
-      if (!enable_schedule_overlap()) {
-        prepare_linear_state_cache(ModelParamsView(input_params));
-      }
-    }
-#endif
-
+void WorkerImpl::prepare_execution_metadata(
+    const ModelParamsView& input_params) {
 #if defined(USE_NPU)
-    // CP prepare after global attention-meta consumers.
+  if (context_.get_model_args().enable_mla() &&
+      (input_params.meta.batch_forward_type.is_chunked_prefill() ||
+       use_chunked_decode_attention(input_params.meta))) {
+    prepare_mla_prefixcache_inputs(input_params);
+  }
 
-    if (can_prepare_npu_graph_decode_input(input_params)) {
-      ModelParamsView execution_params(processed_input.input_params);
-      model_executor_->prepare_graph_input(processed_input.token_ids,
-                                           processed_input.positions,
-                                           kv_caches_,
-                                           execution_params);
-    }
-
+  if (owns_npu_parallel_input_prepare() && uses_npu_dp_ep_padding()) {
+    prepare_dp_ep_padding(input_params);
+  }
+  prepare_expert_input(input_params.expert);
 #endif
-  };
 
-  prepare_device_on_stream();
-
-  if (record_ready_event) {
-    processed_input.runtime.metadata_ready_event =
-        prepare_stream.record_event_or_sync();
-  } else {
-    processed_input.runtime.metadata_ready_event.reset();
-  }
-}
-
-template <typename Input>
-void WorkerImpl::restore_json_object_states_impl(Input& input) {
-  if (input.json_object_state_snapshots.empty()) {
-    return;
-  }
-  CHECK(tokenizer_ != nullptr)
-      << "JSON object state restoration requires a worker tokenizer";
-
-  std::vector<JsonObjectGrammarState> states;
-  states.reserve(input.json_object_state_snapshots.size());
-  for (const auto& snapshot : input.json_object_state_snapshots) {
-    if (!snapshot.enabled) {
-      states.emplace_back();
-      continue;
+  // The inner target worker owns the recurrent cache.
+  if (has_request_state_cache()) {
+    prepare_input_params_for_linear_attention(input_params);
+    // Overlap restores in the worker thread on compute_stream_, after the
+    // preceding chunk finishes writing its live slots.
+    if (!enable_schedule_overlap()) {
+      prepare_linear_state_cache(input_params);
     }
-
-    std::shared_ptr<const JsonObjectGrammar> grammar =
-        ensure_json_object_grammar(snapshot.reasoning_enabled);
-    CHECK(grammar != nullptr) << "Failed to restore JSON object grammar";
-
-    JsonObjectGrammarState state = grammar->restore_state(snapshot);
-    CHECK(state.is_valid())
-        << "Serialized JSON object grammar state is invalid";
-    states.push_back(std::move(state));
   }
-  input.json_object_states = std::move(states);
-  input.json_object_state_snapshots.clear();
 }
+#endif
 
 std::shared_ptr<const JsonObjectGrammar> WorkerImpl::ensure_json_object_grammar(
     bool reasoning_enabled) {
@@ -1950,8 +1723,9 @@ void WorkerImpl::init_hierarchy_kv_transfer(
                               hierarchy_kv_cache_role_.value(),
                               hierarchy_kv_cache_producer_stream_);
 }
-template <typename Params>
-void WorkerImpl::prepare_mla_prefixcache_inputs_impl(Params& input_params) {
+#if defined(USE_NPU)
+void WorkerImpl::prepare_mla_prefixcache_inputs(
+    const ModelParamsView& input_params) {
   const bool has_prefixcache_metadata =
       input_params.meta.num_sequences > 0 &&
       input_params.attention.device.kv_cache_tokens_nums.defined() &&
@@ -1995,40 +1769,7 @@ void WorkerImpl::prepare_mla_prefixcache_inputs_impl(Params& input_params) {
       cached_tokens.begin(),
       cached_tokens.end());
 }
-
-void WorkerImpl::prepare_mla_prefixcache_inputs(LlmModelParams& input_params) {
-  prepare_mla_prefixcache_inputs_impl(input_params);
-}
-
-void WorkerImpl::prepare_mla_prefixcache_inputs(VlmModelParams& input_params) {
-  prepare_mla_prefixcache_inputs_impl(input_params);
-}
-
-void WorkerImpl::prepare_work_before_execute_on_stream(
-    const LlmForwardInput& input,
-    LlmForwardInput& processed_input,
-    Stream& prepare_stream,
-    bool record_ready_event) {
-  prepare_work_before_execute_on_stream_impl(
-      input, processed_input, prepare_stream, record_ready_event);
-}
-
-void WorkerImpl::prepare_work_before_execute_on_stream(
-    const VlmForwardInput& input,
-    VlmForwardInput& processed_input,
-    Stream& prepare_stream,
-    bool record_ready_event) {
-  prepare_work_before_execute_on_stream_impl(
-      input, processed_input, prepare_stream, record_ready_event);
-}
-
-void WorkerImpl::restore_json_object_states(LlmForwardInput& input) {
-  restore_json_object_states_impl(input);
-}
-
-void WorkerImpl::restore_json_object_states(VlmForwardInput& input) {
-  restore_json_object_states_impl(input);
-}
+#endif
 
 folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
     const LlmForwardInput& input) {
@@ -2038,12 +1779,6 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
 folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
     const VlmForwardInput& input) {
   return step_async_impl(input);
-}
-
-void WorkerImpl::prepare_work_before_execute(const VlmForwardInput& input,
-                                             VlmForwardInput& processed_input) {
-  prepare_work_before_execute_on_stream(
-      input, processed_input, *prepare_stream_);
 }
 
 std::optional<ForwardOutput> WorkerImpl::step(

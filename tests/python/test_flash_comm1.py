@@ -76,7 +76,7 @@ def _gdn_build(builder: Qwen3_5GdnMetadataBuilder, metadata: SimpleNamespace) ->
 
 
 def _metadata(num_tokens: int, **overrides: bool) -> SimpleNamespace:
-    fields = dict(is_prefill=True, is_chunked_prefill=False, is_mixed=False, is_spec_verify=False, is_dummy=False)
+    fields = {"is_prefill": True, "is_chunked_prefill": False, "is_mixed": False, "is_dummy": False}
     fields.update(overrides)
     return SimpleNamespace(slot_mapping=torch.zeros(num_tokens, dtype=torch.int32), **fields)
 
@@ -136,7 +136,7 @@ def test_prefill_threshold(num_tokens: int, active: bool) -> None:
         assert context.local_num_tokens * context.tp_size >= num_tokens
 
 
-@pytest.mark.parametrize("excluded", ["is_mixed", "is_spec_verify", "is_dummy"])
+@pytest.mark.parametrize("excluded", ["is_mixed", "is_target_verify", "is_dummy"])
 def test_excluded_batches_keep_replicated_rows(excluded: str) -> None:
     assert FlashComm1MetadataBuilder(2, 0, 0).build(*_flashcomm_inputs(33, **{excluded: True})) is None
 

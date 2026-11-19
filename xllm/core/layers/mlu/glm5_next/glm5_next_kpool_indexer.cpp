@@ -749,7 +749,8 @@ std::tuple<torch::Tensor, torch::Tensor> Glm5NextKPoolIndexerImpl::forward(
   const Execution execution = prepare_execution(attn_metadata, positions);
   CHECK_EQ(execution.batch->row_batch.numel(), positions.numel());
   CHECK(execution.batch->tail_indices.defined());
-  if (attn_metadata.is_spec_verify) {
+  if (attn_metadata.batch_forward_type.is_decode() &&
+      attn_metadata.max_query_len > 1) {
     CHECK_LE(util::max_len(execution.batch->q_seq_lens),
              tail_cache.size(2) - index_kpool_)
         << "KPool tail capacity does not cover the speculative write window.";

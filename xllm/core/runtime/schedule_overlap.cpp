@@ -116,7 +116,7 @@ void ScheduleOverlap::prepare_continuation_impl(WorkerImpl& worker,
     replace_tokens(
         input,
         prior_output,
-        worker.can_prepare_npu_graph_decode_input(input.input_params));
+        worker.can_prepare_npu_graph_decode_input(input.input_params.meta));
   }
 }
 

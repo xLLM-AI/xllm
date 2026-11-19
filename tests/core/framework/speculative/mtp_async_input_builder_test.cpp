@@ -31,7 +31,6 @@ limitations under the License.
 #include "core/kernels/npu/tilelang/mtp_prepare_next_draft.h"
 #include "core/kernels/xllm_torch_ops.h"
 #include "core/layers/common/attention_metadata.h"
-#include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/py_attention_metadata.h"
@@ -322,7 +321,10 @@ TEST(MtpAsyncInputBuilderTest, PybindViewOwnsGlobalDpKvMaxSequenceLengths) {
       params.parallel.dp_global_token_nums = {expected[0] == 0 ? 0 : 1,
                                               expected[1] == 0 ? 0 : 1};
       params.parallel.dp_global_kv_max_seq_lens = expected;
-      py_metadata = py::cast(PyAttentionMetadataView(metadata, params));
+      py_metadata =
+          py::cast(PyAttentionMetadataView(metadata,
+                                           params,
+                                           /*is_draft_engine=*/false));
       EXPECT_EQ(py_metadata.attr("raw_dp_execution_token_counts")
                     .cast<std::vector<int32_t>>(),
                 params.parallel.dp_global_token_nums);
@@ -375,7 +377,10 @@ TEST(MtpAsyncInputBuilderTest, PybindViewExposesLinearStateReadAndWriteSlots) {
   params.embedding.linear_state_read_ids = {2, 6};
   params.meta.batch_forward_type = BatchForwardType::PREFILL;
 
-  py::object py_metadata = py::cast(PyAttentionMetadataView(metadata, params));
+  py::object py_metadata =
+      py::cast(PyAttentionMetadataView(metadata,
+                                       params,
+                                       /*is_draft_engine=*/false));
   EXPECT_TRUE(torch::equal(
       py_metadata.attr("linear_state_indices").cast<torch::Tensor>(),
       torch::tensor({3, 7}, torch::kInt)));
@@ -435,7 +440,10 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   params.parallel.dp_global_token_nums = {6, 0};
   params.parallel.dp_global_sequence_nums = {3, 0};
   params.parallel = params.parallel.to(torch::Device(torch::kCPU));
-  py::object py_metadata = py::cast(PyAttentionMetadataView(metadata, params));
+  py::object py_metadata =
+      py::cast(PyAttentionMetadataView(metadata,
+                                       params,
+                                       /*is_draft_engine=*/false));
   EXPECT_EQ(
       py_metadata.attr("dp_global_sequence_nums").cast<std::vector<int32_t>>(),
       (std::vector<int32_t>{3, 0}));
@@ -461,10 +469,12 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   const torch::Tensor table = torch::tensor({{10, 11}}, torch::kInt);
   const torch::Tensor lengths = torch::tensor({128}, torch::kInt);
   const torch::Tensor slots = torch::tensor({1407}, torch::kInt);
-  auto sparse = std::make_shared<layer::AttentionMetadata>(
-      layer::AttentionMetadataBuilder::build_mtp_sparse_decode(
-          table, lengths, slots, /*block_size=*/128));
-  py::object sparse_view = py::cast(PyAttentionMetadataView(sparse, params));
+  auto sparse = std::make_shared<layer::AttentionMetadata>();
+  sparse->block_table = table;
+  sparse->kv_seq_lens = lengths;
+  sparse->slot_mapping = slots;
+  py::object sparse_view = py::cast(
+      PyAttentionMetadataView(sparse, params, /*is_draft_engine=*/false));
   const torch::Tensor view_table =
       sparse_view.attr("block_table").cast<torch::Tensor>();
   const torch::Tensor view_lengths =
@@ -474,11 +484,6 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   EXPECT_EQ(view_table.data_ptr(), table.data_ptr());
   EXPECT_EQ(view_lengths.data_ptr(), lengths.data_ptr());
   EXPECT_EQ(view_slots.data_ptr(), slots.data_ptr());
-  EXPECT_TRUE(sparse->kv_seq_lens_vec.empty());
-  EXPECT_FALSE(sparse->kv_seq_lens_host.defined());
-  EXPECT_FALSE(sparse->paged_kv_indptr.defined());
-  EXPECT_FALSE(sparse->paged_kv_indices.defined());
-  EXPECT_FALSE(sparse->expanded_decode.enabled);
 
   // The Python view retains the owner as the request crosses a page boundary.
   sparse.reset();

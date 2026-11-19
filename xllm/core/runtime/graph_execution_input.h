@@ -31,12 +31,6 @@ limitations under the License.
 
 namespace xllm {
 
-// ModelParamsView retains its cloned owner. Tensor handles share storage.
-inline ModelParamsView copy_graph_execution_input(
-    const ModelParamsView& params) {
-  return params.clone().view();
-}
-
 // Borrow unchanged execution input. Detach host metadata only when graph
 // preparation changes it; tensor storage deliberately remains shared.
 // The source must outlive this adapter, including when it already owns a view.
@@ -56,7 +50,7 @@ class GraphExecutionInput final {
 
   Params& mutable_params() {
     if (!owned_params_) {
-      owned_params_.emplace(copy_graph_execution_input(source_));
+      owned_params_.emplace(source_.clone().view());
     }
     return *owned_params_;
   }
@@ -101,7 +95,7 @@ inline void fill_persistent_graph_cu_seq_lens(const Params& params,
       params.attention.device.kv_seq_lens, actual_batch_size, kv_cu_seq_lens);
 
   if (params.meta.batch_forward_type.is_decode() &&
-      padded_num_tokens > actual_num_tokens) {
+      params.meta.q_max_seq_len <= 1 && padded_num_tokens > actual_num_tokens) {
     util::pad_query_start_loc(
         kv_cu_seq_lens, actual_batch_size + 1, padded_num_tokens + 1);
   }

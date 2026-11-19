@@ -167,8 +167,7 @@ class HybridConv1dMockLM final : public CausalLM {
     auto graph_context = params.graph.acl_graph_task_update_context;
     const bool register_graph_task =
         graph_context != nullptr && graph_context->capturing;
-    if (register_graph_task &&
-        params.graph.use_expanded_decode_for_spec_verify_attention) {
+    if (register_graph_task && !params.graph.expanded_kv_seq_lens_vec.empty()) {
       captured_spec_verify_block_tables_ = params.graph.expanded_block_tables;
     }
 
@@ -183,16 +182,18 @@ class HybridConv1dMockLM final : public CausalLM {
       torch::Tensor conv_input =
           hidden.slice(/*dim=*/1, 0, kConvChannels).contiguous();
 
-      const bool is_spec_verify = params.is_spec_verify;
+      const bool is_target_verify =
+          params.meta.batch_forward_type.is_decode() &&
+          params.meta.q_max_seq_len > 1;
       const std::vector<int64_t> empty_host_args;
       const std::vector<int64_t> cache_indices(
           params.embedding.linear_state_ids.begin(),
           params.embedding.linear_state_ids.end());
       const auto& nat_ref =
-          is_spec_verify ? params.num_accepted_tokens_host : empty_host_args;
+          is_target_verify ? params.num_accepted_tokens_host : empty_host_args;
 
       if (register_graph_task) {
-        const auto branch = is_spec_verify
+        const auto branch = is_target_verify
                                 ? npu::CausalConv1dGraphBranch::kSpecVerify
                                 : npu::CausalConv1dGraphBranch::kDecode;
 
@@ -627,11 +628,9 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
                                int32_t num_spec_tokens) {
     int32_t total_tokens = num_sequences * num_spec_tokens;
 
-    fi.input_params.meta.batch_forward_type =
-        BatchForwardType(BatchForwardType::CHUNKED_PREFILL);
+    fi.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
     fi.input_params.meta.q_max_seq_len = num_spec_tokens;
     fi.input_params.meta.num_sequences = num_sequences;
-    fi.input_params.is_spec_verify = true;
 
     fi.input_params.attention.host.q_seq_lens.assign(
         static_cast<size_t>(num_sequences), num_spec_tokens);
@@ -1054,7 +1053,6 @@ TEST_F(AclGraphTaskUpdateTest, CaptureReplayVsEagerSpecVerifyBranch) {
   fi = fi.to(*device_, kDtype);
   setup_spec_verify_input(fi, kNumSequences, kNumSpecTokens);
 
-  ASSERT_TRUE(fi.input_params.is_spec_verify);
   ASSERT_EQ(fi.input_params.num_accepted_tokens_host.size(),
             static_cast<size_t>(kNumSequences));
 

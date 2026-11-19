@@ -158,7 +158,7 @@ class DenseDcpMetadataBuilder:
         return query_ends, local_lengths, empty_rows, any(global_lengths)
 
     def _local_slots(self, input_batch: InputBatch, metadata: AttentionMetadata) -> torch.Tensor:
-        if getattr(metadata, "is_spec_verify", False):
+        if getattr(metadata, "is_target_verify", False):
             raise NotImplementedError("Dense DCP attention does not support speculative verification")
         if not metadata.has_kv_shard:
             raise RuntimeError("Dense DCP requires upstream KV-shard metadata")

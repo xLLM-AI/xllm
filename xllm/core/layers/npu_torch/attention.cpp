@@ -248,8 +248,8 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
   }
 
   const bool use_fia_graph_decode =
-      enable_fia_decode_ &&
-      (!attn_metadata.is_spec_verify || attn_metadata.expanded_decode.enabled);
+      enable_fia_decode_ && (attn_metadata.max_query_len <= 1 ||
+                             attn_metadata.expanded_decode.enabled);
   if (tiling_data.defined() && !use_fia_graph_decode) {
     xllm::kernel::npu::batch_decode_acl_graph(query,
                                               k_cache,

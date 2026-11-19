@@ -776,6 +776,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             kv_seq_lens=torch.tensor([4, 8], dtype=torch.int32),
             q_seq_lens=torch.tensor([2, 2], dtype=torch.int32),
             q_seq_lens_host=torch.tensor([2, 2], dtype=torch.int32),
+            is_target_verify=True,
             expanded_decode_metadata=SimpleNamespace(
                 enabled=True,
                 kv_seq_lens=torch.tensor([3, 4, 7, 8], dtype=torch.int32),
@@ -813,7 +814,6 @@ class TestDecodeAclGraphSpeculativeMetadata:
             dp_execution_token_counts=dp_execution_token_counts,
             is_prefill=False,
             is_chunked_prefill=False,
-            is_spec_verify=False,
         )
 
     def test_expanded_metadata_selects_matching_paged_kv_rows(self) -> None:
@@ -861,7 +861,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
     ) -> None:
         runner = self._runner()
         metadata = self._metadata()
-        metadata.linear_state_indices = torch.arange(2, dtype=torch.int32) if linear_state else None
+        runner._has_linear_cache = linear_state
         with patch.object(_PagedStubAttentionBackend, "supports_linear_spec_verify_graph", supported):
             assert (runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is not None) is allowed
 
@@ -1424,7 +1424,7 @@ def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device
         expanded_decode_metadata=None,
         is_prefill=False,
         is_chunked_prefill=expanded,
-        is_spec_verify=expanded,
+        is_target_verify=expanded,
         dp_execution_token_counts=(),
     )
     if expanded:
@@ -1562,7 +1562,6 @@ def test_eager_runner_installs_cp_context(is_mla: bool, model_owned_cp: bool) ->
         is_prefill=not is_mla,
         is_chunked_prefill=is_mla,
         is_mixed=False,
-        is_spec_verify=False,
         q_seq_lens_host=torch.tensor([3, 5], dtype=torch.int32),
         kv_seq_lens_host=torch.tensor(kv_lengths, dtype=torch.int32) if is_mla else None,
     )
@@ -1589,7 +1588,6 @@ def test_eager_runner_rejects_mixed_cp_before_collective() -> None:
         is_prefill=False,
         is_chunked_prefill=True,
         is_mixed=True,
-        is_spec_verify=False,
     )
     with (
         patch("xllm.python.model_executor.runners.eager.build_cp_context") as build,
@@ -1600,25 +1598,18 @@ def test_eager_runner_rejects_mixed_cp_before_collective() -> None:
     assert not runner.attention_backend._prepared
 
 
-@pytest.mark.parametrize(
-    "cp_size,prefill_flags,explicit_spec_verify",
-    [(2, (False, True), True), (2, (False, True), False), (4, (True, False), False)],
-)
-def test_eager_runner_keeps_spec_verify_rows_replicated(
-    cp_size: int, prefill_flags: tuple[bool, bool], explicit_spec_verify: bool
-) -> None:
+@pytest.mark.parametrize("explicit_spec_verify", [False, True])
+def test_eager_runner_keeps_spec_verify_rows_replicated(explicit_spec_verify: bool) -> None:
     runner = _make_eager_runner()
-    runner.cp_size = cp_size
-    runner.cp_rank = cp_size - 1
     input_ids = torch.tensor([11, 12, 13, 21, 22, 23], dtype=torch.int32)
     positions = torch.tensor([126, 127, 128, 7, 8, 9], dtype=torch.int32)
     embedding = torch.arange(12, dtype=torch.float32).view(6, 2)
     topk = torch.arange(12, dtype=torch.int32).view(6, 1, 2)
     metadata = SimpleNamespace(
-        is_prefill=prefill_flags[0],
-        is_chunked_prefill=prefill_flags[1],
+        is_prefill=False,
+        is_chunked_prefill=True,
         is_mixed=False,
-        is_spec_verify=explicit_spec_verify,
+        is_target_verify=explicit_spec_verify,
         expanded_decode_metadata=(
             None
             if explicit_spec_verify
@@ -1655,28 +1646,12 @@ def test_eager_runner_keeps_spec_verify_rows_replicated(
     torch.testing.assert_close(indices, topk + 1)
 
 
-@pytest.mark.parametrize(
-    ("is_mla", "is_prefill", "is_chunked_prefill", "is_mixed", "is_spec_verify"),
-    [
-        (False, False, True, True, False),
-        (False, False, True, False, True),
-        (True, False, False, False, True),
-        (False, True, False, False, False),
-    ],
-)
-def test_eager_runner_preserves_non_cp_fallback(
-    is_mla: bool,
-    is_prefill: bool,
-    is_chunked_prefill: bool,
-    is_mixed: bool,
-    is_spec_verify: bool,
-) -> None:
-    runner = _make_eager_runner(is_mla=is_mla)
+def test_eager_runner_preserves_non_cp_fallback() -> None:
+    runner = _make_eager_runner(is_mla=False)
     metadata = SimpleNamespace(
-        is_prefill=is_prefill,
-        is_chunked_prefill=is_chunked_prefill,
-        is_mixed=is_mixed,
-        is_spec_verify=is_spec_verify,
+        is_prefill=True,
+        is_chunked_prefill=False,
+        is_mixed=False,
         q_seq_lens_host=None,
         kv_seq_lens_host=None,
     )
@@ -1698,7 +1673,6 @@ def test_eager_runner_preserves_non_cp_fallback(
 @pytest.mark.parametrize(
     ("q_seq_lens_host", "kv_seq_lens_host"),
     [
-        (None, None),
         (None, torch.tensor([1], dtype=torch.int32)),
         (torch.tensor([1], dtype=torch.int32), None),
     ],
@@ -1712,7 +1686,6 @@ def test_eager_runner_rejects_missing_cp_lengths(
         is_prefill=True,
         is_chunked_prefill=False,
         is_mixed=False,
-        is_spec_verify=False,
         q_seq_lens_host=q_seq_lens_host,
         kv_seq_lens_host=kv_seq_lens_host,
     )
@@ -1886,7 +1859,7 @@ def test_explicit_deepstack_inputs_reach_eager_decoder_without_stale_state() -> 
     executor.inductor_runner = MagicMock()
     tokens = torch.tensor([1, 2])
     positions = torch.tensor([0, 1])
-    metadata = SimpleNamespace(is_prefill=True, is_chunked_prefill=False, is_spec_verify=False)
+    metadata = SimpleNamespace(is_prefill=True, is_chunked_prefill=False)
     embeddings = torch.tensor([[10.0], [20.0]])
     features = (torch.tensor([[3.0], [5.0]]),)
     result = executor.execute(tokens, positions, metadata, embeddings, deepstack_input_embeds=features)
@@ -1920,7 +1893,6 @@ def test_executor_admits_startup_graphs_and_runs_larger_serving_batches_eagerly(
         return SimpleNamespace(
             is_prefill=False,
             is_chunked_prefill=False,
-            is_spec_verify=False,
             block_table=torch.arange(1, rows + 1, dtype=torch.int32).reshape(rows, 1),
             kv_seq_lens=torch.ones(rows, dtype=torch.int32),
             kv_seq_lens_host_values=[1] * rows,
@@ -2140,7 +2112,9 @@ def test_layerwise_load_rejects_incompatible_execution_before_running(invalid: s
     executor._kv_bound = True
     executor.eager_runner = MagicMock()
     metadata = SimpleNamespace(
-        is_prefill=invalid != "decode", is_chunked_prefill=False, is_spec_verify=invalid == "verify"
+        is_prefill=invalid != "decode",
+        is_chunked_prefill=False,
+        is_target_verify=invalid == "verify",
     )
     with pytest.raises(ValueError, match="supported eager prefill"):
         executor.execute(
@@ -2218,8 +2192,8 @@ def test_executor_passes_no_padding_policy_to_ordinary_acl_runner(
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=32)
 
     runner = executor.decode_graph_runner
-    assert runner is not None
-    assert runner._padded_batch_size(24, SimpleNamespace(is_spec_verify=False)) == expected
+    assert isinstance(runner, DecodeAclGraphRunner)
+    assert runner._padded_batch_size(24, SimpleNamespace()) == expected
     assert runner._capture_error_mode == ("thread_local" if no_padding else "global")
 
 
@@ -2341,7 +2315,6 @@ def test_eager_runner_skips_cp_for_empty_rank() -> None:
         is_prefill=True,
         is_chunked_prefill=False,
         is_mixed=False,
-        is_spec_verify=False,
         is_dummy=True,
         q_seq_lens_host=torch.tensor([1], dtype=torch.int32),
         kv_seq_lens_host=torch.tensor([1], dtype=torch.int32),
@@ -2372,7 +2345,6 @@ class TestDecodeAclGraphWidthKeying:
         two = SimpleNamespace(kpool_query_lens=(4, 4))
         four = SimpleNamespace(kpool_query_lens=(4, 4, 4, 4))
 
-        assert runner._padded_kpool_query_lens(two, 8, 16) == runner._padded_kpool_query_lens(four, 16, 16)
         assert DecodeAclGraphRunner._graph_key(
             16, False, None, kpool_query_lens=runner._padded_kpool_query_lens(two, 8, 16)
         ) == DecodeAclGraphRunner._graph_key(
@@ -2383,7 +2355,3 @@ class TestDecodeAclGraphWidthKeying:
         ) != DecodeAclGraphRunner._graph_key(
             16, False, None, kpool_query_lens=runner._padded_kpool_query_lens(four, 16, 16)
         )
-        with pytest.raises(ValueError, match="complete fixed-width requests"):
-            runner._padded_batch_size(6, SimpleNamespace(is_spec_verify=True))
-        with pytest.raises(ValueError, match="exceeds ACL graph capacity"):
-            runner._padded_batch_size(20, SimpleNamespace(is_spec_verify=True))

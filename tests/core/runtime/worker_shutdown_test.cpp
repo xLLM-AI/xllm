@@ -38,14 +38,11 @@ class ShutdownTestWorker final : public WorkerImpl {
                                 /*process_group=*/nullptr),
                    torch::Device(torch::kPrivateUse1, /*index=*/0),
                    options()),
-        with_output_(with_output) {}
+        with_output_(with_output) {
+    dtype_ = torch::kFloat32;
+  }
 
   bool init_model(ModelContext& /*context*/) override { return false; }
-
-  void prepare_work_before_execute(const LlmForwardInput& input,
-                                   LlmForwardInput& prepared) override {
-    prepared = input.clone();
-  }
 
   std::future<void> second_step_entered() {
     return second_step_entered_.get_future();

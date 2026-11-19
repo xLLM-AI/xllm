@@ -32,7 +32,7 @@ def _metadata(
     *,
     is_prefill: bool,
     is_chunked_prefill: bool = False,
-    is_spec_verify: bool = False,
+    max_query_len: int = 1,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         linear_state_indices=write_indices,
@@ -40,7 +40,8 @@ def _metadata(
         linear_state_write_indices=write_indices,
         is_prefill=is_prefill,
         is_chunked_prefill=is_chunked_prefill,
-        is_spec_verify=is_spec_verify,
+        max_query_len=max_query_len,
+        is_target_verify=max_query_len > 1,
     )
 
 
@@ -128,7 +129,7 @@ def test_spec_verify_rejects_distinct_read_and_write_indices() -> None:
                 write_indices,
                 read_indices,
                 is_prefill=True,
-                is_spec_verify=True,
+                max_query_len=2,
             )
         )
 

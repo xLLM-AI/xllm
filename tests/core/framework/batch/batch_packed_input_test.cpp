@@ -1198,7 +1198,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
   params.embedding.mtp_bootstrap_embeddings = values;
   params.embedding.extra_token_ids = {3};
   params.embedding.mtp_bootstrap_row_idxes = {4};
-  params.graph.use_expanded_decode_for_spec_verify_attention = true;
   params.graph.expanded_kv_seq_lens = values;
   params.graph.expanded_block_tables = values;
   params.graph.expanded_paged_kv_indptr = values;
@@ -1211,7 +1210,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
   params.graph.spec_verify_source_addresses_stable = true;
   params.graph.spec_verify_static_graph_tasks_prepared = true;
   params.multi_block_tables = {values};
-  params.is_spec_verify = true;
   params.num_accepted_tokens = values;
   params.num_accepted_tokens_host = {6};
   params.mtp_topk_state = MtpTopkState::from_tensor(values);
@@ -1239,8 +1237,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
   ASSERT_NE(converted.mtp_topk_state, nullptr);
   EXPECT_EQ(converted.mtp_topk_state->device(), target_device);
   EXPECT_FALSE(converted.has_multimodal());
-  EXPECT_TRUE(converted.is_spec_verify);
-  EXPECT_TRUE(converted.graph.use_expanded_decode_for_spec_verify_attention);
   EXPECT_TRUE(converted.graph.spec_verify_source_addresses_stable);
   EXPECT_TRUE(converted.graph.spec_verify_static_graph_tasks_prepared);
   EXPECT_EQ(converted.embedding.extra_token_ids, (std::vector<int32_t>{3}));

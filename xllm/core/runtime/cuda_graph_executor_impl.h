@@ -256,18 +256,6 @@ class CudaGraph {
   }
 
  private:
-  template <typename Model, typename Params>
-  bool capture_typed(Model* model,
-                     const ModelArgs& args,
-                     const runtime::Options& options,
-                     const torch::Tensor& tokens,
-                     const torch::Tensor& positions,
-                     const Params& params,
-                     std::vector<KVCache>& kv_cache,
-                     uint32_t bucket_num_tokens,
-                     const at::cuda::MempoolId_t& pool,
-                     TorchMemPool* pool_ptr);
-
   // Destroy captured work before releasing its native input owner.
   std::optional<ModelParamsView> capture_params_;
 
@@ -316,12 +304,6 @@ class CudaGraphExecutorImpl final : public ExecutorImpl {
   // not own
   CausalLM* model_ = nullptr;
 
-  template <typename Model, typename Params>
-  ModelOutput run_typed(Model* model,
-                        const torch::Tensor& tokens,
-                        const torch::Tensor& positions,
-                        std::vector<KVCache>& kv_caches,
-                        const Params& params);
   void initialize();
 
   ModelArgs args_;
@@ -347,13 +329,6 @@ class CudaGraphExecutorImpl final : public ExecutorImpl {
   // Whether to enable prefill piecewise graph
   bool enable_prefill_piecewise_graph_;
   int64_t max_tokens_for_graph_mode_ = 0;
-
-  // Get bucket num_tokens for given num_tokens
-  // For num_tokens < 8: use 1, 2, 4, 8
-  // For num_tokens >= 8: use multiples of 8
-  // When is_prefill=true, no_padding is disabled (prefill requires padding)
-  uint32_t get_bucket_num_tokens(uint32_t num_tokens,
-                                 bool is_prefill = false) const;
 
   ModelOutput attach_aux_hidden_states_if_needed(
       const torch::Tensor& hidden_states,

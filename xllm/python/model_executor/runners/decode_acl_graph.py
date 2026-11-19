@@ -293,16 +293,14 @@ class DecodeAclGraphRunner(AclGraphRunner):
             return None
         if is_expanded_spec_verify and self._model_owns_linear_spec_verify:
             query_lens = self._expanded_query_lens(metadata)
-            if _uniform_span_width(query_lens) != self.num_speculative_tokens + 1:
+            if _uniform_span_width(query_lens) != metadata.num_speculative_tokens + 1:
                 return None
 
         # Linear verify requires a backend recurrent-state protocol.
-        linear_indices = getattr(metadata, "linear_state_indices", None)
         if (
             is_expanded_spec_verify
             and not self.attention_backend.is_mla
-            and linear_indices is not None
-            and linear_indices.numel() > 0
+            and self._has_linear_cache
             and not self.attention_backend.supports_linear_spec_verify_graph
             and not self._model_owns_linear_spec_verify
         ):
@@ -390,32 +388,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
             return None
         if not (compatible and (input_embedding is None or input_embedding.shape[0] == batch_size)):
             return None
-        # MTP spec-verify packs (num_speculative_tokens+1) token-rows per
-        # sequence, so batch_size (input_ids.numel()) is in TOKENS while
-        # self.max_batch (derived from max_seqs_per_batch) is in SEQS. Comparing
-        # tokens to seqs wrongly rejects an 8-seq × 4-row verify (32 tokens,
-        # 8 seqs ≤ 16) as bucket-overflow, forcing eager (~10x slower) under
-        # concurrency. For expanded verify, gate on the actual SEQUENCE count
-        # (linear_state_indices is per-seq) — the graph still captures/replays
-        # at the full token bucket (keyed by padded_batch_size below), this
-        # only fixes the graph-vs-eager admission decision.
-        if is_expanded_spec_verify:
-            lsi = getattr(metadata, "linear_state_indices", None)
-            # The captured bucket is a power of two (1/2/4/8/16k) but the
-            # static expanded-verify metadata (per-row q_cu + per-group
-            # q_seq_lens) is only laid out when the PADDED bucket divides by
-            # the spec width. Widths that are not powers of two (w=3 for
-            # num_spec=2, w=5, ...) would capture an entry without the group
-            # layout and silently degrade the in-graph verify semantics —
-            # refuse graph admission there and fall back to eager instead.
-            if lsi is not None and lsi.numel() > 0:
-                seq_count = lsi.numel()
-                if batch_size % seq_count == 0:
-                    width = batch_size // seq_count
-                    if padded_batch_size % width != 0:
-                        return reject_layout(
-                            f"expanded verify bucket {padded_batch_size} is not divisible by width {width}"
-                        )
         if getattr(metadata, "kpool_query_lens", ()):
             # Same invariants as the capture path in _padded_kpool_query_lens;
             # reject instead of raising so admission can fall back to eager.
@@ -517,9 +489,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
             batch_size = max(execution_counts)
         if batch_size > self.max_batch:
             raise ValueError("decode batch exceeds ACL graph capacity")
-        if (self._has_linear_cache or self._model_owns_linear_spec_verify) and metadata.is_spec_verify:
+        if (self._has_linear_cache or self._model_owns_linear_spec_verify) and getattr(
+            metadata, "is_target_verify", False
+        ):
             # Recurrent verify buckets must contain complete requests.
-            width = self.num_speculative_tokens + 1
+            width = metadata.num_speculative_tokens + 1
             if batch_size % width:
                 raise ValueError("linear verify graph requires complete fixed-width requests")
             if self._enable_decode_no_padding:
@@ -611,10 +585,58 @@ class DecodeAclGraphRunner(AclGraphRunner):
         )
 
     def _expanded_verify_view(self, metadata: AttentionMetadata) -> ExpandedDecodeMetadata | None:
-        return resolve_expanded_decode_metadata(
-            metadata,
-            block_size=self._logical_page_size,
-            allow_untyped_spec_verify=not self.attention_backend.is_mla or self._has_linear_cache,
+        expanded = resolve_expanded_decode_metadata(metadata, block_size=self._logical_page_size)
+        if expanded is not None:
+            return expanded
+        if not getattr(metadata, "is_target_verify", False) or (
+            self.attention_backend.is_mla and not self._has_linear_cache
+        ):
+            return None
+        kv_rows, block_table_rows = metadata.kv_seq_lens, metadata.block_table
+        query_ends = metadata.q_cu_seq_lens
+        width = metadata.num_speculative_tokens + 1
+        if metadata.is_prefill or metadata.is_chunked_prefill or kv_rows is None or block_table_rows is None:
+            return None
+        rows = kv_rows.numel()
+        if (
+            width <= 1
+            or rows == 0
+            or rows % width
+            or kv_rows.ndim != 1
+            or block_table_rows.ndim != 2
+            or block_table_rows.shape[0] != rows
+            or (query_ends is not None and query_ends.numel() not in (rows, rows + 1))
+        ):
+            return None
+        kv_rows = kv_rows.to(torch.int32)
+        block_table_rows = block_table_rows.to(torch.int32).contiguous()
+        host_values = getattr(metadata, "kv_seq_lens_host_values", None)
+        if host_values is not None and len(host_values) != kv_rows.numel():
+            raise RuntimeError("expanded decode host KV lengths must match token rows")
+        paged_kv_indptr = metadata.paged_kv_indptr
+        paged_kv_indices = getattr(metadata, "paged_kv_indices", None)
+        paged_kv_last_page_len = metadata.paged_kv_last_page_len
+        if paged_kv_indices is None or not is_row_aligned_paged_kv(
+            paged_kv_indptr, paged_kv_last_page_len, block_table_rows.shape[0]
+        ):
+            (
+                paged_kv_indptr,
+                paged_kv_indices,
+                paged_kv_last_page_len,
+            ) = build_row_aligned_paged_kv_metadata(
+                block_table_rows,
+                host_values,
+                self._logical_page_size,
+            )
+        return ExpandedDecodeMetadata(
+            kv_seq_lens=kv_rows,
+            block_table=block_table_rows,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            paged_attention_tiling_data=None,
+            kv_seq_lens_host=None,
+            kv_seq_lens_host_values=host_values,
         )
 
     @staticmethod
@@ -1495,7 +1517,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
             dp_execution_token_counts=(padded_batch_size,) * self.dp_size if self.dp_size > 1 else (),
             dp_is_decode=tuple([1] * self.dp_size) if self.dp_size > 1 else (),
             is_dummy=bool(getattr(metadata, "is_dummy", False)),
-            is_spec_verify=bool(getattr(metadata, "is_spec_verify", False) or is_expanded),
+            num_speculative_tokens=getattr(metadata, "num_speculative_tokens", 0),
+            is_target_verify=is_expanded and not self._is_spec_draft,
             kpool_query_lens=kpool_query_lens,
             kpool_query_lens_device=(
                 torch.tensor(kpool_query_lens, dtype=torch.int32, device=device) if kpool_query_lens else None

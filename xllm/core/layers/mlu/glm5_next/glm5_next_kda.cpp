@@ -35,12 +35,6 @@ namespace layer {
 
 namespace {
 
-torch::Tensor l2_normalize(const torch::Tensor& input) {
-  return input /
-         torch::sqrt(torch::sum(input * input, /*dim=*/-1, /*keepdim=*/true) +
-                     1e-6f);
-}
-
 void load_column_linear(ColumnParallelLinear& linear,
                         const StateDict& state_dict,
                         const std::string& prefix) {
@@ -100,92 +94,6 @@ torch::Tensor glm5_next_kda_apply_output_gate(
   const torch::Tensor gated = normalized.to(torch::kFloat32) *
                               torch::sigmoid(output_gate.to(torch::kFloat32));
   return gated.to(normalized.scalar_type());
-}
-
-std::tuple<torch::Tensor, torch::Tensor> glm5_next_kda_eager_recurrence(
-    const torch::Tensor& q,
-    const torch::Tensor& k,
-    const torch::Tensor& v,
-    const torch::Tensor& log_gate,
-    const torch::Tensor& beta,
-    const torch::Tensor& initial_state,
-    bool l2norm_qk) {
-  CHECK_EQ(q.dim(), 4) << "GLM5-Next KDA q must be [B, T, H, K]";
-  CHECK_EQ(k.sizes(), q.sizes()) << "GLM5-Next KDA q/k shape mismatch";
-  CHECK_EQ(v.dim(), 4) << "GLM5-Next KDA v must be [B, T, H, V]";
-  CHECK_EQ(v.size(0), q.size(0)) << "GLM5-Next KDA v batch mismatch";
-  CHECK_EQ(v.size(1), q.size(1)) << "GLM5-Next KDA v token mismatch";
-  CHECK_EQ(v.size(2), q.size(2)) << "GLM5-Next KDA v head mismatch";
-  CHECK_EQ(initial_state.dim(), 4)
-      << "GLM5-Next KDA state must be [B, H, V, K]";
-  CHECK_EQ(initial_state.size(0), q.size(0))
-      << "GLM5-Next KDA state batch mismatch";
-  CHECK_EQ(initial_state.size(1), q.size(2))
-      << "GLM5-Next KDA state head mismatch";
-  CHECK_EQ(initial_state.size(2), v.size(3))
-      << "GLM5-Next KDA state value dimension mismatch";
-  CHECK_EQ(initial_state.size(3), q.size(3))
-      << "GLM5-Next KDA state key dimension mismatch";
-
-  torch::Tensor gate = log_gate;
-  if (gate.dim() == 3) {
-    gate = gate.unsqueeze(/*dim=*/0);
-  }
-  CHECK_EQ(gate.sizes(), q.sizes())
-      << "GLM5-Next KDA per-key gate shape mismatch";
-
-  torch::Tensor beta_values = beta;
-  if (beta_values.dim() == 2) {
-    beta_values = beta_values.unsqueeze(/*dim=*/0);
-  }
-  CHECK_EQ(beta_values.dim(), 3)
-      << "GLM5-Next KDA beta must be [T, H] or [B, T, H]";
-  CHECK_EQ(beta_values.size(0), q.size(0))
-      << "GLM5-Next KDA beta batch mismatch";
-  CHECK_EQ(beta_values.size(1), q.size(1))
-      << "GLM5-Next KDA beta token mismatch";
-  CHECK_EQ(beta_values.size(2), q.size(2))
-      << "GLM5-Next KDA beta head mismatch";
-
-  torch::Tensor q_fp32 = q.to(torch::kFloat32);
-  torch::Tensor k_fp32 = k.to(torch::kFloat32);
-  if (l2norm_qk) {
-    q_fp32 = l2_normalize(q_fp32);
-    k_fp32 = l2_normalize(k_fp32);
-  }
-  const double scale = 1.0 / std::sqrt(static_cast<double>(q.size(/*dim=*/3)));
-  q_fp32 = q_fp32 * scale;
-
-  torch::Tensor state = initial_state.to(torch::kFloat32).clone();
-  torch::Tensor v_fp32 = v.to(torch::kFloat32);
-  torch::Tensor gate_fp32 = gate.to(torch::kFloat32);
-  torch::Tensor beta_fp32 = torch::sigmoid(beta_values.to(torch::kFloat32));
-  std::vector<torch::Tensor> outputs;
-  outputs.reserve(static_cast<size_t>(q.size(/*dim=*/1)));
-
-  for (int64_t token = 0; token < q.size(/*dim=*/1); ++token) {
-    torch::Tensor q_t = q_fp32.select(/*dim=*/1, token);
-    torch::Tensor k_t = k_fp32.select(/*dim=*/1, token);
-    torch::Tensor v_t = v_fp32.select(/*dim=*/1, token);
-    torch::Tensor gate_t = gate_fp32.select(/*dim=*/1, token);
-    torch::Tensor beta_t = beta_fp32.select(/*dim=*/1, token);
-
-    state = state * torch::exp(gate_t).unsqueeze(/*dim=*/-2);
-    torch::Tensor prediction =
-        torch::sum(state * k_t.unsqueeze(/*dim=*/-2), /*dim=*/-1);
-    torch::Tensor delta = (v_t - prediction) * beta_t.unsqueeze(/*dim=*/-1);
-    state = state + delta.unsqueeze(/*dim=*/-1) * k_t.unsqueeze(/*dim=*/-2);
-    outputs.push_back(
-        torch::sum(state * q_t.unsqueeze(/*dim=*/-2), /*dim=*/-1));
-  }
-
-  torch::Tensor output;
-  if (outputs.empty()) {
-    output = torch::empty({q.size(0), 0, q.size(2), v.size(3)}, v.options());
-  } else {
-    output = torch::stack(outputs, /*dim=*/1).to(v.scalar_type());
-  }
-  return {output, state};
 }
 
 Glm5NextKDAImpl::Glm5NextKDAImpl(const ModelArgs& args,
@@ -460,7 +368,10 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
                                        KVCache& kv_cache,
                                        const ModelParamsView& input_params) {
   const int64_t num_tokens = hidden_states.size(0);
-  if (input_params.is_spec_verify) {
+  const bool is_target_verify =
+      input_params.meta.batch_forward_type.is_decode() &&
+      input_params.meta.q_max_seq_len > 1;
+  if (is_target_verify) {
     CHECK(attn_metadata.is_chunked_prefill)
         << "GLM5-Next KDA Spec Verify requires chunked-prefill Dense Validate "
            "Span";
@@ -483,7 +394,7 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
   torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
   const int64_t checkpoint_stride = KVCacheShape::linear_ssm_checkpoint_stride(
       kv_cache.get_conv_cache().size(0), ssm_cache.size(0));
-  if (input_params.is_spec_verify) {
+  if (is_target_verify) {
     CHECK_EQ(checkpoint_stride, attn_metadata.max_query_len)
         << "GLM5-Next KDA Spec Verify checkpoint stride mismatch";
     const int64_t expected_conv_state_len =
@@ -501,7 +412,7 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
       build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
   torch::Tensor core_output;
 
-  if (!input_params.is_spec_verify &&
+  if (!is_target_verify &&
       (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill)) {
     mixed_qkv = mixed_qkv.transpose(/*dim0=*/0, /*dim1=*/1);
     mixed_qkv = xllm::kernel::mlu::causal_conv1d_fn(
@@ -545,7 +456,7 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
     ssm_cache.index_put_({state_base_indices},
                          final_state.to(ssm_cache.scalar_type()));
   } else {
-    if (input_params.is_spec_verify) {
+    if (is_target_verify) {
       mixed_qkv = xllm::kernel::mlu::causal_conv1d_update_decode(
           mixed_qkv,
           conv_cache,
@@ -580,12 +491,12 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
     params.b = beta;
     params.initial_state_source = ssm_cache;
     params.initial_state_indices =
-        input_params.is_spec_verify
+        is_target_verify
             ? build_rebased_ssm_state_indices(logical_state_indices,
                                               checkpoint_stride,
                                               attn_metadata.max_query_len)
             : state_base_indices;
-    if (input_params.is_spec_verify) {
+    if (is_target_verify) {
       // Slot zero is reserved; every checkpoint of a virtual request skips
       // state instead of overwriting the reserved slot.
       params.initial_state_indices.masked_fill_(
@@ -594,7 +505,7 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
     params.cu_seqlens = attn_metadata.q_cu_seq_lens;
     params.scale =
         static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim_)));
-    if (input_params.is_spec_verify) {
+    if (is_target_verify) {
       params.num_accepted_tokens = input_params.num_accepted_tokens;
     }
     params.use_qk_l2norm_in_kernel = true;

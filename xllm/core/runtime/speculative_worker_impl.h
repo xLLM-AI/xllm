@@ -23,6 +23,8 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
+#include "core/framework/eplb/eplb_utils.h"
+#include "core/framework/model/model_input_types.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "framework/sampling/sampling_params.h"
@@ -33,23 +35,81 @@ namespace xllm {
 
 class JsonObjectGrammarState;
 
-void prepare_dummy_input(LlmForwardInput& input,
+template <typename Input>
+void prepare_dummy_input(Input& input,
                          const ModelContext& context,
-                         const torch::Device& device);
-void prepare_dummy_input(VlmForwardInput& input,
-                         const ModelContext& context,
-                         const torch::Device& device);
+                         const torch::Device& device) {
+  auto& params = input.input_params;
+  const auto& parallel = context.get_parallel_args();
+  const int32_t num_speculative_tokens = context.num_speculative_tokens();
+  if (params.meta.num_sequences != 0 ||
+      params.meta.batch_forward_type.is_empty() ||
+      (num_speculative_tokens <= 0 && input.token_ids.defined() &&
+       input.token_ids.numel() != 0) ||
+      (parallel.dp_size() <= 1 && parallel.ep_size() <= 1 &&
+       parallel.mapping_data().empty())) {
+    return;
+  }
+  build_dummy_forward_input(input, num_speculative_tokens, device);
+  if (num_speculative_tokens > 0) {
+    if (has_linear_attention_layers(context.get_model_args())) {
+      params.num_accepted_tokens_host = {1};
+      params.num_accepted_tokens =
+          torch::ones({1}, input.token_ids.options().dtype(torch::kInt32));
+    }
+    const int32_t num_decoding_tokens = num_speculative_tokens + 1;
+    params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+    params.meta.q_max_seq_len = num_decoding_tokens;
+    params.meta.kv_max_seq_len = num_decoding_tokens;
+    params.embedding.input_embedding = torch::Tensor();
+    params.attn_metadata.reset();
+    params.attention = {};
+    params.attention.host.q_seq_lens = {num_decoding_tokens};
+    params.attention.host.q_cu_seq_lens = {0, num_decoding_tokens};
+    params.attention.host.kv_seq_lens = {num_decoding_tokens};
+    params.attention.host.kv_cache_tokens_nums = {0};
+    params.attention.host.new_cache_slots.assign(num_decoding_tokens,
+                                                 /*value=*/-1);
+    params.attention.rebuild_device_buffer(device);
+  }
+}
 
-// Returns whether this rank may execute the multi-step speculative decode
-// plan for the current global DP batch.
-bool should_run_speculative_decode(const LlmModelParams& params);
-bool should_run_speculative_decode(const VlmModelParams& params);
+template <typename Params>
+bool should_run_speculative_decode(const Params& params) {
+  if (!params.meta.batch_forward_type.is_decode()) {
+    return false;
+  }
 
-// Keep padded and raw DP token-count views in the same speculative layout.
-void scale_speculative_parallel_token_counts(LlmModelParams& params,
-                                             int32_t num_speculative_tokens);
-void scale_speculative_parallel_token_counts(VlmModelParams& params,
-                                             int32_t num_speculative_tokens);
+  const auto& dp_token_nums = params.parallel.dp_global_token_nums;
+  const auto& dp_is_decode = params.parallel.dp_is_decode;
+  if (dp_is_decode.empty()) {
+    return dp_token_nums.size() <= 1;
+  }
+  if (dp_is_decode.size() != dp_token_nums.size()) {
+    return false;
+  }
+
+  bool any_active = false;
+  for (size_t i = 0; i < dp_is_decode.size(); ++i) {
+    if (dp_token_nums[i] == 0) {
+      continue;
+    }
+    any_active = true;
+    if (dp_is_decode[i] != 1) {
+      return false;
+    }
+  }
+  return any_active;
+}
+
+template <typename Params>
+void scale_speculative_parallel_token_counts(Params& params,
+                                             int32_t num_speculative_tokens) {
+  const int32_t num_decoding_tokens = num_speculative_tokens + 1;
+  scale_parallel_token_counts(params.parallel, num_decoding_tokens);
+  params.expert.eplb_decode_token_mask = eplb::expand_decode_token_mask(
+      params.expert.eplb_decode_token_mask, num_decoding_tokens);
+}
 
 // Shared tail of run_validate: marks the output as a speculative decode
 // verify result, attaches the row metadata, clears embeddings, and installs
@@ -147,7 +207,10 @@ class SpeculativeWorkerImpl : public WorkerImpl {
     impl_->get_cache_info(cluster_id, addr, port);
   };
 
-  void restore_json_object_states(TargetInput& input) override;
+  std::shared_ptr<const JsonObjectGrammar> ensure_json_object_grammar(
+      bool reasoning_enabled) override {
+    return impl_->ensure_json_object_grammar(reasoning_enabled);
+  }
 
   // Common step dispatch: prefill / decode / empty
   std::optional<ForwardOutput> step(const TargetInput& input) override;
@@ -181,9 +244,9 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   virtual std::optional<ForwardOutput> step_empty(
       const TargetInput& inputs) = 0;
 
-  // prepare inputs for target model at Decode phase (validation).
   void prepare_validate_inputs(const TargetInput& inputs,
-                               TargetInput& validate_inputs);
+                               TargetInput& validate_inputs,
+                               bool expand_decode_metadata_per_token);
 
   bool use_orthogonal_cp_consensus() const {
     return parallel_args_.cp_size() > 1 &&

@@ -1640,7 +1640,6 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_prefix(
     draft_input.runtime.device_tensors_ready = false;
     auto& params = draft_input.input_params;
     params.clear_linear_attention_state();
-    params.is_spec_verify = false;
     params.mtp_topk_state.reset();
     layer::ExpandedDecodeMetadataBuilder::reset_expanded_decode_metadata(
         ModelParamsView(params));
@@ -1945,42 +1944,20 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
 #if defined(USE_NPU)
   const bool use_explicit_spec_verify_replay_update =
       should_use_explicit_spec_verify_replay_update(input);
-  const bool qwen_logical_state =
-      target_verify_mode_ == mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY;
-  const bool expand_python_mtp_linear_state_ids =
-      num_val_tokens > 1 &&
-      ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
-      !input_params.embedding.linear_state_ids.empty() && !qwen_logical_state;
-  std::vector<int32_t> python_linear_state_ids;
-  if (qwen_logical_state &&
-      ModelConfig::is_python_model_impl(context_.get_model_impl())) {
-    // Qwen's fused verifier consumes S tokens per logical recurrent state.
-    // Attention is expanded independently, but state indices must remain B.
-    python_linear_state_ids = input_params.embedding.linear_state_ids;
-  } else if (expand_python_mtp_linear_state_ids) {
-    CHECK_EQ(input_params.embedding.linear_state_ids.size(),
-             static_cast<size_t>(num_sequences));
-    python_linear_state_ids.reserve(static_cast<size_t>(total_num_val_tokens));
-    for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-      python_linear_state_ids.insert(
-          python_linear_state_ids.end(),
-          num_val_tokens,
-          input_params.embedding.linear_state_ids[static_cast<size_t>(seq_id)]);
-    }
-  }
 #else
   const bool use_explicit_spec_verify_replay_update = false;
 #endif
   DecodeBatchContext batch_ctx = make_decode_batch_context(input);
   const bool chunked_verify = this->uses_chunked_verify();
-  const DecodeExpansionOptions decode_options = make_verify_layout(
-      options_.num_speculative_tokens(), logical_block_size, chunked_verify);
+  const DecodeExpansionOptions decode_options{
+      {.num_speculative_tokens = options_.num_speculative_tokens(),
+       .per_request = chunked_verify},
+      logical_block_size};
   DecodeBuildBuffers buf = expand_decode_inputs(batch_ctx, decode_options);
 
   if (impl_->has_request_state_cache()) {
     input_params.attention.host.kpool_query_lens =
         std::vector<int32_t>(num_sequences, num_val_tokens);
-    input_params.is_spec_verify = true;
   }
 
   if (!use_explicit_spec_verify_replay_update) {
@@ -2019,23 +1996,16 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
                                     device_,
                                     stable_indices);
 
-  scale_speculative_parallel_token_counts(input_params,
-                                          options_.num_speculative_tokens());
+  scale_speculative_parallel_token_counts(
+      input_params, decode_options.num_speculative_tokens);
 
   std::vector<int32_t> accepted_prefix_lengths;
   if (chunked_verify) {
-    input_params.embedding.input_embedding = torch::Tensor();
-    input_params.is_spec_verify = true;
     accepted_prefix_lengths =
         num_accepted_tokens(embedding_cache_.get(),
                             static_cast<size_t>(num_sequences),
                             input.input_params.embedding.embedding_ids,
                             input.input_params.embedding.request_ids);
-    // num_accepted_tokens must stay the true accepted count. The Qwen3.5 GDN
-    // spec-verify kernel uses it to select which recurrent/conv checkpoint to
-    // commit (checkpoint index = nat - 1); it is a logical checkpoint index,
-    // not the conv_state physical history capacity. Clamping it commits a
-    // stale checkpoint whenever 4+ tokens were accepted (see issue #2247).
     input_params.num_accepted_tokens_host.assign(
         accepted_prefix_lengths.begin(), accepted_prefix_lengths.end());
     if (!use_explicit_spec_verify_replay_update) {
@@ -2074,10 +2044,6 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
 
     ensure_spec_verify_control_block_table(input_params, num_sequences);
     AttentionInputView attention(input_params.attention);
-    CHECK(attention.host.block_tables.defined());
-    CHECK_EQ(attention.host.block_tables.dim(), 2);
-    CHECK_EQ(attention.host.block_tables.size(0), num_sequences);
-    CHECK_EQ(attention.host.block_tables.scalar_type(), torch::kInt32);
     const int64_t active_block_table_width =
         attention.host.block_tables.size(1);
     const int64_t verify_block_table_width =
@@ -2112,12 +2078,6 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     extra_int_inputs.push_back({&buf.out_positions,
                                 &validate_input.positions_host,
                                 &validate_input.positions});
-    if (!python_linear_state_ids.empty()) {
-      extra_int_inputs.push_back(
-          {&python_linear_state_ids,
-           nullptr,
-           &input_params.embedding.linear_state_indices});
-    }
     if (!input_params.num_accepted_tokens_host.empty()) {
       extra_int_inputs.push_back({&accepted_prefix_lengths,
                                   nullptr,
@@ -2140,7 +2100,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
         extra_int_inputs,
         initialize_stable_buffer ? AttentionBufferReusePolicy::GROWABLE
                                  : AttentionBufferReusePolicy::FIXED_CAPACITY);
-    if (initialize_stable_buffer && num_sequences > 0) {
+    if (initialize_stable_buffer) {
       // Source views are part of the explicit replay contract. Reserve enough
       // packed storage for any configured decode batch before the first graph
       // captures their addresses, so a later larger batch cannot relocate the
@@ -2175,13 +2135,28 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     input_params.graph.input_tokens_override = validate_input.token_ids;
     input_params.graph.spec_verify_source_addresses_stable = true;
   } else {
-    if (supports_expanded_spec_verify()) {
+    const bool use_expanded_attention = supports_expanded_spec_verify();
+    if (use_expanded_attention) {
       ensure_spec_verify_control_block_table(input_params, num_sequences);
     }
     std::vector<PackedAttentionIntInput> extra_int_inputs;
-    if (!python_linear_state_ids.empty()) {
+    const auto& linear_state_ids = input_params.embedding.linear_state_ids;
+    std::vector<int32_t> expanded_linear_state_ids;
+    if (!linear_state_ids.empty() &&
+        (use_expanded_attention || num_val_tokens > 1) &&
+        ModelConfig::is_python_model_impl(context_.get_model_impl())) {
+      const auto* packed_linear_state_ids = &linear_state_ids;
+      if (!use_expanded_attention) {
+        CHECK_EQ(linear_state_ids.size(), static_cast<size_t>(num_sequences));
+        expanded_linear_state_ids.reserve(total_num_val_tokens);
+        for (int32_t state_id : linear_state_ids) {
+          expanded_linear_state_ids.insert(
+              expanded_linear_state_ids.end(), num_val_tokens, state_id);
+        }
+        packed_linear_state_ids = &expanded_linear_state_ids;
+      }
       extra_int_inputs.push_back(
-          {&python_linear_state_ids,
+          {packed_linear_state_ids,
            nullptr,
            &input_params.embedding.linear_state_indices});
     }
@@ -2191,7 +2166,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     }
     AttentionInputView(input_params.attention)
         .rebuild_device_buffer(device_, extra_int_inputs);
-    if (supports_expanded_spec_verify()) {
+    if (use_expanded_attention) {
       layer::ExpandedDecodeMetadataBuilder::update_expanded_decode_metadata(
           ModelParamsView(input_params), device_, logical_block_size);
     }
@@ -2399,7 +2374,6 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
       input_params.num_accepted_tokens = torch::Tensor();
       input_params.num_accepted_tokens_host.clear();
     }
-    input_params.is_spec_verify = false;
     if (draft_impl_->has_request_state_cache()) {
       input_params.attention.host.kpool_query_lens.assign(
           batch_ctx.num_requests, uniform_width);
@@ -2626,7 +2600,6 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
   const int32_t num_sequences = input_params.meta.num_sequences;
   if (draft_impl_->has_request_state_cache()) {
     input_params.attention.host.kpool_query_lens.assign(num_sequences, 1);
-    input_params.is_spec_verify = false;
     // The first draft already restored its request slot. Subsequent drafts
     // append to that live state instead of replaying a prefix restore.
     input_params.embedding.linear_state_read_ids =

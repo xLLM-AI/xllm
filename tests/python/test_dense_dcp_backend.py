@@ -111,7 +111,6 @@ def _metadata(
         is_prefill=is_prefill,
         is_chunked_prefill=is_chunked_prefill,
         is_mixed=is_mixed,
-        is_spec_verify=False,
     )
 
 
