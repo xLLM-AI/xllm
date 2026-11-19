@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/kv_cache/storage/quantized_kv_cache_impl.h"
 
 #include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/storage/kv_cache_tensor_factory.h"
 
 namespace xllm {
 

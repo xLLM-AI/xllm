@@ -72,6 +72,7 @@ limitations under the License.
 #include "core/framework/allocator/global_virtual_memory_region.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/model_loader/model_loader.h"
+#include "core/kv_cache/layout/kv_cache_layout_policy.h"
 #include "core/kv_cache/layout/layerwise_split_layout.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/kv_cache/storage/linear_state_restore.h"

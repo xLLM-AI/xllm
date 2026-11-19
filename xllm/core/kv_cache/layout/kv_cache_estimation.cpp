@@ -25,6 +25,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/common/constants.h"
 #include "core/common/metrics.h"
 #include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
