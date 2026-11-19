@@ -88,11 +88,11 @@ def _make_model(events: list[str]) -> tuple[glm5_next.Glm5NextModel, list[_Decod
     model.norm = _Norm(events)
     model.hc_head = _HyperHead()
     model.aux_hidden_capture = AuxHiddenCapture(())
-    model._inputs_embeds = None
     return model, layers
 
 
-def test_cp_model_loop_shards_rows_and_merges_final_hidden() -> None:
+@pytest.mark.parametrize("with_embedding", [False, True])
+def test_cp_model_loop_shards_rows_and_merges_final_hidden(with_embedding: bool) -> None:
     events: list[str] = []
     model, layers = _make_model(events)
     cp_context = SimpleNamespace(shard_valid_mask=torch.tensor([True, False]))
@@ -123,10 +123,10 @@ def test_cp_model_loop_shards_rows_and_merges_final_hidden() -> None:
         output = model(
             torch.tensor([10, 20, 30, 40]),
             torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+            torch.tensor([[10.0], [20.0], [30.0], [40.0]]) if with_embedding else None,
         )
 
-    assert events == [
-        "embedding",
+    assert events == ([] if with_embedding else ["embedding"]) + [
         "shard_rows",
         "shard_positions",
         "layer_0",

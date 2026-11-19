@@ -747,8 +747,9 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
 
     The ``self.model`` attribute (required by ``PyModelBase``) is set to the
     language model, so the executor's runner calls
-    ``language_model(inputs_embeds, positions)``. Vision encoding happens in
-    ``encode`` / ``get_input_embeddings`` before the runner kicks in.
+    ``language_model(input_ids, positions, input_embedding)``. Vision encoding
+    and embedding preparation happen in ``encode`` / ``get_input_embeddings``
+    before the runner executes the decoder.
     """
 
     def __init__(self, config: dict) -> None:
@@ -904,12 +905,8 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
         rotation (``_hidden_rot``) before scattering so they land in the
         rotation-quantized LLM's hidden basis.
         """
-        # Normalise to 2-D [B, S] — the C++ EagerRunner passes a flattened
-        # 1-D [num_tokens] tensor (same convention Glm5NextModel.forward
-        # normalises). Without this, embed_tokens produces a 2-D [S, H] output
-        # and the downstream forward's hc_mult expand hits a shape mismatch.
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
+        # The runner owns packed token rows; the decoder adds its batch axis.
+        input_ids = input_ids.reshape(-1)
         inputs_embeds = self.language_model.embed_tokens(input_ids)
 
         embeds_list: list[torch.Tensor] = []
@@ -936,8 +933,6 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
             mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
             inputs_embeds = inputs_embeds.masked_scatter(mask, combined.to(inputs_embeds.dtype))
 
-        # Close the loop: store on the LLM so forward() uses the merged embeds.
-        self.model._inputs_embeds = inputs_embeds
         return inputs_embeds
 
     # ------------------------------------------------------------------

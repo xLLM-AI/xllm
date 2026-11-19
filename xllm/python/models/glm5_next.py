@@ -2541,16 +2541,13 @@ class Glm5NextModel(nn.Module):
             cfg.layers_to_capture,
             transform=lambda streams: hc_head(streams).reshape(-1, hidden_size),
         )
-        # Set externally by the VL composer (get_input_embeddings) before the
-        # runner drives forward(); when set, it replaces embed_tokens(input_ids)
-        # so image/video embeddings merged into the sequence are used as-is. The
-        # mHC 4-stream expand below applies to the merged hidden identically.
-        self._inputs_embeds: Optional[torch.Tensor] = None
 
     def forward(
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
+        input_embedding: torch.Tensor | None = None,
+        *,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # The C++ EagerRunner passes the flattened token tensor, which is 1-D
@@ -2559,11 +2556,9 @@ class Glm5NextModel(nn.Module):
             input_ids = input_ids.unsqueeze(0)
         if position_ids is not None and position_ids.dim() == 1:
             position_ids = position_ids.unsqueeze(0)
-        if self._inputs_embeds is not None:
-            hidden = self._inputs_embeds
-            self._inputs_embeds = None
-        else:
-            hidden = self.embed_tokens(input_ids)
+        hidden = self.embed_tokens(input_ids) if input_embedding is None else input_embedding
+        if hidden.dim() == 2:
+            hidden = hidden.unsqueeze(0)
         batch_size, seq_len = hidden.shape[:2]
         if attention_mask is None:
             attention_mask = torch.ones(batch_size, seq_len, dtype=torch.bool, device=hidden.device)
@@ -2719,7 +2714,7 @@ class Glm5NextForCausalLM(PyModelBase):
     def forward(
         self, input_ids: torch.Tensor, position_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        hidden = self.model(input_ids, position_ids, attention_mask)
+        hidden = self.model(input_ids, position_ids, attention_mask=attention_mask)
         # With layers_to_capture the body returns (hidden, aux_hidden) for the
         # draft's context projection; the CausalLM wrapper itself consumes only
         # the logits hidden state.
