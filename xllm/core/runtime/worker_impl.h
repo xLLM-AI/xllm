@@ -442,6 +442,9 @@ class WorkerImpl {
  private:
   friend class ScheduleOverlap;
 
+  std::unique_ptr<ModelLoader> create_model_loader(
+      const std::string& model_weights_path) const;
+
   bool init_model_impl(std::unique_ptr<ModelLoader> model_loader,
                        ModelContext context,
                        std::unique_ptr<Tokenizer> tokenizer,

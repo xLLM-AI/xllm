@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <string>
 #include <vector>
 
 #include "core/framework/model/model_args.h"
@@ -73,6 +74,9 @@ class ModelLoader {
   // create a model loader from the given path
   static std::unique_ptr<ModelLoader> create(
       const std::string& model_weights_path);
+
+  static std::unique_ptr<ModelLoader> create(std::string model_weights_path,
+                                             const std::string& backend);
 };
 
 }  // namespace xllm

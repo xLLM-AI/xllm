@@ -30,7 +30,9 @@ namespace xllm {
 
 class HFModelLoader : public ModelLoader {
  public:
-  HFModelLoader(const std::string& model_weights_path);
+  explicit HFModelLoader(std::string model_weights_path);
+
+  HFModelLoader(std::string model_weights_path, const std::string& backend);
 
   std::unique_ptr<Tokenizer> tokenizer() const override;
 
@@ -43,7 +45,8 @@ class HFModelLoader : public ModelLoader {
   int64_t get_max_decoder_layer_weight_size() const override;
 
  private:
-  bool load_args(const std::string& model_weights_path);
+  bool load_args(const std::string& model_weights_path,
+                 const std::string& backend);
   bool load_quant_args(const std::string& model_weights_path);
   bool load_tokenizer_args(const std::string& model_weights_path);
   std::string model_weights_path() const override {
