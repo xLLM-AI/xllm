@@ -13,30 +13,43 @@ cc_test(
     GTest::gtest_main
 )
 
+set(_scheduler_test_deps
+  :config
+  :scheduler
+  :scheduler_factory
+  :disaggregation
+  :xllm_server
+  :block
+  GTest::gtest_main
+  $<$<BOOL:${USE_NPU}>:nnopbase>
+)
+
 cc_test(
-  NAME
-    scheduler_test
+  NAME scheduler_test
   SRCS
     pd_scheduler_test.cpp
     scheduler_metrics_test.cpp
     continuous_scheduler_test.cpp
     scheduler_policy_test.cpp
-  DEPS
-    :config
-    :scheduler
-    :scheduler_factory
-    :disaggregation
-    :xllm_server
-    :block
-    GTest::gtest_main
-    $<$<BOOL:${USE_NPU}>:nnopbase>
+  DEPS ${_scheduler_test_deps}
 )
-target_link_libraries(scheduler_test
-                      PUBLIC
-                      Python::Python
-                      $<$<BOOL:${USE_NPU}>:ascendcl>
-                      $<$<BOOL:${USE_NPU}>:hccl>
-                      $<$<BOOL:${USE_NPU}>:c_sec>)
+
+# Offline control-flow tests use host-only engine doubles.
+cc_test(
+  NAME offline_generation_test
+  CPU_ONLY
+  SRCS offline_generation_test.cpp
+  DEPS ${_scheduler_test_deps}
+)
+
+foreach(test_target IN ITEMS scheduler_test offline_generation_test)
+  target_link_libraries(${test_target}
+    PUBLIC
+    Python::Python
+    $<$<BOOL:${USE_NPU}>:ascendcl>
+    $<$<BOOL:${USE_NPU}>:hccl>
+    $<$<BOOL:${USE_NPU}>:c_sec>)
+endforeach()
 
 # Reservation expiry is host-only and must not initialize the device runtime.
 cc_test(

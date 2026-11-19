@@ -519,7 +519,7 @@ void ContinuousSchedulerBase::step(const absl::Duration& timeout) {
   }
 }
 
-void ContinuousSchedulerBase::step_with_schedule_overlap(
+bool ContinuousSchedulerBase::step_with_schedule_overlap(
     const absl::Duration& timeout) {
   // get a new batch of requests
   BatchGroup batch = schedule_request(timeout);
@@ -528,7 +528,7 @@ void ContinuousSchedulerBase::step_with_schedule_overlap(
         return one_batch.empty();
       });
   if (cur_batch_all_empty && !pending_step_.has_value()) {
-    return;
+    return false;
   }
 
   if (!cur_batch_all_empty) {
@@ -542,7 +542,7 @@ void ContinuousSchedulerBase::step_with_schedule_overlap(
   if (cur_batch_all_empty) {
     // An empty current batch drains the previous step without submitting work.
     pending_step_.reset();
-    return;
+    return false;
   }
 
   if (!pending_step_.has_value()) {
@@ -551,6 +551,7 @@ void ContinuousSchedulerBase::step_with_schedule_overlap(
   // Reuse the retired request vector's capacity across steady-state steps.
   pending_step_->batches = std::move(batch);
   pending_step_->requests = running_requests_;
+  return true;
 }
 
 void ContinuousSchedulerBase::complete_pending_step() {
@@ -582,6 +583,16 @@ void ContinuousSchedulerBase::generate() {
   }
 
   // wait for all responses done
+  output_dispatcher_->wait_completion();
+}
+
+void ContinuousSchedulerBase::generate_with_schedule_overlap() {
+  bool batch_empty = false;
+  while (num_pending_requests() > 0 || !batch_empty ||
+         request_queue_.size() > 0 || has_pending_prefetch() ||
+         pending_step_.has_value()) {
+    batch_empty = !step_with_schedule_overlap(absl::Milliseconds(50));
+  }
   output_dispatcher_->wait_completion();
 }
 

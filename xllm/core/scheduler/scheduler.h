@@ -162,6 +162,9 @@ class Scheduler : public SchedulerBase {
  public:
   virtual ~Scheduler() = default;
 
+  // Offline generation with the same pending-step lifecycle as online step().
+  virtual void generate_with_schedule_overlap() = 0;
+
   // add a new request to scheduler.
   virtual bool add_request(std::shared_ptr<Request>& request) = 0;
 
