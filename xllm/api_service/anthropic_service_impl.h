@@ -25,6 +25,7 @@ limitations under the License.
 namespace xllm {
 
 class MasterManager;
+class Master;
 
 // Specialize is_stream_call for AnthropicCall to recognize it as a stream call
 template <>
@@ -32,12 +33,14 @@ struct is_stream_call<AnthropicCall> : std::true_type {};
 
 class AnthropicServiceImpl final : public APIServiceImpl<AnthropicCall> {
  public:
-  AnthropicServiceImpl(LLMMaster* master,
+  AnthropicServiceImpl(Master* master,
                        const std::vector<std::string>& models,
                        std::shared_ptr<MasterManager> master_manager);
 
   void process_async_impl(std::shared_ptr<AnthropicCall> call) override;
   void count_tokens(std::shared_ptr<AnthropicCall> call);
+  Status validate_backend(const proto::AnthropicMessagesRequest& request,
+                          bool count_tokens) const;
   bool supports_model(const std::string& model) const {
     return models_.contains(model);
   }

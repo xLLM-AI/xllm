@@ -68,12 +68,50 @@ std::string json_string(const google::protobuf::Message& value) {
   return result;
 }
 
+Status validate_image_source(const google::protobuf::Struct& source) {
+  const auto& fields = source.fields();
+  const auto string_field = [&fields](const char* name) {
+    const auto found = fields.find(name);
+    return found != fields.end() &&
+           found->second.kind_case() == google::protobuf::Value::kStringValue &&
+           !found->second.string_value().empty();
+  };
+  if (!string_field("type")) {
+    return invalid_request("Image source.type is required");
+  }
+  const auto& type = fields.at("type").string_value();
+  if (type == "url" && string_field("url")) {
+    return Status();
+  }
+  if (type == "base64" && string_field("media_type") && string_field("data") &&
+      fields.at("media_type").string_value().starts_with("image/")) {
+    return Status();
+  }
+  return invalid_request("Image source requires a URL or base64 image data");
+}
+
+ImageURL image_url(const google::protobuf::Struct& source) {
+  const auto& fields = source.fields();
+  if (fields.at("type").string_value() == "url") {
+    return ImageURL{fields.at("url").string_value(), {}};
+  }
+  return ImageURL{"data:" + fields.at("media_type").string_value() +
+                      ";base64," + fields.at("data").string_value(),
+                  {}};
+}
+
 void append_tool_result(const proto::AnthropicContentBlock& block,
-                        std::vector<Message>& messages) {
+                        std::vector<Message>& messages,
+                        bool supports_images) {
   Message tool_message("tool", "");
   tool_message.tool_call_id = block.tool_use_id();
   std::string text = block.has_content_string() ? block.content_string() : "";
   bool first_text = true;
+  MMContentVec content;
+  if (supports_images && block.has_content_string()) {
+    content.emplace_back("text", block.content_string());
+  }
+  bool has_image = false;
   for (const auto& item : block.content_list().items()) {
     const auto& fields = item.fields();
     auto type = fields.find("type");
@@ -88,10 +126,21 @@ void append_tool_result(const proto::AnthropicContentBlock& block,
       first_text = false;
       if (part != fields.end()) {
         text += part->second.string_value();
+        if (supports_images) {
+          content.emplace_back("text", part->second.string_value());
+        }
       }
+    } else if (supports_images && type->second.string_value() == "image") {
+      content.emplace_back("image_url",
+                           image_url(fields.at("source").struct_value()));
+      has_image = true;
     }
   }
-  tool_message.content = std::move(text);
+  if (has_image) {
+    tool_message.content = std::move(content);
+  } else {
+    tool_message.content = std::move(text);
+  }
   messages.emplace_back(std::move(tool_message));
 }
 
@@ -249,15 +298,28 @@ Status validate_anthropic_request(
 
 Status validate_anthropic_backend(
     const proto::AnthropicMessagesRequest& request,
-    bool count_tokens) {
+    bool count_tokens,
+    bool supports_images,
+    int32_t image_limit) {
   if (request.messages().empty()) {
     return Status(StatusCode::UNKNOWN, "list index out of range");
   }
   for (const auto& message : request.messages()) {
+    int32_t image_count = 0;
     for (const auto& block : message.content_blocks().blocks()) {
       if (block.type() == "image") {
-        return invalid_request(
-            "Image input is not supported by the xLLM Messages API");
+        ++image_count;
+        if (!supports_images) {
+          return invalid_request(
+              "Image input is not supported by the xLLM Messages API");
+        }
+        if (message.role() == "system") {
+          return invalid_request("System messages do not support image input");
+        }
+        const auto status = validate_image_source(block.source());
+        if (!status.ok()) {
+          return status;
+        }
       }
       for (const auto& item : block.content_list().items()) {
         const auto& fields = item.fields();
@@ -266,9 +328,25 @@ Status validate_anthropic_backend(
           continue;
         }
         const std::string& name = type->second.string_value();
-        if (name == "image" || name == "tool_reference") {
+        if (name == "tool_reference" ||
+            (name == "image" && (!supports_images || message.role() != "user" ||
+                                 block.type() != "tool_result"))) {
           return invalid_request(
               "Image and tool-reference results are not supported by xLLM");
+        }
+        if (name == "image") {
+          ++image_count;
+          const auto source = fields.find("source");
+          if (source == fields.end() ||
+              source->second.kind_case() !=
+                  google::protobuf::Value::kStructValue) {
+            return invalid_request("Image source is required");
+          }
+          const auto status =
+              validate_image_source(source->second.struct_value());
+          if (!status.ok()) {
+            return status;
+          }
         }
         const auto text = fields.find("text");
         if (name == "text" && text != fields.end() &&
@@ -277,6 +355,9 @@ Status validate_anthropic_backend(
                         "tool_result text must contain a string");
         }
       }
+    }
+    if (supports_images && image_count > image_limit) {
+      return invalid_request("Number of images exceeds limit_image_per_prompt");
     }
   }
   if (count_tokens) {
@@ -311,7 +392,8 @@ Status validate_anthropic_backend(
 }
 
 std::vector<Message> build_anthropic_messages(
-    const proto::AnthropicMessagesRequest& request) {
+    const proto::AnthropicMessagesRequest& request,
+    bool supports_images) {
   std::vector<Message> messages;
   messages.reserve(request.messages_size() + 1);
   std::string system = request.has_system_string()
@@ -342,9 +424,13 @@ std::vector<Message> build_anthropic_messages(
     calls.reserve(message.content_blocks().blocks_size());
     std::string reasoning;
     bool has_reasoning = false;
+    bool has_image = false;
     for (const auto& block : message.content_blocks().blocks()) {
       if (block.type() == "text" && !block.text().empty()) {
         content.emplace_back("text", block.text());
+      } else if (supports_images && block.type() == "image") {
+        content.emplace_back("image_url", image_url(block.source()));
+        has_image = true;
       } else if (block.type() == "thinking" && block.has_thinking()) {
         reasoning += block.thinking();
         has_reasoning = true;
@@ -358,7 +444,7 @@ std::vector<Message> build_anthropic_messages(
         calls.emplace_back(std::move(call));
       } else if (block.type() == "tool_result") {
         if (role == "user") {
-          append_tool_result(block, messages);
+          append_tool_result(block, messages, supports_images);
         } else {
           std::string text =
               block.has_content_string() ? block.content_string() : "";
@@ -370,7 +456,9 @@ std::vector<Message> build_anthropic_messages(
       continue;
     }
     Message converted(role, "");
-    if (!content.empty()) {
+    if (has_image) {
+      converted.content = std::move(content);
+    } else if (!content.empty()) {
       // vLLM's text renderer joins content parts before applying an LLM
       // template. Passing the array through would break string-only templates.
       std::string text;

@@ -41,6 +41,7 @@ class VlmExecutorImpl : public ExecutorImpl {
                   const runtime::Options& options);
 
   ~VlmExecutorImpl() override = default;
+  void clear_multimodal_cache() override;
 
   ModelOutput run(const torch::Tensor& tokens,
                   const torch::Tensor& positions,

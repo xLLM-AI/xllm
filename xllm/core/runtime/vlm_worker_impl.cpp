@@ -64,6 +64,11 @@ bool VLMWorkerImpl::init_model(ModelContext& context) {
   return true;
 }
 
+bool VLMWorkerImpl::virtual_memory_sleep(MasterStatus master_status) {
+  model_executor_->clear_multimodal_cache();
+  return WorkerImpl::virtual_memory_sleep(master_status);
+}
+
 std::optional<ForwardOutput> VLMWorkerImpl::step(const VlmForwardInput& input) {
   std::unique_ptr<Stream> stream = device_.current_stream();
   wait_input_ready_events(input, *stream);

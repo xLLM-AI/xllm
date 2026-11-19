@@ -94,6 +94,9 @@ bool Qwen2VLPromptProcessor::process(std::string& prompt,
       LOG(FATAL) << "Unexpected token type encountered.";
     }
 
+    if (!grid_thw->defined() || *index >= grid_thw->size(0)) {
+      return false;
+    }
     auto token_num =
         (*grid_thw)[(*index)].prod().item<int32_t>() / merge_length;
     while (token_num--) {
@@ -115,36 +118,58 @@ bool Qwen2VLPromptProcessor::process(std::string& prompt,
 bool Qwen2VLPromptProcessor::find_mm_spans(
     const std::vector<int32_t>& token_ids,
     MMData& mm_data) {
+  if (mm_data.empty()) {
+    return true;
+  }
+  auto& items = mm_data.items<MMItemVec>();
   auto start = token_ids.begin();
-  int32_t global_mm_index = 0;
-  int32_t offset = 0;
-  int32_t length = 0;
-  auto& mm_items = mm_data.items<MMItemVec>();
-  while (true) {
-    auto vision_start_it =
-        std::find(start, token_ids.end(), vision_start_token_id_);
-    auto vision_end_it =
-        std::find(start, token_ids.end(), vision_end_token_id_);
-    if (vision_start_it == token_ids.end()) {
+  size_t item_index = 0;
+  int64_t image_tokens = 0;
+  int64_t video_tokens = 0;
+  const int32_t merge_length = merge_size_ * merge_size_;
+  while (start != token_ids.end()) {
+    auto begin = std::find(start, token_ids.end(), vision_start_token_id_);
+    if (begin == token_ids.end()) {
       break;
     }
-    offset = std::distance(token_ids.begin(), vision_start_it);
-    length = std::distance(vision_start_it + 1, vision_end_it);
-
-    auto& item = mm_items[global_mm_index];
-    auto next_token_id = *(vision_start_it + 1);
-    if (next_token_id == image_token_id_ || next_token_id == video_token_id_) {
-      item.mutable_state().mutable_token_pos() = {offset + 1, length};
-      auto mask = torch::ones(
-          {length},
-          torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
-      item.mutable_state().mutable_mm_token_mask() = mask;
-      item.mutable_state().mutable_mm_token_num() = length;
+    auto end = std::find(begin + 1, token_ids.end(), vision_end_token_id_);
+    if (end == token_ids.end() || end == begin + 1 ||
+        item_index >= items.size()) {
+      return false;
     }
-    ++global_mm_index;
-    start = std::next(vision_end_it);
+    auto& item = items[item_index];
+    const int32_t token = *(begin + 1);
+    const bool image = token == image_token_id_;
+    if ((!image && token != video_token_id_) ||
+        item.type() != (image ? MMType::IMAGE : MMType::VIDEO) ||
+        !std::all_of(
+            begin + 1, end, [token](int32_t id) { return id == token; })) {
+      return false;
+    }
+    const auto grid =
+        item.get<torch::Tensor>(image ? "image_grid_thw" : "video_grid_thw");
+    const int32_t length = static_cast<int32_t>(std::distance(begin + 1, end));
+    if (!grid.has_value() ||
+        length != grid->prod().item<int64_t>() / merge_length) {
+      return false;
+    }
+    auto& state = item.mutable_state();
+    state.mutable_token_pos() = {
+        static_cast<int32_t>(std::distance(token_ids.begin(), begin)) + 1,
+        length};
+    state.mutable_mm_token_mask() = torch::ones(
+        {length},
+        torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
+    state.mutable_mm_token_num() = length;
+    (image ? image_tokens : video_tokens) += length;
+    ++item_index;
+    start = end + 1;
   }
-  return true;
+  return item_index == items.size() &&
+         std::count(token_ids.begin(), token_ids.end(), image_token_id_) ==
+             image_tokens &&
+         std::count(token_ids.begin(), token_ids.end(), video_token_id_) ==
+             video_tokens;
 }
 
 }  // namespace xllm

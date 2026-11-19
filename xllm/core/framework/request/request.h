@@ -32,6 +32,7 @@ limitations under the License.
 #include "request_state.h"
 #include "sequences_group.h"
 #include "stopping_checker.h"
+#include "usage.h"
 #include "util/threadpool.h"
 
 namespace xllm {
@@ -53,6 +54,9 @@ class Request : public RequestBase {
   std::vector<std::unique_ptr<Sequence>>& sequences() {
     return sequences_group_->sequences();
   }
+  const std::vector<std::unique_ptr<Sequence>>& sequences() const {
+    return sequences_group_->sequences();
+  }
   bool expand_sequences(bool share_prefix = true);
 
   SequencesGroup* sequence_group() { return sequences_group_.get(); }
@@ -65,6 +69,8 @@ class Request : public RequestBase {
 
   RequestOutput generate_output(const Tokenizer& tokenizer,
                                 ThreadPool* thread_pool = nullptr);
+
+  Usage usage() const;
 
   void handle_last_token();
 

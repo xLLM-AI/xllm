@@ -19,6 +19,7 @@ option go_package = "jd.com/jd-infer/xllm;xllm";
 package xllm.proto;
 
 import "common.proto";
+import "chat.proto";
 import "google/protobuf/struct.proto";
 import "tensor.proto";
 import "embedding_data.proto";
@@ -60,7 +61,7 @@ message MMChatMessage {
   optional string tool_call_id = 4;
 }
 
-// Next Id: 43
+// Next Id: 51
 message MMChatRequest {
 
   // ID of the model to use. You can use the ListModels endpoint to list available models.
@@ -188,4 +189,5 @@ message MMChatRequest {
   map<int32, float> logit_bias = 47;
   repeated int32 allowed_token_ids = 48;
   repeated string bad_words = 49;
+  optional ResponseFormat response_format = 50;
 }

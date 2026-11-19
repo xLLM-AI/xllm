@@ -72,6 +72,15 @@ void ServiceImplFactory::create(
           const std::vector<std::string>& models) {
          auto* vlm_master = dynamic_cast<VLMMaster*>(master);
          CHECK(vlm_master != nullptr);
+         self->anthropic_service_impl_ = std::make_unique<AnthropicServiceImpl>(
+             vlm_master, models, self->master_manager_);
+         self->completion_service_impl_ =
+             std::make_unique<CompletionServiceImpl>(
+                 vlm_master, models, self->master_manager_);
+         self->sample_service_impl_ = std::make_unique<SampleServiceImpl>(
+             vlm_master, models, self->master_manager_);
+         self->chat_service_impl_ = std::make_unique<ChatServiceImpl>(
+             vlm_master, models, self->master_manager_);
          self->mm_chat_service_impl_ =
              std::make_unique<MMChatServiceImpl>(vlm_master, models);
          self->mm_embedding_service_impl_ =

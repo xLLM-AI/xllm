@@ -1156,7 +1156,7 @@ void handle_anthropic_messages(std::unique_ptr<AnthropicServiceImpl>& service,
     return;
   }
   const Status backend =
-      api_service::validate_anthropic_backend(parsed_request, count_tokens);
+      service->validate_backend(parsed_request, count_tokens);
   if (!backend.ok()) {
     const bool internal = backend.code() == StatusCode::UNKNOWN;
     anthropic_http_error(ctrl,

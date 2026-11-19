@@ -28,6 +28,7 @@ limitations under the License.
 namespace xllm {
 
 class MasterManager;
+class Master;
 
 using SampleCall = NonStreamCall<proto::SampleRequest, proto::SampleResponse>;
 
@@ -60,7 +61,7 @@ bool build_response(const std::string& request_id,
 
 class SampleServiceImpl final : public APIServiceImpl<SampleCall> {
  public:
-  SampleServiceImpl(LLMMaster* master,
+  SampleServiceImpl(Master* master,
                     const std::vector<std::string>& models,
                     std::shared_ptr<MasterManager> master_manager);
 

@@ -23,7 +23,13 @@ limitations under the License.
 
 namespace xllm {
 
-Status RateLimiter::acquire() {
+Status RateLimiter::acquire() { return acquire(1); }
+
+Status RateLimiter::acquire(int32_t num_requests) {
+  if (num_requests <= 0) {
+    return Status(StatusCode::INVALID_ARGUMENT,
+                  "The number of request slots must be positive.");
+  }
   const int32_t max =
       ::xllm::ServiceConfig::get_instance().max_concurrent_requests();
   int32_t expected = num_concurrent_requests_.load(std::memory_order_relaxed);
@@ -34,7 +40,9 @@ Status RateLimiter::acquire() {
                     "Model is currently in sleep state.");
     }
     // Check rate limit.
-    if (max > 0 && expected >= max) {
+    const int64_t next_count = static_cast<int64_t>(expected) + num_requests;
+    const int64_t limit = max > 0 ? max : INT32_MAX;
+    if (next_count > limit) {
       COUNTER_INC(server_request_total_limit);
       return Status(StatusCode::RATE_LIMITED,
                     "The number of concurrent requests has reached the limit.");
@@ -43,10 +51,10 @@ Status RateLimiter::acquire() {
     // retry (re-checking the sleep/limit conditions above with the new value).
     if (num_concurrent_requests_.compare_exchange_weak(
             expected,
-            expected + 1,
+            static_cast<int32_t>(next_count),
             std::memory_order_acq_rel,
             std::memory_order_relaxed)) {
-      GAUGE_SET(num_concurrent_requests, expected + 1);
+      GAUGE_SET(num_concurrent_requests, next_count);
       return Status();
     }
   }

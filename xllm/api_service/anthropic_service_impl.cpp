@@ -26,6 +26,7 @@ limitations under the License.
 
 #include "api_service/anthropic_request_utils.h"
 #include "api_service/anthropic_stream_utils.h"
+#include "api_service/generation_master.h"
 #include "api_service/stream_output_parser.h"
 #include "api_service/tool_call_response.h"
 #include "core/common/types.h"
@@ -39,7 +40,7 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-LLMMaster* check_master(LLMMaster* master) {
+Master* check_master(Master* master) {
   CHECK(master != nullptr);
   return master;
 }
@@ -487,7 +488,7 @@ bool send_delta_to_client(std::shared_ptr<AnthropicCall> call,
 }  // namespace
 
 AnthropicServiceImpl::AnthropicServiceImpl(
-    LLMMaster* master,
+    Master* master,
     const std::vector<std::string>& models,
     std::shared_ptr<MasterManager> master_manager)
     : APIServiceImpl(models),
@@ -499,11 +500,23 @@ AnthropicServiceImpl::AnthropicServiceImpl(
   CHECK(master_manager_ != nullptr);
 }
 
+Status AnthropicServiceImpl::validate_backend(
+    const proto::AnthropicMessagesRequest& request,
+    bool count_tokens) const {
+  auto master =
+      GenerationMaster::from(master_manager_->find_master(request.model()));
+  return api_service::validate_anthropic_backend(
+      request,
+      count_tokens,
+      master.has_value() && master->supports_image_input(),
+      master.has_value() ? master->options().limit_image_per_prompt() : 0);
+}
+
 void AnthropicServiceImpl::count_tokens(std::shared_ptr<AnthropicCall> call) {
   const auto& request = call->request();
-  auto model_master = std::dynamic_pointer_cast<LLMMaster>(
-      master_manager_->find_master(request.model()));
-  if (model_master == nullptr) {
+  auto model_master =
+      GenerationMaster::from(master_manager_->find_master(request.model()));
+  if (!model_master) {
     call->finish_with_error(
         StatusCode::NOT_FOUND,
         "The model `" + request.model() + "` does not exist.");
@@ -519,8 +532,8 @@ void AnthropicServiceImpl::count_tokens(std::shared_ptr<AnthropicCall> call) {
   });
   RequestParams params(
       request, call->get_x_request_id(), call->get_x_request_time());
-  std::vector<Message> messages =
-      api_service::build_anthropic_messages(request);
+  std::vector<Message> messages = api_service::build_anthropic_messages(
+      request, model_master->supports_image_input());
   rate_limit_guard.dismiss();
   model_master->count_chat_tokens(
       std::move(messages),
@@ -543,8 +556,8 @@ void AnthropicServiceImpl::process_async_impl(
   const auto& rpc_request = call->request();
   const auto& model = rpc_request.model();
   auto model_master =
-      std::dynamic_pointer_cast<LLMMaster>(master_manager_->find_master(model));
-  if (model_master == nullptr) {
+      GenerationMaster::from(master_manager_->find_master(model));
+  if (!model_master) {
     call->finish_with_error(StatusCode::UNKNOWN, "Model not supported");
     return;
   }
@@ -564,8 +577,8 @@ void AnthropicServiceImpl::process_async_impl(
       rpc_request, call->get_x_request_id(), call->get_x_request_time());
 
   // Build messages
-  std::vector<Message> messages =
-      api_service::build_anthropic_messages(rpc_request);
+  std::vector<Message> messages = api_service::build_anthropic_messages(
+      rpc_request, model_master->supports_image_input());
 
   const auto rendered =
       model_master->chat_template().apply_with_generation_mode(
@@ -614,7 +627,10 @@ void AnthropicServiceImpl::process_async_impl(
     }
     request_params.decode_address = rpc_request.routing().decode_name();
   }
-  if (saved_streaming && !prompt_tokens.has_value()) {
+  // VLM preprocessing expands media placeholders before tokenization. Let the
+  // master produce these tokens and report their actual count in output usage.
+  if (saved_streaming && !prompt_tokens.has_value() &&
+      !model_master->uses_multimodal_processor()) {
     prompt_tokens.emplace();
     if (!model_master->tokenizer().encode(rendered->prompt,
                                           &prompt_tokens.value(),

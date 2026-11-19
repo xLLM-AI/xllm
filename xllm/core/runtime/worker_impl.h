@@ -432,7 +432,7 @@ class WorkerImpl {
   bool wakeup_local(const WakeupOptions& options);
 
   // Virtual memory residency sleep path.
-  bool virtual_memory_sleep(MasterStatus master_status);
+  virtual bool virtual_memory_sleep(MasterStatus master_status);
 
 #if defined(USE_NPU)
   bool wakeup_from_remote_weights(const WakeupOptions& options);

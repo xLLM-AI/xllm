@@ -129,6 +129,7 @@ TEST(PromptProcessorTest, QwenVideoTimestampsPadGroupsAndRepeatLastFrame) {
 
 TEST(PromptProcessorTest, QwenVideoMaskIncludesGapsAndCountsOnlyVideoTokens) {
   ModelArgs args;
+  args.mm_image_merge_size(1);
   args.vision_start_token_id(10);
   args.vision_end_token_id(11);
   args.image_token_id(12);
@@ -139,15 +140,15 @@ TEST(PromptProcessorTest, QwenVideoMaskIncludesGapsAndCountsOnlyVideoTokens) {
                   MMType::VIDEO,
                   MMDict{{"video_grid_thw", torch::tensor({{2, 1, 2}})}})});
   ASSERT_TRUE(
-      processor.find_mm_spans({10, 13, 13, 11, 99, 10, 13, 7, 11}, data));
+      processor.find_mm_spans({10, 13, 13, 11, 99, 10, 13, 7, 13, 11}, data));
   const auto& state = data.items<MMItemVec>()[0].state();
   EXPECT_EQ(state.token_pos().offset, 1);
-  EXPECT_EQ(state.token_pos().length, 7);
-  EXPECT_EQ(state.mm_token_num(), 3);
-  EXPECT_TRUE(
-      torch::equal(state.mm_token_mask(),
-                   torch::tensor({true, true, false, false, false, true, false},
-                                 torch::kBool)));
+  EXPECT_EQ(state.token_pos().length, 8);
+  EXPECT_EQ(state.mm_token_num(), 4);
+  EXPECT_TRUE(torch::equal(
+      state.mm_token_mask(),
+      torch::tensor({true, true, false, false, false, true, false, true},
+                    torch::kBool)));
 }
 
 TEST(PromptProcessorTest, GlmPreservesMixedExpansionAndVideoTimestamps) {
@@ -174,12 +175,18 @@ TEST(PromptProcessorTest, GlmPreservesMixedExpansionAndVideoTimestamps) {
 
 TEST(PromptProcessorTest, GlmVideoMaskCountResetsBetweenVideos) {
   ModelArgs args;
+  args.mm_image_merge_size(1);
   args.video_start_token_id(10);
   args.video_end_token_id(11);
   args.image_token_id(12);
   GLM4VPromptProcessor processor(args);
-  MMData data(MMType::VIDEO,
-              MMItemVec{MMDataItem(MMType::VIDEO), MMDataItem(MMType::VIDEO)});
+  MMData data(
+      MMType::VIDEO,
+      MMItemVec{
+          MMDataItem(MMType::VIDEO,
+                     MMDict{{"video_grid_thw", torch::tensor({{1, 1, 2}})}}),
+          MMDataItem(MMType::VIDEO,
+                     MMDict{{"video_grid_thw", torch::tensor({{1, 1, 1}})}})});
   ASSERT_TRUE(
       processor.find_mm_spans({10, 12, 7, 12, 11, 10, 7, 12, 11}, data));
   const auto& items = data.items<MMItemVec>();

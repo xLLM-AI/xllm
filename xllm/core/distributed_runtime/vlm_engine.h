@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <gflags/gflags.h>
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -34,11 +35,16 @@ limitations under the License.
 
 namespace xllm {
 
+class ModelLoader;
+
 class VmmKVCacheLayout;
 class KVCacheTransferCoordinatorBase;
 
 class VLMEngine : public Engine {
  public:
+  using ModelInitCallback = std::function<
+      bool(const ModelLoader&, int64_t, int32_t, int32_t, MasterStatus)>;
+
   // create an engine with the given devices
   VLMEngine(const runtime::Options& options,
             std::shared_ptr<DistributedWorkerManager>
@@ -59,6 +65,10 @@ class VLMEngine : public Engine {
   bool init(
       MasterStatus master_status,
       std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator);
+  bool init(
+      MasterStatus master_status,
+      const ModelInitCallback& prepare_model,
+      std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator);
 
   bool start_profile() override;
   bool stop_profile() override;
@@ -68,7 +78,8 @@ class VLMEngine : public Engine {
  private:
   template <typename TargetEngine>
   friend class SpeculativeEngineBase;
-  bool init_model(MasterStatus master_status);
+  bool init_model(MasterStatus master_status,
+                  const ModelInitCallback& prepare_model = {});
   KVCacheCapacity estimate_kv_cache_capacity(
       bool initialize_virtual_memory = true);
   bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap,
@@ -99,6 +110,7 @@ class VLMEngine : public Engine {
 
   std::unique_ptr<VlmForwardInputFactory> forward_input_factory_;
   std::mutex profile_mutex_;
+  int64_t initial_weight_reservation_bytes_ = 0;
 };
 
 }  // namespace xllm

@@ -350,18 +350,16 @@ void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
     }
   }
   params.max_tokens = 0;
-  if constexpr (std::is_same_v<ChatRequest, proto::ChatRequest>) {
-    if (request.has_response_format()) {
-      const std::string& type = request.response_format().type();
-      if (type == "json_object") {
-        if (ServiceConfig::get_instance().enable_json_object_output()) {
-          params.response_format = ResponseFormatType::JSON_OBJECT;
-        }
-      } else if (type != "text") {
-        params.response_format_error =
-            "Unsupported response_format.type: " + type +
-            "; only json_object is supported";
+  if (request.has_response_format()) {
+    const std::string& type = request.response_format().type();
+    if (type == "json_object") {
+      if (ServiceConfig::get_instance().enable_json_object_output()) {
+        params.response_format = ResponseFormatType::JSON_OBJECT;
       }
+    } else if (type != "text") {
+      params.response_format_error =
+          "Unsupported response_format.type: " + type +
+          "; only json_object is supported";
     }
   }
   if (request.has_request_id()) {

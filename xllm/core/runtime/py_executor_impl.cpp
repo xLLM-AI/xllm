@@ -275,6 +275,12 @@ void PyExecutorImpl::bind_kv_caches(std::vector<KVCache>& kv_caches) {
   }
 }
 
+void PyExecutorImpl::clear_multimodal_cache() {
+  if (encoder_cache_ != nullptr) {
+    encoder_cache_->clear();
+  }
+}
+
 ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
                                 const torch::Tensor& positions,
                                 std::vector<KVCache>& kv_caches,

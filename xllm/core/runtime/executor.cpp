@@ -53,6 +53,8 @@ void Executor::set_dp_process_group(ProcessGroup* group) {
   impl_->set_dp_process_group(group);
 }
 
+void Executor::clear_multimodal_cache() { impl_->clear_multimodal_cache(); }
+
 ModelOutput Executor::forward(const torch::Tensor& tokens,
                               const torch::Tensor& positions,
                               std::vector<KVCache>& kv_caches,

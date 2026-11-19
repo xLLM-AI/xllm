@@ -34,9 +34,11 @@ limitations under the License.
 #include "common/types.h"
 #include "core/common/global_flags.h"
 #include "core/common/types.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/kv_capacity_planner.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
@@ -176,7 +178,15 @@ bool VLMEngine::init(MasterStatus master_status) {
 bool VLMEngine::init(
     MasterStatus master_status,
     std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
-  if (!init_model(master_status)) {
+  return init(
+      master_status, /*prepare_model=*/{}, std::move(transfer_coordinator));
+}
+
+bool VLMEngine::init(
+    MasterStatus master_status,
+    const ModelInitCallback& prepare_model,
+    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+  if (!init_model(master_status, prepare_model)) {
     LOG(ERROR) << "Failed to init model from: " << options_.model_path();
     return false;
   }
@@ -193,7 +203,8 @@ bool VLMEngine::init(
   return true;
 }
 
-bool VLMEngine::init_model(MasterStatus master_status) {
+bool VLMEngine::init_model(MasterStatus master_status,
+                           const ModelInitCallback& prepare_model) {
   const std::string& model_path = options_.model_path();
   auto model_loader = ModelLoader::create(model_path);
   LOG(INFO) << "Initializing model from: " << model_path;
@@ -234,6 +245,22 @@ bool VLMEngine::init_model(MasterStatus master_status) {
   LOG(INFO) << "Initializing model with random seed: "
             << ::xllm::ExecutionConfig::get_instance().random_seed();
 
+  if (prepare_model && !prepare_model(*model_loader,
+                                      args_.n_layers(),
+                                      static_cast<int32_t>(dp_size_),
+                                      static_cast<int32_t>(dp_local_tp_size_),
+                                      master_status)) {
+    return false;
+  }
+  if (LoadConfig::get_instance().enable_vmm_weights() &&
+      !KVCacheConfig::get_instance().enable_vmm_kvcache() &&
+      master_status != MasterStatus::WAKEUP) {
+    initial_weight_reservation_bytes_ =
+        DistributedVmmCoordinator::get_instance().get_weight_page_count(
+            options_.model_id()) *
+        KVCacheConfig::get_instance().phy_page_granularity_size();
+  }
+
   // init model for each worker in parallel
   // multiple workers, call async init
   std::vector<folly::SemiFuture<bool>> futures;
@@ -242,7 +269,7 @@ bool VLMEngine::init_model(MasterStatus master_status) {
     futures.push_back(worker->init_model_async(
         model_path,
         ::xllm::ExecutionConfig::get_instance().random_seed(),
-        MasterStatus::WAKEUP));
+        master_status));
   }
   // wait for all futures to complete
   auto results = folly::collectAll(futures).get();
@@ -262,7 +289,7 @@ KVCacheCapacity VLMEngine::estimate_kv_cache_capacity(
                            dp_local_tp_size_,
                            worker_clients_,
                            /*is_multimodal=*/true,
-                           /*reserved_memory_bytes=*/0)
+                           initial_weight_reservation_bytes_)
       .plan(initialize_virtual_memory);
 }
 

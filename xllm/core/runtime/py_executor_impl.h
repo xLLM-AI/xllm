@@ -43,6 +43,7 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
                  const runtime::Options& options);
 
   ~PyExecutorImpl() override;
+  void clear_multimodal_cache() override;
 
   ModelOutput run(const torch::Tensor& tokens,
                   const torch::Tensor& positions,

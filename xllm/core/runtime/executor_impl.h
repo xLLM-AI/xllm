@@ -49,6 +49,8 @@ class ExecutorImpl {
 
   virtual void set_dp_process_group(ProcessGroup* /*group*/) {}
 
+  virtual void clear_multimodal_cache() {}
+
   virtual ModelOutput run(const torch::Tensor& tokens,
                           const torch::Tensor& positions,
                           std::vector<KVCache>& kv_caches,

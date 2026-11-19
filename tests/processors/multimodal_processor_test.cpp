@@ -84,6 +84,89 @@ TEST(MultimodalProcessorTest, TextModelUsesTokenizerWithoutVisualSpans) {
   EXPECT_FALSE(processor.process_prompt(prompt, image_data, ids));
 }
 
+TEST(MultimodalProcessorTest, SuppliedTextTokensAreNotEncodedAgain) {
+  MultimodalProcessor<TextPromptProcessor> processor(
+      ModelArgs{}, std::make_shared<FixedTokenizer>(), TokenizerArgs{});
+  MMData data;
+  std::vector<int32_t> tokens{29, 30};
+  ASSERT_TRUE(processor.process_prompt_tokens(data, tokens));
+  EXPECT_EQ(tokens, (std::vector<int32_t>{29, 30}));
+}
+
+TEST(MultimodalProcessorTest, SuppliedVisualTokensPopulateMatchingSpans) {
+  ModelArgs args;
+  args.vision_start_token_id(10)
+      .vision_end_token_id(11)
+      .image_token_id(12)
+      .video_token_id(13)
+      .mm_image_merge_size(1);
+  MultimodalProcessor<Qwen3VLPromptProcessor> processor(
+      args, std::make_shared<FixedTokenizer>(), TokenizerArgs{});
+  MMData data(MMType::IMAGE,
+              MMItemVec{MMDataItem(
+                  MMType::IMAGE,
+                  MMDict{{"image_grid_thw", torch::tensor({{1, 2, 2}})}})});
+  std::vector<int32_t> tokens{42, 10, 12, 12, 12, 12, 11, 43};
+  ASSERT_TRUE(processor.process_prompt_tokens(data, tokens));
+  const auto& state = data.items<MMItemVec>()[0].state();
+  EXPECT_EQ(state.token_pos().offset, 2);
+  EXPECT_EQ(state.token_pos().length, 4);
+  EXPECT_EQ(state.mm_token_num(), 4);
+}
+
+TEST(MultimodalProcessorTest,
+     SuppliedVisualTokensRejectMissingMarkersAndWrongGrid) {
+  ModelArgs args;
+  args.vision_start_token_id(10)
+      .vision_end_token_id(11)
+      .image_token_id(12)
+      .video_token_id(13)
+      .mm_image_merge_size(1);
+  MultimodalProcessor<Qwen3VLPromptProcessor> processor(
+      args, std::make_shared<FixedTokenizer>(), TokenizerArgs{});
+  const std::vector<std::vector<int32_t>> invalid_inputs{
+      {10, 12, 12},
+      {10, 12, 11},
+      {12, 10, 12, 12, 12, 12, 11},
+      {10, 13, 13, 13, 13, 11}};
+  for (std::vector<int32_t> tokens : invalid_inputs) {
+    MMData data(MMType::IMAGE,
+                MMItemVec{MMDataItem(
+                    MMType::IMAGE,
+                    MMDict{{"image_grid_thw", torch::tensor({{1, 2, 2}})}})});
+    EXPECT_FALSE(processor.process_prompt_tokens(data, tokens));
+  }
+}
+
+class SpecialTokenTokenizer final : public Tokenizer {
+ public:
+  bool encode(const std::string_view& /*text*/,
+              std::vector<int32_t>* tokens,
+              bool add_special_tokens) const override {
+    *tokens = add_special_tokens ? std::vector<int32_t>{1, 2, 3}
+                                 : std::vector<int32_t>{2, 3};
+    return true;
+  }
+};
+
+TEST(MultimodalProcessorTest, PromptEncodingHonorsSpecialTokenOption) {
+  MultimodalProcessor<TextPromptProcessor> processor(
+      ModelArgs{}, std::make_shared<SpecialTokenTokenizer>(), TokenizerArgs{});
+  std::string prompt = "hello";
+  MMData data;
+  std::vector<int32_t> tokens;
+  ASSERT_TRUE(processor.process_prompt(prompt,
+                                       data,
+                                       tokens,
+                                       /*add_special_tokens=*/false));
+  EXPECT_EQ(tokens, (std::vector<int32_t>{2, 3}));
+  ASSERT_TRUE(processor.process_prompt(prompt,
+                                       data,
+                                       tokens,
+                                       /*add_special_tokens=*/true));
+  EXPECT_EQ(tokens, (std::vector<int32_t>{1, 2, 3}));
+}
+
 class CountingImageProcessor final : public ImageProcessor {
  public:
   explicit CountingImageProcessor(const ModelArgs&) {}

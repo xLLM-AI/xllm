@@ -2,7 +2,12 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <barrier>
+#include <thread>
+
 #include "core/framework/config/service_config.h"
+#include "core/util/scope_guard.h"
 
 namespace xllm {
 
@@ -83,6 +88,70 @@ TEST(RequestLimiterTest, AdmissionPreservesRejectionReasonAndCounter) {
   rate_limiter.decrease_one_request();
   EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 0);
   config.max_concurrent_requests(previous_limit);
+}
+
+TEST(RequestLimiterTest, BatchSlotsReleaseIndividuallyBeforeSleep) {
+  auto& config = ServiceConfig::get_instance();
+  const int32_t previous_limit = config.max_concurrent_requests();
+  ScopeGuard restore([&] { config.max_concurrent_requests(previous_limit); });
+  config.max_concurrent_requests(3);
+  RateLimiter limiter;
+
+  ASSERT_TRUE(limiter.acquire(2).ok());
+  EXPECT_EQ(limiter.get_num_concurrent_requests(), 2);
+  limiter.decrease_one_request();
+  EXPECT_FALSE(limiter.try_set_sleeping());
+  limiter.decrease_one_request();
+  EXPECT_EQ(limiter.get_num_concurrent_requests(), 0);
+  ASSERT_TRUE(limiter.try_set_sleeping());
+  EXPECT_EQ(limiter.acquire(2).code(), StatusCode::UNAVAILABLE);
+  EXPECT_TRUE(limiter.try_wakeup());
+  EXPECT_EQ(limiter.get_num_concurrent_requests(), 0);
+}
+
+TEST(RequestLimiterTest, BatchRejectionDoesNotReservePartialCapacity) {
+  auto& config = ServiceConfig::get_instance();
+  const int32_t previous_limit = config.max_concurrent_requests();
+  ScopeGuard restore([&] { config.max_concurrent_requests(previous_limit); });
+  config.max_concurrent_requests(3);
+  RateLimiter limiter;
+
+  ASSERT_TRUE(limiter.acquire(2).ok());
+  EXPECT_EQ(limiter.acquire(2).code(), StatusCode::RATE_LIMITED);
+  EXPECT_EQ(limiter.get_num_concurrent_requests(), 2);
+  ASSERT_TRUE(limiter.acquire().ok());
+  EXPECT_EQ(limiter.get_num_concurrent_requests(), 3);
+  for (int32_t index = 0; index < 3; ++index) {
+    limiter.decrease_one_request();
+  }
+  EXPECT_TRUE(limiter.try_set_sleeping());
+}
+
+TEST(RequestLimiterTest, ConcurrentBatchesReserveWholeRequests) {
+  auto& config = ServiceConfig::get_instance();
+  const int32_t previous_limit = config.max_concurrent_requests();
+  ScopeGuard restore([&] { config.max_concurrent_requests(previous_limit); });
+  config.max_concurrent_requests(3);
+  RateLimiter limiter;
+  std::barrier start(3);
+  std::atomic<int32_t> accepted{0};
+  const auto reserve = [&] {
+    start.arrive_and_wait();
+    if (limiter.acquire(2).ok()) {
+      accepted.fetch_add(1, std::memory_order_relaxed);
+    }
+  };
+  std::thread first(reserve);
+  std::thread second(reserve);
+  start.arrive_and_wait();
+  first.join();
+  second.join();
+
+  EXPECT_EQ(accepted.load(), 1);
+  EXPECT_EQ(limiter.get_num_concurrent_requests(), 2);
+  limiter.decrease_one_request();
+  limiter.decrease_one_request();
+  EXPECT_TRUE(limiter.try_set_sleeping());
 }
 
 }  // namespace xllm

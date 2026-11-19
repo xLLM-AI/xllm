@@ -22,6 +22,7 @@ limitations under the License.
 #include "api_service/api_service_impl.h"
 #include "api_service/stream_call.h"
 #include "chat.pb.h"
+#include "generation_master.h"
 #include "multimodal.pb.h"
 
 namespace xllm {
@@ -33,8 +34,8 @@ using ChatCall = StreamCall<proto::ChatRequest, proto::ChatResponse>;
 // a class to handle completion requests
 class ChatServiceImpl final : public APIServiceImpl<ChatCall> {
  public:
-  // Constructor for LLM backend
-  ChatServiceImpl(LLMMaster* master,
+  // Constructor for a text-generation master.
+  ChatServiceImpl(Master* master,
                   const std::vector<std::string>& models,
                   std::shared_ptr<MasterManager> master_manager);
 
@@ -48,7 +49,8 @@ class ChatServiceImpl final : public APIServiceImpl<ChatCall> {
   void process_request_from_service(const proto::ChatRequest& request,
                                     const std::string& x_request_id = "",
                                     const std::string& x_request_time = "");
-  std::shared_ptr<LLMMaster> get_model_master(const std::string& model) const;
+  std::optional<GenerationMaster> get_model_master(
+      const std::string& model) const;
 
   DISALLOW_COPY_AND_ASSIGN(ChatServiceImpl);
 

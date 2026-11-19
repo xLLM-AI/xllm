@@ -88,8 +88,15 @@ CacheableMultimodalProcessor::CacheableMultimodalProcessor(
 bool CacheableMultimodalProcessor::process_prompt(
     std::string& prompt,
     MMData& mm_data,
+    std::vector<int32_t>& token_ids,
+    bool add_special_tokens) {
+  return inner_->process_prompt(prompt, mm_data, token_ids, add_special_tokens);
+}
+
+bool CacheableMultimodalProcessor::process_prompt_tokens(
+    MMData& mm_data,
     std::vector<int32_t>& token_ids) {
-  return inner_->process_prompt(prompt, mm_data, token_ids);
+  return inner_->process_prompt_tokens(mm_data, token_ids);
 }
 
 bool CacheableMultimodalProcessor::process_multimodal(const MMInput& inputs,

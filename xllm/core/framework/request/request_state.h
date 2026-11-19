@@ -110,7 +110,8 @@ class RequestState final {
                bool enable_schedule_overlap,
                const OutputFunc& output_func,
                const OutputsFunc& outputs_func,
-               const std::string& decode_address = "");
+               const std::string& decode_address = "",
+               std::optional<Call*> call = std::nullopt);
 
   // for profiling run, only provide prompt tokens
   RequestState(std::vector<int32_t> prompt_tokens);

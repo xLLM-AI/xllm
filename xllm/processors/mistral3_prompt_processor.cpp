@@ -18,7 +18,6 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
-#include <cassert>
 
 namespace xllm {
 
@@ -30,8 +29,9 @@ Mistral3PromptProcessor::Mistral3PromptProcessor(const ModelArgs& args) {
 bool Mistral3PromptProcessor::process(std::string& prompt,
                                       const MMData& mm_data) {
   torch::Tensor image_grid_thw;
-  if (auto res = mm_data.get<torch::Tensor>("image_grid_thw"))
+  if (auto res = mm_data.get<torch::Tensor>("image_grid_thw")) {
     image_grid_thw = res.value();
+  }
 
   if (!image_grid_thw.defined()) {
     return true;
@@ -49,6 +49,9 @@ bool Mistral3PromptProcessor::process(std::string& prompt,
   size_t pos = find_image_token(prompt, begin);
 
   while (pos != std::string::npos) {
+    if (image_index >= image_grid_thw.size(0)) {
+      return false;
+    }
     data.append(prompt, begin, pos - begin);
     int32_t token_num =
         image_grid_thw[image_index].prod().item<int32_t>() / merge_length;
@@ -71,35 +74,44 @@ bool Mistral3PromptProcessor::process(std::string& prompt,
 bool Mistral3PromptProcessor::find_mm_spans(
     const std::vector<int32_t>& token_ids,
     MMData& mm_data) {
-  auto& mm_items = mm_data.items<MMItemVec>();
-  int32_t global_mm_index = 0;
-  size_t i = 0;
-  const size_t n = token_ids.size();
-
-  while (i < n && static_cast<size_t>(global_mm_index) < mm_items.size()) {
-    if (token_ids[i] != image_token_id_) {
-      ++i;
+  if (mm_data.empty()) {
+    return true;
+  }
+  auto& items = mm_data.items<MMItemVec>();
+  size_t item_index = 0;
+  size_t index = 0;
+  while (index < token_ids.size()) {
+    if (token_ids[index] != image_token_id_) {
+      ++index;
       continue;
     }
-
-    // Found start of an image token run
-    size_t start = i;
-    while (i < n && token_ids[i] == image_token_id_) {
-      ++i;
+    if (item_index >= items.size()) {
+      return false;
     }
-    int32_t length = static_cast<int32_t>(i - start);
-
-    auto& item = mm_items[global_mm_index];
-    item.mutable_state().mutable_token_pos() = {static_cast<int32_t>(start),
-                                                length};
-    auto mask = torch::ones(
+    auto& item = items[item_index];
+    const auto grid = item.get<torch::Tensor>("image_grid_thw");
+    if (item.type() != MMType::IMAGE || !grid.has_value()) {
+      return false;
+    }
+    const int64_t length =
+        grid->prod().item<int64_t>() / (merge_size_ * merge_size_);
+    if (length <= 0 ||
+        static_cast<uint64_t>(length) > token_ids.size() - index ||
+        !std::all_of(token_ids.begin() + index,
+                     token_ids.begin() + index + length,
+                     [this](int32_t id) { return id == image_token_id_; })) {
+      return false;
+    }
+    item.mutable_state().mutable_token_pos() = {static_cast<int32_t>(index),
+                                                static_cast<int32_t>(length)};
+    item.mutable_state().mutable_mm_token_mask() = torch::ones(
         {length},
         torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
-    item.mutable_state().mutable_mm_token_mask() = mask;
-    item.mutable_state().mutable_mm_token_num() = length;
-    ++global_mm_index;
+    item.mutable_state().mutable_mm_token_num() = static_cast<int32_t>(length);
+    index += static_cast<size_t>(length);
+    ++item_index;
   }
-  return true;
+  return item_index == items.size();
 }
 
 size_t Mistral3PromptProcessor::find_image_token(const std::string& prompt,

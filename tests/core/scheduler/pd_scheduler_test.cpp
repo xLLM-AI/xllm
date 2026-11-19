@@ -2569,5 +2569,50 @@ TEST(PDSchedulerTest, FullDecodeQueueFailsAfterFirstTokenAndReleasesKv) {
   EXPECT_EQ(outputs.back().status->code(), StatusCode::RESOURCE_EXHAUSTED);
 }
 
+TEST(RequestOutputDispatcherTest, StreamingUsageCountsPreparedPromptTokens) {
+  for (const bool batch_response : {false, true}) {
+    for (const bool has_generated_token : {false, true}) {
+      SCOPED_TRACE(batch_response);
+      SCOPED_TRACE(has_generated_token);
+      auto request = make_request({65, 66, 67, 68, 69, 70, 71, 72},
+                                  "prepared-prompt",
+                                  /*enable_schedule_overlap=*/false,
+                                  /*stream=*/true);
+      if (has_generated_token) {
+        auto& sequence = request->sequences().front();
+        sequence->kv_state().set_kv_cache_tokens_num(
+            sequence->num_prompt_tokens());
+        sequence->append_token(Token(73));
+      }
+      std::vector<RequestOutput> outputs;
+      request->state().output_func = [&outputs](const RequestOutput& output) {
+        outputs.push_back(output);
+        return true;
+      };
+      request->state().outputs_func =
+          [&outputs](const std::vector<RequestOutput>& batch) {
+            outputs.insert(outputs.end(), batch.begin(), batch.end());
+            return std::vector<bool>(batch.size(), true);
+          };
+      OutputTokenizer tokenizer;
+      RequestOutputDispatcher dispatcher(&tokenizer,
+                                         batch_response,
+                                         /*disable_log_stats=*/true,
+                                         [](std::shared_ptr<Request>) {});
+      std::vector<std::shared_ptr<Request>> requests{request};
+      dispatcher.process_stream_requests(requests);
+      dispatcher.wait_completion();
+
+      ASSERT_EQ(outputs.size(), 1);
+      ASSERT_TRUE(outputs.front().usage.has_value());
+      EXPECT_EQ(outputs.front().usage->num_prompt_tokens, 8);
+      EXPECT_EQ(outputs.front().usage->num_generated_tokens,
+                has_generated_token ? 1 : 0);
+      EXPECT_EQ(outputs.front().usage->num_total_tokens,
+                has_generated_token ? 9 : 8);
+    }
+  }
+}
+
 }  // namespace
 }  // namespace xllm

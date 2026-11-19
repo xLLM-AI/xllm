@@ -50,7 +50,8 @@ class MultimodalProcessorPipeline : public MultimodalProcessorBase {
                               int32_t max_sequence_length);
 
   bool tokenize(const std::string& prompt,
-                std::vector<int32_t>& token_ids) const;
+                std::vector<int32_t>& token_ids,
+                bool add_special_tokens) const;
 
   void assign_mm_hash_keys(const MMInput& mm_input, MMData& mm_data) const;
 
@@ -84,14 +85,22 @@ class MultimodalProcessor final : public MultimodalProcessorPipeline {
 
   bool process_prompt(std::string& prompt,
                       MMData& mm_data,
-                      std::vector<int32_t>& token_ids) override {
+                      std::vector<int32_t>& token_ids,
+                      bool add_special_tokens = true) override {
     if (!prompt_processor_->process(prompt, mm_data)) {
       return false;
     }
-    if (!tokenize(prompt, token_ids)) {
+    if (!tokenize(prompt, token_ids, add_special_tokens)) {
       return false;
     }
     return prompt_processor_->find_mm_spans(token_ids, mm_data);
+  }
+
+  bool process_prompt_tokens(MMData& mm_data,
+                             std::vector<int32_t>& token_ids) override {
+    pad_to_max_length(token_ids);
+    return mm_data.empty() ||
+           prompt_processor_->find_mm_spans(token_ids, mm_data);
   }
 
   bool process_multimodal(const MMInput& inputs, MMData& data) const override {

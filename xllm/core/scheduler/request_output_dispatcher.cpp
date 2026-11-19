@@ -34,10 +34,12 @@ struct StreamOutputWork {
   bool has_open_sequences = false;
   std::vector<size_t> indexes;
   std::vector<size_t> num_tokens;
+  Usage usage;
 };
 
 StreamOutputWork prepare_stream_output(Request& request) {
   StreamOutputWork work;
+  work.usage = request.usage();
   for (size_t i = 0; i < request.sequences().size(); ++i) {
     auto& sequence = request.sequences()[i];
     if (sequence->is_closed()) {
@@ -253,7 +255,8 @@ void RequestOutputDispatcher::process_stream_request(
                    request,
                    this,
                    indexes = std::move(work.indexes),
-                   num_tokens = std::move(work.num_tokens)]() {
+                   num_tokens = std::move(work.num_tokens),
+                   usage = work.usage]() {
     AUTO_COUNTER(responsing_latency_seconds_stream);
 
     RequestOutput req_output;
@@ -262,6 +265,7 @@ void RequestOutputDispatcher::process_stream_request(
     req_output.target_xservice_addr = request->source_xservice_addr();
     req_output.stream = request->state().stream;
     req_output.response_formatter = request->state().response_formatter;
+    req_output.usage = usage;
     for (size_t i = 0; i < indexes.size(); ++i) {
       const size_t index = indexes[i];
       const size_t size = num_tokens[i];
@@ -304,6 +308,7 @@ void RequestOutputDispatcher::batch_process_stream_requests(
       request_outputs[i].stream = request->state().stream;
       request_outputs[i].response_formatter =
           request->state().response_formatter;
+      request_outputs[i].usage = work.usage;
       counter->decrement_count();
       continue;
     }
@@ -314,6 +319,7 @@ void RequestOutputDispatcher::batch_process_stream_requests(
                      request,
                      indexes = std::move(work.indexes),
                      num_tokens = std::move(work.num_tokens),
+                     usage = work.usage,
                      req_output = &request_outputs[i]]() mutable {
       AUTO_COUNTER(responsing_latency_seconds_stream);
       const absl::Time response_start_time = absl::Now();
@@ -324,6 +330,7 @@ void RequestOutputDispatcher::batch_process_stream_requests(
       req_output->target_xservice_addr = request->source_xservice_addr();
       req_output->stream = request->state().stream;
       req_output->response_formatter = request->state().response_formatter;
+      req_output->usage = usage;
       for (size_t i = 0; i < indexes.size(); ++i) {
         const size_t index = indexes[i];
         const size_t size = num_tokens[i];
