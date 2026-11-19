@@ -32,7 +32,7 @@ class StaticKVBlockPool;
 // prepared input remains tentative until every target worker acknowledges it;
 // abandoned preparation is rolled back so the next input republishes its
 // mappings.
-class SharedKVCacheMappingTracker final {
+class SharedKVMappingTracker final {
  public:
   void begin();
   void acknowledge();

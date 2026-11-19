@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/batch/shared_kv_cache_mapping_tracker.h"
+#include "core/framework/batch/shared_kv_mapping_tracker.h"
 
 #include <glog/logging.h>
 
@@ -23,7 +23,7 @@ limitations under the License.
 
 namespace xllm {
 
-void SharedKVCacheMappingTracker::begin() {
+void SharedKVMappingTracker::begin() {
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto update = pending_.rbegin(); update != pending_.rend(); ++update) {
     known_epochs_[update->type_index][update->id] = update->previous_epoch;
@@ -31,12 +31,12 @@ void SharedKVCacheMappingTracker::begin() {
   pending_.clear();
 }
 
-void SharedKVCacheMappingTracker::acknowledge() {
+void SharedKVMappingTracker::acknowledge() {
   std::lock_guard<std::mutex> lock(mutex_);
   pending_.clear();
 }
 
-void SharedKVCacheMappingTracker::reset() {
+void SharedKVMappingTracker::reset() {
   std::lock_guard<std::mutex> lock(mutex_);
   pending_.clear();
   pool_.reset();
@@ -45,7 +45,7 @@ void SharedKVCacheMappingTracker::reset() {
   }
 }
 
-void SharedKVCacheMappingTracker::append_rows(
+void SharedKVMappingTracker::append_rows(
     std::shared_ptr<StaticKVBlockPool> pool,
     BlockType type,
     Slice<Block> blocks,

@@ -35,7 +35,7 @@ limitations under the License.
 #include "core/distributed_runtime/worker_model_codec.h"
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/batch/forward_input_builder.h"
-#include "core/framework/batch/shared_kv_cache_mapping_tracker.h"
+#include "core/framework/batch/shared_kv_mapping_tracker.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -2488,7 +2488,7 @@ TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
                     "linear_attention",
                     "linear_attention",
                     "full_attention"});
-  SharedKVCacheMappingTracker mapping_tracker;
+  SharedKVMappingTracker mapping_tracker;
   const LlmForwardInput input = batch.prepare_forward_input(
       args, &thread_pool, /*cp_size=*/1, &mapping_tracker);
   const auto& embedding = input.input_params.embedding;

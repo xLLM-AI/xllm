@@ -31,7 +31,7 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/common/metrics.h"
-#include "core/framework/batch/shared_kv_cache_mapping_tracker.h"
+#include "core/framework/batch/shared_kv_mapping_tracker.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -112,7 +112,7 @@ ForwardInputBuilder::ForwardInputBuilder(
     const ModelArgs* args,
     int32_t cp_size,
     ThreadPool* thread_pool,
-    SharedKVCacheMappingTracker* mapping_tracker)
+    SharedKVMappingTracker* mapping_tracker)
     : sequences_(data.sequences),
       allowed_max_tokens_(data.allowed_max_tokens),
       input_embeddings_vec_(data.input_embeddings),
