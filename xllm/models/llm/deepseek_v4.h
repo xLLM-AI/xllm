@@ -1641,10 +1641,6 @@ inline void load_deepseek_v4_model_args(const JsonReader& json,
   // DSpark draft metadata. The 0731 checkpoint stores three draft layers
   // under mtp.0/1/2 and uses DeepSeek-specific top-level key names.
   LOAD_ARG_OR(markov_rank, "dspark_markov_rank", 0);
-  args->dspark_num_layers() = static_cast<int32_t>(
-      json.value_or<std::vector<int32_t>>("dspark_target_layer_ids",
-                                          std::vector<int32_t>{})
-          .size());
 
   // Token ids
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 0);

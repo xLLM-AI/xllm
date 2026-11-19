@@ -58,7 +58,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
 
  protected:
   void apply_target_model_overrides(ModelArgs& args) const override;
-  void apply_draft_model_overrides(ModelArgs& args) override;
   std::optional<ForwardOutput> step_prefill(
       const LlmForwardInput& input) override;
 

@@ -30,7 +30,6 @@ class DFlash2WorkerImpl final : public DFlashWorkerImpl {
                   MasterStatus master_status) override;
 
  protected:
-  void apply_draft_model_overrides(ModelArgs& args) override;
   std::pair<torch::Tensor, torch::Tensor> run_decode_draft(
       const LlmForwardInput& input,
       LlmForwardInput& validate_input,

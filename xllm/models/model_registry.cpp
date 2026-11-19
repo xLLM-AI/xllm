@@ -18,7 +18,6 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <algorithm>
 #include <iostream>
 #include <unordered_set>
 #include <utility>
@@ -30,7 +29,6 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model_loader/dit_model_discovery.h"
 #include "core/framework/model_loader/hf_model_config.h"
@@ -430,10 +428,6 @@ bool ModelRegistry::supports_dcp(const std::string& name) {
   return it != instance->model_registry_.end() && it->second.supports_dcp;
 }
 
-CausalLMFactory ModelRegistry::get_causallm_factory(const std::string& name) {
-  return get_causallm_factory(name, "native");
-}
-
 CausalLMFactory ModelRegistry::get_causallm_factory(
     const std::string& name,
     const std::string& implementation_key) {
@@ -448,10 +442,6 @@ CausalLMFactory ModelRegistry::get_causallm_factory(
     return nullptr;
   }
   return registration->second.factory;
-}
-
-CausalVLMFactory ModelRegistry::get_causalvlm_factory(const std::string& name) {
-  return get_causalvlm_factory(name, "native");
 }
 
 CausalVLMFactory ModelRegistry::get_causalvlm_factory(
@@ -599,25 +589,18 @@ std::string resolve_dit_pipeline_type(
 
 }  // namespace util
 
-void ModelRegistry::register_mtp_args_adapter(const std::string& name,
-                                              MtpArgsAdapter adapter) {
-  get_instance()->model_registry_[name].mtp_args_adapter = std::move(adapter);
+bool ModelRegistry::register_mtp_metadata(const std::string& name,
+                                          MtpModelMetadata metadata) {
+  get_instance()->model_registry_[name].mtp_ = std::move(metadata);
+  return true;
 }
 
-void ModelRegistry::register_mtp_capabilities(
-    const std::string& name,
-    MtpModelCapabilities capabilities) {
-  get_instance()->model_registry_[name].mtp_capabilities = capabilities;
-}
-
-MtpModelCapabilities ModelRegistry::get_mtp_capabilities(
+const MtpModelMetadata& ModelRegistry::get_mtp_metadata(
     const std::string& name) {
+  static const MtpModelMetadata kDefault;
   const auto& models = get_instance()->model_registry_;
   const auto entry = models.find(name);
-  if (entry == models.end()) {
-    return MtpModelCapabilities();
-  }
-  return entry->second.mtp_capabilities;
+  return entry == models.end() ? kDefault : entry->second.mtp_;
 }
 
 void ModelRegistry::register_graph_kv_capacity(const std::string& name,
@@ -635,37 +618,6 @@ int64_t ModelRegistry::get_graph_kv_capacity(const std::string& name,
     return default_capacity;
   }
   return it->second.graph_kv_capacity_adapter(args);
-}
-
-void ModelRegistry::configure_mtp_args(ModelArgs& args,
-                                       std::string_view algorithm,
-                                       bool is_draft_engine,
-                                       bool is_python_model) {
-  if (!is_draft_engine || !SpeculativeConfig::is_mtp_algorithm(algorithm)) {
-    return;
-  }
-  const int64_t num_layers = args.n_layers();
-  const auto& models = get_instance()->model_registry_;
-  const auto entry =
-      models.find(canonical_model_registration_name(args.model_type()));
-  if (entry != models.end() && entry->second.mtp_args_adapter) {
-    entry->second.mtp_args_adapter(args, is_python_model);
-  }
-  const int32_t num_draft_layers = args.num_nextn_predict_layers();
-  if (num_draft_layers <= 0) {
-    return;
-  }
-  if (args.n_layers() != num_draft_layers) {
-    args.mtp_start_layer_idx(args.n_layers()).n_layers(num_draft_layers);
-  }
-  const auto& index_topk_pattern = args.index_topk_pattern();
-  if (num_draft_layers < num_layers &&
-      index_topk_pattern.size() == static_cast<size_t>(num_layers)) {
-    args.index_topk_pattern(
-        index_topk_pattern.substr(/*pos=*/0, num_draft_layers));
-  }
-  args.first_k_dense_replace(
-      std::min(args.first_k_dense_replace(), num_draft_layers));
 }
 
 std::string ModelRegistry::get_model_backend(const std::string& name) {

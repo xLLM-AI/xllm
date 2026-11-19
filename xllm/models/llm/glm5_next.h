@@ -212,59 +212,55 @@ inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
   return true;
 }
 
-inline void configure_mtp_args(ModelArgs& args,
-                               [[maybe_unused]] bool is_python_model) {
-#if defined(USE_MLU)
-  // Native MLU needs a fresh index layout on each draft iteration.
-  if (!is_python_model) {
-    args.index_share_for_mtp_iteration(false);
-  }
-#endif
-  if (!is_glm5_next_target_model_type(args.model_type())) {
-    return;
-  }
-  CHECK_EQ(args.num_nextn_predict_layers(), 1)
-      << "GLM MTP requires exactly one appended prediction layer.";
-  CHECK_GT(args.n_layers(), 0);
-  args.mtp_start_layer_idx(args.n_layers());
-  args.model_type("glm5_next_mtp");
-  args.n_layers(1);
-  args.first_k_dense_replace(0);
-  args.layer_types({"deepseek_sparse_attention"});
-  args.full_attn_layers({0});
-  args.mlp_layer_types({"sparse"});
-  args.indexer_types({"full"});
-  if (args.index_share_for_mtp_iteration()) {
-    args.index_topk_freq(std::max(args.index_topk_freq(), 2));
-    args.index_skip_topk_offset(0);
-    args.index_topk_pattern("S");
-  }
-}
-
 }  // namespace glm5_next_args
-
-const bool glm5_next_mtp_adapter_registered = []() {
-  ModelRegistry::register_mtp_args_adapter("glm5_next",
-                                           &glm5_next_args::configure_mtp_args);
-  ModelRegistry::register_mtp_args_adapter("glm5_next_mtp",
-                                           &glm5_next_args::configure_mtp_args);
-  return true;
-}();
 
 REGISTER_MODEL_BACKEND(glm5_next, "llm");
 REGISTER_MODEL_BACKEND(glm5_next_mtp, "llm");
 REGISTER_MODEL_ARGS_LOADER(glm5_next, &glm5_next_args::load_model_args);
 REGISTER_MODEL_ARGS_LOADER(glm5_next_mtp, &glm5_next_args::load_model_args);
 
-const bool glm5_next_mtp_capabilities_registered = []() {
-  MtpModelCapabilities capabilities;
-  capabilities.native_draft_requires_accepted_span_replay = true;
-  capabilities.model_family = MtpModelFamily::GLM5;
-  capabilities.supports_causal_replay = true;
-  capabilities.supports_grouped_graph = true;
-  capabilities.graph_context_policy = GraphContextPolicy::KPOOL_FIXED;
-  ModelRegistry::register_mtp_capabilities("glm5_next", capabilities);
-  ModelRegistry::register_mtp_capabilities("glm5_next_mtp", capabilities);
+const bool glm5_next_mtp_metadata_registered = [] {
+  const MtpModelMetadata metadata{
+      .prepare_args_ =
+          [](ModelArgs& args, [[maybe_unused]] bool is_python_model) {
+#if defined(USE_MLU)
+            // Native MLU needs a fresh index layout on each draft iteration.
+            if (!is_python_model) {
+              args.index_share_for_mtp_iteration(/*value=*/false);
+            }
+#endif
+            if (!is_glm5_next_target_model_type(args.model_type())) {
+              return;
+            }
+            CHECK_EQ(args.num_nextn_predict_layers(), 1)
+                << "GLM MTP requires exactly one appended prediction layer.";
+            CHECK_GT(args.n_layers(), 0);
+            args.mtp_start_layer_idx(args.n_layers());
+            args.model_type(/*value=*/"glm5_next_mtp");
+            args.n_layers(/*value=*/1);
+            args.first_k_dense_replace(/*value=*/0);
+            args.layer_types(/*value=*/{"deepseek_sparse_attention"});
+            args.full_attn_layers(/*value=*/{0});
+            args.mlp_layer_types(/*value=*/{"sparse"});
+            args.indexer_types(/*value=*/{"full"});
+            if (args.index_share_for_mtp_iteration()) {
+              args.index_topk_freq(std::max(args.index_topk_freq(), /*b=*/2));
+              args.index_skip_topk_offset(/*value=*/0);
+              args.index_topk_pattern(/*value=*/"S");
+            }
+          },
+      .capabilities_ =
+          {
+              .native_draft_requires_accepted_span_replay = true,
+              .model_family = MtpModelFamily::GLM5,
+              .supports_causal_replay = true,
+              .supports_grouped_graph = true,
+              .graph_context_policy = GraphContextPolicy::KPOOL_FIXED,
+          },
+  };
+  for (const char* name : {"glm5_next", "glm5_next_mtp"}) {
+    ModelRegistry::register_mtp_metadata(name, metadata);
+  }
   return true;
 }();
 }  // namespace xllm

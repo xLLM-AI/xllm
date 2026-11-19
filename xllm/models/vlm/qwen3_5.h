@@ -32,6 +32,10 @@ limitations under the License.
 #include "processors/qwen3_vl_prompt_processor.h"
 #include "processors/qwen3_vl_video_processor.h"
 
+#if defined(USE_DCU)
+#include "models/llm/qwen3_5_mtp_metadata.h"  // IWYU pragma: keep
+#endif
+
 #if defined(USE_NPU)
 #include "models/llm/qwen3_5.h"
 #include "models/vlm/qwen3_vl.h"
@@ -55,7 +59,7 @@ class Qwen3_5ModelImpl final
  public:
   Qwen3_5ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::Qwen3_5DecoderLayer>(context.get_model_args()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
     dp_size_ = parallel_args.dp_size();

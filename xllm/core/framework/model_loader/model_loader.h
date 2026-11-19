@@ -18,7 +18,9 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/framework/model/model_args.h"
@@ -31,8 +33,6 @@ namespace xllm {
 
 class ModelLoader {
  public:
-  enum ModelType : uint8_t { HF_MODEL_TYPE = 0, INVALID = 1 };
-
   virtual ~ModelLoader() = default;
 
   virtual const ModelArgs& model_args() const { return args_; }
@@ -45,9 +45,6 @@ class ModelLoader {
   virtual std::string model_weights_path() const = 0;
   virtual int64_t get_total_weight_size() const { return 0; }
 
-  void set_reference_model_weights_path(const std::string& path) {
-    reference_model_weights_path_ = path;
-  }
   const std::string& reference_model_weights_path() const {
     return reference_model_weights_path_;
   }
@@ -71,12 +68,14 @@ class ModelLoader {
   std::string reference_model_weights_path_;
 
  public:
-  // create a model loader from the given path
   static std::unique_ptr<ModelLoader> create(
       const std::string& model_weights_path);
 
-  static std::unique_ptr<ModelLoader> create(std::string model_weights_path,
-                                             const std::string& backend);
+  static std::unique_ptr<ModelLoader> create(
+      std::string model_weights_path,
+      const std::string& backend,
+      std::string_view speculative_algorithm = {},
+      std::string_view reference_model_weights_path = {});
 };
 
 }  // namespace xllm

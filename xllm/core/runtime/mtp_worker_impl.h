@@ -47,7 +47,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
 
  protected:
   static runtime::Options draft_options(const runtime::Options& options);
-  void apply_draft_model_overrides(ModelArgs& args) override;
 
   MTPWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,

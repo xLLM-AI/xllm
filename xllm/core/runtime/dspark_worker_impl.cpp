@@ -27,7 +27,6 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/common/types.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/model/model_type.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "runtime/llm_worker_impl.h"
@@ -35,25 +34,6 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
-
-void DSparkWorkerImpl::apply_draft_model_overrides(ModelArgs& args) {
-  const bool deepseek_v4 = is_deepseek_v4_family(args.model_type());
-  args.layers_to_capture({});
-  if (deepseek_v4) {
-#if defined(USE_NPU)
-    CHECK_GT(args.dspark_num_layers(), 0)
-        << "DeepSeek-V4 DSpark requires at least one draft layer.";
-    args.n_layers(args.dspark_num_layers());
-    args.n_hash_layers(0);
-    args.compress_ratios(std::vector<int32_t>(args.dspark_num_layers(), 1));
-#endif
-    args.model_type("deepseek_v4_dspark");
-  } else {
-    args.model_type(args.model_type() == kDSparkGLM5DraftModelType
-                        ? std::string(kDSparkGLM5DraftModelType)
-                        : "DSparkDraftModel");
-  }
-}
 
 bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
                                   int32_t random_seed,

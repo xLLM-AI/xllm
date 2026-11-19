@@ -14,32 +14,9 @@ limitations under the License.
 ==============================================================================*/
 #pragma once
 
-#include "models/llm/deepseek_v2.h"
-#include "models/llm/llm_model_base.h"
-#include "models/llm/mlu/deepseek_mtp.h"
+#include "models/model_registry.h"
 
 namespace xllm::mlu::model {
-
-class Glm5MtpForCausalLMImpl : public LlmForCausalLMImplBase<DeepseekMtpModel> {
- public:
-  Glm5MtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekMtpModel>(context,
-                                                 /*share_lm_head=*/true) {}
-
-  void load_model(
-      std::unique_ptr<ModelLoader> loader,
-      std::string prefix = "model." /*llm model weight prefix*/) override {
-    // no need to load lm_head since it shares the same weights with main models
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-    model_->verify_loaded_weights();
-  }
-};
-TORCH_MODULE(Glm5MtpForCausalLM);
-
-// register the causal model
-REGISTER_CAUSAL_MODEL(glm_moe_dsa_mtp, Glm5MtpForCausalLM);
 
 // register the model args
 // example config:

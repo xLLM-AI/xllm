@@ -114,9 +114,6 @@ void Eagle3WorkerImpl<TargetInput>::check_draft_input_embedding(
          "for Eagle3.";
 }
 
-template <typename TargetInput>
-void Eagle3WorkerImpl<TargetInput>::apply_draft_model_overrides(ModelArgs&) {}
-
 template class Eagle3WorkerImpl<LlmForwardInput>;
 template class Eagle3WorkerImpl<VlmForwardInput>;
 

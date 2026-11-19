@@ -342,6 +342,11 @@ inline void load_deepseek_v4_mtp_model_args(const JsonReader& json,
 
 REGISTER_CAUSAL_MODEL(deepseek_v4_mtp, DeepseekV4MtpForCausalLM);
 
+const bool deepseek_v4_mtp_type_registered =
+    ModelRegistry::register_mtp_metadata(
+        /*name=*/"deepseek_v4",
+        {.draft_model_type_ = "deepseek_v4_mtp"});
+
 REGISTER_MODEL_ARGS(deepseek_v4_mtp, [&] {
   const DeepseekV4ArgsPolicy args_policy = build_deepseek_v4_args_policy();
   load_deepseek_v4_mtp_model_args(json, args);

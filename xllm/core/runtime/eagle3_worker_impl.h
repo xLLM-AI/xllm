@@ -41,8 +41,6 @@ class Eagle3WorkerImpl final : public MTPWorkerImpl<TargetInput> {
   void apply_target_model_overrides(ModelArgs& args) const override;
 #endif
 
-  void apply_draft_model_overrides(ModelArgs&) override;
-
   void check_draft_input_embedding(const torch::Tensor& embedding,
                                    const std::string& phase) const override;
 };

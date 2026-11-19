@@ -43,16 +43,10 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
         markov_head_(context.get_tensor_options(),
                      context.get_model_args().markov_rank()) {
     const ModelArgs& args = context.get_model_args();
-    const int64_t capture_count = args.dspark_num_layers();
-    CHECK_GT(capture_count, 0)
-        << "DeepSeek-V4 DSpark requires dspark_num_layers > 0.";
-    CHECK_EQ(args.n_layers(), args.dspark_num_layers())
-        << "DeepSeek-V4 DSpark draft layer count mismatch.";
-
     const auto options = context.get_tensor_options();
     main_proj_ = register_module(
         "main_proj",
-        layer::ReplicatedLinear(args.hidden_size() * capture_count,
+        layer::ReplicatedLinear(args.hidden_size() * args.n_layers(),
                                 args.hidden_size(),
                                 /*bias=*/false,
                                 context.get_quant_args(),
