@@ -15,6 +15,15 @@ limitations under the License.
 
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 
+#if defined(USE_NPU)
+#ifdef TORCH_HIGHER_THAN_PTA6
+#include <torch_npu/csrc/core/npu/NPUFormat.h>
+#include <torch_npu/csrc/framework/OpCommand.h>
+#else
+#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
+#include <torch_npu/csrc/framework/utils/OpPreparation.h>
+#endif
+#endif
 #include <glog/logging.h>
 #include <torch/types.h>
 
@@ -22,6 +31,8 @@ limitations under the License.
 #include <cstdint>
 #include <sstream>
 #include <utility>
+
+#include "core/util/tensor_helper.h"
 
 #if defined(USE_NPU)
 #ifdef TORCH_HIGHER_THAN_PTA6
@@ -35,7 +46,10 @@ limitations under the License.
 
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/host_cache_layout.h"
+#include "core/kv_cache/storage/kv_cache_create_options.h"
+#include "core/kv_cache/storage/kv_cache_tensor_factory.h"
+#include "core/kv_cache/storage/kv_cache_tensors.h"
 #include "platform/platform.h"
 
 namespace xllm {

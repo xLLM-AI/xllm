@@ -20,7 +20,8 @@ limitations under the License.
 #include <algorithm>
 
 #include "core/common/constants.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_tensor_factory.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 

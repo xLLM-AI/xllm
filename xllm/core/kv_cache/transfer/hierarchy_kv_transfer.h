@@ -28,7 +28,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/kv_cache/block/block.h"
 #include "core/kv_cache/storage/kv_cache.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_create_options.h"
 #include "core/kv_cache/transfer/host_transfer/transfer.h"
 #include "framework/model/model_params_view.h"
 #include "platform/device.h"

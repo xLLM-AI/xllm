@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <string>
 
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_tensors.h"
 
 namespace xllm {
 

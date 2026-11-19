@@ -21,8 +21,10 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/storage/kv_cache_create_options.h"
 #include "core/kv_cache/storage/kv_cache_impl.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_tensors.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 

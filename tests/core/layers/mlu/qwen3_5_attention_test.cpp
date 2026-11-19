@@ -24,7 +24,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/kv_cache/storage/kv_cache.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_tensors.h"
+#include "core/util/tensor_helper.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/quantization/quant_args.h"

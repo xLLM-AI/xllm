@@ -154,7 +154,13 @@ cc_library(
     layout/kv_shard_layout.h
     storage/kv_tensor_allocator.h
     layout/kv_cache_tensor_role.h
-    storage/kv_cache_utils.h
+    storage/kv_cache_create_options.h
+    storage/kv_cache_tensors.h
+    layout/kv_cache_layout_policy.h
+    storage/kv_cache_tensor_factory.h
+    storage/host_cache_layout.h
+    storage/host_page_aligned_region.h
+    storage/tensor_byte_size.h
     layout/layerwise_split_layout.h
     layout/vmm_kv_layout.h
     storage/linear_attention_kv_cache_impl.h
@@ -171,7 +177,11 @@ cc_library(
     layout/kv_shard_layout.cpp
     layout/vmm_kv_layout.cpp
     storage/kv_tensor_allocator.cpp
-    storage/kv_cache_utils.cpp
+    storage/kv_cache_create_options.cpp
+    layout/kv_cache_layout_policy.cpp
+    storage/kv_cache_tensor_factory.cpp
+    storage/host_cache_layout.cpp
+    storage/host_page_aligned_region.cpp
     storage/linear_attention_kv_cache_impl.cpp
     storage/linear_state_slot_table.cpp
     storage/quantized_kv_cache_impl.cpp

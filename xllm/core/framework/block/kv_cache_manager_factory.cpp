@@ -22,10 +22,12 @@ limitations under the License.
 
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/kv_cache/layout/vmm_kv_layout.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/host_cache_layout.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator_impl.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/tensor_options.h"
 
 namespace xllm {

@@ -27,9 +27,10 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/host_page_aligned_region.h"
 #include "core/kv_cache/transfer/host_transfer/compact_transfer.h"
 #include "core/kv_cache/transfer/host_transfer/layout.h"
+#include "core/util/tensor_helper.h"
 #include "platform/batch_memcpy.h"
 #include "platform/device.h"
 #include "platform/platform.h"

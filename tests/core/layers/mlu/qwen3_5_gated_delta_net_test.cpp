@@ -24,7 +24,8 @@ limitations under the License.
 
 #include "common/constants.h"
 #include "core/kv_cache/storage/kv_cache.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_tensors.h"
+#include "core/util/tensor_helper.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_params_view.h"
 #include "framework/parallel_state/parallel_state.h"

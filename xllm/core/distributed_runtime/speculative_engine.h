@@ -16,7 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "common/macros.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "engine.h"
 #include "framework/batch/batch_group.h"
 #include "framework/block/block_manager_pool.h"

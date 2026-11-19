@@ -26,7 +26,7 @@ limitations under the License.
 namespace xllm {
 
 class KVCacheShape;
-struct KVCacheCreateOptions;
+class KVCacheCreateOptions;
 
 // Row costs are independent of physical capacity. Logical IDs only bound
 // mapping tables; mirrored slab groups supply bytes shared by every cache role.

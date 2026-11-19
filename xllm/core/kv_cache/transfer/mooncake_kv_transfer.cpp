@@ -27,8 +27,9 @@ limitations under the License.
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/layout/cache_layout_builder.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_tensors.h"
 #include "core/kv_cache/transfer/push_route.h"
+#include "core/util/tensor_helper.h"
 #include "util/net.h"
 #include "util/uuid.h"
 

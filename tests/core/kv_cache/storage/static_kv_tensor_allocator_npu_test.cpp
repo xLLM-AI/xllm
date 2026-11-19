@@ -14,6 +14,16 @@ limitations under the License.
 ==============================================================================*/
 
 #include <acl/acl.h>
+
+#if defined(USE_NPU)
+#ifdef TORCH_HIGHER_THAN_PTA6
+#include <torch_npu/csrc/core/npu/NPUFormat.h>
+#include <torch_npu/csrc/framework/OpCommand.h>
+#else
+#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
+#include <torch_npu/csrc/framework/utils/OpPreparation.h>
+#endif
+#endif
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -21,8 +31,8 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/storage/static_kv_tensor_allocator.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 namespace {

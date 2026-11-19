@@ -25,8 +25,10 @@ limitations under the License.
 
 #include "core/kv_cache/block/block.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/host_cache_layout.h"
+#include "core/kv_cache/storage/kv_cache_create_options.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
+#include "core/util/tensor_helper.h"
 
 #if defined(USE_NPU)
 #include <torch_npu/csrc/core/npu/NPUFormat.h>

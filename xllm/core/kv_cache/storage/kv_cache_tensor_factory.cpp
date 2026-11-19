@@ -1,4 +1,4 @@
-/* Copyright 2025-2026 The xLLM Authors.
+/* Copyright 2026 The xLLM Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,59 +13,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_tensor_factory.h"
 
 #include <glog/logging.h>
-#include <sys/mman.h>
-#include <unistd.h>
 
-#include <algorithm>
-#include <cerrno>
-#include <cmath>
-#include <cstring>
-#include <limits>
-#include <sstream>
-
-#include "core/framework/config/kv_cache_config.h"
+#include "core/kv_cache/layout/kv_cache_layout_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "util/utils.h"
-#if defined(USE_MLU)
-#include "platform/mlu/mlu_host_memory.h"
-#endif
+#include "core/kv_cache/storage/tensor_byte_size.h"
+#include "core/util/utils.h"
 #if defined(USE_NPU)
 #include "acl/acl_rt.h"
-#include "core/common/types.h"
+#ifdef TORCH_HIGHER_THAN_PTA6
+#include <torch_npu/csrc/core/npu/NPUFormat.h>
+#include <torch_npu/csrc/framework/OpCommand.h>
+#else
+#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
+#include <torch_npu/csrc/framework/utils/OpPreparation.h>
+#endif
 #include "core/framework/model/model_type.h"
-
-extern "C" aclError aclrtHostRegister(void* ptr,
-                                      uint64_t size,
-                                      aclrtHostRegisterType type,
-                                      void** dev_ptr);
-extern "C" aclError aclrtHostUnregister(void* ptr);
 #endif
 
 namespace xllm {
+
 namespace {
-
-size_t get_tensor_nbytes(const std::vector<int64_t>& dims,
-                         torch::ScalarType dtype) {
-  size_t count = 1;
-  for (int64_t dim : dims) {
-    CHECK_GE(dim, 0) << "tensor dim must be non-negative";
-    const size_t dim_size = static_cast<size_t>(dim);
-    if (dim_size > 0) {
-      CHECK_LE(count, std::numeric_limits<size_t>::max() / dim_size)
-          << "tensor element count overflow";
-    }
-    count *= dim_size;
-  }
-  const size_t elem_size = static_cast<size_t>(torch::elementSize(dtype));
-  CHECK_GT(elem_size, static_cast<size_t>(0)) << "tensor dtype size is zero";
-  CHECK_LE(count, std::numeric_limits<size_t>::max() / elem_size)
-      << "tensor byte size overflow";
-  return count * elem_size;
-}
-
 #if defined(USE_NPU)
 void free_acl_tensor(void* ptr) {
   if (ptr == nullptr) {
@@ -127,7 +97,7 @@ torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
                                          torch::ScalarType dtype,
                                          aclFormat format) {
   void* buffer = nullptr;
-  const size_t nbytes = get_tensor_nbytes(dims, dtype);
+  const size_t nbytes = detail::get_tensor_nbytes(dims, dtype);
   // aclrtMalloc rejects zero-byte buffers; preserve the requested empty shape.
   if (nbytes == 0) {
     auto empty_tensor = torch::empty(dims,
@@ -163,44 +133,6 @@ torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
   return tensor;
 }
 #endif
-
-bool KVCacheCreateOptions::mla_packed_c8() const {
-  return util::enable_mla_packed_c8(enable_kv_cache_quant(), model_type());
-}
-
-bool is_linear_attention_layer(int64_t layer_idx,
-                               int64_t full_attention_interval,
-                               const std::vector<std::string>& layer_types) {
-  if (!layer_types.empty()) {
-    if (layer_idx < 0 ||
-        layer_idx >= static_cast<int64_t>(layer_types.size())) {
-      return false;
-    }
-    const std::string& layer_type = layer_types[static_cast<size_t>(layer_idx)];
-    // Explicit full-attention markers (including the glm5_next
-    // deepseek_sparse_attention label) use paged KV, not the linear
-    // (conv/ssm) cache.
-    if (layer_type == "full_attention" || layer_type == "attention" ||
-        layer_type == "deepseek_sparse_attention") {
-      return false;
-    }
-    // Only an explicit linear marker flips the layer to the conv/ssm cache.
-    // Unknown tags defer to the interval heuristic below instead of guessing
-    // linear — a wrong guess flips the whole KV layout and corrupts serving.
-    if (layer_type == "linear_attention") {
-      return true;
-    }
-  }
-  if (full_attention_interval <= 1) {
-    return false;
-  }
-  return (layer_idx + 1) % full_attention_interval != 0;
-}
-
-bool use_npu_nz_kv_cache_layout(const std::string& model_type) {
-  return (model_type == "deepseek_v3" || model_type == "deepseek_v3_mtp") &&
-         ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
-}
 
 KVCacheTensors create_kv_cache_tensors(
     const KVCacheShape& kv_cache_shape,
@@ -504,282 +436,5 @@ aclFormat get_npu_kv_cache_format(const std::string& model_type) {
                                                 : ACL_FORMAT_ND;
 }
 #endif
-
-namespace {
-
-#if !defined(USE_MLU)
-void release_host_region(void*& base_ptr, size_t& total_bytes) {
-  if (base_ptr == nullptr || total_bytes == 0) {
-    base_ptr = nullptr;
-    total_bytes = 0;
-    return;
-  }
-#if defined(USE_NPU)
-  aclrtHostUnregister(base_ptr);
-#endif
-  munlock(base_ptr, total_bytes);
-  munmap(base_ptr, total_bytes);
-  base_ptr = nullptr;
-  total_bytes = 0;
-}
-#endif
-
-}  // namespace
-
-HostPageAlignedRegion::HostPageAlignedRegion() = default;
-
-HostPageAlignedRegion::HostPageAlignedRegion(size_t bytes) {
-  if (bytes == 0) {
-    return;
-  }
-#if defined(USE_MLU)
-  mlu_region_ = std::make_unique<mlu::MLUHostMemoryRegion>(bytes);
-  base_ptr = mlu_region_->data();
-  total_bytes = mlu_region_->size();
-#else
-  const int64_t system_page_size = sysconf(_SC_PAGESIZE);
-  CHECK_GT(system_page_size, 0) << "Failed to query system page size.";
-  const size_t page_size = static_cast<size_t>(system_page_size);
-  CHECK_LE(bytes, std::numeric_limits<size_t>::max() - (page_size - 1))
-      << "Host region byte count overflows page rounding: bytes=" << bytes
-      << ", page_size=" << page_size;
-  total_bytes = ((bytes + page_size - 1) / page_size) * page_size;
-
-  base_ptr = mmap(nullptr,
-                  total_bytes,
-                  PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS,
-                  -1,
-                  0);
-  CHECK(base_ptr != MAP_FAILED)
-      << "Failed to mmap host memory, size=" << total_bytes;
-  if (mlock(base_ptr, total_bytes) != 0) {
-    const int32_t err = errno;
-    munmap(base_ptr, total_bytes);
-    base_ptr = nullptr;
-    total_bytes = 0;
-    LOG(FATAL) << "mlock failed, errno=" << err << " (" << strerror(err)
-               << "). Run: ulimit -l unlimited";
-  }
-
-#if defined(USE_NPU)
-  void* mapped_ptr = nullptr;
-  const aclError ret = aclrtHostRegister(
-      base_ptr, total_bytes, ACL_HOST_REGISTER_MAPPED, &mapped_ptr);
-  if (ret != ACL_SUCCESS) {
-    munlock(base_ptr, total_bytes);
-    munmap(base_ptr, total_bytes);
-    base_ptr = nullptr;
-    total_bytes = 0;
-  }
-  CHECK_EQ(ret, ACL_SUCCESS) << "aclrtHostRegister fail: " << ret;
-#endif
-#endif
-}
-
-HostPageAlignedRegion::HostPageAlignedRegion(
-    HostPageAlignedRegion&& other) noexcept
-    : base_ptr(other.base_ptr),
-      total_bytes(other.total_bytes)
-#if defined(USE_MLU)
-      ,
-      mlu_region_(std::move(other.mlu_region_))
-#endif
-{
-  other.base_ptr = nullptr;
-  other.total_bytes = 0;
-}
-
-HostPageAlignedRegion& HostPageAlignedRegion::operator=(
-    HostPageAlignedRegion&& other) noexcept {
-  if (this == &other) {
-    return *this;
-  }
-#if !defined(USE_MLU)
-  release_host_region(base_ptr, total_bytes);
-#else
-  mlu_region_ = std::move(other.mlu_region_);
-#endif
-  base_ptr = other.base_ptr;
-  total_bytes = other.total_bytes;
-  other.base_ptr = nullptr;
-  other.total_bytes = 0;
-  return *this;
-}
-
-HostPageAlignedRegion::~HostPageAlignedRegion() {
-#if !defined(USE_MLU)
-  release_host_region(base_ptr, total_bytes);
-#endif
-}
-
-int64_t scale_host_block_count(int64_t block_count, double host_blocks_factor) {
-  CHECK_GT(block_count, 0) << "block_count must be positive.";
-  CHECK(std::isfinite(host_blocks_factor))
-      << "host_blocks_factor must be finite.";
-  CHECK_GE(host_blocks_factor, 0.0)
-      << "host_blocks_factor must be non-negative.";
-  const double factor = std::max(host_blocks_factor, 1.0);
-  const long double scaled_block_count =
-      static_cast<long double>(block_count) * static_cast<long double>(factor);
-  CHECK_LE(scaled_block_count,
-           static_cast<long double>(std::numeric_limits<int64_t>::max()))
-      << "scaled host block count exceeds the int64 limit.";
-  return std::max<int64_t>(block_count,
-                           static_cast<int64_t>(scaled_block_count));
-}
-
-std::optional<std::string> validate_host_cache_options(
-    const HostCacheValidationOptions& options) {
-  if (!std::isfinite(options.host_blocks_factor) ||
-      options.host_blocks_factor < 0.0) {
-    std::ostringstream error;
-    error << "Invalid host prefix-cache offload configuration "
-          << "(host_blocks_factor=" << options.host_blocks_factor
-          << "): --host_blocks_factor must be finite and non-negative.";
-    return error.str();
-  }
-
-  if (options.host_blocks_factor <= 1.0) {
-    return std::nullopt;
-  }
-
-  std::vector<std::string> violations;
-  violations.reserve(10);
-  const long double host_block_count =
-      static_cast<long double>(options.device_block_count) *
-      static_cast<long double>(options.host_blocks_factor);
-  if (options.device_block_count <= 0 ||
-      host_block_count >
-          static_cast<long double>(std::numeric_limits<uint32_t>::max())) {
-    violations.emplace_back(
-        "requested host block count exceeds the uint32 block-manager limit; "
-        "reduce --host_blocks_factor");
-  }
-  if (!options.supports_host_kv_offload) {
-    violations.emplace_back(
-        "the current platform has no host KV offload copy/synchronization "
-        "provider");
-  }
-  const bool has_linear_cache_shape =
-      options.has_conv_cache_shape && options.has_ssm_cache_shape;
-  const bool enable_offload_only_decode =
-      options.enable_disagg_pd && options.enable_kvcache_store &&
-      options.instance_role == InstanceRole::DECODE && !has_linear_cache_shape;
-  if (!options.enable_prefix_cache && !enable_offload_only_decode) {
-    violations.emplace_back(
-        "prefix caching is disabled for this engine; host offload requires "
-        "an engine configuration that supports prefix caching");
-  }
-  if (!options.enable_disagg_pd &&
-      options.instance_role != InstanceRole::DEFAULT) {
-    violations.emplace_back(
-        "host offload outside disaggregated serving requires the DEFAULT "
-        "instance role");
-  }
-
-  // Quantized KV caches add scale tensors whose host offload and restore
-  // lifecycle is not supported consistently by the common path yet.
-  if (options.kv_cache_dtype != "auto") {
-    violations.emplace_back(
-        "quantized KV cache scales are not transferred to host memory; set "
-        "--kv_cache_dtype=auto");
-  }
-  if (!options.has_key_cache_shape) {
-    violations.emplace_back("KV cache has no key-cache tensor to offload");
-  }
-#if defined(USE_NPU)
-  if (options.requires_indexer_row_folding &&
-      use_npu_nz_kv_cache_layout(options.model_type)) {
-    violations.emplace_back(
-        "split indexer host offload requires ND cache storage");
-  }
-#endif
-  if (options.has_grouped_cache_layout &&
-      !options.supports_grouped_cache_offload) {
-    std::ostringstream violation;
-    violation << "model \"" << options.model_type
-              << "\" uses a grouped cache layout (for example DeepSeek-V4 "
-                 "SWA/C4/C128 or DeepSeek-V4.1 SWA/C1/C2) that host offload "
-                 "does not support";
-    violations.emplace_back(violation.str());
-  }
-  if (options.has_conv_cache_shape != options.has_ssm_cache_shape) {
-    std::ostringstream violation;
-    violation << "model \"" << options.model_type
-              << "\" has a partial linear-attention cache layout; Host "
-                 "offload requires both conv and SSM tensors";
-    violations.emplace_back(violation.str());
-  }
-
-  if (violations.empty()) {
-    return std::nullopt;
-  }
-
-  std::ostringstream error;
-  error << "Invalid host prefix-cache offload configuration "
-        << "(host_blocks_factor=" << options.host_blocks_factor << "): ";
-  for (size_t i = 0; i < violations.size(); ++i) {
-    if (i != 0) {
-      error << "; ";
-    }
-    error << violations[i];
-  }
-  error << ". Fix the listed settings or disable offload with "
-           "--host_blocks_factor=0.";
-  return error.str();
-}
-
-std::vector<int64_t> build_host_tensor_shape(
-    const std::vector<int64_t>& base_shape,
-    double host_blocks_factor) {
-  CHECK(!base_shape.empty()) << "base_shape must not be empty.";
-  std::vector<int64_t> host_shape = base_shape;
-  host_shape[0] = scale_host_block_count(host_shape[0], host_blocks_factor);
-  return host_shape;
-}
-
-std::vector<int64_t> build_host_group_tensor_shape(
-    const std::vector<int64_t>& base_shape,
-    double host_blocks_factor,
-    int64_t layer_count) {
-  CHECK_GT(layer_count, 0) << "layer_count must be positive.";
-  std::vector<int64_t> host_shape =
-      build_host_tensor_shape(base_shape, host_blocks_factor);
-  host_shape.insert(host_shape.begin() + 1, layer_count);
-  return host_shape;
-}
-
-std::vector<int64_t> fold_shape_for_host_transfer(
-    const std::vector<int64_t>& shape,
-    int64_t logical_blocks) {
-  CHECK_GE(shape.size(), 2);
-  CHECK_GT(logical_blocks, 0);
-  CHECK_EQ(shape[0] % logical_blocks, 0)
-      << "indexer pages must form complete logical KV blocks";
-  std::vector<int64_t> folded = shape;
-  folded[0] = logical_blocks;
-  folded[1] *= shape[0] / logical_blocks;
-  return folded;
-}
-
-void create_host_page_aligned_tensor(const std::vector<int64_t>& dims,
-                                     torch::ScalarType dtype,
-                                     torch::Tensor* tensor,
-                                     HostPageAlignedRegion* region) {
-  CHECK(tensor != nullptr) << "tensor must not be null.";
-  CHECK(region != nullptr) << "region must not be null.";
-  const size_t tensor_bytes = get_tensor_nbytes(dims, dtype);
-  CHECK_GT(tensor_bytes, static_cast<size_t>(0))
-      << "host cache tensor bytes must be positive.";
-
-  *region = HostPageAlignedRegion(tensor_bytes);
-  std::memset(region->base_ptr, 0, region->total_bytes);
-  *tensor = torch::from_blob(
-      region->base_ptr,
-      dims,
-      torch::TensorOptions().dtype(dtype).device(torch::Device(torch::kCPU)));
-  CHECK(tensor->is_contiguous()) << "host cache tensor must be contiguous.";
-}
 
 }  // namespace xllm

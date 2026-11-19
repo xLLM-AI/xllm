@@ -17,10 +17,12 @@ limitations under the License.
 
 #include <utility>
 
+#include "core/kv_cache/layout/kv_cache_layout_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/layout/virtual_kv_page_layout.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_create_options.h"
 #include "core/kv_cache/storage/static_kv_tensor_allocator.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 namespace {

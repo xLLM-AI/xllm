@@ -30,7 +30,6 @@ limitations under the License.
 #include "common/macros.h"
 #include "common/types.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "engine.h"
 #include "framework/batch/batch_group.h"
 #include "framework/batch/forward_input_factory.h"
@@ -38,7 +37,8 @@ limitations under the License.
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "runtime/worker.h"
-#include "runtime/worker_client.h"
+#include "runtime/worker_client.h" #include "core/kv_cache/layout/kv_cache_capacity.h"
+
 namespace xllm {
 
 class EplbController;
