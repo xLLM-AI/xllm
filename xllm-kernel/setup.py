@@ -61,6 +61,11 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 gamma = source / "gamma_add_rms_norm"
                 for header in ("aclnn_gamma_add_rms_norm.h", "aclnn_util.h"):
                     shutil.copy2(gamma / "op_host/op_api" / header, headers)
+                for component in ("moe_init_routing_v3", "moe_grouped_matmul_swiglu_quant"):
+                    packaged_header = headers / f"aclnn_xllm_kernel_{component}.h"
+                    if packaged_header.exists():
+                        header = source / component / "op_host/op_api" / f"aclnn_{component}.h"
+                        shutil.copy2(header, packaged_header)
                 shutil.copy2(gamma / "CANN_LICENSE.txt", vendor)
                 for provenance in sorted(source.glob("*/SOURCE.txt")):
                     shutil.copy2(provenance, vendor / f"{provenance.parent.name}_SOURCE.txt")
@@ -87,6 +92,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/npu/hyper_connection.cpp",
                 "csrc/npu/inplace_partial_rotary_mul.cpp",
                 "csrc/npu/mla_preprocess_v2.cpp",
+                "csrc/npu/moe.cpp",
                 "csrc/npu/normalization.cpp",
                 "csrc/npu/quant_matmul.cpp",
                 "csrc/npu/reshape_paged_cache.cpp",

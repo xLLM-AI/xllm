@@ -7,6 +7,13 @@ pytest.importorskip("torch_npu", reason="NPU integration tests require torch_npu
 
 from xllm_kernel import initialize
 from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2
+from xllm_kernel.ops.moe import FUSED_MOE_GMM1_OPERATIONS, has_fused_moe_gmm1
+
+
+@pytest.fixture
+def require_fused_moe_gmm1() -> None:
+    if not has_fused_moe_gmm1():
+        pytest.skip("Routing V3 and fused GMM1 are unavailable")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -29,5 +36,8 @@ def _prepare_kernels() -> None:
             "matmul_ein_sum_out",
             "quant_matmul_out",
             *(("mla_preprocess_v2",) if has_mla_preprocess_v2() else ()),
+            "dequant_swiglu_quant",
+            "moe_gating_top_k_hash",
+            *(FUSED_MOE_GMM1_OPERATIONS if has_fused_moe_gmm1() else ()),
         ),
     )

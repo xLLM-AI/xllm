@@ -36,6 +36,27 @@ endif()
 foreach(component IN LISTS hc_components)
     list(APPEND hc_aclnn_sources "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_${component}.cpp")
 endforeach()
+set(moe_hash_host "${CMAKE_CURRENT_SOURCE_DIR}/moe_gating_top_k_hash/op_host")
+set(moe_routing_host "${CMAKE_CURRENT_SOURCE_DIR}/moe_init_routing_v3/op_host")
+set(moe_gmm_host "${CMAKE_CURRENT_SOURCE_DIR}/moe_grouped_matmul_swiglu_quant/op_host")
+set(moe_dequant_host "${CMAKE_CURRENT_SOURCE_DIR}/dequant_swiglu_quant/op_host")
+list(APPEND op_definitions
+    "${moe_hash_host}/moe_gating_top_k_hash_def.cpp"
+    "${moe_gmm_host}/moe_grouped_matmul_swiglu_quant_def.cpp"
+    "${moe_dequant_host}/dequant_swiglu_quant_def.cpp"
+)
+if("ascend910b" IN_LIST ASCEND_COMPUTE_UNIT OR "ascend910_93" IN_LIST ASCEND_COMPUTE_UNIT)
+    list(APPEND op_definitions "${moe_routing_host}/moe_init_routing_v3_def.cpp")
+    set(moe_routing_api
+        "${moe_routing_host}/op_api/aclnn_moe_init_routing_v3.cpp"
+        "${moe_routing_host}/op_api/moe_init_routing_v3_l0.cpp"
+    )
+    set(moe_routing_tiling
+        "${moe_routing_host}/moe_init_routing_v3_proto.cpp"
+        "${moe_routing_host}/moe_init_routing_v3_tiling.cpp"
+        "${moe_routing_host}/moe_init_routing_v3_tiling_base.cpp"
+    )
+endif()
 # The two quantized projections have device implementations on the A2/A3 targets.
 if("ascend910b" IN_LIST ASCEND_COMPUTE_UNIT OR "ascend910_93" IN_LIST ASCEND_COMPUTE_UNIT)
     set(quant_gemm_host "${CMAKE_CURRENT_SOURCE_DIR}/quant_matmul_nz_decode/op_host")
@@ -73,6 +94,12 @@ npu_op_library(cust_opapi ACLNN
     "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_rms_norm_dynamic_quant.cpp"
     "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_inplace_partial_rotary_mul.cpp"
     ${hc_aclnn_sources}
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_moe_gating_top_k_hash.cpp"
+    ${moe_routing_api}
+    "${moe_gmm_host}/op_api/aclnn_moe_grouped_matmul_swiglu_quant.cpp"
+    "${moe_gmm_host}/op_api/moe_grouped_matmul_swiglu_quant_l0.cpp"
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_dequant_swiglu_quant.cpp"
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_dequant_swiglu_quant_v2.cpp"
     ${a2_aclnn_sources}
 )
 target_include_directories(cust_opapi PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/include/aclnn")
@@ -101,6 +128,14 @@ npu_op_library(cust_optiling TILING
     "${rope_host}/rope_regbase_tiling_aba_and_ba.cpp"
     "${rope_host}/rope_regbase_tiling_bab.cpp"
     ${hc_tiling_sources}
+    "${moe_hash_host}/moe_gating_top_k_hash_tiling.cpp"
+    ${moe_routing_tiling}
+    "${moe_gmm_host}/moe_grouped_matmul_swiglu_quant_proto.cpp"
+    "${moe_gmm_host}/moe_grouped_matmul_swiglu_quant_tiling.cpp"
+    "${moe_dequant_host}/dequant_swiglu_quant_infershape.cpp"
+    "${moe_dequant_host}/dequant_swiglu_quant_tiling.cpp"
+    "${moe_dequant_host}/dequant_swiglu_quant_tiling_base.cpp"
+    "${moe_dequant_host}/dequant_swiglu_quant_tiling_arch35.cpp"
     ${a2_tiling_sources}
     ${generated_fallback}
 )
@@ -108,7 +143,10 @@ foreach(target cust_optiling cust_op_proto)
     target_include_directories(${target} PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/include/op_common")
     target_link_libraries(${target} PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/lib64/libops_base.so")
 endforeach()
-target_include_directories(cust_optiling PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(cust_optiling PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${ASCEND_CANN_PACKAGE_PATH}/include/op_common/op_host"
+)
 target_link_libraries(cust_optiling PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/lib64/libascendalog.so")
 
 npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelGammaAddRmsNorm
@@ -147,6 +185,25 @@ foreach(op_type IN LISTS hc_kernel_types)
         -mllvm -cce-aicore-hoist-movemask=false --op_relocatable_kernel_binary=true)
 endforeach()
 npu_op_kernel_options(ascendc_kernels XllmKernelHcPreSinkhorn OPTIONS -Wno-constant-conversion)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelMoeGatingTopKHash
+    KERNEL_DIR moe_gating_top_k_hash/op_kernel KERNEL_FILE xllm_kernel_moe_gating_top_k_hash.cpp)
+if(moe_routing_api)
+    npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelMoeInitRoutingV3
+        KERNEL_DIR moe_init_routing_v3/op_kernel KERNEL_FILE xllm_kernel_moe_init_routing_v3.cpp)
+    npu_op_kernel_options(ascendc_kernels XllmKernelMoeInitRoutingV3
+        OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error)
+endif()
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelDequantSwigluQuant
+    KERNEL_DIR dequant_swiglu_quant/op_kernel KERNEL_FILE xllm_kernel_dequant_swiglu_quant.cpp)
+npu_op_kernel_options(ascendc_kernels XllmKernelDequantSwigluQuant
+    OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Werror)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelMoeGroupedMatmulSwigluQuant
+    KERNEL_DIR moe_grouped_matmul_swiglu_quant/op_kernel KERNEL_FILE xllm_kernel_moe_grouped_matmul_swiglu_quant.cpp)
+npu_op_kernel_options(ascendc_kernels XllmKernelMoeGatingTopKHash
+    OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Werror
+    -mllvm -cce-aicore-hoist-movemask=false --op_relocatable_kernel_binary=true)
+npu_op_kernel_options(ascendc_kernels XllmKernelMoeGroupedMatmulSwigluQuant
+    OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error)
 if(a2_aclnn_sources)
     npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelQuantMatmulNzDecode
         KERNEL_DIR quant_matmul_nz_decode/op_kernel KERNEL_FILE xllm_kernel_quant_matmul_nz_decode.cpp)

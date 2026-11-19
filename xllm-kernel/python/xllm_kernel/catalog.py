@@ -60,6 +60,7 @@ _BUILTINS = (
     "xllm_kernel.ops.gemm",
     "xllm_kernel.ops.hyper_connection",
     "xllm_kernel.ops.kv_cache",
+    "xllm_kernel.ops.moe",
     "xllm_kernel.ops.attention.fia",
     "xllm_kernel.ops.attention.gdn",
     "xllm_kernel.ops.attention.kda",

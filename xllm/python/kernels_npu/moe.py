@@ -16,10 +16,19 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 import torch
 import torch_npu
+from xllm_kernel.ops.moe import (
+    dequant_swiglu_quant as dequant_swiglu_quant,
+)
+from xllm_kernel.ops.moe import (
+    has_fused_moe_gmm1,
+    moe_grouped_matmul_swiglu_quant,
+    moe_init_routing_v3,
+)
+from xllm_kernel.ops.moe import (
+    moe_gating_top_k_hash as moe_gating_top_k_hash,
+)
 
 _FRACTAL_NZ_FORMAT = 29
 # The installed torch_npu runtime uses 1 for int8. Keep this named instead of
@@ -34,37 +43,9 @@ def _unpermute_probs(topk_weights: torch.Tensor, output: torch.Tensor) -> torch.
     return topk_weights.to(output.dtype)
 
 
-@lru_cache(maxsize=1)
-def _has_fused_moe_ops() -> bool:
-    if not hasattr(torch.ops.xllm_ops, "has_moe_init_routing_v3"):
-        return False
-    if not hasattr(torch.ops.xllm_ops, "has_moe_grouped_matmul_swiglu_quant"):
-        return False
-    return bool(
-        torch.ops.xllm_ops.has_moe_init_routing_v3() and torch.ops.xllm_ops.has_moe_grouped_matmul_swiglu_quant()
-    )
-
-
 def supports_fused_moe_gmm1(device: torch.device) -> bool:
     """Return whether the fused W8A8 routed GMM1 path is available."""
-    return device.type in ("npu", "privateuseone") and _has_fused_moe_ops()
-
-
-def _moe_init_routing_v3(
-    hidden_states: torch.Tensor,
-    topk_ids: torch.Tensor,
-    active_num: int,
-    expert_num: int,
-    active_expert_range: list[int],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    return torch.ops.xllm_ops.moe_init_routing_v3(
-        hidden_states,
-        topk_ids,
-        active_num,
-        expert_num,
-        active_expert_range,
-        quant_mode=1,
-    )
+    return device.type in ("npu", "privateuseone") and has_fused_moe_gmm1()
 
 
 def _enable_internal_format() -> None:
@@ -171,72 +152,6 @@ def _grouped_matmul_gmm2(
         output.copy_(result)
         return output
     return result
-
-
-def dequant_swiglu_quant(
-    x: torch.Tensor,
-    weight_scale: torch.Tensor | None,
-    activation_scale: torch.Tensor | None,
-    bias: torch.Tensor | None = None,
-    quant_scale: torch.Tensor | None = None,
-    quant_offset: torch.Tensor | None = None,
-    group_index: torch.Tensor | None = None,
-    activate_left: bool = True,
-    quant_mode: int = 1,
-    swiglu_mode: int = 1,
-    clamp_limit: float = 0.0,
-    glu_alpha: float = 1.0,
-    glu_bias: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply the fused dequantization, SwiGLU, and dynamic quantization."""
-    return torch.ops.xllm_ops.dequant_swiglu_quant(
-        x,
-        weight_scale,
-        activation_scale,
-        bias,
-        quant_scale,
-        quant_offset,
-        group_index,
-        activate_left,
-        quant_mode,
-        swiglu_mode,
-        clamp_limit,
-        glu_alpha,
-        glu_bias,
-    )
-
-
-def moe_gating_top_k_hash(
-    x: torch.Tensor,
-    k: int,
-    bias: torch.Tensor | None,
-    input_ids: torch.Tensor | None,
-    tid2eid: torch.Tensor | None,
-    k_group: int,
-    group_count: int,
-    routed_scaling_factor: float,
-    eps: float,
-    group_select_mode: int,
-    renorm: int,
-    norm_type: int,
-    out_flag: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Select experts with the DeepSeek-V4 hash-routing gate."""
-    return torch.ops.xllm_ops.moe_gating_top_k_hash(
-        x,
-        k,
-        bias,
-        input_ids,
-        tid2eid,
-        k_group,
-        group_count,
-        routed_scaling_factor,
-        eps,
-        group_select_mode,
-        renorm,
-        norm_type,
-        out_flag,
-    )
 
 
 def supports_cutlass_moe(device: torch.device) -> bool:
@@ -1211,7 +1126,7 @@ def _moe_expert_compute_impl(
         and supports_fused_moe_gmm1(hidden_states.device)
     )
     if use_fused_gmm1:
-        sorted_hidden_i8, expanded_row_idx, group_list, pertoken_scale = _moe_init_routing_v3(
+        sorted_hidden_i8, expanded_row_idx, group_list, pertoken_scale = moe_init_routing_v3(
             hidden_states,
             topk_ids,
             num_tokens * topk,
@@ -1235,7 +1150,7 @@ def _moe_expert_compute_impl(
     if group_list.numel() > num_local_experts:
         group_list = group_list[:num_local_experts]
     if use_fused_gmm1:
-        act_i8, act_pt = torch.ops.xllm_ops.moe_grouped_matmul_swiglu_quant(
+        act_i8, act_pt = moe_grouped_matmul_swiglu_quant(
             sorted_hidden_i8,
             w13,
             w13_scale,
