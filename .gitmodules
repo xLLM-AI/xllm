@@ -46,3 +46,7 @@
 	path = third_party/xxHash
 	url = https://gitcode.com/xLLM-AI/xxHash.git
 	fetchRecurseSubmodules = false
+[submodule "xllm-kernel/third_party/catlass"]
+	path = xllm-kernel/third_party/catlass
+	url = https://gitcode.com/cann/catlass.git
+	fetchRecurseSubmodules = false

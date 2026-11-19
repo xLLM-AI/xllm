@@ -42,7 +42,9 @@ from xllm_kernel.ops import fused_recurrent_gated_delta_rule, fused_sigmoid_gati
 from xllm_kernel.ops import get_fused_attention, partial_rotary_embedding, reshape_paged_cache
 from xllm_kernel.ops.attention.gdn import OPERATIONS as GDN_OPERATIONS
 from xllm_kernel.ops.attention.kda import OPERATIONS as KDA_OPERATIONS, causal_conv1d_update_v2
-from xllm_kernel.ops.gemm import OPERATIONS as GEMM_OPERATIONS, matmul_ein_sum, matmul_ein_sum_out
+from xllm_kernel.ops.attention.mla import mla_preprocess_v2
+from xllm_kernel.ops.gemm import MATMUL_EIN_SUM_OPERATION, MATMUL_EIN_SUM_OUT_OPERATION
+from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out, quant_matmul_out
 catalog = {operation.contract.operation: operation for operation in load_operations()}
 for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     name = operation.contract.operation
@@ -50,12 +52,21 @@ for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     assert operation.implementations == ('npu.triton.' + name,)
     assert operation.prepared is None
     assert operation.backends[0].requires == ('torch_npu', 'triton')
-for operation in GEMM_OPERATIONS:
+for operation in (MATMUL_EIN_SUM_OPERATION, MATMUL_EIN_SUM_OUT_OPERATION):
     name = operation.contract.operation
     assert catalog[name] is operation
     assert operation.implementations == ('npu.atb.' + name,)
     assert operation.prepared is None
 assert callable(matmul_ein_sum) and callable(matmul_ein_sum_out)
+for name, mutates, aliases in (
+    ("quant_matmul_out", ("out",), True),
+    ("mla_preprocess_v2", ("kv_cache", "rope_cache"), False),
+):
+    operation = catalog[name]
+    assert operation.implementations == ("npu.ascendc." + name,)
+    assert operation.contract.mutates == mutates and operation.contract.aliases_inputs == aliases
+    assert operation.prepared is None
+assert callable(quant_matmul_out) and callable(mla_preprocess_v2)
 assert callable(causal_conv1d_update_v2)
 assert callable(reshape_paged_cache) and callable(partial_rotary_embedding)
 fia = catalog["fused_attention"]

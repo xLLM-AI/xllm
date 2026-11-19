@@ -59,6 +59,8 @@ def initialize_runtime() -> None:
     elif current_platform.is_npu():
         xllm_kernel = _load_kernel_package()
 
+        from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2
+
         from scripts.logger import logger
 
         prepared = xllm_kernel.initialize(
@@ -71,6 +73,8 @@ def initialize_runtime() -> None:
                 "l2_norm",
                 "matmul_ein_sum",
                 "matmul_ein_sum_out",
+                "quant_matmul_out",
+                *(("mla_preprocess_v2",) if has_mla_preprocess_v2() else ()),
                 "fused_recurrent_gated_delta_rule",
                 "fused_sigmoid_gating_delta_rule_update",
                 "fused_qkvzba_split_reshape_cat",

@@ -333,6 +333,9 @@ def _collect_submodule_init_issues(repo_root: str) -> dict[str, str]:
         if len(parts) < 2:
             continue
         path = parts[1]
+        # The CATLASS include tree does not use its test and DSL submodules.
+        if path.startswith("xllm-kernel/third_party/catlass/"):
+            continue
         commit = parts[0]
 
         if state == "-":

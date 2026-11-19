@@ -1,0 +1,8 @@
+QuantMatmulNzDecode AscendC implementation
+
+Source: https://gitcode.com/xLLM-AI/xllm_ops
+Revision: 8bd2b014c38fec33ecf14dd33e05e8ad792ec5c8
+Directory: xllm_ops/quant_matmul_nz_decode
+
+CANN builds a private operator type for coexistence with the legacy provider.
+Depends on the package's pinned CATLASS headers.
