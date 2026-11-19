@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 
 _EXPORTS = {
+    "dual_affine_layer_norm": ("dual_affine_layer_norm",),
     "activation": ("silu_and_mul", "fused_sigmoid_mul"),
     "attention": (
         "update_decode_graph_metadata",
