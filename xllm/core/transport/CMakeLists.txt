@@ -22,8 +22,11 @@ target_sources(runtime PRIVATE
 )
 
 target_sources(distributed_runtime PRIVATE
+  worker_transport.h
+  worker_transport.cpp
   comm_channel.h
-  comm_channel.cpp
+  rpc_channel.h
+  rpc_channel.cpp
   shm_channel.h
   shm_channel.cpp
 )

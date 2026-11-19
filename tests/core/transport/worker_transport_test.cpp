@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/transport/shm_channel.h"
+#include "core/transport/worker_transport.h"
 
 #include <brpc/closure_guard.h>
 #include <brpc/server.h>
@@ -35,14 +35,24 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/execution_config.h"
+#include "core/transport/shared_memory_transport.h"
 #include "runtime/vlm_forward_params.h"
 #include "util/net.h"
+#include "worker.pb.h"
 
 namespace xllm {
 namespace {
 
 class ShmFallbackService final : public proto::DistributeWorker {
  public:
+  void Hello(google::protobuf::RpcController* /*controller*/,
+             const proto::Status* /*request*/,
+             proto::Status* response,
+             google::protobuf::Closure* done) override {
+    brpc::ClosureGuard guard(done);
+    response->set_ok(true);
+  }
+
   void ExecuteLLMModel(google::protobuf::RpcController* /*controller*/,
                        const proto::LLMForwardRequest* /*request*/,
                        proto::LLMForwardResponse* response,
@@ -76,7 +86,7 @@ class ShmFallbackService final : public proto::DistributeWorker {
   std::atomic<int32_t> executions_{0};
 };
 
-class ShmChannelTest : public ::testing::Test {
+class WorkerTransportTest : public ::testing::Test {
  protected:
   using OutputPromise = folly::Promise<std::optional<RawForwardOutput>>;
 
@@ -92,14 +102,13 @@ class ShmChannelTest : public ::testing::Test {
         .master_node_addr(address_)
         .input_shm_size(kInputBytes)
         .output_shm_size(kOutputBytes);
-    channel_ = std::make_unique<ShmChannel>(
-        /*dp_group=*/0, /*rank=*/0, /*is_driver=*/false, options_);
-    ASSERT_TRUE(channel_->init_brpc(address_));
+    channel_ = std::make_unique<WorkerTransport>(
+        address_, /*rank=*/1, /*dp_local_tp_size=*/2, options_);
     const std::string name = SharedMemoryTransport::create_unique_name(
         "xllm_" + net::extract_port(address_),
         /*dp_group=*/0,
         ForwardType::RAW_OUTPUT,
-        /*rank=*/0);
+        /*rank=*/1);
     bool is_creator = true;
     writer_ = std::make_unique<SharedMemoryTransport>(
         name, kOutputBytes, is_creator, ForwardType::RAW_OUTPUT);
@@ -116,9 +125,18 @@ class ShmChannelTest : public ::testing::Test {
   }
 
   void use_driver_channel() {
-    channel_ = std::make_unique<ShmChannel>(
-        /*dp_group=*/0, /*rank=*/0, /*is_driver=*/true, options_);
-    ASSERT_TRUE(channel_->init_brpc(address_));
+    channel_.reset();
+    writer_.reset();
+    bool is_creator = false;
+    const std::string name = SharedMemoryTransport::create_unique_name(
+        "xllm_" + net::extract_port(address_),
+        /*dp_group=*/0,
+        ForwardType::RAW_OUTPUT,
+        /*rank=*/0);
+    writer_ = std::make_unique<SharedMemoryTransport>(
+        name, kOutputBytes, is_creator, ForwardType::RAW_OUTPUT);
+    channel_ = std::make_unique<WorkerTransport>(
+        address_, /*rank=*/0, /*dp_local_tp_size=*/2, options_);
   }
 
   template <typename Input>
@@ -148,19 +166,19 @@ class ShmChannelTest : public ::testing::Test {
         SharedMemoryTransport::can_write_input(oversized, kInputBytes));
     ASSERT_TRUE(SharedMemoryTransport::can_write_input(small, kInputBytes));
     use_driver_channel();
-    ShmChannel follower(
-        /*dp_group=*/0, /*rank=*/1, /*is_driver=*/false, options_);
-    ASSERT_TRUE(follower.init_brpc(address_));
+    WorkerTransport follower(
+        address_, /*rank=*/1, /*dp_local_tp_size=*/2, options_);
 
     // A follower can be scheduled before the driver. It must choose BRPC
     // independently instead of waiting for an unpublished SHM input.
-    const std::array<ShmChannel*, 2> channels = {&follower, channel_.get()};
+    const std::array<WorkerTransport*, 2> channels = {&follower,
+                                                      channel_.get()};
     for (const Input* input : {&oversized, &small}) {
-      for (ShmChannel* channel : channels) {
+      for (WorkerTransport* channel : channels) {
         OutputPromise promise;
         auto future = promise.getSemiFuture();
         if constexpr (std::is_invocable_v<Execute,
-                                          ShmChannel*,
+                                          WorkerTransport*,
                                           const Input&,
                                           OutputPromise&,
                                           ForwardInputEncoding*>) {
@@ -193,11 +211,17 @@ class ShmChannelTest : public ::testing::Test {
   runtime::Options options_;
   ShmFallbackService service_;
   brpc::Server server_;
-  std::unique_ptr<ShmChannel> channel_;
+  std::unique_ptr<WorkerTransport> channel_;
   std::unique_ptr<SharedMemoryTransport> writer_;
 };
 
-TEST_F(ShmChannelTest, ReadsLlmOutputWithoutRpcExecution) {
+TEST_F(WorkerTransportTest, SharedMemoryChannelUsesRpcForControlMessages) {
+  EXPECT_TRUE(channel_->hello());
+  EXPECT_TRUE(channel_->check_health());
+  EXPECT_EQ(service_.execution_count(), 0);
+}
+
+TEST_F(WorkerTransportTest, ReadsLlmOutputWithoutRpcExecution) {
   ForwardOutput source;
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
   ASSERT_TRUE(writer_->llm_output_write(source, {}));
@@ -211,7 +235,7 @@ TEST_F(ShmChannelTest, ReadsLlmOutputWithoutRpcExecution) {
   EXPECT_EQ(service_.execution_count(), 0);
 }
 
-TEST_F(ShmChannelTest, ReadsVlmOutputWithoutRpcExecution) {
+TEST_F(WorkerTransportTest, ReadsVlmOutputWithoutRpcExecution) {
   ForwardOutput source;
   source.sample_output.mm_embeddings = {{torch::tensor({1.0f, 2.0f})}};
   ASSERT_TRUE(writer_->vlm_output_write(source, {}));
@@ -227,7 +251,7 @@ TEST_F(ShmChannelTest, ReadsVlmOutputWithoutRpcExecution) {
   EXPECT_EQ(service_.execution_count(), 0);
 }
 
-TEST_F(ShmChannelTest, ReadsDitOutputWithoutRpcExecution) {
+TEST_F(WorkerTransportTest, ReadsDitOutputWithoutRpcExecution) {
   DiTForwardOutput source;
   source.text_output = {"shared output"};
   ASSERT_TRUE(writer_->dit_output_write(source));
@@ -240,7 +264,32 @@ TEST_F(ShmChannelTest, ReadsDitOutputWithoutRpcExecution) {
   EXPECT_EQ(service_.execution_count(), 0);
 }
 
-TEST_F(ShmChannelTest, InputWriteFailureFallsBackBeforePublishingRequest) {
+TEST_F(WorkerTransportTest, DifferentHostUsesRpcWithoutWaitingForSharedOutput) {
+  channel_.reset();
+  options_.master_node_addr("192.0.2.1:12345");
+  channel_ = std::make_unique<WorkerTransport>(
+      address_, /*rank=*/0, /*dp_local_tp_size=*/1, options_);
+  OutputPromise promise;
+  auto future = promise.getSemiFuture();
+  channel_->execute_llm_model_async(LlmForwardInput(), promise);
+  const auto output = std::move(future).get();
+  ASSERT_TRUE(output.has_value());
+  EXPECT_EQ(service_.execution_count(), 1);
+}
+
+TEST_F(WorkerTransportTest, DisabledSharedMemoryUsesRpcOnSameHost) {
+  channel_.reset();
+  options_.enable_shm(false);
+  channel_ = std::make_unique<WorkerTransport>(
+      address_, /*rank=*/0, /*dp_local_tp_size=*/1, options_);
+  OutputPromise promise;
+  auto future = promise.getSemiFuture();
+  channel_->execute_llm_model_async(LlmForwardInput(), promise);
+  EXPECT_TRUE(std::move(future).get().has_value());
+  EXPECT_EQ(service_.execution_count(), 1);
+}
+
+TEST_F(WorkerTransportTest, InputWriteFailureFallsBackBeforePublishingRequest) {
   constexpr uint64_t kSmallInputBytes = 64;
   options_.input_shm_size(kSmallInputBytes);
   use_driver_channel();
@@ -266,28 +315,28 @@ TEST_F(ShmChannelTest, InputWriteFailureFallsBackBeforePublishingRequest) {
       0);
 }
 
-TEST_F(ShmChannelTest, LlmOverflowFallsBackForEveryRankAndStaysOnBrpc) {
+TEST_F(WorkerTransportTest, LlmOverflowFallsBackForEveryRankAndStaysOnBrpc) {
   LlmForwardInput oversized;
   oversized.token_ids = torch::zeros({kInputBytes * 2}, torch::kInt32);
   expect_group_input_fallback(
-      oversized, LlmForwardInput(), &ShmChannel::execute_llm_model_async);
+      oversized, LlmForwardInput(), &WorkerTransport::execute_llm_model_async);
 }
 
-TEST_F(ShmChannelTest, VlmOverflowFallsBackForEveryRankAndStaysOnBrpc) {
+TEST_F(WorkerTransportTest, VlmOverflowFallsBackForEveryRankAndStaysOnBrpc) {
   VlmForwardInput oversized;
   oversized.token_ids = torch::zeros({kInputBytes * 2}, torch::kInt32);
   expect_group_input_fallback(
-      oversized, VlmForwardInput(), &ShmChannel::execute_vlm_model_async);
+      oversized, VlmForwardInput(), &WorkerTransport::execute_vlm_model_async);
 }
 
-TEST_F(ShmChannelTest, DitOverflowFallsBackForEveryRankAndStaysOnBrpc) {
+TEST_F(WorkerTransportTest, DitOverflowFallsBackForEveryRankAndStaysOnBrpc) {
   DiTForwardInput oversized;
   oversized.model_params.prompts = {std::string(kInputBytes * 2, 'x')};
   expect_group_input_fallback(
-      oversized, DiTForwardInput(), &ShmChannel::execute_dit_model_async);
+      oversized, DiTForwardInput(), &WorkerTransport::execute_dit_model_async);
 }
 
-TEST_F(ShmChannelTest, DecodeFailureDoesNotReexecuteAndNextReadRecovers) {
+TEST_F(WorkerTransportTest, DecodeFailureDoesNotReexecuteAndNextReadRecovers) {
   const std::array<std::function<void(OutputPromise&)>, 3> execute = {
       [this](OutputPromise& promise) {
         channel_->execute_llm_model_async(LlmForwardInput(), promise);
@@ -323,7 +372,7 @@ TEST_F(ShmChannelTest, DecodeFailureDoesNotReexecuteAndNextReadRecovers) {
   EXPECT_EQ(service_.execution_count(), 0);
 }
 
-TEST_F(ShmChannelTest, InputPreflightMatchesExactPackedSize) {
+TEST_F(WorkerTransportTest, InputPreflightMatchesExactPackedSize) {
   LlmForwardInput llm_input;
   llm_input.token_ids =
       torch::arange(8, torch::kInt32).reshape({2, 4}).transpose(0, 1);

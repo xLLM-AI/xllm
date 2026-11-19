@@ -14,19 +14,55 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+
 #include "core/transport/comm_channel.h"
 #include "core/transport/shared_memory_transport.h"
 #include "runtime/options.h"
 
 namespace xllm {
+class RpcChannel;
+class ForwardInputEncoding;
 
-class ShmChannel : public CommChannel {
+class ShmChannel final : public CommChannel {
  public:
-  explicit ShmChannel(int dp_group,
-                      int rank,
+  explicit ShmChannel(int32_t dp_group,
+                      int32_t rank,
                       bool is_driver,
-                      const runtime::Options& options);
-  ~ShmChannel() = default;
+                      const runtime::Options& options,
+                      std::unique_ptr<RpcChannel> rpc);
+  ~ShmChannel() override;
+
+  bool hello() override;
+
+  bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
+
+  bool get_cache_info(uint64_t& cluster_id,
+                      std::string& addr,
+                      uint16_t& port) override;
+
+  bool link_cluster(const std::vector<uint64_t>& cluster_ids,
+                    const std::vector<std::string>& addrs,
+                    const std::vector<uint16_t>& ports) override;
+
+  bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
+                      const std::vector<std::string>& addrs,
+                      const std::vector<uint16_t>& ports) override;
+
+  // P2P link for weight transfer
+  bool link_p2p(const std::string& remote_addr) override;
+  bool unlink_p2p(const std::string& remote_addr) override;
+
+  bool init_model_async(const std::string& model_weights_path,
+                        int32_t random_seed,
+                        folly::Promise<bool>& promise,
+                        MasterStatus master_status) override;
+
+  bool estimate_kv_cache_capacity(int64_t& available_memory,
+                                  int64_t& total_memory) override;
+
+  bool pull_kv_blocks(const uint64_t src_cluster_id,
+                      const std::string& src_addr,
+                      const std::vector<KVTransferMapping>& mappings) override;
 
   void execute_llm_model_async(
       const LlmForwardInput& input,
@@ -42,7 +78,44 @@ class ShmChannel : public CommChannel {
       folly::Promise<std::optional<RawForwardOutput>>& promise,
       ForwardInputEncoding* encoding = nullptr) override;
 
+  bool process_group_test() override;
+
+  bool allocate_kv_cache_with_transfer(
+      const KVCacheShape& kv_cache_shape) override;
+
+  void transfer_kv_blocks(
+      const std::vector<BlockTransferInfo>& block_transfer_info,
+      folly::Promise<uint32_t>& promise) override;
+
+  void transfer_kv_blocks(
+      const uint64_t batch_id,
+      const std::vector<BlockTransferInfo>& block_transfer_info) override;
+
+  bool wait_for_kv_blocks_transfer(uint64_t batch_id) override;
+
+  void prefetch_from_storage(const StoragePrefetchRequest& request,
+                             std::shared_ptr<PrefetchResult> result,
+                             size_t worker_index) override;
+
+  bool get_last_llm_step_result_async(
+      folly::Promise<std::optional<RawForwardOutput>>& promise) override;
+
+  bool get_last_vlm_step_result_async(
+      folly::Promise<std::optional<RawForwardOutput>>& promise) override;
+
+  // Check if the connection to worker is healthy
+  bool check_health() override;
+
+  bool sleep(MasterStatus master_status, uint64_t transition_id = 0) override;
+
+  bool wakeup(const WakeupOptions& options) override;
+
+  bool start_profile() override;
+
+  bool stop_profile() override;
+
  private:
+  std::unique_ptr<RpcChannel> rpc_;
   bool enable_shm_ = false;
   size_t input_shm_size_ = 0;
   std::unique_ptr<SharedMemoryTransport> input_shm_manager_ = nullptr;

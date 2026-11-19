@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/transport/comm_channel.h"
+#include "core/transport/rpc_channel.h"
 
 #include <brpc/closure_guard.h>
 #include <brpc/controller.h>
@@ -27,6 +27,7 @@ limitations under the License.
 #include <mutex>
 
 #include "core/distributed_runtime/remote_worker.h"
+#include "core/transport/worker_transport.h"
 #include "runtime/vlm_forward_params.h"
 
 namespace xllm {
@@ -209,14 +210,14 @@ class ModelRoutingService final : public proto::DistributeWorker {
   google::protobuf::Closure* completion_done_ = nullptr;
 };
 
-class CommChannelTest : public ::testing::Test {
+class RpcChannelTest : public ::testing::Test {
  protected:
   void SetUp() override {
     ASSERT_EQ(server_.AddService(&service_, brpc::SERVER_DOESNT_OWN_SERVICE),
               0);
     ASSERT_EQ(server_.Start("127.0.0.1:0", nullptr), 0);
-    ASSERT_TRUE(channel_.init_brpc(
-        butil::endpoint2str(server_.listen_address()).c_str()));
+    ASSERT_TRUE(
+        rpc_.init_brpc(butil::endpoint2str(server_.listen_address()).c_str()));
   }
 
   void TearDown() override {
@@ -226,10 +227,11 @@ class CommChannelTest : public ::testing::Test {
 
   ModelRoutingService service_;
   brpc::Server server_;
-  CommChannel channel_;
+  RpcChannel rpc_;
+  CommChannel& channel_ = rpc_;
 };
 
-TEST_F(CommChannelTest, RoutesLLMInputToItsOwnRpc) {
+TEST_F(RpcChannelTest, RoutesLLMInputToItsOwnRpc) {
   LlmForwardInput input;
   folly::Promise<std::optional<RawForwardOutput>> promise;
   auto future = promise.getSemiFuture();
@@ -241,7 +243,7 @@ TEST_F(CommChannelTest, RoutesLLMInputToItsOwnRpc) {
   EXPECT_EQ(output->outputs[0].tokens[0].id, 1);
 }
 
-TEST_F(CommChannelTest, PreservesResidencyGenerationAcrossLifecycleRpcs) {
+TEST_F(RpcChannelTest, PreservesResidencyGenerationAcrossLifecycleRpcs) {
   ASSERT_TRUE(channel_.sleep(MasterStatus::DEEP_SLEEP, /*transition_id=*/41));
   WakeupOptions options;
   options.master_status = MasterStatus::DEEP_SLEEP;
@@ -253,11 +255,13 @@ TEST_F(CommChannelTest, PreservesResidencyGenerationAcrossLifecycleRpcs) {
   EXPECT_FALSE(channel_.wakeup(options));
 }
 
-TEST_F(CommChannelTest, RestoreAcknowledgesRegistrationBeforeCopyCompletion) {
+TEST_F(RpcChannelTest, RestoreAcknowledgesRegistrationBeforeCopyCompletion) {
   const std::string address =
       butil::endpoint2str(server_.listen_address()).c_str();
-  auto channel = std::make_unique<CommChannel>();
-  ASSERT_TRUE(channel->init_brpc(address));
+  runtime::Options options;
+  options.enable_shm(false);
+  auto channel = std::make_unique<WorkerTransport>(
+      address, /*rank=*/0, /*dp_local_tp_size=*/1, options);
   RemoteWorker worker(/*global_rank=*/0,
                       address,
                       torch::Device(torch::kCPU),
@@ -291,11 +295,11 @@ TEST_F(CommChannelTest, RestoreAcknowledgesRegistrationBeforeCopyCompletion) {
   EXPECT_EQ(std::move(restored).get(std::chrono::seconds(5)), 1u);
 }
 
-TEST_F(CommChannelTest, RejectsCompletionForAnUnregisteredRestore) {
+TEST_F(RpcChannelTest, RejectsCompletionForAnUnregisteredRestore) {
   EXPECT_FALSE(channel_.wait_for_kv_blocks_transfer(/*batch_id=*/73));
 }
 
-TEST_F(CommChannelTest, RoutesVLMInputToItsOwnRpc) {
+TEST_F(RpcChannelTest, RoutesVLMInputToItsOwnRpc) {
   VlmForwardInput input;
   folly::Promise<std::optional<RawForwardOutput>> promise;
   auto future = promise.getSemiFuture();
@@ -307,7 +311,7 @@ TEST_F(CommChannelTest, RoutesVLMInputToItsOwnRpc) {
   EXPECT_EQ(output->outputs[0].tokens[0].id, 2);
 }
 
-TEST_F(CommChannelTest, RoutesDITInputToItsOwnRpc) {
+TEST_F(RpcChannelTest, RoutesDITInputToItsOwnRpc) {
   DiTForwardInput input;
   folly::Promise<std::optional<RawForwardOutput>> promise;
   auto future = promise.getSemiFuture();
@@ -318,7 +322,7 @@ TEST_F(CommChannelTest, RoutesDITInputToItsOwnRpc) {
   EXPECT_EQ(output->dit_forward_output.text_output[0], "diffusion");
 }
 
-TEST_F(CommChannelTest, CompletesPromiseWhenLastLLMResultRpcFails) {
+TEST_F(RpcChannelTest, CompletesPromiseWhenLastLLMResultRpcFails) {
   folly::Promise<std::optional<RawForwardOutput>> promise;
   auto future = promise.getSemiFuture();
   EXPECT_FALSE(channel_.get_last_llm_step_result_async(promise));
@@ -326,7 +330,7 @@ TEST_F(CommChannelTest, CompletesPromiseWhenLastLLMResultRpcFails) {
   EXPECT_FALSE(std::move(future).get().has_value());
 }
 
-TEST_F(CommChannelTest, CompletesPromiseWhenLastVLMResultRpcFails) {
+TEST_F(RpcChannelTest, CompletesPromiseWhenLastVLMResultRpcFails) {
   folly::Promise<std::optional<RawForwardOutput>> promise;
   auto future = promise.getSemiFuture();
   EXPECT_FALSE(channel_.get_last_vlm_step_result_async(promise));

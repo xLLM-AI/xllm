@@ -15,21 +15,18 @@ limitations under the License.
 
 #pragma once
 
-#include <brpc/channel.h>
-#include <brpc/controller.h>
 #include <folly/futures/Future.h>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "common/types.h"
-#include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/prefetch_result.h"
 #include "runtime/forward_params.h"
-#include "worker.pb.h"
 
 namespace xllm {
 class VlmForwardInput;
@@ -37,156 +34,89 @@ class ForwardInputEncoding;
 
 class CommChannel {
  public:
-  CommChannel() = default;
   virtual ~CommChannel() = default;
 
-  bool init_brpc(const std::string& server_address);
+  virtual bool hello() = 0;
 
-  virtual bool hello();
-
-  virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
+  virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) = 0;
 
   virtual bool get_cache_info(uint64_t& cluster_id,
                               std::string& addr,
-                              uint16_t& port);
+                              uint16_t& port) = 0;
 
   virtual bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                             const std::vector<std::string>& addrs,
-                            const std::vector<uint16_t>& ports);
+                            const std::vector<uint16_t>& ports) = 0;
 
   virtual bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                               const std::vector<std::string>& addrs,
-                              const std::vector<uint16_t>& ports);
+                              const std::vector<uint16_t>& ports) = 0;
 
-  // P2P link for weight transfer
-  virtual bool link_p2p(const std::string& remote_addr);
-  virtual bool unlink_p2p(const std::string& remote_addr);
+  virtual bool link_p2p(const std::string& remote_addr) = 0;
+
+  virtual bool unlink_p2p(const std::string& remote_addr) = 0;
 
   virtual bool init_model_async(const std::string& model_weights_path,
                                 int32_t random_seed,
                                 folly::Promise<bool>& promise,
-                                MasterStatus master_status);
+                                MasterStatus master_status) = 0;
 
   virtual bool estimate_kv_cache_capacity(int64_t& available_memory,
-                                          int64_t& total_memory);
+                                          int64_t& total_memory) = 0;
 
-  virtual bool pull_kv_blocks(const uint64_t src_cluster_id,
-                              const std::string& src_addr,
-                              const std::vector<KVTransferMapping>& mappings);
+  virtual bool pull_kv_blocks(
+      const uint64_t src_cluster_id,
+      const std::string& src_addr,
+      const std::vector<KVTransferMapping>& mappings) = 0;
 
   virtual void execute_llm_model_async(
       const LlmForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise,
-      ForwardInputEncoding* encoding = nullptr);
+      ForwardInputEncoding* encoding = nullptr) = 0;
 
   virtual void execute_dit_model_async(
       const DiTForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
+      folly::Promise<std::optional<RawForwardOutput>>& promise) = 0;
 
   virtual void execute_vlm_model_async(
       const VlmForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise,
-      ForwardInputEncoding* encoding = nullptr);
+      ForwardInputEncoding* encoding = nullptr) = 0;
 
-  virtual bool process_group_test();
+  virtual bool process_group_test() = 0;
 
   virtual bool allocate_kv_cache_with_transfer(
-      const KVCacheShape& kv_cache_shape);
+      const KVCacheShape& kv_cache_shape) = 0;
 
   virtual void transfer_kv_blocks(
       const std::vector<BlockTransferInfo>& block_transfer_info,
-      folly::Promise<uint32_t>& promise);
+      folly::Promise<uint32_t>& promise) = 0;
 
   virtual void transfer_kv_blocks(
       const uint64_t batch_id,
-      const std::vector<BlockTransferInfo>& block_transfer_info);
+      const std::vector<BlockTransferInfo>& block_transfer_info) = 0;
 
-  virtual bool wait_for_kv_blocks_transfer(uint64_t batch_id);
+  virtual bool wait_for_kv_blocks_transfer(uint64_t batch_id) = 0;
 
   virtual void prefetch_from_storage(const StoragePrefetchRequest& request,
                                      std::shared_ptr<PrefetchResult> result,
-                                     size_t worker_index);
+                                     size_t worker_index) = 0;
 
   virtual bool get_last_llm_step_result_async(
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
+      folly::Promise<std::optional<RawForwardOutput>>& promise) = 0;
 
   virtual bool get_last_vlm_step_result_async(
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
+      folly::Promise<std::optional<RawForwardOutput>>& promise) = 0;
 
-  // Check if the connection to worker is healthy
-  virtual bool check_health();
+  virtual bool check_health() = 0;
 
-  virtual bool sleep(MasterStatus master_status, uint64_t transition_id = 0);
+  virtual bool sleep(MasterStatus master_status,
+                     uint64_t transition_id = 0) = 0;
 
-  virtual bool wakeup(const WakeupOptions& options);
+  virtual bool wakeup(const WakeupOptions& options) = 0;
 
-  virtual bool start_profile();
+  virtual bool start_profile() = 0;
 
-  virtual bool stop_profile();
-
- protected:
-  bool execute_llm_model_with_brpc(
-      const LlmForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise,
-      ForwardInputEncoding* encoding = nullptr);
-
-  bool execute_dit_model_with_brpc(
-      const DiTForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
-
-  bool execute_vlm_model_with_brpc(
-      const VlmForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise,
-      ForwardInputEncoding* encoding = nullptr);
-
- private:
-  brpc::Channel channel_;
-  brpc::ChannelOptions options_;
-  std::unique_ptr<proto::DistributeWorker_Stub> stub_;
-};
-
-class InitModelClosure : public google::protobuf::Closure {
- public:
-  void Run();
-
-  proto::Status response;
-  brpc::Controller cntl;
-  folly::Promise<bool> promise;
-};
-
-class ExecuteLLMModelClosure final : public google::protobuf::Closure {
- public:
-  void Run() override;
-
-  proto::LLMForwardResponse pb_output;
-  brpc::Controller cntl;
-  folly::Promise<std::optional<RawForwardOutput>> promise;
-};
-
-class ExecuteVLMModelClosure final : public google::protobuf::Closure {
- public:
-  void Run() override;
-
-  proto::VLMForwardResponse pb_output;
-  brpc::Controller cntl;
-  folly::Promise<std::optional<RawForwardOutput>> promise;
-};
-
-class ExecuteDITModelClosure final : public google::protobuf::Closure {
- public:
-  void Run() override;
-
-  proto::DITForwardResponse pb_output;
-  brpc::Controller cntl;
-  folly::Promise<std::optional<RawForwardOutput>> promise;
-};
-
-class TransferBlocksClosure : public google::protobuf::Closure {
- public:
-  void Run();
-
-  proto::TransferStatus response;
-  brpc::Controller cntl;
-  folly::Promise<uint32_t> promise;
+  virtual bool stop_profile() = 0;
 };
 }  // namespace xllm

@@ -18,17 +18,17 @@ include(cc_test)
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    shm_channel_test
+    worker_transport_test
   SRCS
-    shm_channel_test.cpp
+    worker_transport_test.cpp
   DEPS
     :distributed_runtime
     GTest::gtest_main
 )
 if(USE_NPU)
-  target_link_libraries(shm_channel_test PRIVATE nnopbase)
+  target_link_libraries(worker_transport_test PRIVATE nnopbase)
 endif()
-target_link_options(shm_channel_test PRIVATE
+target_link_options(worker_transport_test PRIVATE
   "-Wl,--whole-archive"
   "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
   "-Wl,--no-whole-archive")
@@ -36,9 +36,9 @@ target_link_options(shm_channel_test PRIVATE
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    comm_channel_test
+    rpc_channel_test
   SRCS
-    comm_channel_test.cpp
+    rpc_channel_test.cpp
   DEPS
     :distributed_runtime
     GTest::gtest_main

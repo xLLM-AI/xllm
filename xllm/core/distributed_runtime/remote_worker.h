@@ -15,15 +15,13 @@ limitations under the License.
 
 #pragma once
 
-#include <brpc/channel.h>
 #include <folly/futures/Future.h>
 #include <torch/types.h>
 
 #include "common/macros.h"
 #include "common/types.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "core/transport/comm_channel.h"
-#include "core/transport/shared_memory_transport.h"
+#include "core/transport/worker_transport.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_params_view.h"
@@ -43,7 +41,7 @@ class RemoteWorker : public WorkerClient {
   explicit RemoteWorker(int32_t global_rank,
                         const std::string& server_address,
                         const torch::Device& d,
-                        std::unique_ptr<CommChannel> channel);
+                        std::unique_ptr<WorkerTransport> transport);
   virtual ~RemoteWorker() = default;
 
   bool wait_for_server_ready(const std::string& server_address);
@@ -136,10 +134,10 @@ class RemoteWorker : public WorkerClient {
 
  private:
   int32_t global_rank_;
-  // connection resource
-  std::unique_ptr<CommChannel> channel_;
+  // Own transport resources until both task pools have drained.
+  std::unique_ptr<WorkerTransport> transport_;
   // Request tasks can enqueue copy completion waits. Destroy and drain the
-  // request pool before the copy pool, and keep the channel alive for both.
+  // request pool before the copy pool, and keep the transport alive for both.
   ThreadPool copy_threadpool_{/*num_threads=*/4,
                               /*cpu_binding=*/false,
                               /*pool_name=*/"RemoteWorker.copy"};

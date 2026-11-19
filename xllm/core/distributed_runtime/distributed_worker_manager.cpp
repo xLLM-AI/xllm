@@ -30,8 +30,7 @@ limitations under the License.
 #include "core/distributed_runtime/worker_server.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/parallel_state/parallel_args.h"
-#include "core/transport/comm_channel.h"
-#include "core/transport/shm_channel.h"
+#include "core/transport/worker_transport.h"
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 #include "core/platform/numa_utils.h"
 #endif
@@ -310,27 +309,6 @@ bool DistributedWorkerManager::unlink_p2p(
 }
 
 namespace {
-std::unique_ptr<CommChannel> create_channel(const std::string& worker_addr,
-                                            int32_t rank,
-                                            int32_t dp_local_tp_size,
-                                            const runtime::Options& options) {
-  std::unique_ptr<CommChannel> channel;
-
-  if (net::extract_ip(options.master_node_addr().value_or("")) ==
-          net::extract_ip(worker_addr) &&
-      options.enable_shm()) {
-    const int32_t dp_group = rank / dp_local_tp_size;
-    const bool is_driver = rank % dp_local_tp_size == 0;
-    channel = std::make_unique<ShmChannel>(dp_group, rank, is_driver, options);
-  } else {
-    channel = std::make_unique<CommChannel>();
-  }
-
-  channel->init_brpc(worker_addr);
-
-  return channel;
-}
-
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 void setup_numa_affinity_and_isolation(
     const runtime::Options& options,
@@ -511,9 +489,13 @@ void DistributedWorkerManager::connect_worker_clients(
     CHECK(it != worker_addrs_map.end())
         << "Not all workers connected to engine server. Missing rank " << rank;
     // TODO(CP): support shared memory with CP.
-    auto channel = create_channel(it->second, rank, dp_local_tp_size, options);
-    worker_clients_.emplace_back(std::make_shared<RemoteWorker>(
-        rank, it->second, devices[rank % each_node_ranks], std::move(channel)));
+    auto transport = std::make_unique<WorkerTransport>(
+        it->second, rank, dp_local_tp_size, options);
+    worker_clients_.emplace_back(
+        std::make_shared<RemoteWorker>(rank,
+                                       it->second,
+                                       devices[rank % each_node_ranks],
+                                       std::move(transport)));
   }
 }
 
