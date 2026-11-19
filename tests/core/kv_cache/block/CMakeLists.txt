@@ -2,25 +2,25 @@ include(cc_test)
 
 cc_test(
   NAME
-    static_kv_cache_block_pool_test
+    static_kv_block_pool_test
   CPU_ONLY
   SRCS
-    static_kv_cache_block_pool_test.cpp
+    static_kv_block_pool_test.cpp
   DEPS
     :kv_cache_block
-    :static_kv_cache_layout
+    :static_kv_layout
     GTest::gtest_main
     glog::glog
 )
 
 cc_test(
   NAME
-    virtual_kv_cache_page_state_test
+    virtual_kv_page_state_test
   NO_NPU_RUNTIME
   SRCS
-    virtual_kv_cache_page_state_test.cpp
+    virtual_kv_page_state_test.cpp
   DEPS
-    :virtual_kv_cache_page_state
+    :virtual_kv_page_state
     GTest::gtest_main
     glog::glog
 )

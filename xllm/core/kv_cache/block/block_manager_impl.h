@@ -17,7 +17,7 @@ limitations under the License.
 #pragma once
 
 #include "core/kv_cache/block/block_manager.h"
-#include "core/kv_cache/block/static_kv_cache_block_pool.h"
+#include "core/kv_cache/block/static_kv_block_pool.h"
 #include "core/kv_cache/prefix/prefix_cache.h"
 
 namespace xllm {

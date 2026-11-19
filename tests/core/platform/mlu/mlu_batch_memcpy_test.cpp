@@ -28,10 +28,11 @@ limitations under the License.
 #include <thread>
 #include <vector>
 
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/host_page_aligned_region.h"
 #include "core/platform/batch_memcpy.h"
 #include "core/platform/device.h"
 #include "core/platform/platform.h"
+#include "core/util/tensor_helper.h"
 
 namespace {
 

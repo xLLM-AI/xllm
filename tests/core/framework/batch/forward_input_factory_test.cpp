@@ -25,7 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/batch_group.h"
-#include "core/framework/batch/shared_kv_cache_mapping_tracker.h"
+#include "core/framework/batch/shared_kv_mapping_tracker.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/composite_block_manager.h"
 #include "core/framework/config/execution_config.h"
@@ -36,8 +36,8 @@ limitations under the License.
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kv_cache/block/block_manager_impl.h"
-#include "core/kv_cache/block/static_kv_cache_block_pool.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/block/static_kv_block_pool.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
@@ -141,8 +141,8 @@ class ScopedJsonObjectOutput final {
   bool previous_value_;
 };
 
-StaticKVCacheLayout make_publication_layout() {
-  StaticKVCacheLayoutSpec spec;
+StaticKVLayout make_publication_layout() {
+  StaticKVLayoutSpec spec;
   spec.num_slots = 64;
   spec.num_slabs = 16;
   spec.full_row_bytes = 16;
@@ -151,7 +151,7 @@ StaticKVCacheLayout make_publication_layout() {
   spec.checkpoint_stride = 2;
   spec.full_layer_ids = {0, 3};
   spec.linear_layer_ids = {1, 2};
-  return StaticKVCacheLayout(spec);
+  return StaticKVLayout(spec);
 }
 
 BlockManager::Options make_publication_block_options() {
@@ -162,20 +162,20 @@ BlockManager::Options make_publication_block_options() {
       .linear_state_num_slots(64)
       .enable_shared_kv_cache(true)
       .shared_layout(
-          std::make_shared<StaticKVCacheLayout>(make_publication_layout()))
+          std::make_shared<StaticKVLayout>(make_publication_layout()))
       .enable_prefix_cache(false);
   return options;
 }
 
-TEST(SharedKVCacheMappingTrackerTest,
+TEST(SharedKVMappingTrackerTest,
      AbandonedPreparationRepublishesUntilConsumerAcknowledges) {
-  auto pool = std::make_shared<StaticKVCacheBlockPool>(
+  auto pool = std::make_shared<StaticKVBlockPool>(
       /*logical_capacity=*/64, make_publication_layout());
   const auto ids = pool->allocate(/*num_blocks=*/2, BlockType::KV);
   ASSERT_EQ(ids.size(), 2u);
   const std::vector<Block> blocks = {Block(ids[0], nullptr),
                                      Block(ids[1], nullptr)};
-  SharedKVCacheMappingTracker mapping_tracker;
+  SharedKVMappingTracker mapping_tracker;
   std::vector<int32_t> initial_rows;
   std::vector<uint64_t> initial_epochs;
   mapping_tracker.begin();
@@ -210,9 +210,9 @@ TEST(SharedKVCacheMappingTrackerTest,
   EXPECT_EQ(new_epochs, (std::vector<uint64_t>{1}));
 }
 
-TEST(SharedKVCacheMappingTrackerTest,
+TEST(SharedKVMappingTrackerTest,
      ConsumersKeepIndependentFullAndLinearAllocationGenerations) {
-  auto pool = std::make_shared<StaticKVCacheBlockPool>(
+  auto pool = std::make_shared<StaticKVBlockPool>(
       /*logical_capacity=*/64, make_publication_layout());
   const auto full = pool->allocate(/*num_blocks=*/1, BlockType::KV);
   const auto linear = pool->allocate(/*num_blocks=*/1, BlockType::LINEAR);
@@ -221,8 +221,8 @@ TEST(SharedKVCacheMappingTrackerTest,
   ASSERT_EQ(full[0], linear[0]);
   const std::vector<Block> full_blocks = {Block(full[0], nullptr)};
   const std::vector<Block> linear_blocks = {Block(linear[0], nullptr)};
-  SharedKVCacheMappingTracker first;
-  SharedKVCacheMappingTracker second;
+  SharedKVMappingTracker first;
+  SharedKVMappingTracker second;
   std::vector<int32_t> first_full;
   std::vector<int32_t> first_linear;
   first.append_rows(pool, BlockType::KV, full_blocks, &first_full);
@@ -264,7 +264,7 @@ TEST(SharedKVCacheMappingTrackerTest,
   first.append_rows(pool, BlockType::KV, full_blocks, &reused_full_rows);
   EXPECT_EQ(reused_full_rows.size(), 3u);
   first.acknowledge();
-  auto replacement_pool = std::make_shared<StaticKVCacheBlockPool>(
+  auto replacement_pool = std::make_shared<StaticKVBlockPool>(
       /*logical_capacity=*/64, make_publication_layout());
   const auto replacement_full =
       replacement_pool->allocate(/*num_blocks=*/1, BlockType::KV);
@@ -355,7 +355,7 @@ TEST(ForwardInputFactoryTest,
       final_slots));
   EXPECT_TRUE(shared_draft.input_params.embedding.linear_state_ids.empty());
   factory.acknowledge_shared_kv_cache();
-  factory.reset_shared_kv_cache_mapping_tracker();
+  factory.reset_shared_kv_mapping_tracker();
   prepare(factory);
   EXPECT_EQ(inputs[0].input_params.embedding.full_block_slot_rows, full_rows);
   EXPECT_EQ(inputs[0].input_params.embedding.linear_state_slot_rows,
@@ -424,7 +424,7 @@ TEST(ForwardInputFactoryTest,
   EXPECT_TRUE(inputs[1].input_params.embedding.full_block_slot_rows.empty());
   factory.acknowledge_shared_kv_cache();
 
-  factory.reset_shared_kv_cache_mapping_tracker();
+  factory.reset_shared_kv_mapping_tracker();
   prepare(/*include_first=*/false, /*include_second=*/true);
   EXPECT_TRUE(inputs[0].input_params.embedding.full_block_slot_rows.empty());
   EXPECT_EQ(inputs[1].input_params.embedding.full_block_slot_rows.size(), 3u);

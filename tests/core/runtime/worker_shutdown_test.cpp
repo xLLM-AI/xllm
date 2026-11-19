@@ -21,7 +21,7 @@ limitations under the License.
 #include <functional>
 #include <future>
 
-#include "core/kv_cache/transfer/kv_cache_transfer.h"
+#include "core/kv_cache/transfer/kv_transfer.h"
 #include "core/runtime/worker_impl.h"
 
 namespace xllm {
@@ -188,9 +188,9 @@ TEST(WorkerShutdownTest, WaitsForDeviceWorkBeforeReturningFromDrain) {
   EXPECT_TRUE(finished.load());
 }
 
-class BlockingKVCacheTransfer final : public KVCacheTransfer {
+class BlockingKVTransfer final : public KVTransfer {
  public:
-  BlockingKVCacheTransfer() : release_future_(release_.get_future().share()) {}
+  BlockingKVTransfer() : release_future_(release_.get_future().share()) {}
 
   void get_cache_info(uint64_t& /*cluster_id*/,
                       std::string& /*addr*/) override {}
@@ -234,8 +234,8 @@ class BlockingKVCacheTransfer final : public KVCacheTransfer {
   std::shared_future<void> release_future_;
 };
 
-TEST(KVCacheTransferDrainTest, WaitsForQueuedLocalTransfers) {
-  BlockingKVCacheTransfer transfer;
+TEST(KVTransferDrainTest, WaitsForQueuedLocalTransfers) {
+  BlockingKVTransfer transfer;
   auto entered = transfer.entered();
   auto pulled = transfer.pull_kv_blocks_async(
       /*src_cluster_id=*/1,

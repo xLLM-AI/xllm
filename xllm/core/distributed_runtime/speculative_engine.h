@@ -16,7 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "common/macros.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "engine.h"
 #include "framework/batch/batch_group.h"
 #include "framework/block/block_manager_pool.h"
@@ -40,8 +40,8 @@ class SpeculativeEngineBase : public Engine {
 
   bool init(MasterStatus master_status,
             const LLMEngine::ModelInitCallback& prepare_model,
-            std::shared_ptr<KVCacheTransferCoordinatorBase>
-                transfer_coordinator = nullptr);
+            std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator =
+                nullptr);
 
   // step the engine forward
   ForwardOutput step(BatchGroup& batch);
@@ -78,7 +78,7 @@ class SpeculativeEngineBase : public Engine {
                   const LLMEngine::ModelInitCallback& prepare_model);
 
   bool allocate_kv_cache(
-      std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator);
+      std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator);
 
   int64_t calculate_kv_cache(const KVCacheCapacity& target_kv_cache_cap,
                              const KVCacheCapacity& draft_kv_cache_cap) const;

@@ -37,7 +37,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
@@ -2561,7 +2561,7 @@ TEST(SchedulerPolicyTest, SharedSlabPreservesByteUnitsAboveFourGiB) {
   constexpr size_t kGiB = size_t{1} << 30;
   for (const size_t num_allocatable_slabs : {4u, 5u}) {
     SCOPED_TRACE(num_allocatable_slabs);
-    StaticKVCacheLayoutSpec spec;
+    StaticKVLayoutSpec spec;
     spec.num_slots = 64;
     spec.full_row_bytes = kGiB / 8;
     spec.conv_row_bytes = kGiB / 8;
@@ -2569,7 +2569,7 @@ TEST(SchedulerPolicyTest, SharedSlabPreservesByteUnitsAboveFourGiB) {
     spec.checkpoint_stride = 2;
     spec.full_layer_ids = {0, 2, 4, 6};
     spec.linear_layer_ids = {1, 3, 5, 7};
-    const StaticKVCacheLayout layout(spec);
+    const StaticKVLayout layout(spec);
     ASSERT_EQ(layout.bank_count(), 4u);
     ASSERT_EQ(layout.slice_bytes(), kGiB / 2);
     ASSERT_EQ(layout.slab_bytes(), 2 * kGiB);
@@ -2583,8 +2583,7 @@ TEST(SchedulerPolicyTest, SharedSlabPreservesByteUnitsAboveFourGiB) {
         .enable_linear_state(true)
         .linear_state_num_slots(64)
         .enable_shared_kv_cache(true)
-        .shared_layout(
-            std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
+        .shared_layout(std::make_shared<const StaticKVLayout>(std::move(spec)));
     BlockManagerPool pool(options);
     // Only mappings are allocated; no multi-GiB backing tensor is needed.
     EXPECT_EQ(pool.sequence_resource_units(4), 4 * kGiB + kGiB / 2);

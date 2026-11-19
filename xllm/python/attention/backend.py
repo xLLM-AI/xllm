@@ -685,7 +685,7 @@ def detect_shared_kv_cache_layout(
         pages_per_slot=pages_per_slot,
         num_linear_groups=num_linear_groups,
         conv_row_bytes=conv_row_bytes,
-        # StaticKVCacheBlockPool reserves slot 0 for padding in every group,
+        # StaticKVBlockPool reserves slot 0 for padding in every group,
         # so each role's first rows are graph-owned scratch even though the
         # tensor views have different row strides.
         scratch_full_rows=1,

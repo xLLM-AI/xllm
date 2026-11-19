@@ -22,7 +22,7 @@ limitations under the License.
 
 namespace xllm {
 
-class KVCacheTransfer;
+class KVTransfer;
 
 #if defined(USE_NPU)
 class MooncakeWeightTransfer;
@@ -32,11 +32,10 @@ class WorkerRendezvous final {
  public:
 #if defined(USE_NPU)
   WorkerRendezvous(
-      const std::shared_ptr<KVCacheTransfer>& kv_cache_transfer,
+      const std::shared_ptr<KVTransfer>& kv_transfer,
       const std::unique_ptr<MooncakeWeightTransfer>& weight_transfer);
 #else
-  explicit WorkerRendezvous(
-      const std::shared_ptr<KVCacheTransfer>& kv_cache_transfer);
+  explicit WorkerRendezvous(const std::shared_ptr<KVTransfer>& kv_transfer);
 #endif
 
   bool link_cluster(const std::vector<uint64_t>& cluster_ids,
@@ -55,7 +54,7 @@ class WorkerRendezvous final {
                                   const std::vector<std::string>& addrs,
                                   const std::vector<uint16_t>& ports) const;
 
-  const std::shared_ptr<KVCacheTransfer>& kv_cache_transfer_;
+  const std::shared_ptr<KVTransfer>& kv_transfer_;
 
 #if defined(USE_NPU)
   const std::unique_ptr<MooncakeWeightTransfer>& weight_transfer_;

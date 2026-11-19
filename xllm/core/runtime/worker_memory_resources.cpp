@@ -425,7 +425,7 @@ size_t WorkerMemoryResources::free_weight(const std::string& model_id) {
   return freed;
 }
 
-std::optional<VirtualKVCacheBlockGlobalOffsets>
+std::optional<VirtualKVBlockGlobalOffsets>
 WorkerMemoryResources::get_global_offsets_for_block(const std::string& model_id,
                                                     int64_t layer_id,
                                                     int64_t block_id) {

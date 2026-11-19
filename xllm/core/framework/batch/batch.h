@@ -86,7 +86,7 @@ class Batch final {
       const ModelArgs& args,
       ThreadPool* thread_pool = nullptr,
       int32_t cp_size = 1,
-      SharedKVCacheMappingTracker* mapping_tracker = nullptr);
+      SharedKVMappingTracker* mapping_tracker = nullptr);
 
   // Apply sampled tokens or reserve/commit a pending overlap result.
   void process_sample_output(const SampleOutput& sample_output,

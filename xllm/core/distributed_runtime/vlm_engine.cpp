@@ -43,9 +43,10 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/model_loader/model_loader.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/prefix/block_hasher.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/host_cache_layout.h"
 #include "core/runtime/forward_input_encoding.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/tensor_options.h"
@@ -177,7 +178,7 @@ bool VLMEngine::init(MasterStatus master_status) {
 
 bool VLMEngine::init(
     MasterStatus master_status,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator) {
   return init(
       master_status, /*prepare_model=*/{}, std::move(transfer_coordinator));
 }
@@ -185,7 +186,7 @@ bool VLMEngine::init(
 bool VLMEngine::init(
     MasterStatus master_status,
     const ModelInitCallback& prepare_model,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator) {
   if (!init_model(master_status, prepare_model)) {
     LOG(ERROR) << "Failed to init model from: " << options_.model_path();
     return false;
@@ -295,8 +296,8 @@ KVCacheCapacity VLMEngine::estimate_kv_cache_capacity(
 
 bool VLMEngine::allocate_kv_cache(
     const KVCacheCapacity& kv_cache_cap,
-    const VmmKVCacheLayout* shared_vmm_layout,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+    const VmmKVLayout* shared_vmm_layout,
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator) {
   const bool enable_state_cache = has_linear_attention_layers(args_) ||
                                   kv_cache_cap.kpool_tail_slot_size() > 0;
 

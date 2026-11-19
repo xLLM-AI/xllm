@@ -344,7 +344,7 @@ int64_t DistributedVmmCoordinator::init_physical_page_pools(
     LOG(ERROR) << "Worker memory RPC client count does not match world size";
     return 0;
   }
-  std::vector<folly::SemiFuture<MemoryInfo>> memory_futures;
+  std::vector<folly::SemiFuture<WorkerMemoryInfo>> memory_futures;
   memory_futures.reserve(clients_.size());
   for (auto& client : clients_) {
     memory_futures.emplace_back(client->get_memory_info_async());
@@ -637,7 +637,7 @@ bool DistributedVmmCoordinator::broadcast_free_weight_pages(
   return true;
 }
 
-bool DistributedVmmCoordinator::get_virtual_kv_cache_offsets(
+bool DistributedVmmCoordinator::get_virtual_kv_offsets(
     int32_t dp_rank,
     const std::string& model_id,
     const std::vector<int32_t>& block_ids,
@@ -687,7 +687,7 @@ bool DistributedVmmCoordinator::get_virtual_kv_cache_offsets(
     }
     layer_offsets = std::move(local_layer_offsets);
 
-    VLOG(1) << "get_virtual_kv_cache_offsets (local): model_id=" << model_id
+    VLOG(1) << "get_virtual_kv_offsets (local): model_id=" << model_id
             << ", num_blocks=" << block_ids.size()
             << ", num_layers=" << num_layers;
     return true;
@@ -702,14 +702,14 @@ bool DistributedVmmCoordinator::get_virtual_kv_cache_offsets(
     return false;
   }
   const auto& client = clients_[worker_rank];
-  layer_offsets = client->get_virtual_kv_cache_offsets(model_id, block_ids);
+  layer_offsets = client->get_virtual_kv_offsets(model_id, block_ids);
   if (layer_offsets.empty()) {
-    LOG(ERROR) << "get_virtual_kv_cache_offsets failed for dp_rank=" << dp_rank
+    LOG(ERROR) << "get_virtual_kv_offsets failed for dp_rank=" << dp_rank
                << ", model_id=" << model_id;
     return false;
   }
 
-  VLOG(1) << "get_virtual_kv_cache_offsets: dp_rank=" << dp_rank
+  VLOG(1) << "get_virtual_kv_offsets: dp_rank=" << dp_rank
           << ", model_id=" << model_id << ", num_blocks=" << block_ids.size()
           << ", num_layers=" << layer_offsets.size();
 
@@ -898,7 +898,7 @@ void DistributedVmmCoordinator::refresh_worker_capacity_snapshot() {
     if (workers.size() != static_cast<size_t>(expected_worker_count)) {
       return;
     }
-    std::vector<folly::SemiFuture<MemoryInfo>> futures;
+    std::vector<folly::SemiFuture<WorkerMemoryInfo>> futures;
     futures.reserve(workers.size());
     for (const auto& worker : workers) {
       futures.emplace_back(

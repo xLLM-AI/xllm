@@ -19,7 +19,7 @@ limitations under the License.
 
 #include <cstddef>
 
-#include "core/kv_cache/transfer/kv_cache_transfer.h"
+#include "core/kv_cache/transfer/kv_transfer.h"
 #if defined(USE_NPU)
 #include "core/framework/model_loader/weight/mooncake_weight_transfer.h"
 #endif
@@ -28,29 +28,28 @@ namespace xllm {
 
 #if defined(USE_NPU)
 WorkerRendezvous::WorkerRendezvous(
-    const std::shared_ptr<KVCacheTransfer>& kv_cache_transfer,
+    const std::shared_ptr<KVTransfer>& kv_transfer,
     const std::unique_ptr<MooncakeWeightTransfer>& weight_transfer)
-    : kv_cache_transfer_(kv_cache_transfer),
-      weight_transfer_(weight_transfer) {}
+    : kv_transfer_(kv_transfer), weight_transfer_(weight_transfer) {}
 #else
 WorkerRendezvous::WorkerRendezvous(
-    const std::shared_ptr<KVCacheTransfer>& kv_cache_transfer)
-    : kv_cache_transfer_(kv_cache_transfer) {}
+    const std::shared_ptr<KVTransfer>& kv_transfer)
+    : kv_transfer_(kv_transfer) {}
 #endif
 
 bool WorkerRendezvous::link_cluster(const std::vector<uint64_t>& cluster_ids,
                                     const std::vector<std::string>& addrs,
                                     const std::vector<uint16_t>& ports) {
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  if (!kv_cache_transfer_) {
-    LOG(ERROR) << "KVCacheTransfer not initialized";
+  if (!kv_transfer_) {
+    LOG(ERROR) << "KVTransfer not initialized";
     return false;
   }
   if (!validate_cluster_endpoints(cluster_ids, addrs, ports)) {
     return false;
   }
 
-  return kv_cache_transfer_->link_clusters(cluster_ids, addrs, ports);
+  return kv_transfer_->link_clusters(cluster_ids, addrs, ports);
 #endif
   return true;
 }
@@ -59,8 +58,8 @@ bool WorkerRendezvous::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                                       const std::vector<std::string>& addrs,
                                       const std::vector<uint16_t>& ports) {
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  if (!kv_cache_transfer_) {
-    LOG(ERROR) << "KVCacheTransfer not initialized";
+  if (!kv_transfer_) {
+    LOG(ERROR) << "KVTransfer not initialized";
     return false;
   }
   if (!validate_cluster_endpoints(cluster_ids, addrs, ports)) {
@@ -69,8 +68,7 @@ bool WorkerRendezvous::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
 
   const size_t cluster_count = cluster_ids.size();
   for (size_t i = 0; i < cluster_count; ++i) {
-    if (!kv_cache_transfer_->unlink_cluster(
-            cluster_ids[i], addrs[i], ports[i])) {
+    if (!kv_transfer_->unlink_cluster(cluster_ids[i], addrs[i], ports[i])) {
       return false;
     }
   }

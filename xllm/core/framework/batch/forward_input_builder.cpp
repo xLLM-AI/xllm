@@ -31,7 +31,7 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/common/metrics.h"
-#include "core/framework/batch/shared_kv_cache_mapping_tracker.h"
+#include "core/framework/batch/shared_kv_mapping_tracker.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -42,7 +42,7 @@ limitations under the License.
 #include "core/framework/request/sequence.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kv_cache/block/block_manager.h"
-#include "core/kv_cache/block/static_kv_cache_block_pool.h"
+#include "core/kv_cache/block/static_kv_block_pool.h"
 #if defined(USE_MUSA)
 #include "layers/common/attention_metadata.h"
 #endif
@@ -112,7 +112,7 @@ ForwardInputBuilder::ForwardInputBuilder(
     const ModelArgs* args,
     int32_t cp_size,
     ThreadPool* thread_pool,
-    SharedKVCacheMappingTracker* mapping_tracker)
+    SharedKVMappingTracker* mapping_tracker)
     : sequences_(data.sequences),
       allowed_max_tokens_(data.allowed_max_tokens),
       input_embeddings_vec_(data.input_embeddings),
@@ -841,7 +841,7 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
   const int32_t read_id = linear_blocks[read_index].id();
   state.linear_state_read_ids.emplace_back(read_id);
 
-  const std::shared_ptr<StaticKVCacheBlockPool>& shared_pool =
+  const std::shared_ptr<StaticKVBlockPool>& shared_pool =
       linear_blocks.back().manager()->options().shared_block_pool();
   if (shared_pool == nullptr) {
     return;
@@ -935,7 +935,7 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
       std::find_if(blocks.begin(), blocks.end(), [](const Block& block) {
         return block.is_valid() && block.manager() != nullptr;
       });
-  std::shared_ptr<StaticKVCacheBlockPool> shared_pool;
+  std::shared_ptr<StaticKVBlockPool> shared_pool;
   if (shared_block != blocks.end()) {
     shared_pool = shared_block->manager()->options().shared_block_pool();
     if (shared_pool != nullptr && shared_pool->uses_slabs() &&

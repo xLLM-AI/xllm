@@ -15,6 +15,15 @@ limitations under the License.
 
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 
+#if defined(USE_NPU)
+#ifdef TORCH_HIGHER_THAN_PTA6
+#include <torch_npu/csrc/core/npu/NPUFormat.h>
+#include <torch_npu/csrc/framework/OpCommand.h>
+#else
+#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
+#include <torch_npu/csrc/framework/utils/OpPreparation.h>
+#endif
+#endif
 #include <glog/logging.h>
 #include <torch/types.h>
 
@@ -22,6 +31,8 @@ limitations under the License.
 #include <cstdint>
 #include <sstream>
 #include <utility>
+
+#include "core/util/tensor_helper.h"
 
 #if defined(USE_NPU)
 #ifdef TORCH_HIGHER_THAN_PTA6
@@ -35,7 +46,10 @@ limitations under the License.
 
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/host_cache_layout.h"
+#include "core/kv_cache/storage/kv_cache_create_options.h"
+#include "core/kv_cache/storage/kv_cache_tensor_factory.h"
+#include "core/kv_cache/storage/kv_cache_tensors.h"
 #include "platform/platform.h"
 
 namespace xllm {
@@ -77,18 +91,19 @@ std::string tensor_shape_string(const torch::Tensor& tensor) {
 
 }  // namespace
 
-Dsv4StateCache Dsv4StateCache::from_split(torch::Tensor kv,
-                                          torch::Tensor score) {
-  Dsv4StateCache state;
+DeepSeekV4StateCache DeepSeekV4StateCache::from_split(torch::Tensor kv,
+                                                      torch::Tensor score) {
+  DeepSeekV4StateCache state;
   state.kv_ = std::move(kv);
   state.score_ = std::move(score);
   return state;
 }
 
-Dsv4StateCache Dsv4StateCache::from_packed(torch::Tensor packed,
-                                           torch::Tensor fallback_kv,
-                                           torch::Tensor fallback_score) {
-  Dsv4StateCache state;
+DeepSeekV4StateCache DeepSeekV4StateCache::from_packed(
+    torch::Tensor packed,
+    torch::Tensor fallback_kv,
+    torch::Tensor fallback_score) {
+  DeepSeekV4StateCache state;
   if (packed.defined()) {
     state.packed_ = std::move(packed);
   } else {
@@ -98,7 +113,7 @@ Dsv4StateCache Dsv4StateCache::from_packed(torch::Tensor packed,
   return state;
 }
 
-torch::Tensor Dsv4StateCache::kv() const {
+torch::Tensor DeepSeekV4StateCache::kv() const {
   if (!packed_.defined()) {
     return kv_;
   }
@@ -106,7 +121,7 @@ torch::Tensor Dsv4StateCache::kv() const {
   return packed_.narrow(/*dim=*/2, /*start=*/0, /*length=*/state_width);
 }
 
-torch::Tensor Dsv4StateCache::score() const {
+torch::Tensor DeepSeekV4StateCache::score() const {
   if (!packed_.defined()) {
     return score_;
   }
@@ -115,7 +130,7 @@ torch::Tensor Dsv4StateCache::score() const {
       /*dim=*/2, /*start=*/state_width, /*length=*/state_width);
 }
 
-torch::Tensor Dsv4StateCache::packed() const { return packed_; }
+torch::Tensor DeepSeekV4StateCache::packed() const { return packed_; }
 
 DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
     const DeepSeekV4KVCacheTensors& tensors)
@@ -125,19 +140,20 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
       swa_cache_(tensors.swa_cache),
 #if defined(USE_MLU)
       compress_state_(
-          Dsv4StateCache::from_packed(tensors.compress_state,
-                                      tensors.compress_kv_state,
-                                      tensors.compress_score_state)),
-      index_state_(
-          Dsv4StateCache::from_packed(tensors.compress_index_state,
-                                      tensors.compress_index_kv_state,
-                                      tensors.compress_index_score_state)),
+          DeepSeekV4StateCache::from_packed(tensors.compress_state,
+                                            tensors.compress_kv_state,
+                                            tensors.compress_score_state)),
+      index_state_(DeepSeekV4StateCache::from_packed(
+          tensors.compress_index_state,
+          tensors.compress_index_kv_state,
+          tensors.compress_index_score_state)),
 #else
-      compress_state_(Dsv4StateCache::from_split(tensors.compress_kv_state,
-                                                 tensors.compress_score_state)),
+      compress_state_(
+          DeepSeekV4StateCache::from_split(tensors.compress_kv_state,
+                                           tensors.compress_score_state)),
       index_state_(
-          Dsv4StateCache::from_split(tensors.compress_index_kv_state,
-                                     tensors.compress_index_score_state)),
+          DeepSeekV4StateCache::from_split(tensors.compress_index_kv_state,
+                                           tensors.compress_index_score_state)),
 #endif
       compressed_block_type_(tensors.compressed_block_type) {
 }
@@ -404,7 +420,7 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
 
   const DeepSeekV4CachePolicy cache_policy =
       get_dsv4_cache_policy(create_options.dtype());
-  const std::shared_ptr<KVCacheTensorAllocator> tensor_allocator =
+  const std::shared_ptr<KVTensorAllocator> tensor_allocator =
       create_options.tensor_allocator();
 
 #if defined(USE_NPU)

@@ -407,7 +407,7 @@ TEST(WorkerMemoryClientTest, PreservesBlockOrderAndLayerOffsets) {
                 nullptr,
                 [](void* arg) -> void* {
                   auto* state = static_cast<OffsetLookupState*>(arg);
-                  state->offsets = state->client->get_virtual_kv_cache_offsets(
+                  state->offsets = state->client->get_virtual_kv_offsets(
                       "forked-model", *state->block_ids);
                   return nullptr;
                 },
@@ -438,8 +438,7 @@ TEST(WorkerMemoryClientTest, TransportFailureReturnsEmptyOffsets) {
   WorkerMemoryClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
 
-  EXPECT_TRUE(
-      client.get_virtual_kv_cache_offsets("missing-model", {0}).empty());
+  EXPECT_TRUE(client.get_virtual_kv_offsets("missing-model", {0}).empty());
 }
 
 TEST(WorkerMemoryClientTest, RejectsPartialRoleOffsetResponses) {
@@ -451,8 +450,7 @@ TEST(WorkerMemoryClientTest, RejectsPartialRoleOffsetResponses) {
     ASSERT_EQ(server.start(), 0);
     WorkerMemoryClient client(
         /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
-    EXPECT_TRUE(
-        client.get_virtual_kv_cache_offsets("model", {3, 0, 7}).empty());
+    EXPECT_TRUE(client.get_virtual_kv_offsets("model", {3, 0, 7}).empty());
   }
 }
 
@@ -462,8 +460,7 @@ TEST(WorkerMemoryClientTest, EmptyWorkerResponseRemainsEmpty) {
   WorkerMemoryClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
 
-  EXPECT_TRUE(
-      client.get_virtual_kv_cache_offsets("missing-model", {0}).empty());
+  EXPECT_TRUE(client.get_virtual_kv_offsets("missing-model", {0}).empty());
 }
 
 TEST(WorkerMemoryClientTest, CapacityQueryReportsTransportFailure) {
@@ -501,7 +498,7 @@ TEST_F(WorkerMemoryClientTimeoutTest,
   // fails the readiness check without hanging this test or client destruction.
   server.service().release_replies();
   ASSERT_TRUE(wait_until([&] { return capacity.isReady(); }));
-  const MemoryInfo info = std::move(capacity).get();
+  const WorkerMemoryInfo info = std::move(capacity).get();
   EXPECT_EQ(info.available_memory, 4096);
   EXPECT_EQ(info.total_memory, 8192);
   EXPECT_TRUE(info.pool_initialized);

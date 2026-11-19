@@ -162,12 +162,11 @@ BatchInputData BatchState::prepare_batch_input() {
 }
 
 template <typename Input>
-Input BatchState::build_forward_input(
-    const BatchInputData& data,
-    const ModelArgs& args,
-    ThreadPool* thread_pool,
-    int32_t cp_size,
-    SharedKVCacheMappingTracker* mapping_tracker) {
+Input BatchState::build_forward_input(const BatchInputData& data,
+                                      const ModelArgs& args,
+                                      ThreadPool* thread_pool,
+                                      int32_t cp_size,
+                                      SharedKVMappingTracker* mapping_tracker) {
   ForwardInputBuilder builder(
       data, &args, cp_size, thread_pool, mapping_tracker);
   auto input = builder.build_forward_input<Input>();
@@ -182,12 +181,12 @@ template LlmForwardInput BatchState::build_forward_input<LlmForwardInput>(
     const ModelArgs&,
     ThreadPool*,
     int32_t,
-    SharedKVCacheMappingTracker*);
+    SharedKVMappingTracker*);
 template VlmForwardInput BatchState::build_forward_input<VlmForwardInput>(
     const BatchInputData&,
     const ModelArgs&,
     ThreadPool*,
     int32_t,
-    SharedKVCacheMappingTracker*);
+    SharedKVMappingTracker*);
 
 }  // namespace xllm

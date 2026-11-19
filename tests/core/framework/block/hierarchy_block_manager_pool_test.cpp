@@ -145,7 +145,7 @@ class HostOffloadPageAllocator final : public VmmKVPageAllocator {
   bool is_initialized() const override { return true; }
   void start_prealloc_thread(const std::string& /*model_id*/) override {}
 
-  std::unique_ptr<VirtualKVCachePageState> alloc_kv_cache_page(
+  std::unique_ptr<VirtualKVPageState> alloc_kv_cache_page(
       const std::string& /*model_id*/,
       int32_t /*dp_rank*/) override {
     for (size_t index = 0; index < max_pages_; ++index) {
@@ -154,7 +154,7 @@ class HostOffloadPageAllocator final : public VmmKVPageAllocator {
         continue;
       }
       ++mapping_count_;
-      return std::make_unique<VirtualKVCachePageState>(page_id, page_size());
+      return std::make_unique<VirtualKVPageState>(page_id, page_size());
     }
     return nullptr;
   }
@@ -206,7 +206,7 @@ class HostOffloadPageAllocator final : public VmmKVPageAllocator {
   size_t unmapping_count_ = 0;
 };
 
-class DeferredOffloadCoordinator final : public KVCacheTransferCoordinatorBase {
+class DeferredOffloadCoordinator final : public KVTransferCoordinatorBase {
  public:
   explicit DeferredOffloadCoordinator(size_t worker_count = 1,
                                       bool empty_results = false)
@@ -255,8 +255,7 @@ class DeferredOffloadCoordinator final : public KVCacheTransferCoordinatorBase {
   std::vector<folly::Promise<uint32_t>> promises_;
 };
 
-class RecordingHostRestoreCoordinator final
-    : public KVCacheTransferCoordinatorBase {
+class RecordingHostRestoreCoordinator final : public KVTransferCoordinatorBase {
  public:
   explicit RecordingHostRestoreCoordinator(bool deferred = false)
       : deferred_(deferred) {}
@@ -308,7 +307,7 @@ class RecordingHostRestoreCoordinator final
   std::vector<BlockTransferInfo> dispatched_infos_;
 };
 
-class FakePrefetchCoordinator final : public KVCacheTransferCoordinatorBase {
+class FakePrefetchCoordinator final : public KVTransferCoordinatorBase {
  public:
   explicit FakePrefetchCoordinator(size_t worker_count,
                                    int64_t timeout_ms = -1,

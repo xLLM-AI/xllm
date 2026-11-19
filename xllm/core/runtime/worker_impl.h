@@ -27,9 +27,9 @@ limitations under the License.
 #include "common/types.h"
 #include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "core/kv_cache/transfer/hierarchy_kv_cache_transfer.h"
+#include "core/kv_cache/transfer/hierarchy_kv_transfer.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
-#include "core/kv_cache/transfer/kv_cache_transfer.h"
+#include "core/kv_cache/transfer/kv_transfer.h"
 #include "core/runtime/schedule_overlap.h"
 #include "core/runtime/worker_residency_state.h"
 #include "executor.h"
@@ -53,7 +53,7 @@ limitations under the License.
 namespace xllm {
 
 class WorkerRendezvous;
-class StaticKVCacheTensorAllocator;
+class StaticKVTensorAllocator;
 class LinearStateSlotTable;
 
 void build_dummy_forward_input(LlmForwardInput& input,
@@ -121,7 +121,7 @@ class WorkerImpl {
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
   void allocate_kv_cache(const KVCacheShape& shape,
                          const KVCacheCreateOptions& layout,
-                         std::shared_ptr<KVCacheTransfer> transfer = nullptr);
+                         std::shared_ptr<KVTransfer> transfer = nullptr);
   CausalLM* get_causal_lm() const { return model_.get(); }
   std::vector<KVCache>& kv_caches() { return kv_caches_; }
 
@@ -130,7 +130,7 @@ class WorkerImpl {
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   virtual bool allocate_kv_cache_with_transfer(
-      std::shared_ptr<KVCacheTransfer> kv_cache_transfer,
+      std::shared_ptr<KVTransfer> kv_transfer,
       const KVCacheShape& kv_cache_shape);
 #endif
 
@@ -265,26 +265,22 @@ class WorkerImpl {
       const uint64_t batch_id,
       Slice<BlockTransferInfo>& block_transfer_info);
 
-  std::shared_ptr<HierarchyKVCacheTransfer>
-  create_hierarchy_kv_cache_transfer();
+  std::shared_ptr<HierarchyKVTransfer> create_hierarchy_kv_transfer();
 
-  void bind_hierarchy_kv_cache_transfer(
-      std::shared_ptr<HierarchyKVCacheTransfer> transfer,
-      HierarchyKVCacheTransfer::CacheRole role,
-      const Stream* producer_stream,
-      std::string store_key_component = "");
+  void bind_hierarchy_kv_transfer(std::shared_ptr<HierarchyKVTransfer> transfer,
+                                  HierarchyKVTransfer::CacheRole role,
+                                  const Stream* producer_stream,
+                                  std::string store_key_component = "");
 
-  void register_hierarchy_kv_cache(HierarchyKVCacheTransfer& transfer,
-                                   HierarchyKVCacheTransfer::CacheRole role,
+  void register_hierarchy_kv_cache(HierarchyKVTransfer& transfer,
+                                   HierarchyKVTransfer::CacheRole role,
                                    const Stream* producer_stream);
 
-  void set_hierarchy_kv_cache_transfer(
-      std::shared_ptr<HierarchyKVCacheTransfer> transfer);
+  void set_hierarchy_kv_transfer(std::shared_ptr<HierarchyKVTransfer> transfer);
 
-  std::shared_ptr<HierarchyKVCacheTransfer> get_hierarchy_kv_cache_transfer()
-      const;
+  std::shared_ptr<HierarchyKVTransfer> get_hierarchy_kv_transfer() const;
 
-  void clear_hierarchy_kv_cache_transfer();
+  void clear_hierarchy_kv_transfer();
 
   void set_hierarchy_layer_synchronizer(LlmModelParams& input_params);
   void set_hierarchy_layer_synchronizer(VlmModelParams& input_params);
@@ -344,7 +340,7 @@ class WorkerImpl {
   torch::Tensor select_hidden_states_for_embedding(
       const ModelOutput& model_output) const;
 
-  struct HierarchyKVCacheTransferContext {
+  struct HierarchyKVTransferContext {
     KVCacheShape kv_cache_shape;
     KVCacheCreateOptions create_options;
   };
@@ -406,7 +402,7 @@ class WorkerImpl {
   void prepare_mla_prefixcache_inputs(LlmModelParams& input_params);
   void prepare_mla_prefixcache_inputs(VlmModelParams& input_params);
 
-  void init_hierarchy_kv_cache_transfer(
+  void init_hierarchy_kv_transfer(
       const KVCacheShape& kv_cache_shape,
       const KVCacheCreateOptions& kv_cache_create_options);
 
@@ -421,13 +417,13 @@ class WorkerImpl {
   void allocate_kv_cache_storage(
       const KVCacheShape& kv_cache_shape,
       bool use_huge_page_allocator = false,
-      std::shared_ptr<KVCacheTensorAllocator> tensor_allocator = nullptr,
+      std::shared_ptr<KVTensorAllocator> tensor_allocator = nullptr,
       const KVCacheCreateOptions* layout = nullptr);
 
   void configure_shared_kv_allocation(const KVCacheShape& kv_cache_shape,
                                       KVCacheCreateOptions& create_options,
                                       bool use_huge_page_allocator);
-  void register_kv_cache_transfer(const KVCacheShape& kv_cache_shape);
+  void register_kv_transfer(const KVCacheShape& kv_cache_shape);
 
   bool wakeup_local(const WakeupOptions& options);
 
@@ -526,7 +522,7 @@ class WorkerImpl {
 
   // kv caches
   std::vector<xllm::KVCache> kv_caches_;
-  std::shared_ptr<StaticKVCacheTensorAllocator> static_kv_cache_allocator_;
+  std::shared_ptr<StaticKVTensorAllocator> static_kv_cache_allocator_;
   std::shared_ptr<LinearStateSlotTable> static_full_block_slots_;
 
   // causal LM model
@@ -541,13 +537,12 @@ class WorkerImpl {
 
   bool worker_execution_drained_ = false;
 
-  std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
-  std::optional<HierarchyKVCacheTransfer::CacheRole> hierarchy_kv_cache_role_;
+  std::shared_ptr<KVTransfer> kv_transfer_;
+  std::optional<HierarchyKVTransfer::CacheRole> hierarchy_kv_cache_role_;
   const Stream* hierarchy_kv_cache_producer_stream_ = nullptr;
   std::string hierarchy_kv_cache_store_key_component_;
-  std::optional<HierarchyKVCacheTransferContext>
-      hierarchy_kv_cache_transfer_context_;
-  std::shared_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
+  std::optional<HierarchyKVTransferContext> hierarchy_kv_transfer_context_;
+  std::shared_ptr<HierarchyKVTransfer> hierarchy_kv_transfer_;
   std::unique_ptr<WorkerRendezvous> worker_rendezvous_;
 
 #if defined(USE_NPU)

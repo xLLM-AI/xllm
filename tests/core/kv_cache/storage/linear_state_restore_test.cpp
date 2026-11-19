@@ -22,9 +22,9 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "core/kv_cache/block/static_kv_cache_block_pool.h"
+#include "core/kv_cache/block/static_kv_block_pool.h"
 #include "core/kv_cache/storage/linear_state_slot_table.h"
-#include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
+#include "core/kv_cache/storage/static_kv_tensor_allocator.h"
 
 namespace xllm {
 namespace {
@@ -444,8 +444,8 @@ TEST(LinearStateRestoreTest, KPoolOnlyCachePreservesWarmAndPaddingSlots) {
 }
 
 struct StaticSharedTestCache {
-  std::shared_ptr<StaticKVCacheLayout> layout;
-  std::unique_ptr<StaticKVCacheBlockPool> pool;
+  std::shared_ptr<StaticKVLayout> layout;
+  std::unique_ptr<StaticKVBlockPool> pool;
   std::vector<KVCache> caches;
 
   std::vector<int32_t> allocate(size_t count, BlockType type) {
@@ -503,8 +503,8 @@ StaticSharedTestCache make_static_shared_cache(int64_t n_layers = 2,
       .enable_linear_attention(true)
       .full_attention_interval(2);
   StaticSharedTestCache cache;
-  cache.layout = std::make_shared<StaticKVCacheLayout>(shape, options);
-  cache.pool = std::make_unique<StaticKVCacheBlockPool>(32, *cache.layout);
+  cache.layout = std::make_shared<StaticKVLayout>(shape, options);
+  cache.pool = std::make_unique<StaticKVBlockPool>(32, *cache.layout);
   options.static_layout(cache.layout)
       .linear_state_slot_table(std::make_shared<LinearStateSlotTable>(
           cache.layout->num_slots(),
@@ -514,8 +514,8 @@ StaticSharedTestCache make_static_shared_cache(int64_t n_layers = 2,
           cache.layout->num_slots(),
           cache.layout->full_layer_count(),
           torch::kCPU))
-      .tensor_allocator(std::make_shared<StaticKVCacheTensorAllocator>(
-          *cache.layout, torch::kCPU));
+      .tensor_allocator(std::make_shared<StaticKVTensorAllocator>(*cache.layout,
+                                                                  torch::kCPU));
   allocate_kv_caches(cache.caches, shape, options);
   return cache;
 }

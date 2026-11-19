@@ -118,7 +118,7 @@ class DistributedVmmCoordinator final : public KVCachePageBackend {
 
   // Returns byte offsets in the worker's shared physical-page pool mapping for
   // virtual-memory KV blocks, rather than offsets in model-local tensor views.
-  bool get_virtual_kv_cache_offsets(
+  bool get_virtual_kv_offsets(
       int32_t dp_rank,
       const std::string& model_id,
       const std::vector<int32_t>& block_ids,

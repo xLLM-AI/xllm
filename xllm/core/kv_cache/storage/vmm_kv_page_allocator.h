@@ -21,7 +21,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/kv_cache/block/virtual_kv_cache_page_state.h"
+#include "core/kv_cache/block/virtual_kv_page_state.h"
 
 namespace xllm {
 
@@ -35,7 +35,7 @@ class VmmKVPageAllocator {
   virtual bool is_initialized() const = 0;
   virtual void start_prealloc_thread(const std::string& model_id) = 0;
 
-  virtual std::unique_ptr<VirtualKVCachePageState> alloc_kv_cache_page(
+  virtual std::unique_ptr<VirtualKVPageState> alloc_kv_cache_page(
       const std::string& model_id,
       int32_t dp_rank) = 0;
   virtual void free_kv_cache_pages(

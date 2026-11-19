@@ -1,0 +1,350 @@
+/* Copyright 2025-2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "core/kv_cache/transfer/kv_transfer.h"
+
+#include <glog/logging.h>
+
+#include <algorithm>
+#include <limits>
+#include <unordered_set>
+#include <utility>
+
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+#include "core/kv_cache/transfer/mooncake_kv_transfer.h"
+#endif
+
+namespace xllm {
+
+void KVTransfer::drain() {
+  TaskGroup barrier(1);
+  threadpool_.schedule(barrier.wrap([] {}));
+  barrier.wait();
+}
+
+bool KVTransfer::validate_transfer_mappings(
+    const std::vector<KVTransferMapping>& mappings,
+    const std::string& request_id,
+    int32_t kv_split_size,
+    bool rank_local_mapping) {
+  if (kv_split_size < 1) {
+    LOG(ERROR) << "KV cache transfer requires kv_split_size >= 1, request_id="
+               << request_id << ", kv_split_size=" << kv_split_size;
+    return false;
+  }
+
+  std::unordered_set<int32_t> group_ids;
+  group_ids.reserve(mappings.size());
+  for (const KVTransferMapping& mapping : mappings) {
+    if (!group_ids.emplace(mapping.group_id).second) {
+      LOG(ERROR) << "Duplicate KV cache transfer mapping, request_id="
+                 << request_id << ", group_id=" << mapping.group_id;
+      return false;
+    }
+
+    const std::optional<BlockType> block_type =
+        block_type_from_cache_group_id(mapping.group_id);
+    const bool validate_full_kv_split_coverage =
+        kv_split_size > 1 && !rank_local_mapping && block_type.has_value() &&
+        is_kv_split_cache_block_type(block_type.value());
+    if (!validate_full_kv_split_coverage) {
+      if (mapping.local_ids.size() != mapping.remote_ids.size()) {
+        LOG(ERROR) << "KV cache transfer mapping size mismatch, request_id="
+                   << request_id << ", group_id=" << mapping.group_id
+                   << ", local=" << mapping.local_ids.size()
+                   << ", remote=" << mapping.remote_ids.size();
+        return false;
+      }
+      continue;
+    }
+
+    const size_t local_count = mapping.local_ids.size();
+    const size_t remote_count = mapping.remote_ids.size();
+    if (local_count == 0) {
+      if (remote_count != 0) {
+        LOG(ERROR) << "KV-split mapping has remote ids without local ids, "
+                   << "request_id=" << request_id
+                   << ", group_id=" << mapping.group_id
+                   << ", remote=" << remote_count;
+        return false;
+      }
+      continue;
+    }
+
+    const size_t split_size = static_cast<size_t>(kv_split_size);
+    if (local_count > std::numeric_limits<size_t>::max() / split_size) {
+      LOG(ERROR) << "KV-split mapping coverage size overflow, request_id="
+                 << request_id << ", group_id=" << mapping.group_id
+                 << ", local=" << local_count
+                 << ", kv_split_size=" << kv_split_size;
+      return false;
+    }
+    const size_t max_remote_count = local_count * split_size;
+    const size_t min_remote_count = max_remote_count - split_size + 1;
+    if (remote_count < min_remote_count || remote_count > max_remote_count) {
+      LOG(ERROR) << "KV-split mapping remote coverage mismatch, request_id="
+                 << request_id << ", group_id=" << mapping.group_id
+                 << ", local=" << local_count << ", remote=" << remote_count
+                 << ", kv_split_size=" << kv_split_size
+                 << ", expected_remote_range=[" << min_remote_count << ", "
+                 << max_remote_count << "]";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool KVTransfer::validate_transfer_mappings(
+    const std::vector<TransferKVInfo>& transfer_kv_infos,
+    int32_t kv_split_size) {
+  for (const TransferKVInfo& info : transfer_kv_infos) {
+    if (!validate_transfer_mappings(info.mappings,
+                                    info.request_id,
+                                    kv_split_size,
+                                    info.rank_local_mapping)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+folly::SemiFuture<bool> KVTransfer::pull_kv_blocks_async(
+    const uint64_t src_cluster_id,
+    const std::string& src_addr,
+    const std::vector<KVTransferMapping>& mappings) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  if (!validate_transfer_mappings(
+          mappings, /*request_id=*/"PULL", /*kv_split_size=*/1)) {
+    promise.setValue(false);
+    return future;
+  }
+  threadpool_.schedule([this,
+                        src_cluster_id,
+                        src_addr,
+                        mappings,
+                        promise = std::move(promise)]() mutable {
+    const bool success = pull_kv_blocks(src_cluster_id, src_addr, mappings);
+    promise.setValue(success);
+  });
+  return future;
+}
+
+// In KV-split mode, each block-scoped mapping's local_ids already contains
+// only this rank's physical blocks. remote_ids holds the full D-side block
+// entries; this rank maps local_ids[k] to
+// remote_ids[kv_split_rank + k * kv_split_size]. The function rebuilds
+// remote_ids accordingly and drops infos with no mappings.
+std::vector<TransferKVInfo> filter_kv_split_infos(
+    int32_t kv_split_rank,
+    int32_t kv_split_size,
+    const std::vector<TransferKVInfo>& kv_infos) {
+  std::vector<TransferKVInfo> filtered_kv_infos;
+  filtered_kv_infos.reserve(kv_infos.size());
+  for (const TransferKVInfo& kv_info : kv_infos) {
+    if (kv_info.rank_local_mapping) {
+      filtered_kv_infos.emplace_back(kv_info);
+      continue;
+    }
+    TransferKVInfo filtered = kv_info;
+    for (KVTransferMapping& mapping : filtered.mappings) {
+      const std::optional<BlockType> block_type =
+          block_type_from_cache_group_id(mapping.group_id);
+      if (!block_type.has_value() ||
+          !is_kv_split_cache_block_type(block_type.value())) {
+        continue;
+      }
+      const std::vector<uint64_t> remote_ids = mapping.remote_ids;
+      if (mapping.group_id == cache_group_id(BlockType::KV)) {
+        for (auto& layer : filtered.dst_virtual_kv_cache_layer_global_offsets) {
+          const auto filter_offsets = [&](std::vector<uint64_t>& offsets,
+                                          bool optional) {
+            if (optional && offsets.empty()) {
+              return;
+            }
+            CHECK_EQ(offsets.size(), remote_ids.size());
+            std::vector<uint64_t> selected;
+            selected.reserve(mapping.local_ids.size());
+            for (size_t k = 0; k < mapping.local_ids.size(); ++k) {
+              const size_t index = static_cast<size_t>(kv_split_rank) +
+                                   k * static_cast<size_t>(kv_split_size);
+              if (index >= offsets.size()) {
+                break;
+              }
+              selected.emplace_back(offsets[index]);
+            }
+            offsets = std::move(selected);
+          };
+          filter_offsets(layer.k_offsets, /*optional=*/false);
+          filter_offsets(layer.v_offsets, /*optional=*/false);
+          filter_offsets(layer.index_offsets, /*optional=*/true);
+        }
+      }
+      mapping.remote_ids.clear();
+      size_t mapped_local = 0;
+      mapping.remote_ids.reserve(mapping.local_ids.size());
+      for (size_t k = 0; k < mapping.local_ids.size(); ++k) {
+        const size_t remote_idx = static_cast<size_t>(kv_split_rank) +
+                                  k * static_cast<size_t>(kv_split_size);
+        if (remote_idx >= remote_ids.size()) {
+          break;
+        }
+        mapping.remote_ids.emplace_back(remote_ids[remote_idx]);
+        ++mapped_local;
+      }
+      mapping.local_ids.resize(mapped_local);
+    }
+    // local_ids[k] maps to remote_ids[kv_split_rank + k * kv_split_size]. When
+    // the strided remote index runs past the D-side block list (the prompt
+    // spans multiple logical blocks and the last one is not full, which only
+    // happens for kv_split_rank > 0), the loop above stops early. local_ids
+    // must then be truncated to the blocks that actually got a remote target;
+    // otherwise the two sides differ in size and PushKvBlocks rejects the whole
+    // transfer. The dropped tail blocks correspond to tokens beyond the prompt
+    // length, so the truncation is loss-free.
+    const bool has_mapping = std::any_of(filtered.mappings.begin(),
+                                         filtered.mappings.end(),
+                                         [](const KVTransferMapping& mapping) {
+                                           return !mapping.local_ids.empty() &&
+                                                  !mapping.remote_ids.empty();
+                                         });
+    if (has_mapping) {
+      filtered_kv_infos.push_back(std::move(filtered));
+    }
+  }
+  return filtered_kv_infos;
+}
+
+std::vector<std::string> KVTransfer::unique_request_ids(
+    const std::vector<TransferKVInfo>& transfer_kv_infos) {
+  std::unordered_set<std::string> request_ids_by_transfer;
+  std::vector<std::string> request_ids;
+  request_ids.reserve(transfer_kv_infos.size());
+  for (const TransferKVInfo& info : transfer_kv_infos) {
+    if (request_ids_by_transfer.emplace(info.request_id).second) {
+      request_ids.emplace_back(info.request_id);
+    }
+  }
+  return request_ids;
+}
+
+std::vector<std::string> KVTransfer::rotate_dst_rank(
+    const std::vector<std::string>& keys,
+    int32_t kv_split_rank) {
+  int32_t offset = kv_split_rank;
+  std::vector<std::string> rotated_keys;
+  auto sorted_keys = keys;
+  std::sort(sorted_keys.begin(), sorted_keys.end());
+  for (int32_t i = 0; i < keys.size(); i++) {
+    rotated_keys.emplace_back(sorted_keys[(i + offset) % sorted_keys.size()]);
+  }
+  return rotated_keys;
+}
+
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+folly::SemiFuture<std::vector<std::string>> KVTransfer::push_kv_blocks_async(
+    const std::vector<TransferKVInfo>& transfer_kv_infos,
+    const ParallelArgs& parallel_args,
+    std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer,
+    bool is_spec_draft) {
+  folly::Promise<std::vector<std::string>> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this,
+                        transfer_kv_infos,
+                        kv_split_size = parallel_args.kv_split_size_effective(),
+                        kv_split_rank = parallel_args.kv_split_rank(),
+                        layer_synchronizer,
+                        is_spec_draft,
+                        promise = std::move(promise)]() mutable {
+    std::unordered_map<std::string, KVCacheInfo> merged_kv_infos;
+    std::vector<TransferKVInfo> filtered_kv_infos;
+    const std::vector<TransferKVInfo>* kv_infos = &transfer_kv_infos;
+    // Filter when KV is actually sharded across ranks. When
+    // kv_split_size==1 (each CP rank holds a full KV replica) the filter
+    // degenerates to a copy, so we skip it and let each rank consume
+    // remote_ids 1:1.
+    if (!validate_transfer_mappings(*kv_infos, kv_split_size)) {
+      promise.setValue(unique_request_ids(transfer_kv_infos));
+      return;
+    }
+    if (kv_split_size > 1) {
+      filtered_kv_infos =
+          filter_kv_split_infos(kv_split_rank, kv_split_size, *kv_infos);
+      kv_infos = &filtered_kv_infos;
+      if (kv_infos->empty()) {
+        promise.setValue(std::vector<std::string>{});
+        return;
+      }
+    }
+    if (!validate_transfer_mappings(*kv_infos, /*kv_split_size=*/1)) {
+      promise.setValue(unique_request_ids(transfer_kv_infos));
+      return;
+    }
+    merge_kv_blocks(merged_kv_infos, *kv_infos);
+    std::vector<std::string> results;
+    if (!merged_kv_infos.empty()) {
+      results = this->push_kv_blocks(merged_kv_infos,
+                                     layer_synchronizer,
+                                     is_spec_draft,
+                                     kv_split_rank,
+                                     kv_split_size);
+    }
+    promise.setValue(std::move(results));
+  });
+  return future;
+}
+#endif
+
+std::shared_ptr<KVTransfer> KVTransferFactory::create(
+    uint16_t transfer_listen_port,
+    const Device& device,
+    const std::string& model_type,
+    const std::string& model_id,
+    std::unique_ptr<VirtualKVTransferMemoryProvider> memory_provider) {
+  std::shared_ptr<KVTransfer> transfer;
+
+  int32_t device_id = device.index();
+
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+  LOG(INFO) << "Create Mooncake KVTransfer.";
+  std::shared_ptr<MooncakeKVTransferBase> mooncake_transfer;
+#if defined(USE_NPU)
+  if (memory_provider != nullptr) {
+    if (model_id.empty()) {
+      LOG(ERROR)
+          << "VirtualMemory KV cache transfer requires a non-empty model_id";
+      return nullptr;
+    }
+    auto virtual_memory_transfer = std::make_shared<MooncakeVirtualKVTransfer>(
+        device_id, transfer_listen_port, device, std::move(memory_provider));
+    virtual_memory_transfer->set_model_id(model_id);
+    LOG(INFO) << "VirtualMemory mode enabled for MooncakeKVTransfer, model_id="
+              << model_id;
+    mooncake_transfer = virtual_memory_transfer;
+  } else {
+    mooncake_transfer = std::make_shared<MooncakeKVTransferDefault>(
+        device_id, transfer_listen_port, device, model_type);
+  }
+#else
+  mooncake_transfer = std::make_shared<MooncakeKVTransferDefault>(
+      device_id, transfer_listen_port, device, model_type);
+#endif
+  transfer = mooncake_transfer;
+#endif
+
+  return transfer;
+}
+
+}  // namespace xllm

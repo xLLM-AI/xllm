@@ -82,10 +82,10 @@ class PDServiceImpl {
   std::shared_ptr<const JsonObjectGrammar> json_reasoning_grammar_;
 
  private:
-  bool append_virtual_kv_cache_offsets(int32_t dp_rank,
-                                       const std::string& request_id,
-                                       const std::vector<int32_t>& block_ids,
-                                       proto::DisaggResponse* response);
+  bool append_virtual_kv_offsets(int32_t dp_rank,
+                                 const std::string& request_id,
+                                 const std::vector<int32_t>& block_ids,
+                                 proto::DisaggResponse* response);
 
   // Not owned. The initialized engine and its pool outlive this service.
   const BlockManagerPool* const block_manager_;

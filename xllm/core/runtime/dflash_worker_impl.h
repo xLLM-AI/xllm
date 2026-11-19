@@ -23,7 +23,7 @@ limitations under the License.
 
 #include "core/framework/batch/decode_input_builder.h"
 #include "core/framework/speculative/embedding_cache.h"
-#include "core/kv_cache/transfer/kv_cache_transfer.h"
+#include "core/kv_cache/transfer/kv_transfer.h"
 #include "core/util/tensor_helper.h"
 #include "framework/model/model_args.h"
 #include "runtime/draft_model_spec_worker_impl.h"

@@ -72,7 +72,7 @@ class VmmKVPageAllocatorImpl final : public VmmKVPageAllocator {
   void shutdown();
   void start_prealloc_thread(const std::string& model_id) override;
 
-  std::unique_ptr<VirtualKVCachePageState> alloc_kv_cache_page(
+  std::unique_ptr<VirtualKVPageState> alloc_kv_cache_page(
       const std::string& model_id,
       int32_t dp_rank) override;
   void free_kv_cache_pages(

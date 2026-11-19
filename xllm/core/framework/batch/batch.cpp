@@ -68,11 +68,10 @@ std::vector<Sequence*> Batch::get_sequences() const {
 }
 
 template <typename Input>
-Input Batch::prepare_forward_input(
-    const ModelArgs& args,
-    ThreadPool* thread_pool,
-    int32_t cp_size,
-    SharedKVCacheMappingTracker* mapping_tracker) {
+Input Batch::prepare_forward_input(const ModelArgs& args,
+                                   ThreadPool* thread_pool,
+                                   int32_t cp_size,
+                                   SharedKVMappingTracker* mapping_tracker) {
   const auto data = state_.prepare_batch_input();
   output_handler_.prepare(data);
   return state_.build_forward_input<Input>(
@@ -83,12 +82,12 @@ template LlmForwardInput Batch::prepare_forward_input<LlmForwardInput>(
     const ModelArgs&,
     ThreadPool*,
     int32_t,
-    SharedKVCacheMappingTracker*);
+    SharedKVMappingTracker*);
 template VlmForwardInput Batch::prepare_forward_input<VlmForwardInput>(
     const ModelArgs&,
     ThreadPool*,
     int32_t,
-    SharedKVCacheMappingTracker*);
+    SharedKVMappingTracker*);
 
 void Batch::process_sample_output(const RawForwardOutput& output,
                                   BatchOutputAction action) {

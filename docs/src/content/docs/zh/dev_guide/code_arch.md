@@ -130,7 +130,7 @@ flowchart TB
     pages["storage / VmmKVPageAllocatorImpl<br/>页队列、预分配与 block 到页换算"]
     backend["storage / KVCachePageBackend<br/>容量预留与映射接口"]
     ports["storage 与 transfer 接口<br/>页分配、tensor 分配、内存 provider"]
-    storage["storage / VirtualKVCacheMemoryRegistry<br/>本地 KV 映射与分页 tensor 分配"]
+    storage["storage / VirtualKVMemoryRegistry<br/>本地 KV 映射与分页 tensor 分配"]
     kvtransfer["transfer<br/>内存 provider、KV peer/layout 状态<br/>重分片与缓存传输"]
   end
 
@@ -184,18 +184,18 @@ tensor 的 shape、dtype 和视图构造放在 `framework/allocator/torch`；返
 持有的映射 lease 属于 `framework/transfer`，该模块没有 KV 或 distributed-runtime
 目标依赖。
 
-`core/kv_cache/storage` 保存 `VirtualKVCacheMemoryRegions` 和 `VirtualKVCacheMemoryRegistry`，
+`core/kv_cache/storage` 保存 `VirtualKVMemoryRegions` 和 `VirtualKVMemoryRegistry`，
 负责各模型本地的缓存映射及物理偏移查询。`VmmKVTensorAllocator` 使用注入的
-registry 实现 `KVCacheTensorAllocator`。`core/kv_cache/transfer` 中的
-`VirtualKVCacheTransferMemoryProviderImpl` 使用该 registry 和注入的 `GlobalVirtualMemoryRegion`
-实现 `VirtualKVCacheTransferMemoryProvider`。`WorkerImpl` 提供这些依赖，具体缓存后端使用
+registry 实现 `KVTensorAllocator`。`core/kv_cache/transfer` 中的
+`VirtualKVTransferMemoryProviderImpl` 使用该 registry 和注入的 `GlobalVirtualMemoryRegion`
+实现 `VirtualKVTransferMemoryProvider`。`WorkerImpl` 提供这些依赖，具体缓存后端使用
 通用分配能力，不依赖分布式协调器。
 
 `framework/model_loader/weight` 管理 `WeightVirtualMemoryManager`、`ModelWeightStore`、
 `WeightAllocation` 和权重传输适配器，使用构造时传入的物理页池和共享映射，负责
 权重预留的所有权、连续或分散映射、区域内分配及清理。权重传输与 KV 传输共同使用
 Mooncake 字节传输。KV manifest、peer 状态和重分片 plan 仍属于
-`core/kv_cache/transfer`，由 `MooncakeKVCacheTransferEngine` 等类管理。
+`core/kv_cache/transfer`，由 `MooncakeKVTransferEngine` 等类管理。
 
 `runtime/WorkerMemoryResources` 持有本地 KV registry 和 `WeightVirtualMemoryManager`，
 管理设备初始化、物理页池以及本地资源的创建与清理。它是独立的构建目标，

@@ -110,10 +110,10 @@ cc_library(
     :kv_cache
     :kv_cache_store_config_validation
     :kv_cache_estimation
-    :static_kv_cache_tensor_allocator
+    :static_kv_tensor_allocator
     :virtual_memory_kv_cache_storage
-    :virtual_kv_cache_transfer_memory_provider_impl
-    :kv_cache_transfer
+    :virtual_kv_transfer_memory_factory
+    :kv_transfer
     :mooncake_weight_transfer
     :linear_state_restore
     :kv_transfer_completion

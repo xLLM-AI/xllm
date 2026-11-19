@@ -1,0 +1,199 @@
+/* Copyright 2025-2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#pragma once
+
+#include <folly/futures/Future.h>
+
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include "common/types.h"
+#include "core/kv_cache/storage/kv_cache.h"
+#include "core/kv_cache/transfer/virtual_kv_transfer_memory_provider.h"
+#include "framework/model/model_args.h"
+#if defined(USE_NPU)
+#include "platform/npu/npu_layer_synchronizer.h"
+#endif
+#if defined(USE_MLU)
+#include "platform/mlu/mlu_layer_synchronizer.h"
+#endif
+#if defined(USE_DCU)
+#include "platform/dcu/dcu_layer_synchronizer.h"
+#endif
+#include "framework/parallel_state/parallel_args.h"
+#include "platform/device.h"
+#include "util/threadpool.h"
+
+namespace xllm {
+
+#if defined(USE_NPU)
+using KVPushSynchronizerImpl = NPULayerSynchronizerImpl;
+#elif defined(USE_MLU)
+using KVPushSynchronizerImpl = MLULayerSynchronizerImpl;
+#elif defined(USE_DCU)
+using KVPushSynchronizerImpl = DCULayerSynchronizerImpl;
+#endif
+
+// In KV-split mode, filters and remaps each block-scoped cache mapping's
+// remote_ids so that every KV-split rank sees only the destination blocks
+// assigned to it. This includes ordinary KV and grouped SWA/C4/C128 caches.
+// When `kv_split_size == 1` the caller should skip this entirely (every rank
+// holds the full KV replica and remote_ids is 1:1 with local_ids).
+//
+// Note: prior to the KV-split / CP decoupling refactor this was named
+// filter_cp_kv_infos and gated on cp_size>1. The behavior is identical when
+// kv_split_size == cp_size (the legacy default), so callers that pass cp_rank
+// / cp_size keep working byte-for-byte.
+std::vector<TransferKVInfo> filter_kv_split_infos(
+    int32_t kv_split_rank,
+    int32_t kv_split_size,
+    const std::vector<TransferKVInfo>& kv_infos);
+
+class KVTransfer {
+ public:
+  class KVCacheInfo {
+   public:
+    void append_unique_request_id(const std::string& request_id) {
+      if (seen_request_ids_.emplace(request_id).second) {
+        request_ids_.emplace_back(request_id);
+      }
+    }
+
+    const std::vector<std::string>& request_ids() const { return request_ids_; }
+
+    std::string dst_addr;
+    std::vector<KVTransferMapping> mappings;
+
+    // Destination byte offsets in the D-node's GlobalVirtualMemoryRegion
+    // (per-layer). dst_virtual_kv_cache_layer_global_offsets[layer_id] =
+    // {k_offsets, v_offsets, index_offsets}; INDEX is empty on non-owner
+    // layers.
+    std::vector<VirtualKVCacheLayerGlobalOffsets>
+        dst_virtual_kv_cache_layer_global_offsets;
+
+   private:
+    std::vector<std::string> request_ids_;
+    std::unordered_set<std::string> seen_request_ids_;
+  };
+
+  static std::vector<std::string> unique_request_ids(
+      const std::vector<TransferKVInfo>& transfer_kv_infos);
+
+  static std::vector<std::string> rotate_dst_rank(
+      const std::vector<std::string>& keys,
+      int32_t kv_split_rank);
+
+  KVTransfer() = default;
+  virtual ~KVTransfer() = default;
+
+  // Drain locally queued transfers before releasing their cache tensors.
+  // Shared transport shutdown and remote access quiescence remain external.
+  void drain();
+
+  virtual void initialize(int32_t device_id) {};
+
+  virtual void finalize() {};
+
+  virtual void free_kv_cache() {};
+
+  virtual void configure_cache_layout(const ParallelArgs& parallel_args,
+                                      const ModelArgs& model_args,
+                                      int32_t block_token_capacity,
+                                      bool is_spec_draft) {}
+
+  virtual void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
+                                 const KVCacheShape& kv_cache_shape,
+                                 const torch::ScalarType dtype) {};
+
+  virtual void register_kv_cache_spec(std::vector<xllm::KVCache>& kv_caches,
+                                      const KVCacheShape& kv_cache_shape,
+                                      const torch::ScalarType dtype) {
+    NOT_IMPLEMENTED();
+  };
+
+  virtual void get_cache_info(uint64_t& cluster_id, std::string& addr) = 0;
+
+  virtual bool link_clusters(const std::vector<uint64_t>& cluster_ids,
+                             const std::vector<std::string>& remote_addrs,
+                             const std::vector<uint16_t>& ports) = 0;
+
+  virtual bool unlink_cluster(const uint64_t& cluster_id,
+                              const std::string& remote_addr,
+                              const uint16_t port,
+                              bool force_flag = true) = 0;
+
+  virtual bool pull_kv_blocks(
+      const uint64_t src_cluster_id,
+      const std::string& src_addr,
+      const std::vector<KVTransferMapping>& mappings) = 0;
+
+  virtual folly::SemiFuture<bool> pull_kv_blocks_async(
+      const uint64_t src_cluster_id,
+      const std::string& src_addr,
+      const std::vector<KVTransferMapping>& mappings);
+
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+  virtual folly::SemiFuture<std::vector<std::string>> push_kv_blocks_async(
+      const std::vector<TransferKVInfo>& transfer_kv_infos,
+      const ParallelArgs& parallel_args,
+      std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer,
+      bool is_spec_draft);
+#endif
+
+  virtual void merge_kv_blocks(
+      std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
+      const std::vector<TransferKVInfo>& transfer_kv_infos) = 0;
+
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+  virtual std::vector<std::string> push_kv_blocks(
+      std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
+      std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
+      bool is_spec_draft,
+      int32_t kv_split_rank,
+      int32_t kv_split_size) = 0;
+#endif
+
+ protected:
+  static bool validate_transfer_mappings(
+      const std::vector<KVTransferMapping>& mappings,
+      const std::string& request_id,
+      int32_t kv_split_size,
+      bool rank_local_mapping = false);
+
+  static bool validate_transfer_mappings(
+      const std::vector<TransferKVInfo>& transfer_kv_infos,
+      int32_t kv_split_size);
+
+  // working thread
+  ThreadPool threadpool_{/*num_threads=*/1,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"KVTransfer.async"};
+};
+
+class KVTransferFactory {
+ public:
+  static std::shared_ptr<KVTransfer> create(
+      uint16_t transfer_listen_port,
+      const Device& device,
+      const std::string& model_type = "",
+      const std::string& model_id = "",
+      std::unique_ptr<VirtualKVTransferMemoryProvider> memory_provider =
+          nullptr);
+};
+
+}  // namespace xllm

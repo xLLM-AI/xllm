@@ -25,7 +25,7 @@ limitations under the License.
 #include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
-#include "core/kv_cache/transfer/kv_cache_transfer_coordinator_base.h"
+#include "core/kv_cache/transfer/kv_transfer_coordinator_base.h"
 
 namespace xllm {
 namespace {
@@ -60,7 +60,7 @@ BlockManager::Options mtp_options() {
 
 // Replace worker RPCs only; the Sequence, block pools, cache identities, and
 // restore/offload decisions under test are real framework objects.
-class CacheTransferCoordinator final : public KVCacheTransferCoordinatorBase {
+class CacheTransferCoordinator final : public KVTransferCoordinatorBase {
  public:
   void prefetch_from_storage(
       uint32_t /*dp_rank*/,
@@ -391,7 +391,7 @@ TEST(CompositeMtpPrefixCacheTest, NeverPublishesOverlapPlaceholderIdentity) {
 
 TEST(HierarchyMtpPrefixCacheTest, KeepsCoordinatorAliveForPoolLifetime) {
   auto coordinator = std::make_shared<CacheTransferCoordinator>();
-  std::weak_ptr<KVCacheTransferCoordinatorBase> weak_coordinator = coordinator;
+  std::weak_ptr<KVTransferCoordinatorBase> weak_coordinator = coordinator;
   {
     HierarchyBlockManagerPool pool(hierarchy_mtp_options(), coordinator);
     coordinator.reset();

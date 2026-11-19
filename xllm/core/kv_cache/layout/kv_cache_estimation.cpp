@@ -37,7 +37,7 @@ limitations under the License.
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kpool_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/platform/platform.h"
 #include "core/runtime/options.h"
@@ -305,7 +305,7 @@ int64_t calculate_linear_state_blocks(int64_t cache_size_in_bytes,
   return std::min<int64_t>(auto_blocks, max_blocks);
 }
 
-int64_t dsv4_common_unit_bytes(const Dsv4KVCacheEstimateCost& cache_cost,
+int64_t dsv4_common_unit_bytes(const DeepSeekV4KVCacheEstimateCost& cache_cost,
                                int64_t common_blocks_per_unit) {
   CHECK_GT(cache_cost.manager_blocks_per_unit, 0);
   CHECK_EQ(common_blocks_per_unit % cache_cost.manager_blocks_per_unit, 0);
@@ -357,7 +357,7 @@ int64_t dsv4_swa_block_count(const ModelArgs& model_args,
   return swa_blocks_per_seq * max_seqs + burst_blocks + max_seqs + 2;
 }
 
-void set_dsv4_compressed_counts(const Dsv4KVCacheEstimateCost& cache_cost,
+void set_dsv4_compressed_counts(const DeepSeekV4KVCacheEstimateCost& cache_cost,
                                 int64_t token_unit_count,
                                 KVCacheCapacity& kv_cache_cap) {
   if (cache_cost.n_c1_layers > 0 || cache_cost.n_c2_layers > 0) {
@@ -381,7 +381,7 @@ void set_dsv4_compressed_counts(const Dsv4KVCacheEstimateCost& cache_cost,
   }
 }
 
-Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
+DeepSeekV4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
     const ModelArgs& model_args,
     const KVCacheEstimateOptions& options) {
   const int64_t block_size = options.block_size;
@@ -393,7 +393,7 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
   const int64_t dtype_size =
       static_cast<int64_t>(torch::elementSize(options.dtype));
 
-  Dsv4KVCacheEstimateCost cache_cost;
+  DeepSeekV4KVCacheEstimateCost cache_cost;
   cache_cost.swa_count = dsv4_swa_block_count(model_args, options);
 
   if (model_args.model_type() == "deepseek_v41") {
@@ -488,7 +488,7 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
 void init_dsv4_counts(const ModelArgs& model_args,
                       const KVCacheEstimateOptions& options,
                       KVCacheCapacity& kv_cache_cap) {
-  const Dsv4KVCacheEstimateCost cache_cost =
+  const DeepSeekV4KVCacheEstimateCost cache_cost =
       estimate_dsv4_kv_cache_cost(model_args, options);
   CHECK_GE(kv_cache_cap.cache_size_in_bytes(), cache_cost.constant_swa_bytes)
       << "no memory for the minimum DSV4 SWA cache, required="
@@ -502,8 +502,9 @@ void init_dsv4_counts(const ModelArgs& model_args,
     CHECK(is_deepseek_v4_family(options.draft_model_args->model_type()))
         << "DSV4 speculative kv cache estimation only supports DeepSeek V4 "
            "draft";
-    const Dsv4KVCacheEstimateCost draft_cost = estimate_dsv4_kv_cache_cost(
-        *options.draft_model_args, *options.draft_options);
+    const DeepSeekV4KVCacheEstimateCost draft_cost =
+        estimate_dsv4_kv_cache_cost(*options.draft_model_args,
+                                    *options.draft_options);
     const int64_t constant_bytes =
         cache_cost.constant_swa_bytes + draft_cost.constant_swa_bytes;
     CHECK_GE(kv_cache_cap.cache_size_in_bytes(), constant_bytes)
@@ -613,12 +614,12 @@ void init_dsv4_counts(const ModelArgs& model_args,
   kv_cache_cap.n_blocks(std::max<int64_t>(manager_base_blocks, 1));
 }
 
-StaticKVCacheLayoutSpec shared_layout_spec(const ModelArgs& model_args,
-                                           const KVCacheCapacity& capacity,
-                                           torch::ScalarType dtype,
-                                           int64_t local_linear_k_heads,
-                                           int64_t local_linear_v_heads) {
-  StaticKVCacheLayoutSpec spec;
+StaticKVLayoutSpec shared_layout_spec(const ModelArgs& model_args,
+                                      const KVCacheCapacity& capacity,
+                                      torch::ScalarType dtype,
+                                      int64_t local_linear_k_heads,
+                                      int64_t local_linear_v_heads) {
+  StaticKVLayoutSpec spec;
   spec.dtype = dtype;
   spec.ssm_dtype = resolve_ssm_dtype(model_args.mamba_ssm_dtype(), dtype);
   spec.full_row_bytes =
@@ -661,13 +662,12 @@ void init_shared_counts(const ModelArgs& model_args,
   CHECK(!model_args.enable_mla());
   CHECK_EQ(model_args.linear_key_head_dim(),
            model_args.linear_value_head_dim());
-  StaticKVCacheLayoutSpec spec =
-      shared_layout_spec(model_args,
-                         *capacity,
-                         options.dtype,
-                         options.n_local_linear_k_heads,
-                         options.n_local_linear_v_heads);
-  const StaticKVCacheLayout layout(std::move(spec));
+  StaticKVLayoutSpec spec = shared_layout_spec(model_args,
+                                               *capacity,
+                                               options.dtype,
+                                               options.n_local_linear_k_heads,
+                                               options.n_local_linear_v_heads);
+  const StaticKVLayout layout(std::move(spec));
   CHECK_LE(layout.slab_bytes(),
            static_cast<size_t>(std::numeric_limits<int64_t>::max()));
   const int64_t slab_bytes = static_cast<int64_t>(layout.slab_bytes());
@@ -872,14 +872,14 @@ SharedStaticKVCachePlan plan_shared_static_kv_cache(
       << "Shared draft requires the target Full row geometry";
   const int64_t budget = std::min(target_cap.cache_size_in_bytes(),
                                   draft_cap.cache_size_in_bytes());
-  StaticKVCacheLayoutSpec spec = shared_layout_spec(
+  StaticKVLayoutSpec spec = shared_layout_spec(
       target_args,
       target_cap,
       dtype,
       std::max<int64_t>(target_args.linear_num_key_heads() / world_size, 1),
       std::max<int64_t>(target_args.linear_num_value_heads() / world_size, 1));
   spec.draft_layer_count = static_cast<size_t>(draft_cap.n_layers());
-  const StaticKVCacheLayout layout(std::move(spec));
+  const StaticKVLayout layout(std::move(spec));
   const int64_t slab_bytes = static_cast<int64_t>(layout.slab_bytes());
   int64_t slabs = std::min(budget / slab_bytes,
                            static_cast<int64_t>(layout.max_slab_count()));

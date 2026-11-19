@@ -26,7 +26,7 @@ limitations under the License.
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/allocator/vmm_arena_capacity.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/kv_cache/layout/vmm_kv_cache_layout.h"
+#include "core/kv_cache/layout/vmm_kv_layout.h"
 #include "core/runtime/options.h"
 #include "core/runtime/worker_client.h"
 #include "models/model_registry.h"
@@ -109,7 +109,7 @@ void KVCapacityPlanner::prepare_virtual_memory(
                                     worker_clients_.size(),
                                     capacity.linear_cache_size_in_bytes(),
                                     is_multimodal_);
-  const VmmKVCacheLayout layout(
+  const VmmKVLayout layout(
       capacity, model_args_, world_size_, dtype_, options_.is_draft_engine());
   const size_t total_pages = coordinator.get_num_total_phy_pages();
   const size_t page_size =

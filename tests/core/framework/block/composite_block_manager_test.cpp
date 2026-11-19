@@ -38,8 +38,8 @@ limitations under the License.
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
-#include "core/kv_cache/block/static_kv_cache_block_pool.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/block/static_kv_block_pool.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
 #include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
@@ -181,7 +181,7 @@ class TestVmmKVPageAllocator final : public VmmKVPageAllocator {
     ++prealloc_starts;
   }
 
-  std::unique_ptr<VirtualKVCachePageState> alloc_kv_cache_page(
+  std::unique_ptr<VirtualKVPageState> alloc_kv_cache_page(
       const std::string& model_id,
       int32_t dp_rank) override {
     if (before_allocate) {
@@ -193,7 +193,7 @@ class TestVmmKVPageAllocator final : public VmmKVPageAllocator {
     }
     const int64_t page_id = next_page_ids_.at(dp_rank)++;
     allocated_pages_.at(dp_rank).insert(page_id);
-    return std::make_unique<VirtualKVCachePageState>(page_id, page_size());
+    return std::make_unique<VirtualKVPageState>(page_id, page_size());
   }
 
   void free_kv_cache_pages(
@@ -3179,7 +3179,7 @@ TEST_F(SharedKVCacheBlockTest, PaddingSlotIsNeverAllocatedInAnyGroup) {
   CompositeBlockManager manager(build_composite_leaves(options), options);
   std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 7);
   ASSERT_EQ(linear.size(), 7u);
-  const std::shared_ptr<StaticKVCacheBlockPool>& pool =
+  const std::shared_ptr<StaticKVBlockPool>& pool =
       linear.front().manager()->options().shared_block_pool();
   std::unordered_set<int32_t> slots;
   for (const Block& block : linear) {
@@ -3335,7 +3335,7 @@ TEST_F(SharedKVCacheBlockTest, ConcurrentGroupSlotsNeverOverlap) {
   std::vector<Block> linear = linear_future.get();
   ASSERT_EQ(full.size(), 8u);
   ASSERT_EQ(linear.size(), 8u);
-  const std::shared_ptr<StaticKVCacheBlockPool>& pool =
+  const std::shared_ptr<StaticKVBlockPool>& pool =
       linear.front().manager()->options().shared_block_pool();
   std::unordered_set<int32_t> slots;
   for (const Block& block : full) {
@@ -3401,7 +3401,7 @@ class SharedSlabKVCacheBlockTest : public SharedKVCacheBlockTest {
 
   BlockManager::Options slab_options(size_t num_allocatable_slabs,
                                      bool enable_prefix_cache = false) {
-    StaticKVCacheLayoutSpec spec;
+    StaticKVLayoutSpec spec;
     spec.num_slots = 64;
     spec.full_row_bytes = 16;
     spec.conv_row_bytes = 8;
@@ -3411,12 +3411,12 @@ class SharedSlabKVCacheBlockTest : public SharedKVCacheBlockTest {
     spec.ssm_dtype = torch::kFloat32;
     spec.full_layer_ids = {0, 3};
     spec.linear_layer_ids = {1, 2};
-    const StaticKVCacheLayout layout(spec);
+    const StaticKVLayout layout(spec);
     spec.num_slabs = layout.num_reserved_slabs() + num_allocatable_slabs;
     BlockManager::Options options =
         shared_options(/*num_slots=*/64, enable_prefix_cache);
     options.shared_layout(
-        std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
+        std::make_shared<const StaticKVLayout>(std::move(spec)));
     return options;
   }
 };
@@ -3470,7 +3470,7 @@ TEST_F(SharedSlabKVCacheBlockTest, FailedGrowthPreservesExistingStateMappings) {
   ASSERT_TRUE(manager.allocate_sequence(&sequence, /*num_tokens=*/2));
   const int32_t full_id = sequence.kv_state().blocks(BlockType::KV)[0].id();
   const int32_t linear_id = sequence.get_linear_state_slot_id();
-  const std::shared_ptr<StaticKVCacheBlockPool>& pool =
+  const std::shared_ptr<StaticKVBlockPool>& pool =
       manager.leaf_of(BlockType::KV)->options().shared_block_pool();
   std::vector<int32_t> before;
   pool->append_linear_state_rows(linear_id, &before);

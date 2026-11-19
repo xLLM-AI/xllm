@@ -32,7 +32,7 @@ limitations under the License.
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/block/sliding_window_block_manager.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
 
 namespace xllm {
 
@@ -324,9 +324,9 @@ CompositeBlockManager::LeafMap build_composite_leaves(
              static_cast<uint32_t>(options.linear_state_num_slots()));
     cache_options.shared_block_pool(
         options.shared_layout()
-            ? std::make_shared<StaticKVCacheBlockPool>(options.num_blocks(),
-                                                       *options.shared_layout())
-            : std::make_shared<StaticKVCacheBlockPool>(
+            ? std::make_shared<StaticKVBlockPool>(options.num_blocks(),
+                                                  *options.shared_layout())
+            : std::make_shared<StaticKVBlockPool>(
                   options.num_blocks(), options.shared_linear_state_slots()));
   }
 

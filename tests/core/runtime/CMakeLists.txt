@@ -216,9 +216,9 @@ cc_test(
 if(USE_NPU OR USE_MLU)
   cc_test(
     NAME
-      worker_hierarchy_kv_cache_transfer_test
+      worker_hierarchy_kv_transfer_test
     SRCS
-      worker_hierarchy_kv_cache_transfer_test.cpp
+      worker_hierarchy_kv_transfer_test.cpp
     DEPS
       :runtime
       :kv_cache

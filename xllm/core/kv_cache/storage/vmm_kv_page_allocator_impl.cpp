@@ -230,9 +230,9 @@ void VmmKVPageAllocatorImpl::start_prealloc_thread(
   cond_.notify_all();
 }
 
-std::unique_ptr<VirtualKVCachePageState>
-VmmKVPageAllocatorImpl::alloc_kv_cache_page(const std::string& model_id,
-                                            int32_t dp_rank) {
+std::unique_ptr<VirtualKVPageState> VmmKVPageAllocatorImpl::alloc_kv_cache_page(
+    const std::string& model_id,
+    int32_t dp_rank) {
   std::unique_lock<std::mutex> lock(mtx_);
   CHECK(initialized_) << "VmmKVPageAllocatorImpl not initialized";
   validate_dp_rank(dp_rank);
@@ -251,7 +251,7 @@ VmmKVPageAllocatorImpl::alloc_kv_cache_page(const std::string& model_id,
       prealloc_needed_ = true;
       cond_.notify_all();
     }
-    return std::make_unique<VirtualKVCachePageState>(page_id, page_size_);
+    return std::make_unique<VirtualKVPageState>(page_id, page_size_);
   }
   const size_t unmapped_virt_pages =
       pages.num_unmapped_virt_pages(state.num_total_virt_pages);
@@ -303,7 +303,7 @@ VmmKVPageAllocatorImpl::alloc_kv_cache_page(const std::string& model_id,
   cond_.notify_all();
   lock.unlock();
   trigger_preallocation();
-  return std::make_unique<VirtualKVCachePageState>(page_id, page_size_);
+  return std::make_unique<VirtualKVPageState>(page_id, page_size_);
 }
 
 void VmmKVPageAllocatorImpl::free_kv_cache_pages(

@@ -22,7 +22,10 @@ limitations under the License.
 #include <vector>
 
 #include "core/kv_cache/block/block.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/host_page_aligned_region.h" #include "core/kv_cache/storage/kv_cache_create_options.h"
+#include "core/kv_cache/storage/kv_cache_tensors.h"
+#include "core/util/tensor_helper.h"
+
 namespace xllm {
 
 class KVCacheShape;

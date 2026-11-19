@@ -31,7 +31,7 @@ limitations under the License.
 namespace xllm {
 
 struct ModelArgs;
-class SharedKVCacheMappingTracker;
+class SharedKVMappingTracker;
 constexpr uint64_t UNINITIALIZED_BATCH_ID = 0x0;
 
 // maintains scheduling invariants and forward resources across model domains.
@@ -71,12 +71,11 @@ class BatchState final {
   // their targets. Build methods may then advance KV state.
   BatchInputData prepare_batch_input();
   template <typename Input = LlmForwardInput>
-  Input build_forward_input(
-      const BatchInputData& data,
-      const ModelArgs& args,
-      ThreadPool* thread_pool,
-      int32_t cp_size,
-      SharedKVCacheMappingTracker* mapping_tracker = nullptr);
+  Input build_forward_input(const BatchInputData& data,
+                            const ModelArgs& args,
+                            ThreadPool* thread_pool,
+                            int32_t cp_size,
+                            SharedKVMappingTracker* mapping_tracker = nullptr);
 
  private:
   void retain_host_restore_blocks(Sequence& sequence);

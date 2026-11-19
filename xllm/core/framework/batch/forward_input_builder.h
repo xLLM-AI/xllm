@@ -37,7 +37,7 @@ limitations under the License.
 namespace xllm {
 
 struct ModelArgs;
-class SharedKVCacheMappingTracker;
+class SharedKVMappingTracker;
 
 class ForwardInputBuilder final {
  public:
@@ -45,7 +45,7 @@ class ForwardInputBuilder final {
                       const ModelArgs* args,
                       int32_t cp_size = 1,
                       ThreadPool* thread_pool = nullptr,
-                      SharedKVCacheMappingTracker* mapping_tracker = nullptr);
+                      SharedKVMappingTracker* mapping_tracker = nullptr);
 
   template <typename Input = LlmForwardInput>
   Input build_forward_input();
@@ -167,7 +167,7 @@ class ForwardInputBuilder final {
   ThreadPool* thread_pool_ = nullptr;
   uint64_t batch_id_;
   // Owned by the ordered engine input factory, outlives this builder.
-  SharedKVCacheMappingTracker* shared_kv_mapping_tracker_ = nullptr;
+  SharedKVMappingTracker* shared_kv_mapping_tracker_ = nullptr;
 };
 
 }  // namespace xllm

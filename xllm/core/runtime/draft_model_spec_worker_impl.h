@@ -70,12 +70,12 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   using SpeculativeWorkerImpl<TargetInput>::context_;
   using SpeculativeWorkerImpl<TargetInput>::device_;
   using SpeculativeWorkerImpl<TargetInput>::dtype_;
-  using SpeculativeWorkerImpl<TargetInput>::hierarchy_kv_cache_transfer_;
+  using SpeculativeWorkerImpl<TargetInput>::hierarchy_kv_transfer_;
   using SpeculativeWorkerImpl<TargetInput>::impl_;
-  using SpeculativeWorkerImpl<TargetInput>::kv_cache_transfer_;
+  using SpeculativeWorkerImpl<TargetInput>::kv_transfer_;
   using SpeculativeWorkerImpl<TargetInput>::options_;
   using SpeculativeWorkerImpl<TargetInput>::parallel_args_;
-  using SpeculativeWorkerImpl<TargetInput>::set_hierarchy_kv_cache_transfer;
+  using SpeculativeWorkerImpl<TargetInput>::set_hierarchy_kv_transfer;
 
   DraftModelSpecWorkerImpl(
       const ParallelArgs& parallel_args,
@@ -104,8 +104,8 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
-  void prepare_hierarchy_kv_cache_transfers();
-  void finalize_hierarchy_kv_cache_transfers();
+  void prepare_hierarchy_kv_transfers();
+  void finalize_hierarchy_kv_transfers();
   bool allocate_pools(
       const KVCacheShape& kv_cache_shape,
       absl::FunctionRef<bool(WorkerImpl&, const KVCacheShape&)> allocate);

@@ -13,6 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "core/kv_cache/storage/host_page_aligned_region.h"
+
 #include <cn_api.h>
 #include <gtest/gtest.h>
 #include <unistd.h>
@@ -25,9 +27,9 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/platform/device.h"
 #include "core/platform/platform.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 namespace {

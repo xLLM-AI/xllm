@@ -22,7 +22,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/batch/batch_group.h"
-#include "core/framework/batch/shared_kv_cache_mapping_tracker.h"
+#include "core/framework/batch/shared_kv_mapping_tracker.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/framework/model/model_args.h"
@@ -41,7 +41,7 @@ ForwardInputFactory::ForwardInputFactory(ForwardInputFactoryOptions options)
     dp_shared_kv_mapping_trackers_.reserve(options_.dp_size);
     for (uint32_t rank = 0; rank < options_.dp_size; ++rank) {
       dp_shared_kv_mapping_trackers_.emplace_back(
-          std::make_unique<SharedKVCacheMappingTracker>());
+          std::make_unique<SharedKVMappingTracker>());
     }
   }
   dp_batch_embedding_ids_.resize(options_.dp_size);
@@ -94,7 +94,7 @@ void ForwardInputFactory::acknowledge_shared_kv_cache() {
   }
 }
 
-void ForwardInputFactory::reset_shared_kv_cache_mapping_tracker() {
+void ForwardInputFactory::reset_shared_kv_mapping_tracker() {
   for (const auto& mapping_tracker : dp_shared_kv_mapping_trackers_) {
     mapping_tracker->reset();
   }
@@ -108,7 +108,7 @@ void ForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
                                               const ModelArgs& model_args,
                                               PreparationState& state) {
   for (uint32_t dp_rank = 0; dp_rank < options_.dp_size; ++dp_rank) {
-    SharedKVCacheMappingTracker* mapping_tracker =
+    SharedKVMappingTracker* mapping_tracker =
         options_.enable_shared_kv_cache_deltas
             ? dp_shared_kv_mapping_trackers_[dp_rank].get()
             : nullptr;

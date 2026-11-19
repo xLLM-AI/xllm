@@ -77,9 +77,9 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/kv_cache/storage/linear_state_restore.h"
 #include "core/kv_cache/storage/linear_state_slot_table.h"
-#include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
+#include "core/kv_cache/storage/static_kv_tensor_allocator.h"
 #include "core/kv_cache/storage/vmm_kv_tensor_allocator.h"
-#include "core/kv_cache/transfer/virtual_kv_cache_transfer_memory_provider_impl.h"
+#include "core/kv_cache/transfer/virtual_kv_transfer_memory_factory.h"
 #include "core/runtime/worker_memory_resources.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/model/model_params_view.h"
@@ -339,19 +339,19 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
   }
 
   worker_rendezvous_ =
-      std::make_unique<WorkerRendezvous>(kv_cache_transfer_, weight_transfer_);
+      std::make_unique<WorkerRendezvous>(kv_transfer_, weight_transfer_);
 #else
-  worker_rendezvous_ = std::make_unique<WorkerRendezvous>(kv_cache_transfer_);
+  worker_rendezvous_ = std::make_unique<WorkerRendezvous>(kv_transfer_);
 #endif
 }
 
 WorkerImpl::~WorkerImpl() {
   drain_pending_execution();
-  if (hierarchy_kv_cache_transfer_ != nullptr) {
-    hierarchy_kv_cache_transfer_->shutdown();
+  if (hierarchy_kv_transfer_ != nullptr) {
+    hierarchy_kv_transfer_->shutdown();
   }
-  if (kv_cache_transfer_ != nullptr) {
-    kv_cache_transfer_->drain();
+  if (kv_transfer_ != nullptr) {
+    kv_transfer_->drain();
   }
 }
 
@@ -388,7 +388,7 @@ KVCacheCreateOptions WorkerImpl::shared_kv_cache_layout() const {
   KVCacheCreateOptions layout;
   layout.tensor_allocator(static_kv_cache_allocator_)
       .full_block_slot_table(static_full_block_slots_)
-      .static_layout(std::shared_ptr<const StaticKVCacheLayout>(
+      .static_layout(std::shared_ptr<const StaticKVLayout>(
           static_kv_cache_allocator_, &static_kv_cache_allocator_->layout()));
   return layout;
 }
@@ -400,12 +400,12 @@ void WorkerImpl::configure_shared_kv_allocation(
   if (KVCacheConfig::get_instance().enable_shared_kv_cache()) {
     CHECK(!use_huge_page_allocator &&
           create_options.tensor_allocator() == nullptr &&
-          kv_cache_transfer_ == nullptr)
+          kv_transfer_ == nullptr)
         << "Shared KV cache owns its static allocator and does not support "
            "huge pages or cache transfer.";
     auto allocator =
         create_static_kv_tensor_allocator(kv_cache_shape, create_options);
-    const StaticKVCacheLayout& layout = allocator->layout();
+    const StaticKVLayout& layout = allocator->layout();
     static_full_block_slots_ = std::make_shared<LinearStateSlotTable>(
         layout.num_slots(), layout.full_layer_count(), device_.unwrap());
     create_options
@@ -413,7 +413,7 @@ void WorkerImpl::configure_shared_kv_allocation(
             layout.num_slots(), layout.num_linear_groups(), device_.unwrap()))
         .full_block_slot_table(static_full_block_slots_)
         .static_layout(
-            std::shared_ptr<const StaticKVCacheLayout>(allocator, &layout));
+            std::shared_ptr<const StaticKVLayout>(allocator, &layout));
     static_kv_cache_allocator_ = allocator;
     create_options.tensor_allocator(std::move(allocator));
   }
@@ -422,7 +422,7 @@ void WorkerImpl::configure_shared_kv_allocation(
 void WorkerImpl::allocate_kv_cache_storage(
     const KVCacheShape& kv_cache_shape,
     bool use_huge_page_allocator,
-    std::shared_ptr<KVCacheTensorAllocator> tensor_allocator,
+    std::shared_ptr<KVTensorAllocator> tensor_allocator,
     const KVCacheCreateOptions* layout) {
   CHECK(model() != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
@@ -561,7 +561,7 @@ void WorkerImpl::allocate_kv_cache_storage(
   }
 
   allocate_kv_caches(kv_caches_, kv_cache_shape, create_options);
-  init_hierarchy_kv_cache_transfer(kv_cache_shape, create_options);
+  init_hierarchy_kv_transfer(kv_cache_shape, create_options);
 }
 
 bool WorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
@@ -573,18 +573,16 @@ bool WorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
 
 void WorkerImpl::allocate_kv_cache(const KVCacheShape& shape,
                                    const KVCacheCreateOptions& layout,
-                                   std::shared_ptr<KVCacheTransfer> transfer) {
-  kv_cache_transfer_ = std::move(transfer);
-  allocate_kv_cache_storage(
-      shape, kv_cache_transfer_ != nullptr, nullptr, &layout);
+                                   std::shared_ptr<KVTransfer> transfer) {
+  kv_transfer_ = std::move(transfer);
+  allocate_kv_cache_storage(shape, kv_transfer_ != nullptr, nullptr, &layout);
   status_ = Status::READY;
 }
 
-void WorkerImpl::register_kv_cache_transfer(
-    const KVCacheShape& kv_cache_shape) {
-  kv_cache_transfer_->configure_cache_layout(
+void WorkerImpl::register_kv_transfer(const KVCacheShape& kv_cache_shape) {
+  kv_transfer_->configure_cache_layout(
       parallel_args_, context_.get_model_args(), options_.block_size(), false);
-  kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
+  kv_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
 }
 
 bool WorkerImpl::allocate_kv_cache_with_transfer(
@@ -593,34 +591,33 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
   const ModelArgs& model_args = context_.get_model_args();
-  std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider;
+  std::unique_ptr<VirtualKVTransferMemoryProvider> memory_provider;
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_vmm_kvcache()) {
-    memory_provider = create_virtual_kv_cache_transfer_memory_provider(
+    memory_provider = create_virtual_kv_transfer_memory_provider(
         WorkerMemoryResources::get_instance().kv_cache_memory(),
         GlobalVirtualMemoryRegion::get_instance());
   }
 #endif
-  kv_cache_transfer_ =
-      KVCacheTransferFactory::create(options_.transfer_listen_port(),
-                                     device_,
-                                     model_args.model_type(),
-                                     options_.model_id(),
-                                     std::move(memory_provider));
-  if (kv_cache_transfer_ == nullptr) {
+  kv_transfer_ = KVTransferFactory::create(options_.transfer_listen_port(),
+                                           device_,
+                                           model_args.model_type(),
+                                           options_.model_id(),
+                                           std::move(memory_provider));
+  if (kv_transfer_ == nullptr) {
     LOG(ERROR) << "Failed to create KV cache transfer backend.";
     return false;
   }
-  kv_cache_transfer_->initialize(device_.index());
+  kv_transfer_->initialize(device_.index());
 
   bool use_huge_page_allocator = true;
-  std::shared_ptr<KVCacheTensorAllocator> tensor_allocator;
+  std::shared_ptr<KVTensorAllocator> tensor_allocator;
 #if defined(USE_MLU)
   use_huge_page_allocator = false;
 #endif
   allocate_kv_cache_storage(
       kv_cache_shape, use_huge_page_allocator, std::move(tensor_allocator));
-  register_kv_cache_transfer(kv_cache_shape);
+  register_kv_transfer(kv_cache_shape);
 
   status_ = Status::READY;
   return true;
@@ -628,18 +625,18 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
 bool WorkerImpl::allocate_kv_cache_with_transfer(
-    std::shared_ptr<KVCacheTransfer> kv_cache_transfer,
+    std::shared_ptr<KVTransfer> kv_transfer,
     const KVCacheShape& kv_cache_shape) {
   CHECK(model() != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
-  kv_cache_transfer_ = kv_cache_transfer;
+  kv_transfer_ = kv_transfer;
 
   allocate_kv_cache_storage(kv_cache_shape,
                             /*use_huge_page_allocator=*/true,
                             /*tensor_allocator=*/nullptr);
 
-  register_kv_cache_transfer(kv_cache_shape);
+  register_kv_transfer(kv_cache_shape);
 
   status_ = Status::READY;
   return true;
@@ -652,8 +649,8 @@ void WorkerImpl::get_cache_info(uint64_t& cluster_id,
   cluster_id = 0;
   addr.clear();
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  if (kv_cache_transfer_) {
-    kv_cache_transfer_->get_cache_info(cluster_id, addr);
+  if (kv_transfer_) {
+    kv_transfer_->get_cache_info(cluster_id, addr);
   }
 #endif
   port = options_.transfer_listen_port();
@@ -1709,8 +1706,7 @@ folly::SemiFuture<bool> WorkerImpl::pull_kv_blocks_async(
     const std::string& src_addr,
     const std::vector<KVTransferMapping>& mappings) {
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  return kv_cache_transfer_->pull_kv_blocks_async(
-      src_cluster_id, src_addr, mappings);
+  return kv_transfer_->pull_kv_blocks_async(src_cluster_id, src_addr, mappings);
 #else
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
@@ -1725,7 +1721,7 @@ folly::SemiFuture<bool> WorkerImpl::pull_kv_blocks_async(
 uint32_t WorkerImpl::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
-  if (hierarchy_kv_cache_transfer_ != nullptr) {
+  if (hierarchy_kv_transfer_ != nullptr) {
     if (!block_transfer_info.empty() &&
         block_transfer_info.front().transfer_type == TransferType::D2H2G) {
       // Schedule-overlap can deliver the D2H RPC before the preceding forward
@@ -1738,38 +1734,37 @@ uint32_t WorkerImpl::transfer_kv_blocks(
       threadpool_.schedule(
           [this, batch_id, block_transfer_info, result]() mutable {
             try {
-              result->set_value(
-                  hierarchy_kv_cache_transfer_->transfer_kv_blocks(
-                      batch_id, block_transfer_info));
+              result->set_value(hierarchy_kv_transfer_->transfer_kv_blocks(
+                  batch_id, block_transfer_info));
             } catch (...) {
               result->set_exception(std::current_exception());
             }
           });
       return future.get();
     }
-    return hierarchy_kv_cache_transfer_->transfer_kv_blocks(
-        batch_id, block_transfer_info);
+    return hierarchy_kv_transfer_->transfer_kv_blocks(batch_id,
+                                                      block_transfer_info);
   }
   return 0;
 }
 
 bool WorkerImpl::wait_for_kv_blocks_transfer(uint64_t batch_id) {
-  return hierarchy_kv_cache_transfer_ != nullptr &&
-         hierarchy_kv_cache_transfer_->wait_for_load(batch_id);
+  return hierarchy_kv_transfer_ != nullptr &&
+         hierarchy_kv_transfer_->wait_for_load(batch_id);
 }
 
 uint32_t WorkerImpl::transfer_kv_blocks(
     const uint64_t batch_id,
     Slice<BlockTransferInfo>& block_transfer_info) {
-  if (hierarchy_kv_cache_transfer_ != nullptr) {
-    return hierarchy_kv_cache_transfer_->transfer_kv_blocks(
-        batch_id, block_transfer_info);
+  if (hierarchy_kv_transfer_ != nullptr) {
+    return hierarchy_kv_transfer_->transfer_kv_blocks(batch_id,
+                                                      block_transfer_info);
   }
   return 0;
 }
 
-std::shared_ptr<HierarchyKVCacheTransfer>
-WorkerImpl::create_hierarchy_kv_cache_transfer() {
+std::shared_ptr<HierarchyKVTransfer>
+WorkerImpl::create_hierarchy_kv_transfer() {
   CHECK_GT(options_.host_blocks_factor(), 1.0)
       << "Hierarchy KV cache transfer requires Host cache blocks.";
   CHECK_GT(options_.dp_size(), 0u);
@@ -1796,7 +1791,7 @@ WorkerImpl::create_hierarchy_kv_cache_transfer() {
   const uint32_t kv_replica_rank =
       options_.cp_size() == 1 ? dp_local_rank / kv_split_size
                               : dp_local_rank % (dp_local_size / kv_split_size);
-  HierarchyKVCacheTransfer::Options transfer_options;
+  HierarchyKVTransfer::Options transfer_options;
   transfer_options.tp_rank(worker_id % tp_size)
       .tp_size(tp_size)
       .kv_split_size(kv_split_size)
@@ -1815,59 +1810,57 @@ WorkerImpl::create_hierarchy_kv_cache_transfer() {
       .store_local_hostname(options_.store_local_hostname())
       .store_namespace(options_.model_id())
       .store_worker_id(worker_id);
-  return std::make_shared<HierarchyKVCacheTransfer>(transfer_options, device_);
+  return std::make_shared<HierarchyKVTransfer>(transfer_options, device_);
 }
 
-void WorkerImpl::bind_hierarchy_kv_cache_transfer(
-    std::shared_ptr<HierarchyKVCacheTransfer> transfer,
-    HierarchyKVCacheTransfer::CacheRole role,
+void WorkerImpl::bind_hierarchy_kv_transfer(
+    std::shared_ptr<HierarchyKVTransfer> transfer,
+    HierarchyKVTransfer::CacheRole role,
     const Stream* producer_stream,
     std::string store_key_component) {
   CHECK(producer_stream != nullptr) << "Producer stream must not be null.";
-  set_hierarchy_kv_cache_transfer(std::move(transfer));
+  set_hierarchy_kv_transfer(std::move(transfer));
   hierarchy_kv_cache_role_ = role;
   hierarchy_kv_cache_producer_stream_ = producer_stream;
   hierarchy_kv_cache_store_key_component_ = std::move(store_key_component);
 }
 
 void WorkerImpl::register_hierarchy_kv_cache(
-    HierarchyKVCacheTransfer& transfer,
-    HierarchyKVCacheTransfer::CacheRole role,
+    HierarchyKVTransfer& transfer,
+    HierarchyKVTransfer::CacheRole role,
     const Stream* producer_stream) {
-  CHECK(hierarchy_kv_cache_transfer_context_.has_value())
+  CHECK(hierarchy_kv_transfer_context_.has_value())
       << "Hierarchy KV cache transfer context is not initialized.";
   CHECK(producer_stream != nullptr) << "Producer stream must not be null.";
   CHECK(!kv_caches_.empty()) << "kv_caches is not initialized.";
 
-  HierarchyKVCacheTransfer::CacheRegistration registration;
+  HierarchyKVTransfer::CacheRegistration registration;
   registration.role = role;
   registration.enable_mla = context_.get_model_args().enable_mla();
   registration.device_kv_caches = &kv_caches_;
-  registration.kv_cache_shape =
-      hierarchy_kv_cache_transfer_context_->kv_cache_shape;
-  registration.create_options =
-      hierarchy_kv_cache_transfer_context_->create_options;
+  registration.kv_cache_shape = hierarchy_kv_transfer_context_->kv_cache_shape;
+  registration.create_options = hierarchy_kv_transfer_context_->create_options;
   registration.producer_stream = producer_stream;
   registration.store_key_component = hierarchy_kv_cache_store_key_component_;
 
   transfer.register_cache(std::move(registration));
 }
 
-void WorkerImpl::set_hierarchy_kv_cache_transfer(
-    std::shared_ptr<HierarchyKVCacheTransfer> transfer) {
+void WorkerImpl::set_hierarchy_kv_transfer(
+    std::shared_ptr<HierarchyKVTransfer> transfer) {
   CHECK(transfer != nullptr) << "Hierarchy KV cache transfer must not be null.";
-  CHECK(hierarchy_kv_cache_transfer_ == nullptr)
+  CHECK(hierarchy_kv_transfer_ == nullptr)
       << "Hierarchy KV cache transfer is already initialized.";
-  hierarchy_kv_cache_transfer_ = std::move(transfer);
+  hierarchy_kv_transfer_ = std::move(transfer);
 }
 
-std::shared_ptr<HierarchyKVCacheTransfer>
-WorkerImpl::get_hierarchy_kv_cache_transfer() const {
-  return hierarchy_kv_cache_transfer_;
+std::shared_ptr<HierarchyKVTransfer> WorkerImpl::get_hierarchy_kv_transfer()
+    const {
+  return hierarchy_kv_transfer_;
 }
 
-void WorkerImpl::clear_hierarchy_kv_cache_transfer() {
-  hierarchy_kv_cache_transfer_.reset();
+void WorkerImpl::clear_hierarchy_kv_transfer() {
+  hierarchy_kv_transfer_.reset();
   hierarchy_kv_cache_role_.reset();
   hierarchy_kv_cache_producer_stream_ = nullptr;
   hierarchy_kv_cache_store_key_component_.clear();
@@ -1876,27 +1869,27 @@ void WorkerImpl::clear_hierarchy_kv_cache_transfer() {
 void WorkerImpl::set_hierarchy_layer_synchronizer(
     LlmModelParams& input_params) {
   CHECK(!input_params.meta.requires_host_restore ||
-        hierarchy_kv_cache_transfer_ != nullptr)
+        hierarchy_kv_transfer_ != nullptr)
       << "Missing Host restore manager at batch_id="
       << input_params.meta.batch_id;
-  if (hierarchy_kv_cache_transfer_ != nullptr) {
+  if (hierarchy_kv_transfer_ != nullptr) {
     ModelParamsView execution_params(input_params);
-    hierarchy_kv_cache_transfer_->set_layer_synchronizer(execution_params);
+    hierarchy_kv_transfer_->set_layer_synchronizer(execution_params);
   }
 }
 
 std::vector<uint8_t> WorkerImpl::prefetch_kv_blocks(
     Slice<BlockTransferInfo>& block_transfer_info) {
-  if (hierarchy_kv_cache_transfer_ == nullptr) {
+  if (hierarchy_kv_transfer_ == nullptr) {
     return std::vector<uint8_t>(block_transfer_info.size(), /*value=*/0);
   }
-  return hierarchy_kv_cache_transfer_->prefetch_kv_blocks(block_transfer_info);
+  return hierarchy_kv_transfer_->prefetch_kv_blocks(block_transfer_info);
 }
 
 // hierarchy temporarily disabled during the block-manager refactor
-// void WorkerImpl::init_hierarchy_kv_cache_transfer() {
+// void WorkerImpl::init_hierarchy_kv_transfer() {
 //   if (options_.host_blocks_factor() > 1 || options_.enable_kvcache_store()) {
-//     HierarchyKVCacheTransfer::Options transfer_options;
+//     HierarchyKVTransfer::Options transfer_options;
 //     transfer_options
 //         .tp_rank(options_.dp_size() > 1
 //                      ? options_.node_rank() % options_.dp_size()
@@ -1909,18 +1902,18 @@ std::vector<uint8_t> WorkerImpl::prefetch_kv_blocks(
 //         .store_master_server_address(options_.store_master_server_address())
 //         .store_metadata_server(options_.store_metadata_server())
 //         .store_local_hostname(options_.store_local_hostname());
-//     hierarchy_kv_cache_transfer_ =
-//     std::make_unique<HierarchyKVCacheTransfer>(
+//     hierarchy_kv_transfer_ =
+//     std::make_unique<HierarchyKVTransfer>(
 //         transfer_options, device_, &kv_caches_);
 //   }
 // }
-void WorkerImpl::init_hierarchy_kv_cache_transfer(
+void WorkerImpl::init_hierarchy_kv_transfer(
     const KVCacheShape& kv_cache_shape,
     const KVCacheCreateOptions& kv_cache_create_options) {
-  CHECK(!hierarchy_kv_cache_transfer_context_.has_value())
+  CHECK(!hierarchy_kv_transfer_context_.has_value())
       << "Hierarchy KV cache transfer context is already initialized.";
-  hierarchy_kv_cache_transfer_context_.emplace(
-      HierarchyKVCacheTransferContext{kv_cache_shape, kv_cache_create_options});
+  hierarchy_kv_transfer_context_.emplace(
+      HierarchyKVTransferContext{kv_cache_shape, kv_cache_create_options});
   if (options_.enable_kvcache_store()) {
     CHECK_GT(options_.host_blocks_factor(), 1.0)
         << "KV cache Store requires Host cache blocks.";
@@ -1929,14 +1922,14 @@ void WorkerImpl::init_hierarchy_kv_cache_transfer(
     return;
   }
 
-  if (hierarchy_kv_cache_transfer_ == nullptr) {
-    std::shared_ptr<HierarchyKVCacheTransfer> transfer =
-        create_hierarchy_kv_cache_transfer();
+  if (hierarchy_kv_transfer_ == nullptr) {
+    std::shared_ptr<HierarchyKVTransfer> transfer =
+        create_hierarchy_kv_transfer();
     register_hierarchy_kv_cache(*transfer,
-                                HierarchyKVCacheTransfer::CacheRole::TARGET,
+                                HierarchyKVTransfer::CacheRole::TARGET,
                                 compute_stream_.get());
     CHECK(transfer->finalize_registration());
-    set_hierarchy_kv_cache_transfer(std::move(transfer));
+    set_hierarchy_kv_transfer(std::move(transfer));
     return;
   }
 
@@ -1944,7 +1937,7 @@ void WorkerImpl::init_hierarchy_kv_cache_transfer(
       << "Pre-bound hierarchy KV cache transfer is missing a cache role.";
   CHECK(hierarchy_kv_cache_producer_stream_ != nullptr)
       << "Pre-bound hierarchy KV cache transfer is missing a producer stream.";
-  register_hierarchy_kv_cache(*hierarchy_kv_cache_transfer_,
+  register_hierarchy_kv_cache(*hierarchy_kv_transfer_,
                               hierarchy_kv_cache_role_.value(),
                               hierarchy_kv_cache_producer_stream_);
 }
@@ -2074,12 +2067,12 @@ std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
 void WorkerImpl::set_hierarchy_layer_synchronizer(
     VlmModelParams& input_params) {
   CHECK(!input_params.meta.requires_host_restore ||
-        hierarchy_kv_cache_transfer_ != nullptr)
+        hierarchy_kv_transfer_ != nullptr)
       << "Missing Host restore manager at batch_id="
       << input_params.meta.batch_id;
-  if (hierarchy_kv_cache_transfer_ != nullptr) {
+  if (hierarchy_kv_transfer_ != nullptr) {
     ModelParamsView execution_params(input_params);
-    hierarchy_kv_cache_transfer_->set_layer_synchronizer(execution_params);
+    hierarchy_kv_transfer_->set_layer_synchronizer(execution_params);
   }
 }
 

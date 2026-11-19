@@ -18,7 +18,7 @@ xLLM 将 Device Prefix Cache 扩展为三级缓存：
 
 请求首先探测 Host Prefix Cache。缺失的完整 Block 可以从 Mooncake Store 读取到预分配的 Host Block，再按层恢复到 HBM，从而跳过已命中前缀的重复计算。已完成的 HBM Block 会异步写回 Host，随后写入 Mooncake Store。
 
-当前实现由 `HierarchyBlockManagerPool` 管理 Block 的分配、挂载和生命周期，由 `HierarchyKVCacheTransfer` 统一执行 Host↔Device 传输，并由每个 Worker 内的一个 `KVCacheStore` 访问 Mooncake Store。一个 Store 客户端可以同时管理主模型、投机解码 Draft 模型以及同一模型中的多种 `BlockType`。
+当前实现由 `HierarchyBlockManagerPool` 管理 Block 的分配、挂载和生命周期，由 `HierarchyKVTransfer` 统一执行 Host↔Device 传输，并由每个 Worker 内的一个 `KVCacheStore` 访问 Mooncake Store。一个 Store 客户端可以同时管理主模型、投机解码 Draft 模型以及同一模型中的多种 `BlockType`。
 
 NPU Python LLM 支持在 eager 和 ACL graph 下使用 Host Cache 与 Mooncake Store。GLM（`glm5_2.py`）的 eager prefill 在 attention 读取每组 Host KV 前等待对应的换入完成，允许加载与计算重叠；其余 Python 模型和 graph replay 仍保留整批 target/draft reload 依赖。
 
@@ -29,9 +29,9 @@ NPU Python LLM 支持在 eager 和 ACL graph 下使用 Host Cache 与 Mooncake S
 - **etcd**：注册计算实例并同步服务元数据。
 - **xLLM Service**：路由请求并管理 Fused 或 PD 分离实例。
 - **HierarchyBlockManagerPool**：探测 Device/Host Prefix Cache，生成 G2H、H2D 和 D2H2G 计划，并在异步任务完成后发布或释放 Block。
-- **HierarchyKVCacheTransfer**：统一注册主模型与 Draft 模型缓存域，创建 Host Cache，并执行 Host↔Device 拷贝。
+- **HierarchyKVTransfer**：统一注册主模型与 Draft 模型缓存域，创建 Host Cache，并执行 Host↔Device 拷贝。
 - **KVCacheStore**：将逻辑 Block 映射为一个或多个 Mooncake 对象，执行批量存在性检查、读取和写入。
-- **xLLM Worker**：持有 Device/Host KV Cache、`HierarchyKVCacheTransfer` 和 `KVCacheStore`，并执行推理。
+- **xLLM Worker**：持有 Device/Host KV Cache、`HierarchyKVTransfer` 和 `KVCacheStore`，并执行推理。
 - **Mooncake Store**：提供分布式、可跨进程复用的 KV 对象存储层。
 
 服务级整体架构如下：
@@ -40,7 +40,7 @@ NPU Python LLM 支持在 eager 和 ACL graph 下使用 Host Cache 与 Mooncake S
 
 ## 统一缓存域与 Store 键
 
-`HierarchyKVCacheTransfer` 支持注册多个缓存域。普通推理只注册主模型缓存域；投机解码会把主模型和 Draft 模型注册到同一个 Transfer 实例，并共享同一个 Host 传输布局与 `KVCacheStore`：
+`HierarchyKVTransfer` 支持注册多个缓存域。普通推理只注册主模型缓存域；投机解码会把主模型和 Draft 模型注册到同一个 Transfer 实例，并共享同一个 Host 传输布局与 `KVCacheStore`：
 
 | 缓存域 | `CacheRole` | Store `key_component` |
 |---|---|---|
@@ -232,7 +232,7 @@ sequenceDiagram
 
 ## 投机解码缓存
 
-启用投机解码并配置 Host Cache 时，`SpeculativeWorkerImpl` 会让 Target Worker 和 Draft Worker 复用同一个 `HierarchyKVCacheTransfer`。两个缓存域必须共享同一条 producer stream，注册完成后再统一创建 Host Cache、Host 传输器和 `KVCacheStore`。
+启用投机解码并配置 Host Cache 时，`SpeculativeWorkerImpl` 会让 Target Worker 和 Draft Worker 复用同一个 `HierarchyKVTransfer`。两个缓存域必须共享同一条 producer stream，注册完成后再统一创建 Host Cache、Host 传输器和 `KVCacheStore`。
 
 统一缓存域带来以下行为：
 
@@ -344,7 +344,7 @@ sequenceDiagram
     end
 ```
 
-调度路径通过 `kv_cache_transfer_mode` 支持 `PUSH` 和 `PULL`。当前代码不再提供 `kv_cache_transfer_type` 参数。标准 PD 部署需要在 Prefill 和 Decode 都开启全局 Mooncake Store，并为两个角色设置不重叠的 `store_local_hostname` 基础端口区间。
+调度路径通过 `kv_cache_transfer_mode` 支持 `PUSH` 和 `PULL`。当前代码不再提供 `kv_transfer_type` 参数。标准 PD 部署需要在 Prefill 和 Decode 都开启全局 Mooncake Store，并为两个角色设置不重叠的 `store_local_hostname` 基础端口区间。
 
 ## 部署
 

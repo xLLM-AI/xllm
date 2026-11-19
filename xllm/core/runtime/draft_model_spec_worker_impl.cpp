@@ -42,9 +42,9 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
-#include "core/kv_cache/transfer/hierarchy_kv_cache_transfer.h"
-#include "core/kv_cache/transfer/mooncake_kv_cache_transfer.h"
+#include "core/kv_cache/storage/static_kv_tensor_allocator.h"
+#include "core/kv_cache/transfer/hierarchy_kv_transfer.h"
+#include "core/kv_cache/transfer/mooncake_kv_transfer.h"
 #include "core/platform/platform.h"
 #include "core/util/tensor_helper.h"
 #include "framework/model_loader/model_loader.h"
@@ -164,7 +164,7 @@ DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_layout(
   if (shape.shared_draft_layers() > 0) {
     const auto shared = impl_->shared_kv_cache_layout();
     CHECK_EQ(shared.static_layout()->draft_layer_count(), layout.num_layers());
-    CHECK(kv_cache_transfer_ == nullptr && !shape.has_grouped_cache_layout() &&
+    CHECK(kv_transfer_ == nullptr && !shape.has_grouped_cache_layout() &&
           !layout.enable_linear_attention() &&
           draft_impl_->context_.get_model_args().index_n_heads() == 0 &&
           draft_impl_->options().kv_cache_dtype() != "int8" &&
@@ -174,7 +174,7 @@ DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_layout(
         .shared_draft_cache(true)
         .full_block_slot_table(shared.full_block_slot_table())
         .tensor_allocator(create_static_draft_kv_tensor_allocator(
-            std::static_pointer_cast<StaticKVCacheTensorAllocator>(
+            std::static_pointer_cast<StaticKVTensorAllocator>(
                 shared.tensor_allocator())));
   }
   return layout;
@@ -365,8 +365,8 @@ template <typename TargetInput>
 DraftModelSpecWorkerImpl<TargetInput>::~DraftModelSpecWorkerImpl() {
   drain_pending_execution();
   // Stop asynchronous transfers before draft_impl_ releases its KV cache.
-  if (hierarchy_kv_cache_transfer_ != nullptr) {
-    hierarchy_kv_cache_transfer_->shutdown();
+  if (hierarchy_kv_transfer_ != nullptr) {
+    hierarchy_kv_transfer_->shutdown();
   }
 }
 
@@ -477,29 +477,25 @@ DraftModelSpecWorkerImpl<TargetInput>::estimate_kv_cache_capacity() {
 }
 
 template <typename TargetInput>
-void DraftModelSpecWorkerImpl<
-    TargetInput>::prepare_hierarchy_kv_cache_transfers() {
+void DraftModelSpecWorkerImpl<TargetInput>::prepare_hierarchy_kv_transfers() {
   if (options_.host_blocks_factor() <= 1.0) {
     return;
   }
 
-  const auto target_transfer = impl_->get_hierarchy_kv_cache_transfer();
-  const auto draft_transfer = draft_impl_->get_hierarchy_kv_cache_transfer();
-  auto unified_transfer = hierarchy_kv_cache_transfer_
-                              ? hierarchy_kv_cache_transfer_
-                              : target_transfer;
+  const auto target_transfer = impl_->get_hierarchy_kv_transfer();
+  const auto draft_transfer = draft_impl_->get_hierarchy_kv_transfer();
+  auto unified_transfer =
+      hierarchy_kv_transfer_ ? hierarchy_kv_transfer_ : target_transfer;
   if (unified_transfer == nullptr) {
-    unified_transfer = draft_transfer
-                           ? draft_transfer
-                           : impl_->create_hierarchy_kv_cache_transfer();
+    unified_transfer =
+        draft_transfer ? draft_transfer : impl_->create_hierarchy_kv_transfer();
   }
 
   if (target_transfer == nullptr) {
-    impl_->bind_hierarchy_kv_cache_transfer(
-        unified_transfer,
-        HierarchyKVCacheTransfer::CacheRole::TARGET,
-        compute_stream_.get(),
-        /*store_key_component=*/"main");
+    impl_->bind_hierarchy_kv_transfer(unified_transfer,
+                                      HierarchyKVTransfer::CacheRole::TARGET,
+                                      compute_stream_.get(),
+                                      /*store_key_component=*/"main");
   } else {
     CHECK_EQ(target_transfer.get(), unified_transfer.get())
         << "Speculative target worker hierarchy KV cache transfer changed "
@@ -507,9 +503,9 @@ void DraftModelSpecWorkerImpl<
   }
 
   if (draft_transfer == nullptr) {
-    draft_impl_->bind_hierarchy_kv_cache_transfer(
+    draft_impl_->bind_hierarchy_kv_transfer(
         unified_transfer,
-        HierarchyKVCacheTransfer::CacheRole::DRAFT,
+        HierarchyKVTransfer::CacheRole::DRAFT,
         compute_stream_.get(),
         draft_store_key_component(options_));
   } else {
@@ -518,22 +514,21 @@ void DraftModelSpecWorkerImpl<
            "unexpectedly.";
   }
 
-  if (hierarchy_kv_cache_transfer_ == nullptr) {
-    set_hierarchy_kv_cache_transfer(std::move(unified_transfer));
+  if (hierarchy_kv_transfer_ == nullptr) {
+    set_hierarchy_kv_transfer(std::move(unified_transfer));
   }
 }
 
 template <typename TargetInput>
-void DraftModelSpecWorkerImpl<
-    TargetInput>::finalize_hierarchy_kv_cache_transfers() {
+void DraftModelSpecWorkerImpl<TargetInput>::finalize_hierarchy_kv_transfers() {
   if (options_.host_blocks_factor() <= 1.0) {
     return;
   }
 
-  CHECK(hierarchy_kv_cache_transfer_ != nullptr)
+  CHECK(hierarchy_kv_transfer_ != nullptr)
       << "Speculative hierarchy KV cache transfer is not prepared.";
-  if (!hierarchy_kv_cache_transfer_->registration_finalized()) {
-    CHECK(hierarchy_kv_cache_transfer_->finalize_registration());
+  if (!hierarchy_kv_transfer_->registration_finalized()) {
+    CHECK(hierarchy_kv_transfer_->finalize_registration());
   }
 }
 
@@ -556,14 +551,14 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     const auto shape = draft_kv_cache_shape(kv_cache_shape);
     draft_impl_->allocate_kv_cache(
-        shape, build_draft_kv_cache_layout(shape), kv_cache_transfer_);
-    if (kv_cache_transfer_) {
-      kv_cache_transfer_->configure_cache_layout(
+        shape, build_draft_kv_cache_layout(shape), kv_transfer_);
+    if (kv_transfer_) {
+      kv_transfer_->configure_cache_layout(
           draft_impl_->context_.get_parallel_args(),
           draft_impl_->context_.get_model_args(),
           draft_impl_->options().block_size(),
           true);
-      kv_cache_transfer_->register_kv_cache_spec(
+      kv_transfer_->register_kv_cache_spec(
           draft_impl_->kv_caches(), shape, draft_impl_->dtype());
     }
   } else {
@@ -587,7 +582,7 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
                                     {impl_->context_.get_model_id(),
                                      draft_impl_->context_.get_model_id()}));
     }
-    finalize_hierarchy_kv_cache_transfers();
+    finalize_hierarchy_kv_transfers();
   }
   return target_allocated;
 }
@@ -610,7 +605,7 @@ std::optional<ForwardOutput> DraftModelSpecWorkerImpl<TargetInput>::step(
 template <typename TargetInput>
 bool DraftModelSpecWorkerImpl<TargetInput>::allocate_kv_cache(
     const KVCacheShape& kv_cache_shape) {
-  prepare_hierarchy_kv_cache_transfers();
+  prepare_hierarchy_kv_transfers();
   return allocate_pools(kv_cache_shape,
                         [](WorkerImpl& worker, const KVCacheShape& shape) {
                           return worker.allocate_kv_cache(shape);
@@ -621,20 +616,19 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_kv_cache(
 template <typename TargetInput>
 bool DraftModelSpecWorkerImpl<TargetInput>::allocate_kv_cache_with_transfer(
     const KVCacheShape& kv_cache_shape) {
-  prepare_hierarchy_kv_cache_transfers();
-  if (kv_cache_transfer_ == nullptr) {
-    kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
+  prepare_hierarchy_kv_transfers();
+  if (kv_transfer_ == nullptr) {
+    kv_transfer_ = std::make_shared<MooncakeKVTransferDefault>(
         device_.index(),
         options_.transfer_listen_port(),
         device_,
         context_.get_model_args().model_type());
-    kv_cache_transfer_->initialize(device_.index());
+    kv_transfer_->initialize(device_.index());
   }
-  return allocate_pools(kv_cache_shape,
-                        [this](WorkerImpl& worker, const KVCacheShape& shape) {
-                          return worker.allocate_kv_cache_with_transfer(
-                              kv_cache_transfer_, shape);
-                        });
+  return allocate_pools(
+      kv_cache_shape, [this](WorkerImpl& worker, const KVCacheShape& shape) {
+        return worker.allocate_kv_cache_with_transfer(kv_transfer_, shape);
+      });
 }
 #endif
 

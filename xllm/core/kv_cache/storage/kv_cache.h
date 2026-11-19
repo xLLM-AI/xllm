@@ -21,8 +21,10 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/storage/kv_cache_create_options.h"
 #include "core/kv_cache/storage/kv_cache_impl.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_cache_tensors.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 
@@ -101,7 +103,7 @@ class KVCache final {
   [[nodiscard]] KVCache create_shared_view() const;
 
   std::shared_ptr<KVCacheImpl> impl_;
-  std::shared_ptr<const StaticKVCacheLayout> static_layout_;
+  std::shared_ptr<const StaticKVLayout> static_layout_;
   std::shared_ptr<LinearStateSlotTable> linear_state_slots_;
   std::shared_ptr<LinearStateSlotTable> full_block_slots_;
   size_t linear_group_ = 0;

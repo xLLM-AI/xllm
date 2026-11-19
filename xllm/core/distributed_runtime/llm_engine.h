@@ -30,7 +30,6 @@ limitations under the License.
 #include "common/macros.h"
 #include "common/types.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "engine.h"
 #include "framework/batch/batch_group.h"
 #include "framework/batch/forward_input_factory.h"
@@ -38,13 +37,14 @@ limitations under the License.
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "runtime/worker.h"
-#include "runtime/worker_client.h"
+#include "runtime/worker_client.h" #include "core/kv_cache/layout/kv_cache_capacity.h"
+
 namespace xllm {
 
 class EplbController;
-class KVCacheTransferCoordinatorBase;
+class KVTransferCoordinatorBase;
 class ModelLoader;
-class VmmKVCacheLayout;
+class VmmKVLayout;
 
 class LLMEngine : public Engine {
  public:
@@ -71,8 +71,8 @@ class LLMEngine : public Engine {
 
   bool init(MasterStatus master_status,
             const ModelInitCallback& prepare_model,
-            std::shared_ptr<KVCacheTransferCoordinatorBase>
-                transfer_coordinator = nullptr);
+            std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator =
+                nullptr);
 
   std::vector<RawForwardOutput> collect_step_outputs(const BatchGroup& batch);
 
@@ -100,8 +100,8 @@ class LLMEngine : public Engine {
       bool initialize_virtual_memory = true);
   bool allocate_kv_cache(
       const KVCacheCapacity& kv_cache_cap,
-      std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
-      const VmmKVCacheLayout* shared_vmm_layout = nullptr);
+      std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
+      const VmmKVLayout* shared_vmm_layout = nullptr);
   void process_group_test();
 
  protected:

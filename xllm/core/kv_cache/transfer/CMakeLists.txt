@@ -66,11 +66,11 @@ cc_library(
 
 cc_library(
   NAME
-    kv_cache_transfer
+    kv_transfer
   HDRS
-    kv_cache_transfer.h
-    kv_cache_transfer_coordinator_base.h
-    virtual_kv_cache_transfer_memory_provider.h
+    kv_transfer.h
+    kv_transfer_coordinator_base.h
+    virtual_kv_transfer_memory_provider.h
     kv_cache_store.h
     mooncake_store_backend.h
     host_transfer/layout.h
@@ -79,11 +79,11 @@ cc_library(
     host_transfer/compact_transfer.h
     prefetch_result.h
     kv_transport_codec.h
-    hierarchy_kv_cache_transfer.h
-    $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.h>
-    mooncake_kv_cache_transfer_engine.h
+    hierarchy_kv_transfer.h
+    $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_transfer.h>
+    mooncake_kv_transfer_engine.h
   SRCS
-    kv_cache_transfer.cpp
+    kv_transfer.cpp
     kv_transport_codec.cpp
     kv_cache_store.cpp
     mooncake_store_backend.cpp
@@ -94,9 +94,9 @@ cc_library(
     host_transfer/compact_transfer.cpp
     host_transfer/compact_load_executor.cpp
     host_transfer/compact_offload_executor.cpp
-    hierarchy_kv_cache_transfer.cpp
-    $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.cpp>
-    $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer_engine.cpp>
+    hierarchy_kv_transfer.cpp
+    $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_transfer.cpp>
+    $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_transfer_engine.cpp>
   DEPS
     :content_hash
     :cache_layout

@@ -98,7 +98,7 @@ cc_library(
     :request
     :speculative
     :common
-    :kv_cache_transfer
+    :kv_transfer
     absl::strings
     glog::glog
     proto::xllm_proto

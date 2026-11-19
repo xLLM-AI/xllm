@@ -241,8 +241,8 @@ SpeculativeWorkerImpl<TargetInput>::~SpeculativeWorkerImpl() {
   drain_pending_execution();
   // Draft-model subclasses shut down the shared transfer's threadpool first
   // (see ~DraftModelSpecWorkerImpl); this base only releases refs.
-  impl_->clear_hierarchy_kv_cache_transfer();
-  clear_hierarchy_kv_cache_transfer();
+  impl_->clear_hierarchy_kv_transfer();
+  clear_hierarchy_kv_transfer();
 }
 
 template <typename TargetInput>

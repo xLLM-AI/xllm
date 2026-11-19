@@ -23,8 +23,11 @@ limitations under the License.
 
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/model/model_type.h"
-#include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
+#include "core/kv_cache/layout/kv_cache_layout_policy.h"
+#include "core/kv_cache/storage/kv_cache_create_options.h"
 #include "core/platform/platform.h"
+#include "core/util/tensor_helper.h"
 #include "util/utils.h"
 #include "worker.pb.h"
 

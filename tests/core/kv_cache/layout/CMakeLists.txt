@@ -21,14 +21,14 @@ target_link_libraries(cache_layout_builder_test
 
 cc_test(
   NAME
-    vmm_kv_cache_layout_test
+    vmm_kv_layout_test
   SRCS
-    vmm_kv_cache_layout_test.cpp
+    vmm_kv_layout_test.cpp
   DEPS
     :kv_cache
     GTest::gtest_main
 )
-target_link_libraries(vmm_kv_cache_layout_test
+target_link_libraries(vmm_kv_layout_test
                       PUBLIC
                       Python::Python
                       $<$<BOOL:${USE_NPU}>:ascendcl>
@@ -59,12 +59,12 @@ target_link_libraries(kv_cache_estimation_test
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    virtual_kv_cache_page_layout_test
+    virtual_kv_page_layout_test
   SRCS
-    virtual_kv_cache_page_layout_test.cpp
+    virtual_kv_page_layout_test.cpp
   DEPS
-    :virtual_kv_cache_page_layout
-    :virtual_kv_cache_page_state
+    :virtual_kv_page_layout
+    :virtual_kv_page_state
     GTest::gtest_main
     glog::glog
 )

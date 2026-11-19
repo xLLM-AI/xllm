@@ -35,7 +35,7 @@ limitations under the License.
 namespace xllm {
 
 // Memory info returned by GetMemoryInfo RPC
-struct MemoryInfo {
+struct WorkerMemoryInfo {
   int64_t available_memory = 0;  // Available memory in bytes
   int64_t total_memory = 0;      // Total memory in bytes
   bool pool_initialized = false;
@@ -59,7 +59,7 @@ class WorkerMemoryClient final {
   bool wait_for_server_ready(const std::string& server_address);
 
   // Get memory info from remote worker (available/total memory)
-  folly::SemiFuture<MemoryInfo> get_memory_info_async(
+  folly::SemiFuture<WorkerMemoryInfo> get_memory_info_async(
       int32_t timeout_ms = 1000);
 
   // Initialize PhysicalPagePool on remote worker with specified number of pages
@@ -101,7 +101,7 @@ class WorkerMemoryClient final {
   // mapping for PD disaggregation. Returns an empty vector on error.
   // Result vectors retain the requested block order within every layer.
   // Waits through brpc::Join so callers running in bthreads yield the worker.
-  std::vector<VirtualKVCacheLayerGlobalOffsets> get_virtual_kv_cache_offsets(
+  std::vector<VirtualKVCacheLayerGlobalOffsets> get_virtual_kv_offsets(
       const std::string& model_id,
       const std::vector<int32_t>& block_ids);
 
