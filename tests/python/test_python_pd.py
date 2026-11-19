@@ -188,7 +188,6 @@ def test_model_records_each_event_after_its_layer(model_type: str, monkeypatch: 
     model.embed_tokens = nn.Embedding(8, 4)
     model.norm = nn.Identity()
     model.hc_head = _HyperHead()
-    model._inputs_embeds = None
     model.aux_hidden_capture = AuxHiddenCapture(())
     model.enorm = SimpleNamespace(weight=torch.ones(4), eps=1e-6)
     model.hnorm = SimpleNamespace(weight=torch.ones(4), eps=1e-6)

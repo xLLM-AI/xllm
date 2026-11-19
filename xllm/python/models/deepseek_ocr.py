@@ -917,7 +917,6 @@ class DeepseekOCRModel(nn.Module):
     def __init__(self, cfg: DeepseekOCRConfig, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         self._use_fused_rope = kernels.has_fused_qk_rotary(cfg.head_dim, dtype, device)
-        self._inputs_embeds: torch.Tensor | None = None
         tp = cfg.tp_size
         if tp <= 0 or cfg.hidden_size % tp != 0:
             raise ValueError("hidden_size must be divisible by a positive tp_size")
@@ -941,12 +940,9 @@ class DeepseekOCRModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self._inputs_embeds is not None:
-            hidden = self._inputs_embeds
-            self._inputs_embeds = None
-        else:
-            hidden = self.embed_tokens(input_ids)
+        hidden = self.embed_tokens(input_ids) if input_embedding is None else input_embedding
 
         positions = positions.to(torch.int64).contiguous()
         rope_cos, rope_sin = gather_half_rope_cos_sin(self.rotary.cos_sin_cache, positions)
@@ -1018,7 +1014,6 @@ class DeepseekOCRForCausalLM(PyModelBase):
             # positions — skip the scatter then, like the other python VLMs.
             if mask.any():
                 inputs_embeds[mask] = image_embeds.to(inputs_embeds.dtype)
-        self.model._inputs_embeds = inputs_embeds
         return inputs_embeds
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:

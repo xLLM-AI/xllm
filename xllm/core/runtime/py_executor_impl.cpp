@@ -449,10 +449,9 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
         py::tuple visual_inputs = visual_embedding.cast<py::tuple>();
         input_embedding = visual_inputs[0];
         deepstack_input_embeds = visual_inputs[1];
-      } else if (args_.model_type() == "qwen3_5" ||
-                 args_.model_type() == "qwen3_5_moe") {
-        // Qwen3.5 passes chunk-local visual rows explicitly; no mutable
-        // embedding state can survive into subsequent decode steps.
+      } else {
+        // Each visual model returns this step's merged embeddings. The
+        // decoder receives them explicitly instead of retaining request state.
         input_embedding = std::move(visual_embedding);
       }
     }
@@ -485,8 +484,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   py::object eplb_decode_token_mask =
       optional_tensor(params.expert.eplb_decode_token_mask);
 
-  // Qwen visual prefill owns explicit per-step embeddings. Its pure decode
-  // retains the captured token path without model-local visual state.
+  // Visual prefill owns explicit per-step embeddings. Pure decode retains
+  // the captured token path without model-local visual state.
   py::kwargs graph_kwargs;
   if (!deepstack_input_embeds.is_none()) {
     graph_kwargs["deepstack_input_embeds"] = deepstack_input_embeds;
