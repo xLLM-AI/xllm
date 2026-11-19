@@ -20,7 +20,7 @@ from xllm_kernel.ops.normalization import (
     rms_norm_dynamic_quant,
     rms_norm_gated,
 )
-from xllm_kernel.ops.positional_encoding import partial_rotary_embedding
+from xllm_kernel.ops.positional_encoding import inplace_partial_rotary_mul, partial_rotary_embedding
 
 __all__ = [
     "causal_conv1d_update_v2",
@@ -29,7 +29,7 @@ __all__ = [
     "fused_qkvzba_split_reshape_cat",
     "fused_recurrent_gated_delta_rule",
     "fused_sigmoid_gating_delta_rule_update",
-    "get_fused_attention",
+    "inplace_partial_rotary_mul",
     "l2_norm",
     "layer_norm",
     "rms_norm",

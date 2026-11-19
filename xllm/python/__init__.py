@@ -76,6 +76,7 @@ def initialize_runtime() -> None:
                 "fused_qkvzba_split_reshape_cat",
                 "causal_conv1d_update_v2",
                 "partial_rotary_embedding",
+                "inplace_partial_rotary_mul",
                 "reshape_paged_cache",
                 "fused_attention",
             ),

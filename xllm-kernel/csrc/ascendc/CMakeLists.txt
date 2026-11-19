@@ -11,10 +11,12 @@ npu_op_package(${vendor} TYPE RUN CONFIG INSTALL_PATH "${CMAKE_BINARY_DIR}")
 set(gamma_host "${CMAKE_CURRENT_SOURCE_DIR}/gamma_add_rms_norm/op_host")
 set(layer_norm_host "${CMAKE_CURRENT_SOURCE_DIR}/layer_norm_fwd/op_host")
 set(quant_host "${CMAKE_CURRENT_SOURCE_DIR}/rms_norm_dynamic_quant/op_host")
+set(rope_host "${CMAKE_CURRENT_SOURCE_DIR}/inplace_partial_rotary_mul/op_host")
 set(op_definitions
     "${gamma_host}/gamma_add_rms_norm_def.cpp"
     "${layer_norm_host}/layer_norm_fwd_def.cpp"
     "${quant_host}/rms_norm_dynamic_quant_def.cpp"
+    "${rope_host}/inplace_partial_rotary_mul_def.cpp"
 )
 npu_op_code_gen(
     SRC ${op_definitions}
@@ -26,6 +28,7 @@ npu_op_library(cust_opapi ACLNN
     "${gamma_host}/op_api/gamma_add_rms_norm.cpp"
     "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_layer_norm_fwd.cpp"
     "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_rms_norm_dynamic_quant.cpp"
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_inplace_partial_rotary_mul.cpp"
 )
 target_include_directories(cust_opapi PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/include/aclnn")
 target_link_libraries(cust_opapi PRIVATE
@@ -45,6 +48,13 @@ npu_op_library(cust_optiling TILING
     "${layer_norm_host}/layer_norm_fwd_proto.cpp"
     "${layer_norm_host}/layer_norm_fwd_tiling.cpp"
     "${quant_host}/rms_norm_dynamic_quant_tiling.cpp"
+    "${rope_host}/inplace_partial_rotary_mul_tiling.cpp"
+    "${rope_host}/inplace_partial_rotary_mul_a3_tiling.cpp"
+    "${rope_host}/rope_regbase_tiling_base.cpp"
+    "${rope_host}/rope_regbase_tiling_a_and_b.cpp"
+    "${rope_host}/rope_regbase_tiling_ab.cpp"
+    "${rope_host}/rope_regbase_tiling_aba_and_ba.cpp"
+    "${rope_host}/rope_regbase_tiling_bab.cpp"
     ${generated_fallback}
 )
 foreach(target cust_optiling cust_op_proto)
@@ -58,12 +68,17 @@ npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelLayerNormFwd
     KERNEL_DIR layer_norm_fwd/op_kernel KERNEL_FILE xllm_kernel_layer_norm_fwd.cpp)
 npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelRmsNormDynamicQuant
     KERNEL_DIR rms_norm_dynamic_quant/op_kernel KERNEL_FILE xllm_kernel_rms_norm_dynamic_quant.cpp)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelInplacePartialRotaryMul
+    KERNEL_DIR inplace_partial_rotary_mul/op_kernel KERNEL_FILE xllm_kernel_inplace_partial_rotary_mul.cpp)
 npu_op_kernel_options(ascendc_kernels XllmKernelGammaAddRmsNorm
     OPTIONS --cce-auto-sync=off "-I${CMAKE_CURRENT_SOURCE_DIR}")
 npu_op_kernel_options(ascendc_kernels XllmKernelLayerNormFwd
     OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error)
 npu_op_kernel_options(ascendc_kernels XllmKernelRmsNormDynamicQuant
     OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Werror
+    -mllvm -cce-aicore-hoist-movemask=false --op_relocatable_kernel_binary=true)
+npu_op_kernel_options(ascendc_kernels XllmKernelInplacePartialRotaryMul
+    OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Werror
     -mllvm -cce-aicore-hoist-movemask=false --op_relocatable_kernel_binary=true)
 npu_op_kernel_library(ascendc_kernels SRC_BASE "${CMAKE_CURRENT_SOURCE_DIR}" TILING_LIBRARY cust_optiling)
 npu_op_package_add(${vendor} LIBRARY cust_opapi cust_op_proto cust_optiling ascendc_kernels)
