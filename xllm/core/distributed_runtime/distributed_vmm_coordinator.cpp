@@ -344,7 +344,7 @@ int64_t DistributedVmmCoordinator::init_physical_page_pools(
     LOG(ERROR) << "Worker memory RPC client count does not match world size";
     return 0;
   }
-  std::vector<folly::SemiFuture<MemoryInfo>> memory_futures;
+  std::vector<folly::SemiFuture<WorkerMemoryInfo>> memory_futures;
   memory_futures.reserve(clients_.size());
   for (auto& client : clients_) {
     memory_futures.emplace_back(client->get_memory_info_async());
@@ -898,7 +898,7 @@ void DistributedVmmCoordinator::refresh_worker_capacity_snapshot() {
     if (workers.size() != static_cast<size_t>(expected_worker_count)) {
       return;
     }
-    std::vector<folly::SemiFuture<MemoryInfo>> futures;
+    std::vector<folly::SemiFuture<WorkerMemoryInfo>> futures;
     futures.reserve(workers.size());
     for (const auto& worker : workers) {
       futures.emplace_back(

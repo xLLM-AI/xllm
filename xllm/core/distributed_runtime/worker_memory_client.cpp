@@ -87,9 +87,9 @@ bool WorkerMemoryClient::wait_for_server_ready(
   return true;
 }
 
-folly::SemiFuture<MemoryInfo> WorkerMemoryClient::get_memory_info_async(
+folly::SemiFuture<WorkerMemoryInfo> WorkerMemoryClient::get_memory_info_async(
     int32_t timeout_ms) {
-  folly::Promise<MemoryInfo> promise;
+  folly::Promise<WorkerMemoryInfo> promise;
   auto future = promise.getSemiFuture();
   capacity_query_threadpool_.schedule(
       [this, timeout_ms, promise = std::move(promise)]() mutable {
@@ -103,7 +103,7 @@ folly::SemiFuture<MemoryInfo> WorkerMemoryClient::get_memory_info_async(
           promise.setException(std::runtime_error(cntl.ErrorText()));
           return;
         }
-        promise.setValue(MemoryInfo{
+        promise.setValue(WorkerMemoryInfo{
             resp.available_memory(),
             resp.total_memory(),
             resp.pool_initialized(),

@@ -498,7 +498,7 @@ TEST_F(WorkerMemoryClientTimeoutTest,
   // fails the readiness check without hanging this test or client destruction.
   server.service().release_replies();
   ASSERT_TRUE(wait_until([&] { return capacity.isReady(); }));
-  const MemoryInfo info = std::move(capacity).get();
+  const WorkerMemoryInfo info = std::move(capacity).get();
   EXPECT_EQ(info.available_memory, 4096);
   EXPECT_EQ(info.total_memory, 8192);
   EXPECT_TRUE(info.pool_initialized);
