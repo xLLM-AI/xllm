@@ -1,0 +1,232 @@
+{
+  "status": "passed",
+  "runtime_commit": "cbe5ac665188298435b25ce1b36a3ece252ef769",
+  "functional": {
+    "status": "passed",
+    "source_commit": "cbe5ac665188298435b25ce1b36a3ece252ef769",
+    "counts": {
+      "public_accuracy": 35,
+      "extended_accuracy": 150,
+      "engineering": 15,
+      "memory": 20
+    },
+    "npu_executed": true
+  },
+  "host_header_test": {
+    "status": "passed_host_semantics_only",
+    "project_root": "/workspace/t5_qkv_tasks/xllm_pr2656_cbe5ac665188",
+    "scope": "CPU single-block byte-copy/queue semantics only; no cache aliases, concurrency, hardware synchronization or timing",
+    "expected_kernel_sha256": "e31fab4775acacdfb417ad55dc3fef6fce90b62e5af28b479b16cbb7c14d8dad",
+    "expected_plan_sha256": "dbd72a9b9585df82f83852342168237e19df73e8c7bbe29238477d07c8f93c6c",
+    "npu_executed": false,
+    "cann_compiled": false,
+    "host_compiled": true,
+    "host_executed": true,
+    "stages": {
+      "compiler_version": {
+        "command": [
+          "/usr/bin/c++",
+          "--version"
+        ],
+        "exit_code": 0
+      },
+      "compile": {
+        "command": [
+          "/usr/bin/c++",
+          "-std=c++17",
+          "-O2",
+          "-Wall",
+          "-Wextra",
+          "-I/workspace/t5_pr2656_validation_20261116/host_kernel",
+          "-I/workspace/t5_qkv_tasks/xllm_pr2656_cbe5ac665188/xllm",
+          "/workspace/t5_pr2656_validation_20261116/host_kernel/test_t5_copy.cpp",
+          "-o",
+          "/workspace/t5_pr2656_validation_20261116/host_port_cbe5ac66/test_t5_copy"
+        ],
+        "exit_code": 0
+      },
+      "run": {
+        "command": [
+          "/workspace/t5_pr2656_validation_20261116/host_port_cbe5ac66/test_t5_copy"
+        ],
+        "exit_code": 0
+      }
+    },
+    "python": "3.11.6 (main, Sep 21 2026, 19:47:56) [GCC 12.3.1 (openEuler 12.3.1-111.oe2403sp3)]",
+    "python_executable": "/usr/bin/python3",
+    "harness_manifest_sha256": "ed6029d1d03df3637c31ebc85f1a7239bfcb66495ca69572ca9ca932d811347a",
+    "kernel_sha256": "e31fab4775acacdfb417ad55dc3fef6fce90b62e5af28b479b16cbb7c14d8dad",
+    "plan_sha256": "dbd72a9b9585df82f83852342168237e19df73e8c7bbe29238477d07c8f93c6c",
+    "executable_sha256": "8daaa9188bd04b07a544ea95247850164d999bc6698e18808e0138d55b1d9d4b",
+    "reference_counts_sha256": "393e0b2f3f6d7bed33abbc89ea5631c8edc8f58696bc408a691173027615b1e9",
+    "records": [
+      {
+        "case": "large",
+        "dtype_bits": "fp16",
+        "offset_mask": 0,
+        "dma_read": 3086,
+        "pad_read": 0,
+        "dma_write": 3086,
+        "pad_write": 0
+      },
+      {
+        "case": "large",
+        "dtype_bits": "fp16",
+        "offset_mask": 1,
+        "dma_read": 2558,
+        "pad_read": 528,
+        "dma_write": 3086,
+        "pad_write": 0
+      },
+      {
+        "case": "large",
+        "dtype_bits": "fp16",
+        "offset_mask": 2,
+        "dma_read": 1807,
+        "pad_read": 1279,
+        "dma_write": 3086,
+        "pad_write": 0
+      },
+      {
+        "case": "large",
+        "dtype_bits": "fp16",
+        "offset_mask": 4,
+        "dma_read": 1807,
+        "pad_read": 1279,
+        "dma_write": 3086,
+        "pad_write": 0
+      },
+      {
+        "case": "large",
+        "dtype_bits": "bf16",
+        "offset_mask": 0,
+        "dma_read": 3086,
+        "pad_read": 0,
+        "dma_write": 3086,
+        "pad_write": 0
+      },
+      {
+        "case": "large",
+        "dtype_bits": "bf16",
+        "offset_mask": 1,
+        "dma_read": 2558,
+        "pad_read": 528,
+        "dma_write": 3086,
+        "pad_write": 0
+      },
+      {
+        "case": "large",
+        "dtype_bits": "bf16",
+        "offset_mask": 2,
+        "dma_read": 1807,
+        "pad_read": 1279,
+        "dma_write": 3086,
+        "pad_write": 0
+      },
+      {
+        "case": "large",
+        "dtype_bits": "bf16",
+        "offset_mask": 4,
+        "dma_read": 1807,
+        "pad_read": 1279,
+        "dma_write": 3086,
+        "pad_write": 0
+      },
+      {
+        "status": "passed",
+        "host_semantic_cases": 776,
+        "npu_executed": false,
+        "cann_compiled": false,
+        "dma_read": 23892,
+        "pad_read": 16412,
+        "dma_write": 30064,
+        "pad_write": 10240
+      }
+    ],
+    "exit_code": 0
+  },
+  "fixed_performance_runs": [
+    {
+      "run": "initial",
+      "passed_cases": 10,
+      "007_wall_us_median": 69.7645,
+      "007_device_event_us_median": 69.05700206756592,
+      "017_wall_us_median": 70.12780000000001,
+      "017_device_event_us_median": 69.60020065307617
+    },
+    {
+      "run": "repeat_1",
+      "passed_cases": 10,
+      "007_wall_us_median": 69.34305,
+      "007_device_event_us_median": 68.92879962921143,
+      "017_wall_us_median": 69.60119999999999,
+      "017_device_event_us_median": 69.15090084075928
+    },
+    {
+      "run": "repeat_2",
+      "passed_cases": 10,
+      "007_wall_us_median": 69.71395,
+      "007_device_event_us_median": 69.06760215759277,
+      "017_wall_us_median": 70.1322,
+      "017_device_event_us_median": 69.65199947357178
+    },
+    {
+      "run": "repeat_3",
+      "passed_cases": 10,
+      "007_wall_us_median": 70.30914999999999,
+      "007_device_event_us_median": 69.65590000152588,
+      "017_wall_us_median": 70.18205,
+      "017_device_event_us_median": 69.5290994644165
+    },
+    {
+      "run": "repeat_4",
+      "passed_cases": 10,
+      "007_wall_us_median": 69.40145,
+      "007_device_event_us_median": 68.84860038757324,
+      "017_wall_us_median": 70.24015,
+      "017_device_event_us_median": 69.54050064086914
+    },
+    {
+      "run": "repeat_5",
+      "passed_cases": 10,
+      "007_wall_us_median": 69.68195,
+      "007_device_event_us_median": 68.98019790649414,
+      "017_wall_us_median": 69.75689999999999,
+      "017_device_event_us_median": 69.08530235290527
+    }
+  ],
+  "maximum_large_case_round_us": {
+    "007": 70.37705,
+    "017": 70.4783
+  },
+  "max_repeat_median_us": {
+    "007": 70.30914999999999,
+    "017": 70.24015
+  },
+  "device_kernel_sha256": [
+    "37c110d483ac6702a819f7f8447aa4daf49fec5f82ffe912a7a0476ddf6f9247",
+    "da90862b69fe6856082b3102d4dcd179b2d72d4ab6c0779a213a9049f60ed2b0"
+  ],
+  "evidence_archive": {
+    "file": "evidence.tar.gz",
+    "sha256": "59c0c4f78b0fd10a1bfd41163eac0f9ee14a2e6f79069eab63dede362c53e3ef",
+    "bytes": 229646,
+    "files": 351
+  },
+  "scope": "Actual standalone component port on A3; not top-level xLLM integration",
+  "root_cause_of_external_discrete_latency_levels": "not_established",
+  "controls": {
+    "f990": {
+      "status": "failed",
+      "passed_cases": 8,
+      "007_us": 81.5446,
+      "017_us": 84.7892
+    },
+    "a201_current": {
+      "status": "passed",
+      "passed_cases": 10,
+      "007_us": 74.76045,
+      "017_us": 76.34305
+    }
+  }
+}

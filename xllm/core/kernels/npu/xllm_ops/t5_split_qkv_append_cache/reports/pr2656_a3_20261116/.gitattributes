@@ -1,0 +1,5 @@
+.gitattributes text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+SHA256SUMS.txt text eol=lf
+*.tar.gz -text

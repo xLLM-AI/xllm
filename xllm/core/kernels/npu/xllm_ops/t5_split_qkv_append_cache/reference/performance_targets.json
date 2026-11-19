@@ -1,0 +1,269 @@
+{
+  "schema_version": 2,
+  "revision": "2026-10-23-reviewed",
+  "policy_id": "absolute-wall-us-reviewed-v3",
+  "unit": "us",
+  "metric": "api_to_completion_wall_time",
+  "primary_entry": "run",
+  "warmup": 50,
+  "iterations": 200,
+  "rounds": 5,
+  "statistic": "median_of_round_means",
+  "required_environment": {
+    "hardware": "Ascend 910C / Atlas A3",
+    "soc": "Ascend910_9382",
+    "logical_devices": 1,
+    "vector_cores": 48,
+    "cube_cores": 24,
+    "CANN": "9.1.0",
+    "driver": "25.5.t6.b001",
+    "architecture": "aarch64",
+    "os": "openEuler 24.03 LTS-SP3",
+    "python": "3.12.13",
+    "torch": "2.10.0+cpu",
+    "torch_npu": "2.10.0.post4+git5dd8ef3"
+  },
+  "case_sha256": "9ce34ba31fc08abe1969ad4997f7b6173fa950533473d6977398a8ed4db741e8",
+  "cases": [
+    {
+      "case_name": "T5SplitQkvAppendCache_001_float16_random",
+      "input_shapes": [
+        [
+          4,
+          1,
+          1536
+        ],
+        [
+          4,
+          8,
+          0,
+          64
+        ],
+        [
+          4,
+          8,
+          0,
+          64
+        ]
+      ],
+      "dtype": "float16",
+      "max_wall_us": 28
+    },
+    {
+      "case_name": "T5SplitQkvAppendCache_005_float16_random",
+      "input_shapes": [
+        [
+          1,
+          1,
+          1536
+        ],
+        [
+          1,
+          8,
+          128,
+          64
+        ],
+        [
+          1,
+          8,
+          128,
+          64
+        ]
+      ],
+      "dtype": "float16",
+      "max_wall_us": 28
+    },
+    {
+      "case_name": "T5SplitQkvAppendCache_006_float16_random",
+      "input_shapes": [
+        [
+          8,
+          1,
+          2304
+        ],
+        [
+          8,
+          12,
+          512,
+          64
+        ],
+        [
+          8,
+          12,
+          512,
+          64
+        ]
+      ],
+      "dtype": "float16",
+      "max_wall_us": 29
+    },
+    {
+      "case_name": "T5SplitQkvAppendCache_007_float16_random",
+      "input_shapes": [
+        [
+          16,
+          1,
+          3072
+        ],
+        [
+          16,
+          16,
+          2048,
+          64
+        ],
+        [
+          16,
+          16,
+          2048,
+          64
+        ]
+      ],
+      "dtype": "float16",
+      "max_wall_us": 75
+    },
+    {
+      "case_name": "T5SplitQkvAppendCache_008_float16_random",
+      "input_shapes": [
+        [
+          1,
+          1,
+          384
+        ],
+        [
+          1,
+          1,
+          8192,
+          128
+        ],
+        [
+          1,
+          1,
+          8192,
+          128
+        ]
+      ],
+      "dtype": "float16",
+      "max_wall_us": 29
+    },
+    {
+      "case_name": "T5SplitQkvAppendCache_011_bfloat16_random",
+      "input_shapes": [
+        [
+          4,
+          1,
+          1536
+        ],
+        [
+          4,
+          8,
+          0,
+          64
+        ],
+        [
+          4,
+          8,
+          0,
+          64
+        ]
+      ],
+      "dtype": "bfloat16",
+      "max_wall_us": 28
+    },
+    {
+      "case_name": "T5SplitQkvAppendCache_015_bfloat16_random",
+      "input_shapes": [
+        [
+          1,
+          1,
+          1536
+        ],
+        [
+          1,
+          8,
+          128,
+          64
+        ],
+        [
+          1,
+          8,
+          128,
+          64
+        ]
+      ],
+      "dtype": "bfloat16",
+      "max_wall_us": 28
+    },
+    {
+      "case_name": "T5SplitQkvAppendCache_016_bfloat16_random",
+      "input_shapes": [
+        [
+          8,
+          1,
+          2304
+        ],
+        [
+          8,
+          12,
+          512,
+          64
+        ],
+        [
+          8,
+          12,
+          512,
+          64
+        ]
+      ],
+      "dtype": "bfloat16",
+      "max_wall_us": 29
+    },
+    {
+      "case_name": "T5SplitQkvAppendCache_017_bfloat16_random",
+      "input_shapes": [
+        [
+          16,
+          1,
+          3072
+        ],
+        [
+          16,
+          16,
+          2048,
+          64
+        ],
+        [
+          16,
+          16,
+          2048,
+          64
+        ]
+      ],
+      "dtype": "bfloat16",
+      "max_wall_us": 77
+    },
+    {
+      "case_name": "T5SplitQkvAppendCache_018_bfloat16_random",
+      "input_shapes": [
+        [
+          1,
+          1,
+          384
+        ],
+        [
+          1,
+          1,
+          8192,
+          128
+        ],
+        [
+          1,
+          1,
+          8192,
+          128
+        ]
+      ],
+      "dtype": "bfloat16",
+      "max_wall_us": 29
+    }
+  ]
+}

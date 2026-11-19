@@ -18,7 +18,7 @@ repos:
     args: [
       --toml, pyproject.toml,
       '--skip', 'build/**,third_party/**,*.svg,*.ptx.h,docs/package-lock.json',
-      '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,tbe,copyin,nd,ND,bilt,Collet,MAPE,MultiDimension,mape,offen,statics,subtile,thw'
+      '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,tbe,copyin,nd,ND,bilt,Collet,MAPE,MultiDimension,mape,offen,statics,subtile,thw,enque'
     ]
     additional_dependencies:
       - tomli
