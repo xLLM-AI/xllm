@@ -150,7 +150,6 @@ Prefill 和 Decode 都需要使用上一节的 Store 参数，并额外配置：
 ```text
 --enable_disagg_pd=true
 --instance_role=PREFILL              # Decode 进程使用 DECODE
---kv_transfer_type=Mooncake
 --kv_cache_transfer_mode=PUSH
 --etcd_addr=<xllm-service使用的etcd地址>
 --transfer_listen_port=<每个rank唯一端口>
