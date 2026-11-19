@@ -1,0 +1,10 @@
+HcPreInvRms AscendC implementation
+
+Source: https://gitcode.com/xLLM-AI/xllm_ops
+Revision: 8bd2b014c38fec33ecf14dd33e05e8ad792ec5c8
+Directory: xllm_ops/moe/hc_pre_inv_rms
+Supporting files: common/error/ops_error.h, common/log/ops_log.h and
+common/log/inner/dfx_base.h.
+
+The package generates a private CANN operator and ACLNN entry point.
+Imported sources retain their copyright and CANN license notices.

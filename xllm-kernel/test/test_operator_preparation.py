@@ -40,6 +40,7 @@ sys.meta_path.insert(0, BlockDeviceImports())
 from xllm_kernel.catalog import load_operations
 from xllm_kernel.ops import fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat
 from xllm_kernel.ops import get_fused_attention, partial_rotary_embedding, reshape_paged_cache
+from xllm_kernel.ops import hc_post, hc_pre
 from xllm_kernel.ops.attention.gdn import OPERATIONS as GDN_OPERATIONS
 from xllm_kernel.ops.attention.kda import OPERATIONS as KDA_OPERATIONS, causal_conv1d_update_v2
 from xllm_kernel.ops.attention.mla import mla_preprocess_v2
@@ -61,12 +62,15 @@ assert callable(matmul_ein_sum) and callable(matmul_ein_sum_out)
 for name, mutates, aliases in (
     ("quant_matmul_out", ("out",), True),
     ("mla_preprocess_v2", ("kv_cache", "rope_cache"), False),
+    ("hc_pre", (), False),
+    ("hc_post", (), False),
 ):
     operation = catalog[name]
     assert operation.implementations == ("npu.ascendc." + name,)
     assert operation.contract.mutates == mutates and operation.contract.aliases_inputs == aliases
     assert operation.prepared is None
 assert callable(quant_matmul_out) and callable(mla_preprocess_v2)
+assert callable(hc_pre) and callable(hc_post)
 assert callable(causal_conv1d_update_v2)
 assert callable(reshape_paged_cache) and callable(partial_rotary_embedding)
 fia = catalog["fused_attention"]

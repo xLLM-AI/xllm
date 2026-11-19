@@ -12,28 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""NPU hyper-connection kernels for multi-stream residual (mHC) layers.
+"""HyperConnection operators prepared by the NPU worker."""
 
-``hc_pre`` fuses rsqrt RMS + linear projection + sigmoid gating + Sinkhorn
-normalisation + weighted-sum reduction into a single call. ``hc_post``
-applies the post-attention/FFN recombination (post * x + comb^T @ residual).
-"""
+from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
 
-from __future__ import annotations
-
-import torch
-
-try:
-    hc_pre = torch.ops.xllm_ops.hc_pre
-except (AttributeError, RuntimeError):
-    hc_pre = None
-
-try:
-    hc_post = torch.ops.xllm_ops.hc_post
-except (AttributeError, RuntimeError):
-    hc_post = None
-
-__all__ = [
-    "hc_pre",
-    "hc_post",
-]
+__all__ = ["hc_post", "hc_pre"]
