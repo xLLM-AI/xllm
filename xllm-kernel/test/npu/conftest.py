@@ -16,6 +16,7 @@ def _prepare_kernels() -> None:
             "l2_norm",
             "fused_add_gemma_rms_norm",
             "rms_norm_gated",
+            "inplace_partial_rotary_mul",
             "rms_norm_dynamic_quant",
             "fused_recurrent_gated_delta_rule",
             "fused_sigmoid_gating_delta_rule_update",

@@ -1,50 +1,27 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
 #include <acl/acl.h>
-#include <dlfcn.h>
 #include <glog/logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
 #include <array>
-#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <tuple>
 
+#include "csrc/npu/ascendc_api.h"
 #include "op_plugin/utils/op_api_common_base.h"
 
 namespace xllm_kernel {
 namespace {
 
-struct NormalizationApi {
-  void* launch;
-  void* workspace;
-};
-
-NormalizationApi load_api(const char* launch_name, const char* workspace_name) {
-  static void* const library = [] {
-    Dl_info binding{};
-    CHECK(dladdr(reinterpret_cast<const void*>(&load_api), &binding));
-    const auto path = std::filesystem::path(binding.dli_fname).parent_path() /
-                      "ascendc_opp/xllm_kernel/op_api/lib/libcust_opapi.so";
-    // Keep the package API and its CANN registrations alive for the process.
-    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    CHECK(handle) << path << ": " << dlerror();
-    return handle;
-  }();
-  const NormalizationApi api{dlsym(library, launch_name),
-                             dlsym(library, workspace_name)};
-  CHECK(api.launch && api.workspace) << launch_name << " in xllm-kernel OPP";
-  return api;
-}
-
 namespace gated {
 
-const NormalizationApi& get_api() {
+const AscendcApi& get_api() {
   static const auto api =
-      load_api("aclnnXllmKernelLayerNormFwd",
-               "aclnnXllmKernelLayerNormFwdGetWorkspaceSize");
+      load_ascendc_api("aclnnXllmKernelLayerNormFwd",
+                       "aclnnXllmKernelLayerNormFwdGetWorkspaceSize");
   return api;
 }
 
@@ -100,10 +77,10 @@ torch::Tensor rms_norm_gated(const torch::Tensor& input,
 
 namespace quant {
 
-const NormalizationApi& get_api() {
+const AscendcApi& get_api() {
   static const auto api =
-      load_api("aclnnXllmKernelRmsNormDynamicQuant",
-               "aclnnXllmKernelRmsNormDynamicQuantGetWorkspaceSize");
+      load_ascendc_api("aclnnXllmKernelRmsNormDynamicQuant",
+                       "aclnnXllmKernelRmsNormDynamicQuantGetWorkspaceSize");
   return api;
 }
 
