@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "common/types.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_options.h"
 
 namespace xllm {
@@ -84,6 +85,14 @@ struct Options {
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
 
   PROPERTY(bool, is_draft_engine) = false;
+
+  int32_t num_decoding_tokens() const {
+    if (!is_draft_engine()) {
+      return num_speculative_tokens() + 1;
+    }
+    return SpeculativeConfig::num_decoding_tokens(num_speculative_tokens(),
+                                                  speculative_algorithm());
+  }
 
   PROPERTY(EplbControllerConfig, eplb_controller_config);
 

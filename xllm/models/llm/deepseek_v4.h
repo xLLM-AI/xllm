@@ -24,7 +24,6 @@ limitations under the License.
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -39,20 +38,18 @@ limitations under the License.
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/framework/state_dict/utils.h"
-#include "core/kernels/ops_api.h"
 #include "core/layers/common/dsa_metadata.h"
 #include "core/layers/common/dsa_metadata_builder.h"
 #include "core/layers/common/rms_norm.h"
 #include "core/layers/common/word_embedding.h"
 #include "core/layers/deepseek_v4_decoder_layer.h"
+#include "core/layers/npu_torch/deepseek_sparse_attention.h"
 #include "core/util/tensor_helper.h"
 #include "layers/npu/deepseek_v4_rotary_embedding.h"
 #include "layers/npu_torch/deepseek_v4_cp_context.h"
 #include "llm_model_base.h"
 
 namespace xllm {
-
-inline constexpr int64_t kDeepseekV4DsaMetadataBufferElements = 1024;
 
 inline int64_t deepseek_v4_next_power_of_two(int64_t n) {
   int64_t value = 1;
@@ -82,6 +79,34 @@ inline torch::Tensor maybe_to_device(const torch::Tensor& tensor,
     return tensor;
   }
   return tensor.to(device);
+}
+
+inline torch::Device prepare_deepseek_v4_sparse_metadata(
+    layer::DSAMetadata& dsa) {
+  dsa.c1_metadata = torch::Tensor();
+  dsa.c4_metadata = torch::Tensor();
+  dsa.c128_metadata = torch::Tensor();
+  dsa.qli_metadata = torch::Tensor();
+  dsa.sparse_metadata_ori_win_left = -1;
+
+  torch::Device metadata_device(torch::kCPU);
+  if (dsa.input_positions.defined()) {
+    metadata_device = dsa.input_positions.device();
+  } else if (dsa.seq_lens_q.defined()) {
+    metadata_device = dsa.seq_lens_q.device();
+  } else if (dsa.actual_seq_lengths_kv.defined()) {
+    metadata_device = dsa.actual_seq_lengths_kv.device();
+  }
+
+  dsa.actual_seq_lengths_query =
+      maybe_to_device(dsa.actual_seq_lengths_query, metadata_device);
+  dsa.actual_seq_lengths_kv =
+      maybe_to_device(dsa.actual_seq_lengths_kv, metadata_device);
+  dsa.seq_lens_q = maybe_to_device(dsa.seq_lens_q, metadata_device);
+  dsa.seq_lens = maybe_to_device(dsa.seq_lens, metadata_device);
+  dsa.max_seqlen_q = maybe_to_device(dsa.max_seqlen_q, metadata_device);
+  dsa.max_seqlen_kv = maybe_to_device(dsa.max_seqlen_kv, metadata_device);
+  return metadata_device;
 }
 
 inline bool deepseek_v4_uses_acl_graph(
@@ -530,11 +555,11 @@ class DeepseekV4ModelImpl
             context.get_model_args()),
         parallel_args_(context.get_parallel_args()),
         flash_comm1_options_(context.get_flash_comm1_options()),
+        num_speculative_tokens_(context.num_speculative_tokens()),
         aux_capture_(
             context.get_model_args(),
             context.get_tensor_options(),
             ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
-    is_aux_hidden_capture_enabled_ = context.num_speculative_tokens() > 0;
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
@@ -549,8 +574,7 @@ class DeepseekV4ModelImpl
     hc_eps_ = static_cast<double>(model_args.hc_eps());
     norm_eps_ = static_cast<double>(model_args.rms_norm_eps());
 
-    num_heads_ = model_args.n_heads();
-    head_dim_ = model_args.o_lora_rank() + model_args.qk_rope_head_dim();
+    const int64_t num_heads = model_args.n_heads();
     // Attention TP width under the orthogonal dp * cp * attn_tp == world
     // layout. This must match the width DSAttention actually shards heads by
     // (it reads tp_group_->world_size(), narrowed in
@@ -559,19 +583,17 @@ class DeepseekV4ModelImpl
     // the kernels never see.
     cp_size_ = std::max<int64_t>(parallel_args.cp_size(), 1);
     cp_group_ = parallel_args.cp_group_;
-    dp_local_tp_size_ = std::max<int64_t>(
+    const int64_t dp_local_tp_size = std::max<int64_t>(
         parallel_args.world_size() /
             std::max<int64_t>(parallel_args.dp_size(), 1) / cp_size_,
         1);
-    CHECK_EQ(num_heads_ % dp_local_tp_size_, 0)
+    CHECK_EQ(num_heads % dp_local_tp_size, 0)
         << "[DSV4][Init] n_heads must be divisible by attn tp size. n_heads="
-        << num_heads_ << ", attn_tp_size=" << dp_local_tp_size_
+        << num_heads << ", attn_tp_size=" << dp_local_tp_size
         << ", world_size=" << parallel_args.world_size()
         << ", dp_size=" << parallel_args.dp_size() << ", cp_size=" << cp_size_;
-    tp_num_heads_ = num_heads_ / dp_local_tp_size_;
+    tp_num_heads_ = num_heads / dp_local_tp_size;
     window_size_ = model_args.window_size();
-    index_n_heads_ = model_args.index_n_heads();
-    index_head_dim_ = model_args.index_head_dim();
     index_topk_ = model_args.index_topk();
 
     const int64_t hc_dim = hc_mult_ * model_args.hidden_size();
@@ -1057,7 +1079,7 @@ class DeepseekV4ModelImpl
       }
     }
     torch::Tensor pre_hc_head_hidden_states;
-    if (!aux_capture_.enabled() && is_aux_hidden_capture_enabled_) {
+    if (!aux_capture_.enabled() && num_speculative_tokens_ > 0) {
       pre_hc_head_hidden_states = h;
     }
     h = hc_head(h);
@@ -1072,24 +1094,6 @@ class DeepseekV4ModelImpl
       return out;
     }
     return ModelOutput(hidden_states, residual_out);
-  }
-
- private:
-  static c10::optional<torch::Tensor> as_optional_tensor(
-      const torch::Tensor& tensor) {
-    if (tensor.defined() && tensor.numel() > 0) {
-      return c10::optional<torch::Tensor>(tensor);
-    }
-    return c10::nullopt;
-  }
-
-  static c10::optional<torch::Tensor> as_empty_int32_tensor(
-      const torch::Tensor& reference) {
-    if (!reference.defined()) {
-      return c10::nullopt;
-    }
-    return c10::optional<torch::Tensor>(torch::empty(
-        {0}, torch::dtype(torch::kInt32).device(reference.device())));
   }
 
  public:
@@ -1514,9 +1518,6 @@ class DeepseekV4ModelImpl
   }
 
   void build_dspark_swa_metadata(layer::DSAMetadata& dsa) const {
-    if (!model_args_.dspark_use_native_sas() || model_args_.block_size() <= 0) {
-      return;
-    }
     CHECK_GE(dspark_swa_layer_, 0)
         << "Native DeepSeek-V4 DSpark requires an SWA block table.";
     const size_t layer_id = static_cast<size_t>(dspark_swa_layer_);
@@ -1531,7 +1532,7 @@ class DeepseekV4ModelImpl
                                         dsa.actual_seq_lengths_query,
                                         dsa.actual_seq_lengths_kv,
                                         window_size_,
-                                        model_args_.block_size(),
+                                        dsa.num_speculative_tokens,
                                         dspark_swa_block_size_);
   }
 
@@ -1545,53 +1546,23 @@ class DeepseekV4ModelImpl
       layer::DSAMetadata& dsa,
       const ModelParamsView& params,
       const torch::Tensor& cu_seqlens_ori_kv_override = torch::Tensor()) const {
-    dsa.c1_metadata = torch::Tensor();
-    dsa.c4_metadata = torch::Tensor();
-    dsa.c128_metadata = torch::Tensor();
-    dsa.qli_metadata = torch::Tensor();
-    dsa.sparse_metadata_ori_win_left = -1;
     dsa.explicit_swa_indices = torch::Tensor();
-
-    torch::Device metadata_device(torch::kCPU);
-    if (dsa.input_positions.defined()) {
-      metadata_device = dsa.input_positions.device();
-    } else if (dsa.seq_lens_q.defined()) {
-      metadata_device = dsa.seq_lens_q.device();
-    } else if (dsa.actual_seq_lengths_kv.defined()) {
-      metadata_device = dsa.actual_seq_lengths_kv.device();
-    }
-
-    dsa.actual_seq_lengths_query =
-        maybe_to_device(dsa.actual_seq_lengths_query, metadata_device);
-    dsa.actual_seq_lengths_kv =
-        maybe_to_device(dsa.actual_seq_lengths_kv, metadata_device);
+    dsa.num_speculative_tokens = num_speculative_tokens_;
+    const torch::Device metadata_device =
+        prepare_deepseek_v4_sparse_metadata(dsa);
     dsa.kv_cu_seq_lens = maybe_to_device(dsa.kv_cu_seq_lens, metadata_device);
-    dsa.seq_lens_q = maybe_to_device(dsa.seq_lens_q, metadata_device);
-    dsa.seq_lens = maybe_to_device(dsa.seq_lens, metadata_device);
-    dsa.max_seqlen_q = maybe_to_device(dsa.max_seqlen_q, metadata_device);
-    dsa.max_seqlen_kv = maybe_to_device(dsa.max_seqlen_kv, metadata_device);
 
     if (!dsa.actual_seq_lengths_query.defined() ||
         !dsa.actual_seq_lengths_kv.defined()) {
       return;
     }
 
-    const int64_t batch_size =
-        std::max<int64_t>(dsa.actual_seq_lengths_kv.size(0), 1);
-    const int64_t max_seqlen_q =
-        std::max<int64_t>(params.meta.q_max_seq_len,
-                          util::max_len(params.attention.host.q_seq_lens));
-    const int64_t max_seqlen_kv =
-        std::max<int64_t>(params.meta.kv_max_seq_len,
-                          util::max_len(params.attention.host.kv_seq_lens));
     // The batch type, not q_max_seq_len, is the authoritative metadata
     // selector: native DSpark decode may use a gamma-wide query, while the
     // compatibility fallback uses q_len=1 with CHUNKED_PREFILL semantics.
     const bool is_prefill = params.meta.batch_forward_type.no_decode();
     const bool use_native_sas =
-        layer::deepseek_v4_use_native_sas(model_args_.block_size(),
-                                          model_args_.dspark_use_native_sas(),
-                                          is_prefill);
+        model_args_.dspark_use_native_sas() && !is_prefill;
     // Explicit SWA indices use decode geometry and address the persistent ring
     // buffer. Prefill needs per-query windows, and full prefill does not
     // populate that buffer until after attention. All draft layers share the
@@ -1603,151 +1574,14 @@ class DeepseekV4ModelImpl
     // Keep the opaque tiling metadata identical to the arguments passed by
     // DSAttentionImpl::forward. Native DSpark decode expands the window; the
     // prefill and compatibility paths keep the DSV4 window.
-    const int64_t ori_win_left = layer::deepseek_v4_ori_window_left(
-        window_size_, model_args_.block_size(), use_native_sas);
-    dsa.sparse_metadata_ori_win_left = ori_win_left;
-    const int64_t sparse_topk = std::max<int64_t>(index_topk_, 1);
-
-    const char* layout_kv = "PA_ND";
-    auto empty_int32_opt = as_empty_int32_tensor(dsa.actual_seq_lengths_query);
-    const torch::Tensor& ori_kv_cu = cu_seqlens_ori_kv_override.defined()
-                                         ? cu_seqlens_ori_kv_override
-                                         : dsa.actual_seq_lengths_query;
-    auto cu_seqlens_ori_kv_opt =
-        is_prefill ? as_optional_tensor(ori_kv_cu) : empty_int32_opt;
-
-    xllm::kernel::SparseAttnSharedkvMetadataParams c1_params;
-    c1_params.num_heads_q = tp_num_heads_;
-    c1_params.num_heads_kv = 1;
-    c1_params.head_dim = head_dim_;
-    c1_params.cu_seqlens_q = as_optional_tensor(dsa.actual_seq_lengths_query);
-    c1_params.cu_seqlens_ori_kv = cu_seqlens_ori_kv_opt;
-    c1_params.cu_seqlens_cmp_kv = empty_int32_opt;
-    c1_params.seqused_q = empty_int32_opt;
-    c1_params.seqused_kv = as_optional_tensor(dsa.actual_seq_lengths_kv);
-    c1_params.batch_size = batch_size;
-    c1_params.max_seqlen_q = max_seqlen_q;
-    c1_params.max_seqlen_kv = max_seqlen_kv;
-    c1_params.ori_topk = 0;
-    c1_params.cmp_topk = 0;
-    c1_params.cmp_ratio = 1;
-    c1_params.ori_mask_mode = 4;
-    c1_params.cmp_mask_mode = 3;
-    c1_params.ori_win_left = ori_win_left;
-    c1_params.ori_win_right = 0;
-    c1_params.layout_q = "TND";
-    c1_params.layout_kv = layout_kv;
-    c1_params.has_ori_kv = true;
-    c1_params.has_cmp_kv = false;
-    dsa.c1_metadata = xllm::kernel::sparse_attn_sharedkv_metadata(c1_params);
-
-    xllm::kernel::SparseAttnSharedkvMetadataParams c4_params;
-    c4_params.num_heads_q = tp_num_heads_;
-    c4_params.num_heads_kv = 1;
-    c4_params.head_dim = head_dim_;
-    c4_params.cu_seqlens_q = as_optional_tensor(dsa.actual_seq_lengths_query);
-    c4_params.cu_seqlens_ori_kv = cu_seqlens_ori_kv_opt;
-    c4_params.cu_seqlens_cmp_kv = empty_int32_opt;
-    c4_params.seqused_q = empty_int32_opt;
-    c4_params.seqused_kv = as_optional_tensor(dsa.actual_seq_lengths_kv);
-    c4_params.batch_size = batch_size;
-    c4_params.max_seqlen_q = max_seqlen_q;
-    c4_params.max_seqlen_kv = max_seqlen_kv;
-    c4_params.ori_topk = 0;
-    c4_params.cmp_topk = sparse_topk;
-    c4_params.cmp_ratio = 4;
-    c4_params.ori_mask_mode = 4;
-    c4_params.cmp_mask_mode = 3;
-    c4_params.ori_win_left = ori_win_left;
-    c4_params.ori_win_right = 0;
-    c4_params.layout_q = "TND";
-    c4_params.layout_kv = layout_kv;
-    c4_params.has_ori_kv = true;
-    c4_params.has_cmp_kv = true;
-    dsa.c4_metadata = xllm::kernel::sparse_attn_sharedkv_metadata(c4_params);
-
-    xllm::kernel::SparseAttnSharedkvMetadataParams c128_params;
-    c128_params.num_heads_q = tp_num_heads_;
-    c128_params.num_heads_kv = 1;
-    c128_params.head_dim = head_dim_;
-    c128_params.cu_seqlens_q = as_optional_tensor(dsa.actual_seq_lengths_query);
-    c128_params.cu_seqlens_ori_kv = cu_seqlens_ori_kv_opt;
-    c128_params.cu_seqlens_cmp_kv = empty_int32_opt;
-    c128_params.seqused_q = empty_int32_opt;
-    c128_params.seqused_kv = as_optional_tensor(dsa.actual_seq_lengths_kv);
-    c128_params.batch_size = batch_size;
-    c128_params.max_seqlen_q = max_seqlen_q;
-    c128_params.max_seqlen_kv = max_seqlen_kv;
-    c128_params.ori_topk = 0;
-    c128_params.cmp_topk = 0;
-    c128_params.cmp_ratio = 128;
-    c128_params.ori_mask_mode = 4;
-    c128_params.cmp_mask_mode = 3;
-    c128_params.ori_win_left = ori_win_left;
-    c128_params.ori_win_right = 0;
-    c128_params.layout_q = "TND";
-    c128_params.layout_kv = layout_kv;
-    c128_params.has_ori_kv = true;
-    c128_params.has_cmp_kv = true;
-    dsa.c128_metadata =
-        xllm::kernel::sparse_attn_sharedkv_metadata(c128_params);
-
-    torch::Tensor query_lens;
-    if (dsa.actual_seq_lengths_query.defined() &&
-        dsa.actual_seq_lengths_query.dim() > 0 &&
-        dsa.actual_seq_lengths_query.size(0) > 1) {
-      query_lens = dsa.actual_seq_lengths_query
-                       .slice(
-                           /*dim=*/0,
-                           /*start=*/1,
-                           /*end=*/dsa.actual_seq_lengths_query.size(0))
-                       .clone();
-    } else if (dsa.seq_lens_q.defined()) {
-      query_lens = dsa.seq_lens_q;
-    }
-
-    torch::Tensor key_lens;
-    if (dsa.seq_lens.defined()) {
-      key_lens = dsa.seq_lens;
-    } else if (dsa.actual_seq_lengths_kv.defined()) {
-      key_lens = dsa.actual_seq_lengths_kv;
-    }
-
-    if (!query_lens.defined() || !key_lens.defined() ||
-        query_lens.numel() == 0 || key_lens.numel() == 0) {
-      return;
-    }
-
-    const int64_t global_index_num_heads =
-        std::max<int64_t>(index_n_heads_ > 0 ? index_n_heads_ : num_heads_, 1);
-    CHECK_EQ(global_index_num_heads % dp_local_tp_size_, 0)
-        << "[DSV4][PrecomputeMetadata] index/global heads must be divisible by "
-           "local tp size. global_index_num_heads="
-        << global_index_num_heads << ", local_tp_size=" << dp_local_tp_size_;
-    const int64_t qli_batch_size = std::max<int64_t>(key_lens.size(0), 1);
-    const int64_t index_head_dim =
-        std::max<int64_t>(index_head_dim_ > 0 ? index_head_dim_ : head_dim_, 1);
-    xllm::kernel::QuantLightningIndexerMetadataParams qli_params;
-    qli_params.num_heads_q = global_index_num_heads;
-    qli_params.num_heads_k = 1;
-    qli_params.head_dim = index_head_dim;
-    qli_params.query_quant_mode = 0;
-    qli_params.key_quant_mode = 0;
-    qli_params.actual_seq_lengths_query = as_optional_tensor(query_lens);
-    qli_params.actual_seq_lengths_key = as_optional_tensor(key_lens);
-    qli_params.batch_size = qli_batch_size;
-    qli_params.max_seqlen_q = max_seqlen_q;
-    qli_params.max_seqlen_k = max_seqlen_kv;
-    qli_params.layout_query = "TND";
-    qli_params.layout_key = "PA_BSND";
-    qli_params.sparse_count = sparse_topk;
-    qli_params.sparse_mode = 3;
-    qli_params.pre_tokens = std::numeric_limits<int64_t>::max();
-    qli_params.next_tokens = std::numeric_limits<int64_t>::max();
-    qli_params.cmp_ratio = 4;
-    qli_params.device = query_lens.device().str();
-    dsa.qli_metadata =
-        xllm::kernel::quant_lightning_indexer_metadata(qli_params);
+    dsa.sparse_metadata_ori_win_left = layer::deepseek_v4_ori_window_left(
+        window_size_, dsa.num_speculative_tokens, use_native_sas);
+    layer::build_deepseek_v4_sparse_metadata(dsa,
+                                             params,
+                                             model_args_,
+                                             tp_num_heads_,
+                                             is_prefill,
+                                             cu_seqlens_ori_kv_override);
   }
 
   torch::Tensor hc_head(const torch::Tensor& x) {
@@ -1769,23 +1603,18 @@ class DeepseekV4ModelImpl
   double hc_eps_ = 0.0;
   double norm_eps_ = 1e-6;
 
-  int64_t num_heads_ = 0;
   int64_t tp_num_heads_ = 0;
-  int64_t dp_local_tp_size_ = 1;
   // Prefill CP geometry. cp_size_ == 1 means CP is off everywhere below.
   int64_t cp_size_ = 1;
   ProcessGroup* cp_group_ = nullptr;
-  int64_t head_dim_ = 0;
   int64_t window_size_ = 128;
-  int64_t index_n_heads_ = 0;
-  int64_t index_head_dim_ = 0;
   int64_t index_topk_ = 512;
   torch::Device device_{torch::kCPU};
 
   ParallelArgs parallel_args_;
   FlashComm1Options flash_comm1_options_;
 
-  bool is_aux_hidden_capture_enabled_ = false;
+  const int32_t num_speculative_tokens_ = 0;
   AuxHiddenCapture aux_capture_;
 
   // DSA cache group info: built once at model init from compress_ratios

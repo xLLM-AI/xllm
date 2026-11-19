@@ -45,10 +45,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   void drain_pending_execution() override;
 
-  bool init_model(const std::string& model_weights_path,
-                  int32_t random_seed,
-                  MasterStatus master_status) override;
-
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
 
   std::optional<ForwardOutput> step(const TargetInput& input) override;
@@ -77,15 +73,16 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   using SpeculativeWorkerImpl<TargetInput>::parallel_args_;
   using SpeculativeWorkerImpl<TargetInput>::set_hierarchy_kv_transfer;
 
-  DraftModelSpecWorkerImpl(
-      const ParallelArgs& parallel_args,
-      const torch::Device& device,
-      const runtime::Options& options,
-      WorkerType worker_type,
-      const ParallelArgs& draft_parallel_args,
-      const runtime::Options& draft_opts,
-      int32_t (*configure_draft_config)(ModelArgs&,
-                                        const runtime::Options&) = nullptr);
+  DraftModelSpecWorkerImpl(const ParallelArgs& parallel_args,
+                           const torch::Device& device,
+                           const runtime::Options& options,
+                           WorkerType worker_type,
+                           const ParallelArgs& draft_parallel_args,
+                           const runtime::Options& draft_opts);
+
+  bool init_model(const std::string& model_weights_path,
+                  int32_t random_seed,
+                  MasterStatus master_status) override;
 
   virtual KVCacheShape draft_kv_cache_shape(
       const KVCacheShape& target_kv_cache_shape) const;
@@ -97,10 +94,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   // MTP-family drafts reserve a pre-head hidden-state placeholder per row.
   virtual int64_t get_embedding_placeholder_size() const { return 0; }
-
-  // Some drafts replay every verified KV position, so retain the full
-  // accepted span when allocating their embedding cache.
-  virtual bool requires_full_target_replay() const { return false; }
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
@@ -120,8 +113,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   void update_decode_step_input(
       TargetInput& input,
       const std::vector<EmbeddingCache::DecodeState>& last_states) const;
-
-  void prepare_draft_input(const TargetInput& input);
 
   std::optional<ForwardOutput> finalize_step_output(
       ForwardOutput output,
@@ -148,8 +139,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
 
-  ModelContext load_model_config(ModelLoader& loader);
-  torch::Tensor load_draft_vocab_mapping(ModelLoader& loader);
   KVCacheCreateOptions build_draft_kv_cache_layout(
       const KVCacheShape& shape) const;
   int64_t draft_num_layers() const;
@@ -158,8 +147,8 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
                              Stream* prepare_stream = nullptr);
   DpEpPaddingCache dp_ep_padding_cache_{2};
 #endif
-  int32_t (*configure_draft_config_)(ModelArgs&, const runtime::Options&);
   std::unique_ptr<EmbeddingCache> embedding_cache_;
+  bool retain_replay_span_ = false;
 
   DraftVocabMapping draft_vocab_;
 

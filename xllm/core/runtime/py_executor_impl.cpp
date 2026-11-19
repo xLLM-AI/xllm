@@ -38,7 +38,6 @@ limitations under the License.
 #include "core/framework/speculative/spec_verify.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "core/platform/platform.h"
 #include "core/runtime/py_attention_metadata.h"
 #include "core/util/pybind_helper.h"
 #include "models/llm/py_causal_lm.h"
@@ -199,13 +198,12 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   // These values belong to the executor, not the checkpoint. In particular,
   // the MTP draft has different speculative options from its target.
   py::dict executor_config = py_causal_lm_->config_dict().attr("copy")();
-  num_speculative_tokens_ =
-      executor_config["num_speculative_tokens"].cast<int32_t>();
   executor_config["enable_disagg_pd"] = options_.enable_disagg_pd();
   executor_config["instance_role"] = options_.instance_role().to_string();
   executor_config["task_type"] = options_.task_type();
   executor_config["max_encoder_cache_size"] = options_.max_encoder_cache_size();
   executor_config["num_speculative_tokens"] = options_.num_speculative_tokens();
+  executor_config["speculative_algorithm"] = options_.speculative_algorithm();
   executor_config["engine_type"] = SpeculativeConfig::uses_ssm_engine(
                                        options_.draft_model_path().value_or(""),
                                        options_.speculative_algorithm(),
@@ -218,11 +216,6 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["enable_schedule_overlap"] =
       options_.enable_schedule_overlap();
   executor_config["is_draft_engine"] = options_.is_draft_engine();
-  executor_config["is_mtp_algorithm"] =
-      SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm());
-  executor_config["is_block_diffusion_algorithm"] =
-      SpeculativeConfig::is_block_diffusion_algorithm(
-          options_.speculative_algorithm());
   executor_config["requires_aux_hidden_capture"] =
       SpeculativeConfig::requires_aux_hidden_capture(
           options_.speculative_algorithm());
@@ -234,15 +227,6 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       ExecutionConfig::get_instance().enable_graph_mm_encoder();
   executor_config["mm_encoder_graph_capture_shapes"] =
       ExecutionConfig::get_instance().mm_encoder_graph_capture_shapes();
-  // DFlash2 defaults to eager in the model config. Enable its independent
-  // full-block ACL runner when the worker requests graph execution.
-  const bool independent_block_graph =
-      Platform::is_npu() && is_dflash2_draft_model_type(args_.model_type()) &&
-      options_.enable_graph() && options_.num_speculative_tokens() > 0;
-  if (independent_block_graph) {
-    executor_config["enable_graph"] = true;
-    executor_config["python_graph_backend"] = "aclgraph";
-  }
   py_executor_ = executor_module.attr("ModelExecutor")(
       py_causal_lm_->python_model(),
       executor_config,
@@ -325,8 +309,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
   bind_kv_caches(kv_caches);
 
-  py::object py_metadata = py::cast(
-      PyAttentionMetadataView(attn_metadata, params, num_speculative_tokens_));
+  py::object py_metadata =
+      py::cast(PyAttentionMetadataView(attn_metadata, params, options_));
   py::object py_input_batch_metadata =
       requires_input_batch_metadata_
           ? py::cast(ExecutionBatchMetadata(params.meta.execution_batch))

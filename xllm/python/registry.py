@@ -34,9 +34,7 @@ def register_model(
     """Register a model class for callers that already imported its module."""
 
     def deco(cls: type[nn.Module]) -> type[nn.Module]:
-        path = (cls.__module__, cls.__name__)
-        for name in names:
-            _REGISTRY[name] = path
+        _register_model_path(cls.__module__, cls.__name__, *names)
         return cls
 
     return deco
@@ -107,19 +105,19 @@ def _register_builtin_models() -> None:
     _register_model_path(
         "xllm.python.models.qwen3_dspark",
         "Qwen3DSparkForCausalLM",
-        "DSparkDraftModel",
+        "qwen3_dspark",
         "Qwen3DSparkModel",
     )
     _register_model_path(
         "xllm.python.models.qwen3_dflash",
         "DFlashQwen3ForCausalLM",
-        "DFlashDraftModel",
+        "qwen3_dflash",
         "DFlashQwen3Model",
     )
     _register_model_path(
         "xllm.python.models.qwen3_dflash2",
         "DFlash2Qwen3ForCausalLM",
-        "DFlash2DraftModel",
+        "qwen3_dflash2",
         "DFlash2Qwen3Model",
     )
     _register_model_path(

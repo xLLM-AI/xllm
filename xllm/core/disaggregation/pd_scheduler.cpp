@@ -802,7 +802,7 @@ void PDScheduler::prefill_send_first_generation() {
         gen->set_dp_rank(sequence->dp_rank());
       }
       if (options_.num_speculative_tokens() > 0 &&
-          SpeculativeConfig::requires_bootstrap_hidden(
+          SpeculativeConfig::is_eagle_family_algorithm(
               SpeculativeConfig::get_instance().speculative_algorithm())) {
         torch::Tensor embedding =
             request->sequences()[0]->get_mtp_bootstrap_embedding();
@@ -1077,11 +1077,9 @@ bool PDScheduler::decode_recv_first_generation(
   }
   request->record_num_prefix_cache_tokens(
       static_cast<size_t>(num_cached_tokens));
-  const bool requires_bootstrap_hidden =
-      options_.num_speculative_tokens() > 0 &&
-      SpeculativeConfig::requires_bootstrap_hidden(
-          SpeculativeConfig::get_instance().speculative_algorithm());
-  if (requires_bootstrap_hidden) {
+  if (options_.num_speculative_tokens() > 0 &&
+      SpeculativeConfig::is_eagle_family_algorithm(
+          SpeculativeConfig::get_instance().speculative_algorithm())) {
     const int32_t slot_id = sequence->get_embedding_block_id();
     if (slot_id < 0) {
       LOG(ERROR) << "Invalid MTP bootstrap slot, request_id: " << req_id;

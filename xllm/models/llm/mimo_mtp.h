@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "core/layers/qwen2_decoder_layer.h"
 #include "llm_model_base.h"
+#include "models/model_registry.h"
 
 // MiMo MTP (Multi-Token Prediction) model implementation
 // Based on Qwen2 architecture with custom MTP layers
@@ -247,36 +248,5 @@ TORCH_MODULE(MiMoMtpForCausalLM);
 
 // register the causal model
 REGISTER_CAUSAL_MODEL(mimo_mtp, MiMoMtpForCausalLM);
-
-// register the model args
-// example config: /root/models2/MiMo-7B-Base/config.json
-REGISTER_MODEL_ARGS(mimo_mtp, [&] {
-  LOAD_ARG_OR(model_type, "model_type", "mimo_mtp");
-  LOAD_ARG_OR(dtype, "torch_dtype", "");
-  LOAD_ARG_OR(vocab_size, "vocab_size", 151680);
-  LOAD_ARG_OR(hidden_size, "hidden_size", 4096);
-  LOAD_ARG_OR(n_layers, "num_hidden_layers", 36);
-  LOAD_ARG_OR(n_heads, "num_attention_heads", 32);
-  LOAD_ARG(n_kv_heads, "num_key_value_heads");
-  LOAD_ARG_OR(hidden_act, "hidden_act", "silu");
-  LOAD_ARG_OR(attention_bias, "attention_bias", true);
-  LOAD_ARG_OR(intermediate_size, "intermediate_size", 11008);
-  LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 32768);
-  LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-5);
-  LOAD_ARG_OR(eos_token_id, "eos_token_id", 151643);
-  LOAD_ARG_OR(rope_theta, "rope_theta", 640000.0f);
-  LOAD_ARG_OR(tie_word_embeddings, "tie_word_embeddings", false);
-  LOAD_ARG_OR(use_sliding_window, "use_sliding_window", false);
-  LOAD_ARG_OR(sliding_window, "sliding_window", 32768);
-  LOAD_ARG_OR(max_window_layers, "max_window_layers", 32);
-
-  LOAD_ARG_OR(num_nextn_predict_layers, "num_nextn_predict_layers", 1);
-
-  LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
-    return args->hidden_size() / args->n_heads();
-  });
-
-  SET_ARG(stop_token_ids, std::unordered_set<int32_t>({args->eos_token_id()}));
-});
 
 }  // namespace xllm

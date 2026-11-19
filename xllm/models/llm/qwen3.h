@@ -43,7 +43,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
 
     layers_.reserve(model_args.n_layers());
     norm_ = register_module("norm", layer::RMSNorm(context));
-    if (!is_dflash2_draft_model_type(model_args.model_type())) {
+    if (model_args.model_type() != "qwen3_dflash2") {
       embed_tokens_ =
           register_module("embed_tokens", layer::WordEmbedding(context));
     }

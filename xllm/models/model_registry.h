@@ -20,6 +20,7 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -82,35 +83,6 @@ struct CausalVLMRegistration {
   int32_t priority = 0;
 };
 
-// Rewrites a target model's args into the registered MTP draft form. The
-// registry owns dispatch so engines never name a concrete MTP model.
-using MtpArgsAdapter =
-    std::function<void(ModelArgs& args, bool is_python_model)>;
-
-using GraphKVCapacityAdapter = std::function<int64_t(const ModelArgs&)>;
-
-enum class MtpModelFamily : int8_t {
-  NONE,
-  GLM5,
-  QWEN35,
-};
-
-enum class GraphContextPolicy : int8_t {
-  MAX_CONTEXT,
-  QWEN_FULL_ATTENTION,
-  KPOOL_FIXED,
-};
-
-struct MtpModelCapabilities {
-  bool native_draft_requires_accepted_span_replay = false;
-  bool allow_tail_fallback = false;
-  MtpModelFamily model_family = MtpModelFamily::NONE;
-  bool supports_causal_replay = false;
-  bool supports_expanded_replay = false;
-  bool supports_grouped_graph = false;
-  GraphContextPolicy graph_context_policy = GraphContextPolicy::MAX_CONTEXT;
-};
-
 // TODO: add default args loader.
 struct ModelMeta {
   std::unordered_map<std::string, CausalLMRegistration> causal_lm_factories;
@@ -121,9 +93,6 @@ struct ModelMeta {
   ModelArgsLoader model_args_loader;
   TokenizerArgsLoader tokenizer_args_loader;
   bool supports_dcp = false;
-  MtpModelCapabilities mtp_capabilities;
-  MtpArgsAdapter mtp_args_adapter;
-  GraphKVCapacityAdapter graph_kv_capacity_adapter;
 };
 
 // Model config names may be aliases, but registry lookups use one canonical
@@ -192,26 +161,6 @@ class ModelRegistry {
 
   static void register_dcp_capability(const std::string& name);
   static bool supports_dcp(const std::string& name);
-
-  static void register_mtp_args_adapter(const std::string& name,
-                                        MtpArgsAdapter adapter);
-
-  static void register_mtp_capabilities(const std::string& name,
-                                        MtpModelCapabilities capabilities);
-
-  static MtpModelCapabilities get_mtp_capabilities(const std::string& name);
-
-  static void register_graph_kv_capacity(const std::string& name,
-                                         GraphKVCapacityAdapter adapter);
-
-  static int64_t get_graph_kv_capacity(const std::string& name,
-                                       const ModelArgs& args,
-                                       int64_t default_capacity);
-
-  static void configure_mtp_args(ModelArgs& args,
-                                 std::string_view algorithm,
-                                 bool is_draft_engine,
-                                 bool is_python_model);
 
   static CausalLMFactory get_causallm_factory(const std::string& name);
 
@@ -432,27 +381,24 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 #define REGISTER_SPEECH_MODEL(ModelType, SpeechModelClass) \
   REGISTER_SPEECH_MODEL_WITH_VARNAME(ModelType, ModelType, SpeechModelClass)
 
-// Macro to register a model args loader with the ModelRegistry
-#define REGISTER_MODEL_ARGS_LOADER_WITH_VARNAME(VarName, ModelType, Loader) \
-  const bool VarName##_args_loader_registered = []() {                      \
-    ModelRegistry::register_model_args_loader(#ModelType, Loader);          \
-    return true;                                                            \
+#define REGISTER_MODEL_ARGS(ModelType, ...)                           \
+  const bool CONCAT_MODEL_REGISTRATION(xllm_model_args_registration_, \
+                                       __COUNTER__) = [] {            \
+    ModelRegistry::register_model_args_loader(                        \
+        #ModelType, [](const JsonReader& json, ModelArgs* args) {     \
+          UNUSED_PARAMETER(json);                                     \
+          UNUSED_PARAMETER(args);                                     \
+          return [](auto&& load) {                                    \
+            if constexpr (std::is_void_v<decltype(load())>) {         \
+              load();                                                 \
+              return true;                                            \
+            } else {                                                  \
+              return load();                                          \
+            }                                                         \
+          }(__VA_ARGS__);                                             \
+        });                                                           \
+    return true;                                                      \
   }()
-
-#define REGISTER_MODEL_ARGS_LOADER(ModelType, Loader) \
-  REGISTER_MODEL_ARGS_LOADER_WITH_VARNAME(ModelType, ModelType, Loader)
-
-#define REGISTER_MODEL_ARGS_WITH_VARNAME(VarName, ModelType, ...)       \
-  REGISTER_MODEL_ARGS_LOADER_WITH_VARNAME(                              \
-      VarName, ModelType, [](const JsonReader& json, ModelArgs* args) { \
-        UNUSED_PARAMETER(json);                                         \
-        UNUSED_PARAMETER(args);                                         \
-        __VA_ARGS__();                                                  \
-        return true;                                                    \
-      })
-
-#define REGISTER_MODEL_ARGS(ModelType, ...) \
-  REGISTER_MODEL_ARGS_WITH_VARNAME(ModelType, ModelType, __VA_ARGS__)
 
 // Macro to register a tokenizer args loader with the ModelRegistry
 #define REGISTER_TOKENIZER_ARGS_LOADER_WITH_VARNAME(                   \

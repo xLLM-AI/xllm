@@ -55,7 +55,7 @@ class SchedulerMetrics final {
 
   KVCacheManager* kv_cache_manager_;
   int32_t dp_size_;
-  int32_t num_speculative_tokens_;
+  int32_t num_speculative_tokens_ = 0;
   bool collect_recent_latency_;
   std::vector<int64_t> recent_ttft_;
   std::vector<int64_t> recent_tbt_;

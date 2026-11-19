@@ -22,15 +22,12 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/batch/decode_input_builder.h"
 #include "core/framework/config/execution_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/model/model_type.h"
-#include "core/framework/speculative/draft_config.h"
 #include "core/framework/speculative/verify_layout.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/util/tensor_helper.h"
-#include "framework/model/aux_hidden_capture.h"
 #include "framework/model_loader/model_loader.h"
 #include "runtime/decode_graph_bucket.h"
 #include "runtime/llm_worker_impl.h"
@@ -96,9 +93,8 @@ void prepare_dummy_input(VlmForwardInput& input,
   prepare_dummy_input_impl(input, context, device);
 }
 
-namespace {
 template <typename Params>
-bool should_run_speculative_decode_impl(const Params& params) {
+bool should_run_speculative_decode(const Params& params) {
   if (!params.meta.batch_forward_type.is_decode()) {
     return false;
   }
@@ -132,34 +128,19 @@ bool should_run_speculative_decode_impl(const Params& params) {
   return any_active;
 }
 
+template bool should_run_speculative_decode(const LlmModelParams&);
+template bool should_run_speculative_decode(const VlmModelParams&);
+
 template <typename Params>
-void scale_speculative_parallel_token_counts_impl(
-    Params& params,
-    int32_t num_speculative_tokens) {
-  scale_parallel_token_counts(params.parallel, num_speculative_tokens + 1);
+void scale_decode_parallel_token_counts(Params& params,
+                                        int32_t num_decoding_tokens) {
+  scale_parallel_token_counts(params.parallel, num_decoding_tokens);
   params.expert.eplb_decode_token_mask = eplb::expand_decode_token_mask(
-      params.expert.eplb_decode_token_mask, num_speculative_tokens + 1);
+      params.expert.eplb_decode_token_mask, num_decoding_tokens);
 }
 
-}  // namespace
-
-bool should_run_speculative_decode(const LlmModelParams& params) {
-  return should_run_speculative_decode_impl(params);
-}
-
-bool should_run_speculative_decode(const VlmModelParams& params) {
-  return should_run_speculative_decode_impl(params);
-}
-
-void scale_speculative_parallel_token_counts(LlmModelParams& params,
-                                             int32_t num_speculative_tokens) {
-  scale_speculative_parallel_token_counts_impl(params, num_speculative_tokens);
-}
-
-void scale_speculative_parallel_token_counts(VlmModelParams& params,
-                                             int32_t num_speculative_tokens) {
-  scale_speculative_parallel_token_counts_impl(params, num_speculative_tokens);
-}
+template void scale_decode_parallel_token_counts(LlmModelParams&, int32_t);
+template void scale_decode_parallel_token_counts(VlmModelParams&, int32_t);
 
 template <typename TargetInput>
 SpeculativeWorkerImpl<TargetInput>::SpeculativeWorkerImpl(
@@ -261,35 +242,10 @@ bool SpeculativeWorkerImpl<TargetInput>::init_model(
   if (impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
     auto loader = ModelLoader::create(model_weights_path);
     auto args = loader->model_args();
-    const std::string& algorithm = impl_->options().speculative_algorithm();
-    if (SpeculativeConfig::is_block_diffusion_algorithm(algorithm)) {
-      CHECK(impl_->options().draft_model_path().has_value())
-          << "block-diffusion speculative decoding requires --draft_model.";
-      args.layers_to_capture(
-          read_capture_layer_ids(*impl_->options().draft_model_path()));
-    }
-#if defined(USE_NPU)
-    if (SpeculativeConfig::requires_aux_hidden_capture(algorithm) &&
-        args.layers_to_capture().empty()) {
-      std::vector<int32_t> layers;
-      if (SpeculativeConfig::is_eagle3_algorithm(algorithm) &&
-          impl_->options().draft_model_path().has_value()) {
-        layers =
-            read_capture_layer_ids(*impl_->options().draft_model_path(), false);
-      }
-      if (layers.empty()) {
-        layers = AuxHiddenCapture::legacy_default_capture_layer_ids(
-            static_cast<int32_t>(args.n_layers()));
-      }
-      args.layers_to_capture(std::move(layers));
-    }
-#endif
+    configure_target_model_args(args);
     auto tokenizer = impl_->load_tokenizer(*loader);
-    auto context =
-        impl_->load_model_config(std::move(args),
-                                 loader->quant_args(),
-                                 impl_->options().num_speculative_tokens(),
-                                 tokenizer.get());
+    auto context = impl_->load_model_config(
+        std::move(args), loader->quant_args(), tokenizer.get());
     result = impl_->init_model(std::move(loader),
                                std::move(context),
                                std::move(tokenizer),
@@ -451,20 +407,19 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   validate_input.runtime.device_tensors_ready = false;
   auto& input_params = validate_input.input_params;
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
-  const int32_t num_sequences = input_params.meta.num_sequences;
-  const int32_t num_val_tokens = num_speculative_tokens + 1;
-  const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
-  const int32_t block_size = options_.block_size();
   // Hybrid targets (for example Qwen3.8 GDN) mark validation as spec-verify
   // before entering this generic builder.  They must keep one sequence row
   // with an N+1-token query so recurrent state is checkpointed and committed
   // by the model's spec-verify kernel instead of being expanded into N+1
   // independent decode rows.
-  const bool use_chunked_spec_verify = input.input_params.is_spec_verify;
+  const DecodeExpansionOptions decode_options =
+      make_verify_layout(num_speculative_tokens,
+                         options_.block_size(),
+                         input.input_params.is_spec_verify);
+  const int32_t num_val_tokens = decode_options.num_decoding_tokens();
+  const int32_t total_num_val_tokens =
+      input_params.meta.num_sequences * num_val_tokens;
   DecodeBatchContext batch_ctx = make_decode_batch_context(input);
-
-  DecodeExpansionOptions decode_options = make_verify_layout(
-      num_speculative_tokens, block_size, use_chunked_spec_verify);
   DecodeBuildBuffers buf = expand_decode_inputs(batch_ctx, decode_options);
 
   build_decode_input(validate_input, buf, decode_options, device_);
@@ -475,7 +430,7 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
                                     total_num_val_tokens,
                                     device_);
 
-  scale_speculative_parallel_token_counts(input_params, num_speculative_tokens);
+  scale_decode_parallel_token_counts(input_params, num_val_tokens);
   validate_input.runtime.device_tensors_ready = true;
 }
 

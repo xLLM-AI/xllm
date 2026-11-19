@@ -214,19 +214,24 @@ void check_safetensors_cleanup(::Status status,
 
 }  // namespace
 
-HFModelLoader::HFModelLoader(std::string model_weights_path)
-    : HFModelLoader(std::move(model_weights_path),
-                    ModelConfig::get_instance().backend()) {}
-
 HFModelLoader::HFModelLoader(std::string model_weights_path,
-                             const std::string& backend)
+                             const std::string& backend,
+                             std::string_view speculative_algorithm,
+                             std::string_view reference_model_weights_path)
     : model_weights_path_(std::move(model_weights_path)) {
   CHECK(load_args(model_weights_path_, backend))
       << "Failed to load model args from " << model_weights_path_;
-  // try to load safetensors first
+  if (!speculative_algorithm.empty()) {
+    configure_draft_model_args(args_,
+                               speculative_algorithm,
+                               ModelConfig::is_python_model_impl(
+                                   ModelConfig::get_instance().model_impl()));
+    if (reference_model_weights_path != model_weights_path_) {
+      reference_model_weights_path_ = reference_model_weights_path;
+    }
+  }
   for (const auto& entry :
        std::filesystem::directory_iterator(model_weights_path_)) {
-    // load bin or safe tensors
     if (entry.path().extension() == ".safetensors") {
       model_weights_files_.push_back(entry.path().string());
     }
@@ -249,17 +254,15 @@ std::unique_ptr<Tokenizer> HFModelLoader::tokenizer() const {
 
 std::vector<std::unique_ptr<StateDict>>& HFModelLoader::get_state_dicts() {
   if (state_dicts_.empty()) {
-    // load state dict
-    state_dicts_.reserve(model_weights_files_.size());
-    auto file_cnt = model_weights_files_.size();
+    const auto file_cnt = model_weights_files_.size();
     BlockingCounter counter(file_cnt);
-    state_dicts_.resize(model_weights_files_.size());
-    for (int file_id = 0; file_id < file_cnt; file_id++) {
-      threadpool_->schedule([this, file_id, &counter]() mutable {
+    state_dicts_.resize(file_cnt);
+    for (size_t file_id = 0; file_id < file_cnt; ++file_id) {
+      threadpool_->schedule([this, file_id, &counter]() {
         LOG(INFO) << "Loading model weights from "
                   << model_weights_files_[file_id];
-        state_dicts_[file_id] = std::move(
-            StateDictFromSafeTensor::load(model_weights_files_[file_id]));
+        state_dicts_[file_id] =
+            StateDictFromSafeTensor::load(model_weights_files_[file_id]);
         counter.decrement_count();
       });
     }

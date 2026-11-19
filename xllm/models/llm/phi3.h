@@ -26,10 +26,10 @@ namespace xllm {
 // Phi-3 executes through PyCausalLM; no native causal-model factory is needed.
 REGISTER_MODEL_BACKEND(phi3, "llm");
 
-REGISTER_MODEL_ARGS_LOADER(phi3, [](const JsonReader& json, ModelArgs* args) {
+REGISTER_MODEL_ARGS(phi3, [&] {
   LOAD_ARG_OR(model_type, "model_type", "phi3");
   LOAD_ARG_OR(dtype, "torch_dtype", "bfloat16");
-  LOAD_ARG_OR(dtype, "dtype", args->dtype());
+  LOAD_ARG(dtype, /*json_name=*/"dtype");
   LOAD_ARG_OR(vocab_size, "vocab_size", 32064);
   LOAD_ARG_OR(hidden_size, "hidden_size", 3072);
   LOAD_ARG_OR(hidden_act, "hidden_act", "silu");

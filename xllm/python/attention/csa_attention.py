@@ -77,48 +77,6 @@ def _uses_prefill_attention(metadata: AttentionMetadata) -> bool:
     return is_chunked_prefill or (is_prefill and not is_dummy)
 
 
-def _deepseek_v4_ori_window_left(
-    window_size: int,
-    block_size: int,
-    use_native_dspark_sas: bool,
-) -> int:
-    """Window geometry shared with layer::deepseek_v4_ori_window_left."""
-    return int(torch.ops.xllm_ops.deepseek_v4_ori_window_left(window_size, block_size, use_native_dspark_sas))
-
-
-def _cached_ori_window_left(
-    window_size: int,
-    block_size: int,
-    native_sas_by_prefill: dict[bool, bool],
-) -> dict[bool, int]:
-    """Resolve the C++ window geometry once per prefill/decode variant."""
-    return {
-        use_prefill: _deepseek_v4_ori_window_left(window_size, block_size, native_sas_by_prefill[use_prefill])
-        for use_prefill in (False, True)
-    }
-
-
-def _build_dspark_swa_indices(
-    block_table: torch.Tensor,
-    query_cu_seq_lens: torch.Tensor,
-    seq_lens: torch.Tensor,
-    window_size: int,
-    block_size: int,
-    cache_block_size: int,
-) -> torch.Tensor:
-    """Build the explicit ring-buffer slots consumed by native DSpark SAS."""
-    # Same index math as layer::build_dspark_swa_indices (C++ model path);
-    # exposed as xllm_ops::build_dspark_swa_indices so both paths share it.
-    return torch.ops.xllm_ops.build_dspark_swa_indices(
-        block_table,
-        query_cu_seq_lens,
-        seq_lens,
-        window_size,
-        block_size,
-        cache_block_size,
-    )
-
-
 def _attention_type_for_compress_ratio(compress_ratio: int) -> str:
     attention_types = {
         1: SLIDING_ATTENTION,
@@ -165,7 +123,7 @@ class DsaAttentionBackend(AttentionBackend):
         rope_head_dim: int,
         device: torch.device,
         dtype: torch.dtype,
-        block_size: int = 0,
+        num_speculative_tokens: int = 0,
         dspark_use_native_sas: bool = False,
     ) -> None:
         self.caches_info, self.group_infos = build_cache_specs(compress_ratios, window_size, n_layers)
@@ -180,7 +138,8 @@ class DsaAttentionBackend(AttentionBackend):
         self.device = device
         self.dtype = dtype
         self.scale = attn_head_dim**-0.5
-        self.block_size = block_size
+        self.num_speculative_tokens = num_speculative_tokens
+        self._dspark_use_native_sas = dspark_use_native_sas
         self._dspark_swa_location: tuple[int, int, int] | None = None
         for layer_id, layer_caches in enumerate(self.caches_info):
             for cache_id, cache_info in enumerate(layer_caches):
@@ -192,21 +151,14 @@ class DsaAttentionBackend(AttentionBackend):
 
         self._kv_caches: list[LayerCache] = []
         self._metadata: AttentionMetadata | None = None
-        # The geometry below is fixed after __init__; resolve the shared C++
-        # gate once per variant so hot paths do not pay a torch.ops dispatch
-        # per layer per step.
-        self._native_sas_by_prefill = {
-            use_prefill: bool(
-                torch.ops.xllm_ops.deepseek_v4_use_native_sas(block_size, dspark_use_native_sas, use_prefill)
+        self._ori_win_left_by_prefill = {
+            use_prefill: int(
+                torch.ops.xllm_ops.deepseek_v4_ori_window_left(
+                    window_size, num_speculative_tokens, dspark_use_native_sas and not use_prefill
+                )
             )
             for use_prefill in (False, True)
         }
-        self._ori_win_left_by_prefill = _cached_ori_window_left(window_size, block_size, self._native_sas_by_prefill)
-
-    def _use_native_sas(self, use_prefill: bool) -> bool:
-        return self._native_sas_by_prefill[use_prefill]
-
-    # -- AttentionBackend interface -----------------------------------------
 
     @property
     def uses_executor_cp_context(self) -> bool:
@@ -793,7 +745,7 @@ class DsaAttentionBackend(AttentionBackend):
         sinks = getattr(layer, "attn_sink", None) if getattr(layer, "attn_sink_loaded", False) else None
         if sinks is not None:
             sinks = sinks.to(q.device, dtype=torch.float32).contiguous()
-        use_native_sas = self._use_native_sas(use_prefill_attn)
+        use_native_sas = self._dspark_use_native_sas and not use_prefill_attn
         ori_win_left = self._ori_win_left_by_prefill[use_prefill_attn]
         metadata_ori_win_left = getattr(compressed_metadata, "sparse_metadata_ori_win_left", ori_win_left)
         if metadata_ori_win_left != ori_win_left:
@@ -956,7 +908,7 @@ class DsaAttentionBackend(AttentionBackend):
 
     def _build_dspark_swa_metadata(self, compressed_metadata: DsaMetadata) -> None:
         compressed_metadata.explicit_swa_indices = None
-        if not self._use_native_sas(use_prefill=False):
+        if not self._dspark_use_native_sas:
             return
         if self._dspark_swa_location is None:
             raise RuntimeError("Native DeepSeek-V4 DSpark requires an SWA block table")
@@ -969,12 +921,12 @@ class DsaAttentionBackend(AttentionBackend):
         block_table = layer_block_tables[cache_id]
         if block_table is None or block_table.numel() == 0:
             return
-        compressed_metadata.explicit_swa_indices = _build_dspark_swa_indices(
+        compressed_metadata.explicit_swa_indices = torch.ops.xllm_ops.build_dspark_swa_indices(
             block_table,
             compressed_metadata.actual_seq_lengths_query,
             compressed_metadata.actual_seq_lengths_kv,
             self.window_size,
-            self.block_size,
+            self.num_speculative_tokens,
             cache_block_size,
         )
 
@@ -1194,6 +1146,8 @@ def _scatter_by_slot(
     cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     value: torch.Tensor,
+    *,
+    use_padding_slot: bool = False,
 ) -> None:
     """Python port of ``scatter_by_slot`` (deepseek_sparse_attention.cpp:200).
 
@@ -1227,7 +1181,7 @@ def _scatter_by_slot(
         safe_slots = slots_slice.clamp_min(0)
         updates = value_2d[:update_rows].to(cache.dtype)
         context = get_forward_context_or_none()
-        if context is not None and context.acl_graph is not None:
+        if use_padding_slot or (context is not None and context.acl_graph is not None):
             # Graph padding maps to reserved block 0. Avoid IndexSelect in the
             # captured path; it is not reliably capturable on NPU.
             safe_values = updates

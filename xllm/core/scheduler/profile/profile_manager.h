@@ -126,13 +126,7 @@ class ProfileManager {
   double predict_step_time(Sequence* sequence,
                            bool if_need_add_constant_term = true,
                            bool force_use_prefill_predictor = false);
-  // for single batch or sequences
-  double predict_step_time(int32_t length,
-                           int32_t prefix_length,
-                           int32_t batch_size);
 
-  double predict_step_time(const std::vector<int32_t>& length_vec,
-                           const std::vector<int32_t>& prefix_length_vec);
   // Generate a request of token_length and prefix_length, finally
   // executing and returning the inference time.
   double run_request(int32_t token_length,
@@ -140,8 +134,6 @@ class ProfileManager {
                      int32_t batch_size = 1,
                      int32_t extra_token_length = 0,
                      bool is_graph_warmup = true);
-  double run_request(const std::vector<int32_t>& token_length_vec,
-                     const std::vector<int32_t>& prefix_length_vec);
 
   // Generate a batch of decode requests in DECODE stage and execute one decode
   // step, then return the step latency.
@@ -162,8 +154,6 @@ class ProfileManager {
   double get_constant_overhead();
 
   int32_t get_quadratic_root(Sequence* sequence, double budget);
-
-  std::vector<double> get_coefficients(bool is_prefill = true);
 
   void profile_step_time(bool if_dump_to_file);
 
@@ -192,10 +182,6 @@ class ProfileManager {
                                         int32_t total_length);
 
   std::string generate_filename(const std::string& file_suffix);
-
-  void eval_sequence_latency_prediction();
-
-  void eval_batch_latency_prediction(const std::string mode);
 
   void profile_token_budget();
 

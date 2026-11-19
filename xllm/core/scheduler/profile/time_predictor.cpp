@@ -152,14 +152,6 @@ void TimePredictor::fit_for_prefill(
   check_coefficients_non_neg(n);
 }
 
-std::vector<double> TimePredictor::get_coefficients() {
-  std::vector<double> coeffs;
-  for (int32_t i = 0; i < coefficients_.size(); ++i) {
-    coeffs.push_back(coefficients_(i));
-  }
-  return coeffs;
-}
-
 double TimePredictor::get_constant_overhead() {
   double result = coefficients_(0);
   if (result < 0) {

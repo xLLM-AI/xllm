@@ -26,8 +26,8 @@ limitations under the License.
 #include "core/common/options.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/model_loader/dit_model_discovery.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "llm/py_causal_lm.h"
@@ -392,14 +392,13 @@ void ModelRegistry::register_multimodal_processor_factory(
 
 void ModelRegistry::register_model_args_loader(const std::string& name,
                                                ModelArgsLoader loader) {
-  ModelRegistry* instance = get_instance();
-
-  if (instance->model_registry_[name].model_args_loader != nullptr) {
+  auto& model = get_instance()->model_registry_[name];
+  if (model.model_args_loader) {
     SAFE_LOG_WARNING("model args loader for " << name
                                               << " already registered.");
-  } else {
-    instance->model_registry_[name].model_args_loader = loader;
+    return;
   }
+  model.model_args_loader = std::move(loader);
 }
 
 void ModelRegistry::register_tokenizer_args_loader(const std::string& name,
@@ -494,9 +493,10 @@ SpeechModelFactory ModelRegistry::get_speech_model_factory(
 }
 
 ModelArgsLoader ModelRegistry::get_model_args_loader(const std::string& name) {
-  ModelRegistry* instance = get_instance();
-
-  return instance->model_registry_[name].model_args_loader;
+  const auto& models = get_instance()->model_registry_;
+  const auto model = models.find(name);
+  return model == models.end() ? ModelArgsLoader{}
+                               : model->second.model_args_loader;
 }
 
 TokenizerArgsLoader ModelRegistry::get_tokenizer_args_loader(
@@ -592,60 +592,6 @@ std::string resolve_dit_pipeline_type(
 }
 
 }  // namespace util
-
-void ModelRegistry::register_mtp_args_adapter(const std::string& name,
-                                              MtpArgsAdapter adapter) {
-  get_instance()->model_registry_[name].mtp_args_adapter = std::move(adapter);
-}
-
-void ModelRegistry::register_mtp_capabilities(
-    const std::string& name,
-    MtpModelCapabilities capabilities) {
-  get_instance()->model_registry_[name].mtp_capabilities = capabilities;
-}
-
-MtpModelCapabilities ModelRegistry::get_mtp_capabilities(
-    const std::string& name) {
-  const auto& models = get_instance()->model_registry_;
-  const auto entry = models.find(name);
-  if (entry == models.end()) {
-    return MtpModelCapabilities();
-  }
-  return entry->second.mtp_capabilities;
-}
-
-void ModelRegistry::register_graph_kv_capacity(const std::string& name,
-                                               GraphKVCapacityAdapter adapter) {
-  get_instance()->model_registry_[name].graph_kv_capacity_adapter =
-      std::move(adapter);
-}
-
-int64_t ModelRegistry::get_graph_kv_capacity(const std::string& name,
-                                             const ModelArgs& args,
-                                             int64_t default_capacity) {
-  const auto& registry = get_instance()->model_registry_;
-  const auto it = registry.find(name);
-  if (it == registry.end() || !it->second.graph_kv_capacity_adapter) {
-    return default_capacity;
-  }
-  return it->second.graph_kv_capacity_adapter(args);
-}
-
-void ModelRegistry::configure_mtp_args(ModelArgs& args,
-                                       std::string_view algorithm,
-                                       bool is_draft_engine,
-                                       bool is_python_model) {
-  if (!is_draft_engine || !SpeculativeConfig::is_mtp_algorithm(algorithm)) {
-    return;
-  }
-  const auto& models = get_instance()->model_registry_;
-  const auto entry =
-      models.find(canonical_model_registration_name(args.model_type()));
-  if (entry == models.end() || !entry->second.mtp_args_adapter) {
-    return;
-  }
-  entry->second.mtp_args_adapter(args, is_python_model);
-}
 
 std::string ModelRegistry::get_model_backend(const std::string& name) {
   ModelRegistry* instance = get_instance();
@@ -805,7 +751,7 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
 
   if (ModelConfig::is_python_model_impl(model_impl)) {
     std::string python_model_name = context.get_model_args().model_type();
-    if (is_glm5_next_target_model_type(python_model_name)) {
+    if (is_glm5_next_model(python_model_name)) {
       python_model_name = "glm5_next_vl";
     } else {
       python_model_name = canonical_model_registration_name(python_model_name);

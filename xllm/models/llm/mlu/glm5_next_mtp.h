@@ -24,7 +24,6 @@ limitations under the License.
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/layers/common/attention_metadata.h"
-#include "core/util/env_var.h"
 #include "models/llm/llm_model_base.h"
 #include "models/llm/mlu/deepseek_mtp.h"
 #include "models/llm/mlu/glm5_next_graph.h"
@@ -43,28 +42,27 @@ class Glm5NextMtpForCausalLMImpl final
                   << "Native MLU GLM5 MTP requires a full target checkpoint "
                      "with an appended MTP layer; exported draft checkpoints "
                      "are not supported.";
-              CHECK_EQ(args.n_layers(), 1);
-              CHECK_EQ(args.num_nextn_predict_layers(), 1);
               return context;
-            }()),
-        mtp_layer_prefix_(
-            "layers." +
-            std::to_string(context.get_model_args().mtp_start_layer_idx()) +
-            ".") {}
+            }()) {}
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
-    LlmForCausalLMImplBase<DeepseekMtpModel>::load_lm_head(loader, prefix);
-
+    const auto mtp_layer_idx = loader->model_args().mtp_start_layer_idx();
+    const std::string mtp_layer_prefix =
+        "layers." + std::to_string(mtp_layer_idx) + ".";
+    const std::string head_suffix =
+        tie_word_embeddings_ ? "embed_tokens." : "shared_head.head.";
+    const std::vector<std::string> head_prefixes{
+        "model.language_model." + mtp_layer_prefix + head_suffix,
+        prefix + mtp_layer_prefix + head_suffix};
     const std::vector<std::string> prefixes{"model.language_model.", prefix};
     for (const auto& state_dict : loader->get_state_dicts()) {
-      // The appended layer lives inside the target checkpoint, so try the
-      // multimodal language-model root before the plain model root.
+      lm_head_->load_state_dict(
+          state_dict->get_dict_with_prefix(head_prefixes));
       StateDict model_state = state_dict->get_dict_with_prefix(prefixes);
       this->model_->load_state_dict(model_state);
-      StateDict embed_tokens =
-          model_state.get_dict_with_prefix(mtp_layer_prefix_ + "embed_tokens.");
-      this->model_->get_word_embedding()->load_state_dict(embed_tokens);
+      this->model_->get_word_embedding()->load_state_dict(
+          model_state.get_dict_with_prefix(mtp_layer_prefix + "embed_tokens."));
     }
     CHECK(this->model_->get_word_embedding()->is_weight_loaded())
         << "Native MLU GLM5 MTP checkpoint is missing "
@@ -73,16 +71,6 @@ class Glm5NextMtpForCausalLMImpl final
         << "Native MLU GLM5 MTP checkpoint is missing appended-layer "
            "shared_head.head (lm_head) weights";
     this->model_->verify_loaded_weights();
-  }
-
-  void load_lm_head(const StateDict& state_dict,
-                    const std::string& prefix) override {
-    const std::string suffix =
-        tie_word_embeddings_ ? "embed_tokens." : "shared_head.head.";
-    const std::vector<std::string> prefixes{
-        "model.language_model." + mtp_layer_prefix_ + suffix,
-        prefix + mtp_layer_prefix_ + suffix};
-    lm_head_->load_state_dict(state_dict.get_dict_with_prefix(prefixes));
   }
 
   bool requires_graph_forward_metadata() override { return true; }
@@ -99,29 +87,8 @@ class Glm5NextMtpForCausalLMImpl final
     CHECK(graph_state != nullptr) << "GLM5 requires per-graph metadata state";
     graph_state->prepare(positions, params);
   }
-
- private:
-  std::string mtp_layer_prefix_;
 };
 TORCH_MODULE(Glm5NextMtpForCausalLM);
-
-inline int64_t fixed_graph_capacity(const ModelArgs& args) {
-  constexpr int kDefaultGraphHistoryCapacity = 32768;
-  int64_t capacity = xllm::util::get_int_env("XLLM_GRAPH_INDEX_HISTORY_MAX_KV",
-                                             kDefaultGraphHistoryCapacity);
-  CHECK_GT(capacity, 0) << "XLLM_GRAPH_INDEX_HISTORY_MAX_KV must be positive";
-  if (args.max_position_embeddings() > 0) {
-    capacity = std::min(capacity, args.max_position_embeddings());
-  }
-  return capacity;
-}
-
-const bool glm5_next_mtp_capabilities_registered = []() {
-  ModelRegistry::register_graph_kv_capacity("glm5_next", &fixed_graph_capacity);
-  ModelRegistry::register_graph_kv_capacity("glm5_next_mtp",
-                                            &fixed_graph_capacity);
-  return true;
-}();
 
 REGISTER_CAUSAL_MODEL(glm5_next_mtp, Glm5NextMtpForCausalLM);
 

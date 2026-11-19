@@ -42,14 +42,13 @@ void prepare_dummy_input(VlmForwardInput& input,
 
 // Returns whether this rank may execute the multi-step speculative decode
 // plan for the current global DP batch.
-bool should_run_speculative_decode(const LlmModelParams& params);
-bool should_run_speculative_decode(const VlmModelParams& params);
+template <typename Params>
+bool should_run_speculative_decode(const Params& params);
 
 // Keep padded and raw DP token-count views in the same speculative layout.
-void scale_speculative_parallel_token_counts(LlmModelParams& params,
-                                             int32_t num_speculative_tokens);
-void scale_speculative_parallel_token_counts(VlmModelParams& params,
-                                             int32_t num_speculative_tokens);
+template <typename Params>
+void scale_decode_parallel_token_counts(Params& params,
+                                        int32_t num_decoding_tokens);
 
 // Shared tail of run_validate: marks the output as a speculative decode
 // verify result, attaches the row metadata, clears embeddings, and installs
@@ -172,6 +171,8 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   bool prepare_model_decode_continuation(
       TargetInput& inputs,
       const ForwardOutput& prior_output) override;
+
+  virtual void configure_target_model_args(ModelArgs&) const {}
 
   // Algorithm-specific virtual methods for subclasses to implement
   virtual std::optional<ForwardOutput> step_prefill(

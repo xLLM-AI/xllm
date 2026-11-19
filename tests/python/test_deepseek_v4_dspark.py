@@ -139,7 +139,6 @@ def test_dspark_config_builds_only_draft_layers() -> None:
     assert model.cfg.n_layers == 3
     assert model.cfg.n_hash_layers == 0
     assert model.cfg.compress_ratios == [1, 1, 1]
-    assert model.cfg.dspark_use_native_sas is False
     assert len(model.model.layers) == 3
     assert model.model.main_proj.in_features == 24
     assert model.model.main_proj.out_features == 8

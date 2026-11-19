@@ -190,7 +190,6 @@ class TestCreateAttentionBackend:
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["device"] is device
         assert backend.init_kwargs["attn_head_dim"] == 512
-        assert backend.init_kwargs["block_size"] == 0
         assert backend.init_kwargs["dspark_use_native_sas"] is False
         assert backend.init_kwargs["n_layers"] == 3
         assert backend.init_kwargs["compress_ratios"] == [1, 4, 128]
@@ -209,13 +208,15 @@ class TestCreateAttentionBackend:
             "n_layers": 3,
             "window_size": 128,
             "block_size": 5,
+            "num_speculative_tokens": 3,
             "dspark_use_native_sas": True,
         }
 
         with patch.dict(sys.modules, {module.__name__: module}):
             backend = _create_attention_backend(attn, torch.device("npu"), torch.bfloat16, config)
 
-        assert backend.init_kwargs["block_size"] == 5
+        assert isinstance(backend, StubAttentionBackend)
+        assert backend.init_kwargs["num_speculative_tokens"] == config["num_speculative_tokens"]
         assert backend.init_kwargs["dspark_use_native_sas"] is True
 
     @patch(
@@ -1340,7 +1341,7 @@ def test_cp_admission_preserves_model_specific_kv_support(
     config = {
         "model_type": model_type,
         "is_draft_engine": is_draft,
-        "is_mtp_algorithm": model_type == "glm_moe_dsa_mtp",
+        "speculative_algorithm": "mtp" if model_type == "glm_moe_dsa_mtp" else "",
         "num_speculative_tokens": speculative_tokens,
         "cp_size": 2,
         "kv_split_size": kv_split,
@@ -1359,7 +1360,7 @@ def test_glm_cp_draft_admission_requires_mtp_draft_engine(is_draft: bool, algori
     config = {
         "model_type": "glm_moe_dsa_mtp",
         "is_draft_engine": is_draft,
-        "is_mtp_algorithm": algorithm == "mtp",
+        "speculative_algorithm": algorithm,
         "cp_size": 2,
         "kv_split_size": 1,
     }
@@ -2016,7 +2017,7 @@ def test_qwen_draft_prefix_capacity_reaches_backend_and_decode_graph(draft_token
     config = {
         "model_type": "qwen3_5_mtp",
         "is_draft_engine": True,
-        "is_mtp_algorithm": True,
+        "speculative_algorithm": "mtp",
         "num_speculative_tokens": draft_tokens,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
@@ -2040,7 +2041,7 @@ def test_glm_draft_graph_capacity_uses_two_rows_per_request() -> None:
     config = {
         "model_type": "glm_moe_dsa_mtp",
         "is_draft_engine": True,
-        "is_mtp_algorithm": True,
+        "speculative_algorithm": "mtp",
         "num_speculative_tokens": 16,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
@@ -2064,7 +2065,7 @@ def test_executor_rejects_qwen_mtp_width_beyond_kernel_capacity() -> None:
     ):
         ModelExecutor(
             _FakeModel(),
-            {"model_type": "qwen3_5_text", "is_mtp_algorithm": True, "num_speculative_tokens": 17},
+            {"model_type": "qwen3_5_text", "speculative_algorithm": "mtp", "num_speculative_tokens": 17},
             max_seqs_per_batch=2,
         )
 
@@ -2084,7 +2085,7 @@ def test_qwen_mtp_capacity_graph_requires_model_support(model_type: str, vlm_cap
             model,
             {
                 "model_type": model_type,
-                "is_mtp_algorithm": True,
+                "speculative_algorithm": "mtp",
                 "num_speculative_tokens": 3,
                 "python_graph_backend": "aclgraph",
                 "max_position_embeddings": 128,
@@ -2101,7 +2102,7 @@ def test_kv_transfer_uses_eager_and_preserves_step_inputs(is_mtp: bool) -> None:
     config = {
         "model_type": "glm_moe_dsa_mtp" if is_mtp else "glm_moe_dsa",
         "is_draft_engine": is_mtp,
-        "is_mtp_algorithm": is_mtp,
+        "speculative_algorithm": "mtp" if is_mtp else "",
     }
     backend = StubAttentionBackend()
     with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
@@ -2206,7 +2207,7 @@ def test_executor_passes_no_padding_policy_to_ordinary_acl_runner(
     config = {
         "model_type": model_type,
         "is_draft_engine": model_type == "qwen3_5_mtp",
-        "is_mtp_algorithm": True,
+        "speculative_algorithm": "mtp",
         "num_speculative_tokens": 3,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 4096,
@@ -2223,10 +2224,12 @@ def test_executor_passes_no_padding_policy_to_ordinary_acl_runner(
     assert runner._capture_error_mode == ("thread_local" if no_padding else "global")
 
 
-@pytest.mark.parametrize("dp_size", [1, 2, 4])
-def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
+@pytest.mark.parametrize(("algorithm", "dp_size"), [("dflash", 1), ("dflash2", 2), ("dspark", 4)])
+def test_executor_selects_block_draft_acl_graph_with_dp(algorithm: str, dp_size: int) -> None:
     config = {
-        "model_type": "DSparkDraftModel",
+        "model_type": f"qwen3_{algorithm}",
+        "is_draft_engine": True,
+        "speculative_algorithm": algorithm,
         "num_speculative_tokens": 6,
         "dp_size": dp_size,
         "dp_rank": dp_size - 1,
@@ -2234,7 +2237,6 @@ def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
         "max_position_embeddings": 128,
     }
     model = _FakeModel()
-    model.cfg = SimpleNamespace(block_size=7)
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
@@ -2247,40 +2249,16 @@ def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
     assert executor.context_kv_graph_runner is not None
 
 
-def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> None:
-    model = _FakeModel()
-    model.cfg = SimpleNamespace(block_size=8)
-    config = {
-        "model_type": "DFlash2DraftModel",
-        "num_speculative_tokens": 0,
-        "python_graph_backend": "aclgraph",
-        "max_position_embeddings": 128,
-    }
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
-    ):
-        executor = ModelExecutor(model, config, max_seqs_per_batch=2)
-    assert isinstance(executor.decode_graph_runner, BlockDraftAclGraphRunner)
-    assert executor.decode_graph_runner.max_batch == 2
-    executor._kv_bound = True
-    executor.context_kv_graph_runner.warmup = MagicMock()
-    executor.decode_graph_runner.can_execute = MagicMock(return_value=False)
-    executor.eager_runner.execute = MagicMock()
-    tokens = torch.zeros(16, dtype=torch.int32)
-    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
-    executor.execute(tokens, tokens, metadata, is_graph_warmup=True)
-    executor.context_kv_graph_runner.warmup.assert_called_once_with(16)
-
-
 def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
     config = {
-        "model_type": "DSparkDraftModel",
-        "num_speculative_tokens": 6,
+        "model_type": "qwen3_dspark",
+        "is_draft_engine": True,
+        "num_speculative_tokens": 7,
+        "speculative_algorithm": "DSpark",
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
     }
     model = _FakeModel()
-    model.cfg = SimpleNamespace(block_size=7)
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
@@ -2292,7 +2270,9 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
     executor.eager_runner.execute = MagicMock(return_value=torch.zeros(14, 4))
     tokens = torch.zeros(14, dtype=torch.int32)
     positions = torch.zeros_like(tokens)
-    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
+    metadata = SimpleNamespace(
+        is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None, q_seq_lens=torch.ones(14)
+    )
     executor.execute(tokens, positions, metadata, is_graph_warmup=True)
     executor.context_kv_graph_runner.warmup.assert_called_once_with(16)
     executor.execute(tokens, positions, metadata)
@@ -2301,13 +2281,14 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
 
 def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None:
     config = {
-        "model_type": "DSparkDraftModel",
+        "model_type": "qwen3_dspark",
+        "is_draft_engine": True,
+        "speculative_algorithm": "dspark",
         "num_speculative_tokens": 2,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
     }
     model = _FakeModel()
-    model.cfg = SimpleNamespace(block_size=3)
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):

@@ -16,12 +16,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
 import torch.nn as nn
 
+from xllm.python.attention.backend import LayerCacheInput
 from xllm.python.model_executor.forward_context import LayerSynchronizer
 from xllm.python.model_loader import (
     ParallelLoadContext,
@@ -29,6 +31,7 @@ from xllm.python.model_loader import (
     load_missing_draft_vocab_from_quarot_target,
 )
 from xllm.python.models.dspark import DSparkForCausalLMBase
+from xllm.python.models.qwen3 import build_qwen3_layers
 from xllm.python.models.qwen3_dflash import (
     DFlashQwen3Config,
     DFlashQwen3Model,
@@ -59,12 +62,8 @@ class Qwen3DSparkConfig(DFlashQwen3Config):
             raise ValueError("Qwen3 DSpark requires markov_rank > 0")
 
 
-class Qwen3DSparkModel(DFlashQwen3Model):
-    """DFlash draft backbone used with DSpark-specific output heads."""
-
-
 class Qwen3DSparkForCausalLM(DSparkForCausalLMBase):
-    model: Qwen3DSparkModel
+    model: DFlashQwen3Model  # type: ignore[mutable-override]
 
     def __init__(self, config: dict) -> None:
         cfg = Qwen3DSparkConfig.from_dict(config)
@@ -85,7 +84,8 @@ class Qwen3DSparkForCausalLM(DSparkForCausalLMBase):
         self.cfg = cfg
         self.dtype = dtype
         self.device = device
-        self.model = Qwen3DSparkModel(cfg, dtype, device, causal=causal)  # pyright: ignore[reportIncompatibleVariableOverride]
+        layers = build_qwen3_layers(cfg, dtype, device, causal=causal)
+        self.model = DFlashQwen3Model(cfg, dtype, device, layers)  # pyright: ignore[reportIncompatibleVariableOverride]
         self.lm_head: nn.Module | None = None  # pyright: ignore[reportIncompatibleVariableOverride]
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
@@ -100,26 +100,6 @@ class Qwen3DSparkForCausalLM(DSparkForCausalLMBase):
         if self.confidence_head is not None:
             all_weights.load_tensor(self.confidence_head.proj.weight, "confidence_head.proj.weight")
             all_weights.load_tensor(self.confidence_head.proj.bias, "confidence_head.proj.bias")
-        # target id = d2t[draft_id] + draft_id; a same-width permutation is a
-        # valid mapping too. Absent = draft and target share the vocabulary.
-        if all_weights.has("d2t"):
-            d2t = all_weights.get_tensor("d2t")
-            if d2t.dim() != 1:
-                raise ValueError("d2t table must be 1D")
-            if d2t.numel() != self.cfg.draft_vocab_size:
-                raise ValueError(
-                    f"d2t table has {d2t.numel()} entries but draft_vocab_size is {self.cfg.draft_vocab_size}"
-                )
-            mapped_ids = d2t.to(dtype=torch.int64) + torch.arange(d2t.numel(), device=d2t.device, dtype=torch.int64)
-            if torch.unique(mapped_ids).numel() != mapped_ids.numel():
-                raise ValueError("d2t mapped target ids must be unique")
-            if int(mapped_ids.min()) < 0 or int(mapped_ids.max()) >= self.cfg.vocab_size:
-                raise ValueError(f"d2t mapped target ids must be in [0, {self.cfg.vocab_size})")
-            self.hot_token_id = mapped_ids.to(device=self.device)
-        elif self.cfg.draft_vocab_size != self.cfg.vocab_size:
-            raise ValueError("reduced-vocabulary DSpark draft checkpoints must provide a d2t table")
-        else:
-            self.hot_token_id = None
 
     def adapt_weights_for_reference_model(
         self,
@@ -134,7 +114,7 @@ class Qwen3DSparkForCausalLM(DSparkForCausalLMBase):
         target_hidden: torch.Tensor,
         positions: torch.Tensor,
         cache_slots: torch.Tensor,
-        kv_caches: list[tuple[torch.Tensor | None, ...]],
+        kv_caches: Sequence[LayerCacheInput],
         layer_synchronizer: LayerSynchronizer | None,
     ) -> torch.Tensor | None:
         return self.model.write_context_kv(

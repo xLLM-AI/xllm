@@ -16,9 +16,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 import torch.nn as nn
@@ -26,6 +27,7 @@ import torch.nn.functional as F
 from xllm_kernel.ops import reshape_paged_cache
 
 from xllm.python import distributed
+from xllm.python.attention.backend import LayerCacheInput, normalize_layer_caches
 from xllm.python.layers import RMSNorm
 from xllm.python.model_executor.forward_context import LayerSynchronizer
 from xllm.python.model_loader import (
@@ -38,7 +40,7 @@ from xllm.python.model_loader import (
     shard_tensor,
 )
 from xllm.python.models.base import PyModelBase
-from xllm.python.models.qwen3 import Qwen3Config, Qwen3DecoderLayer, Qwen3Model
+from xllm.python.models.qwen3 import Qwen3Config, Qwen3Model, build_qwen3_layers
 
 
 def _load_reference_quarot_rotation(
@@ -62,11 +64,10 @@ class DFlashQwen3Config(Qwen3Config):
     supports_reduced_draft_vocab: ClassVar[bool] = False
 
     draft_vocab_size: int = 0
-    block_size: int = 0
     world_size: int = 1
 
     @classmethod
-    def from_dict(cls, d: dict) -> DFlashQwen3Config:
+    def from_dict(cls, d: dict[str, Any]) -> DFlashQwen3Config:
         normalized_config = dict(d)
         rope_parameters = d.get("rope_parameters") or {}
         if normalized_config.get("rope_theta") is None:
@@ -88,13 +89,6 @@ class DFlashQwen3Config(Qwen3Config):
         return cls(
             **base.__dict__,
             draft_vocab_size=draft_vocab_size,
-            block_size=int(
-                (d.get("dflash_config") or {}).get("block_size")
-                or d.get("block_size")
-                or d.get("dflash2_block_size")
-                or d.get("dspark_block_size")
-                or 0
-            ),
             world_size=int(d.get("world_size", base.tp_size * base.dp_size)),
         )
 
@@ -177,26 +171,17 @@ class DFlashContextProjection(nn.Module):
 
 class DFlashQwen3Model(Qwen3Model):
     @property
-    def context_projection_weight(self) -> torch.Tensor:
-        return self.fc.weight
+    def context_projection_input(self) -> tuple[int, torch.dtype]:
+        return self.fc.weight.shape[1], self.fc.weight.dtype
 
     def __init__(
         self,
         cfg: DFlashQwen3Config,
         dtype: torch.dtype,
         device: torch.device,
-        *,
-        decoder_layer_type: type[Qwen3DecoderLayer] = Qwen3DecoderLayer,
-        causal: bool = False,
+        layers: nn.ModuleList,
     ) -> None:
-        super().__init__(
-            cfg,
-            dtype,
-            device,
-            causal=causal,
-            create_embedding=False,
-            decoder_layer_type=decoder_layer_type,
-        )
+        super().__init__(cfg, dtype, device, layers, create_embedding=False)
         self.cfg = cfg
         self.dtype = dtype
         self.device = device
@@ -265,7 +250,7 @@ class DFlashQwen3Model(Qwen3Model):
         target_hidden: torch.Tensor,
         positions: torch.Tensor,
         cache_slots: torch.Tensor,
-        kv_caches: list[tuple[torch.Tensor | None, ...]],
+        kv_caches: Sequence[LayerCacheInput],
         layer_synchronizer: LayerSynchronizer | None,
     ) -> torch.Tensor | None:
         if len(kv_caches) != self.cfg.n_layers:
@@ -296,8 +281,8 @@ class DFlashQwen3Model(Qwen3Model):
         )
         all_values = all_kv[1].contiguous()
 
-        for layer_id, cache in enumerate(kv_caches):
-            key_cache, value_cache = cache[0], cache[1]
+        for layer_id, cache in enumerate(normalize_layer_caches(kv_caches)):
+            key_cache, value_cache = cache.key, cache.value
             if key_cache is None or value_cache is None:
                 raise RuntimeError(f"draft KV cache is missing for layer {layer_id}")
             reshape_paged_cache(
@@ -334,17 +319,20 @@ class DFlashQwen3Model(Qwen3Model):
 
 class DFlashQwen3ForCausalLM(PyModelBase):
     model: DFlashQwen3Model
-    config_cls: type[DFlashQwen3Config] = DFlashQwen3Config
-    model_cls: type[DFlashQwen3Model] = DFlashQwen3Model
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         super().__init__()
-        self.cfg = self.config_cls.from_dict(config)
-        self.cfg.validate()
         self.dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
         self.device = torch.device(config.get("device", "npu"))
-        self.model = self.model_cls(self.cfg, self.dtype, self.device)  # pyright: ignore[reportIncompatibleVariableOverride]
+        self.model = self._build_model(config)  # pyright: ignore[reportIncompatibleVariableOverride]
+        self.cfg = self.model.cfg
         self.lm_head: nn.Module | None = None  # pyright: ignore[reportIncompatibleVariableOverride]
+
+    def _build_model(self, config: dict[str, Any]) -> DFlashQwen3Model:
+        cfg = DFlashQwen3Config.from_dict(config)
+        cfg.validate()
+        layers = build_qwen3_layers(cfg, self.dtype, self.device, causal=False)
+        return DFlashQwen3Model(cfg, self.dtype, self.device, layers)
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         all_weights = self.model.load_weights(state_dicts, tp_rank, tp_size)
@@ -367,7 +355,7 @@ class DFlashQwen3ForCausalLM(PyModelBase):
         target_hidden: torch.Tensor,
         positions: torch.Tensor,
         cache_slots: torch.Tensor,
-        kv_caches: list[tuple[torch.Tensor | None, ...]],
+        kv_caches: Sequence[LayerCacheInput],
         layer_synchronizer: LayerSynchronizer | None,
     ) -> torch.Tensor | None:
         return self.model.write_context_kv(

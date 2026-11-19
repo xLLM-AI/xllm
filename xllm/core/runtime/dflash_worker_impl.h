@@ -30,20 +30,6 @@ limitations under the License.
 
 namespace xllm {
 
-namespace dflash_detail {
-
-inline void invalidate_draft_model_geometry(LlmModelParams& input_params) {
-  // Attention metadata is model-owned: DeepSeek-V4 bakes DSA group layout and
-  // sparse tiling values such as ori_win_left into opaque tensors. A draft
-  // input copied from the target must rebuild those tensors for draft geometry.
-  input_params.attn_metadata.reset();
-  // Block drafters own no recurrent layers. Target slots and validity masks
-  // must not reach the draft metadata builder, including during graph warmup.
-  input_params.clear_linear_attention_state();
-}
-
-}  // namespace dflash_detail
-
 class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
  public:
   DFlashWorkerImpl(const ParallelArgs& parallel_args,
@@ -57,16 +43,8 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                   MasterStatus master_status) override;
 
  protected:
-  DFlashWorkerImpl(const ParallelArgs& parallel_args,
-                   const torch::Device& device,
-                   const runtime::Options& options,
-                   const ParallelArgs& draft_parallel_args,
-                   const runtime::Options& draft_opts,
-                   int32_t (*configure_draft_config)(ModelArgs&,
-                                                     const runtime::Options&));
+  void configure_target_model_args(ModelArgs& args) const override;
 
-  static runtime::Options draft_options(const runtime::Options& options,
-                                        int32_t num_speculative_tokens = 0);
   std::optional<ForwardOutput> step_prefill(
       const LlmForwardInput& input) override;
 
@@ -92,7 +70,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   bool draft_input_per_request_ = true;
   BatchForwardType draft_forward_type_ = BatchForwardType::CHUNKED_PREFILL;
   bool draft_needs_dummy_tokens_ = false;
-  bool sample_from_anchor_ = false;
 
  private:
   DecodeExpansionOptions prepare_for_draft() const;

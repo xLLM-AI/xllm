@@ -37,48 +37,6 @@ limitations under the License.
 
 namespace xllm {
 
-namespace {
-
-int32_t configure_draft_config(ModelArgs& args,
-                               const runtime::Options& options) {
-  const bool deepseek_v4 = is_deepseek_v4_family(args.model_type());
-  if (args.block_size() == 0) {
-    args.block_size(options.num_speculative_tokens() + 1);
-  }
-  args.layers_to_capture({});
-  if (deepseek_v4) {
-#if defined(USE_NPU)
-    CHECK_GT(args.dspark_num_layers(), 0)
-        << "DeepSeek-V4 DSpark requires at least one draft layer.";
-    args.n_layers(args.dspark_num_layers());
-    args.n_hash_layers(0);
-    args.compress_ratios(std::vector<int32_t>(args.dspark_num_layers(), 1));
-    args.dspark_use_native_sas(
-        KernelConfig::get_instance().enable_dspark_native_sas());
-#endif
-    args.model_type("deepseek_v4_dspark");
-  } else {
-    args.model_type(args.model_type() == kDSparkGLM5DraftModelType
-                        ? std::string(kDSparkGLM5DraftModelType)
-                        : "DSparkDraftModel");
-  }
-  return options.num_speculative_tokens();
-}
-}  // namespace
-
-DSparkWorkerImpl::DSparkWorkerImpl(const ParallelArgs& parallel_args,
-                                   const torch::Device& device,
-                                   const runtime::Options& options)
-    : DFlashWorkerImpl(
-          parallel_args,
-          device,
-          options,
-          configure_draft_parallel_args(parallel_args),
-          draft_options(options, options.num_speculative_tokens() - 1),
-          configure_draft_config) {
-  sample_from_anchor_ = true;
-}
-
 bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
                                   int32_t random_seed,
                                   MasterStatus master_status) {
@@ -89,13 +47,6 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
   }
 
   const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-  CHECK_EQ(options_.num_speculative_tokens(), draft_args.block_size())
-      << "Runtime block size must match the draft model configuration.";
-  const ModelArgs& target_args = impl_->context_.get_model_args();
-  CHECK_EQ(draft_vocab_.mapped_vocab_size(draft_args.draft_vocab_size()),
-           target_args.vocab_size())
-      << "A reduced draft vocabulary requires a DSpark d2t mapping.";
-
   if (draft_args.model_type() == "deepseek_v4_dspark") {
     draft_input_per_request_ = draft_args.dspark_use_native_sas();
     draft_forward_type_ = BatchForwardType::DECODE;

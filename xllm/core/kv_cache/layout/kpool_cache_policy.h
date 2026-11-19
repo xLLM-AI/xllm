@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_type.h"
 
 namespace xllm {
 
@@ -26,7 +27,7 @@ inline bool uses_compressed_kpool_tail_cache(const ModelArgs& args) {
 #if defined(USE_NPU)
   return args.index_kpool() > 1 && args.index_kpool_compress() &&
          args.index_kpool_always_select_tail() &&
-         is_glm5_next_target_model_type(args.model_type());
+         is_glm5_next_model(args.model_type());
 #else
   (void)args;
   return false;

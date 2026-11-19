@@ -808,7 +808,7 @@ class DeepseekV4Attention(Attention):
         if slot_mapping.numel() != hidden.shape[0]:
             raise ValueError("DeepSeek-V4 DSpark context slot count mismatch")
         kv = self._project_context_kv(hidden, cos, sin)
-        _scatter_by_slot(swa_cache, slot_mapping, kv)
+        _scatter_by_slot(swa_cache, slot_mapping, kv, use_padding_slot=True)
 
     def _project_context_kv(
         self,

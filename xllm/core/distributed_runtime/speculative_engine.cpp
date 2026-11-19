@@ -66,7 +66,7 @@ SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
     // draft engine.
     runtime::Options draft_engine_options = options_;
     // The draft engine always runs on the target's device list.
-    draft_engine_options.model_path(options_.draft_model_path().value_or(""))
+    draft_engine_options.model_path(options_.draft_model_path().value())
         .devices(options.devices())
         .backend("llm")
         .enable_speculative_decode(/*enable_speculative_decode=*/false)

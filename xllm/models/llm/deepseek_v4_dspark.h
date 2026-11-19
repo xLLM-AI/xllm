@@ -22,7 +22,6 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/layers/common/linear.h"
 #include "core/layers/common/rms_norm.h"
@@ -46,8 +45,6 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
     const int64_t capture_count = args.dspark_num_layers();
     CHECK_GT(capture_count, 0)
         << "DeepSeek-V4 DSpark requires dspark_num_layers > 0.";
-    CHECK_EQ(args.n_layers(), args.dspark_num_layers())
-        << "DeepSeek-V4 DSpark draft layer count mismatch.";
 
     const auto options = context.get_tensor_options();
     main_proj_ = register_module(
@@ -230,8 +227,6 @@ class DeepseekV4DSparkForCausalLMImpl final
 };
 TORCH_MODULE(DeepseekV4DSparkForCausalLM);
 
-REGISTER_CAUSAL_MODEL_WITH_VARNAME(deepseek_v4_dspark_draft_model,
-                                   deepseek_v4_dspark,
-                                   DeepseekV4DSparkForCausalLM);
+REGISTER_CAUSAL_MODEL(deepseek_v4_dspark, DeepseekV4DSparkForCausalLM);
 
 }  // namespace xllm

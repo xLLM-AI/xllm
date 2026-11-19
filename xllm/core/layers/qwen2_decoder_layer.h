@@ -33,10 +33,11 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-class Qwen2DecoderLayerImpl : public torch::nn::Module {
+template <typename AttentionType>
+class QwenDecoderLayerImpl final : public torch::nn::Module {
  public:
-  explicit Qwen2DecoderLayerImpl(const ModelContext& context,
-                                 int32_t layer_id = -1);
+  explicit QwenDecoderLayerImpl(const ModelContext& context,
+                                int32_t layer_id = -1);
 
   void load_state_dict(const StateDict& state_dict);
 
@@ -59,13 +60,12 @@ class Qwen2DecoderLayerImpl : public torch::nn::Module {
   }
 
  private:
-  Qwen2Attention attention_{nullptr};
+  AttentionType attention_{nullptr};
   DenseMLP mlp_{nullptr};
   RMSNorm input_norm_{nullptr};
   RMSNorm post_norm_{nullptr};
   DFlash2GroupedConv attention_conv_{nullptr};
   DFlash2GroupedConv mlp_conv_{nullptr};
-  bool use_dflash2_conv_ = false;
 
   ParallelArgs parallel_args_;
 
@@ -75,6 +75,9 @@ class Qwen2DecoderLayerImpl : public torch::nn::Module {
       std::optional<torch::Tensor>& residual,
       const std::optional<torch::Tensor>& fp8_scale);
 };
+extern template class QwenDecoderLayerImpl<Qwen2Attention>;
+
+using Qwen2DecoderLayerImpl = QwenDecoderLayerImpl<Qwen2Attention>;
 TORCH_MODULE(Qwen2DecoderLayer);
 
 }  // namespace layer

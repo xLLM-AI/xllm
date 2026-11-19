@@ -31,9 +31,6 @@ TEST(ModelTypeTest, LooksUpBorrowedSubstringWithoutTerminator) {
 }
 
 TEST(ModelTypeTest, GatesPackedC8ByModelAndBackend) {
-  EXPECT_TRUE(supports_mla_kv_cache_quant("glm_moe_dsa"));
-  EXPECT_TRUE(supports_mla_kv_cache_quant("glm_moe_dsa_mtp"));
-  EXPECT_FALSE(supports_mla_kv_cache_quant("deepseek_v3"));
   EXPECT_FALSE(
       enable_mla_packed_c8(/*enable_kv_cache_quant=*/false, "glm_moe_dsa"));
   EXPECT_FALSE(
@@ -41,6 +38,8 @@ TEST(ModelTypeTest, GatesPackedC8ByModelAndBackend) {
 #if defined(USE_NPU)
   EXPECT_TRUE(
       enable_mla_packed_c8(/*enable_kv_cache_quant=*/true, "glm_moe_dsa"));
+  EXPECT_TRUE(enable_mla_packed_c8(/*enable_kv_cache_quant=*/true,
+                                   /*model_type=*/"glm_moe_dsa_mtp"));
 #else
   EXPECT_FALSE(
       enable_mla_packed_c8(/*enable_kv_cache_quant=*/true, "glm_moe_dsa"));

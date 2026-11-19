@@ -20,12 +20,15 @@ limitations under the License.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <tuple>
 #include <vector>
 
 #include "common/flash_comm1_context.h"
+#include "core/framework/model/model_params_view.h"
+#include "core/framework/model/seq_lens.h"
 #include "kernels/ops_api.h"
 #include "layers/npu_torch/deepseek_v4_cp_context.h"
 #include "util/utils.h"
@@ -497,11 +500,111 @@ AttentionMetadata build_indexer_attention_metadata(
 
 }  // namespace
 
+void build_deepseek_v4_sparse_metadata(
+    DSAMetadata& dsa,
+    const ModelParamsView& params,
+    const ModelArgs& model_args,
+    int64_t tp_num_heads,
+    bool use_prefill_attention,
+    const torch::Tensor& cu_seqlens_ori_kv_override) {
+  const int64_t head_dim =
+      model_args.o_lora_rank() + model_args.qk_rope_head_dim();
+  const int64_t sparse_topk =
+      std::max<int64_t>(model_args.index_topk(), /*minimum=*/1);
+  const int64_t max_seqlen_q =
+      std::max<int64_t>(params.meta.q_max_seq_len,
+                        util::max_len(params.attention.host.q_seq_lens));
+  const int64_t max_seqlen_kv =
+      std::max<int64_t>(params.meta.kv_max_seq_len,
+                        util::max_len(params.attention.host.kv_seq_lens));
+  const torch::Tensor empty_int32 =
+      torch::empty({0},
+                   torch::dtype(torch::kInt32)
+                       .device(dsa.actual_seq_lengths_query.device()));
+  const torch::Tensor& ori_kv_cu = cu_seqlens_ori_kv_override.defined()
+                                       ? cu_seqlens_ori_kv_override
+                                       : dsa.actual_seq_lengths_query;
+
+  kernel::SparseAttnSharedkvMetadataParams sparse_params;
+  sparse_params.num_heads_q = tp_num_heads;
+  sparse_params.num_heads_kv = 1;
+  sparse_params.head_dim = head_dim;
+  sparse_params.cu_seqlens_q = as_optional(dsa.actual_seq_lengths_query);
+  if (use_prefill_attention) {
+    sparse_params.cu_seqlens_ori_kv = as_optional(ori_kv_cu);
+  } else {
+    sparse_params.cu_seqlens_ori_kv = empty_int32;
+  }
+  sparse_params.cu_seqlens_cmp_kv = empty_int32;
+  sparse_params.seqused_q = empty_int32;
+  sparse_params.seqused_kv = as_optional(dsa.actual_seq_lengths_kv);
+  sparse_params.batch_size = std::max<int64_t>(
+      dsa.actual_seq_lengths_kv.size(/*dim=*/0), /*minimum=*/1);
+  sparse_params.max_seqlen_q = max_seqlen_q;
+  sparse_params.max_seqlen_kv = max_seqlen_kv;
+  sparse_params.ori_mask_mode = 4;
+  sparse_params.cmp_mask_mode = 3;
+  sparse_params.ori_win_left = dsa.sparse_metadata_ori_win_left;
+  sparse_params.layout_q = "TND";
+  sparse_params.layout_kv = "PA_ND";
+  sparse_params.has_ori_kv = true;
+  dsa.c1_metadata = kernel::sparse_attn_sharedkv_metadata(sparse_params);
+
+  sparse_params.has_cmp_kv = true;
+  sparse_params.cmp_ratio = 4;
+  sparse_params.cmp_topk = sparse_topk;
+  dsa.c4_metadata = kernel::sparse_attn_sharedkv_metadata(sparse_params);
+
+  sparse_params.cmp_ratio = 128;
+  sparse_params.cmp_topk = 0;
+  dsa.c128_metadata = kernel::sparse_attn_sharedkv_metadata(sparse_params);
+
+  const auto& query_cu = dsa.actual_seq_lengths_query;
+  const torch::Tensor query_lens =
+      query_cu.dim() > 0 && query_cu.size(/*dim=*/0) > 1
+          ? query_cu.slice(/*dim=*/0, /*start=*/1).clone()
+          : dsa.seq_lens_q;
+
+  const torch::Tensor& key_lens =
+      dsa.seq_lens.defined() ? dsa.seq_lens : dsa.actual_seq_lengths_kv;
+  if (!query_lens.defined() || query_lens.numel() == 0 ||
+      key_lens.numel() == 0) {
+    return;
+  }
+
+  const int64_t index_num_heads = std::max<int64_t>(
+      model_args.index_n_heads() > 0 ? model_args.index_n_heads()
+                                     : model_args.n_heads(),
+      /*minimum=*/1);
+
+  kernel::QuantLightningIndexerMetadataParams qli_params;
+  qli_params.num_heads_q = index_num_heads;
+  qli_params.num_heads_k = 1;
+  qli_params.head_dim = std::max<int64_t>(
+      model_args.index_head_dim() > 0 ? model_args.index_head_dim() : head_dim,
+      /*minimum=*/1);
+  qli_params.actual_seq_lengths_query = query_lens;
+  qli_params.actual_seq_lengths_key = key_lens;
+  qli_params.batch_size =
+      std::max<int64_t>(key_lens.size(/*dim=*/0), /*minimum=*/1);
+  qli_params.max_seqlen_q = max_seqlen_q;
+  qli_params.max_seqlen_k = max_seqlen_kv;
+  qli_params.layout_query = "TND";
+  qli_params.layout_key = "PA_BSND";
+  qli_params.sparse_count = sparse_topk;
+  qli_params.sparse_mode = 3;
+  qli_params.pre_tokens = std::numeric_limits<int64_t>::max();
+  qli_params.next_tokens = std::numeric_limits<int64_t>::max();
+  qli_params.cmp_ratio = 4;
+  qli_params.device = query_lens.device().str();
+  dsa.qli_metadata = kernel::quant_lightning_indexer_metadata(qli_params);
+}
+
 torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
                                        const torch::Tensor& query_cu_seq_lens,
                                        const torch::Tensor& seq_lens,
                                        int64_t window_size,
-                                       int64_t dspark_block_size,
+                                       int64_t num_speculative_tokens,
                                        int64_t cache_block_size) {
   // Native DSpark SAS addresses the trailing SWA prefix plus the whole current
   // diffusion block explicitly. The compatibility fallback never calls it
@@ -522,8 +625,8 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
   torch::Tensor start_pos = (prefix_lens - window_size).clamp_min(0);
   torch::Tensor visible_lens = kv_lens - start_pos;
   constexpr int64_t kIndexAlignment = 128;
-  const int64_t min_width = window_size + dspark_block_size;
-  const int64_t index_width = util::align_up(min_width, kIndexAlignment);
+  const int64_t index_width =
+      util::align_up(window_size + num_speculative_tokens, kIndexAlignment);
 
   torch::Tensor columns = torch::arange(
       index_width, torch::TensorOptions().dtype(torch::kLong).device(device));
@@ -566,32 +669,20 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
       .unsqueeze(1);
 }
 
-DSAttentionImpl::DSAttentionImpl(const ModelContext& context, int32_t layer_id)
-    : DSAttentionImpl(context.get_model_args(),
-                      context.get_quant_args(),
-                      context.get_parallel_args(),
-                      context.get_tensor_options(),
-                      layer_id) {}
+DSAttentionImpl::DSAttentionImpl(const ModelContext& context,
+                                 int32_t layer_id) {
+  const auto& args = context.get_model_args();
+  const auto& quant_args = context.get_quant_args();
+  const auto& parallel_args = context.get_parallel_args();
+  const auto& options = context.get_tensor_options();
 
-DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
-                                 const QuantArgs& quant_args,
-                                 const ParallelArgs& parallel_args,
-                                 const torch::TensorOptions& options,
-                                 int32_t layer_id)
-    : num_heads_(args.n_heads()),
-      head_dim_(args.head_dim()),
-      q_lora_rank_(args.q_lora_rank()),
-      o_lora_rank_(args.o_lora_rank()),
-      o_groups_(args.o_groups()),
-      rope_head_dim_(args.rope_head_dim()),
-      window_size_(args.window_size()),
-      compress_ratio_(1.0),
-      eps_(args.rms_norm_eps()),
-      index_n_heads_(args.index_n_heads()),
-      index_head_dim_(args.index_head_dim()),
-      index_topk_(args.index_topk()),
-      block_size_(args.block_size()),
-      dspark_use_native_sas_(args.dspark_use_native_sas()) {
+  num_heads_ = args.n_heads();
+  head_dim_ = args.head_dim();
+  o_lora_rank_ = args.o_lora_rank();
+  rope_head_dim_ = args.rope_head_dim();
+  window_size_ = args.window_size();
+  eps_ = args.rms_norm_eps();
+  dspark_use_native_sas_ = args.dspark_use_native_sas();
   const auto& compress_ratios = args.compress_ratios();
   CHECK(!compress_ratios.empty())
       << "DSAttention requires non-empty compress_ratios for DeepSeek V4";
@@ -610,37 +701,36 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
 
   softmax_scale_ = std::pow(head_dim_, static_cast<double>(-0.5));
   nope_head_dim_ = head_dim_ - rope_head_dim_;
-  qk_head_dim_ = nope_head_dim_ + rope_head_dim_;
 
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   tp_rank_ = parallel_args.tp_group_->rank();
-  tp_size_ = tp_size;
-  int64_t hidden_size = args.hidden_size();
-  int64_t num_heads = args.n_heads();
+  const int64_t hidden_size = args.hidden_size();
+  const int64_t o_groups = args.o_groups();
 
-  CHECK_EQ(o_groups_ % tp_size, 0)
+  CHECK_EQ(o_groups % tp_size, 0)
       << "o_groups must be divisible by tensor parallel size";
-  CHECK_EQ(num_heads % tp_size, 0)
+  CHECK_EQ(num_heads_ % tp_size, 0)
       << "num_heads must be divisible by tensor parallel size";
-  n_local_heads_ = num_heads / tp_size;
-  n_local_groups_ = o_groups_ / tp_size;
+  n_local_heads_ = num_heads_ / tp_size;
+  n_local_groups_ = o_groups / tp_size;
 
   attn_sink_ = register_parameter(
       "attn_sink",
       torch::zeros({n_local_heads_}, options.dtype(torch::kFloat32)),
       /*requires_grad=*/false);
 
+  const int64_t q_lora_rank = args.q_lora_rank();
   q_a_proj_ = register_module(
       "q_a_proj",
       ReplicatedLinear(
-          hidden_size, q_lora_rank_, /*bias=*/false, quant_args, options));
+          hidden_size, q_lora_rank, /*bias=*/false, quant_args, options));
 
-  q_layernorm_ =
-      register_module("q_a_layernorm", RMSNorm(q_lora_rank_, eps_, options));
+  q_layernorm_ = register_module(/*name=*/"q_a_layernorm",
+                                 RMSNorm(q_lora_rank, eps_, options));
 
   q_b_proj_ = register_module("q_b_proj",
-                              ColumnParallelLinear(q_lora_rank_,
-                                                   num_heads * head_dim_,
+                              ColumnParallelLinear(q_lora_rank,
+                                                   num_heads_ * head_dim_,
                                                    false,
                                                    false,
                                                    quant_args,
@@ -666,35 +756,19 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
   }
 
   if (compress_ratio_ == 4) {
-    if (index_n_heads_ <= 0) {
-      index_n_heads_ = num_heads_;
-    }
-    if (index_head_dim_ <= 0) {
-      index_head_dim_ = head_dim_;
-    }
-    if (index_topk_ <= 0) {
-      index_topk_ = 512;
-    }
-
-    if (index_n_heads_ > 0 && index_head_dim_ > 0 && index_topk_ > 0) {
-      indexer_ = register_module(
-          "indexer",
-          DeepseekV4Indexer(hidden_size,
-                            index_n_heads_,
-                            index_head_dim_,
-                            rope_head_dim_,
-                            index_topk_,
-                            q_lora_rank_,
-                            static_cast<int64_t>(compress_ratio_),
-                            eps_,
-                            quant_args,
-                            options));
-    } else {
-      LOG(FATAL) << "DSAttention indexer disabled due to invalid config: "
-                 << "index_n_heads=" << index_n_heads_
-                 << ", index_head_dim=" << index_head_dim_
-                 << ", index_topk=" << index_topk_;
-    }
+    indexer_ = register_module(
+        /*name=*/"indexer",
+        DeepseekV4Indexer(
+            hidden_size,
+            args.index_n_heads() > 0 ? args.index_n_heads() : num_heads_,
+            args.index_head_dim() > 0 ? args.index_head_dim() : head_dim_,
+            rope_head_dim_,
+            args.index_topk() > 0 ? args.index_topk() : 512,
+            q_lora_rank,
+            static_cast<int64_t>(compress_ratio_),
+            eps_,
+            quant_args,
+            options));
   }
 
   q_rms_gamma_ = register_buffer("q_rms_gamma",
@@ -705,8 +779,8 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
 
   o_a_proj_ =
       register_module("o_a_proj",
-                      ColumnParallelLinear(num_heads * head_dim_ / o_groups_,
-                                           o_groups_ * o_lora_rank_,
+                      ColumnParallelLinear(num_heads_ * head_dim_ / o_groups,
+                                           o_groups * o_lora_rank_,
                                            false,
                                            true,
                                            quant_args,
@@ -714,7 +788,7 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
                                            options));
 
   o_b_proj_ = register_module("o_b_proj",
-                              RowParallelLinear(o_groups_ * o_lora_rank_,
+                              RowParallelLinear(o_groups * o_lora_rank_,
                                                 hidden_size,
                                                 false,
                                                 true,
@@ -772,7 +846,7 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                                    hidden_states,
                                    n_local_heads_,
                                    head_dim_,
-                                   qk_head_dim_,
+                                   head_dim_,
                                    nope_head_dim_,
                                    rope_head_dim_,
                                    eps_,
@@ -998,8 +1072,7 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                    : as_optional(attn_metadata.actual_seq_lengths_query);
   }
 
-  const bool use_native_sas = deepseek_v4_use_native_sas(
-      block_size_, dspark_use_native_sas_, use_prefill_attn);
+  const bool use_native_sas = dspark_use_native_sas_ && !use_prefill_attn;
   std::optional<torch::Tensor> ori_sparse_indices = std::nullopt;
   if (use_native_sas && compress_ratio_i == 1) {
     CHECK(attn_metadata.explicit_swa_indices.defined())
@@ -1007,8 +1080,8 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
     ori_sparse_indices = as_optional(attn_metadata.explicit_swa_indices);
   }
 
-  const int64_t ori_win_left =
-      deepseek_v4_ori_window_left(window_size_, block_size_, use_native_sas);
+  const int64_t ori_win_left = deepseek_v4_ori_window_left(
+      window_size_, attn_metadata.num_speculative_tokens, use_native_sas);
   CHECK_EQ(attn_metadata.sparse_metadata_ori_win_left, ori_win_left)
       << "DSAttention sparse metadata belongs to incompatible model geometry; "
       << "rebuild attention metadata at the target/draft boundary.";
@@ -1082,7 +1155,7 @@ void DSAttentionImpl::write_context_kv(const torch::Tensor& hidden_states,
 
   torch::Tensor kv = kv_proj_->forward(hidden_states);
   kv = std::get<0>(kv_layernorm_->forward(kv));
-  kv = kv.view({-1, 1, qk_head_dim_});
+  kv = kv.view({-1, 1, head_dim_});
   apply_partial_rope(kv, nope_head_dim_, rope_head_dim_, cos, sin);
 
   torch::Tensor swa_cache = kv_cache.get_swa_cache();
@@ -1107,14 +1180,9 @@ void DSAttentionImpl::load_state_dict(const StateDict& state_dict) {
   }
   if (attn_sink.defined()) {
     if (attn_sink.dim() == 1 && attn_sink.size(0) == num_heads_ &&
-        tp_size_ > 1) {
-      CHECK_EQ(num_heads_ % tp_size_, 0)
-          << "attn_sink full-head tensor size is not divisible by tp_size.";
-      const int64_t shard_size = num_heads_ / tp_size_;
-      const int64_t shard_start = tp_rank_ * shard_size;
-      attn_sink = attn_sink.slice(/*dim=*/0,
-                                  /*start=*/shard_start,
-                                  /*end=*/shard_start + shard_size);
+        n_local_heads_ != num_heads_) {
+      attn_sink = attn_sink.narrow(
+          /*dim=*/0, tp_rank_ * n_local_heads_, n_local_heads_);
     }
 
     CHECK(attn_sink.dim() == 1 && attn_sink.size(0) == n_local_heads_)
@@ -1148,15 +1216,15 @@ void DSAttentionImpl::load_state_dict(const StateDict& state_dict) {
 // window geometry as the C++ model path instead of hand-translated copies.
 TORCH_LIBRARY_FRAGMENT(xllm_ops, module) {
   module.def(
+      /*schema=*/
       "build_dspark_swa_indices(Tensor block_table, Tensor query_cu_seq_lens, "
-      "Tensor seq_lens, int window_size, int dspark_block_size, int "
+      "Tensor seq_lens, int window_size, int num_speculative_tokens, int "
       "cache_block_size) -> Tensor");
   module.def(
-      "deepseek_v4_ori_window_left(int window_size, int dspark_block_size, "
+      /*schema=*/
+      "deepseek_v4_ori_window_left(int window_size, int "
+      "num_speculative_tokens, "
       "bool use_native_dspark_sas) -> int");
-  module.def(
-      "deepseek_v4_use_native_sas(int dspark_block_size, bool "
-      "dspark_use_native_sas, bool use_prefill_attention) -> bool");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, CompositeExplicitAutograd, module) {
@@ -1164,6 +1232,4 @@ TORCH_LIBRARY_IMPL(xllm_ops, CompositeExplicitAutograd, module) {
               TORCH_FN(xllm::layer::build_dspark_swa_indices));
   module.impl("deepseek_v4_ori_window_left",
               TORCH_FN(xllm::layer::deepseek_v4_ori_window_left));
-  module.impl("deepseek_v4_use_native_sas",
-              TORCH_FN(xllm::layer::deepseek_v4_use_native_sas));
 }

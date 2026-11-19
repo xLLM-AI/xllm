@@ -21,7 +21,7 @@ import torch
 
 from xllm.python import distributed, kernels
 from xllm.python.models import qwen3_dflash
-from xllm.python.models.qwen3 import Qwen3Model
+from xllm.python.models.qwen3 import build_qwen3_layers
 from xllm.python.models.qwen3_dflash import (
     DFlashContextProjection,
     DFlashQwen3Config,
@@ -86,7 +86,9 @@ def test_top_level_and_nested_rope_config_formats_are_supported() -> None:
 @pytest.mark.parametrize("non_causal", [False, True])
 def test_windowed_dflash_preserves_non_causal_block_visibility(non_causal: bool) -> None:
     config = _config(sliding_window=2048, sliding_window_non_causal=non_causal)
-    model = DFlashQwen3Model(config, torch.float32, torch.device("cpu"))
+    device = torch.device("cpu")
+    layers = build_qwen3_layers(config, torch.float32, device, causal=False)
+    model = DFlashQwen3Model(config, torch.float32, device, layers)
     attention = model.layers[0].self_attn.attn
     assert attention.sliding_window == 2048
     assert not attention.causal
@@ -116,14 +118,6 @@ def test_config_rejects_reduced_draft_vocabulary() -> None:
 def test_config_rejects_aux_hidden_capture() -> None:
     with pytest.raises(ValueError, match="does not support layers_to_capture"):
         _config(layers_to_capture=[0])
-
-
-def test_draft_attention_is_non_causal() -> None:
-    model = DFlashQwen3Model(_config(), torch.float32, torch.device("cpu"))
-
-    assert isinstance(model, Qwen3Model)
-    assert model.embed_tokens is None
-    assert not model.layers[0].self_attn.attn.causal
 
 
 def test_context_projection_uses_tensor_parallel_output_shard(
@@ -161,7 +155,9 @@ def test_context_projection_uses_tensor_parallel_output_shard(
 
 def test_context_projection_writes_each_layer_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     config = _config(hidden_size=2, head_dim=2, num_hidden_layers=2)
-    model = DFlashQwen3Model(config, torch.float32, torch.device("cpu"))
+    device = torch.device("cpu")
+    layers = build_qwen3_layers(config, torch.float32, device, causal=False)
+    model = DFlashQwen3Model(config, torch.float32, device, layers)
     key_weights = torch.tensor([[[1.0, 0.0], [0.0, 2.0]], [[0.0, 1.0], [3.0, 0.0]]])
     with torch.no_grad():
         model.fc.load_weight(torch.eye(2), tp_rank=0)

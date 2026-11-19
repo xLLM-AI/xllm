@@ -17,13 +17,20 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include <cmath>
+#include <iterator>
 #include <optional>
 #include <regex>
 #include <vector>
 
+#include "core/framework/config/speculative_config.h"
+#if defined(USE_NPU)
+#include "core/framework/config/kernel_config.h"
+#endif
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/framework/quantization/quant_args.h"
 #include "core/platform/platform.h"
@@ -34,6 +41,34 @@ limitations under the License.
 namespace xllm {
 
 namespace {
+
+struct ModelArgsAlias {
+  std::string_view model_type;
+  const char* resolved_type;
+};
+
+constexpr ModelArgsAlias kModelArgsAliases[] = {
+    {"DeepseekOCRForCausalLM", "deepseek_ocr"},
+    {"Qwen3VLForConditionalGeneration", "qwen3_vl"},
+#if defined(USE_NPU) || defined(USE_MLU)
+    {"deepseek_v3_mtp", "deepseek_v3"},
+    {"glm5_next_mtp", "glm5_next"},
+#endif
+#if defined(USE_NPU)
+    {"deepseek_v32_mtp", "deepseek_v32"},
+#endif
+#if defined(USE_MLU)
+    {"glm_moe_dsa_mtp", "glm_moe_dsa"},
+    {"joyai_llm_flash_mtp", "joyai_llm_flash"},
+#endif
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_MUSA)
+    {"qwen3_5_mtp", "qwen3_5_text"},
+    {"qwen3_5_moe_mtp", "qwen3_5_moe_text"},
+#endif
+#if defined(USE_CUDA) || defined(USE_DCU)
+    {"mimo_mtp", "mimo"},
+#endif
+};
 
 constexpr int64_t kCompressedBits4 = 4;
 constexpr int64_t kCompressedBits8 = 8;
@@ -414,6 +449,126 @@ bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args) {
   return validate_smoothquant_mixed_w4a8(reader, quant_args);
 }
 
+void configure_draft_model_args(ModelArgs& args,
+                                std::string_view algorithm,
+                                [[maybe_unused]] bool is_python_model) {
+  if (SpeculativeConfig::is_block_diffusion_algorithm(algorithm)) {
+    args.layers_to_capture({});
+    if (SpeculativeConfig::is_dspark_algorithm(algorithm)) {
+      if (is_deepseek_v4_family(args.model_type())) {
+        args.model_type(/*value=*/"deepseek_v4_dspark");
+#if defined(USE_NPU)
+        args.n_layers(args.dspark_num_layers());
+        args.n_hash_layers(/*value=*/0);
+        args.dspark_use_native_sas(
+            KernelConfig::get_instance().enable_dspark_native_sas());
+        args.compress_ratios(
+            std::vector<int32_t>(args.n_layers(), /*value=*/1));
+#endif
+      } else if (args.model_type() != "glm5_dspark") {
+        args.model_type(/*value=*/"qwen3_dspark");
+      }
+    } else {
+      args.model_type(SpeculativeConfig::is_dflash2_algorithm(algorithm)
+                          ? "qwen3_dflash2"
+                          : "qwen3_dflash");
+    }
+    return;
+  }
+  if (!SpeculativeConfig::is_mtp_algorithm(algorithm)) {
+    return;
+  }
+
+  [[maybe_unused]] const std::string_view model_type = args.model_type();
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_MUSA)
+  const bool is_qwen35_dense =
+      model_type == "qwen3_5" || model_type == "qwen3_5_text" ||
+      (Platform::is_mlu() && model_type == "qwen3_5_mtp");
+  const bool is_qwen35_moe =
+      model_type == "qwen3_5_moe" || model_type == "qwen3_5_moe_text" ||
+      (Platform::is_mlu() && model_type == "qwen3_5_moe_mtp");
+  if (is_qwen35_dense || is_qwen35_moe) {
+    int32_t draft_layers = args.num_nextn_predict_layers();
+#if defined(USE_MLU)
+    if (is_python_model && draft_layers <= 0) {
+      return;
+    }
+#else
+    if (draft_layers <= 0) {
+      return;
+    }
+#endif
+    args.model_type(is_qwen35_dense ? "qwen3_5_mtp" : "qwen3_5_moe_mtp");
+#if defined(USE_MLU)
+    if (is_python_model) {
+      return;
+    }
+    draft_layers = std::max(draft_layers, /*minimum=*/1);
+    args.num_nextn_predict_layers(draft_layers);
+#endif
+#if defined(USE_NPU) || defined(USE_MLU)
+    args.n_layers(draft_layers);
+    args.layer_types(std::vector<std::string>(draft_layers,
+                                              /*value=*/"full_attention"));
+    args.full_attention_interval(/*value=*/1);
+#endif
+    return;
+  }
+#endif
+
+#if defined(USE_NPU) || defined(USE_MLU)
+  if (is_glm5_next_model(model_type)) {
+#if defined(USE_MLU)
+    if (!is_python_model) {
+      args.index_share_for_mtp_iteration(/*value=*/false);
+    }
+#endif
+    CHECK_EQ(args.num_nextn_predict_layers(), 1)
+        << "GLM MTP requires exactly one appended prediction layer.";
+    CHECK_GT(args.n_layers(), 0);
+    args.mtp_start_layer_idx(args.n_layers());
+    args.model_type(/*value=*/"glm5_next_mtp");
+    args.n_layers(/*value=*/1);
+    args.first_k_dense_replace(/*value=*/0);
+    args.layer_types({"deepseek_sparse_attention"});
+    args.full_attn_layers({0});
+    args.mlp_layer_types({"sparse"});
+    args.indexer_types({"full"});
+    if (args.index_share_for_mtp_iteration()) {
+      args.index_topk_freq(std::max(args.index_topk_freq(), /*minimum=*/2));
+      args.index_skip_topk_offset(/*value=*/0);
+      args.index_topk_pattern(/*value=*/"S");
+    }
+    return;
+  }
+#endif
+
+#if defined(USE_MLU)
+  if (model_type == "glm5_next_mtp" && !is_python_model) {
+    args.index_share_for_mtp_iteration(/*value=*/false);
+  }
+#endif
+#if defined(USE_MLU) || defined(USE_CUDA) || defined(USE_DCU)
+  if (args.num_nextn_predict_layers() > 0) {
+    constexpr ModelArgsAlias kEmbeddedMtpModels[] = {
+#if defined(USE_MLU)
+        {"deepseek_v3", "deepseek_v3_mtp"},
+        {"deepseek_v4", "deepseek_v4_mtp"},
+        {"glm_moe_dsa", "glm_moe_dsa_mtp"},
+        {"joyai_llm_flash", "joyai_llm_flash_mtp"},
+#else
+        {"mimo", "mimo_mtp"},
+#endif
+    };
+    const auto model = std::ranges::find(
+        kEmbeddedMtpModels, model_type, &ModelArgsAlias::model_type);
+    if (model != std::end(kEmbeddedMtpModels)) {
+      args.model_type(model->resolved_type);
+    }
+  }
+#endif
+}
+
 bool load_hf_model_args(const std::filesystem::path& model_weights_path,
                         const std::string& backend,
                         ModelArgs* args) {
@@ -438,8 +593,11 @@ bool load_hf_model_args(const std::filesystem::path& model_weights_path,
     return false;
   }
 
-  const auto model_args_loader =
-      ModelRegistry::get_model_args_loader(resolved_model_type);
+  const auto alias = std::ranges::find(
+      kModelArgsAliases, resolved_model_type, &ModelArgsAlias::model_type);
+  const auto model_args_loader = ModelRegistry::get_model_args_loader(
+      alias == std::end(kModelArgsAliases) ? resolved_model_type
+                                           : alias->resolved_type);
   if (model_args_loader == nullptr) {
     LOG(ERROR) << "Failed to find model args loader for model type "
                << resolved_model_type;
@@ -450,6 +608,36 @@ bool load_hf_model_args(const std::filesystem::path& model_weights_path,
     LOG(ERROR) << "Failed to load model args for model type "
                << resolved_model_type;
     return false;
+  }
+#if defined(USE_NPU) || defined(USE_MLU)
+  if (resolved_model_type == "deepseek_v3_mtp") {
+    args->first_k_dense_replace(
+        reader.value_or<int32_t>("first_k_dense_replace", 0));
+#if defined(USE_MLU)
+    args->index_head_dim(reader.value_or<int32_t>("index_head_dim", 128));
+    args->index_n_heads(reader.value_or<int32_t>("index_n_heads", 64));
+    args->index_topk(reader.value_or<int32_t>("index_topk", 2048));
+#endif
+  } else if (resolved_model_type == "deepseek_v32_mtp") {
+    args->index_n_heads(reader.value_or<int32_t>("index_n_heads", 64));
+    args->index_share_for_mtp_iteration(
+        reader.value_or<bool>("index_share_for_mtp_iteration", false));
+  }
+#endif
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_MUSA)
+  if (resolved_model_type == "qwen3_5_mtp" ||
+      resolved_model_type == "qwen3_5_moe_mtp") {
+    const int32_t draft_layers =
+        std::max(args->num_nextn_predict_layers(), /*minimum=*/1);
+    args->num_nextn_predict_layers(draft_layers);
+    args->n_layers(draft_layers);
+    args->layer_types(
+        std::vector<std::string>(draft_layers, /*value=*/"full_attention"));
+  }
+#endif
+  if (alias != std::end(kModelArgsAliases) &&
+      resolved_model_type.ends_with(/*suffix=*/"_mtp")) {
+    args->model_type(resolved_model_type);
   }
   // Qwen3 block drafts enable a positive window when the source omits the
   // switch. Resolve that default before reflection loses the distinction

@@ -94,10 +94,12 @@ TEST(MluGraphCapacityTest, GroupedRowsCoverRoundedRequests) {
       .enable_speculative_decode(true)
       .enable_graph_mode_decode_no_padding(false)
       .speculative_algorithm("mtp");
-  MtpModelCapabilities capabilities;
-  EXPECT_EQ(mlu::get_graph_token_capacity(options, capabilities), 112);
-  capabilities.supports_grouped_graph = true;
-  EXPECT_EQ(mlu::get_graph_token_capacity(options, capabilities), 144);
+  EXPECT_EQ(
+      mlu::get_graph_token_capacity(options, mlu::GraphAttentionLayout::FLAT),
+      112);
+  EXPECT_EQ(mlu::get_graph_token_capacity(
+                options, mlu::GraphAttentionLayout::GROUPED_FULL_ATTENTION),
+            144);
 }
 TEST(MluGraphCapacityTest, DraftRowsCoverIntermediateTpAlignedPrefixes) {
   runtime::Options options;
@@ -106,9 +108,9 @@ TEST(MluGraphCapacityTest, DraftRowsCoverIntermediateTpAlignedPrefixes) {
       .is_draft_engine(true)
       .world_size(16)
       .dp_size(2);
-  MtpModelCapabilities capabilities;
-  capabilities.supports_grouped_graph = true;
-  EXPECT_EQ(mlu::get_graph_token_capacity(options, capabilities), 24);
+  EXPECT_EQ(mlu::get_graph_token_capacity(
+                options, mlu::GraphAttentionLayout::GROUPED_FULL_ATTENTION),
+            24);
 }
 
 }  // namespace
@@ -609,8 +611,10 @@ TEST_F(MluGraphExecutorTest, OverPersistentGraphRowCapacityFallsBackToEager) {
 }
 
 TEST_F(MluGraphExecutorTest, LinearStatePaddingTailUsesPaddingId) {
-  ::xllm::mlu::GraphPersistentParam param(
-      model_args_, tensor_options_.device(), options_, {});
+  ::xllm::mlu::GraphPersistentParam param(model_args_,
+                                          tensor_options_.device(),
+                                          options_,
+                                          mlu::GraphAttentionLayout::FLAT);
 
   LlmForwardInput first_input = prepare_inputs(/*batch_size=*/4, /*seed=*/83);
   first_input.input_params.embedding.linear_state_ids = {10, 20, 30, 40};

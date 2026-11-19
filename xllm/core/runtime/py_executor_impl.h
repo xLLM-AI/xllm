@@ -56,7 +56,6 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
 
   PyCausalLM* py_causal_lm_;
   ModelArgs args_;
-  int32_t num_speculative_tokens_ = 0;
   torch::Device device_;
   runtime::Options options_;
   bool enable_mla_ = false;

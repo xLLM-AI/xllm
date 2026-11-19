@@ -39,17 +39,6 @@ class ProcessGroup;
 class MegaMoeCommResource;
 #endif
 
-namespace detail {
-int64_t python_mega_moe_max_num_tokens_per_rank(int64_t max_seqs_per_batch,
-                                                int64_t num_speculative_tokens,
-                                                int64_t dp_size);
-
-int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
-    int64_t max_tokens_per_batch,
-    int64_t max_seqs_per_batch,
-    int64_t num_speculative_tokens);
-}  // namespace detail
-
 // Inherits CausalVLM so that ``--backend vlm --model_impl python`` can route a
 // Python VLM (e.g. GLM-5.3-Flash-VL) through the VLM engine while
 // PyExecutorImpl drives it. The CausalVLM ``encode`` / ``get_input_embeddings``

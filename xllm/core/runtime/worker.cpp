@@ -23,6 +23,7 @@ limitations under the License.
 
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 
 #include "common/metrics.h"
@@ -48,6 +49,7 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
+
 Worker::Worker(const ParallelArgs& parallel_args,
                const torch::Device& device,
                const runtime::Options& options,
@@ -67,17 +69,6 @@ Worker::Worker(const ParallelArgs& parallel_args,
         impl_ = new Eagle3WorkerImpl<LlmForwardInput>(
             parallel_args, device, options, worker_type);
       }
-    } else if (SpeculativeConfig::is_dflash_algorithm(algorithm)) {
-      impl_ = new DFlashWorkerImpl(parallel_args, device, options);
-    } else if (SpeculativeConfig::is_dflash2_algorithm(algorithm)) {
-#if !defined(USE_NPU)
-      LOG(FATAL) << "DFlash2 speculative decoding is only supported on NPU.";
-#endif
-      impl_ = new DFlash2WorkerImpl(parallel_args, device, options);
-    } else if (SpeculativeConfig::is_dspark_algorithm(algorithm)) {
-      impl_ = new DSparkWorkerImpl(parallel_args, device, options);
-    } else if (SpeculativeConfig::is_suffix_algorithm(algorithm)) {
-      impl_ = new SuffixWorkerImpl(parallel_args, device, options);
     } else if (SpeculativeConfig::is_mtp_algorithm(algorithm)) {
       if (worker_type == WorkerType::VLM) {
         impl_ = new MTPWorkerImpl<VlmForwardInput>(
@@ -86,6 +77,14 @@ Worker::Worker(const ParallelArgs& parallel_args,
         impl_ = new MTPWorkerImpl<LlmForwardInput>(
             parallel_args, device, options, worker_type);
       }
+    } else if (SpeculativeConfig::is_dflash_algorithm(algorithm)) {
+      impl_ = new DFlashWorkerImpl(parallel_args, device, options);
+    } else if (SpeculativeConfig::is_dflash2_algorithm(algorithm)) {
+      impl_ = new DFlash2WorkerImpl(parallel_args, device, options);
+    } else if (SpeculativeConfig::is_dspark_algorithm(algorithm)) {
+      impl_ = new DSparkWorkerImpl(parallel_args, device, options);
+    } else if (SpeculativeConfig::is_suffix_algorithm(algorithm)) {
+      impl_ = new SuffixWorkerImpl(parallel_args, device, options);
     } else {
       LOG(FATAL) << "Unsupported speculative decoding algorithm: " << algorithm;
     }

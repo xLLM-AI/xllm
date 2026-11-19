@@ -57,27 +57,6 @@ inline StateDict get_embed_tokens_dict(const StateDict& state_dict) {
   return state_dict.get_dict_with_prefix(kEmbeddingPrefixes);
 }
 
-inline bool load_model_args(const JsonReader& json,
-                            ModelArgs* args,
-                            const std::string& base_type,
-                            const std::string& mtp_type) {
-  ModelArgsLoader base_loader = ModelRegistry::get_model_args_loader(base_type);
-  if (base_loader == nullptr || base_loader(json, args) == false) {
-    return false;
-  }
-
-  int32_t mtp_num_layers = args->num_nextn_predict_layers();
-  if (mtp_num_layers <= 0) {
-    mtp_num_layers = 1;
-  }
-  args->model_type(mtp_type);
-  args->num_nextn_predict_layers(mtp_num_layers);
-  args->n_layers(mtp_num_layers);
-  args->layer_types(std::vector<std::string>(
-      static_cast<size_t>(mtp_num_layers), "full_attention"));
-  return true;
-}
-
 }  // namespace qwen3_5_mtp
 
 class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {

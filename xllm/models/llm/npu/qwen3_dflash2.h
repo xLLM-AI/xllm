@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -137,17 +138,15 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
     head_dim_ = args.head_dim();
     rms_norm_eps_ = args.rms_norm_eps();
     sliding_window_ = args.sliding_window();
-    block_size_ = args.block_size();
+    num_speculative_tokens_ = context.num_speculative_tokens();
     CHECK_GT(sliding_window_, 0);
-    CHECK_GT(block_size_, 0);
 
-    const int32_t dp_size = parallel_args_.dp_size();
-    const int32_t cp_size = parallel_args_.cp_size();
-    CHECK_GT(dp_size, 0);
-    CHECK_GT(cp_size, 0);
-    CHECK_EQ(parallel_args_.world_size() % (dp_size * cp_size), 0);
-    tp_size_ = parallel_args_.world_size() / (dp_size * cp_size);
-    tp_rank_ = parallel_args_.rank() % tp_size_;
+    const auto& tp_group = *parallel_args_.tp_group_;
+    const int32_t tp_size = tp_group.world_size();
+    const int64_t kv_heads = args.n_kv_heads().value_or(args.n_heads());
+    kv_tp_size_ = static_cast<int32_t>(std::min<int64_t>(kv_heads, tp_size));
+    kv_tp_rank_ = tp_group.rank() / (tp_size / kv_tp_size_);
+    local_kv_heads_ = kv_heads / kv_tp_size_;
 
     fc_ = register_module("fc",
                           layer::AddMatmul(args.hidden_size() * args.n_layers(),
@@ -168,7 +167,7 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
   }
 
   void load_state_dict(const StateDict& state_dict) override {
-    if (state_dict.get_tensor("embed_tokens.weight").defined()) {
+    if (state_dict.has(/*tensor_name=*/"embed_tokens.weight")) {
       if (embed_tokens_.is_empty()) {
         auto embedding = layer::WordEmbedding(model_args_.vocab_size(),
                                               model_args_.hidden_size(),
@@ -184,26 +183,64 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
         state_dict.get_dict_with_prefix("hidden_norm."));
     selector_.load_state_dict(
         state_dict.get_dict_with_prefix("candidate_selector."));
-    load_context_kv_weights(state_dict);
-    for (int32_t i = 0; i < static_cast<int32_t>(layers_.size()); ++i) {
-      layers_[i]->load_state_dict(
-          state_dict.get_dict_with_prefix("layers." + std::to_string(i) + "."));
+    context_kv_weights_.resize(layers_.size());
+    for (size_t i = 0; i < layers_.size(); ++i) {
+      const StateDict layer_dict =
+          state_dict.get_dict_with_prefix("layers." + std::to_string(i) + ".");
+      layers_[i]->load_state_dict(layer_dict);
+      auto& weights = context_kv_weights_[i];
+      if (const auto key = layer_dict.get_sharded_tensor(
+              /*tensor_name=*/"self_attn.k_proj.weight",
+              /*dim=*/0,
+              kv_tp_rank_,
+              kv_tp_size_);
+          key.defined()) {
+        weights.key = key.to(tensor_options_);
+      }
+      if (const auto value = layer_dict.get_sharded_tensor(
+              /*tensor_name=*/"self_attn.v_proj.weight",
+              /*dim=*/0,
+              kv_tp_rank_,
+              kv_tp_size_);
+          value.defined()) {
+        weights.value = value.to(tensor_options_);
+      }
+      if (const auto key_norm =
+              layer_dict.get_tensor(/*tensor_name=*/"self_attn.k_norm.weight");
+          key_norm.defined()) {
+        weights.key_norm = key_norm.to(tensor_options_).to(torch::kFloat32);
+      }
     }
     norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
   }
 
-  void verify_loaded_weights() const {
+  void finalize_loaded_weights() {
     fc_->verify_loaded_weights("fc.");
     hidden_norm_->verify_loaded_weights("hidden_norm.");
     norm_->verify_loaded_weights("norm.");
     selector_.verify_loaded_weights();
-    verify_context_kv_weights();
     for (int32_t i = 0; i < static_cast<int32_t>(layers_.size()); ++i) {
       layers_[i]->verify_loaded_weights("layers." + std::to_string(i) + ".");
     }
-  }
 
-  void finalize_loaded_weights() { build_fused_context_kv_weights(); }
+    const size_t num_layers = context_kv_weights_.size();
+    std::vector<torch::Tensor> kv_weights;
+    std::vector<torch::Tensor> k_norm_weights;
+    kv_weights.reserve(num_layers * 2);
+    k_norm_weights.reserve(num_layers);
+    for (const auto& weights : context_kv_weights_) {
+      kv_weights.emplace_back(weights.key);
+      kv_weights.emplace_back(weights.value);
+      k_norm_weights.emplace_back(weights.key_norm);
+    }
+    fused_kv_weight_ = torch::stack(kv_weights, /*dim=*/0)
+                           .view({static_cast<int64_t>(num_layers) * 2 *
+                                      local_kv_heads_ * head_dim_,
+                                  model_args_.hidden_size()});
+    k_norm_weight_ = torch::stack(k_norm_weights, /*dim=*/0)
+                         .view({static_cast<int64_t>(num_layers), 1, 1, -1});
+    context_kv_weights_.clear();
+  }
 
   DFlash2CandidateOutput candidates(
       const torch::Tensor& hidden_states,
@@ -222,7 +259,6 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
     CHECK_EQ(device_cache_slots.numel(), target_hidden.size(0));
     torch::Tensor projected_hidden = fc_->forward(target_hidden);
     projected_hidden = std::get<0>(hidden_norm_->forward(projected_hidden));
-    CHECK(fused_kv_weight_.defined());
 
     const int64_t num_context = projected_hidden.size(0);
     torch::Tensor all_kv =
@@ -235,7 +271,8 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
     torch::Tensor all_value = all_kv.select(/*dim=*/0, /*index=*/1);
     torch::Tensor flat_key =
         all_key.reshape({num_layers * num_context, local_kv_heads_, head_dim_});
-    flat_key = apply_rope(flat_key, positions.repeat({num_layers}));
+    flat_key = std::get<1>(rotary_embedding_->forward(
+        flat_key, flat_key, positions.repeat({num_layers})));
     all_key =
         flat_key.view({num_layers, num_context, local_kv_heads_, head_dim_});
 
@@ -275,7 +312,7 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
 #if defined(USE_NPU)
     metadata.fia_sparse_mode = 4;
     metadata.fia_pre_tokens = sliding_window_ - 1;
-    metadata.fia_next_tokens = block_size_ - 1;
+    metadata.fia_next_tokens = num_speculative_tokens_;
 #endif
     return metadata;
   }
@@ -289,80 +326,17 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
         .to(key.scalar_type());
   }
 
-  torch::Tensor apply_rope(const torch::Tensor& key,
-                           const torch::Tensor& positions) const {
-    return std::get<1>(rotary_embedding_->forward(key, key, positions));
-  }
-
-  void load_context_kv_weights(const StateDict& state_dict) {
-    const int32_t num_layers = static_cast<int32_t>(layers_.size());
-    if (per_layer_k_proj_.empty()) {
-      per_layer_k_proj_.resize(num_layers);
-      per_layer_v_proj_.resize(num_layers);
-      per_layer_k_norm_.resize(num_layers);
-    }
-    for (int32_t i = 0; i < num_layers; ++i) {
-      StateDict layer_dict =
-          state_dict.get_dict_with_prefix("layers." + std::to_string(i) + ".");
-      torch::Tensor k_proj = layer_dict.get_sharded_tensor(
-          "self_attn.k_proj.weight", /*dim=*/0, tp_rank_, tp_size_);
-      torch::Tensor v_proj = layer_dict.get_sharded_tensor(
-          "self_attn.v_proj.weight", /*dim=*/0, tp_rank_, tp_size_);
-      torch::Tensor k_norm = layer_dict.get_tensor("self_attn.k_norm.weight");
-      if (!k_proj.defined() && !v_proj.defined() && !k_norm.defined()) {
-        continue;
-      }
-      CHECK(k_proj.defined());
-      CHECK(v_proj.defined());
-      CHECK(k_norm.defined());
-      const int64_t local_kv_heads = k_proj.size(0) / head_dim_;
-      if (local_kv_heads_ == 0) {
-        local_kv_heads_ = local_kv_heads;
-      }
-      CHECK_EQ(local_kv_heads_, local_kv_heads);
-      per_layer_k_proj_[i] = k_proj.to(tensor_options_);
-      per_layer_v_proj_[i] = v_proj.to(tensor_options_);
-      per_layer_k_norm_[i] = k_norm.to(tensor_options_).to(torch::kFloat32);
-    }
-  }
-
-  void verify_context_kv_weights() const {
-    const int32_t num_layers = static_cast<int32_t>(layers_.size());
-    CHECK_EQ(static_cast<int32_t>(per_layer_k_proj_.size()), num_layers);
-    CHECK_GT(local_kv_heads_, 0);
-    for (int32_t i = 0; i < num_layers; ++i) {
-      CHECK(per_layer_k_proj_[i].defined());
-      CHECK(per_layer_v_proj_[i].defined());
-      CHECK(per_layer_k_norm_[i].defined());
-    }
-  }
-
-  void build_fused_context_kv_weights() {
-    const int32_t num_layers = static_cast<int32_t>(layers_.size());
-    std::vector<torch::Tensor> kv_weights;
-    std::vector<torch::Tensor> k_norm_weights;
-    kv_weights.reserve(num_layers * 2);
-    k_norm_weights.reserve(num_layers);
-    for (int32_t i = 0; i < num_layers; ++i) {
-      kv_weights.emplace_back(per_layer_k_proj_[i]);
-      kv_weights.emplace_back(per_layer_v_proj_[i]);
-      k_norm_weights.emplace_back(per_layer_k_norm_[i]);
-    }
-    fused_kv_weight_ = torch::cat(kv_weights, /*dim=*/0).contiguous();
-    k_norm_weight_ =
-        torch::stack(k_norm_weights, /*dim=*/0).view({num_layers, 1, 1, -1});
-    per_layer_k_proj_.clear();
-    per_layer_v_proj_.clear();
-    per_layer_k_norm_.clear();
-  }
+  struct ContextKVWeights {
+    torch::Tensor key;
+    torch::Tensor value;
+    torch::Tensor key_norm;
+  };
 
   layer::AddMatmul fc_{nullptr};
   layer::RMSNorm hidden_norm_{nullptr};
   DFlash2CandidateSelector selector_;
   std::shared_ptr<xllm::NpuRotaryEmbedding> rotary_embedding_;
-  std::vector<torch::Tensor> per_layer_k_proj_;
-  std::vector<torch::Tensor> per_layer_v_proj_;
-  std::vector<torch::Tensor> per_layer_k_norm_;
+  std::vector<ContextKVWeights> context_kv_weights_;
   torch::Tensor fused_kv_weight_;
   torch::Tensor k_norm_weight_;
   torch::TensorOptions tensor_options_;
@@ -371,9 +345,9 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
   int64_t local_kv_heads_ = 0;
   double rms_norm_eps_ = 1e-6;
   int32_t sliding_window_ = -1;
-  int32_t block_size_ = 0;
-  int32_t tp_rank_ = 0;
-  int32_t tp_size_ = 1;
+  int32_t num_speculative_tokens_ = 0;
+  int32_t kv_tp_rank_ = 0;
+  int32_t kv_tp_size_ = 1;
 };
 TORCH_MODULE(DFlash2Qwen3Model);
 
@@ -391,7 +365,6 @@ class DFlash2Qwen3ForCausalLMImpl final
          loader->get_state_dicts()) {
       model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
     }
-    model_->verify_loaded_weights();
     model_->finalize_loaded_weights();
   }
 
@@ -413,8 +386,6 @@ class DFlash2Qwen3ForCausalLMImpl final
 };
 TORCH_MODULE(DFlash2Qwen3ForCausalLM);
 
-REGISTER_CAUSAL_MODEL_WITH_VARNAME(dflash2_draft_model,
-                                   DFlash2DraftModel,
-                                   DFlash2Qwen3ForCausalLM);
+REGISTER_CAUSAL_MODEL(qwen3_dflash2, DFlash2Qwen3ForCausalLM);
 
 }  // namespace xllm::npu::model

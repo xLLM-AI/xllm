@@ -25,14 +25,17 @@ limitations under the License.
 
 namespace xllm {
 
-DraftVocabMapping::DraftVocabMapping(torch::Tensor draft_token_id_offsets,
-                                     int64_t draft_vocab_size,
-                                     int64_t target_vocab_size,
-                                     const torch::Device& device)
+DraftVocabMapping::DraftVocabMapping(
+    const torch::Tensor& draft_token_id_offsets,
+    int64_t draft_vocab_size,
+    int64_t target_vocab_size,
+    const torch::Device& device)
     : target_vocab_size_(target_vocab_size) {
-  if (!draft_token_id_offsets.defined()) {
+  if (draft_vocab_size == target_vocab_size) {
     return;
   }
+  CHECK(draft_token_id_offsets.defined())
+      << "Different draft and target vocabulary sizes require a d2t tensor.";
   CHECK_EQ(draft_token_id_offsets.dim(), 1) << "Draft d2t table must be 1D.";
   torch::Tensor mapped_ids =
       draft_token_id_offsets.to(torch::kInt64) +
@@ -48,10 +51,6 @@ DraftVocabMapping::DraftVocabMapping(torch::Tensor draft_token_id_offsets,
   CHECK_LT(torch::max(mapped_ids).item<int64_t>(), target_vocab_size)
       << "Draft d2t mapped target ids must be < target vocab ("
       << target_vocab_size << ").";
-  if (draft_vocab_size == target_vocab_size &&
-      draft_token_id_offsets.eq(0).all().item<bool>()) {
-    return;
-  }
   draft_to_target_ids_ = mapped_ids.to(device);
 }
 

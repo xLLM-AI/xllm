@@ -751,22 +751,6 @@ TEST(DecodeGraphWarmupPlanTest, RespectsReducedWarmupCapacity) {
   EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{1, 2, 4, 8, 15}));
 }
 
-TEST(GraphWarmupTest, PrefillRoleUsesPrefillOnlyPlan) {
-  EXPECT_EQ(graph_warmup_plan(InstanceRole::PREFILL),
-            GraphWarmupPlan::PREFILL_ONLY);
-}
-
-TEST(GraphWarmupTest, NonPrefillRolesUseUnifiedPlan) {
-  EXPECT_EQ(graph_warmup_plan(InstanceRole::DEFAULT), GraphWarmupPlan::UNIFIED);
-  EXPECT_EQ(graph_warmup_plan(InstanceRole::MIX), GraphWarmupPlan::UNIFIED);
-  EXPECT_EQ(graph_warmup_plan(InstanceRole::INVALID), GraphWarmupPlan::UNIFIED);
-}
-
-TEST(GraphWarmupTest, DecodeRoleUsesDecodeOnlyPlan) {
-  EXPECT_EQ(graph_warmup_plan(InstanceRole::DECODE),
-            GraphWarmupPlan::DECODE_ONLY);
-}
-
 TEST(GraphWarmupTest, FormatsWarmupProgress) {
   const std::string progress = graph_warmup_progress(
       /*completed=*/3, /*total=*/8, /*token_bucket=*/8, /*latency_ms=*/12.5);
@@ -788,28 +772,12 @@ TEST(GraphWarmupTest, FormatsCompletedWarmupProgress) {
             "token_bucket=64, latency=100.00 ms");
 }
 
-TEST(GraphWarmupTest, InjectsBootstrapEmbeddingWhenSpeculativeEnabled) {
-  Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
-
-  ModelArgs model_args;
-  model_args.hidden_size(128);
-  prepare_warmup_decode_sequence(&sequence,
-                                 model_args,
-                                 /*num_speculative_tokens=*/3);
-
-  const torch::Tensor embedding = sequence.get_mtp_bootstrap_embedding();
-  ASSERT_TRUE(embedding.defined());
-  EXPECT_EQ(embedding.dim(), 2);
-  EXPECT_EQ(embedding.size(0), 1);
-  EXPECT_EQ(embedding.size(1), 128);
-}
-
-TEST(GraphWarmupTest, BlockDraftBootstrapIncludesEveryCapturedTargetLayer) {
+TEST(GraphWarmupTest, Eagle3BootstrapIncludesEveryCapturedTargetLayer) {
   Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
   ModelArgs model_args;
   model_args.hidden_size(6144).layers_to_capture({5, 19, 33, 47, 61, 75});
 
-  prepare_warmup_decode_sequence(&sequence,
+  prepare_warmup_decode_sequence(sequence,
                                  model_args,
                                  /*num_speculative_tokens=*/7);
 
@@ -836,18 +804,6 @@ TEST(GraphWarmupTest, OtherMtpModelsUseDenseHiddenWidth) {
   model_args.hc_mult() = 4;
 
   EXPECT_EQ(mtp_hidden_state_width(model_args), 128);
-}
-
-TEST(GraphWarmupTest, SkipsBootstrapEmbeddingWhenSpeculativeDisabled) {
-  Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
-
-  ModelArgs model_args;
-  model_args.hidden_size(128);
-  prepare_warmup_decode_sequence(&sequence,
-                                 model_args,
-                                 /*num_speculative_tokens=*/0);
-
-  EXPECT_FALSE(sequence.get_mtp_bootstrap_embedding().defined());
 }
 
 TEST(GraphWarmupTest, ProducesUniqueWarmupRequestIds) {
