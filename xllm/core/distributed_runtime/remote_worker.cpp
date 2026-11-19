@@ -33,8 +33,8 @@ namespace xllm {
 RemoteWorker::RemoteWorker(int32_t global_rank,
                            const std::string& server_address,
                            const torch::Device& d,
-                           std::unique_ptr<CommChannel> channel)
-    : global_rank_(global_rank), device_(d), channel_(std::move(channel)) {
+                           std::unique_ptr<WorkerTransport> transport)
+    : global_rank_(global_rank), device_(d), transport_(std::move(transport)) {
   CHECK(wait_for_server_ready(server_address))
       << "Failed to wait for remote worker server ready: " << server_address
       << ", global_rank: " << global_rank_;
@@ -46,7 +46,7 @@ bool RemoteWorker::wait_for_server_ready(const std::string& server_address) {
   const int sleep_time_second = 3;
   while (try_count <
          ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
-    if (channel_->hello()) {
+    if (transport_->hello()) {
       LOG(INFO) << "RemoteWorker Hello connected, server_address: "
                 << server_address << ", global_rank_: " << global_rank_;
       break;
@@ -70,34 +70,34 @@ bool RemoteWorker::wait_for_server_ready(const std::string& server_address) {
 void RemoteWorker::get_cache_info(uint64_t& cluster_id,
                                   std::string& addr,
                                   uint16_t& port) {
-  channel_->get_cache_info(cluster_id, addr, port);
+  transport_->get_cache_info(cluster_id, addr, port);
 }
 
 bool RemoteWorker::link_cluster(const std::vector<uint64_t>& cluster_ids,
                                 const std::vector<std::string>& addrs,
                                 const std::vector<uint16_t>& ports) {
-  return channel_->link_cluster(cluster_ids, addrs, ports);
+  return transport_->link_cluster(cluster_ids, addrs, ports);
 }
 
 bool RemoteWorker::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                                   const std::vector<std::string>& addrs,
                                   const std::vector<uint16_t>& ports) {
-  return channel_->unlink_cluster(cluster_ids, addrs, ports);
+  return transport_->unlink_cluster(cluster_ids, addrs, ports);
 }
 
 bool RemoteWorker::link_p2p(const std::string& remote_addr) {
-  return channel_->link_p2p(remote_addr);
+  return transport_->link_p2p(remote_addr);
 }
 
 bool RemoteWorker::unlink_p2p(const std::string& remote_addr) {
-  return channel_->unlink_p2p(remote_addr);
+  return transport_->unlink_p2p(remote_addr);
 }
 
 bool RemoteWorker::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
     const std::vector<KVTransferMapping>& mappings) {
-  return channel_->pull_kv_blocks(src_cluster_id, src_addr, mappings);
+  return transport_->pull_kv_blocks(src_cluster_id, src_addr, mappings);
 }
 
 folly::SemiFuture<std::tuple<int64_t, int64_t>>
@@ -108,7 +108,7 @@ RemoteWorker::estimate_kv_cache_capacity_async() {
     int64_t available_memory = 0;
     int64_t total_memory = 0;
 
-    channel_->estimate_kv_cache_capacity(available_memory, total_memory);
+    transport_->estimate_kv_cache_capacity(available_memory, total_memory);
     std::tuple<int64_t, int64_t> result(available_memory, total_memory);
     promise.setValue(result);
   });
@@ -125,7 +125,7 @@ RemoteWorker::step_remote_async(
                         input = input.clone(),
                         encoding = std::move(encoding),
                         promise = std::move(promise)]() mutable {
-    channel_->execute_llm_model_async(input, promise, encoding.get());
+    transport_->execute_llm_model_async(input, promise, encoding.get());
   });
   return future;
 }
@@ -136,7 +136,7 @@ RemoteWorker::step_remote_async(const DiTForwardInput& input) {
   auto future = promise.getSemiFuture();
   threadpool_.schedule(
       [this, input = input, promise = std::move(promise)]() mutable {
-        channel_->execute_dit_model_async(input, promise);
+        transport_->execute_dit_model_async(input, promise);
       });
   return future;
 }
@@ -151,7 +151,7 @@ RemoteWorker::step_remote_async(
                         input = input.clone(),
                         encoding = std::move(encoding),
                         promise = std::move(promise)]() mutable {
-    channel_->execute_vlm_model_async(input, promise, encoding.get());
+    transport_->execute_vlm_model_async(input, promise, encoding.get());
   });
   return future;
 }
@@ -160,7 +160,7 @@ folly::SemiFuture<folly::Unit> RemoteWorker::process_group_test_async() {
   folly::Promise<folly::Unit> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
-    channel_->process_group_test();
+    transport_->process_group_test();
     promise.setValue();
   });
   return future;
@@ -178,7 +178,7 @@ folly::SemiFuture<bool> RemoteWorker::init_model_async(
                         promise = std::move(promise),
                         master_status]() mutable {
     // call InitModel with callback
-    channel_->init_model_async(
+    transport_->init_model_async(
         model_weights_path, random_seed, promise, master_status);
   });
   return future;
@@ -190,7 +190,7 @@ folly::SemiFuture<bool> RemoteWorker::allocate_kv_cache_async(
   auto future = promise.getSemiFuture();
   threadpool_.schedule(
       [this, kv_cache_shape, promise = std::move(promise)]() mutable {
-        if (!channel_->allocate_kv_cache(kv_cache_shape)) {
+        if (!transport_->allocate_kv_cache(kv_cache_shape)) {
           LOG(ERROR) << "allocate_kv_cache_async failed";
           promise.setValue(false);
         } else {
@@ -206,7 +206,7 @@ folly::SemiFuture<bool> RemoteWorker::allocate_kv_cache_with_transfer_async(
   auto future = promise.getSemiFuture();
   threadpool_.schedule(
       [this, kv_cache_shape, promise = std::move(promise)]() mutable {
-        if (!channel_->allocate_kv_cache_with_transfer(kv_cache_shape)) {
+        if (!transport_->allocate_kv_cache_with_transfer(kv_cache_shape)) {
           LOG(ERROR) << "AllocateKVCacheWithTransfer failed";
           promise.setValue(false);
         } else {
@@ -223,7 +223,7 @@ folly::SemiFuture<uint32_t> RemoteWorker::transfer_kv_blocks(
   copy_threadpool_.schedule([this,
                              block_transfer_info = block_transfer_info,
                              promise = std::move(promise)]() mutable {
-    channel_->transfer_kv_blocks(block_transfer_info, promise);
+    transport_->transfer_kv_blocks(block_transfer_info, promise);
   });
   return future;
 }
@@ -239,14 +239,14 @@ folly::SemiFuture<uint32_t> RemoteWorker::transfer_kv_blocks(
                         promise = std::move(promise)]() mutable {
     // Registration must finish before this queue can submit the matching
     // forward. Device completion waits independently to preserve overlap.
-    channel_->transfer_kv_blocks(batch_id, block_transfer_info);
+    transport_->transfer_kv_blocks(batch_id, block_transfer_info);
     const uint32_t block_count =
         static_cast<uint32_t>(block_transfer_info.size());
     copy_threadpool_.schedule([this,
                                batch_id,
                                block_count,
                                promise = std::move(promise)]() mutable {
-      CHECK(channel_->wait_for_kv_blocks_transfer(batch_id))
+      CHECK(transport_->wait_for_kv_blocks_transfer(batch_id))
           << "Host KV restore completion could not be confirmed for batch_id="
           << batch_id;
       promise.setValue(block_count);
@@ -261,7 +261,7 @@ void RemoteWorker::prefetch_from_storage(
     size_t worker_index) {
   copy_threadpool_.schedule(
       [this, request, result = std::move(result), worker_index]() mutable {
-        channel_->prefetch_from_storage(
+        transport_->prefetch_from_storage(
             *request, std::move(result), worker_index);
       });
 }
@@ -276,7 +276,7 @@ RemoteWorker::get_last_llm_step_result_async() {
   folly::Promise<std::optional<RawForwardOutput>> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
-    channel_->get_last_llm_step_result_async(promise);
+    transport_->get_last_llm_step_result_async(promise);
   });
   return future;
 }
@@ -286,12 +286,12 @@ RemoteWorker::get_last_vlm_step_result_async() {
   folly::Promise<std::optional<RawForwardOutput>> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
-    channel_->get_last_vlm_step_result_async(promise);
+    transport_->get_last_vlm_step_result_async(promise);
   });
   return future;
 }
 
-bool RemoteWorker::check_health() { return channel_->check_health(); }
+bool RemoteWorker::check_health() { return transport_->check_health(); }
 
 folly::SemiFuture<bool> RemoteWorker::sleep_async(MasterStatus master_status,
                                                   uint64_t transition_id) {
@@ -301,7 +301,7 @@ folly::SemiFuture<bool> RemoteWorker::sleep_async(MasterStatus master_status,
                         promise = std::move(promise),
                         master_status,
                         transition_id]() mutable {
-    if (!channel_->sleep(master_status, transition_id)) {
+    if (!transport_->sleep(master_status, transition_id)) {
       LOG(ERROR) << "Sleep failed";
       promise.setValue(false);
     } else {
@@ -316,7 +316,7 @@ folly::SemiFuture<bool> RemoteWorker::wakeup_async(
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, options, promise = std::move(promise)]() mutable {
-    if (!channel_->wakeup(options)) {
+    if (!transport_->wakeup(options)) {
       LOG(ERROR) << "Wakeup failed";
       promise.setValue(false);
     } else {
@@ -330,7 +330,7 @@ folly::SemiFuture<bool> RemoteWorker::start_profile_async() {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
-    if (!channel_->start_profile()) {
+    if (!transport_->start_profile()) {
       LOG(ERROR) << "StartProfile failed";
       promise.setValue(false);
     } else {
@@ -344,7 +344,7 @@ folly::SemiFuture<bool> RemoteWorker::stop_profile_async() {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
-    if (!channel_->stop_profile()) {
+    if (!transport_->stop_profile()) {
       LOG(ERROR) << "StopProfile failed";
       promise.setValue(false);
     } else {

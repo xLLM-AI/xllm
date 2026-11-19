@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/transport/comm_channel.h"
+#include "core/transport/rpc_channel.h"
 
 #include <brpc/controller.h>
 #include <glog/logging.h>
@@ -30,7 +30,7 @@ limitations under the License.
 
 namespace xllm {
 
-bool CommChannel::init_brpc(const std::string& server_address) {
+bool RpcChannel::init_brpc(const std::string& server_address) {
   options_.connection_type = "pooled";
   options_.timeout_ms = -1;
   options_.connect_timeout_ms = -1;
@@ -45,7 +45,7 @@ bool CommChannel::init_brpc(const std::string& server_address) {
   return true;
 }
 
-bool CommChannel::hello() {
+bool RpcChannel::hello() {
   proto::Status req;
   proto::Status resp;
   brpc::Controller cntl;
@@ -59,7 +59,7 @@ bool CommChannel::hello() {
   return true;
 }
 
-bool CommChannel::check_health() {
+bool RpcChannel::check_health() {
   proto::Status req;
   proto::Status resp;
   brpc::Controller cntl;
@@ -76,7 +76,7 @@ bool CommChannel::check_health() {
   return resp.ok();
 }
 
-bool CommChannel::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
+bool RpcChannel::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   if (!kv_cache_shape.has_key_cache_shape() ||
       kv_cache_shape.key_cache_shape().empty()) {
     LOG(ERROR) << "allocate_kv_cache failed: key cache shape is empty";
@@ -97,9 +97,9 @@ bool CommChannel::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return true;
 }
 
-bool CommChannel::get_cache_info(uint64_t& cluster_id,
-                                 std::string& addr,
-                                 uint16_t& port) {
+bool RpcChannel::get_cache_info(uint64_t& cluster_id,
+                                std::string& addr,
+                                uint16_t& port) {
   proto::Empty req;
   proto::CacheInfo resp;
   brpc::Controller cntl;
@@ -116,9 +116,9 @@ bool CommChannel::get_cache_info(uint64_t& cluster_id,
   return true;
 }
 
-bool CommChannel::link_cluster(const std::vector<uint64_t>& cluster_ids,
-                               const std::vector<std::string>& addrs,
-                               const std::vector<uint16_t>& ports) {
+bool RpcChannel::link_cluster(const std::vector<uint64_t>& cluster_ids,
+                              const std::vector<std::string>& addrs,
+                              const std::vector<uint16_t>& ports) {
   proto::ClusterInfo cluster_info;
   cluster_info.mutable_cluster_ids()->Reserve(cluster_ids.size());
   cluster_info.mutable_addrs()->Reserve(addrs.size());
@@ -141,9 +141,9 @@ bool CommChannel::link_cluster(const std::vector<uint64_t>& cluster_ids,
   return true;
 }
 
-bool CommChannel::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
-                                 const std::vector<std::string>& addrs,
-                                 const std::vector<uint16_t>& ports) {
+bool RpcChannel::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
+                                const std::vector<std::string>& addrs,
+                                const std::vector<uint16_t>& ports) {
   proto::ClusterInfo cluster_info;
   cluster_info.mutable_cluster_ids()->Reserve(cluster_ids.size());
   cluster_info.mutable_addrs()->Reserve(addrs.size());
@@ -166,7 +166,7 @@ bool CommChannel::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
   return true;
 }
 
-bool CommChannel::link_p2p(const std::string& remote_addr) {
+bool RpcChannel::link_p2p(const std::string& remote_addr) {
   proto::P2PLinkWorkerRequest req;
   req.set_remote_addr(remote_addr);
 
@@ -181,7 +181,7 @@ bool CommChannel::link_p2p(const std::string& remote_addr) {
   return true;
 }
 
-bool CommChannel::unlink_p2p(const std::string& remote_addr) {
+bool RpcChannel::unlink_p2p(const std::string& remote_addr) {
   proto::P2PLinkWorkerRequest req;
   req.set_remote_addr(remote_addr);
 
@@ -196,10 +196,10 @@ bool CommChannel::unlink_p2p(const std::string& remote_addr) {
   return true;
 }
 
-bool CommChannel::init_model_async(const std::string& model_weights_path,
-                                   int32_t random_seed,
-                                   folly::Promise<bool>& promise,
-                                   MasterStatus master_status) {
+bool RpcChannel::init_model_async(const std::string& model_weights_path,
+                                  int32_t random_seed,
+                                  folly::Promise<bool>& promise,
+                                  MasterStatus master_status) {
   proto::InitModelRequest request;
 
   request.set_model_weights_path(model_weights_path);
@@ -212,8 +212,8 @@ bool CommChannel::init_model_async(const std::string& model_weights_path,
   return true;
 }
 
-bool CommChannel::estimate_kv_cache_capacity(int64_t& available_memory,
-                                             int64_t& total_memory) {
+bool RpcChannel::estimate_kv_cache_capacity(int64_t& available_memory,
+                                            int64_t& total_memory) {
   proto::Empty req;
   proto::DeviceMemory mem;
   brpc::Controller cntl;
@@ -229,7 +229,7 @@ bool CommChannel::estimate_kv_cache_capacity(int64_t& available_memory,
   return true;
 }
 
-bool CommChannel::pull_kv_blocks(
+bool RpcChannel::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
     const std::vector<KVTransferMapping>& mappings) {
@@ -252,14 +252,14 @@ bool CommChannel::pull_kv_blocks(
   return !cntl.Failed() && s.ok();
 }
 
-void CommChannel::execute_llm_model_async(
+void RpcChannel::execute_llm_model_async(
     const LlmForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise,
     ForwardInputEncoding* encoding) {
   execute_llm_model_with_brpc(input, promise, encoding);
 }
 
-bool CommChannel::process_group_test() {
+bool RpcChannel::process_group_test() {
   proto::Empty req;
   proto::Status s;
   brpc::Controller cntl;
@@ -272,7 +272,7 @@ bool CommChannel::process_group_test() {
   return true;
 }
 
-bool CommChannel::allocate_kv_cache_with_transfer(
+bool RpcChannel::allocate_kv_cache_with_transfer(
     const KVCacheShape& kv_cache_shape) {
   if (!kv_cache_shape.has_key_cache_shape() ||
       kv_cache_shape.key_cache_shape().empty()) {
@@ -294,7 +294,7 @@ bool CommChannel::allocate_kv_cache_with_transfer(
   return true;
 }
 
-void CommChannel::transfer_kv_blocks(
+void RpcChannel::transfer_kv_blocks(
     const std::vector<BlockTransferInfo>& block_transfer_info,
     folly::Promise<uint32_t>& promise) {
   proto::BlockTransferInfos pb_block_transfer_info;
@@ -311,7 +311,7 @@ void CommChannel::transfer_kv_blocks(
       &done->cntl, &pb_block_transfer_info, &done->response, done);
 }
 
-void CommChannel::transfer_kv_blocks(
+void RpcChannel::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   proto::BlockTransferInfos pb_block_transfer_info;
@@ -328,7 +328,7 @@ void CommChannel::transfer_kv_blocks(
       << batch_id;
 }
 
-bool CommChannel::wait_for_kv_blocks_transfer(uint64_t batch_id) {
+bool RpcChannel::wait_for_kv_blocks_transfer(uint64_t batch_id) {
   proto::WaitForKVBlocksTransferRequest request;
   request.set_batch_id(batch_id);
   proto::Status response;
@@ -342,7 +342,7 @@ bool CommChannel::wait_for_kv_blocks_transfer(uint64_t batch_id) {
   return true;
 }
 
-bool CommChannel::sleep(MasterStatus master_status, uint64_t transition_id) {
+bool RpcChannel::sleep(MasterStatus master_status, uint64_t transition_id) {
   proto::SleepRequest req;
   proto::Status s;
   brpc::Controller cntl;
@@ -357,7 +357,7 @@ bool CommChannel::sleep(MasterStatus master_status, uint64_t transition_id) {
   return true;
 }
 
-bool CommChannel::wakeup(const WakeupOptions& options) {
+bool RpcChannel::wakeup(const WakeupOptions& options) {
   proto::Status s;
   brpc::Controller cntl;
   proto::WakeupRequest req;
@@ -385,7 +385,7 @@ bool CommChannel::wakeup(const WakeupOptions& options) {
   return true;
 }
 
-bool CommChannel::start_profile() {
+bool RpcChannel::start_profile() {
   proto::Empty req;
   proto::Status s;
   brpc::Controller cntl;
@@ -398,7 +398,7 @@ bool CommChannel::start_profile() {
   return true;
 }
 
-bool CommChannel::stop_profile() {
+bool RpcChannel::stop_profile() {
   proto::Empty req;
   proto::Status s;
   brpc::Controller cntl;
@@ -511,9 +511,9 @@ class ClientStreamReceiver final : public brpc::StreamInputHandler {
   }
 };
 
-void CommChannel::prefetch_from_storage(const StoragePrefetchRequest& request,
-                                        std::shared_ptr<PrefetchResult> result,
-                                        size_t worker_index) {
+void RpcChannel::prefetch_from_storage(const StoragePrefetchRequest& request,
+                                       std::shared_ptr<PrefetchResult> result,
+                                       size_t worker_index) {
   CHECK(result != nullptr);
   proto::PrefetchRequest proto_request;
   if (!request.to_proto(&proto_request)) {
@@ -551,7 +551,7 @@ void CommChannel::prefetch_from_storage(const StoragePrefetchRequest& request,
   }
 }
 
-bool CommChannel::get_last_llm_step_result_async(
+bool RpcChannel::get_last_llm_step_result_async(
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
   proto::Empty request;
   proto::LLMForwardResponse response;
@@ -573,7 +573,7 @@ bool CommChannel::get_last_llm_step_result_async(
   return true;
 }
 
-bool CommChannel::get_last_vlm_step_result_async(
+bool RpcChannel::get_last_vlm_step_result_async(
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
   proto::Empty request;
   proto::VLMForwardResponse response;
@@ -595,7 +595,7 @@ bool CommChannel::get_last_vlm_step_result_async(
   return true;
 }
 
-bool CommChannel::execute_llm_model_with_brpc(
+bool RpcChannel::execute_llm_model_with_brpc(
     const LlmForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise,
     ForwardInputEncoding* encoding) {
@@ -636,13 +636,13 @@ void ExecuteLLMModelClosure::Run() {
   promise.setValue(std::move(output));
 }
 
-void CommChannel::execute_dit_model_async(
+void RpcChannel::execute_dit_model_async(
     const DiTForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
   execute_dit_model_with_brpc(input, promise);
 }
 
-bool CommChannel::execute_dit_model_with_brpc(
+bool RpcChannel::execute_dit_model_with_brpc(
     const DiTForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
   proto::DITForwardRequest request;
@@ -673,14 +673,14 @@ void ExecuteDITModelClosure::Run() {
   promise.setValue(std::move(output));
 }
 
-void CommChannel::execute_vlm_model_async(
+void RpcChannel::execute_vlm_model_async(
     const VlmForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise,
     ForwardInputEncoding* encoding) {
   execute_vlm_model_with_brpc(input, promise, encoding);
 }
 
-bool CommChannel::execute_vlm_model_with_brpc(
+bool RpcChannel::execute_vlm_model_with_brpc(
     const VlmForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise,
     ForwardInputEncoding* encoding) {
