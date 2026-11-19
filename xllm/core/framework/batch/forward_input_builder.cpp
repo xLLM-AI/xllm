@@ -256,7 +256,7 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
     CHECK_GT(remote_stride, static_cast<size_t>(0));
     const size_t remote_shared_num =
         static_cast<size_t>(full_mapping.remote_shared_num);
-    CHECK_GE(next_transfer_idx, remote_shared_num)
+    CHECK_GE(next_transfer_idx, remote_shared_num / remote_stride)
         << "P transfer cursor slid below D-side shared prefix, request_id="
         << full_info.request_id << ", group_id=" << full_mapping.group_id
         << ", next_transfer_idx=" << next_transfer_idx
@@ -265,10 +265,10 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
     // Flat KV responses omit D-side shared blocks, while grouped responses
     // preserve their full logical tables (including SWA placeholders).
     const size_t remote_origin = is_flat_kv ? remote_shared_num : 0;
+    const size_t remote_span = map_end * remote_stride;
     const size_t remote_end =
-        map_end > remote_origin ? (map_end - remote_origin) * remote_stride : 0;
-    CHECK_GE(util::align_up(full_mapping.remote_ids.size(), remote_stride),
-             remote_end)
+        remote_span > remote_origin ? remote_span - remote_origin : 0;
+    CHECK_GE(full_mapping.remote_ids.size() + remote_stride - 1, remote_end)
         << "KV remote id coverage shortage, request_id=" << full_info.request_id
         << ", group_id=" << full_mapping.group_id
         << ", remote_size=" << full_mapping.remote_ids.size()
@@ -284,7 +284,7 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
       sequence->kv_state().advance_group_transfer_block_idx(
           block_type.value(), advanced_transfer_idx);
     }
-    if (next_transfer_idx >= map_end || map_end <= remote_origin) {
+    if (next_transfer_idx >= map_end || remote_span <= remote_origin) {
       info.mappings.emplace_back(std::move(step_mapping));
       continue;
     }
@@ -303,8 +303,11 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
       const size_t remote_idxs_begin = remote_idxs.size();
       bool has_remote_sentinel = false;
       for (size_t offset = 0; offset < remote_stride; ++offset) {
-        const size_t remote_idx =
-            (local_idx - remote_origin) * remote_stride + offset;
+        const size_t remote_block = local_idx * remote_stride + offset;
+        if (remote_block < remote_shared_num) {
+          continue;
+        }
+        const size_t remote_idx = remote_block - remote_origin;
         if (remote_idx >= full_mapping.remote_ids.size()) {
           CHECK_GT(remote_stride, static_cast<size_t>(1));
           break;
@@ -322,6 +325,12 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
         step_mapping.remote_ids.resize(remote_ids_begin);
         remote_idxs.resize(remote_idxs_begin);
         continue;
+      }
+      if (step_mapping.remote_ids.size() == remote_ids_begin) {
+        continue;
+      }
+      if (step_mapping.local_ids.empty()) {
+        step_mapping.local_block_start = static_cast<uint64_t>(local_idx);
       }
       step_mapping.local_ids.emplace_back(
           static_cast<uint64_t>(local_ids[local_idx]));

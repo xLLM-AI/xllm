@@ -21,7 +21,6 @@ limitations under the License.
 
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <numeric>
 #include <vector>
 
@@ -69,17 +68,6 @@ torch::Tensor make_scaled_identity_states(const torch::Tensor& state_scales,
                                           const torch::TensorOptions& options) {
   return torch::eye(kHeadDim, options).view({1, 1, kHeadDim, kHeadDim}) *
          state_scales.view({num_sequences, kNumHeads, 1, 1});
-}
-
-TEST(ChunkKDAConfigTest, ChunkSizeDefaultsTo64AndSupports16Override) {
-  const char* configured_chunk_size = std::getenv("XLLM_MLU_KDA_CHUNK_SIZE");
-  const int64_t expected_chunk_size = configured_chunk_size == nullptr
-                                          ? 64
-                                          : std::strtoll(configured_chunk_size,
-                                                         /*str_end=*/nullptr,
-                                                         /*base=*/10);
-  ASSERT_TRUE(expected_chunk_size == 16 || expected_chunk_size == 64);
-  EXPECT_EQ(kda_prefill_chunk_size(), expected_chunk_size);
 }
 
 TEST(ChunkKDATest,
@@ -363,6 +351,111 @@ TEST(ChunkKDATest, OmittingFinalStateKeepsOutputContract) {
             torch::IntArrayRef({1, token_count, kNumHeads, kHeadDim}));
   EXPECT_TRUE(torch::equal(output, torch::zeros_like(output)));
   EXPECT_FALSE(final_state.defined());
+}
+
+void check_raw_gate_against_recurrence(int64_t num_heads, bool use_qk_l2norm) {
+  torch::Device device(torch::kPrivateUse1, 0);
+  torch::DeviceGuard guard(device);
+  torch::manual_seed(20260915);
+  const int64_t chunk_size = kda_prefill_chunk_size();
+  const std::vector<int64_t> sequence_lengths = {
+      1, chunk_size - 1, 2 * chunk_size + 1};
+  const int64_t total_tokens = std::accumulate(
+      sequence_lengths.begin(), sequence_lengths.end(), int64_t{0});
+  const int64_t num_sequences = static_cast<int64_t>(sequence_lengths.size());
+  const auto cpu_options = torch::TensorOptions().dtype(torch::kFloat32);
+  const std::vector<int64_t> shape = {total_tokens, num_heads, kHeadDim};
+  const torch::Tensor q =
+      (torch::randn(shape, cpu_options) * 0.1f).to(torch::kBFloat16);
+  const torch::Tensor k =
+      (torch::randn(shape, cpu_options) * 0.1f).to(torch::kBFloat16);
+  const torch::Tensor v =
+      (torch::randn(shape, cpu_options) * 0.1f).to(torch::kBFloat16);
+  const torch::Tensor raw_gate =
+      (torch::randn(shape, cpu_options) * 2.0f - 2.0f).to(torch::kBFloat16);
+  const torch::Tensor raw_beta =
+      torch::randn({total_tokens, num_heads}, cpu_options).to(torch::kBFloat16);
+  const torch::Tensor a_log = torch::randn({num_heads}, cpu_options) * 0.2f;
+  const torch::Tensor dt_bias =
+      torch::randn({num_heads * kHeadDim}, cpu_options) * 0.1f;
+  constexpr float kGateLowerBound = -5.0f;
+  const torch::Tensor gate =
+      kGateLowerBound *
+      torch::sigmoid(torch::exp(a_log).view({1, num_heads, 1}) *
+                     (raw_gate.to(torch::kFloat32) +
+                      dt_bias.view({1, num_heads, kHeadDim})));
+  const torch::Tensor beta = torch::sigmoid(raw_beta.to(torch::kFloat32));
+  const torch::Tensor initial_state =
+      torch::randn({num_sequences, num_heads, kHeadDim, kHeadDim},
+                   cpu_options) *
+      0.01f;
+  torch::Tensor q_reference = q.to(torch::kFloat32);
+  torch::Tensor k_reference = k.to(torch::kFloat32);
+  if (use_qk_l2norm) {
+    q_reference *=
+        torch::rsqrt(torch::sum(q_reference.square(), -1, true) + 1e-6f);
+    k_reference *=
+        torch::rsqrt(torch::sum(k_reference.square(), -1, true) + 1e-6f);
+  }
+  q_reference /= std::sqrt(static_cast<float>(kHeadDim));
+  const torch::Tensor v_reference = v.to(torch::kFloat32);
+  torch::Tensor expected_output = torch::empty(shape, cpu_options);
+  torch::Tensor expected_state = initial_state.clone();
+  int64_t token = 0;
+  for (int64_t sequence = 0; sequence < num_sequences; ++sequence) {
+    torch::Tensor state = expected_state[sequence];
+    for (int64_t local_token = 0; local_token < sequence_lengths[sequence];
+         ++local_token, ++token) {
+      state *= torch::exp(gate[token]).unsqueeze(-2);
+      const torch::Tensor key = k_reference[token].unsqueeze(-2);
+      const torch::Tensor delta =
+          (v_reference[token] - torch::sum(state * key, -1)) *
+          beta[token].unsqueeze(-1);
+      state += delta.unsqueeze(-1) * key;
+      expected_output[token].copy_(
+          torch::sum(state * q_reference[token].unsqueeze(-2), -1));
+    }
+  }
+  const torch::Tensor cu_seqlens = make_cu_seqlens(sequence_lengths, device);
+  const torch::Tensor chunk_indices =
+      make_chunk_indices(cu_seqlens, chunk_size);
+  ChunkKDA chunk_kda(num_heads);
+  auto [output, final_state] =
+      chunk_kda->forward_raw_gate(q.unsqueeze(0).to(device),
+                                  k.unsqueeze(0).to(device),
+                                  v.unsqueeze(0).to(device),
+                                  raw_gate.to(device),
+                                  a_log.to(device),
+                                  dt_bias.to(device),
+                                  kGateLowerBound,
+                                  raw_beta.to(device),
+                                  initial_state.to(device),
+                                  cu_seqlens,
+                                  chunk_indices,
+                                  /*output_final_state=*/true,
+                                  use_qk_l2norm);
+  torch_mlu::synchronize();
+  EXPECT_TRUE(
+      torch::allclose(output.squeeze(0).to(torch::kCPU).to(torch::kFloat32),
+                      expected_output,
+                      /*rtol=*/5e-3,
+                      /*atol=*/2e-5));
+  EXPECT_TRUE(torch::allclose(final_state.to(torch::kCPU),
+                              expected_state,
+                              /*rtol=*/1e-3,
+                              /*atol=*/2e-5));
+}
+
+TEST(ChunkKDATest, RawGatePackedBoundariesMatchTokenRecurrence) {
+  check_raw_gate_against_recurrence(kNumHeads, /*use_qk_l2norm=*/true);
+}
+
+TEST(ChunkKDATest, RawGateSmallHeadCountRetainsGenericPath) {
+  check_raw_gate_against_recurrence(/*num_heads=*/2, /*use_qk_l2norm=*/true);
+}
+
+TEST(ChunkKDATest, RawGateWithoutNormalizationMatchesTokenRecurrence) {
+  check_raw_gate_against_recurrence(kNumHeads, /*use_qk_l2norm=*/false);
 }
 
 }  // namespace

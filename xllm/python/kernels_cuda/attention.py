@@ -45,9 +45,9 @@ def vision_fusion_attention(
     )
 
 
-def batch_matmul_transpose(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """Portable fallback for the NPU MLA value projection."""
-    return torch.bmm(x, weight).transpose(0, 1)
+def batch_matmul_transpose(x: torch.Tensor, weight: torch.Tensor, *, graph_mode: bool) -> torch.Tensor:
+    """Project MLA rows [T,H,D] with weight [H,D,O] into [T,H,O]."""
+    return torch.bmm(x.transpose(0, 1), weight).transpose(0, 1)
 
 
 __all__ = [

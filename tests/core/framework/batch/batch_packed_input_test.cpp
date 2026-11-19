@@ -1204,7 +1204,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
   params.graph.expanded_paged_kv_indptr = values;
   params.graph.expanded_paged_kv_indices = values;
   params.graph.expanded_paged_kv_last_page_len = values;
-  params.graph.expanded_tiling_data = values;
   params.graph.expanded_kv_seq_lens_vec = {5};
   params.graph.input_tokens_override = values;
   params.graph.spec_verify_draft_token_sources = {values};
@@ -1226,7 +1225,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
       converted.graph.expanded_paged_kv_indptr,
       converted.graph.expanded_paged_kv_indices,
       converted.graph.expanded_paged_kv_last_page_len,
-      converted.graph.expanded_tiling_data,
       converted.graph.input_tokens_override,
       converted.graph.spec_verify_draft_token_sources.at(0),
       converted.num_accepted_tokens};

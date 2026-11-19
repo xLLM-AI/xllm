@@ -24,6 +24,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 #include "compiler/triton/include/jit_kernel.h"
@@ -37,6 +38,11 @@ limitations under the License.
 
 namespace xllm::layer {
 namespace {
+
+constexpr int64_t kHidden = 4096;
+constexpr int64_t kRank = 1536;
+constexpr int64_t kHeads = 32;
+constexpr int64_t kTopk = 2048;
 
 struct Glm5NextKPoolHistory {
   torch::Tensor keys;
@@ -1270,4 +1276,287 @@ TEST(Glm5NextKPoolIndexerTest, DraftPlaceholderDoesNotOverwriteRetainedTail) {
   EXPECT_TRUE(torch::equal(tail[1][0][5], keys[5]));
 }
 
+TEST(Glm5NextKPoolIndexerTest, VerifyMasksHighScoringFuturePoolBeforeTopk) {
+  const torch::Device device(Platform::type_torch(), 0);
+  const auto opts =
+      torch::TensorOptions().dtype(torch::kBFloat16).device(device);
+  torch::Tensor cache = torch::ones({2, 1, 4, 128}, opts);
+  cache[1][0][1].fill_(100);
+  const torch::Tensor q = torch::ones({4, kHeads, 128}, opts);
+  const torch::Tensor weights =
+      torch::ones({4, kHeads}, opts.dtype(torch::kFloat32));
+  const torch::Tensor positions =
+      torch::tensor({6, 7, 8, 9}, opts.dtype(torch::kInt32));
+  const torch::Tensor rows =
+      torch::tensor({0, 0, 0, 1}, opts.dtype(torch::kInt64));
+  const torch::Tensor table =
+      torch::tensor({{1, 0}, {1, 0}}, opts.dtype(torch::kInt32));
+  for (const int64_t bytes :
+       {int64_t{3 * sizeof(float)}, int64_t{12 * sizeof(float)}}) {
+    const torch::Tensor ids = glm5_next_kpool_select(q,
+                                                     weights,
+                                                     positions,
+                                                     rows,
+                                                     cache,
+                                                     table,
+                                                     /*max_kv_seq_len=*/10,
+                                                     /*block_size=*/16,
+                                                     4,
+                                                     kTopk,
+                                                     1.0,
+                                                     bytes);
+    EXPECT_TRUE(torch::equal(ids.select(1, 0).cpu(),
+                             torch::tensor({0, 1, 1, 1}, torch::kInt64)));
+    EXPECT_TRUE(ids.slice(1, 2).eq(-1).all().item<bool>());
+    const auto output =
+        glm5_next_kpool_expand_to_physical_slots(ids,
+                                                 positions,
+                                                 rows,
+                                                 table,
+                                                 /*block_size=*/16,
+                                                 kTopk,
+                                                 /*index_kpool=*/4,
+                                                 /*always_select_tail=*/true);
+    EXPECT_TRUE(torch::equal(output.context_lens.cpu(),
+                             torch::tensor({7, 8, 9, 10}, torch::kInt32)));
+    EXPECT_EQ(output.physical_slots[0][0].item<int32_t>(), 16);
+    EXPECT_EQ(output.physical_slots[1][0].item<int32_t>(), 20);
+  }
+}
+
+TEST(Glm5NextKPoolIndexerTest,
+     FourQuerySelectionKeepsCausalityWithSmallWorkspace) {
+  const torch::Device device(Platform::type_torch(), 0);
+  const auto opts =
+      torch::TensorOptions().dtype(torch::kBFloat16).device(device);
+  const auto ints = opts.dtype(torch::kInt64);
+  torch::Tensor cache = torch::arange(1, 17, opts)
+                            .view({4, 1, 4, 1})
+                            .expand({4, 1, 4, 128})
+                            .contiguous();
+  cache[1][0][1].fill_(10000);
+  const torch::Tensor q = torch::ones({8, kHeads, 128}, opts);
+  const torch::Tensor weights =
+      torch::ones({8, kHeads}, opts.dtype(torch::kFloat32));
+  const torch::Tensor positions =
+      torch::tensor({6, 7, 8, 9, 14, 15, 16, -1}, ints);
+  const torch::Tensor rows = torch::tensor({0, 0, 0, 0, 1, 1, 1, 1}, ints);
+  const torch::Tensor table = torch::tensor({{1, 0}, {3, 2}}, ints);
+  const torch::Tensor starts = torch::tensor({0, 4, 8}, ints);
+  const torch::Tensor expected = glm5_next_kpool_select(q,
+                                                        weights,
+                                                        positions,
+                                                        rows,
+                                                        cache,
+                                                        table,
+                                                        /*max_kv_seq_len=*/32,
+                                                        /*block_size=*/16,
+                                                        /*index_kpool=*/4,
+                                                        kTopk,
+                                                        /*softmax_scale=*/1.0);
+  for (const int64_t bytes : {int64_t{64}, int64_t{256}}) {
+    const torch::Tensor actual = glm5_next_kpool_select(q,
+                                                        weights,
+                                                        positions,
+                                                        rows,
+                                                        cache,
+                                                        table,
+                                                        /*max_kv_seq_len=*/32,
+                                                        /*block_size=*/16,
+                                                        /*index_kpool=*/4,
+                                                        kTopk,
+                                                        /*softmax_scale=*/1.0,
+                                                        bytes,
+                                                        /*batch=*/nullptr,
+                                                        starts);
+    EXPECT_TRUE(torch::equal(actual, expected));
+    EXPECT_EQ(actual[0][0].item<int64_t>(), 0);
+    EXPECT_EQ(actual[1][0].item<int64_t>(), 1);
+    EXPECT_TRUE(actual[7].eq(-1).all().item<bool>());
+  }
+}
+TEST(Glm5NextKPoolIndexerTest,
+     GraphSelectionCrosses64KWithLivePagesAndPadding) {
+  torch::NoGradGuard no_grad;
+  const torch::Device device(Platform::type_torch(), 0);
+  const auto opts =
+      torch::TensorOptions().device(device).dtype(torch::kBFloat16);
+  const auto ints = opts.dtype(torch::kInt64);
+  torch::Tensor cache = torch::zeros({4097, 1, 4, 128}, opts);
+  const torch::Tensor columns = torch::arange(4097 * 4, ints);
+  cache.view({-1, 128}).select(1, 0).copy_(columns.remainder(128));
+  cache.view({-1, 128}).select(1, 1).copy_(
+      torch::floor_divide(columns, /*other=*/128));
+  torch::Tensor q = torch::zeros({4, kHeads, 128}, opts);
+  q.select(1, 0).select(1, 0).fill_(1);
+  q.select(1, 0).select(1, 1).fill_(128);
+  const torch::Tensor weights =
+      torch::ones({4, kHeads}, opts.dtype(torch::kFloat32));
+  torch::Tensor positions = torch::tensor({32767, 65535, 65539, -1}, ints);
+  const torch::Tensor rows = torch::zeros({4}, ints);
+  torch::Tensor table = torch::arange(4097, ints).view({1, 4097});
+  const auto select = [&]() {
+    return glm5_next_kpool_select(q,
+                                  weights,
+                                  positions,
+                                  rows,
+                                  cache,
+                                  table,
+                                  /*max_kv_seq_len=*/65552,
+                                  /*block_size=*/16,
+                                  /*index_kpool=*/4,
+                                  kTopk,
+                                  /*softmax_scale=*/1.0);
+  };
+  select();
+  torch_mlu::synchronize();
+  torch_mlu::MLUGraph graph;
+  torch::Tensor captured;
+  {
+    torch_mlu::mlu::MLUStreamGuard stream(
+        torch_mlu::getStreamFromPool(false, 0));
+    graph.capture_begin();
+    captured = select();
+    graph.capture_end();
+  }
+  for (const bool relocate : {false, true}) {
+    if (relocate) {
+      table.copy_(table.flip({1}));
+      positions.copy_(torch::tensor({65539, -1, 65535, 32768}, ints));
+    }
+    graph.replay();
+    torch_mlu::synchronize();
+    const auto expected = reference_selection(q,
+                                              weights,
+                                              positions,
+                                              rows,
+                                              cache,
+                                              table,
+                                              /*pool_block_size=*/4,
+                                              /*pool_size=*/4,
+                                              /*top_k=*/kTopk / 4,
+                                              /*scale=*/1.0);
+    EXPECT_TRUE(torch::equal(captured, expected));
+  }
+}
+TEST(Glm5NextKPoolIndexerTest, PrefillChainMatchesIndependentTorchState) {
+  torch::NoGradGuard no_grad;
+  torch::manual_seed(6159);
+  const torch::Device device(Platform::type_torch(), 0);
+  const auto opts =
+      torch::TensorOptions().device(device).dtype(torch::kBFloat16);
+  const int64_t saved = KVCacheConfig::get_instance().block_size();
+  KVCacheConfig::get_instance().block_size(16);
+  ModelArgs args;
+  args.model_type("glm5_next")
+      .hidden_size(kHidden)
+      .q_lora_rank(kRank)
+      .index_n_heads(kHeads)
+      .index_head_dim(128)
+      .qk_rope_head_dim(0)
+      .index_topk(kTopk)
+      .index_kpool(4)
+      .index_kpool_compress(true)
+      .index_kpool_always_select_tail(true)
+      .max_position_embeddings(1048576);
+  ParallelArgs parallel(0, 1, nullptr);
+  Glm5NextKPoolIndexer indexer(args, QuantArgs(), parallel, nullptr, opts);
+  auto parameters = indexer->named_parameters();
+  for (auto& p : parameters) {
+    p.value().zero_();
+  }
+  const auto identity = torch::eye(128, opts);
+  parameters["wk.weight"].narrow(1, 0, /*length=*/128).copy_(identity);
+  parameters["wq_b.weight"]
+      .narrow(1, 0, /*length=*/128)
+      .copy_(identity.repeat({kHeads, 1}));
+  parameters["k_norm.weight"].fill_(1);
+  parameters["weights_proj.weight"].select(1, 128).fill_(1.0 / 32);
+  const int64_t tokens = 2083;
+  torch::Tensor hidden = torch::randn({tokens, kHidden}, opts);
+  hidden.select(1, 128).fill_(1);
+  const torch::Tensor query_input = torch::randn({tokens, kRank}, opts);
+  const torch::Tensor cpu_hidden = hidden.cpu().to(torch::kFloat32);
+  const torch::Tensor raw = cpu_hidden.narrow(1, 0, /*length=*/128);
+  const torch::Tensor centered = raw - raw.mean(1, true);
+  const torch::Tensor keys =
+      (centered * torch::rsqrt(centered.square().mean(1, true) + 1e-6))
+          .to(torch::kBFloat16);
+  torch::Tensor hadamard = torch::ones({1, 1});
+  for (int64_t size = 1; size < 128; size *= 2) {
+    hadamard = torch::cat({torch::cat({hadamard, hadamard}, 1),
+                           torch::cat({hadamard, -hadamard}, 1)},
+                          0);
+  }
+  hadamard /= std::sqrt(128.0);
+  const torch::Tensor compressed =
+      glm5_next_kpool_compress_keys(keys.narrow(0, 0, /*length=*/2080),
+                                    torch::zeros({2080, 128}, torch::kBFloat16),
+                                    torch::zeros({4, 128}),
+                                    hadamard,
+                                    4);
+  const auto ints = opts.dtype(torch::kInt32);
+  AttentionMetadata meta{};
+  meta.is_prefill = true;
+  meta.q_seq_lens_vec = {static_cast<int32_t>(tokens)};
+  meta.kv_seq_lens_vec = meta.q_seq_lens_vec;
+  meta.q_seq_lens = torch::tensor(meta.q_seq_lens_vec, ints);
+  meta.kv_seq_lens = meta.q_seq_lens.clone();
+  meta.linear_state_indices = torch::tensor({1}, ints);
+  meta.block_table = torch::arange(131, ints).flip({0}).view({1, 131});
+  const torch::Tensor positions = torch::arange(tokens, ints);
+  torch::Tensor cache = torch::zeros({131, 1, 4, 128}, opts);
+  torch::Tensor tail = torch::zeros({2, 2, 12, 128}, opts);
+  const auto [slots, lengths] =
+      indexer->forward(hidden, query_input, positions, cache, tail, meta);
+  const Glm5NextKPoolHistory actual =
+      glm5_next_kpool_read_compressed_cache(cache,
+                                            meta.block_table,
+                                            meta.kv_seq_lens,
+                                            tokens,
+                                            /*block_size=*/16,
+                                            /*index_kpool=*/4);
+  EXPECT_TRUE(torch::allclose(actual.keys[0].narrow(0, 0, /*length=*/520).cpu(),
+                              compressed,
+                              0.015625,
+                              0.015625));
+  for (int64_t token = tokens - 12; token < tokens; ++token) {
+    EXPECT_TRUE(torch::equal(tail[1][0][token % 12].cpu(), keys[token]));
+  }
+  for (const int64_t row : {0, 3, 31, 2046, 2047}) {
+    const int64_t count = (row + 1) / 4;
+    if (count == 0) {
+      EXPECT_EQ(lengths[row].item<int32_t>(), row + 1);
+      continue;
+    }
+    const torch::Tensor q = torch::matmul(query_input[row]
+                                              .cpu()
+                                              .narrow(0, 0, /*length=*/128)
+                                              .to(torch::kFloat32),
+                                          hadamard.transpose(0, 1))
+                                .to(torch::kBFloat16)
+                                .to(torch::kFloat32);
+    const torch::Tensor scores =
+        torch::relu(torch::matmul(
+            compressed.narrow(0, 0, count).to(torch::kFloat32), q)) /
+        std::sqrt(4096.0);
+    const torch::Tensor ids =
+        std::get<1>(scores.topk(std::min<int64_t>(512, count)));
+    const torch::Tensor expected_ids = torch::full({1, 512}, -1, torch::kInt64);
+    expected_ids[0].narrow(0, 0, ids.numel()).copy_(ids);
+    const auto expected = reference_expansion(expected_ids,
+                                              torch::tensor({row}),
+                                              torch::zeros({1}, torch::kInt64),
+                                              meta.block_table,
+                                              /*block_size=*/16,
+                                              kTopk,
+                                              4,
+                                              true);
+    EXPECT_EQ(lengths[row].item<int32_t>(),
+              expected.context_lens[0].item<int32_t>());
+    EXPECT_TRUE(torch::equal(std::get<0>(slots[row].cpu().sort()),
+                             std::get<0>(expected.physical_slots[0].sort())));
+  }
+  KVCacheConfig::get_instance().block_size(saved);
+}
 }  // namespace xllm::layer

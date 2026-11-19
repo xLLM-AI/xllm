@@ -41,9 +41,9 @@ struct PendingMHC final {
 };
 
 struct MHCFusionContext final {
-  bool optimization_enabled = true;
   bool is_prefill = false;
   bool is_chunked_prefill = false;
+  bool is_spec_verify = false;
   bool supports_fused_mhc = false;
   bool has_pending_storage = false;
   bool has_pending = false;

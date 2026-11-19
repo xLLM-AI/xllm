@@ -169,6 +169,8 @@ def _create_attention_backend(
         if (
             dcp_group is not None
             and dcp_group.size() > 1
+            and (int(config.get("kv_split_size", 0)) or int(config.get("cp_size", 1))) > 1
+            and int(config.get("replicated_block_pages", 1)) == 1
             and (int(config.get("cp_size", 1)) == 1 or model_type in ("glm_moe_dsa", "glm_moe_dsa_mtp"))
         ):
             if model_type in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):

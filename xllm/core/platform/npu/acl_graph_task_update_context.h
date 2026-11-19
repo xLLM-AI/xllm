@@ -110,6 +110,12 @@ struct FusedInferAttentionGraphTask {
   std::shared_ptr<c10_npu::NPUEvent> event;
 };
 
+// Own one buffer per launch shape for the captured graph's lifetime.
+struct FusedInferAttentionWorkspaceEntry {
+  FusedInferAttentionWorkspaceSignature signature;
+  torch::Tensor workspace;
+};
+
 class AclGraphTaskUpdateContext final {
  public:
   void begin_capture() {
@@ -117,8 +123,7 @@ class AclGraphTaskUpdateContext final {
     next_capture_order = 0;
     causal_conv1d_tasks.clear();
     fused_infer_attention_tasks.clear();
-    fused_infer_attention_workspace_signature.reset();
-    fused_infer_attention_workspace = torch::Tensor();
+    fused_infer_attention_workspaces.clear();
   }
 
   void end_capture() { capturing = false; }
@@ -127,9 +132,8 @@ class AclGraphTaskUpdateContext final {
   uint64_t next_capture_order = 0;
   std::vector<CausalConv1dGraphTask> causal_conv1d_tasks;
   std::vector<FusedInferAttentionGraphTask> fused_infer_attention_tasks;
-  std::optional<FusedInferAttentionWorkspaceSignature>
-      fused_infer_attention_workspace_signature;
-  torch::Tensor fused_infer_attention_workspace;
+  std::vector<FusedInferAttentionWorkspaceEntry>
+      fused_infer_attention_workspaces;
 };
 
 }  // namespace xllm::npu

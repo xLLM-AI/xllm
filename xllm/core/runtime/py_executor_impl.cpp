@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/framework/multimodal/mm_visitor.h"
 #include "core/framework/multimodal/multimodal_utils.h"
 #include "core/framework/speculative/spec_verify.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/platform/platform.h"
@@ -218,6 +219,11 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["enable_schedule_overlap"] =
       options_.enable_schedule_overlap();
   executor_config["is_draft_engine"] = options_.is_draft_engine();
+  executor_config["replicated_block_pages"] =
+      options_.is_draft_engine() ? KVCacheShape::draft_replicated_block_pages(
+                                       options_.speculative_algorithm(),
+                                       py_causal_lm_->kv_split_size())
+                                 : 1;
   executor_config["is_mtp_algorithm"] =
       SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm());
   executor_config["is_block_diffusion_algorithm"] =
@@ -307,7 +313,11 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
           << "Python model Host KV reload failed.";
     }
   }
-  if (!enable_mla_ && py_causal_lm_->cp_size() == 1 &&
+  const bool draft_replicates_kv =
+      options_.is_draft_engine() &&
+      KVCacheShape::draft_replicated_block_pages(
+          options_.speculative_algorithm(), py_causal_lm_->kv_split_size()) > 1;
+  if (!enable_mla_ && !draft_replicates_kv && py_causal_lm_->cp_size() == 1 &&
       py_causal_lm_->kv_split_size() > 1) {
     const KVShardLayout layout(options_.block_size(),
                                py_causal_lm_->kv_split_size(),

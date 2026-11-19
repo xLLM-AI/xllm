@@ -17,7 +17,13 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <cstddef>
+#include <utility>
+
 #include "layers/common/attention_metadata.h"
+#if defined(USE_NPU)
+#include "platform/npu/acl_graph_task_update_context.h"
+#endif
 
 namespace xllm::layer {
 
@@ -168,7 +174,8 @@ std::shared_ptr<KVShardBatchMetadata> build_kv_shard_batch_metadata(
       previous_query_end = query_end;
     }
 #if defined(USE_NPU)
-    if (attention_metadata.paged_attention_tiling_data.defined()) {
+    if (attention_metadata.acl_graph_task_update_context != nullptr &&
+        attention_metadata.acl_graph_task_update_context->capturing) {
       metadata->empty_shard_mask =
           (attention_metadata.kv_seq_lens <= layout.first_token_index())
               .view({-1, 1, 1});

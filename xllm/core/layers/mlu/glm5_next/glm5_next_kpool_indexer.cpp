@@ -15,7 +15,9 @@ limitations under the License.
 
 #include "layers/mlu/glm5_next/glm5_next_kpool_indexer.h"
 
+#include <cnrt.h>
 #include <glog/logging.h>
+#include <torch/torch.h>
 
 #include <algorithm>
 #include <bit>
@@ -82,6 +84,7 @@ void launch_kpool_logits(const torch::Tensor& query,
                          const torch::Tensor& positions,
                          const torch::Tensor& row_batch,
                          torch::Tensor& scores,
+                         const torch::Tensor& query_starts,
                          int64_t index_kpool,
                          int64_t pool_block_size,
                          double softmax_scale,
@@ -118,6 +121,51 @@ void launch_kpool_logits(const torch::Tensor& query,
           ? kSplitHeadTile
           : std::clamp(
                 next_power_of_two(score_heads), kMinHeadTile, kMaxHeadTile);
+  const bool four_query_verify =
+      query_starts.defined() && query_starts.dim() == 1 &&
+      query_starts.numel() == block_table.size(0) + 1 &&
+      block_table.size(0) > 0 &&
+      (query_starts.scalar_type() == torch::kInt32 ||
+       query_starts.scalar_type() == torch::kInt64) &&
+      query_starts.device() == query.device() &&
+      query.size(0) == block_table.size(0) * 4 && keys.dim() == 4 &&
+      keys.is_contiguous() && keys.size(1) == 1 && keys.size(2) == 4 &&
+      keys.size(3) == 128 && query.size(1) == 32 && query.size(2) == 128 &&
+      pool_block_size == 4 && index_kpool == 4 &&
+      query.scalar_type() == torch::kBFloat16 &&
+      keys.scalar_type() == torch::kBFloat16 &&
+      weights.scalar_type() == torch::kFloat32;
+  if (four_query_verify) {
+    constexpr int32_t kPoolsPerTile = 128;
+    constexpr int32_t kTilesPerProgram = 4;
+    const torch::Tensor starts = query_starts.contiguous();
+    cnrtQueue_t verify_queue = torch_mlu::getCurMLUStream();
+    triton_jit::JITKernel::get(kKPoolKernelPath, "score_verify_pools")
+        .launch(static_cast<void*>(verify_queue),
+                {static_cast<uint32_t>(block_table.size(0)),
+                 static_cast<uint32_t>(
+                     (scores.size(1) + kPoolsPerTile * kTilesPerProgram - 1) /
+                     (kPoolsPerTile * kTilesPerProgram)),
+                 1},
+                {1, 1},
+                query,
+                weights,
+                keys,
+                block_table,
+                positions,
+                row_batch,
+                starts,
+                scores,
+                query.size(0),
+                scores.size(1),
+                keys.size(0),
+                block_table.size(1),
+                scores.stride(0),
+                static_cast<float>(softmax_scale),
+                kPoolsPerTile,
+                kTilesPerProgram);
+    return;
+  }
   cnrtQueue_t queue = torch_mlu::getCurMLUStream();
   triton_jit::JITKernel::get(kKPoolSelectKernelPath, "score")
       .launch(static_cast<void*>(queue),
@@ -260,7 +308,8 @@ torch::Tensor glm5_next_kpool_select(const torch::Tensor& query,
                                      int64_t index_topk,
                                      double softmax_scale,
                                      int64_t workspace_bytes,
-                                     const KPoolBatchMetadata* batch) {
+                                     const KPoolBatchMetadata* batch,
+                                     const torch::Tensor& query_starts) {
   CHECK_LE((max_kv_seq_len + block_size - 1) / block_size, block_table.size(1));
   const int64_t select_k = index_topk / index_kpool;
   const int64_t max_pools = (max_kv_seq_len + index_kpool - 1) / index_kpool;
@@ -284,6 +333,8 @@ torch::Tensor glm5_next_kpool_select(const torch::Tensor& query,
   const torch::Tensor rows = row_batch.contiguous();
   const torch::Tensor table = block_table.contiguous();
   const int64_t pool_block_size = block_size / index_kpool;
+  const torch::Tensor verify_starts =
+      chunk_size == query.size(0) ? query_starts : torch::Tensor();
   // Long prefill amortizes one dense gather over many queries of each request.
   const int64_t requests = dense ? batch->q_seq_lens.size() : 1;
   cnrtQueue_t queue = torch_mlu::getCurMLUStream();
@@ -334,6 +385,7 @@ torch::Tensor glm5_next_kpool_select(const torch::Tensor& query,
                           pos.narrow(0, offset, count),
                           rows.narrow(0, offset, count),
                           scores,
+                          verify_starts,
                           index_kpool,
                           pool_block_size,
                           softmax_scale,
@@ -713,6 +765,12 @@ torch::Tensor Glm5NextKPoolIndexerImpl::select_pools(
   const torch::Tensor query = project_query(q_norm, positions, metadata);
   const torch::Tensor weights =
       weights_proj_->forward(hidden_states.to(torch::kFloat32));
+  const bool four_query_verify =
+      metadata.is_spec_verify && metadata.max_query_len == 4 &&
+      !execution.batch->q_seq_lens.empty() &&
+      std::all_of(execution.batch->q_seq_lens.begin(),
+                  execution.batch->q_seq_lens.end(),
+                  [](int32_t length) { return length == 4; });
   return glm5_next_kpool_select(
       query,
       weights,
@@ -726,7 +784,8 @@ torch::Tensor Glm5NextKPoolIndexerImpl::select_pools(
       index_topk_,
       softmax_scale_,
       /*workspace_bytes=*/kWorkspaceBytes,
-      execution.graph_decode ? nullptr : execution.batch.get());
+      execution.graph_decode ? nullptr : execution.batch.get(),
+      four_query_verify ? execution.batch->query_starts : torch::Tensor());
 }
 
 std::tuple<torch::Tensor, torch::Tensor> Glm5NextKPoolIndexerImpl::forward(

@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -247,9 +248,14 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
     kv_seq_lens = attn_metadata.kv_seq_lens;
   }
 
+  const std::shared_ptr<xllm::npu::AclGraphTaskUpdateContext> graph_context =
+      attn_metadata.acl_graph_task_update_context;
+  const bool capturing = graph_context != nullptr && graph_context->capturing;
   const bool use_fia_graph_decode =
-      enable_fia_decode_ &&
-      (!attn_metadata.is_spec_verify || attn_metadata.expanded_decode.enabled);
+      capturing &&
+      (!tiling_data.defined() ||
+       (enable_fia_decode_ && (!attn_metadata.is_spec_verify ||
+                               attn_metadata.expanded_decode.enabled)));
   if (tiling_data.defined() && !use_fia_graph_decode) {
     xllm::kernel::npu::batch_decode_acl_graph(query,
                                               k_cache,
@@ -262,7 +268,7 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
     return;
   }
 
-  if (!tiling_data.defined() && !enable_fia_decode_) {
+  if (!capturing && !enable_fia_decode_) {
     xllm::kernel::npu::batch_decode(query,
                                     k_cache,
                                     v_cache.value_or(torch::Tensor()),
@@ -300,25 +306,24 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
   std::vector<int64_t> actual_q_lens =
       detail::make_decode_actual_seq_lengths(query_tnd.size(0));
 
-  if (tiling_data.defined()) {
+  if (use_fia_graph_decode) {
     const xllm::npu::FusedInferAttentionGraphBranch graph_branch =
         attn_metadata.expanded_decode.enabled
             ? xllm::npu::FusedInferAttentionGraphBranch::kSpecVerify
             : xllm::npu::FusedInferAttentionGraphBranch::kDecode;
-    detail::run_fused_infer_attention_graph(
-        attn_metadata.acl_graph_task_update_context,
-        query_tnd,
-        key_view,
-        value_view,
-        block_table,
-        actual_q_lens,
-        *kv_seq_lens_vec,
-        num_kv_heads_,
-        scale_,
-        /*dcp_size=*/1,
-        /*dcp_rank=*/0,
-        graph_branch,
-        output_tnd);
+    detail::run_fused_infer_attention_graph(graph_context,
+                                            query_tnd,
+                                            key_view,
+                                            value_view,
+                                            block_table,
+                                            actual_q_lens,
+                                            *kv_seq_lens_vec,
+                                            num_kv_heads_,
+                                            scale_,
+                                            /*dcp_size=*/1,
+                                            /*dcp_rank=*/0,
+                                            graph_branch,
+                                            output_tnd);
   } else {
     xllm::kernel::npu::npu_fused_infer_attention_decode_out_cached(
         query_tnd,

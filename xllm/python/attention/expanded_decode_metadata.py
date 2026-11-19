@@ -35,7 +35,6 @@ class ExpandedDecodeMetadataLike(Protocol):
     paged_kv_indptr: torch.Tensor | None
     paged_kv_indices: torch.Tensor | None
     paged_kv_last_page_len: torch.Tensor | None
-    paged_attention_tiling_data: torch.Tensor | None
     kv_seq_lens_host: torch.Tensor | None
     kv_seq_lens_host_values: list[int] | None
 
@@ -47,7 +46,6 @@ class ExpandedDecodeMetadata:
     paged_kv_indptr: torch.Tensor
     paged_kv_indices: torch.Tensor
     paged_kv_last_page_len: torch.Tensor
-    paged_attention_tiling_data: torch.Tensor | None
     kv_seq_lens_host: torch.Tensor | None
     kv_seq_lens_host_values: list[int] | None
     enabled: bool = True
@@ -89,7 +87,6 @@ def resolve_expanded_decode_metadata(
         paged_kv_indptr=expanded.paged_kv_indptr,
         paged_kv_indices=expanded.paged_kv_indices,
         paged_kv_last_page_len=expanded.paged_kv_last_page_len,
-        paged_attention_tiling_data=expanded.paged_attention_tiling_data,
         kv_seq_lens_host=expanded.kv_seq_lens_host,
         kv_seq_lens_host_values=host_values,
     )
@@ -217,7 +214,6 @@ def _resolve_untyped_spec_verify_metadata(metadata: object, *, block_size: int) 
         paged_kv_indptr=paged_kv_indptr,
         paged_kv_indices=paged_kv_indices,
         paged_kv_last_page_len=paged_kv_last_page_len,
-        paged_attention_tiling_data=None,
         kv_seq_lens_host=None,
         kv_seq_lens_host_values=host_values,
     )

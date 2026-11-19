@@ -787,7 +787,6 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
             "moe_tp_rank",
             "expert_parallel_degree",
             "enable_mega_moe",
-            "enable_fused_mc2",
         ):
             if key in config:
                 text_config[key] = config[key]

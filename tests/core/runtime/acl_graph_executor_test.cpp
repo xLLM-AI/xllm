@@ -49,7 +49,6 @@ limitations under the License.
 #include "core/runtime/acl_graph_persistent_param.h"
 #include "core/runtime/base_executor_impl.h"
 #include "core/runtime/decode_graph_bucket.h"
-#include "core/runtime/dflash_worker_impl.h"
 #include "core/runtime/options.h"
 #include "core/runtime/speculative_worker_impl.h"
 #include "models/llm/deepseek_v4.h"
@@ -1416,24 +1415,6 @@ TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
                            torch::full({3, 2}, 10.0f)));
   EXPECT_TRUE(torch::equal(output.aux_hidden_states.slice(1, 2, 4),
                            torch::full({3, 2}, 20.0f)));
-}
-
-TEST(DSparkWorkerInputTest, InvalidatesTargetAttentionAndRecurrentMetadata) {
-  LlmModelParams params;
-  params.attn_metadata = std::make_shared<layer::AttentionMetadata>();
-  params.multi_block_tables.resize(3);
-  params.embedding.linear_state_ids = {4};
-  params.embedding.linear_state_indices = torch::tensor({4}, torch::kInt32);
-  params.linear_state_validity_mask = {1};
-
-  dflash_detail::invalidate_draft_model_geometry(params);
-
-  EXPECT_EQ(params.attn_metadata, nullptr);
-  EXPECT_EQ(params.multi_block_tables.size(), 3);
-  EXPECT_TRUE(params.embedding.linear_state_ids.empty());
-  EXPECT_FALSE(params.embedding.linear_state_indices.defined());
-  EXPECT_TRUE(params.linear_state_validity_mask.empty());
-  EXPECT_TRUE(params.embedding.linear_state_read_ids.empty());
 }
 
 TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {

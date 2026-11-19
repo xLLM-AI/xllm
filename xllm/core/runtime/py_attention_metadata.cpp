@@ -55,9 +55,6 @@ void register_attention_metadata_views(py::module_& module) {
       .def_property_readonly(
           "paged_kv_last_page_len",
           &PyExpandedDecodeMetadataView::paged_kv_last_page_len)
-      .def_property_readonly(
-          "paged_attention_tiling_data",
-          &PyExpandedDecodeMetadataView::paged_attention_tiling_data)
       .def_property_readonly("kv_seq_lens_host",
                              &PyExpandedDecodeMetadataView::kv_seq_lens_host)
       .def_property_readonly(
@@ -207,10 +204,6 @@ py::object PyExpandedDecodeMetadataView::paged_kv_indices() const {
 
 py::object PyExpandedDecodeMetadataView::paged_kv_last_page_len() const {
   return optional_tensor(metadata().paged_kv_last_page_len);
-}
-
-py::object PyExpandedDecodeMetadataView::paged_attention_tiling_data() const {
-  return optional_tensor(metadata().paged_attention_tiling_data);
 }
 
 py::object PyExpandedDecodeMetadataView::kv_seq_lens_host() const {

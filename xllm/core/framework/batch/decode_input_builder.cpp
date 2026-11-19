@@ -31,7 +31,8 @@ limitations under the License.
 namespace xllm {
 
 template <typename Input>
-DecodeBatchContext make_decode_batch_context(const Input& input) {
+DecodeBatchContext make_decode_batch_context(const Input& input,
+                                             int64_t replicated_block_pages) {
   DecodeBatchContext ctx;
   ctx.num_requests = input.input_params.meta.num_sequences;
   ctx.build_execution_batch = ModelConfig::is_python_model_impl(
@@ -82,6 +83,18 @@ DecodeBatchContext make_decode_batch_context(const Input& input) {
       << "num_requests exceeds block table rows, num_requests="
       << ctx.num_requests
       << ", num_block_tables=" << ctx.block_tables_owner.size(0);
+  if (replicated_block_pages > 1) {
+    const auto& logical = ctx.block_tables_owner;
+    const auto offsets =
+        torch::arange(replicated_block_pages, logical.options());
+    auto expanded = logical.unsqueeze(-1) * replicated_block_pages + offsets;
+    ctx.block_tables_owner =
+        torch::where(logical.unsqueeze(-1) >= 0,
+                     expanded,
+                     torch::full_like(expanded, -1))
+            .reshape(
+                {logical.size(0), logical.size(1) * replicated_block_pages});
+  }
   ctx.block_table_stride = static_cast<int32_t>(ctx.block_tables_owner.size(1));
   ctx.block_tables = tensor_slice(ctx.block_tables_owner);
   if (input.input_params.attention.host.shared_full_block_table.defined()) {
@@ -312,8 +325,10 @@ template void set_token_position_tensors(VlmForwardInput&,
                                          const std::vector<int32_t>&,
                                          const std::vector<int32_t>&);
 
-template DecodeBatchContext make_decode_batch_context(const LlmForwardInput&);
-template DecodeBatchContext make_decode_batch_context(const VlmForwardInput&);
+template DecodeBatchContext make_decode_batch_context(const LlmForwardInput&,
+                                                      int64_t);
+template DecodeBatchContext make_decode_batch_context(const VlmForwardInput&,
+                                                      int64_t);
 
 DecodeBuildBuffers expand_decode_inputs(
     const DecodeBatchContext& ctx,

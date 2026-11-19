@@ -45,7 +45,7 @@ _INDEX_GUARD_VALUE = -123456789
 
 @pytest.mark.parametrize("no_padding", [False, True], ids=["padded", "exact-shape"])
 @torch.inference_mode()
-def test_serial_fia_buffers_match_private_graphs(no_padding: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_serial_fia_graph_replay(no_padding: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     """Alternate shapes and caller streams without retaining captured storage."""
     from xllm.python.attention.backend import LayerCache
     from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
@@ -82,24 +82,18 @@ def test_serial_fia_buffers_match_private_graphs(no_padding: bool, monkeypatch: 
             first = self.backend._decode(query, key, value, metadata, rows) * 0.25
             return first + self.backend._decode(query * -0.5, key, value, metadata, rows)
 
-    runners = []
-    for shared in (False, True):
-        backend = NpuPagedAttentionBackend(heads, 1, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
-        backend.bind_kv_caches(caches)
-        runner = DecodeAclGraphRunner(
-            _FiaModel(backend),
-            backend,
-            device,
-            512,
-            262144,
-            enable_graph_mode_decode_no_padding=no_padding,
-            kv_capacity_graphs=shared,
-        )
-        if not shared:
-            runner._serial_workspace_pool = None
-            runner._serial_buffers = None
-        runner.bind_layer_caches(caches)
-        runners.append(runner)
+    backend = NpuPagedAttentionBackend(heads, 1, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
+    backend.bind_kv_caches(caches)
+    runner = DecodeAclGraphRunner(
+        _FiaModel(backend),
+        backend,
+        device,
+        512,
+        262144,
+        enable_graph_mode_decode_no_padding=no_padding,
+        kv_capacity_graphs=True,
+    )
+    runner.bind_layer_caches(caches)
 
     sequence = ((512, 7), (4, 32769), (128, 129), (512, 2049), (4, 7), (128, 2049)) * 2
     inputs, metadata_by_shape = {}, {}
@@ -107,7 +101,7 @@ def test_serial_fia_buffers_match_private_graphs(no_padding: bool, monkeypatch: 
         tokens = torch.zeros(rows, dtype=torch.int32, device=device)
         inputs[rows] = (tokens, query_host[:rows].to(device).reshape(rows, heads * dimension))
         table = torch.arange(pages, dtype=torch.int32, device=device).expand(rows, -1).contiguous()
-        for length in sorted({length for size, length in sequence if size == rows} | {7, 32769}):
+        for length in sorted({length for size, length in sequence if size == rows} | {7}):
             indptr, indices, last_page = build_row_aligned_paged_kv_metadata(table, [length] * rows, page_size)
             metadata_by_shape[rows, length] = StaticGraphAttentionMetadata(
                 slot_mapping=torch.full((rows,), -1, dtype=torch.int32, device=device),
@@ -123,10 +117,9 @@ def test_serial_fia_buffers_match_private_graphs(no_padding: bool, monkeypatch: 
             )
         # Start the shared TND graph at a short length. Its workspace must
         # handle a longer request without capturing another capacity tier.
-        for runner, warmup_length in zip(runners, (32769, 7)):
-            runner.warmup(tokens, tokens, metadata_by_shape[rows, warmup_length], inputs[rows][1], is_graph_warmup=True)
+        runner.warmup(tokens, tokens, metadata_by_shape[rows, 7], inputs[rows][1], is_graph_warmup=True)
 
-    entries = list(runners[1]._graphs.values())
+    entries = list(runner._graphs.values())
     for name in ("static_input_ids", "static_positions", "static_input_embedding"):
         assert len({getattr(entry, name).data_ptr() for entry in entries}) == 1
     assert len({entry.static_metadata.block_table.data_ptr() for entry in entries}) == 1
@@ -136,25 +129,22 @@ def test_serial_fia_buffers_match_private_graphs(no_padding: bool, monkeypatch: 
     # without synchronizing between them to exercise the runner's dependencies.
     torch.npu.synchronize()
     streams = [torch.npu.current_stream(), torch.npu.Stream(device=device)]
-    outputs = [[], []]
-    for runner, results in zip(runners, outputs):
-        for iteration, (rows, length) in enumerate(sequence):
-            tokens, query = inputs[rows]
-            with torch.npu.stream(streams[iteration % 2]):
-                results.append(runner.execute(tokens, tokens, metadata_by_shape[rows, length], query))
-        # Both runners use the same graph pool; serialize the comparison modes.
-        torch.npu.synchronize()
-        assert len(runner._graphs) == 3
+    outputs = []
+    for iteration, (rows, length) in enumerate(sequence):
+        tokens, query = inputs[rows]
+        with torch.npu.stream(streams[iteration % 2]):
+            outputs.append(runner.execute(tokens, tokens, metadata_by_shape[rows, length], query))
+    torch.npu.synchronize()
+    assert len(runner._graphs) == 3
 
-    for (rows, length), private, shared in zip(sequence, *outputs):
-        private, shared = [output.cpu().float().view(rows, heads, dimension) for output in (private, shared)]
-        torch.testing.assert_close(shared, private, rtol=0, atol=0)
+    for (rows, length), output in zip(sequence, outputs):
+        actual = output.cpu().float().view(rows, heads, dimension)
         scores = torch.einsum("rhd,kd->rhk", query_host[:rows].float(), key_host[:length].float()) * dimension**-0.5
         first = (torch.softmax(scores, dim=-1) @ value_host[:length].float()).to(torch.bfloat16).float()
         second = (torch.softmax(scores * -0.5, dim=-1) @ value_host[:length].float()).to(torch.bfloat16).float()
         expected = (first * 0.25 + second).to(torch.bfloat16).float()
         epsilon = torch.finfo(torch.bfloat16).eps
-        torch.testing.assert_close(private, expected, rtol=2 * epsilon, atol=epsilon)
+        torch.testing.assert_close(actual, expected, rtol=2 * epsilon, atol=epsilon)
 
 
 def _guarded_shared_indices(shape: tuple[int, ...], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:

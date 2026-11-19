@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "layers/mlu/dsa_topk_relay.h"
+#include "layers/mlu/hyper_connection.h"
 
 namespace xllm {
 namespace layer {
@@ -176,13 +177,46 @@ torch::Tensor Glm5NextDecoderLayerImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const ModelParamsView& input_params,
-    DsaTopkRelay* topk_relay) {
+    DsaTopkRelay* topk_relay,
+    std::optional<PendingMHC>* pending_mhc,
+    bool is_last_layer) {
   residual = std::nullopt;
 
-  const torch::Tensor residual_attention = hidden_states;
-  MHCPreOutput attention_hc = attn_hc_pre_->forward(hidden_states);
-  torch::Tensor attention_input =
-      std::get<0>(input_norm_->forward(attention_hc.output));
+  const bool has_pending_storage = pending_mhc != nullptr;
+  const bool has_pending = has_pending_storage && pending_mhc->has_value();
+  const MHCFusionPlan mhc_plan = resolve_mhc_fusion({
+      .is_prefill = attn_metadata.is_prefill,
+      .is_chunked_prefill = attn_metadata.is_chunked_prefill,
+      .is_spec_verify = attn_metadata.is_spec_verify,
+      .supports_fused_mhc = attn_hc_pre_->supports_fused_mhc() &&
+                            ffn_hc_pre_->supports_fused_mhc(),
+      .has_pending_storage = has_pending_storage,
+      .has_pending = has_pending,
+      .is_last_layer = is_last_layer,
+  });
+  CHECK(!has_pending || mhc_plan.consume_pending)
+      << "GLM5-Next pending mHC state cannot enter an unfused layer.";
+
+  torch::Tensor residual_attention;
+  MHCPreOutput attention_hc;
+  torch::Tensor attention_input;
+  if (mhc_plan.consume_pending) {
+    PendingMHC& pending = pending_mhc->value();
+    std::tie(attention_input,
+             residual_attention,
+             attention_hc.post,
+             attention_hc.comb) =
+        attn_hc_pre_->fused_post_pre_norm(pending.x,
+                                          pending.residual,
+                                          pending.post,
+                                          pending.comb,
+                                          input_norm_->weight());
+    pending_mhc->reset();
+  } else {
+    residual_attention = hidden_states;
+    attention_hc = attn_hc_pre_->forward(hidden_states);
+    attention_input = std::get<0>(input_norm_->forward(attention_hc.output));
+  }
 
   torch::Tensor attention_output;
   if (kda_) {
@@ -210,14 +244,25 @@ torch::Tensor Glm5NextDecoderLayerImpl::forward(
     }
   }
 
-  std::tie(hidden_states, std::ignore) = hc_post_->forward(attention_output,
-                                                           residual_attention,
-                                                           attention_hc.post,
-                                                           attention_hc.comb);
-
-  const torch::Tensor residual_ffn = hidden_states;
-  MHCPreOutput ffn_hc = ffn_hc_pre_->forward(hidden_states);
-  torch::Tensor ffn_input = std::get<0>(post_norm_->forward(ffn_hc.output));
+  torch::Tensor residual_ffn;
+  MHCPreOutput ffn_hc;
+  torch::Tensor ffn_input;
+  if (mhc_plan.use_fused_mhc) {
+    std::tie(ffn_input, residual_ffn, ffn_hc.post, ffn_hc.comb) =
+        ffn_hc_pre_->fused_post_pre_norm(attention_output,
+                                         residual_attention,
+                                         attention_hc.post,
+                                         attention_hc.comb,
+                                         post_norm_->weight());
+  } else {
+    std::tie(hidden_states, std::ignore) = hc_post_->forward(attention_output,
+                                                             residual_attention,
+                                                             attention_hc.post,
+                                                             attention_hc.comb);
+    residual_ffn = hidden_states;
+    ffn_hc = ffn_hc_pre_->forward(hidden_states);
+    ffn_input = std::get<0>(post_norm_->forward(ffn_hc.output));
+  }
   torch::Tensor ffn_output;
   if (dense_mlp_) {
     ffn_output = dense_mlp_->forward(ffn_input);
@@ -225,6 +270,12 @@ torch::Tensor Glm5NextDecoderLayerImpl::forward(
     FusedMoEImpl::RouteInfo route = sparse_moe_->prep_route(ffn_input);
     ffn_output = sparse_moe_->forward_selected(
         ffn_input, route.reduce_weight, route.expert_id, input_params);
+  }
+  if (mhc_plan.defer_post) {
+    pending_mhc->emplace(
+        PendingMHC{ffn_output, residual_ffn, ffn_hc.post, ffn_hc.comb});
+    hidden_states = ffn_output;
+    return hidden_states;
   }
   std::tie(hidden_states, std::ignore) =
       hc_post_->forward(ffn_output, residual_ffn, ffn_hc.post, ffn_hc.comb);

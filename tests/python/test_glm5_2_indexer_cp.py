@@ -193,7 +193,7 @@ def test_empty_query_rank_still_populates_index_cache(quantized: bool) -> None:
         patch.object(glm5_2.kernels, "quantize_per_tensor", side_effect=_quantize, create=True),
         patch.object(glm5_2.kernels, "quant_matmul", side_effect=_quant_matmul, create=True),
         patch.object(glm5_2.kernels, "dynamic_quant", side_effect=_dynamic_quant, create=True),
-        patch.object(glm5_2.kernels, "scatter_nd_update", side_effect=_scatter, create=True),
+        patch.object(glm5_2.kernels, "scatter_cache_by_slot", side_effect=_scatter, create=True),
         patch.object(glm5_2.kernels, "quant_lightning_indexer", side_effect=select, create=True),
         patch.object(glm5_2.kernels, "lightning_indexer_out", side_effect=_indexer_out(select), create=True),
         patch("xllm.python.model_executor.cp_utils.distributed.all_gather", side_effect=all_gather, create=True),
@@ -319,7 +319,7 @@ def test_cp_indexer_preserves_query_segments_and_cache_order(packed: bool, rank:
         patch.object(glm5_2.kernels, "quantize_per_tensor", side_effect=_quantize, create=True),
         patch.object(glm5_2.kernels, "quant_matmul", side_effect=_quant_matmul, create=True),
         patch.object(glm5_2.kernels, "dynamic_quant", side_effect=_dynamic_quant, create=True),
-        patch.object(glm5_2.kernels, "scatter_nd_update", side_effect=_scatter, create=True),
+        patch.object(glm5_2.kernels, "scatter_cache_by_slot", side_effect=_scatter, create=True),
         patch.object(glm5_2.kernels, "quant_lightning_indexer_metadata", side_effect=indexer_metadata, create=True),
         patch.object(
             glm5_2.kernels,

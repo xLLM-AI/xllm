@@ -184,11 +184,6 @@ class GraphPersistentParam final {
   const int32_t* capture_host_kv_seq_lens_data() const {
     return capture_host_kv_seq_lens_.data();
   }
-  bool need_update_attn_mask() const { return need_update_attn_mask_; }
-  void set_need_update_attn_mask(bool value) { need_update_attn_mask_ = value; }
-  bool need_update_attention_plan() const {
-    return need_update_attention_plan_;
-  }
   torch::Tensor persistent_embedding(uint32_t actual_tokens = 0) const {
     if (actual_tokens > 0) {
       return persistent_embedding_.slice(

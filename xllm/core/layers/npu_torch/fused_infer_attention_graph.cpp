@@ -66,13 +66,14 @@ torch::Tensor xllm::layer::detail::run_fused_infer_attention_graph(
       .scale = scale,
       .softmax_lse_flag = softmax_lse_flag,
   };
-  torch::Tensor workspace = graph_context->fused_infer_attention_workspace;
-  if (workspace.defined()) {
-    CHECK(graph_context->fused_infer_attention_workspace_signature.has_value());
-    CHECK(graph_context->fused_infer_attention_workspace_signature.value() ==
-          workspace_signature)
-        << "FIA graph layers in one bucket require different workspaces";
-  } else {
+  torch::Tensor workspace;
+  for (auto& entry : graph_context->fused_infer_attention_workspaces) {
+    if (entry.signature == workspace_signature) {
+      workspace = entry.workspace;
+      break;
+    }
+  }
+  if (!workspace.defined()) {
     workspace =
         xllm::kernel::npu::npu_fused_infer_attention_decode_get_max_workspace(
             query,
@@ -87,9 +88,9 @@ torch::Tensor xllm::layer::detail::run_fused_infer_attention_graph(
             block_size,
             softmax_lse_flag);
     CHECK(workspace.defined()) << "FIA graph workspace must be defined";
-    graph_context->fused_infer_attention_workspace_signature =
-        workspace_signature;
-    graph_context->fused_infer_attention_workspace = workspace;
+    graph_context->fused_infer_attention_workspaces.push_back(
+        xllm::npu::FusedInferAttentionWorkspaceEntry{
+            .signature = workspace_signature, .workspace = workspace});
   }
   torch::Tensor softmax_lse =
       softmax_lse_flag
