@@ -66,6 +66,8 @@ def initialize_runtime() -> None:
             operations=(
                 "rms_norm",
                 "fused_add_gemma_rms_norm",
+                "rms_norm_gated",
+                "rms_norm_dynamic_quant",
                 "l2_norm",
                 "matmul_ein_sum",
                 "matmul_ein_sum_out",

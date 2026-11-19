@@ -33,8 +33,8 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                     "ascend910b" if soc_version < 250 else "ascend950" if soc_version == 260 else "ascend910_93"
                 )
 
-            source = Path(__file__).resolve().parent / "csrc" / "ascendc" / "gamma_add_rms_norm"
-            build = Path(self.build_temp).resolve() / "gamma_add_rms_norm"
+            source = Path(__file__).resolve().parent / "csrc" / "ascendc"
+            build = Path(self.build_temp).resolve() / "ascendc"
             subprocess.run(
                 [
                     "cmake",
@@ -58,10 +58,12 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 vendor = Path(output) / "packages/vendors/xllm_kernel"
                 headers = vendor / "op_api/include"
                 (headers / "aclnn_xllm_kernel_gamma_add_rms_norm.h").unlink(missing_ok=True)
+                gamma = source / "gamma_add_rms_norm"
                 for header in ("aclnn_gamma_add_rms_norm.h", "aclnn_util.h"):
-                    shutil.copy2(source / "op_host/op_api" / header, headers)
-                shutil.copy2(source / "CANN_LICENSE.txt", vendor)
-                shutil.copy2(source / "SOURCE.txt", vendor)
+                    shutil.copy2(gamma / "op_host/op_api" / header, headers)
+                shutil.copy2(gamma / "CANN_LICENSE.txt", vendor)
+                for provenance in sorted(source.glob("*/SOURCE.txt")):
+                    shutil.copy2(provenance, vendor / f"{provenance.parent.name}_SOURCE.txt")
                 paths = [Path(self.build_lib)]
                 if self.inplace:
                     paths.append(Path("python"))
@@ -82,6 +84,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/atb/matmul_ein_sum.cpp",
                 "csrc/atb/reshape_paged_cache.cpp",
                 "csrc/npu/gamma_add_rms_norm.cpp",
+                "csrc/npu/normalization.cpp",
                 "csrc/npu/reshape_paged_cache.cpp",
             ],
             include_dirs=[
