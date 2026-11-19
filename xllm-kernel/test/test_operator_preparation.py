@@ -64,6 +64,10 @@ for name, mutates, aliases in (
     ("mla_preprocess_v2", ("kv_cache", "rope_cache"), False),
     ("hc_pre", (), False),
     ("hc_post", (), False),
+    ("moe_gating_top_k_hash", (), False),
+    ("moe_init_routing_v3", (), False),
+    ("moe_grouped_matmul_swiglu_quant", (), False),
+    ("dequant_swiglu_quant", (), False),
 ):
     operation = catalog[name]
     assert operation.implementations == ("npu.ascendc." + name,)

@@ -60,6 +60,7 @@ def initialize_runtime() -> None:
         xllm_kernel = _load_kernel_package()
 
         from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2
+        from xllm_kernel.ops.moe import FUSED_MOE_GMM1_OPERATIONS, has_fused_moe_gmm1
 
         from scripts.logger import logger
 
@@ -77,6 +78,9 @@ def initialize_runtime() -> None:
                 "matmul_ein_sum_out",
                 "quant_matmul_out",
                 *(("mla_preprocess_v2",) if has_mla_preprocess_v2() else ()),
+                "dequant_swiglu_quant",
+                "moe_gating_top_k_hash",
+                *(FUSED_MOE_GMM1_OPERATIONS if has_fused_moe_gmm1() else ()),
                 "fused_recurrent_gated_delta_rule",
                 "fused_sigmoid_gating_delta_rule_update",
                 "fused_qkvzba_split_reshape_cat",

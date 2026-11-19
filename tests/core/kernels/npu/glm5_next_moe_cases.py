@@ -34,10 +34,12 @@ _MOE_ATOL = 0.1
 
 
 def _require_real_binding() -> ModuleType:
+    from xllm_kernel.ops import dequant_swiglu_quant
+
     from xllm.python import kernels
 
-    assert kernels.dequant_swiglu_quant.__module__ == "xllm.python.kernels_npu.moe"
-    assert torch._C._dispatch_has_kernel_for_dispatch_key("xllm_ops::dequant_swiglu_quant", "PrivateUse1")
+    assert kernels.dequant_swiglu_quant is dequant_swiglu_quant
+    assert torch._C._dispatch_has_kernel_for_dispatch_key("xllm_kernel::dequant_swiglu_quant", "PrivateUse1")
     return kernels
 
 
@@ -88,7 +90,6 @@ def check_v2_clamped_activation() -> None:
         plain = torch.nn.functional.silu(plain_gate) * plain_up
         assert not torch.allclose(plain, _activation_reference(dequantized))
 
-        # V2 provider: custom_xllm_math/op_api/lib/libcust_opapi.so.
         actual = kernels.dequant_swiglu_quant(
             gate_up.to("npu:0"),
             weight_scale.to("npu:0"),
