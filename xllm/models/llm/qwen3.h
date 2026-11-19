@@ -179,7 +179,7 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
       : LlmForCausalLMImplBase<QWen3Model>(context) {}
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) override {
+                       const torch::Tensor& seleted_idxes) {
     auto h = hidden_states;
     if (seleted_idxes.defined()) {
       h = h.index_select(/*dim=*/0, seleted_idxes);

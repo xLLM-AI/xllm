@@ -1,0 +1,392 @@
+/**
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright 2026 The xLLM Authors. All Rights Reserved.
+ * This program is free software, you can redistribute it and/or modify it under
+ * the terms and conditions of CANN Open Software License Agreement Version 2.0
+ * (the "License"). Please refer to the License for details. You may not use
+ * this file except in compliance with the License. THIS SOFTWARE IS PROVIDED ON
+ * AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS
+ * FOR A PARTICULAR PURPOSE. See LICENSE in the root of the software repository
+ * for the full text of the License.
+ */
+
+/*!
+ * \file gamma_add_rms_norm_multi_n.h
+ * \brief add rms norm multi n file
+ */
+#ifndef GAMMA_ADD_RMS_NORM_MULTI_N_H_
+#define GAMMA_ADD_RMS_NORM_MULTI_N_H_
+#include "gamma_add_rms_norm_base.h"
+
+using namespace AscendC;
+using namespace RmsNorm;
+
+template <typename T, int32_t MODE>
+class KernelGammaAddRmsNormMultiN {
+ public:
+  __aicore__ inline KernelGammaAddRmsNormMultiN(TPipe* pipe) { Ppipe = pipe; }
+  __aicore__ inline void Init(GM_ADDR x1,
+                              GM_ADDR x2,
+                              GM_ADDR gamma,
+                              GM_ADDR y,
+                              GM_ADDR rstd,
+                              GM_ADDR x,
+                              GM_ADDR workspace,
+                              const GammaAddRMSNormTilingData* tiling) {
+    ASSERT(GetBlockNum() != 0 && "Block dim can not be zero!");
+    this->numRow = tiling->num_row;
+    this->numCol = tiling->num_col;
+    this->numColAlign = tiling->num_col_align;
+    this->blockFactor = tiling->block_factor;
+    this->rowFactor = tiling->row_factor;
+    this->ubFactor = tiling->ub_factor;
+    this->epsilon = tiling->epsilon;
+    this->avgFactor = tiling->avg_factor;
+    this->addGammaOffset = tiling->add_gamma_offset;
+
+    blockIdx_ = GetBlockIdx();
+    if (blockIdx_ < GetBlockNum() - 1) {
+      this->rowWork = this->blockFactor;
+      this->rowLoop = tiling->row_loop;
+      this->rowTail = tiling->row_tail;
+    } else if (blockIdx_ == GetBlockNum() - 1) {
+      this->rowWork = tiling->last_block_factor;
+      this->rowLoop = tiling->last_block_row_loop;
+      this->rowTail = tiling->last_block_row_tail;
+    }
+    // get start index for current core, core parallel
+    x1Gm.SetGlobalBuffer(
+        (__gm__ T*)x1 + blockIdx_ * this->blockFactor * this->numCol,
+        this->rowWork * this->numCol);
+    x2Gm.SetGlobalBuffer(
+        (__gm__ T*)x2 + blockIdx_ * this->blockFactor * this->numCol,
+        this->rowWork * this->numCol);
+    gammaGm.SetGlobalBuffer((__gm__ T*)gamma, this->numCol);
+    yGm.SetGlobalBuffer(
+        (__gm__ T*)y + blockIdx_ * this->blockFactor * this->numCol,
+        this->rowWork * this->numCol);
+    if constexpr (MODE == GAMMA_ADD_RMS_NORM_MODE) {
+      rstdGm.SetGlobalBuffer((__gm__ float*)rstd + blockIdx_ * blockFactor,
+                             blockFactor);
+      xGm.SetGlobalBuffer((__gm__ T*)x + blockIdx_ * blockFactor * numCol,
+                          rowWork * numCol);
+    }
+    if constexpr (MODE == PRE_RMS_NORM_MODE) {
+      xGm.SetGlobalBuffer((__gm__ T*)x + blockIdx_ * blockFactor * numCol,
+                          rowWork * numCol);
+    }
+
+    // pipe alloc memory to queue, the unit is Bytes
+    Ppipe->InitBuffer(inQueueX, DOUBLE_BUFFER_NUM, this->ubFactor * sizeof(T));
+    Ppipe->InitBuffer(inQueueGamma, BUFFER_NUM, this->numColAlign * sizeof(T));
+    Ppipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, this->ubFactor * sizeof(T));
+#if __CCE_AICORE__ == 220 || \
+    (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
+    Ppipe->InitBuffer(outQueueRstd,
+                      BUFFER_NUM,
+                      this->rowFactor * NUM_PER_BLK_FP32 * sizeof(float));
+#else
+    Ppipe->InitBuffer(rstdBuf,
+                      this->rowFactor * NUM_PER_BLK_FP32 * sizeof(float));
+#endif
+    if constexpr (is_same<T, half>::value || is_same<T, bfloat16_t>::value) {
+      Ppipe->InitBuffer(xFp32Buf, this->ubFactor * sizeof(float));
+    }
+    Ppipe->InitBuffer(sqxBuf, this->ubFactor * sizeof(float));
+    Ppipe->InitBuffer(reduceFp32Buf, NUM_PER_REP_FP32 * sizeof(float));
+    Ppipe->InitBuffer(offsetBuf,
+                      this->rowFactor * NUM_PER_BLK_FP32 * sizeof(uint32_t));
+  }
+  __aicore__ inline void Process() {
+    CopyInGamma();
+    LocalTensor<T> gammaLocal = inQueueGamma.DeQue<T>();
+    if (addGammaOffset != 0U) {
+      AddGammaOffset(gammaLocal, numCol);
+    }
+    LocalTensor<uint32_t> offsetLocal = offsetBuf.Get<uint32_t>();
+    for (uint32_t i = 0; i < this->rowFactor; i++) {
+      Duplicate(offsetLocal[i * NUM_PER_BLK_FP32],
+                i * ONE_BLK_SIZE,
+                NUM_PER_BLK_FP32);
+    }
+    for (uint32_t i_o = 0; i_o < this->rowLoop - 1; i_o++) {
+      SubProcessHalf(i_o, this->rowFactor, gammaLocal);
+    }
+    SubProcessHalf(this->rowLoop - 1, this->rowTail, gammaLocal);
+    inQueueGamma.FreeTensor(gammaLocal);
+  }
+
+  __aicore__ inline void SubProcessHalf(uint32_t i_o,
+                                        uint32_t calc_row_num,
+                                        LocalTensor<T>& gammaLocal) {
+    uint64_t gm_bias = static_cast<uint64_t>(i_o) *
+                       static_cast<uint64_t>(rowFactor) *
+                       static_cast<uint64_t>(numCol);
+    CopyInX(gm_bias, calc_row_num);
+    LocalTensor<T> xLocal = ComputeX(calc_row_num);
+    if constexpr (MODE == GAMMA_ADD_RMS_NORM_MODE ||
+                  MODE == PRE_RMS_NORM_MODE) {
+      CopyOutX(gm_bias, calc_row_num);
+    } else {
+      outQueueY.FreeTensor(xLocal);
+    }
+#if __CCE_AICORE__ == 220 || \
+    (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
+    LocalTensor<float> rstdLocal = outQueueRstd.AllocTensor<float>();
+    ComputeRstd(xLocal, rstdLocal, calc_row_num);
+    if constexpr (MODE == GAMMA_ADD_RMS_NORM_MODE) {
+      outQueueRstd.EnQue<float>(rstdLocal);
+      CopyOutRstd(i_o * rowFactor, calc_row_num);
+    } else {
+      outQueueRstd.FreeTensor(rstdLocal);
+    }
+#else
+    LocalTensor<float> rstdLocal = rstdBuf.Get<float>();
+    ComputeRstd(xLocal, rstdLocal, calc_row_num);
+#endif
+    ComputeY(xLocal, gammaLocal, rstdLocal, calc_row_num);
+    CopyOutY(gm_bias, calc_row_num);
+  }
+
+ private:
+  __aicore__ inline void CopyInX(uint32_t gm_bias, uint32_t calc_row_num) {
+    LocalTensor<T> x1Local = inQueueX.AllocTensor<T>();
+    DataCopyCustom<T>(x1Local, x1Gm[gm_bias], calc_row_num * this->numCol);
+    inQueueX.EnQue(x1Local);
+    LocalTensor<T> x2Local = inQueueX.AllocTensor<T>();
+    DataCopyCustom<T>(x2Local, x2Gm[gm_bias], calc_row_num * this->numCol);
+    inQueueX.EnQue(x2Local);
+  }
+
+  __aicore__ inline LocalTensor<T> ComputeX(uint32_t calc_row_num) {
+    uint32_t calc_num = calc_row_num * this->numColAlign;
+    LocalTensor<T> x1Local = inQueueX.DeQue<T>();
+    LocalTensor<T> x2Local = inQueueX.DeQue<T>();
+    LocalTensor<T> xLocal = outQueueY.AllocTensor<T>();
+    if constexpr (!is_same<T, bfloat16_t>::value) {
+      Add(xLocal, x1Local, x2Local, calc_num);
+    } else {
+      LocalTensor<float> x1Fp32 = xFp32Buf.Get<float>();
+      LocalTensor<float> x2Fp32 = sqxBuf.Get<float>();
+      Cast(x1Fp32, x1Local, RoundMode::CAST_NONE, calc_num);
+      Cast(x2Fp32, x2Local, RoundMode::CAST_NONE, calc_num);
+      PipeBarrier<PIPE_V>();
+      Add(x1Fp32, x1Fp32, x2Fp32, calc_num);
+      PipeBarrier<PIPE_V>();
+      Cast(xLocal, x1Fp32, RoundMode::CAST_RINT, calc_num);
+    }
+    inQueueX.FreeTensor(x1Local);
+    inQueueX.FreeTensor(x2Local);
+    if constexpr (MODE == PRE_RMS_NORM_MODE ||
+                  MODE == GAMMA_ADD_RMS_NORM_MODE) {
+      outQueueY.EnQue(xLocal);
+    }
+    PipeBarrier<PIPE_V>();
+    return xLocal;
+  }
+
+  __aicore__ inline void CopyOutX(uint32_t gm_bias, uint32_t calc_row_num) {
+    // CopyOut x1 + x2
+    auto x_out = outQueueY.DeQue<T>();
+    DataCopyCustom<T>(xGm[gm_bias], x_out, calc_row_num * numCol);
+    outQueueY.FreeTensor(x_out);
+  }
+
+  __aicore__ inline void CopyInGamma() {
+    LocalTensor<T> gammaLocal = inQueueGamma.AllocTensor<T>();
+    DataCopyCustom<T>(gammaLocal, gammaGm, numCol);
+    inQueueGamma.EnQue(gammaLocal);
+  }
+
+  __aicore__ inline void AddGammaOffset(LocalTensor<T>& gammaLocal,
+                                        uint32_t elementNum) {
+    if constexpr (is_same<T, bfloat16_t>::value) {
+      LocalTensor<float> gammaFp32 = xFp32Buf.Get<float>();
+      Cast(gammaFp32, gammaLocal, RoundMode::CAST_NONE, elementNum);
+      PipeBarrier<PIPE_V>();
+      Adds(gammaFp32, gammaFp32, static_cast<float>(1.0), elementNum);
+      PipeBarrier<PIPE_V>();
+      Cast(gammaLocal, gammaFp32, RoundMode::CAST_RINT, elementNum);
+    } else {
+      Adds(gammaLocal, gammaLocal, static_cast<T>(1.0), elementNum);
+    }
+    PipeBarrier<PIPE_V>();
+  }
+
+  __aicore__ inline void ComputeRstd(LocalTensor<T> xLocal,
+                                     LocalTensor<float> rstdLocal,
+                                     uint32_t calc_row_num) {
+    LocalTensor<float> x_fp32 = xFp32Buf.Get<float>();
+    LocalTensor<float> sqx = sqxBuf.Get<float>();
+    LocalTensor<float> reduce_buf_local = reduceFp32Buf.Get<float>();
+    Cast(x_fp32, xLocal, RoundMode::CAST_NONE, calc_row_num * numColAlign);
+    PipeBarrier<PIPE_V>();
+
+    Mul(sqx, x_fp32, x_fp32, calc_row_num * numColAlign);
+    PipeBarrier<PIPE_V>();
+
+    Muls(sqx, sqx, avgFactor, calc_row_num * numColAlign);
+    PipeBarrier<PIPE_V>();
+
+    for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
+      ReduceSumCustom(rstdLocal[i_i * NUM_PER_BLK_FP32],
+                      sqx[i_i * numColAlign],
+                      reduce_buf_local,
+                      numCol);
+    }
+    Adds(rstdLocal, rstdLocal, epsilon, calc_row_num * NUM_PER_BLK_FP32);
+    PipeBarrier<PIPE_V>();
+
+    Sqrt(rstdLocal, rstdLocal, calc_row_num * NUM_PER_BLK_FP32);
+    Duplicate(reduce_buf_local, ONE, NUM_PER_BLK_FP32);
+    PipeBarrier<PIPE_V>();
+
+    int32_t repeatTimes = calc_row_num * NUM_PER_BLK_FP32 / NUM_PER_REP_FP32;
+    int32_t tailCount = calc_row_num * NUM_PER_BLK_FP32 % NUM_PER_REP_FP32;
+    int32_t bodyCount = repeatTimes * NUM_PER_REP_FP32;
+
+    if (likely(repeatTimes > 0)) {
+      Div(rstdLocal,
+          reduce_buf_local,
+          rstdLocal,
+          NUM_PER_REP_FP32,
+          repeatTimes,
+          {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+    }
+    if (unlikely(tailCount != 0)) {
+      Div(rstdLocal[bodyCount],
+          reduce_buf_local,
+          rstdLocal[bodyCount],
+          tailCount,
+          1,
+          {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+    }
+    PipeBarrier<PIPE_V>();
+  }
+
+  __aicore__ inline void ComputeY(LocalTensor<T> xLocal,
+                                  LocalTensor<T> gammaLocal,
+                                  LocalTensor<float> rstdLocal,
+                                  uint32_t calc_row_num) {
+    LocalTensor<float> x_fp32 = xFp32Buf.Get<float>();
+    LocalTensor<uint32_t> offsetLocal = offsetBuf.Get<uint32_t>();
+    Gather(rstdLocal,
+           rstdLocal,
+           offsetLocal,
+           ZERO_UINT,
+           calc_row_num * NUM_PER_BLK_FP32);
+    PipeBarrier<PIPE_V>();
+    int32_t repeatTimes = numCol / NUM_PER_REP_FP32;
+    int32_t tailCount = numCol % NUM_PER_REP_FP32;
+    int32_t bodyCount = repeatTimes * NUM_PER_REP_FP32;
+    for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
+      if (likely(repeatTimes > 0)) {
+        Mul(x_fp32[i_i * numColAlign],
+            x_fp32[i_i * numColAlign],
+            rstdLocal[i_i * NUM_PER_BLK_FP32],
+            NUM_PER_REP_FP32,
+            repeatTimes,
+            {1, 1, 0, DEFAULT_REPEAT_STRIDE, DEFAULT_REPEAT_STRIDE, 0});
+      }
+      if (unlikely(tailCount != 0)) {
+        Mul(x_fp32[i_i * numColAlign + bodyCount],
+            x_fp32[i_i * numColAlign + bodyCount],
+            rstdLocal[i_i * NUM_PER_BLK_FP32],
+            tailCount,
+            1,
+            {1, 1, 0, DEFAULT_REPEAT_STRIDE, DEFAULT_REPEAT_STRIDE, 0});
+      }
+    }
+    PipeBarrier<PIPE_V>();
+    LocalTensor<T> yLocal = outQueueY.AllocTensor<T>();
+    if constexpr (is_same<T, half>::value) {
+      Cast(yLocal, x_fp32, RoundMode::CAST_NONE, calc_row_num * numColAlign);
+      PipeBarrier<PIPE_V>();
+
+      for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
+        Mul(yLocal[i_i * numColAlign],
+            gammaLocal,
+            yLocal[i_i * numColAlign],
+            numCol);
+      }
+    } else {
+      Cast(yLocal, x_fp32, RoundMode::CAST_RINT, calc_row_num * numColAlign);
+      PipeBarrier<PIPE_V>();
+      LocalTensor<float> yfp32 = xFp32Buf.Get<float>();
+      Cast(yfp32, yLocal, RoundMode::CAST_NONE, calc_row_num * numColAlign);
+      PipeBarrier<PIPE_V>();
+      LocalTensor<float> gammaFp32 = sqxBuf.Get<float>();
+      Cast(gammaFp32, gammaLocal, RoundMode::CAST_NONE, numCol);
+      PipeBarrier<PIPE_V>();
+      for (uint32_t i_i = 0; i_i < calc_row_num; i_i++) {
+        Mul(yfp32[i_i * numColAlign],
+            gammaFp32,
+            yfp32[i_i * numColAlign],
+            numCol);
+      }
+      PipeBarrier<PIPE_V>();
+      Cast(yLocal, yfp32, RoundMode::CAST_RINT, calc_row_num * numColAlign);
+    }
+    PipeBarrier<PIPE_V>();
+    outQueueY.EnQue<T>(yLocal);
+  }
+
+  __aicore__ inline void CopyOutY(uint32_t progress, uint32_t calc_row_num) {
+    LocalTensor<T> yLocal = outQueueY.DeQue<T>();
+    DataCopyCustom<T>(yGm[progress], yLocal, calc_row_num * numCol);
+    outQueueY.FreeTensor(yLocal);
+  }
+
+#if __CCE_AICORE__ == 220 || \
+    (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
+  __aicore__ inline void CopyOutRstd(uint32_t outer_progress, uint32_t num) {
+    LocalTensor<float> rstdLocal = outQueueRstd.DeQue<float>();
+    DataCopyParams copyParams;
+    copyParams.blockLen = sizeof(float);
+    copyParams.blockCount = num;
+    DataCopyPad(rstdGm[outer_progress], rstdLocal, copyParams);
+    outQueueRstd.FreeTensor(rstdLocal);
+  }
+#endif
+
+ private:
+  TPipe* Ppipe = nullptr;
+  // create queues for input, in this case depth is equal to buffer num
+  TQue<QuePosition::VECIN, BUFFER_NUM> inQueueGamma;
+  TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueX;
+  // create queues for output, in this case depth is equal to buffer num
+#if __CCE_AICORE__ == 220 || \
+    (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
+  TQue<QuePosition::VECOUT, BUFFER_NUM> outQueueRstd;
+#else
+  TBuf<TPosition::VECCALC> rstdBuf;
+#endif
+  TQue<QuePosition::VECOUT, DOUBLE_BUFFER_NUM> outQueueY;
+
+  TBuf<TPosition::VECCALC> xFp32Buf;
+  TBuf<TPosition::VECCALC> sqxBuf;
+  TBuf<TPosition::VECCALC> reduceFp32Buf;
+  TBuf<TPosition::VECCALC> offsetBuf;
+  GlobalTensor<T> x1Gm;
+  GlobalTensor<T> x2Gm;
+  GlobalTensor<T> gammaGm;
+  GlobalTensor<T> yGm;
+  GlobalTensor<float> rstdGm;
+  GlobalTensor<T> xGm;
+
+  uint32_t numRow;
+  uint32_t numCol;
+  uint32_t blockFactor;  // number of calculations rows on each core
+  uint32_t rowFactor;
+  uint32_t ubFactor;
+  float epsilon;
+  float avgFactor;
+  uint32_t numColAlign;
+  int32_t blockIdx_;
+  uint32_t rowWork = 1;
+  uint32_t rowLoop = 1;
+  uint32_t rowTail = 0;
+  uint32_t addGammaOffset = 0;
+};
+#endif  // GAMMA_ADD_RMS_NORM_H_

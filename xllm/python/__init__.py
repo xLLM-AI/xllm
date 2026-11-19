@@ -65,6 +65,7 @@ def initialize_runtime() -> None:
             device="npu",
             operations=(
                 "rms_norm",
+                "fused_add_gemma_rms_norm",
                 "l2_norm",
                 "matmul_ein_sum",
                 "matmul_ein_sum_out",

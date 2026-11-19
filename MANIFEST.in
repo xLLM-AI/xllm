@@ -5,6 +5,7 @@ include .gitmodules
 recursive-include src *.*
 recursive-include xllm *.py
 recursive-include xllm-kernel *.py *.toml *.md *.cpp *.h
+recursive-include xllm-kernel/csrc/ascendc CMakeLists.txt *.cmake *.txt
 recursive-include xllm/auto_config *.json
 recursive-include examples *.py
 recursive-include third_party *
