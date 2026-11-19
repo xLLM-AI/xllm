@@ -1308,12 +1308,20 @@ folly::SemiFuture<bool> WorkerImpl::init_model_async(
   return future;
 }
 
+std::unique_ptr<ModelLoader> WorkerImpl::create_model_loader(
+    const std::string& model_weights_path) const {
+  if (options_.backend() == "vlm") {
+    return ModelLoader::create(model_weights_path, options_.backend());
+  }
+  return ModelLoader::create(model_weights_path);
+}
+
 bool WorkerImpl::virtual_memory_sleep(MasterStatus master_status) {
   // The memory for kvcache and model weights from hbm is released by the
   // virtual memory manager;
   if (master_status == MasterStatus::LIGHT_SLEEP) {
     // only load model weights to host memory.
-    auto model_loader = ModelLoader::create(model_weights_path_);
+    auto model_loader = create_model_loader(model_weights_path_);
     model()->lazy_load_model(std::move(model_loader));
   } else if (master_status == MasterStatus::DEEP_SLEEP) {
     // only release model weights from host memory.
@@ -1442,7 +1450,7 @@ bool WorkerImpl::wakeup_local(const WakeupOptions& options) {
     model()->reload_model_weights();
 
   } else if (options.master_status == MasterStatus::DEEP_SLEEP) {
-    auto model_loader = ModelLoader::create(model_weights_path_);
+    auto model_loader = create_model_loader(model_weights_path_);
     this->load_model(std::move(model_loader));
   }
   return true;
@@ -1524,7 +1532,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       master_status, [this, &model_weights_path, random_seed, master_status]() {
         ::xllm::ExecutionConfig::get_instance().random_seed(random_seed);
         device_.set_seed(random_seed);
-        auto loader = ModelLoader::create(model_weights_path);
+        auto loader = create_model_loader(model_weights_path);
         auto tokenizer = load_tokenizer(*loader);
         auto context = load_model_config(loader->model_args(),
                                          loader->quant_args(),

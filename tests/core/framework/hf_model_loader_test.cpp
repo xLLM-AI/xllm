@@ -17,15 +17,19 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_args.h"
@@ -62,6 +66,106 @@ nlohmann::json speculators_eagle3_config() {
            {"vocab_size", 151936},
        }},
   };
+}
+
+class HFModelLoaderBackendTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    original_backend_ = ModelConfig::get_instance().backend();
+    std::string directory_template =
+        (std::filesystem::temp_directory_path() / "xllm_loader_backend_XXXXXX")
+            .string();
+    ASSERT_NE(mkdtemp(directory_template.data()), nullptr);
+    model_path_ = directory_template;
+    ModelConfig::get_instance().backend(/*backend=*/"llm");
+    std::ofstream(model_path_ / "config.json") << R"json({
+      "architectures": ["Qwen3_5ForConditionalGeneration"],
+      "model_type": "qwen3_5",
+      "image_token_id": 3,
+      "video_token_id": 4,
+      "text_config": {
+        "model_type": "qwen3_5_text",
+        "hidden_size": 8,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 4,
+        "vocab_size": 32,
+        "layer_types": ["full_attention", "linear_attention"]
+      },
+      "vision_config": {
+        "model_type": "qwen3_5",
+        "depth": 2,
+        "hidden_size": 16,
+        "num_heads": 2
+      }
+    })json";
+    std::ofstream(model_path_ / "tokenizer_config.json") << "{}";
+    // These tests inspect metadata; tensor payloads are not loaded.
+    std::ofstream(model_path_ / "model.safetensors");
+  }
+
+  void TearDown() override {
+    ModelConfig::get_instance().backend(original_backend_);
+    std::error_code error;
+    std::filesystem::remove_all(model_path_, error);
+    EXPECT_FALSE(error) << error.message();
+  }
+
+  std::filesystem::path model_path_;
+  std::string original_backend_;
+};
+
+TEST_F(HFModelLoaderBackendTest,
+       ExplicitVlmLoaderPreservesVisionConfiguration) {
+  auto loader = ModelLoader::create(model_path_.string(), /*backend=*/"vlm");
+
+  EXPECT_EQ(loader->model_args().model_type(), "qwen3_5");
+  EXPECT_EQ(loader->model_args().mm_hidden_size(), 16);
+  EXPECT_EQ(loader->model_args().mm_num_hidden_layers(), 2);
+  EXPECT_EQ(loader->model_args().image_token_id(), 3);
+  EXPECT_EQ(ModelConfig::get_instance().backend(), "llm");
+}
+
+TEST_F(HFModelLoaderBackendTest, ExplicitVlmAndLegacyTextLoadersCanCoexist) {
+  auto visual = ModelLoader::create(model_path_.string(), /*backend=*/"vlm");
+  auto text = ModelLoader::create(model_path_.string());
+  HFModelLoader direct_visual(model_path_.string(), /*backend=*/"vlm");
+  HFModelLoader direct_text(model_path_.string());
+
+  EXPECT_EQ(visual->model_args().model_type(), "qwen3_5");
+  EXPECT_EQ(text->model_args().model_type(), "qwen3_5_text");
+  EXPECT_EQ(direct_visual.model_args().model_type(), "qwen3_5");
+  EXPECT_EQ(direct_text.model_args().model_type(), "qwen3_5_text");
+  EXPECT_EQ(text->model_args().mm_hidden_size(), 0);
+  EXPECT_EQ(ModelConfig::get_instance().backend(), "llm");
+}
+
+TEST_F(HFModelLoaderBackendTest, LegacyLoaderRetainsConfiguredBackend) {
+  ModelConfig::get_instance().backend(/*backend=*/"vlm");
+  auto visual = ModelLoader::create(model_path_.string());
+  auto text = ModelLoader::create(model_path_.string(), /*backend=*/"llm");
+
+  EXPECT_EQ(visual->model_args().model_type(), "qwen3_5");
+  EXPECT_EQ(text->model_args().model_type(), "qwen3_5_text");
+  EXPECT_EQ(ModelConfig::get_instance().backend(), "vlm");
+}
+
+TEST_F(HFModelLoaderBackendTest, VlmBackendKeepsTextOnlyCheckpointTextOnly) {
+  std::ofstream(model_path_ / "config.json") << R"json({
+    "architectures": ["Qwen3_5ForCausalLM"],
+    "model_type": "qwen3_5_text",
+    "hidden_size": 8,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "head_dim": 4,
+    "vocab_size": 32
+  })json";
+  auto loader = ModelLoader::create(model_path_.string(), /*backend=*/"vlm");
+
+  EXPECT_EQ(loader->model_args().model_type(), "qwen3_5_text");
+  EXPECT_EQ(loader->model_args().mm_hidden_size(), 0);
 }
 
 }  // namespace

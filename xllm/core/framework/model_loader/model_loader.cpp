@@ -23,15 +23,22 @@ limitations under the License.
 
 #include <boost/algorithm/string.hpp>
 #include <filesystem>
+#include <utility>
 #include <vector>
 
+#include "core/framework/config/model_config.h"
 #include "core/framework/model_loader/hf_model_loader.h"
 
 namespace xllm {
 
 std::unique_ptr<ModelLoader> ModelLoader::create(
     const std::string& model_weights_path) {
-  ModelType model_type;
+  return create(model_weights_path, ModelConfig::get_instance().backend());
+}
+
+std::unique_ptr<ModelLoader> ModelLoader::create(std::string model_weights_path,
+                                                 const std::string& backend) {
+  ModelType model_type = ModelType::INVALID;
   for (const auto& entry :
        std::filesystem::directory_iterator(model_weights_path)) {
     if (entry.path().extension() == ".safetensors" ||
@@ -42,7 +49,8 @@ std::unique_ptr<ModelLoader> ModelLoader::create(
   }
 
   if (model_type == ModelType::HF_MODEL_TYPE) {
-    return std::make_unique<HFModelLoader>(model_weights_path);
+    return std::make_unique<HFModelLoader>(std::move(model_weights_path),
+                                           backend);
   } else {
     LOG(FATAL) << "Only support HF model type currently.";
   }

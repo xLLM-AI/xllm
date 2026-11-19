@@ -207,7 +207,7 @@ bool VLMEngine::init(
 bool VLMEngine::init_model(MasterStatus master_status,
                            const ModelInitCallback& prepare_model) {
   const std::string& model_path = options_.model_path();
-  auto model_loader = ModelLoader::create(model_path);
+  auto model_loader = ModelLoader::create(model_path, options_.backend());
   LOG(INFO) << "Initializing model from: " << model_path;
 
   tokenizer_ = model_loader->tokenizer();

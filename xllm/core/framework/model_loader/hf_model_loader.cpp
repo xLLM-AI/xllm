@@ -34,6 +34,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "core/common/types.h"
@@ -213,20 +214,25 @@ void check_safetensors_cleanup(::Status status,
 
 }  // namespace
 
-HFModelLoader::HFModelLoader(const std::string& model_weights_path)
-    : model_weights_path_(model_weights_path) {
-  CHECK(load_args(model_weights_path))
-      << "Failed to load model args from " << model_weights_path;
+HFModelLoader::HFModelLoader(std::string model_weights_path)
+    : HFModelLoader(std::move(model_weights_path),
+                    ModelConfig::get_instance().backend()) {}
+
+HFModelLoader::HFModelLoader(std::string model_weights_path,
+                             const std::string& backend)
+    : model_weights_path_(std::move(model_weights_path)) {
+  CHECK(load_args(model_weights_path_, backend))
+      << "Failed to load model args from " << model_weights_path_;
   // try to load safetensors first
   for (const auto& entry :
-       std::filesystem::directory_iterator(model_weights_path)) {
+       std::filesystem::directory_iterator(model_weights_path_)) {
     // load bin or safe tensors
     if (entry.path().extension() == ".safetensors") {
       model_weights_files_.push_back(entry.path().string());
     }
   }
   CHECK(!model_weights_files_.empty())
-      << "Failed to find model weights files in " << model_weights_path;
+      << "Failed to find model weights files in " << model_weights_path_;
   // sort the model weights files by name
   std::sort(model_weights_files_.begin(), model_weights_files_.end());
 
@@ -462,9 +468,9 @@ int64_t HFModelLoader::get_max_decoder_layer_weight_size() const {
   return max_layer_size;
 }
 
-bool HFModelLoader::load_args(const std::string& model_weights_path) {
-  if (!load_hf_model_args(
-          model_weights_path, ModelConfig::get_instance().backend(), &args_)) {
+bool HFModelLoader::load_args(const std::string& model_weights_path,
+                              const std::string& backend) {
+  if (!load_hf_model_args(model_weights_path, backend, &args_)) {
     LOG(ERROR) << "Failed to load model args from " << model_weights_path;
     return false;
   }
