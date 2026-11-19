@@ -136,11 +136,10 @@ _EXPORTS = {
     ),
     "dsa": (
         "compressor",
-        "hc_post",
-        "hc_pre",
         "sparse_attn_sharedkv",
         "sparse_attn_sharedkv_metadata",
     ),
+    "hyper_connection": ("hc_pre", "hc_post"),
 }
 
 __all__ = [

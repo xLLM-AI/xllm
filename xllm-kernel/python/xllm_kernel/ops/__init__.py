@@ -11,6 +11,7 @@ from xllm_kernel.ops.attention.gdn import (
 from xllm_kernel.ops.attention.kda import causal_conv1d_update_v2
 from xllm_kernel.ops.attention.mla import mla_preprocess_v2
 from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out, quant_matmul_out
+from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
 from xllm_kernel.ops.kv_cache import reshape_paged_cache
 from xllm_kernel.ops.normalization import (
     fused_add_gemma_rms_norm,
@@ -30,6 +31,8 @@ __all__ = [
     "fused_qkvzba_split_reshape_cat",
     "fused_recurrent_gated_delta_rule",
     "fused_sigmoid_gating_delta_rule_update",
+    "hc_post",
+    "hc_pre",
     "inplace_partial_rotary_mul",
     "l2_norm",
     "layer_norm",

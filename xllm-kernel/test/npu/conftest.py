@@ -19,6 +19,8 @@ def _prepare_kernels() -> None:
             "rms_norm_gated",
             "inplace_partial_rotary_mul",
             "rms_norm_dynamic_quant",
+            "hc_pre",
+            "hc_post",
             "fused_recurrent_gated_delta_rule",
             "fused_sigmoid_gating_delta_rule_update",
             "fused_qkvzba_split_reshape_cat",

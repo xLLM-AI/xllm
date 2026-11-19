@@ -16,41 +16,13 @@
 
 These wrap the AscendC operators registered as ``torch.ops.xllm_ops.*`` by
 ``core/kernels/npu/npu_ops_library.cpp``. They drive the two-stage sparse
-attention (original + compressed KV), the KV compressor, the quantized
-lightning indexer, and the HyperConnection pre/post used by DeepSeek-V4's DSA
-attention path.
+attention (original + compressed KV), the KV compressor, and the quantized
+lightning indexer.
 """
 
 from __future__ import annotations
 
 import torch
-
-
-def hc_pre(
-    x: torch.Tensor,
-    hc_fn: torch.Tensor,
-    hc_scale: torch.Tensor,
-    hc_base: torch.Tensor,
-    hc_mult: int,
-    hc_sinkhorn_iters: int,
-    norm_eps: float,
-    hc_eps: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """HyperConnection pre: mix hc_mult streams into one sub-block input.
-
-    Returns ``(attn_input, post, comb)`` where post/comb feed ``hc_post``.
-    """
-    return torch.ops.xllm_ops.hc_pre(x, hc_fn, hc_scale, hc_base, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps)
-
-
-def hc_post(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    post: torch.Tensor,
-    comb: torch.Tensor,
-) -> torch.Tensor:
-    """HyperConnection post: combine sub-block output with the residual streams."""
-    return torch.ops.xllm_ops.hc_post(x, residual, post, comb)
 
 
 def compressor(

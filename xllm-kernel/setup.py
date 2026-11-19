@@ -84,6 +84,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/atb/matmul_ein_sum.cpp",
                 "csrc/atb/reshape_paged_cache.cpp",
                 "csrc/npu/gamma_add_rms_norm.cpp",
+                "csrc/npu/hyper_connection.cpp",
                 "csrc/npu/inplace_partial_rotary_mul.cpp",
                 "csrc/npu/mla_preprocess_v2.cpp",
                 "csrc/npu/normalization.cpp",

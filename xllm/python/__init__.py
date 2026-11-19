@@ -70,6 +70,8 @@ def initialize_runtime() -> None:
                 "fused_add_gemma_rms_norm",
                 "rms_norm_gated",
                 "rms_norm_dynamic_quant",
+                "hc_pre",
+                "hc_post",
                 "l2_norm",
                 "matmul_ein_sum",
                 "matmul_ein_sum_out",
