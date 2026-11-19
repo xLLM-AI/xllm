@@ -13,7 +13,7 @@ title: "代码架构与请求流程"
 | 1 | [`xllm/xllm.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/xllm.cpp)：`main()`、`run()` | 配置、master 和 HTTP 服务如何连接起来？ |
 | 2 | [`chat_service_impl.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/api_service/chat_service_impl.cpp)：`ChatServiceImpl::process_async_impl()` | 聊天消息如何转换为内部请求，并绑定输出回调？ |
 | 3 | [`llm_master.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/distributed_runtime/llm_master.cpp)：`LLMMaster::handle_request()`、`run()` | 请求如何进入调度器？谁在驱动调度循环？ |
-| 4 | [`continuous_scheduler.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/scheduler/continuous_scheduler.cpp)：`ContinuousSchedulerBase::step()` | 一轮批次如何被调度、执行并处理结果？ |
+| 4 | [`continuous_scheduler.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/scheduler/continuous_scheduler.cpp)：`ContinuousScheduler::step()` | 一轮批次如何被调度、执行并处理结果？ |
 | 5 | [`llm_engine.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/distributed_runtime/llm_engine.cpp)：`LLMEngine::step()` | 批次如何发送到各个 worker，执行结果如何汇总？ |
 | 6 | [`llm_worker_impl.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/runtime/llm_worker_impl.cpp)：`LLMWorkerImpl::step_internal()` | 模型执行、logits 计算和 token 采样发生在哪里？ |
 
@@ -322,7 +322,7 @@ POST /v1/chat/completions
   -> HTTP route / APIService / ChatServiceImpl
   -> LLMMaster / LLMRequestFactory
        messages -> chat template -> prompt -> token IDs -> Request
-  -> ContinuousSchedulerBase / SchedulerPolicy
+  -> ContinuousScheduler / SchedulerCallbacks
        choose sequences and token budgets -> BatchGroup
   -> LLMEngine
        build inputs -> dispatch to worker ranks
@@ -345,7 +345,7 @@ POST /v1/chat/completions
    应用聊天模板，对提示词分词并校验，创建请求和序列状态。随后 master 调用
    `scheduler_->add_request()` 将请求加入调度器。
 
-3. **选择下一轮执行的工作。** `ContinuousSchedulerBase` 管理请求队列和执行循环。
+3. **选择下一轮执行的工作。** `ContinuousScheduler` 管理请求队列和执行循环。
    [`scheduler_policy.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/scheduler/scheduler_policy.cpp)
    中的 `PrefillFirstPolicy`、`DecodeFirstPolicy` 和 `UnifiedPolicy` 负责组批，
    考虑 token/序列预算与缓存容量。想了解哪些请求会一起执行，应继续阅读策略文件；

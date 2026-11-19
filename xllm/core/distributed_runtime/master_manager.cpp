@@ -409,12 +409,7 @@ bool MasterManager::start_profile(std::string* error_message) {
     return false;
   }
 
-  bool started = false;
-  if (auto* llm_master = dynamic_cast<LLMMaster*>(master.get())) {
-    started = llm_master->start_profile();
-  } else if (auto* vlm_master = dynamic_cast<VLMMaster*>(master.get())) {
-    started = vlm_master->start_profile();
-  }
+  const bool started = master->start_profile();
   if (!started && error_message != nullptr) {
     *error_message = "Failed to start profiler";
   }
@@ -431,12 +426,7 @@ bool MasterManager::stop_profile(std::string* error_message) {
     return false;
   }
 
-  bool stopped = false;
-  if (auto* llm_master = dynamic_cast<LLMMaster*>(master.get())) {
-    stopped = llm_master->stop_profile();
-  } else if (auto* vlm_master = dynamic_cast<VLMMaster*>(master.get())) {
-    stopped = vlm_master->stop_profile();
-  }
+  const bool stopped = master->stop_profile();
   if (!stopped && error_message != nullptr) {
     *error_message = "Failed to stop profiler";
   }

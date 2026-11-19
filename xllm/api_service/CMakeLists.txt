@@ -63,7 +63,6 @@ cc_library(
     non_stream_call.h
     multipart_form_data.h
     service_impl_factory.h
-    serving_mode.h
     stream_call.h
     models_service_impl.h
     mm_service_utils.h

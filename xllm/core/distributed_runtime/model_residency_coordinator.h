@@ -68,6 +68,8 @@ class ModelResidencyCoordinator final {
   // This query does not wait for an in-progress allocator transition.
   bool is_suspended() const;
 
+  bool enabled() const { return options_.enabled; }
+
  private:
   struct PendingSleep {
     MasterStatus master_status;

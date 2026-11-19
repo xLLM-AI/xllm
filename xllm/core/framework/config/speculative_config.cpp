@@ -109,6 +109,10 @@ void SpeculativeConfig::validate() const {
         << " does not support enable_probabilistic_draft. Supported: MTP, "
            "DSpark, DFlash2, Eagle3.";
   }
+  if (!draft_model().empty()) {
+    CHECK_GT(num_speculative_tokens(), 0)
+        << "speculative tokens should not be zero";
+  }
 }
 
 }  // namespace xllm

@@ -15,16 +15,27 @@ limitations under the License.
 
 #pragma once
 
+#include <functional>
+
+#include "core/framework/batch/batch_group.h"
+
 namespace xllm {
 
-template <typename Function, typename Engine, typename OtherEngine>
-decltype(auto) dispatch_engine(const Function& function,
-                               Engine* engine,
-                               OtherEngine* other_engine) {
-  if (engine != nullptr) {
-    return function(engine);
-  }
-  return function(other_engine);
+using StepCallback = std::function<ForwardOutput(BatchGroup&)>;
+
+struct SchedulerCallbacks {
+  StepCallback step;
+  std::function<void(BatchGroup&)> update_last_step_result;
+};
+
+// The engine must outlive the scheduler.
+template <typename EngineT>
+SchedulerCallbacks make_scheduler_callbacks(EngineT* engine) {
+  return {[engine](BatchGroup& batch) { return engine->step(batch); },
+          [engine](BatchGroup& batch) {
+            batch.apply_outputs(engine->collect_step_outputs(batch),
+                                BatchOutputAction::COMMIT_PENDING);
+          }};
 }
 
 }  // namespace xllm

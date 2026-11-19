@@ -1215,4 +1215,67 @@ KVCacheCapacity estimate_kv_cache_capacity(
   return kv_cache_cap;
 }
 
+KVCacheCapacity combine_target_and_draft_kv_cache_capacity(
+    const KVCacheCapacity& target_cap,
+    const ModelArgs& target_args,
+    const ModelArgs& draft_args,
+    const KVCacheCapacity& draft_cap) {
+  CHECK_GT(target_cap.cache_size_in_bytes(), 0)
+      << "no memory for target kv cache";
+  CHECK_GT(draft_cap.cache_size_in_bytes(), 0)
+      << "no memory for draft kv cache";
+  CHECK_EQ(target_cap.block_size(), draft_cap.block_size())
+      << "target and draft kv cache block size must be the same";
+  CHECK_GT(target_cap.block_size(), 0)
+      << "kv cache block size must be greater than 0";
+
+  const int64_t cache_size_in_bytes = std::min(target_cap.cache_size_in_bytes(),
+                                               draft_cap.cache_size_in_bytes());
+
+  int64_t n_blocks = 0;
+  if (target_cap.kpool_tail_slot_size() > 0 &&
+      draft_cap.kpool_tail_slot_size() > 0) {
+    const SharedKPoolPlan plan =
+        plan_shared_kpool(target_cap, draft_cap, draft_args);
+    n_blocks = plan.target.n_blocks();
+  } else {
+    const int64_t linear_cache_size_in_bytes =
+        target_cap.linear_cache_size_in_bytes() +
+        draft_cap.linear_cache_size_in_bytes();
+    CHECK_GT(cache_size_in_bytes, linear_cache_size_in_bytes)
+        << "no memory left for speculative full-attention kv cache after "
+           "reserving target and draft state caches, cache_size: "
+        << cache_size_in_bytes
+        << ", linear_cache_size: " << linear_cache_size_in_bytes;
+
+    // The draft KV cache is allocated from the draft's own KVCacheShape, so
+    // its per-block cost uses the draft's own slot size, which may exceed the
+    // target's (e.g. a full-attention draft against an MLA target).
+    const int64_t draft_full_attention_block_size_in_bytes =
+        standard_full_cache_block_size_in_bytes(draft_cap);
+    const int32_t layerwise_split_size =
+        ParallelConfig::get_instance().layerwise_split_size();
+    if (layerwise_split_size > 1) {
+      n_blocks = estimate_layerwise_split_block_count(
+          target_args,
+          layerwise_split_size,
+          target_cap,
+          cache_size_in_bytes - linear_cache_size_in_bytes,
+          draft_full_attention_block_size_in_bytes);
+    } else {
+      const int64_t full_attention_block_size_in_bytes =
+          standard_full_cache_block_size_in_bytes(target_cap) +
+          draft_full_attention_block_size_in_bytes;
+      n_blocks = (cache_size_in_bytes - linear_cache_size_in_bytes) /
+                 full_attention_block_size_in_bytes;
+    }
+  }
+  CHECK_GT(n_blocks, 0) << "no memory for kv cache";
+
+  KVCacheCapacity combined = target_cap;
+  combined.n_blocks() = n_blocks;
+  combined.cache_size_in_bytes() = cache_size_in_bytes;
+  return combined;
+}
+
 }  // namespace xllm

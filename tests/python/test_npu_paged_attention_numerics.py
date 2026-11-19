@@ -1124,7 +1124,7 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(
         device,
         rows,
         capacity,
-        is_spec_draft=True,
+        is_draft_engine=True,
         enable_graph_mode_decode_no_padding=True,
         device_kv_lengths=True,
     )
