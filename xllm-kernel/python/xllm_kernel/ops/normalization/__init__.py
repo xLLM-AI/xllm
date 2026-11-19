@@ -16,6 +16,8 @@ FUSED_ADD_RMS_NORM_CONTRACT = OpContract("fused_add_rms_norm", 1, (), False, "fp
 FUSED_ADD_GEMMA_RMS_NORM_CONTRACT = OpContract(
     "fused_add_gemma_rms_norm", 1, (), False, "fp32_residual_gemma_norm_cast"
 )
+RMS_NORM_GATED_CONTRACT = OpContract("rms_norm_gated", 1, (), False, "fp32_rms_norm_silu_gate")
+RMS_NORM_DYNAMIC_QUANT_CONTRACT = OpContract("rms_norm_dynamic_quant", 1, (), False, "rms_norm_per_row_int8_quant")
 LAYER_NORM_CONTRACT = OpContract("layer_norm", 1, (), False, "fp32_norm_cast")
 RMS_NORM_CONTRACT = OpContract("rms_norm", 1, (), False, "fp32_norm_cast")
 L2_NORM_CONTRACT = OpContract("l2_norm", 1, (), False, "fp32_sum_squares_eps_rsqrt_cast")
@@ -78,9 +80,36 @@ FUSED_ADD_GEMMA_RMS_NORM_OPERATION = Operation(
     ),
 )
 
+
+RMS_NORM_GATED_OPERATION = Operation(
+    RMS_NORM_GATED_CONTRACT,
+    (
+        BackendModule(
+            module="xllm_kernel.ops.normalization.ascendc",
+            platform=PlatformEnum.NPU,
+            requires=("torch_npu",),
+            implementations=("npu.ascendc.rms_norm_gated",),
+        ),
+    ),
+)
+
+RMS_NORM_DYNAMIC_QUANT_OPERATION = Operation(
+    RMS_NORM_DYNAMIC_QUANT_CONTRACT,
+    (
+        BackendModule(
+            module="xllm_kernel.ops.normalization.ascendc",
+            platform=PlatformEnum.NPU,
+            requires=("torch_npu",),
+            implementations=("npu.ascendc.rms_norm_dynamic_quant",),
+        ),
+    ),
+)
+
 OPERATIONS = (
     FUSED_ADD_RMS_NORM_OPERATION,
     FUSED_ADD_GEMMA_RMS_NORM_OPERATION,
+    RMS_NORM_GATED_OPERATION,
+    RMS_NORM_DYNAMIC_QUANT_OPERATION,
     LAYER_NORM_OPERATION,
     RMS_NORM_OPERATION,
     L2_NORM_OPERATION,
@@ -129,3 +158,17 @@ def layer_norm(value: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, ep
 def rms_norm(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """Normalize without mutation or aliasing using the startup binding."""
     return RMS_NORM_OPERATION.get_prepared().function(input, weight, eps)
+
+
+def rms_norm_gated(value: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Apply last-dimension RMSNorm and multiply by SiLU of the matching gate."""
+    return RMS_NORM_GATED_OPERATION.get_prepared().function(value, gate, weight, eps)
+
+
+def rms_norm_dynamic_quant(input: torch.Tensor, weight: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return fresh INT8 values and FP32 scales with one scale per leading index.
+
+    RMSNorm uses a 1D weight over the last dimension of the FP16 or BF16
+    input. Quantization is symmetric and reduces over that same dimension.
+    """
+    return RMS_NORM_DYNAMIC_QUANT_OPERATION.get_prepared().function(input, weight, eps)

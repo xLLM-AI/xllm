@@ -1,0 +1,9 @@
+LayerNormFwd AscendC implementation
+
+Source: https://gitcode.com/xLLM-AI/xllm_ops
+Revision: 8bd2b014c38fec33ecf14dd33e05e8ad792ec5c8
+Directory: xllm_ops/layer_norm_fwd
+
+The package uses a private CANN operator type so the legacy and system
+providers can coexist. The ACLNN API and operator proto are generated
+from the package definition. Imported sources retain their notices.

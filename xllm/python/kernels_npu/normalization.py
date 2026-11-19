@@ -18,7 +18,12 @@ from __future__ import annotations
 
 import torch
 import torch_npu
-from xllm_kernel.ops import fused_add_gemma_rms_norm, rms_norm
+from xllm_kernel.ops import (
+    fused_add_gemma_rms_norm,
+    rms_norm,
+    rms_norm_dynamic_quant,
+    rms_norm_gated,
+)
 
 fused_add_rms_norm = torch.ops.xllm_ops.fused_add_rms_norm
 _FUSED_ADD_RMS_NORM_DYNAMIC_QUANT = torch_npu.npu_add_rms_norm_dynamic_quant
@@ -49,29 +54,6 @@ def fused_add_rms_norm_dynamic_quant(
         output_mask=[True, False],
     )
     return outputs[0], outputs[3], outputs[2]
-
-
-rms_norm_dynamic_quant = torch.ops.xllm_ops.rms_norm_dynamic_quant
-
-
-def rms_norm_gated(
-    value: torch.Tensor,
-    gate: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    """Apply RMSNorm to ``value`` and gate the result with ``silu(gate)``.
-
-    Args:
-        value: Tensor to normalize.
-        gate: Gate applied after normalization (SiLU is applied internally).
-        weight: RMSNorm weight over the last dimension.
-        eps: RMSNorm epsilon.
-
-    Returns:
-        A tensor with the shape and dtype of ``value``.
-    """
-    return torch.ops.xllm_ops.rms_norm_gated(value, gate, weight, eps)
 
 
 def rms_norm_sigmoid_gated(

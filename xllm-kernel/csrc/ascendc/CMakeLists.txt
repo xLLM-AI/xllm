@@ -1,0 +1,69 @@
+# Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
+cmake_minimum_required(VERSION 3.19)
+project(xllm_kernel_ascendc LANGUAGES CXX)
+find_package(ASC REQUIRED HINTS "${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake")
+
+set(vendor xllm_kernel)
+set(CMAKE_SKIP_RPATH ON)
+set(ENABLE_SOURCE_PACKAGE OFF)
+npu_op_package(${vendor} TYPE RUN CONFIG INSTALL_PATH "${CMAKE_BINARY_DIR}")
+
+set(gamma_host "${CMAKE_CURRENT_SOURCE_DIR}/gamma_add_rms_norm/op_host")
+set(layer_norm_host "${CMAKE_CURRENT_SOURCE_DIR}/layer_norm_fwd/op_host")
+set(quant_host "${CMAKE_CURRENT_SOURCE_DIR}/rms_norm_dynamic_quant/op_host")
+set(op_definitions
+    "${gamma_host}/gamma_add_rms_norm_def.cpp"
+    "${layer_norm_host}/layer_norm_fwd_def.cpp"
+    "${quant_host}/rms_norm_dynamic_quant_def.cpp"
+)
+npu_op_code_gen(
+    SRC ${op_definitions}
+    PACKAGE ${vendor}
+    OUT_DIR "${ASCEND_AUTOGEN_PATH}"
+)
+npu_op_library(cust_opapi ACLNN
+    "${gamma_host}/op_api/aclnn_gamma_add_rms_norm.cpp"
+    "${gamma_host}/op_api/gamma_add_rms_norm.cpp"
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_layer_norm_fwd.cpp"
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_rms_norm_dynamic_quant.cpp"
+)
+target_include_directories(cust_opapi PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/include/aclnn")
+target_link_libraries(cust_opapi PRIVATE
+    "${ASCEND_CANN_PACKAGE_PATH}/lib64/libopapi.so"
+    "${ASCEND_CANN_PACKAGE_PATH}/lib64/libnnopbase.so"
+)
+
+set(generated_proto "${ASCEND_AUTOGEN_PATH}/op_proto.cc")
+file(GLOB generated_fallback CONFIGURE_DEPENDS "${ASCEND_AUTOGEN_PATH}/fallback_*.cpp")
+npu_op_library(cust_op_proto GRAPH ${generated_proto})
+npu_op_library(cust_optiling TILING
+    ${op_definitions}
+    "${gamma_host}/gamma_add_rms_norm_infershape.cpp"
+    "${gamma_host}/gamma_add_rms_norm_tiling.cpp"
+    "${gamma_host}/gamma_add_rms_norm_tiling_arch35.cpp"
+    "${gamma_host}/tiling_util.cpp"
+    "${layer_norm_host}/layer_norm_fwd_proto.cpp"
+    "${layer_norm_host}/layer_norm_fwd_tiling.cpp"
+    "${quant_host}/rms_norm_dynamic_quant_tiling.cpp"
+    ${generated_fallback}
+)
+foreach(target cust_optiling cust_op_proto)
+    target_include_directories(${target} PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/include/op_common")
+    target_link_libraries(${target} PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/lib64/libops_base.so")
+endforeach()
+
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelGammaAddRmsNorm
+    KERNEL_DIR gamma_add_rms_norm/op_kernel KERNEL_FILE xllm_kernel_gamma_add_rms_norm.cpp)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelLayerNormFwd
+    KERNEL_DIR layer_norm_fwd/op_kernel KERNEL_FILE xllm_kernel_layer_norm_fwd.cpp)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelRmsNormDynamicQuant
+    KERNEL_DIR rms_norm_dynamic_quant/op_kernel KERNEL_FILE xllm_kernel_rms_norm_dynamic_quant.cpp)
+npu_op_kernel_options(ascendc_kernels XllmKernelGammaAddRmsNorm
+    OPTIONS --cce-auto-sync=off "-I${CMAKE_CURRENT_SOURCE_DIR}")
+npu_op_kernel_options(ascendc_kernels XllmKernelLayerNormFwd
+    OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error)
+npu_op_kernel_options(ascendc_kernels XllmKernelRmsNormDynamicQuant
+    OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Werror
+    -mllvm -cce-aicore-hoist-movemask=false --op_relocatable_kernel_binary=true)
+npu_op_kernel_library(ascendc_kernels SRC_BASE "${CMAKE_CURRENT_SOURCE_DIR}" TILING_LIBRARY cust_optiling)
+npu_op_package_add(${vendor} LIBRARY cust_opapi cust_op_proto cust_optiling ascendc_kernels)
