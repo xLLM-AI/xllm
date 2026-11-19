@@ -101,7 +101,7 @@ class KVCache final {
   [[nodiscard]] KVCache create_shared_view() const;
 
   std::shared_ptr<KVCacheImpl> impl_;
-  std::shared_ptr<const StaticKVCacheLayout> static_layout_;
+  std::shared_ptr<const StaticKVLayout> static_layout_;
   std::shared_ptr<LinearStateSlotTable> linear_state_slots_;
   std::shared_ptr<LinearStateSlotTable> full_block_slots_;
   size_t linear_group_ = 0;

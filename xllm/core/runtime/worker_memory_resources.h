@@ -30,7 +30,7 @@ limitations under the License.
 
 #include "core/common/types.h"
 #include "core/framework/model_loader/weight/weight_virtual_memory_manager.h"
-#include "core/kv_cache/storage/virtual_kv_cache_memory_registry.h"
+#include "core/kv_cache/storage/virtual_kv_memory_registry.h"
 
 namespace xllm {
 
@@ -81,7 +81,7 @@ class WorkerMemoryResources final {
   bool abort_weight_pages(uint64_t transaction_id);
   bool is_initialized() const { return initialized_; }
   const torch::Device& device() const { return device_; }
-  VirtualKVCacheMemoryRegistry& kv_cache_memory() { return kv_cache_memory_; }
+  VirtualKVMemoryRegistry& kv_cache_memory() { return kv_cache_memory_; }
 
   std::vector<torch::Tensor> create_k_tensors(const std::string& model_id,
                                               const std::vector<int64_t>& dims,
@@ -100,7 +100,7 @@ class WorkerMemoryResources final {
   bool allocate_weight(const std::string& model_id, void*& ptr, size_t size);
   size_t free_weight(const std::string& model_id);
 
-  std::optional<VirtualKVCacheBlockGlobalOffsets> get_global_offsets_for_block(
+  std::optional<VirtualKVBlockGlobalOffsets> get_global_offsets_for_block(
       const std::string& model_id,
       int64_t layer_id,
       int64_t block_id);
@@ -157,7 +157,7 @@ class WorkerMemoryResources final {
   torch::Device device_{torch::kCPU};
   mutable std::mutex mutex_;
   std::condition_variable pool_ready_cv_;
-  VirtualKVCacheMemoryRegistry kv_cache_memory_;
+  VirtualKVMemoryRegistry kv_cache_memory_;
   WeightVirtualMemoryManager weight_memory_;
 };
 

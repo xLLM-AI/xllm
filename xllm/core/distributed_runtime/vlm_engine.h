@@ -37,8 +37,8 @@ namespace xllm {
 
 class ModelLoader;
 
-class VmmKVCacheLayout;
-class KVCacheTransferCoordinatorBase;
+class VmmKVLayout;
+class KVTransferCoordinatorBase;
 
 class VLMEngine : public Engine {
  public:
@@ -62,13 +62,11 @@ class VLMEngine : public Engine {
   }
 
   bool init(MasterStatus master_status) override;
-  bool init(
-      MasterStatus master_status,
-      std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator);
-  bool init(
-      MasterStatus master_status,
-      const ModelInitCallback& prepare_model,
-      std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator);
+  bool init(MasterStatus master_status,
+            std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator);
+  bool init(MasterStatus master_status,
+            const ModelInitCallback& prepare_model,
+            std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator);
 
   bool start_profile() override;
   bool stop_profile() override;
@@ -83,8 +81,8 @@ class VLMEngine : public Engine {
   KVCacheCapacity estimate_kv_cache_capacity(
       bool initialize_virtual_memory = true);
   bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap,
-                         const VmmKVCacheLayout* shared_vmm_layout = nullptr,
-                         std::shared_ptr<KVCacheTransferCoordinatorBase>
+                         const VmmKVLayout* shared_vmm_layout = nullptr,
+                         std::shared_ptr<KVTransferCoordinatorBase>
                              transfer_coordinator = nullptr);
   void setup_workers(const runtime::Options& options);
   void process_group_test();

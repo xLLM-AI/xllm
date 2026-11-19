@@ -179,7 +179,7 @@ void PDServiceImpl::release_reservation(
                            : proto::ReleaseReservationResponse::NOT_WAITING);
 }
 
-bool PDServiceImpl::append_virtual_kv_cache_offsets(
+bool PDServiceImpl::append_virtual_kv_offsets(
     int32_t dp_rank,
     const std::string& request_id,
     const std::vector<int32_t>& block_ids,
@@ -192,7 +192,7 @@ bool PDServiceImpl::append_virtual_kv_cache_offsets(
   std::vector<VirtualKVCacheLayerGlobalOffsets> layer_offsets;
   const auto& block_options = block_manager_->options();
   const bool offsets_available =
-      DistributedVmmCoordinator::get_instance().get_virtual_kv_cache_offsets(
+      DistributedVmmCoordinator::get_instance().get_virtual_kv_offsets(
           dp_rank, block_options.model_id(), block_ids, layer_offsets);
   if (!offsets_available) {
     LOG(ERROR) << "Failed to get VirtualMemory offsets for request "
@@ -275,10 +275,10 @@ void PDServiceImpl::decode_recv_new_requests(
                 block_manager_->options().enable_vmm_kvcache()
             ? &virtual_memory_block_ids
             : nullptr);
-    if (!append_virtual_kv_cache_offsets(sequence->dp_rank(),
-                                         req.req_id(),
-                                         virtual_memory_block_ids,
-                                         resp)) {
+    if (!append_virtual_kv_offsets(sequence->dp_rank(),
+                                   req.req_id(),
+                                   virtual_memory_block_ids,
+                                   resp)) {
       scheduler_->release_request_blocks(std::move(new_request),
                                          /*cache_prefix=*/false);
       resp->clear_groups();

@@ -33,10 +33,10 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
-#include "core/kv_cache/storage/kv_cache_tensor_allocator.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/kv_cache/storage/kv_tensor_allocator.h"
 #include "core/kv_cache/storage/linear_state_slot_table.h"
-#include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
+#include "core/kv_cache/storage/static_kv_tensor_allocator.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "tests/core/kv_cache/dcp_indexer_test_fixture.h"
@@ -108,9 +108,9 @@ void ExpectTensorGroup(const KVCache& cache,
       << "role=" << role.to_string();
 }
 
-class RecordingKVCacheTensorAllocator final : public KVCacheTensorAllocator {
+class RecordingKVTensorAllocator final : public KVTensorAllocator {
  public:
-  explicit RecordingKVCacheTensorAllocator(
+  explicit RecordingKVTensorAllocator(
       bool fill_index_scale_with_nonzero = false,
       bool fill_index_cache_with_nonzero = false)
       : fill_index_scale_with_nonzero_(fill_index_scale_with_nonzero),
@@ -164,7 +164,7 @@ void expect_virtual_hybrid_cache(const torch::Device& device) {
       .linear_value_head_dim(8)
       .linear_conv_kernel_dim(3);
   const KVCacheShape shape(capacity, args, /*world_size=*/1);
-  auto allocator = std::make_shared<RecordingKVCacheTensorAllocator>();
+  auto allocator = std::make_shared<RecordingKVTensorAllocator>();
   KVCacheCreateOptions options;
   options.device(device)
       .dtype(torch::kBFloat16)
@@ -255,20 +255,20 @@ void ExpectMluCompressedStateLayout(const std::vector<KVCache>& caches,
 
 }  // namespace
 
-TEST(Dsv4StateCacheTest, SplitStateReturnsInputViews) {
+TEST(DeepSeekV4StateCacheTest, SplitStateReturnsInputViews) {
   torch::Tensor kv = torch::tensor({{{1.0F}}, {{2.0F}}, {{3.0F}}});
   torch::Tensor score = torch::tensor({{{4.0F}}, {{5.0F}}, {{6.0F}}});
-  Dsv4StateCache state = Dsv4StateCache::from_split(kv, score);
+  DeepSeekV4StateCache state = DeepSeekV4StateCache::from_split(kv, score);
 
   EXPECT_EQ(state.kv().data_ptr(), kv.data_ptr());
   EXPECT_EQ(state.score().data_ptr(), score.data_ptr());
   EXPECT_FALSE(state.packed().defined());
 }
 
-TEST(Dsv4StateCacheTest, PackedStateReturnsWritableViews) {
+TEST(DeepSeekV4StateCacheTest, PackedStateReturnsWritableViews) {
   torch::Tensor packed = torch::arange(24, torch::kFloat32).reshape({3, 2, 4});
-  Dsv4StateCache state =
-      Dsv4StateCache::from_packed(packed, torch::Tensor(), torch::Tensor());
+  DeepSeekV4StateCache state = DeepSeekV4StateCache::from_packed(
+      packed, torch::Tensor(), torch::Tensor());
 
   EXPECT_EQ(shape_vec(state.kv()), (std::vector<int64_t>{3, 2, 2}));
   EXPECT_EQ(shape_vec(state.score()), (std::vector<int64_t>{3, 2, 2}));
@@ -283,11 +283,11 @@ TEST(Dsv4StateCacheTest, PackedStateReturnsWritableViews) {
   EXPECT_TRUE(torch::equal(state.score(), torch::full({3, 2, 2}, 17.0F)));
 }
 
-TEST(Dsv4StateCacheTest, MissingPackedReturnsSplitViews) {
+TEST(DeepSeekV4StateCacheTest, MissingPackedReturnsSplitViews) {
   torch::Tensor kv = torch::tensor({{{1.0F}}, {{2.0F}}});
   torch::Tensor score = torch::tensor({{{3.0F}}, {{4.0F}}});
-  Dsv4StateCache state =
-      Dsv4StateCache::from_packed(torch::Tensor(), kv, score);
+  DeepSeekV4StateCache state =
+      DeepSeekV4StateCache::from_packed(torch::Tensor(), kv, score);
 
   EXPECT_EQ(state.kv().data_ptr(), kv.data_ptr());
   EXPECT_EQ(state.score().data_ptr(), score.data_ptr());
@@ -311,7 +311,7 @@ class GenericIndexerAllocationTest : public ::testing::Test {
         .index_n_heads(1)
         .index_head_dim(4);
     shape_ = KVCacheShape(capacity, model_args, /*world_size=*/1);
-    allocator_ = std::make_shared<RecordingKVCacheTensorAllocator>(
+    allocator_ = std::make_shared<RecordingKVTensorAllocator>(
         /*fill_index_scale_with_nonzero=*/false,
         /*fill_index_cache_with_nonzero=*/true);
     options_.device(torch::Device(torch::kCPU))
@@ -325,7 +325,7 @@ class GenericIndexerAllocationTest : public ::testing::Test {
 
   KVCacheShape shape_;
   KVCacheCreateOptions options_;
-  std::shared_ptr<RecordingKVCacheTensorAllocator> allocator_;
+  std::shared_ptr<RecordingKVTensorAllocator> allocator_;
 };
 
 TEST_F(GenericIndexerAllocationTest, VirtualIndexerUsesAllocatorWithoutWrites) {
@@ -433,7 +433,7 @@ TEST_F(NpuKVCacheTest, VirtualMemoryPreservesSharedIndexerOwnership) {
       .index_n_heads(1)
       .index_head_dim(4);
   const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
-  auto allocator = std::make_shared<RecordingKVCacheTensorAllocator>();
+  auto allocator = std::make_shared<RecordingKVTensorAllocator>();
   KVCacheCreateOptions options;
   options.device(device_)
       .dtype(torch::kBFloat16)
@@ -514,7 +514,7 @@ TEST_F(NpuKVCacheTest, VirtualMemoryRejectsNpuNzLayout) {
       .num_layers(1)
       .model_type("deepseek_v3")
       .enable_vmm_kvcache(true)
-      .tensor_allocator(std::make_shared<RecordingKVCacheTensorAllocator>());
+      .tensor_allocator(std::make_shared<RecordingKVTensorAllocator>());
 
   EXPECT_DEATH(create_kv_cache_tensors(shape, options),
                "Virtual memory does not support the NPU NZ KV cache layout");
@@ -534,7 +534,7 @@ TEST_F(NpuKVCacheTest, InjectedAllocatorOwnsInt8IndexerAndFp16Scale) {
       .index_n_heads(1)
       .index_head_dim(4);
   const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
-  auto allocator = std::make_shared<RecordingKVCacheTensorAllocator>(
+  auto allocator = std::make_shared<RecordingKVTensorAllocator>(
       /*fill_index_scale_with_nonzero=*/true);
   KVCacheCreateOptions options;
   options.device(device_)
@@ -593,7 +593,7 @@ TEST(KVCacheTest, VirtualMemoryRejectsQuantizedIndexerCache) {
       .enable_vmm_kvcache(true)
       .enable_lighting_indexer(true)
       .enable_indexer_cache_quant(true)
-      .tensor_allocator(std::make_shared<RecordingKVCacheTensorAllocator>());
+      .tensor_allocator(std::make_shared<RecordingKVTensorAllocator>());
 
   std::vector<KVCache> caches;
   EXPECT_DEATH(allocate_kv_caches(caches, shape, options),
@@ -866,7 +866,7 @@ TEST(KVCacheTest, SharedArenaDraftCapabilitySurvivesProtoRoundTrip) {
 }
 
 TEST(KVCacheTest, SharedDraftUsesTargetFinalPagesWithLocalLayerIds) {
-  StaticKVCacheLayoutSpec spec;
+  StaticKVLayoutSpec spec;
   spec.num_slots = 8;
   spec.num_slabs = 12;
   spec.full_row_bytes = 16;
@@ -877,10 +877,10 @@ TEST(KVCacheTest, SharedDraftUsesTargetFinalPagesWithLocalLayerIds) {
   spec.full_layer_ids = {1, 3};
   spec.linear_layer_ids = {0, 2};
   spec.draft_layer_count = 1;
-  const auto arena = std::make_shared<StaticKVCacheTensorAllocator>(
-      StaticKVCacheLayout(spec), torch::kCPU);
+  const auto arena = std::make_shared<StaticKVTensorAllocator>(
+      StaticKVLayout(spec), torch::kCPU);
   const auto layout =
-      std::shared_ptr<const StaticKVCacheLayout>(arena, &arena->layout());
+      std::shared_ptr<const StaticKVLayout>(arena, &arena->layout());
   const auto full_slots = std::make_shared<LinearStateSlotTable>(
       spec.num_slots, layout->full_layer_count(), torch::kCPU);
   KVCacheCapacity capacity;
@@ -1081,8 +1081,8 @@ TEST(KVCacheTest, DeepSeekV4UsesInjectedAllocatorForTransferableOwners) {
   model_args.model_type("deepseek_v4");
   const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
 
-  std::shared_ptr<RecordingKVCacheTensorAllocator> allocator =
-      std::make_shared<RecordingKVCacheTensorAllocator>();
+  std::shared_ptr<RecordingKVTensorAllocator> allocator =
+      std::make_shared<RecordingKVTensorAllocator>();
   KVCacheCreateOptions options;
   options.device(torch::Device(torch::kCPU))
       .dtype(torch::kBFloat16)
@@ -1352,7 +1352,7 @@ TEST(KVCacheTest, MluMixedDsaLayersUseInjectedAllocatorForActualRoles) {
       .index_head_dim(4);
   const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
 
-  auto allocator = std::make_shared<RecordingKVCacheTensorAllocator>();
+  auto allocator = std::make_shared<RecordingKVTensorAllocator>();
   KVCacheCreateOptions options;
   options.device(torch::Device(torch::kCPU))
       .dtype(torch::kBFloat16)

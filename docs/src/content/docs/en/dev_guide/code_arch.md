@@ -135,7 +135,7 @@ flowchart TB
     pages["storage / VmmKVPageAllocatorImpl<br/>page queues, preallocation and block-to-page conversion"]
     backend["storage / KVCachePageBackend<br/>capacity reservation and mapping interface"]
     ports["storage and transfer interfaces<br/>page allocator, tensor allocator, memory provider"]
-    storage["storage / VirtualKVCacheMemoryRegistry<br/>local KV mappings and paged tensor allocation"]
+    storage["storage / VirtualKVMemoryRegistry<br/>local KV mappings and paged tensor allocation"]
     kvtransfer["transfer<br/>memory provider, KV peer/layout state<br/>resharding and cache transfer"]
   end
 
@@ -190,12 +190,12 @@ responsibilities. `GlobalVirtualMemoryRegion` is a shared mapping facade with li
 leases. Transport registration and its retained mapping lease belong to
 `framework/transfer`, which has no KV or distributed-runtime target dependency.
 
-`core/kv_cache/storage` owns `VirtualKVCacheMemoryRegions` and
-`VirtualKVCacheMemoryRegistry`, including model-local cache mappings and physical
+`core/kv_cache/storage` owns `VirtualKVMemoryRegions` and
+`VirtualKVMemoryRegistry`, including model-local cache mappings and physical
 offset lookup. `VmmKVTensorAllocator` uses an injected registry to
-implement `KVCacheTensorAllocator`. In `core/kv_cache/transfer`,
-`VirtualKVCacheTransferMemoryProviderImpl` uses that registry and an injected
-`GlobalVirtualMemoryRegion` to implement `VirtualKVCacheTransferMemoryProvider`.
+implement `KVTensorAllocator`. In `core/kv_cache/transfer`,
+`VirtualKVTransferMemoryProviderImpl` uses that registry and an injected
+`GlobalVirtualMemoryRegion` to implement `VirtualKVTransferMemoryProvider`.
 `WorkerImpl` supplies these dependencies. Concrete cache backends consume
 generic allocation facilities without depending on distributed coordination.
 
@@ -205,7 +205,7 @@ reservation ownership, contiguous or fragmented mappings, suballocation
 and cleanup using a physical-page pool and shared mapping supplied at
 construction. Both weight transfer and KV transfer use the shared Mooncake
 byte transport. KV manifests, peer state and resharding plans remain in
-`core/kv_cache/transfer`, including `MooncakeKVCacheTransferEngine`.
+`core/kv_cache/transfer`, including `MooncakeKVTransferEngine`.
 
 `runtime/WorkerMemoryResources` owns the local KV registry and
 `WeightVirtualMemoryManager`, managing device initialization, the physical page pool,

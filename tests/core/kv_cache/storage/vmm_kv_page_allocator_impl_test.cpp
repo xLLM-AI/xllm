@@ -27,7 +27,7 @@ limitations under the License.
 #include <thread>
 #include <vector>
 
-#include "core/kv_cache/layout/virtual_kv_cache_page_layout.h"
+#include "core/kv_cache/layout/virtual_kv_page_layout.h"
 
 namespace xllm {
 namespace {
@@ -1210,8 +1210,8 @@ TEST(VmmKVPageAllocatorImplTest, MlaRetainedPagesKeepPhysicalPageBudget) {
 
 TEST(VmmKVPageAllocatorImplTest,
      Glm53IndexerBudgetSurvivesShortageAndSleepWakeup) {
-  const VirtualKVCachePageLayout layout({128 * 1024, 16 * 1024, 32 * 1024},
-                                        /*page_size=*/2 * 1024 * 1024);
+  const VirtualKVPageLayout layout({128 * 1024, 16 * 1024, 32 * 1024},
+                                   /*page_size=*/2 * 1024 * 1024);
   const size_t physical_pages = layout.physical_pages({78, 78, 21});
   FakeKVCachePageBackend backend(/*total_pages=*/2 * physical_pages,
                                  /*dp_size=*/1);

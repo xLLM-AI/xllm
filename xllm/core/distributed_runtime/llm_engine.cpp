@@ -162,7 +162,7 @@ bool LLMEngine::init(MasterStatus master_status) {
 bool LLMEngine::init(
     MasterStatus master_status,
     const ModelInitCallback& prepare_model,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator) {
   if (!init_model(master_status, prepare_model)) {
     LOG(ERROR) << "Failed to init model from: " << options_.model_path();
     return false;
@@ -306,8 +306,8 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity(
 
 bool LLMEngine::allocate_kv_cache(
     const KVCacheCapacity& kv_cache_cap,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
-    const VmmKVCacheLayout* shared_vmm_layout) {
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
+    const VmmKVLayout* shared_vmm_layout) {
   const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
 
   const bool enable_state_cache = has_linear_attention_layers(args_) ||

@@ -42,7 +42,7 @@ limitations under the License.
 #include "core/framework/request/sequence.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kv_cache/block/block_manager.h"
-#include "core/kv_cache/block/static_kv_cache_block_pool.h"
+#include "core/kv_cache/block/static_kv_block_pool.h"
 #if defined(USE_MUSA)
 #include "layers/common/attention_metadata.h"
 #endif
@@ -841,7 +841,7 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
   const int32_t read_id = linear_blocks[read_index].id();
   state.linear_state_read_ids.emplace_back(read_id);
 
-  const std::shared_ptr<StaticKVCacheBlockPool>& shared_pool =
+  const std::shared_ptr<StaticKVBlockPool>& shared_pool =
       linear_blocks.back().manager()->options().shared_block_pool();
   if (shared_pool == nullptr) {
     return;
@@ -935,7 +935,7 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
       std::find_if(blocks.begin(), blocks.end(), [](const Block& block) {
         return block.is_valid() && block.manager() != nullptr;
       });
-  std::shared_ptr<StaticKVCacheBlockPool> shared_pool;
+  std::shared_ptr<StaticKVBlockPool> shared_pool;
   if (shared_block != blocks.end()) {
     shared_pool = shared_block->manager()->options().shared_block_pool();
     if (shared_pool != nullptr && shared_pool->uses_slabs() &&

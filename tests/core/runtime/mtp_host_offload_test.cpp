@@ -197,7 +197,7 @@ class HierarchyTransferTestWorker : public LLMWorkerImpl {
     const KVCacheCreateOptions create_options =
         make_create_options(device_.unwrap(), model_args);
     allocate_kv_caches(kv_caches_, cache_shape, create_options);
-    init_hierarchy_kv_cache_transfer(cache_shape, create_options);
+    init_hierarchy_kv_transfer(cache_shape, create_options);
   }
 
   void mark_loaded() { status_ = WorkerImpl::Status::LOADED; }
@@ -313,22 +313,20 @@ class TestMTPWorker final : public MTPWorkerImpl<LlmForwardInput> {
     draft_impl_ = std::move(draft);
   }
 
-  void prepare_hierarchy_transfers() { prepare_hierarchy_kv_cache_transfers(); }
+  void prepare_hierarchy_transfers() { prepare_hierarchy_kv_transfers(); }
 
-  void finalize_hierarchy_transfers() {
-    finalize_hierarchy_kv_cache_transfers();
+  void finalize_hierarchy_transfers() { finalize_hierarchy_kv_transfers(); }
+
+  std::shared_ptr<HierarchyKVTransfer> target_transfer_owner() const {
+    return get_hierarchy_kv_transfer();
   }
 
-  std::shared_ptr<HierarchyKVCacheTransfer> target_transfer_owner() const {
-    return get_hierarchy_kv_cache_transfer();
+  std::shared_ptr<HierarchyKVTransfer> target_worker_transfer() const {
+    return impl_->get_hierarchy_kv_transfer();
   }
 
-  std::shared_ptr<HierarchyKVCacheTransfer> target_worker_transfer() const {
-    return impl_->get_hierarchy_kv_cache_transfer();
-  }
-
-  std::shared_ptr<HierarchyKVCacheTransfer> draft_worker_transfer() const {
-    return draft_impl_->get_hierarchy_kv_cache_transfer();
+  std::shared_ptr<HierarchyKVTransfer> draft_worker_transfer() const {
+    return draft_impl_->get_hierarchy_kv_transfer();
   }
 
   void block_outer_executor(std::promise<void>* started,
@@ -354,16 +352,16 @@ class TestDFlashWorker final : public DFlashWorkerImpl {
     draft_impl_ = std::move(draft);
   }
 
-  std::shared_ptr<HierarchyKVCacheTransfer> transfer_owner() const {
-    return get_hierarchy_kv_cache_transfer();
+  std::shared_ptr<HierarchyKVTransfer> transfer_owner() const {
+    return get_hierarchy_kv_transfer();
   }
 
-  std::shared_ptr<HierarchyKVCacheTransfer> target_worker_transfer() const {
-    return impl_->get_hierarchy_kv_cache_transfer();
+  std::shared_ptr<HierarchyKVTransfer> target_worker_transfer() const {
+    return impl_->get_hierarchy_kv_transfer();
   }
 
-  std::shared_ptr<HierarchyKVCacheTransfer> draft_worker_transfer() const {
-    return draft_impl_->get_hierarchy_kv_cache_transfer();
+  std::shared_ptr<HierarchyKVTransfer> draft_worker_transfer() const {
+    return draft_impl_->get_hierarchy_kv_transfer();
   }
 };
 
@@ -499,7 +497,7 @@ TEST_F(MTPHostOffloadTest, BindsAndReleasesUnifiedTransferOwner) {
       make_model_args("test_draft", /*layer_count=*/1, /*head_dim=*/4);
   const KVCacheShape target_shape = make_cache_shape(target_model_args);
   const KVCacheShape draft_shape = make_cache_shape(draft_model_args);
-  std::weak_ptr<HierarchyKVCacheTransfer> transfer_lifetime;
+  std::weak_ptr<HierarchyKVTransfer> transfer_lifetime;
 
   {
     auto worker = std::make_unique<TestMTPWorker>(
@@ -515,36 +513,36 @@ TEST_F(MTPHostOffloadTest, BindsAndReleasesUnifiedTransferOwner) {
     worker->prepare_hierarchy_transfers();
     worker->prepare_hierarchy_transfers();
 
-    ASSERT_NE(target_ptr->get_hierarchy_kv_cache_transfer(), nullptr);
-    ASSERT_NE(draft_ptr->get_hierarchy_kv_cache_transfer(), nullptr);
-    EXPECT_FALSE(target_ptr->get_hierarchy_kv_cache_transfer()
-                     ->registration_finalized());
+    ASSERT_NE(target_ptr->get_hierarchy_kv_transfer(), nullptr);
+    ASSERT_NE(draft_ptr->get_hierarchy_kv_transfer(), nullptr);
     EXPECT_FALSE(
-        draft_ptr->get_hierarchy_kv_cache_transfer()->registration_finalized());
+        target_ptr->get_hierarchy_kv_transfer()->registration_finalized());
+    EXPECT_FALSE(
+        draft_ptr->get_hierarchy_kv_transfer()->registration_finalized());
 
     target_ptr->initialize_hierarchy_cache(target_shape);
     draft_ptr->initialize_hierarchy_cache(draft_shape);
-    EXPECT_FALSE(target_ptr->get_hierarchy_kv_cache_transfer()
-                     ->registration_finalized());
     EXPECT_FALSE(
-        draft_ptr->get_hierarchy_kv_cache_transfer()->registration_finalized());
+        target_ptr->get_hierarchy_kv_transfer()->registration_finalized());
+    EXPECT_FALSE(
+        draft_ptr->get_hierarchy_kv_transfer()->registration_finalized());
     worker->finalize_hierarchy_transfers();
     worker->finalize_hierarchy_transfers();
 
-    std::shared_ptr<HierarchyKVCacheTransfer> target_owner =
+    std::shared_ptr<HierarchyKVTransfer> target_owner =
         worker->target_transfer_owner();
-    std::shared_ptr<HierarchyKVCacheTransfer> target_worker_transfer =
+    std::shared_ptr<HierarchyKVTransfer> target_worker_transfer =
         worker->target_worker_transfer();
-    std::shared_ptr<HierarchyKVCacheTransfer> draft_worker_transfer =
+    std::shared_ptr<HierarchyKVTransfer> draft_worker_transfer =
         worker->draft_worker_transfer();
     ASSERT_NE(target_owner, nullptr);
     EXPECT_EQ(target_owner.get(), target_worker_transfer.get());
     EXPECT_EQ(target_owner.get(), draft_worker_transfer.get());
     EXPECT_TRUE(target_owner->registration_finalized());
     EXPECT_TRUE(target_owner->supports_block_type(
-        HierarchyKVCacheTransfer::CacheRole::TARGET, BlockType::KV));
+        HierarchyKVTransfer::CacheRole::TARGET, BlockType::KV));
     EXPECT_TRUE(target_owner->supports_block_type(
-        HierarchyKVCacheTransfer::CacheRole::DRAFT, BlockType::KV));
+        HierarchyKVTransfer::CacheRole::DRAFT, BlockType::KV));
     transfer_lifetime = target_owner;
   }
 
@@ -562,7 +560,7 @@ TEST_F(MTPHostOffloadTest, DFlashUsesSpeculativeHierarchyTransferLifecycle) {
   const ModelArgs model_args =
       make_model_args("test_dflash", /*layer_count=*/2, /*head_dim=*/8);
   const KVCacheShape cache_shape = make_cache_shape(model_args);
-  std::weak_ptr<HierarchyKVCacheTransfer> transfer_lifetime;
+  std::weak_ptr<HierarchyKVTransfer> transfer_lifetime;
 
   {
     auto worker = std::make_unique<TestDFlashWorker>(
@@ -576,16 +574,15 @@ TEST_F(MTPHostOffloadTest, DFlashUsesSpeculativeHierarchyTransferLifecycle) {
     worker->replace_transfer_workers(std::move(target), std::move(draft));
 
     ASSERT_TRUE(worker->allocate_kv_cache(cache_shape));
-    std::shared_ptr<HierarchyKVCacheTransfer> transfer =
-        worker->transfer_owner();
+    std::shared_ptr<HierarchyKVTransfer> transfer = worker->transfer_owner();
     ASSERT_NE(transfer, nullptr);
     EXPECT_EQ(transfer.get(), worker->target_worker_transfer().get());
     EXPECT_EQ(transfer.get(), worker->draft_worker_transfer().get());
     EXPECT_TRUE(transfer->registration_finalized());
     EXPECT_TRUE(transfer->supports_block_type(
-        HierarchyKVCacheTransfer::CacheRole::TARGET, BlockType::KV));
+        HierarchyKVTransfer::CacheRole::TARGET, BlockType::KV));
     EXPECT_TRUE(transfer->supports_block_type(
-        HierarchyKVCacheTransfer::CacheRole::DRAFT, BlockType::KV));
+        HierarchyKVTransfer::CacheRole::DRAFT, BlockType::KV));
     transfer_lifetime = transfer;
   }
 
@@ -620,7 +617,7 @@ TEST_F(MTPHostOffloadTest, UnifiedTransferRoundTripUsesSharedSynchronizer) {
   target_ptr->initialize_hierarchy_cache(target_shape);
   draft_ptr->initialize_hierarchy_cache(draft_shape);
   worker.finalize_hierarchy_transfers();
-  std::shared_ptr<HierarchyKVCacheTransfer> unified_transfer =
+  std::shared_ptr<HierarchyKVTransfer> unified_transfer =
       worker.target_transfer_owner();
   ASSERT_NE(unified_transfer, nullptr);
 
@@ -755,15 +752,15 @@ TEST_F(MTPHostOffloadTest, Dsv4DraftSkipsUnsupportedCompressedBlockTypes) {
   draft_ptr->initialize_hierarchy_cache(draft_shape);
   worker.finalize_hierarchy_transfers();
 
-  std::shared_ptr<HierarchyKVCacheTransfer> unified_transfer =
+  std::shared_ptr<HierarchyKVTransfer> unified_transfer =
       worker.target_transfer_owner();
   ASSERT_NE(unified_transfer, nullptr);
   ASSERT_TRUE(unified_transfer->supports_block_type(
-      HierarchyKVCacheTransfer::CacheRole::DRAFT, BlockType::SWA));
+      HierarchyKVTransfer::CacheRole::DRAFT, BlockType::SWA));
   ASSERT_FALSE(unified_transfer->supports_block_type(
-      HierarchyKVCacheTransfer::CacheRole::DRAFT, BlockType::C4));
+      HierarchyKVTransfer::CacheRole::DRAFT, BlockType::C4));
   ASSERT_FALSE(unified_transfer->supports_block_type(
-      HierarchyKVCacheTransfer::CacheRole::DRAFT, BlockType::C128));
+      HierarchyKVTransfer::CacheRole::DRAFT, BlockType::C128));
 
   const std::vector<BlockType> block_types = {
       BlockType::SWA, BlockType::C4, BlockType::C128};

@@ -90,7 +90,7 @@ torch::Tensor alloc_cache_tensor(KVCacheTensorRole role,
                                  const std::vector<int64_t>& shape,
                                  torch::ScalarType dtype,
                                  const KVCacheCreateOptions& create_options) {
-  std::shared_ptr<KVCacheTensorAllocator> allocator =
+  std::shared_ptr<KVTensorAllocator> allocator =
       create_options.tensor_allocator();
   // Linear state is indexed by request slots and remains resident independently
   // of the scheduler's paged KV blocks.

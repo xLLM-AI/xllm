@@ -162,7 +162,7 @@ class CompositeBlockManager : public BlockManager {
   bool reclaim_shared_prefix();
   void record_shared_checkpoint(Sequence& seq, size_t checkpoint_index);
 
-  std::shared_ptr<StaticKVCacheBlockPool> shared_block_pool_;
+  std::shared_ptr<StaticKVBlockPool> shared_block_pool_;
   LeafMap leaves_;
   LeafCombination combination_;
   CacheTier cache_tier_;

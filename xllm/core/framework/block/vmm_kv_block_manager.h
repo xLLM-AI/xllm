@@ -25,7 +25,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/kv_cache/block/block_manager.h"
-#include "core/kv_cache/block/virtual_kv_cache_page_state.h"
+#include "core/kv_cache/block/virtual_kv_page_state.h"
 #include "core/kv_cache/prefix/prefix_cache.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
 
@@ -169,13 +169,11 @@ class VmmKVBlockManager final : public BlockManager {
   // Number of available blocks in avail_pages
   std::atomic<size_t> num_avail_blocks_;
 
-  // Pages with free blocks (page_id -> VirtualKVCachePageState)
-  std::unordered_map<int64_t, std::unique_ptr<VirtualKVCachePageState>>
-      avail_pages_;
+  // Pages with free blocks (page_id -> VirtualKVPageState)
+  std::unordered_map<int64_t, std::unique_ptr<VirtualKVPageState>> avail_pages_;
 
-  // Pages that are fully allocated (page_id -> VirtualKVCachePageState)
-  std::unordered_map<int64_t, std::unique_ptr<VirtualKVCachePageState>>
-      full_pages_;
+  // Pages that are fully allocated (page_id -> VirtualKVPageState)
+  std::unordered_map<int64_t, std::unique_ptr<VirtualKVPageState>> full_pages_;
 
   // Reserved blocks for pre-allocation
   std::vector<int32_t> reserved_blocks_;

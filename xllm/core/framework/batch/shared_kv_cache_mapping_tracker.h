@@ -26,7 +26,7 @@ limitations under the License.
 
 namespace xllm {
 
-class StaticKVCacheBlockPool;
+class StaticKVBlockPool;
 
 // Each ordered worker group tracks its acknowledged mapping versions. A
 // prepared input remains tentative until every target worker acknowledges it;
@@ -38,7 +38,7 @@ class SharedKVCacheMappingTracker final {
   void acknowledge();
   void reset();
 
-  void append_rows(std::shared_ptr<StaticKVCacheBlockPool> pool,
+  void append_rows(std::shared_ptr<StaticKVBlockPool> pool,
                    BlockType type,
                    Slice<Block> blocks,
                    std::vector<int32_t>* rows,
@@ -54,7 +54,7 @@ class SharedKVCacheMappingTracker final {
   // Builders can prepare independent sequences on several threads. Their
   // deduplication and undo records belong to the same tentative input.
   std::mutex mutex_;
-  std::shared_ptr<StaticKVCacheBlockPool> pool_;
+  std::shared_ptr<StaticKVBlockPool> pool_;
   std::array<std::vector<uint64_t>, 2> known_epochs_;
   std::vector<PendingUpdate> pending_;
 };

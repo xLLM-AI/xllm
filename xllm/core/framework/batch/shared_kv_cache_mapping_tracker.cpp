@@ -19,7 +19,7 @@ limitations under the License.
 
 #include <utility>
 
-#include "core/kv_cache/block/static_kv_cache_block_pool.h"
+#include "core/kv_cache/block/static_kv_block_pool.h"
 
 namespace xllm {
 
@@ -46,7 +46,7 @@ void SharedKVCacheMappingTracker::reset() {
 }
 
 void SharedKVCacheMappingTracker::append_rows(
-    std::shared_ptr<StaticKVCacheBlockPool> pool,
+    std::shared_ptr<StaticKVBlockPool> pool,
     BlockType type,
     Slice<Block> blocks,
     std::vector<int32_t>* rows,

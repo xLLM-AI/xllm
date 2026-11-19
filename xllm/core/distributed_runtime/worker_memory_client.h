@@ -101,7 +101,7 @@ class WorkerMemoryClient final {
   // mapping for PD disaggregation. Returns an empty vector on error.
   // Result vectors retain the requested block order within every layer.
   // Waits through brpc::Join so callers running in bthreads yield the worker.
-  std::vector<VirtualKVCacheLayerGlobalOffsets> get_virtual_kv_cache_offsets(
+  std::vector<VirtualKVCacheLayerGlobalOffsets> get_virtual_kv_offsets(
       const std::string& model_id,
       const std::vector<int32_t>& block_ids);
 

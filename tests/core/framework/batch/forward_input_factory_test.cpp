@@ -36,8 +36,8 @@ limitations under the License.
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kv_cache/block/block_manager_impl.h"
-#include "core/kv_cache/block/static_kv_cache_block_pool.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/block/static_kv_block_pool.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
@@ -141,8 +141,8 @@ class ScopedJsonObjectOutput final {
   bool previous_value_;
 };
 
-StaticKVCacheLayout make_publication_layout() {
-  StaticKVCacheLayoutSpec spec;
+StaticKVLayout make_publication_layout() {
+  StaticKVLayoutSpec spec;
   spec.num_slots = 64;
   spec.num_slabs = 16;
   spec.full_row_bytes = 16;
@@ -151,7 +151,7 @@ StaticKVCacheLayout make_publication_layout() {
   spec.checkpoint_stride = 2;
   spec.full_layer_ids = {0, 3};
   spec.linear_layer_ids = {1, 2};
-  return StaticKVCacheLayout(spec);
+  return StaticKVLayout(spec);
 }
 
 BlockManager::Options make_publication_block_options() {
@@ -162,14 +162,14 @@ BlockManager::Options make_publication_block_options() {
       .linear_state_num_slots(64)
       .enable_shared_kv_cache(true)
       .shared_layout(
-          std::make_shared<StaticKVCacheLayout>(make_publication_layout()))
+          std::make_shared<StaticKVLayout>(make_publication_layout()))
       .enable_prefix_cache(false);
   return options;
 }
 
 TEST(SharedKVCacheMappingTrackerTest,
      AbandonedPreparationRepublishesUntilConsumerAcknowledges) {
-  auto pool = std::make_shared<StaticKVCacheBlockPool>(
+  auto pool = std::make_shared<StaticKVBlockPool>(
       /*logical_capacity=*/64, make_publication_layout());
   const auto ids = pool->allocate(/*num_blocks=*/2, BlockType::KV);
   ASSERT_EQ(ids.size(), 2u);
@@ -212,7 +212,7 @@ TEST(SharedKVCacheMappingTrackerTest,
 
 TEST(SharedKVCacheMappingTrackerTest,
      ConsumersKeepIndependentFullAndLinearAllocationGenerations) {
-  auto pool = std::make_shared<StaticKVCacheBlockPool>(
+  auto pool = std::make_shared<StaticKVBlockPool>(
       /*logical_capacity=*/64, make_publication_layout());
   const auto full = pool->allocate(/*num_blocks=*/1, BlockType::KV);
   const auto linear = pool->allocate(/*num_blocks=*/1, BlockType::LINEAR);
@@ -264,7 +264,7 @@ TEST(SharedKVCacheMappingTrackerTest,
   first.append_rows(pool, BlockType::KV, full_blocks, &reused_full_rows);
   EXPECT_EQ(reused_full_rows.size(), 3u);
   first.acknowledge();
-  auto replacement_pool = std::make_shared<StaticKVCacheBlockPool>(
+  auto replacement_pool = std::make_shared<StaticKVBlockPool>(
       /*logical_capacity=*/64, make_publication_layout());
   const auto replacement_full =
       replacement_pool->allocate(/*num_blocks=*/1, BlockType::KV);

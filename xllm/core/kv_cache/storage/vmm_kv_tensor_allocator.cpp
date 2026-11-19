@@ -20,14 +20,14 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/kv_cache/storage/virtual_kv_cache_memory_registry.h"
+#include "core/kv_cache/storage/virtual_kv_memory_registry.h"
 
 namespace xllm {
 namespace {
 
-class VmmKVTensorAllocator final : public KVCacheTensorAllocator {
+class VmmKVTensorAllocator final : public KVTensorAllocator {
  public:
-  VmmKVTensorAllocator(VirtualKVCacheMemoryRegistry& registry,
+  VmmKVTensorAllocator(VirtualKVMemoryRegistry& registry,
                        std::string model_id,
                        int64_t num_layers,
                        std::vector<bool> index_layer_owned,
@@ -95,7 +95,7 @@ class VmmKVTensorAllocator final : public KVCacheTensorAllocator {
   }
 
  private:
-  VirtualKVCacheMemoryRegistry& registry_;
+  VirtualKVMemoryRegistry& registry_;
   std::string model_id_;
   int64_t num_layers_;
   std::vector<bool> index_layer_owned_;
@@ -110,8 +110,8 @@ class VmmKVTensorAllocator final : public KVCacheTensorAllocator {
 
 }  // namespace
 
-std::shared_ptr<KVCacheTensorAllocator> create_vmm_kv_tensor_allocator(
-    VirtualKVCacheMemoryRegistry& registry,
+std::shared_ptr<KVTensorAllocator> create_vmm_kv_tensor_allocator(
+    VirtualKVMemoryRegistry& registry,
     std::string model_id,
     int64_t num_layers,
     std::vector<bool> index_layer_owned,

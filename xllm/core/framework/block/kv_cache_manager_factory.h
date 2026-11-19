@@ -27,9 +27,9 @@ limitations under the License.
 
 namespace xllm {
 
-class KVCacheTransferCoordinatorBase;
+class KVTransferCoordinatorBase;
 class ModelArgs;
-class VmmKVCacheLayout;
+class VmmKVLayout;
 
 struct KVCacheManagerFactoryResult final {
   std::unique_ptr<KVCacheManager> manager;
@@ -44,11 +44,11 @@ class KVCacheManagerFactory final {
       int64_t world_size,
       torch::ScalarType dtype,
       BlockManagerPool::Options options,
-      std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
+      std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
       int32_t dp_size = 1,
       std::optional<HostCacheValidationOptions> host_validation_options =
           std::nullopt,
-      const VmmKVCacheLayout* shared_vmm_layout = nullptr);
+      const VmmKVLayout* shared_vmm_layout = nullptr);
 };
 
 }  // namespace xllm

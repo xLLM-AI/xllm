@@ -22,8 +22,8 @@ limitations under the License.
 
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
-#include "core/kv_cache/layout/vmm_kv_cache_layout.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
+#include "core/kv_cache/layout/vmm_kv_layout.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator_impl.h"
 #include "core/util/tensor_options.h"
@@ -36,10 +36,10 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     int64_t world_size,
     torch::ScalarType dtype,
     BlockManagerPool::Options options,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
     int32_t dp_size,
     std::optional<HostCacheValidationOptions> host_validation_options,
-    const VmmKVCacheLayout* shared_vmm_layout) {
+    const VmmKVLayout* shared_vmm_layout) {
   CHECK_GT(world_size, 0) << "world_size must be greater than 0";
   CHECK_GT(dp_size, 0) << "dp_size must be greater than 0";
   KVCacheShape shape(kv_cache_capacity, model_args, world_size);
@@ -80,7 +80,7 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     create_options.num_layers(model_args.n_layers())
         .dtype(dtype)
         .ssm_dtype(resolve_ssm_dtype(model_args.mamba_ssm_dtype(), dtype));
-    auto layout = std::make_shared<StaticKVCacheLayout>(shape, create_options);
+    auto layout = std::make_shared<StaticKVLayout>(shape, create_options);
     CHECK_EQ(layout->slot_bytes(),
              static_cast<size_t>(kv_cache_capacity.shared_slot_bytes()));
     CHECK_EQ(layout->num_linear_groups(),
@@ -121,19 +121,19 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
 
   VmmKVPageAllocator* page_allocator = nullptr;
   if (options.enable_vmm_kvcache()) {
-    std::optional<VmmKVCacheLayout> component_layout;
+    std::optional<VmmKVLayout> component_layout;
     if (shared_vmm_layout == nullptr) {
       component_layout.emplace(
           kv_cache_capacity, model_args, world_size, dtype);
     }
-    const VmmKVCacheLayout& tensors =
+    const VmmKVLayout& tensors =
         shared_vmm_layout == nullptr ? *component_layout : *shared_vmm_layout;
     auto& allocator =
         DistributedVmmCoordinator::get_instance().vmm_kv_page_allocator();
     if (options.enable_disagg_pd()) {
       tensors.validate_pd_page_size(allocator.page_size());
     }
-    const VirtualKVCachePageLayout layout =
+    const VirtualKVPageLayout layout =
         tensors.page_layout(allocator.page_size());
     const size_t physical_pages = tensors.physical_pages(allocator.page_size());
     // Leave the tensor shape unchanged, but expose only complete page groups

@@ -24,7 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
@@ -166,7 +166,7 @@ TEST(SchedulerMetricsTest, SharedArenaCountsFullTailsAndKeepsLinearState) {
 }
 
 TEST(SchedulerMetricsTest, SharedSlabCountsPayloadBytesAndPartialFullTails) {
-  StaticKVCacheLayoutSpec spec;
+  StaticKVLayoutSpec spec;
   spec.num_slots = 64;
   spec.full_row_bytes = 16;
   spec.conv_row_bytes = 8;
@@ -174,7 +174,7 @@ TEST(SchedulerMetricsTest, SharedSlabCountsPayloadBytesAndPartialFullTails) {
   spec.checkpoint_stride = 2;
   spec.full_layer_ids = {0, 3};
   spec.linear_layer_ids = {1, 2};
-  const StaticKVCacheLayout layout(spec);
+  const StaticKVLayout layout(spec);
   spec.num_slabs = layout.num_reserved_slabs() + 8;
   BlockManagerPool::Options options;
   options.num_blocks(64)
@@ -183,8 +183,7 @@ TEST(SchedulerMetricsTest, SharedSlabCountsPayloadBytesAndPartialFullTails) {
       .enable_linear_state(true)
       .linear_state_num_slots(64)
       .enable_shared_kv_cache(true)
-      .shared_layout(
-          std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
+      .shared_layout(std::make_shared<const StaticKVLayout>(std::move(spec)));
   BlockManagerPool block_manager(options);
   SchedulerMetrics metrics(&block_manager, 1, 0, false);
   std::shared_ptr<Request> request = make_request();

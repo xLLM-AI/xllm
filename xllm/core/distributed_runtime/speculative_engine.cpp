@@ -32,7 +32,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
-#include "core/kv_cache/layout/vmm_kv_cache_layout.h"
+#include "core/kv_cache/layout/vmm_kv_layout.h"
 #include "core/util/tensor_options.h"
 #include "llm_engine.h"
 #include "util/utils.h"
@@ -89,7 +89,7 @@ template <typename TargetEngine>
 bool SpeculativeEngineBase<TargetEngine>::init(
     MasterStatus master_status,
     const LLMEngine::ModelInitCallback& prepare_model,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator) {
   if (!init_model(master_status, prepare_model)) {
     return false;
   }
@@ -174,18 +174,18 @@ bool SpeculativeEngineBase<TargetEngine>::init_model(
 
 template <typename TargetEngine>
 bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator) {
   const bool shared_vmm = KVCacheConfig::get_instance().enable_vmm_kvcache() &&
                           draft_engine_ != nullptr;
   KVCacheCapacity target_kv_cache_cap =
       engine_->estimate_kv_cache_capacity(!shared_vmm);
-  std::optional<VmmKVCacheLayout> shared_vmm_layout;
+  std::optional<VmmKVLayout> shared_vmm_layout;
   const auto allocate_target_cache = [this,
                                       &transfer_coordinator,
                                       shared_vmm,
                                       &shared_vmm_layout](
                                          const KVCacheCapacity& capacity) {
-    const VmmKVCacheLayout* layout = shared_vmm ? &*shared_vmm_layout : nullptr;
+    const VmmKVLayout* layout = shared_vmm ? &*shared_vmm_layout : nullptr;
     if constexpr (std::is_same_v<TargetEngine, LLMEngine>) {
       return engine_->allocate_kv_cache(capacity, transfer_coordinator, layout);
     } else {
@@ -220,11 +220,11 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
     const int64_t draft_world_size = options_.enable_mtp_draft_body_tp1()
                                          ? 1
                                          : draft_engine_->dp_local_tp_size_;
-    VmmKVCacheLayout draft_layout(draft_kv_cache_cap,
-                                  draft_engine_->model_args(),
-                                  draft_world_size,
-                                  draft_engine_->dtype_,
-                                  /*is_draft_engine=*/true);
+    VmmKVLayout draft_layout(draft_kv_cache_cap,
+                             draft_engine_->model_args(),
+                             draft_world_size,
+                             draft_engine_->dtype_,
+                             /*is_draft_engine=*/true);
     shared_vmm_layout->append(std::move(draft_layout));
     const int64_t reserved_state_bytes =
         target_kv_cache_cap.linear_cache_size_in_bytes() +

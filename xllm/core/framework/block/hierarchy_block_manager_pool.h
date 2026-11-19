@@ -24,8 +24,8 @@ limitations under the License.
 
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/composite_block_manager.h"
-#include "core/kv_cache/transfer/kv_cache_transfer_coordinator_base.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
+#include "core/kv_cache/transfer/kv_transfer_coordinator_base.h"
 #include "util/blockingconcurrentqueue.h"
 #include "util/timer.h"
 
@@ -46,7 +46,7 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
 
   explicit HierarchyBlockManagerPool(
       const BlockManagerPool::Options& options,
-      std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
+      std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
       int32_t dp_size = 1,
       VmmKVPageAllocator* page_allocator = nullptr);
   ~HierarchyBlockManagerPool() override;
@@ -110,7 +110,7 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   void complete_restore(const RestoreCompletion& completion);
 
  private:
-  std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator_;
+  std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator_;
   // Per-DP Host block managers discovered from the device prefix-cache leaves.
   std::vector<std::unique_ptr<CompositeBlockManager>> host_block_managers_;
 

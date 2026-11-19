@@ -113,7 +113,7 @@ std::vector<int32_t> VmmKVBlockManager::alloc_internal(size_t need_size) {
 
   // Allocate the remaining blocks from pages
   while (remaining_need > 0) {
-    VirtualKVCachePageState* page = nullptr;
+    VirtualKVPageState* page = nullptr;
 
     if (avail_pages_.empty()) {
       // Mapping can wait for device RPCs or a lifecycle transition. Keep local
@@ -239,7 +239,7 @@ void VmmKVBlockManager::free_blocks(const std::vector<int32_t>& indices) {
 
   for (auto& [page_id, idxs] : idx_dict) {
     // Find the page - it must be in either full_pages or avail_pages
-    VirtualKVCachePageState* page = nullptr;
+    VirtualKVPageState* page = nullptr;
     bool was_in_full = false;
 
     auto full_it = full_pages_.find(page_id);
@@ -418,7 +418,7 @@ size_t VmmKVBlockManager::unallocated_block_capacity() const {
       page_allocator.get_num_available_virt_pages(model_id_, dp_rank_);
   size_t blocks_from_reserved_pages =
       reserved_pages *
-      VirtualKVCachePageState::get_num_blocks(page_size_, block_mem_size_);
+      VirtualKVPageState::get_num_blocks(page_size_, block_mem_size_);
 
   return blocks_from_reserved_pages;
 }
@@ -485,7 +485,7 @@ size_t VmmKVBlockManager::get_mapped_memory_size() const {
 size_t VmmKVBlockManager::get_num_allocated_blocks() const {
   // Blocks from fully allocated pages
   size_t blocks_per_page =
-      VirtualKVCachePageState::get_num_blocks(page_size_, block_mem_size_);
+      VirtualKVPageState::get_num_blocks(page_size_, block_mem_size_);
   size_t blocks_from_full_pages = full_pages_.size() * blocks_per_page;
 
   // Blocks from partially allocated pages

@@ -2,11 +2,11 @@ include(cc_library)
 
 cc_library(
   NAME
-    static_kv_cache_layout
+    static_kv_layout
   HDRS
-    layout/static_kv_cache_layout.h
+    layout/static_kv_layout.h
   SRCS
-    layout/static_kv_cache_layout.cpp
+    layout/static_kv_layout.cpp
   DEPS
     glog::glog
     torch
@@ -14,17 +14,17 @@ cc_library(
 
 cc_library(
   NAME
-    static_kv_cache_tensor_allocator
+    static_kv_tensor_allocator
   HDRS
-    storage/static_kv_cache_tensor_allocator.h
+    storage/static_kv_tensor_allocator.h
   SRCS
-    storage/static_kv_cache_tensor_allocator.cpp
-    storage/static_kv_cache_tensor_allocator_factory.cpp
+    storage/static_kv_tensor_allocator.cpp
+    storage/static_kv_tensor_allocator_factory.cpp
   DEPS
-    :static_kv_cache_layout
+    :static_kv_layout
     :kv_cache_memory_interfaces
     :kv_cache
-    :virtual_kv_cache_page_layout
+    :virtual_kv_page_layout
     glog::glog
     torch
 )
@@ -36,9 +36,9 @@ add_subdirectory(transfer)
 
 cc_library(
   NAME
-    virtual_kv_cache_page_layout
+    virtual_kv_page_layout
   HDRS
-    layout/virtual_kv_cache_page_layout.h
+    layout/virtual_kv_page_layout.h
   DEPS
     glog::glog
 )
@@ -50,13 +50,13 @@ cc_library(
   HDRS
     storage/vmm_kv_page_allocator.h
     storage/kv_cache_page_backend.h
-    storage/kv_cache_tensor_allocator.h
+    storage/kv_tensor_allocator.h
     layout/kv_cache_tensor_role.h
-    layout/virtual_kv_cache_offsets.h
-    transfer/virtual_kv_cache_transfer_memory_provider.h
+    layout/virtual_kv_offsets.h
+    transfer/virtual_kv_transfer_memory_provider.h
   DEPS
-    :virtual_kv_cache_page_state
-    :virtual_kv_cache_page_layout
+    :virtual_kv_page_state
+    :virtual_kv_page_layout
     torch
 )
 
@@ -70,7 +70,7 @@ cc_library(
     storage/vmm_kv_page_allocator_impl.cpp
   DEPS
     :kv_cache_memory_interfaces
-    :virtual_kv_cache_page_state
+    :virtual_kv_page_state
     glog::glog
 )
 
@@ -89,12 +89,12 @@ cc_library(
   NAME
     virtual_memory_kv_cache_storage
   HDRS
-    storage/virtual_kv_cache_memory_regions.h
-    storage/virtual_kv_cache_memory_registry.h
+    storage/virtual_kv_memory_regions.h
+    storage/virtual_kv_memory_registry.h
     storage/vmm_kv_tensor_allocator.h
   SRCS
-    storage/virtual_kv_cache_memory_regions.cpp
-    storage/virtual_kv_cache_memory_registry.cpp
+    storage/virtual_kv_memory_regions.cpp
+    storage/virtual_kv_memory_registry.cpp
     storage/vmm_kv_tensor_allocator.cpp
   DEPS
     :kv_cache_memory_interfaces
@@ -105,11 +105,11 @@ cc_library(
 
 cc_library(
   NAME
-    virtual_kv_cache_transfer_memory_provider_impl
+    virtual_kv_transfer_memory_provider_impl
   HDRS
-    transfer/virtual_kv_cache_transfer_memory_provider_impl.h
+    transfer/virtual_kv_transfer_memory_provider_impl.h
   SRCS
-    transfer/virtual_kv_cache_transfer_memory_provider_impl.cpp
+    transfer/virtual_kv_transfer_memory_provider_impl.cpp
   DEPS
     :virtual_memory_kv_cache_storage
     :global_virtual_memory_region
@@ -132,7 +132,7 @@ cc_library(
     :deepseek_v4_cache_policy
     :block_utils
     :platform
-    :static_kv_cache_layout
+    :static_kv_layout
     glog::glog
     proto::xllm_proto
     torch
@@ -152,11 +152,11 @@ cc_library(
     storage/kv_cache_impl.h
     layout/kv_cache_shape.h
     layout/kv_shard_layout.h
-    storage/kv_cache_tensor_allocator.h
+    storage/kv_tensor_allocator.h
     layout/kv_cache_tensor_role.h
     storage/kv_cache_utils.h
     layout/layerwise_split_layout.h
-    layout/vmm_kv_cache_layout.h
+    layout/vmm_kv_layout.h
     storage/linear_attention_kv_cache_impl.h
     storage/linear_state_slot_table.h
     storage/quantized_kv_cache_impl.h
@@ -169,8 +169,8 @@ cc_library(
     storage/kv_cache_impl.cpp
     layout/kv_cache_shape.cpp
     layout/kv_shard_layout.cpp
-    layout/vmm_kv_cache_layout.cpp
-    storage/kv_cache_tensor_allocator.cpp
+    layout/vmm_kv_layout.cpp
+    storage/kv_tensor_allocator.cpp
     storage/kv_cache_utils.cpp
     storage/linear_attention_kv_cache_impl.cpp
     storage/linear_state_slot_table.cpp
@@ -182,7 +182,7 @@ cc_library(
     :deepseek_v4_cache_policy
     :kv_cache_estimation
     :kv_cache_memory_interfaces
-    :static_kv_cache_layout
+    :static_kv_layout
     glog::glog
     torch
     $<$<BOOL:${USE_MLU}>:cndrv>

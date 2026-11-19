@@ -20,16 +20,16 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/kv_cache/storage/kv_cache_tensor_allocator.h"
+#include "core/kv_cache/storage/kv_tensor_allocator.h"
 
 namespace xllm {
 
-class VirtualKVCacheMemoryRegistry;
+class VirtualKVMemoryRegistry;
 
 // Supplies model-wide virtual mappings through the cache allocation interface.
 // The registry must outlive the allocator and all uses of its tensor views.
-std::shared_ptr<KVCacheTensorAllocator> create_vmm_kv_tensor_allocator(
-    VirtualKVCacheMemoryRegistry& registry,
+std::shared_ptr<KVTensorAllocator> create_vmm_kv_tensor_allocator(
+    VirtualKVMemoryRegistry& registry,
     std::string model_id,
     int64_t num_layers,
     std::vector<bool> index_layer_owned = {},

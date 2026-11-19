@@ -24,7 +24,7 @@ limitations under the License.
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/events/kv_cache_event_publisher.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
 #include "framework/model/model_params_view.h"
 
 namespace xllm {
@@ -358,7 +358,7 @@ bool BlockManagerPool::exceeds_total_capacity(
       remaining_slots[dp_rank] =
           composite->admission_capacity() / sequence_resource_units(num_tokens);
       if (options_.shared_layout()) {
-        const StaticKVCacheLayout& layout = *options_.shared_layout();
+        const StaticKVLayout& layout = *options_.shared_layout();
         const size_t full_blocks =
             num_tokens / block_size() + (num_tokens % block_size() != 0);
         size_t lower = 0;
@@ -509,7 +509,7 @@ size_t BlockManagerPool::block_resource_units(BlockType type,
     return KVCacheManager::block_resource_units(type, count);
   }
   if (options_.shared_layout()) {
-    const StaticKVCacheLayout& layout = *options_.shared_layout();
+    const StaticKVLayout& layout = *options_.shared_layout();
     if (type == BlockType::KV) {
       return count * layout.full_layer_count() * 2 *
              layout.row_bytes(KVCacheTensorRole::KEY);

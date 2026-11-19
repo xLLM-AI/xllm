@@ -25,14 +25,14 @@ namespace xllm {
 
 class KVCacheShape;
 
-class Dsv4StateCache final {
+class DeepSeekV4StateCache final {
  public:
-  Dsv4StateCache() = default;
+  DeepSeekV4StateCache() = default;
 
-  static Dsv4StateCache from_split(torch::Tensor kv, torch::Tensor score);
-  static Dsv4StateCache from_packed(torch::Tensor packed,
-                                    torch::Tensor fallback_kv,
-                                    torch::Tensor fallback_score);
+  static DeepSeekV4StateCache from_split(torch::Tensor kv, torch::Tensor score);
+  static DeepSeekV4StateCache from_packed(torch::Tensor packed,
+                                          torch::Tensor fallback_kv,
+                                          torch::Tensor fallback_score);
 
   torch::Tensor kv() const;
   torch::Tensor score() const;
@@ -75,8 +75,8 @@ class DeepSeekV4KVCacheImpl final : public KVCacheImpl {
   torch::Tensor index_cache_;
   torch::Tensor indexer_cache_scale_;
   torch::Tensor swa_cache_;
-  Dsv4StateCache compress_state_;
-  Dsv4StateCache index_state_;
+  DeepSeekV4StateCache compress_state_;
+  DeepSeekV4StateCache index_state_;
   BlockType compressed_block_type_ = BlockType::KV;
 };
 

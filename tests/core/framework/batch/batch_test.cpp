@@ -44,7 +44,7 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/transport/shared_memory_transport.h"
@@ -2446,7 +2446,7 @@ TEST(BatchTest, SharedArenaPublishesLinearGroupSlotsForReadAndWriteStates) {
 TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
   constexpr uint32_t kQueryTokens = 32768;
   ScopedPrefillChunkStride chunk_stride(kQueryTokens);
-  StaticKVCacheLayoutSpec spec;
+  StaticKVLayoutSpec spec;
   spec.num_slots = 64;
   spec.num_slabs = 16;
   spec.full_row_bytes = 16;
@@ -2461,7 +2461,7 @@ TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
       .enable_linear_state(true)
       .linear_state_num_slots(64)
       .enable_shared_kv_cache(true)
-      .shared_layout(std::make_shared<StaticKVCacheLayout>(spec))
+      .shared_layout(std::make_shared<StaticKVLayout>(spec))
       .enable_prefix_cache(false);
   CompositeBlockManager manager(build_composite_leaves(options), options);
   // Releasing a warmup allocation advances only this logical ID's lease.

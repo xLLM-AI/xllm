@@ -7,7 +7,7 @@ cc_test(
   SRCS
     host_transfer/transfer_test.cpp
   DEPS
-    :kv_cache_transfer
+    :kv_transfer
     GTest::gtest_main
 )
 
@@ -65,7 +65,7 @@ cc_test(
   SRCS
     host_transfer/compact_load_test.cpp
   DEPS
-    :kv_cache_transfer
+    :kv_transfer
     GTest::gtest_main
 )
 
@@ -75,7 +75,7 @@ cc_test(
   SRCS
     host_transfer/compact_offload_test.cpp
   DEPS
-    :kv_cache_transfer
+    :kv_transfer
     GTest::gtest_main
 )
 
@@ -89,7 +89,7 @@ cc_test(
   SRCS
     kv_cache_store_test.cpp
   DEPS
-    :kv_cache_transfer
+    :kv_transfer
     GTest::gtest_main
 )
 
@@ -99,33 +99,33 @@ cc_test(
   SRCS
     host_transfer/basic_transfer_test.cpp
   DEPS
-    :kv_cache_transfer
+    :kv_transfer
     GTest::gtest_main
 )
 
 cc_test(
   NAME
-    hierarchy_kv_cache_transfer_test
+    hierarchy_kv_transfer_test
   SRCS
-    hierarchy_kv_cache_transfer_test.cpp
+    hierarchy_kv_transfer_test.cpp
   DEPS
-    :kv_cache_transfer
+    :kv_transfer
     GTest::gtest_main
 )
 if(USE_NPU)
   cc_test(
     NAME
-      virtual_hierarchy_kv_cache_transfer_test
+      virtual_hierarchy_kv_transfer_test
     SRCS
-      virtual_hierarchy_kv_cache_transfer_test.cpp
+      virtual_hierarchy_kv_transfer_test.cpp
     DEPS
-      :kv_cache_transfer
+      :kv_transfer
       :virtual_memory_kv_cache_storage
       GTest::gtest_main
   )
   set_tests_properties(
-    VirtualHierarchyKVCacheTransferTest.RestoresVirtualKVAfterSourcePagesAreUnmapped
-    VirtualHierarchyKVCacheTransferTest.RestoresVirtualMLAAndIndexAfterSourcePagesAreUnmapped
+    VirtualHierarchyKVTransferTest.RestoresVirtualKVAfterSourcePagesAreUnmapped
+    VirtualHierarchyKVTransferTest.RestoresVirtualMLAAndIndexAfterSourcePagesAreUnmapped
     PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
   )
 endif()
@@ -135,11 +135,11 @@ if(USE_NPU OR USE_MLU)
 cc_test(
   DISCOVER_TESTS
   NAME
-    mooncake_kv_cache_transfer_test
+    mooncake_kv_transfer_test
   SRCS
-    mooncake_kv_cache_transfer_test.cpp
+    mooncake_kv_transfer_test.cpp
   DEPS
-    :kv_cache_transfer
+    :kv_transfer
     :xllm_server
     GTest::gtest_main
 )
@@ -149,7 +149,7 @@ if(USE_NPU)
       "${CMAKE_CURRENT_BINARY_DIR}/mooncake-npu-properties.cmake")
     file(GENERATE OUTPUT "${_mooncake_properties_file}" CONTENT [[
 set_tests_properties(
-  MooncakeKVCacheTransferDefaultTest.NpuLinearIndexerScalePushAndPullRoundTrip
+  MooncakeKVTransferDefaultTest.NpuLinearIndexerScalePushAndPullRoundTrip
   PROPERTIES RUN_SERIAL TRUE
              ENVIRONMENT "HCCL_NPU_SOCKET_PORT_RANGE=auto"
 )

@@ -18,7 +18,7 @@ xLLM extends the device prefix cache into a three-level hierarchy:
 
 A request first checks the Host prefix cache. Missing full blocks can be fetched from Mooncake Store into preallocated Host blocks, restored to HBM layer by layer, and reused without recomputing the matched prefix. Completed HBM blocks are asynchronously copied back to Host memory and then written to Mooncake Store.
 
-The current implementation uses `HierarchyBlockManagerPool` to manage block allocation, mounting, and lifetime; `HierarchyKVCacheTransfer` to perform unified Host-to-Device and Device-to-Host transfers; and one `KVCacheStore` in each worker to access Mooncake Store. A single Store client can manage the target model, a speculative draft model, and multiple `BlockType` values from the same model.
+The current implementation uses `HierarchyBlockManagerPool` to manage block allocation, mounting, and lifetime; `HierarchyKVTransfer` to perform unified Host-to-Device and Device-to-Host transfers; and one `KVCacheStore` in each worker to access Mooncake Store. A single Store client can manage the target model, a speculative draft model, and multiple `BlockType` values from the same model.
 
 NPU Python LLMs can use Host Cache and Mooncake Store with eager execution and ACL graphs. GLM (`glm5_2.py`) eager prefill waits for each Host KV copy group at its attention consumer, allowing reload and computation to overlap. Other Python models and graph replay retain whole-batch target/draft reload dependencies.
 
@@ -29,9 +29,9 @@ The deployment can contain the following components:
 - **etcd**: Registers compute instances and synchronizes service metadata.
 - **xLLM Service**: Routes requests and manages fused or disaggregated Prefill/Decode instances.
 - **HierarchyBlockManagerPool**: Probes the device and Host prefix caches, creates G2H, H2D, and D2H2G plans, and publishes or releases blocks after asynchronous work completes.
-- **HierarchyKVCacheTransfer**: Registers target and draft cache domains, creates Host caches, and performs Host-to-Device and Device-to-Host copies.
+- **HierarchyKVTransfer**: Registers target and draft cache domains, creates Host caches, and performs Host-to-Device and Device-to-Host copies.
 - **KVCacheStore**: Maps each logical block to one or more Mooncake objects and performs batched existence checks, reads, and writes.
-- **xLLM Worker**: Owns the device and Host KV caches, `HierarchyKVCacheTransfer`, and `KVCacheStore`, and executes inference.
+- **xLLM Worker**: Owns the device and Host KV caches, `HierarchyKVTransfer`, and `KVCacheStore`, and executes inference.
 - **Mooncake Store**: Provides the distributed, process-independent KV object tier.
 
 The service-level architecture is shown below:
@@ -40,7 +40,7 @@ The service-level architecture is shown below:
 
 ## Unified Cache Domains and Store Keys
 
-`HierarchyKVCacheTransfer` supports multiple registered cache domains. Normal inference registers only the target-model domain. Speculative decoding registers the target and draft models with the same transfer instance so they share one Host-transfer layout and one `KVCacheStore`:
+`HierarchyKVTransfer` supports multiple registered cache domains. Normal inference registers only the target-model domain. Speculative decoding registers the target and draft models with the same transfer instance so they share one Host-transfer layout and one `KVCacheStore`:
 
 | Cache domain | `CacheRole` | Store `key_component` |
 |---|---|---|
@@ -232,7 +232,7 @@ sequenceDiagram
 
 ## Speculative-Decoding Cache
 
-When speculative decoding and the Host cache are enabled, `SpeculativeWorkerImpl` makes the target and draft workers reuse one `HierarchyKVCacheTransfer`. Both cache domains must share the same producer stream. After registration is finalized, xLLM creates their Host caches, Host-transfer implementation, and `KVCacheStore` together.
+When speculative decoding and the Host cache are enabled, `SpeculativeWorkerImpl` makes the target and draft workers reuse one `HierarchyKVTransfer`. Both cache domains must share the same producer stream. After registration is finalized, xLLM creates their Host caches, Host-transfer implementation, and `KVCacheStore` together.
 
 The unified cache domains have the following behavior:
 
@@ -344,7 +344,7 @@ sequenceDiagram
     end
 ```
 
-The scheduler supports both `PUSH` and `PULL` through `kv_cache_transfer_mode`. The current code no longer provides a `kv_cache_transfer_type` option. Enable the global Mooncake Store tier on both Prefill and Decode, using disjoint `store_local_hostname` base-port ranges.
+The scheduler supports both `PUSH` and `PULL` through `kv_cache_transfer_mode`. The current code no longer provides a `kv_transfer_type` option. Enable the global Mooncake Store tier on both Prefill and Decode, using disjoint `store_local_hostname` base-port ranges.
 
 ## Deployment
 

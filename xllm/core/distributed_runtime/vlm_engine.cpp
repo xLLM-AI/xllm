@@ -177,7 +177,7 @@ bool VLMEngine::init(MasterStatus master_status) {
 
 bool VLMEngine::init(
     MasterStatus master_status,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator) {
   return init(
       master_status, /*prepare_model=*/{}, std::move(transfer_coordinator));
 }
@@ -185,7 +185,7 @@ bool VLMEngine::init(
 bool VLMEngine::init(
     MasterStatus master_status,
     const ModelInitCallback& prepare_model,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator) {
   if (!init_model(master_status, prepare_model)) {
     LOG(ERROR) << "Failed to init model from: " << options_.model_path();
     return false;
@@ -295,8 +295,8 @@ KVCacheCapacity VLMEngine::estimate_kv_cache_capacity(
 
 bool VLMEngine::allocate_kv_cache(
     const KVCacheCapacity& kv_cache_cap,
-    const VmmKVCacheLayout* shared_vmm_layout,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+    const VmmKVLayout* shared_vmm_layout,
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator) {
   const bool enable_state_cache = has_linear_attention_layers(args_) ||
                                   kv_cache_cap.kpool_tail_slot_size() > 0;
 

@@ -360,7 +360,7 @@ folly::SemiFuture<bool> WorkerMemoryClient::free_weight_pages_async(
 }
 
 std::vector<VirtualKVCacheLayerGlobalOffsets>
-WorkerMemoryClient::get_virtual_kv_cache_offsets(
+WorkerMemoryClient::get_virtual_kv_offsets(
     const std::string& model_id,
     const std::vector<int32_t>& block_ids) {
   proto::GetVirtualKVCacheOffsetsRequest req;

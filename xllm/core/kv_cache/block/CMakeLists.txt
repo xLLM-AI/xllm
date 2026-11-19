@@ -3,11 +3,11 @@ include(cc_library)
 
 cc_library(
   NAME
-    virtual_kv_cache_page_state
+    virtual_kv_page_state
   HDRS
-    virtual_kv_cache_page_state.h
+    virtual_kv_page_state.h
   SRCS
-    virtual_kv_cache_page_state.cpp
+    virtual_kv_page_state.cpp
   DEPS
     glog::glog
 )
@@ -41,14 +41,14 @@ cc_library(
   NAME
     kv_cache_block
   HDRS
-    static_kv_cache_block_pool.h
+    static_kv_block_pool.h
     block_manager.h
     linear_state_block_manager.h
     block_manager_impl.h
     concurrent_block_manager_impl.h
     sliding_window_block_manager.h
   SRCS
-    static_kv_cache_block_pool.cpp
+    static_kv_block_pool.cpp
     linear_state_block_manager.cpp
     concurrent_block_manager_impl.cpp
     block_manager_impl.cpp
@@ -56,7 +56,7 @@ cc_library(
   DEPS
     :kv_cache_block_types
     :block_utils
-    :static_kv_cache_layout
+    :static_kv_layout
     $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:graph>
     :request

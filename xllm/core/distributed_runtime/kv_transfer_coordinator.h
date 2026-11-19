@@ -21,7 +21,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
-#include "core/kv_cache/transfer/kv_cache_transfer_coordinator_base.h"
+#include "core/kv_cache/transfer/kv_transfer_coordinator_base.h"
 
 namespace xllm {
 
@@ -29,7 +29,7 @@ class DistributedWorkerManager;
 
 // Coordinates KV transfer participation and completion across distributed
 // workers. The master composes this alongside the model engine.
-class KVTransferCoordinator final : public KVCacheTransferCoordinatorBase {
+class KVTransferCoordinator final : public KVTransferCoordinatorBase {
  public:
   struct Options {
     int32_t dp_size = 1;

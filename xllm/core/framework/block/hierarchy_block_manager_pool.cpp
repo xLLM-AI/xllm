@@ -407,7 +407,7 @@ StoragePrefetchRequest build_prefetch_request(
 
 HierarchyBlockManagerPool::HierarchyBlockManagerPool(
     const BlockManagerPool::Options& options,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
+    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
     int32_t dp_size,
     VmmKVPageAllocator* page_allocator)
     : BlockManagerPool(options, dp_size, page_allocator),

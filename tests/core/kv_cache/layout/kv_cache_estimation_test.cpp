@@ -26,7 +26,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/layout/static_kv_layout.h"
 #include "framework/model/model_args.h"
 #include "runtime/options.h"
 #include "tests/core/kv_cache/dcp_indexer_test_fixture.h"
@@ -550,7 +550,7 @@ TEST(KVCacheEstimationTest, SharedStaticCostsMatchTheStorageLayout) {
   KVCacheEstimateOptions options = make_linear_attention_options();
   options.enable_shared_kv_cache = true;
 
-  StaticKVCacheLayoutSpec spec;
+  StaticKVLayoutSpec spec;
   spec.full_row_bytes = 1024;
   spec.conv_row_bytes = 96;
   spec.ssm_row_bytes = 128;
@@ -558,7 +558,7 @@ TEST(KVCacheEstimationTest, SharedStaticCostsMatchTheStorageLayout) {
   spec.ssm_dtype = torch::kFloat32;
   spec.full_layer_ids = {1, 3};
   spec.linear_layer_ids = {0, 2};
-  const StaticKVCacheLayout layout(std::move(spec));
+  const StaticKVLayout layout(std::move(spec));
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
@@ -636,7 +636,7 @@ TEST(KVCacheEstimationTest,
   EXPECT_EQ(capacity.n_blocks(), 17);
   EXPECT_EQ(capacity.num_linear_state_blocks(), 17);
 
-  StaticKVCacheLayoutSpec spec;
+  StaticKVLayoutSpec spec;
   spec.num_slots = capacity.n_blocks();
   spec.num_slabs = capacity.shared_slab_count();
   spec.full_row_bytes = 1024;
@@ -646,7 +646,7 @@ TEST(KVCacheEstimationTest,
   spec.ssm_dtype = torch::kFloat32;
   spec.full_layer_ids = {1, 3};
   spec.linear_layer_ids = {0, 2};
-  const StaticKVCacheLayout layout(std::move(spec));
+  const StaticKVLayout layout(std::move(spec));
   EXPECT_EQ(layout.num_reserved_slabs(), 2u);
   EXPECT_EQ(layout.full_read_padding_row(), 2u);
   EXPECT_TRUE(layout.can_fit(/*full_blocks=*/1, /*linear_states=*/1));
@@ -849,7 +849,7 @@ TEST(KVCacheEstimationTest, SharedStaticQwen38MtpBoundsFiaBankAddressSpan) {
   EXPECT_EQ(capacity.num_full_attention_layers(), 16);
   EXPECT_EQ(capacity.num_linear_attention_layers(), 48);
 
-  StaticKVCacheLayoutSpec spec;
+  StaticKVLayoutSpec spec;
   spec.num_slabs = static_cast<size_t>(kExpectedSlabs);
   spec.full_row_bytes = 131072;
   spec.conv_row_bytes = 71680;
@@ -864,7 +864,7 @@ TEST(KVCacheEstimationTest, SharedStaticQwen38MtpBoundsFiaBankAddressSpan) {
       spec.linear_layer_ids.emplace_back(layer);
     }
   }
-  const StaticKVCacheLayout layout(std::move(spec));
+  const StaticKVLayout layout(std::move(spec));
   EXPECT_EQ(layout.bank_count(), 16u);
   EXPECT_EQ(layout.full_layers_per_bank(), 1u);
   EXPECT_EQ(layout.linear_layers_per_bank(), 3u);
@@ -912,7 +912,7 @@ TEST(KVCacheEstimationTest, SharedStaticReservesEveryMtpCheckpoint) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  StaticKVCacheLayoutSpec spec;
+  StaticKVLayoutSpec spec;
   spec.dtype = torch::kFloat16;
   spec.ssm_dtype = torch::kFloat32;
   spec.full_row_bytes = 1024;
@@ -921,7 +921,7 @@ TEST(KVCacheEstimationTest, SharedStaticReservesEveryMtpCheckpoint) {
   spec.checkpoint_stride = 5;
   spec.full_layer_ids = {1, 3};
   spec.linear_layer_ids = {0, 2};
-  const StaticKVCacheLayout layout(std::move(spec));
+  const StaticKVLayout layout(std::move(spec));
   EXPECT_EQ(capacity.linear_conv_state_len(), 6);
   EXPECT_EQ(capacity.linear_ssm_checkpoint_stride(), 5);
   EXPECT_EQ(capacity.shared_slot_bytes(), layout.slab_bytes());

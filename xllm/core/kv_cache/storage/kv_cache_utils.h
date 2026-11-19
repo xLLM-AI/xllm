@@ -45,13 +45,13 @@ limitations under the License.
 #include "core/kv_cache/layout/cache_layout_types.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_tensor_role.h"
-#include "core/kv_cache/storage/kv_cache_tensor_allocator.h"
+#include "core/kv_cache/storage/kv_tensor_allocator.h"
 
 namespace xllm {
 
 class KVCacheShape;
 class LinearStateSlotTable;
-class StaticKVCacheLayout;
+class StaticKVLayout;
 #if defined(USE_MLU)
 namespace mlu {
 class MLUHostMemoryRegion;
@@ -86,8 +86,8 @@ struct KVCacheCreateOptions {
   // whether that layer owns indexer cache tensors.
   PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
   PROPERTY(bool, enable_kv_cache_quant) = false;
-  PROPERTY(std::shared_ptr<KVCacheTensorAllocator>, tensor_allocator);
-  PROPERTY(std::shared_ptr<const StaticKVCacheLayout>, static_layout);
+  PROPERTY(std::shared_ptr<KVTensorAllocator>, tensor_allocator);
+  PROPERTY(std::shared_ptr<const StaticKVLayout>, static_layout);
   PROPERTY(bool, shared_draft_cache) = false;
   PROPERTY(std::shared_ptr<LinearStateSlotTable>, linear_state_slot_table);
   PROPERTY(std::shared_ptr<LinearStateSlotTable>, full_block_slot_table);
