@@ -112,7 +112,7 @@ cc_library(
     :kv_cache_estimation
     :static_kv_tensor_allocator
     :virtual_memory_kv_cache_storage
-    :virtual_kv_transfer_memory_provider_impl
+    :virtual_kv_transfer_memory_factory
     :kv_transfer
     :mooncake_weight_transfer
     :linear_state_restore

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/kv_cache/transfer/virtual_kv_transfer_memory_provider_impl.h"
+#include "core/kv_cache/transfer/virtual_kv_transfer_memory_factory.h"
 
 #include <glog/logging.h>
 
@@ -26,11 +26,11 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-class VirtualKVTransferMemoryProviderImpl final
+class RegistryKVTransferMemoryProvider final
     : public VirtualKVTransferMemoryProvider {
  public:
-  VirtualKVTransferMemoryProviderImpl(VirtualKVMemoryRegistry& registry,
-                                      GlobalVirtualMemoryRegion& region)
+  RegistryKVTransferMemoryProvider(VirtualKVMemoryRegistry& registry,
+                                   GlobalVirtualMemoryRegion& region)
       : registry_(registry), region_(region) {}
 
   VirtualKVTransferMemoryRegion memory_region() const override {
@@ -88,8 +88,7 @@ class VirtualKVTransferMemoryProviderImpl final
 std::unique_ptr<VirtualKVTransferMemoryProvider>
 create_virtual_kv_transfer_memory_provider(VirtualKVMemoryRegistry& registry,
                                            GlobalVirtualMemoryRegion& region) {
-  return std::make_unique<VirtualKVTransferMemoryProviderImpl>(registry,
-                                                               region);
+  return std::make_unique<RegistryKVTransferMemoryProvider>(registry, region);
 }
 
 }  // namespace xllm

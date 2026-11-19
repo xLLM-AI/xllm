@@ -105,11 +105,11 @@ cc_library(
 
 cc_library(
   NAME
-    virtual_kv_transfer_memory_provider_impl
+    virtual_kv_transfer_memory_factory
   HDRS
-    transfer/virtual_kv_transfer_memory_provider_impl.h
+    transfer/virtual_kv_transfer_memory_factory.h
   SRCS
-    transfer/virtual_kv_transfer_memory_provider_impl.cpp
+    transfer/virtual_kv_transfer_memory_factory.cpp
   DEPS
     :virtual_memory_kv_cache_storage
     :global_virtual_memory_region

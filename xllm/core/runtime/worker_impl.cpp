@@ -79,7 +79,7 @@ limitations under the License.
 #include "core/kv_cache/storage/linear_state_slot_table.h"
 #include "core/kv_cache/storage/static_kv_tensor_allocator.h"
 #include "core/kv_cache/storage/vmm_kv_tensor_allocator.h"
-#include "core/kv_cache/transfer/virtual_kv_transfer_memory_provider_impl.h"
+#include "core/kv_cache/transfer/virtual_kv_transfer_memory_factory.h"
 #include "core/runtime/worker_memory_resources.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/model/model_params_view.h"
