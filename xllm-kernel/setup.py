@@ -85,7 +85,9 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/atb/reshape_paged_cache.cpp",
                 "csrc/npu/gamma_add_rms_norm.cpp",
                 "csrc/npu/inplace_partial_rotary_mul.cpp",
+                "csrc/npu/mla_preprocess_v2.cpp",
                 "csrc/npu/normalization.cpp",
+                "csrc/npu/quant_matmul.cpp",
                 "csrc/npu/reshape_paged_cache.cpp",
             ],
             include_dirs=[

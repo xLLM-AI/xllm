@@ -1,0 +1,9 @@
+MlaPreprocessV2 AscendC implementation
+
+Source: https://gitcode.com/xLLM-AI/xllm_ops
+Revision: 8bd2b014c38fec33ecf14dd33e05e8ad792ec5c8
+Directory: xllm_ops/mla_preprocess_v2
+
+CANN builds a private operator type for coexistence with the legacy provider.
+Includes the shared MlaPreprocess tiling and kernel headers used by V2.
+This package builds the per-tensor INT8 weight path with ND/NZ caches.

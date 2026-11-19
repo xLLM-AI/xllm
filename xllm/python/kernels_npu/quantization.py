@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 import torch_npu
+from xllm_kernel.ops import quant_matmul_out as _quant_matmul_out
 
 
 def quant_matmul(
@@ -79,7 +80,7 @@ def quant_matmul_out(
     out: torch.Tensor,
 ) -> torch.Tensor:
     """Run native quantized matmul directly into the caller-owned output."""
-    return torch.ops.xllm_ops.quant_matmul_out(
+    return _quant_matmul_out(
         x1,
         x2,
         transpose2,

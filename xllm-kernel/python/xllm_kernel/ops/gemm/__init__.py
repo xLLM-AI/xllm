@@ -32,7 +32,19 @@ def _operation(contract: OpContract) -> Operation:
 
 MATMUL_EIN_SUM_OPERATION = _operation(MATMUL_EIN_SUM_CONTRACT)
 MATMUL_EIN_SUM_OUT_OPERATION = _operation(MATMUL_EIN_SUM_OUT_CONTRACT)
-OPERATIONS = (MATMUL_EIN_SUM_OPERATION, MATMUL_EIN_SUM_OUT_OPERATION)
+QUANT_MATMUL_OUT_CONTRACT = OpContract("quant_matmul_out", 1, ("out",), True, "quant_matmul")
+QUANT_MATMUL_OUT_OPERATION = Operation(
+    QUANT_MATMUL_OUT_CONTRACT,
+    (
+        BackendModule(
+            module="xllm_kernel.ops.gemm.ascendc",
+            platform=PlatformEnum.NPU,
+            requires=("torch_npu",),
+            implementations=("npu.ascendc.quant_matmul_out",),
+        ),
+    ),
+)
+OPERATIONS = (MATMUL_EIN_SUM_OPERATION, MATMUL_EIN_SUM_OUT_OPERATION, QUANT_MATMUL_OUT_OPERATION)
 
 
 def matmul_ein_sum(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -55,3 +67,20 @@ def matmul_ein_sum_out(x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor)
     element is overwritten. Its address stays fixed across capture and replay.
     """
     return MATMUL_EIN_SUM_OUT_OPERATION.get_prepared().function(x, weight, out)
+
+
+def quant_matmul_out(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    transpose2: bool,
+    scale: torch.Tensor,
+    offset: torch.Tensor | None,
+    pertoken_scale: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    output_dtype: torch.dtype | None,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    """Write the quantized product into out and return the same tensor."""
+    return QUANT_MATMUL_OUT_OPERATION.get_prepared().function(
+        input, weight, transpose2, scale, offset, pertoken_scale, bias, output_dtype, out
+    )

@@ -62,6 +62,7 @@ _BUILTINS = (
     "xllm_kernel.ops.attention.fia",
     "xllm_kernel.ops.attention.gdn",
     "xllm_kernel.ops.attention.kda",
+    "xllm_kernel.ops.attention.mla",
     "xllm_kernel.ops.positional_encoding",
 )
 

@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import torch
 import torch_npu
-from xllm_kernel.ops import matmul_ein_sum, reshape_paged_cache
+from xllm_kernel.ops import matmul_ein_sum, mla_preprocess_v2, reshape_paged_cache
+from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2
+from xllm_kernel.ops.attention.mla.npu.weights import prepare_mla_preprocess_v2_q_b, prepare_mla_preprocess_v2_qkv
 
 from xllm.python.model_executor.forward_context import get_forward_context_or_none
 
@@ -27,7 +29,6 @@ from .quantization import dynamic_quant, quant_matmul, quant_matmul_out, quantiz
 
 _KROPE_CTKV_CACHE_MODE = 1
 _NZ_CACHE_MODE = 3
-_PER_TENSOR_QUANT_ASYMM_MODE = 0
 MLA_PREPROCESS_V2_MAX_TOKENS = 1024
 _MLA_PREPROCESS_V2_KV_LORA_RANK = 512
 _MLA_PREPROCESS_V2_QK_ROPE_HEAD_DIM = 64
@@ -36,12 +37,6 @@ _KV_RMSNORM_ROPE_CACHE = getattr(
     "npu_kv_rmsnorm_rope_cache",
     None,
 )
-
-
-def has_mla_preprocess_v2() -> bool:
-    """Return whether the xLLM binding and CANN MLAPO v2 symbols exist."""
-    capability_op = getattr(torch.ops.xllm_ops, "has_mla_preprocess_v2", None)
-    return capability_op is not None and bool(capability_op())
 
 
 def supports_mla_preprocess_v2(
@@ -54,72 +49,6 @@ def supports_mla_preprocess_v2(
         and qk_rope_head_dim == _MLA_PREPROCESS_V2_QK_ROPE_HEAD_DIM
         and has_mla_preprocess_v2()
     )
-
-
-def _reorder_rope_axis(
-    tensor: torch.Tensor,
-    rope_dim: int,
-    dim: int,
-) -> torch.Tensor:
-    """Move even RoPE channels before odd channels on one tensor axis."""
-    axis_size = tensor.shape[dim]
-    rope_start = axis_size - rope_dim
-    prefix = tensor.narrow(dim, 0, rope_start)
-    rope = tensor.narrow(dim, rope_start, rope_dim)
-    even = rope.index_select(
-        dim,
-        torch.arange(0, rope_dim, 2, device=tensor.device),
-    )
-    odd = rope.index_select(
-        dim,
-        torch.arange(1, rope_dim, 2, device=tensor.device),
-    )
-    return torch.cat((prefix, even, odd), dim=dim).contiguous()
-
-
-def prepare_mla_preprocess_v2_qkv(
-    weight: torch.Tensor,
-    descale: torch.Tensor,
-    bias: torch.Tensor,
-    kv_lora_rank: int,
-    qk_rope_head_dim: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Prepare fused KV-A/Q-A tensors for ``MlaPreprocessV2``."""
-    kv_dim = kv_lora_rank + qk_rope_head_dim
-
-    def _prepare(tensor: torch.Tensor) -> torch.Tensor:
-        kv = _reorder_rope_axis(tensor.narrow(0, 0, kv_dim), qk_rope_head_dim, 0)
-        q = tensor.narrow(0, kv_dim, tensor.shape[0] - kv_dim)
-        return torch.cat((kv, q), dim=0).contiguous()
-
-    prepared_weight = _prepare(weight)
-    if prepared_weight.device.type != "cpu":
-        prepared_weight = torch_npu.npu_format_cast(prepared_weight, torch_npu.Format.FRACTAL_NZ)
-    return prepared_weight, _prepare(descale), _prepare(bias)
-
-
-def prepare_mla_preprocess_v2_q_b(
-    weight: torch.Tensor,
-    descale: torch.Tensor,
-    bias: torch.Tensor,
-    num_heads: int,
-    qk_nope_head_dim: int,
-    qk_rope_head_dim: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Prepare Q-B tensors for ``MlaPreprocessV2``."""
-    head_dim = qk_nope_head_dim + qk_rope_head_dim
-
-    def _prepare(tensor: torch.Tensor) -> torch.Tensor:
-        shape = tensor.shape
-        viewed = tensor.view(num_heads, head_dim, *shape[1:])
-        reordered = _reorder_rope_axis(viewed, qk_rope_head_dim, 1)
-        return reordered.reshape(shape).contiguous()
-
-    # Let the format cast pack NZ storage while preserving the logical matrix.
-    prepared_weight = _prepare(weight)
-    if prepared_weight.device.type != "cpu":
-        prepared_weight = torch_npu.npu_format_cast(prepared_weight, torch_npu.Format.FRACTAL_NZ)
-    return prepared_weight, _prepare(descale), _prepare(bias)
 
 
 def deepseek_mla_preprocess_decode_v2(
@@ -152,8 +81,7 @@ def deepseek_mla_preprocess_decode_v2(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run the fused xLLM MLAPO v2 decode path."""
     cache_mode = _NZ_CACHE_MODE if _mla_cache_mode(kv_cache) == "PA_NZ" else _KROPE_CTKV_CACHE_MODE
-    num_tokens = hidden.shape[0]
-    q_latent, _, q_pe, _, q_c = torch.ops.xllm_ops.mla_preprocess_v2(
+    return mla_preprocess_v2(
         hidden,
         input_norm_weight,
         input_norm_bias,
@@ -170,30 +98,17 @@ def deepseek_mla_preprocess_decode_v2(
         q_b_deq_scale,
         q_b_quant_bias,
         kv_norm_weight,
-        rope_cos.view(num_tokens, -1),
-        rope_sin.view(num_tokens, -1),
+        rope_cos,
+        rope_sin,
         w_uk,
         kv_cache,
         rope_cache,
         slot_mapping,
-        qkv_input_scale,
-        q_b_input_scale,
         q_lora_rank,
         qk_rope_head_dim,
-        qk_rope_head_dim,
         norm_epsilon,
-        2,
-        2,
-        True,
-        True,
-        True,
         cache_mode,
-        _PER_TENSOR_QUANT_ASYMM_MODE,
-        False,
-        1,
-        True,
     )
-    return q_c, q_latent, q_pe
 
 
 def _mla_cache_mode(kv_cache: torch.Tensor) -> str:
