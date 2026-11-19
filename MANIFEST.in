@@ -5,10 +5,13 @@ include .gitmodules
 recursive-include src *.*
 recursive-include xllm *.py
 recursive-include xllm-kernel *.py *.toml *.md *.cpp *.h
-recursive-include xllm-kernel/csrc/ascendc CMakeLists.txt *.cmake *.txt *.hpp
+recursive-include xllm-kernel/csrc/ascendc CMakeLists.txt *.cmake *.txt *.hpp *.inc
 prune xllm-kernel/third_party/catlass
 recursive-include xllm-kernel/third_party/catlass/include *.h *.hpp
 include xllm-kernel/third_party/catlass/LICENSE
+prune xllm-kernel/third_party/pto-isa
+recursive-include xllm-kernel/third_party/pto-isa/include *.h *.hpp *.inc
+include xllm-kernel/third_party/pto-isa/LICENSE
 recursive-include xllm/auto_config *.json
 recursive-include examples *.py
 recursive-include third_party *

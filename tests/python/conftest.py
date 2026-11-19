@@ -66,7 +66,9 @@ def causal_conv1d_reference(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
             state[sequence].copy_(window[-state.shape[1] :])
         return output.view_as(inputs)
 
-    monkeypatch.setattr(torch.ops.xllm_ops, "causal_conv1d", native_conv, raising=False)
+    from xllm.python.attention import kda_linear_attention
+
+    monkeypatch.setattr(kda_linear_attention, "causal_conv1d", native_conv)
     return calls
 
 
@@ -144,7 +146,6 @@ def _grouped_moe_bf16_reference(
 @pytest.fixture(autouse=True)
 def _model_cpu_normalization(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     if request.module.__name__.rsplit(".", 1)[-1] not in {
-        "test_glm5_next_kda",
         "test_glm5_next_dsa",
         "test_glm53flash_rms_norm",
         "test_deepseek_v41_model",

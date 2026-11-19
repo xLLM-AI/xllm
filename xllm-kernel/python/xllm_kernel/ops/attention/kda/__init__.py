@@ -26,7 +26,40 @@ CAUSAL_CONV1D_UPDATE_V2_OPERATION = Operation(
         ),
     ),
 )
-OPERATIONS = (CAUSAL_CONV1D_UPDATE_V2_OPERATION,)
+CAUSAL_CONV1D_CONTRACT = OpContract("causal_conv1d", 1, ("conv_state",), False, "depthwise_conv1d")
+CAUSAL_CONV1D_OPERATION = Operation(
+    CAUSAL_CONV1D_CONTRACT,
+    (
+        BackendModule(
+            module="xllm_kernel.ops.attention.gdn.ascendc",
+            platform=PlatformEnum.NPU,
+            requires=("torch_npu",),
+            implementations=("npu.ascendc.causal_conv1d",),
+        ),
+    ),
+)
+OPERATIONS = (CAUSAL_CONV1D_UPDATE_V2_OPERATION, CAUSAL_CONV1D_OPERATION)
+
+
+def causal_conv1d(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    query_start_loc: list[int],
+    activation_mode: int,
+    run_mode: int,
+) -> torch.Tensor:
+    """Convolve channel-last tokens in FP16 or BF16 and update staged history.
+
+    Dense input is [batch, tokens, channels] with an empty query-start list.
+    Packed input is [tokens, channels] with host cumulative query lengths.
+    The weight is [width, channels] and state is [batch, width - 1, channels].
+    Activation 1 applies SiLU. Run mode 0 processes prefill and mode 1 updates
+    decode history. The output has the input's shape and owns fresh storage.
+    """
+    return CAUSAL_CONV1D_OPERATION.get_prepared().function(
+        input, weight, conv_state, query_start_loc, activation_mode, run_mode
+    )
 
 
 def causal_conv1d_update_v2(

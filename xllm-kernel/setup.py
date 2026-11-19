@@ -66,6 +66,13 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                     if packaged_header.exists():
                         header = source / component / "op_host/op_api" / f"aclnn_{component}.h"
                         shutil.copy2(header, packaged_header)
+                chunk_gdn = source / "mega_chunk_gdn/op_host/op_api"
+                shutil.copy2(chunk_gdn / "aclnn_mega_chunk_gdn.h", headers / "aclnn_xllm_kernel_mega_chunk_gdn.h")
+                recurrent_header = headers / "aclnn_xllm_kernel_recurrent_gated_delta_rule.h"
+                if recurrent_header.exists():
+                    recurrent_header.unlink()
+                    recurrent_gdn = source / "recurrent_gated_delta_rule/op_host/op_api"
+                    shutil.copy2(recurrent_gdn / "aclnn_recurrent_gated_delta_rule.h", headers)
                 shutil.copy2(gamma / "CANN_LICENSE.txt", vendor)
                 for provenance in sorted(source.glob("*/SOURCE.txt")):
                     shutil.copy2(provenance, vendor / f"{provenance.parent.name}_SOURCE.txt")
@@ -89,6 +96,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/atb/matmul_ein_sum.cpp",
                 "csrc/atb/reshape_paged_cache.cpp",
                 "csrc/npu/gamma_add_rms_norm.cpp",
+                "csrc/npu/gdn.cpp",
                 "csrc/npu/hyper_connection.cpp",
                 "csrc/npu/inplace_partial_rotary_mul.cpp",
                 "csrc/npu/mla_preprocess_v2.cpp",

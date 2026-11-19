@@ -45,11 +45,90 @@ def _operation(contract: OpContract) -> Operation:
 FUSED_RECURRENT_GATED_DELTA_RULE_OPERATION = _operation(FUSED_RECURRENT_GATED_DELTA_RULE_CONTRACT)
 FUSED_SIGMOID_GATING_DELTA_RULE_UPDATE_OPERATION = _operation(FUSED_SIGMOID_GATING_DELTA_RULE_UPDATE_CONTRACT)
 FUSED_QKVZBA_SPLIT_RESHAPE_CAT_OPERATION = _operation(FUSED_QKVZBA_SPLIT_RESHAPE_CAT_CONTRACT)
+
+
+def _ascendc_operation(contract: OpContract) -> Operation:
+    return Operation(
+        contract,
+        (
+            BackendModule(
+                module="xllm_kernel.ops.attention.gdn.ascendc",
+                platform=PlatformEnum.NPU,
+                requires=("torch_npu",),
+                implementations=(f"npu.ascendc.{contract.operation}",),
+            ),
+        ),
+    )
+
+
+CAUSAL_CONV1D_QKV_PREFILL_CONTRACT = OpContract(
+    "causal_conv1d_qkv_prefill", 1, ("conv_state",), False, "packed_bf16_qkv_convolution"
+)
+CHUNK_GATED_DELTA_RULE_CONTRACT = OpContract(
+    "chunk_gated_delta_rule", 1, (), False, "fp16_chunk_compute_fp32_final_state"
+)
+CAUSAL_CONV1D_QKV_PREFILL_OPERATION = _ascendc_operation(CAUSAL_CONV1D_QKV_PREFILL_CONTRACT)
+CHUNK_GATED_DELTA_RULE_OPERATION = _ascendc_operation(CHUNK_GATED_DELTA_RULE_CONTRACT)
 OPERATIONS = (
     FUSED_RECURRENT_GATED_DELTA_RULE_OPERATION,
     FUSED_SIGMOID_GATING_DELTA_RULE_UPDATE_OPERATION,
     FUSED_QKVZBA_SPLIT_RESHAPE_CAT_OPERATION,
+    CAUSAL_CONV1D_QKV_PREFILL_OPERATION,
+    CHUNK_GATED_DELTA_RULE_OPERATION,
 )
+
+
+def causal_conv1d_qkv_prefill(
+    value: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    query_start_loc: list[int],
+    state_indices: list[int],
+    has_initial_state: list[int],
+    num_qk_heads: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Convolve packed BF16 prefill with width 4 and return normalized Q/K and V.
+
+    Host metadata selects the history slots to read and update in place.
+    """
+    return CAUSAL_CONV1D_QKV_PREFILL_OPERATION.get_prepared().function(
+        value,
+        weight,
+        conv_state,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        num_qk_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+    )
+
+
+def chunk_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    *,
+    sequence_lengths: list[int] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run packed chunk GDN and return fresh output and FP32 final KV state.
+
+    Q, K and V have shape [tokens, heads, 128] and g/beta have
+    [tokens, value_heads]. The initial state is [sequences, value_heads, 128, 128].
+    Warm up once on the device and pass host sequence lengths for ACLGraph.
+    The lengths determine workspace sizing for the captured graph.
+    """
+    return CHUNK_GATED_DELTA_RULE_OPERATION.get_prepared().function(
+        q, k, v, g, beta, initial_state, cu_seqlens, sequence_lengths=sequence_lengths
+    )
 
 
 def fused_recurrent_gated_delta_rule(
