@@ -1,0 +1,61 @@
+[
+  {
+    "op": "RowColInt8Quant",
+    "language": "cpp",
+    "input_desc": [
+      {
+        "name": "x",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "float16"
+        ]
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "qRow",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "int8"
+        ]
+      },
+      {
+        "name": "qCol",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "int8"
+        ]
+      },
+      {
+        "name": "rowAbsmax",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "float32"
+        ]
+      },
+      {
+        "name": "colAbsmax",
+        "param_type": "required",
+        "format": [
+          "ND"
+        ],
+        "type": [
+          "float32"
+        ]
+      }
+    ],
+    "attr": []
+  }
+]

@@ -1,0 +1,21 @@
+{
+  "measured_date": "2026-10-14",
+  "hardware": "Ascend 910C / Atlas A3",
+  "soc": "Ascend910_9382",
+  "physical_device": 15,
+  "logical_device": 0,
+  "vector_core_num": 48,
+  "cube_core_num": 24,
+  "device_total_memory_bytes": 65796046848,
+  "architecture": "aarch64",
+  "os_release": "NAME=\"openEuler\"\nVERSION=\"24.03 (LTS-SP3)\"\nID=\"openEuler\"\nVERSION_ID=\"24.03\"\nPRETTY_NAME=\"openEuler 24.03 (LTS-SP3)\"\nANSI_COLOR=\"0;31\"\n\n",
+  "python": "3.12.13",
+  "torch": "2.10.0+cpu",
+  "torch_npu": "2.10.0.post4+git5dd8ef3",
+  "numpy": "2.2.6",
+  "ml_dtypes": "0.6.0",
+  "CANN": "9.1.0",
+  "driver": "25.5.t6.b001",
+  "cmake": "cmake version 3.27.9",
+  "image": "quay.io/jd_xllm/xllm-ai:xllm-dev-cann9.1.0-a3-openeuler24.03-py3.12"
+}

@@ -1,0 +1,57 @@
+{
+  "RowColInt8Quant": {
+    "dynamicRankSupport": true,
+    "simplifiedKeyMode": 0,
+    "optionalInputMode": "gen_placeholder",
+    "optionalOutputMode": "gen_placeholder",
+    "params": {
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "qRow",
+          "index": 0,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "qCol",
+          "index": 1,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "rowAbsmax",
+          "index": 2,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        },
+        {
+          "name": "colAbsmax",
+          "index": 3,
+          "paramType": "required",
+          "formatMode": "static_nd_agnostic"
+        }
+      ]
+    },
+    "binaryList": [
+      {
+        "coreType": 0,
+        "simplifiedKey": [
+          "RowColInt8Quant/d=0,p=1/1,2/2,2/2,2/0,2/0,2",
+          "RowColInt8Quant/d=0,p=0/1,2/2,2/2,2/0,2/0,2",
+          "RowColInt8Quant/d=1,p=1/1,2/2,2/2,2/0,2/0,2",
+          "RowColInt8Quant/d=1,p=0/1,2/2,2/2,2/0,2/0,2"
+        ],
+        "binPath": "ascend910_93/row_col_int8_quant/RowColInt8Quant_4c4740efce4348aac347649b999452a5.o",
+        "jsonPath": "ascend910_93/row_col_int8_quant/RowColInt8Quant_4c4740efce4348aac347649b999452a5.json"
+      }
+    ]
+  }
+}

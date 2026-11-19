@@ -1,0 +1,160 @@
+Preset CMake variables:
+
+  ASCEND_CANN_PACKAGE_PATH:PATH="/usr/local/Ascend/cann-9.1.0"
+  ASCEND_COMPUTE_UNIT:STRING="ascend910_93"
+  ASCEND_PACK_SHARED_LIBRARY:BOOL="False"
+  ASCEND_PYTHON_EXECUTABLE:STRING="python3"
+  CMAKE_BUILD_TYPE:STRING="Release"
+  CMAKE_CROSS_PLATFORM_COMPILER:PATH="/usr/bin/aarch64-linux-gnu-g++"
+  CMAKE_INSTALL_PREFIX:PATH="/tmp/cann-aclnn-build/031ae796a6095034/build_out"
+  ENABLE_BINARY_PACKAGE:BOOL="True"
+  ENABLE_CROSS_COMPILE:BOOL="False"
+  ENABLE_SOURCE_PACKAGE:BOOL="True"
+  ENABLE_TEST:BOOL="False"
+  vendor_name:STRING="community_task2"
+
+-- The C compiler identification is GNU 12.3.1
+-- The CXX compiler identification is GNU 12.3.1
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- set package config: INSTALL_PATH;/tmp/cann-aclnn-build/031ae796a6095034/build_out/
+-- Opbuild generating sources
+-- Opbuild generating sources - done
+INFO target name: cust_optiling
+INFO target name: cust_opapi
+INFO target name: cust_op_proto
+INFO target name: ascendc_kernels
+-- Configuring done (1.8s)
+-- Generating done (0.0s)
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    ASCEND_PACK_SHARED_LIBRARY
+    CMAKE_CROSS_PLATFORM_COMPILER
+    ENABLE_TEST
+
+
+-- Build files have been written to: /tmp/cann-aclnn-build/031ae796a6095034/build_out
+[ 50%] Generating ../autogen/copy_kernel_src.timestamp
+[ 50%] Building CXX object op_host/CMakeFiles/cust_optiling.dir/row_col_int8_quant.cpp.o
+[ 50%] Built target ascendc_kernels_copy_kernel_srcs
+[ 75%] Generating ascendc_kernels/tbe/op_info_cfg/ai_core/ascend910_93/aic-ascend910_93-ops-info.json
+
+
+==============check valid for ops info start==============
+==============check valid for ops info end================
+
+
+Compile op info cfg successfully.
+[ 75%] Built target ascendc_kernels_ops_info_gen_ascend910_93
+[ 75%] Built target cust_optiling
+[100%] Linking CXX shared library libcust_opmaster_rt2.0.so
+[100%] Built target community_task2_ascendc_cust_optiling
+[ascend910_93] Generating RowColInt8Quant_4c4740efce4348aac347649b999452a5 ...
+In file included from /tmp/cann-aclnn-build/031ae796a6095034/build_out/op_kernel/RowColInt8Quant_ascend910_93/kernel_0/kernel_meta_RowColInt8Quant_4c4740efce4348aac347649b999452a5/kernel_meta/RowColInt8Quant_4c4740efce4348aac347649b999452a5_11799_kernel.cpp:6:
+/tmp/cann-aclnn-build/031ae796a6095034/op_kernel/row_col_int8_quant.cpp:6:2: warning: 'SetSysWorkspace' is deprecated: NOTICE: SetSysWorkSpace has been deprecated and will be removed in the next version. [-Wdeprecated-declarations]
+ SetSysWorkspace(workspace);
+ ^
+/usr/local/Ascend/cann-9.1.0/aarch64-linux/asc/impl/basic_api/dav_c220/kernel_operator_common_impl.h:29:3: note: 'SetSysWorkspace' has been explicitly marked deprecated here
+[[deprecated(
+  ^
+1 warning generated.
+Opc tool start working now, please wait for a moment.
+[ascend910_93] Generating RowColInt8Quant_4c4740efce4348aac347649b999452a5 Done
+[100%] Built target RowColInt8Quant_ascend910_93
+[100%] Built target ascendc_kernels_ascendc_bin_ascend910_93_gen_ops_config
+[100%] Built target binary
+[  9%] Generating scripts/install.sh, scripts/upgrade.sh, scripts/uninstall.sh
+[  9%] Built target gen_version_info
+[ 18%] Building CXX object op_host/CMakeFiles/cust_opapi.dir/__/autogen/aclnn_row_col_int8_quant.cpp.o
+[ 18%] Built target modify_vendor
+[ 27%] Building CXX object op_host/CMakeFiles/cust_op_proto.dir/row_col_int8_quant.cpp.o
+[ 27%] Built target cust_opapi
+[ 36%] Built target cust_optiling
+[ 45%] Linking CXX shared library libcust_opapi.so
+[ 45%] Built target community_task2_ascendc_cust_opapi
+[ 45%] Built target community_task2_update_so_names
+[ 54%] Built target ascendc_kernels_copy_kernel_srcs
+[ 63%] Generating ascendc_kernels/tbe/op_info_cfg/ai_core/npu_supported_ops.json
+/tmp/cann-aclnn-build/031ae796a6095034/build_out/autogen /tmp/cann-aclnn-build/031ae796a6095034/build_out/op_kernel/ascendc_kernels/tbe/op_info_cfg/ai_core
+[INFO] Succeeded generated /tmp/cann-aclnn-build/031ae796a6095034/build_out/op_kernel/ascendc_kernels/tbe/op_info_cfg/ai_core/npu_supported_ops.json
+[ 63%] Built target community_task2_npu_supported_ops
+[ 72%] Built target community_task2_ascendc_cust_optiling
+[ 81%] Built target ascendc_kernels_ops_info_gen_ascend910_93
+[ 81%] Built target optiling_compat
+[ 90%] Building CXX object op_host/CMakeFiles/cust_op_proto.dir/__/autogen/op_proto.cc.o
+[ 90%] Built target cust_op_proto
+[100%] Linking CXX shared library libcust_opsproto_rt2.0.so
+[100%] Built target community_task2_ascendc_cust_op_proto
+Run CPack packaging tool...
+CPack: Create package using External
+CPack: Install projects
+CPack: - Run preinstall target for: opp
+CPack: - Install project: opp []
+CPack: Create package
+
+About to compress 1136 KB of data...
+Adding files to archive named "custom_opp_openEuler_aarch64.run"...
+./help.info
+./install.sh
+./packages/vendors/community_task2/framework/tensorflow/npu_supported_ops.json
+./packages/vendors/community_task2/op_api/include/aclnn_row_col_int8_quant.h
+./packages/vendors/community_task2/op_api/lib/libcust_opapi.so
+./packages/vendors/community_task2/op_impl/ai_core/tbe/community_task2_impl/dynamic/kernel_impl.h
+./packages/vendors/community_task2/op_impl/ai_core/tbe/community_task2_impl/dynamic/row_col_int8_quant.cpp
+./packages/vendors/community_task2/op_impl/ai_core/tbe/community_task2_impl/dynamic/row_col_int8_quant.py
+./packages/vendors/community_task2/op_impl/ai_core/tbe/community_task2_impl/dynamic/row_col_int8_quant_tiling.h
+./packages/vendors/community_task2/op_impl/ai_core/tbe/config/ascend910_93/aic-ascend910_93-ops-info.json
+./packages/vendors/community_task2/op_impl/ai_core/tbe/kernel/ascend910_93/row_col_int8_quant/RowColInt8Quant_4c4740efce4348aac347649b999452a5.json
+./packages/vendors/community_task2/op_impl/ai_core/tbe/kernel/ascend910_93/row_col_int8_quant/RowColInt8Quant_4c4740efce4348aac347649b999452a5.o
+./packages/vendors/community_task2/op_impl/ai_core/tbe/kernel/config/ascend910_93/binary_info_config.json
+./packages/vendors/community_task2/op_impl/ai_core/tbe/kernel/config/ascend910_93/row_col_int8_quant.json
+./packages/vendors/community_task2/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64/libcust_opmaster_rt2.0.so
+./packages/vendors/community_task2/op_impl/ai_core/tbe/op_tiling/liboptiling.so
+./packages/vendors/community_task2/op_proto/inc/op_proto.h
+./packages/vendors/community_task2/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so
+./packages/vendors/community_task2/version.info
+./uninstall.sh
+./upgrade.sh
+CRC: 3729529095
+SHA256: 6f758cf0f6eec1d13c00e3e1341f67527e3383b52872c9fd0652d6351edeb006
+Skipping md5sum at user request
+
+Self-extractable archive "custom_opp_openEuler_aarch64.run" successfully created.
+Copy /tmp/cann-aclnn-build/031ae796a6095034/build_out//_CPack_Packages/Linux/External/custom_opp_openEuler_aarch64.run/custom_opp_openEuler_aarch64.run to /tmp/cann-aclnn-build/031ae796a6095034/build_out/
+Copy /tmp/cann-aclnn-build/031ae796a6095034/build_out//_CPack_Packages/Linux/External/custom_opp_openEuler_aarch64.run/custom_opp_openEuler_aarch64.run to /tmp/cann-aclnn-build/031ae796a6095034/build_out//
+CPack: - package: /tmp/cann-aclnn-build/031ae796a6095034/build_out/custom_opp_openEuler_aarch64.run.json generated.
+CPack: - package: /tmp/cann-aclnn-build/031ae796a6095034/build_out/custom_opp_openEuler_aarch64.run generated.
+Verifying archive integrity...     0%    32%    65%    97%  100%   SHA256 checksums are OK. All good.
+Uncompressing version:1.0     0%    32%    65%    97%  100%  
+[ops_custom] [2026-10-15 08:17:52] [INFO] create /tmp/cann-aclnn-build/031ae796a6095034/installed/vendors.
+[ops_custom] [2026-10-15 08:17:52] [INFO] create /tmp/cann-aclnn-build/031ae796a6095034/installed/vendors/community_task2.
+[ops_custom] [2026-10-15 08:17:52] [INFO] validate shared libraries before installation
+[ops_custom] [2026-10-15 08:17:52] [INFO] upgrade framework
+[ops_custom] [2026-10-15 08:17:52] [INFO] create /tmp/cann-aclnn-build/031ae796a6095034/installed/vendors/community_task2/framework.
+[ops_custom] [2026-10-15 08:17:52] [INFO] copy new ops framework files ......
+[ops_custom] [2026-10-15 08:17:52] [INFO] upgrade op proto
+[ops_custom] [2026-10-15 08:17:52] [INFO] create /tmp/cann-aclnn-build/031ae796a6095034/installed/vendors/community_task2/op_proto.
+[ops_custom] [2026-10-15 08:17:52] [INFO] copy new ops op_proto files ......
+[ops_custom] [2026-10-15 08:17:52] [INFO] upgrade op impl
+[ops_custom] [2026-10-15 08:17:52] [INFO] create /tmp/cann-aclnn-build/031ae796a6095034/installed/vendors/community_task2/op_impl.
+[ops_custom] [2026-10-15 08:17:52] [INFO] copy new ops op_impl files ......
+[ops_custom] [2026-10-15 08:17:52] [INFO] upgrade op api
+[ops_custom] [2026-10-15 08:17:52] [INFO] create /tmp/cann-aclnn-build/031ae796a6095034/installed/vendors/community_task2/op_api.
+[ops_custom] [2026-10-15 08:17:52] [INFO] copy new ops op_api files ......
+[ops_custom] [2026-10-15 08:17:52] [INFO] upgrade uninstall
+[ops_custom] [2026-10-15 08:17:52] [INFO] copy new uninstall.sh files ......
+[ops_custom] [2026-10-15 08:17:52] [INFO] upgrade version.info
+[ops_custom] [2026-10-15 08:17:52] [INFO] copy new version.info files ......
+[ops_custom] [2026-10-15 08:17:52] [INFO] no need to upgrade custom.proto files
+[ops_custom] [2026-10-15 08:17:52] [INFO] using requirements: when custom module install finished or before you run the custom module, execute the command [ source /tmp/cann-aclnn-build/031ae796a6095034/installed/vendors/community_task2/bin/set_env.bash ] to set the environment path
+SUCCESS
+ACLNN_INSTALL_OK /work/解答2-行列双向INT8量化算子/aclnn_install
