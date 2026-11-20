@@ -15,10 +15,22 @@ limitations under the License.
 
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <string_view>
 #include <unordered_set>
 
 namespace xllm {
+
+inline constexpr std::array<std::string_view, 3> kGlm5NextModel = {
+    "glm5_3_flash",
+    "glm5_next",
+    "glm5_next_text",
+};
+
+inline bool is_glm5_next_model(std::string_view model_type) {
+  return std::ranges::find(kGlm5NextModel, model_type) != kGlm5NextModel.end();
+}
 
 inline bool is_deepseek_v4_family(std::string_view model_type) {
   return model_type == "deepseek_v4" || model_type == "deepseek_v41" ||
@@ -53,30 +65,11 @@ inline bool is_mla_model_type(std::string_view model_type) {
   return mla_model_type_set().contains(model_type);
 }
 
-// SFA C8: packed [int8 nope | bf16 rope | fp32 scale] KV cache. Currently only
-// GLM-5.2 (glm_moe_dsa) drives the packed 656B write/read pipeline.
-inline bool supports_mla_kv_cache_quant(std::string_view model_type) {
-  return model_type == "glm_moe_dsa" || model_type == "glm_moe_dsa_mtp";
-}
-
-// Combined predicate for the SFA C8 packed KV-cache layout. The C8 layout is
-// only defined for the (small) set of models covered by
-// supports_mla_kv_cache_quant(), and every such model_type is by construction
-// in mla_model_type_set(), so a redundant enable_mla parameter is not needed
-// here. Callers that also need to honor the runtime enable_mla config bit
-// AND it in at the call site (estimation is the only such caller today).
-//
-// The packed 656B layout is implemented on NPU only. Gating the build here
-// rather than at each consumer is what lets every caller read this flat: on a
-// non-NPU build the predicate is unconditionally false, so a caller that
-// eagerly forwards it into KVCacheCapacity / KVCacheCreateOptions can never
-// push a packed shape at a backend that has no write or read kernel for it.
-// If the layout ever lands on another backend, flip this single gate and every
-// consumer follows.
 inline bool enable_mla_packed_c8(bool enable_kv_cache_quant,
                                  std::string_view model_type) {
 #if defined(USE_NPU)
-  return enable_kv_cache_quant && supports_mla_kv_cache_quant(model_type);
+  return enable_kv_cache_quant &&
+         (model_type == "glm_moe_dsa" || model_type == "glm_moe_dsa_mtp");
 #else
   (void)enable_kv_cache_quant;
   (void)model_type;

@@ -29,6 +29,7 @@ limitations under the License.
 #include <map>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <utility>
 
 #include "common/metrics.h"
@@ -44,11 +45,9 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/framework/model/model_type.h"
 #include "core/framework/model_loader/model_loader.h"
-#include "core/framework/speculative/draft_config.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
@@ -60,7 +59,6 @@ limitations under the License.
 #include "core/util/tensor_options.h"
 #include "framework/block/kv_cache_manager_factory.h"
 #include "framework/model/model_args.h"
-#include "models/model_registry.h"
 #include "runtime/decode_graph_bucket.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/worker.h"
@@ -191,28 +189,14 @@ bool LLMEngine::init(
 bool LLMEngine::init_model(MasterStatus master_status,
                            const ModelInitCallback& prepare_model) {
   const std::string& model_path = options_.model_path();
-  auto model_loader = ModelLoader::create(model_path);
+  auto model_loader = ModelLoader::create(model_path,
+                                          ModelConfig::get_instance().backend(),
+                                          options_.is_draft_engine()
+                                              ? options_.speculative_algorithm()
+                                              : std::string_view{});
   LOG(INFO) << "Initializing model from: " << model_path;
 
   args_ = model_loader->model_args();
-  ModelRegistry::configure_mtp_args(
-      args_,
-      options_.speculative_algorithm(),
-      options_.is_draft_engine(),
-      ModelConfig::is_python_model_impl(
-          ModelConfig::get_instance().model_impl()));
-  if (!options_.is_draft_engine() &&
-      SpeculativeConfig::is_block_diffusion_algorithm(
-          options_.speculative_algorithm())) {
-    CHECK(options_.draft_model_path().has_value())
-        << "Block-diffusion Target requires a draft checkpoint.";
-    // Scheduler warmup must use the same auxiliary-state width as the workers.
-    args_.layers_to_capture(
-        read_capture_layer_ids(options_.draft_model_path().value()));
-  }
-
-  // A draft engine is fed token ids and detokenized by the target, so it
-  // shares the target vocabulary and loads no tokenizer of its own.
   if (!options_.is_draft_engine()) {
     tokenizer_ = model_loader->tokenizer();
     CHECK(tokenizer_ != nullptr);

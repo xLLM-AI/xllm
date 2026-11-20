@@ -16,12 +16,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 from xllm_kernel.ops import reshape_paged_cache
 
+from xllm.python.attention.backend import LayerCacheInput, normalize_layer_caches
 from xllm.python.layers import Attention, GatedMLP, RMSNorm, RotaryEmbedding, RowParallelLinear
 from xllm.python.layers.rotary_embedding import apply_rotary_half, gather_half_rope_cos_sin
 from xllm.python.model_executor.forward_context import LayerSynchronizer, get_forward_context, record_layer_event
@@ -184,8 +186,8 @@ class Glm5DSparkModel(nn.Module):
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
 
     @property
-    def context_projection_weight(self) -> torch.Tensor:
-        return self.context_proj.weight
+    def context_projection_input(self) -> tuple[int, torch.dtype]:
+        return self.context_proj.weight.shape[1], self.context_proj.weight.dtype
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         if self.embed_tokens is None:
@@ -202,7 +204,7 @@ class Glm5DSparkModel(nn.Module):
         target_hidden: torch.Tensor,
         positions: torch.Tensor,
         cache_slots: torch.Tensor,
-        kv_caches: list[tuple[torch.Tensor | None, ...]],
+        kv_caches: Sequence[LayerCacheInput],
         layer_synchronizer: LayerSynchronizer | None,
     ) -> torch.Tensor | None:
         if (
@@ -213,11 +215,11 @@ class Glm5DSparkModel(nn.Module):
             raise ValueError("MLA context hidden, positions, slots and cache layers must agree")
         hidden = self.context_norm(self.context_proj(target_hidden))
         cos, sin = gather_half_rope_cos_sin(self.rotary.cos_sin_cache, positions.to(torch.long))
-        for layer, cache in zip(self.layers, kv_caches):
-            if cache[0] is None or cache[1] is None:
+        for layer, cache in zip(self.layers, normalize_layer_caches(kv_caches)):
+            if cache.key is None or cache.value is None:
                 raise RuntimeError(f"MLA draft KV cache is missing for layer {layer.layer_id}")
             latent, rope = layer.self_attn.project_context(hidden, cos, sin)
-            reshape_paged_cache(cache_slots, latent, rope, cache[0], cache[1])
+            reshape_paged_cache(cache_slots, latent, rope, cache.key, cache.value)
             if layer_synchronizer is not None and layer_synchronizer.record_event(layer.layer_id) is False:
                 return None
         return hidden
@@ -233,6 +235,8 @@ class Glm5DSparkModel(nn.Module):
 
 
 class Glm5DSparkForCausalLM(DSparkForCausalLMBase):
+    model: Glm5DSparkModel  # type: ignore[mutable-override]
+
     def __init__(self, config: dict) -> None:
         if int(config.get("kv_split_size", 1)) > 1 or int(config.get("cp_size", 1)) > 1:
             raise NotImplementedError(
@@ -276,7 +280,7 @@ class Glm5DSparkForCausalLM(DSparkForCausalLMBase):
         target_hidden: torch.Tensor,
         positions: torch.Tensor,
         cache_slots: torch.Tensor,
-        kv_caches: list[tuple[torch.Tensor | None, ...]],
+        kv_caches: Sequence[LayerCacheInput],
         layer_synchronizer: LayerSynchronizer | None,
     ) -> torch.Tensor | None:
         return self.model.write_context_kv(target_hidden, positions, cache_slots, kv_caches, layer_synchronizer)

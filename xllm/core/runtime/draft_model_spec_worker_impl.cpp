@@ -23,20 +23,18 @@ limitations under the License.
 #include <filesystem>
 #include <system_error>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 
 #include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model/model_type.h"
+#include "core/framework/model_loader/model_loader.h"
 #include "core/framework/multimodal/content_hash.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "core/framework/speculative/draft_config.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
@@ -44,10 +42,7 @@ limitations under the License.
 #include "core/kv_cache/storage/static_kv_tensor_allocator.h"
 #include "core/kv_cache/transfer/hierarchy_kv_transfer.h"
 #include "core/kv_cache/transfer/mooncake_kv_transfer.h"
-#include "core/platform/platform.h"
 #include "core/util/tensor_helper.h"
-#include "framework/model_loader/model_loader.h"
-#include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/worker_memory_resources.h"
 #include "util/hash_util.h"
@@ -66,85 +61,6 @@ ParallelArgs configure_draft_parallel_args(ParallelArgs parallel_args) {
         std::vector<uint32_t>{static_cast<uint32_t>(parallel_args.rank())};
   }
   return parallel_args;
-}
-
-template <typename TargetInput>
-ModelContext DraftModelSpecWorkerImpl<TargetInput>::load_model_config(
-    ModelLoader& loader) {
-  if (!draft_impl_->options().model_path().empty() &&
-      draft_impl_->options().model_path() != loader.model_weights_path()) {
-    loader.set_reference_model_weights_path(
-        draft_impl_->options().model_path());
-  }
-
-  ModelArgs args = loader.model_args();
-  ModelRegistry::configure_mtp_args(
-      args,
-      draft_impl_->options().speculative_algorithm(),
-      true,
-      ModelConfig::is_python_model_impl(
-          ModelConfig::get_instance().model_impl()));
-
-#if !defined(USE_NPU)
-  if (SpeculativeConfig::is_block_diffusion_algorithm(
-          draft_impl_->options().speculative_algorithm())) {
-    LOG(FATAL) << draft_impl_->options().speculative_algorithm()
-               << " block-diffusion draft is not supported on "
-               << Platform::type_str() << ".";
-  }
-  if (args.num_nextn_predict_layers() != 0) {
-    static const std::unordered_map<std::string, std::string>
-        kModelTypeToMtpType = {
-            {"deepseek_v3", "deepseek_v3_mtp"},
-            {"deepseek_v32", "deepseek_v32_mtp"},
-            {"deepseek_v4", "deepseek_v4_mtp"},
-            {"glm_moe_dsa", "glm_moe_dsa_mtp"},
-            {"joyai_llm_flash", "joyai_llm_flash_mtp"},
-            {"mimo", "mimo_mtp"},
-            {"qwen3_5", "qwen3_5_mtp"},
-            {"qwen3_5_moe", "qwen3_5_moe_mtp"},
-            {"qwen3_5_text", "qwen3_5_mtp"},
-            {"qwen3_5_moe_text", "qwen3_5_moe_mtp"},
-        };
-    const std::string& current_type = args.model_type();
-    auto it = kModelTypeToMtpType.find(current_type);
-    if (it != kModelTypeToMtpType.end()) {
-      LOG(INFO) << "Overriding draft model_type from " << current_type << " to "
-                << it->second << " for speculative decoding";
-      args.model_type(it->second);
-    }
-  }
-#endif
-
-  int32_t num_speculative_tokens = 0;
-  if (configure_draft_config_) {
-    num_speculative_tokens =
-        configure_draft_config_(args, draft_impl_->options());
-  }
-  if (args.draft_vocab_size() == 0) {
-    args.draft_vocab_size(args.vocab_size());
-  }
-  return draft_impl_->load_model_config(
-      std::move(args), loader.quant_args(), num_speculative_tokens, nullptr);
-}
-
-template <typename TargetInput>
-torch::Tensor DraftModelSpecWorkerImpl<TargetInput>::load_draft_vocab_mapping(
-    ModelLoader& loader) {
-  torch::Tensor draft_token_id_offsets;
-  if (SpeculativeConfig::is_eagle3_algorithm(
-          draft_impl_->options().speculative_algorithm()) ||
-      SpeculativeConfig::is_dspark_algorithm(
-          draft_impl_->options().speculative_algorithm())) {
-    for (const auto& state_dict : loader.get_state_dicts()) {
-      auto offsets = state_dict->get_tensor("d2t");
-      if (offsets.defined()) {
-        draft_token_id_offsets = std::move(offsets);
-        break;
-      }
-    }
-  }
-  return draft_token_id_offsets;
 }
 
 template <typename TargetInput>
@@ -254,10 +170,7 @@ std::string draft_store_key_component(const runtime::Options& options) {
   const std::string algorithm =
       absl::AsciiStrToLower(options.speculative_algorithm());
 
-  const std::string draft_model_path = options.draft_model_path().value_or("");
-  if (draft_model_path.empty()) {
-    return "spec_draft::" + algorithm + "::embedded";
-  }
+  const std::string& draft_model_path = options.draft_model_path().value();
 
   std::string draft_model_name = std::filesystem::path(draft_model_path)
                                      .lexically_normal()
@@ -299,8 +212,7 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
   }
   estimate_options.max_seqs_per_batch =
       static_cast<int64_t>(options.max_seqs_per_batch());
-  estimate_options.num_speculative_tokens =
-      static_cast<int64_t>(context.num_speculative_tokens());
+  estimate_options.num_speculative_tokens = options.num_speculative_tokens();
   estimate_options.max_tokens_per_batch =
       static_cast<int64_t>(options.max_tokens_per_batch());
   estimate_options.max_tokens_per_chunk_for_prefill =
@@ -333,8 +245,7 @@ DraftModelSpecWorkerImpl<TargetInput>::DraftModelSpecWorkerImpl(
     const runtime::Options& options,
     WorkerType worker_type,
     const ParallelArgs& draft_parallel_args,
-    const runtime::Options& draft_opts,
-    int32_t (*configure_draft_config)(ModelArgs&, const runtime::Options&))
+    const runtime::Options& draft_opts)
     : SpeculativeWorkerImpl<TargetInput>(parallel_args,
                                          device,
                                          options,
@@ -356,8 +267,7 @@ DraftModelSpecWorkerImpl<TargetInput>::DraftModelSpecWorkerImpl(
             device,
             draft_opts,
             parallel_args.dp_size() > 1);
-      }()),
-      configure_draft_config_(configure_draft_config) {
+      }()) {
 }
 
 template <typename TargetInput>
@@ -381,18 +291,25 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
     int32_t random_seed,
     MasterStatus master_status) {
   bool result;
-  torch::Tensor draft_token_id_offsets;
   if (impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
     result = SpeculativeWorkerImpl<TargetInput>::init_model(
         model_weights_path, random_seed, master_status);
   } else {
     CHECK_EQ(draft_impl_->get_status(), WorkerImpl::Status::UNINITIALIZED);
-    auto loader = ModelLoader::create(model_weights_path);
-    auto context = load_model_config(*loader);
-    draft_token_id_offsets = load_draft_vocab_mapping(*loader);
+    auto loader = ModelLoader::create(
+        model_weights_path,
+        ModelConfig::get_instance().backend(),
+        draft_impl_->options().speculative_algorithm(),
+        /*reference_model_weights_path=*/options_.model_path());
+    ModelArgs args = loader->model_args();
+    if (args.draft_vocab_size() == 0) {
+      args.draft_vocab_size(args.vocab_size());
+    }
+    auto context = draft_impl_->load_model_config(
+        std::move(args), loader->quant_args(), /*tokenizer=*/nullptr);
     result = draft_impl_->WorkerImpl::init_model(std::move(loader),
                                                  std::move(context),
-                                                 nullptr,
+                                                 /*tokenizer=*/nullptr,
                                                  random_seed,
                                                  master_status);
   }
@@ -403,14 +320,17 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
         ModelConfig::is_python_model_impl(context_.get_model_impl()));
   }
   if (result && draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
-    const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-    draft_vocab_ =
-        DraftVocabMapping(std::move(draft_token_id_offsets),
-                          draft_args.draft_vocab_size(),
-                          impl_->context_.get_model_args().vocab_size(),
-                          device_);
-    draft_impl_->get_causal_lm()->share_lm_head(*impl_->get_causal_lm());
-    draft_impl_->get_causal_lm()->share_embed_tokens(*impl_->get_causal_lm());
+    auto& draft_model = *draft_impl_->get_causal_lm();
+    auto& target_model = *impl_->get_causal_lm();
+    if (master_status == MasterStatus::WAKEUP) {
+      draft_vocab_ = DraftVocabMapping(
+          draft_model.d2t(),
+          draft_impl_->context_.get_model_args().draft_vocab_size(),
+          impl_->context_.get_model_args().vocab_size(),
+          device_);
+    }
+    draft_model.share_lm_head(target_model);
+    draft_model.share_embed_tokens(target_model);
   }
   return result;
 }
@@ -565,7 +485,7 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
   }
 
   embedding_cache_ = std::make_unique<EmbeddingCache>(
-      kv_cache_shape.key_cache_shape()[0], requires_full_target_replay());
+      kv_cache_shape.key_cache_shape()[0], retain_replay_span_);
   const int64_t placeholder_size = get_embedding_placeholder_size();
   if (placeholder_size > 0) {
     embedding_cache_->set_placeholder(
@@ -636,44 +556,6 @@ bool DraftModelSpecWorkerImpl<TargetInput>::prepare_model_decode_continuation(
     TargetInput& /*inputs*/,
     const ForwardOutput& /*prior_output*/) {
   return true;
-}
-
-template <typename TargetInput>
-void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input(
-    const TargetInput& input) {
-  const auto& embedding = input.input_params.embedding;
-  if (!embedding.mtp_bootstrap_embeddings.defined()) {
-    return;
-  }
-  CHECK(input.token_ids_host.defined() &&
-        input.token_ids_host.scalar_type() == torch::kInt)
-      << "draft token_ids_host must be int32";
-  const Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
-
-  torch::Tensor bootstrap_embeddings = safe_to(
-      embedding.mtp_bootstrap_embeddings, torch::dtype(dtype_).device(device_));
-  const int32_t num_rows =
-      static_cast<int32_t>(embedding.mtp_bootstrap_row_idxes.size());
-  CHECK_EQ(bootstrap_embeddings.size(0), static_cast<int64_t>(num_rows))
-      << "bootstrap row count mismatch";
-  CHECK_EQ(embedding.embedding_ids.size(), embedding.request_ids.size())
-      << "bootstrap embedding/request id vectors must be parallel";
-  const int32_t num_ids = static_cast<int32_t>(embedding.embedding_ids.size());
-  for (int32_t i = 0; i < num_rows; ++i) {
-    const int32_t row_idx = embedding.mtp_bootstrap_row_idxes[i];
-    CHECK_GE(row_idx, 0) << "bootstrap row index should be valid";
-    CHECK_LT(row_idx, num_ids) << "bootstrap row index exceeds embedding ids";
-    CHECK_LT(static_cast<size_t>(row_idx), token_ids.size())
-        << "bootstrap row index exceeds token ids";
-    embedding_cache_->write_mtp_bootstrap_context(
-        embedding.embedding_ids[row_idx],
-        embedding.request_ids[row_idx],
-        token_ids[row_idx],
-        bootstrap_embeddings.select(/*dim=*/0, i),
-        input.host_positions().dim() == 2
-            ? input.host_positions().select(/*dim=*/1, row_idx)
-            : torch::Tensor());
-  }
 }
 
 template <typename TargetInput>

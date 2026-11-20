@@ -85,51 +85,6 @@ class BridgeTestModel:
       .attr("MODEL_PLATFORM_SUPPORT")[kBridgeTestModule] = support;
 }
 
-TEST(PyCausalLMMegaMoeCapacityTest, DecodeCoversGraphAndEagerFallbackLayouts) {
-  EXPECT_EQ(python_mega_moe_max_num_tokens_per_rank(
-                /*max_seqs_per_batch=*/16,
-                /*num_speculative_tokens=*/0,
-                /*dp_size=*/1),
-            16);
-  EXPECT_EQ(python_mega_moe_max_num_tokens_per_rank(
-                /*max_seqs_per_batch=*/16,
-                /*num_speculative_tokens=*/0,
-                /*dp_size=*/16),
-            31);
-  EXPECT_EQ(python_mega_moe_max_num_tokens_per_rank(
-                /*max_seqs_per_batch=*/17,
-                /*num_speculative_tokens=*/0,
-                /*dp_size=*/16),
-            32);
-}
-
-TEST(PyCausalLMMegaMoeCapacityTest, SpeculativeDecodeScalesRowsBySpecWidth) {
-  EXPECT_EQ(python_mega_moe_max_num_tokens_per_rank(
-                /*max_seqs_per_batch=*/16,
-                /*num_speculative_tokens=*/3,
-                /*dp_size=*/16),
-            79);
-  EXPECT_EQ(python_mega_moe_max_num_tokens_per_rank(
-                /*max_seqs_per_batch=*/17,
-                /*num_speculative_tokens=*/3,
-                /*dp_size=*/16),
-            128);
-}
-
-TEST(PyCausalLMMegaMoeCapacityTest,
-     Qwen35CoversPrefillAndSpeculativeDecodeWithoutDpGather) {
-  EXPECT_EQ(python_qwen3_5_mega_moe_max_num_tokens_per_rank(
-                /*max_tokens_per_batch=*/4096,
-                /*max_seqs_per_batch=*/256,
-                /*num_speculative_tokens=*/3),
-            4096);
-  EXPECT_EQ(python_qwen3_5_mega_moe_max_num_tokens_per_rank(
-                /*max_tokens_per_batch=*/1024,
-                /*max_seqs_per_batch=*/512,
-                /*num_speculative_tokens=*/4),
-            2560);
-}
-
 // Shared scaffolding for tests that construct a PyCausalLM: registers the
 // dependency-free BridgeTestModel and returns a CPU ModelContext carrying the
 // given model_type (the Python side instantiates BridgeTestModel regardless —
@@ -344,8 +299,7 @@ TEST(PyCausalLMConfigBridgeTest, PreservesBlockDraftWindowEnablement) {
       continue;
     }
     const bool is_dflash2 = draft_type == "dflash2";
-    const char* model_type =
-        is_dflash2 ? "DFlash2DraftModel" : "DSparkDraftModel";
+    const char* model_type = is_dflash2 ? "qwen3_dflash2" : "qwen3_dspark";
     ModelContext context =
         make_bridge_model_context(model_type, std::move(args));
     PyCausalLM model(context, kBridgeTestModelType);

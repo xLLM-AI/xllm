@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/parallel_topology.h"
@@ -62,10 +63,7 @@ PyCausalLM* get_py_causal_lm(CausalLM& target, const char* module_name) {
   return target_model;
 }
 
-}  // namespace
-
-namespace detail {
-
+#if defined(USE_NPU)
 int64_t python_mega_moe_max_num_tokens_per_rank(int64_t max_seqs_per_batch,
                                                 int64_t num_speculative_tokens,
                                                 int64_t dp_size) {
@@ -94,7 +92,9 @@ int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
   return std::max(max_tokens_per_batch, max_decode_tokens);
 }
 
-}  // namespace detail
+#endif
+
+}  // namespace
 
 PyCausalLM::PyCausalLM(const ModelContext& context,
                        std::string python_model_name)
@@ -182,13 +182,13 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
     const auto& scheduler_config = SchedulerConfig::get_instance();
     if (enable_qwen3_5_mega_moe) {
       comm_spec.max_num_tokens_per_rank =
-          detail::python_qwen3_5_mega_moe_max_num_tokens_per_rank(
+          python_qwen3_5_mega_moe_max_num_tokens_per_rank(
               static_cast<int64_t>(scheduler_config.max_tokens_per_batch()),
               static_cast<int64_t>(scheduler_config.max_seqs_per_batch()),
               static_cast<int64_t>(context.num_speculative_tokens()));
     } else {
       comm_spec.max_num_tokens_per_rank =
-          detail::python_mega_moe_max_num_tokens_per_rank(
+          python_mega_moe_max_num_tokens_per_rank(
               static_cast<int64_t>(scheduler_config.max_seqs_per_batch()),
               static_cast<int64_t>(context.num_speculative_tokens()),
               dp_size_);
@@ -372,25 +372,17 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   // a derived member function, so pass it explicitly for the Python executor.
   d["cp_rank"] = cp_rank_;
   d["layerwise_split_rank"] = layerwise_split_rank_;
-  d["enable_dsa_multi_stream"] =
-      ExecutionConfig::get_instance().enable_dsa_multi_stream();
+  const auto& execution_config = ExecutionConfig::get_instance();
+  d["enable_dsa_multi_stream"] = execution_config.enable_dsa_multi_stream();
   const bool enable_attn_dp_weight_sharding =
-      ExecutionConfig::get_instance().enable_attn_dp_weight_sharding();
+      execution_config.enable_attn_dp_weight_sharding();
   CHECK(!enable_attn_dp_weight_sharding ||
         model_args_.model_type() == "glm_moe_dsa" ||
         model_args_.model_type() == "glm_moe_dsa_mtp")
       << "--enable_attn_dp_weight_sharding only supports Python GLM MLA models";
   d["enable_attn_dp_weight_sharding"] = enable_attn_dp_weight_sharding;
-  const bool requires_eager_execution =
-      model_args_.model_type() == "DFlashDraftModel" ||
-      is_dflash2_draft_model_type(model_args_.model_type());
-  d["enable_graph"] = requires_eager_execution
-                          ? false
-                          : ExecutionConfig::get_instance().enable_graph();
-  d["python_graph_backend"] =
-      requires_eager_execution
-          ? std::string("off")
-          : ExecutionConfig::get_instance().python_graph_backend();
+  d["enable_graph"] = execution_config.enable_graph();
+  d["python_graph_backend"] = execution_config.python_graph_backend();
 #if defined(USE_NPU)
   const auto& flash_comm1_options = context.get_flash_comm1_options();
   d["enable_flashcomm1"] = flash_comm1_options.enable_flashcomm1;
@@ -398,7 +390,7 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   d["enable_mmrs_fusion"] = flash_comm1_options.enable_mmrs_fusion;
   d["mmrs_comm_mode"] = flash_comm1_options.mmrs_comm_mode;
   d["enable_fused_mc2"] = KernelConfig::get_instance().enable_fused_mc2() > 0;
-  if (is_glm5_next_target_model_type(model_args_.model_type())) {
+  if (is_glm5_next_model(model_args_.model_type())) {
     d["expert_parallel_degree"] =
         EPLBConfig::get_instance().expert_parallel_degree();
   }
@@ -414,8 +406,9 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
 }
 
 void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
+  const auto& state_dicts = loader->get_state_dicts();
+  load_d2t(state_dicts);
   py::gil_scoped_acquire gil;
-  auto& state_dicts = loader->get_state_dicts();
   ensure_xllm_weight_loader_module();
 
   py::list py_state_dicts;

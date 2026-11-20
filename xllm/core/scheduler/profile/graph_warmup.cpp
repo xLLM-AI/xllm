@@ -33,17 +33,6 @@ constexpr int32_t kGraphWarmupBarWidth = 20;
 
 }  // namespace
 
-GraphWarmupPlan graph_warmup_plan(InstanceRole role) {
-  if (role == InstanceRole::PREFILL) {
-    return GraphWarmupPlan::PREFILL_ONLY;
-  }
-  if (role == InstanceRole::DECODE) {
-    return GraphWarmupPlan::DECODE_ONLY;
-  }
-
-  return GraphWarmupPlan::UNIFIED;
-}
-
 std::string graph_warmup_progress(int32_t completed,
                                   int32_t total,
                                   int32_t token_bucket,
@@ -80,10 +69,9 @@ std::string next_warmup_request_id() {
   return absl::StrCat("warmup_", id);
 }
 
-void prepare_warmup_decode_sequence(Sequence* sequence,
+void prepare_warmup_decode_sequence(Sequence& sequence,
                                     const ModelArgs& model_args,
                                     int32_t num_speculative_tokens) {
-  CHECK(sequence != nullptr);
   if (num_speculative_tokens <= 0) {
     return;
   }
@@ -96,7 +84,7 @@ void prepare_warmup_decode_sequence(Sequence* sequence,
   CHECK_GT(embedding_width, 0);
   // Placeholder bootstrap hidden states; the worker converts dtype/device and
   // only the [1, embedding_width] shape matters for the batch input builder.
-  sequence->update_mtp_bootstrap_embedding(
+  sequence.update_mtp_bootstrap_embedding(
       torch::zeros({1, embedding_width}, /*options=*/torch::kFloat));
 }
 

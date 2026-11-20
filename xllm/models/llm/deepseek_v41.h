@@ -136,8 +136,7 @@ inline void validate_deepseek_v41_args(const ModelArgs& args) {
       << args.compress_rope_theta();
 }
 
-inline bool load_deepseek_v41_model_args(const JsonReader& json,
-                                         ModelArgs* args) {
+REGISTER_MODEL_ARGS(deepseek_v41, [&] {
   LOAD_ARG_OR(model_type, "model_type", "deepseek_v41");
   LOAD_ARG_OR(dtype, "torch_dtype", "bfloat16");
 
@@ -242,10 +241,8 @@ inline bool load_deepseek_v41_model_args(const JsonReader& json,
   process_deepseek_v41_args(args);
   validate_deepseek_v41_args(*args);
   return true;
-}
+});
 
 REGISTER_MODEL_BACKEND(deepseek_v41, "llm");
-
-REGISTER_MODEL_ARGS_LOADER(deepseek_v41, &load_deepseek_v41_model_args);
 
 }  // namespace xllm

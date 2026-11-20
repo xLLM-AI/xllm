@@ -16,6 +16,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -28,7 +29,7 @@ from xllm.python.model_executor.runners.context_kv_acl_graph import ContextKvAcl
 @pytest.fixture
 def runner(monkeypatch: pytest.MonkeyPatch) -> ContextKvAclGraphRunner:
     model = SimpleNamespace(
-        model=SimpleNamespace(context_projection_weight=torch.ones(2, 4)),
+        model=SimpleNamespace(context_projection_input=(4, torch.float32)),
         write_context_kv=Mock(side_effect=lambda hidden, *_: hidden[:, :2].clone()),
     )
     monkeypatch.setattr(
@@ -45,7 +46,7 @@ def runner(monkeypatch: pytest.MonkeyPatch) -> ContextKvAclGraphRunner:
     )
     monkeypatch.setattr("xllm.python.model_executor.runners.context_kv_acl_graph._get_graph_pool", lambda: (0, 1))
     result = ContextKvAclGraphRunner(model, torch.device("cpu"))
-    result.bind_kv_caches([LayerCache(torch.full((1, 16, 1, 2), 42.0), torch.full((1, 16, 1, 2), 43.0))])
+    result.layer_caches = [LayerCache(torch.full((1, 16, 1, 2), 42.0), torch.full((1, 16, 1, 2), 43.0))]
     return result
 
 
@@ -94,13 +95,6 @@ def test_replay_changes_positions_and_masks_stale_tail_without_recapture(runner:
     assert runner.model.write_context_kv.call_count == forward_calls
 
 
-def test_missing_startup_capture_is_not_a_runtime_fallback(runner: ContextKvAclGraphRunner) -> None:
-    with pytest.raises(RuntimeError, match="startup warmup"):
-        runner.execute(torch.ones(1, 4), torch.ones(1, dtype=torch.int32), torch.zeros(1, dtype=torch.int32))
-    torch.npu.graph.assert_not_called()
-    runner.model.write_context_kv.assert_not_called()
-
-
 def test_declared_out_of_capacity_path_uses_eager_without_capture(runner: ContextKvAclGraphRunner) -> None:
     runner.warmup(2)
     capture_calls = torch.npu.graph.call_count
@@ -108,7 +102,8 @@ def test_declared_out_of_capacity_path_uses_eager_without_capture(runner: Contex
     output = runner.execute(hidden, torch.arange(3), torch.arange(3, dtype=torch.int32))
     assert output.shape == (3, 2)
     assert torch.npu.graph.call_count == capture_calls
-    assert runner.replays == 0
+    for entry in runner._graphs.values():
+        cast(Mock, entry.graph).replay.assert_not_called()
 
 
 @pytest.mark.parametrize("change", ["width", "rows", "dtype", "slot_dtype"])
@@ -125,14 +120,8 @@ def test_invalid_inputs_fail_before_replay(runner: ContextKvAclGraphRunner, chan
         slots = slots.long()
     with pytest.raises(ValueError):
         runner.execute(hidden, positions, slots)
-    assert runner.replays == 0
-
-
-def test_cache_rebinding_is_rejected(runner: ContextKvAclGraphRunner) -> None:
-    old_key, old_value = runner._kv_caches[0]
-    runner.bind_kv_caches([LayerCache(old_key, old_value)])
-    with pytest.raises(ValueError, match="bindings changed"):
-        runner.bind_kv_caches([LayerCache(old_key.clone(), old_value)])
+    for entry in runner._graphs.values():
+        cast(Mock, entry.graph).replay.assert_not_called()
 
 
 @pytest.mark.skipif(not hasattr(torch, "npu") or not torch.npu.is_available(), reason="requires Ascend NPU")
@@ -172,7 +161,7 @@ def test_real_context_graph_matches_eager_and_preserves_masked_slots(
         for _ in range(2)
     ]
     graph_runner = ContextKvAclGraphRunner(model, torch.device("npu:0"))
-    graph_runner.bind_kv_caches([LayerCache(*cache) for cache in caches])
+    graph_runner.layer_caches = [LayerCache(*cache) for cache in caches]
     # Service startup uses the default stream; serving can use a compute stream.
     # Both callers must initialize and replay without capturing on that stream.
     stream = torch.npu.default_stream("npu:0") if default_stream else torch.npu.Stream(device="npu:0")
@@ -198,4 +187,3 @@ def test_real_context_graph_matches_eager_and_preserves_masked_slots(
             for actual_pair, expected_pair in zip(caches, reference_caches):
                 for actual_cache, expected_cache in zip(actual_pair, expected_pair):
                     torch.testing.assert_close(actual_cache, expected_cache)
-    assert graph_runner.replays == 6

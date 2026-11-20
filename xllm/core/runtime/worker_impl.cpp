@@ -95,13 +95,7 @@ limitations under the License.
 #include "util/timer.h"
 #include "util/utils.h"
 
-#define USE_ASYNC true
-
 namespace xllm {
-
-constexpr uint32_t BATCH_COPY_MAX_SIZE = 4096;
-constexpr uint32_t TIMEOUT_S = 60;      // second
-constexpr uint32_t TIMEOUT_MS = 60000;  // millisecond
 
 namespace {
 
@@ -849,7 +843,7 @@ void WorkerImpl::prepare_linear_state_cache(const ModelParamsView& params) {
   const bool is_python_model = ModelConfig::is_python_model_impl(
       ModelConfig::get_instance().model_impl());
   reads_distinct_state =
-      (is_python_model && is_glm5_next_target_model_type(args.model_type()) &&
+      (is_python_model && is_glm5_next_model(args.model_type()) &&
        params.meta.batch_forward_type.no_decode() && !params.is_spec_verify) ||
       (!is_python_model && is_qwen3_5_target_model_type(args.model_type()));
 #endif
@@ -1535,10 +1529,8 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
         device_.set_seed(random_seed);
         auto loader = create_model_loader(model_weights_path);
         auto tokenizer = load_tokenizer(*loader);
-        auto context = load_model_config(loader->model_args(),
-                                         loader->quant_args(),
-                                         options_.num_speculative_tokens(),
-                                         tokenizer.get());
+        auto context = load_model_config(
+            loader->model_args(), loader->quant_args(), tokenizer.get());
         return init_model_impl(std::move(loader),
                                std::move(context),
                                std::move(tokenizer),
@@ -1570,7 +1562,6 @@ std::unique_ptr<Tokenizer> WorkerImpl::load_tokenizer(
 
 ModelContext WorkerImpl::load_model_config(ModelArgs args,
                                            const QuantArgs& quant_args,
-                                           int32_t num_speculative_tokens,
                                            Tokenizer* tokenizer) {
   validate_shared_kv_cache_config(args, options_, parallel_args_);
   const bool embedding_mode = options_.task_type() == "embed";
@@ -1596,8 +1587,11 @@ ModelContext WorkerImpl::load_model_config(ModelArgs args,
   }
   // create model context
   auto tensor_options = torch::dtype(dtype).device(device_);
-  ModelContext context(
-      parallel_args_, args, quant_args, tensor_options, num_speculative_tokens);
+  ModelContext context(parallel_args_,
+                       args,
+                       quant_args,
+                       tensor_options,
+                       options_.num_speculative_tokens());
   context.set_model_impl(ModelConfig::get_instance().model_impl());
   context.set_extension_impl(options_.extension_impl());
   context.set_model_id(options_.model_id());

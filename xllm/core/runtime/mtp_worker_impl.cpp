@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
@@ -375,65 +376,44 @@ bool MTPWorkerImpl<TargetInput>::init_model(
         draft_impl_->context_.get_model_args().model_type();
     combined_draft_execution_path_ =
         mtp_async::classify_combined_draft_execution_path(draft_model_type);
-    std::string resolved_draft_model_name;
-    std::string error_message;
-    CHECK(resolve_model_registration_name(
-        draft_model_type, &resolved_draft_model_name, &error_message))
-        << error_message;
-    const MtpModelCapabilities draft_capabilities =
-        ModelRegistry::get_mtp_capabilities(resolved_draft_model_name);
-    const bool is_python_draft = ModelConfig::is_python_model_impl(
-        draft_impl_->context_.get_model_impl());
     if (impl_->get_status() != WorkerImpl::Status::UNINITIALIZED) {
-      // Resolve tail-extend vs accepted-span replay once both models have
-      // loaded, before embedding/KV cache allocation.
+      const bool is_python_draft = ModelConfig::is_python_model_impl(
+          draft_impl_->context_.get_model_impl());
       const bool is_python_target =
           ModelConfig::is_python_model_impl(context_.get_model_impl());
-      const bool legacy_tail = draft_capabilities.allow_tail_fallback &&
-                               (is_python_target || is_python_draft);
-      const bool full_target_replay =
-          draft_capabilities.native_draft_requires_accepted_span_replay &&
-          !legacy_tail;
-      if (full_target_replay) {
-        std::string resolved_target_model_name;
-        std::string error_message;
-        CHECK(resolve_model_registration_name(
-            context_.get_model_args().model_type(),
-            &resolved_target_model_name,
-            &error_message))
-            << error_message;
-        const MtpModelCapabilities target_capabilities =
-            ModelRegistry::get_mtp_capabilities(resolved_target_model_name);
-        const bool target_capable =
+      const std::string draft_model_name =
+          canonical_model_registration_name(draft_model_type);
+      const bool glm_replay = draft_model_name == "glm5_next" ||
+                              draft_model_name == "glm5_next_mtp";
+#if defined(USE_MLU)
+      const bool qwen_replay =
+          !is_python_target && !is_python_draft &&
+          combined_draft_execution_path_ ==
+              mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
+      this->retain_replay_span_ = glm_replay || qwen_replay;
+#else
+      this->retain_replay_span_ = glm_replay;
+#endif
+      if (this->retain_replay_span_) {
+        const std::string& target_model_type =
+            context_.get_model_args().model_type();
+        const std::string target_model_name =
+            canonical_model_registration_name(target_model_type);
+        bool replay_pair =
+            target_model_name == "glm5_next" &&
             target_verify_mode_ ==
-                    mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL
-                ? target_capabilities.supports_causal_replay
-                : target_capabilities.supports_expanded_replay;
-        const bool replay_pair =
-            target_capable &&
-            target_capabilities.model_family != MtpModelFamily::NONE &&
-            target_capabilities.model_family == draft_capabilities.model_family;
-        CHECK(replay_pair && !is_python_target && !is_python_draft &&
-              (target_verify_mode_ ==
-                   mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL ||
-               target_verify_mode_ ==
-                   mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY))
-            << "Incompatible draft context update: target="
-            << context_.get_model_args().model_type()
+                mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL;
+#if defined(USE_MLU)
+        if (!glm_replay) {
+          replay_pair = is_qwen3_5_target_model_type(target_model_name) &&
+                        target_verify_mode_ ==
+                            mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY;
+        }
+#endif
+        CHECK(replay_pair && !is_python_target && !is_python_draft)
+            << "Incompatible draft context update: target=" << target_model_type
             << ", draft=" << draft_model_type
             << ", verify_mode=" << static_cast<int32_t>(target_verify_mode_);
-      }
-      const DraftContextReplayPolicy replay_policy{
-          /*full_target_replay=*/full_target_replay,
-          /*num_speculative_tokens=*/
-          full_target_replay ? options_.num_speculative_tokens() : 1,
-          /*draft_position_offset=*/full_target_replay ? -1 : 0};
-      if (draft_context_replay_policy_.has_value()) {
-        CHECK_EQ(draft_context_replay_policy_->full_target_replay,
-                 replay_policy.full_target_replay)
-            << "Draft context update policy changed after initialization.";
-      } else {
-        draft_context_replay_policy_ = replay_policy;
       }
     }
   }
@@ -471,13 +451,6 @@ template <typename TargetInput>
 bool MTPWorkerImpl<TargetInput>::supports_expanded_spec_verify() const {
   return target_verify_mode_ ==
          mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY;
-}
-
-template <typename TargetInput>
-bool MTPWorkerImpl<TargetInput>::requires_full_target_replay() const {
-  CHECK(draft_context_replay_policy_.has_value())
-      << "Draft context replay policy is not initialized.";
-  return draft_context_replay_policy_->full_target_replay;
 }
 
 template <typename TargetInput>
@@ -630,11 +603,10 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
 
     LlmForwardInput draft_extend_input =
         make_llm_draft_input(input, draft_impl_->uses_shared_static_kv_cache());
-    CHECK(draft_context_replay_policy_.has_value())
-        << "Draft context replay policy is not initialized.";
-    scale_speculative_parallel_token_counts(
-        draft_extend_input.input_params,
-        draft_context_replay_policy_->num_speculative_tokens);
+    const int32_t num_decoding_tokens =
+        this->retain_replay_span_ ? options_.num_speculative_tokens() + 1 : 2;
+    scale_decode_parallel_token_counts(draft_extend_input.input_params,
+                                       num_decoding_tokens);
     if (use_prelaunched_first_draft) {
       draft_outputs.emplace_back(
           std::move(pending_draft_context_.output.value()));
@@ -664,8 +636,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     }
 
     TargetInput new_input = input.clone();
-    scale_speculative_parallel_token_counts(new_input.input_params,
-                                            options_.num_speculative_tokens());
+    scale_decode_parallel_token_counts(new_input.input_params,
+                                       options_.num_speculative_tokens() + 1);
     ForwardOutput output =
         run_worker_no_sync_impl(*impl_,
                                 new_input,
@@ -682,9 +654,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     if (can_prelaunch_next_first_draft(input)) {
       LlmForwardInput next_first_draft_input = make_llm_draft_input(
           input, draft_impl_->uses_shared_static_kv_cache());
-      scale_parallel_token_counts(
-          next_first_draft_input.input_params.parallel,
-          draft_context_replay_policy_->num_speculative_tokens + 1);
+      scale_parallel_token_counts(next_first_draft_input.input_params.parallel,
+                                  num_decoding_tokens);
       submit_pending_first_draft(input, std::move(next_first_draft_input));
     }
     return output;
@@ -824,6 +795,44 @@ void MTPWorkerImpl<TargetInput>::prepare_prefill_inputs(
 }
 
 template <typename TargetInput>
+void MTPWorkerImpl<TargetInput>::restore_bootstrap_hidden(
+    const TargetInput& input) {
+  const auto& embedding = input.input_params.embedding;
+  if (!embedding.mtp_bootstrap_embeddings.defined()) {
+    return;
+  }
+  CHECK(input.token_ids_host.defined() &&
+        input.token_ids_host.scalar_type() == torch::kInt)
+      << "draft token_ids_host must be int32";
+  const Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
+
+  torch::Tensor bootstrap_embeddings = safe_to(
+      embedding.mtp_bootstrap_embeddings, torch::dtype(dtype_).device(device_));
+  const int32_t num_rows =
+      static_cast<int32_t>(embedding.mtp_bootstrap_row_idxes.size());
+  CHECK_EQ(bootstrap_embeddings.size(/*dim=*/0), static_cast<int64_t>(num_rows))
+      << "bootstrap row count mismatch";
+  CHECK_EQ(embedding.embedding_ids.size(), embedding.request_ids.size())
+      << "bootstrap embedding/request id vectors must be parallel";
+  const int32_t num_ids = static_cast<int32_t>(embedding.embedding_ids.size());
+  for (int32_t i = 0; i < num_rows; ++i) {
+    const int32_t row_idx = embedding.mtp_bootstrap_row_idxes[i];
+    CHECK_GE(row_idx, 0) << "bootstrap row index should be valid";
+    CHECK_LT(row_idx, num_ids) << "bootstrap row index exceeds embedding ids";
+    CHECK_LT(static_cast<size_t>(row_idx), token_ids.size())
+        << "bootstrap row index exceeds token ids";
+    embedding_cache_->write_mtp_bootstrap_context(
+        embedding.embedding_ids[row_idx],
+        embedding.request_ids[row_idx],
+        token_ids[row_idx],
+        bootstrap_embeddings.select(/*dim=*/0, i),
+        input.host_positions().dim() == 2
+            ? input.host_positions().select(/*dim=*/1, row_idx)
+            : torch::Tensor());
+  }
+}
+
+template <typename TargetInput>
 std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
     const TargetInput& raw_input) {
   TargetInput input = raw_input.clone();
@@ -890,7 +899,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
   Timer draft_timer;
   CHECK(embedding_cache_ != nullptr) << "MTP embedding cache is not allocated";
 
-  prepare_draft_input(input);
+  restore_bootstrap_hidden(input);
 
   TargetInput metadata_template = input.clone();
   if (use_prelaunched_first_draft) {
@@ -1938,10 +1947,13 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   validate_input.skip_sampling_for_logits_only = true;
   auto& input_params = validate_input.input_params;
   input_params.embedding.input_embedding = torch::Tensor();
-  const int32_t num_sequences = input_params.meta.num_sequences;
-  const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;
-  const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
   const int32_t logical_block_size = this->logical_block_size();
+  const bool chunked_verify = this->uses_chunked_verify();
+  const DecodeExpansionOptions decode_options = make_verify_layout(
+      options_.num_speculative_tokens(), logical_block_size, chunked_verify);
+  const int32_t num_sequences = input_params.meta.num_sequences;
+  const int32_t num_val_tokens = decode_options.num_decoding_tokens();
+  const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
 #if defined(USE_NPU)
   const bool use_explicit_spec_verify_replay_update =
       should_use_explicit_spec_verify_replay_update(input);
@@ -1972,9 +1984,6 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   const bool use_explicit_spec_verify_replay_update = false;
 #endif
   DecodeBatchContext batch_ctx = make_decode_batch_context(input);
-  const bool chunked_verify = this->uses_chunked_verify();
-  const DecodeExpansionOptions decode_options = make_verify_layout(
-      options_.num_speculative_tokens(), logical_block_size, chunked_verify);
   DecodeBuildBuffers buf = expand_decode_inputs(batch_ctx, decode_options);
 
   if (impl_->has_request_state_cache()) {
@@ -2019,8 +2028,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
                                     device_,
                                     stable_indices);
 
-  scale_speculative_parallel_token_counts(input_params,
-                                          options_.num_speculative_tokens());
+  scale_decode_parallel_token_counts(input_params, num_val_tokens);
 
   std::vector<int32_t> accepted_prefix_lengths;
   if (chunked_verify) {
@@ -2287,9 +2295,8 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
                          extend_input.sampling_params);
   clear_ready_events(extend_input);
   extend_input.runtime.device_tensors_ready = false;
-  if (requires_full_target_replay()) {
-    const int32_t uniform_width =
-        draft_context_replay_policy_->num_speculative_tokens + 1;
+  if (this->retain_replay_span_) {
+    const int32_t uniform_width = options_.num_speculative_tokens() + 1;
     auto& input_params = extend_input.input_params;
     DecodeBatchContext batch_ctx = make_decode_batch_context(base_input);
     const torch::Tensor placeholder = embedding_cache_->embedding_placeholder();
@@ -2457,7 +2464,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
       (Platform::is_npu() &&
        // Recurrent targets require a uniform verification width.
        (is_qwen3_5_target_model_type(target_model_type) ||
-        is_glm5_next_target_model_type(target_model_type)) &&
+        is_glm5_next_model(target_model_type)) &&
        std::any_of(last_states.begin(),
                    last_states.end(),
                    [](const EmbeddingCache::DecodeState& state) {
@@ -2550,7 +2557,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
   CHECK_EQ(expanded_embeddings.size(), buf.out_positions.size())
       << "draft extend embeddings/positions mismatch";
 
-  const int32_t num_query_tokens =
+  const int32_t total_num_decoding_tokens =
       static_cast<int32_t>(buf.out_positions.size());
   build_decode_input(extend_input, buf, DecodeInputOptions{}, device_);
 
@@ -2560,16 +2567,16 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
 
   if (!input_params.parallel.dp_global_token_nums.empty()) {
     if (dp_enabled) {
-      constexpr int32_t num_query_tokens_per_request = 2;
+      constexpr int32_t num_decoding_tokens_per_request = 2;
       scale_parallel_token_counts(input_params.parallel,
-                                  num_query_tokens_per_request);
+                                  num_decoding_tokens_per_request);
     } else if (input_params.parallel.dp_global_token_nums.size() == 1) {
-      input_params.parallel.dp_global_token_nums[0] = num_query_tokens;
+      input_params.parallel.dp_global_token_nums[0] = total_num_decoding_tokens;
     }
   }
   input_params.expert.eplb_decode_token_mask =
       eplb::expand_decode_token_mask(input_params.expert.eplb_decode_token_mask,
-                                     num_query_tokens / num_sequences);
+                                     total_num_decoding_tokens / num_sequences);
 
 #if defined(USE_NPU)
   // The extend layout is the 2B cache variant during steady overlap decode.
@@ -2604,11 +2611,11 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   draft_input =
       make_llm_draft_input(input, draft_impl_->uses_shared_static_kv_cache());
-  if (requires_full_target_replay()) {
+  if (this->retain_replay_span_) {
     // The first replay proposal consumed the target hidden at
     // current_position - 1; recursive proposals advance from that draft
     // position, while target validation keeps the unshifted template.
-    position_offset += draft_context_replay_policy_->draft_position_offset;
+    --position_offset;
     draft_input.input_params.attn_metadata.reset();
   }
   prepare_draft_sampling(options_.enable_probabilistic_draft(),

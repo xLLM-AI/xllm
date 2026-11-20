@@ -208,7 +208,7 @@ def test_checkpoint_loads_original_mla_and_context_weight_names(model: Glm5DSpar
     tensors["embed_tokens.weight"] = torch.randn(16, 8)
     tensors["lm_head.weight"] = torch.randn(16, 8)
     model.load_weights([_StateDict(tensors)], 0, 1)
-    torch.testing.assert_close(model.model.context_projection_weight, tensors["context_proj.weight"])
+    torch.testing.assert_close(model.model.context_proj.weight, tensors["context_proj.weight"])
     torch.testing.assert_close(model.model.context_norm.weight, tensors["context_norm.weight"])
     torch.testing.assert_close(model.model.embed_tokens.weight, tensors["embed_tokens.weight"])
     torch.testing.assert_close(model.lm_head.weight, tensors["lm_head.weight"])

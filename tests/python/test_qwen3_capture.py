@@ -22,7 +22,7 @@ import torch.nn as nn
 
 import xllm.python.models.qwen3 as qwen3_module
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
-from xllm.python.models.qwen3 import Qwen3Config, Qwen3Model
+from xllm.python.models.qwen3 import Qwen3Config, Qwen3Model, build_qwen3_layers
 
 
 class _Embedding(nn.Module):
@@ -80,7 +80,9 @@ def _model(monkeypatch: pytest.MonkeyPatch, layers_to_capture: tuple[int, ...]) 
         "get_forward_context",
         lambda: SimpleNamespace(cp_context=None),
     )
-    model = Qwen3Model(_config(layers_to_capture=layers_to_capture), torch.float32, torch.device("cpu"))
+    config = _config(layers_to_capture=layers_to_capture)
+    device = torch.device("cpu")
+    model = Qwen3Model(config, torch.float32, device, build_qwen3_layers(config, torch.float32, device))
     model.embed_tokens = _Embedding()
     model.layers = nn.ModuleList([_ResidualLayer(1.0), _ResidualLayer(2.0), _ResidualLayer(3.0)])
     model.norm = _FinalNorm()

@@ -334,8 +334,8 @@ TEST(ModelRegistryTest, Glm5NextMtpPreservesBackendIndexSharingPolicy) {
           .n_layers(61)
           .num_nextn_predict_layers(1)
           .index_share_for_mtp_iteration(true);
-      ModelRegistry::configure_mtp_args(
-          args, "MTP", /*is_draft_engine=*/true, is_python_model);
+      ModelRegistry::configure_draft_model_args(
+          args, /*algorithm=*/"MTP", is_python_model);
 #if defined(USE_MLU)
       EXPECT_EQ(args.index_share_for_mtp_iteration(), is_python_model);
 #else

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
@@ -54,49 +55,31 @@ class _DSparkQuantAwareLinear(QLinear):
 class DeepseekV4DSparkConfig(DeepseekV4Config):
     """DeepSeek-V4 target configuration narrowed to its DSpark draft."""
 
-    dspark_num_layers: int = 0
-    dspark_target_layer_ids: tuple[int, ...] = ()
-    block_size: int = 0
-    dspark_noise_token_id: int = 0
     markov_rank: int = 0
     enable_confidence_head: bool = False
-    confidence_head_with_markov: bool = True
-    dspark_use_native_sas: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> DeepseekV4DSparkConfig:
         base = DeepseekV4Config.from_dict(d)
-        target_layer_ids = tuple(int(layer_id) for layer_id in d.get("dspark_target_layer_ids", ()))
+        target_layer_ids = d.get("dspark_target_layer_ids", ())
         num_layers = int(d.get("dspark_num_layers", len(target_layer_ids)))
+        if target_layer_ids and len(target_layer_ids) != num_layers:
+            message = "DeepSeek-V4 DSpark target layer count must match dspark_num_layers"
+            raise ValueError(message)
         values = dict(base.__dict__)
         values.update(
             model_type="deepseek_v4_dspark",
             n_layers=num_layers,
             n_hash_layers=0,
             compress_ratios=[1] * num_layers,
-            dspark_num_layers=num_layers,
-            dspark_target_layer_ids=target_layer_ids,
-            block_size=int(d.get("block_size") or d.get("dspark_block_size") or 0),
-            dspark_noise_token_id=int(d.get("dspark_noise_token_id", 0)),
             markov_rank=int(d.get("markov_rank", d.get("dspark_markov_rank", 0))),
             enable_confidence_head=bool(d.get("enable_confidence_head", False)),
-            # DeepSeek-V4 DSpark checkpoints always carry a markov (no-bias)
-            # confidence head: the C++ side initializes it with
-            # with_markov=true unconditionally (deepseek_v4_dspark.h). The
-            # reflected confidence_head_with_markov key is NOT consulted —
-            # ModelArgs defaults it to false and no worker sets it, so a
-            # plumb-through would build a [1, hidden] module for a
-            # [1, hidden + markov_rank] checkpoint.
-            confidence_head_with_markov=True,
-            dspark_use_native_sas=bool(d.get("dspark_use_native_sas", False)),
         )
         return cls(**values)
 
     def validate(self) -> None:
-        if self.dspark_num_layers <= 0:
+        if self.n_layers <= 0:
             raise ValueError("DeepSeek-V4 DSpark requires dspark_num_layers > 0")
-        if self.dspark_target_layer_ids and len(self.dspark_target_layer_ids) != self.dspark_num_layers:
-            raise ValueError("DeepSeek-V4 DSpark target layer count must match dspark_num_layers")
         if self.markov_rank <= 0:
             raise ValueError("DeepSeek-V4 DSpark requires dspark_markov_rank > 0")
 
@@ -112,7 +95,7 @@ class DeepseekV4DSparkModel(DeepseekV4Model):
     ) -> None:
         super().__init__(cfg, dtype, device)
         self.main_proj = _DSparkQuantAwareLinear(
-            cfg.hidden_size * cfg.dspark_num_layers,
+            cfg.hidden_size * cfg.n_layers,
             cfg.hidden_size,
             dtype=dtype,
             device=device,
@@ -127,23 +110,26 @@ class DeepseekV4DSparkModel(DeepseekV4Model):
             device=device,
         )
 
+    @property
+    def context_projection_input(self) -> tuple[int, torch.dtype]:
+        return self.main_proj.in_features, self.main_norm.weight.dtype
+
     def write_context_kv(
         self,
         target_hidden: torch.Tensor,
         positions: torch.Tensor,
         cache_slots: torch.Tensor,
-        kv_caches: list[LayerCacheInput],
+        kv_caches: Sequence[LayerCacheInput],
         layer_synchronizer: LayerSynchronizer | None,
     ) -> torch.Tensor | None:
         if len(kv_caches) != self.cfg.n_layers:
             raise ValueError("DeepSeek-V4 DSpark cache/layer count mismatch")
         if cache_slots.numel() != target_hidden.size(0):
             raise ValueError("DeepSeek-V4 DSpark context slot count mismatch")
-        expected_width = self.cfg.hidden_size * self.cfg.dspark_num_layers
+        expected_width = self.cfg.hidden_size * self.cfg.n_layers
         if target_hidden.dim() != 2 or target_hidden.size(-1) != expected_width:
-            raise ValueError(
-                f"DeepSeek-V4 DSpark target hidden width must equal dspark_num_layers * hidden_size ({expected_width})"
-            )
+            message = f"DeepSeek-V4 DSpark target hidden width must equal n_layers * hidden_size ({expected_width})"
+            raise ValueError(message)
 
         projected = self.main_norm(self.main_proj(target_hidden))
         positions = positions.to(torch.int64).contiguous()
@@ -183,7 +169,7 @@ class DeepseekV4DSparkForCausalLM(
             markov_rank=cfg.markov_rank,
             hidden_size=cfg.hidden_size,
             enable_confidence_head=cfg.enable_confidence_head,
-            confidence_head_with_markov=cfg.confidence_head_with_markov,
+            confidence_head_with_markov=True,
             dtype=dtype,
             device=device,
             confidence_head_bias=False,
@@ -209,7 +195,7 @@ class DeepseekV4DSparkForCausalLM(
         target_hidden: torch.Tensor,
         positions: torch.Tensor,
         cache_slots: torch.Tensor,
-        kv_caches: list[LayerCacheInput],
+        kv_caches: Sequence[LayerCacheInput],
         layer_synchronizer: LayerSynchronizer | None,
     ) -> torch.Tensor | None:
         return self.model.write_context_kv(

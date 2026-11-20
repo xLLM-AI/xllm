@@ -17,18 +17,24 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "core/framework/model/model_args.h"
+#include "core/framework/config/speculative_config.h"
 
 namespace xllm {
 
-void Options::validate(const ModelArgs& model_args) const {
-  if (model_args.model_type() == "deepseek_v41") {
+void Options::validate(std::string_view model_type) const {
+  const auto& draft_path = draft_model_path();
+  const bool has_draft_model = draft_path && !draft_path->empty();
+  CHECK(num_speculative_tokens() == 0 ||
+        SpeculativeConfig::is_suffix_algorithm(speculative_algorithm()) ||
+        has_draft_model)
+      << speculative_algorithm()
+      << " speculative decoding requires --draft_model.";
+
+  if (model_type == "deepseek_v41") {
     CHECK(!enable_kvcache_store() && host_blocks_factor() <= 1.0)
         << "DeepSeek-V4.1 does not support KV cache Store or host offload: "
            "restore for the grouped KV (C1/C2) is not implemented.";
-    const bool speculative_requested = num_speculative_tokens() > 0 ||
-                                       !draft_model_path().value_or("").empty();
-    CHECK(!speculative_requested)
+    CHECK(num_speculative_tokens() == 0 && !has_draft_model)
         << "DeepSeek-V4.1 does not support speculative decoding: grouped KV "
            "(C1/C2) is not implemented in the speculative path.";
     CHECK(!enable_disagg_pd())

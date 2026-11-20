@@ -613,8 +613,7 @@ REGISTER_MULTIMODAL_PROCESSOR(qwen3_vl, Qwen3VLMultimodalProcessor);
 REGISTER_CAUSAL_VLM_MODEL(qwen3_vl, Qwen3_VLForConditionalGeneration);
 REGISTER_MPOSITION_GENERATOR(qwen3_vl, Qwen3VLMPositionGenerator);
 
-const ModelArgsLoader kQwen3VLModelArgsLoader = [](const JsonReader& json,
-                                                   ModelArgs* args) {
+REGISTER_MODEL_ARGS(qwen3_vl, [&] {
   // text config
   // LOAD_ARG_OR(attention_dropout, "attention_dropout", 0.0);
   LOAD_ARG_OR(model_type, "model_type", "qwen3_vl");
@@ -676,9 +675,6 @@ const ModelArgsLoader kQwen3VLModelArgsLoader = [](const JsonReader& json,
       rope_scaling_rope_type, "vision_config.rope_scaling.type", "mrope");
   LOAD_ARG_OR(vocab_size, "text_config.vocab_size", 151936);
   return true;
-};
+});
 
-REGISTER_MODEL_ARGS_LOADER(qwen3_vl, kQwen3VLModelArgsLoader);
-REGISTER_MODEL_ARGS_LOADER(Qwen3VLForConditionalGeneration,
-                           kQwen3VLModelArgsLoader);
 }  // namespace xllm

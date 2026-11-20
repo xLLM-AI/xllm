@@ -15,12 +15,15 @@ limitations under the License.
 
 #pragma once
 
-#include "qwen2_decoder_layer.h"
+#include "core/layers/common/qwen3_attention.h"
+#include "core/layers/qwen2_decoder_layer.h"
 
 namespace xllm {
 namespace layer {
 
-using Qwen3DecoderLayerImpl = Qwen2DecoderLayerImpl;
+extern template class QwenDecoderLayerImpl<Qwen3Attention>;
+
+using Qwen3DecoderLayerImpl = QwenDecoderLayerImpl<Qwen3Attention>;
 TORCH_MODULE(Qwen3DecoderLayer);
 
 }  // namespace layer

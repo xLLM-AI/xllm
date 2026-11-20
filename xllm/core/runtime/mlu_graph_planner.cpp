@@ -63,7 +63,7 @@ bool dp_tokens_equal(const std::vector<int32_t>& dp_token_nums) {
 }
 
 bool allows_graph_mode(const xllm::runtime::Options& options,
-                       const xllm::MtpModelCapabilities& capabilities,
+                       xllm::mlu::GraphAttentionLayout attention_layout,
                        const xllm::ModelParamsView& params) {
   if (options.is_draft_engine()) {
     return params.meta.batch_forward_type.is_decode();
@@ -71,7 +71,7 @@ bool allows_graph_mode(const xllm::runtime::Options& options,
   if (options.enable_speculative_decode() &&
       xllm::SpeculativeConfig::is_mtp_algorithm(
           options.speculative_algorithm()) &&
-      capabilities.supports_grouped_graph) {
+      attention_layout != xllm::mlu::GraphAttentionLayout::FLAT) {
     return params.is_spec_verify &&
            params.meta.batch_forward_type.is_chunked_prefill();
   }
@@ -290,7 +290,7 @@ std::size_t GraphKeyHash::operator()(const GraphKey& key) const {
 }
 
 int64_t get_graph_token_capacity(const runtime::Options& options,
-                                 const MtpModelCapabilities& capabilities) {
+                                 GraphAttentionLayout attention_layout) {
   int64_t width =
       options.is_draft_engine() ? 1 : options.num_speculative_tokens() + 1;
   const int64_t max_requests =
@@ -300,7 +300,7 @@ int64_t get_graph_token_capacity(const runtime::Options& options,
   const uint32_t tp_size = get_tp_size(options);
   capacity = align_tokens(
       static_cast<uint32_t>(std::max<int64_t>(capacity, tp_size)), tp_size);
-  if (!capabilities.supports_grouped_graph) {
+  if (attention_layout == GraphAttentionLayout::FLAT) {
     return capacity;
   }
   width = options.num_speculative_tokens() + 1;
@@ -324,10 +324,10 @@ MluGraphPlanner::MluGraphPlanner(GraphPlannerConfig config)
 GraphDecision MluGraphPlanner::plan(int64_t tokens,
                                     const ModelParamsView& params) const {
   const runtime::Options& options = config_.options;
-  if (!allows_graph_mode(options, config_.capabilities, params)) {
+  if (!allows_graph_mode(options, config_.attention_layout, params)) {
     return EagerReason::NON_DECODE;
   }
-  const bool grouped = config_.capabilities.supports_grouped_graph &&
+  const bool grouped = config_.attention_layout != GraphAttentionLayout::FLAT &&
                        (config_.state_required || options.is_draft_engine() ||
                         params.is_spec_verify);
   if (params.mtp_topk_state != nullptr ||
@@ -343,8 +343,8 @@ GraphDecision MluGraphPlanner::plan(int64_t tokens,
   if (layout->padded_num_tokens > config_.max_tokens) {
     return EagerReason::TOKEN_LIMIT;
   }
-  if (config_.capabilities.graph_context_policy ==
-      GraphContextPolicy::QWEN_FULL_ATTENTION) {
+  if (config_.attention_layout ==
+      GraphAttentionLayout::GROUPED_FULL_ATTENTION) {
     layout->cache_pad_slot = xllm::kPadSlotId;
   }
   const int64_t capacity = params.attention.device.block_tables.defined()
@@ -366,8 +366,8 @@ GraphDecision MluGraphPlanner::plan(int64_t tokens,
   }
   const int64_t main_columns =
       capacity > 0 ? get_block_capacity(capacity, options.block_size()) +
-                         (config_.capabilities.graph_context_policy ==
-                                  GraphContextPolicy::QWEN_FULL_ATTENTION
+                         (config_.attention_layout ==
+                                  GraphAttentionLayout::GROUPED_FULL_ATTENTION
                               ? 1
                               : 0)
                    : 0;

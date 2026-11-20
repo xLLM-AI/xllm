@@ -18,20 +18,10 @@ limitations under the License.
 #include <cstdint>
 #include <string>
 
-#include "common/types.h"
-
 namespace xllm {
 
 class Sequence;
 struct ModelArgs;
-
-enum class GraphWarmupPlan : int8_t {
-  UNIFIED = 0,
-  PREFILL_ONLY = 1,
-  DECODE_ONLY = 2,
-};
-
-GraphWarmupPlan graph_warmup_plan(InstanceRole role);
 
 std::string graph_warmup_progress(int32_t completed,
                                   int32_t total,
@@ -44,11 +34,7 @@ std::string graph_warmup_progress(int32_t completed,
 // embedding block cannot be mistaken for a warmup request's own state.
 std::string next_warmup_request_id();
 
-// Prepares synthetic decode state with the model's bootstrap geometry. Block
-// drafts consume concatenated captured layers; MTP consumes its hidden state.
-// The zero values are synthetic, but the shape must obey the worker contract.
-// Does nothing when speculative decoding is disabled.
-void prepare_warmup_decode_sequence(Sequence* sequence,
+void prepare_warmup_decode_sequence(Sequence& sequence,
                                     const ModelArgs& model_args,
                                     int32_t num_speculative_tokens);
 

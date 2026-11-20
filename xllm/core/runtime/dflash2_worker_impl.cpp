@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/framework/sampling/logits_processor.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/platform/platform.h"
 #include "core/util/tensor_helper.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/timer.h"
@@ -42,14 +43,6 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-int32_t configure_draft_config(ModelArgs& args,
-                               const runtime::Options& options) {
-  args.layers_to_capture({});
-  args.model_type(std::string(kDFlash2DraftModelType));
-  CHECK_EQ(options.num_speculative_tokens() + 1, args.block_size())
-      << "Runtime block size must match the draft model configuration.";
-  return options.num_speculative_tokens();
-}
 // The selector takes only temperature — truncation, penalties, and grammar
 // constraints belong to verification.
 std::pair<torch::Tensor, torch::Tensor> sample_dflash2_path(
@@ -145,6 +138,14 @@ std::pair<torch::Tensor, torch::Tensor> sample_dflash2_path(
 
 }  // namespace
 
+DFlash2WorkerImpl::DFlash2WorkerImpl(const ParallelArgs& parallel_args,
+                                     const torch::Device& device,
+                                     const runtime::Options& options)
+    : DFlashWorkerImpl(parallel_args, device, options) {
+  CHECK(Platform::is_npu())
+      << "DFlash2 speculative decoding is only supported on NPU.";
+}
+
 bool DFlash2WorkerImpl::init_model(const std::string& model_weights_path,
                                    int32_t random_seed,
                                    MasterStatus master_status) {
@@ -156,28 +157,12 @@ bool DFlash2WorkerImpl::init_model(const std::string& model_weights_path,
         << "DFlash2 with a hybrid recurrent target requires ACL Graph: the "
            "expanded spec-verify replay path preserves the accepted GDN "
            "checkpoint, while eager validation is not lossless.";
-    if (options_.enable_probabilistic_draft()) {
-      const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-      const ModelArgs& target_args = impl_->context_.get_model_args();
-      CHECK_EQ(draft_args.draft_vocab_size(), target_args.vocab_size())
-          << "DFlash2 probabilistic drafts require draft and target vocabulary "
-             "sizes to match.";
-    }
+    CHECK_EQ(draft_impl_->context_.get_model_args().draft_vocab_size(),
+             impl_->context_.get_model_args().vocab_size())
+        << "DFlash2 uses target token IDs to index the draft codebook.";
   }
   return result;
 }
-
-DFlash2WorkerImpl::DFlash2WorkerImpl(const ParallelArgs& parallel_args,
-                                     const torch::Device& device,
-                                     const runtime::Options& options)
-    : DFlashWorkerImpl(
-          parallel_args,
-          device,
-          options,
-          configure_draft_parallel_args(parallel_args),
-          DFlashWorkerImpl::draft_options(options,
-                                          options.num_speculative_tokens()),
-          configure_draft_config) {}
 
 std::pair<torch::Tensor, torch::Tensor> DFlash2WorkerImpl::run_decode_draft(
     const LlmForwardInput& input,

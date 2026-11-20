@@ -48,8 +48,7 @@ using DeepseekOCRMultimodalProcessor =
 
 REGISTER_MULTIMODAL_PROCESSOR(deepseek_ocr, DeepseekOCRMultimodalProcessor);
 
-const ModelArgsLoader kDeepseekOCRModelArgsLoader = [](const JsonReader& json,
-                                                       ModelArgs* args) {
+REGISTER_MODEL_ARGS(deepseek_ocr, [&] {
   // Several HF releases share model_type "deepseek_vl_v2" (the architecture
   // lineage); canonical_model_registration_name maps them all here. Only
   // DeepSeek-OCR is implemented: fail with a clear message naming the actual
@@ -103,9 +102,6 @@ const ModelArgsLoader kDeepseekOCRModelArgsLoader = [](const JsonReader& json,
   // type stays at its default, so the engine builds 1-D position ids.
   SET_ARG(stop_token_ids, std::unordered_set<int32_t>({args->eos_token_id()}));
   return true;
-};
-
-REGISTER_MODEL_ARGS_LOADER(deepseek_ocr, kDeepseekOCRModelArgsLoader);
-REGISTER_MODEL_ARGS_LOADER(DeepseekOCRForCausalLM, kDeepseekOCRModelArgsLoader);
+});
 
 }  // namespace xllm

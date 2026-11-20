@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
@@ -26,6 +27,26 @@ from scripts.logger import logger
 from xllm.python.attention.backend import LayerCache
 from xllm.python.model_executor.runners.acl_graph import _get_graph_pool
 from xllm.python.model_executor.runners.decode_cuda_graph import _CAPTURE_WARMUP_STEPS
+
+if TYPE_CHECKING:
+    from typing import Protocol
+
+    class _ContextProjectionModel(Protocol):
+        @property
+        def context_projection_input(self) -> tuple[int, torch.dtype]: ...
+
+    class _ContextKvModel(Protocol):
+        @property
+        def model(self) -> _ContextProjectionModel: ...
+
+        def write_context_kv(
+            self,
+            hidden: torch.Tensor,
+            positions: torch.Tensor,
+            slots: torch.Tensor,
+            layer_caches: list[LayerCache],
+            layer_synchronizer: None,
+        ) -> torch.Tensor: ...
 
 
 @dataclass(slots=True)
@@ -42,47 +63,24 @@ class ContextKvAclGraphRunner:
     """Graph the context update with owned input buffers.
 
     Accepted rows are compacted by the worker before this call. Unused bucket
-    rows use negative slots, the same no-write contract as block-draft padding.
+    rows use negative slots, so padding never touches live KV.
     The caller orders producers, updates and cache readers on its compute
     stream and consumes the output before another update.
     """
 
     def __init__(self, model: nn.Module, device: torch.device) -> None:
-        self.model = model
+        self.model = cast("_ContextKvModel", model)
         self.device = device
-        self._kv_caches: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+        self.layer_caches: list[LayerCache] = []
         self._graphs: dict[int, _ContextKvGraph] = {}
         self._buckets: list[int] = []
         self._capture_stream: torch.npu.Stream | None = None
-        self.replays = 0
-
-    def bind_kv_caches(self, caches: list[LayerCache]) -> None:
-        bindings = []
-        for cache in caches:
-            if cache.key is None or cache.value is None:
-                raise ValueError("context KV graphs require key and value caches for every layer")
-            bindings.append((cache.key, cache.value))
-        if self._kv_caches is not None:
-            if len(bindings) != len(self._kv_caches) or any(
-                old.data_ptr() != new.data_ptr()
-                or old.shape != new.shape
-                or old.stride() != new.stride()
-                or old.dtype != new.dtype
-                or old.device != new.device
-                for old_pair, new_pair in zip(self._kv_caches, bindings)
-                for old, new in zip(old_pair, new_pair)
-            ):
-                raise ValueError("context KV cache bindings changed after initialization")
-            return
-        self._kv_caches = bindings
 
     @torch.inference_mode()
     def warmup(self, max_rows: int) -> None:
-        if self._kv_caches is None or max_rows <= 0:
+        if not self.layer_caches or max_rows <= 0:
             raise ValueError("context KV graph warmup requires bound caches and positive capacity")
-        weight = self.model.model.context_projection_weight
-        if weight.shape[1] == 0:
-            raise RuntimeError("context projection weights must be loaded before graph warmup")
+        hidden_size, dtype = self.model.model.context_projection_input
         bucket = 1
         while bucket < max_rows:
             bucket *= 2
@@ -100,20 +98,18 @@ class ContextKvAclGraphRunner:
         # then hand the completed captures back to the caller for replay.
         stream.wait_stream(caller_stream)
         # Larger captures precede smaller ones, matching the shared ACL pool's
-        # allocation order. Warmup never scatters into live or padding KV.
+        # allocation order.
         with torch.npu.stream(stream):
             for rows in missing_rows:
-                hidden = torch.zeros((rows, weight.shape[1]), dtype=weight.dtype, device=self.device)
+                hidden = torch.zeros((rows, hidden_size), dtype=dtype, device=self.device)
                 positions = torch.zeros(rows, dtype=torch.int32, device=self.device)
                 slots = torch.full((rows,), -1, dtype=torch.int32, device=self.device)
                 for _ in range(_CAPTURE_WARMUP_STEPS):
-                    self.model.write_context_kv(hidden, positions, slots, self._kv_caches, None)
+                    self.model.write_context_kv(hidden, positions, slots, self.layer_caches, None)
                 stream.synchronize()
                 graph = torch.npu.NPUGraph()
                 with torch.npu.graph(graph, pool=_get_graph_pool(), stream=stream):
-                    output = self.model.write_context_kv(hidden, positions, slots, self._kv_caches, None)
-                if output is None:
-                    raise RuntimeError("context KV graph capture produced no output")
+                    output = self.model.write_context_kv(hidden, positions, slots, self.layer_caches, None)
                 self._graphs[rows] = _ContextKvGraph(hidden, positions, slots, graph, output)
                 logger.info("Python context KV ACL graph captured: model=%s rows=%d", type(self.model).__name__, rows)
         caller_stream.wait_stream(stream)
@@ -131,13 +127,9 @@ class ContextKvAclGraphRunner:
         rows = hidden.shape[0]
         if rows <= 0 or positions.numel() != rows or slots.numel() != rows:
             raise ValueError("context KV graph input row counts must agree and be positive")
-        if not self._buckets:
-            raise RuntimeError("context KV ACL graphs require startup warmup")
         index = bisect_left(self._buckets, rows)
         if index == len(self._buckets):
-            # Declared out-of-capacity eager path, selected before any update.
-            # Graph capture errors and missing startup warmup never fall back.
-            return self.model.write_context_kv(hidden, positions, slots, self._kv_caches, None)
+            return self.model.write_context_kv(hidden, positions, slots, self.layer_caches, None)
         entry = self._graphs[self._buckets[index]]
         if hidden.shape[1] != entry.hidden.shape[1] or hidden.dtype != entry.hidden.dtype:
             raise ValueError("context KV graph hidden geometry/dtype changed after warmup")
@@ -154,5 +146,4 @@ class ContextKvAclGraphRunner:
             entry.slots[rows : entry.valid_rows].fill_(-1)
         entry.valid_rows = rows
         entry.graph.replay()
-        self.replays += 1
         return entry.output[:rows]

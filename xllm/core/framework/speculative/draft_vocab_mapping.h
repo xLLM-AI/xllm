@@ -27,11 +27,12 @@ class SampleOutput;
 // d2t[draft_id]. An undefined mapping keeps the shared vocabulary unchanged.
 class DraftVocabMapping final {
  public:
-  DraftVocabMapping(torch::Tensor draft_token_id_offsets,
+  DraftVocabMapping() = default;
+
+  DraftVocabMapping(const torch::Tensor& draft_token_id_offsets,
                     int64_t draft_vocab_size,
                     int64_t target_vocab_size,
                     const torch::Device& device);
-  DraftVocabMapping() = default;
 
   int64_t mapped_vocab_size(int64_t draft_vocab_size) const;
 

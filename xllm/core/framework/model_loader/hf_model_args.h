@@ -18,6 +18,7 @@ limitations under the License.
 #include <filesystem>
 #include <nlohmann/json_fwd.hpp>
 #include <string>
+#include <string_view>
 
 namespace xllm {
 
@@ -32,6 +33,10 @@ void normalize_speculators_config(nlohmann::json* config);
 void normalize_config_torch_dtype(JsonReader& reader);
 
 bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args);
+
+void configure_draft_model_args(ModelArgs& args,
+                                std::string_view algorithm,
+                                bool is_python_model);
 
 bool load_hf_model_args(const std::filesystem::path& model_weights_path,
                         const std::string& backend,

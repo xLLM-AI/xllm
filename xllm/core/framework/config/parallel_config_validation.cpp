@@ -243,9 +243,9 @@ std::optional<std::string> validate_context_parallel_config(
       // recompute the whole sequence on every rank. Mirror the implementations
       // that explicitly consume cp_context rather than admitting every Python
       // model type.
-      if (model_type != "qwen3" && model_type != "glm_moe_dsa" &&
-          model_type != "deepseek_v4" &&
-          !is_glm5_next_target_model_type(model_type)) {
+      const bool is_glm5_next = is_glm5_next_model(model_type);
+      if (!(is_glm5_next || model_type == "qwen3" ||
+            model_type == "glm_moe_dsa" || model_type == "deepseek_v4")) {
         return "Python model-side CP does not support model_type=" +
                model_type +
                "; supported models are qwen3, glm_moe_dsa, deepseek_v4, "
@@ -259,8 +259,7 @@ std::optional<std::string> validate_context_parallel_config(
         return "Python model-side CP requires Prefill to use EagerRunner; use "
                "--python_graph_backend=off or decode-only aclgraph";
       }
-      if (options.dp_size() != 1 &&
-          !is_glm5_next_target_model_type(model_type)) {
+      if (options.dp_size() != 1 && !is_glm5_next) {
         return "Python CP requires dp_size == 1";
       }
       if (options.dp_size() < 1) {
@@ -280,7 +279,7 @@ std::optional<std::string> validate_context_parallel_config(
         return "Python DeepSeek-V4 CP requires replicated KV caches; use "
                "kv_split_size=1";
       }
-      if (is_glm5_next_target_model_type(model_type)) {
+      if (is_glm5_next) {
         if (engine_type == EngineType::SSM) {
           return "Python GLM-5 Next CP does not support target-side "
                  "speculative "

@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "core/framework/model/model_params_view.h"
 #include "core/layers/common/attention_metadata.h"
+#include "core/runtime/options.h"
 #include "core/util/pybind_helper.h"
 #include "core/util/tensor_helper.h"
 
@@ -230,7 +231,7 @@ const layer::ExpandedDecodeMetadata& PyExpandedDecodeMetadataView::metadata()
 PyAttentionMetadataView::PyAttentionMetadataView(
     std::shared_ptr<layer::AttentionMetadata> metadata,
     const ModelParamsView& params,
-    int32_t num_speculative_tokens)
+    const runtime::Options& options)
     : metadata_(std::move(metadata)),
       kv_seq_lens_host_(
           make_host_int32_view(metadata_, metadata_->kv_seq_lens_vec)),
@@ -275,7 +276,7 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   std::replace(dp_execution_token_counts_.begin(),
                dp_execution_token_counts_.end(),
                /*old_value=*/0,
-               num_speculative_tokens + 1);
+               options.num_decoding_tokens());
   dp_is_decode_ = params.parallel.dp_is_decode;
   if (params.enable_graph && raw_dp_execution_token_counts_.empty()) {
     // Prepared ordinary decode has one token per actual sequence, before

@@ -77,7 +77,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<TargetInput>::finalize_step_output;
   using SpeculativeWorkerImpl<TargetInput>::maybe_broadcast_spec_tokens;
   using DraftModelSpecWorkerImpl<TargetInput>::logical_block_size;
-  using DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input;
   using DraftModelSpecWorkerImpl<TargetInput>::target_verify_mode_;
   using DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input;
 
@@ -131,7 +130,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       const torch::Tensor& block_tables) const;
   void ensure_spec_verify_control_block_table(TargetModelParams& input_params,
                                               int64_t num_sequences);
-  bool requires_full_target_replay() const override;
   // Prepare target validate input from cached target context.
   void prepare_validate_inputs(const TargetInput& inputs,
                                TargetInput& validate_inputs,
@@ -258,12 +256,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       mtp_async::CombinedDraftExecutionPath::UNSUPPORTED;
   mtp_async::DraftPrefixPolicy draft_prefix_policy_ =
       mtp_async::DraftPrefixPolicy::TAIL_REPAIR;
-  struct DraftContextReplayPolicy {
-    bool full_target_replay;
-    int32_t num_speculative_tokens;
-    int32_t draft_position_offset;
-  };
-  std::optional<DraftContextReplayPolicy> draft_context_replay_policy_;
 
   CachedDeviceIndices logits_indices_;
 
@@ -282,5 +274,8 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // topology, and are rebuilt only when that width changes.
   CachedDeviceIndices mtp_validate_greedy_indices_;
 #endif
+
+ private:
+  void restore_bootstrap_hidden(const TargetInput& input);
 };
 }  // namespace xllm

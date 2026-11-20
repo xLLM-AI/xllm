@@ -21,14 +21,13 @@ limitations under the License.
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/macros.h"
 #include "common/types.h"
 
 namespace xllm {
-
-struct ModelArgs;
 
 class Options {
  public:
@@ -37,7 +36,7 @@ class Options {
 
   std::string to_string() const;
 
-  void validate(const ModelArgs& model_args) const;
+  void validate(std::string_view model_type = {}) const;
 
   PROPERTY(std::string, model_path);
 

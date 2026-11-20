@@ -66,8 +66,7 @@ class SpeculativeConfig final {
     return boost::iequals(algorithm, "MTP");
   }
 
-  // Whether the PD handoff must carry the bootstrap hidden state.
-  static bool requires_bootstrap_hidden(std::string_view algorithm) {
+  static bool is_eagle_family_algorithm(std::string_view algorithm) {
     return is_mtp_algorithm(algorithm) || is_eagle3_algorithm(algorithm);
   }
 
@@ -77,6 +76,20 @@ class SpeculativeConfig final {
            is_dspark_algorithm(algorithm);
   }
 
+  static int32_t num_decoding_tokens(
+      int32_t num_speculative_tokens,
+      std::string_view speculative_algorithm = {}) {
+    if (!speculative_algorithm.empty()) {
+      if (is_dspark_algorithm(speculative_algorithm)) {
+        return num_speculative_tokens;
+      }
+      if (is_eagle_family_algorithm(speculative_algorithm)) {
+        return 1;
+      }
+    }
+    return num_speculative_tokens + 1;
+  }
+
   static bool requires_aux_hidden_capture(std::string_view algorithm) {
     return is_eagle3_algorithm(algorithm) ||
            is_block_diffusion_algorithm(algorithm);
@@ -84,7 +97,7 @@ class SpeculativeConfig final {
 
   // Aux-capture drafts share the target's KV layout, so they are included.
   static bool supports_host_kv_cache(std::string_view algorithm) {
-    return is_mtp_algorithm(algorithm) || is_eagle3_algorithm(algorithm) ||
+    return is_eagle_family_algorithm(algorithm) ||
            is_block_diffusion_algorithm(algorithm);
   }
 
@@ -92,8 +105,8 @@ class SpeculativeConfig final {
   // requires it; greedy-only DFlash and Suffix stay out.
   static bool is_probabilistic_draft_sampling_supported(
       std::string_view algorithm) {
-    return is_mtp_algorithm(algorithm) || is_dspark_algorithm(algorithm) ||
-           is_dflash2_algorithm(algorithm) || is_eagle3_algorithm(algorithm);
+    return is_eagle_family_algorithm(algorithm) ||
+           is_dflash2_algorithm(algorithm) || is_dspark_algorithm(algorithm);
   }
 
   void from_flags();

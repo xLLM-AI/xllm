@@ -291,16 +291,21 @@ class Qwen3DecoderLayer(nn.Module):
         self.mlp.process_weights_after_loading()
 
 
+def build_qwen3_layers(
+    cfg: Qwen3Config, dtype: torch.dtype, device: torch.device, *, causal: bool = True
+) -> nn.ModuleList:
+    return nn.ModuleList(Qwen3DecoderLayer(cfg, i, dtype, device, causal=causal) for i in range(cfg.n_layers))
+
+
 class Qwen3Model(nn.Module):
     def __init__(
         self,
         cfg: Qwen3Config,
         dtype: torch.dtype,
         device: torch.device,
+        layers: nn.ModuleList,
         *,
-        causal: bool = True,
         create_embedding: bool = True,
-        decoder_layer_type: type[Qwen3DecoderLayer] = Qwen3DecoderLayer,
     ) -> None:
         super().__init__()
         tp = cfg.tp_size
@@ -322,10 +327,7 @@ class Qwen3Model(nn.Module):
             device=device,
             rope_scaling=cfg.rope_scaling,
         )
-        self.layers = cast(
-            Sequence[Qwen3DecoderLayer],
-            nn.ModuleList(decoder_layer_type(cfg, i, dtype, device, causal=causal) for i in range(cfg.n_layers)),
-        )
+        self.layers = cast(Sequence[Qwen3DecoderLayer], layers)
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.aux_hidden_capture = AuxHiddenCapture(cfg.layers_to_capture)
 
@@ -393,7 +395,9 @@ class Qwen3ForCausalLM(PyModelBase):
             raise ValueError("world_size must equal tp_size * dp_size")
         if not 0 <= self.cfg.dp_rank < dp:
             raise ValueError("dp_rank must be in [0, dp_size)")
-        self.model = Qwen3Model(self.cfg, dtype, device)  # pyright: ignore[reportIncompatibleVariableOverride]
+        self.model = Qwen3Model(  # pyright: ignore[reportIncompatibleVariableOverride]
+            self.cfg, dtype, device, build_qwen3_layers(self.cfg, dtype, device)
+        )
         self.lm_head = None
         if not config.get("embedding_mode", False):
             assert self.cfg.vocab_size % tp == 0

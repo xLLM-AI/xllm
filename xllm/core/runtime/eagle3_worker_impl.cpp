@@ -17,8 +17,12 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <utility>
+
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/sampling/logits_processor.h"
+#include "core/framework/speculative/draft_config.h"
+#include "core/platform/platform.h"
 #include "core/util/tensor_helper.h"
 #include "runtime/llm_worker_impl.h"
 
@@ -60,6 +64,21 @@ Eagle3WorkerImpl<TargetInput>::~Eagle3WorkerImpl() {
 template <typename TargetInput>
 int64_t Eagle3WorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
   return AuxHiddenCapture::aux_hidden_dim(context_.get_model_args());
+}
+
+template <typename TargetInput>
+void Eagle3WorkerImpl<TargetInput>::configure_target_model_args(
+    ModelArgs& args) const {
+  if (!Platform::is_npu() || !args.layers_to_capture().empty()) {
+    return;
+  }
+  auto layers = read_capture_layer_ids(
+      this->options().draft_model_path().value(), /*required=*/false);
+  if (layers.empty()) {
+    layers = AuxHiddenCapture::legacy_default_capture_layer_ids(
+        static_cast<int32_t>(args.n_layers()));
+  }
+  args.layers_to_capture(std::move(layers));
 }
 
 template <typename TargetInput>

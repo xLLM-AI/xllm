@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -40,7 +41,7 @@ class DFlash2Qwen3Config(DFlashQwen3Config):
     selector_top_k: int = 0
 
     @classmethod
-    def from_dict(cls, d: dict) -> DFlash2Qwen3Config:
+    def from_dict(cls, d: dict[str, Any]) -> DFlash2Qwen3Config:
         base = DFlashQwen3Config.from_dict(d)
         nested = d.get("dflash_config")
         dflash_config = nested if isinstance(nested, dict) else {}
@@ -63,7 +64,6 @@ class DFlash2Qwen3Config(DFlashQwen3Config):
         super().validate()
         if (
             min(
-                self.block_size,
                 self.conv_group_size,
                 self.conv_kernel_size,
                 self.selector_rank,
@@ -141,25 +141,26 @@ class DFlash2Qwen3DecoderLayer(Qwen3DecoderLayer):
         layer_id: int,
         dtype: torch.dtype,
         device: torch.device,
-        causal: bool = False,
+        *,
+        num_speculative_tokens: int,
     ) -> None:
-        super().__init__(cfg, layer_id, dtype, device, causal=causal)
+        super().__init__(cfg, layer_id, dtype, device, causal=False)
         self.self_attn.attn.fia_sparse_mode = 4
         self.attention_conv = DFlash2GroupedConv(
             cfg.hidden_size,
             cfg.conv_kernel_size,
             cfg.conv_group_size,
-            cfg.block_size,
             dtype,
             device,
+            num_speculative_tokens=num_speculative_tokens,
         )
         self.mlp_conv = DFlash2GroupedConv(
             cfg.hidden_size,
             cfg.conv_kernel_size,
             cfg.conv_group_size,
-            cfg.block_size,
             dtype,
             device,
+            num_speculative_tokens=num_speculative_tokens,
         )
 
     def forward(
@@ -197,12 +198,22 @@ class DFlash2Qwen3DecoderLayer(Qwen3DecoderLayer):
 
 
 class DFlash2Qwen3Model(DFlashQwen3Model):
-    def __init__(self, cfg: DFlash2Qwen3Config, dtype: torch.dtype, device: torch.device) -> None:
+    def __init__(
+        self,
+        cfg: DFlash2Qwen3Config,
+        dtype: torch.dtype,
+        device: torch.device,
+        *,
+        num_speculative_tokens: int,
+    ) -> None:
         super().__init__(
             cfg,
             dtype,
             device,
-            decoder_layer_type=DFlash2Qwen3DecoderLayer,
+            layers=nn.ModuleList(
+                DFlash2Qwen3DecoderLayer(cfg, i, dtype, device, num_speculative_tokens=num_speculative_tokens)
+                for i in range(cfg.n_layers)
+            ),
         )
         self.candidate_selector = DFlash2CandidateSelector(
             cfg.hidden_size,
@@ -226,8 +237,16 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     model: DFlash2Qwen3Model
-    config_cls = DFlash2Qwen3Config
-    model_cls = DFlash2Qwen3Model
+
+    def _build_model(self, config: dict[str, Any]) -> DFlash2Qwen3Model:
+        cfg = DFlash2Qwen3Config.from_dict(config)
+        cfg.validate()
+        return DFlash2Qwen3Model(
+            cfg,
+            self.dtype,
+            self.device,
+            num_speculative_tokens=int(config.get("num_speculative_tokens", 0)),
+        )
 
     def dflash2_candidates(
         self,

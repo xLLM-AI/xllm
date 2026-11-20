@@ -23,7 +23,6 @@ limitations under the License.
 #include <string>
 #include <tuple>
 
-#include "attention.h"
 #include "compressor.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "deepseek_v4_indexer.h"
@@ -35,16 +34,18 @@ limitations under the License.
 #include "layers/common/attention_metadata.h"
 #include "layers/common/linear.h"
 #include "layers/common/rms_norm.h"
-#include "layers/common/rotary_embedding.h"
 
 namespace xllm {
+class ModelParamsView;
+
 namespace layer {
 
 inline int64_t deepseek_v4_ori_window_left(int64_t window_size,
-                                           int64_t dspark_block_size,
+                                           int64_t num_speculative_tokens,
                                            bool use_native_dspark_sas) {
-  if (use_native_dspark_sas && dspark_block_size > 0) {
-    return std::max<int64_t>(window_size + dspark_block_size - 1, 0);
+  if (use_native_dspark_sas) {
+    return std::max<int64_t>(window_size + num_speculative_tokens - 1,
+                             /*minimum=*/0);
   }
   // The compatibility fallback accepted by CANN 9.0 uses window_size - 1
   // (127 for DSV4). DSpark block visibility is encoded by expanding the block
@@ -52,18 +53,19 @@ inline int64_t deepseek_v4_ori_window_left(int64_t window_size,
   return std::max<int64_t>(window_size - 1, 0);
 }
 
-inline bool deepseek_v4_use_native_sas(int64_t dspark_block_size,
-                                       bool dspark_use_native_sas,
-                                       bool use_prefill_attention) {
-  return dspark_use_native_sas && dspark_block_size > 0 &&
-         !use_prefill_attention;
-}
+void build_deepseek_v4_sparse_metadata(
+    DSAMetadata& dsa,
+    const ModelParamsView& params,
+    const ModelArgs& model_args,
+    int64_t tp_num_heads,
+    bool use_prefill_attention,
+    const torch::Tensor& cu_seqlens_ori_kv_override);
 
 torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
                                        const torch::Tensor& query_cu_seq_lens,
                                        const torch::Tensor& seq_lens,
                                        int64_t window_size,
-                                       int64_t dspark_block_size,
+                                       int64_t num_speculative_tokens,
                                        int64_t cache_block_size);
 
 // DSA kv state aligned with Python:
@@ -77,13 +79,7 @@ using KVState = std::tuple<torch::Tensor,
 
 class DSAttentionImpl : public torch::nn::Module {
  public:
-  DSAttentionImpl() = default;
-  explicit DSAttentionImpl(const ModelContext& context, int32_t layer_id = -1);
-  DSAttentionImpl(const ModelArgs& args,
-                  const QuantArgs& quant_args,
-                  const ParallelArgs& parallel_args,
-                  const torch::TensorOptions& options,
-                  int32_t layer_id = -1);
+  DSAttentionImpl(const ModelContext& context, int32_t layer_id);
 
   std::tuple<torch::Tensor, std::optional<torch::Tensor>> forward(
       const DSAMetadata& attn_metadata,
@@ -110,9 +106,7 @@ class DSAttentionImpl : public torch::nn::Module {
   int64_t head_dim_;
 
   int64_t n_local_heads_;
-  int64_t q_lora_rank_;
   int64_t o_lora_rank_;
-  int64_t o_groups_;
 
   int64_t rope_head_dim_;
   int64_t nope_head_dim_;
@@ -121,18 +115,9 @@ class DSAttentionImpl : public torch::nn::Module {
 
   double softmax_scale_;
   double eps_ = 1e-6;
-  int64_t qk_head_dim_;
   int64_t n_local_groups_;
   int64_t tp_rank_ = 0;
-  int64_t tp_size_ = 1;
-  int64_t index_n_heads_ = 0;
-  int64_t index_head_dim_ = 0;
-  int64_t index_topk_ = 0;
-  int64_t block_size_ = 0;
   bool dspark_use_native_sas_ = false;
-
-  double rope_theta_ = 10000.0;
-  double compress_rope_theta_ = 40000.0;
 
   ReplicatedLinear q_a_proj_{nullptr};
   ColumnParallelLinear q_b_proj_{nullptr};
@@ -147,8 +132,6 @@ class DSAttentionImpl : public torch::nn::Module {
   torch::Tensor attn_sink_;
   bool attn_sink_loaded_ = false;
 
-  Attention attn_{nullptr};
-  DeepseekScalingRotaryEmbedding rotary_emb_{nullptr};
   DeepseekV4Indexer indexer_{nullptr};
   Compressor compressor_{nullptr};
 

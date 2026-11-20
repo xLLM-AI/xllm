@@ -38,7 +38,7 @@ class GraphPersistentParam final {
   GraphPersistentParam(const ModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options,
-                       const MtpModelCapabilities& capabilities);
+                       GraphAttentionLayout attention_layout);
 
   ~GraphPersistentParam() = default;
 
@@ -158,7 +158,7 @@ class MluGraphExecutorImpl final : public ExecutorImpl {
   std::unique_ptr<MluGraphPlanner> planner_;
   ProcessGroup* dp_group_ = nullptr;
   GraphActionWorkspace graph_action_workspace_;
-  MtpModelCapabilities mtp_capabilities_;
+  GraphAttentionLayout attention_layout_ = GraphAttentionLayout::FLAT;
 
   std::unordered_map<GraphKey, std::unique_ptr<MluGraph>, GraphKeyHash> graphs_;
   std::unique_ptr<GraphPersistentParam> persistent_param_;

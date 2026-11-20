@@ -32,7 +32,6 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
@@ -57,13 +56,10 @@ namespace xllm::npu {
 namespace {
 constexpr int32_t kMlaGraphKvLenBucket = 2048;
 
-int64_t get_decode_graph_capacity(const runtime::Options& options) {
-  return options.max_seqs_per_batch();
-}
-
 int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
   const int64_t token_capacity =
-      options.max_seqs_per_batch() * (options.num_speculative_tokens() + 1);
+      static_cast<int64_t>(options.max_seqs_per_batch()) *
+      options.num_decoding_tokens();
   return runtime::get_decode_graph_token_bucket(
       token_capacity, options.enable_graph_mode_decode_no_padding());
 }
@@ -78,15 +74,15 @@ bool graph_mode_decode_no_padding_enabled() {
 }
 
 int64_t get_hybrid_metadata_capacity(const runtime::Options& options) {
-  const int64_t seq_capacity = get_decode_graph_capacity(options);
-  const int64_t num_speculative_tokens = options.num_speculative_tokens();
+  const int64_t seq_capacity = options.max_seqs_per_batch();
+  const int64_t num_decoding_tokens = options.num_decoding_tokens();
   // Bucket padding rows still consume sequence-scoped metadata:
   // 4 seqs x 5 tokens = 20 rows -> bucket 32 -> 7 metadata rows.
   const int64_t bucketed_tokens = runtime::get_decode_graph_token_bucket(
-      seq_capacity * (num_speculative_tokens + 1),
+      seq_capacity * num_decoding_tokens,
       graph_mode_decode_no_padding_enabled());
   const int64_t padded_seq_capacity =
-      (bucketed_tokens + num_speculative_tokens) / (num_speculative_tokens + 1);
+      (bucketed_tokens + num_decoding_tokens - 1) / num_decoding_tokens;
   return std::max(seq_capacity, padded_seq_capacity);
 }
 
@@ -860,8 +856,7 @@ std::optional<Params> GraphPersistentParam::update(
     if (params.meta.num_sequences == 0) {
       actual_batch_size = 0;
     } else {
-      actual_batch_size =
-          actual_num_tokens / (options_.num_speculative_tokens() + 1);
+      actual_batch_size = actual_num_tokens / options_.num_decoding_tokens();
     }
   }
   const int32_t q_max_seq_len = std::max<int32_t>(params.meta.q_max_seq_len, 1);

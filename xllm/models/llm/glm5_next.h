@@ -26,12 +26,10 @@ namespace xllm {
 // model. Text-side fields in GLM-5.3-Flash checkpoints are nested under
 // text_config.
 
-namespace glm5_next_args {
-
 // Shared config.json -> ModelArgs loader for glm5_next and the
 // glm5_next_mtp draft (same field set; the draft config.json only differs in
 // num_hidden_layers / layer schedules / model_type).
-inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
+REGISTER_MODEL_ARGS(glm5_next, [&] {
   LOAD_ARG_OR(model_type, "model_type", "glm5_next");
   // The export tool writes "glm5_next" / "glm5_next_mtp" as model_type for
   // every GLM-5.3-Flash checkpoint (verified across GLM-5.3-Flash-W8A8,
@@ -210,61 +208,9 @@ inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
           std::unordered_set<int32_t>(args->eos_token_id_vec().begin(),
                                       args->eos_token_id_vec().end()));
   return true;
-}
-
-inline void configure_mtp_args(ModelArgs& args,
-                               [[maybe_unused]] bool is_python_model) {
-#if defined(USE_MLU)
-  // Native MLU needs a fresh index layout on each draft iteration.
-  if (!is_python_model) {
-    args.index_share_for_mtp_iteration(false);
-  }
-#endif
-  if (!is_glm5_next_target_model_type(args.model_type())) {
-    return;
-  }
-  CHECK_EQ(args.num_nextn_predict_layers(), 1)
-      << "GLM MTP requires exactly one appended prediction layer.";
-  CHECK_GT(args.n_layers(), 0);
-  args.mtp_start_layer_idx(args.n_layers());
-  args.model_type("glm5_next_mtp");
-  args.n_layers(1);
-  args.first_k_dense_replace(0);
-  args.layer_types({"deepseek_sparse_attention"});
-  args.full_attn_layers({0});
-  args.mlp_layer_types({"sparse"});
-  args.indexer_types({"full"});
-  if (args.index_share_for_mtp_iteration()) {
-    args.index_topk_freq(std::max(args.index_topk_freq(), 2));
-    args.index_skip_topk_offset(0);
-    args.index_topk_pattern("S");
-  }
-}
-
-}  // namespace glm5_next_args
-
-const bool glm5_next_mtp_adapter_registered = []() {
-  ModelRegistry::register_mtp_args_adapter("glm5_next",
-                                           &glm5_next_args::configure_mtp_args);
-  ModelRegistry::register_mtp_args_adapter("glm5_next_mtp",
-                                           &glm5_next_args::configure_mtp_args);
-  return true;
-}();
+});
 
 REGISTER_MODEL_BACKEND(glm5_next, "llm");
 REGISTER_MODEL_BACKEND(glm5_next_mtp, "llm");
-REGISTER_MODEL_ARGS_LOADER(glm5_next, &glm5_next_args::load_model_args);
-REGISTER_MODEL_ARGS_LOADER(glm5_next_mtp, &glm5_next_args::load_model_args);
 
-const bool glm5_next_mtp_capabilities_registered = []() {
-  MtpModelCapabilities capabilities;
-  capabilities.native_draft_requires_accepted_span_replay = true;
-  capabilities.model_family = MtpModelFamily::GLM5;
-  capabilities.supports_causal_replay = true;
-  capabilities.supports_grouped_graph = true;
-  capabilities.graph_context_policy = GraphContextPolicy::KPOOL_FIXED;
-  ModelRegistry::register_mtp_capabilities("glm5_next", capabilities);
-  ModelRegistry::register_mtp_capabilities("glm5_next_mtp", capabilities);
-  return true;
-}();
 }  // namespace xllm

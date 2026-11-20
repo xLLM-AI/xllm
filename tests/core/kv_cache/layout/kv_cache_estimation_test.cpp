@@ -1496,15 +1496,10 @@ TEST(KVCacheEstimationTest, Qwen35NativeMtpDraftUsesFullAttentionCacheBudget) {
                         "full_attention",
                         "linear_attention",
                         "full_attention"});
-      ModelRegistry::configure_mtp_args(target_args,
-                                        /*speculative_algorithm=*/"MTP",
-                                        /*is_draft_engine=*/false,
-                                        /*is_python_model=*/false);
       ModelArgs draft_args = target_args;
-      ModelRegistry::configure_mtp_args(draft_args,
-                                        /*speculative_algorithm=*/"MTP",
-                                        /*is_draft_engine=*/true,
-                                        /*is_python_model=*/false);
+      ModelRegistry::configure_draft_model_args(draft_args,
+                                                /*speculative_algorithm=*/"MTP",
+                                                /*is_python_model=*/false);
 
       KVCacheEstimateOptions target_options = make_linear_attention_options();
       target_options.num_speculative_tokens = 3;

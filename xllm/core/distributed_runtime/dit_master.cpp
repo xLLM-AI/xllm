@@ -35,6 +35,7 @@ limitations under the License.
 
 namespace xllm {
 DiTMaster::DiTMaster(const Options& options) : Master(options) {
+  options_.validate();
   const std::optional<std::string> cp_error = validate_context_parallel_config(
       options_, EngineType::DIT, /*model_type=*/"", options_.nnodes());
   CHECK(!cp_error.has_value()) << cp_error.value();

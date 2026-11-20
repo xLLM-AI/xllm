@@ -41,19 +41,4 @@ TORCH_MODULE(Qwen3_5MtpForCausalLM);
 REGISTER_CAUSAL_MODEL(qwen3_5_mtp, Qwen3_5MtpForCausalLM);
 REGISTER_CAUSAL_MODEL(qwen3_5_moe_mtp, Qwen3_5MtpForCausalLM);
 
-REGISTER_MODEL_ARGS_LOADER(qwen3_5_mtp,
-                           [](const JsonReader& json, ModelArgs* args) {
-                             return qwen3_5_mtp::load_model_args(
-                                 json, args, "qwen3_5_text", "qwen3_5_mtp");
-                           });
-
-REGISTER_MODEL_ARGS_LOADER(qwen3_5_moe_mtp,
-                           [](const JsonReader& json, ModelArgs* args) {
-                             return qwen3_5_mtp::load_model_args(
-                                 json,
-                                 args,
-                                 "qwen3_5_moe_text",
-                                 "qwen3_5_moe_mtp");
-                           });
-
 }  // namespace xllm

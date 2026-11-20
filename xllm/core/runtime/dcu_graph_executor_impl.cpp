@@ -226,7 +226,7 @@ std::optional<Params> DcuGraphPersistentParam::update(
   util::pad_uniform_decode_lens(q_seq_lens_vec,
                                 kv_seq_lens_vec,
                                 padding_needed,
-                                options_.num_speculative_tokens());
+                                options_.num_decoding_tokens());
   const auto [q_lens, q_cu_lens] =
       stage_seq_lens(q_seq_lens_vec,
                      params.attention.device.q_seq_lens,
@@ -374,7 +374,7 @@ void DcuGraphPersistentParam::update_decode_input_buffer(
   util::pad_uniform_decode_lens(q_seq_lens_vec,
                                 kv_seq_lens_vec,
                                 padding_needed,
-                                options_.num_speculative_tokens());
+                                options_.num_decoding_tokens());
   stage_seq_lens(q_seq_lens_vec,
                  params.attention.device.q_seq_lens,
                  q_seq_lens_values_,

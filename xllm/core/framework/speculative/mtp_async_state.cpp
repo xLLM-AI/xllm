@@ -45,7 +45,7 @@ TargetSpecVerifyMode classify_target_spec_verify_mode(
   if (is_qwen3_5_target_model_type(model_type)) {
     return TargetSpecVerifyMode::EXPANDED_VERIFY;
   }
-  if (is_glm5_next_target_model_type(model_type)) {
+  if (is_glm5_next_model(model_type)) {
     return is_python_model ? TargetSpecVerifyMode::EXPANDED_VERIFY
                            : TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL;
   }

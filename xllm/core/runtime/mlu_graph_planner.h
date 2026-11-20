@@ -22,14 +22,19 @@ limitations under the License.
 #include "absl/container/inlined_vector.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/runtime/options.h"
-#include "models/model_registry.h"
 
 namespace xllm::mlu {
+
+enum class GraphAttentionLayout : uint8_t {
+  FLAT,
+  GROUPED_KPOOL,
+  GROUPED_FULL_ATTENTION,
+};
 
 int64_t get_block_capacity(int64_t max_kv_seq_len, int32_t block_size);
 
 int64_t get_graph_token_capacity(const runtime::Options& options,
-                                 const MtpModelCapabilities& capabilities);
+                                 GraphAttentionLayout attention_layout);
 
 struct GraphLayout {
   int64_t num_reqs = 0;
@@ -75,7 +80,7 @@ using GraphDecision = std::variant<GraphPlan, EagerReason>;
 
 struct GraphPlannerConfig {
   runtime::Options options;
-  MtpModelCapabilities capabilities;
+  GraphAttentionLayout attention_layout = GraphAttentionLayout::FLAT;
   bool state_required = false;
   int64_t history_capacity = 0;
   int64_t max_tokens = 0;

@@ -34,8 +34,10 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/framework/parallel_state/process_group.h"
+#include "core/framework/speculative/mtp_async_state.h"
 #include "core/runtime/graph_execution_input.h"
 #include "core/util/tensor_options.h"
+#include "models/model_registry.h"
 #include "runtime/decode_graph_bucket.h"
 #include "util/utils.h"
 
@@ -223,9 +225,9 @@ GraphPersistentParam::GraphPersistentParam(
     const ModelArgs& args,
     const torch::Device& device,
     const runtime::Options& options,
-    const MtpModelCapabilities& capabilities) {
+    GraphAttentionLayout attention_layout) {
   const int64_t graph_tokens_capacity =
-      get_graph_token_capacity(options, capabilities);
+      get_graph_token_capacity(options, attention_layout);
   const int64_t max_tokens =
       std::max<int64_t>(options.max_tokens_per_batch(), graph_tokens_capacity);
   const int64_t max_seq_lens = graph_tokens_capacity;
@@ -334,7 +336,7 @@ void GraphPersistentParam::update_input_buffer(const torch::Tensor& tokens,
   util::pad_uniform_decode_lens(host.q_seq_lens,
                                 host.kv_seq_lens,
                                 extra_rows,
-                                layout.attention_row_query_len - 1);
+                                layout.attention_row_query_len);
   if (!host.kpool_query_lens.empty()) {
     host.kpool_query_lens.resize(layout.padded_num_reqs,
                                  layout.tokens_per_request);
@@ -587,33 +589,37 @@ MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
       device_(device),
       options_(options),
       graph_pool_(torch_mlu::graph_pool_handle()) {
-  std::string model_name;
-  std::string resolve_error;
-  if (!resolve_model_registration_name(
-          args_.model_type(), &model_name, &resolve_error)) {
-    model_name = args_.model_type();
-  }
-  mtp_capabilities_ = ModelRegistry::get_mtp_capabilities(model_name);
+  const std::string model_name =
+      canonical_model_registration_name(args_.model_type());
   int64_t history_capacity = 0;
-  if (args_.max_position_embeddings() > 0) {
+  if (model_name == "glm5_next" || model_name == "glm5_next_mtp") {
+    attention_layout_ = GraphAttentionLayout::GROUPED_KPOOL;
+    constexpr int kDefaultHistoryCapacity = 32768;
+    history_capacity = util::get_int_env(
+        /*key=*/"XLLM_GRAPH_INDEX_HISTORY_MAX_KV", kDefaultHistoryCapacity);
+    CHECK_GT(history_capacity, 0)
+        << "XLLM_GRAPH_INDEX_HISTORY_MAX_KV must be positive";
+    if (args_.max_position_embeddings() > 0) {
+      history_capacity =
+          std::min<int64_t>(history_capacity, args_.max_position_embeddings());
+    }
+  } else if (is_qwen3_5_target_model_type(model_name) ||
+             mtp_async::classify_combined_draft_execution_path(model_name) ==
+                 mtp_async::CombinedDraftExecutionPath::
+                     QWEN3_5_PAGED_ATTENTION) {
+    attention_layout_ = GraphAttentionLayout::GROUPED_FULL_ATTENTION;
+    CHECK_GT(args_.max_position_embeddings(), 0)
+        << "Qwen3.5 graph capture requires positive max_position_embeddings";
+    history_capacity = args_.max_position_embeddings();
+  } else if (args_.max_position_embeddings() > 0) {
     history_capacity = (get_block_capacity(args_.max_position_embeddings(),
                                            options_.block_size()) +
                         1) *
                        options_.block_size();
   }
-  if (mtp_capabilities_.graph_context_policy ==
-      GraphContextPolicy::KPOOL_FIXED) {
-    history_capacity = ModelRegistry::get_graph_kv_capacity(
-        model_name, args_, history_capacity);
-  } else if (mtp_capabilities_.graph_context_policy ==
-             GraphContextPolicy::QWEN_FULL_ATTENTION) {
-    CHECK_GT(args_.max_position_embeddings(), 0)
-        << "Qwen3.5 graph capture requires positive max_position_embeddings";
-    history_capacity = args_.max_position_embeddings();
-  }
   GraphPlannerConfig planner_config;
   planner_config.options = options_;
-  planner_config.capabilities = mtp_capabilities_;
+  planner_config.attention_layout = attention_layout_;
   planner_config.state_required =
       model_ != nullptr && model_->requires_graph_forward_metadata();
   planner_config.history_capacity = history_capacity;
@@ -621,7 +627,7 @@ MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
       std::max<int64_t>(
           ::xllm::ExecutionConfig::get_instance().max_tokens_for_graph_mode(),
           options_.max_seqs_per_batch()),
-      get_graph_token_capacity(options_, mtp_capabilities_));
+      get_graph_token_capacity(options_, attention_layout_));
   planner_ = std::make_unique<MluGraphPlanner>(std::move(planner_config));
 }
 
@@ -647,7 +653,7 @@ ModelOutput MluGraphExecutorImpl::run_eager(const torch::Tensor& tokens,
 void MluGraphExecutorImpl::init_param_once() {
   if (persistent_param_ == nullptr) {
     persistent_param_ = std::make_unique<GraphPersistentParam>(
-        args_, device_, options_, mtp_capabilities_);
+        args_, device_, options_, attention_layout_);
   }
 }
 
@@ -751,15 +757,13 @@ ModelOutput MluGraphExecutorImpl::run(const torch::Tensor& tokens,
   } else {
     auto graph_input =
         prepare_graph_input(params, plan->layout.padded_num_tokens);
-    if (mtp_capabilities_.model_family == MtpModelFamily::GLM5 ||
-        mtp_capabilities_.model_family == MtpModelFamily::QWEN35) {
-      if (!params.is_spec_verify &&
-          (params.num_accepted_tokens.defined() ||
-           !params.num_accepted_tokens_host.empty())) {
-        auto& graph_params = graph_input.mutable_params();
-        graph_params.num_accepted_tokens = torch::Tensor();
-        graph_params.num_accepted_tokens_host.clear();
-      }
+    if (attention_layout_ != GraphAttentionLayout::FLAT &&
+        !params.is_spec_verify &&
+        (params.num_accepted_tokens.defined() ||
+         !params.num_accepted_tokens_host.empty())) {
+      auto& graph_params = graph_input.mutable_params();
+      graph_params.num_accepted_tokens = torch::Tensor();
+      graph_params.num_accepted_tokens_host.clear();
     }
 
     auto graph = std::make_unique<MluGraph>(persistent_param_.get(), *plan);

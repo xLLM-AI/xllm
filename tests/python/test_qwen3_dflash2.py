@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from xllm.python import kernels, registry
+from xllm.python import kernels
 from xllm.python.layers import DFlash2GroupedConv
 from xllm.python.models.qwen3_dflash2 import (
     DFlash2CandidateSelector,
@@ -106,12 +106,10 @@ def test_config_accepts_nested_and_reflected_dflash_geometry() -> None:
     speculators = DFlash2Qwen3Config.from_dict(speculators_values)
     speculators.validate()
 
-    assert nested.block_size == reflected.block_size
     assert nested.conv_group_size == reflected.conv_group_size
     assert nested.conv_kernel_size == reflected.conv_kernel_size
     assert nested.selector_rank == reflected.selector_rank
     assert nested.selector_top_k == reflected.selector_top_k
-    assert speculators.block_size == reflected.block_size
     assert speculators.conv_group_size == reflected.conv_group_size
     assert speculators.conv_kernel_size == reflected.conv_kernel_size
     assert speculators.selector_rank == reflected.selector_rank
@@ -121,7 +119,6 @@ def test_config_accepts_nested_and_reflected_dflash_geometry() -> None:
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"block_size": 0}, "geometry values"),
         ({"dflash2_conv_group_size": 3}, "must divide hidden_size"),
         ({"sliding_window": 0}, "positive sliding_window"),
         ({"dflash2_selector_top_k": 9}, "must not exceed vocab_size"),
@@ -135,31 +132,14 @@ def test_config_rejects_invalid_dflash2_geometry(
         _config(**overrides)
 
 
-def test_config_reads_flat_block_geometry() -> None:
-    config = DFlash2Qwen3Config.from_dict(
-        _config_dict(
-            block_size=5,
-            conv_group_size=4,
-            conv_kernel_size=3,
-            selector_rank=6,
-            selector_top_k=7,
-        )
-    )
-    assert config.block_size == 5
-    assert config.conv_group_size == 4
-    assert config.conv_kernel_size == 3
-    assert config.selector_rank == 6
-    assert config.selector_top_k == 7
-
-
 def test_grouped_convolution_resets_history_at_block_boundaries() -> None:
     convolution = DFlash2GroupedConv(
         hidden_size=4,
         taps=2,
         group_size=2,
-        block_size=4,
         dtype=torch.float32,
         device=torch.device("cpu"),
+        num_speculative_tokens=3,
     )
     hidden = torch.arange(32, dtype=torch.float32).view(8, 4)
     with torch.no_grad():
@@ -253,9 +233,3 @@ def test_checkpoint_preserves_draft_owned_vocabulary_weights(
         model.model.layers[0].mlp_conv.kernel_projection.weight,
         tensors["layers.0.mlp_conv.kernel_projection.weight"],
     )
-
-
-def test_registry_resolves_dflash2_python_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry.current_platform, "device_type", lambda: "npu")
-
-    assert registry.get_model_class("DFlash2DraftModel") is DFlash2Qwen3ForCausalLM

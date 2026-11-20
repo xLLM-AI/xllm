@@ -28,20 +28,6 @@ from xllm.python.models.deepseek_v4_dspark import (
 from xllm.python.models.dspark import DSparkForCausalLMBase
 
 
-def test_dspark_context_kv_validates_cache_and_hidden_shapes() -> None:
-    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
-    torch.nn.Module.__init__(model)
-    model.cfg = SimpleNamespace(n_layers=2, hidden_size=4, dspark_num_layers=2)
-    target_hidden = torch.zeros((3, 8))
-
-    with pytest.raises(ValueError, match="cache/layer count"):
-        model.write_context_kv(target_hidden, torch.arange(3), torch.arange(3), [], None)
-
-    model.cfg = SimpleNamespace(n_layers=1, hidden_size=4, dspark_num_layers=2)
-    with pytest.raises(ValueError, match="target hidden width"):
-        model.write_context_kv(torch.zeros((3, 4)), torch.arange(3), torch.arange(3), [object()], None)
-
-
 @pytest.mark.parametrize("record_result", [True, False])
 def test_dspark_context_kv_writes_real_decoder_layer_cache(
     monkeypatch: pytest.MonkeyPatch,

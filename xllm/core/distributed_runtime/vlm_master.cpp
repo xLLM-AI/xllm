@@ -140,6 +140,7 @@ std::optional<std::string> join_message_texts(
 
 VLMMaster::VLMMaster(const Options& options)
     : Master(options), master_status_(options.master_status()) {
+  options_.validate();
   options_.enable_mla(should_enable_mla(
       std::filesystem::path(options_.model_path()), options_.backend()));
 #if defined(USE_NPU)
@@ -241,11 +242,7 @@ VLMMaster::VLMMaster(const Options& options)
         << "VLM speculative decoding does not support disaggregated PD";
     CHECK(!options_.enable_service_routing())
         << "VLM speculative decoding does not support service routing";
-    const std::string draft_model_path =
-        options_.draft_model_path().value_or("");
-    CHECK(!draft_model_path.empty())
-        << "draft model path is required for VLM speculative decoding";
-    engine_options.draft_model_path(draft_model_path)
+    engine_options.draft_model_path(options_.draft_model_path())
         .num_speculative_tokens(options_.num_speculative_tokens())
         .speculative_algorithm(options_.speculative_algorithm())
         .enable_probabilistic_draft(options_.enable_probabilistic_draft())

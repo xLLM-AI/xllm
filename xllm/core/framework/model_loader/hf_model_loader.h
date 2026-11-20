@@ -30,9 +30,10 @@ namespace xllm {
 
 class HFModelLoader : public ModelLoader {
  public:
-  explicit HFModelLoader(std::string model_weights_path);
-
-  HFModelLoader(std::string model_weights_path, const std::string& backend);
+  HFModelLoader(std::string model_weights_path,
+                const std::string& backend,
+                std::string_view speculative_algorithm = {},
+                std::string_view reference_model_weights_path = {});
 
   std::unique_ptr<Tokenizer> tokenizer() const override;
 

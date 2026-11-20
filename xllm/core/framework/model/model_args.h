@@ -31,13 +31,6 @@ limitations under the License.
 
 namespace xllm {
 
-inline constexpr std::string_view kDFlash2DraftModelType = "DFlash2DraftModel";
-inline constexpr std::string_view kDSparkGLM5DraftModelType = "glm5_dspark";
-
-inline constexpr bool is_dflash2_draft_model_type(std::string_view model_type) {
-  return model_type == kDFlash2DraftModelType;
-}
-
 class TokenEmbeddingArgs final {
  public:
   REFLECT_PROPERTIES(TokenEmbeddingArgs);
@@ -1297,11 +1290,6 @@ inline bool has_linear_attention_layers(const ModelArgs& args) {
 inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
   return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
          model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
-}
-
-inline bool is_glm5_next_target_model_type(std::string_view model_type) {
-  return model_type == "glm5_3_flash" || model_type == "glm5_next" ||
-         model_type == "glm5_next_text";
 }
 
 // DeepSeek-V4 MTP stashes the pre-hc_head 3D hidden flattened to

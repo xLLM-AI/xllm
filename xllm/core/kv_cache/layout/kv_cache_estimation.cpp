@@ -200,7 +200,7 @@ bool enable_hybrid_spec_verify(const ModelArgs& model_args,
   return options.num_speculative_tokens > 0 && !options.is_draft_engine &&
          options.instance_role != InstanceRole::PREFILL &&
          (is_qwen3_5_target_model_type(model_args.model_type()) ||
-          is_glm5_next_target_model_type(model_args.model_type()));
+          is_glm5_next_model(model_args.model_type()));
 }
 
 int64_t linear_slot_size(const ModelArgs& model_args,
