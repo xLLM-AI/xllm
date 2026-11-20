@@ -118,7 +118,7 @@ def test_cache_backend_follows_ascend_generation(
 ) -> None:
     module_name = "xllm_kernel.ops.kv_cache.npu"
     monkeypatch.delitem(sys.modules, module_name, raising=False)
-    monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: PlatformEnum.NPU))
+    monkeypatch.setattr(Platform, "is_npu", Mock(side_effect=AssertionError("unexpected platform check")))
     monkeypatch.setattr(Platform, "get_ascend_soc_generation", classmethod(lambda cls: generation))
     monkeypatch.setattr(KernelRegistry, "_instance", KernelRegistry())
     monkeypatch.setattr(xllm_kernel, "_npu_binding", object(), raising=False)
@@ -276,7 +276,6 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
         "xllm_kernel.ops.attention.gdn.triton",
         "xllm_kernel.ops.attention.kda.triton",
         "xllm_kernel.ops.gemm.atb",
-        "xllm_kernel.ops.kv_cache.npu",
     )
     for name in modules:
         monkeypatch.delitem(sys.modules, name, raising=False)
