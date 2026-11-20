@@ -101,6 +101,8 @@ class ContinuousSchedulerBase : public Scheduler {
 
   void generate() override;
 
+  void generate_with_schedule_overlap() override;
+
   // inc/dec pending requests
   void incr_pending_requests(size_t count) override {
     pending_requests_.fetch_add(count, std::memory_order_relaxed);
@@ -277,7 +279,8 @@ class ContinuousSchedulerBase : public Scheduler {
 
   BatchGroup schedule_request(const absl::Duration& timeout);
 
-  void step_with_schedule_overlap(const absl::Duration& timeout);
+  // Returns whether a new batch was submitted.
+  bool step_with_schedule_overlap(const absl::Duration& timeout);
 
   void complete_pending_step();
 

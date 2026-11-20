@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "core/kv_cache/storage/kv_cache_create_options.h"
 
-#include "core/util/utils.h"
+#include "core/framework/model/model_type.h"
 
 namespace xllm {
 

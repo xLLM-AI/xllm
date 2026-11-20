@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/model_type.h"
+#include "core/kv_cache/layout/kv_cache_layout_policy.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 #include "core/kv_cache/storage/indexed_kv_cache_impl.h"

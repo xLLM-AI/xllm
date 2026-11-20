@@ -853,8 +853,6 @@ void VLMMaster::warmup_multimodal() {
 }
 
 void VLMMaster::generate() {
-  DCHECK(options_.enable_schedule_overlap())
-      << "Mode generate does not support schedule overlap yet.";
   const bool already_running = running_.load(std::memory_order_relaxed);
   if (already_running) {
     LOG(WARNING) << "Generate is already running.";
@@ -862,7 +860,11 @@ void VLMMaster::generate() {
   }
 
   running_.store(true, std::memory_order_relaxed);
-  scheduler_->generate();
+  if (options_.enable_schedule_overlap()) {
+    scheduler_->generate_with_schedule_overlap();
+  } else {
+    scheduler_->generate();
+  }
   running_.store(false, std::memory_order_relaxed);
 }
 

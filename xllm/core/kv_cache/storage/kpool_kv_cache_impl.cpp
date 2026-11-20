@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/storage/kv_cache_tensor_factory.h"
 
 namespace xllm {
 
