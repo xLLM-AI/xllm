@@ -1,0 +1,8 @@
+ReshapeAndCacheA5 implementation
+
+Source: https://gitcode.com/xLLM-AI/xllm_ops
+Revision: 8bd2b014c38fec33ecf14dd33e05e8ad792ec5c8
+Directory: xllm_ops/reshape_and_cache_a5
+
+The Python package uses its own Ascend950 CANN op type and ACLNN symbol pair.
+The existing xLLM C++ consumers retain the legacy ACLNN ABI.

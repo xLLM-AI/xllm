@@ -13,6 +13,9 @@ if current_platform.is_npu():
     from xllm_kernel import _npu_binding  # noqa: F401
 
     if current_platform.get_ascend_soc_generation() == "a5":
+        from xllm_kernel import _ascendc_opp  # noqa: F401
+
+        torch.ops.xllm_kernel.prepare_ascendc_reshape_paged_cache_a5()
         _solution = "aclnn"
         _binding = torch.ops.xllm_kernel.reshape_paged_cache_a5.default
         _domain = "Contiguous ND FP16/BF16; matching K and V dimensions; int32 slot mapping."

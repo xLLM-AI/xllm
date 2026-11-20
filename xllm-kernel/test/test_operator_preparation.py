@@ -122,11 +122,14 @@ def test_cache_backend_follows_ascend_generation(
     monkeypatch.setattr(Platform, "get_ascend_soc_generation", classmethod(lambda cls: generation))
     monkeypatch.setattr(KernelRegistry, "_instance", KernelRegistry())
     monkeypatch.setattr(xllm_kernel, "_npu_binding", object(), raising=False)
+    monkeypatch.setattr(xllm_kernel, "_ascendc_opp", object(), raising=False)
     atb, a5 = object(), object()
+    prepare_a5 = Mock()
     monkeypatch.setattr(
         torch.ops,
         "xllm_kernel",
         SimpleNamespace(
+            prepare_ascendc_reshape_paged_cache_a5=prepare_a5,
             reshape_paged_cache_atb=SimpleNamespace(default=atb),
             reshape_paged_cache_a5=SimpleNamespace(default=a5),
         ),
@@ -140,6 +143,10 @@ def test_cache_backend_follows_ascend_generation(
         plan = registry.prepare(RESHAPE_PAGED_CACHE_CONTRACT, device="npu", execution_mode="aclgraph")
         assert plan.spec.solution == solution
         assert plan.function is (a5 if generation == "a5" else atb)
+        if generation == "a5":
+            prepare_a5.assert_called_once_with()
+        else:
+            prepare_a5.assert_not_called()
     finally:
         sys.modules.pop(module_name, None)
 
