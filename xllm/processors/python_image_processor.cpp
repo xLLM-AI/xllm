@@ -22,7 +22,6 @@ limitations under the License.
 
 #include <string>
 
-#include "core/framework/config/model_config.h"
 #include "core/util/pybind_helper.h"
 
 namespace py = pybind11;
@@ -33,8 +32,8 @@ namespace {
 
 // Delegates image preprocessing to Python (HF AutoImageProcessor via
 // pybind.multimodal.preprocess_tensors) for the Python model-executor path,
-// so no per-model C++ image processor is needed. Initialize the Python loader
-// with the owning image processor before the service accepts its first image.
+// so no per-model C++ image processor is needed. Share only the Python entry
+// point; the owning image processor supplies its model directory on each call.
 class PyImagePreprocess final {
  public:
   static PyImagePreprocess& instance() {
@@ -42,14 +41,21 @@ class PyImagePreprocess final {
     return ins;
   }
 
-  bool run(const std::vector<torch::Tensor>& images,
+  void initialize(const std::string& model_path) {
+    py::gil_scoped_acquire gil;
+    py::module_ mm = py::module_::import("xllm.pybind.multimodal");
+    mm.attr("initialize_image_processor")(model_path);
+  }
+
+  bool run(const std::string& model_path,
+           const std::vector<torch::Tensor>& images,
            std::vector<MMDataItem>& output_items) {
     py::gil_scoped_acquire gil;
     try {
       // Pass the vector directly: pybind11 (pybind11/stl.h) converts
       // std::vector<torch::Tensor> to a Python list at the call site. (Avoids
       // both the null-handle default py::list pitfall and an explicit cast.)
-      py::dict res = preprocess_fn_(images, model_path_);
+      py::dict res = preprocess_fn_(images, model_path);
       // HF returns batched tensors: pixel_values [total_patches, dim],
       // image_grid_thw [num_images, 3]. Split per image to match the C++
       // ImageProcessor contract (one MMDataItem per input image).
@@ -86,27 +92,25 @@ class PyImagePreprocess final {
   PyImagePreprocess() {
     // Processor construction runs outside Python, so imports need the GIL.
     py::gil_scoped_acquire gil;
-    model_path_ = ::xllm::ModelConfig::get_instance().model();
     // node0 (master+worker) has already imported the `xllm` package via the
     // Python model, so this submodule import is cheap and safe here.
     py::module_ mm = py::module_::import("xllm.pybind.multimodal");
-    mm.attr("initialize_image_processor")(model_path_);
     preprocess_fn_ = mm.attr("preprocess_tensors");
   }
 
   ~PyImagePreprocess() { clear_python_object(preprocess_fn_); }
 
-  std::string model_path_;
   py::object preprocess_fn_;
 };
 
 }  // namespace
 
-void initialize_python_image_processor() {
-  static_cast<void>(PyImagePreprocess::instance());
+void initialize_python_image_processor(const std::string& model_path) {
+  PyImagePreprocess::instance().initialize(model_path);
 }
-bool process_python_images(const std::vector<torch::Tensor>& images,
+bool process_python_images(const std::string& model_path,
+                           const std::vector<torch::Tensor>& images,
                            std::vector<MMDataItem>& output_items) {
-  return PyImagePreprocess::instance().run(images, output_items);
+  return PyImagePreprocess::instance().run(model_path, images, output_items);
 }
 }  // namespace xllm

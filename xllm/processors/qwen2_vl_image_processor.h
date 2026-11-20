@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "core/framework/model/model_args.h"
@@ -28,6 +29,7 @@ namespace xllm {
 class Qwen2VLImageProcessor final : public ImageProcessor {
  public:
   explicit Qwen2VLImageProcessor(const ModelArgs& args);
+  Qwen2VLImageProcessor(const ModelArgs& args, std::string model_path);
 
   bool process(const std::vector<torch::Tensor>& images,
                std::vector<MMDataItem>& output_items) const override;
@@ -37,6 +39,7 @@ class Qwen2VLImageProcessor final : public ImageProcessor {
                      std::vector<torch::Tensor>& thw) const;
 
  private:
+  std::string model_path_;
   bool do_convert_rgb_ = true;
   bool do_normalize_ = true;
   bool do_rescale_ = true;

@@ -486,6 +486,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
           << "Failed to load JoyImageEditPlus Qwen3-VL tokenizer";
       tokenizer_ = std::shared_ptr<Tokenizer>(std::move(tokenizer));
       multimodal_processor_ = create_multimodal_processor(
+          loader->model_root_path(),
           text_encoder_model_args_,
           tokenizer_,
           /*max_cache_items=*/0,

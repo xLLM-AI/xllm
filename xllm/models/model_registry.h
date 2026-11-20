@@ -55,6 +55,7 @@ using DiTModelFactory =
 
 using MultimodalProcessorFactory =
     std::function<std::unique_ptr<MultimodalProcessorBase>(
+        const std::string& model_path,
         const ModelArgs& model_args,
         std::shared_ptr<Tokenizer> tokenizer,
         const TokenizerArgs& tokenizer_args,
@@ -402,14 +403,16 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
   const bool VarName##_multimodal_processor_registered = []() {         \
     ModelRegistry::register_multimodal_processor_factory(               \
         #ModelType,                                                     \
-        [](const ModelArgs& model_args,                                 \
+        [](const std::string& model_path,                               \
+           const ModelArgs& model_args,                                 \
            std::shared_ptr<Tokenizer> tokenizer,                        \
            const TokenizerArgs& tokenizer_args,                         \
            int32_t max_sequence_length) {                               \
           return std::make_unique<ProcessorClass>(model_args,           \
                                                   std::move(tokenizer), \
                                                   tokenizer_args,       \
-                                                  max_sequence_length); \
+                                                  max_sequence_length,  \
+                                                  model_path);          \
         });                                                             \
     return true;                                                        \
   }()

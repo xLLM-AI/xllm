@@ -16,11 +16,13 @@ limitations under the License.
 #pragma once
 #include <torch/types.h>
 
+#include <string>
 #include <vector>
 
 #include "core/framework/multimodal/mm_data_item.h"
 namespace xllm {
-void initialize_python_image_processor();
-bool process_python_images(const std::vector<torch::Tensor>& images,
+void initialize_python_image_processor(const std::string& model_path);
+bool process_python_images(const std::string& model_path,
+                           const std::vector<torch::Tensor>& images,
                            std::vector<MMDataItem>& output_items);
 }  // namespace xllm
