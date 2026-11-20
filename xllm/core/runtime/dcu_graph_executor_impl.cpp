@@ -693,7 +693,7 @@ DcuGraphExecutorImpl::DcuGraphExecutorImpl(CausalLM* model,
                                            const ModelArgs& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
-    : model_(model),
+    : model_(&model->model()),
       args_(args),
       device_(device),
       options_(options),

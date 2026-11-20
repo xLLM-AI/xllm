@@ -50,6 +50,7 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     int64_t max_cache_items,
     const TokenizerArgs& tokenizer_args,
     // Nonpositive lengths disable left padding.
-    int32_t max_sequence_length = 0);
+    int32_t max_sequence_length = 0,
+    const std::string& extension_impl = {});
 
 }  // namespace xllm

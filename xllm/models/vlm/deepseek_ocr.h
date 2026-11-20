@@ -29,8 +29,6 @@ limitations under the License.
 //      base_size + aspect-ratio crops), delegated to
 //      xllm.python.models.deepseek_ocr.preprocess_images via pybind so the
 //      PIL semantics match the HF reference byte for byte.
-// The engine's create_vlm_model python fallback then instantiates PyCausalLM
-// with the model_type name, which resolves to the registered Python class.
 
 #include <glog/logging.h>
 

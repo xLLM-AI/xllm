@@ -221,21 +221,6 @@ class Glm52ForCausalLMImpl : public LlmForCausalLMImplBase<Glm52Model> {
   explicit Glm52ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<Glm52Model>(context) {}
 
-  bool requires_graph_forward_metadata() const {
-    return model_->requires_graph_forward_metadata();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
-      const {
-    return model_->create_graph_forward_metadata_state();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& input_params) const {
-    model_->prepare_graph_forward_metadata(state, positions, input_params);
-  }
-
   void load_model(
       std::unique_ptr<ModelLoader> loader,
       std::string prefix = "model." /*llm model weight prefix*/) override {

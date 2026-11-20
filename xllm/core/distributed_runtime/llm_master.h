@@ -81,8 +81,6 @@ class LLMMaster : public Master {
                             BatchOutputCallback callback);
 
   // handle rpc response, send stream generations to xllm service
-  bool handle_rpc_response(const RequestOutput& output);
-
   std::vector<bool> handle_rpc_responses(
       const std::vector<RequestOutput>& outputs);
 

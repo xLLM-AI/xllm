@@ -88,7 +88,7 @@ class MluGraph final {
   // All buckets must capture on the same MLU stream so the caching allocator
   // can reuse scratch freed by earlier captures within the shared mempool;
   // capturing on different streams defeats its per-stream block reuse.
-  ModelOutput capture(CausalLM* model,
+  ModelOutput capture(DecoderModel* model,
                       std::vector<KVCache>& kv_cache,
                       const torch_mlu::MempoolId_t& pool,
                       const torch_mlu::MLUStream& capture_stream,
@@ -96,13 +96,13 @@ class MluGraph final {
 
   ModelOutput replay();
 
-  void update_input_buffer(CausalLM* model,
+  void update_input_buffer(DecoderModel* model,
                            const torch::Tensor& tokens,
                            const torch::Tensor& positions,
                            const ModelParamsView& params,
                            bool is_init = false);
 
-  void prepare_model_graph_metadata(CausalLM* model,
+  void prepare_model_graph_metadata(DecoderModel* model,
                                     const ModelParamsView& params);
 
  private:
@@ -144,7 +144,7 @@ class MluGraphExecutorImpl final : public ExecutorImpl {
   void init_param_once();
   void log_memory_after_capture();
 
-  CausalLM* model_;  // not owned
+  DecoderModel* model_;  // not owned
   ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;

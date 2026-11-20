@@ -172,9 +172,10 @@ std::pair<torch::Tensor, torch::Tensor> DSparkWorkerImpl::sample_markov_block(
       writable_draft_logits.defined()
           ? torch::Tensor()
           : torch::empty({rows, draft_model_vocab}, logits_options);
+  auto& draft_model = draft_impl_->get_causal_lm()->model();
   auto previous = anchors;
   for (int64_t step = 0; step < steps; ++step) {
-    auto bias = draft_impl_->get_causal_lm()->dspark_markov_bias(previous);
+    auto bias = draft_model.dspark_markov_bias(previous);
     CHECK_EQ(bias.sizes(), torch::IntArrayRef({rows, draft_model_vocab}))
         << "DSpark markov bias must be [rows, draft_model_vocab].";
     torch::Tensor step_logits =

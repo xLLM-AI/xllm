@@ -15,10 +15,9 @@ limitations under the License.
 
 #pragma once
 
-#include "core/framework/config/model_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/multimodal/mposition.h"
-#include "core/layers/common/lm_head.h"
+#include "core/framework/multimodal/multimodal_utils.h"
 #include "core/layers/qwen2_5_vision_layer.h"
 #include "core/layers/qwen2_decoder_layer.h"
 #include "models/llm/qwen2.h"
@@ -462,7 +461,9 @@ struct Qwen2_5_VLVideoInputs {
 class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
  public:
   Qwen2_5_VLForConditionalGenerationImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : image_merge_size_(context.get_model_args().mm_image_merge_size()),
+        encoder_embedding_mode_(
+            context.get_model_args().encoder_embedding_mode()),
         options_(context.get_tensor_options()) {
     visual_ = register_module("visual", Qwen2_5_VisionTransformer(context));
 
@@ -507,17 +508,16 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     std::optional<Qwen2_5_VLImageInputs> image_input;
     std::optional<Qwen2_5_VLVideoInputs> video_input;
     prepare_encoder_input(input_params, image_input, video_input);
-    auto merge_size = model_args_.mm_image_merge_size();
     MMDict multimodal_embeds;
     if (image_input) {
       // visual
       auto image_embeds = visual_(image_input->pixel_values.to(options_),
                                   image_input->image_grid_thw);
-      auto image_tokens =
-          (image_input->image_grid_thw.prod(-1) / merge_size / merge_size)
-              .cpu()
-              .contiguous()
-              .to(torch::kLong);
+      auto image_tokens = (image_input->image_grid_thw.prod(/*dim=*/-1) /
+                           image_merge_size_ / image_merge_size_)
+                              .cpu()
+                              .contiguous()
+                              .to(torch::kLong);
 
       std::vector<int64_t> image_tokens_vec(
           image_tokens.data_ptr<int64_t>(),
@@ -529,11 +529,11 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
       // visual
       auto video_embeds = visual_(video_input->pixel_values_videos.to(options_),
                                   video_input->video_grid_thw);
-      auto video_tokens =
-          (video_input->video_grid_thw.prod(-1) / merge_size / merge_size)
-              .cpu()
-              .contiguous()
-              .to(torch::kLong);
+      auto video_tokens = (video_input->video_grid_thw.prod(/*dim=*/-1) /
+                           image_merge_size_ / image_merge_size_)
+                              .cpu()
+                              .contiguous()
+                              .to(torch::kLong);
       std::vector<int64_t> video_tokens_vec(
           video_tokens.data_ptr<int64_t>(),
           video_tokens.data_ptr<int64_t>() + video_tokens.numel());
@@ -544,62 +544,20 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     return multimodal_embeds;
   }
 
-  torch::Tensor merge_multimodal_embeddings(
-      torch::Tensor inputs_embeds,
-      const torch::Tensor& multimodal_embeds,
-      const torch::Tensor& is_multimodal) {
-    inputs_embeds.index_put_({is_multimodal}, multimodal_embeds);
-    return inputs_embeds;
-  }
-
   torch::Tensor get_input_embeddings(const torch::Tensor input_ids,
                                      const ModelParamsView& input_params) {
-    const auto& mm_data = input_params.multimodal().mm_data;
-    auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
-    auto merge_modality = [&](const std::string& embed_key,
-                              const std::string& mask_key) {
-      auto emb = mm_data.get<torch::Tensor>(embed_key);
-      if (!emb.has_value()) return;
-      auto mask = mm_data.get<torch::Tensor>(mask_key);
-      if (!mask.has_value()) return;
-      inputs_embeds =
-          merge_multimodal_embeddings(inputs_embeds, emb.value(), mask.value());
-    };
-
-    merge_modality("image|embedding", "image|mask");
-    merge_modality("video|embedding", "video|mask");
-
-    return inputs_embeds;
-  }
-
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return language_model_->forward(tokens, positions, kv_caches, input_params);
+    return merge_multimodal_embeddings(
+        language_model_->get_input_embeddings(input_ids),
+        input_params.multimodal().mm_data);
   }
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    // return full embeddings if set flag
-    if (::xllm::ModelConfig::get_instance()
-            .enable_return_mm_full_embeddings()) {
-      return h;
-    }
-
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    auto pooler_output = torch::nn::functional::normalize(
-        h, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
-    return pooler_output;
+    return torch::nn::functional::normalize(
+        language_model_->pooler(hidden_states, seleted_idxes));
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
+  const QWen2ForCausalLM& language_model() const { return language_model_; }
 
   void load_model(std::unique_ptr<ModelLoader> loader) {
     for (const auto& state_dict : loader->get_state_dicts()) {
@@ -607,18 +565,14 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
           std::vector<std::string>{"visual.", "model.visual."}));
     }
 
-    if (!model_args_.encoder_embedding_mode()) {
+    if (!encoder_embedding_mode_) {
       language_model_->load_model(std::move(loader));
     }
   }
 
-  layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  layer::WordEmbedding get_word_embedding() {
-    return language_model_->get_word_embedding();
-  }
-
  private:
-  ModelArgs model_args_;
+  int image_merge_size_;
+  bool encoder_embedding_mode_;
   torch::TensorOptions options_;
 
   Qwen2_5_VisionTransformer visual_{nullptr};
@@ -629,88 +583,78 @@ TORCH_MODULE(Qwen2_5_VLForConditionalGeneration);
 using Qwen25VLMultimodalProcessor = MultimodalProcessor<Qwen2VLPromptProcessor,
                                                         Qwen2VLImageProcessor,
                                                         Qwen2VLVideoProcessor>;
-REGISTER_MULTIMODAL_PROCESSOR(qwen2_5_vl, Qwen25VLMultimodalProcessor);
-REGISTER_CAUSAL_VLM_MODEL(qwen2_5_vl, Qwen2_5_VLForConditionalGeneration);
+REGISTER_CAUSAL_MODEL(
+    qwen2_5_vl,
+    Qwen2_5_VLForConditionalGeneration,
+    /*priority=*/0,
+    ModelRegistry::make_multimodal_processor<Qwen25VLMultimodalProcessor>);
 REGISTER_MPOSITION_GENERATOR(qwen2_5_vl, QwenVLMPositionGenerator);
 
-// Macro to load Qwen2.5-VL model arguments (shared between qwen2_5_vl and
-// Qwen2_5_VLForConditionalGeneration)
-#define LOAD_QWEN2_5_VL_MODEL_ARGS()                                           \
-  do {                                                                         \
-    /* text config */                                                          \
-    /* LOAD_ARG_OR(attention_dropout, "attention_dropout", 0.0); */            \
-    LOAD_ARG_OR(bos_token_id, "bos_token_id", 151643);                         \
-    LOAD_ARG_OR(eos_token_id, "eos_token_id", 151645);                         \
-    LOAD_ARG_OR(pad_token_id, "pad_token_id", 151643);                         \
-    LOAD_ARG_OR(vision_start_token_id, "vision_start_token_id", 151652);       \
-    LOAD_ARG_OR(vision_end_token_id, "vision_end_token_id", 151653);           \
-    LOAD_ARG_OR(vision_token_id, "vision_token_id", 151654);                   \
-    LOAD_ARG_OR(image_token_id, "image_token_id", 151655);                     \
-    LOAD_ARG_OR(video_token_id, "video_token_id", 151656);                     \
-    LOAD_ARG_OR(hidden_act, "hidden_act", "silu");                             \
-    LOAD_ARG_OR(hidden_size, "hidden_size", 3584);                             \
-    /* LOAD_ARG_OR(initializer_range, "initializer_range", 0.02); */           \
-    LOAD_ARG_OR(intermediate_size, "intermediate_size", 18944);                \
-    LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 128000);   \
-    LOAD_ARG_OR(max_window_layers, "max_window_layers", 28);                   \
-    LOAD_ARG_OR(model_type, "model_type", "qwen2_5_vl");                       \
-    LOAD_ARG_OR(n_heads, "num_attention_heads", 28);                           \
-    LOAD_ARG_OR(n_layers, "num_hidden_layers", 28);                            \
-    LOAD_ARG_OR(n_kv_heads, "num_key_value_heads", 4);                         \
-    LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-06);                          \
-    LOAD_ARG_OR(rope_theta, "rope_theta", 1000000.0f);                         \
-    LOAD_ARG_OR(sliding_window, "sliding_window", 32768);                      \
-    LOAD_ARG_OR(tie_word_embeddings, "tie_word_embeddings", false);            \
-    LOAD_ARG_OR(dtype, "torch_dtype", "");                                     \
-    /* LOAD_ARG_OR(transformers_version, "transformers_version", "4.41.2"); */ \
-    /* LOAD_ARG_OR(use_cache, "use_cache", true); */                           \
-    LOAD_ARG_OR(use_sliding_window, "use_sliding_window", false);              \
-    LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {                               \
-      return args->hidden_size() / args->n_heads();                            \
-    });                                                                        \
-                                                                               \
-    /* vision_config */                                                        \
-    LOAD_ARG_OR(mm_num_hidden_layers, "vision_config.depth", 32);              \
-    LOAD_ARG_OR(mm_hidden_act, "vision_config.hidden_act", "silu");            \
-    LOAD_ARG_OR(mm_hidden_size, "vision_config.hidden_size", 1280);            \
-    LOAD_ARG_OR(                                                               \
-        mm_intermediate_size, "vision_config.intermediate_size", 3420);        \
-    LOAD_ARG_OR(mm_num_attention_heads, "vision_config.num_heads", 16);        \
-    LOAD_ARG_OR(mm_num_channels, "vision_config.in_chans", 3);                 \
-    LOAD_ARG_OR(mm_projection_dim, "vision_config.out_hidden_size", 3584);     \
-    LOAD_ARG_OR(mm_patch_size, "vision_config.patch_size", 14);                \
-    LOAD_ARG_OR(mm_spatial_merge_size, "vision_config.spatial_merge_size", 2); \
-    LOAD_ARG_OR_FUNC(mm_image_merge_size,                                      \
-                     "vision_config.image_merge_size",                         \
-                     [&] { return args->mm_spatial_merge_size(); });           \
-    LOAD_ARG_OR(                                                               \
-        mm_spatial_patch_size, "vision_config.spatial_patch_size", 14);        \
-    LOAD_ARG_OR(mm_window_size, "vision_config.window_size", 112);             \
-    LOAD_ARG_OR(mm_fullatt_block_indexes,                                      \
-                "vision_config.fullatt_block_indexes",                         \
-                std::vector<int64_t>({7, 15, 23, 31}));                        \
-    LOAD_ARG_OR(mm_tokens_per_second, "vision_config.tokens_per_second", 2);   \
-    LOAD_ARG_OR(                                                               \
-        mm_temporal_patch_size, "vision_config.temporal_patch_size", 2);       \
-    LOAD_ARG_OR_FUNC(mm_head_dim, "head_dim", [&] {                            \
-      return args->mm_hidden_size() / args->mm_num_attention_heads();          \
-    });                                                                        \
-                                                                               \
-    LOAD_ARG_OR(rope_scaling_rope_type, "rope_scaling.type", "mrope");         \
-    LOAD_ARG_OR(rope_scaling_mrope_section,                                    \
-                "rope_scaling.mrope_section",                                  \
-                std::vector<int64_t>({16, 24, 24}));                           \
-    LOAD_ARG_OR(vocab_size, "vocab_size", 152064);                             \
-    if (args->rope_scaling_rope_type() == "default") {                         \
-      args->rope_scaling_rope_type() = "mrope";                                \
-    }                                                                          \
-  } while (0)
+const ModelArgsLoader kQwen25VLModelArgsLoader = [](const JsonReader& json,
+                                                    ModelArgs* args) {
+  LOAD_ARG_OR(bos_token_id, "bos_token_id", 151643);
+  LOAD_ARG_OR(eos_token_id, "eos_token_id", 151645);
+  LOAD_ARG_OR(pad_token_id, "pad_token_id", 151643);
+  LOAD_ARG_OR(vision_start_token_id, "vision_start_token_id", 151652);
+  LOAD_ARG_OR(vision_end_token_id, "vision_end_token_id", 151653);
+  LOAD_ARG_OR(vision_token_id, "vision_token_id", 151654);
+  LOAD_ARG_OR(image_token_id, "image_token_id", 151655);
+  LOAD_ARG_OR(video_token_id, "video_token_id", 151656);
+  LOAD_ARG_OR(hidden_act, "hidden_act", "silu");
+  LOAD_ARG_OR(hidden_size, "hidden_size", 3584);
+  LOAD_ARG_OR(intermediate_size, "intermediate_size", 18944);
+  LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 128000);
+  LOAD_ARG_OR(max_window_layers, "max_window_layers", 28);
+  LOAD_ARG_OR(model_type, "model_type", "qwen2_5_vl");
+  LOAD_ARG_OR(n_heads, "num_attention_heads", 28);
+  LOAD_ARG_OR(n_layers, "num_hidden_layers", 28);
+  LOAD_ARG_OR(n_kv_heads, "num_key_value_heads", 4);
+  LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-06);
+  LOAD_ARG_OR(rope_theta, "rope_theta", 1000000.0f);
+  LOAD_ARG_OR(sliding_window, "sliding_window", 32768);
+  LOAD_ARG_OR(tie_word_embeddings, "tie_word_embeddings", false);
+  LOAD_ARG_OR(dtype, "torch_dtype", "");
+  LOAD_ARG_OR(use_sliding_window, "use_sliding_window", false);
+  LOAD_ARG_OR_FUNC(head_dim, /*json_name=*/"head_dim", [&] {
+    return args->hidden_size() / args->n_heads();
+  });
 
-REGISTER_MODEL_ARGS(qwen2_5_vl, [&] { LOAD_QWEN2_5_VL_MODEL_ARGS(); });
+  LOAD_ARG_OR(mm_num_hidden_layers, "vision_config.depth", 32);
+  LOAD_ARG_OR(mm_hidden_act, "vision_config.hidden_act", "silu");
+  LOAD_ARG_OR(mm_hidden_size, "vision_config.hidden_size", 1280);
+  LOAD_ARG_OR(mm_intermediate_size, "vision_config.intermediate_size", 3420);
+  LOAD_ARG_OR(mm_num_attention_heads, "vision_config.num_heads", 16);
+  LOAD_ARG_OR(mm_num_channels, "vision_config.in_chans", 3);
+  LOAD_ARG_OR(mm_projection_dim, "vision_config.out_hidden_size", 3584);
+  LOAD_ARG_OR(mm_patch_size, "vision_config.patch_size", 14);
+  LOAD_ARG_OR(mm_spatial_merge_size, "vision_config.spatial_merge_size", 2);
+  LOAD_ARG_OR_FUNC(mm_image_merge_size,
+                   /*json_name=*/"vision_config.image_merge_size",
+                   [&] { return args->mm_spatial_merge_size(); });
+  LOAD_ARG_OR(mm_spatial_patch_size, "vision_config.spatial_patch_size", 14);
+  LOAD_ARG_OR(mm_window_size, "vision_config.window_size", 112);
+  LOAD_ARG_OR(mm_fullatt_block_indexes,
+              "vision_config.fullatt_block_indexes",
+              std::vector<int64_t>({7, 15, 23, 31}));
+  LOAD_ARG_OR(mm_tokens_per_second, "vision_config.tokens_per_second", 2);
+  LOAD_ARG_OR(mm_temporal_patch_size, "vision_config.temporal_patch_size", 2);
+  LOAD_ARG_OR_FUNC(mm_head_dim, /*json_name=*/"head_dim", [&] {
+    return args->mm_hidden_size() / args->mm_num_attention_heads();
+  });
 
-REGISTER_MODEL_ARGS(Qwen2_5_VLForConditionalGeneration,
-                    [&] { LOAD_QWEN2_5_VL_MODEL_ARGS(); });
+  LOAD_ARG_OR(rope_scaling_rope_type, "rope_scaling.type", "mrope");
+  LOAD_ARG_OR(rope_scaling_mrope_section,
+              "rope_scaling.mrope_section",
+              std::vector<int64_t>({16, 24, 24}));
+  LOAD_ARG_OR(vocab_size, "vocab_size", 152064);
+  if (args->rope_scaling_rope_type() == "default") {
+    args->rope_scaling_rope_type() = "mrope";
+  }
+  return true;
+};
 
-#undef LOAD_QWEN2_5_VL_MODEL_ARGS
+REGISTER_MODEL_ARGS_LOADER(qwen2_5_vl, kQwen25VLModelArgsLoader);
+REGISTER_MODEL_ARGS_LOADER(Qwen2_5_VLForConditionalGeneration,
+                           kQwen25VLModelArgsLoader);
 
 }  // namespace xllm

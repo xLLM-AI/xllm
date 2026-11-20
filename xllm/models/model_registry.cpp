@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <iostream>
 #include <unordered_set>
 #include <utility>
@@ -48,29 +49,13 @@ namespace {
     }                                                   \
   } while (0)
 
-#define SAFE_LOG_ERROR(message)                       \
-  do {                                                \
-    if (google::IsGoogleLoggingInitialized()) {       \
-      LOG(ERROR) << message;                          \
-    } else {                                          \
-      std::cerr << "ERROR: " << message << std::endl; \
-    }                                                 \
-  } while (0)
-
-#define SAFE_LOG_INFO(message)                       \
-  do {                                               \
-    if (google::IsGoogleLoggingInitialized()) {      \
-      LOG(INFO) << message;                          \
-    } else {                                         \
-      std::cerr << "INFO: " << message << std::endl; \
-    }                                                \
-  } while (0)
-
 }  // anonymous namespace
 
 namespace xllm {
 
 namespace {
+
+constexpr char kCausalLMComponent[] = "causal_lm";
 
 std::string canonical_model_impl(std::string model_impl) {
   if (model_impl.empty() || model_impl == "auto" || model_impl == "native" ||
@@ -115,7 +100,6 @@ bool resolve_model_registration(const std::string& model_type,
   return resolve_model_registration(model_type,
                                     requested_npu_kernel_backend,
                                     /*extension_impl=*/"",
-                                    /*model_component=*/"",
                                     effective_npu_kernel_backend,
                                     resolved_name,
                                     error_message);
@@ -124,7 +108,6 @@ bool resolve_model_registration(const std::string& model_type,
 bool resolve_model_registration(const std::string& model_type,
                                 const std::string& requested_npu_kernel_backend,
                                 const std::string& extension_impl,
-                                std::string_view model_component,
                                 std::string* effective_npu_kernel_backend,
                                 std::string* resolved_name,
                                 std::string* error_message) {
@@ -147,24 +130,15 @@ bool resolve_model_registration(const std::string& model_type,
       }
       return false;
     }
-    const std::string component(model_component);
-    if (extensions.has_implementation(extension_impl, component)) {
-      bool selected_extension_model = false;
-      if (model_component == "causal_lm") {
-        selected_extension_model =
-            static_cast<bool>(ModelRegistry::get_causallm_factory(
-                canonical_model_type, extension_impl));
-      } else if (model_component == "causal_vlm") {
-        selected_extension_model =
-            static_cast<bool>(ModelRegistry::get_causalvlm_factory(
-                canonical_model_type, extension_impl));
-      }
+    if (extensions.has_implementation(extension_impl, kCausalLMComponent)) {
+      const bool selected_extension_model =
+          static_cast<bool>(ModelRegistry::get_model_factory(
+              canonical_model_type, extension_impl));
       if (!selected_extension_model) {
         if (error_message != nullptr) {
-          *error_message =
-              "Missing " + component +
-              " extension for model type: " + canonical_model_type +
-              " with extension_impl=" + extension_impl;
+          *error_message = "Missing causal_lm extension for model type: " +
+                           canonical_model_type +
+                           " with extension_impl=" + extension_impl;
         }
         return false;
       }
@@ -194,35 +168,31 @@ bool resolve_model_registration(const std::string& model_type,
 }
 
 #if defined(USE_NPU)
-void resolve_npu_kernel_backend(Options* options,
-                                std::string_view model_component) {
-  CHECK(options != nullptr) << "options must not be null";
-
+void resolve_npu_kernel_backend(Options& options) {
   // Python executors use the Torch kernel implementation.
   if (ModelConfig::is_python_model_impl(
           ModelConfig::get_instance().model_impl())) {
-    options->npu_kernel_backend("TORCH");
-    KernelConfig::get_instance().npu_kernel_backend("TORCH");
+    options.npu_kernel_backend(kTorchBackend);
+    KernelConfig::get_instance().npu_kernel_backend(kTorchBackend);
     LOG(INFO) << "Forced npu_kernel_backend=TORCH for python model_impl";
     return;
   }
 
   const std::string model_type =
-      get_model_type(options->model_path(), options->backend());
+      get_model_type(options.model_path(), options.backend());
   std::string effective_backend;
   std::string resolved_name;
   std::string error_message;
   if (!resolve_model_registration(model_type,
-                                  options->npu_kernel_backend(),
-                                  options->extension_impl(),
-                                  model_component,
+                                  options.npu_kernel_backend(),
+                                  options.extension_impl(),
                                   &effective_backend,
                                   &resolved_name,
                                   &error_message)) {
     LOG(FATAL) << error_message;
   }
 
-  options->npu_kernel_backend(effective_backend);
+  options.npu_kernel_backend(effective_backend);
   KernelConfig::get_instance().npu_kernel_backend(effective_backend);
   LOG(INFO) << "Resolved npu_kernel_backend=" << effective_backend
             << " for model_type=" << model_type;
@@ -280,75 +250,32 @@ ModelRegistry* ModelRegistry::get_instance() {
   return &registry;
 }
 
-void ModelRegistry::register_causallm_factory(const std::string& name,
-                                              CausalLMFactory factory) {
-  register_causallm_factory(name, std::move(factory), /*priority=*/0);
-}
-
-bool ModelRegistry::register_causallm_factory(std::string name,
-                                              CausalLMFactory factory,
-                                              int32_t priority) {
-  return register_causallm_factory(
-      std::move(name), "native", std::move(factory), priority);
-}
-
-bool ModelRegistry::register_causallm_factory(std::string name,
-                                              std::string implementation,
-                                              CausalLMFactory factory,
-                                              int32_t priority) {
+bool ModelRegistry::register_model_factory(
+    std::string name,
+    std::string implementation,
+    ModelFactory factory,
+    int32_t priority,
+    MultimodalProcessorFactory processor_factory) {
   CHECK(factory != nullptr) << "Cannot register an empty causal LM factory";
   ModelRegistry* instance = get_instance();
-  auto& factories = instance->model_registry_[name].causal_lm_factories;
+  auto& factories =
+      instance->model_registry_[std::move(name)].causal_lm_factories;
   implementation = canonical_model_impl(std::move(implementation));
-  auto it = factories.find(implementation);
-  if (it != factories.end() && priority <= it->second.priority) {
+  auto [it, inserted] = factories.try_emplace(implementation);
+  auto& registration = it->second;
+  if (!inserted && priority <= registration.priority) {
     return false;
+  }
+  if (processor_factory) {
+    registration.processor_factory = std::move(processor_factory);
   }
 
   if (implementation != "native" && implementation != "python") {
-    ExtensionRegistry::get_instance().register_implementation(implementation,
-                                                              "causal_lm");
+    ExtensionRegistry::get_instance().register_implementation(
+        implementation, kCausalLMComponent);
   }
-  factories.insert_or_assign(
-      std::move(implementation),
-      CausalLMRegistration{std::move(factory), priority});
-  instance->model_backend_[std::move(name)] = "llm";
-  return true;
-}
-
-void ModelRegistry::register_causalvlm_factory(const std::string& name,
-                                               CausalVLMFactory factory) {
-  register_causalvlm_factory(name, std::move(factory), /*priority=*/0);
-}
-
-bool ModelRegistry::register_causalvlm_factory(std::string name,
-                                               CausalVLMFactory factory,
-                                               int32_t priority) {
-  return register_causalvlm_factory(
-      std::move(name), "native", std::move(factory), priority);
-}
-
-bool ModelRegistry::register_causalvlm_factory(std::string name,
-                                               std::string implementation,
-                                               CausalVLMFactory factory,
-                                               int32_t priority) {
-  CHECK(factory != nullptr) << "Cannot register an empty causal VLM factory";
-  ModelRegistry* instance = get_instance();
-  auto& factories = instance->model_registry_[name].causal_vlm_factories;
-  implementation = canonical_model_impl(std::move(implementation));
-  auto it = factories.find(implementation);
-  if (it != factories.end() && priority <= it->second.priority) {
-    return false;
-  }
-
-  if (implementation != "native" && implementation != "python") {
-    ExtensionRegistry::get_instance().register_implementation(implementation,
-                                                              "causal_vlm");
-  }
-  factories.insert_or_assign(
-      std::move(implementation),
-      CausalVLMRegistration{std::move(factory), priority});
-  instance->model_backend_[std::move(name)] = "vlm";
+  registration.factory = std::move(factory);
+  registration.priority = priority;
   return true;
 }
 
@@ -424,11 +351,7 @@ bool ModelRegistry::supports_dcp(const std::string& name) {
   return it != instance->model_registry_.end() && it->second.supports_dcp;
 }
 
-CausalLMFactory ModelRegistry::get_causallm_factory(const std::string& name) {
-  return get_causallm_factory(name, "native");
-}
-
-CausalLMFactory ModelRegistry::get_causallm_factory(
+ModelFactory ModelRegistry::get_model_factory(
     const std::string& name,
     const std::string& implementation_key) {
   const ModelRegistry* instance = get_instance();
@@ -444,35 +367,32 @@ CausalLMFactory ModelRegistry::get_causallm_factory(
   return registration->second.factory;
 }
 
-CausalVLMFactory ModelRegistry::get_causalvlm_factory(const std::string& name) {
-  return get_causalvlm_factory(name, "native");
-}
-
-CausalVLMFactory ModelRegistry::get_causalvlm_factory(
-    const std::string& name,
-    const std::string& implementation_key) {
-  const ModelRegistry* instance = get_instance();
-  const auto model = instance->model_registry_.find(name);
-  if (model == instance->model_registry_.end()) {
-    return nullptr;
-  }
-  const auto registration = model->second.causal_vlm_factories.find(
-      canonical_model_impl(implementation_key));
-  if (registration == model->second.causal_vlm_factories.end()) {
-    return nullptr;
-  }
-  return registration->second.factory;
-}
-
 DiTModelFactory ModelRegistry::get_dit_model_factory(const std::string& name) {
   ModelRegistry* instance = get_instance();
   return instance->model_registry_[name].dit_model_factory;
 }
 
 MultimodalProcessorFactory ModelRegistry::get_multimodal_processor_factory(
-    const std::string& name) {
-  ModelRegistry* instance = get_instance();
-  return instance->model_registry_[name].multimodal_processor_factory;
+    const std::string& name,
+    const std::string& extension_impl) {
+  const auto& models = get_instance()->model_registry_;
+  const auto model = models.find(name);
+  if (model == models.end()) {
+    return {};
+  }
+
+  const auto& factories = model->second.causal_lm_factories;
+  if (!extension_impl.empty()) {
+    const auto selected = factories.find(extension_impl);
+    if (selected != factories.end() && selected->second.processor_factory) {
+      return selected->second.processor_factory;
+    }
+  }
+  const auto native = factories.find(/*key=*/"native");
+  if (native != factories.end() && native->second.processor_factory) {
+    return native->second.processor_factory;
+  }
+  return model->second.multimodal_processor_factory;
 }
 
 void ModelRegistry::register_speech_model_factory(const std::string& name,
@@ -655,7 +575,26 @@ std::string ModelRegistry::get_model_backend(const std::string& name) {
   }
   const std::string canonical_name = canonical_model_registration_name(name);
   it = instance->model_backend_.find(canonical_name);
-  return it == instance->model_backend_.end() ? "" : it->second;
+  if (it != instance->model_backend_.end()) {
+    return it->second;
+  }
+  for (const auto* model_name : {&name, &canonical_name}) {
+    const auto model = instance->model_registry_.find(*model_name);
+    if (model == instance->model_registry_.end()) {
+      continue;
+    }
+    if (model->second.multimodal_processor_factory ||
+        std::ranges::any_of(
+            model->second.causal_lm_factories, [](const auto& entry) {
+              return static_cast<bool>(entry.second.processor_factory);
+            })) {
+      return "vlm";
+    }
+    if (!model->second.causal_lm_factories.empty()) {
+      return "llm";
+    }
+  }
+  return "";
 }
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
@@ -664,7 +603,8 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     std::shared_ptr<Tokenizer> tokenizer,
     int64_t max_cache_items,
     const TokenizerArgs& tokenizer_args,
-    int32_t max_sequence_length) {
+    int32_t max_sequence_length,
+    const std::string& extension_impl) {
   const std::string& model_type = model_args.model_type();
   std::string resolved_name;
   std::string error_message;
@@ -673,7 +613,8 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
       << error_message;
 
   MultimodalProcessorFactory multimodal_processor_factory =
-      ModelRegistry::get_multimodal_processor_factory(resolved_name);
+      ModelRegistry::get_multimodal_processor_factory(resolved_name,
+                                                      extension_impl);
   if (multimodal_processor_factory == nullptr &&
       ModelConfig::is_python_model_impl(
           ModelConfig::get_instance().model_impl()) &&
@@ -700,27 +641,27 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
                                                         max_cache_items);
 }
 
-std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
+CausalModel create_causal_model(const ModelContext& context) {
   if (!validate_implementation_selection(context)) {
-    return nullptr;
+    return {};
   }
   const std::string& model_impl = context.get_model_impl();
   const std::string& extension_impl = context.get_extension_impl();
   if (!extension_impl.empty() &&
-      ExtensionRegistry::get_instance().has_implementation(extension_impl,
-                                                           "causal_lm")) {
+      ExtensionRegistry::get_instance().has_implementation(
+          extension_impl, kCausalLMComponent)) {
     if (ModelConfig::is_python_model_impl(model_impl)) {
       LOG(ERROR) << "Native model extensions require model_impl=native";
-      return nullptr;
+      return {};
     }
     const std::string direct_name = canonical_model_registration_name(
         context.get_model_args().model_type());
     auto direct_factory =
-        ModelRegistry::get_causallm_factory(direct_name, extension_impl);
+        ModelRegistry::get_model_factory(direct_name, extension_impl);
     if (!direct_factory) {
       LOG(ERROR) << "Missing causal_lm extension for model type: "
                  << direct_name << " with extension_impl=" << extension_impl;
-      return nullptr;
+      return {};
     }
     return direct_factory(context);
   }
@@ -734,90 +675,28 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
                  &resolved_name,
                  &error_message)) {
     LOG(ERROR) << error_message;
-    return nullptr;
+    return {};
   }
 
-  auto factory = ModelRegistry::get_causallm_factory(resolved_name, model_impl);
+  auto factory = ModelRegistry::get_model_factory(resolved_name, model_impl);
   if (factory) {
     return factory(context);
   }
 
+  if (ModelConfig::is_python_model_impl(model_impl)) {
 #if defined(USE_CUDA) || defined(USE_NPU)
-  if (ModelConfig::is_python_model_impl(model_impl)) {
     return std::make_unique<PyCausalLM>(context);
-  }
 #else
-  if (ModelConfig::is_python_model_impl(model_impl)) {
     LOG(ERROR) << "--model_impl=python is only supported on CUDA/NPU builds.";
-    return nullptr;
-  }
+    return {};
 #endif
-
-  LOG(ERROR) << "Unsupported model type: "
-             << context.get_model_args().model_type()
-             << " for model_impl=" << canonical_model_impl(model_impl);
-
-  return nullptr;
-}
-
-std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
-  if (!validate_implementation_selection(context)) {
-    return nullptr;
-  }
-  const std::string& model_impl = context.get_model_impl();
-  const std::string& extension_impl = context.get_extension_impl();
-  if (!extension_impl.empty() &&
-      ExtensionRegistry::get_instance().has_implementation(extension_impl,
-                                                           "causal_vlm")) {
-    if (ModelConfig::is_python_model_impl(model_impl)) {
-      LOG(ERROR) << "Native model extensions require model_impl=native";
-      return nullptr;
-    }
-    const std::string direct_name = canonical_model_registration_name(
-        context.get_model_args().model_type());
-    auto direct_factory =
-        ModelRegistry::get_causalvlm_factory(direct_name, extension_impl);
-    if (!direct_factory) {
-      LOG(ERROR) << "Missing causal_vlm extension for model type: "
-                 << direct_name << " with extension_impl=" << extension_impl;
-      return nullptr;
-    }
-    return direct_factory(context);
-  }
-  std::string resolved_name;
-  std::string error_message;
-  if (ModelConfig::is_python_model_impl(model_impl)) {
-    resolved_name = canonical_model_registration_name(
-        context.get_model_args().model_type());
-  } else if (!resolve_model_registration_name(
-                 context.get_model_args().model_type(),
-                 &resolved_name,
-                 &error_message)) {
-    LOG(ERROR) << error_message;
-    return nullptr;
-  }
-
-  auto factory =
-      ModelRegistry::get_causalvlm_factory(resolved_name, model_impl);
-  if (factory) {
-    return factory(context);
-  }
-
-  if (ModelConfig::is_python_model_impl(model_impl)) {
-    std::string python_model_name = context.get_model_args().model_type();
-    if (is_glm5_next_target_model_type(python_model_name)) {
-      python_model_name = "glm5_next_vl";
-    } else {
-      python_model_name = canonical_model_registration_name(python_model_name);
-    }
-    return std::make_unique<PyCausalLM>(context, std::move(python_model_name));
   }
 
   LOG(ERROR) << "Unsupported model type: "
              << context.get_model_args().model_type()
              << " for model_impl=" << canonical_model_impl(model_impl);
 
-  return nullptr;
+  return {};
 }
 
 std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context) {

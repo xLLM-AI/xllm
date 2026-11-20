@@ -112,7 +112,6 @@ class VLMMaster : public Master {
                          RequestParams params,
                          std::function<void(Status, int32_t)> callback);
 
-  bool handle_rpc_response(const RequestOutput& output);
   std::vector<bool> handle_rpc_responses(
       const std::vector<RequestOutput>& outputs);
 

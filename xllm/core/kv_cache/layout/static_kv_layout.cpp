@@ -254,15 +254,6 @@ size_t StaticKVLayout::objects_per_slab(KVCacheTensorRole role) const {
   }
 }
 
-size_t StaticKVLayout::layer_bank_index(int64_t layer_id) const {
-  const auto it = std::find_if(
-      tensors_.begin(), tensors_.end(), [layer_id](const auto& tensor) {
-        return tensor.layer_id == layer_id;
-      });
-  CHECK(it != tensors_.end()) << "Unknown static cache layer";
-  return it->bank;
-}
-
 size_t StaticKVLayout::row_bytes(KVCacheTensorRole role) const {
   switch (role) {
     case KVCacheTensorRole::KEY:
@@ -292,12 +283,6 @@ size_t StaticKVLayout::row_index(size_t slab, KVCacheTensorRole role) const {
   const size_t bytes = checked_multiply(slab, slice_bytes_);
   const size_t row = row_bytes(role);
   return bytes / row + static_cast<size_t>(bytes % row != 0);
-}
-
-size_t StaticKVLayout::role_row_stride(KVCacheTensorRole role) const {
-  CHECK_EQ(slice_bytes_ % row_bytes(role), 0u)
-      << "Aligned Conv objects do not have a constant native row stride";
-  return slice_bytes_ / row_bytes(role);
 }
 
 size_t StaticKVLayout::full_layer_index(int64_t layer_id) const {

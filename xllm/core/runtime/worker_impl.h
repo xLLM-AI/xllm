@@ -52,6 +52,8 @@ limitations under the License.
 
 namespace xllm {
 
+class CausalVLM;
+
 class WorkerRendezvous;
 class StaticKVTensorAllocator;
 class LinearStateSlotTable;
@@ -86,7 +88,7 @@ class WorkerImpl {
   virtual void drain_pending_execution();
 
   // initialize model, cache manager. blocking call
-  virtual bool init_model(ModelContext& context) = 0;
+  virtual bool init_model(ModelContext& context);
 
   virtual bool init_model(const std::string& model_weights_path,
                           int32_t random_seed,
@@ -122,7 +124,7 @@ class WorkerImpl {
   void allocate_kv_cache(const KVCacheShape& shape,
                          const KVCacheCreateOptions& layout,
                          std::shared_ptr<KVTransfer> transfer = nullptr);
-  CausalLM* get_causal_lm() const { return model_.get(); }
+  CausalLM* get_causal_lm() const { return language_model_; }
   std::vector<KVCache>& kv_caches() { return kv_caches_; }
 
   virtual bool allocate_kv_cache_with_transfer(
@@ -528,8 +530,9 @@ class WorkerImpl {
   std::shared_ptr<StaticKVTensorAllocator> static_kv_cache_allocator_;
   std::shared_ptr<LinearStateSlotTable> static_full_block_slots_;
 
-  // causal LM model
-  std::unique_ptr<CausalLM> model_;
+  std::unique_ptr<Model> model_;
+  CausalLM* language_model_ = nullptr;
+  CausalVLM* vlm_model_ = nullptr;
 
   std::unique_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;

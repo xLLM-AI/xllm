@@ -95,6 +95,9 @@ class ModelContext {
   const std::string& get_model_id() const { return model_id_; }
   void set_model_id(const std::string& model_id) { model_id_ = model_id; }
 
+  const std::string& get_backend() const { return backend_; }
+  void set_backend(const std::string& backend) { backend_ = backend; }
+
   const std::string& get_model_impl() const { return model_impl_; }
   void set_model_impl(const std::string& model_impl) {
     model_impl_ = model_impl;
@@ -112,6 +115,7 @@ class ModelContext {
 
   std::string
       model_id_;  // Model identifier for VirtualMemory multi-model support
+  std::string backend_ = "llm";
   std::string model_impl_;
   std::string extension_impl_;
   ModelArgs model_args_;

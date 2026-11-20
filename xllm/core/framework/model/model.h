@@ -17,34 +17,34 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <memory>
+#include <string>
+#include <utility>
 
 #include "common/macros.h"
+#include "core/framework/model/model_traits.h"
 #include "core/framework/model_loader/model_loader.h"
-#include "core/layers/common/lm_head.h"
-#include "core/layers/common/word_embedding.h"
 
 namespace xllm {
 
-// Input-independent model weights and runtime resources. Forward contracts stay
-// on the language-model interfaces.
 class Model {
  public:
   virtual ~Model() = default;
+
+  virtual std::string executor_type() const { return {}; }
+
+  virtual torch::Tensor pooler(const torch::Tensor& hidden_states,
+                               const torch::Tensor& seleted_idxes) {
+    if (seleted_idxes.defined()) {
+      return hidden_states.index_select(/*dim=*/0, seleted_idxes);
+    }
+    return hidden_states;
+  }
 
   virtual void load_model(std::unique_ptr<ModelLoader> loader) = 0;
 
   virtual torch::Device device() const = 0;
 
   virtual const torch::TensorOptions& options() const = 0;
-
-  virtual layer::LmHead get_lm_head() {
-    NOT_IMPLEMENTED();
-    return nullptr;
-  }
-  virtual layer::WordEmbedding get_word_embedding() {
-    NOT_IMPLEMENTED();
-    return nullptr;
-  }
 
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader) {
     NOT_IMPLEMENTED();
@@ -55,6 +55,68 @@ class Model {
   virtual void reload_model_weights() { NOT_IMPLEMENTED(); }
 
   virtual void reload_model_weights_from_device() { NOT_IMPLEMENTED(); }
+};
+
+template <typename ModelType, typename Interface>
+class ModelImpl : public Interface {
+ public:
+  ModelImpl(ModelType model, const torch::TensorOptions& options)
+      : model_(std::move(model)), options_(options) {}
+
+  torch::Tensor pooler(const torch::Tensor& hidden_states,
+                       const torch::Tensor& seleted_idxes) override {
+    if constexpr (detail::has_pooler<ModelType>::value) {
+      return model_->pooler(hidden_states, seleted_idxes);
+    }
+    return Interface::pooler(hidden_states, seleted_idxes);
+  }
+
+  void load_model(std::unique_ptr<ModelLoader> loader) override {
+    model_->load_model(std::move(loader));
+  }
+
+  torch::Device device() const override { return options_.device(); }
+
+  const torch::TensorOptions& options() const override { return options_; }
+
+  void lazy_load_model(std::unique_ptr<ModelLoader> loader) override {
+    if constexpr (detail::has_lazy_load_model<ModelType>::value) {
+      model_->lazy_load_model(std::move(loader));
+    } else {
+      Interface::lazy_load_model(std::move(loader));
+    }
+  }
+
+  void free_model_weights() override {
+    if constexpr (detail::has_free_model_weights<ModelType>::value) {
+      model_->free_model_weights();
+    } else {
+      Interface::free_model_weights();
+    }
+  }
+
+  void reload_model_weights() override {
+    if constexpr (detail::has_reload_model_weights<ModelType>::value) {
+      model_->reload_model_weights();
+    } else {
+      Interface::reload_model_weights();
+    }
+  }
+
+  void reload_model_weights_from_device() override {
+    if constexpr (detail::has_reload_model_weights_from_device<
+                      ModelType>::value) {
+      model_->reload_model_weights_from_device();
+    } else {
+      Interface::reload_model_weights_from_device();
+    }
+  }
+
+ protected:
+  ModelType model_;
+
+ private:
+  torch::TensorOptions options_;
 };
 
 }  // namespace xllm

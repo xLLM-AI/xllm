@@ -196,35 +196,6 @@ class DeepseekV4DSparkForCausalLMImpl final
     }
   }
 
-  torch::Tensor dspark_markov_bias(
-      const torch::Tensor& previous_token_ids) const {
-    return model_->dspark_markov_bias(previous_token_ids);
-  }
-
-  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
-                               const torch::Tensor& positions,
-                               const torch::Tensor& device_cache_slots,
-                               std::vector<KVCache>& kv_caches,
-                               const ModelParamsView& input_params) {
-    return model_->write_context_kv(
-        target_hidden, positions, device_cache_slots, kv_caches, input_params);
-  }
-
-  bool requires_graph_forward_metadata() {
-    return model_->requires_graph_forward_metadata();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState>
-  create_graph_forward_metadata_state() {
-    return model_->create_graph_forward_metadata_state();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& input_params) {
-    model_->prepare_graph_forward_metadata(state, positions, input_params);
-  }
-
  private:
   dspark_detail::VocabularyWeightSelector head_source_;
 };

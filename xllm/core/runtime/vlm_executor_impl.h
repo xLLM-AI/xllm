@@ -24,7 +24,6 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache.h"
 #include "executor_impl_factory.h"
 #include "framework/encoder_cache/encoder_cache.h"
-#include "framework/model/causal_lm.h"
 #include "framework/model/causal_vlm.h"
 #include "framework/model/model_output.h"
 #include "framework/model/model_params_view.h"
@@ -33,9 +32,9 @@ limitations under the License.
 
 namespace xllm {
 
-class VlmExecutorImpl : public ExecutorImpl {
+class VlmExecutorImpl final : public ExecutorImpl {
  public:
-  VlmExecutorImpl(CausalLM* model,
+  VlmExecutorImpl(CausalVLM* model,
                   const ModelArgs& args,
                   const torch::Device& device,
                   const runtime::Options& options);
@@ -55,20 +54,16 @@ class VlmExecutorImpl : public ExecutorImpl {
 
   void set_dp_process_group(ProcessGroup* group) override;
 
-  virtual MMDict encode(const ModelParamsView& params);
-
-  // not own
+ private:
   CausalVLM* model_;
-  ModelArgs args_;
+  DecoderModel& decoder_;
+  bool collapse_mrope_;
   torch::Device device_;
-  runtime::Options options_;
   std::unique_ptr<ExecutorImpl> llm_executor_;
   std::unique_ptr<EncoderCache> encoder_cache_;
 
- private:
   torch::Tensor collapse_mrope_decode_positions(
       const torch::Tensor& positions) const;
 };
-// Q: backend device ?
 REGISTER_EXECUTOR("vlm", VlmExecutorImpl);
 }  // namespace xllm

@@ -84,8 +84,10 @@ torch::Device InitXllmDcuDeviceForTest(int32_t device_index = 0) {
 
 // Minimal fake model for DCU graph tests.
 // It intentionally avoids CUDA Attention / FlashInfer / PlanInfo.
-class FakeSimpleCausalLM final : public CausalLM {
+class FakeSimpleCausalLM final : public CausalLM, public DecoderModel {
  public:
+  DecoderModel& model() override { return *this; }
+
   FakeSimpleCausalLM(const ModelArgs& args, const torch::Device& device)
       : args_(args),
         device_(device),

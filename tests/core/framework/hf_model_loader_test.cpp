@@ -254,16 +254,6 @@ TEST(HFModelLoaderTest, Glm5NextRootArgsLoadNativeMluFields) {
             (std::vector<std::string>{"dense", "dense", "dense", "sparse"}));
 }
 
-TEST(HFModelLoaderTest, Glm5NextRootTypeHasNativeMluRegistration) {
-  EXPECT_EQ(ModelRegistry::get_model_backend("glm5_next"), "llm");
-  CausalLMFactory factory = ModelRegistry::get_causallm_factory("glm5_next");
-  EXPECT_TRUE(static_cast<bool>(factory));
-}
-
-TEST(HFModelLoaderTest, Qwen35MoeRootTypeHasCausalModelFactory) {
-  CausalLMFactory factory = ModelRegistry::get_causallm_factory("qwen3_5_moe");
-  EXPECT_TRUE(static_cast<bool>(factory));
-}
 #endif
 
 TEST(HFModelLoaderTest, LoadCompressedTensorsFp8StaticConfig) {

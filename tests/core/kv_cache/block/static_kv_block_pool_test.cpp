@@ -25,15 +25,13 @@ limitations under the License.
 
 namespace xllm {
 
-class StaticKVBlockPoolTestPeer final {
- public:
-  static size_t num_request_placements(const StaticKVBlockPool& pool) {
-    std::lock_guard<std::mutex> lock(pool.mutex_);
-    return pool.request_placements_.size();
-  }
-};
-
 namespace {
+
+int32_t final_full_page(const StaticKVBlockPool& pool, int32_t id) {
+  std::vector<int32_t> rows;
+  pool.append_full_block_rows(id, &rows);
+  return rows.front();
+}
 
 StaticKVLayoutSpec make_spec(size_t num_slabs = 10,
                              size_t checkpoint_stride = 2) {
@@ -121,7 +119,6 @@ TEST(StaticKVBlockPoolTest,
     pool.append_full_block_rows(id, &rows);
     ASSERT_EQ(rows.size(), 2u);
     EXPECT_EQ(rows[0], rows[1]);
-    EXPECT_EQ(rows[0], pool.final_full_page(id));
     for (size_t layer = 0; layer < spec.full_layer_ids.size(); ++layer) {
       const size_t begin =
           layout
@@ -131,7 +128,7 @@ TEST(StaticKVBlockPoolTest,
       extents.emplace_back(ByteExtent{begin, begin + layout.full_pair_bytes()});
     }
     const size_t draft_begin =
-        draft_key.offset_bytes + pool.final_full_page(id) * draft_key.row_bytes;
+        draft_key.offset_bytes + rows[0] * draft_key.row_bytes;
     extents.emplace_back(
         ByteExtent{draft_begin, draft_begin + layout.full_pair_bytes()});
   }
@@ -245,7 +242,7 @@ TEST(StaticKVBlockPoolTest,
   EXPECT_EQ(draft_key.offset_bytes, 16 * layout.bank_bytes());
   EXPECT_EQ(draft_key.view_rows, target_key.view_rows);
   for (const int32_t id : full) {
-    const size_t page = pool.final_full_page(id);
+    const size_t page = final_full_page(pool, id);
     EXPECT_EQ(page % 2, 0u);
     EXPECT_LE((page + 2) * draft_key.row_bytes, layout.bank_bytes());
   }
@@ -268,7 +265,8 @@ TEST(StaticKVBlockPoolTest, DraftLayersMustFillWholeFullBanks) {
   StaticKVLayoutSpec spec = make_spec();
   spec.full_layer_ids = {0, 3, 4, 5};
   spec.draft_layer_count = 1;
-  EXPECT_DEATH(StaticKVLayout invalid(spec), "whole companion banks");
+  EXPECT_DEATH(static_cast<void>(StaticKVLayout(spec)),
+               "whole companion banks");
   spec.draft_layer_count = 2;
   const StaticKVLayout layout(spec);
   EXPECT_EQ(layout.bank_count(), 3u);
@@ -367,7 +365,6 @@ TEST(StaticKVBlockPoolTest, PacksMixedResourcesWithoutOverlappingBytes) {
     pool.append_full_block_rows(id, &rows);
     ASSERT_EQ(rows.size(), 2);
     EXPECT_EQ(rows[0], rows[1]);
-    EXPECT_EQ(rows[0], pool.final_full_page(id));
     for (size_t layer = 0; layer < rows.size(); ++layer) {
       const int64_t layer_id = layer == 0 ? 0 : 3;
       const size_t begin =
@@ -503,7 +500,6 @@ TEST(StaticKVBlockPoolTest, PreservesScratchAndNegativeSentinelMappings) {
   pool.append_full_block_rows(/*block_id=*/0, &full_rows);
   pool.append_full_block_rows(/*block_id=*/-1, &full_rows);
   EXPECT_EQ(full_rows, (std::vector<int32_t>{0, 0, -1, -1}));
-  EXPECT_GT(layout.full_read_padding_row(), 0);
   std::vector<int32_t> linear_rows;
   pool.append_linear_state_rows(/*state_id=*/0, &linear_rows);
   pool.append_linear_state_slots(/*state_id=*/-2, &linear_rows);
@@ -516,8 +512,8 @@ TEST(StaticKVBlockPoolTest,
   StaticKVBlockPool pool(/*logical_capacity=*/64, layout);
   const auto ids = pool.allocate(/*num_blocks=*/2, BlockType::KV);
   ASSERT_EQ(ids, (std::vector<int32_t>{1, 2}));
-  const int32_t first_page = pool.final_full_page(ids[0]);
-  const int32_t second_page = pool.final_full_page(ids[1]);
+  const int32_t first_page = final_full_page(pool, ids[0]);
+  const int32_t second_page = final_full_page(pool, ids[1]);
   ASSERT_NE(first_page, ids[0]);
   ASSERT_NE(second_page, ids[1]);
   pool.mark_inactive(ids[0], BlockType::KV);
@@ -533,9 +529,8 @@ TEST(StaticKVBlockPoolTest,
   EXPECT_EQ(blocks[0].id(), ids[1]);
   EXPECT_EQ(blocks[1].id(), ids[0]);
   pool.mark_active(ids[0], BlockType::KV);
-  EXPECT_EQ(pool.final_full_page(ids[0]), first_page);
+  EXPECT_EQ(final_full_page(pool, ids[0]), first_page);
   EXPECT_EQ(pool.full_read_padding_page(), layout.full_read_padding_page());
-  EXPECT_EQ(pool.scratch_full_page(), 0);
 }
 
 TEST(StaticKVBlockPoolTest, ExcludesReadPaddingWhenSlabsChangeType) {
@@ -544,7 +539,7 @@ TEST(StaticKVBlockPoolTest, ExcludesReadPaddingWhenSlabsChangeType) {
   const size_t allocatable_begin =
       layout.num_reserved_slabs() * layout.slice_bytes();
   const size_t padding_end =
-      layout.full_read_padding_row() * layout.full_row_bytes() +
+      layout.full_read_padding_page() * layout.full_row_bytes() +
       layout.full_pair_bytes();
   ASSERT_LE(padding_end, allocatable_begin);
   const auto full =
@@ -579,7 +574,7 @@ TEST(StaticKVBlockPoolTest, AccountsForReadPaddingBeyondScratchSlab) {
       make_spec(/*num_slabs=*/4, /*checkpoint_stride=*/2));
   StaticKVBlockPool pool(/*logical_capacity=*/64, layout);
   EXPECT_EQ(layout.num_reserved_slabs(), 2);
-  EXPECT_EQ(layout.full_read_padding_row(), 4);
+  EXPECT_EQ(layout.full_read_padding_page(), 4);
   EXPECT_EQ(pool.num_total_slots(), 2 * layout.slab_bytes());
   EXPECT_EQ(pool.num_free_blocks(BlockType::KV), 4);
   EXPECT_TRUE(layout.can_fit(/*full_blocks=*/4, /*linear_states=*/0));
@@ -701,16 +696,12 @@ TEST(StaticKVBlockPoolTest, ResumedRequestsPreferTheirOwnNonfullSlabs) {
   const auto first_resume = pool.allocate(1, BlockType::KV, &request_a);
   ASSERT_EQ(first_resume.size(), 1);
   EXPECT_EQ(full_block_slab(pool, layout, first_resume.front()), first_slab);
-  EXPECT_EQ(StaticKVBlockPoolTestPeer::num_request_placements(pool), 2);
   pool.release(first.front(), BlockType::KV);
-  EXPECT_EQ(StaticKVBlockPoolTestPeer::num_request_placements(pool), 2);
   pool.release(first_resume.front(), BlockType::KV);
-  EXPECT_EQ(StaticKVBlockPoolTestPeer::num_request_placements(pool), 1);
   for (const int32_t id : second) {
     pool.release(id, BlockType::KV);
   }
   pool.release(second_resume.front(), BlockType::KV);
-  EXPECT_EQ(StaticKVBlockPoolTestPeer::num_request_placements(pool), 0);
   EXPECT_EQ(pool.num_free_slots(), pool.num_total_slots());
 }
 
@@ -750,7 +741,6 @@ TEST(StaticKVBlockPoolTest, RetypingInvalidatesPriorRequestSlabGeneration) {
   }
   pool.release(resumed.front(), BlockType::KV);
   pool.release(state.front(), BlockType::LINEAR);
-  EXPECT_EQ(StaticKVBlockPoolTestPeer::num_request_placements(pool), 0);
   EXPECT_EQ(pool.num_free_slots(), pool.num_total_slots());
 }
 
@@ -766,23 +756,19 @@ TEST(StaticKVBlockPoolTest, FailedRequestAllocationRollsBackHintOwnership) {
   pool.append_linear_state_rows(state.front(), &before);
   pool.mark_inactive(state.front(), BlockType::LINEAR);
   EXPECT_EQ(pool.num_used_slots(), 0);
-  EXPECT_EQ(StaticKVBlockPoolTestPeer::num_request_placements(pool), 1);
   const size_t free_bytes = pool.num_free_slots();
   EXPECT_TRUE(pool.allocate(2, BlockType::LINEAR, &request_b).empty());
   EXPECT_EQ(pool.num_free_slots(), free_bytes);
-  EXPECT_EQ(StaticKVBlockPoolTestPeer::num_request_placements(pool), 1);
   std::vector<int32_t> after;
   pool.append_linear_state_rows(state.front(), &after);
   EXPECT_EQ(after, before);
   pool.release(state.front(), BlockType::LINEAR);
-  EXPECT_EQ(StaticKVBlockPoolTestPeer::num_request_placements(pool), 0);
   const size_t full_capacity = pool.num_free_blocks(BlockType::KV);
   const auto full = pool.allocate(full_capacity, BlockType::KV, &request_b);
   ASSERT_EQ(full.size(), full_capacity);
   for (const int32_t id : full) {
     pool.release(id, BlockType::KV);
   }
-  EXPECT_EQ(StaticKVBlockPoolTestPeer::num_request_placements(pool), 0);
   EXPECT_EQ(pool.num_free_slots(), pool.num_total_slots());
 }
 

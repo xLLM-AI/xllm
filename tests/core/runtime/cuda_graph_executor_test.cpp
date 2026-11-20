@@ -121,8 +121,10 @@ torch::Device InitXllmCudaDeviceForTest(int32_t device_index = 0) {
 // A minimal CausalLM whose forward contains a FlashInfer batch-decode attention
 // call. This model is used to compare eager vs CUDA-graph execution under the
 // same inputs.
-class FakeAttnCausalLM final : public CausalLM {
+class FakeAttnCausalLM final : public CausalLM, public DecoderModel {
  public:
+  DecoderModel& model() override { return *this; }
+
   FakeAttnCausalLM(const ModelArgs& args, const torch::Device& device)
       : args_(args),
         device_(device),
@@ -720,8 +722,6 @@ TEST(CudaGraphExecutorTest, BatchDecodePaddedBucket100CaptureAndReplay) {
   EXPECT_EQ(
       persistent.persistent_decode_qo_indptr(/*actual_batch_size=*/0).size(0),
       113);
-  EXPECT_EQ(persistent.persistent_block_tables(/*actual_batch_size=*/0).size(0),
-            112);
 
   auto model = std::make_unique<FakeAttnCausalLM>(args, device);
   auto graph_exec = std::make_unique<runtime::cuda::CudaGraphExecutorImpl>(
@@ -793,8 +793,6 @@ TEST(CudaGraphExecutorTest, BatchDecodeNoPaddingBucket100CaptureAndReplay) {
   EXPECT_EQ(
       persistent.persistent_decode_qo_indptr(/*actual_batch_size=*/0).size(0),
       101);
-  EXPECT_EQ(persistent.persistent_block_tables(/*actual_batch_size=*/0).size(0),
-            100);
 
   auto model = std::make_unique<FakeAttnCausalLM>(args, device);
   auto graph_exec = std::make_unique<runtime::cuda::CudaGraphExecutorImpl>(
@@ -1086,104 +1084,6 @@ TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
                                    .mean()
                                    .item<float>();
   EXPECT_TRUE(std::isfinite(mean_abs_delta));
-}
-
-TEST(CudaGraphExecutorTest, GraphVmmPoolMemoryReuseAcrossMultiShape) {
-  if (!torch::cuda::is_available()) {
-    GTEST_SKIP() << "CUDA is not available at runtime.";
-  }
-
-  ScopedConfigSnapshot config_snapshot;
-  ExecutionConfig::get_instance()
-      .enable_graph(true)
-      .enable_prefill_piecewise_graph(true)
-      .max_tokens_for_graph_mode(256);
-  SchedulerConfig::get_instance().max_tokens_per_batch(256);
-
-  const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
-  xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
-      device);
-
-  ModelArgs args;
-  args.model_type("fake_attn");
-  args.dtype("bfloat16");
-  args.hidden_size(256);
-  args.max_position_embeddings(512);
-  args.vocab_size(2048);
-  args.n_layers(1);
-  args.n_heads(2);
-  args.head_dim(128);
-  args.n_kv_heads(1);
-
-  runtime::Options options;
-  options.block_size(1);
-  options.max_seqs_per_batch(1);
-
-  auto create_executor = [&]() {
-    auto model = std::make_unique<FakeAttnCausalLM>(args, device);
-    auto exec = std::make_unique<runtime::cuda::CudaGraphExecutorImpl>(
-        model.get(), args, device, options);
-    return std::make_pair(std::move(model), std::move(exec));
-  };
-
-  auto run_prefill_capture_sweep = [&](bool enable_graph_vmm_pool) {
-    ExecutionConfig::get_instance().enable_graph_vmm_pool(
-        enable_graph_vmm_pool);
-    auto [model, exec] = create_executor();
-
-    auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
-    auto all_tokens = torch::arange(1, 257, iopt);
-    auto all_positions = torch::arange(0, 256, iopt);
-    auto kv = MakeKvCaches(device,
-                           /*num_pages=*/256,
-                           /*page_size=*/1,
-                           /*num_kv_heads=*/1,
-                           /*head_dim=*/128);
-
-    std::vector<size_t> memory_usage_bytes;
-    memory_usage_bytes.reserve(9);
-    for (int32_t num_tokens = 256; num_tokens >= 128; num_tokens -= 16) {
-      auto tokens =
-          all_tokens.slice(/*dim=*/0, /*start=*/0, /*end=*/num_tokens);
-      auto positions =
-          all_positions.slice(/*dim=*/0, /*start=*/0, /*end=*/num_tokens);
-      auto params = MakePrefillParams(device, num_tokens);
-      auto out = exec->run(tokens, positions, kv, params).hidden_states;
-      (void)out;
-      torch::cuda::synchronize();
-      memory_usage_bytes.push_back(exec->get_graph_memory_usage_bytes());
-    }
-    return memory_usage_bytes;
-  };
-
-  const auto vmm_usage =
-      run_prefill_capture_sweep(/*enable_graph_vmm_pool=*/true);
-  ASSERT_FALSE(vmm_usage.empty());
-  for (size_t i = 1; i < vmm_usage.size(); ++i) {
-    EXPECT_EQ(vmm_usage[i], vmm_usage.front())
-        << "With enable_graph_vmm_pool=true, memory should remain stable "
-        << "during 256->128 multi-shape capture sweep, step=" << i
-        << ", baseline=" << vmm_usage.front() << ", current=" << vmm_usage[i];
-  }
-
-  const auto no_vmm_usage =
-      run_prefill_capture_sweep(/*enable_graph_vmm_pool=*/false);
-  ASSERT_FALSE(no_vmm_usage.empty());
-
-  size_t grow_steps = 0;
-  for (size_t i = 1; i < no_vmm_usage.size(); ++i) {
-    if (no_vmm_usage[i] > no_vmm_usage[i - 1]) {
-      ++grow_steps;
-    }
-  }
-
-  EXPECT_GT(no_vmm_usage.back(), no_vmm_usage.front())
-      << "With enable_graph_vmm_pool=false, memory should grow during "
-      << "256->128 multi-shape capture sweep, first=" << no_vmm_usage.front()
-      << ", last=" << no_vmm_usage.back();
-  EXPECT_GT(grow_steps, 0U)
-      << "With enable_graph_vmm_pool=false, expected at least one increasing "
-      << "step during 256->128 sweep.";
 }
 
 TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {

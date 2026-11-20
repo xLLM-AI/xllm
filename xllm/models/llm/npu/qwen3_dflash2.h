@@ -205,7 +205,7 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
 
   void finalize_loaded_weights() { build_fused_context_kv_weights(); }
 
-  DFlash2CandidateOutput candidates(
+  DFlash2CandidateOutput dflash2_candidates(
       const torch::Tensor& hidden_states,
       const torch::Tensor& unary_logits,
       const torch::Tensor& anchor_token_ids) const {
@@ -393,22 +393,6 @@ class DFlash2Qwen3ForCausalLMImpl final
     }
     model_->verify_loaded_weights();
     model_->finalize_loaded_weights();
-  }
-
-  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
-                               const torch::Tensor& positions,
-                               const torch::Tensor& device_cache_slots,
-                               std::vector<KVCache>& kv_caches,
-                               const ModelParamsView& input_params) {
-    return model_->write_context_kv(
-        target_hidden, positions, device_cache_slots, kv_caches, input_params);
-  }
-
-  DFlash2CandidateOutput dflash2_candidates(
-      const torch::Tensor& hidden_states,
-      const torch::Tensor& unary_logits,
-      const torch::Tensor& anchor_token_ids) {
-    return model_->candidates(hidden_states, unary_logits, anchor_token_ids);
   }
 };
 TORCH_MODULE(DFlash2Qwen3ForCausalLM);

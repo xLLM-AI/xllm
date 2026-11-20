@@ -620,17 +620,6 @@ void StaticKVBlockPool::append_changed_rows(
   }
 }
 
-int32_t StaticKVBlockPool::final_full_page(int32_t logical_id) const {
-  CHECK(slab_mode_);
-  if (logical_id <= 0) {
-    return logical_id;
-  }
-  std::lock_guard<std::mutex> lock(mutex_);
-  CHECK_LT(static_cast<uint32_t>(logical_id), logical_capacity_);
-  CHECK_NE(logical_states_[0][logical_id], 0u);
-  return physical_rows_[0][static_cast<size_t>(logical_id) * full_layers_];
-}
-
 void StaticKVBlockPool::append_final_full_pages(
     Slice<Block> blocks,
     std::vector<int32_t>* pages) const {

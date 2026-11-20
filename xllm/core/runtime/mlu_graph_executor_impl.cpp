@@ -426,7 +426,7 @@ std::size_t GraphPersistentParam::get_persistent_tensor_bytes() const {
 MluGraph::MluGraph(GraphPersistentParam* persistent_param, GraphPlan plan)
     : plan_(std::move(plan)), persistent_param_(persistent_param) {}
 
-void MluGraph::prepare_model_graph_metadata(CausalLM* model,
+void MluGraph::prepare_model_graph_metadata(DecoderModel* model,
                                             const ModelParamsView& params) {
   if (!model->requires_graph_forward_metadata()) {
     return;
@@ -469,7 +469,7 @@ void MluGraph::prepare_model_graph_metadata(CausalLM* model,
   params_->attn_metadata = std::move(graph_params.attn_metadata);
 }
 
-ModelOutput MluGraph::capture(CausalLM* model,
+ModelOutput MluGraph::capture(DecoderModel* model,
                               std::vector<KVCache>& kv_cache,
                               const torch_mlu::MempoolId_t& pool,
                               const torch_mlu::MLUStream& capture_stream,
@@ -539,7 +539,7 @@ ModelOutput MluGraph::replay() {
   return persistent_output();
 }
 
-void MluGraph::update_input_buffer(CausalLM* model,
+void MluGraph::update_input_buffer(DecoderModel* model,
                                    const torch::Tensor& tokens,
                                    const torch::Tensor& positions,
                                    const ModelParamsView& params,
@@ -582,7 +582,7 @@ MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
                                            const ModelArgs& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
-    : model_(model),
+    : model_(&model->model()),
       args_(args),
       device_(device),
       options_(options),

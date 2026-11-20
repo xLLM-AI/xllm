@@ -23,13 +23,14 @@ limitations under the License.
 #include "framework/model/model_output.h"
 #include "framework/model/model_params_view.h"
 #include "runtime/executor_impl.h"
+#include "runtime/executor_impl_factory.h"
 #include "runtime/options.h"
 
 namespace xllm {
 
 class Executor final {
  public:
-  Executor(CausalLM* model,
+  Executor(ExecutorImplFactory::ModelRef model,
            const ModelContext& context,
            const runtime::Options& options);
 

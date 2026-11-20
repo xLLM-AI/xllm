@@ -32,11 +32,14 @@ limitations under the License.
 
 namespace xllm::mlu::model {
 
+using Glm5NextMtpModelImpl = Glm5NextGraphModel<DeepseekMtpModelImpl>;
+TORCH_MODULE(Glm5NextMtpModel);
+
 class Glm5NextMtpForCausalLMImpl final
-    : public LlmForCausalLMImplBase<DeepseekMtpModel> {
+    : public LlmForCausalLMImplBase<Glm5NextMtpModel> {
  public:
   explicit Glm5NextMtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekMtpModel>(
+      : LlmForCausalLMImplBase<Glm5NextMtpModel>(
             [&context]() -> const ModelContext& {
               const auto& args = context.get_model_args();
               CHECK_GE(args.mtp_start_layer_idx(), 0)
@@ -54,7 +57,7 @@ class Glm5NextMtpForCausalLMImpl final
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
-    LlmForCausalLMImplBase<DeepseekMtpModel>::load_lm_head(loader, prefix);
+    LlmForCausalLMImplBase<Glm5NextMtpModel>::load_lm_head(loader, prefix);
 
     const std::vector<std::string> prefixes{"model.language_model.", prefix};
     for (const auto& state_dict : loader->get_state_dicts()) {
@@ -83,21 +86,6 @@ class Glm5NextMtpForCausalLMImpl final
         "model.language_model." + mtp_layer_prefix_ + suffix,
         prefix + mtp_layer_prefix_ + suffix};
     lm_head_->load_state_dict(state_dict.get_dict_with_prefix(prefixes));
-  }
-
-  bool requires_graph_forward_metadata() override { return true; }
-
-  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
-      override {
-    return std::make_unique<Glm5NextGraphMetadataState>();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& params) override {
-    auto* graph_state = dynamic_cast<Glm5NextGraphMetadataState*>(state);
-    CHECK(graph_state != nullptr) << "GLM5 requires per-graph metadata state";
-    graph_state->prepare(positions, params);
   }
 
  private:

@@ -95,13 +95,13 @@ class AclGraph {
            c10::DeviceIndex device_index,
            const c10_npu::NPUStream& capture_stream)
       : persistent_param_(persistent_param), device_index_(device_index) {
-    initialize_streams(device_index, capture_stream);
+    initialize_streams(capture_stream);
   }
 
   ~AclGraph();
 
   // Capture computation graph for given bucket num_tokens
-  bool capture(CausalLM* model,
+  bool capture(DecoderModel* model,
                const runtime::Options& options,
                const torch::Tensor& tokens,
                const torch::Tensor& positions,
@@ -111,7 +111,7 @@ class AclGraph {
                c10_npu::MempoolId_t graph_pool);
 
   // Replay captured graph with new input data
-  ModelOutput replay(CausalLM* model,
+  ModelOutput replay(DecoderModel* model,
                      const torch::Tensor& tokens,
                      const torch::Tensor& positions,
                      std::vector<KVCache>& kv_cache,
@@ -130,12 +130,10 @@ class AclGraph {
   }
 
  private:
-  // Initialize capture stream if not already initialized
-  void initialize_streams(c10::DeviceIndex device_index,
-                          const c10_npu::NPUStream& capture_stream);
+  void initialize_streams(const c10_npu::NPUStream& capture_stream);
   void make_graph_wait_for_current_stream(aclrtStream current_stream);
   void make_current_stream_wait_for_graph(aclrtStream current_stream);
-  void prepare_model_graph_metadata(CausalLM* model,
+  void prepare_model_graph_metadata(DecoderModel* model,
                                     const torch::Tensor& positions,
                                     ModelParamsView& params);
   void update_spec_verify_attention_tiling(const ModelParamsView& params);
@@ -204,17 +202,11 @@ class AclGraphExecutorImpl final : public ExecutorImpl {
 
  private:
   // not own
-  CausalLM* model_ = nullptr;
+  DecoderModel* model_ = nullptr;
 
   void initialize(bool need_update_attn_mask,
                   bool is_hybrid_linear_attention,
                   bool supports_mla_graph_kv_bucketing);
-  template <typename Model, typename Params>
-  ModelOutput run_typed(Model* model,
-                        const torch::Tensor& tokens,
-                        const torch::Tensor& positions,
-                        std::vector<KVCache>& kv_caches,
-                        const Params& params);
 
   ModelArgs args_;
   torch::Device device_;

@@ -69,7 +69,7 @@ TEST(PyExecutorKVLoadTest, PrefillWaitsAtConsumersAndGraphKeepsCompositeFence) {
   scope["torch"] = py::module_::import("torch");
   const torch::Tensor ready = torch::zeros({3});
   scope["ready"] = py::cast(ready);
-  py::exec(R"PY(
+  py::exec(/*source=*/R"PY(
 import sys
 import types
 import unittest.mock
@@ -105,7 +105,7 @@ class TestExecutor:
         return tokens.float().view(-1, 1) + ready[0]
 
 registry = types.ModuleType('xllm.python.registry')
-registry.get_model_class = lambda name: TestModel
+registry.get_model_class = lambda name, *, backend="llm": TestModel
 executor_module = types.ModuleType('xllm.python.model_executor.executor')
 executor_module.ModelExecutor = TestExecutor
 patch = unittest.mock.patch.dict(sys.modules, {
@@ -131,7 +131,7 @@ patch.__enter__()
     // This executor double runs on the CPU.
     ModelContext context(
         parallel, args, QuantArgs(), torch::TensorOptions().device(device));
-    PyCausalLM model(context, "test_reload");
+    PyCausalLM model(context);
     std::vector<KVCache> caches;
     for (bool layerwise : {false, true}) {
       scope["layerwise"] = layerwise;

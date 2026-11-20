@@ -64,16 +64,19 @@ select the model backend (`native` or `python`); it does not select extensions.
 Each registry chooses the highest-priority registration for its concrete type
 and implementation family. Equal priorities keep the first registration.
 
-Model implementations use the same registration boundary. The built-in
-two-argument `REGISTER_CAUSAL_MODEL` and `REGISTER_CAUSAL_VLM_MODEL` macros
-remain the default native registrations, while an extension can register a
-direct subclass with `REGISTER_CAUSAL_LM` or `REGISTER_CAUSAL_VLM`:
+The built-in `REGISTER_CAUSAL_MODEL` macro remains the default native
+registration. Extensions use `REGISTER_CAUSAL_LM` for text and multimodal
+models. The `example_model` below registers a multimodal model and its processor:
 
 ```cpp
 #include "models/model_registry.h"
 
-REGISTER_CAUSAL_LM(example_model, "custom", ExampleCausalLM, 100);
-REGISTER_CAUSAL_VLM(example_vlm, "custom", ExampleCausalVLM, 100);
+REGISTER_CAUSAL_LM(
+    example_model,
+    "custom",
+    ExampleMultimodalModel,
+    100,
+    xllm::ModelRegistry::make_multimodal_processor<ExampleMultimodalProcessor>);
 ```
 
 Start xLLM with the matching extension family, for example

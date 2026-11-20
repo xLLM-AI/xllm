@@ -66,7 +66,7 @@ namespace xllm {
 LLMMaster::LLMMaster(const Options& options)
     : Master(options), master_status_(options.master_status()) {
 #if defined(USE_NPU)
-  resolve_npu_kernel_backend(&options_, /*model_component=*/"causal_lm");
+  resolve_npu_kernel_backend(options_);
 #endif
   CHECK(load_hf_model_args(
       options_.model_path(), options_.backend(), &model_args_))
@@ -616,15 +616,6 @@ void LLMMaster::generate() {
   running_.store(true, std::memory_order_relaxed);
   scheduler_->generate();
   running_.store(false, std::memory_order_relaxed);
-}
-
-bool LLMMaster::handle_rpc_response(const RequestOutput& output) {
-  // response to xllm service to avoid the redirect cost.
-  if (xservice_client_ == nullptr) return false;
-  auto return_status = xservice_client_->generations({output});
-  CHECK_EQ(return_status.size(), 1)
-      << "return size of generations is not equal to 1";
-  return return_status[0];
 }
 
 std::vector<bool> LLMMaster::handle_rpc_responses(

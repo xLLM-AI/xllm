@@ -26,7 +26,6 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_params_view.h"
-#include "models/model_registry.h"
 #include "options.h"
 #include "util/timer.h"
 
@@ -38,14 +37,8 @@ EmbedVLMWorkerImpl::EmbedVLMWorkerImpl(const ParallelArgs& parallel_args,
     : WorkerImpl(parallel_args, device, options) {}
 
 bool EmbedVLMWorkerImpl::init_model(ModelContext& context) {
-  CHECK(model_ == nullptr) << "Model is already initialized.";
-
   context.set_encoder_embedding_mode(false);
-  model_ = create_vlm_model(context);
-  CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
-
-  return true;
+  return WorkerImpl::init_model(context);
 }
 
 std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(

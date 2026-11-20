@@ -41,20 +41,6 @@ ExecutorImplFactory& ExecutorImplFactory::get_instance() {
   return instance;
 }
 
-bool ExecutorImplFactory::register_creator(const std::string& executor_type,
-                                           Creator creator) {
-  return register_creator(executor_type, std::move(creator), /*priority=*/0);
-}
-
-bool ExecutorImplFactory::register_creator(const std::string& executor_type,
-                                           Creator creator,
-                                           int32_t priority) {
-  return register_creator(executor_type,
-                          /*extension_impl=*/"",
-                          std::move(creator),
-                          priority);
-}
-
 bool ExecutorImplFactory::register_creator(std::string executor_type,
                                            std::string extension_impl,
                                            Creator creator,
@@ -75,7 +61,7 @@ bool ExecutorImplFactory::register_creator(std::string executor_type,
 }
 
 std::unique_ptr<ExecutorImpl> ExecutorImplFactory::create_executor_impl(
-    CausalLM* model,
+    ModelRef model,
     const ModelArgs& args,
     const torch::Device& device,
     const runtime::Options& options,
@@ -108,7 +94,25 @@ std::unique_ptr<ExecutorImpl> ExecutorImplFactory::create_executor_impl(
     throw std::runtime_error("No valid executor type found: " + executor_type);
   }
 
-  return implementation_it->second.creator(model, args, device, options);
+  return std::visit(
+      [&](const auto& creator,
+          auto* typed_model) -> std::unique_ptr<ExecutorImpl> {
+        if constexpr (std::is_invocable_v<decltype(creator),
+                                          decltype(typed_model),
+                                          const ModelArgs&,
+                                          const torch::Device&,
+                                          const runtime::Options&>) {
+          return creator(typed_model, args, device, options);
+        } else if constexpr (std::is_same_v<decltype(typed_model),
+                                            CausalVLM*>) {
+          return creator(&typed_model->language_model(), args, device, options);
+        } else {
+          throw std::invalid_argument(
+              "Executor type is incompatible with model: " + executor_type);
+        }
+      },
+      implementation_it->second.creator,
+      model);
 }
 
 }  // namespace xllm

@@ -18,7 +18,6 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <condition_variable>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -28,7 +27,7 @@ limitations under the License.
 
 namespace xllm {
 
-EplbExecutor::EplbExecutor(CausalLM& model, const torch::Device& device)
+EplbExecutor::EplbExecutor(DecoderModel& model, const torch::Device& device)
     : model_(model),
       device_(device),
       stream_(device_.get_stream_from_pool()),
@@ -45,24 +44,14 @@ EplbExecutor::~EplbExecutor() {
   }
 }
 
-void EplbExecutor::eplb_execute(const EplbInfo& eplb_info) {
-  start_eplb_step(eplb_info);
-  finish_eplb_step();
-}
-
 void EplbExecutor::start_eplb_step(const EplbInfo& eplb_info) {
   std::optional<Task> prepare_task;
   if (eplb_info.prepare_layer_id != -1) {
     CHECK_GT(eplb_info.prepare_token, 0)
         << "EPLB prepare command requires a positive attempt token.";
-    prepare_task.emplace(
-        Task{eplb_info.prepare_layer_id,
-             eplb_info.prepare_token,
-             eplb_info.expert_ids,
-             [prepare_layer_id = eplb_info.prepare_layer_id](int32_t) {
-               LOG(INFO) << "prepare expert weight complete, layer: "
-                         << prepare_layer_id << std::endl;
-             }});
+    prepare_task.emplace(Task{eplb_info.prepare_layer_id,
+                              eplb_info.prepare_token,
+                              eplb_info.expert_ids});
   }
   {
     std::lock_guard<std::mutex> lock(update_mutex_);
@@ -110,14 +99,6 @@ void EplbExecutor::enqueue_prepare_task(Task task) {
     tasks_.emplace(std::move(task));
   }
   condition_.notify_one();
-}
-
-void EplbExecutor::prepare_expert_weight_async(
-    int32_t layer_id,
-    int64_t prepare_token,
-    const std::vector<int32_t>& expert_ids,
-    Callback callback) {
-  enqueue_prepare_task(Task{layer_id, prepare_token, expert_ids, callback});
 }
 
 int64_t EplbExecutor::consume_ready_prepare_token() {
@@ -187,9 +168,6 @@ void EplbExecutor::eplb_worker_loop() {
                  << " | stream_synchronize_result=" << synchronize_result
                  << "; not advancing ready_layer_id.";
       ++heartbeat_tasks_failed;
-    }
-    if (prepare_succeeded && task.callback) {
-      task.callback(task.layer_id);
     }
     if (std::chrono::steady_clock::now() - heartbeat_last >=
         std::chrono::seconds(60)) {

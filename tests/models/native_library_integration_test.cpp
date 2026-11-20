@@ -39,8 +39,9 @@ TEST(NativeLibraryIntegrationTest, CreatesTheRegisteredExecutorSubclass) {
   load_native_libraries();
   runtime::Options options;
   options.extension_impl("custom");
+  CausalLM* model = nullptr;
   auto executor = ExecutorImplFactory::get_instance().create_executor_impl(
-      /*model=*/nullptr,
+      model,
       /*args=*/ModelArgs{},
       /*device=*/torch::Device(torch::kCPU),
       options,
