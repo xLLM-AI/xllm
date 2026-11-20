@@ -77,6 +77,9 @@ for name, mutates, aliases in (
     ("mega_gdn_decode", ("conv_state", "ssm_state"), False),
     ("mega_gdn_mtp_decode", ("conv_state", "ssm_state"), False),
     ("mega_gdn_mtp_decode_varlen", ("conv_state", "ssm_state", "out"), False),
+    ("quant_lightning_indexer", (), False),
+    ("quant_lightning_indexer_metadata", (), False),
+    ("scatter_nd_update", ("value",), False),
 ):
     operation = catalog[name]
     assert operation.implementations == ("npu.ascendc." + name,)

@@ -2,6 +2,11 @@
 """SDK-free public operator APIs."""
 
 from xllm_kernel.ops.activation import silu_and_mul
+from xllm_kernel.ops.attention.dsa.indexer import (
+    quant_lightning_indexer,
+    quant_lightning_indexer_metadata,
+    scatter_nd_update,
+)
 from xllm_kernel.ops.attention.fia import get_fused_attention
 from xllm_kernel.ops.attention.gdn import (
     causal_conv1d_qkv_prefill,
@@ -68,9 +73,12 @@ __all__ = [
     "moe_gating_top_k_hash",
     "moe_grouped_matmul_swiglu_quant",
     "moe_init_routing_v3",
+    "quant_lightning_indexer",
+    "quant_lightning_indexer_metadata",
     "quant_matmul_out",
     "partial_rotary_embedding",
     "reshape_paged_cache",
+    "scatter_nd_update",
     "shared_linear_state_indices_out",
     "silu_and_mul",
 ]
