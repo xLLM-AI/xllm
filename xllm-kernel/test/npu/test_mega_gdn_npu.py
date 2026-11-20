@@ -16,20 +16,14 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import torch
-
-from xllm.python.kernels_npu.gated_delta_net import (
+from xllm_kernel.ops.attention.gdn.mega import (
+    has_mega_gdn_mtp_decode_varlen,
     mega_gdn_decode,
     mega_gdn_mtp_decode,
     mega_gdn_mtp_decode_varlen,
-)
-
-pytestmark = pytest.mark.skipif(
-    os.environ.get("XLLM_TEST_NPU") != "1",
-    reason="requires an explicitly selected idle NPU and XLLM_TEST_NPU=1",
+    mega_gdn_prefill,
 )
 
 
@@ -51,11 +45,8 @@ def _state_caches(width: int, device: torch.device) -> tuple[torch.Tensor, ...]:
 @pytest.mark.parametrize("graph_mode", [False, True], ids=["eager", "graph"])
 @torch.inference_mode()
 def test_split_state_indices_match_compact_state_and_preserve_unowned_rows(width: int, graph_mode: bool) -> None:
-    pytest.importorskip("torch_npu")
-    if not torch.npu.is_available():
-        pytest.skip("requires an Ascend NPU")
     torch.manual_seed(1808)
-    device = torch.device("npu:0")
+    device = torch.device("npu", torch.npu.current_device())
     conv, ssm, dense_conv, dense_ssm = _state_caches(width, device)
     conv_initial, ssm_initial = conv.clone(), ssm.clone()
     dense_initial_conv, dense_initial_ssm = dense_conv.clone(), dense_ssm.clone()
@@ -195,15 +186,13 @@ def test_split_state_indices_match_compact_state_and_preserve_unowned_rows(width
         torch.testing.assert_close(ssm[ssm_unowned], ssm_initial[ssm_unowned], rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("graph_mode", [False, True], ids=["eager", "graph"])
 @torch.inference_mode()
-def test_split_state_varlen_uses_physical_bases_and_leaves_cold_checkpoints() -> None:
-    pytest.importorskip("torch_npu")
-    if not torch.npu.is_available():
-        pytest.skip("requires an Ascend NPU")
-    if "Ascend910B" not in torch.npu.get_device_name(0) and "Ascend910_93" not in torch.npu.get_device_name(0):
+def test_split_state_varlen_uses_physical_bases_and_leaves_cold_checkpoints(graph_mode: bool) -> None:
+    if not has_mega_gdn_mtp_decode_varlen():
         pytest.skip("packed varlen fused verifier requires Ascend A2/A3")
     torch.manual_seed(1809)
-    device = torch.device("npu:0")
+    device = torch.device("npu", torch.npu.current_device())
     width = 5
     conv, ssm, dense_conv, dense_ssm = _state_caches(width, device)
     indices = torch.tensor([[1043, 7], [1049, 18], [-1, -1]], dtype=torch.int32, device=device)
@@ -220,47 +209,138 @@ def test_split_state_varlen_uses_physical_bases_and_leaves_cold_checkpoints() ->
     norm_weight = torch.ones(128, dtype=torch.bfloat16, device=device)
     endpoints = torch.tensor([0, 1, 4, 6], dtype=torch.int32, device=device)
     actual = torch.zeros_like(z)
-    mega_gdn_mtp_decode_varlen(
-        qkv,
-        z,
-        b,
-        a,
-        weight,
-        conv,
-        a_log,
-        dt_bias,
-        ssm,
-        indices,
-        accepted,
-        norm_weight,
-        endpoints,
-        actual,
-    )
-    expected = torch.zeros_like(z[:4])
-    mega_gdn_mtp_decode_varlen(
-        qkv[:4],
-        z[:4],
-        b[:4],
-        a[:4],
-        weight,
-        dense_conv,
-        a_log,
-        dt_bias,
-        dense_ssm,
-        torch.tensor([1, 2], dtype=torch.int32, device=device),
-        accepted[:2],
-        norm_weight,
-        endpoints[:3],
-        expected,
-    )
-    torch.npu.synchronize()
-    torch.testing.assert_close(actual[:4], expected, rtol=0, atol=0)
-    torch.testing.assert_close(actual[4:], torch.zeros_like(actual[4:]), rtol=0, atol=0)
-    for sequence, (conv_row, ssm_row) in enumerate(((1043, 7), (1049, 18))):
-        torch.testing.assert_close(conv[conv_row], dense_conv[sequence + 1], rtol=0, atol=0)
-        torch.testing.assert_close(
-            ssm[ssm_row : ssm_row + width],
-            dense_ssm[(sequence + 1) * width : (sequence + 2) * width],
-            rtol=0,
-            atol=0,
+    initial = tuple(tensor.clone() for tensor in (conv, ssm, dense_conv, dense_ssm))
+
+    def run() -> None:
+        mega_gdn_mtp_decode_varlen(
+            qkv, z, b, a, weight, conv, a_log, dt_bias, ssm, indices, accepted, norm_weight, endpoints, actual
         )
+
+    if graph_mode:
+        run()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            run()
+
+    pointer = actual.data_ptr()
+    for step in range(3):
+        for tensor, snapshot in zip((conv, ssm, dense_conv, dense_ssm), initial, strict=True):
+            tensor.copy_(snapshot)
+        actual.zero_()
+        if step:
+            qkv.normal_(std=0.1)
+            accepted.copy_(torch.tensor([step, width - step, 1], dtype=torch.int32, device=device))
+        if graph_mode:
+            graph.replay()
+        else:
+            run()
+        expected = torch.zeros_like(z[:4])
+        mega_gdn_mtp_decode_varlen(
+            qkv[:4],
+            z[:4],
+            b[:4],
+            a[:4],
+            weight,
+            dense_conv,
+            a_log,
+            dt_bias,
+            dense_ssm,
+            torch.tensor([1, 2], dtype=torch.int32, device=device),
+            accepted[:2],
+            norm_weight,
+            endpoints[:3],
+            expected,
+        )
+        torch.npu.synchronize()
+        assert actual.data_ptr() == pointer
+        torch.testing.assert_close(actual[:4], expected, rtol=0, atol=0)
+        torch.testing.assert_close(actual[4:], torch.zeros_like(actual[4:]), rtol=0, atol=0)
+        for sequence, (conv_row, ssm_row) in enumerate(((1043, 7), (1049, 18))):
+            torch.testing.assert_close(conv[conv_row], dense_conv[sequence + 1], rtol=0, atol=0)
+            torch.testing.assert_close(
+                ssm[ssm_row : ssm_row + width],
+                dense_ssm[(sequence + 1) * width : (sequence + 2) * width],
+                rtol=0,
+                atol=0,
+            )
+
+
+def _prefill_reference(
+    qkv: torch.Tensor,
+    z: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    weight: torch.Tensor,
+    history: torch.Tensor,
+    initial: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    window = torch.cat((history, qkv))
+    projected = torch.nn.functional.conv1d(window.float().t().unsqueeze(0), weight.float().t().unsqueeze(1), groups=384)
+    q, k, v = torch.nn.functional.silu(projected[0].t()).bfloat16().float().chunk(3, dim=-1)
+    q = q * torch.rsqrt(q.square().sum(dim=-1, keepdim=True) + 1e-6)
+    k = k * torch.rsqrt(k.square().sum(dim=-1, keepdim=True) + 1e-6)
+    g = -a_log.exp() * torch.nn.functional.softplus(a.float() + dt_bias)
+    beta = b.float().sigmoid()
+    state = initial.float()
+    outputs = []
+    for i in range(qkv.shape[0]):
+        state = state * g[i].exp()
+        residual = (v[i] - k[i] @ state) * beta[i]
+        state = state + k[i, :, None] * residual[None, :]
+        value = (q[i] @ state) * 128**-0.5
+        normalized = value * torch.rsqrt(value.square().mean() + 1e-6)
+        outputs.append(normalized * torch.nn.functional.silu(z[i, 0].float()))
+    return torch.stack(outputs).bfloat16().unsqueeze(1), window[-3:], state
+
+
+@torch.inference_mode()
+def test_mega_gdn_prefill_matches_reference_and_writes_only_selected_rows() -> None:
+    generator = torch.Generator().manual_seed(2801)
+    qkv = (torch.randn((7, 384), generator=generator) * 0.15).bfloat16()
+    z = (torch.randn((7, 1, 128), generator=generator) * 0.15).bfloat16()
+    b = (torch.randn((7, 1), generator=generator) * 0.2).bfloat16()
+    a = (torch.randn((7, 1), generator=generator) * 0.2).bfloat16()
+    weight = (torch.randn((4, 384), generator=generator) * 0.12).bfloat16()
+    conv = (torch.randn((5, 3, 384), generator=generator) * 0.08).bfloat16()
+    ssm = torch.randn((5, 1, 128, 128), generator=generator) * 0.004
+    a_log = torch.tensor([-0.5])
+    dt_bias = torch.tensor([0.1])
+    conv_read, conv_write = (3, -1), (0, 4)
+    ssm_read, ssm_write = (1, -1), (3, 2)
+    read_and_write = tuple(
+        torch.tensor(indices, dtype=torch.int32).npu() for indices in (conv_read, conv_write, ssm_read, ssm_write)
+    )
+    conv_npu, ssm_npu = conv.npu(), ssm.npu()
+    output = mega_gdn_prefill(
+        qkv.npu(),
+        b.npu(),
+        a.npu(),
+        z.npu(),
+        weight.npu(),
+        conv_npu,
+        a_log.npu(),
+        dt_bias.npu(),
+        *read_and_write,
+        ssm_npu,
+        torch.tensor([0, 3, 7], dtype=torch.int32).npu(),
+        torch.ones(128, dtype=torch.bfloat16).npu(),
+        2,
+    )
+
+    expected_conv, expected_ssm = conv.clone(), ssm.clone()
+    outputs = []
+    for i, token_slice in enumerate((slice(0, 3), slice(3, 7))):
+        history = conv[conv_read[i]] if conv_read[i] >= 0 else torch.zeros_like(conv[0])
+        initial = ssm[ssm_read[i], 0] if ssm_read[i] >= 0 else torch.zeros_like(ssm[0, 0])
+        result, history_out, final = _prefill_reference(
+            qkv[token_slice], z[token_slice], b[token_slice], a[token_slice], weight, history, initial, a_log, dt_bias
+        )
+        outputs.append(result)
+        expected_conv[conv_write[i]] = history_out
+        expected_ssm[ssm_write[i], 0] = final
+    torch.testing.assert_close(output.cpu(), torch.cat(outputs), atol=0.005, rtol=0.04)
+    torch.testing.assert_close(conv_npu.cpu(), expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(ssm_npu.cpu(), expected_ssm, atol=4e-4, rtol=0.03)

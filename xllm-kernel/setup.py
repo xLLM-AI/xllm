@@ -100,6 +100,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/npu/hyper_connection.cpp",
                 "csrc/npu/inplace_partial_rotary_mul.cpp",
                 "csrc/npu/mla_preprocess_v2.cpp",
+                "csrc/npu/mega_gdn.cpp",
                 "csrc/npu/moe.cpp",
                 "csrc/npu/normalization.cpp",
                 "csrc/npu/quant_matmul.cpp",

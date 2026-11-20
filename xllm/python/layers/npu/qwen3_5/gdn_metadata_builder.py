@@ -20,6 +20,7 @@ from math import gcd
 from typing import TYPE_CHECKING, cast
 
 import torch
+from xllm_kernel.ops.attention.gdn.mega import shared_linear_state_indices_out
 
 from xllm.python.attention.backend import (
     CacheRowTable,
@@ -436,7 +437,7 @@ class Qwen3_5GdnMetadataBuilder:
         ):
             if out is None:
                 out = indices.new_empty((groups, indices.numel(), 2))
-            torch.ops.xllm_ops.shared_linear_state_indices_out(indices, rows, out)
+            shared_linear_state_indices_out(indices, rows, out)
             return out
         rows = rows.index_select(1, indices.clamp_min(0).to(torch.int64))
         if layout.num_slabs:

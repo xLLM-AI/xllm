@@ -73,12 +73,20 @@ for name, mutates, aliases in (
     ("causal_conv1d", ("conv_state",), False),
     ("causal_conv1d_qkv_prefill", ("conv_state",), False),
     ("chunk_gated_delta_rule", (), False),
+    ("mega_gdn_prefill", ("conv_state", "ssm_cache"), False),
+    ("mega_gdn_decode", ("conv_state", "ssm_state"), False),
+    ("mega_gdn_mtp_decode", ("conv_state", "ssm_state"), False),
+    ("mega_gdn_mtp_decode_varlen", ("conv_state", "ssm_state", "out"), False),
 ):
     operation = catalog[name]
     assert operation.implementations == ("npu.ascendc." + name,)
     assert operation.contract.mutates == mutates and operation.contract.aliases_inputs == aliases
     assert operation.prepared is None
 assert callable(quant_matmul_out) and callable(mla_preprocess_v2)
+shared_indices = catalog["shared_linear_state_indices_out"]
+assert shared_indices.implementations == ("npu.triton.shared_linear_state_indices_out",)
+assert shared_indices.contract.mutates == ("out",) and not shared_indices.contract.aliases_inputs
+assert shared_indices.prepared is None
 assert callable(hc_pre) and callable(hc_post)
 assert callable(causal_conv1d_update_v2)
 assert callable(reshape_paged_cache) and callable(partial_rotary_embedding)

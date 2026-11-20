@@ -37,9 +37,11 @@ register_kernel(
 
 
 @cache
-def _chunk_masks(device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _chunk_masks(
+    device: torch.device, dtype: torch.dtype = torch.float16
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     ones = torch.ones((_CHUNK_SIZE, _CHUNK_SIZE), device=device, dtype=torch.float32)
-    return ones.tril(-1), ones.tril(0), -torch.eye(_CHUNK_SIZE, device=device, dtype=torch.float16)
+    return ones.tril(-1), ones.tril(0), -torch.eye(_CHUNK_SIZE, device=device, dtype=dtype)
 
 
 def _normalize(value: torch.Tensor) -> torch.Tensor:

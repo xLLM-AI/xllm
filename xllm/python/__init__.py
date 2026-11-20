@@ -59,6 +59,7 @@ def initialize_runtime() -> None:
     elif current_platform.is_npu():
         xllm_kernel = _load_kernel_package()
 
+        from xllm_kernel.ops.attention.gdn.mega import has_mega_gdn_mtp_decode_varlen
         from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2
         from xllm_kernel.ops.moe import FUSED_MOE_GMM1_OPERATIONS, has_fused_moe_gmm1
 
@@ -84,6 +85,11 @@ def initialize_runtime() -> None:
                 "fused_recurrent_gated_delta_rule",
                 "fused_sigmoid_gating_delta_rule_update",
                 "fused_qkvzba_split_reshape_cat",
+                "mega_gdn_prefill",
+                "mega_gdn_decode",
+                "mega_gdn_mtp_decode",
+                *(("mega_gdn_mtp_decode_varlen",) if has_mega_gdn_mtp_decode_varlen() else ()),
+                "shared_linear_state_indices_out",
                 "causal_conv1d",
                 "causal_conv1d_qkv_prefill",
                 "chunk_gated_delta_rule",

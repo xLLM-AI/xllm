@@ -10,6 +10,13 @@ from xllm_kernel.ops.attention.gdn import (
     fused_recurrent_gated_delta_rule,
     fused_sigmoid_gating_delta_rule_update,
 )
+from xllm_kernel.ops.attention.gdn.mega import (
+    mega_gdn_decode,
+    mega_gdn_mtp_decode,
+    mega_gdn_mtp_decode_varlen,
+    mega_gdn_prefill,
+    shared_linear_state_indices_out,
+)
 from xllm_kernel.ops.attention.kda import causal_conv1d, causal_conv1d_update_v2
 from xllm_kernel.ops.attention.mla import mla_preprocess_v2
 from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out, quant_matmul_out
@@ -53,6 +60,10 @@ __all__ = [
     "rms_norm_gated",
     "matmul_ein_sum",
     "matmul_ein_sum_out",
+    "mega_gdn_decode",
+    "mega_gdn_mtp_decode",
+    "mega_gdn_mtp_decode_varlen",
+    "mega_gdn_prefill",
     "mla_preprocess_v2",
     "moe_gating_top_k_hash",
     "moe_grouped_matmul_swiglu_quant",
@@ -60,5 +71,6 @@ __all__ = [
     "quant_matmul_out",
     "partial_rotary_embedding",
     "reshape_paged_cache",
+    "shared_linear_state_indices_out",
     "silu_and_mul",
 ]

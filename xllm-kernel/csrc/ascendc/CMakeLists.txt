@@ -44,6 +44,10 @@ set(conv_host "${CMAKE_CURRENT_SOURCE_DIR}/causal_conv1d/op_host")
 set(conv_qkv_host "${CMAKE_CURRENT_SOURCE_DIR}/causal_conv1d_qkv/op_host")
 set(chunk_gdn_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_chunk_gdn/op_host")
 set(recurrent_gdn_host "${CMAKE_CURRENT_SOURCE_DIR}/recurrent_gated_delta_rule/op_host")
+set(mega_prefill_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_prefill_op/op_host")
+set(mega_decode_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_decode/op_host")
+set(mega_mtp_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_mtp_decode/op_host")
+set(mega_varlen_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_mtp_decode_varlen/op_host")
 set(pto_include "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/pto-isa/include")
 if(NOT EXISTS "${pto_include}/pto/pto-inst.hpp")
     message(FATAL_ERROR "MegaChunkGdn needs PTO headers. "
@@ -56,11 +60,20 @@ list(APPEND op_definitions
     "${conv_host}/causal_conv1d_def.cpp"
     "${conv_qkv_host}/causal_conv1d_qkv_def.cpp"
     "${chunk_gdn_host}/mega_chunk_gdn_def.cpp"
+    "${mega_prefill_host}/mega_gdn_prefill_op_def.cpp"
+    "${mega_decode_host}/mega_gdn_decode_def.cpp"
+    "${mega_mtp_host}/mega_gdn_mtp_decode_def.cpp"
 )
 if("ascend910b" IN_LIST ASCEND_COMPUTE_UNIT OR "ascend910_93" IN_LIST ASCEND_COMPUTE_UNIT)
     list(APPEND op_definitions
         "${moe_routing_host}/moe_init_routing_v3_def.cpp"
         "${recurrent_gdn_host}/recurrent_gated_delta_rule_def.cpp"
+        "${mega_varlen_host}/mega_gdn_mtp_decode_varlen_def.cpp"
+    )
+    set(mega_varlen_api "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_mega_gdn_mtp_decode_varlen.cpp")
+    set(mega_varlen_tiling
+        "${mega_varlen_host}/mega_gdn_mtp_decode_varlen_tiling.cpp"
+        "${mega_varlen_host}/mega_gdn_mtp_decode_varlen_infershape.cpp"
     )
     set(recurrent_gdn_api
         "${recurrent_gdn_host}/op_api/aclnn_recurrent_gated_delta_rule.cpp"
@@ -129,6 +142,10 @@ npu_op_library(cust_opapi ACLNN
     "${chunk_gdn_host}/op_api/aclnn_mega_chunk_gdn.cpp"
     "${chunk_gdn_host}/op_api/mega_chunk_gdn_l0.cpp"
     ${recurrent_gdn_api}
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_mega_gdn_prefill_op.cpp"
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_mega_gdn_decode.cpp"
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_mega_gdn_mtp_decode.cpp"
+    ${mega_varlen_api}
     ${a2_aclnn_sources}
 )
 target_include_directories(cust_opapi PRIVATE
@@ -175,6 +192,13 @@ npu_op_library(cust_optiling TILING
     "${chunk_gdn_host}/mega_chunk_gdn_infershape.cpp"
     "${chunk_gdn_host}/mega_chunk_gdn_tiling.cpp"
     ${recurrent_gdn_tiling}
+    "${mega_prefill_host}/mega_gdn_prefill_op_tiling.cpp"
+    "${mega_prefill_host}/mega_gdn_prefill_op_infershape.cpp"
+    "${mega_decode_host}/mega_gdn_decode_tiling.cpp"
+    "${mega_decode_host}/mega_gdn_decode_proto.cpp"
+    "${mega_mtp_host}/mega_gdn_mtp_decode_tiling.cpp"
+    "${mega_mtp_host}/mega_gdn_mtp_decode_proto.cpp"
+    ${mega_varlen_tiling}
     ${a2_tiling_sources}
     ${generated_fallback}
 )
@@ -262,6 +286,41 @@ if(recurrent_gdn_api)
         KERNEL_DIR recurrent_gated_delta_rule/op_kernel KERNEL_FILE xllm_kernel_recurrent_gated_delta_rule.cpp)
     npu_op_kernel_options(ascendc_kernels XllmKernelRecurrentGatedDeltaRule
         OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Wno-error)
+endif()
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelMegaGdnPrefillOp
+    KERNEL_DIR mega_gdn_prefill_op/op_kernel KERNEL_FILE xllm_kernel_mega_gdn_prefill_op.cpp)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelMegaGdnDecode
+    KERNEL_DIR mega_gdn_decode/op_kernel KERNEL_FILE xllm_kernel_mega_gdn_decode.cpp)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelMegaGdnMtpDecode
+    KERNEL_DIR mega_gdn_mtp_decode/op_kernel KERNEL_FILE xllm_kernel_mega_gdn_mtp_decode.cpp)
+set(mega_kernel_types XllmKernelMegaGdnDecode XllmKernelMegaGdnMtpDecode)
+if(mega_varlen_api)
+    npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelMegaGdnMtpDecodeVarlen
+        KERNEL_DIR mega_gdn_mtp_decode_varlen/op_kernel KERNEL_FILE xllm_kernel_mega_gdn_mtp_decode_varlen.cpp)
+    list(APPEND mega_kernel_types XllmKernelMegaGdnMtpDecodeVarlen)
+endif()
+foreach(op_type IN LISTS mega_kernel_types)
+    npu_op_kernel_options(ascendc_kernels ${op_type}
+        OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error
+        "-I${CMAKE_CURRENT_SOURCE_DIR}" "-I${pto_include}"
+        "-I${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_decode/op_kernel"
+        "-I${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_mtp_decode/op_kernel")
+endforeach()
+npu_op_kernel_options(ascendc_kernels XllmKernelMegaGdnPrefillOp
+    OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error
+    -DGDN_KERNEL_NAME=xllm_kernel_mega_gdn_prefill_op -DGDN_D=128 -DGDN_C=128
+    "-I${CMAKE_CURRENT_SOURCE_DIR}" "-I${pto_include}"
+    "-I${ASCEND_CANN_PACKAGE_PATH}/include" "-I${ASCEND_CANN_PACKAGE_PATH}/pkg_inc"
+    "-I${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/profiling"
+    "-I${CMAKE_CURRENT_SOURCE_DIR}/causal_conv1d/op_kernel"
+    "-I${CMAKE_CURRENT_SOURCE_DIR}/mega_chunk_gdn/op_kernel")
+if("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
+    file(STRINGS "${ASCEND_CANN_PACKAGE_PATH}/opp/version.info" mega_cann_version REGEX "^Version=" LIMIT_COUNT 1)
+    string(REGEX REPLACE "^Version=" "" mega_cann_version "${mega_cann_version}")
+    if(mega_cann_version VERSION_LESS "9.1.0")
+        message(FATAL_ERROR "MegaGdnPrefillOp on Ascend950 requires CANN 9.1.0 or newer.")
+    endif()
+
 endif()
 if(a2_aclnn_sources)
     npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelQuantMatmulNzDecode
