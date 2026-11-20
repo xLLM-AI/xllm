@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import torch
+from xllm_kernel.ops.attention import dsa as _dsa_attention
 from xllm_kernel.ops.attention.dsa.indexer import (
     quant_lightning_indexer as quant_lightning_indexer,
 )
@@ -399,7 +400,7 @@ def sparse_flash_attention_out(
     if (query_rope is None) != (key_rope is None):
         raise ValueError("query_rope and key_rope must both be present or absent")
     if query_rope is not None and layout_query == "TND" and layout_kv == "PA_BSND" and sparse_mode == 3:
-        return torch.ops.xllm_ops.sparse_flash_attention_lse_out(
+        return _dsa_attention.sparse_flash_attention_lse_out(
             query,
             key,
             value,
@@ -414,10 +415,6 @@ def sparse_flash_attention_out(
             layout_query,
             layout_kv,
             sparse_mode,
-            9223372036854775807,
-            9223372036854775807,
-            2,
-            False,
             output,
         )
     # Keep the allocating entry's backend selection for unsupported out layouts.
@@ -460,7 +457,7 @@ def sparse_flash_attention_lse_out(
 ) -> torch.Tensor:
     """Run sparse attention directly into a caller-owned output buffer."""
     _validate_sparse_attention_output(query, output)
-    return torch.ops.xllm_ops.sparse_flash_attention_lse_out(
+    return _dsa_attention.sparse_flash_attention_lse_out(
         query,
         key,
         value,
@@ -475,10 +472,6 @@ def sparse_flash_attention_lse_out(
         layout_query,
         layout_kv,
         sparse_mode,
-        9223372036854775807,
-        9223372036854775807,
-        2,
-        False,
         output,
     )
 
@@ -514,7 +507,7 @@ def sparse_flash_attention_lse(
     if (query_rope is None) != (key_rope is None):
         raise ValueError("query_rope and key_rope must both be present or absent")
     if query_rope is not None:
-        return torch.ops.xllm_ops.sparse_flash_attention_lse(
+        return _dsa_attention.sparse_flash_attention_lse(
             query,
             key,
             value,
