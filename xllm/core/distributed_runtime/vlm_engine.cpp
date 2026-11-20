@@ -420,7 +420,10 @@ bool VLMEngine::allocate_kv_cache(
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(worker_clients_.size());
   for (auto& worker : worker_clients_) {
-    futures.push_back(worker->allocate_kv_cache_async(kv_cache_shape));
+    futures.emplace_back(
+        options_.instance_role() == InstanceRole::DEFAULT
+            ? worker->allocate_kv_cache_async(kv_cache_shape)
+            : worker->allocate_kv_cache_with_transfer_async(kv_cache_shape));
   }
   // wait for all futures to complete
   auto results = folly::collectAll(futures).get();
