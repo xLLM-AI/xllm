@@ -63,6 +63,7 @@ class DiTConfig final {
          "dit_laser_attention_enabled",
          "dit_h3_task_type",
          "dit_h3_rainfusion_enabled",
+         "dit_h3_vae_decoder_partition",
          "dit_generation_image_area_max",
          "dit_vae_image_size",
          "dit_enable_vae_tiling",
@@ -117,6 +118,7 @@ class DiTConfig final {
   PROPERTY(bool, dit_laser_attention_enabled) = false;
 
   PROPERTY(std::string, dit_h3_task_type) = "fl2va";
+  PROPERTY(bool, dit_h3_vae_decoder_partition) = false;
 
   PROPERTY(bool, dit_h3_rainfusion_enabled) = false;
 
