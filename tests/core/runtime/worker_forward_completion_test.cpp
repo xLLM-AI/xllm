@@ -17,7 +17,10 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -32,6 +35,9 @@ limitations under the License.
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/transfer/kv_transfer.h"
 #include "core/platform/device.h"
 #include "core/runtime/llm_worker_impl.h"
 #include "core/runtime/vlm_worker_impl.h"
@@ -63,6 +69,9 @@ struct ForwardObservation {
   bool logits_saw_sampling_history = false;
   aclrtStream execution_stream = nullptr;
   bool weights_loaded = false;
+  bool emit_hidden = true;
+  std::function<void()> on_forward;
+  std::shared_ptr<KVPushSynchronizerImpl> push_synchronizer;
 };
 
 class CompletionTestModel final : public CausalVLM {
@@ -75,15 +84,25 @@ class CompletionTestModel final : public CausalVLM {
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& /*positions*/,
                       std::vector<KVCache>& /*kv_caches*/,
-                      const ModelParamsView& /*parameters*/) override {
+                      const ModelParamsView& parameters) override {
     observation_->forward_saw_sampling_history =
         observation_->sampling_params != nullptr &&
         observation_->sampling_params->prefix_tokens().defined();
     observation_->execution_stream =
         c10_npu::getCurrentNPUStream(tokens.device().index()).stream();
     observation_->hidden_states = tokens.add(/*other=*/5).unsqueeze(/*dim=*/1);
+    observation_->push_synchronizer = parameters.parallel.layer_synchronizer;
+    if (observation_->push_synchronizer != nullptr) {
+      EXPECT_TRUE(observation_->push_synchronizer->record_event(
+          /*layer_index=*/0, options_.device().index()));
+    }
+    if (observation_->on_forward) {
+      observation_->on_forward();
+    }
     ModelOutput output;
-    output.hidden_states = observation_->hidden_states;
+    if (observation_->emit_hidden) {
+      output.hidden_states = observation_->hidden_states;
+    }
     return output;
   }
 
@@ -120,6 +139,86 @@ class CompletionTestModel final : public CausalVLM {
  private:
   torch::TensorOptions options_;
   std::shared_ptr<ForwardObservation> observation_;
+};
+
+class DeferredPushTransfer final : public KVTransfer {
+ public:
+  void register_kv_cache(std::vector<KVCache>& caches,
+                         const KVCacheShape& /*shape*/,
+                         torch::ScalarType /*dtype*/) override {
+    registered_layers_ = static_cast<int32_t>(caches.size());
+  }
+  int32_t registered_layers() const { return registered_layers_; }
+
+  void get_cache_info(uint64_t& /*cluster_id*/,
+                      std::string& /*addr*/) override {}
+  bool link_clusters(const std::vector<uint64_t>& /*cluster_ids*/,
+                     const std::vector<std::string>& /*remote_addrs*/,
+                     const std::vector<uint16_t>& /*ports*/) override {
+    return true;
+  }
+  bool unlink_cluster(const uint64_t& /*cluster_id*/,
+                      const std::string& /*remote_addr*/,
+                      const uint16_t /*port*/,
+                      bool /*force*/) override {
+    return true;
+  }
+  bool pull_kv_blocks(
+      const uint64_t /*cluster_id*/,
+      const std::string& /*addr*/,
+      const std::vector<KVTransferMapping>& /*mappings*/) override {
+    return true;
+  }
+  void merge_kv_blocks(
+      std::unordered_map<std::string, KVCacheInfo>& /*infos*/,
+      const std::vector<TransferKVInfo>& /*transfers*/) override {}
+  std::vector<std::string> push_kv_blocks(
+      std::unordered_map<std::string, KVCacheInfo>& /*infos*/,
+      std::shared_ptr<KVPushSynchronizerImpl>& /*synchronizer*/,
+      bool /*is_spec_draft*/,
+      int32_t /*kv_split_rank*/,
+      int32_t /*kv_split_size*/) override {
+    return {};
+  }
+  folly::SemiFuture<std::vector<std::string>> push_kv_blocks_async(
+      const std::vector<TransferKVInfo>& /*transfers*/,
+      const ParallelArgs& /*parallel_args*/,
+      std::shared_ptr<KVPushSynchronizerImpl> synchronizer,
+      bool is_spec_draft) override {
+    EXPECT_FALSE(is_spec_draft);
+    ++calls_;
+    synchronizer_ = std::move(synchronizer);
+    return completion_.getSemiFuture();
+  }
+  void finish(std::vector<std::string> failed_request_ids) {
+    completion_.setValue(std::move(failed_request_ids));
+  }
+  int32_t calls() const { return calls_; }
+  const std::shared_ptr<KVPushSynchronizerImpl>& synchronizer() const {
+    return synchronizer_;
+  }
+
+ private:
+  int32_t registered_layers_ = 0;
+  int32_t calls_ = 0;
+  folly::Promise<std::vector<std::string>> completion_;
+  std::shared_ptr<KVPushSynchronizerImpl> synchronizer_;
+};
+
+template <typename Worker>
+class PushTestWorker final : public Worker {
+ public:
+  using Worker::Worker;
+
+  bool allocate_registered_cache(const KVCacheShape& shape,
+                                 std::shared_ptr<KVTransfer> transfer) {
+    this->dtype_ = torch::kFloat32;
+    return this->allocate_kv_cache_with_transfer(std::move(transfer), shape);
+  }
+  void disable_result_driver() {
+    this->driver_ = false;
+    this->dp_driver_ = false;
+  }
 };
 
 enum class WorkerKind : int8_t { LLM, VLM };
@@ -292,6 +391,79 @@ class WorkerForwardCompletionTest
                      torch::tensor({8, 13, 13}, torch::kInt64)));
   }
 
+  template <typename Worker, typename Input>
+  void verify_kv_push(const std::string& backend,
+                      bool emit_hidden,
+                      bool non_driver,
+                      bool transfer_fails) {
+    const ForwardCompletion completion = std::get<1>(GetParam());
+    const torch::Device device(torch::kPrivateUse1, /*index=*/0);
+    const ParallelArgs parallel_args(/*rank=*/0,
+                                     /*world_size=*/1,
+                                     /*process_group=*/nullptr);
+    runtime::Options options;
+    options.backend(backend)
+        .enable_schedule_overlap(std::get<2>(GetParam()))
+        .enable_graph(false)
+        .enable_speculative_decode(false)
+        .enable_disagg_pd(true)
+        .instance_role(InstanceRole::PREFILL)
+        .block_size(4);
+    PushTestWorker<Worker> worker(parallel_args, device, options);
+    Device execution_device(device);
+    std::unique_ptr<Stream> stream = execution_device.get_stream_from_pool();
+    auto observation = std::make_shared<ForwardObservation>();
+    observation->emit_hidden = emit_hidden;
+    ASSERT_TRUE(
+        initialize_model(worker, parallel_args, device, backend, observation));
+    if (non_driver) {
+      worker.disable_result_driver();
+    }
+    auto transfer = std::make_shared<DeferredPushTransfer>();
+    KVCacheCapacity capacity;
+    capacity.n_blocks(2).block_size(4);
+    const KVCacheShape shape(
+        capacity, worker.context_.get_model_args(), /*world_size=*/1);
+    ASSERT_TRUE(worker.allocate_registered_cache(shape, transfer));
+    EXPECT_EQ(transfer->registered_layers(), 1);
+    Input input;
+    {
+      auto guard = stream->set_stream_guard();
+      input.token_ids = torch::tensor(
+          {7}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+      input.positions = torch::zeros_like(input.token_ids);
+    }
+    input.input_params.meta.num_sequences = 1;
+    input.input_params.meta.batch_forward_type = BatchForwardType::PREFILL;
+    TransferKVInfo info;
+    info.request_id = "request";
+    input.transfer_kv_infos.emplace_back(std::move(info));
+    std::promise<void> forward_entered;
+    std::future<void> entered = forward_entered.get_future();
+    observation->on_forward = [&]() { forward_entered.set_value(); };
+    WorkerImpl& leaf = worker;
+    auto result = std::async(std::launch::async, [&]() {
+      return leaf.execute_no_sync_on_stream(input, *stream, completion);
+    });
+    EXPECT_EQ(entered.wait_for(std::chrono::seconds(5)),
+              std::future_status::ready);
+    EXPECT_EQ(result.wait_for(std::chrono::milliseconds(50)),
+              std::future_status::timeout);
+    std::vector<std::string> failures;
+    if (transfer_fails) {
+      failures.emplace_back("request");
+    }
+    transfer->finish(failures);
+    std::optional<ForwardOutput> output = result.get();
+    EXPECT_EQ(stream->synchronize(), 0);
+    ASSERT_TRUE(output.has_value());
+    EXPECT_EQ(output->failed_request_ids, failures);
+    EXPECT_EQ(transfer->calls(), 1);
+    ASSERT_NE(transfer->synchronizer(), nullptr);
+    EXPECT_EQ(transfer->synchronizer()->get_event_size(), 1u);
+    EXPECT_EQ(observation->push_synchronizer, transfer->synchronizer());
+  }
+
  private:
   bool initialize_model(
       WorkerImpl& worker,
@@ -317,13 +489,19 @@ class WorkerForwardCompletionTest
       return false;
     }
     ModelArgs args;
-    args.model_type(model_name);
+    args.model_type(model_name)
+        .n_layers(1)
+        .hidden_size(16)
+        .n_heads(2)
+        .n_kv_heads(1)
+        .head_dim(8);
     ModelContext context(parallel_args,
                          args,
                          QuantArgs{},
                          torch::TensorOptions().device(device));
     context.set_model_impl("native");
-    return worker.init_model(context);
+    worker.context_ = std::move(context);
+    return worker.init_model(worker.context_);
   }
 
   ScopedConfigValue<bool> rolling_load_{
@@ -357,6 +535,48 @@ TEST_P(WorkerForwardCompletionTest, PreparesSamplingAfterForwardAndLogits) {
     verify_sampling_history<LLMWorkerImpl, LlmForwardInput>("llm");
   } else {
     verify_sampling_history<VLMWorkerImpl, VlmForwardInput>("vlm");
+  }
+}
+
+TEST_P(WorkerForwardCompletionTest, WaitsForKVPushBeforeReturning) {
+  if (std::get<0>(GetParam()) == WorkerKind::LLM) {
+    verify_kv_push<LLMWorkerImpl, LlmForwardInput>("llm",
+                                                   /*emit_hidden=*/true,
+                                                   /*non_driver=*/false,
+                                                   /*transfer_fails=*/false);
+  } else {
+    verify_kv_push<VLMWorkerImpl, VlmForwardInput>("vlm",
+                                                   /*emit_hidden=*/true,
+                                                   /*non_driver=*/false,
+                                                   /*transfer_fails=*/false);
+  }
+}
+
+TEST_P(WorkerForwardCompletionTest, ReportsKVPushFailureOnNonDriver) {
+  if (std::get<0>(GetParam()) == WorkerKind::LLM) {
+    verify_kv_push<LLMWorkerImpl, LlmForwardInput>("llm",
+                                                   /*emit_hidden=*/true,
+                                                   /*non_driver=*/true,
+                                                   /*transfer_fails=*/true);
+  } else {
+    verify_kv_push<VLMWorkerImpl, VlmForwardInput>("vlm",
+                                                   /*emit_hidden=*/true,
+                                                   /*non_driver=*/true,
+                                                   /*transfer_fails=*/true);
+  }
+}
+
+TEST_P(WorkerForwardCompletionTest, ReportsKVPushFailureWithoutHiddenOutput) {
+  if (std::get<0>(GetParam()) == WorkerKind::LLM) {
+    verify_kv_push<LLMWorkerImpl, LlmForwardInput>("llm",
+                                                   /*emit_hidden=*/false,
+                                                   /*non_driver=*/false,
+                                                   /*transfer_fails=*/true);
+  } else {
+    verify_kv_push<VLMWorkerImpl, VlmForwardInput>("vlm",
+                                                   /*emit_hidden=*/false,
+                                                   /*non_driver=*/false,
+                                                   /*transfer_fails=*/true);
   }
 }
 

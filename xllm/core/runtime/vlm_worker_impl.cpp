@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <memory>
 #include <optional>
+#include <utility>
 
 #include "common/macros.h"
 #include "common/metrics.h"
@@ -28,6 +29,8 @@ limitations under the License.
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_extend_input.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/kv_cache/transfer/kv_transfer.h"
+#include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "models/model_registry.h"
 #include "util/timer.h"
 
@@ -109,6 +112,28 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
     return ForwardOutput{};
   }
 
+  KVTransferCompletion kv_transfers = [&]() {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+    if (options_.kv_push_enabled() && !input.transfer_kv_infos.empty()) {
+      auto layer_synchronizer = std::make_shared<KVPushSynchronizerImpl>(
+          context_.get_model_args().n_layers());
+      input.input_params.parallel.layer_synchronizer = layer_synchronizer;
+      auto request_ids =
+          KVTransfer::unique_request_ids(input.transfer_kv_infos);
+      return KVTransferCompletion(
+          kv_transfer_->push_kv_blocks_async(input.transfer_kv_infos,
+                                             context_.get_parallel_args(),
+                                             std::move(layer_synchronizer),
+                                             options_.is_draft_engine()),
+          std::move(request_ids));
+    }
+#endif
+    return KVTransferCompletion{};
+  }();
+  auto wait_kv_push = [&]() {
+    return kv_transfers.wait(parallel_args_.kv_transfer_groups(), device_);
+  };
+
   const auto& sampling_params = input.sampling_params;
   ModelOutput model_output;
   torch::Tensor logits;
@@ -142,10 +167,10 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
       !options_.enable_speculative_decode()) {
     if (sync_policy == ForwardSyncPolicy::LEGACY) {
-      auto ret = device_.synchronize_default_stream();
-      (void)ret;
+      const int32_t ret = device_.synchronize_default_stream();
+      CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
     }
-    return std::nullopt;
+    return make_transfer_failure_output(wait_kv_push());
   }
 
   ForwardOutput output;
@@ -176,6 +201,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
                               /*cp_enabled=*/options_.cp_size() > 1);
   }
 
+  output.failed_request_ids = wait_kv_push();
   if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
     finalize_no_sync_output(output, input, completion);
     return output;
