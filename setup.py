@@ -63,7 +63,9 @@ from scripts.logger import logger
 BUILD_EXPORT: bool = True
 
 
-def _maybe_compile_tilelang_kernels(device: str, jobs: int | str | None = None) -> None:
+def _maybe_compile_tilelang_kernels(
+    device: str, jobs: int | str | None = None, *, enable_h3_rainfusion: bool = False
+) -> None:
     if device != "npu":
         return
     target_platform = get_ascend_platform()
@@ -87,6 +89,8 @@ def _maybe_compile_tilelang_kernels(device: str, jobs: int | str | None = None) 
     ]
     if jobs is not None:
         cmd.extend(["--jobs", str(jobs)])
+    if enable_h3_rainfusion:
+        cmd.append("--enable-h3-rainfusion")
     logger.info("compiling TileLang kernels via source-tree launcher")
     subprocess.check_call(cmd, cwd=base_dir, env=env)
 
@@ -418,10 +422,23 @@ class ExtBuild(build_ext):
         if self.device != "maca":
             cmake_args += ["-DUSE_CCACHE=ON"]
 
+        cmake_overrides = [item for item in os.environ.get("CMAKE_ARGS", "").split(" ") if item]
         if self.device == "npu":
-            cmake_args += ["-DUSE_NPU=ON"]
+            cmake_args += ["-DUSE_NPU=ON", "-DXLLM_ENABLE_H3_RAINFUSION=OFF"]
             set_npu_envs()
-            _maybe_compile_tilelang_kernels(self.device, self.tilelang_jobs)
+            rainfusion_setting = "OFF"
+            for argument in cmake_overrides:
+                name, separator, value = argument.partition("=")
+                if separator and name.partition(":")[0] in {
+                    "-DXLLM_ENABLE_H3_RAINFUSION",
+                    "XLLM_ENABLE_H3_RAINFUSION",
+                }:
+                    rainfusion_setting = value.upper()
+            _maybe_compile_tilelang_kernels(
+                self.device,
+                self.tilelang_jobs,
+                enable_h3_rainfusion=rainfusion_setting in {"1", "ON", "YES", "TRUE", "Y"},
+            )
         elif self.device == "mlu":
             cmake_args += ["-DUSE_MLU=ON"]
             set_mlu_envs()
@@ -505,8 +522,7 @@ class ExtBuild(build_ext):
 
         # Adding CMake arguments set as environment variable
         # (needed e.g. to build for ARM OSx on conda-forge)
-        if "CMAKE_ARGS" in os.environ:
-            cmake_args += [item for item in os.environ["CMAKE_ARGS"].split(" ") if item]
+        cmake_args += cmake_overrides
 
         # check if torch binary is built with cxx11 abi
         if get_cxx_abi():

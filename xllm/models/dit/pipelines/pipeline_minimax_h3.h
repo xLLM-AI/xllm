@@ -22,10 +22,12 @@ limitations under the License.
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -96,6 +98,37 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         << "MiniMax-H3 dit_h3_task_type must be fl2va or ref2va";
     const ModelArgs& transformer_args = context.get_model_args("transformer");
     const ModelArgs& vae_args = context.get_model_args("vae");
+    const DiTConfig& config = DiTConfig::get_instance();
+    const auto rainfusion_policy =
+        resolve_h3_rainfusion_policy(config.dit_h3_rainfusion_enabled(),
+                                     std::getenv(kH3RainfusionPolicyEnv));
+    if (rainfusion_policy.enabled()) {
+#if defined(USE_NPU)
+      const auto& parallel = context.get_parallel_args();
+      const char* soc = aclrtGetSocName();
+      TORCH_CHECK(
+          options_.device().is_privateuseone() && soc != nullptr &&
+              std::string_view(soc).starts_with("Ascend910_93") &&
+              task_type_ == "ref2va" && parallel.world_size() == 16 &&
+              parallel.tp_size() == 2 && parallel.sp_size() == 8 &&
+              parallel.dp_size() == 1 && parallel.cfg_size() == 1 &&
+              parallel.process_group_ != nullptr &&
+              parallel.process_group_->world_size() == 16 &&
+              parallel.process_group_->device() == options_.device() &&
+              transformer_args.n_heads() == 56 &&
+              transformer_args.head_dim() == 128 &&
+              transformer_args.num_layers() == 50 &&
+              context.get_quant_args("transformer").quant_method().empty() &&
+              !LoadConfig::get_instance().enable_rolling_load() &&
+              !config.dit_laser_attention_enabled(),
+          "MiniMax-H3 RainFusion requires native A3 TP2 SP8 resident BF16 "
+          "Ref2VA and the standard dense attention for non-sparse blocks");
+      rainfusion_ = std::make_unique<minimax_h3::H3RainfusionResources>(
+          parallel.process_group_, options_.device(), rainfusion_policy);
+#else
+      TORCH_CHECK(false, "MiniMax-H3 RainFusion requires the A3 NPU backend");
+#endif
+    }
     const int32_t vae_size = context.get_parallel_args().vae_size();
     CHECK_GT(vae_size, 0);
     CHECK(vae_size == 1 || vae_group_ != nullptr)
@@ -332,6 +365,20 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         {.infer_steps = scheduler_.timesteps().numel(), .single_stream = true});
     auto request_cache = transformer_->make_request_cache(
         layout.sequence_length, layout.audio_start, layout.video_start);
+    minimax_h3::H3RainfusionRequest* rf_request = nullptr;
+#if defined(USE_NPU)
+    auto rainfusion = rainfusion_ != nullptr
+                          ? rainfusion_->prepare(layout.sequence_length,
+                                                 layout.video_start,
+                                                 latent_frames,
+                                                 latent_height / patch_h_,
+                                                 latent_width / patch_w_,
+                                                 scheduler_.timesteps().numel())
+                          : std::nullopt;
+    if (rainfusion) {
+      rf_request = &*rainfusion;
+    }
+#endif
     std::function<void(int32_t)> before_layer_cb;
     std::function<void(int32_t)> after_layer_cb;
 #if defined(USE_NPU)
@@ -371,7 +418,8 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                                 before_layer_cb,
                                 after_layer_cb,
                                 /*step_idx=*/step + 1,
-                                request_cache ? &*request_cache : nullptr);
+                                request_cache ? &*request_cache : nullptr,
+                                rf_request);
       video_rows = step_generated_rows(video_rows,
                                        prediction.sample,
                                        layout.num_condition_video_rows,
@@ -1384,6 +1432,7 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   MiniMaxH3Scheduler audio_scheduler_{/*shift=*/3.0};
 #if defined(USE_NPU)
   dit::DitRollingLoadManager rolling_transformer_;
+  std::unique_ptr<minimax_h3::H3RainfusionResources> rainfusion_;
 #endif
 };
 TORCH_MODULE(MiniMaxH3Pipeline);

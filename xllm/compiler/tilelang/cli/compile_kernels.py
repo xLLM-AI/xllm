@@ -46,11 +46,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Maximum parallel workers for compiling TileLang variants, e.g. --jobs 16.",
     )
+    parser.add_argument(
+        "--enable-h3-rainfusion",
+        action="store_true",
+        help="Compile MiniMax-H3 RainFusion kernels for Ascend A3.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    if args.enable_h3_rainfusion and (args.target, args.device) != ("ascend", "a3"):
+        raise ValueError("--enable-h3-rainfusion requires --target ascend --device a3")
     output_root = Path(args.output_root).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -68,6 +75,7 @@ def main(argv: list[str] | None = None) -> None:
             force=args.force,
             device=args.device,
             jobs=args.jobs,
+            enable_h3_rainfusion=args.enable_h3_rainfusion,
         )
     elif args.target == "cuda":
         from ..targets.cuda.build import build_kernels

@@ -281,6 +281,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_debug_print` | `bool` | `false` | 是否打印 DiT 模型 debug 信息。 |
 | `dit_generation_image_area_max` | `int64` | `0` | 图像生成请求允许的最大图像面积（宽 * 高）；`0` 表示不限制。 |
 | `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 任务类型：`fl2va` 或 `ref2va`。 |
+| `dit_h3_rainfusion_enabled` | `bool` | `false` | 在 Ascend A3 TP2×SP8 上为原生 MiniMax-H3 Ref2VA 启用 BF16 RainFusion，构建时需开启 `XLLM_ENABLE_H3_RAINFUSION=ON`。用 `XLLM_H3_RAINFUSION_POLICY` 选择 `sparse-middle-steps`（默认）或 `sparse-middle-layers`。不符合稀疏形状或步数条件的原生请求走 dense。 |
 | `dit_enable_vae_tiling` | `bool` | `false` | 是否启用 VAE tiling，目前仅支持 `qwen-image-edit-plus`。 |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE 用于计算维度的 image size。 |
 | `dit_sparse_attention_enabled` | `bool` | `false` | 是否为 WAN 启用 block-wise sparse attention / RainFusion。 |

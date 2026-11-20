@@ -45,6 +45,7 @@ limitations under the License.
 #include "models/dit/utils/dit_block_weight_manager.h"
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #endif
+#include "models/dit/utils/minimax_h3_rainfusion.h"
 #include "models/dit/utils/timestep_embedding.h"
 #include "models/dit/utils/util.h"
 #include "models/model_registry.h"
@@ -328,7 +329,8 @@ class H3AttentionImpl final : public torch::nn::Module,
 
   torch::Tensor forward(const torch::Tensor& hidden_states,
                         const torch::Tensor& cos = torch::Tensor(),
-                        const torch::Tensor& sin = torch::Tensor()) {
+                        const torch::Tensor& sin = torch::Tensor(),
+                        H3RainfusionRequest* rainfusion = nullptr) {
     const bool use_communication_overlap =
         DiTConfig::get_instance().dit_sp_communication_overlap();
     const int64_t batch_size = hidden_states.size(0);
@@ -384,8 +386,10 @@ class H3AttentionImpl final : public torch::nn::Module,
             ? unpad_tensor(q, kPackedSequenceTensorName, /*dim=*/1).size(1)
             : sequence_length;
     torch::Tensor out;
-    if (DiTConfig::get_instance().dit_laser_attention_enabled() &&
-        live_sequence_length >= 2048 && dim_head_ <= 128) {
+    if (rainfusion != nullptr) {
+      out = rainfusion->attention(q, k, v, live_sequence_length);
+    } else if (DiTConfig::get_instance().dit_laser_attention_enabled() &&
+               live_sequence_length >= 2048 && dim_head_ <= 128) {
       // Exclude SP padding before Laser adds its own masked alignment. Keep
       // batches independent and restore only the padding needed by all-to-all.
       out = kernel::npu::laser_attention(
@@ -681,7 +685,8 @@ class H3TransformerBlockImpl final : public torch::nn::Module {
                         const torch::Tensor& temb,
                         const torch::Tensor& adaln_indices,
                         const torch::Tensor& cos,
-                        const torch::Tensor& sin) {
+                        const torch::Tensor& sin,
+                        H3RainfusionRequest* rainfusion) {
     torch::Tensor modulation =
         adaln_->forward(temb).index_select(0, adaln_indices).unsqueeze(0);
     auto chunks = modulation.chunk(6, -1);
@@ -695,7 +700,7 @@ class H3TransformerBlockImpl final : public torch::nn::Module {
     torch::Tensor norm_h = norm1_->forward(hidden_states);
     norm_h = norm_h * (1.0 + scale_msa) + shift_msa;
     torch::Tensor h =
-        hidden_states + gate_msa * attn_->forward(norm_h, cos, sin);
+        hidden_states + gate_msa * attn_->forward(norm_h, cos, sin, rainfusion);
     norm_h = norm2_->forward(h);
     norm_h = norm_h * (1.0 + scale_mlp) + shift_mlp;
     h = h + gate_mlp * ff_->forward(norm_h);
@@ -1131,7 +1136,8 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
       std::function<void(int32_t)> before_layer_cb = nullptr,
       std::function<void(int32_t)> after_layer_cb = nullptr,
       int64_t step_idx = 1,
-      MiniMaxH3RequestCache* request_cache = nullptr) {
+      MiniMaxH3RequestCache* request_cache = nullptr,
+      minimax_h3::H3RainfusionRequest* rainfusion = nullptr) {
     const torch::Tensor& text_embeds = conditioning.text_embeds;
     const int64_t batch = text_embeds.size(0);
     const int64_t sequence_length = position_ids.size(0);
@@ -1197,22 +1203,38 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
                        &before_layer_cb,
                        &after_layer_cb,
                        request_cache,
+                       rainfusion,
                        step_idx](torch::Tensor local_packed,
                                  const torch::Tensor& local_adaln_indices,
                                  const torch::Tensor& local_timestep_indices) {
       const torch::Tensor original_hidden_states = local_packed;
+#if defined(USE_NPU)
+      const auto sparse_before =
+          rainfusion != nullptr
+              ? rainfusion->launches
+              : minimax_h3::rainfusion::H3RainfusionLaunchCounters{};
+#endif
       const auto run_block = [&](int64_t index, const torch::Tensor& hidden) {
         const int32_t block_index = static_cast<int32_t>(index);
         if (before_layer_cb) {
           before_layer_cb(block_index);
         }
+        minimax_h3::H3RainfusionRequest* active = nullptr;
+#if defined(USE_NPU)
+        if (rainfusion != nullptr &&
+            rainfusion->policy.includes_step(step_idx - 1) &&
+            rainfusion->policy.includes_layer(index)) {
+          active = rainfusion;
+        }
+#endif
         torch::Tensor output =
             blocks_[index]->as<minimax_h3::H3TransformerBlock>()->forward(
                 hidden,
                 temb,
                 local_adaln_indices,
                 conditioning.rotary.first,
-                conditioning.rotary.second);
+                conditioning.rotary.second,
+                active);
         if (after_layer_cb) {
           after_layer_cb(block_index);
         }
@@ -1263,6 +1285,20 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
           local_packed = run_block(index, local_packed);
         }
       }
+#if defined(USE_NPU)
+      if (rainfusion != nullptr) {
+        const auto& launches = rainfusion->launches;
+        const int64_t selector_launches =
+            launches.selector_launches - sparse_before.selector_launches;
+        const int64_t attention_launches =
+            launches.attention_launches - sparse_before.attention_launches;
+        CHECK_EQ(selector_launches, attention_launches);
+        VLOG(1) << "MiniMax-H3 RainFusion rank=" << rainfusion->rank
+                << " step=" << step_idx - 1
+                << " selector_launches=" << selector_launches
+                << " attention_launches=" << attention_launches;
+      }
+#endif
       // Output normalization depends on the current timestep and must run
       // even when cached block activations replace the transformer body.
       return norm_out_->forward(local_packed, temb, local_timestep_indices);
