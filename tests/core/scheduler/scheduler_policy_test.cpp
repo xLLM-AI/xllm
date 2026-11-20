@@ -16,6 +16,7 @@ limitations under the License.
 #include "scheduler/scheduler_policy.h"
 
 #include <absl/time/clock.h>
+#include <absl/time/time.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -446,11 +447,21 @@ class RestorePriorityBlockManagerPool final : public BlockManagerPool {
 class TestUnifiedPolicy final : public UnifiedPolicy {
  public:
   using SchedulerPolicy::allocate_for_prefill;
+  using SchedulerPolicy::compute_prefill_tokens;
   using UnifiedPolicy::UnifiedPolicy;
 
   void allocate_shared_blocks_for_test(Sequence* sequence,
                                        SchedulerState& state) {
     allocate_shared_blocks_for(sequence, state);
+  }
+};
+
+class TimedRequest final : public Request {
+ public:
+  using Request::Request;
+
+  void set_age_ms(int32_t age_ms) {
+    created_time_ = absl::Now() - absl::Milliseconds(age_ms);
   }
 };
 
@@ -676,6 +687,163 @@ TEST(SchedulerBatchModeTest, DisaggregatedPrefillUsesExclusiveBatches) {
   EXPECT_TRUE(create_batch_mode(options).enable_mix_batch);
 }
 
+TEST(SchedulerPolicyTest, PrioritySettingsOverrideConflictingGlobals) {
+  ScopedConfigValue<double> aggressive_guard(
+      SchedulerConfig::get_instance().aggressive_coeff(), 0.0);
+  ScopedConfigValue<bool> starvation_guard(
+      SchedulerConfig::get_instance().enable_starve_prevent(), false);
+  ScopedConfigValue<double> threshold_guard(
+      SchedulerConfig::get_instance().starve_threshold(), 10.0);
+  for (const bool mix_batch : {false, true}) {
+    for (const auto& [aggressive_coeff,
+                      prevent_starvation,
+                      starve_threshold,
+                      age_ms,
+                      expected_urgency,
+                      expected_starved] :
+         {std::tuple{0.0, false, 1.0, 0, Urgency::NORMAL, false},
+          std::tuple{1000000.0, false, 1.0, 0, Urgency::URGENT, false},
+          std::tuple{0.0, true, 1.0, 30000, Urgency::URGENT, true},
+          std::tuple{0.0, true, 10.0, 30000, Urgency::URGENT, false},
+          std::tuple{0.0, false, 1.0, 30000, Urgency::URGENT, false}}) {
+      SCOPED_TRACE(std::make_tuple(
+          mix_batch, aggressive_coeff, prevent_starvation, starve_threshold));
+      SchedulerOptions options =
+          create_scheduler_options(8, 1, 0, 8, 1, "multi_slo_and_prio", false);
+      options.enable_mix_batch(mix_batch)
+          .enable_schedule_overlap(false)
+          .disable_log_stats(true)
+          .aggressive_coeff(aggressive_coeff)
+          .enable_starve_prevent(prevent_starvation)
+          .starve_threshold(starve_threshold);
+      FakeEngine engine(/*num_blocks=*/16, /*block_size=*/4);
+      TestableContinuousScheduler scheduler(&engine, options);
+      scheduler.get_profile_manager()->train_prefill_time_predictor(
+          std::vector<std::pair<int32_t, double>>{
+              {1, 2.0}, {2, 5.0}, {3, 10.0}});
+      auto template_request =
+          generate_request({8}, {1}, std::nullopt, std::nullopt, 64).front();
+      RequestState state = template_request->state().clone();
+      state.scheduler_param.ttft_slo_ms = 10000;
+      state.scheduler_param.tpot_slo_ms = 10000;
+      auto timed_request =
+          std::make_shared<TimedRequest>("1", "1", "1", std::move(state), "1");
+      timed_request->set_age_ms(age_ms);
+      std::shared_ptr<Request> request = timed_request;
+      ASSERT_TRUE(scheduler.add_request(request));
+
+      scheduler.prepare_batch_test();
+
+      EXPECT_EQ(request->urgency(), expected_urgency);
+      EXPECT_EQ(request->is_starved(), expected_starved);
+      engine.block_manager_pool()->deallocate(request.get());
+    }
+  }
+}
+
+TEST(SchedulerPolicyTest, PrefillPlanningUsesExplicitSplitAndMatchFrequency) {
+  ScopedConfigValue<int32_t> split_guard(
+      ParallelConfig::get_instance().kv_split_size(), 1);
+  ScopedConfigValue<int32_t> frequency_guard(
+      SchedulerConfig::get_instance().chunked_match_frequency(), 1);
+  FakeEngine engine(/*num_blocks=*/64,
+                    /*block_size=*/16,
+                    /*enable_prefix_cache=*/true);
+  BlockManagerPool* pool = engine.block_manager_pool();
+  auto requests =
+      generate_request({1024, 1024}, {1, 1}, std::nullopt, std::nullopt, 2048);
+  Sequence* sequence = requests[0]->sequences().front().get();
+  Sequence* cached_sequence = requests[1]->sequences().front().get();
+  ASSERT_TRUE(pool->allocate(sequence, 64));
+  sequence->kv_state().set_kv_cache_tokens_num(64);
+  sequence->kv_state().set_prefix_cache_matched();
+  ASSERT_TRUE(pool->allocate(cached_sequence, 128));
+  cached_sequence->kv_state().set_kv_cache_tokens_num(128);
+  pool->publish_prefix(cached_sequence);
+  pool->deallocate(cached_sequence);
+
+  SchedulerOptions options = create_scheduler_options(256, 1, 0, 64, 1);
+  options.kv_split_size(2).chunked_match_frequency(16);
+  BatchMode mode{
+      .enable_mix_batch = false,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "fcfs",
+  };
+  TestUnifiedPolicy policy(mode, options);
+  SchedulerOptions sparse_options = options;
+  sparse_options.kv_split_size(1).chunked_match_frequency(1);
+  TestUnifiedPolicy sparse_policy(mode, sparse_options);
+  DequeQueue prefill_queue;
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  std::list<std::shared_ptr<Request>> unified_queue;
+  std::deque<DecodeRestoreEntry> decode_restore_waiting;
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .decode_restore_waiting = decode_restore_waiting,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = pool,
+      .profile_manager = nullptr,
+      .output_dispatcher = nullptr,
+      .model_args = engine.model_args(),
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = true,
+  };
+
+  EXPECT_EQ(policy.compute_prefill_tokens(sequence, 63, state), 48u);
+  EXPECT_EQ(sparse_policy.compute_prefill_tokens(sequence, 63, state), 63u);
+  sparse_policy.allocate_shared_blocks_for_test(sequence, state);
+  EXPECT_EQ(sequence->kv_cache_tokens_num(), 64u);
+  policy.allocate_shared_blocks_for_test(sequence, state);
+  EXPECT_EQ(sequence->kv_cache_tokens_num(), 128u);
+  pool->deallocate(sequence);
+}
+
+TEST(SchedulerPolicyTest, AdmissionThresholdOverridesConflictingGlobal) {
+  ScopedConfigValue<bool> prefix_guard(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> threshold_guard(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      0.0);
+  for (const bool mix_batch : {false, true}) {
+    for (const double threshold : {0.5, 1.0}) {
+      SCOPED_TRACE(std::make_pair(mix_batch, threshold));
+      SchedulerOptions options = create_scheduler_options(24, 2, 0, 16, 1);
+      options.enable_mix_batch(mix_batch)
+          .enable_schedule_overlap(false)
+          .disable_log_stats(true)
+          .prefill_scheduling_memory_usage_threshold(threshold);
+      FakeEngine engine(/*num_blocks=*/8, /*block_size=*/4);
+      TestableContinuousScheduler scheduler(&engine, options);
+      auto requests =
+          generate_request({16, 8}, {1, 1}, std::nullopt, std::nullopt, 64);
+      for (auto& request : requests) {
+        ASSERT_TRUE(scheduler.add_request(request));
+      }
+
+      BatchGroup batches = scheduler.prepare_batch_test();
+
+      ASSERT_EQ(batches.size(), 1u);
+      EXPECT_EQ(batches.front().size(), threshold == 0.5 ? 1u : 2u);
+      for (const auto& request : requests) {
+        engine.block_manager_pool()->deallocate(request.get());
+      }
+    }
+  }
+}
+
 // TEST-1:
 // Three independent prefill requests, according to the configs,
 // verify how many tokens are processed in one scheduling.
@@ -700,6 +868,7 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
     auto scheduler =
         std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
     EXPECT_TRUE(scheduler != nullptr);
+    EXPECT_EQ(scheduler->get_instance_info().kv_split_size, kv_split_size[idx]);
 
     // create requests
     auto requests = generate_request(
@@ -1365,8 +1534,6 @@ TEST(SchedulerPolicyTest, UnifiedReclaimsMutuallyBlockedChunksWhenIdle) {
 }
 
 TEST(SchedulerPolicyTest, DecodeRestoreRetrySizesChunkAfterHostMatch) {
-  ScopedConfigValue<int32_t> match_frequency(
-      SchedulerConfig::get_instance().chunked_match_frequency(), 2);
   ScopedConfigValue<bool> in_batch_cache(
       KVCacheConfig::get_instance().enable_in_batch_prefix_cache(), false);
   constexpr size_t kHbmTokens = 8192;
@@ -1378,6 +1545,7 @@ TEST(SchedulerPolicyTest, DecodeRestoreRetrySizesChunkAfterHostMatch) {
       /*num_speculative_tokens=*/0,
       /*max_tokens_per_chunk_for_prefill=*/kChunkTokens,
       /*dp_size=*/1);
+  options.chunked_match_frequency(2);
   BatchMode mode{
       .enable_mix_batch = true,
       .enable_chunked_prefill = true,
@@ -3217,10 +3385,6 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsDecodeBeyondArena) {
 TEST(SchedulerPolicyTest, IdleChunkContinuationExceedsUtilizationThreshold) {
   ScopedConfigValue<bool> prefix_cache_guard(
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
-  ScopedConfigValue<double> utilization_guard(
-      SchedulerConfig::get_instance()
-          .prefill_scheduling_memory_usage_threshold(),
-      0.5);
   for (bool enable_mix_batch : {false, true}) {
     SCOPED_TRACE(enable_mix_batch);
     SchedulerOptions options = create_scheduler_options(
@@ -3229,7 +3393,8 @@ TEST(SchedulerPolicyTest, IdleChunkContinuationExceedsUtilizationThreshold) {
         /*num_speculative_tokens=*/0,
         /*max_tokens_per_chunk_for_prefill=*/20,
         /*dp_size=*/1);
-    options.enable_mix_batch(enable_mix_batch);
+    options.enable_mix_batch(enable_mix_batch)
+        .prefill_scheduling_memory_usage_threshold(0.5);
     options.enable_chunked_prefill(true)
         .enable_schedule_overlap(false)
         .disable_log_stats(true);

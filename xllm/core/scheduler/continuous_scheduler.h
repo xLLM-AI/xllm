@@ -165,11 +165,10 @@ class ContinuousSchedulerBase : public Scheduler {
 
   const Options options_;
 
-  // BatchMode resolved from options/global config (subsumes old scheduler
-  // hierarchy selection).
+  // BatchMode resolved from scheduler options.
   BatchMode batch_mode_;
 
-  // Process-wide scheduler configuration, resolved once at construction.
+  // Fair prefill budgeting still uses process-wide configuration.
   const SchedulerConfig& scheduler_config_;
 
   // Each scheduler owns a factory configured for its DP topology.

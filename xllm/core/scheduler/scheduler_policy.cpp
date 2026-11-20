@@ -26,7 +26,6 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/kv_cache_store_config.h"
-#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/scheduler/request_output_dispatcher.h"
@@ -409,8 +408,7 @@ SchedulerPolicy::schedule_one_prefill_request(
   if (!options_.enable_disagg_pd() &&
       (!state.running_sequences.empty() || !state.decode_queue.empty()) &&
       state.kv_cache_manager->kv_cache_utilization() >=
-          SchedulerConfig::get_instance()
-              .prefill_scheduling_memory_usage_threshold()) {
+          options_.prefill_scheduling_memory_usage_threshold()) {
     return PrefillScheduleResult::BLOCKS_EXHAUSTED;
   }
 
@@ -599,8 +597,7 @@ size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
   const size_t remaining_in_seq = seq->num_tokens() > kv_cache_tokens_num
                                       ? seq->num_tokens() - kv_cache_tokens_num
                                       : 0;
-  const int32_t kv_split_for_align =
-      ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
+  const int32_t kv_split_for_align = options_.kv_split_size();
   num_tokens = maybe_align_cp_chunk_tokens(num_tokens,
                                            kv_split_for_align,
                                            state.kv_cache_manager->block_size(),
@@ -676,16 +673,13 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
         std::max(options_.max_tokens_per_chunk_for_prefill(), 64);
     size_t total_chunked_size =
         (seq->num_tokens() + max_tokens_per_chunk - 1) / max_tokens_per_chunk;
-    if (total_chunked_size <
-        ::xllm::SchedulerConfig::get_instance().chunked_match_frequency()) {
+    if (total_chunked_size < options_.chunked_match_frequency()) {
       state.kv_cache_manager->allocate_shared(seq);
       return;
     }
     size_t prefix_cache_interval =
-        (total_chunked_size +
-         ::xllm::SchedulerConfig::get_instance().chunked_match_frequency() -
-         1) /
-        ::xllm::SchedulerConfig::get_instance().chunked_match_frequency();
+        (total_chunked_size + options_.chunked_match_frequency() - 1) /
+        options_.chunked_match_frequency();
     size_t cur_chunked_index =
         seq->kv_state().kv_cache_tokens_num() / max_tokens_per_chunk;
     if (cur_chunked_index % prefix_cache_interval == 0) {

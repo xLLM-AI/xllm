@@ -1760,10 +1760,6 @@ TEST(BlockManagerPoolTest, AllocateFailureRollsBackSharedPrefixBlocks) {
 
 TEST(ContinuousSchedulerTest,
      BlockExhaustionDefersRequestAfterCurrentBatchHasWork) {
-  ScopedConfigValue<double> memory_threshold(
-      SchedulerConfig::get_instance()
-          .prefill_scheduling_memory_usage_threshold(),
-      2.0);
   auto engine = std::make_unique<FakeEngine>(
       /*num_blocks=*/4, /*block_size=*/4);
   SchedulerOptions options =
@@ -1772,6 +1768,7 @@ TEST(ContinuousSchedulerTest,
                                /*num_speculative_tokens=*/0,
                                /*max_tokens_per_chunk_for_prefill=*/8,
                                /*dp_size=*/1);
+  options.prefill_scheduling_memory_usage_threshold(2.0);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), options);
 
@@ -2205,12 +2202,6 @@ TEST(ContinuousSchedulerTest,
 
   ScopedConfigValue<bool> enable_prefix_cache(
       KVCacheConfig::get_instance().enable_prefix_cache(), true);
-  // Keep the prefill memory-usage guard from blocking the single sequence.
-  ScopedConfigValue<double> memory_threshold(
-      SchedulerConfig::get_instance()
-          .prefill_scheduling_memory_usage_threshold(),
-      2.0);
-
   auto engine = std::make_unique<FakeEngine>(
       kNumBlocks, kBlockSize, /*enable_prefix_cache=*/true);
   BlockManagerPool* block_manager_pool = engine->block_manager_pool();
@@ -2219,6 +2210,7 @@ TEST(ContinuousSchedulerTest,
   // gives enable_mix_batch=false + enable_chunked_prefill=true.
   SchedulerOptions opt = create_scheduler_options(
       kMaxTokensPerBatch, 256, /*num_speculative_tokens=*/5, 1024, 1);
+  opt.prefill_scheduling_memory_usage_threshold(2.0);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   ASSERT_TRUE(scheduler != nullptr);
