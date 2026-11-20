@@ -56,7 +56,8 @@ class OxygenModelImpl : public QWen3ModelImpl {
     if (!input_params_new.attn_metadata) {
       input_params_new.attn_metadata =
           std::make_shared<layer::AttentionMetadata>(
-              get_attention_metadata(input_params_new));
+              layer::AttentionMetadataBuilder::build(input_params_new,
+                                                     model_args_.enable_mla()));
     }
 
     auto& attn_metadata = *(input_params_new.attn_metadata);
@@ -70,12 +71,7 @@ class OxygenModelImpl : public QWen3ModelImpl {
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
       auto& layer = layers_[i];
-      h = layer->forward(h,
-                         residual,
-                         positions,
-                         attn_metadata,
-                         kv_caches[i],
-                         input_params_new);
+      h = layer->forward(h, residual, positions, attn_metadata, kv_caches[i]);
       if (!input_params_new.record_layer(static_cast<uint32_t>(i),
                                          h.device())) {
         return ModelOutput();

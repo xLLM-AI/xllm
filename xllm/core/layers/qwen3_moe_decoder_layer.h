@@ -31,10 +31,10 @@ limitations under the License.
 #else
 #include "layers/common/fused_moe.h"
 #endif
-#include "common/qwen2_attention.h"
 #include "common/rms_norm.h"
 #include "core/framework/model/moe_execution_input.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/layers/common/qwen3_attention.h"
 #include "framework/model/model_args.h"
 #include "framework/model_context/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -75,7 +75,7 @@ class Qwen3MoeDecoderLayerImpl : public torch::nn::Module {
  private:
   torch::Tensor run_moe(torch::Tensor x, const MoeExecutionInput& input_params);
 
-  Qwen2Attention attention_{nullptr};
+  Qwen3Attention attention_{nullptr};
   DenseMLP mlp_{nullptr};
   FusedMoE moe_mlp_{nullptr};
   RMSNorm input_norm_{nullptr};

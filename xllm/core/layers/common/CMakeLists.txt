@@ -6,6 +6,7 @@ cc_library(
   HDRS
     oxygen_vision_attention.h
     qwen2_attention.h
+    qwen3_attention.h
     qwen2_vision_attention.h
     qwen3_next_rms_norm.h
     deepseek_v4_rotary_embedding.h
@@ -37,6 +38,7 @@ cc_library(
   SRCS
     oxygen_vision_attention.cpp
     qwen2_attention.cpp
+    qwen3_attention.cpp
     qwen2_vision_attention.cpp
     qwen3_next_rms_norm.cpp
     deepseek_v4_rotary_embedding.cpp

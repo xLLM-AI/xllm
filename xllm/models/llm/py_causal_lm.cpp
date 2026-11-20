@@ -383,7 +383,7 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   d["enable_attn_dp_weight_sharding"] = enable_attn_dp_weight_sharding;
   const bool requires_eager_execution =
       model_args_.model_type() == "DFlashDraftModel" ||
-      is_dflash2_draft_model_type(model_args_.model_type());
+      model_args_.model_type() == "DFlash2DraftModel";
   d["enable_graph"] = requires_eager_execution
                           ? false
                           : ExecutionConfig::get_instance().enable_graph();

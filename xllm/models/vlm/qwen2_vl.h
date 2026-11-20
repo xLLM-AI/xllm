@@ -509,6 +509,10 @@ REGISTER_MODEL_ARGS(qwen2_vl, [&] {
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 32768);
   LOAD_ARG_OR(max_window_layers, "max_window_layers", 28);
   LOAD_ARG_OR(model_type, "model_type", "qwen2_vl");
+  LOAD_ARG_OR(attention_bias,
+              (std::vector<std::string>{"text_config.attention_bias",
+                                        "attention_bias"}),
+              true);
   LOAD_ARG_OR(n_heads, "num_attention_heads", 28);
   LOAD_ARG_OR(n_layers, "num_hidden_layers", 28);
   LOAD_ARG_OR(n_kv_heads, "num_key_value_heads", 4);

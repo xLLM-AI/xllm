@@ -80,14 +80,8 @@ class MiMoMtpDecoderLayerImpl final : public torch::nn::Module {
     auto hidden_states = input_proj_(concat_emb);
 
     // Pass through mtp block
-    hidden_states = mtp_block_->forward(hidden_states,
-                                        residual,
-                                        positions,
-                                        attn_metadata,
-                                        kv_cache,
-                                        input_params);
-
-    return hidden_states;
+    return mtp_block_->forward(
+        hidden_states, residual, positions, attn_metadata, kv_cache);
   }
 
   void load_state_dict(const StateDict& state_dict) {

@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <string>
 
-#include "core/framework/model/model_params_view.h"
+#include "core/framework/model/moe_execution_input.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/layers/common/rms_norm.h"
 #include "core/layers/npu_torch/fused_moe.h"
@@ -35,7 +35,7 @@ class MiniMaxM2DecoderLayerImpl : public torch::nn::Module {
                         torch::Tensor& positions,
                         const layer::AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
-                        const ModelParamsView& input_params);
+                        const MoeExecutionInput& moe_input);
 
   void load_state_dict(const StateDict& state_dict);
 

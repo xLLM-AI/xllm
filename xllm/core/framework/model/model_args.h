@@ -31,12 +31,7 @@ limitations under the License.
 
 namespace xllm {
 
-inline constexpr std::string_view kDFlash2DraftModelType = "DFlash2DraftModel";
 inline constexpr std::string_view kDSparkGLM5DraftModelType = "glm5_dspark";
-
-inline constexpr bool is_dflash2_draft_model_type(std::string_view model_type) {
-  return model_type == kDFlash2DraftModelType;
-}
 
 class TokenEmbeddingArgs final {
  public:

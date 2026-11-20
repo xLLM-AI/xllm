@@ -237,7 +237,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   // DFlash2 defaults to eager in the model config. Enable its independent
   // full-block ACL runner when the worker requests graph execution.
   const bool independent_block_graph =
-      Platform::is_npu() && is_dflash2_draft_model_type(args_.model_type()) &&
+      Platform::is_npu() && args_.model_type() == "DFlash2DraftModel" &&
       options_.enable_graph() && options_.num_speculative_tokens() > 0;
   if (independent_block_graph) {
     executor_config["enable_graph"] = true;
