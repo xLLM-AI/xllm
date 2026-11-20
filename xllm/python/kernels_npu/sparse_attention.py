@@ -17,13 +17,13 @@
 from __future__ import annotations
 
 import torch
-from xllm_kernel.ops.attention.sparse_indexing import (
+from xllm_kernel.ops.attention.dsa.indexer import (
     quant_lightning_indexer as quant_lightning_indexer,
 )
-from xllm_kernel.ops.attention.sparse_indexing import (
+from xllm_kernel.ops.attention.dsa.indexer import (
     quant_lightning_indexer_metadata as quant_lightning_indexer_metadata,
 )
-from xllm_kernel.ops.attention.sparse_indexing import (
+from xllm_kernel.ops.attention.dsa.indexer import (
     scatter_nd_update as scatter_nd_update,
 )
 

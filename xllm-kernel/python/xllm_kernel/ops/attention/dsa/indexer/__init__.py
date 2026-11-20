@@ -17,7 +17,7 @@ OPERATIONS = tuple(
         OpContract(name, 1, mutates, False, name),
         (
             BackendModule(
-                module="xllm_kernel.ops.attention.sparse_indexing.ascendc",
+                module="xllm_kernel.ops.attention.dsa.indexer.ascendc",
                 platform=PlatformEnum.NPU,
                 requires=("torch_npu",),
                 implementations=(f"npu.ascendc.{name}",),

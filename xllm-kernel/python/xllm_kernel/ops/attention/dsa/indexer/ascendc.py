@@ -4,7 +4,7 @@
 import torch
 
 from xllm_kernel import _ascendc_opp  # noqa: F401
-from xllm_kernel.ops.attention.sparse_indexing import OPERATIONS
+from xllm_kernel.ops.attention.dsa.indexer import OPERATIONS
 from xllm_kernel.platform import PlatformEnum
 from xllm_kernel.registry import register_kernel
 
