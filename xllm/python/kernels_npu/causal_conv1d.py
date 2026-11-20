@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import torch
+from xllm_kernel.ops.attention.gdn import causal_conv1d_qkv_prefill as _packed_qkv_prefill
 
 
 def causal_conv1d_qkv_prefill(
@@ -37,17 +38,19 @@ def causal_conv1d_qkv_prefill(
         (q, k, v) with shapes [1, T, num_qk_heads, head_k_dim],
         [1, T, num_qk_heads, head_k_dim], [1, T, num_v_heads, head_v_dim].
     """
-    return torch.ops.xllm_ops.causal_conv1d_qkv_prefill(
+    if weight.size(0) > weight.size(1):
+        weight = weight.t().contiguous()
+    return _packed_qkv_prefill(
         value,
         weight,
         conv_state,
-        state_indices,
-        has_initial_state.to(torch.int64),
-        query_start_loc,
-        num_qk_heads,
-        num_v_heads,
-        head_k_dim,
-        head_v_dim,
+        query_start_loc=query_start_loc.reshape(-1).tolist(),
+        state_indices=state_indices.reshape(-1).tolist(),
+        has_initial_state=has_initial_state.to(dtype=torch.int64).reshape(-1).tolist(),
+        num_qk_heads=num_qk_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
     )
 
 

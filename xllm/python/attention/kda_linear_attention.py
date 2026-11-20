@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from xllm_kernel.ops import l2_norm
-from xllm_kernel.ops.attention.kda import causal_conv1d_update_v2
+from xllm_kernel.ops.attention.kda import causal_conv1d, causal_conv1d_update_v2
 
 from xllm.python.attention.backend import resolve_linear_state_io_indices
 from xllm.python.model_executor.forward_context import (
@@ -66,7 +66,7 @@ class KdaLinearAttentionMixin:
         inputs = value.transpose(1, 2).contiguous()
         if query_start_loc is not None:
             inputs = inputs.reshape(-1, inputs.shape[-1])
-        output = torch.ops.xllm_ops.causal_conv1d(
+        output = causal_conv1d(
             inputs,
             weight,
             state,

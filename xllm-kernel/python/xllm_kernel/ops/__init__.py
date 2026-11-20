@@ -4,11 +4,13 @@
 from xllm_kernel.ops.activation import silu_and_mul
 from xllm_kernel.ops.attention.fia import get_fused_attention
 from xllm_kernel.ops.attention.gdn import (
+    causal_conv1d_qkv_prefill,
+    chunk_gated_delta_rule,
     fused_qkvzba_split_reshape_cat,
     fused_recurrent_gated_delta_rule,
     fused_sigmoid_gating_delta_rule_update,
 )
-from xllm_kernel.ops.attention.kda import causal_conv1d_update_v2
+from xllm_kernel.ops.attention.kda import causal_conv1d, causal_conv1d_update_v2
 from xllm_kernel.ops.attention.mla import mla_preprocess_v2
 from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out, quant_matmul_out
 from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
@@ -31,7 +33,10 @@ from xllm_kernel.ops.normalization import (
 from xllm_kernel.ops.positional_encoding import inplace_partial_rotary_mul, partial_rotary_embedding
 
 __all__ = [
+    "causal_conv1d",
+    "causal_conv1d_qkv_prefill",
     "causal_conv1d_update_v2",
+    "chunk_gated_delta_rule",
     "dequant_swiglu_quant",
     "fused_add_gemma_rms_norm",
     "fused_add_rms_norm",

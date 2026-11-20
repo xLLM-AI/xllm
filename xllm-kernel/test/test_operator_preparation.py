@@ -49,6 +49,8 @@ from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out, quant_matmu
 catalog = {operation.contract.operation: operation for operation in load_operations()}
 for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     name = operation.contract.operation
+    if name in ("causal_conv1d", "causal_conv1d_qkv_prefill", "chunk_gated_delta_rule"):
+        continue
     assert catalog[name] is operation
     assert operation.implementations == ('npu.triton.' + name,)
     assert operation.prepared is None
@@ -68,6 +70,9 @@ for name, mutates, aliases in (
     ("moe_init_routing_v3", (), False),
     ("moe_grouped_matmul_swiglu_quant", (), False),
     ("dequant_swiglu_quant", (), False),
+    ("causal_conv1d", ("conv_state",), False),
+    ("causal_conv1d_qkv_prefill", ("conv_state",), False),
+    ("chunk_gated_delta_rule", (), False),
 ):
     operation = catalog[name]
     assert operation.implementations == ("npu.ascendc." + name,)

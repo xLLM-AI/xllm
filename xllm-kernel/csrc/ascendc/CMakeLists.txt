@@ -40,13 +40,36 @@ set(moe_hash_host "${CMAKE_CURRENT_SOURCE_DIR}/moe_gating_top_k_hash/op_host")
 set(moe_routing_host "${CMAKE_CURRENT_SOURCE_DIR}/moe_init_routing_v3/op_host")
 set(moe_gmm_host "${CMAKE_CURRENT_SOURCE_DIR}/moe_grouped_matmul_swiglu_quant/op_host")
 set(moe_dequant_host "${CMAKE_CURRENT_SOURCE_DIR}/dequant_swiglu_quant/op_host")
+set(conv_host "${CMAKE_CURRENT_SOURCE_DIR}/causal_conv1d/op_host")
+set(conv_qkv_host "${CMAKE_CURRENT_SOURCE_DIR}/causal_conv1d_qkv/op_host")
+set(chunk_gdn_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_chunk_gdn/op_host")
+set(recurrent_gdn_host "${CMAKE_CURRENT_SOURCE_DIR}/recurrent_gated_delta_rule/op_host")
+set(pto_include "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/pto-isa/include")
+if(NOT EXISTS "${pto_include}/pto/pto-inst.hpp")
+    message(FATAL_ERROR "MegaChunkGdn needs PTO headers. "
+        "In a Git checkout run git submodule update --init xllm-kernel/third_party/pto-isa.")
+endif()
 list(APPEND op_definitions
     "${moe_hash_host}/moe_gating_top_k_hash_def.cpp"
     "${moe_gmm_host}/moe_grouped_matmul_swiglu_quant_def.cpp"
     "${moe_dequant_host}/dequant_swiglu_quant_def.cpp"
+    "${conv_host}/causal_conv1d_def.cpp"
+    "${conv_qkv_host}/causal_conv1d_qkv_def.cpp"
+    "${chunk_gdn_host}/mega_chunk_gdn_def.cpp"
 )
 if("ascend910b" IN_LIST ASCEND_COMPUTE_UNIT OR "ascend910_93" IN_LIST ASCEND_COMPUTE_UNIT)
-    list(APPEND op_definitions "${moe_routing_host}/moe_init_routing_v3_def.cpp")
+    list(APPEND op_definitions
+        "${moe_routing_host}/moe_init_routing_v3_def.cpp"
+        "${recurrent_gdn_host}/recurrent_gated_delta_rule_def.cpp"
+    )
+    set(recurrent_gdn_api
+        "${recurrent_gdn_host}/op_api/aclnn_recurrent_gated_delta_rule.cpp"
+        "${recurrent_gdn_host}/op_api/recurrent_gated_delta_rule_l0.cpp"
+    )
+    set(recurrent_gdn_tiling
+        "${recurrent_gdn_host}/recurrent_gated_delta_rule_tiling.cpp"
+        "${recurrent_gdn_host}/recurrent_gated_delta_rule_proto.cpp"
+    )
     set(moe_routing_api
         "${moe_routing_host}/op_api/aclnn_moe_init_routing_v3.cpp"
         "${moe_routing_host}/op_api/moe_init_routing_v3_l0.cpp"
@@ -100,9 +123,18 @@ npu_op_library(cust_opapi ACLNN
     "${moe_gmm_host}/op_api/moe_grouped_matmul_swiglu_quant_l0.cpp"
     "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_dequant_swiglu_quant.cpp"
     "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_dequant_swiglu_quant_v2.cpp"
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_causal_conv1d.cpp"
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_causal_conv1d_qkv.cpp"
+    "${conv_qkv_host}/causal_conv1d_qkv_abi.cpp"
+    "${chunk_gdn_host}/op_api/aclnn_mega_chunk_gdn.cpp"
+    "${chunk_gdn_host}/op_api/mega_chunk_gdn_l0.cpp"
+    ${recurrent_gdn_api}
     ${a2_aclnn_sources}
 )
-target_include_directories(cust_opapi PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/include/aclnn")
+target_include_directories(cust_opapi PRIVATE
+    "${ASCEND_CANN_PACKAGE_PATH}/include/aclnn"
+    "${ASCEND_AUTOGEN_PATH}"
+)
 target_link_libraries(cust_opapi PRIVATE
     "${ASCEND_CANN_PACKAGE_PATH}/lib64/libopapi.so"
     "${ASCEND_CANN_PACKAGE_PATH}/lib64/libnnopbase.so"
@@ -136,6 +168,13 @@ npu_op_library(cust_optiling TILING
     "${moe_dequant_host}/dequant_swiglu_quant_tiling.cpp"
     "${moe_dequant_host}/dequant_swiglu_quant_tiling_base.cpp"
     "${moe_dequant_host}/dequant_swiglu_quant_tiling_arch35.cpp"
+    "${conv_host}/causal_conv1d_proto.cpp"
+    "${conv_host}/causal_conv1d_tiling.cpp"
+    "${conv_qkv_host}/causal_conv1d_qkv_proto.cpp"
+    "${conv_qkv_host}/causal_conv1d_qkv_tiling.cpp"
+    "${chunk_gdn_host}/mega_chunk_gdn_infershape.cpp"
+    "${chunk_gdn_host}/mega_chunk_gdn_tiling.cpp"
+    ${recurrent_gdn_tiling}
     ${a2_tiling_sources}
     ${generated_fallback}
 )
@@ -204,6 +243,26 @@ npu_op_kernel_options(ascendc_kernels XllmKernelMoeGatingTopKHash
     -mllvm -cce-aicore-hoist-movemask=false --op_relocatable_kernel_binary=true)
 npu_op_kernel_options(ascendc_kernels XllmKernelMoeGroupedMatmulSwigluQuant
     OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelCausalConv1d
+    KERNEL_DIR causal_conv1d/op_kernel KERNEL_FILE xllm_kernel_causal_conv1d.cpp)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelCausalConv1dQkv
+    KERNEL_DIR causal_conv1d_qkv/op_kernel KERNEL_FILE xllm_kernel_causal_conv1d_qkv.cpp)
+foreach(op_type XllmKernelCausalConv1d XllmKernelCausalConv1dQkv)
+    npu_op_kernel_options(ascendc_kernels ${op_type}
+        OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Werror "-I${CMAKE_CURRENT_SOURCE_DIR}")
+endforeach()
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelMegaChunkGdn
+    KERNEL_DIR mega_chunk_gdn/op_kernel KERNEL_FILE xllm_kernel_mega_chunk_gdn.cpp)
+npu_op_kernel_options(ascendc_kernels XllmKernelMegaChunkGdn
+    OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error
+    -DGDN_KERNEL_NAME=xllm_kernel_mega_chunk_gdn -DGDN_D=128 -DGDN_C=128
+    "-I${CMAKE_CURRENT_SOURCE_DIR}" "-I${pto_include}" "-I${ASCEND_CANN_PACKAGE_PATH}/include")
+if(recurrent_gdn_api)
+    npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelRecurrentGatedDeltaRule
+        KERNEL_DIR recurrent_gated_delta_rule/op_kernel KERNEL_FILE xllm_kernel_recurrent_gated_delta_rule.cpp)
+    npu_op_kernel_options(ascendc_kernels XllmKernelRecurrentGatedDeltaRule
+        OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Wno-error)
+endif()
 if(a2_aclnn_sources)
     npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelQuantMatmulNzDecode
         KERNEL_DIR quant_matmul_nz_decode/op_kernel KERNEL_FILE xllm_kernel_quant_matmul_nz_decode.cpp)

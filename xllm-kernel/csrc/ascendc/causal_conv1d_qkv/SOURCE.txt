@@ -1,0 +1,8 @@
+CausalConv1dQkv AscendC implementation
+
+Source: https://gitcode.com/xLLM-AI/xllm_ops
+Revision: 8bd2b014c38fec33ecf14dd33e05e8ad792ec5c8
+Directory: xllm_ops/causal_conv1d_qkv
+
+Packaged under a private CANN operator type.
+Imported sources retain their CANN license and copyright notices.

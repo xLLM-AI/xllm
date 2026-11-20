@@ -21,6 +21,7 @@ the existing Python composition for paths not migrated to MegaGdn yet.
 from __future__ import annotations
 
 import torch
+from xllm_kernel.ops.attention.gdn import chunk_gated_delta_rule as chunk_gated_delta_rule
 
 
 def mega_gdn_prefill(
@@ -205,45 +206,6 @@ def fused_gdn_gating(
         20.0,  # softplus_threshold
     )
     return g_out, beta_out
-
-
-def chunk_gated_delta_rule(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    initial_state: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run the chunked delta rule over a variable-length batch.
-
-    Args:
-        q: Query of shape ``[num_tokens, num_key_heads, key_head_dim]``.
-        k: Key with the shape of ``q``.
-        v: Value of shape ``[num_tokens, num_value_heads, value_head_dim]``.
-        g: Decay gate of shape ``[num_tokens, num_value_heads]``.
-        beta: Beta with the shape of ``g``.
-        initial_state: Recurrent state each sequence starts from.
-            Shape ``[batch, num_value_heads, value_dim, key_dim]``.
-        cu_seqlens: Cumulative sequence lengths.
-    Returns:
-        The output with the shape of ``v`` and the final recurrent state.
-    """
-    # npu_mega_chunk_gdn expects [B, T, H, D] layout with B=1 for packed input
-    # Cast g and beta to match C++ layer behavior (bf16 round-trip)
-    g_input = g.to(v.dtype)
-    beta_input = beta.to(v.dtype)
-    output, final_state = torch.ops.xllm_ops.chunk_gated_delta_rule(
-        q.unsqueeze(0),
-        k.unsqueeze(0),
-        v.unsqueeze(0),
-        g_input.unsqueeze(0),
-        beta_input.unsqueeze(0),
-        initial_state,
-        cu_seqlens,
-    )
-    return output.squeeze(0), final_state
 
 
 __all__ = [
