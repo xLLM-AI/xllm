@@ -111,6 +111,8 @@ struct Options {
   // default set as 1 for non-MoE model
   PROPERTY(int32_t, dp_size) = 1;
 
+  PROPERTY(bool, enable_dp_fair_token_budget) = true;
+
   // expert parallelism size, currently mainly used for MoE model
   // Default set as 1 for non-MoE model.
   PROPERTY(int32_t, ep_size) = 1;
@@ -160,7 +162,7 @@ struct Options {
   PROPERTY(int32_t, max_seqs_per_batch) = 256;
 
   // the max tokens per chunk for request in prefill stage.
-  PROPERTY(int32_t, max_tokens_per_chunk_for_prefill);
+  PROPERTY(int32_t, max_tokens_per_chunk_for_prefill) = -1;
 
   // for master service, current instance name(ID).
   PROPERTY(std::optional<std::string>, instance_name);

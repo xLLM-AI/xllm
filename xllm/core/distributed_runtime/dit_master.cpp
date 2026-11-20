@@ -62,6 +62,8 @@ DiTMaster::DiTMaster(const Options& options) : Master(options) {
       .ep_size(options_.ep_size())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
+      .max_tokens_per_chunk_for_prefill(
+          options_.max_tokens_per_chunk_for_prefill())
       .enable_offline_inference(options_.enable_offline_inference())
       .disable_log_stats(options_.disable_log_stats())
       .spawn_worker_path(options_.spawn_worker_path())

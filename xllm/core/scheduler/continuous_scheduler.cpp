@@ -28,13 +28,13 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "core/common/prefill_token_budget.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/request/priority_comparator.h"
@@ -65,7 +65,6 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
     std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
     : options_(options),
       batch_mode_(create_batch_mode(options)),
-      scheduler_config_(::xllm::SchedulerConfig::get_instance()),
       batch_factory_(options.dp_size()),
       resource_engine_(engine),
       distributed_worker_manager_(std::move(distributed_worker_manager)),
@@ -103,6 +102,10 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
 
   ProfileManager::Options profile_manager_options;
   profile_manager_options.dp_size(options.dp_size())
+      .enable_dp_fair_token_budget(options.enable_dp_fair_token_budget())
+      .enable_chunked_prefill(options.enable_chunked_prefill())
+      .max_tokens_per_chunk_for_prefill(
+          options.max_tokens_per_chunk_for_prefill())
       .decode_graph_warmup_config(options.decode_graph_warmup_config())
       .enable_schedule_overlap(options.enable_schedule_overlap())
       .enable_profile_step_time(options.enable_profile_step_time())
@@ -359,31 +362,18 @@ BatchGroup ContinuousSchedulerBase::prepare_batch() {
   budget.remaining_seq_budget = std::max(options_.max_seqs_per_batch(), 1);
   budget.latency_budget = options_.max_global_tpot_ms();
   budget.num_preempted_requests = 0;
-  if (scheduler_config_.enable_dp_fair_token_budget() &&
-      options_.dp_size() > 1 && options_.instance_role().has_value() &&
+  if (options_.enable_dp_fair_token_budget() && options_.dp_size() > 1 &&
+      options_.instance_role().has_value() &&
       options_.instance_role().value() == InstanceRole::PREFILL) {
-    // Fair per-group token budget: each DP group can receive at most
-    // max_tokens_per_batch / dp_size tokens per scheduling round, which also
-    // bounds the DSV4 SWA burst on any single rank to the per-group share.
-    // Anchor the cap to max_tokens_per_batch (not the profile token budget,
-    // which may exceed it) so it matches the KV cache estimation burst.
     const int64_t dp_size = options_.dp_size();
-    const int64_t max_batch_tokens = options_.max_tokens_per_batch();
-    int64_t per_group_cap = (max_batch_tokens + dp_size - 1) / dp_size;
-    if (scheduler_config_.enable_chunked_prefill()) {
-      // Floor the share at one prefill chunk so a single long sequence
-      // still advances at full chunk speed even when the budget is below
-      // dp_size * chunk.
-      per_group_cap = std::max(
-          per_group_cap,
-          std::min<int64_t>(options_.max_tokens_per_chunk_for_prefill(),
-                            max_batch_tokens));
-    } else {
-      // Non-chunked prefill computes a whole sequence in one round; a share
-      // below the sequence length could never accumulate, so fall back to
-      // the full budget (fair sharing requires chunked prefill).
-      per_group_cap = max_batch_tokens;
-    }
+    const PrefillTokenBudget prefill_budget(
+        options_.max_tokens_per_batch(),
+        options_.max_tokens_per_chunk_for_prefill(),
+        options_.enable_chunked_prefill());
+    int64_t per_group_cap =
+        prefill_budget.per_dp_group(dp_size,
+                                    options_.instance_role().value(),
+                                    options_.enable_dp_fair_token_budget());
     per_group_cap =
         std::min(std::max<int64_t>(1, per_group_cap),
                  static_cast<int64_t>(budget.remaining_token_budget));

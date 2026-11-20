@@ -2459,6 +2459,7 @@ TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
   options.num_blocks(64)
       .block_size(kQueryTokens)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(kQueryTokens)
       .linear_state_num_slots(64)
       .enable_shared_kv_cache(true)
       .shared_layout(std::make_shared<StaticKVLayout>(spec))
@@ -2882,6 +2883,7 @@ TEST(BatchTest, OverlapRawAcceptanceKeepsSingleLinearSlot) {
   options.num_blocks(2048)
       .block_size(2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(2048)
       .linear_state_num_slots(2)
       .num_speculative_tokens(3)
       .enable_prefix_cache(false);
@@ -3019,6 +3021,7 @@ TEST(BatchTest, OverlapDecodeReusesPrefillTailBeforeAndAfterResults) {
       options.num_blocks(4096)
           .block_size(2)
           .enable_linear_state(true)
+          .linear_state_chunk_stride(2048)
           .linear_state_num_slots(8)
           .num_speculative_tokens(3)
           .enable_prefix_cache(prefix_cache);
@@ -3084,6 +3087,7 @@ TEST(BatchTest, CancelledOverlapOutputDoesNotUpdateReleasedSequence) {
           .block_size(2)
           .enable_prefix_cache(false)
           .enable_linear_state(linear_state)
+          .linear_state_chunk_stride(4)
           .linear_state_num_slots(5);
       BlockManagerPool pool(options, 1);
       RequestSamplingParam sampling;

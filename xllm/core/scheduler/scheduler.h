@@ -67,7 +67,7 @@ struct SchedulerOptions {
   PROPERTY(double, prefill_scheduling_memory_usage_threshold) = 0.95;
 
   // the max tokens per chunk for request in prefill stage.
-  PROPERTY(int32_t, max_tokens_per_chunk_for_prefill);
+  PROPERTY(int32_t, max_tokens_per_chunk_for_prefill) = -1;
 
   PROPERTY(int32_t, chunked_match_frequency) = 2;
 
@@ -84,6 +84,8 @@ struct SchedulerOptions {
 
   // the number of speculative tokens per step
   PROPERTY(int32_t, dp_size) = 1;
+
+  PROPERTY(bool, enable_dp_fair_token_budget) = true;
 
   PROPERTY(int32_t, cp_size) = 1;
 

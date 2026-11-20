@@ -27,10 +27,10 @@ limitations under the License.
 
 #include "core/common/constants.h"
 #include "core/common/metrics.h"
+#include "core/common/prefill_token_budget.h"
 #include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_type.h"
@@ -327,22 +327,14 @@ int64_t dsv4_swa_block_count(const ModelArgs& model_args,
   int64_t publish_unit_blocks = 0;
   if (options.enable_dp_fair_token_budget && options.dp_size > 1 &&
       options.instance_role == InstanceRole::PREFILL) {
-    // The scheduler caps each DP group at max_tokens_per_batch / dp_size
-    // tokens per scheduling round, floored at one prefill chunk, so the
-    // prefill burst landing on any single rank is bounded by the same
-    // expression. Keep this identical to the scheduler-side cap or the ring
-    // under-reserves.
-    int64_t per_group_cap =
-        (burst_budget + options.dp_size - 1) / options.dp_size;
-    if (options.enable_chunked_prefill) {
-      per_group_cap =
-          std::max(per_group_cap,
-                   std::min<int64_t>(options.max_tokens_per_chunk_for_prefill,
-                                     burst_budget));
-    } else {
-      per_group_cap = burst_budget;
-    }
-    burst_budget = per_group_cap;
+    const PrefillTokenBudget prefill_budget(
+        burst_budget,
+        options.max_tokens_per_chunk_for_prefill,
+        options.enable_chunked_prefill);
+    burst_budget =
+        prefill_budget.per_dp_group(options.dp_size,
+                                    options.instance_role,
+                                    options.enable_dp_fair_token_budget);
     if (options.enable_prefix_cache) {
       // Prefix reuse needs the SWA rows of a complete compressed checkpoint.
       for (const int32_t ratio : model_args.compress_ratios()) {
@@ -1047,7 +1039,7 @@ KVCacheCapacity KVCacheEstimator::estimate(
   if (!context.is_multimodal) {
     estimate_options.dp_size = options.dp_size();
     estimate_options.enable_dp_fair_token_budget =
-        ::xllm::SchedulerConfig::get_instance().enable_dp_fair_token_budget();
+        options.enable_dp_fair_token_budget();
     if (options.enable_mtp_draft_body_tp1() && options.is_draft_engine()) {
       estimate_options.world_size = 1;
     }

@@ -17,9 +17,20 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "core/common/prefill_chunk_size.h"
 #include "core/framework/model/model_args.h"
 
 namespace xllm {
+
+void Options::resolve_prefill_options() {
+  const PrefillChunkSize chunk_size(max_tokens_per_chunk_for_prefill(),
+                                    max_tokens_per_batch());
+  max_tokens_per_chunk_for_prefill(chunk_size.tokens());
+  if (task_type() == "mm_embed") {
+    enable_chunked_prefill(false);
+    enable_prefix_cache(false);
+  }
+}
 
 void Options::validate(const ModelArgs& model_args) const {
   if (model_args.model_type() == "deepseek_v41") {

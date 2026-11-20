@@ -26,7 +26,6 @@ limitations under the License.
 
 #include "core/framework/block/embedding_block_manager.h"
 #include "core/framework/block/vmm_kv_block_manager.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/request/sequence.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
@@ -367,8 +366,7 @@ CompositeBlockManager::LeafMap build_composite_leaves(
   if (options.enable_linear_state()) {
     CHECK_GT(options.linear_state_num_slots(), 0)
         << "linear_state_num_slots must be set when linear state is enabled";
-    int32_t chunk_stride =
-        SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
+    int32_t chunk_stride = options.linear_state_chunk_stride();
     // With prefix caching, the slot stride is the checkpoint boundary.
     // Decode can disable chunked prefill, leaving its unused stride unset.
     if (prefill_prefix_cache) {

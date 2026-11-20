@@ -132,7 +132,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `enable_schedule_overlap` | `bool` | `false` | Whether to enable schedule overlap, also known as asynchronous scheduling. See [Async Scheduling](/en/features/async_schedule/). |
 | `prefill_scheduling_memory_usage_threshold` | `double` | `0.95` | Memory usage threshold during prefill scheduling. |
 | `enable_chunked_prefill` | `bool` | `true` | Whether to enable chunked prefill. |
-| `max_tokens_per_chunk_for_prefill` | `int32` | `-1` | Maximum number of tokens per chunk in the prefill stage. `-1` uses the default policy. |
+| `max_tokens_per_chunk_for_prefill` | `int32` | `-1` | Maximum number of tokens per prefill chunk. Negative values use `max_tokens_per_batch`; zero is invalid. |
 | `chunked_match_frequency` | `int32` | `2` | Sequence prefix-cache match frequency. |
 | `priority_strategy` | `string` | `"fcfs"` | Request priority strategy, for example `fcfs`, `priority`, or `deadline`. |
 | `enable_mix_batch` | `bool` | `true` | Whether to run prefill and decode in the same batch. Forced to `false` when CP or MTP is active. |

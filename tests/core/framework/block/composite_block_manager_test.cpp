@@ -41,7 +41,6 @@ limitations under the License.
 #include "core/kv_cache/block/static_kv_block_pool.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
-#include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
 #include "framework/request/stopping_checker.h"
@@ -1392,18 +1391,13 @@ TEST(CompositeBlockManagerTest,
 
 TEST(CompositeBlockManagerTest,
      DecodeLinearWithoutPrefixCacheKeepsReceivedState) {
-  // LinearStateBlockManager pulls its chunk stride from the global scheduler
-  // config, so pin a valid stride for this test and restore it after.
-  const int32_t original_chunk_stride =
-      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
-
   const uint32_t block_size = 128;
   const uint32_t num_blocks = 128;
   BlockManager::Options opts;
   opts.num_blocks(num_blocks)
       .block_size(block_size)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(128)
       .linear_state_num_slots(64)
       .enable_prefix_cache(false)
       .instance_is_decode(true);
@@ -1430,17 +1424,35 @@ TEST(CompositeBlockManagerTest,
   EXPECT_EQ(seq.get_linear_state_slot_id(), received_id);
   seq.kv_state().incr_kv_cache_tokens_num(1);
   manager.deallocate_for_sequence(&seq);
+}
 
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
-      original_chunk_stride;
+TEST(CompositeBlockManagerTest,
+     LinearLeavesRetainIndependentCheckpointIntervals) {
+  for (const int32_t chunk_tokens : {4, 8}) {
+    BlockManager::Options options;
+    options.num_blocks(64)
+        .block_size(2)
+        .enable_linear_state(true)
+        .linear_state_num_slots(16)
+        .linear_state_chunk_stride(chunk_tokens)
+        .enable_prefix_cache(true);
+    auto leaves = build_composite_leaves(options);
+    EXPECT_EQ(leaves.at(BlockType::LINEAR).leaf->block_size(), chunk_tokens);
+  }
+}
+
+TEST(CompositeBlockManagerTest,
+     LinearPrefixCacheRejectsUnresolvedCheckpointInterval) {
+  BlockManager::Options options;
+  options.num_blocks(64)
+      .block_size(2)
+      .enable_linear_state(true)
+      .linear_state_num_slots(16)
+      .enable_prefix_cache(true);
+  EXPECT_DEATH(build_composite_leaves(options), "must be positive");
 }
 
 TEST(CompositeBlockManagerTest, DecodeRoleLinearDefaultStrideDoesNotAbort) {
-  const int32_t original_chunk_stride =
-      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
-  // Emulate --enable_chunked_prefill=false: stride stays at the -1 default.
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = -1;
-
   const uint32_t block_size = 128;
   const uint32_t num_blocks = 128;
   BlockManager::Options opts;
@@ -1460,9 +1472,6 @@ TEST(CompositeBlockManagerTest, DecodeRoleLinearDefaultStrideDoesNotAbort) {
   seq.kv_state().incr_kv_cache_tokens_num(prompt.size());
   EXPECT_EQ(seq.kv_state().num_blocks(BlockType::LINEAR), 1u);
   manager.deallocate_for_sequence(&seq);
-
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
-      original_chunk_stride;
 }
 
 TEST(CompositeBlockManagerTest,
@@ -2233,27 +2242,19 @@ namespace {
 
 class LinearStateWindowTest : public ::testing::TestWithParam<bool> {
  protected:
-  void SetUp() override {
-    original_stride_ =
-        SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
-    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 4;
-    stopping_checker_.set_max_generated_tokens(256);
-  }
-
-  void TearDown() override {
-    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
-        original_stride_;
-  }
+  void SetUp() override { stopping_checker_.set_max_generated_tokens(256); }
 
   std::unique_ptr<CompositeBlockManager> make_manager(
       uint32_t slots = 16,
       uint32_t kv_blocks = 32,
       uint32_t speculative_tokens = 0,
-      bool concurrent = false) {
+      bool concurrent = false,
+      int32_t chunk_stride = 4) {
     BlockManager::Options options;
     options.num_blocks(kv_blocks)
         .block_size(2)
         .enable_linear_state(true)
+        .linear_state_chunk_stride(chunk_stride)
         .linear_state_num_slots(slots)
         .num_speculative_tokens(speculative_tokens)
         .enable_disagg_pd(concurrent)
@@ -2283,7 +2284,6 @@ class LinearStateWindowTest : public ::testing::TestWithParam<bool> {
   }
 
  private:
-  int32_t original_stride_ = 0;
   RequestSamplingParam sampling_param_;
   StoppingChecker stopping_checker_;
 };
@@ -2384,6 +2384,7 @@ TEST_P(LinearStateWindowTest, DecodeReceiverNeedsOnlyOneAvailableSlot) {
   options.num_blocks(32)
       .block_size(2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(3)
       .enable_prefix_cache(false)
       .instance_is_decode(true);
@@ -2514,6 +2515,7 @@ TEST_P(LinearStateWindowTest, IncompleteKvGrowthRollsBackLinearAllocation) {
   options.num_blocks(32)
       .block_size(2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(3)
       .enable_prefix_cache(GetParam());
   auto leaves = build_composite_leaves(options);
@@ -2605,13 +2607,13 @@ TEST_P(LinearStateWindowTest, PrefillAdvancesWithOneUsableSlot) {
 
 TEST_P(LinearStateWindowTest, DecodeReusesOneSlotAcrossCheckpointBoundaries) {
   for (const int32_t stride : {1, 4, 8}) {
-    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = stride;
     for (const uint32_t speculative_tokens : {0u, 3u, 8u}) {
       for (const bool concurrent : {false, true}) {
         SCOPED_TRACE(::testing::Message()
                      << stride << ", " << speculative_tokens << ", "
                      << concurrent);
-        auto manager = make_manager(2, 256, speculative_tokens, concurrent);
+        auto manager =
+            make_manager(2, 256, speculative_tokens, concurrent, stride);
         Sequence sequence = make_sequence(0, {7, 7, 7});
         ASSERT_TRUE(manager->allocate_sequence(&sequence, 3));
         const int32_t slot_id = sequence.get_linear_state_slot_id();
@@ -2783,6 +2785,7 @@ TEST_P(LinearStateWindowTest, PoolReleasesCancelledSequenceBeforeResults) {
     options.num_blocks(32)
         .block_size(2)
         .enable_linear_state(true)
+        .linear_state_chunk_stride(4)
         .linear_state_num_slots(8)
         .enable_prefix_cache(GetParam());
     BlockManagerPool pool(options, 1);
@@ -2816,31 +2819,18 @@ INSTANTIATE_TEST_SUITE_P(PrefixCacheModes,
 
 class SharedKVCacheBlockTest : public ::testing::Test {
  protected:
-  void SetUp() override {
-    original_chunk_size_ =
-        SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
-    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 4;
-  }
-
-  void TearDown() override {
-    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
-        original_chunk_size_;
-  }
-
   BlockManager::Options shared_options(uint32_t num_slots,
                                        bool enable_prefix_cache = false) {
     BlockManager::Options options;
     options.num_blocks(num_slots)
         .block_size(2)
         .enable_linear_state(true)
+        .linear_state_chunk_stride(4)
         .linear_state_num_slots(static_cast<int32_t>(num_slots))
         .enable_shared_kv_cache(true)
         .enable_prefix_cache(enable_prefix_cache);
     return options;
   }
-
- private:
-  int32_t original_chunk_size_ = 0;
 };
 
 TEST_F(SharedKVCacheBlockTest, MultimodalPrefixIdentityKeepsBothGroupsAligned) {
@@ -3073,6 +3063,7 @@ TEST_F(SharedKVCacheBlockTest, SharedPoolsRemainIndependentAcrossDpRanks) {
   options.num_blocks(4)
       .block_size(2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(4)
       .enable_shared_kv_cache(true)
       .enable_prefix_cache(false);
@@ -3091,6 +3082,7 @@ TEST_F(SharedKVCacheBlockTest, AdmissionReservesTheLiveLinearSlot) {
   options.num_blocks(4)
       .block_size(2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(4)
       .enable_shared_kv_cache(true)
       .enable_prefix_cache(false);
@@ -3105,6 +3097,7 @@ TEST_F(SharedKVCacheBlockTest, AggregateAdmissionCountsEveryLinearSlot) {
   options.num_blocks(6)
       .block_size(2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(6)
       .enable_shared_kv_cache(true)
       .enable_prefix_cache(false);
@@ -3273,6 +3266,7 @@ TEST_F(SharedKVCacheBlockTest, AdmissionCountsSlotsPerBlockType) {
   options.num_blocks(17)
       .block_size(2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(17)
       .enable_shared_kv_cache(true)
       .shared_linear_state_slots(2)
@@ -3295,6 +3289,7 @@ TEST_F(SharedKVCacheBlockTest, SchedulerDemandUsesSlotsAndMissingState) {
   options.num_blocks(17)
       .block_size(2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(17)
       .enable_shared_kv_cache(true)
       .shared_linear_state_slots(2)

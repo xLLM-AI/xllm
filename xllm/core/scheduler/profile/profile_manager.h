@@ -58,7 +58,13 @@ class ProfileManager {
 
     PROPERTY(int32_t, dp_size) = 1;
 
+    PROPERTY(bool, enable_dp_fair_token_budget) = true;
+
     PROPERTY(DecodeGraphWarmupConfig, decode_graph_warmup_config) = {};
+
+    PROPERTY(bool, enable_chunked_prefill) = true;
+
+    PROPERTY(int32_t, max_tokens_per_chunk_for_prefill) = -1;
 
     // config for profile
     PROPERTY(bool, enable_profile_step_time) = false;

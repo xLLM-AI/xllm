@@ -100,6 +100,8 @@ class BlockManager {
     // for the unified slot pool. Both are ignored unless linear state is on.
     PROPERTY(bool, enable_linear_state) = false;
     PROPERTY(int32_t, linear_state_num_slots) = 0;
+    // Effective prefill chunk size used as the state checkpoint interval.
+    PROPERTY(int32_t, linear_state_chunk_stride) = -1;
     // Number of speculative tokens for MTP decode (passed from
     // runtime::Options). Used by CompositeBlockManager to adjust SWA block
     // release accounting.

@@ -343,6 +343,12 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
       std::to_string(eplb_worker_config.redundant_experts_num);
   const char* use_decode_only_load_ptr =
       eplb_worker_config.use_decode_only_load ? "1" : "0";
+  const std::string max_prefill_chunk_str =
+      std::to_string(options.max_tokens_per_chunk_for_prefill());
+  const char* chunked_prefill_ptr =
+      options.enable_chunked_prefill() ? "1" : "0";
+  const char* dp_fair_token_budget_ptr =
+      options.enable_dp_fair_token_budget() ? "1" : "0";
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
@@ -400,6 +406,9 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         enable_eplb_ptr,
                         redundant_experts_num_str.c_str(),
                         use_decode_only_load_ptr,
+                        max_prefill_chunk_str.c_str(),
+                        chunked_prefill_ptr,
+                        dp_fair_token_budget_ptr,
                         nullptr};
   static_assert(std::size(argv) == spawn_worker_protocol::kArgumentCount + 1);
   pid_t pid;

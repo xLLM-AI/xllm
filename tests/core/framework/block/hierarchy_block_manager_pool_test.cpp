@@ -38,7 +38,6 @@ limitations under the License.
 #include "core/util/scope_guard.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/block/composite_block_manager.h"
-#include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
 #include "framework/request/stopping_checker.h"
@@ -408,6 +407,7 @@ BlockManagerPool::Options make_flat_kv_linear_options() {
       .enable_prefix_cache(true)
       .enable_host_offload(true)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(128)
       .linear_state_num_slots(64)
       .host_num_blocks_by_type({{BlockType::KV, 128}, {BlockType::LINEAR, 64}});
   return opts;
@@ -2921,14 +2921,6 @@ TEST_F(HierarchyBlockManagerPoolTest, TypedLayoutSupportsStoragePrefetch) {
 
 TEST_F(HierarchyBlockManagerPoolTest,
        FlatKvLinearLayoutBuildsKvAndLinearHostLeaves) {
-  const int32_t original_chunk_stride =
-      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
-  ScopeGuard restore_chunk_stride([original_chunk_stride] {
-    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
-        original_chunk_stride;
-  });
-
   HierarchyBlockManagerPool pool(make_flat_kv_linear_options(),
                                  /*transfer_coordinator=*/nullptr,
                                  /*dp_size=*/1);
@@ -2943,14 +2935,6 @@ TEST_F(HierarchyBlockManagerPoolTest,
 
 TEST_F(HierarchyBlockManagerPoolTest,
        LinearOffloadUsesCheckpointOrdinalAndImmutableHash) {
-  const int32_t original_chunk_stride =
-      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
-  ScopeGuard restore_chunk_stride([original_chunk_stride] {
-    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
-        original_chunk_stride;
-  });
-
   HierarchyBlockManagerPool pool(make_flat_kv_linear_options(),
                                  /*transfer_coordinator=*/nullptr,
                                  /*dp_size=*/1);
@@ -2991,14 +2975,6 @@ TEST_F(HierarchyBlockManagerPoolTest,
 
 TEST_F(HierarchyBlockManagerPoolTest,
        SparseHostCheckpointReplacesOlderDeviceState) {
-  const int32_t original_chunk_stride =
-      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
-  ScopeGuard restore_chunk_stride([original_chunk_stride] {
-    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
-        original_chunk_stride;
-  });
-
   HierarchyBlockManagerPool pool(make_flat_kv_linear_options(),
                                  /*transfer_coordinator=*/nullptr,
                                  /*dp_size=*/1);
@@ -3068,14 +3044,6 @@ TEST_F(HierarchyBlockManagerPoolTest,
 
 TEST_F(HierarchyBlockManagerPoolTest,
        LinearRestoreBudgetAlignsToExactCheckpointBoundary) {
-  const int32_t original_chunk_stride =
-      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
-  ScopeGuard restore_chunk_stride([original_chunk_stride] {
-    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
-        original_chunk_stride;
-  });
-
   HierarchyBlockManagerPool pool(make_flat_kv_linear_options(),
                                  /*transfer_coordinator=*/nullptr,
                                  /*dp_size=*/1);
@@ -3098,17 +3066,10 @@ TEST_F(HierarchyBlockManagerPoolTest,
        LinearOptionalStoreMissLeavesSparseHostCheckpoint) {
   BlockManagerPool::Options options = make_flat_kv_options();
   options.enable_linear_state(true)
+      .linear_state_chunk_stride(128)
       .linear_state_num_slots(64)
       .host_num_blocks_by_type({{BlockType::KV, 128}, {BlockType::LINEAR, 64}})
       .enable_kvcache_store(true);
-
-  const int32_t original_chunk_stride =
-      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
-  ScopeGuard restore_chunk_stride([original_chunk_stride] {
-    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
-        original_chunk_stride;
-  });
 
   auto engine = std::make_shared<FakePrefetchCoordinator>(/*worker_count=*/1,
                                                           /*timeout_ms=*/-1,

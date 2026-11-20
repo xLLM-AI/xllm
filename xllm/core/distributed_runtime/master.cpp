@@ -114,6 +114,7 @@ void validate_rank_tablefile_backend() {
 }  // namespace
 
 Master::Master(const Options& options) : options_(options) {
+  options_.resolve_prefill_options();
   // Multi-process serving runs one worker per process. Select one runtime
   // logical device from the process-visible devices while keeping node_rank as
   // the global distributed identity.
@@ -184,8 +185,6 @@ Master::Master(const Options& options) : options_(options) {
   LOG(INFO) << "Using devices: " << DeviceNameUtils::to_string(devices_);
 
   if (options_.task_type() == "mm_embed") {
-    options_.enable_chunked_prefill(false);
-    options_.enable_prefix_cache(false);
     SchedulerConfig::get_instance().enable_chunked_prefill(false);
     KVCacheConfig::get_instance().enable_prefix_cache(false);
     LOG(WARNING) << "Disabling chunked prefill and prefix cache for "
