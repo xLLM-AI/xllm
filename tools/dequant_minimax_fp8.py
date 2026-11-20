@@ -5,6 +5,18 @@ The current xLLM MiniMax path dequantizes FP8 block weights during
 `load_state_dict`. This tool moves that work offline so repeated server
 restarts can reuse a dequantized checkpoint directory.
 
+Before creating output, validate the input index against shard headers. Shard
+paths must be normalized relative .safetensors paths inside the input directory,
+including after symlink resolution. Subdirectories are preserved in the output.
+Every tensor in a referenced shard must appear exactly once in weight_map;
+unreferenced files are ignored when an index is present.
+
+Input metadata.total_size is optional. When present, it must equal the input
+tensor payload bytes, including FP8 scales and excluding file headers. Output
+total_size is recomputed from the tensors actually saved, after BF16 conversion
+and removal of paired scales. The output index is published only after every
+shard succeeds; an interrupted conversion may leave shards but no final index.
+
 Usage:
     python tools/dequant_minimax_fp8.py \
         --input-dir /models/MiniMax-M2.5 \
@@ -19,7 +31,7 @@ import shutil
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
+from safetensors import SafetensorError, safe_open
 from safetensors.torch import save_file
 
 
@@ -90,18 +102,113 @@ def dequantize_fp8_block_weight(
     return fp8_weight.to(torch.bfloat16) * expanded_scale
 
 
-def discover_safetensor_files(input_dir: Path) -> tuple[list[str], dict[str, str]]:
-    index_path = input_dir / "model.safetensors.index.json"
-    if index_path.exists():
-        index_data = load_json(index_path)
-        weight_map = index_data["weight_map"]
-        files = sorted(set(weight_map.values()))
-        return files, weight_map
+def _unique_index_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate index key {key!r}")
+        result[key] = value
+    return result
 
-    shard_paths = sorted(p.name for p in input_dir.glob("*.safetensors"))
-    if len(shard_paths) != 1:
-        raise ValueError(f"Expected model.safetensors.index.json or a single .safetensors shard under {input_dir}")
-    return shard_paths, {}
+
+def _validate_shard_path(input_dir: Path, name: str) -> Path:
+    path = Path(name)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or "\\" in name
+        or path.as_posix() != name
+        or path.suffix != ".safetensors"
+    ):
+        raise ValueError(f"weight_map shard path {name!r} must be a normalized relative .safetensors path")
+    shard_path = input_dir / path
+    if not shard_path.resolve().is_relative_to(input_dir.resolve()):
+        raise ValueError(f"weight_map shard path {name!r} resolves outside input directory {input_dir}")
+    if not shard_path.is_file():
+        raise ValueError(f"weight_map shard file {name!r} is missing or is not a regular file under {input_dir}")
+    return shard_path
+
+
+def discover_safetensor_files(input_dir: Path) -> tuple[list[str], dict[str, str]]:
+    """Preflight shard paths, exact tensor ownership and optional payload size.
+
+    Only shard headers and file sizes are inspected; tensor data is not loaded.
+    Without an index, synthesize the map from the single shard's header.
+    """
+    index_path = input_dir / "model.safetensors.index.json"
+    expected_by_shard: dict[str, set[str]] = {}
+    declared_size = None
+    has_index = index_path.exists() or index_path.is_symlink()
+    if has_index:
+        try:
+            with index_path.open("r", encoding="utf-8") as stream:
+                index_data = json.load(stream, object_pairs_hook=_unique_index_object)
+        except (OSError, ValueError) as error:
+            raise ValueError(f"{index_path}: {error}") from error
+        if not isinstance(index_data, dict):
+            raise ValueError(f"{index_path}: index must be a JSON object")
+        weight_map = index_data.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(f"{index_path}: weight_map must be a non-empty object")
+        for key, name in weight_map.items():
+            if not key or not isinstance(name, str) or not name:
+                raise ValueError(f"{index_path}: weight_map[{key!r}] must map a non-empty key to a shard path string")
+            expected_by_shard.setdefault(name, set()).add(key)
+        metadata = index_data.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ValueError(f"{index_path}: metadata must be an object")
+        if "total_size" in metadata:
+            declared_size = metadata["total_size"]
+            if type(declared_size) is not int or declared_size < 0:
+                raise ValueError(f"{index_path}: metadata.total_size must be a non-negative integer")
+        files = sorted(expected_by_shard)
+    else:
+        files = sorted(p.name for p in input_dir.glob("*.safetensors"))
+        if len(files) != 1:
+            raise ValueError(f"Expected model.safetensors.index.json or a single .safetensors shard under {input_dir}")
+
+    # Resolve every reference before inspecting headers or creating output.
+    shard_paths = [(name, _validate_shard_path(input_dir, name)) for name in files]
+    actual_map: dict[str, str] = {}
+    total_size = 0
+    for name, shard_path in shard_paths:
+        try:
+            with safe_open(shard_path, framework="pt", device="cpu") as shard:
+                keys = set(shard.keys())
+            # safe_open validates that the payload is fully indexed, with no
+            # gaps. The first 8 bytes encode the padded JSON header length.
+            with shard_path.open("rb") as stream:
+                header_size = int.from_bytes(stream.read(8), "little")
+            total_size += shard_path.stat().st_size - 8 - header_size
+        except (OSError, SafetensorError) as error:
+            raise ValueError(f"Invalid safetensors shard {name!r}: {error}") from error
+        if not keys:
+            raise ValueError(f"Shard {name!r} contains no tensor keys")
+        if has_index:
+            expected = expected_by_shard[name]
+            missing = sorted(expected - keys)
+            unexpected = sorted(keys - expected)
+            if missing or unexpected:
+                raise ValueError(
+                    f"weight_map mismatch for shard {name!r}: missing tensor keys={missing}, "
+                    f"unexpected or misassigned tensor keys={unexpected}"
+                )
+        actual_map.update(dict.fromkeys(keys, name))
+    if declared_size is not None and declared_size != total_size:
+        raise ValueError(
+            f"{index_path}: metadata.total_size is {declared_size}, expected {total_size} input tensor payload bytes"
+        )
+    return files, actual_map
+
+
+def _publish_output_index(output_dir: Path, index_data: dict) -> None:
+    index_path = output_dir / "model.safetensors.index.json"
+    temporary_path = output_dir / ".model.safetensors.index.json.tmp"
+    try:
+        save_json(temporary_path, index_data)
+        temporary_path.replace(index_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def prepare_output_dir(output_dir: Path) -> None:
@@ -193,11 +300,11 @@ def main() -> None:
     if input_dir == output_dir:
         raise ValueError("--input-dir and --output-dir must differ")
 
+    shard_names, _ = discover_safetensor_files(input_dir)
+
     prepare_output_dir(output_dir)
     copy_non_safetensors_files(input_dir, output_dir)
     block_size = update_config(input_dir, output_dir)
-
-    shard_names, _ = discover_safetensor_files(input_dir)
 
     total_weight_map: dict[str, str] = {}
     total_size = 0
@@ -208,9 +315,10 @@ def main() -> None:
     for i, shard_name in enumerate(shard_names, start=1):
         input_path = input_dir / shard_name
         output_path = output_dir / shard_name
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"[{i}/{total_shards}] Processing {shard_name}")
         shard_weight_map, converted_fp8_tensors, shard_bytes = convert_shard(input_path, output_path, block_size)
-        total_weight_map.update(shard_weight_map)
+        total_weight_map.update(dict.fromkeys(shard_weight_map, shard_name))
         total_fp8_tensors += converted_fp8_tensors
         total_size += shard_bytes
 
@@ -218,7 +326,7 @@ def main() -> None:
         "metadata": {"total_size": total_size},
         "weight_map": total_weight_map,
     }
-    save_json(output_dir / "model.safetensors.index.json", index_data)
+    _publish_output_index(output_dir, index_data)
     print(
         "Done. Converted "
         f"{total_fp8_tensors} fp8 tensors. "
