@@ -21,7 +21,9 @@ limitations under the License.
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -72,11 +74,13 @@ class MultimodalProcessor final : public MultimodalProcessorPipeline {
   MultimodalProcessor(const ModelArgs& model_args,
                       std::shared_ptr<Tokenizer> tokenizer,
                       const TokenizerArgs& tokenizer_args,
-                      int32_t max_sequence_length = 0)
+                      int32_t max_sequence_length = 0,
+                      std::optional<std::string> model_path = std::nullopt)
       : MultimodalProcessorPipeline(std::move(tokenizer),
                                     tokenizer_args,
                                     max_sequence_length),
-        image_processor_(std::make_unique<ImageProcessor>(model_args)),
+        image_processor_(
+            create_image_processor(model_args, std::move(model_path))),
         video_processor_(std::make_unique<VideoProcessor>(model_args)),
         audio_processor_(std::make_unique<AudioProcessor>(model_args)),
         prompt_processor_(std::make_unique<PromptProcessor>(model_args)) {}
@@ -218,6 +222,20 @@ class MultimodalProcessor final : public MultimodalProcessorPipeline {
       output_items.push_back(std::move(item));
     }
     return true;
+  }
+
+  static std::unique_ptr<ImageProcessor> create_image_processor(
+      const ModelArgs& model_args,
+      std::optional<std::string> model_path) {
+    if constexpr (std::is_constructible_v<ImageProcessor,
+                                          const ModelArgs&,
+                                          std::string>) {
+      if (model_path.has_value()) {
+        return std::make_unique<ImageProcessor>(model_args,
+                                                std::move(*model_path));
+      }
+    }
+    return std::make_unique<ImageProcessor>(model_args);
   }
 
   std::unique_ptr<ImageProcessor> image_processor_;

@@ -16,6 +16,7 @@ limitations under the License.
 #include "processors/qwen2_vl_image_processor.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/framework/config/model_config.h"
@@ -161,7 +162,12 @@ std::optional<Size> smart_resize_tokens(int32_t num_frames,
 
 }  // namespace
 
-Qwen2VLImageProcessor::Qwen2VLImageProcessor(const ModelArgs& args) {
+Qwen2VLImageProcessor::Qwen2VLImageProcessor(const ModelArgs& args)
+    : Qwen2VLImageProcessor(args, ModelConfig::get_instance().model()) {}
+
+Qwen2VLImageProcessor::Qwen2VLImageProcessor(const ModelArgs& args,
+                                             std::string model_path)
+    : model_path_(std::move(model_path)) {
   image_mean_ = torch::tensor(args.mm_image_normalize_mean(),
                               torch::dtype(torch::kFloat32));
   image_std_ = torch::tensor(args.mm_image_normalize_std(),
@@ -192,7 +198,7 @@ Qwen2VLImageProcessor::Qwen2VLImageProcessor(const ModelArgs& args) {
   }
   if (::xllm::ModelConfig::is_python_model_impl(
           ::xllm::ModelConfig::get_instance().model_impl())) {
-    initialize_python_image_processor();
+    initialize_python_image_processor(model_path_);
   }
 }
 
@@ -288,7 +294,7 @@ bool Qwen2VLImageProcessor::process(
   // processor; the Python model's encode() consumes the HF output directly.
   if (::xllm::ModelConfig::is_python_model_impl(
           ::xllm::ModelConfig::get_instance().model_impl())) {
-    if (process_python_images(images, output_items)) {
+    if (process_python_images(model_path_, images, output_items)) {
       return true;
     }
     // The HF ``Glm5NextImageProcessor`` class only exists in the dev (patched)

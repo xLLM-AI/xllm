@@ -659,6 +659,7 @@ std::string ModelRegistry::get_model_backend(const std::string& name) {
 }
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
+    const std::string& model_path,
     const ModelArgs& model_args,
     std::shared_ptr<Tokenizer> tokenizer,
     int64_t max_cache_items,
@@ -678,12 +679,17 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
           ModelConfig::get_instance().model_impl()) &&
       ModelRegistry::get_model_backend(resolved_name) == "llm") {
     return std::make_unique<MultimodalProcessor<TextPromptProcessor>>(
-        model_args, std::move(tokenizer), tokenizer_args, max_sequence_length);
+        model_args,
+        std::move(tokenizer),
+        tokenizer_args,
+        max_sequence_length,
+        model_path);
   }
   CHECK(multimodal_processor_factory != nullptr)
       << "Missing multimodal processor for model type: " << model_type;
   std::unique_ptr<MultimodalProcessorBase> processor =
-      multimodal_processor_factory(model_args,
+      multimodal_processor_factory(model_path,
+                                   model_args,
                                    std::move(tokenizer),
                                    tokenizer_args,
                                    max_sequence_length);

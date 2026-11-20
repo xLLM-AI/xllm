@@ -30,3 +30,11 @@ cc_test(
     :processors
     GTest::gtest_main
 )
+
+# Python preprocessing and the model-directory boundary use CPU tensors only.
+cc_test(
+  NAME python_image_processor_test
+  CPU_ONLY
+  SRCS python_image_processor_test.cpp
+  DEPS :processors Python::Python GTest::gtest_main
+)

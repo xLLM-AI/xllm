@@ -386,7 +386,8 @@ VLMMaster::VLMMaster(const Options& options)
             std::make_unique<JinjaChatTemplate>(engine->tokenizer_args());
         tokenizer_ = engine->tokenizer()->clone();
         processor_ =
-            create_multimodal_processor(model_args_,
+            create_multimodal_processor(options_.model_path(),
+                                        model_args_,
                                         tokenizer_,
                                         options_.max_processor_cache_items(),
                                         engine->tokenizer_args());

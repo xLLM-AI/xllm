@@ -44,6 +44,7 @@ class MultimodalProcessorBase {
 };
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
+    const std::string& model_path,
     const ModelArgs& model_args,
     std::shared_ptr<Tokenizer> tokenizer,
     int64_t max_cache_items,
