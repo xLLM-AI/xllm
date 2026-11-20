@@ -48,6 +48,9 @@ set(mega_prefill_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_prefill_op/op_host")
 set(mega_decode_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_decode/op_host")
 set(mega_mtp_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_mtp_decode/op_host")
 set(mega_varlen_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_mtp_decode_varlen/op_host")
+set(qli "${CMAKE_CURRENT_SOURCE_DIR}/quant_lightning_indexer")
+set(qli_metadata "${CMAKE_CURRENT_SOURCE_DIR}/quant_lightning_indexer_metadata")
+set(scatter "${CMAKE_CURRENT_SOURCE_DIR}/scatter_nd_update_v2")
 set(pto_include "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/pto-isa/include")
 if(NOT EXISTS "${pto_include}/pto/pto-inst.hpp")
     message(FATAL_ERROR "MegaChunkGdn needs PTO headers. "
@@ -63,6 +66,8 @@ list(APPEND op_definitions
     "${mega_prefill_host}/mega_gdn_prefill_op_def.cpp"
     "${mega_decode_host}/mega_gdn_decode_def.cpp"
     "${mega_mtp_host}/mega_gdn_mtp_decode_def.cpp"
+    "${qli}/op_host/quant_lightning_indexer_def.cpp"
+    "${scatter}/op_host/scatter_nd_update_v2_def.cpp"
 )
 if("ascend910b" IN_LIST ASCEND_COMPUTE_UNIT OR "ascend910_93" IN_LIST ASCEND_COMPUTE_UNIT)
     list(APPEND op_definitions
@@ -146,10 +151,16 @@ npu_op_library(cust_opapi ACLNN
     "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_mega_gdn_decode.cpp"
     "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_mega_gdn_mtp_decode.cpp"
     ${mega_varlen_api}
+    "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_quant_lightning_indexer.cpp"
+    "${qli_metadata}/op_api/aclnn_quant_lightning_indexer_metadata.cpp"
+    "${qli_metadata}/op_api/l0_quant_lightning_indexer_metadata.cpp"
+    "${scatter}/op_host/op_api/aclnn_scatter_nd_update_v2.cpp"
+    "${scatter}/op_host/op_api/scatter_nd_update_v2.cpp"
     ${a2_aclnn_sources}
 )
 target_include_directories(cust_opapi PRIVATE
     "${ASCEND_CANN_PACKAGE_PATH}/include/aclnn"
+    "${ASCEND_CANN_PACKAGE_PATH}/pkg_inc/aicpu"
     "${ASCEND_AUTOGEN_PATH}"
 )
 target_link_libraries(cust_opapi PRIVATE
@@ -159,7 +170,10 @@ target_link_libraries(cust_opapi PRIVATE
 
 set(generated_proto "${ASCEND_AUTOGEN_PATH}/op_proto.cc")
 file(GLOB generated_fallback CONFIGURE_DEPENDS "${ASCEND_AUTOGEN_PATH}/fallback_*.cpp")
-npu_op_library(cust_op_proto GRAPH ${generated_proto})
+npu_op_library(cust_op_proto GRAPH
+    ${generated_proto}
+    "${qli_metadata}/op_graph/quant_lightning_indexer_metadata_proto.cpp"
+)
 npu_op_library(cust_optiling TILING
     ${op_definitions}
     "${gamma_host}/gamma_add_rms_norm_infershape.cpp"
@@ -199,6 +213,11 @@ npu_op_library(cust_optiling TILING
     "${mega_mtp_host}/mega_gdn_mtp_decode_tiling.cpp"
     "${mega_mtp_host}/mega_gdn_mtp_decode_proto.cpp"
     ${mega_varlen_tiling}
+    "${qli}/op_host/quant_lightning_indexer_infershape.cpp"
+    "${qli}/op_host/quant_lightning_indexer_tiling.cpp"
+    "${qli_metadata}/op_host/quant_lightning_indexer_metadata_infershape.cpp"
+    "${scatter}/op_host/scatter_nd_update_infershape.cpp"
+    "${scatter}/op_host/scatter_nd_update_v2_tiling.cpp"
     ${a2_tiling_sources}
     ${generated_fallback}
 )
@@ -208,6 +227,7 @@ foreach(target cust_optiling cust_op_proto)
 endforeach()
 target_include_directories(cust_optiling PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${qli}/op_host"
     "${ASCEND_CANN_PACKAGE_PATH}/include/op_common/op_host"
 )
 target_link_libraries(cust_optiling PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/lib64/libascendalog.so")
@@ -333,5 +353,19 @@ if(a2_aclnn_sources)
     npu_op_kernel_options(ascendc_kernels XllmKernelMlaPreprocessV2
         OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Werror)
 endif()
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelQuantLightningIndexer
+    KERNEL_DIR quant_lightning_indexer/op_kernel KERNEL_FILE xllm_kernel_quant_lightning_indexer.cpp)
+npu_op_kernel_options(ascendc_kernels XllmKernelQuantLightningIndexer
+    OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Wno-error
+    -mllvm -cce-vf-remove-membar=false -mllvm -cce-aicore-hoist-movemask=false
+    "-I${CMAKE_CURRENT_SOURCE_DIR}" "-I${qli}/op_kernel")
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelScatterNdUpdateV2
+    KERNEL_DIR scatter_nd_update_v2/op_kernel KERNEL_FILE xllm_kernel_scatter_nd_update_v2.cpp)
+npu_op_kernel_options(ascendc_kernels XllmKernelScatterNdUpdateV2
+    OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error)
+
 npu_op_kernel_library(ascendc_kernels SRC_BASE "${CMAKE_CURRENT_SOURCE_DIR}" TILING_LIBRARY cust_optiling)
+
+include("${qli_metadata}/aicpu.cmake")
+
 npu_op_package_add(${vendor} LIBRARY cust_opapi cust_op_proto cust_optiling ascendc_kernels)

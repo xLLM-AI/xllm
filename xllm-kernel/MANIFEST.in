@@ -1,6 +1,6 @@
 # Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 recursive-include csrc *.cpp *.h
-recursive-include csrc/ascendc CMakeLists.txt *.cmake *.txt *.hpp *.inc
+recursive-include csrc/ascendc CMakeLists.txt *.cmake *.txt *.hpp *.inc *.json
 recursive-include third_party/catlass/include *.h *.hpp
 include third_party/catlass/LICENSE
 recursive-include third_party/pto-isa/include *.h *.hpp *.inc

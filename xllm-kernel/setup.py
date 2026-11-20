@@ -61,11 +61,13 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 gamma = source / "gamma_add_rms_norm"
                 for header in ("aclnn_gamma_add_rms_norm.h", "aclnn_util.h"):
                     shutil.copy2(gamma / "op_host/op_api" / header, headers)
-                for component in ("moe_init_routing_v3", "moe_grouped_matmul_swiglu_quant"):
+                for component in ("moe_init_routing_v3", "moe_grouped_matmul_swiglu_quant", "scatter_nd_update_v2"):
                     packaged_header = headers / f"aclnn_xllm_kernel_{component}.h"
                     if packaged_header.exists():
                         header = source / component / "op_host/op_api" / f"aclnn_{component}.h"
                         shutil.copy2(header, packaged_header)
+                metadata_api = source / "quant_lightning_indexer_metadata" / "op_api"
+                shutil.copy2(metadata_api / "aclnn_quant_lightning_indexer_metadata.h", headers)
                 chunk_gdn = source / "mega_chunk_gdn/op_host/op_api"
                 shutil.copy2(chunk_gdn / "aclnn_mega_chunk_gdn.h", headers / "aclnn_xllm_kernel_mega_chunk_gdn.h")
                 recurrent_header = headers / "aclnn_xllm_kernel_recurrent_gated_delta_rule.h"
@@ -105,6 +107,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/npu/normalization.cpp",
                 "csrc/npu/quant_matmul.cpp",
                 "csrc/npu/reshape_paged_cache.cpp",
+                "csrc/npu/sparse_indexing.cpp",
             ],
             include_dirs=[
                 str(Path(__file__).resolve().parent),

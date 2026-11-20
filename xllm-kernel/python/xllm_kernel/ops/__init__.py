@@ -19,6 +19,11 @@ from xllm_kernel.ops.attention.gdn.mega import (
 )
 from xllm_kernel.ops.attention.kda import causal_conv1d, causal_conv1d_update_v2
 from xllm_kernel.ops.attention.mla import mla_preprocess_v2
+from xllm_kernel.ops.attention.sparse_indexing import (
+    quant_lightning_indexer,
+    quant_lightning_indexer_metadata,
+    scatter_nd_update,
+)
 from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out, quant_matmul_out
 from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
 from xllm_kernel.ops.kv_cache import reshape_paged_cache
@@ -68,9 +73,12 @@ __all__ = [
     "moe_gating_top_k_hash",
     "moe_grouped_matmul_swiglu_quant",
     "moe_init_routing_v3",
+    "quant_lightning_indexer",
+    "quant_lightning_indexer_metadata",
     "quant_matmul_out",
     "partial_rotary_embedding",
     "reshape_paged_cache",
+    "scatter_nd_update",
     "shared_linear_state_indices_out",
     "silu_and_mul",
 ]
