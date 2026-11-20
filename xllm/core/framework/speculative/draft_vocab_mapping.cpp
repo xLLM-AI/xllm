@@ -25,33 +25,32 @@ limitations under the License.
 
 namespace xllm {
 
-DraftVocabMapping::DraftVocabMapping(torch::Tensor draft_token_id_offsets,
-                                     int64_t draft_vocab_size,
-                                     int64_t target_vocab_size,
-                                     const torch::Device& device)
+DraftVocabMapping::DraftVocabMapping(
+    const torch::Tensor& draft_token_id_offsets,
+    int64_t draft_vocab_size,
+    int64_t target_vocab_size,
+    const torch::Device& device)
     : target_vocab_size_(target_vocab_size) {
-  if (!draft_token_id_offsets.defined()) {
+  if (draft_vocab_size == target_vocab_size) {
     return;
   }
+  CHECK(draft_token_id_offsets.defined())
+      << "Different draft and target vocabulary sizes require a d2t tensor.";
   CHECK_EQ(draft_token_id_offsets.dim(), 1) << "Draft d2t table must be 1D.";
-  torch::Tensor mapped_ids =
+  CHECK_EQ(draft_token_id_offsets.numel(), draft_vocab_size)
+      << "Draft d2t table size must match the draft vocab_size.";
+  const auto mapped_ids =
       draft_token_id_offsets.to(torch::kInt64) +
-      torch::arange(draft_token_id_offsets.size(0),
+      torch::arange(draft_vocab_size,
                     draft_token_id_offsets.options().dtype(torch::kInt64));
-  CHECK_EQ(mapped_ids.numel(), draft_vocab_size)
-      << "Draft d2t table has " << mapped_ids.numel()
-      << " entries but the draft vocab_size is " << draft_vocab_size << ".";
   CHECK_EQ(std::get<0>(torch::_unique2(mapped_ids)).numel(), draft_vocab_size)
       << "Draft d2t mapped target ids must be unique.";
-  CHECK_GE(torch::min(mapped_ids).item<int64_t>(), 0)
+  const auto [min_id, max_id] = torch::aminmax(mapped_ids);
+  CHECK_GE(min_id.item<int64_t>(), 0)
       << "Draft d2t mapped target ids must be >= 0.";
-  CHECK_LT(torch::max(mapped_ids).item<int64_t>(), target_vocab_size)
+  CHECK_LT(max_id.item<int64_t>(), target_vocab_size)
       << "Draft d2t mapped target ids must be < target vocab ("
       << target_vocab_size << ").";
-  if (draft_vocab_size == target_vocab_size &&
-      draft_token_id_offsets.eq(0).all().item<bool>()) {
-    return;
-  }
   draft_to_target_ids_ = mapped_ids.to(device);
 }
 

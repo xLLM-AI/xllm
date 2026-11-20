@@ -16,29 +16,28 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <limits>
+
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_vocab_mapping.h"
 
 namespace xllm {
-TEST(DraftVocabMappingTest, ElidesOnlyFullIdentity) {
-  for (const bool identity : {true, false}) {
-    SCOPED_TRACE(identity ? "identity" : "permutation");
-    const torch::Tensor offsets = identity
-                                      ? torch::zeros({2}, torch::kInt64)
-                                      : torch::tensor({1, -1}, torch::kInt64);
-    const DraftVocabMapping mapping(offsets, 2, 2, torch::Device(torch::kCPU));
-    SampleOutput output;
-    output.next_tokens = torch::tensor({1}, torch::kInt64);
-    output.draft_logits = torch::tensor({{0.5f, -1.0f}});
-    mapping.remap(output);
-    const torch::Tensor expected_tokens =
-        torch::tensor({identity ? 1 : 0}, torch::kInt64);
-    const torch::Tensor expected_logits = identity
-                                              ? torch::tensor({{0.5f, -1.0f}})
-                                              : torch::tensor({{-1.0f, 0.5f}});
-    EXPECT_TRUE(torch::equal(output.next_tokens, expected_tokens));
-    EXPECT_TRUE(torch::equal(output.draft_logits, expected_logits));
-  }
+TEST(DraftVocabMappingTest, RemapsDifferentVocabulary) {
+  const auto offsets = torch::tensor({2, -1}, torch::kInt64);
+  const DraftVocabMapping mapping(offsets,
+                                  /*draft_vocab_size=*/2,
+                                  /*target_vocab_size=*/3,
+                                  torch::Device(torch::kCPU));
+  SampleOutput output;
+  output.next_tokens = torch::tensor({0, 1}, torch::kInt64);
+  output.draft_logits = torch::tensor({{0.5f, -1.0f}, {1.0f, -0.5f}});
+  mapping.remap(output);
+  const float missing = -std::numeric_limits<float>::infinity();
+  EXPECT_TRUE(
+      torch::equal(output.next_tokens, torch::tensor({2, 0}, torch::kInt64)));
+  EXPECT_TRUE(torch::equal(
+      output.draft_logits,
+      torch::tensor({{-1.0f, missing, 0.5f}, {-0.5f, missing, 1.0f}})));
 }
 
 }  // namespace xllm

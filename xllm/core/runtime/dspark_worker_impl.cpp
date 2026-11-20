@@ -91,11 +91,6 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
   const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
   CHECK_EQ(options_.num_speculative_tokens(), draft_args.block_size())
       << "Runtime block size must match the draft model configuration.";
-  const ModelArgs& target_args = impl_->context_.get_model_args();
-  CHECK_EQ(draft_vocab_.mapped_vocab_size(draft_args.draft_vocab_size()),
-           target_args.vocab_size())
-      << "A reduced draft vocabulary requires a DSpark d2t mapping.";
-
   if (draft_args.model_type() == "deepseek_v4_dspark") {
     draft_input_per_request_ = draft_args.dspark_use_native_sas();
     draft_forward_type_ = BatchForwardType::DECODE;

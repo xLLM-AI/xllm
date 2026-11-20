@@ -149,7 +149,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
 
   ModelContext load_model_config(ModelLoader& loader);
-  torch::Tensor load_draft_vocab_mapping(ModelLoader& loader);
   KVCacheCreateOptions build_draft_kv_cache_layout(
       const KVCacheShape& shape) const;
   int64_t draft_num_layers() const;

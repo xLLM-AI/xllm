@@ -129,25 +129,6 @@ ModelContext DraftModelSpecWorkerImpl<TargetInput>::load_model_config(
 }
 
 template <typename TargetInput>
-torch::Tensor DraftModelSpecWorkerImpl<TargetInput>::load_draft_vocab_mapping(
-    ModelLoader& loader) {
-  torch::Tensor draft_token_id_offsets;
-  if (SpeculativeConfig::is_eagle3_algorithm(
-          draft_impl_->options().speculative_algorithm()) ||
-      SpeculativeConfig::is_dspark_algorithm(
-          draft_impl_->options().speculative_algorithm())) {
-    for (const auto& state_dict : loader.get_state_dicts()) {
-      auto offsets = state_dict->get_tensor("d2t");
-      if (offsets.defined()) {
-        draft_token_id_offsets = std::move(offsets);
-        break;
-      }
-    }
-  }
-  return draft_token_id_offsets;
-}
-
-template <typename TargetInput>
 KVCacheCreateOptions
 DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_layout(
     const KVCacheShape& shape) const {
@@ -381,7 +362,6 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
     int32_t random_seed,
     MasterStatus master_status) {
   bool result;
-  torch::Tensor draft_token_id_offsets;
   if (impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
     result = SpeculativeWorkerImpl<TargetInput>::init_model(
         model_weights_path, random_seed, master_status);
@@ -389,7 +369,6 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
     CHECK_EQ(draft_impl_->get_status(), WorkerImpl::Status::UNINITIALIZED);
     auto loader = ModelLoader::create(model_weights_path);
     auto context = load_model_config(*loader);
-    draft_token_id_offsets = load_draft_vocab_mapping(*loader);
     result = draft_impl_->WorkerImpl::init_model(std::move(loader),
                                                  std::move(context),
                                                  nullptr,
@@ -403,14 +382,15 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
         ModelConfig::is_python_model_impl(context_.get_model_impl()));
   }
   if (result && draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
-    const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-    draft_vocab_ =
-        DraftVocabMapping(std::move(draft_token_id_offsets),
-                          draft_args.draft_vocab_size(),
-                          impl_->context_.get_model_args().vocab_size(),
-                          device_);
-    draft_impl_->get_causal_lm()->share_lm_head(*impl_->get_causal_lm());
-    draft_impl_->get_causal_lm()->share_embed_tokens(*impl_->get_causal_lm());
+    auto& draft_model = *draft_impl_->get_causal_lm();
+    auto& target_model = *impl_->get_causal_lm();
+    draft_vocab_ = DraftVocabMapping(
+        draft_model.d2t(),
+        draft_impl_->context_.get_model_args().draft_vocab_size(),
+        impl_->context_.get_model_args().vocab_size(),
+        device_);
+    draft_model.share_lm_head(target_model);
+    draft_model.share_embed_tokens(target_model);
   }
   return result;
 }
