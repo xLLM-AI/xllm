@@ -51,6 +51,13 @@ set(mega_varlen_host "${CMAKE_CURRENT_SOURCE_DIR}/mega_gdn_mtp_decode_varlen/op_
 set(qli "${CMAKE_CURRENT_SOURCE_DIR}/quant_lightning_indexer")
 set(qli_metadata "${CMAKE_CURRENT_SOURCE_DIR}/quant_lightning_indexer_metadata")
 set(scatter "${CMAKE_CURRENT_SOURCE_DIR}/scatter_nd_update_v2")
+set(sas_metadata "${CMAKE_CURRENT_SOURCE_DIR}/sparse_attn_sharedkv_metadata")
+set(sparse_attention_components compressor sparse_attn_sharedkv sparse_flash_attention_lse)
+foreach(component IN LISTS sparse_attention_components)
+    set(host "${CMAKE_CURRENT_SOURCE_DIR}/${component}/op_host")
+    list(APPEND sparse_attention_definitions "${host}/${component}_def.cpp")
+    list(APPEND sparse_attention_tiling "${host}/${component}_tiling.cpp")
+endforeach()
 set(pto_include "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/pto-isa/include")
 if(NOT EXISTS "${pto_include}/pto/pto-inst.hpp")
     message(FATAL_ERROR "MegaChunkGdn needs PTO headers. "
@@ -68,6 +75,7 @@ list(APPEND op_definitions
     "${mega_mtp_host}/mega_gdn_mtp_decode_def.cpp"
     "${qli}/op_host/quant_lightning_indexer_def.cpp"
     "${scatter}/op_host/scatter_nd_update_v2_def.cpp"
+    ${sparse_attention_definitions}
 )
 if("ascend910b" IN_LIST ASCEND_COMPUTE_UNIT OR "ascend910_93" IN_LIST ASCEND_COMPUTE_UNIT)
     list(APPEND op_definitions
@@ -128,6 +136,9 @@ npu_op_code_gen(
     PACKAGE ${vendor}
     OUT_DIR "${ASCEND_AUTOGEN_PATH}"
 )
+foreach(component IN LISTS sparse_attention_components)
+    list(APPEND sparse_attention_api "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_${component}.cpp")
+endforeach()
 npu_op_library(cust_opapi ACLNN
     "${gamma_host}/op_api/aclnn_gamma_add_rms_norm.cpp"
     "${gamma_host}/op_api/gamma_add_rms_norm.cpp"
@@ -156,6 +167,9 @@ npu_op_library(cust_opapi ACLNN
     "${qli_metadata}/op_api/l0_quant_lightning_indexer_metadata.cpp"
     "${scatter}/op_host/op_api/aclnn_scatter_nd_update_v2.cpp"
     "${scatter}/op_host/op_api/scatter_nd_update_v2.cpp"
+    ${sparse_attention_api}
+    "${sas_metadata}/op_api/aclnn_sparse_attn_sharedkv_metadata.cpp"
+    "${sas_metadata}/op_api/l0_sparse_attn_sharedkv_metadata.cpp"
     ${a2_aclnn_sources}
 )
 target_include_directories(cust_opapi PRIVATE
@@ -173,6 +187,7 @@ file(GLOB generated_fallback CONFIGURE_DEPENDS "${ASCEND_AUTOGEN_PATH}/fallback_
 npu_op_library(cust_op_proto GRAPH
     ${generated_proto}
     "${qli_metadata}/op_graph/quant_lightning_indexer_metadata_proto.cpp"
+    "${sas_metadata}/op_graph/sparse_attn_sharedkv_metadata_proto.cpp"
 )
 npu_op_library(cust_optiling TILING
     ${op_definitions}
@@ -218,6 +233,11 @@ npu_op_library(cust_optiling TILING
     "${qli_metadata}/op_host/quant_lightning_indexer_metadata_infershape.cpp"
     "${scatter}/op_host/scatter_nd_update_infershape.cpp"
     "${scatter}/op_host/scatter_nd_update_v2_tiling.cpp"
+    ${sparse_attention_tiling}
+    "${CMAKE_CURRENT_SOURCE_DIR}/compressor/op_host/compressor_proto.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sparse_attn_sharedkv/op_host/sparse_attn_sharedkv_proto.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sparse_flash_attention_lse/op_host/sparse_flash_attention_lse_infershape.cpp"
+    "${sas_metadata}/op_host/sparse_attn_sharedkv_metadata_infershape.cpp"
     ${a2_tiling_sources}
     ${generated_fallback}
 )
@@ -228,6 +248,7 @@ endforeach()
 target_include_directories(cust_optiling PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${qli}/op_host"
+    "${ASCEND_CANN_PACKAGE_PATH}/pkg_inc"
     "${ASCEND_CANN_PACKAGE_PATH}/include/op_common/op_host"
 )
 target_link_libraries(cust_optiling PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/lib64/libascendalog.so")
@@ -364,8 +385,25 @@ npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelScatterNdUpdateV2
 npu_op_kernel_options(ascendc_kernels XllmKernelScatterNdUpdateV2
     OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error)
 
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelCompressor
+    KERNEL_DIR compressor/op_kernel KERNEL_FILE xllm_kernel_compressor.cpp)
+npu_op_kernel_options(ascendc_kernels XllmKernelCompressor
+    OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Wno-error
+    -mllvm -cce-aicore-hoist-movemask=false --op_relocatable_kernel_binary=true
+    "-I${CMAKE_CURRENT_SOURCE_DIR}" "-I${CMAKE_CURRENT_SOURCE_DIR}/compressor/op_kernel")
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelSparseAttnSharedkv
+    KERNEL_DIR sparse_attn_sharedkv/op_kernel KERNEL_FILE xllm_kernel_sparse_attn_sharedkv.cpp)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelSparseFlashAttentionLse
+    KERNEL_DIR sparse_flash_attention_lse/op_kernel KERNEL_FILE xllm_kernel_sparse_flash_attention_lse.cpp)
+foreach(op_type XllmKernelSparseAttnSharedkv XllmKernelSparseFlashAttentionLse)
+    npu_op_kernel_options(ascendc_kernels ${op_type}
+        OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Wno-error
+        -mllvm -cce-vf-remove-membar=false -mllvm -cce-aicore-hoist-movemask=false
+        "-I${CMAKE_CURRENT_SOURCE_DIR}")
+endforeach()
+
 npu_op_kernel_library(ascendc_kernels SRC_BASE "${CMAKE_CURRENT_SOURCE_DIR}" TILING_LIBRARY cust_optiling)
 
-include("${qli_metadata}/aicpu.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/aicpu.cmake")
 
 npu_op_package_add(${vendor} LIBRARY cust_opapi cust_op_proto cust_optiling ascendc_kernels)

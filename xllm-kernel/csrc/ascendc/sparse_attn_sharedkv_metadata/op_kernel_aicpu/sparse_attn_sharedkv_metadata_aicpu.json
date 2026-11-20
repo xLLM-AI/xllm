@@ -1,0 +1,15 @@
+{
+    "XllmKernelSparseAttnSharedkvMetadata":{
+        "opInfo":{
+            "computeCost":"100",
+            "engine":"DNN_VM_AICPU",
+            "flagAsync":"False",
+            "flagPartial":"False",
+            "functionName":"RunCpuKernel",
+            "kernelSo":"libxllm_kernel_aicpu.so",
+            "opKernelLib":"CUSTAICPUKernel",
+            "userDefined":"True",
+            "workspaceSize":"100"
+        }
+    }
+}

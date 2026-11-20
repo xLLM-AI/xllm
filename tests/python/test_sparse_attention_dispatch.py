@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from xllm_kernel.ops.attention import sparse_attention as package_attention
 
 from xllm.python.kernels_npu import sparse_attention
 
@@ -44,9 +45,9 @@ def test_sparse_attention_preserves_backend_and_output_contract(
         return output
 
     custom_out = MagicMock(side_effect=write_out)
-    monkeypatch.setattr(torch.ops.xllm_ops, "sparse_flash_attention_lse", custom, raising=False)
+    monkeypatch.setattr(package_attention, "sparse_flash_attention_lse", custom, raising=False)
     monkeypatch.setattr(torch.ops.npu, "npu_sparse_flash_attention", native, raising=False)
-    monkeypatch.setattr(torch.ops.xllm_ops, "sparse_flash_attention_lse_out", custom_out, raising=False)
+    monkeypatch.setattr(package_attention, "sparse_flash_attention_lse_out", custom_out, raising=False)
     args = (
         query,
         key,
@@ -81,7 +82,7 @@ def test_sparse_attention_preserves_backend_and_output_contract(
         tail = (9223372036854775807, 9223372036854775807, 2, False)
 
     if entry == "out" and rope:
-        custom_out.assert_called_once_with(*args, *tail, buffer)
+        custom_out.assert_called_once_with(*args, buffer)
         custom.assert_not_called()
         native.assert_not_called()
     elif rope:
@@ -121,9 +122,9 @@ def test_partial_rope_pair_is_rejected_before_operator_execution(
     custom = MagicMock()
     native = MagicMock()
     custom_out = MagicMock()
-    monkeypatch.setattr(torch.ops.xllm_ops, "sparse_flash_attention_lse", custom, raising=False)
+    monkeypatch.setattr(package_attention, "sparse_flash_attention_lse", custom, raising=False)
     monkeypatch.setattr(torch.ops.npu, "npu_sparse_flash_attention", native, raising=False)
-    monkeypatch.setattr(torch.ops.xllm_ops, "sparse_flash_attention_lse_out", custom_out, raising=False)
+    monkeypatch.setattr(package_attention, "sparse_flash_attention_lse_out", custom_out, raising=False)
     tensor = torch.zeros(1)
     key_rope = tensor if query_rope is None else None
     args = (

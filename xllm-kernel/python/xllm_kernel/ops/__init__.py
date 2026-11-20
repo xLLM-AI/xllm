@@ -24,6 +24,13 @@ from xllm_kernel.ops.attention.gdn.mega import (
 )
 from xllm_kernel.ops.attention.kda import causal_conv1d, causal_conv1d_update_v2
 from xllm_kernel.ops.attention.mla import mla_preprocess_v2
+from xllm_kernel.ops.attention.sparse_attention import (
+    compressor,
+    sparse_attn_sharedkv,
+    sparse_attn_sharedkv_metadata,
+    sparse_flash_attention_lse,
+    sparse_flash_attention_lse_out,
+)
 from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out, quant_matmul_out
 from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
 from xllm_kernel.ops.kv_cache import reshape_paged_cache
@@ -81,4 +88,9 @@ __all__ = [
     "scatter_nd_update",
     "shared_linear_state_indices_out",
     "silu_and_mul",
+    "compressor",
+    "sparse_attn_sharedkv",
+    "sparse_attn_sharedkv_metadata",
+    "sparse_flash_attention_lse",
+    "sparse_flash_attention_lse_out",
 ]

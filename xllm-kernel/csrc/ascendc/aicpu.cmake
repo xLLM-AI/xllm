@@ -1,6 +1,5 @@
 # Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
-set(aicpu "${CMAKE_CURRENT_LIST_DIR}/op_kernel_aicpu")
 set(cann "${ASCEND_CANN_PACKAGE_PATH}")
 find_program(aicpu_cxx NAMES aarch64-target-linux-gnu-g++
     HINTS "${cann}/toolkit/toolchain/hcc/bin" "${cann}/toolchain/hcc/bin"
@@ -9,9 +8,24 @@ find_library(aicpu_context NAMES libaicpu_context.a
     HINTS "${cann}/lib64" "${cann}/ops_base/lib64" NO_DEFAULT_PATH REQUIRED)
 find_library(aicpu_protobuf NAMES libbase_ascend_protobuf.a
     HINTS "${cann}/lib64" "${cann}/ops_base/lib64" NO_DEFAULT_PATH REQUIRED)
-set(qli_aicpu_library "${CMAKE_CURRENT_BINARY_DIR}/libxllm_kernel_aicpu.so")
+set(aicpu_library "${CMAKE_CURRENT_BINARY_DIR}/libxllm_kernel_aicpu.so")
+set(aicpu_config "${CMAKE_CURRENT_BINARY_DIR}/cust_aicpu_kernel.json")
+set(aicpu_json "{}")
+foreach(component quant_lightning_indexer_metadata sparse_attn_sharedkv_metadata)
+    set(directory "${CMAKE_CURRENT_LIST_DIR}/${component}/op_kernel_aicpu")
+    list(APPEND aicpu_sources "${directory}/${component}_aicpu.cpp")
+    list(APPEND aicpu_headers "${directory}/${component}_aicpu.h")
+    set(config "${directory}/${component}_aicpu.json")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${config}")
+    file(READ "${config}" component_json)
+    string(JSON operator MEMBER "${component_json}" 0)
+    string(JSON definition GET "${component_json}" "${operator}")
+    string(JSON aicpu_json SET "${aicpu_json}" "${operator}" "${definition}")
+endforeach()
+file(GENERATE OUTPUT "${aicpu_config}" CONTENT "${aicpu_json}\n")
+
 add_custom_command(
-    OUTPUT "${qli_aicpu_library}"
+    OUTPUT "${aicpu_library}"
     COMMAND "${aicpu_cxx}" -std=c++17 -O2 -shared -fPIC -fvisibility=hidden
         -fvisibility-inlines-hidden -fstack-protector-all
         -Dgoogle=ascend_private -DDISABLE_COMPILE_V1 -D_FORTIFY_SOURCE=2 -D_GLIBCXX_USE_CXX11_ABI=1
@@ -19,20 +33,20 @@ add_custom_command(
         "-I${cann}/include" "-I${cann}/include/aicpu" "-I${cann}/pkg_inc" "-I${cann}/pkg_inc/base"
         "-I${cann}/pkg_inc/aicpu_common/context/common" "-I${cann}/pkg_inc/aicpu_common/context/cpu_proto"
         "-I${cann}/pkg_inc/aicpu_common/context/utils"
-        "${aicpu}/quant_lightning_indexer_metadata_aicpu.cpp"
+        ${aicpu_sources}
         -Wl,--whole-archive "${aicpu_context}" "${aicpu_protobuf}" -Wl,--no-whole-archive
         -Wl,-Bsymbolic -Wl,--exclude-libs=libbase_ascend_protobuf.a
-        -o "${qli_aicpu_library}"
+        -o "${aicpu_library}"
     DEPENDS
-        "${aicpu}/quant_lightning_indexer_metadata_aicpu.cpp"
-        "${aicpu}/quant_lightning_indexer_metadata_aicpu.h"
-        "${aicpu}/cpu_context_util.h"
+        ${aicpu_sources}
+        ${aicpu_headers}
+        "${qli_metadata}/op_kernel_aicpu/cpu_context_util.h"
+        "${CMAKE_CURRENT_LIST_DIR}/sparse_attn_sharedkv/op_kernel/sparse_attn_sharedkv_metadata.h"
         "${qli}/op_kernel/quant_lightning_indexer_metadata.h"
         "${aicpu_context}" "${aicpu_protobuf}"
     VERBATIM
 )
-add_custom_target(xllm_kernel_aicpu ALL DEPENDS "${qli_aicpu_library}")
+add_custom_target(xllm_kernel_aicpu ALL DEPENDS "${aicpu_library}")
 set(cpu_destination "packages/vendors/${vendor}/op_impl/cpu")
-install(FILES "${qli_aicpu_library}" DESTINATION "${cpu_destination}/aicpu_kernel/impl")
-install(FILES "${aicpu}/quant_lightning_indexer_metadata_aicpu.json"
-    DESTINATION "${cpu_destination}/config" RENAME cust_aicpu_kernel.json)
+install(FILES "${aicpu_library}" DESTINATION "${cpu_destination}/aicpu_kernel/impl")
+install(FILES "${aicpu_config}" DESTINATION "${cpu_destination}/config")

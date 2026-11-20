@@ -66,8 +66,9 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                     if packaged_header.exists():
                         header = source / component / "op_host/op_api" / f"aclnn_{component}.h"
                         shutil.copy2(header, packaged_header)
-                metadata_api = source / "quant_lightning_indexer_metadata" / "op_api"
-                shutil.copy2(metadata_api / "aclnn_quant_lightning_indexer_metadata.h", headers)
+                for component in ("quant_lightning_indexer_metadata", "sparse_attn_sharedkv_metadata"):
+                    metadata_header = source / component / "op_api" / f"aclnn_{component}.h"
+                    shutil.copy2(metadata_header, headers)
                 chunk_gdn = source / "mega_chunk_gdn/op_host/op_api"
                 shutil.copy2(chunk_gdn / "aclnn_mega_chunk_gdn.h", headers / "aclnn_xllm_kernel_mega_chunk_gdn.h")
                 recurrent_header = headers / "aclnn_xllm_kernel_recurrent_gated_delta_rule.h"
@@ -107,6 +108,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/npu/normalization.cpp",
                 "csrc/npu/quant_matmul.cpp",
                 "csrc/npu/reshape_paged_cache.cpp",
+                "csrc/npu/sparse_attention.cpp",
                 "csrc/npu/sparse_indexing.cpp",
             ],
             include_dirs=[
