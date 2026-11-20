@@ -22,7 +22,6 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/framework/config/kv_cache_store_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "framework/request/priority_comparator.h"
 #include "scheduler/scheduler_policy.h"
@@ -464,21 +463,19 @@ void UnifiedPolicy::get_latency_budget_and_request_order(
   int32_t latency_budget_threshold = static_cast<int32_t>(0.65 * min_tpot);
   latency_budget = std::max(min_remaining_time, latency_budget_threshold);
 
-  const double lambda =
-      ::xllm::SchedulerConfig::get_instance().aggressive_coeff();
+  const double lambda = options_.aggressive_coeff();
   const double denominator = std::max(latency_budget - constant_overhead, 1e-6);
   double load_judge_func = total_exec_time * latency_budget / denominator;
 
   for (auto& request : queue) {
     auto& sequence = request->sequences()[0];
 
-    if (::xllm::SchedulerConfig::get_instance().enable_starve_prevent()) {
+    if (options_.enable_starve_prevent()) {
       const int32_t starve_unit_time = sequence->is_prefill_stage()
                                            ? -request->ttft_slo_ms()
                                            : -request->tpot_slo_ms();
-      const int32_t starve_time_threshold = static_cast<int32_t>(
-          ::xllm::SchedulerConfig::get_instance().starve_threshold() *
-          starve_unit_time);
+      const int32_t starve_time_threshold =
+          static_cast<int32_t>(options_.starve_threshold() * starve_unit_time);
       if (request->get_remaining_time() < starve_time_threshold) {
         request->set_starved(true);
       }

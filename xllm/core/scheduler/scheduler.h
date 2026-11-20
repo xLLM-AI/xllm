@@ -64,8 +64,12 @@ struct SchedulerOptions {
   // are rejected at admission.
   PROPERTY(int32_t, request_queue_size) = 100000;
 
+  PROPERTY(double, prefill_scheduling_memory_usage_threshold) = 0.95;
+
   // the max tokens per chunk for request in prefill stage.
   PROPERTY(int32_t, max_tokens_per_chunk_for_prefill);
+
+  PROPERTY(int32_t, chunked_match_frequency) = 2;
 
   // the number of speculative tokens per step
   PROPERTY(int32_t, num_speculative_tokens) = 0;
@@ -120,6 +124,12 @@ struct SchedulerOptions {
   // TODO: think if distinguish prefill and decode priority strategy
   PROPERTY(std::string,
            priority_strategy) = "fcfs";  // priority, deadline, fcfs
+
+  PROPERTY(double, aggressive_coeff) = 1.0;
+
+  PROPERTY(bool, enable_starve_prevent) = true;
+
+  PROPERTY(double, starve_threshold) = 1.0;
 
   PROPERTY(bool, enable_profile_step_time) = false;
   // use predicted latency for latency aware schedule

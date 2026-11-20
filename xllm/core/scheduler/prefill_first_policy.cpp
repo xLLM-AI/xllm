@@ -18,7 +18,6 @@ limitations under the License.
 #include <cstdint>
 #include <limits>
 
-#include "core/framework/config/scheduler_config.h"
 #include "framework/request/priority_comparator.h"
 #include "scheduler/scheduler_policy.h"
 
@@ -218,7 +217,7 @@ void PrefillFirstPolicy::adjust_latency_budget_and_reorder(
     latency_budget = std::max(min_remaining_time, latency_budget_threshold);
   }
 
-  const double lambda = SchedulerConfig::get_instance().aggressive_coeff();
+  const double lambda = options_.aggressive_coeff();
   double load_judge_func = 0.0;
   if (for_prefill) {
     load_judge_func = total_exec_time + constant_overhead;
@@ -237,13 +236,12 @@ void PrefillFirstPolicy::adjust_latency_budget_and_reorder(
       auto request = *it;
       auto& sequence = request->sequences()[0];
 
-      if (SchedulerConfig::get_instance().enable_starve_prevent()) {
+      if (options_.enable_starve_prevent()) {
         const int32_t starve_unit_time = sequence->is_prefill_stage()
                                              ? -request->ttft_slo_ms()
                                              : -request->tpot_slo_ms();
         const int32_t starve_time_threshold = static_cast<int32_t>(
-            SchedulerConfig::get_instance().starve_threshold() *
-            starve_unit_time);
+            options_.starve_threshold() * starve_unit_time);
         if (request->get_remaining_time() < starve_time_threshold) {
           request->set_starved(true);
         }

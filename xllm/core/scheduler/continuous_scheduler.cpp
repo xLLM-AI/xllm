@@ -34,7 +34,6 @@ limitations under the License.
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
@@ -159,8 +158,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
   instance_info_.name = options_.instance_name().value_or("");
   instance_info_.type = options_.instance_role().value().to_string();
   instance_info_.dp_size = options.dp_size();
-  instance_info_.kv_split_size =
-      ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
+  instance_info_.kv_split_size = options_.kv_split_size();
 
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
   if (options_.enable_schedule_overlap()) {

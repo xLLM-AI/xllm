@@ -329,6 +329,7 @@ VLMMaster::VLMMaster(const Options& options)
     finish_engine_initialization(vlm_engine_.get());
   }
 
+  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   SchedulerOptions scheduler_options;
   scheduler_options.max_tokens_per_batch(options.max_tokens_per_batch())
       .max_seqs_per_batch(options.max_seqs_per_batch())
@@ -345,7 +346,13 @@ VLMMaster::VLMMaster(const Options& options)
       .dp_size(options_.dp_size())
       .cp_size(options_.cp_size())
       .kv_split_size(ParallelConfig::get_instance().kv_split_size_effective())
-      .enable_mix_batch(SchedulerConfig::get_instance().enable_mix_batch())
+      .enable_mix_batch(scheduler_config.enable_mix_batch())
+      .prefill_scheduling_memory_usage_threshold(
+          scheduler_config.prefill_scheduling_memory_usage_threshold())
+      .chunked_match_frequency(scheduler_config.chunked_match_frequency())
+      .aggressive_coeff(scheduler_config.aggressive_coeff())
+      .enable_starve_prevent(scheduler_config.enable_starve_prevent())
+      .starve_threshold(scheduler_config.starve_threshold())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
       .instance_name(options_.instance_name())
