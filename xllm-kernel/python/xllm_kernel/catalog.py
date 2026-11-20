@@ -67,7 +67,8 @@ _BUILTINS = (
     "xllm_kernel.ops.attention.kda",
     "xllm_kernel.ops.attention.mla",
     "xllm_kernel.ops.attention.dsa.indexer",
-    "xllm_kernel.ops.attention.sparse_attention",
+    "xllm_kernel.ops.attention.dsv4",
+    "xllm_kernel.ops.attention.dsa",
     "xllm_kernel.ops.positional_encoding",
 )
 

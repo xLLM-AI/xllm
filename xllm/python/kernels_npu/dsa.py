@@ -14,12 +14,12 @@
 
 """DeepSeek-V4 compressed KV and shared sparse attention kernels."""
 
-from xllm_kernel.ops.attention.sparse_attention import (
+from xllm_kernel.ops.attention.dsv4 import (
     compressor as compressor,
 )
-from xllm_kernel.ops.attention.sparse_attention import (
+from xllm_kernel.ops.attention.dsv4 import (
     sparse_attn_sharedkv as sparse_attn_sharedkv,
 )
-from xllm_kernel.ops.attention.sparse_attention import (
+from xllm_kernel.ops.attention.dsv4 import (
     sparse_attn_sharedkv_metadata as sparse_attn_sharedkv_metadata,
 )

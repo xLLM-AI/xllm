@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import torch
-from xllm_kernel.ops.attention import sparse_attention as _sparse_attention
+from xllm_kernel.ops.attention import dsa as _dsa_attention
 from xllm_kernel.ops.attention.dsa.indexer import (
     quant_lightning_indexer as quant_lightning_indexer,
 )
@@ -400,7 +400,7 @@ def sparse_flash_attention_out(
     if (query_rope is None) != (key_rope is None):
         raise ValueError("query_rope and key_rope must both be present or absent")
     if query_rope is not None and layout_query == "TND" and layout_kv == "PA_BSND" and sparse_mode == 3:
-        return _sparse_attention.sparse_flash_attention_lse_out(
+        return _dsa_attention.sparse_flash_attention_lse_out(
             query,
             key,
             value,
@@ -457,7 +457,7 @@ def sparse_flash_attention_lse_out(
 ) -> torch.Tensor:
     """Run sparse attention directly into a caller-owned output buffer."""
     _validate_sparse_attention_output(query, output)
-    return _sparse_attention.sparse_flash_attention_lse_out(
+    return _dsa_attention.sparse_flash_attention_lse_out(
         query,
         key,
         value,
@@ -507,7 +507,7 @@ def sparse_flash_attention_lse(
     if (query_rope is None) != (key_rope is None):
         raise ValueError("query_rope and key_rope must both be present or absent")
     if query_rope is not None:
-        return _sparse_attention.sparse_flash_attention_lse(
+        return _dsa_attention.sparse_flash_attention_lse(
             query,
             key,
             value,

@@ -2,10 +2,16 @@
 """SDK-free public operator APIs."""
 
 from xllm_kernel.ops.activation import silu_and_mul
+from xllm_kernel.ops.attention.dsa import sparse_flash_attention_lse, sparse_flash_attention_lse_out
 from xllm_kernel.ops.attention.dsa.indexer import (
     quant_lightning_indexer,
     quant_lightning_indexer_metadata,
     scatter_nd_update,
+)
+from xllm_kernel.ops.attention.dsv4 import (
+    compressor,
+    sparse_attn_sharedkv,
+    sparse_attn_sharedkv_metadata,
 )
 from xllm_kernel.ops.attention.fia import get_fused_attention
 from xllm_kernel.ops.attention.gdn import (
@@ -24,13 +30,6 @@ from xllm_kernel.ops.attention.gdn.mega import (
 )
 from xllm_kernel.ops.attention.kda import causal_conv1d, causal_conv1d_update_v2
 from xllm_kernel.ops.attention.mla import mla_preprocess_v2
-from xllm_kernel.ops.attention.sparse_attention import (
-    compressor,
-    sparse_attn_sharedkv,
-    sparse_attn_sharedkv_metadata,
-    sparse_flash_attention_lse,
-    sparse_flash_attention_lse_out,
-)
 from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out, quant_matmul_out
 from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
 from xllm_kernel.ops.kv_cache import reshape_paged_cache
