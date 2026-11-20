@@ -66,7 +66,9 @@ class XllmKernelReshapeAndCacheA5 : public OpDef {
     OpAICoreConfig a5_config;
     a5_config.DynamicCompileStaticFlag(true)
         .DynamicRankSupportFlag(true)
-        .DynamicShapeSupportFlag(true);
+        .DynamicShapeSupportFlag(true)
+        .ExtendCfgInfo("opFile.value", "reshape_and_cache_a5")
+        .ExtendCfgInfo("opInterface.value", "reshape_and_cache_a5");
     this->AICore().AddConfig("ascend950", a5_config);
   }
 };

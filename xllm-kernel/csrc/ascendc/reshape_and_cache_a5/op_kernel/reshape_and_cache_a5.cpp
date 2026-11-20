@@ -114,7 +114,7 @@ class ReshapeAndCacheA5Kernel {
 };
 }  // namespace
 
-extern "C" __global__ __aicore__ void xllm_kernel_reshape_and_cache_a5(
+extern "C" __global__ __aicore__ void reshape_and_cache_a5(
     GM_ADDR key,
     GM_ADDR value,
     GM_ADDR key_cache,

@@ -415,7 +415,7 @@ endforeach()
 
 if(reshape_a5_api)
     npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelReshapeAndCacheA5
-        KERNEL_DIR reshape_and_cache_a5/op_kernel KERNEL_FILE xllm_kernel_reshape_and_cache_a5.cpp)
+        KERNEL_DIR reshape_and_cache_a5/op_kernel KERNEL_FILE reshape_and_cache_a5.cpp)
     npu_op_kernel_options(ascendc_kernels XllmKernelReshapeAndCacheA5
         OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Werror)
 endif()
