@@ -1,0 +1,5 @@
+torch==2.7.1
+torch-npu==2.7.1.post4
+triton-ascend==3.2.1
+ninja
+openpyxl

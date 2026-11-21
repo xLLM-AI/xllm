@@ -1,0 +1,593 @@
+{
+  "task": "packed",
+  "source": "golden.py --verify-functional",
+  "environment": {
+    "utc": "2026-11-17T05:59:43.872768+00:00",
+    "hostname": "8770793c13374301b95ada0f37cf1fc5",
+    "python": "3.11.4",
+    "device": "Ascend910_9362",
+    "versions": {
+      "torch": "2.7.1+cpu",
+      "torch-npu": "2.7.1.post4",
+      "triton-ascend": "3.2.1"
+    },
+    "triton_target": "GPUTarget(backend='npu', arch='Ascend910_9362', warp_size=0)",
+    "source_sha256": {
+      "baseline.py": "2a64eae708a9d7cefb034cf41d25e36ffc02350665dce7758c43a2072e55553d",
+      "case.json": "63fe2022eed796d675ef60ee5c6786eea2fac12f9bbf9335e0c7a72e4aeff42b",
+      "contract.py": "08caacee40811608c1ec149342fe5fb77af93b5d1f1e257127738f5296afbbc9",
+      "functional_checks.py": "a5f3d1d7506d542eab7968c6ffe8fed8acae7ac85839120c4e10733bf2443a71",
+      "generate_data.py": "a27cf622f54df8d56b88d8cf81351cad73bfdb171fea3b361c433344df3474a4",
+      "golden.py": "3ea21768bb38440d59c46000c88901992ec35accda233eef43d3a9950b75a6a9"
+    }
+  },
+  "input_cases": [
+    {
+      "id": "packed_literal",
+      "status": "PASS",
+      "shape": [
+        2,
+        3
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_prefix_padding",
+      "status": "PASS",
+      "shape": [
+        2,
+        4
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_single",
+      "status": "PASS",
+      "shape": [
+        2
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_empty_requests",
+      "status": "PASS",
+      "shape": [
+        2,
+        0
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_zero_counts",
+      "status": "PASS",
+      "shape": [
+        2,
+        0
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_empty_columns",
+      "status": "PASS",
+      "shape": [
+        2,
+        0
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_offset",
+      "status": "PASS",
+      "shape": [
+        3,
+        84
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_boundary257",
+      "status": "PASS",
+      "shape": [
+        1,
+        243
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_perf_small",
+      "status": "PASS",
+      "shape": [
+        8,
+        287
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_perf_large",
+      "status": "PASS",
+      "shape": [
+        32,
+        7898
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_skew_valid_prefix",
+      "status": "PASS",
+      "shape": [
+        3,
+        10
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_route_32736",
+      "status": "PASS",
+      "shape": [
+        32,
+        1023
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_route_32768",
+      "status": "PASS",
+      "shape": [
+        32,
+        1024
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    },
+    {
+      "id": "packed_single_long_rows",
+      "status": "PASS",
+      "shape": [
+        4698
+      ],
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      }
+    }
+  ],
+  "negative": [
+    {
+      "id": "input_count",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "unknown_attribute",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "cpu_input",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "dtype",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "noncontiguous",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "negative_mapping",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "logical_address_out_of_range",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "nonmonotonic_cu",
+      "status": "PASS",
+      "exception": "ValueError"
+    }
+  ],
+  "dynamic_updates": {
+    "packed_perf_small": [
+      {
+        "id": "logical_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "mapping_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "cu_counts_changed_same_total",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      }
+    ],
+    "packed_perf_large": [
+      {
+        "id": "logical_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "mapping_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "large_path_int32_output_boundary",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "cu_counts_changed_same_total",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      }
+    ]
+  },
+  "storage_rebindings": {
+    "packed_perf_small": [
+      {
+        "id": "mapping_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "logical_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "cu_set_storage_same_total",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      }
+    ],
+    "packed_perf_large": [
+      {
+        "id": "mapping_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "logical_set_storage",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      },
+      {
+        "id": "cu_set_storage_same_total",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "storage_offset": 1,
+        "pointer_changed": true,
+        "old_alignment_mod16": 0,
+        "new_alignment_mod16": 4
+      }
+    ]
+  },
+  "large_single_layer": {
+    "id": "packed_large_single_layer",
+    "status": "PASS",
+    "checks": {
+      "candidate_mismatches": 0,
+      "baseline_mismatches": 0,
+      "shape": true,
+      "dtype": true,
+      "npu": true,
+      "contiguous": true,
+      "inputs_unchanged": true,
+      "independent_storage": true
+    },
+    "shape": [
+      32768
+    ],
+    "input_shapes": [
+      [
+        1,
+        32768
+      ],
+      [
+        1
+      ],
+      [
+        2
+      ]
+    ],
+    "attributes": {}
+  },
+  "paired_timing": {
+    "source": "evidence/result.json",
+    "benchmarks": [
+      {
+        "id": "packed_perf_small",
+        "baseline_rounds_us": [
+          127.69620981998743,
+          126.87509995885193,
+          123.94286983180791,
+          124.02172025758775,
+          120.65388495102525,
+          121.71759502962232
+        ],
+        "candidate_rounds_us": [
+          38.177224923856556,
+          37.756170495413244,
+          37.61572006624192,
+          37.74047479964793,
+          38.21603022515774,
+          38.062825333327055
+        ],
+        "baseline_mean_us": 124.15122997481376,
+        "candidate_mean_us": 37.92807430727407,
+        "baseline_median_us": 123.98229504469782,
+        "candidate_median_us": 37.90949791437015,
+        "saved_mean_us": 86.22315566753969,
+        "saved_median_us": 86.3041976117529,
+        "saved_mean_ci95_us": [
+          84.13227401130523,
+          88.30638660583645
+        ]
+      },
+      {
+        "id": "packed_perf_large",
+        "baseline_rounds_us": [
+          121.9350501196459,
+          124.0165694616735,
+          121.65414460469037,
+          124.64917497709394,
+          120.54988474119455,
+          123.8923700293526
+        ],
+        "candidate_rounds_us": [
+          45.821304665878415,
+          45.6721504451707,
+          45.8002055529505,
+          45.70910008624196,
+          45.82035529892892,
+          45.70380027871579
+        ],
+        "baseline_mean_us": 122.78286565560848,
+        "candidate_mean_us": 45.754486054647714,
+        "baseline_median_us": 122.91371007449925,
+        "candidate_median_us": 45.75465281959623,
+        "saved_mean_us": 77.02837960096076,
+        "saved_median_us": 77.15115760220215,
+        "saved_mean_ci95_us": [
+          75.7934163751391,
+          78.21454462828115
+        ]
+      },
+      {
+        "id": "packed_route_32736",
+        "baseline_rounds_us": [
+          120.50973484292626,
+          122.35580536071211,
+          121.64754967670888,
+          122.7617549011484,
+          119.97308465652168,
+          123.77256993204355
+        ],
+        "candidate_rounds_us": [
+          37.312014610506594,
+          36.77331027574837,
+          37.67011978197843,
+          37.305669975467026,
+          37.393614766187966,
+          37.127515533939004
+        ],
+        "baseline_mean_us": 121.83674989501014,
+        "candidate_mean_us": 37.2637074906379,
+        "baseline_median_us": 122.0016775187105,
+        "candidate_median_us": 37.30884229298681,
+        "saved_mean_us": 84.57304240437225,
+        "saved_median_us": 84.7167574102059,
+        "saved_mean_ci95_us": [
+          83.41600914718583,
+          85.69524390622973
+        ]
+      },
+      {
+        "id": "packed_route_32768",
+        "baseline_rounds_us": [
+          121.66735017672181,
+          124.46367531083526,
+          122.97291017603128,
+          123.500915360637,
+          120.99804531317204,
+          123.91967000439764
+        ],
+        "candidate_rounds_us": [
+          37.29956515599042,
+          37.185370456427336,
+          37.71196992602199,
+          37.14141494128853,
+          37.44582005310804,
+          37.35196485649794
+        ],
+        "baseline_mean_us": 122.9204277236325,
+        "candidate_mean_us": 37.356017564889044,
+        "baseline_median_us": 123.23691276833414,
+        "candidate_median_us": 37.32576500624418,
+        "saved_mean_us": 85.56441015874346,
+        "saved_median_us": 85.81022033467887,
+        "saved_mean_ci95_us": [
+          84.52268443458404,
+          86.5520767789955
+        ]
+      }
+    ],
+    "acceptance": {
+      "packed_perf_small": {
+        "target_us": 40.0,
+        "mean_ok": true,
+        "mean_saved_positive": true,
+        "median_saved_positive": true,
+        "ci_lower_positive": true
+      },
+      "packed_perf_large": {
+        "target_us": 75.0,
+        "mean_ok": true,
+        "mean_saved_positive": true,
+        "median_saved_positive": true,
+        "ci_lower_positive": true
+      }
+    }
+  }
+}
