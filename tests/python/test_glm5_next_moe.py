@@ -270,7 +270,7 @@ def test_bf16_tp_only_preserves_one_combined_reduction(monkeypatch: pytest.Monke
         calls.append("tp")
 
     layer.experts = Experts()
-    monkeypatch.setattr(layer, "_topk", lambda value: (None, torch.ones(3, 2), torch.zeros(3, 2, dtype=torch.long)))
+    monkeypatch.setattr(layer, "_topk", lambda value: (torch.ones(3, 2), torch.zeros(3, 2, dtype=torch.long)))
     monkeypatch.setattr(layer, "_forward_w8a8", reject_w8a8)
     monkeypatch.setattr(glm5_next, "dp_gather_tokens", reject_w8a8)
     monkeypatch.setattr(glm5_next.kernels, "grouped_moe", reject_w8a8, raising=False)

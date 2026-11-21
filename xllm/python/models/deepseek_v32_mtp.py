@@ -22,7 +22,7 @@ the next MTP step.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
@@ -37,6 +37,11 @@ from xllm.python.models.deepseek_v32 import (
     DeepseekV3Model,
     DeepseekYarnRotaryEmbedding,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from xllm.python.model_loader import StateDictLike
 
 # The loader strips "model.", so a bare "shared_head.norm.weight" needs no entry.
 _MTP_NORM_ALIASES: dict[str, tuple[str, ...]] = {
@@ -100,9 +105,6 @@ class DeepseekV32MtpModel(DeepseekV3Model):
         hidden, _ = self.norm(hidden, residual)
         return hidden
 
-    def _prepare_logits_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
-        return hidden
-
     def _format_mtp_output(
         self, hidden: torch.Tensor, topk: torch.Tensor | None
     ) -> torch.Tensor | tuple[torch.Tensor, None, torch.Tensor | None]:
@@ -144,22 +146,10 @@ class DeepseekV32MtpModel(DeepseekV3Model):
         return self._format_mtp_output(hidden, topk)
 
 
-def _compute_mtp_logits(
-    model: DeepseekV32MtpModel,
-    lm_head: nn.Module | None,
-    hidden: torch.Tensor,
-    selected_idxes: torch.Tensor | None,
-) -> torch.Tensor:
-    if selected_idxes is not None and selected_idxes.numel() > 0:
-        hidden = hidden.index_select(0, selected_idxes)
-    assert lm_head is not None
-    return lm_head(model._prepare_logits_hidden(hidden))
-
-
 def _load_mtp_weights(
     model: PyModelBase,
     load_decoder_weights: Callable[..., None],
-    state_dicts: list,
+    state_dicts: Sequence[StateDictLike],
     tp_rank: int,
     tp_size: int,
 ) -> None:
@@ -180,23 +170,18 @@ def _load_mtp_weights(
         loader=loader,
     )
 
-    def _copy_if_present(module_name: str, required: bool = False) -> bool:
-        key = module_name + ".weight"
-        if not loader.has(key):
-            if required:
-                raise KeyError(f"missing required MTP weight: {key}")
-            return False
+    weight_keys = ["eh_proj.weight", "enorm.weight", "hnorm.weight"]
+    enable_rot = loader.has("rot.weight")
+    if enable_rot:
+        weight_keys.append("rot.weight")
+    for key in weight_keys:
         tensor = loader.get_tensor(key)
-        parameter = model.get_parameter("model." + key)
+        parameter_name = "model." + key
+        parameter = model.get_parameter(parameter_name)
         if tensor.shape != parameter.shape and tensor.dim() == 2:
             tensor = loader.shard(tensor, dim=0)
-        loader.copy_in("model." + key, tensor)
-        return True
-
-    _copy_if_present("eh_proj", required=True)
-    _copy_if_present("enorm", required=True)
-    _copy_if_present("hnorm", required=True)
-    model.model.enable_rot = _copy_if_present("rot")
+        loader.copy_in(parameter_name, tensor)
+    cast(DeepseekV32MtpModel, model.model).enable_rot = enable_rot
 
 
 class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
@@ -205,9 +190,6 @@ class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
     def __init__(self, config: dict) -> None:
         super().__init__(config, build_model=False)
         self.model = DeepseekV32MtpModel(self.cfg, self.dtype, self.device)
-
-    def compute_logits(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
-        return _compute_mtp_logits(self.model, self.lm_head, hidden, selected_idxes)
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         _load_mtp_weights(self, super().load_weights, state_dicts, tp_rank, tp_size)

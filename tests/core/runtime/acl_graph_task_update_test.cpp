@@ -332,12 +332,6 @@ class HybridConv1dMockLM final : public CausalLM {
     return opts;
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) override {
-    return torch::randn({hidden_states.size(0), kVocabSize},
-                        torch::dtype(kDtype).device(device_));
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader) override {}
   torch::Device device() const override { return device_; }
   bool saw_causal_conv_and_fia_graph_tasks() const {

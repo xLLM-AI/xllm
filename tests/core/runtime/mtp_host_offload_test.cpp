@@ -157,12 +157,6 @@ class CacheAllocationModel final : public CausalLM {
     return {};
   }
 
-  torch::Tensor logits(const torch::Tensor& /*hidden_states*/,
-                       const torch::Tensor& /*selected_indices*/) override {
-    ADD_FAILURE() << "Cache allocation must not compute logits.";
-    return {};
-  }
-
   void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {}
   void prepare_expert_weight(
       int32_t /*layer_id*/,

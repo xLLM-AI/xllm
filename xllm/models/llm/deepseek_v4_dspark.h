@@ -105,7 +105,7 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
     }
   }
 
-  void verify_dspark_weights() const {
+  void verify_loaded_weights() const {
     CHECK(embedding_source_.loaded())
         << "Failed to load DeepSeek-V4 DSpark vocabulary embedding from "
            "mtp.0.embed.weight or embed.weight.";
@@ -160,40 +160,38 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
 TORCH_MODULE(DeepseekV4DSparkModel);
 
 class DeepseekV4DSparkForCausalLMImpl final
-    : public LlmForCausalLMImplBase<DeepseekV4DSparkModel> {
+    : public LlmForCausalLMImplBase<DeepseekV4DSparkModel,
+                                    BodyWeightPrefix::kNone> {
  public:
   explicit DeepseekV4DSparkForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekV4DSparkModel>(context) {}
+      : LlmForCausalLMImplBase(context) {}
 
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string = "") override {
-    LlmForCausalLMImplBase<DeepseekV4DSparkModel>::load_lm_head(loader);
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(*state_dict);
-    }
-    model_->verify_dspark_weights();
-    CHECK(lm_head_->is_weight_loaded())
+  void verify_lm_head(bool weight_loaded) const {
+    CHECK(weight_loaded)
         << "Failed to load DeepSeek-V4 DSpark vocabulary head from mtp."
         << model_->last_dspark_layer_index() << ".head.weight or head.weight.";
   }
 
-  void load_lm_head(const StateDict& state_dict,
-                    const std::string& /*prefix*/) override {
+  StateDict lm_head_weights(const StateDict& state_dict,
+                            const std::string&) override {
     using Source = dspark_detail::VocabularyWeightSource;
-    const int32_t last_layer = model_->last_dspark_layer_index();
-    StateDict dedicated_head = state_dict.get_dict_with_prefix(
-        "mtp." + std::to_string(last_layer) + ".head.");
-    StateDict fallback_head = state_dict.get_dict_with_prefix("head.");
-    if (dedicated_head.size() > 0 &&
-        head_source_.should_load(Source::DEDICATED)) {
-      lm_head_->load_state_dict(dedicated_head);
-      head_source_.mark_loaded(Source::DEDICATED);
+    if (head_source_.should_load(/*source=*/Source::DEDICATED)) {
+      const int32_t last_layer = model_->last_dspark_layer_index();
+      auto dedicated = state_dict.get_dict_with_prefix(
+          "mtp." + std::to_string(last_layer) + ".head.");
+      if (dedicated.size() > 0) {
+        head_source_.mark_loaded(/*source=*/Source::DEDICATED);
+        return dedicated;
+      }
     }
-    if (fallback_head.size() > 0 &&
-        head_source_.should_load(Source::TARGET_FALLBACK)) {
-      lm_head_->load_state_dict(fallback_head);
-      head_source_.mark_loaded(Source::TARGET_FALLBACK);
+    if (head_source_.should_load(/*source=*/Source::TARGET_FALLBACK)) {
+      auto fallback = state_dict.get_dict_with_prefix(/*prefix=*/"head.");
+      if (fallback.size() > 0) {
+        head_source_.mark_loaded(/*source=*/Source::TARGET_FALLBACK);
+        return fallback;
+      }
     }
+    return StateDict({});
   }
 
   torch::Tensor dspark_markov_bias(
@@ -208,21 +206,6 @@ class DeepseekV4DSparkForCausalLMImpl final
                                const ModelParamsView& input_params) {
     return model_->write_context_kv(
         target_hidden, positions, device_cache_slots, kv_caches, input_params);
-  }
-
-  bool requires_graph_forward_metadata() {
-    return model_->requires_graph_forward_metadata();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState>
-  create_graph_forward_metadata_state() {
-    return model_->create_graph_forward_metadata_state();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& input_params) {
-    model_->prepare_graph_forward_metadata(state, positions, input_params);
   }
 
  private:

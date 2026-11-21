@@ -192,29 +192,23 @@ class Glm5NextForCausalLMImpl final
 
   bool is_hybrid_linear_attention() { return true; }
 
-  bool requires_graph_forward_metadata() override { return true; }
+  bool requires_graph_forward_metadata() { return true; }
 
-  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
-      override {
+  std::unique_ptr<ModelGraphMetadataState>
+  create_graph_forward_metadata_state() {
     return std::make_unique<Glm5NextGraphMetadataState>();
   }
 
   void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
                                       const torch::Tensor& positions,
-                                      ModelParamsView& params) override {
+                                      ModelParamsView& params) {
     auto* graph_state = dynamic_cast<Glm5NextGraphMetadataState*>(state);
     CHECK(graph_state != nullptr) << "GLM5 requires per-graph metadata state";
     graph_state->prepare(positions, params);
   }
 
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "model.") override {
-    LlmForCausalLMImplBase<Glm5NextModel>::load_model(std::move(loader),
-                                                      std::move(prefix));
-    model_->verify_loaded_weights();
-    if (!embedding_mode_) {
-      CHECK(lm_head_->is_weight_loaded()) << "Missing lm_head.weight";
-    }
+  void verify_lm_head(bool weight_loaded) const {
+    CHECK(weight_loaded) << "Missing lm_head.weight";
   }
 };
 TORCH_MODULE(Glm5NextForCausalLM);

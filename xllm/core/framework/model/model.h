@@ -20,7 +20,6 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/framework/model_loader/model_loader.h"
-#include "core/layers/common/lm_head.h"
 #include "core/layers/common/word_embedding.h"
 
 namespace xllm {
@@ -37,10 +36,6 @@ class Model {
 
   virtual const torch::TensorOptions& options() const = 0;
 
-  virtual layer::LmHead get_lm_head() {
-    NOT_IMPLEMENTED();
-    return nullptr;
-  }
   virtual layer::WordEmbedding get_word_embedding() {
     NOT_IMPLEMENTED();
     return nullptr;

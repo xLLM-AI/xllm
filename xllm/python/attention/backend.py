@@ -788,7 +788,6 @@ class AttentionMetadata(ExecutionMetadataSource, Protocol):
     dsa_graph_mode: bool
     kpool_query_lens: Sequence[int]
     raw_dp_execution_token_counts: Sequence[int]
-    dp_global_sequence_nums: Sequence[int]
     # Host-planned logical KV lengths, including the query; empty ranks keep zero.
     dp_global_kv_max_seq_lens: Sequence[int]
     dp_is_decode: Sequence[int]

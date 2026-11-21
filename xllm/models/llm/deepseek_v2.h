@@ -236,20 +236,10 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
 TORCH_MODULE(DeepseekV2Model);
 
 class DeepseekV2ForCausalLMImpl
-    : public LlmForCausalLMImplBase<DeepseekV2Model> {
+    : public LlmForCausalLMImplBase<DeepseekV2Model, BodyWeightPrefix::kExact> {
  public:
   DeepseekV2ForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekV2Model>(context) {}
-
-  void load_model(
-      std::unique_ptr<ModelLoader> loader,
-      std::string prefix = "model." /*llm model weight prefix*/) override {
-    LlmForCausalLMImplBase<DeepseekV2Model>::load_lm_head(loader, prefix);
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-    model_->verify_loaded_weights();
-  }
+      : LlmForCausalLMImplBase(context) {}
 };
 TORCH_MODULE(DeepseekV2ForCausalLM);
 

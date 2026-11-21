@@ -97,5 +97,5 @@ def test_mtp_load_rejects_missing_required_weights() -> None:
         patch.object(deepseek_v32_mtp.DeepseekV3ForCausalLM, "load_weights"),
     ):
         draft = deepseek_v32_mtp.DeepseekV32MtpForCausalLM(config)
-        with pytest.raises(KeyError, match="missing required MTP weight"):
+        with pytest.raises(KeyError, match=r"eh_proj\.weight"):
             draft.load_weights([], tp_rank=0, tp_size=1)

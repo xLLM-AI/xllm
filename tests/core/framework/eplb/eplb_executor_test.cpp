@@ -45,11 +45,6 @@ class RecordingModel final : public CausalLM {
     return {};
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor&) override {
-    return hidden_states;
-  }
-
   void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {}
 
   torch::Device device() const override { return options_.device(); }

@@ -192,7 +192,7 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
     norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
   }
 
-  void verify_loaded_weights() const {
+  void finalize_loaded_weights() {
     fc_->verify_loaded_weights("fc.");
     hidden_norm_->verify_loaded_weights("hidden_norm.");
     norm_->verify_loaded_weights("norm.");
@@ -201,9 +201,8 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
     for (int32_t i = 0; i < static_cast<int32_t>(layers_.size()); ++i) {
       layers_[i]->verify_loaded_weights("layers." + std::to_string(i) + ".");
     }
+    build_fused_context_kv_weights();
   }
-
-  void finalize_loaded_weights() { build_fused_context_kv_weights(); }
 
   DFlash2CandidateOutput candidates(
       const torch::Tensor& hidden_states,
@@ -378,20 +377,15 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
 TORCH_MODULE(DFlash2Qwen3Model);
 
 class DFlash2Qwen3ForCausalLMImpl final
-    : public ::xllm::LlmForCausalLMImplBase<DFlash2Qwen3Model> {
+    : public ::xllm::LlmForCausalLMImplBase<DFlash2Qwen3Model,
+                                            BodyWeightPrefix::kExact> {
  public:
-  using Base = ::xllm::LlmForCausalLMImplBase<DFlash2Qwen3Model>;
-
   explicit DFlash2Qwen3ForCausalLMImpl(const ModelContext& context)
-      : Base(context, /*share_lm_head=*/true) {}
+      : LlmForCausalLMImplBase(context, /*share_lm_head=*/true) {}
 
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "") override {
-    for (const std::unique_ptr<StateDict>& state_dict :
-         loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-    model_->verify_loaded_weights();
+  static constexpr const char* kWeightPrefix = "";
+
+  void verify_model_weights(const std::string&) override {
     model_->finalize_loaded_weights();
   }
 

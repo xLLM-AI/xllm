@@ -27,9 +27,10 @@ import torch
 import torch.nn as nn
 
 from xllm.python import distributed, kernels
+from xllm.python.layers.qlinear import QLinear
 
 
-class ColumnParallelLinear(nn.Module):
+class ColumnParallelLinear(QLinear):
     """Linear sharded on the output dim (dim 0): each rank owns
     ``[out_per_partition, in]`` and computes its slice of the output. No
     communication unless ``gather_output`` (then an all-gather along the last
@@ -49,54 +50,30 @@ class ColumnParallelLinear(nn.Module):
         bias: bool = False,
         dtype: torch.dtype | None = None,
         device: torch.device | str | None = None,
+        *,
+        kind: str | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            in_features,
+            out_features_per_partition,
+            dtype=dtype,
+            device=device,
+            kind=kind or "static",
+            bias=bias,
+        )
         self.tp_size = tp_size
         self.gather_output = gather_output
-        self.weight = nn.Parameter(
-            torch.empty(
-                out_features_per_partition,
-                in_features,
-                dtype=dtype,
-                device=device,
-            )
-        )
-        if bias:
-            self.bias = nn.Parameter(torch.empty(out_features_per_partition, dtype=dtype, device=device))
-        else:
-            self.register_parameter("bias", None)
+        if kind is None:
+            self.use_w8a8 = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.nn.functional.linear(x, self.weight, self.bias)
+        if self.use_w8a8 is False:
+            out = torch.nn.functional.linear(x, self.weight, self.bias)
+        else:
+            out = super().forward(x)
         if self.gather_output and self.tp_size > 1:
             out = distributed.tp_all_gather(out, dim=-1, world_size=self.tp_size)
         return out
-
-    def greedy_tokens(self, x: torch.Tensor) -> torch.Tensor:
-        """Select global token IDs without gathering the vocabulary logits."""
-        logits = torch.nn.functional.linear(x, self.weight, self.bias)
-        if self.tp_size == 1:
-            return logits.argmax(dim=-1)
-        # Pack both candidates in one collective. A float32 exactly represents
-        # every local vocabulary index in this supported range, and every
-        # fp16/bf16/fp32 score. Global IDs are assembled in int64 afterwards.
-        partition_size = self.weight.shape[0]
-        if partition_size > 2**24 or logits.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-            raise ValueError("greedy TP candidates require fp16/bf16/fp32 logits and at most 2**24 local tokens")
-        scores, indices = logits.max(dim=-1)
-        del logits
-        candidates = torch.stack((scores.float(), indices.float()), dim=-1)
-        candidates = distributed.tp_all_gather(candidates, dim=-1, world_size=self.tp_size)
-        candidates = candidates.view(*indices.shape, self.tp_size, 2)
-        # Rank-ordered contiguous shards make the first winning rank/token
-        # exactly the first global argmax, including ties and NaN scores.
-        winner = candidates[..., 0].argmax(dim=-1)
-        # The winner identifies the rank whose local index is needed. Gather
-        # that one value directly instead of building a rank range and doing a
-        # masked sum. This keeps the candidate communication and the original
-        # argmax tie/NaN behavior while removing two small decode-side ops.
-        local_ids = candidates[..., 1].gather(-1, winner.unsqueeze(-1)).squeeze(-1).to(torch.long)
-        return local_ids + winner * partition_size
 
 
 class RowParallelLinear(nn.Module):

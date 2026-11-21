@@ -98,11 +98,16 @@ int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
 
 PyCausalLM::PyCausalLM(const ModelContext& context,
                        std::string python_model_name)
-    : model_args_(context.get_model_args()),
+    : CausalVLM([this](const torch::Tensor& hidden_states) {
+        torch::NoGradGuard no_grad;
+        py::gil_scoped_acquire gil;
+        return py_model_.attr(/*key=*/"lm_head")(hidden_states)
+            .cast<torch::Tensor>();
+      }),
+      model_args_(context.get_model_args()),
       python_model_name_(std::move(python_model_name)),
       options_(context.get_tensor_options()),
-      device_(context.get_tensor_options().device()),
-      enable_mla_(context.get_model_args().enable_mla()) {
+      device_(context.get_tensor_options().device()) {
   ensure_python_interpreter();
 
   const ParallelArgs& parallel_args = context.get_parallel_args();
@@ -457,31 +462,6 @@ torch::Tensor PyCausalLM::pooler(const torch::Tensor& hidden_states,
         .cast<torch::Tensor>();
   }
   return CausalLM::pooler(hidden_states, selected_idxes);
-}
-
-torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
-                                 const torch::Tensor& seleted_idxes) {
-  torch::NoGradGuard no_grad;
-  py::gil_scoped_acquire gil;
-  py::object selected = optional_tensor(seleted_idxes);
-  py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
-  return out.cast<torch::Tensor>();
-}
-
-torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
-                                 const torch::Tensor& seleted_idxes,
-                                 torch::Tensor& out_hidden) {
-  torch::NoGradGuard no_grad;
-  // Select the draft's hidden rows once and reuse the two-argument
-  // projection path, avoiding a second Python-side index_select.
-  if (seleted_idxes.defined() && seleted_idxes.numel() > 0) {
-    const auto idxes = seleted_idxes.to(
-        torch::dtype(torch::kLong).device(hidden_states.device()));
-    out_hidden = hidden_states.index_select(/*dim=*/0, idxes);
-    return logits(out_hidden, /*seleted_idxes=*/torch::Tensor());
-  }
-  out_hidden = hidden_states;
-  return logits(hidden_states, seleted_idxes);
 }
 
 ModelOutput PyCausalLM::write_context_kv(

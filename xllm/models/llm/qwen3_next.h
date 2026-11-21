@@ -49,7 +49,7 @@ class Qwen3NextModelImpl : public Qwen3HybridModelImplBase {
 };
 TORCH_MODULE(Qwen3NextModel);
 
-class Qwen3NextForCausalLMImpl : public Qwen3HybridForCausalLMImplBase {
+class Qwen3NextForCausalLMImpl : public Qwen3HybridForCausalLMImplBase<> {
  public:
   explicit Qwen3NextForCausalLMImpl(const ModelContext& context)
       : Qwen3NextForCausalLMImpl(

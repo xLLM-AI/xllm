@@ -18,6 +18,7 @@ limitations under the License.
 #include <pybind11/pybind11.h>
 #include <torch/python.h>
 
+#include <memory>
 #include <optional>
 
 // C++<->Python (pybind11) boundary helpers. Include only from translation
@@ -38,6 +39,13 @@ inline void clear_python_object(pybind11::object& object) {
   }
   pybind11::gil_scoped_acquire gil;
   object = pybind11::object();
+}
+
+inline std::shared_ptr<PyObject> share_python_object(pybind11::object object) {
+  return std::shared_ptr<PyObject>(object.release().ptr(), [](PyObject* ptr) {
+    auto owned = pybind11::reinterpret_steal<pybind11::object>(ptr);
+    clear_python_object(owned);
+  });
 }
 
 inline pybind11::object optional_tensor(const torch::Tensor& tensor) {

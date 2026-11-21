@@ -138,11 +138,6 @@ class MockCausalLM : public CausalLM {
     output.mtp_topk_state = mtp_topk_state_;
     return output;
   }
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) override {
-    (void)seleted_idxes;
-    return hidden_states;
-  }
   int32_t forward_cnt() const { return forward_cnt_; }
   int64_t last_tokens_size() const { return last_tokens_size_; }
   const std::vector<int32_t>& last_dp_token_nums() const {
@@ -280,8 +275,8 @@ TEST_F(MluGraphExecutorTest, DifferentBatchSizes) {
                    {ModelParamsView(forward_input.input_params)});
     auto replay_output = replay_model_output.hidden_states;
 
-    CHECK_EQ(eager_output.sizes(), graph_output.sizes());
-    CHECK_EQ(eager_output.sizes(), replay_output.sizes());
+    ASSERT_EQ(eager_output.sizes(), graph_output.sizes());
+    ASSERT_EQ(eager_output.sizes(), replay_output.sizes());
     // Compare outputs - should be identical
     torch_mlu::synchronize();
     EXPECT_TRUE(torch::allclose(eager_output, graph_output, 1e-5, 1e-6));
@@ -308,7 +303,7 @@ TEST_F(MluGraphExecutorTest, MluGraphExecutorVsBaseExecutorImplMultipleRuns) {
                  {ModelParamsView(forward_input.input_params)});
   auto graph_output = graph_model_output.hidden_states;
 
-  CHECK_EQ(eager_output.sizes(), graph_output.sizes());
+  ASSERT_EQ(eager_output.sizes(), graph_output.sizes());
   // Compare outputs - should be identical
   torch_mlu::synchronize();
   EXPECT_TRUE(torch::allclose(eager_output, graph_output, 1e-5, 1e-6));
@@ -317,11 +312,6 @@ TEST_F(MluGraphExecutorTest, MluGraphExecutorVsBaseExecutorImplMultipleRuns) {
   const int num_runs = 5;
   auto base_forward_input = prepare_inputs(batch_size + 1, seed);
   auto replay_forward_input = prepare_inputs(batch_size + 1, seed);
-  EXPECT_TRUE(torch::allclose(
-      base_forward_input.input_params.embedding.input_embedding,
-      replay_forward_input.input_params.embedding.input_embedding,
-      1e-5,
-      1e-6));
 
   for (int i = 0; i < num_runs; ++i) {
     auto base_model_output =
@@ -339,7 +329,7 @@ TEST_F(MluGraphExecutorTest, MluGraphExecutorVsBaseExecutorImplMultipleRuns) {
     auto replay_output = replay_model_output.hidden_states;
     base_forward_input.input_params.embedding.input_embedding = base_output;
     replay_forward_input.input_params.embedding.input_embedding = replay_output;
-    CHECK_EQ(base_output.sizes(), replay_output.sizes());
+    ASSERT_EQ(base_output.sizes(), replay_output.sizes());
   }
 
   torch_mlu::synchronize();

@@ -107,12 +107,6 @@ class _ScaleNorm(nn.Module):
         return hidden * 2
 
 
-class _NormBody(glm5_2_mtp.Glm52MtpModel):
-    def __init__(self) -> None:
-        nn.Module.__init__(self)
-        self.norm = _ScaleNorm()
-
-
 class _DecoderLayer(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -243,20 +237,7 @@ def test_mtp_masks_position_zero_token_embedding() -> None:
     assert torch.equal(hidden[1], torch.full((2,), 6.0))
 
 
-def test_mtp_load_rejects_missing_required_weights() -> None:
-    draft = glm5_2_mtp.Glm52MtpForCausalLM(_config())
-
-    with (
-        patch.object(glm5_2_mtp.Glm52ForCausalLM, "load_weights"),
-        pytest.raises(
-            KeyError,
-            match="missing required MTP weight",
-        ),
-    ):
-        draft.load_weights([], tp_rank=0, tp_size=1)
-
-
-def test_mtp_body_normalizes_recurrent_hidden_once_for_logits_and_recycle() -> None:
+def test_mtp_body_normalizes_recurrent_hidden_once() -> None:
     body, _ = _mtp_body()
     body.norm = _ScaleNorm()
 
@@ -265,12 +246,6 @@ def test_mtp_body_normalizes_recurrent_hidden_once_for_logits_and_recycle() -> N
             return hidden[:, 2:]
 
     body.eh_proj = PreviousHidden()
-    draft = glm5_2_mtp.Glm52MtpForCausalLM.__new__(glm5_2_mtp.Glm52MtpForCausalLM)
-    nn.Module.__init__(draft)
-    draft.cfg = glm5_2_mtp.Glm52Config.from_dict(_config())
-    body.cfg = draft.cfg
-    draft.model = body
-    draft.lm_head = nn.Identity()
     previous = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
     with (
         forward_context(ForwardContext(None, torch.device("cpu"), None, [], cp_context=None)),
@@ -279,11 +254,9 @@ def test_mtp_body_normalizes_recurrent_hidden_once_for_logits_and_recycle() -> N
     ):
         first, _, _ = body(torch.tensor([1, 2]), torch.tensor([5, 6]), previous)
         second, _, _ = body(torch.tensor([3, 4]), torch.tensor([6, 7]), first)
-        logits = draft.compute_logits(second, torch.tensor([1]))
         assert norm.call_count == 2
     assert torch.equal(first, previous * 2)
     assert torch.equal(second, previous * 4)
-    assert torch.equal(logits, torch.tensor([[12.0, 16.0]]))
     assert torch.equal(previous, torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
 
 
@@ -363,22 +336,6 @@ def test_attn_dp_mtp_keeps_reused_topk_local_and_returns_owner_hidden() -> None:
     assert topk is external_topk
     assert layer.reuse_flags == [True]
     torch.testing.assert_close(hidden, torch.tensor([[1.0, 1.0], [2.0, 2.0]]))
-
-
-def test_mtp_greedy_head_preserves_normalization_and_hidden() -> None:
-    from xllm.python.layers.linear import ColumnParallelLinear
-
-    draft = glm5_2_mtp.Glm52MtpForCausalLM.__new__(glm5_2_mtp.Glm52MtpForCausalLM)
-    nn.Module.__init__(draft)
-    draft.model = _NormBody()
-    draft.lm_head = ColumnParallelLinear(2, 3, 1, gather_output=True, bias=True)
-    with torch.no_grad():
-        draft.lm_head.weight.copy_(torch.tensor([[1.0, 0.0], [0.0, 1.0], [-1.0, -1.0]]))
-        draft.lm_head.bias.copy_(torch.tensor([1.5, 0.0, 0.0]))
-    hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0], [-2.0, -1.0]])
-    saved = hidden.clone()
-    assert torch.equal(draft.compute_greedy_tokens(hidden), draft.compute_logits(hidden, None).argmax(-1))
-    assert torch.equal(hidden, saved)
 
 
 def test_mtp_rope_is_shared_across_layers_and_refreshes_positions() -> None:

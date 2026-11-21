@@ -1054,7 +1054,8 @@ class _V41ForwardHarness:
 
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:
         with torch.inference_mode():
-            return self.lm.compute_logits(hidden, None).float()
+            logits: torch.Tensor = self.lm.lm_head(hidden)
+            return logits.float()
 
 
 def _make_forward_lm(

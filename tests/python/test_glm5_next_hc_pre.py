@@ -44,7 +44,7 @@ def hc_pre(monkeypatch: pytest.MonkeyPatch) -> list[tuple[torch.Tensor, ...]]:
 
 def _layer(dtype: torch.dtype = torch.bfloat16) -> glm5_next.Glm5NextHyperConnection:
     config = glm5_next.Glm5NextConfig(hidden_size=16)
-    layer = glm5_next.Glm5NextHyperConnection(config, torch.bfloat16, torch.device("cpu")).to(dtype)
+    layer = glm5_next.Glm5NextHyperConnection(config, torch.device("cpu")).to(dtype)
     with torch.no_grad():
         for parameter in layer.parameters():
             parameter.fill_(0.123456)

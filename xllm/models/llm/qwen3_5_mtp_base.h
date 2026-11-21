@@ -232,25 +232,20 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
   layer::ReplicatedLinear fc_{nullptr};
 };
 
-class Qwen3_5MtpForCausalLMImplBase : public Qwen3HybridForCausalLMImplBase {
+class Qwen3_5MtpForCausalLMImplBase
+    : public Qwen3HybridForCausalLMImplBase<BodyWeightPrefix::kNone> {
  public:
-  void load_model(std::unique_ptr<ModelLoader> loader) {
-    Qwen3HybridForCausalLMImplBase::load_lm_head(loader);
-    for (const std::unique_ptr<StateDict>& state_dict :
-         loader->get_state_dicts()) {
-      model_->load_state_dict(*state_dict);
-    }
+  static constexpr const char* kWeightPrefix = "mtp.";
 
-    model_->verify_loaded_weights("mtp.");
-    CHECK(lm_head_->is_weight_loaded())
+  void verify_lm_head(bool weight_loaded) const {
+    CHECK(weight_loaded)
         << "Failed to find lm_head weights for qwen3.5 mtp draft model";
   }
 
-  void load_lm_head(const StateDict& state_dict,
-                    const std::string& /*prefix*/) override {
-    lm_head_->load_state_dict(
-        tie_word_embeddings_ ? qwen3_5_mtp::get_embed_tokens_dict(state_dict)
-                             : qwen3_5_mtp::get_lm_head_dict(state_dict));
+  StateDict lm_head_weights(const StateDict& state_dict,
+                            const std::string&) override {
+    return tie_word_embeddings_ ? qwen3_5_mtp::get_embed_tokens_dict(state_dict)
+                                : qwen3_5_mtp::get_lm_head_dict(state_dict);
   }
 
  protected:

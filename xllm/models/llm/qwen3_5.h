@@ -52,16 +52,7 @@ class Qwen3_5ForCausalLMImpl : public Qwen3NextForCausalLMImpl {
       : Qwen3NextForCausalLMImpl(context,
                                  std::make_shared<Qwen3_5ModelImpl>(context)) {}
 
-  void load_model(std::unique_ptr<ModelLoader> loader) {
-    Qwen3NextForCausalLMImpl::load_model(
-        std::move(loader), "model.language_model.", "lm_head.");
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string model_prefix) override {
-    Qwen3NextForCausalLMImpl::load_model(
-        std::move(loader), model_prefix, "lm_head.");
-  }
+  static constexpr const char* kWeightPrefix = "model.language_model.";
 };
 TORCH_MODULE(Qwen3_5ForCausalLM);
 #endif
@@ -69,9 +60,6 @@ TORCH_MODULE(Qwen3_5ForCausalLM);
 #define LOAD_ARG_TEXT_OR_ROOT(arg_name, json_key, default_value) \
   LOAD_ARG_OR(arg_name, "text_config." json_key, default_value); \
   LOAD_ARG_OR(arg_name, json_key, args->arg_name())
-
-#define LOAD_ARG_TEXT_OR_ROOT_CHAIN(arg_name, json_key, default_value) \
-  LOAD_ARG_TEXT_OR_ROOT(arg_name, json_key, default_value)
 
 #define LOAD_QWEN3_5_ROPE_ARG(arg_name, default_value)                       \
   LOAD_ARG_OR(arg_name, "text_config." #arg_name, default_value);            \
@@ -260,7 +248,6 @@ const bool qwen3_5_dcp_registered = []() {
 #undef LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE
 #undef LOAD_QWEN3_5_NEXT_COMPAT_ARGS
 #undef LOAD_QWEN3_5_ROPE_ARG
-#undef LOAD_ARG_TEXT_OR_ROOT_CHAIN
 #undef LOAD_ARG_TEXT_OR_ROOT
 
 }  // namespace xllm

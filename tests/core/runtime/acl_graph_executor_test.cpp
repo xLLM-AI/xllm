@@ -344,18 +344,7 @@ class SimpleCausalLM : public CausalLM {
     return last_forward_had_attn_metadata_;
   }
 
-  // Implement required virtual functions
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) override {
-    // Simple logits computation
-    const int64_t vocab_size = std::max(args_.vocab_size(), 1000L);
-    return torch::randn({hidden_states.size(0), vocab_size},
-                        torch::dtype(torch::kFloat32).device(device_));
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> loader) override {
-    // Simple implementation for testing
-  }
+  void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {}
 
   torch::Device device() const override { return device_; }
 
@@ -390,10 +379,6 @@ class AclGraphExecutorTest : public ::testing::Test {
   AclGraphExecutorTest() = default;
 
   void SetUp() override {
-    if (initialized_) {
-      return;
-    }
-    initialized_ = true;
     sequences_.reserve(100);
 
     // Set up model args
@@ -449,8 +434,6 @@ class AclGraphExecutorTest : public ::testing::Test {
     kv_caches_.emplace_back(KVCacheTensors{kv_cache, kv_cache});
   }
 
-  void TearDown() override { return; }
-
   // Helper function to create a simple batch
   std::unique_ptr<Batch> CreateTestBatch() {
     sequences_.emplace_back(0,
@@ -475,7 +458,6 @@ class AclGraphExecutorTest : public ::testing::Test {
 
     return batch;
   }
-  bool initialized_ = false;
   ModelArgs model_args_;
   std::unique_ptr<torch::Device> device_;
   runtime::Options options_;
@@ -1701,8 +1683,8 @@ TEST(AclGraphExecutorHybridTest, KvCacheSupportsLinearOnlyLayers) {
       LinearAttentionKVCacheTensors{conv_cache, ssm_cache});
 
   EXPECT_FALSE(linear_only_cache.empty());
-  EXPECT_FALSE(linear_only_cache.get_conv_cache().defined() == false);
-  EXPECT_FALSE(linear_only_cache.get_ssm_cache().defined() == false);
+  EXPECT_TRUE(linear_only_cache.get_conv_cache().defined());
+  EXPECT_TRUE(linear_only_cache.get_ssm_cache().defined());
   EXPECT_FALSE(linear_only_cache.get_k_cache().defined());
   EXPECT_FALSE(linear_only_cache.get_v_cache().defined());
 }
