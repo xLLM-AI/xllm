@@ -374,6 +374,9 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   d["layerwise_split_rank"] = layerwise_split_rank_;
   d["enable_dsa_multi_stream"] =
       ExecutionConfig::get_instance().enable_dsa_multi_stream();
+  d["use_npu_column_parallel_weight_layout"] =
+      ExecutionConfig::get_instance()
+          .enable_npu_column_parallel_weight_layout();
   const bool enable_attn_dp_weight_sharding =
       ExecutionConfig::get_instance().enable_attn_dp_weight_sharding();
   CHECK(!enable_attn_dp_weight_sharding ||

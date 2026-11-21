@@ -57,6 +57,21 @@ def prepare_row_parallel_weight(
     return torch_npu.npu_format_cast(transposed, _FRACTAL_NZ_FORMAT), True
 
 
+def prepare_column_parallel_weight(
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, bool]:
+    """Lay out an opt-in column-parallel weight for NPU matmul.
+
+    Column-parallel checkpoints store each local projection as ``[N, K]``.
+    The selected matmul path consumes a single ``[K, N]`` FRACTAL_NZ tensor,
+    so replacing the parameter avoids retaining an ND copy beside it.
+    """
+    if weight.device.type == "cpu":
+        return weight, False
+    transposed = weight.transpose(0, 1).contiguous()
+    return torch_npu.npu_format_cast(transposed, _FRACTAL_NZ_FORMAT), True
+
+
 def prepare_quant_weight(
     weight: torch.Tensor,
 ) -> torch.Tensor:
@@ -78,5 +93,6 @@ def prepare_quant_weight(
 __all__ = [
     "grouped_linear",
     "prepare_row_parallel_weight",
+    "prepare_column_parallel_weight",
     "prepare_quant_weight",
 ]
