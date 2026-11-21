@@ -394,6 +394,7 @@ std::tuple<torch::Tensor, torch::Tensor> gated_delta_rule_prefill(
       /*save_new_value=*/true,
       /*cu_seqlens=*/std::optional<torch::Tensor>(cu_seqlens_i64),
       /*chunk_indices=*/std::nullopt,
+      /*chunk_offsets=*/std::nullopt,
       /*use_exp2=*/false,
       /*transpose_state_layout=*/true);
   CHECK_EQ(out.size(), 2u)

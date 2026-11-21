@@ -7,6 +7,7 @@ pybind_extension(
     -DPY_MODULE_NAME=xllm_export
   SRCS
     bind.cpp
+    $<$<BOOL:${USE_DCU}>:gr00t_bind.cpp>
   DEFINES
     PYBIND11_DETAILED_ERROR_MESSAGES=1
   LINKDIRS

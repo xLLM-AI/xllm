@@ -37,7 +37,14 @@ namespace xllm {
 namespace py = pybind11;
 using namespace pybind11::literals;
 
+#if defined(USE_DCU)
+void register_gr00t_bindings(py::module_& module);
+#endif
+
 PYBIND11_MODULE(xllm_export, m) {
+#if defined(USE_DCU)
+  register_gr00t_bindings(m);
+#endif
   load_native_libraries();
 
   // 1. export Options

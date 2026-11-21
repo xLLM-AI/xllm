@@ -428,7 +428,7 @@ void WorkerServer::prepare_shm(
 
     std::string name_prefix =
         "xllm_" + net::extract_port(options.master_node_addr().value());
-    string name = SharedMemoryTransport::create_unique_name(
+    std::string name = SharedMemoryTransport::create_unique_name(
         name_prefix, dp_group, ForwardType::RAW_INPUT, parallel_args.rank());
     input_shm_manager = std::make_unique<SharedMemoryTransport>(
         name, options.input_shm_size(), is_creator, ForwardType::RAW_INPUT);

@@ -19,7 +19,8 @@ namespace xllm {
 namespace layer {
 
 Qwen2DecoderLayerImpl::Qwen2DecoderLayerImpl(const ModelContext& context,
-                                             int32_t layer_id)
+                                             int32_t layer_id,
+                                             bool precompute_rotary_cache)
     : parallel_args_(context.get_parallel_args()) {
   const auto& model_args = context.get_model_args();
   const auto& quant_args = context.get_quant_args();
@@ -28,7 +29,8 @@ Qwen2DecoderLayerImpl::Qwen2DecoderLayerImpl(const ModelContext& context,
       layer_id >= 0 ? "model.layers." + std::to_string(layer_id) + ".mlp" : "";
 
   // Initialize attention layers
-  attention_ = register_module("self_attn", Qwen2Attention(context));
+  attention_ = register_module(
+      "self_attn", Qwen2Attention(context, precompute_rotary_cache));
 
   // Initialize norm layers
   input_norm_ = register_module(

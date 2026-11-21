@@ -46,6 +46,7 @@ class DenseMLPImpl : public torch::nn::Module {
                bool apply_fc1_sequence_parallel = true);
 
   torch::Tensor forward(const torch::Tensor& hidden_states);
+  void set_hf_precision_mode();
 
   void load_state_dict(const StateDict& state_dict);
   void load_state_dict(const StateDict& state_dict,
@@ -58,6 +59,7 @@ class DenseMLPImpl : public torch::nn::Module {
   std::optional<torch::Tensor> get_fp8_input_scale() const;
 
  private:
+  bool hf_precision_mode_ = false;
   bool is_gated_;
   int64_t intermediate_size_;
   ProcessGroup* process_group_;

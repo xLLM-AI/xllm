@@ -32,8 +32,14 @@ RotaryEmbeddingImpl::RotaryEmbeddingImpl(int64_t rotary_dim,
                                          int64_t max_position_embeddings,
                                          int64_t rope_theta,
                                          bool interleaved,
-                                         const torch::TensorOptions& options)
+                                         const torch::TensorOptions& options,
+                                         bool precompute_cache)
     : interleaved_(interleaved) {
+  if (!precompute_cache) {
+    // GR00T supplies token-specific MRoPE tables for every prefill.
+    CHECK(Platform::is_dcu());
+    return;
+  }
   auto inv_freq = rotary::compute_inv_freq(rotary_dim, rope_theta, options);
   const auto cos_sin = rotary::compute_cos_sin_cache(
       rotary_dim, max_position_embeddings, interleaved, inv_freq, options);
@@ -58,6 +64,7 @@ void RotaryEmbeddingImpl::forward(torch::Tensor& q,
                                   const torch::Tensor& cu_query_lens,
                                   int64_t max_query_len,
                                   bool is_prompt) {
+  CHECK(cos_sin_cache_.defined()) << "This rotary path requires a 1D cache";
   bool discrete;
   std::optional<torch::Tensor> position_ids;
   if (is_prompt) {
@@ -129,12 +136,14 @@ MRotaryEmbeddingImpl::MRotaryEmbeddingImpl(
     int64_t rope_theta,
     bool interleaved,
     const std::vector<int64_t>& rope_scaling_mrope_section,
-    const torch::TensorOptions& options)
+    const torch::TensorOptions& options,
+    bool precompute_cache)
     : RotaryEmbeddingImpl(rotary_dim,
                           max_position_embeddings,
                           rope_theta,
                           interleaved,
-                          options),
+                          options,
+                          precompute_cache),
       mrope_section_(rope_scaling_mrope_section) {
   mrope_cu_seq_lens_ = torch::zeros(2, torch::kInt32).to(options.device());
 }
@@ -197,7 +206,10 @@ void MRotaryEmbeddingImpl::forward(torch::Tensor& q,
   rotary_params.sin = attn_metadata.mrope_sin;
   rotary_params.cos = attn_metadata.mrope_cos;
   rotary_params.cos_sin = cos_sin_cache_;
+#if !defined(USE_DCU)
   rotary_params.precomputed_cos_sin = precomputed_cos_sin_cache_;
+#endif
+  // DCU must consume these token-specific spatial/temporal MRoPE tables.
   rotary_params.position_ids = std::nullopt;
   rotary_params.cu_query_lens = mrope_cu_seq_lens_;
   rotary_params.interleaved = interleaved_;

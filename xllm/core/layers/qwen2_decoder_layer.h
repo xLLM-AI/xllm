@@ -36,7 +36,8 @@ namespace layer {
 class Qwen2DecoderLayerImpl : public torch::nn::Module {
  public:
   explicit Qwen2DecoderLayerImpl(const ModelContext& context,
-                                 int32_t layer_id = -1);
+                                 int32_t layer_id = -1,
+                                 bool precompute_rotary_cache = true);
 
   void load_state_dict(const StateDict& state_dict);
 

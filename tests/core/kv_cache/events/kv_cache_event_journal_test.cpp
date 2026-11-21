@@ -39,7 +39,7 @@ const std::string kFirstHash(32, '1');
 const std::string kSecondHash(32, '2');
 const KVCacheEventScope kDevice{"model", 0, "gpu"};
 const KVCacheEventScope kHost{"model", 0, "cpu"};
-std::atomic<std::shared_ptr<KVCacheEventJournal>> replay_update_journal;
+std::shared_ptr<KVCacheEventJournal> replay_update_journal;
 
 struct EventFrame {
   uint64_t sequence = 0;
@@ -153,7 +153,8 @@ extern "C" int __wrap_zmq_msg_recv(zmq_msg_t* message,
       type != ZMQ_ROUTER) {
     return result;
   }
-  const auto journal = replay_update_journal.exchange(nullptr);
+  const auto journal = std::atomic_exchange(
+      &replay_update_journal, std::shared_ptr<KVCacheEventJournal>{});
   if (journal) {
     journal->store(kDevice, kSecondHash, kFirstHash, {3, 4}, /*block_index=*/1);
     journal->store_copy(kHost, kSecondHash);
@@ -191,7 +192,7 @@ TEST(KVCacheEventPublisherTest, ReplaySnapshotMatchesItsLivePublication) {
   // Let any coalesced subscription reset finish; the injection then exercises
   // an ordinary incremental iteration, rather than a pre-existing reset page.
   std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-  replay_update_journal.store(journal);
+  std::atomic_store(&replay_update_journal, journal);
   ASSERT_TRUE(replay.request_replay());
   const auto recovered = replay.receive();
   ASSERT_TRUE(recovered);
@@ -199,7 +200,7 @@ TEST(KVCacheEventPublisherTest, ReplaySnapshotMatchesItsLivePublication) {
   ASSERT_TRUE(end);
   EXPECT_EQ(end->sequence, UINT64_MAX);
   EXPECT_TRUE(end->payload.is_null());
-  EXPECT_FALSE(replay_update_journal.load());
+  EXPECT_FALSE(std::atomic_load(&replay_update_journal));
   ASSERT_EQ(recovered->payload[1].size(), 5);
   EXPECT_EQ(recovered->payload[1][0]["type"], "AllBlocksCleared");
 

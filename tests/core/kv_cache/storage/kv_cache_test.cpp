@@ -28,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/kv_cache/block/block.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
@@ -305,9 +306,10 @@ class GenericIndexerAllocationTest : public ::testing::Test {
   void SetUp() override {
     KVCacheCapacity capacity;
     capacity.n_blocks(2).block_size(4);
+    // Exercise separate K/V buffers; DCU packs MLA into a key-only cache.
     ModelArgs model_args;
     model_args.model_type("glm_moe_dsa")
-        .enable_mla(true)
+        .enable_mla(false)
         .n_heads(8)
         .n_kv_heads(2)
         .head_dim(8)

@@ -15,8 +15,14 @@
 add_custom_target(python_tests)
 add_dependencies(all_tests python_tests)
 
-if(USE_NPU)
+if(USE_DCU)
+  set(test_sources)
+  foreach(test_name IN ITEMS gr00t_action gr00t_processing gr00t_backbone gr00t_execution)
+    list(APPEND test_sources "${CMAKE_CURRENT_SOURCE_DIR}/test_${test_name}.py")
+  endforeach()
+elseif(USE_NPU)
   file(GLOB test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test_*.py")
+  list(FILTER test_sources EXCLUDE REGEX "/test_gr00t_.*\\.py$")
   # These modules require a CUDA device and contain no NPU-testable cases.
   list(FILTER test_sources EXCLUDE REGEX "/test_(flashinfer_attention|kda_triton_ops|triton_ops|phi3_cuda)\\.py$")
 elseif(USE_CUDA)
@@ -47,6 +53,10 @@ foreach(test_source IN LISTS test_sources)
     LABELS python_tests
     # Preserve serial device use within the former single pytest process.
     RESOURCE_LOCK python_tests)
+  if(test_name MATCHES "^gr00t_")
+    # Optional dependencies can skip the whole module, leaving no collected tests.
+    set_tests_properties(${test_target} PROPERTIES SKIP_RETURN_CODE 5)
+  endif()
 endforeach()
 
 # Distributed NZ tests are standalone torchrun entrypoints; pytest skips them.

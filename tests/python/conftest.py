@@ -19,8 +19,12 @@ import torch
 
 from xllm import xllm_export  # noqa: F401
 from xllm.python import initialize_runtime
+from xllm.python.platform import current_platform
 
-initialize_runtime()
+# DCU VLA tests use native C++ layers and do not require a Python kernel peer.
+# This platform currently has no Python model executor kernel package.
+if not current_platform.is_dcu():
+    initialize_runtime()
 
 
 @pytest.fixture

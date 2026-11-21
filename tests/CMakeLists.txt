@@ -2,7 +2,7 @@ if(NOT BUILD_TESTING)
   return()
 endif()
 
-if(USE_NPU OR USE_CUDA)
+if(USE_NPU OR USE_CUDA OR USE_DCU)
   add_subdirectory(python)
 endif()
 

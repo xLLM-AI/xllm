@@ -16,6 +16,8 @@ limitations under the License.
 #include "qwen2_vision_attention.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 
 #include "framework/parallel_state/parallel_state.h"
 #if defined(USE_NPU)
@@ -26,8 +28,29 @@ limitations under the License.
 #endif
 #include "kernels/ops_api.h"
 #include "layers/common/attention_metadata.h"
+#if defined(USE_DCU)
+#include "core/layers/dcu/flash_attention.h"
+#endif
 namespace xllm {
 namespace layer {
+
+#if defined(USE_DCU)
+namespace {
+bool dcu_flash_vision_enabled() {
+  static const bool enabled = [] {
+    const char* backend = std::getenv("XLLM_DCU_VISION_ATTN_IMPL");
+    if (backend == nullptr || std::strcmp(backend, "torch") == 0 ||
+        std::strcmp(backend, "math") == 0) {
+      return false;
+    }
+    CHECK(std::strcmp(backend, "flash") == 0)
+        << "XLLM_DCU_VISION_ATTN_IMPL must be torch, math or flash";
+    return true;
+  }();
+  return enabled;
+}
+}  // namespace
+#endif
 
 Qwen2VisionAttentionImpl::Qwen2VisionAttentionImpl(const ModelContext& context,
                                                    bool has_bias) {
@@ -147,12 +170,28 @@ void compute_qwen2_vision_attention_torch(
     k_i = k_i.permute({1, 0, 2});
     v_i = v_i.permute({1, 0, 2});
 
+#if defined(USE_DCU)
+    // Invoke the math implementation explicitly, including its FP32
+    // intermediates and scaling order, without loading a FlashAttention DSO.
+    auto result = torch::_scaled_dot_product_attention_math(
+        q_i.unsqueeze(0),
+        k_i.unsqueeze(0),
+        v_i.unsqueeze(0),
+        /*attn_mask=*/std::nullopt,
+        /*dropout_p=*/0.0,
+        /*is_causal=*/false,
+        /*dropout_mask=*/std::nullopt,
+        /*scale=*/static_cast<double>(scale));
+    auto out_i = std::get<0>(result).squeeze(0);
+#else
     // Scaled dot-product attention per head.
     auto q_scaled = q_i * scale;
-    auto k_t = k_i.transpose(1, 2);              // [H, D, len]
-    auto scores = torch::matmul(q_scaled, k_t);  // [H, len, len]
+    auto k_t = k_i.transpose(1, 2);
+    auto scores = torch::matmul(q_scaled, k_t);
     auto attn = torch::softmax(scores, /*dim=*/-1);
-    auto out_i = torch::matmul(attn, v_i);  // [H, len, D]
+    auto out_i = torch::matmul(attn, v_i);
+
+#endif
 
     // Back to [len, H, D] and write into output.
     out_i = out_i.permute({1, 0, 2}).contiguous();
@@ -235,6 +274,18 @@ torch::Tensor Qwen2VisionAttentionImpl::forward(
 #if defined(USE_NPU)
   xllm::kernel::npu::apply_vision_rotary(
       q, k, m_cos_pos, m_sin_pos, cu_seq_len, cu_seq_len_vec);
+#elif defined(USE_DCU)
+  // HF vision applies RoPE in FP32 before rounding q/k to the model dtype.
+  auto cos = m_cos_pos.unsqueeze(1).to(torch::kFloat32);
+  auto sin = m_sin_pos.unsqueeze(1).to(torch::kFloat32);
+  auto rotate = [&cos, &sin](const torch::Tensor& value) {
+    auto fp32 = value.to(torch::kFloat32);
+    auto halves = fp32.chunk(2, -1);
+    auto rotated = torch::cat({-halves[1], halves[0]}, -1);
+    return (fp32 * cos + rotated * sin).to(value.scalar_type());
+  };
+  q = rotate(q);
+  k = rotate(k);
 #else
   // NOTE: Do NOT call apply_rotary twice; the first call already handles both
   // q and k. A second call would incorrectly apply RoPE to k a second time.
@@ -295,7 +346,21 @@ torch::Tensor Qwen2VisionAttentionImpl::forward(
                                    /*window_size_right=*/-1,
                                    /*compute_dtype=*/"half",
                                    /*return_lse=*/false);
-#elif defined(USE_CUDA) || defined(USE_DCU)
+#elif defined(USE_DCU)
+  if (dcu_flash_vision_enabled()) {
+    auto lengths = cu_seq_len.to(q.device(), torch::kInt32).contiguous();
+    output = dense_varlen_flash_attention(q.contiguous(),
+                                          k.contiguous(),
+                                          v.contiguous(),
+                                          lengths,
+                                          lengths,
+                                          scale_,
+                                          /*is_causal=*/false);
+  } else {
+    compute_qwen2_vision_attention_torch(
+        q, k, v, output, cu_seq_len_vec, scale_);
+  }
+#elif defined(USE_CUDA)
   // CUDA/DCU path: use a pure PyTorch vision attention implementation that
   // matches Transformers Qwen2.5-VL VisionAttention. FlashInfer's precompiled
   // AOT kernels in this project do not support head_dim=80, so we intentionally

@@ -41,6 +41,11 @@ RMSNormImpl::RMSNormImpl(const ModelContext& context)
                   context.get_model_args().rms_norm_eps(),
                   context.get_tensor_options()) {}
 
+void RMSNormImpl::set_hf_precision_mode() {
+  CHECK_EQ(mode_, kRmsNormMode);
+  hf_precision_mode_ = true;
+}
+
 std::tuple<torch::Tensor, std::optional<torch::Tensor>> RMSNormImpl::forward(
     torch::Tensor& input,
     std::optional<torch::Tensor> residual,
@@ -48,6 +53,27 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> RMSNormImpl::forward(
   auto org_shape = input.sizes().vec();
 
   input = input.reshape({-1, norm_dim_});
+
+  if (hf_precision_mode_) {
+    auto merged = residual.has_value()
+                      ? input + residual.value().reshape({-1, norm_dim_})
+                      : input;
+    auto fp32 = merged.to(torch::kFloat32);
+    auto variance = fp32.pow(2).mean(-1, /*keepdim=*/true);
+    // Match HF's reduction and BF16 boundary before multiplying the weight.
+    auto normalized =
+        (fp32 * torch::rsqrt(variance + eps_)).to(input.scalar_type()) *
+        weight_;
+    if (inplace_output.has_value()) {
+      inplace_output.value().copy_(normalized.view(org_shape));
+      normalized = inplace_output.value();
+    }
+    std::optional<torch::Tensor> updated_residual = std::nullopt;
+    if (residual.has_value()) {
+      updated_residual = merged.view(org_shape);
+    }
+    return {normalized.view(org_shape), updated_residual};
+  }
 
   torch::Tensor output;
   if (!Platform::is_npu()) {
