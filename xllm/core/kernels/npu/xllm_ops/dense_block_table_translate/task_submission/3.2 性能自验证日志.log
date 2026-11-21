@@ -1,0 +1,423 @@
+/opt/buildtools/Python-3.11.4/lib/python3.11/site-packages/torch_npu/utils/_path_manager.py:66: UserWarning: Permission mismatch: The owner of /opt/buildtools/Python-3.11.4/lib/python3.11/site-packages/torch_npu/lib/libop_plugin_atb.so does not match.
+  warnings.warn(f"Permission mismatch: The owner of {path} does not match.")
+{"id": "dense_literal", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_single", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_empty_requests", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_empty_columns", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_odd_offset", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_all_padding", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_max_i32", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_boundary257", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_perf_small", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS", "streams_cpu_oracle": {"status": "PASS", "candidate_retained": 6, "baseline_retained": 6, "compared_with": "independent CPU oracle", "distinct_storage": 12, "baseline_repeat20_before_bytes": 35840, "baseline_repeat20_after_bytes": 35840}}
+{"id": "dense_perf_small", "round": 0, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20954604, "iterations": 200, "latency_us": 104.77302}, "candidate": {"elapsed_ns": 9169428, "iterations": 200, "latency_us": 45.847139999999996}}
+{"id": "dense_perf_small", "round": 1, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9189668, "iterations": 200, "latency_us": 45.948339999999995}, "baseline": {"elapsed_ns": 21083299, "iterations": 200, "latency_us": 105.416495}}
+{"id": "dense_perf_small", "round": 2, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20374312, "iterations": 200, "latency_us": 101.87156}, "candidate": {"elapsed_ns": 9101215, "iterations": 200, "latency_us": 45.506074999999996}}
+{"id": "dense_perf_small", "round": 3, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9076024, "iterations": 200, "latency_us": 45.380120000000005}, "baseline": {"elapsed_ns": 20228806, "iterations": 200, "latency_us": 101.14403}}
+{"id": "dense_perf_small", "round": 4, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20279408, "iterations": 200, "latency_us": 101.39703999999999}, "candidate": {"elapsed_ns": 9056263, "iterations": 200, "latency_us": 45.281315}}
+{"id": "dense_perf_small", "round": 5, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9079194, "iterations": 200, "latency_us": 45.39597}, "baseline": {"elapsed_ns": 21283076, "iterations": 200, "latency_us": 106.41538}}
+{"id": "dense_perf_large", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS", "streams_cpu_oracle": {"status": "PASS", "candidate_retained": 6, "baseline_retained": 6, "compared_with": "independent CPU oracle", "distinct_storage": 12, "baseline_repeat20_before_bytes": 590848, "baseline_repeat20_after_bytes": 590848}}
+{"id": "dense_perf_large", "round": 0, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20442865, "iterations": 200, "latency_us": 102.214325}, "candidate": {"elapsed_ns": 9026122, "iterations": 200, "latency_us": 45.13061}}
+{"id": "dense_perf_large", "round": 1, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9091864, "iterations": 200, "latency_us": 45.45932}, "baseline": {"elapsed_ns": 21113280, "iterations": 200, "latency_us": 105.56639999999999}}
+{"id": "dense_perf_large", "round": 2, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20415164, "iterations": 200, "latency_us": 102.07582000000001}, "candidate": {"elapsed_ns": 9019492, "iterations": 200, "latency_us": 45.09746}}
+{"id": "dense_perf_large", "round": 3, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9032502, "iterations": 200, "latency_us": 45.162510000000005}, "baseline": {"elapsed_ns": 20879481, "iterations": 200, "latency_us": 104.39740499999999}}
+{"id": "dense_perf_large", "round": 4, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20608920, "iterations": 200, "latency_us": 103.0446}, "candidate": {"elapsed_ns": 9040412, "iterations": 200, "latency_us": 45.202059999999996}}
+{"id": "dense_perf_large", "round": 5, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9095345, "iterations": 200, "latency_us": 45.476725}, "baseline": {"elapsed_ns": 20812449, "iterations": 200, "latency_us": 104.06224499999999}}
+{"id": "dense_route_below", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_route_below", "round": 0, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20360501, "iterations": 200, "latency_us": 101.80250500000001}, "candidate": {"elapsed_ns": 9060043, "iterations": 200, "latency_us": 45.300214999999994}}
+{"id": "dense_route_below", "round": 1, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 8999701, "iterations": 200, "latency_us": 44.998504999999994}, "baseline": {"elapsed_ns": 21249885, "iterations": 200, "latency_us": 106.249425}}
+{"id": "dense_route_below", "round": 2, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20368142, "iterations": 200, "latency_us": 101.84071}, "candidate": {"elapsed_ns": 9002141, "iterations": 200, "latency_us": 45.010705}}
+{"id": "dense_route_below", "round": 3, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9009982, "iterations": 200, "latency_us": 45.049910000000004}, "baseline": {"elapsed_ns": 21080398, "iterations": 200, "latency_us": 105.40199000000001}}
+{"id": "dense_route_below", "round": 4, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20696054, "iterations": 200, "latency_us": 103.48027}, "candidate": {"elapsed_ns": 9052333, "iterations": 200, "latency_us": 45.261665}}
+{"id": "dense_route_below", "round": 5, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9018452, "iterations": 200, "latency_us": 45.09226}, "baseline": {"elapsed_ns": 21180262, "iterations": 200, "latency_us": 105.90131}}
+{"id": "dense_route_at", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_route_at", "round": 0, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20361761, "iterations": 200, "latency_us": 101.80880499999999}, "candidate": {"elapsed_ns": 8956749, "iterations": 200, "latency_us": 44.783745}}
+{"id": "dense_route_at", "round": 1, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9092904, "iterations": 200, "latency_us": 45.46452}, "baseline": {"elapsed_ns": 21078289, "iterations": 200, "latency_us": 105.391445}}
+{"id": "dense_route_at", "round": 2, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20357531, "iterations": 200, "latency_us": 101.787655}, "candidate": {"elapsed_ns": 9015122, "iterations": 200, "latency_us": 45.07561}}
+{"id": "dense_route_at", "round": 3, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9003061, "iterations": 200, "latency_us": 45.015305}, "baseline": {"elapsed_ns": 20937004, "iterations": 200, "latency_us": 104.68502000000001}}
+{"id": "dense_route_at", "round": 4, "order": ["baseline", "candidate"], "baseline": {"elapsed_ns": 20566659, "iterations": 200, "latency_us": 102.83329499999999}, "candidate": {"elapsed_ns": 9044573, "iterations": 200, "latency_us": 45.222865}}
+{"id": "dense_route_at", "round": 5, "order": ["candidate", "baseline"], "candidate": {"elapsed_ns": 9005771, "iterations": 200, "latency_us": 45.028855}, "baseline": {"elapsed_ns": 20944234, "iterations": 200, "latency_us": 104.72117}}
+{"id": "dense_many_short_single", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+{"id": "dense_alias_and_padding", "status": "PASS", "backend": "triton", "direct_run": "PASS", "repeated_outputs": "PASS"}
+Using /mnt/workspace/task04_pr_20261117/extensions as PyTorch extensions root...
+Emitting ninja build file /mnt/workspace/task04_pr_20261117/extensions/dense_block_table_native/build.ninja...
+Building extension module dense_block_table_native...
+Using envvar MAX_JOBS (2) as the number of workers...
+ninja: no work to do.
+Loading extension module dense_block_table_native...
+{"status": "PASS", "scope": "functional_engineering_performance"}
+
+Recorded paired statistics
+[
+  {
+    "id": "dense_perf_small",
+    "required": true,
+    "status": "PASS",
+    "baseline_rounds_us": [
+      104.77302,
+      105.416495,
+      101.87156,
+      101.14403,
+      101.39703999999999,
+      106.41538
+    ],
+    "candidate_rounds_us": [
+      45.847139999999996,
+      45.948339999999995,
+      45.506074999999996,
+      45.380120000000005,
+      45.281315,
+      45.39597
+    ],
+    "baseline_mean_us": 103.50292083333333,
+    "candidate_mean_us": 45.559826666666666,
+    "baseline_median_us": 103.32229000000001,
+    "candidate_median_us": 45.45102249999999,
+    "saved_mean_us": 57.94309416666667,
+    "saved_median_us": 57.871267500000016,
+    "saved_mean_ci95_us": [
+      56.498555833333334,
+      59.54593916666667
+    ],
+    "max_mean_us": 75,
+    "checks": {
+      "positive_mean_saving": true,
+      "positive_median_saving": true,
+      "positive_ci95_lower": true,
+      "target_mean": true
+    },
+    "resamples": 10000,
+    "seed": 20261031,
+    "rng": "numpy.random.default_rng/PCG64",
+    "percentile": "linear",
+    "measurement_protocol": {
+      "warmup": 50,
+      "rounds": 6,
+      "iterations_per_round": 200,
+      "execution_order": "alternate baseline and candidate; retain all paired rounds",
+      "timed_entry": "prepared.run",
+      "includes": [
+        "Python submission",
+        "new outputs and per-call temporary allocations",
+        "device execution and completion synchronization"
+      ],
+      "excludes": [
+        "input generation and transfer",
+        "one-time validation",
+        "prepare",
+        "CPU golden",
+        "first compilation"
+      ],
+      "latency_unit": "us",
+      "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+      "target_statistic": "arithmetic mean of six per-round per-call latencies",
+      "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+    },
+    "round_order": [
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ],
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ],
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ]
+    ],
+    "raw_file": "dense_perf_small_raw.json",
+    "backend": "triton"
+  },
+  {
+    "id": "dense_perf_large",
+    "required": true,
+    "status": "PASS",
+    "baseline_rounds_us": [
+      102.214325,
+      105.56639999999999,
+      102.07582000000001,
+      104.39740499999999,
+      103.0446,
+      104.06224499999999
+    ],
+    "candidate_rounds_us": [
+      45.13061,
+      45.45932,
+      45.09746,
+      45.162510000000005,
+      45.202059999999996,
+      45.476725
+    ],
+    "baseline_mean_us": 103.5601325,
+    "candidate_mean_us": 45.254780833333335,
+    "baseline_median_us": 103.5534225,
+    "candidate_median_us": 45.182285,
+    "saved_mean_us": 58.30535166666666,
+    "saved_median_us": 58.371137499999996,
+    "saved_mean_ci95_us": [
+      57.42536833333333,
+      59.20686916666666
+    ],
+    "max_mean_us": 60,
+    "checks": {
+      "positive_mean_saving": true,
+      "positive_median_saving": true,
+      "positive_ci95_lower": true,
+      "target_mean": true
+    },
+    "resamples": 10000,
+    "seed": 20261031,
+    "rng": "numpy.random.default_rng/PCG64",
+    "percentile": "linear",
+    "measurement_protocol": {
+      "warmup": 50,
+      "rounds": 6,
+      "iterations_per_round": 200,
+      "execution_order": "alternate baseline and candidate; retain all paired rounds",
+      "timed_entry": "prepared.run",
+      "includes": [
+        "Python submission",
+        "new outputs and per-call temporary allocations",
+        "device execution and completion synchronization"
+      ],
+      "excludes": [
+        "input generation and transfer",
+        "one-time validation",
+        "prepare",
+        "CPU golden",
+        "first compilation"
+      ],
+      "latency_unit": "us",
+      "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+      "target_statistic": "arithmetic mean of six per-round per-call latencies",
+      "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+    },
+    "round_order": [
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ],
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ],
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ]
+    ],
+    "raw_file": "dense_perf_large_raw.json",
+    "backend": "triton"
+  },
+  {
+    "id": "dense_route_below",
+    "required": false,
+    "status": "MEASURED",
+    "baseline_rounds_us": [
+      101.80250500000001,
+      106.249425,
+      101.84071,
+      105.40199000000001,
+      103.48027,
+      105.90131
+    ],
+    "candidate_rounds_us": [
+      45.300214999999994,
+      44.998504999999994,
+      45.010705,
+      45.049910000000004,
+      45.261665,
+      45.09226
+    ],
+    "baseline_mean_us": 104.11270166666667,
+    "candidate_mean_us": 45.118876666666665,
+    "baseline_median_us": 104.44113000000002,
+    "candidate_median_us": 45.071085000000004,
+    "saved_mean_us": 58.993825,
+    "saved_median_us": 59.37004500000001,
+    "saved_mean_ci95_us": [
+      57.48459333333334,
+      60.44843749999999
+    ],
+    "max_mean_us": null,
+    "checks": {
+      "positive_mean_saving": true,
+      "positive_median_saving": true,
+      "positive_ci95_lower": true,
+      "target_mean": true
+    },
+    "resamples": 10000,
+    "seed": 20261031,
+    "rng": "numpy.random.default_rng/PCG64",
+    "percentile": "linear",
+    "measurement_protocol": {
+      "warmup": 50,
+      "rounds": 6,
+      "iterations_per_round": 200,
+      "execution_order": "alternate baseline and candidate; retain all paired rounds",
+      "timed_entry": "prepared.run",
+      "includes": [
+        "Python submission",
+        "new outputs and per-call temporary allocations",
+        "device execution and completion synchronization"
+      ],
+      "excludes": [
+        "input generation and transfer",
+        "one-time validation",
+        "prepare",
+        "CPU golden",
+        "first compilation"
+      ],
+      "latency_unit": "us",
+      "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+      "target_statistic": "arithmetic mean of six per-round per-call latencies",
+      "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+    },
+    "round_order": [
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ],
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ],
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ]
+    ],
+    "raw_file": "dense_route_below_raw.json",
+    "backend": "triton"
+  },
+  {
+    "id": "dense_route_at",
+    "required": false,
+    "status": "MEASURED",
+    "baseline_rounds_us": [
+      101.80880499999999,
+      105.391445,
+      101.787655,
+      104.68502000000001,
+      102.83329499999999,
+      104.72117
+    ],
+    "candidate_rounds_us": [
+      44.783745,
+      45.46452,
+      45.07561,
+      45.015305,
+      45.222865,
+      45.028855
+    ],
+    "baseline_mean_us": 103.53789833333333,
+    "candidate_mean_us": 45.098483333333334,
+    "baseline_median_us": 103.7591575,
+    "candidate_median_us": 45.0522325,
+    "saved_mean_us": 58.439415,
+    "saved_median_us": 58.706925,
+    "saved_mean_ci95_us": [
+      57.36526416666666,
+      59.41977083333333
+    ],
+    "max_mean_us": null,
+    "checks": {
+      "positive_mean_saving": true,
+      "positive_median_saving": true,
+      "positive_ci95_lower": true,
+      "target_mean": true
+    },
+    "resamples": 10000,
+    "seed": 20261031,
+    "rng": "numpy.random.default_rng/PCG64",
+    "percentile": "linear",
+    "measurement_protocol": {
+      "warmup": 50,
+      "rounds": 6,
+      "iterations_per_round": 200,
+      "execution_order": "alternate baseline and candidate; retain all paired rounds",
+      "timed_entry": "prepared.run",
+      "includes": [
+        "Python submission",
+        "new outputs and per-call temporary allocations",
+        "device execution and completion synchronization"
+      ],
+      "excludes": [
+        "input generation and transfer",
+        "one-time validation",
+        "prepare",
+        "CPU golden",
+        "first compilation"
+      ],
+      "latency_unit": "us",
+      "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+      "target_statistic": "arithmetic mean of six per-round per-call latencies",
+      "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+    },
+    "round_order": [
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ],
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ],
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ]
+    ],
+    "raw_file": "dense_route_at_raw.json",
+    "backend": "triton"
+  }
+]

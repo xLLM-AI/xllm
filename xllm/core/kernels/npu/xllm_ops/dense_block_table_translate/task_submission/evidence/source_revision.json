@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/Wzy-wm/xllm",
+  "branch": "feat/dense-block-table-translate",
+  "path": "xllm/core/kernels/npu/xllm_ops/dense_block_table_translate",
+  "validated_source_commit": "2bcc40f799c0c20f0711ceb9f07150d3654e3fbc",
+  "source_sha256": {
+    "DESIGN.md": "3b9702a52958e5dca612ee13e655532423b5900c86951b3e806f070318b43746",
+    "README.md": "4a872ee12db389d843c2563dcaceafc488b441d0e85e4234ae05f06f997df6e0",
+    "__init__.py": "fbbb234a425fd25844f72b42bf0c0a853dd7f4cb82d2323c88bcaa251276ddba",
+    "collect_environment.py": "03fcee178470974a44218282445a2cd1363d858e2bc0a2decc5c5ebfeaa719ce",
+    "dense_contract.py": "a291997c1cdb48728a1c5ea8eccf216636206ede647208bb11dd08660abb699c",
+    "dense_kernels.py": "19243bec950c6b406d2d2189d9ca655c21be06fef5360d3ed9b7dd1c1c24ee52",
+    "native_dense.cpp": "a9392cfd9285a02343b95c658f1a2315cbf0c4fac1feac7231524181af20e7a7",
+    "native_loader.py": "b531d84622bacf4645d6e4858ec46566454a1b1eb0b6f11855f7d03bd598a0ff",
+    "official/case.json": "37387bb1d8ed8d76ce833fc5d9dd40e170376c59e7ac365e3eda60d149f195e2",
+    "official/generate_data.py": "6eb174f970cce80e3d3bf28991782a0e6e2f83adef60db62f22655cd8c782048",
+    "official/golden.py": "57f69dd9b66452265e36d160fa3d9484c9edbdcc07f41e4c325a110bb180b8b3",
+    "official/op.json": "6f2e78da1448860d1dc58a89a3da0c7d994e3165855006cb94cf1cc947bc70dc",
+    "paired_statistics.py": "5ebd0d88f57ac7096b85f845887804c2a8b38ca76176745ee6286a7c6e9336ef",
+    "solution.py": "83e43fa41fa9c6f843495e3289df3bbc0e8fa5d6cd519e5bec675780ceb9e908",
+    "tests/test_validation.py": "001e53a2e36ddca4e23c2318b1515919b85d7fd7941712080e7fec5db947e2e0",
+    "verify.py": "b39eba444d820877ad21d1d6e47ab2f5723bd880601514a1d2f46cdd79b989ea"
+  }
+}
