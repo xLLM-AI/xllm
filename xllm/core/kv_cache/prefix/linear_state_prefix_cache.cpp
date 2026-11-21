@@ -41,7 +41,7 @@ std::vector<Block> LinearStatePrefixCache::match(
                 existed_shared_blocks.begin(),
                 existed_shared_blocks.begin() + start_block);
 
-  auto batch_begin = lru_lst_.end();
+  DNodeList node_list;
 
   // Hit: emplace + LRU-touch. Miss: emplace invalid placeholder.
   auto probe = [&](const XXH3Key& key) -> bool {
@@ -50,8 +50,10 @@ std::vector<Block> LinearStatePrefixCache::match(
       blocks.emplace_back();
       return false;
     }
-    blocks.emplace_back(iter->second.block_);
-    batch_begin = touch_node(iter->second, batch_begin, now);
+    blocks.emplace_back(iter->second->block);
+    iter->second->last_access_time = now;
+    lru_lst_.remove_node(iter->second);
+    node_list.push_front(iter->second);
     return true;
   };
 
@@ -88,6 +90,11 @@ std::vector<Block> LinearStatePrefixCache::match(
   const size_t keep = has_any_hit ? (last_hit_idx + 1) : start_block;
   blocks.resize(keep);
 
+  while (!node_list.is_empty()) {
+    Node* node = node_list.pop_front();
+    lru_lst_.push_back(node);
+  }
+
   return blocks;
 }
 
@@ -106,7 +113,7 @@ size_t LinearStatePrefixCache::insert(const Slice<int32_t>& token_ids,
     return n_blocks * block_size_;
   }
 
-  auto batch_begin = lru_lst_.end();
+  DNodeList node_list;
 
   // Fill `token_hash_key` with the chained hash of block `block_idx`, reusing
   // the precomputed hash when it covers all blocks, otherwise computing it.
@@ -150,10 +157,32 @@ size_t LinearStatePrefixCache::insert(const Slice<int32_t>& token_ids,
     }
     blocks[block_idx].set_hash_value(token_hash_key.data);
 
-    cache_node(batch_begin, token_hash_key, blocks[block_idx], now);
+    auto iter = cached_blocks_.find(token_hash_key);
+    if (iter != cached_blocks_.end()) {
+      iter->second->last_access_time = now;
+
+      lru_lst_.remove_node(iter->second);
+      node_list.push_front(iter->second);
+    } else {
+      Node* new_node = new Node();
+
+      new_node->block = blocks[block_idx];
+      cached_block_ids_.insert(new_node->block.id());
+      new_node->last_access_time = now;
+
+      node_list.push_front(new_node);
+
+      cached_blocks_.emplace(std::make_pair(token_hash_key, new_node));
+    }
   }
 
-  return n_blocks * block_size_;
+  const size_t n_tokens = n_blocks * block_size_;
+  while (!node_list.is_empty()) {
+    Node* node = node_list.pop_front();
+    lru_lst_.push_back(node);
+  }
+
+  return n_tokens;
 }
 
 }  // namespace xllm

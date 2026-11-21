@@ -18,7 +18,6 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <boost/intrusive/list.hpp>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -124,62 +123,83 @@ class PrefixCache {
  protected:
   std::shared_ptr<KVCacheEventJournal> event_journal_;
   KVCacheEventScope event_scope_;
-  using NodeHook = boost::intrusive::list_member_hook<
-      boost::intrusive::link_mode<boost::intrusive::normal_link>>;
-
-  class Node final {
-   public:
-    Node(const Block& block, int64_t now)
-        : block_(block), last_access_time_(now) {}
-
-    Block block_;
-    std::optional<XXH3Key> parent_;
-    std::optional<XXH3Key> dependency_;
-    bool chain_known_ = false;
-    size_t block_index_ = 0;
-    int64_t last_access_time_;
-    NodeHook lru_hook_;
+  struct Node {
+    Block block;
+    std::optional<XXH3Key> parent;
+    std::optional<XXH3Key> dependency;
+    bool chain_known = false;
+    size_t block_index = 0;
+    int64_t last_access_time = 0;
+    Node* prev = nullptr;
+    Node* next = nullptr;
   };
 
-  using DNodeList = boost::intrusive::list<
-      Node,
-      boost::intrusive::member_hook<Node, NodeHook, &Node::lru_hook_>,
-      boost::intrusive::constant_time_size<false>>;
-
-  // Keep touched blocks in reverse order for suffix-first eviction.
-  DNodeList::iterator touch_node(Node& node,
-                                 DNodeList::iterator before,
-                                 int64_t now) {
-    node.last_access_time_ = now;
-    auto pos = lru_lst_.iterator_to(node);
-    lru_lst_.splice(before, lru_lst_, pos);
-    return pos;
-  }
-
-  bool cache_node(DNodeList::iterator& before,
-                  const XXH3Key& hash,
-                  const Block& block,
-                  int64_t now) {
-    auto [it, inserted] = cached_blocks_.try_emplace(hash, block, now);
-    auto& node = it->second;
-    if (inserted) {
-      cached_block_ids_.insert(node.block_.id());
-      before = lru_lst_.insert(before, node);
-    } else {
-      before = touch_node(node, before, now);
+  struct DNodeList {
+    DNodeList() {
+      lst_front.next = &lst_back;
+      lst_back.prev = &lst_front;
     }
-    return inserted;
-  }
 
+    ~DNodeList() {
+      Node* node = lst_front.next;
+      while (node != &lst_back) {
+        Node* next = node->next;
+        delete node;
+        node = next;
+      }
+    }
+
+    bool is_empty() { return lst_front.next == &lst_back; }
+
+    Node* remove_node(Node* node) {
+      Node* next_node = node->next;
+      node->prev->next = next_node;
+      next_node->prev = node->prev;
+      return next_node;
+    }
+
+    bool is_last(Node* node) { return node == &lst_back; }
+
+    void push_front(Node* node) {
+      node->next = lst_front.next;
+      lst_front.next->prev = node;
+      node->prev = &lst_front;
+      lst_front.next = node;
+    }
+
+    Node* get_first() { return lst_front.next; }
+
+    Node* pop_front() {
+      if (lst_front.next == &lst_back) {
+        return nullptr;
+      }
+      Node* node = lst_front.next;
+      lst_front.next = node->next;
+      node->next->prev = &lst_front;
+      return node;
+    }
+
+    void push_back(Node* node) {
+      node->prev = lst_back.prev;
+      node->next = &lst_back;
+      lst_back.prev->next = node;
+      lst_back.prev = node;
+    }
+
+    Node lst_front;
+    Node lst_back;
+  };
+
+  DNodeList lru_lst_;
   uint32_t block_size_;
   BlockHasherType hasher_type_;
-  std::unordered_map<XXH3Key, Node, FixedStringKeyHash, FixedStringKeyEqual>
+  std::unordered_map<XXH3Key, Node*, FixedStringKeyHash, FixedStringKeyEqual>
       cached_blocks_;
-  DNodeList lru_lst_;
+
   std::unordered_set<int32_t> cached_block_ids_;
 
  private:
-  DNodeList::iterator evict_node(decltype(cached_blocks_)::iterator it);
+  Node* evict_node(Node* node);
 };
 
 }  // namespace xllm
