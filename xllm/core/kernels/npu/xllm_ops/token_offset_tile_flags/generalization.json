@@ -1,0 +1,311 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "id": "flags_interior_last_and_logical_tail",
+      "status": "PASS",
+      "shape": [
+        8
+      ],
+      "input_shapes": [
+        [
+          39
+        ],
+        [
+          3
+        ],
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ],
+      "attributes": {
+        "tile_size": 5,
+        "max_tiles_per_seq": 4
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "golden_sha256": "7c44d3526fd9b4d4bc1cb0a8909b5056f1e2f58db45d114af3e1100bb7c02f1b",
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_near_int32_limit",
+      "status": "PASS",
+      "shape": [
+        3
+      ],
+      "input_shapes": [
+        [
+          9
+        ],
+        [
+          2
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ],
+      "attributes": {
+        "tile_size": 3,
+        "max_tiles_per_seq": 3
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "golden_sha256": "7ff52993d5d3cb149089942de7fc7a6511db2671cf2125976c081ad6fff89772",
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_nonpower_255",
+      "status": "PASS",
+      "shape": [
+        171
+      ],
+      "input_shapes": [
+        [
+          41274
+        ],
+        [
+          10
+        ],
+        [
+          9
+        ],
+        [
+          10
+        ]
+      ],
+      "attributes": {
+        "tile_size": 255,
+        "max_tiles_per_seq": 19
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "golden_sha256": "d629af56872314c57476055e14ef2e9f5ddd7d9723937a209929707283c1e209",
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "flags_nonpower_257",
+      "status": "PASS",
+      "shape": [
+        171
+      ],
+      "input_shapes": [
+        [
+          41598
+        ],
+        [
+          10
+        ],
+        [
+          9
+        ],
+        [
+          10
+        ]
+      ],
+      "attributes": {
+        "tile_size": 257,
+        "max_tiles_per_seq": 19
+      },
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "golden_sha256": "d629af56872314c57476055e14ef2e9f5ddd7d9723937a209929707283c1e209",
+      "storage_offsets": [
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "benchmarks": [
+    {
+      "id": "flags_nonpower_255",
+      "baseline_round_us": [
+        281.949275,
+        280.843115,
+        282.973435,
+        277.857435,
+        282.609075,
+        277.105575
+      ],
+      "candidate_round_us": [
+        50.34896,
+        49.959955,
+        49.52395,
+        50.028254999999994,
+        51.278870000000005,
+        49.384550000000004
+      ],
+      "baseline_mean_us": 280.55631833333337,
+      "candidate_mean_us": 50.087423333333334,
+      "mean_difference_us": 230.46889500000003,
+      "median_difference_us": 231.40209000000004,
+      "paired_mean_difference_ci95_us": [
+        228.8856291666667,
+        232.05216083333332
+      ],
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear"
+      },
+      "limit_us": null,
+      "checks": {
+        "mean_improved": true,
+        "median_improved": true,
+        "paired_ci_lower_positive": true
+      },
+      "status": "MEASURED",
+      "warmup": 50,
+      "iterations": 200,
+      "execution_order": [
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ]
+      ],
+      "timed_entry": "complete prepared.run plus final device synchronization"
+    },
+    {
+      "id": "flags_nonpower_257",
+      "baseline_round_us": [
+        281.353315,
+        279.012595,
+        282.175975,
+        278.47979,
+        278.77589,
+        277.17413
+      ],
+      "candidate_round_us": [
+        48.901095,
+        49.799755,
+        48.939995,
+        49.915355000000005,
+        50.52211,
+        48.506445
+      ],
+      "baseline_mean_us": 279.4952825,
+      "candidate_mean_us": 49.4307925,
+      "mean_difference_us": 230.06448999999998,
+      "median_difference_us": 229.5243675,
+      "paired_mean_difference_ci95_us": [
+        228.58615916666668,
+        231.65623916666664
+      ],
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear"
+      },
+      "limit_us": null,
+      "checks": {
+        "mean_improved": true,
+        "median_improved": true,
+        "paired_ci_lower_positive": true
+      },
+      "status": "MEASURED",
+      "warmup": 50,
+      "iterations": 200,
+      "execution_order": [
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "baseline"
+        ]
+      ],
+      "timed_entry": "complete prepared.run plus final device synchronization"
+    }
+  ]
+}
