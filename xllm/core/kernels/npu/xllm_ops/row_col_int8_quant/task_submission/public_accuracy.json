@@ -1,0 +1,708 @@
+{
+  "status": "passed",
+  "npu_executed": true,
+  "cases": [
+    {
+      "case_name": "RowColInt8Quant_000_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 2,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 2,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 1
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 2
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_001_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 4,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 4,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 2
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 2
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_002_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 18,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 18,
+          "mismatches": 0,
+          "near_half_elements": 1
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 3
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 6
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_003_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 1122,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 1122,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 17
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 66
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_004_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 263682,
+          "mismatches": 0,
+          "near_half_elements": 71
+        },
+        {
+          "output": "qCol",
+          "elements": 263682,
+          "mismatches": 4,
+          "near_half_elements": 106
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 257
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 1026
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_005_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 524288,
+          "mismatches": 0,
+          "near_half_elements": 233
+        },
+        {
+          "output": "qCol",
+          "elements": 524288,
+          "mismatches": 9,
+          "near_half_elements": 280
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 128
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 4096
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_006_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 4194304,
+          "mismatches": 0,
+          "near_half_elements": 1317
+        },
+        {
+          "output": "qCol",
+          "elements": 4194304,
+          "mismatches": 42,
+          "near_half_elements": 1484
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 1024
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 4096
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_007_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 16777216,
+          "mismatches": 0,
+          "near_half_elements": 4766
+        },
+        {
+          "output": "qCol",
+          "elements": 16777216,
+          "mismatches": 159,
+          "near_half_elements": 5364
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 4096
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 4096
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_008_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 1048576,
+          "mismatches": 0,
+          "near_half_elements": 461
+        },
+        {
+          "output": "qCol",
+          "elements": 1048576,
+          "mismatches": 12,
+          "near_half_elements": 395
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 4096
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 256
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_009_float16_zeros",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 1122,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 1122,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 17
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 66
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_010_float16_zero_axes",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 1122,
+          "mismatches": 0,
+          "near_half_elements": 2
+        },
+        {
+          "output": "qCol",
+          "elements": 1122,
+          "mismatches": 0,
+          "near_half_elements": 1
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 17
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 66
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_011_float16_extreme",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 1122,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 1122,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 17
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 66
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_012_float16_ties_row",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 8,
+          "mismatches": 0,
+          "near_half_elements": 6
+        },
+        {
+          "output": "qCol",
+          "elements": 8,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 1
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 8
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_013_float16_ties_col",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 16,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 16,
+          "mismatches": 0,
+          "near_half_elements": 12
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 8
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 2
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_014_float16_boundary",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 4096,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 4096,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 1
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 4096
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_015_float16_boundary",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 8192,
+          "mismatches": 0,
+          "near_half_elements": 5
+        },
+        {
+          "output": "qCol",
+          "elements": 8192,
+          "mismatches": 0,
+          "near_half_elements": 1
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 4096
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 2
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_016_float16_boundary",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 16256,
+          "mismatches": 0,
+          "near_half_elements": 3
+        },
+        {
+          "output": "qCol",
+          "elements": 16256,
+          "mismatches": 0,
+          "near_half_elements": 10
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 64
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 254
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_017_float16_boundary",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 16770,
+          "mismatches": 0,
+          "near_half_elements": 6
+        },
+        {
+          "output": "qCol",
+          "elements": 16770,
+          "mismatches": 1,
+          "near_half_elements": 7
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 65
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 258
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_018_float16_boundary",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 16830,
+          "mismatches": 0,
+          "near_half_elements": 14
+        },
+        {
+          "output": "qCol",
+          "elements": 16830,
+          "mismatches": 1,
+          "near_half_elements": 14
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 33
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 510
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_audit_019_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 8192,
+          "mismatches": 0,
+          "near_half_elements": 3
+        },
+        {
+          "output": "qCol",
+          "elements": 8192,
+          "mismatches": 0,
+          "near_half_elements": 2
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 4096
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 2
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_audit_020_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 4096,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 4096,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 1
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 4096
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_audit_021_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 16384,
+          "mismatches": 0,
+          "near_half_elements": 6
+        },
+        {
+          "output": "qCol",
+          "elements": 16384,
+          "mismatches": 0,
+          "near_half_elements": 4
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 64
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 256
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_audit_022_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 16770,
+          "mismatches": 0,
+          "near_half_elements": 1
+        },
+        {
+          "output": "qCol",
+          "elements": 16770,
+          "mismatches": 0,
+          "near_half_elements": 8
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 65
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 258
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_audit_023_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 8128,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 8128,
+          "mismatches": 1,
+          "near_half_elements": 5
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 32
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 254
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_audit_024_float16_random",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 8448,
+          "mismatches": 0,
+          "near_half_elements": 5
+        },
+        {
+          "output": "qCol",
+          "elements": 8448,
+          "mismatches": 0,
+          "near_half_elements": 9
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 33
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 256
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_audit_025_float16_subnormal",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 16770,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 16770,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 65
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 258
+        }
+      ]
+    },
+    {
+      "case_name": "RowColInt8Quant_audit_026_float16_signed_zero",
+      "status": "passed",
+      "outputs": [
+        {
+          "output": "qRow",
+          "elements": 2178,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "qCol",
+          "elements": 2178,
+          "mismatches": 0,
+          "near_half_elements": 0
+        },
+        {
+          "output": "rowAbsmax",
+          "elements": 33
+        },
+        {
+          "output": "colAbsmax",
+          "elements": 66
+        }
+      ]
+    }
+  ]
+}

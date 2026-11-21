@@ -1,0 +1,54 @@
+{
+  "measurement_date": "2026-10-15",
+  "soc": "Ascend910_9382",
+  "CANN": "9.1.0",
+  "metric": "fresh-output API-to-completion wall time; ratio=custom/fastest correct provided baseline",
+  "warmup": 50,
+  "iterations": 200,
+  "rounds": 5,
+  "cases": [
+    {
+      "case_name": "RowColInt8Quant_004_float16_random",
+      "max_custom_over_fastest_valid_baseline": 0.7692307692307692,
+      "measured_custom_us": 21.81068,
+      "measured_baseline_us": 148.01316,
+      "baseline_name": "two_dynamic_quant_transpose",
+      "measured_speedup": 6.786269845781974
+    },
+    {
+      "case_name": "RowColInt8Quant_005_float16_random",
+      "max_custom_over_fastest_valid_baseline": 0.7692307692307692,
+      "measured_custom_us": 27.340575,
+      "measured_baseline_us": 116.55585,
+      "baseline_name": "two_dynamic_quant_transpose",
+      "measured_speedup": 4.263108950707877
+    },
+    {
+      "case_name": "RowColInt8Quant_006_float16_random",
+      "max_custom_over_fastest_valid_baseline": 0.7692307692307692,
+      "measured_custom_us": 58.39863,
+      "measured_baseline_us": 167.50097,
+      "baseline_name": "two_dynamic_quant_transpose",
+      "measured_speedup": 2.868234580160528
+    },
+    {
+      "case_name": "RowColInt8Quant_007_float16_random",
+      "max_custom_over_fastest_valid_baseline": 1.0,
+      "measured_custom_us": 195.047395,
+      "measured_baseline_us": 371.88384,
+      "baseline_name": "two_dynamic_quant_transpose",
+      "measured_speedup": 1.906633205739559
+    },
+    {
+      "case_name": "RowColInt8Quant_008_float16_random",
+      "max_custom_over_fastest_valid_baseline": 0.7692307692307692,
+      "measured_custom_us": 33.01707,
+      "measured_baseline_us": 121.469345,
+      "baseline_name": "two_dynamic_quant_transpose",
+      "measured_speedup": 3.6789862031973164
+    }
+  ],
+  "primary_entry": "run() calls the generated ACLNN two-stage API",
+  "policy_date": "2026-10-15",
+  "policy": "Every measured case must be no slower than the fastest correct baseline; stricter existing speedup requirements are retained."
+}

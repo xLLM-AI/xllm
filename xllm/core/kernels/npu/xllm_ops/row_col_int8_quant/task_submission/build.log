@@ -1,0 +1,224 @@
+-- The CXX compiler identification is GNU 12.3.1
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+CMake Warning (dev) at CMakeLists.txt:23 (find_package):
+  Policy CMP0144 is not set: find_package uses upper-case <PACKAGENAME>_ROOT
+  variables.  Run "cmake --help-policy CMP0144" for policy details.  Use the
+  cmake_policy command to set the policy and suppress this warning.
+
+  CMake variable TORCH_ROOT is set to:
+
+    /usr/local/python3.12.13/lib/python3.12/site-packages/torch
+
+  For compatibility, find_package is ignoring the variable, but code in a
+  .cmake module might still use it.
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+CMake Warning at /usr/local/python3.12.13/lib/python3.12/site-packages/torch/share/cmake/Torch/TorchConfig.cmake:22 (message):
+  static library kineto_LIBRARY-NOTFOUND not found.
+Call Stack (most recent call first):
+  /usr/local/python3.12.13/lib/python3.12/site-packages/torch/share/cmake/Torch/TorchConfig.cmake:125 (append_torchlib_if_found)
+  CMakeLists.txt:23 (find_package)
+
+
+-- Found Torch: /usr/local/python3.12.13/lib/python3.12/site-packages/torch/lib/libtorch.so  
+-- Configuring done (0.5s)
+-- Generating done (0.0s)
+-- Build files have been written to: /tmp/cann-task-build/031ae796a6095034/build
+[  4%] Building CXX object CMakeFiles/run_aclnn_example.dir/examples/run_aclnn_example.cpp.o
+[  4%] Creating directories for 'task_kernels_precompile'
+[  6%] No download step for 'task_kernels_precompile'
+[  8%] No update step for 'task_kernels_precompile'
+[ 10%] No patch step for 'task_kernels_precompile'
+[ 12%] Performing configure step for 'task_kernels_precompile'
+-- The C compiler identification is GNU 12.3.1
+-- The CXX compiler identification is GNU 12.3.1
+-- Detecting C compiler ABI info
+[ 14%] Linking CXX executable run_aclnn_example
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+[ 14%] Built target run_aclnn_example
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.7s)
+-- Generating done (0.0s)
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    DYNAMIC_MODE
+    INCLUDE_DIR
+
+
+-- Build files have been written to: /tmp/cann-task-build/031ae796a6095034/build/task_kernels_precompile-prefix/src/task_kernels_precompile-build
+[ 16%] Performing build step for 'task_kernels_precompile'
+[ 66%] Building CXX object CMakeFiles/precompile_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o
+[ 66%] Building CXX object CMakeFiles/precompile_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o
+[100%] Building CXX object CMakeFiles/precompile_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o
+[100%] Built target precompile_obj
+[100%] Built target check_src_template
+[ 18%] No install step for 'task_kernels_precompile'
+[ 20%] Completed 'task_kernels_precompile'
+[ 20%] Built target task_kernels_precompile
+[ 22%] Creating directories for 'task_kernels_preprocess'
+[ 24%] No download step for 'task_kernels_preprocess'
+[ 26%] No update step for 'task_kernels_preprocess'
+[ 28%] No patch step for 'task_kernels_preprocess'
+[ 30%] Performing configure step for 'task_kernels_preprocess'
+-- The C compiler identification is GNU 12.3.1
+-- The CXX compiler identification is GNU 12.3.1
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.7s)
+-- Generating done (0.0s)
+-- Build files have been written to: /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build
+[ 32%] Performing build step for 'task_kernels_preprocess'
+[ 22%] Building CXX object CMakeFiles/aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o
+[ 22%] Building CXX object CMakeFiles/preprocess_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o
+[ 33%] Building CXX object CMakeFiles/preprocess_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o
+[ 44%] Building CXX object CMakeFiles/preprocess_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o
+[ 44%] Built target preprocess_obj
+[ 55%] Building CXX object CMakeFiles/aic_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o
+[ 66%] Building CXX object CMakeFiles/aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o
+[ 77%] Building CXX object CMakeFiles/aic_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o
+[ 88%] Building CXX object CMakeFiles/aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o
+[100%] Building CXX object CMakeFiles/aic_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o
+[100%] Built target aiv_obj
+/usr/local/Ascend/cann-9.1.0/aarch64-linux/ccec_compiler/bin/ld.lld -m aicorelinux -Ttext=0 /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o -o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o/usr/local/Ascend/cann-9.1.0/aarch64-linux/ccec_compiler/bin/ld.lld -m aicorelinux -Ttext=0 /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o -o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o/usr/local/Ascend/cann-9.1.0/aarch64-linux/ccec_compiler/bin/ld.lld -m aicorelinux -Ttext=0 /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o -o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o[100%] Built target merge_aiv_obj_text
+[100%] Built target aic_obj
+/usr/local/Ascend/cann-9.1.0/aarch64-linux/ccec_compiler/bin/ld.lld -m aicorelinux -Ttext=0 /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aic_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o -o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aic_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o/usr/local/Ascend/cann-9.1.0/aarch64-linux/ccec_compiler/bin/ld.lld -m aicorelinux -Ttext=0 /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aic_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o -o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aic_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o/usr/local/Ascend/cann-9.1.0/aarch64-linux/ccec_compiler/bin/ld.lld -m aicorelinux -Ttext=0 /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aic_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o -o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_preprocess-prefix/src/task_kernels_preprocess-build/CMakeFiles/aic_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o[100%] Built target merge_aic_obj_text
+[100%] Built target _host_cpp
+[ 34%] No install step for 'task_kernels_preprocess'
+[ 36%] Completed 'task_kernels_preprocess'
+[ 36%] Built target task_kernels_preprocess
+[ 40%] Creating directories for 'task_kernels_aic_device'
+[ 40%] Creating directories for 'task_kernels_aiv_device'
+[ 44%] No download step for 'task_kernels_aiv_device'
+[ 44%] No download step for 'task_kernels_aic_device'
+[ 48%] No update step for 'task_kernels_aic_device'
+[ 48%] No update step for 'task_kernels_aiv_device'
+[ 53%] No patch step for 'task_kernels_aiv_device'
+[ 53%] No patch step for 'task_kernels_aic_device'
+[ 57%] Performing configure step for 'task_kernels_aiv_device'
+[ 57%] Performing configure step for 'task_kernels_aic_device'
+-- The C compiler identification is GNU 12.3.1
+-- The C compiler identification is GNU 12.3.1
+-- The CXX compiler identification is GNU 12.3.1
+-- The CXX compiler identification is GNU 12.3.1
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.7s)
+-- Generating done (0.0s)
+-- Build files have been written to: /tmp/cann-task-build/031ae796a6095034/build/task_kernels_aiv_device-prefix/src/task_kernels_aiv_device-build
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.7s)
+-- Generating done (0.0s)
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    BUILD_MODE
+
+
+-- Build files have been written to: /tmp/cann-task-build/031ae796a6095034/build/task_kernels_aic_device-prefix/src/task_kernels_aic_device-build
+[ 59%] Performing build step for 'task_kernels_aiv_device'
+[ 61%] Performing build step for 'task_kernels_aic_device'
+[ 63%] No install step for 'task_kernels_aic_device'
+[ 33%] Building CXX object CMakeFiles/device_aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/build/auto_gen/task_kernels/auto_gen_row_col_merge.cpp.o
+[ 65%] Completed 'task_kernels_aic_device'
+[ 65%] Built target task_kernels_aic_device
+[ 67%] Creating directories for 'task_kernels_host'
+[ 69%] No download step for 'task_kernels_host'
+[ 71%] No update step for 'task_kernels_host'
+[ 73%] No patch step for 'task_kernels_host'
+[ 75%] Performing configure step for 'task_kernels_host'
+-- The C compiler identification is GNU 12.3.1
+-- The CXX compiler identification is GNU 12.3.1
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.7s)
+-- Generating done (0.0s)
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    ASCEND_PYTHON_EXECUTABLE
+
+
+-- Build files have been written to: /tmp/cann-task-build/031ae796a6095034/build/task_kernels_host-prefix/src/task_kernels_host-build
+[ 77%] Performing build step for 'task_kernels_host'
+[ 33%] Building CXX object CMakeFiles/host_bisheng_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o
+[ 66%] Building CXX object CMakeFiles/device_aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/build/auto_gen/task_kernels/auto_gen_row_col_quant.cpp.o
+[ 66%] Building CXX object CMakeFiles/host_bisheng_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o
+[100%] Building CXX object CMakeFiles/host_bisheng_obj.dir/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o
+[100%] Built target host_bisheng_obj
+[ 79%] Performing install step for 'task_kernels_host'
+[100%] Built target host_bisheng_obj
+Install the project...
+-- Install configuration: "Release"
+-- Installing: /tmp/cann-task-build/031ae796a6095034/build/task_kernels_host_dir/./objects-Release/host_bisheng_obj/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o
+-- Installing: /tmp/cann-task-build/031ae796a6095034/build/task_kernels_host_dir/./objects-Release/host_bisheng_obj/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o
+-- Installing: /tmp/cann-task-build/031ae796a6095034/build/task_kernels_host_dir/./objects-Release/host_bisheng_obj/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o
+[ 81%] Completed 'task_kernels_host'
+[ 81%] Built target task_kernels_host
+[100%] Building CXX object CMakeFiles/device_aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/build/auto_gen/task_kernels/auto_gen_row_col_stats.cpp.o
+[100%] Built target device_aiv_obj
+/usr/local/Ascend/cann-9.1.0/aarch64-linux/ccec_compiler/bin/ld.lld  -m aicorelinux -r  -Ttext=0 /tmp/cann-task-build/031ae796a6095034/build/task_kernels_aiv_device-prefix/src/task_kernels_aiv_device-build/CMakeFiles/device_aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/build/auto_gen/task_kernels/auto_gen_row_col_merge.cpp.o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_aiv_device-prefix/src/task_kernels_aiv_device-build/CMakeFiles/device_aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/build/auto_gen/task_kernels/auto_gen_row_col_quant.cpp.o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_aiv_device-prefix/src/task_kernels_aiv_device-build/CMakeFiles/device_aiv_obj.dir/tmp/cann-task-build/031ae796a6095034/build/auto_gen/task_kernels/auto_gen_row_col_stats.cpp.o -static -o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_aiv_device_dir/device_aiv.o
+[100%] Built target merge_aiv_device_obj
+[ 83%] No install step for 'task_kernels_aiv_device'
+[ 85%] Completed 'task_kernels_aiv_device'
+[ 85%] Built target task_kernels_aiv_device
+/usr/local/Ascend/cann-9.1.0/aarch64-linux/ccec_compiler/bin/ld.lld -x -m aicorelinux   -Ttext=0 /tmp/cann-task-build/031ae796a6095034/build/task_kernels_aiv_device_dir/device_aiv.o -static -o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_merge_obj_dir/device_aiv.o
+[ 85%] Built target task_kernels_merge_obj
+[ 87%] Building CXX object CMakeFiles/task_kernels_host_stub_obj.dir/auto_gen/task_kernels/host_stub.cpp.o
+[ 87%] Built target task_kernels_host_stub_obj
+[ 89%] Linking CXX shared library lib/libtask2_kernels.so
+/usr/local/Ascend/cann-9.1.0/bin/ascendc_pack_kernel /tmp/cann-task-build/031ae796a6095034/build/CMakeFiles/task_kernels_host_stub_obj.dir/auto_gen/task_kernels/host_stub.cpp.o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_merge_obj_dir/device_aiv.o 1 /tmp/cann-task-build/031ae796a6095034/build/CMakeFiles/task_kernels_host_stub_obj.dir/auto_gen/task_kernels/host_stub.cpp.o
+recompile: /usr/bin/c++ -fPIC -O3 -DNDEBUG -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -s -shared -Wl,-soname,libtask2_kernels.so -o lib/libtask2_kernels.so CMakeFiles/task_kernels_host_stub_obj.dir/auto_gen/task_kernels/host_stub.cpp.o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_host_dir/objects-Release/host_bisheng_obj/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_merge.cpp.o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_host_dir/objects-Release/host_bisheng_obj/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_quant.cpp.o /tmp/cann-task-build/031ae796a6095034/build/task_kernels_host_dir/objects-Release/host_bisheng_obj/tmp/cann-task-build/031ae796a6095034/src/op_kernel/row_col_stats.cpp.o    -L/usr/local/Ascend/cann-9.1.0/lib64  -L/usr/local/Ascend/cann-9.1.0/tools/simulator/Ascend910_9382/lib  -Wl,-rpath,/usr/local/Ascend/cann-9.1.0/lib64:/usr/local/Ascend/cann-9.1.0/tools/simulator/Ascend910_9382/lib: /usr/local/Ascend/cann-9.1.0/lib64/libascendc_runtime.a -lascend_dump -lc_sec
+[ 89%] Built target task_kernels
+[ 93%] Building CXX object CMakeFiles/task_torch.dir/op_host/torch_binding.cpp.o
+[ 93%] Building CXX object CMakeFiles/run_example.dir/examples/run_example.cpp.o
+[ 95%] Linking CXX executable run_example
+[ 95%] Built target run_example
+[ 97%] Building CXX object CMakeFiles/task_torch.dir/op_host/aclnn_binding.cpp.o
+[100%] Linking CXX shared library libtask2_torch.so
+[100%] Built target task_torch
+BUILT /work/解答2-行列双向INT8量化算子/build/libtask2_kernels.so

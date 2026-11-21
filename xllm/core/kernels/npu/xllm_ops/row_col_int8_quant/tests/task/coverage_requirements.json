@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "counting_rule": "Distinct input/attribute scenarios. API entries, performance repeats and memory reuse do not add to the independent input count.",
+  "public_cases": {
+    "RowColInt8Quant_000_float16_random": "2c8e1b7aec4015beb9d916c2a5101f7233c57433c7efd38e1be8135af3025197",
+    "RowColInt8Quant_001_float16_random": "9202e0d8f69712eaa463c8aa0cbc24a6dc93b3c2ef1bf742a2aef662150a66d8",
+    "RowColInt8Quant_002_float16_random": "43102ab340d36257428a262ea691f2371929c165f71821ee49f3ab2ee07fdba6",
+    "RowColInt8Quant_003_float16_random": "9b61cb1d63b0894f4e477150869abaf9ce222edfab26c63bfa0a11d28ff11a95",
+    "RowColInt8Quant_004_float16_random": "54752d09b723dd0c43e88d397a164434200e0ffc2c30d6f78f38fa13c3b97ada",
+    "RowColInt8Quant_005_float16_random": "66471ac669bcf7fe3a4824ebea048b79ba4fdfe22e69adbfd2a8e54ed0e74c50",
+    "RowColInt8Quant_006_float16_random": "c54b28bdd99c10f0e1e6dab28c175eec574940c8193bcd9a16a6f9c7c65da32b",
+    "RowColInt8Quant_007_float16_random": "ab051a2bcf69b772e65cb412ea6bfef2de131e0fd06636a87ae59c90cfc4700b",
+    "RowColInt8Quant_008_float16_random": "9cf91732b0a697af8e7a8725638cf9a52b5816367351204ea496903922eb6d72",
+    "RowColInt8Quant_009_float16_zeros": "8bbccad4ba652d0a91ae02ddcfa2cf7ad7b39b9bba4a4808ab96ef37d679ea42",
+    "RowColInt8Quant_010_float16_zero_axes": "a3858cc521a3d7a95e32efd858be892d7956f27af578a36d68eab7d045041aec",
+    "RowColInt8Quant_011_float16_extreme": "e684f9a8b15aa896dacbc46b9c8083291868d7f8662714361937ade00bbf2d12",
+    "RowColInt8Quant_012_float16_ties_row": "f633a599c98652091042bc49ff82ae6948d44bc5d1133fd93f3da57a45b8fa5a",
+    "RowColInt8Quant_013_float16_ties_col": "a0e333e5679904d9dbbc9e2f2ad542c75ad4794e29fef17b5b4b6bc8abec2bb4",
+    "RowColInt8Quant_014_float16_boundary": "776d81aef9dbc517c7cfee86320d74037a9ba1197ab5431d2bd4437219592180",
+    "RowColInt8Quant_015_float16_boundary": "042a97e70d591291db0f7ab35e275abc789ccb8300e7f38e49003ee229ef6fcb",
+    "RowColInt8Quant_016_float16_boundary": "cd135c5a8735b91252ec68016be833a0c3b57ab9111b2893950cd05b5b264302",
+    "RowColInt8Quant_017_float16_boundary": "0296204706b2896d409441e8f5c11a68f27a9212fdc581c21254517ed57d24ac",
+    "RowColInt8Quant_018_float16_boundary": "d927efb304ee48ebcb26296f1a06e166ce8f519da31c5d981a767a78adc13c39",
+    "RowColInt8Quant_audit_019_float16_random": "d3b86c6805be8cf7015f8bc6e35c43b5d79cd5e16ebb1c5b4dc301bfee776643",
+    "RowColInt8Quant_audit_020_float16_random": "fa9edfcbc1974a95b1e85331e27ba610f6cf4c597e06d4f2ecd764a6227e00b4",
+    "RowColInt8Quant_audit_021_float16_random": "8002322d821b0079df533da6c2e96f532cba13cebd05ddd859f5fbea09e875a3",
+    "RowColInt8Quant_audit_022_float16_random": "9c04009bbf4b6b4916f3750d15a52e15552ae444bd621d92b60415cf4e6f207a",
+    "RowColInt8Quant_audit_023_float16_random": "c9183400d0de16a12bdd40b6b47ec8d28c3cfcb20057ffae266b78a8abfb2518",
+    "RowColInt8Quant_audit_024_float16_random": "76e24fc57ea053b420274b2bad49347d3e76a73590ad5fc8853a223e90569387",
+    "RowColInt8Quant_audit_025_float16_subnormal": "5f25fdddd3623789c7b1a5317b89e16527e854f2be08b0edfa5c69fe58cc1f6c",
+    "RowColInt8Quant_audit_026_float16_signed_zero": "bda89448d9c0045997acc982f0a9ff0d28c78a2f430a10049437d28411e21d66"
+  },
+  "performance_case_ids": [
+    "RowColInt8Quant_004_float16_random",
+    "RowColInt8Quant_005_float16_random",
+    "RowColInt8Quant_006_float16_random",
+    "RowColInt8Quant_007_float16_random",
+    "RowColInt8Quant_008_float16_random"
+  ],
+  "negative_scenarios": [
+    "attributes_type",
+    "bf16",
+    "cpu_input",
+    "empty_m",
+    "empty_n",
+    "float32",
+    "input_count",
+    "large_m",
+    "large_n",
+    "noncontiguous",
+    "odd_n",
+    "rank",
+    "unknown_attribute"
+  ],
+  "negative_entries": [
+    "prepare",
+    "run",
+    "run_direct"
+  ],
+  "extra_input_case_ids": [
+    "RowColInt8Quant_000_float16_random__extra_seed_0",
+    "RowColInt8Quant_001_float16_random__extra_seed_1",
+    "RowColInt8Quant_002_float16_random__extra_seed_2",
+    "RowColInt8Quant_002_float16_random__extra_seed_6",
+    "RowColInt8Quant_002_float16_random__extra_seed_7",
+    "RowColInt8Quant_003_float16_random__extra_seed_3",
+    "RowColInt8Quant_004_float16_random__extra_seed_4",
+    "RowColInt8Quant_005_float16_random__extra_seed_5",
+    "RowColInt8Quant_008_float16_random__extra_seed_8",
+    "RowColInt8Quant_009_float16_zeros__extra_seed_9",
+    "RowColInt8Quant_010_float16_zero_axes__extra_seed_10",
+    "RowColInt8Quant_011_float16_extreme__extra_seed_11"
+  ],
+  "extra_entries": [
+    "run",
+    "run_direct"
+  ],
+  "verifier_checks": [
+    "CPU output rejected",
+    "input storage reuse rejected",
+    "offset overlapping storage rejected"
+  ],
+  "stream_case_ids": [
+    "RowColInt8Quant_004_float16_random",
+    "RowColInt8Quant_008_float16_random"
+  ],
+  "min_prepared_calls_per_stream": 10,
+  "min_engineering_metadata_checks": 6,
+  "sequential_cache_append": false
+}
