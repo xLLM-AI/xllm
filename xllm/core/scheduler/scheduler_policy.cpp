@@ -690,7 +690,7 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
 
 bool SchedulerPolicy::has_pending_block_release(
     const SchedulerState& state) const {
-  return state.has_pending_vmm_batch ||
+  return state.has_pending_kv_batch ||
          state.kv_cache_manager->has_pending_async_block_release();
 }
 

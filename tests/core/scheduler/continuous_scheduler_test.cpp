@@ -283,7 +283,12 @@ class FakeEngine : public Engine {
 
 class PipelinePhaseEngine final : public FakeEngine {
  public:
-  PipelinePhaseEngine() : FakeEngine(/*num_blocks=*/128, /*block_size=*/4) {}
+  explicit PipelinePhaseEngine(bool enable_linear_attention = false,
+                               int32_t num_blocks = 128)
+      : FakeEngine(num_blocks,
+                   /*block_size=*/4,
+                   /*enable_prefix_cache=*/false,
+                   enable_linear_attention) {}
   ForwardOutput step(BatchGroup& /*batch*/) override {
     calls.emplace_back("step");
     step_observed_consumed = consumed;
@@ -987,20 +992,17 @@ TEST(ContinuousSchedulerTest,
   scheduler.schedule_batch_for_test({first});
   scheduler.step(absl::ZeroDuration());
   EXPECT_EQ(engine.calls, (std::vector<std::string>{"step"}));
-  EXPECT_TRUE(engine.collected_sequences.empty());
 
   scheduler.schedule_batch_for_test({second});
   scheduler.step(absl::ZeroDuration());
-  EXPECT_EQ(engine.calls,
+  ASSERT_EQ(engine.calls,
             (std::vector<std::string>{"step", "step", "consume"}));
-  ASSERT_EQ(engine.collected_sequences.size(), 1u);
   EXPECT_EQ(engine.collected_sequences[0],
             (std::vector<Sequence*>{first->sequences().front().get()}));
 
   scheduler.step(absl::ZeroDuration());
-  EXPECT_EQ(engine.calls,
+  ASSERT_EQ(engine.calls,
             (std::vector<std::string>{"step", "step", "consume", "consume"}));
-  ASSERT_EQ(engine.collected_sequences.size(), 2u);
   EXPECT_EQ(engine.collected_sequences[1],
             (std::vector<Sequence*>{second->sequences().front().get()}));
   scheduler.step(absl::ZeroDuration());
@@ -1009,40 +1011,96 @@ TEST(ContinuousSchedulerTest,
   // Work arriving after a drain starts a fresh first step.
   scheduler.schedule_batch_for_test({first});
   scheduler.step(absl::ZeroDuration());
-  EXPECT_EQ(engine.calls.back(), "step");
-  EXPECT_EQ(engine.calls.size(), 5u);
-  EXPECT_EQ(engine.collected_sequences.size(), 2u);
+  EXPECT_EQ(
+      engine.calls,
+      (std::vector<std::string>{"step", "step", "consume", "consume", "step"}));
   scheduler.step(absl::ZeroDuration());
   EXPECT_EQ(engine.collected_sequences.size(), 3u);
 }
 
 TEST(ContinuousSchedulerTest, OverlapRetainsRequestsUntilPendingStepCompletes) {
   SchedulerOptions options = create_scheduler_options(64, 4, 0, 64, 1);
-  options.enable_schedule_overlap(true).disable_log_stats(true);
-  PipelinePhaseEngine engine;
+  options.enable_schedule_overlap(/*value=*/true)
+      .disable_log_stats(/*value=*/true)
+      .enable_disagg_pd(/*value=*/true)
+      .instance_role(/*value=*/InstanceRole::DECODE);
+  PipelinePhaseEngine engine(/*enable_linear_attention=*/true);
   TestableContinuousScheduler scheduler(&engine, options);
-  auto request = generate_request_with_prompt_tokens({1, 2}, 16, 256);
+  auto* cache = engine.block_manager_pool();
+  const auto initial_free_blocks = cache->num_free_blocks();
+  constexpr int32_t kMaxTokens = 16;
+  constexpr int32_t kMaxContextLen = 256;
+  auto request = generate_request_with_prompt_tokens(
+      /*prompt_token_ids=*/{1, 2}, kMaxTokens, kMaxContextLen);
+  const auto next_request = generate_request_with_prompt_tokens(
+      /*prompt_token_ids=*/{3, 4}, kMaxTokens, kMaxContextLen);
   const std::weak_ptr<Request> weak_request = request;
   Sequence* sequence = request->sequences().front().get();
-  bool alive_at_collection = false;
+  Sequence* next_sequence = next_request->sequences().front().get();
+  ASSERT_TRUE(cache->allocate(sequence));
+  const int32_t kv_id =
+      sequence->kv_state().blocks(/*type=*/BlockType::KV).front().id();
+  const int32_t linear_id = sequence->get_linear_state_slot_id();
+  ASSERT_GE(linear_id, 0);
   engine.on_collect = [&](const BatchGroup& batches) {
-    const auto retained_request = weak_request.lock();
-    alive_at_collection = retained_request != nullptr;
-    ASSERT_NE(retained_request, nullptr);
+    EXPECT_FALSE(weak_request.expired());
     EXPECT_EQ(batches.front()[0], sequence);
-    EXPECT_EQ(retained_request->sequences().front().get(), sequence);
+    ASSERT_TRUE(cache->allocate(next_sequence));
+    EXPECT_NE(
+        next_sequence->kv_state().blocks(/*type=*/BlockType::KV).front().id(),
+        kv_id);
+    EXPECT_NE(next_sequence->get_linear_state_slot_id(), linear_id);
   };
 
   scheduler.schedule_batch_for_test({request});
   scheduler.step(absl::ZeroDuration());
+  cache->deallocate(sequence);
   request.reset();
-  EXPECT_FALSE(weak_request.expired());
 
   // Preparing the empty batch releases the running set before collection.
   scheduler.step(absl::ZeroDuration());
-  EXPECT_TRUE(alive_at_collection);
   EXPECT_TRUE(weak_request.expired());
   EXPECT_EQ(engine.calls, (std::vector<std::string>{"step", "consume"}));
+  cache->deallocate(next_sequence);
+  EXPECT_EQ(cache->num_free_blocks(), initial_free_blocks);
+
+  options.priority_strategy(/*value=*/"priority");
+  PipelinePhaseEngine pressure_engine(/*enable_linear_attention=*/false,
+                                      /*num_blocks=*/4);
+  TestableContinuousScheduler pressure_scheduler(&pressure_engine, options);
+  const auto make_decode_request = [&](const std::vector<int32_t>& prompt) {
+    auto request =
+        generate_request_with_prompt_tokens(prompt, kMaxTokens, kMaxContextLen);
+    make_request_decode_ready(request);
+    return request;
+  };
+  auto runnable = make_decode_request(/*prompt=*/{1});
+  auto waiting = make_decode_request(/*prompt=*/{1, 2, 3});
+  auto victim = make_decode_request(/*prompt=*/{3});
+  runnable->state().scheduler_param.priority = RequestPriority::HIGH;
+  victim->state().scheduler_param.priority = RequestPriority::LOW;
+  ASSERT_TRUE(pressure_scheduler.add_request(runnable));
+  ASSERT_TRUE(pressure_scheduler.add_request(waiting));
+  ASSERT_TRUE(pressure_scheduler.add_request(victim));
+  pressure_scheduler.step(absl::ZeroDuration());
+  ASSERT_EQ(pressure_engine.block_manager_pool()->num_free_blocks().front(),
+            0u);
+
+  Sequence* waiting_sequence = waiting->sequences().front().get();
+  waiting_sequence->kv_state().set_kv_cache_tokens_num(
+      waiting_sequence->num_tokens());
+  waiting_sequence->append_token(Token(/*id=*/4));
+  pressure_scheduler.step(absl::ZeroDuration());
+  ASSERT_EQ(pressure_engine.calls,
+            (std::vector<std::string>{"step", "step", "consume", "consume"}));
+  EXPECT_EQ(pressure_engine.collected_sequences.back(),
+            (std::vector<Sequence*>{runnable->sequences().front().get()}));
+  EXPECT_FALSE(victim->preempted());
+
+  pressure_scheduler.step(absl::ZeroDuration());
+  EXPECT_TRUE(victim->preempted());
+  EXPECT_EQ(waiting_sequence->kv_state().num_blocks(/*type=*/BlockType::KV),
+            2u);
 }
 
 TEST(ContinuousSchedulerTest, SpeculativeOverlapSubmitsBeforeCollectingOutput) {

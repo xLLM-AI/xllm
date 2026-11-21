@@ -649,7 +649,7 @@ void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence) {
       // completed block is sequence-only until this offload pair retains it.
       // Host is the sequence's unfilled destination block in both cases.
       const uint32_t expected_hbm_refs = entry.supports_prefix_cache ? 2 : 1;
-      if (hbm_block.ref_count() != expected_hbm_refs ||
+      if (hbm_block.unpinned_ref_count() != expected_hbm_refs ||
           host_block.ref_count() != 1) {
         continue;
       }

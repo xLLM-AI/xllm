@@ -32,7 +32,6 @@ std::vector<Block> LinearStatePrefixCache::match(
   if (n_blocks == 0) {
     return {};
   }
-  total_blocks_.fetch_add(n_blocks);
   const int64_t now = absl::ToUnixMicros(absl::Now());
 
   std::vector<Block> blocks;
@@ -95,14 +94,6 @@ std::vector<Block> LinearStatePrefixCache::match(
     Node* node = node_list.pop_front();
     lru_lst_.push_back(node);
   }
-
-  size_t valid_hits = 0;
-  for (const auto& b : blocks) {
-    if (b.is_valid()) {
-      ++valid_hits;
-    }
-  }
-  matched_blocks_.fetch_add(valid_hits);
 
   return blocks;
 }
@@ -182,8 +173,6 @@ size_t LinearStatePrefixCache::insert(const Slice<int32_t>& token_ids,
       node_list.push_front(new_node);
 
       cached_blocks_.emplace(std::make_pair(token_hash_key, new_node));
-
-      num_blocks_++;
     }
   }
 

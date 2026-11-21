@@ -1750,6 +1750,9 @@ TEST_F(HierarchyBlockManagerPoolTest,
   Sequence sequence = make_test_sequence(/*index=*/0, tokens);
 
   ASSERT_TRUE(pool.allocate(&sequence, kFirstChunkTokens));
+  const Block execution_block(
+      sequence.kv_state().blocks(/*type=*/BlockType::C4).front(),
+      /*pin_block=*/true);
   EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 0u);
 
   sequence.kv_state().set_kv_cache_tokens_num(kFirstChunkTokens);

@@ -78,8 +78,6 @@ class CompositeBlockManager : public BlockManager {
                         CacheTier cache_tier = CacheTier::DEVICE);
   ~CompositeBlockManager() override = default;
 
-  bool is_composite() const override { return true; }
-
   // Sequence-level orchestration (the only Sequence-aware surface). Drives
   // each leaf's own primitives and writes results back into KVCacheState
   // under the leaf's block_type().
@@ -143,11 +141,7 @@ class CompositeBlockManager : public BlockManager {
 
   void reserve_virtual_memory_padding_blocks() override;
 
-  size_t num_sub_managers() const { return leaves_.size(); }
-
  private:
-  friend class BlockManagerPoolTestPeer;
-
   void publish_completed_prefix(Sequence* seq, size_t token_limit);
   // The admission leaf whose raw block count defines the pool's
   // scheduler-facing capacity unit. Picks the finest-grained admission leaf

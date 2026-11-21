@@ -72,9 +72,7 @@ struct SchedulerState {
   bool enable_prefix_cache;
   std::function<void(const std::shared_ptr<Request>&)> release_failed_request =
       {};
-  // A submitted VMM batch can still hold pages after its sequences release
-  // their aliases. Drain it before treating an allocation failure as final.
-  bool has_pending_vmm_batch = false;
+  bool has_pending_kv_batch = false;
 };
 
 // ScheduleBudget tracks the remaining resources for the current scheduling

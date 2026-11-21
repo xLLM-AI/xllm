@@ -142,8 +142,6 @@ class BlockManagerPool : public KVCacheManager {
   int32_t get_dp_rank(Sequence* sequence) const;
 
  private:
-  friend class BlockManagerPoolTestPeer;
-
   // Non-owning optional dependency, required for virtual-memory cache leaves.
   // The runtime retains it until this pool and its blocks have been destroyed.
   VmmKVPageAllocator* page_allocator_;

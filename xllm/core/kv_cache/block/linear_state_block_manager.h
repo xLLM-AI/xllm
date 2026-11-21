@@ -66,14 +66,6 @@ class LinearStateBlockManager final : public BlockManagerImpl {
   // verbatim for checkpoint insertion, so keep the base version instead of a
   // bespoke one.
   using BlockManagerImpl::cache;
-
- private:
-  // Grants the test peer access to the inherited prefix_cache_ so unit tests
-  // can assert by-hash checkpoint presence/lookup directly, mirroring how KV
-  // unit tests assert against PrefixCache::find / contains. Production never
-  // probes by hash here -- the composite mounts restore sources through
-  // allocate_shared -- so no by-hash probe method is exposed on this leaf.
-  friend class BlockManagerPoolTestPeer;
 };
 
 class HostLinearStateBlockManager final : public BlockManagerImpl {

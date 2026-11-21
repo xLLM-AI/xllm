@@ -15,44 +15,53 @@ limitations under the License.
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
+#include <vector>
+
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/block/composite_block_manager.h"
 
 namespace xllm {
 
-// Test-only accessor for BlockManagerPool internals. Exposes DP selection and
-// the private LINEAR leaf without widening the production API surface.
-class BlockManagerPoolTestPeer final {
+class BlockManagerPoolTestPeer final : public BlockManagerPool {
  public:
-  static int32_t select_dp_rank(BlockManagerPool& pool) {
-    return pool.select_dp_rank();
-  }
+  using BlockManagerPool::BlockManagerPool;
 
-  static LinearStateBlockManager* linear_leaf(BlockManagerPool& pool,
-                                              int32_t dp_rank) {
-    if (!pool.options_.enable_linear_state()) {
-      return nullptr;
-    }
-    auto* composite = static_cast<CompositeBlockManager*>(
-        pool.block_managers_[dp_rank].get());
+  LinearStateBlockManager* linear_leaf(int32_t dp_rank) const {
+    const auto& composite =
+        static_cast<const CompositeBlockManager&>(*block_managers_[dp_rank]);
     return static_cast<LinearStateBlockManager*>(
-        composite->leaf_of(BlockType::LINEAR));
+        composite.leaf_of(/*type=*/BlockType::LINEAR));
   }
 
-  // Assert by-hash checkpoint presence/lookup directly against the LINEAR
-  // leaf's inherited prefix_cache_. Production has no by-hash probe on the leaf
-  // (restore sources are mounted through allocate_shared); the peer is a friend
-  // of the leaf, so it reaches the protected index through the sanctioned test
-  // seam instead of a public probe surface. match() mirrors PrefixCache::find
-  // (refcount+1, LRU-promoted); contains() only reports presence.
   static bool contains(const LinearStateBlockManager* leaf,
                        const XXH3Key& prefix_hash) {
-    return leaf->prefix_cache_->contains(prefix_hash);
+    return std::ranges::any_of(leaf->prefix_cache_entries(),
+                               [&prefix_hash](const auto& entry) {
+                                 return entry.hash == prefix_hash;
+                               });
   }
-  static Block match(LinearStateBlockManager* leaf,
-                     const XXH3Key& prefix_hash) {
-    return leaf->prefix_cache_->find(prefix_hash);
+  static std::vector<Block> match(LinearStateBlockManager* leaf,
+                                  const XXH3Key& prefix_hash) {
+    const std::vector<int32_t> tokens(leaf->block_size() + 1);
+    const Slice<XXH3Key> hashes(&prefix_hash, /*size=*/1);
+    return leaf->allocate_shared(
+        tokens, /*existed_shared_blocks=*/{}, /*mm_data=*/{}, hashes);
+  }
+
+  static int32_t insert_checkpoint(LinearStateBlockManager* leaf,
+                                   const XXH3Key& hash) {
+    auto checkpoint = leaf->allocate(/*num_blocks=*/1);
+    if (checkpoint.empty()) {
+      return -1;
+    }
+    Block& block = checkpoint.front();
+    const int32_t id = block.id();
+    block.set_hash_value(hash.data);
+    leaf->cache(checkpoint);
+    return id;
   }
 };
 
