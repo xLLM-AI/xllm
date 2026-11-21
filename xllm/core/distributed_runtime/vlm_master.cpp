@@ -140,6 +140,9 @@ std::optional<std::string> join_message_texts(
 
 VLMMaster::VLMMaster(const Options& options)
     : Master(options), master_status_(options.master_status()) {
+  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  const bool enable_dp_fair_token_budget =
+      scheduler_config.enable_dp_fair_token_budget();
   options_.enable_mla(should_enable_mla(
       std::filesystem::path(options_.model_path()), options_.backend()));
 #if defined(USE_NPU)
@@ -195,6 +198,7 @@ VLMMaster::VLMMaster(const Options& options)
       .cp_size(options_.cp_size())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
+      .enable_dp_fair_token_budget(enable_dp_fair_token_budget)
       .enable_offline_inference(options_.enable_offline_inference())
       .disable_log_stats(options_.disable_log_stats())
       .spawn_worker_path(options_.spawn_worker_path())
@@ -329,13 +333,12 @@ VLMMaster::VLMMaster(const Options& options)
     finish_engine_initialization(vlm_engine_.get());
   }
 
-  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   SchedulerOptions scheduler_options;
-  scheduler_options.max_tokens_per_batch(options.max_tokens_per_batch())
-      .max_seqs_per_batch(options.max_seqs_per_batch())
-      .request_queue_size(options.request_queue_size())
+  scheduler_options.max_tokens_per_batch(options_.max_tokens_per_batch())
+      .max_seqs_per_batch(options_.max_seqs_per_batch())
+      .request_queue_size(options_.request_queue_size())
       .max_tokens_per_chunk_for_prefill(
-          options.max_tokens_per_chunk_for_prefill())
+          options_.max_tokens_per_chunk_for_prefill())
       .num_speculative_tokens(options_.num_speculative_tokens())
       .decode_graph_warmup_config(
           ExecutionConfig::get_instance().decode_graph_warmup_config(
@@ -355,6 +358,7 @@ VLMMaster::VLMMaster(const Options& options)
       .starve_threshold(scheduler_config.starve_threshold())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
+      .enable_dp_fair_token_budget(enable_dp_fair_token_budget)
       .instance_name(options_.instance_name())
       .instance_role(options_.instance_role())
       .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())

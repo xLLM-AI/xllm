@@ -171,6 +171,60 @@ TEST(SpawnWorkerProtocolTest,
   EXPECT_EQ(parse_extension_impl(kArgumentCount + 1, argv.data()), "custom");
 }
 
+TEST(SpawnWorkerProtocolTest, PreservesResolvedPrefillSettings) {
+  std::vector<std::string> arguments(kArgumentCount, "unused");
+  arguments[kPrefillChunkArgumentIndex] = "512";
+  arguments[kEnableChunkedPrefillArgumentIndex] = "0";
+  arguments[kEnableDpFairTokenBudgetArgumentIndex] = "1";
+  std::vector<char*> argv = mutable_argv(&arguments);
+  const std::optional<PrefillConfig> config =
+      parse_prefill_config(kArgumentCount, argv.data());
+  ASSERT_TRUE(config.has_value());
+  EXPECT_EQ(config->max_chunk_tokens, 512);
+  EXPECT_FALSE(config->enable_chunked_prefill);
+  EXPECT_TRUE(config->enable_dp_fair_token_budget);
+}
+
+TEST(SpawnWorkerProtocolTest, PreservesLegacyPrefillDefaults) {
+  std::vector<std::string> arguments(kEplbArgumentCount, "unused");
+  std::vector<char*> argv = mutable_argv(&arguments);
+  const std::optional<PrefillConfig> config =
+      parse_prefill_config(kEplbArgumentCount, argv.data());
+  ASSERT_TRUE(config.has_value());
+  EXPECT_EQ(config->max_chunk_tokens, -1);
+  EXPECT_TRUE(config->enable_chunked_prefill);
+  EXPECT_TRUE(config->enable_dp_fair_token_budget);
+}
+
+TEST(SpawnWorkerProtocolTest, RejectsPartialOrInvalidPrefillSettings) {
+  std::vector<std::string> arguments(kArgumentCount, "1");
+  std::vector<char*> argv = mutable_argv(&arguments);
+  for (int32_t argc = kPrefillChunkArgumentIndex + 1; argc < kArgumentCount;
+       ++argc) {
+    EXPECT_FALSE(parse_prefill_config(argc, argv.data()).has_value());
+  }
+  for (const char* invalid : {"0", "-1", "2147483648", "512tail"}) {
+    arguments[kPrefillChunkArgumentIndex] = invalid;
+    argv = mutable_argv(&arguments);
+    EXPECT_FALSE(parse_prefill_config(kArgumentCount, argv.data()).has_value());
+  }
+  arguments[kPrefillChunkArgumentIndex] = "512";
+  arguments[kEnableChunkedPrefillArgumentIndex] = "2";
+  argv = mutable_argv(&arguments);
+  EXPECT_FALSE(parse_prefill_config(kArgumentCount, argv.data()).has_value());
+}
+
+TEST(SpawnWorkerProtocolTest, RejectsMissingPrefillArguments) {
+  EXPECT_FALSE(parse_prefill_config(kArgumentCount, nullptr).has_value());
+  for (int32_t index = kPrefillChunkArgumentIndex; index < kArgumentCount;
+       ++index) {
+    std::vector<std::string> arguments(kArgumentCount, "1");
+    std::vector<char*> argv = mutable_argv(&arguments);
+    argv[index] = nullptr;
+    EXPECT_FALSE(parse_prefill_config(kArgumentCount, argv.data()).has_value());
+  }
+}
+
 TEST(SpawnWorkerProtocolTest, PreservesExplicitEplbWorkerConfig) {
   std::vector<std::string> arguments(kArgumentCount, "unused");
   arguments[kEnableEplbArgumentIndex] = "1";
@@ -221,7 +275,7 @@ TEST(SpawnWorkerProtocolTest, DefaultsEplbWorkerConfigForLegacyArguments) {
 }
 
 TEST(SpawnWorkerProtocolTest, RejectsPartialEplbWorkerConfig) {
-  for (int32_t argc = kEnableEplbArgumentIndex + 1; argc < kArgumentCount;
+  for (int32_t argc = kEnableEplbArgumentIndex + 1; argc < kEplbArgumentCount;
        ++argc) {
     SCOPED_TRACE(argc);
     std::vector<std::string> arguments(argc, "1");
@@ -279,7 +333,7 @@ TEST(SpawnWorkerProtocolTest, RejectsMissingEplbWorkerArguments) {
   EXPECT_FALSE(parse_eplb_worker_config(kMinimumArgumentCount - 1, argv.data())
                    .has_value());
 
-  for (int32_t index = kEnableEplbArgumentIndex; index < kArgumentCount;
+  for (int32_t index = kEnableEplbArgumentIndex; index < kEplbArgumentCount;
        ++index) {
     SCOPED_TRACE(index);
     std::vector<std::string> current_arguments(kArgumentCount, "1");

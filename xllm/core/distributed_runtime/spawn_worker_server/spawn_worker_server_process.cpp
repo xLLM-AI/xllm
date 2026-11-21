@@ -76,6 +76,9 @@ limitations under the License.
 // @enable_eplb
 // @redundant_experts_num
 // @use_decode_only_load
+// @max_tokens_per_chunk_for_prefill
+// @enable_chunked_prefill
+// @enable_dp_fair_token_budget
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -98,6 +101,16 @@ int main(int argc, char* argv[]) {
     LOG(ERROR) << "Spawn worker process received invalid EPLB args. Expected "
                   "enable_eplb and use_decode_only_load as 0 or 1, and a "
                   "non-negative int32 redundant_experts_num.";
+    return 1;
+  }
+
+  const std::optional<xllm::spawn_worker_protocol::PrefillConfig>
+      prefill_config =
+          xllm::spawn_worker_protocol::parse_prefill_config(argc, argv);
+  if (!prefill_config.has_value()) {
+    LOG(ERROR)
+        << "Spawn worker process received invalid prefill args: "
+           "expected positive chunk tokens and 0/1 chunked/fair switches.";
     return 1;
   }
 
@@ -265,7 +278,8 @@ int main(int argc, char* argv[]) {
                                    enable_probabilistic_draft,
                                    model_impl,
                                    extension_impl,
-                                   std::move(eplb_worker_config.value()));
+                                   std::move(eplb_worker_config.value()),
+                                   prefill_config.value());
 
     worker.run();
   }

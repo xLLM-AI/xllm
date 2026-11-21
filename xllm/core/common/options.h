@@ -39,6 +39,8 @@ class Options {
 
   void validate(const ModelArgs& model_args) const;
 
+  void resolve_prefill_options();
+
   PROPERTY(std::string, model_path);
 
   PROPERTY(std::string, model_id);
@@ -89,7 +91,7 @@ class Options {
   PROPERTY(int32_t, max_seqs_per_batch) = 256;
 
   // the max tokens per chunk for request in prefill stage.
-  PROPERTY(int32_t, max_tokens_per_chunk_for_prefill);
+  PROPERTY(int32_t, max_tokens_per_chunk_for_prefill) = -1;
 
   VALIDATED_PROPERTY(int32_t, num_speculative_tokens, [](int32_t value) {
     return std::max(value, int32_t{0});

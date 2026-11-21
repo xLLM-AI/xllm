@@ -42,7 +42,6 @@ limitations under the License.
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_controller.h"
@@ -359,20 +358,6 @@ bool LLMEngine::allocate_kv_cache(
       .indexer_cache_dtype = kv_cache_config.indexer_cache_dtype(),
       .model_type = args_.model_type(),
   };
-  const bool is_decode = options_.instance_role() == InstanceRole::DECODE;
-  if (options_.enable_prefix_cache() && enable_state_cache && !is_decode) {
-    const auto& scheduler_config = ::xllm::SchedulerConfig::get_instance();
-    CHECK(scheduler_config.enable_chunked_prefill())
-        << "GDN/KPool state prefix cache requires block-aligned chunked "
-           "prefill to save matching linear states. Please set "
-           "--enable_chunked_prefill=true in your config.";
-    CHECK(scheduler_config.max_tokens_per_chunk_for_prefill() % block_size == 0)
-        << "state-cache prefix cache saves checkpoints at "
-           "chunk-end boundaries, so max_tokens_per_chunk_for_prefill ("
-        << scheduler_config.max_tokens_per_chunk_for_prefill()
-        << ") must be a multiple of block_size (" << block_size << ").";
-  }
-
   // initialize block manager
   // Logical block_size *= kv_split_size.
   const int32_t kv_split_size_eff =
@@ -388,6 +373,7 @@ bool LLMEngine::allocate_kv_cache(
       .block_size(kv_split_size_eff > 1 ? block_size * kv_split_size_eff
                                         : block_size)
       .enable_linear_state(enable_state_cache)
+      .linear_state_chunk_stride(options_.max_tokens_per_chunk_for_prefill())
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
@@ -512,6 +498,7 @@ bool LLMEngine::allocate_kv_cache(
                                     dp_local_tp_size_,
                                     dtype_,
                                     std::move(options),
+                                    options_.enable_chunked_prefill(),
                                     std::move(transfer_coordinator),
                                     dp_size_,
                                     std::move(host_cache_validation_options),

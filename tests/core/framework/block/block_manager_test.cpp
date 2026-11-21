@@ -119,8 +119,7 @@ bool allocate_kv_prefix_for_test(BlockManagerPool& pool, Sequence& sequence) {
 
 bool allocate_next_linear_chunk(BlockManagerPool& pool, Sequence& sequence) {
   pool.allocate_shared(&sequence);
-  const size_t chunk_stride =
-      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
+  const size_t chunk_stride = pool.options().linear_state_chunk_stride();
   const size_t target = std::min(sequence.num_tokens(),
                                  sequence.kv_cache_tokens_num() + chunk_stride);
   return pool.allocate(&sequence, target);
@@ -172,6 +171,7 @@ BlockManagerPool::Options make_linear_state_pool_options(
       .num_embedding_blocks(4)
       .num_speculative_tokens(1)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(linear_state_num_slots);
   return options;
 }
@@ -230,6 +230,76 @@ std::vector<XXH3Key> ExpectedChain(const std::vector<int32_t>& tokens,
 
 }  // namespace
 
+TEST_F(BlockManagerPoolTest,
+       SharedFactoryRequiresChunkingAndAlignedStateCheckpoints) {
+  BlockManagerPool::Options options;
+  // A chunk may align to the capacity block without filling a KV-split block.
+  options.block_size(16)
+      .enable_linear_state(true)
+      .linear_state_chunk_stride(8)
+      .enable_prefix_cache(true);
+  const auto create_manager = [&options](bool enable_chunked_prefill) {
+    return KVCacheManagerFactory::create(make_shared_cache_capacity(),
+                                         make_shared_cache_model_args(),
+                                         /*world_size=*/1,
+                                         torch::kBFloat16,
+                                         options,
+                                         enable_chunked_prefill,
+                                         /*transfer_coordinator=*/nullptr);
+  };
+  auto result = create_manager(/*enable_chunked_prefill=*/true);
+  ASSERT_NE(result.manager, nullptr);
+  EXPECT_DEATH(create_manager(/*enable_chunked_prefill=*/false),
+               "requires block-aligned chunked");
+  options.linear_state_chunk_stride(12);
+  EXPECT_DEATH(create_manager(/*enable_chunked_prefill=*/true),
+               "must be a multiple of block_size");
+  options.linear_state_chunk_stride(-1);
+  EXPECT_DEATH(create_manager(/*enable_chunked_prefill=*/true),
+               "must be positive");
+}
+
+TEST_F(BlockManagerPoolTest,
+       SharedFactoryAllowsUnusedPrefillSettingsWithoutStatePrefixes) {
+  for (const bool is_decode : {false, true}) {
+    BlockManagerPool::Options options;
+    options.block_size(8)
+        .enable_linear_state(true)
+        .enable_prefix_cache(is_decode)
+        .instance_is_decode(is_decode);
+    auto result =
+        KVCacheManagerFactory::create(make_shared_cache_capacity(),
+                                      make_shared_cache_model_args(),
+                                      /*world_size=*/1,
+                                      torch::kBFloat16,
+                                      options,
+                                      /*enable_chunked_prefill=*/false,
+                                      /*transfer_coordinator=*/nullptr);
+    ASSERT_NE(result.manager, nullptr);
+  }
+}
+
+TEST_F(BlockManagerPoolTest, FactoryAllowsNonChunkedPrefillWithoutLinearState) {
+  KVCacheCapacity capacity;
+  capacity.n_blocks(64).block_size(4);
+  ModelArgs model_args;
+  model_args.model_type("test_model")
+      .n_layers(2)
+      .n_heads(1)
+      .n_kv_heads(1)
+      .head_dim(8);
+  BlockManagerPool::Options options;
+  options.num_blocks(64).block_size(4).enable_prefix_cache(true);
+  auto result = KVCacheManagerFactory::create(capacity,
+                                              model_args,
+                                              /*world_size=*/1,
+                                              torch::kBFloat16,
+                                              options,
+                                              /*enable_chunked_prefill=*/false,
+                                              /*transfer_coordinator=*/nullptr);
+  ASSERT_NE(result.manager, nullptr);
+}
+
 TEST(KVCacheManagerFactoryTest,
      ValidatesVirtualMemoryHostOffloadProviderBeforeAllocation) {
   KVCacheCapacity capacity;
@@ -250,6 +320,7 @@ TEST(KVCacheManagerFactoryTest,
                                              /*world_size=*/1,
                                              torch::kBFloat16,
                                              options,
+                                             /*enable_chunked_prefill=*/true,
                                              /*transfer_coordinator=*/nullptr,
                                              /*dp_size=*/1,
                                              host_options),
@@ -278,6 +349,7 @@ TEST(KVCacheManagerFactoryTest,
                                              /*world_size=*/1,
                                              torch::kBFloat16,
                                              options,
+                                             /*enable_chunked_prefill=*/true,
                                              /*transfer_coordinator=*/nullptr,
                                              /*dp_size=*/1,
                                              host_options),
@@ -287,12 +359,16 @@ TEST(KVCacheManagerFactoryTest,
 TEST_F(BlockManagerPoolTest,
        SharedFactorySeparatesLogicalIdsAndPhysicalBudget) {
   BlockManagerPool::Options options;
-  options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
+  options.block_size(8)
+      .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
+      .enable_prefix_cache(false);
   auto result = KVCacheManagerFactory::create(make_shared_cache_capacity(),
                                               make_shared_cache_model_args(),
                                               /*world_size=*/1,
                                               torch::kBFloat16,
                                               options,
+                                              /*enable_chunked_prefill=*/true,
                                               /*transfer_coordinator=*/nullptr);
   EXPECT_EQ(result.shape.key_cache_shape().front(), 53);
   EXPECT_EQ(result.shape.conv_cache_shape().front(), 53);
@@ -310,7 +386,10 @@ TEST_F(BlockManagerPoolTest,
 
 TEST_F(BlockManagerPoolTest, SharedFactoryAccountsForTypedSlabFragmentation) {
   BlockManagerPool::Options options;
-  options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
+  options.block_size(8)
+      .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
+      .enable_prefix_cache(false);
   KVCacheCapacity capacity = make_shared_cache_capacity();
   capacity.shared_slab_count(5);
   auto result = KVCacheManagerFactory::create(capacity,
@@ -318,6 +397,7 @@ TEST_F(BlockManagerPoolTest, SharedFactoryAccountsForTypedSlabFragmentation) {
                                               /*world_size=*/1,
                                               torch::kBFloat16,
                                               options,
+                                              /*enable_chunked_prefill=*/true,
                                               /*transfer_coordinator=*/nullptr);
   auto first = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8});
   auto second = make_sequence(1, {9, 10, 11, 12, 13, 14, 15, 16});
@@ -336,7 +416,10 @@ TEST_F(BlockManagerPoolTest, SharedFactoryAccountsForTypedSlabFragmentation) {
 
 TEST(KVCacheManagerFactoryTest, RejectsSharedStorageCostMismatch) {
   BlockManagerPool::Options options;
-  options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
+  options.block_size(8)
+      .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
+      .enable_prefix_cache(false);
   auto capacity = make_shared_cache_capacity();
   capacity.shared_linear_state_slots(3);
   EXPECT_DEATH(KVCacheManagerFactory::create(capacity,
@@ -344,6 +427,7 @@ TEST(KVCacheManagerFactoryTest, RejectsSharedStorageCostMismatch) {
                                              /*world_size=*/1,
                                              torch::kBFloat16,
                                              options,
+                                             /*enable_chunked_prefill=*/true,
                                              /*transfer_coordinator=*/nullptr),
                "num_linear_groups");
 }
@@ -457,9 +541,8 @@ TEST_F(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenEnabled) {
   options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .num_speculative_tokens(1)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   Sequence seq = make_sequence(0, /*prompt_tokens=*/{1, 2, 3});
@@ -482,14 +565,13 @@ TEST_F(BlockManagerPoolTest, EqualAvailableCapacityRotatesAcrossDpRanks) {
 }
 
 TEST_F(BlockManagerPoolTest, DpLinearStateAndPrefixCachesAreIsolated) {
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool::Options options;
   options.num_blocks(8)
       .host_num_blocks(0)
       .block_size(4)
       .enable_prefix_cache(true)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(4);
   BlockManagerPool pool(options, /*dp_size=*/2);
 
@@ -566,9 +648,8 @@ TEST_F(BlockManagerPoolTest, DeallocateReleasesSingleBlockId) {
   options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .num_speculative_tokens(1)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   Sequence seq1 = make_sequence(0, /*prompt_tokens=*/{1, 2, 3});
@@ -597,9 +678,8 @@ TEST_F(BlockManagerPoolTest, EmbeddingBlockCapacityUsesNumEmbeddingBlocks) {
   options.num_embedding_blocks(5)
       .num_speculative_tokens(1)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   std::vector<Sequence> sequences;
@@ -623,9 +703,8 @@ TEST_F(BlockManagerPoolTest, TryAllocateKvFailureRollsBackSingleBlock) {
       .num_embedding_blocks(3)
       .num_speculative_tokens(1)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   std::vector<int32_t> huge_prompt(4, 1);
@@ -656,9 +735,8 @@ TEST_F(BlockManagerPoolTest, SingleBlockCapacityCanBeLowerThanMaxSeqs) {
       .enable_prefix_cache(false);
   options.num_speculative_tokens(1)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   Sequence seq0 = make_sequence(0, /*prompt_tokens=*/{1});
@@ -690,9 +768,8 @@ TEST_F(BlockManagerPoolTest, DpRankSelectionSkipsExhaustedSingleBlockPool) {
       .enable_prefix_cache(false);
   options.num_speculative_tokens(1)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/2);
 
   Sequence seq0 = make_sequence(0, /*prompt_tokens=*/{1});
@@ -718,9 +795,8 @@ TEST_F(BlockManagerPoolTest,
       .enable_prefix_cache(false);
   options.num_speculative_tokens(1)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/2);
 
   Sequence seq0 = make_sequence(0, /*prompt_tokens=*/{1});
@@ -774,9 +850,8 @@ TEST_F(BlockManagerPoolTest, CapacityReportsKvPoolWhenLinearStateEnabled) {
       .enable_prefix_cache(false);
   options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(8)
       .linear_state_num_slots(kLinearStateSlots);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 8);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   // Each leaf reserves slot 0 as padding, so a fresh KV pool reports
@@ -798,9 +873,8 @@ TEST_F(BlockManagerPoolTest, SequenceCopyDoesNotReuseSingleBlockSlot) {
   options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .num_speculative_tokens(1)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   Sequence src = make_sequence(0, /*prompt_tokens=*/{1, 2, 3});
@@ -897,9 +971,8 @@ TEST_F(BlockManagerPoolTest,
       true);
   options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   Sequence cached_seq =
@@ -952,9 +1025,8 @@ TEST_F(BlockManagerPoolTest, ExactPromptCannotReuseUncheckpointedTailBoundary) {
       true);
   options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   Sequence cached_seq =
@@ -990,9 +1062,8 @@ TEST_F(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
       true);
   options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   Sequence cached_seq =
@@ -1021,8 +1092,6 @@ TEST_F(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
 }
 
 TEST_F(BlockManagerPoolTest, LinearAllocationEvictsOnlyUnpinnedCheckpoint) {
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(make_linear_state_pool_options(4), 1);
   LinearStateBlockManager* leaf =
       BlockManagerPoolTestPeer::linear_leaf(pool, 0);
@@ -1057,8 +1126,6 @@ TEST_F(BlockManagerPoolTest, LinearAllocationEvictsOnlyUnpinnedCheckpoint) {
 
 TEST_F(BlockManagerPoolTest,
        PrefixMountSurvivesOutputAllocationFailureAndRetry) {
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(make_linear_state_pool_options(3), 1);
   LinearStateBlockManager* leaf =
       BlockManagerPoolTestPeer::linear_leaf(pool, 0);
@@ -1094,9 +1161,6 @@ TEST_F(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
   constexpr int32_t kCanonicalBlockSize = 256;
   constexpr int32_t kChunkStride = 128;
   ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 4);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(),
-      kChunkStride);
 
   const auto check_prefix = [this, kCanonicalBlockSize, kChunkStride](
                                 std::initializer_list<size_t> checkpoints,
@@ -1108,6 +1172,7 @@ TEST_F(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
         .enable_prefix_cache(true);
     options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
         .enable_linear_state(true)
+        .linear_state_chunk_stride(kChunkStride)
         .linear_state_num_slots(16);
     BlockManagerPool pool(options, /*dp_size=*/1);
 
@@ -1160,9 +1225,8 @@ TEST_F(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
       true);
   options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   Sequence short_cached_seq =
@@ -1210,9 +1274,8 @@ TEST_F(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
       true);
   options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
+      .linear_state_chunk_stride(4)
       .linear_state_num_slots(64);
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   Sequence cached_seq =

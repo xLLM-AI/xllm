@@ -53,7 +53,6 @@ limitations under the License.
 namespace xllm {
 class DistributedWorkerManager;
 class RequestPriorityQueue;
-class SchedulerConfig;
 class SchedulerPolicy;
 class ModelResidencyCoordinator;
 struct SchedulerState;
@@ -167,9 +166,6 @@ class ContinuousSchedulerBase : public Scheduler {
 
   // BatchMode resolved from scheduler options.
   BatchMode batch_mode_;
-
-  // Fair prefill budgeting still uses process-wide configuration.
-  const SchedulerConfig& scheduler_config_;
 
   // Each scheduler owns a factory configured for its DP topology.
   BatchFactory batch_factory_;
