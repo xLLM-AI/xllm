@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = ["fixtures", "build"]
+force-exclude = true
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I", "G"]
+ignore = ["F405", "F403", "F821", "F401", "F841", "F402", "E501", "E402", "E731", "B905", "B007", "UP032", "UP035", "B904", "SIM108", "SIM102", "SIM105", "SIM112", "SIM118", "SIM103", "UP007", "UP045"]
+
+[tool.ruff.format]
+docstring-code-format = true
