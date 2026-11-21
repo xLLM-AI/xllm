@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/moe_execution_input.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/model_loader/hf_model_loader.h"
 #include "core/framework/model_loader/model_loader.h"
@@ -64,9 +65,9 @@ class MiniMaxM2MoeDecoderLayerImpl : public torch::nn::Module {
                         torch::Tensor& positions,
                         const layer::AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
-                        const ModelParamsView& input_params) {
+                        const MoeExecutionInput& moe_input) {
     return layer_->forward(
-        x, residual, positions, attn_metadata, kv_cache, input_params);
+        x, residual, positions, attn_metadata, kv_cache, moe_input);
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -94,8 +95,9 @@ class MiniMaxM2MoeDecoderLayerImpl : public torch::nn::Module {
           continue;
         }
 
+        const torch::ScalarType dtype = tensor.scalar_type();
         if (absl::EndsWith(mapped_name, ".weight") &&
-            is_fp8_dtype(tensor.scalar_type())) {
+            (dtype == torch::kFloat8_e5m2 || dtype == torch::kFloat8_e4m3fn)) {
           const std::string scale_name = mapped_name + "_scale_inv";
           auto pending_scale = pending_fp8_scales.find(scale_name);
           if (pending_scale != pending_fp8_scales.end()) {
@@ -139,10 +141,6 @@ class MiniMaxM2MoeDecoderLayerImpl : public torch::nn::Module {
                                        {".w2.", ".down_proj."},
                                        {".w3.", ".up_proj."}});
     return mapped_name;
-  }
-
-  static bool is_fp8_dtype(torch::ScalarType dtype) {
-    return dtype == torch::kFloat8_e5m2 || dtype == torch::kFloat8_e4m3fn;
   }
 
   static torch::Tensor dequantize_fp8_block_weight(
@@ -244,14 +242,11 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
     }
 
     auto& attn_metadata = *(modified_input_params.attn_metadata);
+    const MoeExecutionInput moe_input(modified_input_params);
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); ++i) {
-      h = layers_[i]->forward(h,
-                              residual,
-                              positions,
-                              attn_metadata,
-                              kv_caches[i],
-                              modified_input_params);
+      h = layers_[i]->forward(
+          h, residual, positions, attn_metadata, kv_caches[i], moe_input);
     }
 
     if (h.numel() == 0) {

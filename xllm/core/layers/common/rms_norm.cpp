@@ -44,7 +44,39 @@ RMSNormImpl::RMSNormImpl(const ModelContext& context)
 std::tuple<torch::Tensor, std::optional<torch::Tensor>> RMSNormImpl::forward(
     torch::Tensor& input,
     std::optional<torch::Tensor> residual,
-    std::optional<torch::Tensor> inplace_output) {
+    std::optional<torch::Tensor> inplace_output,
+    const std::optional<torch::Tensor>& fp8_scale) {
+  if (fp8_scale.has_value()) {
+    CHECK(Platform::is_cuda()) << "RMSNorm FP8 quantization requires CUDA";
+    CHECK(!inplace_output.has_value())
+        << "RMSNorm FP8 quantization requires a separate output";
+    CHECK(mode_ == kRmsNormMode) << "FP8 quantization requires RMSNorm mode";
+
+    if (residual.has_value()) {
+      xllm::kernel::FusedAddRmsNormStaticFp8QuantParams params;
+      params.input = input;
+      params.residual = residual.value();
+      params.weight = weight_;
+      params.scale = *fp8_scale;
+      params.epsilon = eps_;
+
+      auto [output, updated_residual] =
+          xllm::kernel::fused_add_rms_norm_static_fp8_quant(params);
+
+      return std::make_tuple(output, updated_residual);
+    }
+
+    xllm::kernel::RmsNormStaticFp8QuantParams params;
+    params.input = input;
+    params.weight = weight_;
+    params.scale = *fp8_scale;
+    params.epsilon = eps_;
+
+    auto output = xllm::kernel::rms_norm_static_fp8_quant(params);
+
+    return std::make_tuple(output, std::nullopt);
+  }
+
   auto org_shape = input.sizes().vec();
 
   input = input.reshape({-1, norm_dim_});
@@ -90,42 +122,6 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> RMSNormImpl::forward(
     residual_out.value() = residual_out.value().view(org_shape);
   }
   return std::make_tuple(output, residual_out);
-}
-
-std::tuple<torch::Tensor, std::optional<torch::Tensor>>
-RMSNormImpl::forward_fp8(torch::Tensor& input,
-                         const torch::Tensor& fp8_scale,
-                         std::optional<torch::Tensor> residual) {
-  // Only supported on CUDA for now
-  CHECK(Platform::is_cuda()) << "forward_fp8 is only supported on CUDA";
-  CHECK(mode_ == kRmsNormMode)
-      << "forward_fp8 only supports RMSNorm mode, not LayerNorm";
-
-  if (residual.has_value()) {
-    // Fused Add + RMSNorm + FP8 Quantization
-    xllm::kernel::FusedAddRmsNormStaticFp8QuantParams params;
-    params.input = input;
-    params.residual = residual.value();
-    params.weight = weight_;
-    params.scale = fp8_scale;
-    params.epsilon = eps_;
-
-    auto [output, updated_residual] =
-        xllm::kernel::fused_add_rms_norm_static_fp8_quant(params);
-
-    return std::make_tuple(output, updated_residual);
-  } else {
-    // RMSNorm + FP8 Quantization (no residual)
-    xllm::kernel::RmsNormStaticFp8QuantParams params;
-    params.input = input;
-    params.weight = weight_;
-    params.scale = fp8_scale;
-    params.epsilon = eps_;
-
-    auto output = xllm::kernel::rms_norm_static_fp8_quant(params);
-
-    return std::make_tuple(output, std::nullopt);
-  }
 }
 
 void RMSNormImpl::load_state_dict(const StateDict& state_dict) {

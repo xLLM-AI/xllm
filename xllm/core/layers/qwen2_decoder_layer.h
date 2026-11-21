@@ -18,10 +18,8 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <optional>
-#include <tuple>
 
 #include "common/dense_mlp.h"
-#include "common/dflash2_grouped_conv.h"
 #include "common/qwen2_attention.h"
 #include "common/rms_norm.h"
 #include "core/kv_cache/storage/kv_cache.h"
@@ -31,49 +29,26 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 
 namespace xllm {
+
 namespace layer {
 
-class Qwen2DecoderLayerImpl : public torch::nn::Module {
+class Qwen2DecoderLayerImpl final : public torch::nn::Module {
  public:
   explicit Qwen2DecoderLayerImpl(const ModelContext& context,
                                  int32_t layer_id = -1);
-
   void load_state_dict(const StateDict& state_dict);
-
   void verify_loaded_weights(const std::string& prefix) const;
-
   torch::Tensor forward(torch::Tensor& x,
                         std::optional<torch::Tensor>& residual,
                         torch::Tensor& positions,
                         const AttentionMetadata& attn_metadata,
                         KVCache& kv_cache);
 
-  template <typename InputParams>
-  torch::Tensor forward(torch::Tensor& x,
-                        std::optional<torch::Tensor>& residual,
-                        torch::Tensor& positions,
-                        const AttentionMetadata& attn_metadata,
-                        KVCache& kv_cache,
-                        const InputParams&) {
-    return forward(x, residual, positions, attn_metadata, kv_cache);
-  }
-
  private:
   Qwen2Attention attention_{nullptr};
   DenseMLP mlp_{nullptr};
   RMSNorm input_norm_{nullptr};
   RMSNorm post_norm_{nullptr};
-  DFlash2GroupedConv attention_conv_{nullptr};
-  DFlash2GroupedConv mlp_conv_{nullptr};
-  bool use_dflash2_conv_ = false;
-
-  ParallelArgs parallel_args_;
-
-  std::tuple<torch::Tensor, std::optional<torch::Tensor>> apply_norm(
-      RMSNorm& norm,
-      torch::Tensor& input,
-      std::optional<torch::Tensor>& residual,
-      const std::optional<torch::Tensor>& fp8_scale);
 };
 TORCH_MODULE(Qwen2DecoderLayer);
 

@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
+
 #include "core/framework/state_dict/utils.h"
 
 namespace xllm::layer {
@@ -57,9 +59,8 @@ torch::Tensor dflash2_grouped_conv(const torch::Tensor& hidden_states,
                                               .device(hidden_states.device())) %
                             block_size;
 
-  for (int32_t tap = 1; tap < taps; ++tap) {
-    CHECK_GT(num_tokens, tap)
-        << "DFlash2 convolution token count must exceed its tap offset.";
+  const int64_t num_taps = std::min<int64_t>({taps, block_size, num_tokens});
+  for (int32_t tap = 1; tap < num_taps; ++tap) {
     // Aligned-slice add_ replaces the previous zeros+cat shift: the first
     // `tap` output rows would receive padding-block contributions (zero) and
     // are skipped, which the block-boundary mask below already guarantees.

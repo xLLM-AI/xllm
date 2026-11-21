@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -34,13 +35,14 @@ from xllm.python.models.qwen3_dflash import (
 
 @dataclass
 class DFlash2Qwen3Config(DFlashQwen3Config):
+    num_speculative_tokens: int | None = None
     conv_group_size: int = 0
     conv_kernel_size: int = 0
     selector_rank: int = 0
     selector_top_k: int = 0
 
     @classmethod
-    def from_dict(cls, d: dict) -> DFlash2Qwen3Config:
+    def from_dict(cls, d: dict[str, Any]) -> DFlash2Qwen3Config:
         base = DFlashQwen3Config.from_dict(d)
         nested = d.get("dflash_config")
         dflash_config = nested if isinstance(nested, dict) else {}
@@ -53,6 +55,7 @@ class DFlash2Qwen3Config(DFlashQwen3Config):
 
         return cls(
             **base.__dict__,
+            num_speculative_tokens=d.get("num_speculative_tokens"),
             conv_group_size=pick("conv_group_size"),
             conv_kernel_size=pick("conv_kernel_size"),
             selector_rank=pick("selector_rank"),
@@ -145,11 +148,14 @@ class DFlash2Qwen3DecoderLayer(Qwen3DecoderLayer):
     ) -> None:
         super().__init__(cfg, layer_id, dtype, device, causal=causal)
         self.self_attn.attn.fia_sparse_mode = 4
+        num_decoding_tokens = (
+            cfg.num_speculative_tokens + 1 if cfg.num_speculative_tokens is not None else cfg.block_size
+        )
         self.attention_conv = DFlash2GroupedConv(
             cfg.hidden_size,
             cfg.conv_kernel_size,
             cfg.conv_group_size,
-            cfg.block_size,
+            num_decoding_tokens,
             dtype,
             device,
         )
@@ -157,7 +163,7 @@ class DFlash2Qwen3DecoderLayer(Qwen3DecoderLayer):
             cfg.hidden_size,
             cfg.conv_kernel_size,
             cfg.conv_group_size,
-            cfg.block_size,
+            num_decoding_tokens,
             dtype,
             device,
         )
