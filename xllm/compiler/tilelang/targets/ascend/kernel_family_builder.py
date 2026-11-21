@@ -90,6 +90,10 @@ def _write_text_if_changed(path: Path, content: str) -> None:
 
 
 def _run_variant_worker(args: _VariantWorkerArgs) -> _VariantBuildResult:
+    # H3 lowering constructs a torch.device("npu"). Register the backend in the
+    # spawned worker even when torch's device backend autoload is disabled.
+    if args.plan.compile_spec.kernel_name in kernel_registry.H3_RAINFUSION_KERNELS:
+        importlib.import_module("torch_npu")
     mod = importlib.import_module(args.kernel_cls_module)
     kernel_cls = getattr(mod, args.kernel_cls_name)
 

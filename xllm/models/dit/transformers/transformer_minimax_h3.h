@@ -18,18 +18,21 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "core/framework/config/dit_config.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/dit_cache/similarity_residual_cache.h"
 #include "core/framework/model_context/dit_model_context.h"
 #include "core/framework/model_loader/dit_model_loader.h"
 #include "core/framework/state_dict/state_dict.h"
@@ -42,12 +45,24 @@ limitations under the License.
 #include "models/dit/utils/dit_block_weight_manager.h"
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #endif
+#include "models/dit/utils/minimax_h3_rainfusion.h"
 #include "models/dit/utils/timestep_embedding.h"
 #include "models/dit/utils/util.h"
 #include "models/model_registry.h"
 
 namespace xllm {
 namespace minimax_h3 {
+
+inline bool uses_a3_tp2_sp8_head_padding(int64_t heads,
+                                         int64_t head_dim,
+                                         int64_t tp_size,
+                                         int64_t sp_size) {
+#if defined(USE_NPU)
+  return heads == 56 && head_dim == 128 && tp_size == 2 && sp_size == 8;
+#else
+  return false;
+#endif
+}
 
 constexpr char kPackedSequenceTensorName[] = "packed";
 constexpr int64_t kPackedSequenceAlignment = 64;
@@ -284,7 +299,9 @@ class H3AttentionImpl final : public torch::nn::Module,
     CHECK_EQ(heads % tp_size, 0)
         << "MiniMax-H3 attention heads must be divisible by TP size";
     local_heads_ = heads / tp_size;
-    CHECK_EQ(local_heads_ % sp_size_, 0)
+    pad_sp_heads_ =
+        uses_a3_tp2_sp8_head_padding(heads, dim_head_, tp_size, sp_size_);
+    CHECK(local_heads_ % sp_size_ == 0 || pad_sp_heads_)
         << "MiniMax-H3 local attention heads must be divisible by SP size";
     const int64_t inner_dim = heads * dim_head;
     const QuantArgs& quant_args = context.get_quant_args();
@@ -312,7 +329,8 @@ class H3AttentionImpl final : public torch::nn::Module,
 
   torch::Tensor forward(const torch::Tensor& hidden_states,
                         const torch::Tensor& cos = torch::Tensor(),
-                        const torch::Tensor& sin = torch::Tensor()) {
+                        const torch::Tensor& sin = torch::Tensor(),
+                        H3RainfusionRequest* rainfusion = nullptr) {
     const bool use_communication_overlap =
         DiTConfig::get_instance().dit_sp_communication_overlap();
     const int64_t batch_size = hidden_states.size(0);
@@ -326,6 +344,14 @@ class H3AttentionImpl final : public torch::nn::Module,
     for (size_t index = 0; index < projections.size(); ++index) {
       qkv_tensor[index] = projections[index].contiguous().view(
           {batch_size, local_sequence_length, local_heads_, dim_head_});
+      if (pad_sp_heads_) {
+        // Ulysses scatters equal head shards. The extra four zero heads carry
+        // no weights and are discarded after the inverse all-to-all.
+        const torch::Tensor dummy =
+            torch::zeros({batch_size, local_sequence_length, 4, dim_head_},
+                         qkv_tensor[index].options());
+        qkv_tensor[index] = torch::cat({qkv_tensor[index], dummy}, /*dim=*/2);
+      }
       if (sp_size_ > 1) {
         qkv_work[index] = parallel_state::all_to_all_4D(
             qkv_tensor[index],
@@ -360,8 +386,10 @@ class H3AttentionImpl final : public torch::nn::Module,
             ? unpad_tensor(q, kPackedSequenceTensorName, /*dim=*/1).size(1)
             : sequence_length;
     torch::Tensor out;
-    if (DiTConfig::get_instance().dit_laser_attention_enabled() &&
-        live_sequence_length >= 2048 && dim_head_ <= 128) {
+    if (rainfusion != nullptr) {
+      out = rainfusion->attention(q, k, v, live_sequence_length);
+    } else if (DiTConfig::get_instance().dit_laser_attention_enabled() &&
+               live_sequence_length >= 2048 && dim_head_ <= 128) {
       // Exclude SP padding before Laser adds its own masked alignment. Keep
       // batches independent and restore only the padding needed by all-to-all.
       out = kernel::npu::laser_attention(
@@ -449,6 +477,9 @@ class H3AttentionImpl final : public torch::nn::Module,
                                                     process_group_);
       out = out_work();
     }
+    if (pad_sp_heads_) {
+      out = out.narrow(/*dim=*/2, /*start=*/0, local_heads_).contiguous();
+    }
     out =
         out.view({batch_size, local_sequence_length, local_heads_ * dim_head_});
     return to_out_->forward(out.reshape({-1, local_heads_ * dim_head_}))
@@ -475,6 +506,7 @@ class H3AttentionImpl final : public torch::nn::Module,
   int64_t local_heads_;
   int64_t dim_head_;
   int64_t sp_size_;
+  bool pad_sp_heads_ = false;
   layer::ColumnParallelLinear to_qkv_{nullptr};
   layer::RowParallelLinear to_out_{nullptr};
   H3RMSNorm norm_q_{nullptr};
@@ -653,7 +685,8 @@ class H3TransformerBlockImpl final : public torch::nn::Module {
                         const torch::Tensor& temb,
                         const torch::Tensor& adaln_indices,
                         const torch::Tensor& cos,
-                        const torch::Tensor& sin) {
+                        const torch::Tensor& sin,
+                        H3RainfusionRequest* rainfusion) {
     torch::Tensor modulation =
         adaln_->forward(temb).index_select(0, adaln_indices).unsqueeze(0);
     auto chunks = modulation.chunk(6, -1);
@@ -667,7 +700,7 @@ class H3TransformerBlockImpl final : public torch::nn::Module {
     torch::Tensor norm_h = norm1_->forward(hidden_states);
     norm_h = norm_h * (1.0 + scale_msa) + shift_msa;
     torch::Tensor h =
-        hidden_states + gate_msa * attn_->forward(norm_h, cos, sin);
+        hidden_states + gate_msa * attn_->forward(norm_h, cos, sin, rainfusion);
     norm_h = norm2_->forward(h);
     norm_h = norm_h * (1.0 + scale_mlp) + shift_mlp;
     h = h + gate_mlp * ff_->forward(norm_h);
@@ -771,6 +804,12 @@ struct MiniMaxH3TransformerConditioning {
   std::pair<torch::Tensor, torch::Tensor> rotary;
 };
 
+struct MiniMaxH3RequestCache {
+  SimilarityResidualCacheState state;
+  torch::Tensor target_rows;
+  int64_t used_rows;
+};
+
 class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
                                               public dit::SequenceParallelMixin,
                                               public dit::DiTCacheMixin {
@@ -780,12 +819,15 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
             /*process_group=*/context.get_parallel_args().dit_sp_group_),
         options_(context.get_tensor_options()) {
     using namespace minimax_h3;
-    const PolicyType cache_policy = context.get_dit_config().selected_policy;
+    const DiTCacheConfig& cache_config = context.get_dit_config();
+    const PolicyType cache_policy = cache_config.selected_policy;
     CHECK(cache_policy == PolicyType::None ||
           cache_policy == PolicyType::TaylorSeer ||
-          cache_policy == PolicyType::FBCache)
-        << "MiniMax-H3 supports None, TaylorSeer and FBCache cache policies";
-    use_cache_ = cache_policy != PolicyType::None;
+          cache_policy == PolicyType::FBCache ||
+          cache_policy == PolicyType::CACHE_DIT)
+        << "MiniMax-H3 supports None, TaylorSeer, FBCache and CacheDiT";
+    use_cache_ = cache_policy == PolicyType::TaylorSeer ||
+                 cache_policy == PolicyType::FBCache;
     const ParallelArgs& parallel_args = context.get_parallel_args();
     CHECK(parallel_args.tp_size() == 1 ||
           parallel_args.dit_tp_group_ != nullptr)
@@ -801,6 +843,25 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
     const int64_t head_dim = model_args.head_dim();
     hidden_size_ = model_args.hidden_size();
     const int64_t num_layers = model_args.num_layers();
+    if (cache_policy == PolicyType::CACHE_DIT) {
+      CHECK(options_.device().is_privateuseone() &&
+            uses_a3_tp2_sp8_head_padding(heads,
+                                         head_dim,
+                                         parallel_args.tp_size(),
+                                         parallel_args.sp_size()) &&
+            parallel_args.world_size() == 16 && parallel_args.dp_size() == 1 &&
+            parallel_args.cfg_size() == 1 && !use_rolling_load_ &&
+            DiTConfig::get_instance().dit_h3_task_type() == "ref2va")
+          << "MiniMax-H3 CacheDiT requires resident NPU Ref2VA with TP2 SP8";
+      cache_group_ = parallel_args.process_group_;
+      CHECK(cache_group_ != nullptr);
+      CHECK_EQ(cache_group_->world_size(), parallel_args.world_size());
+      SimilarityResidualCacheState::validate_options(cache_config.cache_dit);
+      CHECK_LT(cache_config.cache_dit.front_blocks, num_layers);
+      CHECK_LT(cache_config.cache_dit.back_blocks,
+               num_layers - cache_config.cache_dit.front_blocks);
+      cache_options_ = cache_config.cache_dit;
+    }
     const int64_t num_refiner_layers = model_args.num_refiner_layers();
     const int64_t ffn_dim = model_args.ffn_dim();
     const int64_t in_channels = model_args.in_channels();
@@ -830,7 +891,10 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
     CHECK_GT(time_embed_hidden_dim, 0);
     CHECK_GT(time_embed_dim, 0);
     CHECK_GT(rope_freq_dim, 0);
-    CHECK_EQ(heads % (parallel_args.tp_size() * parallel_args.sp_size()), 0)
+    CHECK(
+        heads % (parallel_args.tp_size() * parallel_args.sp_size()) == 0 ||
+        uses_a3_tp2_sp8_head_padding(
+            heads, head_dim, parallel_args.tp_size(), parallel_args.sp_size()))
         << "MiniMax-H3 attention heads must be divisible by TP size times SP "
            "size";
     video_patch_dim_ =
@@ -939,6 +1003,45 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
 
   bool rolling_load_enabled() const { return use_rolling_load_; }
 
+  std::optional<MiniMaxH3RequestCache> make_request_cache(
+      int64_t sequence_length,
+      int64_t audio_start,
+      int64_t video_start) const {
+    if (!cache_options_) {
+      return std::nullopt;
+    }
+    // Match the same contiguous SP partition used by sequence_parallel_forward.
+    const int64_t sp_size = process_group_->world_size();
+    const int64_t alignment =
+        std::lcm(sp_size, minimax_h3::kPackedSequenceAlignment);
+    const int64_t padding =
+        (alignment - sequence_length % alignment) % alignment;
+    const int64_t local_rows = (sequence_length + padding) / sp_size;
+    const int64_t start = process_group_->rank() * local_rows;
+    const int64_t used_rows =
+        std::clamp(sequence_length - start, int64_t{0}, local_rows);
+    CHECK_GE(audio_start, 0);
+    CHECK_GE(video_start, audio_start);
+    CHECK_GE(sequence_length, video_start);
+    CHECK_GT(sequence_length, audio_start)
+        << "MiniMax-H3 CacheDiT requires generated video or audio rows";
+    // Match the original cache policy's video-then-audio reduction order.
+    std::vector<int64_t> local_targets;
+    const auto append = [&](int64_t begin, int64_t end) {
+      for (int64_t row = std::max(begin, start);
+           row < std::min(end, start + used_rows);
+           ++row) {
+        local_targets.push_back(row - start);
+      }
+    };
+    append(video_start, sequence_length);
+    append(audio_start, video_start);
+    return MiniMaxH3RequestCache{
+        SimilarityResidualCacheState(*cache_options_),
+        torch::tensor(local_targets, torch::kInt64).to(options_.device()),
+        used_rows};
+  }
+
 #if defined(USE_NPU)
   // Pack only after apply_reference_precision has established the final dtype.
   void prepare_for_rolling_load() {
@@ -1032,7 +1135,9 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
       const torch::Tensor& text_indices,
       std::function<void(int32_t)> before_layer_cb = nullptr,
       std::function<void(int32_t)> after_layer_cb = nullptr,
-      int64_t step_idx = 1) {
+      int64_t step_idx = 1,
+      MiniMaxH3RequestCache* request_cache = nullptr,
+      minimax_h3::H3RainfusionRequest* rainfusion = nullptr) {
     const torch::Tensor& text_embeds = conditioning.text_embeds;
     const int64_t batch = text_embeds.size(0);
     const int64_t sequence_length = position_ids.size(0);
@@ -1097,28 +1202,77 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
                        &conditioning,
                        &before_layer_cb,
                        &after_layer_cb,
+                       request_cache,
+                       rainfusion,
                        step_idx](torch::Tensor local_packed,
                                  const torch::Tensor& local_adaln_indices,
                                  const torch::Tensor& local_timestep_indices) {
       const torch::Tensor original_hidden_states = local_packed;
+#if defined(USE_NPU)
+      const auto sparse_before =
+          rainfusion != nullptr
+              ? rainfusion->launches
+              : minimax_h3::rainfusion::H3RainfusionLaunchCounters{};
+#endif
       const auto run_block = [&](int64_t index, const torch::Tensor& hidden) {
         const int32_t block_index = static_cast<int32_t>(index);
         if (before_layer_cb) {
           before_layer_cb(block_index);
         }
+        minimax_h3::H3RainfusionRequest* active = nullptr;
+#if defined(USE_NPU)
+        if (rainfusion != nullptr &&
+            rainfusion->policy.includes_step(step_idx - 1) &&
+            rainfusion->policy.includes_layer(index)) {
+          active = rainfusion;
+        }
+#endif
         torch::Tensor output =
             blocks_[index]->as<minimax_h3::H3TransformerBlock>()->forward(
                 hidden,
                 temb,
                 local_adaln_indices,
                 conditioning.rotary.first,
-                conditioning.rotary.second);
+                conditioning.rotary.second,
+                active);
         if (after_layer_cb) {
           after_layer_cb(block_index);
         }
         return output;
       };
-      if (use_cache_) {
+      if (request_cache != nullptr) {
+        CHECK_EQ(local_packed.size(0), 1);
+        const int64_t step = step_idx - 1;
+        auto& cache = request_cache->state;
+        const int64_t middle_start = cache.front_blocks();
+        const int64_t block_count = static_cast<int64_t>(blocks_->size());
+        const int64_t tail_start = block_count - cache.back_blocks();
+        int64_t executed_blocks = 0;
+        const auto execute = [&](int64_t start, int64_t end) {
+          for (int64_t index = start; index < end; ++index) {
+            local_packed = run_block(index, local_packed);
+            ++executed_blocks;
+          }
+        };
+        execute(0, middle_start);
+        const torch::Tensor front = local_packed;
+        const auto decision =
+            cache.decide(step,
+                         (front - original_hidden_states).squeeze(0),
+                         request_cache->used_rows,
+                         cache_group_,
+                         request_cache->target_rows);
+        if (decision.hit) {
+          local_packed = cache.apply(step, front);
+        } else {
+          execute(middle_start, tail_start);
+          cache.record_dense(step, front, local_packed);
+        }
+        execute(tail_start, block_count);
+        VLOG(1) << "MiniMax-H3 CacheDiT rank=" << cache_group_->rank()
+                << " step=" << step << " hit=" << decision.hit
+                << " executed_blocks=" << executed_blocks;
+      } else if (use_cache_) {
         exec_cache_step(step_idx, local_packed, original_hidden_states, [&]() {
           exec_cached_single_blocks(static_cast<int64_t>(blocks_->size()),
                                     local_packed,
@@ -1131,6 +1285,20 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
           local_packed = run_block(index, local_packed);
         }
       }
+#if defined(USE_NPU)
+      if (rainfusion != nullptr) {
+        const auto& launches = rainfusion->launches;
+        const int64_t selector_launches =
+            launches.selector_launches - sparse_before.selector_launches;
+        const int64_t attention_launches =
+            launches.attention_launches - sparse_before.attention_launches;
+        CHECK_EQ(selector_launches, attention_launches);
+        VLOG(1) << "MiniMax-H3 RainFusion rank=" << rainfusion->rank
+                << " step=" << step_idx - 1
+                << " selector_launches=" << selector_launches
+                << " attention_launches=" << attention_launches;
+      }
+#endif
       // Output normalization depends on the current timestep and must run
       // even when cached block activations replace the transformer body.
       return norm_out_->forward(local_packed, temb, local_timestep_indices);
@@ -1271,6 +1439,8 @@ class MiniMaxH3Transformer3DModelImpl final : public torch::nn::Module,
   torch::ScalarType attention_dtype_ = torch::kFloat32;
   bool use_rolling_load_ = false;
   bool use_cache_ = false;
+  std::optional<CacheDiTOptions> cache_options_;
+  ProcessGroup* cache_group_ = nullptr;
   int64_t hidden_size_;
   int64_t freq_dim_;
   int64_t audio_in_channels_;

@@ -261,7 +261,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `max_requests_per_batch` | `int32` | `1` | Maximum number of requests per batch. |
-| `dit_cache_policy` | `string` | `"TaylorSeer"` | DiT cache policy, for example `None`, `FBCache`, `TaylorSeer`, `FBCacheTaylorSeer`, or `ResidualCache`. |
+| `dit_cache_policy` | `string` | `"TaylorSeer"` | DiT cache policy, for example `None`, `FBCache`, `TaylorSeer`, `FBCacheTaylorSeer`, or `ResidualCache`. `CacheDiT` is available for resident MiniMax-H3 Ref2VA on Ascend NPU with TP2 and SP8. |
 | `dit_cache_warmup_steps` | `int64` | `0` | Number of warmup steps. |
 | `dit_cache_n_derivatives` | `int64` | `3` | Number of derivatives to use in TaylorSeer. |
 | `dit_cache_skip_interval_steps` | `int64` | `3` | Refresh interval for `TaylorSeer` and `ResidualCache`; must be greater than `0`. For `TaylorSeer`, `1` computes every step. Ignored by other policies. |
@@ -270,10 +270,19 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `dit_cache_end_steps` | `int64` | `5` | Number of steps to skip at the end. |
 | `dit_cache_start_blocks` | `int64` | `5` | Number of blocks to skip at the start. |
 | `dit_cache_end_blocks` | `int64` | `5` | Number of blocks to skip at the end. |
+| `dit_cachedit_warmup_steps` | `int64` | `30` | CacheDiT zero-based warmup steps. |
+| `dit_cachedit_residual_diff_threshold` | `double` | `0.04` | CacheDiT relative L1 threshold. |
+| `dit_cachedit_max_cached_steps` | `int64` | `4` | CacheDiT total hit limit. `-1` means unlimited and `0` disables hits. |
+| `dit_cachedit_max_consecutive_hits` | `int64` | `1` | CacheDiT consecutive hit limit. |
+| `dit_cachedit_front_blocks` | `int64` | `1` | CacheDiT front blocks executed on every step. |
+| `dit_cachedit_back_blocks` | `int64` | `0` | CacheDiT back blocks executed on every step. |
+| `dit_cachedit_linear_residual_prediction` | `bool` | `true` | Enable CacheDiT linear residual prediction. |
 | `dit_sp_communication_overlap` | `bool` | `true` | Whether to overlap communication and computation for sequence parallelism. |
 | `dit_debug_print` | `bool` | `false` | Whether to print debug information for DiT models. |
 | `dit_generation_image_area_max` | `int64` | `0` | Maximum allowed image area (`width * height`) for image generation requests. `0` means no limit. |
 | `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 task type: `fl2va` or `ref2va`. |
+| `dit_h3_rainfusion_enabled` | `bool` | `false` | Enable BF16 RainFusion for native MiniMax-H3 Ref2VA on Ascend A3 TP2×SP8. Requires a build with `XLLM_ENABLE_H3_RAINFUSION=ON`. Set `XLLM_H3_RAINFUSION_POLICY` to `sparse-middle-steps` (default) or `sparse-middle-layers`. Native requests outside the sparse geometry or schedule run dense. |
+| `dit_h3_vae_decoder_partition` | `bool` | `false` | Partition MiniMax-H3 video VAE decoder blocks between each TP2 pair for Ascend A3 Ref2VA with TP2, SP8, and VAE16. |
 | `dit_enable_vae_tiling` | `bool` | `false` | Whether to enable VAE tiling. Currently only supported for `qwen-image-edit-plus`. |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE image size used to calculate dimensions. |
 | `dit_sparse_attention_enabled` | `bool` | `false` | Whether to enable block-wise sparse attention / RainFusion for WAN. |

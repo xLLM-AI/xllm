@@ -20,12 +20,15 @@ limitations under the License.
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -36,7 +39,10 @@ limitations under the License.
 #include "core/framework/model_context/dit_model_context.h"
 #include "core/framework/model_loader/dit_model_loader.h"
 #if defined(USE_NPU)
+#include <acl/acl.h>
+
 #include "core/layers/npu/loader/rolling_weight_buffer.h"
+#include "core/platform/device.h"
 #endif
 #include "models/dit/autoencoders/autoencoder_kl_minimax_h3_audio.h"
 #include "models/dit/autoencoders/autoencoder_kl_minimax_h3_video.h"
@@ -96,6 +102,37 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         << "MiniMax-H3 dit_h3_task_type must be fl2va or ref2va";
     const ModelArgs& transformer_args = context.get_model_args("transformer");
     const ModelArgs& vae_args = context.get_model_args("vae");
+    const DiTConfig& config = DiTConfig::get_instance();
+    const auto rainfusion_policy =
+        resolve_h3_rainfusion_policy(config.dit_h3_rainfusion_enabled(),
+                                     std::getenv(kH3RainfusionPolicyEnv));
+    if (rainfusion_policy.enabled()) {
+#if defined(USE_NPU)
+      const auto& parallel = context.get_parallel_args();
+      const char* soc = aclrtGetSocName();
+      TORCH_CHECK(
+          options_.device().is_privateuseone() && soc != nullptr &&
+              std::string_view(soc).starts_with("Ascend910_93") &&
+              task_type_ == "ref2va" && parallel.world_size() == 16 &&
+              parallel.tp_size() == 2 && parallel.sp_size() == 8 &&
+              parallel.dp_size() == 1 && parallel.cfg_size() == 1 &&
+              parallel.process_group_ != nullptr &&
+              parallel.process_group_->world_size() == 16 &&
+              parallel.process_group_->device() == options_.device() &&
+              transformer_args.n_heads() == 56 &&
+              transformer_args.head_dim() == 128 &&
+              transformer_args.num_layers() == 50 &&
+              context.get_quant_args("transformer").quant_method().empty() &&
+              !LoadConfig::get_instance().enable_rolling_load() &&
+              !config.dit_laser_attention_enabled(),
+          "MiniMax-H3 RainFusion requires native A3 TP2 SP8 resident BF16 "
+          "Ref2VA and the standard dense attention for non-sparse blocks");
+      rainfusion_ = std::make_unique<minimax_h3::H3RainfusionResources>(
+          parallel.process_group_, options_.device(), rainfusion_policy);
+#else
+      TORCH_CHECK(false, "MiniMax-H3 RainFusion requires the A3 NPU backend");
+#endif
+    }
     const int32_t vae_size = context.get_parallel_args().vae_size();
     CHECK_GT(vae_size, 0);
     CHECK(vae_size == 1 || vae_group_ != nullptr)
@@ -103,6 +140,36 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     if (vae_group_ != nullptr) {
       CHECK_EQ(vae_size, vae_group_->world_size());
     }
+#if defined(USE_NPU)
+    const ParallelArgs& parallel = context.get_parallel_args();
+    const bool vae16_topology =
+        task_type_ == "ref2va" && parallel.world_size() == 16 &&
+        parallel.tp_size() == 2 && parallel.sp_size() == 8 && vae_size == 16;
+#endif
+    ProcessGroup* decoder_group = nullptr;
+    if (DiTConfig::get_instance().dit_h3_vae_decoder_partition()) {
+#if defined(USE_NPU)
+      CHECK(!options_.device().is_cpu() && vae16_topology)
+          << "MiniMax-H3 video VAE decoder partition requires A3 Ref2VA "
+             "with TP2, SP8 and VAE16";
+      torch::DeviceGuard guard(options_.device());
+      const char* soc_name = aclrtGetSocName();
+      CHECK(soc_name != nullptr &&
+            std::string_view(soc_name).starts_with("Ascend910_93"))
+          << "MiniMax-H3 video VAE decoder partition requires Ascend A3";
+      CHECK(tp_group_ != nullptr && tp_group_->world_size() == 2);
+      CHECK_EQ(vae_group_->rank(), parallel.rank());
+      CHECK_EQ(tp_group_->rank(), vae_group_->rank() % 2);
+      decoder_group = tp_group_;
+#else
+      LOG(FATAL)
+          << "MiniMax-H3 video VAE decoder partition requires an NPU build";
+#endif
+    }
+#if defined(USE_NPU)
+    measure_video_decode_ =
+        vae16_topology && !options_.device().is_cpu() && VLOG_IS_ON(1);
+#endif
     const std::vector<int64_t>& patch_size = transformer_args.wan_patch_size();
     CHECK_EQ(patch_size.size(), static_cast<size_t>(3))
         << "MiniMax-H3 transformer patch_size must have 3 dimensions";
@@ -135,8 +202,10 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     transformer_ =
         register_module("transformer", MiniMaxH3Transformer3DModel(context));
     if (is_video_vae_worker_) {
-      vae_ = register_module(
-          "vae", AutoencoderKLMiniMaxH3(context.get_model_context("vae")));
+      vae_ =
+          register_module("vae",
+                          AutoencoderKLMiniMaxH3(
+                              context.get_model_context("vae"), decoder_group));
     }
     if (is_tp_driver_) {
       audio_vae_ = register_module(
@@ -330,6 +399,22 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         audio_scheduler_.timesteps().to(torch::kCPU);
     DiTCache::get_instance().set_context(
         {.infer_steps = scheduler_.timesteps().numel(), .single_stream = true});
+    auto request_cache = transformer_->make_request_cache(
+        layout.sequence_length, layout.audio_start, layout.video_start);
+    minimax_h3::H3RainfusionRequest* rf_request = nullptr;
+#if defined(USE_NPU)
+    auto rainfusion = rainfusion_ != nullptr
+                          ? rainfusion_->prepare(layout.sequence_length,
+                                                 layout.video_start,
+                                                 latent_frames,
+                                                 latent_height / patch_h_,
+                                                 latent_width / patch_w_,
+                                                 scheduler_.timesteps().numel())
+                          : std::nullopt;
+    if (rainfusion) {
+      rf_request = &*rainfusion;
+    }
+#endif
     std::function<void(int32_t)> before_layer_cb;
     std::function<void(int32_t)> after_layer_cb;
 #if defined(USE_NPU)
@@ -368,7 +453,9 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                                 layout.text_indices,
                                 before_layer_cb,
                                 after_layer_cb,
-                                /*step_idx=*/step + 1);
+                                /*step_idx=*/step + 1,
+                                request_cache ? &*request_cache : nullptr,
+                                rf_request);
       video_rows = step_generated_rows(video_rows,
                                        prediction.sample,
                                        layout.num_condition_video_rows,
@@ -382,6 +469,7 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     }
 
     // Release denoising history before VAE decoding allocates its activations.
+    request_cache.reset();
     DiTCache::get_instance().set_context({});
     if (!is_video_vae_worker_) {
       return DiTForwardOutput();
@@ -410,7 +498,25 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
       vae_group_->broadcast(video_latent, /*root_rank=*/0);
     }
 
+#if defined(USE_NPU)
+    Device device(options_.device());
+    std::chrono::steady_clock::time_point decode_started;
+    if (measure_video_decode_) {
+      CHECK_EQ(device.synchronize_default_stream(), 0);
+      decode_started = std::chrono::steady_clock::now();
+    }
+#endif
     torch::Tensor video = vae_->decode_to_pixels(video_latent);
+#if defined(USE_NPU)
+    if (measure_video_decode_) {
+      CHECK_EQ(device.synchronize_default_stream(), 0);
+      LOG(INFO) << "MiniMax-H3 video VAE decode rank=" << vae_group_->rank()
+                << " elapsed_ms="
+                << std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - decode_started)
+                       .count();
+    }
+#endif
     if (!is_tp_driver_) {
       return DiTForwardOutput();
     }
@@ -468,6 +574,11 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
 #endif
     if (is_video_vae_worker_) {
       vae_->to(options_.device(), torch::kFloat32);
+#if defined(USE_NPU)
+      if (measure_video_decode_) {
+        vae_->log_decoder_resident_weights(vae_group_->rank());
+      }
+#endif
     }
     if (is_tp_driver_) {
       audio_vae_->to(options_.device(), torch::kFloat32);
@@ -1362,6 +1473,9 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   bool is_tp_driver_ = true;
   bool use_rolling_load_ = false;
   bool is_vae_parallel_enabled_ = false;
+#if defined(USE_NPU)
+  bool measure_video_decode_ = false;
+#endif
   bool is_video_vae_worker_ = true;
   std::string task_type_;
   int64_t patch_h_;
@@ -1380,6 +1494,7 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   MiniMaxH3Scheduler audio_scheduler_{/*shift=*/3.0};
 #if defined(USE_NPU)
   dit::DitRollingLoadManager rolling_transformer_;
+  std::unique_ptr<minimax_h3::H3RainfusionResources> rainfusion_;
 #endif
 };
 TORCH_MODULE(MiniMaxH3Pipeline);
