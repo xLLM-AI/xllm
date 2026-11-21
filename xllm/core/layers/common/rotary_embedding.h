@@ -48,7 +48,8 @@ class RotaryEmbeddingImpl : public RotaryEmbeddingBase {
                       int64_t max_position_embeddings,
                       int64_t rope_theta,
                       bool interleaved,
-                      const torch::TensorOptions& options);
+                      const torch::TensorOptions& options,
+                      bool precompute_cache = true);
   RotaryEmbeddingImpl(const ModelContext& context);
 
   void forward(torch::Tensor& q,
@@ -93,7 +94,8 @@ class MRotaryEmbeddingImpl : public RotaryEmbeddingImpl {
                        int64_t rope_theta,
                        bool interleaved,
                        const std::vector<int64_t>& rope_scaling_mrope_section,
-                       const torch::TensorOptions& options);
+                       const torch::TensorOptions& options,
+                       bool precompute_cache = true);
 
   void forward(torch::Tensor& q,
                torch::Tensor& k,

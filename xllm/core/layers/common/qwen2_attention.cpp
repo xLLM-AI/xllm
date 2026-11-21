@@ -40,7 +40,8 @@ inline bool supports_fused_qk_norm_rope_head_dim(int64_t head_dim) {
 namespace xllm {
 namespace layer {
 
-Qwen2AttentionImpl::Qwen2AttentionImpl(const ModelContext& context) {
+Qwen2AttentionImpl::Qwen2AttentionImpl(const ModelContext& context,
+                                       bool precompute_rotary_cache) {
   const auto& args = context.get_model_args();
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
@@ -119,7 +120,8 @@ Qwen2AttentionImpl::Qwen2AttentionImpl(const ModelContext& context) {
                                        args.rope_theta(),
                                        /*interleaved=*/false,
                                        args.rope_scaling_mrope_section(),
-                                       options));
+                                       options,
+                                       precompute_rotary_cache));
 
   // 5. Attention
   attn_ = register_module("attn",

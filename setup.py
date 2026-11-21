@@ -63,6 +63,12 @@ from scripts.logger import logger
 BUILD_EXPORT: bool = True
 
 
+def _find_python_packages() -> list[str]:
+    script_packages = ["scripts"] + [f"scripts.{name}" for name in find_namespace_packages(where="scripts")]
+    vla_packages = [f"xllm.{name}" for name in find_packages(where="xllm", include=["vla", "vla.*"])]
+    return script_packages + vla_packages + find_packages(where="xllm-kernel/python")
+
+
 def _maybe_compile_tilelang_kernels(device: str, jobs: int | str | None = None) -> None:
     if device != "npu":
         return
@@ -1136,7 +1142,7 @@ if __name__ == "__main__":
             "bdist_wheel": BuildDistWheel,
         },
         options=options,
-        packages=find_namespace_packages(include=["scripts", "scripts.*"]) + find_packages(where="xllm-kernel/python"),
+        packages=_find_python_packages(),
         package_dir={"xllm_kernel": "xllm-kernel/python/xllm_kernel"},
         zip_safe=False,
         py_modules=[

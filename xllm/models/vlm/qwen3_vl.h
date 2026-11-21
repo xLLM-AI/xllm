@@ -32,9 +32,15 @@ namespace xllm {
 
 class Qwen3_VisionPatchEmbedImpl : public torch::nn::Module {
  public:
-  Qwen3_VisionPatchEmbedImpl(const ModelContext& context) {
+  explicit Qwen3_VisionPatchEmbedImpl(const ModelContext& context,
+                                      bool use_conv3d = false)
+      : use_conv3d_(use_conv3d) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
+
+    channels_ = model_args.mm_num_channels();
+    temporal_patch_size_ = model_args.mm_temporal_patch_size();
+    patch_size_ = model_args.mm_patch_size();
 
     auto in_features = model_args.mm_num_channels() *
                        model_args.mm_temporal_patch_size() *
@@ -51,7 +57,29 @@ class Qwen3_VisionPatchEmbedImpl : public torch::nn::Module {
     proj_->bias.set_data(proj_->bias.to(options));
   }
 
-  torch::Tensor forward(torch::Tensor x) { return proj_(x); }
+  torch::Tensor forward(torch::Tensor x) {
+    if (!use_conv3d_) {
+      return proj_(x);
+    }
+    // Official GR00T uses channels-last Conv3d inputs and weights. On DCU,
+    // contiguous BF16 convolution selects a numerically different kernel.
+    auto patches =
+        x.view({-1, channels_, temporal_patch_size_, patch_size_, patch_size_})
+            .contiguous(torch::MemoryFormat::ChannelsLast3d);
+    auto weight = proj_->weight
+                      .view({proj_->weight.size(0),
+                             channels_,
+                             temporal_patch_size_,
+                             patch_size_,
+                             patch_size_})
+                      .contiguous(torch::MemoryFormat::ChannelsLast3d);
+    auto output =
+        torch::conv3d(patches,
+                      weight,
+                      proj_->bias,
+                      {temporal_patch_size_, patch_size_, patch_size_});
+    return output.view({-1, proj_->weight.size(0)});
+  }
 
   void load_state_dict(const StateDict& state_dict) {
     auto weight = state_dict.get_tensor("proj.weight");
@@ -80,6 +108,10 @@ class Qwen3_VisionPatchEmbedImpl : public torch::nn::Module {
   }
 
  private:
+  bool use_conv3d_ = false;
+  int64_t channels_ = 0;
+  int64_t temporal_patch_size_ = 0;
+  int64_t patch_size_ = 0;
   bool proj_weight_loaded_ = false;
   bool proj_bias_loaded_ = false;
   torch::nn::Linear proj_{nullptr};
@@ -88,7 +120,9 @@ TORCH_MODULE(Qwen3_VisionPatchEmbed);
 
 class Qwen3_VisionRotaryEmbeddingImpl : public torch::nn::Module {
  public:
-  Qwen3_VisionRotaryEmbeddingImpl(const ModelContext& context) {
+  explicit Qwen3_VisionRotaryEmbeddingImpl(const ModelContext& context,
+                                           bool hf_buffer_precision = false)
+      : hf_buffer_precision_(hf_buffer_precision) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
 
@@ -98,7 +132,8 @@ class Qwen3_VisionRotaryEmbeddingImpl : public torch::nn::Module {
     auto opts = options.dtype(torch::kFloat32);
     auto inv_freq =
         1.0 / torch::pow(theta_, torch::arange(0, dim_, 2, opts) / dim_);
-    inv_freq_ = register_buffer("inv_freq", inv_freq);
+    inv_freq_ = register_buffer(
+        "inv_freq", hf_buffer_precision_ ? inv_freq.to(options) : inv_freq);
   }
 
   void update_freqs_cache(int64_t seqlen) {
@@ -110,9 +145,13 @@ class Qwen3_VisionRotaryEmbeddingImpl : public torch::nn::Module {
     auto options = torch::TensorOptions()
                        .dtype(torch::kFloat32)
                        .device(inv_freq_.device());
-    inv_freq_ =
-        1.0 / torch::pow(theta_, torch::arange(0, dim_, 2, options) / dim_);
-    auto seq = torch::arange(seqlen, options);
+    // GR00T casts the HF vision buffers to the policy dtype before inference.
+    // Preserve that rounding explicitly; ordinary Qwen keeps its FP32 cache.
+    if (!hf_buffer_precision_) {
+      inv_freq_ =
+          1.0 / torch::pow(theta_, torch::arange(0, dim_, 2, options) / dim_);
+    }
+    auto seq = torch::arange(seqlen, inv_freq_.options());
     freqs_cached_ = torch::outer(seq, inv_freq_);
   }
 
@@ -126,6 +165,7 @@ class Qwen3_VisionRotaryEmbeddingImpl : public torch::nn::Module {
   double theta_ = 0.0;
 
   int64_t seq_len_cached_ = 0;
+  bool hf_buffer_precision_ = false;
   torch::Tensor inv_freq_;
   torch::Tensor freqs_cached_;
 };
@@ -318,8 +358,10 @@ TORCH_MODULE(Qwen3_VisionPatchMerger);
 
 class Qwen3_VisionTransformerImpl : public torch::nn::Module {
  public:
-  Qwen3_VisionTransformerImpl(const ModelContext& context)
-      : options_(context.get_tensor_options()) {
+  explicit Qwen3_VisionTransformerImpl(const ModelContext& context,
+                                       bool hf_buffer_precision = false)
+      : hf_buffer_precision_(hf_buffer_precision),
+        options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
     hidden_size_ = model_args.mm_hidden_size();
     num_heads_ = model_args.mm_num_attention_heads();
@@ -335,10 +377,11 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
         static_cast<int>(spatial_merge_size_ * spatial_merge_size_);
     num_grid_per_side_ = static_cast<int>(std::sqrt(num_position_embeddings_));
 
-    patch_embed_ =
-        register_module("patch_embed", Qwen3_VisionPatchEmbed(context));
-    rotary_pos_emb_ =
-        register_module("rotary_pos_emb", Qwen3_VisionRotaryEmbedding(context));
+    patch_embed_ = register_module(
+        "patch_embed", Qwen3_VisionPatchEmbed(context, hf_buffer_precision_));
+    rotary_pos_emb_ = register_module(
+        "rotary_pos_emb",
+        Qwen3_VisionRotaryEmbedding(context, hf_buffer_precision_));
 
     deepstack_mergers_ =
         register_module("deepstack_mergers", torch::nn::ModuleList());
@@ -458,9 +501,12 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
       auto h_ceil_grid_idx = h_ceil_grid * num_grid_per_side_;
 
       auto w11 = dh_grid * dw_grid;
-      auto w10 = dh_grid - w11;
-      auto w01 = dw_grid - w11;
-      auto w00 = 1.0f - dh_grid - dw_grid + w11;
+      auto w10 =
+          hf_buffer_precision_ ? dh_grid * (1.0f - dw_grid) : dh_grid - w11;
+      auto w01 =
+          hf_buffer_precision_ ? (1.0f - dh_grid) * dw_grid : dw_grid - w11;
+      auto w00 = hf_buffer_precision_ ? (1.0f - dh_grid) * (1.0f - dw_grid)
+                                      : 1.0f - dh_grid - dw_grid + w11;
 
       auto idx00 = h_floor_grid_idx + w_floor_grid;
       auto idx01 = h_floor_grid_idx + w_ceil_grid;
@@ -476,7 +522,12 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
 
       auto embeds = emb_(indices);
 
-      auto combined = (embeds * weights).sum(0);  // [h*w, hidden_dim]
+      auto weighted = embeds * weights;
+      // HF adds the four BF16 corners in order, rounding after each addition.
+      auto combined =
+          hf_buffer_precision_
+              ? weighted[0] + weighted[1] + weighted[2] + weighted[3]
+              : weighted.sum(0);  // [h*w, hidden_dim]
 
       auto repeated = combined.unsqueeze(0).expand({t, -1, -1}).contiguous();
       repeated = repeated.view(
@@ -489,8 +540,7 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     return torch::cat(outputs, 0);
   }
 
-  torch::Tensor forward(torch::Tensor hidden_states,
-                        torch::Tensor grid_thw) {  // [batch,thw]
+  torch::Tensor forward(torch::Tensor hidden_states, torch::Tensor grid_thw) {
     hidden_states = patch_embed_(hidden_states);
     auto pos_embeds = fast_pos_embed_interpolate(grid_thw);
     hidden_states = hidden_states + pos_embeds;
@@ -592,6 +642,7 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
   torch::Tensor m_sin;
   int device_id = 0;
   bool is_emb_weight_loaded = false;
+  bool hf_buffer_precision_ = false;
   torch::TensorOptions options_;
 };
 TORCH_MODULE(Qwen3_VisionTransformer);

@@ -44,6 +44,7 @@ class RMSNormImpl : public torch::nn::Module {
       std::optional<torch::Tensor> residual = std::nullopt);
 
   void set_layernorm_mode();
+  void set_hf_precision_mode();
 
   void load_state_dict(const StateDict& state_dict);
 
@@ -59,6 +60,7 @@ class RMSNormImpl : public torch::nn::Module {
   int64_t norm_dim_;
   double eps_;
   std::string mode_;
+  bool hf_precision_mode_ = false;
 };
 TORCH_MODULE(RMSNorm);
 

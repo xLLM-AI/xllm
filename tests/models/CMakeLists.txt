@@ -4,8 +4,16 @@ add_library(native_library_registry_fixture SHARED
   native_library_registry_fixture.cpp)
 # Same rationale as the core/common fixtures: avoid the second glog.
 target_link_libraries(native_library_registry_fixture PRIVATE
-  torch
   spdlog::spdlog)
+if(USE_DCU)
+  # Vendor Torch brings another copy of the host's logging dependencies.
+  target_include_directories(native_library_registry_fixture SYSTEM PRIVATE
+    ${TORCH_INCLUDE_DIRS})
+  target_compile_definitions(native_library_registry_fixture PRIVATE
+    __HIP_PLATFORM_AMD__=1 USE_ROCM)
+else()
+  target_link_libraries(native_library_registry_fixture PRIVATE torch)
+endif()
 target_include_directories(native_library_registry_fixture PRIVATE
   ${PROJECT_SOURCE_DIR}/xllm
   ${PROJECT_SOURCE_DIR}/xllm/core

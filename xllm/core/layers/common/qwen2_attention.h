@@ -33,7 +33,8 @@ namespace layer {
 class Qwen2AttentionImpl : public torch::nn::Module {
  public:
   Qwen2AttentionImpl() = default;
-  Qwen2AttentionImpl(const ModelContext& context);
+  explicit Qwen2AttentionImpl(const ModelContext& context,
+                              bool precompute_rotary_cache = true);
 
   torch::Tensor forward(const torch::Tensor& positions,
                         const torch::Tensor& hidden_states,

@@ -27,13 +27,14 @@ namespace xllm {
 
 class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
  public:
-  QWen3ModelImpl(const ModelContext& context)
+  explicit QWen3ModelImpl(const ModelContext& context,
+                          bool precompute_rotary_cache = true)
       : LlmModelImplBase<layer::Qwen3DecoderLayer>(context.get_model_args()) {
     // register submodules
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
 
-    if (!mrope_section_.empty()) {
+    if (precompute_rotary_cache && !mrope_section_.empty()) {
       cos_sin_ = layer::rotary::get_concat_rotary_embedding(
           128,
           model_args.max_position_embeddings(),
@@ -48,7 +49,8 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
           register_module("embed_tokens", layer::WordEmbedding(context));
     }
     for (int32_t i = 0; i < model_args.n_layers(); i++) {
-      auto layer = layer::Qwen3DecoderLayer(context, i);
+      auto layer =
+          layer::Qwen3DecoderLayer(context, i, precompute_rotary_cache);
       layers_.push_back(layer);
     }
   }
@@ -156,15 +158,27 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
       if (input_params.has_multimodal()) {
         const auto& deep_stacks = input_params.multimodal().deep_stacks;
         if (i < deep_stacks.size()) {
-          h = h + deep_stacks[i];
+          add_deepstack(h, residual, deep_stacks[i]);
         }
       }
     }
-    auto [hidden_states, residual_out] = norm_(h, residual);
-    return ModelOutput(hidden_states, residual_out);
+    return finalize_hidden_states(h, residual);
   }
 
  protected:
+  virtual void add_deepstack(torch::Tensor& hidden_states,
+                             std::optional<torch::Tensor>& /*residual*/,
+                             const torch::Tensor& deep_stack) {
+    hidden_states = hidden_states + deep_stack;
+  }
+
+  virtual ModelOutput finalize_hidden_states(
+      torch::Tensor& hidden_states,
+      const std::optional<torch::Tensor>& residual) {
+    auto [normalized, residual_out] = norm_(hidden_states, residual);
+    return ModelOutput(normalized, residual_out);
+  }
+
   virtual layer::AttentionMetadata get_attention_metadata(
       const ModelParamsView& params) {
     return layer::AttentionMetadataBuilder::build(params,

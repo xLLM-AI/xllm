@@ -67,6 +67,17 @@ bool CpuInList(int cpu, const std::vector<int32_t>& cpus) {
   return std::find(cpus.begin(), cpus.end(), cpu) != cpus.end();
 }
 
+int32_t find_bindable_numa_node(int32_t initial_node, int32_t num_nodes) {
+  // A scheduler may restrict the process to CPUs on its initial NUMA node.
+  for (int32_t offset = 1; offset <= num_nodes; ++offset) {
+    const int32_t node = (initial_node + offset) % num_nodes;
+    if (!xllm::numa::get_numa_node_cpus(node).empty()) {
+      return node;
+    }
+  }
+  return -1;
+}
+
 bool HasHipDevice() {
   int count = 0;
   return hipGetDeviceCount(&count) == hipSuccess && count > 0;
@@ -242,8 +253,9 @@ TEST(NumaUtilsTest, BindProcessToValidNodeSucceeds) {
   // Capture initial state before any binding.
   const int32_t initial_node = xllm::numa::get_current_numa_node();
 
-  // Pick a target node different from the initial one.
-  int32_t target_node = (initial_node + 1) % num_nodes;
+  // Prefer another node within the current CPU affinity.
+  const int32_t target_node = find_bindable_numa_node(initial_node, num_nodes);
+  ASSERT_GE(target_node, 0);
 
   cpu_set_t saved_affinity;
   CPU_ZERO(&saved_affinity);
@@ -322,7 +334,8 @@ TEST(NumaUtilsTest, BindThreadToNumaNodeSucceeds) {
 
   const int32_t initial_node = xllm::numa::get_current_numa_node();
 
-  const int32_t target_node = (initial_node + 2) % num_nodes;
+  const int32_t target_node = find_bindable_numa_node(initial_node, num_nodes);
+  ASSERT_GE(target_node, 0);
 
   // Save process affinity so we can restore it before rebinding (thread
   // affinity changes affect sched_getaffinity(0, ...) in

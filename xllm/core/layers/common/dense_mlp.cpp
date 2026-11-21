@@ -121,7 +121,29 @@ DenseMLPImpl::DenseMLPImpl(int64_t hidden_size,
                                                  down_proj_extra_args));
 }
 
+void DenseMLPImpl::set_hf_precision_mode() {
+  CHECK(is_gated_ && hidden_act_ == "silu");
+  CHECK_EQ(process_group_->world_size(), 1);
+  hf_precision_mode_ = true;
+}
+
 torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
+  if (hf_precision_mode_) {
+    // HF evaluates gate/up separately and rounds SiLU before the product.
+    // A merged GEMM or fused activation need not round the same way in BF16.
+    auto weights = gate_up_proj_->weight().chunk(2, 0);
+    auto bias = gate_up_proj_->bias();
+    std::optional<torch::Tensor> gate_bias = std::nullopt;
+    std::optional<torch::Tensor> up_bias = std::nullopt;
+    if (bias.has_value()) {
+      auto halves = bias.value().chunk(2, 0);
+      gate_bias = halves[0];
+      up_bias = halves[1];
+    }
+    auto gate = torch::linear(hidden_states, weights[0], gate_bias);
+    auto up = torch::linear(hidden_states, weights[1], up_bias);
+    return down_proj_->forward(torch::silu(gate) * up);
+  }
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   const bool use_fc1_sequence_parallel =
       apply_fc1_sequence_parallel_ && fc1_ctx && is_sequence_sharded(*fc1_ctx);

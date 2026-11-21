@@ -259,7 +259,18 @@ void active(ActivationParams& params) {
 #elif defined(USE_MUSA)
   musa::active(params.output, params.input, params.act_mode, params.is_gated);
 #elif defined(USE_CUDA) || defined(USE_DCU)
-  cuda::act_and_mul(params.output, params.input, params.act_mode);
+  if (params.is_gated) {
+    cuda::act_and_mul(params.output, params.input, params.act_mode);
+  } else if (params.act_mode == "silu") {
+    params.output.copy_(torch::silu(params.input));
+  } else if (params.act_mode == "gelu") {
+    params.output.copy_(torch::gelu(params.input, "none"));
+  } else if (params.act_mode == "gelu_tanh" ||
+             params.act_mode == "gelu_pytorch_tanh") {
+    params.output.copy_(torch::gelu(params.input, "tanh"));
+  } else {
+    LOG(FATAL) << "Unsupported non-gated activation mode: " << params.act_mode;
+  }
 #elif defined(USE_ILU)
   ilu::act_and_mul(params.output, params.input, params.act_mode);
 #else
@@ -403,7 +414,19 @@ void fused_layernorm(FusedLayerNormParams& params) {
     params.output += params.beta.value();
   }
 #elif defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
-  if (params.residual.has_value()) {
+  if (params.mode == "layernorm") {
+    CHECK(params.beta.has_value()) << "LayerNorm requires beta";
+    torch::Tensor norm_input = params.input;
+    if (params.residual.has_value()) {
+      norm_input = params.input + params.residual.value();
+      params.residual_out = norm_input;
+    }
+    params.output.copy_(torch::layer_norm(norm_input,
+                                          {params.input.size(-1)},
+                                          params.weight,
+                                          params.beta.value(),
+                                          params.eps));
+  } else if (params.residual.has_value()) {
     cuda::fused_add_rms_norm(
         params.input, params.residual.value(), params.weight, params.eps);
     params.output = params.input;

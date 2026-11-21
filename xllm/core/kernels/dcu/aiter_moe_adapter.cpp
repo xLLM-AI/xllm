@@ -48,7 +48,8 @@ torch::Tensor moe_c_moe_gemm_marlin_w8a8_fp8(
     int64_t top_k,
     int64_t mode,
     int64_t delta,
-    int64_t size_m);
+    int64_t size_m,
+    int64_t real_size_k);
 
 }  // namespace native
 }  // namespace aiter
@@ -247,7 +248,8 @@ torch::Tensor moe_gemm_fp8_channelwise(
       topk,
       mode,
       delta,
-      selected_m);
+      selected_m,
+      /*real_size_k=*/0);
 }
 
 }  // namespace aiter

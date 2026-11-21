@@ -1,0 +1,8 @@
+# Copyright 2026 The xLLM Authors. SPDX-License-Identifier: Apache-2.0
+# Optional Python dependencies for GR00T inference.
+# Install the PyTorch build provided by your DCU runtime separately.
+diffusers>=0.35.1
+transformers>=4.57.3
+safetensors
+opencv-python-headless
+scipy

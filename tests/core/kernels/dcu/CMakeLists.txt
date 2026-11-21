@@ -2,6 +2,18 @@ include(cc_test)
 
 cc_test(
   NAME
+    ops_dispatch_dcu_test
+  SRCS
+    ops_dispatch_test.cpp
+  DEPS
+    :kernels
+    torch
+    GTest::gtest_main
+    glog::glog
+)
+
+cc_test(
+  NAME
     activation_dcu_test
   SRCS
     activation_test.cpp
