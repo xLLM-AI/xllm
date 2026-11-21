@@ -414,8 +414,9 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
 }
 
 void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
+  const auto& state_dicts = loader->get_state_dicts();
+  load_d2t(state_dicts);
   py::gil_scoped_acquire gil;
-  auto& state_dicts = loader->get_state_dicts();
   ensure_xllm_weight_loader_module();
 
   py::list py_state_dicts;

@@ -123,6 +123,8 @@ class CausalLM : public torch::nn::Module, public Model {
     return logits(hidden_states, seleted_idxes);
   }
 
+  const torch::Tensor& d2t() const { return d2t_; }
+
   virtual void share_lm_head(CausalLM&) {}
   virtual void share_embed_tokens(CausalLM&) {}
 
@@ -172,6 +174,21 @@ class CausalLM : public torch::nn::Module, public Model {
     NOT_IMPLEMENTED();
     return {};
   }
+
+ protected:
+  void load_d2t(const std::vector<std::unique_ptr<StateDict>>& state_dicts) {
+    for (const auto& state_dict : state_dicts) {
+      const auto offsets = state_dict->get_tensor(/*tensor_name=*/"d2t");
+      if (offsets.defined()) {
+        d2t_ = offsets.clone();
+        return;
+      }
+    }
+    d2t_ = torch::Tensor();
+  }
+
+ private:
+  torch::Tensor d2t_;
 };
 
 template <typename ModelType>
@@ -252,6 +269,7 @@ class CausalLMImpl : public CausalLM {
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) override {
+    load_d2t(loader->get_state_dicts());
     model_->load_model(std::move(loader));
     if constexpr (detail::has_tie_word_embeddings<ModelType>::value &&
                   detail::has_get_word_embedding<ModelType>::value) {
