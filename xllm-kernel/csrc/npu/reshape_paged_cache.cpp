@@ -17,10 +17,29 @@ limitations under the License.
 #include <torch/library.h>
 #include <torch/types.h>
 
+#include "csrc/npu/ascendc_api.h"
 #include "op_plugin/utils/op_api_common_base.h"
 
 namespace xllm_kernel {
 namespace {
+
+const AscendcApi& reshape_and_cache_a5_api() {
+  static const auto api =
+      load_ascendc_api("aclnnXllmKernelReshapeAndCacheA5",
+                       "aclnnXllmKernelReshapeAndCacheA5GetWorkspaceSize");
+  return api;
+}
+
+void GetApiFunc(const char* /*api_name*/,
+                const char* /*workspace_name*/,
+                void*& launch,
+                void*& workspace) {
+  const auto& api = reshape_and_cache_a5_api();
+  launch = api.launch;
+  workspace = api.workspace;
+}
+
+void prepare_ascendc_reshape_paged_cache_a5() { reshape_and_cache_a5_api(); }
 
 torch::Tensor reshape_paged_cache_a5(const torch::Tensor& slot_mapping,
                                      const torch::Tensor& key,
@@ -60,7 +79,7 @@ torch::Tensor reshape_paged_cache_a5(const torch::Tensor& slot_mapping,
 
   if (key.numel() != 0) {
     const torch::DeviceGuard guard(key.device());
-    EXEC_NPU_CMD_EXT(aclnnReshapeAndCacheA5,
+    EXEC_NPU_CMD_EXT(aclnnXllmKernelReshapeAndCacheA5,
                      key,
                      value,
                      key_cache,
@@ -73,6 +92,8 @@ torch::Tensor reshape_paged_cache_a5(const torch::Tensor& slot_mapping,
 }
 
 TORCH_LIBRARY_FRAGMENT(xllm_kernel, m) {
+  m.def("prepare_ascendc_reshape_paged_cache_a5() -> ()",
+        &prepare_ascendc_reshape_paged_cache_a5);
   m.def(
       "reshape_paged_cache_a5(Tensor slot_mapping, Tensor keys, Tensor values, "
       "Tensor(a!) key_cache, Tensor(b!) value_cache) -> Tensor(a!)");

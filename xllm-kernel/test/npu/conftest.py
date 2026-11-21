@@ -51,6 +51,7 @@ def _prepare_kernels() -> None:
             "quant_lightning_indexer",
             "quant_lightning_indexer_metadata",
             "scatter_nd_update",
+            "reshape_paged_cache",
             "quant_matmul_out",
             *(("mla_preprocess_v2",) if has_mla_preprocess_v2() else ()),
             "dequant_swiglu_quant",

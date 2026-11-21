@@ -131,6 +131,15 @@ if("ascend910b" IN_LIST ASCEND_COMPUTE_UNIT OR "ascend910_93" IN_LIST ASCEND_COM
         "${mla_host}/mla_preprocess_v2_tiling.cpp"
     )
 endif()
+if("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
+    set(reshape_a5_host "${CMAKE_CURRENT_SOURCE_DIR}/reshape_and_cache_a5/op_host")
+    list(APPEND op_definitions "${reshape_a5_host}/reshape_and_cache_a5_def.cpp")
+    set(reshape_a5_api "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_reshape_and_cache_a5.cpp")
+    set(reshape_a5_tiling
+        "${reshape_a5_host}/reshape_and_cache_a5_proto.cpp"
+        "${reshape_a5_host}/reshape_and_cache_a5_tiling.cpp"
+    )
+endif()
 npu_op_code_gen(
     SRC ${op_definitions}
     PACKAGE ${vendor}
@@ -168,6 +177,7 @@ npu_op_library(cust_opapi ACLNN
     "${scatter}/op_host/op_api/aclnn_scatter_nd_update_v2.cpp"
     "${scatter}/op_host/op_api/scatter_nd_update_v2.cpp"
     ${sparse_attention_api}
+    ${reshape_a5_api}
     "${sas_metadata}/op_api/aclnn_sparse_attn_sharedkv_metadata.cpp"
     "${sas_metadata}/op_api/l0_sparse_attn_sharedkv_metadata.cpp"
     ${a2_aclnn_sources}
@@ -234,6 +244,7 @@ npu_op_library(cust_optiling TILING
     "${scatter}/op_host/scatter_nd_update_infershape.cpp"
     "${scatter}/op_host/scatter_nd_update_v2_tiling.cpp"
     ${sparse_attention_tiling}
+    ${reshape_a5_tiling}
     "${CMAKE_CURRENT_SOURCE_DIR}/compressor/op_host/compressor_proto.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/sparse_attn_sharedkv/op_host/sparse_attn_sharedkv_proto.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/sparse_flash_attention_lse/op_host/sparse_flash_attention_lse_infershape.cpp"
@@ -401,6 +412,13 @@ foreach(op_type XllmKernelSparseAttnSharedkv XllmKernelSparseFlashAttentionLse)
         -mllvm -cce-vf-remove-membar=false -mllvm -cce-aicore-hoist-movemask=false
         "-I${CMAKE_CURRENT_SOURCE_DIR}")
 endforeach()
+
+if(reshape_a5_api)
+    npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelReshapeAndCacheA5
+        KERNEL_DIR reshape_and_cache_a5/op_kernel KERNEL_FILE reshape_and_cache_a5.cpp)
+    npu_op_kernel_options(ascendc_kernels XllmKernelReshapeAndCacheA5
+        OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Werror)
+endif()
 
 npu_op_kernel_library(ascendc_kernels SRC_BASE "${CMAKE_CURRENT_SOURCE_DIR}" TILING_LIBRARY cust_optiling)
 
