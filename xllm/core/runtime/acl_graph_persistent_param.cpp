@@ -32,10 +32,10 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
+#include "core/runtime/acl_graph_bucket_policy.h"
 #include "core/runtime/decode_graph_bucket.h"
 #include "core/util/utils.h"
 
@@ -57,10 +57,13 @@ namespace {
 constexpr int32_t kMlaGraphKvLenBucket = 2048;
 
 int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
-  const int64_t token_capacity =
-      options.max_seqs_per_batch() * (options.num_speculative_tokens() + 1);
+  const int32_t num_decoding_tokens =
+      acl_graph_decode_tokens_per_sequence(options.num_speculative_tokens(),
+                                           options.speculative_algorithm(),
+                                           options.is_draft_engine());
   return runtime::get_decode_graph_token_bucket(
-      token_capacity, options.enable_graph_mode_decode_no_padding());
+      static_cast<int64_t>(options.max_seqs_per_batch()) * num_decoding_tokens,
+      options.enable_graph_mode_decode_no_padding());
 }
 
 bool graph_mode_decode_no_padding_enabled() {
@@ -74,23 +77,18 @@ bool graph_mode_decode_no_padding_enabled() {
 
 int64_t get_hybrid_metadata_capacity(const runtime::Options& options) {
   const int64_t seq_capacity = options.max_seqs_per_batch();
-  const int64_t num_speculative_tokens = options.num_speculative_tokens();
+  const int32_t num_decoding_tokens =
+      acl_graph_decode_tokens_per_sequence(options.num_speculative_tokens(),
+                                           options.speculative_algorithm(),
+                                           options.is_draft_engine());
   // Bucket padding rows still consume sequence-scoped metadata:
   // 4 seqs x 5 tokens = 20 rows -> bucket 32 -> 7 metadata rows.
   const int64_t bucketed_tokens = runtime::get_decode_graph_token_bucket(
-      seq_capacity * (num_speculative_tokens + 1),
+      seq_capacity * num_decoding_tokens,
       graph_mode_decode_no_padding_enabled());
   const int64_t padded_seq_capacity =
-      (bucketed_tokens + num_speculative_tokens) / (num_speculative_tokens + 1);
+      (bucketed_tokens + num_decoding_tokens - 1) / num_decoding_tokens;
   return std::max(seq_capacity, padded_seq_capacity);
-}
-
-int64_t get_bucketed_decode_graph_token_capacity(
-    const runtime::Options& options) {
-  // Token-scoped buffers are sliced to bucketed token counts: 20 rows -> 32.
-  return runtime::get_decode_graph_token_bucket(
-      get_decode_graph_token_capacity(options),
-      graph_mode_decode_no_padding_enabled());
 }
 
 float get_dp_ep_all2all_buffer_factor(int64_t length) {
@@ -124,43 +122,6 @@ int64_t get_dp_ep_padding_buffer_capacity(const ModelArgs& args,
   const int64_t aligned_moe_buffer_capacity =
       ((moe_buffer_capacity + dp_size - 1) / dp_size) * dp_size;
   return std::max(graph_capacity * dp_size, aligned_moe_buffer_capacity);
-}
-
-template <typename Params>
-int64_t infer_actual_batch_size(const Params& params) {
-  if (params.meta.num_sequences == 0 && params.meta.actual_num_sequences == 0) {
-    return 0;
-  }
-  if (params.meta.actual_num_sequences > 0) {
-    return params.meta.actual_num_sequences;
-  }
-  if (params.meta.num_sequences > 0) {
-    return params.meta.num_sequences;
-  }
-  if (!params.attention.host.kv_seq_lens.empty()) {
-    return static_cast<int64_t>(params.attention.host.kv_seq_lens.size());
-  }
-  if (!params.attention.host.q_seq_lens.empty()) {
-    return static_cast<int64_t>(params.attention.host.q_seq_lens.size());
-  }
-  if (params.attention.device.kv_seq_lens.defined() &&
-      params.attention.device.kv_seq_lens.dim() >= 1) {
-    return params.attention.device.kv_seq_lens.size(0);
-  }
-  if (params.attention.device.q_seq_lens.defined() &&
-      params.attention.device.q_seq_lens.dim() >= 1) {
-    return params.attention.device.q_seq_lens.size(0);
-  }
-  if (params.attention.device.block_tables.defined() &&
-      params.attention.device.block_tables.dim() >= 2) {
-    return params.attention.device.block_tables.size(0);
-  }
-  for (const auto& block_table : params.multi_block_tables) {
-    if (block_table.defined() && block_table.dim() >= 2) {
-      return block_table.size(0);
-    }
-  }
-  return 0;
 }
 
 }  // namespace
@@ -215,7 +176,8 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // comes from decode graph capacity instead.
   const int64_t max_graph_tokens = get_decode_graph_token_capacity(options);
   const int64_t bucketed_max_graph_tokens =
-      get_bucketed_decode_graph_token_capacity(options);
+      runtime::get_decode_graph_token_bucket(
+          max_graph_tokens, graph_mode_decode_no_padding_enabled());
   // Hybrid spec verify keeps sequence-scoped metadata (with bucket padding,
   // see get_hybrid_metadata_capacity), while non-hybrid MTP expands every
   // proposal token into its own decode metadata row.
@@ -820,16 +782,17 @@ std::optional<Params> GraphPersistentParam::update(
         (!is_target_verify || is_hybrid_linear_attention_))
       << "ACL graph persistent param only supports single-token decode or "
          "hybrid spec verify";
-  int64_t actual_batch_size = infer_actual_batch_size(params);
-  if (is_target_verify && params.meta.num_sequences > 0) {
-    actual_batch_size = params.meta.num_sequences;
-  } else if (!is_target_verify) {
-    if (params.meta.num_sequences == 0) {
-      actual_batch_size = 0;
-    } else {
-      actual_batch_size =
-          actual_num_tokens / (options_.num_speculative_tokens() + 1);
-    }
+  int64_t actual_batch_size = 0;
+  if (is_target_verify) {
+    actual_batch_size = params.meta.num_sequences > 0
+                            ? params.meta.num_sequences
+                            : params.meta.actual_num_sequences;
+  } else if (params.meta.num_sequences != 0) {
+    const int32_t num_decoding_tokens =
+        acl_graph_decode_tokens_per_sequence(options_.num_speculative_tokens(),
+                                             options_.speculative_algorithm(),
+                                             options_.is_draft_engine());
+    actual_batch_size = actual_num_tokens / num_decoding_tokens;
   }
   const int32_t q_max_seq_len = std::max<int32_t>(params.meta.q_max_seq_len, 1);
   const int64_t padded_batch_size =
@@ -1274,12 +1237,6 @@ std::optional<Params> GraphPersistentParam::update(
       std::copy(capture_host_q_seq_lens_vec.begin(),
                 capture_host_q_seq_lens_vec.begin() + padded_batch_size,
                 capture_host_q_seq_lens_.begin());
-      const int32_t* graph_kv_seq_lens_data =
-          use_mla_capture_host_lens ? capture_host_kv_seq_lens_data()
-                                    : persistent_host_kv_seq_lens_data();
-      const int32_t* graph_q_seq_lens_data =
-          use_mla_capture_host_lens ? capture_host_q_seq_lens_data()
-                                    : persistent_host_q_seq_lens_data();
       const std::vector<int32_t>& graph_host_kv_seq_lens_vec =
           use_mla_capture_host_lens ? capture_host_kv_seq_lens_vec
                                     : persistent_host_kv_seq_lens_;
@@ -1293,9 +1250,13 @@ std::optional<Params> GraphPersistentParam::update(
           graph_host_q_seq_lens_vec.begin(),
           graph_host_q_seq_lens_vec.begin() + padded_batch_size);
       graph_params->attention.host.graph_kv_seq_lens_data =
-          graph_kv_seq_lens_data;
+          (use_mla_capture_host_lens ? capture_host_kv_seq_lens_
+                                     : persistent_host_kv_seq_lens_)
+              .data();
       graph_params->attention.host.graph_q_seq_lens_data =
-          graph_q_seq_lens_data;
+          (use_mla_capture_host_lens ? capture_host_q_seq_lens_
+                                     : persistent_host_q_seq_lens_)
+              .data();
     } else {
       graph_params->attention.host.kv_seq_lens = padded_kv_seq_lens_vec;
       graph_params->attention.host.q_seq_lens = padded_q_seq_lens_vec;
@@ -1317,8 +1278,8 @@ std::optional<Params> GraphPersistentParam::update(
       CHECK_LE(decode_mask_tokens, persistent_eplb_decode_token_mask_.numel())
           << "EPLB graph decode mask exceeds persistent capacity.";
       graph_params->expert.eplb_decode_token_mask =
-          persistent_eplb_decode_token_mask(
-              static_cast<uint32_t>(decode_mask_tokens));
+          persistent_eplb_decode_token_mask_.slice(
+              /*dim=*/0, /*start=*/0, /*end=*/decode_mask_tokens);
     }
     graph_params->attention.device.new_cache_slots =
         persistent_new_cache_slots(padded_num_tokens);
@@ -1330,8 +1291,8 @@ std::optional<Params> GraphPersistentParam::update(
       graph_params->embedding.linear_state_ids.resize(
           static_cast<size_t>(padded_batch_size), kPaddingLinearStateId);
       graph_params->embedding.linear_state_indices =
-          persistent_linear_state_indices(
-              static_cast<uint32_t>(padded_batch_size));
+          persistent_linear_state_indices_.slice(
+              /*dim=*/0, /*start=*/0, /*end=*/padded_batch_size);
       graph_params->embedding.linear_state_read_ids =
           params.embedding.linear_state_read_ids.empty()
               ? graph_params->embedding.linear_state_ids
@@ -1371,7 +1332,8 @@ std::optional<Params> GraphPersistentParam::update(
     if (is_target_verify) {
       graph_params->graph.attn_mask = torch::Tensor();
     } else if (need_update_attn_mask_) {
-      graph_params->graph.attn_mask = persistent_mask(padded_num_tokens);
+      graph_params->graph.attn_mask = persistent_mask_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
     }
     if (uses_paged_attention_tiling()) {
       graph_params->graph.tiling_data = tiling_data();
@@ -1380,12 +1342,12 @@ std::optional<Params> GraphPersistentParam::update(
     }
     // Set persistent embedding if available
     if (params.embedding.input_embedding.defined()) {
-      graph_params->embedding.input_embedding =
-          persistent_embedding(padded_num_tokens);
+      graph_params->embedding.input_embedding = persistent_embedding_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
     }
     if (params.num_accepted_tokens.defined()) {
-      graph_params->num_accepted_tokens = persistent_num_accepted_tokens(
-          static_cast<uint32_t>(padded_batch_size));
+      graph_params->num_accepted_tokens = persistent_num_accepted_tokens_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/padded_batch_size);
     }
     if (use_expanded_spec_decode_attention) {
       layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(

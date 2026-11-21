@@ -156,8 +156,6 @@ struct DSAMetadata {
   torch::Tensor c4_metadata;
   torch::Tensor c128_metadata;
   torch::Tensor qli_metadata;
-  // ori_win_left baked into c1/c4/c128_metadata. The attention operator checks
-  // this against its runtime window to catch metadata from another model.
   int64_t sparse_metadata_ori_win_left = -1;
   // Operator-explicit SWA indices (currently produced by DSpark native SAS).
   // Request-level; shared across draft decoder layers.

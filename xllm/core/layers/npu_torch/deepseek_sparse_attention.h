@@ -38,6 +38,9 @@ limitations under the License.
 #include "layers/common/rotary_embedding.h"
 
 namespace xllm {
+
+class ModelParamsView;
+
 namespace layer {
 
 inline int64_t deepseek_v4_ori_window_left(int64_t window_size,
@@ -66,6 +69,15 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
                                        int64_t dspark_block_size,
                                        int64_t cache_block_size);
 
+void build_deepseek_v4_sparse_metadata(
+    DSAMetadata& dsa,
+    const ModelParamsView& params,
+    const ModelArgs& args,
+    int64_t tp_num_heads,
+    int64_t dp_local_tp_size,
+    bool is_prefill,
+    const torch::Tensor& cu_seqlens_ori_kv_override);
+
 // DSA kv state aligned with Python:
 // (ori_kv, compressor_kv_state, compressor_score_state,
 //  c4_indexer_kv_state, c4_indexer_score_state)
@@ -77,13 +89,7 @@ using KVState = std::tuple<torch::Tensor,
 
 class DSAttentionImpl : public torch::nn::Module {
  public:
-  DSAttentionImpl() = default;
-  explicit DSAttentionImpl(const ModelContext& context, int32_t layer_id = -1);
-  DSAttentionImpl(const ModelArgs& args,
-                  const QuantArgs& quant_args,
-                  const ParallelArgs& parallel_args,
-                  const torch::TensorOptions& options,
-                  int32_t layer_id = -1);
+  DSAttentionImpl(const ModelContext& context, int32_t layer_id);
 
   std::tuple<torch::Tensor, std::optional<torch::Tensor>> forward(
       const DSAMetadata& attn_metadata,
@@ -116,7 +122,6 @@ class DSAttentionImpl : public torch::nn::Module {
 
   int64_t rope_head_dim_;
   int64_t nope_head_dim_;
-  int64_t window_size_;
   double compress_ratio_;
 
   double softmax_scale_;
@@ -128,8 +133,6 @@ class DSAttentionImpl : public torch::nn::Module {
   int64_t index_n_heads_ = 0;
   int64_t index_head_dim_ = 0;
   int64_t index_topk_ = 0;
-  int64_t block_size_ = 0;
-  bool dspark_use_native_sas_ = false;
 
   double rope_theta_ = 10000.0;
   double compress_rope_theta_ = 40000.0;

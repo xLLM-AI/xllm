@@ -23,7 +23,6 @@ limitations under the License.
 #include <filesystem>
 #include <system_error>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 
 #include "core/common/types.h"
@@ -31,11 +30,9 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
-#include "core/framework/model/model_params_view.h"
 #include "core/framework/model/model_type.h"
 #include "core/framework/multimodal/content_hash.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "core/framework/speculative/draft_config.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
@@ -43,7 +40,6 @@ limitations under the License.
 #include "core/kv_cache/storage/static_kv_tensor_allocator.h"
 #include "core/kv_cache/transfer/hierarchy_kv_transfer.h"
 #include "core/kv_cache/transfer/mooncake_kv_transfer.h"
-#include "core/platform/platform.h"
 #include "core/util/tensor_helper.h"
 #include "framework/model_loader/model_loader.h"
 #include "models/model_registry.h"
@@ -70,59 +66,22 @@ ParallelArgs configure_draft_parallel_args(ParallelArgs parallel_args) {
 template <typename TargetInput>
 ModelContext DraftModelSpecWorkerImpl<TargetInput>::load_model_config(
     ModelLoader& loader) {
-  if (!draft_impl_->options().model_path().empty() &&
-      draft_impl_->options().model_path() != loader.model_weights_path()) {
-    loader.set_reference_model_weights_path(
-        draft_impl_->options().model_path());
+  const auto& draft_options = draft_impl_->options();
+  if (!draft_options.model_path().empty() &&
+      draft_options.model_path() != loader.model_weights_path()) {
+    loader.set_reference_model_weights_path(draft_options.model_path());
   }
 
   ModelArgs args = loader.model_args();
-  ModelRegistry::configure_mtp_args(
-      args,
-      draft_impl_->options().speculative_algorithm(),
-      true,
-      ModelConfig::is_python_model_impl(
-          ModelConfig::get_instance().model_impl()));
-
-#if !defined(USE_NPU)
-  if (SpeculativeConfig::is_block_diffusion_algorithm(
-          draft_impl_->options().speculative_algorithm())) {
-    LOG(FATAL) << draft_impl_->options().speculative_algorithm()
-               << " block-diffusion draft is not supported on "
-               << Platform::type_str() << ".";
-  }
-  if (args.num_nextn_predict_layers() != 0) {
-    static const std::unordered_map<std::string, std::string>
-        kModelTypeToMtpType = {
-            {"deepseek_v3", "deepseek_v3_mtp"},
-            {"deepseek_v32", "deepseek_v32_mtp"},
-            {"deepseek_v4", "deepseek_v4_mtp"},
-            {"glm_moe_dsa", "glm_moe_dsa_mtp"},
-            {"joyai_llm_flash", "joyai_llm_flash_mtp"},
-            {"mimo", "mimo_mtp"},
-            {"qwen3_5", "qwen3_5_mtp"},
-            {"qwen3_5_moe", "qwen3_5_moe_mtp"},
-            {"qwen3_5_text", "qwen3_5_mtp"},
-            {"qwen3_5_moe_text", "qwen3_5_moe_mtp"},
-        };
-    const std::string& current_type = args.model_type();
-    auto it = kModelTypeToMtpType.find(current_type);
-    if (it != kModelTypeToMtpType.end()) {
-      LOG(INFO) << "Overriding draft model_type from " << current_type << " to "
-                << it->second << " for speculative decoding";
-      args.model_type(it->second);
-    }
-  }
-#endif
-
-  int32_t num_speculative_tokens = 0;
-  if (configure_draft_config_) {
-    num_speculative_tokens =
-        configure_draft_config_(args, draft_impl_->options());
-  }
+  apply_draft_model_overrides(args);
   if (args.draft_vocab_size() == 0) {
     args.draft_vocab_size(args.vocab_size());
   }
+  const int32_t num_speculative_tokens =
+      SpeculativeConfig::is_block_diffusion_algorithm(
+          draft_options.speculative_algorithm())
+          ? draft_options.num_speculative_tokens()
+          : 0;
   return draft_impl_->load_model_config(
       std::move(args), loader.quant_args(), num_speculative_tokens, nullptr);
 }
@@ -131,21 +90,19 @@ template <typename TargetInput>
 KVCacheCreateOptions
 DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_layout(
     const KVCacheShape& shape) const {
-  auto layout = get_kv_cache_create_options(
-      draft_impl_->context_.get_model_args(), shape, true);
-  auto indexer_layers = resolve_indexer_cache_enabled_layers(
-      draft_impl_->context_.get_model_args(), draft_num_layers());
-  if (shape.has_kpool_tail_shape()) {
-    indexer_layers.assign(draft_num_layers(), true);
+  const ModelArgs& args = draft_impl_->context_.get_model_args();
+  const int64_t num_layers = args.n_layers();
+  KVCacheCreateOptions layout;
+  if (!shape.has_kpool_tail_shape()) {
+    layout = get_kv_cache_create_options(args);
+    layout.indexer_cache_enabled_layers(
+        resolve_indexer_cache_enabled_layers(args));
   }
-  layout.indexer_cache_enabled_layers(std::move(indexer_layers));
-  layout.num_layers(draft_num_layers());
   if (shape.shared_draft_layers() > 0) {
     const auto shared = impl_->shared_kv_cache_layout();
-    CHECK_EQ(shared.static_layout()->draft_layer_count(), layout.num_layers());
+    CHECK_EQ(shared.static_layout()->draft_layer_count(), num_layers);
     CHECK(kv_transfer_ == nullptr && !shape.has_grouped_cache_layout() &&
-          !layout.enable_linear_attention() &&
-          draft_impl_->context_.get_model_args().index_n_heads() == 0 &&
+          !layout.enable_linear_attention() && args.index_n_heads() == 0 &&
           draft_impl_->options().kv_cache_dtype() != "int8" &&
           KVCacheConfig::get_instance().indexer_cache_dtype() != "int8")
         << "Static shared draft storage requires ordinary Full-only layers";
@@ -157,18 +114,6 @@ DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_layout(
                 shared.tensor_allocator())));
   }
   return layout;
-}
-
-template <typename TargetInput>
-int64_t DraftModelSpecWorkerImpl<TargetInput>::draft_num_layers() const {
-#if !defined(USE_NPU)
-  const int32_t nextn_layers =
-      draft_impl_->context_.get_model_args().num_nextn_predict_layers();
-  if (nextn_layers > 0) {
-    return nextn_layers;
-  }
-#endif
-  return draft_impl_->context_.get_model_args().n_layers();
 }
 
 #if defined(USE_NPU)
@@ -203,14 +148,6 @@ void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_padding(
 #endif
 
 namespace {
-
-runtime::Options target_options(const runtime::Options& options) {
-  runtime::Options opts = options;
-  opts.enable_schedule_overlap(false)
-      .is_draft_engine(false)
-      .enable_graph_aux_hidden_states(true);
-  return opts;
-}
 
 int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args) {
   const int64_t dp_size = std::max<int64_t>(parallel_args.dp_size(), 1);
@@ -280,8 +217,7 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
   }
   estimate_options.max_seqs_per_batch =
       static_cast<int64_t>(options.max_seqs_per_batch());
-  estimate_options.num_speculative_tokens =
-      static_cast<int64_t>(context.num_speculative_tokens());
+  estimate_options.num_speculative_tokens = options.num_speculative_tokens();
   estimate_options.max_tokens_per_batch =
       static_cast<int64_t>(options.max_tokens_per_batch());
   estimate_options.max_tokens_per_chunk_for_prefill =
@@ -314,16 +250,22 @@ DraftModelSpecWorkerImpl<TargetInput>::DraftModelSpecWorkerImpl(
     const runtime::Options& options,
     WorkerType worker_type,
     const ParallelArgs& draft_parallel_args,
-    const runtime::Options& draft_opts,
-    int32_t (*configure_draft_config)(ModelArgs&, const runtime::Options&))
-    : SpeculativeWorkerImpl<TargetInput>(parallel_args,
-                                         device,
-                                         options,
-                                         target_options(options),
-                                         worker_type),
+    const runtime::Options& draft_opts)
+    : SpeculativeWorkerImpl<TargetInput>(
+          parallel_args,
+          device,
+          options,
+          [&options] {
+            runtime::Options target_opts = options;
+            target_opts.is_draft_engine(/*is_draft_engine=*/false)
+                .enable_graph_aux_hidden_states(
+                    /*enable_graph_aux_hidden_states=*/true);
+            return target_opts;
+          }(),
+          worker_type),
       draft_impl_([&] {
         auto prepare_input = [this](LlmForwardInput& input) {
-          ::xllm::prepare_dummy_input(input, draft_impl_->context_, device_);
+          ::xllm::prepare_dummy_input(input, *draft_impl_);
 #if defined(USE_NPU)
           prepare_draft_padding(input.input_params);
 #endif
@@ -337,8 +279,7 @@ DraftModelSpecWorkerImpl<TargetInput>::DraftModelSpecWorkerImpl(
             device,
             draft_opts,
             parallel_args.dp_size() > 1);
-      }()),
-      configure_draft_config_(configure_draft_config) {
+      }()) {
 }
 
 template <typename TargetInput>
@@ -398,18 +339,10 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
 template <typename TargetInput>
 KVCacheShape DraftModelSpecWorkerImpl<TargetInput>::draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape) const {
-  return build_draft_kv_cache_shape(target_kv_cache_shape);
-}
-
-template <typename TargetInput>
-KVCacheShape DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_shape(
-    const KVCacheShape& target_kv_cache_shape,
-    int64_t draft_world_size) const {
-  if (draft_world_size <= 0 &&
-      !target_kv_cache_shape.has_grouped_cache_layout()) {
-    draft_world_size =
-        get_dp_local_tp_size(draft_impl_->context_.get_parallel_args());
-  }
+  const int64_t draft_world_size =
+      target_kv_cache_shape.has_grouped_cache_layout()
+          ? -1
+          : get_dp_local_tp_size(draft_impl_->context_.get_parallel_args());
   KVCacheCapacity draft_capacity;
   draft_capacity.enable_indexer_cache_quant(
       KVCacheConfig::get_instance().indexer_cache_dtype() == "int8");
@@ -619,44 +552,6 @@ bool DraftModelSpecWorkerImpl<TargetInput>::prepare_model_decode_continuation(
 }
 
 template <typename TargetInput>
-void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input(
-    const TargetInput& input) {
-  const auto& embedding = input.input_params.embedding;
-  if (!embedding.mtp_bootstrap_embeddings.defined()) {
-    return;
-  }
-  CHECK(input.token_ids_host.defined() &&
-        input.token_ids_host.scalar_type() == torch::kInt)
-      << "draft token_ids_host must be int32";
-  const Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
-
-  torch::Tensor bootstrap_embeddings = safe_to(
-      embedding.mtp_bootstrap_embeddings, torch::dtype(dtype_).device(device_));
-  const int32_t num_rows =
-      static_cast<int32_t>(embedding.mtp_bootstrap_row_idxes.size());
-  CHECK_EQ(bootstrap_embeddings.size(0), static_cast<int64_t>(num_rows))
-      << "bootstrap row count mismatch";
-  CHECK_EQ(embedding.embedding_ids.size(), embedding.request_ids.size())
-      << "bootstrap embedding/request id vectors must be parallel";
-  const int32_t num_ids = static_cast<int32_t>(embedding.embedding_ids.size());
-  for (int32_t i = 0; i < num_rows; ++i) {
-    const int32_t row_idx = embedding.mtp_bootstrap_row_idxes[i];
-    CHECK_GE(row_idx, 0) << "bootstrap row index should be valid";
-    CHECK_LT(row_idx, num_ids) << "bootstrap row index exceeds embedding ids";
-    CHECK_LT(static_cast<size_t>(row_idx), token_ids.size())
-        << "bootstrap row index exceeds token ids";
-    embedding_cache_->write_mtp_bootstrap_context(
-        embedding.embedding_ids[row_idx],
-        embedding.request_ids[row_idx],
-        token_ids[row_idx],
-        bootstrap_embeddings.select(/*dim=*/0, i),
-        input.host_positions().dim() == 2
-            ? input.host_positions().select(/*dim=*/1, row_idx)
-            : torch::Tensor());
-  }
-}
-
-template <typename TargetInput>
 std::optional<ForwardOutput>
 DraftModelSpecWorkerImpl<TargetInput>::finalize_step_output(
     ForwardOutput output,
@@ -683,7 +578,8 @@ void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
     TargetInput& input,
     const std::vector<EmbeddingCache::DecodeState>& last_states) const {
   const bool enable_cache_correction = this->enable_schedule_overlap();
-  const bool chunked_verify = uses_chunked_verify();
+  const bool chunked_verify =
+      target_verify_mode_ != mtp_async::TargetSpecVerifyMode::GENERIC;
   const bool positions_decoupled =
       !impl_->context_.get_model_args().rope_scaling_mrope_section().empty();
   const int32_t num_sequences = input.input_params.meta.num_sequences;
@@ -708,6 +604,7 @@ void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
       clamp_active
           ? static_cast<int32_t>(block_tables.size(1)) * logical_block_size()
           : 0;
+  const int32_t max_valid_position = allocated_kv_len - verify_lens;
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     const EmbeddingCache::DecodeState& state = last_states[seq_id];
@@ -724,10 +621,7 @@ void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
     int32_t expected_kv_len =
         positions_decoupled ? current_kv_len : current_position + 1;
     if (clamp_active && seq_id < block_tables.size(0)) {
-      const int32_t max_valid_position = allocated_kv_len - verify_lens;
       if (current_position > max_valid_position) {
-        CHECK_GT(allocated_kv_len, 0)
-            << "decode context has empty block table, seq_id=" << seq_id;
         CHECK_GE(max_valid_position, 0)
             << "decode context block table is too small for validation, "
             << "seq_id=" << seq_id << ", allocated_kv_len=" << allocated_kv_len
@@ -742,24 +636,23 @@ void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
         current_kv_len = std::min(current_kv_len, expected_kv_len);
       }
     }
-    if (chunked_verify && current_kv_len < expected_kv_len) {
-      CHECK_LE(expected_kv_len - current_kv_len, verify_lens)
-          << "decode context kv_len lag is too large, seq_id=" << seq_id
+    if (chunked_verify) {
+      if (current_kv_len < expected_kv_len) {
+        CHECK_LE(expected_kv_len - current_kv_len, verify_lens)
+            << "decode context kv_len lag is too large, seq_id=" << seq_id
+            << ", current_position=" << current_position
+            << ", current_kv_len=" << current_kv_len;
+        current_kv_len = expected_kv_len;
+      } else if (current_kv_len > expected_kv_len) {
+        // The first decode can carry the prompt KV length with position zero.
+        current_position = current_kv_len - 1;
+      }
+    } else {
+      CHECK_EQ(expected_kv_len, current_kv_len)
+          << "decode context position/kv_len mismatch, seq_id=" << seq_id
           << ", current_position=" << current_position
           << ", current_kv_len=" << current_kv_len;
-      current_kv_len = expected_kv_len;
     }
-    if (chunked_verify && current_kv_len > expected_kv_len) {
-      // First decode step: the prompt KV length with a zero-initialized
-      // position; align the position to the KV context.
-      current_position = current_kv_len - 1;
-      expected_kv_len = current_kv_len;
-    }
-
-    CHECK_EQ(expected_kv_len, current_kv_len)
-        << "decode context position/kv_len mismatch, seq_id=" << seq_id
-        << ", current_position=" << current_position
-        << ", current_kv_len=" << current_kv_len;
 
     token_ids_vec.emplace_back(rewrite_fake_token ? state.token_id
                                                   : input_token_id);

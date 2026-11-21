@@ -122,8 +122,7 @@ struct DeepSeekV4KVCacheEstimateCost {
 };
 
 std::vector<bool> resolve_indexer_cache_enabled_layers(
-    const ModelArgs& model_args,
-    int64_t num_cache_layers);
+    const ModelArgs& model_args);
 
 // Linear-attention layers stay owned on every rank. Full-attention layers
 // follow LayerwiseSplitLayout.

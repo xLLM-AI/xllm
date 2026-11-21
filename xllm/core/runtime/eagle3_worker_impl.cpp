@@ -18,21 +18,10 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/framework/model/aux_hidden_capture.h"
-#include "core/framework/sampling/logits_processor.h"
-#include "core/util/tensor_helper.h"
+#include "core/framework/speculative/draft_config.h"
 #include "runtime/llm_worker_impl.h"
 
 namespace xllm {
-
-template <typename TargetInput>
-runtime::Options Eagle3WorkerImpl<TargetInput>::draft_options(
-    const runtime::Options& options) {
-  runtime::Options opts = MTPWorkerImpl<TargetInput>::draft_options(options);
-  opts.enable_graph(false)
-      .enable_graph_mode_decode_no_padding(false)
-      .enable_prefill_piecewise_graph(false);
-  return opts;
-}
 
 template <typename TargetInput>
 Eagle3WorkerImpl<TargetInput>::Eagle3WorkerImpl(
@@ -44,7 +33,16 @@ Eagle3WorkerImpl<TargetInput>::Eagle3WorkerImpl(
           parallel_args,
           device,
           options,
-          Eagle3WorkerImpl<TargetInput>::draft_options(options),
+          [&options] {
+            auto draft_opts =
+                MTPWorkerImpl<TargetInput>::draft_options(options);
+            draft_opts.enable_graph(/*enable_graph=*/false)
+                .enable_graph_mode_decode_no_padding(
+                    /*enable_graph_mode_decode_no_padding=*/false)
+                .enable_prefill_piecewise_graph(
+                    /*enable_prefill_piecewise_graph=*/false);
+            return draft_opts;
+          }(),
           worker_type) {
   // Context parallelism does not expose the auxiliary hidden states.
   CHECK_LE(parallel_args.cp_size(), 1)
@@ -56,6 +54,23 @@ template <typename TargetInput>
 Eagle3WorkerImpl<TargetInput>::~Eagle3WorkerImpl() {
   this->drain_pending_execution();
 }
+
+#if defined(USE_NPU)
+template <typename TargetInput>
+void Eagle3WorkerImpl<TargetInput>::apply_target_model_overrides(
+    ModelArgs& args) const {
+  if (!args.layers_to_capture().empty()) {
+    return;
+  }
+  auto layers = read_capture_layer_ids(
+      this->options_.draft_model_path().value(), /*required=*/false);
+  if (layers.empty()) {
+    layers = AuxHiddenCapture::legacy_default_capture_layer_ids(
+        static_cast<int32_t>(args.n_layers()));
+  }
+  args.layers_to_capture(std::move(layers));
+}
+#endif
 
 template <typename TargetInput>
 int64_t Eagle3WorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
@@ -97,6 +112,9 @@ void Eagle3WorkerImpl<TargetInput>::check_draft_input_embedding(
       << ". Check that the target model captures its aux hidden-state layers "
          "for Eagle3.";
 }
+
+template <typename TargetInput>
+void Eagle3WorkerImpl<TargetInput>::apply_draft_model_overrides(ModelArgs&) {}
 
 template class Eagle3WorkerImpl<LlmForwardInput>;
 template class Eagle3WorkerImpl<VlmForwardInput>;

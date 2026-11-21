@@ -20,12 +20,15 @@ limitations under the License.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <tuple>
 #include <vector>
 
 #include "common/flash_comm1_context.h"
+#include "core/framework/model/model_params_view.h"
+#include "core/framework/model/seq_lens.h"
 #include "kernels/ops_api.h"
 #include "layers/npu_torch/deepseek_v4_cp_context.h"
 #include "util/utils.h"
@@ -497,6 +500,100 @@ AttentionMetadata build_indexer_attention_metadata(
 
 }  // namespace
 
+void build_deepseek_v4_sparse_metadata(
+    DSAMetadata& dsa,
+    const ModelParamsView& params,
+    const ModelArgs& args,
+    int64_t tp_num_heads,
+    int64_t dp_local_tp_size,
+    bool is_prefill,
+    const torch::Tensor& cu_seqlens_ori_kv_override) {
+  const auto& cu_seqlens_q = dsa.actual_seq_lengths_query;
+  const auto& seqused_kv = dsa.actual_seq_lengths_kv;
+  const auto& cu_seqlens_ori_kv = cu_seqlens_ori_kv_override.defined()
+                                      ? cu_seqlens_ori_kv_override
+                                      : cu_seqlens_q;
+  const std::optional<torch::Tensor> empty_int32 = torch::empty(
+      {0}, torch::dtype(torch::kInt32).device(cu_seqlens_q.device()));
+  const auto nonempty =
+      [](const torch::Tensor& tensor) -> std::optional<torch::Tensor> {
+    return tensor.numel() > 0 ? std::optional{tensor} : std::nullopt;
+  };
+  const int64_t max_seqlen_q =
+      std::max<int64_t>(params.meta.q_max_seq_len,
+                        util::max_len(params.attention.host.q_seq_lens));
+  const int64_t max_seqlen_kv =
+      std::max<int64_t>(params.meta.kv_max_seq_len,
+                        util::max_len(params.attention.host.kv_seq_lens));
+  const int64_t sparse_topk = std::max<int64_t>(args.index_topk(), /*b=*/1);
+  const int64_t head_dim = args.o_lora_rank() + args.qk_rope_head_dim();
+  kernel::SparseAttnSharedkvMetadataParams sparse{
+      .num_heads_q = tp_num_heads,
+      .num_heads_kv = 1,
+      .head_dim = head_dim,
+      .cu_seqlens_q = nonempty(cu_seqlens_q),
+      .cu_seqlens_ori_kv =
+          is_prefill ? nonempty(cu_seqlens_ori_kv) : empty_int32,
+      .cu_seqlens_cmp_kv = empty_int32,
+      .seqused_q = empty_int32,
+      .seqused_kv = nonempty(seqused_kv),
+      .batch_size = std::max<int64_t>(seqused_kv.size(/*dim=*/0), /*b=*/1),
+      .max_seqlen_q = max_seqlen_q,
+      .max_seqlen_kv = max_seqlen_kv,
+      .ori_mask_mode = 4,
+      .cmp_mask_mode = 3,
+      .ori_win_left = dsa.sparse_metadata_ori_win_left,
+      .layout_q = "TND",
+      .layout_kv = "PA_ND",
+      .has_ori_kv = true,
+  };
+  dsa.c1_metadata = kernel::sparse_attn_sharedkv_metadata(sparse);
+  sparse.has_cmp_kv = true;
+  sparse.cmp_ratio = 4;
+  sparse.cmp_topk = sparse_topk;
+  dsa.c4_metadata = kernel::sparse_attn_sharedkv_metadata(sparse);
+  sparse.cmp_ratio = 128;
+  sparse.cmp_topk = 0;
+  dsa.c128_metadata = kernel::sparse_attn_sharedkv_metadata(sparse);
+
+  const torch::Tensor query_lens =
+      cu_seqlens_q.dim() > 0 && cu_seqlens_q.size(/*dim=*/0) > 1
+          ? cu_seqlens_q.slice(/*dim=*/0, /*start=*/1).clone()
+          : dsa.seq_lens_q;
+  const auto& key_lens = dsa.seq_lens.defined() ? dsa.seq_lens : seqused_kv;
+  if (!query_lens.defined() || query_lens.numel() == 0 ||
+      key_lens.numel() == 0) {
+    return;
+  }
+  const int64_t global_index_num_heads = std::max<int64_t>(
+      args.index_n_heads() > 0 ? args.index_n_heads() : args.n_heads(),
+      /*b=*/1);
+  CHECK_EQ(global_index_num_heads % dp_local_tp_size, 0)
+      << "DeepSeek-V4 index heads (" << global_index_num_heads
+      << ") must be divisible by local TP size (" << dp_local_tp_size << ")";
+  kernel::QuantLightningIndexerMetadataParams indexer{
+      .num_heads_q = global_index_num_heads,
+      .num_heads_k = 1,
+      .head_dim = std::max<int64_t>(
+          args.index_head_dim() > 0 ? args.index_head_dim() : head_dim,
+          /*b=*/1),
+      .actual_seq_lengths_query = query_lens,
+      .actual_seq_lengths_key = key_lens,
+      .batch_size = std::max<int64_t>(key_lens.size(/*dim=*/0), /*b=*/1),
+      .max_seqlen_q = max_seqlen_q,
+      .max_seqlen_k = max_seqlen_kv,
+      .layout_query = "TND",
+      .layout_key = "PA_BSND",
+      .sparse_count = sparse_topk,
+      .sparse_mode = 3,
+      .pre_tokens = std::numeric_limits<int64_t>::max(),
+      .next_tokens = std::numeric_limits<int64_t>::max(),
+      .cmp_ratio = 4,
+      .device = query_lens.device().str(),
+  };
+  dsa.qli_metadata = kernel::quant_lightning_indexer_metadata(indexer);
+}
+
 torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
                                        const torch::Tensor& query_cu_seq_lens,
                                        const torch::Tensor& seq_lens,
@@ -566,35 +663,23 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
       .unsqueeze(1);
 }
 
-DSAttentionImpl::DSAttentionImpl(const ModelContext& context, int32_t layer_id)
-    : DSAttentionImpl(context.get_model_args(),
-                      context.get_quant_args(),
-                      context.get_parallel_args(),
-                      context.get_tensor_options(),
-                      layer_id) {}
-
-DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
-                                 const QuantArgs& quant_args,
-                                 const ParallelArgs& parallel_args,
-                                 const torch::TensorOptions& options,
-                                 int32_t layer_id)
-    : num_heads_(args.n_heads()),
-      head_dim_(args.head_dim()),
-      q_lora_rank_(args.q_lora_rank()),
-      o_lora_rank_(args.o_lora_rank()),
-      o_groups_(args.o_groups()),
-      rope_head_dim_(args.rope_head_dim()),
-      window_size_(args.window_size()),
-      compress_ratio_(1.0),
-      eps_(args.rms_norm_eps()),
-      index_n_heads_(args.index_n_heads()),
-      index_head_dim_(args.index_head_dim()),
-      index_topk_(args.index_topk()),
-      block_size_(args.block_size()),
-      dspark_use_native_sas_(args.dspark_use_native_sas()) {
+DSAttentionImpl::DSAttentionImpl(const ModelContext& context,
+                                 int32_t layer_id) {
+  const auto& args = context.get_model_args();
+  const auto& quant_args = context.get_quant_args();
+  const auto& parallel_args = context.get_parallel_args();
+  const auto& options = context.get_tensor_options();
+  num_heads_ = args.n_heads();
+  head_dim_ = args.head_dim();
+  q_lora_rank_ = args.q_lora_rank();
+  o_lora_rank_ = args.o_lora_rank();
+  o_groups_ = args.o_groups();
+  rope_head_dim_ = args.rope_head_dim();
+  eps_ = args.rms_norm_eps();
+  index_n_heads_ = args.index_n_heads();
+  index_head_dim_ = args.index_head_dim();
+  index_topk_ = args.index_topk();
   const auto& compress_ratios = args.compress_ratios();
-  CHECK(!compress_ratios.empty())
-      << "DSAttention requires non-empty compress_ratios for DeepSeek V4";
   CHECK_GE(layer_id, 0) << "DSAttention requires valid layer_id, got "
                         << layer_id;
   CHECK_LT(layer_id, static_cast<int32_t>(compress_ratios.size()))
@@ -998,20 +1083,10 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                    : as_optional(attn_metadata.actual_seq_lengths_query);
   }
 
-  const bool use_native_sas = deepseek_v4_use_native_sas(
-      block_size_, dspark_use_native_sas_, use_prefill_attn);
-  std::optional<torch::Tensor> ori_sparse_indices = std::nullopt;
-  if (use_native_sas && compress_ratio_i == 1) {
-    CHECK(attn_metadata.explicit_swa_indices.defined())
-        << "Native DeepSeek-V4 DSpark requires precomputed SWA indices.";
-    ori_sparse_indices = as_optional(attn_metadata.explicit_swa_indices);
-  }
-
-  const int64_t ori_win_left =
-      deepseek_v4_ori_window_left(window_size_, block_size_, use_native_sas);
-  CHECK_EQ(attn_metadata.sparse_metadata_ori_win_left, ori_win_left)
-      << "DSAttention sparse metadata belongs to incompatible model geometry; "
-      << "rebuild attention metadata at the target/draft boundary.";
+  const auto ori_sparse_indices =
+      !use_prefill_attn && compress_ratio_i == 1
+          ? as_optional(attn_metadata.explicit_swa_indices)
+          : std::nullopt;
 
   auto [attn_output, output_lse] = xllm::kernel::npu::sparse_attn_sharedkv(
       /*q=*/q,
@@ -1035,7 +1110,7 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       /*cmp_ratio=*/compress_ratio_i,
       /*ori_mask_mode=*/4,
       /*cmp_mask_mode=*/3,
-      /*ori_win_left=*/ori_win_left,
+      /*ori_win_left=*/attn_metadata.sparse_metadata_ori_win_left,
       /*ori_win_right=*/0,
       /*layout_q=*/"TND",
       /*layout_kv=*/ori_kv_layout,

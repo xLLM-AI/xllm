@@ -117,9 +117,7 @@ class LLMMaster : public Master {
   // Includes pending worker acknowledgements after memory restoration.
   bool requires_wakeup() const;
 
-  bool wakeup();
-
-  bool wakeup(const WakeupOptions& options);
+  bool wakeup(const WakeupOptions& options = {});
 
   bool link_p2p(const std::vector<std::string>& remote_addrs);
 

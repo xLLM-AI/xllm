@@ -26,22 +26,13 @@ limitations under the License.
 
 namespace xllm {
 
-namespace {
-
-runtime::Options SuffixTargetOptions(const runtime::Options& options) {
-  auto opts = options;
-  opts.enable_schedule_overlap(false);
-  return opts;
-}
-}  // namespace
-
 SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
     : SpeculativeWorkerImpl<LlmForwardInput>(parallel_args,
                                              device,
                                              options,
-                                             SuffixTargetOptions(options)),
+                                             options),
       suffix_cache_(options_.speculative_suffix_cache_max_depth(),
                     options_.speculative_suffix_max_cached_requests()) {}
 

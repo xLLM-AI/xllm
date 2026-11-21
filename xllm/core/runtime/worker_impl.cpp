@@ -374,29 +374,25 @@ void WorkerImpl::configure_shared_kv_allocation(
   }
 }
 
-void WorkerImpl::allocate_kv_cache_storage(
-    const KVCacheShape& kv_cache_shape,
-    bool use_huge_page_allocator,
-    std::shared_ptr<KVTensorAllocator> tensor_allocator,
-    const KVCacheCreateOptions* layout) {
+void WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
+                                           bool use_huge_page_allocator,
+                                           const KVCacheCreateOptions* layout) {
   CHECK(model() != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
-  if (layout != nullptr && layout->tensor_allocator() != nullptr) {
-    tensor_allocator = layout->tensor_allocator();
-  }
+  auto tensor_allocator = layout ? layout->tensor_allocator() : nullptr;
   const bool has_grouped_cache = kv_cache_shape.has_grouped_cache_layout();
   if (has_grouped_cache) {
     CHECK(!::xllm::KVCacheConfig::get_instance().enable_vmm_kvcache())
         << "Grouped KV cache layout does not support VirtualMemory cache.";
   }
   const auto& args = context_.get_model_args();
+  const int64_t num_layers = args.n_layers();
   KVCacheCreateOptions layout_options =
-      layout ? *layout
-             : get_kv_cache_create_options(args, kv_cache_shape, false);
+      layout ? *layout : get_kv_cache_create_options(args);
   if (layout == nullptr) {
     layout_options.indexer_cache_enabled_layers(
-        resolve_indexer_cache_enabled_layers(args, args.n_layers()));
+        resolve_indexer_cache_enabled_layers(args));
   }
   const bool enable_linear_attention = layout_options.enable_linear_attention();
   const bool enable_lighting_indexer = args.index_n_heads() > 0;
@@ -405,7 +401,6 @@ void WorkerImpl::allocate_kv_cache_storage(
   // ONE impl per layer, each reading only its own shape, so coexistence is
   // harmless. The prior exclusivity CHECK guarded a non-problem.
 
-  const int64_t num_layers = layout ? layout->num_layers() : args.n_layers();
   const int32_t layerwise_split_size = parallel_args_.layerwise_split_size();
   std::vector<bool> layer_cache_owned;
   if (layerwise_split_size > 1) {
@@ -530,7 +525,7 @@ void WorkerImpl::allocate_kv_cache(const KVCacheShape& shape,
                                    const KVCacheCreateOptions& layout,
                                    std::shared_ptr<KVTransfer> transfer) {
   kv_transfer_ = std::move(transfer);
-  allocate_kv_cache_storage(shape, kv_transfer_ != nullptr, nullptr, &layout);
+  allocate_kv_cache_storage(shape, kv_transfer_ != nullptr, &layout);
   status_ = Status::READY;
 }
 
@@ -565,13 +560,12 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   }
   kv_transfer_->initialize(device_.index());
 
-  bool use_huge_page_allocator = true;
-  std::shared_ptr<KVTensorAllocator> tensor_allocator;
 #if defined(USE_MLU)
-  use_huge_page_allocator = false;
+  constexpr bool use_huge_page_allocator = false;
+#else
+  constexpr bool use_huge_page_allocator = true;
 #endif
-  allocate_kv_cache_storage(
-      kv_cache_shape, use_huge_page_allocator, std::move(tensor_allocator));
+  allocate_kv_cache_storage(kv_cache_shape, use_huge_page_allocator);
   register_kv_transfer(kv_cache_shape);
 
   status_ = Status::READY;
@@ -587,9 +581,7 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
 
   kv_transfer_ = kv_transfer;
 
-  allocate_kv_cache_storage(kv_cache_shape,
-                            /*use_huge_page_allocator=*/true,
-                            /*tensor_allocator=*/nullptr);
+  allocate_kv_cache_storage(kv_cache_shape, /*use_huge_page_allocator=*/true);
 
   register_kv_transfer(kv_cache_shape);
 

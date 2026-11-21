@@ -3,10 +3,27 @@ include(cc_binary)
 
 cc_library(
   NAME
+    decode_graph_bucket
+  HDRS
+    acl_graph_bucket_policy.h
+    decode_graph_bucket.h
+  SRCS
+    decode_graph_bucket.cpp
+)
+
+if(USE_NPU OR BUILD_TESTING)
+  target_sources(decode_graph_bucket PRIVATE acl_graph_bucket_policy.cpp)
+  target_link_libraries(decode_graph_bucket PRIVATE
+    Boost::boost
+    nlohmann_json::nlohmann_json
+  )
+endif()
+
+cc_library(
+  NAME
     runtime
   HDRS
     options.h
-    decode_graph_bucket.h
     forward_params.h
     forward_runtime_state.h
     dit_forward_params.h
@@ -21,7 +38,6 @@ cc_library(
     base_executor_impl.h
     graph_execution_input.h
     dit_executor.h
-    $<$<BOOL:${USE_NPU}>:acl_graph_bucket_policy.h>
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.h>
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.h>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.h>
@@ -51,7 +67,6 @@ cc_library(
     dspark_worker_impl.h
     worker_rendezvous.h
   SRCS
-    decode_graph_bucket.cpp
     executor.cpp
     json_object_decode_adapter.cpp
     schedule_overlap.cpp
@@ -90,6 +105,7 @@ cc_library(
     dspark_worker_impl.cpp
   DEPS
     :content_hash
+    :decode_graph_bucket
     :suffix_decoding
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>

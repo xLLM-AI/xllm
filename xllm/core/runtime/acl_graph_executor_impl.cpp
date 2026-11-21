@@ -42,6 +42,7 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_shard_layout.h"
 #include "core/platform/device.h"
 #include "core/platform/npu/acl_graph_task_update_context.h"
+#include "core/runtime/acl_graph_bucket_policy.h"
 #include "core/util/utils.h"
 #include "platform/npu/device_capture_lock.h"
 #include "runtime/decode_graph_bucket.h"
@@ -322,14 +323,6 @@ ModelOutput forward_eager(CausalLM* model,
   torch::Tensor materialized_tokens =
       materialize_graph_speculative_verify_tokens(tokens, params.graph);
   return model->forward(materialized_tokens, positions, kv_cache, params);
-}
-
-bool is_mla_graph_eagle3_target(const CausalLM* model,
-                                const runtime::Options& options) {
-  return model->supports_mla_graph_kv_bucketing() &&
-         options.enable_speculative_decode() && !options.is_draft_engine() &&
-         SpeculativeConfig::is_eagle3_algorithm(
-             options.speculative_algorithm());
 }
 
 void hash_graph_key_value(uint64_t& hash, uint64_t value) {
@@ -738,13 +731,6 @@ void AclGraph::signal_static_causal_conv1d_tasks(
   }
 }
 
-bool AclGraph::static_graph_task_signature_matches(
-    const ModelParamsView& params) const {
-  const auto current_signature = make_static_graph_task_signature(params);
-  return current_signature.has_value() &&
-         static_graph_task_signature_ == current_signature;
-}
-
 void AclGraph::capture_static_graph_task_signature(
     const ModelParamsView& params) {
   static_graph_task_signature_ = make_static_graph_task_signature(params);
@@ -772,11 +758,12 @@ AclGraph::~AclGraph() {
   }
 }
 
-void AclGraph::initialize_streams(c10::DeviceIndex device_index,
-                                  const c10_npu::NPUStream& capture_stream) {
+AclGraph::AclGraph(GraphPersistentParam& persistent_param,
+                   c10::DeviceIndex device_index,
+                   const c10_npu::NPUStream& capture_stream)
+    : persistent_param_(persistent_param) {
   capture_stream_ = capture_stream;
   update_stream_ = c10_npu::getStreamFromPool(true, device_index);
-  device_index_ = device_index;
   CHECK_EQ(aclrtCreateEventWithFlag(&replay_input_ready_event_, ACL_EVENT_SYNC),
            ACL_SUCCESS)
       << "Failed to create ACL graph replay input-ready event";
@@ -944,9 +931,11 @@ ModelOutput AclGraph::replay(CausalLM* model,
     make_graph_wait_for_current_stream(stream);
   }
   first_hybrid_replay_after_capture_ = false;
+  const auto current_signature =
+      graph_params ? make_static_graph_task_signature(*graph_params)
+                   : std::nullopt;
   const bool use_static_graph_tasks =
-      graph_params.has_value() &&
-      static_graph_task_signature_matches(graph_params.value());
+      current_signature && static_graph_task_signature_ == current_signature;
   const bool static_graph_tasks_prepared =
       params.graph.spec_verify_static_graph_tasks_prepared;
   CHECK(!static_graph_tasks_prepared || use_static_graph_tasks)
@@ -1104,7 +1093,10 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     COUNTER_INC(num_model_execution_total_eager);
     return run_eager();
   }
-  if (is_mla_graph_eagle3_target(model_, options_)) {
+  if (model_->supports_mla_graph_kv_bucketing() &&
+      options_.enable_speculative_decode() && !options_.is_draft_engine() &&
+      SpeculativeConfig::is_eagle3_algorithm(
+          options_.speculative_algorithm())) {
     LOG_FIRST_N(WARNING, 1)
         << "Falling back to eager mode for MLA Eagle3 target validation; the "
            "ACL graph path is not adapted for Eagle3 aux hidden-state "
@@ -1167,10 +1159,13 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   const uint32_t n_tokens = tokens.size(/*dim=*/0);
   const uint32_t max_local_num_tokens =
       dp_token_nums.size() > 1 ? util::max(dp_token_nums) : n_tokens;
-  const uint32_t local_batch_size =
-      n_tokens / (options_.num_speculative_tokens() + 1);
+  const int32_t num_decoding_tokens =
+      acl_graph_decode_tokens_per_sequence(options_.num_speculative_tokens(),
+                                           options_.speculative_algorithm(),
+                                           options_.is_draft_engine());
+  const uint32_t local_batch_size = n_tokens / num_decoding_tokens;
   const uint32_t max_local_batch_size =
-      max_local_num_tokens / (options_.num_speculative_tokens() + 1);
+      max_local_num_tokens / num_decoding_tokens;
 
   // Large decode batches create too many/too large ACL graphs and may OOM.
   // Fall back to eager mode when batch size exceeds the safety threshold.
@@ -1195,16 +1190,8 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   const uint32_t bucket_num_tokens =
       get_bucket_num_tokens(max_local_num_tokens);
 
-  // Check if conditions are suitable for graph execution (replay or capture)
   const auto max_seq_len = args_.max_position_embeddings();
-  const bool seq_len_supported = params.meta.kv_max_seq_len <= max_seq_len;
-
-  // Combined condition for graph capture support
-  // ACL graph executor only supports single tensor inputs (no micro-batching)
-  const bool capture_supported = seq_len_supported;
-
-  // Early return if conditions are not suitable for graph operations
-  if (!capture_supported) {
+  if (params.meta.kv_max_seq_len > max_seq_len) {
     LOG_FIRST_N(WARNING, 1)
         << "Falling back to eager mode because kv_max_seq_len ("
         << params.meta.kv_max_seq_len << ") > max_seq_len (" << max_seq_len
@@ -1317,12 +1304,13 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
                                             1, options_.max_seqs_per_batch())),
                                         decode_batch_size_limit,
                                         dp_size);
-    if (!is_acl_graph_decode_capture_allowed(
-            max_local_batch_size,
-            max_graph_batch_size,
-            dp_size,
-            params.meta.is_graph_warmup,
-            static_cast<uint32_t>(options_.num_speculative_tokens()))) {
+    if (!is_acl_graph_decode_capture_allowed(max_local_batch_size,
+                                             max_graph_batch_size,
+                                             dp_size,
+                                             params.meta.is_graph_warmup,
+                                             options_.num_speculative_tokens(),
+                                             options_.speculative_algorithm(),
+                                             options_.is_draft_engine())) {
       LOG_FIRST_N(WARNING, 1)
           << "Falling back to eager mode because no ACL graph was prewarmed "
              "for no-padding decode batch_size="

@@ -56,13 +56,6 @@ if TYPE_CHECKING:
 _DISABLED_GRAPH_BACKENDS = ("", "off", "none", "0")
 
 
-def _resolve_graph_backend(config: dict[str, Any]) -> str:
-    graph_backend = str(config.get("python_graph_backend", "off")).lower()
-    if graph_backend in _DISABLED_GRAPH_BACKENDS and config.get("enable_graph", False) and current_platform.is_npu():
-        return "aclgraph"
-    return graph_backend
-
-
 def _validate_npu_cp_model_config(config: dict[str, Any]) -> None:
     """Mirror model-side CP admission for callers without the C++ master."""
     model_type = config.get("model_type", "")
@@ -161,7 +154,7 @@ def _create_attention_backend(
 
         return DsaAttentionBackend(
             **dsa_kwargs,
-            block_size=int(config.get("block_size", 0)),
+            num_speculative_tokens=int(config.get("num_speculative_tokens", 0)),
             dspark_use_native_sas=bool(config.get("dspark_use_native_sas", False)),
         )
     if current_platform.is_npu():
@@ -312,7 +305,13 @@ class ModelExecutor:
                 raise ValueError("Python CP requires effective kv_split_size to be a positive divisor of cp_size")
             if cp_size == 1 and effective_kv_split > 1 and dp_size > 1:
                 raise NotImplementedError("Python DCP requires dp_size == 1 until DP-local KV groups are implemented")
-        graph_backend = _resolve_graph_backend(config)
+        graph_backend = str(config.get("python_graph_backend", "off")).lower()
+        if (
+            graph_backend in _DISABLED_GRAPH_BACKENDS
+            and config.get("enable_graph", False)
+            and current_platform.is_npu()
+        ):
+            graph_backend = "aclgraph"
         if (
             current_platform.is_npu()
             and config.get("model_type") == "glm_moe_dsa_mtp"
@@ -362,7 +361,9 @@ class ModelExecutor:
             and config.get("is_mtp_algorithm", False)
             and config.get("model_type") != "qwen3_5_mtp"
         )
-        max_decode_rows_per_request = 2 if is_draft_tail_repair_required else num_speculative_tokens + 1
+        self._dspark_draft = is_dspark_draft_model(config)
+        num_decoding_tokens = num_speculative_tokens + int(not self._dspark_draft)
+        max_decode_rows_per_request = 2 if is_draft_tail_repair_required else num_decoding_tokens
         self.attention_backend = _create_attention_backend(
             first_attention,
             device,
@@ -395,7 +396,6 @@ class ModelExecutor:
             )
         dp_rank = int(config.get("dp_rank", 0))
         self.dp_size = dp_size
-        self._dspark_draft = is_dspark_draft_model(config)
         # DSpark drafts and DFlash2 write their own context-KV via the shared
         # context_projection_weight (see uses_context_kv_projection); DFlash
         # and DeepSeek-V4 DSpark do not.
@@ -444,10 +444,6 @@ class ModelExecutor:
                 from xllm.python.model_executor.runners.context_kv_acl_graph import ContextKvAclGraphRunner
 
                 self.context_kv_graph_runner = ContextKvAclGraphRunner(model, device)
-                self._context_kv_query_width = int(model.cfg.block_size)
-                self._context_kv_draft_width = self._context_kv_query_width - int(not self._dspark_draft)
-                if self._context_kv_draft_width <= 0:
-                    raise ValueError("block-draft context graphs require a positive speculative width")
             from xllm.python.model_executor.runners.block_draft_acl_graph import (
                 BlockDraftAclGraphRunner,
             )
@@ -592,10 +588,9 @@ class ModelExecutor:
             # Startup draft inputs have N physical query rows per request.
             # Capture every accepted-row bucket up to the N+1 verify capacity,
             # including prefixes not encountered in the synthetic warmup.
-            width = self._context_kv_draft_width
-            query_width = self._context_kv_query_width
+            query_width = self.num_speculative_tokens + int(not self._dspark_draft)
             sequences = (input_ids.numel() + query_width - 1) // query_width
-            self.context_kv_graph_runner.warmup(sequences * (width + 1))
+            self.context_kv_graph_runner.warmup(sequences * (self.num_speculative_tokens + 1))
         if self.layerwise_split_size > 1 and (metadata.is_prefill or metadata.is_chunked_prefill):
             raise NotImplementedError("Python GLM5.2 layerwise split is decode-only")
 

@@ -25,20 +25,12 @@ limitations under the License.
 
 namespace xllm::layer {
 
-torch::Tensor dflash2_grouped_conv(const torch::Tensor& hidden_states,
-                                   const torch::Tensor& delta,
-                                   const torch::Tensor& base,
-                                   int32_t block_size,
-                                   int32_t num_groups,
-                                   int32_t group_size,
-                                   int32_t taps);
-
 class DFlash2GroupedConvImpl final : public torch::nn::Module {
  public:
   DFlash2GroupedConvImpl(int64_t hidden_size,
                          int32_t taps,
                          int32_t group_size,
-                         int32_t block_size,
+                         int32_t num_speculative_tokens,
                          const torch::TensorOptions& options);
 
   std::tuple<torch::Tensor, torch::Tensor> prepare(
@@ -58,7 +50,7 @@ class DFlash2GroupedConvImpl final : public torch::nn::Module {
   AddMatmul kernel_projection_{nullptr};
   torch::Tensor base_kernel_;
   bool base_kernel_is_loaded_ = false;
-  int32_t block_size_ = 0;
+  int32_t num_speculative_tokens_ = 0;
   int32_t taps_ = 0;
   int32_t group_size_ = 0;
   int32_t num_groups_ = 0;

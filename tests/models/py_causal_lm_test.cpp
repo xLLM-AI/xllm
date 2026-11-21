@@ -136,7 +136,8 @@ TEST(PyCausalLMMegaMoeCapacityTest,
 // real model classes such as deepseek_v4 require full vocab/layer configs).
 ModelContext make_bridge_model_context(const char* model_type,
                                        ModelArgs model_args = {},
-                                       EplbWorkerConfig eplb_config = {}) {
+                                       EplbWorkerConfig eplb_config = {},
+                                       int32_t num_speculative_tokens = 0) {
   {
     py::gil_scoped_acquire gil;
     // Idempotent, but run the py::exec/registry writes only once across the
@@ -169,7 +170,8 @@ ModelContext make_bridge_model_context(const char* model_type,
       parallel_args,
       model_args,
       QuantArgs(),
-      torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+      torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32),
+      num_speculative_tokens);
 }
 
 TEST(PyCausalLMConfigBridgeTest,
@@ -317,8 +319,7 @@ TEST(PyCausalLMConfigBridgeTest, PreservesBlockDraftWindowEnablement) {
       config["use_sliding_window"] = *test.enabled;
     }
     if (draft_type == "dflash2") {
-      config["dflash_config"] = {{"block_size", 4},
-                                 {"conv_group_size", 2},
+      config["dflash_config"] = {{"conv_group_size", 2},
                                  {"conv_kernel_size", 2},
                                  {"selector_rank", 2},
                                  {"selector_top_k", 2}};
@@ -347,7 +348,10 @@ TEST(PyCausalLMConfigBridgeTest, PreservesBlockDraftWindowEnablement) {
     const char* model_type =
         is_dflash2 ? "DFlash2DraftModel" : "DSparkDraftModel";
     ModelContext context =
-        make_bridge_model_context(model_type, std::move(args));
+        make_bridge_model_context(model_type,
+                                  std::move(args),
+                                  {},
+                                  /*num_speculative_tokens=*/3);
     PyCausalLM model(context, kBridgeTestModelType);
     py::gil_scoped_acquire gil;
     const char* module = is_dflash2 ? "xllm.python.models.qwen3_dflash2"

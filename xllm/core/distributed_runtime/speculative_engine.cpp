@@ -55,9 +55,8 @@ SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
   distributed_worker_manager_ =
       std::make_shared<DistributedWorkerManager>(dist_options);
 
-  runtime::Options target_engine_options = options_;
-  engine_ = std::make_unique<TargetEngine>(target_engine_options,
-                                           distributed_worker_manager_);
+  engine_ =
+      std::make_unique<TargetEngine>(options_, distributed_worker_manager_);
 
   if (!SpeculativeConfig::is_suffix_algorithm(
           options.speculative_algorithm())) {
@@ -66,7 +65,7 @@ SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
     // draft engine.
     runtime::Options draft_engine_options = options_;
     // The draft engine always runs on the target's device list.
-    draft_engine_options.model_path(options_.draft_model_path().value_or(""))
+    draft_engine_options.model_path(options_.draft_model_path().value())
         .devices(options.devices())
         .backend("llm")
         .enable_speculative_decode(/*enable_speculative_decode=*/false)
@@ -223,8 +222,7 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
     VmmKVLayout draft_layout(draft_kv_cache_cap,
                              draft_engine_->model_args(),
                              draft_world_size,
-                             draft_engine_->dtype_,
-                             /*is_draft_engine=*/true);
+                             draft_engine_->dtype_);
     shared_vmm_layout->append(std::move(draft_layout));
     const int64_t reserved_state_bytes =
         target_kv_cache_cap.linear_cache_size_in_bytes() +

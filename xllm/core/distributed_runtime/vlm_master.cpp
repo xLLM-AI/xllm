@@ -64,12 +64,6 @@ namespace xllm {
 
 namespace {
 
-bool should_use_vlm_speculative_engine(const Options& options) {
-  return !SpeculativeConfig::is_suffix_algorithm(
-             options.speculative_algorithm()) &&
-         !options.draft_model_path().value_or("").empty();
-}
-
 std::vector<Message> build_user_messages_from_image_urls(
     std::string prompt,
     const std::vector<std::string>& image_urls) {
@@ -154,10 +148,13 @@ VLMMaster::VLMMaster(const Options& options)
   CHECK(!options_.enable_disagg_pd() ||
         options_.kv_cache_transfer_mode() != "PULL")
       << "VLM disaggregated PD does not support KV cache PULL.";
+  const auto& draft_model_path = options_.draft_model_path();
   const bool use_speculative_engine =
-      should_use_vlm_speculative_engine(options_);
+      draft_model_path && !draft_model_path->empty() &&
+      !SpeculativeConfig::is_suffix_algorithm(options_.speculative_algorithm());
   const std::string model_type =
       get_model_type(options_.model_path(), options_.backend());
+  options_.validate(model_type);
   const std::optional<std::string> cp_error = validate_context_parallel_config(
       options_,
       use_speculative_engine ? EngineType::VLMSSM : EngineType::VLM,
@@ -245,11 +242,7 @@ VLMMaster::VLMMaster(const Options& options)
         << "VLM speculative decoding does not support disaggregated PD";
     CHECK(!options_.enable_service_routing())
         << "VLM speculative decoding does not support service routing";
-    const std::string draft_model_path =
-        options_.draft_model_path().value_or("");
-    CHECK(!draft_model_path.empty())
-        << "draft model path is required for VLM speculative decoding";
-    engine_options.draft_model_path(draft_model_path)
+    engine_options.draft_model_path(options_.draft_model_path())
         .num_speculative_tokens(options_.num_speculative_tokens())
         .speculative_algorithm(options_.speculative_algorithm())
         .enable_probabilistic_draft(options_.enable_probabilistic_draft())
@@ -766,8 +759,6 @@ bool VLMMaster::requires_wakeup() const {
   return model_residency_coordinator_ != nullptr &&
          model_residency_coordinator_->is_suspended();
 }
-
-bool VLMMaster::wakeup() { return wakeup(WakeupOptions{}); }
 
 bool VLMMaster::wakeup(const WakeupOptions& options) {
   if (vlm_engine_ == nullptr) {

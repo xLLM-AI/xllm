@@ -42,7 +42,6 @@ limitations under the License.
 #pragma GCC diagnostic ignored "-Wattributes"
 #endif
 
-#include "acl_graph_bucket_policy.h"
 #include "torch_npu/csrc/core/npu/NPUGraph.h"
 
 #if defined(__GNUC__)
@@ -93,10 +92,7 @@ class AclGraph {
  public:
   AclGraph(GraphPersistentParam& persistent_param,
            c10::DeviceIndex device_index,
-           const c10_npu::NPUStream& capture_stream)
-      : persistent_param_(persistent_param), device_index_(device_index) {
-    initialize_streams(device_index, capture_stream);
-  }
+           const c10_npu::NPUStream& capture_stream);
 
   ~AclGraph();
 
@@ -130,9 +126,6 @@ class AclGraph {
   }
 
  private:
-  // Initialize capture stream if not already initialized
-  void initialize_streams(c10::DeviceIndex device_index,
-                          const c10_npu::NPUStream& capture_stream);
   void make_graph_wait_for_current_stream(aclrtStream current_stream);
   void make_current_stream_wait_for_graph(aclrtStream current_stream);
   void prepare_model_graph_metadata(CausalLM* model,
@@ -145,12 +138,11 @@ class AclGraph {
                           bool update_causal_conv1d_tasks);
   void signal_static_causal_conv1d_tasks(
       const c10_npu::NPUStream& signal_stream);
-  bool static_graph_task_signature_matches(const ModelParamsView& params) const;
   void capture_static_graph_task_signature(const ModelParamsView& params);
 
   // NPUGraph with mempool for managing temporary tensors during forward pass
   c10_npu::NPUGraph graph_;
-  uint32_t num_tokens_;
+  uint32_t num_tokens_ = 0;
 
   // Reference to persistent parameters (shared across multiple AclGraph
   // instances)
@@ -162,7 +154,6 @@ class AclGraph {
   aclrtStream graph_stream_ = nullptr;
   aclrtEvent replay_input_ready_event_ = nullptr;
   aclrtEvent replay_done_event_ = nullptr;
-  c10::DeviceIndex device_index_;
   std::shared_ptr<AclGraphTaskUpdateContext> graph_task_context_;
   std::optional<c10_npu::NPUStream> update_stream_;
   std::atomic<bool> replay_inputs_prepared_{false};

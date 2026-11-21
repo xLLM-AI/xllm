@@ -190,33 +190,9 @@ class TestCreateAttentionBackend:
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["device"] is device
         assert backend.init_kwargs["attn_head_dim"] == 512
-        assert backend.init_kwargs["block_size"] == 0
         assert backend.init_kwargs["dspark_use_native_sas"] is False
         assert backend.init_kwargs["n_layers"] == 3
         assert backend.init_kwargs["compress_ratios"] == [1, 4, 128]
-
-    @patch(
-        "xllm.python.model_executor.executor.current_platform.is_npu",
-        return_value=True,
-    )
-    def test_deepseek_v4_dspark_passes_native_sas_config(self, _mock_is_npu: MagicMock) -> None:
-        attn = _make_attention_layer(head_dim=512)
-        module = types.ModuleType("xllm.python.attention.dsa_attention")
-        module.DsaAttentionBackend = StubAttentionBackend
-        config = {
-            "model_type": "deepseek_v4_dspark",
-            "compress_ratios": [1, 1, 1],
-            "n_layers": 3,
-            "window_size": 128,
-            "block_size": 5,
-            "dspark_use_native_sas": True,
-        }
-
-        with patch.dict(sys.modules, {module.__name__: module}):
-            backend = _create_attention_backend(attn, torch.device("npu"), torch.bfloat16, config)
-
-        assert backend.init_kwargs["block_size"] == 5
-        assert backend.init_kwargs["dspark_use_native_sas"] is True
 
     @patch(
         "xllm.python.model_executor.executor.current_platform.is_npu",
@@ -2208,7 +2184,6 @@ def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
         "max_position_embeddings": 128,
     }
     model = _FakeModel()
-    model.cfg = SimpleNamespace(block_size=7)
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
@@ -2223,10 +2198,9 @@ def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
 
 def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> None:
     model = _FakeModel()
-    model.cfg = SimpleNamespace(block_size=8)
     config = {
         "model_type": "DFlash2DraftModel",
-        "num_speculative_tokens": 0,
+        "num_speculative_tokens": 7,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
     }
@@ -2237,13 +2211,15 @@ def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> Non
     assert isinstance(executor.decode_graph_runner, BlockDraftAclGraphRunner)
     assert executor.decode_graph_runner.max_batch == 2
     executor._kv_bound = True
-    executor.context_kv_graph_runner.warmup = MagicMock()
-    executor.decode_graph_runner.can_execute = MagicMock(return_value=False)
-    executor.eager_runner.execute = MagicMock()
     tokens = torch.zeros(16, dtype=torch.int32)
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
-    executor.execute(tokens, tokens, metadata, is_graph_warmup=True)
-    executor.context_kv_graph_runner.warmup.assert_called_once_with(16)
+    with (
+        patch.object(executor.context_kv_graph_runner, "warmup") as warmup,
+        patch.object(executor.decode_graph_runner, "can_execute", return_value=False),
+        patch.object(executor.eager_runner, "execute"),
+    ):
+        executor.execute(tokens, tokens, metadata, is_graph_warmup=True)
+    warmup.assert_called_once_with(16)
 
 
 def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
@@ -2254,23 +2230,24 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
         "max_position_embeddings": 128,
     }
     model = _FakeModel()
-    model.cfg = SimpleNamespace(block_size=7)
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
         executor = ModelExecutor(model, config, max_seqs_per_batch=4)
     cache = torch.empty(2, 4, 2, 64)
     executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    executor.context_kv_graph_runner.warmup = MagicMock()
-    executor.decode_graph_runner.can_execute = MagicMock(return_value=False)
-    executor.eager_runner.execute = MagicMock(return_value=torch.zeros(14, 4))
-    tokens = torch.zeros(14, dtype=torch.int32)
+    tokens = torch.zeros(12, dtype=torch.int32)
     positions = torch.zeros_like(tokens)
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
-    executor.execute(tokens, positions, metadata, is_graph_warmup=True)
-    executor.context_kv_graph_runner.warmup.assert_called_once_with(16)
-    executor.execute(tokens, positions, metadata)
-    executor.context_kv_graph_runner.warmup.assert_called_once_with(16)
+    with (
+        patch.object(executor.context_kv_graph_runner, "warmup") as warmup,
+        patch.object(executor.decode_graph_runner, "can_execute", return_value=False),
+        patch.object(executor.eager_runner, "execute", return_value=torch.zeros(12, 4)),
+    ):
+        executor.execute(tokens, positions, metadata, is_graph_warmup=True)
+        warmup.assert_called_once_with(14)
+        executor.execute(tokens, positions, metadata)
+    warmup.assert_called_once_with(14)
 
 
 def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None:
@@ -2281,7 +2258,6 @@ def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None
         "max_position_embeddings": 128,
     }
     model = _FakeModel()
-    model.cfg = SimpleNamespace(block_size=3)
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
@@ -2289,24 +2265,18 @@ def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None
     executor._kv_bound = True
     runner = executor.decode_graph_runner
     assert isinstance(runner, BlockDraftAclGraphRunner)
-    runner.prepare_execution = MagicMock(side_effect=AssertionError("ordinary decode admission"))
-    runner.can_execute = MagicMock(return_value=True)
-    runner.warmup = MagicMock(return_value="block-key")
-    runner.execute = MagicMock(return_value=torch.ones(3, 4))
-    tokens = torch.arange(3, dtype=torch.int32)
+    tokens = torch.arange(2, dtype=torch.int32)
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
-
-    output = executor.execute(tokens, tokens, metadata)
-
-    runner.prepare_execution.assert_not_called()
-    runner.can_execute.assert_called_once_with(tokens, metadata, None, None)
-    runner.warmup.assert_called_once_with(
-        tokens, tokens, metadata, None, None, eplb=None, pre_capture_kv_buckets=False, input_batch=None
-    )
-    runner.execute.assert_called_once_with(
-        tokens, tokens, metadata, None, None, graph_key="block-key", eplb=None, decode_metadata=None, input_batch=None
-    )
-    assert output is runner.execute.return_value
+    graph_key = ("block-key",)
+    expected = torch.ones(2, 4)
+    with (
+        patch.object(runner, "prepare_execution", side_effect=AssertionError("ordinary decode admission")),
+        patch.object(runner, "can_execute", return_value=True),
+        patch.object(runner, "warmup", return_value=graph_key),
+        patch.object(runner, "execute", return_value=expected) as execute,
+    ):
+        assert executor.execute(tokens, tokens, metadata) is expected
+    assert execute.call_args.kwargs["graph_key"] is graph_key
 
 
 def test_eager_runner_skips_cp_for_empty_rank() -> None:

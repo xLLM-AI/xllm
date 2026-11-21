@@ -204,8 +204,6 @@ bool LLMEngine::init_model(MasterStatus master_status,
   if (!options_.is_draft_engine() &&
       SpeculativeConfig::is_block_diffusion_algorithm(
           options_.speculative_algorithm())) {
-    CHECK(options_.draft_model_path().has_value())
-        << "Block-diffusion Target requires a draft checkpoint.";
     // Scheduler warmup must use the same auxiliary-state width as the workers.
     args_.layers_to_capture(
         read_capture_layer_ids(options_.draft_model_path().value()));

@@ -24,19 +24,15 @@ namespace xllm {
 
 class DSparkWorkerImpl final : public DFlashWorkerImpl {
  public:
-  DSparkWorkerImpl(const ParallelArgs& parallel_args,
-                   const torch::Device& device,
-                   const runtime::Options& options);
-
-  ~DSparkWorkerImpl() override = default;
+  using DFlashWorkerImpl::DFlashWorkerImpl;
 
   bool init_model(const std::string& model_weights_path,
                   int32_t random_seed,
                   MasterStatus master_status) override;
 
  protected:
+  void apply_draft_model_overrides(ModelArgs& args) override;
   DecodeExpansionOptions prepare_for_draft() const override;
-
   std::pair<torch::Tensor, torch::Tensor> run_decode_draft(
       const LlmForwardInput& input,
       LlmForwardInput& validate_input,

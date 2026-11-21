@@ -451,14 +451,6 @@ bool load_hf_model_args(const std::filesystem::path& model_weights_path,
                << resolved_model_type;
     return false;
   }
-  // Qwen3 block drafts enable a positive window when the source omits the
-  // switch. Resolve that default before reflection loses the distinction
-  // between an absent switch and an explicit false; keep target defaults.
-  if (resolved_model_type == "qwen3" &&
-      (args->markov_rank() > 0 || args->block_size() > 0) &&
-      !reader.value<bool>("use_sliding_window").has_value()) {
-    args->use_sliding_window(args->sliding_window() > 0);
-  }
   args->enable_mla(should_enable_mla(model_weights_path, backend));
 
   return true;

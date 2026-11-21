@@ -35,7 +35,7 @@ from xllm.python.models.qwen3_dflash import (
 
 @dataclass
 class DFlash2Qwen3Config(DFlashQwen3Config):
-    num_speculative_tokens: int | None = None
+    num_speculative_tokens: int = 0
     conv_group_size: int = 0
     conv_kernel_size: int = 0
     selector_rank: int = 0
@@ -55,7 +55,7 @@ class DFlash2Qwen3Config(DFlashQwen3Config):
 
         return cls(
             **base.__dict__,
-            num_speculative_tokens=d.get("num_speculative_tokens"),
+            num_speculative_tokens=int(d.get("num_speculative_tokens", 0)),
             conv_group_size=pick("conv_group_size"),
             conv_kernel_size=pick("conv_kernel_size"),
             selector_rank=pick("selector_rank"),
@@ -66,7 +66,7 @@ class DFlash2Qwen3Config(DFlashQwen3Config):
         super().validate()
         if (
             min(
-                self.block_size,
+                self.num_speculative_tokens,
                 self.conv_group_size,
                 self.conv_kernel_size,
                 self.selector_rank,
@@ -148,14 +148,11 @@ class DFlash2Qwen3DecoderLayer(Qwen3DecoderLayer):
     ) -> None:
         super().__init__(cfg, layer_id, dtype, device, causal=causal)
         self.self_attn.attn.fia_sparse_mode = 4
-        num_decoding_tokens = (
-            cfg.num_speculative_tokens + 1 if cfg.num_speculative_tokens is not None else cfg.block_size
-        )
         self.attention_conv = DFlash2GroupedConv(
             cfg.hidden_size,
             cfg.conv_kernel_size,
             cfg.conv_group_size,
-            num_decoding_tokens,
+            cfg.num_speculative_tokens,
             dtype,
             device,
         )
@@ -163,7 +160,7 @@ class DFlash2Qwen3DecoderLayer(Qwen3DecoderLayer):
             cfg.hidden_size,
             cfg.conv_kernel_size,
             cfg.conv_group_size,
-            num_decoding_tokens,
+            cfg.num_speculative_tokens,
             dtype,
             device,
         )

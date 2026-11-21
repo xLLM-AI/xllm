@@ -64,8 +64,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
       TargetInput& inputs,
       const ForwardOutput& prior_output) override;
 
-  using TargetModelParams =
-      typename SpeculativeWorkerImpl<TargetInput>::TargetModelParams;
   using SpeculativeWorkerImpl<TargetInput>::compute_stream_;
   using SpeculativeWorkerImpl<TargetInput>::context_;
   using SpeculativeWorkerImpl<TargetInput>::device_;
@@ -77,23 +75,19 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   using SpeculativeWorkerImpl<TargetInput>::parallel_args_;
   using SpeculativeWorkerImpl<TargetInput>::set_hierarchy_kv_transfer;
 
-  DraftModelSpecWorkerImpl(
-      const ParallelArgs& parallel_args,
-      const torch::Device& device,
-      const runtime::Options& options,
-      WorkerType worker_type,
-      const ParallelArgs& draft_parallel_args,
-      const runtime::Options& draft_opts,
-      int32_t (*configure_draft_config)(ModelArgs&,
-                                        const runtime::Options&) = nullptr);
+  DraftModelSpecWorkerImpl(const ParallelArgs& parallel_args,
+                           const torch::Device& device,
+                           const runtime::Options& options,
+                           WorkerType worker_type,
+                           const ParallelArgs& draft_parallel_args,
+                           const runtime::Options& draft_opts);
 
-  virtual KVCacheShape draft_kv_cache_shape(
-      const KVCacheShape& target_kv_cache_shape) const;
+  virtual void apply_draft_model_overrides(ModelArgs& args) = 0;
+
   // Reuse grouped pool counts; otherwise use the draft's geometry and DP-local
   // TP size, borrowing only the target's block count.
-  KVCacheShape build_draft_kv_cache_shape(
-      const KVCacheShape& target_kv_cache_shape,
-      int64_t draft_world_size = -1) const;
+  virtual KVCacheShape draft_kv_cache_shape(
+      const KVCacheShape& target_kv_cache_shape) const;
 
   // MTP-family drafts reserve a pre-head hidden-state placeholder per row.
   virtual int64_t get_embedding_placeholder_size() const { return 0; }
@@ -113,15 +107,10 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   // A DCP block-table entry covers one logical KV page per KV split; slot and
   // expanded-attention metadata use this size, not the physical block size.
   int32_t logical_block_size() const;
-  bool uses_chunked_verify() const {
-    return target_verify_mode_ != mtp_async::TargetSpecVerifyMode::GENERIC;
-  }
 
   void update_decode_step_input(
       TargetInput& input,
       const std::vector<EmbeddingCache::DecodeState>& last_states) const;
-
-  void prepare_draft_input(const TargetInput& input);
 
   std::optional<ForwardOutput> finalize_step_output(
       ForwardOutput output,
@@ -151,17 +140,14 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   ModelContext load_model_config(ModelLoader& loader);
   KVCacheCreateOptions build_draft_kv_cache_layout(
       const KVCacheShape& shape) const;
-  int64_t draft_num_layers() const;
 #if defined(USE_NPU)
   void prepare_draft_padding(LlmModelParams& params,
                              Stream* prepare_stream = nullptr);
   DpEpPaddingCache dp_ep_padding_cache_{2};
 #endif
-  int32_t (*configure_draft_config_)(ModelArgs&, const runtime::Options&);
   std::unique_ptr<EmbeddingCache> embedding_cache_;
 
   DraftVocabMapping draft_vocab_;
-
   mtp_async::TargetSpecVerifyMode target_verify_mode_ =
       mtp_async::TargetSpecVerifyMode::GENERIC;
 };

@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <iostream>
 #include <unordered_set>
 #include <utility>
@@ -638,13 +639,28 @@ void ModelRegistry::configure_mtp_args(ModelArgs& args,
   if (!is_draft_engine || !SpeculativeConfig::is_mtp_algorithm(algorithm)) {
     return;
   }
+  const int64_t num_layers = args.n_layers();
   const auto& models = get_instance()->model_registry_;
   const auto entry =
       models.find(canonical_model_registration_name(args.model_type()));
-  if (entry == models.end() || !entry->second.mtp_args_adapter) {
+  if (entry != models.end() && entry->second.mtp_args_adapter) {
+    entry->second.mtp_args_adapter(args, is_python_model);
+  }
+  const int32_t num_draft_layers = args.num_nextn_predict_layers();
+  if (num_draft_layers <= 0) {
     return;
   }
-  entry->second.mtp_args_adapter(args, is_python_model);
+  if (args.n_layers() != num_draft_layers) {
+    args.mtp_start_layer_idx(args.n_layers()).n_layers(num_draft_layers);
+  }
+  const auto& index_topk_pattern = args.index_topk_pattern();
+  if (num_draft_layers < num_layers &&
+      index_topk_pattern.size() == static_cast<size_t>(num_layers)) {
+    args.index_topk_pattern(
+        index_topk_pattern.substr(/*pos=*/0, num_draft_layers));
+  }
+  args.first_k_dense_replace(
+      std::min(args.first_k_dense_replace(), num_draft_layers));
 }
 
 std::string ModelRegistry::get_model_backend(const std::string& name) {

@@ -1718,10 +1718,6 @@ TEST_F(DeepseekV2DecoderTopkShareTest,
   model_args_.index_topk_pattern() = "";
   refresh_ctx();
 
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_EQ(topk_share_plan.num_indexer_layers(), kNumLayers);
-
   for (int32_t layer_id : {0, 3, 6, 7}) {
     auto decoder = make_loaded_decoder(layer_id);
     const DsaTopkShareDecision& decision =
@@ -1850,19 +1846,6 @@ TEST_F(DeepseekV2DecoderTopkShareTest,
       second_output, first_output, /*rtol=*/1e-3, /*atol=*/1e-2);
 }
 
-TEST_F(DeepseekV2DecoderTopkShareTest, PatternWithOnlyFullLayersHasNoReuse) {
-  configure_glm5_indexer();
-  model_args_.n_layers() = 4;
-  model_args_.index_topk_freq() = 1;
-  model_args_.index_skip_topk_offset() = 0;
-  model_args_.index_topk_pattern() = "FFFF";
-
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/3).reuse_topk);
-  EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/3).output_topk);
-}
-
 TEST_F(DeepseekV2DecoderTopkShareTest,
        ShortFrequencyPlanWithNoSharedLayerHasNoReuse) {
   configure_glm5_indexer();
@@ -1872,8 +1855,7 @@ TEST_F(DeepseekV2DecoderTopkShareTest,
   model_args_.index_topk_pattern() = "";
 
   const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/2).output_topk);
+  EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/2).reuse_topk);
 }
 
 }  // namespace layer

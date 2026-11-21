@@ -129,27 +129,12 @@ class GraphPersistentParam final {
     }
     return persistent_new_cache_slots_;
   }
-  torch::Tensor persistent_eplb_decode_token_mask(
-      uint32_t token_count = 0) const {
-    if (token_count > 0) {
-      return persistent_eplb_decode_token_mask_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/token_count);
-    }
-    return persistent_eplb_decode_token_mask_;
-  }
   torch::Tensor persistent_block_tables(uint32_t actual_batch_size = 0) const {
     if (actual_batch_size > 0) {
       return persistent_block_tables_.slice(
           /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
     }
     return persistent_block_tables_;
-  }
-  torch::Tensor persistent_mask(uint32_t actual_tokens = 0) const {
-    if (actual_tokens > 0) {
-      return persistent_mask_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_tokens);
-    }
-    return persistent_mask_;
   }
   const torch::Tensor& tiling_data() const { return tiling_data_; }
   std::optional<PagedAttentionPlanDescriptor> paged_attention_plan_descriptor(
@@ -171,46 +156,6 @@ class GraphPersistentParam final {
     const uint32_t result_tokens = value.size(0);
     hidden_states_.slice(/*dim=*/0, /*start=*/0, /*end=*/result_tokens)
         .copy_(value, /*non_blocking=*/true);
-  }
-  const int32_t* persistent_host_q_seq_lens_data() const {
-    return persistent_host_q_seq_lens_.data();
-  }
-  const int32_t* persistent_host_kv_seq_lens_data() const {
-    return persistent_host_kv_seq_lens_.data();
-  }
-  const int32_t* capture_host_q_seq_lens_data() const {
-    return capture_host_q_seq_lens_.data();
-  }
-  const int32_t* capture_host_kv_seq_lens_data() const {
-    return capture_host_kv_seq_lens_.data();
-  }
-  bool need_update_attn_mask() const { return need_update_attn_mask_; }
-  void set_need_update_attn_mask(bool value) { need_update_attn_mask_ = value; }
-  bool need_update_attention_plan() const {
-    return need_update_attention_plan_;
-  }
-  torch::Tensor persistent_embedding(uint32_t actual_tokens = 0) const {
-    if (actual_tokens > 0) {
-      return persistent_embedding_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_tokens);
-    }
-    return persistent_embedding_;
-  }
-  torch::Tensor persistent_linear_state_indices(
-      uint32_t actual_batch_size = 0) const {
-    if (actual_batch_size > 0) {
-      return persistent_linear_state_indices_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
-    }
-    return persistent_linear_state_indices_;
-  }
-  torch::Tensor persistent_num_accepted_tokens(
-      uint32_t actual_batch_size = 0) const {
-    if (actual_batch_size > 0) {
-      return persistent_num_accepted_tokens_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
-    }
-    return persistent_num_accepted_tokens_;
   }
   torch::Tensor aux_hidden_states(uint32_t actual_tokens = 0) const {
     if (!aux_hidden_states_.defined() || aux_hidden_states_.numel() == 0) {
