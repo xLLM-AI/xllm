@@ -121,6 +121,18 @@ std::vector<uint8_t> MooncakeStoreBackend::batch_put(
   return statuses;
 }
 
+std::vector<uint8_t> MooncakeStoreBackend::batch_get(
+    const std::vector<std::string>& keys,
+    const std::vector<MooncakeMultiBuffer>& buffers) {
+  std::vector<uint8_t> statuses(keys.size(), 0);
+  if (keys.size() == buffers.size()) {
+    for (size_t index = 0; index < keys.size(); ++index) {
+      statuses[index] = get(keys[index], buffers[index]) ? 1 : 0;
+    }
+  }
+  return statuses;
+}
+
 bool MooncakeStoreBackend::get(const std::string& key,
                                const MooncakeMultiBuffer& buffer) {
   if (client_ptr_ == nullptr ||

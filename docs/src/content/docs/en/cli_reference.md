@@ -121,7 +121,21 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `store_master_server_address` | `string` | `""` | Store master address. Use `IP:Port` in standalone mode or `etcd://IP:Port;IP:Port;...` in etcd-backed HA mode. |
 | `store_metadata_server` | `string` | `""` | Address of the KV Cache Store metadata service. |
 | `store_local_hostname` | `string` | `""` | Local host name of the KV Cache Store client. |
+| `store_backend` | `string` | `"mooncake"` | KV Cache Store backend, `mooncake` or `yuanrong`. `yuanrong` requires a build with `USE_YUANRONG`. |
+| `store_yuanrong_host` | `string` | `""` | Worker hostname or IP. Required for `yuanrong`. |
+| `store_yuanrong_port` | `int32` | `0` | Worker port (1–65535). Required for `yuanrong`. |
+| `store_yuanrong_timeout_ms` | `int32` | `500` | Request timeout in milliseconds (maximum 5000). |
 | `enable_control_h2d_block_num` | `bool` | `false` | Whether to control the number of H2D copy blocks. |
+
+To use YuanRong, build the A2 wheel below and pass `--enable_prefix_cache=true --host_blocks_factor=1.125 --enable_kvcache_store=true --store_backend=yuanrong --store_yuanrong_host=192.168.0.213 --store_yuanrong_port=18889` to `xllm serve`. Replace the example host and port with those of your running DataSystem Worker.
+
+```bash
+git submodule update --init third_party/yuanrong-datasystem
+MAX_JOBS=32 CMAKE_ARGS="-DUSE_YUANRONG=ON" \
+  python3 setup.py --device npu bdist_wheel
+```
+
+`MAX_JOBS` sets the parallelism for xLLM, the DS dependencies and the client. To override only DS, add `-DDS_STATIC_SDK_JOBS=N` to `CMAKE_ARGS`. When neither is set, DS uses the environment variable `CMAKE_BUILD_PARALLEL_LEVEL`, defaulting to 8. Set `DS_OPENSOURCE_DIR` to reuse a dependency cache for native Linux source builds.
 
 ## SchedulerConfig
 

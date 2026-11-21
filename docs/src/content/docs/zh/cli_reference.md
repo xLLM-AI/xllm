@@ -121,7 +121,21 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `store_master_server_address` | `string` | `""` | Store master 地址。单机模式使用 `IP:Port`；etcd 高可用模式使用 `etcd://IP:Port;IP:Port;...`。 |
 | `store_metadata_server` | `string` | `""` | KV Cache Store metadata service 的地址。 |
 | `store_local_hostname` | `string` | `""` | KV Cache Store client 的本地主机名。 |
+| `store_backend` | `string` | `"mooncake"` | KV Cache Store 后端，可选 `mooncake` 或 `yuanrong`；`yuanrong` 需要以 `USE_YUANRONG` 构建。 |
+| `store_yuanrong_host` | `string` | `""` | Worker 主机名或 IP，选择 `yuanrong` 时必填。 |
+| `store_yuanrong_port` | `int32` | `0` | Worker 端口（1–65535），选择 `yuanrong` 时必填。 |
+| `store_yuanrong_timeout_ms` | `int32` | `500` | 单次请求超时，单位毫秒，上限 5000。 |
 | `enable_control_h2d_block_num` | `bool` | `false` | 是否控制 H2D 拷贝的 block 数。 |
+
+构建支持元戎的 A2 wheel 后，在 `xllm serve` 中传入 `--enable_prefix_cache=true --host_blocks_factor=1.125 --enable_kvcache_store=true --store_backend=yuanrong --store_yuanrong_host=192.168.0.213 --store_yuanrong_port=18889`。请将示例地址和端口替换为已启动的 DataSystem Worker 的实际值。
+
+```bash
+git submodule update --init third_party/yuanrong-datasystem
+MAX_JOBS=32 CMAKE_ARGS="-DUSE_YUANRONG=ON" \
+  python3 setup.py --device npu bdist_wheel
+```
+
+`MAX_JOBS` 同时控制 xLLM 和 DS 第三方及 Client 的构建并行度。若只想调整 DS，可在 `CMAKE_ARGS` 中指定 `-DDS_STATIC_SDK_JOBS=N`。两者均未指定时，DS 使用环境变量 `CMAKE_BUILD_PARALLEL_LEVEL`，缺省为 8。原生 Linux 源码构建可通过 `DS_OPENSOURCE_DIR` 复用第三方缓存。
 
 ## SchedulerConfig
 

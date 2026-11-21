@@ -46,11 +46,15 @@ class KVCacheStoreConfig final {
          "layers_wise_copy_batchs",
          "host_blocks_factor",
          "enable_kvcache_store",
+         "store_backend",
          "store_protocol",
          "store_rdma_devices",
          "store_master_server_address",
          "store_metadata_server",
          "store_local_hostname",
+         "store_yuanrong_host",
+         "store_yuanrong_port",
+         "store_yuanrong_timeout_ms",
          "enable_control_h2d_block_num"}};
     return kOptionCategory;
   }
@@ -65,6 +69,11 @@ class KVCacheStoreConfig final {
 
   PROPERTY(bool, enable_kvcache_store) = false;
 
+  // Which backend holds offloaded blocks: "mooncake" (peer-to-peer store
+  // client) or "yuanrong" (content-addressed host store). The latter
+  // requires a build with USE_YUANRONG.
+  PROPERTY(std::string, store_backend) = "mooncake";
+
   PROPERTY(std::string, store_protocol) = "tcp";
 
   // Comma-separated HCAs for the embedded Store client.
@@ -75,6 +84,13 @@ class KVCacheStoreConfig final {
   PROPERTY(std::string, store_metadata_server);
 
   PROPERTY(std::string, store_local_hostname);
+
+  // YuanRong worker endpoint used when store_backend=yuanrong.
+  PROPERTY(std::string, store_yuanrong_host);
+
+  PROPERTY(int32_t, store_yuanrong_port) = 0;
+
+  PROPERTY(int32_t, store_yuanrong_timeout_ms) = 500;
 
   PROPERTY(bool, enable_control_h2d_block_num) = false;
 };

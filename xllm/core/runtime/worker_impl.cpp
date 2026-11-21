@@ -1652,7 +1652,11 @@ WorkerImpl::create_hierarchy_kv_transfer() {
       .store_metadata_server(options_.store_metadata_server())
       .store_local_hostname(options_.store_local_hostname())
       .store_namespace(options_.model_id())
-      .store_worker_id(worker_id);
+      .store_worker_id(worker_id)
+      .store_backend(options_.store_backend())
+      .store_yuanrong_host(options_.store_yuanrong_host())
+      .store_yuanrong_port(options_.store_yuanrong_port())
+      .store_yuanrong_timeout_ms(options_.store_yuanrong_timeout_ms());
   return std::make_shared<HierarchyKVTransfer>(transfer_options, device_);
 }
 

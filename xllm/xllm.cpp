@@ -214,6 +214,11 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .layers_wise_copy_batchs(kv_cache_store_config.layers_wise_copy_batchs())
       .store_protocol(kv_cache_store_config.store_protocol())
       .store_rdma_devices(kv_cache_store_config.store_rdma_devices())
+      .store_backend(kv_cache_store_config.store_backend())
+      .store_yuanrong_host(kv_cache_store_config.store_yuanrong_host())
+      .store_yuanrong_port(kv_cache_store_config.store_yuanrong_port())
+      .store_yuanrong_timeout_ms(
+          kv_cache_store_config.store_yuanrong_timeout_ms())
       .store_master_server_address(
           kv_cache_store_config.store_master_server_address())
       .store_metadata_server(kv_cache_store_config.store_metadata_server())

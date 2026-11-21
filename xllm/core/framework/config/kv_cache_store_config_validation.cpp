@@ -49,6 +49,11 @@ void validate_kv_cache_store_config(const std::string& model_type,
   }
 
   if (store_config.enable_kvcache_store()) {
+    const char* error =
+        kv_cache_store_backend_error(store_config.store_backend(),
+                                     store_config.store_yuanrong_host(),
+                                     store_config.store_yuanrong_port());
+    CHECK(error == nullptr) << error;
     CHECK(kv_cache_config.enable_prefix_cache())
         << "KV cache Store requires --enable_prefix_cache=true.";
     CHECK_GT(store_config.host_blocks_factor(), 1.0)

@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "core/kv_cache/transfer/kv_cache_store.h"
 
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 
 #include <array>
@@ -657,6 +658,43 @@ TEST(MooncakeStoreBackendTest, ValidatesRegistrationRangesBeforeSetup) {
                    {{reinterpret_cast<void*>(UINTPTR_MAX - 7), 8}})
                    .has_value());
 }
+
+TEST(KVCacheStoreTest, RejectsInvalidBackendBeforeRegisteringHostCaches) {
+  KVCacheStoreInitConfig config = make_store_config();
+  KVCacheStore store;
+  config.backend = "unknown";
+  EXPECT_FALSE(store.init(config, {}));
+  config.backend = "yuanrong";
+  config.yuanrong_port = 31501;
+  EXPECT_FALSE(store.init(config, {}));
+  config.yuanrong_host = "localhost";
+  for (const int32_t port : {-1, 0, 65536}) {
+    config.yuanrong_port = port;
+    EXPECT_FALSE(store.init(config, {}));
+  }
+}
+
+#if defined(USE_YUANRONG)
+// Integration test for a local Worker listening on its default port.
+TEST(YuanRongStoreBackendTest, DISABLED_ColdBatchReturnsMissesWithoutErrors) {
+  KVCache cache = make_attention_cache(/*host_blocks=*/2, /*width=*/8);
+  HostCacheStoreIndex index;
+  index[BlockType::KV].emplace_back(HostCacheStoreEntry{0, "main", &cache});
+  auto config = make_store_config("xllm-test-cold-reads");
+  config.backend = "yuanrong";
+  config.yuanrong_host = "127.0.0.1";
+  config.yuanrong_port = 31501;
+  KVCacheStore store;
+  ASSERT_TRUE(store.init(config, std::move(index)));
+  std::vector<BlockTransferInfo> blocks{
+      make_block_info(1),
+      make_block_info(2, BlockType::KV, /*destination_block_id=*/1)};
+  Slice<BlockTransferInfo> slice(blocks);
+  const int64_t errors = google::LogMessage::num_messages(google::GLOG_ERROR);
+  EXPECT_EQ(store.batch_get_with_status(slice), (std::vector<uint8_t>{0, 0}));
+  EXPECT_EQ(google::LogMessage::num_messages(google::GLOG_ERROR), errors);
+}
+#endif
 
 }  // namespace
 }  // namespace xllm
