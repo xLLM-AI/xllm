@@ -322,7 +322,6 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
   py_model_ = model_cls(config_dict_);
   py_model_.attr("eval")();
   supports_greedy_tokens_ =
-      ModelConfig::get_instance().enable_greedy_output() &&
       py::hasattr(py_model_, "supports_greedy_tokens") &&
       py_model_.attr("supports_greedy_tokens")().cast<bool>();
 }

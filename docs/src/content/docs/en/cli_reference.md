@@ -33,7 +33,6 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `enable_greedy_output` | `bool` | `false` | Opt in to candidate-only output for unconstrained greedy Python Qwen3 dense requests (TP with DP=CP=1). Requests needing logits, constraints, selected hidden states or speculative decoding retain full logits. Does not capture the output head in a graph. |
 | `model_id` | `string` | `""` | Hugging Face model name, not a path. |
 | `model` | `string` | `""` | Hugging Face model name or model path. |
 | `backend` | `string` | `""` | Backend model type: `llm` for text-only models, `vlm` for multimodal models, or `dit` for diffusion models. |
