@@ -24,6 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
@@ -1882,6 +1883,44 @@ TEST(KVCacheEstimationTest,
   const KVCacheCapacity no_prefix_capacity =
       estimate_kv_cache_capacity(model_args, no_prefix_options);
   EXPECT_EQ(no_prefix_capacity.swa_count(), 50);
+}
+
+TEST(KVCacheEstimationTest, RuntimePrefillSettingsControlSwaBurstReservation) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 4, 128});
+  runtime::Options options;
+  options.block_size(128)
+      .max_seqs_per_batch(4)
+      .max_tokens_per_batch(16384)
+      .max_tokens_per_chunk_for_prefill(4096)
+      .enable_chunked_prefill(true)
+      .enable_prefix_cache(false)
+      .enable_disagg_pd(true)
+      .instance_role(InstanceRole::PREFILL)
+      .dp_size(4);
+  KVCacheEstimateContext context;
+  context.dtype = torch::kFloat32;
+  context.virtual_memory_cache_size = 64 * 1024 * 1024;
+
+  const SchedulerConfig saved_config = SchedulerConfig::get_instance();
+  for (const bool fair : {false, true}) {
+    SchedulerConfig::get_instance().enable_dp_fair_token_budget(!fair);
+    options.enable_dp_fair_token_budget(fair);
+    const KVCacheCapacity capacity =
+        KVCacheEstimator(model_args).estimate(options, context);
+    EXPECT_EQ(capacity.swa_count(), fair ? 50 : 146);
+  }
+  // Multimodal capacity retains the existing full-budget estimate.
+  context.is_multimodal = true;
+  const KVCacheCapacity capacity =
+      KVCacheEstimator(model_args).estimate(options, context);
+  EXPECT_EQ(capacity.swa_count(), 146);
+  SchedulerConfig::get_instance() = saved_config;
 }
 
 TEST(KVCacheEstimationTest, DeepSeekV4DecodeKeepsOperationalSwaPool) {

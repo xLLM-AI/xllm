@@ -65,6 +65,9 @@ namespace xllm {
 
 LLMMaster::LLMMaster(const Options& options)
     : Master(options), master_status_(options.master_status()) {
+  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  const bool enable_dp_fair_token_budget =
+      scheduler_config.enable_dp_fair_token_budget();
 #if defined(USE_NPU)
   resolve_npu_kernel_backend(&options_, /*model_component=*/"causal_lm");
 #endif
@@ -148,6 +151,7 @@ LLMMaster::LLMMaster(const Options& options)
       .cp_size(options_.cp_size())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
+      .enable_dp_fair_token_budget(enable_dp_fair_token_budget)
       .enable_offline_inference(options_.enable_offline_inference())
       .disable_log_stats(options_.disable_log_stats())
       .spawn_worker_path(options_.spawn_worker_path())
@@ -257,7 +261,6 @@ LLMMaster::LLMMaster(const Options& options)
       initialize_engine, llm_engine_.get(), speculative_engine_.get());
   task_type_ = options_.task_type();
 
-  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   SchedulerOptions scheduler_options;
   scheduler_options.max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
@@ -284,6 +287,7 @@ LLMMaster::LLMMaster(const Options& options)
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
+      .enable_dp_fair_token_budget(enable_dp_fair_token_budget)
       .instance_name(options_.instance_name())
       .instance_role(options_.instance_role())
       .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())

@@ -26,7 +26,6 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/kv_cache_store_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/util/scope_guard.h"
@@ -634,8 +633,8 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
       std::min(kv_cache_tokens_num + token_budget, seq->num_tokens());
   if (has_linear_attention_layers(state.model_args) &&
       state.enable_prefix_cache && seq->is_prefill_stage()) {
-    const size_t chunk_stride = static_cast<size_t>(
-        SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill());
+    const size_t chunk_stride =
+        static_cast<size_t>(options_.max_tokens_per_chunk_for_prefill());
     const size_t aligned = max_handle_num_tokens / chunk_stride * chunk_stride;
     if (aligned > kv_cache_tokens_num) {
       max_handle_num_tokens = aligned;

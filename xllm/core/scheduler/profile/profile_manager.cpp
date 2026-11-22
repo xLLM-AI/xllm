@@ -29,13 +29,13 @@ limitations under the License.
 #include <sstream>
 
 #include "core/common/global_flags.h"
+#include "core/common/prefill_token_budget.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/request/request_state.h"
 #include "core/runtime/acl_graph_bucket_policy.h"
@@ -270,7 +270,7 @@ void ProfileManager::eval_batch_latency_prediction(const std::string mode) {
     }
   }
   if (mode == "mix") {
-    if (!::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+    if (!options_.enable_chunked_prefill()) {
       LOG(WARNING) << "When chunked prefill is disabled, mixed prefill and "
                       "decode scenarios will not be tested.";
       return;
@@ -1124,27 +1124,16 @@ void ProfileManager::warmup_prefill_for_graph() {
 
   int32_t prefill_tokens =
       std::min(options_.max_tokens_per_batch(), max_context_len);
-  if (::xllm::SchedulerConfig::get_instance().enable_dp_fair_token_budget() &&
-      options_.dp_size() > 1 &&
-      options_.instance_role() == InstanceRole::PREFILL) {
-    // The fair per-group budget caps any single sequence's prefill at
-    // max_tokens_per_batch / dp_size tokens per scheduling round (floored
-    // at one prefill chunk), so warming up at the per-group cap covers the
-    // largest real prefill shape.
-    const int32_t dp_size = options_.dp_size();
-    int32_t per_group_cap =
-        (options_.max_tokens_per_batch() + dp_size - 1) / dp_size;
-    if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
-      const int32_t max_chunk_tokens = ::xllm::SchedulerConfig::get_instance()
-                                           .max_tokens_per_chunk_for_prefill();
-      per_group_cap =
-          std::max(per_group_cap,
-                   std::min(max_chunk_tokens, options_.max_tokens_per_batch()));
-    } else {
-      per_group_cap = options_.max_tokens_per_batch();
-    }
-    prefill_tokens = std::min(prefill_tokens, per_group_cap);
-  }
+  const PrefillTokenBudget prefill_budget(
+      options_.max_tokens_per_batch(),
+      options_.max_tokens_per_chunk_for_prefill(),
+      options_.enable_chunked_prefill());
+  const int64_t per_group_cap =
+      prefill_budget.per_dp_group(options_.dp_size(),
+                                  options_.instance_role(),
+                                  options_.enable_dp_fair_token_budget());
+  prefill_tokens =
+      static_cast<int32_t>(std::min<int64_t>(prefill_tokens, per_group_cap));
   double prefill_latency = run_request(prefill_tokens,
                                        /*prefix_length=*/0,
                                        /*batch_size=*/1,

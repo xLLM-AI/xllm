@@ -29,7 +29,6 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
@@ -301,7 +300,7 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
   estimate_options.instance_role = options.instance_role();
   estimate_options.dp_size = options.dp_size();
   estimate_options.enable_dp_fair_token_budget =
-      SchedulerConfig::get_instance().enable_dp_fair_token_budget();
+      options.enable_dp_fair_token_budget();
   return estimate_options;
 }
 

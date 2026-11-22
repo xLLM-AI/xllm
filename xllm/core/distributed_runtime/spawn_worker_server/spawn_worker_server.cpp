@@ -59,46 +59,48 @@ std::string get_backend_from_worker_type(const std::string& worker_type) {
 }
 }  // namespace
 
-SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
-                                     int32_t local_rank,
-                                     int32_t global_rank,
-                                     int32_t world_size,
-                                     int32_t device_idx,
-                                     int32_t block_size,
-                                     const std::string& indexer_cache_dtype,
-                                     int32_t max_tokens_per_batch,
-                                     int32_t max_seqs_per_batch,
-                                     bool enable_shm,
-                                     uint64_t input_shm_size,
-                                     uint64_t output_shm_size,
-                                     bool is_local,
-                                     const std::string& task_type,
-                                     const std::string& worker_type,
-                                     bool enable_speculative_decode,
-                                     int32_t num_speculative_tokens,
-                                     const std::string& speculative_algorithm,
-                                     const std::string& communication_backend,
-                                     const std::string& npu_kernel_backend,
-                                     const std::string& rank_tablefile,
-                                     bool enable_graph,
-                                     bool enable_graph_mode_decode_no_padding,
-                                     bool enable_prefill_piecewise_graph,
-                                     int32_t max_tokens_for_graph_mode,
-                                     int64_t max_encoder_cache_size,
-                                     int32_t dp_size,
-                                     int32_t ep_size,
-                                     int32_t cp_size,
-                                     int32_t kv_split_size,
-                                     int32_t tp_size,
-                                     int32_t sp_size,
-                                     int32_t cfg_size,
-                                     int32_t text_encoder_tp_size,
-                                     const InstanceRole& instance_role,
-                                     bool enable_mtp_draft_body_tp1,
-                                     bool enable_probabilistic_draft,
-                                     const std::string& model_impl,
-                                     const std::string& extension_impl,
-                                     EplbWorkerConfig eplb_worker_config) {
+SpawnWorkerServer::SpawnWorkerServer(
+    const std::string& master_node_addr,
+    int32_t local_rank,
+    int32_t global_rank,
+    int32_t world_size,
+    int32_t device_idx,
+    int32_t block_size,
+    const std::string& indexer_cache_dtype,
+    int32_t max_tokens_per_batch,
+    int32_t max_seqs_per_batch,
+    bool enable_shm,
+    uint64_t input_shm_size,
+    uint64_t output_shm_size,
+    bool is_local,
+    const std::string& task_type,
+    const std::string& worker_type,
+    bool enable_speculative_decode,
+    int32_t num_speculative_tokens,
+    const std::string& speculative_algorithm,
+    const std::string& communication_backend,
+    const std::string& npu_kernel_backend,
+    const std::string& rank_tablefile,
+    bool enable_graph,
+    bool enable_graph_mode_decode_no_padding,
+    bool enable_prefill_piecewise_graph,
+    int32_t max_tokens_for_graph_mode,
+    int64_t max_encoder_cache_size,
+    int32_t dp_size,
+    int32_t ep_size,
+    int32_t cp_size,
+    int32_t kv_split_size,
+    int32_t tp_size,
+    int32_t sp_size,
+    int32_t cfg_size,
+    int32_t text_encoder_tp_size,
+    const InstanceRole& instance_role,
+    bool enable_mtp_draft_body_tp1,
+    bool enable_probabilistic_draft,
+    const std::string& model_impl,
+    const std::string& extension_impl,
+    EplbWorkerConfig eplb_worker_config,
+    spawn_worker_protocol::PrefillConfig prefill_config) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -116,6 +118,11 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .eplb_worker_config(std::move(eplb_worker_config))
       .world_size(world_size)
       .max_tokens_per_batch(max_tokens_per_batch)
+      .max_tokens_per_chunk_for_prefill(prefill_config.max_chunk_tokens < 0
+                                            ? max_tokens_per_batch
+                                            : prefill_config.max_chunk_tokens)
+      .enable_chunked_prefill(prefill_config.enable_chunked_prefill)
+      .enable_dp_fair_token_budget(prefill_config.enable_dp_fair_token_budget)
       .max_seqs_per_batch(max_seqs_per_batch)
       .enable_speculative_decode(enable_speculative_decode)
       .enable_mtp_draft_body_tp1(enable_mtp_draft_body_tp1)

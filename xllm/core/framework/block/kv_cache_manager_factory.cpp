@@ -38,12 +38,34 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     int64_t world_size,
     torch::ScalarType dtype,
     BlockManagerPool::Options options,
+    bool enable_chunked_prefill,
     std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
     int32_t dp_size,
     std::optional<HostCacheValidationOptions> host_validation_options,
     const VmmKVLayout* shared_vmm_layout) {
   CHECK_GT(world_size, 0) << "world_size must be greater than 0";
   CHECK_GT(dp_size, 0) << "dp_size must be greater than 0";
+  if (options.enable_linear_state() && options.enable_prefix_cache() &&
+      !options.instance_is_decode()) {
+    CHECK(enable_chunked_prefill)
+        << "GDN/KPool state prefix cache requires block-aligned chunked "
+           "prefill to save matching linear states. Please set "
+           "--enable_chunked_prefill=true in your config.";
+    const int32_t chunk_tokens = options.linear_state_chunk_stride();
+    CHECK_GT(chunk_tokens, 0)
+        << "max_tokens_per_chunk_for_prefill must be positive for linear state "
+           "prefix cache";
+    // KV split expands the manager's logical block size. Check checkpoint
+    // alignment against the original cache block size from the capacity.
+    const int64_t block_size = kv_cache_capacity.block_size();
+    CHECK_GT(block_size, 0) << "state prefix cache block_size must be positive";
+    CHECK_EQ(chunk_tokens % block_size, 0)
+        << "state-cache prefix cache saves checkpoints at chunk-end "
+           "boundaries, "
+           "so max_tokens_per_chunk_for_prefill ("
+        << chunk_tokens << ") must be a multiple of block_size (" << block_size
+        << ").";
+  }
   KVCacheShape shape(kv_cache_capacity, model_args, world_size);
   CHECK(shape.has_key_cache_shape())
       << "KV cache shape must contain a key cache shape";

@@ -26,7 +26,7 @@ limitations under the License.
 
 namespace xllm::spawn_worker_protocol {
 
-inline constexpr int32_t kArgumentCount = 43;
+inline constexpr int32_t kArgumentCount = 46;
 inline constexpr int32_t kMinimumArgumentCount = 33;
 inline constexpr int32_t kIndexerCacheDtypeArgumentIndex = 33;
 inline constexpr int32_t kEnableMtpDraftBodyTp1ArgumentIndex = 34;
@@ -38,6 +38,10 @@ inline constexpr int32_t kExtensionImplArgumentIndex = 39;
 inline constexpr int32_t kEnableEplbArgumentIndex = 40;
 inline constexpr int32_t kRedundantExpertsNumArgumentIndex = 41;
 inline constexpr int32_t kUseDecodeOnlyLoadArgumentIndex = 42;
+inline constexpr int32_t kEplbArgumentCount = 43;
+inline constexpr int32_t kPrefillChunkArgumentIndex = 43;
+inline constexpr int32_t kEnableChunkedPrefillArgumentIndex = 44;
+inline constexpr int32_t kEnableDpFairTokenBudgetArgumentIndex = 45;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
 
 inline std::optional<std::string> parse_indexer_cache_dtype(
@@ -80,6 +84,43 @@ inline std::string parse_extension_impl(int32_t argc, char* const argv[]) {
   return std::string(argv[kExtensionImplArgumentIndex]);
 }
 
+struct PrefillConfig {
+  int32_t max_chunk_tokens = -1;
+  bool enable_chunked_prefill = true;
+  bool enable_dp_fair_token_budget = true;
+};
+
+inline std::optional<PrefillConfig> parse_prefill_config(int32_t argc,
+                                                         char* const argv[]) {
+  if (argv == nullptr || argc < kMinimumArgumentCount) {
+    return std::nullopt;
+  }
+  if (argc <= kPrefillChunkArgumentIndex) {
+    return PrefillConfig{};
+  }
+  if (argc < kArgumentCount || argv[kPrefillChunkArgumentIndex] == nullptr ||
+      argv[kEnableChunkedPrefillArgumentIndex] == nullptr ||
+      argv[kEnableDpFairTokenBudgetArgumentIndex] == nullptr) {
+    return std::nullopt;
+  }
+  const std::string_view chunk(argv[kPrefillChunkArgumentIndex]);
+  const std::string_view chunked(argv[kEnableChunkedPrefillArgumentIndex]);
+  const std::string_view fair(argv[kEnableDpFairTokenBudgetArgumentIndex]);
+  if ((chunked != "0" && chunked != "1") || (fair != "0" && fair != "1")) {
+    return std::nullopt;
+  }
+  PrefillConfig config;
+  const auto [end, error] = std::from_chars(
+      chunk.data(), chunk.data() + chunk.size(), config.max_chunk_tokens);
+  if (error != std::errc{} || end != chunk.data() + chunk.size() ||
+      config.max_chunk_tokens <= 0) {
+    return std::nullopt;
+  }
+  config.enable_chunked_prefill = chunked == "1";
+  config.enable_dp_fair_token_budget = fair == "1";
+  return config;
+}
+
 inline std::optional<EplbWorkerConfig> parse_eplb_worker_config(
     int32_t argc,
     char* const argv[]) {
@@ -89,7 +130,7 @@ inline std::optional<EplbWorkerConfig> parse_eplb_worker_config(
   if (argc <= kEnableEplbArgumentIndex) {
     return EplbWorkerConfig{};
   }
-  if (argc < kArgumentCount || argv[kEnableEplbArgumentIndex] == nullptr ||
+  if (argc < kEplbArgumentCount || argv[kEnableEplbArgumentIndex] == nullptr ||
       argv[kRedundantExpertsNumArgumentIndex] == nullptr ||
       argv[kUseDecodeOnlyLoadArgumentIndex] == nullptr) {
     return std::nullopt;
