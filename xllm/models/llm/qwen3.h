@@ -27,29 +27,25 @@ namespace xllm {
 
 class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
  public:
-  QWen3ModelImpl(const ModelContext& context)
+  explicit QWen3ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::Qwen3DecoderLayer>(context.get_model_args()) {
-    // register submodules
-    auto model_args = context.get_model_args();
-    auto options = context.get_tensor_options();
+    const auto& model_args = context.get_model_args();
+    const auto& options = context.get_tensor_options();
 
     if (!mrope_section_.empty()) {
       cos_sin_ = layer::rotary::get_concat_rotary_embedding(
-          128,
+          /*dim=*/128,
           model_args.max_position_embeddings(),
           model_args.rope_theta(),
           options);
     }
 
     layers_.reserve(model_args.n_layers());
-    norm_ = register_module("norm", layer::RMSNorm(context));
-    if (!is_dflash2_draft_model_type(model_args.model_type())) {
-      embed_tokens_ =
-          register_module("embed_tokens", layer::WordEmbedding(context));
-    }
-    for (int32_t i = 0; i < model_args.n_layers(); i++) {
-      auto layer = layer::Qwen3DecoderLayer(context, i);
-      layers_.push_back(layer);
+    norm_ = register_module(/*name=*/"norm", layer::RMSNorm(context));
+    embed_tokens_ = register_module(
+        /*name=*/"embed_tokens", layer::WordEmbedding(context));
+    for (int32_t i = 0; i < model_args.n_layers(); ++i) {
+      layers_.emplace_back(context, i);
     }
   }
 
@@ -95,21 +91,11 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
                       std::vector<KVCache>& kv_caches,
                       const ModelParamsView& input_params) override {
     auto local_params = input_params.clone().view();
-    return forward_impl(tokens, positions, kv_caches, local_params);
-  }
-
-  template <typename InputParams>
-  ModelOutput forward_impl(torch::Tensor tokens,
-                           torch::Tensor positions,
-                           std::vector<KVCache>& kv_caches,
-                           InputParams& input_params) {
-    auto& input_params_new = input_params;
-
     if (tokens.numel() == 0) {
       tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
       positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
     }
-    auto inputs_embeds = input_params.embedding.input_embedding;
+    auto inputs_embeds = local_params.embedding.input_embedding;
     torch::Tensor h;
     if (inputs_embeds.defined()) {
       h = inputs_embeds;
@@ -117,15 +103,15 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
       h = embed_tokens_(tokens);
     }
 
-    auto& dp_token_nums = input_params_new.parallel.dp_global_token_nums;
+    auto& dp_token_nums = local_params.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
-    if (!input_params_new.attn_metadata) {
-      input_params_new.attn_metadata =
-          std::make_shared<layer::AttentionMetadata>(
-              get_attention_metadata(input_params_new));
+    if (!local_params.attn_metadata) {
+      local_params.attn_metadata = std::make_shared<layer::AttentionMetadata>(
+          layer::AttentionMetadataBuilder::build(local_params,
+                                                 model_args_.enable_mla()));
     }
 
-    auto& attn_metadata = *(input_params_new.attn_metadata);
+    auto& attn_metadata = *(local_params.attn_metadata);
     bool only_prefill =
         (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill);
     if (positions.dim() == 2 && only_prefill && !mrope_section_.empty()) {
@@ -135,26 +121,20 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
 
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
-      if (!input_params_new.synchronize_layer(static_cast<uint32_t>(i))) {
+      if (!local_params.synchronize_layer(static_cast<uint32_t>(i))) {
         return ModelOutput();
       }
 #if defined(USE_CUDA)
       attn_metadata.plan_info->layer_id = i;
 #endif
       auto& layer = layers_[i];
-      h = layer->forward(h,
-                         residual,
-                         positions,
-                         attn_metadata,
-                         kv_caches[i],
-                         input_params_new);
-      if (!input_params_new.record_layer(static_cast<uint32_t>(i),
-                                         h.device())) {
+      h = layer->forward(h, residual, positions, attn_metadata, kv_caches[i]);
+      if (!local_params.record_layer(static_cast<uint32_t>(i), h.device())) {
         return ModelOutput();
       }
 
-      if (input_params.has_multimodal()) {
-        const auto& deep_stacks = input_params.multimodal().deep_stacks;
+      if (local_params.has_multimodal()) {
+        const auto& deep_stacks = local_params.multimodal().deep_stacks;
         if (i < deep_stacks.size()) {
           h = h + deep_stacks[i];
         }
@@ -162,13 +142,6 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
     }
     auto [hidden_states, residual_out] = norm_(h, residual);
     return ModelOutput(hidden_states, residual_out);
-  }
-
- protected:
-  virtual layer::AttentionMetadata get_attention_metadata(
-      const ModelParamsView& params) {
-    return layer::AttentionMetadataBuilder::build(params,
-                                                  model_args_.enable_mla());
   }
 };
 TORCH_MODULE(QWen3Model);

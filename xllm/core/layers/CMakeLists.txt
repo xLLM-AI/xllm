@@ -55,6 +55,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:deepseek_v4_decoder_layer.cpp>
     qwen2_vision_layer.cpp
     qwen2_decoder_layer.cpp
+    qwen3_decoder_layer.cpp
     qwen2_5_vision_layer.cpp
     qwen3_vision_layer.cpp
     qwen3_moe_decoder_layer.cpp

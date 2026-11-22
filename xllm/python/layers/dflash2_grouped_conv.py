@@ -47,9 +47,7 @@ def _dflash2_grouped_conv(
     output = coefficients[:, 0] * blocks
     positions = torch.arange(num_tokens, dtype=torch.long, device=hidden_states.device) % block_size
 
-    for tap in range(1, taps):
-        if num_tokens <= tap:
-            raise ValueError("DFlash2 convolution token count must exceed its tap offset")
+    for tap in range(1, min(taps, block_size, num_tokens)):
         valid = positions[tap:].ge(tap).view(num_tokens - tap, 1, 1).to(hidden_states.dtype)
         output[tap:].add_(coefficients[tap:, tap] * blocks[:-tap] * valid)
     return output.flatten(start_dim=1)

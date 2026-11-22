@@ -42,14 +42,6 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-int32_t configure_draft_config(ModelArgs& args,
-                               const runtime::Options& options) {
-  args.layers_to_capture({});
-  args.model_type(std::string(kDFlash2DraftModelType));
-  CHECK_EQ(options.num_speculative_tokens() + 1, args.block_size())
-      << "Runtime block size must match the draft model configuration.";
-  return options.num_speculative_tokens();
-}
 // The selector takes only temperature — truncation, penalties, and grammar
 // constraints belong to verification.
 std::pair<torch::Tensor, torch::Tensor> sample_dflash2_path(
@@ -177,7 +169,11 @@ DFlash2WorkerImpl::DFlash2WorkerImpl(const ParallelArgs& parallel_args,
           configure_draft_parallel_args(parallel_args),
           DFlashWorkerImpl::draft_options(options,
                                           options.num_speculative_tokens()),
-          configure_draft_config) {}
+          [](ModelArgs& args, const runtime::Options& options) {
+            args.layers_to_capture({});
+            args.model_type(/*value=*/"DFlash2DraftModel");
+            return options.num_speculative_tokens();
+          }) {}
 
 std::pair<torch::Tensor, torch::Tensor> DFlash2WorkerImpl::run_decode_draft(
     const LlmForwardInput& input,

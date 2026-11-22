@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <type_traits>
+#include <algorithm>
 
 #include "common/global_flags.h"
 #include "core/framework/config/eplb_config.h"
@@ -26,47 +26,18 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-namespace {
-
-template <typename MoEModule, typename MoEImpl>
-MoEModule create_fused_moe_from_context(const ModelContext& context,
-                                        const FusedMoEArgs& moe_args) {
-  if constexpr (std::is_constructible_v<MoEImpl,
-                                        const ModelContext&,
-                                        const FusedMoEArgs&>) {
-    return MoEModule(context, moe_args);
-  } else {
-    return MoEModule(context.get_model_args(),
-                     moe_args,
-                     context.get_quant_args(),
-                     context.get_parallel_args(),
-                     context.get_tensor_options());
-  }
-}
-
-#if defined(USE_MLU)
-bool use_moe_all2all(bool enable_deep_ep,
-                     const MoeExecutionInput& input_params) {
-  return enable_deep_ep && all_dp_ranks_are_decode(input_params);
-}
-#endif
-bool is_moe_layer(const ModelArgs& model_args, int32_t layer_id) {
-  const auto& mlp_only_layers = model_args.mlp_only_layers();
-  return std::count(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
-             0 &&
-         model_args.n_routed_experts() > 0 &&
-         (layer_id + 1) % model_args.decoder_sparse_step() == 0;
-}
-
-}  // namespace
-
 Qwen3MoeDecoderLayerImpl::Qwen3MoeDecoderLayerImpl(const ModelContext& context,
                                                    int32_t layer_id)
     : parallel_args_(context.get_parallel_args()) {
   const auto& model_args = context.get_model_args();
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
-  const bool use_moe = is_moe_layer(model_args, layer_id);
+  const auto& mlp_only_layers = model_args.mlp_only_layers();
+  const bool use_moe =
+      std::find(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
+          mlp_only_layers.end() &&
+      model_args.n_routed_experts() > 0 &&
+      (layer_id + 1) % model_args.decoder_sparse_step() == 0;
 
   // Qwen3 only support deep ep all2all
   //  when dp_size == ep_size && dp_size == world_size for now
@@ -80,8 +51,7 @@ Qwen3MoeDecoderLayerImpl::Qwen3MoeDecoderLayerImpl(const ModelContext& context,
         << "Qwen3 MoE only support deep ep all2all when dp_size == ep_size";
   }
 
-  // Initialize attention layers
-  attention_ = register_module("self_attn", Qwen2Attention(context));
+  attention_ = register_module(/*name=*/"self_attn", Qwen3Attention(context));
 
   // Initialize norm layers
   input_norm_ = register_module(
@@ -94,10 +64,14 @@ Qwen3MoeDecoderLayerImpl::Qwen3MoeDecoderLayerImpl(const ModelContext& context,
 
   // Initialize mlp
   if (use_moe) {
-    moe_mlp_ =
-        register_module("mlp",
-                        create_fused_moe_from_context<FusedMoE, FusedMoEImpl>(
-                            context, FusedMoEArgs{.is_gated = true}));
+    const FusedMoEArgs moe_args{.is_gated = true};
+#if defined(USE_MLU)
+    auto moe = FusedMoE(context, moe_args);
+#else
+    auto moe =
+        FusedMoE(model_args, moe_args, quant_args, parallel_args_, options);
+#endif
+    moe_mlp_ = register_module(/*name=*/"mlp", moe);
   } else {
     const std::string mlp_module_prefix =
         "model.layers." + std::to_string(layer_id) + ".mlp";
@@ -120,7 +94,7 @@ torch::Tensor Qwen3MoeDecoderLayerImpl::run_moe(
     const MoeExecutionInput& input_params) {
 #if defined(USE_MLU)
   const bool enable_moe_all2all =
-      use_moe_all2all(enable_deep_ep_, input_params);
+      enable_deep_ep_ && all_dp_ranks_are_decode(input_params);
   if (need_dp_moe_gather(parallel_args_, enable_moe_all2all)) {
     x = gather_dp_tokens(x, input_params, parallel_args_);
     x = moe_mlp_->forward_experts(x, enable_moe_all2all);
