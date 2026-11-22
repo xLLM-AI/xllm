@@ -247,7 +247,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   torch::Tensor logits;
-  torch::Tensor greedy_tokens;
+  SampleOutput sample_output;
   torch::Tensor lm_head_input_indices;
   torch::Tensor selected_hidden;
   if (sampling_params.num_sample_seqs() > 0) {
@@ -271,7 +271,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
         !input.skip_sampling_for_logits_only && !need_selected_hidden &&
         !options_.enable_speculative_decode() && options_.cp_size() == 1;
     if (use_greedy_output) {
-      greedy_tokens =
+      sample_output.next_tokens =
           model_->greedy_tokens(model_output.hidden_states, logits_indices);
     } else if (need_selected_hidden) {
       // Emit both selected hidden and logits from a single lm_head pass so the
@@ -310,20 +310,18 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
         if (prepare_sampling) {
           prepare_sampling();
         }
-        auto sample_output = [&]() {
-          if (greedy_tokens.defined()) {
-            return SampleOutput{.next_tokens = greedy_tokens};
-          }
+        if (!sample_output.next_tokens.defined()) {
           if (!sampling_params.min_token_positions().defined()) {
-            return sample(logits, sampling_params);
+            sample_output = sample(logits, sampling_params);
+          } else {
+            SamplingParameters target_sampling = sampling_params;
+            const auto selected_positions = input.positions.index_select(
+                /*dim=*/0, sampling_params.logits_indices().to(torch::kInt64));
+            target_sampling.min_tokens_remaining() =
+                sampling_params.min_token_positions() - selected_positions;
+            sample_output = sample(logits, target_sampling);
           }
-          SamplingParameters target_sampling = sampling_params;
-          const auto selected_positions = input.positions.index_select(
-              /*dim=*/0, sampling_params.logits_indices().to(torch::kInt64));
-          target_sampling.min_tokens_remaining() =
-              sampling_params.min_token_positions() - selected_positions;
-          return sample(logits, target_sampling);
-        }();
+        }
         output.sample_output = std::move(sample_output);
       }
       output.logits = logits;
