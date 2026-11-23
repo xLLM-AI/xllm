@@ -58,7 +58,6 @@ def _metadata(
     return SimpleNamespace(
         is_prefill=False,
         is_chunked_prefill=False,
-        is_spec_verify=False,
         is_dummy=is_dummy,
         dp_execution_token_counts=(1, 1),
         dp_is_decode=(1, 1),

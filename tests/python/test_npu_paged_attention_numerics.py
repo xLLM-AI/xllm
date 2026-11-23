@@ -458,7 +458,6 @@ def test_prepared_slab_replay_reads_current_maps_into_each_graph_entry() -> None
             kv_seq_lens_host_values=[6, 4],
             is_prefill=False,
             is_chunked_prefill=False,
-            is_spec_verify=False,
         )
         metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
         contexts.append(ForwardContext(backend, device, metadata, caches, execution_state=AclGraphExecutionState({})))
@@ -538,7 +537,6 @@ def test_ordinary_slab_replay_refreshes_host_tables_per_graph_entry() -> None:
             kv_seq_lens_host_values=[6, 4],
             is_prefill=False,
             is_chunked_prefill=False,
-            is_spec_verify=False,
         )
         context = ForwardContext(
             backend, device, metadata, backend._kv_caches, execution_state=AclGraphExecutionState({})
@@ -689,12 +687,11 @@ def test_shared_full_attention_matches_dense_after_chunked_prefill(layer_id: int
             kv_seq_lens_host_values=[2 * page_size] * len(lengths) if device_lengths else lengths,
             is_prefill=prefill,
             is_chunked_prefill=chunked,
-            is_spec_verify=verify,
+            is_target_verify=verify,
+            max_query_len=2,
             is_mixed=False,
             has_kv_shard=False,
             expanded_decode_metadata=None,
-            linear_state_indices=torch.tensor([3, 4], device=device, dtype=torch.int32) if verify else None,
-            num_accepted_tokens=torch.ones(2, device=device, dtype=torch.int32) if verify else None,
         )
         metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=device_lengths)
         return metadata
@@ -957,12 +954,11 @@ def test_slab_full_device_lengths_ignore_poisoned_writable_scratch(layer_id: int
             kv_seq_lens_host_values=[num_slots * page_size] * width,
             is_prefill=False,
             is_chunked_prefill=False,
-            is_spec_verify=True,
+            is_target_verify=True,
+            max_query_len=2,
             is_mixed=False,
             has_kv_shard=False,
             expanded_decode_metadata=None,
-            linear_state_indices=torch.ones(1, dtype=torch.int32, device=device),
-            num_accepted_tokens=torch.ones(1, dtype=torch.int32, device=device),
         )
         metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
         metadata_sets.append(metadata)
@@ -1138,7 +1134,6 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(
         metadata = SimpleNamespace(
             is_prefill=False,
             is_chunked_prefill=False,
-            is_spec_verify=False,
             expanded_decode_metadata=None,
             block_table=table,
             kv_seq_lens=torch.tensor(lengths, dtype=torch.int32, device=device),
@@ -1266,7 +1261,6 @@ def test_windowed_draft_attention_matches_global_reference_across_long_contexts(
             kv_seq_lens_host_values=[source_pages * page_size] * batch,
             is_prefill=False,
             is_chunked_prefill=True,
-            is_spec_verify=False,
             has_kv_shard=False,
         )
         metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
@@ -1368,7 +1362,6 @@ def test_live_device_attention_excludes_rejected_kv_tail(graph: bool) -> None:
         kv_seq_lens_host_values=[100, 100],
         is_prefill=False,
         is_chunked_prefill=False,
-        is_spec_verify=False,
         has_kv_shard=False,
     )
     metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
@@ -1471,7 +1464,6 @@ def test_refreshed_attention_hidden_matches_reexecuted_first_body(draft_width: i
             kv_seq_lens_host_values=[100] * count,
             is_prefill=False,
             is_chunked_prefill=False,
-            is_spec_verify=False,
             has_kv_shard=False,
         )
         metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)

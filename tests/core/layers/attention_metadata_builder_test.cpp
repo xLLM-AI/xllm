@@ -112,8 +112,8 @@ TEST(AttentionMetadataBuilderTest, PreservesSharedFullFinalAddresses) {
 
 TEST(AttentionMetadataBuilderTest, PreservesExpandedSharedFullFinalAddresses) {
   ModelParamsView params = make_params();
-  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
-  params.is_spec_verify = true;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.q_max_seq_len = 2;
   params.attention.device.shared_full_block_table = torch::tensor(
       {{120, 60}, {120, 60}, {122, 124}, {122, 124}}, torch::kInt32);
   params.attention.device.shared_full_slot_mapping =

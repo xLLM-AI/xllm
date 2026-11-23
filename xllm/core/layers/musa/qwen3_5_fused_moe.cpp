@@ -832,7 +832,8 @@ torch::Tensor Qwen3_5FusedMoEImpl::forward(
   const int64_t num_tokens = hidden_states.size(0);
   // MIXED contains both prefill and decode rows. It must use the general
   // compact route rather than a decode-only fixed-block specialization.
-  const bool is_decode = input_params.meta.batch_forward_type.is_decode();
+  const bool is_decode = input_params.meta.batch_forward_type.is_decode() &&
+                         input_params.meta.q_max_seq_len <= 1;
   const bool is_prefill = !is_decode;
   int64_t chunk_tokens = kMaxChunkTokens;
   if (is_prefill && use_contiguous_bf16_moe_) {

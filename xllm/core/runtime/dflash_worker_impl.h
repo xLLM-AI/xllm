@@ -81,22 +81,17 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
       LlmForwardInput& validate_input,
       LlmForwardInput& draft_forward_input);
 
-  // Shared with subclasses (DSpark): build the N/N+1-wide draft query block and
-  // the target validate input. A DSpark override of run_decode_draft calls both
-  // before its draft forward.
+  virtual DecodeExpansionOptions prepare_for_draft() const;
+
   void prepare_query_inputs(const LlmForwardInput& input,
                             LlmForwardInput& query_input);
   void prepare_validate_inputs(const LlmForwardInput& input,
                                LlmForwardInput& validate_input);
 
   bool draft_input_per_request_ = true;
-  BatchForwardType draft_forward_type_ = BatchForwardType::CHUNKED_PREFILL;
   bool draft_needs_dummy_tokens_ = false;
-  bool sample_from_anchor_ = false;
 
  private:
-  DecodeExpansionOptions prepare_for_draft() const;
-
   bool prepare_parallel_draft_metadata(
       LlmForwardInput& query_input,
       const DecodeExpansionOptions& decode_options);

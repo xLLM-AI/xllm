@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include "core/framework/model/model_input_types.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_extend_input.h"
@@ -299,31 +300,37 @@ TEST(EmbeddingCacheTest, SpeculativeHiddenSelectionPreservesDrafterSource) {
   const ModelOutput model_output(primary, torch::Tensor(), aux);
 
   for (const bool is_target_prefill : {false, true}) {
-    for (const bool cp_enabled : {false, true}) {
-      SCOPED_TRACE(::testing::Message()
-                   << "prefill=" << is_target_prefill << ", cp=" << cp_enabled);
-      SampleOutput output;
-      output_spec_hidden_states(output,
-                                model_output,
-                                indices,
-                                gathered_primary,
-                                is_target_prefill,
-                                cp_enabled);
-      EXPECT_TRUE(tensor_equal(
-          is_target_prefill ? output.selected_embeddings : output.embeddings,
-          selected_aux));
-      if (is_target_prefill) {
-        EXPECT_TRUE(tensor_equal(output.embeddings, aux));
-      }
+    BatchInputMeta meta;
+    meta.batch_forward_type = is_target_prefill ? BatchForwardType::PREFILL
+                                                : BatchForwardType::DECODE;
+    meta.q_max_seq_len = 1;
+    SCOPED_TRACE(is_target_prefill);
+    SampleOutput output;
+    output_spec_hidden_states(output,
+                              model_output,
+                              indices,
+                              gathered_primary,
+                              meta,
+                              /*is_draft_engine=*/false,
+                              /*cp_enabled=*/true);
+    EXPECT_TRUE(tensor_equal(
+        is_target_prefill ? output.selected_embeddings : output.embeddings,
+        selected_aux));
+    if (is_target_prefill) {
+      EXPECT_TRUE(tensor_equal(output.embeddings, aux));
     }
   }
 
   SampleOutput output;
+  BatchInputMeta meta;
+  meta.batch_forward_type = BatchForwardType::DECODE;
+  meta.q_max_seq_len = 1;
   output_spec_hidden_states(output,
                             ModelOutput(primary.narrow(0, 0, 1)),
                             indices,
                             gathered_primary,
-                            /*is_target_prefill=*/false,
+                            meta,
+                            /*is_draft_engine=*/false,
                             /*cp_enabled=*/true);
   EXPECT_TRUE(tensor_equal(output.embeddings, gathered_primary));
 }

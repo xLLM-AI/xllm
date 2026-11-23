@@ -589,7 +589,9 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
       get_checkpoint_stride(conv_cache, ssm_cache);
   torch::Tensor linear_state_base_indices =
       build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
-  const bool use_spec_verify = input_params.is_spec_verify;
+  const bool use_spec_verify =
+      input_params.meta.batch_forward_type.is_decode() &&
+      input_params.meta.q_max_seq_len > 1;
   const bool is_any_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   // Exclude chunked-prefill: seq_len==1 chunked batches must not take the fused

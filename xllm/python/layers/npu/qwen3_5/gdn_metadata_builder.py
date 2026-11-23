@@ -183,7 +183,7 @@ class Qwen3_5GdnMetadataBuilder:
         # copy other tensors without replacing the dataclass or its views.
         if not isinstance(persistent_metadata, GdnMetadata):
             raise TypeError("Qwen3.5 GDN persistent metadata has an invalid type")
-        updated = self._build(input_batch, metadata, persistent_metadata=persistent_metadata)
+        updated = self.build(input_batch, metadata, persistent_metadata=persistent_metadata)
         if type(updated) is not type(persistent_metadata):
             raise ValueError("Qwen3.5 GDN graph metadata changed execution mode during replay")
         packed_fields = (
@@ -220,10 +220,7 @@ class Qwen3_5GdnMetadataBuilder:
                 if current_group is not replacement_group:
                     current_group.copy_(replacement_group)
 
-    def build(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> GdnMetadata:
-        return self._build(input_batch, metadata)
-
-    def _build(
+    def build(
         self,
         input_batch: InputBatch,
         metadata: ExecutionMetadataSource,
@@ -281,9 +278,8 @@ class Qwen3_5GdnMetadataBuilder:
             raise ValueError("Qwen3.5 GDN state indices must be one-dimensional and shape-aligned")
         read_indices = read_indices.to(device=device, dtype=torch.int32).contiguous()
         write_indices = write_indices.to(device=device, dtype=torch.int32).contiguous()
-        # Verify is also marked chunked prefill by the speculative worker.
         # It must restore the last accepted checkpoint before processing rows.
-        if getattr(metadata, "is_spec_verify", False):
+        if getattr(metadata, "is_target_verify", False):
             return self._with_shared_verify_indices(
                 self._build_verify(input_batch, metadata, write_indices),
                 persistent_metadata if isinstance(persistent_metadata, GdnVerifyMetadata) else None,

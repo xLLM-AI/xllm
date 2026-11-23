@@ -355,7 +355,8 @@ def test_spec_verify_uses_combined_state_without_environment_flags(
         has_initial_state=None,
         is_prefill=False,
         is_chunked_prefill=chunked_verify,
-        is_spec_verify=chunked_verify,
+        is_target_verify=chunked_verify,
+        max_query_len=2,
         q_cu_seq_lens=torch.arange(
             0, total_rows + 1, width if chunked_verify and not in_graph else 1, dtype=torch.int32
         ),
@@ -631,7 +632,8 @@ def test_checkpoint_indices_follow_forward_lifetime(
         kv_seq_lens=None,
         is_prefill=False,
         is_chunked_prefill=False,
-        is_spec_verify=True,
+        is_target_verify=True,
+        max_query_len=2,
         expanded_decode_metadata=None,
     )
     backend._metadata = metadata

@@ -40,7 +40,6 @@ class VlmModelParams final {
     out.graph = graph;
     out.multi_block_tables = multi_block_tables;
     out.linear_state_validity_mask = linear_state_validity_mask;
-    out.is_spec_verify = is_spec_verify;
     out.prefill_without_cache = prefill_without_cache;
     out.num_accepted_tokens = num_accepted_tokens;
     out.mtp_topk_state = mtp_topk_state;
@@ -60,7 +59,6 @@ class VlmModelParams final {
     params.expert = expert.to(device);
     params.graph = graph.to(device);
     params.linear_state_validity_mask = linear_state_validity_mask;
-    params.is_spec_verify = is_spec_verify;
     params.prefill_without_cache = prefill_without_cache;
     params.num_accepted_tokens = safe_to(num_accepted_tokens, device, true);
     params.num_accepted_tokens_host = num_accepted_tokens_host;
@@ -129,7 +127,6 @@ class VlmModelParams final {
   VlmGraphInput graph;
   std::vector<torch::Tensor> multi_block_tables;
   std::vector<int64_t> linear_state_validity_mask;
-  bool is_spec_verify = false;
   bool prefill_without_cache = false;
   torch::Tensor num_accepted_tokens;
   MtpTopkStatePtr mtp_topk_state;

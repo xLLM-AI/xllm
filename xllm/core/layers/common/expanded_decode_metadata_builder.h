@@ -55,10 +55,6 @@ class ExpandedDecodeMetadataBuilder final {
                                               int32_t block_size);
 
   static ExpandedDecodeMetadata build(const ModelParamsView& params);
-
-  static void validate(const ExpandedDecodeMetadata& metadata,
-                       int64_t expected_sequence_count = -1,
-                       int32_t block_size = 0);
 };
 
 }  // namespace layer

@@ -199,8 +199,6 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   // These values belong to the executor, not the checkpoint. In particular,
   // the MTP draft has different speculative options from its target.
   py::dict executor_config = py_causal_lm_->config_dict().attr("copy")();
-  num_speculative_tokens_ =
-      executor_config["num_speculative_tokens"].cast<int32_t>();
   executor_config["enable_disagg_pd"] = options_.enable_disagg_pd();
   executor_config["instance_role"] = options_.instance_role().to_string();
   executor_config["task_type"] = options_.task_type();
@@ -292,13 +290,25 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
       params.attn_metadata;
   if (!attn_metadata) {
+    layer::AttentionMetadataBuildOptions build_options{
+        .is_draft_engine = options_.is_draft_engine()};
+    if (build_options.is_draft_engine) {
+      build_options.chunked_block_diffusion =
+          SpeculativeConfig::chunked_block_diffusion(
+              options_.speculative_algorithm(), args_.model_type());
+    }
     attn_metadata = std::make_shared<layer::AttentionMetadata>(
-        layer::AttentionMetadataBuilder::build(
-            params, enable_mla_, std::nullopt, device_));
+        layer::AttentionMetadataBuilder::build(params,
+                                               enable_mla_,
+                                               /*attn_mask=*/std::nullopt,
+                                               device_,
+                                               build_options));
   }
   const bool layerwise_kv_load =
       params.parallel.layer_wise_load_synchronizer != nullptr &&
-      supports_layerwise_kv_load_ && !params.is_spec_verify &&
+      supports_layerwise_kv_load_ &&
+      !(params.meta.batch_forward_type.is_decode() &&
+        params.meta.q_max_seq_len > 1) &&
       (attn_metadata->is_prefill || attn_metadata->is_chunked_prefill);
   if (params.parallel.layer_wise_load_synchronizer != nullptr) {
     VLOG(1) << "[HostKV][PythonLoad] batch_id=" << params.meta.batch_id
@@ -325,8 +335,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
   bind_kv_caches(kv_caches);
 
-  py::object py_metadata = py::cast(
-      PyAttentionMetadataView(attn_metadata, params, num_speculative_tokens_));
+  py::object py_metadata = py::cast(PyAttentionMetadataView(
+      attn_metadata, params, options_.is_draft_engine()));
   py::object py_input_batch_metadata =
       requires_input_batch_metadata_
           ? py::cast(ExecutionBatchMetadata(params.meta.execution_batch))

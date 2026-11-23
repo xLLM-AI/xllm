@@ -18,6 +18,7 @@ limitations under the License.
 #include <boost/algorithm/string/predicate.hpp>
 #include <cstdint>
 #include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -75,6 +76,15 @@ class SpeculativeConfig final {
   static bool is_block_diffusion_algorithm(std::string_view algorithm) {
     return is_dflash_algorithm(algorithm) || is_dflash2_algorithm(algorithm) ||
            is_dspark_algorithm(algorithm);
+  }
+
+  static std::optional<bool> chunked_block_diffusion(
+      std::string_view algorithm,
+      std::string_view model_type) {
+    if (!is_block_diffusion_algorithm(algorithm)) {
+      return std::nullopt;
+    }
+    return model_type != "deepseek_v4_dspark";
   }
 
   static bool requires_aux_hidden_capture(std::string_view algorithm) {

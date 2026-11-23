@@ -349,20 +349,16 @@ std::optional<Params> CudaGraphPersistentParam::update(
   if (return_capture_params) {
     CHECK_GT(padded_num_tokens, 0)
         << "padded_num_tokens must be > 0 when return_capture_params is true";
-    params_for_capture.emplace(copy_graph_execution_input(params));
+    params_for_capture.emplace(params.clone().view());
   }
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
       build_graph_attention_metadata(params,
                                      args_,
                                      /*skip_cu_seq_lens=*/true);
   auto build_capture_params_if_needed = [&]() -> std::optional<Params> {
-    if (!return_capture_params) {
+    if (!params_for_capture) {
       return std::nullopt;
     }
-    CHECK(params_for_capture.has_value())
-        << "params_for_capture should be initialized when "
-           "return_capture_params "
-           "is true";
     if (params.embedding.input_embedding.defined()) {
       params_for_capture->embedding.input_embedding =
           persistent_embedding(padded_num_tokens);
@@ -743,29 +739,6 @@ bool CudaGraph::capture(CausalLM* model,
                         uint32_t bucket_num_tokens,
                         const at::cuda::MempoolId_t& pool,
                         TorchMemPool* pool_ptr) {
-  return capture_typed(model,
-                       args,
-                       options,
-                       tokens,
-                       positions,
-                       params,
-                       kv_cache,
-                       bucket_num_tokens,
-                       pool,
-                       pool_ptr);
-}
-
-template <typename Model, typename Params>
-bool CudaGraph::capture_typed(Model* model,
-                              const ModelArgs& args,
-                              const runtime::Options& options,
-                              const torch::Tensor& tokens,
-                              const torch::Tensor& positions,
-                              const Params& params,
-                              std::vector<KVCache>& kv_cache,
-                              uint32_t bucket_num_tokens,
-                              const at::cuda::MempoolId_t& pool,
-                              TorchMemPool* pool_ptr) {
   padded_num_tokens_ = bucket_num_tokens;
   const uint32_t actual_num_tokens = tokens.size(0);
   CHECK_GE(padded_num_tokens_, actual_num_tokens)
@@ -818,8 +791,8 @@ bool CudaGraph::capture_typed(Model* model,
       << "update() should return ModelParamsView when "
          "return_capture_params=true";
 
-  capture_params_.emplace(std::move(graph_params_opt.value()));
-  auto& graph_params = capture_params_.value();
+  capture_params_.emplace(std::move(*graph_params_opt));
+  auto& graph_params = *capture_params_;
 
   LOG(INFO) << "CUDA graph capture begin, bucket_num_tokens: "
             << bucket_num_tokens << ", actual_num_tokens: " << actual_num_tokens
@@ -1313,22 +1286,13 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
                                        const torch::Tensor& positions,
                                        std::vector<KVCache>& kv_caches,
                                        const ModelParamsView& params) {
-  return run_typed(model_, tokens, positions, kv_caches, params);
-}
-
-template <typename Model, typename Params>
-ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
-                                             const torch::Tensor& tokens,
-                                             const torch::Tensor& positions,
-                                             std::vector<KVCache>& kv_caches,
-                                             const Params& params) {
   const bool is_prefill = params.meta.batch_forward_type.is_prefill();
-  const bool is_decode = params.meta.batch_forward_type.is_decode();
+  const bool is_decode = params.meta.batch_forward_type.is_decode() &&
+                         params.meta.q_max_seq_len <= 1;
 
-  // Get actual num_tokens from tokens shape
   const uint32_t n_tokens = tokens.size(/*dim=*/0);
   const uint32_t bucket_num_tokens =
-      get_bucket_num_tokens(n_tokens, is_prefill);
+      static_cast<uint32_t>(get_graph_bucket_num_tokens(n_tokens, is_prefill));
 
   // Prefill phase with piecewise graph
   if (is_prefill && enable_prefill_piecewise_graph_) {
@@ -1341,7 +1305,7 @@ ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
           << " exceeds max_tokens_for_graph_mode ("
           << max_tokens_for_graph_mode_ << "), falling back to eager mode";
       COUNTER_INC(num_model_execution_total_eager);
-      return model->forward(tokens, positions, kv_caches, params);
+      return model_->forward(tokens, positions, kv_caches, params);
     }
 
     // Check if piecewise graph exists for this bucket
@@ -1373,7 +1337,7 @@ ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
     const at::cuda::MempoolId_t mem_pool =
         get_mem_pool(kPhysicalPoolIdPrefill, bucket_num_tokens);
 
-    bool capture_success = graph->capture(model,
+    bool capture_success = graph->capture(model_,
                                           args_,
                                           options_,
                                           tokens,
@@ -1415,7 +1379,7 @@ ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
   // Prefill without piecewise graph: use eager mode
   if (is_prefill) {
     COUNTER_INC(num_model_execution_total_eager);
-    return model->forward(tokens, positions, kv_caches, params);
+    return model_->forward(tokens, positions, kv_caches, params);
   }
 
   // Decode phase with full graph
@@ -1429,7 +1393,7 @@ ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
       LOG(WARNING) << "Not suitable for CUDA graph operations, falling back to "
                       "eager mode.";
       COUNTER_INC(num_model_execution_total_eager);
-      return model->forward(tokens, positions, kv_caches, params);
+      return model_->forward(tokens, positions, kv_caches, params);
     }
 
     // Check if captured graph exists for this bucket num_tokens
@@ -1460,7 +1424,7 @@ ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
     const at::cuda::MempoolId_t mem_pool =
         get_mem_pool(kPhysicalPoolIdDecode, bucket_num_tokens);
 
-    bool capture_success = graph->capture(model,
+    bool capture_success = graph->capture(model_,
                                           args_,
                                           options_,
                                           tokens,
@@ -1501,14 +1465,7 @@ ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
   LOG(ERROR) << "Failed to capture CUDA graph for bucket num_tokens: "
              << bucket_num_tokens;
   COUNTER_INC(num_model_execution_total_eager);
-  return model->forward(tokens, positions, kv_caches, params);
-}
-
-// bucket will be [1, 2, 4, 8, 16, 32, 48, 64, ..., max_seqs_per_batch]
-uint32_t CudaGraphExecutorImpl::get_bucket_num_tokens(uint32_t num_tokens,
-                                                      bool is_prefill) const {
-  return static_cast<uint32_t>(
-      get_graph_bucket_num_tokens(num_tokens, is_prefill));
+  return model_->forward(tokens, positions, kv_caches, params);
 }
 
 template std::optional<ModelParamsView> CudaGraphPersistentParam::update(

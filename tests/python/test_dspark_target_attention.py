@@ -127,7 +127,6 @@ def _make_slot(batch: int, rows: int, device: torch.device, *, packed: bool) -> 
         slot_mapping=torch.full((rows,), -1, dtype=torch.int32, device=device),
         is_prefill=False,
         is_chunked_prefill=False,
-        is_spec_verify=False,
         has_kv_shard=False,
         expanded_decode_metadata=None,
     )

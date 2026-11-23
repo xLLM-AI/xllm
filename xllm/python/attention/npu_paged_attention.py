@@ -465,7 +465,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     ) -> _PreparedPagedAttention | _PreparedMlaAttention:
         """Borrow final metadata views; dummy warmup may allocate padding views."""
         expanded = getattr(metadata, "expanded_decode_metadata", None)
-        spec_verify = getattr(metadata, "is_spec_verify", False)
+        spec_verify = getattr(metadata, "is_target_verify", False)
         use_expanded = expanded is not None and expanded.enabled
         if (
             getattr(metadata, "has_kv_shard", False)
@@ -473,46 +473,39 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             or (spec_verify and self._is_mla)
         ):
             raise ValueError("prepared paged metadata requires supported unsharded attention")
-        q_lens = metadata.q_seq_lens
-        if q_lens is None:
-            raise ValueError("prepared paged metadata requires query lengths")
-        batch_size = q_lens.numel()
-        query_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
-        block_table = metadata.block_table
-        kv_lengths = getattr(metadata, "kv_seq_lens_host_values", None)
-        device_lengths = getattr(metadata, "kv_seq_lens", None)
-        if spec_verify and use_expanded:
+        if use_expanded:
             batch_size = metadata.slot_mapping.numel()
             query_ends = list(range(1, batch_size + 1))
             block_table = expanded.block_table
             kv_lengths = expanded.kv_seq_lens_host_values
             device_lengths = expanded.kv_seq_lens
+        else:
+            q_lens = metadata.q_seq_lens
+            if q_lens is None:
+                raise ValueError("prepared paged metadata requires query lengths")
+            batch_size = q_lens.numel()
+            host_query_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
+            if host_query_ends is None:
+                raise ValueError("prepared paged metadata requires Host query ends")
+            if len(host_query_ends) == batch_size + 1 and host_query_ends[0] == 0:
+                query_ends = host_query_ends[1:]
+            elif len(host_query_ends) == batch_size:
+                query_ends = list(host_query_ends)
+            else:
+                raise ValueError("prepared Host query ends must match the batch")
+            block_table = metadata.block_table
+            kv_lengths = getattr(metadata, "kv_seq_lens_host_values", None)
+            device_lengths = getattr(metadata, "kv_seq_lens", None)
         shared_full_table, shared_full_slots = self._direct_full_addresses(metadata, block_table)
-        if query_ends is None:
-            raise ValueError("prepared paged metadata requires Host query ends")
-        has_leading_zero = len(query_ends) == batch_size + 1 and query_ends[0] == 0
-        if has_leading_zero:
-            query_ends = query_ends[1:]
-        if len(query_ends) != batch_size:
-            raise ValueError("prepared Host query ends must match the batch")
         if spec_verify:
-            indices = getattr(metadata, "linear_state_indices", None)
-            accepted = getattr(metadata, "num_accepted_tokens", None)
             if (
                 metadata.is_prefill
-                or (metadata.is_chunked_prefill and not use_expanded)
                 or getattr(metadata, "is_mixed", False)
-                or indices is None
-                or indices.numel() == 0
-                or accepted is None
-                or accepted.numel() != indices.numel()
-                or batch_size % indices.numel()
-                or not 2 <= batch_size // indices.numel() <= 17
-                or query_ends != list(range(1, batch_size + 1))
+                or (not use_expanded and (metadata.is_chunked_prefill or query_ends != list(range(1, batch_size + 1))))
             ):
-                raise ValueError("prepared Qwen MTP requires expanded one-token attention rows and logical state slots")
+                raise ValueError("prepared speculative decode requires expanded one-token attention rows")
             if block_table is None:
-                raise ValueError("prepared Qwen MTP requires a paged block table")
+                raise ValueError("prepared speculative decode requires a paged block table")
         actual_seq_q: list[int] = []
         actual_seq_kv: list[int] = []
         if block_table is not None:
@@ -525,10 +518,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             if not self._is_mla:
                 actual_seq_q = list(query_ends)
             actual_seq_kv = list(kv_lengths)
-        # A leading-zero slice already owns its Host values. Otherwise take
-        # one private snapshot so the next Task cannot mutate this one.
-        if not has_leading_zero:
-            query_ends = list(query_ends)
         if self._is_mla:
             if block_table is None:
                 raise ValueError("prepared MLA requires a block table for every forward type")
@@ -741,7 +730,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         graph_prefill = (
             graph_mode
             and (metadata.is_prefill or metadata.is_chunked_prefill)
-            and not metadata.is_spec_verify
+            and not getattr(metadata, "is_target_verify", False)
             and expanded is None
         )
         block_table = expanded.block_table if expanded is not None else metadata.block_table
@@ -1112,7 +1101,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
 
         prepared = getattr(metadata, "prepared_attention_state", None)
         if (
-            getattr(metadata, "is_spec_verify", False)
+            getattr(metadata, "is_target_verify", False)
             and isinstance(prepared, _PreparedPagedAttention)
             and prepared.device_kv_lengths is not None
         ):

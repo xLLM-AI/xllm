@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "common/constants.h"
@@ -250,18 +251,20 @@ class Qwen3_5GatedDeltaNetTest : public ::testing::Test {
   }
 
   ModelParamsView MakeSpecVerifyInputParams(
-      const std::vector<int64_t>& accepted_lengths) {
+      std::vector<int64_t> accepted_lengths,
+      int64_t q_max_seq_len = 2) {
     auto opts_int = torch::dtype(torch::kInt32).device(device_);
     ModelParamsView input_params = ModelInputSnapshot(LlmModelParams()).view();
-    input_params.is_spec_verify = true;
+    input_params.meta.batch_forward_type = BatchForwardType::DECODE;
+    input_params.meta.q_max_seq_len = q_max_seq_len;
     input_params.num_accepted_tokens =
         torch::tensor(accepted_lengths, opts_int);
-    input_params.num_accepted_tokens_host = accepted_lengths;
     input_params.embedding.linear_state_ids.reserve(accepted_lengths.size());
     for (size_t i = 0; i < accepted_lengths.size(); ++i) {
       input_params.embedding.linear_state_ids.emplace_back(
           static_cast<int32_t>(i) + 1);
     }
+    input_params.num_accepted_tokens_host = std::move(accepted_lengths);
     return input_params;
   }
 
@@ -446,7 +449,8 @@ TEST_P(Qwen3_5GatedDeltaNetSpecVerifyTest, ReturnsFullDenseValidateSpan) {
   auto layer = MakeLayer();
   auto hidden = MakeHidden(num_tokens);
   auto metadata = MakeSpecVerifyMetadata(kBatchSize, q_max_seq_len);
-  auto input_params = MakeSpecVerifyInputParams({1, q_max_seq_len});
+  auto input_params =
+      MakeSpecVerifyInputParams({1, q_max_seq_len}, q_max_seq_len);
   auto spec_kv_cache = MakeSpecVerifyKvCache(q_max_seq_len);
 
   auto output = layer->forward(hidden, metadata, spec_kv_cache, input_params);

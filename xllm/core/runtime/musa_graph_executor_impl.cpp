@@ -499,20 +499,19 @@ size_t MusaGraphPersistentParam::get_persistent_tensor_bytes() const {
   return total;
 }
 
-template <typename Params>
-std::optional<Params> MusaGraphPersistentParam::update_typed(
+std::optional<ModelParamsView> MusaGraphPersistentParam::update(
     const torch::Tensor& tokens,
     const torch::Tensor& k_cache,
     const torch::Tensor& v_cache,
     const torch::Tensor& positions,
-    const Params& params,
+    const ModelParamsView& params,
     uint32_t padded_num_tokens,
     bool return_capture_params) {
-  std::optional<Params> params_for_capture;
+  std::optional<ModelParamsView> params_for_capture;
   if (return_capture_params) {
     CHECK_GT(padded_num_tokens, 0)
         << "padded_num_tokens must be > 0 when return_capture_params is true";
-    params_for_capture.emplace(copy_graph_execution_input(params));
+    params_for_capture.emplace(params.clone().view());
   }
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
       build_graph_attention_metadata(params,
@@ -579,14 +578,11 @@ std::optional<Params> MusaGraphPersistentParam::update_typed(
     ensure_host_mirror(attn_metadata->fa3_metadata.paged_kv_last_page_len_host,
                        attn_metadata->paged_kv_last_page_len);
   }
-  auto build_capture_params_if_needed = [&]() -> std::optional<Params> {
-    if (!return_capture_params) {
+  auto build_capture_params_if_needed =
+      [&]() -> std::optional<ModelParamsView> {
+    if (!params_for_capture) {
       return std::nullopt;
     }
-    CHECK(params_for_capture.has_value())
-        << "params_for_capture should be initialized when "
-           "return_capture_params "
-           "is true";
     if (params.embedding.input_embedding.defined()) {
       params_for_capture->embedding.input_embedding =
           persistent_embedding(padded_num_tokens);
@@ -615,7 +611,6 @@ std::optional<Params> MusaGraphPersistentParam::update_typed(
     }
 
     params_for_capture->attn_metadata = attn_metadata;
-    params_for_capture->is_spec_verify = params.is_spec_verify;
     return std::move(params_for_capture);
   };
 
@@ -1040,23 +1035,6 @@ std::optional<Params> MusaGraphPersistentParam::update_typed(
   return build_capture_params_if_needed();
 }
 
-std::optional<ModelParamsView> MusaGraphPersistentParam::update(
-    const torch::Tensor& tokens,
-    const torch::Tensor& k_cache,
-    const torch::Tensor& v_cache,
-    const torch::Tensor& positions,
-    const ModelParamsView& params,
-    uint32_t padded_num_tokens,
-    bool return_capture_params) {
-  return update_typed(tokens,
-                      k_cache,
-                      v_cache,
-                      positions,
-                      params,
-                      padded_num_tokens,
-                      return_capture_params);
-}
-
 void MusaGraph::refresh_persistent_paged_kv_host_mirrors(
     const std::shared_ptr<layer::AttentionMetadata>& attn_metadata) {
   // Only applies to the Mate FFI decode path. Prefill/chunked-prefill and MLA
@@ -1159,17 +1137,16 @@ void MusaGraph::refresh_persistent_paged_kv_host_mirrors(
 }
 
 // MusaGraph implementation
-template <typename Params, typename Model>
-bool MusaGraph::capture_typed(Model* model,
-                              const ModelArgs& args,
-                              const runtime::Options& options,
-                              const torch::Tensor& tokens,
-                              const torch::Tensor& positions,
-                              const Params& params,
-                              std::vector<KVCache>& kv_cache,
-                              uint32_t bucket_num_tokens,
-                              const c10::musa::MempoolId_t& pool,
-                              MusaMemPool* pool_ptr) {
+bool MusaGraph::capture(CausalLM* model,
+                        const ModelArgs& args,
+                        const runtime::Options& options,
+                        const torch::Tensor& tokens,
+                        const torch::Tensor& positions,
+                        const ModelParamsView& params,
+                        std::vector<KVCache>& kv_cache,
+                        uint32_t bucket_num_tokens,
+                        const c10::musa::MempoolId_t& pool,
+                        MusaMemPool* pool_ptr) {
   padded_num_tokens_ = bucket_num_tokens;
   const uint32_t actual_num_tokens = tokens.size(0);
   CHECK_GE(padded_num_tokens_, actual_num_tokens)
@@ -1209,7 +1186,6 @@ bool MusaGraph::capture_typed(Model* model,
             device_index_);
     capture_lock_guard.emplace(capture_lock);
   }
-  // Use the returned typed input for graph capture.
   // Always use capture stream for plan/update + capture + forward.
   c10::musa::MUSAStream original_stream =
       c10::musa::getCurrentMUSAStream(device_index_);
@@ -1245,7 +1221,7 @@ bool MusaGraph::capture_typed(Model* model,
       << "update() should return capture parameters when "
          "return_capture_params=true";
 
-  auto& graph_params = [&]() -> Params& { return graph_params_opt.value(); }();
+  auto& graph_params = *graph_params_opt;
 
   captured_fa3_scheduler_metadata_ =
       graph_params.attn_metadata->fa3_metadata.fa3_scheduler_metadata;
@@ -1398,33 +1374,10 @@ bool MusaGraph::capture_typed(Model* model,
   return true;
 }
 
-bool MusaGraph::capture(CausalLM* model,
-                        const ModelArgs& args,
-                        const runtime::Options& options,
-                        const torch::Tensor& tokens,
-                        const torch::Tensor& positions,
-                        const ModelParamsView& params,
-                        std::vector<KVCache>& kv_cache,
-                        uint32_t bucket_num_tokens,
-                        const c10::musa::MempoolId_t& pool,
-                        MusaMemPool* pool_ptr) {
-  return capture_typed(model,
-                       args,
-                       options,
-                       tokens,
-                       positions,
-                       params,
-                       kv_cache,
-                       bucket_num_tokens,
-                       pool,
-                       pool_ptr);
-}
-
-template <typename Params>
-ModelOutput MusaGraph::replay_typed(const torch::Tensor& tokens,
-                                    const torch::Tensor& positions,
-                                    std::vector<KVCache>& kv_cache,
-                                    const Params& params) {
+ModelOutput MusaGraph::replay(const torch::Tensor& tokens,
+                              const torch::Tensor& positions,
+                              std::vector<KVCache>& kv_cache,
+                              const ModelParamsView& params) {
   const uint32_t actual_num_tokens = tokens.size(0);
   CHECK_LE(actual_num_tokens, padded_num_tokens_)
       << "num_tokens mismatch: expected <= " << padded_num_tokens_ << ", got "
@@ -1534,13 +1487,6 @@ ModelOutput MusaGraph::replay_typed(const torch::Tensor& tokens,
   // since replay() doesn't have access to options
   ModelOutput output(get_hidden_states(actual_num_tokens));
   return output;
-}
-
-ModelOutput MusaGraph::replay(const torch::Tensor& tokens,
-                              const torch::Tensor& positions,
-                              std::vector<KVCache>& kv_cache,
-                              const ModelParamsView& params) {
-  return replay_typed(tokens, positions, kv_cache, params);
 }
 
 MusaGraphExecutorImpl::MusaGraphExecutorImpl(CausalLM* model,
@@ -1685,53 +1631,44 @@ ModelOutput MusaGraphExecutorImpl::attach_aux_hidden_states_if_needed(
   return ModelOutput(hidden_states);
 }
 
-template <typename Model, typename Params>
 void MusaGraphExecutorImpl::prepare_graph_embedding(
-    Model* model,
     const torch::Tensor& tokens,
-    GraphExecutionInput<Params>& graph_input) const {
-  const Params& params = graph_input.params();
-  if (!params.meta.batch_forward_type.is_decode() ||
-      params.embedding.input_embedding.defined()) {
+    GraphExecutionInput<ModelParamsView>& graph_input) const {
+  if (graph_input.params().embedding.input_embedding.defined()) {
     return;
   }
 
-  auto embed_layer = model->get_word_embedding();
+  auto embed_layer = model_->get_word_embedding();
   if (embed_layer.is_empty()) {
     return;
   }
 
   // IndexSelect cannot be captured on MUSA. The persistent update copies
   // these embeddings before capture/replay binds the persistent buffer.
-  Params& prepared_params = graph_input.mutable_params();
-  prepared_params.embedding.input_embedding = embed_layer(tokens);
+  graph_input.mutable_params().embedding.input_embedding = embed_layer(tokens);
 }
 
-template <typename Model, typename Params>
-ModelOutput MusaGraphExecutorImpl::run_typed(Model* model,
-                                             const torch::Tensor& tokens,
-                                             const torch::Tensor& positions,
-                                             std::vector<KVCache>& kv_caches,
-                                             const Params& params) {
+ModelOutput MusaGraphExecutorImpl::run(const torch::Tensor& tokens,
+                                       const torch::Tensor& positions,
+                                       std::vector<KVCache>& kv_caches,
+                                       const ModelParamsView& params) {
   torch::NoGradGuard no_grad;
   const bool is_prefill = params.meta.batch_forward_type.is_prefill();
   const bool is_decode = params.meta.batch_forward_type.is_decode();
 
-  // Get actual num_tokens from tokens shape
   const uint32_t n_tokens = tokens.size(/*dim=*/0);
   const int64_t effective_num_sequences = params.meta.actual_num_sequences > 0
                                               ? params.meta.actual_num_sequences
                                               : params.meta.num_sequences;
   const bool multi_sequence_prefill = is_prefill && effective_num_sequences > 1;
 
-  // Prefill runs in eager mode.
   if (is_prefill) {
     COUNTER_INC(num_model_execution_total_eager);
     const bool time_fwd = s_enable_prefill_fwd_timing();
     if (time_fwd) {
       c10::musa::getCurrentMUSAStream(device_.index()).synchronize();
       const auto t0 = std::chrono::steady_clock::now();
-      auto result = model->forward(tokens, positions, kv_caches, params);
+      auto result = model_->forward(tokens, positions, kv_caches, params);
       c10::musa::getCurrentMUSAStream(device_.index()).synchronize();
       const auto t1 = std::chrono::steady_clock::now();
       const double ms =
@@ -1746,15 +1683,17 @@ ModelOutput MusaGraphExecutorImpl::run_typed(Model* model,
       maybe_empty_prefill_cache();
       return result;
     }
-    auto result = model->forward(tokens, positions, kv_caches, params);
+    auto result = model_->forward(tokens, positions, kv_caches, params);
     maybe_empty_prefill_cache();
     return result;
   }
 
   if (params.meta.batch_forward_type.is_chunked_prefill() ||
+      (params.meta.batch_forward_type.is_decode() &&
+       params.meta.q_max_seq_len > 1) ||
       params.meta.batch_forward_type.is_mixed()) {
     COUNTER_INC(num_model_execution_total_eager);
-    auto result = model->forward(tokens, positions, kv_caches, params);
+    auto result = model_->forward(tokens, positions, kv_caches, params);
     maybe_empty_prefill_cache();
     return result;
   }
@@ -1763,35 +1702,27 @@ ModelOutput MusaGraphExecutorImpl::run_typed(Model* model,
                              args_.model_type() == "qwen3_5_moe_mtp";
   if (is_decode && is_qwen35_mtp) {
     COUNTER_INC(num_model_execution_total_eager);
-    return model->forward(tokens, positions, kv_caches, params);
+    return model_->forward(tokens, positions, kv_caches, params);
   }
-  const uint32_t bucket_num_tokens = get_bucket_num_tokens(n_tokens);
+  const uint32_t bucket_num_tokens =
+      static_cast<uint32_t>(::xllm::runtime::get_decode_graph_token_bucket(
+          n_tokens, options_.enable_graph_mode_decode_no_padding()));
 
-  // Decode phase with full graph
   if (is_decode) {
-    // Check if conditions are suitable for graph execution (replay or capture)
     const auto max_seq_len = args_.max_position_embeddings();
     const bool seq_len_supported = params.meta.kv_max_seq_len <= max_seq_len;
 
-    // Early return if conditions are not suitable for graph operations
     if (!seq_len_supported) {
       LOG(WARNING) << "Not suitable for MUSA graph operations, falling back to "
                       "eager mode.";
       COUNTER_INC(num_model_execution_total_eager);
-      return model->forward(tokens, positions, kv_caches, params);
+      return model_->forward(tokens, positions, kv_caches, params);
     }
 
-    // On MUSA the in-graph IndexSelect (embedding lookup) is the only known
-    // capture blocker. Compute the embedding here, outside the captured
-    // stream region, and pass it through `params.embedding.input_embedding`
-    // so both capture and replay paths read from the persistent embedding
-    // buffer. No-op on other platforms / non-decode forwards. See
-    // prepare_graph_embedding() for the ownership boundary.
-    GraphExecutionInput<Params> graph_input(params);
-    prepare_graph_embedding(model, tokens, graph_input);
-    const Params& graph_params = graph_input.params();
+    GraphExecutionInput<ModelParamsView> graph_input(params);
+    prepare_graph_embedding(tokens, graph_input);
+    const ModelParamsView& graph_params = graph_input.params();
 
-    // Check if captured graph exists for this bucket num_tokens
     auto it = graphs_.find(bucket_num_tokens);
 
     if (it != graphs_.end()) {
@@ -1822,7 +1753,7 @@ ModelOutput MusaGraphExecutorImpl::run_typed(Model* model,
     const c10::musa::MempoolId_t mem_pool =
         get_mem_pool(kPhysicalPoolIdDecode, bucket_num_tokens);
 
-    bool capture_success = graph->capture(model,
+    bool capture_success = graph->capture(model_,
                                           args_,
                                           options_,
                                           tokens,
@@ -1848,8 +1779,8 @@ ModelOutput MusaGraphExecutorImpl::run_typed(Model* model,
       // reflects the current token batch (the capture-time embedding above
       // would otherwise be reused unchanged, which is only correct in the
       // unlikely case the post-capture request happens to match exactly).
-      GraphExecutionInput<Params> replay_input(params);
-      prepare_graph_embedding(model, tokens, replay_input);
+      GraphExecutionInput<ModelParamsView> replay_input(params);
+      prepare_graph_embedding(tokens, replay_input);
       auto result = graphs_[bucket_num_tokens]->replay(
           tokens, positions, kv_caches, replay_input.params());
       auto output =
@@ -1869,20 +1800,7 @@ ModelOutput MusaGraphExecutorImpl::run_typed(Model* model,
   LOG(ERROR) << "Failed to capture MUSA graph for bucket num_tokens: "
              << bucket_num_tokens;
   COUNTER_INC(num_model_execution_total_eager);
-  return model->forward(tokens, positions, kv_caches, params);
-}
-
-ModelOutput MusaGraphExecutorImpl::run(const torch::Tensor& tokens,
-                                       const torch::Tensor& positions,
-                                       std::vector<KVCache>& kv_caches,
-                                       const ModelParamsView& params) {
-  return run_typed(model_, tokens, positions, kv_caches, params);
-}
-
-uint32_t MusaGraphExecutorImpl::get_bucket_num_tokens(
-    uint32_t num_tokens) const {
-  return static_cast<uint32_t>(::xllm::runtime::get_decode_graph_token_bucket(
-      num_tokens, options_.enable_graph_mode_decode_no_padding()));
+  return model_->forward(tokens, positions, kv_caches, params);
 }
 
 // NOTE: REGISTER_EXECUTOR for MusaGraphExecutorImpl lives in

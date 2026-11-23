@@ -322,6 +322,7 @@ struct BatchInputMeta {
   int32_t actual_num_sequences = 0;
   int32_t kv_max_seq_len = 0;
   int32_t q_max_seq_len = 0;
+  int32_t num_speculative_tokens = 0;
   ExecutionBatchMetadata execution_batch;
   uint64_t batch_id = 0;
   bool requires_host_restore = false;
@@ -506,7 +507,6 @@ class LlmGraphInput final {
 #if defined(USE_DCU)
   bool use_dense_flash_attention = false;
 #endif
-  bool use_expanded_decode_for_spec_verify_attention = false;
   torch::Tensor expanded_kv_seq_lens;
   torch::Tensor expanded_block_tables;
   torch::Tensor expanded_paged_kv_indptr;
@@ -538,8 +538,6 @@ class LlmGraphInput final {
 #if defined(USE_DCU)
     out.use_dense_flash_attention = use_dense_flash_attention;
 #endif
-    out.use_expanded_decode_for_spec_verify_attention =
-        use_expanded_decode_for_spec_verify_attention;
     out.expanded_kv_seq_lens = safe_to(expanded_kv_seq_lens, device, true);
     out.expanded_block_tables = safe_to(expanded_block_tables, device, true);
     out.expanded_paged_kv_indptr =
@@ -635,7 +633,6 @@ class VlmGraphInput final {
 #if defined(USE_DCU)
   bool use_dense_flash_attention = false;
 #endif
-  bool use_expanded_decode_for_spec_verify_attention = false;
   torch::Tensor expanded_kv_seq_lens;
   torch::Tensor expanded_block_tables;
   torch::Tensor expanded_paged_kv_indptr;
@@ -667,8 +664,6 @@ class VlmGraphInput final {
 #if defined(USE_DCU)
     out.use_dense_flash_attention = use_dense_flash_attention;
 #endif
-    out.use_expanded_decode_for_spec_verify_attention =
-        use_expanded_decode_for_spec_verify_attention;
     out.expanded_kv_seq_lens = safe_to(expanded_kv_seq_lens, device, true);
     out.expanded_block_tables = safe_to(expanded_block_tables, device, true);
     out.expanded_paged_kv_indptr =

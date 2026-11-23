@@ -118,7 +118,7 @@ def test_prepared_visual_inputs_are_independent_and_do_not_leak_into_text(kind: 
     runner = _make_runner(model.model, device)
     tokens = torch.tensor([1, 3, 2], device=device)
     positions = torch.arange(3, device=device)
-    metadata = SimpleNamespace(is_prefill=True, is_chunked_prefill=False, is_spec_verify=False)
+    metadata = SimpleNamespace(is_prefill=True, is_chunked_prefill=False)
     text_output = runner.execute(tokens, positions, metadata)
     image_a = torch.tensor([[1.0, 3.0, 2.0, 7.0]], device=device)
     image_b = torch.tensor([[7.0, 2.0, 4.0, 1.0]], device=device)
@@ -148,7 +148,7 @@ def test_explicit_embeddings_accept_chunk_local_rows_without_image_placeholders(
     runner = _make_runner(model.model, device)
     tokens = torch.tensor([1, 2], device=device)
     positions = torch.arange(2, device=device)
-    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, is_spec_verify=False)
+    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True)
     # A later prefill chunk has only text rows. It must keep token embeddings
     # even while another prepared image input is still owned by its caller.
     model.get_input_embeddings(torch.tensor([3], device=device), torch.tensor([[3.0, 1.0, 4.0, 2.0]], device=device))
@@ -163,7 +163,7 @@ def test_glm_accepts_flat_runner_embeddings_and_preserves_text_wrapper_mask(devi
     model = _make_vlm("glm", device)
     tokens = torch.tensor([1, 3, 2], device=device)
     positions = torch.arange(3, device=device)
-    metadata = SimpleNamespace(is_prefill=True, is_chunked_prefill=False, is_spec_verify=False)
+    metadata = SimpleNamespace(is_prefill=True, is_chunked_prefill=False)
     runner = _make_runner(model.model, device)
     embedding = model.get_input_embeddings(tokens, torch.tensor([[1.0, 4.0, 2.0, 3.0]], device=device))
     torch.testing.assert_close(

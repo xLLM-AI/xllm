@@ -58,7 +58,7 @@ class PyAttentionMetadataView final {
  public:
   PyAttentionMetadataView(std::shared_ptr<layer::AttentionMetadata> metadata,
                           const ModelParamsView& params,
-                          int32_t num_speculative_tokens = 0);
+                          bool is_draft_engine);
 
   const torch::Tensor& slot_mapping() const;
   pybind11::object local_slot_mapping() const;
@@ -117,7 +117,8 @@ class PyAttentionMetadataView final {
   bool is_prefill() const;
   bool is_chunked_prefill() const;
   bool is_mixed() const;
-  bool is_spec_verify() const;
+  int32_t num_speculative_tokens() const;
+  bool is_target_verify() const { return is_target_verify_; }
   bool is_dummy() const;
 
  private:
@@ -126,6 +127,7 @@ class PyAttentionMetadataView final {
       std::vector<int32_t>& host_vec);
 
   std::shared_ptr<layer::AttentionMetadata> metadata_;
+  bool is_target_verify_ = false;
   torch::Tensor kv_seq_lens_host_;
   torch::Tensor q_seq_lens_host_;
   std::vector<int32_t> new_cache_slots_host_values_;

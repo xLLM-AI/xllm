@@ -390,7 +390,9 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
 
   // Save the gathered hidden-state size for potential padding later.
   const int64_t original_num_tokens = h.size(0);
-  const bool use_spec_verify = input_params.is_spec_verify;
+  const bool use_spec_verify =
+      input_params.meta.batch_forward_type.is_decode() &&
+      input_params.meta.q_max_seq_len > 1;
   const bool is_any_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   torch::Tensor mixed_qkv, z, b, a;

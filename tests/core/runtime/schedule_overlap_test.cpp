@@ -92,21 +92,13 @@ class OverlapTestWorker final : public WorkerImpl {
                    /*is_input_release_deferred=*/speculative_decode &&
                        parallel_args.dp_size() > 1),
         outputs_(std::move(outputs)),
-        continuation_mode_(continuation_mode) {}
+        continuation_mode_(continuation_mode) {
+    dtype_ = torch::kFloat32;
+  }
 
   ~OverlapTestWorker() override { drain_pending_execution(); }
 
   bool init_model(ModelContext& /*context*/) override { return false; }
-
-  void prepare_work_before_execute(const LlmForwardInput& input,
-                                   LlmForwardInput& prepared) override {
-    prepare_input(input, prepared);
-  }
-
-  void prepare_work_before_execute(const VlmForwardInput& input,
-                                   VlmForwardInput& prepared) override {
-    prepare_input(input, prepared);
-  }
 
   int32_t continuation_count() const { return continuation_count_; }
   const torch::Tensor& executed_tokens() const { return executed_tokens_; }
@@ -165,14 +157,6 @@ class OverlapTestWorker final : public WorkerImpl {
     options.enable_speculative_decode(speculative_decode);
     options.eplb_worker_config(eplb_config);
     return options;
-  }
-
-  template <typename Input>
-  void prepare_input(const Input& input, Input& prepared) const {
-    prepared = input.clone();
-    if (continuation_mode_ == ContinuationMode::DEFAULT_REPLACEMENT) {
-      prepared.token_ids = input.token_ids.to(device());
-    }
   }
 
   template <typename Input>
@@ -451,7 +435,7 @@ TYPED_TEST(ScheduleOverlapTest, ExistingErrorsSanitizeOnlyTheirPlaceholders) {
   auto step = worker.step_async(input);
   const auto output = std::move(step).get();
   ASSERT_TRUE(output.has_value());
-  EXPECT_TRUE(torch::equal(worker.executed_tokens(),
+  EXPECT_TRUE(torch::equal(worker.executed_tokens().to(torch::kCPU),
                            torch::tensor({0, -2, 9}, torch::kInt32)));
   ASSERT_EQ(output->json_object_errors.size(), 1U);
   EXPECT_EQ(output->json_object_errors.front().sample_sequence_id, "request#0");

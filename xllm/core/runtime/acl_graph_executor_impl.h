@@ -209,13 +209,6 @@ class AclGraphExecutorImpl final : public ExecutorImpl {
   void initialize(bool need_update_attn_mask,
                   bool is_hybrid_linear_attention,
                   bool supports_mla_graph_kv_bucketing);
-  template <typename Model, typename Params>
-  ModelOutput run_typed(Model* model,
-                        const torch::Tensor& tokens,
-                        const torch::Tensor& positions,
-                        std::vector<KVCache>& kv_caches,
-                        const Params& params);
-
   ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;

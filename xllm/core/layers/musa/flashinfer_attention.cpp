@@ -197,18 +197,16 @@ FlashInferAttentionImpl::forward(const AttentionMetadata& attn_metadata,
     xllm::kernel::reshape_paged_cache(reshape_paged_cache_params);
   }
 
-  const bool spec_verify_expanded_decode =
-      attn_metadata.is_chunked_prefill &&
-      (attn_metadata.expanded_decode.enabled ||
-       use_expanded_spec_decode_attention(attn_metadata) ||
-       attn_metadata.is_spec_verify);
   if (attn_metadata.is_prefill) {
     prefill_forward(
         attn_metadata, query, key, value, output, output_lse, k_cache, v_cache);
-  } else if (spec_verify_expanded_decode) {
-    decoder_forward(
-        attn_metadata, query, key, output, output_lse, k_cache, v_cache);
-  } else if (attn_metadata.is_chunked_prefill) {
+  } else if (attn_metadata.is_chunked_prefill &&
+             !attn_metadata.expanded_decode.enabled &&
+             !(attn_metadata.batch_forward_type.is_decode() &&
+               attn_metadata.max_query_len > 1) &&
+             (!attn_metadata.plan_info ||
+              attn_metadata.plan_info->uri.find(/*s=*/"batch_decode") ==
+                  std::string::npos)) {
     chunked_prefill_forward(
         attn_metadata, query, key, output, output_lse, k_cache, v_cache);
   } else {
@@ -502,15 +500,6 @@ void FlashInferAttentionImpl::chunked_prefill_forward(
     std::optional<torch::Tensor>& output_lse,
     const torch::Tensor& k_cache,
     const torch::Tensor& v_cache) {
-  // Graph capture plans expanded spec-verify as batch_decode (exports "run").
-  // batch_chunked_prefill looks up "paged_run" on the same URI and fatals.
-  if (attn_metadata.plan_info &&
-      (attn_metadata.plan_info->uri.find("batch_decode") != std::string::npos ||
-       attn_metadata.is_spec_verify)) {
-    decoder_forward(
-        attn_metadata, query, key, output, output_lse, k_cache, v_cache);
-    return;
-  }
   const Fa3AttentionMetadata& fa3_metadata = attn_metadata.fa3_metadata;
   // Get block_size from k_cache if defined and has proper dimensions,
   // otherwise use a default value (for prefill without KV cache, e.g., LongCat)

@@ -65,17 +65,19 @@ bool dp_tokens_equal(const std::vector<int32_t>& dp_token_nums) {
 bool allows_graph_mode(const xllm::runtime::Options& options,
                        const xllm::MtpModelCapabilities& capabilities,
                        const xllm::ModelParamsView& params) {
+  if (!params.meta.batch_forward_type.is_decode()) {
+    return false;
+  }
   if (options.is_draft_engine()) {
-    return params.meta.batch_forward_type.is_decode();
+    return true;
   }
   if (options.enable_speculative_decode() &&
       xllm::SpeculativeConfig::is_mtp_algorithm(
           options.speculative_algorithm()) &&
       capabilities.supports_grouped_graph) {
-    return params.is_spec_verify &&
-           params.meta.batch_forward_type.is_chunked_prefill();
+    return params.meta.q_max_seq_len > 1;
   }
-  return !params.is_spec_verify && params.meta.batch_forward_type.is_decode();
+  return params.meta.q_max_seq_len <= 1;
 }
 
 uint32_t get_tp_size(const xllm::runtime::Options& options) {
@@ -106,9 +108,7 @@ uint32_t get_graph_dp_tokens(int64_t actual_tokens,
 
 bool supports_ordinary_graph(const xllm::runtime::Options& options,
                              const xllm::ModelParamsView& params) {
-  if (params.is_spec_verify || options.is_draft_engine() ||
-      !params.meta.batch_forward_type.is_decode() ||
-      params.meta.q_max_seq_len == 0 ||
+  if (options.is_draft_engine() ||
       has_zero_tokens(params.parallel.dp_global_token_nums)) {
     return false;
   }
@@ -123,17 +123,13 @@ bool supports_ordinary_graph(const xllm::runtime::Options& options,
   }
   return decode_flags.size() == token_nums.size() &&
          std::find(decode_flags.begin(), decode_flags.end(), 0) ==
-             decode_flags.end() &&
-         (dp_tokens_equal(token_nums) || params.meta.q_max_seq_len == 1);
+             decode_flags.end();
 }
 
 bool supports_grouped_graph(const xllm::runtime::Options& options,
                             const xllm::ModelParamsView& params) {
   if (options.cp_size() > 1 || params.meta.q_max_seq_len <= 0 ||
-      params.meta.num_sequences <= 0 || params.prefill_without_cache ||
-      !(params.meta.batch_forward_type.is_decode() ||
-        (params.is_spec_verify &&
-         params.meta.batch_forward_type.is_chunked_prefill()))) {
+      params.meta.num_sequences <= 0 || params.prefill_without_cache) {
     return false;
   }
   if (!dp_tokens_equal(params.parallel.dp_global_token_nums) ||
@@ -241,7 +237,7 @@ std::optional<GraphLayout> get_graph_layout(
        (!params.embedding.linear_state_ids.empty() &&
         params.embedding.linear_state_ids.size() !=
             static_cast<std::size_t>(layout.num_reqs)) ||
-       (params.is_spec_verify &&
+       (!options.is_draft_engine() && params.meta.q_max_seq_len > 1 &&
         (!params.num_accepted_tokens.defined() ||
          params.num_accepted_tokens.numel() != layout.num_reqs)))) {
     return std::nullopt;
@@ -329,7 +325,7 @@ GraphDecision MluGraphPlanner::plan(int64_t tokens,
   }
   const bool grouped = config_.capabilities.supports_grouped_graph &&
                        (config_.state_required || options.is_draft_engine() ||
-                        params.is_spec_verify);
+                        params.meta.q_max_seq_len > 1);
   if (params.mtp_topk_state != nullptr ||
       (grouped ? !supports_grouped_graph(options, params)
                : !supports_ordinary_graph(options, params))) {

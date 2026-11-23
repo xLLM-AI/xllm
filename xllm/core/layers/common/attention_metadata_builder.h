@@ -35,6 +35,8 @@ struct AttentionMetadataBuildOptions {
   bool materialize_linear_state_validity = true;
   bool skip_cu_seq_lens = false;
   std::optional<KVShardLayout> kv_shard_layout;
+  bool is_draft_engine = false;
+  std::optional<bool> chunked_block_diffusion;
 };
 
 // Builder class for AttentionMetadata to avoid circular dependency.
@@ -42,19 +44,11 @@ struct AttentionMetadataBuildOptions {
 // attention_metadata.h does not depend on domain input owners.
 class AttentionMetadataBuilder {
  public:
-  // One sparse decode row per token. No compact CSR or Host length mirrors:
-  // page crossings change values, not the graph's allocation contract.
-  static AttentionMetadata build_mtp_sparse_decode(
-      const torch::Tensor& block_table,
-      const torch::Tensor& kv_seq_lens,
-      const torch::Tensor& slots,
-      int32_t block_size);
-
   static torch::Tensor build_chunk_indices(const torch::Tensor& cu_seqlens,
                                            int64_t chunk_size);
 
   // Build convolution scheduling and chunk indices for linear attention.
-  static void build_linear_prefill(AttentionMetadata& attn_metadata,
+  static bool build_linear_prefill(AttentionMetadata& attn_metadata,
                                    int64_t block_size);
 
   // Build AttentionMetadata from ModelParamsView with default compute_dtype

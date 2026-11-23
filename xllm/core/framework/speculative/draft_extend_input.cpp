@@ -25,21 +25,17 @@ limitations under the License.
 
 namespace xllm {
 
-namespace {
-
-void clear_selected_embeddings(ForwardOutput& output) {
-  output.sample_output.selected_embeddings = torch::Tensor();
-}
-
-}  // namespace
-
 void output_spec_hidden_states(
     SampleOutput& sample_output,
     const ModelOutput& model_output,
     const torch::Tensor& logits_indices,
     const torch::Tensor& gathered_sample_hidden_states,
-    bool is_target_prefill,
+    const BatchInputMeta& meta,
+    bool is_draft_engine,
     bool cp_enabled) {
+  const bool is_target_prefill_or_verify =
+      !is_draft_engine &&
+      (!meta.batch_forward_type.is_decode() || meta.q_max_seq_len > 1);
   const torch::Tensor& target_hidden_states =
       get_hidden_states_for_drafter(model_output);
   CHECK(target_hidden_states.defined())
@@ -48,7 +44,7 @@ void output_spec_hidden_states(
   if (logits_indices.defined()) {
     // The lm_head selection contains primary rows, not auxiliary rows.
     const bool has_aux = model_output.aux_hidden_states.defined();
-    if (cp_enabled && !is_target_prefill && !has_aux) {
+    if (cp_enabled && !is_target_prefill_or_verify && !has_aux) {
       CHECK(gathered_sample_hidden_states.defined())
           << "gathered selected hidden is required on the CP decode path";
     }
@@ -64,7 +60,7 @@ void output_spec_hidden_states(
     CHECK_EQ(sample_hidden_states.size(0), logits_indices.numel())
         << "selected speculative hidden must match logits_indices rows";
   }
-  if (is_target_prefill) {
+  if (is_target_prefill_or_verify) {
     sample_output.embeddings = target_hidden_states;
     sample_output.selected_embeddings = sample_hidden_states;
   } else {
@@ -74,7 +70,7 @@ void output_spec_hidden_states(
 
 void clear_all_output_embeddings(ForwardOutput& output) {
   output.sample_output.embeddings = torch::Tensor();
-  clear_selected_embeddings(output);
+  output.sample_output.selected_embeddings = torch::Tensor();
 }
 template <typename Input>
 void prepare_first_draft_inputs(EmbeddingCache& embedding_cache,
@@ -94,7 +90,7 @@ void prepare_first_draft_inputs(EmbeddingCache& embedding_cache,
       input.sampling_params.logits_indices(),
       input.host_positions());
   output.sample_output.embeddings = sample_hidden_states.detach();
-  clear_selected_embeddings(output);
+  output.sample_output.selected_embeddings = torch::Tensor();
 }
 
 template void prepare_first_draft_inputs(EmbeddingCache&,

@@ -157,7 +157,9 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 #endif
     const int32_t num_tokens = static_cast<int32_t>(tokens.size(0));
     const auto& batch_forward_type = input_params.meta.batch_forward_type;
-    const bool is_prefill_side = batch_forward_type.no_decode();
+    const bool is_prefill_side =
+        batch_forward_type.no_decode() ||
+        (batch_forward_type.is_decode() && input_params.meta.q_max_seq_len > 1);
     FlashComm1Context fc1_ctx;
     // Sequence sharding changes the token-row layout. Per-layer auxiliary
     // capture must keep the full DP-local token set so every capture slot and
@@ -264,7 +266,8 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     }
     max_seq_len_ = std::max(input_params.meta.kv_max_seq_len, max_seq_len_);
     const bool use_append_mask =
-        input_params.is_spec_verify ||
+        (input_params.meta.batch_forward_type.is_decode() &&
+         input_params.meta.q_max_seq_len > 1) ||
         input_params.meta.batch_forward_type.is_mixed() ||
         input_params.meta.batch_forward_type.is_chunked_prefill();
     if (!use_append_mask) {

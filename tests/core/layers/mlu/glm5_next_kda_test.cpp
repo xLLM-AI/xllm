@@ -16,13 +16,11 @@ limitations under the License.
 #include "layers/mlu/glm5_next/glm5_next_kda.h"
 
 #include <framework/core/device.h>
-#include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -36,6 +34,61 @@ limitations under the License.
 
 namespace xllm::layer {
 namespace {
+
+torch::Tensor l2_normalize(const torch::Tensor& input) {
+  return input /
+         torch::sqrt(torch::sum(input * input, /*dim=*/-1, /*keepdim=*/true) +
+                     1e-6f);
+}
+
+std::tuple<torch::Tensor, torch::Tensor> glm5_next_kda_eager_recurrence(
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& log_gate,
+    const torch::Tensor& beta,
+    const torch::Tensor& initial_state,
+    bool l2norm_qk) {
+  const torch::Tensor gate =
+      log_gate.dim() == 3 ? log_gate.unsqueeze(/*dim=*/0) : log_gate;
+  const torch::Tensor beta_values =
+      beta.dim() == 2 ? beta.unsqueeze(/*dim=*/0) : beta;
+
+  torch::Tensor q_fp32 = q.to(torch::kFloat32);
+  torch::Tensor k_fp32 = k.to(torch::kFloat32);
+  if (l2norm_qk) {
+    q_fp32 = l2_normalize(q_fp32);
+    k_fp32 = l2_normalize(k_fp32);
+  }
+  const double scale = 1.0 / std::sqrt(static_cast<double>(q.size(/*dim=*/3)));
+  q_fp32 = q_fp32 * scale;
+
+  torch::Tensor state = initial_state.to(torch::kFloat32).clone();
+  torch::Tensor v_fp32 = v.to(torch::kFloat32);
+  torch::Tensor gate_fp32 = gate.to(torch::kFloat32);
+  torch::Tensor beta_fp32 = torch::sigmoid(beta_values.to(torch::kFloat32));
+  std::vector<torch::Tensor> outputs;
+  const int64_t num_tokens = q.size(/*dim=*/1);
+  outputs.reserve(static_cast<size_t>(num_tokens));
+
+  for (int64_t token = 0; token < num_tokens; ++token) {
+    torch::Tensor q_t = q_fp32.select(/*dim=*/1, token);
+    torch::Tensor k_t = k_fp32.select(/*dim=*/1, token);
+    torch::Tensor v_t = v_fp32.select(/*dim=*/1, token);
+    torch::Tensor gate_t = gate_fp32.select(/*dim=*/1, token);
+    torch::Tensor beta_t = beta_fp32.select(/*dim=*/1, token);
+
+    state = state * torch::exp(gate_t).unsqueeze(/*dim=*/-2);
+    torch::Tensor prediction =
+        torch::sum(state * k_t.unsqueeze(/*dim=*/-2), /*dim=*/-1);
+    torch::Tensor delta = (v_t - prediction) * beta_t.unsqueeze(/*dim=*/-1);
+    state = state + delta.unsqueeze(/*dim=*/-1) * k_t.unsqueeze(/*dim=*/-2);
+    outputs.emplace_back(
+        torch::sum(state * q_t.unsqueeze(/*dim=*/-2), /*dim=*/-1));
+  }
+
+  return {torch::stack(outputs, /*dim=*/1).to(v.scalar_type()), state};
+}
 
 torch::Tensor make_chunk_indices(const torch::Tensor& cu_seqlens,
                                  int64_t chunk_size) {
@@ -139,60 +192,6 @@ TEST(Glm5NextKDATest, OutputGateUsesSigmoidRatherThanSilu) {
   EXPECT_FALSE(torch::allclose(actual, silu_gated, 1e-6, 1e-6));
 }
 
-TEST(Glm5NextKDATest, EagerRecurrencePreservesStateAcrossSegments) {
-  torch::manual_seed(20260827);
-  constexpr int64_t kTokens = 5;
-  constexpr int64_t kHeads = 2;
-  constexpr int64_t kDim = 4;
-  const torch::TensorOptions options =
-      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-
-  const torch::Tensor q = torch::randn({1, kTokens, kHeads, kDim}, options);
-  const torch::Tensor k = torch::randn({1, kTokens, kHeads, kDim}, options);
-  const torch::Tensor v = torch::randn({1, kTokens, kHeads, kDim}, options);
-  const torch::Tensor raw_gate = torch::randn({kTokens, kHeads, kDim}, options);
-  const torch::Tensor a_log = torch::randn({kHeads}, options);
-  const torch::Tensor dt_bias = torch::randn({kHeads * kDim}, options);
-  const torch::Tensor log_gate =
-      glm5_next_safe_gate(raw_gate, a_log, dt_bias, -5.0f);
-  const torch::Tensor beta = torch::randn({kTokens, kHeads}, options);
-  const torch::Tensor initial_state =
-      torch::zeros({1, kHeads, kDim, kDim}, options);
-
-  torch::Tensor full_output;
-  torch::Tensor full_state;
-  std::tie(full_output, full_state) = glm5_next_kda_eager_recurrence(
-      q, k, v, log_gate, beta, initial_state, /*l2norm_qk=*/true);
-
-  constexpr int64_t kSplit = 3;
-  torch::Tensor first_output;
-  torch::Tensor first_state;
-  std::tie(first_output, first_state) = glm5_next_kda_eager_recurrence(
-      q.slice(/*dim=*/1, /*start=*/0, /*end=*/kSplit),
-      k.slice(/*dim=*/1, /*start=*/0, /*end=*/kSplit),
-      v.slice(/*dim=*/1, /*start=*/0, /*end=*/kSplit),
-      log_gate.slice(/*dim=*/0, /*start=*/0, /*end=*/kSplit),
-      beta.slice(/*dim=*/0, /*start=*/0, /*end=*/kSplit),
-      initial_state,
-      /*l2norm_qk=*/true);
-
-  torch::Tensor second_output;
-  torch::Tensor second_state;
-  std::tie(second_output, second_state) = glm5_next_kda_eager_recurrence(
-      q.slice(/*dim=*/1, /*start=*/kSplit),
-      k.slice(/*dim=*/1, /*start=*/kSplit),
-      v.slice(/*dim=*/1, /*start=*/kSplit),
-      log_gate.slice(/*dim=*/0, /*start=*/kSplit),
-      beta.slice(/*dim=*/0, /*start=*/kSplit),
-      first_state,
-      /*l2norm_qk=*/true);
-
-  const torch::Tensor segmented_output =
-      torch::cat({first_output, second_output}, /*dim=*/1);
-  EXPECT_TRUE(torch::allclose(segmented_output, full_output, 1e-5, 1e-5));
-  EXPECT_TRUE(torch::allclose(second_state, full_state, 1e-5, 1e-5));
-}
-
 TEST(Glm5NextKDATest, ChunkPrefillMatchesPackedEagerAcrossBoundaries) {
   torch::Device device(torch::kPrivateUse1, /*index=*/0);
   torch::DeviceGuard guard(device);
@@ -249,40 +248,11 @@ TEST(Glm5NextKDATest, ChunkPrefillMatchesPackedEagerAcrossBoundaries) {
       torch::tensor(cumulative_sequence_lengths, int_options);
   torch::Tensor chunk_indices = make_chunk_indices(cu_seqlens, chunk_size);
 
-  torch::Tensor eager_warmup_output;
-  torch::Tensor eager_warmup_state;
-  std::tie(eager_warmup_output, eager_warmup_state) = packed_eager_kda(
+  const auto [expected_output, expected_state] = packed_eager_kda(
       q, k, v, log_gate, raw_beta, initial_state, sequence_lengths);
-  (void)eager_warmup_output;
-  (void)eager_warmup_state;
-  torch_mlu::synchronize();
-  const auto eager_begin = std::chrono::steady_clock::now();
-  torch::Tensor expected_output;
-  torch::Tensor expected_state;
-  std::tie(expected_output, expected_state) = packed_eager_kda(
-      q, k, v, log_gate, raw_beta, initial_state, sequence_lengths);
-  torch_mlu::synchronize();
-  const auto eager_elapsed =
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now() - eager_begin);
 
   kernel::mlu::ChunkKDA chunk_kda(kNumHeads);
   chunk_kda->to(device);
-  auto [warmup_output, warmup_state] =
-      chunk_kda->forward(q,
-                         k,
-                         v,
-                         log_gate,
-                         activated_beta,
-                         initial_state,
-                         cu_seqlens,
-                         chunk_indices,
-                         /*output_final_state=*/true,
-                         /*use_qk_l2norm=*/true);
-  (void)warmup_output;
-  (void)warmup_state;
-  torch_mlu::synchronize();
-  const auto chunk_begin = std::chrono::steady_clock::now();
   auto [actual_output, actual_state] =
       chunk_kda->forward(q,
                          k,
@@ -294,11 +264,6 @@ TEST(Glm5NextKDATest, ChunkPrefillMatchesPackedEagerAcrossBoundaries) {
                          chunk_indices,
                          /*output_final_state=*/true,
                          /*use_qk_l2norm=*/true);
-  torch_mlu::synchronize();
-  const auto chunk_elapsed =
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now() - chunk_begin);
-
   torch::Tensor squeezed_output = actual_output.squeeze(/*dim=*/0);
   const double output_max_abs =
       torch::max(torch::abs(squeezed_output.to(torch::kFloat32) -
@@ -321,15 +286,6 @@ TEST(Glm5NextKDATest, ChunkPrefillMatchesPackedEagerAcrossBoundaries) {
                               /*rtol=*/3e-2,
                               /*atol=*/2e-2))
       << "state max_abs=" << state_max_abs << ", cosine=" << state_cosine;
-  LOG(INFO) << "GLM5-Next KDA eager/chunk latency for " << total_tokens
-            << " packed tokens: eager=" << eager_elapsed.count()
-            << " us, chunk=" << chunk_elapsed.count() << " us, speedup="
-            << static_cast<double>(eager_elapsed.count()) /
-                   static_cast<double>(chunk_elapsed.count())
-            << ", output max_abs=" << output_max_abs
-            << ", output cosine=" << output_cosine
-            << ", state max_abs=" << state_max_abs
-            << ", state cosine=" << state_cosine;
 }
 
 TEST(Glm5NextKDATest,

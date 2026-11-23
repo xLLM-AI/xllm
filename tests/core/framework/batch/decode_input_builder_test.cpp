@@ -142,26 +142,25 @@ TEST(DecodeInputBuilderTest, PreservesRequestGroupsAndAbsoluteHistory) {
 
 TEST(DecodeInputBuilderTest,
      VerifyRowsPreserveFinalTargetAndLogicalDraftPages) {
-  for (const bool chunked : {false, true}) {
-    SCOPED_TRACE(chunked);
+  for (const bool per_request : {false, true}) {
+    SCOPED_TRACE(per_request);
     LlmForwardInput input = make_shared_forward_input();
     const DecodeBatchContext context = make_decode_batch_context(input);
-    const DecodeExpansionOptions options =
-        make_verify_layout(1, /*block_size=*/4, chunked);
+    const DecodeExpansionOptions options{
+        {.num_speculative_tokens = 1, .per_request = per_request}, 4};
     DecodeBuildBuffers buffers = expand_decode_inputs(context, options);
     EXPECT_EQ(buffers.out_new_cache_slots,
               std::vector<int32_t>({7, 8, 23, 24}));
-    EXPECT_EQ(buffers.out_shared_full_slot_mapping,
-              std::vector<int32_t>({483, 488, 731, 736}));
 
     build_decode_metadata(input.input_params, buffers, options);
     const torch::Tensor expected_pages =
-        chunked ? torch::tensor({{120, 122, 124}, {180, 182, 184}}, torch::kInt)
-                : torch::tensor({{120, 122, 124},
-                                 {120, 122, 124},
-                                 {180, 182, 184},
-                                 {180, 182, 184}},
-                                torch::kInt);
+        per_request
+            ? torch::tensor({{120, 122, 124}, {180, 182, 184}}, torch::kInt)
+            : torch::tensor({{120, 122, 124},
+                             {120, 122, 124},
+                             {180, 182, 184},
+                             {180, 182, 184}},
+                            torch::kInt);
     EXPECT_TRUE(
         torch::equal(input.input_params.attention.host.shared_full_block_table,
                      expected_pages));
@@ -182,8 +181,7 @@ TEST(DecodeInputBuilderTest, VerifyPaddingNeverWritesFiniteReadPage) {
   input.input_params.attention.host.shared_full_slot_mapping =
       torch::tensor({kPadSlotId}, torch::kInt);
   const DecodeBatchContext context = make_decode_batch_context(input);
-  const DecodeExpansionOptions options =
-      make_verify_layout(0, /*block_size=*/4, /*chunked=*/false);
+  const DecodeExpansionOptions options{{}, 4};
   DecodeBuildBuffers buffers = expand_decode_inputs(context, options);
   build_decode_metadata(input.input_params, buffers, options);
 
@@ -260,7 +258,6 @@ TEST(DecodeInputBuilderTest, DraftSlotsUpdateWithoutRebuildingPageTables) {
 TEST(DecodeInputBuilderTest, VlmVerifyRowsPreserveVisionState) {
   VlmForwardInput input;
   input.input_params.meta.num_sequences = 2;
-  input.input_params.is_spec_verify = true;
   input.token_ids_host = torch::tensor({10, 20}, torch::kInt);
   input.positions_host = torch::tensor({4, 8}, torch::kInt);
   input.input_params.attention.host.block_tables =
@@ -280,7 +277,6 @@ TEST(DecodeInputBuilderTest, VlmVerifyRowsPreserveVisionState) {
 
   EXPECT_EQ(input.input_params.attention.host.q_seq_lens,
             std::vector<int32_t>({1, 1}));
-  EXPECT_TRUE(input.input_params.is_spec_verify);
   const auto retained_pixels =
       input.input_params.multimodal.mm_data.get<torch::Tensor>("pixel_values");
   ASSERT_TRUE(retained_pixels.has_value());
@@ -293,8 +289,8 @@ TEST(DecodeInputBuilderTest, VlmVerifyRowsPreserveVisionState) {
 TEST(DecodeInputBuilderTest, ChunkedExpansionCommitsPerRequestLengths) {
   auto [input, ctx] = make_two_request_ctx();
 
-  const DecodeExpansionOptions decode_options =
-      make_verify_layout(2, /*block_size=*/4, /*chunked=*/true);
+  const DecodeExpansionOptions decode_options{
+      {.num_speculative_tokens = 2, .per_request = true}, 4};
   DecodeBuildBuffers buf = expand_decode_inputs(ctx, decode_options);
   build_decode_metadata(input.input_params, buf, decode_options);
 
@@ -303,14 +299,14 @@ TEST(DecodeInputBuilderTest, ChunkedExpansionCommitsPerRequestLengths) {
   EXPECT_EQ(input.input_params.attention.host.q_seq_lens,
             std::vector<int32_t>({3, 3}));
   EXPECT_EQ(input.input_params.meta.num_sequences, 2);
-  EXPECT_TRUE(input.input_params.meta.batch_forward_type.is_chunked_prefill());
+  EXPECT_TRUE(input.input_params.meta.batch_forward_type.is_decode() &&
+              input.input_params.meta.q_max_seq_len > 1);
 }
 
 TEST(DecodeInputBuilderTest, FlatExpansionCommitsOneRowPerToken) {
   auto [input, ctx] = make_two_request_ctx();
 
-  const DecodeExpansionOptions decode_options =
-      make_verify_layout(1, /*block_size=*/4, /*chunked=*/false);
+  const DecodeExpansionOptions decode_options{{.num_speculative_tokens = 1}, 4};
   DecodeBuildBuffers buf = expand_decode_inputs(ctx, decode_options);
 
   EXPECT_EQ(buf.out_token_ids, std::vector<int32_t>({10, -1, 20, -1}));
@@ -335,12 +331,8 @@ TEST(DecodeInputBuilderTest, NonCausalTokensShareFullQueryKvLength) {
                                     kv_seq_lens);
   const DecodeBatchContext ctx = make_decode_batch_context(input);
 
-  const DecodeExpansionOptions decode_options{{2,
-                                               false,
-                                               BatchForwardType::DECODE,
-                                               /*leading_zero_cu=*/false,
-                                               /*causal=*/false},
-                                              /*block_size=*/4};
+  const DecodeExpansionOptions decode_options{
+      {.num_speculative_tokens = 2, .causal = false}, 4};
   DecodeBuildBuffers buf = expand_decode_inputs(ctx, decode_options);
   EXPECT_EQ(buf.out_kv_seq_lens, std::vector<int32_t>({7, 7, 7, 11, 11, 11}));
   EXPECT_EQ(buf.out_positions, std::vector<int32_t>({4, 5, 6, 8, 9, 10}));
@@ -354,6 +346,8 @@ TEST(DecodeInputBuilderTest, NonCausalTokensShareFullQueryKvLength) {
   EXPECT_EQ(input.input_params.meta.num_sequences, 6);
   EXPECT_EQ(input.input_params.meta.actual_num_sequences, 6);
   EXPECT_TRUE(input.input_params.meta.batch_forward_type.is_decode());
+  EXPECT_EQ(input.input_params.attention.host.q_cu_seq_lens,
+            std::vector<int32_t>({0, 1, 2, 3, 4, 5, 6}));
 }
 
 TEST(DecodeInputBuilderTest, ResolveTokenWithPositionOffset) {

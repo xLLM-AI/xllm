@@ -120,12 +120,12 @@ std::vector<int64_t> build_accepted_context_rows(
 bool DFlashWorkerImpl::prepare_parallel_draft_metadata(
     LlmForwardInput& query_input,
     const DecodeExpansionOptions& decode_options) {
+  auto& params = query_input.input_params;
   scale_speculative_parallel_token_counts(
-      query_input.input_params, decode_options.num_speculative_tokens);
+      params, decode_options.num_speculative_tokens);
   if (!draft_needs_dummy_tokens_) {
     return false;
   }
-  auto& params = query_input.input_params;
   std::replace(params.parallel.dp_global_token_nums.begin(),
                params.parallel.dp_global_token_nums.end(),
                0,
@@ -279,8 +279,6 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
                           *compute_stream_);
 
   LlmForwardInput validate_input = input.clone();
-  // DSpark's N-wide draft geometry must be rescaled to (N+1) for the target's
-  // anchor + drafts forward.
   scale_speculative_parallel_token_counts(validate_input.input_params,
                                           options_.num_speculative_tokens());
   LlmForwardInput target_forward_input;
@@ -476,14 +474,10 @@ torch::Tensor DFlashWorkerImpl::anchor_token_ids(
 }
 DecodeExpansionOptions DFlashWorkerImpl::prepare_for_draft() const {
   DecodeExpansionOptions decode_options;
-  decode_options.num_speculative_tokens =
-      options_.num_speculative_tokens() -
-      static_cast<int32_t>(sample_from_anchor_);
+  decode_options.num_speculative_tokens = options_.num_speculative_tokens();
   decode_options.block_size = options_.block_size();
   decode_options.per_request = draft_input_per_request_;
   decode_options.causal = false;
-  decode_options.forward_type = draft_forward_type_;
-  decode_options.sample_from_anchor = sample_from_anchor_;
   decode_options.mask_token_id = mask_token_id_;
   return decode_options;
 }
@@ -495,9 +489,8 @@ void DFlashWorkerImpl::prepare_validate_inputs(
   LlmForwardInput prepared_input = input.clone();
   prepared_input.runtime.metadata_ready_event.reset();
   const bool use_linear_spec_verify = target_is_hybrid_recurrent_;
-  prepared_input.input_params.is_spec_verify = use_linear_spec_verify;
   SpeculativeWorkerImpl<LlmForwardInput>::prepare_validate_inputs(
-      prepared_input, validate_input);
+      prepared_input, validate_input, !use_linear_spec_verify);
   validate_input.input_params.embedding.input_embedding = torch::Tensor();
   if (use_linear_spec_verify) {
     LlmModelParams& input_params = validate_input.input_params;
@@ -534,7 +527,6 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
   dflash_detail::invalidate_draft_model_geometry(input_params);
 
   const DecodeExpansionOptions decode_options = prepare_for_draft();
-  const int32_t query_width = (decode_options.num_speculative_tokens + 1);
   const bool idle_rank =
       prepare_parallel_draft_metadata(query_input, decode_options);
   if (idle_rank) {
@@ -542,22 +534,22 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
   } else {
     DecodeBatchContext batch_ctx = make_decode_batch_context(input);
     DecodeBuildBuffers buf = expand_decode_inputs(batch_ctx, decode_options);
-    const int32_t num_logits_per_request =
-        decode_options.sample_from_anchor ? query_width : query_width - 1;
+    const int32_t query_width = decode_options.num_speculative_tokens + 1;
+    const int32_t num_logits_per_request = options_.num_speculative_tokens();
     const int32_t num_logits = batch_ctx.num_requests * num_logits_per_request;
     const torch::Tensor& draft_query_indices =
         draft_logits_indices_.get(num_logits, [&]() {
-          return decode_options.sample_from_anchor
-                     ? arange_indices(num_logits, device_)
-                     : torch::arange(
-                           static_cast<int64_t>(batch_ctx.num_requests) *
-                               query_width,
-                           torch::TensorOptions()
-                               .dtype(torch::kInt)
-                               .device(device_))
-                           .view({batch_ctx.num_requests, query_width})
-                           .narrow(/*dim=*/1, 1, query_width - 1)
-                           .reshape({-1});
+          if (query_width == num_logits_per_request) {
+            return arange_indices(num_logits, device_);
+          }
+          return arange_indices(
+                     static_cast<int64_t>(batch_ctx.num_requests) * query_width,
+                     device_)
+              .view({batch_ctx.num_requests, query_width})
+              .narrow(/*dim=*/1,
+                      query_width - num_logits_per_request,
+                      num_logits_per_request)
+              .reshape({-1});
         });
     build_decode_input(query_input, buf, decode_options, device_);
     query_input.sampling_params.logits_indices() = draft_query_indices;

@@ -165,7 +165,7 @@ class DeepseekV4MtpModel(_DeepseekV4ForwardSetup, nn.Module):
             raise ValueError("DeepSeek-V4 MTP requires input_embedding from the target or previous draft step")
 
         self._prepare_dsa_forward(backend, metadata, positions, "DeepSeek-V4 MTP")
-        cp_ctx = self._build_cp_context(backend, metadata, positions, allow_spec_verify=True)
+        cp_ctx = self._build_cp_context(backend, metadata, positions)
 
         if cp_ctx is not None and cp_ctx.enabled():
             hidden = cp_ctx.shard_rows(hidden)

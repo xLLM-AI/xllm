@@ -752,8 +752,13 @@ class ExecutionMetadataSource(Protocol):
     is_prefill: bool
     is_chunked_prefill: bool
     is_mixed: bool
-    is_spec_verify: bool
     is_dummy: bool
+
+    @property
+    def is_target_verify(self) -> bool: ...
+
+    @property
+    def num_speculative_tokens(self) -> int: ...
 
 
 class AttentionMetadata(ExecutionMetadataSource, Protocol):
@@ -818,7 +823,7 @@ def resolve_linear_state_io_indices(
             f"read={tuple(read_indices.shape)}, write={tuple(write_indices.shape)}"
         )
     is_prefill = metadata.is_prefill or metadata.is_chunked_prefill
-    if not is_prefill or getattr(metadata, "is_spec_verify", False):
+    if not is_prefill or getattr(metadata, "is_target_verify", False):
         if not torch.equal(read_indices, write_indices):
             raise RuntimeError("linear-state read/write separation is only supported for non-speculative prefill")
         # Canonicalize equal metadata to one object. Hot-path state users can

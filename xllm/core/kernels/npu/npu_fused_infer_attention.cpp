@@ -90,7 +90,7 @@ torch::Tensor ascend950_packed_causal_attention(
     const torch::Tensor& query,
     const torch::Tensor& key,
     const torch::Tensor& value,
-    const std::vector<int64_t>& actual_seq_lengths,
+    torch::IntArrayRef actual_seq_lengths,
     const std::vector<int64_t>& actual_seq_lengths_kv,
     int64_t num_heads,
     int64_t num_key_value_heads,
@@ -556,6 +556,12 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
   CHECK(!actual_seq_lengths.empty()) << "actual_seq_lengths must not be empty";
   CHECK(!actual_seq_lengths_kv.empty())
       << "actual_seq_lengths_kv must not be empty";
+  torch::IntArrayRef query_end_offsets(actual_seq_lengths);
+  if (input_layout == "TND" &&
+      query_end_offsets.size() == actual_seq_lengths_kv.size() + 1 &&
+      query_end_offsets.front() == 0) {
+    query_end_offsets = query_end_offsets.slice(/*start=*/1);
+  }
 
   torch::Tensor output = infer_attention_output(
       query, value, block_table, num_heads, input_layout);
@@ -569,7 +575,7 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     output = ascend950_packed_causal_attention(query,
                                                key,
                                                value,
-                                               actual_seq_lengths,
+                                               query_end_offsets,
                                                actual_seq_lengths_kv,
                                                num_heads,
                                                num_key_value_heads,
@@ -588,10 +594,8 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
   std::optional<torch::Tensor> block_table_tensor =
       to_optional_tensor(block_table);
 
-  torch::IntArrayRef actual_seq_lengths_ref(actual_seq_lengths);
   torch::IntArrayRef actual_seq_lengths_kv_ref(actual_seq_lengths_kv);
-  std::optional<torch::IntArrayRef> actual_seq_lengths_opt =
-      actual_seq_lengths_ref;
+  std::optional<torch::IntArrayRef> actual_seq_lengths_opt = query_end_offsets;
   std::optional<torch::IntArrayRef> actual_seq_lengths_kv_opt =
       actual_seq_lengths_kv_ref;
   std::optional<torch::IntArrayRef> none_int_array = std::nullopt;

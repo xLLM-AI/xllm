@@ -97,7 +97,6 @@ def _prepared_metadata() -> SimpleNamespace:
         q_seq_lens=torch.ones(4, dtype=torch.int32),
         expanded_decode_metadata=None,
         has_kv_shard=False,
-        is_spec_verify=False,
         is_prefill=False,
         is_chunked_prefill=False,
     )
@@ -668,7 +667,6 @@ def test_cp_prefill_writes_global_rows_to_kv2_owners(
         q_cu_seq_lens=lengths.cumsum(0, dtype=torch.int32),
         is_prefill=False,
         is_chunked_prefill=True,
-        is_spec_verify=False,
         has_kv_shard=False,
         expanded_decode_metadata=None,
     )

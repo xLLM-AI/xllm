@@ -53,8 +53,6 @@ class GraphInputView final {
   GraphInputView(Common& common, Spec& spec)
       : attn_mask(common.attn_mask),
         tiling_data(common.tiling_data),
-        use_expanded_decode_for_spec_verify_attention(
-            spec.use_expanded_decode_for_spec_verify_attention),
         expanded_kv_seq_lens(spec.expanded_kv_seq_lens),
         expanded_block_tables(spec.expanded_block_tables),
         expanded_paged_kv_indptr(spec.expanded_paged_kv_indptr),
@@ -80,7 +78,6 @@ class GraphInputView final {
   }
   torch::Tensor& attn_mask;
   torch::Tensor& tiling_data;
-  bool& use_expanded_decode_for_spec_verify_attention;
   torch::Tensor& expanded_kv_seq_lens;
   torch::Tensor& expanded_block_tables;
   torch::Tensor& expanded_paged_kv_indptr;
@@ -210,7 +207,6 @@ class ModelParamsView final {
   GraphInputView graph;
   std::vector<int64_t>& linear_state_validity_mask;
   std::vector<torch::Tensor>& multi_block_tables;
-  bool& is_spec_verify;
   bool& prefill_without_cache;
   torch::Tensor& num_accepted_tokens;
   MtpTopkStatePtr& mtp_topk_state;
@@ -232,7 +228,6 @@ class ModelParamsView final {
         graph(owner.graph, spec.graph),
         linear_state_validity_mask(owner.linear_state_validity_mask),
         multi_block_tables(spec.multi_block_tables),
-        is_spec_verify(spec.is_spec_verify),
         prefill_without_cache(spec.prefill_without_cache),
         num_accepted_tokens(spec.num_accepted_tokens),
         mtp_topk_state(spec.mtp_topk_state),

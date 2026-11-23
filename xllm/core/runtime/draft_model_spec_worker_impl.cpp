@@ -179,7 +179,7 @@ void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_padding(
   if (!draft_impl_->uses_npu_dp_ep_padding()) {
     return;
   }
-  const bool is_prefill = params.meta.batch_forward_type.no_decode();
+  const bool is_prefill = draft_impl_->use_prefill_dp_ep_padding(params.meta);
   const auto& tokens = params.parallel.dp_global_token_nums;
   const auto& raw_tokens = params.parallel.raw_dp_global_token_nums;
   if (!is_prefill) {
@@ -189,9 +189,10 @@ void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_padding(
     }
   }
   if (prepare_stream != nullptr) {
-    draft_impl_->prepare_dp_ep_padding_on_stream(params, *prepare_stream);
+    draft_impl_->prepare_dp_ep_padding_on_stream(ModelParamsView(params),
+                                                 *prepare_stream);
   } else {
-    draft_impl_->prepare_dp_ep_padding(params);
+    draft_impl_->prepare_dp_ep_padding(ModelParamsView(params));
   }
   if (!is_prefill) {
     dp_ep_padding_cache_.insert(

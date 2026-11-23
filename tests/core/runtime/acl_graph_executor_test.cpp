@@ -1124,7 +1124,6 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
   const torch::Tensor tokens = torch::arange(kValidateRows, int_options);
   const torch::Tensor positions = torch::arange(kValidateRows, int_options);
   ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
-  params.is_spec_verify = true;
   params.meta.batch_forward_type = BatchForwardType::DECODE;
   params.meta.num_sequences = kValidateRows;
   params.attention.host.q_seq_lens.assign(kValidateRows, 1);
@@ -1205,8 +1204,7 @@ TEST_P(HybridSpecVerifyPaddingTest, MetadataCoversBucketPadding) {
   const torch::Tensor tokens = torch::arange(kActualNumTokens, int_options);
   const torch::Tensor positions = torch::arange(kActualNumTokens, int_options);
   ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
-  params.is_spec_verify = true;
-  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
   params.meta.num_sequences = kNumSequences;
   params.meta.q_max_seq_len = kSpecWidth;
   params.attention.host.q_seq_lens.assign(kNumSequences, kSpecWidth);
@@ -1228,7 +1226,6 @@ TEST_P(HybridSpecVerifyPaddingTest, MetadataCoversBucketPadding) {
   params.linear_state_validity_mask.assign(kNumSequences, 1);
   // Hybrid spec verify consumes token-wise expanded metadata: one row per
   // (sequence, draft token) with kv_seq_lens growing inside each sequence.
-  params.graph.use_expanded_decode_for_spec_verify_attention = true;
   constexpr int64_t kKvLen = 20;
   std::vector<int32_t> expanded_kv_seq_lens_vec;
   expanded_kv_seq_lens_vec.reserve(kActualNumTokens);
@@ -1312,8 +1309,7 @@ TEST(AclGraphPersistentParamTest,
       /*is_hybrid_linear_attention=*/true);
 
   ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
-  params.is_spec_verify = true;
-  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
   params.meta.num_sequences = 1;
   params.meta.q_max_seq_len = kSpecWidth;
   params.attention.host.q_seq_lens = {kSpecWidth};
@@ -1328,7 +1324,6 @@ TEST(AclGraphPersistentParamTest,
       torch::tensor({0, kSpecWidth}, int_options);
   params.embedding.linear_state_indices = torch::tensor({1}, int_options);
   params.num_accepted_tokens = torch::tensor({1}, int_options);
-  params.graph.use_expanded_decode_for_spec_verify_attention = true;
   params.graph.expanded_kv_seq_lens =
       torch::tensor({15, 16, 17, 18, 19, 20}, int_options);
   params.graph.expanded_kv_seq_lens_vec = {15, 16, 17, 18, 19, 20};
@@ -1498,7 +1493,8 @@ TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
   params.parallel.dp_global_token_nums = {2, 0, 4};
   params.parallel.raw_dp_global_token_nums = {1, 0, 3};
 
-  scale_speculative_parallel_token_counts(params, 4);
+  scale_speculative_parallel_token_counts(params,
+                                          /*num_speculative_tokens=*/4);
 
   EXPECT_EQ(params.parallel.dp_global_token_nums,
             (std::vector<int32_t>{10, 0, 20}));
@@ -1585,8 +1581,7 @@ TEST(AclGraphPersistentParamTest, SpecVerifyGraphUpdateSupportsRuntimeBatch) {
       /*is_hybrid_linear_attention=*/true);
 
   ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
-  params.is_spec_verify = true;
-  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
   params.meta.num_sequences = kBatchSize;
   params.meta.q_max_seq_len = kSpecWidth;
   params.attention.host.q_seq_lens = {kSpecWidth, kSpecWidth};

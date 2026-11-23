@@ -19,21 +19,21 @@ limitations under the License.
 
 namespace xllm {
 
+struct BatchInputMeta;
+
 class SampleOutput;
 struct ModelOutput;
 class LlmForwardInput;
 class ForwardOutput;
 class EmbeddingCache;
 
-// Selects the drafter's feed from `get_hidden_states_for_drafter(model_output)`
-// and exposes it through `embeddings` (plus `selected_embeddings` on target
-// prefill).
 void output_spec_hidden_states(
     SampleOutput& sample_output,
     const ModelOutput& model_output,
     const torch::Tensor& logits_indices,
     const torch::Tensor& gathered_sample_hidden_states,
-    bool is_target_prefill,
+    const BatchInputMeta& meta,
+    bool is_draft_engine,
     bool cp_enabled);
 
 void clear_all_output_embeddings(ForwardOutput& output);

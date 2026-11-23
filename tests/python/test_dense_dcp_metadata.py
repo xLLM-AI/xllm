@@ -78,7 +78,6 @@ def _metadata(slots: list[int]) -> SimpleNamespace:
         new_cache_slots_host_values=list(range(num_tokens)),
         is_prefill=False,
         is_chunked_prefill=False,
-        is_spec_verify=False,
         is_mixed=False,
     )
 
@@ -112,7 +111,7 @@ def test_eager_runner_exposes_upstream_slots_without_copying() -> None:
         ("local_slot_mapping", torch.tensor([0.0, 1.0]), TypeError),
         ("kv_split_size", 4, RuntimeError),
         ("kv_split_rank", 0, RuntimeError),
-        ("is_spec_verify", True, NotImplementedError),
+        ("is_target_verify", True, NotImplementedError),
     ],
 )
 def test_builder_rejects_invalid_upstream_metadata_before_updating(

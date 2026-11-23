@@ -304,7 +304,9 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
     gathered_hidden_states = gather_sequence(hidden_states, *fc1_context);
   }
   const int64_t original_num_tokens = gathered_hidden_states.size(0);
-  const bool use_spec_verify = input_params.is_spec_verify;
+  const bool use_spec_verify =
+      input_params.meta.batch_forward_type.is_decode() &&
+      input_params.meta.q_max_seq_len > 1;
   const bool is_any_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
 

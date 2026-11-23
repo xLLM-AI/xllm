@@ -1044,7 +1044,6 @@ class _V41ForwardHarness:
             is_prefill=is_prefill,
             is_chunked_prefill=is_chunked_prefill,
             is_mixed=False,
-            is_spec_verify=False,
             multi_block_tables=[self.swa_bt, self.tok1_bt, self.tok2_bt],
             kv_seq_lens_host=torch.tensor(kv_lens, dtype=torch.int32, device=_HOST_DEVICE),
             kv_seq_lens_host_values=list(kv_lens),

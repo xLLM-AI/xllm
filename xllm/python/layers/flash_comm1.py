@@ -111,7 +111,7 @@ class FlashComm1MetadataBuilder:
         if (
             not (metadata.is_prefill or metadata.is_chunked_prefill)
             or metadata.is_mixed
-            or metadata.is_spec_verify
+            or getattr(metadata, "is_target_verify", False)
             or metadata.is_dummy
             or num_tokens == 0
             or num_tokens < self._min_prefill_tokens

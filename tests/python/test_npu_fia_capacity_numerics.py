@@ -151,7 +151,6 @@ def _assert_fia_capacity_graphs(
         linear_state_indices=None,
         is_prefill=False,
         is_chunked_prefill=False,
-        is_spec_verify=False,
         has_kv_shard=False,
         expanded_decode_metadata=None,
     )
