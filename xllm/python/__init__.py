@@ -69,6 +69,8 @@ def initialize_runtime() -> None:
             device="npu",
             operations=(
                 "rms_norm",
+                "fused_add_rms_norm",
+                "silu_and_mul",
                 "fused_add_gemma_rms_norm",
                 "rms_norm_gated",
                 "rms_norm_dynamic_quant",

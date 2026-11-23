@@ -29,6 +29,7 @@ from typing import Any, cast
 
 import torch
 import torch.nn as nn
+from xllm_kernel.ops import rms_norm
 
 from xllm.python import kernels
 from xllm.python.layers import (
@@ -194,12 +195,12 @@ class Qwen3Attention(nn.Module):
             # cos_sin_cache here is the [max_pos, head_dim]=[cos_half|sin_half]
             # table; q/k stay 2D [N, num_heads*head_dim] as npu_mrope requires.
             num_tokens = qkv.size(0)
-            q = torch.ops.xllm_ops.rms_norm(
+            q = rms_norm(
                 qkv[:, : self.q_size].reshape(num_tokens * self.num_heads, self.head_dim),
                 self.q_norm.weight,
                 self.q_norm.eps,
             ).view(num_tokens, self.q_size)
-            k = torch.ops.xllm_ops.rms_norm(
+            k = rms_norm(
                 qkv[:, self.q_size : self.q_size + self.kv_size].reshape(num_tokens * self.num_kv_heads, self.head_dim),
                 self.k_norm.weight,
                 self.k_norm.eps,

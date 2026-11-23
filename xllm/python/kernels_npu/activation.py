@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import torch
 import torch_npu
+from xllm_kernel.ops import silu_and_mul
 
-silu_and_mul = torch.ops.xllm_ops.silu_and_mul
 _DEQUANT_SWIGLU_QUANT = torch_npu.npu_dequant_swiglu_quant
 
 
