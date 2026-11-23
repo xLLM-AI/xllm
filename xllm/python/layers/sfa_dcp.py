@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+from xllm_kernel.ops.attention.dsa import sparse_flash_attention_lse
 
 from xllm.python.attention.backend import has_rope_dim, normalize_attention_lse
 from xllm.python.attention.kv_shard_layout import KVShardLayout
@@ -315,7 +316,7 @@ class AscendSFADCPImpl:
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         kv = kv_cache[0]
         key_rope = kv_cache[1] if len(kv_cache) > 1 else None
-        attention_out, softmax_max, softmax_sum = torch.ops.xllm_ops.sparse_flash_attention_lse(
+        attention_out, softmax_max, softmax_sum = sparse_flash_attention_lse(
             query=ql_nope,
             key=kv,
             value=kv,

@@ -29,6 +29,7 @@ from xllm.python.attention.kv_shard_layout import KVShardLayout
 from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
 from xllm.python.attention.sfa_dcp_backend import SfaDcpAttentionBackend
 from xllm.python.distributed import finish_all_gather
+from xllm.python.layers import sfa_dcp
 from xllm.python.layers.sfa_dcp import (
     AscendSFADCPImpl,
     AscendSFADCPMetadataBuilder,
@@ -448,9 +449,7 @@ def test_npu_sparse_flash_attention_passes_none_rope() -> None:
     attn_out = torch.randn(2, 4, 8)
     softmax_max = torch.zeros(1)
     softmax_sum = torch.ones(1)
-    fake_ops = MagicMock()
-    fake_ops.sparse_flash_attention_lse.return_value = (attn_out, softmax_max, softmax_sum)
-    with patch.object(torch.ops, "xllm_ops", fake_ops, create=True):
+    with patch.object(sfa_dcp, "sparse_flash_attention_lse", return_value=(attn_out, softmax_max, softmax_sum)) as sfa:
         out = impl._npu_sparse_flash_attention(
             query,
             None,
@@ -463,7 +462,7 @@ def test_npu_sparse_flash_attention_passes_none_rope() -> None:
             return_lse=False,
         )
     assert out is attn_out
-    kwargs = fake_ops.sparse_flash_attention_lse.call_args.kwargs
+    kwargs = sfa.call_args.kwargs
     assert kwargs["query_rope"] is None
     assert kwargs["key_rope"] is None
 
