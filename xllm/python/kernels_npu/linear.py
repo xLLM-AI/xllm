@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import torch
 import torch_npu
-from xllm_kernel.ops import grouped_matmul
+from xllm_kernel.ops.gemm import grouped_matmul
 
 _FRACTAL_NZ_FORMAT = 29
 

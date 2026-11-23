@@ -20,8 +20,8 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Any
 
 import torch
-from xllm_kernel.ops import l2_norm
 from xllm_kernel.ops.attention.kda import causal_conv1d, causal_conv1d_update_v2
+from xllm_kernel.ops.normalization import l2_norm
 
 from xllm.python.attention.backend import resolve_linear_state_io_indices
 from xllm.python.model_executor.forward_context import (

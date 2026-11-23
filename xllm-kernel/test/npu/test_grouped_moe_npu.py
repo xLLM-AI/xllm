@@ -4,7 +4,7 @@
 import pytest
 import torch
 import torch_npu
-from xllm_kernel.ops import moe_grouped_matmul_swiglu_quant
+from xllm_kernel.ops.moe import moe_grouped_matmul_swiglu_quant
 
 
 def _assert_grouped_moe_output(

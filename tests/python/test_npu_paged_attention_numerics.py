@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from xllm_kernel.ops import reshape_paged_cache
+from xllm_kernel.ops.kv_cache import reshape_paged_cache
 
 pytest.importorskip("torch_npu", reason="requires the real NPU backend")
 

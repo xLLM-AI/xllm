@@ -6,7 +6,7 @@ from collections.abc import Callable
 import pytest
 import torch
 import torch_npu
-from xllm_kernel.ops import (
+from xllm_kernel.ops.moe import (
     dequant_swiglu_quant,
     moe_gating_top_k_hash,
     moe_grouped_matmul_swiglu_quant,

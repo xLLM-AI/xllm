@@ -3,7 +3,7 @@
 
 import pytest
 import torch
-from xllm_kernel.ops import fused_add_gemma_rms_norm
+from xllm_kernel.ops.normalization import fused_add_gemma_rms_norm
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])

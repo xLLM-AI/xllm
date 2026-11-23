@@ -38,14 +38,25 @@ class BlockDeviceImports(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, BlockDeviceImports())
 from xllm_kernel.catalog import load_operations
-from xllm_kernel.ops import fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat
-from xllm_kernel.ops import get_fused_attention, partial_rotary_embedding, reshape_paged_cache
-from xllm_kernel.ops import hc_post, hc_pre
+from xllm_kernel.ops.attention.fia import get_fused_attention
 from xllm_kernel.ops.attention.gdn import OPERATIONS as GDN_OPERATIONS
+from xllm_kernel.ops.attention.gdn import (
+    fused_qkvzba_split_reshape_cat,
+    fused_recurrent_gated_delta_rule,
+    fused_sigmoid_gating_delta_rule_update,
+)
 from xllm_kernel.ops.attention.kda import OPERATIONS as KDA_OPERATIONS, causal_conv1d_update_v2
 from xllm_kernel.ops.attention.mla import mla_preprocess_v2
-from xllm_kernel.ops.gemm import MATMUL_EIN_SUM_OPERATION, MATMUL_EIN_SUM_OUT_OPERATION
-from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out, quant_matmul_out
+from xllm_kernel.ops.gemm import (
+    MATMUL_EIN_SUM_OPERATION,
+    MATMUL_EIN_SUM_OUT_OPERATION,
+    matmul_ein_sum,
+    matmul_ein_sum_out,
+    quant_matmul_out,
+)
+from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
+from xllm_kernel.ops.kv_cache import reshape_paged_cache
+from xllm_kernel.ops.positional_encoding import partial_rotary_embedding
 catalog = {operation.contract.operation: operation for operation in load_operations()}
 for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     name = operation.contract.operation
@@ -155,8 +166,7 @@ def test_cache_backend_follows_ascend_generation(
 def test_fused_attention_prepares_optional_split_rope_and_preserves_graph_buffers(
     monkeypatch: pytest.MonkeyPatch, has_split_rope: bool
 ) -> None:
-    from xllm_kernel.ops import get_fused_attention
-    from xllm_kernel.ops.attention.fia import FUSED_ATTENTION_OPERATION
+    from xllm_kernel.ops.attention.fia import FUSED_ATTENTION_OPERATION, get_fused_attention
 
     module_name = "xllm_kernel.ops.attention.fia.npu"
     monkeypatch.delitem(sys.modules, module_name, raising=False)

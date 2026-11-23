@@ -3,7 +3,7 @@
 
 import pytest
 import torch
-from xllm_kernel.ops import rms_norm_dynamic_quant, rms_norm_gated
+from xllm_kernel.ops.normalization import rms_norm_dynamic_quant, rms_norm_gated
 
 _EPS = 1e-6
 

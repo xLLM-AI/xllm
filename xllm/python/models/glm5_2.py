@@ -37,7 +37,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from xllm_kernel.ops import matmul_ein_sum
+from xllm_kernel.ops.gemm import matmul_ein_sum
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.attn_dp_collectives import (

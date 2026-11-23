@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from xllm_kernel.ops import get_fused_attention
+from xllm_kernel.ops.attention.fia import get_fused_attention
 
 from xllm.python.attention.backend import AttentionMetadata, LayerCache
 from xllm.python.attention.dense_dcp_metadata import DenseDcpMetadata

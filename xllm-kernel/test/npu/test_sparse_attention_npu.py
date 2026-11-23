@@ -3,13 +3,8 @@
 
 import pytest
 import torch
-from xllm_kernel.ops import (
-    compressor,
-    sparse_attn_sharedkv,
-    sparse_attn_sharedkv_metadata,
-    sparse_flash_attention_lse,
-    sparse_flash_attention_lse_out,
-)
+from xllm_kernel.ops.attention.dsa import sparse_flash_attention_lse, sparse_flash_attention_lse_out
+from xllm_kernel.ops.attention.dsv4 import compressor, sparse_attn_sharedkv, sparse_attn_sharedkv_metadata
 
 
 @pytest.mark.parametrize("graph_mode", [False, True], ids=["eager", "graph"])

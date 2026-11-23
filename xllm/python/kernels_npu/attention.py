@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from xllm_kernel.ops import get_fused_attention
+from xllm_kernel.ops.attention.fia import get_fused_attention
 
 _MIN_PAD_HEAD_DIM = 64
 _MAX_PAD_HEAD_DIM = 128

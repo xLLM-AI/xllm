@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import torch
 import torch_npu
-from xllm_kernel.ops import inplace_partial_rotary_mul as _partial_rotary_mul
+from xllm_kernel.ops.positional_encoding import inplace_partial_rotary_mul as _partial_rotary_mul
 
 
 def has_fused_qk_rotary(head_dim: int, dtype: torch.dtype, device: torch.device) -> bool:

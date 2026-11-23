@@ -20,7 +20,7 @@ from typing import Protocol
 
 import torch
 import torch.nn as nn
-from xllm_kernel.ops import partial_rotary_embedding
+from xllm_kernel.ops.positional_encoding import partial_rotary_embedding
 
 
 class Qwen3_5AttentionConfig(Protocol):

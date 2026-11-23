@@ -14,7 +14,8 @@
 
 """NPU quantization kernels."""
 
-from xllm_kernel.ops import dynamic_quant, quant_matmul, quant_matmul_out, quantize_per_tensor
+from xllm_kernel.ops.gemm import quant_matmul, quant_matmul_out
+from xllm_kernel.ops.quantization import dynamic_quant, quantize_per_tensor
 
 __all__ = [
     "quant_matmul",
