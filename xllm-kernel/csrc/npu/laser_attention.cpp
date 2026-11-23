@@ -22,7 +22,6 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
-#include "aclnn_laser_attention.h"
 #include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "core/kernels/npu/utils.h"
 #include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -127,7 +126,7 @@ torch::Tensor laser_attention(const torch::Tensor& q_bnsd,
   const std::optional<torch::Tensor> no_mask;  // atten/alibi/drop masks: unused
 
   // Two-stage aclnn call (GetWorkspaceSize + execute) handled by the macro.
-  EXEC_NPU_CMD(aclnnLaserAttention,
+  EXEC_NPU_CMD(aclnnXllmKernelLaserAttention,
                q_c,
                k_c,
                v_c,

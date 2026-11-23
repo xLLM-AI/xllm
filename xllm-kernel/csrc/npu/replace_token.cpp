@@ -13,25 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <c10/core/Device.h>
-#include <glog/logging.h>
-#include <torch/torch.h>
-#include <torch_npu/csrc/libs/init_npu.h>
-#include <torch_npu/torch_npu.h>
+#include <aclnn/acl_meta.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
 
-#include <nlohmann/json.hpp>
-#ifdef TORCH_HIGHER_THAN_PTA6
-#include <torch_npu/csrc/framework/OpCommand.h>
-#else
-#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
-#include <torch_npu/csrc/framework/utils/OpPreparation.h>
-#endif
-
-#include "acl/acl.h"
-#include "aclnn_replace_token.h"
 #include "core/common/macros.h"
+#include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "core/kernels/npu/utils.h"
-#include "xllm_ops_api.h"
+#include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
 
 namespace xllm::kernel::npu {
 
@@ -47,6 +35,20 @@ void replace_token(torch::Tensor& dst,
                    bool synchronize_stream) {
   check_tensor(dst, "dst", "replace_token");
   check_tensor(src, "src", "replace_token");
+  using GetWorkspaceSize = aclnnStatus (*)(const aclTensor*,
+                                           const aclTensor*,
+                                           const aclTensor*,
+                                           uint64_t*,
+                                           aclOpExecutor**);
+  using Launch = aclnnStatus (*)(void*, uint64_t, aclOpExecutor*, aclrtStream);
+  static const auto get_workspace_size =
+      reinterpret_cast<GetWorkspaceSize>(aclnn::detail::get_op_api_func_addr(
+          "aclnnXllmKernelReplaceTokenGetWorkspaceSize"));
+  static const auto launch = reinterpret_cast<Launch>(
+      aclnn::detail::get_op_api_func_addr("aclnnXllmKernelReplaceToken"));
+  CHECK(get_workspace_size && launch)
+      << "ReplaceToken is missing from the xllm-kernel OPP";
+
   aclTensor* dst_ids = nullptr;
   aclTensor* src_ids = nullptr;
   int32_t device_id = dst.device().index();
@@ -55,13 +57,12 @@ void replace_token(torch::Tensor& dst,
   create_acltensor(&src_ids, src);
   uint64_t workspace_size = 0;
   aclOpExecutor* executor;
-  CHECK_ACL_SUCCESS(aclnnReplaceTokenGetWorkspaceSize(
-                        dst_ids, src_ids, dst_ids, &workspace_size, &executor),
-                    "replace_token: failed to get workspace size");
-  void* workspace_addr = nullptr;
   CHECK_ACL_SUCCESS(
-      aclnnReplaceToken(workspace_addr, workspace_size, executor, stream),
-      "replace_token: failed to replace token");
+      get_workspace_size(dst_ids, src_ids, dst_ids, &workspace_size, &executor),
+      "replace_token: failed to get workspace size");
+  void* workspace_addr = nullptr;
+  CHECK_ACL_SUCCESS(launch(workspace_addr, workspace_size, executor, stream),
+                    "replace_token: failed to replace token");
   if (synchronize_stream) {
     CHECK_ACL_SUCCESS(aclrtSynchronizeStream(stream),
                       "replace_token: failed to synchronize stream");

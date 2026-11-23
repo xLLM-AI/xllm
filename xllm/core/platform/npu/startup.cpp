@@ -117,11 +117,11 @@ bool configure_bundled_npu_ops() {
   const bool has_bundle = fs::exists(bundle);
   const bool is_python = ModelConfig::is_python_model_impl(
       ModelConfig::get_instance().model_impl());
-  // CANN discovers operator packages during initialization, before Python model
-  // startup.
+  // Native and Python operators both need the package registered before ACL
+  // initializes.
   const fs::path kernel_vendor =
       host.parent_path().parent_path() / "xllm_kernel/ascendc_opp/xllm_kernel";
-  const bool has_kernel_vendor = is_python && fs::is_directory(kernel_vendor);
+  const bool has_kernel_vendor = fs::is_directory(kernel_vendor);
   if (!has_bundle && !has_kernel_vendor) {
     return true;
   }

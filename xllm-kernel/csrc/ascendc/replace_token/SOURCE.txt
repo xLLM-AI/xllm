@@ -1,0 +1,8 @@
+ReplaceToken AscendC implementation
+
+Source: https://gitcode.com/xLLM-AI/xllm_ops
+Revision: 8bd2b014c38fec33ecf14dd33e05e8ad792ec5c8
+Directory: xllm_ops/replace_token
+
+Packaged under the private CANN operator type XllmKernelReplaceToken.
+Imported sources retain their copyright and license notices.

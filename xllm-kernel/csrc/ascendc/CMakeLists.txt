@@ -140,6 +140,26 @@ if("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
         "${reshape_a5_host}/reshape_and_cache_a5_tiling.cpp"
     )
 endif()
+set(native_components laser_attention replace_token dispatch_ffn_combine)
+if("ascend910_93" IN_LIST ASCEND_COMPUTE_UNIT OR "ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
+    list(APPEND native_components dispatch_gmm_combine_decode)
+endif()
+foreach(component IN LISTS native_components)
+    set(host "${CMAKE_CURRENT_SOURCE_DIR}/${component}/op_host")
+    list(APPEND op_definitions "${host}/${component}_def.cpp")
+    list(APPEND native_tiling
+        "${host}/${component}_proto.cpp"
+        "${host}/${component}_tiling.cpp"
+    )
+    if(component MATCHES "^dispatch_")
+        list(APPEND native_api
+            "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_${component}_op.cpp"
+            "${host}/op_api/aclnn_${component}.cpp"
+        )
+    else()
+        list(APPEND native_api "${ASCEND_AUTOGEN_PATH}/aclnn_xllm_kernel_${component}.cpp")
+    endif()
+endforeach()
 npu_op_code_gen(
     SRC ${op_definitions}
     PACKAGE ${vendor}
@@ -178,6 +198,7 @@ npu_op_library(cust_opapi ACLNN
     "${scatter}/op_host/op_api/scatter_nd_update_v2.cpp"
     ${sparse_attention_api}
     ${reshape_a5_api}
+    ${native_api}
     "${sas_metadata}/op_api/aclnn_sparse_attn_sharedkv_metadata.cpp"
     "${sas_metadata}/op_api/l0_sparse_attn_sharedkv_metadata.cpp"
     ${a2_aclnn_sources}
@@ -245,6 +266,7 @@ npu_op_library(cust_optiling TILING
     "${scatter}/op_host/scatter_nd_update_v2_tiling.cpp"
     ${sparse_attention_tiling}
     ${reshape_a5_tiling}
+    ${native_tiling}
     "${CMAKE_CURRENT_SOURCE_DIR}/compressor/op_host/compressor_proto.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/sparse_attn_sharedkv/op_host/sparse_attn_sharedkv_proto.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/sparse_flash_attention_lse/op_host/sparse_flash_attention_lse_infershape.cpp"
@@ -262,7 +284,10 @@ target_include_directories(cust_optiling PRIVATE
     "${ASCEND_CANN_PACKAGE_PATH}/pkg_inc"
     "${ASCEND_CANN_PACKAGE_PATH}/include/op_common/op_host"
 )
-target_link_libraries(cust_optiling PRIVATE "${ASCEND_CANN_PACKAGE_PATH}/lib64/libascendalog.so")
+target_link_libraries(cust_optiling PRIVATE
+    "${ASCEND_CANN_PACKAGE_PATH}/lib64/libascendalog.so"
+    "${ASCEND_CANN_PACKAGE_PATH}/lib64/libgraph_base.so"
+)
 
 npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelGammaAddRmsNorm
     KERNEL_DIR gamma_add_rms_norm/op_kernel KERNEL_FILE xllm_kernel_gamma_add_rms_norm.cpp)
@@ -420,6 +445,33 @@ if(reshape_a5_api)
         OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Werror)
 endif()
 
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelLaserAttention
+    KERNEL_DIR laser_attention/op_kernel KERNEL_FILE xllm_kernel_laser_attention.cpp)
+npu_op_kernel_options(ascendc_kernels XllmKernelLaserAttention
+    OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Werror -fpermissive)
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelReplaceToken
+    KERNEL_DIR replace_token/op_kernel KERNEL_FILE xllm_kernel_replace_token.cpp)
+npu_op_kernel_options(ascendc_kernels XllmKernelReplaceToken
+    OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Wno-error)
+
+set(mc2_catlass "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/catlass/include")
+if(NOT EXISTS "${mc2_catlass}/catlass/catlass.hpp")
+    message(FATAL_ERROR "The MC2 kernels need CATLASS headers. "
+        "In a Git checkout run git submodule update --init xllm-kernel/third_party/catlass.")
+endif()
+npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelDispatchFFNCombineOp
+    KERNEL_DIR dispatch_ffn_combine/op_kernel KERNEL_FILE xllm_kernel_dispatch_ffn_combine_op.cpp)
+npu_op_kernel_options(ascendc_kernels XllmKernelDispatchFFNCombineOp
+    OPTIONS --cce-auto-sync=on -Wno-deprecated-declarations -Werror -DHCCL_COMM
+    "-I${mc2_catlass}")
+if("dispatch_gmm_combine_decode" IN_LIST native_components)
+    npu_op_kernel_sources(ascendc_kernels OP_TYPE XllmKernelDispatchGmmCombineDecodeOp
+        KERNEL_DIR dispatch_gmm_combine_decode/op_kernel
+        KERNEL_FILE xllm_kernel_dispatch_gmm_combine_decode_op.cpp)
+    npu_op_kernel_options(ascendc_kernels XllmKernelDispatchGmmCombineDecodeOp
+        OPTIONS --cce-auto-sync=off -Wno-deprecated-declarations -Werror -DASCENDC_DUMP=0
+        "-I${mc2_catlass}")
+endif()
 npu_op_kernel_library(ascendc_kernels SRC_BASE "${CMAKE_CURRENT_SOURCE_DIR}" TILING_LIBRARY cust_optiling)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/aicpu.cmake")

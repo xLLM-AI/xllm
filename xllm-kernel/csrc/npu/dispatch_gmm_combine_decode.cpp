@@ -49,9 +49,10 @@ int64_t resolve_local_expert_num(int64_t ep_rank_size,
 bool has_dispatch_gmm_combine_decode() {
   static const bool is_available =
       aclnn::detail::get_op_api_func_addr(
-          "aclnnDispatchGmmCombineDecodeGetWorkspaceSize") != nullptr &&
-      aclnn::detail::get_op_api_func_addr("aclnnDispatchGmmCombineDecode") !=
-          nullptr;
+          "aclnnXllmKernelDispatchGmmCombineDecodeGetWorkspaceSize") !=
+          nullptr &&
+      aclnn::detail::get_op_api_func_addr(
+          "aclnnXllmKernelDispatchGmmCombineDecode") != nullptr;
   return is_available;
 }
 
@@ -74,7 +75,8 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_gmm_combine_decode(
     int64_t quant_mode,
     int64_t global_bs) {
   TORCH_CHECK(has_dispatch_gmm_combine_decode(),
-              "aclnnDispatchGmmCombineDecode is not available in libopapi.");
+              "aclnnXllmKernelDispatchGmmCombineDecode is not available in the "
+              "xllm-kernel OPP.");
   TORCH_CHECK(x.dim() == 2, "DispatchGmmCombineDecode expects 2D x.");
   TORCH_CHECK(x.scalar_type() == at::kHalf || x.scalar_type() == at::kBFloat16,
               "DispatchGmmCombineDecode expects fp16/bf16 x, got ",
@@ -144,7 +146,7 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_gmm_combine_decode(
   std::string group_ep_copy = group_ep;
   char* group_ep_ptr = group_ep_copy.data();
 
-  EXEC_NPU_CMD(aclnnDispatchGmmCombineDecode,
+  EXEC_NPU_CMD(aclnnXllmKernelDispatchGmmCombineDecode,
                x,
                expert_ids,
                gmm1_permuted_weight,

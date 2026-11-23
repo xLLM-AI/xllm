@@ -7,8 +7,8 @@ cc_library(
     xllm_ops_api.h
     ../utils.h
   SRCS
-    replace_token.cpp
-    laser_attention.cpp
+    "${PROJECT_SOURCE_DIR}/xllm-kernel/csrc/npu/replace_token.cpp"
+    "${PROJECT_SOURCE_DIR}/xllm-kernel/csrc/npu/laser_attention.cpp"
     top_k_top_p.cpp
     quant_matmul.cpp
     grouped_matmul.cpp
