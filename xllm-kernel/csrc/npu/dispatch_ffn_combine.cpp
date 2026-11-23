@@ -24,8 +24,9 @@ namespace xllm::kernel::npu {
 bool has_dispatch_ffn_combine() {
   static const bool is_available =
       aclnn::detail::get_op_api_func_addr(
-          "aclnnDispatchFFNCombineGetWorkspaceSize") != nullptr &&
-      aclnn::detail::get_op_api_func_addr("aclnnDispatchFFNCombine") != nullptr;
+          "aclnnXllmKernelDispatchFFNCombineGetWorkspaceSize") != nullptr &&
+      aclnn::detail::get_op_api_func_addr(
+          "aclnnXllmKernelDispatchFFNCombine") != nullptr;
   return is_available;
 }
 
@@ -44,7 +45,8 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_ffn_combine(
     const std::optional<torch::Tensor>& output,
     const std::optional<torch::Tensor>& expert_token_nums) {
   TORCH_CHECK(has_dispatch_ffn_combine(),
-              "aclnnDispatchFFNCombine is not available in libopapi.");
+              "aclnnXllmKernelDispatchFFNCombine is not available in the "
+              "xllm-kernel OPP.");
   TORCH_CHECK(x.dim() == 2, "DispatchFFNCombine expects 2D x.");
   TORCH_CHECK(x.scalar_type() == at::kHalf || x.scalar_type() == at::kBFloat16,
               "DispatchFFNCombine expects fp16/bf16 x, got ",
@@ -127,7 +129,7 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_ffn_combine(
   torch::Tensor active_mask =
       x_active_mask.has_value() ? x_active_mask.value() : torch::Tensor();
 
-  EXEC_NPU_CMD(aclnnDispatchFFNCombine,
+  EXEC_NPU_CMD(aclnnXllmKernelDispatchFFNCombine,
                x,
                weight1,
                weight2,

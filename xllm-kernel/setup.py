@@ -76,6 +76,11 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                     recurrent_header.unlink()
                     recurrent_gdn = source / "recurrent_gated_delta_rule/op_host/op_api"
                     shutil.copy2(recurrent_gdn / "aclnn_recurrent_gated_delta_rule.h", headers)
+                for component in ("dispatch_ffn_combine", "dispatch_gmm_combine_decode"):
+                    generated_header = headers / f"aclnn_xllm_kernel_{component}_op.h"
+                    if generated_header.exists():
+                        header = source / component / "op_host/op_api" / f"aclnn_xllm_kernel_{component}.h"
+                        shutil.copy2(header, headers)
                 shutil.copy2(gamma / "CANN_LICENSE.txt", vendor)
                 for provenance in sorted(source.glob("*/SOURCE.txt")):
                     shutil.copy2(provenance, vendor / f"{provenance.parent.name}_SOURCE.txt")
