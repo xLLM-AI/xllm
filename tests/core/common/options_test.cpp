@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
-#include "core/common/prefill_token_budget.h"
+#include "core/common/prefill_policy.h"
 
 namespace xllm {
 namespace {
@@ -73,27 +73,48 @@ TEST(OptionsTest, ResolvePrefillPreservesDisabledAndMultimodalEmbeddingModes) {
   EXPECT_EQ(embedding.max_tokens_per_chunk_for_prefill(), 256);
 }
 
-TEST(PrefillTokenBudgetTest, FairBudgetPreservesChunkFloorAndRoleSemantics) {
-  const PrefillTokenBudget chunked(/*max_batch_tokens=*/10,
-                                   /*max_chunk_tokens=*/2,
-                                   /*enable_chunked_prefill=*/true);
-  EXPECT_EQ(chunked.per_dp_group(3, InstanceRole::PREFILL, true), 4);
-  EXPECT_EQ(chunked.per_dp_group(1, InstanceRole::PREFILL, true), 10);
-  EXPECT_EQ(chunked.per_dp_group(3, InstanceRole::DECODE, true), 10);
-  EXPECT_EQ(chunked.per_dp_group(3, InstanceRole::PREFILL, false), 10);
+TEST(PrefillPolicyTest, FairBudgetPreservesChunkFloorAndRoleSemantics) {
+  const PrefillPolicy chunked(/*max_batch_tokens=*/10,
+                              /*requested_chunk_tokens=*/2,
+                              /*enable_chunked_prefill=*/true,
+                              /*enable_fair_budget=*/true);
+  EXPECT_EQ(chunked.per_dp_group(3, InstanceRole::PREFILL), 4);
+  EXPECT_EQ(chunked.per_dp_group(1, InstanceRole::PREFILL), 10);
+  EXPECT_EQ(chunked.per_dp_group(3, InstanceRole::DECODE), 10);
+  EXPECT_EQ(chunked.per_dp_group(3, InstanceRole::MIX), 10);
+  const PrefillPolicy unfair(/*max_batch_tokens=*/10,
+                             /*requested_chunk_tokens=*/2,
+                             /*enable_chunked_prefill=*/true,
+                             /*enable_fair_budget=*/false);
+  EXPECT_EQ(unfair.per_dp_group(3, InstanceRole::PREFILL), 10);
 
-  const PrefillTokenBudget large_chunk(/*max_batch_tokens=*/10,
-                                       /*max_chunk_tokens=*/6,
-                                       /*enable_chunked_prefill=*/true);
-  EXPECT_EQ(large_chunk.per_dp_group(3, InstanceRole::PREFILL, true), 6);
-  const PrefillTokenBudget oversized_chunk(/*max_batch_tokens=*/10,
-                                           /*max_chunk_tokens=*/16,
-                                           /*enable_chunked_prefill=*/true);
-  EXPECT_EQ(oversized_chunk.per_dp_group(3, InstanceRole::PREFILL, true), 10);
-  const PrefillTokenBudget full_prefill(/*max_batch_tokens=*/10,
-                                        /*max_chunk_tokens=*/2,
-                                        /*enable_chunked_prefill=*/false);
-  EXPECT_EQ(full_prefill.per_dp_group(3, InstanceRole::PREFILL, true), 10);
+  const PrefillPolicy large_chunk(/*max_batch_tokens=*/10,
+                                  /*requested_chunk_tokens=*/6,
+                                  /*enable_chunked_prefill=*/true,
+                                  /*enable_fair_budget=*/true);
+  EXPECT_EQ(large_chunk.per_dp_group(3, InstanceRole::PREFILL), 6);
+  const PrefillPolicy oversized_chunk(/*max_batch_tokens=*/10,
+                                      /*requested_chunk_tokens=*/16,
+                                      /*enable_chunked_prefill=*/true,
+                                      /*enable_fair_budget=*/true);
+  EXPECT_EQ(oversized_chunk.chunk_tokens(), 16);
+  EXPECT_EQ(oversized_chunk.per_dp_group(3, InstanceRole::PREFILL), 10);
+  const PrefillPolicy full_prefill(/*max_batch_tokens=*/10,
+                                   /*requested_chunk_tokens=*/2,
+                                   /*enable_chunked_prefill=*/false,
+                                   /*enable_fair_budget=*/true);
+  EXPECT_EQ(full_prefill.per_dp_group(3, InstanceRole::PREFILL), 10);
+}
+
+TEST(PrefillPolicyTest, AutomaticChunkAndBudgetStayConsistent) {
+  for (const int64_t requested : {-1, -8}) {
+    const PrefillPolicy policy(/*max_batch_tokens=*/10,
+                               requested,
+                               /*enable_chunked_prefill=*/true,
+                               /*enable_fair_budget=*/true);
+    EXPECT_EQ(policy.chunk_tokens(), 10);
+    EXPECT_EQ(policy.per_dp_group(3, InstanceRole::PREFILL), 10);
+  }
 }
 
 TEST(OptionsTest, ContextParallelDefaultsToOne) {

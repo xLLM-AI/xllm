@@ -29,7 +29,6 @@ limitations under the License.
 #include <sstream>
 
 #include "core/common/global_flags.h"
-#include "core/common/prefill_token_budget.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/framework/batch/batch_factory.h"
@@ -126,6 +125,10 @@ ProfileManager::ProfileManager(
     ResultCallback result_callback,
     std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
     : options_(options),
+      prefill_policy_(options.max_tokens_per_batch(),
+                      options.max_tokens_per_chunk_for_prefill(),
+                      options.enable_chunked_prefill(),
+                      options.enable_dp_fair_token_budget()),
       engine_(engine),
       distributed_worker_manager_(std::move(distributed_worker_manager)),
       step_callback_(std::move(step_callback)),
@@ -270,7 +273,7 @@ void ProfileManager::eval_batch_latency_prediction(const std::string mode) {
     }
   }
   if (mode == "mix") {
-    if (!options_.enable_chunked_prefill()) {
+    if (!prefill_policy_.enable_chunked_prefill()) {
       LOG(WARNING) << "When chunked prefill is disabled, mixed prefill and "
                       "decode scenarios will not be tested.";
       return;
@@ -1124,14 +1127,8 @@ void ProfileManager::warmup_prefill_for_graph() {
 
   int32_t prefill_tokens =
       std::min(options_.max_tokens_per_batch(), max_context_len);
-  const PrefillTokenBudget prefill_budget(
-      options_.max_tokens_per_batch(),
-      options_.max_tokens_per_chunk_for_prefill(),
-      options_.enable_chunked_prefill());
-  const int64_t per_group_cap =
-      prefill_budget.per_dp_group(options_.dp_size(),
-                                  options_.instance_role(),
-                                  options_.enable_dp_fair_token_budget());
+  const int64_t per_group_cap = prefill_policy_.per_dp_group(
+      options_.dp_size(), options_.instance_role());
   prefill_tokens =
       static_cast<int32_t>(std::min<int64_t>(prefill_tokens, per_group_cap));
   double prefill_latency = run_request(prefill_tokens,

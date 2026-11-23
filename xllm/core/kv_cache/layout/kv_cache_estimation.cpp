@@ -27,7 +27,7 @@ limitations under the License.
 
 #include "core/common/constants.h"
 #include "core/common/metrics.h"
-#include "core/common/prefill_token_budget.h"
+#include "core/common/prefill_policy.h"
 #include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -327,14 +327,16 @@ int64_t dsv4_swa_block_count(const ModelArgs& model_args,
   int64_t publish_unit_blocks = 0;
   if (options.enable_dp_fair_token_budget && options.dp_size > 1 &&
       options.instance_role == InstanceRole::PREFILL) {
-    const PrefillTokenBudget prefill_budget(
-        burst_budget,
-        options.max_tokens_per_chunk_for_prefill,
-        options.enable_chunked_prefill);
-    burst_budget =
-        prefill_budget.per_dp_group(options.dp_size,
-                                    options.instance_role,
-                                    options.enable_dp_fair_token_budget);
+    // A zero burst is valid for capacity-only estimates and needs no sharing.
+    if (burst_budget > 0) {
+      const PrefillPolicy prefill_policy(
+          burst_budget,
+          options.max_tokens_per_chunk_for_prefill,
+          options.enable_chunked_prefill,
+          options.enable_dp_fair_token_budget);
+      burst_budget =
+          prefill_policy.per_dp_group(options.dp_size, options.instance_role);
+    }
     if (options.enable_prefix_cache) {
       // Prefix reuse needs the SWA rows of a complete compressed checkpoint.
       for (const int32_t ratio : model_args.compress_ratios()) {

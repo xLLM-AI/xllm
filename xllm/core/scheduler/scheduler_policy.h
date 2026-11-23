@@ -25,6 +25,7 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "core/common/prefill_policy.h"
 #include "framework/block/kv_cache_manager.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -222,6 +223,7 @@ class SchedulerPolicy {
 
   BatchMode batch_mode_;
   const SchedulerOptions& options_;
+  const PrefillPolicy prefill_policy_;
 
  private:
   enum class PrefillScheduleResult {

@@ -30,8 +30,7 @@ cc_library(
     metrics.h
     $<$<BOOL:${USE_NPU}>:mspti_helper.h>
     options.h
-    prefill_chunk_size.h
-    prefill_token_budget.h
+    prefill_policy.h
     rate_limiter.h
     types.h
     flash_comm1_context.h

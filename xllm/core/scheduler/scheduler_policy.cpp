@@ -71,7 +71,12 @@ inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
 
 SchedulerPolicy::SchedulerPolicy(const BatchMode& mode,
                                  const SchedulerOptions& options)
-    : batch_mode_(mode), options_(options) {}
+    : batch_mode_(mode),
+      options_(options),
+      prefill_policy_(options.max_tokens_per_batch(),
+                      options.max_tokens_per_chunk_for_prefill(),
+                      options.enable_chunked_prefill(),
+                      options.enable_dp_fair_token_budget()) {}
 
 bool SchedulerPolicy::should_limit_prefill_requests(
     const SchedulerState& state) const {
@@ -586,7 +591,7 @@ size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
 
   // Chunked prefill: compute min(remaining, max_chunk, budget).
   const size_t max_tokens_per_chunk =
-      options_.max_tokens_per_chunk_for_prefill();
+      static_cast<size_t>(prefill_policy_.chunk_tokens());
   size_t num_tokens = seq->num_tokens();
   size_t assume_max = std::min(max_tokens_per_chunk, remaining_budget);
   num_tokens = std::min(assume_max, num_tokens);
@@ -634,7 +639,7 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
   if (has_linear_attention_layers(state.model_args) &&
       state.enable_prefix_cache && seq->is_prefill_stage()) {
     const size_t chunk_stride =
-        static_cast<size_t>(options_.max_tokens_per_chunk_for_prefill());
+        static_cast<size_t>(prefill_policy_.chunk_tokens());
     const size_t aligned = max_handle_num_tokens / chunk_stride * chunk_stride;
     if (aligned > kv_cache_tokens_num) {
       max_handle_num_tokens = aligned;
@@ -668,8 +673,8 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
       state.kv_cache_manager->allocate_shared(seq);
       return;
     }
-    const size_t max_tokens_per_chunk =
-        std::max(options_.max_tokens_per_chunk_for_prefill(), 64);
+    const size_t max_tokens_per_chunk = static_cast<size_t>(
+        std::max<int64_t>(prefill_policy_.chunk_tokens(), 64));
     size_t total_chunked_size =
         (seq->num_tokens() + max_tokens_per_chunk - 1) / max_tokens_per_chunk;
     if (total_chunked_size < options_.chunked_match_frequency()) {

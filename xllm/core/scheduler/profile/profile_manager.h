@@ -24,6 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/macros.h"
+#include "core/common/prefill_policy.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/batch/batch_factory.h"
@@ -256,6 +257,7 @@ class ProfileManager {
   std::unique_ptr<TimePredictor> decode_time_predictor_;
 
   const Options options_;
+  const PrefillPolicy prefill_policy_;
 
   Engine* engine_;
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;

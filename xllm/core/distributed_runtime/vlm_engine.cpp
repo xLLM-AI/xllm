@@ -33,6 +33,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/common/global_flags.h"
+#include "core/common/prefill_policy.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/kv_capacity_planner.h"
@@ -348,7 +349,6 @@ bool VLMEngine::allocate_kv_cache(
       .host_num_blocks(0)
       .block_size(block_size)
       .enable_linear_state(enable_state_cache)
-      .linear_state_chunk_stride(options_.max_tokens_per_chunk_for_prefill())
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
@@ -388,13 +388,18 @@ bool VLMEngine::allocate_kv_cache(
     }
     options.enable_host_offload(true);
   }
+  const PrefillPolicy prefill_policy(
+      options_.max_tokens_per_batch(),
+      options_.max_tokens_per_chunk_for_prefill(),
+      options_.enable_chunked_prefill(),
+      options_.enable_dp_fair_token_budget());
   auto factory_result =
       KVCacheManagerFactory::create(kv_cache_cap,
                                     args_,
                                     dp_local_tp_size_,
                                     dtype_,
                                     std::move(options),
-                                    options_.enable_chunked_prefill(),
+                                    prefill_policy,
                                     std::move(transfer_coordinator),
                                     dp_size_,
                                     std::move(host_cache_validation_options),

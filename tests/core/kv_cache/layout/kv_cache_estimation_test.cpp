@@ -1915,6 +1915,15 @@ TEST(KVCacheEstimationTest, RuntimePrefillSettingsControlSwaBurstReservation) {
         KVCacheEstimator(model_args).estimate(options, context);
     EXPECT_EQ(capacity.swa_count(), fair ? 50 : 146);
   }
+  options.max_tokens_per_chunk_for_prefill(-1);
+  const KVCacheCapacity automatic_capacity =
+      KVCacheEstimator(model_args).estimate(options, context);
+  EXPECT_EQ(automatic_capacity.swa_count(), 146);
+  options.max_tokens_per_chunk_for_prefill(4096).enable_chunked_prefill(false);
+  const KVCacheCapacity full_prefill_capacity =
+      KVCacheEstimator(model_args).estimate(options, context);
+  EXPECT_EQ(full_prefill_capacity.swa_count(), 146);
+  options.enable_chunked_prefill(true);
   // Multimodal capacity retains the existing full-budget estimate.
   context.is_multimodal = true;
   const KVCacheCapacity capacity =

@@ -365,6 +365,23 @@ TEST_P(LinearProfileGraphWarmupTest, PrefillWarmupDoesNotSplitIntoChunks) {
             (std::vector<size_t>{0}));
 }
 
+TEST_P(LinearProfileGraphWarmupTest,
+       AutomaticChunkKeepsFullPrefillWarmupBudget) {
+  RecordingProfileEngine engine(
+      /*overlap=*/std::get<0>(GetParam()),
+      /*dp_size=*/3,
+      /*linear_attention=*/true,
+      InstanceRole::PREFILL,
+      std::get<1>(GetParam()));
+  ProfileManager::Options profile_options = options(InstanceRole::PREFILL);
+  profile_options.dp_size(3)
+      .enable_dp_fair_token_budget(true)
+      .max_tokens_per_chunk_for_prefill(-1);
+  ProfileManager profile_manager(&engine, profile_options);
+  EXPECT_EQ(engine.prefill_batches(),
+            (std::vector<std::vector<int32_t>>{{10}}));
+}
+
 TEST_P(LinearProfileGraphWarmupTest, PrefillUsesInjectedFairBudget) {
   // Fixture globals disable fairness; explicit options must control the shape.
   for (const bool chunked : {false, true}) {

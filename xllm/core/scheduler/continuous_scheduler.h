@@ -33,6 +33,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/macros.h"
+#include "core/common/prefill_policy.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/distributed_runtime/xservice_client.h"
@@ -163,6 +164,7 @@ class ContinuousSchedulerBase : public Scheduler {
       const std::vector<std::shared_ptr<Request>>& requests);
 
   const Options options_;
+  const PrefillPolicy prefill_policy_;
 
   // BatchMode resolved from scheduler options.
   BatchMode batch_mode_;

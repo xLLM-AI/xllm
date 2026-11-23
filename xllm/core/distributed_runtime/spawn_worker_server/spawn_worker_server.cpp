@@ -24,6 +24,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/common/global_flags.h"
+#include "core/common/prefill_policy.h"
 #include "core/distributed_runtime/worker_server.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/eplb_config.h"
@@ -111,6 +112,11 @@ SpawnWorkerServer::SpawnWorkerServer(
   const int32_t effective_cfg_size = is_dit_backend ? cfg_size : 1;
   const int32_t effective_text_encoder_tp_size =
       is_dit_backend ? text_encoder_tp_size : 1;
+  const PrefillPolicy prefill_policy(
+      max_tokens_per_batch,
+      prefill_config.max_chunk_tokens,
+      prefill_config.enable_chunked_prefill,
+      prefill_config.enable_dp_fair_token_budget);
   runner_options.block_size(block_size)
       .backend(backend)
       .model_impl(model_impl)
@@ -118,9 +124,8 @@ SpawnWorkerServer::SpawnWorkerServer(
       .eplb_worker_config(std::move(eplb_worker_config))
       .world_size(world_size)
       .max_tokens_per_batch(max_tokens_per_batch)
-      .max_tokens_per_chunk_for_prefill(prefill_config.max_chunk_tokens < 0
-                                            ? max_tokens_per_batch
-                                            : prefill_config.max_chunk_tokens)
+      .max_tokens_per_chunk_for_prefill(
+          static_cast<int32_t>(prefill_policy.chunk_tokens()))
       .enable_chunked_prefill(prefill_config.enable_chunked_prefill)
       .enable_dp_fair_token_budget(prefill_config.enable_dp_fair_token_budget)
       .max_seqs_per_batch(max_seqs_per_batch)
@@ -153,9 +158,14 @@ SpawnWorkerServer::SpawnWorkerServer(
       .max_encoder_cache_size(max_encoder_cache_size);
   ModelConfig::get_instance().model_impl(model_impl);
   ExecutionConfig::get_instance().extension_impl(extension_impl);
+  // Some model implementations still read prefill settings from this singleton.
   SchedulerConfig::get_instance()
       .max_tokens_per_batch(max_tokens_per_batch)
       .max_seqs_per_batch(max_seqs_per_batch)
+      .max_tokens_per_chunk_for_prefill(
+          runner_options.max_tokens_per_chunk_for_prefill())
+      .enable_chunked_prefill(runner_options.enable_chunked_prefill())
+      .enable_dp_fair_token_budget(runner_options.enable_dp_fair_token_budget())
       .enable_schedule_overlap(false);
   ParallelConfig::get_instance()
       .dp_size(dp_size)
