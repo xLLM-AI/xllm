@@ -30,6 +30,7 @@ namespace xllm {
 
 class KVTransferCoordinatorBase;
 class ModelArgs;
+class PrefillPolicy;
 class VmmKVLayout;
 
 struct KVCacheManagerFactoryResult final {
@@ -45,7 +46,7 @@ class KVCacheManagerFactory final {
       int64_t world_size,
       torch::ScalarType dtype,
       BlockManagerPool::Options options,
-      bool enable_chunked_prefill,
+      const PrefillPolicy& prefill_policy,
       std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
       int32_t dp_size = 1,
       std::optional<HostCacheValidationOptions> host_validation_options =

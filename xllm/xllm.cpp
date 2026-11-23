@@ -35,7 +35,7 @@ namespace py = pybind11;
 #include "core/common/metrics.h"
 #include "core/common/native_library.h"
 #include "core/common/options.h"
-#include "core/common/prefill_chunk_size.h"
+#include "core/common/prefill_policy.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/master.h"
@@ -400,10 +400,13 @@ int run() {
   LOG(INFO) << "set worker role to "
             << (is_local ? "local worker" : "remote worker");
 
-  const PrefillChunkSize chunk_size(
+  const PrefillPolicy prefill_policy(
+      scheduler_config.max_tokens_per_batch(),
       scheduler_config.max_tokens_per_chunk_for_prefill(),
-      scheduler_config.max_tokens_per_batch());
-  scheduler_config.max_tokens_per_chunk_for_prefill(chunk_size.tokens());
+      scheduler_config.enable_chunked_prefill(),
+      scheduler_config.enable_dp_fair_token_budget());
+  scheduler_config.max_tokens_per_chunk_for_prefill(
+      static_cast<int32_t>(prefill_policy.chunk_tokens()));
 
   std::string model_type = "";
   if (model_config.backend() != "dit") {

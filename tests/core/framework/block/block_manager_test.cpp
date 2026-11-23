@@ -21,6 +21,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/global_flags.h"
+#include "core/common/prefill_policy.h"
 #include "core/framework/batch/batch.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/kv_cache_manager_factory.h"
@@ -239,24 +240,36 @@ TEST_F(BlockManagerPoolTest,
       .linear_state_chunk_stride(8)
       .enable_prefix_cache(true);
   const auto create_manager = [&options](bool enable_chunked_prefill) {
-    return KVCacheManagerFactory::create(make_shared_cache_capacity(),
-                                         make_shared_cache_model_args(),
-                                         /*world_size=*/1,
-                                         torch::kBFloat16,
-                                         options,
-                                         enable_chunked_prefill,
-                                         /*transfer_coordinator=*/nullptr);
+    return KVCacheManagerFactory::create(
+        make_shared_cache_capacity(),
+        make_shared_cache_model_args(),
+        /*world_size=*/1,
+        torch::kBFloat16,
+        options,
+        PrefillPolicy(/*max_batch_tokens=*/512,
+                      options.linear_state_chunk_stride(),
+                      enable_chunked_prefill,
+                      /*enable_fair_budget=*/false),
+        /*transfer_coordinator=*/nullptr);
   };
   auto result = create_manager(/*enable_chunked_prefill=*/true);
   ASSERT_NE(result.manager, nullptr);
+  auto& pool = static_cast<BlockManagerPool&>(*result.manager);
+  EXPECT_EQ(
+      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0)->block_size(),
+      8);
   EXPECT_DEATH(create_manager(/*enable_chunked_prefill=*/false),
                "requires block-aligned chunked");
   options.linear_state_chunk_stride(12);
   EXPECT_DEATH(create_manager(/*enable_chunked_prefill=*/true),
                "must be a multiple of block_size");
   options.linear_state_chunk_stride(-1);
-  EXPECT_DEATH(create_manager(/*enable_chunked_prefill=*/true),
-               "must be positive");
+  auto automatic = create_manager(/*enable_chunked_prefill=*/true);
+  ASSERT_NE(automatic.manager, nullptr);
+  auto& automatic_pool = static_cast<BlockManagerPool&>(*automatic.manager);
+  EXPECT_EQ(BlockManagerPoolTestPeer::linear_leaf(automatic_pool, /*dp_rank=*/0)
+                ->block_size(),
+            512);
 }
 
 TEST_F(BlockManagerPoolTest,
@@ -267,14 +280,17 @@ TEST_F(BlockManagerPoolTest,
         .enable_linear_state(true)
         .enable_prefix_cache(is_decode)
         .instance_is_decode(is_decode);
-    auto result =
-        KVCacheManagerFactory::create(make_shared_cache_capacity(),
-                                      make_shared_cache_model_args(),
-                                      /*world_size=*/1,
-                                      torch::kBFloat16,
-                                      options,
-                                      /*enable_chunked_prefill=*/false,
-                                      /*transfer_coordinator=*/nullptr);
+    auto result = KVCacheManagerFactory::create(
+        make_shared_cache_capacity(),
+        make_shared_cache_model_args(),
+        /*world_size=*/1,
+        torch::kBFloat16,
+        options,
+        PrefillPolicy(/*max_batch_tokens=*/512,
+                      options.linear_state_chunk_stride(),
+                      /*enable_chunked_prefill=*/false,
+                      /*enable_fair_budget=*/false),
+        /*transfer_coordinator=*/nullptr);
     ASSERT_NE(result.manager, nullptr);
   }
 }
@@ -290,13 +306,17 @@ TEST_F(BlockManagerPoolTest, FactoryAllowsNonChunkedPrefillWithoutLinearState) {
       .head_dim(8);
   BlockManagerPool::Options options;
   options.num_blocks(64).block_size(4).enable_prefix_cache(true);
-  auto result = KVCacheManagerFactory::create(capacity,
-                                              model_args,
-                                              /*world_size=*/1,
-                                              torch::kBFloat16,
-                                              options,
-                                              /*enable_chunked_prefill=*/false,
-                                              /*transfer_coordinator=*/nullptr);
+  auto result = KVCacheManagerFactory::create(
+      capacity,
+      model_args,
+      /*world_size=*/1,
+      torch::kBFloat16,
+      options,
+      PrefillPolicy(/*max_batch_tokens=*/512,
+                    options.linear_state_chunk_stride(),
+                    /*enable_chunked_prefill=*/false,
+                    /*enable_fair_budget=*/false),
+      /*transfer_coordinator=*/nullptr);
   ASSERT_NE(result.manager, nullptr);
 }
 
@@ -315,15 +335,19 @@ TEST(KVCacheManagerFactoryTest,
   HostCacheValidationOptions host_options;
   host_options.host_blocks_factor = 2.0;
 
-  EXPECT_DEATH(KVCacheManagerFactory::create(capacity,
-                                             model_args,
-                                             /*world_size=*/1,
-                                             torch::kBFloat16,
-                                             options,
-                                             /*enable_chunked_prefill=*/true,
-                                             /*transfer_coordinator=*/nullptr,
-                                             /*dp_size=*/1,
-                                             host_options),
+  EXPECT_DEATH(KVCacheManagerFactory::create(
+                   capacity,
+                   model_args,
+                   /*world_size=*/1,
+                   torch::kBFloat16,
+                   options,
+                   PrefillPolicy(/*max_batch_tokens=*/512,
+                                 options.linear_state_chunk_stride(),
+                                 /*enable_chunked_prefill=*/true,
+                                 /*enable_fair_budget=*/false),
+                   /*transfer_coordinator=*/nullptr,
+                   /*dp_size=*/1,
+                   host_options),
                "current platform has no host KV offload");
 }
 
@@ -344,15 +368,19 @@ TEST(KVCacheManagerFactoryTest,
   host_options.supports_host_kv_offload = true;
   host_options.enable_prefix_cache = false;
 
-  EXPECT_DEATH(KVCacheManagerFactory::create(capacity,
-                                             model_args,
-                                             /*world_size=*/1,
-                                             torch::kBFloat16,
-                                             options,
-                                             /*enable_chunked_prefill=*/true,
-                                             /*transfer_coordinator=*/nullptr,
-                                             /*dp_size=*/1,
-                                             host_options),
+  EXPECT_DEATH(KVCacheManagerFactory::create(
+                   capacity,
+                   model_args,
+                   /*world_size=*/1,
+                   torch::kBFloat16,
+                   options,
+                   PrefillPolicy(/*max_batch_tokens=*/512,
+                                 options.linear_state_chunk_stride(),
+                                 /*enable_chunked_prefill=*/true,
+                                 /*enable_fair_budget=*/false),
+                   /*transfer_coordinator=*/nullptr,
+                   /*dp_size=*/1,
+                   host_options),
                "prefix caching is disabled");
 }
 
@@ -363,13 +391,17 @@ TEST_F(BlockManagerPoolTest,
       .enable_linear_state(true)
       .linear_state_chunk_stride(4)
       .enable_prefix_cache(false);
-  auto result = KVCacheManagerFactory::create(make_shared_cache_capacity(),
-                                              make_shared_cache_model_args(),
-                                              /*world_size=*/1,
-                                              torch::kBFloat16,
-                                              options,
-                                              /*enable_chunked_prefill=*/true,
-                                              /*transfer_coordinator=*/nullptr);
+  auto result = KVCacheManagerFactory::create(
+      make_shared_cache_capacity(),
+      make_shared_cache_model_args(),
+      /*world_size=*/1,
+      torch::kBFloat16,
+      options,
+      PrefillPolicy(/*max_batch_tokens=*/512,
+                    options.linear_state_chunk_stride(),
+                    /*enable_chunked_prefill=*/true,
+                    /*enable_fair_budget=*/false),
+      /*transfer_coordinator=*/nullptr);
   EXPECT_EQ(result.shape.key_cache_shape().front(), 53);
   EXPECT_EQ(result.shape.conv_cache_shape().front(), 53);
   EXPECT_EQ(result.manager->block_resource_units(BlockType::KV, 2), 128);
@@ -392,13 +424,17 @@ TEST_F(BlockManagerPoolTest, SharedFactoryAccountsForTypedSlabFragmentation) {
       .enable_prefix_cache(false);
   KVCacheCapacity capacity = make_shared_cache_capacity();
   capacity.shared_slab_count(5);
-  auto result = KVCacheManagerFactory::create(capacity,
-                                              make_shared_cache_model_args(),
-                                              /*world_size=*/1,
-                                              torch::kBFloat16,
-                                              options,
-                                              /*enable_chunked_prefill=*/true,
-                                              /*transfer_coordinator=*/nullptr);
+  auto result = KVCacheManagerFactory::create(
+      capacity,
+      make_shared_cache_model_args(),
+      /*world_size=*/1,
+      torch::kBFloat16,
+      options,
+      PrefillPolicy(/*max_batch_tokens=*/512,
+                    options.linear_state_chunk_stride(),
+                    /*enable_chunked_prefill=*/true,
+                    /*enable_fair_budget=*/false),
+      /*transfer_coordinator=*/nullptr);
   auto first = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8});
   auto second = make_sequence(1, {9, 10, 11, 12, 13, 14, 15, 16});
   EXPECT_FALSE(result.manager->exceeds_total_capacity(&first, 8));
@@ -422,13 +458,17 @@ TEST(KVCacheManagerFactoryTest, RejectsSharedStorageCostMismatch) {
       .enable_prefix_cache(false);
   auto capacity = make_shared_cache_capacity();
   capacity.shared_linear_state_slots(3);
-  EXPECT_DEATH(KVCacheManagerFactory::create(capacity,
-                                             make_shared_cache_model_args(),
-                                             /*world_size=*/1,
-                                             torch::kBFloat16,
-                                             options,
-                                             /*enable_chunked_prefill=*/true,
-                                             /*transfer_coordinator=*/nullptr),
+  EXPECT_DEATH(KVCacheManagerFactory::create(
+                   capacity,
+                   make_shared_cache_model_args(),
+                   /*world_size=*/1,
+                   torch::kBFloat16,
+                   options,
+                   PrefillPolicy(/*max_batch_tokens=*/512,
+                                 options.linear_state_chunk_stride(),
+                                 /*enable_chunked_prefill=*/true,
+                                 /*enable_fair_budget=*/false),
+                   /*transfer_coordinator=*/nullptr),
                "num_linear_groups");
 }
 

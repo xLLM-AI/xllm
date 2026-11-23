@@ -17,15 +17,18 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "core/common/prefill_chunk_size.h"
+#include "core/common/prefill_policy.h"
 #include "core/framework/model/model_args.h"
 
 namespace xllm {
 
 void Options::resolve_prefill_options() {
-  const PrefillChunkSize chunk_size(max_tokens_per_chunk_for_prefill(),
-                                    max_tokens_per_batch());
-  max_tokens_per_chunk_for_prefill(chunk_size.tokens());
+  const PrefillPolicy prefill_policy(max_tokens_per_batch(),
+                                     max_tokens_per_chunk_for_prefill(),
+                                     enable_chunked_prefill(),
+                                     /*enable_fair_budget=*/false);
+  max_tokens_per_chunk_for_prefill(
+      static_cast<int32_t>(prefill_policy.chunk_tokens()));
   if (task_type() == "mm_embed") {
     enable_chunked_prefill(false);
     enable_prefix_cache(false);

@@ -28,7 +28,6 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "core/common/prefill_token_budget.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/distributed_runtime/engine.h"
@@ -64,6 +63,10 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
     std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator,
     std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
     : options_(options),
+      prefill_policy_(options.max_tokens_per_batch(),
+                      options.max_tokens_per_chunk_for_prefill(),
+                      options.enable_chunked_prefill(),
+                      options.enable_dp_fair_token_budget()),
       batch_mode_(create_batch_mode(options)),
       batch_factory_(options.dp_size()),
       resource_engine_(engine),
@@ -365,15 +368,9 @@ BatchGroup ContinuousSchedulerBase::prepare_batch() {
   if (options_.enable_dp_fair_token_budget() && options_.dp_size() > 1 &&
       options_.instance_role().has_value() &&
       options_.instance_role().value() == InstanceRole::PREFILL) {
-    const int64_t dp_size = options_.dp_size();
-    const PrefillTokenBudget prefill_budget(
-        options_.max_tokens_per_batch(),
-        options_.max_tokens_per_chunk_for_prefill(),
-        options_.enable_chunked_prefill());
-    int64_t per_group_cap =
-        prefill_budget.per_dp_group(dp_size,
-                                    options_.instance_role().value(),
-                                    options_.enable_dp_fair_token_budget());
+    const int32_t dp_size = options_.dp_size();
+    int64_t per_group_cap = prefill_policy_.per_dp_group(
+        options_.dp_size(), options_.instance_role().value());
     per_group_cap =
         std::min(std::max<int64_t>(1, per_group_cap),
                  static_cast<int64_t>(budget.remaining_token_budget));

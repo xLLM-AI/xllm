@@ -20,6 +20,7 @@ limitations under the License.
 #include <limits>
 #include <utility>
 
+#include "core/common/prefill_policy.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
@@ -38,23 +39,27 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     int64_t world_size,
     torch::ScalarType dtype,
     BlockManagerPool::Options options,
-    bool enable_chunked_prefill,
+    const PrefillPolicy& prefill_policy,
     std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
     int32_t dp_size,
     std::optional<HostCacheValidationOptions> host_validation_options,
     const VmmKVLayout* shared_vmm_layout) {
   CHECK_GT(world_size, 0) << "world_size must be greater than 0";
   CHECK_GT(dp_size, 0) << "dp_size must be greater than 0";
+  if (options.enable_linear_state()) {
+    CHECK_LE(prefill_policy.chunk_tokens(),
+             static_cast<int64_t>(std::numeric_limits<int32_t>::max()))
+        << "Linear checkpoint interval exceeds int32_t range";
+    options.linear_state_chunk_stride(
+        static_cast<int32_t>(prefill_policy.chunk_tokens()));
+  }
   if (options.enable_linear_state() && options.enable_prefix_cache() &&
       !options.instance_is_decode()) {
-    CHECK(enable_chunked_prefill)
+    CHECK(prefill_policy.enable_chunked_prefill())
         << "GDN/KPool state prefix cache requires block-aligned chunked "
            "prefill to save matching linear states. Please set "
            "--enable_chunked_prefill=true in your config.";
-    const int32_t chunk_tokens = options.linear_state_chunk_stride();
-    CHECK_GT(chunk_tokens, 0)
-        << "max_tokens_per_chunk_for_prefill must be positive for linear state "
-           "prefix cache";
+    const int64_t chunk_tokens = prefill_policy.chunk_tokens();
     // KV split expands the manager's logical block size. Check checkpoint
     // alignment against the original cache block size from the capacity.
     const int64_t block_size = kv_cache_capacity.block_size();

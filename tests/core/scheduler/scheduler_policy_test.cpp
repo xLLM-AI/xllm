@@ -896,36 +896,40 @@ TEST(SchedulerPolicyTest, PrefillBudgetUsesInjectedFairAndChunkSwitches) {
   ScopedConfigValue<bool> chunked_prefill_guard(
       SchedulerConfig::get_instance().enable_chunked_prefill(), false);
   for (const bool fair : {false, true}) {
-    SchedulerOptions options = create_scheduler_options(
-        /*max_tokens_per_batch=*/10,
-        /*max_seqs_per_batch=*/8,
-        /*num_speculative_tokens=*/0,
-        /*max_tokens_per_chunk_for_prefill=*/2,
-        /*dp_size=*/3);
-    options.enable_dp_fair_token_budget(fair)
-        .enable_chunked_prefill(true)
-        .enable_mix_batch(false)
-        .enable_disagg_pd(true)
-        .instance_role(InstanceRole::PREFILL);
-    FakeEngine engine(/*num_blocks=*/128,
-                      /*block_size=*/1,
-                      /*enable_prefix_cache=*/false,
-                      /*dp_size=*/3);
-    TestableContinuousScheduler scheduler(&engine, options);
-    auto requests = generate_request(
-        {30, 30, 30}, {1, 1, 1}, std::nullopt, std::nullopt, 128);
-    for (auto& request : requests) {
-      request->sequences().front()->set_dp_rank(0);
-      ASSERT_TRUE(scheduler.add_request(request));
-    }
-    auto batches = scheduler.prepare_batch_test();
-    size_t scheduled_tokens = 0;
-    for (const Batch& batch : batches) {
-      for (const uint32_t tokens : batch.get_allowed_max_tokens()) {
-        scheduled_tokens += tokens;
+    for (const int32_t requested_chunk : {-1, 2}) {
+      SchedulerOptions options = create_scheduler_options(
+          /*max_tokens_per_batch=*/10,
+          /*max_seqs_per_batch=*/8,
+          /*num_speculative_tokens=*/0,
+          requested_chunk,
+          /*dp_size=*/3);
+      options.enable_dp_fair_token_budget(fair)
+          .enable_chunked_prefill(true)
+          .enable_mix_batch(false)
+          .enable_disagg_pd(true)
+          .instance_role(InstanceRole::PREFILL);
+      FakeEngine engine(/*num_blocks=*/128,
+                        /*block_size=*/1,
+                        /*enable_prefix_cache=*/false,
+                        /*dp_size=*/3);
+      TestableContinuousScheduler scheduler(&engine, options);
+      auto requests = generate_request(
+          {30, 30, 30}, {1, 1, 1}, std::nullopt, std::nullopt, 128);
+      for (auto& request : requests) {
+        request->sequences().front()->set_dp_rank(0);
+        ASSERT_TRUE(scheduler.add_request(request));
       }
+      auto batches = scheduler.prepare_batch_test();
+      size_t scheduled_tokens = 0;
+      for (const Batch& batch : batches) {
+        for (const uint32_t tokens : batch.get_allowed_max_tokens()) {
+          scheduled_tokens += tokens;
+        }
+      }
+      const size_t expected_tokens =
+          requested_chunk < 0 ? 10u : (fair ? 4u : 6u);
+      EXPECT_EQ(scheduled_tokens, expected_tokens);
     }
-    EXPECT_EQ(scheduled_tokens, fair ? 4u : 6u);
   }
 }
 
