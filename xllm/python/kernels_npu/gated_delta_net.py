@@ -20,8 +20,7 @@ the existing Python composition for paths not migrated to MegaGdn yet.
 
 from __future__ import annotations
 
-import torch
-from xllm_kernel.ops.attention.gdn import chunk_gated_delta_rule as chunk_gated_delta_rule
+from xllm_kernel.ops.attention.gdn import chunk_gated_delta_rule, fused_gdn_gating
 from xllm_kernel.ops.attention.gdn.mega import (
     mega_gdn_decode as mega_gdn_decode,
 )
@@ -34,39 +33,6 @@ from xllm_kernel.ops.attention.gdn.mega import (
 from xllm_kernel.ops.attention.gdn.mega import (
     mega_gdn_prefill as mega_gdn_prefill,
 )
-
-
-def fused_gdn_gating(
-    a_log: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-    dt_bias: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute decay gate g and beta from raw projections via TileLang kernel."""
-    from .tilelang.fused_gdn_gating import fused_gdn_gating_kernel_jit
-
-    num_batches, num_heads = a.shape
-    kernel = fused_gdn_gating_kernel_jit(
-        num_batches=num_batches,
-        compile_max_batch=num_batches,
-        num_heads=num_heads,
-    )
-
-    g_out = torch.empty(1, num_batches, num_heads, dtype=torch.float32, device=a.device)
-    beta_out = torch.empty(1, num_batches, num_heads, dtype=a.dtype, device=a.device)
-    kernel(
-        a_log.to(torch.float32).contiguous(),
-        a.contiguous(),
-        b.contiguous(),
-        dt_bias.to(torch.float32).contiguous(),
-        g_out.squeeze(0),
-        beta_out.squeeze(0),
-        num_batches,
-        1.0,  # softplus_beta
-        20.0,  # softplus_threshold
-    )
-    return g_out, beta_out
-
 
 __all__ = [
     "mega_gdn_decode",

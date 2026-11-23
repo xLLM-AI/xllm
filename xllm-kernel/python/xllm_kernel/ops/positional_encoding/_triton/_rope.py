@@ -19,13 +19,9 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra.cann.extension import extract_slice, get_element, insert_slice
 
-from .utils import (
-    extract_slice,
-    get_element,
-    get_vectorcore_num,
-    insert_slice,
-)
+from xllm_kernel.ops._tilelang import VECTOR_CORES
 
 
 @triton.jit
@@ -235,7 +231,7 @@ def split_qkv_rmsnorm_rope(
     head_dim: int,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    num_vectorcore = get_vectorcore_num()
+    num_vectorcore = VECTOR_CORES
     rope_dim = cos_sin_cache.shape[-1]
     batch_size = qkv.shape[0]
     total_hidden_size = q_hidden_size + kv_hidden_size * 2
@@ -256,28 +252,28 @@ def split_qkv_rmsnorm_rope(
 
     grid = (num_vectorcore, 1, 1)
     _split_qkv_rmsnorm_rope_kernel[grid](
-        qkv,
-        q_output,
-        k_output,
-        v_output,
-        q_weight,
-        k_weight,
-        batch_size,
-        q_hidden_size,
-        kv_hidden_size,
-        total_hidden_size,
-        eps,
-        head_dim,
-        rope_dim,
-        rope_dim // 2,
-        num_vectorcore,
-        batch_size_per_iter_per_vec,
-        qk_head_nums_per_iter_per_vec,
-        q_head_num,
-        kv_head_num,
-        qk_head_num_sum,
-        v_batch_size_per_iter_per_vec,
-        positions,
-        cos_sin_cache,
+        input_gm_ptr=qkv,
+        q_gm_ptr=q_output,
+        k_gm_ptr=k_output,
+        v_gm_ptr=v_output,
+        q_weight_ptr=q_weight,
+        k_weight_ptr=k_weight,
+        batch_size=batch_size,
+        q_hidden_size=q_hidden_size,
+        kv_hidden_size=kv_hidden_size,
+        total_hidden_size=total_hidden_size,
+        eps=eps,
+        HEAD_DIM=head_dim,
+        ROPE_DIM=rope_dim,
+        HALF_ROPE_DIM=rope_dim // 2,
+        num_vectorcore=num_vectorcore,
+        batch_size_per_iter_per_vec=batch_size_per_iter_per_vec,
+        qk_head_nums_per_iter_per_vec=qk_head_nums_per_iter_per_vec,
+        q_head_num=q_head_num,
+        kv_head_num=kv_head_num,
+        qk_head_num_sum=qk_head_num_sum,
+        v_batch_size_per_iter_per_vec=v_batch_size_per_iter_per_vec,
+        positions_gm_ptr=positions,
+        cos_sin_cache_gm_ptr=cos_sin_cache,
     )
     return q_output, k_output, v_output

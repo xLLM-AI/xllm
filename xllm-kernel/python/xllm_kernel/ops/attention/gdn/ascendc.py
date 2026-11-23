@@ -6,7 +6,11 @@ from functools import cache
 import torch
 
 from xllm_kernel import _ascendc_opp  # noqa: F401
-from xllm_kernel.ops.attention.gdn import CAUSAL_CONV1D_QKV_PREFILL_CONTRACT, CHUNK_GATED_DELTA_RULE_CONTRACT
+from xllm_kernel.ops.attention.gdn import (
+    CAUSAL_CONV1D_PREFILL_CONTRACT,
+    CAUSAL_CONV1D_QKV_PREFILL_CONTRACT,
+    CHUNK_GATED_DELTA_RULE_CONTRACT,
+)
 from xllm_kernel.ops.attention.kda import CAUSAL_CONV1D_CONTRACT
 from xllm_kernel.platform import PlatformEnum
 from xllm_kernel.registry import register_kernel
@@ -34,6 +38,17 @@ register_kernel(
     binding="aclnn",
     contract=CAUSAL_CONV1D_QKV_PREFILL_CONTRACT,
 )(torch.ops.xllm_kernel.causal_conv1d_qkv_prefill.default)
+
+
+register_kernel(
+    name="npu.ascendc.causal_conv1d_prefill",
+    platform=PlatformEnum.NPU,
+    execution_modes=("eager", "aclgraph"),
+    input_domain="Packed FP16/BF16 convolution with host query lengths and indexed state.",
+    solution="ascendc",
+    binding="aclnn",
+    contract=CAUSAL_CONV1D_PREFILL_CONTRACT,
+)(torch.ops.xllm_kernel.causal_conv1d_prefill.default)
 
 
 @cache

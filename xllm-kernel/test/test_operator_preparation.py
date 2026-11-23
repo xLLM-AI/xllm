@@ -60,12 +60,16 @@ from xllm_kernel.ops.positional_encoding import partial_rotary_embedding
 catalog = {operation.contract.operation: operation for operation in load_operations()}
 for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     name = operation.contract.operation
-    if name in ("causal_conv1d", "causal_conv1d_qkv_prefill", "chunk_gated_delta_rule"):
-        continue
     assert catalog[name] is operation
-    assert operation.implementations == ('npu.triton.' + name,)
     assert operation.prepared is None
-    assert operation.backends[0].requires == ('torch_npu', 'triton')
+    if name in ("causal_conv1d", "causal_conv1d_prefill", "causal_conv1d_qkv_prefill", "chunk_gated_delta_rule"):
+        continue
+    if name in ("fused_gdn_gating", "causal_conv1d_decode"):
+        assert operation.implementations == ("npu.tilelang." + name,)
+        assert operation.backends[0].requires == ("torch_npu", "tilelang", "triton")
+    else:
+        assert operation.implementations == ("npu.triton." + name,)
+        assert operation.backends[0].requires == ("torch_npu", "triton")
 for operation in (MATMUL_EIN_SUM_OPERATION, MATMUL_EIN_SUM_OUT_OPERATION):
     name = operation.contract.operation
     assert catalog[name] is operation
@@ -82,6 +86,7 @@ for name, mutates, aliases in (
     ("moe_grouped_matmul_swiglu_quant", (), False),
     ("dequant_swiglu_quant", (), False),
     ("causal_conv1d", ("conv_state",), False),
+    ("causal_conv1d_prefill", ("conv_state",), False),
     ("causal_conv1d_qkv_prefill", ("conv_state",), False),
     ("chunk_gated_delta_rule", (), False),
     ("mega_gdn_prefill", ("conv_state", "ssm_cache"), False),
@@ -117,6 +122,10 @@ cache = catalog["reshape_paged_cache"].contract
 assert cache.mutates == ("key_cache", "value_cache") and cache.aliases_inputs
 rope = catalog["partial_rotary_embedding"].contract
 assert rope.mutates == () and not rope.aliases_inputs
+mrope = catalog["mrope"].contract
+assert mrope.mutates == () and not mrope.aliases_inputs
+inplace_rope = catalog["apply_rotary_embedding"].contract
+assert inplace_rope.mutates == ("q", "k") and not inplace_rope.aliases_inputs
 assert all(callable(fn) for fn in (fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat))
 """
     env = {**os.environ, "PYTHONPATH": str(Path(xllm_kernel.__file__).resolve().parent.parent)}

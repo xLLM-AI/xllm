@@ -69,11 +69,40 @@ CHUNK_GATED_DELTA_RULE_CONTRACT = OpContract(
 )
 CAUSAL_CONV1D_QKV_PREFILL_OPERATION = _ascendc_operation(CAUSAL_CONV1D_QKV_PREFILL_CONTRACT)
 CHUNK_GATED_DELTA_RULE_OPERATION = _ascendc_operation(CHUNK_GATED_DELTA_RULE_CONTRACT)
+CAUSAL_CONV1D_PREFILL_CONTRACT = OpContract(
+    "causal_conv1d_prefill", 1, ("conv_state",), False, "packed_causal_convolution"
+)
+CAUSAL_CONV1D_PREFILL_OPERATION = _ascendc_operation(CAUSAL_CONV1D_PREFILL_CONTRACT)
+FUSED_GDN_GATING_CONTRACT = OpContract("fused_gdn_gating", 1, (), False, "fp32_decay_bf16_beta")
+CAUSAL_CONV1D_DECODE_CONTRACT = OpContract(
+    "causal_conv1d_decode", 1, ("conv_state",), False, "single_token_causal_convolution"
+)
+
+
+def _tilelang_operation(contract: OpContract) -> Operation:
+    return Operation(
+        contract,
+        (
+            BackendModule(
+                module="xllm_kernel.ops.attention.gdn.tilelang",
+                platform=PlatformEnum.NPU,
+                requires=("torch_npu", "tilelang", "triton"),
+                implementations=(f"npu.tilelang.{contract.operation}",),
+            ),
+        ),
+    )
+
+
+FUSED_GDN_GATING_OPERATION = _tilelang_operation(FUSED_GDN_GATING_CONTRACT)
+CAUSAL_CONV1D_DECODE_OPERATION = _tilelang_operation(CAUSAL_CONV1D_DECODE_CONTRACT)
 OPERATIONS = (
     FUSED_RECURRENT_GATED_DELTA_RULE_OPERATION,
     FUSED_SIGMOID_GATING_DELTA_RULE_UPDATE_OPERATION,
     FUSED_QKVZBA_SPLIT_RESHAPE_CAT_OPERATION,
     CAUSAL_CONV1D_QKV_PREFILL_OPERATION,
+    CAUSAL_CONV1D_PREFILL_OPERATION,
+    CAUSAL_CONV1D_DECODE_OPERATION,
+    FUSED_GDN_GATING_OPERATION,
     CHUNK_GATED_DELTA_RULE_OPERATION,
 )
 
@@ -248,3 +277,46 @@ def fused_qkvzba_split_reshape_cat(
     return FUSED_QKVZBA_SPLIT_RESHAPE_CAT_OPERATION.get_prepared().function(
         mixed_qkvz, mixed_ba, num_heads_qk, num_heads_v, head_qk, head_v
     )
+
+
+def causal_conv1d_prefill(
+    value: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    query_start_loc: list[int],
+    state_indices: list[int],
+    has_initial_state: list[int],
+) -> torch.Tensor:
+    """Convolve packed channel-last prefill tokens with SiLU.
+
+    Weight is [width, channels]. Host metadata selects each sequence's
+    history slot and whether to read its previous contents. The convolution
+    updates history in place, with -1 reserved for padded slots.
+    """
+    return CAUSAL_CONV1D_PREFILL_OPERATION.get_prepared().function(
+        value, weight, conv_state, query_start_loc, state_indices, has_initial_state
+    )
+
+
+def causal_conv1d_decode(
+    value: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    state_indices: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Convolve one token per sequence and update the selected history slots."""
+    return CAUSAL_CONV1D_DECODE_OPERATION.get_prepared().function(
+        value,
+        weight,
+        conv_state,
+        state_indices,
+        bias,
+    )
+
+
+def fused_gdn_gating(
+    a_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute FP32 decay and BF16 beta from [tokens, heads] gate projections."""
+    return FUSED_GDN_GATING_OPERATION.get_prepared().function(a_log, a, b, dt_bias)
