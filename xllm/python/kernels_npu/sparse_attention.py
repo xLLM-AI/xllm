@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 from xllm_kernel.ops.attention import dsa as _dsa_attention
+from xllm_kernel.ops.attention.dsa.indexer import lightning_indexer, lightning_indexer_out
 from xllm_kernel.ops.attention.dsa.indexer import (
     quant_lightning_indexer as quant_lightning_indexer,
 )
@@ -206,95 +207,6 @@ def pool_key_indexer(
         mask_mode=mask_mode,
         quant_mode=quant_mode,
         return_value=return_value,
-    )
-
-
-def lightning_indexer(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    weights: torch.Tensor,
-    query_seq_lengths: torch.Tensor | None,
-    key_seq_lengths: torch.Tensor | None,
-    block_table: torch.Tensor | None,
-    layout_query: str,
-    layout_key: str,
-    selected_count: int,
-    sparse_mode: int,
-    pre_tokens: int,
-    next_tokens: int,
-    return_value: bool,
-) -> torch.Tensor:
-    """Select the key blocks each query attends to.
-
-    Args:
-        query: Query tensor laid out as ``layout_query``.
-        key: Key cache laid out as ``layout_key``.
-        weights: Per-head indexer weights.
-        query_seq_lengths: Query length of every sequence, or ``None``.
-        key_seq_lengths: Key length of every sequence, or ``None``.
-        block_table: Paged key-cache block table, or ``None``.
-        layout_query: Query layout, ``"TND"`` or ``"BSND"``.
-        layout_key: Key layout, for example ``"PA_BSND"``.
-        selected_count: Key blocks kept per query.
-        sparse_mode: Sparse masking mode.
-        pre_tokens: Tokens visible before the query position.
-        next_tokens: Tokens visible after the query position.
-        return_value: Whether to also return the indexer scores.
-
-    Returns:
-        Selected key indices of dtype ``torch.int32``.
-    """
-    return torch.ops.xllm_ops.lightning_indexer(
-        query,
-        key,
-        weights,
-        query_seq_lengths,
-        key_seq_lengths,
-        block_table,
-        layout_query,
-        layout_key,
-        selected_count,
-        sparse_mode,
-        pre_tokens,
-        next_tokens,
-        return_value,
-    )
-
-
-def lightning_indexer_out(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    weights: torch.Tensor,
-    query_seq_lengths: torch.Tensor | None,
-    key_seq_lengths: torch.Tensor | None,
-    block_table: torch.Tensor | None,
-    layout_query: str,
-    layout_key: str,
-    selected_count: int,
-    sparse_mode: int,
-    pre_tokens: int,
-    next_tokens: int,
-    return_value: bool,
-    sparse_indices_out: torch.Tensor,
-    sparse_values_out: torch.Tensor,
-) -> torch.Tensor:
-    """Select key blocks and write the results to caller-owned buffers."""
-    return torch.ops.xllm_ops.lightning_indexer_out(
-        query,
-        key,
-        weights,
-        query_seq_lengths,
-        key_seq_lengths,
-        block_table,
-        layout_query,
-        layout_key,
-        selected_count,
-        sparse_mode,
-        pre_tokens,
-        next_tokens,
-        return_value,
-        sparse_indices_out,
-        sparse_values_out,
     )
 
 

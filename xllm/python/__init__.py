@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from importlib.util import find_spec
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -86,6 +87,8 @@ def initialize_runtime() -> None:
                 "sparse_attn_sharedkv_metadata",
                 "sparse_flash_attention_lse",
                 "sparse_flash_attention_lse_out",
+                "lightning_indexer",
+                "lightning_indexer_out",
                 "quant_lightning_indexer",
                 "quant_lightning_indexer_metadata",
                 "scatter_nd_update",
@@ -114,6 +117,8 @@ def initialize_runtime() -> None:
                 "partial_rotary_embedding",
                 "inplace_partial_rotary_mul",
                 "reshape_paged_cache",
+                "update_decode_graph_metadata",
+                *(("shared_full_indices_out", "sfa_dcp_remap_out") if find_spec("tilelang") is not None else ()),
                 "fused_attention",
             ),
         )

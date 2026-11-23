@@ -4,14 +4,14 @@
 import torch
 
 from xllm_kernel import _ascendc_opp  # noqa: F401
-from xllm_kernel.ops.attention.dsa.indexer import OPERATIONS
+from xllm_kernel.ops.attention.dsa.indexer import ASCENDC_OPERATIONS
 from xllm_kernel.platform import PlatformEnum
 from xllm_kernel.registry import register_kernel
 
 torch.ops.xllm_kernel.prepare_ascendc_sparse_indexing()
 
 for operation, domain in zip(
-    OPERATIONS,
+    ASCENDC_OPERATIONS,
     (
         "Packed quantized queries with per-token scales and paged key rows.",
         "Device int32 query and key lengths, and packed-paged indexer geometry.",

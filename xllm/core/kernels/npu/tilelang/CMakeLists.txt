@@ -128,11 +128,6 @@ tilelang_register_runtime_kernel(
 )
 
 tilelang_register_runtime_kernel(
-  NAME shared_full_indices
-  WRAPPER_SRCS shared_full_indices_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
   NAME apply_token_bitmask
   WRAPPER_SRCS apply_token_bitmask_wrapper.cpp
 )
@@ -200,11 +195,6 @@ tilelang_register_runtime_kernel(
 tilelang_register_runtime_kernel(
   NAME fused_sigmoid_gating_delta_rule
   WRAPPER_SRCS fused_sigmoid_gating_delta_rule_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
-  NAME sfa_dcp_remap
-  WRAPPER_SRCS sfa_dcp_remap_wrapper.cpp
 )
 
 cc_library(

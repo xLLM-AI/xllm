@@ -1,6 +1,8 @@
 # Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 """Prepare the migrated NPU operators directly from the kernel package."""
 
+from importlib.util import find_spec
+
 import pytest
 
 pytest.importorskip("torch_npu", reason="NPU integration tests require torch_npu")
@@ -50,10 +52,14 @@ def _prepare_kernels() -> None:
             "sparse_attn_sharedkv_metadata",
             "sparse_flash_attention_lse",
             "sparse_flash_attention_lse_out",
+            "lightning_indexer",
+            "lightning_indexer_out",
             "quant_lightning_indexer",
             "quant_lightning_indexer_metadata",
             "scatter_nd_update",
             "reshape_paged_cache",
+            "update_decode_graph_metadata",
+            *(("shared_full_indices_out", "sfa_dcp_remap_out") if find_spec("tilelang") is not None else ()),
             "quant_matmul",
             "quant_matmul_out",
             "quantize_per_tensor",
