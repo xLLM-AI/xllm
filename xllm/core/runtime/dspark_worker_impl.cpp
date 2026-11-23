@@ -37,14 +37,8 @@ limitations under the License.
 
 namespace xllm {
 
-namespace {
-
-int32_t configure_draft_config(ModelArgs& args,
-                               const runtime::Options& options) {
+void DSparkWorkerImpl::apply_draft_model_overrides(ModelArgs& args) {
   const bool deepseek_v4 = is_deepseek_v4_family(args.model_type());
-  if (args.block_size() == 0) {
-    args.block_size(options.num_speculative_tokens() + 1);
-  }
   args.layers_to_capture({});
   if (deepseek_v4) {
 #if defined(USE_NPU)
@@ -62,20 +56,7 @@ int32_t configure_draft_config(ModelArgs& args,
                         ? std::string(kDSparkGLM5DraftModelType)
                         : "DSparkDraftModel");
   }
-  return options.num_speculative_tokens();
 }
-}  // namespace
-
-DSparkWorkerImpl::DSparkWorkerImpl(const ParallelArgs& parallel_args,
-                                   const torch::Device& device,
-                                   const runtime::Options& options)
-    : DFlashWorkerImpl(
-          parallel_args,
-          device,
-          options,
-          configure_draft_parallel_args(parallel_args),
-          draft_options(options, options.num_speculative_tokens() - 1),
-          configure_draft_config) {}
 
 bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
                                   int32_t random_seed,
@@ -87,8 +68,6 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
   }
 
   const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-  CHECK_EQ(options_.num_speculative_tokens(), draft_args.block_size())
-      << "Runtime block size must match the draft model configuration.";
   if (draft_args.model_type() == "deepseek_v4_dspark") {
     draft_input_per_request_ = draft_args.dspark_use_native_sas();
   }
@@ -100,8 +79,7 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
 
 DecodeExpansionOptions DSparkWorkerImpl::prepare_for_draft() const {
   auto decode_options = DFlashWorkerImpl::prepare_for_draft();
-  decode_options.num_speculative_tokens =
-      draft_impl_->options().num_speculative_tokens();
+  decode_options.num_speculative_tokens = options_.num_speculative_tokens() - 1;
   return decode_options;
 }
 

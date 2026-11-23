@@ -35,8 +35,7 @@ class VmmKVLayout final {
   VmmKVLayout(const KVCacheCapacity& capacity,
               const ModelArgs& model_args,
               int64_t world_size,
-              torch::ScalarType dtype,
-              bool is_draft_engine = false);
+              torch::ScalarType dtype);
 
   void append(VmmKVLayout layout);
 

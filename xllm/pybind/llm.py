@@ -70,14 +70,6 @@ class EmbeddingOutput:
 
 
 class LLM:
-    @staticmethod
-    def _is_vllm_style_inputs(prompts: object) -> bool:
-        if isinstance(prompts, dict):
-            return True
-        if isinstance(prompts, list) and prompts and all(isinstance(x, dict) for x in prompts):
-            return True
-        return False
-
     def __init__(
         self,
         model: str,
@@ -230,7 +222,9 @@ class LLM:
 
         mm_datas = None
         image_urls = None
-        if self._is_vllm_style_inputs(prompts):
+        if isinstance(prompts, dict) or (
+            isinstance(prompts, list) and prompts and all(isinstance(x, dict) for x in prompts)
+        ):
             from . import mm_utils
 
             prompts, mm_datas, image_urls = mm_utils.normalize_vllm_style_inputs(prompts)

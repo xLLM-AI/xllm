@@ -23,17 +23,14 @@ namespace xllm {
 
 class DFlash2WorkerImpl final : public DFlashWorkerImpl {
  public:
-  DFlash2WorkerImpl(const ParallelArgs& parallel_args,
-                    const torch::Device& device,
-                    const runtime::Options& options);
-
-  ~DFlash2WorkerImpl() override = default;
+  using DFlashWorkerImpl::DFlashWorkerImpl;
 
   bool init_model(const std::string& model_weights_path,
                   int32_t random_seed,
                   MasterStatus master_status) override;
 
  protected:
+  void apply_draft_model_overrides(ModelArgs& args) override;
   std::pair<torch::Tensor, torch::Tensor> run_decode_draft(
       const LlmForwardInput& input,
       LlmForwardInput& validate_input,

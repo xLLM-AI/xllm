@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -36,80 +37,11 @@ namespace xllm {
 class JsonObjectGrammarState;
 
 template <typename Input>
-void prepare_dummy_input(Input& input,
-                         const ModelContext& context,
-                         const torch::Device& device) {
-  auto& params = input.input_params;
-  const auto& parallel = context.get_parallel_args();
-  const int32_t num_speculative_tokens = context.num_speculative_tokens();
-  if (params.meta.num_sequences != 0 ||
-      params.meta.batch_forward_type.is_empty() ||
-      (num_speculative_tokens <= 0 && input.token_ids.defined() &&
-       input.token_ids.numel() != 0) ||
-      (parallel.dp_size() <= 1 && parallel.ep_size() <= 1 &&
-       parallel.mapping_data().empty())) {
-    return;
-  }
-  build_dummy_forward_input(input, num_speculative_tokens, device);
-  if (num_speculative_tokens > 0) {
-    if (has_linear_attention_layers(context.get_model_args())) {
-      params.num_accepted_tokens_host = {1};
-      params.num_accepted_tokens =
-          torch::ones({1}, input.token_ids.options().dtype(torch::kInt32));
-    }
-    const int32_t num_decoding_tokens = num_speculative_tokens + 1;
-    params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
-    params.meta.q_max_seq_len = num_decoding_tokens;
-    params.meta.kv_max_seq_len = num_decoding_tokens;
-    params.embedding.input_embedding = torch::Tensor();
-    params.attn_metadata.reset();
-    params.attention = {};
-    params.attention.host.q_seq_lens = {num_decoding_tokens};
-    params.attention.host.q_cu_seq_lens = {0, num_decoding_tokens};
-    params.attention.host.kv_seq_lens = {num_decoding_tokens};
-    params.attention.host.kv_cache_tokens_nums = {0};
-    params.attention.host.new_cache_slots.assign(num_decoding_tokens,
-                                                 /*value=*/-1);
-    params.attention.rebuild_device_buffer(device);
-  }
-}
-
-template <typename Params>
-bool should_run_speculative_decode(const Params& params) {
-  if (!params.meta.batch_forward_type.is_decode()) {
-    return false;
-  }
-
-  const auto& dp_token_nums = params.parallel.dp_global_token_nums;
-  const auto& dp_is_decode = params.parallel.dp_is_decode;
-  if (dp_is_decode.empty()) {
-    return dp_token_nums.size() <= 1;
-  }
-  if (dp_is_decode.size() != dp_token_nums.size()) {
-    return false;
-  }
-
-  bool any_active = false;
-  for (size_t i = 0; i < dp_is_decode.size(); ++i) {
-    if (dp_token_nums[i] == 0) {
-      continue;
-    }
-    any_active = true;
-    if (dp_is_decode[i] != 1) {
-      return false;
-    }
-  }
-  return any_active;
-}
+void prepare_dummy_input(Input& input, const WorkerImpl& worker);
 
 template <typename Params>
 void scale_speculative_parallel_token_counts(Params& params,
-                                             int32_t num_speculative_tokens) {
-  const int32_t num_decoding_tokens = num_speculative_tokens + 1;
-  scale_parallel_token_counts(params.parallel, num_decoding_tokens);
-  params.expert.eplb_decode_token_mask = eplb::expand_decode_token_mask(
-      params.expert.eplb_decode_token_mask, num_decoding_tokens);
-}
+                                             int32_t num_speculative_tokens);
 
 // Shared tail of run_validate: marks the output as a speculative decode
 // verify result, attaches the row metadata, clears embeddings, and installs
@@ -157,13 +89,10 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   void drain_pending_execution() override;
 
  protected:
-  // `options` is passed to WorkerImpl (preserves enable_schedule_overlap etc.),
-  // `target_options` is used to create impl_ (target model worker).
-  // Each algorithm subclass decides its own target_options.
   SpeculativeWorkerImpl(const ParallelArgs& parallel_args,
                         const torch::Device& device,
                         const runtime::Options& options,
-                        const runtime::Options& target_options,
+                        runtime::Options target_options,
                         WorkerType worker_type = WorkerType::LLM);
 
  public:
@@ -235,6 +164,8 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   bool prepare_model_decode_continuation(
       TargetInput& inputs,
       const ForwardOutput& prior_output) override;
+
+  virtual void apply_target_model_overrides(ModelArgs&) const;
 
   // Algorithm-specific virtual methods for subclasses to implement
   virtual std::optional<ForwardOutput> step_prefill(

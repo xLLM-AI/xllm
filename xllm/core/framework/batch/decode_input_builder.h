@@ -151,25 +151,11 @@ template <typename Params>
 void build_decode_metadata(Params& input_params,
                            DecodeBuildBuffers& buf,
                            const DecodeInputOptions& decode_options);
-extern template void build_decode_metadata(
-    LlmModelParams& input_params,
-    DecodeBuildBuffers& buf,
-    const DecodeInputOptions& decode_options);
-extern template void build_decode_metadata(
-    VlmModelParams& input_params,
-    DecodeBuildBuffers& buf,
-    const DecodeInputOptions& decode_options);
 
 template <typename Input>
 void set_token_position_tensors(Input& input,
                                 const std::vector<int32_t>& token_ids,
                                 const std::vector<int32_t>& positions);
-extern template void set_token_position_tensors(LlmForwardInput&,
-                                                const std::vector<int32_t>&,
-                                                const std::vector<int32_t>&);
-extern template void set_token_position_tensors(VlmForwardInput&,
-                                                const std::vector<int32_t>&,
-                                                const std::vector<int32_t>&);
 
 void build_idle_decode_input(LlmForwardInput& input,
                              const DecodeExpansionOptions& decode_options);
@@ -179,13 +165,5 @@ void build_decode_input(Input& input,
                         DecodeBuildBuffers& buf,
                         const DecodeInputOptions& decode_options,
                         const torch::Device& target_device);
-extern template void build_decode_input(LlmForwardInput&,
-                                        DecodeBuildBuffers&,
-                                        const DecodeInputOptions&,
-                                        const torch::Device&);
-extern template void build_decode_input(VlmForwardInput&,
-                                        DecodeBuildBuffers&,
-                                        const DecodeInputOptions&,
-                                        const torch::Device&);
 
 }  // namespace xllm

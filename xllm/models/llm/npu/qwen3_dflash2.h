@@ -132,20 +132,19 @@ class DFlash2Qwen3DecoderLayerImpl final : public layer::Qwen3DecoderLayerImpl {
       : layer::Qwen3DecoderLayerImpl(context, layer_id) {
     const auto& args = context.get_model_args();
     const auto& options = context.get_tensor_options();
-    const int32_t num_decoding_tokens = context.num_speculative_tokens() + 1;
     attention_conv_ = register_module(
         /*name=*/"attention_conv",
         layer::DFlash2GroupedConv(args.hidden_size(),
                                   args.dflash2_conv_kernel_size(),
                                   args.dflash2_conv_group_size(),
-                                  num_decoding_tokens,
+                                  context.num_speculative_tokens(),
                                   options));
     mlp_conv_ = register_module(
         /*name=*/"mlp_conv",
         layer::DFlash2GroupedConv(args.hidden_size(),
                                   args.dflash2_conv_kernel_size(),
                                   args.dflash2_conv_group_size(),
-                                  num_decoding_tokens,
+                                  context.num_speculative_tokens(),
                                   options));
   }
 

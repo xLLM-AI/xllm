@@ -37,7 +37,11 @@ class Eagle3WorkerImpl final : public MTPWorkerImpl<TargetInput> {
   using MTPWorkerImpl<TargetInput>::context_;
   using MTPWorkerImpl<TargetInput>::draft_impl_;
 
-  static runtime::Options draft_options(const runtime::Options& options);
+#if defined(USE_NPU)
+  void apply_target_model_overrides(ModelArgs& args) const override;
+#endif
+
+  void apply_draft_model_overrides(ModelArgs&) override;
 
   void check_draft_input_embedding(const torch::Tensor& embedding,
                                    const std::string& phase) const override;

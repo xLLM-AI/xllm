@@ -67,6 +67,11 @@ HEAVILY_COMPRESSED_ATTENTION = "heavily_compressed_attention"
 # Sparse mask modes used by C++ DSAttentionImpl (rightDownCausal variants).
 _MASK_MODE_RIGHT_DOWN_CAUSAL = 3
 _MASK_MODE_COMPRESS = 4
+_ATTENTION_TYPE_BY_COMPRESS_RATIO = {
+    1: SLIDING_ATTENTION,
+    4: COMPRESSED_SPARSE_ATTENTION,
+    128: HEAVILY_COMPRESSED_ATTENTION,
+}
 
 
 def _uses_prefill_attention(metadata: AttentionMetadata) -> bool:
@@ -75,60 +80,6 @@ def _uses_prefill_attention(metadata: AttentionMetadata) -> bool:
     is_chunked_prefill = bool(getattr(metadata, "is_chunked_prefill", False))
     is_dummy = bool(getattr(metadata, "is_dummy", False))
     return is_chunked_prefill or (is_prefill and not is_dummy)
-
-
-def _deepseek_v4_ori_window_left(
-    window_size: int,
-    block_size: int,
-    use_native_dspark_sas: bool,
-) -> int:
-    """Window geometry shared with layer::deepseek_v4_ori_window_left."""
-    return int(torch.ops.xllm_ops.deepseek_v4_ori_window_left(window_size, block_size, use_native_dspark_sas))
-
-
-def _cached_ori_window_left(
-    window_size: int,
-    block_size: int,
-    native_sas_by_prefill: dict[bool, bool],
-) -> dict[bool, int]:
-    """Resolve the C++ window geometry once per prefill/decode variant."""
-    return {
-        use_prefill: _deepseek_v4_ori_window_left(window_size, block_size, native_sas_by_prefill[use_prefill])
-        for use_prefill in (False, True)
-    }
-
-
-def _build_dspark_swa_indices(
-    block_table: torch.Tensor,
-    query_cu_seq_lens: torch.Tensor,
-    seq_lens: torch.Tensor,
-    window_size: int,
-    block_size: int,
-    cache_block_size: int,
-) -> torch.Tensor:
-    """Build the explicit ring-buffer slots consumed by native DSpark SAS."""
-    # Same index math as layer::build_dspark_swa_indices (C++ model path);
-    # exposed as xllm_ops::build_dspark_swa_indices so both paths share it.
-    return torch.ops.xllm_ops.build_dspark_swa_indices(
-        block_table,
-        query_cu_seq_lens,
-        seq_lens,
-        window_size,
-        block_size,
-        cache_block_size,
-    )
-
-
-def _attention_type_for_compress_ratio(compress_ratio: int) -> str:
-    attention_types = {
-        1: SLIDING_ATTENTION,
-        4: COMPRESSED_SPARSE_ATTENTION,
-        128: HEAVILY_COMPRESSED_ATTENTION,
-    }
-    try:
-        return attention_types[compress_ratio]
-    except KeyError as error:
-        raise ValueError(f"unsupported DeepSeek-V4 compression ratio: {compress_ratio}") from error
 
 
 @dataclass
@@ -165,7 +116,7 @@ class DsaAttentionBackend(AttentionBackend):
         rope_head_dim: int,
         device: torch.device,
         dtype: torch.dtype,
-        block_size: int = 0,
+        num_speculative_tokens: int = 0,
         dspark_use_native_sas: bool = False,
     ) -> None:
         self.caches_info, self.group_infos = build_cache_specs(compress_ratios, window_size, n_layers)
@@ -180,7 +131,6 @@ class DsaAttentionBackend(AttentionBackend):
         self.device = device
         self.dtype = dtype
         self.scale = attn_head_dim**-0.5
-        self.block_size = block_size
         self._dspark_swa_location: tuple[int, int, int] | None = None
         for layer_id, layer_caches in enumerate(self.caches_info):
             for cache_id, cache_info in enumerate(layer_caches):
@@ -195,16 +145,21 @@ class DsaAttentionBackend(AttentionBackend):
         # The geometry below is fixed after __init__; resolve the shared C++
         # gate once per variant so hot paths do not pay a torch.ops dispatch
         # per layer per step.
+        self._num_speculative_tokens = num_speculative_tokens
         self._native_sas_by_prefill = {
             use_prefill: bool(
-                torch.ops.xllm_ops.deepseek_v4_use_native_sas(block_size, dspark_use_native_sas, use_prefill)
+                torch.ops.xllm_ops.deepseek_v4_use_native_sas(
+                    num_speculative_tokens, dspark_use_native_sas, use_prefill
+                )
             )
             for use_prefill in (False, True)
         }
-        self._ori_win_left_by_prefill = _cached_ori_window_left(window_size, block_size, self._native_sas_by_prefill)
-
-    def _use_native_sas(self, use_prefill: bool) -> bool:
-        return self._native_sas_by_prefill[use_prefill]
+        self._ori_win_left_by_prefill = {
+            use_prefill: int(
+                torch.ops.xllm_ops.deepseek_v4_ori_window_left(window_size, num_speculative_tokens, enabled)
+            )
+            for use_prefill, enabled in self._native_sas_by_prefill.items()
+        }
 
     # -- AttentionBackend interface -----------------------------------------
 
@@ -715,7 +670,10 @@ class DsaAttentionBackend(AttentionBackend):
             self._populate_compressed_attention_rope(compressed_metadata, metadata)
         layer_id = layer.layer_id
         compress_ratio = self._layer_compress_ratio(layer_id)
-        attention_type = _attention_type_for_compress_ratio(compress_ratio)
+        try:
+            attention_type = _ATTENTION_TYPE_BY_COMPRESS_RATIO[compress_ratio]
+        except KeyError as error:
+            raise ValueError(f"unsupported DeepSeek-V4 compression ratio: {compress_ratio}") from error
         mapping = self._resolve_cache_mapping(layer_id, compress_ratio)
         layer_cache = self._kv_caches[layer_id]
         is_prefill = _uses_prefill_attention(metadata)
@@ -793,10 +751,9 @@ class DsaAttentionBackend(AttentionBackend):
         sinks = getattr(layer, "attn_sink", None) if getattr(layer, "attn_sink_loaded", False) else None
         if sinks is not None:
             sinks = sinks.to(q.device, dtype=torch.float32).contiguous()
-        use_native_sas = self._use_native_sas(use_prefill_attn)
+        use_native_sas = self._native_sas_by_prefill[use_prefill_attn]
         ori_win_left = self._ori_win_left_by_prefill[use_prefill_attn]
-        metadata_ori_win_left = getattr(compressed_metadata, "sparse_metadata_ori_win_left", ori_win_left)
-        if metadata_ori_win_left != ori_win_left:
+        if compressed_metadata.sparse_metadata_ori_win_left != ori_win_left:
             raise RuntimeError("DeepSeek-V4 sparse metadata belongs to incompatible model geometry")
         ori_sparse_indices = None
         if use_native_sas and compress_ratio == 1:
@@ -956,7 +913,7 @@ class DsaAttentionBackend(AttentionBackend):
 
     def _build_dspark_swa_metadata(self, compressed_metadata: DsaMetadata) -> None:
         compressed_metadata.explicit_swa_indices = None
-        if not self._use_native_sas(use_prefill=False):
+        if not self._native_sas_by_prefill[False]:
             return
         if self._dspark_swa_location is None:
             raise RuntimeError("Native DeepSeek-V4 DSpark requires an SWA block table")
@@ -969,12 +926,12 @@ class DsaAttentionBackend(AttentionBackend):
         block_table = layer_block_tables[cache_id]
         if block_table is None or block_table.numel() == 0:
             return
-        compressed_metadata.explicit_swa_indices = _build_dspark_swa_indices(
+        compressed_metadata.explicit_swa_indices = torch.ops.xllm_ops.build_dspark_swa_indices(
             block_table,
             compressed_metadata.actual_seq_lengths_query,
             compressed_metadata.actual_seq_lengths_kv,
             self.window_size,
-            self.block_size,
+            self._num_speculative_tokens,
             cache_block_size,
         )
 

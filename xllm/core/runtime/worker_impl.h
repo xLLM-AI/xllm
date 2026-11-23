@@ -433,11 +433,9 @@ class WorkerImpl {
   bool can_prepare_npu_graph_decode_input(const BatchInputMeta& meta) const;
   bool can_skip_npu_graph_decode_sync(const BatchInputMeta& meta) const;
 
-  void allocate_kv_cache_storage(
-      const KVCacheShape& kv_cache_shape,
-      bool use_huge_page_allocator = false,
-      std::shared_ptr<KVTensorAllocator> tensor_allocator = nullptr,
-      const KVCacheCreateOptions* layout = nullptr);
+  void allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
+                                 bool use_huge_page_allocator = false,
+                                 const KVCacheCreateOptions* layout = nullptr);
 
   void configure_shared_kv_allocation(const KVCacheShape& kv_cache_shape,
                                       KVCacheCreateOptions& create_options,

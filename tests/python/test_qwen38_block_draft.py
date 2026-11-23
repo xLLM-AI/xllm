@@ -139,11 +139,12 @@ def _draft_config() -> dict:
 
 
 def test_incoai_qwen38_dflash2_geometry() -> None:
+    num_speculative_tokens = 7
     config = _draft_config()
     config.update(
         sliding_window=2048,
+        num_speculative_tokens=num_speculative_tokens,
         dflash_config={
-            "block_size": 8,
             "conv_group_size": 16,
             "conv_kernel_size": 2,
             "selector_rank": 256,
@@ -153,7 +154,7 @@ def test_incoai_qwen38_dflash2_geometry() -> None:
     cfg = DFlash2Qwen3Config.from_dict(config)
     cfg.validate()
     assert cfg.rope_theta == 10000000
-    assert cfg.block_size == 8
+    assert cfg.num_speculative_tokens == num_speculative_tokens
     assert cfg.head_split() == (32, 8)
 
 

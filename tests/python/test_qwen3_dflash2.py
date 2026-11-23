@@ -40,7 +40,7 @@ def _config_dict(**overrides) -> dict:
         "sliding_window": 8,
         "vocab_size": 8,
         "draft_vocab_size": 8,
-        "block_size": 4,
+        "num_speculative_tokens": 3,
         "dflash2_conv_group_size": 2,
         "dflash2_conv_kernel_size": 2,
         "dflash2_selector_rank": 2,
@@ -76,13 +76,11 @@ class _StateDict:
 def test_config_accepts_nested_and_reflected_dflash_geometry() -> None:
     reflected = _config()
     nested_values = _config_dict(
-        block_size=None,
         dflash2_conv_group_size=None,
         dflash2_conv_kernel_size=None,
         dflash2_selector_rank=None,
         dflash2_selector_top_k=None,
         dflash_config={
-            "block_size": 4,
             "conv_group_size": 2,
             "conv_kernel_size": 2,
             "selector_rank": 2,
@@ -97,7 +95,6 @@ def test_config_accepts_nested_and_reflected_dflash_geometry() -> None:
         dflash2_conv_kernel_size=None,
         dflash2_selector_rank=None,
         dflash2_selector_top_k=None,
-        block_size=4,
         conv_group_size=2,
         conv_kernel_size=2,
         selector_rank=2,
@@ -106,12 +103,10 @@ def test_config_accepts_nested_and_reflected_dflash_geometry() -> None:
     speculators = DFlash2Qwen3Config.from_dict(speculators_values)
     speculators.validate()
 
-    assert nested.block_size == reflected.block_size
     assert nested.conv_group_size == reflected.conv_group_size
     assert nested.conv_kernel_size == reflected.conv_kernel_size
     assert nested.selector_rank == reflected.selector_rank
     assert nested.selector_top_k == reflected.selector_top_k
-    assert speculators.block_size == reflected.block_size
     assert speculators.conv_group_size == reflected.conv_group_size
     assert speculators.conv_kernel_size == reflected.conv_kernel_size
     assert speculators.selector_rank == reflected.selector_rank
@@ -121,7 +116,7 @@ def test_config_accepts_nested_and_reflected_dflash_geometry() -> None:
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"block_size": 0}, "geometry values"),
+        ({"num_speculative_tokens": 0}, "geometry values"),
         ({"dflash2_conv_group_size": 3}, "must divide hidden_size"),
         ({"sliding_window": 0}, "positive sliding_window"),
         ({"dflash2_selector_top_k": 9}, "must not exceed vocab_size"),
@@ -135,29 +130,12 @@ def test_config_rejects_invalid_dflash2_geometry(
         _config(**overrides)
 
 
-def test_config_reads_flat_block_geometry() -> None:
-    config = DFlash2Qwen3Config.from_dict(
-        _config_dict(
-            block_size=5,
-            conv_group_size=4,
-            conv_kernel_size=3,
-            selector_rank=6,
-            selector_top_k=7,
-        )
-    )
-    assert config.block_size == 5
-    assert config.conv_group_size == 4
-    assert config.conv_kernel_size == 3
-    assert config.selector_rank == 6
-    assert config.selector_top_k == 7
-
-
 def test_grouped_convolution_resets_history_at_block_boundaries() -> None:
     convolution = DFlash2GroupedConv(
         hidden_size=4,
         taps=2,
         group_size=2,
-        block_size=4,
+        num_speculative_tokens=3,
         dtype=torch.float32,
         device=torch.device("cpu"),
     )

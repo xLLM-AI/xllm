@@ -63,7 +63,6 @@ def test_dspark_context_kv_writes_real_decoder_layer_cache(
             "dspark_num_layers": 1,
             "dspark_target_layer_ids": [7],
             "dspark_markov_rank": 4,
-            "block_size": 5,
         }
     )
     config.validate()

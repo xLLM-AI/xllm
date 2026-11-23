@@ -33,20 +33,11 @@ limitations under the License.
 
 namespace xllm {
 
-KVCacheCreateOptions get_kv_cache_create_options(const ModelArgs& model_args,
-                                                 const KVCacheShape& shape,
-                                                 bool is_spec_draft) {
+KVCacheCreateOptions get_kv_cache_create_options(const ModelArgs& model_args) {
   KVCacheCreateOptions options;
-  const bool kpool_draft = shape.has_kpool_tail_shape() && is_spec_draft;
-  options.enable_linear_attention(has_linear_attention_layers(model_args) &&
-                                  !kpool_draft);
-  options.full_attention_interval(
-      kpool_draft ? 1 : model_args.full_attention_interval());
-  options.layer_types(
-      kpool_draft
-          ? std::vector<std::string>(static_cast<size_t>(model_args.n_layers()),
-                                     "full_attention")
-          : model_args.layer_types());
+  options.enable_linear_attention(has_linear_attention_layers(model_args))
+      .full_attention_interval(model_args.full_attention_interval())
+      .layer_types(model_args.layer_types());
   return options;
 }
 

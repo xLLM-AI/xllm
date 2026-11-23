@@ -109,8 +109,7 @@ void KVCapacityPlanner::prepare_virtual_memory(
                                     worker_clients_.size(),
                                     capacity.linear_cache_size_in_bytes(),
                                     is_multimodal_);
-  const VmmKVLayout layout(
-      capacity, model_args_, world_size_, dtype_, options_.is_draft_engine());
+  const VmmKVLayout layout(capacity, model_args_, world_size_, dtype_);
   const size_t total_pages = coordinator.get_num_total_phy_pages();
   const size_t page_size =
       KVCacheConfig::get_instance().phy_page_granularity_size();

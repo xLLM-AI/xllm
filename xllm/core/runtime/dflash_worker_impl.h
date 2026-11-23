@@ -57,16 +57,8 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                   MasterStatus master_status) override;
 
  protected:
-  DFlashWorkerImpl(const ParallelArgs& parallel_args,
-                   const torch::Device& device,
-                   const runtime::Options& options,
-                   const ParallelArgs& draft_parallel_args,
-                   const runtime::Options& draft_opts,
-                   int32_t (*configure_draft_config)(ModelArgs&,
-                                                     const runtime::Options&));
-
-  static runtime::Options draft_options(const runtime::Options& options,
-                                        int32_t num_speculative_tokens = 0);
+  void apply_target_model_overrides(ModelArgs& args) const override;
+  void apply_draft_model_overrides(ModelArgs& args) override;
   std::optional<ForwardOutput> step_prefill(
       const LlmForwardInput& input) override;
 

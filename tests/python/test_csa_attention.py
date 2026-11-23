@@ -26,8 +26,6 @@ from xllm.python.attention import csa_attention as csa_attention_module
 from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.csa_attention import (
     DsaAttentionBackend,
-    _build_dspark_swa_indices,
-    _deepseek_v4_ori_window_left,
     _scatter_by_slot,
 )
 from xllm.python.model_executor.v4_cp_context import (
@@ -68,46 +66,9 @@ def _make_dspark_native_backend() -> DsaAttentionBackend:
         rope_head_dim=2,
         device=torch.device("cpu"),
         dtype=torch.float32,
-        block_size=3,
+        num_speculative_tokens=3,
         dspark_use_native_sas=True,
     )
-
-
-def test_dspark_native_sas_window_matches_cpp_contract() -> None:
-    assert _deepseek_v4_ori_window_left(128, 5, False) == 127
-    assert _deepseek_v4_ori_window_left(128, 0, True) == 127
-    assert _deepseek_v4_ori_window_left(128, 5, True) == 132
-
-
-def test_dspark_native_swa_indices_are_shared_by_query_rows() -> None:
-    indices = _build_dspark_swa_indices(
-        torch.tensor([[10, 11, 12]], dtype=torch.int32),
-        torch.tensor([0, 3], dtype=torch.int32),
-        torch.tensor([6], dtype=torch.int32),
-        window_size=4,
-        block_size=3,
-        cache_block_size=4,
-    )
-
-    assert indices.shape == (3, 1, 128)
-    expected = torch.tensor([40, 41, 42, 43, 44, 45, -1], dtype=torch.int32)
-    for row in range(3):
-        torch.testing.assert_close(indices[row, 0, :7], expected)
-
-
-def test_dspark_native_swa_indices_wrap_ring_buffer() -> None:
-    indices = _build_dspark_swa_indices(
-        torch.tensor([[20, 21]], dtype=torch.int32),
-        torch.tensor([0, 1], dtype=torch.int32),
-        torch.tensor([10], dtype=torch.int32),
-        window_size=4,
-        block_size=3,
-        cache_block_size=2,
-    )
-
-    assert indices.shape == (1, 1, 128)
-    expected = torch.tensor([41, 42, 43, 40, 41], dtype=torch.int32)
-    torch.testing.assert_close(indices[0, 0, :5], expected)
 
 
 def test_dspark_native_swa_indices_map_expanded_metadata_ring() -> None:
@@ -488,7 +449,7 @@ def test_decode_precomputed_metadata_matches_cpp_contract(monkeypatch) -> None:
 
 
 def test_dspark_native_decode_metadata_uses_expanded_window(monkeypatch) -> None:
-    backend = _make_backend(compress_ratios=[1], n_layers=1, block_size=5, dspark_use_native_sas=True)
+    backend = _make_backend(compress_ratios=[1], n_layers=1, num_speculative_tokens=5, dspark_use_native_sas=True)
     sparse_calls: list[dict] = []
 
     monkeypatch.setattr(
@@ -586,7 +547,7 @@ def test_dspark_native_mixed_ratio_decode_uses_expanded_window(
         rope_head_dim=2,
         device=torch.device("cpu"),
         dtype=torch.float32,
-        block_size=3,
+        num_speculative_tokens=3,
         dspark_use_native_sas=True,
     )
     backend.bind_kv_caches([LayerCache(key=None, value=None, swa=torch.zeros(1, 4, 1, 4))])
@@ -938,7 +899,7 @@ def test_graph_dsa_build_uses_stable_host_length_values(monkeypatch) -> None:
 def test_prefill_and_dummy_decode_metadata_stay_in_sync_with_execute(
     monkeypatch,
 ) -> None:
-    backend = _make_backend(compress_ratios=[1], n_layers=1, block_size=5, dspark_use_native_sas=True)
+    backend = _make_backend(compress_ratios=[1], n_layers=1, num_speculative_tokens=5, dspark_use_native_sas=True)
     swa = torch.zeros(2, 128, 1, 512, dtype=torch.float32)
     backend.bind_kv_caches([LayerCache(key=None, value=None, swa=swa)])
     block_table = torch.tensor([[1]], dtype=torch.int32)

@@ -141,8 +141,7 @@ class VLMMaster : public Master {
   void set_master_status(MasterStatus status) { master_status_ = status; }
   bool sleep();
   bool requires_wakeup() const;
-  bool wakeup();
-  bool wakeup(const WakeupOptions& options);
+  bool wakeup(const WakeupOptions& options = {});
   bool link_p2p(const std::vector<std::string>& remote_addrs);
   bool unlink_p2p(const std::vector<std::string>& remote_addrs);
 

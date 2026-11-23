@@ -219,10 +219,11 @@ std::optional<Params> DcuGraphPersistentParam::update(
   std::vector<int32_t> q_seq_lens_vec(params.attention.host.q_seq_lens);
   std::vector<int32_t> kv_seq_lens_vec(params.attention.host.kv_seq_lens);
 
-  util::pad_uniform_decode_lens(q_seq_lens_vec,
-                                kv_seq_lens_vec,
-                                padding_needed,
-                                options_.num_speculative_tokens());
+  util::pad_uniform_decode_lens(
+      q_seq_lens_vec,
+      kv_seq_lens_vec,
+      padding_needed,
+      options_.is_draft_engine() ? 0 : options_.num_speculative_tokens());
   const auto [q_lens, q_cu_lens] =
       stage_seq_lens(q_seq_lens_vec,
                      params.attention.device.q_seq_lens,
@@ -367,10 +368,11 @@ void DcuGraphPersistentParam::update_decode_input_buffer(
   std::vector<int32_t> q_seq_lens_vec(params.attention.host.q_seq_lens);
   std::vector<int32_t> kv_seq_lens_vec(params.attention.host.kv_seq_lens);
 
-  util::pad_uniform_decode_lens(q_seq_lens_vec,
-                                kv_seq_lens_vec,
-                                padding_needed,
-                                options_.num_speculative_tokens());
+  util::pad_uniform_decode_lens(
+      q_seq_lens_vec,
+      kv_seq_lens_vec,
+      padding_needed,
+      options_.is_draft_engine() ? 0 : options_.num_speculative_tokens());
   stage_seq_lens(q_seq_lens_vec,
                  params.attention.device.q_seq_lens,
                  q_seq_lens_values_,

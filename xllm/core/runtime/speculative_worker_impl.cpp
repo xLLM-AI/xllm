@@ -25,11 +25,9 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/model/model_type.h"
-#include "core/framework/speculative/draft_config.h"
 #include "core/framework/speculative/verify_layout.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/util/tensor_helper.h"
-#include "framework/model/aux_hidden_capture.h"
 #include "framework/model_loader/model_loader.h"
 #include "runtime/decode_graph_bucket.h"
 #include "runtime/llm_worker_impl.h"
@@ -40,16 +38,117 @@ limitations under the License.
 
 namespace xllm {
 
+template <typename Input>
+void prepare_dummy_input(Input& input, const WorkerImpl& worker) {
+  auto& params = input.input_params;
+  const auto& context = worker.context_;
+  const auto& parallel = context.get_parallel_args();
+  if (params.meta.num_sequences != 0 ||
+      params.meta.batch_forward_type.is_empty() ||
+      (parallel.dp_size() <= 1 && parallel.ep_size() <= 1 &&
+       parallel.mapping_data().empty())) {
+    return;
+  }
+  const auto& options = worker.options();
+  const int32_t num_speculative_tokens = options.num_speculative_tokens();
+  int32_t num_decoding_tokens = num_speculative_tokens + 1;
+  if (options.is_draft_engine()) {
+    const auto& algorithm = options.speculative_algorithm();
+    if (SpeculativeConfig::is_dspark_algorithm(algorithm)) {
+      num_decoding_tokens = num_speculative_tokens;
+    } else if (SpeculativeConfig::is_eagle_family(algorithm)) {
+      num_decoding_tokens = 1;
+    }
+  }
+  if (num_decoding_tokens == 1 && input.token_ids.defined() &&
+      input.token_ids.numel() != 0) {
+    return;
+  }
+  const auto device = context.get_tensor_options().device();
+  build_dummy_forward_input(input, num_decoding_tokens - 1, device);
+  if (num_decoding_tokens > 1) {
+    if (has_linear_attention_layers(context.get_model_args())) {
+      params.num_accepted_tokens_host = {1};
+      params.num_accepted_tokens =
+          torch::ones({1}, input.token_ids.options().dtype(torch::kInt32));
+    }
+    params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+    params.meta.q_max_seq_len = num_decoding_tokens;
+    params.meta.kv_max_seq_len = num_decoding_tokens;
+    params.embedding.input_embedding = torch::Tensor();
+    params.attn_metadata.reset();
+    params.attention = {};
+    params.attention.host.q_seq_lens = {num_decoding_tokens};
+    params.attention.host.q_cu_seq_lens = {0, num_decoding_tokens};
+    params.attention.host.kv_seq_lens = {num_decoding_tokens};
+    params.attention.host.kv_cache_tokens_nums = {0};
+    params.attention.host.new_cache_slots.assign(num_decoding_tokens,
+                                                 /*value=*/-1);
+    params.attention.rebuild_device_buffer(device);
+  }
+}
+
+namespace {
+
+template <typename Params>
+bool should_run_speculative_decode(const Params& params) {
+  if (!params.meta.batch_forward_type.is_decode()) {
+    return false;
+  }
+
+  const auto& dp_token_nums = params.parallel.dp_global_token_nums;
+  const auto& dp_is_decode = params.parallel.dp_is_decode;
+  if (dp_is_decode.empty()) {
+    return dp_token_nums.size() <= 1;
+  }
+  if (dp_is_decode.size() != dp_token_nums.size()) {
+    return false;
+  }
+
+  bool any_active = false;
+  for (size_t i = 0; i < dp_is_decode.size(); ++i) {
+    if (dp_token_nums[i] == 0) {
+      continue;
+    }
+    any_active = true;
+    if (dp_is_decode[i] != 1) {
+      return false;
+    }
+  }
+  return any_active;
+}
+
+}  // namespace
+
+template <typename Params>
+void scale_speculative_parallel_token_counts(Params& params,
+                                             int32_t num_speculative_tokens) {
+  const int32_t num_decoding_tokens = num_speculative_tokens + 1;
+  scale_parallel_token_counts(params.parallel, num_decoding_tokens);
+  params.expert.eplb_decode_token_mask = eplb::expand_decode_token_mask(
+      params.expert.eplb_decode_token_mask, num_decoding_tokens);
+}
+
+template void prepare_dummy_input(LlmForwardInput&, const WorkerImpl&);
+template void prepare_dummy_input(VlmForwardInput&, const WorkerImpl&);
+template void scale_speculative_parallel_token_counts(LlmModelParams&, int32_t);
+template void scale_speculative_parallel_token_counts(VlmModelParams&, int32_t);
+
+template <typename TargetInput>
+void SpeculativeWorkerImpl<TargetInput>::apply_target_model_overrides(
+    ModelArgs&) const {}
+
 template <typename TargetInput>
 SpeculativeWorkerImpl<TargetInput>::SpeculativeWorkerImpl(
     const ParallelArgs& parallel_args,
     const torch::Device& device,
     const runtime::Options& options,
-    const runtime::Options& target_options,
+    runtime::Options target_options,
     WorkerType worker_type)
     : WorkerImpl(parallel_args, device, options, parallel_args.dp_size() > 1) {
+  target_options.enable_schedule_overlap(/*enable_schedule_overlap=*/false);
   auto prepare_input = [this](TargetInput& input) {
-    ::xllm::prepare_dummy_input(input, impl_->context_, device_);
+    ::xllm::prepare_dummy_input(input, *impl_);
 #if defined(USE_NPU)
     prepare_target_padding(input.input_params);
 #endif
@@ -141,29 +240,7 @@ bool SpeculativeWorkerImpl<TargetInput>::init_model(
   if (impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
     auto loader = ModelLoader::create(model_weights_path);
     auto args = loader->model_args();
-    const std::string& algorithm = impl_->options().speculative_algorithm();
-    if (SpeculativeConfig::is_block_diffusion_algorithm(algorithm)) {
-      CHECK(impl_->options().draft_model_path().has_value())
-          << "block-diffusion speculative decoding requires --draft_model.";
-      args.layers_to_capture(
-          read_capture_layer_ids(*impl_->options().draft_model_path()));
-    }
-#if defined(USE_NPU)
-    if (SpeculativeConfig::requires_aux_hidden_capture(algorithm) &&
-        args.layers_to_capture().empty()) {
-      std::vector<int32_t> layers;
-      if (SpeculativeConfig::is_eagle3_algorithm(algorithm) &&
-          impl_->options().draft_model_path().has_value()) {
-        layers =
-            read_capture_layer_ids(*impl_->options().draft_model_path(), false);
-      }
-      if (layers.empty()) {
-        layers = AuxHiddenCapture::legacy_default_capture_layer_ids(
-            static_cast<int32_t>(args.n_layers()));
-      }
-      args.layers_to_capture(std::move(layers));
-    }
-#endif
+    apply_target_model_overrides(args);
     auto tokenizer = impl_->load_tokenizer(*loader);
     auto context =
         impl_->load_model_config(std::move(args),

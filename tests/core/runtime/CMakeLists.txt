@@ -21,6 +21,7 @@ cc_test(
   SRCS
     acl_graph_bucket_policy_test.cpp
   DEPS
+    :decode_graph_bucket
     GTest::gtest_main
 )
 

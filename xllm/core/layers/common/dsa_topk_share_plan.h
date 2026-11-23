@@ -52,9 +52,8 @@ class DsaTopkSharePlan final {
   explicit DsaTopkSharePlan(const ModelArgs& args) {
     const int64_t num_layers = args.n_layers();
     decisions_.resize(static_cast<size_t>(num_layers));
-    has_indexer_ = has_dsa_indexer(args);
 
-    if (!has_indexer_ ||
+    if (!has_dsa_indexer(args) ||
         (args.indexer_types().empty() && args.index_topk_pattern().empty() &&
          args.index_topk_freq() <= 1)) {
       return;
@@ -82,7 +81,6 @@ class DsaTopkSharePlan final {
     } else {
       const int32_t freq = args.index_topk_freq();
       const int32_t offset = args.index_skip_topk_offset();
-      CHECK_GT(freq, 1) << "DSA top-k sharing freq must be greater than 1.";
       CHECK_GE(offset, 0) << "DSA top-k sharing offset must be non-negative.";
       for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
         decisions_[static_cast<size_t>(layer_id)].reuse_topk =
@@ -97,7 +95,6 @@ class DsaTopkSharePlan final {
       }
       DsaTopkShareDecision& decision =
           decisions_[static_cast<size_t>(layer_id)];
-      has_reuse_ = has_reuse_ || decision.reuse_topk;
       decision.output_topk = !decision.reuse_topk && next_dsa_reuses;
       next_dsa_reuses = decision.reuse_topk;
     }
@@ -108,24 +105,6 @@ class DsaTopkSharePlan final {
     CHECK_LT(static_cast<size_t>(layer_id), decisions_.size())
         << "DSA top-k sharing layer id exceeds num_hidden_layers.";
     return decisions_[static_cast<size_t>(layer_id)];
-  }
-
-  bool has_reuse() const { return has_reuse_; }
-
-  bool layer_uses_indexer(int32_t layer_id) const {
-    return has_indexer_ && !decision_for(layer_id).reuse_topk;
-  }
-
-  int64_t num_indexer_layers() const {
-    if (!has_indexer_) {
-      return 0;
-    }
-    return static_cast<int64_t>(
-        std::count_if(decisions_.begin(),
-                      decisions_.end(),
-                      [](const DsaTopkShareDecision& decision) {
-                        return !decision.reuse_topk;
-                      }));
   }
 
  private:
@@ -148,28 +127,20 @@ class DsaTopkSharePlan final {
   }
 
   std::vector<DsaTopkShareDecision> decisions_;
-  bool has_indexer_ = false;
-  bool has_reuse_ = false;
 };
 
-inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgs& args,
-                                                    int64_t num_cache_layers) {
+inline auto get_dsa_indexer_layer_mask(const ModelArgs& args) {
+  const int64_t num_cache_layers = has_dsa_indexer(args) ? args.n_layers() : 0;
   CHECK_GE(num_cache_layers, 0)
       << "DSA indexer cache layer count must be non-negative.";
   CHECK_LE(num_cache_layers, std::numeric_limits<int32_t>::max())
       << "DSA indexer cache layer count exceeds int32 range.";
-  if (!has_dsa_indexer(args)) {
-    return {};
-  }
-
   std::vector<bool> layer_mask(static_cast<size_t>(num_cache_layers), true);
+  if (layer_mask.empty()) {
+    return layer_mask;
+  }
   if (args.model_type().ends_with("_mtp")) {
-    // MTP variants skip the top-k reuse plan, but the DSA indexer still only
-    // applies to full-attention (DSA) layers — KDA (linear-attention) layers
-    // never carry one. Without this filter a KDA+DSA mixed MTP model would
-    // over-count indexer layers and trip the
-    // num_indexer_layers <= num_full_attention_layers check that the guard
-    // below is meant to enforce.
+    // KDA layers never allocate an indexer, even when MTP skips top-k reuse.
     for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
       layer_mask[static_cast<size_t>(layer_id)] =
           is_full_attention_layer(args, layer_id);
@@ -179,22 +150,11 @@ inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgs& args,
 
   const DsaTopkSharePlan topk_share_plan(args);
   for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
-    // The DSA indexer only applies to full-attention (DSA) layers; KDA
-    // (linear-attention) layers never carry one, so mask them out
-    // regardless of the top-k reuse plan (without this, a KDA+DSA mixed
-    // model with no top-k reuse pattern over-counts indexer layers and
-    // trips the num_indexer_layers <= num_full_attention_layers check).
     layer_mask[static_cast<size_t>(layer_id)] =
         is_full_attention_layer(args, layer_id) &&
-        topk_share_plan.layer_uses_indexer(layer_id);
+        !topk_share_plan.decision_for(layer_id).reuse_topk;
   }
   return layer_mask;
-}
-
-inline DsaTopkShareDecision get_dsa_topk_share_decision(const ModelArgs& args,
-                                                        int32_t layer_id) {
-  const DsaTopkSharePlan topk_share_plan(args);
-  return topk_share_plan.decision_for(layer_id);
 }
 
 }  // namespace xllm::layer

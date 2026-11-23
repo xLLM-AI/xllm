@@ -43,8 +43,7 @@ TEST(VmmKVLayoutTest, CombinesDifferentTargetAndDraftTensorWidths) {
   VmmKVLayout draft_layout(draft_capacity,
                            draft_args,
                            /*world_size=*/1,
-                           torch::kBFloat16,
-                           /*is_draft_engine=*/true);
+                           torch::kBFloat16);
   layout.append(std::move(draft_layout));
 
   // One group covers 64 shared block IDs: four pages per target tensor
@@ -86,8 +85,7 @@ TEST(VmmKVLayoutTest, CountsHybridTargetAndFullAttentionDraftLayers) {
   VmmKVLayout draft_layout(draft_capacity,
                            draft_args,
                            /*world_size=*/1,
-                           torch::kBFloat16,
-                           /*is_draft_engine=*/true);
+                           torch::kBFloat16);
   layout.append(std::move(draft_layout));
 
   EXPECT_EQ(layout.physical_pages(kPageSize), 18U);

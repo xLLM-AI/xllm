@@ -156,11 +156,6 @@ KVCacheShape build_speculative_draft_kv_cache_shape(
     int64_t draft_world_size,
     const std::string& kv_cache_dtype);
 
-// Returns the cache layout requested by the model, including draft-specific
-// layouts. Keeping this decision with cache geometry prevents workers from
-// interpreting model attention semantics.
-KVCacheCreateOptions get_kv_cache_create_options(const ModelArgs& model_args,
-                                                 const KVCacheShape& shape,
-                                                 bool is_spec_draft);
+KVCacheCreateOptions get_kv_cache_create_options(const ModelArgs& model_args);
 
 }  // namespace xllm

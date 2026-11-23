@@ -20,56 +20,23 @@ import torch
 import torch.nn as nn
 
 
-def _dflash2_grouped_conv(
-    hidden_states: torch.Tensor,
-    delta: torch.Tensor,
-    base: torch.Tensor,
-    block_size: int,
-    num_groups: int,
-    group_size: int,
-    taps: int,
-) -> torch.Tensor:
-    if hidden_states.dim() != 2:
-        raise ValueError("DFlash2 convolution hidden states must be two-dimensional")
-    if delta.shape != (hidden_states.size(0), taps, num_groups):
-        raise ValueError("DFlash2 convolution coefficient shape mismatch")
-    if base.shape != (taps, hidden_states.size(1)):
-        raise ValueError("DFlash2 convolution base-kernel shape mismatch")
-    if hidden_states.size(1) != num_groups * group_size:
-        raise ValueError("DFlash2 convolution hidden-size grouping mismatch")
-
-    num_tokens = hidden_states.size(0)
-    if num_tokens % block_size:
-        raise ValueError("DFlash2 convolution rows must contain complete sequence blocks")
-
-    blocks = hidden_states.view(num_tokens, num_groups, group_size)
-    coefficients = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
-    output = coefficients[:, 0] * blocks
-    positions = torch.arange(num_tokens, dtype=torch.long, device=hidden_states.device) % block_size
-
-    for tap in range(1, min(taps, block_size, num_tokens)):
-        valid = positions[tap:].ge(tap).view(num_tokens - tap, 1, 1).to(hidden_states.dtype)
-        output[tap:].add_(coefficients[tap:, tap] * blocks[:-tap] * valid)
-    return output.flatten(start_dim=1)
-
-
 class DFlash2GroupedConv(nn.Module):
     def __init__(
         self,
         hidden_size: int,
         taps: int,
         group_size: int,
-        block_size: int,
+        num_speculative_tokens: int,
         dtype: torch.dtype,
         device: torch.device,
     ) -> None:
         super().__init__()
-        if min(hidden_size, taps, group_size, block_size) <= 0:
+        if min(hidden_size, taps, group_size) <= 0:
             raise ValueError("DFlash2 convolution dimensions must be positive")
         if hidden_size % group_size:
             raise ValueError("DFlash2 conv_group_size must divide hidden_size")
 
-        self.block_size = block_size
+        self.num_speculative_tokens = num_speculative_tokens
         self.taps = taps
         self.group_size = group_size
         self.num_groups = hidden_size // group_size
@@ -104,12 +71,21 @@ class DFlash2GroupedConv(nn.Module):
         delta: torch.Tensor,
         side: int,
     ) -> torch.Tensor:
-        return _dflash2_grouped_conv(
-            hidden_states,
-            delta,
-            self.base_kernel[side],
-            self.block_size,
-            self.num_groups,
-            self.group_size,
-            self.taps,
-        )
+        if hidden_states.dim() != 2 or hidden_states.size(1) != self.num_groups * self.group_size:
+            raise ValueError("DFlash2 convolution hidden-state shape mismatch")
+        num_tokens = hidden_states.size(0)
+        if delta.shape != (num_tokens, self.taps, self.num_groups):
+            raise ValueError("DFlash2 convolution coefficient shape mismatch")
+        num_decoding_tokens = self.num_speculative_tokens + 1
+        if num_tokens % num_decoding_tokens:
+            raise ValueError("DFlash2 convolution rows must contain complete sequence blocks")
+
+        blocks = hidden_states.view(num_tokens, self.num_groups, self.group_size)
+        coefficients = self.base_kernel[side].view(1, self.taps, self.num_groups, self.group_size) + delta.unsqueeze(-1)
+        output = coefficients[:, 0] * blocks
+        positions = torch.arange(num_tokens, dtype=torch.long, device=hidden_states.device) % num_decoding_tokens
+
+        for tap in range(1, min(self.taps, num_decoding_tokens, num_tokens)):
+            valid = positions[tap:].ge(tap).view(num_tokens - tap, 1, 1).to(hidden_states.dtype)
+            output[tap:].add_(coefficients[tap:, tap] * blocks[:-tap] * valid)
+        return output.flatten(start_dim=1)

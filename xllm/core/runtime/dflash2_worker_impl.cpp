@@ -137,6 +137,11 @@ std::pair<torch::Tensor, torch::Tensor> sample_dflash2_path(
 
 }  // namespace
 
+void DFlash2WorkerImpl::apply_draft_model_overrides(ModelArgs& args) {
+  args.layers_to_capture({});
+  args.model_type(/*value=*/"DFlash2DraftModel");
+}
+
 bool DFlash2WorkerImpl::init_model(const std::string& model_weights_path,
                                    int32_t random_seed,
                                    MasterStatus master_status) {
@@ -158,22 +163,6 @@ bool DFlash2WorkerImpl::init_model(const std::string& model_weights_path,
   }
   return result;
 }
-
-DFlash2WorkerImpl::DFlash2WorkerImpl(const ParallelArgs& parallel_args,
-                                     const torch::Device& device,
-                                     const runtime::Options& options)
-    : DFlashWorkerImpl(
-          parallel_args,
-          device,
-          options,
-          configure_draft_parallel_args(parallel_args),
-          DFlashWorkerImpl::draft_options(options,
-                                          options.num_speculative_tokens()),
-          [](ModelArgs& args, const runtime::Options& options) {
-            args.layers_to_capture({});
-            args.model_type(/*value=*/"DFlash2DraftModel");
-            return options.num_speculative_tokens();
-          }) {}
 
 std::pair<torch::Tensor, torch::Tensor> DFlash2WorkerImpl::run_decode_draft(
     const LlmForwardInput& input,

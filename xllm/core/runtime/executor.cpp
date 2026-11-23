@@ -36,16 +36,11 @@ Executor::Executor(CausalLM* model,
       executor_type = options.backend();
     }
   }
-  auto executor_options = options;
-  if (executor_type != "python" && executor_type != "mlu" &&
-      options.is_draft_engine()) {
-    executor_options.num_speculative_tokens(context.num_speculative_tokens());
-  }
   impl_ = ExecutorImplFactory::get_instance().create_executor_impl(
       model,
       context.get_model_args(),
       context.get_tensor_options().device(),
-      executor_options,
+      options,
       executor_type);
 }
 

@@ -40,8 +40,10 @@ limitations under the License.
 #endif
 #include "core/common/types.h"
 #include "core/framework/batch/decode_input_builder.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_type.h"
 #include "core/framework/model_loader/hf_model_config.h"
+#include "core/framework/speculative/draft_config.h"
 #include "core/framework/speculative/draft_extend_input.h"
 #include "core/platform/platform.h"
 #include "core/util/tensor_helper.h"
@@ -52,25 +54,7 @@ limitations under the License.
 
 namespace xllm {
 
-runtime::Options DFlashWorkerImpl::draft_options(
-    const runtime::Options& options,
-    int32_t num_speculative_tokens) {
-  runtime::Options opts = options;
-  opts.enable_schedule_overlap(false)
-      .is_draft_engine(true)
-      .num_speculative_tokens(num_speculative_tokens)
-      .enable_graph_aux_hidden_states(false);
-  return opts;
-}
-
 namespace {
-
-int32_t configure_draft_config(ModelArgs& args,
-                               const runtime::Options& options) {
-  args.layers_to_capture({});
-  args.model_type("DFlashDraftModel");
-  return options.num_speculative_tokens();
-}
 
 std::vector<int64_t> build_accepted_context_rows(
     const LlmForwardInput& input,
@@ -129,7 +113,7 @@ bool DFlashWorkerImpl::prepare_parallel_draft_metadata(
   std::replace(params.parallel.dp_global_token_nums.begin(),
                params.parallel.dp_global_token_nums.end(),
                0,
-               (decode_options.num_speculative_tokens + 1));
+               decode_options.num_speculative_tokens + 1);
   if (params.meta.num_sequences != 0) {
     return false;
   }
@@ -145,27 +129,21 @@ bool DFlashWorkerImpl::prepare_parallel_draft_metadata(
 DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
-    : DFlashWorkerImpl(parallel_args,
-                       device,
-                       options,
-                       configure_draft_parallel_args(parallel_args),
-                       draft_options(options),
-                       configure_draft_config) {}
-
-DFlashWorkerImpl::DFlashWorkerImpl(
-    const ParallelArgs& parallel_args,
-    const torch::Device& device,
-    const runtime::Options& options,
-    const ParallelArgs& draft_parallel_args,
-    const runtime::Options& draft_opts,
-    int32_t (*configure_draft_config)(ModelArgs&, const runtime::Options&))
-    : DraftModelSpecWorkerImpl<LlmForwardInput>(parallel_args,
-                                                device,
-                                                options,
-                                                WorkerType::LLM,
-                                                draft_parallel_args,
-                                                draft_opts,
-                                                configure_draft_config) {
+    : DraftModelSpecWorkerImpl<LlmForwardInput>(
+          parallel_args,
+          device,
+          options,
+          WorkerType::LLM,
+          configure_draft_parallel_args(parallel_args),
+          [&options] {
+            runtime::Options draft_opts = options;
+            draft_opts
+                .enable_schedule_overlap(/*enable_schedule_overlap=*/false)
+                .is_draft_engine(/*is_draft_engine=*/true)
+                .enable_graph_aux_hidden_states(
+                    /*enable_graph_aux_hidden_states=*/false);
+            return draft_opts;
+          }()) {
   // The draft consumes the target's aux hidden states, which the
   // worker does not expose under CP; reject cp_size > 1 except
   // DeepSeek-V4 on NPU.
@@ -177,6 +155,16 @@ DFlashWorkerImpl::DFlashWorkerImpl(
   }
 }
 
+void DFlashWorkerImpl::apply_target_model_overrides(ModelArgs& args) const {
+  args.layers_to_capture(
+      read_capture_layer_ids(options_.draft_model_path().value()));
+}
+
+void DFlashWorkerImpl::apply_draft_model_overrides(ModelArgs& args) {
+  args.layers_to_capture({});
+  args.model_type(/*model_type=*/"DFlashDraftModel");
+}
+
 DFlashWorkerImpl::~DFlashWorkerImpl() {
   // Keep launch-thread-owned context alive until queued execution completes.
   drain_pending_execution();
@@ -185,6 +173,11 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
 bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
                                   int32_t random_seed,
                                   MasterStatus master_status) {
+#if !defined(USE_NPU)
+  LOG(FATAL) << options_.speculative_algorithm()
+             << " block-diffusion draft is not supported on "
+             << Platform::type_str() << ".";
+#endif
   // DFlash draft attends each block non-causally, which the shared QWen3 model
   // only wires up on the chunked-prefill mask path. Without it the draft falls
   // back to a causal mask and proposal quality silently degrades, so require
@@ -224,15 +217,8 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         << "Block-diffusion mask_token_id (" << mask_token_id_
         << ") must be < target vocab_size (" << target_args.vocab_size()
         << ").";
-    // Context hidden comes from the target.
-    const int64_t num_target_layers =
-        static_cast<int64_t>(target_args.layers_to_capture().size());
-    CHECK_GT(num_target_layers, 0)
-        << "Block-diffusion draft config requires dspark_target_layer_ids, "
-           "target_layer_ids, dflash_config.target_layer_ids, or "
-           "aux_hidden_state_layer_ids.";
     expected_context_hidden_size_ =
-        static_cast<int64_t>(target_args.hidden_size()) * num_target_layers;
+        AuxHiddenCapture::aux_hidden_dim(target_args);
   }
   return result;
 }
@@ -264,9 +250,8 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   const int32_t num_sequences = query_input.input_params.meta.num_sequences;
   if (!prepare_parallel_draft_metadata(query_input, decode_options)) {
     const int32_t rows_per_sequence =
-        decode_options.per_request
-            ? 1
-            : (decode_options.num_speculative_tokens + 1);
+        decode_options.per_request ? 1
+                                   : decode_options.num_speculative_tokens + 1;
     update_decode_batch_metadata(query_input.input_params,
                                  decode_options,
                                  num_sequences * rows_per_sequence);
@@ -354,8 +339,6 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_decode(
 
   CHECK(embedding_cache_ != nullptr)
       << "DFlash embedding cache is not allocated";
-
-  prepare_draft_input(input);
 
   std::vector<EmbeddingCache::DecodeState> last_states =
       embedding_cache_->read_decode_states(

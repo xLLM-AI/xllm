@@ -464,19 +464,20 @@ TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIgnoresOtherAlgorithms) {
   }
 }
 
-TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIgnoresOtherModels) {
-  for (const std::string model_type : {"deepseek_v3", "llama"}) {
-    SCOPED_TRACE(model_type);
-    ModelArgs args;
-    args.model_type(model_type).n_layers(45).num_nextn_predict_layers(1);
-    ModelRegistry::configure_mtp_args(args,
-                                      /*speculative_algorithm=*/"MTP",
-                                      /*is_draft_engine=*/true,
-                                      /*is_python_model=*/false);
-    EXPECT_EQ(args.model_type(), model_type);
-    EXPECT_EQ(args.n_layers(), 45);
-    EXPECT_EQ(args.mtp_start_layer_idx(), -1);
-  }
+TEST(HFModelLoaderTest, MtpLayerCountDoesNotRequireModelAdapter) {
+  ModelArgs args;
+  args.model_type(/*value=*/"deepseek_v3")
+      .n_layers(/*value=*/4)
+      .num_nextn_predict_layers(/*value=*/1)
+      .index_topk_pattern(/*value=*/"FSFS");
+  ModelRegistry::configure_mtp_args(args,
+                                    /*speculative_algorithm=*/"MTP",
+                                    /*is_draft_engine=*/true,
+                                    /*is_python_model=*/false);
+  EXPECT_EQ(args.model_type(), "deepseek_v3");
+  EXPECT_EQ(args.n_layers(), 1);
+  EXPECT_EQ(args.mtp_start_layer_idx(), 4);
+  EXPECT_EQ(args.index_topk_pattern(), "F");
 }
 
 TEST(HFModelLoaderTest, Glm5NextMtpEngineAndWorkerMatchExportedCacheLayout) {
@@ -752,7 +753,6 @@ TEST(HFModelLoaderTest, Qwen3DFlash2AcceptsArrayEosTokenIds) {
     EXPECT_EQ(args.stop_token_ids(),
               std::unordered_set<int32_t>({154820, 154827, 154829}));
     if (std::string(model_name) == "qwen3") {
-      EXPECT_EQ(args.block_size(), 8);
       EXPECT_EQ(args.dflash2_selector_top_k(), 16);
     }
   }
@@ -776,7 +776,6 @@ TEST(HFModelLoaderTest, Qwen3DFlash2ReadsFlatBlockGeometry) {
 
   ModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
-  EXPECT_EQ(args.block_size(), 5);
   EXPECT_EQ(args.dflash2_conv_group_size(), 2);
   EXPECT_EQ(args.dflash2_conv_kernel_size(), 3);
   EXPECT_EQ(args.dflash2_selector_rank(), 128);
@@ -829,7 +828,6 @@ TEST(HFModelLoaderTest, DeepseekV4DSparkModelArgsFrom0731Config) {
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.model_type(), "deepseek_v4");
   EXPECT_EQ(args.dspark_num_layers(), 3);
-  EXPECT_EQ(args.block_size(), 5);
   EXPECT_EQ(args.markov_rank(), 256);
   ASSERT_EQ(args.compress_ratios().size(), 43);
 }

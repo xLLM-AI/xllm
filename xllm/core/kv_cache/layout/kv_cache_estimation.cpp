@@ -140,7 +140,7 @@ int64_t layerwise_split_block_count(const ModelArgs& model_args,
                                     int64_t additional_block_bytes) {
   const int64_t num_layers = kv_cache_cap.n_layers();
   const std::vector<bool> indexer_layer_mask =
-      resolve_indexer_cache_enabled_layers(model_args, num_layers);
+      resolve_indexer_cache_enabled_layers(model_args);
 
   std::vector<int64_t> layer_bytes(static_cast<size_t>(num_layers), 0);
   bool any_indexer_layer = false;
@@ -732,8 +732,7 @@ void init_standard_counts(const ModelArgs& model_args,
   if (kv_cache_cap->index_block_bytes() > 0) {
     int64_t num_indexer_layers = kv_cache_cap->num_full_attention_layers();
     const std::vector<bool> indexer_layer_mask =
-        resolve_indexer_cache_enabled_layers(model_args,
-                                             kv_cache_cap->n_layers());
+        resolve_indexer_cache_enabled_layers(model_args);
     if (!indexer_layer_mask.empty()) {
       num_indexer_layers = static_cast<int64_t>(std::count(
           indexer_layer_mask.begin(), indexer_layer_mask.end(), true));
@@ -919,12 +918,11 @@ SharedStaticKVCachePlan plan_shared_static_kv_cache(
 }
 
 std::vector<bool> resolve_indexer_cache_enabled_layers(
-    const ModelArgs& model_args,
-    int64_t num_cache_layers) {
+    const ModelArgs& model_args) {
   if (!Platform::supports_dsa_indexer_cache_elision()) {
     return {};
   }
-  return layer::get_dsa_indexer_layer_mask(model_args, num_cache_layers);
+  return layer::get_dsa_indexer_layer_mask(model_args);
 }
 
 std::vector<bool> build_layer_cache_owned(const ModelArgs& model_args,
@@ -1175,10 +1173,6 @@ KVCacheCapacity estimate_kv_cache_capacity(
   kv_cache_cap.linear_conv_state_len(model_args.linear_conv_kernel_dim() - 1 +
                                      num_speculative_tokens);
   kv_cache_cap.linear_ssm_checkpoint_stride(num_speculative_tokens + 1);
-  if (options.is_draft_engine && model_args.num_nextn_predict_layers() > 0) {
-    kv_cache_cap.n_layers(model_args.num_nextn_predict_layers());
-  }
-
   if (model_args.index_kpool_compress() &&
       kpool_layout == KPoolCacheLayout::COMPRESSED_WITH_TAIL) {
     CHECK_EQ(options.layerwise_split_size, 1)

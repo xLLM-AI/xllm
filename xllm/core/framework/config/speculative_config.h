@@ -67,6 +67,10 @@ class SpeculativeConfig final {
     return boost::iequals(algorithm, "MTP");
   }
 
+  static constexpr auto is_eagle_family = [](std::string_view algorithm) {
+    return is_mtp_algorithm(algorithm) || is_eagle3_algorithm(algorithm);
+  };
+
   // Whether the PD handoff must carry the bootstrap hidden state.
   static bool requires_bootstrap_hidden(std::string_view algorithm) {
     return is_mtp_algorithm(algorithm) || is_eagle3_algorithm(algorithm);

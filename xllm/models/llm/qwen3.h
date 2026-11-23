@@ -212,7 +212,6 @@ REGISTER_MODEL_ARGS(qwen3, [&] {
   // For qwen3/2.5 model < 7B,  tie_word_embeddings = true
   LOAD_ARG_OR(tie_word_embeddings, "tie_word_embeddings", false);
 
-  LOAD_ARG_OR(use_sliding_window, "use_sliding_window", false);
   LOAD_ARG_OR(sliding_window, "sliding_window", -1);
   LOAD_ARG_OR(sliding_window_non_causal, "sliding_window_non_causal", false);
   LOAD_ARG_OR(max_window_layers, "max_window_layers", 28);
@@ -222,12 +221,6 @@ REGISTER_MODEL_ARGS(qwen3, [&] {
   LOAD_ARG_OR(enable_confidence_head, "enable_confidence_head", false);
   LOAD_ARG_OR(
       confidence_head_with_markov, "confidence_head_with_markov", false);
-  LOAD_ARG_OR_FUNC(block_size, "dflash_config.block_size", [&] {
-    return json.value_or<int32_t>(
-        std::vector<std::string>{
-            "block_size", "dflash2_block_size", "dspark_block_size"},
-        0);
-  });
   LOAD_ARG_OR_FUNC(
       dflash2_conv_group_size, "dflash_config.conv_group_size", [&] {
         return json.value_or<int32_t>(
@@ -250,6 +243,17 @@ REGISTER_MODEL_ARGS(qwen3, [&] {
     return json.value_or<int32_t>(
         std::vector<std::string>{"selector_top_k", "dflash2_selector_top_k"},
         0);
+  });
+
+  LOAD_ARG_OR_FUNC(use_sliding_window, /*json_name=*/"use_sliding_window", [&] {
+    return args->sliding_window() > 0 &&
+           (args->markov_rank() > 0 || args->dflash2_conv_group_size() > 0 ||
+            json.value_or<int64_t>(
+                std::vector<std::string>{"dflash_config.block_size",
+                                         "block_size",
+                                         "dflash2_block_size",
+                                         "dspark_block_size"},
+                /*default_value=*/0) > 0);
   });
 
   LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {

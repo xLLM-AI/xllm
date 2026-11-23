@@ -74,6 +74,8 @@ LLMMaster::LLMMaster(const Options& options)
   CHECK(load_hf_model_args(
       options_.model_path(), options_.backend(), &model_args_))
       << "Failed to load model args from " << options_.model_path();
+  const std::string& model_type = model_args_.model_type();
+  options_.validate(model_type);
   options_.enable_mla(model_args_.enable_mla());
   const bool use_ssm_engine = SpeculativeConfig::uses_ssm_engine(
       options_.draft_model_path().value_or(""),
@@ -81,8 +83,6 @@ LLMMaster::LLMMaster(const Options& options)
       options_.num_speculative_tokens());
   const EngineType engine_type =
       use_ssm_engine ? EngineType::SSM : EngineType::LLM;
-  const std::string& model_type = model_args_.model_type();
-  options_.validate(model_args_);
   const std::optional<std::string> cp_error = validate_context_parallel_config(
       options_, engine_type, model_type, options_.nnodes());
   CHECK(!cp_error.has_value()) << cp_error.value();
@@ -197,9 +197,7 @@ LLMMaster::LLMMaster(const Options& options)
   if (!use_ssm_engine) {
     llm_engine_ = std::make_unique<LLMEngine>(engine_options);
   } else {
-    const std::string draft_model_path =
-        options_.draft_model_path().value_or("");
-    engine_options.draft_model_path(draft_model_path)
+    engine_options.draft_model_path(options_.draft_model_path())
         .num_speculative_tokens(options_.num_speculative_tokens())
         .speculative_algorithm(options_.speculative_algorithm())
         .enable_probabilistic_draft(options_.enable_probabilistic_draft())
@@ -650,11 +648,6 @@ bool LLMMaster::sleep() {
 bool LLMMaster::requires_wakeup() const {
   return model_residency_coordinator_ != nullptr &&
          model_residency_coordinator_->is_suspended();
-}
-
-bool LLMMaster::wakeup() {
-  WakeupOptions options;
-  return wakeup(options);
 }
 
 bool LLMMaster::wakeup(const WakeupOptions& options) {

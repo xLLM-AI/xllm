@@ -47,6 +47,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
 
  protected:
   static runtime::Options draft_options(const runtime::Options& options);
+  void apply_draft_model_overrides(ModelArgs& args) override;
 
   MTPWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,
@@ -60,7 +61,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                   MasterStatus master_status) override;
 
  protected:
-  using typename DraftModelSpecWorkerImpl<TargetInput>::TargetModelParams;
+  using typename SpeculativeWorkerImpl<TargetInput>::TargetModelParams;
   using DraftModelSpecWorkerImpl<TargetInput>::compute_stream_;
   using DraftModelSpecWorkerImpl<TargetInput>::context_;
   using DraftModelSpecWorkerImpl<TargetInput>::device_;
@@ -71,14 +72,12 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<TargetInput>::options_;
   using DraftModelSpecWorkerImpl<TargetInput>::parallel_args_;
   using DraftModelSpecWorkerImpl<TargetInput>::prepare_stream_;
-  using DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_shape;
+  using DraftModelSpecWorkerImpl<TargetInput>::target_verify_mode_;
   using DraftModelSpecWorkerImpl<TargetInput>::enable_schedule_overlap;
   using DraftModelSpecWorkerImpl<TargetInput>::run_worker_no_sync_impl;
   using DraftModelSpecWorkerImpl<TargetInput>::finalize_step_output;
   using SpeculativeWorkerImpl<TargetInput>::maybe_broadcast_spec_tokens;
   using DraftModelSpecWorkerImpl<TargetInput>::logical_block_size;
-  using DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input;
-  using DraftModelSpecWorkerImpl<TargetInput>::target_verify_mode_;
   using DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input;
 
   // MTP composite: leaves own model-specific NPU input preparation.
@@ -124,7 +123,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // prepare inputs for draft model at Prefill phase.
   void prepare_prefill_inputs(const TargetInput& inputs,
                               LlmForwardInput& prefill_inputs);
-  bool supports_expanded_spec_verify() const;
   bool should_use_explicit_spec_verify_replay_update(
       const TargetInput& input) const;
   int64_t spec_verify_block_table_width(
