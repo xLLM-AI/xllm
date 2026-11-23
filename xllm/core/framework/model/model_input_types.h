@@ -45,34 +45,11 @@ limitations under the License.
 
 #include "core/framework/batch/batch_forward_type.h"
 #include "core/framework/model/mtp_topk_state.h"
-#include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
 #include "core/util/hash_util.h"
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
-
-template <typename Embedding>
-void materialize_linear_state_indices(Embedding& embedding,
-                                      const torch::Device& device) {
-  if (embedding.linear_state_ids.empty()) {
-    return;
-  }
-  if (!embedding.linear_state_indices.defined()) {
-    embedding.linear_state_indices =
-        make_cpu_tensor(embedding.linear_state_ids).to(device);
-  }
-  if (!embedding.linear_state_read_indices.defined()) {
-    const auto& read_ids = embedding.linear_state_read_ids.empty()
-                               ? embedding.linear_state_ids
-                               : embedding.linear_state_read_ids;
-    CHECK_EQ(read_ids.size(), embedding.linear_state_ids.size());
-    embedding.linear_state_read_indices =
-        read_ids == embedding.linear_state_ids
-            ? embedding.linear_state_indices
-            : make_cpu_tensor(read_ids).to(device);
-  }
-}
 
 namespace npu {
 struct AclGraphTaskUpdateContext;
@@ -331,10 +308,11 @@ struct BatchInputMeta {
   bool is_graph_warmup = false;
 };
 
-class LlmEmbeddingInput final {
+class ModelEmbeddingInput final {
  public:
   // input embedding
   mutable torch::Tensor input_embedding;
+  std::vector<torch::Tensor> deep_stacks_;
 
   // embedding ids of each sequence
   std::vector<int32_t> embedding_ids;
@@ -369,9 +347,31 @@ class LlmEmbeddingInput final {
   std::vector<int32_t> mtp_bootstrap_row_idxes;
   torch::Tensor mtp_bootstrap_embeddings;
 
-  LlmEmbeddingInput to(const torch::Device& device) const {
-    LlmEmbeddingInput out;
+  void materialize_linear_state_indices(const torch::Device& device) {
+    if (linear_state_ids.empty()) {
+      return;
+    }
+    if (!linear_state_indices.defined()) {
+      linear_state_indices = make_cpu_tensor(linear_state_ids).to(device);
+    }
+    if (!linear_state_read_indices.defined()) {
+      const auto& read_ids = linear_state_read_ids.empty()
+                                 ? linear_state_ids
+                                 : linear_state_read_ids;
+      CHECK_EQ(read_ids.size(), linear_state_ids.size());
+      linear_state_read_indices = read_ids == linear_state_ids
+                                      ? linear_state_indices
+                                      : make_cpu_tensor(read_ids).to(device);
+    }
+  }
+
+  ModelEmbeddingInput to(const torch::Device& device) const {
+    ModelEmbeddingInput out;
     out.input_embedding = safe_to(input_embedding, device);
+    out.deep_stacks_.reserve(deep_stacks_.size());
+    for (const auto& residual : deep_stacks_) {
+      out.deep_stacks_.emplace_back(safe_to(residual, device));
+    }
     out.embedding_ids = embedding_ids;
     out.linear_state_ids = linear_state_ids;
     out.linear_state_indices = safe_to(linear_state_indices, device, true);
@@ -386,22 +386,7 @@ class LlmEmbeddingInput final {
     out.mtp_bootstrap_row_idxes = mtp_bootstrap_row_idxes;
     out.mtp_bootstrap_embeddings =
         safe_to(mtp_bootstrap_embeddings, device, true);
-    return out;
-  }
-};
-
-class VlmVisionInput final {
- public:
-  // multimodal
-  mutable MMBatchData mm_data;
-
-  // deep_stack for Qwen3-VL
-  mutable std::vector<torch::Tensor> deep_stacks;
-
-  VlmVisionInput to(const torch::Device& device) const {
-    VlmVisionInput out;
-    out.mm_data = MMBatchData::to(mm_data, device);
-    out.deep_stacks = deep_stacks;
+    out.materialize_linear_state_indices(device);
     return out;
   }
 };
@@ -447,6 +432,15 @@ class ParallelInput final {
 #if defined(USE_NPU) || defined(USE_MUSA)
   std::vector<int64_t> query_start_loc;
 #endif
+
+  bool synchronize_draft_layer() const {
+    if (layer_wise_load_synchronizer == nullptr ||
+        !draft_load_event_index.has_value()) {
+      return true;
+    }
+    return layer_wise_load_synchronizer->synchronize_layer(
+        static_cast<int64_t>(*draft_load_event_index));
+  }
 
   ParallelInput to(const torch::Device& device) const {
     ParallelInput out;
@@ -502,7 +496,7 @@ class ExpertInput final {
   }
 };
 
-class LlmGraphInput final {
+class ModelGraphInput final {
  public:
   torch::Tensor attn_mask;
   torch::Tensor tiling_data;
@@ -533,8 +527,8 @@ class LlmGraphInput final {
   // signaling on the final-draft-to-target critical path.
   bool spec_verify_static_graph_tasks_prepared = false;
 
-  LlmGraphInput to(const torch::Device& device) const {
-    LlmGraphInput out;
+  ModelGraphInput to(const torch::Device& device) const {
+    ModelGraphInput out;
     out.attn_mask = safe_to(attn_mask, device, true);
     out.tiling_data = safe_to(tiling_data, device, true);
 #if defined(USE_DCU)
@@ -569,130 +563,35 @@ class LlmGraphInput final {
   }
 };
 
-class VlmEmbeddingInput final {
- public:
-  // input embedding
-  mutable torch::Tensor input_embedding;
-
-  // embedding ids of each sequence
-  std::vector<int32_t> embedding_ids;
-
-  // linear state ids of each sequence
-  std::vector<int32_t> linear_state_ids;
-
-  // IntTensor: [n_seq]
-  torch::Tensor linear_state_indices;
-
-  std::vector<int32_t> linear_state_read_ids;
-  torch::Tensor linear_state_read_indices;
-
-  // Shared static storage only: [state id, Linear group slots...] for each
-  // recurrent state this batch reads or writes.
-  std::vector<int32_t> linear_state_slot_rows;
-
-  // Shared slab storage: [logical Full block id, physical row per Full layer].
-  std::vector<int32_t> full_block_slot_rows;
-
-  // One allocation epoch per Full mapping row, including retained prefixes.
-  std::vector<uint64_t> full_block_lease_epochs;
-
-  // request ids of each sequence, used by suffix decoding request identity
-  std::vector<std::string> request_ids;
-
-  // chunked prefill case of speculative decoding
-  // extra token ids for each sequence, and -1 for last chunk
-  std::vector<int32_t> extra_token_ids;
-
-  // Pending PD handoff bootstrap rows for the first MTP decode step.
-  std::vector<int32_t> mtp_bootstrap_row_idxes;
-  torch::Tensor mtp_bootstrap_embeddings;
-
-  VlmEmbeddingInput to(const torch::Device& device) const {
-    VlmEmbeddingInput out;
-    out.input_embedding = safe_to(input_embedding, device);
-    out.embedding_ids = embedding_ids;
-    out.linear_state_ids = linear_state_ids;
-    out.linear_state_indices = safe_to(linear_state_indices, device, true);
-    out.linear_state_read_ids = linear_state_read_ids;
-    out.linear_state_read_indices =
-        safe_to(linear_state_read_indices, device, true);
-    out.linear_state_slot_rows = linear_state_slot_rows;
-    out.full_block_slot_rows = full_block_slot_rows;
-    out.full_block_lease_epochs = full_block_lease_epochs;
-    out.request_ids = request_ids;
-    out.extra_token_ids = extra_token_ids;
-    out.mtp_bootstrap_row_idxes = mtp_bootstrap_row_idxes;
-    out.mtp_bootstrap_embeddings =
-        safe_to(mtp_bootstrap_embeddings, device, true);
-    return out;
+namespace detail {
+template <typename Params>
+Params transfer_model_params(const Params& source,
+                             const torch::Device& device) {
+  Params params;
+  params.meta = source.meta;
+  params.attention = source.attention.to(device);
+  params.embedding = source.embedding.to(device);
+  params.parallel = source.parallel.to(device);
+  params.expert = source.expert.to(device);
+  params.graph = source.graph.to(device);
+  params.linear_state_validity_mask = source.linear_state_validity_mask;
+  params.prefill_without_cache = source.prefill_without_cache;
+  params.num_accepted_tokens =
+      safe_to(source.num_accepted_tokens, device, /*non_blocking=*/true);
+  params.num_accepted_tokens_host = source.num_accepted_tokens_host;
+  if (source.mtp_topk_state != nullptr) {
+    params.mtp_topk_state = source.mtp_topk_state->to(device);
   }
-};
-
-class VlmGraphInput final {
- public:
-  torch::Tensor attn_mask;
-  torch::Tensor tiling_data;
-#if defined(USE_DCU)
-  bool use_dense_flash_attention = false;
-#endif
-  torch::Tensor expanded_kv_seq_lens;
-  torch::Tensor expanded_block_tables;
-  torch::Tensor expanded_paged_kv_indptr;
-  torch::Tensor expanded_paged_kv_indices;
-  torch::Tensor expanded_paged_kv_last_page_len;
-  torch::Tensor expanded_tiling_data;
-  std::vector<int32_t> expanded_kv_seq_lens_vec;
-#if defined(USE_NPU)
-  std::shared_ptr<npu::AclGraphTaskUpdateContext> acl_graph_task_update_context;
-#endif
-  torch::Tensor input_tokens_override;
-  // Device token sources produced by a speculative proposer. A matching
-  // backend may fuse them into graph-owned target-verify storage.
-  std::vector<torch::Tensor> spec_verify_draft_token_sources;
-  // All dynamic target-verify source tensors retain their backing addresses
-  // across replay generations. When true, the ACL graph records those
-  // addresses separately from its graph key/task signature and validates them
-  // before each replay.
-  bool spec_verify_source_addresses_stable = false;
-  // All ready events for the current static causal-conv task signature have
-  // already been recorded on the signal stream. Replay can skip cold-path
-  // signaling on the final-draft-to-target critical path.
-  bool spec_verify_static_graph_tasks_prepared = false;
-
-  VlmGraphInput to(const torch::Device& device) const {
-    VlmGraphInput out;
-    out.attn_mask = safe_to(attn_mask, device, true);
-    out.tiling_data = safe_to(tiling_data, device, true);
-#if defined(USE_DCU)
-    out.use_dense_flash_attention = use_dense_flash_attention;
-#endif
-    out.expanded_kv_seq_lens = safe_to(expanded_kv_seq_lens, device, true);
-    out.expanded_block_tables = safe_to(expanded_block_tables, device, true);
-    out.expanded_paged_kv_indptr =
-        safe_to(expanded_paged_kv_indptr, device, true);
-    out.expanded_paged_kv_indices =
-        safe_to(expanded_paged_kv_indices, device, true);
-    out.expanded_paged_kv_last_page_len =
-        safe_to(expanded_paged_kv_last_page_len, device, true);
-    out.expanded_tiling_data = safe_to(expanded_tiling_data, device, true);
-    out.expanded_kv_seq_lens_vec = expanded_kv_seq_lens_vec;
-#if defined(USE_NPU)
-    out.acl_graph_task_update_context = acl_graph_task_update_context;
-#endif
-    out.input_tokens_override =
-        safe_to(input_tokens_override, device, /*non_blocking=*/true);
-    out.spec_verify_draft_token_sources.reserve(
-        spec_verify_draft_token_sources.size());
-    for (const auto& token : spec_verify_draft_token_sources) {
-      out.spec_verify_draft_token_sources.push_back(
-          safe_to(token, device, /*non_blocking=*/true));
-    }
-    out.spec_verify_source_addresses_stable =
-        spec_verify_source_addresses_stable;
-    out.spec_verify_static_graph_tasks_prepared =
-        spec_verify_static_graph_tasks_prepared;
-    return out;
+  params.multi_block_tables.reserve(source.multi_block_tables.size());
+  for (const auto& table : source.multi_block_tables) {
+    params.multi_block_tables.emplace_back(safe_to(
+        table, table.options().device(/*device=*/torch::kCPU), /*non_blocking=*/true));
   }
-};
+#if defined(USE_MUSA)
+  params.attn_metadata = source.attn_metadata;
+#endif
+  return params;
+}
+}  // namespace detail
 
 }  // namespace xllm

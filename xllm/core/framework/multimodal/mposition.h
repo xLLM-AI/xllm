@@ -31,6 +31,13 @@ limitations under the License.
 
 namespace xllm {
 
+torch::Tensor build_image_mrope_positions(const torch::Tensor& input_ids,
+                                          const torch::Tensor& attention_mask,
+                                          const torch::Tensor& image_grid_thw,
+                                          int64_t spatial_merge_size,
+                                          int32_t image_token_id,
+                                          int32_t vision_start_token_id);
+
 class MPositionGenerator {
  public:
   virtual ~MPositionGenerator() = default;

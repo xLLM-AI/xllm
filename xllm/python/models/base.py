@@ -25,7 +25,7 @@ PyCausalLM no longer calls model.forward() directly.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
@@ -46,6 +46,37 @@ class MultimodalEmbeddings:
     deepstack_input_embeds: tuple[torch.Tensor, ...] | None = None
 
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Protocol
+
+    class _EmbeddingBackbone(Protocol):
+        embed_tokens: Callable[[torch.Tensor], torch.Tensor]
+
+        def __call__(
+            self,
+            embeddings: torch.Tensor,
+            positions: torch.Tensor,
+            *args: torch.Tensor | tuple[torch.Tensor, ...] | None,
+        ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...
+
+
+class TokenEmbeddingRunner(nn.Module):
+    def __init__(self, backbone: nn.Module) -> None:
+        super().__init__()  # pyright: ignore[reportUnknownMemberType]
+        self.backbone = cast("_EmbeddingBackbone", backbone)
+        self.execution_metadata_builders = getattr(backbone, "execution_metadata_builders", ())
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_embedding: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        embeddings = self.backbone.embed_tokens(input_ids) if input_embedding is None else input_embedding
+        return self.backbone(embeddings, positions)
+
+
 class PyModelBase(nn.Module):
     """Base class for causal LMs the C++ ``PyCausalLM`` bridge drives.
 
@@ -56,6 +87,13 @@ class PyModelBase(nn.Module):
 
     model: nn.Module
     lm_head: nn.Module
+    runner_model_cls: type[nn.Module] | None = None
+
+    @property
+    def runner_model(self) -> nn.Module:
+        if self.runner_model_cls is None:
+            return self.model
+        return self.runner_model_cls(self.model)
 
     @staticmethod
     def resolve_dtype(dtype: object) -> torch.dtype:

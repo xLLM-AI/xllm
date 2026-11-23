@@ -81,8 +81,7 @@ def test_deepstack_inputs_survive_interleaved_embedding_preparation() -> None:
     model.model.norm = _IdentityNorm()
     model.image_token_id = 10
     model.video_token_id = 11
-    model.visual_dim = 4
-    model.deepstack_num_level = 1
+    model.vision_cfg = Qwen3VLVisionConfig(out_hidden_size=4, deepstack_visual_indexes=[0])
     tokens = torch.tensor([1, 10, 11, 2])
     image = torch.tensor([[100.0] * 4 + [10.0] * 4])
     video = torch.tensor([[200.0] * 4 + [20.0] * 4])
@@ -91,13 +90,9 @@ def test_deepstack_inputs_survive_interleaved_embedding_preparation() -> None:
     expected = model.model.embed_tokens(tokens).clone()
     expected[1] = 110
     expected[2] = 220
-    torch.testing.assert_close(
-        model.model(
-            tokens, torch.arange(4), inputs.input_embedding, deepstack_input_embeds=inputs.deepstack_input_embeds
-        ),
-        expected,
-    )
-    torch.testing.assert_close(model.model(tokens, torch.arange(4)), model.model.embed_tokens(tokens))
+    positions = torch.arange(4)
+    torch.testing.assert_close(model.model(inputs.input_embedding, positions, inputs.deepstack_input_embeds), expected)
+    torch.testing.assert_close(model.runner_model(tokens, positions), model.model.embed_tokens(tokens))
     text_inputs = model.get_input_embeddings(torch.tensor([3, 4]))
     assert text_inputs.deepstack_input_embeds == ()
     torch.testing.assert_close(text_inputs.input_embedding, model.model.embed_tokens(torch.tensor([3, 4])))
@@ -212,6 +207,7 @@ def test_multimodal_registry_selects_vision_composer(name: str) -> None:
 
 def test_explicit_image_video_rows_do_not_leak_into_decode() -> None:
     model = _model()
+    runner = model.runner_model
     tokens = torch.tensor([1, 10, 10, 2, 11, 3])
     image = torch.full((2, 4), 100.0)
     video = torch.full((1, 4), 200.0)
@@ -219,28 +215,20 @@ def test_explicit_image_video_rows_do_not_leak_into_decode() -> None:
     expected[1:3] = image
     expected[4] = video[0]
     merged = model.get_input_embeddings(tokens, image, video).input_embedding
-    torch.testing.assert_close(merged, expected)
-    torch.testing.assert_close(model.model(tokens, torch.zeros(3, 6, dtype=torch.long), merged), expected)
-    torch.testing.assert_close(
-        model.model(tokens, torch.zeros(3, 6, dtype=torch.long)), model.model.embed_tokens(tokens)
-    )
+    torch.testing.assert_close(runner(tokens, torch.zeros(3, 6, dtype=torch.long), merged), expected)
+    torch.testing.assert_close(runner(tokens, torch.zeros(3, 6, dtype=torch.long)), model.model.embed_tokens(tokens))
     decode_tokens = torch.tensor([4, 5])
-    torch.testing.assert_close(
-        model.model(decode_tokens, torch.tensor([6, 7])), model.model.embed_tokens(decode_tokens)
-    )
+    torch.testing.assert_close(runner(decode_tokens, torch.tensor([6, 7])), model.model.embed_tokens(decode_tokens))
 
 
 def test_chunk_uses_only_current_visual_rows() -> None:
     model = _model()
+    runner = model.runner_model
     for values in (torch.full((2, 4), 100.0), torch.full((2, 4), 200.0), torch.full((1, 4), 300.0)):
         tokens = torch.tensor([1] + [10] * values.shape[0])
         merged = model.get_input_embeddings(tokens, values).input_embedding
-        torch.testing.assert_close(merged[1:], values)
-        hidden = model.model(tokens, torch.zeros(3, len(tokens), dtype=torch.long), merged)
+        hidden = runner(tokens, torch.zeros(3, len(tokens), dtype=torch.long), merged)
         torch.testing.assert_close(hidden[1:], values)
-    text = torch.tensor([1, 2])
-    torch.testing.assert_close(model.get_input_embeddings(text).input_embedding, model.model.embed_tokens(text))
-    torch.testing.assert_close(model.model(text, torch.tensor([6, 7])), model.model.embed_tokens(text))
 
 
 def test_empty_visual_rows_keep_text_only_execution_state() -> None:
@@ -248,18 +236,17 @@ def test_empty_visual_rows_keep_text_only_execution_state() -> None:
     tokens = torch.tensor([1, 2])
     inputs = model.get_input_embeddings(tokens, torch.empty(0, 4), torch.empty(0, 4))
     assert inputs.deepstack_input_embeds is None
-    merged = inputs.input_embedding
-    torch.testing.assert_close(merged, model.model.embed_tokens(tokens))
-    torch.testing.assert_close(model.model(tokens, torch.tensor([0, 1]), merged), model.model.embed_tokens(tokens))
+    torch.testing.assert_close(inputs.input_embedding, model.model.embed_tokens(tokens))
 
 
 @pytest.mark.parametrize("shape", [(1, 4), (3, 4), (2, 8)])
 def test_visual_shape_mismatch_does_not_change_decoder_input(shape: tuple[int, int]) -> None:
     model = _model()
+    runner = model.runner_model
     with pytest.raises(ValueError, match="visual embedding shape"):
         model.get_input_embeddings(torch.tensor([10, 10]), torch.zeros(shape))
     tokens = torch.tensor([1, 2])
-    torch.testing.assert_close(model.model(tokens, torch.tensor([0, 1])), model.model.embed_tokens(tokens))
+    torch.testing.assert_close(runner(tokens, torch.tensor([0, 1])), model.model.embed_tokens(tokens))
 
 
 def test_qwen35_rejects_deepstack_before_constructing_decoder() -> None:

@@ -93,36 +93,14 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
     return std::make_pair(cos_pos, sin_pos);
   }
 
-  // tokens: [num_tokens]
-  // positions: [num_tokens] token pos in the sequence
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) override {
-    auto local_params = input_params.clone().view();
-    return forward_impl(tokens, positions, kv_caches, local_params);
-  }
-
-  template <typename InputParams>
-  ModelOutput forward_impl(torch::Tensor tokens,
-                           torch::Tensor positions,
-                           std::vector<KVCache>& kv_caches,
-                           InputParams& input_params) {
-    auto& modified_input_params = input_params;
-    if (tokens.numel() == 0) {
-      tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-      positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-    }
+  ModelOutput forward_from_embeddings(
+      torch::Tensor h,
+      torch::Tensor positions,
+      std::vector<KVCache>& kv_caches,
+      const ModelParamsView& input_params) override {
+    const auto modified_input_params = input_params.clone().view();
     auto& dp_token_nums = modified_input_params.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
-    auto inputs_embeds = input_params.embedding.input_embedding;
-    torch::Tensor h;
-    if (inputs_embeds.defined()) {
-      h = inputs_embeds;
-    } else {
-      h = embed_tokens_(tokens);
-    }
-
     if (!modified_input_params.attn_metadata) {
       modified_input_params.attn_metadata =
           std::make_shared<layer::AttentionMetadata>(
@@ -136,6 +114,8 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
           apply_mrope(positions);
     }
 
+    const auto& deep_stacks = modified_input_params.embedding.deep_stacks_;
+    const size_t num_deep_stacks = deep_stacks.size();
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
       if (!modified_input_params.synchronize_layer(static_cast<uint32_t>(i))) {
@@ -156,11 +136,8 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
         return ModelOutput();
       }
 
-      if (input_params.has_multimodal()) {
-        const auto& deep_stacks = input_params.multimodal().deep_stacks;
-        if (i < deep_stacks.size()) {
-          h = h + deep_stacks[i];
-        }
+      if (i < num_deep_stacks) {
+        h = h + deep_stacks[i];
       }
     }
     auto [hidden_states, residual_out] = norm_(h, residual);
@@ -213,8 +190,7 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
   }
 
  private:
-  template <typename InputParams>
-  layer::AttentionMetadata get_attention_metadata(const InputParams& params,
+  layer::AttentionMetadata get_attention_metadata(const ModelParamsView& params,
                                                   const torch::Tensor& h) {
 #if defined(USE_NPU)
     max_seq_len_ = std::max(params.meta.kv_max_seq_len, max_seq_len_);

@@ -222,11 +222,11 @@ VlmForwardInput make_vlm_transport_input() {
   input.input_params.attention.host.new_cache_slots = {3, 4};
   input.input_params.attention.host.block_tables =
       torch::tensor({{7, 9}}, torch::kInt32);
-  input.input_params.multimodal.mm_data.batch({MMData(
+  input.mm_data_.batch({MMData(
       MMType::IMAGE,
       MMDict{{"pixel_values", torch::tensor({{1.5F, 2.5F}})},
              {"image_grid_thw", torch::tensor({{1, 2, 2}}, torch::kInt64)}})});
-  input.input_params.multimodal.deep_stacks = {torch::tensor({{3.5F, 4.5F}}),
+  input.input_params.embedding.deep_stacks_ = {torch::tensor({{3.5F, 4.5F}}),
                                                torch::tensor({{5.5F, 6.5F}})};
   input.sampling_params.logits_indices() = torch::tensor({1}, torch::kInt32);
   input.sample_sequence_ids = {"vlm#0"};
@@ -245,18 +245,16 @@ void expect_vlm_transport_input(const VlmForwardInput& input) {
             (std::vector<int32_t>{2}));
   EXPECT_EQ(input.sample_sequence_ids, (std::vector<std::string>{"vlm#0"}));
   EXPECT_EQ(input.sample_prior_output_rows, (std::vector<int32_t>{-1}));
-  const auto pixels =
-      input.input_params.multimodal.mm_data.get<torch::Tensor>("pixel_values");
-  const auto grid = input.input_params.multimodal.mm_data.get<torch::Tensor>(
-      "image_grid_thw");
+  const auto pixels = input.mm_data_.get<torch::Tensor>(/*key=*/"pixel_values");
+  const auto grid = input.mm_data_.get<torch::Tensor>(/*key=*/"image_grid_thw");
   ASSERT_TRUE(pixels.has_value());
   ASSERT_TRUE(grid.has_value());
   EXPECT_TRUE(torch::equal(*pixels, torch::tensor({{1.5F, 2.5F}})));
   EXPECT_TRUE(torch::equal(*grid, torch::tensor({{1, 2, 2}}, torch::kInt64)));
-  ASSERT_EQ(input.input_params.multimodal.deep_stacks.size(), 2u);
-  EXPECT_TRUE(torch::equal(input.input_params.multimodal.deep_stacks[0],
+  ASSERT_EQ(input.input_params.embedding.deep_stacks_.size(), 2u);
+  EXPECT_TRUE(torch::equal(input.input_params.embedding.deep_stacks_[0],
                            torch::tensor({{3.5F, 4.5F}})));
-  EXPECT_TRUE(torch::equal(input.input_params.multimodal.deep_stacks[1],
+  EXPECT_TRUE(torch::equal(input.input_params.embedding.deep_stacks_[1],
                            torch::tensor({{5.5F, 6.5F}})));
 }
 
@@ -858,7 +856,7 @@ TEST(BatchPackedInputTest, NativeVlmDecodeKeepsDomainWithoutVisionData) {
   const auto prepared =
       lazy_input.to(torch::Device(torch::kCPU), torch::kFloat32);
   EXPECT_TRUE(prepared.input_params.meta.batch_forward_type.is_decode());
-  EXPECT_FALSE(prepared.input_params.multimodal.mm_data.valid());
+  EXPECT_FALSE(prepared.mm_data_.valid());
   EXPECT_TRUE(torch::equal(prepared.token_ids.cpu(), source.token_ids));
   LlmForwardInput llm_input;
   DiTForwardInput dit_input;
@@ -884,7 +882,6 @@ TEST(BatchPackedInputTest, BorrowedExecutionViewUpdatesNativeMetadata) {
   view.graph.input_tokens_override = torch::tensor({13}, torch::kInt32);
   EXPECT_TRUE(torch::equal(owner.graph.input_tokens_override,
                            torch::tensor({13}, torch::kInt32)));
-  EXPECT_FALSE(view.has_multimodal());
 }
 
 TEST(BatchPackedInputTest, NativeDiTPackedProtoRejectsMalformedPayloads) {
@@ -1164,7 +1161,7 @@ TEST(BatchPackedInputTest, NativeVlmSharedMemoryRetainsVisionAfterOverwrite) {
         torch::Device(torch::kCPU),
         InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE);
     source.token_ids = torch::tensor({91, 92}, torch::kInt32);
-    source.input_params.multimodal.deep_stacks.clear();
+    source.input_params.embedding.deep_stacks_.clear();
     ASSERT_TRUE(writer.input_write(source));
   }
   const auto prepared =
@@ -1177,7 +1174,7 @@ TEST(BatchPackedInputTest,
   const auto snapshot_view = [] {
     VlmModelParams owner;
     owner.attention.host.kv_seq_lens = {2};
-    owner.multimodal.deep_stacks = {torch::tensor({1.0F, 3.0F})};
+    owner.embedding.deep_stacks_ = {torch::tensor(/*values=*/{1.0F, 3.0F})};
     ModelParamsView borrowed(owner);
     auto retained = borrowed.clone().view();
     borrowed.attention.host.kv_seq_lens[0] = 9;
@@ -1185,9 +1182,8 @@ TEST(BatchPackedInputTest,
   }();
   EXPECT_EQ(snapshot_view.attention.host.kv_seq_lens,
             (std::vector<int32_t>{2}));
-  EXPECT_TRUE(snapshot_view.has_multimodal());
-  ASSERT_EQ(snapshot_view.multimodal().deep_stacks.size(), 1u);
-  EXPECT_TRUE(torch::equal(snapshot_view.multimodal().deep_stacks[0],
+  ASSERT_EQ(snapshot_view.embedding.deep_stacks_.size(), 1u);
+  EXPECT_TRUE(torch::equal(snapshot_view.embedding.deep_stacks_[0],
                            torch::tensor({1.0F, 3.0F})));
 }
 
@@ -1215,7 +1211,7 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
   params.mtp_topk_state = MtpTopkState::from_tensor(values);
 
   const torch::Device target_device("meta");
-  ModelParamsView converted = params.clone().to(target_device).view();
+  ModelParamsView converted = params.clone().view().to(target_device).view();
 
   const std::vector<torch::Tensor> transferred_tensors = {
       converted.embedding.mtp_bootstrap_embeddings,
@@ -1236,7 +1232,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
   }
   ASSERT_NE(converted.mtp_topk_state, nullptr);
   EXPECT_EQ(converted.mtp_topk_state->device(), target_device);
-  EXPECT_FALSE(converted.has_multimodal());
   EXPECT_TRUE(converted.graph.spec_verify_source_addresses_stable);
   EXPECT_TRUE(converted.graph.spec_verify_static_graph_tasks_prepared);
   EXPECT_EQ(converted.embedding.extra_token_ids, (std::vector<int32_t>{3}));

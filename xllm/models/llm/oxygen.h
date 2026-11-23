@@ -25,42 +25,20 @@ class OxygenModelImpl : public QWen3ModelImpl {
  public:
   OxygenModelImpl(const ModelContext& context) : QWen3ModelImpl(context) {}
 
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) override {
-    const bool use_deepstack = input_params.has_multimodal() &&
-                               !input_params.multimodal().deep_stacks.empty();
-    ModelParamsView& input_params_new =
-        const_cast<ModelParamsView&>(input_params);
-    std::vector<torch::Tensor> deep_stacks;
-
-    if (tokens.numel() == 0) {
-      tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-      positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-    }
-    auto inputs_embeds = input_params.embedding.input_embedding;
-    torch::Tensor h;
-    if (inputs_embeds.defined()) {
-      h = inputs_embeds;
-    } else {
-      h = embed_tokens_(tokens);
-    }
-    if (use_deepstack) {
-      deep_stacks = input_params.multimodal()
-                        .deep_stacks;  // [num_deepstack, hidden_size]
-    }
-
-    auto& dp_token_nums = input_params_new.parallel.dp_global_token_nums;
+  ModelOutput forward_from_embeddings(
+      torch::Tensor h,
+      torch::Tensor positions,
+      std::vector<KVCache>& kv_caches,
+      const ModelParamsView& input_params) override {
+    auto& dp_token_nums = input_params.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
-    if (!input_params_new.attn_metadata) {
-      input_params_new.attn_metadata =
-          std::make_shared<layer::AttentionMetadata>(
-              layer::AttentionMetadataBuilder::build(input_params_new,
-                                                     model_args_.enable_mla()));
+    if (!input_params.attn_metadata) {
+      input_params.attn_metadata = std::make_shared<layer::AttentionMetadata>(
+          layer::AttentionMetadataBuilder::build(input_params,
+                                                 model_args_.enable_mla()));
     }
 
-    auto& attn_metadata = *(input_params_new.attn_metadata);
+    auto& attn_metadata = *(input_params.attn_metadata);
     bool only_prefill =
         (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill);
     if (positions.dim() == 2 && only_prefill && !mrope_section_.empty()) {
@@ -68,19 +46,16 @@ class OxygenModelImpl : public QWen3ModelImpl {
           apply_mrope(positions);
     }
 
+    const auto& deep_stacks = input_params.embedding.deep_stacks_;
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
       auto& layer = layers_[i];
       h = layer->forward(h, residual, positions, attn_metadata, kv_caches[i]);
-      if (!input_params_new.record_layer(static_cast<uint32_t>(i),
-                                         h.device())) {
+      if (!input_params.record_layer(static_cast<uint32_t>(i), h.device())) {
         return ModelOutput();
       }
-
-      if (use_deepstack) {
-        if (deep_stacks.size() > 0 && i < deep_stacks.size()) {
-          h = h + deep_stacks[i];
-        }
+      if (i < deep_stacks.size()) {
+        h = h + deep_stacks[i];
       }
     }
     auto [hidden_states, residual_out] = norm_(h, residual);

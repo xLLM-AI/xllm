@@ -45,6 +45,7 @@ limitations under the License.
 #include "models/dit/utils/util.h"
 #include "models/model_registry.h"
 #if defined(USE_DCU)
+#include "core/framework/multimodal/mposition.h"
 #include "models/vlm/qwen2_5_vl.h"
 #endif
 #include "core/util/tensor_helper.h"
@@ -87,9 +88,6 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
   QwenImageEditPlusPipelineImpl(const DiTModelContext& context)
       : context_(context),
         parallel_args_(context.get_parallel_args()),
-#if defined(USE_DCU)
-        vl_image_processor_(context.get_model_args("processor")),
-#endif
         vae_model_args_(context.get_model_args("vae")) {
     options_ = context.get_tensor_options();
     dtype_ = options_.dtype().toScalarType();
@@ -197,134 +195,13 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
   }
 
 #if defined(USE_DCU)
-  torch::Tensor build_qwen2_5_vl_mrope_positions(
-      const torch::Tensor& input_ids,
-      const torch::Tensor& attention_mask,
-      const torch::Tensor& image_grid_thw) {
-    CHECK(input_ids.dim() == 2) << "input_ids must be [B, S]";
-    CHECK(attention_mask.dim() == 2) << "attention_mask must be [B, S]";
-
-    auto long_opts =
-        torch::TensorOptions().dtype(torch::kLong).device(input_ids.device());
-    torch::Tensor position_ids =
-        torch::ones({3, input_ids.size(0), input_ids.size(1)}, long_opts);
-
-    const auto& text_encoder_args = context_.get_model_args("text_encoder");
-    int64_t spatial_merge_size = text_encoder_args.mm_spatial_merge_size();
-    CHECK_GT(spatial_merge_size, 0)
-        << "QwenImageEditPlus text_encoder mm_spatial_merge_size must be > 0";
-    int64_t image_token_id = text_encoder_args.image_token_id();
-    int64_t vision_start_token_id = text_encoder_args.vision_start_token_id();
-
-    int64_t global_image_index = 0;
-    int64_t num_image_grids =
-        image_grid_thw.defined() ? image_grid_thw.size(0) : 0;
-
-    for (int64_t b = 0; b < input_ids.size(0); ++b) {
-      auto mask_b = attention_mask[b].to(torch::kBool);
-      auto ids_b = input_ids[b].index({mask_b}).to(torch::kLong).cpu();
-      std::vector<int64_t> tokens(ids_b.data_ptr<int64_t>(),
-                                  ids_b.data_ptr<int64_t>() + ids_b.numel());
-
-      int64_t image_nums = 0;
-      for (int64_t i = 0; i + 1 < static_cast<int64_t>(tokens.size()); ++i) {
-        if (tokens[i] == vision_start_token_id &&
-            tokens[i + 1] == image_token_id) {
-          image_nums++;
-        }
-      }
-
-      std::vector<torch::Tensor> llm_pos_ids_list;
-      llm_pos_ids_list.reserve(static_cast<size_t>(image_nums) * 2 + 1);
-      int64_t st = 0;
-      int64_t remain_images = image_nums;
-      for (int64_t n = 0; n < image_nums; ++n) {
-        int64_t ed = static_cast<int64_t>(tokens.size()) + 1;
-        if (remain_images > 0) {
-          for (int64_t p = st; p < static_cast<int64_t>(tokens.size()); ++p) {
-            if (tokens[p] == image_token_id) {
-              ed = p;
-              break;
-            }
-          }
-        }
-
-        CHECK(num_image_grids > 0)
-            << "image_grid_thw is required when image tokens exist";
-        CHECK(global_image_index < num_image_grids)
-            << "image_grid_thw count is smaller than required image tokens";
-        int64_t t = image_grid_thw[global_image_index][0].item<int64_t>();
-        int64_t h = image_grid_thw[global_image_index][1].item<int64_t>();
-        int64_t w = image_grid_thw[global_image_index][2].item<int64_t>();
-
-        int64_t llm_grid_t = t;
-        int64_t llm_grid_h = h / spatial_merge_size;
-        int64_t llm_grid_w = w / spatial_merge_size;
-        int64_t text_len = ed - st;
-
-        int64_t st_idx = 0;
-        if (!llm_pos_ids_list.empty()) {
-          st_idx = llm_pos_ids_list.back().max().item<int64_t>() + 1;
-        }
-
-        auto text_pos =
-            torch::arange(text_len, long_opts).view({1, -1}).expand({3, -1}) +
-            st_idx;
-        llm_pos_ids_list.push_back(text_pos);
-
-        auto t_index = torch::arange(llm_grid_t, long_opts)
-                           .view({-1, 1})
-                           .expand({-1, llm_grid_h * llm_grid_w})
-                           .flatten();
-        auto h_index = torch::arange(llm_grid_h, long_opts)
-                           .view({1, -1, 1})
-                           .expand({llm_grid_t, -1, llm_grid_w})
-                           .flatten();
-        auto w_index = torch::arange(llm_grid_w, long_opts)
-                           .view({1, 1, -1})
-                           .expand({llm_grid_t, llm_grid_h, -1})
-                           .flatten();
-        auto vision_pos =
-            torch::stack({t_index, h_index, w_index}, 0) + text_len + st_idx;
-        llm_pos_ids_list.push_back(vision_pos);
-
-        st = ed + llm_grid_t * llm_grid_h * llm_grid_w;
-        global_image_index++;
-        remain_images--;
-      }
-
-      if (st < static_cast<int64_t>(tokens.size())) {
-        int64_t st_idx = 0;
-        if (!llm_pos_ids_list.empty()) {
-          st_idx = llm_pos_ids_list.back().max().item<int64_t>() + 1;
-        }
-        int64_t text_len = static_cast<int64_t>(tokens.size()) - st;
-        auto text_pos =
-            torch::arange(text_len, long_opts).view({1, -1}).expand({3, -1}) +
-            st_idx;
-        llm_pos_ids_list.push_back(text_pos);
-      }
-
-      if (!llm_pos_ids_list.empty()) {
-        auto llm_positions = torch::cat(llm_pos_ids_list, 1).reshape({3, -1});
-        position_ids.index_put_({torch::indexing::Slice(), b, mask_b},
-                                llm_positions.to(position_ids.device()));
-      }
-    }
-
-    return position_ids.reshape({3, -1}).contiguous();
-  }
-
-  VlmModelParams build_qwen_vl_input_params(const torch::Tensor& tokens,
+  LlmModelParams build_qwen_vl_input_params(const torch::Tensor& tokens,
                                             const torch::Tensor& attention_mask,
                                             MMBatchData mm_batch) {
-    VlmModelParams params;
-    CHECK(attention_mask.defined() && attention_mask.dim() == 2)
-        << "QwenImageEditPlus text encoder requires a [B, S] attention mask";
+    LlmModelParams params;
     int64_t batch_size = attention_mask.size(0);
     if (tokens.numel() > 0) {
-      auto lengths_cpu =
-          attention_mask.to(torch::kCPU).to(torch::kInt64).sum(/*dim=*/1);
+      auto lengths_cpu = attention_mask.sum(/*dim=*/1);
       const int64_t* lengths_data = lengths_cpu.data_ptr<int64_t>();
       std::vector<int32_t> seq_lens;
       seq_lens.reserve(static_cast<size_t>(batch_size));
@@ -337,8 +214,6 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       }
       std::vector<int32_t> cu_seqlens_vec = util::query_start_loc(seq_lens);
       const int32_t max_seq_len = util::max_len(seq_lens);
-      CHECK_EQ(tokens.numel(), cu_seqlens_vec.back())
-          << "packed token count does not match attention mask";
       params.meta.num_sequences = static_cast<int32_t>(batch_size);
       params.meta.actual_num_sequences = static_cast<int32_t>(batch_size);
       params.meta.q_max_seq_len = max_seq_len;
@@ -358,16 +233,14 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
 
     torch::Tensor image_mask =
         tokens.eq(context_.get_model_args("text_encoder").image_token_id());
-    if (image_mask.sum().item<int64_t>() == 0) {
-      params.embedding.input_embedding =
-          text_encoder_->get_input_embeddings(tokens, ModelParamsView(params));
+    const int64_t image_token_count = image_mask.sum().item<int64_t>();
+    if (image_token_count == 0) {
       return params;
     }
 
-    VlmModelParams mm_params;
-    mm_params.multimodal.mm_data = MMBatchData::to(mm_batch, tokens.device());
+    mm_batch.to(tokens.device());
     MMDict multimodal_embeds =
-        text_encoder_->get_multimodal_embeddings(ModelParamsView(mm_params));
+        text_encoder_->get_multimodal_embeddings(mm_batch);
 
     auto image_embedding_value = multimodal_embeds.find("image|embedding");
     CHECK(image_embedding_value != multimodal_embeds.end())
@@ -381,16 +254,16 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       image_embeddings = torch::cat(image_embedding_list, 0);
     }
 
-    CHECK_EQ(image_mask.sum().item<int64_t>(), image_embeddings.size(0))
+    CHECK_EQ(image_token_count, image_embeddings.size(/*dim=*/0))
         << "image token count does not match image embedding count";
 
     MMDict embedding_data;
     embedding_data["image|embedding"] = image_embeddings;
     embedding_data["image|mask"] = image_mask;
-    params.multimodal.mm_data = MMBatchData(MMType::IMAGE, embedding_data);
+    MMBatchData embedding_batch(MMType::IMAGE, std::move(embedding_data));
 
     params.embedding.input_embedding =
-        text_encoder_->get_input_embeddings(tokens, ModelParamsView(params));
+        text_encoder_->get_input_embeddings(tokens, embedding_batch);
     return params;
   }
 #endif
@@ -607,28 +480,35 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
 
     torch::Tensor input_ids =
         torch::tensor(input_ids_flat, torch::dtype(torch::kLong))
-            .view({batch_size, total_seq_len})
-            .to(device_);
+            .view({batch_size, total_seq_len});
     torch::Tensor attention_mask =
         torch::tensor(attention_mask_flat, torch::dtype(torch::kLong))
-            .view({batch_size, total_seq_len})
-            .to(device_);
+            .view({batch_size, total_seq_len});
 
-    torch::Tensor positions_2d = build_qwen2_5_vl_mrope_positions(
-        input_ids, attention_mask, image_grid_thw);
-    torch::Tensor valid_token_mask =
-        attention_mask.view({-1}).to(torch::kBool).contiguous();
-    torch::Tensor valid_token_indices =
-        torch::nonzero(valid_token_mask).squeeze(1).to(device_);
-    torch::Tensor tokens_flat =
-        input_ids.view({-1}).index_select(0, valid_token_indices);
-    torch::Tensor positions_packed =
-        positions_2d.index_select(1, valid_token_indices);
+    const int32_t spatial_merge_size =
+        text_encoder_args.mm_spatial_merge_size();
+    const auto positions_2d =
+        build_image_mrope_positions(input_ids,
+                                    attention_mask,
+                                    image_grid_thw,
+                                    spatial_merge_size,
+                                    text_encoder_args.image_token_id(),
+                                    text_encoder_args.vision_start_token_id());
+    const auto valid_token_indices_host =
+        torch::nonzero(attention_mask.view(/*size=*/{-1})).squeeze(/*dim=*/1);
+    const auto valid_token_indices = valid_token_indices_host.to(device_);
+    const auto tokens_flat =
+        input_ids.view(/*size=*/{-1})
+            .index_select(/*dim=*/0, valid_token_indices_host)
+            .to(device_);
+    const auto positions_packed =
+        positions_2d.index_select(/*dim=*/1, valid_token_indices_host)
+            .to(device_);
 
     MMBatchData mm_batch(std::move(mm_data_list));
 
     std::vector<KVCache> kv_caches(text_encoder_args.n_layers());
-    VlmModelParams input_params = build_qwen_vl_input_params(
+    LlmModelParams input_params = build_qwen_vl_input_params(
         tokens_flat, attention_mask, std::move(mm_batch));
 #if defined(USE_DCU)
     input_params.graph.use_dense_flash_attention = true;
@@ -1224,9 +1104,9 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
 #if defined(USE_DCU)
   QwenImageEditTextEncoder text_encoder_{nullptr};
   std::unique_ptr<ProcessGroup> vlm_tp_group_;
-  Qwen2VLImageProcessor vl_image_processor_;
+  Qwen2VLImageProcessor vl_image_processor_{
+      context_.get_model_args(/*component=*/"processor")};
 #endif
-  std::unique_ptr<Tokenizer> qwen_tokenizer_;
   std::unique_ptr<Tokenizer> tokenizer_;
   xllm::FlowMatchEulerDiscreteScheduler scheduler_{nullptr};
 

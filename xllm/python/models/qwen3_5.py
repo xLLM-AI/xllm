@@ -36,7 +36,7 @@ from xllm.python.model_loader import (
     load_causal_lm_weights,
 )
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
-from xllm.python.models.base import PyModelBase
+from xllm.python.models.base import PyModelBase, TokenEmbeddingRunner
 
 
 @dataclass
@@ -328,12 +328,10 @@ class Qwen3_5Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        hidden: torch.Tensor,
         positions: torch.Tensor,
-        input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         mrope_cos_sin = self.rotary.build_mrope_cos_sin(positions) if self._use_fused_mrope else None
-        hidden = self.embed_tokens(input_ids) if input_embedding is None else input_embedding
         flash_comm1 = get_flash_comm1_context()
         if flash_comm1 is not None:
             hidden = flash_comm1.shard(hidden)
@@ -352,6 +350,7 @@ class Qwen3_5Model(nn.Module):
 
 
 class Qwen3_5ForCausalLM(PyModelBase):
+    runner_model_cls: type[nn.Module] | None = TokenEmbeddingRunner
     model_cls: type[Qwen3_5Model] = Qwen3_5Model
     model: Qwen3_5Model
     lm_head: ColumnParallelLinear

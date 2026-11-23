@@ -654,10 +654,11 @@ TEST_F(MTPHostOffloadTest, UnifiedTransferRoundTripUsesSharedSynchronizer) {
   EXPECT_EQ(target_input_params.parallel.layers_per_event, 2U);
   EXPECT_EQ(draft_input_params.parallel.layers_per_event, 2U);
 
+  const ModelParamsView target_execution_params(target_input_params);
   for (uint32_t layer_index = 0; layer_index < 2; ++layer_index) {
-    ASSERT_TRUE(target_input_params.synchronize_layer(layer_index));
+    ASSERT_TRUE(target_execution_params.synchronize_layer(layer_index));
   }
-  ASSERT_TRUE(draft_input_params.synchronize_draft_layer());
+  ASSERT_TRUE(draft_input_params.parallel.synchronize_draft_layer());
   EXPECT_TRUE(target_ptr->blocks_equal(kSourceBlockId, kDestinationBlockId));
   EXPECT_TRUE(draft_ptr->blocks_equal(kSourceBlockId, kDestinationBlockId));
 }
@@ -794,13 +795,14 @@ TEST_F(MTPHostOffloadTest, Dsv4DraftSkipsUnsupportedCompressedBlockTypes) {
   target_input_params.meta.requires_host_restore = true;
   worker.set_hierarchy_layer_synchronizer(target_input_params);
   EXPECT_FALSE(target_input_params.meta.requires_host_restore);
+  const ModelParamsView target_execution_params(target_input_params);
   for (uint32_t layer_index = 0; layer_index < 3; ++layer_index) {
-    ASSERT_TRUE(target_input_params.synchronize_layer(layer_index));
+    ASSERT_TRUE(target_execution_params.synchronize_layer(layer_index));
   }
   LlmModelParams draft_input_params = target_input_params.clone();
   draft_ptr->set_hierarchy_layer_synchronizer(draft_input_params);
   EXPECT_FALSE(draft_input_params.meta.requires_host_restore);
-  ASSERT_TRUE(draft_input_params.synchronize_draft_layer());
+  ASSERT_TRUE(draft_input_params.parallel.synchronize_draft_layer());
 
   for (BlockType block_type : block_types) {
     EXPECT_TRUE(target_ptr->blocks_equal(

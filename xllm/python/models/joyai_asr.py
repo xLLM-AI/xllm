@@ -28,7 +28,7 @@ import torch.nn.functional as F
 
 from xllm.python.layers import ColumnParallelLinear
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader, load_causal_lm_weights
-from xllm.python.models.base import MultimodalEmbeddings, PyModelBase
+from xllm.python.models.base import MultimodalEmbeddings, PyModelBase, TokenEmbeddingRunner
 from xllm.python.models.qwen2 import Qwen2Config, Qwen2Model
 
 if TYPE_CHECKING:
@@ -319,6 +319,7 @@ def _batch_ctc_greedy_search(
 
 
 class JoyaiASRForConditionalGeneration(PyModelBase):
+    runner_model_cls: type[nn.Module] | None = TokenEmbeddingRunner
     model: Qwen2Model
     lm_head: ColumnParallelLinear
 

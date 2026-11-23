@@ -243,11 +243,12 @@ class DFlash2Qwen3ModelImpl final
         tensor_options_);
   }
 
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) override {
-    auto local_params = input_params.clone().view();
+  ModelOutput forward_from_embeddings(
+      torch::Tensor embeddings,
+      torch::Tensor positions,
+      std::vector<KVCache>& kv_caches,
+      const ModelParamsView& input_params) override {
+    const auto local_params = input_params.clone().view();
     if (!local_params.attn_metadata) {
       auto metadata = std::make_shared<layer::AttentionMetadata>(
           layer::AttentionMetadataBuilder::build(local_params,
@@ -258,7 +259,8 @@ class DFlash2Qwen3ModelImpl final
       metadata->fia_next_tokens = num_speculative_tokens_;
       local_params.attn_metadata = std::move(metadata);
     }
-    return forward_impl(tokens, positions, kv_caches, local_params);
+    return forward_impl(
+        std::move(embeddings), std::move(positions), kv_caches, local_params);
   }
 
   void load_state_dict(const StateDict& state_dict) override {

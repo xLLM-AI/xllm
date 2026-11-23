@@ -145,7 +145,7 @@ class DeepseekV4ModelImpl final
   ModelOutput forward(torch::Tensor tokens,
                       torch::Tensor positions,
                       std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) override {
+                      const ModelParamsView& input_params) {
     torch::NoGradGuard no_grad;
     const bool is_empty_dp_rank = input_params.meta.q_max_seq_len == 0 ||
                                   input_params.meta.num_sequences == 0 ||

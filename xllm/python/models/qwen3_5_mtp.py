@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 
@@ -23,6 +25,7 @@ from xllm.python.layers.flash_comm1 import get_flash_comm1_context
 from xllm.python.layers.qwen3_5.decoder_layer import get_qwen3_5_decoder_layer_class
 from xllm.python.model_executor.forward_context import record_layer_event
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader, StateDictLike, load_causal_lm_weights
+from xllm.python.models.base import TokenEmbeddingRunner
 from xllm.python.models.qwen3_5 import Qwen3_5Config, Qwen3_5ForCausalLM, Qwen3_5Model
 
 
@@ -37,18 +40,17 @@ class Qwen3_5MtpModel(Qwen3_5Model):
         # The native fusion projection is replicated, including under TP.
         self.fc = nn.Linear(2 * cfg.hidden_size, cfg.hidden_size, bias=False, dtype=dtype, device=device)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        input_embedding: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        mrope_cos_sin = self.rotary.build_mrope_cos_sin(positions) if self._use_fused_mrope else None
+    def prepare_inputs_embeds(self, input_ids: torch.Tensor, input_embedding: torch.Tensor | None) -> torch.Tensor:
         embedding = self.embed_tokens(input_ids)
-        carried = embedding if input_embedding is None else input_embedding
-        if carried.shape != embedding.shape:
+        if input_embedding is None:
+            input_embedding = embedding
+        elif input_embedding.shape != embedding.shape:
             raise ValueError("Qwen3.5 MTP requires one carried hidden state per token")
-        hidden = self.fc(torch.cat((self.pre_fc_norm_embedding(embedding), self.pre_fc_norm_hidden(carried)), dim=-1))
+        fused = torch.cat((self.pre_fc_norm_embedding(embedding), self.pre_fc_norm_hidden(input_embedding)), dim=-1)
+        return cast("torch.Tensor", self.fc(fused))
+
+    def forward(self, hidden: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        mrope_cos_sin = self.rotary.build_mrope_cos_sin(positions) if self._use_fused_mrope else None
         flash_comm1 = get_flash_comm1_context()
         if flash_comm1 is not None:
             hidden = flash_comm1.shard(hidden)
@@ -60,8 +62,20 @@ class Qwen3_5MtpModel(Qwen3_5Model):
         return hidden if flash_comm1 is None else flash_comm1.gather(hidden)
 
 
+class _Qwen35MtpRunner(TokenEmbeddingRunner):
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_embedding: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        backbone = cast("Qwen3_5MtpModel", self.backbone)
+        return cast("torch.Tensor", backbone(backbone.prepare_inputs_embeds(input_ids, input_embedding), positions))
+
+
 class Qwen3_5MtpForCausalLM(Qwen3_5ForCausalLM):
     model_cls = Qwen3_5MtpModel
+    runner_model_cls: type[nn.Module] | None = _Qwen35MtpRunner
     model: Qwen3_5MtpModel
 
     def load_weights(self, state_dicts: list[StateDictLike], tp_rank: int, tp_size: int) -> None:

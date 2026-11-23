@@ -48,6 +48,12 @@ class VlmExecutorImpl : public ExecutorImpl {
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
 
+  ModelOutput run_multimodal(const torch::Tensor& tokens,
+                             const torch::Tensor& positions,
+                             std::vector<KVCache>& kv_caches,
+                             const ModelParamsView& params,
+                             MMBatchData& mm_data) override;
+
   void prepare_graph_input(const torch::Tensor& tokens,
                            const torch::Tensor& positions,
                            std::vector<KVCache>& kv_caches,
@@ -55,19 +61,23 @@ class VlmExecutorImpl : public ExecutorImpl {
 
   void set_dp_process_group(ProcessGroup* group) override;
 
-  virtual MMDict encode(const ModelParamsView& params);
-
-  // not own
-  CausalVLM* model_;
-  ModelArgs args_;
-  torch::Device device_;
-  runtime::Options options_;
-  std::unique_ptr<ExecutorImpl> llm_executor_;
-  std::unique_ptr<EncoderCache> encoder_cache_;
-
  private:
+  ModelOutput run_backbone(const torch::Tensor& tokens,
+                           const torch::Tensor& positions,
+                           std::vector<KVCache>& kv_caches,
+                           const ModelParamsView& params);
+  torch::Tensor prepare_inputs_embeds(const torch::Tensor& tokens,
+                                      const ModelParamsView& params,
+                                      MMBatchData& mm_data);
   torch::Tensor collapse_mrope_decode_positions(
       const torch::Tensor& positions) const;
+
+  CausalVLM* model_;
+  torch::Device device_;
+  runtime::Options options_;
+  bool use_mrope_;
+  std::unique_ptr<ExecutorImpl> llm_executor_;
+  std::unique_ptr<EncoderCache> encoder_cache_;
 };
 // Q: backend device ?
 REGISTER_EXECUTOR("vlm", VlmExecutorImpl);

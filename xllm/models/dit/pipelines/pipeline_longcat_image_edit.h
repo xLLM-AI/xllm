@@ -27,8 +27,7 @@
 #include "core/framework/model/dit_model_params.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/model_loader/dit_model_loader.h"
-#include "core/framework/multimodal/mm_batch_data.h"
-#include "core/framework/multimodal/mm_input.h"
+#include "core/framework/multimodal/mposition.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/request/dit_request_state.h"
@@ -45,9 +44,6 @@
 #include "processors/transforms.h"
 
 namespace xllm {
-
-// Forward declarations
-class LongCatImageEditPipelineImpl;
 
 // Prompt template constants for LongCat-Image-Edit
 // Ref:
@@ -365,7 +361,7 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
   // processes it with VL image processor and encodes vision + text (diffusers
   // _encode_prompt behavior).
   torch::Tensor encode_prompt_qwen(
-      std::vector<std::string>& prompt,
+      const std::vector<std::string>& prompt,
       std::optional<torch::Tensor> image = std::nullopt,
       int64_t num_images_per_prompt = 1,
       int64_t max_sequence_length = 512) {
@@ -392,16 +388,10 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     } else {
       img = img.clamp(0.0f, 255.0f);
     }
-    std::vector<torch::Tensor> pixel_values_list;
-    std::vector<torch::Tensor> image_grid_thw_list;
-
     std::vector<MMDataItem> mm_items;
-
     CHECK(vl_image_processor_.process({img}, mm_items))
         << "VL image processor failed";
 
-    torch::Tensor pixel_values =
-        mm_items[0].get<torch::Tensor>("pixel_values").value();
     torch::Tensor image_grid_thw =
         mm_items[0].get<torch::Tensor>("image_grid_thw").value();
 
@@ -516,27 +506,28 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
 
     torch::Tensor input_ids =
         torch::tensor(input_ids_flat, torch::dtype(torch::kLong))
-            .view({batch_size, total_seq_len})
-            .to(options_.device());
+            .view({batch_size, total_seq_len});
 
     torch::Tensor attention_mask =
         torch::tensor(attention_mask_flat, torch::dtype(torch::kLong))
-            .view({batch_size, total_seq_len})
+            .view({batch_size, total_seq_len});
+
+    const auto positions_2d =
+        build_image_mrope_positions(input_ids,
+                                    attention_mask,
+                                    image_grid_thw,
+                                    merge_size,
+                                    text_encoder_args.image_token_id(),
+                                    vision_start_token_id)
             .to(options_.device());
-
-    torch::Tensor tokens_flat = input_ids.view({-1});
-    torch::Tensor positions_2d = build_qwen2_5_vl_mrope_positions(
-        input_ids, attention_mask, image_grid_thw);
-    torch::Tensor positions_3d =
-        positions_2d.view({3, batch_size, total_seq_len}).to(torch::kLong);
-
+    auto tokens_flat = input_ids.view(/*size=*/{-1}).to(options_.device());
     std::vector<KVCache> kv_caches(text_encoder_args.n_layers());
-    MMData mm_data;
-    mm_data.set(MMType::IMAGE, std::move(mm_items));
-    std::vector<MMData> mm_data_list(static_cast<size_t>(batch_size), mm_data);
-    MMBatchData mm_batch(std::move(mm_data_list));
-    VlmModelParams input_params = build_longcat_input_params(
-        tokens_flat, positions_2d, attention_mask, mm_batch);
+    LlmModelParams input_params = build_longcat_input_params(tokens_flat);
+    input_params.attn_metadata = std::make_shared<layer::AttentionMetadata>(
+        layer::AttentionMetadataBuilder::build(ModelParamsView(input_params),
+                                               text_encoder_args.enable_mla()));
+    input_params.graph.attn_mask =
+        attention_mask.view(/*size=*/{-1}).to(options_.device(), /*dtype=*/torch::kFloat32);
     auto model_output = text_encoder_->forward(
         tokens_flat, positions_2d, kv_caches, ModelParamsView(input_params));
     torch::Tensor hidden_states_flat = model_output.hidden_states;
@@ -662,177 +653,6 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
         /*width=*/adjusted_width / 2);
 
     return {latents, image_latents, latents_ids, image_latents_ids};
-  }
-
-  // Build VlmModelParams for LongCat-Image text encoding (reuse from
-  // T2I pipeline). When mm_data_opt is provided (e.g. pixel_values +
-  // image_grid_thw), the text encoder will use vision embeddings.
-  torch::Tensor build_qwen2_5_vl_mrope_positions(
-      const torch::Tensor& input_ids,         // [B, S]
-      const torch::Tensor& attention_mask,    // [B, S]
-      const torch::Tensor& image_grid_thw) {  // [num_images, 3]
-    CHECK(input_ids.dim() == 2) << "input_ids must be [B, S]";
-    CHECK(attention_mask.dim() == 2) << "attention_mask must be [B, S]";
-
-    auto long_opts =
-        torch::TensorOptions().dtype(torch::kLong).device(input_ids.device());
-    torch::Tensor position_ids =
-        torch::ones({3, input_ids.size(0), input_ids.size(1)}, long_opts);
-
-    const auto& text_encoder_args = context_.get_model_args("text_encoder");
-    int64_t spatial_merge_size = text_encoder_args.mm_image_merge_size();
-    int64_t image_token_id = text_encoder_args.image_token_id();
-    int64_t vision_start_token_id = text_encoder_args.vision_start_token_id();
-
-    int64_t global_image_index = 0;
-    int64_t num_image_grids =
-        image_grid_thw.defined() ? image_grid_thw.size(0) : 0;
-
-    for (int64_t b = 0; b < input_ids.size(0); ++b) {
-      auto mask_b = attention_mask[b].to(torch::kBool);
-      auto ids_b = input_ids[b].index({mask_b}).to(torch::kLong).cpu();
-
-      std::vector<int64_t> tokens(ids_b.data_ptr<int64_t>(),
-                                  ids_b.data_ptr<int64_t>() + ids_b.numel());
-
-      int64_t image_nums = 0;
-      for (int64_t i = 0; i + 1 < static_cast<int64_t>(tokens.size()); ++i) {
-        if (tokens[i] == vision_start_token_id &&
-            tokens[i + 1] == image_token_id) {
-          image_nums++;
-        }
-      }
-
-      std::vector<torch::Tensor> llm_pos_ids_list;
-      llm_pos_ids_list.reserve(static_cast<size_t>(image_nums) * 2 + 1);
-
-      int64_t st = 0;
-      int64_t remain_images = image_nums;
-      for (int64_t n = 0; n < image_nums; ++n) {
-        int64_t ed = static_cast<int64_t>(tokens.size()) + 1;
-        if (remain_images > 0) {
-          for (int64_t p = st; p < static_cast<int64_t>(tokens.size()); ++p) {
-            if (tokens[p] == image_token_id) {
-              ed = p;
-              break;
-            }
-          }
-        }
-
-        CHECK(num_image_grids > 0)
-            << "image_grid_thw is required when image tokens exist";
-        CHECK(global_image_index < num_image_grids)
-            << "image_grid_thw count is smaller than required image tokens";
-        auto grid_idx = global_image_index;
-        int64_t t = image_grid_thw[grid_idx][0].item<int64_t>();
-        int64_t h = image_grid_thw[grid_idx][1].item<int64_t>();
-        int64_t w = image_grid_thw[grid_idx][2].item<int64_t>();
-
-        int64_t llm_grid_t = t;
-        int64_t llm_grid_h = h / spatial_merge_size;
-        int64_t llm_grid_w = w / spatial_merge_size;
-        int64_t text_len = ed - st;
-
-        int64_t st_idx = 0;
-        if (!llm_pos_ids_list.empty()) {
-          st_idx = llm_pos_ids_list.back().max().item<int64_t>() + 1;
-        }
-
-        auto text_pos =
-            torch::arange(text_len, long_opts).view({1, -1}).expand({3, -1}) +
-            st_idx;
-        llm_pos_ids_list.push_back(text_pos);
-
-        auto t_index = torch::arange(llm_grid_t, long_opts)
-                           .view({-1, 1})
-                           .expand({-1, llm_grid_h * llm_grid_w})
-                           .flatten();
-        auto h_index = torch::arange(llm_grid_h, long_opts)
-                           .view({1, -1, 1})
-                           .expand({llm_grid_t, -1, llm_grid_w})
-                           .flatten();
-        auto w_index = torch::arange(llm_grid_w, long_opts)
-                           .view({1, 1, -1})
-                           .expand({llm_grid_t, llm_grid_h, -1})
-                           .flatten();
-        auto vision_pos =
-            torch::stack({t_index, h_index, w_index}, 0) + text_len + st_idx;
-        llm_pos_ids_list.push_back(vision_pos);
-
-        st = ed + llm_grid_t * llm_grid_h * llm_grid_w;
-        global_image_index++;
-        remain_images--;
-      }
-
-      if (st < static_cast<int64_t>(tokens.size())) {
-        int64_t st_idx = 0;
-        if (!llm_pos_ids_list.empty()) {
-          st_idx = llm_pos_ids_list.back().max().item<int64_t>() + 1;
-        }
-        int64_t text_len = static_cast<int64_t>(tokens.size()) - st;
-        auto text_pos =
-            torch::arange(text_len, long_opts).view({1, -1}).expand({3, -1}) +
-            st_idx;
-        llm_pos_ids_list.push_back(text_pos);
-      }
-
-      if (!llm_pos_ids_list.empty()) {
-        auto llm_positions = torch::cat(llm_pos_ids_list, 1).reshape({3, -1});
-        position_ids.index_put_({torch::indexing::Slice(), b, mask_b},
-                                llm_positions.to(position_ids.device()));
-      }
-    }
-
-    return position_ids.reshape({3, -1}).contiguous();
-  }
-
-  VlmModelParams build_longcat_input_params(
-      const torch::Tensor& tokens,
-      const torch::Tensor& positions,
-      const torch::Tensor& attention_mask,
-      std::optional<MMBatchData> mm_data_opt = std::nullopt) {
-    VlmModelParams params;
-
-    int64_t actual_seq_len;
-    if (positions.dim() == 2) {
-      actual_seq_len = positions.size(1);
-    } else if (positions.dim() == 1) {
-      actual_seq_len = positions.size(0);
-    } else {
-      actual_seq_len = positions.numel();
-    }
-
-    if (actual_seq_len > 0) {
-      params.meta.q_max_seq_len = actual_seq_len;
-      params.meta.kv_max_seq_len = actual_seq_len;
-      auto per_seq_lens =
-          torch::tensor({static_cast<int32_t>(actual_seq_len)}, torch::kInt)
-              .to(tokens.device());
-      params.attention.device.q_seq_lens = per_seq_lens;
-      params.attention.device.kv_seq_lens = per_seq_lens;
-      params.meta.batch_forward_type = BatchForwardType::PREFILL;
-    }
-
-    // Set mm_data before get_input_embeddings
-    if (mm_data_opt.has_value()) {
-      params.multimodal.mm_data =
-          MMBatchData::to(mm_data_opt.value(), options_.device());
-    }
-
-    // Build attention metadata before get_input_embeddings
-    // (may be needed by multimodal processing)
-    params.attn_metadata = std::make_shared<layer::AttentionMetadata>(
-        layer::AttentionMetadataBuilder::build(
-            ModelParamsView(params),
-            context_.get_model_args("text_encoder").enable_mla()));
-    params.attn_metadata->is_causal = true;
-    params.embedding.input_embedding =
-        text_encoder_->get_input_embeddings(tokens, ModelParamsView(params));
-    if (attention_mask.defined() && attention_mask.size(0) > 0) {
-      params.graph.attn_mask = attention_mask.view({-1}).to(torch::kFloat32);
-    }
-
-    return params;
   }
 
   std::vector<torch::Tensor> forward_(

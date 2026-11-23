@@ -94,14 +94,11 @@ def test_pd_kpool_decode_uses_transferred_history(prompt_length: int, graph_mode
         torch.tensor([[3, 1, 4, 2]]),
     )
     prompt_positions = torch.arange(prompt_length)
-    prompt_rows = indexer.get_packed_states(
-        hidden[:, :prompt_length], torch.ones(1, prompt_length, dtype=torch.bool)
-    ).reshape(prompt_length, -1)
-    raw_k, raw_gate, valid = torch.split(prompt_rows, [cfg.index_head_dim, cfg.index_head_dim, 1], dim=-1)
+    raw_k, raw_gate = indexer.get_kpool_states(hidden[:, :prompt_length])
     update_compressed_kpool(
-        raw_k,
-        raw_gate,
-        valid.reshape(-1).bool(),
+        raw_k.squeeze(0),
+        raw_gate.squeeze(0),
+        torch.ones(prompt_length, dtype=torch.bool),
         prompt_positions,
         source.cache,
         source.kpool_tail,
@@ -200,7 +197,9 @@ def test_model_records_each_event_after_its_layer(model_type: str, monkeypatch: 
         layer_synchronizer=_RecordingSynchronizer(trace),
     )
     with forward_context(context):
-        model(torch.tensor([1, 2]), torch.tensor([0, 1]))
+        tokens = torch.tensor([1, 2])
+        inputs = tokens if model_type == "mtp" else model.embed_tokens(tokens)
+        model(inputs, torch.tensor([0, 1]))
     assert trace == [(action, i) for i in range(layer_count) for action in ("compute", "event")]
 
 

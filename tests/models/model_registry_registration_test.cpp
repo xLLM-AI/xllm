@@ -56,11 +56,11 @@ class RegistryTestModel final : public CausalVLM {
 
   void update_expert_weight(int32_t /*layer_id*/) override {}
 
-  MMDict encode(const ModelParamsView& /*parameters*/) override { return {}; }
+  MMDict encode(const MMBatchData&) override { return {}; }
 
-  torch::Tensor get_input_embeddings(
-      const torch::Tensor& /*input_ids*/,
-      const ModelParamsView& /*input_params*/) override {
+  torch::Tensor get_input_embeddings(const torch::Tensor&,
+                                     const MMBatchData&,
+                                     std::vector<torch::Tensor>&) override {
     return {};
   }
 

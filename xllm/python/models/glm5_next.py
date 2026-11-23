@@ -81,7 +81,7 @@ from xllm.python.model_executor.forward_context import (
 )
 from xllm.python.model_loader import QLinearWeightLoader
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
-from xllm.python.models.base import PyModelBase
+from xllm.python.models.base import PyModelBase, TokenEmbeddingRunner
 from xllm.python.models.glm5_next_kpool import (
     append_causal_tail,
     read_pools,
@@ -856,15 +856,6 @@ class Glm5NextIndexer(nn.Module):
             return pool_keys, pool_indices, pool_valid
         keep = pool_valid.any(0)
         return pool_keys[:, keep], pool_indices[:, keep], pool_valid[:, keep]
-
-    def get_packed_states(
-        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor, key: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Per-token indexer cache row ``[B, S, head_dim*2+1]`` =
-        [k(128), gate(128), valid(1)]. NoPE: no RoPE applied to k."""
-        k, gate_scores = self.get_kpool_states(hidden_states, key)
-        valid_channel = attention_mask.to(k.dtype).unsqueeze(-1)
-        return torch.cat([k, gate_scores, valid_channel], dim=-1)
 
     def get_kpool_states(
         self,
@@ -2544,24 +2535,15 @@ class Glm5NextModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        hidden: torch.Tensor,
         position_ids: torch.Tensor,
-        input_embedding: torch.Tensor | None = None,
-        *,
-        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # The C++ EagerRunner passes the flattened token tensor, which is 1-D
-        # ``[num_tokens]`` for a single sequence; normalise to ``[B, S]``.
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-        if position_ids is not None and position_ids.dim() == 1:
+        if position_ids.dim() == 1:
             position_ids = position_ids.unsqueeze(0)
-        hidden = self.embed_tokens(input_ids) if input_embedding is None else input_embedding
         if hidden.dim() == 2:
             hidden = hidden.unsqueeze(0)
         batch_size, seq_len = hidden.shape[:2]
-        if attention_mask is None:
-            attention_mask = torch.ones(batch_size, seq_len, dtype=torch.bool, device=hidden.device)
+        attention_mask = torch.ones(batch_size, seq_len, dtype=torch.bool, device=hidden.device)
 
         is_eplv2 = getattr(self.cfg, "expert_parallel_degree", 0) == 2
         forward_context = get_forward_context_or_none() if is_eplv2 else get_forward_context()
@@ -2676,8 +2658,22 @@ def _real_ckpt_aliases(name: str) -> list:
     return out
 
 
+class _Glm5NextRunner(TokenEmbeddingRunner):
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_embedding: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if input_embedding is None and input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        return super().forward(input_ids, positions, input_embedding)
+
+
 class Glm5NextForCausalLM(PyModelBase):
     """glm5_next causal LM. Registered under model_type='glm5_next'."""
+
+    runner_model_cls: type[nn.Module] | None = _Glm5NextRunner
 
     def __init__(self, config: dict, build_model: bool = True) -> None:
         super().__init__()
@@ -2710,17 +2706,6 @@ class Glm5NextForCausalLM(PyModelBase):
         # (which runs .to(bf16) over the model). The KDA conv weights are included in
         # this cast — the reference's conv1d is also bf16 after .to(dtype).
         self.to(device=device, dtype=dtype)
-
-    def forward(
-        self, input_ids: torch.Tensor, position_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        hidden = self.model(input_ids, position_ids, attention_mask=attention_mask)
-        # With layers_to_capture the body returns (hidden, aux_hidden) for the
-        # draft's context projection; the CausalLM wrapper itself consumes only
-        # the logits hidden state.
-        if isinstance(hidden, tuple):
-            hidden = hidden[0]
-        return self.lm_head(hidden)
 
     # -- weight loading ---------------------------------------------------
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:

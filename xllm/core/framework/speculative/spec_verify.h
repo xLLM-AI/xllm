@@ -21,7 +21,7 @@ limitations under the License.
 
 namespace xllm {
 
-class GraphInputView;
+class ModelGraphInput;
 class SampleOutput;
 
 // Expanded verify needs a primary block-table tensor for its generic graph
@@ -46,7 +46,7 @@ int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
 
 torch::Tensor materialize_graph_speculative_verify_tokens(
     const torch::Tensor& tokens,
-    const GraphInputView& graph_input);
+    const ModelGraphInput& graph_input);
 
 SampleOutput run_rejection_sampling(const SamplingParameters& sampling_params,
                                     const torch::Tensor& draft_token_ids,

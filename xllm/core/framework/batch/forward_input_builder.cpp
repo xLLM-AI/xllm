@@ -1154,7 +1154,7 @@ Input ForwardInputBuilder::build_forward_input() {
     batch_mm_data_vec.insert(batch_mm_data_vec.end(),
                              state_.scheduled_mm_data_vec.begin(),
                              state_.scheduled_mm_data_vec.end());
-    input_params.multimodal.mm_data.batch(batch_mm_data_vec);
+    forward_input.mm_data_.batch(batch_mm_data_vec);
   }
 
   // Setup block tables

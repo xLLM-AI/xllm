@@ -332,8 +332,7 @@ class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
         register_module("language_model", QWen2ForCausalLM(context));
   }
 
-  MMDict get_multimodal_embeddings(const ModelParamsView& input_params) {
-    const auto& mm_data = input_params.multimodal().mm_data;
+  MMDict get_multimodal_embeddings(const MMBatchData& mm_data) {
     auto pixel_values = mm_data.get<torch::Tensor>(/*key=*/"pixel_values")
                             .value_or(torch::Tensor());
     auto image_grid_thw = mm_data.get<torch::Tensor>(/*key=*/"image_grid_thw")
@@ -358,22 +357,10 @@ class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
     return multimodal_embeds;
   }
 
-  torch::Tensor get_input_embeddings(const torch::Tensor input_ids,
-                                     const ModelParamsView& input_params) {
-    const auto& mm_data = input_params.multimodal().mm_data;
+  torch::Tensor get_input_embeddings(const torch::Tensor& input_ids,
+                                     const MMBatchData& mm_data) {
     auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
-    auto merge_modality = [&](const std::string& embed_key,
-                              const std::string& mask_key) {
-      auto emb = mm_data.get<torch::Tensor>(embed_key);
-      if (!emb.has_value()) return;
-      auto mask = mm_data.get<torch::Tensor>(mask_key);
-      if (!mask.has_value()) return;
-      inputs_embeds.index_put_({*mask}, *emb);
-    };
-
-    merge_modality("image|embedding", "image|mask");
-    merge_modality("video|embedding", "video|mask");
-
+    mm_data.merge_visual_embeddings(inputs_embeds);
     return inputs_embeds;
   }
 

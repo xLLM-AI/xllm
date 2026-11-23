@@ -161,7 +161,7 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
     torch::Tensor hidden_states = embed_tokens_(tokens);
 
     std::optional<torch::Tensor> residual;
-    if (!modified_input_params.synchronize_draft_layer()) {
+    if (!modified_input_params.parallel.synchronize_draft_layer()) {
       return ModelOutput();
     }
     for (size_t i = 0; i < mtp_layers_.size(); i++) {

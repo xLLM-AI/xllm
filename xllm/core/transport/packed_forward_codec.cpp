@@ -2335,8 +2335,8 @@ inline void deserialize_forward_input_payload(
   read_vector(context, input_params.embedding.mtp_bootstrap_row_idxes);
   read_tensor(context, input_params.embedding.mtp_bootstrap_embeddings, stream);
   if constexpr (std::is_same_v<Input, VlmForwardInput>) {
-    read_mm_batch_data(context, input_params.multimodal.mm_data);
-    read_vector_tensor(context, input_params.multimodal.deep_stacks, stream);
+    read_mm_batch_data(context, forward_input.mm_data_);
+    read_vector_tensor(context, input_params.embedding.deep_stacks_, stream);
   }
   read_tensor_and_vector(context,
                          input_params.attention.device.kv_cache_tokens_nums,
@@ -2683,8 +2683,8 @@ inline void serialize_forward_input_sections(
                input_params.embedding.mtp_bootstrap_row_idxes);
   write_tensor(context, input_params.embedding.mtp_bootstrap_embeddings);
   if constexpr (std::is_same_v<Input, VlmForwardInput>) {
-    write_mm_batch_data(context, input_params.multimodal.mm_data);
-    write_vector_tensor(context, input_params.multimodal.deep_stacks);
+    write_mm_batch_data(context, input.mm_data_);
+    write_vector_tensor(context, input_params.embedding.deep_stacks_);
   }
   write_host_vector_or_tensor(
       context,

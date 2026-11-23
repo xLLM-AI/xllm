@@ -95,6 +95,10 @@ def _make_model(events: list[str]) -> tuple[glm5_next.Glm5NextModel, list[_Decod
 def test_cp_model_loop_shards_rows_and_merges_final_hidden(with_embedding: bool) -> None:
     events: list[str] = []
     model, layers = _make_model(events)
+    wrapper = glm5_next.Glm5NextForCausalLM(
+        {"hidden_size": 1, "num_attention_heads": 1, "vocab_size": 4, "device": "cpu"}, build_model=False
+    )
+    wrapper.model = model
     cp_context = SimpleNamespace(shard_valid_mask=torch.tensor([True, False]))
     merged_output = torch.tensor([[13.0], [23.0], [33.0], [43.0]])
 
@@ -120,7 +124,7 @@ def test_cp_model_loop_shards_rows_and_merges_final_hidden(with_embedding: bool)
         patch.object(glm5_next, "cp_shard_positions", side_effect=shard_positions),
         patch.object(glm5_next, "cp_merge_rows", side_effect=merge_rows),
     ):
-        output = model(
+        output = wrapper.runner_model(
             torch.tensor([10, 20, 30, 40]),
             torch.tensor([0, 1, 2, 3], dtype=torch.int32),
             torch.tensor([[10.0], [20.0], [30.0], [40.0]]) if with_embedding else None,
@@ -221,7 +225,7 @@ def test_pcp_sp_gathers_tp_rows_before_cp_merge(layers_to_capture: tuple[int, ..
         patch.object(moe_parallel.distributed, "tp_all_gather", side_effect=tp_all_gather, create=True),
         patch.object(cp_utils.distributed, "all_gather", side_effect=all_gather, create=True),
     ):
-        result = model(torch.arange(8), torch.arange(8))
+        result = model(model.embed_tokens(torch.arange(8)), torch.arange(8))
 
     if layers_to_capture:
         hidden, aux = result
@@ -661,7 +665,7 @@ def test_cp_one_preserves_full_rows_without_shard_or_merge() -> None:
         patch.object(glm5_next, "cp_merge_rows") as merge_rows,
     ):
         output = model(
-            torch.tensor([10, 20, 30, 40]),
+            model.embed_tokens(torch.tensor([10, 20, 30, 40])),
             torch.tensor([0, 1, 2, 3], dtype=torch.int32),
         )
 
@@ -680,7 +684,7 @@ def test_model_captures_selected_layer_streams_before_final_normalization() -> N
     model.hc_head.register_forward_hook(lambda _module, _args, output: collapses.append(output))
     model.aux_hidden_capture = AuxHiddenCapture((1,), transform=lambda hidden: model.hc_head(hidden).reshape(-1, 1))
     with patch.object(glm5_next, "get_forward_context", return_value=SimpleNamespace(cp_context=None)):
-        hidden, captured = model(torch.tensor([2, 4]), torch.tensor([0, 1]))
+        hidden, captured = model(model.embed_tokens(torch.tensor([2, 4])), torch.tensor([0, 1]))
     torch.testing.assert_close(hidden, torch.tensor([[5.0], [7.0]]))
     torch.testing.assert_close(captured, torch.tensor([[5.0], [7.0]]))
     assert len(collapses) == 2

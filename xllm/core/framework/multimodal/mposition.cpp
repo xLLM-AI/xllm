@@ -57,6 +57,103 @@ torch::Tensor get_mm_tensor(const MMData& mm_data, const std::string& key) {
 
 }  // namespace
 
+torch::Tensor build_image_mrope_positions(const torch::Tensor& input_ids,
+                                          const torch::Tensor& attention_mask,
+                                          const torch::Tensor& image_grid_thw,
+                                          int64_t spatial_merge_size,
+                                          int32_t image_token_id,
+                                          int32_t vision_start_token_id) {
+  CHECK_GT(spatial_merge_size, 0);
+  const auto long_opts =
+      torch::TensorOptions().dtype(/*device=*/torch::kLong).device(/*dtype=*/torch::kCPU);
+  const auto ids = input_ids.to(/*device=*/torch::kCPU, /*dtype=*/torch::kLong);
+  const auto mask = attention_mask.to(/*device=*/torch::kCPU, /*dtype=*/torch::kBool);
+  const auto grids = image_grid_thw.defined()
+                         ? image_grid_thw.to(/*device=*/torch::kCPU, /*dtype=*/torch::kLong)
+                         : torch::Tensor();
+  const int64_t num_image_grids = grids.defined() ? grids.size(/*dim=*/0) : 0;
+  const int64_t batch_size = ids.size(/*dim=*/0);
+  const int64_t seq_len = ids.size(/*dim=*/1);
+  auto position_ids = torch::ones({3, batch_size, seq_len}, long_opts);
+
+  int64_t global_image_index = 0;
+  for (int64_t b = 0; b < batch_size; ++b) {
+    const auto mask_b = mask[b];
+    const auto ids_b = ids[b].index({mask_b});
+    const auto* tokens = ids_b.const_data_ptr<int64_t>();
+    const int64_t token_count = ids_b.numel();
+
+    int64_t image_nums = 0;
+    for (int64_t i = 0; i + 1 < token_count; ++i) {
+      if (tokens[i] == vision_start_token_id &&
+          tokens[i + 1] == image_token_id) {
+        image_nums++;
+      }
+    }
+
+    std::vector<torch::Tensor> llm_pos_ids_list;
+    llm_pos_ids_list.reserve(static_cast<size_t>(image_nums) * 2 + 1);
+    int64_t st = 0;
+    int64_t next_pos = 0;
+    for (int64_t n = 0; n < image_nums; ++n) {
+      int64_t ed = token_count + 1;
+      for (int64_t p = st; p < token_count; ++p) {
+        if (tokens[p] == image_token_id) {
+          ed = p;
+          break;
+        }
+      }
+
+      CHECK_LT(global_image_index, num_image_grids)
+          << "image_grid_thw count is smaller than required image tokens";
+      const auto grid = grids[global_image_index++];
+      const int64_t llm_grid_t = grid[0].item<int64_t>();
+      const int64_t llm_grid_h = grid[1].item<int64_t>() / spatial_merge_size;
+      const int64_t llm_grid_w = grid[2].item<int64_t>() / spatial_merge_size;
+      int64_t text_len = ed - st;
+
+      auto text_pos =
+          torch::arange(text_len, long_opts).view(/*size=*/{1, -1}).expand(/*size=*/{3, -1}) +
+          next_pos;
+      llm_pos_ids_list.push_back(text_pos);
+
+      auto t_index = torch::arange(llm_grid_t, long_opts)
+                         .view(/*size=*/{-1, 1})
+                         .expand({-1, llm_grid_h * llm_grid_w})
+                         .flatten();
+      auto h_index = torch::arange(llm_grid_h, long_opts)
+                         .view(/*size=*/{1, -1, 1})
+                         .expand({llm_grid_t, -1, llm_grid_w})
+                         .flatten();
+      auto w_index = torch::arange(llm_grid_w, long_opts)
+                         .view(/*size=*/{1, 1, -1})
+                         .expand({llm_grid_t, llm_grid_h, -1})
+                         .flatten();
+      next_pos += text_len;
+      auto vision_pos = torch::stack({t_index, h_index, w_index}) + next_pos;
+      llm_pos_ids_list.push_back(vision_pos);
+      next_pos += std::max({llm_grid_t, llm_grid_h, llm_grid_w});
+      st = ed + llm_grid_t * llm_grid_h * llm_grid_w;
+    }
+
+    if (st < token_count) {
+      int64_t text_len = token_count - st;
+      auto text_pos =
+          torch::arange(text_len, long_opts).view(/*size=*/{1, -1}).expand(/*size=*/{3, -1}) +
+          next_pos;
+      llm_pos_ids_list.push_back(text_pos);
+    }
+
+    if (!llm_pos_ids_list.empty()) {
+      auto llm_positions = torch::cat(llm_pos_ids_list, /*dim=*/1);
+      position_ids.index_put_({torch::indexing::Slice(), b, mask_b},
+                              llm_positions);
+    }
+  }
+
+  return position_ids.view(/*size=*/{3, -1}).to(input_ids.device());
+}
+
 MPositionGeneratorFactory& MPositionGeneratorFactory::get_instance() {
   static MPositionGeneratorFactory instance;
   return instance;

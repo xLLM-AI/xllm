@@ -399,7 +399,7 @@ class MtpModelImplBase : public torch::nn::Module {
     std::optional<torch::Tensor> residual;
     LayerForwardAdapter forward_adapter(
         input_params.mtp_topk_state, mtp_layers_.size(), device_);
-    if (!modified_input_params.synchronize_draft_layer()) {
+    if (!modified_input_params.parallel.synchronize_draft_layer()) {
       return ModelOutput();
     }
     for (size_t i = 0; i < mtp_layers_.size(); i++) {

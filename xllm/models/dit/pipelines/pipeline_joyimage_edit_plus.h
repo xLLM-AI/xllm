@@ -553,7 +553,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     return images;
   }
 
-  VlmModelParams build_text_encoder_input(const torch::Tensor& tokens,
+  LlmModelParams build_text_encoder_input(const torch::Tensor& tokens,
                                           const MMData& mm_data) {
     CHECK_LE(tokens.numel(), std::numeric_limits<int32_t>::max())
         << "JoyImageEditPlus Qwen3-VL prompt is too long";
@@ -561,7 +561,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     CHECK_GT(sequence_length, 0)
         << "JoyImageEditPlus Qwen3-VL prompt must not be empty";
 
-    VlmModelParams params;
+    LlmModelParams params;
     params.meta.num_sequences = 1;
     params.meta.actual_num_sequences = 1;
     params.meta.q_max_seq_len = sequence_length;
@@ -588,20 +588,11 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
 #endif
 
     MMBatchData mm_batch(std::vector<MMData>{mm_data});
-    EncoderInputGatherVisitor input_gather;
-    mm_batch.foreach (input_gather);
-    CHECK(input_gather.finish(mm_batch))
-        << "JoyImageEditPlus failed to gather Qwen3-VL encoder inputs";
-    mm_batch.to(tokens.device());
-
-    VlmModelParams multimodal_params;
-    multimodal_params.multimodal.mm_data = mm_batch;
-    MMDict multimodal_embeddings = text_encoder_->get_multimodal_embeddings(
-        ModelParamsView(multimodal_params));
-    EncoderOutputScatterVisitor output_scatter(multimodal_embeddings);
-    CHECK(mm_batch.foreach (output_scatter));
-    CHECK(output_scatter.finish())
-        << "JoyImageEditPlus failed to scatter Qwen3-VL embeddings";
+    execute_mm_encoder(
+        mm_batch, /*cache=*/nullptr, [&](MMBatchData& encoder_inputs) {
+          encoder_inputs.to(tokens.device());
+          return text_encoder_->get_multimodal_embeddings(encoder_inputs);
+        });
 
     EncoderEmbeddingGatherVisitor embedding_gather(
         tokens.device(),
@@ -611,9 +602,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     CHECK(mm_batch.foreach (embedding_gather));
     CHECK(embedding_gather.finish(mm_batch))
         << "JoyImageEditPlus failed to gather Qwen3-VL embeddings";
-    params.multimodal.mm_data = std::move(mm_batch);
-    params.embedding.input_embedding =
-        text_encoder_->get_input_embeddings(tokens, ModelParamsView(params));
+    params.embedding.input_embedding = text_encoder_->get_input_embeddings(
+        tokens, mm_batch, params.embedding.deep_stacks_);
     return params;
   }
 
@@ -663,7 +653,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
         torch::tensor(token_ids, torch::TensorOptions().dtype(torch::kInt32))
             .to(device_);
     positions = positions.to(device_);
-    VlmModelParams input_params = build_text_encoder_input(tokens, mm_data);
+    LlmModelParams input_params = build_text_encoder_input(tokens, mm_data);
     ModelOutput model_output =
         text_encoder_->forward(tokens,
                                positions,

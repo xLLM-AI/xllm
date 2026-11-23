@@ -478,10 +478,9 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
         register_module("language_model", OxygenForCausalLM(context));
   }
 
-  void prepare_encoder_input(const ModelParamsView& input_params,
+  void prepare_encoder_input(const MMBatchData& mm_data,
                              std::optional<OxygenImageInputs>& image_inputs,
                              std::optional<OxygenVideoInputs>& video_inputs) {
-    const auto& mm_data = input_params.multimodal().mm_data;
     torch::Tensor pixel_values;
     if (const auto& res = mm_data.get<torch::Tensor>("pixel_values"))
       pixel_values = res.value();
@@ -505,10 +504,10 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
       video_inputs = OxygenVideoInputs{pixel_values_videos, video_grid_thw};
   }
 
-  MMDict get_multimodal_embeddings(const ModelParamsView& input_params) {
+  MMDict get_multimodal_embeddings(const MMBatchData& mm_data) {
     std::optional<OxygenImageInputs> image_input;
     std::optional<OxygenVideoInputs> video_input;
-    prepare_encoder_input(input_params, image_input, video_input);
+    prepare_encoder_input(mm_data, image_input, video_input);
 
     auto merge_size = model_args_.mm_image_merge_size();
     MMDict multimodal_embeds;
@@ -549,30 +548,10 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
     return multimodal_embeds;
   }
 
-  torch::Tensor merge_multimodal_embeddings(
-      torch::Tensor inputs_embeds,
-      const torch::Tensor& multimodal_embeds,
-      const torch::Tensor& is_multimodal) {
-    inputs_embeds.index_put_({is_multimodal}, multimodal_embeds);
-    return inputs_embeds;
-  }
-  torch::Tensor get_input_embeddings(const torch::Tensor input_ids,
-                                     const ModelParamsView& input_params) {
-    const auto& mm_data = input_params.multimodal().mm_data;
+  torch::Tensor get_input_embeddings(const torch::Tensor& input_ids,
+                                     const MMBatchData& mm_data) {
     auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
-    auto merge_modality = [&](const std::string& embed_key,
-                              const std::string& mask_key) {
-      auto emb = mm_data.get<torch::Tensor>(embed_key);
-      if (!emb.has_value()) return;
-      auto mask = mm_data.get<torch::Tensor>(mask_key);
-      if (!mask.has_value()) return;
-      inputs_embeds =
-          merge_multimodal_embeddings(inputs_embeds, emb.value(), mask.value());
-    };
-
-    merge_modality("image|embedding", "image|mask");
-    merge_modality("video|embedding", "video|mask");
-
+    mm_data.merge_visual_embeddings(inputs_embeds);
     return inputs_embeds;
   }
   ModelOutput forward(const torch::Tensor& tokens,

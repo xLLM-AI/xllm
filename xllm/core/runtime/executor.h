@@ -43,6 +43,12 @@ class Executor final {
                       std::vector<KVCache>& kv_caches,
                       const ModelParamsView& params);
 
+  ModelOutput forward(const torch::Tensor& tokens,
+                      const torch::Tensor& positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelParamsView& params,
+                      MMBatchData& mm_data);
+
   void prepare_graph_input(const torch::Tensor& tokens,
                            const torch::Tensor& positions,
                            std::vector<KVCache>& kv_caches,

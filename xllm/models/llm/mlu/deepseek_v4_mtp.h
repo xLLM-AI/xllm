@@ -245,7 +245,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module,
            "mtp layer count";
 
     torch::Tensor aux_hidden_states;
-    if (!modified_input_params.synchronize_draft_layer()) {
+    if (!modified_input_params.parallel.synchronize_draft_layer()) {
       return ModelOutput();
     }
     for (size_t i = 0; i < mtp_layers_.size(); ++i) {

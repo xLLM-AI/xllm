@@ -288,8 +288,8 @@ PyAttentionMetadataView::PyAttentionMetadataView(
         << "linear-state read ids must align with Python metadata rows";
     linear_state_read_indices_ = params.embedding.linear_state_read_indices;
     if (!linear_state_read_indices_.defined()) {
-      materialize_linear_state_indices(params.embedding,
-                                       linear_state_indices_.device());
+      params.embedding.materialize_linear_state_indices(
+          linear_state_indices_.device());
       linear_state_read_indices_ = params.embedding.linear_state_read_indices;
     }
   }

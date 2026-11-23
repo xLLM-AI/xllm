@@ -377,7 +377,7 @@ class ModelExecutor:
             quant_mode=cast("str", model.quant_mode) if config.get("model_type") == "deepseek_v41" else None,
         )
 
-        execution_model = model.model
+        execution_model = getattr(model, "runner_model", self.execution_model)
         self.eager_runner = EagerRunner(execution_model, self.attention_backend, device)
         # Context-Parallel: shard prefill sequences across the CP group. Decode
         # stays on the non-CP path (CP is prefill-only, eager-only in v1).
@@ -481,7 +481,7 @@ class ModelExecutor:
                 # to masked BNSD can change BF16 verify outputs.
                 device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
                 kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
-                max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
+                max_capture_tokens=getattr(self.execution_model, "graph_capture_token_limit", None),
             )
         else:
             if self.layerwise_split_size > 1:

@@ -51,7 +51,7 @@ bool EmbedVLMWorkerImpl::init_model(ModelContext& context) {
 std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
     const VlmForwardInput& input) {
   torch::DeviceGuard device_guard(device_);
-  auto ret = device_.synchronize_default_stream();
+  device_.synchronize_default_stream();
 
   Timer timer;
 
@@ -63,9 +63,10 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
   auto sampling_params = input.sampling_params.to(device_, dtype_);
 
   ModelParamsView execution_params(params);
+  auto mm_data = MMBatchData::to(input.mm_data_, device_);
   auto model_output = model_executor_->forward(
-      flatten_tokens, flatten_positions, kv_caches_, execution_params);
-  ret = device_.synchronize_default_stream();
+      flatten_tokens, flatten_positions, kv_caches_, execution_params, mm_data);
+  device_.synchronize_default_stream();
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 
   if (!driver_) {
@@ -100,7 +101,7 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
     }
     output.sample_output = sample_output;
   }
-  ret = device_.synchronize_default_stream();
+  device_.synchronize_default_stream();
   return output;
 }
 
