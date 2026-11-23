@@ -30,7 +30,14 @@ from xllm_kernel.ops.attention.gdn.mega import (
 )
 from xllm_kernel.ops.attention.kda import causal_conv1d, causal_conv1d_update_v2
 from xllm_kernel.ops.attention.mla import mla_preprocess_v2
-from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out, quant_matmul_out
+from xllm_kernel.ops.gemm import (
+    grouped_matmul,
+    grouped_matmul_out,
+    matmul_ein_sum,
+    matmul_ein_sum_out,
+    quant_matmul,
+    quant_matmul_out,
+)
 from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
 from xllm_kernel.ops.kv_cache import reshape_paged_cache
 from xllm_kernel.ops.moe import (
@@ -42,6 +49,7 @@ from xllm_kernel.ops.moe import (
 from xllm_kernel.ops.normalization import (
     fused_add_gemma_rms_norm,
     fused_add_rms_norm,
+    gemma_rms_norm,
     l2_norm,
     layer_norm,
     rms_norm,
@@ -49,6 +57,7 @@ from xllm_kernel.ops.normalization import (
     rms_norm_gated,
 )
 from xllm_kernel.ops.positional_encoding import inplace_partial_rotary_mul, partial_rotary_embedding
+from xllm_kernel.ops.quantization import dynamic_quant, quantize_per_tensor
 
 __all__ = [
     "causal_conv1d",
@@ -56,11 +65,15 @@ __all__ = [
     "causal_conv1d_update_v2",
     "chunk_gated_delta_rule",
     "dequant_swiglu_quant",
+    "dynamic_quant",
     "fused_add_gemma_rms_norm",
     "fused_add_rms_norm",
     "fused_qkvzba_split_reshape_cat",
     "fused_recurrent_gated_delta_rule",
     "fused_sigmoid_gating_delta_rule_update",
+    "gemma_rms_norm",
+    "grouped_matmul",
+    "grouped_matmul_out",
     "hc_post",
     "hc_pre",
     "inplace_partial_rotary_mul",
@@ -81,7 +94,9 @@ __all__ = [
     "moe_init_routing_v3",
     "quant_lightning_indexer",
     "quant_lightning_indexer_metadata",
+    "quant_matmul",
     "quant_matmul_out",
+    "quantize_per_tensor",
     "partial_rotary_embedding",
     "reshape_paged_cache",
     "scatter_nd_update",

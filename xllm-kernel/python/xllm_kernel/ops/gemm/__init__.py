@@ -1,5 +1,5 @@
 # Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
-"""SDK-free MLA projection contracts and startup-bound public APIs."""
+"""SDK-free matrix product contracts and startup-bound public APIs."""
 
 from __future__ import annotations
 
@@ -44,7 +44,53 @@ QUANT_MATMUL_OUT_OPERATION = Operation(
         ),
     ),
 )
-OPERATIONS = (MATMUL_EIN_SUM_OPERATION, MATMUL_EIN_SUM_OUT_OPERATION, QUANT_MATMUL_OUT_OPERATION)
+QUANT_MATMUL_CONTRACT = OpContract("quant_matmul", 1, (), False, "quant_matmul")
+QUANT_MATMUL_OPERATION = Operation(
+    QUANT_MATMUL_CONTRACT,
+    (
+        BackendModule(
+            module="xllm_kernel.ops.gemm.ascendc",
+            platform=PlatformEnum.NPU,
+            requires=("torch_npu",),
+            implementations=("npu.aclnn.quant_matmul",),
+        ),
+    ),
+)
+GROUPED_MATMUL_CONTRACT = OpContract("grouped_matmul", 1, (), False, "grouped_matmul")
+GROUPED_MATMUL_OUT_CONTRACT = OpContract("grouped_matmul_out", 1, ("output",), True, "grouped_matmul")
+
+
+def _grouped_operation(contract: OpContract, implementation: str) -> Operation:
+    return Operation(
+        contract,
+        (
+            BackendModule(
+                module="xllm_kernel.ops.gemm.npu",
+                platform=PlatformEnum.NPU,
+                requires=("torch_npu",),
+                implementations=(implementation,),
+            ),
+        ),
+    )
+
+
+GROUPED_MATMUL_OPERATION = _grouped_operation(GROUPED_MATMUL_CONTRACT, "npu.torch.grouped_matmul")
+GROUPED_MATMUL_OUT_OPERATION = _grouped_operation(GROUPED_MATMUL_OUT_CONTRACT, "npu.aclnn.grouped_matmul_out")
+OPERATIONS = (
+    MATMUL_EIN_SUM_OPERATION,
+    MATMUL_EIN_SUM_OUT_OPERATION,
+    QUANT_MATMUL_OPERATION,
+    QUANT_MATMUL_OUT_OPERATION,
+    GROUPED_MATMUL_OPERATION,
+    GROUPED_MATMUL_OUT_OPERATION,
+)
+
+
+def has_grouped_matmul_out() -> bool:
+    """Return whether CANN provides the grouped out kernel on this host."""
+    from xllm_kernel.ops.gemm.npu import HAS_GROUPED_MATMUL_OUT
+
+    return HAS_GROUPED_MATMUL_OUT
 
 
 def matmul_ein_sum(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -83,4 +129,66 @@ def quant_matmul_out(
     """Write the quantized product into out and return the same tensor."""
     return QUANT_MATMUL_OUT_OPERATION.get_prepared().function(
         input, weight, transpose2, scale, offset, pertoken_scale, bias, output_dtype, out
+    )
+
+
+def quant_matmul(
+    x1: torch.Tensor,
+    x2: torch.Tensor,
+    transpose2: bool,
+    scale: torch.Tensor,
+    offset: torch.Tensor | None,
+    pertoken_scale: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    output_dtype: torch.dtype | None,
+) -> torch.Tensor:
+    """Return a quantized product with weight stored as [N, K] when transpose2 is true."""
+    return QUANT_MATMUL_OPERATION.get_prepared().function(
+        x1, x2, transpose2, scale, offset, pertoken_scale, bias, output_dtype
+    )
+
+
+def grouped_matmul(
+    x: list[torch.Tensor],
+    weight: list[torch.Tensor],
+    *,
+    bias: list[torch.Tensor] | None = None,
+    scale: list[torch.Tensor] | None = None,
+    per_token_scale: list[torch.Tensor] | None = None,
+    split_item: int,
+    group_type: int,
+    group_list_type: int = 0,
+    group_list: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
+) -> list[torch.Tensor]:
+    """Return TorchNPU grouped products with optional bias and quantization scales."""
+    return GROUPED_MATMUL_OPERATION.get_prepared().function(
+        x=x,
+        weight=weight,
+        bias=bias,
+        scale=scale,
+        per_token_scale=per_token_scale,
+        split_item=split_item,
+        group_type=group_type,
+        group_list_type=group_list_type,
+        group_list=group_list,
+        output_dtype=output_dtype,
+    )
+
+
+def grouped_matmul_out(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    per_token_scale: torch.Tensor,
+    group_list: torch.Tensor,
+    *,
+    split_item: int,
+    group_type: int,
+    group_list_type: int,
+    output: torch.Tensor,
+) -> torch.Tensor:
+    """Write an [M, K] by [E, K, N] grouped product into contiguous output and return it."""
+    return GROUPED_MATMUL_OUT_OPERATION.get_prepared().function(
+        x, weight, scale, per_token_scale, group_list, split_item, group_type, group_list_type, output
     )
