@@ -61,6 +61,7 @@ def initialize_runtime() -> None:
 
         from xllm_kernel.ops.attention.gdn.mega import has_mega_gdn_mtp_decode_varlen
         from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2
+        from xllm_kernel.ops.gemm import has_grouped_matmul_out
         from xllm_kernel.ops.moe import FUSED_MOE_GMM1_OPERATIONS, has_fused_moe_gmm1
 
         from scripts.logger import logger
@@ -69,6 +70,7 @@ def initialize_runtime() -> None:
             device="npu",
             operations=(
                 "rms_norm",
+                "gemma_rms_norm",
                 "fused_add_rms_norm",
                 "silu_and_mul",
                 "fused_add_gemma_rms_norm",
@@ -87,7 +89,12 @@ def initialize_runtime() -> None:
                 "quant_lightning_indexer",
                 "quant_lightning_indexer_metadata",
                 "scatter_nd_update",
+                "quant_matmul",
                 "quant_matmul_out",
+                "quantize_per_tensor",
+                "dynamic_quant",
+                "grouped_matmul",
+                *(("grouped_matmul_out",) if has_grouped_matmul_out() else ()),
                 *(("mla_preprocess_v2",) if has_mla_preprocess_v2() else ()),
                 "dequant_swiglu_quant",
                 "moe_gating_top_k_hash",

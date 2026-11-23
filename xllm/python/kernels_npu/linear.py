@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 import torch_npu
+from xllm_kernel.ops import grouped_matmul
 
 _FRACTAL_NZ_FORMAT = 29
 
@@ -32,7 +33,7 @@ def grouped_linear(hidden: torch.Tensor, weights: list[torch.Tensor]) -> list[to
     """
     # Normalize a strided input once rather than once per grouped operand.
     hidden = hidden.contiguous()
-    return torch_npu.npu_grouped_matmul([hidden] * len(weights), weights, split_item=0, group_type=-1)
+    return grouped_matmul([hidden] * len(weights), weights, split_item=0, group_type=-1)
 
 
 def prepare_row_parallel_weight(

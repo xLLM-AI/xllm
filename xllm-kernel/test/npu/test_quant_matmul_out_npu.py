@@ -6,7 +6,7 @@ from collections.abc import Iterator
 import pytest
 import torch
 import torch_npu
-from xllm_kernel.ops import quant_matmul_out
+from xllm_kernel.ops import quant_matmul, quant_matmul_out
 
 
 @pytest.fixture
@@ -72,3 +72,18 @@ def test_quant_matmul_out_nz_aclgraph_replay(_allow_nz: None) -> None:
         torch.npu.synchronize()
         reference = torch_npu.npu_quant_matmul(value, weight, scale, bias=bias, output_dtype=out.dtype)
         torch.testing.assert_close(out, reference, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("transpose2", [False, True])
+def test_quant_matmul_preserves_weight_layout(transpose2: bool) -> None:
+    generator = torch.Generator().manual_seed(623)
+    value = torch.randint(-4, 5, (3, 64), generator=generator, dtype=torch.int8)
+    weight = torch.randint(-4, 5, (64, 96), generator=generator, dtype=torch.int8)
+    scale = torch.full((96,), 0.125)
+    token_scale = torch.tensor([0.25, 0.5, 1.0])
+    stored_weight = weight.T.contiguous() if transpose2 else weight
+    actual = quant_matmul(
+        value.npu(), stored_weight.npu(), transpose2, scale.npu(), None, token_scale.npu(), None, torch.bfloat16
+    )
+    expected = ((value.float() @ weight.float()) * scale * token_scale[:, None]).to(torch.bfloat16)
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)

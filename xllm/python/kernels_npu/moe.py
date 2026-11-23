@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 import torch_npu
+from xllm_kernel.ops.gemm import grouped_matmul, grouped_matmul_out, has_grouped_matmul_out
 from xllm_kernel.ops.moe import (
     dequant_swiglu_quant as dequant_swiglu_quant,
 )
@@ -123,8 +124,7 @@ def _grouped_matmul_gmm2(
     if output is None:
         output = _graph_gmm2_output(act_i8, weight)
 
-    grouped_matmul_out = getattr(torch.ops.xllm_ops, "grouped_matmul_out", None)
-    if output is not None and grouped_matmul_out is not None:
+    if output is not None and has_grouped_matmul_out():
         return grouped_matmul_out(
             act_i8,
             weight,
@@ -137,7 +137,7 @@ def _grouped_matmul_gmm2(
             output=output,
         )
 
-    result = torch.ops.npu.npu_grouped_matmul(
+    result = grouped_matmul(
         x=[act_i8],
         weight=[weight],
         scale=[weight_scale],
@@ -394,7 +394,7 @@ def _group_gemm(
     group_list_type: int,
     output_dtype: torch.dtype | None,
 ) -> torch.Tensor:
-    outputs = torch.ops.npu.npu_grouped_matmul(
+    outputs = grouped_matmul(
         x=[x],
         weight=[weight],
         scale=None if scale is None else [scale],

@@ -56,6 +56,18 @@ LAYER_NORM_OPERATION = Operation(
         ),
     ),
 )
+GEMMA_RMS_NORM_CONTRACT = OpContract("gemma_rms_norm", 1, (), False, "fp32_offset_gamma_rms_norm_cast")
+GEMMA_RMS_NORM_OPERATION = Operation(
+    GEMMA_RMS_NORM_CONTRACT,
+    (
+        BackendModule(
+            module="xllm_kernel.ops.normalization.torch",
+            platform=PlatformEnum.NPU,
+            requires=("torch_npu",),
+            implementations=("npu.torch.gemma_rms_norm",),
+        ),
+    ),
+)
 RMS_NORM_OPERATION = Operation(
     RMS_NORM_CONTRACT,
     (
@@ -112,6 +124,7 @@ OPERATIONS = (
     RMS_NORM_DYNAMIC_QUANT_OPERATION,
     LAYER_NORM_OPERATION,
     RMS_NORM_OPERATION,
+    GEMMA_RMS_NORM_OPERATION,
     L2_NORM_OPERATION,
 )
 
@@ -158,6 +171,11 @@ def layer_norm(value: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, ep
 def rms_norm(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """Normalize without mutation or aliasing using the startup binding."""
     return RMS_NORM_OPERATION.get_prepared().function(input, weight, eps)
+
+
+def gemma_rms_norm(value: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """Normalize with the effective weight 1 + weight."""
+    return GEMMA_RMS_NORM_OPERATION.get_prepared().function(value, weight, eps)
 
 
 def rms_norm_gated(value: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:

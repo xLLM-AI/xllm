@@ -21,22 +21,13 @@ import torch_npu
 from xllm_kernel.ops import (
     fused_add_gemma_rms_norm,
     fused_add_rms_norm,
+    gemma_rms_norm,
     rms_norm,
     rms_norm_dynamic_quant,
     rms_norm_gated,
 )
 
 _FUSED_ADD_RMS_NORM_DYNAMIC_QUANT = torch_npu.npu_add_rms_norm_dynamic_quant
-
-
-def gemma_rms_norm(
-    value: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-) -> torch.Tensor:
-    """Apply Gemma RMSNorm with the checkpoint's additive gamma."""
-    output, _ = torch_npu.npu_gemma_rms_norm(value, weight, eps)
-    return output
 
 
 def fused_add_rms_norm_dynamic_quant(

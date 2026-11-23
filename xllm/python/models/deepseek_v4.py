@@ -42,6 +42,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_npu
+from xllm_kernel.ops.gemm import grouped_matmul
 
 from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.csa_attention import (
@@ -1467,7 +1468,7 @@ class DeepseekV4MoE(nn.Module):
             )
             sorted_hidden_i8, input_scale = kernels.dynamic_quant(sorted_hidden)
             group_list = group_list[: self.num_experts_per_rank].to(torch.int64)
-            gemm1 = torch.ops.npu.npu_grouped_matmul(
+            gemm1 = grouped_matmul(
                 x=[sorted_hidden_i8],
                 weight=[self.experts_w13],
                 bias=[self.experts_w13_scale_bias],
@@ -1498,7 +1499,7 @@ class DeepseekV4MoE(nn.Module):
             if act.dtype != torch.bfloat16:
                 act = act.to(torch.bfloat16)
             act_i8, act_scale = kernels.dynamic_quant(act)
-            gemm2 = torch.ops.npu.npu_grouped_matmul(
+            gemm2 = grouped_matmul(
                 x=[act_i8],
                 weight=[self.experts_w2],
                 bias=[self.experts_w2_scale_bias],

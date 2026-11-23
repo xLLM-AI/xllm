@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import torch
 
-from xllm_kernel.ops.normalization import FUSED_ADD_RMS_NORM_CONTRACT, LAYER_NORM_CONTRACT, RMS_NORM_CONTRACT
+from xllm_kernel.ops.normalization import (
+    FUSED_ADD_RMS_NORM_CONTRACT,
+    GEMMA_RMS_NORM_CONTRACT,
+    LAYER_NORM_CONTRACT,
+    RMS_NORM_CONTRACT,
+)
 from xllm_kernel.platform import Platform, PlatformEnum
 from xllm_kernel.registry import register_kernel
 
@@ -56,3 +61,15 @@ if Platform.is_npu():
     )
     def rms_norm(value: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
         return _rms_norm(value, weight, epsilon=eps)[0]
+
+    @register_kernel(
+        name="npu.torch.gemma_rms_norm",
+        platform=PlatformEnum.NPU,
+        execution_modes=("eager", "aclgraph"),
+        input_domain="TorchNPU Gemma RMSNorm with additive gamma.",
+        solution="torch",
+        binding="torch_npu",
+        contract=GEMMA_RMS_NORM_CONTRACT,
+    )
+    def gemma_rms_norm(value: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+        return torch_npu.npu_gemma_rms_norm(value, weight, eps)[0]
