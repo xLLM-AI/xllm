@@ -16,6 +16,7 @@ import argparse
 from pathlib import Path
 
 import tilelang
+from xllm_kernel.ops.attention.gdn._tilelang import _fused_gdn_gating as packaged_dsl
 
 from xllm.python.kernels_npu.tilelang import (
     fused_gdn_gating as kernel_impl,
@@ -25,10 +26,11 @@ from xllm.python.kernels_npu.tilelang import (
 )
 from xllm.python.kernels_npu.tilelang.fused_gdn_gating import (
     BATCH_SIZE_SPECIALIZATIONS,
-    DEFAULT_ASCEND_PASS_CONFIGS,
     DEFAULT_DTYPE,
     DEFAULT_MAX_BATCH,
     DEFAULT_NUM_HEADS,
+    GDN_GATING_PASS_CONFIGS,
+    MAX_VEC_CORE_NUM,
     REF_CHECK_NUM_BATCHES,
     REF_CHECK_NUM_HEADS,
     SUPPORTED_NUM_HEADS,
@@ -38,7 +40,7 @@ from xllm.python.kernels_npu.tilelang.fused_gdn_gating import (
 
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
-DEPENDENCY_MODULES = (kernel_impl, tilelang_utils)
+DEPENDENCY_MODULES = (kernel_impl, packaged_dsl, tilelang_utils)
 
 
 @register_kernel
@@ -74,8 +76,9 @@ class FusedGdnGatingKernel(TilelangKernel):
             batch_size=batch_size,
             compile_max_batch=DEFAULT_MAX_BATCH,
             num_heads=num_heads,
+            vec_core_num=MAX_VEC_CORE_NUM,
         )
-        with tilelang.tvm.transform.PassContext(opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS):
+        with tilelang.tvm.transform.PassContext(opt_level=3, config=GDN_GATING_PASS_CONFIGS):
             kernel = tilelang.engine.lower(tilelang_kernel)
         return kernel.kernel_source
 

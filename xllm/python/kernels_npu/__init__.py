@@ -38,6 +38,7 @@ _EXPORTS = {
     ),
     "causal_conv1d": (
         "causal_conv1d_decode",
+        "causal_conv1d_prefill",
         "causal_conv1d_qkv_prefill",
     ),
     "gated_delta_net": (
@@ -108,6 +109,7 @@ _EXPORTS = {
     ),
     "rotary_embedding": (
         "apply_qk_rotary",
+        "apply_rotary_embedding",
         "build_split_qkv_rmsnorm_mrope_gather_pattern",
         "fused_qk_norm_rope",
         "has_fused_qk_rotary",
@@ -164,6 +166,7 @@ __all__ = [
     "build_split_qkv_rmsnorm_mrope_gather_pattern",
     "has_split_qkv_rmsnorm_mrope_specialization",
     "apply_qk_rotary",
+    "apply_rotary_embedding",
     "has_fused_qk_rotary",
     "interleaved_rotary_embedding",
     "npu_inplace_partial_rotary_mul",
@@ -219,6 +222,7 @@ __all__ = [
     "sparse_flash_attention_lse",
     "sparse_flash_attention_lse_out",
     "causal_conv1d_decode",
+    "causal_conv1d_prefill",
     "compressor",
     "dequant_swiglu_quant",
     "hc_pre",

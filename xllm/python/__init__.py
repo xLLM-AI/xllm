@@ -111,14 +111,30 @@ def initialize_runtime() -> None:
                 *(("mega_gdn_mtp_decode_varlen",) if has_mega_gdn_mtp_decode_varlen() else ()),
                 "shared_linear_state_indices_out",
                 "causal_conv1d",
+                "causal_conv1d_prefill",
                 "causal_conv1d_qkv_prefill",
                 "chunk_gated_delta_rule",
                 "causal_conv1d_update_v2",
                 "partial_rotary_embedding",
                 "inplace_partial_rotary_mul",
+                "apply_rotary_embedding",
+                "apply_qk_rotary",
+                "fused_qk_norm_rope",
+                "mrope",
+                "vision_rotary_mul",
                 "reshape_paged_cache",
                 "update_decode_graph_metadata",
-                *(("shared_full_indices_out", "sfa_dcp_remap_out") if find_spec("tilelang") is not None else ()),
+                *(
+                    (
+                        "shared_full_indices_out",
+                        "sfa_dcp_remap_out",
+                        "split_qkv_rmsnorm_mrope",
+                        "fused_gdn_gating",
+                        "causal_conv1d_decode",
+                    )
+                    if find_spec("tilelang") is not None
+                    else ()
+                ),
                 "fused_attention",
             ),
         )
