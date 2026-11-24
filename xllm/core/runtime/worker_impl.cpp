@@ -59,6 +59,7 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
+#include "core/kv_cache/layout/native_kv_cache_format.h"
 #include "core/platform/platform.h"
 #if defined(USE_NPU)
 #include "core/platform/npu/npu_profiler.h"
@@ -417,6 +418,30 @@ void WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
   // "auto" (default): cache dtype aligns with model dtype (no quantization)
   // "int8": enables INT8 quantization
   const bool enable_kv_cache_quant = options_.kv_cache_dtype() == "int8";
+  const bool native_kv_cache =
+      is_native_kv_cache_format(options_.kv_cache_dtype());
+  if (native_kv_cache) {
+#if defined(USE_CUDA)
+    CHECK(ModelConfig::is_python_model_impl(
+        ModelConfig::get_instance().model_impl()))
+        << "Native FP8 KV requires the CUDA Python Executor.";
+    CHECK(!options_.enable_speculative_decode() &&
+          !options_.is_draft_engine() && options_.num_speculative_tokens() == 0)
+        << "Native FP8 KV requires ordinary autoregressive decoding.";
+    CHECK(parallel_args_.cp_size() == 1 &&
+          parallel_args_.kv_split_size_effective() == 1)
+        << "Native FP8 KV requires local attention pages.";
+    CHECK_LE(options_.host_blocks_factor(), 1.0)
+        << "Native FP8 KV host offload is not qualified.";
+    CHECK(!options_.enable_kvcache_store())
+        << "Native FP8 KV external stores are not qualified.";
+    CHECK(!options_.enable_disagg_pd())
+        << "Native compressed KV transfer is not qualified for PD "
+           "disaggregation.";
+#else
+    LOG(FATAL) << "Native FP8 KV is supported only on CUDA.";
+#endif
+  }
 
   const bool enable_indexer_cache_quant =
       ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype() == "int8";
@@ -475,6 +500,7 @@ void WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
 
   KVCacheCreateOptions create_options;
   create_options.device(device_)
+      .enable_native_fp8(native_kv_cache)
       .dtype(dtype_)
       .ssm_dtype(ssm_dtype)
       .num_layers(num_layers)

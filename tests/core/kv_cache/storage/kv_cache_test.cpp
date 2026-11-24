@@ -28,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/kv_cache/block/block.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
@@ -259,6 +260,49 @@ void ExpectMluCompressedStateLayout(const std::vector<KVCache>& caches,
 #endif
 
 }  // namespace
+
+#if !defined(USE_MLU) && !defined(USE_NPU)
+TEST(NativeKVCacheTest, FP8BytePagesKeepLinearStateDtypes) {
+  KVCacheCapacity capacity;
+  capacity.n_blocks(4).block_size(16).num_linear_state_blocks(3);
+  ModelArgs args;
+  args.n_layers(4)
+      .n_heads(24)
+      .n_kv_heads(4)
+      .head_dim(256)
+      .full_attention_interval(2)
+      .linear_num_key_heads(2)
+      .linear_num_value_heads(2)
+      .linear_key_head_dim(4)
+      .linear_value_head_dim(8)
+      .linear_conv_kernel_dim(3);
+  const KVCacheShape shape(capacity, args, 1);
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kBFloat16)
+      .ssm_dtype(torch::kFloat32)
+      .num_layers(4)
+      .full_attention_interval(2)
+      .enable_linear_attention(true)
+      .enable_native_fp8(true);
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+  ASSERT_EQ(caches.size(), 4U);
+  EXPECT_EQ(caches[0].get_conv_cache().scalar_type(), torch::kBFloat16);
+  EXPECT_EQ(caches[0].get_ssm_cache().scalar_type(), torch::kFloat32);
+  for (int64_t layer : {1, 3}) {
+    const torch::Tensor key = caches[layer].get_k_cache();
+    const torch::Tensor value = caches[layer].get_v_cache();
+    EXPECT_EQ(key.scalar_type(), torch::kByte);
+    EXPECT_EQ(key.size(3), 256);
+    EXPECT_FALSE(caches[layer].get_k_cache_scale().has_value());
+    EXPECT_EQ(value.scalar_type(), torch::kByte);
+    EXPECT_FALSE(caches[layer].get_v_cache_scale().has_value());
+    EXPECT_EQ(key[0].count_nonzero().item<int64_t>(), 0);
+    EXPECT_EQ(value[0].count_nonzero().item<int64_t>(), 0);
+  }
+}
+#endif
 
 TEST(DeepSeekV4StateCacheTest, SplitStateReturnsInputViews) {
   torch::Tensor kv = torch::tensor({{{1.0F}}, {{2.0F}}, {{3.0F}}});

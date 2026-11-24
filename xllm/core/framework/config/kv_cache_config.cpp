@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <cmath>
+#include <limits>
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
@@ -58,7 +59,25 @@ DEFINE_string(kv_cache_dtype,
               "KV cache data type for quantization. \"auto\" (default): KV "
               "cache dtype aligns with model dtype (no quantization). "
               "\"int8\": Enables INT8 quantization on MLU, and on NPU for "
-              "GLM-5.2 SFA packed KV cache.");
+              "GLM-5.2 SFA packed KV cache. CUDA Python Executor additionally "
+              "supports native fp8_e4m3 compressed pages.");
+
+DEFINE_double(kv_cache_k_scale,
+              1.0,
+              "Native quantized KV immutable global K decode scale.");
+DEFINE_double(kv_cache_v_scale,
+              1.0,
+              "Native quantized KV immutable global V decode scale.");
+
+DEFINE_string(
+    kv_cache_prefill_backend,
+    "auto",
+    "Explicit native KV prefill backend; auto selects a supported route.");
+
+DEFINE_string(
+    kv_cache_decode_backend,
+    "auto",
+    "Explicit native KV decode backend; auto selects a supported route.");
 
 DEFINE_string(indexer_cache_dtype,
               "auto",
@@ -110,6 +129,10 @@ void KVCacheConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_cache_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_memory_utilization);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_dtype);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_k_scale);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_v_scale);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_decode_backend);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_prefill_backend);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(indexer_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_events_config);
@@ -129,6 +152,10 @@ void KVCacheConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_cache_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_memory_utilization);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_dtype);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_k_scale);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_v_scale);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_decode_backend);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_prefill_backend);
   XLLM_CONFIG_ASSIGN_FROM_JSON(indexer_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_events_config);
@@ -154,6 +181,14 @@ void KVCacheConfig::append_config_json(
       config_json, default_config, max_memory_utilization);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, kv_cache_dtype);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, kv_cache_k_scale);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, kv_cache_v_scale);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, kv_cache_decode_backend);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, kv_cache_prefill_backend);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, indexer_cache_dtype);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
@@ -196,6 +231,32 @@ void KVCacheConfig::initialize() {
 void KVCacheConfig::validate() const {
   CHECK(!enable_shared_kv_cache_ || !enable_vmm_kvcache_)
       << "Static shared KV cache and VMM addressing are separate modes.";
+  CHECK(kv_cache_dtype_ == "auto" || kv_cache_dtype_ == "int8" ||
+        kv_cache_dtype_ == "fp8_e4m3")
+      << "Unsupported kv_cache_dtype=" << kv_cache_dtype_;
+  CHECK(std::isfinite(kv_cache_k_scale_) &&
+        kv_cache_k_scale_ >= std::numeric_limits<float>::min() &&
+        kv_cache_k_scale_ <= std::numeric_limits<float>::max());
+  CHECK(std::isfinite(kv_cache_v_scale_) &&
+        kv_cache_v_scale_ >= std::numeric_limits<float>::min() &&
+        kv_cache_v_scale_ <= std::numeric_limits<float>::max());
+  CHECK(kv_cache_prefill_backend_ == "auto" ||
+        kv_cache_prefill_backend_ == "fa2" ||
+        kv_cache_prefill_backend_ == "fa3");
+  CHECK(kv_cache_decode_backend_ == "auto" ||
+        kv_cache_decode_backend_ == "flashinfer" ||
+        kv_cache_decode_backend_ == "xqa");
+  if (kv_cache_dtype_ == "fp8_e4m3" &&
+      kv_cache_decode_backend_ != "flashinfer") {
+    CHECK(block_size_ == 16 || block_size_ == 32 || block_size_ == 64 ||
+          block_size_ == 128)
+        << "FP8 XQA requires block_size 16, 32, 64 or 128; got " << block_size_;
+  }
+  CHECK(!enable_shared_kv_cache_ || kv_cache_dtype_ != "fp8_e4m3")
+      << "Native FP8 requires the resident per-layer KV allocator.";
+  CHECK(!enable_vmm_kvcache_ || kv_cache_dtype_ != "fp8_e4m3")
+      << "Native FP8 requires finite initialized pages; this VMM path is not "
+         "qualified.";
   CHECK_GE(vmm_memory_reserve_bytes_, 0);
   CHECK_GT(vmm_startup_timeout_ms_, 0)
       << "vmm_startup_timeout_ms must be positive";

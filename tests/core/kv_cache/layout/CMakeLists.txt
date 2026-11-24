@@ -43,6 +43,7 @@ cc_test(
   SRCS
     kv_cache_estimation_test.cpp
   DEPS
+    :kv_cache
     :kv_cache_estimation
     $<$<BOOL:${USE_NPU}>:models>
     GTest::gtest_main

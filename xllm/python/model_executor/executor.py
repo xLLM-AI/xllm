@@ -245,6 +245,28 @@ def _create_attention_backend(
             mla_block_draft=model_type == "glm5_dspark",
         )
     if current_platform.is_cuda():
+        cache_dtype = config.get("kv_cache_dtype", "auto")
+        if cache_dtype == "fp8_e4m3":
+            if graph_backend not in (*_DISABLED_GRAPH_BACKENDS, "cudagraphs"):
+                raise ValueError("Native FP8 KV supports eager execution and decode CUDA graphs")
+            from xllm.python.attention.flashinfer_native_kv import FlashInferNativeKVBackend
+
+            return FlashInferNativeKVBackend(
+                num_heads=first_attention.num_heads,
+                num_kv_heads=first_attention.num_kv_heads,
+                head_dim=first_attention.head_dim,
+                scale=first_attention.scale,
+                sliding_window=first_attention.sliding_window,
+                device=device,
+                dtype=dtype,
+                cache_dtype=cache_dtype,
+                key_scale=float(config.get("kv_cache_k_scale", 1.0)),
+                value_scale=float(config.get("kv_cache_v_scale", 1.0)),
+                prefill_backend=config.get("kv_cache_prefill_backend", "auto"),
+                decode_backend=config.get("kv_cache_decode_backend", "auto"),
+                max_context_tokens=int(config.get("max_position_embeddings", 32768)),
+                virtual_memory=bool(config.get("enable_vmm_kvcache", False)),
+            )
         from xllm.python.attention.flashinfer import FlashInferBackend
 
         return FlashInferBackend(

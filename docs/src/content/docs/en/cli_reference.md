@@ -69,7 +69,11 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `block_size` | `int32` | `128` | Number of slots per KV Cache block. |
 | `max_cache_size` | `int64` | `0` | Maximum KV Cache size in bytes. With virtual memory, caps the shared KV/weight pool. `0` leaves the explicit byte ceiling unset and derives capacity from available memory. |
 | `max_memory_utilization` | `double` | `0.8` | Fraction of device memory used for model inference, including model weights and KV Cache. Must be in `(0, 1]` for physical KV Cache and fixed VMM. Elastic VMM ignores this ratio during startup sizing, arena reservation, and physical growth; capacity follows live available memory and observed execution headroom. |
-| `kv_cache_dtype` | `string` | `"auto"` | KV Cache dtype for quantization. `auto` aligns with model dtype and disables quantization. `int8` enables INT8 quantization and is only supported on the MLU backend. |
+| `kv_cache_dtype` | `string` | `"auto"` | KV Cache format. `auto` aligns with model dtype; `int8` retains its existing MLU/NPU support. CUDA Python Executor on SM90 additionally supports resident `fp8_e4m3` pages; GDN states retain their original dtypes. |
+| `kv_cache_k_scale` | `double` | `1.0` | Fixed positive normal FP32 K dequantization scale for native FP8 KV. Calibrate for the model before deployment. |
+| `kv_cache_v_scale` | `double` | `1.0` | Fixed positive normal FP32 V dequantization scale for native FP8 KV. This is a model recipe, not a universal calibrated default. |
+| `kv_cache_prefill_backend` | `string` | `"auto"` | Native FP8 only: `auto`, `fa2`, or `fa3`. SM90 `auto` selects FA3 with FP8 queries; normal mixed batches use the full packed prefill route. |
+| `kv_cache_decode_backend` | `string` | `"auto"` | Native FP8 only: `auto`, `flashinfer`, or `xqa`. SM90 `auto` selects XQA for pure decode. XQA requires `block_size` 16, 32, 64, or 128. Native FP8 VMM is rejected before execution. |
 | `indexer_cache_dtype` | `string` | `"auto"` | Indexer cache dtype for models with an indexer cache. Supported values are `auto` and `int8`. `auto` aligns with model dtype and disables indexer cache quantization. `int8` enables INT8 indexer cache quantization. |
 | `enable_prefix_cache` | `bool` | `true` | Whether to enable prefix cache in the block manager. See [Prefix Cache](/en/features/prefix_cache/). |
 | `kv_events_config` | `string` | `""` | KV residency event publisher configuration as a JSON object string. An empty string disables reporting. See the fields and example below. |

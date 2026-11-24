@@ -199,16 +199,19 @@ KVCacheTensors create_kv_cache_tensors(
                                    create_options.dtype());
   }
 #else
+  const torch::ScalarType cache_dtype = create_options.enable_native_fp8()
+                                            ? torch::kByte
+                                            : create_options.dtype();
   tensors.key_cache = alloc_cache_tensor(KVCacheTensorRole::KEY,
                                          kv_cache_shape.key_cache_shape(),
-                                         create_options.dtype(),
+                                         cache_dtype,
                                          create_options);
 
   // deepseek_v3 model has no value cache on mlu device
   if (!kv_cache_shape.value_cache_shape().empty()) {
     tensors.value_cache = alloc_cache_tensor(KVCacheTensorRole::VALUE,
                                              kv_cache_shape.value_cache_shape(),
-                                             create_options.dtype(),
+                                             cache_dtype,
                                              create_options);
   }
 #endif
