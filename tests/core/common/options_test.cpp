@@ -18,9 +18,57 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include "core/common/prefill_policy.h"
+#include "core/framework/config/model_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/util/scope_guard.h"
 
 namespace xllm {
 namespace {
+
+TEST(OptionsTest, ValidatesNativeFP8BeforeEngineCreation) {
+  constexpr std::string_view kModelType = "qwen3_5";
+  Options options;
+  options.kv_cache_dtype("fp8_e4m3");
+#if defined(USE_CUDA)
+  auto& model = ModelConfig::get_instance();
+  const ScopeGuard restore(
+      [&model, saved = model.model_impl()] { model.model_impl(saved); });
+  model.model_impl("python");
+  options.validate(kModelType);
+
+  EXPECT_DEATH(
+      {
+        model.model_impl("native");
+        options.validate(kModelType);
+      },
+      "CUDA Python Executor");
+  EXPECT_DEATH(options.draft_model_path("draft").validate(kModelType),
+               "ordinary autoregressive decoding");
+  EXPECT_DEATH(options.speculative_algorithm("Suffix")
+                   .num_speculative_tokens(/*value=*/1)
+                   .validate(kModelType),
+               "ordinary autoregressive decoding");
+  EXPECT_DEATH(options.cp_size(/*value=*/2).validate(kModelType),
+               "local attention pages");
+  EXPECT_DEATH(
+      {
+        ParallelConfig::get_instance().kv_split_size(/*value=*/2);
+        options.validate(kModelType);
+      },
+      "local attention pages");
+  EXPECT_DEATH(options.host_blocks_factor(/*value=*/2.0).validate(kModelType),
+               "host offload");
+  EXPECT_DEATH(
+      options.enable_kvcache_store(/*value=*/true).validate(kModelType),
+      "external stores");
+  EXPECT_DEATH(options.enable_disagg_pd(/*value=*/true).validate(kModelType),
+               "PD disaggregation");
+#else
+  EXPECT_DEATH(options.validate(kModelType), "supported only on CUDA");
+#endif
+  options.kv_cache_dtype("auto").host_blocks_factor(/*value=*/2.0);
+  options.validate(kModelType);
+}
 
 TEST(OptionsTest, SpeculativeTokenCountRemainsNonnegative) {
   Options options;

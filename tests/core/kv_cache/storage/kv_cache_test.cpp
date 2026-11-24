@@ -276,7 +276,7 @@ TEST(NativeKVCacheTest, FP8BytePagesKeepLinearStateDtypes) {
       .linear_key_head_dim(4)
       .linear_value_head_dim(8)
       .linear_conv_kernel_dim(3);
-  const KVCacheShape shape(capacity, args, 1);
+  const KVCacheShape shape(capacity, args, /*world_size=*/1);
   KVCacheCreateOptions options;
   options.device(torch::Device(torch::kCPU))
       .dtype(torch::kBFloat16)
@@ -294,7 +294,7 @@ TEST(NativeKVCacheTest, FP8BytePagesKeepLinearStateDtypes) {
     const torch::Tensor key = caches[layer].get_k_cache();
     const torch::Tensor value = caches[layer].get_v_cache();
     EXPECT_EQ(key.scalar_type(), torch::kByte);
-    EXPECT_EQ(key.size(3), 256);
+    EXPECT_EQ(key.size(/*dim=*/3), 256);
     EXPECT_FALSE(caches[layer].get_k_cache_scale().has_value());
     EXPECT_EQ(value.scalar_type(), torch::kByte);
     EXPECT_FALSE(caches[layer].get_v_cache_scale().has_value());

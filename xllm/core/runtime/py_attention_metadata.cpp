@@ -342,7 +342,9 @@ py::object PyAttentionMetadataView::paged_kv_indptr_host() const {
     return py::none();
   }
   const auto page_counts =
-      torch::floor_divide(kv_seq_lens_host_.clamp_min(1) - 1, block_size_) + 1;
+      torch::floor_divide(kv_seq_lens_host_.clamp_min(/*min=*/1) - 1,
+                          block_size_) +
+      1;
   return py::cast(util::make_query_start_loc(page_counts));
 }
 
@@ -350,8 +352,8 @@ py::object PyAttentionMetadataView::paged_kv_last_page_len_host() const {
   if (!kv_seq_lens_host_.defined()) {
     return py::none();
   }
-  return py::cast((kv_seq_lens_host_.clamp_min(1) - 1).remainder(block_size_) +
-                  1);
+  return py::cast(
+      (kv_seq_lens_host_.clamp_min(/*min=*/1) - 1).remainder(block_size_) + 1);
 }
 
 const torch::Tensor& PyAttentionMetadataView::paged_kv_indices() const {
