@@ -59,7 +59,6 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
-#include "core/kv_cache/layout/native_kv_cache_format.h"
 #include "core/platform/platform.h"
 #if defined(USE_NPU)
 #include "core/platform/npu/npu_profiler.h"
@@ -476,7 +475,7 @@ void WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
 
   KVCacheCreateOptions create_options;
   create_options.device(device_)
-      .enable_native_fp8(is_native_kv_cache_format(options_.kv_cache_dtype()))
+      .enable_native_fp8(options_.kv_cache_dtype() == "fp8_e4m3")
       .dtype(dtype_)
       .ssm_dtype(ssm_dtype)
       .num_layers(num_layers)

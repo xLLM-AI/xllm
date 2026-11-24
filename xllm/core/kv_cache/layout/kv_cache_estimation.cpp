@@ -38,7 +38,6 @@ limitations under the License.
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kpool_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "core/kv_cache/layout/native_kv_cache_format.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/platform/platform.h"
@@ -104,7 +103,7 @@ int64_t kv_slot_size(const ModelArgs& model_args,
 int64_t scale_slot_size(const ModelArgs& model_args,
                         const KVCacheEstimateOptions& options) {
   if (options.kv_cache_dtype == "auto" ||
-      is_native_kv_cache_format(options.kv_cache_dtype)) {
+      options.kv_cache_dtype == "fp8_e4m3") {
     return 0;
   }
   if (model_args.enable_mla()) {
@@ -1092,7 +1091,7 @@ KVCacheCapacity estimate_kv_cache_capacity(
            "target";
   }
 
-  if (is_native_kv_cache_format(options.kv_cache_dtype)) {
+  if (options.kv_cache_dtype == "fp8_e4m3") {
     CHECK(!options.enable_shared_kv_cache)
         << "Shared static storage requires model-dtype Full KV rows.";
     CHECK(options.dtype == torch::kBFloat16 ||

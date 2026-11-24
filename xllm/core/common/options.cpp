@@ -21,7 +21,6 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/speculative_config.h"
-#include "core/kv_cache/layout/native_kv_cache_format.h"
 
 namespace xllm {
 
@@ -47,7 +46,7 @@ void Options::validate(std::string_view model_type) const {
          !SpeculativeConfig::is_block_diffusion_algorithm(algorithm)))
       << algorithm << " speculative decoding requires --draft_model.";
 
-  if (is_native_kv_cache_format(kv_cache_dtype())) {
+  if (kv_cache_dtype() == "fp8_e4m3") {
 #if defined(USE_CUDA)
     CHECK(ModelConfig::is_python_model_impl(
         ModelConfig::get_instance().model_impl()))
