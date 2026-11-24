@@ -1550,7 +1550,7 @@ def test_npu_shared_gdn_matches_dense_state_across_reordered_pages(width: int, p
         num_accepted_tokens=accepted,
         num_accepted_tokens_host_values=(1, 1),
         q_seq_lens_host=torch.tensor(lengths, dtype=torch.int32),
-        is_target_verify=True,
+        is_target_verify=width != 1,
         max_query_len=width,
         is_prefill=False,
         is_chunked_prefill=width != 1,

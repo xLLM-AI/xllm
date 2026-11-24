@@ -926,6 +926,10 @@ void WorkerImpl::prepare_dummy_input(Input& input) {
   }
 }
 
+// Inline worker hooks call these specializations from other translation units.
+template void WorkerImpl::prepare_dummy_input(LlmForwardInput& input);
+template void WorkerImpl::prepare_dummy_input(VlmForwardInput& input);
+
 std::shared_ptr<const JsonObjectGrammar> WorkerImpl::ensure_json_object_grammar(
     bool reasoning_enabled) {
   CHECK(tokenizer_ != nullptr)
