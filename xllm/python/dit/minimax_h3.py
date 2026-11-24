@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 
 from collections.abc import Callable, Mapping, Sequence
+from copy import copy
 from dataclasses import dataclass
+from functools import lru_cache
 from math import floor, sqrt
 from typing import Any
 
@@ -68,7 +70,9 @@ def _spatial_grid(size: int, patch: int, area_root: float, spatial_ratio: int) -
     return ((1 - side) / 2 + torch.arange(count, dtype=torch.float64) * (side / count)) * spatial_ratio * patch
 
 
-def _build_layout(tags: list[int], geometry: _VideoGeometry, audio_latents: int, device: torch.device) -> PackedLayout:
+def _build_layout(
+    tags: tuple[int, ...], geometry: _VideoGeometry, audio_latents: int, device: torch.device
+) -> PackedLayout:
     text_rows = len(tags)
     audio_rows = _AUDIO_CHANNELS * audio_latents
     area_root = sqrt(geometry.latent_height * geometry.latent_width)
@@ -91,13 +95,78 @@ def _build_layout(tags: list[int], geometry: _VideoGeometry, audio_latents: int,
 
     video_start = text_rows + audio_rows
     video_end = video_start + video_pos.shape[0]
+    audio_mask = torch.zeros(video_end, dtype=torch.long)
+    audio_mask[text_rows:video_start] = 1
     return PackedLayout(
         positions=torch.cat((text_pos, audio_pos, video_pos)).to(device=device, dtype=torch.float32),
-        tags=torch.tensor(tags + [2] * audio_rows + [0] * video_pos.shape[0], dtype=torch.long).to(device),
+        tags=torch.tensor(list(tags) + [2] * audio_rows + [0] * video_pos.shape[0], dtype=torch.long).to(device),
         video_indices=torch.arange(video_start, video_end, dtype=torch.long).to(device),
         audio_indices=torch.arange(text_rows, video_start, dtype=torch.long).to(device),
         text_indices=torch.arange(text_rows, dtype=torch.long).to(device),
+        timestep_indices=(
+            torch.zeros_like(audio_mask).to(device),
+            audio_mask.to(device),
+            (1 - audio_mask).to(device),
+        ),
     )
+
+
+def _prepare_noise(
+    geometry: _VideoGeometry, video_channels: int, audio_shape: tuple[int, int, int], seed: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Native H3 restarts the CPU generator for each modality with the same seed.
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    pin_memory = device.type == "npu"
+    video_noise = torch.randn(
+        (1, video_channels, geometry.latent_frames, geometry.latent_height, geometry.latent_width),
+        generator=generator,
+        dtype=torch.float32,
+        device="cpu",
+        pin_memory=pin_memory,
+    )
+    video = geometry.patchify(video_noise.to(device, non_blocking=pin_memory))
+    audio_noise = torch.randn(
+        audio_shape,
+        generator=generator.manual_seed(seed),
+        dtype=torch.float32,
+        device="cpu",
+        pin_memory=pin_memory,
+    )
+    return video, audio_noise.to(device, non_blocking=pin_memory)
+
+
+def _build_denoise_schedule(
+    steps: int, video_shift: float, audio_shift: float, device: torch.device
+) -> tuple[MiniMaxH3Scheduler, MiniMaxH3Scheduler, tuple[tuple[torch.Tensor, int], ...]]:
+    video_scheduler = MiniMaxH3Scheduler(shift=video_shift)
+    audio_scheduler = MiniMaxH3Scheduler(shift=audio_shift)
+    # Diffusers counts grid points, including the terminal sigma. Keep the
+    # ordering decisions on CPU until the complete schedule is ready.
+    for scheduler in (video_scheduler, audio_scheduler):
+        scheduler.set_timesteps(steps + 1, device="cpu")
+        scheduler.set_begin_index(0)
+    video_times = video_scheduler.timesteps
+    audio_times = audio_scheduler.timesteps
+    modes = tuple(
+        0 if video_time == audio_time else 1 if video_time < audio_time else 2
+        for video_time, audio_time in zip(video_times.tolist(), audio_times.tolist(), strict=True)
+    )
+    joint_times = torch.stack((video_times, audio_times), dim=-1).sort(dim=-1).values
+    schedule_tensors = (joint_times.flatten(), video_times, audio_times, video_scheduler.sigmas, audio_scheduler.sigmas)
+    # The values share a dtype. Send the full schedule in one host-to-device copy.
+    packed_schedule = torch.cat(schedule_tensors).to(device)
+    (
+        joint_times,
+        video_scheduler.timesteps,
+        audio_scheduler.timesteps,
+        video_scheduler.sigmas,
+        audio_scheduler.sigmas,
+    ) = packed_schedule.split([tensor.numel() for tensor in schedule_tensors])
+    step_layouts = tuple(
+        (times if mode else times[:1], mode)
+        for times, mode in zip(joint_times.view(-1, 2).unbind(), modes, strict=True)
+    )
+    return video_scheduler, audio_scheduler, step_layouts
 
 
 class MiniMaxH3Pipeline:
@@ -123,6 +192,9 @@ class MiniMaxH3Pipeline:
         self._sp = SequenceParallel(sp_rank, sp_size, sp_gather, sp_exchange)
         self._tiles = TileParallel(vae_rank, vae_size, vae_gather)
         self._scheduler_shifts = {"scheduler": 12.0, "audio_scheduler": 3.0}
+        self._packed_layout = lru_cache(maxsize=1)(_build_layout)
+        self._initial_noise = lru_cache(maxsize=1)(_prepare_noise)
+        self._denoise_schedule = lru_cache(maxsize=1)(_build_denoise_schedule)
 
     def checkpoint_components(self) -> tuple[ComponentLoad, ...]:
         return (
@@ -142,6 +214,13 @@ class MiniMaxH3Pipeline:
             self._audio_geometry = load_audio_geometry(path)
             if self._is_driver:
                 self._audio_decoder = load_audio_decoder(path, shards, self._device)
+                config = self._audio_decoder.config
+                self._audio_mean = torch.tensor(config.latents_mean, dtype=torch.float32, device=self._device).view(
+                    1, -1, 1
+                )
+                self._audio_std = torch.tensor(config.latents_std, dtype=torch.float32, device=self._device).view(
+                    1, -1, 1
+                )
         elif name in self._scheduler_shifts:
             config = MiniMaxH3Scheduler.load_config(path)
             self._scheduler_shifts[name] = float(config.get("shift", self._scheduler_shifts[name]))
@@ -205,23 +284,10 @@ class MiniMaxH3Pipeline:
         audio_latents = floor(duration * (sampling_rate // self._audio_geometry.hop_length) + 0.5)
         video_config = self._denoiser.model.config
 
-        # Native H3 restarts the CPU generator for each modality with the same seed.
-        generator = torch.Generator(device="cpu").manual_seed(seed)
-        video = torch.randn(
-            (1, video_config.in_channels, geometry.latent_frames, geometry.latent_height, geometry.latent_width),
-            generator=generator,
-            dtype=torch.float32,
-            device="cpu",
-        ).to(self._device)
-        video = geometry.patchify(video)
-        audio = torch.randn(
-            (1, _AUDIO_CHANNELS * audio_latents, video_config.audio_in_channels),
-            generator=generator.manual_seed(seed),
-            dtype=torch.float32,
-            device="cpu",
-        ).to(self._device)
-
-        layout = _build_layout(prompt_tags, geometry, audio_latents, self._device)
+        audio_shape = (1, _AUDIO_CHANNELS * audio_latents, video_config.audio_in_channels)
+        # The denoiser reads the initial noise and the scheduler returns new tensors.
+        video, audio = self._initial_noise(geometry, video_config.in_channels, audio_shape, seed, self._device)
+        layout = self._packed_layout(tuple(prompt_tags), geometry, audio_latents, self._device)
         conditioning = self._denoiser.prepare_conditioning(prompt_embed, layout)
         video, audio = self._denoise(video, audio, conditioning, steps)
 
@@ -229,12 +295,11 @@ class MiniMaxH3Pipeline:
         if not self._is_driver:
             return None
         audio = audio.reshape(_AUDIO_CHANNELS, audio_latents, -1).transpose(1, 2)
-        audio_config = self._audio_decoder.config
-        mean = audio.new_tensor(audio_config.latents_mean).view(1, -1, 1)
-        std = audio.new_tensor(audio_config.latents_std).view(1, -1, 1)
-        waveform = self._audio_decoder.decode(audio * std + mean, return_dict=False)[0]
+        waveform = self._audio_decoder.decode(audio * self._audio_std + self._audio_mean, return_dict=False)[0]
         waveform = waveform.transpose(0, 1)[..., : floor(duration * sampling_rate + 0.5)].contiguous()
-        return frames_out, waveform
+        # The VAE clamps pixels to [0, 1]. Match the MP4 encoder's RGB8 truncation.
+        video_bytes = frames_out.mul_(255.0).to(torch.uint8)
+        return video_bytes, waveform
 
     def _denoise(
         self,
@@ -243,28 +308,16 @@ class MiniMaxH3Pipeline:
         conditioning: PackedConditioning,
         steps: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        video_scheduler = MiniMaxH3Scheduler(shift=self._scheduler_shifts["scheduler"])
-        audio_scheduler = MiniMaxH3Scheduler(shift=self._scheduler_shifts["audio_scheduler"])
-        # Diffusers counts grid points, including the terminal sigma.
-        video_scheduler.set_timesteps(steps + 1, device=self._device)
-        audio_scheduler.set_timesteps(steps + 1, device=self._device)
-        video_scheduler.set_begin_index(0)
-        audio_scheduler.set_begin_index(0)
-        layout = conditioning.layout
-        audio_mask = (layout.tags == 2).long()
-        zero_indices = torch.zeros_like(layout.tags)
-        video_times = video_scheduler.timesteps.cpu().tolist()
-        audio_times = audio_scheduler.timesteps.cpu().tolist()
-        for step, (video_time, audio_time) in enumerate(zip(video_times, audio_times, strict=True)):
+        video_template, audio_template, step_layouts = self._denoise_schedule(
+            steps, self._scheduler_shifts["scheduler"], self._scheduler_shifts["audio_scheduler"], self._device
+        )
+        # Schedule tensors are read-only. Each request advances its own cursor.
+        video_scheduler, audio_scheduler = copy(video_template), copy(audio_template)
+        timestep_indices = conditioning.layout.timestep_indices
+        for step, (times, mode) in enumerate(step_layouts):
             video_t = video_scheduler.timesteps[step]
             audio_t = audio_scheduler.timesteps[step]
-            if video_time == audio_time:
-                times, indices = video_t.view(1), zero_indices
-            elif video_time < audio_time:
-                times, indices = torch.stack((video_t, audio_t)), audio_mask
-            else:
-                times, indices = torch.stack((audio_t, video_t)), 1 - audio_mask
-            video_pred, audio_pred = self._denoiser(video, audio, times, indices, conditioning)
+            video_pred, audio_pred = self._denoiser(video, audio, times, timestep_indices[mode], conditioning)
             video = video_scheduler.step(video_pred, video_t, video, return_dict=False)[0]
             audio = audio_scheduler.step(audio_pred, audio_t, audio, return_dict=False)[0]
         return video, audio

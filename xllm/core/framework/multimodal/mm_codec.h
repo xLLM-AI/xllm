@@ -75,8 +75,8 @@ class FFmpegVideoEncoder final {
   FFmpegVideoEncoder() = default;
   ~FFmpegVideoEncoder() = default;
 
-  // Encode video tensor [T, C, H, W] (float32, RGB, 0-1 range) with explicit
-  // container format ("mp4", "avi", etc.).
+  // Encode a CPU [T, C, H, W] RGB tensor with an explicit container format.
+  // Float32 pixels are in [0, 1]. Uint8 pixels are in [0, 255].
   bool encode(const torch::Tensor& video,
               double fps,
               const std::string& format,

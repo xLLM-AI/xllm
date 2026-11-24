@@ -25,6 +25,8 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
 from torch import nn
 from torch.nn import functional as F
 
+_WEIGHT_TRANSFER_BATCH_BYTES = 256 * 1024**2
+
 
 class StateDictShard(Protocol):
     def get_tensor(self, name: str) -> torch.Tensor: ...
@@ -96,6 +98,8 @@ def load_component_weights(
     dtype_for: Callable[[str], torch.dtype],
 ) -> None:
     missing = set(model.state_dict())
+    pending_transfers: list[torch.Tensor] = []
+    pending_bytes = 0
     for shard in shards:
         for name in shard.keys():
             if name not in missing:
@@ -111,11 +115,26 @@ def load_component_weights(
             if not value.is_floating_point() and target.is_floating_point():
                 raise ValueError(f"H3 weight {name} must be a dense floating point tensor")
             dtype = dtype_for(name) if value.is_floating_point() else target.dtype
-            value = value.to(device=device, dtype=dtype, memory_format=torch.contiguous_format)
+            if device.type == "npu" and value.device.type == "cpu":
+                # Pack the local shard on the host and enqueue the transfer.
+                # Keep the pinned staging buffer alive until its batch completes.
+                staging = torch.empty(value.shape, dtype=dtype, device="cpu", pin_memory=True)
+                staging.copy_(value)
+                value = staging.to(device=device, non_blocking=True)
+                pending_transfers.append(staging)
+                pending_bytes += staging.nbytes
+                if pending_bytes >= _WEIGHT_TRANSFER_BATCH_BYTES:
+                    torch.npu.current_stream(device).synchronize()
+                    pending_transfers.clear()
+                    pending_bytes = 0
+            else:
+                value = value.to(device=device, dtype=dtype, memory_format=torch.contiguous_format)
             if isinstance(target, nn.Parameter):
                 value = nn.Parameter(value, requires_grad=False)
             setattr(module, key, value)
             missing.remove(name)
+    if pending_transfers:
+        torch.npu.current_stream(device).synchronize()
     if missing:
         raise ValueError(f"Missing H3 weights in {type(model).__name__}: {', '.join(sorted(missing)[:8])}")
     model.eval()
@@ -128,6 +147,7 @@ class PackedLayout:
     video_indices: torch.Tensor
     audio_indices: torch.Tensor
     text_indices: torch.Tensor
+    timestep_indices: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 @dataclass(frozen=True)

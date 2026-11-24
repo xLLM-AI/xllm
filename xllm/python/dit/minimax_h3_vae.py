@@ -108,8 +108,8 @@ def load_audio_decoder(
     path: str, shards: Sequence[StateDictShard], device: torch.device
 ) -> AutoencoderKLMiniMaxH3Audio:
     config = AutoencoderKLMiniMaxH3Audio.load_config(path)
-    # The decoder's weight-norm hooks and anti-aliasing filters are initialized on CPU.
-    model = AutoencoderKLMiniMaxH3Audio.from_config(config)
+    with torch.device("meta"):
+        model = AutoencoderKLMiniMaxH3Audio.from_config(config)
     del model.encoder, model.pre_block, model.mean_proj, model.logs_proj
     load_component_weights(model, shards, device, _fp32)
     return model
