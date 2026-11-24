@@ -250,7 +250,7 @@ sys.meta_path.insert(0, BlockHost())
 import torch
 import torch_npu
 from xllm_kernel import initialize
-from xllm_kernel.ops import matmul_ein_sum, matmul_ein_sum_out
+from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out
 plans = initialize(device='npu', operations=('matmul_ein_sum', 'matmul_ein_sum_out'))
 assert all(plan.spec.binding == 'atb' for plan in plans.values())
 x = torch.randn(3, 4, 128, dtype=torch.bfloat16, device='npu')

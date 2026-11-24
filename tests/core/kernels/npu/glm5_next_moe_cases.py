@@ -34,7 +34,7 @@ _MOE_ATOL = 0.1
 
 
 def _require_real_binding() -> ModuleType:
-    from xllm_kernel.ops import dequant_swiglu_quant
+    from xllm_kernel.ops.moe import dequant_swiglu_quant
 
     from xllm.python import kernels
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-from xllm_kernel.ops import reshape_paged_cache
+from xllm_kernel.ops.kv_cache import reshape_paged_cache
 
 from xllm.python.layers import Attention, GatedMLP, RMSNorm, RotaryEmbedding, RowParallelLinear
 from xllm.python.layers.rotary_embedding import apply_rotary_half, gather_half_rope_cos_sin

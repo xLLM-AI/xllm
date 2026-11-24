@@ -12,7 +12,7 @@ import pytest
 @pytest.mark.parametrize("offset", [0, 1])
 def test_nondefault_stream_and_changed_input_graph_replays(strided: bool, offset: int) -> None:
     import torch
-    from xllm_kernel.ops import l2_norm
+    from xllm_kernel.ops.normalization import l2_norm
 
     stream = torch.npu.Stream()
     storage = torch.randn(17 * 192 * (2 if strided else 1) + offset, dtype=torch.bfloat16, device="npu")
@@ -39,7 +39,7 @@ def test_nondefault_stream_and_changed_input_graph_replays(strided: bool, offset
 @pytest.mark.parametrize("strided", [False, True])
 def test_numeric_shape_alias_and_mutation(shape: tuple[int, ...], eps: float, strided: bool) -> None:
     import torch
-    from xllm_kernel.ops import l2_norm
+    from xllm_kernel.ops.normalization import l2_norm
 
     torch.manual_seed(42)
     storage = torch.randn((*shape[:-1], shape[-1] * 2 if strided else shape[-1]), dtype=torch.bfloat16, device="npu")
@@ -72,7 +72,7 @@ sys.meta_path.insert(0, BlockHostImports())
 import torch
 import torch_npu
 from xllm_kernel import initialize
-from xllm_kernel.ops import l2_norm
+from xllm_kernel.ops.normalization import l2_norm
 
 plan = initialize(device='npu', operations=('l2_norm',))['l2_norm']
 assert plan.spec.binding == 'python'

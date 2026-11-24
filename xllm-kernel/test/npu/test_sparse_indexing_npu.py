@@ -3,7 +3,11 @@
 
 import pytest
 import torch
-from xllm_kernel.ops import quant_lightning_indexer, quant_lightning_indexer_metadata, scatter_nd_update
+from xllm_kernel.ops.attention.dsa.indexer import (
+    quant_lightning_indexer,
+    quant_lightning_indexer_metadata,
+    scatter_nd_update,
+)
 
 
 @pytest.mark.parametrize("graph_mode", [False, True], ids=["eager", "graph"])

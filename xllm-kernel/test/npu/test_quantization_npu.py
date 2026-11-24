@@ -2,7 +2,7 @@
 """Check static and dynamic NPU quantization storage and scale semantics."""
 
 import torch
-from xllm_kernel.ops import dynamic_quant, quantize_per_tensor
+from xllm_kernel.ops.quantization import dynamic_quant, quantize_per_tensor
 
 
 def test_static_qint8_quantization_uses_scale_and_zero_point() -> None:

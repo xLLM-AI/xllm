@@ -3,7 +3,7 @@
 
 import pytest
 import torch
-from xllm_kernel.ops import inplace_partial_rotary_mul
+from xllm_kernel.ops.positional_encoding import inplace_partial_rotary_mul
 
 
 def _reference(value: torch.Tensor, cosine: torch.Tensor, sine: torch.Tensor, start: int, end: int) -> torch.Tensor:

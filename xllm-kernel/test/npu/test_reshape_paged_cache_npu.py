@@ -3,7 +3,7 @@
 
 import pytest
 import torch
-from xllm_kernel.ops import reshape_paged_cache
+from xllm_kernel.ops.kv_cache import reshape_paged_cache
 from xllm_kernel.platform import current_platform
 
 

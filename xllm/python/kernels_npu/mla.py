@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import torch
 import torch_npu
-from xllm_kernel.ops import matmul_ein_sum, mla_preprocess_v2, reshape_paged_cache
-from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2
+from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2, mla_preprocess_v2
 from xllm_kernel.ops.attention.mla.npu.weights import prepare_mla_preprocess_v2_q_b, prepare_mla_preprocess_v2_qkv
+from xllm_kernel.ops.gemm import matmul_ein_sum
+from xllm_kernel.ops.kv_cache import reshape_paged_cache
 
 from xllm.python.model_executor.forward_context import get_forward_context_or_none
 

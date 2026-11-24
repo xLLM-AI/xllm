@@ -3,7 +3,7 @@
 
 import pytest
 import torch
-from xllm_kernel.ops import hc_post, hc_pre
+from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
 
 _HC_MULT = 4
 _SINKHORN_ITERS = 6

@@ -74,7 +74,7 @@ def main() -> None:
 
     torch.npu.set_device(args.device)
     from xllm_kernel import initialize
-    from xllm_kernel.ops import matmul_ein_sum
+    from xllm_kernel.ops.gemm import matmul_ein_sum
 
     if args.implementation == "atb":
         initialize(device="npu", operations=("matmul_ein_sum",))

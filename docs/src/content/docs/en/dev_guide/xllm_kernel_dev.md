@@ -201,8 +201,8 @@ dependencies. To add an operator:
 
    Groups with several operators export every declaration in that tuple, as
    `ops/normalization/__init__.py` does for its normalization operators.
-2. Add the group module to `catalog._BUILTINS` and export its public API
-   from `ops/__init__.py`.
+2. Add the group module to `catalog._BUILTINS` and import its public API
+   directly from the group module at the call site.
 3. Have the public API obtain its fixed binding through `OPERATION.get_prepared()`;
    include the operation name, rather than the group name, in `operations` during
    model initialization.
@@ -213,7 +213,7 @@ dependencies. To add an operator:
 Example public API call after initialization:
 
 ```python
-from xllm_kernel.ops import rms_norm
+from xllm_kernel.ops.normalization import rms_norm
 
 output = rms_norm(input, weight, eps)
 ```

@@ -25,7 +25,8 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
-from xllm_kernel.ops import get_fused_attention, reshape_paged_cache
+from xllm_kernel.ops.attention.fia import get_fused_attention
+from xllm_kernel.ops.kv_cache import reshape_paged_cache
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.backend import (

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
-from xllm_kernel.ops import reshape_paged_cache
+from xllm_kernel.ops.kv_cache import reshape_paged_cache
 
 from xllm.python.attention.backend import (
     AttentionMetadata,

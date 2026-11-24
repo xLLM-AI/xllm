@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import torch
 import triton.runtime.jit
-from xllm_kernel.ops import (
+from xllm_kernel.ops.attention.gdn import (
     fused_qkvzba_split_reshape_cat,
     fused_recurrent_gated_delta_rule,
     fused_sigmoid_gating_delta_rule_update,
@@ -330,7 +330,7 @@ sys.meta_path.insert(0, BlockHost())
 import torch
 import torch_npu
 from xllm_kernel import initialize
-from xllm_kernel.ops import fused_qkvzba_split_reshape_cat, fused_recurrent_gated_delta_rule
+from xllm_kernel.ops.attention.gdn import fused_qkvzba_split_reshape_cat, fused_recurrent_gated_delta_rule
 
 operations = ('fused_recurrent_gated_delta_rule', 'fused_sigmoid_gating_delta_rule_update', 'fused_qkvzba_split_reshape_cat')
 plans = initialize(device='npu', operations=operations)

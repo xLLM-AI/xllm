@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import torch
 import torch_npu
-from xllm_kernel.ops import (
+from xllm_kernel.ops.normalization import (
     fused_add_gemma_rms_norm,
     fused_add_rms_norm,
     gemma_rms_norm,

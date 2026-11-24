@@ -29,7 +29,7 @@ from typing import Any, cast
 
 import torch
 import torch.nn as nn
-from xllm_kernel.ops import rms_norm
+from xllm_kernel.ops.normalization import rms_norm
 
 from xllm.python import kernels
 from xllm.python.layers import (

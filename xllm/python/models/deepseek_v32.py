@@ -29,7 +29,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from xllm_kernel.ops import matmul_ein_sum, matmul_ein_sum_out
+from xllm_kernel.ops.gemm import matmul_ein_sum, matmul_ein_sum_out
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.backend import (

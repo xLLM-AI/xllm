@@ -6,7 +6,7 @@ from collections.abc import Iterator
 import pytest
 import torch
 import torch_npu
-from xllm_kernel.ops import quant_matmul, quant_matmul_out
+from xllm_kernel.ops.gemm import quant_matmul, quant_matmul_out
 
 
 @pytest.fixture

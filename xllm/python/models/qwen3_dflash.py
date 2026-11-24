@@ -23,7 +23,7 @@ from typing import ClassVar
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from xllm_kernel.ops import reshape_paged_cache
+from xllm_kernel.ops.kv_cache import reshape_paged_cache
 
 from xllm.python import distributed
 from xllm.python.layers import RMSNorm

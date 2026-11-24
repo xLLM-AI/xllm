@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 import torch
 from xllm_kernel import initialize, prepare_rms_norm
-from xllm_kernel.ops import rms_norm
+from xllm_kernel.ops.normalization import rms_norm
 
 from xllm.python import initialize_runtime, kernels
 from xllm.python.layers.layernorm import RMSNorm
@@ -110,7 +110,7 @@ sys.meta_path.insert(0, BlockHostImports())
 import torch
 import torch_npu
 from xllm_kernel import initialize
-from xllm_kernel.ops import rms_norm
+from xllm_kernel.ops.normalization import rms_norm
 plan = initialize(device='npu', operations=('rms_norm',))
 assert not hasattr(torch.ops.xllm_kernel, 'rms_norm')
 assert not hasattr(torch.ops.xllm_ops, 'rms_norm')
