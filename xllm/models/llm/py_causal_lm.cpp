@@ -39,7 +39,6 @@ limitations under the License.
 #include "models/py_model_helper.h"
 
 #if defined(USE_NPU)
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/parallel_state/mega_moe_comm_resource.h"
 #include "core/kernels/npu/npu_ops_api.h"
 #include "platform/npu/npu_layer_synchronizer.h"
@@ -179,17 +178,17 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
     comm_spec.hccl_comm = moe_ep_group_->hccl_comm();
     comm_spec.ep_world_size = moe_ep_group_->world_size();
     comm_spec.device_index = device_.index();
-    const auto& scheduler_config = SchedulerConfig::get_instance();
+    const ModelBatchLimits& batch_limits = context.batch_limits();
     if (enable_qwen3_5_mega_moe) {
       comm_spec.max_num_tokens_per_rank =
           detail::python_qwen3_5_mega_moe_max_num_tokens_per_rank(
-              static_cast<int64_t>(scheduler_config.max_tokens_per_batch()),
-              static_cast<int64_t>(scheduler_config.max_seqs_per_batch()),
+              static_cast<int64_t>(batch_limits.max_tokens_per_batch),
+              static_cast<int64_t>(batch_limits.max_seqs_per_batch),
               static_cast<int64_t>(context.num_speculative_tokens()));
     } else {
       comm_spec.max_num_tokens_per_rank =
           detail::python_mega_moe_max_num_tokens_per_rank(
-              static_cast<int64_t>(scheduler_config.max_seqs_per_batch()),
+              static_cast<int64_t>(batch_limits.max_seqs_per_batch),
               static_cast<int64_t>(context.num_speculative_tokens()),
               dp_size_);
     }

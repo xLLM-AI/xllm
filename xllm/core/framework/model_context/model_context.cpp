@@ -26,12 +26,14 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
                            const QuantArgs& quant_args,
                            const torch::TensorOptions& tensor_options,
                            int32_t num_speculative_tokens,
-                           bool enable_chunked_prefill)
-    : parallel_args_(input_parallel_args),
-      model_args_(model_args),
+                           bool enable_chunked_prefill,
+                           ModelBatchLimits batch_limits)
+    : model_args_(model_args),
       num_speculative_tokens_(num_speculative_tokens),
       enable_chunked_prefill_(enable_chunked_prefill),
+      batch_limits_(batch_limits),
       quant_args_(quant_args),
+      parallel_args_(input_parallel_args),
       tensor_options_(tensor_options),
       stream_registry_(
           std::make_shared<ModelStreamRegistry>(tensor_options.device())) {

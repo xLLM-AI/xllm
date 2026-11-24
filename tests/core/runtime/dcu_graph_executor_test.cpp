@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/batch/batch_forward_type.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
@@ -36,6 +37,7 @@ limitations under the License.
 #include "core/platform/device.h"
 #include "core/runtime/dcu_graph_executor_impl.h"
 #include "core/runtime/options.h"
+#include "core/util/scope_guard.h"
 
 namespace xllm {
 namespace {
@@ -185,6 +187,7 @@ runtime::Options MakeRuntimeOptions(int32_t max_seqs_per_batch = 8) {
   runtime::Options options;
 
   options.block_size(1);
+  options.max_tokens_per_batch(128);
   options.max_seqs_per_batch(max_seqs_per_batch);
 
   return options;
@@ -309,6 +312,33 @@ bool AllCloseBf16(const torch::Tensor& lhs,
                   double atol = 1e-2) {
   return torch::allclose(
       lhs.to(torch::kFloat32), rhs.to(torch::kFloat32), rtol, atol);
+}
+
+TEST(DcuGraphExecutorTest, PersistentBuffersUseRuntimeTokenCapacity) {
+  if (!IsDcuAvailable()) {
+    GTEST_SKIP() << "DCU/HIP is not available at runtime.";
+  }
+  SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  const int32_t previous_tokens = scheduler_config.max_tokens_per_batch();
+  ScopeGuard restore_config(
+      [&] { scheduler_config.max_tokens_per_batch(previous_tokens); });
+  scheduler_config.max_tokens_per_batch(1);
+
+  const torch::Device device = InitXllmDcuDeviceForTest(/*device_index=*/0);
+  runtime::Options options = MakeRuntimeOptions(/*max_seqs_per_batch=*/3);
+  options.max_tokens_per_batch(7);
+  runtime::dcu::DcuGraphPersistentParam buffers(
+      MakeFakeModelArgs(), device, options);
+  options.max_tokens_per_batch(99);
+  scheduler_config.max_tokens_per_batch(2);
+  EXPECT_EQ(buffers.persistent_tokens(/*n_tokens=*/0).size(0), 7);
+  EXPECT_EQ(buffers.persistent_positions(/*n_tokens=*/0).size(0), 7);
+
+  const torch::Tensor hidden = torch::ones(
+      {7, 4}, torch::TensorOptions().dtype(torch::kBFloat16).device(device));
+  buffers.set_aux_hidden_states(hidden);
+  EXPECT_EQ(buffers.aux_hidden_states(/*n_tokens=*/0).size(0), 7);
+  EXPECT_TRUE(torch::equal(buffers.aux_hidden_states(/*n_tokens=*/7), hidden));
 }
 
 TEST(DcuGraphExecutorTest, DecodeCaptureAndReplay) {

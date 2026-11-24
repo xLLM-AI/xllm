@@ -34,7 +34,6 @@ limitations under the License.
 #include "core/common/flash_comm1_context.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/framework/state_dict/utils.h"
@@ -530,10 +529,9 @@ class DeepseekV4ModelImpl
         parallel_args_(context.get_parallel_args()),
         flash_comm1_options_(context.get_flash_comm1_options()),
         num_speculative_tokens_(context.num_speculative_tokens()),
-        aux_capture_(
-            context.get_model_args(),
-            context.get_tensor_options(),
-            ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
+        aux_capture_(context.get_model_args(),
+                     context.get_tensor_options(),
+                     context.batch_limits().max_tokens_per_batch) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();

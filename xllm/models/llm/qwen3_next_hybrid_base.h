@@ -25,7 +25,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/flash_comm1_context.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
@@ -71,7 +70,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
         flash_comm1_options_(context.get_flash_comm1_options()),
         aux_capture_(context.get_model_args(),
                      context.get_tensor_options(),
-                     SchedulerConfig::get_instance().max_tokens_per_batch()) {
+                     context.batch_limits().max_tokens_per_batch) {
     if (model_args_.n_routed_experts() > 0) {
       flash_comm1_options_.enable_flashcomm1 = false;
       flash_comm1_options_.enable_mmrs_fusion = false;

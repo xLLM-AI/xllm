@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -27,6 +28,13 @@ limitations under the License.
 namespace xllm {
 
 class ModelStreamRegistry;
+
+// Full batch capacities for model buffers and communication resources. Worker
+// startup supplies effective limits; standalone contexts keep legacy defaults.
+struct ModelBatchLimits {
+  int32_t max_tokens_per_batch = 10240;
+  int32_t max_seqs_per_batch = 200;
+};
 
 // Internal optimization configuration.
 // This struct holds all optimization techniques that are automatically
@@ -55,7 +63,8 @@ class ModelContext {
                const QuantArgs& quant_args,
                const torch::TensorOptions& tensor_options,
                int32_t num_speculative_tokens = 0,
-               bool enable_chunked_prefill = true);
+               bool enable_chunked_prefill = true,
+               ModelBatchLimits batch_limits = {});
 
   const ModelArgs& get_model_args() const { return model_args_; }
 
@@ -86,6 +95,8 @@ class ModelContext {
   int32_t num_speculative_tokens() const { return num_speculative_tokens_; }
 
   bool enable_chunked_prefill() const { return enable_chunked_prefill_; }
+
+  const ModelBatchLimits& batch_limits() const { return batch_limits_; }
 
   ModelContext with_parallel_args(const ParallelArgs& parallel_args) const;
 
@@ -120,6 +131,7 @@ class ModelContext {
   ModelArgs model_args_;
   int32_t num_speculative_tokens_ = 0;
   bool enable_chunked_prefill_ = true;
+  ModelBatchLimits batch_limits_;
   QuantArgs quant_args_;
   ParallelArgs parallel_args_;
   torch::TensorOptions tensor_options_;
