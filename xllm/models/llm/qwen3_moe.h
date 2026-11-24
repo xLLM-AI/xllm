@@ -19,7 +19,6 @@ limitations under the License.
 
 #include "core/framework/model/model_output.h"
 #if defined(USE_NPU)
-#include "core/common/global_flags.h"
 #include "core/layers/common/attention_mask.h"
 #endif
 #include "core/layers/qwen3_moe_decoder_layer.h"
@@ -30,8 +29,8 @@ namespace xllm {
 class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
  public:
   Qwen3MoeModelImpl(const ModelContext& context)
-      : LlmModelImplBase<layer::Qwen3MoeDecoderLayer>(
-            context.get_model_args()) {
+      : LlmModelImplBase<layer::Qwen3MoeDecoderLayer>(context.get_model_args()),
+        enable_chunked_prefill_(context.enable_chunked_prefill()) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     layers_.reserve(model_args.n_layers());
@@ -48,9 +47,7 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
         register_module("embed_tokens", layer::WordEmbedding(context));
     norm_ = register_module("norm", layer::RMSNorm(context));
 #if defined(USE_NPU)
-    int32_t mask_value =
-        ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() ? -9984
-                                                                         : 1;
+    const int32_t mask_value = enable_chunked_prefill_ ? -9984 : 1;
     attn_mask_ = layer::AttentionMask(
         options.device(), options.dtype().toScalarType(), mask_value);
 #endif
@@ -222,7 +219,7 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
 #if defined(USE_NPU)
     max_seq_len_ = std::max(params.meta.kv_max_seq_len, max_seq_len_);
     torch::Tensor attn_mask;
-    if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+    if (enable_chunked_prefill_) {
       const int32_t max_kv_seq = params.meta.kv_max_seq_len;
       const int32_t num_sequences = params.meta.num_sequences;
       if (num_sequences > 0) {
@@ -257,6 +254,7 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
 #endif
   }
 
+  const bool enable_chunked_prefill_;
 #if defined(USE_NPU)
   layer::AttentionMask attn_mask_;
 #endif

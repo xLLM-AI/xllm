@@ -54,7 +54,8 @@ class ModelContext {
                const ModelArgs& model_args,
                const QuantArgs& quant_args,
                const torch::TensorOptions& tensor_options,
-               int32_t num_speculative_tokens = 0);
+               int32_t num_speculative_tokens = 0,
+               bool enable_chunked_prefill = true);
 
   const ModelArgs& get_model_args() const { return model_args_; }
 
@@ -83,6 +84,8 @@ class ModelContext {
   }
 
   int32_t num_speculative_tokens() const { return num_speculative_tokens_; }
+
+  bool enable_chunked_prefill() const { return enable_chunked_prefill_; }
 
   ModelContext with_parallel_args(const ParallelArgs& parallel_args) const;
 
@@ -116,6 +119,7 @@ class ModelContext {
   std::string extension_impl_;
   ModelArgs model_args_;
   int32_t num_speculative_tokens_ = 0;
+  bool enable_chunked_prefill_ = true;
   QuantArgs quant_args_;
   ParallelArgs parallel_args_;
   torch::TensorOptions tensor_options_;

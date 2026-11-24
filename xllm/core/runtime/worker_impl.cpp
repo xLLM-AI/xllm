@@ -1427,8 +1427,12 @@ ModelContext WorkerImpl::load_model_config(ModelArgs args,
   }
   // create model context
   auto tensor_options = torch::dtype(dtype).device(device_);
-  ModelContext context(
-      parallel_args_, args, quant_args, tensor_options, num_speculative_tokens);
+  ModelContext context(parallel_args_,
+                       args,
+                       quant_args,
+                       tensor_options,
+                       num_speculative_tokens,
+                       options_.enable_chunked_prefill());
   context.set_model_impl(ModelConfig::get_instance().model_impl());
   context.set_extension_impl(options_.extension_impl());
   context.set_model_id(options_.model_id());
