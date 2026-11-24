@@ -4,6 +4,8 @@
 import pytest
 import torch
 from xllm_kernel.ops.attention.dsa.indexer import (
+    lightning_indexer,
+    lightning_indexer_out,
     quant_lightning_indexer,
     quant_lightning_indexer_metadata,
     scatter_nd_update,
@@ -103,3 +105,59 @@ def test_cache_scatter_updates_only_selected_rows(
                 expected[row, :width] = value
         assert cache.data_ptr() == address
         torch.testing.assert_close(backing.cpu(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("paged", [True, False], ids=["paged-indices", "packed-values"])
+@torch.inference_mode()
+def test_floating_point_indexer_out_replays_in_place(paged: bool) -> None:
+    device = torch.device("npu")
+    query = torch.ones((2, 64, 128), dtype=torch.bfloat16, device=device)
+    key = torch.empty((128, 1, 128), dtype=torch.bfloat16, device=device)
+    initial_keys = torch.arange(128)
+    key.copy_(initial_keys.view(128, 1, 1))
+    weights = torch.ones((2, 64), dtype=torch.bfloat16, device=device)
+    q_lengths = torch.tensor([2], dtype=torch.int32, device=device)
+    kv_lengths = torch.tensor([128], dtype=torch.int32, device=device)
+    table = torch.zeros((1, 1), dtype=torch.int32, device=device) if paged else None
+    out = torch.empty((2, 1, 2048), dtype=torch.int32, device=device)
+    values = torch.full(out.shape, -1.0, dtype=torch.bfloat16, device=device)
+    max_tokens = torch.iinfo(torch.int64).max
+    args = (
+        query,
+        key.unsqueeze(0) if paged else key,
+        weights,
+        q_lengths,
+        kv_lengths,
+        table,
+        "TND",
+        "PA_BSND" if paged else "TND",
+        2048,
+        3,
+        max_tokens,
+        max_tokens,
+        not paged,
+    )
+
+    assert lightning_indexer_out(*args, out, values) is out
+    torch.testing.assert_close(out, lightning_indexer(*args))
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        result = lightning_indexer_out(*args, out, values)
+    assert result is out
+
+    for shift, length in ((11, 96), (29, 112)):
+        values.fill_(-1)
+        live_keys = initial_keys.roll(shift)
+        key.copy_(live_keys.view(128, 1, 1))
+        if paged:
+            kv_lengths.fill_(length)
+        else:
+            length = key.shape[0]
+        graph.replay()
+        expected = live_keys[:length].argsort(descending=True)[:16].to(torch.int32)
+        torch.testing.assert_close(out[-1, 0, :16].cpu(), expected)
+        if paged:
+            assert values.eq(-1).all().item()
+        else:
+            assert values[-1, 0, :16].min().item() > 0

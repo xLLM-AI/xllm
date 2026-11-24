@@ -36,8 +36,7 @@ FIA call with per-segment ``actual_seq_lengths`` and ``sparse_mode=3``
 (right-aligned causal) masks every row exactly, with no custom mask.
 
 The zigzag index math (shard/restore/query/KV gather indices) is built by the
-``xllm_ops::build_cp_context`` C++ op and validated by its gtest
-(``cp_context_builder_test``). The shard/merge functions here stay plain torch
+``xllm_kernel::build_cp_context`` C++ op. The shard/merge functions here use torch
 index ops so ``merge(all_gather(shard(x))) == x`` holds by construction.
 """
 
@@ -48,6 +47,7 @@ from dataclasses import dataclass
 from operator import index
 
 import torch
+from xllm_kernel.ops.attention.cp import build_cp_context as _build_cp_indices
 
 from xllm.python import distributed
 
@@ -118,29 +118,11 @@ def build_cp_context(
 
     ``q_seq_lens`` and ``kv_seq_lens`` are per-request lengths in packed batch
     order. Their difference is the already-cached prefix for chunked prefill.
-    The index math runs in the ``xllm_ops::build_cp_context`` C++ op (host
+    The index math runs in the ``xllm_kernel::build_cp_context`` C++ op (host
     scalar loops are far cheaper there than in Python on the prefill critical
     path); this wrapper just packs the returned tensors into a ``CpContext``.
     Returns index tensors on ``device``.
     """
-    # Reject malformed host plans before the native builder can terminate a
-    # worker with CHECK, or any backend can enter a CP collective.
-    cp_size = index(cp_size)
-    cp_rank = index(cp_rank)
-    if cp_size <= 1:
-        raise ValueError("CP context cp_size must be greater than 1")
-    if not 0 <= cp_rank < cp_size:
-        raise ValueError(f"CP context cp_rank must be in [0, {cp_size}), got {cp_rank}")
-    if len(q_seq_lens) != len(kv_seq_lens):
-        raise ValueError("CP query and KV lengths must describe the same number of requests")
-    query_lengths = [index(length) for length in q_seq_lens]
-    kv_lengths = [index(length) for length in kv_seq_lens]
-    for request_id, (query_length, kv_length) in enumerate(zip(query_lengths, kv_lengths, strict=True)):
-        if query_length < 0:
-            raise ValueError(f"CP request {request_id}: query length must be nonnegative")
-        if kv_length < query_length:
-            raise ValueError(f"CP request {request_id}: KV length must be at least the query length")
-
     (
         shard_index,
         shard_gather_index,
@@ -153,17 +135,17 @@ def build_cp_context(
         segment_seq_indices,
         segment_kv_seq_lens,
         total_local,
-    ) = torch.ops.xllm_ops.build_cp_context(
-        query_lengths,
-        kv_lengths,
+    ) = _build_cp_indices(
+        q_seq_lens,
+        kv_seq_lens,
         cp_size,
         cp_rank,
         device,
     )
 
     return CpContext(
-        cp_size=cp_size,
-        cp_rank=cp_rank,
+        cp_size=index(cp_size),
+        cp_rank=index(cp_rank),
         total_local=total_local,
         shard_index=shard_index,
         shard_gather_index=shard_gather_index,
@@ -181,7 +163,7 @@ def build_cp_context(
             dtype=torch.int32,
             device=device,
         ),
-        has_prefix=any(kv != q for q, kv in zip(query_lengths, kv_lengths, strict=True)),
+        has_prefix=any(kv != q for q, kv in zip(q_seq_lens, kv_seq_lens, strict=True)),
     )
 
 

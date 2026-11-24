@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from xllm_kernel.ops.kv_cache import reshape_paged_cache
+from xllm_kernel.ops.kv_cache import reshape_paged_cache, shared_full_indices_out
 
 pytest.importorskip("torch_npu", reason="requires the real NPU backend")
 
@@ -243,9 +243,7 @@ def test_shared_full_index_fusion_refreshes_tables_and_slots(
     captured = None
 
     def _run() -> None:
-        torch.ops.xllm_ops.shared_full_indices_out(
-            table, slots, rows, page_size, padding_row, output_tables, output_slots
-        )
+        shared_full_indices_out(table, slots, rows, page_size, padding_row, output_tables, output_slots)
 
     for phase in range(3):
         base = (1 << 24) + 1 if page_size == 1 else (1 << 17) + 1
@@ -330,7 +328,7 @@ def test_shared_full_index_fusion_handles_independent_empty_outputs(batch: int, 
     slots = torch.tensor([0, 129, -1][:tokens], dtype=torch.int32, device=device)
     table_storage, output_tables = _guarded_shared_indices((2, batch, 3), device)
     slot_storage, output_slots = _guarded_shared_indices((2, tokens), device)
-    torch.ops.xllm_ops.shared_full_indices_out(table, slots, rows, 128, 10, output_tables, output_slots)
+    shared_full_indices_out(table, slots, rows, 128, 10, output_tables, output_slots)
     torch.npu.synchronize()
     expected_tables = torch.tensor([[[10, physical, -1]] * batch for physical in (6, 14)], dtype=torch.int32).view(
         2, batch, 3
@@ -370,7 +368,7 @@ def test_slab_full_mapping_size_dispatch_preserves_graph_updates(
     metadata = SimpleNamespace(slot_mapping=slots, has_kv_shard=False)
     backend._metadata = metadata
     context = ForwardContext(backend, device, metadata, backend._kv_caches, execution_state=AclGraphExecutionState({}))
-    native = torch.ops.xllm_ops.shared_full_indices_out
+    native = shared_full_indices_out
     fused_calls: list[int] = []
 
     def _fused(
@@ -385,7 +383,7 @@ def test_slab_full_mapping_size_dispatch_preserves_graph_updates(
         fused_calls.append(output_tables.numel() + output_slots.numel())
         native(block_table, slot_mapping, row_maps, page_size, padding_row, output_tables, output_slots)
 
-    monkeypatch.setattr(torch.ops.xllm_ops, "shared_full_indices_out", _fused)
+    monkeypatch.setattr("xllm.python.attention.npu_paged_attention.shared_full_indices_out", _fused)
     captured = None
     pointers = None
     with forward_context(context):

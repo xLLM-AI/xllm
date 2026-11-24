@@ -12,7 +12,7 @@ from xllm_kernel.registry import OpContract
 if TYPE_CHECKING:
     import torch
 
-OPERATIONS = tuple(
+ASCENDC_OPERATIONS = tuple(
     Operation(
         OpContract(name, 1, mutates, aliases, name),
         (
@@ -29,7 +29,28 @@ OPERATIONS = tuple(
         ("sparse_flash_attention_lse_out", ("attention_output",), True),
     )
 )
-_SPARSE_FLASH_ATTENTION_LSE, _SPARSE_FLASH_ATTENTION_LSE_OUT = OPERATIONS
+_SPARSE_FLASH_ATTENTION_LSE, _SPARSE_FLASH_ATTENTION_LSE_OUT = ASCENDC_OPERATIONS
+
+SFA_DCP_REMAP_TOPK = 2048
+SFA_DCP_REMAP_MAX_TOKENS = 256
+SFA_DCP_REMAP_OUT_CONTRACT = OpContract("sfa_dcp_remap_out", 1, ("out", "idx_scratch"), True, "stable_sparse_remap")
+SFA_DCP_REMAP_OUT_OPERATION = Operation(
+    SFA_DCP_REMAP_OUT_CONTRACT,
+    (
+        BackendModule(
+            module="xllm_kernel.ops.attention.dsa.tilelang",
+            platform=PlatformEnum.NPU,
+            requires=("torch_npu", "tilelang", "triton"),
+            implementations=("npu.tilelang.sfa_dcp_remap_out",),
+        ),
+    ),
+)
+OPERATIONS = (*ASCENDC_OPERATIONS, SFA_DCP_REMAP_OUT_OPERATION)
+
+
+def has_sfa_dcp_remap_out() -> bool:
+    """Return whether the worker prepared the fused DCP index remap."""
+    return SFA_DCP_REMAP_OUT_OPERATION.prepared is not None
 
 
 def sparse_flash_attention_lse(
@@ -113,4 +134,18 @@ def sparse_flash_attention_lse_out(
         2,
         False,
         output,
+    )
+
+
+def sfa_dcp_remap_out(
+    topk_indices: torch.Tensor,
+    physical_block_size: int,
+    shard_size: int,
+    shard_rank: int,
+    out: torch.Tensor,
+    idx_scratch: torch.Tensor,
+) -> torch.Tensor:
+    """Compact this rank's local offsets in index order and pad the tail with -1."""
+    return SFA_DCP_REMAP_OUT_OPERATION.get_prepared().function(
+        topk_indices, physical_block_size, shard_size, shard_rank, out, idx_scratch
     )

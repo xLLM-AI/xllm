@@ -269,15 +269,21 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
 ) -> None:
     import importlib.abc
 
+    blocked_imports = {"torch_npu", "xllm_kernel._npu_binding", "xllm_kernel.ops._tilelang"}
+
     class _BlockNpuImports(importlib.abc.MetaPathFinder):
         def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> None:
-            if fullname == "torch_npu" or fullname.startswith("torch_npu."):
-                raise AssertionError(f"unexpected NPU import on {platform.value}: {fullname}")
+            if any(fullname == name or fullname.startswith(f"{name}.") for name in blocked_imports):
+                raise AssertionError(f"unexpected backend import on {platform.value}: {fullname}")
 
     registry = KernelRegistry()
+    compile_kernel = Mock(side_effect=AssertionError(f"unexpected TileLang compilation on {platform.value}"))
     monkeypatch.setattr(KernelRegistry, "_instance", registry)
     monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: platform))
-    monkeypatch.delitem(sys.modules, "torch_npu", raising=False)
+    monkeypatch.setitem(sys.modules, "tilelang", SimpleNamespace(compile=compile_kernel))
+    for name in blocked_imports:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.delattr(xllm_kernel, "_npu_binding", raising=False)
     monkeypatch.setattr(sys, "meta_path", [_BlockNpuImports(), *sys.meta_path])
     modules = (
         "xllm_kernel.ops.activation.torch",
@@ -286,15 +292,20 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
         "xllm_kernel.ops.attention.gdn.triton",
         "xllm_kernel.ops.attention.kda.triton",
         "xllm_kernel.ops.gemm.atb",
+        "xllm_kernel.ops.attention.dsa.tilelang",
+        "xllm_kernel.ops.kv_cache.decode_metadata",
+        "xllm_kernel.ops.kv_cache.tilelang",
     )
     for name in modules:
         monkeypatch.delitem(sys.modules, name, raising=False)
     try:
         for name in modules:
             importlib.import_module(name)
+        compile_kernel.assert_not_called()
         assert not registry.specs()
-        assert "torch_npu" not in sys.modules
+        assert blocked_imports.isdisjoint(sys.modules)
     finally:
         for name in modules:
             sys.modules.pop(name, None)
-            vars(importlib.import_module(name.rsplit(".", 1)[0])).pop("torch", None)
+            parent, attr = name.rsplit(".", 1)
+            vars(importlib.import_module(parent)).pop(attr, None)

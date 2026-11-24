@@ -4,14 +4,14 @@
 import torch
 
 from xllm_kernel import _ascendc_opp  # noqa: F401
-from xllm_kernel.ops.attention.dsa import OPERATIONS
+from xllm_kernel.ops.attention.dsa import ASCENDC_OPERATIONS
 from xllm_kernel.platform import PlatformEnum
 from xllm_kernel.registry import register_kernel
 
 torch.ops.xllm_kernel.prepare_ascendc_sparse_attention()
 
 for operation, domain in zip(
-    OPERATIONS,
+    ASCENDC_OPERATIONS,
     (
         "Sparse RoPE attention with optional softmax max and sum.",
         "Sparse RoPE attention with a caller-owned output.",

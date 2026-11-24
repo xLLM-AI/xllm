@@ -684,21 +684,6 @@ build_cp_context_npu(const std::vector<int64_t>& q_seq_lens,
 
 }  // namespace
 
-torch::Tensor sfa_dcp_remap_out_npu(const torch::Tensor& topk_indices,
-                                    int64_t physical_block_size,
-                                    int64_t shard_size,
-                                    int64_t shard_rank,
-                                    torch::Tensor& out,
-                                    torch::Tensor& idx_scratch) {
-  xllm::kernel::npu::tilelang::sfa_dcp_remap_out(topk_indices,
-                                                 physical_block_size,
-                                                 shard_size,
-                                                 shard_rank,
-                                                 out,
-                                                 idx_scratch);
-  return out;
-}
-
 void ensure_xllm_ops_registered() {
   // Intentionally empty — referencing this symbol prevents the linker from
   // stripping the TORCH_LIBRARY static initializers below.
@@ -712,10 +697,6 @@ TORCH_LIBRARY(xllm_ops, m) {
   m.def(
       "shared_linear_state_indices_out(Tensor ids, Tensor rows, Tensor(a!) "
       "out) -> ()");
-  m.def(
-      "shared_full_indices_out(Tensor block_table, Tensor slots, Tensor rows, "
-      "int page_size, int padding_row, Tensor(a!) out_tables, "
-      "Tensor(b!) out_slots) -> ()");
   m.def(
       "dspark_allocate_verify_prefixes(Tensor confidence, "
       "Tensor(a!) widths, int budget) -> ()");
@@ -1001,10 +982,6 @@ TORCH_LIBRARY(xllm_ops, m) {
       "cmp_topk, int cmp_ratio, int ori_mask_mode, int cmp_mask_mode, int "
       "ori_win_left, int ori_win_right, str layout_q, str layout_kv, bool "
       "has_ori_kv, bool has_cmp_kv) -> Tensor");
-  m.def(
-      "sfa_dcp_remap_out(Tensor topk_indices, int physical_block_size, int "
-      "shard_size, int shard_rank, Tensor(a!) out, Tensor(b!) idx_scratch) -> "
-      "Tensor(a!)");
   // Current-stream collectives borrowing the caller's HCCL communicator.
   m.def("npu_all_reduce(Tensor(a!) x, int comm) -> ()");
   m.def("npu_all_gather(Tensor input, Tensor(a!) output, int comm) -> ()");
@@ -1015,8 +992,6 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl(
       "shared_linear_state_indices_out",
       TORCH_FN(xllm::kernel::npu::tilelang::shared_linear_state_indices_out));
-  m.impl("shared_full_indices_out",
-         TORCH_FN(xllm::kernel::npu::tilelang::shared_full_indices_out));
   m.impl(
       "dspark_allocate_verify_prefixes",
       TORCH_FN(xllm::kernel::npu::tilelang::dspark_allocate_verify_prefixes));
@@ -1096,7 +1071,6 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention_lse));
   m.impl("sparse_flash_attention_lse_out",
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention_lse_out));
-  m.impl("sfa_dcp_remap_out", TORCH_FN(xllm::sfa_dcp_remap_out_npu));
   m.impl("npu_all_reduce",
          TORCH_FN(xllm::kernel::npu::all_reduce_on_current_stream));
   m.impl("npu_all_gather",

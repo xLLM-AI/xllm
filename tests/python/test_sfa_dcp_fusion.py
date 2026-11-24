@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SFA DCP remap precision: CPU golden and optional AOT kernel vs naive torch."""
+"""SFA DCP remap precision: CPU golden and optional TileLang kernel vs naive torch."""
 
 from __future__ import annotations
 
 import pytest
 import torch
+from xllm_kernel.ops.attention.dsa import has_sfa_dcp_remap_out, sfa_dcp_remap_out
 
 from xllm.python.attention.kv_shard_layout import KVShardLayout
 from xllm.python.layers.sfa_dcp import _fill_wide_remap
@@ -30,11 +31,6 @@ KPOOL_TAIL_COLS = 3
 
 def _npu_available() -> bool:
     return hasattr(torch, "npu") and torch.npu.is_available()
-
-
-def _aot_remap_available() -> bool:
-    ops = getattr(torch.ops, "xllm_ops", None)
-    return ops is not None and hasattr(ops, "sfa_dcp_remap_out")
 
 
 def _make_logical_slots(
@@ -141,13 +137,13 @@ def test_fill_wide_remap_keeps_a_fully_owned_tail_contiguous() -> None:
 
 @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
 @pytest.mark.skipif(
-    not _aot_remap_available(),
-    reason="TileLang AOT sfa_dcp_remap_out is not registered",
+    not has_sfa_dcp_remap_out(),
+    reason="TileLang sfa_dcp_remap_out is unavailable",
 )
 def test_fused_remap_matches_naive() -> None:
     """Both widths the indexer emits: exactly ``index_topk``, and the wider
     kPool tail (``topk + index_kpool - 1``, what GLM-5.3 ships). The fused path
-    packs the prefix with the AOT kernel and joins the tail through
+    packs the prefix with the TileLang kernel and joins the tail through
     ``_fill_wide_remap``, which is what the model feeds SFA.
     """
     device = torch.device("npu")
@@ -168,7 +164,7 @@ def test_fused_remap_matches_naive() -> None:
             prefix = slots[..., :TOPK].contiguous()
             out = torch.empty_like(prefix)
             scratch = torch.empty(num_tokens * TOPK, dtype=torch.int32, device=device)
-            fused = torch.ops.xllm_ops.sfa_dcp_remap_out(
+            fused = sfa_dcp_remap_out(
                 prefix,
                 layout.physical_block_size,
                 layout.dcp_size,
@@ -191,3 +187,28 @@ def test_fused_remap_matches_naive() -> None:
             assert torch.equal(fused, naive), (
                 f"remap mismatch pb={physical_block_size} dcp={dcp_size} T={num_tokens} width={width}"
             )
+
+
+@pytest.mark.skipif(not _npu_available() or not has_sfa_dcp_remap_out(), reason="requires TileLang and NPU")
+@torch.inference_mode()
+def test_fused_remap_replays_live_indices_into_original_buffers() -> None:
+    device = torch.device("npu")
+    layout = KVShardLayout(128, 4, 2)
+    slots = _make_logical_slots(8, layout, device=device)
+    out = torch.empty_like(slots)
+    scratch = torch.empty(slots.numel(), dtype=torch.int32, device=device)
+
+    def run() -> torch.Tensor:
+        return sfa_dcp_remap_out(slots, layout.physical_block_size, layout.dcp_size, layout.dcp_rank, out, scratch)
+
+    assert run() is out
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        actual = run()
+    assert actual is out
+    for shift in (1, 5):
+        slots.copy_(slots.roll(shift, dims=-1))
+        graph.replay()
+        expected = remap_sparse_indices(slots, layout, index_topk=TOPK)
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
