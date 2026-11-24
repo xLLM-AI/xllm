@@ -17,7 +17,10 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstdint>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -25,15 +28,63 @@ limitations under the License.
 
 #include "api_service/call.h"
 #include "common/metrics.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config_validation.h"
+#include "core/framework/model_loader/hf_model_config.h"
+#include "core/util/tensor_helper.h"
 #include "dit_engine.h"
 #include "framework/request/dit_request.h"
+#include "models/model_registry.h"
 #include "runtime/options.h"
 #include "scheduler/scheduler_factory.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
 
 namespace xllm {
+namespace {
+
+const char* python_h3_request_error(const DiTRequestParams& params) {
+  const auto& generation = params.generation_params;
+  if (params.request_kind != DiTRequestKind::kVideo ||
+      !params.input_params.media_sources.entries().empty() ||
+      generation.num_videos_per_prompt != 1) {
+    return "Python MiniMax-H3 supports T2VA with one video per request";
+  }
+  if (generation.audio_sampling_rate != 32000 || generation.num_frames <= 0 ||
+      !std::isfinite(generation.video_fps) || generation.video_fps <= 0.0) {
+    return "Python MiniMax-H3 requires 32 kHz audio, positive frames and fps";
+  }
+  // The serving checkpoint uses 17-frame clips and rounds up by at most 16.
+  const double frames = static_cast<double>(generation.num_frames);
+  if (frames / generation.video_fps < 5.0 ||
+      (frames + 16.0) / generation.video_fps > 15.0) {
+    return "Python MiniMax-H3 duration must be between 5 and 15 seconds";
+  }
+  const auto source =
+      params.input_params.tensor_sources.get_named_tensor("prompt_embed");
+  if (!source.has_value()) {
+    return "Python MiniMax-H3 requires prompt_embed from the H3 encoder";
+  }
+  const auto& embedding = source->get().tensor;
+  if (embedding.dim() != 2 || embedding.size(0) == 0 ||
+      embedding.size(1) != 5120 || !embedding.is_floating_point() ||
+      !torch::isfinite(embedding).all().item<bool>()) {
+    return "Python MiniMax-H3 requires a finite floating point [L, 5120] "
+           "prompt_embed";
+  }
+  const auto* tags = get_tensor_parameter<std::vector<int64_t>>(
+      source->get().parameters, "prompt_token_tags");
+  if (tags == nullptr ||
+      tags->size() != static_cast<size_t>(embedding.size(0)) ||
+      !std::all_of(
+          tags->begin(), tags->end(), [](int64_t tag) { return tag == 1; })) {
+    return "Python MiniMax-H3 T2VA requires L text-only prompt_token_tags";
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 DiTMaster::DiTMaster(const Options& options) : Master(options) {
   const std::optional<std::string> cp_error = validate_context_parallel_config(
       options_, EngineType::DIT, /*model_type=*/"", options_.nnodes());
@@ -44,10 +95,23 @@ DiTMaster::DiTMaster(const Options& options) : Master(options) {
       << "Disaggregated PD is not supported by the DiT engine.";
   CHECK(options_.host_blocks_factor() <= 1.0)
       << "Basic host KV cache offload is not supported by the DiT engine.";
+  const std::string& model_impl = ModelConfig::get_instance().model_impl();
+  if (ModelConfig::is_python_model_impl(model_impl)) {
+    const std::string model_type =
+        get_model_type(options_.model_path(), options_.backend());
+    is_python_minimax_h3_ =
+        model_type == "MiniMaxH3ModularPipeline" ||
+        (options_.model_id() == "MiniMaxH3ModularPipeline" &&
+         !ModelRegistry::has_dit_model_factory(model_type));
+    if (is_python_minimax_h3_) {
+      CHECK_EQ(options_.max_requests_per_batch(), 1);
+    }
+  }
 
   runtime::Options engine_options;
   engine_options.model_path(options_.model_path())
       .model_id(options_.model_id())
+      .model_impl(model_impl)
       .extension_impl(options_.extension_impl())
       .devices(devices_)
       .backend(options_.backend())
@@ -134,6 +198,12 @@ void DiTMaster::handle_request(DiTRequestParams params,
     // verify the prompt
     if (!params.verify_params(callback)) {
       return;
+    }
+    if (is_python_minimax_h3_) {
+      if (const char* error = python_h3_request_error(params)) {
+        CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, error);
+        return;
+      }
     }
     DiTRequestState dit_state =
         DiTRequestState(std::move(params.input_params),

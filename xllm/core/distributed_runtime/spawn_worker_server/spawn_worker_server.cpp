@@ -94,6 +94,7 @@ SpawnWorkerServer::SpawnWorkerServer(
     int32_t tp_size,
     int32_t sp_size,
     int32_t cfg_size,
+    int32_t vae_size,
     int32_t text_encoder_tp_size,
     const InstanceRole& instance_role,
     bool enable_mtp_draft_body_tp1,
@@ -143,6 +144,7 @@ SpawnWorkerServer::SpawnWorkerServer(
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
+      .vae_size(is_dit_backend ? vae_size : 1)
       .text_encoder_tp_size(effective_text_encoder_tp_size)
       .enable_shm(enable_shm)
       .input_shm_size(input_shm_size)

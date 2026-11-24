@@ -141,6 +141,7 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
                                  tensor_options,
                                  cache_config,
                                  model_type);
+  dit_context_.set_model_impl(options_.model_impl());
 
   dit_model_ = create_dit_model(dit_context_);
   CHECK(dit_model_ != nullptr) << "Failed to create model.";

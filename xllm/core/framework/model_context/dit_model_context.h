@@ -16,6 +16,8 @@ limitations under the License.
 #pragma once
 
 #include <memory>
+#include <string>
+#include <utility>
 
 #include "core/framework/dit_cache/dit_cache_config.h"
 #include "core/framework/model/model_args.h"
@@ -57,6 +59,11 @@ class DiTModelContext {
 
   const std::string& model_type() const { return model_type_; }
 
+  const std::string& model_impl() const { return model_impl_; }
+  void set_model_impl(std::string model_impl) {
+    model_impl_ = std::move(model_impl);
+  }
+
   const DiTCacheConfig& get_dit_config() const { return dit_config_; }
 
  private:
@@ -66,6 +73,7 @@ class DiTModelContext {
   torch::TensorOptions tensor_options_;
   DiTCacheConfig dit_config_;
   std::string model_type_;
+  std::string model_impl_;
 };
 
 }  // namespace xllm

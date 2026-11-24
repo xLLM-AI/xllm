@@ -58,6 +58,7 @@ class DiTMaster : public Master {
   void generate();
 
  private:
+  bool is_python_minimax_h3_ = false;
   std::unique_ptr<DiTEngine> dit_engine_;
   // Scheduler must be destroyed before the engine it references.
   std::unique_ptr<DiTScheduler> scheduler_;

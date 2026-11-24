@@ -14,11 +14,13 @@ cc_library(
     speech_model.h
     models.h
     dit/utils/lanczos_resample.h
+    dit/py_dit_model.h
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.h>
     py_model_helper.h
   SRCS
     model_registry.cpp
     dit/utils/lanczos_resample.cpp
+    dit/py_dit_model.cpp
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.cpp>
     llm/py_causal_lm.cpp
     py_model_helper.cpp
@@ -29,6 +31,7 @@ cc_library(
     :request
     :mposition
     :parallel_state
+    :platform
     :model_context
     :dit_cache
     :model_loader
