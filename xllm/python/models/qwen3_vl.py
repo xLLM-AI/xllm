@@ -51,7 +51,7 @@ from xllm.python.model_loader import (
     ScopedWeightLoader,
     load_causal_lm_weights,
 )
-from xllm.python.models.base import PyModelBase
+from xllm.python.models.base import MultimodalEmbeddings, PyModelBase
 from xllm.python.models.qwen3 import (
     Qwen3Config,
     Qwen3DecoderLayer,
@@ -961,7 +961,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         input_ids: torch.Tensor,
         image_embeds: torch.Tensor | None = None,
         video_embeds: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+    ) -> MultimodalEmbeddings:
         """Stage 2: merge text + multimodal embeddings.
 
         Each present modality's embedding is scattered at its placeholder-token
@@ -982,7 +982,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             modalities.append((video_embeds, self.video_token_id))
 
         if not modalities:
-            return inputs_embeds, ()
+            return MultimodalEmbeddings(inputs_embeds, deepstack_input_embeds=())
 
         visual_dim = self.visual_dim
         num_level = self.deepstack_num_level
@@ -1007,7 +1007,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         if deepstack_acc is not None:
             deepstack_acc = deepstack_acc.view(seq_len, num_level, visual_dim)
             deepstack_inputs = tuple(deepstack_acc[:, i, :].contiguous() for i in range(num_level))
-        return inputs_embeds, deepstack_inputs
+        return MultimodalEmbeddings(inputs_embeds, deepstack_input_embeds=deepstack_inputs)
 
     # ------------------------------------------------------------------
     # Weight loading

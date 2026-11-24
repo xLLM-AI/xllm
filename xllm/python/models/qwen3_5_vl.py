@@ -19,6 +19,7 @@ from __future__ import annotations
 import torch
 
 from xllm.python.model_loader import ScopedWeightLoader
+from xllm.python.models.base import MultimodalEmbeddings
 from xllm.python.models.qwen3_5 import Qwen3_5ForCausalLM
 from xllm.python.models.qwen3_vl import Qwen3VLVisionConfig, Qwen3VLVisionTransformer
 
@@ -52,7 +53,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5ForCausalLM):
         input_ids: torch.Tensor,
         image_embeds: torch.Tensor | None = None,
         video_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> MultimodalEmbeddings:
         """Merge the current chunk's visual rows selected by the C++ MM gather."""
         modalities = [(image_embeds, self.image_token_id), (video_embeds, self.video_token_id)]
         visual_rows = []
@@ -71,7 +72,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5ForCausalLM):
         for embeds, indices in visual_rows:
             # Copy whole token rows; elementwise masked_scatter uses AI CPU on Ascend.
             inputs_embeds.index_copy_(0, indices, embeds.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype))
-        return inputs_embeds
+        return MultimodalEmbeddings(inputs_embeds)
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         self.vision_model.load_weights(ScopedWeightLoader(state_dicts, src_prefixes=("model.visual.",)), tp_rank)

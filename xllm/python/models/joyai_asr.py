@@ -28,7 +28,7 @@ import torch.nn.functional as F
 
 from xllm.python.layers import ColumnParallelLinear
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader, load_causal_lm_weights
-from xllm.python.models.base import PyModelBase
+from xllm.python.models.base import MultimodalEmbeddings, PyModelBase
 from xllm.python.models.qwen2 import Qwen2Config, Qwen2Model
 
 if TYPE_CHECKING:
@@ -496,23 +496,23 @@ class JoyaiASRForConditionalGeneration(PyModelBase):
         video_embeds: torch.Tensor | None = None,
         audio_embeds: torch.Tensor | None = None,
         audio_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> MultimodalEmbeddings:
         """Use the chunk mask; audio pad IDs can also occur as ordinary text."""
         inputs_embeds: torch.Tensor = self.model.embed_tokens(input_ids)
 
         if audio_embeds is None:
-            return inputs_embeds
+            return MultimodalEmbeddings(inputs_embeds)
 
         if audio_mask is None:
             raise ValueError("audio_embeds requires the executor's chunk scatter mask")
         num_mask_rows = int(audio_mask.sum().item())
         if num_mask_rows == 0:
             # A chunk may contain only the text gap before CTC pads.
-            return inputs_embeds
+            return MultimodalEmbeddings(inputs_embeds)
         if num_mask_rows != audio_embeds.size(0):
             raise ValueError(f"audio scatter mask rows ({num_mask_rows}) != audio embeds rows ({audio_embeds.size(0)})")
         inputs_embeds[audio_mask] = audio_embeds.to(inputs_embeds.dtype)
-        return inputs_embeds
+        return MultimodalEmbeddings(inputs_embeds)
 
     def load_weights(
         self,

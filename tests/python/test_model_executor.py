@@ -753,6 +753,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             q_seq_lens=torch.tensor([2, 2], dtype=torch.int32),
             q_seq_lens_host=torch.tensor([2, 2], dtype=torch.int32),
             is_target_verify=True,
+            num_speculative_tokens=1,
             expanded_decode_metadata=SimpleNamespace(
                 enabled=True,
                 kv_seq_lens=torch.tensor([3, 4, 7, 8], dtype=torch.int32),
