@@ -158,13 +158,13 @@ SpawnWorkerServer::SpawnWorkerServer(
       .max_encoder_cache_size(max_encoder_cache_size);
   ModelConfig::get_instance().model_impl(model_impl);
   ExecutionConfig::get_instance().extension_impl(extension_impl);
-  // Some model implementations still read prefill settings from this singleton.
+  // Legacy model and layer consumers still read batch limits from this
+  // singleton.
   SchedulerConfig::get_instance()
       .max_tokens_per_batch(max_tokens_per_batch)
       .max_seqs_per_batch(max_seqs_per_batch)
       .max_tokens_per_chunk_for_prefill(
           runner_options.max_tokens_per_chunk_for_prefill())
-      .enable_chunked_prefill(runner_options.enable_chunked_prefill())
       .enable_dp_fair_token_budget(runner_options.enable_dp_fair_token_budget())
       .enable_schedule_overlap(false);
   ParallelConfig::get_instance()
