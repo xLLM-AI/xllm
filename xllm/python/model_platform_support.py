@@ -18,6 +18,7 @@ MODEL_PLATFORM_SUPPORT: dict[str, dict[str, bool]] = {
     "phi3": {"cuda": True, "npu": False},
     "glm5_dspark": {"cuda": False, "npu": True},
     "qwen3": {"cuda": True, "npu": True},
+    "qwen3_moe": {"cuda": False, "npu": True},
     "qwen3_5": {"cuda": True, "npu": True},
     "qwen3_5_mtp": {"cuda": False, "npu": True},
     "qwen3_5_vl": {"cuda": False, "npu": True},
