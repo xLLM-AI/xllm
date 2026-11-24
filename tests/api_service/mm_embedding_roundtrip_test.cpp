@@ -197,7 +197,8 @@ TEST_F(MMEmbeddingRoundtripTest, RoundTripsPreserveImageKeysAndPrefixHashes) {
   ModelArgs args;
   args.vision_start_token_id(kVisionStart)
       .vision_end_token_id(kVisionEnd)
-      .image_token_id(kImageToken);
+      .image_token_id(kImageToken)
+      .mm_image_merge_size(2);
   MultimodalProcessor<Qwen3VLPromptProcessor> processor(
       args, nullptr, TokenizerArgs{});
   Qwen3VLPromptProcessor prompt_processor(args);
@@ -228,7 +229,7 @@ TEST_F(MMEmbeddingRoundtripTest, RoundTripsPreserveImageKeysAndPrefixHashes) {
     MMInput inputs(std::move(items));
     MMData received;
     ASSERT_TRUE(processor.process_multimodal(inputs, received));
-    prompt_processor.find_mm_spans(tokens, received);
+    ASSERT_TRUE(prompt_processor.find_mm_spans(tokens, received));
     std::vector<XXH3Key> actual_hashes;
     extend_prefix_hashes(BlockHasherType::MM,
                          received,
@@ -332,7 +333,8 @@ TEST_F(MMEmbeddingRoundtripTest,
   ModelArgs args;
   args.vision_start_token_id(kVisionStart)
       .vision_end_token_id(kVisionEnd)
-      .image_token_id(kImageToken);
+      .image_token_id(kImageToken)
+      .mm_image_merge_size(2);
   MultimodalProcessor<Qwen3VLPromptProcessor> processor(
       args, nullptr, TokenizerArgs{});
   MMData data;
@@ -344,7 +346,7 @@ TEST_F(MMEmbeddingRoundtripTest,
 
   const std::vector<int32_t> tokens = make_tokens(items.size());
   Qwen3VLPromptProcessor prompt_processor(args);
-  prompt_processor.find_mm_spans(tokens, data);
+  ASSERT_TRUE(prompt_processor.find_mm_spans(tokens, data));
   std::vector<XXH3Key> first_hashes;
   std::vector<XXH3Key> repeated_hashes;
   extend_prefix_hashes(BlockHasherType::MM,

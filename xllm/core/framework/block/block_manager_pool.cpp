@@ -214,8 +214,7 @@ void BlockManagerPool::deallocate(Sequence* sequence) {
   DCHECK(sequence != nullptr);
   int32_t dp_rank = get_dp_rank(sequence);
   // The composite publishes the final prefix before resetting the sequence.
-  auto* composite =
-      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  auto* composite = block_managers_[dp_rank].get();
   composite->deallocate_for_sequence(sequence);
 }
 
@@ -245,8 +244,7 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   // failure, wrongly deallocate + reset the already-held SWA/C4/C128 blocks.
   const bool started_empty = !sequence->has_any_blocks();
 
-  auto* composite =
-      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  auto* composite = block_managers_[dp_rank].get();
   if (started_empty) {
     composite->allocate_shared_for_sequence(sequence);
   }
@@ -273,8 +271,7 @@ bool BlockManagerPool::exceeds_total_capacity(Sequence* sequence,
     if (assigned_rank >= 0 && dp_rank != static_cast<size_t>(assigned_rank)) {
       continue;
     }
-    const auto* composite = static_cast<const CompositeBlockManager*>(
-        block_managers_[dp_rank].get());
+    const auto* composite = block_managers_[dp_rank].get();
     if (options_.enable_shared_kv_cache()) {
       const size_t full_blocks =
           num_tokens / block_size() + (num_tokens % block_size() != 0);
@@ -353,8 +350,7 @@ bool BlockManagerPool::exceeds_total_capacity(
   std::vector<size_t> remaining_slots(block_managers_.size(),
                                       std::numeric_limits<size_t>::max());
   for (size_t dp_rank = 0; dp_rank < block_managers_.size(); ++dp_rank) {
-    const auto* composite = static_cast<const CompositeBlockManager*>(
-        block_managers_[dp_rank].get());
+    const auto* composite = block_managers_[dp_rank].get();
     if (options_.enable_shared_kv_cache()) {
       remaining_slots[dp_rank] =
           composite->admission_capacity() / sequence_resource_units(num_tokens);
@@ -425,12 +421,9 @@ std::vector<Block> BlockManagerPool::allocate(size_t num_tokens,
   dp_rank = get_manager_with_max_available_blocks();
   const size_t block_size = options_.block_size();
   const size_t num_blocks_needed = (num_tokens + block_size - 1) / block_size;
-  // block_managers_[dp_rank] is always a CompositeBlockManager, whose
-  // type-ambiguous allocate(size_t) is NOT_IMPLEMENTED. Route to the KV leaf
-  // explicitly (this raw-block path is the flat-KV-only helper used to seed /
-  // evict the prefix cache; DSV4 has no KV leaf and must not call it).
-  auto* composite =
-      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  // This raw-block helper seeds or evicts a flat KV prefix cache. Grouped
+  // caches without a KV leaf must use sequence-level allocation instead.
+  auto* composite = block_managers_[dp_rank].get();
   return composite->allocate_blocks(BlockType::KV, num_blocks_needed);
 }
 
@@ -439,8 +432,7 @@ bool BlockManagerPool::try_allocate(Sequence* sequence) {
 
   // Composite path: prefix-share + grow via the leaves, then advance the token
   // counter (try_allocate admits the full prompt up front).
-  auto* composite =
-      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  auto* composite = block_managers_[dp_rank].get();
   composite->allocate_shared_for_sequence(sequence);
   if (!composite->allocate_sequence(sequence, sequence->num_tokens())) {
     composite->deallocate_for_sequence(sequence);
@@ -463,8 +455,7 @@ void BlockManagerPool::allocate_shared(Sequence* sequence) {
     return;
   }
   int32_t dp_rank = get_dp_rank(sequence);
-  auto* composite =
-      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  auto* composite = block_managers_[dp_rank].get();
   if (composite->leaf_combination() ==
           CompositeBlockManager::LeafCombination::SWA_COMPRESSED &&
       sequence->kv_state().prefix_cache_matched()) {
@@ -478,8 +469,7 @@ void BlockManagerPool::publish_prefix(Sequence* sequence) {
     return;
   }
   int32_t dp_rank = get_dp_rank(sequence);
-  static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
-      ->publish_prefix(sequence);
+  block_managers_[dp_rank]->publish_prefix(sequence);
 }
 
 void BlockManagerPool::publish_prefix(Sequence* sequence, size_t num_tokens) {
@@ -490,8 +480,7 @@ void BlockManagerPool::publish_prefix(Sequence* sequence, size_t num_tokens) {
   int32_t dp_rank = get_dp_rank(sequence);
   // Fan out the in-batch publish to the prefix leaf (KV); the composite no-ops
   // for shapes without a prefix-capable KV leaf (DSV4).
-  static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
-      ->publish_prefix(sequence, num_tokens);
+  block_managers_[dp_rank]->publish_prefix(sequence, num_tokens);
 }
 
 float BlockManagerPool::get_gpu_cache_usage_perc() const {

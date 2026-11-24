@@ -460,7 +460,6 @@ TEST(CompositeBlockManagerTest, AllocateForSequence_SingleSeq) {
       base_num_blocks, base_block_size, window_size, max_seqs_per_batch);
 
   CompositeBlockManager manager(build_composite_leaves(opts), opts);
-  EXPECT_TRUE(manager.is_composite());
   EXPECT_EQ(manager.num_sub_managers(), 3u);
 
   Sequence seq = MakeTestSequence(0, std::vector<int32_t>(1024, 1));
