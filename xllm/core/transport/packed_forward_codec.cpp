@@ -3155,23 +3155,6 @@ bool unpack_from_input_host_buffer(const VlmForwardInput& input,
       input, device, dtype, output, materialize_device_buffer);
 }
 
-bool unpack_from_input_host_buffer(const VlmForwardInput& input,
-                                   const torch::Device& device,
-                                   VlmForwardInput& output) {
-  return unpack_native_input_host_buffer(
-      input, device, torch::kFloat32, output, false);
-}
-
-bool unpack_from_input_host_buffer(const LlmForwardInput& input,
-                                   const torch::Device& device,
-                                   LlmForwardInput& output) {
-  return unpack_from_input_host_buffer(input,
-                                       device,
-                                       torch::kFloat32,
-                                       output,
-                                       /*materialize_device_buffer=*/false);
-}
-
 }  // namespace detail
 
 namespace {

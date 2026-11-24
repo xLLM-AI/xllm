@@ -74,9 +74,8 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<TargetInput>::prepare_stream_;
   using DraftModelSpecWorkerImpl<TargetInput>::target_verify_mode_;
   using DraftModelSpecWorkerImpl<TargetInput>::enable_schedule_overlap;
-  using DraftModelSpecWorkerImpl<TargetInput>::run_worker_no_sync_impl;
   using DraftModelSpecWorkerImpl<TargetInput>::finalize_step_output;
-  using SpeculativeWorkerImpl<TargetInput>::maybe_broadcast_spec_tokens;
+  using DraftModelSpecWorkerImpl<TargetInput>::maybe_broadcast_spec_tokens;
   using DraftModelSpecWorkerImpl<TargetInput>::logical_block_size;
   using DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input;
 
@@ -188,21 +187,11 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   void prepare_first_draft_template(TargetInput& metadata_template,
                                     LlmForwardInput& combined_input,
                                     bool wait_for_compute_stream);
-  void enqueue_next_first_draft(const TargetInput& input,
-                                const SampleOutput& validate_output,
-                                const torch::Tensor& base_positions,
-                                const torch::Tensor& base_kv_seq_lens,
-                                LlmForwardInput combined_input);
   void submit_pending_first_draft(const TargetInput& batch_identity_input,
                                   LlmForwardInput draft_input);
   bool pending_draft_context_matches(const TargetInput& input) const;
 
   bool uses_verifier_conditioned_draft_prefix() const;
-  int32_t draft_prefix_kv_upper_bound(int32_t embedding_id,
-                                      const std::string& request_id,
-                                      int32_t raw_kv_seq_len,
-                                      int32_t row_offset,
-                                      int64_t kv_capacity) const;
   void prepare_draft_prefix(
       const TargetInput& input,
       const std::vector<EmbeddingCache::DecodeState>& bootstrap_states,

@@ -88,12 +88,6 @@ class Worker {
 
   const bool is_driver();
 
-  std::optional<ForwardOutput> step(const VlmForwardInput& inputs);
-
-  std::optional<ForwardOutput> step(const DiTForwardInput& inputs);
-
-  std::optional<ForwardOutput> step(const LlmForwardInput& inputs);
-
   // initialize model, cache manager. async call
   folly::SemiFuture<bool> init_model_async(
       const std::string& model_weights_path,

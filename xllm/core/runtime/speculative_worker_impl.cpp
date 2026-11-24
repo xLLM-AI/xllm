@@ -16,7 +16,6 @@ limitations under the License.
 #include "core/runtime/speculative_worker_impl.h"
 
 #include <algorithm>
-#include <type_traits>
 
 #include "common/global_flags.h"
 #include "core/common/types.h"
@@ -24,17 +23,14 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
-#include "core/framework/model/model_type.h"
+#include "core/framework/eplb/eplb_utils.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/speculative/verify_layout.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
-#include "core/util/tensor_helper.h"
 #include "framework/model_loader/model_loader.h"
 #include "runtime/decode_graph_bucket.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/vlm_worker_impl.h"
-#include "util/slice.h"
-#include "util/timer.h"
-#include "util/utils.h"
 
 namespace xllm {
 
@@ -88,38 +84,6 @@ void prepare_dummy_input(Input& input, const WorkerImpl& worker) {
   }
 }
 
-namespace {
-
-template <typename Params>
-bool should_run_speculative_decode(const Params& params) {
-  if (!params.meta.batch_forward_type.is_decode()) {
-    return false;
-  }
-
-  const auto& dp_token_nums = params.parallel.dp_global_token_nums;
-  const auto& dp_is_decode = params.parallel.dp_is_decode;
-  if (dp_is_decode.empty()) {
-    return dp_token_nums.size() <= 1;
-  }
-  if (dp_is_decode.size() != dp_token_nums.size()) {
-    return false;
-  }
-
-  bool any_active = false;
-  for (size_t i = 0; i < dp_is_decode.size(); ++i) {
-    if (dp_token_nums[i] == 0) {
-      continue;
-    }
-    any_active = true;
-    if (dp_is_decode[i] != 1) {
-      return false;
-    }
-  }
-  return any_active;
-}
-
-}  // namespace
-
 template <typename Params>
 void scale_speculative_parallel_token_counts(Params& params,
                                              int32_t num_speculative_tokens) {
@@ -130,7 +94,6 @@ void scale_speculative_parallel_token_counts(Params& params,
 }
 
 template void prepare_dummy_input(LlmForwardInput&, const WorkerImpl&);
-template void prepare_dummy_input(VlmForwardInput&, const WorkerImpl&);
 template void scale_speculative_parallel_token_counts(LlmModelParams&, int32_t);
 template void scale_speculative_parallel_token_counts(VlmModelParams&, int32_t);
 
@@ -150,7 +113,41 @@ SpeculativeWorkerImpl<TargetInput>::SpeculativeWorkerImpl(
   auto prepare_input = [this](TargetInput& input) {
     ::xllm::prepare_dummy_input(input, *impl_);
 #if defined(USE_NPU)
-    prepare_target_padding(input.input_params);
+    if (!impl_->uses_npu_dp_ep_padding()) {
+      return;
+    }
+    auto& params = input.input_params;
+    const auto& tokens = params.parallel.dp_global_token_nums;
+    const auto& raw_tokens = params.parallel.raw_dp_global_token_nums;
+    const bool graph_decode =
+        params.meta.batch_forward_type.is_decode() &&
+        params.meta.q_max_seq_len <= 1 &&
+        ExecutionConfig::get_instance().enable_graph() && tokens.size() > 1 &&
+        params.parallel.dp_is_decode.size() == tokens.size() &&
+        std::all_of(params.parallel.dp_is_decode.begin(),
+                    params.parallel.dp_is_decode.end(),
+                    [](int32_t decode) { return decode != 0; });
+    if (graph_decode) {
+      const int32_t max_tokens =
+          *std::max_element(tokens.begin(), tokens.end());
+      const int32_t bucket =
+          static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
+              max_tokens,
+              ExecutionConfig::get_instance()
+                  .enable_graph_mode_decode_no_padding()));
+      if (std::any_of(tokens.begin(), tokens.end(), [bucket](int32_t count) {
+            return count != bucket;
+          })) {
+        const auto padded_tokens =
+            runtime::get_decode_graph_dp_token_counts(tokens, bucket);
+        params.parallel.dp_ep_padding_data = impl_->build_dp_ep_padding_data(
+            padded_tokens,
+            raw_tokens.empty() ? tokens : raw_tokens,
+            /*is_prefill=*/false);
+        return;
+      }
+    }
+    impl_->prepare_dp_ep_padding(ModelParamsView(params));
 #endif
   };
   auto make_impl = [&]<typename BaseWorker>() {
@@ -173,47 +170,6 @@ SpeculativeWorkerImpl<TargetInput>::SpeculativeWorkerImpl(
                << worker_type.to_string();
   }
 }
-
-#if defined(USE_NPU)
-template <typename TargetInput>
-template <typename Params>
-void SpeculativeWorkerImpl<TargetInput>::prepare_target_padding(
-    Params& params) {
-  if (!impl_->uses_npu_dp_ep_padding()) {
-    return;
-  }
-  const auto& tokens = params.parallel.dp_global_token_nums;
-  const auto& raw_tokens = params.parallel.raw_dp_global_token_nums;
-  const bool graph_decode =
-      params.meta.batch_forward_type.is_decode() &&
-      params.meta.q_max_seq_len <= 1 &&
-      ExecutionConfig::get_instance().enable_graph() && tokens.size() > 1 &&
-      params.parallel.dp_is_decode.size() == tokens.size() &&
-      std::all_of(params.parallel.dp_is_decode.begin(),
-                  params.parallel.dp_is_decode.end(),
-                  [](int32_t decode) { return decode != 0; });
-  if (graph_decode) {
-    const int32_t max_tokens = *std::max_element(tokens.begin(), tokens.end());
-    const int32_t bucket =
-        static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
-            max_tokens,
-            ExecutionConfig::get_instance()
-                .enable_graph_mode_decode_no_padding()));
-    if (std::any_of(tokens.begin(), tokens.end(), [bucket](int32_t count) {
-          return count != bucket;
-        })) {
-      const auto padded_tokens =
-          runtime::get_decode_graph_dp_token_counts(tokens, bucket);
-      params.parallel.dp_ep_padding_data = impl_->build_dp_ep_padding_data(
-          padded_tokens,
-          raw_tokens.empty() ? tokens : raw_tokens,
-          params.meta.batch_forward_type.no_decode());
-      return;
-    }
-  }
-  impl_->prepare_dp_ep_padding(ModelParamsView(params));
-}
-#endif
 
 template <typename TargetInput>
 SpeculativeWorkerImpl<TargetInput>::~SpeculativeWorkerImpl() {
@@ -241,7 +197,7 @@ bool SpeculativeWorkerImpl<TargetInput>::init_model(
     auto loader = ModelLoader::create(model_weights_path);
     auto args = loader->model_args();
     apply_target_model_overrides(args);
-    auto tokenizer = impl_->load_tokenizer(*loader);
+    auto tokenizer = loader->tokenizer();
     auto context =
         impl_->load_model_config(std::move(args),
                                  loader->quant_args(),
@@ -274,31 +230,39 @@ bool SpeculativeWorkerImpl<TargetInput>::allocate_kv_cache_with_transfer(
 #endif
 
 template <typename TargetInput>
+std::shared_ptr<const JsonObjectGrammar>
+SpeculativeWorkerImpl<TargetInput>::ensure_json_object_grammar(
+    bool reasoning_enabled) {
+  return impl_->ensure_json_object_grammar(reasoning_enabled);
+}
+
+template <typename TargetInput>
 std::optional<ForwardOutput> SpeculativeWorkerImpl<TargetInput>::step(
     const TargetInput& input) {
-  if constexpr (std::is_same_v<TargetInput, VlmForwardInput>) {
-    if (input.runtime.input_host_buffer_has_layout) {
-      // Rebuild host views before speculative code derives text draft inputs.
-      VlmForwardInput unpacked_input;
-      if (input.runtime.device_tensors_ready) {
-        unpacked_input = input.clone();
-        unpacked_input.runtime.input_host_buffer_has_layout = false;
-      } else {
-        CHECK(detail::unpack_from_input_host_buffer(
-            input, torch::Device(torch::kCPU), unpacked_input))
-            << "failed to unpack the packed VLM input host buffer";
-      }
-      return step(unpacked_input);
-    }
-  }
   auto& mutable_params = input.input_params;
   set_hierarchy_layer_synchronizer(mutable_params);
-  const bool run_speculative_decode =
-      should_run_speculative_decode(mutable_params);
+  const bool is_decode = mutable_params.meta.batch_forward_type.is_decode();
+  bool run_speculative_decode = false;
+  if (is_decode) {
+    const auto& dp_token_nums = mutable_params.parallel.dp_global_token_nums;
+    const auto& dp_is_decode = mutable_params.parallel.dp_is_decode;
+    if (dp_is_decode.empty()) {
+      run_speculative_decode = dp_token_nums.size() <= 1;
+    } else if (dp_is_decode.size() == dp_token_nums.size()) {
+      for (size_t i = 0; i < dp_is_decode.size(); ++i) {
+        if (dp_token_nums[i] == 0) {
+          continue;
+        }
+        run_speculative_decode = dp_is_decode[i] == 1;
+        if (!run_speculative_decode) {
+          break;
+        }
+      }
+    }
+  }
   if (input.input_params.meta.num_sequences == 0 ||
       input.token_ids.numel() == 0) {
-    if (input.input_params.meta.batch_forward_type.is_decode() &&
-        !run_speculative_decode) {
+    if (is_decode && !run_speculative_decode) {
       // Realign a non-speculative decode rank to EMPTY so every rank agrees
       // on the batch type. Only this branch needs its own copy.
       TargetInput aligned_input = input.clone();
@@ -313,54 +277,6 @@ std::optional<ForwardOutput> SpeculativeWorkerImpl<TargetInput>::step(
     return step_decode(input);
   }
   return step_prefill(input);
-}
-
-template <typename TargetInput>
-bool SpeculativeWorkerImpl<TargetInput>::prepare_model_decode_continuation(
-    TargetInput& inputs,
-    const ForwardOutput& prior_output) {
-  // Only decode batches need draft input rebuilding.
-  auto& input_params = inputs.input_params;
-  const int32_t num_sequences = input_params.meta.num_sequences;
-  const int32_t block_size = options_.block_size();
-
-  const torch::Tensor last_token_ids =
-      to_cpu_contiguous(prior_output.sample_output.next_tokens.flatten());
-  const Slice<int64_t> last_tokens_ids_slice =
-      tensor_slice<int64_t>(last_token_ids);
-
-  // Determine how many tokens were decoded in the last step
-  // If the output is 2D, it means multiple tokens were generated per sequence
-  int32_t last_step_decode_num = 1;
-  if (prior_output.sample_output.next_tokens.dim() == 2) {
-    last_step_decode_num = prior_output.sample_output.next_tokens.size(1);
-  }
-
-  DecodeBuildBuffers buf;
-  DecodeBatchContext batch_ctx = make_decode_batch_context(inputs);
-  prepare_decode_buffers(buf,
-                         batch_ctx,
-                         static_cast<size_t>(num_sequences),
-                         /*emit_kv_len=*/true,
-                         /*emit_block_tables=*/false);
-
-  for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    const auto [token_id, position_offset] =
-        resolve_token_with_position_offset(batch_ctx.token_ids[seq_id],
-                                           last_tokens_ids_slice,
-                                           last_step_decode_num);
-    DecodeTokenInput token_input;
-    token_input.req_id = seq_id;
-    token_input.token_id = token_id;
-    token_input.position_offset = position_offset;
-    append_decode_token(batch_ctx, token_input, block_size, buf);
-  }
-
-  set_token_position_tensors(inputs, buf.out_token_ids, buf.out_positions);
-  update_kv_lengths_and_slots(input_params, buf);
-  input_params.attention.rebuild_device_buffer(device_);
-
-  return true;
 }
 
 ForwardOutput finalize_verify_output(
@@ -423,7 +339,6 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
 
   build_decode_input(validate_input, buf, decode_options, device_);
 
-  // Clearing here drops the ~15 dead per-token tensors the clone carried in.
   expand_sampling_params_for_verify(validate_input.sampling_params,
                                     num_speculative_tokens,
                                     total_num_val_tokens,

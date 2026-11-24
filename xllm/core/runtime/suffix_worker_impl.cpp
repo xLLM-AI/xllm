@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 
 #include "common/metrics.h"
+#include "core/framework/batch/decode_input_builder.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/util/tensor_helper.h"
@@ -35,6 +36,46 @@ SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
                                              options),
       suffix_cache_(options_.speculative_suffix_cache_max_depth(),
                     options_.speculative_suffix_max_cached_requests()) {}
+
+bool SuffixWorkerImpl::prepare_model_decode_continuation(
+    LlmForwardInput& inputs,
+    const ForwardOutput& prior_output) {
+  auto& input_params = inputs.input_params;
+  const int32_t num_sequences = input_params.meta.num_sequences;
+  const int32_t block_size = options_.block_size();
+
+  const auto& next_tokens = prior_output.sample_output.next_tokens;
+  const torch::Tensor last_token_ids = to_cpu_contiguous(next_tokens.flatten());
+  const Slice<int64_t> last_tokens_ids_slice =
+      tensor_slice<int64_t>(last_token_ids);
+  const int32_t last_step_decode_num =
+      next_tokens.dim() == 2 ? next_tokens.sizes().back() : 1;
+
+  DecodeBuildBuffers buf;
+  DecodeBatchContext batch_ctx = make_decode_batch_context(inputs);
+  prepare_decode_buffers(buf,
+                         batch_ctx,
+                         static_cast<size_t>(num_sequences),
+                         /*emit_kv_len=*/true,
+                         /*emit_block_tables=*/false);
+
+  for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
+    const auto [token_id, position_offset] =
+        resolve_token_with_position_offset(batch_ctx.token_ids[seq_id],
+                                           last_tokens_ids_slice,
+                                           last_step_decode_num);
+    DecodeTokenInput token_input;
+    token_input.req_id = seq_id;
+    token_input.token_id = token_id;
+    token_input.position_offset = position_offset;
+    append_decode_token(batch_ctx, token_input, block_size, buf);
+  }
+
+  set_token_position_tensors(inputs, buf.out_token_ids, buf.out_positions);
+  update_kv_lengths_and_slots(input_params, buf);
+  input_params.attention.rebuild_device_buffer(device_.unwrap());
+  return true;
+}
 
 std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
     const LlmForwardInput& input) {

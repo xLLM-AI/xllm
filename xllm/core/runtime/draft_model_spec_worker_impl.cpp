@@ -21,17 +21,20 @@ limitations under the License.
 
 #include <algorithm>
 #include <filesystem>
+#include <mutex>
 #include <system_error>
 #include <tuple>
 #include <utility>
 
 #include "core/common/types.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_type.h"
 #include "core/framework/multimodal/content_hash.h"
+#include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
@@ -40,6 +43,8 @@ limitations under the License.
 #include "core/kv_cache/storage/static_kv_tensor_allocator.h"
 #include "core/kv_cache/transfer/hierarchy_kv_transfer.h"
 #include "core/kv_cache/transfer/mooncake_kv_transfer.h"
+#include "core/platform/npu/device_capture_lock.h"
+#include "core/runtime/vlm_forward_params.h"
 #include "core/util/tensor_helper.h"
 #include "framework/model_loader/model_loader.h"
 #include "models/model_registry.h"
@@ -120,7 +125,7 @@ DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_layout(
 template <typename TargetInput>
 void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_padding(
     LlmModelParams& params,
-    Stream* prepare_stream) {
+    bool acquire_graph_capture_lock) {
   if (!draft_impl_->uses_npu_dp_ep_padding()) {
     return;
   }
@@ -133,11 +138,16 @@ void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_padding(
       return;
     }
   }
-  if (prepare_stream != nullptr) {
-    draft_impl_->prepare_dp_ep_padding_on_stream(ModelParamsView(params),
-                                                 *prepare_stream);
-  } else {
-    draft_impl_->prepare_dp_ep_padding(ModelParamsView(params));
+  {
+    std::optional<std::unique_lock<std::mutex>> capture_lock_guard;
+    if (acquire_graph_capture_lock &&
+        ExecutionConfig::get_instance().enable_graph()) {
+      capture_lock_guard.emplace(
+          npu::DeviceCaptureLock::get_instance().get_lock(
+              draft_impl_->device().index()));
+    }
+    params.parallel.dp_ep_padding_data =
+        draft_impl_->build_dp_ep_padding_data(tokens, raw_tokens, is_prefill);
   }
   if (!is_prefill) {
     dp_ep_padding_cache_.insert(
@@ -153,39 +163,6 @@ int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args) {
   const int64_t dp_size = std::max<int64_t>(parallel_args.dp_size(), 1);
   const int64_t cp_size = std::max<int64_t>(parallel_args.cp_size(), 1);
   return std::max<int64_t>(parallel_args.world_size() / dp_size / cp_size, 1);
-}
-
-std::string stable_path_digest(const std::string& path_string) {
-  const std::filesystem::path path(path_string);
-  std::error_code error;
-  const std::filesystem::path canonical_path =
-      std::filesystem::weakly_canonical(path, error);
-  const std::string normalized_path =
-      (error ? path.lexically_normal() : canonical_path).generic_string();
-  const XXH3Key path_hash = hash_string(normalized_path);
-
-  return absl::BytesToHexString(absl::string_view(
-      reinterpret_cast<const char*>(path_hash.data), sizeof(path_hash.data)));
-}
-
-std::string draft_store_key_component(const runtime::Options& options) {
-  const std::string algorithm =
-      absl::AsciiStrToLower(options.speculative_algorithm());
-
-  const std::string draft_model_path = options.draft_model_path().value_or("");
-  if (draft_model_path.empty()) {
-    return "spec_draft::" + algorithm + "::embedded";
-  }
-
-  std::string draft_model_name = std::filesystem::path(draft_model_path)
-                                     .lexically_normal()
-                                     .filename()
-                                     .generic_string();
-  if (draft_model_name.empty()) {
-    draft_model_name = "checkpoint";
-  }
-  return "spec_draft::" + algorithm + "::" + draft_model_name +
-         "::" + stable_path_digest(draft_model_path);
 }
 
 KVCacheEstimateOptions make_kv_cache_estimate_options(
@@ -289,6 +266,23 @@ DraftModelSpecWorkerImpl<TargetInput>::~DraftModelSpecWorkerImpl() {
   if (hierarchy_kv_transfer_ != nullptr) {
     hierarchy_kv_transfer_->shutdown();
   }
+}
+
+template <typename Input>
+std::optional<ForwardOutput> run_worker_no_sync_impl(
+    WorkerImpl& worker,
+    const Input& input,
+    Input& processed_input,
+    Stream& prepare_stream,
+    Stream& compute_stream,
+    WorkerImpl::ForwardCompletion completion) {
+  worker.prepare_work_before_execute(
+      input,
+      processed_input,
+      &prepare_stream,
+      /*record_ready_event=*/&prepare_stream != &compute_stream);
+  return worker.execute_no_sync_on_stream(
+      processed_input, compute_stream, completion);
 }
 
 template <typename TargetInput>
@@ -415,11 +409,31 @@ void DraftModelSpecWorkerImpl<TargetInput>::prepare_hierarchy_kv_transfers() {
   }
 
   if (draft_transfer == nullptr) {
+    std::string store_key_component =
+        "spec_draft::" +
+        absl::AsciiStrToLower(options_.speculative_algorithm()) + "::";
+    const std::filesystem::path path(options_.draft_model_path().value_or(""));
+    if (path.empty()) {
+      store_key_component += "embedded";
+    } else {
+      const auto normalized_path = path.lexically_normal();
+      const std::string model_name =
+          normalized_path.filename().generic_string();
+      std::error_code error;
+      const auto canonical_path =
+          std::filesystem::weakly_canonical(path, error);
+      const XXH3Key hash = hash_string(
+          (error ? normalized_path : canonical_path).generic_string());
+      store_key_component += model_name.empty() ? "checkpoint" : model_name;
+      store_key_component += "::";
+      store_key_component += absl::BytesToHexString(absl::string_view(
+          reinterpret_cast<const char*>(hash.data), sizeof(hash.data)));
+    }
     draft_impl_->bind_hierarchy_kv_transfer(
         unified_transfer,
         HierarchyKVTransfer::CacheRole::DRAFT,
         compute_stream_.get(),
-        draft_store_key_component(options_));
+        std::move(store_key_component));
   } else {
     CHECK_EQ(draft_transfer.get(), unified_transfer.get())
         << "Speculative draft worker hierarchy KV cache transfer changed "
@@ -545,6 +559,42 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_kv_cache_with_transfer(
 #endif
 
 template <typename TargetInput>
+bool DraftModelSpecWorkerImpl<TargetInput>::use_orthogonal_cp_consensus()
+    const {
+  return parallel_args_.cp_size() > 1 && parallel_args_.tp_group_ != nullptr &&
+         parallel_args_.cp_group_ != nullptr &&
+         parallel_args_.cp_group_ != parallel_args_.tp_group_;
+}
+
+// TP covers one CP shard. Broadcast along both axes within the DP replica.
+template <typename TargetInput>
+void DraftModelSpecWorkerImpl<TargetInput>::broadcast_spec_tokens(
+    torch::Tensor& tokens) const {
+  if (use_orthogonal_cp_consensus()) {
+    sync_sampling_tensor(tokens, parallel_args_.tp_group_);
+    sync_sampling_tensor(tokens, parallel_args_.cp_group_);
+    return;
+  }
+
+  sync_sampling_tensor(tokens,
+                       parallel_args_.tp_group_ != nullptr
+                           ? parallel_args_.tp_group_
+                           : parallel_args_.process_group_);
+}
+
+template <typename TargetInput>
+void DraftModelSpecWorkerImpl<TargetInput>::maybe_broadcast_spec_tokens(
+    torch::Tensor& tokens,
+    SamplingMode sampling_mode) const {
+  if (use_orthogonal_cp_consensus() ||
+      (context_.get_optimization_config().enable_spec_token_broadcast &&
+       sampling_mode != SamplingMode::GREEDY)) {
+    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+    broadcast_spec_tokens(tokens);
+  }
+}
+
+template <typename TargetInput>
 bool DraftModelSpecWorkerImpl<TargetInput>::prepare_model_decode_continuation(
     TargetInput& /*inputs*/,
     const ForwardOutput& /*prior_output*/) {
@@ -666,6 +716,21 @@ void DraftModelSpecWorkerImpl<TargetInput>::update_decode_step_input(
   input.runtime.input_host_buffer_has_layout = false;
   input.runtime.device_tensors_ready = false;
 }
+
+template std::optional<ForwardOutput> run_worker_no_sync_impl(
+    WorkerImpl&,
+    const LlmForwardInput&,
+    LlmForwardInput&,
+    Stream&,
+    Stream&,
+    WorkerImpl::ForwardCompletion);
+template std::optional<ForwardOutput> run_worker_no_sync_impl(
+    WorkerImpl&,
+    const VlmForwardInput&,
+    VlmForwardInput&,
+    Stream&,
+    Stream&,
+    WorkerImpl::ForwardCompletion);
 
 template class DraftModelSpecWorkerImpl<LlmForwardInput>;
 template class DraftModelSpecWorkerImpl<VlmForwardInput>;

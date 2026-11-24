@@ -24,9 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
-#include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/model/model_input_types.h"
-#include "core/framework/parallel_state/process_group.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "framework/sampling/sampling_params.h"
 #include "runtime/options.h"
@@ -137,9 +135,7 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   };
 
   std::shared_ptr<const JsonObjectGrammar> ensure_json_object_grammar(
-      bool reasoning_enabled) override {
-    return impl_->ensure_json_object_grammar(reasoning_enabled);
-  }
+      bool reasoning_enabled) override;
 
   // Common step dispatch: prefill / decode / empty
   std::optional<ForwardOutput> step(const TargetInput& input) override;
@@ -152,18 +148,9 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   };
 
  protected:
-#if defined(USE_NPU)
-  template <typename Params>
-  void prepare_target_padding(Params& params);
-#endif
-
   bool can_prepare_without_compute_stream_wait() const override {
     return false;
   }
-
-  bool prepare_model_decode_continuation(
-      TargetInput& inputs,
-      const ForwardOutput& prior_output) override;
 
   virtual void apply_target_model_overrides(ModelArgs&) const;
 
@@ -178,41 +165,6 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   void prepare_validate_inputs(const TargetInput& inputs,
                                TargetInput& validate_inputs,
                                bool expand_decode_metadata_per_token);
-
-  bool use_orthogonal_cp_consensus() const {
-    return parallel_args_.cp_size() > 1 &&
-           parallel_args_.tp_group_ != nullptr &&
-           parallel_args_.cp_group_ != nullptr &&
-           parallel_args_.cp_group_ != parallel_args_.tp_group_;
-  }
-
-  // Speculative state is replicated across every model rank within one DP
-  // replica. With orthogonal CP x TP, tp_group_ covers only one CP shard,
-  // while cp_group_ connects the same TP rank across CP shards. Broadcast
-  // along both axes so every replica caches and consumes the same sampled
-  // token, without crossing into another DP replica through the world group.
-  void broadcast_spec_tokens(torch::Tensor& tokens) const {
-    ProcessGroup* tp_group = parallel_args_.tp_group_ != nullptr
-                                 ? parallel_args_.tp_group_
-                                 : parallel_args_.process_group_;
-    if (!use_orthogonal_cp_consensus()) {
-      sync_sampling_tensor(tokens, tp_group);
-      return;
-    }
-
-    sync_sampling_tensor(tokens, parallel_args_.tp_group_);
-    sync_sampling_tensor(tokens, parallel_args_.cp_group_);
-  }
-
-  void maybe_broadcast_spec_tokens(torch::Tensor& tokens,
-                                   SamplingMode sampling_mode) const {
-    if (use_orthogonal_cp_consensus() ||
-        (get_optimization_config().enable_spec_token_broadcast &&
-         sampling_mode != SamplingMode::GREEDY)) {
-      c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-      broadcast_spec_tokens(tokens);
-    }
-  }
 
  protected:
   // Target model worker
