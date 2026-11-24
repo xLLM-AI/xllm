@@ -84,12 +84,7 @@ class SpeculativeConfig final {
 
   static std::optional<bool> chunked_block_diffusion(
       std::string_view algorithm,
-      std::string_view model_type) {
-    if (!is_block_diffusion_algorithm(algorithm)) {
-      return std::nullopt;
-    }
-    return model_type != "deepseek_v4_dspark";
-  }
+      std::string_view model_type);
 
   static bool requires_aux_hidden_capture(std::string_view algorithm) {
     return is_eagle3_algorithm(algorithm) ||
@@ -97,18 +92,7 @@ class SpeculativeConfig final {
   }
 
   // Aux-capture drafts share the target's KV layout, so they are included.
-  static bool supports_host_kv_cache(std::string_view algorithm) {
-    return is_mtp_algorithm(algorithm) || is_eagle3_algorithm(algorithm) ||
-           is_block_diffusion_algorithm(algorithm);
-  }
-
-  // DFlash2 carries the dense proposal only when probabilistic rejection
-  // requires it; greedy-only DFlash and Suffix stay out.
-  static bool is_probabilistic_draft_sampling_supported(
-      std::string_view algorithm) {
-    return is_mtp_algorithm(algorithm) || is_dspark_algorithm(algorithm) ||
-           is_dflash2_algorithm(algorithm) || is_eagle3_algorithm(algorithm);
-  }
+  static bool supports_host_kv_cache(std::string_view algorithm);
 
   void from_flags();
   void from_json(const JsonReader& json);

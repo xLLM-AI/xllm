@@ -26,15 +26,12 @@ limitations under the License.
 
 #include "common/types.h"
 #include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
-#include "core/framework/config/execution_config.h"
-#include "core/framework/config/model_config.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/hierarchy_kv_transfer.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
 #include "core/kv_cache/transfer/kv_transfer.h"
 #include "core/runtime/schedule_overlap.h"
 #include "core/runtime/worker_residency_state.h"
-#include "core/util/tensor_helper.h"
 #include "executor.h"
 #include "forward_params.h"
 #include "framework/model/causal_lm.h"
@@ -50,7 +47,6 @@ limitations under the License.
 #include "util/threadpool.h"
 #if defined(USE_NPU)
 #include "core/framework/model_loader/weight/mooncake_weight_transfer.h"
-#include "core/platform/npu/device_capture_lock.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
 #endif
 
@@ -63,31 +59,7 @@ class LinearStateSlotTable;
 template <typename Input>
 void build_dummy_forward_input(Input& input,
                                int32_t num_speculative_tokens,
-                               const torch::Device& device) {
-  const int32_t num_decoding_tokens = num_speculative_tokens + 1;
-  auto token_options = input.token_ids.defined()
-                           ? input.token_ids.options()
-                           : torch::TensorOptions().dtype(torch::kInt32);
-  auto position_options = input.positions.defined()
-                              ? input.positions.options()
-                              : torch::TensorOptions().dtype(torch::kInt32);
-  input.token_ids =
-      torch::ones({num_decoding_tokens}, token_options.device(device));
-  input.positions =
-      torch::arange(num_decoding_tokens, position_options.device(device));
-  input.input_params.embedding.linear_state_indices = torch::zeros(
-      {num_decoding_tokens}, token_options.dtype(torch::kInt32).device(device));
-  if (ModelConfig::is_python_model_impl(
-          ModelConfig::get_instance().model_impl())) {
-    auto& execution_batch = input.input_params.meta.execution_batch;
-    execution_batch.num_reqs = 0;
-    execution_batch.num_tokens = num_decoding_tokens;
-    execution_batch.num_scheduled_tokens.clear();
-    execution_batch.num_computed_tokens.clear();
-    execution_batch.is_prefilling.clear();
-    execution_batch.query_start_loc = {0};
-  }
-}
+                               const torch::Device& device);
 
 class WorkerImpl {
  public:
@@ -127,7 +99,6 @@ class WorkerImpl {
                                  const QuantArgs& quant_args,
                                  int32_t num_speculative_tokens,
                                  Tokenizer* tokenizer);
-  std::unique_ptr<Tokenizer> load_tokenizer(const ModelLoader& loader);
 
   virtual void load_model(std::unique_ptr<ModelLoader> loader);
 
@@ -186,11 +157,6 @@ class WorkerImpl {
       const std::vector<int32_t>& full_block_rows,
       const std::vector<uint64_t>& full_block_lease_epochs,
       Stream& prepare_stream);
-  void prepare_shared_kv_cache(
-      const std::vector<int32_t>& full_block_rows,
-      const std::vector<uint64_t>& full_block_lease_epochs,
-      const std::vector<int32_t>& linear_state_rows,
-      Stream& prepare_stream);
 #if defined(USE_NPU)
   DpEpPaddingData build_dp_ep_padding_data(
       const std::vector<int32_t>& token_sizes,
@@ -200,8 +166,6 @@ class WorkerImpl {
   bool uses_npu_dp_ep_padding() const;
   bool use_prefill_dp_ep_padding(const BatchInputMeta& meta) const;
   void prepare_dp_ep_padding(const ModelParamsView& params) const;
-  void prepare_dp_ep_padding_on_stream(const ModelParamsView& params,
-                                       Stream& prepare_stream) const;
 #endif
 
   // False on composites where only leaf workers consume parallel metadata.
@@ -318,10 +282,6 @@ class WorkerImpl {
 
   torch::ScalarType dtype() const { return dtype_; }
 
-  int32_t hidden_size() const {
-    return context_.get_model_args().hidden_size();
-  }
-
   bool enable_schedule_overlap() const {
     return options_.enable_schedule_overlap_;
   }
@@ -336,10 +296,6 @@ class WorkerImpl {
 
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;
-
-  OptimizationConfig get_optimization_config() const {
-    return context_.get_optimization_config();
-  }
 
  protected:
   virtual void prepare_expert_input(ExpertInput& /*input*/) const {}
@@ -373,34 +329,14 @@ class WorkerImpl {
   // stream. Leaf workers use this before their no-sync forward; composite
   // workers use it before their regular step dispatch.
   template <typename Input>
-  void prepare_schedule_overlap(const Input& input) {
-#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
-    defined(USE_MUSA)
-    if (has_request_state_cache()) {
-      c10::StreamGuard compute_guard = compute_stream_->set_stream_guard();
-      CHECK(compute_stream_->wait_event(input.runtime.metadata_ready_event))
-          << "failed to wait input metadata ready event on compute stream";
-      prepare_linear_state_cache(ModelParamsView(input.input_params));
-    }
-#else
-    (void)input;
-#endif
-  }
+  void prepare_schedule_overlap(const Input& input);
   // Keep no-sync inputs alive until their compute stream work is complete.
   // Overlap callers request an event; composite callers retire the ownership
   // through their own completion path.
   template <typename Input>
   void finalize_no_sync_output(ForwardOutput& output,
                                const Input& input,
-                               ForwardCompletion completion) {
-    if (completion == ForwardCompletion::CALLER_RETAINS_INPUT) {
-      return;
-    }
-    output.retained_inputs.emplace_back(std::make_shared<Input>(input.clone()));
-    if (completion == ForwardCompletion::RECORD_EVENT) {
-      output.ready_event = device_.current_stream()->record_event_or_sync();
-    }
-  }
+                               ForwardCompletion completion);
 
   // Return true when the model rebuilds this input in place or manages its
   // continuation in step(). Return false without changing the input to use
@@ -442,8 +378,6 @@ class WorkerImpl {
                                       bool use_huge_page_allocator);
   void register_kv_transfer(const KVCacheShape& kv_cache_shape);
 
-  bool wakeup_local(const WakeupOptions& options);
-
   // Virtual memory residency sleep path.
   virtual bool virtual_memory_sleep(MasterStatus master_status);
 
@@ -465,10 +399,6 @@ class WorkerImpl {
 
   WorkerResidencyState residency_state_;
 
-#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
-    defined(USE_MUSA)
-  void prepare_execution_metadata(const ModelParamsView& params);
-#endif
   template <typename Input>
   void restore_json_object_states(Input& input);
   template <typename Input>
@@ -486,9 +416,6 @@ class WorkerImpl {
   bool use_chunked_decode_attention(const BatchInputMeta& meta) const;
 
  protected:
-  // Borrowed model access; specialized workers retain ownership.
-  virtual Model* model() const { return model_.get(); }
-
   // runtime options
   runtime::Options options_;
 
@@ -560,98 +487,5 @@ class WorkerImpl {
 
   std::string model_weights_path_;
 };
-
-template <typename Input>
-void WorkerImpl::prepare_work_before_execute(const Input& input,
-                                             Input& processed_input,
-                                             Stream* prepare_stream,
-                                             bool record_ready_event) {
-  if (!input.json_object_state_snapshots.empty()) {
-    Input restored_input = input.clone();
-    restore_json_object_states(restored_input);
-    prepare_work_before_execute(
-        restored_input, processed_input, prepare_stream, record_ready_event);
-    return;
-  }
-  Stream& stream =
-      prepare_stream == nullptr ? *prepare_stream_ : *prepare_stream;
-#if defined(USE_NPU)
-  // Serialize prepare-stream H2D copies with ACL graph capture.
-  std::optional<std::unique_lock<std::mutex>> lock_guard;
-  if (ExecutionConfig::get_instance().enable_graph()) {
-    lock_guard.emplace(
-        npu::DeviceCaptureLock::get_instance().get_lock(device_.index()));
-  }
-#endif
-  c10::StreamGuard stream_guard = stream.set_stream_guard();
-  if (enable_schedule_overlap() && !can_prepare_without_compute_stream_wait() &&
-      compute_stream_) {
-    stream.wait_stream(*compute_stream_);
-  }
-  CHECK(stream.wait_event(input.runtime.metadata_ready_event))
-      << "failed to wait input metadata ready event on worker prepare stream";
-
-  processed_input = input.to(device_, dtype_);
-  // Packed RPC/SHM inputs may deserialize JSON snapshots during Input::to.
-  if (processed_input.json_object_states.empty() &&
-      !processed_input.json_object_state_snapshots.empty()) {
-    restore_json_object_states(processed_input);
-  }
-  move_tensor_to_device_if_needed(processed_input.token_ids, device_);
-  move_tensor_to_device_if_needed(processed_input.positions, device_);
-  move_tensor_to_device_if_needed(
-      processed_input.sampling_params.logits_indices(), device_);
-
-  auto& params = processed_input.input_params;
-  params.meta.num_speculative_tokens = options_.num_speculative_tokens();
-  prepare_model_input(processed_input);
-  if (params.meta.num_sequences != 0 ||
-      (processed_input.token_ids.defined() &&
-       processed_input.token_ids.numel() != 0)) {
-    prepare_shared_kv_cache(params.embedding.full_block_slot_rows,
-                            params.embedding.full_block_lease_epochs,
-                            params.embedding.linear_state_slot_rows,
-                            stream);
-#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
-    defined(USE_MUSA)
-    ModelParamsView execution_params(params);
-    prepare_execution_metadata(execution_params);
-#if defined(USE_NPU)
-    if (can_prepare_npu_graph_decode_input(params.meta)) {
-      model_executor_->prepare_graph_input(processed_input.token_ids,
-                                           processed_input.positions,
-                                           kv_caches_,
-                                           execution_params);
-    }
-#endif
-#endif
-  }
-
-  processed_input.runtime.metadata_ready_event =
-      record_ready_event ? stream.record_event_or_sync() : nullptr;
-}
-
-template <typename Input>
-void WorkerImpl::restore_json_object_states(Input& input) {
-  std::vector<JsonObjectGrammarState> states;
-  states.reserve(input.json_object_state_snapshots.size());
-  for (const auto& snapshot : input.json_object_state_snapshots) {
-    if (!snapshot.enabled) {
-      states.emplace_back();
-      continue;
-    }
-
-    std::shared_ptr<const JsonObjectGrammar> grammar =
-        ensure_json_object_grammar(snapshot.reasoning_enabled);
-    CHECK(grammar != nullptr) << "Failed to restore JSON object grammar";
-
-    JsonObjectGrammarState state = grammar->restore_state(snapshot);
-    CHECK(state.is_valid())
-        << "Serialized JSON object grammar state is invalid";
-    states.push_back(std::move(state));
-  }
-  input.json_object_states = std::move(states);
-  input.json_object_state_snapshots.clear();
-}
 
 }  // namespace xllm

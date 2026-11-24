@@ -91,10 +91,6 @@ bool unpack_from_input_host_buffer(const LlmForwardInput& input,
                                    LlmForwardInput& output,
                                    bool materialize_device_buffer);
 
-bool unpack_from_input_host_buffer(const LlmForwardInput& input,
-                                   const torch::Device& device,
-                                   LlmForwardInput& output);
-
 struct ForwardInputBufferEntry {
   torch::Tensor host_tensor;
   torch::Tensor* target = nullptr;

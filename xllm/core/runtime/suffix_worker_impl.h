@@ -34,6 +34,10 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl<LlmForwardInput> {
   ~SuffixWorkerImpl() override = default;
 
  protected:
+  bool prepare_model_decode_continuation(
+      LlmForwardInput& inputs,
+      const ForwardOutput& prior_output) override;
+
   std::optional<ForwardOutput> step_prefill(
       const LlmForwardInput& input) override;
   std::optional<ForwardOutput> step_decode(
