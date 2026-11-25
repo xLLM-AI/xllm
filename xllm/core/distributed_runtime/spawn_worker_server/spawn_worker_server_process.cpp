@@ -79,6 +79,7 @@ limitations under the License.
 // @max_tokens_per_chunk_for_prefill
 // @enable_chunked_prefill
 // @enable_dp_fair_token_budget
+// @vae_size (optional, Python DiT)
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -153,6 +154,11 @@ int main(int argc, char* argv[]) {
   int32_t tp_size = static_cast<int32_t>(atoi(argv[27]));
   int32_t sp_size = static_cast<int32_t>(atoi(argv[28]));
   int32_t cfg_size = static_cast<int32_t>(atoi(argv[29]));
+  const int32_t vae_size =
+      argc > xllm::spawn_worker_protocol::kVaeSizeArgumentIndex
+          ? static_cast<int32_t>(
+                atoi(argv[xllm::spawn_worker_protocol::kVaeSizeArgumentIndex]))
+          : 1;
   const int32_t text_encoder_tp_size =
       argc > xllm::spawn_worker_protocol::kTextEncoderTpSizeArgumentIndex
           ? static_cast<int32_t>(
@@ -177,7 +183,7 @@ int main(int argc, char* argv[]) {
           xllm::spawn_worker_protocol::kEnableMtpDraftBodyTp1ArgumentIndex);
   if (world_size < 1 || global_rank < 0 || global_rank >= world_size ||
       cp_size < 1 || ep_size < 1 || text_encoder_tp_size < 1 ||
-      kv_split_size < 0 ||
+      kv_split_size < 0 || vae_size < 1 || world_size % vae_size != 0 ||
       (instance_role_str != "DEFAULT" && instance_role_str != "PREFILL" &&
        instance_role_str != "DECODE")) {
     LOG(ERROR) << "Invalid spawn worker topology: global_rank=" << global_rank
@@ -272,6 +278,7 @@ int main(int argc, char* argv[]) {
                                    tp_size,
                                    sp_size,
                                    cfg_size,
+                                   vae_size,
                                    text_encoder_tp_size,
                                    instance_role,
                                    enable_mtp_draft_body_tp1,

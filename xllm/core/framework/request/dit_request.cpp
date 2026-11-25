@@ -209,11 +209,11 @@ std::vector<DiTGenerationOutput> DiTRequest::generate_video_outputs() const {
   std::vector<DiTGenerationOutput> outputs;
   outputs.reserve(output_.tensors.size());
   for (size_t index = 0; index < output_.tensors.size(); ++index) {
-    torch::Tensor tensor = output_.tensors[index]
-                               .squeeze(0)
-                               .cpu()
-                               .to(torch::kFloat32)
-                               .contiguous();
+    torch::Tensor tensor = output_.tensors[index].squeeze(0).cpu();
+    if (tensor.scalar_type() != torch::kUInt8) {
+      tensor = tensor.to(torch::kFloat32);
+    }
+    tensor = tensor.contiguous();
     CHECK_EQ(tensor.dim(), 4);
     DiTGenerationOutput output;
     fill_output_identity(output, index, params);

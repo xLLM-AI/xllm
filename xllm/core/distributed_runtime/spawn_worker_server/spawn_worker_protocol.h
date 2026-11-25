@@ -42,6 +42,7 @@ inline constexpr int32_t kEplbArgumentCount = 43;
 inline constexpr int32_t kPrefillChunkArgumentIndex = 43;
 inline constexpr int32_t kEnableChunkedPrefillArgumentIndex = 44;
 inline constexpr int32_t kEnableDpFairTokenBudgetArgumentIndex = 45;
+inline constexpr int32_t kVaeSizeArgumentIndex = kArgumentCount;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
 
 inline std::optional<std::string> parse_indexer_cache_dtype(

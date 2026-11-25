@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -1102,6 +1103,27 @@ class MemoryAudioWriter final {
   int32_t channels_ = 0;
 };
 
+template <typename Pixel>
+void interleave_rgb_frame(const torch::TensorAccessor<Pixel, 3>& frame,
+                          int64_t height,
+                          int64_t width,
+                          std::vector<uint8_t>& rgb) {
+  size_t offset = 0;
+  for (int64_t y = 0; y < height; ++y) {
+    for (int64_t x = 0; x < width; ++x) {
+      for (int64_t channel = 0; channel < 3; ++channel) {
+        const Pixel value = frame[channel][y][x];
+        if constexpr (std::is_same_v<Pixel, float>) {
+          rgb[offset++] =
+              static_cast<uint8_t>(std::clamp(value * 255.0f, 0.0f, 255.0f));
+        } else {
+          rgb[offset++] = value;
+        }
+      }
+    }
+  }
+}
+
 class MemoryVideoWriter final : public MemoryMediaWriter {
  public:
   MemoryVideoWriter() = default;
@@ -1147,8 +1169,10 @@ class MemoryVideoWriter final : public MemoryMediaWriter {
                  << video.sizes();
       return false;
     }
-    if (video.scalar_type() != torch::kFloat32 || !video.device().is_cpu()) {
-      LOG(ERROR) << "MemoryVideoWriter: expects cpu float32 tensor";
+    const bool is_rgb8 = video.scalar_type() == torch::kUInt8;
+    if ((!is_rgb8 && video.scalar_type() != torch::kFloat32) ||
+        !video.device().is_cpu()) {
+      LOG(ERROR) << "MemoryVideoWriter: expects CPU float32 or uint8 frames";
       return false;
     }
 
@@ -1235,24 +1259,15 @@ class MemoryVideoWriter final : public MemoryMediaWriter {
       return false;
     }
 
-    auto video_acc = video.accessor<float, 4>();
     const int64_t stride = W * 3;
     std::vector<uint8_t> rgb_buf(static_cast<size_t>(H * stride));
     int64_t pts = 0;
 
     for (int64_t t = 0; t < T; ++t) {
-      for (int64_t y = 0; y < H; ++y) {
-        for (int64_t x = 0; x < W; ++x) {
-          rgb_buf[static_cast<size_t>(y * stride + x * 3 + 0)] =
-              static_cast<uint8_t>(
-                  std::clamp(video_acc[t][0][y][x] * 255.0f, 0.0f, 255.0f));
-          rgb_buf[static_cast<size_t>(y * stride + x * 3 + 1)] =
-              static_cast<uint8_t>(
-                  std::clamp(video_acc[t][1][y][x] * 255.0f, 0.0f, 255.0f));
-          rgb_buf[static_cast<size_t>(y * stride + x * 3 + 2)] =
-              static_cast<uint8_t>(
-                  std::clamp(video_acc[t][2][y][x] * 255.0f, 0.0f, 255.0f));
-        }
+      if (is_rgb8) {
+        interleave_rgb_frame(video.accessor<uint8_t, 4>()[t], H, W, rgb_buf);
+      } else {
+        interleave_rgb_frame(video.accessor<float, 4>()[t], H, W, rgb_buf);
       }
 
       const uint8_t* src_data[1] = {rgb_buf.data()};
