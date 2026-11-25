@@ -26,6 +26,7 @@ limitations under the License.
 #include "dit_engine.h"
 #include "framework/request/dit_request_params.h"
 #include "master.h"
+#include "models/dit/dit_model_policy.h"
 #include "scheduler/dit_scheduler.h"
 
 namespace xllm {
@@ -58,7 +59,7 @@ class DiTMaster : public Master {
   void generate();
 
  private:
-  bool is_python_minimax_h3_ = false;
+  DiTRequestValidator request_validator_ = nullptr;
   std::unique_ptr<DiTEngine> dit_engine_;
   // Scheduler must be destroyed before the engine it references.
   std::unique_ptr<DiTScheduler> scheduler_;

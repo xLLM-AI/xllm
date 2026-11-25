@@ -13,12 +13,14 @@ cc_library(
     model_registry.h
     speech_model.h
     models.h
+    dit/dit_model_policy.h
     dit/utils/lanczos_resample.h
     dit/py_dit_model.h
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.h>
     py_model_helper.h
   SRCS
     model_registry.cpp
+    dit/dit_model_policy.cpp
     dit/utils/lanczos_resample.cpp
     dit/py_dit_model.cpp
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.cpp>
