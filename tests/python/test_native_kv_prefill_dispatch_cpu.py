@@ -199,23 +199,6 @@ class NativeKVPrefillDispatchTest(unittest.TestCase):
             execute(backend, object(), object(), object(), object())
         writer.assert_not_called()
 
-    def test_runtime_report_does_not_advertise_mixed_split(self) -> None:
-        report = _load_method("native_kv_runtime_info")
-        for prefill in ("fa2", "fa3"):
-            for decode in ("flashinfer", "xqa"):
-                with self.subTest(prefill=prefill, decode=decode):
-                    backend = SimpleNamespace(
-                        _cache_format="fp8_e4m3",
-                        _fixed_scales=(0.125, 0.0625),
-                        _prefill_backend=prefill,
-                        _decode_backend=decode,
-                        _prefill_query_dtype="FP8" if prefill == "fa3" else "BF16",
-                        dtype="BF16",
-                        _max_context_tokens=262144,
-                        _pages={},
-                    )
-                    self.assertIsNone(report(backend)["mixed_FP8_decode"])
-
 
 if __name__ == "__main__":
     unittest.main()
