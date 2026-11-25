@@ -204,10 +204,6 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["enable_vmm_kvcache"] = kv_config.enable_vmm_kvcache();
   executor_config["kv_cache_k_scale"] = kv_config.kv_cache_k_scale();
   executor_config["kv_cache_v_scale"] = kv_config.kv_cache_v_scale();
-  executor_config["kv_cache_decode_backend"] =
-      kv_config.kv_cache_decode_backend();
-  executor_config["kv_cache_prefill_backend"] =
-      kv_config.kv_cache_prefill_backend();
   executor_config["enable_disagg_pd"] = options_.enable_disagg_pd();
   executor_config["instance_role"] = options_.instance_role().to_string();
   executor_config["task_type"] = options_.task_type();

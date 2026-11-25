@@ -262,8 +262,6 @@ def _create_attention_backend(
                 cache_dtype=cache_dtype,
                 key_scale=float(config.get("kv_cache_k_scale", 1.0)),
                 value_scale=float(config.get("kv_cache_v_scale", 1.0)),
-                prefill_backend=config.get("kv_cache_prefill_backend", "auto"),
-                decode_backend=config.get("kv_cache_decode_backend", "auto"),
                 max_context_tokens=int(config.get("max_position_embeddings", 32768)),
                 virtual_memory=bool(config.get("enable_vmm_kvcache", False)),
             )

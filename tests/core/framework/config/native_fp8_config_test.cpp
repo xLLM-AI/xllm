@@ -29,40 +29,31 @@ namespace {
 TEST(NativeFP8ConfigTest, XqaPageSizesAreCheckedBeforeAllocation) {
   KVCacheConfig config;
   config.kv_cache_dtype("fp8_e4m3");
-  for (const std::string& backend : {"auto", "xqa"}) {
-    SCOPED_TRACE(backend);
-    config.kv_cache_decode_backend(backend);
-    for (const int32_t size : {16, 32, 64, 128}) {
-      config.block_size(size);
-      EXPECT_NO_FATAL_FAILURE(config.validate());
-    }
-    for (const int32_t size : {0, -1, 8, 256}) {
-      config.block_size(size);
-      EXPECT_DEATH(config.validate(), "FP8 XQA requires block_size");
-    }
+  for (const int32_t size : {16, 32, 64, 128}) {
+    config.block_size(size);
+    EXPECT_NO_FATAL_FAILURE(config.validate());
+  }
+  for (const int32_t size : {0, -1, 8, 256}) {
+    config.block_size(size);
+    EXPECT_DEATH(config.validate(), "FP8 XQA requires block_size");
   }
 }
 
-TEST(NativeFP8ConfigTest, PageSizeRestrictionDoesNotAffectOtherBackends) {
+TEST(NativeFP8ConfigTest, PageSizeRestrictionDoesNotAffectOtherFormats) {
   KVCacheConfig config;
-  config.kv_cache_dtype("fp8_e4m3")
-      .kv_cache_decode_backend("flashinfer")
-      .block_size(256);
-  EXPECT_NO_FATAL_FAILURE(config.validate());
+  config.block_size(/*value=*/256);
   for (const std::string& dtype : {"auto", "int8"}) {
-    config.kv_cache_dtype(dtype).kv_cache_decode_backend("auto");
+    config.kv_cache_dtype(dtype);
     EXPECT_NO_FATAL_FAILURE(config.validate());
   }
 }
 
-TEST(NativeFP8ConfigTest, ScalesAndBackendsRoundTripThroughJson) {
+TEST(NativeFP8ConfigTest, ScalesRoundTripThroughJson) {
   google::FlagSaver flag_saver;
   KVCacheConfig original;
   original.kv_cache_dtype("fp8_e4m3")
       .kv_cache_k_scale(0.125)
-      .kv_cache_v_scale(0.5)
-      .kv_cache_prefill_backend("fa3")
-      .kv_cache_decode_backend("xqa");
+      .kv_cache_v_scale(0.5);
   nlohmann::ordered_json encoded = nlohmann::ordered_json::object();
   original.append_config_json(encoded);
   KVCacheConfig restored;
@@ -71,8 +62,6 @@ TEST(NativeFP8ConfigTest, ScalesAndBackendsRoundTripThroughJson) {
   EXPECT_EQ(restored.kv_cache_dtype(), "fp8_e4m3");
   EXPECT_DOUBLE_EQ(restored.kv_cache_k_scale(), 0.125);
   EXPECT_DOUBLE_EQ(restored.kv_cache_v_scale(), 0.5);
-  EXPECT_EQ(restored.kv_cache_prefill_backend(), "fa3");
-  EXPECT_EQ(restored.kv_cache_decode_backend(), "xqa");
 }
 
 }  // namespace

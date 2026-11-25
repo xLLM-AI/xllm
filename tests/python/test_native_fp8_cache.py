@@ -11,40 +11,57 @@
 
 """Resident-page ownership on CPU; writer/query numerics and replay on SM90."""
 
-import json
+from __future__ import annotations
+
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
 
-from xllm.python.attention.xqa_decode import _XQA_PAGE_SIZES
+from xllm.python.attention.backend import LayerCache
 
-from .test_native_kv_prefill_dispatch_cpu import _load_method
+if TYPE_CHECKING:
+    from xllm.python.attention.flashinfer_native_kv import FlashInferNativeKVBackend
 
 
-def test_fp8_aliases_preserve_owner_and_whole_page_copy() -> None:
-    bind = _load_method(
-        "bind_kv_caches", globals_={"_XQA_PAGE_SIZES": _XQA_PAGE_SIZES, "torch": torch, "logger": Mock(), "json": json}
-    )
+@pytest.fixture
+def backend_type() -> type[FlashInferNativeKVBackend]:
+    pytest.importorskip("triton")
+    pytest.importorskip("flashinfer")
+    from xllm.python.attention.flashinfer_native_kv import FlashInferNativeKVBackend
+
+    return FlashInferNativeKVBackend
+
+
+@pytest.fixture
+def storage_backend(backend_type: type[FlashInferNativeKVBackend]) -> FlashInferNativeKVBackend:
+    # Binding needs the workspace device, but does not allocate or launch CUDA kernels.
+    backend = backend_type.__new__(backend_type)
+    backend.head_dim = 256
+    backend.num_kv_heads = 4
+    backend._decode_workspace = torch.empty(0)
+    backend._fixed_scales = (0.125, 0.5)
+    backend._max_context_tokens = 32768
+    backend.dtype = torch.bfloat16
+    return backend
+
+
+def test_fp8_aliases_preserve_storage_and_whole_page_copy(storage_backend: FlashInferNativeKVBackend) -> None:
     owner_k = torch.zeros((3, 128, 4, 256), dtype=torch.uint8)
     owner_v = torch.zeros_like(owner_k)
-    linear = SimpleNamespace(key=None, value=None)
-    caches = [linear, SimpleNamespace(key=owner_k, value=owner_v)]
-    backend = SimpleNamespace(
-        head_dim=256,
-        num_kv_heads=4,
-        _decode_backend="xqa",
-        _decode_workspace=torch.empty(1),
-        native_kv_runtime_info=lambda: {},
-    )
-    bind(backend, caches)
-    key, value = backend._pages[1]
+    caches = [LayerCache(None, None), LayerCache(owner_k, owner_v)]
+    storage_backend.bind_kv_caches(caches)
+    key, value = storage_backend._pages[1]
     assert key.dtype == value.dtype == torch.float8_e4m3fn
     assert key.data_ptr() == owner_k.data_ptr()
     assert value.data_ptr() == owner_v.data_ptr()
-    assert backend._kv_caches is caches
-    assert 0 not in backend._pages
+    assert storage_backend._kv_caches is caches
+    assert 0 not in storage_backend._pages
+    info = storage_backend.native_kv_runtime_info()
+    actual_storage = owner_k.untyped_storage().nbytes() + owner_v.untyped_storage().nbytes()
+    assert info["resident_KV_bytes"] == info["KV_tensor_address_bytes"] == actual_storage
+    assert info["resident_global_scale_bytes"] == 0
     owner_k[0].fill_(17)
     owner_v[0].fill_(29)
     owner_k[2].copy_(owner_k[0])
@@ -54,30 +71,8 @@ def test_fp8_aliases_preserve_owner_and_whole_page_copy() -> None:
     assert not owner_k[1].any()
 
 
-def test_runtime_byte_count_uses_full_attention_storage() -> None:
-    report = _load_method("native_kv_runtime_info")
-    owners = (torch.empty((2, 128, 4, 256), dtype=torch.uint8), torch.empty((2, 128, 4, 256), dtype=torch.uint8))
-    pages = tuple(tensor.view(torch.float8_e4m3fn) for tensor in owners)
-    backend = SimpleNamespace(
-        _cache_format="fp8_e4m3",
-        _fixed_scales=(0.125, 0.5),
-        _pages={1: pages},
-        _prefill_backend="fa3",
-        _decode_backend="xqa",
-        _prefill_query_dtype=torch.float8_e4m3fn,
-        dtype=torch.bfloat16,
-        _max_context_tokens=32768,
-    )
-    info = report(backend)
-    actual_storage = sum(tensor.untyped_storage().nbytes() for tensor in owners)
-    assert info["resident_KV_bytes"] == actual_storage
-    assert info["KV_tensor_address_bytes"] == actual_storage
-    assert info["resident_global_scale_bytes"] == 0
-
-
 @pytest.mark.parametrize("kind", ["dtype", "shape", "strides", "missing_value"])
-def test_fp8_binding_rejects_wrong_physical_storage(kind: str) -> None:
-    bind = _load_method("bind_kv_caches", globals_={"_XQA_PAGE_SIZES": _XQA_PAGE_SIZES, "torch": torch})
+def test_fp8_binding_rejects_wrong_physical_storage(storage_backend: FlashInferNativeKVBackend, kind: str) -> None:
     key = torch.zeros((2, 128, 4, 256), dtype=torch.uint8)
     if kind == "dtype":
         key = key.to(torch.bfloat16)
@@ -86,81 +81,72 @@ def test_fp8_binding_rejects_wrong_physical_storage(kind: str) -> None:
     elif kind == "strides":
         key = key.transpose(0, 1)
     value = None if kind == "missing_value" else key.clone()
-    backend = SimpleNamespace(head_dim=256, num_kv_heads=4, _decode_backend="xqa", _decode_workspace=torch.empty(1))
     with pytest.raises(ValueError, match="contiguous resident byte pages"):
-        bind(backend, [SimpleNamespace(key=key, value=value)])
+        storage_backend.bind_kv_caches([LayerCache(key, value)])
 
 
 @pytest.mark.parametrize("shape", [(2, 64, 4, 256), (3, 128, 4, 256)])
-def test_fp8_layers_must_share_page_geometry(shape: tuple[int, ...]) -> None:
-    bind = _load_method(
-        "bind_kv_caches", globals_={"_XQA_PAGE_SIZES": _XQA_PAGE_SIZES, "torch": torch, "logger": Mock(), "json": json}
-    )
+def test_fp8_layers_must_share_page_geometry(
+    storage_backend: FlashInferNativeKVBackend, shape: tuple[int, ...]
+) -> None:
     first = torch.zeros((2, 128, 4, 256), dtype=torch.uint8)
     other = torch.zeros(shape, dtype=torch.uint8)
-    backend = SimpleNamespace(
-        head_dim=256,
-        num_kv_heads=4,
-        _decode_backend="xqa",
-        _decode_workspace=torch.empty(1),
-        native_kv_runtime_info=lambda: {},
-    )
     with pytest.raises(ValueError, match="same page geometry"):
-        bind(
-            backend, [SimpleNamespace(key=first, value=first.clone()), SimpleNamespace(key=other, value=other.clone())]
-        )
+        storage_backend.bind_kv_caches([LayerCache(first, first.clone()), LayerCache(other, other.clone())])
 
 
-@pytest.mark.parametrize("shape", [(0, 128, 4, 256), (2, 0, 4, 256)])
-def test_fp8_requires_nonempty_resident_pages(shape: tuple[int, ...]) -> None:
-    bind = _load_method(
-        "bind_kv_caches", globals_={"_XQA_PAGE_SIZES": _XQA_PAGE_SIZES, "torch": torch, "logger": Mock(), "json": json}
-    )
-    key = torch.empty(shape, dtype=torch.uint8)
-    backend = SimpleNamespace(
-        head_dim=256,
-        num_kv_heads=4,
-        _decode_backend="xqa",
-        _decode_workspace=torch.empty(1),
-        native_kv_runtime_info=lambda: {},
-    )
-    with pytest.raises(ValueError, match="nonempty resident pages"):
-        bind(backend, [SimpleNamespace(key=key, value=key.clone())])
-
-
-def test_fp8_xqa_rejects_unsupported_page_size_when_binding() -> None:
-    bind = _load_method(
-        "bind_kv_caches", globals_={"_XQA_PAGE_SIZES": _XQA_PAGE_SIZES, "torch": torch, "logger": Mock(), "json": json}
-    )
-    key = torch.empty((2, 256, 4, 256), dtype=torch.uint8)
-    backend = SimpleNamespace(
-        head_dim=256,
-        num_kv_heads=4,
-        _decode_backend="xqa",
-        _decode_workspace=torch.empty(1),
-        native_kv_runtime_info=lambda: {},
-    )
-    with pytest.raises(ValueError, match="XQA page size"):
-        bind(backend, [SimpleNamespace(key=key, value=key.clone())])
+@pytest.mark.parametrize(
+    ("blocks", "page_size", "error"),
+    [(0, 128, "nonempty resident pages"), (2, 0, "nonempty resident pages"), (2, 256, "XQA page size")],
+)
+def test_fp8_rejects_invalid_pages(
+    storage_backend: FlashInferNativeKVBackend, blocks: int, page_size: int, error: str
+) -> None:
+    key = torch.empty((blocks, page_size, 4, 256), dtype=torch.uint8)
+    with pytest.raises(ValueError, match=error):
+        storage_backend.bind_kv_caches([LayerCache(key, key.clone())])
 
 
 @pytest.mark.parametrize("cache_dtype", ["nvfp4", "mxfp4", "fp8_e5m2"])
-def test_pr_backend_rejects_other_formats(cache_dtype: str) -> None:
-    constructor = _load_method("__init__")
+def test_backend_rejects_other_formats(backend_type: type[FlashInferNativeKVBackend], cache_dtype: str) -> None:
     with pytest.raises(ValueError, match="fp8_e4m3"):
-        constructor(object(), 24, 4, 256, 0.0625, 0, torch.device("cuda"), torch.bfloat16, cache_dtype)
+        backend_type(24, 4, 256, 0.0625, 0, torch.device("cuda"), torch.bfloat16, cache_dtype)
 
 
-def test_fp8_rejects_unqualified_virtual_pages() -> None:
-    import math
-
-    constructor = _load_method("__init__", globals_={"_XQA_PAGE_SIZES": _XQA_PAGE_SIZES, "torch": torch, "math": math})
-    with (
-        patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)),
-        pytest.raises(ValueError, match="VMM is not qualified"),
-    ):
-        constructor(
-            object(), 24, 4, 256, 0.0625, 0, torch.device("cuda"), torch.bfloat16, "fp8_e4m3", virtual_memory=True
+@pytest.mark.parametrize(
+    ("capability", "heads", "kv_heads", "dim", "window", "vmm", "error"),
+    [
+        ((8, 6), 24, 4, 256, 0, False, "SM90"),
+        ((9, 0), 24, 4, 64, 0, False, "head_dim"),
+        ((9, 0), 8, 4, 256, 0, False, "GQA"),
+        ((9, 0), 17, 4, 256, 0, False, "GQA"),
+        ((9, 0), 24, 4, 256, 0, True, "VMM"),
+        ((9, 0), 24, 4, 256, 128, False, "full attention"),
+    ],
+)
+def test_rejects_unsupported_attention_before_allocation(
+    backend_type: type[FlashInferNativeKVBackend],
+    monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    heads: int,
+    kv_heads: int,
+    dim: int,
+    window: int,
+    vmm: bool,
+    error: str,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: capability)
+    with pytest.raises(ValueError, match=error):
+        backend_type(
+            heads,
+            kv_heads,
+            dim,
+            dim**-0.5,
+            window,
+            torch.device("cuda"),
+            torch.bfloat16,
+            "fp8_e4m3",
+            virtual_memory=vmm,
         )
 
 
@@ -208,18 +194,18 @@ def test_query_conversion_preserves_strided_values() -> None:
 
 
 @pytest.mark.skipif(not _SM90, reason="Native FP8 integration targets SM90")
-@pytest.mark.parametrize("phase", ["chunked_mixed", "decode", "decode_graph"])
-def test_native_attention_matches_dense_reference(phase: str) -> None:
+@pytest.mark.parametrize("phase", ["prefill", "chunked_mixed", "decode", "decode_graph"])
+@pytest.mark.parametrize(("dtype", "v_scale"), [(torch.bfloat16, 0.5), (torch.float16, 0.0625)])
+def test_native_attention_matches_dense_reference(phase: str, dtype: torch.dtype, v_scale: float) -> None:
     pytest.importorskip("triton")
     pytest.importorskip("flashinfer")
-    from xllm.python.attention.backend import LayerCache
     from xllm.python.attention.flashinfer_native_kv import FlashInferNativeKVBackend
 
     # The first sequence crosses a page boundary. The second stays in one page.
     # Mixed prefill appends two queries and one decode token in a single call.
     device = torch.device("cuda")
     page, dim, heads = 16, 128, 8
-    k_scale, v_scale = 0.125, 0.5
+    k_scale = 0.125
     backend = FlashInferNativeKVBackend(
         heads,
         1,
@@ -227,7 +213,7 @@ def test_native_attention_matches_dense_reference(phase: str) -> None:
         dim**-0.5,
         0,
         device,
-        torch.bfloat16,
+        dtype,
         "fp8_e4m3",
         k_scale,
         v_scale,
@@ -237,14 +223,16 @@ def test_native_attention_matches_dense_reference(phase: str) -> None:
 
     def samples(count: int, nheads: int) -> torch.Tensor:
         # Exactly representable inputs make paging, scale and causal errors visible.
-        return torch.randint(-4, 5, (count, nheads, dim), generator=rng, device=device).bfloat16() / 2
+        return torch.randint(-4, 5, (count, nheads, dim), generator=rng, device=device).to(dtype) / 2
 
+    prefill = phase == "prefill"
     mixed = phase == "chunked_mixed"
-    prefix = 15 if mixed else 16
-    q = samples(3 if mixed else 2, heads)
+    prefix = 0 if prefill else (15 if mixed else 16)
+    second_prefix = 0 if prefill else 2
+    new_indices = [*range(prefix, 17), *range(17 + second_prefix, 20)]
+    q = samples(len(new_indices), heads)
     keys, values = samples(20, 1), samples(20, 1)
     slots = [*range(32, 48), 16, 48, 49, 50]
-    new_indices = [*range(prefix, 17), 19]
     cache_slots = torch.tensor(slots, device=device)
     caches = []
     for source, scale in ((keys, k_scale), (values, v_scale)):
@@ -255,10 +243,12 @@ def test_native_attention_matches_dense_reference(phase: str) -> None:
     backend.bind_kv_caches([LayerCache(key=caches[0], value=caches[1])])
     indptr = torch.tensor([0, 2, 3], dtype=torch.int32)
     tails = torch.tensor([1, 3], dtype=torch.int32)
+    qo_indptr = torch.tensor([0, 17 - prefix, q.size(0)], device=device, dtype=torch.int32)
     metadata = SimpleNamespace(
-        is_prefill=False,
+        is_prefill=prefill,
         is_chunked_prefill=mixed,
-        qo_indptr=torch.tensor([0, q.size(0) - 1, q.size(0)], device=device, dtype=torch.int32),
+        qo_indptr=None if prefill else qo_indptr,
+        q_cu_seq_lens=qo_indptr,
         paged_kv_indptr_host=indptr,
         paged_kv_last_page_len_host=tails,
         paged_kv_indptr=indptr.cuda(),
@@ -267,9 +257,23 @@ def test_native_attention_matches_dense_reference(phase: str) -> None:
         slot_mapping=cache_slots[new_indices].int(),
     )
     graph_mode = phase == "decode_graph"
-    backend.prepare(metadata, graph_mode=graph_mode)
     k, v = keys[new_indices], values[new_indices]
     layer = SimpleNamespace(layer_id=0)
+    if phase == "decode":
+        # A failed plan must leave the original pages intact even if execute is called.
+        metadata.paged_kv_indptr_host = None
+        with pytest.raises(ValueError, match="CPU planner metadata"):
+            backend.prepare(metadata)
+        with pytest.raises(RuntimeError, match="before writing KV"):
+            backend.execute(q, k, v, layer)
+        for owner in caches:
+            assert not owner.view(-1, 1, dim)[cache_slots[new_indices]].any()
+        metadata.paged_kv_indptr_host = indptr
+    backend.prepare(metadata, graph_mode=graph_mode)
+    if phase in ("decode", "decode_graph"):
+        plan = backend._active_xqa_plan
+        backend.prepare(metadata, graph_mode=graph_mode)
+        assert backend._active_xqa_plan is plan
     output = backend.execute(q, k, v, layer)
     if graph_mode:
         graph = torch.cuda.CUDAGraph()
@@ -278,7 +282,7 @@ def test_native_attention_matches_dense_reference(phase: str) -> None:
         q.neg_()
         graph.replay()
 
-    contexts = [(0, end) for end in range(prefix + 1, 18)] + [(17, 20)]
+    contexts = [(0, end) for end in range(prefix + 1, 18)] + [(17, end) for end in range(18 + second_prefix, 21)]
     reference, rounded_reference = [], []
     fp8 = torch.finfo(torch.float8_e4m3fn)
     for query, (start, stop) in zip(q, contexts, strict=True):

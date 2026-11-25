@@ -69,16 +69,6 @@ DEFINE_double(kv_cache_v_scale,
               1.0,
               "Native quantized KV immutable global V decode scale.");
 
-DEFINE_string(
-    kv_cache_prefill_backend,
-    "auto",
-    "Explicit native KV prefill backend; auto selects a supported route.");
-
-DEFINE_string(
-    kv_cache_decode_backend,
-    "auto",
-    "Explicit native KV decode backend; auto selects a supported route.");
-
 DEFINE_string(indexer_cache_dtype,
               "auto",
               "Indexer cache data type for quantization. \"auto\" (default): "
@@ -131,8 +121,6 @@ void KVCacheConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_k_scale);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_v_scale);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_decode_backend);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_prefill_backend);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(indexer_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_events_config);
@@ -154,8 +142,6 @@ void KVCacheConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_k_scale);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_v_scale);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_decode_backend);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_prefill_backend);
   XLLM_CONFIG_ASSIGN_FROM_JSON(indexer_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_events_config);
@@ -185,10 +171,6 @@ void KVCacheConfig::append_config_json(
       config_json, default_config, kv_cache_k_scale);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, kv_cache_v_scale);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, kv_cache_decode_backend);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, kv_cache_prefill_backend);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, indexer_cache_dtype);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
@@ -240,14 +222,7 @@ void KVCacheConfig::validate() const {
   CHECK(std::isfinite(kv_cache_v_scale_) &&
         kv_cache_v_scale_ >= std::numeric_limits<float>::min() &&
         kv_cache_v_scale_ <= std::numeric_limits<float>::max());
-  CHECK(kv_cache_prefill_backend_ == "auto" ||
-        kv_cache_prefill_backend_ == "fa2" ||
-        kv_cache_prefill_backend_ == "fa3");
-  CHECK(kv_cache_decode_backend_ == "auto" ||
-        kv_cache_decode_backend_ == "flashinfer" ||
-        kv_cache_decode_backend_ == "xqa");
-  if (kv_cache_dtype_ == "fp8_e4m3" &&
-      kv_cache_decode_backend_ != "flashinfer") {
+  if (kv_cache_dtype_ == "fp8_e4m3") {
     CHECK(block_size_ == 16 || block_size_ == 32 || block_size_ == 64 ||
           block_size_ == 128)
         << "FP8 XQA requires block_size 16, 32, 64 or 128; got " << block_size_;
