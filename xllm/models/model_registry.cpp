@@ -853,8 +853,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context) {
           << "Python MiniMax-H3 supports T2VA with fl2va weights";
       CHECK(context.get_dit_config().selected_policy == PolicyType::None)
           << "Python MiniMax-H3 requires dit_cache_policy=None";
-      CHECK(!config.dit_laser_attention_enabled() &&
-            !config.dit_sparse_attention_enabled() &&
+      CHECK(!config.dit_sparse_attention_enabled() &&
             !ExecutionConfig::get_instance().enable_graph() &&
             !LoadConfig::get_instance().enable_rolling_load())
           << "Python MiniMax-H3 requires dense eager execution";

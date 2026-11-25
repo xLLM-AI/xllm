@@ -26,6 +26,7 @@ from torch import nn
 from torch.nn import functional as F
 
 _WEIGHT_TRANSFER_BATCH_BYTES = 256 * 1024**2
+_LaserAttention = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, float], torch.Tensor]
 
 
 class StateDictShard(Protocol):
@@ -175,6 +176,7 @@ def _dense_attention(
     rotary: tuple[torch.Tensor, torch.Tensor] | None = None,
     sp: SequenceParallel | None = None,
     live_rows: int | None = None,
+    laser: _LaserAttention | None = None,
 ) -> torch.Tensor:
     query = attn.norm_q(attn.to_q(states).unflatten(-1, (-1, attn.head_dim)))
     key = attn.norm_k(attn.to_k(states).unflatten(-1, (-1, attn.head_dim)))
@@ -189,28 +191,44 @@ def _dense_attention(
     rows, heads, head_dim = query.shape[1:]
     if live_rows is None:
         live_rows = rows
-    # Padding is a separate document in the packed dense NPU attention.
-    sequence_ends = [live_rows] if live_rows == rows else [live_rows, rows]
-    attended, _ = torch.ops.npu.npu_fused_infer_attention_score(
-        query[0].contiguous(),
-        key[0].contiguous(),
-        value[0].contiguous(),
-        actual_seq_lengths=sequence_ends,
-        actual_seq_lengths_kv=sequence_ends,
-        num_heads=heads,
-        num_key_value_heads=heads,
-        scale=head_dim**-0.5,
-        pre_tokens=2147483647,
-        next_tokens=2147483647,
-        input_layout="TND",
-    )
-    attended = attended.unsqueeze(0)
+    if laser is not None and live_rows >= 2048 and head_dim <= 128:
+        # Exclude sequence-parallel padding from the softmax, then restore the
+        # full sequence for the reverse all-to-all.
+        attended = laser(
+            query[:, :live_rows].transpose(1, 2),
+            key[:, :live_rows].transpose(1, 2),
+            value[:, :live_rows].transpose(1, 2),
+            head_dim**-0.5,
+        ).transpose(1, 2)
+        if live_rows != rows:
+            attended = F.pad(attended, (0, 0, 0, 0, 0, rows - live_rows))
+        attended = attended.contiguous()
+    else:
+        # Padding is a separate document in the packed dense NPU attention.
+        sequence_ends = [live_rows] if live_rows == rows else [live_rows, rows]
+        attended, _ = torch.ops.npu.npu_fused_infer_attention_score(
+            query[0].contiguous(),
+            key[0].contiguous(),
+            value[0].contiguous(),
+            actual_seq_lengths=sequence_ends,
+            actual_seq_lengths_kv=sequence_ends,
+            num_heads=heads,
+            num_key_value_heads=heads,
+            scale=head_dim**-0.5,
+            pre_tokens=2147483647,
+            next_tokens=2147483647,
+            input_layout="TND",
+        )
+        attended = attended.unsqueeze(0)
     if sp is not None:
         attended = sp.exchange(attended, False)
     return attn.to_out[0](attended.flatten(-2))
 
 
 class _RefinerAttention:
+    def __init__(self, laser: _LaserAttention | None) -> None:
+        self._laser = laser
+
     def __call__(
         self,
         attn: MiniMaxH3Attention,
@@ -218,7 +236,7 @@ class _RefinerAttention:
         rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return _dense_attention(attn, hidden_states, rotary_emb)
+        return _dense_attention(attn, hidden_states, rotary_emb, laser=self._laser)
 
 
 class MiniMaxH3Denoiser(nn.Module):
@@ -229,9 +247,18 @@ class MiniMaxH3Denoiser(nn.Module):
         device: torch.device,
         tp: TensorParallel,
         sp: SequenceParallel,
+        *,
+        laser_attention_enabled: bool = False,
     ) -> None:
         super().__init__()
         self._sp = sp
+        self._laser: _LaserAttention | None = None
+        if laser_attention_enabled:
+            from xllm_kernel import initialize
+            from xllm_kernel.ops.attention.laser import laser_attention
+
+            initialize(device=device.type, execution_mode="eager", operations=("laser_attention",))
+            self._laser = laser_attention
         config = MiniMaxH3Transformer3DModel.load_config(path)
         with torch.device("meta"):
             model = MiniMaxH3Transformer3DModel.from_config(config)
@@ -254,7 +281,7 @@ class MiniMaxH3Denoiser(nn.Module):
             block.ff.net[0].proj = _ParallelLinear(block.ff.net[0].proj, tp, packed=True)
             block.ff.net[2] = _ParallelLinear(block.ff.net[2], tp, row=True)
         for block in model.token_refiner.refiner_blocks:
-            block.attn.set_processor(_RefinerAttention())
+            block.attn.set_processor(_RefinerAttention(self._laser))
         for block in model.transformer_blocks:
             block.adaln_proj.linear = _ParallelLinear(block.adaln_proj.linear, tp, gather=True)
 
@@ -315,7 +342,9 @@ class MiniMaxH3Denoiser(nn.Module):
             attn_scale = scale_attn.index_select(0, modulation_indices)
             attn_shift = shift_attn.index_select(0, modulation_indices)
             attn_input = block.norm1(hidden) * (1 + attn_scale) + attn_shift
-            attended = _dense_attention(block.attn, attn_input, conditioning.rotary, self._sp, layout.tags.numel())
+            attended = _dense_attention(
+                block.attn, attn_input, conditioning.rotary, self._sp, layout.tags.numel(), self._laser
+            )
             hidden = hidden + gate_attn.index_select(0, modulation_indices) * attended
             ff_scale = scale_ff.index_select(0, modulation_indices)
             ff_shift = shift_ff.index_select(0, modulation_indices)

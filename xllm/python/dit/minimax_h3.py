@@ -185,8 +185,11 @@ class MiniMaxH3Pipeline:
         sp_gather: Callable[[torch.Tensor], torch.Tensor],
         sp_exchange: Callable[[torch.Tensor, bool], torch.Tensor],
         vae_gather: Callable[[torch.Tensor], torch.Tensor],
+        *,
+        laser_attention_enabled: bool = False,
     ) -> None:
         self._device = torch.device(device)
+        self._laser_attention_enabled = laser_attention_enabled
         self._is_driver = is_driver
         self._tp = TensorParallel(tp_rank, tp_size, tp_reduce, tp_gather)
         self._sp = SequenceParallel(sp_rank, sp_size, sp_gather, sp_exchange)
@@ -207,7 +210,9 @@ class MiniMaxH3Pipeline:
 
     def load_component(self, name: str, path: str, shards: Sequence[StateDictShard]) -> None:
         if name == "transformer":
-            self._denoiser = MiniMaxH3Denoiser(path, shards, self._device, self._tp, self._sp)
+            self._denoiser = MiniMaxH3Denoiser(
+                path, shards, self._device, self._tp, self._sp, laser_attention_enabled=self._laser_attention_enabled
+            )
         elif name == "vae":
             self._video_decoder = load_video_decoder(path, shards, self._device, self._tiles)
         elif name == "audio_vae":
