@@ -195,9 +195,6 @@ class BlockManager {
   // Physical KV keeps its static capacity; VmmKV supplies a live budget.
   virtual size_t admission_capacity() const { return num_total_blocks(); }
 
-  // True only for CompositeBlockManager. Leaves and flat managers return false.
-  virtual bool is_composite() const { return false; }
-
   // —— Sequence-level growth interface (pure: every concrete manager defines
   // its own policy) ——
   // Grows this manager's block_type() blocks for a sequence and returns the

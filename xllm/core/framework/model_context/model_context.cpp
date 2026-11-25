@@ -25,10 +25,12 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
                            const ModelArgs& model_args,
                            const QuantArgs& quant_args,
                            const torch::TensorOptions& tensor_options,
-                           int32_t num_speculative_tokens)
+                           int32_t num_speculative_tokens,
+                           bool enable_chunked_prefill)
     : parallel_args_(input_parallel_args),
       model_args_(model_args),
       num_speculative_tokens_(num_speculative_tokens),
+      enable_chunked_prefill_(enable_chunked_prefill),
       quant_args_(quant_args),
       tensor_options_(tensor_options),
       stream_registry_(

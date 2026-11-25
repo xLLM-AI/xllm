@@ -21,7 +21,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/kv_cache/block/block_manager.h"
+#include "core/framework/block/composite_block_manager.h"
 #include "core/kv_cache/events/kv_cache_event_publisher.h"
 #include "framework/block/embedding_block_manager.h"
 #include "framework/block/kv_cache_manager.h"
@@ -155,7 +155,7 @@ class BlockManagerPool : public KVCacheManager {
   // the options for the block manager
   Options options_;
   std::unique_ptr<KVCacheEventPublisher> event_publisher_;
-  std::vector<std::unique_ptr<BlockManager>> block_managers_;
+  std::vector<std::unique_ptr<CompositeBlockManager>> block_managers_;
 };
 
 }  // namespace xllm

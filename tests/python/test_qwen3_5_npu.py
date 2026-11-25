@@ -53,9 +53,6 @@ from xllm.python.attention.backend import (
     detect_shared_kv_cache_layout,
 )
 from xllm.python.distributed import collectives
-from xllm.python.kernels_npu.causal_conv1d import (
-    causal_conv1d_decode as npu_causal_conv1d_decode,
-)
 from xllm.python.layers.npu.layernorm import NpuGemmaRMSNorm
 from xllm.python.layers.npu.mega_moe_metadata import MegaMoeMetadata
 from xllm.python.layers.npu.mega_moe_metadata_builder import TokenOwnerMegaMoeMetadataBuilder
@@ -1550,7 +1547,7 @@ def test_npu_shared_gdn_matches_dense_state_across_reordered_pages(width: int, p
         num_accepted_tokens=accepted,
         num_accepted_tokens_host_values=(1, 1),
         q_seq_lens_host=torch.tensor(lengths, dtype=torch.int32),
-        is_target_verify=True,
+        is_target_verify=width != 1,
         max_query_len=width,
         is_prefill=False,
         is_chunked_prefill=width != 1,
@@ -1834,25 +1831,6 @@ def test_npu_mega_prefill_num_matrices(
     expected: int,
 ) -> None:
     assert _compute_mega_prefill_num_matrices(query_lengths, num_value_heads) == expected
-
-
-def test_npu_decode_passes_native_weight_and_cache_to_tilelang(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    output = torch.zeros(1, 24)
-    kernel = MagicMock(return_value=output)
-    tilelang_wrapper = types.ModuleType("xllm.python.kernels_npu.tilelang.causal_conv1d_decode")
-    tilelang_wrapper.DIM_PER_CORE = 2048
-    tilelang_wrapper._build_decode_kernel_jit = MagicMock(return_value=kernel)
-    monkeypatch.setitem(sys.modules, "xllm.python.kernels_npu.tilelang.causal_conv1d_decode", tilelang_wrapper)
-    value = torch.zeros(1, 24)
-    weight = torch.zeros(4, 24)
-    conv_state = torch.zeros(2, 3, 24)
-    state_indices = torch.tensor([1], dtype=torch.int32)
-    actual = npu_causal_conv1d_decode(value, weight, conv_state, state_indices)
-    assert actual is output
-    assert kernel.call_args.args[1] is weight
-    assert kernel.call_args.args[2] is conv_state
 
 
 def test_npu_moe_rejects_non_bf16_weights() -> None:

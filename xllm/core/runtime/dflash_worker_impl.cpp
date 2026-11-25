@@ -27,7 +27,6 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/spec_verify.h"
@@ -182,7 +181,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
   // only wires up on the chunked-prefill mask path. Without it the draft falls
   // back to a causal mask and proposal quality silently degrades, so require
   // the flag rather than accept a misconfigured run.
-  CHECK(::xllm::SchedulerConfig::get_instance().enable_chunked_prefill())
+  CHECK(options_.enable_chunked_prefill())
       << "Block-diffusion speculative decoding requires "
          "--enable_chunked_prefill=true.";
   // Draft config's use_sliding_window / sliding_window is intentionally

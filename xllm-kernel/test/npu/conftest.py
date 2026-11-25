@@ -1,6 +1,8 @@
 # Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 """Prepare the migrated NPU operators directly from the kernel package."""
 
+from importlib.util import find_spec
+
 import pytest
 
 pytest.importorskip("torch_npu", reason="NPU integration tests require torch_npu")
@@ -28,6 +30,11 @@ def _prepare_kernels() -> None:
             "gemma_rms_norm",
             "rms_norm_gated",
             "inplace_partial_rotary_mul",
+            "apply_rotary_embedding",
+            "apply_qk_rotary",
+            "fused_qk_norm_rope",
+            "mrope",
+            "vision_rotary_mul",
             "rms_norm_dynamic_quant",
             "hc_pre",
             "hc_post",
@@ -40,6 +47,7 @@ def _prepare_kernels() -> None:
             *(("mega_gdn_mtp_decode_varlen",) if has_mega_gdn_mtp_decode_varlen() else ()),
             "shared_linear_state_indices_out",
             "causal_conv1d",
+            "causal_conv1d_prefill",
             "causal_conv1d_qkv_prefill",
             "chunk_gated_delta_rule",
             "causal_conv1d_update_v2",
@@ -50,10 +58,24 @@ def _prepare_kernels() -> None:
             "sparse_attn_sharedkv_metadata",
             "sparse_flash_attention_lse",
             "sparse_flash_attention_lse_out",
+            "lightning_indexer",
+            "lightning_indexer_out",
             "quant_lightning_indexer",
             "quant_lightning_indexer_metadata",
             "scatter_nd_update",
             "reshape_paged_cache",
+            "update_decode_graph_metadata",
+            *(
+                (
+                    "shared_full_indices_out",
+                    "sfa_dcp_remap_out",
+                    "split_qkv_rmsnorm_mrope",
+                    "fused_gdn_gating",
+                    "causal_conv1d_decode",
+                )
+                if find_spec("tilelang") is not None
+                else ()
+            ),
             "quant_matmul",
             "quant_matmul_out",
             "quantize_per_tensor",

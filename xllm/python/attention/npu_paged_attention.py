@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from xllm_kernel.ops.attention.fia import get_fused_attention
-from xllm_kernel.ops.kv_cache import reshape_paged_cache
+from xllm_kernel.ops.kv_cache import has_shared_full_indices_out, reshape_paged_cache, shared_full_indices_out
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.backend import (
@@ -2512,6 +2512,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if update:
             if (
                 tables is not None
+                and has_shared_full_indices_out()
                 and tables.numel() + mappings.numel() <= _SHARED_FULL_MAPPING_MAX_FUSED_ELEMENTS
                 and block_table.device.type == "npu"
                 and block_table.dtype == torch.int32
@@ -2522,7 +2523,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 and rows.stride(1) == 1
                 and rows.stride(0) >= rows.shape[1]
             ):
-                torch.ops.xllm_ops.shared_full_indices_out(
+                shared_full_indices_out(
                     block_table,
                     slot_mapping,
                     rows,

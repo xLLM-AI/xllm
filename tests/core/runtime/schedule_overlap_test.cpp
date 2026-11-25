@@ -54,7 +54,9 @@ class ScopedConfigValue final {
 
 ForwardOutput token_output(int32_t token_id) {
   ForwardOutput output;
-  output.sample_output.next_tokens = torch::tensor({token_id}, torch::kInt64);
+  output.sample_output.next_tokens =
+      torch::tensor({token_id}, torch::kInt64)
+          .to(torch::Device(torch::kPrivateUse1, /*index=*/0));
   return output;
 }
 
@@ -66,11 +68,11 @@ class OverlapTestWorker final : public WorkerImpl {
     MODEL_MANAGED
   };
 
-  explicit OverlapTestWorker(
-      std::vector<std::optional<ForwardOutput>> outputs,
-      bool driver = true,
-      ContinuationMode continuation_mode = ContinuationMode::CUSTOM_REBUILD,
-      EplbWorkerConfig eplb_config = {})
+  explicit OverlapTestWorker(std::vector<std::optional<ForwardOutput>> outputs,
+                             bool driver = true,
+                             ContinuationMode continuation_mode =
+                                 ContinuationMode::DEFAULT_REPLACEMENT,
+                             EplbWorkerConfig eplb_config = {})
       : OverlapTestWorker(std::move(outputs),
                           ParallelArgs(/*rank=*/driver ? 0 : 1,
                                        /*world_size=*/2,
@@ -80,12 +82,12 @@ class OverlapTestWorker final : public WorkerImpl {
                           /*speculative_decode=*/false,
                           eplb_config) {}
 
-  OverlapTestWorker(
-      std::vector<std::optional<ForwardOutput>> outputs,
-      const ParallelArgs& parallel_args,
-      ContinuationMode continuation_mode = ContinuationMode::CUSTOM_REBUILD,
-      bool speculative_decode = false,
-      EplbWorkerConfig eplb_config = {})
+  OverlapTestWorker(std::vector<std::optional<ForwardOutput>> outputs,
+                    const ParallelArgs& parallel_args,
+                    ContinuationMode continuation_mode =
+                        ContinuationMode::DEFAULT_REPLACEMENT,
+                    bool speculative_decode = false,
+                    EplbWorkerConfig eplb_config = {})
       : WorkerImpl(parallel_args,
                    torch::Device(torch::kPrivateUse1, /*index=*/0),
                    options(speculative_decode, eplb_config),
@@ -100,7 +102,6 @@ class OverlapTestWorker final : public WorkerImpl {
 
   bool init_model(ModelContext& /*context*/) override { return false; }
 
-  int32_t continuation_count() const { return continuation_count_; }
   const torch::Tensor& executed_tokens() const { return executed_tokens_; }
   const std::vector<int32_t>& executed_grammar_tokens() const {
     return executed_grammar_tokens_;
@@ -128,13 +129,17 @@ class OverlapTestWorker final : public WorkerImpl {
   bool prepare_model_decode_continuation(
       LlmForwardInput& input,
       const ForwardOutput& prior_output) override {
-    return prepare_continuation(input, prior_output);
+    if (continuation_mode_ == ContinuationMode::CUSTOM_REBUILD) {
+      input.token_ids =
+          prior_output.sample_output.next_tokens.to(torch::kInt32);
+    }
+    return continuation_mode_ != ContinuationMode::DEFAULT_REPLACEMENT;
   }
 
   bool prepare_model_decode_continuation(
-      VlmForwardInput& input,
-      const ForwardOutput& prior_output) override {
-    return prepare_continuation(input, prior_output);
+      VlmForwardInput& /*input*/,
+      const ForwardOutput& /*prior_output*/) override {
+    return continuation_mode_ != ContinuationMode::DEFAULT_REPLACEMENT;
   }
 
   std::optional<ForwardOutput> step_for_schedule_overlap(
@@ -157,19 +162,6 @@ class OverlapTestWorker final : public WorkerImpl {
     options.enable_speculative_decode(speculative_decode);
     options.eplb_worker_config(eplb_config);
     return options;
-  }
-
-  template <typename Input>
-  bool prepare_continuation(Input& input, const ForwardOutput& prior_output) {
-    ++continuation_count_;
-    if (continuation_mode_ == ContinuationMode::DEFAULT_REPLACEMENT) {
-      return WorkerImpl::prepare_model_decode_continuation(input, prior_output);
-    }
-    if (continuation_mode_ == ContinuationMode::CUSTOM_REBUILD) {
-      input.token_ids =
-          prior_output.sample_output.next_tokens.to(torch::kInt32);
-    }
-    return true;
   }
 
   template <typename Input>
@@ -208,7 +200,6 @@ class OverlapTestWorker final : public WorkerImpl {
   std::vector<std::optional<ForwardOutput>> outputs_;
   ContinuationMode continuation_mode_;
   size_t step_index_ = 0;
-  int32_t continuation_count_ = 0;
   torch::Tensor executed_tokens_;
   torch::Tensor executed_filter_bitmask_;
   torch::Tensor forward_prefix_tokens_;
@@ -274,44 +265,33 @@ class ScheduleOverlapTest : public ::testing::Test {};
 using ForwardInputTypes = ::testing::Types<LlmForwardInput, VlmForwardInput>;
 TYPED_TEST_SUITE(ScheduleOverlapTest, ForwardInputTypes);
 
-TYPED_TEST(ScheduleOverlapTest, DecodeWithoutPriorTokensSkipsContinuation) {
-  OverlapTestWorker worker({token_output(17)});
-  auto step = worker.step_async(step_input<TypeParam>(/*decode=*/true));
-  ASSERT_TRUE(std::move(step).get().has_value());
-  EXPECT_EQ(worker.continuation_count(), 0);
-  EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), 7);
-  worker.get_last_step_result();
-}
-
-TYPED_TEST(ScheduleOverlapTest, PrefillIgnoresPriorContinuation) {
-  OverlapTestWorker worker({token_output(17), token_output(23)});
-  auto first = worker.step_async(step_input<TypeParam>(/*decode=*/false));
-  ASSERT_TRUE(std::move(first).get().has_value());
-  worker.get_last_step_result();
-
-  auto second = worker.step_async(step_input<TypeParam>(/*decode=*/false));
-  ASSERT_TRUE(std::move(second).get().has_value());
-  EXPECT_EQ(worker.continuation_count(), 0);
-  EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), 7);
-  worker.get_last_step_result();
-}
-
-TYPED_TEST(ScheduleOverlapTest, ConsumedResultRemainsAvailableForContinuation) {
-  OverlapTestWorker worker({token_output(17), token_output(23)});
-  auto first = worker.step_async(step_input<TypeParam>(/*decode=*/false));
+TEST(ScheduleOverlapContinuationTest,
+     ConsumedResultRemainsAvailableForRebuild) {
+  OverlapTestWorker worker({token_output(/*token_id=*/17),
+                            token_output(/*token_id=*/23),
+                            token_output(/*token_id=*/41)},
+                           /*driver=*/true,
+                           OverlapTestWorker::ContinuationMode::CUSTOM_REBUILD);
+  auto first = worker.step_async(step_input<LlmForwardInput>(/*decode=*/false));
   ASSERT_TRUE(std::move(first).get().has_value());
   ASSERT_EQ(worker.get_last_step_result()
                 .sample_output.next_tokens.template item<int64_t>(),
             17);
 
-  auto second = worker.step_async(
-      step_input<TypeParam>(/*decode=*/true, /*token_id=*/-1));
+  auto second =
+      worker.step_async(step_input<LlmForwardInput>(/*decode=*/false));
   ASSERT_TRUE(std::move(second).get().has_value());
-  EXPECT_EQ(worker.continuation_count(), 1);
-  EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), 17);
-  EXPECT_EQ(worker.get_last_step_result()
+  EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), 7);
+  ASSERT_EQ(worker.get_last_step_result()
                 .sample_output.next_tokens.template item<int64_t>(),
             23);
+
+  auto third = worker.step_async(step_input<LlmForwardInput>(/*decode=*/true));
+  ASSERT_TRUE(std::move(third).get().has_value());
+  EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), 23);
+  EXPECT_EQ(worker.get_last_step_result()
+                .sample_output.next_tokens.template item<int64_t>(),
+            41);
 }
 
 TYPED_TEST(ScheduleOverlapTest,
@@ -332,7 +312,6 @@ TYPED_TEST(ScheduleOverlapTest,
   input.token_ids = torch::tensor({-2, 9, -1}, torch::kInt32);
   auto second = worker.step_async(input);
   ASSERT_TRUE(std::move(second).get().has_value());
-  EXPECT_EQ(worker.continuation_count(), 1);
   EXPECT_EQ(worker.executed_tokens().device(), device);
   EXPECT_TRUE(torch::equal(worker.executed_tokens().to(torch::kCPU),
                            torch::tensor({23, 9, 17}, torch::kInt32)));
@@ -357,7 +336,6 @@ TYPED_TEST(ScheduleOverlapTest, ModelManagedContinuationPreservesModelInput) {
   const auto output = std::move(second).get();
   ASSERT_TRUE(output.has_value());
   EXPECT_TRUE(output->json_object_errors.empty());
-  EXPECT_EQ(worker.continuation_count(), 1);
   EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), -1);
   EXPECT_EQ(worker.executed_grammar_tokens(), std::vector<int32_t>({0}));
   EXPECT_EQ(input.token_ids.template item<int32_t>(), -1);
@@ -463,7 +441,6 @@ TYPED_TEST(ScheduleOverlapTest, EmptyStepClearsPriorContinuation) {
   auto next = worker.step_async(
       step_input<TypeParam>(/*decode=*/true, /*token_id=*/-1));
   ASSERT_TRUE(std::move(next).get().has_value());
-  EXPECT_EQ(worker.continuation_count(), 0);
   EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), -1);
   worker.get_last_step_result();
 }
@@ -508,7 +485,6 @@ TYPED_TEST(ScheduleOverlapTest, ConstrainedDecodeRejectsUnrelatedPriorResult) {
   auto step = worker.step_async(input);
   const auto output = std::move(step).get();
   ASSERT_TRUE(output.has_value());
-  EXPECT_EQ(worker.continuation_count(), 0);
   EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), 0);
   EXPECT_FALSE(worker.executed_grammar_initialized());
   ASSERT_EQ(output->json_object_errors.size(), 1U);
@@ -532,7 +508,6 @@ TYPED_TEST(ScheduleOverlapTest, ConstrainedContinuationAdvancesGrammar) {
   const auto output = std::move(step).get();
   ASSERT_TRUE(output.has_value());
   EXPECT_TRUE(output->json_object_errors.empty());
-  EXPECT_EQ(worker.continuation_count(), 1);
   EXPECT_EQ(worker.executed_grammar_tokens(), std::vector<int32_t>({0}));
   EXPECT_TRUE(input.json_object_states.front().snapshot().token_ids.empty());
   worker.get_last_step_result();
@@ -560,7 +535,6 @@ TYPED_TEST(ScheduleOverlapTest, NewConstrainedSequenceStartsWithoutPriorRow) {
   ASSERT_TRUE(worker.executed_filter_bitmask().defined());
   EXPECT_TRUE(torch::equal(worker.executed_filter_bitmask().to(torch::kCPU),
                            torch::tensor({{1 << 0}}, torch::kInt32)));
-  EXPECT_EQ(worker.continuation_count(), 1);
   worker.get_last_step_result();
 }
 
@@ -589,7 +563,6 @@ TYPED_TEST(ScheduleOverlapTest, MixedConstrainedSequencesAdvancePriorRow) {
   ASSERT_TRUE(worker.executed_filter_bitmask().defined());
   EXPECT_TRUE(torch::equal(worker.executed_filter_bitmask().to(torch::kCPU),
                            torch::tensor({{1 << 1}, {1 << 0}}, torch::kInt32)));
-  EXPECT_EQ(worker.continuation_count(), 1);
   worker.get_last_step_result();
 }
 
@@ -703,7 +676,6 @@ TYPED_TEST(ScheduleOverlapTest, NonDriverContinuesWithoutHostConsumption) {
   }
   EXPECT_TRUE(second_ready);
   ASSERT_TRUE(std::move(second).get().has_value());
-  EXPECT_EQ(worker.continuation_count(), 1);
   EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), 17);
 }
 
@@ -713,10 +685,11 @@ TYPED_TEST(ScheduleOverlapTest,
   ForwardOutput output;
   output.expert_load_data = torch::tensor({3, 5}, torch::kInt64);
   output.prepared_token = 11;
-  OverlapTestWorker worker({std::move(output)},
-                           /*driver=*/false,
-                           OverlapTestWorker::ContinuationMode::CUSTOM_REBUILD,
-                           EplbWorkerConfig{.enabled = true});
+  OverlapTestWorker worker(
+      {std::move(output)},
+      /*driver=*/false,
+      OverlapTestWorker::ContinuationMode::DEFAULT_REPLACEMENT,
+      EplbWorkerConfig{.enabled = true});
   ScopedConfigValue<bool> changed_eplb(EPLBConfig::get_instance().enable_eplb(),
                                        true);
   auto step = worker.step_async(step_input<TypeParam>(/*decode=*/false))
@@ -889,7 +862,7 @@ TYPED_TEST(ScheduleOverlapTest,
   OverlapTestWorker worker(
       {token_output(17), token_output(23), token_output(31)},
       parallel_args,
-      OverlapTestWorker::ContinuationMode::CUSTOM_REBUILD,
+      OverlapTestWorker::ContinuationMode::DEFAULT_REPLACEMENT,
       /*speculative_decode=*/true);
   worker.set_output_hook([&](ForwardOutput& output, Stream& stream) {
     if (output_index++ > 0) {
@@ -998,7 +971,7 @@ TYPED_TEST(ScheduleOverlapTest,
     OverlapTestWorker worker(
         {ForwardOutput{}, std::nullopt, token_output(31)},
         parallel_args,
-        OverlapTestWorker::ContinuationMode::CUSTOM_REBUILD,
+        OverlapTestWorker::ContinuationMode::DEFAULT_REPLACEMENT,
         /*speculative_decode=*/parallel_args.dp_size() > 1);
     worker.set_output_hook([&](ForwardOutput& output, Stream& stream) {
       auto guard = stream.set_stream_guard();

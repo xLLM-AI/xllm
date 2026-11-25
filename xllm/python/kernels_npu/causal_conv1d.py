@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import torch
+from xllm_kernel.ops.attention.gdn import causal_conv1d_decode
+from xllm_kernel.ops.attention.gdn import causal_conv1d_prefill as _packed_prefill
 from xllm_kernel.ops.attention.gdn import causal_conv1d_qkv_prefill as _packed_qkv_prefill
 
 
@@ -54,56 +56,29 @@ def causal_conv1d_qkv_prefill(
     )
 
 
-def causal_conv1d_decode(
+def causal_conv1d_prefill(
     value: torch.Tensor,
     weight: torch.Tensor,
     conv_state: torch.Tensor,
     state_indices: torch.Tensor,
-    bias: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor,
+    query_start_loc: torch.Tensor,
 ) -> torch.Tensor:
-    """Convolve one token per sequence and update the convolution states.
-
-    Args:
-        value: Activations of shape ``[batch_size, channels]``.
-        weight: Depthwise kernel of shape ``[kernel_size, channels]``.
-        conv_state: Per-sequence convolution state, updated in place.
-        state_indices: State slot of every sequence.
-
-    Returns:
-        Convolved activations with the shape and dtype of ``value``.
-    """
-    from .tilelang.causal_conv1d_decode import (
-        DIM_PER_CORE,
-        _build_decode_kernel_jit,
-    )
-
-    _, dim = value.shape
-    width = weight.shape[0]
-    dtype_name = str(value.dtype).removeprefix("torch.")
-    dim_chunks = (dim + DIM_PER_CORE - 1) // DIM_PER_CORE
-    kernel = _build_decode_kernel_jit(
-        width,
-        dim_chunks,
-        DIM_PER_CORE,
-        dtype_name,
-        True,
-    )
-    indices = state_indices.to(dtype=torch.int32).contiguous()
-    initial_state_mode = torch.ones_like(indices, dtype=torch.int32)
-    if bias is None:
-        bias = torch.zeros(dim, dtype=value.dtype, device=value.device)
-    return kernel(
-        value.contiguous(),
+    """Adapt legacy tensor metadata during eager prefill."""
+    if weight.size(0) > weight.size(1):
+        weight = weight.t().contiguous()
+    return _packed_prefill(
+        value,
         weight,
         conv_state,
-        indices,
-        indices,
-        initial_state_mode,
-        bias,
+        query_start_loc=query_start_loc.reshape(-1).tolist(),
+        state_indices=state_indices.reshape(-1).tolist(),
+        has_initial_state=has_initial_state.to(dtype=torch.int64).reshape(-1).tolist(),
     )
 
 
 __all__ = [
+    "causal_conv1d_prefill",
     "causal_conv1d_qkv_prefill",
     "causal_conv1d_decode",
 ]

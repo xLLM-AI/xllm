@@ -356,5 +356,23 @@ TEST(ModelRegistryRegistrationTest, DerivedContextsPreserveExtensionSelection) {
   EXPECT_EQ(quant_context.get_extension_impl(), "custom");
 }
 
+TEST(ModelRegistryRegistrationTest,
+     DerivedContextsPreserveChunkedPrefillSelection) {
+  const ModelContext context(
+      ParallelArgs(/*rank=*/0, /*world_size=*/1, nullptr),
+      ModelArgs{},
+      QuantArgs{},
+      torch::TensorOptions().device(torch::kCPU),
+      /*num_speculative_tokens=*/0,
+      /*enable_chunked_prefill=*/false);
+
+  EXPECT_FALSE(context.enable_chunked_prefill());
+  EXPECT_FALSE(context
+                   .with_parallel_args(
+                       ParallelArgs(/*rank=*/0, /*world_size=*/1, nullptr))
+                   .enable_chunked_prefill());
+  EXPECT_FALSE(context.with_quant_args(QuantArgs{}).enable_chunked_prefill());
+}
+
 }  // namespace
 }  // namespace xllm

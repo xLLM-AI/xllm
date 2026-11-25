@@ -23,13 +23,12 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from xllm_kernel.ops.attention.fia import get_fused_attention
+from xllm_kernel.ops.kv_cache import update_decode_graph_metadata
 
 _MIN_PAD_HEAD_DIM = 64
 _MAX_PAD_HEAD_DIM = 128
 _FIA_BLOCK_SIZE = 128
 _FIA_FULL_ATTENTION_TOKENS = 2147483647
-
-update_decode_graph_metadata = torch.ops.xllm_ops.update_decode_graph_metadata
 
 
 def vision_fusion_attention(

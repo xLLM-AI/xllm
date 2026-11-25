@@ -54,6 +54,35 @@ void GetApiFunc(const char* name,
 
 void prepare_ascendc_gdn() { gdn_apis(); }
 
+Tensor run_causal_conv1d(const Tensor& input,
+                         const Tensor& weight,
+                         const Tensor& conv_state,
+                         IntArray query_start_loc,
+                         IntArray state_indices,
+                         IntArray initial_state_mode,
+                         int64_t activation_mode,
+                         int64_t run_mode) {
+  const torch::DeviceGuard guard(input.device());
+  constexpr int64_t kPadSlotId = -1;
+  const std::optional<Tensor> bias;
+  const IntArray no_accepted_tokens;
+  auto output = torch::empty(input.sizes(), input.options());
+  EXEC_NPU_CMD_EXT(aclnnXllmKernelCausalConv1d,
+                   input,
+                   weight,
+                   bias,
+                   conv_state,
+                   query_start_loc,
+                   state_indices,
+                   initial_state_mode,
+                   no_accepted_tokens,
+                   activation_mode,
+                   kPadSlotId,
+                   run_mode,
+                   output);
+  return output;
+}
+
 Tensor causal_conv1d(const Tensor& input,
                      const Tensor& weight,
                      const Tensor& conv_state,
@@ -82,31 +111,34 @@ Tensor causal_conv1d(const Tensor& input,
   CHECK(input.is_contiguous() && weight.is_contiguous() &&
         conv_state.is_contiguous());
 
-  const torch::DeviceGuard guard(input.device());
-  constexpr int64_t kPadSlotId = -1;
-  const std::optional<Tensor> bias;
-  const IntArray no_indices;
-  const IntArray no_accepted_tokens;
   std::vector<int64_t> initial_state_modes;
   if (run_mode == 0) {
     initial_state_modes.assign(conv_state.size(0), 1);
   }
-  const IntArray initial_state_mode(initial_state_modes);
-  auto output = torch::empty(input.sizes(), input.options());
-  EXEC_NPU_CMD_EXT(aclnnXllmKernelCausalConv1d,
-                   input,
-                   weight,
-                   bias,
-                   conv_state,
-                   query_start_loc,
-                   no_indices,
-                   initial_state_mode,
-                   no_accepted_tokens,
-                   activation_mode,
-                   kPadSlotId,
-                   run_mode,
-                   output);
-  return output;
+  return run_causal_conv1d(input,
+                           weight,
+                           conv_state,
+                           query_start_loc,
+                           /*state_indices=*/{},
+                           initial_state_modes,
+                           activation_mode,
+                           run_mode);
+}
+
+Tensor causal_conv1d_prefill(const Tensor& input,
+                             const Tensor& weight,
+                             const Tensor& conv_state,
+                             IntArray query_start_loc,
+                             IntArray state_indices,
+                             IntArray has_initial_state) {
+  return run_causal_conv1d(input,
+                           weight,
+                           conv_state,
+                           query_start_loc,
+                           state_indices,
+                           has_initial_state,
+                           /*activation_mode=*/1,
+                           /*run_mode=*/0);
 }
 
 std::tuple<Tensor, Tensor, Tensor> causal_conv1d_qkv_prefill(
@@ -232,6 +264,11 @@ TORCH_LIBRARY_FRAGMENT(xllm_kernel, m) {
       "causal_conv1d(Tensor input, Tensor weight, Tensor(a!) conv_state, "
       "int[] query_start_loc, int activation_mode, int run_mode) -> Tensor");
   m.def(
+      "causal_conv1d_prefill(Tensor input, Tensor weight, Tensor(a!) "
+      "conv_state, "
+      "int[] query_start_loc, int[] state_indices, int[] has_initial_state) "
+      "-> Tensor");
+  m.def(
       "causal_conv1d_qkv_prefill(Tensor x, Tensor weight, Tensor(a!) "
       "conv_state, "
       "int[] query_start_loc, int[] state_indices, int[] has_initial_state, "
@@ -246,6 +283,7 @@ TORCH_LIBRARY_FRAGMENT(xllm_kernel, m) {
 
 TORCH_LIBRARY_IMPL(xllm_kernel, PrivateUse1, m) {
   m.impl("causal_conv1d", TORCH_FN(causal_conv1d));
+  m.impl("causal_conv1d_prefill", TORCH_FN(causal_conv1d_prefill));
   m.impl("causal_conv1d_qkv_prefill", TORCH_FN(causal_conv1d_qkv_prefill));
   m.impl("mega_chunk_gdn", TORCH_FN(mega_chunk_gdn));
 }

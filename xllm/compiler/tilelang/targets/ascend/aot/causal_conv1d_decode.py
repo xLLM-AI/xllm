@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import tilelang
+from xllm_kernel.ops.attention.gdn._tilelang import _causal_conv1d_decode as packaged_dsl
 
 from xllm.python.kernels_npu.tilelang import (
     causal_conv1d_decode as kernel_impl,
@@ -20,14 +21,10 @@ from xllm.python.kernels_npu.tilelang import (
 from xllm.python.kernels_npu.tilelang import (
     utils as tilelang_utils,
 )
-from xllm.python.kernels_npu.tilelang.causal_conv1d_decode import (
-    DIM_PER_CORE,
-    build_causal_conv1d_decode_kernel,
-)
 
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
-DEPENDENCY_MODULES = (kernel_impl, tilelang_utils)
+DEPENDENCY_MODULES = (kernel_impl, packaged_dsl, tilelang_utils)
 
 
 @register_kernel
@@ -61,12 +58,12 @@ class CausalConv1dDecodeKernel(TilelangKernel):
     ) -> str:
         if dtype not in ("float16", "bfloat16"):
             raise ValueError(f"CausalConv1D Decode TileLang kernel only supports dtype=float16/bfloat16, got {dtype}")
-        dim_chunks = (dim + DIM_PER_CORE - 1) // DIM_PER_CORE
+        dim_chunks = (dim + packaged_dsl.DIM_PER_CORE - 1) // packaged_dsl.DIM_PER_CORE
         tilelang.disable_cache()
-        tilelang_kernel = build_causal_conv1d_decode_kernel(
+        tilelang_kernel = packaged_dsl.build_causal_conv1d_decode_kernel(
             width=width,
             dim_chunks=dim_chunks,
-            dim_per_core=DIM_PER_CORE,
+            dim_per_core=packaged_dsl.DIM_PER_CORE,
             dtype_str=dtype,
             has_silu=bool(has_silu),
         )

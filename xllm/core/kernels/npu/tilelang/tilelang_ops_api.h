@@ -37,20 +37,6 @@ void shared_linear_state_indices_out(const torch::Tensor& ids,
                                      const torch::Tensor& rows,
                                      torch::Tensor& out);
 
-// Map Full read tables and write slots in a single current-stream launch.
-// block_table is [batch, columns], slots is [tokens], rows is [layers,
-// capacity] with unit inner stride, and outputs are [layers, batch, columns]
-// and [layers, tokens]. Negative sentinels are preserved. Read-table zero maps
-// to padding_row, while write-slot zero still addresses writable scratch. Live
-// logical ids must be within capacity and translated token slots fit int32.
-void shared_full_indices_out(const torch::Tensor& block_table,
-                             const torch::Tensor& slots,
-                             const torch::Tensor& rows,
-                             int64_t page_size,
-                             int64_t padding_row,
-                             torch::Tensor& out_tables,
-                             torch::Tensor& out_slots);
-
 // Draft5/7 adaptive verification. All buffers are preallocated contiguous
 // tensors on one NPU; these APIs enqueue on its current stream without copying
 // tensor values to Host. Admission validates the supported geometry first.
@@ -263,16 +249,6 @@ torch::Tensor causal_conv1d(torch::Tensor& conv_state,
                             const torch::Tensor& current_indices,
                             const torch::Tensor& initial_state_mode,
                             bool has_silu);
-
-// Remap logical DCP sparse indices onto this rank's local KV slots and
-// compact owned entries to the front. ``out`` and ``idx_scratch`` must be
-// caller-owned, contiguous NPU storage so ACL graph replay can reuse them.
-void sfa_dcp_remap_out(const torch::Tensor& topk_indices,
-                       int64_t physical_block_size,
-                       int64_t shard_size,
-                       int64_t shard_rank,
-                       torch::Tensor& out,
-                       torch::Tensor& idx_scratch);
 
 // Run fused sigmoid-gating delta-rule SSM scan on NPU.
 // Returns (out, final_state).

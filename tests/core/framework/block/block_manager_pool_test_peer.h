@@ -34,8 +34,7 @@ class BlockManagerPoolTestPeer final {
     if (!pool.options_.enable_linear_state()) {
       return nullptr;
     }
-    auto* composite = static_cast<CompositeBlockManager*>(
-        pool.block_managers_[dp_rank].get());
+    auto* composite = pool.block_managers_[dp_rank].get();
     return static_cast<LinearStateBlockManager*>(
         composite->leaf_of(BlockType::LINEAR));
   }

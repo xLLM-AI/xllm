@@ -20,7 +20,13 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
-from xllm_kernel.ops.attention.dsa import sparse_flash_attention_lse
+from xllm_kernel.ops.attention.dsa import (
+    SFA_DCP_REMAP_MAX_TOKENS,
+    SFA_DCP_REMAP_TOPK,
+    has_sfa_dcp_remap_out,
+    sfa_dcp_remap_out,
+    sparse_flash_attention_lse,
+)
 
 from xllm.python.attention.backend import has_rope_dim, normalize_attention_lse
 from xllm.python.attention.kv_shard_layout import KVShardLayout
@@ -30,10 +36,6 @@ from xllm.python.distributed import (
     start_all_gather,
 )
 from xllm.python.layers.sfa_dcp_ref import remap_sparse_indices
-
-# Must match xllm/python/kernels_npu/tilelang/sfa_dcp_remap.py AOT specializations.
-_REMAP_TOPK = 2048
-_REMAP_MAX_TOKENS = 256
 
 
 def _can_use_fused_remap(
@@ -46,15 +48,15 @@ def _can_use_fused_remap(
     last_dim = int(topk_indices.shape[-1]) if topk_indices.ndim > 0 else 0
     num_tokens = int(topk_indices.numel() // last_dim) if last_dim > 0 else 0
     return (
-        index_topk == _REMAP_TOPK
-        and last_dim == _REMAP_TOPK
-        and 0 < num_tokens <= _REMAP_MAX_TOKENS
+        index_topk == SFA_DCP_REMAP_TOPK
+        and last_dim == SFA_DCP_REMAP_TOPK
+        and 0 < num_tokens <= SFA_DCP_REMAP_MAX_TOKENS
         and (physical_block_size > 0 and (physical_block_size & (physical_block_size - 1)) == 0)
         and (dcp_size > 0 and (dcp_size & (dcp_size - 1)) == 0)
         and topk_indices.dtype == torch.int32
         and topk_indices.is_contiguous()
         and topk_indices.device.type == "npu"
-        and hasattr(getattr(torch.ops, "xllm_ops", None), "sfa_dcp_remap_out")
+        and has_sfa_dcp_remap_out()
     )
 
 
@@ -255,7 +257,7 @@ class AscendSFADCPImpl:
         num_tokens = int(prefix.numel() // index_topk)
         scratch_n = num_tokens * index_topk
         idx_scratch = torch.empty(scratch_n, dtype=torch.int32, device=topk_indices.device)
-        fused = torch.ops.xllm_ops.sfa_dcp_remap_out(
+        fused = sfa_dcp_remap_out(
             prefix,
             int(self.layout.physical_block_size),
             int(self.layout.dcp_size),

@@ -79,8 +79,7 @@ class HierarchyPoolTestPeer final {
 
   static CompositeBlockManager* device_composite(
       HierarchyBlockManagerPool& pool) {
-    return static_cast<CompositeBlockManager*>(
-        pool.block_managers_.front().get());
+    return pool.block_managers_.front().get();
   }
 
   static void dispatch_pending_h2d(HierarchyBlockManagerPool& pool) {

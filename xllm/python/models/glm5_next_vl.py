@@ -50,6 +50,7 @@ import torch.nn.functional as F
 
 from xllm.python.layers import ColumnParallelLinear, RowParallelLinear
 from xllm.python.model_loader import ModelWeightLoader
+from xllm.python.models.base import MultimodalEmbeddings
 from xllm.python.models.glm5_next import (
     Glm5NextForCausalLM,
     Glm5NextModel,
@@ -891,7 +892,7 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
         input_ids: torch.Tensor,
         image_embeds: Optional[torch.Tensor] = None,
         video_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> MultimodalEmbeddings:
         """Stage 2: merge text + multimodal embeddings.
 
         GLM4V placeholder convention: both still images and video frames use
@@ -933,7 +934,7 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
             mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
             inputs_embeds = inputs_embeds.masked_scatter(mask, combined.to(inputs_embeds.dtype))
 
-        return inputs_embeds
+        return MultimodalEmbeddings(inputs_embeds)
 
     # ------------------------------------------------------------------
     # Weight loading

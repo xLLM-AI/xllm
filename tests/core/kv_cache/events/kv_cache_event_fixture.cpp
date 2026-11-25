@@ -36,8 +36,7 @@ class FixtureBlockManagerPool final : public xllm::BlockManagerPool {
       : BlockManagerPool(options, /*dp_size=*/2) {}
 
   xllm::BlockManager* device(int32_t rank) {
-    auto* composite =
-        static_cast<xllm::CompositeBlockManager*>(block_managers_[rank].get());
+    auto* composite = block_managers_[rank].get();
     return composite->leaf_entries().at(xllm::BlockType::KV).leaf.get();
   }
 

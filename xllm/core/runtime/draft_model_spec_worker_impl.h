@@ -36,6 +36,16 @@ class LLMWorkerImpl;
 class LlmForwardInput;
 class VlmForwardInput;
 
+template <typename Input>
+std::optional<ForwardOutput> run_worker_no_sync_impl(
+    WorkerImpl& worker,
+    const Input& input,
+    Input& processed_input,
+    Stream& prepare_stream,
+    Stream& compute_stream,
+    WorkerImpl::ForwardCompletion completion =
+        WorkerImpl::ForwardCompletion::CALLER_RETAINS_INPUT);
+
 // Base for draft-model speculative workers (MTP, DFlash/DSpark); Suffix has no
 // draft model and derives from SpeculativeWorkerImpl directly.
 template <typename TargetInput>
@@ -117,23 +127,9 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
       std::optional<SampleOutput> verify_output = std::nullopt,
       const std::vector<JsonObjectGrammarState>& json_object_states = {}) const;
 
-  template <typename Input>
-  static std::optional<ForwardOutput> run_worker_no_sync_impl(
-      WorkerImpl& worker,
-      const Input& input,
-      Input& forward_input,
-      Stream& prepare_stream,
-      Stream& compute_stream,
-      WorkerImpl::ForwardCompletion completion =
-          WorkerImpl::ForwardCompletion::CALLER_RETAINS_INPUT) {
-    worker.prepare_work_before_execute(
-        input,
-        forward_input,
-        &prepare_stream,
-        /*record_ready_event=*/&prepare_stream != &compute_stream);
-    return worker.execute_no_sync_on_stream(
-        forward_input, compute_stream, completion);
-  }
+  void broadcast_spec_tokens(torch::Tensor& tokens) const;
+  void maybe_broadcast_spec_tokens(torch::Tensor& tokens,
+                                   SamplingMode sampling_mode) const;
 
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
 
@@ -142,7 +138,7 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
       const KVCacheShape& shape) const;
 #if defined(USE_NPU)
   void prepare_draft_padding(LlmModelParams& params,
-                             Stream* prepare_stream = nullptr);
+                             bool acquire_graph_capture_lock = false);
   DpEpPaddingCache dp_ep_padding_cache_{2};
 #endif
   std::unique_ptr<EmbeddingCache> embedding_cache_;
@@ -150,6 +146,9 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   DraftVocabMapping draft_vocab_;
   mtp_async::TargetSpecVerifyMode target_verify_mode_ =
       mtp_async::TargetSpecVerifyMode::GENERIC;
+
+ private:
+  bool use_orthogonal_cp_consensus() const;
 };
 
 }  // namespace xllm

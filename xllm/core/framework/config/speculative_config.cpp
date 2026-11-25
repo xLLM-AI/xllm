@@ -50,6 +50,19 @@ DEFINE_bool(enable_mtp_draft_body_tp1,
 
 namespace xllm {
 
+std::optional<bool> SpeculativeConfig::chunked_block_diffusion(
+    std::string_view algorithm,
+    std::string_view model_type) {
+  if (!is_block_diffusion_algorithm(algorithm)) {
+    return std::nullopt;
+  }
+  return model_type != "deepseek_v4_dspark";
+}
+
+bool SpeculativeConfig::supports_host_kv_cache(std::string_view algorithm) {
+  return is_eagle_family(algorithm) || is_block_diffusion_algorithm(algorithm);
+}
+
 void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(draft_model);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(num_speculative_tokens);
@@ -104,8 +117,10 @@ void SpeculativeConfig::initialize() {
 
 void SpeculativeConfig::validate() const {
   if (enable_probabilistic_draft()) {
-    CHECK(is_probabilistic_draft_sampling_supported(speculative_algorithm()))
-        << speculative_algorithm()
+    const std::string& algorithm = speculative_algorithm();
+    CHECK(is_eagle_family(algorithm) || is_dspark_algorithm(algorithm) ||
+          is_dflash2_algorithm(algorithm))
+        << algorithm
         << " does not support enable_probabilistic_draft. Supported: MTP, "
            "DSpark, DFlash2, Eagle3.";
   }

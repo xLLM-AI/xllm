@@ -89,7 +89,8 @@ void Eagle3WorkerImpl<TargetInput>::check_draft_input_embedding(
   }
 
   const int64_t expected_hidden_size = get_embedding_placeholder_size();
-  const int64_t draft_hidden_size = draft_impl_->hidden_size();
+  const int64_t draft_hidden_size =
+      draft_impl_->context_.get_model_args().hidden_size();
   CHECK_EQ(embedding.dim(), 2)
       << "Eagle3 " << phase << " embedding must be a 2-D tensor, got dim "
       << embedding.dim();
