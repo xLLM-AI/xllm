@@ -48,7 +48,6 @@ class MMDataItem {
   MMDataItem(MMType type, MMDict data, MMMetadata metadata);
 
   bool valid() const { return type_ != MMType::NONE; }
-  bool is_type(MMType type) const { return type_ == type; }
 
   const MMDict& data() const { return data_; }
   MMDict& mutable_data() { return data_; }

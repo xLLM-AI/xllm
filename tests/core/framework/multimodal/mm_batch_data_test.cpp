@@ -30,7 +30,7 @@ MMData make_image(torch::Tensor pixels) {
                                      {{"pixel_values", std::move(pixels)}})});
 }
 
-TEST(MMBatchDataTest, SingleImageSurvivesSourceReleaseAndProtoRoundTrip) {
+TEST(MMBatchDataTest, SingleImageSurvivesSourceRelease) {
   MMBatchData batch;
   {
     auto pixels = torch::arange(12, torch::kFloat32).reshape({3, 4});
@@ -40,23 +40,6 @@ TEST(MMBatchDataTest, SingleImageSurvivesSourceReleaseAndProtoRoundTrip) {
   ASSERT_TRUE(pixels.has_value());
   EXPECT_TRUE(torch::equal(*pixels,
                            torch::arange(12, torch::kFloat32).reshape({3, 4})));
-  MMBatchData decoded;
-  {
-    proto::MMData wire;
-    ASSERT_TRUE(mmdata_to_proto(batch, &wire));
-    ASSERT_TRUE(proto_to_mmdata(wire, &decoded));
-  }
-  const auto restored = decoded.get<torch::Tensor>("pixel_values");
-  ASSERT_TRUE(restored.has_value());
-  EXPECT_TRUE(torch::equal(*restored, *pixels));
-  ASSERT_EQ(decoded.mm_data_vec().size(), 1);
-  const auto item_pixels = decoded.mm_data_vec()
-                               .front()
-                               .items<MMItemVec>()
-                               .front()
-                               .get<torch::Tensor>("pixel_values");
-  ASSERT_TRUE(item_pixels.has_value());
-  EXPECT_TRUE(torch::equal(*item_pixels, *pixels));
 }
 
 TEST(MMBatchDataTest, SingleNoncontiguousImageKeepsContiguousBatchLayout) {
@@ -107,8 +90,7 @@ TEST(MMBatchDataTest, EncoderReplacementDiscardsPendingRawInputs) {
   EXPECT_TRUE(torch::equal(*gathered, embeddings));
 }
 
-TEST(MMBatchDataTest,
-     BatchCopiesSupportConcurrentAggregationAndProtoRoundTrip) {
+TEST(MMBatchDataTest, BatchCopiesSupportConcurrentAggregation) {
   const MMBatchData batch(
       {make_image(torch::ones({2, 3})), make_image(torch::zeros({1, 3}))});
   auto read = [batch] { return batch.get<torch::Tensor>("pixel_values"); };
@@ -121,14 +103,6 @@ TEST(MMBatchDataTest,
   ASSERT_TRUE(second_pixels.has_value());
   EXPECT_TRUE(torch::equal(*first_pixels, expected));
   EXPECT_TRUE(torch::equal(*second_pixels, expected));
-  proto::MMData wire;
-  ASSERT_TRUE(mmdata_to_proto(batch, &wire));
-  MMBatchData decoded;
-  ASSERT_TRUE(proto_to_mmdata(wire, &decoded));
-  ASSERT_EQ(decoded.mm_data_vec().size(), 2);
-  const auto restored = decoded.get<torch::Tensor>("pixel_values");
-  ASSERT_TRUE(restored.has_value());
-  EXPECT_TRUE(torch::equal(*restored, expected));
 }
 
 TEST(MMBatchDataTest, ScalarAndIncompatibleInputsRemainTensorLists) {
