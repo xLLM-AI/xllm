@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -20,6 +22,7 @@ import pytest
 import torch
 
 from xllm.python.attention.backend import LayerCache
+from xllm.python.model_loader.quantized_weight_loader import load_kv_cache_scales
 
 if TYPE_CHECKING:
     from xllm.python.attention.flashinfer_native_kv import FlashInferNativeKVBackend
@@ -35,6 +38,41 @@ def backend_type() -> type[FlashInferNativeKVBackend]:
     from xllm.python.attention.flashinfer_native_kv import FlashInferNativeKVBackend
 
     return FlashInferNativeKVBackend
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({}, (1.0, 1.0)),
+        ({"quantization_config": {"quant_method": "fp8"}}, (1.0, 1.0)),
+        ({"quantization_config": {"kv_cache_scales": {"k": 0.125}}}, (0.125, 1.0)),
+        ({"quantization_config": {"kv_cache_scales": {"v": 0.5}}}, (1.0, 0.5)),
+    ],
+)
+def test_checkpoint_scale_defaults(tmp_path: Path, config: dict, expected: tuple[float, float]) -> None:
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    assert load_kv_cache_scales(tmp_path) == expected
+
+
+@pytest.mark.parametrize(
+    "scales",
+    [
+        None,
+        {"k": False},
+        {"k": "0.125"},
+        {"v": None},
+        {"k": 0},
+        {"v": -1},
+        {"v": 1e-40},
+        {"k": 1e39},
+        {"v": float("inf")},
+        {"k": float("nan")},
+    ],
+)
+def test_invalid_checkpoint_scales(tmp_path: Path, scales: object) -> None:
+    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"kv_cache_scales": scales}}))
+    with pytest.raises(ValueError, match="kv_cache_scales"):
+        load_kv_cache_scales(tmp_path)
 
 
 @pytest.fixture
@@ -202,7 +240,9 @@ def test_query_conversion_preserves_strided_values() -> None:
 @pytest.mark.skipif(not _SM90, reason="Native FP8 integration targets SM90")
 @pytest.mark.parametrize("phase", ["prefill", "chunked_mixed", "decode", "decode_graph"])
 @pytest.mark.parametrize(("dtype", "v_scale"), [(torch.bfloat16, 0.5), (torch.float16, 0.0625)])
-def test_native_attention_matches_dense_reference(phase: str, dtype: torch.dtype, v_scale: float) -> None:
+def test_native_attention_matches_dense_reference(
+    phase: str, dtype: torch.dtype, v_scale: float, tmp_path: Path
+) -> None:
     pytest.importorskip("triton")
     pytest.importorskip("flashinfer")
     from xllm.python.attention.flashinfer_native_kv import FlashInferNativeKVBackend
@@ -212,6 +252,9 @@ def test_native_attention_matches_dense_reference(phase: str, dtype: torch.dtype
     device = torch.device("cuda")
     page, dim, heads = 16, 128, 8
     k_scale = 0.125
+    (tmp_path / "config.json").write_text(
+        json.dumps({"quantization_config": {"kv_cache_scales": {"k": k_scale, "v": v_scale}}})
+    )
     backend = FlashInferNativeKVBackend(
         heads,
         1,
@@ -221,8 +264,7 @@ def test_native_attention_matches_dense_reference(phase: str, dtype: torch.dtype
         device,
         dtype,
         "fp8_e4m3",
-        k_scale,
-        v_scale,
+        fixed_scales=load_kv_cache_scales(tmp_path),
         max_context_tokens=32,
     )
     rng = torch.Generator(device=device).manual_seed(73)

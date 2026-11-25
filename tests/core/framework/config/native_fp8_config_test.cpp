@@ -13,14 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <gflags/gflags.h>
 #include <gtest/gtest.h>
 
 #include <cstdint>
-#include <nlohmann/json.hpp>
 #include <string>
 
-#include "core/framework/config/config_utils.h"
 #include "core/framework/config/kv_cache_config.h"
 
 namespace xllm {
@@ -46,22 +43,6 @@ TEST(NativeFP8ConfigTest, PageSizeRestrictionDoesNotAffectOtherFormats) {
     config.kv_cache_dtype(dtype);
     EXPECT_NO_FATAL_FAILURE(config.validate());
   }
-}
-
-TEST(NativeFP8ConfigTest, ScalesRoundTripThroughJson) {
-  google::FlagSaver flag_saver;
-  KVCacheConfig original;
-  original.kv_cache_dtype("fp8_e4m3")
-      .kv_cache_k_scale(0.125)
-      .kv_cache_v_scale(0.5);
-  nlohmann::ordered_json encoded = nlohmann::ordered_json::object();
-  original.append_config_json(encoded);
-  KVCacheConfig restored;
-  restored.from_json(config::parse_json_string(encoded.dump()));
-  EXPECT_NO_FATAL_FAILURE(restored.validate());
-  EXPECT_EQ(restored.kv_cache_dtype(), "fp8_e4m3");
-  EXPECT_DOUBLE_EQ(restored.kv_cache_k_scale(), 0.125);
-  EXPECT_DOUBLE_EQ(restored.kv_cache_v_scale(), 0.5);
 }
 
 }  // namespace

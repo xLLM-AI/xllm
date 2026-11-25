@@ -47,8 +47,6 @@ class KVCacheConfig final {
          "max_cache_size",
          "max_memory_utilization",
          "kv_cache_dtype",
-         "kv_cache_k_scale",
-         "kv_cache_v_scale",
          "indexer_cache_dtype",
          "enable_prefix_cache",
          "kv_events_config",
@@ -71,8 +69,6 @@ class KVCacheConfig final {
   PROPERTY(double, max_memory_utilization) = 0.8;
 
   PROPERTY(std::string, kv_cache_dtype) = "auto";
-  PROPERTY(double, kv_cache_k_scale) = 1.0;
-  PROPERTY(double, kv_cache_v_scale) = 1.0;
 
   PROPERTY(std::string, indexer_cache_dtype) = "auto";
 

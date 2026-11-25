@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import json
-import math
 from typing import TYPE_CHECKING
 
 import flashinfer
@@ -44,8 +43,7 @@ class FlashInferNativeKVBackend(FlashInferBackend):
         device: torch.device,
         dtype: torch.dtype,
         cache_dtype: str,
-        key_scale: float = 1.0,
-        value_scale: float = 1.0,
+        fixed_scales: tuple[float, float] = (1.0, 1.0),
         max_context_tokens: int = 32768,
         virtual_memory: bool = False,
     ) -> None:
@@ -57,9 +55,6 @@ class FlashInferNativeKVBackend(FlashInferBackend):
             raise ValueError("Native SM90 KV requires BF16/FP16 activations and head_dim 128/256")
         if num_kv_heads <= 0 or num_heads % num_kv_heads or num_heads // num_kv_heads < 4:
             raise ValueError("Native KV currently requires a tensor-core decode GQA group of at least 4")
-        limits = torch.finfo(torch.float32)
-        if not all(math.isfinite(s) and limits.tiny <= s <= limits.max for s in (key_scale, value_scale)):
-            raise ValueError("Native KV decode scales must be finite positive normal FP32 values")
         if virtual_memory:
             raise ValueError("Native FP8 KV requires initialized resident pages; VMM is not qualified")
         if sliding_window > 0:
@@ -70,7 +65,7 @@ class FlashInferNativeKVBackend(FlashInferBackend):
         self._graph_xqa_plans: dict[int, XQADecodePlan] = {}
         self._eager_xqa_plan: XQADecodePlan | None = None
         self._active_xqa_plan: XQADecodePlan | None = None
-        self._fixed_scales = (key_scale, value_scale)
+        self._fixed_scales = fixed_scales
         self._pages: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         super().__init__(num_heads, num_kv_heads, head_dim, scale, sliding_window, device, dtype)
         # FlashInfer requires a zeroed workspace on first use. In

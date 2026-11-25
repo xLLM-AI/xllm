@@ -200,10 +200,8 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   // the MTP draft has different speculative options from its target.
   py::dict executor_config = py_causal_lm_->config_dict().attr("copy")();
   executor_config["kv_cache_dtype"] = options_.kv_cache_dtype();
-  const auto& kv_config = KVCacheConfig::get_instance();
-  executor_config["enable_vmm_kvcache"] = kv_config.enable_vmm_kvcache();
-  executor_config["kv_cache_k_scale"] = kv_config.kv_cache_k_scale();
-  executor_config["kv_cache_v_scale"] = kv_config.kv_cache_v_scale();
+  executor_config["enable_vmm_kvcache"] =
+      KVCacheConfig::get_instance().enable_vmm_kvcache();
   executor_config["enable_disagg_pd"] = options_.enable_disagg_pd();
   executor_config["instance_role"] = options_.instance_role().to_string();
   executor_config["task_type"] = options_.task_type();
