@@ -574,7 +574,7 @@ def launch_server(argv: Sequence[str] | None = None) -> int:
 def _exec_binary(argv: Sequence[str]) -> NoReturn:
     # Replace this process with the packaged xllm binary so `xllm <args>`
     # behaves exactly like invoking the binary directly (same pid, signals,
-    # stdio, and exit code). Any argument other than the `serve` subcommand is
+    # stdio, and exit code). Arguments outside the supported subcommands are
     # forwarded verbatim, which keeps `xllm --model ...` working for users who
     # start the server through the binary directly.
     try:
@@ -593,6 +593,11 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args and args[0] == "serve":
         raise SystemExit(launch_server(args[1:]))
+
+    if args and args[0] == "generate":
+        from xllm.generate import generate
+
+        raise SystemExit(generate(args[1:]))
 
     # Everything else is handed straight to the xllm binary, including no args
     # and -h/--help, so `xllm` is a transparent alias for the server binary.

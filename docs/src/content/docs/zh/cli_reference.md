@@ -6,6 +6,37 @@ sidebar:
 
 xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填参数。对于原生配置，显式指定的命令行 flag 优先于 JSON 配置值，后者优先于编译时默认值。下表按 `/xllm/core/framework/config` 下的 Config 类分组，一个 Config 对应一节；`ConfigJsonUtils` 一节包含配置文件相关的通用参数。
 
+## DiT 离线生成
+
+`xllm generate` 加载 DiT 模型，完成一次请求，将编码结果保存到文件，然后退出所有本地 worker。
+命令不启动 HTTP 服务。`xllm generate --help` 显示生成参数，`xllm serve --help` 显示引擎参数。
+支持通过 `--nnodes` 使用单机多卡。
+
+```bash
+xllm generate /path/to/FLUX.1-dev --prompt "A red fox in a snowy forest" \
+  --modality image --width 1024 --height 1024 --num-inference-steps 28 \
+  --seed 42 --output-file-path outputs/fox.png
+```
+
+| 参数 | 含义 |
+| --- | --- |
+| `MODEL_PATH`、`--model`、`--model-path` | 本地模型目录，也可使用引擎 JSON 配置中的 `model`。 |
+| `--modality` | `image`（默认）、`video`、`audio`、`text`，分别保存 PNG、MP4、WAV、UTF-8 文本。 |
+| `--prompt`、`--negative-prompt` | 模型支持的文本条件。 |
+| `--request-file` | 使用对应 `/v1/{modality}/generation` 格式的完整 JSON 请求，可携带媒体和 tensor 输入；显式生成参数覆盖文件中的对应字段。 |
+| `--conditioning` | 包含 `prompt`、具名 prompt embedding 和可选 `prompt_token_tags` 的 PyTorch 字典，使用 `weights_only=True` 加载。H3 仍需匹配编码器的输出。 |
+| `--size`、`--width` / `--height` | `宽*高` 格式的分辨率，或同时指定宽、高。 |
+| `--num-inference-steps`、`--guidance-scale`、`--seed` | 图像/视频采样参数；未指定时沿用引擎默认值。其他模态的参数见 `--help`。 |
+| `--num-frames`、`--fps`、`--flow-shift` | 视频生成参数。 |
+| `--output-path`、`--output-file-name` | 输出目录（默认 `outputs`）和文件名（默认 `output` 加模态扩展名）。多个结果添加 `_0`、`_1` 等后缀，已有同名文件会被覆盖。 |
+| `--output-file-path` | 完整输出文件路径，优先于输出目录和文件名。 |
+| `--nnodes`、`--num-gpus` | 本地设备数量，包括 NPU；`--tp_size`、`--sp_size` 等并行参数含义不变。 |
+| `--config-json-file` | 引擎 JSON 配置，显式运行参数优先于 JSON。 |
+| `--log-dir`、`--no-log-files` | 每个 rank 的日志目录（默认 `log`），或直接输出到终端。 |
+
+引擎参数支持下划线和连字符写法。模型输入、并行拓扑及生成参数限制与在线服务一致。
+带音频的视频生成和外部文本条件示例见 [MiniMax-H3 指南](/zh/cookbook/diffusion_models/minimax_h3/minimax_h3/)。
+
 ## ConfigJsonUtils
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |

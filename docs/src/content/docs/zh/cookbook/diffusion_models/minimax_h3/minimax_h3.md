@@ -221,3 +221,26 @@ FBCache 不能与滚动加载权重同时使用。TP=1 时必须显式设置
 `--enable_rolling_load=false`，此时单个设备须能容纳完整常驻权重及推理工作区；
 关闭滚动加载并不保证 TP=1 能够装下模型。显存不足时，请使用上面的多卡布局。
 H3 仅支持 `None`、`TaylorSeer` 和 `FBCache`，不支持 `FBCacheTaylorSeer`。
+
+## 离线生成
+
+沿用上文的 checkpoint 和 `conditioning.pt`，以下命令生成带音频的 MP4，保存完成后自动退出：
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export OMP_NUM_THREADS=8
+export HCCL_BUFFSIZE=256
+
+xllm generate /path/to/MiniMax-H3 --modality video \
+  --conditioning conditioning.pt --nnodes 4 \
+  --tp_size=2 --sp_size=2 --cfg_size=1 --vae_size=4 \
+  --text_encoder_tp_size=1 --dit_h3_task_type=fl2va --dit_cache_policy=None \
+  --dit_laser_attention_enabled=false --dit_sparse_attention_enabled=false \
+  --width 1344 --height 768 --num-frames 124 --fps 24 \
+  --num-inference-steps 50 --seed 42 --sampling-rate 32000 \
+  --flow-shift 12 --guidance-scale 1 --num-videos-per-prompt 1 \
+  --max_body_size=2147483648 --output-file-path outputs/minimax-h3.mp4
+```
+
+`--conditioning` 一起读取 prompt、embedding 和 token tags；如同时指定 `--prompt`，它必须与文件内的 prompt 一致。
+命令沿用现有 DiT 模型实现，也可通过 `--model_impl=python` 选择 Python 流水线，并遵守其拓扑和依赖要求。

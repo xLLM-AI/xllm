@@ -76,6 +76,7 @@ cc_binary(
     xllm
   SRCS
     xllm.cpp
+    dit_generation.cpp
   DEPS
     :distributed_vmm_coordinator
     :worker_memory_resources

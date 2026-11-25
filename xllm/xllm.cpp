@@ -25,8 +25,10 @@ namespace py = pybind11;
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "api_service/api_service.h"
@@ -38,6 +40,7 @@ namespace py = pybind11;
 #include "core/common/prefill_policy.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
+#include "core/distributed_runtime/dit_master.h"
 #include "core/distributed_runtime/master.h"
 #include "core/distributed_runtime/master_factory.h"
 #include "core/distributed_runtime/worker_memory_options.h"
@@ -74,6 +77,7 @@ namespace py = pybind11;
 #include "core/util/net.h"
 #include "core/util/utils.h"
 #include "core/util/verbose_trace_logger.h"
+#include "dit_generation.h"
 #include "function_call/function_call_parser.h"
 #include "parser/reasoning_parser.h"
 #include "server/xllm_server_registry.h"
@@ -356,7 +360,7 @@ void validate_config(const std::string& model_type) {
   model_config.normalize_cpp_chat_template(model_type);
 }
 
-int run() {
+int run(const std::optional<DiTGenerationCommand>& generation) {
   ModelConfig& model_config = ModelConfig::get_instance();
   LoadConfig& load_config = LoadConfig::get_instance();
   KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
@@ -384,6 +388,20 @@ int run() {
 
   if (model_config.backend().empty()) {
     model_config.backend(xllm::get_model_backend(model_path));
+  }
+
+  std::optional<DiTRequestParams> generation_request;
+  if (generation.has_value()) {
+    if (model_config.backend() != "dit") {
+      LOG(ERROR) << "xllm generate requires a DiT model";
+      return 1;
+    }
+    if (distributed_config.node_rank() == 0) {
+      generation_request = load_dit_generation_request(*generation);
+      if (!generation_request.has_value()) {
+        return 1;
+      }
+    }
   }
 
   const std::string local_ip = net::get_local_ip_addr();
@@ -475,6 +493,16 @@ int run() {
       create_master(model_config.backend(), options);
   master->run();
 
+  if (generation.has_value()) {
+    if (distributed_config.node_rank() == 0) {
+      return generate_dit_output(static_cast<DiTMaster&>(*master),
+                                 std::move(*generation_request),
+                                 generation->output_path);
+    }
+    master->wait();
+    return 0;
+  }
+
   // supported models
   std::vector<std::string> model_names = {model_config.model_id()};
   std::vector<std::string> model_repository_names = {model_repository_name};
@@ -523,6 +551,15 @@ int main(int argc, char** argv) {
   FLAGS_minloglevel = 0;
   google::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging("xllm");
+  std::optional<DiTGenerationCommand> generation;
+  if (argc > 1 && std::string_view(argv[1]) == "generate") {
+    if (argc != 5) {
+      LOG(ERROR) << "Usage: xllm generate MODALITY REQUEST_JSON OUTPUT_FILE "
+                    "[runtime flags]";
+      return 1;
+    }
+    generation = DiTGenerationCommand{argv[2], argv[3], argv[4]};
+  }
   initialize_configs();
 
   const ServiceConfig& service_config = ServiceConfig::get_instance();
@@ -575,7 +612,7 @@ int main(int argc, char** argv) {
   py::gil_scoped_release release;
 #endif
 
-  const int32_t exit_code = run();
+  const int32_t exit_code = run(generation);
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   // Master and workers have stopped. Release the shared transport before
   // Python/device finalization and its dependencies' static destructors.

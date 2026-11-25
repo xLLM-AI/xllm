@@ -6,6 +6,40 @@ sidebar:
 
 xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the only required flag. For native configuration, explicitly supplied command-line flags override JSON configuration values, which override compiled defaults. The tables below are grouped by the Config classes in `/xllm/core/framework/config`, with one Config per section. The `ConfigJsonUtils` section contains the common JSON config-file flags.
 
+## DiT offline generation
+
+`xllm generate` loads a DiT model, generates one request, saves the encoded
+results, and stops all local workers. It does not start an HTTP service.
+Use `xllm generate --help` for generation options and `xllm serve --help` for
+engine options. Generation supports one machine with `--nnodes` devices.
+
+```bash
+xllm generate /path/to/FLUX.1-dev --prompt "A red fox in a snowy forest" \
+  --modality image --width 1024 --height 1024 --num-inference-steps 28 \
+  --seed 42 --output-file-path outputs/fox.png
+```
+
+| Option | Meaning |
+| --- | --- |
+| `MODEL_PATH`, `--model`, `--model-path` | Local model directory; may also come from runtime JSON `model`. |
+| `--modality` | `image` (default), `video`, `audio`, or `text`; saves PNG, MP4, WAV, or UTF-8 text. |
+| `--prompt`, `--negative-prompt` | Text conditioning supported by the model. |
+| `--request-file` | Full JSON request using the matching `/v1/{modality}/generation` schema, including media/tensor inputs. Explicit generation CLI options override its fields. |
+| `--conditioning` | PyTorch dictionary with `prompt`, named prompt embeddings, and optional `prompt_token_tags`; loaded with `weights_only=True`. H3 still requires its matching encoder output. |
+| `--size`, `--width` / `--height` | Output resolution as `WIDTH*HEIGHT`, or a pair of dimensions. |
+| `--num-inference-steps`, `--guidance-scale`, `--seed` | Image/video sampling controls; omitted values use engine defaults. Other modalities expose their own controls in `--help`. |
+| `--num-frames`, `--fps`, `--flow-shift` | Video generation controls. |
+| `--output-path`, `--output-file-name` | Directory (default `outputs`) and name (default `output` plus modality extension). Multiple results add `_0`, `_1`, etc. Existing files are overwritten. |
+| `--output-file-path` | Complete filename; overrides the output directory/name. |
+| `--nnodes`, `--num-gpus` | Number of local devices, including NPUs. Parallelism flags such as `--tp_size` / `--sp_size` retain their normal meaning. |
+| `--config-json-file` | Engine configuration JSON. Explicit runtime flags override JSON values. |
+| `--log-dir`, `--no-log-files` | Rank logs (default `log`) or direct console output. |
+
+Engine flags accept underscore or hyphen spelling. Model-specific input,
+parallelism, and generation restrictions are the same as online serving.
+See the [MiniMax-H3 recipe](/en/cookbook/diffusion_models/minimax_h3/minimax_h3/)
+for video with audio and external text conditioning.
+
 ## ConfigJsonUtils
 
 | Parameter | Type | Default | Description |

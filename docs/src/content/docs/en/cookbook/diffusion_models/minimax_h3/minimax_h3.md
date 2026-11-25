@@ -244,3 +244,29 @@ set `--enable_rolling_load=false`; all resident weights and inference workspace
 must then fit on one device. Disabling rolling does not guarantee that TP=1
 fits. Use the multi-device layouts above when memory is insufficient. H3 supports
 only `None`, `TaylorSeer`, and `FBCache`; `FBCacheTaylorSeer` is unsupported.
+
+## Offline generation
+
+Use the same checkpoint and `conditioning.pt` described above. The following
+command generates an MP4 with audio and exits after saving the result:
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export OMP_NUM_THREADS=8
+export HCCL_BUFFSIZE=256
+
+xllm generate /path/to/MiniMax-H3 --modality video \
+  --conditioning conditioning.pt --nnodes 4 \
+  --tp_size=2 --sp_size=2 --cfg_size=1 --vae_size=4 \
+  --text_encoder_tp_size=1 --dit_h3_task_type=fl2va --dit_cache_policy=None \
+  --dit_laser_attention_enabled=false --dit_sparse_attention_enabled=false \
+  --width 1344 --height 768 --num-frames 124 --fps 24 \
+  --num-inference-steps 50 --seed 42 --sampling-rate 32000 \
+  --flow-shift 12 --guidance-scale 1 --num-videos-per-prompt 1 \
+  --max_body_size=2147483648 --output-file-path outputs/minimax-h3.mp4
+```
+
+`--conditioning` reads the prompt, embeddings, and token tags together. If
+`--prompt` is also supplied, it must match the conditioning prompt. The command
+uses the existing DiT model implementation; select `--model_impl=python` to use
+the Python pipeline with its supported topology and dependencies.
