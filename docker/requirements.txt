@@ -31,6 +31,7 @@ torchvision==${TORCHVISION_VERSION}
 safetensors==${SAFETENSORS_VERSION}
 tqdm==${TQDM_VERSION}
 transformers==${TRANSFORMERS_VERSION}
+diffusers==0.43.0
 loguru
 cloudpickle
 ml-dtypes
