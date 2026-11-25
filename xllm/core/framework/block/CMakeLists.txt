@@ -17,6 +17,8 @@ cc_library(
     composite_block_manager.cpp
     vmm_kv_block_manager.cpp
   DEPS
+    :paged_cache_partition
+    :recurrent_cache_partition
     :kv_cache_block
     :kv_transfer_completion
     :kv_cache_memory_interfaces

@@ -409,8 +409,14 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
     const BlockManagerPool::Options& options,
     std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
     int32_t dp_size,
-    VmmKVPageAllocator* page_allocator)
-    : BlockManagerPool(options, dp_size, page_allocator),
+    VmmKVPageAllocator* page_allocator,
+    std::optional<PagedCachePartition> paged_partition,
+    std::optional<RecurrentCachePartition> recurrent_partition)
+    : BlockManagerPool(options,
+                       dp_size,
+                       page_allocator,
+                       std::move(paged_partition),
+                       std::move(recurrent_partition)),
       transfer_coordinator_(std::move(transfer_coordinator)) {
   host_block_managers_.reserve(dp_size);
 

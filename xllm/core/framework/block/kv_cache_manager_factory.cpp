@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/common/prefill_policy.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
+#include "core/kv_cache/layout/cache_partition_builder.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/kv_cache/layout/vmm_kv_layout.h"
@@ -147,6 +148,29 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     }
   }
 
+  std::optional<PagedCachePartition> paged_partition;
+  std::optional<RecurrentCachePartition> recurrent_partition;
+  if (options.manager_types().empty()) {
+    paged_partition =
+        build_paged_cache_partition(CachePartitionId{options.model_id(), 0},
+                                    kv_cache_capacity,
+                                    model_args,
+                                    shape,
+                                    dtype,
+                                    options.block_size(),
+                                    options.enable_prefix_cache());
+    if (options.enable_linear_state()) {
+      recurrent_partition = build_recurrent_cache_partition(
+          CachePartitionId{options.model_id(), 1},
+          kv_cache_capacity,
+          model_args,
+          shape,
+          dtype,
+          options.linear_state_chunk_stride(),
+          options.enable_prefix_cache() && !options.instance_is_decode());
+    }
+  }
+
   VmmKVPageAllocator* page_allocator = nullptr;
   if (options.enable_vmm_kvcache()) {
     std::optional<VmmKVLayout> component_layout;
@@ -192,10 +216,19 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
         << "KV cache transfer coordinator is required for host-offload KV "
            "cache manager";
     manager = std::make_unique<HierarchyBlockManagerPool>(
-        options, std::move(transfer_coordinator), dp_size, page_allocator);
+        options,
+        std::move(transfer_coordinator),
+        dp_size,
+        page_allocator,
+        std::move(paged_partition),
+        std::move(recurrent_partition));
   } else {
     manager =
-        std::make_unique<BlockManagerPool>(options, dp_size, page_allocator);
+        std::make_unique<BlockManagerPool>(options,
+                                           dp_size,
+                                           page_allocator,
+                                           std::move(paged_partition),
+                                           std::move(recurrent_partition));
   }
 
   return KVCacheManagerFactoryResult{std::move(manager), std::move(shape)};

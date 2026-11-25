@@ -1,5 +1,29 @@
 include(cc_library)
 
+# Semantic cache partitions have no Torch, Request or allocator dependency.
+cc_library(
+  NAME
+    paged_cache_partition
+  HDRS
+    layout/cache_partition.h
+    layout/paged_cache_partition.h
+  SRCS
+    layout/paged_cache_partition.cpp
+  DEPS
+    glog::glog
+)
+
+cc_library(
+  NAME
+    recurrent_cache_partition
+  HDRS
+    layout/recurrent_cache_partition.h
+  SRCS
+    layout/recurrent_cache_partition.cpp
+  DEPS
+    glog::glog
+)
+
 cc_library(
   NAME
     static_kv_layout
@@ -142,6 +166,7 @@ cc_library(
   NAME
     kv_cache
   HDRS
+    layout/cache_partition_builder.h
     layout/cache_layout_builder.h
     layout/cache_layout_types.h
     layout/flashinfer_cache_layout.h
@@ -167,6 +192,7 @@ cc_library(
     storage/linear_state_slot_table.h
     storage/quantized_kv_cache_impl.h
   SRCS
+    layout/cache_partition_builder.cpp
     layout/cache_layout_builder.cpp
     storage/deepseek_v4_kv_cache_impl.cpp
     storage/indexed_kv_cache_impl.cpp
@@ -191,6 +217,8 @@ cc_library(
     :common
     :deepseek_v4_cache_policy
     :kv_cache_estimation
+    :paged_cache_partition
+    :recurrent_cache_partition
     :kv_cache_memory_interfaces
     :static_kv_layout
     glog::glog

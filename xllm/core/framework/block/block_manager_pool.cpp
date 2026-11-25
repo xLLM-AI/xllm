@@ -45,11 +45,38 @@ size_t total_admission_blocks(const BlockManager& manager,
 
 }  // namespace
 
-BlockManagerPool::BlockManagerPool(const Options& options,
-                                   int32_t dp_size,
-                                   VmmKVPageAllocator* page_allocator)
-    : page_allocator_(page_allocator), options_(options) {
+BlockManagerPool::BlockManagerPool(
+    const Options& options,
+    int32_t dp_size,
+    VmmKVPageAllocator* page_allocator,
+    std::optional<PagedCachePartition> paged_partition,
+    std::optional<RecurrentCachePartition> recurrent_partition)
+    : page_allocator_(page_allocator),
+      paged_partition_(std::move(paged_partition)),
+      recurrent_partition_(std::move(recurrent_partition)),
+      options_(options) {
   CHECK(dp_size > 0) << "dp_size must be greater than 0";
+  if (paged_partition_.has_value()) {
+    CHECK(options_.manager_types().empty());
+    // The pool construction adapter is the only partition-to-legacy-options
+    // bridge. Remove it when all leaf constructors accept their own cache
+    // descriptions.
+    options_.block_size(paged_partition_->token_stride())
+        .enable_prefix_cache(paged_partition_->enable_prefix_cache())
+        .model_id(paged_partition_->id().model_id);
+  }
+  if (recurrent_partition_.has_value()) {
+    CHECK(options_.manager_types().empty());
+    CHECK_EQ(recurrent_partition_->enable_prefix_cache(),
+             options_.enable_prefix_cache() && !options_.instance_is_decode());
+    if (paged_partition_.has_value()) {
+      CHECK_EQ(recurrent_partition_->id().model_id,
+               paged_partition_->id().model_id);
+    }
+    options_.enable_linear_state(true)
+        .linear_state_chunk_stride(recurrent_partition_->checkpoint_stride())
+        .model_id(recurrent_partition_->id().model_id);
+  }
   block_managers_.reserve(dp_size);
   const std::string& event_config = options_.kv_events_config();
   if (!event_config.empty() || options_.event_journal()) {
