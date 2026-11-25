@@ -28,7 +28,7 @@ limitations under the License.
 #include "common/options.h"
 #include "common/rate_limiter.h"
 #include "core/framework/multimodal/mm_data.h"
-#include "framework/chat_template/jinja_chat_template.h"
+#include "framework/chat_template/chat_template.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "framework/request/request_output.h"
@@ -59,7 +59,7 @@ class VLMRequestFactory final {
       std::function<std::vector<bool>(const std::vector<RequestOutput>&)>;
 
   VLMRequestFactory(MultimodalProcessorBase* processor,
-                    JinjaChatTemplate* chat_template,
+                    ChatTemplate* chat_template,
                     const Tokenizer* tokenizer,
                     const ModelArgs* model_args,
                     const Options* options,
@@ -155,7 +155,7 @@ class VLMRequestFactory final {
       const OutputCallback& callback);
 
   MultimodalProcessorBase* processor_ = nullptr;
-  JinjaChatTemplate* chat_template_ = nullptr;
+  ChatTemplate* chat_template_ = nullptr;
   const Tokenizer* tokenizer_ = nullptr;
   const ModelArgs* model_args_ = nullptr;
   const Options* options_ = nullptr;

@@ -62,7 +62,6 @@ cc_library(
     :kv_cache_block_types
     :tokenizer
     :chat_template
-    :jinja_chat_template
     :multimodal
     :json_object_grammar
     glog::glog
