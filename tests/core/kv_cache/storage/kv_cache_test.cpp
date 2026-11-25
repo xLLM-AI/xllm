@@ -272,7 +272,7 @@ TEST(NativeKVCacheTest, FP8PagesMatchBudgetAndKeepLinearStateDtypes) {
       .linear_num_key_heads(2)
       .linear_num_value_heads(2)
       .linear_key_head_dim(4)
-      .linear_value_head_dim(8)
+      .linear_value_head_dim(4)
       .linear_conv_kernel_dim(3)
       .mamba_ssm_dtype("float32");
   KVCacheEstimateOptions estimate;

@@ -492,7 +492,7 @@ void KVCacheShape::init_conv_cache_shape(const KVCacheCapacity& kv_cache_cap,
       kv_cache_cap.num_linear_state_blocks(),
       conv_state_len,
       model_args.linear_key_head_dim() * local_linear_k_head_count * 2 +
-          model_args.linear_value_head_dim() * local_linear_v_head_count};
+          model_args.linear_key_head_dim() * local_linear_v_head_count};
 #endif
 }
 
