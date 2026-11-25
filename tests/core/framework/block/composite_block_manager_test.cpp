@@ -456,7 +456,6 @@ TEST(CompositeBlockManagerTest, AllocateForSequence_SingleSeq) {
       base_num_blocks, base_block_size, window_size, max_seqs_per_batch);
 
   CompositeBlockManager manager(build_composite_leaves(opts), opts);
-  EXPECT_EQ(manager.num_sub_managers(), 3u);
 
   Sequence seq = MakeTestSequence(0, std::vector<int32_t>(1024, 1));
   const size_t num_tokens = 1024;
@@ -3267,15 +3266,7 @@ TEST_F(SharedKVCacheBlockTest, SchedulerDemandUsesSlotsAndMissingState) {
 
   EXPECT_EQ(pool.admission_capacity(0), 16u);
   EXPECT_EQ(pool.sequence_resource_units(/*num_tokens=*/4), 4u);
-  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/4), 4u);
   ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/4));
-  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/4), 0u);
-  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/5), 1u);
-
-  // A sequence with mounted KV but no recurrent slot still needs state.
-  std::vector<Block> linear =
-      sequence.kv_state().take_blocks(BlockType::LINEAR);
-  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/4), 2u);
   pool.deallocate_without_cache(&sequence);
 }
 

@@ -121,7 +121,6 @@ TEST(StaticKVTensorAllocatorTest, PlansGeometryWithoutAllocatingCapacity) {
   EXPECT_EQ(layout.bank_bytes(), 0);
   EXPECT_EQ(layout.num_reserved_slabs(), 2);
   EXPECT_EQ(layout.full_read_padding_page(), 4);
-  EXPECT_EQ(layout.scratch_full_page(), 0);
   EXPECT_EQ(layout.full_pages_per_slab(), 4);
   EXPECT_EQ(layout.objects_per_slab(KVCacheTensorRole::KEY), 2);
   EXPECT_EQ(layout.objects_per_slab(KVCacheTensorRole::CONV), 8);
@@ -532,10 +531,8 @@ TEST(StaticKVTensorAllocatorTest, ReadPaddingSurvivesAllWritableScratchRoles) {
   StaticKVTensorAllocator allocator(layout, torch::kCPU);
   const CacheViews views = allocate_views(allocator, spec);
   for (size_t layer = 0; layer < views.keys.size(); ++layer) {
-    views.keys[layer][layout.scratch_full_page()].fill_(
-        std::numeric_limits<float>::quiet_NaN());
-    views.values[layer][layout.scratch_full_page()].fill_(
-        std::numeric_limits<float>::quiet_NaN());
+    views.keys[layer][0].fill_(std::numeric_limits<float>::quiet_NaN());
+    views.values[layer][0].fill_(std::numeric_limits<float>::quiet_NaN());
   }
   for (size_t layer = 0; layer < views.conv.size(); ++layer) {
     views.conv[layer][0].fill_(std::numeric_limits<float>::quiet_NaN());

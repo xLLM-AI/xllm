@@ -173,10 +173,6 @@ class Block final {
     memcpy(hash_value_, hash_value, XXH3_128BITS_HASH_VALUE_LEN);
   }
 
-  constexpr uint32_t get_hash_value_len() const {
-    return XXH3_128BITS_HASH_VALUE_LEN;
-  }
-
  private:
   // increase reference count
   void inc_ref_count();

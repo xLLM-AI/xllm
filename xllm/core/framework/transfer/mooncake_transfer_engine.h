@@ -53,7 +53,6 @@ class MooncakeTransferEngineCore final {
   TransferEngine* engine() { return engine_.get(); }
 
   const std::string& addr() const { return addr_; }
-  const std::string& host_ip() const { return host_ip_; }
 
   // Session state is shared across all MooncakeTransferEngine instances.
   bool open_session(const std::string& control_endpoint,
