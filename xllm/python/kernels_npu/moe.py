@@ -24,9 +24,17 @@ from xllm_kernel.ops.moe import (
 )
 from xllm_kernel.ops.moe import (
     has_fused_moe_gmm1,
+    moe_distribute_combine_v2,
+    moe_distribute_dispatch_v2,
+    moe_finalize_routing,
+    moe_gating_top_k,
+    moe_gating_top_k_softmax,
     moe_grouped_matmul_swiglu_quant,
+    moe_init_routing_v2,
     moe_init_routing_v3,
+    moe_token_unpermute,
 )
+from xllm_kernel.ops.moe import mega_moe as _mega_moe
 from xllm_kernel.ops.moe import (
     moe_gating_top_k_hash as moe_gating_top_k_hash,
 )
@@ -194,30 +202,6 @@ def format_cast_nz(weight: torch.Tensor) -> torch.Tensor:
     return torch_npu.npu_format_cast(weight, _FRACTAL_NZ_FORMAT)
 
 
-def moe_finalize_routing(
-    permuted_tokens: torch.Tensor,
-    shared_input: torch.Tensor,
-    probs: torch.Tensor,
-    sorted_indices: torch.Tensor,
-) -> torch.Tensor:
-    """Finalize routed tokens and add the shared expert output.
-
-    This is a thin Python-graph wrapper around the existing torch_npu op.  It
-    intentionally keeps the native argument layout in one place; no C++ or
-    ATB source is changed by the GLM Unified prototype.
-    """
-    return torch_npu.npu_moe_finalize_routing(
-        permuted_tokens,
-        shared_input,
-        None,
-        None,
-        probs,
-        sorted_indices,
-        None,
-        drop_pad_mode=2,
-    )
-
-
 def _grouped_moe_impl(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -263,7 +247,7 @@ def _grouped_moe_impl(
     """
     if correction_bias is not None and correction_bias.dtype != gating_output.dtype:
         correction_bias = correction_bias.to(gating_output.dtype)
-    topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
+    topk_weights, topk_ids, _ = moe_gating_top_k(
         gating_output,
         k=topk,
         bias=correction_bias,
@@ -331,7 +315,7 @@ def grouped_moe(
         expert_tokens_num_type=expert_tokens_num_type,
         group_list_type=group_list_type,
     )
-    return torch_npu.npu_moe_token_unpermute(
+    return moe_token_unpermute(
         permuted_tokens=output,
         sorted_indices=sorted_indices,
         probs=probs,
@@ -424,7 +408,7 @@ def grouped_moe_bf16(
     if router_weight_before_down and hidden_states.shape[0] == 0:
         return torch.empty_like(hidden_states, dtype=torch.float32)
     active_expert_range = [start_expert_id, start_expert_id + num_experts_per_rank]
-    expanded_hidden, expanded_row_idx, group_list, _ = torch_npu.npu_moe_init_routing_v2(
+    expanded_hidden, expanded_row_idx, group_list, _ = moe_init_routing_v2(
         hidden_states,
         topk_ids,
         scale=None,
@@ -493,7 +477,7 @@ def grouped_moe_bf16(
     else:
         local_expert_mask = (topk_ids >= active_expert_range[0]) & (topk_ids < active_expert_range[1])
         probs = _unpermute_probs(topk_weights * local_expert_mask, expert_output)
-    return torch_npu.npu_moe_token_unpermute(
+    return moe_token_unpermute(
         permuted_tokens=expert_output,
         sorted_indices=expanded_row_idx.abs(),
         probs=probs,
@@ -530,7 +514,7 @@ def _grouped_moe_with_selected_experts_impl(
         raise ValueError(f"active expert range {active_range} is outside [0, {expert_num})")
     if w13.shape[0] != local_expert_count or w2.shape[0] != local_expert_count:
         raise ValueError("local expert count must match the first dimension of w13 and w2")
-    expanded_hidden, expanded_row_idx, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
+    expanded_hidden, expanded_row_idx, expert_tokens, _ = moe_init_routing_v2(
         hidden_states,
         topk_ids,
         scale=None,
@@ -560,7 +544,7 @@ def _grouped_moe_with_selected_experts_impl(
     )
     local_mask = (topk_ids >= active_range[0]) & (topk_ids < active_range[1])
     local_topk_weights = topk_weights * local_mask
-    return torch_npu.npu_moe_token_unpermute(
+    return moe_token_unpermute(
         permuted_tokens=output,
         sorted_indices=expanded_row_idx.abs(),
         probs=_unpermute_probs(local_topk_weights, output),
@@ -781,7 +765,7 @@ def ep_moe_w8a8(
         if active.shape[0]:
             # Use the same input quantizer as MC2/selected experts. Routing's
             # fused quantization is not a numerical substitute at half ties.
-            expanded, row_map, counts, _ = torch_npu.npu_moe_init_routing_v2(
+            expanded, row_map, counts, _ = moe_init_routing_v2(
                 active,
                 ids,
                 scale=None,
@@ -845,7 +829,7 @@ def ep_moe_w8a8(
         )
         output = torch.zeros_like(flat)
         if active.shape[0]:
-            restored = torch_npu.npu_moe_token_unpermute(
+            restored = moe_token_unpermute(
                 permuted_tokens=returned,
                 sorted_indices=row_map.abs().to(torch.int32),
                 probs=weights,
@@ -862,30 +846,6 @@ def ep_moe_w8a8(
 
     if hidden_2d.shape[0] > 512:
         raise ValueError("A3 MC2 dispatch supports at most 512 source rows per rank")
-    dispatch_output = torch_npu.npu_moe_distribute_dispatch_v2(
-        x=hidden_2d,
-        expert_ids=topk_ids_2d,
-        scales=None,
-        x_active_mask=active_mask,
-        expert_scales=None,
-        group_ep=group_ep,
-        ep_world_size=ep_size,
-        ep_rank_id=ep_rank,
-        moe_expert_num=num_experts,
-        group_tp="",
-        tp_world_size=0,
-        tp_rank_id=0,
-        expert_shard_type=0,
-        shared_expert_num=1,
-        shared_expert_rank_num=0,
-        # Keep the model's input quantizer. MC2's fused quantizer makes
-        # different half-tie choices on real BF16 hidden states; valid
-        # quantization cells alone did not prevent model-quality regression.
-        quant_mode=0,
-        global_bs=0,
-        expert_token_nums_type=1,
-        comm_alg="",
-    )
     (
         expand_x,
         _dynamic_scale,
@@ -894,7 +854,15 @@ def ep_moe_w8a8(
         ep_recv_counts,
         tp_recv_counts,
         _expand_scales,
-    ) = dispatch_output[:7]
+    ) = moe_distribute_dispatch_v2(
+        x=hidden_2d,
+        expert_ids=topk_ids_2d,
+        x_active_mask=active_mask,
+        group_ep=group_ep,
+        ep_world_size=ep_size,
+        ep_rank_id=ep_rank,
+        moe_expert_num=num_experts,
+    )
 
     if expand_x.shape[0]:
         quantized_x, input_scale = _kernels.dynamic_quant(expand_x)
@@ -914,7 +882,7 @@ def ep_moe_w8a8(
         hidden.dtype,
         swiglu_limit,
     )
-    routed_output = torch_npu.npu_moe_distribute_combine_v2(
+    routed_output = moe_distribute_combine_v2(
         expand_x=expert_output,
         expert_ids=topk_ids_2d,
         assist_info_for_combine=assist_info_for_combine,
@@ -922,21 +890,10 @@ def ep_moe_w8a8(
         expert_scales=topk_weights_2d,
         tp_send_counts=tp_recv_counts,
         x_active_mask=active_mask,
-        expand_scales=None,
-        shared_expert_x=None,
         group_ep=group_ep,
         ep_world_size=ep_size,
         ep_rank_id=ep_rank,
         moe_expert_num=num_experts,
-        group_tp="",
-        tp_world_size=0,
-        tp_rank_id=0,
-        expert_shard_type=0,
-        shared_expert_num=1,
-        shared_expert_rank_num=0,
-        global_bs=0,
-        comm_quant_mode=0,
-        comm_alg="",
     )
     return routed_output.reshape(original_shape)
 
@@ -960,7 +917,7 @@ def moe_fused_topk(
     """
     if scoring_func != "softmax":
         raise NotImplementedError("NPU moe_fused_topk currently supports softmax routing only")
-    return torch.ops.xllm_ops.moe_gating_top_k_softmax(
+    return moe_gating_top_k_softmax(
         gating_output,
         topk,
         renormalize,
@@ -1046,7 +1003,7 @@ def moe_gate_routing(
     """Gate routing: select top-k experts per token from logits."""
     if correction_bias is not None and correction_bias.dtype != gating_output.dtype:
         correction_bias = correction_bias.to(gating_output.dtype)
-    topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
+    topk_weights, topk_ids, _ = moe_gating_top_k(
         gating_output,
         k=topk,
         bias=correction_bias,
@@ -1082,7 +1039,7 @@ def mega_moe(
     use_w8a8 = w13_scale is not None
     weight1 = [w13] if use_w8a8 else list(w13.unbind(dim=0))
     weight2 = [w2] if use_w8a8 else list(w2.unbind(dim=0))
-    output, _ = torch.ops.xllm_ops.mega_moe(
+    output, _ = _mega_moe(
         context,
         hidden_states,
         topk_ids,
@@ -1134,7 +1091,7 @@ def _moe_expert_compute_impl(
             expert_range,
         )
     else:
-        sorted_hidden_i8, expanded_row_idx, group_list, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
+        sorted_hidden_i8, expanded_row_idx, group_list, pertoken_scale = moe_init_routing_v2(
             hidden_states,
             topk_ids,
             scale=None,
@@ -1213,7 +1170,7 @@ def moe_expert_compute(
         w2_scale,
         topk,
     )
-    return torch_npu.npu_moe_token_unpermute(
+    return moe_token_unpermute(
         permuted_tokens=output,
         sorted_indices=sorted_indices,
         probs=_unpermute_probs(topk_weights, output),
@@ -1279,7 +1236,7 @@ def moe_token_dispatch(
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = hidden_states.shape[0]
-    return torch_npu.npu_moe_init_routing_v2(
+    return moe_init_routing_v2(
         hidden_states,
         topk_ids,
         scale=None,
@@ -1320,7 +1277,7 @@ def moe_gmm2_combine(
         weight_scale=w2_scale,
         group_list=group_list,
     )
-    return torch_npu.npu_moe_token_unpermute(
+    return moe_token_unpermute(
         permuted_tokens=output,
         sorted_indices=expanded_row_idx.abs(),
         probs=_unpermute_probs(topk_weights, output),

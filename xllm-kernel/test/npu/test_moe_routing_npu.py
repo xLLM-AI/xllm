@@ -9,8 +9,11 @@ import torch_npu
 from xllm_kernel.ops.moe import (
     dequant_swiglu_quant,
     moe_gating_top_k_hash,
+    moe_gating_top_k_softmax,
     moe_grouped_matmul_swiglu_quant,
+    moe_init_routing_v2,
     moe_init_routing_v3,
+    moe_token_unpermute,
 )
 
 
@@ -26,6 +29,61 @@ def _check_graph_replay(forward: Callable[[], tuple[torch.Tensor, ...]], update:
         torch.npu.synchronize()
         for actual, reference in zip(captured, eager, strict=True):
             torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("normalize", [False, True])
+def test_softmax_gate_selects_and_normalizes_topk(normalize: bool) -> None:
+    generator = torch.Generator().manual_seed(2301)
+    logits = torch.randn((7, 128), generator=generator).npu()
+
+    def forward() -> tuple[torch.Tensor, torch.Tensor]:
+        return moe_gating_top_k_softmax(logits, 4, normalize)
+
+    def update() -> None:
+        logits.copy_(torch.randn(logits.shape, generator=generator))
+
+    expected_weights, expected_ids = logits.cpu().softmax(dim=-1).topk(4)
+    if normalize:
+        expected_weights /= expected_weights.sum(dim=-1, keepdim=True)
+    weights, ids = forward()
+    assert weights.is_contiguous() and ids.is_contiguous()
+    torch.testing.assert_close(weights.cpu(), expected_weights, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(ids.cpu(), expected_ids.int(), rtol=0, atol=0)
+    _check_graph_replay(forward, update)
+
+
+@pytest.mark.parametrize("quant_mode", [-1, 1])
+def test_routing_v2_groups_and_restores_tokens(quant_mode: int) -> None:
+    tokens = torch.arange(8, dtype=torch.bfloat16).view(-1, 1).expand(8, 128).contiguous().npu()
+    expert_ids = torch.tensor([[2, 0], [3, 2], [1, 0], [3, 1]] * 2, dtype=torch.int32, device="npu")
+    probs = torch.full(expert_ids.shape, 0.5, device="npu")
+
+    def forward() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        expanded, row_map, counts, scales = moe_init_routing_v2(
+            tokens,
+            expert_ids,
+            scale=None,
+            active_num=expert_ids.numel(),
+            expert_num=4,
+            expert_tokens_num_type=1,
+            expert_tokens_num_flag=True,
+            active_expert_range=[0, 4],
+            quant_mode=quant_mode,
+        )
+        rows = expanded if quant_mode == -1 else (expanded.float() * scales.view(-1, 1)).bfloat16()
+        restored = moe_token_unpermute(rows, row_map.abs(), probs)
+        return expanded, counts, restored
+
+    def update() -> None:
+        tokens.add_(1)
+        expert_ids.add_(1).remainder_(4)
+
+    expected_counts = expert_ids.cpu().long().flatten().bincount(minlength=4)
+    expanded, counts, restored = forward()
+    assert expanded.dtype == (torch.bfloat16 if quant_mode == -1 else torch.int8)
+    torch.testing.assert_close(counts.cpu(), expected_counts, rtol=0, atol=0)
+    torch.testing.assert_close(restored, tokens, rtol=0, atol=0)
+    _check_graph_replay(forward, update)
 
 
 @pytest.mark.parametrize("lookup", [False, True])

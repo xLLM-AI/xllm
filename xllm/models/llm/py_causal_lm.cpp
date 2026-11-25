@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/parallel_state/parallel_topology.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "core/kernels/ops_api.h"
 #include "core/kv_cache/layout/kpool_cache_policy.h"
 #include "core/util/pybind_helper.h"
 #include "core/util/utils.h"
@@ -41,7 +42,6 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/parallel_state/mega_moe_comm_resource.h"
-#include "core/kernels/npu/npu_ops_api.h"
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
 
@@ -172,8 +172,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
   }
   const bool enable_mega_moe = enable_glm_mega_moe || enable_qwen3_5_mega_moe;
   if (enable_mega_moe) {
-    CHECK(kernel::npu::has_mega_moe())
-        << "Python MegaMoE requires aclnnMegaMoe.";
+    CHECK(kernel::has_mega_moe()) << "Python MegaMoE requires aclnnMegaMoe.";
     MegaMoeCommSpec comm_spec;
     comm_spec.group_name = moe_ep_group_->hccl_comm_name(/*init_comm=*/true);
     comm_spec.hccl_comm = moe_ep_group_->hccl_comm();

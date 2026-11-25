@@ -13,6 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "csrc/npu/mega_moe.h"
+
+#include <dlfcn.h>
 #include <glog/logging.h>
 #include <torch_npu/csrc/aten/CustomFunctions.h>
 
@@ -23,12 +26,29 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
-#include "core/kernels/npu/npu_ops_api.h"
-#include "graph/types.h"
+#include "op_plugin/utils/op_api_common_base.h"
 
 namespace xllm::kernel::npu {
 namespace {
+
+struct MegaMoeApi {
+  void* launch;
+  void* workspace;
+};
+
+const MegaMoeApi& mega_moe_api() {
+  // This adapter uses CANN's float activation-clamp ABI. A custom transformer
+  // OPP can export the same symbol with an incompatible activation array ABI.
+  static const MegaMoeApi api = [] {
+    void* library = dlopen("libopapi.so", RTLD_LAZY | RTLD_LOCAL);
+    if (library == nullptr) {
+      return MegaMoeApi{};
+    }
+    return MegaMoeApi{dlsym(library, "aclnnMegaMoe"),
+                      dlsym(library, "aclnnMegaMoeGetWorkspaceSize")};
+  }();
+  return api;
+}
 
 bool is_fractal_nz(const torch::Tensor& tensor) {
   return at_npu::native::custom_ops::get_npu_format(tensor) ==
@@ -43,9 +63,7 @@ aclTensor* create_acl_tensor(const int64_t* view_dims,
                              const int64_t* storage_dims,
                              uint64_t storage_ndim,
                              void* data_ptr) {
-  static const auto acl_create_tensor =
-      aclnn::detail::get_op_api_func<aclnn::detail::AclCreateTensorFn>(
-          "aclCreateTensor");
+  static const auto acl_create_tensor = GET_OP_API_FUNC(aclCreateTensor);
   CHECK(acl_create_tensor != nullptr)
       << "aclCreateTensor is not available in libopapi.";
   aclTensor* tensor = acl_create_tensor(view_dims,
@@ -105,11 +123,8 @@ aclTensor* create_packed_scale_view(const torch::Tensor& packed,
 }  // namespace
 
 bool has_mega_moe() {
-  static const bool is_available =
-      aclnn::detail::get_op_api_func_addr("aclnnMegaMoeGetWorkspaceSize") !=
-          nullptr &&
-      aclnn::detail::get_op_api_func_addr("aclnnMegaMoe") != nullptr;
-  return is_available;
+  const auto& api = mega_moe_api();
+  return api.launch && api.workspace;
 }
 
 // To use the MegaMoe operator, you need to download CANN version 9.1.0 and the
@@ -140,7 +155,7 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
     const std::string& activation,
     float activation_clamp,
     int64_t dispatch_quant_out_dtype,
-    int64_t topo_type,
+    int64_t /*topo_type*/,
     int64_t rank_num_per_server) {
   CHECK(has_mega_moe()) << "aclnnMegaMoe is not available in libopapi.";
   CHECK(context.defined()) << "MegaMoe expects a defined context tensor.";
@@ -254,6 +269,7 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
     }
   }
 
+  const torch::DeviceGuard guard(x.device());
   auto y = torch::empty_like(x);
   auto expert_token_nums =
       torch::empty({local_expert_num}, x.options().dtype(torch::kInt));
@@ -296,9 +312,7 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
       s2_views.emplace_back(
           create_packed_scale_view(packed_s2, expert, local_expert_num));
     }
-    static const auto create_list =
-        aclnn::detail::get_op_api_func<aclnn::detail::AclCreateTensorListFn>(
-            "aclCreateTensorList");
+    static const auto create_list = GET_OP_API_FUNC(aclCreateTensorList);
     CHECK(create_list != nullptr)
         << "aclCreateTensorList is not available in libopapi.";
     const auto checked_create_list = [](const auto& tensors) {
@@ -311,37 +325,64 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
     acl_scales1 = checked_create_list(s1_views);
     acl_scales2 = checked_create_list(s2_views);
   } else {
-    acl_weight1 = aclnn::detail::convert_type(weight1);
-    acl_weight2 = aclnn::detail::convert_type(weight2);
-    acl_scales1 = aclnn::detail::convert_type(weight_scales1);
-    acl_scales2 = aclnn::detail::convert_type(weight_scales2);
+    acl_weight1 = ConvertType(weight1);
+    acl_weight2 = ConvertType(weight2);
+    acl_scales1 = weight_scales1 ? ConvertType(*weight_scales1) : nullptr;
+    acl_scales2 = weight_scales2 ? ConvertType(*weight_scales2) : nullptr;
   }
 
-  EXEC_NPU_CMD(aclnnMegaMoe,
-               context,
-               x,
-               topk_ids,
-               topk_weights,
-               acl_weight1,
-               acl_weight2,
-               acl_scales1,
-               acl_scales2,
-               bias1,
-               bias2,
-               x_active_mask,
-               moe_expert_num,
-               ep_world_size,
-               ccl_buffer_size,
-               max_recv_token_num,
-               dispatch_quant_mode,
-               resolved_dispatch_quant_out_dtype,
-               combine_quant_mode,
-               comm_alg_ptr,
-               num_max_tokens_per_rank,
-               activation_ptr,
-               activation_clamp,
-               y,
-               expert_token_nums);
+  // The packed experts use custom ACL descriptors. Build the executor per
+  // call because an ACL tensor-list pointer is not a cache key for its views.
+  const auto [launch, get_workspace] = mega_moe_api();
+  auto* acl_bias1 = bias1 ? ConvertType(*bias1) : nullptr;
+  auto* acl_bias2 = bias2 ? ConvertType(*bias2) : nullptr;
+  InitExecCommonCtx();
+  const auto stream = GetAclStream();
+  SetExecConfig();
+  uint64_t workspace_size = 0;
+  auto* workspace_size_ptr = &workspace_size;
+  aclOpExecutor* executor = nullptr;
+  auto** executor_ptr = &executor;
+  auto args = ConvertTypes(context,
+                           x,
+                           topk_ids,
+                           topk_weights,
+                           acl_weight1,
+                           acl_weight2,
+                           acl_scales1,
+                           acl_scales2,
+                           acl_bias1,
+                           acl_bias2,
+                           x_active_mask,
+                           moe_expert_num,
+                           ep_world_size,
+                           ccl_buffer_size,
+                           max_recv_token_num,
+                           dispatch_quant_mode,
+                           resolved_dispatch_quant_out_dtype,
+                           combine_quant_mode,
+                           comm_alg_ptr,
+                           num_max_tokens_per_rank,
+                           activation_ptr,
+                           activation_clamp,
+                           y,
+                           expert_token_nums,
+                           workspace_size_ptr,
+                           executor_ptr);
+  const int32_t workspace_status =
+      call(ConvertToOpApiFunc(args, get_workspace), args);
+  CHECK_EQ(workspace_status, ACL_SUCCESS)
+      << "aclnnMegaMoe workspace query failed: " << aclGetRecentErrMsg();
+  void* workspace = GetWorkSpaceAddr(workspace_size);
+  RunAclCall("aclnnMegaMoe", [=]() mutable {
+    InitExecSubTheadCtx(stream);
+    const int32_t result =
+        ExecuteApiFunc(launch, stream, workspace, workspace_size, executor);
+    ReleaseConvertTypes(args);
+    ReleaseExecCommonCtx();
+    return result;
+  });
+  UnInitExecCommonCtx();
 
   return std::make_tuple(y, expert_token_nums);
 }

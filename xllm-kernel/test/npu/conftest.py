@@ -1,15 +1,17 @@
 # Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 """Prepare the migrated NPU operators directly from the kernel package."""
 
+import os
 from importlib.util import find_spec
 
 import pytest
 
-pytest.importorskip("torch_npu", reason="NPU integration tests require torch_npu")
+torch_npu = pytest.importorskip("torch_npu", reason="NPU integration tests require torch_npu")
 
 from xllm_kernel import initialize
 from xllm_kernel.ops.attention.gdn.mega import has_mega_gdn_mtp_decode_varlen
 from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2
+from xllm_kernel.ops.collectives import HCCL_OPERATIONS, has_matmul_reduce_scatter
 from xllm_kernel.ops.gemm import has_grouped_matmul_out
 from xllm_kernel.ops.moe import FUSED_MOE_GMM1_OPERATIONS, has_fused_moe_gmm1
 
@@ -22,6 +24,8 @@ def require_fused_moe_gmm1() -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def _prepare_kernels() -> None:
+    if "LOCAL_RANK" in os.environ:
+        torch_npu.npu.set_device(int(os.environ["LOCAL_RANK"]))
     initialize(
         device="npu",
         operations=(
@@ -80,11 +84,16 @@ def _prepare_kernels() -> None:
             "quant_matmul_out",
             "quantize_per_tensor",
             "dynamic_quant",
+            *HCCL_OPERATIONS,
+            *(("matmul_reduce_scatter",) if has_matmul_reduce_scatter() else ()),
             "grouped_matmul",
             *(("grouped_matmul_out",) if has_grouped_matmul_out() else ()),
             *(("mla_preprocess_v2",) if has_mla_preprocess_v2() else ()),
             "dequant_swiglu_quant",
             "moe_gating_top_k_hash",
+            "moe_gating_top_k_softmax",
+            "moe_init_routing_v2",
+            "moe_token_unpermute",
             *(FUSED_MOE_GMM1_OPERATIONS if has_fused_moe_gmm1() else ()),
         ),
     )

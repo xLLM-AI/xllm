@@ -23,19 +23,14 @@ limitations under the License.
 // ACLGraph capture of these primitives requires HCCL_OP_EXPANSION_MODE=AIV;
 // the AICPU expansion mode cannot be captured.
 
+#include "csrc/npu/collectives.h"
+
 #include <ATen/MemoryOverlap.h>
 #include <glog/logging.h>
+#include <hccl/hccl.h>
+#include <torch_npu/csrc/aten/CustomFunctions.h>
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
-
-#ifdef TORCH_HIGHER_THAN_PTA6
-#include <torch_npu/csrc/aten/CustomFunctions.h>
-#else
-#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
-#endif
-#include <hccl/hccl.h>
-
-#include "npu_ops_api.h"
 
 namespace xllm::kernel::npu {
 namespace {
@@ -45,11 +40,7 @@ bool is_npu(const torch::Tensor& tensor) {
 }
 
 int64_t npu_format(const torch::Tensor& tensor) {
-#ifdef TORCH_HIGHER_THAN_PTA6
   return at_npu::native::get_npu_format(tensor);
-#else
-  return at_npu::native::NPUNativeFunctions::get_npu_format(tensor);
-#endif
 }
 
 HcclDataType to_hccl_data_type(const torch::Tensor& input) {
@@ -89,7 +80,7 @@ void check_input(const torch::Tensor& input, bool allow_nz = false) {
     CHECK_EQ(input.dim(), 2) << "NZ AllGather requires a 2D tensor.";
     CHECK_EQ(input.storage_offset(), 0)
         << "NZ AllGather requires whole storage.";
-    const auto dtype = input.scalar_type();
+    const torch::ScalarType dtype = input.scalar_type();
     CHECK(dtype == torch::kChar || dtype == torch::kHalf ||
           dtype == torch::kFloat || dtype == torch::kBFloat16)
         << "Unsupported NZ AllGather dtype " << dtype;
