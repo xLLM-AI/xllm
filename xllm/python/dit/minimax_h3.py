@@ -618,6 +618,8 @@ class MiniMaxH3Pipeline:
         tp_broadcast: Callable[[torch.Tensor, int], torch.Tensor] | None = None,
         cache_options: Mapping[str, Any] | None = None,
         sp_reduce: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        rainfusion_enabled: bool = False,
+        global_rank: int = 0,
         sp_communication_overlap: bool = True,
         laser_attention_enabled: bool = False,
     ) -> None:
@@ -630,6 +632,7 @@ class MiniMaxH3Pipeline:
         self._device = torch.device(device)
         self._laser_attention_enabled = laser_attention_enabled
         self._is_driver = is_driver
+        self._global_rank = global_rank
         self._task_type = task_type
         self._tp = TensorParallel(tp_rank, tp_size, tp_reduce, tp_gather)
         self._sp = SequenceParallel(
@@ -643,6 +646,7 @@ class MiniMaxH3Pipeline:
         self._tiles = TileParallel(vae_rank, vae_size, vae_gather)
         self._sp_reduce = sp_reduce
         self._cache_options = CacheDiTOptions(**cache_options) if cache_options is not None else None
+        self._rainfusion_enabled = rainfusion_enabled
         self.last_cache_stats: dict[str, object] | None = None
         self._scheduler_shifts = {"scheduler": 12.0, "audio_scheduler": 3.0}
         self._packed_layout = lru_cache(maxsize=1)(_build_layout)
@@ -663,7 +667,13 @@ class MiniMaxH3Pipeline:
     def load_component(self, name: str, path: str, shards: Sequence[StateDictShard]) -> None:
         if name in ("transformer", "transformer_ref"):
             self._denoiser = MiniMaxH3Denoiser(
-                path, shards, self._device, self._tp, self._sp, laser_attention_enabled=self._laser_attention_enabled
+                path,
+                shards,
+                self._device,
+                self._tp,
+                self._sp,
+                laser_attention_enabled=self._laser_attention_enabled,
+                rainfusion_enabled=self._rainfusion_enabled,
             )
         elif name == "vae":
             self._video_decoder = load_video_decoder(
@@ -985,8 +995,51 @@ class MiniMaxH3Pipeline:
                 self._sp_reduce,
                 self._device,
             )
+        rainfusion_request = None
+        if self._rainfusion_enabled:
+            grid_t = geometry.latent_frames
+            grid_h = geometry.latent_height // geometry.patch_height
+            grid_w = geometry.latent_width // geometry.patch_width
+            executed_steps = int(video_scheduler.timesteps.numel())
+            rainfusion_request, rainfusion_reason = self._denoiser.prepare_rainfusion(
+                layout, grid_t, grid_h, grid_w, executed_steps
+            )
+            if rainfusion_request is None:
+                logger.info(
+                    "MINIMAX_H3_RF_ADMISSION rank=%d decision=DENSE_FALLBACK reason=%s "
+                    "grid=%dx%dx%d valid_rows=%d video_start=%d steps=%d",
+                    self._global_rank,
+                    rainfusion_reason,
+                    grid_t,
+                    grid_h,
+                    grid_w,
+                    int(layout.tags.numel()),
+                    int(layout.video_start),
+                    executed_steps,
+                )
+            else:
+                logger.info(
+                    "MINIMAX_H3_RF_ADMISSION rank=%d decision=SPARSE policy=%s "
+                    "storage_rows=%d grid=%dx%dx%d valid_rows=%d video_start=%d "
+                    "steps=%d",
+                    self._global_rank,
+                    rainfusion_request.policy.name,
+                    rainfusion_request.geometry.total_rows,
+                    grid_t,
+                    grid_h,
+                    grid_w,
+                    int(layout.tags.numel()),
+                    int(layout.video_start),
+                    executed_steps,
+                )
         video, audio = self._denoise_reference(
-            video, audio, conditioning, video_scheduler, audio_scheduler, cache_request
+            video,
+            audio,
+            conditioning,
+            video_scheduler,
+            audio_scheduler,
+            cache_request,
+            rainfusion_request,
         )
         if cache_request is not None:
             state = cache_request.state
@@ -999,6 +1052,16 @@ class MiniMaxH3Pipeline:
                     state.similarity_checks,
                     state.hit_steps,
                 )
+        if rainfusion_request is not None:
+            logger.info(
+                "MINIMAX_H3_RF_LAUNCH rank=%d policy=%s selector_launches=%d attention_launches=%d sparse_steps=%s steps=%d",
+                self._global_rank,
+                rainfusion_request.policy.name,
+                rainfusion_request.selector_launches,
+                rainfusion_request.attention_launches,
+                rainfusion_request.sparse_steps,
+                int(video_scheduler.timesteps.numel()),
+            )
         video = video[:, layout.num_condition_video_rows :]
         audio = audio[:, layout.num_condition_audio_rows :]
 
@@ -1019,6 +1082,7 @@ class MiniMaxH3Pipeline:
         video_scheduler: MiniMaxH3Scheduler,
         audio_scheduler: MiniMaxH3Scheduler,
         cache: CacheDiTRequest | None,
+        rainfusion: "object | None",
     ) -> tuple[torch.Tensor, torch.Tensor]:
         layout = conditioning.layout
         video = video.clone()
@@ -1027,8 +1091,17 @@ class MiniMaxH3Pipeline:
             video_t = video_scheduler.timesteps[step]
             audio_t = audio_scheduler.timesteps[step]
             timesteps, timestep_indices = _reference_timesteps(layout, video_t, audio_t)
+            if rainfusion is not None:
+                rainfusion.begin_step(step)
             video_pred, audio_pred = self._denoiser(
-                video, audio, timesteps, timestep_indices, conditioning, step=step, cache=cache
+                video,
+                audio,
+                timesteps,
+                timestep_indices,
+                conditioning,
+                step=step,
+                cache=cache,
+                rainfusion=rainfusion,
             )
             if layout.num_condition_video_rows:
                 video[:, layout.num_condition_video_rows :] = video_scheduler.step(

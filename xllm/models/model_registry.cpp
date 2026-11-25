@@ -894,6 +894,10 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context) {
           task_type == "ref2va" && parallel.world_size() == 16 &&
           parallel.tp_size() == 2 && parallel.sp_size() == 8 &&
           parallel.vae_size() == 16 && is_ascend_a3();
+      CHECK(!config.dit_minimax_h3_rainfusion_enabled() || a3_ref2va)
+          << "dit_minimax_h3_rainfusion_enabled requires A3 Ref2VA with TP2, "
+             "SP8 and "
+             "VAE16";
       CHECK((four_device_fl2va || a3_ref2va) && parallel.cfg_size() == 1 &&
             parallel.dp_size() == 1 && parallel.dit_tp_group_ != nullptr &&
             parallel.dit_sp_group_ != nullptr &&

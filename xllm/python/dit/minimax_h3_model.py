@@ -14,7 +14,7 @@
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import isfinite, lcm
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 from diffusers import MiniMaxH3Transformer3DModel
@@ -26,6 +26,9 @@ from torch import nn
 from torch.nn import functional as F
 
 from xllm.python import _load_kernel_package
+
+if TYPE_CHECKING:
+    from xllm_kernel.ops.attention.rainfusion.backend import MinimaxH3RainfusionRequest
 
 _WEIGHT_TRANSFER_BATCH_BYTES = 256 * 1024**2
 _PACKED_SEQUENCE_ALIGNMENT = 64
@@ -459,6 +462,8 @@ def _dense_attention(
     sp: SequenceParallel | None = None,
     live_rows: int | None = None,
     laser: _LaserAttention | None = None,
+    *,
+    rainfusion: "MinimaxH3RainfusionRequest | None" = None,
 ) -> torch.Tensor:
     query = attn.norm_q(attn.to_q(states).unflatten(-1, (-1, attn.head_dim)))
     key = attn.norm_k(attn.to_k(states).unflatten(-1, (-1, attn.head_dim)))
@@ -490,7 +495,12 @@ def _dense_attention(
     rows, heads, head_dim = query.shape[1:]
     if live_rows is None:
         live_rows = rows
-    if laser is not None and live_rows >= 2048 and head_dim <= 128:
+    if rainfusion is not None:
+        # The compiled AOT pair owns geometry checks, capacity and both
+        # launches. Q/K/V stay in the same post-Ulysses packed layout as the
+        # dense NPU attention.
+        attended = rainfusion.attention(query, key, value, live_rows)
+    elif laser is not None and live_rows >= 2048 and head_dim <= 128:
         # Exclude sequence-parallel padding from the softmax, then restore the
         # full sequence for the reverse all-to-all.
         attended = laser(
@@ -550,6 +560,7 @@ class MiniMaxH3Denoiser(nn.Module):
         sp: SequenceParallel,
         *,
         laser_attention_enabled: bool = False,
+        rainfusion_enabled: bool = False,
     ) -> None:
         super().__init__()
         self._sp = sp
@@ -603,6 +614,11 @@ class MiniMaxH3Denoiser(nn.Module):
         # The non-persistent frequency buffer is initialized on CPU, then moved.
         model.rope = MiniMaxH3RotaryPosEmbed(cfg.rope_freq_dim, cfg.rope_theta).to(device)
         self.model = model
+        if rainfusion_enabled:
+            _load_kernel_package()
+            from xllm_kernel.ops.attention.rainfusion.backend import MinimaxH3RainfusionBackend
+
+            MinimaxH3RainfusionBackend().prepare_specialization(device)
 
     def prepare_conditioning(self, prompt_embed: torch.Tensor, layout: PackedLayout) -> PackedConditioning:
         text = self.model.token_refiner(self.model.context_embedder(prompt_embed.to(torch.bfloat16)))
@@ -623,6 +639,40 @@ class MiniMaxH3Denoiser(nn.Module):
             padded_rows,
         )
 
+    def prepare_rainfusion(
+        self,
+        layout: PackedLayout,
+        grid_t: int,
+        grid_h: int,
+        grid_w: int,
+        steps: int,
+    ) -> tuple["MinimaxH3RainfusionRequest | None", str]:
+        from xllm_kernel.ops.attention.rainfusion.backend import (
+            SPARSE_MIDDLE_STEPS,
+            MinimaxH3RainfusionBackend,
+        )
+
+        valid_rows = int(layout.tags.numel())
+        video_start = int(layout.video_start)
+        if steps != 50:
+            return None, "unsupported_native_step_count"
+        if video_start + grid_t * grid_h * grid_w != valid_rows:
+            return None, "unsupported_native_geometry"
+        backend = MinimaxH3RainfusionBackend(enabled=True)
+        reason = backend.unavailability_reason(valid_rows, video_start, grid_t, grid_h, grid_w)
+        if reason:
+            return None, reason
+        request = backend.prepare(
+            valid_rows,
+            video_start,
+            grid_t,
+            grid_h,
+            grid_w,
+            SPARSE_MIDDLE_STEPS,
+            self.model.proj_in.weight.device,
+        )
+        return request, "" if request is not None else "specialization_unavailable"
+
     def forward(
         self,
         video: torch.Tensor,
@@ -633,6 +683,7 @@ class MiniMaxH3Denoiser(nn.Module):
         *,
         step: int = 0,
         cache: CacheDiTRequest | None = None,
+        rainfusion: "MinimaxH3RainfusionRequest | None" = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         model = self.model
         layout = conditioning.layout
@@ -647,13 +698,26 @@ class MiniMaxH3Denoiser(nn.Module):
         modulation_indices = F.pad(timestep_indices * 3 + layout.tags, (0, padding))
         modulation_indices = modulation_indices.narrow(0, conditioning.local_start, conditioning.local_rows)
 
-        def run_block(block: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+        def run_block(index: int, block: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+            active = (
+                rainfusion
+                if rainfusion is not None
+                and rainfusion.policy.includes_step(step)
+                and rainfusion.policy.includes_layer(index)
+                else None
+            )
             shift_attn, scale_attn, gate_attn, shift_ff, scale_ff, gate_ff = block.adaln_proj(temb)
             attn_scale = scale_attn.index_select(0, modulation_indices)
             attn_shift = shift_attn.index_select(0, modulation_indices)
             attn_input = block.norm1(hidden_states) * (1 + attn_scale) + attn_shift
             attended = _dense_attention(
-                block.attn, attn_input, conditioning.rotary, self._sp, layout.tags.numel(), laser=self._laser
+                block.attn,
+                attn_input,
+                conditioning.rotary,
+                self._sp,
+                layout.tags.numel(),
+                laser=self._laser,
+                rainfusion=active,
             )
             hidden_states = hidden_states + gate_attn.index_select(0, modulation_indices) * attended
             ff_scale = scale_ff.index_select(0, modulation_indices)
@@ -667,7 +731,7 @@ class MiniMaxH3Denoiser(nn.Module):
             tail_start = len(blocks) - cache.state.back_blocks
             original_hidden = hidden
             for index in range(middle_start):
-                hidden = run_block(blocks[index], hidden)
+                hidden = run_block(index, blocks[index], hidden)
             front = hidden
             decision = cache.state.decide(
                 step,
@@ -681,15 +745,15 @@ class MiniMaxH3Denoiser(nn.Module):
                 hidden = cache.state.apply(step, front)
             else:
                 for index in range(middle_start, tail_start):
-                    hidden = run_block(blocks[index], hidden)
+                    hidden = run_block(index, blocks[index], hidden)
                 cache.state.record_dense(step, front, hidden)
                 executed_blocks += tail_start - middle_start
             for index in range(tail_start, len(blocks)):
-                hidden = run_block(blocks[index], hidden)
+                hidden = run_block(index, blocks[index], hidden)
             cache.state.record_step(step, decision.hit, executed_blocks + len(blocks) - tail_start)
         else:
-            for block in blocks:
-                hidden = run_block(block, hidden)
+            for index, block in enumerate(blocks):
+                hidden = run_block(index, block, hidden)
 
         hidden = self._sp.gather(hidden.contiguous())[:, : layout.tags.numel()]
         hidden = model.norm_out(hidden, temb, timestep_indices).float()

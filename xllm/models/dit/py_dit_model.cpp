@@ -151,6 +151,7 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
       minimax_h3_ref2va &&
       context.get_dit_config().selected_policy == PolicyType::CACHE_DIT;
   py::kwargs pipeline_args;
+  pipeline_args["global_rank"] = parallel.rank();
   if (minimax_h3_ref2va) {
     pipeline_args["task_type"] = task_type;
     pipeline_args["sp_communication_overlap"] =
@@ -181,6 +182,9 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
         return parallel_state::reduce(input, sp);
       });
       pipeline_args["cache_options"] = cache_options;
+    }
+    if (config.dit_minimax_h3_rainfusion_enabled()) {
+      pipeline_args["rainfusion_enabled"] = true;
     }
   } else {
     pipeline_args["laser_attention_enabled"] =

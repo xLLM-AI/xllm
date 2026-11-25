@@ -280,6 +280,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_debug_print` | `bool` | `false` | 是否打印 DiT 模型 debug 信息。 |
 | `dit_generation_image_area_max` | `int64` | `0` | 图像生成请求允许的最大图像面积（宽 * 高）；`0` 表示不限制。 |
 | `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 任务类型：`fl2va` 或 `ref2va`。 |
+| `dit_minimax_h3_rainfusion_enabled` | `bool` | `false` | 在 PyTorch Ref2VA 路径上启用 MiniMax-H3 RainFusion。需要 A3、由隔离编译子进程准备的 Python TileLang 算子，以及 Ref2VA TP2/SP8/VAE16；拓扑不满足时模型创建失败。对满足条件的 50 步请求，在从 0 开始计数的 step `[8, 36)` 上使用固定的 `sparse-middle-steps` 策略；几何或 step 数不支持时使用 dense attention。编译后的 kernel 对会在启动时缓存，并由启用的运行时复用。 |
 | `dit_enable_vae_tiling` | `bool` | `false` | 是否启用 VAE tiling，目前仅支持 `qwen-image-edit-plus`。 |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE 用于计算维度的 image size。 |
 | `dit_sparse_attention_enabled` | `bool` | `false` | 是否为 WAN 启用 block-wise sparse attention / RainFusion。 |
