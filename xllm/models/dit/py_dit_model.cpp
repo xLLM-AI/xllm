@@ -21,6 +21,7 @@ limitations under the License.
 #include <torch/python.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -93,43 +94,76 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
   py::object pipeline_class =
       py::module_::import("xllm.python.dit.registry")
           .attr("get_pipeline_class")(context.model_type());
-  pipeline_ = pipeline_class(
-      c10::str(device()),
-      parallel.rank() == 0,
-      group_rank(tp),
-      group_size(tp),
-      group_rank(sp),
-      group_size(sp),
-      group_rank(vae),
-      group_size(vae),
-      py::cpp_function([tp](torch::Tensor input) {
-        py::gil_scoped_release release;
-        return parallel_state::reduce(input, tp);
-      }),
-      py::cpp_function([tp](const torch::Tensor& input) {
-        py::gil_scoped_release release;
-        return parallel_state::gather(input, tp, /*dim=*/-1);
-      }),
-      py::cpp_function([sp](const torch::Tensor& input) {
-        py::gil_scoped_release release;
-        return parallel_state::gather(input, sp, /*dim=*/1);
-      }),
-      py::cpp_function([sp](const torch::Tensor& input, bool scatter_heads) {
-        py::gil_scoped_release release;
-        const int32_t scatter_dim = scatter_heads ? 2 : 1;
-        const int32_t gather_dim = scatter_heads ? 1 : 2;
-        return parallel_state::all_to_all_4D(
-            input, scatter_dim, gather_dim, /*async_ops=*/false, sp)();
-      }),
-      py::cpp_function([vae](const torch::Tensor& input) {
-        py::gil_scoped_release release;
-        if (vae == nullptr || vae->world_size() == 1) {
-          return input.unsqueeze(0);
-        }
-        return vae->allgather_base_sync(input);
-      }),
-      py::arg("laser_attention_enabled") =
-          DiTConfig::get_instance().dit_laser_attention_enabled());
+  auto make_pipeline = [&](auto&&... keyword_args) {
+    return pipeline_class(
+        c10::str(device()),
+        parallel.rank() == 0,
+        group_rank(tp),
+        group_size(tp),
+        group_rank(sp),
+        group_size(sp),
+        group_rank(vae),
+        group_size(vae),
+        py::cpp_function([tp](torch::Tensor input) {
+          py::gil_scoped_release release;
+          return parallel_state::reduce(input, tp);
+        }),
+        py::cpp_function([tp](const torch::Tensor& input) {
+          py::gil_scoped_release release;
+          return parallel_state::gather(input, tp, /*dim=*/-1);
+        }),
+        py::cpp_function([sp](const torch::Tensor& input) {
+          py::gil_scoped_release release;
+          return parallel_state::gather(input, sp, /*dim=*/1);
+        }),
+        py::cpp_function([sp](const torch::Tensor& input,
+                              bool scatter_heads,
+                              bool async_ops) {
+          const int32_t scatter_dim = scatter_heads ? 2 : 1;
+          const int32_t gather_dim = scatter_heads ? 1 : 2;
+          std::function<torch::Tensor()> work;
+          {
+            py::gil_scoped_release release;
+            work = parallel_state::all_to_all_4D(
+                input, scatter_dim, gather_dim, async_ops, sp);
+          }
+          return py::cpp_function([work = std::move(work)]() mutable {
+            py::gil_scoped_release release;
+            return work();
+          });
+        }),
+        py::cpp_function([vae](const torch::Tensor& input) {
+          py::gil_scoped_release release;
+          if (vae == nullptr || vae->world_size() == 1) {
+            return input.unsqueeze(0);
+          }
+          return vae->allgather_base_sync(input);
+        }),
+        std::forward<decltype(keyword_args)>(keyword_args)...);
+  };
+  const DiTConfig& config = DiTConfig::get_instance();
+  const std::string task_type = config.dit_h3_task_type();
+  const bool minimax_h3_ref2va =
+      context.model_type() == "MiniMaxH3ModularPipeline" &&
+      task_type == "ref2va";
+  if (minimax_h3_ref2va) {
+    pipeline_ =
+        make_pipeline(py::arg("task_type") = task_type,
+                      py::arg("sp_communication_overlap") =
+                          config.dit_sp_communication_overlap(),
+                      py::arg("tp_broadcast") = py::cpp_function(
+                          [tp](const torch::Tensor& input, int32_t root_rank) {
+                            torch::Tensor tensor = input.contiguous();
+                            if (tp != nullptr) {
+                              py::gil_scoped_release release;
+                              tp->broadcast(tensor, root_rank);
+                            }
+                            return tensor;
+                          }));
+  } else {
+    pipeline_ = make_pipeline(py::arg("laser_attention_enabled") =
+                                  config.dit_laser_attention_enabled());
+  }
 }
 
 PyDiTModel::~PyDiTModel() { clear_python_object(pipeline_); }

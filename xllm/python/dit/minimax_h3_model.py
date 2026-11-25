@@ -49,7 +49,14 @@ class SequenceParallel:
     rank: int
     size: int
     gather: Callable[[torch.Tensor], torch.Tensor]
-    exchange: Callable[[torch.Tensor, bool], torch.Tensor]
+    exchange: Callable[[torch.Tensor, bool, bool], Callable[[], torch.Tensor]]
+    async_qkv: bool = False
+
+    def sync(self, tensor: torch.Tensor, scatter_heads: bool) -> torch.Tensor:
+        return self.exchange(tensor, scatter_heads, False)()
+
+    def submit(self, tensor: torch.Tensor, scatter_heads: bool) -> Callable[[], torch.Tensor]:
+        return self.exchange(tensor, scatter_heads, True)
 
 
 class _ParallelLinear(nn.Module):
@@ -150,7 +157,11 @@ class PackedLayout:
     video_indices: torch.Tensor
     audio_indices: torch.Tensor
     text_indices: torch.Tensor
-    timestep_indices: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    timestep_indices: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+    audio_start: int = 0
+    video_start: int = 0
+    num_condition_video_rows: int = 0
+    num_condition_audio_rows: int = 0
 
 
 @dataclass(frozen=True)
@@ -186,10 +197,27 @@ def _dense_attention(
     if rotary is not None:
         query = _apply_rotary(query, rotary)
         key = _apply_rotary(key, rotary)
+    local_heads = query.size(2)
+    head_padding = 0
     if sp is not None:
-        query = sp.exchange(query, True)
-        key = sp.exchange(key, True)
-        value = sp.exchange(value, True)
+        padded_heads = local_heads + (-local_heads) % sp.size
+        head_padding = padded_heads - local_heads
+        if head_padding:
+            pad = (0, 0, 0, head_padding)
+            query = F.pad(query, pad)
+            key = F.pad(key, pad)
+            value = F.pad(value, pad)
+        if sp.async_qkv:
+            query_work = sp.submit(query, True)
+            key_work = sp.submit(key, True)
+            value_work = sp.submit(value, True)
+            query = query_work()
+            key = key_work()
+            value = value_work()
+        else:
+            query = sp.sync(query, True)
+            key = sp.sync(key, True)
+            value = sp.sync(value, True)
     rows, heads, head_dim = query.shape[1:]
     if live_rows is None:
         live_rows = rows
@@ -223,7 +251,9 @@ def _dense_attention(
         )
         attended = attended.unsqueeze(0)
     if sp is not None:
-        attended = sp.exchange(attended, False)
+        attended = sp.sync(attended, False)
+        if head_padding:
+            attended = attended.narrow(2, 0, local_heads).contiguous()
     return attn.to_out[0](attended.flatten(-2))
 
 
@@ -266,8 +296,12 @@ class MiniMaxH3Denoiser(nn.Module):
         with torch.device("meta"):
             model = MiniMaxH3Transformer3DModel.from_config(config)
         cfg = model.config
+        head_parallel_size = tp.size * sp.size
+        padded_split_heads = (
+            cfg.num_attention_heads == 56 and cfg.attention_head_dim == 128 and tp.size == 2 and sp.size == 8
+        )
         if (
-            cfg.num_attention_heads % (tp.size * sp.size)
+            (cfg.num_attention_heads % head_parallel_size and not padded_split_heads)
             or cfg.in_channels * cfg.patch_size[1] * cfg.patch_size[2] % tp.size
             or cfg.audio_in_channels % tp.size
             or tuple(cfg.patch_size[:1]) != (1,)

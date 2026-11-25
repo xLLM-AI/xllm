@@ -18,6 +18,7 @@ from math import prod
 import torch
 from diffusers import AutoencoderKLMiniMaxH3, AutoencoderKLMiniMaxH3Audio
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoRotaryPosEmbed
+from torch.nn import functional as F
 
 from xllm.python.dit.minimax_h3_model import StateDictShard, load_component_weights
 
@@ -74,14 +75,31 @@ class MiniMaxH3VideoDecoder(AutoencoderKLMiniMaxH3):
         pixel_std = decoded.new_tensor((0.229, 0.224, 0.225)).view(1, 3, 1, 1, 1)
         return decoded.mul_(pixel_std).add_(pixel_mean).clamp_(0, 1).permute(0, 2, 1, 3, 4).contiguous()
 
+    def encode_reference_condition(self, pixels: torch.Tensor, seed: int = 42) -> torch.Tensor:
+        mean = pixels.new_tensor(self.config.latents_mean, dtype=torch.float32).view(1, -1, 1, 1, 1)
+        std = pixels.new_tensor(self.config.latents_std, dtype=torch.float32).view(1, -1, 1, 1, 1)
+        pixel_mean = pixels.new_tensor((0.485, 0.456, 0.406), dtype=torch.float32).view(1, 3, 1, 1, 1)
+        pixel_std = pixels.new_tensor((0.229, 0.224, 0.225), dtype=torch.float32).view(1, 3, 1, 1, 1)
+        normalized = (pixels.to(torch.float32).div(255.0) - pixel_mean) / pixel_std
+        posterior = self.encode(normalized, return_dict=False)[0]
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        latent = posterior.sample(generator=generator).to(torch.float16).to(torch.float32)
+        return (latent - mean) / std
+
 
 def load_video_decoder(
-    path: str, shards: Sequence[StateDictShard], device: torch.device, group: TileParallel
+    path: str,
+    shards: Sequence[StateDictShard],
+    device: torch.device,
+    group: TileParallel,
+    *,
+    with_encoder: bool = False,
 ) -> MiniMaxH3VideoDecoder:
     config = MiniMaxH3VideoDecoder.load_config(path)
     with torch.device("meta"):
         model = MiniMaxH3VideoDecoder.from_config(config)
-    del model.encoder, model.quant_conv
+    if not with_encoder:
+        del model.encoder, model.quant_conv
     model._tile_parallel = group
     load_component_weights(model, shards, device, _fp32)
     head_dim = int(model.config.decoder_attention_head_dim * model.config.decoder_rope_dim_ratio)
@@ -90,10 +108,25 @@ def load_video_decoder(
     return model
 
 
+class MiniMaxH3AudioCodec(AutoencoderKLMiniMaxH3Audio):
+    def encode_reference_rows(self, waveform: torch.Tensor) -> torch.Tensor:
+        hop_length = prod(self.config.encoder_rates)
+        sample = waveform.to(torch.float32).unsqueeze(1)
+        right_pad = (-sample.size(2)) % hop_length
+        if right_pad:
+            sample = F.pad(sample, (0, right_pad))
+        posterior = self.encode(sample, return_dict=False)[0]
+        latent = posterior.mode().to(torch.float32)
+        mean = latent.new_tensor(self.config.latents_mean, dtype=torch.float32).view(1, -1, 1)
+        std = latent.new_tensor(self.config.latents_std, dtype=torch.float32).view(1, -1, 1)
+        return ((latent - mean) / std).reshape(1, -1, latent.size(1)).contiguous()
+
+
 @dataclass(frozen=True)
 class AudioGeometry:
     sampling_rate: int
     hop_length: int
+    latent_channels: int
 
 
 def load_audio_geometry(path: str) -> AudioGeometry:
@@ -101,15 +134,23 @@ def load_audio_geometry(path: str) -> AudioGeometry:
     hop_length = prod(config["encoder_rates"])
     if config["sampling_rate"] != 32000 or hop_length <= 0 or 32000 % hop_length:
         raise ValueError("MiniMax-H3 T2VA requires a 32 kHz audio VAE with an integral latent rate")
-    return AudioGeometry(config["sampling_rate"], hop_length)
+    return AudioGeometry(config["sampling_rate"], hop_length, config["latent_channels"])
 
 
 def load_audio_decoder(
-    path: str, shards: Sequence[StateDictShard], device: torch.device
-) -> AutoencoderKLMiniMaxH3Audio:
-    config = AutoencoderKLMiniMaxH3Audio.load_config(path)
+    path: str,
+    shards: Sequence[StateDictShard],
+    device: torch.device,
+    *,
+    with_encoder: bool = False,
+    with_decoder: bool = True,
+) -> MiniMaxH3AudioCodec:
+    config = MiniMaxH3AudioCodec.load_config(path)
     with torch.device("meta"):
-        model = AutoencoderKLMiniMaxH3Audio.from_config(config)
-    del model.encoder, model.pre_block, model.mean_proj, model.logs_proj
+        model = MiniMaxH3AudioCodec.from_config(config)
+    if not with_encoder:
+        del model.encoder, model.pre_block, model.mean_proj, model.logs_proj
+    if not with_decoder:
+        del model.decoder, model.dec_in_proj
     load_component_weights(model, shards, device, _fp32)
     return model
