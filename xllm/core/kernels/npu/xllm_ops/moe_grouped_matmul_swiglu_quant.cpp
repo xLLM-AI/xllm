@@ -22,20 +22,6 @@ limitations under the License.
 
 namespace xllm::kernel::npu {
 
-bool has_moe_grouped_matmul_swiglu_quant() {
-  static const bool available =
-      (aclnn::detail::get_op_api_func_addr(
-           "aclnnMoeGroupedMatmulSwigluQuantGetWorkspaceSize") != nullptr &&
-       aclnn::detail::get_op_api_func_addr(
-           "aclnnMoeGroupedMatmulSwigluQuant") != nullptr) ||
-      (aclnn::detail::get_op_api_func_addr(
-           "aclnnGroupedMatmulSwigluQuantWeightNZGetWorkspaceSize") !=
-           nullptr &&
-       aclnn::detail::get_op_api_func_addr(
-           "aclnnGroupedMatmulSwigluQuantWeightNZ") != nullptr);
-  return available;
-}
-
 std::tuple<torch::Tensor, torch::Tensor> moe_grouped_matmul_swiglu_quant(
     const torch::Tensor& x,
     const torch::Tensor& weight,

@@ -30,7 +30,8 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-Sequence make_decode_ready_sequence(bool enable_schedule_overlap) {
+std::unique_ptr<Sequence> make_decode_ready_sequence(
+    bool enable_schedule_overlap) {
   static RequestSamplingParam sampling_param;
   static StoppingChecker stopping_checker;
 
@@ -40,7 +41,6 @@ Sequence make_decode_ready_sequence(bool enable_schedule_overlap) {
   params.skip_special_tokens = true;
   params.streaming = false;
   params.enable_schedule_overlap = enable_schedule_overlap;
-  params.bos_token_id = 0;
   params.request_id = "generated_tokens_req";
   params.sampling_param = &sampling_param;
   params.stopping_checker = &stopping_checker;
@@ -51,91 +51,67 @@ Sequence make_decode_ready_sequence(bool enable_schedule_overlap) {
       /*num_prompt_tokens=*/prompt_token_ids.size(),
       /*echo=*/params.echo,
       /*skip_special_tokens=*/params.skip_special_tokens);
-  Sequence sequence(/*index=*/0,
-                    prompt_token_ids,
-                    /*input_embedding=*/torch::Tensor(),
-                    /*mm_data=*/MMData(),
-                    decoder,
-                    params);
+  auto sequence =
+      std::make_unique<Sequence>(/*index=*/0,
+                                 prompt_token_ids,
+                                 /*input_embedding=*/torch::Tensor(),
+                                 /*mm_data=*/MMData(),
+                                 decoder,
+                                 params);
   // Move the sequence out of the prefill stage so append_token / the decode
   // path treats new tokens as generated decode tokens.
-  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
+  sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
   return sequence;
 }
 
 }  // namespace
 
 TEST(SequenceGeneratedTokensTest, CountsRealAppendedTokens) {
-  Sequence sequence = make_decode_ready_sequence(
+  auto sequence = make_decode_ready_sequence(
       /*enable_schedule_overlap=*/false);
-  EXPECT_EQ(sequence.generated_tokens_since_latency(), 0u);
+  EXPECT_EQ(sequence->generated_tokens_since_latency(), 0u);
 
-  sequence.append_token(Token(10));
-  sequence.append_token(Token(11));
+  sequence->append_token(Token(/*id=*/10));
+  sequence->append_token(Token(/*id=*/11));
 
-  EXPECT_EQ(sequence.generated_tokens_since_latency(), 2u);
+  EXPECT_EQ(sequence->generated_tokens_since_latency(), 2u);
 }
 
 TEST(SequenceGeneratedTokensTest, TbtResetsGeneratedTokenCount) {
-  Sequence sequence = make_decode_ready_sequence(
+  auto sequence = make_decode_ready_sequence(
       /*enable_schedule_overlap=*/false);
-  sequence.append_token(Token(10));
-  sequence.append_token(Token(11));
-  ASSERT_EQ(sequence.generated_tokens_since_latency(), 2u);
+  sequence->append_token(Token(/*id=*/10));
+  sequence->append_token(Token(/*id=*/11));
+  ASSERT_EQ(sequence->generated_tokens_since_latency(), 2u);
 
-  sequence.tbt(absl::Now());
-  EXPECT_EQ(sequence.generated_tokens_since_latency(), 0u);
+  sequence->tbt(absl::Now());
+  EXPECT_EQ(sequence->generated_tokens_since_latency(), 0u);
 
-  sequence.append_token(Token(12));
-  EXPECT_EQ(sequence.generated_tokens_since_latency(), 1u);
-}
-
-TEST(SequenceGeneratedTokensTest, ForkPreservesPendingLatencyObservation) {
-  for (bool enable_schedule_overlap : {false, true}) {
-    SCOPED_TRACE(enable_schedule_overlap);
-    Sequence sequence = make_decode_ready_sequence(enable_schedule_overlap);
-    const absl::Time start = absl::FromUnixSeconds(100);
-    sequence.tbt_microseconds(start);
-    if (enable_schedule_overlap) {
-      sequence.append_token(Token(-1));
-      sequence.update_last_step_token(Token(10), /*token_offset=*/0);
-    } else {
-      sequence.append_token(Token(10));
-    }
-    ASSERT_TRUE(sequence.is_first_token());
-    ASSERT_EQ(sequence.generated_tokens_since_latency(), 1u);
-
-    std::unique_ptr<Sequence> fork = sequence.fork(/*index=*/1);
-    EXPECT_TRUE(fork->is_first_token());
-    EXPECT_EQ(fork->generated_tokens_since_latency(), 1u);
-    EXPECT_EQ(fork->tbt_microseconds(start + absl::Seconds(7)), 7000000);
-    EXPECT_EQ(fork->generated_tokens_since_latency(), 0u);
-    EXPECT_EQ(sequence.generated_tokens_since_latency(), 1u);
-    EXPECT_EQ(sequence.tbt_microseconds(start + absl::Seconds(9)), 9000000);
-  }
+  sequence->append_token(Token(/*id=*/12));
+  EXPECT_EQ(sequence->generated_tokens_since_latency(), 1u);
 }
 
 TEST(SequenceGeneratedTokensTest, IgnoresOverlapFakeTokens) {
-  Sequence sequence = make_decode_ready_sequence(
+  auto sequence = make_decode_ready_sequence(
       /*enable_schedule_overlap=*/true);
   // Under schedule overlap a placeholder token id (< 0) is appended and the
   // real token is committed later via update_last_step_token. Fake tokens must
   // not inflate the committed-token count used for amortized TPOT.
-  sequence.append_token(Token(-1));
-  sequence.append_token(Token(-1));
+  sequence->append_token(Token(/*id=*/-1));
+  sequence->append_token(Token(/*id=*/-1));
 
-  EXPECT_EQ(sequence.generated_tokens_since_latency(), 0u);
+  EXPECT_EQ(sequence->generated_tokens_since_latency(), 0u);
 }
 
 TEST(SequenceGeneratedTokensTest, CountsOverlapCommittedTokens) {
-  Sequence sequence = make_decode_ready_sequence(
+  auto sequence = make_decode_ready_sequence(
       /*enable_schedule_overlap=*/true);
-  EXPECT_EQ(sequence.generated_tokens_since_latency(), 0u);
+  EXPECT_EQ(sequence->generated_tokens_since_latency(), 0u);
 
-  sequence.update_last_step_token(Token(10), /*token_offset=*/0);
-  sequence.update_last_step_token(Token(11), /*token_offset=*/0);
+  sequence->update_last_step_token(Token(/*id=*/10), /*token_offset=*/0);
+  sequence->update_last_step_token(Token(/*id=*/11), /*token_offset=*/0);
 
-  EXPECT_EQ(sequence.generated_tokens_since_latency(), 2u);
+  EXPECT_EQ(sequence->generated_tokens_since_latency(), 2u);
 }
 
 class RequestGeneratedTokenUsageTest

@@ -1255,7 +1255,7 @@ TEST(BatchTest, Basic) {
                 seq_params);
   seq2.add_blocks(BlockType::KV, manager.allocate(4));  // [4, 5, 6, 7]
   seq2.kv_state().incr_kv_cache_tokens_num(/*size=*/7);
-  seq2.append_token(100);
+  seq2.append_token(Token(/*id=*/100));
 
   IncrementalDecoder fake_decoder3("", 3, false, false);
   // seq in decode phase
@@ -1268,7 +1268,7 @@ TEST(BatchTest, Basic) {
       seq_params);
   seq3.add_blocks(BlockType::KV, manager.allocate(5));  // [8, 9, 10, 11, 12]
   seq3.kv_state().incr_kv_cache_tokens_num(/*size=*/15);
-  seq3.append_token(200);
+  seq3.append_token(Token(/*id=*/200));
 
   IncrementalDecoder fake_decoder4("", 4, false, false);
   Sequence seq4(/*index=*/0,
@@ -2277,18 +2277,20 @@ TEST(BatchTest, ThreadedMropeIgnoresEmptyTailPartitions) {
       .block_size(static_cast<uint32_t>(kTokensPerSequence + 8));
   BlockManagerImpl manager(options);
 
-  std::vector<Sequence> sequence_storage;
+  std::vector<std::unique_ptr<Sequence>> sequence_storage;
   sequence_storage.reserve(kSequenceCount);
   std::vector<Sequence*> sequences;
   sequences.reserve(kSequenceCount);
   for (size_t sequence_idx = 0; sequence_idx < kSequenceCount; ++sequence_idx) {
-    sequence_storage.emplace_back(make_basic_sequence(std::vector<int32_t>(
-        kTokensPerSequence, static_cast<int32_t>(sequence_idx))));
-    Sequence& sequence = sequence_storage.back();
-    sequence.set_mrope_positions(torch::zeros(
+    auto sequence = std::unique_ptr<Sequence>(
+        new Sequence(make_basic_sequence(std::vector<int32_t>(
+            kTokensPerSequence, static_cast<int32_t>(sequence_idx)))));
+    sequence->set_mrope_positions(torch::zeros(
         {3, static_cast<int64_t>(kTokensPerSequence)}, torch::kInt));
-    sequence.add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
-    sequences.emplace_back(&sequence);
+    sequence->add_blocks(/*type=*/BlockType::KV,
+                         manager.allocate(/*num_blocks=*/1));
+    sequences.emplace_back(sequence.get());
+    sequence_storage.push_back(std::move(sequence));
   }
 
   const std::vector<uint32_t> allowed_max_tokens(kSequenceCount,
@@ -2343,7 +2345,7 @@ TEST(BatchTest, DecodeEmbeddingAndLinearStateIdsAreIndependentSlots) {
                seq_params);
   seq.add_blocks(BlockType::KV, manager.allocate(1));
   seq.kv_state().incr_kv_cache_tokens_num(/*size=*/3);
-  seq.append_token(4);
+  seq.append_token(Token(/*id=*/4));
 
   // EMBEDDING and LINEAR are now fully decoupled slots: the embedding-row id
   // (embedding_ids) and the recurrent-state id (linear_state_ids) come from
@@ -2413,7 +2415,7 @@ TEST(BatchTest, SharedArenaPublishesLinearGroupSlotsForReadAndWriteStates) {
                seq_params);
   seq.add_blocks(BlockType::KV, manager.allocate_blocks(BlockType::KV, 1));
   seq.kv_state().incr_kv_cache_tokens_num(/*size=*/3);
-  seq.append_token(4);
+  seq.append_token(Token(/*id=*/4));
   // Slot 1 holds the KV block. The read state takes slots {2, 3} and the
   // write state takes slots {4, 5}.
   std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 2);
@@ -2618,7 +2620,7 @@ TEST(BatchTest, MixedBatchPreservesPrefillReadIds) {
   decode.add_blocks(BlockType::KV, manager.allocate(3));
   decode.add_blocks(BlockType::LINEAR, manager.allocate(1));
   decode.kv_state().incr_kv_cache_tokens_num(/*size=*/8);
-  decode.append_token(17);
+  decode.append_token(Token(/*id=*/17));
 
   Batch batch;
   batch.add(&prefill, /*allowed_max_token=*/4);
@@ -2662,7 +2664,7 @@ TEST(BatchTest, ColdPrefillResetsButShortPromptDecodeDoesNotReset) {
 
   EXPECT_EQ(prefill_input.input_params.embedding.linear_state_read_ids.front(),
             prefill_input.input_params.embedding.linear_state_ids.front());
-  sequence.append_token(4);
+  sequence.append_token(Token(/*id=*/4));
   Batch decode;
   decode.add(&sequence, 1);
   LlmForwardInput decode_input = decode.prepare_forward_input(args, nullptr);
@@ -2828,7 +2830,7 @@ TEST(BatchTest, DecodeKeepsSingleTailWithoutRestore) {
   sequence.add_blocks(BlockType::KV, manager.allocate(3));
   sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
   sequence.kv_state().set_kv_cache_tokens_num(8);
-  sequence.append_token(9);
+  sequence.append_token(Token(/*id=*/9));
   Batch batch;
   batch.add(&sequence, 1);
   ModelArgs args;
@@ -2856,7 +2858,7 @@ TEST(BatchTest, DecodeDestinationIsOwnedOnlyBySequence) {
   sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
   const int32_t output_id = sequence.get_linear_state_slot_id();
   sequence.kv_state().set_kv_cache_tokens_num(3);
-  sequence.append_token(4);
+  sequence.append_token(Token(/*id=*/4));
   std::optional<Batch> batch;
   batch.emplace();
   batch->add(&sequence, 1);
@@ -3167,7 +3169,7 @@ TEST(BatchTest, OverlapTensorAcceptanceUpdatesCacheProgress) {
       make_overlap_sequence({1, 2, 3}, 32, &sampling, &stopping);
   sequence.add_blocks(BlockType::KV, manager.allocate(1));
   sequence.kv_state().set_kv_cache_tokens_num(3);
-  sequence.append_token(-1);
+  sequence.append_token(Token(/*id=*/-1));
   sequence.update_last_step_token(Token(8));
   SampleOutput fake;
   fake.next_tokens = torch::tensor({-1}, torch::kInt64);

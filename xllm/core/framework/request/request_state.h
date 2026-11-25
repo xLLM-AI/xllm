@@ -200,8 +200,6 @@ class RequestState final {
 
   bool is_graph_warmup = false;
 
-  int32_t bos_token_id = 0;
-
   // The thread id of the thread pool in the response handler to ensure that
   // stream responses for the same request are executed sequentially during
   // multi-threaded stream processing.

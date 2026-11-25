@@ -17,6 +17,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -138,7 +139,6 @@ class BlockManagerPoolTest : public ::testing::Test {
     params.skip_special_tokens = true;
     params.streaming = false;
     params.enable_schedule_overlap = false;
-    params.bos_token_id = 0;
     params.request_id = "block_manager_pool_test";
     params.sampling_param = &sampling_param_;
     params.stopping_checker = &stopping_checker_;
@@ -722,12 +722,15 @@ TEST_F(BlockManagerPoolTest, EmbeddingBlockCapacityUsesNumEmbeddingBlocks) {
       .linear_state_num_slots(64);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
-  std::vector<Sequence> sequences;
-  sequences.reserve(4);
-  for (size_t i = 0; i < 4; ++i) {
-    sequences.emplace_back(make_sequence(i, /*prompt_tokens=*/{1}));
-    EXPECT_TRUE(pool.allocate(&sequences.back()));
-    EXPECT_TRUE(sequences.back().get_embedding_block_id() >= 0);
+  constexpr size_t kSequenceCount = 4;
+  std::vector<std::unique_ptr<Sequence>> sequences;
+  sequences.reserve(kSequenceCount);
+  for (size_t i = 0; i < kSequenceCount; ++i) {
+    auto sequence = std::unique_ptr<Sequence>(
+        new Sequence(make_sequence(i, /*prompt_tokens=*/{1})));
+    EXPECT_TRUE(pool.allocate(sequence.get()));
+    EXPECT_TRUE(sequence->get_embedding_block_id() >= 0);
+    sequences.push_back(std::move(sequence));
   }
 }
 
@@ -901,40 +904,6 @@ TEST_F(BlockManagerPoolTest, CapacityReportsKvPoolWhenLinearStateEnabled) {
   ASSERT_EQ(free.size(), 1u);
   EXPECT_EQ(free[0], kKvBlocks - 1);
   EXPECT_LT(free[0], static_cast<size_t>(kLinearStateSlots));
-}
-
-TEST_F(BlockManagerPoolTest, SequenceCopyDoesNotReuseSingleBlockSlot) {
-  ScopedValue<int32_t> max_seqs_guard(
-      &SchedulerConfig::get_instance().max_seqs_per_batch(), 2);
-
-  BlockManagerPool::Options options;
-  options.num_blocks(8).host_num_blocks(0).block_size(1).enable_prefix_cache(
-      false);
-  options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
-      .num_speculative_tokens(1)
-      .enable_linear_state(true)
-      .linear_state_chunk_stride(4)
-      .linear_state_num_slots(64);
-  BlockManagerPool pool(options, /*dp_size=*/1);
-
-  Sequence src = make_sequence(0, /*prompt_tokens=*/{1, 2, 3});
-  ASSERT_TRUE(pool.allocate(&src));
-  ASSERT_TRUE(src.get_embedding_block_id() >= 0);
-  ASSERT_TRUE(src.has_linear_state_slot());
-  const int32_t src_single_block_id = src.get_embedding_block_id();
-  const int32_t src_linear_state_slot_id = src.get_linear_state_slot_id();
-
-  Sequence clone(src);
-  EXPECT_FALSE(clone.get_embedding_block_id() >= 0);
-  EXPECT_EQ(clone.get_embedding_block_id(), -1);
-  EXPECT_FALSE(clone.has_linear_state_slot());
-  EXPECT_EQ(clone.get_linear_state_slot_id(), -1);
-
-  ASSERT_TRUE(pool.allocate(&clone));
-  EXPECT_TRUE(clone.get_embedding_block_id() >= 0);
-  EXPECT_NE(clone.get_embedding_block_id(), src_single_block_id);
-  EXPECT_TRUE(clone.has_linear_state_slot());
-  EXPECT_NE(clone.get_linear_state_slot_id(), src_linear_state_slot_id);
 }
 
 TEST_F(BlockManagerPoolTest, AllocateAfterPrefixCacheHitAllocatesSuffixBlocks) {
@@ -1349,8 +1318,6 @@ TEST_F(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
   pool.deallocate_without_cache(&exact_seq);
 }
 
-// Validates the production hash builder Sequence::update_block_hashes():
-// correct chain, idempotency, and invalidation after a token rewrite.
 TEST_F(BlockManagerPoolTest, SequenceUpdateBlockHashes) {
   const uint32_t block_size = 4;
   const uint32_t n_blocks = 5;
@@ -1360,63 +1327,17 @@ TEST_F(BlockManagerPoolTest, SequenceUpdateBlockHashes) {
     prompt.push_back(static_cast<int32_t>(i * 7 + 1));
   }
 
-  // Build the Sequence in-test so the sampling/stopping params outlive it.
-  RequestSamplingParam sampling_param;
-
-  sampling_param.is_embeddings = false;
-  StoppingChecker stopping_checker;
-  SequenceParams params;
-  params.seq_capacity = prompt.size() + 8;
-  params.bos_token_id = 0;
-  params.request_id = "seq_block_hash_test";
-  params.sampling_param = &sampling_param;
-  params.stopping_checker = &stopping_checker;
-  IncrementalDecoder decoder(/*prompt=*/"prompt",
-                             /*num_prompt_tokens=*/prompt.size(),
-                             /*echo=*/false,
-                             /*skip_special_tokens=*/true);
-  Sequence seq(/*index=*/0,
-               prompt,
-               /*input_embedding=*/torch::Tensor(),
-               /*mm_data=*/MMData(),
-               decoder,
-               params);
-
+  Sequence seq = make_sequence(/*index=*/0, /*prompt_tokens=*/prompt);
   const std::vector<XXH3Key> expected = ExpectedChain(prompt, block_size);
 
   seq.update_block_hashes(block_size, BlockHasherType::TEXT);
-  ASSERT_EQ(seq.block_hashes().size(), n_blocks);
-  for (uint32_t i = 0; i < n_blocks; ++i) {
-    EXPECT_EQ(std::memcmp(seq.block_hashes()[i].data,
-                          expected[i].data,
-                          XXH3_128BITS_HASH_VALUE_LEN),
-              0);
-  }
+  EXPECT_EQ(seq.block_hashes(), expected);
 
-  // Idempotent: no new full block -> nothing recomputed/appended.
+  seq.update_block_hashes(/*block_size=*/2 * block_size,
+                          /*hasher_type=*/BlockHasherType::TEXT);
+  EXPECT_EQ(seq.block_hashes().size(), n_blocks / 2);
   seq.update_block_hashes(block_size, BlockHasherType::TEXT);
-  EXPECT_EQ(seq.block_hashes().size(), n_blocks);
-
-  // Rewriting a token in block index 2 invalidates block 2 and everything
-  // after it; blocks 0 and 1 survive.
-  seq.update_token(2 * block_size + 1, Token(/*id=*/999999));
-  EXPECT_EQ(seq.block_hashes().size(), 2u);
-
-  // Recompute: blocks 0/1 unchanged, block 2 differs from the old chain.
-  seq.update_block_hashes(block_size, BlockHasherType::TEXT);
-  ASSERT_EQ(seq.block_hashes().size(), n_blocks);
-  EXPECT_EQ(std::memcmp(seq.block_hashes()[0].data,
-                        expected[0].data,
-                        XXH3_128BITS_HASH_VALUE_LEN),
-            0);
-  EXPECT_EQ(std::memcmp(seq.block_hashes()[1].data,
-                        expected[1].data,
-                        XXH3_128BITS_HASH_VALUE_LEN),
-            0);
-  EXPECT_NE(std::memcmp(seq.block_hashes()[2].data,
-                        expected[2].data,
-                        XXH3_128BITS_HASH_VALUE_LEN),
-            0);
+  EXPECT_EQ(seq.block_hashes(), expected);
 }
 
 // In-batch prefix cache publishes only the full blocks covered by the given

@@ -22,7 +22,6 @@ cc_library(
     dit_request_state.h
     sample_slot.h
     sequence.h
-    sequence_factory.h
     sequence_logprob_state.h
     sequence_kv_state.h
     sequences_group.h
@@ -46,7 +45,6 @@ cc_library(
     sample_slot.cpp
     dit_request_params.cpp
     sequence.cpp
-    sequence_factory.cpp
     sequence_logprob_state.cpp
     sequence_kv_state.cpp
     sequences_group.cpp

@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include <cstdlib>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -379,8 +380,6 @@ class HybridConv1dMockLM final : public CausalLM {
 class AclGraphTaskUpdateTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    sequences_.reserve(100);
-
     auto& execution_config = ExecutionConfig::get_instance();
     original_enable_graph_ = execution_config.enable_graph();
     original_enable_graph_double_buffer_ =
@@ -511,7 +510,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
       sequence.add_blocks(BlockType::LINEAR, linear_state_block);
       sequence.add_blocks(BlockType::KV, block_manager_->allocate(2));
       sequence.kv_state().incr_kv_cache_tokens_num(4);
-      sequence.append_token(token_seed + static_cast<int32_t>(i));
+      sequence.append_token(Token(token_seed + static_cast<int32_t>(i)));
       batch->add(&sequence);
     }
     return batch;
@@ -538,7 +537,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
           block_manager_->allocate(static_cast<size_t>(num_kv_blocks)));
       sequence.kv_state().incr_kv_cache_tokens_num(
           static_cast<size_t>(prompt_len));
-      sequence.append_token(token_seed + static_cast<int32_t>(i));
+      sequence.append_token(Token(token_seed + static_cast<int32_t>(i)));
       batch->add(&sequence);
     }
     return batch;
@@ -733,7 +732,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
   SequenceParams seq_params_;
   torch::Tensor input_embedding_;
   MMData mm_data_;
-  std::vector<Sequence> sequences_;
+  std::deque<Sequence> sequences_;
   IncrementalDecoder fake_decoder_ = IncrementalDecoder("", 1, false, false);
   bool original_enable_graph_ = false;
   bool original_enable_graph_double_buffer_ = true;

@@ -41,17 +41,6 @@ class IncrementalDecoder final {
   // get the offset of the output text
   size_t output_offset() const { return output_offset_; }
 
-  // get the offset of the prefix text
-  size_t prefix_offset() const { return prefix_offset_; }
-
-  // Enable checking whether to skip the prefill token
-  void enable_checking_prefill_token() {
-    checking_prefill_token_ = true;
-    // The prefill check can change the decode boundary without changing the
-    // token window.  Do not reuse a result from before that boundary change.
-    last_decode_valid_ = false;
-  }
-
  private:
   // the original prompt string, used to skip the prompt decoding when streaming
   std::string_view prompt_;
@@ -68,9 +57,6 @@ class IncrementalDecoder final {
   size_t prefix_offset_ = 0;
   // all tokens before output_offset_ have been decoded
   size_t output_offset_ = 0;
-
-  // whether to check skipping prefill token in decode instance.
-  bool checking_prefill_token_ = false;
 
   // A sequence can invoke decode repeatedly with the same token window while
   // waiting for a delayed callback or an incomplete byte-fallback sequence.

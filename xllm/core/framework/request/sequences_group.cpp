@@ -17,8 +17,8 @@ limitations under the License.
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 
-#include "core/framework/request/sequence_factory.h"
 #include "util/blocking_counter.h"
 
 namespace xllm {
@@ -42,12 +42,12 @@ void SequencesGroup::add() {
                              prompt_tokens_.size(),
                              sequence_params_.echo,
                              sequence_params_.skip_special_tokens);
-  sequences_.emplace_back(create_sequence(index,
-                                          prompt_tokens_,
-                                          input_embedding_,
-                                          mm_data_,
-                                          std::move(decoder),
-                                          sequence_params_));
+  sequences_.emplace_back(std::make_unique<Sequence>(index,
+                                                     prompt_tokens_,
+                                                     input_embedding_,
+                                                     mm_data_,
+                                                     std::move(decoder),
+                                                     sequence_params_));
 }
 
 bool SequencesGroup::finished() const {
@@ -122,7 +122,7 @@ void SequencesGroup::generate_outputs(std::vector<SequenceOutput>& outputs,
       SequenceOutput output = seq->generate_output();
       // A received PD token can finish the request before any Decode step.
       // Drain text and metadata not consumed by earlier stream callbacks.
-      auto delta = seq->generate_streaming_output(seq->num_tokens(), tokenizer);
+      auto delta = seq->generate_streaming_output(tokenizer);
       if (delta.has_value()) {
         output.text = std::move(delta->text);
         output.token_ids = std::move(delta->token_ids);

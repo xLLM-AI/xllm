@@ -32,38 +32,27 @@ class TileLangSpecVerifyTokenUpdateTest : public ::testing::Test {
       torch::TensorOptions().dtype(torch::kInt64).device(device_);
 };
 
-TEST_F(TileLangSpecVerifyTokenUpdateTest, ReportsCompiledWidths) {
-  EXPECT_TRUE(has_spec_verify_token_update_specialization(4));
-  EXPECT_TRUE(has_spec_verify_token_update_specialization(5));
-  EXPECT_TRUE(has_spec_verify_token_update_specialization(6));
-  EXPECT_FALSE(has_spec_verify_token_update_specialization(3));
-  EXPECT_FALSE(has_spec_verify_token_update_specialization(8));
-}
-
 TEST_F(TileLangSpecVerifyTokenUpdateTest, PacksSupportedWidthsAndZerosTail) {
   struct TokenPackingCase {
-    int64_t spec_width;
     std::vector<int32_t> base_tokens;
     std::vector<int64_t> draft_tokens;
     std::vector<int32_t> expected;
   };
   const std::vector<TokenPackingCase> test_cases = {
-      {/*spec_width=*/4,
-       /*base_tokens=*/{42, -1, -1, -1},
+      {/*base_tokens=*/{42, -1, -1, -1},
        /*draft_tokens=*/{1, 2, 3},
        /*expected=*/{42, 1, 2, 3, 0, 0, 0, 0}},
-      {/*spec_width=*/5,
-       /*base_tokens=*/{42, -1, -1, -1, -1},
+      {/*base_tokens=*/{42, -1, -1, -1, -1},
        /*draft_tokens=*/{1, 2, 3, 4},
        /*expected=*/{42, 1, 2, 3, 4, 0, 0, 0}},
-      {/*spec_width=*/6,
-       /*base_tokens=*/{42, -1, -1, -1, -1, -1},
+      {/*base_tokens=*/{42, -1, -1, -1, -1, -1},
        /*draft_tokens=*/{1, 2, 3, 4, 5},
        /*expected=*/{42, 1, 2, 3, 4, 5, 0, 0}},
   };
 
   for (const TokenPackingCase& test_case : test_cases) {
-    SCOPED_TRACE(::testing::Message() << "spec_width=" << test_case.spec_width);
+    SCOPED_TRACE(::testing::Message()
+                 << "spec_width=" << test_case.base_tokens.size());
     std::vector<torch::Tensor> draft_tokens;
     draft_tokens.reserve(test_case.draft_tokens.size());
     for (const int64_t token : test_case.draft_tokens) {
@@ -73,8 +62,7 @@ TEST_F(TileLangSpecVerifyTokenUpdateTest, PacksSupportedWidthsAndZerosTail) {
 
     spec_verify_token_update(torch::tensor(test_case.base_tokens, i32_),
                              draft_tokens,
-                             persistent_tokens,
-                             test_case.spec_width);
+                             persistent_tokens);
 
     EXPECT_TRUE(torch::equal(
         persistent_tokens.cpu(),
@@ -92,8 +80,7 @@ TEST_F(TileLangSpecVerifyTokenUpdateTest, PacksMultipleSequencesRowMajor) {
   };
   torch::Tensor persistent_tokens = torch::full({8}, -1, i32_);
 
-  spec_verify_token_update(
-      base_tokens, draft_tokens, persistent_tokens, /*spec_width=*/4);
+  spec_verify_token_update(base_tokens, draft_tokens, persistent_tokens);
 
   EXPECT_TRUE(torch::equal(
       persistent_tokens.cpu(),

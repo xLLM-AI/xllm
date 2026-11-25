@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdlib>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -347,8 +348,6 @@ class SimpleCausalLM : public CausalLM {
 class AclGraphExecutorTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    sequences_.reserve(100);
-
     // Set up model args
     model_args_.model_type("test_model");
     model_args_.dtype("float32");
@@ -414,7 +413,7 @@ class AclGraphExecutorTest : public ::testing::Test {
     // stage
     sequence.kv_state().incr_kv_cache_tokens_num(
         /*size=*/9);  // 9 prompt tokens
-    sequence.append_token(100);
+    sequence.append_token(Token(/*id=*/100));
 
     // Create batch with pointer to sequence (batch doesn't own sequence)
     auto batch = std::make_unique<Batch>();
@@ -438,7 +437,7 @@ class AclGraphExecutorTest : public ::testing::Test {
   std::vector<KVCache> kv_caches_;
 
   // Sequences managed by test class
-  std::vector<Sequence> sequences_;
+  std::deque<Sequence> sequences_;
 
   // Create a sequence in decode phase
   IncrementalDecoder fake_decoder_ = IncrementalDecoder("", 1, false, false);
@@ -577,7 +576,7 @@ TEST_F(AclGraphExecutorTest, DifferentBatchSizes) {
       sequence.kv_state().incr_kv_cache_tokens_num(
           /*size=*/4);  // 4 prompt tokens
 
-      sequence.append_token(100 + i);
+      sequence.append_token(Token(100 + i));
       // Add sequence pointer to batch (batch doesn't own sequence)
       batch->add(&sequence);
     }
@@ -639,7 +638,7 @@ TEST_F(AclGraphExecutorTest, DecodeBatchSizeThresholdFallsBackToEager) {
     auto& sequence = sequences_.back();
     sequence.add_blocks(BlockType::KV, block_manager_->allocate(2));
     sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
-    sequence.append_token(100 + i);
+    sequence.append_token(Token(100 + i));
     batch->add(&sequence);
   }
 
@@ -694,7 +693,7 @@ TEST_F(AclGraphExecutorTest, NoPaddingBucketCapturesOnlyForWarmup) {
     auto& sequence = sequences_.back();
     sequence.add_blocks(BlockType::KV, block_manager_->allocate(2));
     sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
-    sequence.append_token(100 + i);
+    sequence.append_token(Token(100 + i));
     batch->add(&sequence);
   }
 

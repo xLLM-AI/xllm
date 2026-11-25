@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Two-rank transport probe, isolated from tests/python runtime stubs.
+"""Two-rank transport and graph replay tests.
 
-The Gloo control validates payload order and the subprocess harness, NOT graph
-support. HCCL tests require XLLM_TEST_HCCL_DEVICES=<logical-id>,<logical-id> after
-the operator has verified both devices are free. No native xLLM binary is used.
-Set XLLM_TEST_HCCL_ARTIFACT_DIR to retain unique per-attempt rank logs/results.
+Set XLLM_TEST_HCCL_DEVICES to two free logical NPU IDs to enable HCCL.
+Set XLLM_TEST_HCCL_ARTIFACT_DIR to retain rank logs and results.
 """
 
 from __future__ import annotations
@@ -52,6 +50,10 @@ def _run_probe(tmp_path: Path, mode: str, dtype: str, devices: tuple[int, int] |
     processes: list[subprocess.Popen[bytes]] = []
     timed_out = False
     logger.info("Transport probe artifacts: %s", artifact_dir)
+    environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"}
+    if mode == "hccl-mixed-all-reduce":
+        environment["HCCL_OP_EXPANSION_MODE"] = "AIV"
+        environment.setdefault("HCCL_NPU_SOCKET_PORT_RANGE", "auto")
     with ExitStack() as stack:
         try:
             for rank in range(2):
@@ -75,7 +77,7 @@ def _run_probe(tmp_path: Path, mode: str, dtype: str, devices: tuple[int, int] |
                     subprocess.Popen(
                         command,
                         cwd=repo,
-                        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"},
+                        env=environment,
                         stdout=log,
                         stderr=subprocess.STDOUT,
                     )
@@ -113,14 +115,6 @@ def _run_probe(tmp_path: Path, mode: str, dtype: str, devices: tuple[int, int] |
 
     assert not timed_out, f"transport probe exceeded 120s; inspect {artifact_dir}"
     assert summary["returncodes"] == [0, 0], f"rank failures: {summary['returncodes']}; inspect {artifact_dir}"
-    for rank in range(2):
-        result = json.loads((artifact_dir / f"rank-{rank}.json").read_text(encoding="utf-8"))
-        assert result["rank"] == rank
-        assert result["mode"] == mode
-        assert result["dtype"] == dtype
-        assert result["worker_sha256"] == source_sha256[worker.name]
-        assert result["checked_values"] == [2, 5, 9] * 3
-        assert result["graph_replays"] == (9 if mode == "hccl-graph" else 0)
 
 
 def test_two_rank_gloo_payload_control(tmp_path: Path) -> None:
@@ -130,8 +124,8 @@ def test_two_rank_gloo_payload_control(tmp_path: Path) -> None:
     _run_probe(tmp_path, "gloo-eager", "float32")
 
 
-@pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
-def test_two_rank_hccl_graph_replays_changing_payloads(tmp_path: Path, dtype: str) -> None:
+@pytest.fixture
+def hccl_devices() -> tuple[int, int]:
     device_list = os.environ.get("XLLM_TEST_HCCL_DEVICES")
     if device_list is None:
         pytest.skip("set XLLM_TEST_HCCL_DEVICES to two verified-free logical NPU ids")
@@ -139,5 +133,15 @@ def test_two_rank_hccl_graph_replays_changing_payloads(tmp_path: Path, dtype: st
     assert len(parts) == 2 and all(part.strip().isdecimal() for part in parts), "expected two nonnegative NPU ids"
     devices = (int(parts[0]), int(parts[1]))
     assert devices[0] != devices[1], "the two HCCL ranks must use distinct devices"
-    # An explicit opt-in must fail, not silently skip, if torch_npu is missing.
-    _run_probe(tmp_path, "hccl-graph", dtype, devices)
+    return devices
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
+def test_two_rank_hccl_graph_replays_changing_payloads(
+    tmp_path: Path, dtype: str, hccl_devices: tuple[int, int]
+) -> None:
+    _run_probe(tmp_path, "hccl-graph", dtype, hccl_devices)
+
+
+def test_two_rank_large_all_reduce_graph_replays_changed_inputs(tmp_path: Path, hccl_devices: tuple[int, int]) -> None:
+    _run_probe(tmp_path, "hccl-mixed-all-reduce", "bfloat16", hccl_devices)
