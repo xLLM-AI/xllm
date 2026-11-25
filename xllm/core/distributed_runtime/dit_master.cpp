@@ -67,10 +67,8 @@ const char* python_h3_request_error(const DiTRequestParams& params) {
   }
   const auto& embedding = source->get().tensor;
   if (embedding.dim() != 2 || embedding.size(0) == 0 ||
-      embedding.size(1) != 5120 || !embedding.is_floating_point() ||
-      !torch::isfinite(embedding).all().item<bool>()) {
-    return "Python MiniMax-H3 requires a finite floating point [L, 5120] "
-           "prompt_embed";
+      embedding.size(1) != 5120 || !embedding.is_floating_point()) {
+    return "Python MiniMax-H3 requires a floating point [L, 5120] prompt_embed";
   }
   const auto* tags = get_tensor_parameter<std::vector<int64_t>>(
       source->get().parameters, "prompt_token_tags");
