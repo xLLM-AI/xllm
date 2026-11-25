@@ -90,10 +90,11 @@ LinearAttentionKVCacheImpl::LinearAttentionKVCacheImpl(
     // Prefill checkpoints omit speculative Conv/SSM rows.
     host_conv_shape[kConvHistoryAxis] = conv_history_rows;
     host_conv_shape.insert(host_conv_shape.begin() + 1, layer_count);
-    create_host_tensor(host_conv_shape,
-                       create_options.dtype(),
-                       &conv_cache_,
-                       &conv_cache_shape_);
+    create_host_tensor(
+        host_conv_shape,
+        create_options.conv_dtype().value_or(create_options.dtype()),
+        &conv_cache_,
+        &conv_cache_shape_);
 
     std::vector<int64_t> host_ssm_shape = device_ssm_shape;
     host_ssm_shape[0] = 1;

@@ -45,8 +45,7 @@ def _convert_pages(
     page_size: int,
 ) -> None:
     import triton
-
-    from xllm.python.attention.native_kv_writer import convert_xqa_pages_kernel
+    from xllm_kernel.ops.kv_cache.native_kv_writer import convert_xqa_pages_kernel
 
     rows, width = table.shape
     convert_xqa_pages_kernel[(rows,)](

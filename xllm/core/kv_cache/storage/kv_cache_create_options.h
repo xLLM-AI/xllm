@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,9 @@ class KVCacheCreateOptions final {
   PROPERTY(torch::Device, device) = torch::Device(torch::kCPU);
   // kvcache dtype for key/value cache, index cache
   PROPERTY(torch::ScalarType, dtype) = torch::kBFloat16;
+  // Conv state normally shares the KV dtype. Compressed KV keeps the model
+  // dtype here.
+  PROPERTY(std::optional<torch::ScalarType>, conv_dtype);
   // ssm dtype for linear attention layers
   PROPERTY(torch::ScalarType, ssm_dtype) = torch::kBFloat16;
   PROPERTY(double, host_blocks_factor) = 0.0;
@@ -58,7 +62,6 @@ class KVCacheCreateOptions final {
   // Empty keeps the legacy all-layer behavior. Otherwise each entry controls
   // whether that layer owns indexer cache tensors.
   PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
-  PROPERTY(bool, enable_native_fp8) = false;
   PROPERTY(bool, enable_kv_cache_quant) = false;
   PROPERTY(std::shared_ptr<KVTensorAllocator>, tensor_allocator);
   PROPERTY(std::shared_ptr<const StaticKVLayout>, static_layout);

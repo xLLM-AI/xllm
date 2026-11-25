@@ -22,11 +22,11 @@ from typing import TYPE_CHECKING
 
 import flashinfer
 import torch
+from xllm_kernel.ops.kv_cache.native_kv_writer import write_fp8_kv
 
 from scripts.logger import logger
 from xllm.python.attention.backend import AttentionMetadata, LayerCache
 from xllm.python.attention.flashinfer import FlashInferBackend
-from xllm.python.attention.native_kv_writer import write_fp8_kv
 from xllm.python.attention.xqa_decode import _XQA_PAGE_SIZES, XQADecodePlan
 
 if TYPE_CHECKING:
@@ -98,14 +98,14 @@ class FlashInferNativeKVBackend(FlashInferBackend):
             for tensor in (cache.key, cache.value):
                 if (
                     tensor is None
-                    or tensor.dtype != torch.uint8
+                    or tensor.dtype != torch.float8_e4m3fn
                     or tensor.device != self._decode_workspace.device
                     or tensor.ndim != 4
                     or tuple(tensor.shape) != expected_shape
                     or not tensor.is_contiguous()
                 ):
                     raise ValueError(
-                        "Native KV requires contiguous resident byte pages with the format's physical head dimension"
+                        "Native KV requires contiguous resident FP8 E4M3 pages with the format's physical head dimension"
                     )
             layer_geometry = (cache.key.size(0), cache.key.size(1))
             if geometry is None:
@@ -118,7 +118,7 @@ class FlashInferNativeKVBackend(FlashInferBackend):
                 raise ValueError(
                     f"Native FP8 KV layers must use the same page geometry: {geometry} vs {layer_geometry}"
                 )
-            pages[layer_id] = (cache.key.view(torch.float8_e4m3fn), cache.value.view(torch.float8_e4m3fn))
+            pages[layer_id] = (cache.key, cache.value)
         if not pages:
             raise ValueError("Native KV requires full-attention resident pages")
         self._kv_caches = kv_caches
@@ -176,7 +176,7 @@ class FlashInferNativeKVBackend(FlashInferBackend):
         if decode_plan is not None:
             output = decode_plan.run(query, pages, self._decode_workspace, self.scale, *self._fixed_scales)
         else:
-            from xllm.python.attention.query_quantization import quantize_query_fp8
+            from xllm_kernel.ops.quantization.query_quantization import quantize_query_fp8
 
             query = quantize_query_fp8(query, 1.0)
             output = self._prefill_paged_wrapper.run(

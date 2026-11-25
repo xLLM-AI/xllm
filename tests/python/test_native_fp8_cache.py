@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     from xllm.python.attention.flashinfer_native_kv import FlashInferNativeKVBackend
 
 
+_SM90 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
+
+
 @pytest.fixture
 def backend_type() -> type[FlashInferNativeKVBackend]:
     pytest.importorskip("triton")
@@ -47,8 +50,14 @@ def storage_backend(backend_type: type[FlashInferNativeKVBackend]) -> FlashInfer
     return backend
 
 
-def test_fp8_aliases_preserve_storage_and_whole_page_copy(storage_backend: FlashInferNativeKVBackend) -> None:
-    owner_k = torch.zeros((3, 128, 4, 256), dtype=torch.uint8)
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not _SM90, reason="requires SM90"))]
+)
+def test_fp8_binding_preserves_storage_and_whole_page_copy(
+    storage_backend: FlashInferNativeKVBackend, device: str
+) -> None:
+    storage_backend._decode_workspace = torch.empty(0, device=device)
+    owner_k = torch.zeros((3, 128, 4, 256), dtype=torch.float8_e4m3fn, device=device)
     owner_v = torch.zeros_like(owner_k)
     caches = [LayerCache(None, None), LayerCache(owner_k, owner_v)]
     storage_backend.bind_kv_caches(caches)
@@ -61,27 +70,28 @@ def test_fp8_aliases_preserve_storage_and_whole_page_copy(storage_backend: Flash
     info = storage_backend.native_kv_runtime_info()
     actual_storage = owner_k.untyped_storage().nbytes() + owner_v.untyped_storage().nbytes()
     assert info["resident_KV_bytes"] == info["KV_tensor_address_bytes"] == actual_storage
-    assert info["resident_global_scale_bytes"] == 0
-    owner_k[0].fill_(17)
-    owner_v[0].fill_(29)
+    owner_k[0].view(torch.uint8).fill_(17)
+    owner_v[0].view(torch.uint8).fill_(29)
     owner_k[2].copy_(owner_k[0])
     owner_v[2].copy_(owner_v[0])
-    assert torch.equal(key[2].view(torch.uint8), owner_k[0])
-    assert torch.equal(value[2].view(torch.uint8), owner_v[0])
-    assert not owner_k[1].any()
+    assert torch.equal(key[2].view(torch.uint8), owner_k[0].view(torch.uint8))
+    assert torch.equal(value[2].view(torch.uint8), owner_v[0].view(torch.uint8))
+    assert not owner_k[1].view(torch.uint8).any()
 
 
-@pytest.mark.parametrize("kind", ["dtype", "shape", "strides", "missing_value"])
+@pytest.mark.parametrize("kind", ["bf16", "byte", "shape", "strides", "missing_value"])
 def test_fp8_binding_rejects_wrong_physical_storage(storage_backend: FlashInferNativeKVBackend, kind: str) -> None:
-    key = torch.zeros((2, 128, 4, 256), dtype=torch.uint8)
-    if kind == "dtype":
+    key = torch.zeros((2, 128, 4, 256), dtype=torch.float8_e4m3fn)
+    if kind == "byte":
+        key = key.view(torch.uint8)
+    elif kind == "bf16":
         key = key.to(torch.bfloat16)
     elif kind == "shape":
         key = key[..., :128].contiguous()
     elif kind == "strides":
         key = key.transpose(0, 1)
     value = None if kind == "missing_value" else key.clone()
-    with pytest.raises(ValueError, match="contiguous resident byte pages"):
+    with pytest.raises(ValueError, match="contiguous resident FP8 E4M3 pages"):
         storage_backend.bind_kv_caches([LayerCache(key, value)])
 
 
@@ -89,8 +99,8 @@ def test_fp8_binding_rejects_wrong_physical_storage(storage_backend: FlashInferN
 def test_fp8_layers_must_share_page_geometry(
     storage_backend: FlashInferNativeKVBackend, shape: tuple[int, ...]
 ) -> None:
-    first = torch.zeros((2, 128, 4, 256), dtype=torch.uint8)
-    other = torch.zeros(shape, dtype=torch.uint8)
+    first = torch.zeros((2, 128, 4, 256), dtype=torch.float8_e4m3fn)
+    other = torch.zeros(shape, dtype=torch.float8_e4m3fn)
     with pytest.raises(ValueError, match="same page geometry"):
         storage_backend.bind_kv_caches([LayerCache(first, first.clone()), LayerCache(other, other.clone())])
 
@@ -102,7 +112,7 @@ def test_fp8_layers_must_share_page_geometry(
 def test_fp8_rejects_invalid_pages(
     storage_backend: FlashInferNativeKVBackend, blocks: int, page_size: int, error: str
 ) -> None:
-    key = torch.empty((blocks, page_size, 4, 256), dtype=torch.uint8)
+    key = torch.empty((blocks, page_size, 4, 256), dtype=torch.float8_e4m3fn)
     with pytest.raises(ValueError, match=error):
         storage_backend.bind_kv_caches([LayerCache(key, key.clone())])
 
@@ -150,20 +160,16 @@ def test_rejects_unsupported_attention_before_allocation(
         )
 
 
-_SM90 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
-
-
 @pytest.mark.skipif(not _SM90, reason="Native FP8 integration targets SM90")
 @pytest.mark.parametrize("graph", [False, True])
 def test_fp8_writer_matches_independent_cast_and_replays(graph: bool) -> None:
     pytest.importorskip("triton")
-    from xllm.python.attention.native_kv_writer import write_fp8_kv
+    from xllm_kernel.ops.kv_cache.native_kv_writer import write_fp8_kv
 
     key = torch.randn((5, 4, 512), device="cuda", dtype=torch.bfloat16)[..., ::2]
     value = torch.randn_like(key) * 100
     slots = torch.tensor([0, 127, 128, 255, -1], dtype=torch.int32, device="cuda")
-    owners = tuple(torch.zeros((3, 128, 4, 256), dtype=torch.uint8, device="cuda") for _ in range(2))
-    pages = tuple(tensor.view(torch.float8_e4m3fn) for tensor in owners)
+    pages = tuple(torch.zeros((3, 128, 4, 256), dtype=torch.float8_e4m3fn, device="cuda") for _ in range(2))
     scales = (0.125, 0.5)
     write_fp8_kv(key, value, slots, pages, scales)
     torch.cuda.synchronize()
@@ -174,17 +180,17 @@ def test_fp8_writer_matches_independent_cast_and_replays(graph: bool) -> None:
         key.mul_(2)
         value.mul_(0.5)
         captured.replay()
-    for source, owner, scale in zip((key, value), owners, scales):
-        expected = torch.zeros_like(owner).view(-1, 4, 256)
+    for source, page, scale in zip((key, value), pages, scales):
+        expected = torch.zeros_like(page, dtype=torch.uint8).view(-1, 4, 256)
         quantized = (source.float() / scale).clamp(-448, 448).to(torch.float8_e4m3fn).view(torch.uint8)
         expected[slots[:-1].long()] = quantized[:-1]
-        assert torch.equal(owner, expected.view_as(owner))
+        assert torch.equal(page.view(torch.uint8), expected.view_as(page))
 
 
 @pytest.mark.skipif(not _SM90, reason="Native FP8 integration targets SM90")
 def test_query_conversion_preserves_strided_values() -> None:
     pytest.importorskip("triton")
-    from xllm.python.attention.query_quantization import quantize_query_fp8
+    from xllm_kernel.ops.quantization.query_quantization import quantize_query_fp8
 
     query = torch.randn((17, 24, 512), dtype=torch.bfloat16, device="cuda")[..., ::2]
     actual = quantize_query_fp8(query, 1.0)
@@ -236,9 +242,10 @@ def test_native_attention_matches_dense_reference(phase: str, dtype: torch.dtype
     cache_slots = torch.tensor(slots, device=device)
     caches = []
     for source, scale in ((keys, k_scale), (values, v_scale)):
-        owner = torch.zeros((4, page, 1, dim), device=device, dtype=torch.uint8)
-        owner.view(-1, 1, dim)[cache_slots] = (source / scale).to(torch.float8_e4m3fn).view(torch.uint8)
-        owner.view(-1, 1, dim)[cache_slots[new_indices]] = 0
+        owner = torch.zeros((4, page, 1, dim), device=device, dtype=torch.float8_e4m3fn)
+        page_bytes = owner.view(torch.uint8).view(-1, 1, dim)
+        page_bytes[cache_slots] = (source / scale).to(torch.float8_e4m3fn).view(torch.uint8)
+        page_bytes[cache_slots[new_indices]] = 0
         caches.append(owner)
     backend.bind_kv_caches([LayerCache(key=caches[0], value=caches[1])])
     indptr = torch.tensor([0, 2, 3], dtype=torch.int32)
@@ -267,7 +274,7 @@ def test_native_attention_matches_dense_reference(phase: str, dtype: torch.dtype
         with pytest.raises(RuntimeError, match="before writing KV"):
             backend.execute(q, k, v, layer)
         for owner in caches:
-            assert not owner.view(-1, 1, dim)[cache_slots[new_indices]].any()
+            assert not owner.view(torch.uint8).view(-1, 1, dim)[cache_slots[new_indices]].any()
         metadata.paged_kv_indptr_host = indptr
     backend.prepare(metadata, graph_mode=graph_mode)
     if phase in ("decode", "decode_graph"):

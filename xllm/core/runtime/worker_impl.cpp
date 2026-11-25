@@ -475,8 +475,9 @@ void WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
 
   KVCacheCreateOptions create_options;
   create_options.device(device_)
-      .enable_native_fp8(options_.kv_cache_dtype() == "fp8_e4m3")
-      .dtype(dtype_)
+      .dtype(options_.kv_cache_dtype() == "fp8_e4m3" ? torch::kFloat8_e4m3fn
+                                                     : dtype_)
+      .conv_dtype(dtype_)
       .ssm_dtype(ssm_dtype)
       .num_layers(num_layers)
       .full_attention_interval(layout_options.full_attention_interval())
