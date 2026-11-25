@@ -281,6 +281,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `dit_generation_image_area_max` | `int64` | `0` | Maximum allowed image area (`width * height`) for image generation requests. `0` means no limit. |
 | `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 task type: `fl2va` or `ref2va`. |
 | `dit_minimax_h3_rainfusion_enabled` | `bool` | `false` | Enable MiniMax-H3 RainFusion on the PyTorch Ref2VA path. Requires A3, Python TileLang kernels prepared by an isolated compiler subprocess, and Ref2VA TP2/SP8/VAE16; an unmet topology fails model creation. Applies the fixed `sparse-middle-steps` policy to zero-based steps `[8, 36)` of an eligible 50-step request; unsupported geometries or step counts use dense attention. The compiled kernel pair is cached on startup and reused by the enabled runtime. |
+| `dit_minimax_h3_vae_decoder_partition` | `bool` | `false` | Partition the MiniMax-H3 video VAE decoder blocks between TP2 peers on the PyTorch Ref2VA path. Requires A3, TP2/SP8/VAE16, and adjacent VAE ranks within each TP2 pair. |
 | `dit_enable_vae_tiling` | `bool` | `false` | Whether to enable VAE tiling. Currently only supported for `qwen-image-edit-plus`. |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE image size used to calculate dimensions. |
 | `dit_sparse_attention_enabled` | `bool` | `false` | Whether to enable block-wise sparse attention / RainFusion for WAN. |

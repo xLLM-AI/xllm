@@ -144,12 +144,15 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
   };
   const DiTConfig& config = DiTConfig::get_instance();
   const std::string task_type = config.dit_h3_task_type();
-  const bool minimax_h3_ref2va =
-      context.model_type() == "MiniMaxH3ModularPipeline" &&
-      task_type == "ref2va";
+  const bool minimax_h3 = context.model_type() == "MiniMaxH3ModularPipeline";
+  const bool minimax_h3_ref2va = minimax_h3 && task_type == "ref2va";
+  const bool vae_decoder_partition =
+      minimax_h3 && config.dit_minimax_h3_vae_decoder_partition();
   const bool cache_dit =
       minimax_h3_ref2va &&
       context.get_dit_config().selected_policy == PolicyType::CACHE_DIT;
+  CHECK(!vae_decoder_partition || minimax_h3_ref2va)
+      << "MiniMax-H3 video VAE decoder partition requires ref2va";
   py::kwargs pipeline_args;
   pipeline_args["global_rank"] = parallel.rank();
   if (minimax_h3_ref2va) {
@@ -165,6 +168,18 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
           }
           return tensor;
         });
+    if (vae_decoder_partition) {
+      CHECK_EQ(group_rank(tp), group_rank(vae) % 2)
+          << "MiniMax-H3 video VAE decoder partition requires each TP2 pair to "
+             "own adjacent VAE ranks";
+      pipeline_args["vae_decoder_partition"] = true;
+      pipeline_args["vae_barrier"] = py::cpp_function([vae]() {
+        py::gil_scoped_release release;
+        if (vae != nullptr) {
+          vae->barrier();
+        }
+      });
+    }
     if (cache_dit) {
       const CacheDiTOptions& options = context.get_dit_config().cache_dit;
       py::dict cache_options;

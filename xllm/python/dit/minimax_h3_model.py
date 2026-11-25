@@ -46,6 +46,7 @@ class TensorParallel:
     size: int
     reduce: Callable[[torch.Tensor], torch.Tensor]
     gather: Callable[[torch.Tensor], torch.Tensor]
+    broadcast: Callable[[torch.Tensor, int], torch.Tensor] | None = None
 
 
 @dataclass(frozen=True)

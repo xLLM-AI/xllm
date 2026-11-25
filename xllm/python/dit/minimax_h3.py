@@ -618,6 +618,8 @@ class MiniMaxH3Pipeline:
         tp_broadcast: Callable[[torch.Tensor, int], torch.Tensor] | None = None,
         cache_options: Mapping[str, Any] | None = None,
         sp_reduce: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        vae_decoder_partition: bool = False,
+        vae_barrier: Callable[[], None] | None = None,
         rainfusion_enabled: bool = False,
         global_rank: int = 0,
         sp_communication_overlap: bool = True,
@@ -634,7 +636,7 @@ class MiniMaxH3Pipeline:
         self._is_driver = is_driver
         self._global_rank = global_rank
         self._task_type = task_type
-        self._tp = TensorParallel(tp_rank, tp_size, tp_reduce, tp_gather)
+        self._tp = TensorParallel(tp_rank, tp_size, tp_reduce, tp_gather, tp_broadcast)
         self._sp = SequenceParallel(
             sp_rank,
             sp_size,
@@ -642,8 +644,8 @@ class MiniMaxH3Pipeline:
             sp_exchange,
             async_qkv=task_type == "ref2va" and sp_communication_overlap,
         )
-        self._tp_broadcast = tp_broadcast
-        self._tiles = TileParallel(vae_rank, vae_size, vae_gather)
+        self._tiles = TileParallel(vae_rank, vae_size, vae_gather, vae_barrier)
+        self._vae_decoder_partition = vae_decoder_partition
         self._sp_reduce = sp_reduce
         self._cache_options = CacheDiTOptions(**cache_options) if cache_options is not None else None
         self._rainfusion_enabled = rainfusion_enabled
@@ -677,7 +679,12 @@ class MiniMaxH3Pipeline:
             )
         elif name == "vae":
             self._video_decoder = load_video_decoder(
-                path, shards, self._device, self._tiles, with_encoder=self._task_type == "ref2va"
+                path,
+                shards,
+                self._device,
+                self._tiles,
+                with_encoder=self._task_type == "ref2va",
+                partition=self._tp if self._vae_decoder_partition else None,
             )
         elif name == "audio_vae":
             self._audio_geometry = load_audio_geometry(path)
@@ -913,8 +920,8 @@ class MiniMaxH3Pipeline:
                 dtype=torch.float32,
                 device=self._device,
             )
-        if self._tp_broadcast is not None:
-            return self._tp_broadcast(row, 0)
+        if self._tp.broadcast is not None:
+            return self._tp.broadcast(row, 0)
         if self._tp.size > 1:
             raise RuntimeError("MiniMax-H3 Ref2VA requires a TP broadcast callback")
         return row
