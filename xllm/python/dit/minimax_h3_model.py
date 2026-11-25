@@ -25,6 +25,8 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
 from torch import nn
 from torch.nn import functional as F
 
+from xllm.python import _load_kernel_package
+
 _WEIGHT_TRANSFER_BATCH_BYTES = 256 * 1024**2
 _LaserAttention = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, float], torch.Tensor]
 
@@ -254,10 +256,11 @@ class MiniMaxH3Denoiser(nn.Module):
         self._sp = sp
         self._laser: _LaserAttention | None = None
         if laser_attention_enabled:
-            from xllm_kernel import initialize
+            _load_kernel_package().initialize(
+                device=device.type, execution_mode="eager", operations=("laser_attention",)
+            )
             from xllm_kernel.ops.attention.laser import laser_attention
 
-            initialize(device=device.type, execution_mode="eager", operations=("laser_attention",))
             self._laser = laser_attention
         config = MiniMaxH3Transformer3DModel.load_config(path)
         with torch.device("meta"):
