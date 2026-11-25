@@ -474,12 +474,22 @@ def grouped_moe_bf16(
         valid = torch.arange(expert_output.shape[0], device=expert_output.device) < group_list.sum()
         expert_output = torch.where(valid.unsqueeze(-1), expert_output, 0).float()
         probs = local_expert_mask.float()
+        sorted_indices = expanded_row_idx.abs()
+    elif start_expert_id == 0 and num_experts_per_rank == num_total_experts:
+        # The rank owns every expert, so no route is foreign: the local mask is
+        # all ones and routing marks no row with a negative index. Skipping the
+        # mask and the abs that exist for the expert-parallel case removes five
+        # elementwise kernels per layer, which the captured decode graph pays
+        # for on every step.
+        probs = _unpermute_probs(topk_weights, expert_output)
+        sorted_indices = expanded_row_idx
     else:
         local_expert_mask = (topk_ids >= active_expert_range[0]) & (topk_ids < active_expert_range[1])
         probs = _unpermute_probs(topk_weights * local_expert_mask, expert_output)
+        sorted_indices = expanded_row_idx.abs()
     return moe_token_unpermute(
         permuted_tokens=expert_output,
-        sorted_indices=expanded_row_idx.abs(),
+        sorted_indices=sorted_indices,
         probs=probs,
     )
 
