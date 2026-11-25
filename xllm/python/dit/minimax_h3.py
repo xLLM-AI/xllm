@@ -23,14 +23,19 @@ import torch
 from diffusers import MiniMaxH3Scheduler
 from PIL import Image
 
+from scripts.logger import logger
 from xllm.python.dit import ComponentLoad
 from xllm.python.dit.minimax_h3_model import (
+    CacheDiTOptions,
+    CacheDiTRequest,
     MiniMaxH3Denoiser,
     PackedConditioning,
     PackedLayout,
     SequenceParallel,
+    SimilarityResidualCacheState,
     StateDictShard,
     TensorParallel,
+    make_cache_request,
 )
 from xllm.python.dit.minimax_h3_vae import TileParallel, load_audio_decoder, load_audio_geometry, load_video_decoder
 
@@ -609,13 +614,19 @@ class MiniMaxH3Pipeline:
         sp_exchange: Callable[[torch.Tensor, bool, bool], Callable[[], torch.Tensor]],
         vae_gather: Callable[[torch.Tensor], torch.Tensor],
         task_type: str = "fl2va",
-        tp_broadcast: Callable[[torch.Tensor, int], torch.Tensor] | None = None,
-        sp_communication_overlap: bool = True,
         *,
+        tp_broadcast: Callable[[torch.Tensor, int], torch.Tensor] | None = None,
+        cache_options: Mapping[str, Any] | None = None,
+        sp_reduce: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        sp_communication_overlap: bool = True,
         laser_attention_enabled: bool = False,
     ) -> None:
         if task_type not in ("fl2va", "ref2va"):
             raise ValueError(f"Unsupported MiniMax-H3 task_type: {task_type}")
+        if cache_options is not None and task_type != "ref2va":
+            raise ValueError("MiniMax-H3 CacheDiT requires Ref2VA")
+        if cache_options is not None and sp_size > 1 and sp_reduce is None:
+            raise ValueError("MiniMax-H3 CacheDiT requires a cross-SP reduction")
         self._device = torch.device(device)
         self._laser_attention_enabled = laser_attention_enabled
         self._is_driver = is_driver
@@ -630,6 +641,9 @@ class MiniMaxH3Pipeline:
         )
         self._tp_broadcast = tp_broadcast
         self._tiles = TileParallel(vae_rank, vae_size, vae_gather)
+        self._sp_reduce = sp_reduce
+        self._cache_options = CacheDiTOptions(**cache_options) if cache_options is not None else None
+        self.last_cache_stats: dict[str, object] | None = None
         self._scheduler_shifts = {"scheduler": 12.0, "audio_scheduler": 3.0}
         self._packed_layout = lru_cache(maxsize=1)(_build_layout)
         self._initial_noise = lru_cache(maxsize=1)(_prepare_noise)
@@ -955,7 +969,36 @@ class MiniMaxH3Pipeline:
         video = torch.cat([condition_rows, video], dim=1)
         audio = torch.cat([audio_condition_rows, audio], dim=1)
         conditioning = self._denoiser.prepare_conditioning(prompt_embed, layout)
-        video, audio = self._denoise_reference(video, audio, conditioning, video_scheduler, audio_scheduler)
+        cache_request: CacheDiTRequest | None = None
+        if self._cache_options is not None:
+            block_count = len(self._denoiser.model.transformer_blocks)
+            SimilarityResidualCacheState.validate_options(self._cache_options)
+            if not 0 < self._cache_options.front_blocks < block_count:
+                raise ValueError("MiniMax-H3 CacheDiT front_blocks must be within the block count")
+            if not 0 <= self._cache_options.back_blocks < block_count - self._cache_options.front_blocks:
+                raise ValueError("MiniMax-H3 CacheDiT back_blocks must fit after front_blocks")
+            cache_request = make_cache_request(
+                self._cache_options,
+                layout,
+                self._sp.rank,
+                self._sp.size,
+                self._sp_reduce,
+                self._device,
+            )
+        video, audio = self._denoise_reference(
+            video, audio, conditioning, video_scheduler, audio_scheduler, cache_request
+        )
+        if cache_request is not None:
+            state = cache_request.state
+            self.last_cache_stats = state.statistics()
+            if self._is_driver:
+                logger.info(
+                    "MiniMax-H3 CacheDiT hits=%d dense_forwards=%d similarity_checks=%d hit_steps=%s",
+                    state.cache_hits,
+                    state.dense_forwards,
+                    state.similarity_checks,
+                    state.hit_steps,
+                )
         video = video[:, layout.num_condition_video_rows :]
         audio = audio[:, layout.num_condition_audio_rows :]
 
@@ -975,6 +1018,7 @@ class MiniMaxH3Pipeline:
         conditioning: PackedConditioning,
         video_scheduler: MiniMaxH3Scheduler,
         audio_scheduler: MiniMaxH3Scheduler,
+        cache: CacheDiTRequest | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         layout = conditioning.layout
         video = video.clone()
@@ -983,7 +1027,9 @@ class MiniMaxH3Pipeline:
             video_t = video_scheduler.timesteps[step]
             audio_t = audio_scheduler.timesteps[step]
             timesteps, timestep_indices = _reference_timesteps(layout, video_t, audio_t)
-            video_pred, audio_pred = self._denoiser(video, audio, timesteps, timestep_indices, conditioning)
+            video_pred, audio_pred = self._denoiser(
+                video, audio, timesteps, timestep_indices, conditioning, step=step, cache=cache
+            )
             if layout.num_condition_video_rows:
                 video[:, layout.num_condition_video_rows :] = video_scheduler.step(
                     video_pred[:, layout.num_condition_video_rows :].float(),

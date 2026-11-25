@@ -874,10 +874,14 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context) {
       const auto& config = DiTConfig::get_instance();
       const auto& parallel = context.get_parallel_args();
       const std::string& task_type = config.dit_h3_task_type();
-      CHECK(context.get_dit_config().selected_policy == PolicyType::None)
-          << "Python MiniMax-H3 requires dit_cache_policy=None";
+      const PolicyType cache_policy = context.get_dit_config().selected_policy;
+      CHECK(cache_policy == PolicyType::None ||
+            (cache_policy == PolicyType::CACHE_DIT && task_type == "ref2va"))
+          << "Python MiniMax-H3 supports dit_cache_policy=None or CacheDiT on "
+             "Ref2VA";
       CHECK(task_type != "ref2va" || !config.dit_laser_attention_enabled())
-          << "Python MiniMax-H3 Ref2VA requires dit_laser_attention_enabled=false";
+          << "Python MiniMax-H3 Ref2VA requires "
+             "dit_laser_attention_enabled=false";
       CHECK(!config.dit_sparse_attention_enabled() &&
             !ExecutionConfig::get_instance().enable_graph() &&
             !LoadConfig::get_instance().enable_rolling_load())

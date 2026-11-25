@@ -13,7 +13,7 @@
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from math import lcm
+from math import isfinite, lcm
 from typing import Protocol
 
 import torch
@@ -28,6 +28,7 @@ from torch.nn import functional as F
 from xllm.python import _load_kernel_package
 
 _WEIGHT_TRANSFER_BATCH_BYTES = 256 * 1024**2
+_PACKED_SEQUENCE_ALIGNMENT = 64
 _LaserAttention = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, float], torch.Tensor]
 
 
@@ -172,6 +173,274 @@ class PackedConditioning:
     local_start: int
     local_rows: int
     padded_rows: int
+
+
+@dataclass(frozen=True)
+class CacheDiTOptions:
+    warmup_steps: int = 30
+    residual_diff_threshold: float = 0.04
+    max_cached_steps: int = 4
+    max_consecutive_hits: int = 1
+    front_blocks: int = 1
+    back_blocks: int = 0
+    linear_residual_prediction: bool = True
+
+
+@dataclass(frozen=True)
+class CacheDiTDecision:
+    hit: bool
+    relative_l1: float
+    prediction_scale: float
+
+
+@dataclass(frozen=True)
+class CacheDiTRequest:
+    state: "SimilarityResidualCacheState"
+    target_rows: torch.Tensor
+    used_rows: int
+    reduce: Callable[[torch.Tensor], torch.Tensor] | None
+
+
+class SimilarityResidualCacheState:
+    def __init__(self, options: CacheDiTOptions) -> None:
+        self.validate_options(options)
+        self._options = options
+        self._previous_previous_front_residual: torch.Tensor | None = None
+        self._previous_front_residual: torch.Tensor | None = None
+        self._previous_stack_residual: torch.Tensor | None = None
+        self._stack_residual: torch.Tensor | None = None
+        self._previous_stack_step = -1
+        self._stack_step = -1
+        self._prediction_scale = 0.0
+        self._dense_forwards = 0
+        self._cache_hits = 0
+        self._similarity_checks = 0
+        self._consecutive_hits = 0
+        self._steps: list[tuple[int, bool, int]] = []
+
+    @staticmethod
+    def validate_options(options: CacheDiTOptions) -> None:
+        if (
+            options.warmup_steps < 0
+            or not isfinite(options.residual_diff_threshold)
+            or options.residual_diff_threshold <= 0.0
+            or options.max_cached_steps < -1
+            or options.max_consecutive_hits <= 0
+            or options.front_blocks <= 0
+            or options.back_blocks < 0
+        ):
+            raise ValueError("similarity residual cache options are invalid")
+
+    def decide(
+        self,
+        step: int,
+        front_residual: torch.Tensor,
+        used_rows: int,
+        reduce: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        row_indices: torch.Tensor | None = None,
+    ) -> CacheDiTDecision:
+        empty_collective_shard = (
+            used_rows == 0 and reduce is not None and row_indices is not None and row_indices.numel() == 0
+        )
+        if (
+            step < 0
+            or front_residual.dim() < 1
+            or used_rows < 0
+            or (used_rows == 0 and not empty_collective_shard)
+            or used_rows > front_residual.size(0)
+        ):
+            raise ValueError("similarity residual cache front residual is invalid")
+
+        below_total_limit = self._options.max_cached_steps < 0 or self._cache_hits < self._options.max_cached_steps
+        below_consecutive_limit = self._consecutive_hits < self._options.max_consecutive_hits
+        decision = CacheDiTDecision(False, float("inf"), 0.0)
+        if (
+            step >= self._options.warmup_steps
+            and self._previous_front_residual is not None
+            and below_total_limit
+            and below_consecutive_limit
+        ):
+            previous = self._previous_front_residual
+            if (
+                previous.shape != front_residual.shape
+                or previous.device != front_residual.device
+                or previous.dtype != front_residual.dtype
+            ):
+                raise ValueError("similarity residual cache tensor metadata changed")
+            previous_previous = self._previous_previous_front_residual
+            if previous_previous is not None and (
+                previous_previous.shape != front_residual.shape
+                or previous_previous.device != front_residual.device
+                or previous_previous.dtype != front_residual.dtype
+            ):
+                raise ValueError("similarity residual cache tensor metadata changed")
+            if row_indices is not None:
+                if (
+                    row_indices.dim() != 1
+                    or row_indices.dtype != torch.int64
+                    or row_indices.device != front_residual.device
+                ):
+                    raise ValueError("similarity residual cache row indices are invalid")
+                if row_indices.numel() > 0 and (row_indices.min().item() < 0 or row_indices.max().item() >= used_rows):
+                    raise ValueError("similarity residual cache row indices are invalid")
+
+            statistics_options = {"dtype": torch.float32, "device": front_residual.device}
+            if row_indices is not None and row_indices.numel() == 0:
+                statistics = torch.zeros(5, **statistics_options)
+            else:
+                current = front_residual.narrow(0, 0, used_rows)
+                previous_used = previous.narrow(0, 0, used_rows)
+                if row_indices is not None:
+                    current = current.index_select(0, row_indices)
+                    previous_used = previous_used.index_select(0, row_indices)
+                current_delta = (current - previous_used).to(torch.float32)
+                prediction_numerator = torch.zeros((), **statistics_options)
+                prediction_denominator = torch.zeros_like(prediction_numerator)
+                if previous_previous is not None:
+                    historical = previous_previous.narrow(0, 0, used_rows)
+                    if row_indices is not None:
+                        historical = historical.index_select(0, row_indices)
+                    historical_delta = (previous_used - historical).to(torch.float32)
+                    prediction_numerator = (current_delta * historical_delta).sum()
+                    prediction_denominator = historical_delta.square().sum()
+                statistics = torch.stack(
+                    (
+                        current_delta.abs().sum(),
+                        previous_used.abs().to(torch.float32).sum(),
+                        torch.full((), float(current.numel()), **statistics_options),
+                        prediction_numerator,
+                        prediction_denominator,
+                    )
+                )
+            if reduce is not None:
+                statistics = reduce(statistics)
+            if statistics[2].item() <= 0.0:
+                raise ValueError("similarity residual cache selected no tensor values")
+            prediction_scale = 0.0
+            if statistics[4].item() > 1e-6:
+                prediction_scale = min(max((statistics[3] / statistics[4]).item(), 0.0), 2.0)
+            decision = CacheDiTDecision(
+                False,
+                (statistics[0] / (statistics[1] + 1e-6)).item(),
+                prediction_scale,
+            )
+            self._similarity_checks += 1
+            decision = CacheDiTDecision(
+                isfinite(decision.relative_l1)
+                and decision.relative_l1 < self._options.residual_diff_threshold
+                and self._stack_residual is not None,
+                decision.relative_l1,
+                decision.prediction_scale,
+            )
+
+        if decision.hit:
+            self._cache_hits += 1
+            self._consecutive_hits += 1
+            self._prediction_scale = decision.prediction_scale
+        else:
+            self._previous_previous_front_residual = self._previous_front_residual
+            self._previous_front_residual = front_residual.detach().clone()
+            self._consecutive_hits = 0
+            self._prediction_scale = 0.0
+        return decision
+
+    def record_dense(self, step: int, front_output: torch.Tensor, full_output: torch.Tensor) -> None:
+        if (
+            step < 0
+            or (self._stack_step >= 0 and step <= self._stack_step)
+            or front_output.shape != full_output.shape
+            or front_output.device != full_output.device
+            or front_output.dtype != full_output.dtype
+        ):
+            raise ValueError("similarity residual cache dense outputs do not match")
+        self._previous_stack_residual = self._stack_residual
+        self._previous_stack_step = self._stack_step
+        self._stack_residual = (full_output - front_output).detach()
+        self._stack_step = step
+        self._dense_forwards += 1
+
+    def apply(self, step: int, front_output: torch.Tensor) -> torch.Tensor:
+        if (
+            self._stack_residual is None
+            or step <= self._stack_step
+            or front_output.shape != self._stack_residual.shape
+            or front_output.device != self._stack_residual.device
+            or front_output.dtype != self._stack_residual.dtype
+        ):
+            raise ValueError("similarity residual cache has no compatible stack residual")
+        residual = self._stack_residual
+        if (
+            self._options.linear_residual_prediction
+            and self._previous_stack_residual is not None
+            and self._previous_stack_step >= 0
+            and self._stack_step > self._previous_stack_step
+        ):
+            residual = self._stack_residual + self._prediction_scale * (
+                self._stack_residual - self._previous_stack_residual
+            )
+        return front_output + residual
+
+    def record_step(self, step: int, hit: bool, executed_blocks: int) -> None:
+        self._steps.append((step, hit, executed_blocks))
+
+    def statistics(self) -> dict[str, object]:
+        return {
+            "cache_hits": self._cache_hits,
+            "dense_forwards": self._dense_forwards,
+            "similarity_checks": self._similarity_checks,
+            "steps": list(self._steps),
+        }
+
+    @property
+    def front_blocks(self) -> int:
+        return self._options.front_blocks
+
+    @property
+    def back_blocks(self) -> int:
+        return self._options.back_blocks
+
+    @property
+    def cache_hits(self) -> int:
+        return self._cache_hits
+
+    @property
+    def dense_forwards(self) -> int:
+        return self._dense_forwards
+
+    @property
+    def similarity_checks(self) -> int:
+        return self._similarity_checks
+
+    @property
+    def hit_steps(self) -> list[int]:
+        return [step for step, hit, _ in self._steps if hit]
+
+
+def make_cache_request(
+    options: CacheDiTOptions,
+    layout: PackedLayout,
+    rank: int,
+    size: int,
+    reduce: Callable[[torch.Tensor], torch.Tensor] | None,
+    device: torch.device,
+) -> CacheDiTRequest:
+    sequence_length = layout.tags.numel()
+    alignment = lcm(_PACKED_SEQUENCE_ALIGNMENT, size)
+    padding = (alignment - sequence_length % alignment) % alignment
+    local_rows = (sequence_length + padding) // size
+    start = rank * local_rows
+    used_rows = min(max(sequence_length - start, 0), local_rows)
+    targets: list[int] = []
+    for begin, end in ((layout.video_start, sequence_length), (layout.audio_start, layout.video_start)):
+        low = max(begin, start)
+        high = min(end, start + used_rows)
+        targets.extend(range(low - start, high - start))
+    return CacheDiTRequest(
+        SimilarityResidualCacheState(options),
+        torch.tensor(targets, dtype=torch.int64, device=device),
+        used_rows,
+        reduce,
+    )
 
 
 def _apply_rotary(states: torch.Tensor, rotary: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
@@ -337,7 +606,7 @@ class MiniMaxH3Denoiser(nn.Module):
 
     def prepare_conditioning(self, prompt_embed: torch.Tensor, layout: PackedLayout) -> PackedConditioning:
         text = self.model.token_refiner(self.model.context_embedder(prompt_embed.to(torch.bfloat16)))
-        alignment = lcm(64, self._sp.size)
+        alignment = lcm(_PACKED_SEQUENCE_ALIGNMENT, self._sp.size)
         rows = layout.tags.numel()
         padded_rows = rows + (-rows) % alignment
         local_rows = padded_rows // self._sp.size
@@ -361,6 +630,9 @@ class MiniMaxH3Denoiser(nn.Module):
         timestep: torch.Tensor,
         timestep_indices: torch.Tensor,
         conditioning: PackedConditioning,
+        *,
+        step: int = 0,
+        cache: CacheDiTRequest | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         model = self.model
         layout = conditioning.layout
@@ -374,19 +646,50 @@ class MiniMaxH3Denoiser(nn.Module):
         padding = conditioning.padded_rows - layout.tags.numel()
         modulation_indices = F.pad(timestep_indices * 3 + layout.tags, (0, padding))
         modulation_indices = modulation_indices.narrow(0, conditioning.local_start, conditioning.local_rows)
-        for block in model.transformer_blocks:
+
+        def run_block(block: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
             shift_attn, scale_attn, gate_attn, shift_ff, scale_ff, gate_ff = block.adaln_proj(temb)
             attn_scale = scale_attn.index_select(0, modulation_indices)
             attn_shift = shift_attn.index_select(0, modulation_indices)
-            attn_input = block.norm1(hidden) * (1 + attn_scale) + attn_shift
+            attn_input = block.norm1(hidden_states) * (1 + attn_scale) + attn_shift
             attended = _dense_attention(
-                block.attn, attn_input, conditioning.rotary, self._sp, layout.tags.numel(), self._laser
+                block.attn, attn_input, conditioning.rotary, self._sp, layout.tags.numel(), laser=self._laser
             )
-            hidden = hidden + gate_attn.index_select(0, modulation_indices) * attended
+            hidden_states = hidden_states + gate_attn.index_select(0, modulation_indices) * attended
             ff_scale = scale_ff.index_select(0, modulation_indices)
             ff_shift = shift_ff.index_select(0, modulation_indices)
-            ff_input = block.norm2(hidden) * (1 + ff_scale) + ff_shift
-            hidden = hidden + gate_ff.index_select(0, modulation_indices) * block.ff(ff_input)
+            ff_input = block.norm2(hidden_states) * (1 + ff_scale) + ff_shift
+            return hidden_states + gate_ff.index_select(0, modulation_indices) * block.ff(ff_input)
+
+        blocks = model.transformer_blocks
+        if cache is not None:
+            middle_start = cache.state.front_blocks
+            tail_start = len(blocks) - cache.state.back_blocks
+            original_hidden = hidden
+            for index in range(middle_start):
+                hidden = run_block(blocks[index], hidden)
+            front = hidden
+            decision = cache.state.decide(
+                step,
+                (front - original_hidden).squeeze(0),
+                cache.used_rows,
+                cache.reduce,
+                cache.target_rows,
+            )
+            executed_blocks = middle_start
+            if decision.hit:
+                hidden = cache.state.apply(step, front)
+            else:
+                for index in range(middle_start, tail_start):
+                    hidden = run_block(blocks[index], hidden)
+                cache.state.record_dense(step, front, hidden)
+                executed_blocks += tail_start - middle_start
+            for index in range(tail_start, len(blocks)):
+                hidden = run_block(blocks[index], hidden)
+            cache.state.record_step(step, decision.hit, executed_blocks + len(blocks) - tail_start)
+        else:
+            for block in blocks:
+                hidden = run_block(block, hidden)
 
         hidden = self._sp.gather(hidden.contiguous())[:, : layout.tags.numel()]
         hidden = model.norm_out(hidden, temb, timestep_indices).float()

@@ -28,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/dit_config.h"
+#include "core/framework/dit_cache/dit_cache_config.h"
 #include "core/framework/model_context/dit_model_context.h"
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/process_group.h"
@@ -94,7 +95,7 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
   py::object pipeline_class =
       py::module_::import("xllm.python.dit.registry")
           .attr("get_pipeline_class")(context.model_type());
-  auto make_pipeline = [&](auto&&... keyword_args) {
+  auto make_pipeline = [&](py::kwargs keyword_args) {
     return pipeline_class(
         c10::str(device()),
         parallel.rank() == 0,
@@ -139,31 +140,53 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
           }
           return vae->allgather_base_sync(input);
         }),
-        std::forward<decltype(keyword_args)>(keyword_args)...);
+        **keyword_args);
   };
   const DiTConfig& config = DiTConfig::get_instance();
   const std::string task_type = config.dit_h3_task_type();
   const bool minimax_h3_ref2va =
       context.model_type() == "MiniMaxH3ModularPipeline" &&
       task_type == "ref2va";
+  const bool cache_dit =
+      minimax_h3_ref2va &&
+      context.get_dit_config().selected_policy == PolicyType::CACHE_DIT;
+  py::kwargs pipeline_args;
   if (minimax_h3_ref2va) {
-    pipeline_ =
-        make_pipeline(py::arg("task_type") = task_type,
-                      py::arg("sp_communication_overlap") =
-                          config.dit_sp_communication_overlap(),
-                      py::arg("tp_broadcast") = py::cpp_function(
-                          [tp](const torch::Tensor& input, int32_t root_rank) {
-                            torch::Tensor tensor = input.contiguous();
-                            if (tp != nullptr) {
-                              py::gil_scoped_release release;
-                              tp->broadcast(tensor, root_rank);
-                            }
-                            return tensor;
-                          }));
+    pipeline_args["task_type"] = task_type;
+    pipeline_args["sp_communication_overlap"] =
+        config.dit_sp_communication_overlap();
+    pipeline_args["tp_broadcast"] =
+        py::cpp_function([tp](const torch::Tensor& input, int32_t root_rank) {
+          torch::Tensor tensor = input.contiguous();
+          if (tp != nullptr) {
+            py::gil_scoped_release release;
+            tp->broadcast(tensor, root_rank);
+          }
+          return tensor;
+        });
+    if (cache_dit) {
+      const CacheDiTOptions& options = context.get_dit_config().cache_dit;
+      py::dict cache_options;
+      cache_options["warmup_steps"] = options.warmup_steps;
+      cache_options["residual_diff_threshold"] =
+          options.residual_diff_threshold;
+      cache_options["max_cached_steps"] = options.max_cached_steps;
+      cache_options["max_consecutive_hits"] = options.max_consecutive_hits;
+      cache_options["front_blocks"] = options.front_blocks;
+      cache_options["back_blocks"] = options.back_blocks;
+      cache_options["linear_residual_prediction"] =
+          options.linear_residual_prediction;
+      pipeline_args["sp_reduce"] = py::cpp_function([sp](torch::Tensor input) {
+        py::gil_scoped_release release;
+        return parallel_state::reduce(input, sp);
+      });
+      pipeline_args["cache_options"] = cache_options;
+    }
   } else {
-    pipeline_ = make_pipeline(py::arg("laser_attention_enabled") =
-                                  config.dit_laser_attention_enabled());
+    pipeline_args["laser_attention_enabled"] =
+        config.dit_laser_attention_enabled();
   }
+  pipeline_ = make_pipeline(std::move(pipeline_args));
 }
 
 PyDiTModel::~PyDiTModel() { clear_python_object(pipeline_); }

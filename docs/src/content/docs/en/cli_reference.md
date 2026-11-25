@@ -260,7 +260,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `max_requests_per_batch` | `int32` | `1` | Maximum number of requests per batch. |
-| `dit_cache_policy` | `string` | `"TaylorSeer"` | DiT cache policy, for example `None`, `FBCache`, `TaylorSeer`, `FBCacheTaylorSeer`, or `ResidualCache`. |
+| `dit_cache_policy` | `string` | `"TaylorSeer"` | DiT cache policy: `None`, `FBCache`, `TaylorSeer`, `FBCacheTaylorSeer`, `ResidualCache`, or `CacheDiT`. `CacheDiT` is supported only by the PyTorch MiniMax-H3 Ref2VA path and keeps cache state request-local. |
 | `dit_cache_warmup_steps` | `int64` | `0` | Number of warmup steps. |
 | `dit_cache_n_derivatives` | `int64` | `3` | Number of derivatives to use in TaylorSeer. |
 | `dit_cache_skip_interval_steps` | `int64` | `3` | Refresh interval for `TaylorSeer` and `ResidualCache`; must be greater than `0`. For `TaylorSeer`, `1` computes every step. Ignored by other policies. |
@@ -269,6 +269,13 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `dit_cache_end_steps` | `int64` | `5` | Number of steps to skip at the end. |
 | `dit_cache_start_blocks` | `int64` | `5` | Number of blocks to skip at the start. |
 | `dit_cache_end_blocks` | `int64` | `5` | Number of blocks to skip at the end. |
+| `dit_cachedit_warmup_steps` | `int64` | `30` | CacheDiT zero-based warmup steps; must be `>= 0`. |
+| `dit_cachedit_residual_diff_threshold` | `double` | `0.04` | CacheDiT relative L1 threshold; must be finite and `> 0`. |
+| `dit_cachedit_max_cached_steps` | `int64` | `4` | CacheDiT total hit limit; `-1` means unlimited, `0` disables hits. |
+| `dit_cachedit_max_consecutive_hits` | `int64` | `1` | CacheDiT consecutive hit limit; must be `> 0`. |
+| `dit_cachedit_front_blocks` | `int64` | `1` | CacheDiT front blocks executed on every step; must be `> 0` and leave room for `back_blocks`. |
+| `dit_cachedit_back_blocks` | `int64` | `0` | CacheDiT back blocks executed on every step; must be `>= 0` and fit after `front_blocks` within the block count. |
+| `dit_cachedit_linear_residual_prediction` | `bool` | `true` | Enable CacheDiT linear residual prediction. |
 | `dit_sp_communication_overlap` | `bool` | `true` | Whether to overlap communication and computation for sequence parallelism. |
 | `dit_debug_print` | `bool` | `false` | Whether to print debug information for DiT models. |
 | `dit_generation_image_area_max` | `int64` | `0` | Maximum allowed image area (`width * height`) for image generation requests. `0` means no limit. |
