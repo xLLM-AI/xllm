@@ -37,6 +37,7 @@ struct AttentionMetadataBuildOptions {
   std::optional<KVShardLayout> kv_shard_layout;
   bool is_draft_engine = false;
   std::optional<bool> chunked_block_diffusion;
+  int64_t dummy_query_rows = 1;
 };
 
 // Builder class for AttentionMetadata to avoid circular dependency.

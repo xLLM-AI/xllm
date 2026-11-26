@@ -45,6 +45,7 @@ def _runner(
     device_kv_lengths: bool = False,
     kv_capacity_graphs: bool = False,
     max_capture_tokens: int | None = None,
+    fixed_dp_graph_layout: bool = False,
 ) -> DecodeAclGraphRunner:
     attention_backend = SimpleNamespace(page_size=4, is_mla=False, create_graph_block_tables=lambda *_: ())
     return DecodeAclGraphRunner(
@@ -60,6 +61,7 @@ def _runner(
         device_kv_lengths=device_kv_lengths,
         kv_capacity_graphs=kv_capacity_graphs,
         max_capture_tokens=max_capture_tokens,
+        fixed_dp_graph_layout=fixed_dp_graph_layout,
     )
 
 
@@ -112,6 +114,38 @@ def _capacity_metadata(rows: int, kv_length: int = 1, query_width: int = 1, page
             kv_seq_lens_host_values=metadata.kv_seq_lens_host_values,
         )
     return metadata
+
+
+def test_fixed_dp_verify_reuses_capture_when_a_rank_becomes_empty() -> None:
+    runner = _runner(max_batch=32, dp_size=2, num_speculative_tokens=5, fixed_dp_graph_layout=True)
+
+    def capture(*_args: object, graph_key: tuple[object, ...], **_kwargs: object) -> None:
+        runner._graphs[graph_key] = AclGraphEntry()
+
+    keys = []
+    with (
+        patch("xllm.python.model_executor.runners.decode_acl_graph.dist.is_initialized", return_value=True),
+        patch("xllm.python.distributed.all_gather") as gather,
+        patch("xllm.python.distributed.all_reduce_") as reduce,
+        patch.object(runner, "_prepare_graph_entry", side_effect=capture) as prepare,
+    ):
+        for rows, is_dummy in ((12, False), (6, True), (12, False)):
+            metadata = _capacity_metadata(rows, kv_length=1 if is_dummy else 8)
+            metadata.num_speculative_tokens = 5
+            metadata.is_target_verify = not is_dummy
+            metadata.is_dummy = is_dummy
+            metadata.q_seq_lens_host = torch.ones(rows, dtype=torch.int32)
+            metadata.dp_execution_token_counts = (rows, 12)
+            metadata.dp_is_decode = (1, 1)
+            tokens = torch.arange(rows, dtype=torch.int32)
+            prepared = runner.prepare_execution(tokens, metadata)
+            assert prepared is not None
+            keys.append(runner.warmup(tokens, tokens, metadata, decode_metadata=prepared))
+            runner._synchronize_dp_graph_execute(tokens)
+        assert prepare.call_count == 1
+        gather.assert_not_called()
+        reduce.assert_not_called()
+    assert keys[0] == keys[1] == keys[2]
 
 
 def test_shared_gdn_verify_admission_uses_bound_model_capability() -> None:

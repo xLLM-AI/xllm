@@ -55,18 +55,20 @@ enum class BlockType : int8_t {
                   // from LinearStateBlockManager; exported via
                   // get_linear_block_id() (linear_state_ids). Also the cache
                   // group for the conv/ssm recurrent-state KV tensors.
+  DECODER_SWA = 8,  // V4.1 request-local decoder window.
 };
 
 // Fixed column order of worker multi_block_tables. The exported tables must
 // follow this order so they line up with the worker-side DSA group_infos; it
 // must never depend on std::map iteration order or config traversal order.
-// V4 exports [SWA, C4, C128]; V4.1 exports [SWA, C1, C2].
-inline constexpr std::array<BlockType, 5> kMultiBlockExportOrder = {
+// V4 exports [SWA, C4, C128]; V4.1 bounded replay appends DECODER_SWA.
+inline constexpr std::array<BlockType, 6> kMultiBlockExportOrder = {
     BlockType::SWA,
     BlockType::C1,
     BlockType::C2,
     BlockType::C4,
-    BlockType::C128};
+    BlockType::C128,
+    BlockType::DECODER_SWA};
 
 // Stable cache-group identity used by PD transfer. BlockType remains a local
 // storage key; the serialized group id is intentionally opaque to transfer
@@ -82,6 +84,7 @@ inline constexpr bool is_kv_split_cache_block_type(BlockType type) {
   switch (type) {
     case BlockType::KV:
     case BlockType::SWA:
+    case BlockType::DECODER_SWA:
     case BlockType::C1:
     case BlockType::C2:
     case BlockType::C4:
@@ -101,6 +104,8 @@ inline constexpr std::optional<BlockType> block_type_from_cache_group_id(
       return BlockType::KV;
     case cache_group_id(BlockType::SWA):
       return BlockType::SWA;
+    case cache_group_id(BlockType::DECODER_SWA):
+      return BlockType::DECODER_SWA;
     case cache_group_id(BlockType::C1):
       return BlockType::C1;
     case cache_group_id(BlockType::C2):

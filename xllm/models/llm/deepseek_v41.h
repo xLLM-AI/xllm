@@ -239,6 +239,9 @@ inline bool load_deepseek_v41_model_args(const JsonReader& json,
   LOAD_ARG_OR(pad_token_id, "text_config.pad_token_id", args->pad_token_id());
   LOAD_ARG_OR(image_token_id, "image_token_id", -1);
 
+  LOAD_ARG_OR(markov_rank, "text_config.dspark_markov_rank", 0);
+  LOAD_ARG_OR(dspark_num_layers, "text_config.num_nextn_predict_layers", 0);
+
   process_deepseek_v41_args(args);
   validate_deepseek_v41_args(*args);
   return true;

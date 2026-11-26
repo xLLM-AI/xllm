@@ -31,6 +31,7 @@ MODEL_PLATFORM_SUPPORT: dict[str, dict[str, bool]] = {
     "deepseek_v4_mtp": {"cuda": False, "npu": True},
     "deepseek_v4_dspark": {"cuda": False, "npu": True},
     "deepseek_v41": {"cuda": False, "npu": True},
+    "deepseek_v41_dspark": {"cuda": False, "npu": True},
     "glm5_2": {"cuda": False, "npu": True},
     "glm5_2_mtp": {"cuda": False, "npu": True},
     "glm5_next": {"cuda": False, "npu": True},
@@ -47,13 +48,13 @@ def is_deepseek_v4_model(config: dict) -> bool:
     model_type = config.get("model_type", "")
     return (
         model_type == "deepseek_v4"
-        or model_type == "deepseek_v41"
+        or model_type in ("deepseek_v41", "deepseek_v41_dspark")
         or model_type == "deepseek_v4_dspark"
         or (model_type.startswith("deepseek_v4") and "mtp" in model_type)
     )
 
 
-_DSPARK_DRAFT_MODEL_TYPES = ("DSparkDraftModel", "glm5_dspark", "deepseek_v4_dspark")
+_DSPARK_DRAFT_MODEL_TYPES = ("DSparkDraftModel", "glm5_dspark", "deepseek_v4_dspark", "deepseek_v41_dspark")
 
 
 def is_dspark_draft_model(config: dict) -> bool:

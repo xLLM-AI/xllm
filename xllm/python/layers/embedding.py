@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from xllm.python import distributed
+from xllm.python.distributed.collectives import decode_tp_all_gather
 
 
 class HiddenParallelEmbedding(nn.Module):
@@ -37,9 +38,12 @@ class HiddenParallelEmbedding(nn.Module):
         tp_size: int,
         dtype: torch.dtype | None = None,
         device: torch.device | str | None = None,
+        *,
+        use_decode_tp: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = tp_size
+        self.use_decode_tp = use_decode_tp
         self.weight = nn.Parameter(
             torch.empty(
                 num_embeddings,
@@ -52,5 +56,7 @@ class HiddenParallelEmbedding(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         out = torch.nn.functional.embedding(input_ids, self.weight)
         if self.tp_size > 1:
+            if self.use_decode_tp:
+                return decode_tp_all_gather(out, self.tp_size, dim=-1)
             out = distributed.tp_all_gather(out, dim=-1, world_size=self.tp_size)
         return out

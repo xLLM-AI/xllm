@@ -57,6 +57,7 @@ class ModelConfig final {
          "backend",
          "task",
          "use_ctc",
+         "enable_engram_host_offload",
          "enable_return_embedding_modality_tags",
          "python_model_path",
          "limit_image_per_prompt",
@@ -88,6 +89,8 @@ class ModelConfig final {
   PROPERTY(std::string, task) = "generate";
 
   PROPERTY(bool, use_ctc) = false;
+
+  PROPERTY(bool, enable_engram_host_offload) = true;
 
   PROPERTY(bool, enable_return_embedding_modality_tags) = false;
 

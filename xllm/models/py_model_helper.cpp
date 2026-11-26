@@ -166,13 +166,13 @@ void ensure_embedded_python() {
   });
 }
 
-void ensure_python_interpreter() {
+void ensure_python_interpreter(const std::string& model_type) {
   ensure_embedded_python();
   static std::once_flag flag;
-  std::call_once(flag, []() {
+  std::call_once(flag, [&model_type]() {
     py::gil_scoped_acquire gil;
     try {
-      py::module_::import("xllm.python").attr("initialize_runtime")();
+      py::module_::import("xllm.python").attr("initialize_runtime")(model_type);
     } catch (const py::error_already_set& e) {
       LOG(FATAL) << "Failed to initialize Python model kernels: " << e.what();
     }

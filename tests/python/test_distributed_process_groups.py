@@ -92,7 +92,7 @@ def _mock_process_groups(
     tcp_store = MagicMock(return_value=base_store)
     init_world = MagicMock()
     new_group = MagicMock(
-        side_effect=lambda ranks, timeout, backend: _FakeGroup(
+        side_effect=lambda ranks, timeout, backend, pg_options=None: _FakeGroup(
             ranks.index(global_rank) if global_rank in ranks else -1, len(ranks)
         )
     )
@@ -227,6 +227,8 @@ def test_npu_all_reduce_selects_managed_stream_above_inline_limit(
     # Test the size-based dispatch without constructing an NPU communicator.
     # Real HCCL graph replay is covered by the kernel package tests.
     monkeypatch.setattr(hccl, "get_hccl_comm", communicator)
+    communication_stream = MagicMock()
+    monkeypatch.setattr(hccl, "_communication_stream", communication_stream)
     monkeypatch.setattr(hccl, "all_reduce", inline)
     monkeypatch.setattr(hccl.dist, "all_reduce", managed)
 
@@ -234,9 +236,11 @@ def test_npu_all_reduce_selects_managed_stream_above_inline_limit(
 
     communicator.assert_called_once_with(group, value.device)
     if extra_elements:
+        communication_stream.assert_not_called()
         managed.assert_called_once_with(value, group=group)
         inline.assert_not_called()
     else:
+        communication_stream.assert_called_once_with(group, value.device, value)
         inline.assert_called_once_with(value, 17)
         managed.assert_not_called()
     torch.testing.assert_close(value, torch.full_like(value, 2))

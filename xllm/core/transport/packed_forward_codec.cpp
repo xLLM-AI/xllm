@@ -99,7 +99,7 @@ constexpr PackedInputDomain packed_input_domain() {
   return PackedInputDomain::LLM;
 }
 constexpr uint64_t kPackedInputMagic = 0x584c4c4d494e5032;
-constexpr uint16_t kPackedInputSchemaVersion = 13;
+constexpr uint16_t kPackedInputSchemaVersion = 14;
 constexpr uint32_t kPackedInputHeaderBytes = 40;
 
 struct RawInputLayoutHeader final {
@@ -2258,6 +2258,11 @@ inline void deserialize_forward_input_payload(
   read_vector(context, input_params.meta.execution_batch.num_computed_tokens);
   read_vector(context, input_params.meta.execution_batch.query_start_loc);
   read_vector(context, input_params.meta.execution_batch.is_prefilling);
+  auto& swa_replay = input_params.meta.execution_batch.swa_prefix_replay;
+  read_vector(context, swa_replay.starts);
+  read_vector(context, swa_replay.ends);
+  read_vector(context, swa_replay.engram_history);
+  read_vector(context, swa_replay.decoder_starts);
   read_tensor_and_vector(context,
                          input_params.attention.device.q_seq_lens,
                          input_params.attention.host.q_seq_lens,
@@ -2309,6 +2314,7 @@ inline void deserialize_forward_input_payload(
   read_vector(context, input_params.parallel.dp_global_token_nums);
   read_vector(context, input_params.parallel.dp_global_sequence_nums);
   read_vector(context, input_params.parallel.raw_dp_global_token_nums);
+  read_vector(context, input_params.parallel.decoder_replay_dp_token_counts);
   read_vector(context, input_params.parallel.dp_global_batch_generations);
   read_vector(context, input_params.parallel.dp_global_kv_max_seq_lens);
   read_vector(context, input_params.parallel.dp_global_json_object_active);
@@ -2612,6 +2618,11 @@ inline void serialize_forward_input_sections(
                input_params.meta.execution_batch.query_start_loc);
   write_vector(context.descriptor,
                input_params.meta.execution_batch.is_prefilling);
+  const auto& swa_replay = input_params.meta.execution_batch.swa_prefix_replay;
+  write_vector(context.descriptor, swa_replay.starts);
+  write_vector(context.descriptor, swa_replay.ends);
+  write_vector(context.descriptor, swa_replay.engram_history);
+  write_vector(context.descriptor, swa_replay.decoder_starts);
 
   write_host_vector_or_tensor(context,
                               input_params.attention.host.q_seq_lens,
@@ -2661,6 +2672,8 @@ inline void serialize_forward_input_sections(
                input_params.parallel.dp_global_sequence_nums);
   write_vector(context.descriptor,
                input_params.parallel.raw_dp_global_token_nums);
+  write_vector(context.descriptor,
+               input_params.parallel.decoder_replay_dp_token_counts);
   write_vector(context.descriptor,
                input_params.parallel.dp_global_batch_generations);
   write_vector(context.descriptor,

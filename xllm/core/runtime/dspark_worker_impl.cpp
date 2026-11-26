@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "runtime/llm_worker_impl.h"
+#include "util/json_reader.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -43,11 +44,34 @@ void DSparkWorkerImpl::apply_draft_model_overrides(ModelArgs& args) {
 #if defined(USE_NPU)
     CHECK_GT(args.dspark_num_layers(), 0)
         << "DeepSeek-V4 DSpark requires at least one draft layer.";
+    const bool is_v41 = args.model_type() == "deepseek_v41";
+    if (is_v41) {
+      CHECK(ModelConfig::is_python_model_impl(context_.get_model_impl()))
+          << "DeepSeek-V4.1 DSpark requires the Python model implementation.";
+      JsonReader reader;
+      CHECK(reader.parse(options_.draft_model_path().value() + "/config.json"));
+      args.n_routed_experts(
+          reader.value_or<int32_t>("text_config.dspark_n_routed_experts", 128));
+      args.num_experts_per_tok(reader.value_or<int32_t>(
+          "text_config.dspark_num_experts_per_tok", 3));
+      args.n_activated_experts(args.num_experts_per_tok());
+      args.kv_source_layer_ids({});
+      args.index_source_layer_ids({});
+      args.candidate_source_layer_id(-1);
+      args.engram_layer_ids({});
+      args.engram_num_embeddings({});
+      args.first_k_dense_replace(0);
+      args.enable_confidence_head(false);
+    }
     args.n_layers(args.dspark_num_layers());
     args.n_hash_layers(0);
-    args.compress_ratios(std::vector<int32_t>(args.dspark_num_layers(), 1));
-#endif
+    args.compress_ratios(
+        std::vector<int32_t>(args.dspark_num_layers(), is_v41 ? 0 : 1));
+    args.model_type(is_v41 ? std::string(kDeepseekV41DSparkModelType)
+                           : "deepseek_v4_dspark");
+#else
     args.model_type("deepseek_v4_dspark");
+#endif
   } else {
     args.model_type(args.model_type() == kDSparkGLM5DraftModelType
                         ? std::string(kDSparkGLM5DraftModelType)

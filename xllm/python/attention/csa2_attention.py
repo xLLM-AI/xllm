@@ -16,12 +16,18 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from copy import copy
+from dataclasses import dataclass, field, replace
+from itertools import accumulate
 from typing import Any
 
 import torch
 
 from scripts.logger import logger
+from xllm.python import kernels
+from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.csa_attention import (
     DsaAttentionBackend,
     _CompressedAttentionCacheMapping,
@@ -37,6 +43,7 @@ from xllm.python.attention.dsa_metadata import (
     build_deepseek_v41_cache_config,
     last_ring_writes,
 )
+from xllm.python.model_executor.forward_context import get_forward_context_or_none
 from xllm.python.models.deepseek_v41 import (
     V41_QUANT_ASCEND,
     V41_QUANT_NONE,
@@ -50,6 +57,8 @@ _NEG_INF_FLOOR = -1e30
 _ATTENTION_QUERY_TILE = 256
 # Tile query rows to bound FP32 indexer scores without changing per-row top-k.
 _INDEXER_QUERY_TILE = 256
+# Maximum token rows per invocation of v41_partial_rope_.
+_PARTIAL_ROPE_MAX_TOKENS = 4096
 
 
 @dataclass
@@ -60,12 +69,72 @@ class _SwaGroupMetadata:
     cache: torch.Tensor
 
 
+@dataclass(frozen=True)
+class _PreparedCsa2Attention:
+    query_lens: tuple[int, ...]
+    device_block_tables: tuple[torch.Tensor, ...]
+
+
+@dataclass(frozen=True)
+class _Csa2GraphQuery:
+    lengths: torch.Tensor
+    offsets: torch.Tensor
+    max_length: torch.Tensor
+    empty: torch.Tensor
+
+
+@dataclass
+class _DecoderSwaReplayPlan:
+    metadata: DsaMetadata
+    requests: torch.Tensor | None
+    table_views: dict[int, torch.Tensor] = field(default_factory=dict)
+
+    def select_table(self, table: torch.Tensor | None) -> torch.Tensor | None:
+        if table is None or not table.numel() or self.requests is None:
+            return table
+        key = id(table)
+        if key not in self.table_views:
+            self.table_views[key] = table.index_select(0, self.requests)
+        return self.table_views[key]
+
+
 @dataclass
 class Csa2LayerContext:
     x: torch.Tensor
-    qr: torch.Tensor
+    qr: torch.Tensor | None
     positions: torch.Tensor
     cos_sin_cache: torch.Tensor
+    qr_quantized: tuple[torch.Tensor, torch.Tensor] | None = None
+    swa_cache_written: bool = False
+
+
+@dataclass(frozen=True)
+class _Csa2IndexerMetadata:
+    committed: torch.Tensor
+    residual: torch.Tensor | None
+    tiling: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _Csa2DecodeCompressorMetadata:
+    rows: torch.Tensor
+    starts: torch.Tensor
+    owners: torch.Tensor
+    committed: torch.Tensor
+    park_slots: torch.Tensor | None = None
+    previous_rows: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
+class _Csa2DraftSwaMetadata:
+    history_slots: torch.Tensor
+    history_valid: torch.Tensor
+    positions: torch.Tensor
+    lengths: torch.Tensor
+    sequence_lengths: torch.Tensor
+    block_table: torch.Tensor
+    tiling: torch.Tensor
+    cache: torch.Tensor
 
 
 @dataclass
@@ -73,10 +142,34 @@ class CSA2SharedRuntime:
     key_cache: torch.Tensor | None = None
     key_block_table: torch.Tensor | None = None
     index_cache: torch.Tensor | None = None
+    index_scale: torch.Tensor | None = None
+    indexer_metadata: dict[int, _Csa2IndexerMetadata] = field(default_factory=dict)
+    candidate_blocks: torch.Tensor | None = None
     index_block_table: torch.Tensor | None = None
     compress_ratio: int = 0
     topk_idxs: torch.Tensor | None = None
+    compressed_indices: torch.Tensor | None = None
     candidates: list[torch.Tensor | None] | None = None
+    swa_metadata: torch.Tensor | None = None
+    prewritten_kv_layer: int | None = None
+    draft_swa: _Csa2DraftSwaMetadata | None = None
+    compressed_mla_metadata: dict[int, torch.Tensor] = field(default_factory=dict)
+    ring_write_rows: dict[tuple[torch.Tensor, int], tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
+    rope_tables: dict[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] = field(
+        default_factory=dict
+    )
+    decode_compressor_metadata: dict[tuple[int, int], _Csa2DecodeCompressorMetadata] = field(default_factory=dict)
+
+    def last_swa_writes(
+        self, slots: torch.Tensor, values: torch.Tensor, capacity: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Layers in the same SWA group share the physical slot mapping for this forward.
+        key = (slots, capacity)
+        if key not in self.ring_write_rows:
+            rows = torch.arange(slots.numel(), device=slots.device)
+            self.ring_write_rows[key] = last_ring_writes(slots, rows, slot_capacity=capacity)
+        destinations, rows = self.ring_write_rows[key]
+        return destinations, values.index_select(0, rows)
 
 
 def apply_interleaved_rope(
@@ -103,6 +196,19 @@ def apply_interleaved_rope(
     if 2 * half == dim:
         return rotated
     return torch.cat((x[..., : dim - 2 * half], rotated), dim=-1)
+
+
+def _a3_quantize_indexer_query(query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    # The A3 indexer rounds its per-head scale to FP16 before quantizing Q.
+    query_fp32 = query.float()
+    scale = (query_fp32.abs().amax(dim=-1) / 127).half().clamp_min(2.0**-24)
+    codes = (query_fp32 / scale.float().unsqueeze(-1)).round().clamp(-127, 127)
+    return codes.to(torch.int8), scale
+
+
+def _a3_indexer_query_qdq(query: torch.Tensor) -> torch.Tensor:
+    codes, scale = _a3_quantize_indexer_query(query)
+    return codes.float() * scale.float().unsqueeze(-1)
 
 
 def _indexer_score(
@@ -222,12 +328,16 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         max_model_len: int = 0,
         quant_mode: str = V41_QUANT_NONE,
         graph_backend: str = "off",
+        dspark_block_size: int = 0,
+        dp_rank: int = 0,
+        decoder_swa_start_layer: int | None = None,
     ) -> None:
         self.caches_info, self.group_infos = build_deepseek_v41_cache_config(
             compress_ratios,
             kv_source_layer_ids,
             window_size,
             n_layers,
+            decoder_swa_start_layer,
         )
         self._builder = DsaMetadataBuilder(
             self.caches_info,
@@ -245,11 +355,23 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         self.device = device
         self.dtype = dtype
         self.scale = attn_head_dim**-0.5
+        self.uses_a3_cache_precision = device.type in ("npu", "privateuseone") and torch.npu.get_device_name(
+            device
+        ).startswith("Ascend910_93")
+        self._rope_swap_offsets = None
+        if self.uses_a3_cache_precision and dtype == torch.bfloat16 and rope_head_dim == 64:
+            self._rope_swap_offsets = torch.tensor(
+                [(lane ^ 1) * 4 for lane in range(8 * 64)], dtype=torch.int32, device=device
+            )
 
         self.index_source_layer_ids = sorted({int(source) for source in index_source_layer_ids})
         self.candidate_source_layer_id = int(candidate_source_layer_id)
         self.candidate_topk_blocks = int(candidate_topk_blocks)
         self.candidate_block_size = int(candidate_block_size)
+        # SparseFlashMla consumes min(visible_compressed_tokens, index_topk)
+        # picks per query. A retained partial block can supply just one token.
+        min_candidate_tokens = (self.candidate_topk_blocks - 1) * self.candidate_block_size + 1
+        self.native_mla_full_topk = self.candidate_source_layer_id < 0 or min_candidate_tokens >= self.index_topk
         if self.candidate_source_layer_id >= 0 and self.candidate_source_layer_id not in self.index_source_layer_ids:
             raise ValueError(
                 "DeepSeek-V4.1 candidate source layer must also be an index source layer: "
@@ -288,19 +410,187 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                 "disable graph execution."
             )
 
-        self._kv_caches: list[Any] = []
+        self._kv_caches: list[LayerCache] = []
+        self.uses_device_length_indexer = False
+        self.dspark_block_size = dspark_block_size
+        self.dp_rank = dp_rank
         self._metadata: Any | None = None
         self._v41_shared: CSA2SharedRuntime | None = None
 
-    def reset_forward(self, metadata: Any | None = None) -> None:
-        super().reset_forward(metadata)
+    def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:
+        indexed = [cache for cache in kv_caches if cache.index is not None]
+        quantized = [cache for cache in indexed if cache.index.dtype == torch.int8]
+        if quantized:
+            if len(quantized) != len(indexed) or any(
+                cache.indexer_scale is None
+                or cache.indexer_scale.dtype != torch.float16
+                or cache.indexer_scale.shape != cache.index.shape[:-1]
+                for cache in quantized
+            ):
+                raise ValueError("DeepSeek-V4.1 INT8 index caches require one FP16 scale per key row")
+            if not self.uses_a3_cache_precision or self.index_head_dim != 128 or self.index_n_heads not in (32, 64):
+                raise ValueError("DeepSeek-V4.1 INT8 index cache requires compatible A3 indexer geometry")
+        super().bind_kv_caches(kv_caches)
+        self.uses_device_length_indexer = bool(quantized)
+
+    def reset_forward(self, metadata: Any | None = None, *, preserve_dsa_metadata: bool = False) -> None:
+        if not preserve_dsa_metadata:
+            super().reset_forward(metadata)
         self._v41_shared = None
 
+    @property
+    def supports_prepared_metadata(self) -> bool:
+        return True
+
+    @property
+    def uses_grouped_cache(self) -> bool:
+        return True
+
+    def prepare_graph_replay(self, metadata: Any) -> None:
+        if isinstance(getattr(metadata, "prepared_attention_state", None), _PreparedCsa2Attention):
+            # Prepared graphs derive lengths, tables and slots inside capture.
+            # The inherited Host refresh would overwrite graph-pool scratch
+            # whose lifetime overlaps other intermediates in that graph.
+            self.prepare(metadata, graph_mode=True)
+        else:
+            super().prepare_graph_replay(metadata)
+
+    def prepare(self, metadata: Any, *, graph_mode: bool = False) -> None:
+        super().prepare(metadata, graph_mode=graph_mode)
+        prepared = getattr(metadata, "prepared_attention_state", None)
+        if graph_mode and isinstance(prepared, _PreparedCsa2Attention):
+            self._graph_query(prepared)
+
+    def _graph_query(self, prepared: _PreparedCsa2Attention) -> _Csa2GraphQuery:
+        width = self.dspark_block_size or 1
+        rows = len(prepared.query_lens)
+        context = get_forward_context_or_none()
+        state = context.execution_state if context is not None else None
+        key = ("csa2_graph_query", rows, width)
+        if state is not None and key in state.persistent_buffers:
+            return state.persistent_buffers[key]
+        options = {"device": self.device, "dtype": torch.int32}
+        query = _Csa2GraphQuery(
+            lengths=torch.full((rows,), width, **options),
+            offsets=torch.arange(0, (rows + 1) * width, width, **options),
+            max_length=torch.full((), width, **options),
+            empty=torch.empty(0, **options),
+        )
+        if state is not None:
+            state.persistent_buffers[key] = query
+        return query
+
+    def prepare_metadata(self, metadata: Any, *, device_kv_lengths: bool = False) -> _PreparedCsa2Attention:
+        """Bind the decode graph's persistent grouped tables."""
+        del device_kv_lengths
+        tables = (metadata.block_table,) if self.dspark_block_size else tuple(metadata.multi_block_tables)
+        query_lens = (self.dspark_block_size or 1,) * tables[0].size(0)
+        if len(tables) != len(self.group_infos) or any(
+            table.dtype != torch.int32
+            or table.device != self.device
+            or table.ndim != 2
+            or table.shape[0] != len(query_lens)
+            or not table.is_contiguous()
+            for table in tables
+        ):
+            raise ValueError("prepared CSA2 requires final row-aligned int32 Device tables for every cache group")
+        return _PreparedCsa2Attention(query_lens, tables)
+
+    def _build_prepared_graph_metadata(self, metadata: Any, prepared: _PreparedCsa2Attention) -> DsaMetadata:
+        # The decode runner updates lengths and grouped tables before replay.
+        # Derive their dependent metadata inside capture.
+        width = 1
+        if any(length != width for length in prepared.query_lens):
+            raise ValueError("prepared CSA2 requires uniform query rows matching its execution width")
+        positions = metadata.dsa_positions
+        query = self._graph_query(prepared)
+        capacity = int(metadata.dsa_graph_token_capacity)
+        if capacity <= 0:
+            raise ValueError("prepared CSA2 graphs require a positive KV capacity")
+        swa_group, *token_groups = self.group_infos
+        swa_source, *token_sources = prepared.device_block_tables
+        swa_cols = (capacity + swa_group.block_size - 1) // swa_group.block_size
+        swa_table = swa_source[:, :swa_cols].contiguous()
+        swa_column = torch.div(positions, swa_group.block_size, rounding_mode="floor")
+        swa_block = swa_table.gather(1, swa_column.reshape(-1, 1)).flatten()
+        active = swa_block > 0
+        swa_slot = swa_block.to(torch.int64) * swa_group.block_size + positions % swa_group.block_size
+        tables = [swa_table]
+        slots = [torch.where(active, swa_slot, -1).to(torch.int32)]
+        for group, source in zip(token_groups, token_sources, strict=True):
+            ratio = group.ratio
+            columns = (capacity + ratio * group.block_size - 1) // (ratio * group.block_size)
+            table = source[:, :columns].contiguous()
+            tables.append(table)
+            index = torch.div(positions + 1, ratio, rounding_mode="floor") - 1
+            column = torch.div(index.clamp_min(0), group.block_size, rounding_mode="floor")
+            block = table.gather(1, column.reshape(-1, 1)).flatten()
+            committed = active & ((positions + 1) % ratio == 0) & (block > 0)
+            slot = block.to(torch.int64) * group.block_size + index % group.block_size
+            slots.append(torch.where(committed, slot, -1).to(torch.int32))
+        lengths = torch.where(active, metadata.kv_seq_lens, 0).to(torch.int32)
+        empty = query.empty
+        device_lengths = self.uses_device_length_indexer
+        # Device-length decode consumers use the per-request lengths directly.
+        # The cumulative KV lengths and maxima belong to the generic DSA path.
+        kv_offsets = empty if device_lengths else torch.cat((lengths.new_zeros(1), lengths.cumsum(0).to(torch.int32)))
+        dsa = DsaMetadata(
+            layer_id=-1,
+            seq_lens=lengths,
+            seq_lens_q=query.lengths,
+            actual_seq_lengths_kv=lengths,
+            actual_seq_lengths_query=query.offsets,
+            kv_cu_seq_lens=kv_offsets,
+            max_seqlen_kv=empty if device_lengths else lengths.max(),
+            max_seqlen_q=query.max_length,
+            max_query_len=width,
+            max_seq_len=capacity,
+            input_positions=positions,
+            c4_pad_positions=empty,
+            c128_pad_positions=empty,
+            start_pos=empty if device_lengths else lengths - width,
+            is_acl_graph=True,
+        )
+        dsa.seq_lens_q_host = list(prepared.query_lens)
+        dsa.graph_token_capacity = capacity
+        dsa.query_aligned_token_slots = width == 1
+        dsa.block_tables = [[tables[cache.group_id] for cache in layer] for layer in self.caches_info]
+        dsa.slot_mappings = [[slots[cache.group_id] for cache in layer] for layer in self.caches_info]
+        return dsa
+
     def _build_dsa_metadata_for_forward(self, metadata: Any) -> DsaMetadata:
+        prepared = getattr(metadata, "prepared_attention_state", None)
+        if isinstance(prepared, _PreparedCsa2Attention) and self.dspark_block_size:
+            query = self._graph_query(prepared)
+            lengths = metadata.kv_seq_lens
+            dsa = DsaMetadata(
+                layer_id=-1,
+                seq_lens=lengths,
+                seq_lens_q=query.lengths,
+                actual_seq_lengths_kv=lengths,
+                actual_seq_lengths_query=query.offsets,
+                kv_cu_seq_lens=query.empty,
+                max_seqlen_kv=query.empty,
+                max_seqlen_q=query.max_length,
+                max_query_len=self.dspark_block_size,
+                max_seq_len=self.window_size + self.dspark_block_size,
+                input_positions=metadata.dsa_positions,
+                c4_pad_positions=query.empty,
+                c128_pad_positions=query.empty,
+                start_pos=lengths - self.dspark_block_size,
+                is_acl_graph=True,
+            )
+            dsa.seq_lens_q_host = list(prepared.query_lens)
+            dsa.block_tables = [[prepared.device_block_tables[0]] for _ in self.caches_info]
+            return dsa
+        if isinstance(prepared, _PreparedCsa2Attention) and bool(getattr(metadata, "dsa_graph_mode", False)):
+            return self._build_prepared_graph_metadata(metadata, prepared)
         dsa = super()._build_dsa_metadata_for_forward(metadata)
-        if bool(getattr(metadata, "is_dummy", False)):
+        raw_counts = getattr(metadata, "raw_dp_execution_token_counts", ())
+        if getattr(metadata, "is_dummy", False) or (raw_counts and raw_counts[self.dp_rank] == 0):
             # V4's synthetic tiling context is not initialized history for tensor attention.
             dsa.seq_lens.zero_()
+            dsa.seq_lens_kv_host = [0] * len(dsa.seq_lens_kv_host)
             dsa.actual_seq_lengths_kv.zero_()
             dsa.kv_cu_seq_lens.zero_()
             dsa.max_seqlen_kv.zero_()
@@ -368,6 +658,146 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             cache=layer_cache.swa,
         )
 
+    def apply_projection_rope(
+        self,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        inverse: bool = False,
+    ) -> torch.Tensor:
+        dsa = getattr(self._current_forward_metadata(), "dsa_metadata", None)
+        return self._apply_rope(value, positions, cos_sin_cache, dsa, self._shared_runtime(), inverse)
+
+    def prepare_projection_rope(
+        self, value: torch.Tensor, positions: torch.Tensor, cos_sin_cache: torch.Tensor
+    ) -> bool:
+        """Materialize the shared coefficients before the Q and KV streams fork."""
+        dsa = getattr(self._current_forward_metadata(), "dsa_metadata", None)
+        return self._rope_arguments(value, positions, cos_sin_cache, dsa, self._shared_runtime()) is not None
+
+    def _apply_rope(
+        self,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        dsa: DsaMetadata | None,
+        shared: CSA2SharedRuntime,
+        inverse: bool = False,
+    ) -> torch.Tensor:
+        arguments = self._rope_arguments(value, positions, cos_sin_cache, dsa, shared)
+        if arguments is None:
+            return apply_interleaved_rope(value, positions, cos_sin_cache, inverse=inverse)
+        return self._rotate_in_place(value, *arguments, inverse)
+
+    @staticmethod
+    def _rotate_in_place(
+        value: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        offsets: torch.Tensor,
+        inverse: bool,
+    ) -> torch.Tensor:
+        if value.size(0) <= _PARTIAL_ROPE_MAX_TOKENS:
+            torch.ops.xllm_ops.v41_partial_rope_(value, cos, sin, offsets, inverse)
+        else:
+            for start in range(0, value.size(0), _PARTIAL_ROPE_MAX_TOKENS):
+                rows = slice(start, start + _PARTIAL_ROPE_MAX_TOKENS)
+                torch.ops.xllm_ops.v41_partial_rope_(value[rows], cos[rows], sin[rows], offsets, inverse)
+        return value
+
+    def _rope_arguments(
+        self,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        dsa: DsaMetadata | None,
+        shared: CSA2SharedRuntime,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        swap_offsets = self._rope_swap_offsets
+        if (
+            swap_offsets is None
+            or dsa is None
+            or value.ndim not in (2, 3)
+            or value.dtype != torch.bfloat16
+            or not value.is_contiguous()
+            or value.size(0) == 0
+            or (dsa.is_acl_graph and value.size(0) > _PARTIAL_ROPE_MAX_TOKENS)
+            or positions.numel() != value.size(0)
+            or value.size(-1) not in (128, 512)
+            or (value.ndim == 3 and not 0 < value.size(1) <= 128)
+            or cos_sin_cache.dtype != torch.float32
+            or cos_sin_cache.size(-1) != 64
+        ):
+            return None
+
+        tables = shared.rope_tables
+        # Eager compressor positions can be temporary. Keep them alive for the lifetime of the cached coefficients.
+        key = (positions, cos_sin_cache)
+        if key not in tables:
+            compact = cos_sin_cache.index_select(0, positions.reshape(-1).to(torch.int64))
+            cos, sin = compact.chunk(2, dim=-1)
+            # Flip the even lane before the fused kernel swaps each pair.
+            signed_sin = torch.stack((-sin, sin), dim=-1).flatten(1)
+            tables[key] = (cos.repeat_interleave(2, dim=-1), signed_sin)
+        return *tables[key], swap_offsets
+
+    def prepare_swa_kv(
+        self,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        layer: Any,
+    ) -> tuple[torch.Tensor, bool]:
+        dsa = getattr(self._current_forward_metadata(), "dsa_metadata", None)
+        shared = self._shared_runtime()
+        arguments = self._rope_arguments(value, positions, cos_sin_cache, dsa, shared)
+        if arguments is None:
+            return apply_interleaved_rope(value, positions, cos_sin_cache), False
+
+        if (
+            dsa is not None
+            and dsa.is_acl_graph
+            and dsa.query_aligned_token_slots
+            and self.window_size == 128
+            and value.ndim == 2
+            and value.size(1) == 512
+        ):
+            layer_id = layer.layer_id
+            mapping = self._resolve_cache_mapping(layer_id, layer.mode.compress_ratio)
+            cache = self._kv_caches[layer_id].swa
+            slots = _get_layer_cache_tensor(dsa.slot_mappings, layer_id, mapping.ori_cache_idx)
+            if (
+                cache is not None
+                and cache.dtype == value.dtype
+                and cache.is_contiguous()
+                and 0 < cache.numel() // 512 <= (1 << 21)
+                and slots is not None
+                and slots.is_contiguous()
+                and slots.dtype == torch.int32
+                and slots.numel() == value.size(0)
+            ):
+                # Prepared single-token rows have distinct write slots. Publish
+                # them before attention reads the current and earlier query rows.
+                torch.ops.xllm_ops.v41_swa_rope_cache_(value, *arguments, slots.reshape(-1), cache.view(-1, 512))
+                return value, True
+
+        return self._rotate_in_place(value, *arguments, False), False
+
+    def _write_cache_rows(self, cache: torch.Tensor, slots: torch.Tensor, value: torch.Tensor, *, graph: bool) -> None:
+        if (
+            graph
+            and self.uses_a3_cache_precision
+            and cache.device.type == "npu"
+            and slots.dtype == torch.int32
+            and slots.numel() == value.size(0) > 0
+            and value.dtype == cache.dtype
+        ):
+            # The A3 op skips -1 slots. Send the prepared indices directly.
+            width = value.size(-1)
+            kernels.scatter_nd_update(cache.view(-1, width), slots.reshape(-1, 1), value.reshape(-1, width))
+            return
+        _scatter_by_slot(cache, slots, value)
+
     def execute_csa2_layer(
         self,
         q: torch.Tensor,
@@ -378,6 +808,10 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         dsa = getattr(metadata, "dsa_metadata", None)
         if dsa is None:
             raise RuntimeError("DeepSeek-V4.1 requires prepared DSA metadata before attention")
+        if not dsa.is_acl_graph and dsa.max_seq_len == 0:
+            # An idle DP shard still runs the layer's EP collectives. Its
+            # synthetic query rows have no paged KV to read or update.
+            return torch.zeros_like(q)
         mode = layer.mode
         layer_id = layer.layer_id
         layer_cache = self._kv_caches[layer_id]
@@ -385,38 +819,404 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         ctx = layer._csa2_ctx
         if ctx is None:
             raise RuntimeError(f"DeepSeek-V4.1 layer {layer_id} ran without its CSA2 context")
-        if dsa.is_acl_graph:
-            # Decode-graph contract: one token row per sequence. The host list
-            # is a capture-stable constant, so never sync-read the device
-            # tensor inside the captured stream (aclrtMemcpy on a captured
-            # stream fails with 107030).
-            q_lens = [1] * dsa.seq_lens_q.numel()
-        else:
-            q_lens = dsa.seq_lens_q_host
+        q_lens = dsa.seq_lens_q_host
         ctx_lens = dsa.seq_lens
 
         shared = self._shared_runtime()
-        if mode.is_full:
+        if self.dspark_block_size:
+            return self._fused_draft_swa(q, kv, layer, dsa, mapping, shared)
+        if (
+            self.uses_a3_cache_precision
+            and mode.compress_ratio == 0
+            and self.head_dim == 512
+            and self.window_size == 128
+            and q.dtype in (torch.bfloat16, torch.float16)
+        ):
+            return self._fused_swa(q, kv, layer, dsa, mapping, shared, cache_written=ctx.swa_cache_written)
+
+        if mode.is_full and shared.prewritten_kv_layer != layer_id:
             self._run_compressor(layer, ctx, dsa, layer_cache, mapping, q_lens, ctx_lens, shared)
         if mode.is_full or mode.is_reindex:
-            topk = self._run_indexer(layer, ctx, dsa, q_lens, ctx_lens, shared)
-        elif mode.is_reuse:
-            topk = shared.topk_idxs
-            if topk is None and dsa.block_tables:
-                raise RuntimeError(
-                    f"DeepSeek-V4.1 reuse layer {layer_id} has no shared top-k; its group source must run first"
-                )
-        else:
-            topk = None
-        # Current-chunk KV is read directly; preserve the ring history until
-        # all queries have consumed it, even when the chunk wraps the ring.
-        output = self._csa2_attention(q, kv, layer, dsa, q_lens, ctx_lens, topk, shared)
+            self._run_indexer(layer, ctx, dsa, q_lens, ctx_lens, shared)
+        topk = shared.topk_idxs if mode.compress_ratio else None
+        cmp_indices = shared.compressed_indices if mode.compress_ratio else None
+        if mode.is_reuse and topk is None and cmp_indices is None and dsa.block_tables:
+            raise RuntimeError(
+                f"DeepSeek-V4.1 reuse layer {layer_id} has no shared top-k; its group source must run first"
+            )
         swa_slot = _get_layer_cache_tensor(dsa.slot_mappings, layer_id, mapping.ori_cache_idx)
-        if layer_cache.swa is not None and swa_slot is not None and swa_slot.numel() > 0:
+        write_swa = layer_cache.swa is not None and swa_slot is not None and swa_slot.numel() > 0
+        flat_graph = (
+            write_swa and dsa.is_acl_graph and mode.compress_ratio > 0 and all(length == 1 for length in q_lens)
+        )
+        if flat_graph and not ctx.swa_cache_written:
+            # Verification flattens a request's consecutive queries into
+            # separate rows. Later rows gather preceding queries from SWA.
+            self._write_cache_rows(layer_cache.swa, swa_slot, kv, graph=True)
+        if (
+            write_swa
+            and mode.compress_ratio in (1, 2)
+            and cmp_indices is not None
+            and cmp_indices.numel()
+            and self.uses_a3_cache_precision
+            and q.size(-1) == 512
+            and self.window_size == 128
+            and q.dtype in (torch.bfloat16, torch.float16)
+            and layer_cache.swa.dtype == q.dtype
+            and shared.key_cache is not None
+            and shared.key_cache.dtype == q.dtype
+            and self.native_mla_full_topk
+            and (not dsa.is_acl_graph or flat_graph)
+        ):
+            output = self._fused_compressed_attention(q, kv, layer, dsa, mapping, cmp_indices, shared)
+        else:
+            if topk is None and cmp_indices is not None:
+                topk = self._reference_topk_indices(cmp_indices, q_lens)
+                shared.topk_idxs = topk
+            output = self._csa2_attention(q, kv, layer, dsa, q_lens, ctx_lens, topk, shared)
+        if write_swa and not flat_graph:
+            # Chunk attention reads current KV directly, so preserve its old
+            # ring rows until every query in the chunk has consumed them.
             if not dsa.is_acl_graph:
-                swa_slot, kv = last_ring_writes(swa_slot, kv, slot_capacity=layer_cache.swa.numel() // kv.size(-1))
+                swa_slot, kv = shared.last_swa_writes(swa_slot, kv, layer_cache.swa.numel() // kv.size(-1))
             _scatter_by_slot(layer_cache.swa, swa_slot, kv)
         return output
+
+    def prepare_decoder_replay_kv(
+        self,
+        layer: Any,
+        ctx: Csa2LayerContext,
+    ) -> None:
+        dsa = self._current_forward_metadata().dsa_metadata
+        layer_id = layer.layer_id
+        layer_cache = self._kv_caches[layer_id]
+        mapping = self._resolve_cache_mapping(layer_id, layer.mode.compress_ratio)
+        shared = self._shared_runtime()
+        self._run_compressor(layer, ctx, dsa, layer_cache, mapping, dsa.seq_lens_q_host, dsa.seq_lens, shared)
+        shared.prewritten_kv_layer = layer_id
+
+    def prepare_decoder_swa_replay(
+        self,
+        dsa: DsaMetadata,
+        lengths: list[int],
+        rows: torch.Tensor | None,
+        history_floors: list[int],
+        *,
+        dummy: bool = False,
+    ) -> _DecoderSwaReplayPlan:
+        active = [seq for seq, length in enumerate(lengths) if length]
+        all_requests = len(active) == len(lengths)
+        requests = None if all_requests else dsa.input_positions.new_tensor(active, dtype=torch.int64)
+        tail = copy(dsa)
+        plan = _DecoderSwaReplayPlan(tail, requests)
+        tail.swa_history_floors = tuple(history_floors[seq] for seq in active)
+        if rows is not None:
+            if not all_requests:
+                kv_lens = [dsa.seq_lens_kv_host[seq] for seq in active]
+                tail.seq_lens_kv_host = kv_lens
+                tail.seq_lens = dsa.seq_lens.new_tensor(kv_lens)
+                tail.actual_seq_lengths_kv = tail.seq_lens
+                tail.kv_cu_seq_lens = dsa.kv_cu_seq_lens.new_tensor([0, *accumulate(kv_lens)])
+                tail.max_seq_len = max(kv_lens)
+                tail.max_seqlen_kv = dsa.max_seqlen_kv.new_full(dsa.max_seqlen_kv.shape, tail.max_seq_len)
+                tail.block_tables = [[plan.select_table(table) for table in tables] for tables in dsa.block_tables]
+
+            query_lens = [lengths[seq] for seq in active]
+            tail.seq_lens_q_host = query_lens
+            tail.seq_lens_q = dsa.seq_lens_q.new_tensor(query_lens)
+            tail.actual_seq_lengths_query = dsa.actual_seq_lengths_query.new_tensor([0, *accumulate(query_lens)])
+            tail.max_query_len = max(query_lens)
+            tail.max_seqlen_q = dsa.max_seqlen_q.new_full(dsa.max_seqlen_q.shape, tail.max_query_len)
+            tail.input_positions = dsa.input_positions.index_select(0, rows)
+            tail.start_pos = (tail.seq_lens - tail.seq_lens_q).to(torch.int32)
+            # The source already wrote compressed KV for all requests. The
+            # decoder only needs compact SWA write slots for its live queries.
+            full_rows = sum(dsa.seq_lens_q_host)
+            slot_views: dict[int, torch.Tensor] = {}
+            tail.slot_mappings = []
+            for layer_slots in dsa.slot_mappings:
+                slots = []
+                for mapping in layer_slots:
+                    key = id(mapping)
+                    if key not in slot_views:
+                        selected = mapping.index_select(0, rows) if mapping.numel() == full_rows else mapping
+                        slot_views[key] = torch.full_like(selected, -1) if dummy else selected
+                    slots.append(slot_views[key])
+                tail.slot_mappings.append(slots)
+
+        return plan
+
+    @contextmanager
+    def decoder_swa_replay(self, plan: _DecoderSwaReplayPlan) -> Iterator[DsaMetadata]:
+        original = self._shared_runtime()
+        self._v41_shared = replace(
+            original,
+            key_block_table=plan.select_table(original.key_block_table),
+            index_block_table=plan.select_table(original.index_block_table),
+            topk_idxs=None,
+            candidates=None,
+            candidate_blocks=None,
+            compressed_indices=None,
+            indexer_metadata={},
+            compressed_mla_metadata={},
+            swa_metadata=None,
+        )
+        try:
+            yield plan.metadata
+        finally:
+            self._v41_shared = original
+
+    def _fused_swa(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        layer: Any,
+        dsa: DsaMetadata,
+        mapping: _CompressedAttentionCacheMapping,
+        shared: CSA2SharedRuntime,
+        *,
+        cache_written: bool = False,
+    ) -> torch.Tensor:
+        if q.size(0) == 0:
+            return torch.zeros_like(q)
+        cache = self._kv_caches[layer.layer_id].swa
+        slots = _get_layer_cache_tensor(dsa.slot_mappings, layer.layer_id, mapping.ori_cache_idx)
+        table = _get_layer_cache_tensor(dsa.block_tables, layer.layer_id, mapping.ori_cache_idx)
+        if cache is None or slots is None or table is None:
+            raise RuntimeError("DeepSeek-V4.1 fused SWA requires a paged cache and slot mapping")
+
+        cache = cache.view(-1, cache.size(1), 1, self.head_dim)
+        max_query_len = 1 if dsa.is_acl_graph else max(dsa.seq_lens_q_host)
+        packed_prefill = max_query_len > 1 or bool(dsa.swa_history_floors)
+        if packed_prefill:
+            # A prefill chunk can reuse a ring page before its earliest
+            # queries are finished with it. Read the live history first.
+            attention_kv, attention_table, seq_lens, max_kv_len = self._pack_swa_prefill(kv, cache, table, dsa)
+        else:
+            if not cache_written:
+                self._write_cache_rows(cache, slots, kv, graph=dsa.is_acl_graph)
+            attention_kv, attention_table, seq_lens = cache, table, dsa.seq_lens
+            max_kv_len = table.size(1) * cache.size(1) if dsa.is_acl_graph else dsa.max_seq_len
+        cu_seqlens_q = dsa.actual_seq_lengths_query
+        if shared.swa_metadata is None:
+            shared.swa_metadata = torch.ops.xllm_ops.sparse_flash_mla_swa_metadata(
+                cu_seqlens_q, seq_lens, q.size(1), q.size(2), max_query_len, max_kv_len, self.window_size
+            )
+        sinks = layer.attn_sink.float() if layer.attn_sink_loaded else None
+        output = torch.ops.xllm_ops.sparse_flash_mla_swa(
+            q,
+            attention_kv,
+            attention_table,
+            cu_seqlens_q,
+            seq_lens,
+            sinks,
+            shared.swa_metadata,
+            self.scale,
+            self.window_size,
+        )
+        if packed_prefill:
+            slots, kv = shared.last_swa_writes(slots, kv, cache.numel() // self.head_dim)
+            _scatter_by_slot(cache, slots, kv)
+        return output
+
+    def _fused_draft_swa(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        layer: Any,
+        dsa: DsaMetadata,
+        mapping: _CompressedAttentionCacheMapping,
+        shared: CSA2SharedRuntime,
+    ) -> torch.Tensor:
+        width = self.dspark_block_size
+        window = self.window_size
+        span = window + width
+        ring = self._kv_caches[layer.layer_id].swa
+        metadata = shared.draft_swa
+        if metadata is None:
+            table = _get_layer_cache_tensor(dsa.block_tables, layer.layer_id, mapping.ori_cache_idx)
+            block_size = ring.size(1)
+            batch = dsa.seq_lens.numel()
+            prefix = dsa.seq_lens.to(torch.int64) - width
+            history = prefix.unsqueeze(1) - window + torch.arange(window, device=q.device)
+            history_valid = history >= 0
+            history = history.clamp_min(0)
+            columns = (history // block_size) % table.size(1)
+            blocks = table.gather(1, columns).to(torch.int64).clamp_min(0)
+            slots = blocks * block_size + history % block_size
+
+            # Use private scratch pages so speculative writes cannot overwrite
+            # the oldest committed positions that this noncausal block reads.
+            pages = (span + block_size - 1) // block_size
+            block_table = torch.arange(batch * pages, dtype=torch.int32, device=q.device).view(batch, pages)
+            cache = q.new_empty((batch, pages * block_size, self.head_dim))
+            active = dsa.seq_lens > 0
+            sequence_lengths = torch.where(active, span, 0).to(torch.int32)
+            start = (window - prefix).clamp(0, span)
+            topk_width = (span + 127) // 128 * 128
+            positions = start.unsqueeze(1) + torch.arange(topk_width, device=q.device)
+            positions = torch.where(active.unsqueeze(1) & (positions < span), positions, -1).to(torch.int32)
+            positions = positions.repeat_interleave(width, dim=0).unsqueeze(1)
+            lengths = (span - start).to(torch.int32).repeat_interleave(width).unsqueeze(1)
+            tiling = torch.ops.xllm_ops.sparse_flash_mla_metadata(
+                dsa.actual_seq_lengths_query,
+                sequence_lengths,
+                None,
+                None,
+                q.size(1),
+                q.size(2),
+                width,
+                span,
+                0,
+                0,
+                0,
+                window,
+                lengths,
+                topk_width,
+            )
+            metadata = _Csa2DraftSwaMetadata(
+                slots.flatten(),
+                history_valid & active.unsqueeze(1),
+                positions,
+                lengths,
+                sequence_lengths,
+                block_table,
+                tiling,
+                cache,
+            )
+            shared.draft_swa = metadata
+
+        batch = metadata.sequence_lengths.numel()
+        history = (
+            ring.view(-1, self.head_dim).index_select(0, metadata.history_slots).view(batch, window, self.head_dim)
+        )
+        metadata.cache[:, :window].copy_(history.masked_fill(~metadata.history_valid.unsqueeze(2), 0))
+        metadata.cache[:, window:span].copy_(kv.view(batch, width, self.head_dim))
+        sinks = layer.attn_sink.float() if layer.attn_sink_loaded else None
+        return torch.ops.xllm_ops.sparse_flash_mla(
+            q,
+            metadata.cache.view(-1, ring.size(1), 1, self.head_dim),
+            metadata.block_table,
+            dsa.actual_seq_lengths_query,
+            metadata.sequence_lengths,
+            None,
+            None,
+            None,
+            None,
+            None,
+            sinks,
+            metadata.tiling,
+            self.scale,
+            0,
+            window,
+            metadata.positions,
+            metadata.lengths,
+        )
+
+    def _fused_compressed_attention(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        layer: Any,
+        dsa: DsaMetadata,
+        mapping: _CompressedAttentionCacheMapping,
+        cmp_indices: torch.Tensor,
+        shared: CSA2SharedRuntime,
+    ) -> torch.Tensor:
+        swa = self._kv_caches[layer.layer_id].swa
+        swa_table = _get_layer_cache_tensor(dsa.block_tables, layer.layer_id, mapping.ori_cache_idx)
+        cmp_kv, cmp_table = shared.key_cache, shared.key_block_table
+        if swa is None or swa_table is None or cmp_kv is None or cmp_table is None:
+            raise RuntimeError("Fused compressed attention requires paged SWA and compressed KV")
+        swa = swa.view(-1, swa.size(1), 1, self.head_dim)
+        cmp_kv = cmp_kv.view(-1, cmp_kv.size(1), 1, self.head_dim)
+        ratio = layer.mode.compress_ratio
+        q_lens = dsa.seq_lens_q_host
+        if dsa.is_acl_graph:
+            swa_lens = dsa.seq_lens
+            max_swa_len = swa_table.size(1) * swa.size(1)
+        else:
+            # Keep SWA history alive until all queries in this chunk have read it.
+            swa, swa_table, swa_lens, max_swa_len = self._pack_swa_prefill(kv, swa, swa_table, dsa)
+        indexer_metadata = shared.indexer_metadata[ratio]
+        cmp_lens, cmp_residual = indexer_metadata.committed, indexer_metadata.residual
+        cu_seqlens_q = dsa.actual_seq_lengths_query
+        metadata = shared.compressed_mla_metadata.get(ratio)
+        if metadata is None:
+            metadata = torch.ops.xllm_ops.sparse_flash_mla_metadata(
+                cu_seqlens_q,
+                swa_lens,
+                cmp_lens,
+                cmp_residual,
+                q.size(1),
+                q.size(2),
+                max(q_lens),
+                max_swa_len,
+                self._committed_capacity(dsa, ratio, dsa.seq_lens),
+                cmp_indices.size(-1),
+                ratio,
+                self.window_size,
+            )
+            shared.compressed_mla_metadata[ratio] = metadata
+        sinks = layer.attn_sink.float() if layer.attn_sink_loaded else None
+        return torch.ops.xllm_ops.sparse_flash_mla(
+            q,
+            swa,
+            swa_table,
+            cu_seqlens_q,
+            swa_lens,
+            cmp_kv,
+            cmp_table,
+            cmp_indices,
+            cmp_lens,
+            cmp_residual,
+            sinks,
+            metadata,
+            self.scale,
+            ratio,
+            self.window_size,
+        )
+
+    def _pack_swa_prefill(
+        self,
+        kv: torch.Tensor,
+        cache: torch.Tensor,
+        block_table: torch.Tensor,
+        dsa: DsaMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        block_size = cache.size(1)
+        q_lens = dsa.seq_lens_q_host
+        history_ends = [max(0, length - query_len) for length, query_len in zip(dsa.seq_lens_kv_host, q_lens)]
+        floors = dsa.swa_history_floors or (0,) * len(q_lens)
+        history_lens = [
+            min(max(0, end - floor), self.window_size - 1) for end, floor in zip(history_ends, floors, strict=True)
+        ]
+        kv_lens = [
+            past + min(query_len, length) for past, query_len, length in zip(history_lens, q_lens, dsa.seq_lens_kv_host)
+        ]
+        block_counts = [(length + block_size - 1) // block_size for length in kv_lens]
+        table_width = max(block_counts)
+        packed = cache.new_zeros((1 + sum(block_counts), block_size, 1, self.head_dim))
+        cache_rows = cache.view(-1, self.head_dim)
+        row_offsets = torch.arange(self.window_size - 1, device=cache.device)
+        rows: list[list[int]] = []
+        block_start = 1
+        token_start = 0
+        for seq, (query_len, past, end, length, blocks) in enumerate(
+            zip(q_lens, history_lens, history_ends, kv_lens, block_counts)
+        ):
+            block_end = block_start + blocks
+            rows.append(list(range(block_start, block_end)) + [0] * (table_width - blocks))
+            dst = packed[block_start:block_end].view(-1, self.head_dim)
+            if past:
+                positions = row_offsets[:past] + (end - past)
+                dst[:past].copy_(self._gather_swa_positions(cache_rows, block_table, seq, positions, block_size))
+            dst[past:length].copy_(kv[token_start : token_start + length - past])
+            block_start = block_end
+            token_start += query_len
+        table = torch.tensor(rows, dtype=torch.int32, device=cache.device)
+        seq_lens = torch.tensor(kv_lens, dtype=torch.int32, device=cache.device)
+        return packed, table, seq_lens, max(kv_lens)
 
     def _run_compressor(
         self,
@@ -437,23 +1237,253 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         kv_state_flat = kv_state.view(-1, layer_cache.swa.size(-1)) if kv_state is not None else None
         score_state_flat = score_state.view(-1, layer_cache.swa.size(-1)) if score_state is not None else None
 
+        decode = None
+        swa_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.ori_cache_idx)
+        if (
+            self.uses_a3_cache_precision
+            and dsa.is_acl_graph
+            and q_lens
+            and all(width == 1 for width in q_lens)
+            and (
+                ratio == 1
+                or (
+                    swa_table is not None
+                    and swa_slot is not None
+                    and kv_state_flat is not None
+                    and score_state_flat is not None
+                )
+            )
+        ):
+            group = self.caches_info[layer_id][mapping.ori_cache_idx].group_id if ratio == 2 else -1
+            metadata_key = (ratio, group)
+            decode = shared.decode_compressor_metadata.get(metadata_key)
+            if decode is None:
+                decode = self._decode_compressor_metadata(
+                    ctx, ctx_lens, ratio, swa_table, swa_slot, layer_cache.swa.size(1) if ratio == 2 else 0
+                )
+                shared.decode_compressor_metadata[metadata_key] = decode
+            latent, scores = layer.compress_kv_score(ctx.x)
+            if ratio == 2:
+                latent = self._pool_decode_c2(layer, ctx, decode, latent, scores, kv_state_flat, score_state_flat)
+            else:
+                latent = layer.compress_rmsnorm(latent)
+            all_starts, all_slot_rows, all_slot_seqs, all_slot_mask = (
+                decode.starts,
+                decode.rows,
+                decode.owners,
+                decode.committed,
+            )
+        else:
+            compressed = self._compress_chunks(
+                layer, ctx, dsa, mapping, q_lens, ctx_lens, swa_slot, kv_state_flat, score_state_flat
+            )
+            latent, all_starts, all_slot_rows, all_slot_seqs, all_slot_mask = compressed
+
+        index_block_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.index_cache_idx)
+        key_block_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.cmp_cache_idx)
+
+        def cache_slots(cache_idx: int, table: torch.Tensor | None, cache: torch.Tensor) -> torch.Tensor:
+            if decode is not None and dsa.query_aligned_token_slots:
+                slots = _get_layer_cache_tensor(dsa.slot_mappings, layer_id, cache_idx)
+                if slots is not None:
+                    return slots
+            return _token_cache_slots(table, cache, all_slot_rows, all_slot_seqs, all_slot_mask)
+
+        if latent is not None:
+            if layer.indexer is not None and layer.indexer.owns_k:
+                if (
+                    self.uses_a3_cache_precision
+                    and self.index_head_dim == 128
+                    and ctx.cos_sin_cache.size(-1) == 64
+                    and latent.dtype == torch.bfloat16
+                    and latent.size(0) <= 65536
+                ):
+                    cos_sin = ctx.cos_sin_cache.index_select(0, all_starts).float()
+                    index_k = layer.indexer_key(latent, cos_sin)
+                else:
+                    index_k = layer.indexer_key(latent)
+                    index_k = apply_interleaved_rope(index_k, all_starts, ctx.cos_sin_cache)
+                index_scale = None
+                if self.uses_a3_cache_precision:
+                    quant_input = index_k.bfloat16() if index_k.dtype == torch.float32 else index_k
+                    codes, scale = kernels.dynamic_quant(quant_input)
+                    if layer_cache.indexer_scale is None:
+                        # Reference scoring uses the dequantized model-dtype key.
+                        index_k = codes.float() * scale.half().float().unsqueeze(-1)
+                    else:
+                        index_k = codes
+                        index_scale = scale.half().unsqueeze(-1)
+                else:
+                    index_k = fp4_act_qdq_e8m0(index_k, 32)
+                if layer_cache.index is not None:
+                    index_slots = cache_slots(mapping.index_cache_idx, index_block_table, layer_cache.index)
+                    self._write_cache_rows(layer_cache.index, index_slots, index_k, graph=decode is not None)
+                    if index_scale is not None:
+                        self._write_cache_rows(
+                            layer_cache.indexer_scale, index_slots, index_scale, graph=decode is not None
+                        )
+            rotated = self._apply_rope(latent, all_starts, ctx.cos_sin_cache, dsa, shared)
+            if not self.uses_a3_cache_precision:
+                rotated = fp4_act_qdq_e4m3_scale(rotated, 16)
+            if layer_cache.key is not None:
+                key_slots = cache_slots(mapping.cmp_cache_idx, key_block_table, layer_cache.key)
+                self._write_cache_rows(layer_cache.key, key_slots, rotated, graph=decode is not None)
+        shared.key_cache = layer_cache.key
+        shared.key_block_table = key_block_table
+        shared.index_cache = layer_cache.index
+        shared.index_scale = layer_cache.indexer_scale
+        shared.index_block_table = index_block_table
+        shared.compress_ratio = ratio
+
+    @staticmethod
+    def _decode_compressor_metadata(
+        ctx: Csa2LayerContext,
+        lengths: torch.Tensor,
+        ratio: int,
+        swa_table: torch.Tensor | None,
+        swa_slots: torch.Tensor | None,
+        block_size: int,
+    ) -> _Csa2DecodeCompressorMetadata:
+        owners = torch.arange(lengths.numel(), device=lengths.device)
+        positions = lengths.to(torch.int64) - 1
+        live = lengths > 0
+        if ratio == 1:
+            return _Csa2DecodeCompressorMetadata(positions, ctx.positions.to(torch.int64), owners, live)
+
+        rows = positions // 2
+        starts = (rows * 2).clamp(0, ctx.cos_sin_cache.size(0) - 1)
+        committed = live & (positions % 2 == 1)
+        park = live & ~committed
+        park_slots = torch.where(park, swa_slots, -1)
+
+        previous_positions = (positions - 1).clamp_min(0)
+        columns = (previous_positions // block_size) % swa_table.size(1)
+        blocks = swa_table.gather(1, columns.unsqueeze(1)).squeeze(1).to(torch.int64).clamp_min(0)
+        previous_slots = blocks * block_size + previous_positions % block_size
+
+        # Fixed verification and packed verification both order consecutive
+        # tokens of a request together. An equal physical slot alone is
+        # insufficient when the request crosses the SWA ring boundary.
+        preceding = (owners - 1).clamp_min(0)
+        previous_in_batch = (
+            committed
+            & (owners > 0)
+            & (positions.index_select(0, preceding) == previous_positions)
+            & (park_slots.index_select(0, preceding) == previous_slots)
+        )
+        # Nonnegative entries address the state ring. The previous query's
+        # index (owners - 1) is stored as -(index + 1) when it is in this step.
+        previous_rows = torch.where(previous_in_batch, -owners, previous_slots).to(torch.int32)
+        return _Csa2DecodeCompressorMetadata(rows, starts, owners, committed, park_slots, previous_rows)
+
+    def _pool_decode_c2(
+        self,
+        layer: Any,
+        ctx: Csa2LayerContext,
+        decode: _Csa2DecodeCompressorMetadata,
+        kv: torch.Tensor,
+        scores: torch.Tensor,
+        kv_state: torch.Tensor,
+        score_state: torch.Tensor,
+    ) -> torch.Tensor:
+        if (
+            self.uses_a3_cache_precision
+            and self.head_dim == 512
+            and ctx.x.dtype == torch.bfloat16
+            and kv.size(0) <= 65536
+            and kv_state.size(0) <= 1 << 21
+        ):
+            output = torch.ops.xllm_ops.v41_c2_decode_pool_norm(
+                kv, scores, kv_state, score_state, decode.previous_rows, layer.cmp_norm.weight, layer.cmp_norm.eps
+            )
+        else:
+            previous = decode.previous_rows.to(torch.int64)
+            from_batch = (previous < 0).unsqueeze(1)
+            preceding = (-previous - 1).clamp_min(0)
+            previous_slots = previous.clamp_min(0)
+            previous_kv = torch.where(
+                from_batch, kv.index_select(0, preceding).to(kv_state.dtype), kv_state.index_select(0, previous_slots)
+            )
+            previous_scores = torch.where(
+                from_batch,
+                scores.index_select(0, preceding).to(score_state.dtype),
+                score_state.index_select(0, previous_slots),
+            )
+            members = torch.stack((previous_kv, kv), dim=1)
+            member_scores = torch.stack((previous_scores, scores), dim=1)
+            output = self._pool_c2(layer, ctx, members, member_scores)
+        # Every read of the old partial group must finish before publishing
+        # this forward's new state into the ring.
+        self._write_cache_rows(kv_state, decode.park_slots, kv, graph=True)
+        self._write_cache_rows(score_state, decode.park_slots, scores, graph=True)
+        return output
+
+    def _pool_c2(self, layer: Any, ctx: Csa2LayerContext, members: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        if (
+            self.uses_a3_cache_precision
+            and self.head_dim == 512
+            and ctx.x.dtype == torch.bfloat16
+            and members.size(0) <= 65536
+        ):
+            return torch.ops.xllm_ops.v41_c2_pool_norm(members, scores, layer.cmp_norm.weight, layer.cmp_norm.eps)
+        pooled = (members * scores.softmax(dim=1)).sum(dim=1)
+        return layer.compress_rmsnorm(pooled.to(ctx.x.dtype))
+
+    def _compress_chunks(
+        self,
+        layer: Any,
+        ctx: Csa2LayerContext,
+        dsa: DsaMetadata,
+        mapping: _CompressedAttentionCacheMapping,
+        q_lens: list[int],
+        ctx_lens: torch.Tensor,
+        swa_slot: torch.Tensor | None,
+        kv_state_flat: torch.Tensor | None,
+        score_state_flat: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        ratio = layer.mode.compress_ratio
+        layer_id = layer.layer_id
         latent_rows: list[torch.Tensor] = []
+        c2_members: list[torch.Tensor] = []
+        c2_scores: list[torch.Tensor] = []
+        c2_projections = layer.compress_kv_score(ctx.x) if ratio == 2 and not dsa.compressed_write_floors else None
         group_starts: list[torch.Tensor] = []
         slot_rows: list[torch.Tensor] = []
         slot_seqs: list[torch.Tensor] = []
         slot_masks: list[torch.Tensor] = []
         token_offset = 0
         for seq, q_len in enumerate(q_lens):
+            start = token_offset
+            token_offset += q_len
+            if dsa.compressed_write_floors:
+                # Shared compressed groups are already complete at this
+                # boundary. Project and publish only the uncached suffix.
+                query_start = dsa.seq_lens_kv_host[seq] - q_len
+                skip = min(q_len, max(0, dsa.compressed_write_floors[seq] - query_start))
+                start += skip
+                q_len -= skip
+                if q_len == 0:
+                    continue
             ctx_len = ctx_lens[seq]
             prev_ctx = ctx_len - q_len
             # Padded graph rows (ctx <= 0) stay fully inert: no parking, no
             # commit, so a garbage block-table entry can never be written.
             seq_valid = ctx_len > 0
-            x_seq = ctx.x[token_offset : token_offset + q_len]
+            x_seq = ctx.x[start:token_offset]
             rows = torch.arange(q_len, device=ctx.x.device)
-            # Fixed commit capacity: a chunk of q_len tokens completes at most
-            # q_len // ratio + 1 groups (the group straddling each boundary).
-            capacity = q_len // ratio + 1
+            # An aligned chunk provides both members of every C2 group. Other
+            # chunks can straddle a boundary and need the parked state.
+            complete_pairs = (
+                ratio == 2
+                and not dsa.is_acl_graph
+                and not dsa.compressed_write_floors
+                and q_len > 0
+                and q_len % 2 == 0
+                and len(dsa.seq_lens_kv_host) == len(q_lens)
+                and dsa.seq_lens_kv_host[seq] >= q_len
+                and dsa.seq_lens_kv_host[seq] % 2 == 0
+            )
+            capacity = q_len // ratio if complete_pairs else q_len // ratio + 1
             g = torch.arange(capacity, device=ctx.x.device)
             group_idx = torch.div(prev_ctx, ratio, rounding_mode="floor") + g
             commit_mask = g < (
@@ -463,26 +1493,35 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             if ratio == 1:
                 kv_seq, _ = layer.compress_kv_score(x_seq)
                 latent_rows.append(layer.compress_rmsnorm(kv_seq))
-                group_starts.append(ctx.positions[token_offset : token_offset + q_len].to(torch.int64))
+                group_starts.append(ctx.positions[start:token_offset].to(torch.int64))
                 rows_segment = group_idx[:q_len]
                 mask_segment = commit_mask[:q_len]
             else:
-                kv_seq, score_seq = layer.compress_kv_score(x_seq)
+                if c2_projections is None:
+                    kv_seq, score_seq = layer.compress_kv_score(x_seq)
+                else:
+                    c2_kv, c2_wgate = c2_projections
+                    kv_seq = c2_kv[start:token_offset]
+                    score_seq = c2_wgate[start:token_offset]
                 # Pool the groups committed by this forward; a member inside
                 # the chunk reads the fresh projection, one before the chunk
                 # start reads its parked copy from the state ring.
-                member_pos = group_idx.unsqueeze(-1) * ratio + torch.arange(ratio, device=ctx.x.device)
-                in_chunk = (member_pos >= prev_ctx).unsqueeze(-1)
-                member_row = (member_pos - prev_ctx).clamp(0, q_len - 1)
-                parked_slot = self._swa_position_slots(
-                    dsa, layer_id, mapping.ori_cache_idx, seq, member_pos.clamp_min(0)
-                )
-                if kv_state_flat is not None and score_state_flat is not None:
-                    member_kv = torch.where(in_chunk, kv_seq[member_row], kv_state_flat[parked_slot])
-                    member_score = torch.where(in_chunk, score_seq[member_row], score_state_flat[parked_slot])
+                if complete_pairs:
+                    member_kv = kv_seq.view(-1, ratio, kv_seq.size(-1))
+                    member_score = score_seq.view(-1, ratio, score_seq.size(-1))
                 else:
-                    member_kv = kv_seq[member_row]
-                    member_score = score_seq[member_row]
+                    member_pos = group_idx.unsqueeze(-1) * ratio + torch.arange(ratio, device=ctx.x.device)
+                    in_chunk = (member_pos >= prev_ctx).unsqueeze(-1)
+                    member_row = (member_pos - prev_ctx).clamp(0, q_len - 1)
+                    parked_slot = self._swa_position_slots(
+                        dsa, layer_id, mapping.ori_cache_idx, seq, member_pos.clamp_min(0)
+                    )
+                    if kv_state_flat is not None and score_state_flat is not None:
+                        member_kv = torch.where(in_chunk, kv_seq[member_row], kv_state_flat[parked_slot])
+                        member_score = torch.where(in_chunk, score_seq[member_row], score_state_flat[parked_slot])
+                    else:
+                        member_kv = kv_seq[member_row]
+                        member_score = score_seq[member_row]
                 # Read old partial-group members before a long chunk wraps
                 # its new state onto the same ring slots.
                 pos = prev_ctx + rows
@@ -493,7 +1532,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                     and kv_state_flat is not None
                     and score_state_flat is not None
                 ):
-                    slot_seq = swa_slot[token_offset : token_offset + q_len]
+                    slot_seq = swa_slot[start:token_offset]
                     park_slot = torch.where(park_mask, slot_seq, -1)
                     park_kv, park_score = kv_seq, score_seq
                     if not dsa.is_acl_graph:
@@ -501,10 +1540,8 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                         park_kv, park_score = kv_seq[park_rows], score_seq[park_rows]
                     _scatter_by_slot(kv_state_flat, park_slot, park_kv)
                     _scatter_by_slot(score_state_flat, park_slot, park_score)
-                gate = member_score.softmax(dim=1)
-                pooled = (member_kv * gate).sum(dim=1)
-                # RMSNorm AFTER pooling, BEFORE RoPE.
-                latent_rows.append(layer.compress_rmsnorm(pooled.to(ctx.x.dtype)))
+                c2_members.append(member_kv)
+                c2_scores.append(member_score)
                 # Garbage rows (beyond this sequence's commit count) keep a
                 # valid non-negative rope position; the slot mask keeps them
                 # unwritten. The lower clamp also catches fully padded rows
@@ -516,45 +1553,18 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             slot_rows.append(rows_segment)
             slot_seqs.append(torch.full_like(rows_segment, seq))
             slot_masks.append(mask_segment)
-            token_offset += q_len
 
-        index_block_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.index_cache_idx)
-        key_block_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.cmp_cache_idx)
-        if latent_rows:
-            latent = torch.cat(latent_rows, dim=0)
-            all_starts = torch.cat(group_starts, dim=0)
-            all_slot_rows = torch.cat(slot_rows, dim=0)
-            all_slot_seqs = torch.cat(slot_seqs, dim=0)
-            all_slot_mask = torch.cat(slot_masks, dim=0)
-            if layer.indexer is not None and layer.indexer.owns_k:
-                index_k = layer.indexer_key(latent)
-                index_k = apply_interleaved_rope(index_k, all_starts, ctx.cos_sin_cache)
-                index_k = fp4_act_qdq_e8m0(index_k, 32)
-                if layer_cache.index is not None:
-                    index_slots = _token_cache_slots(
-                        index_block_table,
-                        layer_cache.index,
-                        all_slot_rows,
-                        all_slot_seqs,
-                        all_slot_mask,
-                    )
-                    _scatter_by_slot(layer_cache.index, index_slots, index_k)
-            rotated = apply_interleaved_rope(latent, all_starts, ctx.cos_sin_cache)
-            rotated = fp4_act_qdq_e4m3_scale(rotated, 16)
-            if layer_cache.key is not None:
-                key_slots = _token_cache_slots(
-                    key_block_table,
-                    layer_cache.key,
-                    all_slot_rows,
-                    all_slot_seqs,
-                    all_slot_mask,
-                )
-                _scatter_by_slot(layer_cache.key, key_slots, rotated)
-        shared.key_cache = layer_cache.key
-        shared.key_block_table = key_block_table
-        shared.index_cache = layer_cache.index
-        shared.index_block_table = index_block_table
-        shared.compress_ratio = ratio
+        if c2_members:
+            latent_rows.append(self._pool_c2(layer, ctx, torch.cat(c2_members, dim=0), torch.cat(c2_scores, dim=0)))
+        if not latent_rows:
+            return None, None, None, None, None
+        return (
+            torch.cat(latent_rows, dim=0),
+            torch.cat(group_starts, dim=0),
+            torch.cat(slot_rows, dim=0),
+            torch.cat(slot_seqs, dim=0),
+            torch.cat(slot_masks, dim=0),
+        )
 
     def _run_indexer(
         self,
@@ -565,6 +1575,8 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         ctx_lens: torch.Tensor,
         shared: CSA2SharedRuntime,
     ) -> torch.Tensor | None:
+        shared.topk_idxs = None
+        shared.compressed_indices = None
         layer_id = layer.layer_id
         ratio = shared.compress_ratio
         if ratio <= 0 or shared.index_cache is None:
@@ -577,12 +1589,21 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         index_cache = shared.index_cache
         block_table = shared.index_block_table
         block_size = index_cache.size(1)
-        capacity = self._committed_capacity(dsa, ratio, ctx_lens)
-
-        q_idx = layer.indexer_query(ctx.qr)
-        q_idx = apply_interleaved_rope(q_idx, ctx.positions, ctx.cos_sin_cache)
-        q_idx = fp4_act_qdq_e8m0(q_idx, 32)
+        if ctx.qr_quantized is None:
+            assert ctx.qr is not None
+            q_idx = layer.indexer_query(ctx.qr)
+        else:
+            q_idx = layer.indexer_query(ctx.qr, ctx.qr_quantized)
+        q_idx = self._apply_rope(q_idx, ctx.positions, ctx.cos_sin_cache, dsa, shared)
         weights = layer.indexer_weights(ctx.x)
+        if shared.index_scale is not None and dsa is not None and (dsa.is_acl_graph or dsa.max_seq_len > 0):
+            return self._run_device_length_indexer(layer_id, q_idx, weights, dsa, shared)
+        capacity = self._committed_capacity(dsa, ratio, ctx_lens)
+        if self.uses_a3_cache_precision:
+            q_idx = _a3_indexer_query_qdq(q_idx)
+            weights = weights.half()
+        else:
+            q_idx = fp4_act_qdq_e8m0(q_idx, 32)
 
         candidates_per_seq: list[torch.Tensor | None] | None = None
         if layer_id == self.candidate_source_layer_id:
@@ -600,6 +1621,11 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                 token_offset += q_len
                 continue
             index_k = self._gather_cache_rows(index_cache, block_table, seq, capacity, block_size)
+            if shared.index_scale is not None:
+                scale = self._gather_cache_rows(
+                    shared.index_scale.unsqueeze(-1), block_table, seq, capacity, block_size
+                )
+                index_k = (index_k.float() * scale.float()).to(self.dtype)
             # A compressed group is visible to query p once p has passed its
             # last token: visible(p) = (p + 1) // ratio;
             # rows past this sequence's committed count (or past the graph's
@@ -661,6 +1687,93 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             shared.candidates = candidates_per_seq
         return topk
 
+    def _run_device_length_indexer(
+        self,
+        layer_id: int,
+        query: torch.Tensor,
+        weights: torch.Tensor,
+        dsa: DsaMetadata,
+        shared: CSA2SharedRuntime,
+    ) -> torch.Tensor:
+        ratio = shared.compress_ratio
+        query_offsets = dsa.actual_seq_lengths_query
+        max_query_len = max(dsa.seq_lens_q_host)
+        key, key_scale, block_table = shared.index_cache, shared.index_scale, shared.index_block_table
+        metadata = shared.indexer_metadata.get(ratio)
+        if metadata is None:
+            lengths = dsa.seq_lens
+            committed = torch.div(lengths, ratio, rounding_mode="floor")
+            residual = lengths.remainder(ratio) if ratio != 1 else None
+            tiling = torch.ops.xllm_ops.quant_lightning_indexer_v2_metadata(
+                query_offsets,
+                committed,
+                residual,
+                self.index_n_heads,
+                self.index_head_dim,
+                self.index_topk,
+                max_query_len,
+                block_table.size(1) * key.size(1),
+                ratio,
+            )
+            metadata = _Csa2IndexerMetadata(committed, residual, tiling)
+            shared.indexer_metadata[ratio] = metadata
+        if (
+            self.uses_a3_cache_precision
+            and query.dtype == torch.bfloat16
+            and query.is_contiguous()
+            and query.size(0) > 0
+            and (not dsa.is_acl_graph or query.size(0) <= 4096)
+            and query.size(1) in (32, 64)
+            and query.size(2) == 128
+        ):
+            if query.size(0) <= 4096:
+                query_codes, query_scale = torch.ops.xllm_ops.v41_index_query_quant(query)
+            else:
+                # The kernel addresses at most 4096 token rows per launch.
+                quantized = [torch.ops.xllm_ops.v41_index_query_quant(part) for part in query.split(4096)]
+                query_codes = torch.cat([codes for codes, _ in quantized])
+                query_scale = torch.cat([scales for _, scales in quantized])
+        else:
+            query_codes, query_scale = _a3_quantize_indexer_query(query)
+        is_source = layer_id == self.candidate_source_layer_id
+        is_consumer = 0 <= self.candidate_source_layer_id < layer_id
+        if is_consumer and shared.candidate_blocks is None:
+            raise RuntimeError(f"DeepSeek-V4.1 reindex layer {layer_id} requires the graph candidate blocks")
+        selected, candidates = torch.ops.xllm_ops.quant_lightning_indexer_v2(
+            query_codes,
+            key,
+            weights.half(),
+            query_scale,
+            key_scale,
+            query_offsets,
+            metadata.committed,
+            metadata.residual,
+            block_table,
+            metadata.tiling,
+            shared.candidate_blocks if is_consumer else None,
+            self.index_topk,
+            max_query_len,
+            ratio,
+            1 if is_source else 2 if is_consumer else 3,
+            self.candidate_topk_blocks,
+            self.candidate_block_size,
+        )
+        if is_source:
+            shared.candidate_blocks = candidates
+        # Native MLA uses the same compressed-cache coordinates as the QLI.
+        shared.compressed_indices = selected.clamp_min_(-1)
+        return shared.compressed_indices
+
+    def _reference_topk_indices(self, selected: torch.Tensor, q_lens: list[int]) -> torch.Tensor:
+        if max(q_lens) == 1:
+            return torch.where(selected >= 0, selected + self.window_size + 1, -1)
+        rows = selected.squeeze(1).split(q_lens)
+        picks = [
+            torch.where(indices >= 0, indices + self.window_size + q_len, -1)
+            for indices, q_len in zip(rows, q_lens, strict=True)
+        ]
+        return torch.nn.utils.rnn.pad_sequence(picks, batch_first=True, padding_value=-1)
+
     def _csa2_attention(
         self,
         q: torch.Tensor,
@@ -688,8 +1801,13 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         capacity = 0
         if q_lens and ratio > 0 and topk is not None and shared.key_cache is not None:
             capacity = self._committed_capacity(dsa, ratio, ctx_lens)
+        if capacity > 0 and dsa.is_acl_graph and all(n == 1 for n in q_lens):
+            return self._compressed_decode_attention(
+                q, kv, ctx_lens, topk[:, 0], layer_cache.swa, swa_bt, shared, ratio, capacity, sinks
+            )
         compressed_rows = torch.arange(capacity, device=q.device) if capacity > 0 else None
 
+        history_floors = dsa.swa_history_floors
         out = torch.empty_like(q)
         token_offset = 0
         for seq, q_len in enumerate(q_lens):
@@ -705,15 +1823,16 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             # Unwritten rows can contain NaN/Inf. Score masking alone still
             # lets zero probabilities multiply those values in the reduction.
             # The gather owns this storage; masking does not change the cache.
-            ring_rows.masked_fill_((ring_pos < 0).unsqueeze(-1), 0)
+            history_floor = history_floors[seq] if history_floors else 0
+            ring_rows.masked_fill_((ring_pos < history_floor).unsqueeze(-1), 0)
             kv_seq = torch.where(ctx_len > 0, kv_seq, 0)
             n_w = ring_rows.size(0) + kv_seq.size(0)
             positions_seq = prev_ctx + torch.arange(q_len, device=q.device)
             col_pos = torch.cat((ring_pos, positions_seq), dim=0)
             cols = torch.arange(n_w, device=q.device)
             window_idxs = _window_visible_idxs(positions_seq, col_pos, cols, win)
-
-            compress_kv = None
+            if history_floor:
+                window_idxs = window_idxs.masked_fill(col_pos < history_floor, -1)
             if capacity > 0:
                 shared_key_cache = shared.key_cache
                 shared_key_table = shared.key_block_table
@@ -722,6 +1841,8 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                         f"DeepSeek-V4.1 layer {layer_id} has no shared key cache for its "
                         f"compressed rows; its group kv source must run first"
                     )
+                picks = topk[seq][:q_len]
+                committed = torch.div(ctx_len, ratio, rounding_mode="floor")
                 compress_kv = self._gather_cache_rows(
                     shared_key_cache,
                     shared_key_table,
@@ -729,12 +1850,10 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                     capacity,
                     shared_key_cache.size(1),
                 )
-                committed = torch.div(ctx_len, ratio, rounding_mode="floor")
                 valid_rows = compressed_rows < committed
                 compress_kv.masked_fill_(~valid_rows.unsqueeze(-1), 0)
-            if compress_kv is not None:
                 kv_cat = torch.cat((ring_rows, kv_seq, compress_kv), dim=0)
-                idxs = torch.cat((window_idxs, topk[seq][:q_len]), dim=-1)
+                idxs = torch.cat((window_idxs, picks), dim=-1)
             else:
                 kv_cat = torch.cat((ring_rows, kv_seq), dim=0)
                 idxs = window_idxs
@@ -758,6 +1877,57 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             token_offset += q_len
         return out
 
+    def _compressed_decode_attention(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        ctx_lens: torch.Tensor,
+        topk: torch.Tensor,
+        swa_cache: torch.Tensor | None,
+        swa_table: torch.Tensor | None,
+        shared: CSA2SharedRuntime,
+        ratio: int,
+        capacity: int,
+        sinks: torch.Tensor | None,
+    ) -> torch.Tensor:
+        key_cache, key_table = shared.key_cache, shared.key_block_table
+        if key_cache is None or key_table is None:
+            raise RuntimeError("DeepSeek-V4.1 compressed decode needs the source key cache and page table")
+        batch, _, head_dim = q.shape
+        owners = torch.arange(batch, device=q.device).unsqueeze(1)
+        lengths = ctx_lens.reshape(-1, 1)
+        # The current query occupies one position of the causal SWA window.
+        # Its oldest cached row is outside the window and need not be gathered.
+        ring_pos = lengths - 1 + torch.arange(1 - self.window_size, 0, device=q.device)
+        live_ring = ring_pos >= 0
+        if swa_cache is None or swa_table is None:
+            ring = kv.new_zeros((batch, self.window_size - 1, head_dim))
+        else:
+            slots = _cache_slots(swa_table, owners, ring_pos.clamp_min(0), swa_cache.size(1))
+            ring = swa_cache.view(-1, head_dim).index_select(0, slots.flatten()).view(batch, -1, head_dim)
+
+        # The indexer returns distinct compressed rows after the SWA span in
+        # the reference layout (window + query). Invalid rows use a safe slot.
+        selected = topk.to(torch.int64) - (self.window_size + 1)
+        committed = torch.div(lengths, ratio, rounding_mode="floor")
+        live_keys = (selected >= 0) & (selected < capacity) & (selected < committed)
+        positions = torch.where(live_keys, selected, 0)
+        slots = _cache_slots(key_table, owners, positions, key_cache.size(1))
+        compressed = key_cache.view(-1, head_dim).index_select(0, slots.flatten()).view(batch, -1, head_dim)
+        valid = torch.cat((live_ring, lengths > 0, live_keys), dim=1)
+        values = torch.cat((ring, kv.unsqueeze(1), compressed), dim=1).float()
+        # Unwritten cache rows may contain NaNs, even when scores are masked.
+        values.masked_fill_(~valid.unsqueeze(-1), 0)
+        scores = torch.bmm(q.float(), values.transpose(1, 2)) * self.scale
+        scores.masked_fill_(~valid.unsqueeze(1), float("-inf"))
+        row_max = scores.amax(dim=-1).clamp_min(_NEG_INF_FLOOR)
+        probs = torch.exp(scores - row_max.unsqueeze(-1))
+        normalizer = probs.sum(dim=-1)
+        if sinks is not None:
+            normalizer = normalizer + torch.exp(sinks - row_max)
+        output = torch.bmm(probs, values)
+        return (output / normalizer.clamp_min(torch.finfo(torch.float32).tiny).unsqueeze(-1)).to(q.dtype)
+
     def _committed_capacity(
         self,
         dsa: DsaMetadata | None,
@@ -779,6 +1949,10 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                 "construction; a missing value means the deployment entry point passed no "
                 "max_model_len."
             )
+        if dsa is not None and dsa.seq_lens_kv_host:
+            # Eager metadata owns the exact host lengths from the same forward.
+            # Reading lengths back would synchronize the NPU at every layer.
+            return max(max(dsa.seq_lens_kv_host) // ratio, 0)
         if ctx_lens.numel() == 0:
             return 0
         return max(int(torch.div(ctx_lens.max(), ratio, rounding_mode="floor").item()), 0)

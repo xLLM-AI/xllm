@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,8 @@ from xllm.python.layers import moe_parallel
 from xllm.python.layers.attention import Attention
 from xllm.python.model_executor import executor as executor_module
 from xllm.python.model_executor.executor import ModelExecutor
+from xllm.python.model_executor.forward_context import ForwardContext, forward_context
+from xllm.python.model_executor.runners.context_kv_acl_graph import ContextKvAclGraphRunner
 from xllm.python.models import deepseek_v41 as dq
 from xllm.python.models.deepseek_v41 import (
     CSA2_MODE_FULL,
@@ -63,6 +66,7 @@ from xllm.python.models.deepseek_v41 import (
     DeepseekV41MoE,
     fp4_act_qdq_e8m0,
 )
+from xllm.python.models.deepseek_v41_dspark import DeepseekV41DSparkForCausalLM
 from xllm.python.models.deepseek_v41_engram import (
     ENGRAM_IMAGE_SENTINEL_BASE_ID,
     ENGRAM_STORAGE_INT8,
@@ -201,6 +205,55 @@ def _engram_sidecar(tmp_path_factory: pytest.TempPathFactory) -> None:
     )
     for config in (_ENGRAM_TINY_OVERRIDE, _DSV41_TINY_CONFIG, _DSV41_FORWARD_CONFIG):
         config["model_path"] = str(model_path)
+
+
+@npu_only
+@torch.inference_mode()
+def test_dspark_swa_context_graph_preserves_padding_and_matches_eager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    device = torch.device("npu:0")
+    if not torch.npu.get_device_name(device).startswith("Ascend910_93"):
+        pytest.skip("requires the Ascend A3 SWA scatter")
+    monkeypatch.setattr("xllm.python.model_executor.runners.acl_graph._GRAPH_POOL", None)
+    quant_description = {
+        f"mtp.{layer}.attn.{projection}.weight": "FLOAT" for layer in range(2) for projection in ("wq_a", "wkv")
+    }
+    (tmp_path / "quant_model_description.json").write_text(json.dumps(quant_description), encoding="utf-8")
+    torch.manual_seed(41)
+    model = DeepseekV41DSparkForCausalLM(
+        {
+            **_DSV41_FORWARD_CONFIG,
+            "model_path": str(tmp_path),
+            "dspark_num_layers": 2,
+            "device": str(device),
+            "dtype": "bfloat16",
+        }
+    )
+    model.model.pack_context_wkv()
+    shape = (1, 128, model.cfg.head_dim)
+    caches = [
+        LayerCache(None, None, swa=torch.full(shape, 3.0, dtype=torch.bfloat16, device=device))
+        for _ in model.model.layers
+    ]
+    reference_caches = [LayerCache(None, None, swa=cache.swa.clone()) for cache in caches]
+    runner = ContextKvAclGraphRunner(model, device, use_swa_cache=True)
+    runner.bind_kv_caches(caches)
+    runner.warmup(4)
+    for actual, expected in zip(caches, reference_caches, strict=True):
+        torch.testing.assert_close(actual.swa, expected.swa, rtol=0, atol=0)
+
+    hidden_width = model.model.context_projection_weight.shape[1]
+    for slots in ([2, 3, 4, 5], [6, -1, 8], [-1, -1, -1], [9]):
+        rows = len(slots)
+        hidden = torch.randn(rows, hidden_width, dtype=torch.bfloat16, device=device)
+        positions = torch.arange(1, rows + 1, dtype=torch.int32, device=device)
+        cache_slots = torch.tensor(slots, dtype=torch.int32, device=device)
+        expected = model.write_context_kv(hidden, positions, cache_slots, reference_caches, None)
+        result = runner.execute(hidden, positions, cache_slots)
+        torch.testing.assert_close(result, expected)
+        for actual, reference in zip(caches, reference_caches, strict=True):
+            torch.testing.assert_close(actual.swa, reference.swa)
 
 
 def test_csa2_plan_matches_reference_layer_assignment() -> None:
@@ -891,6 +944,7 @@ def _make_csa2_backend(
     quant_mode: str = V41_QUANT_NONE,
     graph_backend: str = "off",
     max_model_len: int = 0,
+    decoder_swa_start_layer: int | None = None,
 ) -> Csa2AttentionBackend:
     return Csa2AttentionBackend(
         compress_ratios=list(cfg.compress_ratios),
@@ -912,6 +966,7 @@ def _make_csa2_backend(
         quant_mode=quant_mode,
         graph_backend=graph_backend,
         max_model_len=max_model_len,
+        decoder_swa_start_layer=decoder_swa_start_layer,
     )
 
 
@@ -1065,6 +1120,185 @@ def _make_forward_lm(
     lm = DeepseekV41ForCausalLM({**_DSV41_FORWARD_CONFIG, "device": str(device or "cpu"), "dtype": dtype})
     _random_init_v41(lm)
     return lm
+
+
+@pytest.mark.parametrize(("enabled", "extra_rows"), [(False, 3), (True, 0), (True, 3)])
+def test_decoder_bounded_replay_keeps_full_source_rows_and_sample_addresses(enabled: bool, extra_rows: int) -> None:
+    config = {
+        **_DSV41_FORWARD_CONFIG,
+        "device": "cpu",
+        "dtype": "float32",
+        "engram_layer_ids": [],
+        "first_k_dense_replace": 6,
+        "intermediate_size": 32,
+        "hc_mult": 2,
+        "layers_to_capture": [5, 2],
+        "enable_swa_bounded_replay": enabled,
+    }
+    device = torch.device("cpu")
+    lm = DeepseekV41ForCausalLM(config)
+    _random_init_v41(lm)
+    backend = _make_csa2_backend(lm.cfg, device, decoder_swa_start_layer=4 if enabled else None)
+    caches = _allocate_v41_layer_caches(lm.cfg, 2, torch.float32, device, reserve_token_sink=True)
+    backend.bind_kv_caches(caches)
+    full = lm.cfg.window_size + extra_rows
+    lengths = [full, 2]
+    layer_rows: list[int] = []
+    source_kv_rows: list[int] = []
+    handles = [
+        layer.register_forward_pre_hook(lambda _layer, args: layer_rows.append(args[0].size(0)))
+        for layer in lm.model.layers
+    ]
+    handles.append(
+        lm.model.layers[4].self_attn.cmp_wkv.register_forward_pre_hook(
+            lambda _projection, args: source_kv_rows.append(args[0].size(0))
+        )
+    )
+    tokens = torch.arange(1, full + 3, device=device)
+    positions = torch.cat([torch.arange(length, device=device) for length in lengths])
+    swa_table = torch.arange(4, dtype=torch.int32).view(2, 2)
+    token_table = torch.tensor([[1], [2]], dtype=torch.int32)
+    tables = [swa_table, token_table, token_table]
+    if enabled:
+        tables.append(swa_table.flip(0))
+    metadata = SimpleNamespace(
+        is_prefill=True,
+        is_chunked_prefill=False,
+        is_mixed=False,
+        is_target_verify=False,
+        dp_execution_token_counts=[],
+        multi_block_tables=tables,
+        q_seq_lens_host=torch.tensor(lengths, dtype=torch.int32),
+        kv_seq_lens_host=torch.tensor(lengths, dtype=torch.int32),
+    )
+    with torch.inference_mode(), forward_context(ForwardContext(backend, device, metadata, caches)):
+        hidden, aux = lm.model(tokens, positions)
+    for handle in handles:
+        handle.remove()
+    dropped_rows = extra_rows if enabled else 0
+    assert source_kv_rows == lengths
+    assert layer_rows == [full + 2] * 4 + [full + 2 - dropped_rows] * 2
+    assert hidden.size(0) == aux.size(0) == full + 2
+    if dropped_rows:
+        assert torch.count_nonzero(hidden[:dropped_rows]) == torch.count_nonzero(aux[:dropped_rows]) == 0
+    assert hidden[full - 1].abs().sum() > 0
+    assert hidden[-1].abs().sum() > 0
+    assert torch.isfinite(aux).all()
+
+
+@pytest.mark.parametrize("layer_id", [2, 4])
+def test_decoder_replay_cut_preserves_global_kv_and_writes_only_tail_swa(layer_id: int) -> None:
+    device = torch.device("cpu")
+    lm = _make_forward_lm(torch.float32, seed=41, device=device)
+    cut = lm.model.layers[layer_id].self_attn
+    cos_sin = lm.model.compress_rotary.cos_sin_cache
+    past_lengths = [8, 5]
+    lengths = [11, 2]
+    tail_lengths = [8, 2]
+    rows = torch.arange(3, sum(lengths), device=device)
+    tables = [
+        torch.arange(4, dtype=torch.int32).view(2, 2),
+        torch.tensor([[1], [2]], dtype=torch.int32),
+        torch.tensor([[1], [2]], dtype=torch.int32),
+    ]
+    past = torch.randn(sum(past_lengths), lm.cfg.hidden_size, device=device)
+    fresh = torch.randn(sum(lengths), lm.cfg.hidden_size, device=device)
+
+    def run(replay: bool) -> tuple[torch.Tensor, LayerCache, torch.Tensor, torch.Tensor]:
+        backend = _make_csa2_backend(lm.cfg, device)
+        caches = _allocate_v41_layer_caches(lm.cfg, 2, torch.float32, device, reserve_token_sink=True)
+        backend.bind_kv_caches(caches)
+        cache = caches[layer_id]
+        for x, starts, q_lens in ((past, [0, 0], past_lengths), (fresh, past_lengths, lengths)):
+            positions = torch.cat(
+                [
+                    torch.arange(start, start + length, device=device)
+                    for start, length in zip(starts, q_lens, strict=True)
+                ]
+            )
+            total_lengths = [start + length for start, length in zip(starts, q_lens, strict=True)]
+            metadata = SimpleNamespace(
+                dsa_metadata=backend._builder.build(
+                    multi_block_tables=tables,
+                    kv_seq_lens=total_lengths,
+                    q_seq_lens=q_lens,
+                    positions=positions,
+                    is_prefill=x is past,
+                    is_chunked_prefill=x is fresh,
+                )
+            )
+            backend._move_metadata_to_device(metadata.dsa_metadata)
+            backend.reset_forward(metadata, preserve_dsa_metadata=True)
+            context = ForwardContext(backend, device, metadata, caches)
+            if x is fresh:
+                prior_swa = cache.swa.clone()
+                mapping = backend._resolve_cache_mapping(layer_id, cut.mode.compress_ratio)
+                slots = metadata.dsa_metadata.slot_mappings[layer_id][mapping.ori_cache_idx][rows]
+            with forward_context(context):
+                if replay and x is fresh:
+                    cut.prepare_decoder_replay_kv(x, positions, cos_sin)
+                    replay = backend.prepare_decoder_swa_replay(metadata.dsa_metadata, tail_lengths, rows, [11, 5])
+                    with backend.decoder_swa_replay(replay) as tail:
+                        tail_context = replace(context, metadata=SimpleNamespace(dsa_metadata=tail))
+                        with forward_context(tail_context):
+                            output = cut(x.index_select(0, rows), positions.index_select(0, rows), cos_sin)
+                else:
+                    output = cut(x, positions, cos_sin)
+        return output, cache, prior_swa, slots
+
+    with torch.inference_mode():
+        _, full_cache, _, _ = run(replay=False)
+        replay_output, replay_cache, prior_swa, slots = run(replay=True)
+    assert torch.isfinite(replay_output).all()
+    expected_swa = prior_swa.clone().view(-1, lm.cfg.head_dim)
+    expected_swa[slots.long()] = full_cache.swa.view_as(expected_swa)[slots.long()]
+    torch.testing.assert_close(replay_cache.swa, expected_swa.view_as(replay_cache.swa))
+    for actual, expected in (
+        (replay_cache.key, full_cache.key),
+        (replay_cache.index, full_cache.index),
+        (replay_cache.compress_kv_state, full_cache.compress_kv_state),
+        (replay_cache.compress_score_state, full_cache.compress_score_state),
+    ):
+        torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("layer_id", [2, 4])
+def test_encoder_swa_replay_preserves_shared_compressed_keys_and_index(layer_id: int) -> None:
+    lm = _make_forward_lm(torch.float32, seed=11)
+    cfg = lm.cfg
+    backend = _make_csa2_backend(cfg)
+    caches = _allocate_v41_layer_caches(cfg, n_seqs=1, dtype=torch.float32)
+    backend.bind_kv_caches(caches)
+    layer = lm.model.layers[layer_id].self_attn
+    ratio = layer.mode.compress_ratio
+    mapping = backend._resolve_cache_mapping(layer_id, ratio)
+    dsa = backend._builder.build(
+        multi_block_tables=[torch.tensor([[0, 1]], dtype=torch.int32)] * 3,
+        kv_seq_lens=[8],
+        q_seq_lens=[6],
+        positions=torch.arange(2, 8),
+        is_prefill=False,
+        is_chunked_prefill=True,
+    )
+    dsa.compressed_write_floors = (6,)
+    cache = caches[layer_id]
+    projected_rows = []
+    hook = layer.cmp_wkv.register_forward_pre_hook(lambda _project, args: projected_rows.append(args[0].size(0)))
+    cache.key[0, : 6 // ratio].fill_(55)
+    cache.index[0, : 6 // ratio].fill_(56)
+    context = Csa2LayerContext(
+        x=torch.randn(6, cfg.hidden_size),
+        qr=torch.randn(6, cfg.q_lora_rank),
+        positions=dsa.input_positions,
+        cos_sin_cache=lm.model.compress_rotary.cos_sin_cache,
+    )
+    backend._run_compressor(layer, context, dsa, cache, mapping, [6], torch.tensor([8]), CSA2SharedRuntime())
+    hook.remove()
+    assert projected_rows == [2]
+    assert (cache.key[0, : 6 // ratio] == 55).all()
+    assert (cache.index[0, : 6 // ratio] == 56).all()
+    assert torch.count_nonzero(cache.key[0, 6 // ratio : 8 // ratio]) > 0
+    assert torch.count_nonzero(cache.index[0, 6 // ratio : 8 // ratio]) > 0
 
 
 def test_compressor_math() -> None:
@@ -1336,10 +1570,10 @@ def test_swa_window_lower_bound_is_per_query() -> None:
 
 @npu_only
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("num_tokens", [0, 1, 7])
-def test_hc_post_preserves_v41_matrix_orientation(dtype: torch.dtype, num_tokens: int) -> None:
+@pytest.mark.parametrize(("num_tokens", "hidden_size"), [(0, 128), (1, 128), (7, 128), (7, 127)])
+def test_hc_post_preserves_v41_matrix_orientation(dtype: torch.dtype, num_tokens: int, hidden_size: int) -> None:
     torch.manual_seed(4109)
-    cfg = DeepseekV41Config.from_dict(_DSV41_TINY_CONFIG)
+    cfg = DeepseekV41Config.from_dict({**_DSV41_TINY_CONFIG, "hidden_size": hidden_size})
     hc = dq.DeepseekV41HyperConnection(cfg, _active_device())
     x = torch.randn(num_tokens, cfg.hidden_size, dtype=dtype)
     residual = torch.randn(num_tokens, cfg.hc_mult, cfg.hidden_size, dtype=dtype)
@@ -1347,7 +1581,8 @@ def test_hc_post_preserves_v41_matrix_orientation(dtype: torch.dtype, num_tokens
     comb = torch.arange(num_tokens * cfg.hc_mult**2, dtype=torch.float32).reshape(
         num_tokens, cfg.hc_mult, cfg.hc_mult
     ) / (cfg.hc_mult**2)
-    expected = post.unsqueeze(-1) * x.float().unsqueeze(-2) + torch.bmm(comb, residual.float())
+    expected = post.unsqueeze(-1) * x.float().unsqueeze(-2)
+    expected += (comb.unsqueeze(-1) * residual.float().unsqueeze(-2)).sum(dim=-3)
     actual = hc.hc_post(
         x.to(_active_device()),
         residual.to(_active_device()),
@@ -1584,7 +1819,8 @@ def _quarot_gate_reference(
     return (h + gate.unsqueeze(-1) * value.unsqueeze(1)).to(hidden.dtype)
 
 
-def test_engram_gate_quarot_unrotation() -> None:
+@pytest.mark.parametrize("repeat_block", [False, True])
+def test_engram_gate_quarot_unrotation(repeat_block: bool) -> None:
     layout = EngramLayout(
         layer_ids=[1],
         num_embeddings=[290],
@@ -1595,9 +1831,11 @@ def test_engram_gate_quarot_unrotation() -> None:
         compressed_vocab_size=16,
         pad_token_id=0,
     )
-    dim, hc_mult = 48, 2
+    dim, hc_mult = (64 if repeat_block else 48), 2
     g = torch.Generator().manual_seed(99)
-    q_orth = torch.linalg.qr(torch.randn(dim, dim, generator=g))[0]
+    width = 32 if repeat_block else dim
+    rotation = torch.linalg.qr(torch.randn(width, width, generator=g))[0]
+    q_orth = torch.block_diag(rotation, rotation) if repeat_block else rotation
 
     def make(gate_unrotate: torch.Tensor | None) -> Engram:
         eng = Engram(
@@ -1628,7 +1866,7 @@ def test_engram_gate_quarot_unrotation() -> None:
     out_plain = plain(hidden, torch.zeros(t, n_hash_cols, dtype=torch.int64))
     assert torch.equal(out_plain, _quarot_gate_reference(plain, hidden, staged, None))
 
-    rotated = make(q_orth.t().contiguous())
+    rotated = make(rotation.t().contiguous())
     rotated.wkv.load_state_dict(plain.wkv.state_dict())
     with torch.no_grad():
         rotated.q_weight.copy_(plain.q_weight)
@@ -1672,12 +1910,21 @@ def test_load_quarot_gate_unrotate(tmp_path: Path) -> None:
     assert loaded_bf.dtype == torch.float32
     assert torch.equal(loaded_bf, q_bf.t().contiguous().to(torch.float32))
 
+    block = q[:32, :32]
+    repeated = torch.block_diag(block, block)
+    rotation_path = str(model_path / "optional" / "quarot.safetensors")
+    _st.save_file({"global_rotation": repeated}, rotation_path)
+    assert torch.equal(load_quarot_gate_unrotate(str(model_path), torch.device("cpu")), block.t())
+    repeated[0, 32] = 1
+    _st.save_file({"global_rotation": repeated}, rotation_path)
+    assert torch.equal(load_quarot_gate_unrotate(str(model_path), torch.device("cpu")), repeated.t())
+
     (model_path / "optional" / "quarot.safetensors").write_bytes(b"garbage-bytes")
     with pytest.raises(SafetensorError):
         load_quarot_gate_unrotate(str(model_path), torch.device("cpu"))
 
 
-def test_engram_gate_math_and_mask_passthrough() -> None:
+def test_engram_gate_math_and_mask_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     lm = _make_forward_lm(torch.float32, seed=43)
     cfg = lm.cfg
     eng = lm.model.layers[1].engram
@@ -1704,6 +1951,12 @@ def test_engram_gate_math_and_mask_passthrough() -> None:
     out_masked = eng(hidden_states, hash_ids, mask)
     assert torch.allclose(out_masked[0], out[0], atol=1e-6)
     assert torch.allclose(out_masked[1], hidden_states[1], atol=1e-6)
+
+    complete_rows = eng.embed_tokens.lookup(hash_ids)
+    gather_heads = MagicMock(side_effect=AssertionError("Engram rows are already gathered"))
+    monkeypatch.setattr(eng.embed_tokens, "gather_heads", gather_heads)
+    prefetched_output = eng(hidden_states, hash_ids, mask, prefetched=complete_rows)
+    torch.testing.assert_close(prefetched_output, out_masked)
 
     assert cfg.image_token_id == ENGRAM_IMAGE_SENTINEL_BASE_ID
 
@@ -1856,7 +2109,8 @@ def test_csa2_sink_normalizer_follows_loaded_flag(monkeypatch: pytest.MonkeyPatc
     torch.testing.assert_close(loaded, expected_loaded[None, :, None].expand_as(loaded))
 
 
-def test_compressor_cached_long_chunk_preserves_partial_group() -> None:
+@pytest.mark.parametrize("prefix_len", [3, 4])
+def test_compressor_cached_long_chunk_preserves_partial_group(prefix_len: int) -> None:
     lm = _make_forward_lm(torch.float32, seed=113)
     cfg, model = lm.cfg, lm.model
     backend = _make_csa2_backend(cfg)
@@ -1886,18 +2140,30 @@ def test_compressor_cached_long_chunk_preserves_partial_group() -> None:
             layer, ctx, dsa, caches[2], mapping, [x.shape[0]], torch.tensor([end], dtype=torch.int64), shared
         )
 
-    prefix = torch.randn(3, cfg.hidden_size)
-    chunk = torch.randn(2 * cfg.window_size + 3, cfg.hidden_size)
+    prefix = torch.randn(prefix_len, cfg.hidden_size)
+    chunk = torch.randn(2 * cfg.window_size + prefix_len, cfg.hidden_size)
     old_kv, old_score = layer.compress_kv_score(prefix)
     new_kv, new_score = layer.compress_kv_score(chunk)
-    members = torch.stack((old_kv[2], new_kv[0]))
-    gates = torch.stack((old_score[2], new_score[0])).softmax(dim=0)
+    first_pair = prefix_len // 2
+    pair_rows = slice(2 * first_pair, 2 * first_pair + 2)
+    members = torch.cat((old_kv, new_kv))[pair_rows]
+    gates = torch.cat((old_score, new_score))[pair_rows].softmax(dim=0)
     latent = layer.compress_rmsnorm((members * gates).sum(dim=0, keepdim=True))
-    expected = _expected_fp4_e4m3(apply_interleaved_rope(latent, torch.tensor([2]), cos_sin), 16)[0]
+    expected = _expected_fp4_e4m3(apply_interleaved_rope(latent, torch.tensor([2 * first_pair]), cos_sin), 16)[0]
     run(prefix, 0)
-    run(chunk, 3)
+    run(chunk, prefix_len)
     assert caches[2].key is not None
-    torch.testing.assert_close(caches[2].key[0, 1], expected)
+    torch.testing.assert_close(caches[2].key[0, first_pair], expected)
+
+
+def test_shared_swa_writes_select_each_layers_latest_values() -> None:
+    shared = CSA2SharedRuntime()
+    slots = torch.tensor([1, -1, 0, 1])
+    for layer in (0, 1):
+        kv = torch.arange(8).reshape(4, 2) + 10 * layer
+        destinations, rows = shared.last_swa_writes(slots, kv, 2)
+        torch.testing.assert_close(destinations, torch.tensor([0, 1]))
+        torch.testing.assert_close(rows, kv[[2, 3]])
 
 
 @pytest.mark.parametrize("counts", [(1, 3), (3, 1), (1, 1)])
@@ -2099,8 +2365,9 @@ def test_graph_tables_preserve_logical_swa_and_token_capacity(max_model_len: int
     assert tables[0].shape == (2, columns)
     storage = tables[0].data_ptr()
     backend.bind_kv_caches(_allocate_v41_layer_caches(cfg, n_seqs=2, dtype=torch.float32))
-    static = SimpleNamespace(multi_block_tables=tables)
+    static = SimpleNamespace(multi_block_tables=tables, dsa_graph_token_capacity=max_model_len)
     runner = DecodeAclGraphRunner.__new__(DecodeAclGraphRunner)
+    runner.attention_backend = backend
     swa_flat = torch.arange(5 * window).reshape(-1, 1)
     for length in (window - 1, window, window + 1, 2 * window - 1, 2 * window, 2 * window + 1, max_model_len):
         live_begin = max(0, length - window) // window
@@ -2131,6 +2398,40 @@ def test_graph_tables_preserve_logical_swa_and_token_capacity(max_model_len: int
     for table, group in zip(tables[1:], backend.group_infos[1:], strict=True):
         tokens_per_block = group.ratio * group.block_size
         assert table.shape == (2, (max_model_len + tokens_per_block - 1) // tokens_per_block)
+
+
+@pytest.mark.parametrize("decoder_swa_start_layer", [None, 4])
+def test_csa2_graph_metadata_reuses_tables_with_live_positions_and_lengths(decoder_swa_start_layer: int | None) -> None:
+    cfg = DeepseekV41Config.from_dict(_DSV41_FORWARD_CONFIG)
+    backend = _make_csa2_backend(cfg, decoder_swa_start_layer=decoder_swa_start_layer)
+    page = cfg.window_size
+    tables = backend.create_graph_block_tables(2, 2 * page, 2)
+    tables[0][0] = torch.tensor([3, 4], dtype=torch.int32)
+    for table in tables[1:]:
+        table[0].fill_(2)
+    if decoder_swa_start_layer is not None:
+        tables[-1][0] = torch.tensor([5, 6], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        multi_block_tables=tables,
+        dsa_graph_token_capacity=2 * page,
+        kv_seq_lens=torch.tensor([page, 1], dtype=torch.int32),
+        dsa_positions=torch.tensor([page - 1, 0], dtype=torch.int64),
+    )
+    prepared = backend.prepare_metadata(metadata)
+    first = backend._build_prepared_graph_metadata(metadata, prepared)
+    assert first.seq_lens.tolist() == [page, 0]
+    mapping = backend._resolve_cache_mapping(0, cfg.compress_ratios[0])
+    assert first.slot_mappings[0][mapping.ori_cache_idx].tolist() == [4 * page - 1, -1]
+
+    metadata.kv_seq_lens[0] += 1
+    metadata.dsa_positions[0] += 1
+    next_step = backend._build_prepared_graph_metadata(metadata, prepared)
+    assert next_step.seq_lens.tolist() == [page + 1, 0]
+    assert next_step.slot_mappings[0][mapping.ori_cache_idx].tolist() == [4 * page, -1]
+    if decoder_swa_start_layer is not None:
+        mapping = backend._resolve_cache_mapping(decoder_swa_start_layer, cfg.compress_ratios[decoder_swa_start_layer])
+        assert first.slot_mappings[decoder_swa_start_layer][mapping.ori_cache_idx].tolist() == [6 * page - 1, -1]
+        assert next_step.slot_mappings[decoder_swa_start_layer][mapping.ori_cache_idx].tolist() == [6 * page, -1]
 
 
 @pytest.mark.parametrize("quant_mode", ["none", "ascend"])
@@ -2279,7 +2580,8 @@ def test_empty_dp_attention_has_no_history_or_cache_writes(
         q_seq_lens_host=torch.ones(rows, dtype=torch.int32),
         is_prefill=False,
         is_chunked_prefill=False,
-        is_dummy=True,
+        is_dummy=graph_mode,
+        raw_dp_execution_token_counts=[0, rows],
         dsa_metadata=None,
         dsa_positions=torch.zeros(rows, dtype=torch.int64),
         dsa_cos_sin=None,
@@ -2310,6 +2612,148 @@ def test_empty_dp_attention_has_no_history_or_cache_writes(
     actual = backend.execute_csa2_layer(query, torch.full((rows, cfg.head_dim), poison), layer)
     torch.testing.assert_close(actual, torch.zeros_like(actual))
     torch.testing.assert_close(caches[0].swa, before, equal_nan=True)
+
+
+@pytest.mark.parametrize("query_lengths", [(6, 6), (6, 3)])
+def test_engram_flat_verify_rows_match_sequence_hashes(query_lengths: tuple[int, int]) -> None:
+    state = _tiny_engram_hash_state()
+    block_size = 8
+    state._cache = torch.zeros(5 * block_size, dtype=torch.int32)
+    generator = torch.Generator().manual_seed(319)
+    inputs, positions, tables, slots, expected = [], [], [], [], []
+    for seq, query_len in enumerate(query_lengths):
+        # Adjacent positions across requests must remain separate histories.
+        prefix_len = 19 + seq * query_lengths[0]
+        ids = torch.randint(1, 64, (prefix_len + query_len,), generator=generator)
+        pos = torch.arange(ids.numel())
+        table = torch.tensor([[1 + seq * 2, 2 + seq * 2]], dtype=torch.int32)
+        physical = table[0, pos // block_size % 2] * block_size + pos % block_size
+        state(
+            ids[:prefix_len],
+            pos[:prefix_len],
+            torch.tensor([0, prefix_len]),
+            torch.zeros(prefix_len, dtype=torch.bool),
+            physical[:prefix_len],
+            table,
+            block_size,
+        )
+        reference = _tiny_engram_hash_state()
+        hashes = reference(
+            ids, pos, torch.tensor([0, ids.numel()]), torch.zeros_like(ids, dtype=torch.bool), None, None, 0
+        )
+        inputs.append(ids[prefix_len:])
+        positions.append(pos[prefix_len:])
+        tables.append(table.expand(query_len, -1))
+        slots.append(physical[prefix_len:])
+        expected.append(hashes[prefix_len:])
+    tokens = torch.cat(inputs)
+    actual = state(
+        tokens,
+        torch.cat(positions),
+        torch.arange(tokens.numel() + 1),
+        torch.zeros_like(tokens, dtype=torch.bool),
+        torch.cat(slots),
+        torch.cat(tables),
+        block_size,
+    )
+    torch.testing.assert_close(actual, torch.cat(expected))
+
+
+@npu_only
+@torch.inference_mode()
+def test_engram_fused_hash_matches_torch_with_ring_and_replay() -> None:
+    device = torch.device("npu:0")
+    reference = _tiny_engram_hash_state()
+    fused = _tiny_engram_hash_state().to(device)
+    initial = torch.arange(32, dtype=torch.int32) % 16
+    reference._cache = initial.clone()
+    fused._cache = initial.to(device)
+    ids = torch.tensor([1, 2, 32, 9, 6, 11, 7])
+    positions = torch.tensor([15, 16, 17, 18, 23, 24, 25])
+    starts = torch.tensor([0, 4, 7])
+    slots = torch.tensor([15, 0, 1, 2, 31, 16, 17])
+    tables = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+    history = torch.tensor([[9, 1, 12], [4, -1, 6]])
+    dead = ids == 32
+    args = (ids, positions, starts, dead, slots, tables)
+    expected = reference(*args, 8, replay_history=history, replay_requests=(16, 0))
+    device_args = tuple(arg.to(device) for arg in args)
+    actual = fused(*device_args, 8, replay_history=history.to(device), replay_requests=(16, 0))
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+    torch.testing.assert_close(fused._cache.cpu(), reference._cache, rtol=0, atol=0)
+
+
+@npu_only
+@torch.inference_mode()
+def test_engram_host_lookup_replays_changed_device_hashes() -> None:
+    from xllm.python.models.deepseek_v41_engram_host import EngramHostTable
+
+    device = torch.device("npu:0")
+    codes = (torch.arange(256 * 8).reshape(8, 256) % 61 - 30).to(torch.int8)
+    scales = (torch.arange(8 * 8).reshape(8, 8) % 11 + 120).to(torch.uint8)
+    rows = (codes.float() * dq.ue8m0_to_scale(scales).repeat_interleave(32, dim=-1)).to(torch.bfloat16)
+    table = EngramHostTable(codes, scales, device, dp_size=1, layer=0)
+    hbm = EngramEmbedding(8, 256, (4, 4), tp_size=1, tp_rank=0, storage=ENGRAM_STORAGE_INT8, device=device)
+    hbm.weight.copy_(codes)
+    hbm.weight_scale = torch.nn.Parameter(scales.to(device), requires_grad=False)
+    ids = torch.tensor([[0, 3], [2, -1]], dtype=torch.int32, device=device)
+
+    def lookup() -> torch.Tensor:
+        return table.lookup(ids, 0, 2, 0, 8, 256, 32)
+
+    torch.testing.assert_close(lookup().cpu(), hbm.lookup(ids).cpu(), rtol=0, atol=0)
+    stream = torch.npu.Stream(device=device)
+    ready = torch.npu.Event()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        main = torch.npu.current_stream(device)
+        stream.wait_stream(main)
+        with torch.npu.stream(stream):
+            staged = lookup()
+            ready.record(stream)
+        main.wait_event(ready)
+        staged.record_stream(main)
+        output = staged.clone()
+
+    for value in (torch.tensor([[4, 7], [1, -1]]), torch.tensor([[6, 0], [3, 9]])):
+        ids.copy_(value)
+        graph.replay()
+        valid = (value >= 0) & (value < 8)
+        expected = torch.where(valid.unsqueeze(-1), rows[value.clamp(0, 7)], 0)
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+def test_engram_encoder_replay_uses_prompt_history_without_swa_pages() -> None:
+    state = _tiny_engram_hash_state()
+    state._cache = torch.full((32,), 63, dtype=torch.int32)
+    ids = torch.arange(1, 21).reshape(2, 10)
+    start = 6
+    history = state.layout.max_ngram_size - 1
+    expected = (
+        state(
+            ids.flatten(),
+            torch.arange(10).repeat(2),
+            torch.tensor([0, 10, 20]),
+            torch.zeros(20, dtype=torch.bool),
+            None,
+            None,
+            0,
+        )
+        .unflatten(0, (2, 10))[:, start:]
+        .flatten(0, 1)
+    )
+    actual = state(
+        ids[:, start:].flatten(),
+        torch.arange(start, 10).repeat(2),
+        torch.tensor([0, 4, 8]),
+        torch.zeros(8, dtype=torch.bool),
+        None,
+        torch.tensor([[0, 1], [2, 3]]),
+        8,
+        replay_history=ids[:, start - history : start],
+        replay_requests=(8, 8),
+    )
+    torch.testing.assert_close(actual, expected)
 
 
 def test_engram_cache_reuses_resolved_token_ids() -> None:

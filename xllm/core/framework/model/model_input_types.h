@@ -288,6 +288,17 @@ class BlockTransferInfo final {
   }
 };
 
+struct SwaPrefixReplayInput {
+  // Per request: -1 marks a row with regular attention history.
+  std::vector<int32_t> starts;
+  std::vector<int32_t> ends;
+  // Right-aligned tokens immediately before each query, with -1 padding.
+  std::vector<int32_t> engram_history;
+  // Position of the first decoder query in each prefill request.
+  // A negative entry denotes a decode request in a mixed batch.
+  std::vector<int32_t> decoder_starts;
+};
+
 struct ExecutionBatchMetadata {
   int32_t num_reqs = 0;
   int64_t num_tokens = 0;
@@ -295,6 +306,7 @@ struct ExecutionBatchMetadata {
   std::vector<int32_t> num_computed_tokens;
   std::vector<int32_t> query_start_loc;
   std::vector<uint8_t> is_prefilling;
+  SwaPrefixReplayInput swa_prefix_replay;
 };
 
 inline void fill_request_layout(
@@ -416,6 +428,8 @@ class ParallelInput final {
   // Attention/FFN paths may need the padded counts, while lm_head output
   // compaction must skip true empty DP ranks.
   std::vector<int32_t> raw_dp_global_token_nums;
+  // Real decoder replay rows per DP rank, including zero rows on idle ranks.
+  std::vector<int32_t> decoder_replay_dp_token_counts;
   // Per-DP-shard generation derived from the local batch identity. Every shard
   // receives the full vector so speculative prelaunch reuse decisions remain
   // collective-order consistent when any shard changes its batch.
@@ -451,6 +465,7 @@ class ParallelInput final {
     out.dp_global_token_nums = dp_global_token_nums;
     out.dp_global_sequence_nums = dp_global_sequence_nums;
     out.raw_dp_global_token_nums = raw_dp_global_token_nums;
+    out.decoder_replay_dp_token_counts = decoder_replay_dp_token_counts;
     out.dp_global_batch_generations = dp_global_batch_generations;
     out.dp_global_kv_max_seq_lens = dp_global_kv_max_seq_lens;
     out.dp_global_json_object_active = dp_global_json_object_active;

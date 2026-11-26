@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 
+#include "core/framework/model/model_type.h"
+
 #if defined(USE_NPU)
 #ifdef TORCH_HIGHER_THAN_PTA6
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
@@ -155,7 +157,8 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
           DeepSeekV4StateCache::from_split(tensors.compress_index_kv_state,
                                            tensors.compress_index_score_state)),
 #endif
-      compressed_block_type_(tensors.compressed_block_type) {
+      compressed_block_type_(tensors.compressed_block_type),
+      swa_block_type_(tensors.swa_block_type) {
 }
 
 DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
@@ -309,7 +312,7 @@ std::vector<KVCacheTensor> DeepSeekV4KVCacheImpl::get_cache_tensors() const {
     }
   };
 
-  add_tensor(KVCacheTensorRole::WINDOW, swa_cache_, BlockType::SWA);
+  add_tensor(KVCacheTensorRole::WINDOW, swa_cache_, swa_block_type_);
   add_tensor(KVCacheTensorRole::KEY, key_cache_, compressed_block_type_);
   add_tensor(KVCacheTensorRole::INDEX, index_cache_, compressed_block_type_);
   add_tensor(KVCacheTensorRole::INDEX_SCALE,
@@ -318,21 +321,21 @@ std::vector<KVCacheTensor> DeepSeekV4KVCacheImpl::get_cache_tensors() const {
   if (Platform::is_mlu()) {
     add_tensor(KVCacheTensorRole::COMPRESS_STATE,
                compress_state_.packed(),
-               BlockType::SWA);
+               swa_block_type_);
     add_tensor(KVCacheTensorRole::COMPRESS_INDEX_STATE,
                index_state_.packed(),
-               BlockType::SWA);
+               swa_block_type_);
   } else {
     add_tensor(
-        KVCacheTensorRole::KV_STATE, compress_state_.kv(), BlockType::SWA);
+        KVCacheTensorRole::KV_STATE, compress_state_.kv(), swa_block_type_);
     add_tensor(KVCacheTensorRole::SCORE_STATE,
                compress_state_.score(),
-               BlockType::SWA);
+               swa_block_type_);
     add_tensor(
-        KVCacheTensorRole::INDEX_KV_STATE, index_state_.kv(), BlockType::SWA);
+        KVCacheTensorRole::INDEX_KV_STATE, index_state_.kv(), swa_block_type_);
     add_tensor(KVCacheTensorRole::INDEX_SCORE_STATE,
                index_state_.score(),
-               BlockType::SWA);
+               swa_block_type_);
   }
   return tensors;
 }
@@ -342,7 +345,9 @@ BlockTypeTensorMap DeepSeekV4KVCacheImpl::get_block_type_tensors(
   BlockTypeTensorMap tensor_map;
   switch (type) {
     case BlockType::SWA:
-      if (swa_cache_.defined() && swa_cache_.numel() > 0) {
+    case BlockType::DECODER_SWA:
+      if (type == swa_block_type_ && swa_cache_.defined() &&
+          swa_cache_.numel() > 0) {
         tensor_map.emplace(KVCacheTensorRole::SWA, swa_cache_);
       }
       break;
@@ -443,7 +448,7 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
         dims, torch::dtype(dtype).device(create_options.device())));
   };
 
-  if (create_options.model_type() == "deepseek_v41") {
+  if (is_deepseek_v41_family(create_options.model_type())) {
     const int64_t c1_count = pool_counts[1];
     const int64_t c2_count = pool_counts[2];
     const std::vector<int32_t>& kv_source_layer_ids =
@@ -454,6 +459,10 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
                   static_cast<int32_t>(layer_idx)) != kv_source_layer_ids.end();
 
     DeepSeekV4KVCacheTensors tensors;
+    const int64_t decoder_start = create_options.decoder_swa_start_layer();
+    if (decoder_start >= 0 && layer_idx >= decoder_start) {
+      tensors.swa_block_type = BlockType::DECODER_SWA;
+    }
     const bool is_c1_source = is_kv_source_layer && compress_ratio == 1;
     const bool is_c2_source = is_kv_source_layer && compress_ratio == 2;
     if (is_c1_source || is_c2_source) {
@@ -464,11 +473,19 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
           KVCacheTensorRole::KEY,
           dsv4_block_shape(compressed_count, block_size, n_heads, head_dim),
           create_options.dtype());
+      const bool quantized_indexer =
+          create_options.enable_indexer_cache_quant();
       tensors.index_cache = allocate_tensor(
           KVCacheTensorRole::INDEX,
           dsv4_block_shape(
               compressed_count, block_size, index_n_heads, index_head_dim),
-          create_options.dtype());
+          quantized_indexer ? torch::kInt8 : create_options.dtype());
+      if (quantized_indexer) {
+        tensors.indexer_cache_scale =
+            allocate_tensor(KVCacheTensorRole::INDEX_SCALE,
+                            {compressed_count, block_size, index_n_heads},
+                            torch::kFloat16);
+      }
     }
     tensors.swa_cache = allocate_tensor(
         KVCacheTensorRole::WINDOW,

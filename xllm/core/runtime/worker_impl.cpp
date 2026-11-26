@@ -384,7 +384,9 @@ void WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
 
   const bool enable_indexer_cache_quant =
       ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype() == "int8";
-  if (enable_lighting_indexer) {
+  // Only C1/C2 source layers have index scales. The V4.1 DSpark draft
+  // inherits the grouped layout and allocates SWA pages only.
+  if (enable_lighting_indexer && !is_deepseek_v41_family(args.model_type())) {
     CHECK_EQ(kv_cache_shape.has_index_cache_scale_shape(),
              enable_indexer_cache_quant)
         << "Indexer cache shape and worker quantization config must agree.";
@@ -461,6 +463,13 @@ void WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
       .window_size(std::max(args.window_size(), 1))
       .compress_ratios(args.compress_ratios())
       .kv_source_layer_ids(args.kv_source_layer_ids());
+  if (args.model_type() == "deepseek_v41" &&
+      KVCacheConfig::get_instance().enable_swa_bounded_replay()) {
+    const auto& sources = args.kv_source_layer_ids();
+    CHECK(!sources.empty());
+    create_options.decoder_swa_start_layer(
+        *std::max_element(sources.begin(), sources.end()));
+  }
 #if defined(USE_NPU)
   create_options.enable_kv_cache_huge_page_allocator(use_huge_page_allocator);
 #endif

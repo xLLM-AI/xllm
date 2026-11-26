@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <utility>
@@ -30,6 +31,40 @@ limitations under the License.
 #include "core/util/utils.h"
 
 namespace xllm {
+namespace {
+
+std::vector<int32_t> decoder_replay_dp_token_counts(
+    const std::vector<LlmForwardInput>& inputs,
+    const std::vector<int32_t>& dp_token_counts) {
+  if (inputs.size() == 1 ||
+      std::none_of(
+          inputs.begin(), inputs.end(), [](const LlmForwardInput& input) {
+            return !input.input_params.meta.execution_batch.swa_prefix_replay
+                        .decoder_starts.empty();
+          })) {
+    return {};
+  }
+
+  std::vector<int32_t> counts = dp_token_counts;
+  for (size_t rank = 0; rank < inputs.size(); ++rank) {
+    const auto& batch = inputs[rank].input_params.meta.execution_batch;
+    const auto& starts = batch.swa_prefix_replay.decoder_starts;
+    if (starts.empty()) {
+      // Decode-only ranks retain all their query rows. Idle ranks retain none.
+      continue;
+    }
+    int32_t rows = 0;
+    for (size_t seq = 0; seq < starts.size(); ++seq) {
+      const int32_t query_len = batch.num_scheduled_tokens[seq];
+      const int32_t end = batch.num_computed_tokens[seq] + query_len;
+      rows += std::clamp(end - std::max(0, starts[seq]), 0, query_len);
+    }
+    counts[rank] = rows;
+  }
+  return counts;
+}
+
+}  // namespace
 
 ForwardInputFactory::ForwardInputFactory(ForwardInputFactoryOptions options)
     : options_(options) {
@@ -182,10 +217,13 @@ void ForwardInputFactory::finalize_inputs(PreparationState& state) {
 
   annotate_eplb_inputs(state);
 
+  const auto replay_counts =
+      decoder_replay_dp_token_counts(state.inputs, state.dp_token_counts);
   for (auto& input : state.inputs) {
     input.input_params.meta.is_graph_warmup = state.is_graph_warmup;
     auto& parallel = input.input_params.parallel;
     parallel.dp_global_token_nums = state.dp_token_counts;
+    parallel.decoder_replay_dp_token_counts = replay_counts;
     parallel.dp_global_batch_generations = dp_batch_generations_;
     if (input.input_params.meta.batch_forward_type.is_empty()) {
       input.input_params.meta.batch_forward_type = state.batch_forward_type;

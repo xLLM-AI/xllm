@@ -208,6 +208,40 @@ torch::Tensor causal_conv1d(torch::Tensor& conv_state,
                             const torch::Tensor& initial_state_mode,
                             bool has_silu);
 
+torch::Tensor v41_c2_decode_pool_norm(const torch::Tensor& kv,
+                                      const torch::Tensor& scores,
+                                      const torch::Tensor& state_kv,
+                                      const torch::Tensor& state_scores,
+                                      const torch::Tensor& previous_rows,
+                                      const torch::Tensor& weight,
+                                      double eps);
+
+torch::Tensor v41_c2_pool_norm(const torch::Tensor& kv,
+                               const torch::Tensor& scores,
+                               const torch::Tensor& weight,
+                               double eps);
+
+void v41_partial_rope_(torch::Tensor& value,
+                       const torch::Tensor& cos,
+                       const torch::Tensor& signed_sin,
+                       const torch::Tensor& swap_offsets,
+                       bool inverse);
+
+void v41_swa_rope_cache_(torch::Tensor& value,
+                         const torch::Tensor& cos,
+                         const torch::Tensor& signed_sin,
+                         const torch::Tensor& swap_offsets,
+                         const torch::Tensor& slots,
+                         torch::Tensor& cache);
+
+torch::Tensor v41_index_key_transform(const torch::Tensor& key,
+                                      const torch::Tensor& weight,
+                                      const torch::Tensor& cos_sin,
+                                      double eps);
+
+std::tuple<torch::Tensor, torch::Tensor> v41_index_query_quant(
+    const torch::Tensor& query);
+
 // Run fused sigmoid-gating delta-rule SSM scan on NPU.
 // Returns (out, final_state).
 //   out: [T_padded, nv, dv] (padded token dim; caller strips padding)

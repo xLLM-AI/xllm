@@ -390,20 +390,21 @@ AttentionMetadata build_common_attention_metadata(
              "undefined";
       options = options.device(device.value());
     }
-    attn_metadata.slot_mapping = torch::zeros({1}, options);
-    attn_metadata.q_cu_seq_lens = torch::arange(2, options);
-    attn_metadata.kv_cu_seq_lens = torch::arange(2, options);
-    attn_metadata.q_seq_lens = torch::ones({1}, options);
-    attn_metadata.kv_seq_lens = torch::ones({1}, options);
-    attn_metadata.q_seq_lens_vec = {1};
-    attn_metadata.kv_seq_lens_vec = {1};
-    attn_metadata.paged_kv_indptr = torch::arange(2, options);
-    attn_metadata.paged_kv_indices = torch::zeros({1}, options);
-    attn_metadata.paged_kv_last_page_len = torch::ones({1}, options);
-    attn_metadata.block_table = torch::zeros({1, 1}, options);
+    const int64_t rows = build_options.dummy_query_rows;
+    attn_metadata.slot_mapping = torch::zeros({rows}, options);
+    attn_metadata.q_cu_seq_lens = torch::arange(rows + 1, options);
+    attn_metadata.kv_cu_seq_lens = torch::arange(rows + 1, options);
+    attn_metadata.q_seq_lens = torch::ones({rows}, options);
+    attn_metadata.kv_seq_lens = torch::ones({rows}, options);
+    attn_metadata.q_seq_lens_vec.assign(rows, 1);
+    attn_metadata.kv_seq_lens_vec.assign(rows, 1);
+    attn_metadata.paged_kv_indptr = torch::arange(rows + 1, options);
+    attn_metadata.paged_kv_indices = torch::zeros({rows}, options);
+    attn_metadata.paged_kv_last_page_len = torch::ones({rows}, options);
+    attn_metadata.block_table = torch::zeros({rows, 1}, options);
     attn_metadata.max_query_len = 1;
     attn_metadata.max_seq_len = std::max<int64_t>(attn_metadata.max_seq_len, 1);
-    attn_metadata.total_kv_len = 1;
+    attn_metadata.total_kv_len = rows;
   }
   materialize_linear_state_validity(
       params, device, build_options, attn_metadata);

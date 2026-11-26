@@ -345,7 +345,7 @@ void KVCacheShape::init_key_cache_shape(const KVCacheCapacity& kv_cache_cap,
                                         const ModelArgs& model_args,
                                         int64_t world_size) {
   if (has_grouped_cache_layout()) {
-    const bool is_v41 = model_args.model_type() == "deepseek_v41";
+    const bool is_v41 = is_deepseek_v41_family(model_args.model_type());
     key_cache_shape_ = std::vector<int64_t>{
         kv_cache_cap.swa_count(),
         is_v41 ? kv_cache_cap.c1_count() : kv_cache_cap.c4_count(),

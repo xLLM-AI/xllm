@@ -33,6 +33,7 @@ linear / MLP / MoE / YaRN-RoPE / weight-loader primitives from
 
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -56,7 +57,7 @@ from xllm.python.layers.attention import Attention
 from xllm.python.layers.embedding import HiddenParallelEmbedding
 from xllm.python.layers.layernorm import RMSNorm
 from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
-from xllm.python.layers.moe_parallel import dp_gather_tokens
+from xllm.python.layers.moe_parallel import TokenParallelLayout, dp_gather_tokens, shared_expert_stream
 from xllm.python.layers.rotary_embedding import _expand_half_rope_cos_sin
 from xllm.python.model_executor.forward_context import (
     get_forward_context,
@@ -1244,10 +1245,22 @@ class DeepseekV4MoE(nn.Module):
     FusedMoEImpl::forward_with_selected_experts.
     """
 
-    def __init__(self, cfg: DeepseekV4Config, layer_id: int, dtype: torch.dtype, device: torch.device) -> None:
+    def __init__(
+        self,
+        cfg: DeepseekV4Config,
+        layer_id: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        *,
+        fuse_shared_expert_activation: bool = False,
+        fused_mc2_group: str = "",
+        pretranspose_w8a8_weights: bool = False,
+    ) -> None:
         super().__init__()
         self.cfg = cfg
         self.layer_id = layer_id
+        self.fuse_shared_expert_activation = fuse_shared_expert_activation
+        self.pretranspose_w8a8_weights = pretranspose_w8a8_weights
         self.topk = cfg.n_activated_experts
         self.num_total_experts = cfg.n_routed_experts
         self.routed_scaling = cfg.routed_scaling_factor
@@ -1275,6 +1288,20 @@ class DeepseekV4MoE(nn.Module):
         # keep expert tensors empty until then to avoid allocating the W8A8
         # fallback shape for all 43 layers.
         self.w4a8_dynamic = False
+        self._fused_mc2_group = (
+            fused_mc2_group
+            if fused_mc2_group
+            and device.type == "npu"
+            and dtype == torch.bfloat16
+            and self.moe_tp_size == 1
+            and ep_size > 1
+            and ep_size == cfg.dp_size * cfg.tp_size
+            and not self.hash_layer
+            and torch.npu.get_device_name(device).startswith("Ascend910_93")
+            else ""
+        )
+        self._prefill_dispatch_limit: int | None = None
+        self._dispatch_scales: tuple[torch.Tensor, torch.Tensor] | None = None
 
         # Gate weight [n_total_experts, hidden] float32 (replicated, not sharded).
         self.gate = nn.Linear(cfg.hidden_size, cfg.n_routed_experts, bias=False, dtype=torch.float32, device=device)
@@ -1335,6 +1362,7 @@ class DeepseekV4MoE(nn.Module):
         self.shared_expert_gate_is_loaded = False
 
     def process_weights_after_loading(self) -> None:
+        self._dispatch_scales = None
         if self.w4a8_dynamic:
             # Match FusedMoEImpl::preprocess_w4a8_dynamic_weights.  Ascend
             # stores each W4 output pair in one int8 row; after transpose the
@@ -1371,16 +1399,160 @@ class DeepseekV4MoE(nn.Module):
             self.experts_w13_scale_bias.data = self.experts_w13_scale_bias.transpose(1, 2).contiguous().sum(1)
             self.experts_w2_scale_bias.data = self.experts_w2_scale_bias.transpose(1, 2).contiguous().sum(1)
         else:
-            # W8A8 grouped path: [expert, out, in] -> [expert, in, out].
-            self.experts_w13.data = self.experts_w13.data.transpose(1, 2).contiguous()
-            self.experts_w2.data = self.experts_w2.data.transpose(1, 2).contiguous()
+            if not self.pretranspose_w8a8_weights:
+                self.experts_w13.data = self.experts_w13.data.transpose(1, 2).contiguous()
+                self.experts_w2.data = self.experts_w2.data.transpose(1, 2).contiguous()
             self.experts_w13_scale.data = self.experts_w13_scale.data.squeeze(-1).contiguous()
             scale_dtype = torch.bfloat16 if self.shared_expert_gate.weight.dtype == torch.bfloat16 else torch.float32
             self.experts_w2_scale.data = self.experts_w2_scale.data.squeeze(-1).to(scale_dtype).contiguous()
+            if self._fused_mc2_group:
+                self._prepare_fused_mc2()
         self.shared_experts.gate_up_proj.process_weights_after_loading()
         self.shared_experts.down_proj.process_weights_after_loading()
 
-    def forward(self, hidden: torch.Tensor, input_ids: torch.Tensor | None = None) -> torch.Tensor:
+    def _prepare_fused_mc2(self) -> None:
+        if not torch.ops.xllm_ops.has_dispatch_ffn_combine():
+            raise RuntimeError("Fused MC2 requires the DispatchFFNCombine NPU operator")
+        # DispatchFFNCombine places INT8 dispatch rows in the first third of
+        # the HCCL window, followed by a scale area and BF16 combine rows.
+        mib = 1024 * 1024
+        window = int(os.environ.get("HCCL_BUFFSIZE") or 512) * mib
+        dispatch_bytes = ((window // 3 + 511) // 512) * 512
+        row_bytes = self.topk * self.cfg.hidden_size
+        self._prefill_dispatch_limit = min(
+            dispatch_bytes // row_bytes,
+            (window - dispatch_bytes - 3 * mib) // (2 * row_bytes),
+            mib // (self.topk * 4),
+        )
+        if self._prefill_dispatch_limit <= 0:
+            raise ValueError("The HCCL window cannot fit one DispatchFFNCombine input row")
+        # GroupedMatmul and DispatchFFNCombine consume the same logical weight
+        # layout in NZ format. Keep only one expert bank for prefill and decode.
+        self.experts_w13.data = torch_npu.npu_format_cast(self.experts_w13, 29)
+        self.experts_w2.data = torch_npu.npu_format_cast(self.experts_w2, 29)
+        self._dispatch_scales = (
+            self.experts_w13_scale.float().cpu().view(torch.int32).to(torch.int64).to(self.experts_w13.device),
+            self.experts_w2_scale.float().cpu().view(torch.int32).to(torch.int64).to(self.experts_w2.device),
+        )
+
+    def _forward_fused_mc2(
+        self,
+        hidden: torch.Tensor,
+        scales: tuple[torch.Tensor, torch.Tensor],
+        input_norm: nn.Module | None = None,
+    ) -> torch.Tensor:
+        ctx = get_forward_context()
+        graph = in_acl_graph()
+        key = ("v41_mc2", hidden.shape[0])
+        if key not in ctx.layer_shared_cache:
+            layout = TokenParallelLayout.from_dp(
+                hidden.shape[0],
+                self.cfg.tp_size,
+                self.cfg.tp_rank,
+                self.dp_size,
+                self.dp_rank,
+                ctx.metadata.dp_execution_token_counts,
+            )
+            valid = layout.valid_tokens
+            if not graph and self.dp_size > 1:
+                raw = ctx.metadata.raw_dp_execution_token_counts[self.dp_rank]
+                valid = max(0, min(valid, raw - self.cfg.tp_rank * layout.shard_tokens))
+            active_mask = torch.arange(layout.dispatch_tokens, device=hidden.device) < valid
+            ctx.layer_shared_cache[key] = (layout, active_mask)
+        else:
+            layout, active_mask = ctx.layer_shared_cache[key]
+        local = layout.shard(hidden)
+        if input_norm is not None:
+            local = input_norm(local)
+        auxiliary = None
+        if local.device.type in ("npu", "privateuseone"):
+            current = torch.npu.current_stream(local.device)
+            auxiliary = shared_expert_stream(local.device)
+            auxiliary.wait_stream(current)
+            local.record_stream(auxiliary)
+            with torch.npu.stream(auxiliary):
+                shared = self._shared_output(local)
+        topk_weights, topk_idx = self._route_tokens(local, None)
+        # Every source uses the same EP dispatch capacity. Drop dispatch padding
+        # before gathering the local attention-TP result.
+        dispatch_input = layout.pad_dispatch(local)
+        expert_ids = layout.pad_dispatch(topk_idx.to(torch.int32))
+        expert_weights = layout.pad_dispatch(topk_weights.float())
+        tile_rows = layout.dispatch_tokens
+        input_rows = layout.dispatch_tokens * self.cfg.ep_size
+        if not graph:
+            assert self._prefill_dispatch_limit is not None
+            tile_rows = min(tile_rows, self._prefill_dispatch_limit)
+            input_rows = sum(ctx.metadata.dp_execution_token_counts) if self.dp_size > 1 else hidden.size(0)
+        if tile_rows == layout.dispatch_tokens:
+            routed = self._dispatch_experts(dispatch_input, expert_ids, expert_weights, active_mask, scales, input_rows)
+        else:
+            # Padding gives every EP rank the same dispatch tiles, including empty DP ranks.
+            routed = torch.cat(
+                [
+                    self._dispatch_experts(x, ids, weights, mask, scales, input_rows)
+                    for x, ids, weights, mask in zip(
+                        dispatch_input.split(tile_rows),
+                        expert_ids.split(tile_rows),
+                        expert_weights.split(tile_rows),
+                        active_mask.split(tile_rows),
+                        strict=True,
+                    )
+                ]
+            )
+        if auxiliary is None:
+            shared = self._shared_output(local)
+        else:
+            current.wait_stream(auxiliary)
+            shared.record_stream(current)
+        return layout.gather(routed[: layout.shard_tokens] + shared, use_decode_tp=True)
+
+    def _dispatch_experts(
+        self,
+        dispatch_input: torch.Tensor,
+        expert_ids: torch.Tensor,
+        expert_weights: torch.Tensor,
+        active_mask: torch.Tensor,
+        scales: tuple[torch.Tensor, torch.Tensor],
+        input_rows: int,
+    ) -> torch.Tensor:
+        return torch.ops.xllm_ops.dispatch_ffn_combine(
+            dispatch_input,
+            self.experts_w13,
+            self.experts_w2,
+            expert_ids,
+            scales[0],
+            scales[1],
+            expert_weights,
+            active_mask,
+            self._fused_mc2_group,
+            min(input_rows, dispatch_input.size(0) * self.cfg.ep_size) * self.topk,
+            self.cfg.swiglu_limit,
+        )
+
+    def _is_fused_mc2_prefill(self) -> bool:
+        if self.cfg.model_type != "deepseek_v41" or self.hash_layer:
+            return False
+        metadata = get_forward_context().metadata
+        if self.dp_size == 1:
+            return metadata.is_prefill or metadata.is_chunked_prefill
+        # The EP group must make the same choice even if a local DP rank has no prefill rows.
+        return any(
+            rows > 0 and not decode
+            for rows, decode in zip(metadata.raw_dp_execution_token_counts, metadata.dp_is_decode, strict=True)
+        )
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        *,
+        input_norm: nn.Module | None = None,
+    ) -> torch.Tensor:
+        if self._dispatch_scales is not None and (in_acl_graph() or self._is_fused_mc2_prefill()):
+            return self._forward_fused_mc2(hidden, self._dispatch_scales, input_norm)
+        if input_norm is not None:
+            hidden = input_norm(hidden)
         local_tokens = hidden.shape[0]
         hidden, scatter_state = dp_gather_tokens(hidden, self.dp_size, self.dp_rank)
 
@@ -1400,47 +1572,7 @@ class DeepseekV4MoE(nn.Module):
             if ids_for_gate is not None:
                 gate_input_ids, _ = dp_gather_tokens(ids_for_gate, self.dp_size, self.dp_rank)
 
-        # 1) Gate: compute logits + moe_gating_top_k_hash.
-        gate_input = hidden.to(torch.float32)
-        logits = self.gate(gate_input)
-        norm_type = {"softmax": 0, "sigmoid": 1, "sqrtsoftplus": 2}.get(self.scoring_func, 2)
-        renorm = 0 if norm_type == 2 else 1
-
-        if self.hash_layer and hasattr(self, "tid2eid") and gate_input_ids is not None:
-            topk_weights, topk_idx, _ = kernels.moe_gating_top_k_hash(
-                x=logits,
-                k=self.topk,
-                bias=None,
-                input_ids=gate_input_ids,
-                tid2eid=self.tid2eid,
-                k_group=1,
-                group_count=1,
-                routed_scaling_factor=self.routed_scaling,
-                eps=1e-20,
-                group_select_mode=1,
-                renorm=renorm,
-                norm_type=norm_type,
-                out_flag=False,
-            )
-        elif self.hash_layer:
-            raise RuntimeError("DeepSeek-V4 hash gate requires input_ids for routing")
-        else:
-            bias = getattr(self, "e_score_correction_bias", None)
-            topk_weights, topk_idx, _ = kernels.moe_gating_top_k_hash(
-                x=logits,
-                k=self.topk,
-                bias=bias,
-                input_ids=None,
-                tid2eid=None,
-                k_group=1,
-                group_count=1,
-                routed_scaling_factor=self.routed_scaling,
-                eps=1e-20,
-                group_select_mode=1,
-                renorm=renorm,
-                norm_type=norm_type,
-                out_flag=False,
-            )
+        topk_weights, topk_idx = self._route_tokens(hidden, gate_input_ids)
 
         # 2) EP: zero out non-local expert weights (C++ fused_moe.cpp:843-850).
         ep_size = self.cfg.ep_size if self.cfg.ep_size > 0 else self.cfg.tp_size
@@ -1537,13 +1669,63 @@ class DeepseekV4MoE(nn.Module):
                 self.cfg.swiglu_limit,
             )
         # 4) Shared experts + C++-ordered TP/EP reductions.
-        shared_out = self.shared_experts(hidden)
-        if self.shared_expert_gate_is_loaded:
-            shared_gate = torch.sigmoid(self.shared_expert_gate(hidden))
-            shared_out = shared_gate * shared_out
-
-        output = self._reduce_moe_outputs(routed_out, shared_out)
+        output = self._reduce_moe_outputs(routed_out, self._shared_output(hidden))
         return scatter_state.scatter(output)
+
+    def _route_tokens(
+        self, hidden: torch.Tensor, gate_input_ids: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        gate_input = hidden.to(torch.float32)
+        logits = self.gate(gate_input)
+        norm_type = {"softmax": 0, "sigmoid": 1, "sqrtsoftplus": 2}.get(self.scoring_func, 2)
+        renorm = 0 if norm_type == 2 else 1
+
+        if self.hash_layer and hasattr(self, "tid2eid") and gate_input_ids is not None:
+            topk_weights, topk_idx, _ = kernels.moe_gating_top_k_hash(
+                x=logits,
+                k=self.topk,
+                bias=None,
+                input_ids=gate_input_ids,
+                tid2eid=self.tid2eid,
+                k_group=1,
+                group_count=1,
+                routed_scaling_factor=self.routed_scaling,
+                eps=1e-20,
+                group_select_mode=1,
+                renorm=renorm,
+                norm_type=norm_type,
+                out_flag=False,
+            )
+        elif self.hash_layer:
+            raise RuntimeError("DeepSeek-V4 hash gate requires input_ids for routing")
+        else:
+            bias = getattr(self, "e_score_correction_bias", None)
+            topk_weights, topk_idx, _ = kernels.moe_gating_top_k_hash(
+                x=logits,
+                k=self.topk,
+                bias=bias,
+                input_ids=None,
+                tid2eid=None,
+                k_group=1,
+                group_count=1,
+                routed_scaling_factor=self.routed_scaling,
+                eps=1e-20,
+                group_select_mode=1,
+                renorm=renorm,
+                norm_type=norm_type,
+                out_flag=False,
+            )
+        return topk_weights, topk_idx
+
+    def _shared_output(self, hidden: torch.Tensor) -> torch.Tensor:
+        if self.fuse_shared_expert_activation:
+            # Requantize SwiGLU directly from the INT32 gate/up accumulators.
+            shared_out = self.shared_experts.forward_dequant_swiglu_quant(hidden, swiglu_limit=self.cfg.swiglu_limit)
+        else:
+            shared_out = self.shared_experts(hidden)
+        if self.shared_expert_gate_is_loaded:
+            shared_out = torch.sigmoid(self.shared_expert_gate(hidden)) * shared_out
+        return shared_out
 
     def _reduce_moe_outputs(self, routed_out: torch.Tensor, shared_out: torch.Tensor) -> torch.Tensor:
         """Reduce routed/shared results in the C++ ``FusedMoEImpl`` order.
@@ -2263,6 +2445,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
         if is_w4a8 and cfg.hidden_size % 2 != 0:
             raise ValueError(f"DeepSeek-V4 packed W4A8 requires an even hidden size, got {cfg.hidden_size}")
         mlp.w4a8_dynamic = is_w4a8
+        pretranspose = not is_w4a8 and mlp.pretranspose_w8a8_weights
         device = w13.device
         if is_w4a8:
             w13.data = torch.empty(
@@ -2290,8 +2473,13 @@ class DeepseekV4ForCausalLM(PyModelBase):
             w2_scale_bias.data = torch.empty(nepr, *sb2.shape, dtype=torch.float32, device=device)
         else:
             inter_local = cfg.moe_intermediate_size // tp
-            w13.data = torch.empty(nepr, 2 * inter_local, cfg.hidden_size, dtype=torch.int8, device=device)
-            w2.data = torch.empty(nepr, cfg.hidden_size, inter_local, dtype=torch.int8, device=device)
+            w13_dims = (2 * inter_local, cfg.hidden_size)
+            w2_dims = (cfg.hidden_size, inter_local)
+            if pretranspose:
+                w13_dims = w13_dims[::-1]
+                w2_dims = w2_dims[::-1]
+            w13.data = torch.empty(nepr, *w13_dims, dtype=torch.int8, device=device)
+            w2.data = torch.empty(nepr, *w2_dims, dtype=torch.int8, device=device)
             w13_scale.data = torch.empty(nepr, 2 * inter_local, 1, dtype=torch.float32, device=device)
             w2_scale.data = w2_scale.new_empty((nepr, cfg.hidden_size, 1))
             w13_offset.data = torch.zeros_like(w13_scale)
@@ -2323,8 +2511,13 @@ class DeepseekV4ForCausalLM(PyModelBase):
             w13_j = _shard_fused(gate_weight, up_weight)
             if tp > 1:
                 w2_j = loader.shard(w2_j, dim=1, world=tp, rank=tp_rank)
-            w13[local_idx].copy_(w13_j.to(w13.dtype))
-            w2[local_idx].copy_(w2_j.to(w2.dtype))
+            if pretranspose:
+                # Transpose one checkpoint expert on the host before transfer.
+                # This avoids retaining a second copy of a whole layer in HBM.
+                w13_j = w13_j.t().contiguous()
+                w2_j = w2_j.t().contiguous()
+            w13[local_idx].copy_(w13_j)
+            w2[local_idx].copy_(w2_j)
             # Legacy exports can share the gate scale with the up projection.
             gate_scale = _require_tensor(
                 loader,

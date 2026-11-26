@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/encoder_cache/encoder_cache.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
@@ -296,6 +297,9 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
       build_options.chunked_block_diffusion =
           SpeculativeConfig::chunked_block_diffusion(
               options_.speculative_algorithm(), args_.model_type());
+    } else if (params.meta.batch_forward_type.is_decode() &&
+               is_deepseek_v41_family(args_.model_type())) {
+      build_options.dummy_query_rows = tokens.size(0);
     }
     attn_metadata = std::make_shared<layer::AttentionMetadata>(
         layer::AttentionMetadataBuilder::build(params,

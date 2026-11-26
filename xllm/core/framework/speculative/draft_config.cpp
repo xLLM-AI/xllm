@@ -53,6 +53,7 @@ std::vector<int32_t> read_capture_layer_ids(
   std::vector<int32_t> capture_layer_ids =
       reader.value_or<std::vector<int32_t>>(
           std::vector<std::string>{"dspark_target_layer_ids",
+                                   "text_config.dspark_target_layer_ids",
                                    "target_layer_ids",
                                    "dflash_config.target_layer_ids"},
           std::vector<int32_t>{});

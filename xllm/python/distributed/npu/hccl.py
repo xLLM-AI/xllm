@@ -24,6 +24,9 @@ despite that environment setting.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import torch
 import torch.distributed as dist
 from xllm_kernel.ops.collectives import (
@@ -64,13 +67,44 @@ def get_hccl_comm(
     return comm
 
 
+@contextmanager
+def _communication_stream(
+    group: dist.ProcessGroup | None,
+    device: torch.device,
+    *buffers: torch.Tensor,
+) -> Iterator[None]:
+    """Order direct HCCL calls with c10d operations on the same stream."""
+    group = dist.distributed_c10d._get_default_group() if group is None else group
+    with torch.npu.device(device):
+        caller = torch.npu.current_stream()
+        stream = torch.npu.Stream(
+            stream_id=group._get_backend(device)._get_stream_id(),
+            device_index=caller.device_index,
+            device_type=caller.device_type,
+        )
+        if stream == caller:
+            for buffer in buffers:
+                buffer.record_stream(stream)
+            yield
+            return
+        # Named CCLBuffers stay bound to their communication stream. Device
+        # events order the producer and consumer without blocking the host.
+        stream.wait_stream(caller)
+        with torch.npu.stream(stream):
+            for buffer in buffers:
+                buffer.record_stream(stream)
+            yield
+        caller.wait_stream(stream)
+
+
 def all_reduce_on_current_stream(x: torch.Tensor, group: dist.ProcessGroup) -> None:
     """In-place SUM, preserving the input dtype."""
     comm = get_hccl_comm(group, x.device)
     if x.numel() * x.element_size() > _CURRENT_STREAM_ALL_REDUCE_MAX_BYTES:
         dist.all_reduce(x, group=group)
         return
-    all_reduce(x, comm)
+    with _communication_stream(group, x.device, x):
+        all_reduce(x, comm)
 
 
 def all_gather_on_current_stream(
@@ -84,7 +118,14 @@ def all_gather_on_current_stream(
 
     ``output.numel()`` must equal ``group.size() * input.numel()``.
     """
-    all_gather(input, output, get_hccl_comm(group, input.device, initialize=initialize))
+    # AIV-only HCCL AllGather has no INT64 kernel. Gather the same bytes as
+    # pairs of INT32 words, including for Engram's hash indices.
+    if input.dtype == output.dtype == torch.int64:
+        input = input.view(-1).view(torch.int32)
+        output = output.view(-1).view(torch.int32)
+    comm = get_hccl_comm(group, input.device, initialize=initialize)
+    with _communication_stream(group, input.device, input, output):
+        all_gather(input, output, comm)
 
 
 def reduce_scatter_on_current_stream(input: torch.Tensor, output: torch.Tensor, group: dist.ProcessGroup) -> None:
@@ -92,7 +133,9 @@ def reduce_scatter_on_current_stream(input: torch.Tensor, output: torch.Tensor, 
 
     ``input.numel()`` must equal ``group.size() * output.numel()``.
     """
-    reduce_scatter(input, output, get_hccl_comm(group, input.device))
+    comm = get_hccl_comm(group, input.device)
+    with _communication_stream(group, input.device, input, output):
+        reduce_scatter(input, output, comm)
 
 
 def matmul_reduce_scatter_on_current_stream(

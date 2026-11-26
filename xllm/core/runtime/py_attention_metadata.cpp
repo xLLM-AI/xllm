@@ -103,6 +103,13 @@ void register_attention_metadata_views(py::module_& module) {
                              &PyAttentionMetadataView::q_seq_lens_host)
       .def_property_readonly("multi_block_tables",
                              &PyAttentionMetadataView::multi_block_tables)
+      .def_property_readonly("swa_prefix_replay",
+                             &PyAttentionMetadataView::swa_prefix_replay)
+      .def_property_readonly("decoder_replay_starts",
+                             &PyAttentionMetadataView::decoder_replay_starts)
+      .def_property_readonly(
+          "decoder_replay_dp_token_counts",
+          &PyAttentionMetadataView::decoder_replay_dp_token_counts)
       .def_property_readonly("block_table",
                              &PyAttentionMetadataView::block_table)
       .def_property_readonly("shared_full_block_table",
@@ -268,6 +275,7 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   shared_full_slot_mapping_ = params.attention.device.shared_full_slot_mapping;
   shared_full_read_padding_page_ =
       params.attention.host.shared_full_read_padding_page;
+  swa_prefix_replay_ = params.meta.execution_batch.swa_prefix_replay;
   linear_state_indices_ = params.embedding.linear_state_indices;
   num_accepted_tokens_ = params.num_accepted_tokens;
   num_accepted_tokens_host_values_ = params.num_accepted_tokens_host;
@@ -291,6 +299,8 @@ PyAttentionMetadataView::PyAttentionMetadataView(
       params.parallel.raw_dp_global_token_nums.empty()
           ? params.parallel.dp_global_token_nums
           : params.parallel.raw_dp_global_token_nums;
+  decoder_replay_dp_token_counts_ =
+      params.parallel.decoder_replay_dp_token_counts;
   // Python model kernels consume materialized execution rows. Empty DP ranks
   // contribute the model's complete dummy input, which may be a draft block.
   dp_execution_token_counts_ = params.parallel.dp_global_token_nums;
@@ -572,6 +582,22 @@ py::object PyAttentionMetadataView::num_accepted_tokens() const {
 const std::vector<int64_t>&
 PyAttentionMetadataView::num_accepted_tokens_host_values() const {
   return num_accepted_tokens_host_values_;
+}
+
+pybind11::tuple PyAttentionMetadataView::swa_prefix_replay() const {
+  return pybind11::make_tuple(swa_prefix_replay_.starts,
+                              swa_prefix_replay_.ends,
+                              swa_prefix_replay_.engram_history);
+}
+
+const std::vector<int32_t>& PyAttentionMetadataView::decoder_replay_starts()
+    const {
+  return swa_prefix_replay_.decoder_starts;
+}
+
+const std::vector<int32_t>&
+PyAttentionMetadataView::decoder_replay_dp_token_counts() const {
+  return decoder_replay_dp_token_counts_;
 }
 
 int32_t PyAttentionMetadataView::num_speculative_tokens() const {

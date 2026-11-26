@@ -132,7 +132,7 @@ class _DsaGraphMetadataView:
         self,
         base: AttentionMetadata,
         block_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
         multi_block_tables: tuple[torch.Tensor, ...],
     ) -> None:
         self._base = base
@@ -178,6 +178,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         device_kv_lengths: bool = False,
         kv_capacity_graphs: bool = False,
         max_capture_tokens: int | None = None,
+        fixed_dp_graph_layout: bool = False,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
@@ -185,6 +186,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.max_batch = (max_batch + dp_size - 1) // dp_size
         self.max_model_len = max_model_len
         self.num_speculative_tokens = num_speculative_tokens
+        self._fixed_dp_graph_layout = fixed_dp_graph_layout
         self._is_spec_draft = is_spec_draft
         self._causal = causal
         if type(block_draft_graph_warmup_max_kv_len) is not int or block_draft_graph_warmup_max_kv_len < -1:
@@ -368,6 +370,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 return None
             padded_batch_size = self._padded_batch_size(batch_size, metadata)
 
+        if self._fixed_dp_graph_layout and (
+            not is_expanded_spec_verify or input_embedding is not None or mtp_topk_indices is not None
+        ):
+            raise RuntimeError("fixed-layout DP verify requires a token-only expanded decode batch")
+
         # Physical KV capacity can limit startup shapes. Draft prefix steps
         # also flatten multiple rows per request, so the largest warmed row
         # count does not imply coverage of smaller shapes. Select eager for
@@ -405,6 +412,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
             query_width = _uniform_span_width(expanded_query_lens)
             if query_width is None:
                 return reject_layout("expanded verify query lengths are not uniform")
+            if self._fixed_dp_graph_layout and query_width != 1:
+                return reject_layout("fixed-layout DP verify needs one query token per metadata row")
             if sum(expanded_query_lens) != batch_size:
                 return reject_layout("expanded verify query lengths do not cover the decode batch")
             if padded_batch_size % query_width != 0:
@@ -643,9 +652,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
         expanded = resolve_expanded_decode_metadata(metadata, block_size=self._logical_page_size)
         if expanded is not None:
             return expanded
-        if not getattr(metadata, "is_target_verify", False) or (
-            self.attention_backend.is_mla and not self._has_linear_cache
-        ):
+        dummy_verify = (
+            self._fixed_dp_graph_layout and self.num_speculative_tokens > 0 and getattr(metadata, "is_dummy", False)
+        )
+        if not (getattr(metadata, "is_target_verify", False) or dummy_verify):
+            return None
+        if self.attention_backend.is_mla and not self._has_linear_cache:
             return None
         kv_rows, block_table_rows = metadata.kv_seq_lens, metadata.block_table
         query_ends = metadata.q_cu_seq_lens
@@ -1034,7 +1046,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         to replay graphs captured together: both entries can exist but belong
         to different captures. Include every DP rank's variant in the key.
         """
-        if self.dp_size <= 1 or not dist.is_initialized():
+        if self._fixed_dp_graph_layout or self.dp_size <= 1 or not dist.is_initialized():
             return local_key
         variant = self._dp_graph_variants.setdefault(local_key, len(self._dp_graph_variants) + 1)
         local_variant = torch.tensor([variant], dtype=torch.int32, device=input_ids.device)
@@ -1058,7 +1070,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         signatures can differ for empty ranks (embedding/top-k are absent),
         so a cached local key must still participate on every call.
         """
-        if self.dp_size <= 1 or not dist.is_initialized():
+        if self._fixed_dp_graph_layout or self.dp_size <= 1 or not dist.is_initialized():
             return graph_key not in self._graphs
         presence = torch.tensor(
             [int(graph_key in self._graphs)],
@@ -1078,7 +1090,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         to the host on every decode step. A one-value reduction keeps the
         cross-rank launch barrier without rebuilding the Python cache key.
         """
-        if self.dp_size <= 1 or not dist.is_initialized():
+        if self._fixed_dp_graph_layout or self.dp_size <= 1 or not dist.is_initialized():
             return
         ready = torch.ones(1, dtype=torch.int32, device=input_ids.device)
         from xllm.python import distributed
@@ -1858,6 +1870,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
             static_metadata.prepared_attention_state = self.attention_backend.prepare_metadata(
                 static_metadata, device_kv_lengths=True
             )
+        elif static_metadata.prepared_attention_state is None and getattr(
+            self.attention_backend, "supports_prepared_metadata", False
+        ):
+            static_metadata.prepared_attention_state = self.attention_backend.prepare_metadata(static_metadata)
 
         if input_embedding is not None:
             if input_embedding.shape[0] != batch_size:
@@ -1997,7 +2013,20 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     f"ACL graph DSA manager {manager_id} requires {source.shape[1]} "
                     f"columns, capacity is {target.shape[1]}"
                 )
-            target[:batch_size, : source.shape[1]].copy_(source[:batch_size])
+            if (
+                manager_id == 0
+                and getattr(self.attention_backend, "supports_prepared_metadata", False)
+                and source.size(1) > 0
+            ):
+                columns = (
+                    static_metadata.dsa_graph_token_capacity + self._logical_page_size - 1
+                ) // self._logical_page_size
+                # Native batches report physical SWA ring pages. Sparse MLA
+                # takes the logical table up to the captured context bound.
+                ring = torch.arange(columns, device=source.device).remainder_(source.size(1))
+                target[:batch_size, :columns].copy_(source.index_select(1, ring))
+            else:
+                target[:batch_size, : source.shape[1]].copy_(source[:batch_size])
 
     def _fill_graph_dsa_positions(
         self,

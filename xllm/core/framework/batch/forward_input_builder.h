@@ -84,6 +84,7 @@ class ForwardInputBuilder final {
     std::vector<int32_t> num_scheduled_tokens;
     std::vector<int32_t> num_computed_tokens;
     std::vector<uint8_t> is_prefilling;
+    SwaPrefixReplayInput swa_prefix_replay;
     std::vector<int32_t> seq_lens;
     std::vector<int32_t> q_seq_lens;
 
@@ -160,6 +161,7 @@ class ForwardInputBuilder final {
   bool need_unique_tokens_ = true;
   bool build_eplb_decode_token_mask_ = false;
   bool build_execution_batch_ = false;
+  bool build_swa_prefix_replay_ = false;
   bool is_graph_warmup_ = false;
   int32_t cp_size_ = 1;
 

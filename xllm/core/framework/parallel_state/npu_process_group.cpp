@@ -16,8 +16,12 @@ limitations under the License.
 
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 
+#include <algorithm>
 #include <c10d/ProcessGroup.hpp>
 #include <c10d/TCPStore.hpp>
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
 
 #include "core/framework/config/dit_config.h"
@@ -82,6 +86,48 @@ std::string resolve_tcp_store_host(const std::string& host, int32_t rank_size) {
 
 constexpr uint32_t kHcclAivExpansionMode = 3;
 
+constexpr uint32_t kDefaultHcclBufferSizeMiB = 512;
+constexpr char kDefaultHcclBufferName[] = "xllm_shared";
+constexpr size_t kHcclBufferNameMaxLength = 127;
+
+uint32_t get_hccl_buffer_size_mib() {
+  const char* value = std::getenv("HCCL_BUFFSIZE");
+  if (value == nullptr || value[0] == '\0') {
+    return kDefaultHcclBufferSizeMiB;
+  }
+  const std::string raw_size(value);
+  CHECK(std::all_of(raw_size.begin(),
+                    raw_size.end(),
+                    [](unsigned char c) { return c >= '0' && c <= '9'; }))
+      << "HCCL_BUFFSIZE must be a positive int32 decimal value, got " << value;
+  errno = 0;
+  char* end = nullptr;
+  const int64_t parsed = std::strtol(value, &end, 10);
+  if (errno != 0 || end == value || *end != '\0' || parsed <= 0 ||
+      parsed > std::numeric_limits<int32_t>::max()) {
+    LOG(FATAL) << "HCCL_BUFFSIZE should be a positive integer, got " << value;
+  }
+  return static_cast<uint32_t>(parsed);
+}
+
+void configure_hccl_buffer_size(
+    const c10::intrusive_ptr<c10d_npu::ProcessGroupHCCL::Options>& options) {
+  options->hccl_config["hccl_buffer_size"] = get_hccl_buffer_size_mib();
+  const char* configured_name = std::getenv("XLLM_HCCL_BUFFER_NAME");
+  std::string buffer_name =
+      configured_name == nullptr || configured_name[0] == '\0'
+          ? kDefaultHcclBufferName
+          : configured_name;
+  CHECK(std::all_of(buffer_name.begin(),
+                    buffer_name.end(),
+                    [](unsigned char c) { return c < 0x80; }))
+      << "XLLM_HCCL_BUFFER_NAME must contain ASCII characters.";
+  if (buffer_name.size() > kHcclBufferNameMaxLength) {
+    buffer_name.resize(kHcclBufferNameMaxLength);
+  }
+  options->hccl_config["hccl_buffer_name"] = std::move(buffer_name);
+}
+
 void configure_hccl_aiv_expansion(
     const std::string& group_name,
     int32_t rank_size,
@@ -137,6 +183,7 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
   const int32_t store_port = rank_size == 1 ? 0 : port;
   auto store = create_tcp_store(
       resolve_tcp_store_host(host, rank_size), store_port, rank);
+  configure_hccl_buffer_size(hccl_pg_options);
   configure_hccl_aiv_expansion(group_name, rank_size, hccl_pg_options);
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
       store, rank, rank_size, hccl_pg_options);
@@ -186,6 +233,7 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
   const int32_t store_port = rank_size == 1 ? 0 : port;
   auto store = create_tcp_store(
       resolve_tcp_store_host(host, rank_size), store_port, local_rank);
+  configure_hccl_buffer_size(hccl_pg_options);
   configure_hccl_aiv_expansion(group_name, rank_size, hccl_pg_options);
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
       store, local_rank, rank_size, hccl_pg_options);

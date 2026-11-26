@@ -306,7 +306,12 @@ TEST_F(BlockManagerPoolTest,
       .compress_ratios({1, 2, 1, 2})
       .kv_source_layer_ids({1, 2});
   KVCacheCapacity capacity;
-  capacity.n_blocks(32).block_size(8).swa_count(32).c1_count(32).c2_count(16);
+  capacity.n_blocks(32)
+      .block_size(8)
+      .swa_count(32)
+      .c1_count(32)
+      .c2_count(16)
+      .enable_indexer_cache_quant(true);
   BlockManagerPool::Options options;
   options.num_blocks(32).block_size(8).enable_prefix_cache(true);
   auto result = KVCacheManagerFactory::create(
@@ -332,16 +337,21 @@ TEST_F(BlockManagerPoolTest,
   ASSERT_NE(state, nullptr);
   EXPECT_EQ(c1->layers, (std::vector<int32_t>{2}));
   EXPECT_EQ(c2->layers, (std::vector<int32_t>{1}));
-  EXPECT_EQ(c2->dtype, CacheScalarType::BFLOAT16);
+  EXPECT_EQ(c2->dtype, CacheScalarType::INT8);
+  const auto* scale =
+      partitions[2].find_component(CacheComponentRole::INDEX_SCALE);
+  ASSERT_NE(scale, nullptr);
+  EXPECT_EQ(scale->dtype, CacheScalarType::FLOAT16);
   EXPECT_EQ(state->layers, (std::vector<int32_t>{1}));
-  EXPECT_FALSE(partitions[1].enable_prefix_cache());
-  EXPECT_FALSE(partitions[2].enable_prefix_cache());
+  EXPECT_TRUE(partitions[1].enable_prefix_cache());
+  EXPECT_TRUE(partitions[2].enable_prefix_cache());
   Sequence sequence = make_sequence(/*index=*/0, std::vector<int32_t>(32, 7));
   ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/32));
   sequence.kv_state().set_kv_cache_tokens_num(32);
   pool.publish_prefix(&sequence);
   pool.deallocate(&sequence);
-  EXPECT_EQ(pool.num_blocks_in_prefix_cache(), (std::vector<size_t>{0}));
+  ASSERT_EQ(pool.num_blocks_in_prefix_cache().size(), 1u);
+  EXPECT_GT(pool.num_blocks_in_prefix_cache().front(), 0u);
 }
 
 TEST_F(BlockManagerPoolTest, GroupedFactoryPreservesWindowOnlyDraft) {

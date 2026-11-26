@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -375,23 +376,25 @@ class AclGraphRunner(BaseRunner):
             # Rebuild warmup-derived tensors inside capture.
             layer_shared_cache=entry.layer_shared_cache.copy(),
         )
-        with forward_context(context), torch.npu.stream(stream):
-            for _ in range(_CAPTURE_WARMUP_STEPS):
-                self._forward_static(entry)
-        torch.npu.synchronize()
-        entry.graph = torch.npu.NPUGraph()
         capture_context = AclGraphCaptureContext(stream, [])
-        context = replace(context, acl_graph=capture_context, layer_shared_cache=entry.layer_shared_cache)
-        with (
-            forward_context(context),
-            torch.npu.graph(
-                entry.graph,
-                pool=_get_graph_pool(),
-                stream=stream,
-                capture_error_mode=self._capture_error_mode,
-            ),
-        ):
-            entry.static_output = self._forward_static(entry)
+        with forward_context(context), torch.npu.stream(stream):
+            capture_scope = getattr(self.model, "acl_graph_capture_context", None)
+            with capture_scope(entry.static_input_ids) if capture_scope is not None else nullcontext():
+                for _ in range(_CAPTURE_WARMUP_STEPS):
+                    self._forward_static(entry)
+                torch.npu.synchronize()
+                entry.graph = torch.npu.NPUGraph()
+                capture = replace(context, acl_graph=capture_context, layer_shared_cache=entry.layer_shared_cache)
+                with (
+                    forward_context(capture),
+                    torch.npu.graph(
+                        entry.graph,
+                        pool=_get_graph_pool(),
+                        stream=stream,
+                        capture_error_mode=self._capture_error_mode,
+                    ),
+                ):
+                    entry.static_output = self._forward_static(entry)
         entry.static_output = self._retain_graph_output(entry, entry.static_output)
         entry.graph_tasks = capture_context.tasks
         logger.info(

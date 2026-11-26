@@ -31,7 +31,7 @@ namespace xllm {
 void ensure_embedded_python();
 
 // Starts embedded Python and prepares the Python LLM kernel runtime.
-void ensure_python_interpreter();
+void ensure_python_interpreter(const std::string& model_type);
 
 // Makes the internal StateDict binding importable as xllm_weight_loader.
 // The caller must hold the Python GIL.
