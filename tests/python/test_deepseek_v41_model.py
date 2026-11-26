@@ -48,7 +48,7 @@ from xllm.python.layers import moe_parallel
 from xllm.python.layers.attention import Attention
 from xllm.python.model_executor import executor as executor_module
 from xllm.python.model_executor.executor import ModelExecutor
-from xllm.python.model_executor.forward_context import ForwardContext, forward_context
+from xllm.python.model_executor.forward_context import AclGraphCaptureContext, ForwardContext, forward_context
 from xllm.python.model_executor.runners.context_kv_acl_graph import ContextKvAclGraphRunner
 from xllm.python.models import deepseek_v41 as dq
 from xllm.python.models.deepseek_v41 import (
