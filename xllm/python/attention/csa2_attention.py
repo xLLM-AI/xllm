@@ -126,6 +126,14 @@ class _Csa2DecodeCompressorMetadata:
 
 
 @dataclass(frozen=True)
+class _Csa2PrefillSwaPages:
+    descriptors: torch.Tensor
+    table: torch.Tensor
+    lengths: torch.Tensor
+    max_length: int
+
+
+@dataclass(frozen=True)
 class _Csa2DraftSwaMetadata:
     history_slots: torch.Tensor
     positions: torch.Tensor
@@ -152,6 +160,7 @@ class CSA2SharedRuntime:
     swa_metadata: torch.Tensor | None = None
     prewritten_kv_layer: int | None = None
     draft_swa: _Csa2DraftSwaMetadata | None = None
+    prefill_swa_pages: dict[int, _Csa2PrefillSwaPages] = field(default_factory=dict)
     compressed_mla_metadata: dict[int, torch.Tensor] = field(default_factory=dict)
     ring_write_rows: dict[tuple[torch.Tensor, int], tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     rope_tables: dict[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] = field(
@@ -959,6 +968,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             indexer_metadata={},
             compressed_mla_metadata={},
             swa_metadata=None,
+            prefill_swa_pages={},
         )
         try:
             yield plan.metadata
@@ -1157,6 +1167,15 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         dsa: DsaMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         block_size = cache.size(1)
+        use_fused_pack = kv.device.type in ("npu", "privateuseone") and self.head_dim == 512 and cache.is_contiguous()
+        if use_fused_pack:
+            from xllm.python.kernels_npu.triton.prefill_swa import pack_prefill_swa
+
+            shared = self._shared_runtime()
+            pages = shared.prefill_swa_pages.get(block_size)
+            if pages is not None:
+                packed = pack_prefill_swa(kv, cache, block_table, pages.descriptors)
+                return packed, pages.table, pages.lengths, pages.max_length
         q_lens = dsa.seq_lens_q_host
         history_ends = [max(0, length - query_len) for length, query_len in zip(dsa.seq_lens_kv_host, q_lens)]
         floors = dsa.swa_history_floors or (0,) * len(q_lens)
@@ -1168,27 +1187,49 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         ]
         block_counts = [(length + block_size - 1) // block_size for length in kv_lens]
         table_width = max(block_counts)
-        packed = cache.new_zeros((1 + sum(block_counts), block_size, 1, self.head_dim))
-        cache_rows = cache.view(-1, self.head_dim)
-        row_offsets = torch.arange(self.window_size - 1, device=cache.device)
         rows: list[list[int]] = []
+        descriptors = [(0, 0, 0, 0, 0, 0)]  # Page zero supplies padding for the attention block table.
         block_start = 1
         token_start = 0
         for seq, (query_len, past, end, length, blocks) in enumerate(
             zip(q_lens, history_lens, history_ends, kv_lens, block_counts)
         ):
-            block_end = block_start + blocks
-            rows.append(list(range(block_start, block_end)) + [0] * (table_width - blocks))
-            dst = packed[block_start:block_end].view(-1, self.head_dim)
-            if past:
-                positions = row_offsets[:past] + (end - past)
-                dst[:past].copy_(self._gather_swa_positions(cache_rows, block_table, seq, positions, block_size))
-            dst[past:length].copy_(kv[token_start : token_start + length - past])
-            block_start = block_end
+            rows.append(list(range(block_start, block_start + blocks)) + [0] * (table_width - blocks))
+            if use_fused_pack:
+                descriptors.extend(
+                    (seq, page * block_size, end - past, past, token_start, length) for page in range(blocks)
+                )
+            block_start += blocks
             token_start += query_len
+
         table = torch.tensor(rows, dtype=torch.int32, device=cache.device)
         seq_lens = torch.tensor(kv_lens, dtype=torch.int32, device=cache.device)
-        return packed, table, seq_lens, max(kv_lens)
+        max_length = max(kv_lens)
+        if use_fused_pack:
+            pages = _Csa2PrefillSwaPages(
+                torch.tensor(descriptors, dtype=torch.int32, device=cache.device), table, seq_lens, max_length
+            )
+            shared.prefill_swa_pages[block_size] = pages
+            packed = pack_prefill_swa(kv, cache, block_table, pages.descriptors)
+        else:
+            packed = cache.new_zeros((block_start, block_size, 1, self.head_dim))
+            cache_rows = cache.view(-1, self.head_dim)
+            row_offsets = torch.arange(self.window_size - 1, device=cache.device)
+            token_start = 0
+            for seq, (query_len, past, end, length, blocks) in enumerate(
+                zip(q_lens, history_lens, history_ends, kv_lens, block_counts)
+            ):
+                if blocks:
+                    first = rows[seq][0]
+                    dst = packed[first : first + blocks].view(-1, self.head_dim)
+                    if past:
+                        positions = row_offsets[:past] + (end - past)
+                        dst[:past].copy_(
+                            self._gather_swa_positions(cache_rows, block_table, seq, positions, block_size)
+                        )
+                    dst[past:length].copy_(kv[token_start : token_start + length - past])
+                token_start += query_len
+        return packed, table, seq_lens, max_length
 
     def _run_compressor(
         self,

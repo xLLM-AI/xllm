@@ -2482,6 +2482,35 @@ def test_attention_extras_preserve_sink_tp_layout(
     )
 
 
+@npu_only
+def test_prefill_swa_pack_reuses_page_layout_across_distinct_layer_caches() -> None:
+    cfg = DeepseekV41Config.from_dict(dict(_DSV41_FORWARD_CONFIG, head_dim=512, window_size=128))
+    backend = _make_csa2_backend(cfg)
+    lengths = [21, 129, 3, 1]
+    metadata = SimpleNamespace(
+        seq_lens_q_host=lengths,
+        seq_lens_kv_host=[297, 129, 132, 0],
+        swa_history_floors=(0, 0, 128, 0),
+    )
+    kv = torch.randn(sum(lengths), 1024).to(torch.bfloat16)[:, ::2]
+    cache = torch.randn(10, 128, 1, 512).to(torch.bfloat16)
+    pages = torch.tensor([[2, 4, 1], [7, 5, 3], [6, 8, 9], [2, 4, 1]], dtype=torch.int32)
+    device_kv = torch.empty_strided(kv.shape, kv.stride(), dtype=kv.dtype, device="npu")
+    device_kv.copy_(kv)
+    for layer in range(2):
+        layer_cache = cache + layer
+        layer_pages = pages.roll(layer, dims=1)
+        reference = backend._pack_swa_prefill(kv, layer_cache, layer_pages, metadata)
+        packed = backend._pack_swa_prefill(device_kv, layer_cache.npu(), layer_pages.npu(), metadata)
+        for actual, expected in zip(packed[:3], reference[:3]):
+            torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+        assert packed[3] == reference[3]
+        if layer == 0:
+            first_table = packed[1]
+        else:
+            assert packed[1] is first_table
+
+
 @pytest.mark.parametrize("poison", [float("nan"), float("inf")])
 def test_swa_first_prefill_ignores_unwritten_cache_rows(monkeypatch: pytest.MonkeyPatch, poison: float) -> None:
     cfg = DeepseekV41Config.from_dict(_DSV41_FORWARD_CONFIG)
