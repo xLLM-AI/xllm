@@ -823,7 +823,7 @@ std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
   int32_t generated_token = dis(gen);
   generated_token =
       generated_token == eos_token_id ? generated_token + 1 : generated_token;
-  sequence->append_token(generated_token);
+  sequence->append_token(Token(generated_token));
 
   // Synthetic decode requests must carry the same bootstrap geometry as real
   // requests, including the concatenated Target layers consumed by block
