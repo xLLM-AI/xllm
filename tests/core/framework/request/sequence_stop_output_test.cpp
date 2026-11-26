@@ -110,7 +110,6 @@ class SequenceStopOutputTest : public ::testing::Test {
     params.logprobs = logprobs;
     params.streaming = false;
     params.enable_schedule_overlap = false;
-    params.bos_token_id = 0;
     params.request_id = "stop_output_test";
     sampling_param_.logprobs = logprobs;
     params.sampling_param = &sampling_param_;
@@ -162,39 +161,6 @@ TEST(IncrementalDecoderTest, ReusesRepeatedTokenWindow) {
   EXPECT_EQ(tokenizer.decode_calls(), decode_calls);
 }
 
-TEST_F(SequenceStopOutputTest, DecodeStreamDoesNotRepeatPrefillTokenMetadata) {
-  initialize(/*max_generated_tokens=*/8,
-             /*stop_tokens=*/{},
-             /*stop_sequences=*/{},
-             /*prompt_tokens=*/{'P'},
-             /*include_stop_str_in_output=*/false,
-             /*eos_token=*/-1,
-             /*skip_special_tokens=*/false,
-             /*logprobs=*/true);
-  sequence_->enable_checking_prefill_token();
-  EXPECT_FALSE(
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_)
-          .has_value());
-  append_token('A', -0.1f);
-  EXPECT_FALSE(sequence_->has_new_tokens_generated());
-  append_token('B', -0.2f);
-
-  auto output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_);
-  ASSERT_TRUE(output.has_value());
-  EXPECT_EQ(output->text, "B");
-  ASSERT_EQ(output->token_ids.size(), 1);
-  EXPECT_EQ(output->token_ids[0], 'B');
-  ASSERT_TRUE(output->logprobs.has_value());
-  ASSERT_EQ(output->logprobs->size(), 1);
-  EXPECT_EQ(output->logprobs->front().token_id, 'B');
-  EXPECT_FLOAT_EQ(output->logprobs->front().logprob, -0.2f);
-  EXPECT_EQ(sequence_->num_valid_generated_tokens(), 2);
-  EXPECT_FALSE(
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_)
-          .has_value());
-}
-
 TEST_F(SequenceStopOutputTest,
        DecodeStreamCompletesPrefillBytesWithoutRepeatingMetadata) {
   initialize(/*max_generated_tokens=*/8,
@@ -206,12 +172,16 @@ TEST_F(SequenceStopOutputTest,
              /*skip_special_tokens=*/false,
              /*logprobs=*/true);
   ByteFallbackTokenizer tokenizer;
-  sequence_->enable_checking_prefill_token();
   append_token(ByteFallbackTokenizer::kFirstByteTokenId, -0.1f);
+  const auto first = sequence_->generate_streaming_output(tokenizer);
+  ASSERT_TRUE(first.has_value());
+  EXPECT_TRUE(first->text.empty());
+  EXPECT_EQ(first->token_ids,
+            std::vector<int32_t>{ByteFallbackTokenizer::kFirstByteTokenId});
+
   append_token(ByteFallbackTokenizer::kLastByteTokenId, -0.2f);
 
-  auto output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer);
+  auto output = sequence_->generate_streaming_output(tokenizer);
   ASSERT_TRUE(output.has_value());
   EXPECT_EQ(output->text, "\xE4\xBD\xA0");
   ASSERT_EQ(output->token_ids.size(), 1);
@@ -228,8 +198,6 @@ TEST_F(SequenceStopOutputTest, ExplicitStopTokenPropagatesToBothOutputModes) {
   append_token(1000);
   ASSERT_TRUE(sequence_->finished());
   EXPECT_EQ(std::get<int32_t>(sequence_->generate_output().stop_reason), 1000);
-  auto fork = sequence_->fork(/*index=*/1);
-  EXPECT_EQ(std::get<int32_t>(fork->generate_output().stop_reason), 1000);
   EXPECT_EQ(
       std::get<int32_t>(sequence_->generate_output(tokenizer_).stop_reason),
       1000);
@@ -299,15 +267,13 @@ TEST_F(SequenceStopOutputTest, StreamingDoesNotEmitStopTokenDelta) {
   append_token('A');
   EXPECT_FALSE(sequence_->finished());
 
-  auto first_output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_);
+  auto first_output = sequence_->generate_streaming_output(tokenizer_);
   ASSERT_TRUE(first_output.has_value());
   EXPECT_EQ(first_output->text, "A");
 
   append_token(StopAwareTokenizer::kStopTokenId);
   ASSERT_TRUE(sequence_->finished());
-  auto stop_output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_);
+  auto stop_output = sequence_->generate_streaming_output(tokenizer_);
 
   ASSERT_TRUE(stop_output.has_value());
   EXPECT_TRUE(stop_output->text.empty());
@@ -342,15 +308,13 @@ TEST_F(SequenceStopOutputTest, StreamingIncludesStopTokenWhenRequested) {
   append_token('A');
   EXPECT_FALSE(sequence_->finished());
 
-  auto first_output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_);
+  auto first_output = sequence_->generate_streaming_output(tokenizer_);
   ASSERT_TRUE(first_output.has_value());
   EXPECT_EQ(first_output->text, "A");
 
   append_token(StopAwareTokenizer::kStopTokenId);
   ASSERT_TRUE(sequence_->finished());
-  auto stop_output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_);
+  auto stop_output = sequence_->generate_streaming_output(tokenizer_);
 
   ASSERT_TRUE(stop_output.has_value());
   EXPECT_EQ(stop_output->text, "<|observation|>");
@@ -474,8 +438,7 @@ TEST_F(SequenceStopOutputTest, StreamingBuffersPotentialStopSequence) {
   append_token('S');
   EXPECT_FALSE(sequence_->finished());
 
-  auto prefix_output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_);
+  auto prefix_output = sequence_->generate_streaming_output(tokenizer_);
   ASSERT_TRUE(prefix_output.has_value());
   EXPECT_EQ(prefix_output->text, "A");
   ASSERT_EQ(prefix_output->token_ids.size(), 3);
@@ -485,8 +448,7 @@ TEST_F(SequenceStopOutputTest, StreamingBuffersPotentialStopSequence) {
 
   append_token('>');
   ASSERT_TRUE(sequence_->finished());
-  auto stop_output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_);
+  auto stop_output = sequence_->generate_streaming_output(tokenizer_);
 
   ASSERT_TRUE(stop_output.has_value());
   EXPECT_TRUE(stop_output->text.empty());
@@ -506,15 +468,13 @@ TEST_F(SequenceStopOutputTest, StreamingDoesNotBufferStopSequenceWhenIncluded) {
   append_token('S');
   EXPECT_FALSE(sequence_->finished());
 
-  auto prefix_output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_);
+  auto prefix_output = sequence_->generate_streaming_output(tokenizer_);
   ASSERT_TRUE(prefix_output.has_value());
   EXPECT_EQ(prefix_output->text, "A<S");
 
   append_token('>');
   ASSERT_TRUE(sequence_->finished());
-  auto stop_output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_);
+  auto stop_output = sequence_->generate_streaming_output(tokenizer_);
 
   ASSERT_TRUE(stop_output.has_value());
   EXPECT_EQ(stop_output->text, ">");
@@ -599,8 +559,7 @@ TEST_F(SequenceStopOutputTest, LengthFinishFlushesStreamingStopBuffer) {
   append_token('B');
   ASSERT_TRUE(sequence_->finished());
 
-  auto output =
-      sequence_->generate_streaming_output(sequence_->num_tokens(), tokenizer_);
+  auto output = sequence_->generate_streaming_output(tokenizer_);
 
   ASSERT_TRUE(output.has_value());
   EXPECT_EQ(output->text, "AB");

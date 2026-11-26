@@ -1213,7 +1213,7 @@ TEST(SchedulerPolicyTest, DecodeQueuePlansColdBestOfCandidatesAsPrefill) {
           std::vector<Batch> prefill(1);
           prefill.front().add(first, 7);
           first->kv_state().set_kv_cache_tokens_num(7);
-          first->append_token(1);
+          first->append_token(Token(/*id=*/1));
           scheduler.add_request(request);
           auto batches = scheduler.prepare_batch_test();
           ASSERT_EQ(request->sequences().size(), 2u);
@@ -1704,7 +1704,7 @@ TEST_P(AsyncBlockReleasePolicyTest, WaitsWithoutPreemptionThenRetries) {
       Sequence* sequence = request->sequences().front().get();
       sequence->kv_state().set_kv_cache_tokens_num(
           sequence->num_prompt_tokens());
-      sequence->append_token(1);
+      sequence->append_token(Token(/*id=*/1));
     }
   }
   DequeQueue prefill_queue;
@@ -1820,7 +1820,7 @@ TEST_P(PendingVmmBatchPolicyTest, RetainsRequestsUntilBatchReleasesBlocks) {
       Sequence* sequence = request->sequences().front().get();
       sequence->kv_state().set_kv_cache_tokens_num(
           sequence->num_prompt_tokens());
-      sequence->append_token(1);
+      sequence->append_token(Token(/*id=*/1));
     }
   }
   DequeQueue prefill_queue;
@@ -2003,7 +2003,7 @@ TEST(SchedulerPolicyTest,
       cached_requests.front()->sequences().front().get();
   sequence->kv_state().set_kv_cache_tokens_num(kPromptTokens);
   for (int32_t token_id = 0; token_id <= kPromptTokens; ++token_id) {
-    sequence->append_token(token_id);
+    sequence->append_token(Token(token_id));
   }
   sequence->kv_state().set_kv_cache_tokens_num(0);
   ASSERT_TRUE(prefix_cache_pool.allocate(cached_sequence));

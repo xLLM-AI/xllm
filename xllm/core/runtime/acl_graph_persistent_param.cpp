@@ -699,8 +699,7 @@ void GraphPersistentParam::update_spec_verify_inputs(
     kernel::npu::tilelang::spec_verify_token_update(
         params.graph.input_tokens_override,
         params.graph.spec_verify_draft_token_sources,
-        persistent_tokens_,
-        spec_width);
+        persistent_tokens_);
   } else {
     persistent_tokens_.narrow(0, 0, total_tokens).copy_(graph_tokens, true);
   }

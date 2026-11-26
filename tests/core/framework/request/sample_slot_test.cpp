@@ -227,12 +227,6 @@ TEST(RequestTest, GenerateOutputReturnsSequenceFailureStatus) {
                  "json_object constrained decoding failed");
   request.sequences()[0]->fail(failure);
 
-  Sequence copied_sequence(*request.sequences()[0], /*index=*/1);
-  EXPECT_EQ(copied_sequence.sample_sequence_id(), "req-error#1");
-
-  EXPECT_TRUE(copied_sequence.finished());
-  ASSERT_TRUE(copied_sequence.error_status().has_value());
-
   CharTokenizer tokenizer;
   const RequestOutput output = request.generate_output(tokenizer);
 

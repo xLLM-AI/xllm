@@ -697,19 +697,6 @@ TORCH_LIBRARY(xllm_ops, m) {
   m.def(
       "shared_linear_state_indices_out(Tensor ids, Tensor rows, Tensor(a!) "
       "out) -> ()");
-  m.def(
-      "dspark_allocate_verify_prefixes(Tensor confidence, "
-      "Tensor(a!) widths, int budget) -> ()");
-  m.def(
-      "dspark_allocate_verify_prefixes_graph(Tensor(a!) arena, "
-      "Tensor control, int capacity, int draft_width=7) -> ()");
-  m.def(
-      "dspark_pack_verify_inputs(Tensor anchors, Tensor proposals, "
-      "Tensor base_positions, Tensor base_kv_lengths, Tensor base_block_table, "
-      "Tensor widths, Tensor(a!) offsets, Tensor(b!) tokens, "
-      "Tensor(c!) positions, Tensor(d!) kv_seq_lens, Tensor(e!) slot_mapping, "
-      "Tensor(f!) block_table, Tensor(g!) q_seq_lens, Tensor(h!) owners, "
-      "Tensor(i!) columns, int block_size) -> ()");
   m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
   m.def(
       "rms_norm_gated(Tensor input, Tensor gate, Tensor weight, float eps) -> "
@@ -853,8 +840,6 @@ TORCH_LIBRARY(xllm_ops, m) {
       "moe_init_routing_v3(Tensor x, Tensor expert_idx, int active_num, "
       "int expert_num, int[] active_expert_range, int quant_mode) -> "
       "(Tensor, Tensor, Tensor, Tensor)");
-  m.def("has_moe_grouped_matmul_swiglu_quant() -> bool");
-  m.def("has_moe_init_routing_v3() -> bool");
   m.def(
       "quantize_per_tensor(Tensor self, Tensor scales, Tensor zero_points, "
       "ScalarType dtype, int axis) -> Tensor");
@@ -992,15 +977,6 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl(
       "shared_linear_state_indices_out",
       TORCH_FN(xllm::kernel::npu::tilelang::shared_linear_state_indices_out));
-  m.impl(
-      "dspark_allocate_verify_prefixes",
-      TORCH_FN(xllm::kernel::npu::tilelang::dspark_allocate_verify_prefixes));
-  m.impl(
-      "dspark_allocate_verify_prefixes_graph",
-      TORCH_FN(
-          xllm::kernel::npu::tilelang::dspark_allocate_verify_prefixes_graph));
-  m.impl("dspark_pack_verify_inputs",
-         TORCH_FN(xllm::kernel::npu::tilelang::dspark_pack_verify_inputs));
   m.impl("rms_norm", TORCH_FN(xllm::rms_norm_npu));
   m.impl("rms_norm_gated", TORCH_FN(xllm::rms_norm_gated_npu));
   m.impl("fused_add_gemma_rms_norm",
@@ -1085,10 +1061,6 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
 // runs only on the eager prefill path, so it needs no fake/meta registration;
 // decode graph capture is phase-disjoint.
 TORCH_LIBRARY_IMPL(xllm_ops, CompositeExplicitAutograd, m) {
-  m.impl("has_moe_grouped_matmul_swiglu_quant",
-         TORCH_FN(xllm::kernel::npu::has_moe_grouped_matmul_swiglu_quant));
-  m.impl("has_moe_init_routing_v3",
-         TORCH_FN(xllm::kernel::npu::has_moe_init_routing_v3));
   m.impl("has_mla_preprocess_v2",
          TORCH_FN(xllm::kernel::npu::has_mla_preprocess_v2));
   m.impl("build_cp_context", TORCH_FN(xllm::build_cp_context_npu));

@@ -33,7 +33,6 @@ namespace {
 struct StreamOutputWork {
   bool has_open_sequences = false;
   std::vector<size_t> indexes;
-  std::vector<size_t> num_tokens;
   Usage usage;
 };
 
@@ -47,12 +46,12 @@ StreamOutputWork prepare_stream_output(Request& request) {
     }
     work.has_open_sequences = true;
 
-    if (sequence->has_new_tokens_generated() || sequence->finished()) {
+    const bool finished = sequence->finished();
+    if (sequence->has_new_tokens_generated() || finished) {
       work.indexes.push_back(i);
-      work.num_tokens.push_back(sequence->num_tokens());
     }
 
-    if (sequence->finished()) {
+    if (finished) {
       sequence->close();
     }
   }
@@ -255,7 +254,6 @@ void RequestOutputDispatcher::process_stream_request(
                    request,
                    this,
                    indexes = std::move(work.indexes),
-                   num_tokens = std::move(work.num_tokens),
                    usage = work.usage]() {
     AUTO_COUNTER(responsing_latency_seconds_stream);
 
@@ -266,11 +264,9 @@ void RequestOutputDispatcher::process_stream_request(
     req_output.stream = request->state().stream;
     req_output.response_formatter = request->state().response_formatter;
     req_output.usage = usage;
-    for (size_t i = 0; i < indexes.size(); ++i) {
-      const size_t index = indexes[i];
-      const size_t size = num_tokens[i];
+    for (const size_t index : indexes) {
       auto& seq = request->sequences()[index];
-      auto seq_output = seq->generate_streaming_output(size, *tokenizer_);
+      auto seq_output = seq->generate_streaming_output(*tokenizer_);
       if (seq_output.has_value()) {
         req_output.outputs.push_back(std::move(seq_output.value()));
       }
@@ -318,7 +314,6 @@ void RequestOutputDispatcher::batch_process_stream_requests(
                      counter,
                      request,
                      indexes = std::move(work.indexes),
-                     num_tokens = std::move(work.num_tokens),
                      usage = work.usage,
                      req_output = &request_outputs[i]]() mutable {
       AUTO_COUNTER(responsing_latency_seconds_stream);
@@ -331,12 +326,10 @@ void RequestOutputDispatcher::batch_process_stream_requests(
       req_output->stream = request->state().stream;
       req_output->response_formatter = request->state().response_formatter;
       req_output->usage = usage;
-      for (size_t i = 0; i < indexes.size(); ++i) {
-        const size_t index = indexes[i];
-        const size_t size = num_tokens[i];
+      for (const size_t index : indexes) {
         auto& seq = request->sequences()[index];
 
-        auto seq_output = seq->generate_streaming_output(size, *tokenizer_);
+        auto seq_output = seq->generate_streaming_output(*tokenizer_);
         if (seq_output.has_value()) {
           req_output->outputs.push_back(std::move(seq_output.value()));
         }

@@ -183,28 +183,6 @@ std::shared_ptr<Request> make_mtp_request(const std::vector<int32_t>& tokens) {
 
 }  // namespace
 
-TEST(SequenceMtpPrefixCacheTest, BoundaryRewriteInvalidatesEveryStride) {
-  std::vector<int32_t> tokens(65, 7);
-  Sequence sequence = make_mtp_sequence(tokens);
-  sequence.update_block_hashes(/*block_size=*/16, BlockHasherType::MTP_TEXT);
-  ASSERT_EQ(sequence.block_hashes().size(), 4u);
-  const XXH3Key first_hash = sequence.block_hashes()[0];
-  sequence.update_block_hashes(/*block_size=*/32, BlockHasherType::MTP_TEXT);
-  ASSERT_EQ(sequence.block_hashes().size(), 2u);
-
-  sequence.update_token(/*index=*/32, Token(8));
-  EXPECT_TRUE(sequence.block_hashes().empty());
-  tokens[32] = 8;
-  Sequence fresh = make_mtp_sequence(tokens);
-  for (uint32_t stride : {16u, 32u}) {
-    sequence.update_block_hashes(stride, BlockHasherType::MTP_TEXT);
-    fresh.update_block_hashes(stride, BlockHasherType::MTP_TEXT);
-    EXPECT_TRUE(sequence.block_hashes() == fresh.block_hashes());
-  }
-  sequence.update_block_hashes(/*block_size=*/16, BlockHasherType::MTP_TEXT);
-  EXPECT_EQ(sequence.block_hashes()[0], first_hash);
-}
-
 TEST(SequenceMtpPrefixCacheTest, OverlapPlaceholdersNeverEnterHashChain) {
   Sequence sequence = make_mtp_sequence(std::vector<int32_t>(16, 7),
                                         /*overlap=*/true);
@@ -215,23 +193,6 @@ TEST(SequenceMtpPrefixCacheTest, OverlapPlaceholdersNeverEnterHashChain) {
   sequence.update_last_step_token(Token(8), /*token_offset=*/0);
   sequence.update_block_hashes(/*block_size=*/16, BlockHasherType::MTP_TEXT);
   EXPECT_EQ(sequence.block_hashes().size(), 1u);
-}
-
-TEST(SequenceMtpPrefixCacheTest, CopyRetainsMtpInvalidationPolicy) {
-  const std::vector<int32_t> tokens(33, 7);
-  Sequence source = make_mtp_sequence(tokens);
-  source.update_block_hashes(/*block_size=*/16, BlockHasherType::MTP_TEXT);
-  Sequence copy(source);
-  copy.update_token(/*index=*/16, Token(8));
-  EXPECT_TRUE(copy.block_hashes().empty());
-  EXPECT_EQ(source.block_hashes().size(), 2u);
-
-  Sequence ordinary = make_mtp_sequence(tokens);
-  ordinary.update_block_hashes(/*block_size=*/16, BlockHasherType::TEXT);
-  const XXH3Key first = ordinary.block_hashes()[0];
-  ordinary.update_token(/*index=*/16, Token(8));
-  ASSERT_EQ(ordinary.block_hashes().size(), 1u);
-  EXPECT_EQ(ordinary.block_hashes()[0], first);
 }
 
 TEST(CompositeMtpPrefixCacheTest, PublishesCompletedKvWithConfirmedLookahead) {

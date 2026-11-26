@@ -99,8 +99,6 @@ struct SequenceParams {
 
   bool is_graph_warmup = false;
 
-  int32_t bos_token_id = 0;
-
   // request id for suffix-decoding request identity
   std::string request_id;
 
@@ -123,7 +121,7 @@ struct SequenceParams {
 // One generation stream of a request: the token buffer, KV/logprob state,
 // stopping and timing bookkeeping, and the detokenizing output path of a plain
 // LLM / VLM request.
-class Sequence {
+class Sequence final {
  public:
   // Decoder seeded by the prompt tokens (LLM / VLM).
   Sequence(size_t index,
@@ -133,13 +131,7 @@ class Sequence {
            IncrementalDecoder incremental_decoder,
            const SequenceParams& seq_params);
 
-  Sequence(const Sequence& other);
-  Sequence(const Sequence& other, size_t index);
-  virtual ~Sequence();
-
-  // Polymorphic copy for best_of expansion: same request, new index.
-  // Derived types return their own type so no state is sliced away.
-  virtual std::unique_ptr<Sequence> fork(size_t index) const;
+  ~Sequence();
 
   size_t index() const { return index_; }
 
@@ -158,7 +150,7 @@ class Sequence {
   }
   const torch::Tensor& mrope_positions() const { return mrope_positions_; }
   bool has_mrope_positions() const {
-    return mrope_positions_.defined() && mrope_positions_.dim() == 2 &&
+    return mrope_positions_.defined() &&
            mrope_positions_.size(1) == static_cast<int64_t>(num_tokens_);
   }
 
@@ -205,11 +197,6 @@ class Sequence {
     return {tokens_, kv_state_.kv_cache_tokens_num()};
   }
 
-  // get token ids in host kv cache
-  Slice<int32_t> cached_host_tokens() const {
-    return {tokens_, host_kv_state_.kv_cache_tokens_num()};
-  }
-
   // get the number of tokens need compute
   size_t num_need_compute_tokens() const {
     return num_tokens_ - kv_cache_tokens_num();
@@ -226,8 +213,6 @@ class Sequence {
   // add a new token id to the sequence and update the count
   // the token would be discarded if the sequence is still in prefill stage
   void append_token(const Token& token);
-  void append_token(int64_t token_id) { append_token(Token(token_id)); }
-  void update_token(size_t index, const Token& token);
   void update_last_step_token(const Token& token, size_t token_offset = 0);
   bool has_new_tokens_generated() const {
     return num_tokens_ > stream_output_token_offset_;
@@ -261,10 +246,6 @@ class Sequence {
     return kv_state_.get_linear_block_id();
   }
 
-  int32_t get_recurrent_state_slot_id() const {
-    return get_linear_state_slot_id();
-  }
-
   // The request id already lives in sequence_params_; don't keep a second
   // copy per sequence (a heap allocation each for UUID-length ids).
   const std::string& request_id() const { return sequence_params_.request_id; }
@@ -278,8 +259,6 @@ class Sequence {
   bool has_input_embedding() const { return input_embedding_.defined(); }
 
   void add_blocks(BlockType type, const std::vector<Block>& blocks);
-  void add_host_blocks(BlockType type, const std::vector<Block>& blocks);
-  void add_shared_host_blocks(BlockType type, std::vector<Block>&& blocks);
 
   // Precomputed chained block hashes used by the prefix cache. Covers all full
   // blocks with available token dependencies; reused by match()/insert() so the
@@ -331,13 +310,11 @@ class Sequence {
   void finish();
   void fail(Status status);
 
-  // get the output of the sequence until the specified number of tokens,
-  // returns nullopt if no delta text and not finished
-  virtual std::optional<SequenceOutput> generate_streaming_output(
-      size_t size,
+  // Return newly available output, skipping trailing placeholders.
+  std::optional<SequenceOutput> generate_streaming_output(
       const Tokenizer& tokenizer);
   // get the full output of the sequence
-  virtual SequenceOutput generate_output(const Tokenizer& tokenizer);
+  SequenceOutput generate_output(const Tokenizer& tokenizer);
   SequenceOutput generate_output();
   void generate_sample_outputs(std::vector<SequenceOutput>& outputs,
                                const Tokenizer& tokenizer);
@@ -372,12 +349,6 @@ class Sequence {
     return generated_tokens_since_latency_;
   }
 
-  void set_wait_time_ms() {
-    wait_time_ms_ = static_cast<int32_t>(
-        absl::ToDoubleSeconds(absl::Now() - latest_generate_time_) * 1000);
-  }
-  int32_t get_wait_time_ms() const { return wait_time_ms_; }
-
   // set sequence ttft
   void set_time_to_first_token_latency_seconds(
       double time_to_first_token_latency_seconds) {
@@ -390,14 +361,6 @@ class Sequence {
   void set_dp_rank(int32_t dp_rank) { dp_rank_ = dp_rank; }
 
   int32_t dp_rank() const { return dp_rank_; }
-
-  void enable_checking_prefill_token() {
-    decoder_.enable_checking_prefill_token();
-    // Prefill already emitted this token's metadata. Keep the text decoder
-    // independent so it can still complete an unfinished byte sequence.
-    stream_output_token_offset_ =
-        std::max(stream_output_token_offset_, num_prompt_tokens_ + 1);
-  }
 
   KVCacheState& kv_state() { return kv_state_; }
 
@@ -434,8 +397,6 @@ class Sequence {
                : *sequence_params_.sample_slots;
   }
 
-  bool check_need_unique_tokens() { return need_unique_tokens_; }
-
   void set_estimated_latency(double estimated_latency) {
     estimated_latency_ = estimated_latency;
   }
@@ -460,39 +421,12 @@ class Sequence {
     return last_token_handled_.load(std::memory_order_relaxed);
   }
 
- protected:
-  // How a derived type seeds the decoder instead of using the prompt tokens:
-  // `num_bos_tokens` BOS tokens in a buffer of `capacity` slots.
-  struct DecoderSeed {
-    size_t num_bos_tokens = 0;
-    size_t capacity = 0;
-  };
-
-  // Internal construction with an explicit decoder seed and logprob policy.
-  Sequence(size_t index,
-           const DecoderSeed& seed,
-           torch::Tensor input_embedding,
-           const MMData& mm_data,
-           const IncrementalDecoder& incremental_decoder,
-           const SequenceParams& seq_params,
-           bool force_token_logprobs);
-
-  // Hooks for derived types. Defaults are the plain LLM behavior.
-  // Whether a token may be appended before any KV cache has been filled.
-  virtual bool allows_append_before_prefill() const { return false; }
-  // Whether the sequence can only be finished once it generated a token.
-  virtual bool requires_generated_token_to_finish() const { return false; }
-
-  // Read access for derived output paths.
-  const SequenceParams& sequence_params() const { return sequence_params_; }
-  const torch::Tensor& output_embedding() const { return output_embedding_; }
+ private:
   // Number of leading tokens that are real: trailing placeholder tokens (< 0,
   // appended under schedule overlap) are excluded.
   size_t num_valid_tokens() const;
 
- private:
   void init_request_state();
-  void init_logprob_state(bool force_token_logprobs);
 
   void record_first_token(const Token& token);
   bool try_commit_json_object_token(int32_t token_id, int64_t token_offset);
@@ -514,7 +448,6 @@ class Sequence {
   void generate_embeddings_output(SequenceOutput& output);
   void generate_mm_embeddings_output(SequenceOutput& output);
 
-  int32_t wait_time_ms_ = 0;
   double estimated_latency_ = 0.0;
 
   // the index of the sequence in the request

@@ -45,8 +45,6 @@ class LogprobState {
   LogprobState() = default;
   ~LogprobState() = default;
 
-  LogprobState(const LogprobState&) = default;
-  LogprobState& operator=(const LogprobState&) = default;
   LogprobState(LogprobState&&) = default;
   LogprobState& operator=(LogprobState&&) = default;
 

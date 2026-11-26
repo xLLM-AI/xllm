@@ -58,42 +58,6 @@ void Sequence::init_request_state() {
   }
 }
 
-void Sequence::init_logprob_state(bool force_token_logprobs) {
-  const bool enable_logprobs =
-      sequence_params_.sampling_param->logprobs || force_token_logprobs;
-  const bool enable_top_logprobs =
-      sequence_params_.sampling_param->top_logprobs > 0;
-  logprob_state_ = LogprobState(
-      num_prompt_tokens_, tokens_.size(), enable_logprobs, enable_top_logprobs);
-}
-
-Sequence::Sequence(size_t index,
-                   const DecoderSeed& seed,
-                   torch::Tensor input_embedding,
-                   const MMData& mm_data,
-                   const IncrementalDecoder& decoder,
-                   const SequenceParams& seq_params,
-                   bool force_token_logprobs)
-    : index_(index),
-      mm_data_(mm_data),
-      latest_generate_time_(absl::Now()),
-      sequence_params_(seq_params),
-      decoder_(decoder),
-      stream_output_token_offset_(decoder_.output_offset()) {
-  init_request_state();
-
-  num_prompt_tokens_ = seed.num_bos_tokens;
-  tokens_.resize(seed.capacity);
-  for (size_t i = 0; i < num_prompt_tokens_; ++i) {
-    tokens_[num_tokens_++] = sequence_params_.bos_token_id;
-    token_to_count_map_[sequence_params_.bos_token_id]++;
-  }
-  volatile_num_prompt_tokens_ = num_prompt_tokens_;
-  input_embedding_ = std::move(input_embedding);
-  cur_generated_token_idx_ = num_prompt_tokens_;
-  init_logprob_state(force_token_logprobs);
-}
-
 Sequence::Sequence(size_t index,
                    const std::vector<int32_t>& prompt_token_ids,
                    torch::Tensor input_embedding,
@@ -126,7 +90,11 @@ Sequence::Sequence(size_t index,
   tokens_.resize(capacity);
   num_tokens_ = num_prompt_tokens_;
 
-  init_logprob_state(/*force_token_logprobs=*/false);
+  logprob_state_ =
+      LogprobState(num_prompt_tokens_,
+                   capacity,
+                   sequence_params_.sampling_param->logprobs,
+                   sequence_params_.sampling_param->top_logprobs > 0);
 
   if (sequence_params_.sampling_param->frequency_penalty != 0 ||
       sequence_params_.sampling_param->presence_penalty != 0 ||
@@ -145,65 +113,6 @@ Sequence::Sequence(size_t index,
   token_to_count_map_[prompt_token_ids.back()] = 0;
   input_embedding_ = std::move(input_embedding);
   cur_generated_token_idx_ = num_prompt_tokens_;
-}
-
-std::unique_ptr<Sequence> Sequence::fork(size_t index) const {
-  return std::make_unique<Sequence>(*this, index);
-}
-
-Sequence::Sequence(const Sequence& other) : Sequence(other, other.index_) {}
-
-Sequence::Sequence(const Sequence& other, size_t index)
-    : index_(index),
-      kv_state_(other.kv_state_),
-      host_kv_state_(other.host_kv_state_),
-      effective_restore_tokens_(other.effective_restore_tokens_),
-      host_cache_copy_units_(other.host_cache_copy_units_),
-      latest_generate_time_(other.latest_generate_time_),
-      generated_tokens_since_latency_(other.generated_tokens_since_latency_),
-      time_to_first_token_latency_seconds_(
-          other.time_to_first_token_latency_seconds_),
-      is_first_token_(other.is_first_token_),
-      is_cache_block_for_prefill_(other.is_cache_block_for_prefill_),
-      sequence_params_(other.sequence_params_),
-      decoder_(other.decoder_),
-      stream_output_token_offset_(other.stream_output_token_offset_),
-      tokens_(other.tokens_),
-      input_embedding_(other.input_embedding_),
-      mm_data_(other.mm_data_),
-      mrope_position_delta_(other.mrope_position_delta_),
-      mrope_positions_(other.mrope_positions_),
-      output_embedding_(other.output_embedding_),
-      mtp_bootstrap_embedding_(other.mtp_bootstrap_embedding_),
-      num_tokens_(other.num_tokens_),
-      token_to_count_map_(other.token_to_count_map_),
-      num_prompt_tokens_(other.num_prompt_tokens_),
-      block_hashes_by_stride_(other.block_hashes_by_stride_),
-      hash_block_size_(other.hash_block_size_),
-      hash_type_(other.hash_type_),
-      linear_state_hashes_(other.linear_state_hashes_),
-      linear_hash_stride_(other.linear_hash_stride_),
-      json_object_state_(other.json_object_state_),
-      volatile_num_prompt_tokens_(other.volatile_num_prompt_tokens_),
-      finished_(other.finished_),
-      finish_status_invalidated_(other.finish_status_invalidated_),
-      finish_reason_(other.finish_reason_),
-      stop_reason_(other.stop_reason_),
-      matched_stop_token_count_(other.matched_stop_token_count_),
-      closed_(other.closed_),
-      dp_rank_(other.dp_rank_),
-      cur_generated_token_idx_(other.cur_generated_token_idx_),
-      first_token_(other.first_token_) {
-  logprob_state_ = other.logprob_state_;
-  // A forked sequence (best_of) shares the prompt KV prefix by
-  // ref-counting those blocks, but its linear-state / embedding resource block
-  // is private: drop the copied Embedding and Linear blocks so this sequence
-  // allocates its own on the next allocate. Preserves the pre-map behavior
-  // where the private slot was never copied by this constructor.
-  kv_state_.erase_blocks(BlockType::EMBEDDING);
-  kv_state_.erase_blocks(BlockType::LINEAR);
-  host_kv_state_.erase_blocks(BlockType::EMBEDDING);
-  host_kv_state_.erase_blocks(BlockType::LINEAR);
 }
 
 void Sequence::record_speculative_token_stats(
@@ -279,10 +188,8 @@ void Sequence::append_token(const Token& token) {
       << "exceed the token capacity of the sequence";
   CHECK(!finished_ && !error_status().has_value())
       << "cannot append token to a finished sequence";
-  if (!allows_append_before_prefill()) {
-    CHECK(kv_state_.kv_cache_tokens_num() > 0 && !is_chunked_prefill_stage())
-        << "cannot append token to a prefill sequence";
-  }
+  CHECK(kv_state_.kv_cache_tokens_num() > 0 && !is_chunked_prefill_stage())
+      << "cannot append token to a prefill sequence";
 
   const int32_t token_id = static_cast<int32_t>(token.id);
   if (!try_commit_json_object_token(token_id, /*token_offset=*/-1)) {
@@ -382,30 +289,6 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
   finish_status_invalidated_ = true;
 }
 
-void Sequence::update_token(size_t index, const Token& token) {
-  // TODO: not record in non-disagg pd mode.
-  record_first_token(token);
-
-  const int32_t origin_token_id = tokens_[index];
-  const int32_t token_id = static_cast<int32_t>(token.id);
-  tokens_[index] = token_id;
-  // A rewritten token invalidates the cached hash of its block and all
-  // subsequent blocks; recompute lazily on the next update_block_hashes().
-  invalidate_block_hashes_from(index);
-  invalidate_linear_state_hashes_from(index);
-  if (need_unique_tokens_) {
-    --token_to_count_map_[origin_token_id];
-    ++token_to_count_map_[token_id];
-  }
-  // update logprobs if needed
-  if (sequence_params_.sampling_param->logprobs) {
-    logprob_state_.update_logprob(
-        index, token, sequence_params_.sampling_param->top_logprobs);
-  }
-  // logprobs_[index] = token.logprob;
-  finish_status_invalidated_ = true;
-}
-
 void Sequence::update_mm_embeddings(
     const std::vector<torch::Tensor>& mm_embeddings,
     EmbeddingOutputMetadata metadata) {
@@ -467,10 +350,8 @@ size_t Sequence::num_valid_generated_tokens() const {
 }
 
 std::optional<SequenceOutput> Sequence::generate_streaming_output(
-    size_t /*size*/,
     const Tokenizer& tokenizer) {
-  // The requested size has always been superseded by the scan for the last
-  // real token (placeholders under schedule overlap); keep that behavior.
+  // Delayed callbacks can drain tokens accumulated across multiple steps.
   const size_t size = num_valid_tokens();
   if (size < stream_output_token_offset_) {
     return std::nullopt;
@@ -488,37 +369,6 @@ std::optional<SequenceOutput> Sequence::generate_streaming_output(
 
   const size_t token_start = stream_output_token_offset_;
   auto delta = decoder_.decode(decodable_ids, tokenizer);
-  // NOTE:
-  // There is a incomprehensible logic here: we use a thread pool to handle
-  // request callbacks in response handler, which means that the main thread and
-  // the tasks processing callbacks execute concurrently. This gives rise to a
-  // scenario where the main thread finish forwarding, but the callbacks of some
-  // previous steps have not yet been executed. However, the main thread
-  // forwarding operation modifies sequence information such as um_tokens, which
-  // may cause callback handle a previous step to process all accumulated tokens
-  // directly when executing "generate_streaming_output" in a streaming
-  // scenario. Example: output-1:
-  // - step1: data:
-  // {"id":"1","object":"text_completion","created":1,"model":"model","choices":[{"index":0,"text":",
-  //   I'm"}]}
-  // - step2: data:
-  // {"id":"1","object":"text_completion","created":1,"model":"model","choices":[{"index":0,"text":",
-  //   trying"}]}
-  // - step3: data:
-  // {"id":"1","object":"text_completion","created":1,"model":"model","choices":[{"index":0,"text":",
-  //   to"}]}
-  // output-2:
-  // - step1: data:
-  // {"id":"1","object":"text_completion","created":1,"model":"model","choices":[{"index":0,"text":",
-  //   I'm trying to"}]}
-  // - step2: data:
-  // {"id":"1","object":"text_completion","created":1,"model":"model","choices":[{"index":0,"text":"","finish_reason":"length"}]}
-  // - step3: data:
-  // {"id":"1","object":"text_completion","created":1,"model":"model","choices":[{"index":0,"text":"","finish_reason":"length"}]}
-  //
-  // We consider both of these cases to be valid,
-  // subsequent callbacks only need to skip to return tokens.
-  //
   const size_t token_end = size;
   if (delta.empty() && token_start == token_end) {
     return std::nullopt;
@@ -698,11 +548,6 @@ void Sequence::add_blocks(BlockType type, const std::vector<Block>& blocks) {
   kv_state_.add_blocks(type, blocks);
 }
 
-void Sequence::add_host_blocks(BlockType type,
-                               const std::vector<Block>& blocks) {
-  host_kv_state_.add_blocks(type, blocks);
-}
-
 size_t Sequence::num_prefix_cache_tokens() const {
   size_t cached_tokens = std::max(kv_state_.shared_tokens_num(),
                                   host_kv_state_.shared_tokens_num());
@@ -759,11 +604,6 @@ void Sequence::reset() {
   volatile_num_prompt_tokens_ = num_tokens_;
 }
 
-void Sequence::add_shared_host_blocks(BlockType type,
-                                      std::vector<Block>&& blocks) {
-  host_kv_state_.add_shared_blocks(type, std::move(blocks), num_tokens_);
-}
-
 Slice<XXH3Key> Sequence::block_hashes() const {
   const auto it = block_hashes_by_stride_.find(hash_block_size_);
   if (it == block_hashes_by_stride_.end()) {
@@ -812,7 +652,7 @@ void Sequence::invalidate_block_hashes_from(size_t token_index) {
   // Truncate every stride's chain at the first block the rewrite touched; each
   // stride recomputes lazily on its next update_block_hashes().
   for (auto& [block_size, hashes] : block_hashes_by_stride_) {
-    if (hashes.empty() || block_size == 0) {
+    if (hashes.empty()) {
       continue;
     }
     const size_t first_stale_block = stale_token / block_size;
@@ -847,7 +687,7 @@ void Sequence::update_linear_state_hashes(uint32_t chunk_stride) {
 }
 
 void Sequence::invalidate_linear_state_hashes_from(size_t token_index) {
-  if (linear_state_hashes_.empty() || linear_hash_stride_ == 0) {
+  if (linear_state_hashes_.empty()) {
     return;
   }
   const size_t first_stale_chunk = token_index / linear_hash_stride_;
@@ -865,14 +705,7 @@ bool Sequence::finished() const {
     return finished_;
   }
 
-  if (requires_generated_token_to_finish() &&
-      num_tokens_ == num_prompt_tokens_) {
-    return false;
-  }
-
-  // Embedding sequence never be finished until it updates its embeddings
-  if (finish_status_invalidated_ &&
-      sequence_params_.sampling_param->is_embeddings) {
+  if (sequence_params_.sampling_param->is_embeddings) {
     return false;
   }
 

@@ -98,16 +98,12 @@ torch::Tensor grouped_matmul_out(const torch::Tensor& x,
                                  int64_t group_list_type,
                                  torch::Tensor& output);
 
-bool has_moe_grouped_matmul_swiglu_quant();
-
 std::tuple<torch::Tensor, torch::Tensor> moe_grouped_matmul_swiglu_quant(
     const torch::Tensor& x,
     const torch::Tensor& weight,
     const torch::Tensor& weight_scale,
     const torch::Tensor& x_scale,
     const torch::Tensor& group_list);
-
-bool has_moe_init_routing_v3();
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 moe_init_routing_v3(const torch::Tensor& x,

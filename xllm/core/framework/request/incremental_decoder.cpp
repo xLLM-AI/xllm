@@ -45,8 +45,8 @@ std::string IncrementalDecoder::decode(const Slice<int32_t>& token_ids,
   // byte-fallback token is waiting for its continuation.  Compare the exact
   // suffix that is relevant after the current offsets; earlier token changes
   // cannot affect this decode call.
-  if (!checking_prefill_token_ && last_decode_valid_ &&
-      last_tokenizer_ == &tokenizer && token_ids.size() >= prefix_offset_) {
+  if (last_decode_valid_ && last_tokenizer_ == &tokenizer &&
+      token_ids.size() >= prefix_offset_) {
     const auto current_ids = token_ids.slice(prefix_offset_);
     if (current_ids == last_token_ids_) {
       return {};
@@ -61,19 +61,6 @@ std::string IncrementalDecoder::decode(const Slice<int32_t>& token_ids,
     prefix_offset_ = num_prompt_tokens_ <= 6 ? 0 : num_prompt_tokens_ - 6;
     output_offset_ = num_prompt_tokens_;
     result.append(prompt_);
-  }
-
-  // In PD mode, if a prefill token can directly generate characters, the decode
-  // phase needs to skip that token. If it cannot, the decode token and that
-  // token need to generate characters together.
-  if (checking_prefill_token_ && output_offset_ < token_ids.size()) {
-    const auto prefill_token_text =
-        tokenizer.decode(token_ids.slice(output_offset_, output_offset_ + 1),
-                         skip_special_tokens_);
-    if (!absl::EndsWith(prefill_token_text, "�")) {
-      output_offset_ += 1;
-    }
-    checking_prefill_token_ = false;
   }
 
   const auto prefix_text = tokenizer.decode(
