@@ -399,6 +399,7 @@ class EngramHashState(nn.Module):
         block_table: torch.Tensor | None,
         swa_block_size: int,
         *,
+        unit_query_rows: torch.Tensor | None = None,
         replay_history: torch.Tensor | None = None,
         replay_requests: tuple[int, ...] = (),
     ) -> torch.Tensor:
@@ -409,27 +410,53 @@ class EngramHashState(nn.Module):
         device = input_ids.device
         if num_tokens == 0:
             return torch.empty((0, num_layers, self.layout.n_hash_cols), dtype=torch.int32, device=device)
-        pos = positions.reshape(-1).to(torch.int64)
-        ids = input_ids.reshape(-1).to(torch.int64)
-        req = self._sequence_index(pos, query_start_loc)
-        chunk_start = pos[query_start_loc.to(torch.int64)[req].clamp(0, num_tokens - 1)]
-        rows = torch.arange(num_tokens, device=device)
-        if query_start_loc.numel() == num_tokens + 1 and slot_mapping is not None and block_table is not None:
-            # Speculative verification flattens a request into single-token
-            # rows. Consecutive positions backed by the same physical history
-            # still read earlier tokens from this invocation, before cache writeback.
-            prior_pos = (pos - 1).clamp_min(0)
-            column = torch.div(prior_pos, swa_block_size, rounding_mode="floor") % block_table.size(1)
-            prior_slot = block_table.to(torch.int64)[req, column] * swa_block_size + prior_pos % swa_block_size
-            previous = (rows - 1).clamp_min(0)
-            slots = slot_mapping.reshape(-1)
-            continues = (rows > 0) & (pos == pos[previous] + 1) & (slots[previous] >= 0)
-            continues = continues & (slots[previous] == prior_slot)
-            starts = torch.where(continues, 0, rows).cummax(0).values
-            chunk_start = pos[starts]
+        pos = positions.reshape(-1)
+        ids = input_ids.reshape(-1)
+        on_npu = device.type in ("npu", "privateuseone")
+        prepared_decode = (
+            on_npu
+            and unit_query_rows is not None
+            and block_table is not None
+            and slot_mapping is not None
+            and replay_history is None
+        )
+        if prepared_decode:
+            from xllm.python.kernels_npu.triton.engram import prepare_unit_query_hash
 
-        comp = self.token_map[ids.clamp(0, self.token_map.numel() - 1)]
-        comp = torch.where(dead_mask.reshape(-1), ENGRAM_DEAD_ID, comp).to(torch.int64)
+            req = unit_query_rows.contiguous()
+            pos = pos.contiguous()
+            comp, chunk_start = prepare_unit_query_hash(
+                ids, pos, dead_mask, slot_mapping, block_table, swa_block_size, self.token_map, max_ngram
+            )
+        else:
+            pos = pos.to(torch.int64)
+            ids = ids.to(torch.int64)
+            if unit_query_rows is None:
+                rows = torch.arange(num_tokens, device=device)
+                ends = query_start_loc[1:].to(torch.int64).contiguous()
+                req = torch.searchsorted(ends, rows, right=True).clamp(0, max(ends.numel() - 1, 0))
+            else:
+                # Prepared unit-width offsets give each physical row its own table, including padding.
+                rows = unit_query_rows.to(torch.int64)
+                req = rows
+            if query_start_loc.numel() == num_tokens + 1 and slot_mapping is not None and block_table is not None:
+                # Speculative verification flattens a request into single-token
+                # rows. Consecutive positions backed by the same physical history
+                # still read earlier tokens from this invocation, before cache writeback.
+                prior_pos = (pos - 1).clamp_min(0)
+                column = torch.div(prior_pos, swa_block_size, rounding_mode="floor") % block_table.size(1)
+                prior_slot = block_table.to(torch.int64)[req, column] * swa_block_size + prior_pos % swa_block_size
+                previous = (rows - 1).clamp_min(0)
+                slots = slot_mapping.reshape(-1)
+                continues = (rows > 0) & (pos == pos[previous] + 1) & (slots[previous] >= 0)
+                continues = continues & (slots[previous] == prior_slot)
+                starts = torch.where(continues, 0, rows).cummax(0).values
+                chunk_start = pos[starts]
+            else:
+                chunk_start = pos[query_start_loc.to(torch.int64)[req].clamp(0, num_tokens - 1)]
+
+            comp = self.token_map[ids.clamp(0, self.token_map.numel() - 1)]
+            comp = torch.where(dead_mask.reshape(-1), ENGRAM_DEAD_ID, comp).to(torch.int64)
 
         cache = self._cache
         mapped_history = None
@@ -440,7 +467,7 @@ class EngramHashState(nn.Module):
             mapped_history = self.token_map[replay_history.clamp(0, self.token_map.numel() - 1).to(torch.int64)]
             mapped_history = torch.where(replay_valid, mapped_history, ENGRAM_DEAD_ID)
             request_floors = positions.new_tensor(replay_requests)
-        if input_ids.device.type in ("npu", "privateuseone"):
+        if on_npu:
             from xllm.python.kernels_npu.triton.engram import hash_rows
 
             output = hash_rows(
@@ -458,8 +485,13 @@ class EngramHashState(nn.Module):
                 self.offsets,
                 self.pad_id,
             )
-            if slot_mapping is not None and cache is not None:
-                self._write_hash_cache(cache, comp, slot_mapping)
+            if cache is not None and slot_mapping is not None:
+                if prepared_decode and in_acl_graph():
+                    from xllm.python.kernels_npu.triton.engram import write_unit_query_history
+
+                    write_unit_query_history(cache, comp, slot_mapping)
+                else:
+                    self._write_hash_cache(cache, comp, slot_mapping)
             return output
 
         output = torch.empty((num_tokens, num_layers, self.layout.n_hash_cols), dtype=torch.int32, device=device)
@@ -505,17 +537,6 @@ class EngramHashState(nn.Module):
         safe = torch.where(valid, slots, torch.zeros_like(slots))
         keep = cache.index_select(0, safe)
         cache.scatter_(0, safe, torch.where(valid, comp, keep))
-
-    def _sequence_index(
-        self,
-        positions: torch.Tensor,
-        query_start_loc: torch.Tensor,
-    ) -> torch.Tensor:
-        num_tokens = positions.shape[0]
-        qsl = query_start_loc.to(torch.int64).reshape(-1)
-        ends = qsl[1:].contiguous()
-        req = torch.searchsorted(ends, torch.arange(num_tokens, device=positions.device), right=True)
-        return req.clamp(0, max(qsl.numel() - 2, 0))
 
     def _chunk_source(
         self,
@@ -814,14 +835,29 @@ class Engram(nn.Module):
         rows = rows.to(self.wkv.weight.dtype)
         kv = self.wkv(rows.flatten(-2))
         num_tokens, hc_mult, dim = hidden_states.shape
-        keys = kv[:, : hc_mult * dim].view(num_tokens, hc_mult, dim).float()
-        value = kv[:, hc_mult * dim :].float()
         hidden = hidden_states.float()
         # The gate needs the original basis; wkv already produces rotated values.
         gate_hidden = hidden
         if self.gate_unrotate is not None:
             width = self.gate_unrotate.size(0)
             gate_hidden = (hidden.reshape(-1, width) @ self.gate_unrotate).reshape_as(hidden)
+        if (
+            in_acl_graph()
+            and hidden_states.device.type in ("npu", "privateuseone")
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.is_contiguous()
+            and dim == 5120
+            and num_tokens > 0
+            and token_mask is not None
+            and token_mask.is_contiguous()
+        ):
+            from xllm.python.kernels_npu.triton.engram import engram_gate
+
+            return engram_gate(
+                hidden_states, gate_hidden, kv, self.q_weight, self.k_weight, token_mask, self.eps, _ENGRAM_GATE_CLAMP
+            )
+        keys = kv[:, : hc_mult * dim].view(num_tokens, hc_mult, dim).float()
+        value = kv[:, hc_mult * dim :].float()
         hidden_rms = torch.rsqrt(gate_hidden.square().mean(-1) + self.eps)
         key_rms = torch.rsqrt(keys.square().mean(-1) + self.eps)
         dot = (gate_hidden * self.q_weight.float() * self.k_weight.float() * keys).sum(-1)

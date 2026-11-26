@@ -595,9 +595,10 @@ class DeepseekV41Attention(Attention):
         return torch.einsum("tgd,grd->tgr", out, wo_a.view(self.n_local_groups, self.o_lora_rank, -1))
 
     def _project_packed_q_a_kv(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        from xllm.python.kernels_npu.triton.packed_projection import split_packed_projection
+
         projected = F.linear(hidden, self._packed_q_a_kv_weight)
-        q_a, kv = projected.split((self.cfg.q_lora_rank, self.head_dim), dim=-1)
-        return q_a.contiguous(), kv.contiguous()
+        return split_packed_projection(projected, self.cfg.q_lora_rank)
 
     def forward(
         self,
@@ -1168,6 +1169,7 @@ class DeepseekV41Model(nn.Module):
             swa_group.slot_mapping,
             swa_group.block_table,
             swa_group.block_size,
+            unit_query_rows=q_cu[:-1] if dsa.query_aligned_token_slots and dsa.max_query_len == 1 else None,
             replay_history=replay_history,
             replay_requests=dsa.compressed_write_floors,
         )

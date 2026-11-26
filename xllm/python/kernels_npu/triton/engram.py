@@ -21,6 +21,100 @@ import triton
 import triton.language as tl
 
 
+@triton.jit(do_not_specialize=["tokens", "table_cols", "table_stride"])
+def _prepare_unit_query_hash_kernel(
+    Ids,
+    Positions,
+    Dead,
+    Slots,
+    Blocks,
+    Map,
+    Compressed,
+    Starts,
+    tokens,
+    table_cols,
+    table_stride,
+    col_stride: tl.constexpr,
+    vocab: tl.constexpr,
+    block_size: tl.constexpr,
+    ngram: tl.constexpr,
+    tile: tl.constexpr,
+):
+    row = tl.program_id(0) * tile + tl.arange(0, tile)
+    valid = row < tokens
+    position = tl.load(Positions + row, valid, 0).to(tl.int64)
+    token = tl.load(Ids + row, valid, 0)
+    token = tl.minimum(tl.maximum(token, 0), vocab - 1)
+    compact = tl.load(Map + token, valid, 0)
+    dead = tl.load(Dead + row, valid, 0).to(tl.int1)
+    tl.store(Compressed + row, tl.where(dead, -1, compact), valid)
+
+    # Only ngram - 1 earlier tokens can enter this hash. Each link must
+    # match both the logical position and the physical SWA slot of its predecessor.
+    start = position
+    linked = valid
+    for distance in tl.static_range(1, ngram):
+        previous_row = row - distance
+        linked = linked & (previous_row >= 0)
+        previous_pos = tl.load(Positions + previous_row, linked, 0).to(tl.int64)
+        previous_slot = tl.load(Slots + previous_row, linked, -1).to(tl.int64)
+        prior = tl.maximum(position - distance, 0)
+        col = prior // block_size % table_cols
+        block = tl.load(Blocks + (previous_row + 1) * table_stride + col * col_stride, linked, 0).to(tl.int64)
+        linked = linked & (previous_pos == position - distance) & (previous_slot >= 0)
+        linked = linked & (previous_slot == block * block_size + prior % block_size)
+        start = tl.where(linked, previous_pos, start)
+    tl.store(Starts + row, start, valid)
+
+
+def prepare_unit_query_hash(
+    ids: torch.Tensor,
+    positions: torch.Tensor,
+    dead: torch.Tensor,
+    slots: torch.Tensor,
+    blocks: torch.Tensor,
+    block_size: int,
+    token_map: torch.Tensor,
+    ngram: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    tokens = ids.numel()
+    compressed = torch.empty(tokens, dtype=torch.int32, device=ids.device)
+    starts = torch.empty(tokens, dtype=positions.dtype, device=ids.device)
+    _prepare_unit_query_hash_kernel[(triton.cdiv(tokens, 16),)](
+        ids.contiguous(),
+        positions.contiguous(),
+        dead.contiguous(),
+        slots.contiguous(),
+        blocks,
+        token_map,
+        compressed,
+        starts,
+        tokens,
+        blocks.size(1),
+        blocks.stride(0),
+        blocks.stride(1),
+        token_map.numel(),
+        block_size,
+        ngram,
+        16,
+    )
+    return compressed, starts
+
+
+@triton.jit(do_not_specialize=["tokens"])
+def _write_unit_query_history_kernel(Cache, Compressed, Slots, tokens, TILE: tl.constexpr):
+    row = tl.program_id(0) * TILE + tl.arange(0, TILE)
+    slot = tl.load(Slots + row, row < tokens, -1).to(tl.int64)
+    compact = tl.load(Compressed + row, row < tokens, 0)
+    tl.store(Cache + slot, compact, (row < tokens) & (slot >= 0))
+
+
+def write_unit_query_history(cache: torch.Tensor, compressed: torch.Tensor, slots: torch.Tensor) -> None:
+    # Hashing must finish reading the old ring before any program writes current tokens.
+    tokens = compressed.numel()
+    _write_unit_query_history_kernel[(triton.cdiv(tokens, 64),)](cache, compressed, slots.contiguous(), tokens, 64)
+
+
 @triton.jit(do_not_specialize=["tokens", "table_rows", "table_cols", "table_row_stride", "table_col_stride"])
 def _hash_kernel(
     Comp,
@@ -228,4 +322,72 @@ def lookup_int8(
             mapped_host,
             e8m0,
         )
+    return output
+
+
+@triton.jit
+def _engram_gate_kernel(
+    residual,
+    gate_hidden,
+    projected,
+    query_weight,
+    key_weight,
+    mask,
+    output,
+    EPS: tl.constexpr,
+    CLAMP: tl.constexpr,
+    HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    token = row // HEADS
+    head = row % HEADS
+    col = tl.arange(0, TILE)
+    keep = col < DIM
+    offset = row * DIM + col
+    base = token * (HEADS + 1) * DIM
+    hidden = tl.load(gate_hidden + offset, keep, 0).to(tl.float32)
+    key = tl.load(projected + base + head * DIM + col, keep, 0).to(tl.float32)
+    qw = tl.load(query_weight + head * DIM + col, keep, 0).to(tl.float32)
+    kw = tl.load(key_weight + head * DIM + col, keep, 0).to(tl.float32)
+    dot = tl.sum(((hidden * qw) * kw) * key, axis=0)
+    hidden_rms = tl.rsqrt(tl.sum(hidden * hidden, axis=0) / DIM + EPS)
+    key_rms = tl.rsqrt(tl.sum(key * key, axis=0) / DIM + EPS)
+    score = ((dot * hidden_rms) * key_rms) * (DIM**-0.5)
+    magnitude = tl.sqrt(tl.maximum(tl.abs(score), CLAMP))
+    gate = tl.sigmoid(tl.where(score < 0, -magnitude, magnitude))
+    gate = tl.where(tl.load(mask + token), gate, 0.0)
+    value = tl.load(projected + base + HEADS * DIM + col, keep, 0).to(tl.float32)
+    previous = tl.load(residual + offset, keep, 0).to(tl.float32)
+    tl.store(output + offset, previous + gate * value, keep)
+
+
+def engram_gate(
+    residual: torch.Tensor,
+    gate_hidden: torch.Tensor,
+    projected: torch.Tensor,
+    query_weight: torch.Tensor,
+    key_weight: torch.Tensor,
+    mask: torch.Tensor,
+    eps: float,
+    clamp: float,
+) -> torch.Tensor:
+    tokens, heads, dim = residual.shape
+    output = torch.empty_like(residual)
+    _engram_gate_kernel[(tokens * heads,)](
+        residual,
+        gate_hidden,
+        projected,
+        query_weight,
+        key_weight,
+        mask,
+        output,
+        eps,
+        clamp,
+        heads,
+        dim,
+        triton.next_power_of_2(dim),
+        enable_fp_fusion=False,
+    )
     return output

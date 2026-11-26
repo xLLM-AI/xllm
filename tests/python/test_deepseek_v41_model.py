@@ -2615,7 +2615,8 @@ def test_empty_dp_attention_has_no_history_or_cache_writes(
 
 
 @pytest.mark.parametrize("query_lengths", [(6, 6), (6, 3)])
-def test_engram_flat_verify_rows_match_sequence_hashes(query_lengths: tuple[int, int]) -> None:
+@pytest.mark.parametrize("prepared_rows", [False, True])
+def test_engram_flat_verify_rows_match_sequence_hashes(query_lengths: tuple[int, int], prepared_rows: bool) -> None:
     state = _tiny_engram_hash_state()
     block_size = 8
     state._cache = torch.zeros(5 * block_size, dtype=torch.int32)
@@ -2647,16 +2648,61 @@ def test_engram_flat_verify_rows_match_sequence_hashes(query_lengths: tuple[int,
         slots.append(physical[prefix_len:])
         expected.append(hashes[prefix_len:])
     tokens = torch.cat(inputs)
+    offsets = torch.arange(tokens.numel() + 1, dtype=torch.int32)
     actual = state(
         tokens,
         torch.cat(positions),
-        torch.arange(tokens.numel() + 1),
+        offsets,
         torch.zeros_like(tokens, dtype=torch.bool),
         torch.cat(slots),
         torch.cat(tables),
         block_size,
+        unit_query_rows=offsets[:-1] if prepared_rows else None,
     )
     torch.testing.assert_close(actual, torch.cat(expected))
+    torch.testing.assert_close(state._cache[torch.cat(slots).long()], state.token_map[tokens].int())
+
+
+@npu_only
+@torch.inference_mode()
+def test_engram_prepared_verify_hash_replays_ring_boundaries() -> None:
+    reference = _tiny_engram_hash_state()
+    fused = _tiny_engram_hash_state().to("npu")
+    initial = torch.arange(64, dtype=torch.int32) % 16
+    reference._cache = initial.clone()
+    fused._cache = initial.npu()
+    offsets = torch.arange(18, dtype=torch.int32)
+    ids = torch.arange(17)
+    positions = torch.tensor([*range(13, 21), *range(21, 28), 0, 0], dtype=torch.int32)
+    blocks = torch.tensor([[0, 1]] * 8 + [[2, 3]] * 7 + [[0, 0]] * 2, dtype=torch.int32)
+    slots = blocks[torch.arange(17), (positions // 8) % 2] * 8 + positions % 8
+    slots[-2:] = -1
+    args = [ids, positions, offsets, ids == 4, slots, blocks]
+    device_args = [a.npu() for a in args]
+
+    def run() -> torch.Tensor:
+        return fused(*device_args, 8, unit_query_rows=device_args[2][:-1])
+
+    capture = AclGraphCaptureContext(torch.npu.current_stream(), [])
+    with forward_context(ForwardContext(None, torch.device("npu"), None, [], acl_graph=capture)):
+        run()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            output = run()
+    for delta in (0, 8):
+        args[0] = ids + delta
+        args[1] = positions + delta
+        args[3] = args[0] == 8
+        args[4] = blocks[torch.arange(17), (args[1] // 8) % 2] * 8 + args[1] % 8
+        args[4][-2:] = -1
+        for target, source in zip(device_args, args, strict=True):
+            target.copy_(source)
+        reference._cache.copy_(initial)
+        fused._cache.copy_(initial)
+        expected = reference(*args, 8, unit_query_rows=offsets[:-1])
+        graph.replay()
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+        torch.testing.assert_close(fused._cache.cpu(), reference._cache, rtol=0, atol=0)
 
 
 @npu_only

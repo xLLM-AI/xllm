@@ -1261,6 +1261,13 @@ class DeepseekV4MoE(nn.Module):
         self.layer_id = layer_id
         self.fuse_shared_expert_activation = fuse_shared_expert_activation
         self.pretranspose_w8a8_weights = pretranspose_w8a8_weights
+        self._use_router_norm_cast = (
+            cfg.model_type == "deepseek_v41"
+            and device.type in ("npu", "privateuseone")
+            and dtype == torch.bfloat16
+            and torch.npu.get_device_name(device).startswith("Ascend910_93")
+            and torch.ops.xllm_ops.supports_rms_norm_cast()
+        )
         self.topk = cfg.n_activated_experts
         self.num_total_experts = cfg.n_routed_experts
         self.routed_scaling = cfg.routed_scaling_factor
@@ -1462,8 +1469,11 @@ class DeepseekV4MoE(nn.Module):
         else:
             layout, active_mask = ctx.layer_shared_cache[key]
         local = layout.shard(hidden)
-        if input_norm is not None:
-            local = input_norm(local)
+        if input_norm is not None and self._use_router_norm_cast:
+            local, router_input = torch.ops.xllm_ops.rms_norm_cast(local, input_norm.weight, input_norm.eps)
+        else:
+            local = input_norm(local) if input_norm is not None else local
+            router_input = local
         auxiliary = None
         if local.device.type in ("npu", "privateuseone"):
             current = torch.npu.current_stream(local.device)
@@ -1472,7 +1482,7 @@ class DeepseekV4MoE(nn.Module):
             local.record_stream(auxiliary)
             with torch.npu.stream(auxiliary):
                 shared = self._shared_output(local)
-        topk_weights, topk_idx = self._route_tokens(local, None)
+        topk_weights, topk_idx = self._route_tokens(router_input, None)
         # Every source uses the same EP dispatch capacity. Drop dispatch padding
         # before gathering the local attention-TP result.
         dispatch_input = layout.pad_dispatch(local)

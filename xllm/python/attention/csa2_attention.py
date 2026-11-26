@@ -128,7 +128,6 @@ class _Csa2DecodeCompressorMetadata:
 @dataclass(frozen=True)
 class _Csa2DraftSwaMetadata:
     history_slots: torch.Tensor
-    history_valid: torch.Tensor
     positions: torch.Tensor
     lengths: torch.Tensor
     sequence_lengths: torch.Tensor
@@ -1028,6 +1027,8 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         mapping: _CompressedAttentionCacheMapping,
         shared: CSA2SharedRuntime,
     ) -> torch.Tensor:
+        from xllm.python.kernels_npu.triton.draft_swa import draft_swa_metadata, pack_draft_swa
+
         width = self.dspark_block_size
         window = self.window_size
         span = window + width
@@ -1037,27 +1038,12 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             table = _get_layer_cache_tensor(dsa.block_tables, layer.layer_id, mapping.ori_cache_idx)
             block_size = ring.size(1)
             batch = dsa.seq_lens.numel()
-            prefix = dsa.seq_lens.to(torch.int64) - width
-            history = prefix.unsqueeze(1) - window + torch.arange(window, device=q.device)
-            history_valid = history >= 0
-            history = history.clamp_min(0)
-            columns = (history // block_size) % table.size(1)
-            blocks = table.gather(1, columns).to(torch.int64).clamp_min(0)
-            slots = blocks * block_size + history % block_size
-
-            # Use private scratch pages so speculative writes cannot overwrite
-            # the oldest committed positions that this noncausal block reads.
-            pages = (span + block_size - 1) // block_size
-            block_table = torch.arange(batch * pages, dtype=torch.int32, device=q.device).view(batch, pages)
-            cache = q.new_empty((batch, pages * block_size, self.head_dim))
-            active = dsa.seq_lens > 0
-            sequence_lengths = torch.where(active, span, 0).to(torch.int32)
-            start = (window - prefix).clamp(0, span)
-            topk_width = (span + 127) // 128 * 128
-            positions = start.unsqueeze(1) + torch.arange(topk_width, device=q.device)
-            positions = torch.where(active.unsqueeze(1) & (positions < span), positions, -1).to(torch.int32)
-            positions = positions.repeat_interleave(width, dim=0).unsqueeze(1)
-            lengths = (span - start).to(torch.int32).repeat_interleave(width).unsqueeze(1)
+            slots, positions, lengths, sequence_lengths, block_table = draft_swa_metadata(
+                dsa.seq_lens, table, width, window, block_size
+            )
+            # Speculative rows must never overwrite the committed ring read by another query.
+            cache = q.new_empty((batch, block_table.size(1) * block_size, self.head_dim))
+            topk_width = positions.size(-1)
             tiling = torch.ops.xllm_ops.sparse_flash_mla_metadata(
                 dsa.actual_seq_lengths_query,
                 sequence_lengths,
@@ -1074,24 +1060,10 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                 lengths,
                 topk_width,
             )
-            metadata = _Csa2DraftSwaMetadata(
-                slots.flatten(),
-                history_valid & active.unsqueeze(1),
-                positions,
-                lengths,
-                sequence_lengths,
-                block_table,
-                tiling,
-                cache,
-            )
+            metadata = _Csa2DraftSwaMetadata(slots, positions, lengths, sequence_lengths, block_table, tiling, cache)
             shared.draft_swa = metadata
 
-        batch = metadata.sequence_lengths.numel()
-        history = (
-            ring.view(-1, self.head_dim).index_select(0, metadata.history_slots).view(batch, window, self.head_dim)
-        )
-        metadata.cache[:, :window].copy_(history.masked_fill(~metadata.history_valid.unsqueeze(2), 0))
-        metadata.cache[:, window:span].copy_(kv.view(batch, width, self.head_dim))
+        pack_draft_swa(ring, kv, metadata.history_slots, metadata.cache)
         sinks = layer.attn_sink.float() if layer.attn_sink_loaded else None
         return torch.ops.xllm_ops.sparse_flash_mla(
             q,

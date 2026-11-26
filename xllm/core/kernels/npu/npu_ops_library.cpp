@@ -31,6 +31,7 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/util/tensor_helper.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -45,6 +46,25 @@ torch::Tensor rms_norm_npu(const torch::Tensor& input,
                            const torch::Tensor& weight,
                            double eps) {
   return xllm::kernel::npu::rms_norm(input, weight, eps, "rmsnorm");
+}
+
+bool supports_rms_norm_cast_npu() {
+  using kernel::npu::aclnn::detail::get_op_api_func_addr;
+  static const bool available =
+      get_op_api_func_addr("aclnnRmsNormCastVaGetWorkspaceSize") != nullptr &&
+      get_op_api_func_addr("aclnnRmsNormCastVa") != nullptr;
+  return available;
+}
+
+std::tuple<torch::Tensor, torch::Tensor> rms_norm_cast_npu(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    double eps) {
+  auto normed = torch::empty_like(input);
+  auto router_input =
+      torch::empty_like(input, input.options().dtype(torch::kFloat32));
+  EXEC_NPU_CMD(aclnnRmsNormCastVa, input, weight, eps, normed, router_input);
+  return {normed, router_input};
 }
 
 torch::Tensor rms_norm_gated_npu(const torch::Tensor& input,
@@ -743,6 +763,11 @@ TORCH_LIBRARY(xllm_ops, m) {
   m.def(
       "shared_linear_state_indices_out(Tensor ids, Tensor rows, Tensor(a!) "
       "out) -> ()");
+  m.def("supports_rms_norm_cast() -> bool",
+        TORCH_FN(xllm::supports_rms_norm_cast_npu));
+  m.def(
+      "rms_norm_cast(Tensor input, Tensor weight, float eps) -> (Tensor, "
+      "Tensor)");
   m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
   m.def(
       "rms_norm_gated(Tensor input, Tensor gate, Tensor weight, float eps) -> "
@@ -1049,6 +1074,7 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl(
       "shared_linear_state_indices_out",
       TORCH_FN(xllm::kernel::npu::tilelang::shared_linear_state_indices_out));
+  m.impl("rms_norm_cast", TORCH_FN(xllm::rms_norm_cast_npu));
   m.impl("rms_norm", TORCH_FN(xllm::rms_norm_npu));
   m.impl("rms_norm_gated", TORCH_FN(xllm::rms_norm_gated_npu));
   m.impl("fused_add_gemma_rms_norm",
