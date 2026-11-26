@@ -2693,19 +2693,21 @@ def test_engram_flat_verify_rows_match_sequence_hashes(query_lengths: tuple[int,
 
 
 @npu_only
+@pytest.mark.parametrize("rows", (17, 48))
 @torch.inference_mode()
-def test_engram_prepared_verify_hash_replays_ring_boundaries() -> None:
+def test_engram_prepared_verify_hash_replays_ring_boundaries(rows: int) -> None:
     reference = _tiny_engram_hash_state()
     fused = _tiny_engram_hash_state().to("npu")
     initial = torch.arange(64, dtype=torch.int32) % 16
     reference._cache = initial.clone()
     fused._cache = initial.npu()
-    offsets = torch.arange(18, dtype=torch.int32)
-    ids = torch.arange(17)
-    positions = torch.tensor([*range(13, 21), *range(21, 28), 0, 0], dtype=torch.int32)
-    blocks = torch.tensor([[0, 1]] * 8 + [[2, 3]] * 7 + [[0, 0]] * 2, dtype=torch.int32)
-    slots = blocks[torch.arange(17), (positions // 8) % 2] * 8 + positions % 8
-    slots[-2:] = -1
+    offsets = torch.arange(rows + 1, dtype=torch.int32)
+    ids = torch.arange(rows)
+    padding = rows - 15
+    positions = torch.tensor([*range(13, 28)] + [0] * padding, dtype=torch.int32)
+    blocks = torch.tensor([[0, 1]] * 8 + [[2, 3]] * 7 + [[0, 0]] * padding, dtype=torch.int32)
+    slots = blocks[torch.arange(rows), (positions // 8) % 2] * 8 + positions % 8
+    slots[-padding:] = -1
     args = [ids, positions, offsets, ids == 4, slots, blocks]
     device_args = [a.npu() for a in args]
 
@@ -2722,8 +2724,8 @@ def test_engram_prepared_verify_hash_replays_ring_boundaries() -> None:
         args[0] = ids + delta
         args[1] = positions + delta
         args[3] = args[0] == 8
-        args[4] = blocks[torch.arange(17), (args[1] // 8) % 2] * 8 + args[1] % 8
-        args[4][-2:] = -1
+        args[4] = blocks[torch.arange(rows), (args[1] // 8) % 2] * 8 + args[1] % 8
+        args[4][-padding:] = -1
         for target, source in zip(device_args, args, strict=True):
             target.copy_(source)
         reference._cache.copy_(initial)

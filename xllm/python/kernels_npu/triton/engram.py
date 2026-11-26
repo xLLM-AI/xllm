@@ -54,13 +54,16 @@ def _prepare_unit_query_hash_kernel(
     start = position
     linked = valid
     for distance in tl.static_range(1, ngram):
-        previous_row = row - distance
-        linked = linked & (previous_row >= 0)
-        previous_pos = tl.load(Positions + previous_row, linked, 0).to(tl.int64)
-        previous_slot = tl.load(Slots + previous_row, linked, -1).to(tl.int64)
+        # Ascend can lower a masked contiguous load to a vector transfer.
+        # Keep its base inside the allocation even at the first token of a graph.
+        previous_row = tl.minimum(tl.maximum(row - distance, 0), tokens - 1)
+        table_row = tl.minimum(tl.maximum(row - distance + 1, 0), tokens - 1)
+        linked = linked & (row >= distance)
+        previous_pos = tl.load(Positions + previous_row).to(tl.int64)
+        previous_slot = tl.load(Slots + previous_row).to(tl.int64)
         prior = tl.maximum(position - distance, 0)
         col = prior // block_size % table_cols
-        block = tl.load(Blocks + (previous_row + 1) * table_stride + col * col_stride, linked, 0).to(tl.int64)
+        block = tl.load(Blocks + table_row * table_stride + col * col_stride).to(tl.int64)
         linked = linked & (previous_pos == position - distance) & (previous_slot >= 0)
         linked = linked & (previous_slot == block * block_size + prior % block_size)
         start = tl.where(linked, previous_pos, start)
