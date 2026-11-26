@@ -458,7 +458,7 @@ DecodeExpansionOptions DFlashWorkerImpl::prepare_for_draft() const {
   DecodeExpansionOptions decode_options;
   decode_options.num_speculative_tokens = options_.num_speculative_tokens();
   decode_options.block_size = options_.block_size();
-  decode_options.per_request = draft_input_per_request_;
+  decode_options.per_request = true;
   decode_options.causal = false;
   decode_options.mask_token_id = mask_token_id_;
   return decode_options;

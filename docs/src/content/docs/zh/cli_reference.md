@@ -254,7 +254,6 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 |:---------|:-----|:-------|:---------|
 | `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel 后端，支持 `AUTO`、`TORCH`。 |
 | `enable_fused_mc2` | `int32` | `-1` | NPU 的 Fused MC2 模式；`-1` 使用自动默认值，`0` 禁用 fused MC2，正值启用 dense matmul-allreduce，`1` 对 MoE 使用 DispatchFFNCombine，`2` 对 MoE 使用 DispatchGmmCombineDecode。 |
-| `enable_dspark_native_sas` | `bool` | `false` | 启用 NPU DSpark 原生 SparseAttnSharedkv 语义。旧版算子若不接受非空 `ori_sparse_indices`，可能在 tiling 阶段终止进程；请保持关闭以使用 q_len=1 兼容模式。 |
 
 ## DiTConfig
 

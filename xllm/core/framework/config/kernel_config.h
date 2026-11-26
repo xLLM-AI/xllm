@@ -43,7 +43,6 @@ class KernelConfig final {
         {"npu_kernel_backend",
          "enable_fused_mc2",
          "enable_mega_moe",
-         "enable_dspark_native_sas",
          "enable_flashcomm1",
          "flashcomm1_min_prefill_tokens",
          "enable_mmrs_fusion",
@@ -58,8 +57,6 @@ class KernelConfig final {
   PROPERTY(int32_t, enable_fused_mc2) = 0;
 
   PROPERTY(bool, enable_mega_moe) = false;
-
-  PROPERTY(bool, enable_dspark_native_sas) = false;
 
   PROPERTY(bool, enable_flashcomm1) = false;
 

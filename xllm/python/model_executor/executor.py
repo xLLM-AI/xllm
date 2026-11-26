@@ -154,8 +154,9 @@ def _create_attention_backend(
 
         return DsaAttentionBackend(
             **dsa_kwargs,
-            num_speculative_tokens=int(config.get("num_speculative_tokens", 0)),
-            dspark_use_native_sas=bool(config.get("dspark_use_native_sas", False)),
+            num_speculative_tokens=int(config.get("num_speculative_tokens", 0))
+            if model_type == "deepseek_v4_dspark"
+            else 0,
         )
     if current_platform.is_npu():
         dcp_group = distributed.dcp_group(device)

@@ -80,7 +80,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   void prepare_validate_inputs(const LlmForwardInput& input,
                                LlmForwardInput& validate_input);
 
-  bool draft_input_per_request_ = true;
   bool draft_needs_dummy_tokens_ = false;
 
  private:
