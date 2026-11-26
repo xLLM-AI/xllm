@@ -694,7 +694,7 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
 
 bool SchedulerPolicy::has_pending_block_release(
     const SchedulerState& state) const {
-  return state.has_pending_kv_batch ||
+  return state.has_pending_kv_batch_ ||
          state.kv_cache_manager->has_pending_async_block_release();
 }
 
@@ -871,7 +871,7 @@ void SchedulerPolicy::schedule_decode_from_queue(
     // pages released by a sequence. Let that owner finish before preempting
     // another request.
     if (has_pending_block_release(state)) {
-      budget.preemption_deferred = true;
+      budget.preemption_deferred_ = true;
       return;
     }
 

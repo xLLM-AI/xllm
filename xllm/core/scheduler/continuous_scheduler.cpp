@@ -385,7 +385,7 @@ BatchGroup ContinuousSchedulerBase::prepare_batch() {
   // Strategy-driven scheduling
   policy_->schedule(state, budget, finished);
   if (pending_step_ && requires_pd_kv_retirement()) {
-    pending_step_->drain_next_batch = budget.preemption_deferred;
+    pending_step_->drain_next_batch_ = budget.preemption_deferred_;
   }
 
   // Finalize
@@ -432,7 +432,7 @@ SchedulerState ContinuousSchedulerBase::make_state() {
           [this](const std::shared_ptr<Request>& request) {
             release_failed_request(request);
           },
-      .has_pending_kv_batch =
+      .has_pending_kv_batch_ =
           pending_step_.has_value() &&
           (KVCacheConfig::get_instance().enable_vmm_kvcache() ||
            requires_pd_kv_retirement()),
@@ -529,7 +529,7 @@ bool ContinuousSchedulerBase::step_with_schedule_overlap(
       // BatchState already retains the VMM KV blocks used by its forward plan.
       const std::optional<BlockType> excluded_type =
           KVCacheConfig::get_instance().enable_vmm_kvcache()
-              ? std::optional{BlockType::KV}
+              ? std::optional{/*value=*/BlockType::KV}
               : std::nullopt;
       size_t block_count = 0;
       for (Sequence* sequence : running_sequences_) {
@@ -577,7 +577,7 @@ bool ContinuousSchedulerBase::step_with_schedule_overlap(
   if (cache_block_lease) {
     pending_step_->cache_block_lease.emplace(std::move(*cache_block_lease));
   }
-  if (pending_step_->drain_next_batch) {
+  if (pending_step_->drain_next_batch_) {
     // A partial batch must not renew the deferral into the next round.
     complete_pending_step();
     pending_step_.reset();

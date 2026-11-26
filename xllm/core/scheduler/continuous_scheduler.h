@@ -256,7 +256,7 @@ class ContinuousSchedulerBase : public Scheduler {
     std::vector<std::shared_ptr<Request>> requests;
     BatchGroup batches;
     std::optional<KVCacheBlockLease> cache_block_lease;
-    bool drain_next_batch = false;
+    bool drain_next_batch_ = false;
   };
 
   std::optional<PendingStep> pending_step_;

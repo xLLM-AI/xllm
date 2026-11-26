@@ -1541,7 +1541,7 @@ TEST(SchedulerPolicyTest, UnifiedReclaimsMutuallyBlockedChunksWhenIdle) {
         .options = options,
         .min_speculative_tokens_required = 0,
         .enable_prefix_cache = false,
-        .has_pending_kv_batch = pending_release,
+        .has_pending_kv_batch_ = pending_release,
     };
     const ScheduleBudget initial_budget{
         .remaining_token_budget = 32,
@@ -1857,7 +1857,7 @@ TEST_P(PendingVmmBatchPolicyTest, RetainsRequestsUntilBatchReleasesBlocks) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = false,
-      .has_pending_kv_batch = true,
+      .has_pending_kv_batch_ = true,
   };
   const ScheduleBudget initial_budget{
       .remaining_token_budget = 1024,
@@ -1881,7 +1881,7 @@ TEST_P(PendingVmmBatchPolicyTest, RetainsRequestsUntilBatchReleasesBlocks) {
   }
 
   pending_blocks.clear();
-  state.has_pending_kv_batch = false;
+  state.has_pending_kv_batch_ = false;
   budget = initial_budget;
   policy->schedule(state, budget, finished);
 
