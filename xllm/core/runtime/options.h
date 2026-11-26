@@ -256,6 +256,8 @@ struct Options {
 
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;
+  // alternate NPU graph slots so input preparation can overlap replay
+  PROPERTY(bool, enable_graph_double_buffer) = true;
   // enable graph-mode decode without padding
   PROPERTY(bool, enable_graph_mode_decode_no_padding) = false;
   // enable piecewise graph for prefill

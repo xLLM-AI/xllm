@@ -164,6 +164,14 @@ class ArgumentParser:
             help="Whether to enable graph execution for offline inference.",
         )
         self.parser.add_argument(
+            "--enable_graph_double_buffer",
+            nargs="?",
+            const=True,
+            default=True,
+            type=_str_to_bool,
+            help="Whether to use double buffering for NPU graph execution.",
+        )
+        self.parser.add_argument(
             "--enable_graph_mode_decode_no_padding",
             nargs="?",
             const=True,

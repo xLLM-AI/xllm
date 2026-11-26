@@ -361,5 +361,57 @@ TEST(SpawnWorkerProtocolTest, PreservesEplbConfigWithUnknownTrailingArguments) {
   EXPECT_FALSE(config->use_decode_only_load);
 }
 
+TEST(SpawnWorkerProtocolTest, PreservesExplicitGraphDoubleBufferMode) {
+  for (const bool enabled : {false, true}) {
+    SCOPED_TRACE(enabled);
+    std::vector<std::string> arguments(
+        kEnableGraphDoubleBufferArgumentIndex + 2, "unused");
+    arguments[kEnableGraphDoubleBufferArgumentIndex] = enabled ? "1" : "0";
+    std::vector<char*> argv = mutable_argv(&arguments);
+    const std::optional<bool> parsed = parse_graph_double_buffer(
+        static_cast<int32_t>(argv.size()), argv.data());
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed.value(), enabled);
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, DefaultsGraphDoubleBufferForLegacyArguments) {
+  for (int32_t argc = kMinimumArgumentCount;
+       argc <= kEnableGraphDoubleBufferArgumentIndex;
+       ++argc) {
+    SCOPED_TRACE(argc);
+    std::vector<std::string> arguments(argc, "unused");
+    std::vector<char*> argv = mutable_argv(&arguments);
+    const std::optional<bool> parsed =
+        parse_graph_double_buffer(argc, argv.data());
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed.value());
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, RejectsInvalidGraphDoubleBufferMode) {
+  for (const char* invalid : {"", "2", "-1", "true", "1tail", " 1"}) {
+    SCOPED_TRACE(invalid);
+    std::vector<std::string> arguments(
+        kEnableGraphDoubleBufferArgumentIndex + 1, "unused");
+    arguments[kEnableGraphDoubleBufferArgumentIndex] = invalid;
+    std::vector<char*> argv = mutable_argv(&arguments);
+    EXPECT_FALSE(parse_graph_double_buffer(static_cast<int32_t>(argv.size()),
+                                           argv.data())
+                     .has_value());
+  }
+  EXPECT_FALSE(
+      parse_graph_double_buffer(kMinimumArgumentCount, nullptr).has_value());
+  std::vector<std::string> arguments(kEnableGraphDoubleBufferArgumentIndex + 1,
+                                     "unused");
+  std::vector<char*> argv = mutable_argv(&arguments);
+  argv[kEnableGraphDoubleBufferArgumentIndex] = nullptr;
+  EXPECT_FALSE(
+      parse_graph_double_buffer(static_cast<int32_t>(argv.size()), argv.data())
+          .has_value());
+  EXPECT_FALSE(parse_graph_double_buffer(kMinimumArgumentCount - 1, argv.data())
+                   .has_value());
+}
+
 }  // namespace
 }  // namespace xllm::spawn_worker_protocol

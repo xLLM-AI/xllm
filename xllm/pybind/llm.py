@@ -116,6 +116,7 @@ class LLM:
         use_cpp_chat_template: bool = True,
         disable_log_stats: bool = True,
         extension_impl: str = "",
+        enable_graph_double_buffer: bool = True,
         **kwargs: Any,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
@@ -178,6 +179,7 @@ class LLM:
         options.kv_cache_transfer_mode = kv_cache_transfer_mode
         options.disable_ttft_profiling = disable_ttft_profiling
         options.enable_graph = enable_graph
+        options.enable_graph_double_buffer = enable_graph_double_buffer
         options.enable_graph_mode_decode_no_padding = enable_graph_mode_decode_no_padding
         options.enable_prefill_piecewise_graph = enable_prefill_piecewise_graph
         options.max_tokens_for_graph_mode = max_tokens_for_graph_mode

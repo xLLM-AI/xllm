@@ -259,27 +259,35 @@ TEST(ScheduleOverlapTest, PreparationUsesInstanceGraphMode) {
     SCOPED_TRACE(enable_graph);
     ScopedConfigValue<bool> global_graph(
         ExecutionConfig::get_instance().enable_graph(), !enable_graph);
-    ScopedConfigValue<bool> double_buffer(
-        ExecutionConfig::get_instance().enable_graph_double_buffer(), true);
-    for (const std::string backend : {"llm", "vlm"}) {
-      SCOPED_TRACE(backend);
-      runtime::Options options;
-      options.backend(backend).enable_graph(enable_graph);
-      GraphPreparationTestWorker worker(options);
-      options.enable_graph(!enable_graph);
-      EXPECT_EQ(worker.can_prepare_without_compute_stream_wait(), enable_graph);
-      LlmForwardInput llm_input;
-      worker.prepare_work_before_execute(LlmForwardInput(),
-                                         llm_input,
-                                         /*prepare_stream=*/nullptr,
-                                         /*record_ready_event=*/false);
-      EXPECT_EQ(worker.preparation_held_capture_lock(), enable_graph);
-      VlmForwardInput vlm_input;
-      worker.prepare_work_before_execute(VlmForwardInput(),
-                                         vlm_input,
-                                         /*prepare_stream=*/nullptr,
-                                         /*record_ready_event=*/false);
-      EXPECT_EQ(worker.preparation_held_capture_lock(), enable_graph);
+    for (const bool double_buffer : {false, true}) {
+      SCOPED_TRACE(double_buffer);
+      ScopedConfigValue<bool> global_double_buffer(
+          ExecutionConfig::get_instance().enable_graph_double_buffer(),
+          !double_buffer);
+      for (const std::string backend : {"llm", "vlm"}) {
+        SCOPED_TRACE(backend);
+        runtime::Options options;
+        options.backend(backend)
+            .enable_graph(enable_graph)
+            .enable_graph_double_buffer(double_buffer);
+        GraphPreparationTestWorker worker(options);
+        options.enable_graph(!enable_graph)
+            .enable_graph_double_buffer(!double_buffer);
+        EXPECT_EQ(worker.can_prepare_without_compute_stream_wait(),
+                  enable_graph && double_buffer);
+        LlmForwardInput llm_input;
+        worker.prepare_work_before_execute(LlmForwardInput(),
+                                           llm_input,
+                                           /*prepare_stream=*/nullptr,
+                                           /*record_ready_event=*/false);
+        EXPECT_EQ(worker.preparation_held_capture_lock(), enable_graph);
+        VlmForwardInput vlm_input;
+        worker.prepare_work_before_execute(VlmForwardInput(),
+                                           vlm_input,
+                                           /*prepare_stream=*/nullptr,
+                                           /*record_ready_event=*/false);
+        EXPECT_EQ(worker.preparation_held_capture_lock(), enable_graph);
+      }
     }
   }
 }

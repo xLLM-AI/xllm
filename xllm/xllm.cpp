@@ -228,6 +228,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .enable_profile_kv_blocks(profile_config.enable_profile_kv_blocks())
       .disable_ttft_profiling(profile_config.disable_ttft_profiling())
       .enable_graph(execution_config.enable_graph())
+      .enable_graph_double_buffer(execution_config.enable_graph_double_buffer())
       .enable_graph_mode_decode_no_padding(
           execution_config.enable_graph_mode_decode_no_padding())
       .enable_prefill_piecewise_graph(
