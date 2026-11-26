@@ -227,7 +227,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["block_draft_graph_warmup_max_kv_len"] =
       ExecutionConfig::get_instance().block_draft_graph_warmup_max_kv_len();
   executor_config["enable_graph_mode_decode_no_padding"] =
-      ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding();
+      options_.enable_graph_mode_decode_no_padding();
   executor_config["enable_graph_mm_encoder"] =
       ExecutionConfig::get_instance().enable_graph_mm_encoder();
   executor_config["mm_encoder_graph_capture_shapes"] =

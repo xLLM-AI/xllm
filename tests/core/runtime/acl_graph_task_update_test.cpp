@@ -1074,7 +1074,7 @@ TEST_F(AclGraphTaskUpdateTest, CaptureReplayVsEagerSpecVerifyBranch) {
 }
 
 TEST_F(AclGraphTaskUpdateTest, StaticMtpPrepareReplaysFiaSpecVerifyWidths) {
-  ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding(true);
+  options_.enable_graph_mode_decode_no_padding(true);
 
   for (const int32_t spec_width : std::vector<int32_t>{4, 5, 6}) {
     SCOPED_TRACE("spec_width=" + std::to_string(spec_width));

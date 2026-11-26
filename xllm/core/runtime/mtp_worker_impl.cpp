@@ -32,7 +32,6 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/constants.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
@@ -355,9 +354,9 @@ bool MTPWorkerImpl<TargetInput>::should_use_explicit_spec_verify_replay_update(
   const torch::Tensor& block_tables =
       input.input_params.attention.host.block_tables;
   const int64_t num_sequences = input.input_params.meta.num_sequences;
-  if (!::xllm::ExecutionConfig::get_instance().enable_graph() ||
-      !::xllm::ExecutionConfig::get_instance()
-           .enable_graph_mode_decode_no_padding() ||
+  const auto& target_options = impl_->options();
+  if (!target_options.enable_graph() ||
+      !target_options.enable_graph_mode_decode_no_padding() ||
       ModelConfig::is_python_model_impl(context_.get_model_impl()) ||
       target_verify_mode_ != TargetSpecVerifyMode::EXPANDED_VERIFY ||
       options_.block_size() <= 0 ||

@@ -67,7 +67,6 @@ class DcuGraphExecutorTestEnvironment final : public ::testing::Environment {
 
     FLAGS_block_size = 1;
     FLAGS_max_tokens_per_batch = 128;
-    FLAGS_enable_graph_mode_decode_no_padding = true;
 
     torch::manual_seed(0);
   }
@@ -120,7 +119,9 @@ class FakeSimpleCausalLM final : public CausalLM {
                       std::vector<KVCache>& kv_caches,
                       const ModelParamsView& params) override {
     (void)kv_caches;
-    (void)params;
+    if (params.enable_graph) {
+      captured_token_rows_ = tokens.size(0);
+    }
 
     auto token_ids = tokens.to(torch::kInt64);
     auto x = embedding_->forward(token_ids).to(torch::kBFloat16);
@@ -132,6 +133,8 @@ class FakeSimpleCausalLM final : public CausalLM {
 
     return ModelOutput(y + pos_bias);
   }
+
+  int64_t captured_token_rows() const { return captured_token_rows_; }
 
   const torch::TensorOptions& options() const override { return options_; }
 
@@ -159,6 +162,7 @@ class FakeSimpleCausalLM final : public CausalLM {
   void update_expert_weight(int32_t expert_id) override { (void)expert_id; }
 
  private:
+  int64_t captured_token_rows_ = 0;
   ModelArgs args_;
   torch::Device device_;
   torch::TensorOptions options_;
@@ -346,16 +350,19 @@ TEST(DcuGraphExecutorTest, DecodeCaptureAndReplay) {
     GTEST_SKIP() << "DCU/HIP is not available at runtime.";
   }
 
-  const bool old_enable_graph = FLAGS_enable_graph;
-  const bool old_decode_no_padding = FLAGS_enable_graph_mode_decode_no_padding;
+  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
+  const bool old_enable_graph = execution_config.enable_graph();
+  const bool old_decode_no_padding =
+      execution_config.enable_graph_mode_decode_no_padding();
 
-  FLAGS_enable_graph = true;
-  FLAGS_enable_graph_mode_decode_no_padding = true;
+  execution_config.enable_graph(true);
+  execution_config.enable_graph_mode_decode_no_padding(false);
 
   const torch::Device device = InitXllmDcuDeviceForTest(0);
 
   ModelArgs args = MakeFakeModelArgs(64);
   runtime::Options options = MakeRuntimeOptions(8);
+  options.enable_graph_mode_decode_no_padding(true);
 
   auto model = std::make_unique<FakeSimpleCausalLM>(args, device);
   auto graph_exec = std::make_unique<runtime::dcu::DcuGraphExecutorImpl>(
@@ -385,6 +392,7 @@ TEST(DcuGraphExecutorTest, DecodeCaptureAndReplay) {
       graph_exec->run(tokens, positions, kv, params).hidden_states.clone();
   DcuSynchronize();
 
+  EXPECT_EQ(model->captured_token_rows(), 3);
   EXPECT_TRUE(AllCloseBf16(out1, eager_out))
       << "DCU graph capture output should match eager output";
 
@@ -394,8 +402,8 @@ TEST(DcuGraphExecutorTest, DecodeCaptureAndReplay) {
   EXPECT_TRUE(AllCloseBf16(out1, out2))
       << "DCU graph capture and replay outputs should match";
 
-  FLAGS_enable_graph = old_enable_graph;
-  FLAGS_enable_graph_mode_decode_no_padding = old_decode_no_padding;
+  execution_config.enable_graph(old_enable_graph);
+  execution_config.enable_graph_mode_decode_no_padding(old_decode_no_padding);
 }
 
 TEST(DcuGraphExecutorTest, PrefillFallsBackToEager) {
