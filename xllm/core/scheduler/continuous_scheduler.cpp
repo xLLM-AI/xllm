@@ -445,6 +445,35 @@ BatchGroup ContinuousSchedulerBase::schedule_request(
     }
 
     apply_cancel_requests();
+    // An idle DP engine can otherwise launch a full EP prefill for the first
+    // request while the other already-admitted prompts are being tokenized.
+    if (!pending_step_.has_value() && running_requests_.empty() &&
+        options_.dp_size() > 1 && options_.enable_schedule_overlap() &&
+        !options_.enable_disagg_pd() && !options_.enable_mix_batch() &&
+        resource_engine_->model_args().model_type() == "deepseek_v41" &&
+        prefill_queue_->empty() && chunk_queue_->empty() &&
+        decode_queue_->empty()) {
+      const size_t ready = num_queued_requests();
+      const size_t preparing = num_pending_requests();
+      if (ready > 0 && preparing >= static_cast<size_t>(options_.dp_size())) {
+        const size_t target =
+            std::min(ready + preparing,
+                     static_cast<size_t>(options_.max_seqs_per_batch()));
+        const auto burst_deadline =
+            std::min(deadline, absl::Now() + absl::Milliseconds(80));
+        while (true) {
+          const SchedulerNotifier::Snapshot snapshot = notifier_->snapshot();
+          const auto remaining = burst_deadline - absl::Now();
+          if (snapshot.stop_requested || remaining <= absl::ZeroDuration() ||
+              num_queued_requests() >= target || num_pending_requests() == 0) {
+            break;
+          }
+          notifier_->wait_for(snapshot.generation,
+                              absl::ToChronoNanoseconds(std::min(
+                                  kSchedulerWakeupInterval, remaining)));
+        }
+      }
+    }
     batch = prepare_batch();
     bool all_empty =
         std::all_of(batch.begin(), batch.end(), [](const Batch& one_batch) {
