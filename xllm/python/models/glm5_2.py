@@ -75,9 +75,6 @@ from xllm.python.models.deepseek_v32 import (
     _tp_rank_from_device,
     _validate_rope_cos_sin,
 )
-from xllm.python.models.deepseek_v32 import (
-    DeepseekYarnRotaryEmbedding as Glm52YarnRotaryEmbedding,
-)
 
 _MLAPO_V2_Q_LORA_RANK = 1536
 _MLAPO_V2_KV_LORA_RANK = 512

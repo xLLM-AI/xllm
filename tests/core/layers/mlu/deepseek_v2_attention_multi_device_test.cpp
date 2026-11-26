@@ -373,22 +373,6 @@ torch::Tensor get_full_out(const torch::Tensor& output,
   return xllm::parallel_state::gather(output, tp_group);
 }
 
-void check_attn_out_close(const torch::Tensor& sharded_output,
-                          const torch::Tensor& full_output,
-                          xllm::ProcessGroup* tp_group,
-                          int64_t hidden_size,
-                          double rtol,
-                          double atol,
-                          const std::string& label) {
-  CHECK_EQ(full_output.size(-1), hidden_size)
-      << label << " full-weight output width mismatch";
-  check_tensors_close(get_full_out(sharded_output, tp_group, hidden_size),
-                      full_output,
-                      rtol,
-                      atol,
-                      label);
-}
-
 ModelArgs create_attention_model_args(int64_t q_lora_rank = 0,
                                       bool enable_indexer = false) {
   ModelArgs args;

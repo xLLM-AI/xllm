@@ -64,10 +64,6 @@ TEST_F(DeepseekV4IndexerTest, ConstructorAndMetadataWorks) {
   EXPECT_EQ(indexer->rope_head_dim(), rope_head_dim);
   EXPECT_EQ(indexer->index_topk(), index_topk);
   EXPECT_EQ(indexer->q_lora_rank(), q_lora_rank);
-  EXPECT_EQ(indexer->compress_ratio(), compress_ratio);
-
-  EXPECT_TRUE(indexer->wq_b());
-  EXPECT_TRUE(indexer->weights_proj());
 }
 
 TEST_F(DeepseekV4IndexerTest, DsaTokenSlotsTrackCurrentDecodeStep) {

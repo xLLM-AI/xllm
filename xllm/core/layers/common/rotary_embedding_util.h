@@ -101,34 +101,6 @@ std::pair<torch::Tensor, torch::Tensor> apply_mrope(
     const torch::Tensor& positions,
     const std::vector<int64_t>& mrope_section);
 
-torch::Tensor get_chatglm_rotary_embedding(int64_t dim,
-                                           int64_t seq_len,
-                                           double rope_theta,
-                                           const torch::TensorOptions& options);
-
-torch::Tensor get_deepseek_rotary_embedding(
-    int64_t head_size,
-    int64_t rotary_dim,
-    int64_t max_position_embeddings,
-    int64_t rope_scaling_original_max_position_embeddings,
-    int64_t rope_theta,
-    bool interleaved,
-    float scaling_factor,
-    float extrapolation_factor,
-    float attn_factor,
-    float beta_fast,
-    float beta_slow,
-    float mscale,
-    float mscale_all_dim,
-    const torch::TensorOptions& options);
-
-#if defined(USE_MUSA)
-torch::Tensor get_interleave_rotary_embedding(
-    int64_t dim,
-    int64_t seq_len,
-    double rope_theta,
-    const torch::TensorOptions& options);
-#endif
 }  // namespace rotary
 }  // namespace layer
 }  // namespace xllm

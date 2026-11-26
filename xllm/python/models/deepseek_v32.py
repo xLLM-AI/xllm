@@ -43,7 +43,6 @@ from xllm.python.layers import (
     HiddenParallelEmbedding,
     RMSNorm,
     RotaryEmbedding,
-    RowParallelLinear,
     apply_rotary_half,
     gather_half_rope_cos_sin,
 )
@@ -155,22 +154,9 @@ def _expand_interleave_rope_cos_sin(
     return cos, sin
 
 
-def _gather_interleave_cos_sin(
-    cos_sin_cache: torch.Tensor, positions: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Gather per-token cos/sin and double for ``npu_interleave_rope``."""
-    return _expand_interleave_rope_cos_sin(*gather_half_rope_cos_sin(cos_sin_cache, positions))
-
-
 def _interleave_rope_with(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Apply interleaved RoPE to ``[T, H, D]`` with precomputed cos/sin."""
     return kernels.interleaved_rotary_embedding(x, cos, sin)
-
-
-def _apply_half_rope(cos_sin_cache: torch.Tensor, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-    """Half-rotate RoPE (NeoX style) for ``[T, H, D]`` tensors."""
-    half_cos, half_sin = gather_half_rope_cos_sin(cos_sin_cache, positions)
-    return apply_rotary_half(x, half_cos, half_sin)
 
 
 def _select_indexer_query_cos_sin(

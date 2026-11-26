@@ -39,8 +39,8 @@ def runtime() -> tuple[Any, Any]:
 
 @pytest.fixture(scope="module")
 def rotary(runtime: tuple[Any, Any]) -> torch.nn.Module:
-    glm, _ = runtime
-    return glm.Glm52YarnRotaryEmbedding(
+    _, deepseek = runtime
+    return deepseek.DeepseekYarnRotaryEmbedding(
         64, 1048576, 1.0, 8000000.0, 32, 1, 1.0, 1.0, dtype=torch.bfloat16, device=torch.device("npu:0")
     )
 
