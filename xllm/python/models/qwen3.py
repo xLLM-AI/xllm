@@ -140,6 +140,7 @@ class Qwen3Attention(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
+        self._opt01_mrope = False
         self.cfg = cfg
         num_heads, num_kv_heads = cfg.head_split()
         tp = cfg.tp_size
@@ -188,7 +189,22 @@ class Qwen3Attention(nn.Module):
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden)
 
-        if mrope_section is not None and positions.dim() == 2:
+        if self._opt01_mrope and mrope_section is not None and positions.dim() == 2:
+            from xllm.python.kernels_npu.triton.split_qkv_rmsnorm_mrope_opt01 import split_qkv_norm_mrope
+
+            if cos is None:
+                raise RuntimeError("OPT-01 shared mRoPE table was not prepared")
+            q, k, v = split_qkv_norm_mrope(
+                qkv,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                cos,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.q_norm.eps,
+            )
+        elif mrope_section is not None and positions.dim() == 2:
             # mRoPE prefill: per-head Q/K RMSNorm (same math as the fused
             # kernel) then kernels.mrope, which does the time/height/width
             # section combination + rotation in one op.

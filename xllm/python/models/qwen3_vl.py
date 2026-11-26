@@ -27,6 +27,7 @@ Deepstack flow:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -779,6 +780,26 @@ class Qwen3VLModel(nn.Module):
             nn.ModuleList([Qwen3DecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)]),
         )
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
+        self._opt01_mrope = (
+            os.getenv("XLLM_OPT01_FUSED_MROPE", "0") == "1"
+            and device.type == "npu"
+            and dtype == torch.bfloat16
+            and cfg.head_dim == 128
+            and self.mrope_section == [24, 20, 20]
+            # Flat ModelArgs omits this dictionary; Qwen3Attention's legacy
+            # mRoPE branch explicitly uses cache_mode="interleave".
+            and cfg.rope_scaling.get("mrope_interleaved", True) is True
+            and cfg.tp_size in (1, 2, 4, 8)
+            and cfg.head_split() in ((32, 8), (16, 4), (8, 2), (4, 1))
+        )
+        if self._opt01_mrope:
+            from scripts.logger import logger
+            from xllm.python.kernels_npu.triton.split_qkv_rmsnorm_mrope_opt01 import build_axis_pattern
+
+            self.register_buffer("_opt01_axis", build_axis_pattern(self.mrope_section, True, device), persistent=False)
+            for layer in self.layers:
+                layer.self_attn._opt01_mrope = True
+            logger.info("OPT-01 enabled: ordinary QKV + QK RMSNorm + interleaved mRoPE; shared table once per forward")
 
     def forward(
         self,
@@ -801,6 +822,10 @@ class Qwen3VLModel(nn.Module):
         if positions.dim() == 2 and self.mrope_section:
             cos_sin_cache = self._mrope_cos_sin
             mrope_sec = self.mrope_section
+            if self._opt01_mrope:
+                from xllm.python.kernels_npu.triton.split_qkv_rmsnorm_mrope_opt01 import prepare_mrope
+
+                cos = prepare_mrope(self._mrope_cos_sin, positions, self._opt01_axis)
         else:
             cos, sin = self.rotary(positions)
 

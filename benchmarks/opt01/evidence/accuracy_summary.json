@@ -1,0 +1,237 @@
+{
+  "runs": {
+    "vl_a_mm_bench": {
+      "report": "accuracy/a_retry/mm_bench/reports/Qwen3-VL-8B-Instruct/mm_bench.json",
+      "samples": 8658,
+      "score": 0.8639,
+      "correct": 7480.0,
+      "exact_accuracy_from_reviews": 0.8639408639408639,
+      "metrics": [
+        {
+          "name": "mean_acc",
+          "num": 8658,
+          "score": 0.8639,
+          "macro_score": 0.8639,
+          "categories": [
+            {
+              "name": [
+                "default"
+              ],
+              "num": 8658,
+              "score": 0.8639,
+              "macro_score": 0.8639,
+              "subsets": [
+                {
+                  "name": "cn",
+                  "score": 0.8586,
+                  "num": 4329,
+                  "is_aggregate": false
+                },
+                {
+                  "name": "en",
+                  "score": 0.8693,
+                  "num": 4329,
+                  "is_aggregate": false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "vl_b_mm_bench": {
+      "report": "accuracy/b/mm_bench/reports/Qwen3-VL-8B-Instruct/mm_bench.json",
+      "samples": 8658,
+      "score": 0.8661,
+      "correct": 7499.0,
+      "exact_accuracy_from_reviews": 0.8661353661353661,
+      "metrics": [
+        {
+          "name": "mean_acc",
+          "num": 8658,
+          "score": 0.8661,
+          "macro_score": 0.8661,
+          "categories": [
+            {
+              "name": [
+                "default"
+              ],
+              "num": 8658,
+              "score": 0.8661,
+              "macro_score": 0.8661,
+              "subsets": [
+                {
+                  "name": "cn",
+                  "score": 0.8619,
+                  "num": 4329,
+                  "is_aggregate": false
+                },
+                {
+                  "name": "en",
+                  "score": 0.8704,
+                  "num": 4329,
+                  "is_aggregate": false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "vl_a_gsm8k": {
+      "report": "accuracy/a_retry/gsm8k/reports/Qwen3-VL-8B-Instruct/gsm8k.json",
+      "samples": 1319,
+      "score": 0.9477,
+      "correct": 1250.0,
+      "exact_accuracy_from_reviews": 0.9476876421531463,
+      "metrics": [
+        {
+          "name": "mean_acc",
+          "num": 1319,
+          "score": 0.9477,
+          "macro_score": 0.9477,
+          "categories": [
+            {
+              "name": [
+                "default"
+              ],
+              "num": 1319,
+              "score": 0.9477,
+              "macro_score": 0.9477,
+              "subsets": [
+                {
+                  "name": "main",
+                  "score": 0.9477,
+                  "num": 1319,
+                  "is_aggregate": false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "vl_b_gsm8k": {
+      "report": "accuracy/b/gsm8k/reports/Qwen3-VL-8B-Instruct/gsm8k.json",
+      "samples": 1319,
+      "score": 0.9469,
+      "correct": 1249.0,
+      "exact_accuracy_from_reviews": 0.9469294920394238,
+      "metrics": [
+        {
+          "name": "mean_acc",
+          "num": 1319,
+          "score": 0.9469,
+          "macro_score": 0.9469,
+          "categories": [
+            {
+              "name": [
+                "default"
+              ],
+              "num": 1319,
+              "score": 0.9469,
+              "macro_score": 0.9469,
+              "subsets": [
+                {
+                  "name": "main",
+                  "score": 0.9469,
+                  "num": 1319,
+                  "is_aggregate": false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "dense_a_gsm8k": {
+      "report": "accuracy/dense_a/gsm8k/reports/Qwen3-8B/gsm8k.json",
+      "samples": 1319,
+      "score": 0.9348,
+      "correct": 1233.0,
+      "exact_accuracy_from_reviews": 0.9347990902198635,
+      "metrics": [
+        {
+          "name": "mean_acc",
+          "num": 1319,
+          "score": 0.9348,
+          "macro_score": 0.9348,
+          "categories": [
+            {
+              "name": [
+                "default"
+              ],
+              "num": 1319,
+              "score": 0.9348,
+              "macro_score": 0.9348,
+              "subsets": [
+                {
+                  "name": "main",
+                  "score": 0.9348,
+                  "num": 1319,
+                  "is_aggregate": false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "dense_b_gsm8k": {
+      "report": "accuracy/dense_b/gsm8k/reports/Qwen3-8B/gsm8k.json",
+      "samples": 1319,
+      "score": 0.928,
+      "correct": 1224.0,
+      "exact_accuracy_from_reviews": 0.9279757391963609,
+      "metrics": [
+        {
+          "name": "mean_acc",
+          "num": 1319,
+          "score": 0.928,
+          "macro_score": 0.928,
+          "categories": [
+            {
+              "name": [
+                "default"
+              ],
+              "num": 1319,
+              "score": 0.928,
+              "macro_score": 0.928,
+              "subsets": [
+                {
+                  "name": "main",
+                  "score": 0.928,
+                  "num": 1319,
+                  "is_aggregate": false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "paired_comparisons": {
+    "vl_a_vs_vl_b_mm_bench": {
+      "samples": 8658,
+      "same_extracted_answers": 8058,
+      "baseline_correct_candidate_wrong": 196,
+      "baseline_wrong_candidate_correct": 215,
+      "score_delta_percentage_points": 0.21945021945022347
+    },
+    "vl_a_vs_vl_b_gsm8k": {
+      "samples": 1319,
+      "same_extracted_answers": 1298,
+      "baseline_correct_candidate_wrong": 8,
+      "baseline_wrong_candidate_correct": 7,
+      "score_delta_percentage_points": -0.07581501137224889
+    },
+    "dense_a_vs_dense_b_gsm8k": {
+      "samples": 1319,
+      "same_extracted_answers": 1296,
+      "baseline_correct_candidate_wrong": 13,
+      "baseline_wrong_candidate_correct": 4,
+      "score_delta_percentage_points": -0.6823351023502622
+    }
+  }
+}
