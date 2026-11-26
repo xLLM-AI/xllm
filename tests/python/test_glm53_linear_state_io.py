@@ -361,6 +361,7 @@ def test_spec_verify_uses_combined_state_without_environment_flags(
             0, total_rows + 1, width if chunked_verify and not in_graph else 1, dtype=torch.int32
         ),
         q_seq_lens=torch.full((2,), width, dtype=torch.int32),
+        q_seq_lens_host=torch.full((2,), width, dtype=torch.int32),
         kv_seq_lens=torch.arange(total_rows, dtype=torch.int32) + 10,
         num_accepted_tokens=torch.ones(2, dtype=torch.int32),
         expanded_decode_metadata=SimpleNamespace() if in_graph else None,
@@ -467,7 +468,7 @@ def test_varlen_prefill_uses_one_native_convolution(
     assert causal_conv1d_reference[0]["query_start_loc"] == [0, 1, 3, 6]
     assert causal_conv1d_reference[0]["run_mode"] == 0
     assert [call["op"] for call in kda_test_environment] == ["chunk"] * 3
-    assert [call["cu_seqlens"].tolist() for call in kda_test_environment] == [[0, 1], [0, 2], [0, 3]]
+    assert [call["cu_seqlens"] for call in kda_test_environment] == [[0, 1], [0, 2], [0, 3]]
 
 
 def _verify_metadata(slots: torch.Tensor, width: int) -> SimpleNamespace:

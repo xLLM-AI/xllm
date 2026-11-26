@@ -30,9 +30,6 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/spec_verify.h"
-#if defined(USE_NPU) || defined(USE_MLU)
-#include "core/kv_cache/transfer/mooncake_kv_transfer.h"
-#endif
 #if defined(USE_NPU)
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
@@ -580,14 +577,8 @@ std::vector<std::string> DFlashWorkerImpl::write_context_kv(
           std::make_shared<NPULayerSynchronizerImpl>(
               draft_impl_->context_.get_model_args().n_layers());
       input.input_params.parallel.layer_synchronizer = layer_synchronizer;
-      auto request_ids =
-          KVTransfer::unique_request_ids(input.transfer_kv_infos);
-      return KVTransferCompletion(kv_transfer_->push_kv_blocks_async(
-                                      input.transfer_kv_infos,
-                                      draft_impl_->context_.get_parallel_args(),
-                                      layer_synchronizer,
-                                      /*is_spec_draft=*/true),
-                                  std::move(request_ids));
+      return draft_impl_->push_kv_blocks_async(input.transfer_kv_infos,
+                                               std::move(layer_synchronizer));
     }
     return KVTransferCompletion{};
   }();

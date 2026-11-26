@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <folly/futures/Future.h>
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -36,7 +37,6 @@ limitations under the License.
 #include "platform/dcu/dcu_layer_synchronizer.h"
 #endif
 #include "framework/parallel_state/parallel_args.h"
-#include "platform/device.h"
 #include "util/threadpool.h"
 
 namespace xllm {
@@ -94,10 +94,6 @@ class KVTransfer {
   static std::vector<std::string> unique_request_ids(
       const std::vector<TransferKVInfo>& transfer_kv_infos);
 
-  static std::vector<std::string> rotate_dst_rank(
-      const std::vector<std::string>& keys,
-      int32_t kv_split_rank);
-
   KVTransfer() = default;
   virtual ~KVTransfer() = default;
 
@@ -105,26 +101,17 @@ class KVTransfer {
   // Shared transport shutdown and remote access quiescence remain external.
   void drain();
 
-  virtual void initialize(int32_t device_id) {};
-
-  virtual void finalize() {};
-
-  virtual void free_kv_cache() {};
+  virtual void initialize() {};
 
   virtual void configure_cache_layout(const ParallelArgs& parallel_args,
                                       const ModelArgs& model_args,
-                                      int32_t block_token_capacity,
-                                      bool is_spec_draft) {}
+                                      int32_t block_token_capacity) {}
 
-  virtual void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
-                                 const KVCacheShape& kv_cache_shape,
-                                 const torch::ScalarType dtype) {};
-
-  virtual void register_kv_cache_spec(std::vector<xllm::KVCache>& kv_caches,
-                                      const KVCacheShape& kv_cache_shape,
-                                      const torch::ScalarType dtype) {
+  virtual uint32_t register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
+                                     const KVCacheShape& kv_cache_shape,
+                                     torch::ScalarType dtype) {
     NOT_IMPLEMENTED();
-  };
+  }
 
   virtual void get_cache_info(uint64_t& cluster_id, std::string& addr) = 0;
 
@@ -152,7 +139,7 @@ class KVTransfer {
       const std::vector<TransferKVInfo>& transfer_kv_infos,
       const ParallelArgs& parallel_args,
       std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer,
-      bool is_spec_draft);
+      uint32_t cache_pool_id);
 #endif
 
   virtual void merge_kv_blocks(
@@ -163,7 +150,7 @@ class KVTransfer {
   virtual std::vector<std::string> push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
-      bool is_spec_draft,
+      uint32_t cache_pool_id,
       int32_t kv_split_rank,
       int32_t kv_split_size) = 0;
 #endif
@@ -189,8 +176,7 @@ class KVTransferFactory {
  public:
   static std::shared_ptr<KVTransfer> create(
       uint16_t transfer_listen_port,
-      const Device& device,
-      const std::string& model_type = "",
+      const torch::Device& device,
       const std::string& model_id = "",
       std::unique_ptr<VirtualKVTransferMemoryProvider> memory_provider =
           nullptr);

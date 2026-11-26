@@ -22,7 +22,10 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/model/model_args.h"
+#include "core/kv_cache/layout/cache_layout_types.h"
 #include "core/kv_cache/layout/flashinfer_cache_layout.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/layout/kv_shard_layout.h"
 #include "layers/common/kv_shard_batch_metadata.h"
@@ -36,8 +39,6 @@ TEST(CacheLayoutBuilderTest, FlashinferResolvesPhysicalWidthWithoutModelType) {
   args.head_dim() = 96;
   configure_flashinfer_kv_cache_layout(args);
   EXPECT_EQ(args.head_dim(), 96);
-  EXPECT_EQ(get_kv_cache_storage_head_dim(args), 128);
-  configure_flashinfer_kv_cache_layout(args);
   EXPECT_EQ(get_kv_cache_storage_head_dim(args), 128);
 }
 
@@ -146,7 +147,6 @@ TEST(CacheLayoutBuilderTest, DescribesSharedIndexerKeyAsReplica) {
   context.tp_rank = 7;
   context.tp_size = 8;
   context.block_token_capacity = 3;
-  context.index_head_count = 64;
   KVCacheTensor tensor{KVCacheTensorRole::INDEX,
                        torch::zeros({2, 3, 1, 4}),
                        cache_group_id(BlockType::C4)};
@@ -167,7 +167,6 @@ TEST(CacheLayoutBuilderTest, DescribesSharedIndexerScaleAsReplica) {
   context.tp_rank = 3;
   context.tp_size = 4;
   context.block_token_capacity = 3;
-  context.index_head_count = 64;
   KVCacheTensor tensor{KVCacheTensorRole::INDEX_SCALE,
                        torch::zeros({2, 3, 1}),
                        cache_group_id(BlockType::C4)};

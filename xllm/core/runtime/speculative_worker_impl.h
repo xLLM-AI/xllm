@@ -166,8 +166,8 @@ class SpeculativeWorkerImpl : public WorkerImpl {
                                TargetInput& validate_inputs,
                                bool expand_decode_metadata_per_token);
 
- protected:
-  // Target model worker
+  int32_t logical_block_size() const;
+
   std::unique_ptr<WorkerImpl> impl_;
 };
 }  // namespace xllm

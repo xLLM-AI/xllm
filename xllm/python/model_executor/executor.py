@@ -159,10 +159,13 @@ def _create_attention_backend(
         )
     if current_platform.is_npu():
         dcp_group = distributed.dcp_group(device)
+        dcp_size = dcp_group.size() if dcp_group is not None else 1
+        cp_size = int(config.get("cp_size", 1))
         if (
             dcp_group is not None
-            and dcp_group.size() > 1
-            and (int(config.get("cp_size", 1)) == 1 or model_type in ("glm_moe_dsa", "glm_moe_dsa_mtp"))
+            and dcp_size > 1
+            and (int(config.get("kv_split_size", dcp_size)) or cp_size) > 1
+            and (cp_size == 1 or model_type in ("glm_moe_dsa", "glm_moe_dsa_mtp"))
         ):
             if model_type in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):
                 if current_platform.get_ascend_soc_generation() == "a5":
@@ -170,7 +173,6 @@ def _create_attention_backend(
                         "Qwen3.5 Python DCP is not supported on Ascend950 because "
                         "its TND attention fallback does not return softmax LSE"
                     )
-                dcp_size = dcp_group.size()
                 tp_size = int(config.get("tp_size", 1))
                 if dcp_size > tp_size or tp_size % dcp_size:
                     raise ValueError(f"Qwen3.5 DCP size must divide TP size: dcp_size={dcp_size}, tp_size={tp_size}")
@@ -493,6 +495,7 @@ class ModelExecutor:
                     # to masked BNSD can change BF16 verify outputs.
                     device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
                     kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
+                    enable_index_history_bucketing=bool(dsa_layers),
                     max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
                 )
         else:

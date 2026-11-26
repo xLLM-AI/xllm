@@ -96,6 +96,7 @@ cc_library(
     mm_embed_vlm_worker_impl.cpp
     worker_client.cpp
     dit_forward_params.cpp
+    forward_params.cpp
     vlm_forward_params.cpp
     draft_model_spec_worker_impl.cpp
     speculative_worker_impl.cpp

@@ -37,6 +37,13 @@ enum CachePeerMode {
 message CachePeerRequest {
   WorkerCacheLayoutManifest destination_manifest = 1;
   CachePeerMode mode = 2;
+  CachePeerSourceSelection source_selection = 3;
+}
+
+message CachePeerSourceSelection {
+  string incarnation_id = 1;
+  uint64 layout_generation = 2;
+  repeated uint64 excluded_span_ordinals = 3;
 }
 
 enum CacheNamespace {

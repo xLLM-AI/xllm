@@ -277,8 +277,8 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
                                      num_v_heads_ / tp_size_,
                                      head_k_dim_,
                                      head_v_dim_);
-    torch::Tensor ssm_state_indices = build_rebased_ssm_state_indices(
-        logical_state_indices, checkpoint_stride, attn_metadata.max_query_len);
+    torch::Tensor ssm_state_indices = build_ssm_checkpoint_indices(
+        linear_state_base_indices, checkpoint_stride);
 
     xllm::kernel::FusedSigmoidGatingDeltaRuleUpdateParams params;
     params.A_log = A_log_;

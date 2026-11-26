@@ -202,20 +202,28 @@ class TestCreateAttentionBackend:
         "xllm.python.attention.npu_paged_attention.NpuPagedAttentionBackend",
         StubAttentionBackend,
     )
-    def test_npu_platform_creates_npu_backend(self, _mock_is_npu: MagicMock) -> None:
+    @pytest.mark.parametrize(
+        ("model_type", "dcp_size", "is_draft"),
+        [("", 1, False), ("DFlashDraftModel", 2, True), ("DFlash2DraftModel", 2, True)],
+    )
+    def test_npu_platform_creates_npu_backend(
+        self, _mock_is_npu: MagicMock, model_type: str, dcp_size: int, is_draft: bool
+    ) -> None:
         attn = _make_attention_layer(num_kv_heads=1, head_dim=256)
         device = torch.device("cpu")
+        dcp_group = MagicMock()
+        dcp_group.size.return_value = dcp_size
         module = types.ModuleType("xllm.python.attention.npu_paged_attention")
         module.NpuPagedAttentionBackend = StubAttentionBackend
         with (
-            patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=None),
+            patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=dcp_group),
             patch.dict(sys.modules, {module.__name__: module}),
         ):
             backend = _create_attention_backend(
                 attn,
                 device,
                 torch.float16,
-                {"enable_mla": False},
+                {"enable_mla": False, "model_type": model_type, "is_draft_engine": is_draft},
             )
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["device"] is device
@@ -764,7 +772,6 @@ class TestDecodeAclGraphSpeculativeMetadata:
                 paged_kv_indptr=torch.tensor([0, 1, 2, 4, 6], dtype=torch.int32),
                 paged_kv_indices=torch.tensor([10, 10, 20, 21, 20, 21], dtype=torch.int32),
                 paged_kv_last_page_len=torch.tensor([3, 4, 3, 4], dtype=torch.int32),
-                paged_attention_tiling_data=None,
                 kv_seq_lens_host=torch.tensor([3, 4, 7, 8], dtype=torch.int32),
                 kv_seq_lens_host_values=[3, 4, 7, 8],
             ),
@@ -1408,7 +1415,6 @@ def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device
         metadata.expanded_decode_metadata = SimpleNamespace(
             **tensors,
             enabled=True,
-            paged_attention_tiling_data=None,
             kv_seq_lens_host=None,
             kv_seq_lens_host_values=lengths,
         )

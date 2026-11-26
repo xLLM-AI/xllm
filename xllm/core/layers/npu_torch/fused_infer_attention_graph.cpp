@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -48,7 +49,7 @@ torch::Tensor xllm::layer::detail::run_fused_infer_attention_graph(
                                           block_table.size(1) * block_size)
                    : actual_seq_lengths_kv;
 
-  const xllm::npu::FusedInferAttentionWorkspaceSignature workspace_signature{
+  xllm::npu::FusedInferAttentionWorkspaceSignature workspace_signature{
       .query_dtype = query.scalar_type(),
       .key_dtype = key.scalar_type(),
       .value_dtype = value.scalar_type(),
@@ -66,12 +67,14 @@ torch::Tensor xllm::layer::detail::run_fused_infer_attention_graph(
       .scale = scale,
       .softmax_lse_flag = softmax_lse_flag,
   };
-  torch::Tensor workspace = graph_context->fused_infer_attention_workspace;
-  if (workspace.defined()) {
-    CHECK(graph_context->fused_infer_attention_workspace_signature.has_value());
-    CHECK(graph_context->fused_infer_attention_workspace_signature.value() ==
-          workspace_signature)
-        << "FIA graph layers in one bucket require different workspaces";
+  auto& workspaces = graph_context->fused_infer_attention_workspaces_;
+  const auto cached_workspace = std::find_if(
+      workspaces.begin(), workspaces.end(), [&](const auto& candidate) {
+        return candidate.signature == workspace_signature;
+      });
+  torch::Tensor workspace;
+  if (cached_workspace != workspaces.end()) {
+    workspace = cached_workspace->workspace;
   } else {
     workspace =
         xllm::kernel::npu::npu_fused_infer_attention_decode_get_max_workspace(
@@ -87,9 +90,8 @@ torch::Tensor xllm::layer::detail::run_fused_infer_attention_graph(
             block_size,
             softmax_lse_flag);
     CHECK(workspace.defined()) << "FIA graph workspace must be defined";
-    graph_context->fused_infer_attention_workspace_signature =
-        workspace_signature;
-    graph_context->fused_infer_attention_workspace = workspace;
+    workspaces.push_back(
+        {.signature = std::move(workspace_signature), .workspace = workspace});
   }
   torch::Tensor softmax_lse =
       softmax_lse_flag

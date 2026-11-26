@@ -18,7 +18,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from xllm.python.attention.mla_index_context import KPoolIndexContext
 from xllm.python.models import glm5_next
 from xllm.python.models.glm5_next_kpool import update_compressed_kpool
 
@@ -34,32 +33,6 @@ def _indexer(device: torch.device) -> glm5_next.Glm5NextIndexer:
         index_kpool_compress=True,
     )
     return glm5_next.Glm5NextIndexer(config, 1, torch.bfloat16, device).to(device=device, dtype=torch.bfloat16)
-
-
-@pytest.mark.parametrize(
-    ("query_lens", "rate", "expected"),
-    [
-        ([], 4, None),
-        ([1, 1], 4, 1),
-        ([4, 4], 4, 4),
-        ([8, 8], 4, 8),
-        ([9, 9], 4, 9),
-        ([4, 8], 4, None),
-        ([0], 4, None),
-        ([1], 0, None),
-    ],
-)
-def test_compact_kpool_query_width_spans_multiple_pools(query_lens: list[int], rate: int, expected: int | None) -> None:
-    assert glm5_next._compact_kpool_triton_query_len(query_lens, rate) == expected
-
-
-def test_kpool_query_spans_cover_all_token_rows() -> None:
-    ctx = SimpleNamespace(
-        kpool=KPoolIndexContext(tail=torch.empty(0), tail_read_indices=None, tail_write_indices=None, query_lens=(6,))
-    )
-    with pytest.raises(RuntimeError, match="cover the current token rows"):
-        glm5_next._kpool_update_query_lens(ctx, 8)
-    assert glm5_next._kpool_update_query_lens(ctx, 6) == [6]
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17])
@@ -130,21 +103,24 @@ def test_indexer_paged_selection_reuses_merged_weights_for_varlen_queries(
         offset += length
     expected = indexer.select_topk(
         padded_query,
-        padded_hidden,
+        indexer.weights_proj(padded_hidden),
         valid,
         8,
-        8,
+        kv_seq_lens=torch.full((3,), 8),
         packed_states=history,
         query_positions=padded_positions,
     )[valid]
     context = SimpleNamespace(
-        index_cache=None,
+        index_cache=history.unsqueeze(2),
         slot_mapping=None,
-        block_table=torch.zeros(3, 1, dtype=torch.int32),
+        block_table=torch.arange(3, dtype=torch.int32).view(3, 1),
         actual_seq_kv=torch.tensor([8, 8, 8]),
-        kpool_tail=None,
+        actual_seq_kv_host=[8, 8, 8],
     )
-    backend = SimpleNamespace(gather_index_history=lambda *_args: history)
+    backend = SimpleNamespace(
+        indexer_block_table=lambda: context.block_table,
+        gather_index_history=lambda _layer, begin=None, end=None: history[begin:end],
+    )
     monkeypatch.setattr(glm5_next, "_current_q_seq_lens", lambda *_args: query_lengths)
     indexer.process_weights_after_loading()
 
@@ -178,54 +154,30 @@ def test_indexer_mixed_projection_dtypes_keep_independent_calls() -> None:
 
 
 @torch.inference_mode()
-def test_pool_selection_length_input_matches_dense_fallback() -> None:
-    torch.manual_seed(42)
-    device = torch.device("cpu")
-    indexer = _indexer(device)
-    lengths = torch.tensor([3, 8, 17], dtype=torch.int32)
-    key_valid = torch.arange(32)[None] < lengths[:, None]
-    cache = torch.randn(8, 4, 1, 128, dtype=torch.bfloat16)
-    tables = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
-    hidden = torch.randn(3, 1, 16, dtype=torch.bfloat16)
-    mask = torch.ones(3, 1, dtype=torch.bool)
-    expected = indexer.select_topk(
-        hidden, hidden, mask, 32, 32, key_valid=key_valid, pool_cache=cache, pool_block_table=tables
-    )
-    actual = indexer.select_topk(
-        hidden, hidden, mask, 32, 32, kv_seq_lens=lengths, pool_cache=cache, pool_block_table=tables
-    )
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-    prefill_indexer = SimpleNamespace(
-        wq_b=torch.nn.Linear(2, 2, bias=False),
-        weights_proj=torch.nn.Linear(2, 1, bias=False),
-        n_heads=1,
-        head_dim=2,
+def test_paged_prefill_preserves_causal_tail_and_padding() -> None:
+    config = glm5_next.Glm5NextConfig(
+        hidden_size=2,
+        q_lora_rank=2,
+        index_n_heads=1,
+        index_head_dim=2,
+        index_topk=4,
         index_kpool=4,
         index_kpool_compress=True,
         index_kpool_always_select_tail=True,
-        topk=4,
-        softmax_scale=1.0,
     )
-    pool_data = (
-        torch.zeros(2, 1, 2),
-        torch.tensor([[[0, 1, 2, 3]], [[0, 1, 2, 3]]], dtype=torch.int64),
-        torch.ones(2, 1, dtype=torch.bool),
-    )
-    selected = glm5_next.Glm5NextIndexer.select_topk(
-        prefill_indexer,
+    prefill_indexer = glm5_next.Glm5NextIndexer(config, 1, torch.float32, torch.device("cpu"))
+    topk_token_indices = prefill_indexer.select_topk(
         q_resid=torch.zeros(2, 4, 2),
-        hidden_states=torch.zeros(2, 4, 2),
+        projected_weights=torch.zeros(2, 4, 1),
         attention_mask=torch.tensor([[True, True, True, True], [True, True, False, False]]),
         kv_len=4,
-        current_length=4,
-        pool_data=pool_data,
-        key_valid=torch.ones(2, 4, dtype=torch.bool),
+        kv_seq_lens=torch.full((2,), 4),
+        pool_cache=torch.zeros(2, 1, 1, 2),
+        pool_block_table=torch.tensor([[0], [1]]),
         query_positions=torch.tensor([[0, 1, 2, 3], [0, 1, -1, -1]], dtype=torch.int64),
-        append_unscored_tail=True,
     )
     torch.testing.assert_close(
-        selected,
+        topk_token_indices,
         torch.tensor(
             [
                 [
@@ -298,9 +250,8 @@ def test_fused_pool_selection_does_not_materialize_history_mask(
     monkeypatch.setattr(torch, "arange", _unexpected_arange)
     actual = indexer.select_topk(
         hidden,
-        hidden,
+        indexer.weights_proj(hidden),
         mask,
-        32768,
         32768,
         kv_seq_lens=lengths,
         pool_cache=cache,

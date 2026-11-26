@@ -134,7 +134,7 @@ class AclGraph {
   void update_spec_verify_attention_tiling(const ModelParamsView& params);
   bool has_fused_infer_attention_graph_tasks() const;
 
-  bool update_graph_tasks(const ModelParamsView& params,
+  void update_graph_tasks(const ModelParamsView& params,
                           bool update_causal_conv1d_tasks);
   void signal_static_causal_conv1d_tasks(
       const c10_npu::NPUStream& signal_stream);

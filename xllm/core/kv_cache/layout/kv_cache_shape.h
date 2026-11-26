@@ -146,16 +146,6 @@ class KVCacheShape final {
   std::optional<std::vector<int64_t>> ssm_cache_shape_;
 };
 
-// Retains the draft capacity's indexer and linear-state metadata, borrowing
-// the target's block counts and selecting packed-C8 from the draft model.
-KVCacheShape build_speculative_draft_kv_cache_shape(
-    const KVCacheShape& target_kv_cache_shape,
-    KVCacheCapacity draft_capacity,
-    const ModelArgs& draft_model_args,
-    int64_t block_size,
-    int64_t draft_world_size,
-    const std::string& kv_cache_dtype);
-
 KVCacheCreateOptions get_kv_cache_create_options(const ModelArgs& model_args);
 
 }  // namespace xllm

@@ -40,23 +40,15 @@ struct PendingMHC final {
   torch::Tensor comb;
 };
 
-struct MHCFusionContext final {
-  bool optimization_enabled = true;
-  bool is_prefill = false;
-  bool is_chunked_prefill = false;
-  bool supports_fused_mhc = false;
-  bool has_pending_storage = false;
-  bool has_pending = false;
-  bool is_last_layer = true;
-};
-
 struct MHCFusionPlan final {
   bool use_fused_mhc = false;
   bool consume_pending = false;
   bool defer_post = false;
 };
 
-MHCFusionPlan resolve_mhc_fusion(const MHCFusionContext& context);
+MHCFusionPlan resolve_mhc_fusion(bool can_fuse_mhc,
+                                 const std::optional<PendingMHC>* pending_mhc,
+                                 bool is_last_layer);
 
 struct MHCPreOutput final {
   torch::Tensor output;

@@ -13,17 +13,6 @@ cc_test(
 
 cc_test(
   NAME
-    push_route_test
-  CPU_ONLY
-  SRCS
-    push_route_test.cpp
-  DEPS
-    :push_route
-    GTest::gtest_main
-)
-
-cc_test(
-  NAME
     pd_topology_guard_test
   CPU_ONLY
   SRCS

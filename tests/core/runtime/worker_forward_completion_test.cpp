@@ -143,10 +143,11 @@ class CompletionTestModel final : public CausalVLM {
 
 class DeferredPushTransfer final : public KVTransfer {
  public:
-  void register_kv_cache(std::vector<KVCache>& caches,
-                         const KVCacheShape& /*shape*/,
-                         torch::ScalarType /*dtype*/) override {
+  uint32_t register_kv_cache(std::vector<KVCache>& caches,
+                             const KVCacheShape& /*shape*/,
+                             torch::ScalarType /*dtype*/) override {
     registered_layers_ = static_cast<int32_t>(caches.size());
+    return 1;
   }
   int32_t registered_layers() const { return registered_layers_; }
 
@@ -175,7 +176,7 @@ class DeferredPushTransfer final : public KVTransfer {
   std::vector<std::string> push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& /*infos*/,
       std::shared_ptr<KVPushSynchronizerImpl>& /*synchronizer*/,
-      bool /*is_spec_draft*/,
+      uint32_t /*cache_pool_id*/,
       int32_t /*kv_split_rank*/,
       int32_t /*kv_split_size*/) override {
     return {};
@@ -184,8 +185,8 @@ class DeferredPushTransfer final : public KVTransfer {
       const std::vector<TransferKVInfo>& /*transfers*/,
       const ParallelArgs& /*parallel_args*/,
       std::shared_ptr<KVPushSynchronizerImpl> synchronizer,
-      bool is_spec_draft) override {
-    EXPECT_FALSE(is_spec_draft);
+      uint32_t cache_pool_id) override {
+    EXPECT_EQ(cache_pool_id, 1U);
     ++calls_;
     synchronizer_ = std::move(synchronizer);
     return completion_.getSemiFuture();

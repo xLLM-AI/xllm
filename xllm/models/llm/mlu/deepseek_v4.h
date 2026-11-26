@@ -235,7 +235,6 @@ class DeepseekV4ModelImpl final
           modified_input_params,
           tokens,
           &pending_mhc,
-          layer_idx + 1 == layers_.size(),
           cp_context.has_value() ? &cp_context.value() : nullptr);
       if (!modified_input_params.record_layer(static_cast<uint32_t>(layer_idx),
                                               h.device())) {

@@ -52,6 +52,12 @@ struct VirtualKVPullSession {
   uint64_t destination_layout_generation = 0;
 };
 
+struct CachePeerSourceSelection {
+  std::string incarnation_id;
+  uint64_t layout_generation;
+  std::vector<uint64_t> excluded_span_ordinals;
+};
+
 class MooncakeKVTransferState final {
  public:
   static MooncakeKVTransferState& get_instance();
@@ -70,20 +76,19 @@ class MooncakeKVTransferState final {
       std::vector<VirtualKVCacheLayerGlobalOffsets>* layer_offsets,
       uint64_t* physical_page_size_bytes) const;
   std::optional<WorkerCacheLayoutManifest> local_cache_layout() const;
-  Status set_cache_peer(const WorkerCacheLayoutManifest& peer_manifest,
-                        CachePeerMode mode);
-  bool has_outgoing_plan(const std::string& remote_addr,
-                         CacheNamespace cache_namespace) const;
-  bool has_reshard_plan(const std::string& remote_addr) const;
+  Status set_cache_peer(
+      const WorkerCacheLayoutManifest& peer_manifest,
+      CachePeerMode mode,
+      const CachePeerSourceSelection* source_selection = nullptr);
   Status bind_outgoing_regions(const std::string& remote_addr,
                                const std::vector<KVTransferMapping>& mappings,
-                               CacheNamespace cache_namespace,
+                               uint32_t cache_pool_id,
                                int64_t layer_id,
                                std::vector<ByteRegion>* regions) const;
   Status bind_outgoing_regions_explicit(
       const std::string& remote_addr,
       const std::vector<ExplicitResourceMapping>& mappings,
-      CacheNamespace cache_namespace,
+      uint32_t cache_pool_id,
       int64_t layer_id,
       std::vector<ByteRegion>* regions) const;
 
@@ -95,8 +100,8 @@ class MooncakeKVTransferState final {
     std::string destination_incarnation;
     uint64_t destination_layout_generation = 0;
     CachePeerMode mode = CachePeerMode::PLAN_ONLY;
-    std::optional<ReshardPlanTemplate> plan;
-    bool holds_session = false;
+    std::shared_ptr<const std::vector<StridedRegionTemplate>> plan;
+    std::optional<std::vector<uint64_t>> excluded_source_spans;
   };
   std::optional<WorkerCacheLayoutManifest> local_cache_layout_;
   std::string virtual_memory_model_id_;
@@ -116,55 +121,50 @@ class MooncakeKVTransferEngine : public MooncakeTransferEngine {
   Status set_virtual_memory_provider(
       std::string model_id,
       std::shared_ptr<VirtualKVTransferMemoryProvider> provider);
-  virtual bool get_remote_virtual_offsets(
+  bool get_remote_virtual_offsets(
       uint64_t cluster_id,
       const std::string& remote_addr,
       const std::vector<uint64_t>& block_ids,
       WorkerCacheLayoutManifest* manifest,
       std::vector<VirtualKVCacheLayerGlobalOffsets>* layer_offsets,
-      VirtualKVPullSession* session = nullptr);
-
-  bool has_outgoing_plan(const std::string& remote_addr,
-                         CacheNamespace cache_namespace) const;
-  virtual bool has_reshard_plan(const std::string& remote_addr) const;
+      VirtualKVPullSession& session);
 
   Status bind_outgoing_regions(const std::string& remote_addr,
                                const std::vector<KVTransferMapping>& mappings,
-                               CacheNamespace cache_namespace,
+                               uint32_t cache_pool_id,
                                int64_t layer_id,
                                std::vector<ByteRegion>* regions) const;
   Status bind_outgoing_regions_explicit(
       const std::string& remote_addr,
       const std::vector<ExplicitResourceMapping>& mappings,
-      CacheNamespace cache_namespace,
+      uint32_t cache_pool_id,
       int64_t layer_id,
       std::vector<ByteRegion>* regions) const;
 
   bool close_session(uint64_t cluster_id, const std::string& remote_addr);
 
   // Validate the offsets' link and keep it alive for this complete READ.
-  virtual bool move_memory_regions_with_session(
-      const std::string& remote_addr,
-      const VirtualKVPullSession& session,
-      const std::vector<ByteRegion>& regions,
-      MoveOpcode move_opcode);
-
- protected:
-  virtual bool fetch_cache_layout(uint64_t cluster_id,
-                                  const std::string& remote_addr,
-                                  WorkerCacheLayoutManifest* manifest);
-  virtual bool set_remote_peer(uint64_t cluster_id,
-                               const std::string& remote_addr,
-                               const WorkerCacheLayoutManifest& manifest,
-                               CachePeerMode mode);
-  virtual bool open_local_session(const std::string& remote_addr);
-  virtual bool close_local_session(const std::string& remote_addr);
-  virtual bool fetch_virtual_offsets(
-      uint64_t cluster_id,
-      const proto::VirtualKVCacheOffsetsRequest& request,
-      proto::VirtualKVCacheOffsetsResponse* response);
+  bool move_memory_regions_with_session(const std::string& remote_addr,
+                                        const VirtualKVPullSession& session,
+                                        const std::vector<ByteRegion>& regions,
+                                        MoveOpcode move_opcode);
 
  private:
+  bool fetch_cache_layout(uint64_t cluster_id,
+                          const std::string& remote_addr,
+                          WorkerCacheLayoutManifest* manifest);
+  bool set_remote_peer(
+      uint64_t cluster_id,
+      const std::string& remote_addr,
+      const WorkerCacheLayoutManifest& manifest,
+      CachePeerMode mode,
+      const CachePeerSourceSelection* source_selection = nullptr);
+  bool open_local_session(const std::string& remote_addr);
+  bool close_local_session(const std::string& remote_addr);
+  bool fetch_virtual_offsets(uint64_t cluster_id,
+                             const proto::VirtualKVCacheOffsetsRequest& request,
+                             proto::VirtualKVCacheOffsetsResponse* response);
+
   void record_pending_remote_unlink(
       uint64_t cluster_id,
       const std::string& remote_addr,
@@ -173,8 +173,7 @@ class MooncakeKVTransferEngine : public MooncakeTransferEngine {
   struct LocalCachePeer {
     WorkerCacheLayoutManifest destination_manifest;
     WorkerCacheLayoutManifest source_manifest;
-    std::string source_incarnation;
-    uint64_t source_layout_generation = 0;
+    std::vector<uint64_t> excluded_source_spans;
     CachePeerMode mode = CachePeerMode::PLAN_ONLY;
     uint64_t link_epoch = 0;
     bool holds_session = false;
@@ -194,7 +193,6 @@ class MooncakeKVTransferEngine : public MooncakeTransferEngine {
 class MooncakeKVTransferService final
     : public proto::MooncakeTransferEngineService {
  public:
-  MooncakeKVTransferService();
   explicit MooncakeKVTransferService(
       std::shared_ptr<MooncakeKVTransferState> state);
   void SetCachePeer(google::protobuf::RpcController* controller,

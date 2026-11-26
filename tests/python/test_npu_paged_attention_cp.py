@@ -368,6 +368,7 @@ def test_mla_cp_uses_one_paged_sequence_per_zigzag_segment_and_reuses_lengths(
     has_kv_shard: bool,
 ) -> None:
     backend = object.__new__(NpuPagedAttentionBackend)
+    backend._mla_cp_block_tables = {}
     backend._metadata = SimpleNamespace(
         has_kv_shard=has_kv_shard,
         kv_split_size=1,

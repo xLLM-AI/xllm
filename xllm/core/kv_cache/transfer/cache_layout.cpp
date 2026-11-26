@@ -138,8 +138,7 @@ Status validate_physical_coverage(const CacheTensorManifest& tensor) {
 }
 
 Status validate_contiguous_shape(const CacheTensorManifest& tensor) {
-  if (tensor.physical_rows_per_resource == 0 ||
-      multiply_overflows(tensor.resource_count,
+  if (multiply_overflows(tensor.resource_count,
                          tensor.physical_rows_per_resource) ||
       static_cast<uint64_t>(tensor.shape.front()) !=
           tensor.resource_count * tensor.physical_rows_per_resource) {
@@ -255,20 +254,19 @@ Status validate_worker_cache_layout(const WorkerCacheLayoutManifest& manifest) {
 
   std::unordered_map<int64_t, uint64_t> buffer_sizes;
   buffer_sizes.reserve(manifest.tensors.size());
-  std::set<std::tuple<int32_t, int64_t, int32_t, int32_t>> tensor_keys;
+  std::set<std::tuple<uint32_t, int64_t, int32_t, int32_t>> tensor_keys;
   for (const CacheTensorManifest& tensor : manifest.tensors) {
-    if (tensor.cache_namespace < CacheNamespace::MAIN ||
-        tensor.cache_namespace > CacheNamespace::SPEC_DRAFT ||
-        tensor.layer_id < 0 || tensor.mooncake_buffer_id < 0 ||
-        tensor.element_bytes == 0 || tensor.shape.empty() ||
-        tensor.shape.size() != tensor.stride.size() || !tensor.contiguous ||
-        tensor.resource_count == 0 || tensor.physical_rows_per_resource == 0 ||
+    if (tensor.cache_pool_id >= kMaxNumCachePools || tensor.layer_id < 0 ||
+        tensor.mooncake_buffer_id < 0 || tensor.element_bytes == 0 ||
+        tensor.shape.empty() || tensor.shape.size() != tensor.stride.size() ||
+        !tensor.contiguous || tensor.resource_count == 0 ||
+        tensor.physical_rows_per_resource == 0 ||
         tensor.resource_stride_bytes == 0 || tensor.buffer_bytes == 0 ||
         tensor.shard.spans.empty()) {
       return invalid("cache tensor manifest is incomplete");
     }
     if (!tensor_keys
-             .emplace(static_cast<int32_t>(tensor.cache_namespace),
+             .emplace(tensor.cache_pool_id,
                       tensor.layer_id,
                       tensor.role,
                       tensor.group_id)
@@ -353,8 +351,9 @@ void cache_layout_to_proto(const WorkerCacheLayoutManifest& manifest,
       static_cast<int32_t>(manifest.tensors.size()));
   for (const CacheTensorManifest& tensor : manifest.tensors) {
     proto::CacheTensorManifest* proto_tensor = proto_manifest->add_tensors();
+    // Keep the legacy enum in the RPC contract.
     proto_tensor->set_cache_namespace(
-        static_cast<proto::CacheNamespace>(tensor.cache_namespace));
+        static_cast<proto::CacheNamespace>(tensor.cache_pool_id));
     proto_tensor->set_layer_id(tensor.layer_id);
     proto_tensor->set_role(tensor.role);
     proto_tensor->set_group_id(tensor.group_id);
@@ -416,12 +415,9 @@ Status cache_layout_from_proto(
   manifest->tensors.reserve(static_cast<size_t>(proto_manifest.tensors_size()));
   for (const proto::CacheTensorManifest& proto_tensor :
        proto_manifest.tensors()) {
-    if (!proto::CacheNamespace_IsValid(proto_tensor.cache_namespace())) {
-      return invalid("cache tensor contains an unknown namespace");
-    }
     CacheTensorManifest tensor;
-    tensor.cache_namespace =
-        static_cast<CacheNamespace>(proto_tensor.cache_namespace());
+    tensor.cache_pool_id =
+        static_cast<uint32_t>(proto_tensor.cache_namespace());
     tensor.layer_id = proto_tensor.layer_id();
     tensor.role = proto_tensor.role();
     tensor.group_id = proto_tensor.group_id();

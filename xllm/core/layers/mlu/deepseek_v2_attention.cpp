@@ -18,6 +18,7 @@ limitations under the License.
 #include <tuple>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/platform/model_stream_registry.h"
 #include "kernels/ops_api.h"
 
 namespace xllm {

@@ -216,7 +216,7 @@ class BlockingKVTransfer final : public KVTransfer {
   std::vector<std::string> push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& /*merged_kv_infos*/,
       std::shared_ptr<KVPushSynchronizerImpl>& /*layer_synchronizer*/,
-      bool /*is_spec_draft*/,
+      uint32_t /*cache_pool_id*/,
       int32_t /*kv_split_rank*/,
       int32_t /*kv_split_size*/) override {
     return {};

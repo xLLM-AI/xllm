@@ -328,7 +328,7 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   const int32_t num_sequences = input_params.meta.num_sequences;
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
-  const int32_t block_size = options_.block_size();
+  const int32_t block_size = logical_block_size();
   DecodeBatchContext batch_ctx = make_decode_batch_context(input);
 
   const DecodeExpansionOptions decode_options{
@@ -347,6 +347,12 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   scale_speculative_parallel_token_counts(
       input_params, decode_options.num_speculative_tokens);
   validate_input.runtime.device_tensors_ready = true;
+}
+
+template <typename TargetInput>
+int32_t SpeculativeWorkerImpl<TargetInput>::logical_block_size() const {
+  return static_cast<int32_t>(options_.block_size()) *
+         parallel_args_.kv_split_size_effective();
 }
 
 template class SpeculativeWorkerImpl<LlmForwardInput>;

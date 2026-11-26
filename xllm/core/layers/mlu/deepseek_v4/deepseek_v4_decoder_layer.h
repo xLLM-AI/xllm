@@ -51,7 +51,6 @@ class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
       const ModelParamsView& input_params,
       const std::optional<torch::Tensor>& input_ids = std::nullopt,
       std::optional<PendingMHC>* pending_mhc = nullptr,
-      bool is_last_layer = true,
       const mlu_v4_cp::DeepseekV4CpContext* cp_context = nullptr);
 
  private:
@@ -61,6 +60,7 @@ class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
 
   int32_t layer_id_ = 0;
   bool use_hash_ = false;
+  const bool is_last_layer_;
 
   MHCPre attn_hc_pre_{nullptr};
   MHCPre ffn_hc_pre_{nullptr};

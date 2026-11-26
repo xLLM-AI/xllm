@@ -189,8 +189,9 @@ uint64_t specialize_dp_ep_graph_key(uint64_t graph_key, const Params& params) {
   return graph_namespace | graph_key;
 }
 
-constexpr uint64_t paged_attention_plan_bucket_unchecked(int64_t max_kv,
-                                                         int64_t block_size) {
+uint64_t paged_attention_plan_bucket(int64_t max_kv, int64_t block_size) {
+  CHECK_GT(max_kv, 0);
+  CHECK_GT(block_size, 0);
   const uint64_t block =
       static_cast<uint64_t>((max_kv + block_size - 1) / block_size);
   // Keep the exact block endpoint separate. This preserves a conservative
@@ -199,19 +200,6 @@ constexpr uint64_t paged_attention_plan_bucket_unchecked(int64_t max_kv,
   // block.
   const uint64_t is_block_endpoint = max_kv % block_size == 0 ? 1 : 0;
   return (block << 1) | is_block_endpoint;
-}
-
-static_assert(paged_attention_plan_bucket_unchecked(127, 128) == 2);
-static_assert(paged_attention_plan_bucket_unchecked(128, 128) == 3);
-static_assert(paged_attention_plan_bucket_unchecked(129, 128) == 4);
-static_assert(paged_attention_plan_bucket_unchecked(255, 128) == 4);
-static_assert(paged_attention_plan_bucket_unchecked(256, 128) == 5);
-static_assert(paged_attention_plan_bucket_unchecked(257, 128) == 6);
-
-uint64_t paged_attention_plan_bucket(int64_t max_kv, int64_t block_size) {
-  CHECK_GT(max_kv, 0);
-  CHECK_GT(block_size, 0);
-  return paged_attention_plan_bucket_unchecked(max_kv, block_size);
 }
 
 uint64_t spec_verify_packed_graph_key(uint32_t bucket_num_tokens,
@@ -463,11 +451,9 @@ bool AclGraph::capture(CausalLM* model,
     update_spec_verify_attention_tiling(graph_params.value());
   }
 
-  if (model->is_hybrid_linear_attention()) {
-    graph_task_context_ = std::make_shared<AclGraphTaskUpdateContext>();
-    graph_task_context_->begin_capture();
-    graph_params->graph.acl_graph_task_update_context = graph_task_context_;
-  }
+  graph_task_context_ = std::make_shared<AclGraphTaskUpdateContext>();
+  graph_task_context_->begin_capture();
+  graph_params->graph.acl_graph_task_update_context = graph_task_context_;
   // Synchronize stream to ensure all data is copied to graph persistent buffers
   aclrtSynchronizeStream(stream);
 
@@ -557,14 +543,12 @@ bool AclGraph::capture(CausalLM* model,
   return true;
 }
 
-bool AclGraph::update_graph_tasks(const ModelParamsView& params,
+void AclGraph::update_graph_tasks(const ModelParamsView& params,
                                   bool update_causal_conv1d_tasks) {
   if (graph_task_context_ == nullptr) {
-    return false;
+    return;
   }
 
-  c10_npu::NPUStream update_stream = update_stream_.value();
-  c10_npu::NPUStreamGuard stream_guard(update_stream);
   auto& causal_conv1d_tasks = graph_task_context_->causal_conv1d_tasks;
   auto& fused_infer_attention_tasks =
       graph_task_context_->fused_infer_attention_tasks;
@@ -574,8 +558,11 @@ bool AclGraph::update_graph_tasks(const ModelParamsView& params,
   const bool has_fused_infer_attention_tasks =
       !fused_infer_attention_tasks.empty();
   if (!has_causal_conv1d_tasks && !has_fused_infer_attention_tasks) {
-    return false;
+    return;
   }
+
+  c10_npu::NPUStream update_stream = update_stream_.value();
+  c10_npu::NPUStreamGuard stream_guard(update_stream);
 
   std::vector<int64_t> empty_host_args;
   std::vector<int64_t> linear_state_indices_host;
@@ -717,7 +704,6 @@ bool AclGraph::update_graph_tasks(const ModelParamsView& params,
       ++fused_infer_attention_index;
     }
   }
-  return true;
 }
 
 void AclGraph::signal_static_causal_conv1d_tasks(
@@ -920,13 +906,10 @@ ModelOutput AclGraph::replay(CausalLM* model,
 
   aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
-  const bool has_dcp_fused_infer_attention_tasks =
-      has_fused_infer_attention_graph_tasks() &&
-      graph_task_context_->fused_infer_attention_tasks.front().dcp_size > 1;
   // The first hybrid replay must wait for real inputs to replace capture
   // padding.
   if (graph_paged_attention_tiling_data_.defined() ||
-      has_dcp_fused_infer_attention_tasks ||
+      has_fused_infer_attention_graph_tasks() ||
       first_hybrid_replay_after_capture_) {
     make_graph_wait_for_current_stream(stream);
   }
@@ -941,17 +924,9 @@ ModelOutput AclGraph::replay(CausalLM* model,
   CHECK(!static_graph_tasks_prepared || use_static_graph_tasks)
       << "prepared static graph tasks do not match the replay signature";
   graph_.replay();
-  if (model->is_hybrid_linear_attention()) {
-    CHECK(graph_params.has_value())
-        << "update() should return ModelParamsView for graph task update";
-    const bool causal_conv1d_tasks_prepared =
-        use_static_graph_tasks && static_graph_tasks_prepared;
-    // The first replay after dirty capture dynamically replaces slot-0 host
-    // parameters. Later matching MTP replays may use the existing ready signal.
-    update_graph_tasks(
-        graph_params.value(),
-        /*update_causal_conv1d_tasks=*/!causal_conv1d_tasks_prepared);
-  }
+  update_graph_tasks(graph_params ? *graph_params : params,
+                     /*update_causal_conv1d_tasks=*/!use_static_graph_tasks ||
+                         !static_graph_tasks_prepared);
   make_current_stream_wait_for_graph(stream);
 
   // Return the actual num_tokens portion of ModelOutput
@@ -1388,13 +1363,8 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
                                                const torch::Tensor& positions,
                                                std::vector<KVCache>& kv_caches,
                                                const ModelParamsView& params) {
-  const bool in_decoding_phase = params.meta.batch_forward_type.is_decode() &&
-                                 params.meta.q_max_seq_len <= 1;
-  const bool in_spec_verify_phase =
-      !options_.is_draft_engine() &&
-      params.meta.batch_forward_type.is_decode() &&
-      params.meta.q_max_seq_len > 1;
-  if ((!in_decoding_phase && !in_spec_verify_phase) || args_.n_layers() == 1) {
+  if (!params.meta.batch_forward_type.is_decode() ||
+      params.meta.q_max_seq_len > 1 || args_.n_layers() == 1) {
     return;
   }
   if (!is_qwen3_5_dp_graph_step_supported(args_, options_, params)) {
@@ -1403,10 +1373,8 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
   if (model_->requires_graph_forward_metadata()) {
     return;
   }
-  if (in_spec_verify_phase && !model_->is_hybrid_linear_attention()) {
-    return;
-  }
-  if (in_decoding_phase && params.parallel.dp_global_token_nums.size() > 1) {
+  const bool dp_batch = params.parallel.dp_global_token_nums.size() > 1;
+  if (dp_batch) {
     if (params.parallel.dp_is_decode.size() !=
         params.parallel.dp_global_token_nums.size()) {
       return;
@@ -1424,26 +1392,14 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
   }
 
   uint32_t graph_num_tokens = tokens.size(/*dim=*/0);
-  if (params.parallel.dp_global_token_nums.size() > 1) {
+  if (dp_batch) {
     graph_num_tokens = util::max(params.parallel.dp_global_token_nums);
   }
   if (graph_num_tokens == 0) {
     return;
   }
   const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
-  uint64_t attention_plan_class = 0;
-  if (in_spec_verify_phase &&
-      params.graph.spec_verify_source_addresses_stable) {
-    const uint64_t lookup_key = spec_verify_attention_plan_lookup_key(
-        bucket_num_tokens, params, options_.block_size());
-    auto plan_class = find_spec_verify_attention_plan_class(lookup_key);
-    if (!plan_class.has_value()) {
-      return;
-    }
-    attention_plan_class = plan_class.value();
-  }
-  const uint64_t graph_key =
-      get_graph_key(bucket_num_tokens, params, attention_plan_class);
+  const uint64_t graph_key = get_graph_key(bucket_num_tokens, params);
 
   std::shared_ptr<AclGraph> graph;
   {

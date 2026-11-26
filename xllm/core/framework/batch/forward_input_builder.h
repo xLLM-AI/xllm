@@ -55,11 +55,10 @@ class ForwardInputBuilder final {
   void process_sequences();
   void process_sequences_multithreaded();
 
-  static TransferKVInfo build_step_transfer_info(
-      const TransferKVInfo& full_info,
-      Sequence* sequence,
+  static void append_step_transfer_info(
+      Sequence& sequence,
       uint32_t seq_len,
-      uint32_t kv_split_size);
+      std::vector<TransferKVInfo>& transfer_kv_infos);
 
   // State management
   struct BuilderState {

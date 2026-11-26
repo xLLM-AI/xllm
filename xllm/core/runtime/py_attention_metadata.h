@@ -44,7 +44,6 @@ class PyExpandedDecodeMetadataView final {
   pybind11::object paged_kv_indptr() const;
   pybind11::object paged_kv_indices() const;
   pybind11::object paged_kv_last_page_len() const;
-  pybind11::object paged_attention_tiling_data() const;
   pybind11::object kv_seq_lens_host() const;
   const std::vector<int32_t>& kv_seq_lens_host_values() const;
 

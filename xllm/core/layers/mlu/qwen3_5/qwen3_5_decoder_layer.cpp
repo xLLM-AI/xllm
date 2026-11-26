@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/platform/model_stream_registry.h"
 #include "layers/common/dp_utils.h"
 
 namespace xllm {

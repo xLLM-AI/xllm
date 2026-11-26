@@ -99,7 +99,7 @@ constexpr PackedInputDomain packed_input_domain() {
   return PackedInputDomain::LLM;
 }
 constexpr uint64_t kPackedInputMagic = 0x584c4c4d494e5032;
-constexpr uint16_t kPackedInputSchemaVersion = 13;
+constexpr uint16_t kPackedInputSchemaVersion = 14;
 constexpr uint32_t kPackedInputHeaderBytes = 40;
 
 struct RawInputLayoutHeader final {
@@ -590,6 +590,8 @@ inline void write_kv_transfer_mappings(
     write_data(buffer, mapping.group_id);
     write_vector(buffer, mapping.local_ids);
     write_vector(buffer, mapping.remote_ids);
+    write_data(buffer, mapping.remote_shared_num);
+    write_data(buffer, mapping.local_start_block_index);
   }
 }
 
@@ -601,6 +603,8 @@ inline void write_kv_transfer_mappings(
     write_data(context.descriptor, mapping.group_id);
     write_vector(context.descriptor, mapping.local_ids);
     write_vector(context.descriptor, mapping.remote_ids);
+    write_data(context.descriptor, mapping.remote_shared_num);
+    write_data(context.descriptor, mapping.local_start_block_index);
   }
 }
 
@@ -1480,6 +1484,8 @@ inline void read_kv_transfer_mappings(
     read_data(buffer, mapping.group_id);
     read_vector(buffer, mapping.local_ids);
     read_vector(buffer, mapping.remote_ids);
+    read_data(buffer, mapping.remote_shared_num);
+    read_data(buffer, mapping.local_start_block_index);
   }
 }
 
@@ -1493,6 +1499,8 @@ inline void read_kv_transfer_mappings(
     read_data(context, mapping.group_id);
     read_vector(context, mapping.local_ids);
     read_vector(context, mapping.remote_ids);
+    read_data(context, mapping.remote_shared_num);
+    read_data(context, mapping.local_start_block_index);
   }
 }
 

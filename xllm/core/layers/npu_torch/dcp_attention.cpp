@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <limits>
+#include <memory>
 #include <optional>
 #include <tuple>
 #include <vector>
@@ -113,7 +114,10 @@ DcpAttentionResult run_local_dcp_cache_attention(
 
   torch::Tensor partial_output;
   torch::Tensor partial_lse;
-  if (attention_metadata.paged_attention_tiling_data.defined()) {
+  const std::shared_ptr<xllm::npu::AclGraphTaskUpdateContext> graph_context =
+      attention_metadata.acl_graph_task_update_context;
+  const bool capturing = graph_context != nullptr && graph_context->capturing;
+  if (capturing) {
     partial_output = torch::empty_like(gathered_query);
     partial_lse = detail::run_fused_infer_attention_graph(
         attention_metadata.acl_graph_task_update_context,
@@ -147,7 +151,7 @@ DcpAttentionResult run_local_dcp_cache_attention(
             "TND",
             /*softmax_lse_flag=*/true);
   }
-  if (attention_metadata.paged_attention_tiling_data.defined()) {
+  if (capturing) {
     const torch::Tensor& empty_shards =
         attention_metadata.kv_shard_batch_metadata->empty_shard_mask;
     partial_lse.copy_(torch::where(

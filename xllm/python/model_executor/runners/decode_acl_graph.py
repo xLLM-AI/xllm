@@ -31,7 +31,6 @@ logic:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import cast
 
@@ -148,6 +147,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         enable_graph_mode_decode_no_padding: bool = False,
         device_kv_lengths: bool = False,
         kv_capacity_graphs: bool = False,
+        enable_index_history_bucketing: bool = False,
         max_capture_tokens: int | None = None,
     ) -> None:
         super().__init__(model, attention_backend, device)
@@ -164,7 +164,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # runner's owned static buffers.
         if enable_graph_mode_decode_no_padding:
             self._capture_error_mode = "thread_local"
-        self._serial_workspace_pool: list[torch.Tensor] | None = []
+        self._serial_workspace_pool: list[torch.Tensor] = []
         self._serial_buffers = AclGraphBufferPool(self.max_batch)
         # Device masks need compact capacity tiers. Host-length FIA updates
         # its live lengths between replays and uses a single full-width graph.
@@ -172,12 +172,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if self._kv_capacity_graphs and dp_size != 1:
             raise ValueError("KV-capacity ACL graphs require DP size one")
         self._device_kv_lengths = device_kv_lengths
-        self._has_index_cache = False
         self._has_linear_cache = False
         self._model_owns_linear_spec_verify = any(
             getattr(builder, "supports_linear_spec_verify_graph", False) for builder in self.execution_metadata_builders
         )
         self._uses_compressed_kpool_tail = False
+        self._enable_index_history_bucketing = enable_index_history_bucketing
+        self._uses_index_history_bucketing = False
         self._graphs: dict[_GraphKey, AclGraphEntry] = {}
         self._startup_batch_shapes: set[tuple[int, bool]] = set()
         self._dp_graph_variants: dict[_GraphKey, int] = {}
@@ -192,7 +193,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
         super().bind_layer_caches(layer_caches)
-        self._has_index_cache = any(cache.index is not None for cache in layer_caches)
         self._has_linear_cache = any(cache.conv is not None or cache.ssm is not None for cache in layer_caches)
         self._model_owns_linear_spec_verify = any(
             getattr(builder, "supports_linear_spec_verify_graph", False) for builder in self.execution_metadata_builders
@@ -200,6 +200,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # Compressed-tail signature is fixed after bind; cache it once instead
         # of rescanning every layer cache on each decode step.
         self._uses_compressed_kpool_tail = any(is_compact_kpool_tail(cache.kpool_tail) for cache in layer_caches)
+        self._uses_index_history_bucketing = self._enable_index_history_bucketing and any(
+            cache.index is not None and not is_compact_kpool_tail(cache.kpool_tail) for cache in layer_caches
+        )
 
     def _shared_kv_layout(self) -> object | None:
         """Return the backend's shared physical-cache layout, when enabled.
@@ -317,7 +320,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             if any(count <= 0 for count in execution_counts):
                 raise RuntimeError(f"DP execution token counts must be positive, got {execution_counts}")
             dp_is_decode = getattr(metadata, "dp_is_decode", None)
-            if dp_is_decode is not None and not all(dp_is_decode):
+            if dp_is_decode is None or len(dp_is_decode) != self.dp_size or not all(dp_is_decode):
                 return None
             if max(execution_counts) > self.max_batch:
                 return None
@@ -409,12 +412,15 @@ class DecodeAclGraphRunner(AclGraphRunner):
             source_tables = list(getattr(metadata, "multi_block_tables", ()) or ())
             if not source_tables or len(source_tables) < len(group_infos):
                 return None
-        granularity = int(getattr(self.attention_backend, "graph_token_capacity_granularity", 0) or 0)
+        granularity = self._token_capacity_granularity()
         if granularity:
             bucket = self._token_capacity_bucket(metadata, decode_metadata)
             if bucket <= 0:
                 return None
-            if bucket > (self.max_model_len + granularity - 1) // granularity:
+            max_context = self.max_model_len + (
+                self.num_speculative_tokens if self._uses_index_history_bucketing else 0
+            )
+            if bucket > (max_context + granularity - 1) // granularity:
                 return None
         return decode_metadata
 
@@ -446,39 +452,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
             "AttentionMetadata",
             _DsaGraphMetadataView(metadata, block_table, slot_mapping, tuple(tables)),
         )
-
-    def _has_compatible_index_history(self, metadata: AttentionMetadata, block_table: torch.Tensor) -> bool:
-        if not self._has_index_cache:
-            return True
-        max_kv_cap = getattr(self.attention_backend, "graph_index_history_max_kv", None)
-        if max_kv_cap is None:
-            return True
-        page_size = self.attention_backend.page_size
-        if max_kv_cap <= 0 or page_size <= 0 or max_kv_cap % page_size:
-            return False
-        if self.dp_size > 1:
-            # Draft iterations advance KV without refreshing the shared host plan.
-            if self._is_spec_draft:
-                return False
-            global_kv_lengths = getattr(metadata, "dp_global_kv_max_seq_lens", None)
-            if global_kv_lengths is None:
-                return False
-            if not isinstance(global_kv_lengths, Sequence):
-                raise RuntimeError("DP index-history lengths must be a host sequence")
-            if not global_kv_lengths:
-                return False
-            if len(global_kv_lengths) != self.dp_size:
-                raise RuntimeError(f"DP index-history lengths must contain {self.dp_size} entries")
-            if any(
-                not isinstance(length, int) or isinstance(length, bool) or length < 0 for length in global_kv_lengths
-            ):
-                raise RuntimeError("DP index-history lengths must be nonnegative host integers")
-            # All ranks, including dummy ranks, decide from the same logical history.
-            # Target verify appends rows after the scheduler publishes its plan.
-            max_verify_kv = max(global_kv_lengths) + self.num_speculative_tokens
-            return max_verify_kv <= max_kv_cap
-
-        return block_table.shape[1] * self._logical_page_size <= max_kv_cap
 
     def _padded_batch_size(self, batch_size: int, metadata: AttentionMetadata) -> int:
         # All DP ranks must use the same shape for captured MoE collectives.
@@ -634,7 +607,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
             paged_kv_indptr=paged_kv_indptr,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len,
-            paged_attention_tiling_data=None,
             kv_seq_lens_host=None,
             kv_seq_lens_host_values=host_values,
         )
@@ -745,7 +717,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 and not (is_expanded and linear_idx.numel() > 0 and batch_size % linear_idx.numel() == 0)
             ):
                 return False
-        return self._has_compatible_index_history(metadata, block_table)
+        return True
 
     @staticmethod
     def _cumulative_lengths(
@@ -1163,9 +1135,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             assert self._update_done_event is not None
             # execute() already orders the previous caller after replay.
             # A different caller must also wait before reusing shared inputs.
-            if self._serial_buffers is not None and not _same_npu_stream(
-                current_stream, self._update_done_caller_stream
-            ):
+            if not _same_npu_stream(current_stream, self._update_done_caller_stream):
                 current_stream.wait_stream(self._stream)
             current_stream.wait_event(self._update_done_event)
 
@@ -1188,9 +1158,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 **decode_kwargs,
             )
             # Replay must keep the gather capacity used at capture.
-            entry.static_metadata.dsa_graph_token_capacity = self._token_capacity_bucket(
-                metadata, decode_metadata
-            ) * int(getattr(self.attention_backend, "graph_token_capacity_granularity", 0) or 0)
+            entry.static_metadata.dsa_graph_token_capacity = (
+                self._token_capacity_bucket(metadata, decode_metadata) * self._token_capacity_granularity()
+            )
             self._graphs[graph_key] = entry
 
         self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=first_capture)
@@ -1220,7 +1190,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 entry.static_metadata.num_accepted_tokens_host_values = (1,) * accepted.numel()
 
         self._bind_graph_input_batch(entry, input_batch)
-        self._prepare_attention(entry, entry.static_metadata, replay=not first_capture)
+        self._prepare_attention(entry, replay=not first_capture)
         if first_capture:
             self._capture(entry, self._stream)
             if capture_linear_state:
@@ -1239,7 +1209,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     **decode_kwargs,
                 )
                 self._bind_graph_input_batch(entry, input_batch)
-                self._prepare_attention(entry, entry.static_metadata, replay=True)
+                self._prepare_attention(entry, replay=True)
         return entry
 
     @staticmethod
@@ -1276,12 +1246,17 @@ class DecodeAclGraphRunner(AclGraphRunner):
             token_capacity_bucket,
         )
 
+    def _token_capacity_granularity(self) -> int:
+        if self._uses_index_history_bucketing:
+            return 32768
+        return int(getattr(self.attention_backend, "graph_token_capacity_granularity", 0) or 0)
+
     def _token_capacity_bucket(
         self,
         metadata: AttentionMetadata,
         decode_metadata: DecodeAclGraphMetadata | None = None,
     ) -> int:
-        granularity = int(getattr(self.attention_backend, "graph_token_capacity_granularity", 0) or 0)
+        granularity = self._token_capacity_granularity()
         if not granularity:
             return 0
         if decode_metadata is not None and decode_metadata.token_capacity_bucket is not None:
@@ -1289,6 +1264,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if self.dp_size > 1:
             global_lengths = getattr(metadata, "dp_global_kv_max_seq_lens", None)
             max_ctx = max((int(value) for value in global_lengths or ()), default=0)
+            if max_ctx and self._uses_index_history_bucketing:
+                max_ctx = (self.max_model_len if self._is_spec_draft else max_ctx) + self.num_speculative_tokens
         else:
             expanded = resolve_expanded_decode_metadata(metadata)
             host_values = (
@@ -1334,10 +1311,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             )
         return query_lens + (query_width,) * ((padded_num_tokens - num_tokens) // query_width)
 
-    def _retain_graph_output(self, entry: AclGraphEntry, output: ModelExecutionOutput) -> ModelExecutionOutput:
-        if entry.execution_state.serial_buffers is None:
-            return output
-
+    def _retain_graph_output(self, output: ModelExecutionOutput) -> ModelExecutionOutput:
         # All output-producing operators allocate normally inside capture.
         # Let the graph pool reuse those allocations for subsequent shapes.
         if isinstance(output, torch.Tensor):
@@ -1358,8 +1332,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
         device: torch.device,
         capacity: int | None = None,
     ) -> torch.Tensor:
-        if self._serial_buffers is None:
-            return torch.zeros(shape, dtype=dtype, device=device)
         return self._serial_buffers.get(("input", name), shape, dtype=dtype, device=device, capacity=capacity).zero_()
 
     def _allocate_entry(
@@ -1415,7 +1387,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
         entry.kv_capacity_pages = kv_capacity_pages
         entry.batch_size = padded_batch_size
         entry.graph = None
-        entry.static_output = None
         entry.graph_tasks = []
         entry.execution_state = AclGraphExecutionState(
             {}, serial_workspace_pool=self._serial_workspace_pool, serial_buffers=self._serial_buffers
@@ -1552,7 +1523,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 paged_kv_indptr=entry.static_metadata.paged_kv_indptr,
                 paged_kv_indices=entry.static_metadata.paged_kv_indices,
                 paged_kv_last_page_len=(entry.static_metadata.paged_kv_last_page_len),
-                paged_attention_tiling_data=None,
                 kv_seq_lens_host=None,
                 kv_seq_lens_host_values=(
                     entry.static_metadata.kv_seq_lens_host_values

@@ -178,19 +178,24 @@ ForwardInputBuilder::ForwardInputBuilder(
   state_.batch_forward_type = data.forward_type;
 }
 
-TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
-    const TransferKVInfo& full_info,
-    Sequence* sequence,
+void ForwardInputBuilder::append_step_transfer_info(
+    Sequence& sequence,
     uint32_t seq_len,
-    uint32_t kv_split_size) {
-  CHECK(sequence != nullptr);
+    std::vector<TransferKVInfo>& transfer_kv_infos) {
+  auto& kv_state = sequence.kv_state();
+  const auto& transfer_kv_info = kv_state.transfer_kv_info();
+  if (!transfer_kv_info.has_value()) {
+    return;
+  }
+  const auto& full_info = transfer_kv_info.value();
+  const auto kv_split_size = static_cast<uint32_t>(
+      ParallelConfig::get_instance().kv_split_size_effective());
 
   TransferKVInfo info;
   info.request_id = full_info.request_id;
   info.rank_local_mapping = full_info.rank_local_mapping;
   info.dp_rank = full_info.dp_rank;
   info.remote_instance_info = full_info.remote_instance_info;
-  info.dst_virtual_kv_cache_layer_global_offsets.clear();
 
   for (const KVTransferMapping& full_mapping : full_info.mappings) {
     const std::optional<BlockType> block_type =
@@ -207,8 +212,8 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
     if (block_type.value() == BlockType::LINEAR ||
         block_type.value() == BlockType::EMBEDDING) {
       const int32_t local_id = block_type.value() == BlockType::LINEAR
-                                   ? sequence->get_linear_state_slot_id()
-                                   : sequence->get_embedding_block_id();
+                                   ? sequence.get_linear_state_slot_id()
+                                   : sequence.get_embedding_block_id();
       if (local_id < 0 || full_mapping.remote_ids.empty()) {
         info.mappings.emplace_back(std::move(step_mapping));
         continue;
@@ -222,7 +227,7 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
       continue;
     }
 
-    const Slice<Block> blocks = sequence->kv_state().blocks(block_type.value());
+    const Slice<Block> blocks = kv_state.blocks(block_type.value());
     if (blocks.empty() || full_mapping.remote_ids.empty()) {
       info.mappings.emplace_back(std::move(step_mapping));
       continue;
@@ -244,9 +249,8 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
     const bool is_flat_kv = block_type.value() == BlockType::KV;
     const bool uses_kv_split = is_kv_split_cache_block_type(block_type.value());
     const size_t next_transfer_idx =
-        is_flat_kv ? sequence->kv_state().next_transfer_block_idx()
-                   : sequence->kv_state().next_group_transfer_block_idx(
-                         block_type.value());
+        is_flat_kv ? kv_state.next_transfer_block_idx()
+                   : kv_state.next_group_transfer_block_idx(block_type.value());
     const size_t win_end =
         static_cast<size_t>(util::ceil_div(seq_len, block_size));
     const size_t map_end = std::min(win_end, local_ids.size());
@@ -256,7 +260,7 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
     CHECK_GT(remote_stride, static_cast<size_t>(0));
     const size_t remote_shared_num =
         static_cast<size_t>(full_mapping.remote_shared_num);
-    CHECK_GE(next_transfer_idx, remote_shared_num)
+    CHECK_GE(next_transfer_idx, remote_shared_num / remote_stride)
         << "P transfer cursor slid below D-side shared prefix, request_id="
         << full_info.request_id << ", group_id=" << full_mapping.group_id
         << ", next_transfer_idx=" << next_transfer_idx
@@ -265,10 +269,11 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
     // Flat KV responses omit D-side shared blocks, while grouped responses
     // preserve their full logical tables (including SWA placeholders).
     const size_t remote_origin = is_flat_kv ? remote_shared_num : 0;
-    const size_t remote_end =
-        map_end > remote_origin ? (map_end - remote_origin) * remote_stride : 0;
-    CHECK_GE(util::align_up(full_mapping.remote_ids.size(), remote_stride),
-             remote_end)
+    const size_t remote_end_block_index = map_end * remote_stride;
+    const size_t remote_end = remote_end_block_index > remote_origin
+                                  ? remote_end_block_index - remote_origin
+                                  : 0;
+    CHECK_GE(full_mapping.remote_ids.size() + remote_stride - 1, remote_end)
         << "KV remote id coverage shortage, request_id=" << full_info.request_id
         << ", group_id=" << full_mapping.group_id
         << ", remote_size=" << full_mapping.remote_ids.size()
@@ -279,12 +284,12 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
     const size_t advanced_transfer_idx =
         std::max(next_transfer_idx, std::min(stable_end, map_end));
     if (is_flat_kv) {
-      sequence->kv_state().advance_transfer_block_idx(advanced_transfer_idx);
+      kv_state.advance_transfer_block_idx(advanced_transfer_idx);
     } else {
-      sequence->kv_state().advance_group_transfer_block_idx(
-          block_type.value(), advanced_transfer_idx);
+      kv_state.advance_group_transfer_block_idx(block_type.value(),
+                                                advanced_transfer_idx);
     }
-    if (next_transfer_idx >= map_end || map_end <= remote_origin) {
+    if (next_transfer_idx >= map_end || remote_end == 0) {
       info.mappings.emplace_back(std::move(step_mapping));
       continue;
     }
@@ -303,8 +308,11 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
       const size_t remote_idxs_begin = remote_idxs.size();
       bool has_remote_sentinel = false;
       for (size_t offset = 0; offset < remote_stride; ++offset) {
-        const size_t remote_idx =
-            (local_idx - remote_origin) * remote_stride + offset;
+        const size_t remote_block_index = local_idx * remote_stride + offset;
+        if (remote_block_index < remote_shared_num) {
+          continue;
+        }
+        const size_t remote_idx = remote_block_index - remote_origin;
         if (remote_idx >= full_mapping.remote_ids.size()) {
           CHECK_GT(remote_stride, static_cast<size_t>(1));
           break;
@@ -323,6 +331,12 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
         remote_idxs.resize(remote_idxs_begin);
         continue;
       }
+      if (step_mapping.remote_ids.size() == remote_ids_begin) {
+        continue;
+      }
+      if (step_mapping.local_ids.empty()) {
+        step_mapping.local_start_block_index = static_cast<uint64_t>(local_idx);
+      }
       step_mapping.local_ids.emplace_back(
           static_cast<uint64_t>(local_ids[local_idx]));
     }
@@ -336,7 +350,13 @@ TransferKVInfo ForwardInputBuilder::build_step_transfer_info(
     }
     info.mappings.emplace_back(std::move(step_mapping));
   }
-  return info;
+  if (std::any_of(info.mappings.begin(),
+                  info.mappings.end(),
+                  [](const KVTransferMapping& mapping) {
+                    return !mapping.local_ids.empty();
+                  })) {
+    transfer_kv_infos.emplace_back(std::move(info));
+  }
 }
 
 void ForwardInputBuilder::process_sequences() {
@@ -975,25 +995,7 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
       }
       state.multi_block_tables[m].emplace_back(std::move(block_ids));
     }
-    const std::optional<TransferKVInfo>& transfer_kv_info =
-        sequence->kv_state().transfer_kv_info();
-    if (transfer_kv_info.has_value()) {
-      TransferKVInfo step_info = build_step_transfer_info(
-          transfer_kv_info.value(),
-          sequence,
-          seq_len,
-          static_cast<uint32_t>(
-              ParallelConfig::get_instance().kv_split_size_effective()));
-      const bool has_transfer =
-          std::any_of(step_info.mappings.begin(),
-                      step_info.mappings.end(),
-                      [](const KVTransferMapping& mapping) {
-                        return !mapping.local_ids.empty();
-                      });
-      if (has_transfer) {
-        state.transfer_kv_infos.emplace_back(std::move(step_info));
-      }
-    }
+    append_step_transfer_info(*sequence, seq_len, state.transfer_kv_infos);
     return;
   }
 
@@ -1043,23 +1045,7 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
                               state.paged_kv_indices,
                               state.paged_kv_last_page_len);
 
-  auto& transfer_kv_info = sequence->kv_state().transfer_kv_info();
-  if (transfer_kv_info.has_value()) {
-    TransferKVInfo step_info = ForwardInputBuilder::build_step_transfer_info(
-        transfer_kv_info.value(),
-        sequence,
-        seq_len,
-        static_cast<uint32_t>(
-            ParallelConfig::get_instance().kv_split_size_effective()));
-    const bool has_transfer = std::any_of(step_info.mappings.begin(),
-                                          step_info.mappings.end(),
-                                          [](const KVTransferMapping& mapping) {
-                                            return !mapping.local_ids.empty();
-                                          });
-    if (has_transfer) {
-      state.transfer_kv_infos.emplace_back(std::move(step_info));
-    }
-  }
+  append_step_transfer_info(*sequence, seq_len, state.transfer_kv_infos);
 
   state.block_tables_vec.emplace_back(std::move(block_ids));
 }

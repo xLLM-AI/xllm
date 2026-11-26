@@ -352,7 +352,7 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=first_capture)
         self._fill_entry(entry, input_ids, positions, metadata)
         self._bind_graph_input_batch(entry, input_batch)
-        self._prepare_attention(entry, entry.static_metadata)
+        self._prepare_attention(entry)
         if first_capture:
             self._capture(entry, self._stream)
             self._graphs[graph_key] = entry
@@ -422,7 +422,6 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         entry = AclGraphEntry()
         entry.batch_size = token_count
         entry.graph = None
-        entry.static_output = None
         entry.static_input_ids = torch.zeros(token_count, dtype=input_ids.dtype, device=device)
         entry.static_positions = torch.zeros(token_count, dtype=torch.int32, device=device)
         entry.static_input_embedding = None
