@@ -18,6 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdint>
 #include <future>
 #include <stdexcept>
 #include <vector>
@@ -32,19 +33,20 @@ TEST(HostStoreWriterTest, HoldsCompletionAndDrainsAcceptedWritesInOrder) {
   std::promise<void> started;
   std::promise<void> release;
   auto gate = release.get_future();
-  std::vector<int> completed;
+  std::vector<int32_t> completed;
+  completed.reserve(2);
   std::future<uint32_t> first;
   std::future<uint32_t> second;
   {
     HostStoreWriter writer(/*max_blocks=*/3);
-    first = writer.submit(2, Put([&] {
+    first = writer.submit(/*blocks=*/2, Put([&] {
                             started.set_value();
                             gate.wait();
                             completed.push_back(1);
                             return 2;
                           }));
     started.get_future().wait();
-    second = writer.submit(1, Put([&] {
+    second = writer.submit(/*blocks=*/1, Put([&] {
                              completed.push_back(2);
                              return 1;
                            }));
@@ -56,22 +58,22 @@ TEST(HostStoreWriterTest, HoldsCompletionAndDrainsAcceptedWritesInOrder) {
   EXPECT_EQ(second.wait_for(0s), std::future_status::ready);
   EXPECT_EQ(first.get(), 2U);
   EXPECT_EQ(second.get(), 1U);
-  EXPECT_EQ(completed, (std::vector<int>{1, 2}));
+  EXPECT_EQ(completed, (std::vector<int32_t>{1, 2}));
 }
 
 TEST(HostStoreWriterTest, CountsBothRunningAndQueuedBlocksAgainstCapacity) {
   HostStoreWriter writer(/*max_blocks=*/4);
   std::promise<void> release;
   auto gate = release.get_future();
-  auto running = writer.submit(2, Put([&] {
+  auto running = writer.submit(/*blocks=*/2, Put([&] {
                                  gate.wait();
                                  return 2U;
                                }));
-  auto queued = writer.submit(1, Put([] { return 1U; }));
+  auto queued = writer.submit(/*blocks=*/1, Put([] { return 1U; }));
   std::promise<void> submitting;
   auto next = std::async(std::launch::async, [&] {
     submitting.set_value();
-    return writer.submit(2, Put([] { return 2U; }));
+    return writer.submit(/*blocks=*/2, Put([] { return 2U; }));
   });
   submitting.get_future().wait();
   EXPECT_EQ(next.wait_for(20ms), std::future_status::timeout);
@@ -86,14 +88,14 @@ TEST(HostStoreWriterTest, OversizedWriteHoldsCreditsAndReleasesThemOnFailure) {
   std::promise<void> release;
   auto gate = release.get_future();
   auto oversized =
-      writer.submit(3, Put([&]() -> uint32_t {
+      writer.submit(/*blocks=*/3, Put([&]() -> uint32_t {
                       gate.wait();
                       throw std::runtime_error("backend PUT failed");
                     }));
   std::promise<void> submitting;
   auto next = std::async(std::launch::async, [&] {
     submitting.set_value();
-    return writer.submit(1, Put([] { return 1U; }));
+    return writer.submit(/*blocks=*/1, Put([] { return 1U; }));
   });
   submitting.get_future().wait();
   EXPECT_EQ(next.wait_for(20ms), std::future_status::timeout);
