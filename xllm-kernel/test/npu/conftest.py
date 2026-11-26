@@ -77,10 +77,12 @@ def _prepare_kernels() -> None:
                     "split_qkv_rmsnorm_mrope",
                     "fused_gdn_gating",
                     "causal_conv1d_decode",
+                    "greedy_prefix_verify",
                 )
                 if find_spec("tilelang") is not None
                 else ()
             ),
+            "top_k_top_p",
             "quant_matmul",
             "quant_matmul_out",
             "quantize_per_tensor",
