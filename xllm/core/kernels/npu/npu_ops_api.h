@@ -132,16 +132,6 @@ void npu_fused_infer_attention_decode_out_cached(
     int64_t block_size,
     torch::Tensor& output);
 
-void batch_chunked_paged_prefill(const torch::Tensor& query,
-                                 const torch::Tensor& k_cache,
-                                 const torch::Tensor& v_cache,
-                                 float scale,
-                                 const torch::Tensor& block_table,
-                                 const torch::Tensor& seq_lens,
-                                 const torch::Tensor& attn_mask,
-                                 const torch::Tensor& q_seq_lens,
-                                 torch::Tensor& output);
-
 // Custom batch decode for ACL graph execution
 // This variant uses CustomPagedAttention to avoid .to(kCPU) operations
 // that break ACL graph capture
@@ -462,60 +452,5 @@ void causal_conv1d_out(const torch::Tensor& output,
                        int64_t activation_mode,
                        int64_t pad_slot_id,
                        int64_t run_mode);
-
-// MegaMoe dispatch-quant modes and the op's own dtype codes shared between the
-// kernel implementation and its op registration. These dtype codes are the
-// MegaMoe operator's own encoding, not aclDataType values (e.g. the bf16 code
-// 28 differs from ACL_BF16 == 27), so they must not be replaced with SDK enums.
-inline constexpr int64_t kMegaMoeDispatchQuantModeNone = 0;
-inline constexpr int64_t kMegaMoeDispatchQuantModeDynamic = 2;
-inline constexpr int64_t kMegaMoeCombineQuantModeNone = 0;
-inline constexpr int64_t kMegaMoeDtypeInt8 = 2;
-inline constexpr int64_t kMegaMoeDtypeBFloat16 = 28;
-
-bool has_mega_moe();
-
-std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
-    const torch::Tensor& context,
-    const torch::Tensor& x,
-    const torch::Tensor& topk_ids,
-    const torch::Tensor& topk_weights,
-    const torch::TensorList weight1,
-    const torch::TensorList weight2,
-    int64_t moe_expert_num,
-    int64_t ep_world_size,
-    int64_t ccl_buffer_size,
-    const std::optional<torch::TensorList>& weight_scales1 = std::nullopt,
-    const std::optional<torch::TensorList>& weight_scales2 = std::nullopt,
-    const std::optional<torch::TensorList>& bias1 = std::nullopt,
-    const std::optional<torch::TensorList>& bias2 = std::nullopt,
-    const std::optional<torch::Tensor>& x_active_mask = std::nullopt,
-    int64_t max_recv_token_num = 0,
-    int64_t dispatch_quant_mode = 0,
-    int64_t combine_quant_mode = 0,
-    const std::string& comm_alg = "",
-    int64_t num_max_tokens_per_rank = 0,
-    const std::string& activation = "swiglu",
-    float activation_clamp = std::numeric_limits<float>::max(),
-    int64_t dispatch_quant_out_dtype = 0,
-    int64_t topo_type = 0,
-    int64_t rank_num_per_server = 2);
-
-// Submit on the current NPU stream. Buffers must be dense, contiguous, nonempty
-// and in ND storage format. The caller owns the communicator (encoded as an
-// integer for Torch) and buffers, and must retain them through graph replay.
-// ACLGraph capture requires HCCL_OP_EXPANSION_MODE=AIV.
-// In-place SUM, preserving dtype.
-void all_reduce_on_current_stream(torch::Tensor& input, int64_t comm);
-
-// Out-of-place, rank-ordered concatenation: output.numel = W * input.numel.
-void all_gather_on_current_stream(const torch::Tensor& input,
-                                  torch::Tensor& output,
-                                  int64_t comm);
-
-// Out-of-place SUM of rank-ordered blocks: input.numel = W * output.numel.
-void reduce_scatter_on_current_stream(const torch::Tensor& input,
-                                      torch::Tensor& output,
-                                      int64_t comm);
 
 }  // namespace xllm::kernel::npu

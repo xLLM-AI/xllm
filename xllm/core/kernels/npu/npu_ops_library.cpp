@@ -26,7 +26,6 @@ limitations under the License.
 #include <torch/library.h>
 #include <torch/torch.h>
 
-#include <limits>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -392,53 +391,6 @@ torch::Tensor silu_and_mul_npu(const torch::Tensor& input) {
   return xllm::kernel::npu::active(input, "swiglu");
 }
 
-std::tuple<torch::Tensor, torch::Tensor> mega_moe_npu(
-    const torch::Tensor& context,
-    const torch::Tensor& x,
-    const torch::Tensor& topk_ids,
-    const torch::Tensor& topk_weights,
-    const torch::TensorList weight1,
-    const torch::TensorList weight2,
-    const torch::TensorList weight_scales1,
-    const torch::TensorList weight_scales2,
-    int64_t moe_expert_num,
-    int64_t ep_world_size,
-    int64_t ccl_buffer_size,
-    int64_t num_max_tokens_per_rank,
-    const std::optional<torch::Tensor>& x_active_mask) {
-  CHECK_EQ(weight_scales1.empty(), weight_scales2.empty())
-      << "MegaMoe weight scales must be provided for both projections or "
-         "neither.";
-  const bool use_w8a8 = !weight_scales1.empty();
-  return xllm::kernel::npu::apply_npu_mega_moe(
-      context,
-      x,
-      topk_ids,
-      topk_weights,
-      weight1,
-      weight2,
-      moe_expert_num,
-      ep_world_size,
-      ccl_buffer_size,
-      use_w8a8 ? std::optional<torch::TensorList>(weight_scales1)
-               : std::nullopt,
-      use_w8a8 ? std::optional<torch::TensorList>(weight_scales2)
-               : std::nullopt,
-      /*bias1=*/std::nullopt,
-      /*bias2=*/std::nullopt,
-      x_active_mask,
-      /*max_recv_token_num=*/0,
-      use_w8a8 ? xllm::kernel::npu::kMegaMoeDispatchQuantModeDynamic
-               : xllm::kernel::npu::kMegaMoeDispatchQuantModeNone,
-      xllm::kernel::npu::kMegaMoeCombineQuantModeNone,
-      /*comm_alg=*/"",
-      num_max_tokens_per_rank,
-      /*activation=*/"swiglu",
-      /*activation_clamp=*/std::numeric_limits<float>::max(),
-      use_w8a8 ? xllm::kernel::npu::kMegaMoeDtypeInt8
-               : xllm::kernel::npu::kMegaMoeDtypeBFloat16);
-}
-
 void inplace_partial_rotary_mul_npu(torch::Tensor& input,
                                     const torch::Tensor& cosine,
                                     const torch::Tensor& sine,
@@ -684,21 +636,6 @@ build_cp_context_npu(const std::vector<int64_t>& q_seq_lens,
 
 }  // namespace
 
-torch::Tensor sfa_dcp_remap_out_npu(const torch::Tensor& topk_indices,
-                                    int64_t physical_block_size,
-                                    int64_t shard_size,
-                                    int64_t shard_rank,
-                                    torch::Tensor& out,
-                                    torch::Tensor& idx_scratch) {
-  xllm::kernel::npu::tilelang::sfa_dcp_remap_out(topk_indices,
-                                                 physical_block_size,
-                                                 shard_size,
-                                                 shard_rank,
-                                                 out,
-                                                 idx_scratch);
-  return out;
-}
-
 void ensure_xllm_ops_registered() {
   // Intentionally empty — referencing this symbol prevents the linker from
   // stripping the TORCH_LIBRARY static initializers below.
@@ -712,23 +649,6 @@ TORCH_LIBRARY(xllm_ops, m) {
   m.def(
       "shared_linear_state_indices_out(Tensor ids, Tensor rows, Tensor(a!) "
       "out) -> ()");
-  m.def(
-      "shared_full_indices_out(Tensor block_table, Tensor slots, Tensor rows, "
-      "int page_size, int padding_row, Tensor(a!) out_tables, "
-      "Tensor(b!) out_slots) -> ()");
-  m.def(
-      "dspark_allocate_verify_prefixes(Tensor confidence, "
-      "Tensor(a!) widths, int budget) -> ()");
-  m.def(
-      "dspark_allocate_verify_prefixes_graph(Tensor(a!) arena, "
-      "Tensor control, int capacity, int draft_width=7) -> ()");
-  m.def(
-      "dspark_pack_verify_inputs(Tensor anchors, Tensor proposals, "
-      "Tensor base_positions, Tensor base_kv_lengths, Tensor base_block_table, "
-      "Tensor widths, Tensor(a!) offsets, Tensor(b!) tokens, "
-      "Tensor(c!) positions, Tensor(d!) kv_seq_lens, Tensor(e!) slot_mapping, "
-      "Tensor(f!) block_table, Tensor(g!) q_seq_lens, Tensor(h!) owners, "
-      "Tensor(i!) columns, int block_size) -> ()");
   m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
   m.def(
       "rms_norm_gated(Tensor input, Tensor gate, Tensor weight, float eps) -> "
@@ -823,12 +743,6 @@ TORCH_LIBRARY(xllm_ops, m) {
       "str rotary_mode, int[] partial_slice) -> ()");
   m.def("silu_and_mul(Tensor input) -> Tensor");
   m.def(
-      "mega_moe(Tensor context, Tensor x, Tensor topk_ids, Tensor "
-      "topk_weights, Tensor[] weight1, Tensor[] weight2, Tensor[] "
-      "weight_scales1, Tensor[] weight_scales2, int moe_expert_num, int "
-      "ep_world_size, int ccl_buffer_size, int num_max_tokens_per_rank, "
-      "Tensor? x_active_mask=None) -> (Tensor, Tensor)");
-  m.def(
       "inplace_partial_rotary_mul(Tensor(a!) input, Tensor cosine, Tensor "
       "sine, str rotary_mode, int[] partial_slice) -> ()");
   m.def(
@@ -872,8 +786,6 @@ TORCH_LIBRARY(xllm_ops, m) {
       "moe_init_routing_v3(Tensor x, Tensor expert_idx, int active_num, "
       "int expert_num, int[] active_expert_range, int quant_mode) -> "
       "(Tensor, Tensor, Tensor, Tensor)");
-  m.def("has_moe_grouped_matmul_swiglu_quant() -> bool");
-  m.def("has_moe_init_routing_v3() -> bool");
   m.def(
       "quantize_per_tensor(Tensor self, Tensor scales, Tensor zero_points, "
       "ScalarType dtype, int axis) -> Tensor");
@@ -982,6 +894,17 @@ TORCH_LIBRARY(xllm_ops, m) {
       "start_pos, int rope_head_dim, int cmp_ratio, int coff, float "
       "norm_eps, int rotary_mode, bool enable_grad) -> (Tensor, Tensor, "
       "Tensor, Tensor, Tensor)");
+  m.def(/*raw_schema=*/"supports_sparse_flash_mla_swa() -> bool");
+  m.def(
+      /*raw_schema=*/
+      "sparse_flash_mla_swa_metadata(Tensor cu_seqlens_q, Tensor "
+      "kv_seq_lens, Tensor ori_block_table, int max_kv_len, int num_heads, "
+      "int page_size, int visible_window) -> (Tensor, Tensor, Tensor)");
+  m.def(
+      /*raw_schema=*/
+      "sparse_flash_mla_swa(Tensor q, Tensor ori_kv, Tensor ori_block_table, "
+      "Tensor cu_seqlens_q, Tensor kv_seq_lens, Tensor ori_sparse_indices, "
+      "Tensor ori_topk_length, Tensor? sinks, Tensor metadata) -> Tensor");
   // Two-stage sparse attention over original + compressed KV.
   m.def(
       "sparse_attn_sharedkv(Tensor q, Tensor? ori_kv, Tensor? cmp_kv, "
@@ -1001,31 +924,12 @@ TORCH_LIBRARY(xllm_ops, m) {
       "cmp_topk, int cmp_ratio, int ori_mask_mode, int cmp_mask_mode, int "
       "ori_win_left, int ori_win_right, str layout_q, str layout_kv, bool "
       "has_ori_kv, bool has_cmp_kv) -> Tensor");
-  m.def(
-      "sfa_dcp_remap_out(Tensor topk_indices, int physical_block_size, int "
-      "shard_size, int shard_rank, Tensor(a!) out, Tensor(b!) idx_scratch) -> "
-      "Tensor(a!)");
-  // Current-stream collectives borrowing the caller's HCCL communicator.
-  m.def("npu_all_reduce(Tensor(a!) x, int comm) -> ()");
-  m.def("npu_all_gather(Tensor input, Tensor(a!) output, int comm) -> ()");
-  m.def("npu_reduce_scatter(Tensor input, Tensor(a!) output, int comm) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl(
       "shared_linear_state_indices_out",
       TORCH_FN(xllm::kernel::npu::tilelang::shared_linear_state_indices_out));
-  m.impl("shared_full_indices_out",
-         TORCH_FN(xllm::kernel::npu::tilelang::shared_full_indices_out));
-  m.impl(
-      "dspark_allocate_verify_prefixes",
-      TORCH_FN(xllm::kernel::npu::tilelang::dspark_allocate_verify_prefixes));
-  m.impl(
-      "dspark_allocate_verify_prefixes_graph",
-      TORCH_FN(
-          xllm::kernel::npu::tilelang::dspark_allocate_verify_prefixes_graph));
-  m.impl("dspark_pack_verify_inputs",
-         TORCH_FN(xllm::kernel::npu::tilelang::dspark_pack_verify_inputs));
   m.impl("rms_norm", TORCH_FN(xllm::rms_norm_npu));
   m.impl("rms_norm_gated", TORCH_FN(xllm::rms_norm_gated_npu));
   m.impl("fused_add_gemma_rms_norm",
@@ -1057,7 +961,6 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("npu_inplace_partial_rotary_mul",
          TORCH_FN(xllm::kernel::npu::npu_inplace_partial_rotary_mul));
   m.impl("silu_and_mul", TORCH_FN(xllm::silu_and_mul_npu));
-  m.impl("mega_moe", TORCH_FN(xllm::mega_moe_npu));
   m.impl("inplace_partial_rotary_mul",
          TORCH_FN(xllm::inplace_partial_rotary_mul_npu));
   m.impl("reshape_paged_cache", TORCH_FN(xllm::reshape_paged_cache_npu));
@@ -1090,19 +993,16 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("hc_pre", TORCH_FN(xllm::kernel::npu::hc_pre));
   m.impl("hc_post", TORCH_FN(xllm::kernel::npu::hc_post));
   m.impl("compressor", TORCH_FN(xllm::kernel::npu::compressor));
+  m.impl(/*name=*/"sparse_flash_mla_swa_metadata",
+         TORCH_FN(xllm::kernel::npu::sparse_flash_mla_swa_metadata));
+  m.impl(/*name=*/"sparse_flash_mla_swa",
+         TORCH_FN(xllm::kernel::npu::sparse_flash_mla_swa));
   m.impl("sparse_attn_sharedkv",
          TORCH_FN(xllm::kernel::npu::sparse_attn_sharedkv));
   m.impl("sparse_flash_attention_lse",
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention_lse));
   m.impl("sparse_flash_attention_lse_out",
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention_lse_out));
-  m.impl("sfa_dcp_remap_out", TORCH_FN(xllm::sfa_dcp_remap_out_npu));
-  m.impl("npu_all_reduce",
-         TORCH_FN(xllm::kernel::npu::all_reduce_on_current_stream));
-  m.impl("npu_all_gather",
-         TORCH_FN(xllm::kernel::npu::all_gather_on_current_stream));
-  m.impl("npu_reduce_scatter",
-         TORCH_FN(xllm::kernel::npu::reduce_scatter_on_current_stream));
 }
 
 // build_cp_context is pure host index math with no Tensor input, so the
@@ -1111,10 +1011,8 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
 // runs only on the eager prefill path, so it needs no fake/meta registration;
 // decode graph capture is phase-disjoint.
 TORCH_LIBRARY_IMPL(xllm_ops, CompositeExplicitAutograd, m) {
-  m.impl("has_moe_grouped_matmul_swiglu_quant",
-         TORCH_FN(xllm::kernel::npu::has_moe_grouped_matmul_swiglu_quant));
-  m.impl("has_moe_init_routing_v3",
-         TORCH_FN(xllm::kernel::npu::has_moe_init_routing_v3));
+  m.impl(/*name=*/"supports_sparse_flash_mla_swa",
+         TORCH_FN(xllm::kernel::npu::supports_sparse_flash_mla_swa));
   m.impl("has_mla_preprocess_v2",
          TORCH_FN(xllm::kernel::npu::has_mla_preprocess_v2));
   m.impl("build_cp_context", TORCH_FN(xllm::build_cp_context_npu));

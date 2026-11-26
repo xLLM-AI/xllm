@@ -23,7 +23,6 @@ limitations under the License.
 
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/batch/shared_kv_mapping_tracker.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_type.h"
@@ -171,8 +170,7 @@ void ForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
 
 void ForwardInputFactory::finalize_inputs(PreparationState& state) {
   // Graph decode requires empty ranks to participate using Worker fake inputs.
-  if (::xllm::ExecutionConfig::get_instance().enable_graph() &&
-      state.batch_forward_type.is_decode()) {
+  if (options_.enable_graph && state.batch_forward_type.is_decode()) {
     for (uint32_t dp_rank = 0; dp_rank < options_.dp_size; ++dp_rank) {
       if (state.inputs[dp_rank]
               .input_params.meta.batch_forward_type.is_empty() &&

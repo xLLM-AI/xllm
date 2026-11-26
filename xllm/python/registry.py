@@ -83,6 +83,12 @@ def _register_builtin_models() -> None:
         "qwen3",
     )
     _register_model_path(
+        "xllm.python.models.qwen3_moe",
+        "Qwen3MoeForCausalLM",
+        "Qwen3MoeForCausalLM",
+        "qwen3_moe",
+    )
+    _register_model_path(
         "xllm.python.models.qwen3_5",
         "Qwen3_5ForCausalLM",
         "Qwen3_5ForCausalLM",

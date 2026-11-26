@@ -16,6 +16,8 @@ import argparse
 from pathlib import Path
 
 import tilelang
+from xllm_kernel.ops.positional_encoding._tilelang import _mrope_geometry as mrope_geometry
+from xllm_kernel.ops.positional_encoding._tilelang import _mrope_tilelang as packaged_dsl
 
 from xllm.python.kernels_npu.tilelang import (
     split_qkv_rmsnorm_mrope as kernel_impl,
@@ -45,7 +47,7 @@ from xllm.python.kernels_npu.tilelang.split_qkv_rmsnorm_mrope import (
 
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
-DEPENDENCY_MODULES = (kernel_impl, tilelang_utils)
+DEPENDENCY_MODULES = (kernel_impl, packaged_dsl, tilelang_utils, mrope_geometry)
 
 
 @register_kernel

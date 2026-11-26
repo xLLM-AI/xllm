@@ -26,7 +26,12 @@ from __future__ import annotations
 
 import torch
 import torch.distributed as dist
-import torch_npu
+from xllm_kernel.ops.collectives import (
+    all_gather,
+    all_reduce,
+    matmul_reduce_scatter,
+    reduce_scatter,
+)
 
 # Keep the inline optimization conservative, rather than assuming HCCL's
 # topology- and version-dependent AIV-to-AI-CPU threshold. c10d owns the stream
@@ -65,7 +70,7 @@ def all_reduce_on_current_stream(x: torch.Tensor, group: dist.ProcessGroup) -> N
     if x.numel() * x.element_size() > _CURRENT_STREAM_ALL_REDUCE_MAX_BYTES:
         dist.all_reduce(x, group=group)
         return
-    torch.ops.xllm_ops.npu_all_reduce(x, comm)
+    all_reduce(x, comm)
 
 
 def all_gather_on_current_stream(
@@ -79,7 +84,7 @@ def all_gather_on_current_stream(
 
     ``output.numel()`` must equal ``group.size() * input.numel()``.
     """
-    torch.ops.xllm_ops.npu_all_gather(input, output, get_hccl_comm(group, input.device, initialize=initialize))
+    all_gather(input, output, get_hccl_comm(group, input.device, initialize=initialize))
 
 
 def reduce_scatter_on_current_stream(input: torch.Tensor, output: torch.Tensor, group: dist.ProcessGroup) -> None:
@@ -87,7 +92,7 @@ def reduce_scatter_on_current_stream(input: torch.Tensor, output: torch.Tensor, 
 
     ``input.numel()`` must equal ``group.size() * output.numel()``.
     """
-    torch.ops.xllm_ops.npu_reduce_scatter(input, output, get_hccl_comm(group, input.device))
+    reduce_scatter(input, output, get_hccl_comm(group, input.device))
 
 
 def matmul_reduce_scatter_on_current_stream(
@@ -103,11 +108,10 @@ def matmul_reduce_scatter_on_current_stream(
     hcom = backend.get_hccl_comm_name(device_index)
     if not hcom:
         raise RuntimeError(f"group {group.group_name} has no HCCL communicator name on {input.device}")
-    return torch_npu.npu_mm_reduce_scatter_base(
+    return matmul_reduce_scatter(
         input,
         weight,
         hcom,
         group.size(),
-        reduce_op="sum",
         comm_mode=None if comm_mode in ("", "none") else comm_mode,
     )

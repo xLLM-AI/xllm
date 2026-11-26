@@ -57,15 +57,6 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-// benchmark 1.8.x exposes only DoNotOptimize(Tp const&) -- deprecated -- and
-// DoNotOptimize(Tp&); there is no rvalue overload, so a temporary or a const
-// local resolves to the deprecated one. Sinking the value into a non-const
-// parameter first selects the supported overload.
-template <typename T>
-inline BENCHMARK_ALWAYS_INLINE void do_not_optimize(T value) {
-  benchmark::DoNotOptimize(value);
-}
-
 constexpr size_t kPromptTokens = 512;
 constexpr int32_t kMaxContextLen = 1 << 20;
 
@@ -148,8 +139,9 @@ void BM_Sequence_GenerateStreamingOutput(benchmark::State& state) {
     state.ResumeTiming();
 
     std::optional<SequenceOutput> output =
-        sequence.generate_streaming_output(sequence.num_tokens(), tokenizer);
-    do_not_optimize(output.has_value());
+        sequence.generate_streaming_output(tokenizer);
+    bool has_output = output.has_value();
+    benchmark::DoNotOptimize(has_output);
 
     state.PauseTiming();
     request.reset();
@@ -175,7 +167,8 @@ void BM_Request_GenerateOutput(benchmark::State& state) {
     state.ResumeTiming();
 
     RequestOutput output = request->generate_output(tokenizer);
-    do_not_optimize(output.outputs.data());
+    SequenceOutput* outputs = output.outputs.data();
+    benchmark::DoNotOptimize(outputs);
 
     state.PauseTiming();
     request.reset();

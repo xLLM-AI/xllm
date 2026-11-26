@@ -98,16 +98,12 @@ torch::Tensor grouped_matmul_out(const torch::Tensor& x,
                                  int64_t group_list_type,
                                  torch::Tensor& output);
 
-bool has_moe_grouped_matmul_swiglu_quant();
-
 std::tuple<torch::Tensor, torch::Tensor> moe_grouped_matmul_swiglu_quant(
     const torch::Tensor& x,
     const torch::Tensor& weight,
     const torch::Tensor& weight_scale,
     const torch::Tensor& x_scale,
     const torch::Tensor& group_list);
-
-bool has_moe_init_routing_v3();
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 moe_init_routing_v3(const torch::Tensor& x,
@@ -244,6 +240,27 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
     int64_t renorm,
     int64_t norm_type,
     bool out_flag);
+
+bool supports_sparse_flash_mla_swa();
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+sparse_flash_mla_swa_metadata(const torch::Tensor& cu_seqlens_q,
+                              const torch::Tensor& kv_seq_lens,
+                              const torch::Tensor& ori_block_table,
+                              int64_t max_kv_len,
+                              int64_t num_heads,
+                              int64_t page_size,
+                              int64_t visible_window);
+
+torch::Tensor sparse_flash_mla_swa(const torch::Tensor& q,
+                                   const torch::Tensor& ori_kv,
+                                   const torch::Tensor& ori_block_table,
+                                   const torch::Tensor& cu_seqlens_q,
+                                   const torch::Tensor& kv_seq_lens,
+                                   const torch::Tensor& ori_sparse_indices,
+                                   const torch::Tensor& ori_topk_length,
+                                   const std::optional<torch::Tensor>& sinks,
+                                   const torch::Tensor& metadata);
 
 std::tuple<at::Tensor, at::Tensor> sparse_attn_sharedkv(
     const at::Tensor& q,

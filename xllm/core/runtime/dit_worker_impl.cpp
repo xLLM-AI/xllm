@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/util/tensor_options.h"
 #include "framework/dit_cache/dit_cache.h"
 #include "framework/state_dict/state_dict.h"
+#include "models/dit/dit_model_policy.h"
 #include "models/model_registry.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
@@ -117,12 +118,12 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
   auto tensor_options = torch::dtype(dtype_).device(device_);
   DiTCacheConfig cache_config = parse_dit_cache_from_flags();
 
-  auto model_type = loader->get_model_type();
-
-  if (!ModelRegistry::has_dit_model_factory(model_type)) {
-    LOG(WARNING) << "could not find model_type: " << model_type
-                 << ", using model_id: " << options_.model_id() << " instead.";
-    model_type = options_.model_id();
+  const std::string checkpoint_model_type = loader->get_model_type();
+  const std::string model_type =
+      resolve_dit_model_type(checkpoint_model_type, options_.model_id());
+  if (model_type != checkpoint_model_type) {
+    LOG(WARNING) << "could not find model_type: " << checkpoint_model_type
+                 << ", using model_id: " << model_type << " instead.";
   }
 
   // H3 was dense before cache integration. Preserve that default while
@@ -141,6 +142,7 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
                                  tensor_options,
                                  cache_config,
                                  model_type);
+  dit_context_.set_model_impl(options_.model_impl());
 
   dit_model_ = create_dit_model(dit_context_);
   CHECK(dit_model_ != nullptr) << "Failed to create model.";

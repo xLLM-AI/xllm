@@ -31,7 +31,6 @@ limitations under the License.
 #include "common/metrics.h"
 #include "compiler/triton/include/jit_kernel.h"
 #include "core/common/constants.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/runtime/graph_execution_input.h"
@@ -617,11 +616,10 @@ MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
   planner_config.state_required =
       model_ != nullptr && model_->requires_graph_forward_metadata();
   planner_config.history_capacity = history_capacity;
-  planner_config.max_tokens = std::min<int64_t>(
-      std::max<int64_t>(
-          ::xllm::ExecutionConfig::get_instance().max_tokens_for_graph_mode(),
-          options_.max_seqs_per_batch()),
-      get_graph_token_capacity(options_, mtp_capabilities_));
+  planner_config.max_tokens =
+      std::min<int64_t>(std::max<int64_t>(options_.max_tokens_for_graph_mode(),
+                                          options_.max_seqs_per_batch()),
+                        get_graph_token_capacity(options_, mtp_capabilities_));
   planner_ = std::make_unique<MluGraphPlanner>(std::move(planner_config));
 }
 

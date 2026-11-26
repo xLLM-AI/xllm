@@ -24,6 +24,7 @@ PyCausalLM no longer calls model.forward() directly.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -31,6 +32,18 @@ import torch.nn as nn
 
 if TYPE_CHECKING:
     from xllm_weight_loader import StateDict
+
+
+@dataclass(frozen=True)
+class MultimodalEmbeddings:
+    """Per-step decoder inputs owned by the caller across request preparation.
+
+    DeepStack models supply a tuple, including an empty tuple for text-only
+    chunks. Other models leave it unset so decoder graph admission is preserved.
+    """
+
+    input_embedding: torch.Tensor
+    deepstack_input_embeds: tuple[torch.Tensor, ...] | None = None
 
 
 class PyModelBase(nn.Module):

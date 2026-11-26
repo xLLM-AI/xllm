@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include <cstdlib>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -379,8 +380,6 @@ class HybridConv1dMockLM final : public CausalLM {
 class AclGraphTaskUpdateTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    sequences_.reserve(100);
-
     auto& execution_config = ExecutionConfig::get_instance();
     original_enable_graph_ = execution_config.enable_graph();
     original_enable_graph_double_buffer_ =
@@ -406,7 +405,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
     model_args_.layer_types({"linear_attention", "full_attention"});
 
     device_ = std::make_unique<torch::Device>("npu:0");
-    options_.block_size(kBlockSize);
+    options_.block_size(kBlockSize).enable_graph_double_buffer(false);
     options_.max_seqs_per_batch(32);
 
     model_ = std::make_unique<HybridConv1dMockLM>(model_args_, *device_);
@@ -511,7 +510,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
       sequence.add_blocks(BlockType::LINEAR, linear_state_block);
       sequence.add_blocks(BlockType::KV, block_manager_->allocate(2));
       sequence.kv_state().incr_kv_cache_tokens_num(4);
-      sequence.append_token(token_seed + static_cast<int32_t>(i));
+      sequence.append_token(Token(token_seed + static_cast<int32_t>(i)));
       batch->add(&sequence);
     }
     return batch;
@@ -538,7 +537,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
           block_manager_->allocate(static_cast<size_t>(num_kv_blocks)));
       sequence.kv_state().incr_kv_cache_tokens_num(
           static_cast<size_t>(prompt_len));
-      sequence.append_token(token_seed + static_cast<int32_t>(i));
+      sequence.append_token(Token(token_seed + static_cast<int32_t>(i)));
       batch->add(&sequence);
     }
     return batch;
@@ -733,7 +732,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
   SequenceParams seq_params_;
   torch::Tensor input_embedding_;
   MMData mm_data_;
-  std::vector<Sequence> sequences_;
+  std::deque<Sequence> sequences_;
   IncrementalDecoder fake_decoder_ = IncrementalDecoder("", 1, false, false);
   bool original_enable_graph_ = false;
   bool original_enable_graph_double_buffer_ = true;
@@ -753,7 +752,8 @@ TEST_F(AclGraphTaskUpdateTest, CaptureReplayVsEagerDecodeBranch) {
   for (bool double_buffer : {false, true}) {
     SCOPED_TRACE(double_buffer);
     reset_sequences();
-    ExecutionConfig::get_instance().enable_graph_double_buffer(double_buffer);
+    options_.enable_graph_double_buffer(double_buffer);
+    ExecutionConfig::get_instance().enable_graph_double_buffer(!double_buffer);
     auto batch = create_decode_batch(/*batch_size=*/3);
     auto input = batch->prepare_forward_input(model_args_, nullptr);
     input = input.to(*device_, kDtype);
@@ -1075,7 +1075,7 @@ TEST_F(AclGraphTaskUpdateTest, CaptureReplayVsEagerSpecVerifyBranch) {
 }
 
 TEST_F(AclGraphTaskUpdateTest, StaticMtpPrepareReplaysFiaSpecVerifyWidths) {
-  ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding(true);
+  options_.enable_graph_mode_decode_no_padding(true);
 
   for (const int32_t spec_width : std::vector<int32_t>{4, 5, 6}) {
     SCOPED_TRACE("spec_width=" + std::to_string(spec_width));

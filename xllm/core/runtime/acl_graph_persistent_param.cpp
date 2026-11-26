@@ -30,7 +30,6 @@ limitations under the License.
 
 #include "core/common/constants.h"
 #include "core/common/global_flags.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
@@ -66,15 +65,6 @@ int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
       options.enable_graph_mode_decode_no_padding());
 }
 
-bool graph_mode_decode_no_padding_enabled() {
-  // Immutable after ExecutionConfig::initialize() in the entrypoint.
-  static const bool enabled = [] {
-    return ::xllm::ExecutionConfig::get_instance()
-        .enable_graph_mode_decode_no_padding();
-  }();
-  return enabled;
-}
-
 int64_t get_hybrid_metadata_capacity(const runtime::Options& options) {
   const int64_t seq_capacity = options.max_seqs_per_batch();
   const int32_t num_decoding_tokens =
@@ -85,7 +75,7 @@ int64_t get_hybrid_metadata_capacity(const runtime::Options& options) {
   // 4 seqs x 5 tokens = 20 rows -> bucket 32 -> 7 metadata rows.
   const int64_t bucketed_tokens = runtime::get_decode_graph_token_bucket(
       seq_capacity * num_decoding_tokens,
-      graph_mode_decode_no_padding_enabled());
+      options.enable_graph_mode_decode_no_padding());
   const int64_t padded_seq_capacity =
       (bucketed_tokens + num_decoding_tokens - 1) / num_decoding_tokens;
   return std::max(seq_capacity, padded_seq_capacity);
@@ -175,9 +165,6 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // only serves decode / spec-verify batches, so the relevant row upper bound
   // comes from decode graph capacity instead.
   const int64_t max_graph_tokens = get_decode_graph_token_capacity(options);
-  const int64_t bucketed_max_graph_tokens =
-      runtime::get_decode_graph_token_bucket(
-          max_graph_tokens, graph_mode_decode_no_padding_enabled());
   // Hybrid spec verify keeps sequence-scoped metadata (with bucket padding,
   // see get_hybrid_metadata_capacity), while non-hybrid MTP expands every
   // proposal token into its own decode metadata row.
@@ -192,7 +179,7 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
                                     torch::dtype(torch::kInt).device(device));
   if (::xllm::KernelConfig::get_instance().enable_mega_moe()) {
     persistent_mega_active_mask_ = torch::zeros(
-        {bucketed_max_graph_tokens}, torch::dtype(torch::kInt8).device(device));
+        {max_graph_tokens}, torch::dtype(torch::kInt8).device(device));
   }
   persistent_positions_ = torch::zeros(
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
@@ -241,7 +228,7 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       torch::zeros({metadata_capacity, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
   persistent_expanded_block_tables_ =
-      torch::zeros({bucketed_max_graph_tokens, max_block_table_len},
+      torch::zeros({max_graph_tokens, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
 
   torch::Dtype dtype = util::parse_dtype(args.dtype(), device);
@@ -260,16 +247,15 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // token capacity instead of the much larger max_tokens_per_batch prefill
   // budget.
   if (need_update_attn_mask_) {
-    persistent_mask_ = torch::zeros({bucketed_max_graph_tokens, max_seq_len},
+    persistent_mask_ = torch::zeros({max_graph_tokens, max_seq_len},
                                     torch::dtype(dtype).device(device));
-    persistent_mask_zero_template_ =
-        torch::zeros({bucketed_max_graph_tokens, max_seq_len},
-                     torch::dtype(dtype).device(device));
+    persistent_mask_zero_template_ = torch::zeros(
+        {max_graph_tokens, max_seq_len}, torch::dtype(dtype).device(device));
     const float mask_fill_value = (dtype == torch::kFloat16)
                                       ? -std::numeric_limits<float>::infinity()
                                       : -9984.0f;
     persistent_mask_fill_template_ =
-        torch::full({bucketed_max_graph_tokens, max_seq_len},
+        torch::full({max_graph_tokens, max_seq_len},
                     mask_fill_value,
                     torch::dtype(dtype).device(device));
   }
@@ -336,7 +322,8 @@ torch::Tensor slice_like_source(const torch::Tensor& persistent,
 
 int64_t get_graph_lm_head_index_length(const torch::Tensor& src,
                                        uint32_t padded_tokens,
-                                       int32_t dp_size) {
+                                       int32_t dp_size,
+                                       bool enable_no_padding) {
   CHECK(src.defined());
   CHECK_GT(src.numel(), 0);
   if (dp_size > 1) {
@@ -349,8 +336,7 @@ int64_t get_graph_lm_head_index_length(const torch::Tensor& src,
         << "lm-head graph layout is smaller than raw index tensor";
     return graph_length;
   }
-  return runtime::get_decode_graph_token_bucket(
-      src.size(0), graph_mode_decode_no_padding_enabled());
+  return runtime::get_decode_graph_token_bucket(src.size(0), enable_no_padding);
 }
 }  // namespace
 
@@ -378,7 +364,10 @@ void GraphPersistentParam::update_persistent_dp_ep_padding(
     torch::Tensor& persistent_lm_head_indices =
         persistent_dp_ep_padding_.lm_head_skip_padding_token_indices();
     const int64_t graph_length = get_graph_lm_head_index_length(
-        src_lm_head_indices, padded_tokens, dp_layout_size);
+        src_lm_head_indices,
+        padded_tokens,
+        dp_layout_size,
+        options_.enable_graph_mode_decode_no_padding());
     CHECK_LE(graph_length, persistent_lm_head_indices.size(0))
         << "lm-head index graph bucket exceeds persistent capacity";
     persistent_lm_head_indices
@@ -438,7 +427,10 @@ void GraphPersistentParam::replace_capture_dp_ep_padding(
             /*start=*/0,
             /*end=*/
             get_graph_lm_head_index_length(
-                src_lm_head_indices, padded_tokens, dp_layout_size)));
+                src_lm_head_indices,
+                padded_tokens,
+                dp_layout_size,
+                options_.enable_graph_mode_decode_no_padding())));
   }
   dst.gather_prenorm_idx(
       slice_like_source(persistent_dp_ep_padding_.gather_prenorm_idx(),
@@ -699,8 +691,7 @@ void GraphPersistentParam::update_spec_verify_inputs(
     kernel::npu::tilelang::spec_verify_token_update(
         params.graph.input_tokens_override,
         params.graph.spec_verify_draft_token_sources,
-        persistent_tokens_,
-        spec_width);
+        persistent_tokens_);
   } else {
     persistent_tokens_.narrow(0, 0, total_tokens).copy_(graph_tokens, true);
   }

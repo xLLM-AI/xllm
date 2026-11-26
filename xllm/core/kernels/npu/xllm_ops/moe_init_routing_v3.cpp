@@ -23,14 +23,6 @@ limitations under the License.
 
 namespace xllm::kernel::npu {
 
-bool has_moe_init_routing_v3() {
-  static const bool available =
-      aclnn::detail::get_op_api_func_addr(
-          "aclnnMoeInitRoutingV3GetWorkspaceSize") != nullptr &&
-      aclnn::detail::get_op_api_func_addr("aclnnMoeInitRoutingV3") != nullptr;
-  return available;
-}
-
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 moe_init_routing_v3(const torch::Tensor& x,
                     const torch::Tensor& expert_idx,

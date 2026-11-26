@@ -229,17 +229,15 @@ def test_stable_sfa_layout_handles_multiple_sequences_and_invalid_tail() -> None
         ([0], [-1], 2, 0, "KV length must be at least the query length"),
     ],
 )
-def test_cp_context_rejects_invalid_metadata_before_native_op(
+def test_cp_context_rejects_invalid_metadata(
     query_lengths: list[int],
     kv_lengths: list[int],
     cp_size: int,
     cp_rank: int,
     message: str,
 ) -> None:
-    with patch.object(torch.ops.xllm_ops, "build_cp_context", create=True) as native_op:
-        with pytest.raises(ValueError, match=message):
-            build_cp_context(query_lengths, kv_lengths, cp_size, cp_rank, torch.device("cpu"))
-        native_op.assert_not_called()
+    with pytest.raises(ValueError, match=message):
+        build_cp_context(query_lengths, kv_lengths, cp_size, cp_rank, torch.device("cpu"))
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
@@ -274,10 +272,9 @@ def test_build_cp_context_materializes_mla_segment_lengths_on_device() -> None:
     device = torch.device("cpu")
 
     with patch.object(
-        torch.ops.xllm_ops,
+        torch.ops.xllm_kernel,
         "build_cp_context",
         return_value=op_result,
-        create=True,
     ):
         context = build_cp_context([2, 3], [4, 5], 2, 0, device)
 

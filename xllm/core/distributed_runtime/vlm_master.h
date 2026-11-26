@@ -29,7 +29,7 @@ limitations under the License.
 #include "common/options.h"
 #include "common/types.h"
 #include "core/framework/multimodal/mm_input.h"
-#include "framework/chat_template/jinja_chat_template.h"
+#include "framework/chat_template/chat_template.h"
 #include "framework/request/request_output.h"
 #include "framework/request/request_params.h"
 #include "framework/request/vlm_request_factory.h"
@@ -184,7 +184,7 @@ class VLMMaster : public Master {
   // (drained/joined) in ~VLMMaster before those members are destroyed.
   std::unique_ptr<ThreadPool> threadpool_;
 
-  std::unique_ptr<JinjaChatTemplate> chat_template_;
+  std::unique_ptr<ChatTemplate> chat_template_;
   std::unique_ptr<MultimodalProcessorBase> processor_;
   std::shared_ptr<Tokenizer> tokenizer_;
 

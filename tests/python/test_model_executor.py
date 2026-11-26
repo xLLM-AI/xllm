@@ -190,7 +190,6 @@ class TestCreateAttentionBackend:
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["device"] is device
         assert backend.init_kwargs["attn_head_dim"] == 512
-        assert backend.init_kwargs["dspark_use_native_sas"] is False
         assert backend.init_kwargs["n_layers"] == 3
         assert backend.init_kwargs["compress_ratios"] == [1, 4, 128]
 
@@ -752,6 +751,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             kv_seq_lens=torch.tensor([4, 8], dtype=torch.int32),
             q_seq_lens=torch.tensor([2, 2], dtype=torch.int32),
             q_seq_lens_host=torch.tensor([2, 2], dtype=torch.int32),
+            num_speculative_tokens=1,
             is_target_verify=True,
             expanded_decode_metadata=SimpleNamespace(
                 enabled=True,

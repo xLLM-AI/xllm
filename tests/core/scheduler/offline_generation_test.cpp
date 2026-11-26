@@ -63,7 +63,7 @@ class FiniteGenerationEngine final : public Engine {
     for (Batch& batch : batches) {
       for (Sequence* sequence : batch.get_sequences()) {
         sequence->kv_state().set_kv_cache_tokens_num(sequence->tokens().size());
-        sequence->append_token(overlap_ ? -1 : 7);
+        sequence->append_token(Token(overlap_ ? -1 : 7));
       }
     }
     return {};

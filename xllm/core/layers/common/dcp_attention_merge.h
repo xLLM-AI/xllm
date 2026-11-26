@@ -32,10 +32,5 @@ DcpAttentionResult merge_dcp_attention_shards(
     const torch::Tensor& partial_outputs,
     const torch::Tensor& partial_lse);
 
-DcpAttentionResult all_gather_and_merge_dcp_attention(
-    const torch::Tensor& local_output,
-    const torch::Tensor& local_lse,
-    ProcessGroup& dcp_group);
-
 }  // namespace layer
 }  // namespace xllm

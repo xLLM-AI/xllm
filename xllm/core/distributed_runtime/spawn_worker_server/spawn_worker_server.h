@@ -64,6 +64,7 @@ class SpawnWorkerServer final {
       int32_t tp_size,
       int32_t sp_size,
       int32_t cfg_size,
+      int32_t vae_size,
       int32_t text_encoder_tp_size,
       const InstanceRole& instance_role,
       bool enable_mtp_draft_body_tp1,
@@ -71,7 +72,8 @@ class SpawnWorkerServer final {
       const std::string& model_impl,
       const std::string& extension_impl,
       EplbWorkerConfig eplb_worker_config,
-      spawn_worker_protocol::PrefillConfig prefill_config);
+      spawn_worker_protocol::PrefillConfig prefill_config,
+      bool enable_graph_double_buffer);
 
   ~SpawnWorkerServer();
 

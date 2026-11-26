@@ -55,8 +55,6 @@ class TensorMtpTopkState final : public MtpTopkState {
         << "MTP top-k indices must have at least one dimension.";
   }
 
-  const torch::Tensor& topk_indices() const { return topk_indices_; }
-
   std::optional<torch::Tensor> as_tensor() const override {
     return topk_indices_;
   }

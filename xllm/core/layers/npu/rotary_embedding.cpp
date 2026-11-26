@@ -18,12 +18,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <boost/algorithm/string.hpp>
-#include <cmath>
-#include <memory>
-
-#include "core/common/global_flags.h"
-#include "core/util/slice.h"
+#include "core/layers/common/rotary_embedding_util.h"
 
 namespace xllm {
 
@@ -81,52 +76,6 @@ std::tuple<torch::Tensor, torch::Tensor> apply_rotary_pos_emb(
 
 }  // namespace
 
-// create right instance based on params
-std::shared_ptr<NpuRotaryEmbedding> create_rotary_embedding(
-    const ModelArgs& args,
-    int64_t rotary_dim,
-    bool interleaved,
-    const torch::TensorOptions& options) {
-  // rotary positional embedding
-  auto inv_freq = layer::rotary::apply_deepseek_yarn_rope_scaling(
-      args.rope_scaling_factor(),
-      args.rope_extrapolation_factor(),
-      args.rope_scaling_beta_fast(),
-      args.rope_scaling_beta_slow(),
-      args.rotary_dim(),
-      args.rope_theta(),
-      args.rope_scaling_original_max_position_embeddings());
-
-  if (boost::iequals(args.rope_scaling_rope_type(), "deepseek_yarn")) {
-    const float attn_scale = args.attn_scalar().value_or(
-        static_cast<float>(args.qk_nope_head_dim() + args.qk_rope_head_dim()));
-    return std::make_shared<RotaryEmbeddingDeepseekYarn>(
-        args.rope_scaling_factor(),
-        rotary_dim,
-        args.max_position_embeddings(),
-        interleaved,
-        args.rope_scaling_attn_factor(),
-        args.rope_scaling_mscale(),
-        args.rope_scaling_mscale_all_dim(),
-        inv_freq,
-        options);
-  } else if (boost::iequals(args.rope_scaling_rope_type(), "mrope")) {
-    return std::make_shared<MRotaryEmbedding>(rotary_dim,
-                                              args.max_position_embeddings(),
-                                              inv_freq,
-                                              interleaved,
-                                              args.rope_scaling_mrope_section(),
-                                              options);
-  } else {
-    return std::make_shared<RotaryEmbeddingGeneric>(
-        rotary_dim,
-        args.max_position_embeddings(),
-        inv_freq,
-        interleaved,
-        options);
-  }
-}
-
 RotaryEmbeddingGeneric::RotaryEmbeddingGeneric(
     int64_t rotary_dim,
     int64_t max_position_embeddings,
@@ -154,61 +103,6 @@ std::tuple<torch::Tensor, torch::Tensor> RotaryEmbeddingGeneric::forward(
   namespace F = torch::nn::functional;
   auto cos_sin = F::embedding(positions, cos_sin_cache_);
   // add a new dimension for n_heads
-  cos_sin = cos_sin.unsqueeze(1);
-  std::tie(query_rotary, key_rotary) =
-      apply_rotary_pos_emb(query_rotary, key_rotary, cos_sin, interleaved_);
-  return std::make_tuple(torch::cat({query_rotary, query_pass}, /*dim=*/-1),
-                         torch::cat({key_rotary, key_pass}, /*dim=*/-1));
-}
-
-RotaryEmbeddingDeepseekYarn::RotaryEmbeddingDeepseekYarn(
-    float scaling_factor,
-    int64_t rotary_dim,
-    int64_t max_position_embeddings,
-    bool interleaved,
-    float attn_factor,
-    float mscale,
-    float mscale_all_dim,
-    torch::Tensor inv_freq,
-    const torch::TensorOptions& options)
-    : rotary_dim_(rotary_dim), interleaved_(interleaved) {
-  const auto cos_sin =
-      layer::rotary::compute_cos_sin_cache(rotary_dim,
-                                           max_position_embeddings,
-                                           interleaved,
-                                           scaling_factor,
-                                           attn_factor,
-                                           mscale,
-                                           mscale_all_dim,
-                                           inv_freq,
-                                           options);
-  cos_sin_cache_ = register_buffer("cos_sin_cache", cos_sin);
-}
-
-// inplace rotary positional embedding
-std::tuple<torch::Tensor, torch::Tensor> RotaryEmbeddingDeepseekYarn::forward(
-    const torch::Tensor& query,     // [num_tokens, n_heads, head_dim]
-    const torch::Tensor& key,       // [num_tokens, n_kv_heads, head_dim]
-    const torch::Tensor& positions  // [num_tokens]
-) const {
-  auto query_rotary = query.index({"...", ISlice(0, rotary_dim_)});
-  auto query_pass = query.index({"...", ISlice(rotary_dim_, None)});
-  auto key_rotary = key.index({"...", ISlice(0, rotary_dim_)});
-  auto key_pass = key.index({"...", ISlice(rotary_dim_, None)});
-  namespace F = torch::nn::functional;
-  auto cos_sin = F::embedding(positions, cos_sin_cache_);
-  // add a new dimension for n_heads
-  // auto chunks = cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
-  // auto cos = chunks[0];
-  // auto sin = chunks[1];
-  // if (interleaved_) {
-  //   cos = cos.repeat_interleave(/*repeats=*/2, /*dim=*/-1);
-  //   sin = sin.repeat_interleave(/*repeats=*/2, /*dim=*/-1);
-  // } else {
-  //   cos = torch::cat({cos, cos}, /*dim=*/-1);
-  //   sin = torch::cat({sin, sin}, /*dim=*/-1);
-  // }
-  // cos_sin = torch::cat({cos, sin}, /*dim=*/-1);
   cos_sin = cos_sin.unsqueeze(1);
   std::tie(query_rotary, key_rotary) =
       apply_rotary_pos_emb(query_rotary, key_rotary, cos_sin, interleaved_);

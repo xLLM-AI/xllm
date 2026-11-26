@@ -14,6 +14,11 @@
 
 """DeepSeek-V4 compressed KV and shared sparse attention kernels."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import torch
 from xllm_kernel.ops.attention.dsv4 import (
     compressor as compressor,
 )
@@ -23,3 +28,26 @@ from xllm_kernel.ops.attention.dsv4 import (
 from xllm_kernel.ops.attention.dsv4 import (
     sparse_attn_sharedkv_metadata as sparse_attn_sharedkv_metadata,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+supports_sparse_flash_mla_swa: Callable[[], bool] = torch.ops.xllm_ops.supports_sparse_flash_mla_swa
+sparse_flash_mla_swa_metadata: Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, int],
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+] = torch.ops.xllm_ops.sparse_flash_mla_swa_metadata
+sparse_flash_mla_swa: Callable[
+    [
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor,
+    ],
+    torch.Tensor,
+] = torch.ops.xllm_ops.sparse_flash_mla_swa

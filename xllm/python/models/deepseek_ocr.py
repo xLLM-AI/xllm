@@ -74,7 +74,7 @@ from xllm.python.model_loader import (
     load_causal_lm_weights,
     load_gqa_fused_attention,
 )
-from xllm.python.models.base import PyModelBase
+from xllm.python.models.base import MultimodalEmbeddings, PyModelBase
 
 
 def _queries(view_size: int, patch_size: int, downsample_ratio: int) -> int:
@@ -1004,7 +1004,7 @@ class DeepseekOCRForCausalLM(PyModelBase):
         input_ids: torch.Tensor,
         image_embeds: torch.Tensor | None = None,
         video_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> MultimodalEmbeddings:
         inputs_embeds = self.model.embed_tokens(input_ids)
         if image_embeds is not None:
             mask = input_ids == self.image_token_id
@@ -1014,7 +1014,7 @@ class DeepseekOCRForCausalLM(PyModelBase):
             # positions — skip the scatter then, like the other python VLMs.
             if mask.any():
                 inputs_embeds[mask] = image_embeds.to(inputs_embeds.dtype)
-        return inputs_embeds
+        return MultimodalEmbeddings(inputs_embeds)
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         self.vision_model.load_weights(state_dicts, tp_rank)

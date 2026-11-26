@@ -102,10 +102,6 @@ class VisionAclGraphRunner:
         self.replayed_encodes = 0
         self.eager_encodes = 0
 
-    @property
-    def captured_graphs(self) -> int:
-        return len(self._graphs)
-
     @staticmethod
     def _patches(row: tuple[int, int, int]) -> int:
         return row[0] * row[1] * row[2]

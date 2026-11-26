@@ -94,6 +94,7 @@ SpawnWorkerServer::SpawnWorkerServer(
     int32_t tp_size,
     int32_t sp_size,
     int32_t cfg_size,
+    int32_t vae_size,
     int32_t text_encoder_tp_size,
     const InstanceRole& instance_role,
     bool enable_mtp_draft_body_tp1,
@@ -101,7 +102,8 @@ SpawnWorkerServer::SpawnWorkerServer(
     const std::string& model_impl,
     const std::string& extension_impl,
     EplbWorkerConfig eplb_worker_config,
-    spawn_worker_protocol::PrefillConfig prefill_config) {
+    spawn_worker_protocol::PrefillConfig prefill_config,
+    bool enable_graph_double_buffer) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -143,6 +145,7 @@ SpawnWorkerServer::SpawnWorkerServer(
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
+      .vae_size(is_dit_backend ? vae_size : 1)
       .text_encoder_tp_size(effective_text_encoder_tp_size)
       .enable_shm(enable_shm)
       .input_shm_size(input_shm_size)
@@ -150,6 +153,7 @@ SpawnWorkerServer::SpawnWorkerServer(
       .is_local(is_local)
       .npu_kernel_backend(npu_kernel_backend)
       .enable_graph(enable_graph)
+      .enable_graph_double_buffer(enable_graph_double_buffer)
       .enable_graph_mode_decode_no_padding(enable_graph_mode_decode_no_padding)
       .enable_prefill_piecewise_graph(enable_prefill_piecewise_graph)
       .max_tokens_for_graph_mode(max_tokens_for_graph_mode)
@@ -158,13 +162,13 @@ SpawnWorkerServer::SpawnWorkerServer(
       .max_encoder_cache_size(max_encoder_cache_size);
   ModelConfig::get_instance().model_impl(model_impl);
   ExecutionConfig::get_instance().extension_impl(extension_impl);
-  // Some model implementations still read prefill settings from this singleton.
+  // Legacy model and layer consumers still read batch limits from this
+  // singleton.
   SchedulerConfig::get_instance()
       .max_tokens_per_batch(max_tokens_per_batch)
       .max_seqs_per_batch(max_seqs_per_batch)
       .max_tokens_per_chunk_for_prefill(
           runner_options.max_tokens_per_chunk_for_prefill())
-      .enable_chunked_prefill(runner_options.enable_chunked_prefill())
       .enable_dp_fair_token_budget(runner_options.enable_dp_fair_token_budget())
       .enable_schedule_overlap(false);
   ParallelConfig::get_instance()

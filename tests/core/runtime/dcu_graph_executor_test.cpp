@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/batch/batch_forward_type.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
@@ -36,6 +37,7 @@ limitations under the License.
 #include "core/platform/device.h"
 #include "core/runtime/dcu_graph_executor_impl.h"
 #include "core/runtime/options.h"
+#include "core/util/scope_guard.h"
 
 namespace xllm {
 namespace {
@@ -52,6 +54,17 @@ void DcuSynchronize() {
       << "hipDeviceSynchronize failed: " << hipGetErrorString(err);
 }
 
+class ScopedExecutionConfigSnapshot final {
+ public:
+  ScopedExecutionConfigSnapshot() = default;
+  ~ScopedExecutionConfigSnapshot() {
+    ExecutionConfig::get_instance() = previous_;
+  }
+
+ private:
+  ExecutionConfig previous_ = ExecutionConfig::get_instance();
+};
+
 class DcuGraphExecutorTestEnvironment final : public ::testing::Environment {
  public:
   void SetUp() override {
@@ -65,7 +78,6 @@ class DcuGraphExecutorTestEnvironment final : public ::testing::Environment {
 
     FLAGS_block_size = 1;
     FLAGS_max_tokens_per_batch = 128;
-    FLAGS_enable_graph_mode_decode_no_padding = true;
 
     torch::manual_seed(0);
   }
@@ -118,7 +130,9 @@ class FakeSimpleCausalLM final : public CausalLM {
                       std::vector<KVCache>& kv_caches,
                       const ModelParamsView& params) override {
     (void)kv_caches;
-    (void)params;
+    if (params.enable_graph) {
+      captured_token_rows_ = tokens.size(0);
+    }
 
     auto token_ids = tokens.to(torch::kInt64);
     auto x = embedding_->forward(token_ids).to(torch::kBFloat16);
@@ -130,6 +144,8 @@ class FakeSimpleCausalLM final : public CausalLM {
 
     return ModelOutput(y + pos_bias);
   }
+
+  int64_t captured_token_rows() const { return captured_token_rows_; }
 
   const torch::TensorOptions& options() const override { return options_; }
 
@@ -157,6 +173,7 @@ class FakeSimpleCausalLM final : public CausalLM {
   void update_expert_weight(int32_t expert_id) override { (void)expert_id; }
 
  private:
+  int64_t captured_token_rows_ = 0;
   ModelArgs args_;
   torch::Device device_;
   torch::TensorOptions options_;
@@ -185,6 +202,7 @@ runtime::Options MakeRuntimeOptions(int32_t max_seqs_per_batch = 8) {
   runtime::Options options;
 
   options.block_size(1);
+  options.max_tokens_per_batch(128);
   options.max_seqs_per_batch(max_seqs_per_batch);
 
   return options;
@@ -311,111 +329,155 @@ bool AllCloseBf16(const torch::Tensor& lhs,
       lhs.to(torch::kFloat32), rhs.to(torch::kFloat32), rtol, atol);
 }
 
-TEST(DcuGraphExecutorTest, DecodeCaptureAndReplay) {
+TEST(DcuGraphExecutorTest, PersistentBuffersUseRuntimeTokenCapacity) {
   if (!IsDcuAvailable()) {
     GTEST_SKIP() << "DCU/HIP is not available at runtime.";
   }
+  SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  const int32_t previous_tokens = scheduler_config.max_tokens_per_batch();
+  ScopeGuard restore_config(
+      [&] { scheduler_config.max_tokens_per_batch(previous_tokens); });
+  scheduler_config.max_tokens_per_batch(1);
 
-  const bool old_enable_graph = FLAGS_enable_graph;
-  const bool old_decode_no_padding = FLAGS_enable_graph_mode_decode_no_padding;
+  const torch::Device device = InitXllmDcuDeviceForTest(/*device_index=*/0);
+  runtime::Options options = MakeRuntimeOptions(/*max_seqs_per_batch=*/3);
+  options.max_tokens_per_batch(7);
+  runtime::dcu::DcuGraphPersistentParam buffers(
+      MakeFakeModelArgs(), device, options);
+  options.max_tokens_per_batch(99);
+  scheduler_config.max_tokens_per_batch(2);
+  EXPECT_EQ(buffers.persistent_tokens(/*n_tokens=*/0).size(0), 7);
+  EXPECT_EQ(buffers.persistent_positions(/*n_tokens=*/0).size(0), 7);
 
-  FLAGS_enable_graph = true;
-  FLAGS_enable_graph_mode_decode_no_padding = true;
-
-  const torch::Device device = InitXllmDcuDeviceForTest(0);
-
-  ModelArgs args = MakeFakeModelArgs(64);
-  runtime::Options options = MakeRuntimeOptions(8);
-
-  auto model = std::make_unique<FakeSimpleCausalLM>(args, device);
-  auto graph_exec = std::make_unique<runtime::dcu::DcuGraphExecutorImpl>(
-      model.get(), args, device, options);
-
-  auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
-
-  auto tokens = torch::tensor({1, 2, 3}, iopt);
-  auto positions = torch::tensor({0, 1, 2}, iopt);
-  auto params = MakeDecodeParams(device, 3);
-
-  auto kv = MakeKvCaches(device,
-                         /*num_pages=*/16,
-                         /*page_size=*/1,
-                         /*num_kv_heads=*/1,
-                         /*head_dim=*/64);
-
-  auto eager_out =
-      model->forward(tokens, positions, kv, params).hidden_states.clone();
-  DcuSynchronize();
-
-  auto out1 =
-      graph_exec->run(tokens, positions, kv, params).hidden_states.clone();
-  DcuSynchronize();
-
-  auto out2 =
-      graph_exec->run(tokens, positions, kv, params).hidden_states.clone();
-  DcuSynchronize();
-
-  EXPECT_TRUE(AllCloseBf16(out1, eager_out))
-      << "DCU graph capture output should match eager output";
-
-  EXPECT_TRUE(AllCloseBf16(out2, eager_out))
-      << "DCU graph replay output should match eager output";
-
-  EXPECT_TRUE(AllCloseBf16(out1, out2))
-      << "DCU graph capture and replay outputs should match";
-
-  FLAGS_enable_graph = old_enable_graph;
-  FLAGS_enable_graph_mode_decode_no_padding = old_decode_no_padding;
+  const torch::Tensor hidden = torch::ones(
+      {7, 4}, torch::TensorOptions().dtype(torch::kBFloat16).device(device));
+  buffers.set_aux_hidden_states(hidden);
+  EXPECT_EQ(buffers.aux_hidden_states(/*n_tokens=*/0).size(0), 7);
+  EXPECT_TRUE(torch::equal(buffers.aux_hidden_states(/*n_tokens=*/7), hidden));
 }
 
-TEST(DcuGraphExecutorTest, PrefillFallsBackToEager) {
+TEST(DcuGraphExecutorTest, DecodeGraphUsesInstanceSwitchAndDpModes) {
   if (!IsDcuAvailable()) {
     GTEST_SKIP() << "DCU/HIP is not available at runtime.";
   }
 
-  const bool old_enable_graph = FLAGS_enable_graph;
+  ScopedExecutionConfigSnapshot config_snapshot;
+  const torch::Device device = InitXllmDcuDeviceForTest(/*device_index=*/0);
+  ModelArgs args = MakeFakeModelArgs(/*hidden_size=*/64);
+  const torch::TensorOptions int_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(device);
+  const torch::Tensor tokens = torch::tensor({1, 2, 3}, int_options);
+  const torch::Tensor positions = torch::tensor({0, 1, 2}, int_options);
 
-  FLAGS_enable_graph = true;
+  struct DecodeCase {
+    const char* name;
+    bool has_dp;
+    bool all_decode;
+  };
+  const std::vector<DecodeCase> cases{{"single_rank", false, true},
+                                      {"dp_all_decode", true, true},
+                                      {"dp_mixed", true, false}};
+  for (const bool enable_graph : {false, true}) {
+    SCOPED_TRACE(enable_graph);
+    for (const auto& test_case : cases) {
+      SCOPED_TRACE(test_case.name);
+      ExecutionConfig::get_instance()
+          .enable_graph(!enable_graph)
+          .enable_graph_mode_decode_no_padding(false);
+      runtime::Options options = MakeRuntimeOptions(/*max_seqs_per_batch=*/8);
+      options.enable_graph(enable_graph)
+          .enable_graph_mode_decode_no_padding(true);
+      auto model = std::make_unique<FakeSimpleCausalLM>(args, device);
+      runtime::dcu::DcuGraphExecutorImpl executor(
+          model.get(), args, device, options);
+      options.enable_graph(!enable_graph);
 
-  const torch::Device device = InitXllmDcuDeviceForTest(0);
+      auto params = MakeDecodeParams(device, /*num_tokens=*/3);
+      if (test_case.has_dp) {
+        params.parallel.dp_global_token_nums = {3, 5};
+        params.parallel.dp_is_decode = {1, test_case.all_decode ? 1 : 0};
+      }
+      auto caches = MakeKvCaches(device,
+                                 /*num_pages=*/16,
+                                 /*page_size=*/1,
+                                 /*num_kv_heads=*/1,
+                                 /*head_dim=*/64);
+      const torch::Tensor eager_output =
+          model->forward(tokens, positions, caches, params)
+              .hidden_states.clone();
+      DcuSynchronize();
+      const bool captures = enable_graph && test_case.all_decode;
+      const int64_t captured_rows = captures ? (test_case.has_dp ? 5 : 3) : 0;
+      for (int32_t step = 0; step < 2; ++step) {
+        const torch::Tensor output =
+            executor.run(tokens, positions, caches, params)
+                .hidden_states.clone();
+        DcuSynchronize();
+        EXPECT_EQ(model->captured_token_rows(), captured_rows);
+        EXPECT_TRUE(AllCloseBf16(output, eager_output));
+      }
+    }
+  }
+}
 
-  ModelArgs args = MakeFakeModelArgs(64);
-  runtime::Options options = MakeRuntimeOptions(8);
+TEST(DcuGraphExecutorTest, PrefillGraphUsesInstanceSwitchAndTokenLimit) {
+  if (!IsDcuAvailable()) {
+    GTEST_SKIP() << "DCU/HIP is not available at runtime.";
+  }
 
-  auto model = std::make_unique<FakeSimpleCausalLM>(args, device);
-  auto graph_exec = std::make_unique<runtime::dcu::DcuGraphExecutorImpl>(
-      model.get(), args, device, options);
-
+  ScopedExecutionConfigSnapshot config_snapshot;
+  const torch::Device device = InitXllmDcuDeviceForTest(/*device_index=*/0);
+  ModelArgs args = MakeFakeModelArgs(/*hidden_size=*/64);
   constexpr int32_t kNumTokens = 7;
+  const torch::TensorOptions int_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(device);
+  const torch::Tensor tokens = torch::arange(1, kNumTokens + 1, int_options);
+  const torch::Tensor positions = torch::arange(0, kNumTokens, int_options);
+  const auto params = MakePrefillParams(device, kNumTokens);
 
-  auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
-
-  auto tokens = torch::arange(1, kNumTokens + 1, iopt);
-  auto positions = torch::arange(0, kNumTokens, iopt);
-  auto params = MakePrefillParams(device, kNumTokens);
-
-  auto kv = MakeKvCaches(device,
-                         /*num_pages=*/16,
-                         /*page_size=*/1,
-                         /*num_kv_heads=*/1,
-                         /*head_dim=*/64);
-
-  auto eager_out =
-      model->forward(tokens, positions, kv, params).hidden_states.clone();
-  DcuSynchronize();
-
-  auto out =
-      graph_exec->run(tokens, positions, kv, params).hidden_states.clone();
-  DcuSynchronize();
-
-  EXPECT_EQ(out.size(0), kNumTokens);
-  EXPECT_EQ(out.size(1), args.hidden_size());
-
-  EXPECT_TRUE(torch::isfinite(out.to(torch::kFloat32)).all().item<bool>());
-  EXPECT_TRUE(AllCloseBf16(out, eager_out))
-      << "DCU prefill path should fallback to eager and match eager output";
-
-  FLAGS_enable_graph = old_enable_graph;
+  struct PrefillCase {
+    const char* name;
+    bool piecewise_enabled;
+    int32_t token_limit;
+    int32_t max_sequences;
+    bool captures;
+  };
+  const std::vector<PrefillCase> cases{
+      {"disabled", false, 128, 1, false},
+      {"over_limit", true, 6, 1, false},
+      {"at_limit", true, 7, 7, true},
+      {"sequence_capacity_floor", true, 1, 7, true}};
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    ExecutionConfig::get_instance()
+        .enable_graph(true)
+        .enable_prefill_piecewise_graph(!test_case.piecewise_enabled)
+        .max_tokens_for_graph_mode(test_case.captures ? 1 : 128);
+    runtime::Options options = MakeRuntimeOptions(test_case.max_sequences);
+    options.enable_prefill_piecewise_graph(test_case.piecewise_enabled)
+        .max_tokens_for_graph_mode(test_case.token_limit);
+    auto model = std::make_unique<FakeSimpleCausalLM>(args, device);
+    runtime::dcu::DcuGraphExecutorImpl executor(
+        model.get(), args, device, options);
+    options.enable_prefill_piecewise_graph(!test_case.piecewise_enabled)
+        .max_tokens_for_graph_mode(128);
+    auto caches = MakeKvCaches(device,
+                               /*num_pages=*/16,
+                               /*page_size=*/1,
+                               /*num_kv_heads=*/1,
+                               /*head_dim=*/64);
+    const torch::Tensor eager_output =
+        model->forward(tokens, positions, caches, params).hidden_states.clone();
+    DcuSynchronize();
+    for (int32_t step = 0; step < 2; ++step) {
+      const torch::Tensor output =
+          executor.run(tokens, positions, caches, params).hidden_states.clone();
+      DcuSynchronize();
+      EXPECT_EQ(model->captured_token_rows(),
+                test_case.captures ? kNumTokens : 0);
+      EXPECT_TRUE(AllCloseBf16(output, eager_output));
+    }
+  }
 }
 
 }  // namespace

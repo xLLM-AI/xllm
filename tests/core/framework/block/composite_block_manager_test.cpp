@@ -114,7 +114,8 @@ inline size_t ExpectedSwaLogicalBlocks(size_t num_tokens) {
 
 // Creates a minimal Sequence for testing (same pattern as batch_test.cpp).
 Sequence MakeTestSequence(size_t index,
-                          const std::vector<int32_t>& prompt_token_ids) {
+                          const std::vector<int32_t>& prompt_token_ids,
+                          const MMData& mm_data = {}) {
   // Sequence keeps non-owning pointers to these parameters after this helper
   // returns, so they must outlive every sequence created here.
   static RequestSamplingParam sampling_param;
@@ -136,7 +137,6 @@ Sequence MakeTestSequence(size_t index,
   seq_params.enable_schedule_overlap = false;
 
   torch::Tensor input_embedding;
-  MMData mm_data;
   IncrementalDecoder decoder("", 1, false, false);
   return Sequence(index,
                   prompt_token_ids,
@@ -460,7 +460,6 @@ TEST(CompositeBlockManagerTest, AllocateForSequence_SingleSeq) {
       base_num_blocks, base_block_size, window_size, max_seqs_per_batch);
 
   CompositeBlockManager manager(build_composite_leaves(opts), opts);
-  EXPECT_TRUE(manager.is_composite());
   EXPECT_EQ(manager.num_sub_managers(), 3u);
 
   Sequence seq = MakeTestSequence(0, std::vector<int32_t>(1024, 1));
@@ -1418,7 +1417,7 @@ TEST(CompositeBlockManagerTest,
   seq.kv_state().incr_kv_cache_tokens_num(prompt.size());
 
   EXPECT_EQ(seq.kv_state().num_blocks(BlockType::LINEAR), 1u);
-  seq.append_token(8);
+  seq.append_token(Token(/*id=*/8));
   ASSERT_TRUE(manager.allocate_sequence(&seq, seq.num_tokens()));
   ASSERT_EQ(seq.kv_state().num_blocks(BlockType::LINEAR), 1u);
   EXPECT_EQ(seq.get_linear_state_slot_id(), received_id);
@@ -2161,31 +2160,6 @@ TEST(CompositeBlockManagerTest, SequenceResetReleasesCachedVirtualBlocks) {
   EXPECT_EQ(manager->num_used_blocks(), 0u);
 }
 
-TEST(CompositeBlockManagerTest, ForkPreservesParentPrivateBlockUsage) {
-  for (const BlockType type : {BlockType::EMBEDDING, BlockType::LINEAR}) {
-    SCOPED_TRACE(static_cast<int32_t>(type));
-    BlockManager::Options options;
-    options.num_blocks(3).block_size(1).block_type(type).enable_prefix_cache(
-        false);
-    BlockManagerImpl manager(options);
-    Sequence parent = MakeTestSequence(/*index=*/0, {11, 12});
-    parent.add_blocks(type, manager.allocate(/*num_blocks=*/1));
-    const int32_t parent_block_id = parent.kv_state().blocks(type).front().id();
-
-    std::unique_ptr<Sequence> child = parent.fork(/*index=*/1);
-
-    EXPECT_EQ(child->kv_state().num_blocks(type), 0u);
-    EXPECT_EQ(parent.kv_state().blocks(type).front().id(), parent_block_id);
-    EXPECT_EQ(manager.num_used_blocks(), 1u);
-    EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks() - 1);
-    child.reset();
-    EXPECT_EQ(manager.num_used_blocks(), 1u);
-    parent.reset();
-    EXPECT_EQ(manager.num_used_blocks(), 0u);
-    EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks());
-  }
-}
-
 TEST(CompositeBlockManagerTest,
      VirtualMemoryReservationReclaimsCachedOnlyBlocks) {
   TestVmmKVPageAllocator allocator(/*dp_size=*/1);
@@ -2365,7 +2339,7 @@ TEST_P(LinearStateWindowTest, DecodeReceiverAllocationIsOwnedByLeaf) {
     EXPECT_EQ(sequence.get_linear_state_slot_id(), received_id);
 
     sequence.kv_state().set_kv_cache_tokens_num(prompt_length);
-    sequence.append_token(8);
+    sequence.append_token(Token(/*id=*/8));
     allocated = manager.allocate_for_sequence(
         &sequence, sequence.kv_state(), prompt_length + 1);
     ASSERT_TRUE(allocated.has_value());
@@ -2404,7 +2378,7 @@ TEST_P(LinearStateWindowTest, DecodeReceiverNeedsOnlyOneAvailableSlot) {
   const int32_t received_id = sequence.get_linear_state_slot_id();
   EXPECT_EQ(linear_leaf->num_free_blocks(), 0u);
   sequence.kv_state().set_kv_cache_tokens_num(11);
-  sequence.append_token(8);
+  sequence.append_token(Token(/*id=*/8));
   for (const size_t target : {12u, 13u, 16u, 24u}) {
     ASSERT_TRUE(manager.allocate_sequence(&sequence, target));
     EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1u);
@@ -2443,7 +2417,7 @@ TEST_P(LinearStateWindowTest, PrefillCheckpointsDoNotAliasLiveState) {
               GetParam() ? output_index : 0u);
     previous_id = output_id;
   }
-  sequence.append_token(8);
+  sequence.append_token(Token(/*id=*/8));
   ASSERT_TRUE(manager->allocate_sequence(&sequence, sequence.num_tokens()));
   const Slice<Block> blocks = sequence.kv_state().blocks(BlockType::LINEAR);
   ASSERT_EQ(blocks.size(), 1u);
@@ -2618,7 +2592,7 @@ TEST_P(LinearStateWindowTest, DecodeReusesOneSlotAcrossCheckpointBoundaries) {
         ASSERT_TRUE(manager->allocate_sequence(&sequence, 3));
         const int32_t slot_id = sequence.get_linear_state_slot_id();
         sequence.kv_state().set_kv_cache_tokens_num(3);
-        sequence.append_token(8);
+        sequence.append_token(Token(/*id=*/8));
         for (size_t step = 0; step < 24; ++step) {
           const size_t target = sequence.num_tokens() + speculative_tokens;
           for (size_t retry = 0; retry < 2; ++retry) {
@@ -2629,7 +2603,7 @@ TEST_P(LinearStateWindowTest, DecodeReusesOneSlotAcrossCheckpointBoundaries) {
           sequence.kv_state().set_kv_cache_tokens_num(sequence.num_tokens());
           for (size_t accepted = 0; accepted <= speculative_tokens;
                ++accepted) {
-            sequence.append_token(8);
+            sequence.append_token(Token(/*id=*/8));
           }
         }
         BlockManager* leaf =
@@ -2840,11 +2814,12 @@ TEST_F(SharedKVCacheBlockTest, MultimodalPrefixIdentityKeepsBothGroupsAligned) {
     options.hasher_type(BlockHasherType::MTP_MM).num_speculative_tokens(4);
     CompositeBlockManager manager(build_composite_leaves(options), options);
     const auto make_multimodal = [modality](size_t index, uint8_t content_key) {
-      Sequence sequence = MakeTestSequence(index, std::vector<int32_t>(13, 7));
-      auto& item = sequence.mutable_mm_data().add(modality);
+      MMData mm_data;
+      auto& item = mm_data.add(modality);
       item.mutable_state().mutable_token_pos() = {5, 3};
       item.mutable_state().mutable_schedule_data().key.data[0] = content_key;
-      return sequence;
+      return MakeTestSequence(
+          index, std::vector<int32_t>(/*count=*/13, /*value=*/7), mm_data);
     };
 
     Sequence producer = make_multimodal(/*index=*/0, /*content_key=*/1);

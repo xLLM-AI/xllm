@@ -83,8 +83,9 @@ class TestModel:
 class TestExecutor:
     requires_input_batch_metadata = False
     context_kv_graph_runner = None
-    def __init__(self, *args: object) -> None:
+    def __init__(self, model: object, config: dict, *args: object) -> None:
         self.supports_layerwise_kv_load = layerwise
+        executor_configs.append(config.copy())
     def bind_kv_caches(self, caches: object) -> None:
         pass
     def execute(self, tokens: torch.Tensor, positions: torch.Tensor,
@@ -104,6 +105,7 @@ class TestExecutor:
             assert bool((ready == 7).all())
         return tokens.float().view(-1, 1) + ready[0]
 
+executor_configs = []
 registry = types.ModuleType('xllm.python.registry')
 registry.get_model_class = lambda name: TestModel
 executor_module = types.ModuleType('xllm.python.model_executor.executor')
@@ -135,7 +137,16 @@ patch.__enter__()
     std::vector<KVCache> caches;
     for (bool layerwise : {false, true}) {
       scope["layerwise"] = layerwise;
-      PyExecutorImpl executor(&model, args, device, runtime::Options());
+      runtime::Options options;
+      options.enable_graph_mode_decode_no_padding(layerwise);
+      PyExecutorImpl executor(&model, args, device, options);
+      // Both modes share the same checkpoint config and unchanged singleton.
+      // The bridge must preserve each executor's padding setting.
+      const py::dict config = scope["executor_configs"]
+                                  .cast<py::list>()[layerwise ? 1 : 0]
+                                  .cast<py::dict>();
+      EXPECT_EQ(config["enable_graph_mode_decode_no_padding"].cast<bool>(),
+                layerwise);
       for (bool graph : {false, true}) {
         ready.zero_();
         auto load = std::make_shared<TestLoadSynchronizer>(ready);

@@ -2,6 +2,28 @@ include(cc_test)
 
 cc_test(
   NAME
+    recurrent_cache_partition_test
+  CPU_ONLY
+  SRCS
+    recurrent_cache_partition_test.cpp
+  DEPS
+    :recurrent_cache_partition
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    paged_cache_partition_test
+  CPU_ONLY
+  SRCS
+    paged_cache_partition_test.cpp
+  DEPS
+    :paged_cache_partition
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     cache_layout_builder_test
   CPU_ONLY
   SRCS

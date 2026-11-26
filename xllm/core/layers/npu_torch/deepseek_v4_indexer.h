@@ -127,11 +127,6 @@ class DeepseekV4IndexerImpl : public torch::nn::Module {
   int64_t rope_head_dim() const { return rope_head_dim_; }
   int64_t index_topk() const { return index_topk_; }
   int64_t q_lora_rank() const { return q_lora_rank_; }
-  int64_t compress_ratio() const { return compress_ratio_; }
-  double softmax_scale() const { return softmax_scale_; }
-
-  ReplicatedLinear wq_b() const { return wq_b_; }
-  ReplicatedLinear weights_proj() const { return weights_proj_; }
 
  private:
   int64_t dim_ = 0;

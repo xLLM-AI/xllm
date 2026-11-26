@@ -27,7 +27,10 @@ limitations under the License.
 
 namespace xllm {
 
-// Initializes the embedded CPython interpreter (idempotent, process-wide).
+// Starts the embedded interpreter and imports the shared Python package.
+void ensure_embedded_python();
+
+// Starts embedded Python and prepares the Python LLM kernel runtime.
 void ensure_python_interpreter(const std::string& kv_cache_dtype);
 
 // Makes the internal StateDict binding importable as xllm_weight_loader.

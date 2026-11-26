@@ -12,6 +12,7 @@ cc_test(
     :config
     :request
     :processors
+    :chat_template_factory
     :jinja_chat_template
     $<$<BOOL:${USE_MLU}>:torch_mlu>
     $<$<BOOL:${USE_NPU}>:torch_npu>

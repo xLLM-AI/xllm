@@ -16,16 +16,11 @@ limitations under the License.
 
 #pragma once
 
-#include <c10/core/Device.h>
-#include <c10/core/ScalarType.h>
 #include <torch/torch.h>
 
-#include <functional>
+#include <cstdint>
 #include <tuple>
-#include <unordered_map>
-
-#include "framework/model/model_args.h"
-#include "layers/common/rotary_embedding_util.h"
+#include <vector>
 
 namespace xllm {
 
@@ -69,32 +64,6 @@ class RotaryEmbeddingGeneric : public NpuRotaryEmbedding {
   bool interleaved_ = false;
 };
 
-class RotaryEmbeddingDeepseekYarn : public NpuRotaryEmbedding {
- public:
-  RotaryEmbeddingDeepseekYarn(float scaling_factor,
-                              int64_t rotary_dim,
-                              int64_t max_position_embeddings,
-                              bool interleaved,
-                              float attn_factor,
-                              float mscale,
-                              float mscale_all_dim,
-                              torch::Tensor inv_freq,
-                              const torch::TensorOptions& options);
-  // inplace rotary positional embedding
-  std::tuple<torch::Tensor, torch::Tensor> forward(
-      const torch::Tensor& query,     // [num_tokens, n_heads, head_dim]
-      const torch::Tensor& key,       // [num_tokens, n_kv_heads, head_dim]
-      const torch::Tensor& positions  // [num_tokens]
-  ) const override;
-
-  torch::Tensor get_cos_sin_cache() override { return cos_sin_cache_; }
-
- private:
-  torch::Tensor cos_sin_cache_;
-  int64_t rotary_dim_ = 0;
-  bool interleaved_ = false;
-};
-
 // Rotary Embedding with Multimodal Sections.
 class MRotaryEmbedding : public NpuRotaryEmbedding {
  public:
@@ -120,11 +89,5 @@ class MRotaryEmbedding : public NpuRotaryEmbedding {
   bool interleaved_ = false;
   std::vector<int64_t> mrope_section_;
 };
-
-std::shared_ptr<NpuRotaryEmbedding> create_rotary_embedding(
-    const ModelArgs& model_args,
-    int64_t rotary_dim,
-    bool interleaved,
-    const torch::TensorOptions& options);
 
 }  // namespace xllm

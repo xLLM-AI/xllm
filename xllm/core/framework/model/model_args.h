@@ -386,7 +386,6 @@ class DSparkArgs final {
 
   PROPERTY(int64_t, markov_rank) = 0;
   PROPERTY(int32_t, dspark_num_layers) = 0;
-  PROPERTY(bool, dspark_use_native_sas) = false;
 };
 
 // Vision encoder, projector, and model-defined generation configuration.
@@ -748,7 +747,6 @@ struct ModelArgs {
 
   FORWARD_PROPERTY(int64_t, markov_rank, dspark_args);
   FORWARD_PROPERTY(int32_t, dspark_num_layers, dspark_args);
-  FORWARD_PROPERTY(bool, dspark_use_native_sas, dspark_args);
 
   PROPERTY(ConfidenceHeadArgs, confidence_head_args);
 

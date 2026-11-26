@@ -409,15 +409,20 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
     const BlockManagerPool::Options& options,
     std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
     int32_t dp_size,
-    VmmKVPageAllocator* page_allocator)
-    : BlockManagerPool(options, dp_size, page_allocator),
+    VmmKVPageAllocator* page_allocator,
+    std::optional<PagedCachePartition> paged_partition,
+    std::optional<RecurrentCachePartition> recurrent_partition)
+    : BlockManagerPool(options,
+                       dp_size,
+                       page_allocator,
+                       std::move(paged_partition),
+                       std::move(recurrent_partition)),
       transfer_coordinator_(std::move(transfer_coordinator)) {
   host_block_managers_.reserve(dp_size);
 
   for (int32_t i = 0; i < dp_size; ++i) {
     CompositeBlockManager::LeafMap per_type;
-    auto* composite =
-        static_cast<CompositeBlockManager*>(block_managers_[i].get());
+    auto* composite = block_managers_[i].get();
     const CompositeBlockManager::LeafCombination combination =
         composite->leaf_combination();
     switch (combination) {
@@ -544,8 +549,7 @@ void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
   const bool cancelled_restore =
       restoring_sequences_.erase(sequence) > 0 || cancelled_pending_restore;
 
-  auto* composite =
-      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  auto* composite = block_managers_[dp_rank].get();
   if (!cancelled_restore) {
     composite->publish_prefix(sequence);
     collect_offload_pairs(sequence);
@@ -564,8 +568,7 @@ void HierarchyBlockManagerPool::publish_prefix(Sequence* sequence) {
     return;
   }
   const int32_t dp_rank = get_dp_rank(sequence);
-  auto* composite =
-      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  auto* composite = block_managers_[dp_rank].get();
   composite->publish_prefix(sequence);
 }
 
@@ -579,8 +582,7 @@ void HierarchyBlockManagerPool::publish_prefix(Sequence* sequence,
     return;
   }
   const int32_t dp_rank = get_dp_rank(sequence);
-  auto* composite =
-      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  auto* composite = block_managers_[dp_rank].get();
   composite->publish_prefix(sequence, num_tokens);
 }
 
@@ -703,8 +705,7 @@ void HierarchyBlockManagerPool::trim_host_cache(
   CHECK_LE(hbm_state.kv_cache_tokens_num(), restore_tokens);
   CHECK_LE(restore_tokens, matched_tokens);
 
-  const auto* composite =
-      static_cast<const CompositeBlockManager*>(block_managers_[dp_rank].get());
+  const auto* composite = block_managers_[dp_rank].get();
   for (const auto& [type, entry] : composite->leaf_entries()) {
     if (type == BlockType::EMBEDDING || type == BlockType::LINEAR) {
       continue;
@@ -750,8 +751,7 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
   const std::map<BlockType, size_t> previous_hbm_cached_blocks =
       hbm_state.num_cached_blocks();
 
-  auto* composite =
-      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  auto* composite = block_managers_[dp_rank].get();
   const bool already_restoring = restoring_sequences_.contains(sequence);
   const bool cache_prefix =
       !already_restoring && restore_tokens == hbm_state.kv_cache_tokens_num();
@@ -874,8 +874,7 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
   }
 
   const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
-  auto* composite =
-      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  auto* composite = block_managers_[dp_rank].get();
   if (sequence->stage() == SequenceStage::DECODE) {
     composite->allocate_shared_for_sequence(sequence);
     return;
@@ -986,8 +985,7 @@ HostCacheRestorePoint HierarchyBlockManagerPool::select_host_cache_restore(
   const size_t restore_tokens = sequence->kv_cache_tokens_num();
 
   const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
-  const auto* composite =
-      static_cast<const CompositeBlockManager*>(block_managers_[dp_rank].get());
+  const auto* composite = block_managers_[dp_rank].get();
   const bool is_swa_compressed =
       composite->leaf_combination() ==
       CompositeBlockManager::LeafCombination::SWA_COMPRESSED;
@@ -1117,8 +1115,7 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
       finish_sequence();
       continue;
     }
-    const auto* composite = static_cast<const CompositeBlockManager*>(
-        block_managers_[dp_rank].get());
+    const auto* composite = block_managers_[dp_rank].get();
     const CompositeBlockManager::LeafCombination combination =
         composite->leaf_combination();
     auto* host_manager = host_block_managers_[dp_rank].get();
@@ -1297,8 +1294,7 @@ void HierarchyBlockManagerPool::complete_restore(
   CHECK(batch != per_dp.end());
   std::vector<RestoringSequence> restored = std::move(batch->second);
   per_dp.erase(batch);
-  auto* composite = static_cast<CompositeBlockManager*>(
-      block_managers_[completion.dp_rank].get());
+  auto* composite = block_managers_[completion.dp_rank].get();
   for (const RestoringSequence& restore : restored) {
     auto active = restoring_sequences_.find(restore.sequence);
     if (active == restoring_sequences_.end() ||

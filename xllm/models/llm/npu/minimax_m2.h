@@ -26,7 +26,6 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model/moe_execution_input.h"
@@ -192,7 +191,8 @@ TORCH_MODULE(MiniMaxM2MoeDecoderLayer);
 
 class MiniMaxM2ModelImpl : public torch::nn::Module {
  public:
-  explicit MiniMaxM2ModelImpl(const ModelContext& context) {
+  explicit MiniMaxM2ModelImpl(const ModelContext& context)
+      : enable_chunked_prefill_(context.enable_chunked_prefill()) {
     const auto& options = context.get_tensor_options();
     const auto& model_args = context.get_model_args();
     const auto& parallel_args = context.get_parallel_args();
@@ -208,9 +208,7 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
                                              options));
     norm_ = register_module("norm", layer::RMSNorm(context));
 
-    int32_t mask_value =
-        ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() ? -9984
-                                                                         : 1;
+    const int32_t mask_value = enable_chunked_prefill_ ? -9984 : 1;
     attn_mask_ = layer::AttentionMask(
         options.device(), options.dtype().toScalarType(), mask_value);
 
@@ -284,7 +282,7 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
 
     max_seq_len_ = std::max(params.meta.kv_max_seq_len, max_seq_len_);
     torch::Tensor attn_mask;
-    if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+    if (enable_chunked_prefill_) {
       const int32_t max_kv_seq = params.meta.kv_max_seq_len;
       const int32_t num_sequences = params.meta.num_sequences;
       if (num_sequences > 0) {
@@ -318,6 +316,7 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
   int64_t hidden_size_ = 0;
   int32_t max_seq_len_ = 0;
   bool enable_mla_ = false;
+  const bool enable_chunked_prefill_;
 };
 TORCH_MODULE(MiniMaxM2Model);
 

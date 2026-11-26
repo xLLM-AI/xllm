@@ -58,7 +58,6 @@ class RollingWeightBuffer {
 
   size_t slot_size() const { return storage_size_; }
   int32_t num_slots() const { return num_slots_; }
-  bool is_allocated() const { return base_ptr_ != nullptr; }
 
  private:
   int32_t num_slots_;

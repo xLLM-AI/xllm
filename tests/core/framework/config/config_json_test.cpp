@@ -141,16 +141,6 @@ TEST(ExecutionConfigTest, AttnDpCommandLineFlagOverridesJson) {
   EXPECT_TRUE(execution_config.enable_attn_dp_weight_sharding());
 }
 
-#if !defined(USE_NPU)
-TEST(KernelConfigTest, RejectsNpuOnlyDsparkNativeSas) {
-  JsonReader json_config =
-      config::parse_json_string(R"json({"enable_dspark_native_sas":true})json");
-  KernelConfig kernel_config;
-  EXPECT_DEATH(kernel_config.from_json(json_config),
-               "enable_dspark_native_sas is only supported on NPU");
-}
-#endif
-
 class ConfigJsonFileFlagGuard final {
  public:
   explicit ConfigJsonFileFlagGuard(const std::string& config_json_file)

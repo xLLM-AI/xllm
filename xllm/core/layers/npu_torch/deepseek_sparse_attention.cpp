@@ -15,7 +15,6 @@ limitations under the License.
 #include "deepseek_sparse_attention.h"
 
 #include <glog/logging.h>
-#include <torch/library.h>
 
 #include <algorithm>
 #include <cmath>
@@ -500,31 +499,74 @@ AttentionMetadata build_indexer_attention_metadata(
 
 }  // namespace
 
-void build_deepseek_v4_sparse_metadata(
-    DSAMetadata& dsa,
-    const ModelParamsView& params,
-    const ModelArgs& args,
-    int64_t tp_num_heads,
-    int64_t dp_local_tp_size,
-    bool is_prefill,
-    const torch::Tensor& cu_seqlens_ori_kv_override) {
+void build_deepseek_v4_sparse_metadata(DSAMetadata& dsa,
+                                       const ModelParamsView& params,
+                                       const ModelArgs& args,
+                                       int64_t dp_local_tp_size,
+                                       bool is_prefill) {
+  dsa.c1_metadata = torch::Tensor();
+  dsa.c4_metadata = torch::Tensor();
+  dsa.c128_metadata = torch::Tensor();
+  dsa.qli_metadata = torch::Tensor();
+  dsa.ori_sparse_indices_ = torch::Tensor();
+  dsa.ori_topk_length_ = torch::Tensor();
+
+  torch::Device device(/*type=*/torch::kCPU);
+  if (dsa.input_positions.defined()) {
+    device = dsa.input_positions.device();
+  } else if (dsa.seq_lens_q.defined()) {
+    device = dsa.seq_lens_q.device();
+  } else if (dsa.actual_seq_lengths_kv.defined()) {
+    device = dsa.actual_seq_lengths_kv.device();
+  }
+  for (auto* lengths : {&dsa.actual_seq_lengths_query,
+                        &dsa.actual_seq_lengths_kv,
+                        &dsa.kv_cu_seq_lens,
+                        &dsa.seq_lens_q,
+                        &dsa.seq_lens,
+                        &dsa.max_seqlen_q,
+                        &dsa.max_seqlen_kv}) {
+    if (lengths->defined() && lengths->device() != device) {
+      *lengths = lengths->to(device);
+    }
+  }
   const auto& cu_seqlens_q = dsa.actual_seq_lengths_query;
   const auto& seqused_kv = dsa.actual_seq_lengths_kv;
-  const auto& cu_seqlens_ori_kv = cu_seqlens_ori_kv_override.defined()
-                                      ? cu_seqlens_ori_kv_override
-                                      : cu_seqlens_q;
-  const std::optional<torch::Tensor> empty_int32 = torch::empty(
-      {0}, torch::dtype(torch::kInt32).device(cu_seqlens_q.device()));
-  const auto nonempty =
-      [](const torch::Tensor& tensor) -> std::optional<torch::Tensor> {
-    return tensor.numel() > 0 ? std::optional{tensor} : std::nullopt;
-  };
+  if (!cu_seqlens_q.defined() || !seqused_kv.defined()) {
+    return;
+  }
+  const int64_t tp_num_heads = args.n_heads() / dp_local_tp_size;
   const int64_t max_seqlen_q =
       std::max<int64_t>(params.meta.q_max_seq_len,
                         util::max_len(params.attention.host.q_seq_lens));
   const int64_t max_seqlen_kv =
       std::max<int64_t>(params.meta.kv_max_seq_len,
                         util::max_len(params.attention.host.kv_seq_lens));
+  if (args.model_type() == "deepseek_v4_dspark" &&
+      params.meta.num_speculative_tokens > 0 && !is_prefill &&
+      max_seqlen_q == 1 && args.head_dim() == 512 &&
+      kernel::npu::supports_sparse_flash_mla_swa()) {
+    std::tie(dsa.ori_sparse_indices_, dsa.ori_topk_length_, dsa.c1_metadata) =
+        kernel::npu::sparse_flash_mla_swa_metadata(
+            cu_seqlens_q,
+            seqused_kv,
+            dsa.block_tables.front().front(),
+            max_seqlen_kv,
+            tp_num_heads,
+            /*page_size=*/args.window_size(),
+            /*visible_window=*/args.window_size() +
+                params.meta.num_speculative_tokens);
+    return;
+  }
+  const auto& cu_seqlens_ori_kv =
+      dsa.v4_cp_context ? dsa.kv_cu_seq_lens : cu_seqlens_q;
+  const std::optional<torch::Tensor> empty_int32 = torch::empty(
+      /*size=*/{0},
+      torch::dtype(/*dtype=*/torch::kInt32).device(cu_seqlens_q.device()));
+  const auto nonempty =
+      [](const torch::Tensor& tensor) -> std::optional<torch::Tensor> {
+    return tensor.numel() > 0 ? std::optional{tensor} : std::nullopt;
+  };
   const int64_t sparse_topk = std::max<int64_t>(args.index_topk(), /*b=*/1);
   const int64_t head_dim = args.o_lora_rank() + args.qk_rope_head_dim();
   kernel::SparseAttnSharedkvMetadataParams sparse{
@@ -542,7 +584,7 @@ void build_deepseek_v4_sparse_metadata(
       .max_seqlen_kv = max_seqlen_kv,
       .ori_mask_mode = 4,
       .cmp_mask_mode = 3,
-      .ori_win_left = dsa.sparse_metadata_ori_win_left,
+      .ori_win_left = std::max<int64_t>(args.window_size() - 1, /*b=*/0),
       .layout_q = "TND",
       .layout_kv = "PA_ND",
       .has_ori_kv = true,
@@ -594,75 +636,6 @@ void build_deepseek_v4_sparse_metadata(
   dsa.qli_metadata = kernel::quant_lightning_indexer_metadata(indexer);
 }
 
-torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
-                                       const torch::Tensor& query_cu_seq_lens,
-                                       const torch::Tensor& seq_lens,
-                                       int64_t window_size,
-                                       int64_t dspark_block_size,
-                                       int64_t cache_block_size) {
-  // Native DSpark SAS addresses the trailing SWA prefix plus the whole current
-  // diffusion block explicitly. The compatibility fallback never calls it
-  // because CANN 9.0 rejects a non-empty ori_sparse_indices argument.
-  CHECK(block_table.defined() && query_cu_seq_lens.defined() &&
-        seq_lens.defined());
-  CHECK_GT(block_table.size(1), 0);
-  CHECK_GT(cache_block_size, 0);
-
-  const torch::Device device = block_table.device();
-  torch::Tensor q_cu = query_cu_seq_lens.to(device, torch::kLong);
-  torch::Tensor kv_lens = seq_lens.to(device, torch::kLong);
-  torch::Tensor q_lens = q_cu.slice(0, 1) - q_cu.slice(0, 0, q_cu.size(0) - 1);
-  CHECK_EQ(q_lens.numel(), block_table.size(0));
-  CHECK_EQ(kv_lens.numel(), block_table.size(0));
-
-  torch::Tensor prefix_lens = kv_lens - q_lens;
-  torch::Tensor start_pos = (prefix_lens - window_size).clamp_min(0);
-  torch::Tensor visible_lens = kv_lens - start_pos;
-  constexpr int64_t kIndexAlignment = 128;
-  const int64_t min_width = window_size + dspark_block_size;
-  const int64_t index_width = util::align_up(min_width, kIndexAlignment);
-
-  torch::Tensor columns = torch::arange(
-      index_width, torch::TensorOptions().dtype(torch::kLong).device(device));
-  torch::Tensor valid = columns.unsqueeze(0) < visible_lens.unsqueeze(1);
-  torch::Tensor positions = start_pos.unsqueeze(1) + columns.unsqueeze(0);
-  torch::Tensor logical_block_columns =
-      torch::floor_divide(positions, cache_block_size);
-
-  // DSAMetadataBuilder expands an SWA ring into logical block-table columns
-  // and right-aligns the retained physical blocks. Positions just before the
-  // retained range still wrap into those blocks, so taking modulo by the
-  // expanded table width would incorrectly select its -1 padding.
-  torch::Tensor valid_block_counts =
-      block_table.ge(0).sum(/*dim=*/1).to(torch::kLong);
-  torch::Tensor safe_block_counts = valid_block_counts.clamp_min(1);
-  torch::Tensor logical_block_counts =
-      torch::floor_divide(kv_lens + cache_block_size - 1, cache_block_size);
-  torch::Tensor first_retained_columns =
-      (logical_block_counts - valid_block_counts).clamp_min(0);
-  torch::Tensor expanded_block_columns =
-      first_retained_columns.unsqueeze(1) +
-      (logical_block_columns - first_retained_columns.unsqueeze(1))
-          .remainder(safe_block_counts.unsqueeze(1));
-  torch::Tensor raw_block_columns =
-      logical_block_columns.remainder(safe_block_counts.unsqueeze(1));
-  torch::Tensor uses_expanded_layout =
-      logical_block_counts.le(block_table.size(1));
-  torch::Tensor block_columns =
-      torch::where(uses_expanded_layout.unsqueeze(1),
-                   expanded_block_columns,
-                   raw_block_columns)
-          .clamp(/*min=*/0, /*max=*/block_table.size(1) - 1);
-  torch::Tensor block_ids = block_table.gather(/*dim=*/1, block_columns);
-  torch::Tensor slot_ids =
-      block_ids * cache_block_size + positions.remainder(cache_block_size);
-  slot_ids = torch::where(
-      valid & block_ids.ge(0), slot_ids, torch::full_like(slot_ids, -1));
-  return torch::repeat_interleave(slot_ids, q_lens, /*dim=*/0)
-      .to(torch::kInt32)
-      .unsqueeze(1);
-}
-
 DSAttentionImpl::DSAttentionImpl(const ModelContext& context,
                                  int32_t layer_id) {
   const auto& args = context.get_model_args();
@@ -679,6 +652,7 @@ DSAttentionImpl::DSAttentionImpl(const ModelContext& context,
   index_n_heads_ = args.index_n_heads();
   index_head_dim_ = args.index_head_dim();
   index_topk_ = args.index_topk();
+  ori_win_left_ = std::max<int64_t>(args.window_size() - 1, /*b=*/0);
   const auto& compress_ratios = args.compress_ratios();
   CHECK_GE(layer_id, 0) << "DSAttention requires valid layer_id, got "
                         << layer_id;
@@ -1083,38 +1057,47 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                    : as_optional(attn_metadata.actual_seq_lengths_query);
   }
 
-  const auto ori_sparse_indices =
-      !use_prefill_attn && compress_ratio_i == 1
-          ? as_optional(attn_metadata.explicit_swa_indices)
-          : std::nullopt;
-
-  auto [attn_output, output_lse] = xllm::kernel::npu::sparse_attn_sharedkv(
-      /*q=*/q,
-      /*ori_kv=*/as_optional(ori_kv_for_attn),
-      /*cmp_kv=*/compress_ratio_i > 1 ? as_optional(cmp_kv_for_attn)
-                                      : std::nullopt,
-      /*ori_sparse_indices=*/ori_sparse_indices,
-      /*cmp_sparse_indices=*/
-      compress_ratio_i == 4 ? as_optional(compress_topk_idxs) : std::nullopt,
-      /*ori_block_table=*/as_optional(ori_block_table_for_attn),
-      /*cmp_block_table=*/
-      compress_ratio_i > 1 ? as_optional(cmp_block_table) : std::nullopt,
-      /*cu_seqlens_q=*/as_optional(attn_metadata.actual_seq_lengths_query),
-      /*cu_seqlens_ori_kv=*/cu_seqlens_ori_kv_for_attn,
-      /*cu_seqlens_cmp_kv=*/std::nullopt,
-      /*seqused_q=*/std::nullopt,
-      /*seqused_kv=*/as_optional(attn_metadata.actual_seq_lengths_kv),
-      /*sinks=*/attn_sink_loaded_ ? as_optional(attn_sink_) : std::nullopt,
-      /*metadata=*/sparse_metadata,
-      /*softmax_scale=*/softmax_scale_,
-      /*cmp_ratio=*/compress_ratio_i,
-      /*ori_mask_mode=*/4,
-      /*cmp_mask_mode=*/3,
-      /*ori_win_left=*/attn_metadata.sparse_metadata_ori_win_left,
-      /*ori_win_right=*/0,
-      /*layout_q=*/"TND",
-      /*layout_kv=*/ori_kv_layout,
-      /*return_softmax_lse=*/false);
+  torch::Tensor attn_output;
+  if (compress_ratio_i == 1 && attn_metadata.ori_topk_length_.defined()) {
+    attn_output = kernel::npu::sparse_flash_mla_swa(
+        q,
+        ori_kv_for_attn,
+        ori_block_table_for_attn,
+        attn_metadata.actual_seq_lengths_query,
+        attn_metadata.actual_seq_lengths_kv,
+        attn_metadata.ori_sparse_indices_,
+        attn_metadata.ori_topk_length_,
+        attn_sink_loaded_ ? as_optional(attn_sink_) : std::nullopt,
+        *sparse_metadata);
+  } else {
+    attn_output = std::get<0>(kernel::npu::sparse_attn_sharedkv(
+        /*q=*/q,
+        /*ori_kv=*/as_optional(ori_kv_for_attn),
+        /*cmp_kv=*/compress_ratio_i > 1 ? as_optional(cmp_kv_for_attn)
+                                        : std::nullopt,
+        /*ori_sparse_indices=*/std::nullopt,
+        /*cmp_sparse_indices=*/
+        compress_ratio_i == 4 ? as_optional(compress_topk_idxs) : std::nullopt,
+        /*ori_block_table=*/as_optional(ori_block_table_for_attn),
+        /*cmp_block_table=*/
+        compress_ratio_i > 1 ? as_optional(cmp_block_table) : std::nullopt,
+        /*cu_seqlens_q=*/as_optional(attn_metadata.actual_seq_lengths_query),
+        /*cu_seqlens_ori_kv=*/cu_seqlens_ori_kv_for_attn,
+        /*cu_seqlens_cmp_kv=*/std::nullopt,
+        /*seqused_q=*/std::nullopt,
+        /*seqused_kv=*/as_optional(attn_metadata.actual_seq_lengths_kv),
+        /*sinks=*/attn_sink_loaded_ ? as_optional(attn_sink_) : std::nullopt,
+        /*metadata=*/sparse_metadata,
+        /*softmax_scale=*/softmax_scale_,
+        /*cmp_ratio=*/compress_ratio_i,
+        /*ori_mask_mode=*/4,
+        /*cmp_mask_mode=*/3,
+        /*ori_win_left=*/ori_win_left_,
+        /*ori_win_right=*/0,
+        /*layout_q=*/"TND",
+        /*layout_kv=*/ori_kv_layout,
+        /*return_softmax_lse=*/false));
+  }
 
   // 8) Deferred cache write for full prefill.
   if (use_temporary_prefill_kv) {
@@ -1139,7 +1122,6 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
     output = o_b_proj_->forward(o_low_rank.reshape({num_tokens, -1}));
   }
   std::optional<torch::Tensor> final_lse = std::nullopt;
-  (void)output_lse;
 
   return std::make_tuple(output, final_lse);
 }
@@ -1218,27 +1200,3 @@ void DSAttentionImpl::load_state_dict(const StateDict& state_dict) {
 
 }  // namespace layer
 }  // namespace xllm
-
-// Exposed to Python so csa_attention.py consumes the same index math and
-// window geometry as the C++ model path instead of hand-translated copies.
-TORCH_LIBRARY_FRAGMENT(xllm_ops, module) {
-  module.def(
-      "build_dspark_swa_indices(Tensor block_table, Tensor query_cu_seq_lens, "
-      "Tensor seq_lens, int window_size, int dspark_block_size, int "
-      "cache_block_size) -> Tensor");
-  module.def(
-      "deepseek_v4_ori_window_left(int window_size, int dspark_block_size, "
-      "bool use_native_dspark_sas) -> int");
-  module.def(
-      "deepseek_v4_use_native_sas(int dspark_block_size, bool "
-      "dspark_use_native_sas, bool use_prefill_attention) -> bool");
-}
-
-TORCH_LIBRARY_IMPL(xllm_ops, CompositeExplicitAutograd, module) {
-  module.impl("build_dspark_swa_indices",
-              TORCH_FN(xllm::layer::build_dspark_swa_indices));
-  module.impl("deepseek_v4_ori_window_left",
-              TORCH_FN(xllm::layer::deepseek_v4_ori_window_left));
-  module.impl("deepseek_v4_use_native_sas",
-              TORCH_FN(xllm::layer::deepseek_v4_use_native_sas));
-}

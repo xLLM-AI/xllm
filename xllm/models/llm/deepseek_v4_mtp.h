@@ -107,7 +107,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
         << "[DeepseekV4Mtp] n_heads must be divisible by local tp "
            "size. n_heads="
         << num_heads << ", local_tp_size=" << dp_local_tp_size_;
-    tp_num_heads_ = num_heads / dp_local_tp_size_;
     window_size_ = model_args_.window_size();
 
     const int64_t rope_head_dim = model_args_.rope_head_dim();
@@ -306,6 +305,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
         if (dsa.c128_cos.defined()) {
           cp_ctx.global_rope_by_ratio[128] = {dsa.c128_cos, dsa.c128_sin};
         }
+        dsa.v4_cp_context = &cp_ctx;
         rebuild_cp_local_query_metadata(dsa, modified_input_params, cp_ctx);
         hidden_states = cp_ctx.shard_rows(hidden_states);
         previous_hidden_states = cp_ctx.shard_rows(previous_hidden_states);
@@ -313,7 +313,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
         // tokens stays global on purpose: see the matching note in
         // deepseek_v4.h. The decoder layer re-gathers before the MoE gate, so
         // input_ids and dp_global_token_nums both stay on the global token set.
-        dsa.v4_cp_context = &cp_ctx;
       }
     }
 
@@ -597,7 +596,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     // It must not be recomputed after this point either, since both fields it
     // derives from are localized above.
 
-    build_precomputed_metadata(dsa, params, cp_ctx.local_kv_cu_seq_lens);
+    build_precomputed_metadata(dsa, params);
   }
 
   void build_dsa_rope_metadata(layer::DSAMetadata& dsa) const {
@@ -676,55 +675,11 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     }
   }
 
-  // cu_seqlens_ori_kv_override: see the matching note in deepseek_v4.h. Only
-  // prefill CP passes it, and it has to agree with the cu_seqlens_ori_kv the
-  // attention layer passes at call time.
-  void build_precomputed_metadata(
-      layer::DSAMetadata& dsa,
-      const ModelParamsView& params,
-      const torch::Tensor& cu_seqlens_ori_kv_override = torch::Tensor()) const {
-    dsa.c1_metadata = torch::Tensor();
-    dsa.c4_metadata = torch::Tensor();
-    dsa.c128_metadata = torch::Tensor();
-    dsa.qli_metadata = torch::Tensor();
-    dsa.sparse_metadata_ori_win_left = -1;
-
-    torch::Device metadata_device(torch::kCPU);
-    if (dsa.input_positions.defined()) {
-      metadata_device = dsa.input_positions.device();
-    } else if (dsa.seq_lens_q.defined()) {
-      metadata_device = dsa.seq_lens_q.device();
-    } else if (dsa.actual_seq_lengths_kv.defined()) {
-      metadata_device = dsa.actual_seq_lengths_kv.device();
-    }
-
-    dsa.actual_seq_lengths_query =
-        maybe_to_device(dsa.actual_seq_lengths_query, metadata_device);
-    dsa.actual_seq_lengths_kv =
-        maybe_to_device(dsa.actual_seq_lengths_kv, metadata_device);
-    dsa.seq_lens_q = maybe_to_device(dsa.seq_lens_q, metadata_device);
-    dsa.seq_lens = maybe_to_device(dsa.seq_lens, metadata_device);
-    dsa.max_seqlen_q = maybe_to_device(dsa.max_seqlen_q, metadata_device);
-    dsa.max_seqlen_kv = maybe_to_device(dsa.max_seqlen_kv, metadata_device);
-
-    if (!dsa.actual_seq_lengths_query.defined() ||
-        !dsa.actual_seq_lengths_kv.defined()) {
-      return;
-    }
-
-    const int64_t ori_win_left =
-        layer::deepseek_v4_ori_window_left(window_size_,
-                                           /*dspark_block_size=*/0,
-                                           /*use_native_dspark_sas=*/false);
-    dsa.sparse_metadata_ori_win_left = ori_win_left;
+  void build_precomputed_metadata(layer::DSAMetadata& dsa,
+                                  const ModelParamsView& params) const {
     const bool is_prefill = params.meta.q_max_seq_len > 1;
-    layer::build_deepseek_v4_sparse_metadata(dsa,
-                                             params,
-                                             model_args_,
-                                             tp_num_heads_,
-                                             dp_local_tp_size_,
-                                             is_prefill,
-                                             cu_seqlens_ori_kv_override);
+    layer::build_deepseek_v4_sparse_metadata(
+        dsa, params, model_args_, dp_local_tp_size_, is_prefill);
   }
 
   void prepare_for_layer(layer::AttentionMetadata& attn_metadata,
@@ -783,7 +738,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
   std::vector<std::vector<DSACacheInfo>> caches_info_;
   std::vector<DSAGroupInfo> group_infos_;
 
-  int64_t tp_num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
   // Prefill CP geometry. cp_size_ == 1 means CP is off everywhere below.
   int64_t cp_size_ = 1;

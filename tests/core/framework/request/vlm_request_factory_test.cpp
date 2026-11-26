@@ -23,6 +23,7 @@ limitations under the License.
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "api_service/call.h"
@@ -30,13 +31,18 @@ limitations under the License.
 #include "common/rate_limiter.h"
 #include "core/common/message.h"
 #include "core/common/types.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
+#include "framework/chat_template/chat_template_factory.h"
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request_params.h"
 #include "framework/tokenizer/tokenizer_args.h"
+#include "processors/multimodal_processor_pipeline.h"
+#include "processors/text_prompt_processor.h"
 #include "tests/core/framework/request/request_factory_test_utils.h"
+#include "util/scope_guard.h"
 #include "xllm/processors/multimodal_processor.h"
 
 namespace xllm {
@@ -616,6 +622,76 @@ TEST_F(VLMRequestFactoryTest,
             (std::vector<bool>{true}));
   EXPECT_EQ(forwarded, 1);
 }
+
+class VLMChatTemplateTest
+    : public ::testing::TestWithParam<std::tuple<std::string, bool, bool>> {};
+
+TEST_P(VLMChatTemplateTest, GenerationAndCountingUseSelectedTemplate) {
+  const auto& [model_type, use_cpp_template, thinking] = GetParam();
+  auto& model_config = ModelConfig::get_instance();
+  const bool previous_use_cpp = model_config.use_cpp_chat_template();
+  ScopeGuard restore_config([previous_use_cpp] {
+    ModelConfig::get_instance().use_cpp_chat_template(previous_use_cpp);
+  });
+  model_config.use_cpp_chat_template(use_cpp_template);
+
+  TokenizerArgs tokenizer_args;
+  tokenizer_args.bos_token("<｜begin▁of▁sentence｜>")
+      .chat_template(
+          "jinja:{{ messages[0].content }}"
+          "{% if thinking %}<think>{% else %}</think>{% endif %}");
+  auto chat_template = ChatTemplateFactory::create(tokenizer_args, model_type);
+  auto tokenizer = std::make_shared<FakeTokenizer>(/*vocab_size=*/1000);
+  ModelArgs model_args;
+  model_args.model_type(model_type)
+      .vocab_size(1000)
+      .max_position_embeddings(2048)
+      .eos_token_id(-1);
+  MultimodalProcessor<TextPromptProcessor> processor(
+      model_args, tokenizer, tokenizer_args);
+  Options options;
+  RateLimiter rate_limiter;
+  ASSERT_TRUE(rate_limiter.acquire().ok());
+  VLMRequestFactory factory(&processor,
+                            chat_template.get(),
+                            tokenizer.get(),
+                            &model_args,
+                            &options,
+                            &rate_limiter);
+  RequestParams params;
+  params.max_tokens = 16;
+  params.chat_template_kwargs = {{"thinking", thinking},
+                                 {"reasoning_effort", "low"}};
+  std::vector<Message> messages;
+  messages.emplace_back("user", std::string("hello"));
+
+  std::string expected =
+      use_cpp_template ? "<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜>"
+                       : "jinja:hello";
+  expected += thinking ? "<think>" : "</think>";
+  std::vector<int32_t> expected_tokens;
+  ASSERT_TRUE(tokenizer->encode(expected, &expected_tokens));
+
+  int32_t count = 0;
+  ASSERT_TRUE(
+      factory.count_chat_tokens(messages, params, MMInput{}, count).ok());
+  EXPECT_EQ(count, expected_tokens.size());
+  CallbackCapture capture;
+  auto request = factory.create(
+      std::move(messages), params, MMInput{}, make_capture_callback(&capture));
+  ASSERT_NE(request, nullptr);
+  EXPECT_FALSE(capture.called);
+  EXPECT_EQ(request->state().prompt, expected);
+  EXPECT_EQ(request->state().prompt_tokens, expected_tokens);
+}
+
+INSTANTIATE_TEST_SUITE_P(Deepseek,
+                         VLMChatTemplateTest,
+                         ::testing::Combine(::testing::Values("deepseek_v32",
+                                                              "deepseek_v4",
+                                                              "deepseek_v41"),
+                                            ::testing::Bool(),
+                                            ::testing::Bool()));
 
 }  // namespace
 }  // namespace xllm

@@ -254,7 +254,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 |:----------|:-----|:--------|:------------|
 | `npu_kernel_backend` | `string` | `"AUTO"` | NPU kernel backend. Supported values: `AUTO`, `TORCH`. |
 | `enable_fused_mc2` | `int32` | `-1` | Fused MC2 mode for NPU. `-1` uses the auto default, `0` disables fused MC2, positive values enable dense matmul-allreduce, `1` uses DispatchFFNCombine for MoE, `2` uses DispatchGmmCombineDecode for MoE. |
-| `enable_dspark_native_sas` | `bool` | `false` | Enable native NPU DSpark SparseAttnSharedkv semantics. Older operators that reject non-empty `ori_sparse_indices` may terminate during tiling; keep this disabled to use q_len=1 compatibility mode. |
 
 ## DiTConfig
 

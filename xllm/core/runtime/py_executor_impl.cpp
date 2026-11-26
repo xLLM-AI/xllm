@@ -230,7 +230,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["block_draft_graph_warmup_max_kv_len"] =
       ExecutionConfig::get_instance().block_draft_graph_warmup_max_kv_len();
   executor_config["enable_graph_mode_decode_no_padding"] =
-      ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding();
+      options_.enable_graph_mode_decode_no_padding();
   executor_config["enable_graph_mm_encoder"] =
       ExecutionConfig::get_instance().enable_graph_mm_encoder();
   executor_config["mm_encoder_graph_capture_shapes"] =
@@ -448,28 +448,21 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
         mm_data.get<torch::Tensor>(get_embedding_key(MMType::VIDEO)));
     py::object audio_embeds = optional_tensor(
         mm_data.get<torch::Tensor>(get_embedding_key(MMType::AUDIO)));
-    if (!audio_embeds.is_none()) {
-      const auto audio_mask = mm_data.get<torch::Tensor>("audio|mask");
-      CHECK(audio_mask.has_value());
-      CHECK_EQ(audio_mask->numel(), execution_tokens.numel());
-      input_embedding = top_model.attr("get_input_embeddings")(
-          execution_tokens,
-          image_embeds,
-          video_embeds,
-          audio_embeds,
-          audio_mask->view(execution_tokens.sizes()));
-    } else if (!image_embeds.is_none() || !video_embeds.is_none()) {
-      py::object visual_embedding = top_model.attr("get_input_embeddings")(
-          execution_tokens, image_embeds, video_embeds);
-      if (args_.model_type() == "qwen3_vl") {
-        py::tuple visual_inputs = visual_embedding.cast<py::tuple>();
-        input_embedding = visual_inputs[0];
-        deepstack_input_embeds = visual_inputs[1];
-      } else {
-        // Each visual model returns this step's merged embeddings. The
-        // decoder receives them explicitly instead of retaining request state.
-        input_embedding = std::move(visual_embedding);
+    if (!image_embeds.is_none() || !video_embeds.is_none() ||
+        !audio_embeds.is_none()) {
+      py::kwargs embedding_kwargs;
+      if (!audio_embeds.is_none()) {
+        const auto audio_mask = mm_data.get<torch::Tensor>("audio|mask");
+        CHECK(audio_mask.has_value());
+        CHECK_EQ(audio_mask->numel(), execution_tokens.numel());
+        embedding_kwargs["audio_embeds"] = audio_embeds;
+        embedding_kwargs["audio_mask"] =
+            audio_mask->view(execution_tokens.sizes());
       }
+      py::object embeddings = top_model.attr("get_input_embeddings")(
+          execution_tokens, image_embeds, video_embeds, **embedding_kwargs);
+      input_embedding = embeddings.attr("input_embedding");
+      deepstack_input_embeds = embeddings.attr("deepstack_input_embeds");
     }
   }
 

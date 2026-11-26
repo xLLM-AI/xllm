@@ -40,6 +40,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -287,6 +288,8 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* num_speculative_tokens_ptr = num_speculative_tokens_str.c_str();
   std::string speculative_algorithm_str = options.speculative_algorithm();
   const char* speculative_algorithm_ptr = speculative_algorithm_str.c_str();
+  const char* enable_graph_double_buffer_ptr =
+      options.enable_graph_double_buffer() ? "1" : "0";
   std::string enable_graph_str = std::to_string(options.enable_graph());
   const char* enable_graph_ptr = enable_graph_str.c_str();
   std::string enable_graph_mode_decode_no_padding_str =
@@ -349,6 +352,12 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
       options.enable_chunked_prefill() ? "1" : "0";
   const char* dp_fair_token_budget_ptr =
       options.enable_dp_fair_token_budget() ? "1" : "0";
+  const std::string vae_size_str = std::to_string(options.vae_size());
+  const char* vae_size_ptr =
+      worker_type == WorkerType::DIT &&
+              ModelConfig::is_python_model_impl(options.model_impl())
+          ? vae_size_str.c_str()
+          : nullptr;
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
@@ -409,8 +418,12 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         max_prefill_chunk_str.c_str(),
                         chunked_prefill_ptr,
                         dp_fair_token_budget_ptr,
+                        vae_size_ptr,
+                        enable_graph_double_buffer_ptr,
                         nullptr};
-  static_assert(std::size(argv) == spawn_worker_protocol::kArgumentCount + 1);
+  static_assert(std::size(argv) ==
+                spawn_worker_protocol::kEnableGraphDoubleBufferArgumentIndex +
+                    2);
   pid_t pid;
   int status = posix_spawnp(
       &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);

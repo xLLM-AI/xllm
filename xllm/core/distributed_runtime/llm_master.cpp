@@ -174,6 +174,7 @@ LLMMaster::LLMMaster(const Options& options)
       .enable_service_routing(options_.enable_service_routing())
       .server_idx(options_.server_idx())
       .enable_graph(options_.enable_graph())
+      .enable_graph_double_buffer(options_.enable_graph_double_buffer())
       .enable_graph_mode_decode_no_padding(
           options_.enable_graph_mode_decode_no_padding())
       .enable_prefill_piecewise_graph(options_.enable_prefill_piecewise_graph())

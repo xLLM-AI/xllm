@@ -19,8 +19,6 @@ limitations under the License.
 
 #include <limits>
 
-#include "framework/parallel_state/process_group.h"
-
 namespace xllm::layer {
 
 DcpAttentionResult merge_dcp_attention_shards(
@@ -62,17 +60,6 @@ DcpAttentionResult merge_dcp_attention_shards(
       safe_max_lse.squeeze(/*dim=*/0) + torch::log(safe_weight_sum),
       torch::full_like(weight_sum, negative_infinity));
   return {output.to(partial_outputs.scalar_type()), merged_lse};
-}
-
-DcpAttentionResult all_gather_and_merge_dcp_attention(
-    const torch::Tensor& local_output,
-    const torch::Tensor& local_lse,
-    ProcessGroup& dcp_group) {
-  torch::Tensor partial_outputs =
-      dcp_group.allgather_base_sync(local_output.contiguous());
-  torch::Tensor partial_lse =
-      dcp_group.allgather_base_sync(local_lse.contiguous());
-  return merge_dcp_attention_shards(partial_outputs, partial_lse);
 }
 
 }  // namespace xllm::layer

@@ -115,6 +115,7 @@ LLMEngine::LLMEngine(
           .cp_size = cp_size,
           .max_tokens_per_batch =
               static_cast<int64_t>(options_.max_tokens_per_batch()),
+          .enable_graph = options_.enable_graph(),
           .enable_dp_global_json_object_active =
               dp_size_ > 1 && !options_.is_draft_engine() &&
               options_.num_speculative_tokens() > 0,

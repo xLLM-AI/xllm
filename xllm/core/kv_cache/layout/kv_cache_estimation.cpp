@@ -1092,6 +1092,7 @@ KVCacheCapacity estimate_kv_cache_capacity(
   }
 
   if (options.kv_cache_dtype == "fp8_e4m3") {
+    kv_cache_cap.full_kv_dtype(CacheScalarType::FLOAT8_E4M3FN);
     CHECK(!options.enable_shared_kv_cache)
         << "Shared static storage requires model-dtype Full KV rows.";
     CHECK(options.dtype == torch::kBFloat16 ||

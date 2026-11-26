@@ -25,14 +25,19 @@ limitations under the License.
 
 #include "core/common/extension_registry.h"
 #include "core/common/options.h"
+#include "core/framework/config/dit_config.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
+#include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model_loader/dit_model_discovery.h"
 #include "core/framework/model_loader/hf_model_config.h"
+#include "core/platform/platform.h"
 #include "llm/py_causal_lm.h"
 #include "models.h"
+#include "models/dit/py_dit_model.h"
 #include "processors/cacheable_multimodal_processor.h"
 #include "processors/multimodal_processor_pipeline.h"
 #include "processors/text_prompt_processor.h"
@@ -837,7 +842,37 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
 }
 
 std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context) {
-  // get the factory function for the model type from model registry
+  if (ModelConfig::is_python_model_impl(context.model_impl())) {
+    if (context.model_type() == "MiniMaxH3ModularPipeline" &&
+        Platform::is_npu() &&
+        context.get_tensor_options().device().type() ==
+            Platform::type_torch()) {
+      const auto& config = DiTConfig::get_instance();
+      const auto& parallel = context.get_parallel_args();
+      CHECK_EQ(config.dit_h3_task_type(), "fl2va")
+          << "Python MiniMax-H3 supports T2VA with fl2va weights";
+      CHECK(context.get_dit_config().selected_policy == PolicyType::None)
+          << "Python MiniMax-H3 requires dit_cache_policy=None";
+      CHECK(!config.dit_sparse_attention_enabled() &&
+            !ExecutionConfig::get_instance().enable_graph() &&
+            !LoadConfig::get_instance().enable_rolling_load())
+          << "Python MiniMax-H3 requires dense eager execution";
+      CHECK(parallel.world_size() == 4 && parallel.tp_size() == 2 &&
+            parallel.sp_size() == 2 && parallel.vae_size() == 4 &&
+            parallel.cfg_size() == 1 && parallel.dp_size() == 1 &&
+            parallel.dit_tp_group_ != nullptr &&
+            parallel.dit_sp_group_ != nullptr &&
+            parallel.dit_vae_group_ != nullptr)
+          << "Python MiniMax-H3 requires TP2, SP2, VAE4, CFG1 and DP1";
+      CHECK_EQ(config.max_requests_per_batch(), 1);
+      CHECK(context.get_quant_args("transformer").quant_method().empty())
+          << "Python MiniMax-H3 requires dense floating point weights";
+      return std::make_unique<PyDiTModel>(context);
+    }
+    LOG(ERROR) << "Python DiT is unavailable for " << context.model_type()
+               << " on " << context.get_tensor_options().device();
+    return nullptr;
+  }
   auto factory = ModelRegistry::get_dit_model_factory(context.model_type());
   if (factory) {
     return factory(context);

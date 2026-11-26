@@ -86,9 +86,6 @@ function(tilelang_register_runtime_kernel)
     message(FATAL_ERROR
       "tilelang_register_runtime_kernel requires NAME and WRAPPER_SRCS")
   endif()
-  if(NOT DEFINED TILELANG_GENERATED_ROOT)
-    message(FATAL_ERROR "TILELANG_GENERATED_ROOT must be set before registering TileLang kernels")
-  endif()
 
   set(_manifest_path
     "${TILELANG_GENERATED_ROOT}/targets/ascend/${TL_RUNTIME_NAME}/manifest.json")
@@ -128,11 +125,6 @@ tilelang_register_runtime_kernel(
 )
 
 tilelang_register_runtime_kernel(
-  NAME shared_full_indices
-  WRAPPER_SRCS shared_full_indices_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
   NAME apply_token_bitmask
   WRAPPER_SRCS apply_token_bitmask_wrapper.cpp
 )
@@ -145,16 +137,6 @@ tilelang_register_runtime_kernel(
 tilelang_register_runtime_kernel(
   NAME greedy_prefix_verify
   WRAPPER_SRCS greedy_prefix_verify_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
-  NAME dspark_allocate_verify_prefixes
-  WRAPPER_SRCS dspark_allocate_verify_prefixes_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
-  NAME dspark_pack_verify_inputs
-  WRAPPER_SRCS dspark_pack_verify_inputs_wrapper.cpp
 )
 
 tilelang_register_runtime_kernel(
@@ -200,11 +182,6 @@ tilelang_register_runtime_kernel(
 tilelang_register_runtime_kernel(
   NAME fused_sigmoid_gating_delta_rule
   WRAPPER_SRCS fused_sigmoid_gating_delta_rule_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
-  NAME sfa_dcp_remap
-  WRAPPER_SRCS sfa_dcp_remap_wrapper.cpp
 )
 
 cc_library(

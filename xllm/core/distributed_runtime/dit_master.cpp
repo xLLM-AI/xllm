@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "api_service/call.h"
 #include "common/metrics.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config_validation.h"
 #include "dit_engine.h"
 #include "framework/request/dit_request.h"
@@ -34,6 +35,7 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
+
 DiTMaster::DiTMaster(const Options& options) : Master(options) {
   const std::optional<std::string> cp_error = validate_context_parallel_config(
       options_, EngineType::DIT, /*model_type=*/"", options_.nnodes());
@@ -44,10 +46,19 @@ DiTMaster::DiTMaster(const Options& options) : Master(options) {
       << "Disaggregated PD is not supported by the DiT engine.";
   CHECK(options_.host_blocks_factor() <= 1.0)
       << "Basic host KV cache offload is not supported by the DiT engine.";
+  const std::string& model_impl = ModelConfig::get_instance().model_impl();
+  const DiTRequestPolicy request_policy =
+      resolve_dit_request_policy(options_, model_impl);
+  if (request_policy.required_batch_size.has_value()) {
+    CHECK_EQ(options_.max_requests_per_batch(),
+             *request_policy.required_batch_size);
+  }
+  request_validator_ = request_policy.validator;
 
   runtime::Options engine_options;
   engine_options.model_path(options_.model_path())
       .model_id(options_.model_id())
+      .model_impl(model_impl)
       .extension_impl(options_.extension_impl())
       .devices(devices_)
       .backend(options_.backend())
@@ -133,6 +144,11 @@ void DiTMaster::handle_request(DiTRequestParams params,
     Timer timer;
     // verify the prompt
     if (!params.verify_params(callback)) {
+      return;
+    }
+    if (const char* error =
+            request_validator_ ? request_validator_(params) : nullptr) {
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, error);
       return;
     }
     DiTRequestState dit_state =

@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/kv_cache/layout/cache_partition_builder.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
@@ -85,23 +86,55 @@ KVCacheEstimateOptions make_estimate_options() {
 
 }  // namespace
 
-TEST(KVCacheEstimationTest, NativeFP8BudgetsOnlyResidentBytes) {
+TEST(KVCacheEstimationTest, FullKVComponentsMatchResidentBudget) {
   ModelArgs args;
   args.n_layers(4).head_dim(256).n_heads(24).n_kv_heads(4);
   KVCacheEstimateOptions options = make_estimate_options();
   options.dtype = torch::kBFloat16;
   options.cache_size_in_bytes = 64 * 1024 * 1024;
   options.n_local_kv_heads = 4;
-  for (const std::string format : {"auto", "fp8_e4m3"}) {
+  auto check_format = [&](const std::string& format,
+                          CacheScalarType dtype,
+                          int64_t bytes_per_token,
+                          int64_t scale_bytes) {
     SCOPED_TRACE(format);
     options.kv_cache_dtype = format;
     const KVCacheCapacity capacity = estimate_kv_cache_capacity(args, options);
-    const int64_t bytes_per_token = format == "auto" ? 4096 : 2048;
     EXPECT_EQ(capacity.slot_size(), bytes_per_token);
-    EXPECT_EQ(capacity.scale_slot_size(), 0);
-    EXPECT_LE(capacity.n_blocks() * options.block_size * 4 * bytes_per_token,
+    EXPECT_EQ(capacity.scale_slot_size(), scale_bytes);
+    EXPECT_LE(capacity.n_blocks() * options.block_size * args.n_layers() *
+                  (bytes_per_token + scale_bytes),
               options.cache_size_in_bytes);
-  }
+    const KVCacheShape shape(capacity, args, /*world_size=*/1);
+    const auto paged =
+        build_paged_cache_partition(CachePartitionId{},
+                                    capacity,
+                                    args,
+                                    shape,
+                                    options.dtype,
+                                    /*token_stride=*/16,
+                                    /*enable_prefix_cache=*/true);
+    ASSERT_TRUE(paged.has_value());
+    for (const auto role :
+         {CacheComponentRole::KEY, CacheComponentRole::VALUE}) {
+      const auto* component = paged->find_component(role);
+      ASSERT_NE(component, nullptr);
+      EXPECT_EQ(component->dtype, dtype);
+    }
+    for (const auto role :
+         {CacheComponentRole::KEY_SCALE, CacheComponentRole::VALUE_SCALE}) {
+      const auto* scale = paged->find_component(role);
+      if (scale_bytes == 0) {
+        EXPECT_EQ(scale, nullptr);
+      } else {
+        ASSERT_NE(scale, nullptr);
+        EXPECT_EQ(scale->dtype, CacheScalarType::FLOAT32);
+      }
+    }
+  };
+  check_format("auto", CacheScalarType::BFLOAT16, 4096, 0);
+  check_format("fp8_e4m3", CacheScalarType::FLOAT8_E4M3FN, 2048, 0);
+  check_format("int8", CacheScalarType::INT8, 2048, 32);
 }
 
 TEST(KVCacheEstimationTest, RuntimeBudgetUsesMinimumAcrossWorkers) {

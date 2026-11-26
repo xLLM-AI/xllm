@@ -18,7 +18,6 @@ cc_library(
   SRCS
     active.cpp
     attention.cpp
-    collectives.cpp
     fused_layernorm.cpp
     npu_adalayernorm.cpp
     matmul.cpp
@@ -31,7 +30,7 @@ cc_library(
     npu_rain_fusion_attention.cpp
     npu_grouped_matmul.cpp
     npu_moe_gating_topk_softmax.cpp
-    npu_mega_moe.cpp
+    "${PROJECT_SOURCE_DIR}/xllm-kernel/csrc/npu/mega_moe.cpp"
     "${PROJECT_SOURCE_DIR}/xllm-kernel/csrc/npu/dispatch_ffn_combine.cpp"
     "${PROJECT_SOURCE_DIR}/xllm-kernel/csrc/npu/dispatch_gmm_combine_decode.cpp"
     npu_moe_distribute_combine_v2.cpp
@@ -43,11 +42,11 @@ cc_library(
     utils.cpp
     w4a8_dynamic_moe_preprocess.cpp
     npu_ops_library.cpp
+  INCLUDES
+    "${PROJECT_SOURCE_DIR}/xllm-kernel"
+    "$ENV{PYTORCH_NPU_INSTALL_PATH}/include/third_party/op-plugin"
   DEPS
     :util
-    # collectives.cpp issues raw Hccl* calls on the caller's stream.
-    hccl
-    hcomm
     :torch_npu_kernels
     :triton_adapter
     :tilelang_kernels

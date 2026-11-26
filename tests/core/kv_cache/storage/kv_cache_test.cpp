@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/kv_cache/block/block.h"
+#include "core/kv_cache/layout/cache_partition_builder.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
@@ -264,7 +265,8 @@ void ExpectMluCompressedStateLayout(const std::vector<KVCache>& caches,
 #if !defined(USE_MLU) && !defined(USE_NPU)
 TEST(NativeKVCacheTest, FP8PagesMatchBudgetAndKeepLinearStateDtypes) {
   ModelArgs args;
-  args.n_layers(4)
+  args.model_type("qwen3_5_text")
+      .n_layers(4)
       .n_heads(24)
       .n_kv_heads(4)
       .head_dim(256)
@@ -283,6 +285,32 @@ TEST(NativeKVCacheTest, FP8PagesMatchBudgetAndKeepLinearStateDtypes) {
   estimate.max_seqs_per_batch = 4;
   const KVCacheCapacity capacity = KVCacheEstimator(args).estimate(estimate);
   const KVCacheShape shape(capacity, args, /*world_size=*/1);
+  const auto paged = build_paged_cache_partition(CachePartitionId{},
+                                                 capacity,
+                                                 args,
+                                                 shape,
+                                                 estimate.dtype,
+                                                 estimate.block_size,
+                                                 /*enable_prefix_cache=*/true);
+  ASSERT_TRUE(paged.has_value());
+  ASSERT_EQ(paged->components().size(), 2U);
+  for (const auto role : {CacheComponentRole::KEY, CacheComponentRole::VALUE}) {
+    const auto* component = paged->find_component(role);
+    ASSERT_NE(component, nullptr);
+    EXPECT_EQ(component->dtype, CacheScalarType::FLOAT8_E4M3FN);
+    EXPECT_EQ(component->layers, (std::vector<int32_t>{1, 3}));
+  }
+  const auto recurrent =
+      build_recurrent_cache_partition(CachePartitionId{},
+                                      capacity,
+                                      args,
+                                      shape,
+                                      estimate.dtype,
+                                      /*checkpoint_stride=*/16,
+                                      /*enable_prefix_cache=*/true);
+  ASSERT_TRUE(recurrent.has_value());
+  EXPECT_EQ(recurrent->conv().dtype, CacheScalarType::FLOAT16);
+  EXPECT_EQ(recurrent->ssm().dtype, CacheScalarType::FLOAT32);
   KVCacheCreateOptions options;
   options.device(torch::Device(torch::kCPU))
       .dtype(torch::kFloat8_e4m3fn)

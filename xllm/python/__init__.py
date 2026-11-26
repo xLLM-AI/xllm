@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from importlib.util import find_spec
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -69,8 +70,15 @@ def initialize_runtime(kv_cache_dtype: str = "auto") -> None:
 
         from xllm_kernel.ops.attention.gdn.mega import has_mega_gdn_mtp_decode_varlen
         from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2
+        from xllm_kernel.ops.collectives import HCCL_OPERATIONS, has_matmul_reduce_scatter
         from xllm_kernel.ops.gemm import has_grouped_matmul_out
-        from xllm_kernel.ops.moe import FUSED_MOE_GMM1_OPERATIONS, has_fused_moe_gmm1
+        from xllm_kernel.ops.moe import (
+            FUSED_MOE_GMM1_OPERATIONS,
+            MOE_DISTRIBUTE_OPERATIONS,
+            has_fused_moe_gmm1,
+            has_mega_moe,
+            has_moe_distribute,
+        )
 
         from scripts.logger import logger
 
@@ -94,6 +102,8 @@ def initialize_runtime(kv_cache_dtype: str = "auto") -> None:
                 "sparse_attn_sharedkv_metadata",
                 "sparse_flash_attention_lse",
                 "sparse_flash_attention_lse_out",
+                "lightning_indexer",
+                "lightning_indexer_out",
                 "quant_lightning_indexer",
                 "quant_lightning_indexer_metadata",
                 "scatter_nd_update",
@@ -106,6 +116,15 @@ def initialize_runtime(kv_cache_dtype: str = "auto") -> None:
                 *(("mla_preprocess_v2",) if has_mla_preprocess_v2() else ()),
                 "dequant_swiglu_quant",
                 "moe_gating_top_k_hash",
+                "moe_gating_top_k_softmax",
+                "moe_gating_top_k",
+                "moe_init_routing_v2",
+                "moe_token_unpermute",
+                "moe_finalize_routing",
+                *(MOE_DISTRIBUTE_OPERATIONS if has_moe_distribute() else ()),
+                *(("mega_moe",) if has_mega_moe() else ()),
+                *HCCL_OPERATIONS,
+                *(("matmul_reduce_scatter",) if has_matmul_reduce_scatter() else ()),
                 *(FUSED_MOE_GMM1_OPERATIONS if has_fused_moe_gmm1() else ()),
                 "fused_recurrent_gated_delta_rule",
                 "fused_sigmoid_gating_delta_rule_update",
@@ -116,12 +135,30 @@ def initialize_runtime(kv_cache_dtype: str = "auto") -> None:
                 *(("mega_gdn_mtp_decode_varlen",) if has_mega_gdn_mtp_decode_varlen() else ()),
                 "shared_linear_state_indices_out",
                 "causal_conv1d",
+                "causal_conv1d_prefill",
                 "causal_conv1d_qkv_prefill",
                 "chunk_gated_delta_rule",
                 "causal_conv1d_update_v2",
                 "partial_rotary_embedding",
                 "inplace_partial_rotary_mul",
+                "apply_rotary_embedding",
+                "apply_qk_rotary",
+                "fused_qk_norm_rope",
+                "mrope",
+                "vision_rotary_mul",
                 "reshape_paged_cache",
+                "update_decode_graph_metadata",
+                *(
+                    (
+                        "shared_full_indices_out",
+                        "sfa_dcp_remap_out",
+                        "split_qkv_rmsnorm_mrope",
+                        "fused_gdn_gating",
+                        "causal_conv1d_decode",
+                    )
+                    if find_spec("tilelang") is not None
+                    else ()
+                ),
                 "fused_attention",
             ),
         )

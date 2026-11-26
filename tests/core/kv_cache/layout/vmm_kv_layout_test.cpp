@@ -57,7 +57,8 @@ TEST(VmmKVLayoutTest, CombinesDifferentTargetAndDraftTensorWidths) {
 
 TEST(VmmKVLayoutTest, CountsHybridTargetAndFullAttentionDraftLayers) {
   ModelArgs target_args;
-  target_args.n_layers(8)
+  target_args.model_type("qwen3_5_text")
+      .n_layers(8)
       .head_dim(128)
       .n_heads(4)
       .n_kv_heads(4)
@@ -92,6 +93,34 @@ TEST(VmmKVLayoutTest, CountsHybridTargetAndFullAttentionDraftLayers) {
   EXPECT_EQ(layout.block_capacity(17, kPageSize), 0U);
   EXPECT_EQ(layout.block_capacity(18, kPageSize), 64U);
 }
+
+#if defined(USE_NPU)
+TEST(VmmKVLayoutTest, SparseIndexerOwnershipChangesPagesWithoutChangingBlocks) {
+  ModelArgs args;
+  args.model_type("glm_moe_dsa")
+      .n_layers(4)
+      .n_heads(1)
+      .n_kv_heads(1)
+      .head_dim(128)
+      .enable_mla(true)
+      .kv_lora_rank(512)
+      .qk_rope_head_dim(64)
+      .index_n_heads(1)
+      .index_head_dim(128)
+      .index_topk(8)
+      .index_topk_pattern("FSFS");
+  KVCacheCapacity capacity;
+  capacity.n_blocks(128).block_size(128).n_layers(4);
+  VmmKVLayout sparse(capacity, args, /*world_size=*/1, torch::kBFloat16);
+  // 128 blocks per group: 32 key pages + 4 rotary + 4 index pages.
+  EXPECT_EQ(sparse.physical_pages(kPageSize), 40u);
+  EXPECT_EQ(sparse.block_capacity(40, kPageSize), 128u);
+  args.index_topk_pattern("FFFF");
+  VmmKVLayout dense(capacity, args, /*world_size=*/1, torch::kBFloat16);
+  EXPECT_EQ(dense.physical_pages(kPageSize), 44u);
+  EXPECT_EQ(dense.block_capacity(40, kPageSize), 0u);
+}
+#endif
 
 }  // namespace
 }  // namespace xllm

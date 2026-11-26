@@ -16,6 +16,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,10 +25,13 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/platform/platform.h"
 #include "core/runtime/llm_worker_impl.h"
 #include "core/runtime/options.h"
+#include "core/util/scope_guard.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -197,6 +201,77 @@ TEST_F(EplbWorkerOptionsTest,
     EXPECT_EQ(draft_context.num_speculative_tokens(), 0);
     EXPECT_EQ(copied_context.num_speculative_tokens(), 4);
     EXPECT_EQ(quantized_context.num_speculative_tokens(), 0);
+  }
+}
+
+TEST_F(EplbWorkerOptionsTest,
+       BatchLimitsFollowIndependentTargetAndDraftOptions) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "An accelerator is required for worker construction.";
+  }
+  SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  const int32_t previous_tokens = scheduler_config.max_tokens_per_batch();
+  const int32_t previous_seqs = scheduler_config.max_seqs_per_batch();
+  ScopeGuard restore_config([&] {
+    scheduler_config.max_tokens_per_batch(previous_tokens)
+        .max_seqs_per_batch(previous_seqs);
+  });
+  scheduler_config.max_tokens_per_batch(1).max_seqs_per_batch(1);
+
+  runtime::Options target_options;
+  target_options.backend("llm")
+      .enable_graph(false)
+      .enable_speculative_decode(true)
+      .num_speculative_tokens(4)
+      .max_tokens_per_batch(17)
+      .max_seqs_per_batch(5);
+  runtime::Options draft_options = target_options;
+  draft_options.is_draft_engine(true)
+      .max_tokens_per_batch(9)
+      .max_seqs_per_batch(3);
+  const torch::Device device(Platform::type_torch(), /*index=*/0);
+  const ParallelArgs parallel_args(/*rank=*/0,
+                                   /*world_size=*/1,
+                                   /*process_group=*/nullptr);
+  EplbInitWorker target(parallel_args, device, target_options);
+  EplbInitWorker draft(parallel_args, device, draft_options);
+  target_options.max_tokens_per_batch(99).max_seqs_per_batch(99);
+  draft_options.max_tokens_per_batch(99).max_seqs_per_batch(99);
+
+  const ModelContext target_context =
+      target.make_context(/*num_speculative_tokens=*/4);
+  const ModelContext draft_context =
+      draft.make_context(/*num_speculative_tokens=*/0);
+  scheduler_config.max_tokens_per_batch(2).max_seqs_per_batch(2);
+  const ModelContext parallel_context =
+      target_context.with_parallel_args(parallel_args);
+  const ModelContext quant_context = draft_context.with_quant_args(QuantArgs{});
+  EXPECT_EQ(target_context.batch_limits().max_tokens_per_batch, 17);
+  EXPECT_EQ(target_context.batch_limits().max_seqs_per_batch, 5);
+  EXPECT_EQ(parallel_context.batch_limits().max_tokens_per_batch, 17);
+  EXPECT_EQ(parallel_context.batch_limits().max_seqs_per_batch, 5);
+  EXPECT_EQ(draft_context.batch_limits().max_tokens_per_batch, 9);
+  EXPECT_EQ(draft_context.batch_limits().max_seqs_per_batch, 3);
+  EXPECT_EQ(quant_context.batch_limits().max_tokens_per_batch, 9);
+  EXPECT_EQ(quant_context.batch_limits().max_seqs_per_batch, 3);
+  EXPECT_EQ(target_context.num_speculative_tokens(), 4);
+  EXPECT_EQ(draft_context.num_speculative_tokens(), 0);
+
+  // Capture more rows than the conflicting singleton permits.
+  ModelArgs capture_args;
+  capture_args.hidden_size(2).layers_to_capture({0});
+  const ModelContext* contexts[] = {&parallel_context, &quant_context};
+  for (const ModelContext* context : contexts) {
+    const int32_t tokens = context->batch_limits().max_tokens_per_batch;
+    AuxHiddenCapture capture(
+        capture_args, context->get_tensor_options(), tokens);
+    const torch::Tensor hidden =
+        torch::ones({tokens, 2}, context->get_tensor_options());
+    capture.capture_layer(/*layer_idx=*/0, hidden, std::nullopt);
+    const ModelOutput output = capture.finalize(hidden);
+    ASSERT_TRUE(output.aux_hidden_states.defined());
+    EXPECT_EQ(output.aux_hidden_states.sizes(), hidden.sizes());
+    EXPECT_TRUE(torch::equal(output.aux_hidden_states, hidden));
   }
 }
 

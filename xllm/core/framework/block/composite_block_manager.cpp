@@ -466,16 +466,15 @@ CompositeBlockManager::LeafMap build_composite_leaves(
   return leaves;
 }
 
-CompositeBlockManager::CompositeBlockManager(
-    LeafMap leaves,
-    const BlockManager::Options& options,
-    CacheTier cache_tier)
-    : BlockManager(options),
+CompositeBlockManager::CompositeBlockManager(LeafMap leaves,
+                                             BlockManager::Options options,
+                                             CacheTier cache_tier)
+    : options_(std::move(options)),
       leaves_(std::move(leaves)),
       combination_(classify_leaf_combination(leaves_)),
       cache_tier_(cache_tier) {
   CHECK(!leaves_.empty()) << "CompositeBlockManager requires at least one leaf";
-  if (options.enable_shared_kv_cache()) {
+  if (options_.enable_shared_kv_cache()) {
     CHECK(cache_tier == CacheTier::DEVICE);
     shared_block_pool_ = leaf_of(BlockType::KV)->options().shared_block_pool();
     CHECK(shared_block_pool_ != nullptr);
@@ -1019,40 +1018,6 @@ void CompositeBlockManager::deallocate(const Slice<Block>& blocks) {
   }
 }
 
-std::vector<Block> CompositeBlockManager::allocate(size_t /*num_blocks*/) {
-  NOT_IMPLEMENTED();
-  return {};
-}
-
-std::optional<std::vector<Block>> CompositeBlockManager::allocate_for_sequence(
-    Sequence* /*seq*/,
-    KVCacheState& /*kv_state*/,
-    size_t /*num_tokens*/) {
-  NOT_IMPLEMENTED();
-  return std::nullopt;
-}
-
-std::vector<Block> CompositeBlockManager::allocate_shared(
-    const Slice<int32_t>& /*tokens_ids*/,
-    const Slice<Block>& /*existed_shared_blocks*/,
-    const MMData& /*mm_data*/,
-    const Slice<XXH3Key>& /*block_hashes*/) {
-  NOT_IMPLEMENTED();
-  return {};
-}
-
-void CompositeBlockManager::cache(const Slice<int32_t>& /*token_ids*/,
-                                  std::vector<Block>& /*blocks*/,
-                                  size_t /*existed_shared_blocks_num*/,
-                                  const MMData& /*mm_data*/,
-                                  const Slice<XXH3Key>& /*block_hashes*/) {
-  NOT_IMPLEMENTED();
-}
-
-void CompositeBlockManager::cache(const std::vector<Block>& /*blocks*/) {
-  NOT_IMPLEMENTED();
-}
-
 size_t CompositeBlockManager::num_blocks_in_prefix_cache() const {
   size_t total = 0;
   for (const auto& [type, entry] : leaves_) {
@@ -1308,15 +1273,6 @@ double CompositeBlockManager::kv_cache_utilization() const {
   }
   const LeafEntry* leaf = capacity_leaf();
   return leaf == nullptr ? 0.0 : leaf->leaf->kv_cache_utilization();
-}
-
-void CompositeBlockManager::free(int32_t /*block_id*/) {
-  LOG(FATAL) << "CompositeBlockManager::free should not be called";
-}
-
-Block CompositeBlockManager::allocate() {
-  LOG(FATAL) << "CompositeBlockManager::allocate should not be called";
-  return Block();
 }
 
 size_t CompositeBlockManager::admission_capacity() const {

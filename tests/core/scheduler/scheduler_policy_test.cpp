@@ -708,8 +708,8 @@ TEST(SchedulerPolicyTest, PrioritySettingsOverrideConflictingGlobals) {
           std::tuple{0.0, true, 1.0, 30000, Urgency::URGENT, true},
           std::tuple{0.0, true, 10.0, 30000, Urgency::URGENT, false},
           std::tuple{0.0, false, 1.0, 30000, Urgency::URGENT, false}}) {
-      SCOPED_TRACE(std::make_tuple(
-          mix_batch, aggressive_coeff, prevent_starvation, starve_threshold));
+      SCOPED_TRACE(::testing::PrintToString(std::make_tuple(
+          mix_batch, aggressive_coeff, prevent_starvation, starve_threshold)));
       SchedulerOptions options =
           create_scheduler_options(8, 1, 0, 8, 1, "multi_slo_and_prio", false);
       options.enable_mix_batch(mix_batch)
@@ -1213,7 +1213,7 @@ TEST(SchedulerPolicyTest, DecodeQueuePlansColdBestOfCandidatesAsPrefill) {
           std::vector<Batch> prefill(1);
           prefill.front().add(first, 7);
           first->kv_state().set_kv_cache_tokens_num(7);
-          first->append_token(1);
+          first->append_token(Token(/*id=*/1));
           scheduler.add_request(request);
           auto batches = scheduler.prepare_batch_test();
           ASSERT_EQ(request->sequences().size(), 2u);
@@ -1704,7 +1704,7 @@ TEST_P(AsyncBlockReleasePolicyTest, WaitsWithoutPreemptionThenRetries) {
       Sequence* sequence = request->sequences().front().get();
       sequence->kv_state().set_kv_cache_tokens_num(
           sequence->num_prompt_tokens());
-      sequence->append_token(1);
+      sequence->append_token(Token(/*id=*/1));
     }
   }
   DequeQueue prefill_queue;
@@ -1820,7 +1820,7 @@ TEST_P(PendingVmmBatchPolicyTest, RetainsRequestsUntilBatchReleasesBlocks) {
       Sequence* sequence = request->sequences().front().get();
       sequence->kv_state().set_kv_cache_tokens_num(
           sequence->num_prompt_tokens());
-      sequence->append_token(1);
+      sequence->append_token(Token(/*id=*/1));
     }
   }
   DequeQueue prefill_queue;
@@ -2003,7 +2003,7 @@ TEST(SchedulerPolicyTest,
       cached_requests.front()->sequences().front().get();
   sequence->kv_state().set_kv_cache_tokens_num(kPromptTokens);
   for (int32_t token_id = 0; token_id <= kPromptTokens; ++token_id) {
-    sequence->append_token(token_id);
+    sequence->append_token(Token(token_id));
   }
   sequence->kv_state().set_kv_cache_tokens_num(0);
   ASSERT_TRUE(prefix_cache_pool.allocate(cached_sequence));

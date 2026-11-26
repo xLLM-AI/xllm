@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import torch
+from xllm_kernel.ops.positional_encoding import prepare_split_qkv_rmsnorm_mrope
 
 from xllm.python import kernels
 from xllm.python.layers.flash_comm1 import get_flash_comm1_context
@@ -61,6 +62,7 @@ class NpuQwen3_5Attention(Qwen3_5Attention):
         )
         self._weights_reordered = False
         if self.use_fused_qkv:
+            prepare_split_qkv_rmsnorm_mrope(self.num_heads, self.num_kv_heads, self.head_dim)
             gather_pattern = kernels.build_split_qkv_rmsnorm_mrope_gather_pattern(
                 rotary_dim,
                 cfg.rope_scaling_mrope_section,

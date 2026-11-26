@@ -28,10 +28,9 @@ namespace xllm {
 class VmmKVPageAllocator;
 
 // Composition of BlockManager leaves keyed by BlockType. The map key decides
-// which KVCacheState slot a leaf's blocks land in; the leaf itself is
-// type-free. The composite is the only block-side class that touches
-// Sequence.
-class CompositeBlockManager : public BlockManager {
+// which KVCacheState slot a leaf's blocks land in. The composite orchestrates
+// sequence operations; physical blocks remain owned by their resource leaves.
+class CompositeBlockManager final {
  public:
   // The admission / prefix roles live on the composite, not on the leaf: the
   // same BlockManagerImpl is prefix-capable under KV but non-prefix under
@@ -74,14 +73,11 @@ class CompositeBlockManager : public BlockManager {
   };
 
   CompositeBlockManager(LeafMap leaves,
-                        const BlockManager::Options& options,
+                        BlockManager::Options options,
                         CacheTier cache_tier = CacheTier::DEVICE);
-  ~CompositeBlockManager() override = default;
 
-  bool is_composite() const override { return true; }
-
-  // Sequence-level orchestration (the only Sequence-aware surface). Drives
-  // each leaf's own primitives and writes results back into KVCacheState
+  // Sequence-level orchestration drives each leaf's own primitives and writes
+  // results back into KVCacheState
   // under the leaf's block_type().
   bool allocate_sequence(Sequence* seq,
                          size_t num_tokens,
@@ -93,7 +89,7 @@ class CompositeBlockManager : public BlockManager {
   void publish_prefix(Sequence* seq, size_t num_tokens);
   // Publish completed Host restore blocks without exposing the current forward.
   void publish_restored_prefix(Sequence* seq, size_t restored_tokens);
-  void trim_prefetch_blocks(Sequence& seq, size_t max_hit_tokens) override;
+  void trim_prefetch_blocks(Sequence& seq, size_t max_hit_tokens);
 
   // Probe every prefix-capable leaf without mounting the returned aliases.
   static std::vector<ProbeResult> probe_prefix_cache(Sequence* seq,
@@ -106,42 +102,25 @@ class CompositeBlockManager : public BlockManager {
 
   const LeafMap& leaf_entries() const { return leaves_; }
   LeafCombination leaf_combination() const { return combination_; }
+  const BlockManager::Options& options() const { return options_; }
 
   BlockManager* leaf_of(BlockType type) const;
 
   // Typed block-level allocation routed to the leaf under `type`.
   std::vector<Block> allocate_blocks(BlockType type, size_t num_blocks);
 
-  // Type-ambiguous block-level primitives are not meaningful on a composition.
-  void deallocate(const Slice<Block>& blocks) override;
-  std::vector<Block> allocate(size_t num_blocks) override;
-  std::optional<std::vector<Block>> allocate_for_sequence(
-      Sequence* seq,
-      KVCacheState& kv_state,
-      size_t num_tokens) override;
-  std::vector<Block> allocate_shared(
-      const Slice<int32_t>& tokens_ids,
-      const Slice<Block>& existed_shared_blocks = {},
-      const MMData& mm_data = MMData(),
-      const Slice<XXH3Key>& block_hashes = {}) override;
-  void cache(const Slice<int32_t>& token_ids,
-             std::vector<Block>& blocks,
-             size_t existed_shared_blocks_num = 0,
-             const MMData& mm_data = MMData(),
-             const Slice<XXH3Key>& block_hashes = {}) override;
-  void cache(const std::vector<Block>& blocks) override;
+  // Route accounting to the owner carried by each block, without copying refs.
+  void deallocate(const Slice<Block>& blocks);
 
   // Stats use the shared pool when enabled, otherwise the capacity leaf.
-  size_t num_blocks_in_prefix_cache() const override;
-  size_t num_free_blocks() const override;
-  size_t num_used_blocks() const override;
-  double kv_cache_utilization() const override;
-  void free(int32_t block_id) override;
-  Block allocate() override;
-  size_t num_total_blocks() const override;
-  size_t admission_capacity() const override;
+  size_t num_blocks_in_prefix_cache() const;
+  size_t num_free_blocks() const;
+  size_t num_used_blocks() const;
+  double kv_cache_utilization() const;
+  size_t num_total_blocks() const;
+  size_t admission_capacity() const;
 
-  void reserve_virtual_memory_padding_blocks() override;
+  void reserve_virtual_memory_padding_blocks();
 
   size_t num_sub_managers() const { return leaves_.size(); }
 
@@ -162,6 +141,7 @@ class CompositeBlockManager : public BlockManager {
   bool reclaim_shared_prefix();
   void record_shared_checkpoint(Sequence& seq, size_t checkpoint_index);
 
+  BlockManager::Options options_;
   std::shared_ptr<StaticKVBlockPool> shared_block_pool_;
   LeafMap leaves_;
   LeafCombination combination_;

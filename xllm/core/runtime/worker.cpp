@@ -167,21 +167,9 @@ std::tuple<int64_t, int64_t> Worker::estimate_kv_cache_capacity() {
   return impl_->estimate_kv_cache_capacity();
 }
 
-std::optional<ForwardOutput> Worker::step(const VlmForwardInput& inputs) {
-  return impl_->step(inputs);
-}
-
 folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(
     const VlmForwardInput& inputs) {
   return impl_->step_async(inputs);
-}
-
-std::optional<ForwardOutput> Worker::step(const LlmForwardInput& inputs) {
-  return impl_->step(inputs);
-}
-
-std::optional<ForwardOutput> Worker::step(const DiTForwardInput& inputs) {
-  return impl_->step(inputs);
 }
 
 folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(

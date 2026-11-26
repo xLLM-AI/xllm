@@ -34,7 +34,6 @@ limitations under the License.
 #include "core/common/flash_comm1_context.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/framework/state_dict/utils.h"
@@ -180,8 +179,6 @@ inline void deepseek_v4_collect_cpu_metadata_tensors(
   deepseek_v4_add_packed_tensor(dsa.input_positions, runtime_device, specs);
   deepseek_v4_add_packed_tensor(dsa.c4_pad_positions, runtime_device, specs);
   deepseek_v4_add_packed_tensor(dsa.c128_pad_positions, runtime_device, specs);
-  deepseek_v4_add_packed_tensor(
-      dsa.explicit_swa_indices, runtime_device, specs);
 
   for (auto& layer_block_tables : dsa.block_tables) {
     for (auto& block_table : layer_block_tables) {
@@ -530,10 +527,9 @@ class DeepseekV4ModelImpl
         parallel_args_(context.get_parallel_args()),
         flash_comm1_options_(context.get_flash_comm1_options()),
         num_speculative_tokens_(context.num_speculative_tokens()),
-        aux_capture_(
-            context.get_model_args(),
-            context.get_tensor_options(),
-            ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
+        aux_capture_(context.get_model_args(),
+                     context.get_tensor_options(),
+                     context.batch_limits().max_tokens_per_batch) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
@@ -566,7 +562,6 @@ class DeepseekV4ModelImpl
         << num_heads << ", attn_tp_size=" << dp_local_tp_size_
         << ", world_size=" << parallel_args.world_size()
         << ", dp_size=" << parallel_args.dp_size() << ", cp_size=" << cp_size_;
-    tp_num_heads_ = num_heads / dp_local_tp_size_;
     window_size_ = model_args.window_size();
     index_topk_ = model_args.index_topk();
 
@@ -626,23 +621,6 @@ class DeepseekV4ModelImpl
     }
 
     build_deepseek_v4_cache_config(model_args, caches_info_, group_infos_);
-
-    // Locate the first SWA cache so build_dspark_swa_metadata doesn't rescan
-    // caches_info_ on every model forward.
-    for (size_t layer_id = 0; layer_id < caches_info_.size(); ++layer_id) {
-      const auto& layer_caches = caches_info_[layer_id];
-      const auto it = std::find_if(
-          layer_caches.begin(), layer_caches.end(), [](const auto& c) {
-            return c.type == DSACacheType::SLIDING_WINDOW;
-          });
-      if (it != layer_caches.end()) {
-        dspark_swa_layer_ = static_cast<int32_t>(layer_id);
-        dspark_swa_cache_ =
-            static_cast<int32_t>(std::distance(layer_caches.begin(), it));
-        dspark_swa_block_size_ = it->block_size;
-        break;
-      }
-    }
   }
 
   void load_state_dict(const StateDict& state_dict) override {
@@ -835,32 +813,27 @@ class DeepseekV4ModelImpl
     if (attn_metadata.dsa_metadata) {
       auto& dsa = *(attn_metadata.dsa_metadata);
       const bool metadata_prepared =
-          dsa.c1_metadata.defined() && dsa.c4_metadata.defined() &&
-          dsa.c128_metadata.defined() && dsa.qli_metadata.defined();
-      const bool graph_metadata_ready = acl_graph_forward &&
-                                        dsa.packed_metadata_buffer.defined() &&
-                                        dsa.start_pos.defined();
-
-      if (metadata_prepared || graph_metadata_ready) {
-        prepare_forward_dsa_runtime_metadata(
-            dsa, modified_input_params, acl_graph_forward, input_rope_by_ratio);
-      } else {
-        CHECK(!acl_graph_forward)
+          dsa.c1_metadata.defined() &&
+          (dsa.ori_topk_length_.defined() ||
+           (dsa.c4_metadata.defined() && dsa.c128_metadata.defined() &&
+            dsa.qli_metadata.defined()));
+      if (acl_graph_forward) {
+        CHECK(metadata_prepared ||
+              (dsa.packed_metadata_buffer.defined() && dsa.start_pos.defined()))
             << "DeepSeek V4 ACL graph requires prebuilt DSA metadata";
+      } else if (!metadata_prepared) {
         if (dsa_hadamard_.defined()) {
           dsa.hadamard = dsa_hadamard_;
         }
         deepseek_v4_pack_dsa_metadata_to_device(dsa, runtime_device);
-
         if (dsa.actual_seq_lengths_kv.defined() && dsa.seq_lens_q.defined()) {
           dsa.start_pos =
               (dsa.actual_seq_lengths_kv - dsa.seq_lens_q).to(torch::kInt32);
         }
-        prepare_forward_dsa_runtime_metadata(dsa,
-                                             modified_input_params,
-                                             /*rebuild_precomputed_metadata=*/
-                                             true,
-                                             input_rope_by_ratio);
+      }
+      build_dsa_rope_metadata(dsa, &input_rope_by_ratio);
+      if (acl_graph_forward || !metadata_prepared) {
+        build_precomputed_metadata(dsa, modified_input_params);
       }
     }
 
@@ -900,6 +873,7 @@ class DeepseekV4ModelImpl
         // rebuilt against local rows. The layer loop below picks the KV table
         // for the layer's own ratio out of this map.
         cp_ctx.global_rope_by_ratio = input_rope_by_ratio;
+        dsa.v4_cp_context = &cp_ctx;
         rebuild_cp_local_query_metadata(
             dsa, modified_input_params, cp_ctx, input_rope_by_ratio);
         h = cp_ctx.shard_rows(h);
@@ -909,7 +883,6 @@ class DeepseekV4ModelImpl
         // gate's input_ids must stay global to match those rows. Likewise
         // dp_global_token_nums keeps the unsharded counts the engine published,
         // because the MoE DP gather runs on the already CP-gathered rows.
-        dsa.v4_cp_context = &cp_ctx;
       }
     }
 
@@ -1438,24 +1411,9 @@ class DeepseekV4ModelImpl
     // both localized above, so re-deriving it would yield the local value the
     // paragraph above rules out. Both call sites that build it
     // (prepare_dsa_metadata_for_forward and the eager branch in forward()) run
-    // before the CP block, and neither prepare_forward_dsa_runtime_metadata nor
-    // build_precomputed_metadata touches it.)
+    // before the CP block, and build_precomputed_metadata leaves it intact.)
 
-    build_precomputed_metadata(dsa, params, cp_ctx.local_kv_cu_seq_lens);
-  }
-
-  void prepare_forward_dsa_runtime_metadata(
-      layer::DSAMetadata& dsa,
-      const ModelParamsView& params,
-      bool rebuild_precomputed_metadata,
-      std::unordered_map<int32_t, layer::DeepseekV4RotaryEmbedding::CosSinPair>&
-          input_rope_by_ratio) const {
-    build_dsa_rope_metadata(dsa, &input_rope_by_ratio);
-    if (rebuild_precomputed_metadata || !dsa.c1_metadata.defined() ||
-        !dsa.c4_metadata.defined() || !dsa.c128_metadata.defined() ||
-        !dsa.qli_metadata.defined()) {
-      build_precomputed_metadata(dsa, params);
-    }
+    build_precomputed_metadata(dsa, params);
   }
 
   void prepare_dsa_metadata_for_forward(layer::AttentionMetadata& attn_metadata,
@@ -1484,89 +1442,11 @@ class DeepseekV4ModelImpl
     }
   }
 
-  void build_dspark_swa_metadata(layer::DSAMetadata& dsa) const {
-    const size_t layer_id = static_cast<size_t>(dspark_swa_layer_);
-    const size_t cache_id = static_cast<size_t>(dspark_swa_cache_);
-    CHECK(layer_id < dsa.block_tables.size() &&
-          cache_id < dsa.block_tables[layer_id].size() &&
-          dsa.block_tables[layer_id][cache_id].defined())
-        << "Native DeepSeek-V4 DSpark requires an SWA block table.";
-    dsa.explicit_swa_indices =
-        layer::build_dspark_swa_indices(dsa.block_tables[layer_id][cache_id],
-                                        dsa.actual_seq_lengths_query,
-                                        dsa.actual_seq_lengths_kv,
-                                        window_size_,
-                                        num_speculative_tokens_,
-                                        dspark_swa_block_size_);
-  }
-
-  // cu_seqlens_ori_kv_override, when defined, replaces the query cumsum the
-  // prefill sparse metadata normally uses to describe ori_kv. Only prefill CP
-  // passes it: there the kv window is longer than this rank's query block, so
-  // the two stop coinciding and the kernel's baked tiling must follow the
-  // window. It has to agree with the cu_seqlens_ori_kv the attention layer
-  // passes at call time.
-  void build_precomputed_metadata(
-      layer::DSAMetadata& dsa,
-      const ModelParamsView& params,
-      const torch::Tensor& cu_seqlens_ori_kv_override = torch::Tensor()) const {
-    dsa.c1_metadata = torch::Tensor();
-    dsa.c4_metadata = torch::Tensor();
-    dsa.c128_metadata = torch::Tensor();
-    dsa.qli_metadata = torch::Tensor();
-    dsa.sparse_metadata_ori_win_left = -1;
-    dsa.explicit_swa_indices = torch::Tensor();
-
-    torch::Device metadata_device(torch::kCPU);
-    if (dsa.input_positions.defined()) {
-      metadata_device = dsa.input_positions.device();
-    } else if (dsa.seq_lens_q.defined()) {
-      metadata_device = dsa.seq_lens_q.device();
-    } else if (dsa.actual_seq_lengths_kv.defined()) {
-      metadata_device = dsa.actual_seq_lengths_kv.device();
-    }
-
-    dsa.actual_seq_lengths_query =
-        maybe_to_device(dsa.actual_seq_lengths_query, metadata_device);
-    dsa.actual_seq_lengths_kv =
-        maybe_to_device(dsa.actual_seq_lengths_kv, metadata_device);
-    dsa.kv_cu_seq_lens = maybe_to_device(dsa.kv_cu_seq_lens, metadata_device);
-    dsa.seq_lens_q = maybe_to_device(dsa.seq_lens_q, metadata_device);
-    dsa.seq_lens = maybe_to_device(dsa.seq_lens, metadata_device);
-    dsa.max_seqlen_q = maybe_to_device(dsa.max_seqlen_q, metadata_device);
-    dsa.max_seqlen_kv = maybe_to_device(dsa.max_seqlen_kv, metadata_device);
-
-    if (!dsa.actual_seq_lengths_query.defined() ||
-        !dsa.actual_seq_lengths_kv.defined()) {
-      return;
-    }
-
-    // The batch type, not q_max_seq_len, is the authoritative metadata
-    // selector: native DSpark decode may use a gamma-wide query, while the
-    // compatibility fallback uses q_len=1 with CHUNKED_PREFILL semantics.
+  void build_precomputed_metadata(layer::DSAMetadata& dsa,
+                                  const ModelParamsView& params) const {
     const bool is_prefill = params.meta.batch_forward_type.no_decode();
-    const bool use_native_sas =
-        layer::deepseek_v4_use_native_sas(num_speculative_tokens_,
-                                          model_args_.dspark_use_native_sas(),
-                                          is_prefill);
-    const int64_t ori_win_left = layer::deepseek_v4_ori_window_left(
-        window_size_, num_speculative_tokens_, use_native_sas);
-    dsa.sparse_metadata_ori_win_left = ori_win_left;
-    // Explicit SWA indices use decode geometry and address the persistent ring
-    // buffer. Prefill needs per-query windows, and full prefill does not
-    // populate that buffer until after attention. All draft layers share the
-    // same SWA manager, so build the indices once for decode only.
-    if (use_native_sas) {
-      build_dspark_swa_metadata(dsa);
-    }
-
-    layer::build_deepseek_v4_sparse_metadata(dsa,
-                                             params,
-                                             model_args_,
-                                             tp_num_heads_,
-                                             dp_local_tp_size_,
-                                             is_prefill,
-                                             cu_seqlens_ori_kv_override);
+    layer::build_deepseek_v4_sparse_metadata(
+        dsa, params, model_args_, dp_local_tp_size_, is_prefill);
   }
 
   torch::Tensor hc_head(const torch::Tensor& x) {
@@ -1588,7 +1468,6 @@ class DeepseekV4ModelImpl
   double hc_eps_ = 0.0;
   double norm_eps_ = 1e-6;
 
-  int64_t tp_num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
   // Prefill CP geometry. cp_size_ == 1 means CP is off everywhere below.
   int64_t cp_size_ = 1;
@@ -1609,10 +1488,6 @@ class DeepseekV4ModelImpl
   std::vector<std::vector<DSACacheInfo>> caches_info_;
   // group_infos_[group_id] = DSAGroupInfo
   std::vector<DSAGroupInfo> group_infos_;
-
-  int32_t dspark_swa_layer_ = -1;
-  int32_t dspark_swa_cache_ = -1;
-  int32_t dspark_swa_block_size_ = 0;
 
   DEFINE_WEIGHT(hc_head_fn);
   DEFINE_WEIGHT(hc_head_base);

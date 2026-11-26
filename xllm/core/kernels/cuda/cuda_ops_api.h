@@ -82,23 +82,6 @@ void batch_prefill_with_optional_piecewise_capture(
     torch::Tensor output,
     std::optional<torch::Tensor>& output_lse);
 
-void batch_prefill_non_causal(
-    const std::string& uri,
-    ffi::Array<int64_t> plan_info,
-    torch::Tensor float_workspace_buffer,
-    torch::Tensor int_workspace_buffer,
-    torch::Tensor page_locked_int_workspace_buffer,
-    torch::Tensor query,
-    torch::Tensor key,
-    torch::Tensor value,
-    torch::Tensor q_cu_seq_lens,
-    torch::Tensor kv_cu_seq_lens,
-    int64_t window_left,
-    double sm_scale,
-    torch::Tensor output,
-    std::optional<torch::Tensor>& output_lse,
-    const std::optional<torch::Tensor>& mask = std::nullopt);
-
 void batch_chunked_prefill(
     const std::string& uri,
     ffi::Array<int64_t> plan_info,

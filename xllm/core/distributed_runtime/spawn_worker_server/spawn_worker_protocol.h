@@ -42,7 +42,29 @@ inline constexpr int32_t kEplbArgumentCount = 43;
 inline constexpr int32_t kPrefillChunkArgumentIndex = 43;
 inline constexpr int32_t kEnableChunkedPrefillArgumentIndex = 44;
 inline constexpr int32_t kEnableDpFairTokenBudgetArgumentIndex = 45;
+inline constexpr int32_t kVaeSizeArgumentIndex = kArgumentCount;
+inline constexpr int32_t kEnableGraphDoubleBufferArgumentIndex =
+    kVaeSizeArgumentIndex + 1;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
+
+inline std::optional<bool> parse_graph_double_buffer(int32_t argc,
+                                                     char* const argv[]) {
+  if (argv == nullptr || argc < kMinimumArgumentCount) {
+    return std::nullopt;
+  }
+  // Older launchers omit this trailing argument; retain the flag default.
+  if (argc <= kEnableGraphDoubleBufferArgumentIndex) {
+    return true;
+  }
+  if (argv[kEnableGraphDoubleBufferArgumentIndex] == nullptr) {
+    return std::nullopt;
+  }
+  const std::string_view enabled(argv[kEnableGraphDoubleBufferArgumentIndex]);
+  if (enabled != "0" && enabled != "1") {
+    return std::nullopt;
+  }
+  return enabled == "1";
+}
 
 inline std::optional<std::string> parse_indexer_cache_dtype(
     int32_t argc,

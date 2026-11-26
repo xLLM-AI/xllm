@@ -66,12 +66,16 @@ for api, mutates in ((write_fp8_kv, ("key_cache", "value_cache")), (convert_xqa_
     assert operation.prepared is None
 for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     name = operation.contract.operation
-    if name in ("causal_conv1d", "causal_conv1d_qkv_prefill", "chunk_gated_delta_rule"):
-        continue
     assert catalog[name] is operation
-    assert operation.implementations == ('npu.triton.' + name,)
     assert operation.prepared is None
-    assert operation.backends[0].requires == ('torch_npu', 'triton')
+    if name in ("causal_conv1d", "causal_conv1d_prefill", "causal_conv1d_qkv_prefill", "chunk_gated_delta_rule"):
+        continue
+    if name in ("fused_gdn_gating", "causal_conv1d_decode"):
+        assert operation.implementations == ("npu.tilelang." + name,)
+        assert operation.backends[0].requires == ("torch_npu", "tilelang", "triton")
+    else:
+        assert operation.implementations == ("npu.triton." + name,)
+        assert operation.backends[0].requires == ("torch_npu", "triton")
 for operation in (MATMUL_EIN_SUM_OPERATION, MATMUL_EIN_SUM_OUT_OPERATION):
     name = operation.contract.operation
     assert catalog[name] is operation
@@ -88,6 +92,7 @@ for name, mutates, aliases in (
     ("moe_grouped_matmul_swiglu_quant", (), False),
     ("dequant_swiglu_quant", (), False),
     ("causal_conv1d", ("conv_state",), False),
+    ("causal_conv1d_prefill", ("conv_state",), False),
     ("causal_conv1d_qkv_prefill", ("conv_state",), False),
     ("chunk_gated_delta_rule", (), False),
     ("mega_gdn_prefill", ("conv_state", "ssm_cache"), False),
@@ -123,6 +128,10 @@ cache = catalog["reshape_paged_cache"].contract
 assert cache.mutates == ("key_cache", "value_cache") and cache.aliases_inputs
 rope = catalog["partial_rotary_embedding"].contract
 assert rope.mutates == () and not rope.aliases_inputs
+mrope = catalog["mrope"].contract
+assert mrope.mutates == () and not mrope.aliases_inputs
+inplace_rope = catalog["apply_rotary_embedding"].contract
+assert inplace_rope.mutates == ("q", "k") and not inplace_rope.aliases_inputs
 assert all(callable(fn) for fn in (fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat))
 """
     env = {**os.environ, "PYTHONPATH": str(Path(xllm_kernel.__file__).resolve().parent.parent)}
@@ -275,15 +284,21 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
 ) -> None:
     import importlib.abc
 
+    blocked_imports = {"torch_npu", "xllm_kernel._npu_binding", "xllm_kernel.ops._tilelang"}
+
     class _BlockNpuImports(importlib.abc.MetaPathFinder):
         def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> None:
-            if fullname == "torch_npu" or fullname.startswith("torch_npu."):
-                raise AssertionError(f"unexpected NPU import on {platform.value}: {fullname}")
+            if any(fullname == name or fullname.startswith(f"{name}.") for name in blocked_imports):
+                raise AssertionError(f"unexpected backend import on {platform.value}: {fullname}")
 
     registry = KernelRegistry()
+    compile_kernel = Mock(side_effect=AssertionError(f"unexpected TileLang compilation on {platform.value}"))
     monkeypatch.setattr(KernelRegistry, "_instance", registry)
     monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: platform))
-    monkeypatch.delitem(sys.modules, "torch_npu", raising=False)
+    monkeypatch.setitem(sys.modules, "tilelang", SimpleNamespace(compile=compile_kernel))
+    for name in blocked_imports:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.delattr(xllm_kernel, "_npu_binding", raising=False)
     monkeypatch.setattr(sys, "meta_path", [_BlockNpuImports(), *sys.meta_path])
     modules = (
         "xllm_kernel.ops.activation.torch",
@@ -292,18 +307,25 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
         "xllm_kernel.ops.attention.gdn.triton",
         "xllm_kernel.ops.attention.kda.triton",
         "xllm_kernel.ops.gemm.atb",
+        "xllm_kernel.ops.attention.dsa.tilelang",
+        "xllm_kernel.ops.kv_cache.decode_metadata",
+        "xllm_kernel.ops.kv_cache.tilelang",
+        "xllm_kernel.ops.speculative.tilelang",
+        "xllm_kernel.ops.sampling.npu",
     )
     for name in modules:
         monkeypatch.delitem(sys.modules, name, raising=False)
     try:
         for name in modules:
             importlib.import_module(name)
+        compile_kernel.assert_not_called()
         assert not registry.specs()
-        assert "torch_npu" not in sys.modules
+        assert blocked_imports.isdisjoint(sys.modules)
     finally:
         for name in modules:
             sys.modules.pop(name, None)
-            vars(importlib.import_module(name.rsplit(".", 1)[0])).pop("torch", None)
+            parent, attr = name.rsplit(".", 1)
+            vars(importlib.import_module(parent)).pop(attr, None)
 
 
 def test_npu_quantization_registers_only_its_two_adapters(monkeypatch: pytest.MonkeyPatch) -> None:

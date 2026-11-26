@@ -43,7 +43,7 @@ limitations under the License.
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/framework/multimodal/mm_codec.h"
 #include "core/framework/multimodal/mm_data.h"
-#include "framework/chat_template/jinja_chat_template.h"
+#include "framework/chat_template/chat_template_factory.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #if defined(USE_NPU)
@@ -230,6 +230,7 @@ VLMMaster::VLMMaster(const Options& options)
       .max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .enable_graph(options_.enable_graph())
+      .enable_graph_double_buffer(options_.enable_graph_double_buffer())
       .enable_graph_mode_decode_no_padding(
           options_.enable_graph_mode_decode_no_padding())
       .enable_prefill_piecewise_graph(options_.enable_prefill_piecewise_graph())
@@ -386,8 +387,8 @@ VLMMaster::VLMMaster(const Options& options)
 
   dispatch_engine(
       [this](auto* engine) {
-        chat_template_ =
-            std::make_unique<JinjaChatTemplate>(engine->tokenizer_args());
+        chat_template_ = ChatTemplateFactory::create(engine->tokenizer_args(),
+                                                     model_args_.model_type());
         tokenizer_ = engine->tokenizer()->clone();
         processor_ =
             create_multimodal_processor(options_.model_path(),

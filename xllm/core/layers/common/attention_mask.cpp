@@ -37,34 +37,11 @@ AttentionMask::AttentionMask(at::Device device,
                           .to(device);
 }
 
-torch::Tensor AttentionMask::get_decode_attn_mask(torch::Tensor input_lengths,
-                                                  int64_t max_s,
-                                                  torch::Dtype dtype,
-                                                  torch::Device device) {
-  update_attn_cache(dtype, device, max_s);
-  return atten_mask_cache_.index_select(0, input_lengths).view({-1, 1, max_s});
-}
-
 torch::Tensor AttentionMask::get_attn_mask(int64_t max_s,
                                            torch::Dtype dtype,
                                            torch::Device device) {
   update_attn_cache(dtype, device, max_s);
   return atten_mask_cache_.slice(0, 0, max_s).slice(1, 0, max_s);
-}
-
-torch::Tensor AttentionMask::gen_free_mask(int32_t q_len,
-                                           torch::Dtype dtype,
-                                           torch::Device device) {
-  float pre_mask_factor = -10000.0f;
-  if (dtype == torch::kBFloat16) {
-    pre_mask_factor = 1.0f;
-  }
-
-  auto mask_options = torch::TensorOptions().dtype(dtype).device(device);
-  auto mask_free =
-      torch::full({125 + 2 * q_len, 128}, pre_mask_factor, mask_options);
-  mask_free = torch::triu(mask_free, 2 - q_len);
-  return mask_free;
 }
 
 torch::Tensor AttentionMask::gen_append_mask(int32_t q_len,
