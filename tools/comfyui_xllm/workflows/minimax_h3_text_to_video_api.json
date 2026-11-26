@@ -1,0 +1,61 @@
+{
+  "1": {
+    "class_type": "XLLMServer",
+    "inputs": {
+      "base_url": "http://127.0.0.1:8000",
+      "model": "minimax-h3",
+      "timeout_seconds": 3600
+    }
+  },
+  "3": {
+    "class_type": "XLLMH3Generate",
+    "inputs": {
+      "server": [
+        "1",
+        0
+      ],
+      "conditioning": [
+        "2",
+        0
+      ],
+      "width": 1344,
+      "height": 768,
+      "num_frames": 124,
+      "fps": 24.0,
+      "steps": 50,
+      "seed": 42
+    }
+  },
+  "4": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "3",
+        0
+      ],
+      "filename_prefix": "video/xllm_h3",
+      "format": "mp4",
+      "codec": {
+        "codec": "auto"
+      }
+    }
+  },
+  "2": {
+    "class_type": "XLLMH3TextEncode",
+    "inputs": {
+      "clip": [
+        "5",
+        0
+      ],
+      "prompt": "Gentle ocean waves roll onto a sandy beach, with the sound of the surf."
+    }
+  },
+  "5": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "minimax_h3_text_encoder.safetensors",
+      "type": "minimax",
+      "device": "cpu"
+    }
+  }
+}
