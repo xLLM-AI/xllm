@@ -20,7 +20,6 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "core/common/types.h"
 #include "core/framework/batch/decode_input_builder.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/eplb/eplb_utils.h"
@@ -119,10 +118,11 @@ SpeculativeWorkerImpl<TargetInput>::SpeculativeWorkerImpl(
     auto& params = input.input_params;
     const auto& tokens = params.parallel.dp_global_token_nums;
     const auto& raw_tokens = params.parallel.raw_dp_global_token_nums;
+    const auto& target_options = impl_->options();
     const bool graph_decode =
         params.meta.batch_forward_type.is_decode() &&
-        params.meta.q_max_seq_len <= 1 &&
-        ExecutionConfig::get_instance().enable_graph() && tokens.size() > 1 &&
+        params.meta.q_max_seq_len <= 1 && target_options.enable_graph() &&
+        tokens.size() > 1 &&
         params.parallel.dp_is_decode.size() == tokens.size() &&
         std::all_of(params.parallel.dp_is_decode.begin(),
                     params.parallel.dp_is_decode.end(),
@@ -133,8 +133,7 @@ SpeculativeWorkerImpl<TargetInput>::SpeculativeWorkerImpl(
       const int32_t bucket =
           static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
               max_tokens,
-              ExecutionConfig::get_instance()
-                  .enable_graph_mode_decode_no_padding()));
+              target_options.enable_graph_mode_decode_no_padding()));
       if (std::any_of(tokens.begin(), tokens.end(), [bucket](int32_t count) {
             return count != bucket;
           })) {

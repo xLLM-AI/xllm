@@ -708,9 +708,9 @@ TEST_F(AclGraphExecutorTest, NoPaddingBucketCapturesOnlyForWarmup) {
       execution_config.enable_graph_mode_decode_no_padding();
   const int32_t old_decode_batch_size_limit =
       execution_config.acl_graph_decode_batch_size_limit();
-  execution_config.enable_graph_mode_decode_no_padding(true);
+  execution_config.enable_graph_mode_decode_no_padding(false);
   execution_config.acl_graph_decode_batch_size_limit(20);
-  options_.max_seqs_per_batch(20);
+  options_.max_seqs_per_batch(20).enable_graph_mode_decode_no_padding(true);
 
   auto npu_executor = std::make_unique<BaseExecutorImpl>(
       model_.get(), model_args_, *device_, options_);
@@ -838,6 +838,82 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
       std::vector<int32_t>({expected_linear_state_id, kPaddingLinearStateId}));
   EXPECT_EQ(params_for_capture->linear_state_validity_mask,
             (std::vector<int64_t>{1, 0}));
+}
+
+TEST(AclGraphPersistentParamTest,
+     PaddingUsesInstanceOptionsForMetadataAndLmHead) {
+  ModelArgs args;
+  args.model_type("deepseek_v4")
+      .dtype("float32")
+      .hidden_size(4)
+      .max_position_embeddings(16)
+      .head_dim(0);
+  const torch::Device device(torch::kCPU);
+  const bool global_no_padding =
+      ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding();
+  // Repeating opposite settings under a fixed global value catches
+  // process-wide caching of the first mode.
+  runtime::Options padded_options;
+  padded_options.max_tokens_per_batch(32)
+      .max_seqs_per_batch(3)
+      .block_size(4)
+      .num_speculative_tokens(2)
+      .enable_graph_mode_decode_no_padding(false);
+  runtime::Options exact_options = padded_options;
+  exact_options.enable_graph_mode_decode_no_padding(true);
+  for (const bool no_padding :
+       {!global_no_padding, global_no_padding, !global_no_padding}) {
+    SCOPED_TRACE(no_padding);
+    const runtime::Options& options =
+        no_padding ? exact_options : padded_options;
+    npu::GraphPersistentParam target(args,
+                                     device,
+                                     options,
+                                     /*need_update_attn_mask=*/false,
+                                     /*is_hybrid_linear_attention=*/true);
+    // 3 sequences x 3 tokens: exact mode needs 3 metadata rows; the padded
+    // bucket has 16 tokens and needs 6 metadata rows.
+    EXPECT_EQ(target.persistent_block_tables().size(0), no_padding ? 3 : 6);
+  }
+
+  // Single-token draft decoding also uses its own padding mode for lm-head
+  // index views, independently of the target's speculative token width.
+  padded_options.is_draft_engine(true).speculative_algorithm("eagle3");
+  exact_options.is_draft_engine(true).speculative_algorithm("eagle3");
+  npu::GraphPersistentParam padded_draft(args, device, padded_options);
+  npu::GraphPersistentParam exact_draft(args, device, exact_options);
+  EXPECT_EQ(padded_draft.persistent_block_tables().size(0), 4);
+  EXPECT_EQ(exact_draft.persistent_block_tables().size(0), 3);
+
+  ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.num_sequences = 3;
+  params.attention.host.q_seq_lens = {1, 1, 1};
+  params.attention.host.kv_seq_lens = {1, 1, 1};
+  params.parallel.dp_ep_padding_data
+      .attn_padding_idx(torch::tensor({0, 1, 2}, torch::kInt32))
+      .lm_head_skip_padding_token_indices(
+          torch::tensor({0, 1, 2}, torch::kInt32));
+  const torch::Tensor tokens = torch::tensor({1, 2, 3}, torch::kInt32);
+  const torch::Tensor positions = torch::zeros({3}, torch::kInt32);
+  for (const bool no_padding : {!global_no_padding, global_no_padding}) {
+    SCOPED_TRACE(no_padding);
+    npu::GraphPersistentParam& draft = no_padding ? exact_draft : padded_draft;
+    const auto captured = draft.update(tokens,
+                                       torch::Tensor(),
+                                       torch::Tensor(),
+                                       positions,
+                                       params,
+                                       /*padded_num_tokens=*/no_padding ? 3 : 4,
+                                       /*return_capture_params=*/true);
+    ASSERT_TRUE(captured.has_value());
+    const torch::Tensor& indices = captured->parallel.dp_ep_padding_data
+                                       .lm_head_skip_padding_token_indices();
+    EXPECT_TRUE(torch::equal(indices,
+                             no_padding
+                                 ? torch::tensor({0, 1, 2}, torch::kInt32)
+                                 : torch::tensor({0, 1, 2, 0}, torch::kInt32)));
+  }
 }
 
 TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {

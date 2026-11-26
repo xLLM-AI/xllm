@@ -42,6 +42,7 @@ limitations under the License.
 #include "core/platform/shared_vmm_allocator.h"
 #include "core/platform/stream.h"
 #include "core/platform/vmm_torch_allocator.h"
+#include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/graph_execution_input.h"
 #include "core/util/tensor_options.h"
 #include "core/util/utils.h"
@@ -106,26 +107,12 @@ bool is_cuda_contiguous_int32_tensor(const torch::Tensor& tensor) {
          tensor.scalar_type() == torch::kInt32 && tensor.is_contiguous();
 }
 
-int64_t get_graph_bucket_num_tokens(int64_t num_tokens, bool is_prefill) {
-  // no_padding only works for decode, prefill requires padding for graph reuse
-  if (::xllm::ExecutionConfig::get_instance()
-          .enable_graph_mode_decode_no_padding() &&
-      !is_prefill) {
-    return num_tokens;
-  }
-  if (num_tokens <= 1) {
-    return 1;
-  }
-  if (num_tokens <= 2) {
-    return 2;
-  }
-  if (num_tokens <= 4) {
-    return 4;
-  }
-  if (num_tokens <= 8) {
-    return 8;
-  }
-  return ((num_tokens + 15) / 16) * 16;
+int64_t get_graph_bucket_num_tokens(int64_t num_tokens,
+                                    bool is_prefill,
+                                    bool enable_no_padding) {
+  // Prefill still requires padding for graph reuse.
+  return runtime::get_decode_graph_token_bucket(
+      num_tokens, enable_no_padding && !is_prefill);
 }
 
 }  // namespace
@@ -142,8 +129,10 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
   // the largest configured decode batch can be padded safely.
   int64_t max_seqs_per_batch;
   max_seqs_per_batch = options.max_seqs_per_batch();
-  max_seqs_per_batch =
-      get_graph_bucket_num_tokens(max_seqs_per_batch, /*is_prefill=*/false);
+  max_seqs_per_batch = get_graph_bucket_num_tokens(
+      max_seqs_per_batch,
+      /*is_prefill=*/false,
+      options.enable_graph_mode_decode_no_padding());
   auto tensor_options = torch::TensorOptions().device(device);
 
   const int64_t max_seq_len = args_.max_position_embeddings();
@@ -1292,7 +1281,10 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
 
   const uint32_t n_tokens = tokens.size(/*dim=*/0);
   const uint32_t bucket_num_tokens =
-      static_cast<uint32_t>(get_graph_bucket_num_tokens(n_tokens, is_prefill));
+      static_cast<uint32_t>(get_graph_bucket_num_tokens(
+          n_tokens,
+          is_prefill,
+          options_.enable_graph_mode_decode_no_padding()));
 
   // Prefill phase with piecewise graph
   if (is_prefill && enable_prefill_piecewise_graph_) {

@@ -101,7 +101,6 @@ class CudaGraphExecutorTestEnvironment : public ::testing::Environment {
     // Keep the test minimal and deterministic.
     KVCacheConfig::get_instance().block_size(1);
     SchedulerConfig::get_instance().max_tokens_per_batch(128);
-    ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding(true);
 
     // Seed all RNGs once per test environment.
     torch::manual_seed(0);
@@ -377,6 +376,7 @@ ModelArgs make_test_model_args() {
 runtime::Options make_test_runtime_options(int64_t max_seqs_per_batch) {
   runtime::Options options;
   options.block_size(1);
+  options.enable_graph_mode_decode_no_padding(true);
   options.max_seqs_per_batch(max_seqs_per_batch);
   return options;
 }
@@ -653,6 +653,7 @@ TEST(CudaGraphExecutorTest, BatchDecodeCaptureAndReplay) {
 
   runtime::Options options;
   options.block_size(1);
+  options.enable_graph_mode_decode_no_padding(true);
   options.max_seqs_per_batch(1);
 
   auto model = std::make_unique<FakeAttnCausalLM>(args, device);
@@ -697,7 +698,7 @@ TEST(CudaGraphExecutorTest, BatchDecodePaddedBucket100CaptureAndReplay) {
   ExecutionConfig::get_instance()
       .enable_graph(true)
       .enable_graph_vmm_pool(false)
-      .enable_graph_mode_decode_no_padding(false);
+      .enable_graph_mode_decode_no_padding(true);
   SchedulerConfig::get_instance().max_tokens_per_batch(128);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
@@ -708,6 +709,7 @@ TEST(CudaGraphExecutorTest, BatchDecodePaddedBucket100CaptureAndReplay) {
   args.max_position_embeddings(16);
   runtime::Options options =
       make_test_runtime_options(/*max_seqs_per_batch=*/100);
+  options.enable_graph_mode_decode_no_padding(false);
 
   runtime::cuda::CudaGraphPersistentParam persistent(args, device, options);
   EXPECT_EQ(
@@ -770,7 +772,7 @@ TEST(CudaGraphExecutorTest, BatchDecodeNoPaddingBucket100CaptureAndReplay) {
   ExecutionConfig::get_instance()
       .enable_graph(true)
       .enable_graph_vmm_pool(false)
-      .enable_graph_mode_decode_no_padding(true);
+      .enable_graph_mode_decode_no_padding(false);
   SchedulerConfig::get_instance().max_tokens_per_batch(128);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
@@ -862,6 +864,7 @@ TEST(CudaGraphExecutorTest,
 
   runtime::Options options;
   options.block_size(1);
+  options.enable_graph_mode_decode_no_padding(true);
   options.max_seqs_per_batch(1);
 
   auto model = std::make_unique<FakeAttnCausalLM>(args, device);
@@ -922,6 +925,7 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
 
   runtime::Options options;
   options.block_size(1);
+  options.enable_graph_mode_decode_no_padding(true);
   options.max_seqs_per_batch(1);
 
   auto model = std::make_unique<FakeAttnCausalLM>(args, device);
@@ -1021,6 +1025,7 @@ TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
 
     runtime::Options options;
     options.block_size(1);
+    options.enable_graph_mode_decode_no_padding(true);
     options.max_seqs_per_batch(1);
 
     auto model = std::make_unique<FakeAttnCausalLM>(args, device);
@@ -1117,6 +1122,7 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolMemoryReuseAcrossMultiShape) {
 
   runtime::Options options;
   options.block_size(1);
+  options.enable_graph_mode_decode_no_padding(true);
   options.max_seqs_per_batch(1);
 
   auto create_executor = [&]() {
@@ -1216,6 +1222,7 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {
 
   runtime::Options options;
   options.block_size(1);
+  options.enable_graph_mode_decode_no_padding(true);
   options.max_seqs_per_batch(1);
 
   auto model = std::make_unique<FakeAttnCausalLM>(args, device);

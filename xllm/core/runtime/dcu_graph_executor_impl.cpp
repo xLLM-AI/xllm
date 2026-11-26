@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/model/seq_lens.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
+#include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/graph_execution_input.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/tensor_options.h"
@@ -712,29 +713,8 @@ DcuGraphExecutorImpl::~DcuGraphExecutorImpl() {
 
 uint32_t DcuGraphExecutorImpl::get_bucket_num_tokens(
     uint32_t num_tokens) const {
-  if (::xllm::ExecutionConfig::get_instance()
-          .enable_graph_mode_decode_no_padding()) {
-    return num_tokens;
-  }
-
-  if (num_tokens <= 1) {
-    return 1;
-  }
-
-  if (num_tokens <= 2) {
-    return 2;
-  }
-
-  if (num_tokens <= 4) {
-    return 4;
-  }
-
-  if (num_tokens <= 8) {
-    return 8;
-  }
-
-  constexpr uint32_t kGraphStep = 16;
-  return ((num_tokens + kGraphStep - 1) / kGraphStep) * kGraphStep;
+  return static_cast<uint32_t>(runtime::get_decode_graph_token_bucket(
+      num_tokens, options_.enable_graph_mode_decode_no_padding()));
 }
 
 uint32_t DcuGraphExecutorImpl::get_graph_max_seq_len(
