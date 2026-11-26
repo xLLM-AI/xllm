@@ -9,6 +9,13 @@ cc_test(
 
 cc_test(
   NO_NPU_RUNTIME
+  NAME vlm_executor_impl_test
+  SRCS vlm_executor_impl_test.cpp
+  DEPS :runtime GTest::gtest_main
+)
+
+cc_test(
+  NO_NPU_RUNTIME
   NAME graph_execution_input_test
   SRCS graph_execution_input_test.cpp
   DEPS :model GTest::gtest_main

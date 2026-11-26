@@ -120,43 +120,56 @@ TEST_F(VlmForwardInputFactoryTest, PreservesMixedRankTypesAndDpMetadata) {
   }
 }
 
-TEST_F(VlmForwardInputFactoryTest, EmptyRankParticipatesInGraphDecode) {
-  BlockManager::Options manager_options;
-  manager_options.num_blocks(4).block_size(4);
-  BlockManagerImpl manager(manager_options);
-  Sequence decode = make_sequence({1, 2}, "decode");
-  decode.add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
-  decode.kv_state().set_kv_cache_tokens_num(2);
-  decode.append_token(Token(3));
-  BatchGroup batches(2);
-  batches[1].add(&decode);
-  ScopedGraphMode graph_mode(/*enabled=*/true);
-  VlmForwardInputFactoryOptions options;
-  options.dp_size = 2;
-  VlmForwardInputFactory factory(options);
-  std::vector<VlmForwardInput> inputs;
-  factory.create_inputs(batches, ModelArgs(), inputs);
+TEST_F(VlmForwardInputFactoryTest, EmptyRankUsesInstanceGraphDecodeOption) {
+  for (const bool enable_graph : {false, true}) {
+    SCOPED_TRACE(enable_graph);
+    for (const bool is_decode : {false, true}) {
+      SCOPED_TRACE(is_decode);
+      ScopedGraphMode graph_mode(/*enabled=*/!enable_graph);
+      BlockManager::Options manager_options;
+      manager_options.num_blocks(4).block_size(4);
+      BlockManagerImpl manager(manager_options);
+      Sequence sequence = make_sequence({1, 2}, "request");
+      sequence.add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
+      if (is_decode) {
+        sequence.kv_state().set_kv_cache_tokens_num(2);
+        sequence.append_token(Token(3));
+      }
+      BatchGroup batches(2);
+      batches[1].add(&sequence);
+      VlmForwardInputFactoryOptions options;
+      options.dp_size = 2;
+      options.enable_graph = enable_graph;
+      VlmForwardInputFactory factory(options);
+      options.enable_graph = !enable_graph;
+      std::vector<VlmForwardInput> inputs;
+      factory.create_inputs(batches, ModelArgs(), inputs);
 
-  ASSERT_EQ(inputs.size(), 2u);
-  EXPECT_FALSE(inputs[0].token_ids.defined());
-  EXPECT_TRUE(inputs[0].input_params.meta.batch_forward_type.is_decode());
-  EXPECT_EQ(inputs[0].input_params.meta.num_sequences, 0);
-  for (const auto& input : inputs) {
-    EXPECT_EQ(input.input_params.parallel.dp_global_token_nums,
-              (std::vector<int32_t>{0, 1}));
-    EXPECT_EQ(input.input_params.parallel.dp_global_sequence_nums,
-              (std::vector<int32_t>{0, 1}));
-    EXPECT_EQ(input.input_params.parallel.dp_is_decode,
-              (std::vector<int32_t>{1, 1}));
-    EXPECT_TRUE(
-        input.input_params.parallel.dp_global_json_object_active.empty());
+      ASSERT_EQ(inputs.size(), 2u);
+      EXPECT_FALSE(inputs[0].token_ids.defined());
+      EXPECT_EQ(inputs[0].input_params.meta.batch_forward_type.is_decode(),
+                is_decode);
+      EXPECT_EQ(inputs[0].input_params.meta.num_sequences, 0);
+      for (const auto& input : inputs) {
+        EXPECT_EQ(input.input_params.parallel.dp_global_token_nums,
+                  (std::vector<int32_t>{0, is_decode ? 1 : 2}));
+        EXPECT_EQ(input.input_params.parallel.dp_global_sequence_nums,
+                  (std::vector<int32_t>{0, 1}));
+        EXPECT_EQ(input.input_params.parallel.dp_is_decode,
+                  (std::vector<int32_t>{enable_graph && is_decode ? 1 : 0,
+                                        is_decode ? 1 : 0}));
+        EXPECT_TRUE(
+            input.input_params.parallel.dp_global_json_object_active.empty());
+      }
+    }
   }
 }
 
 TEST_F(VlmForwardInputFactoryTest, AllEmptyGroupClearsPreviousInputs) {
-  ScopedGraphMode graph_mode(/*enabled=*/true);
+  ScopedGraphMode graph_mode(/*enabled=*/false);
   VlmForwardInputFactoryOptions options;
   options.dp_size = 2;
+  options.enable_graph = true;
   VlmForwardInputFactory factory(options);
   std::vector<VlmForwardInput> inputs(1);
   inputs[0].token_ids = torch::tensor({42}, torch::kInt32);

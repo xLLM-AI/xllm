@@ -34,6 +34,7 @@ struct ForwardInputFactoryOptions {
   uint32_t dp_size = 1;
   uint32_t cp_size = 1;
   int64_t max_tokens_per_batch = 0;
+  bool enable_graph = false;
   bool enable_dp_global_json_object_active = false;
   // Requires acknowledgment after every target worker accepts the input.
   bool enable_shared_kv_cache_deltas = false;

@@ -26,7 +26,6 @@ limitations under the License.
 
 #include "core/common/constants.h"
 #include "core/common/metrics.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
@@ -797,16 +796,14 @@ ModelOutput DcuGraphExecutorImpl::run_impl(ModelType* model,
 
   VLOG(1) << "DCU executor run: "
           << "is_prefill=" << is_prefill << ", is_decode=" << is_decode
-          << ", enable_graph="
-          << ::xllm::ExecutionConfig::get_instance().enable_graph()
+          << ", enable_graph=" << options_.enable_graph()
           << ", enable_prefill_piecewise_graph="
           << options_.enable_prefill_piecewise_graph()
           << ", num_tokens=" << tokens.size(0);
 
   uint32_t actual_num_tokens = static_cast<uint32_t>(tokens.size(/*dim=*/0));
 
-  bool graph_mode =
-      is_decode && ::xllm::ExecutionConfig::get_instance().enable_graph();
+  bool graph_mode = is_decode && options_.enable_graph();
 
   if (params.parallel.dp_global_token_nums.size() > 1) {
     auto max_it = std::max_element(params.parallel.dp_global_token_nums.begin(),
@@ -818,7 +815,7 @@ ModelOutput DcuGraphExecutorImpl::run_impl(ModelType* model,
     const auto& dp_is_decode = params.parallel.dp_is_decode;
     CHECK_EQ(dp_is_decode.size(), params.parallel.dp_global_token_nums.size());
 
-    graph_mode = ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+    graph_mode = options_.enable_graph() &&
                  std::find(dp_is_decode.begin(), dp_is_decode.end(), 0) ==
                      dp_is_decode.end();
   }

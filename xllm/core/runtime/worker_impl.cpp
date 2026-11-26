@@ -626,7 +626,7 @@ bool WorkerImpl::can_prepare_npu_graph_decode_input(
 bool WorkerImpl::can_prepare_without_compute_stream_wait() const {
 #if defined(USE_NPU)
   const auto& config = ExecutionConfig::get_instance();
-  return config.enable_graph() && config.enable_graph_double_buffer() &&
+  return options_.enable_graph() && config.enable_graph_double_buffer() &&
          (options_.backend() == "llm" || options_.backend() == "vlm");
 #else
   return false;
@@ -995,7 +995,7 @@ void WorkerImpl::prepare_work_before_execute(const Input& input,
 #if defined(USE_NPU)
   // Serialize prepare-stream H2D copies with ACL graph capture.
   std::optional<std::unique_lock<std::mutex>> lock_guard;
-  if (ExecutionConfig::get_instance().enable_graph()) {
+  if (options_.enable_graph()) {
     lock_guard.emplace(
         npu::DeviceCaptureLock::get_instance().get_lock(device_.index()));
   }
