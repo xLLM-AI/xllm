@@ -31,8 +31,10 @@ logic:
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import cast
 
 import torch
@@ -71,6 +73,7 @@ from xllm.python.model_executor.runners.decode_cuda_graph import (
 from xllm.python.model_executor.runners.kv_capacity import kv_capacity_bucket, kv_capacity_buckets
 
 _GraphKey = tuple[object, ...]
+_PREPARED_REPLAY_REPORT_STEPS = 500
 
 
 @dataclass(slots=True)
@@ -149,6 +152,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         device_kv_lengths: bool = False,
         kv_capacity_graphs: bool = False,
         max_capture_tokens: int | None = None,
+        enable_double_buffer: bool = False,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
@@ -179,6 +183,33 @@ class DecodeAclGraphRunner(AclGraphRunner):
         )
         self._uses_compressed_kpool_tail = False
         self._graphs: dict[_GraphKey, AclGraphEntry] = {}
+        # A second slot lets the worker's input-preparation thread fill the next
+        # step's static inputs while the current step still replays; without it
+        # that fill would overwrite the inputs the in-flight graph is reading.
+        # Each slot keeps its own entries and its own static input storage; the
+        # graph pool stays shared, because replays remain strictly serialized.
+        self._slot_graphs: list[dict[_GraphKey, AclGraphEntry]] = [self._graphs]
+        # Each slot also needs its own scratch. The attention workspace and the
+        # shared execution buffers below are handed to every entry, and sharing
+        # them is only safe while replays and their task refreshes are strictly
+        # serialized -- which is exactly what a prepared slot stops being.
+        self._slot_buffers: list[AclGraphBufferPool] = [self._serial_buffers]
+        self._slot_workspace_pools: list[list[torch.Tensor] | None] = [self._serial_workspace_pool]
+        if enable_double_buffer and not self._kv_capacity_graphs and not is_spec_draft:
+            self._slot_graphs.append({})
+            self._slot_buffers.append(AclGraphBufferPool(self.max_batch))
+            self._slot_workspace_pools.append([])
+        # `_active_slot` is the slot the latest replay uses. A prepare-ahead
+        # fill only ever targets the other one, and both the choice and the
+        # claim happen under this lock, so a fill can never land on the slot a
+        # graph is reading -- the worker may prepare a step before the previous
+        # one has even reached `execute`.
+        self._active_slot = 0
+        self._prefilled: tuple[_GraphKey, int, tuple[int, int, int], torch.npu.Event] | None = None
+        self._prefill_lock = threading.Lock()
+        self._prepared_logged = False
+        self._prepared_claims = 0
+        self._steps = 0
         self._startup_batch_shapes: set[tuple[int, bool]] = set()
         self._dp_graph_variants: dict[_GraphKey, int] = {}
         self._enable_mega_moe_token_mask = enable_mega_moe_token_mask
@@ -930,6 +961,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self._graphs.pop(graph_key, None)
 
         decode_kwargs = {} if decode_metadata is None else {"decode_metadata": decode_metadata}
+        # Warmup captures the first slot only. Preparing an entry leaves the
+        # attention backend holding that entry's per-step state, and the
+        # forward that follows warmup is a request's prefill, which would read
+        # it; a further slot is captured on its first use in `execute`, where
+        # the state it leaves behind belongs to the replay that follows.
         self._prepare_graph_entry(
             input_ids,
             positions,
@@ -1030,17 +1066,31 @@ class DecodeAclGraphRunner(AclGraphRunner):
         expanded = self._expanded_verify_view(metadata)
         if expanded is not None:
             prepare_kwargs["expanded"] = expanded
-        entry = self._prepare_graph_entry(
-            input_ids,
-            positions,
-            metadata,
-            input_embedding,
-            mtp_topk_indices,
-            graph_key=graph_key,
-            eplb=eplb,
-            input_batch=input_batch,
-            **prepare_kwargs,
+        slot, entry = self._claim_slot(
+            input_ids, metadata, graph_key, input_embedding, mtp_topk_indices, expanded, eplb
         )
+        prepared_ahead = entry is not None
+        if prepared_ahead:
+            # The worker patches the step's sampled token into the input only
+            # after the prepare call has returned, so a prepared slot still
+            # holds the placeholder the scheduler left there. Refresh the
+            # tokens, as the native path does with its prepared slots.
+            entry.static_input_ids[:batch_size].copy_(input_ids)
+            self._bind_graph_input_batch(entry, input_batch)
+            self._prepare_attention(entry, entry.static_metadata, replay=True)
+        if entry is None:
+            entry = self._prepare_graph_entry(
+                input_ids,
+                positions,
+                metadata,
+                input_embedding,
+                mtp_topk_indices,
+                graph_key=graph_key,
+                eplb=eplb,
+                input_batch=input_batch,
+                slot=slot,
+                **prepare_kwargs,
+            )
 
         assert self._stream is not None
         current_stream = torch.npu.current_stream()
@@ -1090,9 +1140,143 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # target graph can otherwise start while this runner is still updating
         # FIA/MLA task parameters.  Order the caller's compute stream after
         # those updates before exposing the output to the next model stage.
-        if has_task_updates:
+        if self._update_done_recorded:
             current_stream.wait_event(self._update_done_event)
+        self._steps += 1
+        if self._steps == _PREPARED_REPLAY_REPORT_STEPS and self._prepared_claims:
+            # One line, once: enough to tell a deployment whether its decode
+            # steps are reaching the prepared slot, without logging per step.
+            logger.info(
+                "Python ACL graph prepared-slot replays: %d of the first %d steps",
+                self._prepared_claims,
+                self._steps,
+            )
         return output
+
+    @staticmethod
+    def _step_fingerprint(input_ids: torch.Tensor, metadata: AttentionMetadata) -> tuple[int, int, int]:
+        """Identify one decode step well enough to match a prepared fill to it.
+
+        Rows and the token buffer alone repeat across steps, and the graph key
+        is shared by every step in a bucket. The per-row KV lengths advance by
+        one token per step, so their count and sum separate consecutive steps,
+        which is all a single-use prepared fill has to be told apart from.
+        """
+        lengths = getattr(metadata, "kv_seq_lens_host_values", None) or ()
+        return (input_ids.shape[0], len(lengths), sum(lengths))
+
+    @property
+    def has_prepared_slots(self) -> bool:
+        """Whether this runner keeps a slot that can be filled ahead of a replay."""
+        return len(self._slot_graphs) > 1
+
+    def _decode_graph_key(
+        self,
+        input_ids: torch.Tensor,
+        metadata: AttentionMetadata,
+        expanded: ExpandedDecodeMetadata | None,
+    ) -> _GraphKey:
+        """Resolve the key of a plain decode step, as `_prepare_graph_entry` does."""
+        padded_batch_size = self._padded_batch_size(input_ids.shape[0], metadata)
+        graph_key, _, _ = self._resolve_graph_key(input_ids, metadata, padded_batch_size, None, None, expanded)
+        return graph_key
+
+    def prepare_next_slot(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        metadata: AttentionMetadata,
+    ) -> None:
+        """Fill the slot of the next replay while the current one is still running.
+
+        The worker calls this from the thread that prepares a step's inputs, one
+        step ahead of `execute`, which is the whole point: the static inputs and
+        the attention backend's host parameters are written during the previous
+        replay instead of between two replays. Only a plain decode step whose
+        graph this slot already holds is prepared; anything else is left to
+        `execute`, which fills its slot itself.
+        """
+        if len(self._slot_graphs) < 2 or self._stream is None:
+            return
+        metadata = self._normalize_dsa_metadata(metadata)
+        if metadata.is_prefill or metadata.is_chunked_prefill:
+            return
+        expanded = self._expanded_verify_view(metadata)
+        if expanded is not None:
+            return
+        graph_key = self._decode_graph_key(input_ids, metadata, expanded)
+        with self._prefill_lock:
+            if self._prefilled is not None:
+                # A fill is already waiting to be claimed. The worker prepares a
+                # step while the previous one is still executing, so this call
+                # can arrive before that step reached `execute`; overwriting the
+                # slot now would hand it the following step's metadata. Leave it
+                # alone, as the native executor's `is_prepared` slot does, and
+                # this step fills its own slot in `execute`.
+                return
+            slot = (self._active_slot + 1) % len(self._slot_graphs)
+            entry = self._slot_graphs[slot].get(graph_key)
+            if entry is None:
+                return
+            # Only this entry's own storage is written here. The attention
+            # backend keeps the step's state on itself and the compute thread is
+            # using it for the step still running, so preparing the backend --
+            # and with it the graph-task refresh, which needs that state --
+            # stays in `execute`.
+            self._fill_entry(entry, input_ids, positions, metadata, input_ids.shape[0], None)
+            self._bind_graph_input_batch(entry, None)
+            # The fill runs on this thread's stream and the replay on another,
+            # so the replay is handed an event rather than an assumption about
+            # how the two streams are ordered.
+            ready = torch.npu.Event()
+            ready.record()
+            self._prefilled = (graph_key, slot, self._step_fingerprint(input_ids, metadata), ready)
+            if not self._prepared_logged:
+                self._prepared_logged = True
+                logger.info(
+                    "Python ACL graph prepared ahead: model=%s slot=%d bucket=%d tasks=%d",
+                    type(self.model).__name__,
+                    slot,
+                    entry.batch_size,
+                    len(entry.graph_tasks),
+                )
+
+    def _claim_slot(
+        self,
+        input_ids: torch.Tensor,
+        metadata: AttentionMetadata,
+        graph_key: _GraphKey | None,
+        input_embedding: torch.Tensor | None,
+        mtp_topk_indices: torch.Tensor | None,
+        expanded: ExpandedDecodeMetadata | None,
+        eplb: EplbRuntimeState | None,
+    ) -> tuple[int, AclGraphEntry | None]:
+        """Pick this step's slot, and its entry when a fill already prepared it.
+
+        A pending fill is only accepted when it describes this step: the same
+        graph, and the same per-step fingerprint. A step the worker could not
+        prepare ahead gets the slot the current replay does not use, and fills
+        it itself. Expert load state is refreshed per step by
+        `_prepare_graph_entry`, so a step carrying it is never served from a
+        prepared slot.
+        """
+        prepared = input_embedding is None and mtp_topk_indices is None and expanded is None and eplb is None
+        with self._prefill_lock:
+            pending = self._prefilled
+            self._prefilled = None
+            entry = None
+            slot = (self._active_slot + 1) % len(self._slot_graphs)
+            if prepared and pending is not None:
+                pending_key, pending_slot, fingerprint, ready = pending
+                resolved = graph_key if graph_key is not None else self._decode_graph_key(input_ids, metadata, expanded)
+                if resolved == pending_key and fingerprint == self._step_fingerprint(input_ids, metadata):
+                    entry = self._slot_graphs[pending_slot].get(pending_key)
+                    if entry is not None:
+                        slot = pending_slot
+                        torch.npu.current_stream().wait_event(ready)
+                        self._prepared_claims += 1
+            self._active_slot = slot
+        return slot, entry
 
     def _prepare_graph_entry(
         self,
@@ -1109,6 +1293,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         kv_capacity_pages: int = 0,
         allow_capacity_capture: bool = False,
         input_batch: InputBatch | None = None,
+        slot: int = 0,
     ) -> AclGraphEntry:
         batch_size = input_ids.shape[0]
         padded_batch_size = self._padded_batch_size(batch_size, metadata)
@@ -1140,7 +1325,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             resolved_spans = (kpool_spans, expanded_spans)
         if self._kv_capacity_graphs and graph_key[-1] != kv_capacity_pages:
             raise ValueError("KV capacity graph key differs from its metadata")
-        entry = self._graphs.get(graph_key)
+        entry = self._slot_graphs[slot].get(graph_key)
         first_capture = entry is None
         decode_kwargs = {} if decode_metadata is None else {"decode_metadata": decode_metadata}
         if entry is None and self._kv_capacity_graphs and not allow_capacity_capture:
@@ -1186,12 +1371,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 expanded_query_lens=None if resolved_spans is None else resolved_spans[1],
                 **({"kv_capacity_pages": kv_capacity_pages} if self._kv_capacity_graphs else {}),
                 **decode_kwargs,
+                slot=slot,
             )
             # Replay must keep the gather capacity used at capture.
             entry.static_metadata.dsa_graph_token_capacity = self._token_capacity_bucket(
                 metadata, decode_metadata
             ) * int(getattr(self.attention_backend, "graph_token_capacity_granularity", 0) or 0)
-            self._graphs[graph_key] = entry
+            self._slot_graphs[slot][graph_key] = entry
 
         self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=first_capture)
 
@@ -1357,10 +1543,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
         dtype: torch.dtype,
         device: torch.device,
         capacity: int | None = None,
+        slot: int = 0,
     ) -> torch.Tensor:
-        if self._serial_buffers is None:
+        pool = self._slot_buffers[slot]
+        if pool is None:
             return torch.zeros(shape, dtype=dtype, device=device)
-        return self._serial_buffers.get(("input", name), shape, dtype=dtype, device=device, capacity=capacity).zero_()
+        return pool.get(("input", name), shape, dtype=dtype, device=device, capacity=capacity).zero_()
 
     def _allocate_entry(
         self,
@@ -1374,7 +1562,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
         expanded_query_lens: tuple[int, ...] | None = None,
         decode_metadata: DecodeAclGraphMetadata | None = None,
         kv_capacity_pages: int = 0,
+        slot: int = 0,
     ) -> AclGraphEntry:
+        # Every static input of this entry belongs to this slot's storage.
+        allocate = partial(self._allocate_static_tensor, slot=slot)
         device = input_ids.device
         if expanded is None:
             expanded = self._expanded_verify_view(metadata)
@@ -1397,7 +1588,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             )
             self._max_blocks_per_sequence = max_blocks_per_sequence
 
-        static_block_table = self._allocate_static_tensor(
+        static_block_table = allocate(
             "block_table",
             (padded_batch_size, kv_capacity_pages or self._max_blocks_per_sequence),
             dtype=torch.int32,
@@ -1412,25 +1603,24 @@ class DecodeAclGraphRunner(AclGraphRunner):
         )
 
         entry = AclGraphEntry()
+        entry.slot = slot
         entry.kv_capacity_pages = kv_capacity_pages
         entry.batch_size = padded_batch_size
         entry.graph = None
         entry.static_output = None
         entry.graph_tasks = []
         entry.execution_state = AclGraphExecutionState(
-            {}, serial_workspace_pool=self._serial_workspace_pool, serial_buffers=self._serial_buffers
+            {},
+            serial_workspace_pool=self._slot_workspace_pools[slot],
+            serial_buffers=self._slot_buffers[slot],
         )
         entry.replay_logged = False
-        entry.static_input_ids = self._allocate_static_tensor(
-            "input_ids", (padded_batch_size,), dtype=input_ids.dtype, device=device
-        )
-        entry.static_positions = self._allocate_static_tensor(
-            "positions", (padded_batch_size,), dtype=torch.int32, device=device
-        )
+        entry.static_input_ids = allocate("input_ids", (padded_batch_size,), dtype=input_ids.dtype, device=device)
+        entry.static_positions = allocate("positions", (padded_batch_size,), dtype=torch.int32, device=device)
         entry.static_input_embedding = None
         entry.static_mtp_topk_indices = None
         if mtp_topk_indices is not None:
-            entry.static_mtp_topk_indices = self._allocate_static_tensor(
+            entry.static_mtp_topk_indices = allocate(
                 "mtp_topk_indices",
                 (padded_batch_size, *mtp_topk_indices.shape[1:]),
                 dtype=mtp_topk_indices.dtype,
@@ -1451,13 +1641,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 else None
             ),
             fixed_graph_kv_bound=self._device_kv_lengths and self._is_spec_draft,
-            slot_mapping=self._allocate_static_tensor(
+            slot_mapping=allocate(
                 "slot_mapping",
                 (padded_batch_size,),
                 dtype=torch.int32,
                 device=device,
             ),
-            paged_kv_indptr=self._allocate_static_tensor(
+            paged_kv_indptr=allocate(
                 "paged_kv_indptr",
                 (padded_batch_size + 1,),
                 dtype=paged_kv_indptr.dtype,
@@ -1465,13 +1655,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 capacity=self.max_batch + 1,
             ),
             paged_kv_indices=self._paged_kv_indices_buffer,
-            paged_kv_last_page_len=self._allocate_static_tensor(
+            paged_kv_last_page_len=allocate(
                 "paged_kv_last_page_len",
                 (padded_batch_size,),
                 dtype=paged_kv_last_page_len.dtype,
                 device=device,
             ),
-            kv_cu_seq_lens=self._allocate_static_tensor(
+            kv_cu_seq_lens=allocate(
                 "kv_cu_seq_lens",
                 (padded_batch_size + 1,),
                 dtype=torch.int32,
@@ -1492,7 +1682,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 if graph_query_lens
                 else None
             ),
-            linear_state_indices=self._allocate_static_tensor(
+            linear_state_indices=allocate(
                 "linear_state_indices",
                 (len(expanded_graph_query_lens) if has_linear_verify_state else padded_batch_size,),
                 dtype=torch.int32,
@@ -1536,9 +1726,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 else None
             ),
         )
-        entry.kv_seq_lens_delta = self._allocate_static_tensor(
-            "kv_seq_lens_delta", (padded_batch_size,), dtype=torch.int32, device=device
-        )
+        entry.kv_seq_lens_delta = allocate("kv_seq_lens_delta", (padded_batch_size,), dtype=torch.int32, device=device)
         entry.expanded_query_cu_seq_lens = (
             torch.arange(padded_batch_size + 1, dtype=torch.int32, device=device) if is_expanded else None
         )
@@ -1774,6 +1962,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     (entry.batch_size, input_embedding.shape[-1]),
                     dtype=input_embedding.dtype,
                     device=input_embedding.device,
+                    slot=entry.slot,
                 )
             elif entry.static_input_embedding.shape[1:] != input_embedding.shape[1:]:
                 raise ValueError("ACL graph input_embedding shape changed for a graph bucket")

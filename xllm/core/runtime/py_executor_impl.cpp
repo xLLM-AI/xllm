@@ -230,6 +230,8 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       options_.enable_graph_mode_decode_no_padding();
   executor_config["enable_graph_mm_encoder"] =
       ExecutionConfig::get_instance().enable_graph_mm_encoder();
+  executor_config["enable_graph_double_buffer"] =
+      ExecutionConfig::get_instance().enable_graph_double_buffer();
   executor_config["mm_encoder_graph_capture_shapes"] =
       ExecutionConfig::get_instance().mm_encoder_graph_capture_shapes();
   // DFlash2 defaults to eager in the model config. Enable its independent
@@ -250,6 +252,12 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       py_executor_.attr("context_kv_graph_runner"));
   requires_input_batch_metadata_ =
       py_executor_.attr("requires_input_batch_metadata").cast<bool>();
+  // Asking once keeps the worker out of Python on its prepare thread for
+  // every decode step when the runner has no slot to prepare into.
+  prepares_graph_input_ =
+      py::hasattr(py_executor_, "prepare_graph_input") &&
+      py::hasattr(py_executor_, "prepares_graph_input") &&
+      py_executor_.attr("prepares_graph_input").cast<bool>();
   supports_layerwise_kv_load_ =
       py_executor_.attr("supports_layerwise_kv_load").cast<bool>();
 }
@@ -537,6 +545,42 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
     return model_output;
   }
   return ModelOutput(hidden_obj.cast<torch::Tensor>());
+}
+
+void PyExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
+                                        const torch::Tensor& positions,
+                                        std::vector<KVCache>& kv_caches,
+                                        const ModelParamsView& params) {
+  if (!prepares_graph_input_) {
+    return;
+  }
+  torch::NoGradGuard no_grad;
+  // Build the metadata here and leave it on the params. The step's own run()
+  // reuses it instead of building it again on the critical path, and the
+  // Python runner needs it to resolve which graph the step will replay.
+  if (!params.attn_metadata) {
+    layer::AttentionMetadataBuildOptions build_options{
+        .is_draft_engine = options_.is_draft_engine()};
+    if (build_options.is_draft_engine) {
+      build_options.chunked_block_diffusion =
+          SpeculativeConfig::chunked_block_diffusion(
+              options_.speculative_algorithm(), args_.model_type());
+    }
+    params.attn_metadata = std::make_shared<layer::AttentionMetadata>(
+        layer::AttentionMetadataBuilder::build(params,
+                                               enable_mla_,
+                                               /*attn_mask=*/std::nullopt,
+                                               device_,
+                                               build_options));
+  }
+  py::gil_scoped_acquire gil;
+  PyCausalLM::set_active_instance(py_causal_lm_);
+  bind_kv_caches(kv_caches);
+  py_executor_.attr("prepare_graph_input")(
+      tokens,
+      positions,
+      py::cast(PyAttentionMetadataView(
+          params.attn_metadata, params, options_.is_draft_engine())));
 }
 
 }  // namespace xllm
