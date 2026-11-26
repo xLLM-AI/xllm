@@ -690,8 +690,7 @@ DcuGraphExecutorImpl::DcuGraphExecutorImpl(CausalLM* model,
       device_(device),
       options_(options),
       graph_pool_(at::cuda::graph_pool_handle()) {
-  max_tokens_for_graph_mode_ =
-      ::xllm::ExecutionConfig::get_instance().max_tokens_for_graph_mode();
+  max_tokens_for_graph_mode_ = options_.max_tokens_for_graph_mode();
   if (max_tokens_for_graph_mode_ < options_.max_seqs_per_batch()) {
     max_tokens_for_graph_mode_ = options_.max_seqs_per_batch();
   }
@@ -801,8 +800,7 @@ ModelOutput DcuGraphExecutorImpl::run_impl(ModelType* model,
           << ", enable_graph="
           << ::xllm::ExecutionConfig::get_instance().enable_graph()
           << ", enable_prefill_piecewise_graph="
-          << ::xllm::ExecutionConfig::get_instance()
-                 .enable_prefill_piecewise_graph()
+          << options_.enable_prefill_piecewise_graph()
           << ", num_tokens=" << tokens.size(0);
 
   uint32_t actual_num_tokens = static_cast<uint32_t>(tokens.size(/*dim=*/0));
@@ -826,7 +824,7 @@ ModelOutput DcuGraphExecutorImpl::run_impl(ModelType* model,
   }
 
   const bool enable_prefill_piecewise =
-      ::xllm::ExecutionConfig::get_instance().enable_prefill_piecewise_graph();
+      options_.enable_prefill_piecewise_graph();
 
   if (is_prefill && enable_prefill_piecewise) {
     if (static_cast<int64_t>(actual_num_tokens) > max_tokens_for_graph_mode_) {

@@ -326,8 +326,6 @@ class CudaGraphExecutorImpl final : public ExecutorImpl {
   // executor is intentional. If concurrent calls are introduced in the future,
   // this assumption must be revisited.
   at::cuda::MempoolId_t graph_pool_;
-  // Whether to enable prefill piecewise graph
-  bool enable_prefill_piecewise_graph_;
   int64_t max_tokens_for_graph_mode_ = 0;
 
   ModelOutput attach_aux_hidden_states_if_needed(

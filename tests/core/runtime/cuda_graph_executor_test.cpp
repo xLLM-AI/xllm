@@ -195,6 +195,9 @@ class FakeAttnCausalLM final : public CausalLM {
       attn_meta =
           layer::AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
     }
+    if (attn_meta.enable_cuda_graph) {
+      ++graph_forward_count_;
+    }
     CHECK(attn_meta.plan_info) << "attn_meta.plan_info must be set";
     attn_meta.plan_info->layer_id = 0;
 
@@ -212,6 +215,8 @@ class FakeAttnCausalLM final : public CausalLM {
     (void)out_lse;
     return ModelOutput(out);
   }
+
+  int64_t graph_forward_count() const { return graph_forward_count_; }
 
   const torch::TensorOptions& options() const override { return options_; }
 
@@ -231,6 +236,7 @@ class FakeAttnCausalLM final : public CausalLM {
   void update_expert_weight(int32_t) override {}
 
  private:
+  int64_t graph_forward_count_ = 0;
   ModelArgs args_;
   torch::Device device_;
   torch::TensorOptions options_;
@@ -903,9 +909,9 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
   ExecutionConfig::get_instance()
       .enable_graph(true)
       .enable_graph_mode_decode_no_padding(true)
-      .enable_prefill_piecewise_graph(true)
+      .enable_prefill_piecewise_graph(false)
       .enable_graph_vmm_pool(false)
-      .max_tokens_for_graph_mode(128);
+      .max_tokens_for_graph_mode(1);
   SchedulerConfig::get_instance().max_tokens_per_batch(128);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
@@ -926,11 +932,15 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
   runtime::Options options;
   options.block_size(1);
   options.enable_graph_mode_decode_no_padding(true);
+  options.enable_prefill_piecewise_graph(true).max_tokens_for_graph_mode(113);
   options.max_seqs_per_batch(1);
 
   auto model = std::make_unique<FakeAttnCausalLM>(args, device);
   auto graph_exec = std::make_unique<runtime::cuda::CudaGraphExecutorImpl>(
       model.get(), args, device, options);
+  // Construction captures the worker settings even if the caller changes its
+  // copy.
+  options.enable_prefill_piecewise_graph(false).max_tokens_for_graph_mode(1);
 
   constexpr int32_t kNumTokens = 113;
   auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
@@ -965,6 +975,7 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
   out2 = out2.clone();
   torch::cuda::synchronize();
 
+  EXPECT_GT(model->graph_forward_count(), 0);
   EXPECT_EQ(out1.size(0), kNumTokens);
   EXPECT_EQ(out1.size(1), args.hidden_size());
   EXPECT_EQ(out2.size(0), kNumTokens);
@@ -980,6 +991,28 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
       << "prefill second run (replay) should match eager";
   EXPECT_TRUE(torch::allclose(out1, out2, /*rtol=*/1e-2, /*atol=*/1e-2))
       << "prefill first and second runs should be consistent";
+
+  ExecutionConfig::get_instance()
+      .enable_prefill_piecewise_graph(true)
+      .max_tokens_for_graph_mode(128);
+  for (const bool piecewise_enabled : {false, true}) {
+    SCOPED_TRACE(piecewise_enabled);
+    runtime::Options eager_options = options;
+    eager_options.enable_prefill_piecewise_graph(piecewise_enabled)
+        .max_tokens_for_graph_mode(piecewise_enabled ? 112 : 128);
+    runtime::cuda::CudaGraphExecutorImpl eager_executor(
+        model.get(), args, device, eager_options);
+    const int64_t graph_forward_count = model->graph_forward_count();
+    auto eager_caches = MakeSingleKvCaches(kv[0].get_k_cache().clone(),
+                                           kv[0].get_v_cache().clone());
+    const torch::Tensor output =
+        eager_executor.run(tokens, positions, eager_caches, params)
+            .hidden_states;
+    torch::cuda::synchronize();
+    EXPECT_EQ(model->graph_forward_count(), graph_forward_count);
+    EXPECT_TRUE(
+        torch::allclose(output, eager_out, /*rtol=*/1e-2, /*atol=*/1e-2));
+  }
 }
 
 TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
@@ -988,11 +1021,8 @@ TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
   }
 
   ScopedConfigSnapshot config_snapshot;
-  ExecutionConfig::get_instance()
-      .enable_graph(true)
-      .enable_prefill_piecewise_graph(true)
-      .enable_graph_vmm_pool(false)
-      .max_tokens_for_graph_mode(128);
+  ExecutionConfig::get_instance().enable_graph(true).enable_graph_vmm_pool(
+      false);
   SchedulerConfig::get_instance().max_tokens_per_batch(128);
   ModelConfig::get_instance().flashinfer_workspace_buffer_size(256 * 1024 *
                                                                1024);
@@ -1026,6 +1056,7 @@ TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
     runtime::Options options;
     options.block_size(1);
     options.enable_graph_mode_decode_no_padding(true);
+    options.enable_prefill_piecewise_graph(true).max_tokens_for_graph_mode(128);
     options.max_seqs_per_batch(1);
 
     auto model = std::make_unique<FakeAttnCausalLM>(args, device);
@@ -1099,10 +1130,7 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolMemoryReuseAcrossMultiShape) {
   }
 
   ScopedConfigSnapshot config_snapshot;
-  ExecutionConfig::get_instance()
-      .enable_graph(true)
-      .enable_prefill_piecewise_graph(true)
-      .max_tokens_for_graph_mode(256);
+  ExecutionConfig::get_instance().enable_graph(true);
   SchedulerConfig::get_instance().max_tokens_per_batch(256);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
@@ -1123,6 +1151,7 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolMemoryReuseAcrossMultiShape) {
   runtime::Options options;
   options.block_size(1);
   options.enable_graph_mode_decode_no_padding(true);
+  options.enable_prefill_piecewise_graph(true).max_tokens_for_graph_mode(256);
   options.max_seqs_per_batch(1);
 
   auto create_executor = [&]() {
@@ -1198,11 +1227,8 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {
   }
 
   ScopedConfigSnapshot config_snapshot;
-  ExecutionConfig::get_instance()
-      .enable_graph(true)
-      .enable_prefill_piecewise_graph(true)
-      .max_tokens_for_graph_mode(256)
-      .enable_graph_vmm_pool(true);
+  ExecutionConfig::get_instance().enable_graph(true).enable_graph_vmm_pool(
+      true);
   SchedulerConfig::get_instance().max_tokens_per_batch(256);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
@@ -1223,6 +1249,7 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {
   runtime::Options options;
   options.block_size(1);
   options.enable_graph_mode_decode_no_padding(true);
+  options.enable_prefill_piecewise_graph(true).max_tokens_for_graph_mode(256);
   options.max_seqs_per_batch(1);
 
   auto model = std::make_unique<FakeAttnCausalLM>(args, device);

@@ -54,6 +54,17 @@ void DcuSynchronize() {
       << "hipDeviceSynchronize failed: " << hipGetErrorString(err);
 }
 
+class ScopedExecutionConfigSnapshot final {
+ public:
+  ScopedExecutionConfigSnapshot() = default;
+  ~ScopedExecutionConfigSnapshot() {
+    ExecutionConfig::get_instance() = previous_;
+  }
+
+ private:
+  ExecutionConfig previous_ = ExecutionConfig::get_instance();
+};
+
 class DcuGraphExecutorTestEnvironment final : public ::testing::Environment {
  public:
   void SetUp() override {
@@ -406,54 +417,64 @@ TEST(DcuGraphExecutorTest, DecodeCaptureAndReplay) {
   execution_config.enable_graph_mode_decode_no_padding(old_decode_no_padding);
 }
 
-TEST(DcuGraphExecutorTest, PrefillFallsBackToEager) {
+TEST(DcuGraphExecutorTest, PrefillGraphUsesInstanceSwitchAndTokenLimit) {
   if (!IsDcuAvailable()) {
     GTEST_SKIP() << "DCU/HIP is not available at runtime.";
   }
 
-  const bool old_enable_graph = FLAGS_enable_graph;
-
-  FLAGS_enable_graph = true;
-
-  const torch::Device device = InitXllmDcuDeviceForTest(0);
-
-  ModelArgs args = MakeFakeModelArgs(64);
-  runtime::Options options = MakeRuntimeOptions(8);
-
-  auto model = std::make_unique<FakeSimpleCausalLM>(args, device);
-  auto graph_exec = std::make_unique<runtime::dcu::DcuGraphExecutorImpl>(
-      model.get(), args, device, options);
-
+  ScopedExecutionConfigSnapshot config_snapshot;
+  const torch::Device device = InitXllmDcuDeviceForTest(/*device_index=*/0);
+  ModelArgs args = MakeFakeModelArgs(/*hidden_size=*/64);
   constexpr int32_t kNumTokens = 7;
+  const torch::TensorOptions int_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(device);
+  const torch::Tensor tokens = torch::arange(1, kNumTokens + 1, int_options);
+  const torch::Tensor positions = torch::arange(0, kNumTokens, int_options);
+  const auto params = MakePrefillParams(device, kNumTokens);
 
-  auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
-
-  auto tokens = torch::arange(1, kNumTokens + 1, iopt);
-  auto positions = torch::arange(0, kNumTokens, iopt);
-  auto params = MakePrefillParams(device, kNumTokens);
-
-  auto kv = MakeKvCaches(device,
-                         /*num_pages=*/16,
-                         /*page_size=*/1,
-                         /*num_kv_heads=*/1,
-                         /*head_dim=*/64);
-
-  auto eager_out =
-      model->forward(tokens, positions, kv, params).hidden_states.clone();
-  DcuSynchronize();
-
-  auto out =
-      graph_exec->run(tokens, positions, kv, params).hidden_states.clone();
-  DcuSynchronize();
-
-  EXPECT_EQ(out.size(0), kNumTokens);
-  EXPECT_EQ(out.size(1), args.hidden_size());
-
-  EXPECT_TRUE(torch::isfinite(out.to(torch::kFloat32)).all().item<bool>());
-  EXPECT_TRUE(AllCloseBf16(out, eager_out))
-      << "DCU prefill path should fallback to eager and match eager output";
-
-  FLAGS_enable_graph = old_enable_graph;
+  struct PrefillCase {
+    const char* name;
+    bool piecewise_enabled;
+    int32_t token_limit;
+    int32_t max_sequences;
+    bool captures;
+  };
+  const std::vector<PrefillCase> cases{
+      {"disabled", false, 128, 1, false},
+      {"over_limit", true, 6, 1, false},
+      {"at_limit", true, 7, 7, true},
+      {"sequence_capacity_floor", true, 1, 7, true}};
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    ExecutionConfig::get_instance()
+        .enable_graph(true)
+        .enable_prefill_piecewise_graph(!test_case.piecewise_enabled)
+        .max_tokens_for_graph_mode(test_case.captures ? 1 : 128);
+    runtime::Options options = MakeRuntimeOptions(test_case.max_sequences);
+    options.enable_prefill_piecewise_graph(test_case.piecewise_enabled)
+        .max_tokens_for_graph_mode(test_case.token_limit);
+    auto model = std::make_unique<FakeSimpleCausalLM>(args, device);
+    runtime::dcu::DcuGraphExecutorImpl executor(
+        model.get(), args, device, options);
+    options.enable_prefill_piecewise_graph(!test_case.piecewise_enabled)
+        .max_tokens_for_graph_mode(128);
+    auto caches = MakeKvCaches(device,
+                               /*num_pages=*/16,
+                               /*page_size=*/1,
+                               /*num_kv_heads=*/1,
+                               /*head_dim=*/64);
+    const torch::Tensor eager_output =
+        model->forward(tokens, positions, caches, params).hidden_states.clone();
+    DcuSynchronize();
+    for (int32_t step = 0; step < 2; ++step) {
+      const torch::Tensor output =
+          executor.run(tokens, positions, caches, params).hidden_states.clone();
+      DcuSynchronize();
+      EXPECT_EQ(model->captured_token_rows(),
+                test_case.captures ? kNumTokens : 0);
+      EXPECT_TRUE(AllCloseBf16(output, eager_output));
+    }
+  }
 }
 
 }  // namespace
