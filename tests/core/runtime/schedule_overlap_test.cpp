@@ -22,15 +22,18 @@ limitations under the License.
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/platform/npu/device_capture_lock.h"
 #include "core/runtime/worker_impl.h"
 
 namespace xllm {
@@ -209,6 +212,77 @@ class OverlapTestWorker final : public WorkerImpl {
   bool executed_grammar_initialized_ = false;
   std::function<void(ForwardOutput&, Stream&)> output_hook_;
 };
+
+class GraphPreparationTestWorker final : public WorkerImpl {
+ public:
+  explicit GraphPreparationTestWorker(const runtime::Options& options)
+      : WorkerImpl(ParallelArgs(/*rank=*/0,
+                                /*world_size=*/1,
+                                /*dp_size=*/1,
+                                /*process_group=*/nullptr),
+                   torch::Device(torch::kPrivateUse1, /*index=*/0),
+                   options) {
+    dtype_ = torch::kFloat32;
+  }
+
+  bool init_model(ModelContext& /*context*/) override { return false; }
+
+  using WorkerImpl::can_prepare_without_compute_stream_wait;
+  bool preparation_held_capture_lock() const { return capture_lock_held_; }
+
+ protected:
+  void prepare_model_input(LlmForwardInput& /*input*/) override {
+    observe_capture_lock();
+  }
+  void prepare_model_input(VlmForwardInput& /*input*/) override {
+    observe_capture_lock();
+  }
+
+ private:
+  void observe_capture_lock() {
+    // Probe from another thread: trying to lock a mutex owned by this thread
+    // would be undefined behavior.
+    capture_lock_held_ =
+        std::async(std::launch::async, [this] {
+          std::unique_lock<std::mutex> lock(
+              npu::DeviceCaptureLock::get_instance().get_lock(device_.index()),
+              std::try_to_lock);
+          return !lock.owns_lock();
+        }).get();
+  }
+
+  bool capture_lock_held_ = false;
+};
+
+TEST(ScheduleOverlapTest, PreparationUsesInstanceGraphMode) {
+  for (const bool enable_graph : {false, true}) {
+    SCOPED_TRACE(enable_graph);
+    ScopedConfigValue<bool> global_graph(
+        ExecutionConfig::get_instance().enable_graph(), !enable_graph);
+    ScopedConfigValue<bool> double_buffer(
+        ExecutionConfig::get_instance().enable_graph_double_buffer(), true);
+    for (const std::string backend : {"llm", "vlm"}) {
+      SCOPED_TRACE(backend);
+      runtime::Options options;
+      options.backend(backend).enable_graph(enable_graph);
+      GraphPreparationTestWorker worker(options);
+      options.enable_graph(!enable_graph);
+      EXPECT_EQ(worker.can_prepare_without_compute_stream_wait(), enable_graph);
+      LlmForwardInput llm_input;
+      worker.prepare_work_before_execute(LlmForwardInput(),
+                                         llm_input,
+                                         /*prepare_stream=*/nullptr,
+                                         /*record_ready_event=*/false);
+      EXPECT_EQ(worker.preparation_held_capture_lock(), enable_graph);
+      VlmForwardInput vlm_input;
+      worker.prepare_work_before_execute(VlmForwardInput(),
+                                         vlm_input,
+                                         /*prepare_stream=*/nullptr,
+                                         /*record_ready_event=*/false);
+      EXPECT_EQ(worker.preparation_held_capture_lock(), enable_graph);
+    }
+  }
+}
 
 template <typename Input>
 Input step_input(bool decode,

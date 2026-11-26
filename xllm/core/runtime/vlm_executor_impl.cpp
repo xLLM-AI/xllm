@@ -13,14 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "vlm_executor_impl.h"
+#include "core/runtime/vlm_executor_impl.h"
 
 #include <glog/logging.h>
 #include <torch/torch.h>
 
-#include "common/global_flags.h"
-#include "common/metrics.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/multimodal/mm_visitor.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -40,9 +37,9 @@ VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
         options_.max_encoder_cache_size() * 1024 * 1024);
   }
 
-  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
+  if (options_.enable_graph() || options_.enable_prefill_piecewise_graph()) {
     llm_executor_ = ExecutorImplFactory::get_instance().create_executor_impl(
-        model, args, device, options, Platform::type_str());
+        model, args, device, options_, Platform::type_str());
   }
 }
 
@@ -72,7 +69,7 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
       params.meta.q_max_seq_len <= 1 && !mm_data.valid()) {
     const torch::Tensor decode_positions =
         collapse_mrope_decode_positions(positions);
-    if (llm_executor_) {
+    if (llm_executor_ && options_.enable_graph()) {
       return llm_executor_->run(tokens, decode_positions, kv_caches, params);
     }
     return model_->forward(tokens, decode_positions, kv_caches, params);
@@ -107,7 +104,8 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
   params.embedding.input_embedding =
       model_->get_input_embeddings(tokens, params);
 
-  if (llm_executor_) {
+  if (llm_executor_ && (options_.enable_graph() ||
+                        params.meta.batch_forward_type.is_prefill())) {
     return llm_executor_->run(tokens, positions, kv_caches, params);
   }
 
@@ -118,10 +116,9 @@ void VlmExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
                                           const torch::Tensor& positions,
                                           std::vector<KVCache>& kv_caches,
                                           const ModelParamsView& params) {
-  // Decode-only double-buffer graph prewarm. Delegate to the inner graph
-  // executor built in enable_graph mode; multimodal prefill steps never reach
-  // here because the worker gates this on decode-phase input params.
-  if (llm_executor_) {
+  // Decode-only double-buffer graph prewarm. A prefill-only graph executor
+  // must not prewarm decode slots. The worker gates this on decode-phase input.
+  if (llm_executor_ && options_.enable_graph()) {
     llm_executor_->prepare_graph_input(
         tokens, collapse_mrope_decode_positions(positions), kv_caches, params);
   }

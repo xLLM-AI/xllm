@@ -142,6 +142,7 @@ VLMEngine::VLMEngine(
   forward_input_factory_ =
       std::make_unique<VlmForwardInputFactory>(VlmForwardInputFactoryOptions{
           .dp_size = dp_size_,
+          .enable_graph = options_.enable_graph(),
           .enable_dp_global_json_object_active =
               dp_size_ > 1 && !options_.is_draft_engine() &&
               options_.num_speculative_tokens() > 0});

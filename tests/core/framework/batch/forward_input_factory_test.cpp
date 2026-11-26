@@ -590,32 +590,44 @@ TEST(ForwardInputFactoryTest, DpMetadataIsIndependentAcrossRanksAndCalls) {
   EXPECT_EQ(last_parallel.dp_global_batch_generations[0], 99u);
 }
 
-TEST(ForwardInputFactoryTest, EmptyRanksInheritGraphDecodeMetadata) {
-  BlockManager::Options manager_options;
-  manager_options.num_blocks(8).block_size(4);
-  BlockManagerImpl manager(manager_options);
-  Sequence decode = make_sequence({1, 2}, "decode");
-  add_kv_block(&decode, &manager);
-  decode.kv_state().set_kv_cache_tokens_num(2);
-  decode.append_token(Token(3));
+TEST(ForwardInputFactoryTest, EmptyRanksUseInstanceGraphDecodeOption) {
+  for (const bool enable_graph : {false, true}) {
+    SCOPED_TRACE(enable_graph);
+    for (const bool is_decode : {false, true}) {
+      SCOPED_TRACE(is_decode);
+      ScopedGraphMode graph_mode(/*enabled=*/!enable_graph);
+      BlockManager::Options manager_options;
+      manager_options.num_blocks(8).block_size(4);
+      BlockManagerImpl manager(manager_options);
+      Sequence sequence = make_sequence({1, 2}, "request");
+      add_kv_block(&sequence, &manager);
+      if (is_decode) {
+        sequence.kv_state().set_kv_cache_tokens_num(2);
+        sequence.append_token(Token(3));
+      }
+      BatchGroup batches(2);
+      batches[0] = make_batch(&sequence);
+      ForwardInputFactoryOptions options;
+      options.dp_size = 2;
+      options.enable_graph = enable_graph;
+      ForwardInputFactory factory(options);
+      options.enable_graph = !enable_graph;
+      std::vector<LlmForwardInput> inputs;
+      bool is_graph_warmup = false;
+      factory.create_inputs(batches, ModelArgs(), inputs, is_graph_warmup);
 
-  BatchGroup batches(2);
-  batches[0] = make_batch(&decode);
-
-  ScopedGraphMode graph_mode(/*enabled=*/true);
-  auto factory = make_factory(/*dp_size=*/2);
-  std::vector<LlmForwardInput> inputs;
-  bool is_graph_warmup = false;
-  factory.create_inputs(batches, ModelArgs(), inputs, is_graph_warmup);
-
-  ASSERT_EQ(inputs.size(), 2u);
-  EXPECT_EQ(inputs[0].input_params.parallel.dp_global_token_nums,
-            (std::vector<int32_t>{1, 0}));
-  EXPECT_TRUE(inputs[1].input_params.meta.batch_forward_type.is_decode());
-  EXPECT_EQ(inputs[0].input_params.parallel.dp_is_decode,
-            (std::vector<int32_t>{1, 1}));
-  EXPECT_EQ(inputs[1].input_params.parallel.dp_is_decode,
-            (std::vector<int32_t>{1, 1}));
+      ASSERT_EQ(inputs.size(), 2u);
+      for (const auto& input : inputs) {
+        EXPECT_EQ(input.input_params.parallel.dp_global_token_nums,
+                  (std::vector<int32_t>{is_decode ? 1 : 2, 0}));
+        EXPECT_EQ(input.input_params.parallel.dp_is_decode,
+                  (std::vector<int32_t>{is_decode ? 1 : 0,
+                                        enable_graph && is_decode ? 1 : 0}));
+      }
+      EXPECT_EQ(inputs[1].input_params.meta.batch_forward_type.is_decode(),
+                is_decode);
+    }
+  }
 }
 
 TEST(ForwardInputFactoryTest, PropagatesGraphWarmupAndHandlesAllEmptyGroup) {
