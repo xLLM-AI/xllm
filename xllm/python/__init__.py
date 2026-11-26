@@ -62,8 +62,15 @@ def initialize_runtime() -> None:
 
         from xllm_kernel.ops.attention.gdn.mega import has_mega_gdn_mtp_decode_varlen
         from xllm_kernel.ops.attention.mla import has_mla_preprocess_v2
+        from xllm_kernel.ops.collectives import HCCL_OPERATIONS, has_matmul_reduce_scatter
         from xllm_kernel.ops.gemm import has_grouped_matmul_out
-        from xllm_kernel.ops.moe import FUSED_MOE_GMM1_OPERATIONS, has_fused_moe_gmm1
+        from xllm_kernel.ops.moe import (
+            FUSED_MOE_GMM1_OPERATIONS,
+            MOE_DISTRIBUTE_OPERATIONS,
+            has_fused_moe_gmm1,
+            has_mega_moe,
+            has_moe_distribute,
+        )
 
         from scripts.logger import logger
 
@@ -101,6 +108,15 @@ def initialize_runtime() -> None:
                 *(("mla_preprocess_v2",) if has_mla_preprocess_v2() else ()),
                 "dequant_swiglu_quant",
                 "moe_gating_top_k_hash",
+                "moe_gating_top_k_softmax",
+                "moe_gating_top_k",
+                "moe_init_routing_v2",
+                "moe_token_unpermute",
+                "moe_finalize_routing",
+                *(MOE_DISTRIBUTE_OPERATIONS if has_moe_distribute() else ()),
+                *(("mega_moe",) if has_mega_moe() else ()),
+                *HCCL_OPERATIONS,
+                *(("matmul_reduce_scatter",) if has_matmul_reduce_scatter() else ()),
                 *(FUSED_MOE_GMM1_OPERATIONS if has_fused_moe_gmm1() else ()),
                 "fused_recurrent_gated_delta_rule",
                 "fused_sigmoid_gating_delta_rule_update",

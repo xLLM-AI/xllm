@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for Python process-group rendezvous ownership."""
+"""Executor process groups, collective dispatch, and CUDA symmetric memory."""
 
 from __future__ import annotations
 
@@ -197,14 +197,13 @@ def test_parallel_groups_share_one_multitenant_tcp_store(monkeypatch):
 
 @pytest.mark.parametrize("group_name", ["tp", "dp", "moe_tp", "moe_ep", "cp", "layerwise", "dcp"])
 def test_npu_all_reduce_binding_applies_to_every_group(monkeypatch: pytest.MonkeyPatch, group_name: str) -> None:
-    from xllm.python.distributed.npu import all_reduce_on_current_stream
+    from xllm.python.distributed.npu import hccl
 
     def unexpected_native_call(x: torch.Tensor, comm: int) -> None:
         raise AssertionError("CPU input must be rejected before native execution")
 
-    # The Python helper resolves the native symbol before validating arguments.
-    monkeypatch.setattr(torch.ops.xllm_ops, "npu_all_reduce", unexpected_native_call, raising=False)
-    assert collectives._all_reduce is all_reduce_on_current_stream
+    monkeypatch.setattr(hccl, "all_reduce", unexpected_native_call)
+    assert collectives._all_reduce is hccl.all_reduce_on_current_stream
     collectives._groups[(group_name, "cpu")] = _FakeGroup(0, 2)
     # The selected NPU implementation must reject a CPU tensor for every group,
     # rather than silently routing non-TP groups back through c10d.
@@ -226,9 +225,9 @@ def test_npu_all_reduce_selects_managed_stream_above_inline_limit(
     inline = MagicMock(side_effect=lambda tensor, comm: tensor.mul_(2))
     managed = MagicMock(side_effect=lambda tensor, group: tensor.mul_(2))
     # Test the size-based dispatch without constructing an NPU communicator.
-    # Real HCCL graph replay is covered by the opt-in multi-rank probe.
+    # Real HCCL graph replay is covered by the kernel package tests.
     monkeypatch.setattr(hccl, "get_hccl_comm", communicator)
-    monkeypatch.setattr(torch.ops.xllm_ops, "npu_all_reduce", inline)
+    monkeypatch.setattr(hccl, "all_reduce", inline)
     monkeypatch.setattr(hccl.dist, "all_reduce", managed)
 
     hccl.all_reduce_on_current_stream(value, group)

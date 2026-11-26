@@ -43,6 +43,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_npu
 from xllm_kernel.ops.gemm import grouped_matmul
+from xllm_kernel.ops.moe import moe_init_routing_v2, moe_token_unpermute
 
 from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.csa_attention import (
@@ -1453,7 +1454,7 @@ class DeepseekV4MoE(nn.Module):
         if self.w4a8_dynamic:
             # W4A8_DYNAMIC uses the same two grouped GEMMs as C++
             # forward_expert: W4 GMM1 -> SwiGLU -> dynamic int8 -> W4 GMM2.
-            sorted_hidden, expanded_row_idx, group_list, per_token = torch_npu.npu_moe_init_routing_v2(
+            sorted_hidden, expanded_row_idx, group_list, per_token = moe_init_routing_v2(
                 hidden,
                 topk_idx.to(torch.int32),
                 scale=None,
@@ -1514,7 +1515,7 @@ class DeepseekV4MoE(nn.Module):
             local_mask = (topk_idx >= self.start_expert_id) & (
                 topk_idx < self.start_expert_id + self.num_experts_per_rank
             )
-            routed_out = torch_npu.npu_moe_token_unpermute(
+            routed_out = moe_token_unpermute(
                 permuted_tokens=gemm2,
                 sorted_indices=expanded_row_idx.abs(),
                 probs=(topk_weights * local_mask).to(gemm2.dtype),

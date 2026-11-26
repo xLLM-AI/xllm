@@ -26,7 +26,6 @@ limitations under the License.
 #include <torch/library.h>
 #include <torch/torch.h>
 
-#include <limits>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -392,53 +391,6 @@ torch::Tensor silu_and_mul_npu(const torch::Tensor& input) {
   return xllm::kernel::npu::active(input, "swiglu");
 }
 
-std::tuple<torch::Tensor, torch::Tensor> mega_moe_npu(
-    const torch::Tensor& context,
-    const torch::Tensor& x,
-    const torch::Tensor& topk_ids,
-    const torch::Tensor& topk_weights,
-    const torch::TensorList weight1,
-    const torch::TensorList weight2,
-    const torch::TensorList weight_scales1,
-    const torch::TensorList weight_scales2,
-    int64_t moe_expert_num,
-    int64_t ep_world_size,
-    int64_t ccl_buffer_size,
-    int64_t num_max_tokens_per_rank,
-    const std::optional<torch::Tensor>& x_active_mask) {
-  CHECK_EQ(weight_scales1.empty(), weight_scales2.empty())
-      << "MegaMoe weight scales must be provided for both projections or "
-         "neither.";
-  const bool use_w8a8 = !weight_scales1.empty();
-  return xllm::kernel::npu::apply_npu_mega_moe(
-      context,
-      x,
-      topk_ids,
-      topk_weights,
-      weight1,
-      weight2,
-      moe_expert_num,
-      ep_world_size,
-      ccl_buffer_size,
-      use_w8a8 ? std::optional<torch::TensorList>(weight_scales1)
-               : std::nullopt,
-      use_w8a8 ? std::optional<torch::TensorList>(weight_scales2)
-               : std::nullopt,
-      /*bias1=*/std::nullopt,
-      /*bias2=*/std::nullopt,
-      x_active_mask,
-      /*max_recv_token_num=*/0,
-      use_w8a8 ? xllm::kernel::npu::kMegaMoeDispatchQuantModeDynamic
-               : xllm::kernel::npu::kMegaMoeDispatchQuantModeNone,
-      xllm::kernel::npu::kMegaMoeCombineQuantModeNone,
-      /*comm_alg=*/"",
-      num_max_tokens_per_rank,
-      /*activation=*/"swiglu",
-      /*activation_clamp=*/std::numeric_limits<float>::max(),
-      use_w8a8 ? xllm::kernel::npu::kMegaMoeDtypeInt8
-               : xllm::kernel::npu::kMegaMoeDtypeBFloat16);
-}
-
 void inplace_partial_rotary_mul_npu(torch::Tensor& input,
                                     const torch::Tensor& cosine,
                                     const torch::Tensor& sine,
@@ -791,12 +743,6 @@ TORCH_LIBRARY(xllm_ops, m) {
       "str rotary_mode, int[] partial_slice) -> ()");
   m.def("silu_and_mul(Tensor input) -> Tensor");
   m.def(
-      "mega_moe(Tensor context, Tensor x, Tensor topk_ids, Tensor "
-      "topk_weights, Tensor[] weight1, Tensor[] weight2, Tensor[] "
-      "weight_scales1, Tensor[] weight_scales2, int moe_expert_num, int "
-      "ep_world_size, int ccl_buffer_size, int num_max_tokens_per_rank, "
-      "Tensor? x_active_mask=None) -> (Tensor, Tensor)");
-  m.def(
       "inplace_partial_rotary_mul(Tensor(a!) input, Tensor cosine, Tensor "
       "sine, str rotary_mode, int[] partial_slice) -> ()");
   m.def(
@@ -967,10 +913,6 @@ TORCH_LIBRARY(xllm_ops, m) {
       "cmp_topk, int cmp_ratio, int ori_mask_mode, int cmp_mask_mode, int "
       "ori_win_left, int ori_win_right, str layout_q, str layout_kv, bool "
       "has_ori_kv, bool has_cmp_kv) -> Tensor");
-  // Current-stream collectives borrowing the caller's HCCL communicator.
-  m.def("npu_all_reduce(Tensor(a!) x, int comm) -> ()");
-  m.def("npu_all_gather(Tensor input, Tensor(a!) output, int comm) -> ()");
-  m.def("npu_reduce_scatter(Tensor input, Tensor(a!) output, int comm) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
@@ -1008,7 +950,6 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("npu_inplace_partial_rotary_mul",
          TORCH_FN(xllm::kernel::npu::npu_inplace_partial_rotary_mul));
   m.impl("silu_and_mul", TORCH_FN(xllm::silu_and_mul_npu));
-  m.impl("mega_moe", TORCH_FN(xllm::mega_moe_npu));
   m.impl("inplace_partial_rotary_mul",
          TORCH_FN(xllm::inplace_partial_rotary_mul_npu));
   m.impl("reshape_paged_cache", TORCH_FN(xllm::reshape_paged_cache_npu));
@@ -1047,12 +988,6 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention_lse));
   m.impl("sparse_flash_attention_lse_out",
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention_lse_out));
-  m.impl("npu_all_reduce",
-         TORCH_FN(xllm::kernel::npu::all_reduce_on_current_stream));
-  m.impl("npu_all_gather",
-         TORCH_FN(xllm::kernel::npu::all_gather_on_current_stream));
-  m.impl("npu_reduce_scatter",
-         TORCH_FN(xllm::kernel::npu::reduce_scatter_on_current_stream));
 }
 
 // build_cp_context is pure host index math with no Tensor input, so the

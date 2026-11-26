@@ -103,6 +103,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
             sources=[
                 "csrc/atb/matmul_ein_sum.cpp",
                 "csrc/atb/reshape_paged_cache.cpp",
+                "csrc/npu/collectives.cpp",
                 "csrc/npu/cp_context.cpp",
                 "csrc/npu/decode_graph_metadata.cpp",
                 "csrc/npu/gamma_add_rms_norm.cpp",
@@ -113,7 +114,9 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/npu/lightning_indexer.cpp",
                 "csrc/npu/mla_preprocess_v2.cpp",
                 "csrc/npu/mega_gdn.cpp",
+                "csrc/npu/mega_moe.cpp",
                 "csrc/npu/moe.cpp",
+                "csrc/npu/moe_collectives_bindings.cpp",
                 "csrc/npu/normalization.cpp",
                 "csrc/npu/quant_matmul.cpp",
                 "csrc/npu/quantization.cpp",
@@ -129,7 +132,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 str(atb_root / "include"),
             ],
             library_dirs=[str(npu_root / "lib"), str(ascend_root / "lib64"), str(atb_root / "lib")],
-            libraries=["torch_npu", "atb", "glog", "dl"],
+            libraries=["torch_npu", "atb", "glog", "hccl", "hcomm", "dl"],
             extra_compile_args=["-O2", "-fvisibility=hidden", "-fvisibility-inlines-hidden"],
         )
     )
