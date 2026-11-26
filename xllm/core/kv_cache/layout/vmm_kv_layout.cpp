@@ -17,6 +17,9 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <limits>
+
+#include "core/kv_cache/layout/cache_partition_builder.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/kv_cache_layout_policy.h"
@@ -45,15 +48,44 @@ VmmKVLayout::VmmKVLayout(const KVCacheCapacity& capacity,
   CHECK(!use_npu_nz_kv_cache_layout(model_args.model_type()))
       << "Virtual memory does not support the NPU NZ KV cache layout.";
 #endif
+  CHECK_GT(capacity.n_layers(), 0);
+  CHECK_LE(capacity.block_size(), std::numeric_limits<int32_t>::max());
+  const auto partition =
+      build_paged_cache_partition(CachePartitionId{},
+                                  capacity,
+                                  model_args,
+                                  shape,
+                                  dtype,
+                                  static_cast<int32_t>(capacity.block_size()),
+                                  /*enable_prefix_cache=*/false);
   const KVCacheCreateOptions create_options =
       get_kv_cache_create_options(model_args);
   size_t full_attention_layers = 0;
-  for (int64_t layer_id = 0; layer_id < capacity.n_layers(); ++layer_id) {
-    if (!create_options.enable_linear_attention() ||
-        !is_linear_attention_layer(layer_id,
-                                   create_options.full_attention_interval(),
-                                   create_options.layer_types())) {
+  size_t indexer_count = 0;
+  if (partition.has_value()) {
+    const CacheComponentRole main_role = model_args.enable_mla()
+                                             ? CacheComponentRole::MLA_LATENT
+                                             : CacheComponentRole::KEY;
+    full_attention_layers = partition->find_component(main_role)->layers.size();
+    const auto* index = partition->find_component(CacheComponentRole::INDEX);
+    indexer_count = index == nullptr ? 0 : index->layers.size();
+  } else {
+    // Unmigrated hybrid models retain their existing layer selection.
+    const auto indexer_layers =
+        resolve_indexer_cache_enabled_layers(model_args);
+    for (int64_t layer_id = 0; layer_id < capacity.n_layers(); ++layer_id) {
+      if (create_options.enable_linear_attention() &&
+          is_linear_attention_layer(layer_id,
+                                    create_options.full_attention_interval(),
+                                    create_options.layer_types())) {
+        continue;
+      }
       ++full_attention_layers;
+      if (shape.has_index_cache_shape() &&
+          (indexer_layers.empty() ||
+           indexer_layers[static_cast<size_t>(layer_id)])) {
+        ++indexer_count;
+      }
     }
   }
   CHECK_GT(full_attention_layers, 0)
@@ -71,19 +103,6 @@ VmmKVLayout::VmmKVLayout(const KVCacheCapacity& capacity,
         << "Virtual memory indexer cache requires BF16";
     CHECK_EQ(shape.index_cache_shape().front(),
              shape.key_cache_shape().front());
-    const auto indexer_layers =
-        resolve_indexer_cache_enabled_layers(model_args);
-    size_t indexer_count = 0;
-    for (int64_t layer_id = 0; layer_id < capacity.n_layers(); ++layer_id) {
-      const size_t layer_index = static_cast<size_t>(layer_id);
-      if ((!create_options.enable_linear_attention() ||
-           !is_linear_attention_layer(layer_id,
-                                      create_options.full_attention_interval(),
-                                      create_options.layer_types())) &&
-          (indexer_layers.empty() || indexer_layers[layer_index])) {
-        ++indexer_count;
-      }
-    }
     if (indexer_count > 0) {
       tensor_block_bytes_.emplace_back(VirtualKVPageLayout::tensor_block_bytes(
           shape.index_cache_shape(), element_size));

@@ -17,12 +17,15 @@ limitations under the License.
 
 #include <atomic>
 #include <map>
+#include <optional>
 #include <queue>
 #include <string>
 #include <vector>
 
 #include "core/framework/block/composite_block_manager.h"
 #include "core/kv_cache/events/kv_cache_event_publisher.h"
+#include "core/kv_cache/layout/paged_cache_partition.h"
+#include "core/kv_cache/layout/recurrent_cache_partition.h"
 #include "framework/block/embedding_block_manager.h"
 #include "framework/block/kv_cache_manager.h"
 
@@ -87,9 +90,13 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(bool, instance_is_decode) = false;
   };
 
-  explicit BlockManagerPool(const Options& options,
-                            int32_t dp_size = 1,
-                            VmmKVPageAllocator* page_allocator = nullptr);
+  explicit BlockManagerPool(
+      const Options& options,
+      int32_t dp_size = 1,
+      VmmKVPageAllocator* page_allocator = nullptr,
+      std::optional<PagedCachePartition> paged_partition = std::nullopt,
+      std::optional<RecurrentCachePartition> recurrent_partition =
+          std::nullopt);
 
   ~BlockManagerPool() = default;
 
@@ -129,6 +136,15 @@ class BlockManagerPool : public KVCacheManager {
 
   int32_t select_dp_rank() const override;
 
+  // The paged partition is bound to the KV leaf in every DP pool.
+  const std::optional<PagedCachePartition>& paged_partition() const {
+    return paged_partition_;
+  }
+
+  const std::optional<RecurrentCachePartition>& recurrent_partition() const {
+    return recurrent_partition_;
+  }
+
   // get the options for the block manager
   const Options& options() const { return options_; }
 
@@ -149,6 +165,8 @@ class BlockManagerPool : public KVCacheManager {
   // Non-owning optional dependency, required for virtual-memory cache leaves.
   // The runtime retains it until this pool and its blocks have been destroyed.
   VmmKVPageAllocator* page_allocator_;
+  std::optional<PagedCachePartition> paged_partition_;
+  std::optional<RecurrentCachePartition> recurrent_partition_;
   mutable std::atomic<size_t> dp_selection_cursor_{0};
 
  protected:
