@@ -111,7 +111,6 @@ std::pair<torch::Tensor, torch::Tensor> DSparkWorkerImpl::run_decode_draft(
   prepare_query_inputs(input, query_input);
 
   const int32_t batch_size = input.input_params.meta.num_sequences;
-  const torch::Tensor anchors = anchor_token_ids(input);
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
 
   query_input.skip_sampling_for_logits_only = true;
@@ -130,7 +129,18 @@ std::pair<torch::Tensor, torch::Tensor> DSparkWorkerImpl::run_decode_draft(
   torch::Tensor base_logits = draft_output->logits.view(
       {batch_size, num_speculative_tokens, draft_output->logits.size(-1)});
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+  // The first draft query of each sequence carries its corrected anchor.
+  const torch::Tensor anchors =
+      draft_forward_input.token_ids
+          .slice(0,
+                 0,
+                 static_cast<int64_t>(batch_size) * num_speculative_tokens,
+                 num_speculative_tokens)
+          .to(torch::kLong);
   SamplingParameters draft_sampling_params = input.sampling_params;
+  // The draft forward already selected these logits. Markov sampling uses all
+  // rows, so it does not need another blocking copy of the selection indices.
+  draft_sampling_params.logits_indices() = torch::Tensor();
   prepare_draft_sampling(options_.enable_probabilistic_draft(),
                          draft_sampling_params);
   auto draft_proposal =
