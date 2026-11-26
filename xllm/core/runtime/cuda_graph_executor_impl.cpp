@@ -990,10 +990,7 @@ CudaGraphExecutorImpl::CudaGraphExecutorImpl(CausalLM* model,
 }
 
 void CudaGraphExecutorImpl::initialize() {
-  enable_prefill_piecewise_graph_ =
-      ::xllm::ExecutionConfig::get_instance().enable_prefill_piecewise_graph();
-  max_tokens_for_graph_mode_ =
-      ::xllm::ExecutionConfig::get_instance().max_tokens_for_graph_mode();
+  max_tokens_for_graph_mode_ = options_.max_tokens_for_graph_mode();
   if (max_tokens_for_graph_mode_ < options_.max_seqs_per_batch()) {
     max_tokens_for_graph_mode_ = options_.max_seqs_per_batch();
   }
@@ -1287,7 +1284,7 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
           options_.enable_graph_mode_decode_no_padding()));
 
   // Prefill phase with piecewise graph
-  if (is_prefill && enable_prefill_piecewise_graph_) {
+  if (is_prefill && options_.enable_prefill_piecewise_graph()) {
     // Check if token count is within limit
     const bool graph_mode_supported = n_tokens <= max_tokens_for_graph_mode_;
 
@@ -1360,8 +1357,7 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
     // Fail fast intentionally: after entering graph mode, silently falling back
     // to eager can hide allocator/capture regressions and make latency behavior
     // non-deterministic in production. Operators can disable graph mode via
-    // ::xllm::ExecutionConfig::get_instance().enable_graph() or
-    // ::xllm::ExecutionConfig::get_instance().enable_prefill_piecewise_graph()
+    // enable_graph or enable_prefill_piecewise_graph in the worker options
     // when fallback behavior is preferred over strict graph-mode enforcement.
     LOG(FATAL)
         << "Failed to capture piecewise CUDA graph for bucket num_tokens: "
