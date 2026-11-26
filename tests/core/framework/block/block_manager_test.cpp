@@ -261,13 +261,16 @@ TEST_F(BlockManagerPoolTest,
       pool.paged_partition()->find_component(CacheComponentRole::KEY);
   ASSERT_NE(key, nullptr);
   EXPECT_EQ(key->layers, (std::vector<int32_t>{1, 3}));
-  EXPECT_EQ(pool.recurrent_partition()->conv().layers,
-            (std::vector<int32_t>{0, 2}));
-  EXPECT_EQ(pool.recurrent_partition()->ssm().layers,
-            pool.recurrent_partition()->conv().layers);
-  EXPECT_EQ(pool.recurrent_partition()->conv().dtype,
-            CacheScalarType::BFLOAT16);
-  EXPECT_EQ(pool.recurrent_partition()->ssm().dtype, CacheScalarType::FLOAT32);
+  const auto* conv =
+      pool.recurrent_partition()->find_component(CacheComponentRole::CONV);
+  const auto* ssm =
+      pool.recurrent_partition()->find_component(CacheComponentRole::SSM);
+  ASSERT_NE(conv, nullptr);
+  ASSERT_NE(ssm, nullptr);
+  EXPECT_EQ(conv->layers, (std::vector<int32_t>{0, 2}));
+  EXPECT_EQ(ssm->layers, conv->layers);
+  EXPECT_EQ(conv->dtype, CacheScalarType::BFLOAT16);
+  EXPECT_EQ(ssm->dtype, CacheScalarType::FLOAT32);
   EXPECT_TRUE(pool.recurrent_partition()->enable_prefix_cache());
   EXPECT_EQ(pool.recurrent_partition()->ssm_snapshots_per_slot(), 1);
   EXPECT_EQ(
@@ -378,9 +381,13 @@ TEST_F(BlockManagerPoolTest,
   EXPECT_NE(state_partition.id().ordinal, pool.paged_partition()->id().ordinal);
   EXPECT_EQ(state_partition.checkpoint_stride(), 8);
   EXPECT_EQ(state_partition.ssm_snapshots_per_slot(), 3);
-  EXPECT_EQ(state_partition.conv().layers, (std::vector<int32_t>{0, 2, 3}));
-  EXPECT_EQ(state_partition.conv().dtype, CacheScalarType::BFLOAT16);
-  EXPECT_EQ(state_partition.ssm().dtype, CacheScalarType::FLOAT32);
+  const auto* conv = state_partition.find_component(CacheComponentRole::CONV);
+  const auto* ssm = state_partition.find_component(CacheComponentRole::SSM);
+  ASSERT_NE(conv, nullptr);
+  ASSERT_NE(ssm, nullptr);
+  EXPECT_EQ(conv->layers, (std::vector<int32_t>{0, 2, 3}));
+  EXPECT_EQ(conv->dtype, CacheScalarType::BFLOAT16);
+  EXPECT_EQ(ssm->dtype, CacheScalarType::FLOAT32);
   EXPECT_EQ(result.shape.conv_cache_shape().front(), 8);
   EXPECT_EQ(result.shape.ssm_cache_shape().front(), 24);
   const auto* key =
@@ -582,6 +589,88 @@ TEST(KVCacheManagerFactoryTest, MlaKeepsComponentsInOneHistoryPartition) {
     EXPECT_EQ(pool.allocate(/*num_tokens=*/129, rank).size(), 2u);
   }
 }
+
+TEST_F(BlockManagerPoolTest, GlmMtpTailOnlyUsesCheckpointStateWithoutSsmRows) {
+  ModelArgs args;
+  args.model_type("glm5_next_mtp")
+      .n_layers(1)
+      .n_heads(1)
+      .n_kv_heads(1)
+      .head_dim(16)
+      .enable_mla(true)
+      .kv_lora_rank(16)
+      .qk_rope_head_dim(8)
+      .index_n_heads(1)
+      .index_head_dim(8)
+      .index_topk(2)
+      .index_kpool(4)
+      .index_kpool_compress(true)
+      .index_kpool_always_select_tail(true)
+      .full_attention_interval(4)
+      .layer_types({"deepseek_sparse_attention"})
+      .indexer_types({"full"});
+  KVCacheCapacity capacity;
+  capacity.n_blocks(16)
+      .block_size(8)
+      .n_layers(1)
+      .num_linear_state_blocks(8)
+      .linear_ssm_checkpoint_stride(5)
+      .kpool_layout(KPoolCacheLayout::COMPRESSED_WITH_TAIL)
+      .kpool_tail_len(9);
+  BlockManagerPool::Options options;
+  options.num_blocks(16)
+      .block_size(8)
+      .model_id("target::mtp_draft")
+      .enable_prefix_cache(true)
+      .enable_linear_state(true);
+  auto result = KVCacheManagerFactory::create(
+      capacity,
+      args,
+      /*world_size=*/1,
+      torch::kBFloat16,
+      options,
+      PrefillPolicy(/*max_batch_tokens=*/128,
+                    /*chunk_tokens=*/16,
+                    /*enable_chunked_prefill=*/true,
+                    /*enable_fair_budget=*/false),
+      /*transfer_coordinator=*/nullptr);
+  auto& pool = static_cast<BlockManagerPool&>(*result.manager);
+  ASSERT_TRUE(pool.paged_partition().has_value());
+  ASSERT_TRUE(pool.recurrent_partition().has_value());
+  const auto& state = *pool.recurrent_partition();
+  EXPECT_EQ(state.id().model_id, "target::mtp_draft");
+  EXPECT_NE(state.id().ordinal, pool.paged_partition()->id().ordinal);
+  EXPECT_EQ(state.components().size(), 1u);
+  EXPECT_EQ(state.ssm_snapshots_per_slot(), 0);
+  EXPECT_EQ(state.tail_tokens_per_slot(), 9);
+  EXPECT_EQ(state.checkpoint_stride(), 16);
+  EXPECT_TRUE(state.enable_prefix_cache());
+  EXPECT_EQ(state.find_component(CacheComponentRole::CONV), nullptr);
+  EXPECT_EQ(state.find_component(CacheComponentRole::SSM), nullptr);
+  const auto* tail = state.find_component(CacheComponentRole::KPOOL_TAIL);
+  ASSERT_NE(tail, nullptr);
+  EXPECT_EQ(tail->layers, (std::vector<int32_t>{0}));
+  EXPECT_FALSE(result.shape.has_conv_cache_shape());
+  EXPECT_FALSE(result.shape.has_ssm_cache_shape());
+  Sequence source = make_sequence(
+      0, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17});
+  ASSERT_TRUE(pool.allocate(&source));
+  EXPECT_TRUE(source.has_linear_state_slot());
+  auto* state_pool = BlockManagerPoolTestPeer::linear_leaf(pool, 0);
+  ASSERT_NE(state_pool, nullptr);
+  const PrefixHash hash = compute_linear_state_prefix_hash_for_test(
+      source.tokens(), state_pool->block_size(), /*boundary_tokens=*/16);
+  source.kv_state().set_kv_cache_tokens_num(source.num_tokens());
+  pool.publish_prefix(&source);
+  pool.deallocate_without_cache(&source);
+  ASSERT_GE(insert_linear_state_checkpoint(state_pool, hash), 1);
+  Sequence repeated = make_sequence(
+      1, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17});
+  pool.allocate_shared(&repeated);
+  EXPECT_EQ(repeated.kv_cache_tokens_num(), 16u);
+  pool.deallocate_without_cache(&repeated);
+}
+
 #endif
 
 TEST(KVCacheManagerFactoryTest,
@@ -1595,13 +1684,13 @@ TEST_F(BlockManagerPoolTest, SequenceUpdateBlockHashes) {
   const std::vector<XXH3Key> expected = ExpectedChain(prompt, block_size);
 
   seq.update_block_hashes(block_size, BlockHasherType::TEXT);
-  EXPECT_EQ(seq.block_hashes(), expected);
+  EXPECT_TRUE(seq.block_hashes() == expected);
 
   seq.update_block_hashes(/*block_size=*/2 * block_size,
                           /*hasher_type=*/BlockHasherType::TEXT);
   EXPECT_EQ(seq.block_hashes().size(), n_blocks / 2);
   seq.update_block_hashes(block_size, BlockHasherType::TEXT);
-  EXPECT_EQ(seq.block_hashes(), expected);
+  EXPECT_TRUE(seq.block_hashes() == expected);
 }
 
 // In-batch prefix cache publishes only the full blocks covered by the given
