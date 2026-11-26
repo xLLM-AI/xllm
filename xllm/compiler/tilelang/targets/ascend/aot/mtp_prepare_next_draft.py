@@ -13,15 +13,13 @@
 # limitations under the License.
 
 import tilelang
-
-from xllm.python.kernels_npu.tilelang import mtp_prepare_next_draft as kernel_impl
-from xllm.python.kernels_npu.tilelang.mtp_prepare_next_draft import (
+from compiler.tilelang.common.spec import DispatchField, TilelangKernel, register_kernel
+from xllm_kernel.ops.speculative._tilelang import _mtp_prepare_next_draft as kernel_impl
+from xllm_kernel.ops.speculative._tilelang._mtp_prepare_next_draft import (
     MTP_PREPARE_NEXT_DRAFT_PASS_CONFIGS,
     build_mtp_prepare_next_draft_kernel,
     prepare_vector_only_source,
 )
-
-from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
 DEPENDENCY_MODULES = (kernel_impl,)
 

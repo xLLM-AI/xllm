@@ -13,17 +13,17 @@
 # limitations under the License.
 
 import tilelang
-
-from xllm.python.kernels_npu.tilelang import greedy_prefix_verify as kernel_impl
-from xllm.python.kernels_npu.tilelang import utils as tilelang_utils
-from xllm.python.kernels_npu.tilelang.greedy_prefix_verify import (
-    DEFAULT_TASK_COUNT,
+from compiler.tilelang.common.spec import DispatchField, TilelangKernel, register_kernel
+from xllm_kernel.ops.speculative._tilelang import _greedy_prefix_verify as kernel_impl
+from xllm_kernel.ops.speculative._tilelang._greedy_prefix_verify import (
     GREEDY_PREFIX_VERIFY_PASS_CONFIGS,
     VEC_NUM,
     build_greedy_prefix_verify_kernel,
 )
 
-from ....common.spec import DispatchField, TilelangKernel, register_kernel
+from xllm.python.kernels_npu.tilelang import utils as tilelang_utils
+
+DEFAULT_TASK_COUNT = tilelang_utils.detect_vec_core_num()
 
 DEPENDENCY_MODULES = (kernel_impl, tilelang_utils)
 

@@ -304,6 +304,8 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
         "xllm_kernel.ops.attention.dsa.tilelang",
         "xllm_kernel.ops.kv_cache.decode_metadata",
         "xllm_kernel.ops.kv_cache.tilelang",
+        "xllm_kernel.ops.speculative.tilelang",
+        "xllm_kernel.ops.sampling.npu",
     )
     for name in modules:
         monkeypatch.delitem(sys.modules, name, raising=False)
