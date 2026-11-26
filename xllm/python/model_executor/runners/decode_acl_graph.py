@@ -589,7 +589,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         )
         if block_table is None or kv_seq_lens is None:
             raise RuntimeError("decode graph requires block and KV metadata")
-        block_table = block_table.to(device=kv_seq_lens.device, dtype=torch.int32).contiguous()
+        block_table = block_table.to(device=kv_seq_lens.device, dtype=torch.int32, non_blocking=True).contiguous()
         kv_seq_lens = kv_seq_lens.to(torch.int32)
         if getattr(self.attention_backend, "is_mla", False) and not getattr(
             self.attention_backend, "requires_host_kv_lengths", False
@@ -1721,7 +1721,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 raise RuntimeError("expanded decode query groups exceed the captured graph layout")
             actual_query_lens_host = torch.tensor(expanded_query_lens, dtype=torch.int32)
             static_metadata.q_seq_lens_host[: len(expanded_query_lens)].copy_(actual_query_lens_host)
-            static_metadata.q_seq_lens[: len(expanded_query_lens)].copy_(actual_query_lens_host)
+            static_metadata.q_seq_lens[: len(expanded_query_lens)].copy_(actual_query_lens_host, non_blocking=True)
             if len(expanded_query_lens) < static_metadata.q_seq_lens.numel():
                 query_width = _uniform_span_width(expanded_query_lens)
                 if query_width is None or query_width <= 0:
@@ -2000,6 +2000,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 continue
             if source.dim() != 2:
                 raise RuntimeError(f"ACL graph DSA manager {manager_id} block table must be two-dimensional")
+            # Transfer the compact scheduler table before expanding rows or ring columns.
+            # All consumers, including graph replay, are ordered on this stream.
+            if getattr(self.attention_backend, "supports_prepared_metadata", False):
+                source = source.to(device=target.device, non_blocking=True)
             source_rows = int(source.shape[0])
             if source_rows != batch_size:
                 if source_rows <= 0 or batch_size % source_rows != 0:
@@ -2083,7 +2087,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         """Resolve scheduler cache slots when DSV4 omits the top-level tensor."""
         slot_mapping = getattr(metadata, "slot_mapping", None)
         if slot_mapping is not None and slot_mapping.dim() == 1 and slot_mapping.numel() == token_count:
-            return slot_mapping.to(device=device, dtype=torch.int32).contiguous()
+            return slot_mapping.to(device=device, dtype=torch.int32, non_blocking=True).contiguous()
         host_slots = getattr(metadata, "new_cache_slots_host_values", None)
         if host_slots is not None and len(host_slots) == token_count:
             return torch.tensor(host_slots, dtype=torch.int32, device=device)
