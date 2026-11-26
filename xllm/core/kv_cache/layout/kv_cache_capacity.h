@@ -37,9 +37,6 @@ class KVCacheCapacity final {
   PROPERTY(int64_t, cache_size_in_bytes) = 0;
   PROPERTY(int64_t, block_size) = 0;
   PROPERTY(int64_t, slot_size) = 0;
-  // Explicit Full K/V storage dtype when it differs from the model dtype
-  // without allocating per-token scale components.
-  PROPERTY(std::optional<CacheScalarType>, full_kv_dtype);
 
   PROPERTY(KPoolCacheLayout, kpool_layout) = default_kpool_layout();
   PROPERTY(int64_t, kpool_tail_len) = 0;
@@ -57,6 +54,9 @@ class KVCacheCapacity final {
 
   // for kv cache quantization scale cache
   PROPERTY(int64_t, scale_slot_size) = 0;
+  // Explicit Full K/V storage dtype when it differs from the model dtype
+  // without allocating per-token scale components.
+  PROPERTY(std::optional<CacheScalarType>, full_kv_dtype);
 
   // for linear attention
   PROPERTY(int64_t, linear_slot_size) = 0;

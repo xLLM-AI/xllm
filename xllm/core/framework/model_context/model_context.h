@@ -115,7 +115,9 @@ class ModelContext {
   }
 
   const std::string& kv_cache_dtype() const { return kv_cache_dtype_; }
-  void set_kv_cache_dtype(const std::string& dtype) { kv_cache_dtype_ = dtype; }
+  void set_kv_cache_dtype(std::string dtype) {
+    kv_cache_dtype_ = std::move(dtype);
+  }
 
   const std::string& get_extension_impl() const { return extension_impl_; }
   void set_extension_impl(std::string extension_impl) {

@@ -30,6 +30,7 @@ def test_attention_public_catalog_is_sdk_free(tmp_path: Path) -> None:
 import importlib.abc
 import sys
 from typing import Any
+from unittest.mock import patch
 
 class BlockDeviceImports(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> None:
@@ -133,6 +134,13 @@ assert mrope.mutates == () and not mrope.aliases_inputs
 inplace_rope = catalog["apply_rotary_embedding"].contract
 assert inplace_rope.mutates == ("q", "k") and not inplace_rope.aliases_inputs
 assert all(callable(fn) for fn in (fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat))
+
+from xllm_kernel.platform import Platform, PlatformEnum
+from xllm_kernel.registry import KernelRegistry
+with patch.object(Platform, "enum", return_value=PlatformEnum.NPU):
+    from xllm_kernel.ops.kv_cache import native_kv_writer
+    from xllm_kernel.ops.quantization import query_quantization
+assert not KernelRegistry.get().specs()
 """
     env = {**os.environ, "PYTHONPATH": str(Path(xllm_kernel.__file__).resolve().parent.parent)}
     subprocess.run([sys.executable, "-S", "-c", script], cwd=tmp_path, env=env, check=True)
