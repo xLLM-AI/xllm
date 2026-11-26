@@ -35,7 +35,6 @@ from scripts.logger import logger
 
 from .utils import detect_vec_core_num
 
-COS_SIN_MERGED_LAYOUT = "token_3rope"
 DEFAULT_DTYPE = "bf16"
 MAX_VEC_CORE_NUM = detect_vec_core_num()
 MAX_LAUNCH_NUM_TOKENS = (MAX_VEC_CORE_NUM // VEC_NUM) * VEC_NUM

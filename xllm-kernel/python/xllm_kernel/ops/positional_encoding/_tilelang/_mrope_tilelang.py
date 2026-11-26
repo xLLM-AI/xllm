@@ -104,7 +104,6 @@ def build_split_qkv_rmsnorm_mrope_kernel(
     half_rope_dim = rope_dim // 2
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
-    gate_size = q_size
     qkv_stride = q_size * 2 + kv_size * 2
     qkv_head_slots = num_q_heads * 2 + num_kv_heads * 2
 

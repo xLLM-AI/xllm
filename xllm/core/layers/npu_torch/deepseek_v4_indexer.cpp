@@ -170,19 +170,6 @@ void scatter_rows_by_prepared_slot(torch::Tensor& cache,
   cache_2d.index_copy_(/*dim=*/0, valid_slots, valid_values);
 }
 
-void scatter_rows_by_slot(torch::Tensor& cache,
-                          const torch::Tensor& slot_mapping,
-                          const torch::Tensor& value) {
-  if (!cache.defined() || !slot_mapping.defined() || !value.defined()) {
-    return;
-  }
-
-  torch::Tensor value_2d = value.reshape({-1, value.size(value.dim() - 1)});
-  SlotScatterPlan plan =
-      prepare_slot_scatter_plan(slot_mapping, value_2d.size(0), cache.device());
-  scatter_rows_by_prepared_slot(cache, plan, value);
-}
-
 torch::Tensor apply_partial_rope(torch::Tensor q,
                                  int64_t rope_start_dim,
                                  int64_t rope_head_dim,
