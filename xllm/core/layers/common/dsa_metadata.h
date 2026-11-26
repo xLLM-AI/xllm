@@ -156,10 +156,8 @@ struct DSAMetadata {
   torch::Tensor c4_metadata;
   torch::Tensor c128_metadata;
   torch::Tensor qli_metadata;
-  int64_t sparse_metadata_ori_win_left = -1;
-  // Operator-explicit SWA indices (currently produced by DSpark native SAS).
-  // Request-level; shared across draft decoder layers.
-  torch::Tensor explicit_swa_indices;
+  torch::Tensor ori_sparse_indices_;
+  torch::Tensor ori_topk_length_;
 
   // hadamard: Hadamard transform matrix
   torch::Tensor hadamard;

@@ -190,7 +190,6 @@ class TestCreateAttentionBackend:
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["device"] is device
         assert backend.init_kwargs["attn_head_dim"] == 512
-        assert backend.init_kwargs["dspark_use_native_sas"] is False
         assert backend.init_kwargs["n_layers"] == 3
         assert backend.init_kwargs["compress_ratios"] == [1, 4, 128]
 

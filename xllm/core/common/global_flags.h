@@ -363,8 +363,6 @@ DECLARE_string(npu_kernel_backend);
 
 DECLARE_int32(enable_fused_mc2);
 
-DECLARE_bool(enable_dspark_native_sas);
-
 DECLARE_bool(enable_flashcomm1);
 
 DECLARE_int32(flashcomm1_min_prefill_tokens);
