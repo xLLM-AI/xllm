@@ -19,14 +19,6 @@ limitations under the License.
 
 namespace xllm {
 
-XXH3Key hash_tensor(const torch::Tensor& tensor) {
-  const torch::Tensor contiguous_tensor = tensor.contiguous();
-  return hash_bytes(
-      contiguous_tensor.data_ptr(),
-      contiguous_tensor.numel() * contiguous_tensor.element_size(),
-      KVCacheConfig::get_instance().xxh3_128bits_seed());
-}
-
 XXH3Key hash_string(const std::string& value) {
   return hash_string(std::string_view(value),
                      KVCacheConfig::get_instance().xxh3_128bits_seed());

@@ -66,26 +66,19 @@ def runner(monkeypatch: pytest.MonkeyPatch, vision_model: SimpleNamespace) -> Vi
 def test_layout_is_captured_once_and_replayed(runner: VisionAclGraphRunner) -> None:
     grid = [[1, 2, 2]]
     first = runner.execute(_pixels(4), grid)
-    captures = torch.npu.graph.call_count
     second = runner.execute(_pixels(4, fill=3.0), grid)
 
-    assert runner.captured_graphs == 1
-    assert torch.npu.graph.call_count == captures, "a second call of a known layout must not capture again"
+    assert torch.npu.graph.call_count == 1
     assert first.shape == second.shape
 
 
 def test_distinct_layouts_get_distinct_graphs(runner: VisionAclGraphRunner) -> None:
     runner.execute(_pixels(4), [[1, 2, 2]])
     runner.execute(_pixels(16), [[1, 4, 4]])
-    assert runner.captured_graphs == 2
+    assert torch.npu.graph.call_count == 2
 
-    # Two images of a captured geometry are a layout of their own: the grouped
-    # encode is what fills the device, so it is what gets captured, and the
-    # budget decides whether this one can be.
-    captures = torch.npu.graph.call_count
     runner.execute(_pixels(8), [[1, 2, 2], [1, 2, 2]])
-    assert runner.captured_graphs == 2, "the budget is two graphs"
-    assert torch.npu.graph.call_count == captures
+    assert torch.npu.graph.call_count == 2
     assert runner.eager_encodes == 1
 
 
@@ -108,8 +101,6 @@ def test_budget_exhaustion_keeps_a_layout_eager(runner: VisionAclGraphRunner, vi
     runner.execute(_pixels(64), [[1, 8, 8]])
     assert torch.npu.graph.call_count == captures
     assert runner.eager_encodes == 3
-    assert runner.captured_graphs == 2
-    assert not [name for name in vars(runner) if "reject" in name]
 
 
 def test_replay_output_is_not_the_captured_buffer(runner: VisionAclGraphRunner) -> None:

@@ -15,8 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <torch/types.h>
-
 #include <string>
 
 #include "core/util/hash_util.h"
@@ -24,7 +22,6 @@ limitations under the License.
 namespace xllm {
 
 // Content identity shares the configured seed with prefix-cache identities.
-XXH3Key hash_tensor(const torch::Tensor& tensor);
 XXH3Key hash_string(const std::string& value);
 
 }  // namespace xllm

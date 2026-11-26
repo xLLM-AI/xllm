@@ -26,7 +26,6 @@ limitations under the License.
 
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_type.h"
-#include "worker.pb.h"
 
 namespace xllm {
 
@@ -92,11 +91,5 @@ class MMBatchData {
   std::shared_ptr<TensorAggregation> aggregation_;
   std::vector<MMData> mm_datas_;
 };
-
-bool mmdata_to_proto(const xllm::MMBatchData& cpp_mmdata,
-                     proto::MMData* pb_mmdata);
-
-bool proto_to_mmdata(const proto::MMData& pb_mmdata,
-                     xllm::MMBatchData* cpp_mmdata);
 
 }  // namespace xllm

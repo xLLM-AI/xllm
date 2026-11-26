@@ -1,19 +1,8 @@
 # ASCEND_RT_VISIBLE_DEVICES=0 python generate_vlm.py --model /path/to/Qwen2.5-VL-7B-Instruct/ --max_seqs_per_batch 4 --enable_shm
 
 # from xllm import VLM
-import base64
-import os
 
 from xllm import LLM, ArgumentParser, SamplingParams
-
-
-def encode_image_from_file(file_path: str) -> str:
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"not found image: {file_path}")
-    with open(file_path, "rb") as image_file:
-        result = base64.b64encode(image_file.read()).decode("utf-8")
-    return result
-
 
 parser = ArgumentParser()
 args = parser.parse_args()
@@ -23,12 +12,6 @@ vlm = LLM(**vars(args))
 
 image_1 = "./images/3.jpg"
 image_2 = "./images/4.jpg"
-
-# image_base64_1 = encode_image_from_file(image_1)
-# image_base64_2 = encode_image_from_file(image_2)
-
-# image_1 = f"data:image/jpeg;base64,{image_base64_1}"
-# image_2 = f"data:image/jpeg;base64,{image_base64_2}"
 
 requests = [
     {
