@@ -2,6 +2,17 @@ include(cc_test)
 
 cc_test(
   NAME
+    host_store_writer_test
+  CPU_ONLY
+  SRCS
+    host_store_writer_test.cpp
+  DEPS
+    :host_store_writer
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     host_kv_transfer_test
   CPU_ONLY
   SRCS

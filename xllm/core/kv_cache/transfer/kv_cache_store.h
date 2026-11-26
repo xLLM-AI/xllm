@@ -64,6 +64,8 @@ class KVCacheStore final {
   bool init(const KVCacheStoreInitConfig& config,
             HostCacheStoreIndex store_index);
 
+  [[nodiscard]] bool is_storage_writer() const { return is_storage_writer_; }
+
   uint32_t batch_put(
       const std::vector<BlockTransferInfo>& block_transfer_info) {
     Slice<BlockTransferInfo> slice(block_transfer_info);
