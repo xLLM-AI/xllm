@@ -80,6 +80,7 @@ limitations under the License.
 // @enable_chunked_prefill
 // @enable_dp_fair_token_budget
 // @vae_size (optional, Python DiT)
+// @enable_graph_double_buffer (optional)
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -112,6 +113,14 @@ int main(int argc, char* argv[]) {
     LOG(ERROR)
         << "Spawn worker process received invalid prefill args: "
            "expected positive chunk tokens and 0/1 chunked/fair switches.";
+    return 1;
+  }
+
+  const std::optional<bool> enable_graph_double_buffer =
+      xllm::spawn_worker_protocol::parse_graph_double_buffer(argc, argv);
+  if (!enable_graph_double_buffer.has_value()) {
+    LOG(ERROR) << "Spawn worker process received invalid graph double-buffer "
+                  "argument: expected 0 or 1.";
     return 1;
   }
 
@@ -215,6 +224,7 @@ int main(int argc, char* argv[]) {
       << ", npu_kernel_backend = " << npu_kernel_backend
       << ", rank_tablefile = " << rank_tablefile
       << ", enable_graph = " << enable_graph
+      << ", enable_graph_double_buffer = " << enable_graph_double_buffer.value()
       << ", enable_graph_mode_decode_no_padding = "
       << enable_graph_mode_decode_no_padding
       << ", enable_prefill_piecewise_graph = " << enable_prefill_piecewise_graph
@@ -286,7 +296,8 @@ int main(int argc, char* argv[]) {
                                    model_impl,
                                    extension_impl,
                                    std::move(eplb_worker_config.value()),
-                                   prefill_config.value());
+                                   prefill_config.value(),
+                                   enable_graph_double_buffer.value());
 
     worker.run();
   }

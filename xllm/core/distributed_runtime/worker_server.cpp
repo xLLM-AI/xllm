@@ -288,6 +288,8 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* num_speculative_tokens_ptr = num_speculative_tokens_str.c_str();
   std::string speculative_algorithm_str = options.speculative_algorithm();
   const char* speculative_algorithm_ptr = speculative_algorithm_str.c_str();
+  const char* enable_graph_double_buffer_ptr =
+      options.enable_graph_double_buffer() ? "1" : "0";
   std::string enable_graph_str = std::to_string(options.enable_graph());
   const char* enable_graph_ptr = enable_graph_str.c_str();
   std::string enable_graph_mode_decode_no_padding_str =
@@ -417,9 +419,11 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         chunked_prefill_ptr,
                         dp_fair_token_budget_ptr,
                         vae_size_ptr,
+                        enable_graph_double_buffer_ptr,
                         nullptr};
   static_assert(std::size(argv) ==
-                spawn_worker_protocol::kVaeSizeArgumentIndex + 2);
+                spawn_worker_protocol::kEnableGraphDoubleBufferArgumentIndex +
+                    2);
   pid_t pid;
   int status = posix_spawnp(
       &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);

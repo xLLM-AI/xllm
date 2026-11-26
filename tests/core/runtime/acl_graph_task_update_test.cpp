@@ -405,7 +405,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
     model_args_.layer_types({"linear_attention", "full_attention"});
 
     device_ = std::make_unique<torch::Device>("npu:0");
-    options_.block_size(kBlockSize);
+    options_.block_size(kBlockSize).enable_graph_double_buffer(false);
     options_.max_seqs_per_batch(32);
 
     model_ = std::make_unique<HybridConv1dMockLM>(model_args_, *device_);
@@ -752,7 +752,8 @@ TEST_F(AclGraphTaskUpdateTest, CaptureReplayVsEagerDecodeBranch) {
   for (bool double_buffer : {false, true}) {
     SCOPED_TRACE(double_buffer);
     reset_sequences();
-    ExecutionConfig::get_instance().enable_graph_double_buffer(double_buffer);
+    options_.enable_graph_double_buffer(double_buffer);
+    ExecutionConfig::get_instance().enable_graph_double_buffer(!double_buffer);
     auto batch = create_decode_batch(/*batch_size=*/3);
     auto input = batch->prepare_forward_input(model_args_, nullptr);
     input = input.to(*device_, kDtype);

@@ -103,6 +103,8 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("disable_ttft_profiling",
                      &Options::disable_ttft_profiling_)
       .def_readwrite("enable_graph", &Options::enable_graph_)
+      .def_readwrite("enable_graph_double_buffer",
+                     &Options::enable_graph_double_buffer_)
       .def_readwrite("enable_graph_mode_decode_no_padding",
                      &Options::enable_graph_mode_decode_no_padding_)
       .def_readwrite("enable_prefill_piecewise_graph",

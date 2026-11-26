@@ -1032,9 +1032,7 @@ AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
 void AclGraphExecutorImpl::initialize(bool need_update_attn_mask,
                                       bool is_hybrid_linear_attention,
                                       bool supports_mla_graph_kv_bucketing) {
-  graph_slot_count_ =
-      ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() ? 2
-                                                                           : 1;
+  graph_slot_count_ = options_.enable_graph_double_buffer() ? 2 : 1;
   for (int32_t slot_idx = 0; slot_idx < graph_slot_count_; ++slot_idx) {
     GraphSlot& slot = graph_slots_[slot_idx];
     slot.persistent_param =

@@ -72,7 +72,8 @@ class SpawnWorkerServer final {
       const std::string& model_impl,
       const std::string& extension_impl,
       EplbWorkerConfig eplb_worker_config,
-      spawn_worker_protocol::PrefillConfig prefill_config);
+      spawn_worker_protocol::PrefillConfig prefill_config,
+      bool enable_graph_double_buffer);
 
   ~SpawnWorkerServer();
 

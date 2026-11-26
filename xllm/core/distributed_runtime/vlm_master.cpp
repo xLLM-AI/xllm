@@ -230,6 +230,7 @@ VLMMaster::VLMMaster(const Options& options)
       .max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .enable_graph(options_.enable_graph())
+      .enable_graph_double_buffer(options_.enable_graph_double_buffer())
       .enable_graph_mode_decode_no_padding(
           options_.enable_graph_mode_decode_no_padding())
       .enable_prefill_piecewise_graph(options_.enable_prefill_piecewise_graph())

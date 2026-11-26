@@ -625,8 +625,7 @@ bool WorkerImpl::can_prepare_npu_graph_decode_input(
 
 bool WorkerImpl::can_prepare_without_compute_stream_wait() const {
 #if defined(USE_NPU)
-  const auto& config = ExecutionConfig::get_instance();
-  return options_.enable_graph() && config.enable_graph_double_buffer() &&
+  return options_.enable_graph() && options_.enable_graph_double_buffer() &&
          (options_.backend() == "llm" || options_.backend() == "vlm");
 #else
   return false;

@@ -53,6 +53,7 @@ limitations under the License.
 #include "core/runtime/dflash_worker_impl.h"
 #include "core/runtime/options.h"
 #include "core/runtime/speculative_worker_impl.h"
+#include "core/util/scope_guard.h"
 #include "core/util/tensor_helper.h"
 #include "models/llm/deepseek_v4.h"
 #include "models/llm/dspark_weight_source.h"
@@ -247,6 +248,7 @@ class SimpleCausalLM : public CausalLM {
                       const torch::Tensor& positions,
                       std::vector<KVCache>& kv_caches,
                       const ModelParamsView& params) override {
+    ++forward_count_;
     last_forward_enabled_graph_ = params.enable_graph;
     last_forward_had_attn_metadata_ = params.attn_metadata != nullptr;
     auto token_embeddings = torch::embedding(token_embedding_table_, tokens);
@@ -327,6 +329,7 @@ class SimpleCausalLM : public CausalLM {
     // Simple implementation for testing
   }
 
+  int32_t forward_count_ = 0;
   bool return_aux_hidden_states_ = false;
   bool last_forward_enabled_graph_ = false;
   bool last_forward_had_attn_metadata_ = false;
@@ -443,6 +446,47 @@ class AclGraphExecutorTest : public ::testing::Test {
   IncrementalDecoder fake_decoder_ = IncrementalDecoder("", 1, false, false);
 };
 
+TEST_F(AclGraphExecutorTest, GraphSlotsUseInstanceDoubleBufferOption) {
+  ExecutionConfig& config = ExecutionConfig::get_instance();
+  const bool previous_double_buffer = config.enable_graph_double_buffer();
+  ScopeGuard restore_config(
+      [&] { config.enable_graph_double_buffer(previous_double_buffer); });
+  auto batch = CreateTestBatch();
+  auto input = batch->prepare_forward_input(model_args_, nullptr);
+  input = input.to(*device_, /*dtype=*/torch::kFloat32);
+  const ModelParamsView params(input.input_params);
+  const torch::Tensor eager_output =
+      model_->forward(input.token_ids, input.positions, kv_caches_, params)
+          .hidden_states.clone();
+  const double eager_fallbacks_before =
+      COUNTER_num_model_execution_total_eager.get_value();
+
+  for (const bool double_buffer : {false, true}) {
+    SCOPED_TRACE(double_buffer);
+    config.enable_graph_double_buffer(!double_buffer);
+    runtime::Options options = options_;
+    options.enable_graph_double_buffer(double_buffer);
+    npu::AclGraphExecutorImpl executor(
+        model_.get(), model_args_, *device_, options);
+    options.enable_graph_double_buffer(!double_buffer);
+    for (int32_t step = 0; step < 3; ++step) {
+      SCOPED_TRACE(step);
+      const int32_t forwards_before = model_->forward_count_;
+      const ModelOutput output =
+          executor.run(input.token_ids, input.positions, kv_caches_, params);
+      EXPECT_TRUE(torch::allclose(eager_output,
+                                  output.hidden_states,
+                                  /*rtol=*/1e-5,
+                                  /*atol=*/1e-6));
+      // Capturing calls the model; replaying a captured slot does not.
+      EXPECT_EQ(model_->forward_count_ > forwards_before,
+                step == 0 || (double_buffer && step == 1));
+    }
+  }
+  EXPECT_EQ(COUNTER_num_model_execution_total_eager.get_value(),
+            eager_fallbacks_before);
+}
+
 TEST_F(AclGraphExecutorTest, PreservesAuxHiddenStatesAcrossGraphReplay) {
   auto batch = CreateTestBatch();
 
@@ -460,8 +504,7 @@ TEST_F(AclGraphExecutorTest, PreservesAuxHiddenStatesAcrossGraphReplay) {
   const double eager_fallbacks_before =
       COUNTER_num_model_execution_total_eager.get_value();
   ASSERT_TRUE(eager_output.aux_hidden_states.defined());
-  const int32_t num_runs =
-      ExecutionConfig::get_instance().enable_graph_double_buffer() ? 3 : 2;
+  const int32_t num_runs = options_.enable_graph_double_buffer() ? 3 : 2;
   for (int32_t i = 0; i < num_runs; ++i) {
     const auto output = graph_executor.run(
         forward_input.token_ids, forward_input.positions, kv_caches_, params);
@@ -541,8 +584,7 @@ TEST(DeepseekV4ModelTest, ReturnsPreHcHiddenStatesForMtp) {
 // Test graph creation and execution with different batch sizes
 TEST_F(AclGraphExecutorTest, DifferentBatchSizes) {
   const std::vector<uint32_t> batch_sizes = {1, 2, 4};
-  const bool double_buffer =
-      ExecutionConfig::get_instance().enable_graph_double_buffer();
+  const bool double_buffer = options_.enable_graph_double_buffer();
   npu::AclGraphExecutorImpl graph_executor(
       model_.get(), model_args_, *device_, options_);
   std::vector<LlmForwardInput> captured_inputs;

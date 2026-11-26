@@ -118,6 +118,7 @@ std::string Options::to_string() const {
      << ", enable_multi_stream_parallel: " << enable_multi_stream_parallel()
      << ", disable_ttft_profiling: " << disable_ttft_profiling()
      << ", enable_graph: " << enable_graph()
+     << ", enable_graph_double_buffer: " << enable_graph_double_buffer()
      << ", enable_graph_mode_decode_no_padding: "
      << enable_graph_mode_decode_no_padding()
      << ", enable_prefill_piecewise_graph: " << enable_prefill_piecewise_graph()
