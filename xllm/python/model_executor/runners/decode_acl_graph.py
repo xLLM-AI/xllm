@@ -1253,9 +1253,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
             # backend keeps the step's state on itself and the compute thread is
             # using it for the step still running, so preparing the backend --
             # and with it the graph-task refresh, which needs that state --
-            # stays in `execute`.
+            # stays in `execute`, and so does binding the batch metadata a
+            # runner may require, which this call is not given.
             self._fill_entry(entry, input_ids, positions, metadata, input_ids.shape[0], None)
-            self._bind_graph_input_batch(entry, None)
             # The fill runs on this thread's stream and the replay on another,
             # so the replay is handed an event rather than an assumption about
             # how the two streams are ordered.

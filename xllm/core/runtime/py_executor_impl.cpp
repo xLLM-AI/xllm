@@ -231,7 +231,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["enable_graph_mm_encoder"] =
       ExecutionConfig::get_instance().enable_graph_mm_encoder();
   executor_config["enable_graph_double_buffer"] =
-      ExecutionConfig::get_instance().enable_graph_double_buffer();
+      options_.enable_graph_double_buffer();
   executor_config["mm_encoder_graph_capture_shapes"] =
       ExecutionConfig::get_instance().mm_encoder_graph_capture_shapes();
   // DFlash2 defaults to eager in the model config. Enable its independent
@@ -573,12 +573,21 @@ void PyExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
                                                device_,
                                                build_options));
   }
+  // mRoPE decode positions arrive as [3, N] and the prepared slot's fill
+  // checks the decode layout, so collapse them exactly as run() does.
+  torch::Tensor positions_arg = positions;
+  if (positions.dim() == 2 && !params.attn_metadata->is_prefill &&
+      !params.attn_metadata->is_chunked_prefill) {
+    positions_arg = positions.slice(/*dim=*/0, /*start=*/0, /*end=*/1)
+                        .squeeze(0)
+                        .contiguous();
+  }
   py::gil_scoped_acquire gil;
   PyCausalLM::set_active_instance(py_causal_lm_);
   bind_kv_caches(kv_caches);
   py_executor_.attr("prepare_graph_input")(
       tokens,
-      positions,
+      positions_arg,
       py::cast(PyAttentionMetadataView(
           params.attn_metadata, params, options_.is_draft_engine())));
 }
