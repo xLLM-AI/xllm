@@ -575,7 +575,7 @@ bool ContinuousSchedulerBase::step_with_schedule_overlap(
   pending_step_->batches = std::move(batch);
   pending_step_->requests = running_requests_;
   if (cache_block_lease) {
-    pending_step_->cache_block_lease.emplace(std::move(*cache_block_lease));
+    pending_step_->cache_block_lease_.emplace(std::move(*cache_block_lease));
   }
   if (pending_step_->drain_next_batch_) {
     // A partial batch must not renew the deferral into the next round.
@@ -592,7 +592,7 @@ bool ContinuousSchedulerBase::requires_pd_kv_retirement() const {
 
 void ContinuousSchedulerBase::complete_pending_step() {
   result_callback_(pending_step_->batches);
-  pending_step_->cache_block_lease.reset();
+  pending_step_->cache_block_lease_.reset();
   process_batch_output(pending_step_->requests);
 }
 

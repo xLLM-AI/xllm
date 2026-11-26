@@ -255,7 +255,7 @@ class ContinuousSchedulerBase : public Scheduler {
     // Keep requests alive until their non-owning Batch views are destroyed.
     std::vector<std::shared_ptr<Request>> requests;
     BatchGroup batches;
-    std::optional<KVCacheBlockLease> cache_block_lease;
+    std::optional<KVCacheBlockLease> cache_block_lease_;
     bool drain_next_batch_ = false;
   };
 
