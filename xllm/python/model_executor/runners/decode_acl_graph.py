@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import cast
@@ -88,6 +89,24 @@ class DecodeAclGraphMetadata:
     paged_kv_last_page_len: torch.Tensor
     kv_cu_seq_lens: torch.Tensor | None = None
     token_capacity_bucket: int | None = None
+
+
+def _device_capture_lock(device: torch.device) -> object:
+    """Hold the worker's per-device capture lock for the duration of a capture.
+
+    The worker takes this lock around the H2D copies that prepare the next
+    batch, because they break an ACL graph capture even when the streams differ
+    and the capture mode is thread-local. A build without the native bridge,
+    such as a standalone test, has nothing to serialise against.
+    """
+    try:
+        import xllm_runtime
+    except ImportError:
+        return nullcontext()
+    lock = getattr(xllm_runtime, "DeviceCaptureLock", None)
+    if lock is None:
+        return nullcontext()
+    return lock(device_index=device.index or 0)
 
 
 def _same_npu_stream(lhs: object, rhs: object) -> bool:
@@ -195,7 +214,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # serialized -- which is exactly what a prepared slot stops being.
         self._slot_buffers: list[AclGraphBufferPool] = [self._serial_buffers]
         self._slot_workspace_pools: list[list[torch.Tensor] | None] = [self._serial_workspace_pool]
-        if enable_double_buffer and not self._kv_capacity_graphs and not is_spec_draft:
+        # Resolving a graph key under data parallelism issues a collective, and
+        # the preparation thread must not take part in one: the compute thread
+        # is issuing this step's collectives at the same time and the two are
+        # only locally ordered, so ranks could pair up different steps.
+        if enable_double_buffer and not self._kv_capacity_graphs and not is_spec_draft and dp_size == 1:
             self._slot_graphs.append({})
             self._slot_buffers.append(AclGraphBufferPool(self.max_batch))
             self._slot_workspace_pools.append([])
@@ -205,7 +228,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # graph is reading -- the worker may prepare a step before the previous
         # one has even reached `execute`.
         self._active_slot = 0
-        self._prefilled: tuple[_GraphKey, int, tuple[int, int, int], torch.npu.Event] | None = None
+        self._prefilled: tuple[_GraphKey, int, int, torch.npu.Event] | None = None
         self._prefill_lock = threading.Lock()
         self._prepared_logged = False
         self._prepared_claims = 0
@@ -1154,16 +1177,17 @@ class DecodeAclGraphRunner(AclGraphRunner):
         return output
 
     @staticmethod
-    def _step_fingerprint(input_ids: torch.Tensor, metadata: AttentionMetadata) -> tuple[int, int, int]:
-        """Identify one decode step well enough to match a prepared fill to it.
+    def _step_identity(metadata: AttentionMetadata) -> int | None:
+        """The batch a prepared fill belongs to, or None when it cannot be told.
 
-        Rows and the token buffer alone repeat across steps, and the graph key
-        is shared by every step in a bucket. The per-row KV lengths advance by
-        one token per step, so their count and sum separate consecutive steps,
-        which is all a single-use prepared fill has to be told apart from.
+        Nothing derived from the inputs identifies a step: rows, the token
+        buffer and the graph key all repeat, and an aggregate of the KV lengths
+        collides as soon as continuous batching swaps requests between steps --
+        10 + 5 and 9 + 6 read the same. The batch id does identify it, and a
+        fill whose batch cannot be named is not claimed at all.
         """
-        lengths = getattr(metadata, "kv_seq_lens_host_values", None) or ()
-        return (input_ids.shape[0], len(lengths), sum(lengths))
+        batch_id = getattr(metadata, "batch_id", None)
+        return batch_id if isinstance(batch_id, int) and batch_id >= 0 else None
 
     @property
     def has_prepared_slots(self) -> bool:
@@ -1204,6 +1228,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
         expanded = self._expanded_verify_view(metadata)
         if expanded is not None:
             return
+        if input_ids.dim() != 1 or input_ids.shape[0] > self.max_batch:
+            # Above the graph's capacity the step runs eagerly, which is a
+            # supported path: resolving its key here would raise instead.
+            return
         graph_key = self._decode_graph_key(input_ids, metadata, expanded)
         with self._prefill_lock:
             if self._prefilled is not None:
@@ -1213,6 +1241,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 # slot now would hand it the following step's metadata. Leave it
                 # alone, as the native executor's `is_prepared` slot does, and
                 # this step fills its own slot in `execute`.
+                return
+            identity = self._step_identity(metadata)
+            if identity is None:
                 return
             slot = (self._active_slot + 1) % len(self._slot_graphs)
             entry = self._slot_graphs[slot].get(graph_key)
@@ -1230,7 +1261,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             # how the two streams are ordered.
             ready = torch.npu.Event()
             ready.record()
-            self._prefilled = (graph_key, slot, self._step_fingerprint(input_ids, metadata), ready)
+            self._prefilled = (graph_key, slot, identity, ready)
             if not self._prepared_logged:
                 self._prepared_logged = True
                 logger.info(
@@ -1266,15 +1297,25 @@ class DecodeAclGraphRunner(AclGraphRunner):
             self._prefilled = None
             entry = None
             slot = (self._active_slot + 1) % len(self._slot_graphs)
-            if prepared and pending is not None:
-                pending_key, pending_slot, fingerprint, ready = pending
+            if pending is not None:
+                pending_key, pending_slot, pending_identity, ready = pending
                 resolved = graph_key if graph_key is not None else self._decode_graph_key(input_ids, metadata, expanded)
-                if resolved == pending_key and fingerprint == self._step_fingerprint(input_ids, metadata):
-                    entry = self._slot_graphs[pending_slot].get(pending_key)
-                    if entry is not None:
-                        slot = pending_slot
-                        torch.npu.current_stream().wait_event(ready)
-                        self._prepared_claims += 1
+                identity = self._step_identity(metadata)
+                claimed = (
+                    prepared
+                    and identity is not None
+                    and resolved == pending_key
+                    and pending_identity == identity
+                    and self._slot_graphs[pending_slot].get(pending_key) is not None
+                )
+                if claimed:
+                    slot = pending_slot
+                    entry = self._slot_graphs[pending_slot][pending_key]
+                    self._prepared_claims += 1
+                # Whether claimed or discarded, that fill's writes are in
+                # flight on the preparation stream and this step may replay or
+                # refill the very slot it wrote.
+                torch.npu.current_stream().wait_event(ready)
             self._active_slot = slot
         return slot, entry
 
@@ -1408,7 +1449,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self._bind_graph_input_batch(entry, input_batch)
         self._prepare_attention(entry, entry.static_metadata, replay=not first_capture)
         if first_capture:
-            self._capture(entry, self._stream)
+            # A slot beyond the first is captured on live traffic, while the
+            # worker may be copying the next batch to the device. Those copies
+            # break a capture even on another stream, which is why the worker
+            # holds a per-device lock around them and why this capture takes
+            # the same one.
+            with _device_capture_lock(self.device) if slot else nullcontext():
+                self._capture(entry, self._stream)
             if capture_linear_state:
                 # Capture reads the persistent state indices. Restore real
                 # metadata only after capture, then refresh derived tables in place.
