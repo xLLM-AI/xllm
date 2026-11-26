@@ -67,6 +67,7 @@ _BUILTINS = (
     "xllm_kernel.ops.attention.gdn",
     "xllm_kernel.ops.attention.gdn.mega",
     "xllm_kernel.ops.attention.kda",
+    "xllm_kernel.ops.attention.laser",
     "xllm_kernel.ops.attention.mla",
     "xllm_kernel.ops.attention.dsa.indexer",
     "xllm_kernel.ops.attention.dsv4",

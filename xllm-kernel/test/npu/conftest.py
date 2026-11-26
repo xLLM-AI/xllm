@@ -29,6 +29,7 @@ def _prepare_kernels() -> None:
     initialize(
         device="npu",
         operations=(
+            "laser_attention",
             "l2_norm",
             "fused_add_gemma_rms_norm",
             "gemma_rms_norm",

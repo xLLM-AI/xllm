@@ -109,6 +109,10 @@ VAE 保持 FP32，每张参与的 NPU 都会加载完整的视频 VAE 权重，�
 `--dit_laser_attention_enabled=true`，默认值为 `false`。继续使用本文说明的
 checkpoint、文本条件、请求字段及并行配置；启用 Laser 不会运行文本编码器。
 
+Python 路径使用四卡 TP2/SP2/VAE4 配置，并设置
+`--model_impl=python --dit_laser_attention_enabled=true --dit_cache_policy=None`。
+Worker 从同一版本的 xllm-kernel 加载 Laser Attention。
+
 需要一起构建 xLLM 和匹配的 `xllm_ops` 子模块。更新原生算子时使用新的
 构建目录，避免复用旧的内核生成缓存。运行环境沿用上述 Ascend 环境。
 

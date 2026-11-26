@@ -119,6 +119,10 @@ To enable Laser on Ascend NPUs, change the service argument above to
 checkpoint, text conditioning, request fields and parallel layout described
 in this recipe; enabling Laser does not run the text encoder.
 
+For the Python pipeline, use the four-NPU TP2/SP2/VAE4 layout with
+`--model_impl=python --dit_laser_attention_enabled=true --dit_cache_policy=None`.
+The worker loads Laser Attention from the matching xllm-kernel package.
+
 Build xLLM together with its matching `xllm_ops` submodule. Rebuild the native
 operator in a fresh build directory when updating it so generated kernel
 caches are not reused. Use the Ascend environment described above.

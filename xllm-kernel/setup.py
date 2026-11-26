@@ -111,6 +111,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/npu/grouped_matmul.cpp",
                 "csrc/npu/hyper_connection.cpp",
                 "csrc/npu/inplace_partial_rotary_mul.cpp",
+                "csrc/npu/laser_attention_binding.cpp",
                 "csrc/npu/lightning_indexer.cpp",
                 "csrc/npu/mla_preprocess_v2.cpp",
                 "csrc/npu/mega_gdn.cpp",
