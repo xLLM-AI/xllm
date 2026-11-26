@@ -34,7 +34,7 @@ TEST(HostStoreWriterTest, HoldsCompletionAndDrainsAcceptedWritesInOrder) {
   std::promise<void> release;
   auto gate = release.get_future();
   std::vector<int32_t> completed;
-  completed.reserve(2);
+  completed.reserve(/*new_cap=*/2);
   std::future<uint32_t> first;
   std::future<uint32_t> second;
   {
@@ -42,12 +42,12 @@ TEST(HostStoreWriterTest, HoldsCompletionAndDrainsAcceptedWritesInOrder) {
     first = writer.submit(/*blocks=*/2, Put([&] {
                             started.set_value();
                             gate.wait();
-                            completed.push_back(1);
+                            completed.push_back(/*value=*/1);
                             return 2;
                           }));
     started.get_future().wait();
     second = writer.submit(/*blocks=*/1, Put([&] {
-                             completed.push_back(2);
+                             completed.push_back(/*value=*/2);
                              return 1;
                            }));
     EXPECT_EQ(first.wait_for(0s), std::future_status::timeout);
