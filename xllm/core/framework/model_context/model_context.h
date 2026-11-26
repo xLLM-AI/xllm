@@ -100,6 +100,9 @@ class ModelContext {
     model_impl_ = model_impl;
   }
 
+  const std::string& kv_cache_dtype() const { return kv_cache_dtype_; }
+  void set_kv_cache_dtype(const std::string& dtype) { kv_cache_dtype_ = dtype; }
+
   const std::string& get_extension_impl() const { return extension_impl_; }
   void set_extension_impl(std::string extension_impl) {
     extension_impl_ = std::move(extension_impl);
@@ -114,6 +117,7 @@ class ModelContext {
       model_id_;  // Model identifier for VirtualMemory multi-model support
   std::string model_impl_;
   std::string extension_impl_;
+  std::string kv_cache_dtype_ = "auto";
   ModelArgs model_args_;
   int32_t num_speculative_tokens_ = 0;
   QuantArgs quant_args_;

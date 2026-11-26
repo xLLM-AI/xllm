@@ -1,5 +1,5 @@
 # Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
-"""NPU static and dynamic quantization contracts."""
+"""Static and dynamic quantization contracts and startup-bound APIs."""
 
 from __future__ import annotations
 
@@ -29,7 +29,19 @@ def _operation(name: str) -> Operation:
 
 QUANTIZE_PER_TENSOR_OPERATION = _operation("quantize_per_tensor")
 DYNAMIC_QUANT_OPERATION = _operation("dynamic_quant")
-OPERATIONS = (QUANTIZE_PER_TENSOR_OPERATION, DYNAMIC_QUANT_OPERATION)
+QUANTIZE_QUERY_FP8_CONTRACT = OpContract("quantize_query_fp8", 1, (), False, "static_fp8_e4m3")
+QUANTIZE_QUERY_FP8_OPERATION = Operation(
+    QUANTIZE_QUERY_FP8_CONTRACT,
+    (
+        BackendModule(
+            module="xllm_kernel.ops.quantization.query_quantization",
+            platform=PlatformEnum.CUDA,
+            requires=("torch", "triton"),
+            implementations=("cuda.triton.quantize_query_fp8",),
+        ),
+    ),
+)
+OPERATIONS = (QUANTIZE_PER_TENSOR_OPERATION, DYNAMIC_QUANT_OPERATION, QUANTIZE_QUERY_FP8_OPERATION)
 
 
 def quantize_per_tensor(
@@ -59,3 +71,12 @@ def dynamic_quant(
     Optional smooth scales and group boundaries are passed to the quantizer.
     """
     return DYNAMIC_QUANT_OPERATION.get_prepared().function(value, smooth_scales, group_index, dst_type)
+
+
+def quantize_query_fp8(query: torch.Tensor, scale: float) -> torch.Tensor:
+    """Return a fresh contiguous E4M3FN tensor with the same [T,H,D] shape.
+
+    Strided BF16/FP16 input is divided in FP32 by a fixed positive scale and
+    clamped to [-448, 448] before the cast. Empty inputs retain their shape.
+    """
+    return QUANTIZE_QUERY_FP8_OPERATION.get_prepared().function(query, scale)

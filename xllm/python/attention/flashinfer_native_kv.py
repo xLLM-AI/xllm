@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING
 
 import flashinfer
 import torch
-from xllm_kernel.ops.kv_cache.native_kv_writer import write_fp8_kv
+from xllm_kernel.ops.kv_cache import write_fp8_kv
+from xllm_kernel.ops.quantization import quantize_query_fp8
 
 from scripts.logger import logger
 from xllm.python.attention.backend import AttentionMetadata, LayerCache
@@ -166,13 +167,11 @@ class FlashInferNativeKVBackend(FlashInferBackend):
         key = k.view(-1, self.num_kv_heads, self.head_dim)
         value = v.view(-1, self.num_kv_heads, self.head_dim)
         pages = self._pages[layer.layer_id]
-        write_fp8_kv(key, value, metadata.slot_mapping, pages, self._fixed_scales)
+        write_fp8_kv(key, value, metadata.slot_mapping, *pages, *self._fixed_scales)
         query = q.view(-1, self.num_heads, self.head_dim)
         if decode_plan is not None:
             output = decode_plan.run(query, pages, self._decode_workspace, self.scale, *self._fixed_scales)
         else:
-            from xllm_kernel.ops.quantization.query_quantization import quantize_query_fp8
-
             query = quantize_query_fp8(query, 1.0)
             output = self._prefill_paged_wrapper.run(
                 query, pages, k_scale=self._fixed_scales[0], v_scale=self._fixed_scales[1], q_scale=1.0

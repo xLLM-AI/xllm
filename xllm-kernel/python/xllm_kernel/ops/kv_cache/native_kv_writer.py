@@ -20,6 +20,10 @@ import torch
 import triton
 import triton.language as tl
 
+from xllm_kernel.ops.kv_cache import CONVERT_XQA_PAGES_CONTRACT, WRITE_FP8_KV_CONTRACT
+from xllm_kernel.platform import PlatformEnum
+from xllm_kernel.registry import register_kernel
+
 
 @triton.jit
 def _write_fp8(
@@ -61,12 +65,23 @@ def _write_fp8(
         tl.store(value_cache + offset, tl.clamp(v / value_scale, -448.0, 448.0), mask=channel < dim)
 
 
-def write_fp8_kv(
+@register_kernel(
+    name="cuda.triton.write_fp8_kv",
+    contract=WRITE_FP8_KV_CONTRACT,
+    platform=PlatformEnum.CUDA,
+    execution_modes=("eager", "cudagraph"),
+    input_domain="SM90 strided BF16/FP16 [T,H,D], contiguous int32/int64 slots and contiguous NHD E4M3FN caches.",
+    solution="triton",
+    binding="python",
+)
+def _write_fp8_kv(
     key: torch.Tensor,
     value: torch.Tensor,
     slots: torch.Tensor,
-    caches: tuple[torch.Tensor, torch.Tensor],
-    scales: tuple[float, float],
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    key_scale: float,
+    value_scale: float,
 ) -> None:
     # The model and bound cache establish shapes/dtypes once, before serving.
     # All input strides are explicit, including compiler-selected head layouts.
@@ -74,7 +89,8 @@ def write_fp8_kv(
         key,
         value,
         slots,
-        *caches,
+        key_cache,
+        value_cache,
         key.stride(0),
         key.stride(1),
         key.stride(2),
@@ -83,15 +99,16 @@ def write_fp8_kv(
         value.stride(2),
         key.shape[1],
         key.shape[2],
-        caches[0].shape[0] * caches[0].shape[1],
-        *scales,
+        key_cache.shape[0] * key_cache.shape[1],
+        key_scale,
+        value_scale,
         block=triton.next_power_of_2(key.shape[2]),
         num_warps=4,
     )
 
 
 @triton.jit
-def convert_xqa_pages_kernel(
+def _convert_xqa_pages_kernel(
     indptr: tl.tensor,
     indices: tl.tensor,
     last: tl.tensor,
@@ -110,3 +127,26 @@ def convert_xqa_pages_kernel(
     # one-token read from initialized reserved page0; padded outputs are discarded.
     length = (end - begin - 1) * page_size + tl.load(last + row)
     tl.store(lengths + row, tl.where(end > begin, length, 1))
+
+
+@register_kernel(
+    name="cuda.triton.convert_xqa_pages",
+    contract=CONVERT_XQA_PAGES_CONTRACT,
+    platform=PlatformEnum.CUDA,
+    execution_modes=("eager", "cudagraph"),
+    input_domain="SM90 contiguous int32 CSR inputs and page table, contiguous uint32 lengths, page size 16/32/64/128.",
+    solution="triton",
+    binding="python",
+)
+def _convert_xqa_pages(
+    indptr: torch.Tensor,
+    indices: torch.Tensor,
+    last: torch.Tensor,
+    table: torch.Tensor,
+    lengths: torch.Tensor,
+    page_size: int,
+) -> None:
+    rows, width = table.shape
+    _convert_xqa_pages_kernel[(rows,)](
+        indptr, indices, last, table, lengths, width, page_size, triton.next_power_of_2(width)
+    )

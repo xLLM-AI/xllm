@@ -14,13 +14,21 @@
 
 """Initialize the real native operators and Python kernels before collection."""
 
+from importlib.util import find_spec
+
 import pytest
 import torch
 
 from xllm import xllm_export  # noqa: F401
 from xllm.python import initialize_runtime
 
-initialize_runtime()
+# The suite shares one frozen registry. Prepare the FP8 tests' kernels on a
+# supported device before collection alongside the ordinary CUDA operations.
+initialize_runtime(
+    kv_cache_dtype="fp8_e4m3"
+    if torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0) and find_spec("triton") is not None
+    else "auto"
+)
 
 
 @pytest.fixture

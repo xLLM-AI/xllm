@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import torch
+from xllm_kernel.ops.kv_cache import convert_xqa_pages
 
 from xllm.python.attention.backend import AttentionMetadata
 
@@ -34,23 +35,6 @@ def _validate_xqa_lengths(indptr: list[int], last: list[int], page_size: int, ma
             raise ValueError("XQA requires monotone pages and a valid partial tail/padding row")
         if (end - begin - 1) * page_size + tail > maximum:
             raise ValueError("XQA live context exceeds the declared model context")
-
-
-def _convert_pages(
-    indptr: torch.Tensor,
-    indices: torch.Tensor,
-    last: torch.Tensor,
-    table: torch.Tensor,
-    lengths: torch.Tensor,
-    page_size: int,
-) -> None:
-    import triton
-    from xllm_kernel.ops.kv_cache.native_kv_writer import convert_xqa_pages_kernel
-
-    rows, width = table.shape
-    convert_xqa_pages_kernel[(rows,)](
-        indptr, indices, last, table, lengths, width, page_size, triton.next_power_of_2(width)
-    )
 
 
 class XQADecodePlan:
@@ -103,7 +87,7 @@ class XQADecodePlan:
         if graph_mode and self._metadata_addresses is not None and addresses != self._metadata_addresses:
             raise RuntimeError("XQA graph paging input addresses changed")
         self._metadata_addresses = addresses
-        _convert_pages(*inputs, self._table, self._lengths, self._page_size)
+        convert_xqa_pages(*inputs, self._table, self._lengths, self._page_size)
 
     def run(
         self,

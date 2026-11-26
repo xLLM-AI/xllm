@@ -9,7 +9,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Real host paging contracts; only the CUDA launch boundary is replaced."""
+"""Host paging contracts and device-side XQA page conversion."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -55,7 +55,7 @@ def test_csr_requires_flat_contiguous_buffers(field: str, layout: str) -> None:
     else:
         tensor = tensor.reshape(1, -1)
     setattr(metadata, field, tensor)
-    with patch.object(xqa_decode, "_convert_pages", MagicMock()) as kernel:
+    with patch.object(xqa_decode, "convert_xqa_pages", MagicMock()) as kernel:
         with pytest.raises(ValueError, match="contiguous.*int32"):
             _cpu_plan().prepare(metadata, graph_mode=False)
         kernel.assert_not_called()
@@ -83,7 +83,7 @@ def test_invalid_host_pages_fail_before_launch(indptr: list[int], last: list[int
     metadata = _metadata()
     metadata.paged_kv_indptr_host = torch.tensor(indptr, dtype=torch.int32)
     metadata.paged_kv_last_page_len_host = torch.tensor(last, dtype=torch.int32)
-    with patch.object(xqa_decode, "_convert_pages", MagicMock()) as kernel:
+    with patch.object(xqa_decode, "convert_xqa_pages", MagicMock()) as kernel:
         with pytest.raises(ValueError):
             _cpu_plan().prepare(metadata, graph_mode=False)
         kernel.assert_not_called()
@@ -94,7 +94,7 @@ def test_graph_padding_is_accepted_but_changed_addresses_are_rejected() -> None:
     metadata.paged_kv_indptr_host.copy_(torch.tensor([0, 1, 1], dtype=torch.int32))
     metadata.paged_kv_indptr.copy_(metadata.paged_kv_indptr_host)
     plan = _cpu_plan()
-    with patch.object(xqa_decode, "_convert_pages", MagicMock()) as kernel:
+    with patch.object(xqa_decode, "convert_xqa_pages", MagicMock()) as kernel:
         plan.prepare(metadata, graph_mode=True)
         addresses = plan._metadata_addresses
         metadata.paged_kv_indices = metadata.paged_kv_indices.clone()
@@ -102,3 +102,26 @@ def test_graph_padding_is_accepted_but_changed_addresses_are_rejected() -> None:
             plan.prepare(metadata, graph_mode=True)
         assert plan._metadata_addresses == addresses
         kernel.assert_called_once()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0), reason="requires SM90"
+)
+def test_convert_xqa_pages_overwrites_outputs_on_replay() -> None:
+    pytest.importorskip("triton")
+    from xllm_kernel.ops.kv_cache import convert_xqa_pages
+
+    indptr = torch.tensor([0, 2, 2], dtype=torch.int32, device="cuda")
+    indices = torch.tensor([9, 4], dtype=torch.int32, device="cuda")
+    last = torch.tensor([3, 1], dtype=torch.int32, device="cuda")
+    table = torch.full((2, 3), -1, dtype=torch.int32, device="cuda")
+    lengths = torch.zeros(2, dtype=torch.uint32, device="cuda")
+    assert convert_xqa_pages(indptr, indices, last, table, lengths, 16) is None
+    assert table.tolist() == [[9, 4, 0], [0, 0, 0]] and lengths.tolist() == [19, 1]
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        convert_xqa_pages(indptr, indices, last, table, lengths, 16)
+    indptr[1] = 1
+    graph.replay()
+    assert table.tolist() == [[9, 0, 0], [4, 0, 0]] and lengths.tolist() == [3, 1]

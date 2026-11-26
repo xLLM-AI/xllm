@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -29,6 +31,27 @@ if TYPE_CHECKING:
 
 
 _SM90 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
+
+
+@pytest.mark.skipif(not _SM90, reason="requires SM90")
+def test_default_cuda_worker_does_not_load_native_fp8_ops() -> None:
+    # conftest has already bound the FP8 test worker. Exercise default startup
+    # in a fresh process with the same native extension as the parent.
+    script = """
+import sys
+import pytest
+from xllm import xllm_export
+from xllm.python import initialize_runtime
+
+initialize_runtime()
+from xllm_kernel.ops.kv_cache import WRITE_FP8_KV_OPERATION
+assert WRITE_FP8_KV_OPERATION.prepared is None
+assert "xllm_kernel.ops.kv_cache.native_kv_writer" not in sys.modules
+assert "xllm_kernel.ops.quantization.query_quantization" not in sys.modules
+with pytest.raises(RuntimeError, match="restart the worker"):
+    initialize_runtime(kv_cache_dtype="fp8_e4m3")
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 @pytest.fixture
@@ -202,19 +225,19 @@ def test_rejects_unsupported_attention_before_allocation(
 @pytest.mark.parametrize("graph", [False, True])
 def test_fp8_writer_matches_independent_cast_and_replays(graph: bool) -> None:
     pytest.importorskip("triton")
-    from xllm_kernel.ops.kv_cache.native_kv_writer import write_fp8_kv
+    from xllm_kernel.ops.kv_cache import write_fp8_kv
 
     key = torch.randn((5, 4, 512), device="cuda", dtype=torch.bfloat16)[..., ::2]
     value = torch.randn_like(key) * 100
     slots = torch.tensor([0, 127, 128, 255, -1], dtype=torch.int32, device="cuda")
     pages = tuple(torch.zeros((3, 128, 4, 256), dtype=torch.float8_e4m3fn, device="cuda") for _ in range(2))
     scales = (0.125, 0.5)
-    write_fp8_kv(key, value, slots, pages, scales)
+    write_fp8_kv(key, value, slots, *pages, *scales)
     torch.cuda.synchronize()
     if graph:
         captured = torch.cuda.CUDAGraph()
         with torch.cuda.graph(captured):
-            write_fp8_kv(key, value, slots, pages, scales)
+            write_fp8_kv(key, value, slots, *pages, *scales)
         key.mul_(2)
         value.mul_(0.5)
         captured.replay()
@@ -226,14 +249,21 @@ def test_fp8_writer_matches_independent_cast_and_replays(graph: bool) -> None:
 
 
 @pytest.mark.skipif(not _SM90, reason="Native FP8 integration targets SM90")
-def test_query_conversion_preserves_strided_values() -> None:
+@pytest.mark.parametrize("graph", [False, True])
+def test_query_conversion_preserves_strided_values(graph: bool) -> None:
     pytest.importorskip("triton")
-    from xllm_kernel.ops.quantization.query_quantization import quantize_query_fp8
+    from xllm_kernel.ops.quantization import quantize_query_fp8
 
     query = torch.randn((17, 24, 512), dtype=torch.bfloat16, device="cuda")[..., ::2]
     actual = quantize_query_fp8(query, 1.0)
+    if graph:
+        captured = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(captured):
+            actual = quantize_query_fp8(query, 1.0)
+        query.mul_(2)
+        captured.replay()
     expected = query.float().clamp(-448, 448).to(torch.float8_e4m3fn)
-    assert actual.is_contiguous()
+    assert actual.is_contiguous() and actual.data_ptr() != query.data_ptr()
     assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
 
 

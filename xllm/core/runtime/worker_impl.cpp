@@ -1385,6 +1385,7 @@ bool WorkerImpl::init_model_impl(std::unique_ptr<ModelLoader> model_loader,
                                  MasterStatus master_status) {
   model_weights_path_ = model_loader->model_weights_path();
   context_ = std::move(context);
+  context_.set_kv_cache_dtype(options_.kv_cache_dtype());
   parallel_args_ = context_.get_parallel_args();
   dtype_ = context_.get_tensor_options().dtype().toScalarType();
   tokenizer_ = std::move(tokenizer);

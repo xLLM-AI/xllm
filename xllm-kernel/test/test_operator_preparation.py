@@ -55,9 +55,15 @@ from xllm_kernel.ops.gemm import (
     quant_matmul_out,
 )
 from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
-from xllm_kernel.ops.kv_cache import reshape_paged_cache
+from xllm_kernel.ops.kv_cache import convert_xqa_pages, reshape_paged_cache, write_fp8_kv
+from xllm_kernel.ops.quantization import quantize_query_fp8
 from xllm_kernel.ops.positional_encoding import partial_rotary_embedding
 catalog = {operation.contract.operation: operation for operation in load_operations()}
+for api, mutates in ((write_fp8_kv, ("key_cache", "value_cache")), (convert_xqa_pages, ("table", "lengths")), (quantize_query_fp8, ())):
+    operation = catalog[api.__name__]
+    assert operation.implementations == ("cuda.triton." + api.__name__,)
+    assert operation.contract.mutates == mutates and not operation.contract.aliases_inputs
+    assert operation.prepared is None
 for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     name = operation.contract.operation
     if name in ("causal_conv1d", "causal_conv1d_qkv_prefill", "chunk_gated_delta_rule"):
@@ -298,3 +304,23 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
         for name in modules:
             sys.modules.pop(name, None)
             vars(importlib.import_module(name.rsplit(".", 1)[0])).pop("torch", None)
+
+
+def test_npu_quantization_registers_only_its_two_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
+    module_name = "xllm_kernel.ops.quantization.npu"
+    registry = KernelRegistry()
+    monkeypatch.setattr(KernelRegistry, "_instance", registry)
+    monkeypatch.setattr(xllm_kernel, "_npu_binding", object(), raising=False)
+    monkeypatch.setattr(
+        torch.ops,
+        "xllm_kernel",
+        SimpleNamespace(
+            quantize_per_tensor=SimpleNamespace(default=Mock()), dynamic_quant=SimpleNamespace(default=Mock())
+        ),
+    )
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    try:
+        importlib.import_module(module_name)
+        assert {spec.name for spec in registry.specs()} == {"npu.aclnn.quantize_per_tensor", "npu.aclnn.dynamic_quant"}
+    finally:
+        sys.modules.pop(module_name, None)

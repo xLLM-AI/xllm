@@ -120,8 +120,9 @@ std::string dtype_to_string(const torch::TensorOptions& options) {
 // ensure_python_interpreter
 // ---------------------------------------------------------------------------
 
-void ensure_python_interpreter() {
+void ensure_python_interpreter(const std::string& kv_cache_dtype) {
   static std::once_flag flag;
+  static const std::string startup_kv_cache_dtype = kv_cache_dtype;
   std::call_once(flag, []() {
     ensure_xllm_torch_ops_registered();
 
@@ -154,7 +155,7 @@ void ensure_python_interpreter() {
         phase = "importing xllm.python";
         py::module_ python_package = py::module_::import("xllm.python");
         phase = "initializing xllm.python runtime";
-        python_package.attr("initialize_runtime")();
+        python_package.attr("initialize_runtime")(startup_kv_cache_dtype);
       } catch (const py::error_already_set& e) {
         LOG(FATAL) << "Failed while " << phase << " (python_model_path='"
                    << model_path << "'; empty uses the default Python path). "
@@ -166,6 +167,18 @@ void ensure_python_interpreter() {
       PyEval_SaveThread();
     }
   });
+
+  if (kv_cache_dtype == startup_kv_cache_dtype) {
+    return;
+  }
+  // A later model in this process can only use already-prepared operations.
+  py::gil_scoped_acquire gil;
+  try {
+    py::module_::import("xllm.python")
+        .attr("initialize_runtime")(kv_cache_dtype);
+  } catch (const py::error_already_set& e) {
+    LOG(FATAL) << "Failed to initialize xllm.python runtime: " << e.what();
+  }
 }
 
 // ---------------------------------------------------------------------------

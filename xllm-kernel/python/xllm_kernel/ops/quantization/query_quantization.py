@@ -20,6 +20,10 @@ import torch
 import triton
 import triton.language as tl
 
+from xllm_kernel.ops.quantization import QUANTIZE_QUERY_FP8_CONTRACT
+from xllm_kernel.platform import PlatformEnum
+from xllm_kernel.registry import register_kernel
+
 
 @triton.jit
 def _quantize_query_kernel(
@@ -44,7 +48,16 @@ def _quantize_query_kernel(
     tl.store(destination + offsets, values, offsets < count)
 
 
-def quantize_query_fp8(query: torch.Tensor, scale: float) -> torch.Tensor:
+@register_kernel(
+    name="cuda.triton.quantize_query_fp8",
+    contract=QUANTIZE_QUERY_FP8_CONTRACT,
+    platform=PlatformEnum.CUDA,
+    execution_modes=("eager", "cudagraph"),
+    input_domain="SM90 strided CUDA BF16/FP16 [T,H,D] with a finite positive fixed scale.",
+    solution="triton",
+    binding="python",
+)
+def _quantize_query_fp8(query: torch.Tensor, scale: float) -> torch.Tensor:
     """Quantize inside graph capture; the immutable scalar never requires a host sync."""
     if query.device.type != "cuda" or query.dtype not in (torch.bfloat16, torch.float16) or query.ndim != 3:
         raise ValueError("Native FP8 query conversion requires CUDA BF16/FP16 [token, head, channel] input")
