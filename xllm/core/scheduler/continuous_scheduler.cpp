@@ -455,10 +455,11 @@ BatchGroup ContinuousSchedulerBase::schedule_request(
         decode_queue_->empty()) {
       const size_t ready = num_queued_requests();
       const size_t preparing = num_pending_requests();
-      if (ready > 0 && preparing >= static_cast<size_t>(options_.dp_size())) {
-        const size_t target =
-            std::min(ready + preparing,
-                     static_cast<size_t>(options_.max_seqs_per_batch()));
+      const size_t cohort_size = ready + preparing;
+      if (ready > 0 && preparing > 0 &&
+          cohort_size >= static_cast<size_t>(options_.dp_size())) {
+        const size_t target = std::min(
+            cohort_size, static_cast<size_t>(options_.max_seqs_per_batch()));
         const auto burst_deadline =
             std::min(deadline, absl::Now() + absl::Milliseconds(80));
         while (true) {
