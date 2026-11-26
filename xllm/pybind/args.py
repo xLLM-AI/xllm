@@ -164,6 +164,12 @@ class ArgumentParser:
             help="Whether to enable graph execution for offline inference.",
         )
         self.parser.add_argument(
+            "--acl_graph_decode_batch_size_limit",
+            type=int,
+            default=16,
+            help="Maximum per-DP-rank decode batch size for NPU graph execution.",
+        )
+        self.parser.add_argument(
             "--enable_graph_double_buffer",
             nargs="?",
             const=True,

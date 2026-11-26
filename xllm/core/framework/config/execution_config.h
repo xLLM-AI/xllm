@@ -18,7 +18,6 @@ limitations under the License.
 #include <cstdint>
 #include <nlohmann/json_fwd.hpp>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "core/common/macros.h"
@@ -47,11 +46,6 @@ class ExecutionConfig final {
   void from_json(const JsonReader& json);
   void append_config_json(nlohmann::ordered_json& config_json) const;
   void initialize();
-
-  DecodeGraphWarmupConfig decode_graph_warmup_config(
-      int32_t num_speculative_tokens,
-      bool enable_no_padding,
-      std::string_view speculative_algorithm = "MTP") const;
 
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {

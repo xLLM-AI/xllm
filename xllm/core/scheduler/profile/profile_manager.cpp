@@ -144,14 +144,13 @@ ProfileManager::ProfileManager(
     max_decode_batch_size =
         std::min(max_decode_batch_size, max_concurrent_requests);
   }
-  if (Platform::is_npu()) {
+  if (Platform::is_npu() &&
+      options_.decode_graph_warmup_config().max_graph_batch_size > 0) {
     max_decode_batch_size =
         static_cast<int32_t>(npu::acl_graph_max_global_batch_size(
             static_cast<uint32_t>(std::max<int32_t>(1, max_decode_batch_size)),
             static_cast<uint32_t>(
-                std::max<int32_t>(1,
-                                  ::xllm::ExecutionConfig::get_instance()
-                                      .acl_graph_decode_batch_size_limit())),
+                options_.decode_graph_warmup_config().max_graph_batch_size),
             static_cast<uint32_t>(std::max<int32_t>(1, options_.dp_size()))));
   }
   decode_graph_warmup_plan_ =
@@ -1155,14 +1154,13 @@ void ProfileManager::warmup_decode_for_graph() {
     max_decode_batch_size =
         std::min(max_decode_batch_size, max_concurrent_requests);
   }
-  if (Platform::is_npu()) {
+  if (Platform::is_npu() &&
+      options_.decode_graph_warmup_config().max_graph_batch_size > 0) {
     max_decode_batch_size =
         static_cast<int32_t>(npu::acl_graph_max_global_batch_size(
             static_cast<uint32_t>(std::max<int32_t>(1, max_decode_batch_size)),
             static_cast<uint32_t>(
-                std::max<int32_t>(1,
-                                  ::xllm::ExecutionConfig::get_instance()
-                                      .acl_graph_decode_batch_size_limit())),
+                options_.decode_graph_warmup_config().max_graph_batch_size),
             static_cast<uint32_t>(std::max<int32_t>(1, options_.dp_size()))));
   }
   const int32_t decode_seq_len = warmup_decode_seq_len(

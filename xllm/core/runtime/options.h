@@ -264,6 +264,8 @@ struct Options {
   PROPERTY(bool, enable_prefill_piecewise_graph) = false;
   // maximum number of tokens for graph execution
   PROPERTY(int32_t, max_tokens_for_graph_mode) = 2048;
+  // maximum per-DP-rank decode batch size for NPU graphs
+  PROPERTY(int32_t, acl_graph_decode_batch_size_limit) = 16;
 
   // max tokens per batch
   PROPERTY(int32_t, max_tokens_per_batch) = 4096;

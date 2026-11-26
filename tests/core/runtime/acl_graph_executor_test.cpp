@@ -660,10 +660,16 @@ TEST_F(AclGraphExecutorTest, DifferentBatchSizes) {
             eager_fallbacks_before);
 }
 
-// Test decode batch-size threshold fallback: ACL graph should fall back to
-// eager when batch_size exceeds the configured limit (default: 16).
+// Exceeding an instance's limit must select eager even if the global limit
+// permits capture.
 TEST_F(AclGraphExecutorTest, DecodeBatchSizeThresholdFallsBackToEager) {
-  constexpr uint32_t batch_size = 17;
+  ExecutionConfig& config = ExecutionConfig::get_instance();
+  const int32_t previous_limit = config.acl_graph_decode_batch_size_limit();
+  ScopeGuard restore_config(
+      [&] { config.acl_graph_decode_batch_size_limit(previous_limit); });
+  config.acl_graph_decode_batch_size_limit(16);
+  options_.acl_graph_decode_batch_size_limit(1);
+  constexpr uint32_t batch_size = 2;
   sequences_.clear();
   auto batch = std::make_unique<Batch>();
 
@@ -715,6 +721,28 @@ TEST_F(AclGraphExecutorTest, DecodeBatchSizeThresholdFallsBackToEager) {
                               graph_out.hidden_states,
                               /*rtol=*/1e-5,
                               /*atol=*/1e-6));
+
+  // The exact threshold captures even when the global limit would reject it.
+  config.acl_graph_decode_batch_size_limit(1);
+  options_.acl_graph_decode_batch_size_limit(2);
+  npu::AclGraphExecutorImpl at_limit(
+      model_.get(), model_args_, *device_, options_);
+  options_.acl_graph_decode_batch_size_limit(1);
+  const double fallbacks_before =
+      COUNTER_num_model_execution_total_eager.get_value();
+  for (int32_t step = 0; step < 3; ++step) {
+    const ModelOutput output =
+        at_limit.run(forward_input.token_ids,
+                     forward_input.positions,
+                     kv_caches_,
+                     ModelParamsView(forward_input.input_params));
+    EXPECT_TRUE(torch::allclose(eager_out.hidden_states,
+                                output.hidden_states,
+                                /*rtol=*/1e-5,
+                                /*atol=*/1e-6));
+  }
+  EXPECT_EQ(COUNTER_num_model_execution_total_eager.get_value(),
+            fallbacks_before);
 }
 
 TEST_F(AclGraphExecutorTest, NoPaddingBucketCapturesOnlyForWarmup) {
@@ -751,8 +779,10 @@ TEST_F(AclGraphExecutorTest, NoPaddingBucketCapturesOnlyForWarmup) {
   const int32_t old_decode_batch_size_limit =
       execution_config.acl_graph_decode_batch_size_limit();
   execution_config.enable_graph_mode_decode_no_padding(false);
-  execution_config.acl_graph_decode_batch_size_limit(20);
-  options_.max_seqs_per_batch(20).enable_graph_mode_decode_no_padding(true);
+  execution_config.acl_graph_decode_batch_size_limit(1);
+  options_.max_seqs_per_batch(20)
+      .enable_graph_mode_decode_no_padding(true)
+      .acl_graph_decode_batch_size_limit(20);
 
   auto npu_executor = std::make_unique<BaseExecutorImpl>(
       model_.get(), model_args_, *device_, options_);

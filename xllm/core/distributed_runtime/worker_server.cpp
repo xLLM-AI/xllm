@@ -290,6 +290,8 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* speculative_algorithm_ptr = speculative_algorithm_str.c_str();
   const char* enable_graph_double_buffer_ptr =
       options.enable_graph_double_buffer() ? "1" : "0";
+  const std::string graph_decode_batch_size_limit_str =
+      std::to_string(options.acl_graph_decode_batch_size_limit());
   std::string enable_graph_str = std::to_string(options.enable_graph());
   const char* enable_graph_ptr = enable_graph_str.c_str();
   std::string enable_graph_mode_decode_no_padding_str =
@@ -420,10 +422,11 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         dp_fair_token_budget_ptr,
                         vae_size_ptr,
                         enable_graph_double_buffer_ptr,
+                        graph_decode_batch_size_limit_str.c_str(),
                         nullptr};
-  static_assert(std::size(argv) ==
-                spawn_worker_protocol::kEnableGraphDoubleBufferArgumentIndex +
-                    2);
+  static_assert(
+      std::size(argv) ==
+      spawn_worker_protocol::kAclGraphDecodeBatchSizeLimitArgumentIndex + 2);
   pid_t pid;
   int status = posix_spawnp(
       &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);
