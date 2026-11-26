@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -58,6 +58,8 @@ from xllm.python.models.base import PyModelBase
 
 @dataclass
 class Qwen3Config:
+    prepare_column_parallel_weight_layout: ClassVar[bool] = True
+
     hidden_size: int = 1024
     n_layers: int = 28
     n_heads: int = 16
@@ -78,7 +80,6 @@ class Qwen3Config:
     layers_to_capture: tuple[int, ...] = ()
     mrope_section: Sequence[int] = ()
     rope_scaling: dict[str, Any] = field(default_factory=dict)
-    use_npu_column_parallel_weight_layout: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> Qwen3Config:
@@ -117,7 +118,6 @@ class Qwen3Config:
             dp_rank=int(pick("dp_rank", default=0)),
             layers_to_capture=tuple(int(layer_id) for layer_id in pick("layers_to_capture", default=[])),
             rope_scaling=dict(rope_scaling),
-            use_npu_column_parallel_weight_layout=bool(pick("use_npu_column_parallel_weight_layout", default=False)),
         )
 
     def head_split(self) -> tuple[int, int]:
@@ -157,7 +157,7 @@ class Qwen3Attention(nn.Module):
             bias=cfg.attention_bias,
             dtype=dtype,
             device=device,
-            use_npu_weight_layout=cfg.use_npu_column_parallel_weight_layout,
+            prepare_weight_layout=cfg.prepare_column_parallel_weight_layout,
         )
         self.o_proj = RowParallelLinear(
             self.q_size,
@@ -264,7 +264,7 @@ class Qwen3DecoderLayer(nn.Module):
             cfg.tp_size,
             dtype,
             device,
-            use_npu_weight_layout=cfg.use_npu_column_parallel_weight_layout,
+            prepare_gate_up_weight_layout=cfg.prepare_column_parallel_weight_layout,
         )
 
     def forward(
@@ -410,7 +410,7 @@ class Qwen3ForCausalLM(PyModelBase):
                 gather_output=True,
                 dtype=dtype,
                 device=device,
-                use_npu_weight_layout=self.cfg.use_npu_column_parallel_weight_layout,
+                prepare_weight_layout=self.cfg.prepare_column_parallel_weight_layout,
             )
 
     def pooler(self, hidden_states: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:

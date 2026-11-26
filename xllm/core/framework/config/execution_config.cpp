@@ -144,13 +144,6 @@ DEFINE_bool(
     "Shard Python GLM MLA head-dependent attention weights across "
     "TP and DP ranks. Requires DP > 1, CP=1 and layerwise_split_size=1.");
 
-DEFINE_bool(
-    enable_npu_column_parallel_weight_layout,
-    false,
-    "Experimentally prepare Python Qwen3/Qwen3-VL ColumnParallel weights "
-    "in an NPU-specific layout after loading. Disabled by default because "
-    "the layout must demonstrate a repeatable end-to-end benefit first.");
-
 namespace xllm {
 
 void ExecutionConfig::from_flags() {
@@ -175,7 +168,6 @@ void ExecutionConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_fia_decode);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dsa_multi_stream);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_attn_dp_weight_sharding);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_npu_column_parallel_weight_layout);
 }
 
 void ExecutionConfig::from_json(const JsonReader& json) {
@@ -200,7 +192,6 @@ void ExecutionConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_fia_decode);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dsa_multi_stream);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_attn_dp_weight_sharding);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_npu_column_parallel_weight_layout);
 }
 
 void ExecutionConfig::append_config_json(
@@ -248,8 +239,6 @@ void ExecutionConfig::append_config_json(
       config_json, default_config, enable_dsa_multi_stream);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_attn_dp_weight_sharding);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_npu_column_parallel_weight_layout);
 }
 
 ExecutionConfig& ExecutionConfig::get_instance() {

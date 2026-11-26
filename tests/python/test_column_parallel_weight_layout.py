@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Behavior tests for opt-in ColumnParallel weight preparation."""
+"""Behavior tests for backend-selected ColumnParallel weight preparation."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from xllm.python.models.qwen3_vl import Qwen3VLVisionConfig, Qwen3VLVisionTransf
 
 
 def test_column_parallel_weight_preparation_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
-    layer = linear.ColumnParallelLinear(3, 5, 1, bias=True, use_npu_weight_layout=True)
+    layer = linear.ColumnParallelLinear(3, 5, 1, bias=True, prepare_weight_layout=True)
     layer.weight.data.copy_(torch.arange(15, dtype=torch.float32).reshape(5, 3))
     layer.bias.data.copy_(torch.arange(5, dtype=torch.float32))
     x = torch.tensor([[1.0, -2.0, 3.0]])
@@ -37,7 +37,6 @@ def test_column_parallel_weight_preparation_is_idempotent(monkeypatch: pytest.Mo
         linear.kernels,
         "prepare_column_parallel_weight",
         prepare,
-        raising=False,
     )
 
     layer.process_weights_after_loading()
@@ -62,14 +61,13 @@ def test_column_parallel_weight_preparation_is_idempotent(monkeypatch: pytest.Mo
     assert prepare.call_count == 2
 
 
-def test_column_parallel_weight_layout_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_column_parallel_weight_layout_requires_layer_eligibility(monkeypatch: pytest.MonkeyPatch) -> None:
     layer = linear.ColumnParallelLinear(3, 5, 1)
     prepare = Mock()
     monkeypatch.setattr(
         linear.kernels,
         "prepare_column_parallel_weight",
         prepare,
-        raising=False,
     )
 
     layer.process_weights_after_loading()
@@ -78,16 +76,16 @@ def test_column_parallel_weight_layout_is_opt_in(monkeypatch: pytest.MonkeyPatch
     prepare.assert_not_called()
 
 
-@pytest.mark.parametrize("use_npu_weight_layout", [False, True])
+@pytest.mark.parametrize("prepare_weight_layout", [False, True])
 def test_greedy_tokens_uses_vocab_shard_size_after_weight_layout(
     monkeypatch: pytest.MonkeyPatch,
-    use_npu_weight_layout: bool,
+    prepare_weight_layout: bool,
 ) -> None:
     layer = linear.ColumnParallelLinear(
         3,
         5,
         2,
-        use_npu_weight_layout=use_npu_weight_layout,
+        prepare_weight_layout=prepare_weight_layout,
     )
     layer.weight.data.copy_(
         torch.tensor(
@@ -100,12 +98,11 @@ def test_greedy_tokens_uses_vocab_shard_size_after_weight_layout(
             ]
         )
     )
-    if use_npu_weight_layout:
+    if prepare_weight_layout:
         monkeypatch.setattr(
             linear.kernels,
             "prepare_column_parallel_weight",
             lambda weight: (weight.transpose(0, 1).contiguous(), True),
-            raising=False,
         )
         layer.process_weights_after_loading()
 
@@ -122,7 +119,7 @@ def test_greedy_tokens_uses_vocab_shard_size_after_weight_layout(
     assert torch.equal(actual, torch.tensor([8]))
 
 
-def test_qwen3_config_wires_column_parallel_layout_to_all_target_projections() -> None:
+def test_qwen3_enables_backend_layout_for_all_target_projections() -> None:
     cfg = Qwen3Config(
         hidden_size=8,
         n_layers=1,
@@ -131,7 +128,6 @@ def test_qwen3_config_wires_column_parallel_layout_to_all_target_projections() -
         head_dim=4,
         intermediate_size=16,
         vocab_size=16,
-        use_npu_column_parallel_weight_layout=True,
     )
     layer = Qwen3DecoderLayer(cfg, 0, torch.float32, torch.device("cpu"))
     model = Qwen3ForCausalLM(
@@ -145,17 +141,16 @@ def test_qwen3_config_wires_column_parallel_layout_to_all_target_projections() -
             "vocab_size": 16,
             "dtype": "float32",
             "device": "cpu",
-            "use_npu_column_parallel_weight_layout": True,
         }
     )
 
-    assert layer.self_attn.qkv_proj._use_npu_weight_layout
-    assert layer.mlp.gate_up_proj._use_npu_weight_layout
+    assert layer.self_attn.qkv_proj._prepare_weight_layout
+    assert layer.mlp.gate_up_proj._prepare_weight_layout
     assert model.lm_head is not None
-    assert model.lm_head._use_npu_weight_layout
+    assert model.lm_head._prepare_weight_layout
 
 
-def test_qwen3_vl_config_wires_column_parallel_layout_to_vision_projections() -> None:
+def test_qwen3_vl_enables_backend_layout_for_vision_projections() -> None:
     vision = Qwen3VLVisionTransformer(
         Qwen3VLVisionConfig(
             deepstack_visual_indexes=[],
@@ -171,8 +166,7 @@ def test_qwen3_vl_config_wires_column_parallel_layout_to_vision_projections() ->
         ),
         dtype=torch.float32,
         device=torch.device("cpu"),
-        use_npu_weight_layout=True,
     )
 
-    assert vision.blocks[0].attn.qkv._use_npu_weight_layout
-    assert vision.blocks[0].mlp.linear_fc1._use_npu_weight_layout
+    assert vision.blocks[0].attn.qkv._prepare_weight_layout
+    assert vision.blocks[0].mlp.linear_fc1._prepare_weight_layout

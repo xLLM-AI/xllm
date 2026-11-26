@@ -38,7 +38,7 @@ class GatedMLP(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
         reduce_results: bool = True,
-        use_npu_weight_layout: bool = False,
+        prepare_gate_up_weight_layout: bool = False,
     ) -> None:
         super().__init__()
         if intermediate_size % tp_size:
@@ -50,7 +50,7 @@ class GatedMLP(nn.Module):
             tp_size,
             dtype=dtype,
             device=device,
-            use_npu_weight_layout=use_npu_weight_layout,
+            prepare_weight_layout=prepare_gate_up_weight_layout,
         )
         self.down_proj = self.row_parallel_cls(
             local_intermediate_size,

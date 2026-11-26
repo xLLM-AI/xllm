@@ -49,6 +49,7 @@ from .gated_delta_net import (
     resolve_gdn_prefill_backend,
 )
 from .linear import (
+    prepare_column_parallel_weight,
     prepare_quant_weight,
     prepare_row_parallel_weight,
 )
@@ -142,6 +143,7 @@ __all__ = [
     "moe_gmm2_combine",
     "prepare_grouped_moe_weights",
     "supports_cutlass_moe",
+    "prepare_column_parallel_weight",
     "prepare_row_parallel_weight",
     "prepare_quant_weight",
     "deepseek_mla_preprocess_decode",

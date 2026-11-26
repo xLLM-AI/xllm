@@ -20,6 +20,8 @@ import torch
 import torch_npu
 
 _FRACTAL_NZ_FORMAT = 29
+_COLUMN_PARALLEL_NZ_DEVICES = frozenset({"Ascend910B2"})
+_COLUMN_PARALLEL_NZ_DTYPES = frozenset({torch.bfloat16, torch.float16})
 
 
 def grouped_linear(hidden: torch.Tensor, weights: list[torch.Tensor]) -> list[torch.Tensor]:
@@ -60,13 +62,25 @@ def prepare_row_parallel_weight(
 def prepare_column_parallel_weight(
     weight: torch.Tensor,
 ) -> tuple[torch.Tensor, bool]:
-    """Lay out an opt-in column-parallel weight for NPU matmul.
+    """Lay out a supported column-parallel weight for NPU matmul.
 
     Column-parallel checkpoints store each local projection as ``[N, K]``.
     The selected matmul path consumes a single ``[K, N]`` FRACTAL_NZ tensor,
-    so replacing the parameter avoids retaining an ND copy beside it.
+    so replacing the parameter avoids retaining an ND copy beside it. Keep ND
+    for unverified devices, unsupported dtypes, meta tensors, and singleton
+    dimensions that cannot use the weight-NZ matmul path.
     """
-    if weight.device.type == "cpu":
+    if (
+        weight.device.type != "npu"
+        or weight.is_meta
+        or weight.dtype not in _COLUMN_PARALLEL_NZ_DTYPES
+        or weight.ndim < 2
+        or weight.shape[-1] == 1
+        or weight.shape[-2] == 1
+    ):
+        return weight, False
+    device_name = torch_npu.npu.get_device_name(weight.device.index)
+    if device_name not in _COLUMN_PARALLEL_NZ_DEVICES:
         return weight, False
     transposed = weight.transpose(0, 1).contiguous()
     return torch_npu.npu_format_cast(transposed, _FRACTAL_NZ_FORMAT), True

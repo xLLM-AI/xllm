@@ -262,7 +262,6 @@ class Qwen3VLVisionAttention(nn.Module):
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
         tp_size: int = 1,
-        use_npu_weight_layout: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -277,7 +276,7 @@ class Qwen3VLVisionAttention(nn.Module):
             3 * local_hidden_size,
             tp_size,
             bias=True,
-            use_npu_weight_layout=use_npu_weight_layout,
+            prepare_weight_layout=True,
         )
         self.proj = RowParallelLinear(local_hidden_size, hidden_size, tp_size, bias=True)
         if dtype is not None and device is not None:
@@ -323,7 +322,6 @@ class Qwen3VLVisionMLP(nn.Module):
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
         tp_size: int = 1,
-        use_npu_weight_layout: bool = False,
     ) -> None:
         super().__init__()
         if intermediate_size % tp_size:
@@ -333,7 +331,7 @@ class Qwen3VLVisionMLP(nn.Module):
             intermediate_size // tp_size,
             tp_size,
             bias=True,
-            use_npu_weight_layout=use_npu_weight_layout,
+            prepare_weight_layout=True,
         )
         if hidden_act == "gelu_pytorch_tanh":
             self.act_fn = nn.GELU(approximate="tanh")
@@ -363,7 +361,6 @@ class Qwen3VLVisionBlock(nn.Module):
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
         tp_size: int = 1,
-        use_npu_weight_layout: bool = False,
     ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, eps=1e-6)
@@ -373,7 +370,6 @@ class Qwen3VLVisionBlock(nn.Module):
             dtype=dtype,
             device=device,
             tp_size=tp_size,
-            use_npu_weight_layout=use_npu_weight_layout,
         )
         self.norm2 = nn.LayerNorm(hidden_size, eps=1e-6)
         self.mlp = Qwen3VLVisionMLP(
@@ -383,7 +379,6 @@ class Qwen3VLVisionBlock(nn.Module):
             dtype=dtype,
             device=device,
             tp_size=tp_size,
-            use_npu_weight_layout=use_npu_weight_layout,
         )
 
     def forward(
@@ -432,7 +427,6 @@ class Qwen3VLVisionTransformer(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
         tp_size: int = 1,
-        use_npu_weight_layout: bool = False,
     ) -> None:
         super().__init__()
         self.cfg = vision_config
@@ -483,7 +477,6 @@ class Qwen3VLVisionTransformer(nn.Module):
                     dtype=dtype,
                     device=device,
                     tp_size=tp_size,
-                    use_npu_weight_layout=use_npu_weight_layout,
                 )
                 for _ in range(vision_config.depth)
             ]
@@ -940,7 +933,6 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             dtype=dtype,
             device=device,
             tp_size=text_cfg.tp_size,
-            use_npu_weight_layout=text_cfg.use_npu_column_parallel_weight_layout,
         )
         # Armed by configure_runtime when the worker runs graph execution.
         self._vision_graph_runner: VisionAclGraphRunner | None = None
@@ -958,7 +950,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             gather_output=True,
             dtype=dtype,
             device=device,
-            use_npu_weight_layout=text_cfg.use_npu_column_parallel_weight_layout,
+            prepare_weight_layout=text_cfg.prepare_column_parallel_weight_layout,
         )
 
     # ------------------------------------------------------------------

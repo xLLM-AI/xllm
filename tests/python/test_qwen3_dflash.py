@@ -132,14 +132,14 @@ def test_draft_attention_is_non_causal() -> None:
     (DFlashQwen3Config, DFlash2Qwen3Config, Qwen3DSparkConfig),
 )
 def test_draft_configs_preserve_qkv_checkpoint_layout(config_cls: type[DFlashQwen3Config]) -> None:
-    config = config_cls.from_dict(_config_dict(use_npu_column_parallel_weight_layout=True))
+    config = config_cls.from_dict(_config_dict())
     model = DFlashQwen3Model(config, torch.float32, torch.device("cpu"))
 
     model._build_context_kv_buffers()
 
     attention = model.layers[0].self_attn
-    assert not config.use_npu_column_parallel_weight_layout
-    assert not attention.qkv_proj._use_npu_weight_layout
+    assert not config.prepare_column_parallel_weight_layout
+    assert not attention.qkv_proj._prepare_weight_layout
     assert model._fused_kv_weight is not None
     assert model._fused_kv_weight.shape == (
         2 * attention.kv_size,

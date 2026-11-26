@@ -59,6 +59,8 @@ def _load_reference_quarot_rotation(
 @dataclass
 class DFlashQwen3Config(Qwen3Config):
     supports_reduced_draft_vocab: ClassVar[bool] = False
+    # Context-KV extraction slices QKV weights in checkpoint [N, K] layout.
+    prepare_column_parallel_weight_layout: ClassVar[bool] = False
 
     draft_vocab_size: int = 0
     block_size: int = 0
@@ -67,10 +69,6 @@ class DFlashQwen3Config(Qwen3Config):
     @classmethod
     def from_dict(cls, d: dict) -> DFlashQwen3Config:
         normalized_config = dict(d)
-        # Draft context-KV extraction slices fused QKV weights in checkpoint
-        # [out_features, in_features] layout. Keep draft projections in that
-        # layout until the extraction path supports prepared transposed weights.
-        normalized_config["use_npu_column_parallel_weight_layout"] = False
         rope_parameters = d.get("rope_parameters") or {}
         if normalized_config.get("rope_theta") is None:
             normalized_config["rope_theta"] = rope_parameters.get("rope_theta")

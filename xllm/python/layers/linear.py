@@ -49,12 +49,12 @@ class ColumnParallelLinear(nn.Module):
         bias: bool = False,
         dtype: torch.dtype | None = None,
         device: torch.device | str | None = None,
-        use_npu_weight_layout: bool = False,
+        prepare_weight_layout: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = tp_size
         self.gather_output = gather_output
-        self._use_npu_weight_layout = use_npu_weight_layout
+        self._prepare_weight_layout = prepare_weight_layout
         self._weight_is_transposed = False
         self._prepared_weight: torch.Tensor | None = None
         self.weight = nn.Parameter(
@@ -71,8 +71,8 @@ class ColumnParallelLinear(nn.Module):
             self.register_parameter("bias", None)
 
     def process_weights_after_loading(self) -> None:
-        """Prepare the explicitly selected NPU layout once after loading."""
-        if not self._use_npu_weight_layout or self._weight_is_transposed:
+        """Prepare the backend-selected weight layout once after loading."""
+        if not self._prepare_weight_layout or self._weight_is_transposed:
             return
         prepared, is_transposed = kernels.prepare_column_parallel_weight(self.weight.data)
         if (
