@@ -21,7 +21,9 @@ from typing import Any
 import torch
 from diffusers import MiniMaxH3Scheduler
 
+from scripts.logger import logger
 from xllm.python.dit import ComponentLoad
+from xllm.python.dit.minimax_h3_acl_graph import MiniMaxH3AclGraphRunner
 from xllm.python.dit.minimax_h3_model import (
     MiniMaxH3Denoiser,
     PackedConditioning,
@@ -187,9 +189,11 @@ class MiniMaxH3Pipeline:
         vae_gather: Callable[[torch.Tensor], torch.Tensor],
         *,
         laser_attention_enabled: bool = False,
+        enable_graph: bool = False,
     ) -> None:
         self._device = torch.device(device)
         self._laser_attention_enabled = laser_attention_enabled
+        self._enable_graph = enable_graph
         self._is_driver = is_driver
         self._tp = TensorParallel(tp_rank, tp_size, tp_reduce, tp_gather)
         self._sp = SequenceParallel(sp_rank, sp_size, sp_gather, sp_exchange)
@@ -212,6 +216,9 @@ class MiniMaxH3Pipeline:
         if name == "transformer":
             self._denoiser = MiniMaxH3Denoiser(
                 path, shards, self._device, self._tp, self._sp, laser_attention_enabled=self._laser_attention_enabled
+            )
+            self._denoise_step = (
+                MiniMaxH3AclGraphRunner(self._denoiser, self._device) if self._enable_graph else self._denoiser
             )
         elif name == "vae":
             self._video_decoder = load_video_decoder(path, shards, self._device, self._tiles)
@@ -322,7 +329,14 @@ class MiniMaxH3Pipeline:
         for step, (times, mode) in enumerate(step_layouts):
             video_t = video_scheduler.timesteps[step]
             audio_t = audio_scheduler.timesteps[step]
-            video_pred, audio_pred = self._denoiser(video, audio, times, timestep_indices[mode], conditioning)
+            video_pred, audio_pred = self._denoise_step(video, audio, times, timestep_indices[mode], conditioning)
             video = video_scheduler.step(video_pred, video_t, video, return_dict=False)[0]
             audio = audio_scheduler.step(audio_pred, audio_t, audio, return_dict=False)[0]
+        if self._enable_graph:
+            logger.info(
+                "Python MiniMax-H3 ACL graph denoising complete: device=%s captures=%d replays=%d",
+                self._device,
+                self._denoise_step.captured_steps,
+                self._denoise_step.replayed_steps,
+            )
         return video, audio

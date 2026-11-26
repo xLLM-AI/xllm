@@ -103,6 +103,18 @@ VAE 保持 FP32，每张参与的 NPU 都会加载完整的视频 VAE 权重，�
 `heads % (TP * SP) == 0`、`video_patch_dim % TP == 0` 和
 `audio_in_channels % TP == 0`。
 
+## Python ACLGraph
+
+四卡 TP2/SP2/VAE4 的 Python 路径可设置 `--model_impl=python --enable_graph=true`，
+并保持 `--dit_cache_policy=None --enable_rolling_load=false`。该选项捕获去噪器的
+单步 Transformer 执行，包括 TP/SP 通信；文本条件准备、调度器和 VAE 解码仍按原路径执行。
+
+首次遇到请求形状时先预热，再分别捕获单时间步和双时间步的图，因此首次请求包含
+预热和捕获开销。后续相同形状的请求更新 latent、时间步、文本条件和位置编码后复用图。
+每个 worker 只保留最近一种请求形状的图，形状改变时重新捕获。
+日志中的 `ACL graph captured` 和 `ACL graph denoising complete` 分别记录捕获及累计 replay 次数。
+设置 `--enable_graph=false` 使用 eager 路径。
+
 ## Laser Attention
 
 在 Ascend NPU 上启用 Laser 时，将上述服务启动参数改为

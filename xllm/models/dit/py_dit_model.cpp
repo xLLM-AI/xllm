@@ -27,6 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/dit_config.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/model_context/dit_model_context.h"
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/process_group.h"
@@ -129,7 +130,8 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
         return vae->allgather_base_sync(input);
       }),
       py::arg("laser_attention_enabled") =
-          DiTConfig::get_instance().dit_laser_attention_enabled());
+          DiTConfig::get_instance().dit_laser_attention_enabled(),
+      py::arg("enable_graph") = ExecutionConfig::get_instance().enable_graph());
 }
 
 PyDiTModel::~PyDiTModel() { clear_python_object(pipeline_); }

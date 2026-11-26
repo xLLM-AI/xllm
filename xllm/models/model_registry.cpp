@@ -26,7 +26,6 @@ limitations under the License.
 #include "core/common/extension_registry.h"
 #include "core/common/options.h"
 #include "core/framework/config/dit_config.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
@@ -854,9 +853,8 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context) {
       CHECK(context.get_dit_config().selected_policy == PolicyType::None)
           << "Python MiniMax-H3 requires dit_cache_policy=None";
       CHECK(!config.dit_sparse_attention_enabled() &&
-            !ExecutionConfig::get_instance().enable_graph() &&
             !LoadConfig::get_instance().enable_rolling_load())
-          << "Python MiniMax-H3 requires dense eager execution";
+          << "Python MiniMax-H3 requires dense execution with resident weights";
       CHECK(parallel.world_size() == 4 && parallel.tp_size() == 2 &&
             parallel.sp_size() == 2 && parallel.vae_size() == 4 &&
             parallel.cfg_size() == 1 && parallel.dp_size() == 1 &&

@@ -112,6 +112,20 @@ it based on the compressed MP4. The standard checkpoint has 56 attention heads,
 `heads % (TP * SP) == 0`, `video_patch_dim % TP == 0`, and
 `audio_in_channels % TP == 0`.
 
+## Python ACLGraph
+
+For the four-device TP2/SP2/VAE4 Python path, set `--model_impl=python --enable_graph=true`
+with `--dit_cache_policy=None --enable_rolling_load=false`. This captures one Transformer
+denoising step, including TP/SP collectives. Text conditioning, schedulers, and VAE
+decoding keep their existing execution paths.
+
+The first request of a shape warms up and captures separate graphs for one and two
+timesteps, so its latency includes warmup and capture. Later requests of the same shape
+reuse the graphs after updating latents, timesteps, text conditioning, and rotary tables.
+Each worker retains graphs for only the most recent request shape and recaptures when
+the shape changes. The `ACL graph captured` and `ACL graph denoising complete` logs
+report captures and cumulative replay counts. Set `--enable_graph=false` for eager execution.
+
 ## Laser Attention
 
 To enable Laser on Ascend NPUs, change the service argument above to
