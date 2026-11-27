@@ -32,7 +32,6 @@ limitations under the License.
 #include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
@@ -330,7 +329,9 @@ VLMMaster::VLMMaster(const Options& options)
   }
 
   SchedulerOptions scheduler_options;
-  scheduler_options.max_tokens_per_batch(options_.max_tokens_per_batch())
+  scheduler_options.enable_graph(options_.enable_graph())
+      .disable_graph_warmup(options_.disable_graph_warmup())
+      .max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .request_queue_size(options_.request_queue_size())
       .max_tokens_per_chunk_for_prefill(
@@ -802,8 +803,7 @@ void VLMMaster::run() {
 
   if (!is_sleeping() && !requires_wakeup() &&
       !options_.enable_offline_inference() && !options_.enable_disagg_pd() &&
-      !ExecutionConfig::get_instance().disable_graph_warmup() &&
-      model_args_.image_token_id() != 0) {
+      !options_.disable_graph_warmup() && model_args_.image_token_id() != 0) {
     warmup_multimodal();
   }
 }

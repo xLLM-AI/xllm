@@ -55,6 +55,10 @@ class ProfileManager {
 
  public:
   struct Options {
+    PROPERTY(bool, enable_graph) = false;
+
+    PROPERTY(bool, disable_graph_warmup) = false;
+
     PROPERTY(bool, enable_schedule_overlap) = false;
 
     PROPERTY(int32_t, dp_size) = 1;

@@ -94,6 +94,7 @@ class VLM:
         model_impl: str = "",
         enable_graph_double_buffer: bool = True,
         acl_graph_decode_batch_size_limit: int = 16,
+        disable_graph_warmup: bool = False,
         **kwargs: Any,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
@@ -145,6 +146,7 @@ class VLM:
         options.enable_schedule_overlap = enable_schedule_overlap
         options.kv_cache_transfer_mode = kv_cache_transfer_mode
         options.enable_graph = enable_graph
+        options.disable_graph_warmup = disable_graph_warmup
         options.enable_graph_double_buffer = enable_graph_double_buffer
         options.acl_graph_decode_batch_size_limit = acl_graph_decode_batch_size_limit
         options.enable_graph_mode_decode_no_padding = enable_graph_mode_decode_no_padding

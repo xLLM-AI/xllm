@@ -38,6 +38,14 @@ def test_graph_double_buffer_cli(arguments: list[str], expected: bool) -> None:
     assert ArgumentParser().parser.parse_args(arguments).enable_graph_double_buffer is expected
 
 
+@pytest.mark.parametrize(
+    "arguments,expected",
+    [([], False), (["--disable_graph_warmup"], True), (["--disable_graph_warmup", "false"], False)],
+)
+def test_disable_graph_warmup_cli(arguments: list[str], expected: bool) -> None:
+    assert ArgumentParser().parser.parse_args(arguments).disable_graph_warmup is expected
+
+
 @pytest.mark.parametrize("arguments,expected", [([], 16), (["--acl_graph_decode_batch_size_limit", "3"], 3)])
 def test_graph_decode_limit_cli(arguments: list[str], expected: int) -> None:
     assert ArgumentParser().parser.parse_args(arguments).acl_graph_decode_batch_size_limit == expected
@@ -62,7 +70,11 @@ def test_constructor_keeps_graph_buffering_per_instance(
     constructor = getattr(api_module, api_name)
 
     single_buffer = constructor(
-        model=str(tmp_path), enable_graph=True, enable_graph_double_buffer=False, acl_graph_decode_batch_size_limit=3
+        model=str(tmp_path),
+        enable_graph=True,
+        enable_graph_double_buffer=False,
+        acl_graph_decode_batch_size_limit=3,
+        disable_graph_warmup=True,
     )
     single_buffer_options = master.call_args.args[0]
     double_buffer = constructor(model=str(tmp_path), enable_graph=True)
@@ -79,3 +91,5 @@ def test_constructor_keeps_graph_buffering_per_instance(
     assert double_buffer_options.enable_graph_double_buffer is True
     assert single_buffer_options.acl_graph_decode_batch_size_limit == 3
     assert double_buffer_options.acl_graph_decode_batch_size_limit == 16
+    assert single_buffer_options.disable_graph_warmup is True
+    assert double_buffer_options.disable_graph_warmup is False

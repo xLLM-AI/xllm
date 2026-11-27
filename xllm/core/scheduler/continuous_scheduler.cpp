@@ -104,7 +104,9 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
       ::xllm::KVCacheConfig::get_instance().enable_in_batch_prefix_cache();
 
   ProfileManager::Options profile_manager_options;
-  profile_manager_options.dp_size(options.dp_size())
+  profile_manager_options.enable_graph(options.enable_graph())
+      .disable_graph_warmup(options.disable_graph_warmup())
+      .dp_size(options.dp_size())
       .enable_dp_fair_token_budget(options.enable_dp_fair_token_budget())
       .enable_chunked_prefill(options.enable_chunked_prefill())
       .max_tokens_per_chunk_for_prefill(
