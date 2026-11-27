@@ -1,0 +1,38 @@
+{
+  "utc": "2026-11-17T06:35:57.230569+00:00",
+  "hostname": "775dbd970f3d4c20bfd836f8ae44a220",
+  "platform": "Linux-5.10.0-182.0.0.95.r2220_156.hce2.aarch64-aarch64-with-glibc2.39",
+  "machine": "aarch64",
+  "python": "3.11.14",
+  "python_executable": "/mnt/workspace/task06/venv/bin/python",
+  "device": "Ascend910_9362",
+  "device_count": 2,
+  "triton_target": "GPUTarget(backend='npu', arch='Ascend910_9362', warp_size=0)",
+  "versions": {
+    "torch": "2.10.0",
+    "torch-npu": "2.10.0.post4",
+    "triton-ascend": "3.2.2",
+    "triton": "3.5.0",
+    "numpy": "1.26.4",
+    "openpyxl": "3.1.5"
+  },
+  "cann": "cann-9.1.0",
+  "ascend_home_path": "/home/developer/Ascend/cann-9.1.0",
+  "ascend_rt_visible_devices": null,
+  "cpp_extension_built": true,
+  "cpp_extension_error": null,
+  "source_sha256": {
+    "solution.py": "6fb90499063fb508b11bbbb082a64763b9082fea27886e08a9e46a0453540eab",
+    "csrc/packed_ext.cpp": "97a9d9d23ed76b49180f60dccf5fc2c9fbfdec9465d0f98394d91c64caed8f65",
+    "task_pkg/case.json": "dbb78e3103677d0a1db7476ab309cdde7d748894532e07b1ce13c0bf06483244",
+    "task_pkg/golden.py": "ea5097bdb304f75ca747953a489d549ff7d4d7e9294bbf972225c0693c11d897",
+    "task_pkg/generate_data.py": "c7109370c7f8d419eab3618db198f4dd163f6b5c131f19af94ce68e1add315f8",
+    "selftest/common.py": "4b8e6d847d7b440d6a4b71cd9a7a585ba3f7c5413f5908344b1e98daf33a7a4a",
+    "selftest/functional.py": "e7ccc0d4d5bcdf76eb6a200cf9ce07ae71e40d328328de23fca584e35b3c385c",
+    "selftest/performance.py": "62d151f863939e1a33d29ecc1e6ee107347884b7a5855f12925bfc2a67bb5ca1",
+    "selftest/memory.py": "e0bde758691714f7d341dd8752b1c648c31b23b46bf6d8112bbe97d8f81eadeb",
+    "selftest/generalization.py": "26a6d3e56aacff9ef8978e9347a7266aa748640b20cce7241e8688da18b79f40",
+    "selftest/report.py": "3e36b924046043c914f1c931d5866555bb1b20c2689f454b467a9897346ec4d8",
+    "selftest/run_all.py": "bb1652c8a14237fe0ca1aa1c359e84a16dbd8562306befdd6ed4a9f51c58e070"
+  }
+}
