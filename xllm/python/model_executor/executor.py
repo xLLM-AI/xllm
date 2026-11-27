@@ -458,7 +458,9 @@ class ModelExecutor:
             if self._independent_block_draft or use_swa_context_graph:
                 from xllm.python.model_executor.runners.context_kv_acl_graph import ContextKvAclGraphRunner
 
-                self.context_kv_graph_runner = ContextKvAclGraphRunner(model, device)
+                self.context_kv_graph_runner = ContextKvAclGraphRunner(
+                    model, device, use_swa_cache=use_swa_context_graph
+                )
             from xllm.python.model_executor.runners.decode_acl_graph import (
                 DecodeAclGraphRunner,
             )
@@ -485,7 +487,7 @@ class ModelExecutor:
                 int(config["max_position_embeddings"]),
                 dp_size,
                 dp_rank,
-                causal=not self._independent_block_draft,
+                causal=not (self._independent_block_draft or config.get("model_type") == "deepseek_v41_dspark"),
                 block_draft_graph_warmup_max_kv_len=int(config.get("block_draft_graph_warmup_max_kv_len", 0)),
                 num_speculative_tokens=self.num_speculative_tokens,
                 is_spec_draft=bool(config.get("is_draft_engine", False)),
@@ -496,6 +498,12 @@ class ModelExecutor:
                 device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
                 kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
                 max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
+                fixed_dp_graph_layout=(
+                    dp_size > 1
+                    and config.get("model_type") == "deepseek_v41"
+                    and bool(config.get("is_block_diffusion_algorithm", False))
+                    and self.num_speculative_tokens > 0
+                ),
             )
         else:
             if self.layerwise_split_size > 1:

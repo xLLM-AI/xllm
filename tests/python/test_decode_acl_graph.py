@@ -344,6 +344,7 @@ def test_failed_decode_startup_capture_does_not_admit_shape() -> None:
 
 
 class _FakeNonCausalAttentionBackend:
+    draft_query_width = 0
     page_size = 4
     logical_page_size = 4
     is_mla = False
@@ -398,12 +399,15 @@ def _non_causal_metadata(block_table: torch.Tensor, query_width: int = 2) -> Sim
 
 @pytest.mark.parametrize("width", [3, 5])
 def test_fixed_draft_graph_uses_configured_width_without_reading_query_lengths(width: int) -> None:
-    backend = _FakeBlockDraftAttentionBackend()
+    backend = _FakeNonCausalAttentionBackend()
     backend.draft_query_width = width
-    runner = BlockDraftAclGraphRunner(nn.Identity(), backend, torch.device("cpu"), max_batch=2, max_model_len=16)
-    table = torch.zeros((2, 4), dtype=torch.int32)
-    metadata = _block_draft_metadata(table)
+    runner = DecodeAclGraphRunner(
+        nn.Identity(), backend, torch.device("cpu"), max_batch=2 * width, max_model_len=16, causal=False
+    )
+    table = torch.tensor([[2, 3], [5, 7]], dtype=torch.int32)
+    metadata = _non_causal_metadata(table, width)
     metadata.block_table = None
+    metadata.slot_mapping = None
     metadata.multi_block_tables = (table,)
     # A meta tensor has a shape but cannot service item() or tolist().
     metadata.q_seq_lens = torch.empty(2, dtype=torch.int32, device="meta")
@@ -418,7 +422,9 @@ def test_fixed_draft_graph_uses_configured_width_without_reading_query_lengths(w
     assert preparation.metadata.block_table is table
     assert preparation.padded_batch_size == tokens.numel()
     assert runner.prepare_execution(tokens[:-1], metadata) is None
-    entry = runner._allocate_entry(tokens, tokens, preparation.metadata, sequence_count=2, page_table_capacity=4)
+    entry = runner._allocate_entry(tokens.numel(), tokens, preparation.metadata, kv_capacity_pages=4)
+    runner._fill_entry(entry, tokens, tokens, preparation.metadata, tokens.numel(), None)
+    assert entry.static_metadata.block_table.tolist() == [[2, 3, 2, 3], [5, 7, 5, 7]]
     assert entry.static_input_ids.numel() == 2 * width
     assert entry.static_metadata.q_seq_lens.tolist() == [width, width]
 

@@ -186,16 +186,17 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.max_batch = (max_batch + dp_size - 1) // dp_size
         self.max_model_len = max_model_len
         self.num_speculative_tokens = num_speculative_tokens
-        self._fixed_dp_graph_layout = fixed_dp_graph_layout
+        self._fixed_dp_graph_layout = fixed_dp_graph_layout or (
+            not causal and getattr(attention_backend, "draft_query_width", 0) > 0
+        )
         self._is_spec_draft = is_spec_draft
         self._causal = causal
         if type(block_draft_graph_warmup_max_kv_len) is not int or block_draft_graph_warmup_max_kv_len < -1:
             raise ValueError("Block graph warmup KV limit must be -1, zero or a positive integer")
         self._block_draft_graph_warmup_max_kv_len = block_draft_graph_warmup_max_kv_len
-        self._windowed_decode = (
-            not causal
-            and not getattr(attention_backend, "is_mla", False)
-            and block_draft_model_window_context(model) is not None
+        self._windowed_decode = not causal and (
+            self._fixed_dp_graph_layout
+            or (not getattr(attention_backend, "is_mla", False) and block_draft_model_window_context(model) is not None)
         )
         self._max_capture_tokens = max_capture_tokens
         self._enable_decode_no_padding = enable_graph_mode_decode_no_padding
@@ -478,6 +479,14 @@ class DecodeAclGraphRunner(AclGraphRunner):
     ) -> AttentionMetadata:
         """Normalize busy and dummy DSA batches alike so every DP rank selects the same runner."""
         if isinstance(metadata, _DsaGraphMetadataView):
+            return metadata
+        if not self._causal and self._fixed_dp_graph_layout:
+            tables = getattr(metadata, "multi_block_tables", ())
+            if tables:
+                return cast(
+                    "AttentionMetadata",
+                    _DsaGraphMetadataView(metadata, tables[0], metadata.slot_mapping, tuple(tables)),
+                )
             return metadata
         group_infos = getattr(self.attention_backend, "group_infos", None)
         if group_infos is None:
@@ -2136,22 +2145,28 @@ class DecodeAclGraphRunner(AclGraphRunner):
         block_table = metadata.block_table
         slot_mapping = metadata.slot_mapping
         kv_seq_lens = metadata.kv_seq_lens
-        if q_seq_lens is None or block_table is None or slot_mapping is None or kv_seq_lens is None:
+        if q_seq_lens is None or block_table is None or kv_seq_lens is None:
             return None
         if q_seq_lens.dim() != 1 or q_seq_lens.numel() == 0:
             return None
-        query_widths = q_seq_lens.to(torch.int64).tolist()
         query_width = metadata.decode_query_width
-        if query_width is None or query_width <= 0 or any(width != query_width for width in query_widths):
+        if query_width is None or query_width <= 0:
             return None
-        sequence_count = len(query_widths)
+        if self._fixed_dp_graph_layout:
+            if query_width != self.attention_backend.draft_query_width:
+                return None
+        elif any(width != query_width for width in q_seq_lens.to(torch.int64).tolist()):
+            return None
+        sequence_count = q_seq_lens.numel()
         if input_ids.numel() > self.max_batch:
             return None
         if block_table.dim() != 2 or block_table.shape[0] != sequence_count:
             return None
         if input_ids.numel() != sequence_count * query_width:
             return None
-        if slot_mapping.dim() != 1 or slot_mapping.numel() != input_ids.numel():
+        if not self._fixed_dp_graph_layout and (
+            slot_mapping is None or slot_mapping.dim() != 1 or slot_mapping.numel() != input_ids.numel()
+        ):
             return None
         if kv_seq_lens.dtype != torch.int32 or kv_seq_lens.shape != (sequence_count,):
             return None
@@ -2160,9 +2175,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
             return None
         if any(int(length) <= 0 for length in host_kv_lens):
             return None
-        if not self._valid_paged_metadata(metadata, sequence_count):
+        if not self._fixed_dp_graph_layout and not self._valid_paged_metadata(metadata, sequence_count):
             return None
-        query_ends = self._query_ends(metadata, query_widths)
+        query_ends = self._query_ends(metadata, sequence_count, query_width)
         if query_ends is None or query_ends[-1] != input_ids.numel():
             return None
         if block_table.shape[1] <= 0:
@@ -2197,21 +2212,15 @@ class DecodeAclGraphRunner(AclGraphRunner):
         return min(_decode_bucket(group_sequences), max_sequences)
 
     @staticmethod
-    def _query_ends(metadata: AttentionMetadata, query_widths: list[int]) -> list[int] | None:
+    def _query_ends(metadata: AttentionMetadata, sequence_count: int, query_width: int) -> list[int] | None:
         host_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
         if host_ends is None:
             return None
         host_ends = list(host_ends)
-        if len(host_ends) == len(query_widths) + 1 and host_ends[0] == 0:
+        if len(host_ends) == sequence_count + 1 and host_ends[0] == 0:
             host_ends = host_ends[1:]
-        if len(host_ends) != len(query_widths):
-            return None
-        expected = []
-        total = 0
-        for width in query_widths:
-            total += width
-            expected.append(total)
-        return host_ends if host_ends == expected else None
+        expected = range(query_width, sequence_count * query_width + 1, query_width)
+        return host_ends if host_ends == list(expected) else None
 
     @staticmethod
     def _valid_paged_metadata(metadata: AttentionMetadata, sequence_count: int) -> bool:
@@ -2353,7 +2362,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if page_size <= 0:
             raise ValueError("Non-causal decode ACL graph page size must be positive")
         kv_capacity = page_table_capacity * page_size
-        if self._query_ends(metadata, [query_width] * metadata.q_seq_lens.numel()) is None:
+        if self._query_ends(metadata, metadata.q_seq_lens.numel(), query_width) is None:
             raise ValueError("Non-causal decode ACL graph requires canonical query ends")
         query_ends = [query_width * (index + 1) for index in range(sequence_count)]
         static_block_table = torch.zeros(
@@ -2364,7 +2373,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
         )
         static_kv_lens = torch.empty(sequence_count, dtype=torch.int32, device=device)
         static_metadata = StaticGraphAttentionMetadata(
-            slot_mapping=torch.full((token_count,), -1, dtype=metadata.slot_mapping.dtype, device=device),
+            slot_mapping=torch.full(
+                (token_count,),
+                -1,
+                dtype=torch.int32 if self._fixed_dp_graph_layout else metadata.slot_mapping.dtype,
+                device=device,
+            ),
             paged_kv_indptr=torch.zeros(sequence_count + 1, dtype=torch.int32, device=device),
             paged_kv_indices=torch.zeros(sequence_count * page_table_capacity, dtype=torch.int32, device=device),
             paged_kv_last_page_len=torch.ones(sequence_count, dtype=torch.int32, device=device),
@@ -2391,6 +2405,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             kv_seq_lens=static_kv_lens,
             is_chunked_prefill=True,
             decode_query_width=getattr(metadata, "decode_query_width", None),
+            dsa_graph_mode=self._fixed_dp_graph_layout,
             num_speculative_tokens=getattr(metadata, "num_speculative_tokens", 0),
             dp_execution_token_counts=(token_count,) * self.dp_size if self.dp_size > 1 else (),
             dp_is_decode=(1,) * self.dp_size if self.dp_size > 1 else (),
@@ -2431,11 +2446,28 @@ class DecodeAclGraphRunner(AclGraphRunner):
             input_ids.dim() != 1
             or token_count != sequence_count * query_width
             or positions.shape != input_ids.shape
-            or metadata.slot_mapping.shape != input_ids.shape
+            or (not self._fixed_dp_graph_layout and metadata.slot_mapping.shape != input_ids.shape)
             or metadata.kv_seq_lens.shape != (sequence_count,)
-            or self._query_ends(metadata, [query_width] * sequence_count) is None
+            or self._query_ends(metadata, sequence_count, query_width) is None
         ):
             raise ValueError("Non-causal decode ACL graph query layout changed within a graph bucket")
+        entry.static_input_ids[:token_count].copy_(input_ids)
+        entry.static_positions[:token_count].copy_(positions.to(torch.int32))
+        entry.static_input_ids[token_count:].zero_()
+        entry.static_positions[token_count:].zero_()
+        if self._fixed_dp_graph_layout:
+            # Expand the physical ring to stable logical columns. Its
+            # physical width comes from the current scheduler batch.
+            block_table = block_table.to(device=static.block_table.device, non_blocking=True)
+            columns = torch.arange(static.block_table.shape[1], device=block_table.device)
+            columns.remainder_(block_table.shape[1])
+            static.block_table[:sequence_count].copy_(block_table.index_select(1, columns))
+            static.block_table[sequence_count:].zero_()
+            static.kv_seq_lens[:sequence_count].copy_(metadata.kv_seq_lens)
+            if getattr(metadata, "is_dummy", False):
+                static.kv_seq_lens[:sequence_count].zero_()
+            static.kv_seq_lens[sequence_count:].zero_()
+            return
         if not self._valid_paged_metadata(metadata, block_table.shape[0]):
             raise ValueError("Non-causal decode ACL graph paged KV metadata is inconsistent")
         page_counts = self._non_causal_page_counts(metadata)
@@ -2456,10 +2488,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if prepared is None:
             raise RuntimeError("Non-causal decode ACL graph prepared attention state is missing")
 
-        entry.static_input_ids[:token_count].copy_(input_ids)
-        entry.static_positions[:token_count].copy_(positions.to(torch.int32))
-        entry.static_input_ids[token_count:].zero_()
-        entry.static_positions[token_count:].zero_()
         static.slot_mapping[:token_count].copy_(metadata.slot_mapping)
         static.slot_mapping[token_count:].fill_(-1)
         static.block_table.zero_()
