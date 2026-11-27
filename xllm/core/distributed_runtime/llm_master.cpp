@@ -262,7 +262,9 @@ LLMMaster::LLMMaster(const Options& options)
   task_type_ = options_.task_type();
 
   SchedulerOptions scheduler_options;
-  scheduler_options.max_tokens_per_batch(options_.max_tokens_per_batch())
+  scheduler_options.enable_graph(options_.enable_graph())
+      .disable_graph_warmup(options_.disable_graph_warmup())
+      .max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .request_queue_size(options_.request_queue_size())
       .max_tokens_per_chunk_for_prefill(

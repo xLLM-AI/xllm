@@ -220,6 +220,8 @@ class Options {
 
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;
+  // skip synthetic graph warmup while retaining lazy graph capture
+  PROPERTY(bool, disable_graph_warmup) = false;
   // alternate NPU graph slots so input preparation can overlap replay
   PROPERTY(bool, enable_graph_double_buffer) = true;
   // enable graph-mode decode without padding

@@ -131,6 +131,7 @@ std::string Options::to_string() const {
      << ", enable_multi_stream_parallel: " << enable_multi_stream_parallel()
      << ", disable_ttft_profiling: " << disable_ttft_profiling()
      << ", enable_graph: " << enable_graph()
+     << ", disable_graph_warmup: " << disable_graph_warmup()
      << ", enable_graph_double_buffer: " << enable_graph_double_buffer()
      << ", acl_graph_decode_batch_size_limit: "
      << acl_graph_decode_batch_size_limit()

@@ -170,6 +170,14 @@ class ArgumentParser:
             help="Maximum per-DP-rank decode batch size for NPU graph execution.",
         )
         self.parser.add_argument(
+            "--disable_graph_warmup",
+            nargs="?",
+            const=True,
+            default=False,
+            type=_str_to_bool,
+            help="Skip synthetic graph warmup at startup; capture graphs lazily from real requests.",
+        )
+        self.parser.add_argument(
             "--enable_graph_double_buffer",
             nargs="?",
             const=True,

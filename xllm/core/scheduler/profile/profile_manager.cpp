@@ -178,10 +178,9 @@ ProfileManager::ProfileManager(
   // prediction.
 
 #if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
-  const auto& execution_config = ::xllm::ExecutionConfig::get_instance();
-  if (execution_config.enable_graph()) {
-    if (execution_config.disable_graph_warmup()) {
-      LOG(INFO) << "Graph warmup disabled by execution config; graphs will "
+  if (options_.enable_graph()) {
+    if (options_.disable_graph_warmup()) {
+      LOG(INFO) << "Graph warmup disabled by instance options; graphs will "
                    "be captured lazily from real requests";
     } else {
       warmup_for_graph();
