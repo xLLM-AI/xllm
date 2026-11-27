@@ -1008,20 +1008,37 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             max_kv_len = table.size(1) * cache.size(1) if dsa.is_acl_graph else dsa.max_seq_len
         cu_seqlens_q = dsa.actual_seq_lengths_query
         if shared.swa_metadata is None:
-            shared.swa_metadata = torch.ops.xllm_ops.sparse_flash_mla_swa_metadata(
-                cu_seqlens_q, seq_lens, q.size(1), q.size(2), max_query_len, max_kv_len, self.window_size
+            shared.swa_metadata = torch.ops.xllm_ops.sparse_flash_mla_metadata(
+                cu_seqlens_q,
+                seq_lens,
+                None,
+                None,
+                q.size(1),
+                q.size(2),
+                max_query_len,
+                max_kv_len,
+                max_seqlen_cmp_kv=0,
+                cmp_topk=0,
+                cmp_ratio=0,
+                window_size=self.window_size,
             )
         sinks = layer.attn_sink.float() if layer.attn_sink_loaded else None
-        output = torch.ops.xllm_ops.sparse_flash_mla_swa(
+        output = torch.ops.xllm_ops.sparse_flash_mla(
             q,
             attention_kv,
             attention_table,
             cu_seqlens_q,
             seq_lens,
-            sinks,
-            shared.swa_metadata,
-            self.scale,
-            self.window_size,
+            cmp_kv=None,
+            cmp_block_table=None,
+            cmp_indices=None,
+            seqused_cmp_kv=None,
+            cmp_residual_kv=None,
+            sinks=sinks,
+            metadata=shared.swa_metadata,
+            softmax_scale=self.scale,
+            cmp_ratio=0,
+            window_size=self.window_size,
         )
         if packed_prefill:
             slots, kv = shared.last_swa_writes(slots, kv, cache.numel() // self.head_dim)

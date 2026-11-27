@@ -281,24 +281,6 @@ torch::Tensor sparse_flash_mla(
     const std::optional<torch::Tensor>& ori_sparse_indices = std::nullopt,
     const std::optional<torch::Tensor>& ori_topk_length = std::nullopt);
 
-torch::Tensor sparse_flash_mla_swa_metadata(const torch::Tensor& cu_seqlens_q,
-                                            const torch::Tensor& seqused_kv,
-                                            int64_t num_heads_q,
-                                            int64_t head_dim,
-                                            int64_t max_seqlen_q,
-                                            int64_t max_seqlen_kv,
-                                            int64_t window_size);
-
-torch::Tensor sparse_flash_mla_swa(const torch::Tensor& q,
-                                   const torch::Tensor& kv,
-                                   const torch::Tensor& block_table,
-                                   const torch::Tensor& cu_seqlens_q,
-                                   const torch::Tensor& seqused_kv,
-                                   const std::optional<torch::Tensor>& sinks,
-                                   const torch::Tensor& metadata,
-                                   double softmax_scale,
-                                   int64_t window_size);
-
 bool supports_fused_hc_pre();
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>

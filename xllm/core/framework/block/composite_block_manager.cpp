@@ -489,21 +489,17 @@ CompositeBlockManager::classify_leaf_combination(const LeafMap& leaves) {
   };
   const bool has_kv = has_prefix(BlockType::KV);
   const bool has_swa = has_prefix(BlockType::SWA);
-  const bool has_c4 = has_prefix(BlockType::C4);
-  const bool has_c128 = has_prefix(BlockType::C128);
   const bool has_c1 = has_prefix(BlockType::C1);
   const bool has_c2 = has_prefix(BlockType::C2);
+  const bool has_c4 = has_prefix(BlockType::C4);
+  const bool has_c128 = has_prefix(BlockType::C128);
   const bool has_linear = has_prefix(BlockType::LINEAR);
 
-  // SWA_COMPRESSED requires C4 + C128 to make sense (a compressed shape with
-  // only one granularity is not a shape we ship). SWA is optional here on
-  // purpose: the DECODE role turns off SWA prefix cache via the role
-  // predicate, so has_swa is false while C4/C128 stay on -- trim /
-  // classify still route through this branch, but probes will be missing
-  // the SWA entry and trim_swa_compressed guards accordingly.
-  if (has_c4 || has_c128 || has_c1 || has_c2) {
-    CHECK((has_c4 && has_c128 && !has_c1 && !has_c2) ||
-          (has_c1 && has_c2 && !has_c4 && !has_c128))
+  // V4.1 uses C1/C2, and V4 uses C4/C128. On decode-only instances the
+  // V4 pair can participate even when the SWA leaf has prefix caching off.
+  if (has_c1 || has_c2 || has_c4 || has_c128) {
+    CHECK((has_c1 && has_c2 && !has_c4 && !has_c128) ||
+          (!has_c1 && !has_c2 && has_c4 && has_c128))
         << "Compressed prefix cache requires either C1/C2 or C4/C128";
     CHECK(!has_kv) << "SWA_COMPRESSED must not carry a KV leaf";
     CHECK(!has_linear) << "SWA_COMPRESSED must not carry a LINEAR leaf";
@@ -513,7 +509,8 @@ CompositeBlockManager::classify_leaf_combination(const LeafMap& leaves) {
     // A prefix-cache-on SWA leaf paired with no compressed leaves is not a
     // shape we build; the classifier surfaces the misconfiguration loudly
     // instead of silently mounting garbage.
-    LOG(FATAL) << "SWA prefix cache is on but neither C4 nor C128 is present";
+    LOG(FATAL)
+        << "SWA prefix cache requires a prefix-cache-capable history group";
   }
   if (has_kv) {
     return has_linear ? LeafCombination::FLAT_KV_LINEAR

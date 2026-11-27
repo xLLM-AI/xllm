@@ -24,9 +24,7 @@ namespace {
 constexpr int64_t kMetadataSize = 2048;
 constexpr int64_t kSwaMaskMode = 4;
 constexpr int64_t kNonCausalMaskMode = 0;
-constexpr int64_t kNoCompression = 0;
 constexpr int64_t kNumKvHeads = 1;
-constexpr int64_t kNoTopk = 0;
 constexpr int64_t kCmpCausalMaskMode = 3;
 constexpr int64_t kWinRight = 0;
 constexpr int64_t kTopkValueMode = 1;
@@ -155,53 +153,6 @@ torch::Tensor sparse_flash_mla(
                output,
                softmax_lse);
   return output;
-}
-
-torch::Tensor sparse_flash_mla_swa_metadata(const torch::Tensor& cu_seqlens_q,
-                                            const torch::Tensor& seqused_kv,
-                                            int64_t num_heads_q,
-                                            int64_t head_dim,
-                                            int64_t max_seqlen_q,
-                                            int64_t max_seqlen_kv,
-                                            int64_t window_size) {
-  return sparse_flash_mla_metadata(cu_seqlens_q,
-                                   seqused_kv,
-                                   /*seqused_cmp_kv=*/std::nullopt,
-                                   /*cmp_residual_kv=*/std::nullopt,
-                                   num_heads_q,
-                                   head_dim,
-                                   max_seqlen_q,
-                                   max_seqlen_kv,
-                                   /*max_seqlen_cmp_kv=*/0,
-                                   kNoTopk,
-                                   kNoCompression,
-                                   window_size);
-}
-
-torch::Tensor sparse_flash_mla_swa(const torch::Tensor& q,
-                                   const torch::Tensor& kv,
-                                   const torch::Tensor& block_table,
-                                   const torch::Tensor& cu_seqlens_q,
-                                   const torch::Tensor& seqused_kv,
-                                   const std::optional<torch::Tensor>& sinks,
-                                   const torch::Tensor& metadata,
-                                   double softmax_scale,
-                                   int64_t window_size) {
-  return sparse_flash_mla(q,
-                          kv,
-                          block_table,
-                          cu_seqlens_q,
-                          seqused_kv,
-                          /*cmp_kv=*/std::nullopt,
-                          /*cmp_block_table=*/std::nullopt,
-                          /*cmp_indices=*/std::nullopt,
-                          /*seqused_cmp_kv=*/std::nullopt,
-                          /*cmp_residual_kv=*/std::nullopt,
-                          sinks,
-                          metadata,
-                          softmax_scale,
-                          kNoCompression,
-                          window_size);
 }
 
 }  // namespace xllm::kernel::npu

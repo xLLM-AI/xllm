@@ -724,14 +724,6 @@ TORCH_LIBRARY(xllm_ops, m) {
       "Tensor? ori_sparse_indices=None, Tensor? ori_topk_length=None) -> "
       "Tensor");
   m.def(
-      "sparse_flash_mla_swa_metadata(Tensor cu_seqlens_q, Tensor seqused_kv, "
-      "int num_heads_q, int head_dim, int max_seqlen_q, int max_seqlen_kv, "
-      "int window_size) -> Tensor");
-  m.def(
-      "sparse_flash_mla_swa(Tensor q, Tensor kv, Tensor block_table, Tensor "
-      "cu_seqlens_q, Tensor seqused_kv, Tensor? sinks, Tensor metadata, "
-      "float softmax_scale, int window_size) -> Tensor");
-  m.def(
       "v41_partial_rope_(Tensor(a!) value, Tensor cos, Tensor signed_sin, "
       "Tensor swap_offsets, bool inverse) -> ()");
   m.def(
@@ -1053,10 +1045,6 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("sparse_flash_mla_metadata",
          TORCH_FN(xllm::kernel::npu::sparse_flash_mla_metadata));
   m.impl("sparse_flash_mla", TORCH_FN(xllm::kernel::npu::sparse_flash_mla));
-  m.impl("sparse_flash_mla_swa_metadata",
-         TORCH_FN(xllm::kernel::npu::sparse_flash_mla_swa_metadata));
-  m.impl("sparse_flash_mla_swa",
-         TORCH_FN(xllm::kernel::npu::sparse_flash_mla_swa));
   m.impl("v41_partial_rope_",
          TORCH_FN(xllm::kernel::npu::tilelang::v41_partial_rope_));
   m.impl("v41_swa_rope_cache_",
