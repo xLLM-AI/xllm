@@ -235,6 +235,20 @@ class Qwen3MoeSparseBlock(nn.Module):
             weights.copy(self.w13[expert], torch.cat((gate, up), dim=0).t(), gate_name)
             weights.copy(self.w2[expert], down.t(), down_name)
 
+    def process_weights_after_loading(self) -> None:
+        """Re-lay the loaded experts in the grouped matmul's internal format.
+
+        The grouped matmul reads fractal-NZ weights, while loading leaves them
+        in ND. Each weight is staged and its loaded allocation released before
+        the cast, as the DeepSeek-V3.2 and GLM5-Next expert loaders do: capture
+        rejects an NZ tensor that still shares storage with a live ND one.
+        """
+        for parameter in (self.w13, self.w2):
+            staged = parameter.data.clone()
+            parameter.data = torch.empty(0, dtype=parameter.dtype, device=parameter.device)
+            parameter.data = kernels.format_cast_nz(staged)
+            del staged
+
 
 class Qwen3MoeDecoderLayer(nn.Module):
     """Qwen3's decoder layer with routed experts in place of the dense FFN."""
@@ -286,8 +300,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         weights.load_tensor(self.post_attention_layernorm.weight, "post_attention_layernorm.weight")
         self.self_attn.load_weights(weights.with_prefix("self_attn."), context)
         self.mlp.load_weights(weights.with_prefix("mlp."), context)
-        if not self.is_moe:
-            self.mlp.process_weights_after_loading()
+        self.mlp.process_weights_after_loading()
 
 
 class Qwen3MoeForCausalLM(PyModelBase):
