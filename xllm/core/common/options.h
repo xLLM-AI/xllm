@@ -232,6 +232,8 @@ class Options {
   PROPERTY(int32_t, max_tokens_for_graph_mode) = 2048;
   // maximum per-DP-rank decode batch size for NPU graphs
   PROPERTY(int32_t, acl_graph_decode_batch_size_limit) = 16;
+  // Zero covers the full model context; -1 keeps lazy KV-capacity capture.
+  PROPERTY(int32_t, block_draft_graph_warmup_max_kv_len) = 0;
   // all requests use single global ttft
   PROPERTY(int32_t, max_global_ttft_ms) = std::numeric_limits<int32_t>::max();
   // all requests use single global tpot
