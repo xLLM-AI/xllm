@@ -316,9 +316,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         The caller owns this result for one execution only. Keep it local to
         that call so scheduler updates are decoded again on the next step.
         """
+        metadata = self._normalize_dsa_metadata(metadata)
         if not self._causal:
             return self._prepare_non_causal_execution(input_ids, metadata, input_embedding, mtp_topk_indices)
-        metadata = self._normalize_dsa_metadata(metadata)
         if not getattr(self.attention_backend, "moe_graph_capturable", True):
             return None
         if input_ids.dim() != 1:
@@ -480,9 +480,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         """Normalize busy and dummy DSA batches alike so every DP rank selects the same runner."""
         if isinstance(metadata, _DsaGraphMetadataView):
             return metadata
-        if not self._causal and self._fixed_dp_graph_layout:
+        if not self._causal:
             tables = getattr(metadata, "multi_block_tables", ())
-            if tables:
+            if self._fixed_dp_graph_layout and tables:
                 return cast(
                     "AttentionMetadata",
                     _DsaGraphMetadataView(metadata, tables[0], metadata.slot_mapping, tuple(tables)),
