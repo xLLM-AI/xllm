@@ -52,11 +52,29 @@ def test_graph_decode_limit_cli(arguments: list[str], expected: int) -> None:
 
 
 @pytest.mark.parametrize(
+    "arguments,expected",
+    [
+        ([], 0),
+        (["--block_draft_graph_warmup_max_kv_len", "-1"], -1),
+        (["--block_draft_graph_warmup_max_kv_len", "4096"], 4096),
+    ],
+)
+def test_block_draft_graph_warmup_limit_cli(arguments: list[str], expected: int) -> None:
+    assert ArgumentParser().parser.parse_args(arguments).block_draft_graph_warmup_max_kv_len == expected
+
+
+@pytest.mark.parametrize("warmup_limit", [-1, 0, 4096])
+@pytest.mark.parametrize(
     "api_module,api_name,backend",
     [(llm, "LLM", "llm"), (llm, "LLM", "vlm"), (vlm, "VLM", "vlm"), (embedding, "Embedding", "llm")],
 )
-def test_constructor_keeps_graph_buffering_per_instance(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, api_module: ModuleType, api_name: str, backend: str
+def test_constructor_keeps_graph_options_per_instance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    api_module: ModuleType,
+    api_name: str,
+    backend: str,
+    warmup_limit: int,
 ) -> None:
     (tmp_path / "config.json").write_text(
         json.dumps({"model_type": "qwen2_vl" if backend == "vlm" else "qwen3"}), encoding="utf-8"
@@ -75,6 +93,7 @@ def test_constructor_keeps_graph_buffering_per_instance(
         enable_graph_double_buffer=False,
         acl_graph_decode_batch_size_limit=3,
         disable_graph_warmup=True,
+        block_draft_graph_warmup_max_kv_len=warmup_limit,
     )
     single_buffer_options = master.call_args.args[0]
     double_buffer = constructor(model=str(tmp_path), enable_graph=True)
@@ -93,3 +112,5 @@ def test_constructor_keeps_graph_buffering_per_instance(
     assert double_buffer_options.acl_graph_decode_batch_size_limit == 16
     assert single_buffer_options.disable_graph_warmup is True
     assert double_buffer_options.disable_graph_warmup is False
+    assert single_buffer_options.block_draft_graph_warmup_max_kv_len == warmup_limit
+    assert double_buffer_options.block_draft_graph_warmup_max_kv_len == 0

@@ -176,6 +176,8 @@ LLMMaster::LLMMaster(const Options& options)
       .enable_graph_double_buffer(options_.enable_graph_double_buffer())
       .acl_graph_decode_batch_size_limit(
           options_.acl_graph_decode_batch_size_limit())
+      .block_draft_graph_warmup_max_kv_len(
+          options_.block_draft_graph_warmup_max_kv_len())
       .enable_graph_mode_decode_no_padding(
           options_.enable_graph_mode_decode_no_padding())
       .enable_prefill_piecewise_graph(options_.enable_prefill_piecewise_graph())

@@ -292,6 +292,8 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
       options.enable_graph_double_buffer() ? "1" : "0";
   const std::string graph_decode_batch_size_limit_str =
       std::to_string(options.acl_graph_decode_batch_size_limit());
+  const std::string block_draft_graph_warmup_max_kv_len_str =
+      std::to_string(options.block_draft_graph_warmup_max_kv_len());
   std::string enable_graph_str = std::to_string(options.enable_graph());
   const char* enable_graph_ptr = enable_graph_str.c_str();
   std::string enable_graph_mode_decode_no_padding_str =
@@ -355,11 +357,12 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* dp_fair_token_budget_ptr =
       options.enable_dp_fair_token_budget() ? "1" : "0";
   const std::string vae_size_str = std::to_string(options.vae_size());
+  // A null entry here would truncate the graph arguments that follow.
   const char* vae_size_ptr =
       worker_type == WorkerType::DIT &&
               ModelConfig::is_python_model_impl(options.model_impl())
           ? vae_size_str.c_str()
-          : nullptr;
+          : "1";
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
@@ -423,10 +426,11 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         vae_size_ptr,
                         enable_graph_double_buffer_ptr,
                         graph_decode_batch_size_limit_str.c_str(),
+                        block_draft_graph_warmup_max_kv_len_str.c_str(),
                         nullptr};
   static_assert(
       std::size(argv) ==
-      spawn_worker_protocol::kAclGraphDecodeBatchSizeLimitArgumentIndex + 2);
+      spawn_worker_protocol::kBlockDraftGraphWarmupMaxKvLenArgumentIndex + 2);
   pid_t pid;
   int status = posix_spawnp(
       &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);

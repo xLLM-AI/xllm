@@ -74,7 +74,8 @@ class SpawnWorkerServer final {
       EplbWorkerConfig eplb_worker_config,
       spawn_worker_protocol::PrefillConfig prefill_config,
       bool enable_graph_double_buffer,
-      int32_t acl_graph_decode_batch_size_limit);
+      int32_t acl_graph_decode_batch_size_limit,
+      int32_t block_draft_graph_warmup_max_kv_len);
 
   ~SpawnWorkerServer();
 

@@ -170,6 +170,13 @@ class ArgumentParser:
             help="Maximum per-DP-rank decode batch size for NPU graph execution.",
         )
         self.parser.add_argument(
+            "--block_draft_graph_warmup_max_kv_len",
+            type=int,
+            default=0,
+            help="Block-draft graph KV warmup limit: 0 covers full context, -1 captures lazily, "
+            "and a positive value bounds proactive capture.",
+        )
+        self.parser.add_argument(
             "--disable_graph_warmup",
             nargs="?",
             const=True,
