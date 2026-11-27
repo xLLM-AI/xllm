@@ -207,10 +207,10 @@ dtypes, and parallel layouts require separate validation.
 
 ## Transformer cache
 
-H3 uses dense inference by default. To enable approximate TaylorSeer caching,
-explicitly set `--dit_cache_policy=TaylorSeer` (or `"dit_cache_policy": "TaylorSeer"`
-in the JSON configuration). For a 50-step request, replace the cache arguments
-in the service command with:
+H3 uses dense inference by default. On the native pipeline, enable approximate
+TaylorSeer caching with `--dit_cache_policy=TaylorSeer` or
+`"dit_cache_policy": "TaylorSeer"` in the JSON configuration. For a 50-step
+request, use the following cache arguments in the service command.
 
 ```bash
 --dit_cache_policy=TaylorSeer \
@@ -227,9 +227,8 @@ scheduler updates, and VAE decoding still execute normally. Caching changes the
 numerical result and requires workload-specific quality validation. Set
 `--dit_cache_policy=None` for dense inference.
 
-To use FBCache instead of TaylorSeer or dense inference, replace the cache
-arguments in the service command with the following. These settings are for a
-50-step request; keep the same conditioning and HTTP request format:
+For FBCache on the native pipeline, use the following cache arguments for a
+50-step request. Keep the same conditioning and HTTP request format.
 
 ```bash
 --dit_cache_policy=FBCache \
@@ -243,8 +242,27 @@ denoising step count also keeps every step fully computed. Approximate reuse
 changes numerical results, so choose settings using video and audio quality
 checks for your workload.
 
-FBCache cannot be combined with rolling weight loading. For TP=1, explicitly
-set `--enable_rolling_load=false`; all resident weights and inference workspace
-must then fit on one device. Disabling rolling does not guarantee that TP=1
-fits. Use the multi-device layouts above when memory is insufficient. H3 supports
-only `None`, `TaylorSeer`, and `FBCache`; `FBCacheTaylorSeer` is unsupported.
+On the native pipeline, FBCache cannot be combined with rolling weight loading.
+For TP=1, set `--enable_rolling_load=false` and make sure the resident weights
+and inference workspace fit on one device. Use the multi-device layouts above
+when memory is insufficient. The native pipeline supports `None`, `TaylorSeer`,
+and `FBCache`.
+
+For Python FBCache, use the four-NPU service command (TP2/SP2/VAE4, CFG1, DP1)
+with dense floating-point weights and a Diffusers version that provides the
+MiniMax-H3 transformer, scheduler, and video and audio VAEs. Replace
+`--dit_cache_policy=None` in that command with the following arguments.
+
+```bash
+--model_impl=python \
+--enable_graph=false --enable_rolling_load=false \
+--dit_cache_policy=FBCache \
+--dit_cache_warmup_steps=45 \
+--dit_cache_residual_diff_threshold=0.09 \
+--dit_h3_fbcache_max_consecutive_reuse_steps=4
+```
+
+Keep the `fl2va` task and sparse attention disabled. Use the text-only request
+above with precomputed conditioning. All `prompt_token_tags` must be `1`. The consecutive reuse
+limit must be nonnegative. Set it to `0` for unlimited consecutive reuse.
+The Python pipeline supports `None` and `FBCache`.

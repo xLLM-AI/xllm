@@ -851,8 +851,19 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context) {
       const auto& parallel = context.get_parallel_args();
       CHECK_EQ(config.dit_h3_task_type(), "fl2va")
           << "Python MiniMax-H3 supports T2VA with fl2va weights";
-      CHECK(context.get_dit_config().selected_policy == PolicyType::None)
-          << "Python MiniMax-H3 requires dit_cache_policy=None";
+      const DiTCacheConfig& cache_config = context.get_dit_config();
+      const PolicyType cache_policy = cache_config.selected_policy;
+      CHECK(cache_policy == PolicyType::None ||
+            cache_policy == PolicyType::FBCache)
+          << "Python MiniMax-H3 supports None and FBCache";
+      if (cache_policy == PolicyType::FBCache) {
+        CHECK_GE(cache_config.fbcache.warmup_steps, 0)
+            << "dit_cache_warmup_steps must be nonnegative";
+        CHECK_GE(cache_config.fbcache.residual_diff_threshold, 0.0f)
+            << "dit_cache_residual_diff_threshold must be nonnegative";
+        CHECK_GE(config.dit_h3_fbcache_max_consecutive_reuse_steps(), 0)
+            << "dit_h3_fbcache_max_consecutive_reuse_steps must be nonnegative";
+      }
       CHECK(!config.dit_sparse_attention_enabled() &&
             !ExecutionConfig::get_instance().enable_graph() &&
             !LoadConfig::get_instance().enable_rolling_load())
