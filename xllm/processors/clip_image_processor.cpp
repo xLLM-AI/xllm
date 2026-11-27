@@ -15,11 +15,16 @@ limitations under the License.
 
 #include "processors/clip_image_processor.h"
 
+#include <glog/logging.h>
+
+#include "core/util/json_reader.h"
 #include "processors/transforms.h"
 
 namespace xllm {
 
-CLIPImageProcessor::CLIPImageProcessor(const ModelArgs& args) {
+CLIPImageProcessor::CLIPImageProcessor(
+    const ModelArgs& args,
+    const std::string& preprocessor_config_path) {
   do_resize_ = args.mm_image_do_resize();
   do_center_crop_ = args.mm_image_do_center_crop();
   do_rescale_ = args.mm_image_do_rescale();
@@ -34,6 +39,18 @@ CLIPImageProcessor::CLIPImageProcessor(const ModelArgs& args) {
   image_std_ = torch::tensor(args.mm_image_normalize_std(),
                              torch::dtype(torch::kFloat32));
 
+  if (do_resize_) {
+    JsonReader config;
+    CHECK(config.parse(preprocessor_config_path)) << preprocessor_config_path;
+    const auto height = config.value<int64_t>("size.height");
+    const auto width = config.value<int64_t>("size.width");
+    if (height.has_value() || width.has_value()) {
+      CHECK(height.value_or(0) > 0 && width.value_or(0) > 0)
+          << "CLIP image size must specify positive height and width";
+      resize_size_ = {*height, *width};
+    }
+  }
+
   if (do_rescale_ && do_normalize_) {
     image_mean_.mul_(1.0 / rescale_factor_);
     image_std_.mul_(1.0 / rescale_factor_);
@@ -45,12 +62,14 @@ torch::Tensor CLIPImageProcessor::process_images(
     const torch::Tensor& images) const {
   int64_t batch_size = images.size(0);
   std::vector<torch::Tensor> processed_images;
-  auto size = get_resize_output_image_size(images[0], shortest_edge_);
 
   for (int64_t i = 0; i < batch_size; ++i) {
     torch::Tensor image = images[i];
 
     if (do_resize_) {
+      const auto size = resize_size_.empty() ? get_resize_output_image_size(
+                                                   image, shortest_edge_)
+                                             : resize_size_;
       image = transforms::resize(image, size, resample_);
     }
 

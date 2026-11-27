@@ -19,7 +19,7 @@ import torch
 from diffusers import AutoencoderKLMiniMaxH3, AutoencoderKLMiniMaxH3Audio
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoRotaryPosEmbed
 
-from xllm.python.dit.minimax_h3_model import StateDictShard, load_component_weights
+from xllm.python.dit.parallel import StateDictShard, load_component_weights
 
 
 @dataclass(frozen=True)

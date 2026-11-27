@@ -32,6 +32,8 @@ safetensors==${SAFETENSORS_VERSION}
 tqdm==${TQDM_VERSION}
 transformers==${TRANSFORMERS_VERSION}
 diffusers==${DIFFUSERS_VERSION}
+ftfy
+sentencepiece
 loguru
 cloudpickle
 ml-dtypes

@@ -843,6 +843,28 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
 
 std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context) {
   if (ModelConfig::is_python_model_impl(context.model_impl())) {
+    if (context.model_type() == "WanImageToVideoPipeline" &&
+        Platform::is_npu() &&
+        context.get_tensor_options().device().type() ==
+            Platform::type_torch()) {
+      const auto& config = DiTConfig::get_instance();
+      const auto& parallel = context.get_parallel_args();
+      CHECK(context.get_dit_config().selected_policy == PolicyType::None)
+          << "Python Wan2.1 I2V requires dit_cache_policy=None";
+      CHECK(!config.dit_laser_attention_enabled() &&
+            !config.dit_sparse_attention_enabled() &&
+            !ExecutionConfig::get_instance().enable_graph() &&
+            !LoadConfig::get_instance().enable_rolling_load())
+          << "Python Wan2.1 I2V requires dense eager execution";
+      CHECK(parallel.cfg_size() == 1 && parallel.dp_size() == 1 &&
+            parallel.vae_size() == 1 && parallel.text_encoder_tp_size() == 1)
+          << "Python Wan2.1 I2V supports TP/SP with CFG1, DP1, VAE1 and text "
+             "encoder TP1";
+      CHECK_EQ(config.max_requests_per_batch(), 1);
+      CHECK(context.get_quant_args("transformer").quant_method().empty())
+          << "Python Wan2.1 I2V requires dense floating point weights";
+      return std::make_unique<PyDiTModel>(context);
+    }
     if (context.model_type() == "MiniMaxH3ModularPipeline" &&
         Platform::is_npu() &&
         context.get_tensor_options().device().type() ==

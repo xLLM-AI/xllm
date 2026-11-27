@@ -31,6 +31,56 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+const char* validate_wan_i2v_request(const DiTRequestParams& params) {
+  const auto& generation = params.generation_params;
+  const auto& media = params.input_params.media_sources;
+  if (params.request_kind != DiTRequestKind::kVideo ||
+      generation.num_videos_per_prompt != 1 || media.size() != 1 ||
+      media.at(0).name != "image" || media.at(0).modality != "image") {
+    return "Python Wan2.1 I2V requires one image and one output video per "
+           "request";
+  }
+  const auto& image = media.at(0).tensor;
+  if (image.dim() != 3 || image.size(0) != 3 ||
+      image.scalar_type() != torch::kUInt8) {
+    return "Python Wan2.1 I2V requires an RGB8 image in CHW layout";
+  }
+  if (generation.height <= 0 || generation.width <= 0 ||
+      generation.height % 16 != 0 || generation.width % 16 != 0 ||
+      generation.num_frames <= 0 || generation.num_inference_steps <= 0 ||
+      generation.max_sequence_length != 512 ||
+      !std::isfinite(generation.guidance_scale) ||
+      !std::isfinite(generation.flow_shift) || generation.flow_shift <= 0.0f) {
+    return "Python Wan2.1 I2V requires positive 16-aligned dimensions, frames, "
+           "steps and flow_shift, finite guidance_scale, and "
+           "max_sequence_length=512";
+  }
+  for (const NamedTensor& source :
+       params.input_params.tensor_sources.entries()) {
+    const auto& tensor = source.tensor;
+    if (source.name == "prompt_embed" ||
+        source.name == "negative_prompt_embed") {
+      if (tensor.dim() != 2 || tensor.size(0) != 512 ||
+          tensor.size(1) != 4096 || !tensor.is_floating_point()) {
+        return "Python Wan2.1 I2V text embeddings must be floating point [512, "
+               "4096]";
+      }
+    } else if (source.name == "latent") {
+      if (tensor.dim() != 4 || tensor.size(0) != 16 ||
+          tensor.size(1) != generation.num_frames / 4 + 1 ||
+          tensor.size(2) != generation.height / 8 ||
+          tensor.size(3) != generation.width / 8 ||
+          !tensor.is_floating_point()) {
+        return "Python Wan2.1 I2V latent must match [16, frames/4+1, height/8, "
+               "width/8]";
+      }
+    } else {
+      return "Unsupported tensor source for Python Wan2.1 I2V";
+    }
+  }
+  return nullptr;
+}
+
 const char* validate_minimax_h3_t2va_request(const DiTRequestParams& params) {
   const auto& generation = params.generation_params;
   if (params.request_kind != DiTRequestKind::kVideo ||
@@ -89,6 +139,9 @@ DiTRequestPolicy resolve_dit_request_policy(const Options& options,
   if (model_type == "MiniMaxH3ModularPipeline") {
     return {.validator = validate_minimax_h3_t2va_request,
             .required_batch_size = 1};
+  }
+  if (model_type == "WanImageToVideoPipeline") {
+    return {.validator = validate_wan_i2v_request, .required_batch_size = 1};
   }
   return {};
 }

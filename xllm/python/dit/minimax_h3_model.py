@@ -14,7 +14,6 @@
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import lcm
-from typing import Protocol
 
 import torch
 from diffusers import MiniMaxH3Transformer3DModel
@@ -26,121 +25,15 @@ from torch import nn
 from torch.nn import functional as F
 
 from xllm.python import _load_kernel_package
+from xllm.python.dit.parallel import (
+    ParallelLinear,
+    SequenceParallel,
+    StateDictShard,
+    TensorParallel,
+    load_component_weights,
+)
 
-_WEIGHT_TRANSFER_BATCH_BYTES = 256 * 1024**2
 _LaserAttention = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, float], torch.Tensor]
-
-
-class StateDictShard(Protocol):
-    def get_tensor(self, name: str) -> torch.Tensor: ...
-    def keys(self) -> list[str]: ...
-
-
-@dataclass(frozen=True)
-class TensorParallel:
-    rank: int
-    size: int
-    reduce: Callable[[torch.Tensor], torch.Tensor]
-    gather: Callable[[torch.Tensor], torch.Tensor]
-
-
-@dataclass(frozen=True)
-class SequenceParallel:
-    rank: int
-    size: int
-    gather: Callable[[torch.Tensor], torch.Tensor]
-    exchange: Callable[[torch.Tensor, bool], torch.Tensor]
-
-
-class _ParallelLinear(nn.Module):
-    def __init__(
-        self,
-        base: nn.Linear,
-        group: TensorParallel,
-        *,
-        row: bool = False,
-        gather: bool = False,
-        packed: bool = False,
-    ) -> None:
-        super().__init__()
-        self._group = group
-        self._row = row
-        self._gather = gather
-        self._packed = packed
-        axis = 1 if row else 0
-        parts = 2 if packed else 1
-        shape = list(base.weight.shape)
-        if shape[axis] % (group.size * parts):
-            raise ValueError(f"Cannot shard H3 projection {shape} across {group.size} ranks")
-        shape[axis] //= group.size
-        self.weight = nn.Parameter(torch.empty(shape, device="meta"), requires_grad=False)
-        bias_size = base.out_features if row else shape[0]
-        bias = nn.Parameter(torch.empty(bias_size, device="meta"), requires_grad=False)
-        self.register_parameter("bias", bias if base.bias is not None else None)
-
-    def shard(self, value: torch.Tensor, parameter: str) -> torch.Tensor:
-        if self._row:
-            return value if parameter == "bias" else value.chunk(self._group.size, dim=1)[self._group.rank]
-        if self._packed:
-            # The converted SwiGLU projection stores up and gate contiguously.
-            return torch.cat([part.chunk(self._group.size)[self._group.rank] for part in value.chunk(2)])
-        return value.chunk(self._group.size)[self._group.rank]
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self._row:
-            result = self._group.reduce(F.linear(hidden_states, self.weight))
-            return result if self.bias is None else result + self.bias
-        result = F.linear(hidden_states, self.weight, self.bias)
-        return self._group.gather(result) if self._gather else result
-
-
-def load_component_weights(
-    model: nn.Module,
-    shards: Sequence[StateDictShard],
-    device: torch.device,
-    dtype_for: Callable[[str], torch.dtype],
-) -> None:
-    missing = set(model.state_dict())
-    pending_transfers: list[torch.Tensor] = []
-    pending_bytes = 0
-    for shard in shards:
-        for name in shard.keys():
-            if name not in missing:
-                continue
-            parent, _, key = name.rpartition(".")
-            module = model.get_submodule(parent)
-            target = getattr(module, key)
-            value = shard.get_tensor(name)
-            if isinstance(module, _ParallelLinear):
-                value = module.shard(value, key)
-            if target.shape != value.shape:
-                raise ValueError(f"H3 weight {name} has shape {tuple(value.shape)}, expected {tuple(target.shape)}")
-            if not value.is_floating_point() and target.is_floating_point():
-                raise ValueError(f"H3 weight {name} must be a dense floating point tensor")
-            dtype = dtype_for(name) if value.is_floating_point() else target.dtype
-            if device.type == "npu" and value.device.type == "cpu":
-                # Pack the local shard on the host and enqueue the transfer.
-                # Keep the pinned staging buffer alive until its batch completes.
-                staging = torch.empty(value.shape, dtype=dtype, device="cpu", pin_memory=True)
-                staging.copy_(value)
-                value = staging.to(device=device, non_blocking=True)
-                pending_transfers.append(staging)
-                pending_bytes += staging.nbytes
-                if pending_bytes >= _WEIGHT_TRANSFER_BATCH_BYTES:
-                    torch.npu.current_stream(device).synchronize()
-                    pending_transfers.clear()
-                    pending_bytes = 0
-            else:
-                value = value.to(device=device, dtype=dtype, memory_format=torch.contiguous_format)
-            if isinstance(target, nn.Parameter):
-                value = nn.Parameter(value, requires_grad=False)
-            setattr(module, key, value)
-            missing.remove(name)
-    if pending_transfers:
-        torch.npu.current_stream(device).synchronize()
-    if missing:
-        raise ValueError(f"Missing H3 weights in {type(model).__name__}: {', '.join(sorted(missing)[:8])}")
-    model.eval()
 
 
 @dataclass(frozen=True)
@@ -277,20 +170,20 @@ class MiniMaxH3Denoiser(nn.Module):
 
         for block in [*model.transformer_blocks, *model.token_refiner.refiner_blocks]:
             attn = block.attn
-            attn.to_q = _ParallelLinear(attn.to_q, tp)
-            attn.to_k = _ParallelLinear(attn.to_k, tp)
-            attn.to_v = _ParallelLinear(attn.to_v, tp)
-            attn.to_out[0] = _ParallelLinear(attn.to_out[0], tp, row=True)
-            block.ff.net[0].proj = _ParallelLinear(block.ff.net[0].proj, tp, packed=True)
-            block.ff.net[2] = _ParallelLinear(block.ff.net[2], tp, row=True)
+            attn.to_q = ParallelLinear(attn.to_q, tp)
+            attn.to_k = ParallelLinear(attn.to_k, tp)
+            attn.to_v = ParallelLinear(attn.to_v, tp)
+            attn.to_out[0] = ParallelLinear(attn.to_out[0], tp, row=True)
+            block.ff.net[0].proj = ParallelLinear(block.ff.net[0].proj, tp, packed=True)
+            block.ff.net[2] = ParallelLinear(block.ff.net[2], tp, row=True)
         for block in model.token_refiner.refiner_blocks:
             block.attn.set_processor(_RefinerAttention(self._laser))
         for block in model.transformer_blocks:
-            block.adaln_proj.linear = _ParallelLinear(block.adaln_proj.linear, tp, gather=True)
+            block.adaln_proj.linear = ParallelLinear(block.adaln_proj.linear, tp, gather=True)
 
-        model.time_embedder.linear_1 = _ParallelLinear(model.time_embedder.linear_1, tp)
-        model.time_embedder.linear_2 = _ParallelLinear(model.time_embedder.linear_2, tp, row=True)
-        model.norm_out.linear = _ParallelLinear(model.norm_out.linear, tp, gather=True)
+        model.time_embedder.linear_1 = ParallelLinear(model.time_embedder.linear_1, tp)
+        model.time_embedder.linear_2 = ParallelLinear(model.time_embedder.linear_2, tp, row=True)
+        model.norm_out.linear = ParallelLinear(model.norm_out.linear, tp, gather=True)
 
         def weight_dtype(name: str) -> torch.dtype:
             fp32 = ("proj_in", "audio_proj_in", "proj_out", "audio_proj_out", "time_embedder")
