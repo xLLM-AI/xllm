@@ -1,0 +1,549 @@
+{
+  "task": "dense",
+  "scope": "functional",
+  "status": "PASS",
+  "cases": [
+    {
+      "id": "dense_literal",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        2,
+        2,
+        3
+      ],
+      "input_shapes": [
+        [
+          2,
+          3
+        ],
+        [
+          2,
+          4
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_single",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        1,
+        3
+      ],
+      "input_shapes": [
+        [
+          1,
+          3
+        ],
+        [
+          4
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_empty_requests",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        2,
+        0,
+        3
+      ],
+      "input_shapes": [
+        [
+          0,
+          3
+        ],
+        [
+          2,
+          31
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_empty_columns",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        2,
+        3,
+        0
+      ],
+      "input_shapes": [
+        [
+          3,
+          0
+        ],
+        [
+          2,
+          31
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_odd_offset",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        3,
+        7,
+        33
+      ],
+      "input_shapes": [
+        [
+          7,
+          33
+        ],
+        [
+          3,
+          129
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_all_padding",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        2,
+        1,
+        2
+      ],
+      "input_shapes": [
+        [
+          1,
+          2
+        ],
+        [
+          2,
+          4
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_max_i32",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        1,
+        1,
+        3
+      ],
+      "input_shapes": [
+        [
+          1,
+          3
+        ],
+        [
+          1,
+          2
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_boundary257",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        1,
+        3,
+        257
+      ],
+      "input_shapes": [
+        [
+          3,
+          257
+        ],
+        [
+          1,
+          257
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_perf_small",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        8,
+        8,
+        64
+      ],
+      "input_shapes": [
+        [
+          8,
+          64
+        ],
+        [
+          8,
+          1024
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_perf_large",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        32,
+        64,
+        256
+      ],
+      "input_shapes": [
+        [
+          64,
+          256
+        ],
+        [
+          32,
+          4096
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_route_below",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        4,
+        32,
+        255
+      ],
+      "input_shapes": [
+        [
+          32,
+          255
+        ],
+        [
+          4,
+          1021
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_route_at",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        4,
+        32,
+        256
+      ],
+      "input_shapes": [
+        [
+          32,
+          256
+        ],
+        [
+          4,
+          1021
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_many_short_single",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        257,
+        3
+      ],
+      "input_shapes": [
+        [
+          257,
+          3
+        ],
+        [
+          5
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "dense_alias_and_padding",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        3,
+        2,
+        6
+      ],
+      "input_shapes": [
+        [
+          2,
+          6
+        ],
+        [
+          3,
+          5
+        ]
+      ],
+      "attributes": {}
+    }
+  ],
+  "negative": [
+    {
+      "id": "input_count",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "unknown_attribute",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "cpu_input",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "dtype",
+      "status": "PASS",
+      "exception": "TypeError"
+    },
+    {
+      "id": "noncontiguous",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "negative_mapping",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "logical_address_out_of_range",
+      "status": "PASS",
+      "exception": "ValueError"
+    }
+  ],
+  "dynamic_updates": {
+    "dense_perf_small": [
+      {
+        "id": "logical_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "mapping_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      }
+    ],
+    "dense_perf_large": [
+      {
+        "id": "logical_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "mapping_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "large_path_int32_output_boundary",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      }
+    ]
+  },
+  "engineering_by_case": {
+    "dense_perf_small": {
+      "two_streams": "PASS",
+      "retained_outputs_independent": "PASS",
+      "repeat20_released": "PASS",
+      "active_before_bytes": 35840,
+      "active_after_bytes": 35840,
+      "peak_increment_bytes": 16896,
+      "output_bytes": 16384,
+      "baseline_peak_increment_bytes": 39936,
+      "baseline_output_bytes": 16384,
+      "baseline_active_before_bytes": 35840,
+      "baseline_active_after_bytes": 35840,
+      "candidate_minus_baseline_peak_bytes": -23040,
+      "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+    },
+    "dense_perf_large": {
+      "two_streams": "PASS",
+      "retained_outputs_independent": "PASS",
+      "repeat20_released": "PASS",
+      "active_before_bytes": 590848,
+      "active_after_bytes": 590848,
+      "peak_increment_bytes": 2097664,
+      "output_bytes": 2097152,
+      "baseline_peak_increment_bytes": 4344320,
+      "baseline_output_bytes": 2097152,
+      "baseline_active_before_bytes": 590848,
+      "baseline_active_after_bytes": 590848,
+      "candidate_minus_baseline_peak_bytes": -2246656,
+      "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+    }
+  },
+  "storage_rebindings": {},
+  "environment": {
+    "utc": "2026-11-17T04:28:19.540167+00:00",
+    "hostname": "c1567ad5f56a4842a875cea72ab30baf",
+    "python": "3.11.4",
+    "device": "Ascend910_9362",
+    "versions": {
+      "torch": "2.7.1+cpu",
+      "torch-npu": "2.7.1.post4",
+      "triton-ascend": "3.2.1"
+    },
+    "triton_target": "GPUTarget(backend='npu', arch='Ascend910_9362', warp_size=0)",
+    "source_sha256": {
+      "baseline.py": "6d98cd2b488406c2f62b7c645c42a8e08e0e4ff07ce05e85d13998de8842cfb6",
+      "case.json": "ff096ed8284030c2fc6cb944b53bc52c9b46aef54e8c2b6c4b142e5cdc57c942",
+      "contract.py": "4efc5856a7bf1419250058325b85d64c6179366416c24da181fff2e40b955720",
+      "functional_checks.py": "71bc86d32b60e22efc99990169e83563abe8f7382507a39fa25adbc61a68a1b8",
+      "generate_data.py": "5d5db7c8e8023345d3cd25681f407e8ddf91d765f6af450cd66d00239d967cd0",
+      "golden.py": "eea770d39b01302ee80b7692f3b930a143a40bf64aae8d5aa11a062eb7d7f0a8"
+    }
+  }
+}

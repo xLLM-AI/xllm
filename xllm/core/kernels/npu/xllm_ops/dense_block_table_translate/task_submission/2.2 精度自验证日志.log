@@ -1,0 +1,264 @@
+/opt/buildtools/Python-3.11.4/lib/python3.11/site-packages/torch_npu/utils/_path_manager.py:66: UserWarning: Permission mismatch: The owner of /opt/buildtools/Python-3.11.4/lib/python3.11/site-packages/torch_npu/lib/libop_plugin_atb.so does not match.
+  warnings.warn(f"Permission mismatch: The owner of {path} does not match.")
+{"id": "dense_literal", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [2, 2, 3], "input_shapes": [[2, 3], [2, 4]], "attributes": {}}
+{"id": "dense_single", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [1, 3], "input_shapes": [[1, 3], [4]], "attributes": {}}
+{"id": "dense_empty_requests", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [2, 0, 3], "input_shapes": [[0, 3], [2, 31]], "attributes": {}}
+{"id": "dense_empty_columns", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [2, 3, 0], "input_shapes": [[3, 0], [2, 31]], "attributes": {}}
+{"id": "dense_odd_offset", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [3, 7, 33], "input_shapes": [[7, 33], [3, 129]], "attributes": {}}
+{"id": "dense_all_padding", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [2, 1, 2], "input_shapes": [[1, 2], [2, 4]], "attributes": {}}
+{"id": "dense_max_i32", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [1, 1, 3], "input_shapes": [[1, 3], [1, 2]], "attributes": {}}
+{"id": "dense_boundary257", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [1, 3, 257], "input_shapes": [[3, 257], [1, 257]], "attributes": {}}
+{"id": "dense_perf_small", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [8, 8, 64], "input_shapes": [[8, 64], [8, 1024]], "attributes": {}}
+{"id": "dense_perf_large", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [32, 64, 256], "input_shapes": [[64, 256], [32, 4096]], "attributes": {}}
+{"id": "dense_route_below", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [4, 32, 255], "input_shapes": [[32, 255], [4, 1021]], "attributes": {}}
+{"id": "dense_route_at", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [4, 32, 256], "input_shapes": [[32, 256], [4, 1021]], "attributes": {}}
+{"id": "dense_many_short_single", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [257, 3], "input_shapes": [[257, 3], [5]], "attributes": {}}
+{"id": "dense_alias_and_padding", "status": "PASS", "checks": {"candidate_mismatches": 0, "baseline_mismatches": 0, "shape": true, "dtype": true, "npu": true, "contiguous": true, "inputs_unchanged": true, "independent_storage": true}, "shape": [3, 2, 6], "input_shapes": [[2, 6], [3, 5]], "attributes": {}}
+
+Supplementary records from run-final/result.json
+{
+  "negative_performance_fixture": [
+    {
+      "id": "input_count",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "unknown_attribute",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "cpu_input",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "dtype",
+      "status": "PASS",
+      "exception": "TypeError"
+    },
+    {
+      "id": "noncontiguous",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "negative_mapping",
+      "status": "PASS",
+      "exception": "ValueError"
+    },
+    {
+      "id": "logical_address_out_of_range",
+      "status": "PASS",
+      "exception": "ValueError"
+    }
+  ],
+  "dynamic_updates": {
+    "dense_perf_small": [
+      {
+        "id": "logical_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "mapping_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      }
+    ],
+    "dense_perf_large": [
+      {
+        "id": "logical_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "mapping_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "large_path_int32_output_boundary",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      }
+    ]
+  },
+  "supplemental": [
+    {
+      "id": "dense_literal",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_single",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_empty_requests",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_empty_columns",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_odd_offset",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_all_padding",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_max_i32",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_boundary257",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_perf_small",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS",
+      "streams_cpu_oracle": {
+        "status": "PASS",
+        "candidate_retained": 6,
+        "baseline_retained": 6,
+        "compared_with": "independent CPU oracle",
+        "distinct_storage": 12,
+        "baseline_repeat20_before_bytes": 35840,
+        "baseline_repeat20_after_bytes": 35840
+      }
+    },
+    {
+      "id": "dense_perf_large",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS",
+      "streams_cpu_oracle": {
+        "status": "PASS",
+        "candidate_retained": 6,
+        "baseline_retained": 6,
+        "compared_with": "independent CPU oracle",
+        "distinct_storage": 12,
+        "baseline_repeat20_before_bytes": 590848,
+        "baseline_repeat20_after_bytes": 590848
+      }
+    },
+    {
+      "id": "dense_route_below",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_route_at",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_many_short_single",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    },
+    {
+      "id": "dense_alias_and_padding",
+      "status": "PASS",
+      "backend": "triton",
+      "direct_run": "PASS",
+      "repeated_outputs": "PASS"
+    }
+  ],
+  "additional_native_fallback": {
+    "id": "additional_native_fallback",
+    "status": "PASS",
+    "checks": {
+      "candidate_mismatches": 0,
+      "baseline_mismatches": 0,
+      "shape": true,
+      "dtype": true,
+      "npu": true,
+      "contiguous": true,
+      "inputs_unchanged": true,
+      "independent_storage": true
+    },
+    "shape": [
+      3,
+      3,
+      257
+    ],
+    "input_shapes": [
+      [
+        3,
+        257
+      ],
+      [
+        3,
+        4097
+      ]
+    ],
+    "attributes": {},
+    "dynamic_updates": [
+      {
+        "id": "logical_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      },
+      {
+        "id": "mapping_values_changed",
+        "status": "PASS",
+        "candidate_mismatches": 0,
+        "compared_with": "independent CPU oracle; outside performance timing"
+      }
+    ],
+    "streams_cpu_oracle": {
+      "status": "PASS",
+      "candidate_retained": 6,
+      "baseline_retained": 6,
+      "compared_with": "independent CPU oracle",
+      "distinct_storage": 12,
+      "baseline_repeat20_before_bytes": 54272,
+      "baseline_repeat20_after_bytes": 54272
+    }
+  }
+}
