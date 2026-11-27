@@ -33,6 +33,8 @@ class Engine;
 class Request;
 class Sequence;
 class PDScheduler;
+class Options;
+class ModelArgs;
 
 // Immutable response configuration supplied when the PD RPC service starts.
 struct PDServiceOptions {
@@ -41,6 +43,9 @@ struct PDServiceOptions {
   std::string reasoning_parser_format;
   std::string system_fingerprint;
 };
+
+PDServiceOptions make_pd_service_options(const Options& options,
+                                         const ModelArgs& model_args);
 
 class PDServiceImpl {
  public:
