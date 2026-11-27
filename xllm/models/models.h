@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+#include "models/llm/olmo2_args.h"  // IWYU pragma: keep
 
 #if defined(USE_NPU)
 #include "dit/pipelines/pipeline_flux.h"                 // IWYU pragma: keep
