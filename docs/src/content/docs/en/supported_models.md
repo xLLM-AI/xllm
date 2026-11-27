@@ -39,6 +39,7 @@ Language models for chat, reasoning, and text generation.
 | DeepSeek-V3 / R1 / V3.1 | ❌ | ✅ | ❌ | Not yet available |
 | DeepSeek-V3.2 | ✅ | ✅ | ❌ | Not yet available |
 | DeepSeek-V4 | ✅ | ✅ | — | [Guide ↗](/en/cookbook/autoregressive_models/deepseek/deepseek_v4/) |
+| DeepSeek-V4.1-Flash-1017 | ✅ | — | — | Not yet available |
 | Qwen2 / Qwen2.5 / QwQ | ❌ | ✅ | ✅ | Not yet available |
 | Qwen3 | ✅ | ✅ | ✅ | Not yet available |
 | Qwen3 MoE | ✅ | ✅ | ✅ | Not yet available |
