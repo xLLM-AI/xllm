@@ -18,7 +18,7 @@ from typing import Any
 import torch
 from diffusers import WanTransformer3DModel
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from diffusers.models.transformers.transformer_wan import WanAttention, WanRotaryPosEmbed
+from diffusers.models.transformers.transformer_wan import WanAttention, WanRotaryPosEmbed, WanTransformerBlock
 from torch.nn import functional as F
 
 from xllm.python.dit.parallel import (
@@ -100,6 +100,19 @@ class _WanAttentionProcessor:
         return attn.to_out[1](attn.to_out[0](output.flatten(-2)))
 
 
+def _finish_first_block(
+    block: WanTransformerBlock,
+    states: torch.Tensor,
+    context: torch.Tensor,
+    ffn_modulation: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+) -> torch.Tensor:
+    shift, scale, gate = ffn_modulation
+    normalized = block.norm2(states.float()).type_as(states)
+    states = states + block.attn2(normalized, context, None, None)
+    normalized = (block.norm3(states.float()) * (1 + scale) + shift).type_as(states)
+    return (states.float() + block.ffn(normalized).float() * gate).type_as(states)
+
+
 class WanI2VTransformer(WanTransformer3DModel):
     _sp: SequenceParallel
 
@@ -126,9 +139,12 @@ class WanI2VTransformer(WanTransformer3DModel):
         attention_kwargs: dict[str, Any] | None = None,
         *,
         rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+        negative_encoder_hidden_states: torch.Tensor | None = None,
+        guidance_scale: float = 1.0,
     ) -> Transformer2DModelOutput | tuple[torch.Tensor]:
-        batch, _, frames, height, width = hidden_states.shape
+        _, _, frames, height, width = hidden_states.shape
         pt, ph, pw = self.config.patch_size
+        grid = (frames // pt, height // ph, width // pw)
         rotary = self.prepare_rotary(hidden_states) if rotary_emb is None else rotary_emb
         states = self.patch_embedding(hidden_states).flatten(2).transpose(1, 2)
         live_rows = states.shape[1]
@@ -141,16 +157,68 @@ class WanI2VTransformer(WanTransformer3DModel):
         )
         context = torch.cat((image, text), dim=1)
         timestep_proj = timestep_proj.unflatten(1, (6, -1))
-        for block in self.blocks:
+
+        if negative_encoder_hidden_states is None:
+            output = self._run_blocks(states, context, temb, timestep_proj, rotary, live_rows, grid)
+        else:
+            negative_text = self.condition_embedder.text_embedder(negative_encoder_hidden_states)
+            negative_context = torch.cat((image, negative_text), dim=1)
+            first = self.blocks[0]
+            first.attn1.processor.live_rows = live_rows
+            shift, scale, gate, ffn_shift, ffn_scale, ffn_gate = (
+                first.scale_shift_table + timestep_proj.float()
+            ).chunk(6, dim=1)
+            # The two CFG branches first diverge at the first block's cross-attention.
+            normalized = (first.norm1(states.float()) * (1 + scale) + shift).type_as(states)
+            attention = first.attn1(normalized, None, None, rotary)
+            states = (states.float() + attention * gate).type_as(states)
+            del normalized, attention
+            modulation = (ffn_shift, ffn_scale, ffn_gate)
+            positive = self._run_blocks(
+                _finish_first_block(first, states, context, modulation),
+                context,
+                temb,
+                timestep_proj,
+                rotary,
+                live_rows,
+                grid,
+                start=1,
+            )
+            unconditional = self._run_blocks(
+                _finish_first_block(first, states, negative_context, modulation),
+                negative_context,
+                temb,
+                timestep_proj,
+                rotary,
+                live_rows,
+                grid,
+                start=1,
+            )
+            output = unconditional + guidance_scale * (positive - unconditional)
+        return Transformer2DModelOutput(sample=output) if return_dict else (output,)
+
+    def _run_blocks(
+        self,
+        states: torch.Tensor,
+        context: torch.Tensor,
+        temb: torch.Tensor,
+        timestep_proj: torch.Tensor,
+        rotary: tuple[torch.Tensor, torch.Tensor],
+        live_rows: int,
+        grid: tuple[int, int, int],
+        *,
+        start: int = 0,
+    ) -> torch.Tensor:
+        for index in range(start, len(self.blocks)):
+            block = self.blocks[index]
             block.attn1.processor.live_rows = live_rows
             states = block(states, context, timestep_proj, rotary)
 
         shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
         states = (self.norm_out(states.float()) * (1 + scale) + shift).to(states.dtype)
         states = self._sp.gather(self.proj_out(states).contiguous())[:, :live_rows]
-        states = states.reshape(batch, frames // pt, height // ph, width // pw, pt, ph, pw, -1)
-        output = states.permute(0, 7, 1, 4, 2, 5, 3, 6).flatten(6, 7).flatten(4, 5).flatten(2, 3)
-        return Transformer2DModelOutput(sample=output) if return_dict else (output,)
+        states = states.reshape(states.size(0), *grid, *self.config.patch_size, -1)
+        return states.permute(0, 7, 1, 4, 2, 5, 3, 6).flatten(6, 7).flatten(4, 5).flatten(2, 3)
 
 
 def load_transformer(

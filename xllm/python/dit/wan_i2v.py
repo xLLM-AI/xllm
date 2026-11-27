@@ -144,13 +144,15 @@ class WanI2VPipeline:
         # byte pixels, while the VAE processor expects floating point [0, 1].
         image = batch["media_sources"][0][2].cpu()
         pipeline = self._pipeline
+        guidance_scale = generation["guidance_scale"]
+        do_cfg = guidance_scale > 1
         image_embed = pipeline.encode_image(image, device=self._device).to(pipeline.transformer.dtype)
         prompt_embed = tensors.get("prompt_embed")
         negative_embed = tensors.get("negative_prompt_embed")
         prompt_embed, negative_embed = pipeline.encode_prompt(
             prompt=None if prompt_embed is not None else batch["prompts"],
             negative_prompt=None if negative_embed is not None else batch["negative_prompts"] or None,
-            do_classifier_free_guidance=generation["guidance_scale"] > 1,
+            do_classifier_free_guidance=do_cfg,
             prompt_embeds=prompt_embed,
             negative_prompt_embeds=negative_embed,
             max_sequence_length=512,
@@ -183,27 +185,20 @@ class WanI2VPipeline:
             latents=tensors.get("latent"),
         )
         rotary_emb = pipeline.transformer.prepare_rotary(latents)
+        transformer_dtype = pipeline.transformer.dtype
+        condition = condition.to(transformer_dtype)
         for timestep in scheduler.timesteps:
-            model_input = torch.cat((latents, condition), dim=1).to(pipeline.transformer.dtype)
-            timestep_input = timestep.expand(1)
+            model_input = torch.cat((latents.to(transformer_dtype), condition), dim=1)
             noise = pipeline.transformer(
                 hidden_states=model_input,
-                timestep=timestep_input,
+                timestep=timestep.expand(1),
                 encoder_hidden_states=prompt_embed,
                 encoder_hidden_states_image=image_embed,
                 return_dict=False,
                 rotary_emb=rotary_emb,
+                negative_encoder_hidden_states=negative_embed if do_cfg else None,
+                guidance_scale=guidance_scale,
             )[0]
-            if generation["guidance_scale"] > 1:
-                unconditional = pipeline.transformer(
-                    hidden_states=model_input,
-                    timestep=timestep_input,
-                    encoder_hidden_states=negative_embed,
-                    encoder_hidden_states_image=image_embed,
-                    return_dict=False,
-                    rotary_emb=rotary_emb,
-                )[0]
-                noise = unconditional + generation["guidance_scale"] * (noise - unconditional)
             latents = scheduler.step(noise, timestep, latents, return_dict=False)[0]
 
         if not self._is_driver:
