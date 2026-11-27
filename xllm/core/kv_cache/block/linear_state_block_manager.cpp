@@ -70,9 +70,9 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
       }
     }
   }
-  if (!blocks->empty() &&
-      (decode_step || !options_.enable_prefix_cache() ||
-       (!checkpoint_hash.has_value() && !blocks->back().is_shared()))) {
+  if (!blocks->empty() && (decode_step || !options_.enable_prefix_cache() ||
+                           (!checkpoint_hash.has_value() &&
+                            blocks->back().unpinned_ref_count() == 1))) {
     return std::vector<Block>{};
   }
   const auto& pool = options_.shared_block_pool();
@@ -81,7 +81,7 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
                                      : BlockManagerImpl::allocate(1);
   if (allocated.empty()) {
     // Checkpoint retention must not stall a private live slot.
-    if (!blocks->empty() && !blocks->back().is_shared()) {
+    if (!blocks->empty() && blocks->back().unpinned_ref_count() == 1) {
       return std::vector<Block>{};
     }
     return std::nullopt;
@@ -92,14 +92,6 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
     kv_state.set_num_cached_blocks(BlockType::LINEAR, checkpoint_index);
   }
   return allocated;
-}
-
-Block LinearStateBlockManager::allocate() {
-  std::vector<Block> blocks = BlockManagerImpl::allocate(1);
-  if (blocks.empty()) {
-    return Block();
-  }
-  return std::move(blocks[0]);
 }
 
 std::vector<Block> LinearStateBlockManager::allocate_shared(

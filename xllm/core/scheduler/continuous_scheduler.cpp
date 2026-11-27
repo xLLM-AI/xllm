@@ -26,6 +26,7 @@ limitations under the License.
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "core/common/types.h"
@@ -39,6 +40,7 @@ limitations under the License.
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/kv_cache/block/block.h"
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler_policy.h"
 #include "core/util/timer.h"
@@ -99,9 +101,6 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
 
   enable_prefix_cache_ =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
-  enable_in_batch_prefix_cache_ =
-      enable_prefix_cache_ &&
-      ::xllm::KVCacheConfig::get_instance().enable_in_batch_prefix_cache();
 
   ProfileManager::Options profile_manager_options;
   profile_manager_options.enable_graph(options.enable_graph())
@@ -240,6 +239,10 @@ ContinuousSchedulerBase::~ContinuousSchedulerBase() {
 
   if (kv_cache_prefetcher_ != nullptr) {
     kv_cache_prefetcher_->shutdown();
+  }
+  if (pending_step_ && requires_pd_kv_retirement()) {
+    result_callback_(pending_step_->batches);
+    pending_step_.reset();
   }
   running_requests_.clear();
 }
@@ -383,6 +386,9 @@ BatchGroup ContinuousSchedulerBase::prepare_batch() {
 
   // Strategy-driven scheduling
   policy_->schedule(state, budget, finished);
+  if (pending_step_ && requires_pd_kv_retirement()) {
+    pending_step_->drain_next_batch_ = budget.preemption_deferred_;
+  }
 
   // Finalize
   if (!finished.empty()) {
@@ -428,9 +434,10 @@ SchedulerState ContinuousSchedulerBase::make_state() {
           [this](const std::shared_ptr<Request>& request) {
             release_failed_request(request);
           },
-      .has_pending_vmm_batch =
-          KVCacheConfig::get_instance().enable_vmm_kvcache() &&
-          pending_step_.has_value(),
+      .has_pending_kv_batch_ =
+          pending_step_.has_value() &&
+          (KVCacheConfig::get_instance().enable_vmm_kvcache() ||
+           requires_pd_kv_retirement()),
   };
 }
 
@@ -518,7 +525,38 @@ bool ContinuousSchedulerBase::step_with_schedule_overlap(
     return false;
   }
 
+  std::optional<KVCacheBlockLease> cache_block_lease;
   if (!cur_batch_all_empty) {
+    if (requires_pd_kv_retirement()) {
+      // BatchState already retains the VMM KV blocks used by its forward plan.
+      const std::optional<BlockType> excluded_type =
+          KVCacheConfig::get_instance().enable_vmm_kvcache()
+              ? std::optional{/*value=*/BlockType::KV}
+              : std::nullopt;
+      size_t block_count = 0;
+      for (Sequence* sequence : running_sequences_) {
+        for (const auto& group :
+             sequence->kv_state().block_groups(excluded_type)) {
+          block_count += group.size();
+        }
+      }
+
+      std::vector<Block> blocks;
+      blocks.reserve(block_count);
+      for (Sequence* sequence : running_sequences_) {
+        for (const auto& group :
+             sequence->kv_state().block_groups(excluded_type)) {
+          for (const Block& block : group) {
+            if (block.is_valid()) {
+              blocks.emplace_back(block, /*pin_block=*/true);
+            }
+          }
+        }
+      }
+      if (!blocks.empty()) {
+        cache_block_lease.emplace(std::move(blocks));
+      }
+    }
     step_callback_(batch);
   }
 
@@ -538,12 +576,25 @@ bool ContinuousSchedulerBase::step_with_schedule_overlap(
   // Reuse the retired request vector's capacity across steady-state steps.
   pending_step_->batches = std::move(batch);
   pending_step_->requests = running_requests_;
+  if (cache_block_lease) {
+    pending_step_->cache_block_lease_.emplace(std::move(*cache_block_lease));
+  }
+  if (pending_step_->drain_next_batch_) {
+    // A partial batch must not renew the deferral into the next round.
+    complete_pending_step();
+    pending_step_.reset();
+  }
   return true;
 }
 
+bool ContinuousSchedulerBase::requires_pd_kv_retirement() const {
+  const auto role = options_.instance_role();
+  return options_.enable_disagg_pd() && role && role->can_receive_pd_kv();
+}
+
 void ContinuousSchedulerBase::complete_pending_step() {
-  CHECK(pending_step_.has_value());
   result_callback_(pending_step_->batches);
+  pending_step_->cache_block_lease_.reset();
   process_batch_output(pending_step_->requests);
 }
 

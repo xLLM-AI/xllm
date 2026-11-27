@@ -18,7 +18,6 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -61,7 +60,7 @@ class PrefixCache {
 
   explicit PrefixCache(uint32_t block_size,
                        BlockHasherType hasher_type = BlockHasherType::TEXT)
-      : block_size_(block_size), hasher_type_(hasher_type), num_blocks_(0) {}
+      : block_size_(block_size), hasher_type_(hasher_type) {}
 
   virtual ~PrefixCache() {
     if (event_journal_) {
@@ -74,7 +73,7 @@ class PrefixCache {
 
   void set_event_sink(std::shared_ptr<KVCacheEventJournal> journal,
                       KVCacheEventScope scope) {
-    CHECK_EQ(num_blocks_, 0);
+    CHECK(cached_blocks_.empty());
     CHECK(hasher_type_ == BlockHasherType::TEXT);
     event_journal_ = std::move(journal);
     event_scope_ = std::move(scope);
@@ -104,13 +103,8 @@ class PrefixCache {
                         const Slice<XXH3Key>& block_hashes = {});
 
   // Insert already-hashed blocks (hash stamped by the caller).
-  virtual size_t insert(Slice<Block>& blocks);
-  virtual size_t insert(const std::vector<Block>& blocks);
+  size_t insert(Slice<Block> blocks);
 
-  // Point-lookup by chained hash key. `find` hits refresh LRU recency and
-  // return the block; `contains` is LRU-neutral. Both return an invalid
-  // Block / false on miss.
-  Block find(const XXH3Key& hash);
   bool contains(const XXH3Key& hash) const;
 
   // Physical ownership is independent of a handle's hash: transfer aliases
@@ -124,22 +118,7 @@ class PrefixCache {
   bool evict_block(const XXH3Key& hash);
   void set_dependency(const XXH3Key& hash, const XXH3Key& dependency);
 
-  virtual size_t num_blocks() const {
-    CHECK(num_blocks_ == cached_blocks_.size()) << "check block num failed";
-    return num_blocks_;
-  }
-
-  float block_match_rate() {
-    if (total_blocks_.load() == 0) {
-      return 0;
-    } else {
-      return static_cast<float>(matched_blocks_.load()) / total_blocks_.load();
-    }
-  }
-
-  static uint32_t compute_hash_keys(const Slice<int32_t>& token_ids,
-                                    std::vector<Block>& blocks,
-                                    const size_t cached_blocks = 0);
+  size_t num_blocks() const { return cached_blocks_.size(); }
 
  protected:
   std::shared_ptr<KVCacheEventJournal> event_journal_;
@@ -207,11 +186,6 @@ class PrefixCache {
       lst_back.prev = node;
     }
 
-    void move_back(Node* node) {
-      remove_node(node);
-      push_back(node);
-    }
-
     Node lst_front;
     Node lst_back;
   };
@@ -219,13 +193,10 @@ class PrefixCache {
   DNodeList lru_lst_;
   uint32_t block_size_;
   BlockHasherType hasher_type_;
-  size_t num_blocks_ = 0;
   std::unordered_map<XXH3Key, Node*, FixedStringKeyHash, FixedStringKeyEqual>
       cached_blocks_;
 
   std::unordered_set<int32_t> cached_block_ids_;
-
-  std::atomic<uint64_t> total_blocks_{0}, matched_blocks_{0};
 
  private:
   Node* evict_node(Node* node);

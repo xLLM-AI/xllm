@@ -129,7 +129,6 @@ bool VmmKVPageAllocatorImpl::register_model(
     return false;
   }
   ModelState& state = it->second;
-  state.num_layers = num_layers;
   const size_t symmetric_pages = 2 * static_cast<size_t>(num_layers);
   state.phy_pages_per_virt_page = physical_pages_per_virtual_page == 0
                                       ? symmetric_pages
@@ -163,60 +162,12 @@ bool VmmKVPageAllocatorImpl::register_model(
   return true;
 }
 
-bool VmmKVPageAllocatorImpl::unregister_model(const std::string& model_id) {
-  std::unique_lock<std::mutex> lock(mtx_);
-  auto it = model_states_.find(model_id);
-  if (it == model_states_.end()) {
-    return false;
-  }
-  ModelState& state = it->second;
-  const auto has_allocated_pages = [&state] {
-    return std::any_of(state.dp_group_pages.begin(),
-                       state.dp_group_pages.end(),
-                       [](const DpGroupPages& pages) {
-                         return !pages.allocated_virt_page_list.empty();
-                       });
-  };
-  if (state.unregistering || state.transition != ModelTransition::IDLE ||
-      state.transition_waiters > 0 || has_allocated_pages()) {
-    LOG(ERROR) << "Cannot unregister active KV cache model " << model_id;
-    return false;
-  }
-  state.unregistering = true;
-  cond_.notify_all();
-  cond_.wait(lock, [&state] { return state.pending_map_ops == 0; });
-  // A synchronous allocation already mapping when cleanup began can finish
-  // with a live page. Keep its state available for the owner to recycle it.
-  if (has_allocated_pages()) {
-    state.unregistering = false;
-    cond_.notify_all();
-    return false;
-  }
-  const bool mapped = state.kv_cache_mapped;
-  const auto plan = snapshot_pages(state);
-  lock.unlock();
-  if (mapped) {
-    unmap_pages(model_id, plan);
-    for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
-      backend_.release_pages(model_id,
-                             dp_rank,
-                             plan.dp_group_page_ids[dp_rank].size() *
-                                 plan.physical_pages_per_virtual_page);
-    }
-  }
-  lock.lock();
-  model_states_.erase(model_id);
-  return true;
-}
-
 void VmmKVPageAllocatorImpl::start_prealloc_thread(
     const std::string& model_id) {
   std::lock_guard<std::mutex> lock(mtx_);
   CHECK(initialized_) << "VmmKVPageAllocatorImpl not initialized";
   CHECK(!shutting_down_) << "VmmKVPageAllocatorImpl is shutting down";
   ModelState& state = get_model_state(model_id);
-  CHECK(!state.unregistering)
-      << "Cannot preallocate for unregistering model " << model_id;
   state.ready_for_preallocation = true;
   if (!enable_prealloc_) {
     return;
@@ -320,7 +271,7 @@ void VmmKVPageAllocatorImpl::free_kv_cache_pages(
         << "KV page " << page_id << " is not allocated for model " << model_id;
   }
   pages.num_free_virt_pages += virtual_page_ids.size();
-  if (!state.kv_cache_mapped) {
+  if (state.suspended) {
     pages.recycle_free_virt_pages(virtual_page_ids);
     return;
   }
@@ -334,34 +285,6 @@ void VmmKVPageAllocatorImpl::free_kv_cache_pages(
       virtual_page_ids.begin() + num_to_reserve);
   std::vector<int64_t> pages_to_unmap(virtual_page_ids.begin() + num_to_reserve,
                                       virtual_page_ids.end());
-  if (pages_to_unmap.empty()) {
-    return;
-  }
-  ++state.pending_map_ops;
-  lock.unlock();
-  unmap_virtual_pages(model_id, dp_rank, pages_to_unmap);
-  lock.lock();
-  pages.recycle_free_virt_pages(pages_to_unmap);
-  backend_.release_pages(
-      model_id, dp_rank, pages_to_unmap.size() * state.phy_pages_per_virt_page);
-  --state.pending_map_ops;
-  cond_.notify_all();
-}
-
-void VmmKVPageAllocatorImpl::trim_kv_cache(const std::string& model_id,
-                                           int32_t dp_rank) {
-  std::unique_lock<std::mutex> lock(mtx_);
-  validate_dp_rank(dp_rank);
-  ModelState& state = get_model_state(model_id);
-  wait_for_model_transition(state, lock);
-  auto& pages = state.dp_group_pages[dp_rank];
-  std::vector<int64_t> pages_to_unmap(pages.reserved_virt_page_list.begin(),
-                                      pages.reserved_virt_page_list.end());
-  pages.reserved_virt_page_list.clear();
-  if (!state.kv_cache_mapped) {
-    pages.recycle_free_virt_pages(pages_to_unmap);
-    return;
-  }
   if (pages_to_unmap.empty()) {
     return;
   }
@@ -395,7 +318,6 @@ void VmmKVPageAllocatorImpl::finish_suspend(const std::string& model_id) {
   std::lock_guard<std::mutex> lock(mtx_);
   ModelState& state = get_model_state(model_id);
   CHECK(state.transition == ModelTransition::SUSPENDING);
-  state.kv_cache_mapped = false;
   state.transition = ModelTransition::IDLE;
   cond_.notify_all();
 }
@@ -419,7 +341,6 @@ void VmmKVPageAllocatorImpl::finish_resume(const std::string& model_id,
     ModelState& state = get_model_state(model_id);
     CHECK(state.transition == ModelTransition::RESUMING);
     state.suspended = !success;
-    state.kv_cache_mapped = success;
     state.transition = ModelTransition::IDLE;
     cond_.notify_all();
   }
@@ -469,7 +390,7 @@ size_t VmmKVPageAllocatorImpl::get_num_available_virt_pages(
   std::lock_guard<std::mutex> lock(mtx_);
   validate_dp_rank(dp_rank);
   const ModelState& state = get_model_state(model_id);
-  if (shutting_down_ || state.unregistering || state.suspended ||
+  if (shutting_down_ || state.suspended ||
       state.transition != ModelTransition::IDLE) {
     return 0;
   }
@@ -479,34 +400,6 @@ size_t VmmKVPageAllocatorImpl::get_num_available_virt_pages(
                backend_.available_pages(model_id, dp_rank) /
                    state.phy_pages_per_virt_page);
   return pages.reserved_virt_page_list.size() + growth;
-}
-
-size_t VmmKVPageAllocatorImpl::get_num_free_virt_pages(
-    const std::string& model_id,
-    int32_t dp_rank) const {
-  std::lock_guard<std::mutex> lock(mtx_);
-  validate_dp_rank(dp_rank);
-  return get_model_state(model_id).dp_group_pages[dp_rank].num_free_virt_pages;
-}
-
-size_t VmmKVPageAllocatorImpl::get_num_inuse_virt_pages(
-    const std::string& model_id,
-    int32_t dp_rank) const {
-  std::lock_guard<std::mutex> lock(mtx_);
-  validate_dp_rank(dp_rank);
-  const ModelState& state = get_model_state(model_id);
-  return state.num_total_virt_pages -
-         state.dp_group_pages[dp_rank].num_free_virt_pages;
-}
-
-size_t VmmKVPageAllocatorImpl::get_num_reserved_virt_pages(
-    const std::string& model_id,
-    int32_t dp_rank) const {
-  std::lock_guard<std::mutex> lock(mtx_);
-  validate_dp_rank(dp_rank);
-  return get_model_state(model_id)
-      .dp_group_pages[dp_rank]
-      .reserved_virt_page_list.size();
 }
 
 size_t VmmKVPageAllocatorImpl::get_num_total_virt_pages(
@@ -538,17 +431,6 @@ int64_t VmmKVPageAllocatorImpl::get_offset(int64_t virtual_page_id) const {
   return virtual_page_id * static_cast<int64_t>(page_size_);
 }
 
-int64_t VmmKVPageAllocatorImpl::num_layers(const std::string& model_id) const {
-  std::lock_guard<std::mutex> lock(mtx_);
-  return get_model_state(model_id).num_layers;
-}
-
-size_t VmmKVPageAllocatorImpl::phy_pages_per_virt_page(
-    const std::string& model_id) const {
-  std::lock_guard<std::mutex> lock(mtx_);
-  return get_model_state(model_id).phy_pages_per_virt_page;
-}
-
 VmmKVPageAllocatorImpl::ModelState& VmmKVPageAllocatorImpl::get_model_state(
     const std::string& model_id) {
   auto it = model_states_.find(model_id);
@@ -566,15 +448,10 @@ VmmKVPageAllocatorImpl::get_model_state(const std::string& model_id) const {
 void VmmKVPageAllocatorImpl::wait_for_model_transition(
     ModelState& state,
     std::unique_lock<std::mutex>& lock) {
-  CHECK(!shutting_down_) << "VmmKVPageAllocatorImpl is shutting down";
-  CHECK(!state.unregistering) << "KV cache model is unregistering";
-  ++state.transition_waiters;
   cond_.wait(lock, [this, &state] {
     return shutting_down_ || state.transition == ModelTransition::IDLE;
   });
-  --state.transition_waiters;
   CHECK(!shutting_down_) << "VmmKVPageAllocatorImpl is shutting down";
-  CHECK(!state.unregistering) << "KV cache model is unregistering";
 }
 
 KVCacheMappingPlan VmmKVPageAllocatorImpl::snapshot_pages(
@@ -678,8 +555,8 @@ void VmmKVPageAllocatorImpl::prealloc_worker() {
       prealloc_needed_ = false;
       batches.reserve(model_states_.size() * static_cast<size_t>(dp_size_));
       for (auto& [model_id, state] : model_states_) {
-        if (!state.ready_for_preallocation || state.unregistering ||
-            state.suspended || state.transition != ModelTransition::IDLE) {
+        if (!state.ready_for_preallocation || state.suspended ||
+            state.transition != ModelTransition::IDLE) {
           continue;
         }
         for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
@@ -719,7 +596,7 @@ void VmmKVPageAllocatorImpl::prealloc_worker() {
       {
         std::lock_guard<std::mutex> lock(mtx_);
         ModelState& state = get_model_state(batch.model_id);
-        if (state.unregistering || state.suspended || !prealloc_running_) {
+        if (state.suspended || !prealloc_running_) {
           auto& pages = state.dp_group_pages[batch.dp_rank];
           pages.restore_free_virt_pages(batch.virtual_page_ids);
           backend_.release_pages(

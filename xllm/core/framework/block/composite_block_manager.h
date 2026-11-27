@@ -122,11 +122,7 @@ class CompositeBlockManager final {
 
   void reserve_virtual_memory_padding_blocks();
 
-  size_t num_sub_managers() const { return leaves_.size(); }
-
  private:
-  friend class BlockManagerPoolTestPeer;
-
   void publish_completed_prefix(Sequence* seq, size_t token_limit);
   // The admission leaf whose raw block count defines the pool's
   // scheduler-facing capacity unit. Picks the finest-grained admission leaf

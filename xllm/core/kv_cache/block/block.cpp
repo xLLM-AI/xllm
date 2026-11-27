@@ -46,35 +46,33 @@ void Block::release(std::vector<Block> blocks) {
 }
 
 Block::Block(int32_t id, BlockManager* manager)
-    : id_(id), ref_count_(new std::atomic<uint32_t>(1)), manager_(manager) {
-  // get the block size from the manager
-  size_ = manager_ == nullptr ? 0 : manager_->block_size();
-}
+    : id_(id),
+      size_(manager == nullptr ? 0
+                               : static_cast<uint32_t>(manager->block_size())),
+      pin_block_(false),
+      ref_count_(new std::atomic<uint64_t>{/*desired=*/1}),
+      manager_(manager) {}
 
-Block::~Block() {
-  // decrease reference count
-  dec_ref_count();
-}
+Block::~Block() { dec_ref_count(); }
 
-// copy constructor
-Block::Block(const Block& other)
+Block::Block(const Block& other, bool pin_block)
     : id_(other.id_),
       size_(other.size_),
+      pin_block_(pin_block || other.pin_block_),
       ref_count_(other.ref_count_),
       manager_(other.manager_) {
   memcpy(hash_value_, other.hash_value_, XXH3_128BITS_HASH_VALUE_LEN);
 
-  // increase reference count
   inc_ref_count();
 }
 
-// copy assignment
 Block& Block::operator=(const Block& other) {
   if (this != &other) {
     dec_ref_count();
 
     id_ = other.id_;
     size_ = other.size_;
+    pin_block_ = other.pin_block_;
     manager_ = other.manager_;
     ref_count_ = other.ref_count_;
 
@@ -88,11 +86,11 @@ Block& Block::operator=(const Block& other) {
 Block::Block(Block&& other) noexcept
     : id_(other.id_),
       size_(other.size_),
+      pin_block_(other.pin_block_),
       ref_count_(other.ref_count_),
       manager_(other.manager_) {
   memcpy(hash_value_, other.hash_value_, XXH3_128BITS_HASH_VALUE_LEN);
 
-  // reset other without adjusting the reference count
   other.id_ = -1;
   other.size_ = 0;
   other.ref_count_ = nullptr;
@@ -105,6 +103,7 @@ Block& Block::operator=(Block&& other) noexcept {
 
     id_ = other.id_;
     size_ = other.size_;
+    pin_block_ = other.pin_block_;
     manager_ = other.manager_;
     ref_count_ = other.ref_count_;
 
@@ -122,7 +121,7 @@ Block& Block::operator=(Block&& other) noexcept {
 void Block::inc_ref_count() {
   if (ref_count_ != nullptr) {
     // Another alias appearing only needs atomicity, not ordering, so relaxed.
-    ref_count_->fetch_add(1, std::memory_order_relaxed);
+    ref_count_->fetch_add(ref_count_delta(), std::memory_order_relaxed);
   }
 }
 
@@ -132,12 +131,11 @@ void Block::dec_ref_count() {
   }
   // acq_rel pairs the releasing decrements with the acquiring final one, so the
   // thread that drives the count to zero observes all prior alias writes before
-  // it frees. fetch_sub returns the previous value; == 1 means we just hit
-  // zero.
-  if (ref_count_->fetch_sub(1, std::memory_order_acq_rel) == 1) {
-    // release the reference count memory
+  // it frees.
+  const uint64_t prior =
+      ref_count_->fetch_sub(ref_count_delta(), std::memory_order_acq_rel);
+  if (static_cast<uint32_t>(prior) == 1) {
     delete ref_count_;
-    // return the block id to the manager
     if (manager_ != nullptr) {
       manager_->free(id_);
     }

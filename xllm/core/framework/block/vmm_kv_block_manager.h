@@ -44,7 +44,6 @@ namespace xllm {
  * Key features:
  * - Uses an injected VmmKVPageAllocator for physical page management
  * - Maps blocks to virtual pages
- * - Supports reserved blocks for pre-allocation
  * - Retains shared prefix blocks until LRU eviction releases their pages
  */
 class VmmKVBlockManager final : public BlockManager {
@@ -105,27 +104,9 @@ class VmmKVBlockManager final : public BlockManager {
   // Free a single block by id
   void free(int32_t block_id) override;
 
-  // Allocate a single block
-  Block allocate() override;
-
   // Get total number of blocks
   size_t num_total_blocks() const override;
   size_t admission_capacity() const override;
-
-  // Get available size (free blocks that can be allocated)
-  size_t available_size() const;
-
-  // Try to reserve blocks for future allocation
-  bool try_to_reserve(size_t need_size);
-
-  // Free all reserved blocks
-  void free_reserved();
-
-  // Trim unused reserved pages
-  void trim();
-
-  // Get mapped memory size in bytes
-  size_t get_mapped_memory_size() const;
 
   // Reserve padding block for padding tokens.
   // Should be called after KV tensors are created.
@@ -174,9 +155,6 @@ class VmmKVBlockManager final : public BlockManager {
 
   // Pages that are fully allocated (page_id -> VirtualKVPageState)
   std::unordered_map<int64_t, std::unique_ptr<VirtualKVPageState>> full_pages_;
-
-  // Reserved blocks for pre-allocation
-  std::vector<int32_t> reserved_blocks_;
 
   // Padding block id (block 0, reserved for padding)
   std::optional<int32_t> padding_block_;

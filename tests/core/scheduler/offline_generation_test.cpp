@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/scheduler/continuous_scheduler.h"
+#include "core/scheduler/scheduler_notifier_test_peer.h"
 
 namespace xllm {
 namespace {
@@ -105,23 +106,9 @@ class OfflineGenerationScheduler final : public ContinuousScheduler<> {
     pending_step_->batches.front().add(request->sequences().front().get());
   }
 
-  void notify_after_next_prepare_batch(std::promise<void>& notification) {
-    prepared_notification_ = &notification;
+  bool wait_until_armed() const {
+    return SchedulerNotifierTestPeer::wait_until_armed(*notifier_);
   }
-
- protected:
-  BatchGroup prepare_batch() override {
-    BatchGroup batch = ContinuousSchedulerBase::prepare_batch();
-    std::promise<void>* notification =
-        std::exchange(prepared_notification_, nullptr);
-    if (notification != nullptr) {
-      notification->set_value();
-    }
-    return batch;
-  }
-
- private:
-  std::promise<void>* prepared_notification_ = nullptr;
 };
 
 SchedulerOptions generation_options(bool overlap) {
@@ -244,14 +231,10 @@ TEST_F(OfflineGenerationTest, OverlapWaitsForAdmissionAndResponse) {
     return true;
   };
   scheduler.incr_pending_requests(/*count=*/1);
-  std::promise<void> prepared;
-  std::future<void> preparing = prepared.get_future();
-  scheduler.notify_after_next_prepare_batch(prepared);
   auto generated = std::async(std::launch::async, [&]() {
     scheduler.generate_with_schedule_overlap();
   });
-  EXPECT_EQ(preparing.wait_for(std::chrono::seconds(5)),
-            std::future_status::ready);
+  EXPECT_TRUE(scheduler.wait_until_armed());
   EXPECT_NE(generated.wait_for(std::chrono::seconds(0)),
             std::future_status::ready);
   EXPECT_TRUE(scheduler.add_request(request));

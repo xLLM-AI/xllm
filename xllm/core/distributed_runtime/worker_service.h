@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -27,9 +28,6 @@ namespace xllm {
 class WorkerService : public proto::DistributeWorker {
  public:
   WorkerService(runtime::Options options, const torch::Device& device);
-  WorkerService(runtime::Options options,
-                const torch::Device& device,
-                std::unique_ptr<Worker> worker);
 
   virtual ~WorkerService();
 
@@ -194,7 +192,7 @@ class WorkerService : public proto::DistributeWorker {
   // runtime options
   runtime::Options options_;
 
-  bool initialized_;
+  std::atomic<bool> initialized_;
 
   Device device_;
 

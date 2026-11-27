@@ -111,7 +111,7 @@ TEST(WorkerShutdownTest, WakesResultWaitersWithoutPublishingAnOutput) {
   if (status != std::future_status::ready) {
     worker.begin_shutdown();
   }
-  EXPECT_FALSE(result.get().sample_output.next_tokens.defined());
+  EXPECT_FALSE(result.get().has_value());
   worker.drain_pending_execution();
 }
 
@@ -119,12 +119,12 @@ TEST(WorkerShutdownTest, DoesNotReturnAnAlreadyConsumedOutputDuringShutdown) {
   ShutdownTestWorker worker;
   auto step = worker.step_async(empty_input());
   EXPECT_TRUE(std::move(step).get().has_value());
-  EXPECT_TRUE(
-      worker.get_last_step_result().sample_output.next_tokens.defined());
+  EXPECT_TRUE(worker.get_last_step_result()
+                  .value()
+                  .sample_output.next_tokens.defined());
 
   worker.begin_shutdown();
-  EXPECT_FALSE(
-      worker.get_last_step_result().sample_output.next_tokens.defined());
+  EXPECT_FALSE(worker.get_last_step_result().has_value());
   worker.drain_pending_execution();
 }
 

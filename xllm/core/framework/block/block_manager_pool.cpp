@@ -145,25 +145,15 @@ BlockManagerPool::BlockManagerPool(
     auto leaves =
         build_composite_leaves(block_options, /*dp_rank=*/i, page_allocator_);
     if (options_.num_speculative_tokens() > 0) {
-      // EMBEDDING leaf needs the same concurrency wrapper as the other leaves
-      // when sequence-level entry points run off the scheduler thread (disagg
-      // PD / kvcache store prefill threadpools call try_allocate concurrently,
-      // and the host-offload D2H callback frees blocks off-thread).
       std::unique_ptr<BlockManager> embedding_leaf =
           std::make_unique<EmbeddingBlockManager>(
-              /*num_blocks=*/options_.num_embedding_blocks(),
-              /*resource_name=*/"embedding block",
-              /*exhaustion_message=*/"No more embedding-block ids available");
-      if (options_.enable_disagg_pd() || options_.enable_kvcache_store() ||
-          options_.enable_host_offload()) {
-        embedding_leaf = std::make_unique<ConcurrentBlockManagerImpl>(
-            std::move(embedding_leaf));
-      }
-      leaves.emplace(
-          BlockType::EMBEDDING,
-          CompositeBlockManager::LeafEntry{std::move(embedding_leaf),
-                                           /*participates_in_admission=*/false,
-                                           /*supports_prefix_cache=*/false});
+              /*num_blocks=*/options_.num_embedding_blocks());
+      leaves.emplace(/*key=*/BlockType::EMBEDDING,
+                     CompositeBlockManager::LeafEntry{
+                         ConcurrentBlockManagerImpl::wrap_if_needed(
+                             std::move(embedding_leaf), block_options),
+                         /*participates_in_admission=*/false,
+                         /*supports_prefix_cache=*/false});
     }
     block_managers_.emplace_back(std::make_unique<CompositeBlockManager>(
         std::move(leaves), block_options));

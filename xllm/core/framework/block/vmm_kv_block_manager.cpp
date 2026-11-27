@@ -99,19 +99,6 @@ std::vector<int32_t> VmmKVBlockManager::alloc_internal(size_t need_size) {
 
   size_t remaining_need = need_size;
 
-  // Try to allocate from reserved blocks first
-  if (!reserved_blocks_.empty()) {
-    size_t num_from_reserved =
-        std::min(reserved_blocks_.size(), remaining_need);
-    ret_index.insert(ret_index.end(),
-                     reserved_blocks_.begin(),
-                     reserved_blocks_.begin() + num_from_reserved);
-    reserved_blocks_.erase(reserved_blocks_.begin(),
-                           reserved_blocks_.begin() + num_from_reserved);
-    remaining_need -= num_from_reserved;
-  }
-
-  // Allocate the remaining blocks from pages
   while (remaining_need > 0) {
     VirtualKVPageState* page = nullptr;
 
@@ -206,14 +193,6 @@ std::optional<std::vector<Block>> VmmKVBlockManager::allocate_for_sequence(
     return std::nullopt;
   }
   return blocks;
-}
-
-Block VmmKVBlockManager::allocate() {
-  auto blocks = allocate(1);
-  if (blocks.empty()) {
-    return Block();  // Invalid block
-  }
-  return std::move(blocks[0]);
 }
 
 void VmmKVBlockManager::free_blocks(const std::vector<int32_t>& indices) {
@@ -363,7 +342,14 @@ size_t VmmKVBlockManager::num_blocks_in_prefix_cache() const {
   return prefix_cache_ ? prefix_cache_->num_blocks() : 0;
 }
 
-size_t VmmKVBlockManager::num_free_blocks() const { return available_size(); }
+size_t VmmKVBlockManager::num_free_blocks() const {
+  size_t resident_free_blocks = 0;
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    resident_free_blocks = num_avail_blocks_.load() + inactive_blocks_.size();
+  }
+  return resident_free_blocks + unallocated_block_capacity();
+}
 
 size_t VmmKVBlockManager::num_used_blocks() const {
   std::lock_guard<std::mutex> lock(mtx_);
@@ -397,8 +383,7 @@ size_t VmmKVBlockManager::admission_capacity() const {
   bool padding_reserved = false;
   {
     std::lock_guard<std::mutex> lock(mtx_);
-    resident_blocks = get_num_allocated_blocks() + num_avail_blocks_.load() +
-                      reserved_blocks_.size();
+    resident_blocks = get_num_allocated_blocks() + num_avail_blocks_.load();
     padding_reserved = padding_block_.has_value();
   }
   size_t capacity = std::min(static_cast<size_t>(options_.num_blocks()),
@@ -423,65 +408,6 @@ size_t VmmKVBlockManager::unallocated_block_capacity() const {
   return blocks_from_reserved_pages;
 }
 
-size_t VmmKVBlockManager::available_size() const {
-  size_t resident_free_blocks = 0;
-  {
-    std::lock_guard<std::mutex> lock(mtx_);
-    resident_free_blocks = num_avail_blocks_.load() + reserved_blocks_.size() +
-                           inactive_blocks_.size();
-  }
-  return resident_free_blocks + unallocated_block_capacity();
-}
-
-bool VmmKVBlockManager::try_to_reserve(size_t need_size) {
-  // Check available size first (consistent with Python version)
-  if (available_size() < need_size) {
-    return false;
-  }
-
-  // alloc_internal will acquire mtx_ internally
-  auto reserved = alloc_internal(need_size);
-  if (reserved.size() != need_size) {
-    // The live device budget can shrink after the advisory capacity check.
-    // A failed reservation must not retain a partially allocated block batch.
-    free_blocks(reserved);
-    LOG_EVERY_N(WARNING, 1000) << "Failed to reserve blocks.";
-    return false;
-  }
-
-  std::lock_guard<std::mutex> lock(mtx_);
-  reserved_blocks_.insert(
-      reserved_blocks_.end(), reserved.begin(), reserved.end());
-  return true;
-}
-
-void VmmKVBlockManager::free_reserved() {
-  std::vector<int32_t> blocks_to_free;
-  {
-    std::lock_guard<std::mutex> lock(mtx_);
-    if (reserved_blocks_.empty()) {
-      return;
-    }
-    blocks_to_free = std::move(reserved_blocks_);
-    reserved_blocks_.clear();
-  }
-  // free_blocks will acquire mtx_ internally
-  free_blocks(blocks_to_free);
-}
-
-void VmmKVBlockManager::trim() {
-  page_allocator_.trim_kv_cache(model_id_, dp_rank_);
-}
-
-size_t VmmKVBlockManager::get_mapped_memory_size() const {
-  auto& page_allocator = page_allocator_;
-  // Each virtual page uses phy_pages_per_virt_page physical pages
-  // Each physical page is phy_page_size bytes
-  return page_allocator.get_num_inuse_virt_pages(model_id_, dp_rank_) *
-         page_allocator.phy_pages_per_virt_page(model_id_) *
-         page_allocator.page_size();
-}
-
 size_t VmmKVBlockManager::get_num_allocated_blocks() const {
   // Blocks from fully allocated pages
   size_t blocks_per_page =
@@ -494,11 +420,7 @@ size_t VmmKVBlockManager::get_num_allocated_blocks() const {
   // the partially allocated pages minus the number of free blocks.
   size_t blocks_from_avail_pages =
       avail_pages_.size() * blocks_per_page - num_avail_blocks_.load();
-
-  // Page state has already marked reserved blocks occupied, but they remain
-  // available to the next allocation. Count them only in available_size().
-  return blocks_from_full_pages + blocks_from_avail_pages -
-         reserved_blocks_.size();
+  return blocks_from_full_pages + blocks_from_avail_pages;
 }
 
 }  // namespace xllm

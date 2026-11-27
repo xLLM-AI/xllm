@@ -286,7 +286,7 @@ class WorkerImpl {
     return options_.enable_schedule_overlap_;
   }
 
-  virtual ForwardOutput get_last_step_result();
+  virtual std::optional<ForwardOutput> get_last_step_result();
 
   bool is_driver() const { return driver_ || dp_driver_; }
 

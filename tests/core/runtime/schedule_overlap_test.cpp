@@ -329,7 +329,7 @@ void expect_rejected_json_continuation(torch::Tensor prior_tokens) {
   EXPECT_EQ(output->json_object_errors.front().sample_sequence_id, "request#0");
   EXPECT_EQ(output->json_object_errors.front().message,
             "prior token violates json_object grammar");
-  const ForwardOutput published = worker.get_last_step_result();
+  const ForwardOutput published = worker.get_last_step_result().value();
   ASSERT_EQ(published.json_object_errors.size(), 1U);
   EXPECT_EQ(published.json_object_errors.front().sample_sequence_id,
             "request#0");
@@ -357,6 +357,7 @@ TEST(ScheduleOverlapContinuationTest,
   auto first = worker.step_async(step_input<LlmForwardInput>(/*decode=*/false));
   ASSERT_TRUE(std::move(first).get().has_value());
   ASSERT_EQ(worker.get_last_step_result()
+                .value()
                 .sample_output.next_tokens.template item<int64_t>(),
             17);
 
@@ -365,6 +366,7 @@ TEST(ScheduleOverlapContinuationTest,
   ASSERT_TRUE(std::move(second).get().has_value());
   EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), 7);
   ASSERT_EQ(worker.get_last_step_result()
+                .value()
                 .sample_output.next_tokens.template item<int64_t>(),
             23);
 
@@ -372,6 +374,7 @@ TEST(ScheduleOverlapContinuationTest,
   ASSERT_TRUE(std::move(third).get().has_value());
   EXPECT_EQ(worker.executed_tokens().template item<int32_t>(), 23);
   EXPECT_EQ(worker.get_last_step_result()
+                .value()
                 .sample_output.next_tokens.template item<int64_t>(),
             41);
 }
@@ -517,8 +520,9 @@ TYPED_TEST(ScheduleOverlapTest, EmptyStepClearsPriorContinuation) {
   empty.token_ids = torch::empty({0}, torch::kInt32);
   auto idle = worker.step_async(empty);
   EXPECT_FALSE(std::move(idle).get().has_value());
-  EXPECT_FALSE(
-      worker.get_last_step_result().sample_output.next_tokens.defined());
+  EXPECT_FALSE(worker.get_last_step_result()
+                   .value()
+                   .sample_output.next_tokens.defined());
 
   auto next = worker.step_async(
       step_input<TypeParam>(/*decode=*/true, /*token_id=*/-1));
@@ -545,7 +549,7 @@ TYPED_TEST(ScheduleOverlapTest, AddsWarmupAndJsonErrorsToBothResultPaths) {
   EXPECT_EQ(returned->json_object_errors[0].message, "model error");
   EXPECT_EQ(returned->json_object_errors[1].message, "input error");
 
-  const ForwardOutput published = worker.get_last_step_result();
+  const ForwardOutput published = worker.get_last_step_result().value();
   EXPECT_TRUE(published.is_graph_warmup);
   ASSERT_EQ(published.json_object_errors.size(), 2U);
   EXPECT_EQ(published.json_object_errors[0].message, "model error");
@@ -573,7 +577,8 @@ TYPED_TEST(ScheduleOverlapTest, ConstrainedDecodeRejectsUnrelatedPriorResult) {
   EXPECT_EQ(output->json_object_errors.front().sample_sequence_id, "current#0");
   EXPECT_NE(output->json_object_errors.front().message.find("missing"),
             std::string::npos);
-  ASSERT_EQ(worker.get_last_step_result().json_object_errors.size(), 1U);
+  ASSERT_EQ(worker.get_last_step_result().value().json_object_errors.size(),
+            1U);
 }
 
 TYPED_TEST(ScheduleOverlapTest, ConstrainedContinuationAdvancesGrammar) {
@@ -729,7 +734,8 @@ TYPED_TEST(ScheduleOverlapTest,
         torch::equal(input.sampling_params.seed_offsets().to(torch::kCPU),
                      torch::tensor({10, 20, 30}, torch::kInt64)));
     EXPECT_TRUE(torch::equal(
-        worker.get_last_step_result().sample_output.next_tokens.to(torch::kCPU),
+        worker.get_last_step_result().value().sample_output.next_tokens.to(
+            torch::kCPU),
         output->sample_output.next_tokens.to(torch::kCPU)));
   }
 }
@@ -792,7 +798,7 @@ TYPED_TEST(ScheduleOverlapTest,
     worker.begin_shutdown();
   }
   ASSERT_EQ(publication_status, std::future_status::ready);
-  const ForwardOutput published = publication.get();
+  const ForwardOutput published = publication.get().value();
   EXPECT_FALSE(published.sample_output.next_tokens.defined());
   ASSERT_TRUE(published.expert_load_data.defined());
   EXPECT_TRUE(torch::equal(published.expert_load_data,
@@ -825,7 +831,7 @@ TYPED_TEST(ScheduleOverlapTest, DpDriverPublishesWithoutEplb) {
     worker.begin_shutdown();
   }
   ASSERT_EQ(publication_status, std::future_status::ready);
-  const ForwardOutput published = publication.get();
+  const ForwardOutput published = publication.get().value();
   ASSERT_TRUE(published.sample_output.next_tokens.defined());
   EXPECT_EQ(published.sample_output.next_tokens.template item<int64_t>(), 17);
 }
@@ -880,7 +886,7 @@ TYPED_TEST(ScheduleOverlapTest,
   if (publication_status != std::future_status::ready) {
     worker.begin_shutdown();
   }
-  const ForwardOutput published = publication.get();
+  const ForwardOutput published = publication.get().value();
   auto second = worker.step_async(step_input<TypeParam>(/*decode=*/false))
                     .toUnsafeFuture()
                     .thenValue([](std::optional<ForwardOutput> output) {

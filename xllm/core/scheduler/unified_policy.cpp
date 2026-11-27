@@ -351,6 +351,7 @@ void UnifiedPolicy::schedule_from_unified_queue(
       continue;
     }
     if (has_pending_block_release(state)) {
+      budget.preemption_deferred_ = true;
       break;
     }
 

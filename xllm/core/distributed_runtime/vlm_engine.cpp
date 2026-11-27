@@ -517,7 +517,9 @@ std::vector<RawForwardOutput> VLMEngine::collect_step_outputs(
   // cause the output on other workers is the same as that on driver.
   // Under data parallelism (DP), we need to get dp_size outputs.
   // The `stride` means the workers num we can skip.
-  int32_t stride = dp_local_tp_size_;
+  const bool wait_all_ranks = options_.enable_disagg_pd() &&
+                              options_.instance_role().can_receive_pd_kv();
+  const int32_t stride = wait_all_ranks ? 1 : dp_local_tp_size_;
   for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += stride) {
     futures.emplace_back(

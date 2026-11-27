@@ -22,7 +22,7 @@ namespace xllm {
 TEST(EmbeddingBlockManagerTest, AllocateAndFreeRoundTrip) {
   // id 0 is reserved for padding (matching BlockManagerImpl), so a pool sized
   // for 4 physical slots exposes 3 usable blocks.
-  EmbeddingBlockManager manager(4, "single");
+  EmbeddingBlockManager manager(/*num_blocks=*/4);
 
   EXPECT_EQ(manager.num_total_blocks(), 3);
   EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 0);
@@ -51,36 +51,10 @@ TEST(EmbeddingBlockManagerTest, AllocateAndFreeRoundTrip) {
 
 TEST(EmbeddingBlockManagerTest, AllocateReturnsEmptyWhenExhausted) {
   // id 0 is reserved internally, so 3 physical slots expose 2 usable blocks.
-  EmbeddingBlockManager manager(3, "single");
+  EmbeddingBlockManager manager(/*num_blocks=*/3);
   auto blocks = manager.allocate(2);
   ASSERT_EQ(blocks.size(), 2);
   EXPECT_TRUE(manager.allocate(1).empty());
-}
-
-TEST(EmbeddingBlockManagerTest, AllocateSingleDiesWhenExhausted) {
-  // id 0 is reserved internally, so 2 physical slots expose a single usable
-  // block, whose id is 1.
-  EmbeddingBlockManager manager(2, "single");
-  Block block = manager.allocate();
-  EXPECT_EQ(block.id(), 1);
-  EXPECT_DEATH(manager.allocate(), "No more single blocks available");
-}
-
-TEST(EmbeddingBlockManagerTest, PrefixCacheApisAreNotImplemented) {
-  EmbeddingBlockManager manager(2, "single");
-
-  const int32_t token_ids_arr[] = {1, 2, 3};
-  const Slice<int32_t> token_ids(token_ids_arr, 3);
-
-  // EMBEDDING never serves the prefix cache. These APIs are explicitly
-  // NOT_IMPLEMENTED so a stray caller fails loudly instead of silently
-  // mis-routing (the composite only calls them on prefix-capable leaves).
-  EXPECT_DEATH(manager.allocate_shared(token_ids), "not implemented");
-
-  std::vector<Block> blocks = manager.allocate(1);
-  ASSERT_EQ(blocks.size(), 1u);
-  EXPECT_DEATH(manager.cache(token_ids, blocks), "not implemented");
-  EXPECT_DEATH(manager.cache(blocks), "not implemented");
 }
 
 TEST(EmbeddingBlockManagerTest, UsedBlocksAccountingRoundTrips) {
@@ -90,21 +64,21 @@ TEST(EmbeddingBlockManagerTest, UsedBlocksAccountingRoundTrips) {
   // effective usage immediately and the physical id returns when the Block is
   // destroyed. id 0 is reserved internally, so 2 physical slots expose a single
   // usable block.
-  EmbeddingBlockManager manager(2, "single");
+  EmbeddingBlockManager manager(/*num_blocks=*/2);
   EXPECT_EQ(manager.num_used_blocks(), 0u);
   EXPECT_EQ(manager.num_free_blocks(), 1u);
 
   {
-    Block block = manager.allocate();
+    auto blocks = manager.allocate(/*num_blocks=*/1);
     EXPECT_EQ(manager.num_used_blocks(), 1u);
     EXPECT_EQ(manager.num_free_blocks(), 0u);
 
     // Deallocate the owning reference: effective usage drops immediately.
-    manager.deallocate(Slice<Block>(&block, 1));
+    manager.deallocate(blocks);
     EXPECT_EQ(manager.num_used_blocks(), 0u);
 
     // Physical id returns to the free list when the Block is destroyed.
-    block = Block();
+    blocks.clear();
     EXPECT_EQ(manager.num_used_blocks(), 0u);
     EXPECT_EQ(manager.num_free_blocks(), 1u);
   }
@@ -117,7 +91,7 @@ TEST(EmbeddingBlockManagerTest, ReservesPaddingSlotZero) {
   // Draining the whole pool must never yield the reserved padding id 0, which
   // padded batch rows use as kPaddingLinearStateId. 4 physical slots expose 3
   // usable blocks.
-  EmbeddingBlockManager manager(4, "single");
+  EmbeddingBlockManager manager(/*num_blocks=*/4);
   EXPECT_EQ(manager.num_total_blocks(), 3);
 
   std::vector<Block> blocks = manager.allocate(3);
@@ -133,7 +107,8 @@ TEST(EmbeddingBlockManagerTest, ReservesPaddingSlotZero) {
 }
 
 TEST(EmbeddingBlockManagerTest, ConstructorRejectsZeroBlocks) {
-  EXPECT_DEATH({ EmbeddingBlockManager manager(0, "single"); }, "No blocks");
+  EXPECT_DEATH(
+      { EmbeddingBlockManager manager(/*num_blocks=*/0); }, "No blocks");
 }
 
 }  // namespace xllm

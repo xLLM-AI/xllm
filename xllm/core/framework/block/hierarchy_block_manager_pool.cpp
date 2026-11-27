@@ -64,17 +64,6 @@ void finalize_host_blocks(bool publish,
   }
 }
 
-// Wrap a leaf in the concurrency adapter when the D2H offload callback frees
-// blocks off-thread. Host-offload leaves always need this wrap.
-std::unique_ptr<BlockManager> wrap_for_offload(std::unique_ptr<BlockManager> l,
-                                               const BlockManager::Options& o) {
-  if (o.enable_disagg_pd() || o.enable_kvcache_store() ||
-      o.enable_host_offload()) {
-    return std::make_unique<ConcurrentBlockManagerImpl>(std::move(l));
-  }
-  return l;
-}
-
 ProbeResult* find_probe(std::vector<ProbeResult>& probes, BlockType type) {
   for (ProbeResult& probe : probes) {
     if (probe.type == type) {
@@ -472,7 +461,8 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
       } else {
         leaf = std::make_unique<BlockManagerImpl>(host_options);
       }
-      leaf = wrap_for_offload(std::move(leaf), host_options);
+      leaf = ConcurrentBlockManagerImpl::wrap_if_needed(std::move(leaf),
+                                                        host_options);
       per_type.emplace(
           type,
           CompositeBlockManager::LeafEntry{
@@ -651,7 +641,7 @@ void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence) {
       // completed block is sequence-only until this offload pair retains it.
       // Host is the sequence's unfilled destination block in both cases.
       const uint32_t expected_hbm_refs = entry.supports_prefix_cache ? 2 : 1;
-      if (hbm_block.ref_count() != expected_hbm_refs ||
+      if (hbm_block.unpinned_ref_count() != expected_hbm_refs ||
           host_block.ref_count() != 1) {
         continue;
       }

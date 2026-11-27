@@ -33,11 +33,17 @@ limitations under the License.
 namespace xllm {
 
 ScheduleOverlap::ScheduleOverlap(bool is_driver,
-                                 bool enable_eplb,
-                                 bool retire_unconsumed_inputs)
-    : state_(/*publish_to_host=*/is_driver || enable_eplb,
-             /*retain_tokenless_output=*/enable_eplb,
-             retire_unconsumed_inputs) {}
+                                 const runtime::Options& options,
+                                 bool is_input_release_deferred)
+    : publish_output_(is_driver || options.eplb_worker_config().enabled),
+      wait_worker_completion_(options.enable_schedule_overlap() &&
+                              options.enable_disagg_pd() &&
+                              options.instance_role().can_receive_pd_kv()),
+      state_(/*publish_to_host=*/publish_output_ || wait_worker_completion_,
+             /*retain_tokenless_output=*/options.eplb_worker_config().enabled ||
+                 wait_worker_completion_,
+             /*retire_unconsumed_inputs=*/options.enable_schedule_overlap() ||
+                 is_input_release_deferred) {}
 
 template <typename Input>
 std::optional<ForwardOutput> ScheduleOverlap::execute_impl(WorkerImpl& worker,
@@ -51,28 +57,29 @@ std::optional<ForwardOutput> ScheduleOverlap::execute_impl(WorkerImpl& worker,
   torch::Tensor sampling_rows;
   auto output = worker.step_for_schedule_overlap(
       input, [&]() { sampling_rows = prepare_sampling_impl(worker, input); });
-  if (sampling_rows.defined()) {
-    if (output.has_value()) {
+  if (wait_worker_completion_ && !output.has_value()) {
+    output.emplace();
+  }
+  if (output.has_value()) {
+    if (sampling_rows.defined()) {
       // Keep the pinned H2D source alive through this output's completion.
       output->retained_inputs.emplace_back(
           std::make_shared<torch::Tensor>(std::move(sampling_rows)));
-    } else {
-      CHECK_EQ(worker.compute_stream_->synchronize(), 0);
     }
-  }
-  // Composite workers may return retained inputs without an output event. The
-  // completion boundary must cover the full worker step before ownership is
-  // transferred to the overlap state.
-  if (output.has_value() && output->ready_event == nullptr &&
-      (!output->retained_inputs.empty() || prior_tokens_owner != nullptr)) {
-    output->ready_event = worker.compute_stream_->record_event_or_sync();
-  }
-  if (prior_tokens_owner != nullptr) {
-    if (output.has_value() && output->ready_event != nullptr) {
+    // MTP's output event can precede its prelaunched draft on the compute
+    // stream.
+    if ((wait_worker_completion_ &&
+         worker.options().enable_speculative_decode()) ||
+        (output->ready_event == nullptr &&
+         (wait_worker_completion_ || !output->retained_inputs.empty() ||
+          prior_tokens_owner != nullptr))) {
+      output->ready_event = worker.compute_stream_->record_event_or_sync();
+    }
+    if (output->ready_event != nullptr && prior_tokens_owner != nullptr) {
       output->retained_inputs.emplace_back(std::move(prior_tokens_owner));
-    } else {
-      CHECK_EQ(worker.compute_stream_->synchronize(), 0);
     }
+  } else if (sampling_rows.defined() || prior_tokens_owner != nullptr) {
+    CHECK_EQ(worker.compute_stream_->synchronize(), 0);
   }
   worker.observe_execution_memory(input.input_params.meta.is_graph_warmup);
   complete_step_impl(input, *worker.compute_stream_, output);
@@ -194,7 +201,15 @@ std::optional<ForwardOutput> ScheduleOverlap::execute(WorkerImpl& worker,
   return execute_impl(worker, input);
 }
 
-ForwardOutput ScheduleOverlap::consume() { return state_.consume(); }
+std::optional<ForwardOutput> ScheduleOverlap::consume() {
+  auto output = state_.consume();
+  if (output && !publish_output_) {
+    CHECK(output->ready_event == nullptr || output->ready_event->synchronize())
+        << "failed to retire overlap KV cache access";
+    return ForwardOutput{};
+  }
+  return output;
+}
 
 void ScheduleOverlap::shutdown() { state_.shutdown(); }
 

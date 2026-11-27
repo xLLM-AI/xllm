@@ -21,11 +21,19 @@ limitations under the License.
 
 namespace xllm {
 
+std::unique_ptr<BlockManager> ConcurrentBlockManagerImpl::wrap_if_needed(
+    std::unique_ptr<BlockManager> leaf,
+    const BlockManager::Options& options) {
+  if (options.enable_disagg_pd() || options.enable_kvcache_store() ||
+      options.enable_host_offload()) {
+    return std::make_unique<ConcurrentBlockManagerImpl>(std::move(leaf));
+  }
+  return leaf;
+}
+
 ConcurrentBlockManagerImpl::ConcurrentBlockManagerImpl(
     std::unique_ptr<BlockManager> inner)
-    : BlockManager(inner->options()), inner_(std::move(inner)) {
-  CHECK(inner_ != nullptr) << "ConcurrentBlockManagerImpl needs an inner leaf";
-}
+    : BlockManager(inner->options()), inner_(std::move(inner)) {}
 
 std::vector<Block> ConcurrentBlockManagerImpl::allocate(size_t num_blocks) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -37,13 +45,6 @@ std::vector<Block> ConcurrentBlockManagerImpl::allocate(size_t num_blocks) {
     block.set_manager(this);
   }
   return blocks;
-}
-
-Block ConcurrentBlockManagerImpl::allocate() {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  Block block = inner_->allocate();
-  block.set_manager(this);
-  return block;
 }
 
 void ConcurrentBlockManagerImpl::deallocate(const Slice<Block>& blocks) {

@@ -204,13 +204,6 @@ class TestVmmKVPageAllocator final : public VmmKVPageAllocator {
     }
   }
 
-  void trim_kv_cache(const std::string& /*model_id*/,
-                     int32_t /*dp_rank*/) override {
-    if (before_trim) {
-      before_trim();
-    }
-  }
-
   size_t get_num_available_virt_pages(const std::string& /*model_id*/,
                                       int32_t dp_rank) const override {
     if (before_available) {
@@ -222,12 +215,8 @@ class TestVmmKVPageAllocator final : public VmmKVPageAllocator {
   }
 
   size_t get_num_inuse_virt_pages(const std::string& /*model_id*/,
-                                  int32_t dp_rank) const override {
+                                  int32_t dp_rank) const {
     return allocated_pages_.at(dp_rank).size();
-  }
-  size_t get_num_reserved_virt_pages(const std::string& /*model_id*/,
-                                     int32_t dp_rank) const override {
-    return allocated_pages_.at(dp_rank).empty() ? 1 : 0;
   }
   int64_t get_virt_page_id(int64_t block_id,
                            size_t block_memory_size) const override {
@@ -235,17 +224,12 @@ class TestVmmKVPageAllocator final : public VmmKVPageAllocator {
            static_cast<int64_t>(page_size());
   }
   size_t page_size() const override { return 64; }
-  size_t phy_pages_per_virt_page(
-      const std::string& /*model_id*/) const override {
-    return 4;
-  }
 
   int32_t prealloc_starts = 0;
   std::vector<std::pair<std::string, int32_t>> allocation_requests;
   std::vector<std::pair<std::string, int32_t>> released_pages;
   std::function<void()> before_allocate;
   std::function<void()> before_free;
-  std::function<void()> before_trim;
   std::function<void()> before_available;
 
  private:
@@ -428,10 +412,11 @@ TEST(CompositeBlockManagerTest, ExplicitDeviceStatePreservesEmbeddingDispatch) {
   BlockManager::Options options;
   options.num_blocks(16).block_size(128);
   auto leaves = build_composite_leaves(options);
-  leaves.emplace(
-      BlockType::EMBEDDING,
-      CompositeBlockManager::LeafEntry{
-          std::make_unique<EmbeddingBlockManager>(4, "test"), false, false});
+  leaves.emplace(/*key=*/BlockType::EMBEDDING,
+                 CompositeBlockManager::LeafEntry{
+                     std::make_unique<EmbeddingBlockManager>(/*num_blocks=*/4),
+                     false,
+                     false});
   CompositeBlockManager manager(std::move(leaves), options);
   Sequence sequence = MakeTestSequence(0, std::vector<int32_t>(1025, 7));
   ASSERT_TRUE(manager.allocate_sequence(&sequence, 128));
@@ -456,7 +441,6 @@ TEST(CompositeBlockManagerTest, AllocateForSequence_SingleSeq) {
       base_num_blocks, base_block_size, window_size, max_seqs_per_batch);
 
   CompositeBlockManager manager(build_composite_leaves(opts), opts);
-  EXPECT_EQ(manager.num_sub_managers(), 3u);
 
   Sequence seq = MakeTestSequence(0, std::vector<int32_t>(1024, 1));
   const size_t num_tokens = 1024;
@@ -1863,32 +1847,6 @@ TEST(CompositeBlockManagerTest,
 }
 
 TEST(CompositeBlockManagerTest,
-     VirtualMemoryAdmissionCountsReservedBlocksOnce) {
-  TestVmmKVPageAllocator allocator(/*dp_size=*/1, /*max_pages_per_dp=*/2);
-  allocator.set_admission_page_limit(/*dp_rank=*/0, 2);
-  BlockManager::Options options;
-  options.num_blocks(16).block_size(4);
-  VmmKVBlockManager leaf(options,
-                         allocator,
-                         /*num_layers=*/2,
-                         /*block_mem_size=*/16,
-                         /*page_size=*/64,
-                         /*dp_rank=*/0,
-                         "injected-cache");
-
-  EXPECT_EQ(leaf.admission_capacity(), 8u);
-  ASSERT_TRUE(leaf.try_to_reserve(/*need_size=*/4));
-  EXPECT_EQ(leaf.admission_capacity(), 8u);
-  std::vector<Block> blocks = leaf.allocate(/*num_blocks=*/4);
-  ASSERT_EQ(blocks.size(), 4u);
-  EXPECT_EQ(leaf.admission_capacity(), 8u);
-  blocks.clear();
-  EXPECT_EQ(leaf.admission_capacity(), 8u);
-  EXPECT_EQ(allocator.get_num_inuse_virt_pages("injected-cache", /*dp_rank=*/0),
-            0u);
-}
-
-TEST(CompositeBlockManagerTest,
      PhysicalPoolRetainsConfiguredAdmissionCapacity) {
   BlockManagerPool::Options options;
   options.num_blocks(8).block_size(4).enable_prefix_cache(false);
@@ -1918,8 +1876,7 @@ TEST(CompositeBlockManagerTest, ConcurrentAdapterPreservesVirtualAdmission) {
   EXPECT_EQ(manager.admission_capacity(), 0u);
 }
 
-TEST(CompositeBlockManagerTest,
-     VirtualMemoryReservationRollsBackPartialGrowth) {
+TEST(CompositeBlockManagerTest, VirtualMemoryAllocationRollsBackPartialGrowth) {
   TestVmmKVPageAllocator allocator(/*dp_size=*/1);
   allocator.set_admission_page_limit(/*dp_rank=*/0, 2);
   BlockManager::Options options;
@@ -1934,22 +1891,15 @@ TEST(CompositeBlockManagerTest,
 
   // The advisory snapshot promises two pages, but a concurrent budget change
   // leaves backing for only one. Failure must return every partial block.
-  EXPECT_FALSE(leaf.try_to_reserve(/*need_size=*/5));
+  EXPECT_TRUE(leaf.allocate(/*num_blocks=*/5).empty());
   EXPECT_EQ(leaf.num_used_blocks(), 0u);
   EXPECT_EQ(allocator.get_num_inuse_virt_pages("injected-cache", /*dp_rank=*/0),
             0u);
   ASSERT_EQ(allocator.released_pages.size(), 1u);
-
-  ASSERT_TRUE(leaf.try_to_reserve(/*need_size=*/4));
-  leaf.free_reserved();
-  EXPECT_EQ(leaf.num_used_blocks(), 0u);
-  EXPECT_EQ(allocator.get_num_inuse_virt_pages("injected-cache", /*dp_rank=*/0),
-            0u);
-  EXPECT_EQ(allocator.released_pages.size(), 2u);
 }
 
 TEST(CompositeBlockManagerTest,
-     VirtualMemoryReservationFailurePreservesLiveBlocks) {
+     VirtualMemoryAllocationFailurePreservesLiveBlocks) {
   TestVmmKVPageAllocator allocator(/*dp_size=*/1);
   allocator.set_admission_page_limit(/*dp_rank=*/0, 2);
   BlockManager::Options options;
@@ -1964,9 +1914,7 @@ TEST(CompositeBlockManagerTest,
   std::vector<Block> held = leaf.allocate(/*num_blocks=*/1);
   ASSERT_EQ(held.size(), 1u);
 
-  // Roll back only this reservation's three partial blocks. The live block
-  // must keep its page mapped until its original owner releases it.
-  EXPECT_FALSE(leaf.try_to_reserve(/*need_size=*/4));
+  EXPECT_TRUE(leaf.allocate(/*num_blocks=*/4).empty());
   EXPECT_EQ(leaf.num_used_blocks(), 1u);
   EXPECT_EQ(allocator.get_num_inuse_virt_pages("injected-cache", /*dp_rank=*/0),
             1u);
@@ -2066,13 +2014,8 @@ TEST(CompositeBlockManagerTest,
   observer.join();
   allocator.before_free = {};
 
-  allocator.before_trim = check_local_query;
-  leaf.trim();
-  observer.join();
-  allocator.before_trim = {};
-
   allocator.before_available = check_local_query;
-  leaf.available_size();
+  leaf.num_free_blocks();
   observer.join();
   leaf.admission_capacity();
   observer.join();
@@ -2156,7 +2099,7 @@ TEST(CompositeBlockManagerTest, SequenceResetReleasesCachedVirtualBlocks) {
 }
 
 TEST(CompositeBlockManagerTest,
-     VirtualMemoryReservationReclaimsCachedOnlyBlocks) {
+     VirtualMemoryAllocationReclaimsCachedOnlyBlocks) {
   TestVmmKVPageAllocator allocator(/*dp_size=*/1);
   auto manager = make_vmm_prefix_manager(allocator);
   const std::vector<int32_t> tokens(16, 7);
@@ -2166,15 +2109,9 @@ TEST(CompositeBlockManagerTest,
   manager->deallocate(blocks);
   blocks.clear();
 
-  ASSERT_TRUE(manager->try_to_reserve(/*need_size=*/4));
+  blocks = manager->allocate(/*num_blocks=*/4);
+  ASSERT_EQ(blocks.size(), 4u);
   EXPECT_EQ(manager->num_blocks_in_prefix_cache(), 0u);
-  EXPECT_EQ(manager->num_used_blocks(), 0u);
-  EXPECT_EQ(manager->num_free_blocks(), 4u);
-  const size_t allocation_requests = allocator.allocation_requests.size();
-  std::vector<Block> reserved = manager->allocate(/*num_blocks=*/4);
-  ASSERT_EQ(reserved.size(), 4u);
-  EXPECT_EQ(allocator.allocation_requests.size(), allocation_requests);
-  EXPECT_EQ(manager->num_used_blocks(), 4u);
 }
 
 TEST(CompositeBlockManagerTest,
@@ -3005,12 +2942,12 @@ TEST_F(SharedKVCacheBlockTest, EmbeddingShortagePreservesSharedCheckpoints) {
   const BlockManager::Options options =
       shared_options(/*num_slots=*/4, /*enable_prefix_cache=*/true);
   CompositeBlockManager::LeafMap leaves = build_composite_leaves(options);
-  leaves.emplace(BlockType::EMBEDDING,
-                 CompositeBlockManager::LeafEntry{
-                     std::make_unique<EmbeddingBlockManager>(
-                         /*num_blocks=*/1, /*resource_name=*/"embedding"),
-                     /*participates_in_admission=*/false,
-                     /*supports_prefix_cache=*/false});
+  leaves.emplace(
+      /*key=*/BlockType::EMBEDDING,
+      CompositeBlockManager::LeafEntry{std::make_unique<EmbeddingBlockManager>(
+                                           /*num_blocks=*/1),
+                                       /*participates_in_admission=*/false,
+                                       /*supports_prefix_cache=*/false});
   CompositeBlockManager manager(std::move(leaves), options);
   BlockManager* linear = manager.leaf_of(BlockType::LINEAR);
   std::vector<Block> checkpoint = manager.allocate_blocks(BlockType::LINEAR, 1);

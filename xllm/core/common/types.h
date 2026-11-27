@@ -151,8 +151,12 @@ class InstanceRole {
     }
   }
 
-  InstanceRole(RoleType role) : role_(role) {}
+  constexpr InstanceRole(RoleType role) : role_(role) {}
   operator RoleType() const { return role_; }
+
+  constexpr bool can_receive_pd_kv() const {
+    return role_ == DECODE || role_ == MIX;
+  }
   explicit operator bool() const = delete;
 
   bool operator==(InstanceRole rhs) const { return role_ == rhs.role_; }

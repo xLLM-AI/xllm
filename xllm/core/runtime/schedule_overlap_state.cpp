@@ -114,13 +114,15 @@ bool ScheduleOverlapState::record(
   return true;
 }
 
-ForwardOutput ScheduleOverlapState::consume() {
+std::optional<ForwardOutput> ScheduleOverlapState::consume() {
   CHECK(publish_to_host_) << "overlap output has no host consumer";
   std::unique_lock<std::mutex> lock(mutex_);
   condition_.wait(lock, [this] { return pending_ || shutting_down_; });
 
-  ForwardOutput output =
-      pending_ && has_output() ? prior_output_ : ForwardOutput();
+  if (!pending_) {
+    return std::nullopt;
+  }
+  ForwardOutput output = has_output() ? prior_output_ : ForwardOutput();
   pending_ = false;
   condition_.notify_all();
   return output;

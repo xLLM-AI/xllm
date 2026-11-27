@@ -228,10 +228,7 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
     : options_(options),
       driver_(parallel_args.rank() == 0),
       dp_driver_(is_dp_driver(parallel_args)),
-      schedule_overlap_(
-          is_driver(),
-          options.eplb_worker_config().enabled,
-          options.enable_schedule_overlap() || is_input_release_deferred),
+      schedule_overlap_(is_driver(), options, is_input_release_deferred),
       device_(device),
       parallel_args_(parallel_args) {
   parallel_args_.eplb_worker_config(options_.eplb_worker_config());
@@ -1128,7 +1125,7 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async_impl(
   return future;
 }
 
-ForwardOutput WorkerImpl::get_last_step_result() {
+std::optional<ForwardOutput> WorkerImpl::get_last_step_result() {
   return schedule_overlap_.consume();
 }
 

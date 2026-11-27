@@ -596,8 +596,10 @@ std::vector<RawForwardOutput> LLMEngine::collect_step_outputs(
   // because the experts on each worker are different,
   // and the controller needs the token load of every expert shard.
   // so we can not skip any worker.
-  if (eplb_controller_ != nullptr &&
-      eplb_controller_->requires_all_worker_results()) {
+  if ((options_.enable_disagg_pd() &&
+       options_.instance_role().can_receive_pd_kv()) ||
+      (eplb_controller_ != nullptr &&
+       eplb_controller_->requires_all_worker_results())) {
     stride = 1;
   }
 

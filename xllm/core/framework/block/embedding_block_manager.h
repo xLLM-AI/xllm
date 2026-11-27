@@ -15,8 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <string>
-
 #include "core/kv_cache/block/block_manager_impl.h"
 
 namespace xllm {
@@ -31,9 +29,7 @@ namespace xllm {
 // allocates one block only when the sequence does not already hold one.
 class EmbeddingBlockManager final : public BlockManagerImpl {
  public:
-  EmbeddingBlockManager(uint32_t num_blocks,
-                        std::string resource_name,
-                        std::string exhaustion_message = "");
+  explicit EmbeddingBlockManager(uint32_t num_blocks);
   ~EmbeddingBlockManager() override = default;
 
   // One block per sequence: empty when already held, else a single block (or
@@ -43,32 +39,6 @@ class EmbeddingBlockManager final : public BlockManagerImpl {
       Sequence* seq,
       KVCacheState& kv_state,
       size_t num_tokens) override;
-
-  // Single-block allocate: reuses the base free list but reports exhaustion
-  // with this resource's name / message. Only this leaf calls it directly (the
-  // base ctor's padding reservation runs before the vtable points here, so it
-  // still uses BlockManagerImpl::allocate()). Bring the base allocate(size_t)
-  // overload back into scope: declaring the zero-arg allocate() here would
-  // otherwise hide it (name hiding).
-  using BlockManagerImpl::allocate;
-  Block allocate() override;
-
-  // EMBEDDING never serves prefix cache; these must not be reached.
-  std::vector<Block> allocate_shared(
-      const Slice<int32_t>& token_ids,
-      const Slice<Block>& existed_shared_blocks = {},
-      const MMData& mm_data = MMData(),
-      const Slice<XXH3Key>& block_hashes = {}) override;
-  void cache(const Slice<int32_t>& token_ids,
-             std::vector<Block>& blocks,
-             size_t existed_shared_blocks_num = 0,
-             const MMData& mm_data = MMData(),
-             const Slice<XXH3Key>& block_hashes = {}) override;
-  void cache(const std::vector<Block>& blocks) override;
-
- private:
-  std::string resource_name_;
-  std::string exhaustion_message_;
 };
 
 }  // namespace xllm
