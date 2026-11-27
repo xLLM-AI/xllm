@@ -295,19 +295,28 @@ Graph-owned static metadata retains the same width during capture and replay.
 
 ### Decode graph preparation
 
-Ordinary and non-causal block decode runners share the same ACL graph call
-sequence: `prepare_execution` → `warmup` → `execute`. Admission returns `None`
-for an unsupported layout before graph capture or replay starts. An admitted
+`DecodeAclGraphRunner` handles ordinary, expanded verification and non-causal
+multi-token decode through the same call sequence:
+`prepare_execution` → `warmup` → `execute`. Admission returns `None` for an
+unsupported layout before graph capture or replay starts. An admitted
 step returns `DecodeAclGraphPreparation`, which borrows the normalized attention
 metadata, records the padded physical token count, and retains any resolved
 expanded/KV metadata. The executor passes this result to both later calls and
 keeps it local to that execution; callers must prepare again after scheduler
 metadata changes.
 
-Runners own their graph keys, DP coordination and KV capacity tiers. During
-startup, the shared `is_graph_warmup` argument lets each runner select its own
-pre-capture policy. Ordinary and block graph allocation/replay implementations
-remain separate behind this preparation interface.
+The runner's `max_batch` always counts physical token rows, including every
+query token of a non-causal request. The executor rounds the per-rank request
+budget before expanding it to token capacity. Non-causal graph keys include the
+padded token count, query width and page capacity; DP padding preserves complete
+requests. Their KV tables retain one row per request, while causal decode keeps
+its existing per-token KV representation. Both layouts share graph preparation,
+capture, replay and DP coordination, with layout-specific buffer filling.
+
+The runner owns its KV capacity tiers and uses `is_graph_warmup` to select
+startup pre-capture. Non-causal attention still uses the existing chunked-prefill
+metadata flags and block-draft warmup setting; those producer/configuration
+boundaries remain separate follow-up work.
 
 ## Adding an operator
 

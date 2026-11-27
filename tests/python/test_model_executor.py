@@ -50,9 +50,6 @@ from xllm.python.model_executor.forward_context import (  # noqa: E402
     record_layer_event,
 )
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry
-from xllm.python.model_executor.runners.block_draft_acl_graph import (  # noqa: E402
-    BlockDraftAclGraphRunner,
-)
 from xllm.python.model_executor.runners.decode_acl_graph import (  # noqa: E402
     DecodeAclGraphRunner,
 )
@@ -2191,10 +2188,11 @@ def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
     ):
         executor = ModelExecutor(model, config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=2)
     runner = executor.decode_graph_runner
-    assert isinstance(runner, BlockDraftAclGraphRunner)
+    assert isinstance(runner, DecodeAclGraphRunner)
     assert runner.dp_size == dp_size
     assert runner.dp_rank == dp_size - 1
-    assert runner.max_batch == min((5 + dp_size - 1) // dp_size, 2)
+    assert runner.max_batch == min((5 + dp_size - 1) // dp_size, 2) * 6
+    assert not runner._causal
     assert executor.context_kv_graph_runner is not None
 
 
@@ -2210,8 +2208,9 @@ def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> Non
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
         executor = ModelExecutor(model, config, max_seqs_per_batch=2)
-    assert isinstance(executor.decode_graph_runner, BlockDraftAclGraphRunner)
-    assert executor.decode_graph_runner.max_batch == 2
+    assert isinstance(executor.decode_graph_runner, DecodeAclGraphRunner)
+    assert executor.decode_graph_runner.max_batch == 16
+    assert not executor.decode_graph_runner._causal
     executor._kv_bound = True
     tokens = torch.zeros(16, dtype=torch.int32)
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
@@ -2267,7 +2266,7 @@ def test_executor_uses_block_draft_preparation_for_warmup_and_replay(is_graph_wa
         executor = ModelExecutor(model, config, max_seqs_per_batch=4)
     executor._kv_bound = True
     runner = executor.decode_graph_runner
-    assert isinstance(runner, BlockDraftAclGraphRunner)
+    assert isinstance(runner, DecodeAclGraphRunner)
     tokens = torch.arange(2, dtype=torch.int32)
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
     graph_key = ("block-key",)
