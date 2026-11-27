@@ -142,10 +142,12 @@ std::optional<PagedCachePartition> build_paged_cache_partition(
           CacheComponentRole::MLA_SCALE, CacheScalarType::FLOAT32, layers});
     }
   } else {
+    const CacheScalarType full_kv_dtype =
+        capacity.full_kv_dtype().value_or(kv_dtype);
     components.emplace_back(
-        CacheComponent{CacheComponentRole::KEY, kv_dtype, layers});
+        CacheComponent{CacheComponentRole::KEY, full_kv_dtype, layers});
     components.emplace_back(
-        CacheComponent{CacheComponentRole::VALUE, kv_dtype, layers});
+        CacheComponent{CacheComponentRole::VALUE, full_kv_dtype, layers});
   }
   if (quantized_kv && !packed_mla) {
     components.emplace_back(CacheComponent{

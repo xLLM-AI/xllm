@@ -102,7 +102,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
       options_(context.get_tensor_options()),
       device_(context.get_tensor_options().device()),
       enable_mla_(context.get_model_args().enable_mla()) {
-  ensure_python_interpreter();
+  ensure_python_interpreter(context.kv_cache_dtype());
 
   const ParallelArgs& parallel_args = context.get_parallel_args();
   tp_group_ = parallel_args.tp_group_;

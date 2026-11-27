@@ -16,9 +16,11 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 #include "common/macros.h"
 #include "core/kv_cache/layout/cache_layout_types.h"
+#include "core/kv_cache/layout/cache_partition.h"
 
 namespace xllm {
 
@@ -52,6 +54,9 @@ class KVCacheCapacity final {
 
   // for kv cache quantization scale cache
   PROPERTY(int64_t, scale_slot_size) = 0;
+  // Explicit Full K/V storage dtype when it differs from the model dtype
+  // without allocating per-token scale components.
+  PROPERTY(std::optional<CacheScalarType>, full_kv_dtype);
 
   // for linear attention
   PROPERTY(int64_t, linear_slot_size) = 0;

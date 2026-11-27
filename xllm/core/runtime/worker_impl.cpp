@@ -439,7 +439,9 @@ void WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
 
   KVCacheCreateOptions create_options;
   create_options.device(device_)
-      .dtype(dtype_)
+      .dtype(options_.kv_cache_dtype() == "fp8_e4m3" ? torch::kFloat8_e4m3fn
+                                                     : dtype_)
+      .conv_dtype(dtype_)
       .ssm_dtype(ssm_dtype)
       .num_layers(num_layers)
       .full_attention_interval(layout_options.full_attention_interval())
@@ -1455,6 +1457,7 @@ bool WorkerImpl::init_model_impl(std::unique_ptr<ModelLoader> model_loader,
                                  MasterStatus master_status) {
   model_weights_path_ = model_loader->model_weights_path();
   context_ = std::move(context);
+  context_.set_kv_cache_dtype(options_.kv_cache_dtype());
   parallel_args_ = context_.get_parallel_args();
   dtype_ = context_.get_tensor_options().dtype().toScalarType();
   tokenizer_ = std::move(tokenizer);

@@ -22,6 +22,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/seq_lens.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/util/pybind_helper.h"
 #include "core/util/tensor_helper.h"
@@ -84,6 +85,11 @@ void register_attention_metadata_views(py::module_& module) {
                              &PyAttentionMetadataView::paged_kv_indices)
       .def_property_readonly("paged_kv_last_page_len",
                              &PyAttentionMetadataView::paged_kv_last_page_len)
+      .def_property_readonly("paged_kv_indptr_host",
+                             &PyAttentionMetadataView::paged_kv_indptr_host)
+      .def_property_readonly(
+          "paged_kv_last_page_len_host",
+          &PyAttentionMetadataView::paged_kv_last_page_len_host)
       .def_property_readonly("qo_indptr", &PyAttentionMetadataView::qo_indptr)
       .def_property_readonly("q_cu_seq_lens",
                              &PyAttentionMetadataView::q_cu_seq_lens)
@@ -232,8 +238,10 @@ const layer::ExpandedDecodeMetadata& PyExpandedDecodeMetadataView::metadata()
 PyAttentionMetadataView::PyAttentionMetadataView(
     std::shared_ptr<layer::AttentionMetadata> metadata,
     const ModelParamsView& params,
-    bool is_draft_engine)
+    bool is_draft_engine,
+    int32_t block_size)
     : metadata_(std::move(metadata)),
+      block_size_(block_size),
       kv_seq_lens_host_(
           make_host_int32_view(metadata_, metadata_->kv_seq_lens_vec)),
       q_seq_lens_host_(
@@ -327,6 +335,25 @@ bool PyAttentionMetadataView::has_kv_shard() const {
 
 const torch::Tensor& PyAttentionMetadataView::paged_kv_indptr() const {
   return metadata_->paged_kv_indptr;
+}
+
+py::object PyAttentionMetadataView::paged_kv_indptr_host() const {
+  if (!kv_seq_lens_host_.defined()) {
+    return py::none();
+  }
+  const auto page_counts =
+      torch::floor_divide(kv_seq_lens_host_.clamp_min(/*min=*/1) - 1,
+                          block_size_) +
+      1;
+  return py::cast(util::make_query_start_loc(page_counts));
+}
+
+py::object PyAttentionMetadataView::paged_kv_last_page_len_host() const {
+  if (!kv_seq_lens_host_.defined()) {
+    return py::none();
+  }
+  return py::cast(
+      (kv_seq_lens_host_.clamp_min(/*min=*/1) - 1).remainder(block_size_) + 1);
 }
 
 const torch::Tensor& PyAttentionMetadataView::paged_kv_indices() const {

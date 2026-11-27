@@ -58,7 +58,8 @@ DEFINE_string(kv_cache_dtype,
               "KV cache data type for quantization. \"auto\" (default): KV "
               "cache dtype aligns with model dtype (no quantization). "
               "\"int8\": Enables INT8 quantization on MLU, and on NPU for "
-              "GLM-5.2 SFA packed KV cache.");
+              "GLM-5.2 SFA packed KV cache. CUDA Python Executor additionally "
+              "supports native fp8_e4m3 compressed pages.");
 
 DEFINE_string(indexer_cache_dtype,
               "auto",
@@ -196,6 +197,19 @@ void KVCacheConfig::initialize() {
 void KVCacheConfig::validate() const {
   CHECK(!enable_shared_kv_cache_ || !enable_vmm_kvcache_)
       << "Static shared KV cache and VMM addressing are separate modes.";
+  CHECK(kv_cache_dtype_ == "auto" || kv_cache_dtype_ == "int8" ||
+        kv_cache_dtype_ == "fp8_e4m3")
+      << "Unsupported kv_cache_dtype=" << kv_cache_dtype_;
+  if (kv_cache_dtype_ == "fp8_e4m3") {
+    CHECK(block_size_ == 16 || block_size_ == 32 || block_size_ == 64 ||
+          block_size_ == 128)
+        << "FP8 XQA requires block_size 16, 32, 64 or 128; got " << block_size_;
+  }
+  CHECK(!enable_shared_kv_cache_ || kv_cache_dtype_ != "fp8_e4m3")
+      << "Native FP8 requires the resident per-layer KV allocator.";
+  CHECK(!enable_vmm_kvcache_ || kv_cache_dtype_ != "fp8_e4m3")
+      << "Native FP8 requires finite initialized pages; this VMM path is not "
+         "qualified.";
   CHECK_GE(vmm_memory_reserve_bytes_, 0);
   CHECK_GT(vmm_startup_timeout_ms_, 0)
       << "vmm_startup_timeout_ms must be positive";

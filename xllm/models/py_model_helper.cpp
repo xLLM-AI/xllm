@@ -166,17 +166,31 @@ void ensure_embedded_python() {
   });
 }
 
-void ensure_python_interpreter() {
+void ensure_python_interpreter(const std::string& kv_cache_dtype) {
   ensure_embedded_python();
   static std::once_flag flag;
+  static const std::string startup_kv_cache_dtype = kv_cache_dtype;
   std::call_once(flag, []() {
     py::gil_scoped_acquire gil;
     try {
-      py::module_::import("xllm.python").attr("initialize_runtime")();
+      py::module_::import("xllm.python")
+          .attr("initialize_runtime")(startup_kv_cache_dtype);
     } catch (const py::error_already_set& e) {
       LOG(FATAL) << "Failed to initialize Python model kernels: " << e.what();
     }
   });
+
+  if (kv_cache_dtype == startup_kv_cache_dtype) {
+    return;
+  }
+  // A later model in this process can only use already-prepared operations.
+  py::gil_scoped_acquire gil;
+  try {
+    py::module_::import("xllm.python")
+        .attr("initialize_runtime")(kv_cache_dtype);
+  } catch (const py::error_already_set& e) {
+    LOG(FATAL) << "Failed to initialize xllm.python runtime: " << e.what();
+  }
 }
 
 // ---------------------------------------------------------------------------

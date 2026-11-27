@@ -30,6 +30,7 @@ def test_attention_public_catalog_is_sdk_free(tmp_path: Path) -> None:
 import importlib.abc
 import sys
 from typing import Any
+from unittest.mock import patch
 
 class BlockDeviceImports(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> None:
@@ -55,9 +56,15 @@ from xllm_kernel.ops.gemm import (
     quant_matmul_out,
 )
 from xllm_kernel.ops.hyper_connection import hc_post, hc_pre
-from xllm_kernel.ops.kv_cache import reshape_paged_cache
+from xllm_kernel.ops.kv_cache import convert_xqa_pages, reshape_paged_cache, write_fp8_kv
+from xllm_kernel.ops.quantization import quantize_query_fp8
 from xllm_kernel.ops.positional_encoding import partial_rotary_embedding
 catalog = {operation.contract.operation: operation for operation in load_operations()}
+for api, mutates in ((write_fp8_kv, ("key_cache", "value_cache")), (convert_xqa_pages, ("table", "lengths")), (quantize_query_fp8, ())):
+    operation = catalog[api.__name__]
+    assert operation.implementations == ("cuda.triton." + api.__name__,)
+    assert operation.contract.mutates == mutates and not operation.contract.aliases_inputs
+    assert operation.prepared is None
 for operation in (*GDN_OPERATIONS, *KDA_OPERATIONS):
     name = operation.contract.operation
     assert catalog[name] is operation
@@ -127,6 +134,13 @@ assert mrope.mutates == () and not mrope.aliases_inputs
 inplace_rope = catalog["apply_rotary_embedding"].contract
 assert inplace_rope.mutates == ("q", "k") and not inplace_rope.aliases_inputs
 assert all(callable(fn) for fn in (fused_recurrent_gated_delta_rule, fused_sigmoid_gating_delta_rule_update, fused_qkvzba_split_reshape_cat))
+
+from xllm_kernel.platform import Platform, PlatformEnum
+from xllm_kernel.registry import KernelRegistry
+with patch.object(Platform, "enum", return_value=PlatformEnum.NPU):
+    from xllm_kernel.ops.kv_cache import native_kv_writer
+    from xllm_kernel.ops.quantization import query_quantization
+assert not KernelRegistry.get().specs()
 """
     env = {**os.environ, "PYTHONPATH": str(Path(xllm_kernel.__file__).resolve().parent.parent)}
     subprocess.run([sys.executable, "-S", "-c", script], cwd=tmp_path, env=env, check=True)
@@ -320,3 +334,23 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
             sys.modules.pop(name, None)
             parent, attr = name.rsplit(".", 1)
             vars(importlib.import_module(parent)).pop(attr, None)
+
+
+def test_npu_quantization_registers_only_its_two_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
+    module_name = "xllm_kernel.ops.quantization.npu"
+    registry = KernelRegistry()
+    monkeypatch.setattr(KernelRegistry, "_instance", registry)
+    monkeypatch.setattr(xllm_kernel, "_npu_binding", object(), raising=False)
+    monkeypatch.setattr(
+        torch.ops,
+        "xllm_kernel",
+        SimpleNamespace(
+            quantize_per_tensor=SimpleNamespace(default=Mock()), dynamic_quant=SimpleNamespace(default=Mock())
+        ),
+    )
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    try:
+        importlib.import_module(module_name)
+        assert {spec.name for spec in registry.specs()} == {"npu.aclnn.quantize_per_tensor", "npu.aclnn.dynamic_quant"}
+    finally:
+        sys.modules.pop(module_name, None)

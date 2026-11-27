@@ -28,7 +28,9 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/kv_cache/block/block.h"
+#include "core/kv_cache/layout/cache_partition_builder.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
@@ -259,6 +261,101 @@ void ExpectMluCompressedStateLayout(const std::vector<KVCache>& caches,
 #endif
 
 }  // namespace
+
+#if !defined(USE_MLU) && !defined(USE_NPU)
+TEST(NativeKVCacheTest, FP8PagesMatchBudgetAndKeepLinearStateDtypes) {
+  ModelArgs args;
+  args.model_type("qwen3_5_text")
+      .n_layers(4)
+      .n_heads(24)
+      .n_kv_heads(4)
+      .head_dim(256)
+      .full_attention_interval(2)
+      .linear_num_key_heads(2)
+      .linear_num_value_heads(2)
+      .linear_key_head_dim(4)
+      .linear_value_head_dim(4)
+      .linear_conv_kernel_dim(3)
+      .mamba_ssm_dtype("float32");
+  KVCacheEstimateOptions estimate;
+  estimate.kv_cache_dtype = "fp8_e4m3";
+  estimate.dtype = torch::kFloat16;
+  estimate.block_size = 16;
+  estimate.cache_size_in_bytes = 1024 * 1024;
+  estimate.max_seqs_per_batch = 4;
+  const KVCacheCapacity capacity = KVCacheEstimator(args).estimate(estimate);
+  const KVCacheShape shape(capacity, args, /*world_size=*/1);
+  const auto paged = build_paged_cache_partition(CachePartitionId{},
+                                                 capacity,
+                                                 args,
+                                                 shape,
+                                                 estimate.dtype,
+                                                 estimate.block_size,
+                                                 /*enable_prefix_cache=*/true);
+  ASSERT_TRUE(paged.has_value());
+  ASSERT_EQ(paged->components().size(), 2U);
+  for (const auto role : {CacheComponentRole::KEY, CacheComponentRole::VALUE}) {
+    const auto* component = paged->find_component(role);
+    ASSERT_NE(component, nullptr);
+    EXPECT_EQ(component->dtype, CacheScalarType::FLOAT8_E4M3FN);
+    EXPECT_EQ(component->layers, (std::vector<int32_t>{1, 3}));
+  }
+  const auto recurrent =
+      build_recurrent_cache_partition(CachePartitionId{},
+                                      capacity,
+                                      args,
+                                      shape,
+                                      estimate.dtype,
+                                      /*checkpoint_stride=*/16,
+                                      /*enable_prefix_cache=*/true);
+  ASSERT_TRUE(recurrent.has_value());
+  const auto* conv_component =
+      recurrent->find_component(CacheComponentRole::CONV);
+  const auto* ssm_component =
+      recurrent->find_component(CacheComponentRole::SSM);
+  ASSERT_NE(conv_component, nullptr);
+  ASSERT_NE(ssm_component, nullptr);
+  EXPECT_EQ(conv_component->dtype, CacheScalarType::FLOAT16);
+  EXPECT_EQ(ssm_component->dtype, CacheScalarType::FLOAT32);
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kFloat8_e4m3fn)
+      .conv_dtype(estimate.dtype)
+      .ssm_dtype(torch::kFloat32)
+      .num_layers(4)
+      .full_attention_interval(2)
+      .enable_linear_attention(true);
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+  ASSERT_EQ(caches.size(), 4U);
+  int64_t state_bytes = 0;
+  for (int64_t layer : {0, 2}) {
+    const auto conv = caches[layer].get_conv_cache();
+    const auto ssm = caches[layer].get_ssm_cache();
+    EXPECT_EQ(conv.scalar_type(), estimate.dtype);
+    EXPECT_EQ(ssm.scalar_type(), torch::kFloat32);
+    state_bytes += conv.nbytes() + ssm.nbytes();
+  }
+  EXPECT_EQ(state_bytes, capacity.linear_cache_size_in_bytes());
+  for (int64_t layer : {1, 3}) {
+    const torch::Tensor key = caches[layer].get_k_cache();
+    const torch::Tensor value = caches[layer].get_v_cache();
+    EXPECT_EQ(key.scalar_type(), torch::kFloat8_e4m3fn);
+    EXPECT_EQ(key.size(/*dim=*/3), 256);
+    EXPECT_FALSE(caches[layer].get_k_cache_scale().has_value());
+    EXPECT_EQ(value.scalar_type(), torch::kFloat8_e4m3fn);
+    EXPECT_FALSE(caches[layer].get_v_cache_scale().has_value());
+    EXPECT_EQ(
+        key.nbytes() + value.nbytes(),
+        capacity.n_blocks() * capacity.block_size() * capacity.slot_size());
+    EXPECT_EQ(key.view(torch::kByte).count_nonzero().item<int64_t>(), 0);
+    EXPECT_EQ(value.view(torch::kByte).count_nonzero().item<int64_t>(), 0);
+  }
+  options.conv_dtype(std::nullopt);
+  EXPECT_DEATH(create_linear_attention_kv_cache_tensors(shape, options),
+               "model dtype for Conv state");
+}
+#endif
 
 TEST(DeepSeekV4StateCacheTest, SplitStateReturnsInputViews) {
   torch::Tensor kv = torch::tensor({{{1.0F}}, {{2.0F}}, {{3.0F}}});

@@ -199,6 +199,9 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   // These values belong to the executor, not the checkpoint. In particular,
   // the MTP draft has different speculative options from its target.
   py::dict executor_config = py_causal_lm_->config_dict().attr("copy")();
+  executor_config["kv_cache_dtype"] = options_.kv_cache_dtype();
+  executor_config["enable_vmm_kvcache"] =
+      KVCacheConfig::get_instance().enable_vmm_kvcache();
   executor_config["enable_disagg_pd"] = options_.enable_disagg_pd();
   executor_config["instance_role"] = options_.instance_role().to_string();
   executor_config["task_type"] = options_.task_type();
@@ -335,8 +338,11 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
   bind_kv_caches(kv_caches);
 
-  py::object py_metadata = py::cast(PyAttentionMetadataView(
-      attn_metadata, params, options_.is_draft_engine()));
+  py::object py_metadata =
+      py::cast(PyAttentionMetadataView(attn_metadata,
+                                       params,
+                                       options_.is_draft_engine(),
+                                       options_.block_size()));
   py::object py_input_batch_metadata =
       requires_input_batch_metadata_
           ? py::cast(ExecutionBatchMetadata(params.meta.execution_batch))

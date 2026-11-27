@@ -12,15 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""W8A8 packing and destination adapters for quantized projections."""
+"""Checkpoint scale loading and weight packing for quantized models."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from pathlib import Path
 
 import torch
 
 from .model_weight_loader import ModelWeightLoader
+
+
+def load_kv_cache_scales(model_path: str | Path) -> tuple[float, float]:
+    """Read the fixed native FP8 dequantization scales from the checkpoint."""
+    with (Path(model_path) / "config.json").open(encoding="utf-8") as f:
+        quant_config = json.load(f).get("quantization_config")
+    if quant_config is None:
+        return 1.0, 1.0
+    if not isinstance(quant_config, dict):
+        raise ValueError("quantization_config must be an object")
+    scales = quant_config.get("kv_cache_scales", {})
+    if not isinstance(scales, dict):
+        raise ValueError("quantization_config.kv_cache_scales must be an object")
+    key, value = scales.get("k", 1.0), scales.get("v", 1.0)
+    limits = torch.finfo(torch.float32)
+    for name, scale in (("k", key), ("v", value)):
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not limits.tiny <= scale <= limits.max:
+            raise ValueError(f"kv_cache_scales.{name} must be a finite positive normal FP32 value")
+    return float(key), float(value)
 
 
 class W8A8WeightLoader(ModelWeightLoader):

@@ -321,10 +321,10 @@ TEST(MtpAsyncInputBuilderTest, PybindViewOwnsGlobalDpKvMaxSequenceLengths) {
       params.parallel.dp_global_token_nums = {expected[0] == 0 ? 0 : 1,
                                               expected[1] == 0 ? 0 : 1};
       params.parallel.dp_global_kv_max_seq_lens = expected;
-      py_metadata =
-          py::cast(PyAttentionMetadataView(metadata,
-                                           params,
-                                           /*is_draft_engine=*/false));
+      py_metadata = py::cast(PyAttentionMetadataView(metadata,
+                                                     params,
+                                                     /*is_draft_engine=*/false,
+                                                     kBlockSize));
       EXPECT_EQ(py_metadata.attr("raw_dp_execution_token_counts")
                     .cast<std::vector<int32_t>>(),
                 params.parallel.dp_global_token_nums);
@@ -380,7 +380,8 @@ TEST(MtpAsyncInputBuilderTest, PybindViewExposesLinearStateReadAndWriteSlots) {
   py::object py_metadata =
       py::cast(PyAttentionMetadataView(metadata,
                                        params,
-                                       /*is_draft_engine=*/false));
+                                       /*is_draft_engine=*/false,
+                                       kBlockSize));
   EXPECT_TRUE(torch::equal(
       py_metadata.attr("linear_state_indices").cast<torch::Tensor>(),
       torch::tensor({3, 7}, torch::kInt)));
@@ -410,6 +411,7 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
 
   auto metadata = std::make_shared<layer::AttentionMetadata>();
   metadata->slot_mapping = torch::arange(4, torch::kInt);
+  metadata->kv_seq_lens_vec = {1, 4, 5};
   metadata->expanded_decode.enabled = true;
   metadata->expanded_decode.kv_seq_lens =
       torch::tensor({3, 4, 7, 8}, torch::kInt);
@@ -443,7 +445,14 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   py::object py_metadata =
       py::cast(PyAttentionMetadataView(metadata,
                                        params,
-                                       /*is_draft_engine=*/false));
+                                       /*is_draft_engine=*/false,
+                                       kBlockSize));
+  EXPECT_TRUE(torch::equal(
+      py_metadata.attr("paged_kv_indptr_host").cast<torch::Tensor>(),
+      torch::tensor({0, 1, 2, 4}, torch::kInt)));
+  EXPECT_TRUE(torch::equal(
+      py_metadata.attr("paged_kv_last_page_len_host").cast<torch::Tensor>(),
+      torch::tensor({1, 4, 1}, torch::kInt)));
   EXPECT_EQ(
       py_metadata.attr("dp_global_sequence_nums").cast<std::vector<int32_t>>(),
       (std::vector<int32_t>{3, 0}));
@@ -473,8 +482,8 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   sparse->block_table = table;
   sparse->kv_seq_lens = lengths;
   sparse->slot_mapping = slots;
-  py::object sparse_view = py::cast(
-      PyAttentionMetadataView(sparse, params, /*is_draft_engine=*/false));
+  py::object sparse_view = py::cast(PyAttentionMetadataView(
+      sparse, params, /*is_draft_engine=*/false, kBlockSize));
   const torch::Tensor view_table =
       sparse_view.attr("block_table").cast<torch::Tensor>();
   const torch::Tensor view_lengths =

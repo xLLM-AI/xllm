@@ -19,6 +19,8 @@ limitations under the License.
 
 #include "core/common/prefill_policy.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/model_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/platform/platform.h"
 
@@ -56,6 +58,28 @@ void Options::validate(std::string_view model_type) const {
         (num_speculative_tokens() == 0 &&
          !SpeculativeConfig::is_block_diffusion_algorithm(algorithm)))
       << algorithm << " speculative decoding requires --draft_model.";
+
+  if (kv_cache_dtype() == "fp8_e4m3") {
+#if defined(USE_CUDA)
+    CHECK(ModelConfig::is_python_model_impl(
+        ModelConfig::get_instance().model_impl()))
+        << "Native FP8 KV requires the CUDA Python Executor.";
+    CHECK(!has_draft_model && num_speculative_tokens() == 0)
+        << "Native FP8 KV requires ordinary autoregressive decoding.";
+    CHECK(cp_size() == 1 &&
+          ParallelConfig::get_instance().kv_split_size_effective() == 1)
+        << "Native FP8 KV requires local attention pages.";
+    CHECK_LE(host_blocks_factor(), 1.0)
+        << "Native FP8 KV host offload is not qualified.";
+    CHECK(!enable_kvcache_store())
+        << "Native FP8 KV external stores are not qualified.";
+    CHECK(!enable_disagg_pd())
+        << "Native compressed KV transfer is not qualified for PD "
+           "disaggregation.";
+#else
+    LOG(FATAL) << "Native FP8 KV is supported only on CUDA.";
+#endif
+  }
 
   if (model_type == "deepseek_v41") {
     CHECK(!enable_kvcache_store() && host_blocks_factor() <= 1.0)

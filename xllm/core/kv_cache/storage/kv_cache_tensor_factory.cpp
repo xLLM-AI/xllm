@@ -394,12 +394,16 @@ LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(
   CHECK(kv_cache_shape.has_ssm_cache_shape())
       << "ssm_cache_shape must be initialized.";
   LinearAttentionKVCacheTensors tensors;
+  const torch::ScalarType conv_dtype =
+      create_options.conv_dtype().value_or(create_options.dtype());
+  CHECK_NE(conv_dtype, torch::kFloat8_e4m3fn)
+      << "FP8 KV pages require the model dtype for Conv state.";
 
 #if defined(USE_NPU)
   if (create_options.static_layout() != nullptr) {
     tensors.conv_cache = alloc_cache_tensor(KVCacheTensorRole::CONV,
                                             kv_cache_shape.conv_cache_shape(),
-                                            create_options.dtype(),
+                                            conv_dtype,
                                             create_options);
     tensors.ssm_cache = alloc_cache_tensor(KVCacheTensorRole::SSM,
                                            kv_cache_shape.ssm_cache_shape(),
@@ -409,7 +413,7 @@ LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(
   }
   tensors.conv_cache =
       alloc_npu_zeroed_tensor(kv_cache_shape.conv_cache_shape(),
-                              create_options.dtype(),
+                              conv_dtype,
                               ACL_FORMAT_ND,
                               create_options);
   tensors.ssm_cache = alloc_npu_zeroed_tensor(kv_cache_shape.ssm_cache_shape(),
@@ -419,7 +423,7 @@ LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(
 #else
   tensors.conv_cache = alloc_cache_tensor(KVCacheTensorRole::CONV,
                                           kv_cache_shape.conv_cache_shape(),
-                                          create_options.dtype(),
+                                          conv_dtype,
                                           create_options);
   tensors.ssm_cache = alloc_cache_tensor(KVCacheTensorRole::SSM,
                                          kv_cache_shape.ssm_cache_shape(),
