@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
 #include "core/kv_cache/transfer/kv_transfer_coordinator_base.h"
+#include "framework/block/grouped_cache_test_utils.h"
 
 namespace xllm {
 namespace {
@@ -143,11 +144,9 @@ BlockManagerPool::Options hierarchy_mtp_options() {
 BlockManagerPool::Options typed_hierarchy_options() {
   BlockManagerPool::Options options = hierarchy_mtp_options();
   options.num_blocks(4096)
-      .manager_types({1u, 0u, 0u})
-      .compress_ratios({0u, 4u, 128u})
+      .grouped_partitions(test::grouped_cache_partitions(16, 16))
       .swa_num_blocks(256)
       .swa_blocks_per_seq(2)
-      .sliding_window_size(16)
       .max_tokens_per_batch(4096)
       .max_seqs_per_batch(1)
       .host_num_blocks_by_type(
@@ -408,11 +407,9 @@ TEST(HierarchyMtpPrefixCacheTest, StoreDoesNotQueryWithoutNextToken) {
 TEST(TypedMtpPrefixCacheTest, CompressedCheckpointRequiresNextToken) {
   BlockManager::Options options = mtp_options();
   options.num_blocks(4096)
-      .manager_types({1u, 0u, 0u})
-      .compress_ratios({0u, 4u, 128u})
+      .grouped_partitions(test::grouped_cache_partitions(16, 16))
       .swa_num_blocks(256)
       .swa_blocks_per_seq(2)
-      .sliding_window_size(16)
       .max_tokens_per_batch(4096)
       .max_seqs_per_batch(1)
       .num_speculative_tokens(1);

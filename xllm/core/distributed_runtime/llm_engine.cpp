@@ -49,7 +49,6 @@ limitations under the License.
 #include "core/framework/model/model_type.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/speculative/draft_config.h"
-#include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/prefix/block_hasher.h"
@@ -377,6 +376,7 @@ bool LLMEngine::allocate_kv_cache(
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
       .enable_vmm_kvcache(kv_cache_config.enable_vmm_kvcache())
+      .max_tokens_per_batch(options_.max_tokens_per_batch())
       .num_layers(args_.n_layers())
       .slot_size(kv_cache_cap.slot_size())
       .model_id(options_.model_id())
@@ -391,46 +391,6 @@ bool LLMEngine::allocate_kv_cache(
     // contain GDN state and KPool tail state.
     options.linear_state_num_slots(
         static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()));
-  }
-  if (is_deepseek_v4_family(args_.model_type())) {
-    constexpr uint32_t kManagerTypeBlockManagerImpl = 0;
-    constexpr uint32_t kManagerTypeSlidingWindowBlockManager = 1;
-
-    std::vector<uint32_t> manager_types{kManagerTypeSlidingWindowBlockManager};
-    std::vector<uint32_t> manager_compress_ratios{0};
-    manager_types.reserve(5);
-    manager_compress_ratios.reserve(5);
-    const std::pair<uint32_t, int64_t> token_pools[] = {
-        {1, kv_cache_cap.c1_count()},
-        {2, kv_cache_cap.c2_count()},
-        {4, kv_cache_cap.c4_count()},
-        {128, kv_cache_cap.c128_count()}};
-    for (const auto& [ratio, count] : token_pools) {
-      if (count == 0) {
-        continue;
-      }
-      manager_types.push_back(kManagerTypeBlockManagerImpl);
-      manager_compress_ratios.push_back(ratio);
-    }
-
-    const int64_t semantic_window = std::max(args_.window_size(), 1);
-    const int64_t max_model_len = args_.max_seq_len();
-    const int64_t effective_window =
-        max_model_len > 0 ? std::min<int64_t>(semantic_window, max_model_len)
-                          : semantic_window;
-    const uint32_t swa_blocks_per_seq = static_cast<uint32_t>(
-        get_swa_blocks_per_seq(effective_window, block_size));
-    CHECK_LE(kv_cache_cap.swa_count(),
-             static_cast<int64_t>(std::numeric_limits<uint32_t>::max()))
-        << "DSV4 swa_count exceeds uint32_t range: "
-        << kv_cache_cap.swa_count();
-
-    options.sliding_window_size(static_cast<uint32_t>(effective_window))
-        .swa_blocks_per_seq(swa_blocks_per_seq)
-        .swa_num_blocks(static_cast<uint32_t>(kv_cache_cap.swa_count()))
-        .max_tokens_per_batch(options_.max_tokens_per_batch())
-        .manager_types(std::move(manager_types))
-        .compress_ratios(std::move(manager_compress_ratios));
   }
 
   if (options_.enable_kvcache_store()) {
@@ -452,9 +412,9 @@ bool LLMEngine::allocate_kv_cache(
     // Translate a composite cache capacity into typed Host pools. The
     // hierarchy layer consumes only this BlockType map and does not need to
     // identify the model that produced the layout.
-    if (!options.manager_types().empty() || enable_state_cache) {
+    if (is_deepseek_v4_family(args_.model_type()) || enable_state_cache) {
       std::map<BlockType, uint32_t> host_capacities;
-      if (options.manager_types().empty()) {
+      if (!is_deepseek_v4_family(args_.model_type())) {
         host_capacities.emplace(
             BlockType::KV,
             static_cast<uint32_t>(scale_host_block_count(

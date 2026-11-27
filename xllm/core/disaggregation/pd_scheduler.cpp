@@ -1265,7 +1265,7 @@ bool PDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
   CHECK(block_manager != nullptr);
   const BlockManagerPool::Options& block_options = block_manager->options();
   if (block_options.enable_vmm_kvcache() ||
-      !block_options.manager_types().empty() ||
+      !block_options.grouped_partitions().empty() ||
       (block_options.enable_host_offload() &&
        options_.instance_role() != InstanceRole::DECODE)) {
     return false;

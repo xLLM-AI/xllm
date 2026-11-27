@@ -30,10 +30,17 @@ class PagedCachePartition final {
   PagedCachePartition(CachePartitionId id,
                       int32_t token_stride,
                       bool enable_prefix_cache,
-                      std::vector<CacheComponent> components);
+                      std::vector<CacheComponent> components,
+                      int32_t compression_ratio = 1,
+                      int32_t window_size = 0);
 
   const CachePartitionId& id() const { return id_; }
   int32_t token_stride() const { return token_stride_; }
+  int32_t compression_ratio() const { return compression_ratio_; }
+  int32_t window_size() const { return window_size_; }
+  bool is_sliding_window() const { return window_size() > 0; }
+  bool participates_in_admission() const { return !is_sliding_window(); }
+  // Engine settings and instance role may further restrict prefix reuse.
   bool enable_prefix_cache() const { return enable_prefix_cache_; }
   const std::vector<CacheComponent>& components() const { return components_; }
   const CacheComponent* find_component(CacheComponentRole role) const;
@@ -41,6 +48,9 @@ class PagedCachePartition final {
  private:
   CachePartitionId id_;
   int32_t token_stride_;
+  int32_t compression_ratio_;
+  // Zero denotes full history; positive values denote a sliding window.
+  int32_t window_size_;
   bool enable_prefix_cache_;
   std::vector<CacheComponent> components_;
 };

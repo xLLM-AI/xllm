@@ -70,8 +70,6 @@ class BlockManagerPool : public KVCacheManager {
              slot_size) = 0;  // Memory size per slot (for virtual memory)
     PROPERTY(size_t, virtual_block_bytes) = 0;
     PROPERTY(std::string, model_id);  // Model ID for multi-model support
-    // Token-level sliding window size for CompositeBlockManager.
-    PROPERTY(uint32_t, sliding_window_size) = 0;
     // Base SWA/cache-state block rows retained per sequence.
     PROPERTY(uint32_t, swa_blocks_per_seq) = 0;
     // Total physical SWA rows. This is computed by the KV cache estimator and
@@ -80,8 +78,7 @@ class BlockManagerPool : public KVCacheManager {
     // Scheduler token budget used to size the shared SWA burst pool.
     PROPERTY(uint32_t, max_tokens_per_batch) = 0;
     // For CompositeBlockManager.
-    PROPERTY(std::vector<uint32_t>, manager_types) = {};
-    PROPERTY(std::vector<uint32_t>, compress_ratios) = {};
+    PROPERTY(std::vector<PagedCachePartition>, grouped_partitions) = {};
     PROPERTY(uint32_t, max_seqs_per_batch) = 0;
     // Hasher type bound to the engine (TEXT for LLM, MM for VLM).
     PROPERTY(BlockHasherType, hasher_type) = BlockHasherType::TEXT;
