@@ -17,6 +17,7 @@ from typing import Any
 
 import torch
 from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanImageToVideoPipeline
+from diffusers.models.autoencoders.autoencoder_kl_wan import WanCausalConv3d
 from transformers import (
     AutoTokenizer,
     CLIPImageProcessor,
@@ -94,6 +95,13 @@ class WanI2VPipeline:
             config = AutoencoderKLWan.load_config(path)
             with torch.device("meta"):
                 component = AutoencoderKLWan.from_config(config)
+            for convolution in component.modules():
+                if isinstance(convolution, WanCausalConv3d):
+                    # Keep the causal time padding explicit. Conv3d can apply
+                    # spatial padding without materializing a padded feature map.
+                    padding_width, _, padding_height, _, padding_time, _ = convolution._padding
+                    convolution.padding = (0, padding_height, padding_width)
+                    convolution._padding = (0, 0, 0, 0, padding_time, 0)
             load_component_weights(component, shards, self._device, lambda _: torch.float32)
         elif name == "scheduler":
             config = UniPCMultistepScheduler.load_config(path)
