@@ -28,7 +28,7 @@ from xllm.python.model_executor.runners.acl_graph import (
     AclGraphEntry,
     StaticGraphAttentionMetadata,
 )
-from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
+from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphPreparation, DecodeAclGraphRunner
 from xllm.python.model_executor.runners.decode_cuda_graph import _decode_bucket
 from xllm.python.model_executor.runners.kv_capacity import block_draft_kv_capacity_buckets
 
@@ -81,55 +81,60 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
             not getattr(attention_backend, "is_mla", False) and block_draft_model_window_context(model) is not None
         )
 
-    def can_execute(
+    def prepare_execution(
         self,
         input_ids: torch.Tensor,
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         mtp_topk_indices: torch.Tensor | None = None,
-    ) -> bool:
+        *,
+        is_graph_warmup: bool = False,
+    ) -> DecodeAclGraphPreparation | None:
         if input_ids.dim() != 1:
-            return False
+            return None
         if not metadata.is_chunked_prefill or metadata.is_prefill or getattr(metadata, "is_target_verify", False):
-            return False
+            return None
         if input_embedding is not None or mtp_topk_indices is not None:
-            return False
+            return None
         q_seq_lens = metadata.q_seq_lens
         block_table = metadata.block_table
         slot_mapping = metadata.slot_mapping
         kv_seq_lens = metadata.kv_seq_lens
         if q_seq_lens is None or block_table is None or slot_mapping is None or kv_seq_lens is None:
-            return False
+            return None
         if q_seq_lens.dim() != 1 or q_seq_lens.numel() == 0:
-            return False
+            return None
         query_widths = q_seq_lens.to(torch.int64).tolist()
         query_width = metadata.decode_query_width
         if query_width is None or query_width <= 0 or any(width != query_width for width in query_widths):
-            return False
+            return None
         sequence_count = len(query_widths)
         if sequence_count > self.max_batch:
-            return False
+            return None
         if block_table.dim() != 2 or block_table.shape[0] != sequence_count:
-            return False
+            return None
         if input_ids.numel() != sequence_count * query_width:
-            return False
+            return None
         if slot_mapping.dim() != 1 or slot_mapping.numel() != input_ids.numel():
-            return False
+            return None
         if kv_seq_lens.dtype != torch.int32 or kv_seq_lens.shape != (sequence_count,):
-            return False
+            return None
         host_kv_lens = getattr(metadata, "kv_seq_lens_host_values", None)
         if host_kv_lens is None or len(host_kv_lens) != sequence_count:
-            return False
+            return None
         if any(int(length) <= 0 for length in host_kv_lens):
-            return False
+            return None
         if not self._valid_paged_metadata(metadata, sequence_count):
-            return False
+            return None
         query_ends = self._query_ends(metadata, query_widths)
         if query_ends is None or query_ends[-1] != input_ids.numel():
-            return False
-        return (
-            block_table.shape[1] > 0 and self._padded_sequence_count(metadata, sequence_count, query_width) is not None
-        )
+            return None
+        if block_table.shape[1] <= 0:
+            return None
+        padded_sequences = self._padded_sequence_count(metadata, sequence_count, query_width)
+        if padded_sequences is None:
+            return None
+        return DecodeAclGraphPreparation(metadata=metadata, padded_batch_size=padded_sequences * query_width)
 
     def _padded_sequence_count(
         self,
@@ -212,19 +217,26 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         mtp_topk_indices: torch.Tensor | None = None,
         *,
         eplb: EplbRuntimeState | None = None,
-        pre_capture_kv_buckets: bool = False,
+        preparation: DecodeAclGraphPreparation | None = None,
+        is_graph_warmup: bool = False,
         input_batch: InputBatch | None = None,
     ) -> _BlockGraphKey:
-        self._validate_inputs(input_ids, positions, metadata)
-        sequence_count = metadata.q_seq_lens.numel()
+        if preparation is None:
+            preparation = self.prepare_execution(
+                input_ids, metadata, input_embedding, mtp_topk_indices, is_graph_warmup=is_graph_warmup
+            )
+            if preparation is None:
+                raise ValueError("DSpark ACL graph requires fixed-width non-causal block metadata")
+        metadata = preparation.metadata
+        if positions.dim() != 1 or positions.numel() != input_ids.numel():
+            raise ValueError("DSpark ACL graph positions must match input_ids")
         query_width = metadata.decode_query_width
         assert query_width is not None
-        padded_sequences = self._padded_sequence_count(metadata, sequence_count, query_width)
-        assert padded_sequences is not None
+        padded_sequences = preparation.padded_batch_size // query_width
         local_key = self._graph_key(input_ids, metadata, padded_sequences, query_width)
         local_pages = local_key[2]
         tiers: tuple[int, ...] = ()
-        if pre_capture_kv_buckets and not self._windowed_block_draft:
+        if is_graph_warmup and not self._windowed_block_draft:
             page_size = self._logical_page_size
             # The owned-table runner pads its last capacity to a power of two,
             # unlike the prepared runner's clamped source-table view. Include
@@ -299,17 +311,6 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         # deadlock on the next replay.  Larger requests still get their own
         # power-of-two bucket.
         return max(required_capacity, warmup_capacity)
-
-    def _validate_inputs(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        metadata: AttentionMetadata,
-    ) -> None:
-        if not self.can_execute(input_ids, metadata):
-            raise ValueError("DSpark ACL graph requires fixed-width non-causal block metadata")
-        if positions.dim() != 1 or positions.numel() != input_ids.numel():
-            raise ValueError("DSpark ACL graph positions must match input_ids")
 
     def _prepare_graph_entry(
         self,

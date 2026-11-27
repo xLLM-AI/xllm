@@ -293,6 +293,22 @@ token count of its complete dummy block. ACL graph shape and request bucketing
 consume this width instead of reconstructing it from the candidate budget.
 Graph-owned static metadata retains the same width during capture and replay.
 
+### Decode graph preparation
+
+Ordinary and non-causal block decode runners share the same ACL graph call
+sequence: `prepare_execution` → `warmup` → `execute`. Admission returns `None`
+for an unsupported layout before graph capture or replay starts. An admitted
+step returns `DecodeAclGraphPreparation`, which borrows the normalized attention
+metadata, records the padded physical token count, and retains any resolved
+expanded/KV metadata. The executor passes this result to both later calls and
+keeps it local to that execution; callers must prepare again after scheduler
+metadata changes.
+
+Runners own their graph keys, DP coordination and KV capacity tiers. During
+startup, the shared `is_graph_warmup` argument lets each runner select its own
+pre-capture policy. Ordinary and block graph allocation/replay implementations
+remain separate behind this preparation interface.
+
 ## Adding an operator
 
 1. Add the implementation under the matching platform package's framework

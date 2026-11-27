@@ -188,7 +188,8 @@ def test_capacity_warmup_bounds_long_synthetic_lengths_without_mutating_source(
     metadata.kv_cu_seq_lens = torch.arange(9, dtype=torch.int32) * 2048
     tokens = torch.arange(8, dtype=torch.int32)
     original_table = metadata.block_table.clone()
-    resolved = runner._decode_metadata(metadata, runner._expanded_verify_view(metadata))
+    preparation = runner.prepare_execution(tokens, metadata, is_graph_warmup=True)
+    assert preparation is not None
     captured_pages: list[int] = []
 
     def _capture(
@@ -211,7 +212,7 @@ def test_capacity_warmup_bounds_long_synthetic_lengths_without_mutating_source(
         runner._graphs[graph_key] = AclGraphEntry()
 
     with patch.object(runner, "_prepare_graph_entry", side_effect=_capture):
-        runner.warmup(tokens, tokens, metadata, decode_metadata=resolved, is_graph_warmup=True)
+        runner.warmup(tokens, tokens, metadata, preparation=preparation, is_graph_warmup=True)
         assert captured_pages == ([4, 32, 256, 513] if device_kv_lengths else [513])
         assert runner.warmup(tokens, tokens, metadata)[-1] == (32 if device_kv_lengths else 513)
     assert metadata.kv_seq_lens_host_values == [2048] * 8
@@ -370,7 +371,7 @@ def test_dspark_dp_graph_uses_group_wide_complete_blocks(dp_rank: int, sequence_
     metadata.dp_is_decode = (1, 1)
     input_ids = torch.arange(sequence_count * 2, dtype=torch.int32)
 
-    assert runner.can_execute(input_ids, metadata)
+    assert runner.prepare_execution(input_ids, metadata) is not None
     assert runner._padded_sequence_count(metadata, sequence_count, 2) == 4
     entry = runner._allocate_entry(input_ids, input_ids, metadata, sequence_count=4, page_table_capacity=4)
     runner._fill_entry(entry, input_ids, input_ids, metadata)
@@ -398,7 +399,7 @@ def test_dspark_dp_graph_admits_an_idle_rank_full_block() -> None:
     metadata.paged_kv_last_page_len.fill_(1)
     input_ids = torch.zeros(2, dtype=torch.int32)
 
-    assert runner.can_execute(input_ids, metadata)
+    assert runner.prepare_execution(input_ids, metadata) is not None
     entry = runner._allocate_entry(input_ids, input_ids, metadata, sequence_count=4, page_table_capacity=4)
     runner._fill_entry(entry, input_ids, input_ids, metadata)
     assert entry.static_metadata.slot_mapping.tolist() == [-1] * 8
@@ -420,7 +421,7 @@ def test_dspark_dp_graph_rejects_invalid_counts(counts: tuple[int, ...], phases:
     metadata.dp_execution_token_counts = counts
     metadata.dp_is_decode = phases
     with pytest.raises(ValueError, match=error):
-        runner.can_execute(torch.zeros(2, dtype=torch.int32), metadata)
+        runner.prepare_execution(torch.zeros(2, dtype=torch.int32), metadata)
 
 
 @pytest.mark.parametrize("counts,phases", [((2, 10), (1, 1)), ((2, 6), (1, 0))])
@@ -429,7 +430,7 @@ def test_dspark_dp_graph_falls_back_group_wide(counts: tuple[int, ...], phases: 
     metadata = _block_draft_metadata(torch.zeros(1, 1, dtype=torch.int32))
     metadata.dp_execution_token_counts = counts
     metadata.dp_is_decode = phases
-    assert not runner.can_execute(torch.zeros(2, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.zeros(2, dtype=torch.int32), metadata) is None
 
 
 def test_dspark_dp_replay_clears_rows_from_a_larger_local_batch() -> None:
@@ -539,7 +540,9 @@ def test_block_draft_dp_prewarm_keeps_collectives_aligned_for_unequal_capacities
         patch("xllm.python.distributed.all_reduce_", side_effect=presence) as reduce,
         patch.object(runner, "_prepare_graph_entry", side_effect=prepare),
     ):
-        key = runner.warmup(tokens, tokens, metadata, pre_capture_kv_buckets=True)
+        preparation = runner.prepare_execution(tokens, metadata, is_graph_warmup=True)
+        assert preparation is not None
+        key = runner.warmup(tokens, tokens, metadata, preparation=preparation, is_graph_warmup=True)
 
     # Both ranks visit the bounded tier, then their current local capacity.
     assert gather.call_count == reduce.call_count == 2
@@ -578,14 +581,14 @@ def test_block_draft_dp_prewarmed_capacity_keys_are_reused_at_runtime() -> None:
         patch("xllm.python.distributed.all_reduce_", side_effect=presence),
         patch.object(runner, "_prepare_graph_entry", side_effect=prepare),
     ):
-        current_key = runner.warmup(tokens, tokens, metadata, pre_capture_kv_buckets=True)
+        current_key = runner.warmup(tokens, tokens, metadata, is_graph_warmup=True)
         assert current_key == captured[-1]
         assert [(key[2], key[-1]) for key in captured] == [(128, (1, 1)), (64, (2, 2)), (32, (3, 3))]
         for length in (2048, 4097, 8193, 2048):
             metadata.kv_seq_lens.fill_(length)
             metadata.kv_seq_lens_host_values = [length]
             assert runner.warmup(tokens, tokens, metadata) in captured
-        runner.warmup(tokens, tokens, metadata, pre_capture_kv_buckets=True)
+        runner.warmup(tokens, tokens, metadata, is_graph_warmup=True)
 
     assert len(captured) == 3
 
@@ -662,7 +665,7 @@ def test_windowed_block_draft_reuses_one_source_capacity_across_contexts(sparse_
             metadata = _block_draft_metadata(torch.zeros(1, columns, dtype=torch.int32))
             metadata.kv_seq_lens_host_values[:] = [length]
             metadata.kv_seq_lens.fill_(length)
-            key = runner.warmup(tokens, tokens, metadata, pre_capture_kv_buckets=True)
+            key = runner.warmup(tokens, tokens, metadata, is_graph_warmup=True)
             assert key[2] == 513
     assert prepare.call_count == 1
     entry = runner._allocate_entry(tokens, tokens, metadata, sequence_count=1, page_table_capacity=key[2])
@@ -750,8 +753,8 @@ def test_block_draft_startup_prewarms_large_buckets_with_short_metadata(
         runner._graphs[graph_key] = object()
 
     with patch.object(runner, "_prepare_graph_entry", side_effect=prepare_entry):
-        key = runner.warmup(tokens, tokens, metadata, pre_capture_kv_buckets=True)
-        runner.warmup(tokens, tokens, metadata, pre_capture_kv_buckets=True)
+        key = runner.warmup(tokens, tokens, metadata, is_graph_warmup=True)
+        runner.warmup(tokens, tokens, metadata, is_graph_warmup=True)
     assert captured == expected
     assert key[2] == expected[-1]
     metadata.block_table = torch.zeros(1, (max_model_len + 127) // 128, dtype=torch.int32)
@@ -849,7 +852,7 @@ def test_dspark_graph_rejects_missing_host_kv_lengths() -> None:
     metadata = _block_draft_metadata(torch.zeros(1, 3, dtype=torch.int32))
     metadata.kv_seq_lens_host_values = None
 
-    assert not runner.can_execute(torch.zeros(2, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.zeros(2, dtype=torch.int32), metadata) is None
 
 
 def test_dspark_graph_rejects_inconsistent_paged_metadata() -> None:
@@ -857,7 +860,7 @@ def test_dspark_graph_rejects_inconsistent_paged_metadata() -> None:
     metadata = _block_draft_metadata(torch.zeros(1, 3, dtype=torch.int32))
     metadata.paged_kv_indptr = torch.tensor([0, 1], dtype=torch.int32)
 
-    assert not runner.can_execute(torch.zeros(2, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.zeros(2, dtype=torch.int32), metadata) is None
 
 
 def test_dspark_graph_replay_clears_stale_page_table_tail() -> None:
@@ -2062,7 +2065,7 @@ def test_block_draft_graph_rejects_layout_disagreeing_with_query_rows(width: int
     metadata = _block_draft_metadata(torch.zeros((1, 2), dtype=torch.int32))
     metadata.decode_query_width = width
     metadata.num_speculative_tokens = 1
-    assert not runner.can_execute(torch.arange(2, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.arange(2, dtype=torch.int32), metadata) is None
 
 
 @pytest.mark.parametrize("candidate_count", [0, 2, 7])
@@ -2070,4 +2073,4 @@ def test_block_draft_graph_uses_query_layout_independently_of_candidate_count(ca
     runner = _block_draft_runner()
     metadata = _block_draft_metadata(torch.zeros((1, 2), dtype=torch.int32))
     metadata.num_speculative_tokens = candidate_count
-    assert runner.can_execute(torch.arange(2, dtype=torch.int32), metadata)
+    assert runner.prepare_execution(torch.arange(2, dtype=torch.int32), metadata) is not None

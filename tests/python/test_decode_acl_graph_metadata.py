@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Per-execution metadata reuse in the ordinary ACL decode runner."""
+"""Per-execution preparation and metadata reuse in ACL decode runners."""
 
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -26,6 +26,7 @@ from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_m
 from xllm.python.model_executor.executor import ModelExecutor
 from xllm.python.model_executor.forward_context import AclGraphExecutionState
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner
+from xllm.python.model_executor.runners.block_draft_acl_graph import BlockDraftAclGraphRunner
 from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
 
@@ -147,10 +148,10 @@ def test_no_padding_graph_entries_use_exact_rows_and_reuse_matching_shapes(runne
         metadata.kv_seq_lens_host_values = [2] * rows
         metadata.slot_mapping = torch.arange(rows, dtype=torch.int32)
         metadata.linear_state_indices = torch.arange(rows, dtype=torch.int32)
-        decoded = runner.prepare_execution(input_ids, metadata)
-        assert decoded is not None
-        key = runner.warmup(input_ids, input_ids, metadata, decode_metadata=decoded)
-        output = runner.execute(input_ids, input_ids, metadata, graph_key=key, decode_metadata=decoded)
+        preparation = runner.prepare_execution(input_ids, metadata)
+        assert preparation is not None
+        key = runner.warmup(input_ids, input_ids, metadata, preparation=preparation)
+        output = runner.execute(input_ids, input_ids, metadata, graph_key=key, preparation=preparation)
         entry = runner._graphs[key]
         assert entry.batch_size == rows
         assert entry.static_input_ids.numel() == rows
@@ -295,10 +296,10 @@ def test_metadata_is_decoded_once_for_new_and_cached_graph_steps(
         ) as build_paging,
     ):
         for step in range(2):
-            decoded = runner.prepare_execution(input_ids, metadata)
-            assert decoded is not None
-            graph_key = runner.warmup(input_ids, positions, metadata, decode_metadata=decoded)
-            output = runner.execute(input_ids, positions, metadata, graph_key=graph_key, decode_metadata=decoded)
+            preparation = runner.prepare_execution(input_ids, metadata)
+            assert preparation is not None
+            graph_key = runner.warmup(input_ids, positions, metadata, preparation=preparation)
+            output = runner.execute(input_ids, positions, metadata, graph_key=graph_key, preparation=preparation)
             entry = runner._graphs[graph_key]
 
             assert entry.static_metadata.dsa_graph_token_capacity == (5 + step if granularity else 0)
@@ -307,10 +308,11 @@ def test_metadata_is_decoded_once_for_new_and_cached_graph_steps(
             assert build_paging.call_count == step + 1
             torch.testing.assert_close(entry.static_metadata.block_table[:, :2], metadata.block_table.to(torch.int32))
             assert entry.static_metadata.kv_seq_lens_host_values == metadata.kv_seq_lens_host_values
-            assert decoded.kv_seq_lens.tolist() == [2 + step, 5 + step]
-            assert decoded.paged_kv_indptr.tolist() == [0, 1, 3]
-            assert decoded.paged_kv_indices.tolist() == [11 + step, 21 + step, 22 + step]
-            assert decoded.paged_kv_last_page_len.tolist() == [2 + step, 1 + step]
+            assert preparation.decode_metadata is not None
+            assert preparation.decode_metadata.kv_seq_lens.tolist() == [2 + step, 5 + step]
+            assert preparation.decode_metadata.paged_kv_indptr.tolist() == [0, 1, 3]
+            assert preparation.decode_metadata.paged_kv_indices.tolist() == [11 + step, 21 + step, 22 + step]
+            assert preparation.decode_metadata.paged_kv_last_page_len.tolist() == [2 + step, 1 + step]
 
             # Reuse the same metadata object with new values on the next step.
             metadata.block_table.add_(1)
@@ -438,10 +440,10 @@ def test_direct_runner_calls_decode_current_metadata_without_retained_state(runn
 def test_new_step_still_validates_metadata_after_successful_replay(runner: DecodeAclGraphRunner) -> None:
     input_ids = torch.tensor([10, 20], dtype=torch.int32)
     metadata = _metadata()
-    decoded = runner.prepare_execution(input_ids, metadata)
-    assert decoded is not None
-    graph_key = runner.warmup(input_ids, input_ids, metadata, decode_metadata=decoded)
-    runner.execute(input_ids, input_ids, metadata, graph_key=graph_key, decode_metadata=decoded)
+    preparation = runner.prepare_execution(input_ids, metadata)
+    assert preparation is not None
+    graph_key = runner.warmup(input_ids, input_ids, metadata, preparation=preparation)
+    runner.execute(input_ids, input_ids, metadata, graph_key=graph_key, preparation=preparation)
 
     metadata.kv_seq_lens_host_values = [2]
     assert runner.prepare_execution(input_ids, metadata) is None
@@ -500,10 +502,10 @@ def test_metadata_reuse_preserves_dp_capture_and_replay_coordination(
     monkeypatch.setattr("xllm.python.distributed.all_reduce_", reduce)
 
     for _ in range(2):
-        decoded = runner.prepare_execution(input_ids, metadata)
-        assert decoded is not None
-        graph_key = runner.warmup(input_ids, input_ids, metadata, decode_metadata=decoded)
-        runner.execute(input_ids, input_ids, metadata, graph_key=graph_key, decode_metadata=decoded)
+        preparation = runner.prepare_execution(input_ids, metadata)
+        assert preparation is not None
+        graph_key = runner.warmup(input_ids, input_ids, metadata, preparation=preparation)
+        runner.execute(input_ids, input_ids, metadata, graph_key=graph_key, preparation=preparation)
 
     runner._capture.assert_called_once()
     assert gather.call_count == 2
@@ -516,10 +518,10 @@ def test_metadata_reuse_preserves_kpool_span_graph_variants(runner: DecodeAclGra
     with patch.object(runner, "_decode_metadata", wraps=runner._decode_metadata) as decode:
         for query_lens in ((1, 1), (2,), (1, 1)):
             metadata.kpool_query_lens = query_lens
-            decoded = runner.prepare_execution(input_ids, metadata)
-            assert decoded is not None
-            graph_key = runner.warmup(input_ids, input_ids, metadata, decode_metadata=decoded)
-            runner.execute(input_ids, input_ids, metadata, graph_key=graph_key, decode_metadata=decoded)
+            preparation = runner.prepare_execution(input_ids, metadata)
+            assert preparation is not None
+            graph_key = runner.warmup(input_ids, input_ids, metadata, preparation=preparation)
+            runner.execute(input_ids, input_ids, metadata, graph_key=graph_key, preparation=preparation)
 
             assert runner._graphs[graph_key].static_metadata.kpool_query_lens == query_lens
 
@@ -556,10 +558,10 @@ def test_metadata_reuse_preserves_expanded_verify_rows_and_query_groups(
 
     with patch.object(runner, "_decode_metadata", wraps=runner._decode_metadata) as decode:
         for _ in range(2):
-            decoded = runner.prepare_execution(input_ids, metadata)
-            assert decoded is not None
-            graph_key = runner.warmup(input_ids, input_ids, metadata, decode_metadata=decoded)
-            runner.execute(input_ids, input_ids, metadata, graph_key=graph_key, decode_metadata=decoded)
+            preparation = runner.prepare_execution(input_ids, metadata)
+            assert preparation is not None
+            graph_key = runner.warmup(input_ids, input_ids, metadata, preparation=preparation)
+            runner.execute(input_ids, input_ids, metadata, graph_key=graph_key, preparation=preparation)
             static_metadata = runner._graphs[graph_key].static_metadata
 
             assert static_metadata.kv_seq_lens_host_values == [1, 2, 4, 5]
@@ -599,10 +601,10 @@ def test_expanded_query_row_offsets_survive_padding_and_bucket_reuse(runner: Dec
             paged_kv_last_page_len=torch.ones(rows, dtype=torch.int32),
             paged_attention_tiling_data=None,
         )
-        decoded = runner.prepare_execution(input_ids, metadata)
-        assert decoded is not None
-        graph_key = runner.warmup(input_ids, input_ids, metadata, decode_metadata=decoded)
-        runner.execute(input_ids, input_ids, metadata, graph_key=graph_key, decode_metadata=decoded)
+        preparation = runner.prepare_execution(input_ids, metadata)
+        assert preparation is not None
+        graph_key = runner.warmup(input_ids, input_ids, metadata, preparation=preparation)
+        runner.execute(input_ids, input_ids, metadata, graph_key=graph_key, preparation=preparation)
         entry = runner._graphs[graph_key]
         expected = list(range(rows + 1)) + [rows] * (entry.batch_size - rows)
         assert entry.static_metadata.q_cu_seq_lens.tolist() == expected
@@ -621,3 +623,68 @@ def test_linear_verify_bucketing_requires_a_fixed_producer_width(
     metadata = SimpleNamespace(decode_query_width=width, num_speculative_tokens=4, is_target_verify=True)
     with pytest.raises(ValueError, match="complete fixed-width requests"):
         runner._padded_batch_size(10, metadata)
+
+
+@pytest.mark.parametrize("dp_rank", [0, 1])
+def test_executor_reuses_block_graph_with_fresh_preparation_and_rejects_changed_layout(
+    runner: DecodeAclGraphRunner, executor: ModelExecutor, dp_rank: int
+) -> None:
+    backend = SimpleNamespace(
+        page_size=4,
+        is_mla=False,
+        prepare_metadata=lambda metadata, **_kwargs: SimpleNamespace(
+            actual_seq_q=list(metadata.q_cu_seq_lens_host_values), query_ends=None
+        ),
+    )
+    block_runner = BlockDraftAclGraphRunner(
+        nn.Identity(), backend, torch.device("cpu"), max_batch=8, max_model_len=8, dp_size=2, dp_rank=dp_rank
+    )
+    # Share only the fixture's simulated device capture boundary; allocation,
+    # filling, admission and executor dispatch use the real implementations.
+    block_runner._stream = runner._stream
+    block_runner._capture = runner._capture
+    block_runner._prepare_attention = runner._prepare_attention
+    executor.decode_graph_runner = block_runner
+    metadata = _metadata()
+    metadata.is_chunked_prefill = True
+    metadata.decode_query_width = 2
+    metadata.q_seq_lens = torch.tensor([2, 2], dtype=torch.int32)
+    metadata.q_cu_seq_lens = torch.tensor([0, 2, 4], dtype=torch.int32)
+    metadata.q_cu_seq_lens_host_values = [2, 4]
+    metadata.slot_mapping = torch.arange(4, dtype=torch.int32)
+    metadata.kv_seq_lens = metadata.kv_seq_lens.to(torch.int32)
+    metadata.paged_kv_indptr = None
+    metadata.paged_kv_indices = None
+    metadata.paged_kv_last_page_len = None
+    metadata.dp_execution_token_counts = (4, 6) if dp_rank == 0 else (6, 4)
+    metadata.dp_is_decode = (1, 1)
+    tokens = torch.arange(4, dtype=torch.int32)
+
+    with patch.object(block_runner, "prepare_execution", wraps=block_runner.prepare_execution) as prepare:
+        for step in range(2):
+            output = executor.execute(tokens, tokens, metadata)
+            assert output.shape == (4, 2)
+            assert prepare.call_count == step + 1
+            entry = next(iter(block_runner._graphs.values()))
+            assert entry.batch_size == 8
+            assert entry.static_metadata.q_seq_lens.tolist() == [2, 2, 2, 2]
+            assert entry.static_metadata.slot_mapping.tolist() == [0, 1, 2, 3, -1, -1, -1, -1]
+            assert entry.static_metadata.kv_seq_lens.tolist() == [2 + step, 5 + step, 1, 1]
+            torch.testing.assert_close(
+                entry.static_metadata.block_table[0, :1], metadata.block_table[0, :1].to(torch.int32)
+            )
+            torch.testing.assert_close(
+                entry.static_metadata.block_table[1, :2], metadata.block_table[1, :2].to(torch.int32)
+            )
+            assert entry.static_metadata.block_table[0, 1:].count_nonzero().item() == 0
+            metadata.block_table.add_(10)
+            metadata.kv_seq_lens.add_(1)
+            metadata.kv_seq_lens_host_values[:] = metadata.kv_seq_lens.tolist()
+
+        metadata.q_seq_lens[1] = 3
+        assert executor.execute(tokens, tokens, metadata) is executor.eager_runner.execute.return_value
+        assert prepare.call_count == 3
+
+    block_runner._capture.assert_called_once()
+    assert entry.graph.replay.call_count == 2
+    executor.eager_runner.execute.assert_called_once()

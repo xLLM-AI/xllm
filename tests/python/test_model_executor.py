@@ -1794,7 +1794,7 @@ class TestExecuteRouting:
             None,
             None,
             eplb=None,
-            decode_metadata=graph_runner.prepare_execution.return_value,
+            preparation=graph_runner.prepare_execution.return_value,
             is_graph_warmup=False,
             input_batch=None,
         )
@@ -1806,7 +1806,7 @@ class TestExecuteRouting:
             None,
             graph_key=graph_runner.warmup.return_value,
             eplb=None,
-            decode_metadata=graph_runner.prepare_execution.return_value,
+            preparation=graph_runner.prepare_execution.return_value,
             input_batch=None,
         )
         assert torch.equal(result, torch.ones(4))
@@ -1948,7 +1948,7 @@ def test_mtp_topk_routes_to_acl_graph(mock_create):
         topk,
         graph_key=graph_runner.warmup.return_value,
         eplb=None,
-        decode_metadata=graph_runner.prepare_execution.return_value,
+        preparation=graph_runner.prepare_execution.return_value,
         input_batch=None,
     )
     assert result is graph_runner.execute.return_value
@@ -2217,7 +2217,7 @@ def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> Non
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
     with (
         patch.object(executor.context_kv_graph_runner, "warmup") as warmup,
-        patch.object(executor.decode_graph_runner, "can_execute", return_value=False),
+        patch.object(executor.decode_graph_runner, "prepare_execution", return_value=None),
         patch.object(executor.eager_runner, "execute"),
     ):
         executor.execute(tokens, tokens, metadata, is_graph_warmup=True)
@@ -2243,7 +2243,7 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
     with (
         patch.object(executor.context_kv_graph_runner, "warmup") as warmup,
-        patch.object(executor.decode_graph_runner, "can_execute", return_value=False),
+        patch.object(executor.decode_graph_runner, "prepare_execution", return_value=None),
         patch.object(executor.eager_runner, "execute", return_value=torch.zeros(12, 4)),
     ):
         executor.execute(tokens, positions, metadata, is_graph_warmup=True)
@@ -2252,7 +2252,8 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
     warmup.assert_called_once_with(14)
 
 
-def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None:
+@pytest.mark.parametrize("is_graph_warmup", [False, True])
+def test_executor_uses_block_draft_preparation_for_warmup_and_replay(is_graph_warmup: bool) -> None:
     config = {
         "model_type": "DSparkDraftModel",
         "num_speculative_tokens": 2,
@@ -2272,12 +2273,15 @@ def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None
     graph_key = ("block-key",)
     expected = torch.ones(2, 4)
     with (
-        patch.object(runner, "prepare_execution", side_effect=AssertionError("ordinary decode admission")),
-        patch.object(runner, "can_execute", return_value=True),
-        patch.object(runner, "warmup", return_value=graph_key),
+        patch.object(runner, "prepare_execution", return_value=object()) as prepare,
+        patch.object(runner, "warmup", return_value=graph_key) as warmup,
         patch.object(runner, "execute", return_value=expected) as execute,
     ):
-        assert executor.execute(tokens, tokens, metadata) is expected
+        assert executor.execute(tokens, tokens, metadata, is_graph_warmup=is_graph_warmup) is expected
+    prepare.assert_called_once_with(tokens, metadata, None, None, is_graph_warmup=is_graph_warmup)
+    assert warmup.call_args.kwargs["preparation"] is prepare.return_value
+    assert warmup.call_args.kwargs["is_graph_warmup"] is is_graph_warmup
+    assert execute.call_args.kwargs["preparation"] is prepare.return_value
     assert execute.call_args.kwargs["graph_key"] is graph_key
 
 
