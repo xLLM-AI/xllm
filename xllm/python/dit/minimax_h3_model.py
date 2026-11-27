@@ -208,19 +208,31 @@ def _dense_attention(
     else:
         # Padding is a separate document in the packed dense NPU attention.
         sequence_ends = [live_rows] if live_rows == rows else [live_rows, rows]
-        attended, _ = torch.ops.npu.npu_fused_infer_attention_score(
-            query[0].contiguous(),
-            key[0].contiguous(),
-            value[0].contiguous(),
-            actual_seq_lengths=sequence_ends,
-            actual_seq_lengths_kv=sequence_ends,
-            num_heads=heads,
-            num_key_value_heads=heads,
-            scale=head_dim**-0.5,
-            pre_tokens=2147483647,
-            next_tokens=2147483647,
-            input_layout="TND",
-        )
+        if sp is not None and live_rows >= 24 * 1024 and head_dim == 128 and query.dtype == torch.bfloat16:
+            attended = torch.ops.npu.npu_fusion_attention(
+                query[0].contiguous(),
+                key[0].contiguous(),
+                value[0].contiguous(),
+                heads,
+                "TND",
+                scale=head_dim**-0.5,
+                actual_seq_qlen=sequence_ends,
+                actual_seq_kvlen=sequence_ends,
+            )[0]
+        else:
+            attended, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                query[0].contiguous(),
+                key[0].contiguous(),
+                value[0].contiguous(),
+                actual_seq_lengths=sequence_ends,
+                actual_seq_lengths_kv=sequence_ends,
+                num_heads=heads,
+                num_key_value_heads=heads,
+                scale=head_dim**-0.5,
+                pre_tokens=2147483647,
+                next_tokens=2147483647,
+                input_layout="TND",
+            )
         attended = attended.unsqueeze(0)
     if sp is not None:
         attended = sp.exchange(attended, False)
