@@ -38,6 +38,11 @@ def test_graph_double_buffer_cli(arguments: list[str], expected: bool) -> None:
     assert ArgumentParser().parser.parse_args(arguments).enable_graph_double_buffer is expected
 
 
+@pytest.mark.parametrize("arguments,expected", [([], 16), (["--acl_graph_decode_batch_size_limit", "3"], 3)])
+def test_graph_decode_limit_cli(arguments: list[str], expected: int) -> None:
+    assert ArgumentParser().parser.parse_args(arguments).acl_graph_decode_batch_size_limit == expected
+
+
 @pytest.mark.parametrize(
     "api_module,api_name,backend",
     [(llm, "LLM", "llm"), (llm, "LLM", "vlm"), (vlm, "VLM", "vlm"), (embedding, "Embedding", "llm")],
@@ -56,7 +61,9 @@ def test_constructor_keeps_graph_buffering_per_instance(
     monkeypatch.setattr(utils.xllm_export, "configure_cpp_chat_template", MagicMock())
     constructor = getattr(api_module, api_name)
 
-    single_buffer = constructor(model=str(tmp_path), enable_graph=True, enable_graph_double_buffer=False)
+    single_buffer = constructor(
+        model=str(tmp_path), enable_graph=True, enable_graph_double_buffer=False, acl_graph_decode_batch_size_limit=3
+    )
     single_buffer_options = master.call_args.args[0]
     double_buffer = constructor(model=str(tmp_path), enable_graph=True)
     double_buffer_options = master.call_args.args[0]
@@ -70,3 +77,5 @@ def test_constructor_keeps_graph_buffering_per_instance(
     assert double_buffer_options.enable_graph is True
     assert single_buffer_options.enable_graph_double_buffer is False
     assert double_buffer_options.enable_graph_double_buffer is True
+    assert single_buffer_options.acl_graph_decode_batch_size_limit == 3
+    assert double_buffer_options.acl_graph_decode_batch_size_limit == 16

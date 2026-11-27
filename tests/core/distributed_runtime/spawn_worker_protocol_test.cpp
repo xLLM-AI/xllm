@@ -413,5 +413,60 @@ TEST(SpawnWorkerProtocolTest, RejectsInvalidGraphDoubleBufferMode) {
                    .has_value());
 }
 
+TEST(SpawnWorkerProtocolTest, PreservesGraphDecodeLimitAndTrailingArguments) {
+  for (const int32_t limit : {-1, 0, 1, 20, 2147483647}) {
+    SCOPED_TRACE(limit);
+    for (const int32_t trailing : {0, 1}) {
+      std::vector<std::string> arguments(
+          kAclGraphDecodeBatchSizeLimitArgumentIndex + 1 + trailing, "unused");
+      arguments[kAclGraphDecodeBatchSizeLimitArgumentIndex] =
+          std::to_string(limit);
+      std::vector<char*> argv = mutable_argv(&arguments);
+      const auto parsed = parse_graph_decode_batch_size_limit(
+          static_cast<int32_t>(argv.size()), argv.data());
+      ASSERT_TRUE(parsed.has_value());
+      EXPECT_EQ(parsed.value(), limit);
+    }
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, DefaultsGraphDecodeLimitForLegacyArguments) {
+  for (int32_t argc = kMinimumArgumentCount;
+       argc <= kAclGraphDecodeBatchSizeLimitArgumentIndex;
+       ++argc) {
+    std::vector<std::string> arguments(argc, "unused");
+    std::vector<char*> argv = mutable_argv(&arguments);
+    const auto parsed = parse_graph_decode_batch_size_limit(argc, argv.data());
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed.value(), 16);
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, RejectsMalformedGraphDecodeLimit) {
+  for (const char* text :
+       {"", " 1", "1x", "1.0", "2147483648", "-2147483649"}) {
+    std::vector<std::string> arguments(
+        kAclGraphDecodeBatchSizeLimitArgumentIndex + 1, "unused");
+    arguments[kAclGraphDecodeBatchSizeLimitArgumentIndex] = text;
+    std::vector<char*> argv = mutable_argv(&arguments);
+    EXPECT_FALSE(parse_graph_decode_batch_size_limit(
+                     static_cast<int32_t>(argv.size()), argv.data())
+                     .has_value());
+  }
+  EXPECT_FALSE(
+      parse_graph_decode_batch_size_limit(kMinimumArgumentCount, nullptr)
+          .has_value());
+  std::vector<std::string> arguments(
+      kAclGraphDecodeBatchSizeLimitArgumentIndex + 1, "unused");
+  std::vector<char*> argv = mutable_argv(&arguments);
+  argv[kAclGraphDecodeBatchSizeLimitArgumentIndex] = nullptr;
+  EXPECT_FALSE(parse_graph_decode_batch_size_limit(
+                   static_cast<int32_t>(argv.size()), argv.data())
+                   .has_value());
+  EXPECT_FALSE(parse_graph_decode_batch_size_limit(kMinimumArgumentCount - 1,
+                                                   argv.data())
+                   .has_value());
+}
+
 }  // namespace
 }  // namespace xllm::spawn_worker_protocol

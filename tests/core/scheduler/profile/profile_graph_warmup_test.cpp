@@ -23,6 +23,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/common/options.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/execution_config.h"
@@ -549,10 +550,12 @@ TEST(DecodeGraphWarmupPlanTest, JointCoverageUsesLocalDpGeometryAndGraphLimit) {
           SCOPED_TRACE(width);
           SCOPED_TRACE(dp_size);
           SCOPED_TRACE(local_capacity);
-          ExecutionConfig execution;
-          execution.acl_graph_decode_batch_size_limit(8);
-          const auto config =
-              execution.decode_graph_warmup_config(width, false, algorithm);
+          Options instance_options;
+          instance_options.acl_graph_decode_batch_size_limit(8)
+              .num_speculative_tokens(width)
+              .enable_graph_mode_decode_no_padding(false)
+              .speculative_algorithm(algorithm);
+          const auto config = instance_options.decode_graph_warmup_config();
           const int32_t global_capacity = local_capacity * dp_size;
           const auto plan =
               build_decode_graph_warmup_plan(config, global_capacity, dp_size);
@@ -940,9 +943,7 @@ TEST(GraphWarmupTest, DecodeProfileUsesConfiguredSpeculativeGeometry) {
       .dp_size(1)
       .instance_role(InstanceRole::DECODE)
       .decode_graph_warmup_config(
-          ExecutionConfig::get_instance().decode_graph_warmup_config(
-              /*num_speculative_tokens=*/3,
-              /*enable_no_padding=*/false));
+          Options().num_speculative_tokens(3).decode_graph_warmup_config());
   ProfileManager profile_manager(&engine, options);
 
   profile_manager.profile_decode_step_time(/*token_length=*/5,
@@ -975,7 +976,11 @@ TEST(GraphWarmupTest, OrdinaryStepsWarmBucketsAndDrainBeforeReleasingKv) {
         .enable_schedule_overlap(overlap)
         .enable_profile_step_time(false)
         .enable_profile_kv_blocks(false)
-        .instance_role(InstanceRole::DECODE);
+        .instance_role(InstanceRole::DECODE)
+        .decode_graph_warmup_config(make_decode_graph_warmup_config(
+            /*num_speculative_tokens=*/0,
+            /*enable_no_padding=*/false,
+            /*max_graph_batch_size=*/4));
     ProfileManager profile_manager(&engine, options);
     EXPECT_EQ(engine.observed_batches(), (std::vector<int32_t>{4, 2, 1}));
     EXPECT_EQ(engine.pending_steps(), 0);
@@ -987,6 +992,40 @@ TEST(GraphWarmupTest, OrdinaryStepsWarmBucketsAndDrainBeforeReleasingKv) {
   config.acl_graph_decode_batch_size_limit(previous_limit);
 #else
   GTEST_SKIP() << "Startup graph warmup is disabled on this platform.";
+#endif
+}
+
+TEST(GraphWarmupTest, DecodeLimitUsesInstanceOptionsAcrossDpGroups) {
+#if defined(USE_NPU)
+  ScopedDecodeGraphConfigSnapshot snapshot;
+  auto& config = ExecutionConfig::get_instance();
+  config.enable_graph(true).disable_graph_warmup(false);
+  for (const int32_t dp_size : {1, 2}) {
+    for (const int32_t limit : {1, 2}) {
+      SCOPED_TRACE(dp_size);
+      SCOPED_TRACE(limit);
+      config.acl_graph_decode_batch_size_limit(limit == 1 ? 2 : 1);
+      RecordingProfileEngine engine(/*overlap=*/false, dp_size);
+      const auto blocks_before = engine.block_manager_pool()->num_used_blocks();
+      ProfileManager::Options options;
+      options.max_tokens_per_batch(8)
+          .max_seqs_per_batch(4)
+          .dp_size(dp_size)
+          .instance_role(InstanceRole::DECODE)
+          .decode_graph_warmup_config(make_decode_graph_warmup_config(
+              /*num_speculative_tokens=*/0,
+              /*enable_no_padding=*/false,
+              limit));
+      ProfileManager manager(&engine, options);
+      const auto& batches = engine.observed_batches();
+      ASSERT_FALSE(batches.empty());
+      EXPECT_EQ(*std::max_element(batches.begin(), batches.end()),
+                limit * dp_size);
+      EXPECT_EQ(engine.block_manager_pool()->num_used_blocks(), blocks_before);
+    }
+  }
+#else
+  GTEST_SKIP() << "ACL decode batch limits apply only on NPU.";
 #endif
 }
 

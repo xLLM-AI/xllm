@@ -17,7 +17,6 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
-#include "core/platform/platform.h"
 
 DEFINE_string(extension_impl,
               "",
@@ -251,17 +250,6 @@ void ExecutionConfig::initialize() {
   if (const auto& json_config = config::get_parsed_json_config()) {
     from_json(*json_config);
   }
-}
-
-DecodeGraphWarmupConfig ExecutionConfig::decode_graph_warmup_config(
-    int32_t num_speculative_tokens,
-    bool enable_no_padding,
-    std::string_view speculative_algorithm) const {
-  return {.num_speculative_tokens = num_speculative_tokens,
-          .enable_graph_mode_decode_no_padding = enable_no_padding,
-          .max_graph_batch_size =
-              Platform::is_npu() ? acl_graph_decode_batch_size_limit() : 0,
-          .speculative_algorithm = std::string(speculative_algorithm)};
 }
 
 }  // namespace xllm
