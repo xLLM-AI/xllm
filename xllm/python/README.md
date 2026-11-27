@@ -313,10 +313,27 @@ requests. Their KV tables retain one row per request, while causal decode keeps
 its existing per-token KV representation. Both layouts share graph preparation,
 capture, replay and DP coordination, with layout-specific buffer filling.
 
+Python draft decode metadata keeps both prefill flags false, including for
+multi-token requests. The native metadata can retain kernel-routing flags;
+the Python metadata view removes that convention at the bridge. The bridge
+also declares whether decode KV rows address tokens or requests.
+`DecodeAclGraphPreparation` resolves request query width, sequence count,
+padding and page capacity into a `RequestDecodeGraphLayout`. The runner has no
+causality mode: one instance can capture both KV row layouts, with buffer and
+output ownership attached to each graph entry. Attention mask semantics stay
+with the attention layer and backend. Genuine prefill and chunked prefill
+remain separate phases and are rejected by the decode graph runner.
+
 The runner owns its KV capacity tiers and uses `is_graph_warmup` to select
-startup pre-capture. Non-causal attention still uses the existing chunked-prefill
-metadata flags and block-draft warmup setting; those producer/configuration
-boundaries remain separate follow-up work.
+startup pre-capture. The public `block_draft_graph_warmup_max_kv_len` option is
+retained for compatibility and translated at the bridge into
+`non_causal_decode_graph_warmup_max_kv_len`. It controls the non-causal layout
+inside `DecodeAclGraphRunner`: `0` pre-captures full context, `-1` keeps only
+required startup shapes, and positive values bound proactive capacity capture.
+Runtime capacity can still grow beyond that bound. The minimum profile context
+and query lookahead are shared by runtime bucket selection and startup tiers;
+DP ranks capture model-wide tiers in the same order before their local shape.
+Causal decode keeps its existing capacity tiers and startup-only capture rules.
 
 ## Adding an operator
 

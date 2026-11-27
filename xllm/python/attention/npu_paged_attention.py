@@ -646,10 +646,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._direct_full_slot_mapping = None
         prepared = getattr(metadata, "prepared_attention_state", None)
         if isinstance(prepared, _PreparedMlaAttention):
-            block_graph = self._mla_block_draft and prepared.is_chunked_prefill and not prepared.is_prefill
-            if not self._is_mla or (
-                graph_mode and (prepared.is_prefill or prepared.is_chunked_prefill) and not block_graph
-            ):
+            if not self._is_mla or (graph_mode and (prepared.is_prefill or prepared.is_chunked_prefill)):
                 raise ValueError("prepared MLA graph state requires decode")
             self._metadata = prepared
             self._use_expanded_decode = False
@@ -676,11 +673,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if prepared is not None:
             if self._is_mla or not isinstance(prepared, _PreparedPagedAttention):
                 raise ValueError("prepared paged state requires ordinary attention")
-            if (
-                graph_mode
-                and (metadata.is_prefill or metadata.is_chunked_prefill)
-                and not (metadata.is_chunked_prefill and prepared.device_kv_lengths is not None)
-            ):
+            if graph_mode and (metadata.is_prefill or metadata.is_chunked_prefill):
                 raise ValueError("prepared graph attention requires decode")
             # Keep the static metadata available to execute().  The graph
             # task-update closures retain the backend, but this metadata only
@@ -855,7 +848,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             if self.requires_host_kv_lengths:
                 query_ends = (
                     actual_seq_q.cpu().tolist()
-                    if metadata.is_prefill or metadata.is_chunked_prefill
+                    if metadata.is_prefill or metadata.is_chunked_prefill or self._mla_block_draft
                     else list(range(1, int(actual_seq_kv.numel()) + 1))
                 )
                 kv_lengths = (
@@ -867,7 +860,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             else:
                 self._mla_actual_seq_q_host = None
                 self._mla_actual_seq_kv_host = None
-            if metadata.is_prefill or metadata.is_chunked_prefill:
+            if metadata.is_prefill or metadata.is_chunked_prefill or self._mla_block_draft:
                 q_seq_lens = getattr(metadata, "q_seq_lens", None)
                 if q_seq_lens is not None and q_seq_lens.numel() > 0:
                     self._mla_max_seqlen_q = int(q_seq_lens.max().item())
@@ -1108,7 +1101,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         ):
             return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
         device_lengths = isinstance(prepared, _PreparedPagedAttention) and prepared.device_kv_lengths is not None
-        if metadata.is_prefill or metadata.is_chunked_prefill or device_lengths or block_window:
+        if metadata.is_prefill or metadata.is_chunked_prefill or not layer.causal or device_lengths or block_window:
             if self._use_expanded_decode:
                 return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
             return self._prefill(

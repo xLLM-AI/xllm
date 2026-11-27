@@ -21,6 +21,7 @@ import pytest
 import torch
 
 from xllm.python.attention import npu_paged_attention
+from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.npu_paged_attention import (  # noqa: E402
     NpuPagedAttentionBackend,
     _build_stable_sfa_page_layout,
@@ -449,3 +450,38 @@ def test_mla_cp_uses_one_paged_sequence_per_zigzag_segment_and_reuses_lengths(
     for output in outputs:
         torch.testing.assert_close(output[cp_context.query_index], torch.ones(5, 1, 2))
         torch.testing.assert_close(output[2], torch.zeros(1, 2))
+
+
+@pytest.mark.parametrize("width", [1, 3, 8])
+@pytest.mark.parametrize("prepared", [False, True], ids=["eager", "graph"])
+def test_non_causal_mla_keeps_query_geometry_without_prefill_flags(width: int, prepared: bool) -> None:
+    backend = NpuPagedAttentionBackend(
+        2, 1, 8, 0.125, 0, True, torch.device("cpu"), torch.float32, mla_block_draft=True
+    )
+    cache = torch.zeros(4, 128, 1, 8)
+    backend.bind_kv_caches([LayerCache(cache, cache)])
+    metadata = StaticGraphAttentionMetadata(
+        slot_mapping=torch.full((2 * width,), -1, dtype=torch.int32),
+        paged_kv_indptr=torch.tensor([0, 1, 2], dtype=torch.int32),
+        paged_kv_indices=torch.tensor([1, 2], dtype=torch.int32),
+        paged_kv_last_page_len=torch.tensor([32, 64], dtype=torch.int32),
+        q_seq_lens=torch.full((2,), width, dtype=torch.int32),
+        q_cu_seq_lens=torch.tensor([0, width, 2 * width], dtype=torch.int32),
+        q_cu_seq_lens_host_values=[width, 2 * width],
+        kv_seq_lens=torch.tensor([32, 64], dtype=torch.int32),
+        kv_seq_lens_host_values=[32, 64],
+        block_table=torch.tensor([[1], [2]], dtype=torch.int32),
+        decode_query_width=width,
+    )
+    if prepared:
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    backend.prepare(metadata, graph_mode=prepared)
+    assert backend._mla_actual_seq_q.tolist() == [width, 2 * width]
+    assert backend._mla_actual_seq_q_host == [width, 2 * width]
+    assert backend._mla_max_seqlen_q == width
+
+    if prepared:
+        metadata.is_chunked_prefill = True
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+        with pytest.raises(ValueError, match="requires decode"):
+            backend.prepare(metadata, graph_mode=True)

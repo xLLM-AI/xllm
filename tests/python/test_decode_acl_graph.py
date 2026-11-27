@@ -31,6 +31,7 @@ from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraph
 from xllm.python.model_executor.runners.decode_acl_graph import (
     DecodeAclGraphMetadata,
     DecodeAclGraphRunner,
+    RequestDecodeGraphLayout,
 )
 
 
@@ -68,6 +69,7 @@ def _metadata(linear_state_indices: torch.Tensor, rows: int | None = None) -> Si
     lengths = torch.arange(1, rows + 1, dtype=torch.int32)
     pages = lengths * 10
     return SimpleNamespace(
+        decode_kv_layout="token",
         slot_mapping=torch.arange(rows, dtype=torch.int32),
         paged_kv_indptr=torch.arange(rows + 1, dtype=torch.int32),
         paged_kv_indices=pages,
@@ -334,7 +336,6 @@ def _non_causal_runner(max_sequences: int = 1, **kwargs: object) -> DecodeAclGra
         torch.device("cpu"),
         max_batch=local_sequences * 2 * dp_size,
         max_model_len=8,
-        causal=False,
         **kwargs,
     )
 
@@ -345,7 +346,8 @@ def _non_causal_metadata(block_table: torch.Tensor, query_width: int = 2) -> Sim
     query_ends = [query_width * (index + 1) for index in range(sequence_count)]
     return SimpleNamespace(
         is_prefill=False,
-        is_chunked_prefill=True,
+        is_chunked_prefill=False,
+        decode_kv_layout="request",
         decode_query_width=query_width,
         q_seq_lens=torch.full((sequence_count,), query_width, dtype=torch.int32),
         q_cu_seq_lens=torch.tensor([0, *query_ends], dtype=torch.int32),
@@ -360,6 +362,29 @@ def _non_causal_metadata(block_table: torch.Tensor, query_width: int = 2) -> Sim
         paged_kv_indices=torch.arange(sequence_count * block_cols, dtype=torch.int32),
         paged_kv_last_page_len=torch.full((sequence_count,), 4, dtype=torch.int32),
     )
+
+
+def _request_key(
+    runner: DecodeAclGraphRunner, input_ids: torch.Tensor, metadata: SimpleNamespace, padded_tokens: int
+) -> tuple[object, ...]:
+    layout = RequestDecodeGraphLayout(
+        metadata.decode_query_width,
+        metadata.q_seq_lens.numel(),
+        padded_tokens // metadata.decode_query_width,
+        runner._request_page_table_capacity(metadata),
+    )
+    return runner._request_graph_key(input_ids, layout)
+
+
+@pytest.mark.parametrize("phase", ["is_prefill", "is_chunked_prefill", "is_target_verify"])
+def test_non_causal_graph_rejects_prefill_and_target_verify(phase: str) -> None:
+    runner = _non_causal_runner()
+    metadata = _non_causal_metadata(torch.zeros(1, 2, dtype=torch.int32))
+    tokens = torch.arange(2, dtype=torch.int32)
+    assert runner.prepare_execution(tokens, metadata) is not None
+    setattr(metadata, phase, True)
+    assert runner.prepare_execution(tokens, metadata) is None
+    assert not runner._graphs
 
 
 @pytest.mark.parametrize("dp_rank,sequence_count", [(0, 1), (1, 3)])
@@ -380,6 +405,8 @@ def test_dspark_dp_graph_uses_group_wide_complete_blocks(dp_rank: int, sequence_
     assert static.q_seq_lens.tolist() == [2] * 4
     assert static.dp_execution_token_counts == (8, 8)
     assert static.dp_is_decode == (1, 1)
+    assert not static.is_prefill
+    assert not static.is_chunked_prefill
     assert static.slot_mapping[sequence_count * 2 :].tolist() == [-1] * (8 - sequence_count * 2)
     assert static.kv_seq_lens.tolist() == [12] * sequence_count + [1] * (4 - sequence_count)
     assert static.prepared_attention_state.actual_seq_q == [2, 4, 6, 8]
@@ -456,7 +483,7 @@ def test_dspark_dp_replay_clears_rows_from_a_larger_local_batch() -> None:
 def test_dspark_dp_graph_key_tracks_peer_page_capacity() -> None:
     runner = _non_causal_runner(max_sequences=8, dp_size=2)
     input_ids = torch.arange(2, dtype=torch.int32)
-    local_key = runner._non_causal_graph_key(input_ids, _non_causal_metadata(torch.zeros(1, 1, dtype=torch.int32)), 8)
+    local_key = _request_key(runner, input_ids, _non_causal_metadata(torch.zeros(1, 1, dtype=torch.int32)), 8)
     with (
         patch("xllm.python.model_executor.runners.decode_acl_graph.dist.is_initialized", return_value=True),
         patch(
@@ -478,7 +505,7 @@ def test_dspark_dp_warmup_recaptures_when_any_rank_is_missing() -> None:
     metadata.dp_execution_token_counts = (2, 6)
     metadata.dp_is_decode = (1, 1)
     input_ids = torch.arange(2, dtype=torch.int32)
-    local_key = runner._non_causal_graph_key(input_ids, metadata, 8)
+    local_key = _request_key(runner, input_ids, metadata, 8)
     graph_key = (*local_key, (1, 1))
     runner._graphs[graph_key] = object()
     expected_eplb = Mock()
@@ -492,7 +519,9 @@ def test_dspark_dp_warmup_recaptures_when_any_rank_is_missing() -> None:
         graph_key: tuple[object, ...],
         eplb: object | None = None,
         input_batch: object = None,
+        request_layout: RequestDecodeGraphLayout | None = None,
     ) -> None:
+        assert request_layout is not None
         assert eplb is expected_eplb
         assert input_batch is None
         assert graph_key not in runner._graphs
@@ -510,7 +539,7 @@ def test_dspark_dp_warmup_recaptures_when_any_rank_is_missing() -> None:
 
 @pytest.mark.parametrize("dp_rank", [0, 1])
 def test_block_draft_dp_prewarm_keeps_collectives_aligned_for_unequal_capacities(dp_rank: int) -> None:
-    runner = _non_causal_runner(dp_size=2, dp_rank=dp_rank, block_draft_graph_warmup_max_kv_len=4096)
+    runner = _non_causal_runner(dp_size=2, dp_rank=dp_rank, non_causal_warmup_max_kv_len=4096)
     runner.max_model_len = 16384
     runner.attention_backend.logical_page_size = 128
     metadata = _non_causal_metadata(torch.zeros(1, 128, dtype=torch.int32))
@@ -595,10 +624,10 @@ def test_block_draft_dp_prewarmed_capacity_keys_are_reused_at_runtime() -> None:
 def test_dspark_graph_key_buckets_live_page_table_width() -> None:
     runner = _non_causal_runner()
     input_ids = torch.zeros(2, dtype=torch.int32)
-    key = runner._non_causal_graph_key(input_ids, _non_causal_metadata(torch.zeros(1, 3, dtype=torch.int32)), 2)
-    wider_key = runner._non_causal_graph_key(input_ids, _non_causal_metadata(torch.zeros(1, 4, dtype=torch.int32)), 2)
+    key = _request_key(runner, input_ids, _non_causal_metadata(torch.zeros(1, 3, dtype=torch.int32)), 2)
+    wider_key = _request_key(runner, input_ids, _non_causal_metadata(torch.zeros(1, 4, dtype=torch.int32)), 2)
     assert key == wider_key
-    assert key != runner._non_causal_graph_key(input_ids, _non_causal_metadata(torch.zeros(1, 5, dtype=torch.int32)), 2)
+    assert key != _request_key(runner, input_ids, _non_causal_metadata(torch.zeros(1, 5, dtype=torch.int32)), 2)
 
 
 @pytest.mark.parametrize(
@@ -608,7 +637,7 @@ def test_dspark_graph_key_buckets_live_page_table_width() -> None:
 def test_dspark_page_table_capacity_grows_geometrically(block_cols: int, capacity: int) -> None:
     runner = _non_causal_runner()
     metadata = _non_causal_metadata(torch.zeros(1, block_cols, dtype=torch.int32))
-    assert runner._non_causal_page_table_capacity(metadata) == capacity
+    assert runner._request_page_table_capacity(metadata) == capacity
 
 
 def test_dspark_graph_capacity_does_not_use_model_maximum() -> None:
@@ -635,11 +664,15 @@ def test_windowed_block_draft_reuses_one_source_capacity_across_contexts(sparse_
     model = nn.ModuleList([Attention(4, 1, 64, 0.125, 2048, 0, fia_sparse_mode=sparse_mode)])
     backend = _FakeNonCausalAttentionBackend()
     backend.logical_page_size = 128
-    runner = DecodeAclGraphRunner(model, backend, torch.device("cpu"), max_batch=2, max_model_len=65537, causal=False)
+    runner = DecodeAclGraphRunner(model, backend, torch.device("cpu"), max_batch=2, max_model_len=65537)
     tokens = torch.arange(2, dtype=torch.int32)
 
     def prepare_entry(
-        *args: object, graph_key: tuple[object, ...], eplb: object = None, input_batch: object = None
+        *args: object,
+        graph_key: tuple[object, ...],
+        eplb: object = None,
+        input_batch: object = None,
+        request_layout: RequestDecodeGraphLayout | None = None,
     ) -> None:
         runner._graphs[graph_key] = object()
 
@@ -724,7 +757,7 @@ def test_dspark_warmup_captures_once_per_page_capacity_bucket() -> None:
 def test_block_draft_startup_prewarms_large_buckets_with_short_metadata(
     max_model_len: int, expected: list[int]
 ) -> None:
-    runner = _non_causal_runner(block_draft_graph_warmup_max_kv_len=0)
+    runner = _non_causal_runner(non_causal_warmup_max_kv_len=0)
     runner.max_model_len = max_model_len
     runner.attention_backend.logical_page_size = 128
     metadata = _non_causal_metadata(torch.zeros(1, 1, dtype=torch.int32))
@@ -744,8 +777,34 @@ def test_block_draft_startup_prewarms_large_buckets_with_short_metadata(
     metadata.block_table = torch.zeros(1, (max_model_len + 127) // 128, dtype=torch.int32)
     metadata.kv_seq_lens_host_values[:] = [max_model_len]
     metadata.kv_seq_lens.fill_(max_model_len)
-    runtime_key = runner._non_causal_graph_key(tokens, metadata, 2)
+    runtime_key = _request_key(runner, tokens, metadata, 2)
     assert runtime_key in runner._graphs
+
+
+@pytest.mark.parametrize("limit,expected", [(-1, [32]), (4096, [32]), (8192, [64, 32])])
+def test_non_causal_warmup_limit_does_not_bound_runtime_capacity(limit: int, expected: list[int]) -> None:
+    runner = _non_causal_runner(non_causal_warmup_max_kv_len=limit)
+    runner.max_model_len = 16384
+    runner.attention_backend.logical_page_size = 128
+    metadata = _non_causal_metadata(torch.zeros(1, 1, dtype=torch.int32))
+    metadata.kv_seq_lens_host_values = [2]
+    tokens = torch.arange(2, dtype=torch.int32)
+    captured = []
+
+    def prepare_entry(*_args: object, graph_key: tuple[object, ...], **_: object) -> None:
+        captured.append(graph_key[2])
+        runner._graphs[graph_key] = object()
+
+    with patch.object(runner, "_prepare_graph_entry", side_effect=prepare_entry):
+        runner.warmup(tokens, tokens, metadata, is_graph_warmup=True)
+        assert captured == expected
+        metadata.block_table = torch.zeros(1, 128, dtype=torch.int32)
+        metadata.kv_seq_lens_host_values = [16384]
+        metadata.kv_seq_lens.fill_(16384)
+        assert runner.prepare_execution(tokens, metadata) is not None
+        key = runner.warmup(tokens, tokens, metadata)
+    assert captured == [*expected, 128]
+    assert key[2] == 128
 
 
 def test_dspark_request_reuses_startup_page_bucket() -> None:
@@ -754,9 +813,7 @@ def test_dspark_request_reuses_startup_page_bucket() -> None:
     startup_metadata = _non_causal_metadata(torch.zeros(1, 4, dtype=torch.int32))
     request_metadata = _non_causal_metadata(torch.zeros(1, 3, dtype=torch.int32))
 
-    assert runner._non_causal_graph_key(input_ids, startup_metadata, 2) == runner._non_causal_graph_key(
-        input_ids, request_metadata, 2
-    )
+    assert _request_key(runner, input_ids, startup_metadata, 2) == _request_key(runner, input_ids, request_metadata, 2)
 
 
 def test_dspark_graph_is_cached_only_after_successful_capture() -> None:
@@ -765,7 +822,7 @@ def test_dspark_graph_is_cached_only_after_successful_capture() -> None:
     input_ids = torch.arange(2, dtype=torch.int32)
     positions = input_ids.clone()
     metadata = _non_causal_metadata(torch.zeros(1, 3, dtype=torch.int32))
-    graph_key = runner._non_causal_graph_key(input_ids, metadata, 2)
+    graph_key = _request_key(runner, input_ids, metadata, 2)
 
     def capture_entry(entry: AclGraphEntry, stream: object) -> None:
         assert graph_key not in runner._graphs
@@ -790,7 +847,7 @@ def test_dspark_failed_graph_preparation_is_not_cached(failure_stage: str) -> No
     input_ids = torch.arange(2, dtype=torch.int32)
     positions = input_ids.clone()
     metadata = _non_causal_metadata(torch.zeros(1, 3, dtype=torch.int32))
-    graph_key = runner._non_causal_graph_key(input_ids, metadata, 2)
+    graph_key = _request_key(runner, input_ids, metadata, 2)
 
     with (
         patch.object(runner, "_fill_entry", wraps=runner._fill_entry) as fill,
@@ -946,8 +1003,10 @@ def test_non_causal_execute_uses_shared_replay_and_preserves_output_ownership(ca
     caller = Mock()
     metadata = _non_causal_metadata(torch.tensor([[10, 11, 12]], dtype=torch.int32))
     input_ids = torch.arange(2, dtype=torch.int32)
-    graph_key = runner._non_causal_graph_key(input_ids, metadata, 2)
+    graph_key = _request_key(runner, input_ids, metadata, 2)
     entry = SimpleNamespace(
+        execution_state=SimpleNamespace(serial_buffers=None),
+        static_metadata=SimpleNamespace(decode_kv_layout="request"),
         graph_tasks=[],
         graph=Mock(),
         static_output=torch.arange(8, dtype=torch.float32).view(4, 2),
@@ -962,7 +1021,15 @@ def test_non_causal_execute_uses_shared_replay_and_preserves_output_ownership(ca
         output = runner.execute(input_ids, input_ids, metadata, graph_key=graph_key)
 
     prepare.assert_called_once_with(
-        input_ids, input_ids, metadata, None, None, graph_key=graph_key, eplb=None, input_batch=None
+        input_ids,
+        input_ids,
+        metadata,
+        None,
+        None,
+        graph_key=graph_key,
+        eplb=None,
+        input_batch=None,
+        request_layout=runner.prepare_execution(input_ids, metadata).request_layout,
     )
     entry.graph.replay.assert_called_once_with()
     stream_context.assert_called_once_with(caller)
@@ -981,6 +1048,8 @@ def test_replay_selects_stream_and_preserves_output_ownership(has_tasks: bool, h
     capture = Mock()
     runner._stream = capture
     entry = SimpleNamespace(
+        execution_state=SimpleNamespace(serial_buffers=object()),
+        static_metadata=SimpleNamespace(decode_kv_layout="token"),
         graph_tasks=[Mock()] if has_tasks else [],
         graph=Mock(),
         static_output=torch.ones((4, 2)),
@@ -2069,7 +2138,6 @@ def test_non_causal_graph_variants_preserve_request_rows_at_equal_token_counts()
         torch.device("cpu"),
         max_batch=12,
         max_model_len=8,
-        causal=False,
     )
     tokens = torch.arange(6, dtype=torch.int32)
     keys = []
@@ -2081,7 +2149,8 @@ def test_non_causal_graph_variants_preserve_request_rows_at_equal_token_counts()
         preparation = runner.prepare_execution(tokens, metadata)
         assert preparation is not None
         assert preparation.padded_batch_size == 6
-        key, _, _ = runner._resolve_graph_key(tokens, metadata, 6, None, None, None)
+        assert preparation.request_layout is not None
+        key = runner._request_graph_key(tokens, preparation.request_layout)
         keys.append(key)
         if key not in entries:
             entries[key] = runner._allocate_entry(6, tokens, metadata, kv_capacity_pages=key[2])
@@ -2106,7 +2175,6 @@ def test_non_causal_admission_uses_token_capacity_and_preserves_complete_request
         torch.device("cpu"),
         max_batch=3 * width,
         max_model_len=8,
-        causal=False,
     )
     metadata = _non_causal_metadata(torch.zeros(3, 2, dtype=torch.int32), query_width=width)
     tokens = torch.arange(3 * width, dtype=torch.int32)

@@ -224,7 +224,8 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["requires_aux_hidden_capture"] =
       SpeculativeConfig::requires_aux_hidden_capture(
           options_.speculative_algorithm());
-  executor_config["block_draft_graph_warmup_max_kv_len"] =
+  // Keep the public compatibility option at the configuration boundary.
+  executor_config["non_causal_decode_graph_warmup_max_kv_len"] =
       options_.block_draft_graph_warmup_max_kv_len();
   executor_config["enable_graph_mode_decode_no_padding"] =
       options_.enable_graph_mode_decode_no_padding();
@@ -335,8 +336,14 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
   bind_kv_caches(kv_caches);
 
+  const DecodeKVLayout decode_kv_layout =
+      options_.is_draft_engine() && (args_.model_type() == "DSparkDraftModel" ||
+                                     args_.model_type() == "glm5_dspark" ||
+                                     args_.model_type() == "DFlash2DraftModel")
+          ? DecodeKVLayout::REQUEST
+          : DecodeKVLayout::TOKEN;
   py::object py_metadata = py::cast(PyAttentionMetadataView(
-      attn_metadata, params, options_.is_draft_engine()));
+      attn_metadata, params, options_.is_draft_engine(), decode_kv_layout));
   py::object py_input_batch_metadata =
       requires_input_batch_metadata_
           ? py::cast(ExecutionBatchMetadata(params.meta.execution_batch))

@@ -644,7 +644,6 @@ def test_executor_reuses_non_causal_graph_with_fresh_preparation_and_rejects_cha
         max_model_len=16,
         dp_size=2,
         dp_rank=dp_rank,
-        causal=False,
     )
     # Share only the fixture's simulated device capture boundary; allocation,
     # filling, admission and executor dispatch use the real implementations.
@@ -653,7 +652,7 @@ def test_executor_reuses_non_causal_graph_with_fresh_preparation_and_rejects_cha
     block_runner._prepare_attention = runner._prepare_attention
     executor.decode_graph_runner = block_runner
     metadata = _metadata()
-    metadata.is_chunked_prefill = True
+    metadata.decode_kv_layout = "request"
     metadata.decode_query_width = query_width
     metadata.q_seq_lens = torch.tensor([query_width, query_width], dtype=torch.int32)
     metadata.q_cu_seq_lens = torch.tensor([0, query_width, 2 * query_width], dtype=torch.int32)
@@ -709,3 +708,57 @@ def test_causal_preparation_failure_does_not_publish_graph(runner: DecodeAclGrap
     ):
         runner.warmup(tokens, tokens, metadata)
     assert not runner._graphs
+
+
+@pytest.mark.parametrize("width", [1, 2])
+def test_one_runner_keeps_token_and_request_kv_layouts_and_output_lifetimes_separate(
+    runner: DecodeAclGraphRunner, executor: ModelExecutor, width: int
+) -> None:
+    runner.num_speculative_tokens = 3
+    runner._is_spec_draft = True
+    runner.attention_backend.prepare_metadata = lambda metadata, **_kwargs: SimpleNamespace(
+        actual_seq_q=list(metadata.q_cu_seq_lens_host_values),
+        actual_seq_kv=list(metadata.kv_seq_lens_host_values),
+        query_ends=list(metadata.q_cu_seq_lens_host_values),
+    )
+    tokens = torch.arange(2, dtype=torch.int32)
+    token_metadata = _metadata()
+    sequences = tokens.numel() // width
+    request_metadata = _metadata()
+    request_metadata.decode_kv_layout = "request"
+    request_metadata.decode_query_width = width
+    request_metadata.q_seq_lens = torch.full((sequences,), width, dtype=torch.int32)
+    request_metadata.q_cu_seq_lens = torch.arange(sequences + 1, dtype=torch.int32) * width
+    request_metadata.q_cu_seq_lens_host_values = [width * (index + 1) for index in range(sequences)]
+    request_metadata.block_table = torch.full((sequences, 2), 11, dtype=torch.int32)
+    request_metadata.kv_seq_lens = torch.full((sequences,), 5, dtype=torch.int32)
+    request_metadata.kv_seq_lens_host_values = [5] * sequences
+    request_metadata.paged_kv_indptr = None
+    request_metadata.paged_kv_indices = None
+    request_metadata.paged_kv_last_page_len = None
+    entries = {}
+    for metadata in (token_metadata, request_metadata, token_metadata, request_metadata):
+        output = executor.execute(tokens, tokens, metadata)
+        preparation = runner.prepare_execution(tokens, metadata)
+        assert preparation is not None
+        if metadata is request_metadata:
+            layout = preparation.request_layout
+            assert layout is not None
+            assert layout.query_width == width
+            assert layout.sequence_count == sequences
+        else:
+            assert preparation.request_layout is None
+        entry = next(
+            entry
+            for entry in runner._graphs.values()
+            if entry.static_metadata.decode_kv_layout == getattr(metadata, "decode_kv_layout", "token")
+        )
+        entries[entry.static_metadata.decode_kv_layout] = entry
+        owns_request_buffers = metadata is request_metadata
+        assert (entry.execution_state.serial_buffers is None) == owns_request_buffers
+        assert (output.data_ptr() == entry.static_output.data_ptr()) == owns_request_buffers
+    assert runner._capture.call_count == 2
+    assert entries["token"].static_input_ids.data_ptr() != entries["request"].static_input_ids.data_ptr()
+    assert entries["token"].static_metadata.block_table.shape[0] == 2
+    assert entries["request"].static_metadata.block_table.shape[0] == sequences
+    executor.eager_runner.execute.assert_not_called()

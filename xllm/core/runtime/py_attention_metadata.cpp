@@ -176,6 +176,8 @@ void register_attention_metadata_views(py::module_& module) {
       .def_property_readonly("is_chunked_prefill",
                              &PyAttentionMetadataView::is_chunked_prefill)
       .def_property_readonly("is_mixed", &PyAttentionMetadataView::is_mixed)
+      .def_property_readonly("decode_kv_layout",
+                             &PyAttentionMetadataView::decode_kv_layout)
       .def_property_readonly("decode_query_width",
                              &PyAttentionMetadataView::decode_query_width)
       .def_property_readonly(/*name=*/"num_speculative_tokens",
@@ -234,8 +236,13 @@ const layer::ExpandedDecodeMetadata& PyExpandedDecodeMetadataView::metadata()
 PyAttentionMetadataView::PyAttentionMetadataView(
     std::shared_ptr<layer::AttentionMetadata> metadata,
     const ModelParamsView& params,
-    bool is_draft_engine)
+    bool is_draft_engine,
+    DecodeKVLayout decode_kv_layout)
     : metadata_(std::move(metadata)),
+      decode_kv_layout_(decode_kv_layout),
+      is_chunked_prefill_(
+          metadata_->is_chunked_prefill &&
+          !(is_draft_engine && params.meta.batch_forward_type.is_decode())),
       kv_seq_lens_host_(
           make_host_int32_view(metadata_, metadata_->kv_seq_lens_vec)),
       q_seq_lens_host_(
@@ -553,12 +560,18 @@ void PyAttentionMetadataView::set_dsa_graph_mode(bool value) {
   dsa_graph_mode_ = value;
 }
 
+const char* PyAttentionMetadataView::decode_kv_layout() const {
+  return decode_kv_layout_ == DecodeKVLayout::REQUEST ? "request" : "token";
+}
+
 bool PyAttentionMetadataView::is_prefill() const {
   return metadata_->is_prefill;
 }
 
 bool PyAttentionMetadataView::is_chunked_prefill() const {
-  return metadata_->is_chunked_prefill;
+  // Native attention uses this flag to route multi-token decode to a
+  // prefill kernel. Python selects query layout independently of batch phase.
+  return is_chunked_prefill_;
 }
 
 bool PyAttentionMetadataView::is_mixed() const {

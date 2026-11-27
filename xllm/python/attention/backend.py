@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields
 from math import gcd, lcm
-from typing import TYPE_CHECKING, Protocol, TypeGuard
+from typing import TYPE_CHECKING, Literal, Protocol, TypeGuard
 
 import torch
 
@@ -756,6 +756,9 @@ class ExecutionMetadataSource(Protocol):
 
     @property
     def is_target_verify(self) -> bool: ...
+
+    @property
+    def decode_kv_layout(self) -> Literal["token", "request"]: ...
 
     @property
     def decode_query_width(self) -> int | None: ...

@@ -38,9 +38,9 @@ import pytest
 def test_block_kv_warmup_covers_binary_buckets_largest_first(
     max_pages: int, limit: int, expected: tuple[int, ...]
 ) -> None:
-    from xllm.python.model_executor.runners.kv_capacity import block_draft_kv_capacity_buckets
+    from xllm.python.model_executor.runners.kv_capacity import non_causal_kv_capacity_buckets
 
-    assert block_draft_kv_capacity_buckets(128, max_pages, 7, limit) == expected
+    assert non_causal_kv_capacity_buckets(128, max_pages, 7, limit) == expected
 
 
 @pytest.mark.parametrize(
@@ -48,10 +48,10 @@ def test_block_kv_warmup_covers_binary_buckets_largest_first(
     [(0, 64, 7, 0), (128, 0, 7, 0), (128, 64, 0, 0), (128, 64, 7, -2), (128, 64, 7, True)],
 )
 def test_block_kv_warmup_rejects_invalid_geometry(page_size: int, max_pages: int, width: int, limit: int) -> None:
-    from xllm.python.model_executor.runners.kv_capacity import block_draft_kv_capacity_buckets
+    from xllm.python.model_executor.runners.kv_capacity import non_causal_kv_capacity_buckets
 
     with pytest.raises(ValueError):
-        block_draft_kv_capacity_buckets(page_size, max_pages, width, limit)
+        non_causal_kv_capacity_buckets(page_size, max_pages, width, limit)
 
 
 @pytest.mark.parametrize(

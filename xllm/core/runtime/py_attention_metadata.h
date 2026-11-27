@@ -55,11 +55,17 @@ class PyExpandedDecodeMetadataView final {
   std::shared_ptr<layer::AttentionMetadata> metadata_;
 };
 
+// A single-token query cannot distinguish token-row and request-row KV tables
+// by shape alone. Export the producer's row convention to graph preparation.
+enum class DecodeKVLayout : int8_t { TOKEN, REQUEST };
+
 class PyAttentionMetadataView final {
  public:
-  PyAttentionMetadataView(std::shared_ptr<layer::AttentionMetadata> metadata,
-                          const ModelParamsView& params,
-                          bool is_draft_engine);
+  PyAttentionMetadataView(
+      std::shared_ptr<layer::AttentionMetadata> metadata,
+      const ModelParamsView& params,
+      bool is_draft_engine,
+      DecodeKVLayout decode_kv_layout = DecodeKVLayout::TOKEN);
 
   const torch::Tensor& slot_mapping() const;
   pybind11::object local_slot_mapping() const;
@@ -115,6 +121,7 @@ class PyAttentionMetadataView final {
   void set_dsa_graph_block_table_cols(int64_t value);
   bool dsa_graph_mode() const;
   void set_dsa_graph_mode(bool value);
+  const char* decode_kv_layout() const;
   bool is_prefill() const;
   bool is_chunked_prefill() const;
   bool is_mixed() const;
@@ -132,6 +139,8 @@ class PyAttentionMetadataView final {
       std::vector<int32_t>& host_vec);
 
   std::shared_ptr<layer::AttentionMetadata> metadata_;
+  DecodeKVLayout decode_kv_layout_ = DecodeKVLayout::TOKEN;
+  bool is_chunked_prefill_ = false;
   bool is_target_verify_ = false;
   std::optional<int32_t> decode_query_width_;
   torch::Tensor kv_seq_lens_host_;
