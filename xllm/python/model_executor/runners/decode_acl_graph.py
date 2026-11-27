@@ -2451,11 +2451,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
             or self._query_ends(metadata, sequence_count, query_width) is None
         ):
             raise ValueError("Non-causal decode ACL graph query layout changed within a graph bucket")
-        entry.static_input_ids[:token_count].copy_(input_ids)
-        entry.static_positions[:token_count].copy_(positions.to(torch.int32))
-        entry.static_input_ids[token_count:].zero_()
-        entry.static_positions[token_count:].zero_()
         if self._fixed_dp_graph_layout:
+            entry.static_input_ids[:token_count].copy_(input_ids)
+            entry.static_positions[:token_count].copy_(positions.to(torch.int32))
+            entry.static_input_ids[token_count:].zero_()
+            entry.static_positions[token_count:].zero_()
             # Expand the physical ring to stable logical columns. Its
             # physical width comes from the current scheduler batch.
             block_table = block_table.to(device=static.block_table.device, non_blocking=True)
@@ -2488,6 +2488,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if prepared is None:
             raise RuntimeError("Non-causal decode ACL graph prepared attention state is missing")
 
+        entry.static_input_ids[:token_count].copy_(input_ids)
+        entry.static_positions[:token_count].copy_(positions.to(torch.int32))
+        entry.static_input_ids[token_count:].zero_()
+        entry.static_positions[token_count:].zero_()
         static.slot_mapping[:token_count].copy_(metadata.slot_mapping)
         static.slot_mapping[token_count:].fill_(-1)
         static.block_table.zero_()
