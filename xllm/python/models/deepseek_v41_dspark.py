@@ -42,7 +42,6 @@ from xllm.python.models.dspark import DSparkForCausalLMBase
 @dataclass
 class DeepseekV41DSparkConfig(DeepseekV41Config):
     dspark_num_layers: int = 3
-    dspark_block_size: int = 5
     markov_rank: int = 256
 
     @classmethod
@@ -56,7 +55,6 @@ class DeepseekV41DSparkConfig(DeepseekV41Config):
             model_type="deepseek_v41_dspark",
             n_layers=count,
             dspark_num_layers=count,
-            dspark_block_size=int(config.get("num_speculative_tokens", 5)),
             markov_rank=int(config.get("markov_rank", config.get("dspark_markov_rank", 256))),
             compress_ratios=[0] * count,
             kv_source_layer_ids=[],

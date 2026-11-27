@@ -130,7 +130,7 @@ def test_fixed_dp_verify_reuses_capture_when_a_rank_becomes_empty() -> None:
         patch.object(runner, "_prepare_graph_entry", side_effect=capture) as prepare,
     ):
         for rows, is_dummy in ((12, False), (6, True), (12, False)):
-            metadata = _capacity_metadata(rows, kv_length=1 if is_dummy else 8)
+            metadata = _capacity_metadata(rows, kv_length=1 if is_dummy else 8, query_width=6)
             metadata.num_speculative_tokens = 5
             metadata.is_target_verify = not is_dummy
             metadata.is_dummy = is_dummy
@@ -394,6 +394,28 @@ def _non_causal_metadata(block_table: torch.Tensor, query_width: int = 2) -> Sim
         paged_kv_indices=torch.arange(sequence_count * block_cols, dtype=torch.int32),
         paged_kv_last_page_len=torch.full((sequence_count,), 4, dtype=torch.int32),
     )
+
+
+@pytest.mark.parametrize("width", [3, 5])
+def test_fixed_draft_graph_uses_configured_width_without_reading_query_lengths(width: int) -> None:
+    backend = _FakeBlockDraftAttentionBackend()
+    backend.draft_query_width = width
+    runner = BlockDraftAclGraphRunner(nn.Identity(), backend, torch.device("cpu"), max_batch=2, max_model_len=16)
+    metadata = _block_draft_metadata(torch.zeros((2, 4), dtype=torch.int32))
+    # A meta tensor has a shape but cannot service item() or tolist().
+    metadata.decode_query_width = width
+    metadata.q_seq_lens = torch.empty(2, dtype=torch.int32, device="meta")
+    metadata.q_cu_seq_lens_host_values = [width, 2 * width]
+    tokens = torch.arange(2 * width, dtype=torch.int32)
+
+    metadata.decode_query_width = width - 1
+    assert not runner.can_execute(tokens, metadata)
+    metadata.decode_query_width = width
+    assert runner.can_execute(tokens, metadata)
+    assert not runner.can_execute(tokens[:-1], metadata)
+    entry = runner._allocate_entry(tokens, tokens, metadata, sequence_count=2, page_table_capacity=4)
+    assert entry.static_input_ids.numel() == 2 * width
+    assert entry.static_metadata.q_seq_lens.tolist() == [width, width]
 
 
 @pytest.mark.parametrize("dp_rank,sequence_count", [(0, 1), (1, 3)])

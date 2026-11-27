@@ -894,6 +894,9 @@ class CsaIndexContext:
 
 
 class AttentionBackend(ABC):
+    # Fixed query tokens per request for ring-cache block drafts.
+    draft_query_width: int = 0
+
     @property
     def uses_executor_cp_context(self) -> bool:
         return True

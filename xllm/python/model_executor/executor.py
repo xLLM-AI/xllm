@@ -151,7 +151,9 @@ def _create_attention_backend(
                 max_model_len=serving_len,
                 quant_mode=quant_mode if quant_mode is not None else V41_QUANT_NONE,
                 graph_backend=graph_backend,
-                dspark_block_size=(int(config["num_speculative_tokens"]) if model_type == "deepseek_v41_dspark" else 0),
+                num_speculative_tokens=(
+                    int(config["num_speculative_tokens"]) if model_type == "deepseek_v41_dspark" else 0
+                ),
                 dp_rank=int(config.get("dp_rank", 0)),
                 decoder_swa_start_layer=max(kv_sources) if config.get("enable_swa_bounded_replay") else None,
             )

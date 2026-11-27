@@ -117,12 +117,12 @@ class _Csa2IndexerMetadata:
 
 @dataclass(frozen=True)
 class _Csa2DecodeCompressorMetadata:
-    rows: torch.Tensor
+    compressed_positions: torch.Tensor
     starts: torch.Tensor
-    owners: torch.Tensor
+    table_indices: torch.Tensor
     committed: torch.Tensor
     park_slots: torch.Tensor | None = None
-    previous_rows: torch.Tensor | None = None
+    previous_sources: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -162,7 +162,7 @@ class CSA2SharedRuntime:
     draft_swa: _Csa2DraftSwaMetadata | None = None
     prefill_swa_pages: dict[int, _Csa2PrefillSwaPages] = field(default_factory=dict)
     compressed_mla_metadata: dict[int, torch.Tensor] = field(default_factory=dict)
-    ring_write_rows: dict[tuple[torch.Tensor, int], tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
+    ring_write_indices: dict[tuple[torch.Tensor, int], tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     rope_tables: dict[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] = field(
         default_factory=dict
     )
@@ -173,11 +173,11 @@ class CSA2SharedRuntime:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Layers in the same SWA group share the physical slot mapping for this forward.
         key = (slots, capacity)
-        if key not in self.ring_write_rows:
-            rows = torch.arange(slots.numel(), device=slots.device)
-            self.ring_write_rows[key] = last_ring_writes(slots, rows, slot_capacity=capacity)
-        destinations, rows = self.ring_write_rows[key]
-        return destinations, values.index_select(0, rows)
+        if key not in self.ring_write_indices:
+            source_token_indices = torch.arange(slots.numel(), device=slots.device)
+            self.ring_write_indices[key] = last_ring_writes(slots, source_token_indices, slot_capacity=capacity)
+        destinations, source_token_indices = self.ring_write_indices[key]
+        return destinations, values.index_select(0, source_token_indices)
 
 
 def apply_interleaved_rope(
@@ -286,26 +286,26 @@ def _window_visible_idxs(
 
 
 def _cache_slots(
-    block_table: torch.Tensor, seqs: int | torch.Tensor, rows: torch.Tensor, block_size: int
+    block_table: torch.Tensor, table_indices: int | torch.Tensor, cache_positions: torch.Tensor, block_size: int
 ) -> torch.Tensor:
-    cols = torch.div(rows, block_size, rounding_mode="floor") % block_table.size(1)
-    blocks = block_table[seqs, cols].to(torch.int64).clamp_min(0)
-    return blocks * block_size + rows % block_size
+    page_columns = torch.div(cache_positions, block_size, rounding_mode="floor") % block_table.size(1)
+    blocks = block_table[table_indices, page_columns].to(torch.int64).clamp_min(0)
+    return blocks * block_size + cache_positions % block_size
 
 
 def _token_cache_slots(
     block_table: torch.Tensor | None,
     cache: torch.Tensor | None,
-    rows: torch.Tensor,
-    seqs: torch.Tensor,
+    cache_positions: torch.Tensor,
+    table_indices: torch.Tensor,
     mask: torch.Tensor | None,
 ) -> torch.Tensor:
     if block_table is None or cache is None:
-        return torch.full_like(rows, -1)
+        return torch.full_like(cache_positions, -1)
     if block_table.numel() == 0:
-        return torch.full_like(rows, -1)
+        return torch.full_like(cache_positions, -1)
     block_size = cache.size(1)
-    slots = _cache_slots(block_table, seqs, rows, block_size)
+    slots = _cache_slots(block_table, table_indices, cache_positions, block_size)
     if mask is not None:
         slots = torch.where(mask, slots, -1)
     return slots
@@ -336,7 +336,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         max_model_len: int = 0,
         quant_mode: str = V41_QUANT_NONE,
         graph_backend: str = "off",
-        dspark_block_size: int = 0,
+        num_speculative_tokens: int = 0,
         dp_rank: int = 0,
         decoder_swa_start_layer: int | None = None,
     ) -> None:
@@ -420,7 +420,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
 
         self._kv_caches: list[LayerCache] = []
         self.uses_device_length_indexer = False
-        self.dspark_block_size = dspark_block_size
+        self.draft_query_width = num_speculative_tokens
         self.dp_rank = dp_rank
         self._metadata: Any | None = None
         self._v41_shared: CSA2SharedRuntime | None = None
@@ -470,17 +470,17 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             self._graph_query(prepared)
 
     def _graph_query(self, prepared: _PreparedCsa2Attention) -> _Csa2GraphQuery:
-        width = self.dspark_block_size or 1
-        rows = len(prepared.query_lens)
+        width = self.draft_query_width or 1
+        num_sequences = len(prepared.query_lens)
         context = get_forward_context_or_none()
         state = context.execution_state if context is not None else None
-        key = ("csa2_graph_query", rows, width)
+        key = ("csa2_graph_query", num_sequences, width)
         if state is not None and key in state.persistent_buffers:
             return state.persistent_buffers[key]
         options = {"device": self.device, "dtype": torch.int32}
         query = _Csa2GraphQuery(
-            lengths=torch.full((rows,), width, **options),
-            offsets=torch.arange(0, (rows + 1) * width, width, **options),
+            lengths=torch.full((num_sequences,), width, **options),
+            offsets=torch.arange(0, (num_sequences + 1) * width, width, **options),
             max_length=torch.full((), width, **options),
             empty=torch.empty(0, **options),
         )
@@ -491,8 +491,8 @@ class Csa2AttentionBackend(DsaAttentionBackend):
     def prepare_metadata(self, metadata: Any, *, device_kv_lengths: bool = False) -> _PreparedCsa2Attention:
         """Bind the decode graph's persistent grouped tables."""
         del device_kv_lengths
-        tables = (metadata.block_table,) if self.dspark_block_size else tuple(metadata.multi_block_tables)
-        query_lens = (self.dspark_block_size or 1,) * tables[0].size(0)
+        tables = (metadata.block_table,) if self.draft_query_width else tuple(metadata.multi_block_tables)
+        query_lens = (self.draft_query_width or 1,) * tables[0].size(0)
         if len(tables) != len(self.group_infos) or any(
             table.dtype != torch.int32
             or table.device != self.device
@@ -568,7 +568,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
 
     def _build_dsa_metadata_for_forward(self, metadata: Any) -> DsaMetadata:
         prepared = getattr(metadata, "prepared_attention_state", None)
-        if isinstance(prepared, _PreparedCsa2Attention) and self.dspark_block_size:
+        if isinstance(prepared, _PreparedCsa2Attention) and self.draft_query_width:
             query = self._graph_query(prepared)
             lengths = metadata.kv_seq_lens
             dsa = DsaMetadata(
@@ -580,12 +580,12 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                 kv_cu_seq_lens=query.empty,
                 max_seqlen_kv=query.empty,
                 max_seqlen_q=query.max_length,
-                max_query_len=self.dspark_block_size,
-                max_seq_len=self.window_size + self.dspark_block_size,
+                max_query_len=self.draft_query_width,
+                max_seq_len=self.window_size + self.draft_query_width,
                 input_positions=metadata.dsa_positions,
                 c4_pad_positions=query.empty,
                 c128_pad_positions=query.empty,
-                start_pos=lengths - self.dspark_block_size,
+                start_pos=lengths - self.draft_query_width,
                 is_acl_graph=True,
             )
             dsa.seq_lens_q_host = list(prepared.query_lens)
@@ -709,8 +709,10 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             torch.ops.xllm_ops.v41_partial_rope_(value, cos, sin, offsets, inverse)
         else:
             for start in range(0, value.size(0), _PARTIAL_ROPE_MAX_TOKENS):
-                rows = slice(start, start + _PARTIAL_ROPE_MAX_TOKENS)
-                torch.ops.xllm_ops.v41_partial_rope_(value[rows], cos[rows], sin[rows], offsets, inverse)
+                token_slice = slice(start, start + _PARTIAL_ROPE_MAX_TOKENS)
+                torch.ops.xllm_ops.v41_partial_rope_(
+                    value[token_slice], cos[token_slice], sin[token_slice], offsets, inverse
+                )
         return value
 
     def _rope_arguments(
@@ -791,7 +793,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
 
         return self._rotate_in_place(value, *arguments, False), False
 
-    def _write_cache_rows(self, cache: torch.Tensor, slots: torch.Tensor, value: torch.Tensor, *, graph: bool) -> None:
+    def _write_cache_slots(self, cache: torch.Tensor, slots: torch.Tensor, value: torch.Tensor, *, graph: bool) -> None:
         if (
             graph
             and self.uses_a3_cache_precision
@@ -831,7 +833,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         ctx_lens = dsa.seq_lens
 
         shared = self._shared_runtime()
-        if self.dspark_block_size:
+        if self.draft_query_width:
             return self._fused_draft_swa(q, kv, layer, dsa, mapping, shared)
         if (
             self.uses_a3_cache_precision
@@ -860,7 +862,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         if flat_graph and not ctx.swa_cache_written:
             # Verification flattens a request's consecutive queries into
             # separate rows. Later rows gather preceding queries from SWA.
-            self._write_cache_rows(layer_cache.swa, swa_slot, kv, graph=True)
+            self._write_cache_slots(layer_cache.swa, swa_slot, kv, graph=True)
         if (
             write_swa
             and mode.compress_ratio in (1, 2)
@@ -907,7 +909,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         self,
         dsa: DsaMetadata,
         lengths: list[int],
-        rows: torch.Tensor | None,
+        query_token_indices: torch.Tensor | None,
         history_floors: list[int],
         *,
         dummy: bool = False,
@@ -918,7 +920,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         tail = copy(dsa)
         plan = _DecoderSwaReplayPlan(tail, requests)
         tail.swa_history_floors = tuple(history_floors[seq] for seq in active)
-        if rows is not None:
+        if query_token_indices is not None:
             if not all_requests:
                 kv_lens = [dsa.seq_lens_kv_host[seq] for seq in active]
                 tail.seq_lens_kv_host = kv_lens
@@ -935,11 +937,11 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             tail.actual_seq_lengths_query = dsa.actual_seq_lengths_query.new_tensor([0, *accumulate(query_lens)])
             tail.max_query_len = max(query_lens)
             tail.max_seqlen_q = dsa.max_seqlen_q.new_full(dsa.max_seqlen_q.shape, tail.max_query_len)
-            tail.input_positions = dsa.input_positions.index_select(0, rows)
+            tail.input_positions = dsa.input_positions.index_select(0, query_token_indices)
             tail.start_pos = (tail.seq_lens - tail.seq_lens_q).to(torch.int32)
             # The source already wrote compressed KV for all requests. The
             # decoder only needs compact SWA write slots for its live queries.
-            full_rows = sum(dsa.seq_lens_q_host)
+            num_query_tokens = sum(dsa.seq_lens_q_host)
             slot_views: dict[int, torch.Tensor] = {}
             tail.slot_mappings = []
             for layer_slots in dsa.slot_mappings:
@@ -947,7 +949,11 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                 for mapping in layer_slots:
                     key = id(mapping)
                     if key not in slot_views:
-                        selected = mapping.index_select(0, rows) if mapping.numel() == full_rows else mapping
+                        selected = (
+                            mapping.index_select(0, query_token_indices)
+                            if mapping.numel() == num_query_tokens
+                            else mapping
+                        )
                         slot_views[key] = torch.full_like(selected, -1) if dummy else selected
                     slots.append(slot_views[key])
                 tail.slot_mappings.append(slots)
@@ -1003,7 +1009,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             attention_kv, attention_table, seq_lens, max_kv_len = self._pack_swa_prefill(kv, cache, table, dsa)
         else:
             if not cache_written:
-                self._write_cache_rows(cache, slots, kv, graph=dsa.is_acl_graph)
+                self._write_cache_slots(cache, slots, kv, graph=dsa.is_acl_graph)
             attention_kv, attention_table, seq_lens = cache, table, dsa.seq_lens
             max_kv_len = table.size(1) * cache.size(1) if dsa.is_acl_graph else dsa.max_seq_len
         cu_seqlens_q = dsa.actual_seq_lengths_query
@@ -1056,7 +1062,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
     ) -> torch.Tensor:
         from xllm.python.kernels_npu.triton.draft_swa import draft_swa_metadata, pack_draft_swa
 
-        width = self.dspark_block_size
+        width = self.draft_query_width
         window = self.window_size
         span = window + width
         ring = self._kv_caches[layer.layer_id].swa
@@ -1204,14 +1210,14 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         ]
         block_counts = [(length + block_size - 1) // block_size for length in kv_lens]
         table_width = max(block_counts)
-        rows: list[list[int]] = []
+        page_ids_per_request: list[list[int]] = []
         descriptors = [(0, 0, 0, 0, 0, 0)]  # Page zero supplies padding for the attention block table.
         block_start = 1
         token_start = 0
         for seq, (query_len, past, end, length, blocks) in enumerate(
             zip(q_lens, history_lens, history_ends, kv_lens, block_counts)
         ):
-            rows.append(list(range(block_start, block_start + blocks)) + [0] * (table_width - blocks))
+            page_ids_per_request.append(list(range(block_start, block_start + blocks)) + [0] * (table_width - blocks))
             if use_fused_pack:
                 descriptors.extend(
                     (seq, page * block_size, end - past, past, token_start, length) for page in range(blocks)
@@ -1219,7 +1225,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             block_start += blocks
             token_start += query_len
 
-        table = torch.tensor(rows, dtype=torch.int32, device=cache.device)
+        table = torch.tensor(page_ids_per_request, dtype=torch.int32, device=cache.device)
         seq_lens = torch.tensor(kv_lens, dtype=torch.int32, device=cache.device)
         max_length = max(kv_lens)
         if use_fused_pack:
@@ -1230,19 +1236,19 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             packed = pack_prefill_swa(kv, cache, block_table, pages.descriptors)
         else:
             packed = cache.new_zeros((block_start, block_size, 1, self.head_dim))
-            cache_rows = cache.view(-1, self.head_dim)
-            row_offsets = torch.arange(self.window_size - 1, device=cache.device)
+            flat_cache = cache.view(-1, self.head_dim)
+            history_offsets = torch.arange(self.window_size - 1, device=cache.device)
             token_start = 0
             for seq, (query_len, past, end, length, blocks) in enumerate(
                 zip(q_lens, history_lens, history_ends, kv_lens, block_counts)
             ):
                 if blocks:
-                    first = rows[seq][0]
+                    first = page_ids_per_request[seq][0]
                     dst = packed[first : first + blocks].view(-1, self.head_dim)
                     if past:
-                        positions = row_offsets[:past] + (end - past)
+                        positions = history_offsets[:past] + (end - past)
                         dst[:past].copy_(
-                            self._gather_swa_positions(cache_rows, block_table, seq, positions, block_size)
+                            self._gather_swa_positions(flat_cache, block_table, seq, positions, block_size)
                         )
                     dst[past:length].copy_(kv[token_start : token_start + length - past])
                 token_start += query_len
@@ -1297,17 +1303,17 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                 latent = self._pool_decode_c2(layer, ctx, decode, latent, scores, kv_state_flat, score_state_flat)
             else:
                 latent = layer.compress_rmsnorm(latent)
-            all_starts, all_slot_rows, all_slot_seqs, all_slot_mask = (
+            all_starts, compressed_positions, table_indices, write_mask = (
                 decode.starts,
-                decode.rows,
-                decode.owners,
+                decode.compressed_positions,
+                decode.table_indices,
                 decode.committed,
             )
         else:
             compressed = self._compress_chunks(
                 layer, ctx, dsa, mapping, q_lens, ctx_lens, swa_slot, kv_state_flat, score_state_flat
             )
-            latent, all_starts, all_slot_rows, all_slot_seqs, all_slot_mask = compressed
+            latent, all_starts, compressed_positions, table_indices, write_mask = compressed
 
         index_block_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.index_cache_idx)
         key_block_table = _get_layer_cache_tensor(dsa.block_tables, layer_id, mapping.cmp_cache_idx)
@@ -1317,7 +1323,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                 slots = _get_layer_cache_tensor(dsa.slot_mappings, layer_id, cache_idx)
                 if slots is not None:
                     return slots
-            return _token_cache_slots(table, cache, all_slot_rows, all_slot_seqs, all_slot_mask)
+            return _token_cache_slots(table, cache, compressed_positions, table_indices, write_mask)
 
         if latent is not None:
             if layer.indexer is not None and layer.indexer.owns_k:
@@ -1347,9 +1353,9 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                     index_k = fp4_act_qdq_e8m0(index_k, 32)
                 if layer_cache.index is not None:
                     index_slots = cache_slots(mapping.index_cache_idx, index_block_table, layer_cache.index)
-                    self._write_cache_rows(layer_cache.index, index_slots, index_k, graph=decode is not None)
+                    self._write_cache_slots(layer_cache.index, index_slots, index_k, graph=decode is not None)
                     if index_scale is not None:
-                        self._write_cache_rows(
+                        self._write_cache_slots(
                             layer_cache.indexer_scale, index_slots, index_scale, graph=decode is not None
                         )
             rotated = self._apply_rope(latent, all_starts, ctx.cos_sin_cache, dsa, shared)
@@ -1357,7 +1363,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                 rotated = fp4_act_qdq_e4m3_scale(rotated, 16)
             if layer_cache.key is not None:
                 key_slots = cache_slots(mapping.cmp_cache_idx, key_block_table, layer_cache.key)
-                self._write_cache_rows(layer_cache.key, key_slots, rotated, graph=decode is not None)
+                self._write_cache_slots(layer_cache.key, key_slots, rotated, graph=decode is not None)
         shared.key_cache = layer_cache.key
         shared.key_block_table = key_block_table
         shared.index_cache = layer_cache.index
@@ -1374,14 +1380,14 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         swa_slots: torch.Tensor | None,
         block_size: int,
     ) -> _Csa2DecodeCompressorMetadata:
-        owners = torch.arange(lengths.numel(), device=lengths.device)
+        table_indices = torch.arange(lengths.numel(), device=lengths.device)
         positions = lengths.to(torch.int64) - 1
         live = lengths > 0
         if ratio == 1:
-            return _Csa2DecodeCompressorMetadata(positions, ctx.positions.to(torch.int64), owners, live)
+            return _Csa2DecodeCompressorMetadata(positions, ctx.positions.to(torch.int64), table_indices, live)
 
-        rows = positions // 2
-        starts = (rows * 2).clamp(0, ctx.cos_sin_cache.size(0) - 1)
+        compressed_positions = positions // 2
+        starts = (compressed_positions * 2).clamp(0, ctx.cos_sin_cache.size(0) - 1)
         committed = live & (positions % 2 == 1)
         park = live & ~committed
         park_slots = torch.where(park, swa_slots, -1)
@@ -1394,17 +1400,19 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         # Fixed verification and packed verification both order consecutive
         # tokens of a request together. An equal physical slot alone is
         # insufficient when the request crosses the SWA ring boundary.
-        preceding = (owners - 1).clamp_min(0)
+        preceding = (table_indices - 1).clamp_min(0)
         previous_in_batch = (
             committed
-            & (owners > 0)
+            & (table_indices > 0)
             & (positions.index_select(0, preceding) == previous_positions)
             & (park_slots.index_select(0, preceding) == previous_slots)
         )
         # Nonnegative entries address the state ring. The previous query's
-        # index (owners - 1) is stored as -(index + 1) when it is in this step.
-        previous_rows = torch.where(previous_in_batch, -owners, previous_slots).to(torch.int32)
-        return _Csa2DecodeCompressorMetadata(rows, starts, owners, committed, park_slots, previous_rows)
+        # index (table_indices - 1) is stored as -(index + 1) when it is in this step.
+        previous_sources = torch.where(previous_in_batch, -table_indices, previous_slots).to(torch.int32)
+        return _Csa2DecodeCompressorMetadata(
+            compressed_positions, starts, table_indices, committed, park_slots, previous_sources
+        )
 
     def _pool_decode_c2(
         self,
@@ -1424,10 +1432,10 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             and kv_state.size(0) <= 1 << 21
         ):
             output = torch.ops.xllm_ops.v41_c2_decode_pool_norm(
-                kv, scores, kv_state, score_state, decode.previous_rows, layer.cmp_norm.weight, layer.cmp_norm.eps
+                kv, scores, kv_state, score_state, decode.previous_sources, layer.cmp_norm.weight, layer.cmp_norm.eps
             )
         else:
-            previous = decode.previous_rows.to(torch.int64)
+            previous = decode.previous_sources.to(torch.int64)
             from_batch = (previous < 0).unsqueeze(1)
             preceding = (-previous - 1).clamp_min(0)
             previous_slots = previous.clamp_min(0)
@@ -1444,8 +1452,8 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             output = self._pool_c2(layer, ctx, members, member_scores)
         # Every read of the old partial group must finish before publishing
         # this forward's new state into the ring.
-        self._write_cache_rows(kv_state, decode.park_slots, kv, graph=True)
-        self._write_cache_rows(score_state, decode.park_slots, scores, graph=True)
+        self._write_cache_slots(kv_state, decode.park_slots, kv, graph=True)
+        self._write_cache_slots(score_state, decode.park_slots, scores, graph=True)
         return output
 
     def _pool_c2(self, layer: Any, ctx: Csa2LayerContext, members: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
@@ -1650,9 +1658,9 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                 rows_per_seq.append(torch.full((q_len, 0), -1, dtype=torch.int32, device=q_idx.device))
                 token_offset += q_len
                 continue
-            index_k = self._gather_cache_rows(index_cache, block_table, seq, capacity, block_size)
+            index_k = self._gather_compressed_cache(index_cache, block_table, seq, capacity, block_size)
             if shared.index_scale is not None:
-                scale = self._gather_cache_rows(
+                scale = self._gather_compressed_cache(
                     shared.index_scale.unsqueeze(-1), block_table, seq, capacity, block_size
                 )
                 index_k = (index_k.float() * scale.float()).to(self.dtype)
@@ -1797,10 +1805,10 @@ class Csa2AttentionBackend(DsaAttentionBackend):
     def _reference_topk_indices(self, selected: torch.Tensor, q_lens: list[int]) -> torch.Tensor:
         if max(q_lens) == 1:
             return torch.where(selected >= 0, selected + self.window_size + 1, -1)
-        rows = selected.squeeze(1).split(q_lens)
+        indices_per_request = selected.squeeze(1).split(q_lens)
         picks = [
             torch.where(indices >= 0, indices + self.window_size + q_len, -1)
-            for indices, q_len in zip(rows, q_lens, strict=True)
+            for indices, q_len in zip(indices_per_request, q_lens, strict=True)
         ]
         return torch.nn.utils.rnn.pad_sequence(picks, batch_first=True, padding_value=-1)
 
@@ -1873,7 +1881,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
                     )
                 picks = topk[seq][:q_len]
                 committed = torch.div(ctx_len, ratio, rounding_mode="floor")
-                compress_kv = self._gather_cache_rows(
+                compress_kv = self._gather_compressed_cache(
                     shared_key_cache,
                     shared_key_table,
                     seq,
@@ -1987,7 +1995,7 @@ class Csa2AttentionBackend(DsaAttentionBackend):
             return 0
         return max(int(torch.div(ctx_lens.max(), ratio, rounding_mode="floor").item()), 0)
 
-    def _gather_cache_rows(
+    def _gather_compressed_cache(
         self,
         cache: torch.Tensor,
         block_table: torch.Tensor,
@@ -1995,8 +2003,8 @@ class Csa2AttentionBackend(DsaAttentionBackend):
         count: int,
         block_size: int,
     ) -> torch.Tensor:
-        rows = torch.arange(count, device=cache.device)
-        slots = _cache_slots(block_table, seq, rows, block_size)
+        compressed_positions = torch.arange(count, device=cache.device)
+        slots = _cache_slots(block_table, seq, compressed_positions, block_size)
         return cache.view(-1, cache.size(-1)).index_select(0, slots)
 
     def _gather_swa_positions(

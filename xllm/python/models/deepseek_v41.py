@@ -1283,8 +1283,8 @@ class DeepseekV41Model(nn.Module):
         hidden = hidden.unsqueeze(1).expand(-1, self.cfg.hc_mult, -1).contiguous()
         pre_mix = DeepseekV41HyperConnection.make_identity_pre_mix(hidden, self.cfg.hc_mult)
         replay = self._decoder_replay_enabled(metadata, graph_mode or context.acl_graph is not None)
-        full_rows = hidden.size(0)
-        tail_rows = None
+        num_query_tokens = hidden.size(0)
+        tail_token_indices = None
         skip_decoder = False
         needs_compaction = False
         dummy_decoder = False
@@ -1294,7 +1294,7 @@ class DeepseekV41Model(nn.Module):
             dsa = metadata.dsa_metadata
             lengths, floors, dp_counts = self._decoder_replay_lengths(metadata)
             skip_decoder = not any(dp_counts)
-            needs_compaction = sum(lengths) != full_rows
+            needs_compaction = sum(lengths) != num_query_tokens
             if not skip_decoder:
                 dummy_decoder = not any(lengths)
                 if dummy_decoder:
@@ -1302,17 +1302,19 @@ class DeepseekV41Model(nn.Module):
                     # shards without real decoder queries.
                     lengths[0] = 1
                     floors[0] = dsa.seq_lens_kv_host[0] - 1
-                rows = None
+                replay_token_indices = None
                 if needs_compaction:
-                    tail_indices = []
+                    token_indices = []
                     end = 0
                     for original_len, length in zip(dsa.seq_lens_q_host, lengths, strict=True):
                         end += original_len
-                        tail_indices.extend(range(end - length, end))
-                    rows = input_ids.new_tensor(tail_indices, dtype=torch.int64)
-                    if rows.numel() != full_rows:
-                        tail_rows = rows
-                replay_plan = backend.prepare_decoder_swa_replay(dsa, lengths, rows, floors, dummy=dummy_decoder)
+                        token_indices.extend(range(end - length, end))
+                    replay_token_indices = input_ids.new_tensor(token_indices, dtype=torch.int64)
+                    if replay_token_indices.numel() != num_query_tokens:
+                        tail_token_indices = replay_token_indices
+                replay_plan = backend.prepare_decoder_swa_replay(
+                    dsa, lengths, replay_token_indices, floors, dummy=dummy_decoder
+                )
                 tail_metadata = _DecoderReplayMetadata(
                     metadata, replay_plan.metadata, [max(count, 1) for count in dp_counts], dp_counts
                 )
@@ -1332,21 +1334,21 @@ class DeepseekV41Model(nn.Module):
                                 "full_rows=%d, tail_rows=0, cut_layer_kv_rows=%d",
                                 self.cfg.dp_rank,
                                 layer_id,
-                                full_rows,
-                                full_rows,
+                                num_query_tokens,
+                                num_query_tokens,
                             )
                             self._decoder_swa_skip_logged = True
-                        output = hidden.new_zeros((full_rows, self.cfg.hidden_size))
+                        output = hidden.new_zeros((num_query_tokens, self.cfg.hidden_size))
                         return self.aux_hidden_capture.finalize(
                             output, None if aux_hidden is None else aux_hidden.zero_()
                         )
-                    if tail_rows is not None:
-                        hidden = hidden.index_select(0, tail_rows)
-                        pre_mix = pre_mix.index_select(0, tail_rows)
-                        positions = positions.index_select(0, tail_rows)
-                        input_ids = input_ids.index_select(0, tail_rows)
+                    if tail_token_indices is not None:
+                        hidden = hidden.index_select(0, tail_token_indices)
+                        pre_mix = pre_mix.index_select(0, tail_token_indices)
+                        positions = positions.index_select(0, tail_token_indices)
+                        input_ids = input_ids.index_select(0, tail_token_indices)
                         if aux_hidden is not None:
-                            aux_hidden = aux_hidden.index_select(0, tail_rows)
+                            aux_hidden = aux_hidden.index_select(0, tail_token_indices)
                     stack.enter_context(backend.decoder_swa_replay(replay_plan))
                     stack.enter_context(
                         forward_context(replace(context, metadata=tail_metadata, layer_shared_cache={}))
@@ -1357,9 +1359,9 @@ class DeepseekV41Model(nn.Module):
                             "full_rows=%d, tail_rows=%d, cut_layer_kv_rows=%d",
                             self.cfg.dp_rank,
                             layer_id,
-                            full_rows,
+                            num_query_tokens,
                             hidden.size(0),
-                            full_rows,
+                            num_query_tokens,
                         )
                         self._decoder_swa_replay_logged = True
                 # V4.1 checkpoint IDs select the residual entering the layer.
@@ -1376,16 +1378,16 @@ class DeepseekV41Model(nn.Module):
             merged = self.layers[-1].hc.hc_pre(hidden, pre_mix)
             output = merged if self.cfg.model_type == "deepseek_v41_dspark" else self.norm(merged)
         if dummy_decoder:
-            output = output.new_zeros((full_rows, output.size(-1)))
+            output = output.new_zeros((num_query_tokens, output.size(-1)))
             if aux_hidden is not None:
-                aux_hidden = aux_hidden.new_zeros((full_rows, aux_hidden.size(-1)))
-        elif tail_rows is not None:
+                aux_hidden = aux_hidden.new_zeros((num_query_tokens, aux_hidden.size(-1)))
+        elif tail_token_indices is not None:
             # The sampler and DSpark context publication still use full-batch
             # row addresses. Retained rows own the final output and draft KV.
-            output = output.new_zeros((full_rows, output.size(-1))).index_copy_(0, tail_rows, output)
+            output = output.new_zeros((num_query_tokens, output.size(-1))).index_copy_(0, tail_token_indices, output)
             if aux_hidden is not None:
-                aux_hidden = aux_hidden.new_zeros((full_rows, aux_hidden.size(-1))).index_copy_(
-                    0, tail_rows, aux_hidden
+                aux_hidden = aux_hidden.new_zeros((num_query_tokens, aux_hidden.size(-1))).index_copy_(
+                    0, tail_token_indices, aux_hidden
                 )
         return self.aux_hidden_capture.finalize(output, aux_hidden)
 
