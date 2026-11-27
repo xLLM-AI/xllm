@@ -216,6 +216,11 @@ export default defineConfig({
 									collapsed: true,
 									items: [
 										{
+											label: 'DeepSeek-V4.1-Flash-1017',
+											translations: { 'zh-CN': 'DeepSeek-V4.1-Flash-1017' },
+											slug: 'cookbook/autoregressive_models/deepseek/deepseek_v4_1_flash',
+										},
+										{
 											label: 'DeepSeek-V4',
 											translations: { 'zh-CN': 'DeepSeek-V4' },
 											slug: 'cookbook/autoregressive_models/deepseek/deepseek_v4',

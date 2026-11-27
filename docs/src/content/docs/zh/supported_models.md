@@ -39,7 +39,7 @@ sidebar:
 | DeepSeek-V3 / R1 / V3.1 | ❌ | ✅ | ❌ | 指南待补充 |
 | DeepSeek-V3.2 | ✅ | ✅ | ❌ | 指南待补充 |
 | DeepSeek-V4 | ✅ | ✅ | — | [部署指南 ↗](/zh/cookbook/autoregressive_models/deepseek/deepseek_v4/) |
-| DeepSeek-V4.1-Flash-1017 | ✅ | — | — | 指南待补充 |
+| DeepSeek-V4.1-Flash-1017 | ✅ | — | — | [部署指南 ↗](/zh/cookbook/autoregressive_models/deepseek/deepseek_v4_1_flash/) |
 | Qwen2 / Qwen2.5 / QwQ | ❌ | ✅ | ✅ | 指南待补充 |
 | Qwen3 | ✅ | ✅ | ✅ | 指南待补充 |
 | Qwen3 MoE | ✅ | ✅ | ✅ | 指南待补充 |
