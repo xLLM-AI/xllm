@@ -29,6 +29,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/message.h"
+#include "core/disaggregation/pd_service_impl.h"
 #include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
@@ -372,11 +373,13 @@ VLMMaster::VLMMaster(const Options& options)
       .server_idx(options_.server_idx());
   dispatch_engine(
       [&](auto* engine) {
-        scheduler_ = create_continuous_scheduler(engine,
-                                                 scheduler_options,
-                                                 distributed_worker_manager_,
-                                                 model_residency_coordinator_,
-                                                 kv_transfer_coordinator_);
+        scheduler_ = create_continuous_scheduler(
+            engine,
+            scheduler_options,
+            distributed_worker_manager_,
+            model_residency_coordinator_,
+            kv_transfer_coordinator_,
+            make_pd_service_options(options_, model_args_));
       },
       vlm_engine_.get(),
       speculative_engine_.get());

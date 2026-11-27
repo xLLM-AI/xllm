@@ -28,7 +28,6 @@ limitations under the License.
 #include <vector>
 
 #include "api_service/call.h"
-#include "api_service/openai_json.h"
 #include "common/metrics.h"
 #include "core/disaggregation/pd_service_impl.h"
 #include "core/distributed_runtime/engine_dispatch.h"
@@ -303,16 +302,8 @@ LLMMaster::LLMMaster(const Options& options)
       .max_global_ttft_ms(options_.max_global_ttft_ms())
       .max_global_tpot_ms(options_.max_global_tpot_ms())
       .server_idx(options_.server_idx());
-  PDServiceOptions response_options;
-  if (options_.enable_disagg_pd()) {
-    response_options.enable_response_formatting = true;
-    response_options.tool_parser_format =
-        options_.tool_call_parser().value_or("");
-    response_options.reasoning_parser_format =
-        options_.reasoning_parser().value_or("");
-    response_options.system_fingerprint =
-        api_service::openai_system_fingerprint(options_, &model_args_);
-  }
+  PDServiceOptions response_options =
+      make_pd_service_options(options_, model_args_);
   auto create_scheduler =
       [this, &scheduler_options, &response_options](auto* engine) {
         scheduler_ = create_continuous_scheduler(

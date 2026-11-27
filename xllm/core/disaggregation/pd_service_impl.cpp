@@ -22,6 +22,8 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "api_service/openai_json.h"
+#include "common/options.h"
 #include "common/types.h"
 #include "core/common/types.h"
 #include "core/disaggregation/pd_kv_response.h"
@@ -38,6 +40,21 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+
+PDServiceOptions make_pd_service_options(const Options& options,
+                                         const ModelArgs& model_args) {
+  PDServiceOptions response_options;
+  if (options.enable_disagg_pd()) {
+    response_options.enable_response_formatting = true;
+    response_options.tool_parser_format =
+        options.tool_call_parser().value_or("");
+    response_options.reasoning_parser_format =
+        options.reasoning_parser().value_or("");
+    response_options.system_fingerprint =
+        api_service::openai_system_fingerprint(options, &model_args);
+  }
+  return response_options;
+}
 
 PDServiceImpl::PDServiceImpl(PDScheduler* scheduler,
                              Engine* engine,
