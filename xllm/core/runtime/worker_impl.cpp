@@ -886,26 +886,23 @@ std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
 
 template <typename Input>
 void build_dummy_forward_input(Input& input,
-                               int32_t num_speculative_tokens,
+                               int32_t query_width,
                                const torch::Device& device) {
-  const int32_t num_decoding_tokens = num_speculative_tokens + 1;
   auto token_options = input.token_ids.defined()
                            ? input.token_ids.options()
                            : torch::TensorOptions().dtype(torch::kInt32);
   auto position_options = input.positions.defined()
                               ? input.positions.options()
                               : torch::TensorOptions().dtype(torch::kInt32);
-  input.token_ids =
-      torch::ones({num_decoding_tokens}, token_options.device(device));
-  input.positions =
-      torch::arange(num_decoding_tokens, position_options.device(device));
+  input.token_ids = torch::ones({query_width}, token_options.device(device));
+  input.positions = torch::arange(query_width, position_options.device(device));
   input.input_params.embedding.linear_state_indices = torch::zeros(
-      {num_decoding_tokens}, token_options.dtype(torch::kInt32).device(device));
+      {query_width}, token_options.dtype(torch::kInt32).device(device));
   if (ModelConfig::is_python_model_impl(
           ModelConfig::get_instance().model_impl())) {
     auto& execution_batch = input.input_params.meta.execution_batch;
     execution_batch.num_reqs = 0;
-    execution_batch.num_tokens = num_decoding_tokens;
+    execution_batch.num_tokens = query_width;
     execution_batch.num_scheduled_tokens.clear();
     execution_batch.num_computed_tokens.clear();
     execution_batch.is_prefilling.clear();
@@ -921,7 +918,7 @@ void WorkerImpl::prepare_dummy_input(Input& input) {
       !params.meta.batch_forward_type.is_empty() &&
       (parallel_args_.dp_size() > 1 || parallel_args_.ep_size() > 1 ||
        !parallel_args_.mapping_data().empty())) {
-    build_dummy_forward_input(input, /*num_speculative_tokens=*/0, device_);
+    build_dummy_forward_input(input, /*query_width=*/1, device_);
   }
 }
 

@@ -98,6 +98,7 @@ def _capacity_metadata(rows: int, kv_length: int = 1, query_width: int = 1, page
         build_row_aligned_paged_kv_metadata(metadata.block_table, metadata.kv_seq_lens_host_values, page_size)
     )
     if query_width > 1:
+        metadata.decode_query_width = query_width
         metadata.num_speculative_tokens = query_width - 1
         metadata.is_target_verify = True
         metadata.q_seq_lens_host = torch.full((rows // query_width,), query_width, dtype=torch.int32)
@@ -345,6 +346,7 @@ def _block_draft_metadata(block_table: torch.Tensor) -> SimpleNamespace:
     return SimpleNamespace(
         is_prefill=False,
         is_chunked_prefill=True,
+        decode_query_width=query_width,
         q_seq_lens=torch.full((sequence_count,), query_width, dtype=torch.int32),
         q_cu_seq_lens=torch.tensor([0, *query_ends], dtype=torch.int32),
         q_cu_seq_lens_host_values=query_ends,
@@ -1222,6 +1224,7 @@ def test_accepted_counts_refresh_in_stable_graph_buffer() -> None:
     metadata.q_seq_lens_host = torch.tensor([2, 2], dtype=torch.int32)
     metadata.q_cu_seq_lens = torch.tensor([0, 2, 4], dtype=torch.int32)
     metadata.is_target_verify = True
+    metadata.decode_query_width = 2
     metadata.expanded_decode_metadata = SimpleNamespace(
         enabled=True,
         kv_seq_lens=metadata.kv_seq_lens,
@@ -1398,6 +1401,7 @@ def test_capture_preserves_live_state_until_first_replay(
     metadata.num_accepted_tokens = torch.tensor([width, 1], dtype=torch.int32) if width > 1 else None
     metadata.num_accepted_tokens_host_values = (width, 1) if width > 1 else ()
     if width > 1:
+        metadata.decode_query_width = width
         metadata.num_speculative_tokens = width - 1
         metadata.is_target_verify = True
         metadata.q_seq_lens_host = torch.full((slots.numel(),), width, dtype=torch.int32)
@@ -1487,6 +1491,7 @@ def test_untyped_verify_reuses_row_aligned_paging_metadata() -> None:
     runner = _runner()
     metadata = _metadata(torch.arange(4, dtype=torch.int32))
     metadata.linear_state_indices = None
+    metadata.decode_query_width = 2
     metadata.num_speculative_tokens = 1
     metadata.is_target_verify = True
 
@@ -2049,3 +2054,20 @@ def test_mla_admission_retains_index_history_capacity_check() -> None:
     metadata.linear_state_indices = torch.tensor([-1], dtype=torch.int32)
 
     assert runner.prepare_execution(torch.arange(4, dtype=torch.int32), metadata) is None
+
+
+@pytest.mark.parametrize("width", [None, 1, 3])
+def test_block_draft_graph_rejects_layout_disagreeing_with_query_rows(width: int | None) -> None:
+    runner = _block_draft_runner()
+    metadata = _block_draft_metadata(torch.zeros((1, 2), dtype=torch.int32))
+    metadata.decode_query_width = width
+    metadata.num_speculative_tokens = 1
+    assert not runner.can_execute(torch.arange(2, dtype=torch.int32), metadata)
+
+
+@pytest.mark.parametrize("candidate_count", [0, 2, 7])
+def test_block_draft_graph_uses_query_layout_independently_of_candidate_count(candidate_count: int) -> None:
+    runner = _block_draft_runner()
+    metadata = _block_draft_metadata(torch.zeros((1, 2), dtype=torch.int32))
+    metadata.num_speculative_tokens = candidate_count
+    assert runner.can_execute(torch.arange(2, dtype=torch.int32), metadata)

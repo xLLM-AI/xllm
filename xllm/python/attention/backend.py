@@ -758,6 +758,9 @@ class ExecutionMetadataSource(Protocol):
     def is_target_verify(self) -> bool: ...
 
     @property
+    def decode_query_width(self) -> int | None: ...
+
+    @property
     def num_speculative_tokens(self) -> int: ...
 
 

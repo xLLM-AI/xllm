@@ -293,7 +293,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             return None
         if is_expanded_spec_verify and self._model_owns_linear_spec_verify:
             query_lens = self._expanded_query_lens(metadata)
-            if _uniform_span_width(query_lens) != metadata.num_speculative_tokens + 1:
+            if metadata.decode_query_width is None or _uniform_span_width(query_lens) != metadata.decode_query_width:
                 return None
 
         # Linear verify requires a backend recurrent-state protocol.
@@ -493,8 +493,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
             metadata, "is_target_verify", False
         ):
             # Recurrent verify buckets must contain complete requests.
-            width = metadata.num_speculative_tokens + 1
-            if batch_size % width:
+            width = metadata.decode_query_width
+            if width is None or width <= 0 or batch_size % width:
                 raise ValueError("linear verify graph requires complete fixed-width requests")
             if self._enable_decode_no_padding:
                 return batch_size
@@ -594,12 +594,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
             return None
         kv_rows, block_table_rows = metadata.kv_seq_lens, metadata.block_table
         query_ends = metadata.q_cu_seq_lens
-        width = metadata.num_speculative_tokens + 1
+        width = metadata.decode_query_width
         if metadata.is_prefill or metadata.is_chunked_prefill or kv_rows is None or block_table_rows is None:
             return None
         rows = kv_rows.numel()
         if (
-            width <= 1
+            width is None
+            or width <= 1
             or rows == 0
             or rows % width
             or kv_rows.ndim != 1
@@ -1517,6 +1518,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             dp_execution_token_counts=(padded_batch_size,) * self.dp_size if self.dp_size > 1 else (),
             dp_is_decode=tuple([1] * self.dp_size) if self.dp_size > 1 else (),
             is_dummy=bool(getattr(metadata, "is_dummy", False)),
+            decode_query_width=getattr(metadata, "decode_query_width", None),
             num_speculative_tokens=getattr(metadata, "num_speculative_tokens", 0),
             is_target_verify=is_expanded and not self._is_spec_draft,
             kpool_query_lens=kpool_query_lens,

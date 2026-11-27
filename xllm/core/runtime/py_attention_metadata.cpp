@@ -176,6 +176,8 @@ void register_attention_metadata_views(py::module_& module) {
       .def_property_readonly("is_chunked_prefill",
                              &PyAttentionMetadataView::is_chunked_prefill)
       .def_property_readonly("is_mixed", &PyAttentionMetadataView::is_mixed)
+      .def_property_readonly("decode_query_width",
+                             &PyAttentionMetadataView::decode_query_width)
       .def_property_readonly(/*name=*/"num_speculative_tokens",
                              &PyAttentionMetadataView::num_speculative_tokens)
       .def_property_readonly(/*name=*/"is_target_verify",
@@ -238,8 +240,19 @@ PyAttentionMetadataView::PyAttentionMetadataView(
           make_host_int32_view(metadata_, metadata_->kv_seq_lens_vec)),
       q_seq_lens_host_(
           make_host_int32_view(metadata_, metadata_->q_seq_lens_vec)) {
+  const auto& batch = params.meta.execution_batch;
+  const auto& query_widths = batch.num_scheduled_tokens;
+  if (!query_widths.empty() && query_widths.front() > 0 &&
+      std::all_of(query_widths.begin(), query_widths.end(), [&](int32_t width) {
+        return width == query_widths.front();
+      })) {
+    decode_query_width_ = query_widths.front();
+  } else if (query_widths.empty() && batch.num_reqs == 0 &&
+             batch.num_tokens > 0) {
+    // A dummy rank has no logical requests, but executes one complete block.
+    decode_query_width_ = static_cast<int32_t>(batch.num_tokens);
+  }
   if (params.meta.batch_forward_type.is_decode() && !is_draft_engine) {
-    const auto& batch = params.meta.execution_batch;
     const int32_t num_requests =
         batch.num_reqs > 0 ? batch.num_reqs : params.meta.num_sequences;
     is_target_verify_ =

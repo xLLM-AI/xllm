@@ -147,7 +147,7 @@ TEST(DecodeInputBuilderTest,
     LlmForwardInput input = make_shared_forward_input();
     const DecodeBatchContext context = make_decode_batch_context(input);
     const DecodeExpansionOptions options{
-        {.num_speculative_tokens = 1, .per_request = per_request}, 4};
+        {.query_width = 2, .per_request = per_request}, 4};
     DecodeBuildBuffers buffers = expand_decode_inputs(context, options);
     EXPECT_EQ(buffers.out_new_cache_slots,
               std::vector<int32_t>({7, 8, 23, 24}));
@@ -290,7 +290,7 @@ TEST(DecodeInputBuilderTest, ChunkedExpansionCommitsPerRequestLengths) {
   auto [input, ctx] = make_two_request_ctx();
 
   const DecodeExpansionOptions decode_options{
-      {.num_speculative_tokens = 2, .per_request = true}, 4};
+      {.query_width = 3, .per_request = true}, 4};
   DecodeBuildBuffers buf = expand_decode_inputs(ctx, decode_options);
   build_decode_metadata(input.input_params, buf, decode_options);
 
@@ -306,7 +306,7 @@ TEST(DecodeInputBuilderTest, ChunkedExpansionCommitsPerRequestLengths) {
 TEST(DecodeInputBuilderTest, FlatExpansionCommitsOneRowPerToken) {
   auto [input, ctx] = make_two_request_ctx();
 
-  const DecodeExpansionOptions decode_options{{.num_speculative_tokens = 1}, 4};
+  const DecodeExpansionOptions decode_options{{.query_width = 2}, 4};
   DecodeBuildBuffers buf = expand_decode_inputs(ctx, decode_options);
 
   EXPECT_EQ(buf.out_token_ids, std::vector<int32_t>({10, -1, 20, -1}));
@@ -332,7 +332,7 @@ TEST(DecodeInputBuilderTest, NonCausalTokensShareFullQueryKvLength) {
   const DecodeBatchContext ctx = make_decode_batch_context(input);
 
   const DecodeExpansionOptions decode_options{
-      {.num_speculative_tokens = 2, .causal = false}, 4};
+      {.query_width = 3, .causal = false}, 4};
   DecodeBuildBuffers buf = expand_decode_inputs(ctx, decode_options);
   EXPECT_EQ(buf.out_kv_seq_lens, std::vector<int32_t>({7, 7, 7, 11, 11, 11}));
   EXPECT_EQ(buf.out_positions, std::vector<int32_t>({4, 5, 6, 8, 9, 10}));
@@ -348,6 +348,64 @@ TEST(DecodeInputBuilderTest, NonCausalTokensShareFullQueryKvLength) {
   EXPECT_TRUE(input.input_params.meta.batch_forward_type.is_decode());
   EXPECT_EQ(input.input_params.attention.host.q_cu_seq_lens,
             std::vector<int32_t>({0, 1, 2, 3, 4, 5, 6}));
+}
+
+TEST(DecodeInputBuilderTest,
+     ExplicitQueryWidthPreservesRequestAndTokenLayouts) {
+  auto [input, context] = make_two_request_ctx();
+  context.build_execution_batch = true;
+  for (const bool per_request : {false, true}) {
+    SCOPED_TRACE(per_request);
+    const DecodeExpansionOptions options{
+        {.query_width = 3, .per_request = per_request, .causal = false}, 4, 99};
+    DecodeBuildBuffers buffers = expand_decode_inputs(context, options);
+    EXPECT_EQ(buffers.out_token_ids,
+              (std::vector<int32_t>{10, 99, 99, 20, 99, 99}));
+    EXPECT_EQ(buffers.out_positions, (std::vector<int32_t>{4, 5, 6, 8, 9, 10}));
+    EXPECT_EQ(buffers.out_new_cache_slots,
+              (std::vector<int32_t>{4, 5, 6, 20, 21, 22}));
+    LlmModelParams params;
+    build_decode_metadata(params, buffers, options);
+    const auto& batch = params.meta.execution_batch;
+    EXPECT_EQ(batch.num_reqs, 2);
+    EXPECT_EQ(batch.num_tokens, 6);
+    EXPECT_EQ(batch.num_scheduled_tokens, (std::vector<int32_t>{3, 3}));
+    EXPECT_EQ(batch.query_start_loc, (std::vector<int32_t>{0, 3, 6}));
+    EXPECT_EQ(batch.num_computed_tokens, (std::vector<int32_t>{4, 8}));
+    EXPECT_EQ(params.attention.host.kv_seq_lens,
+              per_request ? std::vector<int32_t>({7, 11})
+                          : std::vector<int32_t>({7, 7, 7, 11, 11, 11}));
+  }
+}
+
+TEST(DecodeInputBuilderTest,
+     IdleDecodePreservesAWholeQueryBlockWithoutCacheWrites) {
+  LlmForwardInput input;
+  const DecodeExpansionOptions options{
+      {.query_width = 3, .per_request = true, .causal = false}, 4, 99};
+  build_idle_decode_input(input, options);
+  EXPECT_EQ(tensor_to_vector<int32_t>(input.token_ids),
+            (std::vector<int32_t>{99, 99, 99}));
+  EXPECT_EQ(input.input_params.attention.host.new_cache_slots,
+            (std::vector<int32_t>{kPadSlotId, kPadSlotId, kPadSlotId}));
+  EXPECT_EQ(input.input_params.attention.host.q_seq_lens,
+            (std::vector<int32_t>{3}));
+  EXPECT_EQ(input.input_params.attention.host.kv_seq_lens,
+            (std::vector<int32_t>{1}));
+  EXPECT_TRUE(
+      input.input_params.meta.execution_batch.num_scheduled_tokens.empty());
+  EXPECT_EQ(input.input_params.meta.execution_batch.num_reqs, 0);
+  EXPECT_EQ(input.input_params.meta.execution_batch.query_start_loc,
+            (std::vector<int32_t>{0}));
+  EXPECT_EQ(input.input_params.meta.execution_batch.num_tokens, 3);
+}
+
+TEST(DecodeInputBuilderTest, RejectsNonPositiveQueryWidthBeforeExpansion) {
+  auto [input, context] = make_two_request_ctx();
+  for (const int32_t width : {0, -1}) {
+    const DecodeExpansionOptions options{{.query_width = width}, 4};
+    EXPECT_DEATH(expand_decode_inputs(context, options), "query_width");
+  }
 }
 
 TEST(DecodeInputBuilderTest, ResolveTokenWithPositionOffset) {

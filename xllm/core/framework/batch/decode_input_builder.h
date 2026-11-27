@@ -118,7 +118,8 @@ void update_kv_lengths_and_slots(Params& params, DecodeBuildBuffers& buf) {
 }
 
 struct DecodeInputOptions {
-  int32_t num_speculative_tokens = 0;
+  // Input token rows per request, independent of sampled candidate count.
+  int32_t query_width = 1;
   bool per_request = false;
   bool causal = true;
 };
@@ -137,13 +138,13 @@ void update_decode_batch_metadata(Params& input_params,
                                   const DecodeInputOptions& decode_options,
                                   int32_t num_requests) {
   input_params.meta.num_sequences = num_requests;
-  const int32_t num_decoding_tokens = decode_options.num_speculative_tokens + 1;
+  const int32_t query_width = decode_options.query_width;
   if (!decode_options.per_request && !decode_options.causal &&
       input_params.meta.actual_num_sequences > 0) {
-    input_params.meta.actual_num_sequences *= num_decoding_tokens;
+    input_params.meta.actual_num_sequences *= query_width;
   }
   input_params.meta.q_max_seq_len =
-      decode_options.per_request ? num_decoding_tokens : 1;
+      decode_options.per_request ? query_width : 1;
   input_params.meta.batch_forward_type = BatchForwardType::DECODE;
 }
 

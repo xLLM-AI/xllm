@@ -751,6 +751,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             kv_seq_lens=torch.tensor([4, 8], dtype=torch.int32),
             q_seq_lens=torch.tensor([2, 2], dtype=torch.int32),
             q_seq_lens_host=torch.tensor([2, 2], dtype=torch.int32),
+            decode_query_width=2,
             num_speculative_tokens=1,
             is_target_verify=True,
             expanded_decode_metadata=SimpleNamespace(
@@ -1401,6 +1402,7 @@ def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device
         is_prefill=False,
         is_chunked_prefill=expanded,
         is_target_verify=expanded,
+        decode_query_width=len(lengths) if expanded else 1,
         dp_execution_token_counts=(),
     )
     if expanded:

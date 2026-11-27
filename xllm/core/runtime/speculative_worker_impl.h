@@ -38,8 +38,7 @@ template <typename Input>
 void prepare_dummy_input(Input& input, const WorkerImpl& worker);
 
 template <typename Params>
-void scale_speculative_parallel_token_counts(Params& params,
-                                             int32_t num_speculative_tokens);
+void scale_decode_parallel_token_counts(Params& params, int32_t query_width);
 
 // Shared tail of run_validate: marks the output as a speculative decode
 // verify result, attaches the row metadata, clears embeddings, and installs

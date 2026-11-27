@@ -103,8 +103,8 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         if q_seq_lens.dim() != 1 or q_seq_lens.numel() == 0:
             return False
         query_widths = q_seq_lens.to(torch.int64).tolist()
-        query_width = query_widths[0]
-        if query_width <= 0 or any(width != query_width for width in query_widths):
+        query_width = metadata.decode_query_width
+        if query_width is None or query_width <= 0 or any(width != query_width for width in query_widths):
             return False
         sequence_count = len(query_widths)
         if sequence_count > self.max_batch:
@@ -217,7 +217,8 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
     ) -> _BlockGraphKey:
         self._validate_inputs(input_ids, positions, metadata)
         sequence_count = metadata.q_seq_lens.numel()
-        query_width = int(metadata.q_seq_lens[0].item())
+        query_width = metadata.decode_query_width
+        assert query_width is not None
         padded_sequences = self._padded_sequence_count(metadata, sequence_count, query_width)
         assert padded_sequences is not None
         local_key = self._graph_key(input_ids, metadata, padded_sequences, query_width)
@@ -286,7 +287,8 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         if required_cols <= 0:
             raise ValueError("DSpark ACL graph page-table width must be positive")
         required_capacity = 1 << (required_cols - 1).bit_length()
-        query_width = int(metadata.q_seq_lens[0].item())
+        query_width = metadata.decode_query_width
+        assert query_width is not None
         warmup_context_len = min(self.max_model_len, page_size * self._WARMUP_PAGE_COUNT)
         warmup_cols = max(1, (warmup_context_len + query_width + page_size - 1) // page_size)
         warmup_capacity = 1 << (warmup_cols - 1).bit_length()
@@ -368,7 +370,8 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         page_table_capacity: int,
     ) -> AclGraphEntry:
         del positions
-        query_width = int(metadata.q_seq_lens[0].item())
+        query_width = metadata.decode_query_width
+        assert query_width is not None
         token_count = sequence_count * query_width
         device = input_ids.device
         page_size = self._logical_page_size
@@ -412,6 +415,7 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
             block_table=static_block_table,
             kv_seq_lens=static_kv_lens,
             is_chunked_prefill=True,
+            decode_query_width=getattr(metadata, "decode_query_width", None),
             num_speculative_tokens=getattr(metadata, "num_speculative_tokens", 0),
             dp_execution_token_counts=(token_count,) * self.dp_size if self.dp_size > 1 else (),
             dp_is_decode=(1,) * self.dp_size if self.dp_size > 1 else (),

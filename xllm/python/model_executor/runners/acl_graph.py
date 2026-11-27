@@ -92,6 +92,7 @@ class StaticGraphAttentionMetadata:
     mega_moe_token_mask: torch.Tensor | None = None
     is_mixed: bool = False
     is_dummy: bool = False
+    decode_query_width: int | None = None
     num_speculative_tokens: int = 0
     is_target_verify: bool = False
     local_slot_mapping: torch.Tensor | None = None

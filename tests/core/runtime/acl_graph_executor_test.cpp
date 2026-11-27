@@ -1384,8 +1384,8 @@ TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
   params.parallel.dp_global_token_nums = {2, 0, 4};
   params.parallel.raw_dp_global_token_nums = {1, 0, 3};
 
-  scale_speculative_parallel_token_counts(params,
-                                          /*num_speculative_tokens=*/4);
+  scale_decode_parallel_token_counts(params,
+                                     /*query_width=*/5);
 
   EXPECT_EQ(params.parallel.dp_global_token_nums,
             (std::vector<int32_t>{10, 0, 20}));
