@@ -22,33 +22,35 @@ limitations under the License.
 
 namespace xllm {
 
-// Conv and SSM share one live slot and are checkpointed together. SSM snapshots
-// within that slot serve speculative verification, independently of the token
-// interval between prefix checkpoints.
+// Components share one live slot and are checkpointed together. A KPool tail
+// belongs to indexed Full layers, independently of the Conv/SSM layer
+// ownership, and can also exist without Conv/SSM. SSM snapshots and tail tokens
+// within a slot are distinct from the token interval between prefix
+// checkpoints.
 class RecurrentCachePartition final {
  public:
   RecurrentCachePartition(CachePartitionId id,
                           int32_t checkpoint_stride,
                           int32_t ssm_snapshots_per_slot,
                           bool enable_prefix_cache,
-                          std::vector<int32_t> layers,
-                          CacheScalarType conv_dtype,
-                          CacheScalarType ssm_dtype);
+                          std::vector<CacheComponent> components,
+                          int32_t tail_tokens_per_slot = 0);
 
   const CachePartitionId& id() const { return id_; }
   int32_t checkpoint_stride() const { return checkpoint_stride_; }
   int32_t ssm_snapshots_per_slot() const { return ssm_snapshots_per_slot_; }
+  int32_t tail_tokens_per_slot() const { return tail_tokens_per_slot_; }
   bool enable_prefix_cache() const { return enable_prefix_cache_; }
-  const CacheComponent& conv() const { return conv_; }
-  const CacheComponent& ssm() const { return ssm_; }
+  const std::vector<CacheComponent>& components() const { return components_; }
+  const CacheComponent* find_component(CacheComponentRole role) const;
 
  private:
   CachePartitionId id_;
   int32_t checkpoint_stride_;
   int32_t ssm_snapshots_per_slot_;
   bool enable_prefix_cache_;
-  CacheComponent conv_;
-  CacheComponent ssm_;
+  std::vector<CacheComponent> components_;
+  int32_t tail_tokens_per_slot_;
 };
 
 }  // namespace xllm

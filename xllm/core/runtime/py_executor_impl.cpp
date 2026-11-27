@@ -225,9 +225,9 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       SpeculativeConfig::requires_aux_hidden_capture(
           options_.speculative_algorithm());
   executor_config["block_draft_graph_warmup_max_kv_len"] =
-      ExecutionConfig::get_instance().block_draft_graph_warmup_max_kv_len();
+      options_.block_draft_graph_warmup_max_kv_len();
   executor_config["enable_graph_mode_decode_no_padding"] =
-      ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding();
+      options_.enable_graph_mode_decode_no_padding();
   executor_config["enable_graph_mm_encoder"] =
       ExecutionConfig::get_instance().enable_graph_mm_encoder();
   executor_config["mm_encoder_graph_capture_shapes"] =
@@ -245,7 +245,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       py_causal_lm_->python_model(),
       executor_config,
       options_.max_seqs_per_batch(),
-      ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
+      options_.acl_graph_decode_batch_size_limit());
   py_causal_lm_->set_context_kv_graph_runner(
       py_executor_.attr("context_kv_graph_runner"));
   requires_input_batch_metadata_ =

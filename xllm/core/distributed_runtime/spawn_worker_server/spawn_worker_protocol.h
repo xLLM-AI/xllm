@@ -43,7 +43,79 @@ inline constexpr int32_t kPrefillChunkArgumentIndex = 43;
 inline constexpr int32_t kEnableChunkedPrefillArgumentIndex = 44;
 inline constexpr int32_t kEnableDpFairTokenBudgetArgumentIndex = 45;
 inline constexpr int32_t kVaeSizeArgumentIndex = kArgumentCount;
+inline constexpr int32_t kEnableGraphDoubleBufferArgumentIndex =
+    kVaeSizeArgumentIndex + 1;
+inline constexpr int32_t kAclGraphDecodeBatchSizeLimitArgumentIndex =
+    kEnableGraphDoubleBufferArgumentIndex + 1;
+inline constexpr int32_t kBlockDraftGraphWarmupMaxKvLenArgumentIndex =
+    kAclGraphDecodeBatchSizeLimitArgumentIndex + 1;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
+
+inline std::optional<int32_t> parse_graph_decode_batch_size_limit(
+    int32_t argc,
+    char* const argv[]) {
+  if (argv == nullptr || argc < kMinimumArgumentCount) {
+    return std::nullopt;
+  }
+  // Older launchers omit this trailing argument; retain the flag default.
+  if (argc <= kAclGraphDecodeBatchSizeLimitArgumentIndex) {
+    return 16;
+  }
+  if (argv[kAclGraphDecodeBatchSizeLimitArgumentIndex] == nullptr) {
+    return std::nullopt;
+  }
+  const std::string_view text(argv[kAclGraphDecodeBatchSizeLimitArgumentIndex]);
+  int32_t limit = 0;
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), limit);
+  if (error != std::errc{} || end != text.data() + text.size()) {
+    return std::nullopt;
+  }
+  return limit;
+}
+
+inline std::optional<int32_t> parse_block_draft_graph_warmup_max_kv_len(
+    int32_t argc,
+    char* const argv[]) {
+  if (argv == nullptr || argc < kMinimumArgumentCount) {
+    return std::nullopt;
+  }
+  // Older launchers omit this trailing argument; retain the flag default.
+  if (argc <= kBlockDraftGraphWarmupMaxKvLenArgumentIndex) {
+    return 0;
+  }
+  if (argv[kBlockDraftGraphWarmupMaxKvLenArgumentIndex] == nullptr) {
+    return std::nullopt;
+  }
+  const std::string_view text(
+      argv[kBlockDraftGraphWarmupMaxKvLenArgumentIndex]);
+  int32_t limit = 0;
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), limit);
+  if (error != std::errc{} || end != text.data() + text.size()) {
+    return std::nullopt;
+  }
+  return limit;
+}
+
+inline std::optional<bool> parse_graph_double_buffer(int32_t argc,
+                                                     char* const argv[]) {
+  if (argv == nullptr || argc < kMinimumArgumentCount) {
+    return std::nullopt;
+  }
+  // Older launchers omit this trailing argument; retain the flag default.
+  if (argc <= kEnableGraphDoubleBufferArgumentIndex) {
+    return true;
+  }
+  if (argv[kEnableGraphDoubleBufferArgumentIndex] == nullptr) {
+    return std::nullopt;
+  }
+  const std::string_view enabled(argv[kEnableGraphDoubleBufferArgumentIndex]);
+  if (enabled != "0" && enabled != "1") {
+    return std::nullopt;
+  }
+  return enabled == "1";
+}
 
 inline std::optional<std::string> parse_indexer_cache_dtype(
     int32_t argc,

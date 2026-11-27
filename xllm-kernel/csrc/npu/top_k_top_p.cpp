@@ -13,26 +13,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <c10/core/Device.h>
+#include <acl/acl.h>
+#include <aclnnop/aclnn_apply_top_k_top_p.h>
 #include <glog/logging.h>
-#include <torch/torch.h>
-#include <torch_npu/csrc/libs/init_npu.h>
-#include <torch_npu/torch_npu.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
 
-#include <nlohmann/json.hpp>
+#include <array>
 #include <unordered_map>
-#ifdef TORCH_HIGHER_THAN_PTA6
-#include <torch_npu/csrc/framework/OpCommand.h>
-#else
-#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
-#include <torch_npu/csrc/framework/utils/OpPreparation.h>
-#endif
 
-#include "acl/acl.h"
-#include "aclnnop/aclnn_apply_top_k_top_p.h"
-#include "core/common/macros.h"
-#include "core/kernels/npu/utils.h"
-#include "xllm_ops_api.h"
+#include "csrc/npu/sampling.h"
+#include "op_plugin/utils/op_api_common_base.h"
 
 namespace xllm::kernel::npu {
 
@@ -60,17 +50,17 @@ class AclWorkspaceCache final {
     }
 
     if (workspace.addr_ != nullptr) {
-      CHECK_ACL_SUCCESS(aclrtSynchronizeStream(stream),
-                        "top_k_top_p: failed to synchronize stream before "
-                        "workspace resize");
-      CHECK_ACL_SUCCESS(aclrtFree(workspace.addr_),
-                        "top_k_top_p: failed to free resized workspace");
+      CHECK_EQ(aclrtSynchronizeStream(stream), ACL_SUCCESS)
+          << "top_k_top_p: failed to synchronize stream before "
+             "workspace resize";
+      CHECK_EQ(aclrtFree(workspace.addr_), ACL_SUCCESS)
+          << "top_k_top_p: failed to free resized workspace";
     }
 
-    CHECK_ACL_SUCCESS(
-        aclrtMalloc(
-            &workspace.addr_, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST),
-        "top_k_top_p: failed to allocate workspace");
+    CHECK_EQ(aclrtMalloc(
+                 &workspace.addr_, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST),
+             ACL_SUCCESS)
+        << "top_k_top_p: failed to allocate workspace";
     workspace.size_ = workspace_size;
     return workspace.addr_;
   }
@@ -96,44 +86,48 @@ AclWorkspaceCache& workspace_cache() {
 // This wrapper applies top-k and top-p filtering before token sampling so the
 // downstream sampler only sees the kept candidates.
 // Inputs:
-//   topK: top-k threshold tensor for this sampling step.
-//   topP: top-p threshold tensor for this sampling step.
+//   top_k: top-k threshold tensor for this sampling step.
+//   top_p_threshold: top-p threshold tensor for this sampling step.
 // Outputs:
 //   logits: logits tensor filtered in place and consumed by the sampler.
 void top_k_top_p(torch::Tensor& logits,
-                 const torch::Tensor& topK,
-                 const torch::Tensor& topP) {
-  check_tensor(logits, "logits", "top_k_top_p");
-  check_tensor(topK, "topK", "top_k_top_p");
-  check_tensor(topP, "topP", "top_k_top_p");
-  aclTensor* logits_ids = nullptr;
-  aclTensor* topK_ids = nullptr;
-  aclTensor* topP_ids = nullptr;
+                 const torch::Tensor& top_k,
+                 const torch::Tensor& top_p_threshold) {
+  for (const torch::Tensor* input :
+       std::array<const torch::Tensor*, 3>{&logits, &top_k, &top_p_threshold}) {
+    CHECK(input->defined());
+    CHECK_GT(input->numel(), 0);
+    CHECK(input->device().is_privateuseone());
+    CHECK_EQ(input->device(), logits.device());
+  }
+  const torch::DeviceGuard guard(logits.device());
   int32_t device_id = logits.device().index();
   aclrtStream stream = c10_npu::getCurrentNPUStream(device_id).stream();
   // aclnn compares in the logits dtype (unlike the CUDA/CPU fp32 cutoff);
-  // named so the converted storage outlives dispatch — create_acltensor
+  // named so the converted storage outlives dispatch — ACL tensor conversion
   // keeps only the raw pointer.
-  const torch::Tensor top_p = topP.to(logits.scalar_type());
-  create_acltensor(&logits_ids, logits);
-  create_acltensor(&topK_ids, topK);
-  create_acltensor(&topP_ids, top_p);
+  const torch::Tensor top_p = top_p_threshold.to(logits.scalar_type());
+  aclTensor* logits_ids = ConvertType(logits);
+  aclTensor* top_k_ids = ConvertType(top_k);
+  aclTensor* top_p_threshold_ids = ConvertType(top_p);
+  CHECK(logits_ids && top_k_ids && top_p_threshold_ids);
 
   uint64_t workspace_size = 0;
   aclOpExecutor* executor = nullptr;
-  CHECK_ACL_SUCCESS(aclnnApplyTopKTopPGetWorkspaceSize(logits_ids,
-                                                       topP_ids,
-                                                       topK_ids,
-                                                       logits_ids,
-                                                       &workspace_size,
-                                                       &executor),
-                    "top_k_top_p: failed to get workspace size");
+  CHECK_EQ(aclnnApplyTopKTopPGetWorkspaceSize(logits_ids,
+                                              top_p_threshold_ids,
+                                              top_k_ids,
+                                              logits_ids,
+                                              &workspace_size,
+                                              &executor),
+           ACL_SUCCESS)
+      << "top_k_top_p: failed to get workspace size";
   void* workspace_addr = workspace_cache().get(stream, workspace_size);
-  CHECK_ACL_SUCCESS(
-      aclnnApplyTopKTopP(workspace_addr, workspace_size, executor, stream),
-      "top_k_top_p: failed to apply top k top p");
+  CHECK_EQ(aclnnApplyTopKTopP(workspace_addr, workspace_size, executor, stream),
+           ACL_SUCCESS)
+      << "top_k_top_p: failed to apply top k top p";
   aclDestroyTensor(logits_ids);
-  aclDestroyTensor(topK_ids);
-  aclDestroyTensor(topP_ids);
+  aclDestroyTensor(top_k_ids);
+  aclDestroyTensor(top_p_threshold_ids);
 }
 }  // namespace xllm::kernel::npu

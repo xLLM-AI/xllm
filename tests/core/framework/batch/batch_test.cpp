@@ -53,6 +53,7 @@ limitations under the License.
 #include "core/util/tensor_helper.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/block/composite_block_manager.h"
+#include "framework/block/grouped_cache_test_utils.h"
 #include "framework/config/service_config.h"
 #include "framework/model/model_args.h"
 #include "framework/request/stopping_checker.h"
@@ -4219,14 +4220,13 @@ TEST(BatchTest, OverlapMTPReplacementKeepsCompositeKvBlocks) {
   BlockManager::Options options;
   options.num_blocks(base_num_blocks)
       .block_size(base_block_size)
-      .sliding_window_size(window_size)
       .swa_blocks_per_seq(static_cast<uint32_t>(
           get_swa_blocks_per_seq(window_size, base_block_size)))
       .swa_num_blocks(20)
       .max_tokens_per_batch(1280)
       .max_seqs_per_batch(max_seqs_per_batch)
-      .manager_types({1, 0, 0})
-      .compress_ratios({0, 4, 128});
+      .grouped_partitions(
+          test::grouped_cache_partitions(base_block_size, window_size));
   CompositeBlockManager manager(build_composite_leaves(options), options);
 
   RequestSamplingParam sampling_param;

@@ -30,14 +30,18 @@ limitations under the License.
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "api_service/openai_json.h"
 #include "common/metrics.h"
+#include "common/options.h"
 #include "core/disaggregation/pd_service_impl.h"
 #include "core/framework/batch/sampling_input_builder.h"
 #include "core/framework/config/distributed_config.h"
@@ -1491,6 +1495,155 @@ TEST(PDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
     EXPECT_TRUE(scheduler.reservations_empty());
   }
 }
+
+TEST(PDSchedulerTest, LocalInstanceLeavesPdResponseFormattingDisabled) {
+  Options options;
+  options.tool_call_parser("qwen25").reasoning_parser("qwen3");
+  const PDServiceOptions response =
+      make_pd_service_options(options, ModelArgs{});
+  EXPECT_FALSE(response.enable_response_formatting);
+  EXPECT_TRUE(response.tool_parser_format.empty());
+  EXPECT_TRUE(response.reasoning_parser_format.empty());
+  EXPECT_TRUE(response.system_fingerprint.empty());
+}
+
+class PDServiceResponseTest : public ::testing::TestWithParam<
+                                  std::tuple<std::string, bool, std::string>> {
+};
+
+TEST_P(PDServiceResponseTest, DecodeFormatsResponseWithInstanceConfiguration) {
+  const auto& [backend, stream, response_kind] = GetParam();
+  const bool initialized = XServiceClientTestPeer::set_initialized(true);
+  ScopeGuard restore_client(
+      [initialized] { XServiceClientTestPeer::set_initialized(initialized); });
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  TestPDScheduler scheduler(&engine, make_decode_options());
+  Options options;
+  options.backend(backend)
+      .enable_disagg_pd(true)
+      .tool_call_parser("qwen25")
+      .reasoning_parser("qwen3");
+  TestPDServiceImpl service(
+      &scheduler,
+      &engine,
+      make_pd_service_options(options, engine.model_args()));
+
+  proto::DisaggRequest wire_request;
+  wire_request.set_req_id("decode-response");
+  wire_request.set_service_req_id("service-response");
+  wire_request.set_source_xservice_addr("127.0.0.1:1");
+  wire_request.set_model("model");
+  wire_request.add_prompt_tokens(1);
+  wire_request.set_seq_capacity(16);
+  wire_request.set_n(1);
+  wire_request.set_best_of(1);
+  wire_request.set_max_tokens(8);
+  wire_request.set_max_context_len(16);
+  wire_request.set_vocab_size(8);
+  wire_request.set_repetition_penalty(1.0f);
+  wire_request.set_eos_token_id(7);
+  wire_request.set_stream(stream);
+  wire_request.mutable_stream_options()->set_include_usage(true);
+  wire_request.set_response_type(response_kind == "completion"
+                                     ? proto::TEXT_COMPLETION
+                                     : proto::CHAT_COMPLETION);
+  if (response_kind == "tools") {
+    auto* tool = wire_request.add_tools();
+    tool->set_type("function");
+    tool->mutable_function()->set_name("weather");
+    wire_request.set_tool_choice("auto");
+    (*wire_request.mutable_chat_template_kwargs()
+          ->mutable_fields())["enable_thinking"]
+        .set_bool_value(false);
+  }
+  auto request = service.generate_request(wire_request);
+  ASSERT_NE(request, nullptr);
+  const auto& formatter = request->state().response_formatter;
+  ASSERT_TRUE(formatter);
+
+  RequestOutput output;
+  output.finished = true;
+  output.usage = Usage{1, 1, 2, 0};
+  output.outputs.emplace_back();
+  output.outputs.back().index = 0;
+  output.outputs.back().finish_reason = "stop";
+  if (response_kind == "tools") {
+    output.outputs.back().text =
+        "<tool_call>\n{\"name\":\"weather\",\"arguments\":{\"city\":\"Paris\"}}"
+        "\n</tool_call>";
+  } else {
+    output.outputs.back().text =
+        response_kind == "reasoning" ? "<think>why</think>answer" : "answer";
+  }
+  std::optional<ServiceGenerationOutput> formatted;
+  ASSERT_TRUE((*formatter)(output, /*http=*/true, &formatted));
+  ASSERT_TRUE(formatted.has_value());
+  EXPECT_TRUE(formatted->finished);
+  SCOPED_TRACE(formatted->payload);
+
+  std::vector<nlohmann::json> frames;
+  if (stream) {
+    EXPECT_TRUE(formatted->payload.ends_with("data: [DONE]\n\n"));
+    size_t offset = 0;
+    for (size_t end = formatted->payload.find("\n\n", offset);
+         end != std::string::npos;
+         end = formatted->payload.find("\n\n", offset)) {
+      const std::string frame = formatted->payload.substr(offset, end - offset);
+      offset = end + 2;
+      if (frame == "data: [DONE]") {
+        break;
+      }
+      frames.emplace_back(nlohmann::json::parse(frame.substr(6)));
+    }
+  } else {
+    frames.emplace_back(nlohmann::json::parse(formatted->payload));
+  }
+  ASSERT_FALSE(frames.empty());
+  EXPECT_EQ(
+      frames.back()["system_fingerprint"],
+      api_service::openai_system_fingerprint(options, &engine.model_args()));
+  EXPECT_EQ(frames.back()["usage"]["total_tokens"], 2);
+  std::string content;
+  std::string reasoning;
+  std::string function_name;
+  std::string arguments;
+  for (const auto& frame : frames) {
+    for (const auto& choice : frame["choices"]) {
+      if (response_kind == "completion") {
+        content += choice["text"].get<std::string>();
+        continue;
+      }
+      const auto& message = choice[stream ? "delta" : "message"];
+      const auto content_field = message.find("content");
+      if (content_field != message.end() && content_field->is_string()) {
+        content += content_field->get<std::string>();
+      }
+      if (message.contains("reasoning") && message["reasoning"].is_string()) {
+        reasoning += message["reasoning"].get<std::string>();
+      }
+      if (message.contains("tool_calls")) {
+        for (const auto& call : message["tool_calls"]) {
+          function_name += call["function"].value("name", "");
+          arguments += call["function"].value("arguments", "");
+        }
+      }
+    }
+  }
+  if (response_kind == "tools") {
+    EXPECT_EQ(function_name, "weather");
+    EXPECT_EQ(nlohmann::json::parse(arguments)["city"], "Paris");
+  } else {
+    EXPECT_EQ(content, "answer");
+    EXPECT_EQ(reasoning, response_kind == "reasoning" ? "why" : "");
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    GenerationBackends,
+    PDServiceResponseTest,
+    ::testing::Combine(::testing::Values("llm", "vlm"),
+                       ::testing::Bool(),
+                       ::testing::Values("completion", "reasoning", "tools")));
 
 TEST(PDSchedulerTest, DetectsRankPreservingFlatKvGroups) {
   proto::DisaggResponse response;

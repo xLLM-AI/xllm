@@ -183,6 +183,153 @@ std::vector<XXH3Key> ExpectedChain(const std::vector<int32_t>& tokens,
 
 }  // namespace
 
+TEST_F(BlockManagerPoolTest, GroupedFactoryBindsHistoryAndWindowGeometry) {
+  ModelArgs args;
+  args.model_type("deepseek_v4")
+      .n_layers(4)
+      .window_size(128)
+      .max_seq_len(64)
+      .compress_ratios({1, 4, 128, 4});
+  KVCacheCapacity capacity;
+  capacity.n_blocks(256).block_size(8).swa_count(32).c4_count(64).c128_count(2);
+  BlockManagerPool::Options options;
+  // Logical stride includes KV split; the SWA ring uses physical rows.
+  options.num_blocks(256).block_size(16).model_id("grouped");
+  auto result = KVCacheManagerFactory::create(
+      capacity,
+      args,
+      /*world_size=*/1,
+      torch::kBFloat16,
+      options,
+      PrefillPolicy(/*max_batch_tokens=*/512,
+                    /*chunk_tokens=*/512,
+                    /*enable_chunked_prefill=*/false,
+                    /*enable_fair_budget=*/false),
+      /*transfer_coordinator=*/nullptr);
+  auto& pool = static_cast<BlockManagerPool&>(*result.manager);
+  const auto& partitions = pool.options().grouped_partitions();
+  ASSERT_EQ(partitions.size(), 3u);
+  EXPECT_FALSE(pool.paged_partition().has_value());
+  EXPECT_EQ(result.shape.key_cache_shape(), (std::vector<int64_t>{32, 64, 2}));
+  EXPECT_EQ(partitions[0].window_size(), 64);
+  EXPECT_EQ(partitions[0].token_stride(), 16);
+  EXPECT_FALSE(partitions[0].participates_in_admission());
+  EXPECT_EQ(pool.options().swa_blocks_per_seq(), 8u);
+  EXPECT_EQ(partitions[1].token_stride(), 64);
+  EXPECT_EQ(partitions[1].compression_ratio(), 4);
+  EXPECT_EQ(partitions[2].token_stride(), 2048);
+  EXPECT_EQ(partitions[2].compression_ratio(), 128);
+  const auto* window = partitions[0].find_component(CacheComponentRole::KEY);
+  const auto* history = partitions[1].find_component(CacheComponentRole::KEY);
+  const auto* index = partitions[1].find_component(CacheComponentRole::INDEX);
+  const auto* state =
+      partitions[0].find_component(CacheComponentRole::COMPRESS_KV_STATE);
+  ASSERT_NE(window, nullptr);
+  ASSERT_NE(history, nullptr);
+  ASSERT_NE(index, nullptr);
+  ASSERT_NE(state, nullptr);
+  EXPECT_EQ(window->layers, (std::vector<int32_t>{0, 1, 2, 3}));
+  EXPECT_EQ(history->layers, (std::vector<int32_t>{1, 3}));
+  EXPECT_EQ(index->dtype, CacheScalarType::INT8);
+  EXPECT_EQ(state->layers, (std::vector<int32_t>{1, 2, 3}));
+  EXPECT_EQ(state->dtype, CacheScalarType::FLOAT32);
+  const auto* index_state =
+      partitions[0].find_component(CacheComponentRole::COMPRESS_INDEX_KV_STATE);
+  ASSERT_NE(index_state, nullptr);
+  EXPECT_EQ(index_state->layers, history->layers);
+  EXPECT_EQ(partitions[2].find_component(CacheComponentRole::INDEX), nullptr);
+  EXPECT_EQ(partitions[1].id().model_id, "grouped");
+  EXPECT_NE(partitions[0].id().ordinal, partitions[1].id().ordinal);
+
+  Sequence sequence = make_sequence(/*index=*/0, std::vector<int32_t>(64, 7));
+  ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/64));
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::C4), 1u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::C128), 1u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::SWA), 4u);
+  pool.deallocate_without_cache(&sequence);
+}
+
+TEST_F(BlockManagerPoolTest,
+       GroupedFactoryKeepsV41SourceOwnershipAndPrefixGate) {
+  ModelArgs args;
+  args.model_type("deepseek_v41")
+      .n_layers(4)
+      .window_size(16)
+      .compress_ratios({1, 2, 1, 2})
+      .kv_source_layer_ids({1, 2});
+  KVCacheCapacity capacity;
+  capacity.n_blocks(32).block_size(8).swa_count(32).c1_count(32).c2_count(16);
+  BlockManagerPool::Options options;
+  options.num_blocks(32).block_size(8).enable_prefix_cache(true);
+  auto result = KVCacheManagerFactory::create(
+      capacity,
+      args,
+      /*world_size=*/1,
+      torch::kBFloat16,
+      options,
+      PrefillPolicy(/*max_batch_tokens=*/512,
+                    /*chunk_tokens=*/512,
+                    /*enable_chunked_prefill=*/false,
+                    /*enable_fair_budget=*/false),
+      /*transfer_coordinator=*/nullptr);
+  auto& pool = static_cast<BlockManagerPool&>(*result.manager);
+  const auto& partitions = pool.options().grouped_partitions();
+  ASSERT_EQ(partitions.size(), 3u);
+  const auto* c1 = partitions[1].find_component(CacheComponentRole::KEY);
+  const auto* c2 = partitions[2].find_component(CacheComponentRole::INDEX);
+  const auto* state =
+      partitions[0].find_component(CacheComponentRole::COMPRESS_KV_STATE);
+  ASSERT_NE(c1, nullptr);
+  ASSERT_NE(c2, nullptr);
+  ASSERT_NE(state, nullptr);
+  EXPECT_EQ(c1->layers, (std::vector<int32_t>{2}));
+  EXPECT_EQ(c2->layers, (std::vector<int32_t>{1}));
+  EXPECT_EQ(c2->dtype, CacheScalarType::BFLOAT16);
+  EXPECT_EQ(state->layers, (std::vector<int32_t>{1}));
+  EXPECT_FALSE(partitions[1].enable_prefix_cache());
+  EXPECT_FALSE(partitions[2].enable_prefix_cache());
+  Sequence sequence = make_sequence(/*index=*/0, std::vector<int32_t>(32, 7));
+  ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/32));
+  sequence.kv_state().set_kv_cache_tokens_num(32);
+  pool.publish_prefix(&sequence);
+  pool.deallocate(&sequence);
+  EXPECT_EQ(pool.num_blocks_in_prefix_cache(), (std::vector<size_t>{0}));
+}
+
+TEST_F(BlockManagerPoolTest, GroupedFactoryPreservesWindowOnlyDraft) {
+  ModelArgs args;
+  args.model_type("deepseek_v4_mtp")
+      .n_layers(1)
+      .window_size(16)
+      .compress_ratios({1});
+  KVCacheCapacity capacity;
+  capacity.n_blocks(1).block_size(8).swa_count(16);
+  BlockManagerPool::Options options;
+  options.num_blocks(1).block_size(8).enable_prefix_cache(false);
+  auto result = KVCacheManagerFactory::create(
+      capacity,
+      args,
+      /*world_size=*/1,
+      torch::kBFloat16,
+      options,
+      PrefillPolicy(/*max_batch_tokens=*/64,
+                    /*chunk_tokens=*/64,
+                    /*enable_chunked_prefill=*/false,
+                    /*enable_fair_budget=*/false),
+      /*transfer_coordinator=*/nullptr);
+  auto& pool = static_cast<BlockManagerPool&>(*result.manager);
+  ASSERT_EQ(pool.options().grouped_partitions().size(), 1u);
+  const auto& window = pool.options().grouped_partitions().front();
+  EXPECT_TRUE(window.is_sliding_window());
+  EXPECT_EQ(window.components().size(), 1u);
+  Sequence sequence = make_sequence(/*index=*/0, std::vector<int32_t>(16, 7));
+  ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/16));
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::SWA), 2u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::C4), 0u);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::C128), 0u);
+  pool.deallocate(&sequence);
+}
+
 TEST_F(BlockManagerPoolTest,
        SharedFactoryRequiresChunkingAndAlignedStateCheckpoints) {
   BlockManagerPool::Options options;
@@ -213,13 +360,16 @@ TEST_F(BlockManagerPoolTest,
       pool.paged_partition()->find_component(CacheComponentRole::KEY);
   ASSERT_NE(key, nullptr);
   EXPECT_EQ(key->layers, (std::vector<int32_t>{1, 3}));
-  EXPECT_EQ(pool.recurrent_partition()->conv().layers,
-            (std::vector<int32_t>{0, 2}));
-  EXPECT_EQ(pool.recurrent_partition()->ssm().layers,
-            pool.recurrent_partition()->conv().layers);
-  EXPECT_EQ(pool.recurrent_partition()->conv().dtype,
-            CacheScalarType::BFLOAT16);
-  EXPECT_EQ(pool.recurrent_partition()->ssm().dtype, CacheScalarType::FLOAT32);
+  const auto* conv =
+      pool.recurrent_partition()->find_component(CacheComponentRole::CONV);
+  const auto* ssm =
+      pool.recurrent_partition()->find_component(CacheComponentRole::SSM);
+  ASSERT_NE(conv, nullptr);
+  ASSERT_NE(ssm, nullptr);
+  EXPECT_EQ(conv->layers, (std::vector<int32_t>{0, 2}));
+  EXPECT_EQ(ssm->layers, conv->layers);
+  EXPECT_EQ(conv->dtype, CacheScalarType::BFLOAT16);
+  EXPECT_EQ(ssm->dtype, CacheScalarType::FLOAT32);
   EXPECT_TRUE(pool.recurrent_partition()->enable_prefix_cache());
   EXPECT_EQ(pool.recurrent_partition()->ssm_snapshots_per_slot(), 1);
   EXPECT_EQ(
@@ -330,9 +480,13 @@ TEST_F(BlockManagerPoolTest,
   EXPECT_NE(state_partition.id().ordinal, pool.paged_partition()->id().ordinal);
   EXPECT_EQ(state_partition.checkpoint_stride(), 8);
   EXPECT_EQ(state_partition.ssm_snapshots_per_slot(), 3);
-  EXPECT_EQ(state_partition.conv().layers, (std::vector<int32_t>{0, 2, 3}));
-  EXPECT_EQ(state_partition.conv().dtype, CacheScalarType::BFLOAT16);
-  EXPECT_EQ(state_partition.ssm().dtype, CacheScalarType::FLOAT32);
+  const auto* conv = state_partition.find_component(CacheComponentRole::CONV);
+  const auto* ssm = state_partition.find_component(CacheComponentRole::SSM);
+  ASSERT_NE(conv, nullptr);
+  ASSERT_NE(ssm, nullptr);
+  EXPECT_EQ(conv->layers, (std::vector<int32_t>{0, 2, 3}));
+  EXPECT_EQ(conv->dtype, CacheScalarType::BFLOAT16);
+  EXPECT_EQ(ssm->dtype, CacheScalarType::FLOAT32);
   EXPECT_EQ(result.shape.conv_cache_shape().front(), 8);
   EXPECT_EQ(result.shape.ssm_cache_shape().front(), 24);
   const auto* key =
@@ -534,6 +688,88 @@ TEST(KVCacheManagerFactoryTest, MlaKeepsComponentsInOneHistoryPartition) {
     EXPECT_EQ(pool.allocate(/*num_tokens=*/129, rank).size(), 2u);
   }
 }
+
+TEST_F(BlockManagerPoolTest, GlmMtpTailOnlyUsesCheckpointStateWithoutSsmRows) {
+  ModelArgs args;
+  args.model_type("glm5_next_mtp")
+      .n_layers(1)
+      .n_heads(1)
+      .n_kv_heads(1)
+      .head_dim(16)
+      .enable_mla(true)
+      .kv_lora_rank(16)
+      .qk_rope_head_dim(8)
+      .index_n_heads(1)
+      .index_head_dim(8)
+      .index_topk(2)
+      .index_kpool(4)
+      .index_kpool_compress(true)
+      .index_kpool_always_select_tail(true)
+      .full_attention_interval(4)
+      .layer_types({"deepseek_sparse_attention"})
+      .indexer_types({"full"});
+  KVCacheCapacity capacity;
+  capacity.n_blocks(16)
+      .block_size(8)
+      .n_layers(1)
+      .num_linear_state_blocks(8)
+      .linear_ssm_checkpoint_stride(5)
+      .kpool_layout(KPoolCacheLayout::COMPRESSED_WITH_TAIL)
+      .kpool_tail_len(9);
+  BlockManagerPool::Options options;
+  options.num_blocks(16)
+      .block_size(8)
+      .model_id("target::mtp_draft")
+      .enable_prefix_cache(true)
+      .enable_linear_state(true);
+  auto result = KVCacheManagerFactory::create(
+      capacity,
+      args,
+      /*world_size=*/1,
+      torch::kBFloat16,
+      options,
+      PrefillPolicy(/*max_batch_tokens=*/128,
+                    /*chunk_tokens=*/16,
+                    /*enable_chunked_prefill=*/true,
+                    /*enable_fair_budget=*/false),
+      /*transfer_coordinator=*/nullptr);
+  auto& pool = static_cast<BlockManagerPool&>(*result.manager);
+  ASSERT_TRUE(pool.paged_partition().has_value());
+  ASSERT_TRUE(pool.recurrent_partition().has_value());
+  const auto& state = *pool.recurrent_partition();
+  EXPECT_EQ(state.id().model_id, "target::mtp_draft");
+  EXPECT_NE(state.id().ordinal, pool.paged_partition()->id().ordinal);
+  EXPECT_EQ(state.components().size(), 1u);
+  EXPECT_EQ(state.ssm_snapshots_per_slot(), 0);
+  EXPECT_EQ(state.tail_tokens_per_slot(), 9);
+  EXPECT_EQ(state.checkpoint_stride(), 16);
+  EXPECT_TRUE(state.enable_prefix_cache());
+  EXPECT_EQ(state.find_component(CacheComponentRole::CONV), nullptr);
+  EXPECT_EQ(state.find_component(CacheComponentRole::SSM), nullptr);
+  const auto* tail = state.find_component(CacheComponentRole::KPOOL_TAIL);
+  ASSERT_NE(tail, nullptr);
+  EXPECT_EQ(tail->layers, (std::vector<int32_t>{0}));
+  EXPECT_FALSE(result.shape.has_conv_cache_shape());
+  EXPECT_FALSE(result.shape.has_ssm_cache_shape());
+  Sequence source = make_sequence(
+      0, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17});
+  ASSERT_TRUE(pool.allocate(&source));
+  EXPECT_TRUE(source.has_linear_state_slot());
+  auto* state_pool = BlockManagerPoolTestPeer::linear_leaf(pool, 0);
+  ASSERT_NE(state_pool, nullptr);
+  const PrefixHash hash = compute_linear_state_prefix_hash_for_test(
+      source.tokens(), state_pool->block_size(), /*boundary_tokens=*/16);
+  source.kv_state().set_kv_cache_tokens_num(source.num_tokens());
+  pool.publish_prefix(&source);
+  pool.deallocate_without_cache(&source);
+  ASSERT_GE(insert_linear_state_checkpoint(state_pool, hash), 1);
+  Sequence repeated = make_sequence(
+      1, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17});
+  pool.allocate_shared(&repeated);
+  EXPECT_EQ(repeated.kv_cache_tokens_num(), 16u);
+  pool.deallocate_without_cache(&repeated);
+}
+
 #endif
 
 TEST(KVCacheManagerFactoryTest,

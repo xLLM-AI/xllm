@@ -54,6 +54,10 @@ class CancelRequestQueue final {
 };
 
 struct SchedulerOptions {
+  PROPERTY(bool, enable_graph) = false;
+
+  PROPERTY(bool, disable_graph_warmup) = false;
+
   // the maximum number of tokens per batch
   PROPERTY(int32_t, max_tokens_per_batch) = 20000;
 

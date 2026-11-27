@@ -57,7 +57,7 @@ BlockManagerPool::BlockManagerPool(
       options_(options) {
   CHECK(dp_size > 0) << "dp_size must be greater than 0";
   if (paged_partition_.has_value()) {
-    CHECK(options_.manager_types().empty());
+    CHECK(options_.grouped_partitions().empty());
     // The pool construction adapter is the only partition-to-legacy-options
     // bridge. Remove it when all leaf constructors accept their own cache
     // descriptions.
@@ -66,7 +66,7 @@ BlockManagerPool::BlockManagerPool(
         .model_id(paged_partition_->id().model_id);
   }
   if (recurrent_partition_.has_value()) {
-    CHECK(options_.manager_types().empty());
+    CHECK(options_.grouped_partitions().empty());
     CHECK_EQ(recurrent_partition_->enable_prefix_cache(),
              options_.enable_prefix_cache() && !options_.instance_is_decode());
     if (paged_partition_.has_value()) {
@@ -86,7 +86,8 @@ BlockManagerPool::BlockManagerPool(
     CHECK(!options_.enable_disagg_pd() || !options_.instance_is_decode())
         << "KV events in disaggregated PD require a PREFILL instance";
     CHECK(options_.enable_prefix_cache() && !options_.enable_vmm_kvcache() &&
-          !options_.enable_linear_state() && options_.manager_types().empty() &&
+          !options_.enable_linear_state() &&
+          options_.grouped_partitions().empty() &&
           options_.hasher_type() == BlockHasherType::TEXT &&
           !options_.enable_kvcache_store())
         << "KV events currently support text, flat KV prefix caches with local "
@@ -109,12 +110,10 @@ BlockManagerPool::BlockManagerPool(
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
       .enable_host_offload(options_.enable_host_offload())
-      .sliding_window_size(options_.sliding_window_size())
       .swa_blocks_per_seq(options_.swa_blocks_per_seq())
       .swa_num_blocks(options_.swa_num_blocks())
       .max_tokens_per_batch(options_.max_tokens_per_batch())
-      .manager_types(options_.manager_types())
-      .compress_ratios(options_.compress_ratios())
+      .grouped_partitions(options_.grouped_partitions())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .hasher_type(options_.hasher_type())
       .enable_vmm_kvcache(options_.enable_vmm_kvcache())
@@ -139,7 +138,7 @@ BlockManagerPool::BlockManagerPool(
     // The pool always holds a CompositeBlockManager. Its KV leaf is a flat
     // BlockManagerImpl, or a VmmKVBlockManager when
     // enable_vmm_kvcache (the builder picks); SWA / C4 / C128 come from
-    // manager_types; the LINEAR leaf is added by the builder when
+    // grouped partitions; the LINEAR leaf is added by the builder when
     // enable_linear_state. The per-sequence EMBEDDING resource leaf is appended
     // here under the EMBEDDING key when spec decode needs it. Every leaf is
     // routed by its BlockType.

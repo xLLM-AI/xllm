@@ -164,6 +164,35 @@ class ArgumentParser:
             help="Whether to enable graph execution for offline inference.",
         )
         self.parser.add_argument(
+            "--acl_graph_decode_batch_size_limit",
+            type=int,
+            default=16,
+            help="Maximum per-DP-rank decode batch size for NPU graph execution.",
+        )
+        self.parser.add_argument(
+            "--block_draft_graph_warmup_max_kv_len",
+            type=int,
+            default=0,
+            help="Block-draft graph KV warmup limit: 0 covers full context, -1 captures lazily, "
+            "and a positive value bounds proactive capture.",
+        )
+        self.parser.add_argument(
+            "--disable_graph_warmup",
+            nargs="?",
+            const=True,
+            default=False,
+            type=_str_to_bool,
+            help="Skip synthetic graph warmup at startup; capture graphs lazily from real requests.",
+        )
+        self.parser.add_argument(
+            "--enable_graph_double_buffer",
+            nargs="?",
+            const=True,
+            default=True,
+            type=_str_to_bool,
+            help="Whether to use double buffering for NPU graph execution.",
+        )
+        self.parser.add_argument(
             "--enable_graph_mode_decode_no_padding",
             nargs="?",
             const=True,

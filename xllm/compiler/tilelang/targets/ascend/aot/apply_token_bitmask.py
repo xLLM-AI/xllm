@@ -13,21 +13,17 @@
 # limitations under the License.
 
 import tilelang
-
-from xllm.python.kernels_npu.tilelang import (
-    apply_token_bitmask as kernel_impl,
-)
-from xllm.python.kernels_npu.tilelang import (
-    utils as tilelang_utils,
-)
-from xllm.python.kernels_npu.tilelang.apply_token_bitmask import (
+from compiler.tilelang.common.spec import DispatchField, TilelangKernel, register_kernel
+from xllm_kernel.ops.sampling._tilelang import _apply_token_bitmask as kernel_impl
+from xllm_kernel.ops.sampling._tilelang._apply_token_bitmask import (
     DEFAULT_ASCEND_PASS_CONFIGS,
     SUPPORTED_DTYPES,
     build_apply_token_bitmask_kernel,
-    detect_vec_core_num,
 )
 
-from ....common.spec import DispatchField, TilelangKernel, register_kernel
+from xllm.python.kernels_npu.tilelang import (
+    utils as tilelang_utils,
+)
 
 DEPENDENCY_MODULES = (kernel_impl, tilelang_utils)
 
@@ -48,7 +44,7 @@ class ApplyTokenBitmaskKernel(TilelangKernel):
         tilelang.disable_cache()
         tilelang_kernel = build_apply_token_bitmask_kernel(
             dtype=dtype,
-            vec_core_num=detect_vec_core_num(),
+            vec_core_num=tilelang_utils.detect_vec_core_num(),
         )
         with tilelang.tvm.transform.PassContext(opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS):
             kernel = tilelang.engine.lower(tilelang_kernel)

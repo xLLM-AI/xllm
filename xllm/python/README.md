@@ -263,6 +263,61 @@ With `--python_model_path` pointing to the checkout root, a service restart
 picks up Python model and layer edits. Changes to C++ or Python DSL kernels
 compiled into native AOT artifacts require rebuilding those artifacts.
 
+## Decode input layout
+
+`num_speculative_tokens` describes the speculative candidate budget. The input
+builder receives `DecodeInputOptions.query_width`, the actual number of query
+token rows per request. Workers resolve this width before constructing inputs;
+input expansion and parallel token accounting consume the resolved width.
+For a candidate budget of `K`, the current producers use:
+
+| Execution role | Query width | Attention semantics | Logits selection |
+| --- | --- | --- | --- |
+| Ordinary decode | 1 | Causal decode | One position per request. |
+| Target verify | K + 1 | Causal verification | All verification positions. |
+| MTP/Eagle draft decode | 1 | Causal decode | One proposal per iteration. |
+| MTP tail repair | Up to 2 | Causal repair | Existing repair selection. |
+| DFlash/DFlash2 draft | K + 1 | Non-causal block | Last K query positions. |
+| DSpark draft | K | Non-causal block | All K query positions. |
+
+`per_request` selects how attention metadata is represented: one row per
+request, or expanded token rows. It does not change the logical query width.
+`causal` independently controls the visible KV lengths during expansion.
+The worker retains responsibility for the execution role and sampling indices.
+
+`execution_batch.num_scheduled_tokens` preserves logical request widths even
+when attention metadata has been expanded. `PyAttentionMetadataView` snapshots
+the common width as `decode_query_width`; variable-width or absent request
+layouts produce `None`. A dummy rank with no logical requests uses the physical
+token count of its complete dummy block. ACL graph shape and request bucketing
+consume this width instead of reconstructing it from the candidate budget.
+Graph-owned static metadata retains the same width during capture and replay.
+
+### Decode graph preparation
+
+`DecodeAclGraphRunner` handles ordinary, expanded verification and non-causal
+multi-token decode through the same call sequence:
+`prepare_execution` → `warmup` → `execute`. Admission returns `None` for an
+unsupported layout before graph capture or replay starts. An admitted
+step returns `DecodeAclGraphPreparation`, which borrows the normalized attention
+metadata, records the padded physical token count, and retains any resolved
+expanded/KV metadata. The executor passes this result to both later calls and
+keeps it local to that execution; callers must prepare again after scheduler
+metadata changes.
+
+The runner's `max_batch` always counts physical token rows, including every
+query token of a non-causal request. The executor rounds the per-rank request
+budget before expanding it to token capacity. Non-causal graph keys include the
+padded token count, query width and page capacity; DP padding preserves complete
+requests. Their KV tables retain one row per request, while causal decode keeps
+its existing per-token KV representation. Both layouts share graph preparation,
+capture, replay and DP coordination, with layout-specific buffer filling.
+
+The runner owns its KV capacity tiers and uses `is_graph_warmup` to select
+startup pre-capture. Non-causal attention still uses the existing chunked-prefill
+metadata flags and block-draft warmup setting; those producer/configuration
+boundaries remain separate follow-up work.
+
 ## Adding an operator
 
 1. Add the implementation under the matching platform package's framework

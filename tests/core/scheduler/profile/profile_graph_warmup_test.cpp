@@ -23,6 +23,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/common/options.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/execution_config.h"
@@ -316,8 +317,8 @@ class LinearProfileGraphWarmupTest
     SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 4;
     SchedulerConfig::get_instance().enable_chunked_prefill() = true;
     SchedulerConfig::get_instance().enable_dp_fair_token_budget() = false;
-    ExecutionConfig::get_instance().enable_graph() = true;
-    ExecutionConfig::get_instance().disable_graph_warmup() = false;
+    ExecutionConfig::get_instance().enable_graph() = false;
+    ExecutionConfig::get_instance().disable_graph_warmup() = true;
   }
 
   void TearDown() override {
@@ -329,7 +330,8 @@ class LinearProfileGraphWarmupTest
                                   int32_t token_budget = 10,
                                   int32_t sequence_budget = 4) const {
     ProfileManager::Options options;
-    options.instance_role(role)
+    options.enable_graph(true)
+        .instance_role(role)
         .enable_dp_fair_token_budget(false)
         .enable_chunked_prefill(true)
         .max_tokens_per_chunk_for_prefill(4)
@@ -417,14 +419,15 @@ TEST_P(LinearProfileGraphWarmupTest, PrefillRespectsSequenceLimit) {
 }
 
 TEST_P(LinearProfileGraphWarmupTest, EagerWarmupAcceptsMoreThanOneCheckpoint) {
-  ExecutionConfig::get_instance().enable_graph() = false;
   RecordingProfileEngine engine(
       /*overlap=*/std::get<0>(GetParam()),
       /*dp_size=*/1,
       /*linear_attention=*/true,
       InstanceRole::PREFILL,
       std::get<1>(GetParam()));
-  ProfileManager profile_manager(&engine, options(InstanceRole::PREFILL));
+  ProfileManager::Options profile_options = options(InstanceRole::PREFILL);
+  profile_options.enable_graph(false);
+  ProfileManager profile_manager(&engine, profile_options);
   EXPECT_EQ(engine.prefill_batches(),
             (std::vector<std::vector<int32_t>>{{10}}));
   EXPECT_EQ(engine.block_manager_pool()->num_used_blocks(),
@@ -433,14 +436,15 @@ TEST_P(LinearProfileGraphWarmupTest, EagerWarmupAcceptsMoreThanOneCheckpoint) {
 
 TEST_P(LinearProfileGraphWarmupTest,
        ProfilingAcceptsUnalignedPrefixAndLongQuery) {
-  ExecutionConfig::get_instance().disable_graph_warmup() = true;
   RecordingProfileEngine engine(
       /*overlap=*/std::get<0>(GetParam()),
       /*dp_size=*/1,
       /*linear_attention=*/true,
       InstanceRole::PREFILL,
       std::get<1>(GetParam()));
-  ProfileManager profile_manager(&engine, options(InstanceRole::PREFILL));
+  ProfileManager::Options profile_options = options(InstanceRole::PREFILL);
+  profile_options.disable_graph_warmup(true);
+  ProfileManager profile_manager(&engine, profile_options);
   profile_manager.run_request(10, 3);
   profile_manager.run_request(8, 0);
   EXPECT_EQ(engine.prefill_batches(),
@@ -549,10 +553,12 @@ TEST(DecodeGraphWarmupPlanTest, JointCoverageUsesLocalDpGeometryAndGraphLimit) {
           SCOPED_TRACE(width);
           SCOPED_TRACE(dp_size);
           SCOPED_TRACE(local_capacity);
-          ExecutionConfig execution;
-          execution.acl_graph_decode_batch_size_limit(8);
-          const auto config =
-              execution.decode_graph_warmup_config(width, false, algorithm);
+          Options instance_options;
+          instance_options.acl_graph_decode_batch_size_limit(8)
+              .num_speculative_tokens(width)
+              .enable_graph_mode_decode_no_padding(false)
+              .speculative_algorithm(algorithm);
+          const auto config = instance_options.decode_graph_warmup_config();
           const int32_t global_capacity = local_capacity * dp_size;
           const auto plan =
               build_decode_graph_warmup_plan(config, global_capacity, dp_size);
@@ -940,9 +946,7 @@ TEST(GraphWarmupTest, DecodeProfileUsesConfiguredSpeculativeGeometry) {
       .dp_size(1)
       .instance_role(InstanceRole::DECODE)
       .decode_graph_warmup_config(
-          ExecutionConfig::get_instance().decode_graph_warmup_config(
-              /*num_speculative_tokens=*/3,
-              /*enable_no_padding=*/false));
+          Options().num_speculative_tokens(3).decode_graph_warmup_config());
   ProfileManager profile_manager(&engine, options);
 
   profile_manager.profile_decode_step_time(/*token_length=*/5,
@@ -954,6 +958,61 @@ TEST(GraphWarmupTest, DecodeProfileUsesConfiguredSpeculativeGeometry) {
   EXPECT_EQ(engine.observed_kv_capacities(), (std::vector<size_t>{12, 12, 12}));
   EXPECT_EQ(engine.observed_bootstrap_embeddings(),
             (std::vector<bool>{true, true, true}));
+}
+
+TEST(GraphWarmupTest, StartupWarmupUsesInstanceModeAndRole) {
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
+  ScopedDecodeGraphConfigSnapshot snapshot;
+  for (const bool graph : {false, true}) {
+    for (const bool disabled : {false, true}) {
+      for (const bool overlap : {false, true}) {
+        for (const InstanceRole role : {InstanceRole::DEFAULT,
+                                        InstanceRole::PREFILL,
+                                        InstanceRole::DECODE,
+                                        InstanceRole::MIX}) {
+          SCOPED_TRACE(graph);
+          SCOPED_TRACE(disabled);
+          SCOPED_TRACE(overlap);
+          SCOPED_TRACE(role.to_string());
+          ExecutionConfig::get_instance()
+              .enable_graph(!graph)
+              .disable_graph_warmup(!disabled);
+          RecordingProfileEngine engine(overlap);
+          const auto blocks_before =
+              engine.block_manager_pool()->num_used_blocks();
+          ProfileManager::Options options;
+          options.enable_graph(graph)
+              .disable_graph_warmup(disabled)
+              .max_tokens_per_batch(4)
+              .max_seqs_per_batch(2)
+              .enable_schedule_overlap(overlap)
+              .instance_role(role);
+          ProfileManager manager(&engine, options);
+          std::vector<int32_t> expected;
+          expected.reserve(3);
+          if (graph && !disabled) {
+            if (role != InstanceRole::DECODE) {
+              expected.emplace_back(1);
+            }
+            if (role != InstanceRole::PREFILL) {
+              expected.emplace_back(2);
+              expected.emplace_back(1);
+            }
+          } else if (Platform::is_npu() && !graph &&
+                     role != InstanceRole::DECODE) {
+            expected.emplace_back(1);
+          }
+          EXPECT_EQ(engine.observed_batches(), expected);
+          EXPECT_EQ(engine.pending_steps(), 0);
+          EXPECT_EQ(engine.block_manager_pool()->num_used_blocks(),
+                    blocks_before);
+        }
+      }
+    }
+  }
+#else
+  GTEST_SKIP() << "Startup warmup requires a device execution platform.";
+#endif
 }
 
 TEST(GraphWarmupTest, OrdinaryStepsWarmBucketsAndDrainBeforeReleasingKv) {
@@ -969,13 +1028,18 @@ TEST(GraphWarmupTest, OrdinaryStepsWarmBucketsAndDrainBeforeReleasingKv) {
     RecordingProfileEngine engine(overlap);
     const auto used_blocks = engine.block_manager_pool()->num_used_blocks();
     ProfileManager::Options options;
-    options.max_tokens_per_batch(4)
+    options.enable_graph(true)
+        .max_tokens_per_batch(4)
         .max_seqs_per_batch(4)
         .dp_size(1)
         .enable_schedule_overlap(overlap)
         .enable_profile_step_time(false)
         .enable_profile_kv_blocks(false)
-        .instance_role(InstanceRole::DECODE);
+        .instance_role(InstanceRole::DECODE)
+        .decode_graph_warmup_config(make_decode_graph_warmup_config(
+            /*num_speculative_tokens=*/0,
+            /*enable_no_padding=*/false,
+            /*max_graph_batch_size=*/4));
     ProfileManager profile_manager(&engine, options);
     EXPECT_EQ(engine.observed_batches(), (std::vector<int32_t>{4, 2, 1}));
     EXPECT_EQ(engine.pending_steps(), 0);
@@ -987,6 +1051,41 @@ TEST(GraphWarmupTest, OrdinaryStepsWarmBucketsAndDrainBeforeReleasingKv) {
   config.acl_graph_decode_batch_size_limit(previous_limit);
 #else
   GTEST_SKIP() << "Startup graph warmup is disabled on this platform.";
+#endif
+}
+
+TEST(GraphWarmupTest, DecodeLimitUsesInstanceOptionsAcrossDpGroups) {
+#if defined(USE_NPU)
+  ScopedDecodeGraphConfigSnapshot snapshot;
+  auto& config = ExecutionConfig::get_instance();
+  config.enable_graph(true).disable_graph_warmup(false);
+  for (const int32_t dp_size : {1, 2}) {
+    for (const int32_t limit : {1, 2}) {
+      SCOPED_TRACE(dp_size);
+      SCOPED_TRACE(limit);
+      config.acl_graph_decode_batch_size_limit(limit == 1 ? 2 : 1);
+      RecordingProfileEngine engine(/*overlap=*/false, dp_size);
+      const auto blocks_before = engine.block_manager_pool()->num_used_blocks();
+      ProfileManager::Options options;
+      options.enable_graph(true)
+          .max_tokens_per_batch(8)
+          .max_seqs_per_batch(4)
+          .dp_size(dp_size)
+          .instance_role(InstanceRole::DECODE)
+          .decode_graph_warmup_config(make_decode_graph_warmup_config(
+              /*num_speculative_tokens=*/0,
+              /*enable_no_padding=*/false,
+              limit));
+      ProfileManager manager(&engine, options);
+      const auto& batches = engine.observed_batches();
+      ASSERT_FALSE(batches.empty());
+      EXPECT_EQ(*std::max_element(batches.begin(), batches.end()),
+                limit * dp_size);
+      EXPECT_EQ(engine.block_manager_pool()->num_used_blocks(), blocks_before);
+    }
+  }
+#else
+  GTEST_SKIP() << "ACL decode batch limits apply only on NPU.";
 #endif
 }
 
@@ -1009,7 +1108,8 @@ TEST(GraphWarmupTest, PythonNoPaddingWarmsEverySequenceCount) {
         const std::vector<size_t> used_before =
             engine.block_manager_pool()->num_used_blocks();
         ProfileManager::Options options;
-        options.max_tokens_per_batch(20)
+        options.enable_graph(true)
+            .max_tokens_per_batch(20)
             .max_seqs_per_batch(4)
             .dp_size(1)
             .enable_schedule_overlap(overlap)
@@ -1111,7 +1211,9 @@ TEST(GraphWarmupTest, VmmGraphWarmupCanBeDisabled) {
   const std::vector<size_t> used_before =
       engine.block_manager_pool()->num_used_blocks();
   ProfileManager::Options options;
-  options.max_tokens_per_batch(20)
+  options.enable_graph(true)
+      .disable_graph_warmup(true)
+      .max_tokens_per_batch(20)
       .max_seqs_per_batch(4)
       .dp_size(2)
       .enable_schedule_overlap(true)

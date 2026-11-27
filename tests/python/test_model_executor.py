@@ -50,9 +50,6 @@ from xllm.python.model_executor.forward_context import (  # noqa: E402
     record_layer_event,
 )
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry
-from xllm.python.model_executor.runners.block_draft_acl_graph import (  # noqa: E402
-    BlockDraftAclGraphRunner,
-)
 from xllm.python.model_executor.runners.decode_acl_graph import (  # noqa: E402
     DecodeAclGraphRunner,
 )
@@ -190,7 +187,6 @@ class TestCreateAttentionBackend:
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["device"] is device
         assert backend.init_kwargs["attn_head_dim"] == 512
-        assert backend.init_kwargs["dspark_use_native_sas"] is False
         assert backend.init_kwargs["n_layers"] == 3
         assert backend.init_kwargs["compress_ratios"] == [1, 4, 128]
 
@@ -752,6 +748,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             kv_seq_lens=torch.tensor([4, 8], dtype=torch.int32),
             q_seq_lens=torch.tensor([2, 2], dtype=torch.int32),
             q_seq_lens_host=torch.tensor([2, 2], dtype=torch.int32),
+            decode_query_width=2,
             num_speculative_tokens=1,
             is_target_verify=True,
             expanded_decode_metadata=SimpleNamespace(
@@ -1402,6 +1399,7 @@ def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device
         is_prefill=False,
         is_chunked_prefill=expanded,
         is_target_verify=expanded,
+        decode_query_width=len(lengths) if expanded else 1,
         dp_execution_token_counts=(),
     )
     if expanded:
@@ -1793,7 +1791,7 @@ class TestExecuteRouting:
             None,
             None,
             eplb=None,
-            decode_metadata=graph_runner.prepare_execution.return_value,
+            preparation=graph_runner.prepare_execution.return_value,
             is_graph_warmup=False,
             input_batch=None,
         )
@@ -1805,7 +1803,7 @@ class TestExecuteRouting:
             None,
             graph_key=graph_runner.warmup.return_value,
             eplb=None,
-            decode_metadata=graph_runner.prepare_execution.return_value,
+            preparation=graph_runner.prepare_execution.return_value,
             input_batch=None,
         )
         assert torch.equal(result, torch.ones(4))
@@ -1947,7 +1945,7 @@ def test_mtp_topk_routes_to_acl_graph(mock_create):
         topk,
         graph_key=graph_runner.warmup.return_value,
         eplb=None,
-        decode_metadata=graph_runner.prepare_execution.return_value,
+        preparation=graph_runner.prepare_execution.return_value,
         input_batch=None,
     )
     assert result is graph_runner.execute.return_value
@@ -2190,10 +2188,11 @@ def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
     ):
         executor = ModelExecutor(model, config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=2)
     runner = executor.decode_graph_runner
-    assert isinstance(runner, BlockDraftAclGraphRunner)
+    assert isinstance(runner, DecodeAclGraphRunner)
     assert runner.dp_size == dp_size
     assert runner.dp_rank == dp_size - 1
-    assert runner.max_batch == min((5 + dp_size - 1) // dp_size, 2)
+    assert runner.max_batch == min((5 + dp_size - 1) // dp_size, 2) * 6
+    assert not runner._causal
     assert executor.context_kv_graph_runner is not None
 
 
@@ -2209,14 +2208,15 @@ def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> Non
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
         executor = ModelExecutor(model, config, max_seqs_per_batch=2)
-    assert isinstance(executor.decode_graph_runner, BlockDraftAclGraphRunner)
-    assert executor.decode_graph_runner.max_batch == 2
+    assert isinstance(executor.decode_graph_runner, DecodeAclGraphRunner)
+    assert executor.decode_graph_runner.max_batch == 16
+    assert not executor.decode_graph_runner._causal
     executor._kv_bound = True
     tokens = torch.zeros(16, dtype=torch.int32)
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
     with (
         patch.object(executor.context_kv_graph_runner, "warmup") as warmup,
-        patch.object(executor.decode_graph_runner, "can_execute", return_value=False),
+        patch.object(executor.decode_graph_runner, "prepare_execution", return_value=None),
         patch.object(executor.eager_runner, "execute"),
     ):
         executor.execute(tokens, tokens, metadata, is_graph_warmup=True)
@@ -2242,7 +2242,7 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
     with (
         patch.object(executor.context_kv_graph_runner, "warmup") as warmup,
-        patch.object(executor.decode_graph_runner, "can_execute", return_value=False),
+        patch.object(executor.decode_graph_runner, "prepare_execution", return_value=None),
         patch.object(executor.eager_runner, "execute", return_value=torch.zeros(12, 4)),
     ):
         executor.execute(tokens, positions, metadata, is_graph_warmup=True)
@@ -2251,7 +2251,8 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
     warmup.assert_called_once_with(14)
 
 
-def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None:
+@pytest.mark.parametrize("is_graph_warmup", [False, True])
+def test_executor_uses_block_draft_preparation_for_warmup_and_replay(is_graph_warmup: bool) -> None:
     config = {
         "model_type": "DSparkDraftModel",
         "num_speculative_tokens": 2,
@@ -2265,18 +2266,21 @@ def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None
         executor = ModelExecutor(model, config, max_seqs_per_batch=4)
     executor._kv_bound = True
     runner = executor.decode_graph_runner
-    assert isinstance(runner, BlockDraftAclGraphRunner)
+    assert isinstance(runner, DecodeAclGraphRunner)
     tokens = torch.arange(2, dtype=torch.int32)
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
     graph_key = ("block-key",)
     expected = torch.ones(2, 4)
     with (
-        patch.object(runner, "prepare_execution", side_effect=AssertionError("ordinary decode admission")),
-        patch.object(runner, "can_execute", return_value=True),
-        patch.object(runner, "warmup", return_value=graph_key),
+        patch.object(runner, "prepare_execution", return_value=object()) as prepare,
+        patch.object(runner, "warmup", return_value=graph_key) as warmup,
         patch.object(runner, "execute", return_value=expected) as execute,
     ):
-        assert executor.execute(tokens, tokens, metadata) is expected
+        assert executor.execute(tokens, tokens, metadata, is_graph_warmup=is_graph_warmup) is expected
+    prepare.assert_called_once_with(tokens, metadata, None, None, is_graph_warmup=is_graph_warmup)
+    assert warmup.call_args.kwargs["preparation"] is prepare.return_value
+    assert warmup.call_args.kwargs["is_graph_warmup"] is is_graph_warmup
+    assert execute.call_args.kwargs["preparation"] is prepare.return_value
     assert execute.call_args.kwargs["graph_key"] is graph_key
 
 

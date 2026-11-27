@@ -27,12 +27,22 @@ namespace xllm {
 PagedCachePartition::PagedCachePartition(CachePartitionId id,
                                          int32_t token_stride,
                                          bool enable_prefix_cache,
-                                         std::vector<CacheComponent> components)
+                                         std::vector<CacheComponent> components,
+                                         int32_t compression_ratio,
+                                         int32_t window_size)
     : id_(std::move(id)),
       token_stride_(token_stride),
+      compression_ratio_(compression_ratio),
+      window_size_(window_size),
       enable_prefix_cache_(enable_prefix_cache),
       components_(std::move(components)) {
   CHECK_GT(token_stride_, 0) << "Paged cache token stride must be positive";
+  CHECK_GT(compression_ratio_, 0) << "Compression ratio must be positive";
+  CHECK_EQ(token_stride_ % compression_ratio_, 0)
+      << "Token stride must contain complete compressed rows";
+  CHECK_GE(window_size_, 0) << "Window size cannot be negative";
+  CHECK(!is_sliding_window() || compression_ratio_ == 1)
+      << "Sliding windows use uncompressed token rows";
   CHECK(!components_.empty())
       << "Paged cache partition must contain components";
   std::unordered_set<CacheComponentRole> roles;

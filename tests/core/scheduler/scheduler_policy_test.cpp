@@ -34,6 +34,7 @@ limitations under the License.
 
 #include "continuous_scheduler.h"
 #include "core/common/types.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -609,6 +610,51 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
 };
 
 }  // namespace
+
+TEST(SchedulerWarmupTest, ForwardsInstanceModeToProfileManager) {
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
+  class WarmupEngine final : public FakeEngine {
+   public:
+    WarmupEngine() : FakeEngine(/*num_blocks=*/64, /*block_size=*/4) {
+      warmup_args_.vocab_size(128).max_position_embeddings(16);
+    }
+    const ModelArgs& model_args() const override { return warmup_args_; }
+    ForwardOutput step(BatchGroup& /*batch*/) override {
+      ++steps_;
+      return {};
+    }
+    int32_t steps() const { return steps_; }
+
+   private:
+    ModelArgs warmup_args_;
+    int32_t steps_ = 0;
+  };
+  for (const bool graph : {false, true}) {
+    for (const bool disabled : {false, true}) {
+      SCOPED_TRACE(graph);
+      SCOPED_TRACE(disabled);
+      ScopedConfigValue<bool> graph_guard(
+          ExecutionConfig::get_instance().enable_graph(), !graph);
+      ScopedConfigValue<bool> warmup_guard(
+          ExecutionConfig::get_instance().disable_graph_warmup(), !disabled);
+      WarmupEngine engine;
+      SchedulerOptions options;
+      options.enable_graph(graph)
+          .disable_graph_warmup(disabled)
+          .max_tokens_per_batch(4)
+          .max_seqs_per_batch(2)
+          .enable_schedule_overlap(false)
+          .instance_role(InstanceRole::DECODE);
+      TestableContinuousScheduler scheduler(&engine, options);
+      EXPECT_EQ(engine.steps(), graph && !disabled ? 2 : 0);
+      EXPECT_EQ(engine.block_manager_pool()->num_used_blocks(),
+                (std::vector<size_t>{0}));
+    }
+  }
+#else
+  GTEST_SKIP() << "Startup warmup requires a device execution platform.";
+#endif
+}
 
 TEST(SchedulerBatchModeTest, ExplicitOptionsOverrideConflictingGlobals) {
   ScopedConfigValue<bool> mix_batch_guard(

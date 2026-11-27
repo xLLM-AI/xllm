@@ -80,6 +80,9 @@ limitations under the License.
 // @enable_chunked_prefill
 // @enable_dp_fair_token_budget
 // @vae_size (optional, Python DiT)
+// @enable_graph_double_buffer (optional)
+// @acl_graph_decode_batch_size_limit (optional)
+// @block_draft_graph_warmup_max_kv_len (optional)
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -112,6 +115,32 @@ int main(int argc, char* argv[]) {
     LOG(ERROR)
         << "Spawn worker process received invalid prefill args: "
            "expected positive chunk tokens and 0/1 chunked/fair switches.";
+    return 1;
+  }
+
+  const std::optional<bool> enable_graph_double_buffer =
+      xllm::spawn_worker_protocol::parse_graph_double_buffer(argc, argv);
+  if (!enable_graph_double_buffer.has_value()) {
+    LOG(ERROR) << "Spawn worker process received invalid graph double-buffer "
+                  "argument: expected 0 or 1.";
+    return 1;
+  }
+
+  const std::optional<int32_t> graph_decode_batch_size_limit =
+      xllm::spawn_worker_protocol::parse_graph_decode_batch_size_limit(argc,
+                                                                       argv);
+  if (!graph_decode_batch_size_limit.has_value()) {
+    LOG(ERROR) << "Spawn worker process received invalid graph decode batch "
+                  "size limit.";
+    return 1;
+  }
+
+  const std::optional<int32_t> block_draft_graph_warmup_max_kv_len =
+      xllm::spawn_worker_protocol::parse_block_draft_graph_warmup_max_kv_len(
+          argc, argv);
+  if (!block_draft_graph_warmup_max_kv_len.has_value()) {
+    LOG(ERROR) << "Spawn worker process received invalid block-draft graph "
+                  "warmup KV length.";
     return 1;
   }
 
@@ -215,6 +244,11 @@ int main(int argc, char* argv[]) {
       << ", npu_kernel_backend = " << npu_kernel_backend
       << ", rank_tablefile = " << rank_tablefile
       << ", enable_graph = " << enable_graph
+      << ", enable_graph_double_buffer = " << enable_graph_double_buffer.value()
+      << ", acl_graph_decode_batch_size_limit = "
+      << graph_decode_batch_size_limit.value()
+      << ", block_draft_graph_warmup_max_kv_len = "
+      << block_draft_graph_warmup_max_kv_len.value()
       << ", enable_graph_mode_decode_no_padding = "
       << enable_graph_mode_decode_no_padding
       << ", enable_prefill_piecewise_graph = " << enable_prefill_piecewise_graph
@@ -286,7 +320,10 @@ int main(int argc, char* argv[]) {
                                    model_impl,
                                    extension_impl,
                                    std::move(eplb_worker_config.value()),
-                                   prefill_config.value());
+                                   prefill_config.value(),
+                                   enable_graph_double_buffer.value(),
+                                   graph_decode_batch_size_limit.value(),
+                                   block_draft_graph_warmup_max_kv_len.value());
 
     worker.run();
   }

@@ -517,9 +517,10 @@ TEST_F(MluGraphExecutorTest, SpecVerifyFallsBackAndNonSpecStillCaptures) {
 
 TEST_F(MluGraphExecutorTest, LargeDecodeBucketCapturesThenReplays) {
   ScopedConfigSnapshot config_snapshot;
-  ExecutionConfig::get_instance().max_tokens_for_graph_mode(128);
+  ExecutionConfig::get_instance().max_tokens_for_graph_mode(1);
   options_.is_draft_engine(false);
-  options_.max_seqs_per_batch(128);
+  // The sequence capacity remains the lower bound for the graph token limit.
+  options_.max_tokens_for_graph_mode(1).max_seqs_per_batch(128);
   rebuild_impl();
 
   const int32_t batch_size = 65;
@@ -546,42 +547,48 @@ TEST_F(MluGraphExecutorTest, LargeDecodeBucketCapturesThenReplays) {
   EXPECT_EQ(model_->last_tokens_size(), 80);
 }
 
-TEST_F(MluGraphExecutorTest, OverConfiguredTokenLimitFallsBackToEager) {
+TEST_F(MluGraphExecutorTest, RoundedBucketRespectsInstanceTokenLimit) {
   ScopedConfigSnapshot config_snapshot;
-  ExecutionConfig::get_instance().max_tokens_for_graph_mode(33);
+  ExecutionConfig::get_instance().max_tokens_for_graph_mode(128);
   options_.is_draft_engine(false);
-  options_.max_seqs_per_batch(33);
-  rebuild_impl();
+  for (const int32_t token_limit : {33, 48}) {
+    SCOPED_TRACE(token_limit);
+    options_.max_tokens_for_graph_mode(token_limit).max_seqs_per_batch(33);
+    rebuild_impl();
+    options_.max_tokens_for_graph_mode(1);
 
-  const int32_t batch_size = 33;
-  const uint64_t seed = 79;
-  auto forward_input = prepare_inputs(batch_size, seed);
-  const int32_t start_cnt = model_->forward_cnt();
+    const int32_t batch_size = 33;
+    const uint64_t seed = 79;
+    auto forward_input = prepare_inputs(batch_size, seed);
+    const int32_t start_cnt = model_->forward_cnt();
 
-  auto first_output = impl_
-                          ->run({forward_input.token_ids},
-                                {forward_input.positions},
-                                kv_caches_,
-                                {ModelParamsView(forward_input.input_params)})
-                          .hidden_states;
-  auto second_output = impl_
-                           ->run({forward_input.token_ids},
-                                 {forward_input.positions},
-                                 kv_caches_,
-                                 {ModelParamsView(forward_input.input_params)})
-                           .hidden_states;
+    auto first_output = impl_
+                            ->run({forward_input.token_ids},
+                                  {forward_input.positions},
+                                  kv_caches_,
+                                  {ModelParamsView(forward_input.input_params)})
+                            .hidden_states;
+    auto second_output =
+        impl_
+            ->run({forward_input.token_ids},
+                  {forward_input.positions},
+                  kv_caches_,
+                  {ModelParamsView(forward_input.input_params)})
+            .hidden_states;
 
-  torch_mlu::synchronize();
-  EXPECT_TRUE(torch::allclose(first_output, second_output, 1e-5, 1e-6));
-  EXPECT_EQ(model_->forward_cnt(), start_cnt + 2);
-  EXPECT_EQ(model_->last_tokens_size(), batch_size);
+    torch_mlu::synchronize();
+    EXPECT_TRUE(torch::allclose(first_output, second_output, 1e-5, 1e-6));
+    const bool captures = token_limit == 48;
+    EXPECT_EQ(model_->forward_cnt(), start_cnt + (captures ? 1 : 2));
+    EXPECT_EQ(model_->last_tokens_size(), captures ? 48 : batch_size);
+  }
 }
 
 TEST_F(MluGraphExecutorTest, OverPersistentGraphRowCapacityFallsBackToEager) {
   ScopedConfigSnapshot config_snapshot;
-  ExecutionConfig::get_instance().max_tokens_for_graph_mode(128);
+  ExecutionConfig::get_instance().max_tokens_for_graph_mode(1);
   options_.is_draft_engine(false);
-  options_.max_seqs_per_batch(1);
+  options_.max_tokens_for_graph_mode(128).max_seqs_per_batch(1);
   options_.enable_speculative_decode(false);
   rebuild_impl();
 

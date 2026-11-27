@@ -29,10 +29,10 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/message.h"
+#include "core/disaggregation/pd_service_impl.h"
 #include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
@@ -230,6 +230,11 @@ VLMMaster::VLMMaster(const Options& options)
       .max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .enable_graph(options_.enable_graph())
+      .enable_graph_double_buffer(options_.enable_graph_double_buffer())
+      .acl_graph_decode_batch_size_limit(
+          options_.acl_graph_decode_batch_size_limit())
+      .block_draft_graph_warmup_max_kv_len(
+          options_.block_draft_graph_warmup_max_kv_len())
       .enable_graph_mode_decode_no_padding(
           options_.enable_graph_mode_decode_no_padding())
       .enable_prefill_piecewise_graph(options_.enable_prefill_piecewise_graph())
@@ -327,17 +332,15 @@ VLMMaster::VLMMaster(const Options& options)
   }
 
   SchedulerOptions scheduler_options;
-  scheduler_options.max_tokens_per_batch(options_.max_tokens_per_batch())
+  scheduler_options.enable_graph(options_.enable_graph())
+      .disable_graph_warmup(options_.disable_graph_warmup())
+      .max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .request_queue_size(options_.request_queue_size())
       .max_tokens_per_chunk_for_prefill(
           options_.max_tokens_per_chunk_for_prefill())
       .num_speculative_tokens(options_.num_speculative_tokens())
-      .decode_graph_warmup_config(
-          ExecutionConfig::get_instance().decode_graph_warmup_config(
-              options_.num_speculative_tokens(),
-              options_.enable_graph_mode_decode_no_padding(),
-              options_.speculative_algorithm()))
+      .decode_graph_warmup_config(options_.decode_graph_warmup_config())
       .nnodes(options_.nnodes())
       .dp_size(options_.dp_size())
       .cp_size(options_.cp_size())
@@ -370,11 +373,13 @@ VLMMaster::VLMMaster(const Options& options)
       .server_idx(options_.server_idx());
   dispatch_engine(
       [&](auto* engine) {
-        scheduler_ = create_continuous_scheduler(engine,
-                                                 scheduler_options,
-                                                 distributed_worker_manager_,
-                                                 model_residency_coordinator_,
-                                                 kv_transfer_coordinator_);
+        scheduler_ = create_continuous_scheduler(
+            engine,
+            scheduler_options,
+            distributed_worker_manager_,
+            model_residency_coordinator_,
+            kv_transfer_coordinator_,
+            make_pd_service_options(options_, model_args_));
       },
       vlm_engine_.get(),
       speculative_engine_.get());
@@ -803,8 +808,7 @@ void VLMMaster::run() {
 
   if (!is_sleeping() && !requires_wakeup() &&
       !options_.enable_offline_inference() && !options_.enable_disagg_pd() &&
-      !ExecutionConfig::get_instance().disable_graph_warmup() &&
-      model_args_.image_token_id() != 0) {
+      !options_.disable_graph_warmup() && model_args_.image_token_id() != 0) {
     warmup_multimodal();
   }
 }

@@ -26,7 +26,6 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/types.h"
-#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/model/model_type.h"
 #include "core/framework/sampling/sampler.h"
@@ -47,8 +46,6 @@ void DSparkWorkerImpl::apply_draft_model_overrides(ModelArgs& args) {
     args.n_layers(args.dspark_num_layers());
     args.n_hash_layers(0);
     args.compress_ratios(std::vector<int32_t>(args.dspark_num_layers(), 1));
-    args.dspark_use_native_sas(
-        KernelConfig::get_instance().enable_dspark_native_sas());
 #endif
     args.model_type("deepseek_v4_dspark");
   } else {
@@ -63,23 +60,20 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
                                   MasterStatus master_status) {
   const bool result = DFlashWorkerImpl::init_model(
       model_weights_path, random_seed, master_status);
-  if (draft_impl_->get_status() != WorkerImpl::Status::LOADED) {
-    return result;
+  if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
+    draft_needs_dummy_tokens_ =
+        prepare_for_draft().per_request &&
+        ModelConfig::is_python_model_impl(context_.get_model_impl());
   }
-
-  const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-  if (draft_args.model_type() == "deepseek_v4_dspark") {
-    draft_input_per_request_ = draft_args.dspark_use_native_sas();
-  }
-  draft_needs_dummy_tokens_ =
-      draft_input_per_request_ &&
-      ModelConfig::is_python_model_impl(context_.get_model_impl());
   return result;
 }
 
 DecodeExpansionOptions DSparkWorkerImpl::prepare_for_draft() const {
   auto decode_options = DFlashWorkerImpl::prepare_for_draft();
-  decode_options.num_speculative_tokens = options_.num_speculative_tokens() - 1;
+  decode_options.query_width = options_.num_speculative_tokens();
+  decode_options.per_request =
+      draft_impl_->context_.get_model_args().model_type() !=
+      "deepseek_v4_dspark";
   return decode_options;
 }
 

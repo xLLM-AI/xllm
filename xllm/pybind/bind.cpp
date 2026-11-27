@@ -103,6 +103,13 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("disable_ttft_profiling",
                      &Options::disable_ttft_profiling_)
       .def_readwrite("enable_graph", &Options::enable_graph_)
+      .def_readwrite("disable_graph_warmup", &Options::disable_graph_warmup_)
+      .def_readwrite("block_draft_graph_warmup_max_kv_len",
+                     &Options::block_draft_graph_warmup_max_kv_len_)
+      .def_readwrite("acl_graph_decode_batch_size_limit",
+                     &Options::acl_graph_decode_batch_size_limit_)
+      .def_readwrite("enable_graph_double_buffer",
+                     &Options::enable_graph_double_buffer_)
       .def_readwrite("enable_graph_mode_decode_no_padding",
                      &Options::enable_graph_mode_decode_no_padding_)
       .def_readwrite("enable_prefill_piecewise_graph",

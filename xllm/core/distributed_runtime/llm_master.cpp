@@ -28,14 +28,12 @@ limitations under the License.
 #include <vector>
 
 #include "api_service/call.h"
-#include "api_service/openai_json.h"
 #include "common/metrics.h"
 #include "core/disaggregation/pd_service_impl.h"
 #include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/config/eplb_config.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
@@ -174,6 +172,11 @@ LLMMaster::LLMMaster(const Options& options)
       .enable_service_routing(options_.enable_service_routing())
       .server_idx(options_.server_idx())
       .enable_graph(options_.enable_graph())
+      .enable_graph_double_buffer(options_.enable_graph_double_buffer())
+      .acl_graph_decode_batch_size_limit(
+          options_.acl_graph_decode_batch_size_limit())
+      .block_draft_graph_warmup_max_kv_len(
+          options_.block_draft_graph_warmup_max_kv_len())
       .enable_graph_mode_decode_no_padding(
           options_.enable_graph_mode_decode_no_padding())
       .enable_prefill_piecewise_graph(options_.enable_prefill_piecewise_graph())
@@ -260,17 +263,15 @@ LLMMaster::LLMMaster(const Options& options)
   task_type_ = options_.task_type();
 
   SchedulerOptions scheduler_options;
-  scheduler_options.max_tokens_per_batch(options_.max_tokens_per_batch())
+  scheduler_options.enable_graph(options_.enable_graph())
+      .disable_graph_warmup(options_.disable_graph_warmup())
+      .max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .request_queue_size(options_.request_queue_size())
       .max_tokens_per_chunk_for_prefill(
           options_.max_tokens_per_chunk_for_prefill())
       .num_speculative_tokens(options_.num_speculative_tokens())
-      .decode_graph_warmup_config(
-          ExecutionConfig::get_instance().decode_graph_warmup_config(
-              options_.num_speculative_tokens(),
-              options_.enable_graph_mode_decode_no_padding(),
-              options_.speculative_algorithm()))
+      .decode_graph_warmup_config(options_.decode_graph_warmup_config())
       .nnodes(options_.nnodes())
       .dp_size(options_.dp_size())
       .cp_size(options_.cp_size())
@@ -301,16 +302,8 @@ LLMMaster::LLMMaster(const Options& options)
       .max_global_ttft_ms(options_.max_global_ttft_ms())
       .max_global_tpot_ms(options_.max_global_tpot_ms())
       .server_idx(options_.server_idx());
-  PDServiceOptions response_options;
-  if (options_.enable_disagg_pd()) {
-    response_options.enable_response_formatting = true;
-    response_options.tool_parser_format =
-        options_.tool_call_parser().value_or("");
-    response_options.reasoning_parser_format =
-        options_.reasoning_parser().value_or("");
-    response_options.system_fingerprint =
-        api_service::openai_system_fingerprint(options_, &model_args_);
-  }
+  PDServiceOptions response_options =
+      make_pd_service_options(options_, model_args_);
   auto create_scheduler =
       [this, &scheduler_options, &response_options](auto* engine) {
         scheduler_ = create_continuous_scheduler(

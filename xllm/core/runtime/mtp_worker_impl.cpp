@@ -32,7 +32,6 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/constants.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
@@ -355,9 +354,9 @@ bool MTPWorkerImpl<TargetInput>::should_use_explicit_spec_verify_replay_update(
   const torch::Tensor& block_tables =
       input.input_params.attention.host.block_tables;
   const int64_t num_sequences = input.input_params.meta.num_sequences;
-  if (!::xllm::ExecutionConfig::get_instance().enable_graph() ||
-      !::xllm::ExecutionConfig::get_instance()
-           .enable_graph_mode_decode_no_padding() ||
+  const auto& target_options = impl_->options();
+  if (!target_options.enable_graph() ||
+      !target_options.enable_graph_mode_decode_no_padding() ||
       ModelConfig::is_python_model_impl(context_.get_model_impl()) ||
       target_verify_mode_ != TargetSpecVerifyMode::EXPANDED_VERIFY ||
       options_.block_size() <= 0 ||
@@ -508,9 +507,9 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     } else {
       LlmForwardInput draft_extend_input = make_llm_draft_input(
           input, draft_impl_->uses_shared_static_kv_cache());
-      scale_speculative_parallel_token_counts(
+      scale_decode_parallel_token_counts(
           draft_extend_input.input_params,
-          draft_context_replay_policy_->num_speculative_tokens);
+          draft_context_replay_policy_->num_speculative_tokens + 1);
       draft_outputs.emplace_back(
           run_worker_no_sync_impl(*draft_impl_,
                                   draft_extend_input,
@@ -533,8 +532,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     }
 
     TargetInput new_input = input.clone();
-    scale_speculative_parallel_token_counts(new_input.input_params,
-                                            options_.num_speculative_tokens());
+    scale_decode_parallel_token_counts(new_input.input_params,
+                                       options_.num_speculative_tokens() + 1);
     ForwardOutput output =
         run_worker_no_sync_impl(*impl_,
                                 new_input,
@@ -1880,8 +1879,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   const bool chunked_verify =
       target_verify_mode_ != TargetSpecVerifyMode::GENERIC;
   const DecodeExpansionOptions decode_options{
-      {.num_speculative_tokens = options_.num_speculative_tokens(),
-       .per_request = chunked_verify},
+      {.query_width = num_val_tokens, .per_request = chunked_verify},
       logical_block_size};
   DecodeBuildBuffers buf = expand_decode_inputs(batch_ctx, decode_options);
 
@@ -1918,8 +1916,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
                                     device_,
                                     stable_indices);
 
-  scale_speculative_parallel_token_counts(
-      input_params, decode_options.num_speculative_tokens);
+  scale_decode_parallel_token_counts(input_params, decode_options.query_width);
 
   std::vector<int32_t> accepted_prefix_lengths;
   if (chunked_verify) {

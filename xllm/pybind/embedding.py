@@ -60,6 +60,10 @@ class Embedding:
         output_shm_size: int = 128,
         use_cpp_chat_template: bool = True,
         extension_impl: str = "",
+        enable_graph_double_buffer: bool = True,
+        acl_graph_decode_batch_size_limit: int = 16,
+        disable_graph_warmup: bool = False,
+        block_draft_graph_warmup_max_kv_len: int = 0,
         **kwargs: Any,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
@@ -104,6 +108,10 @@ class Embedding:
         options.enable_disagg_pd = False
         options.enable_schedule_overlap = enable_schedule_overlap
         options.enable_graph = enable_graph
+        options.disable_graph_warmup = disable_graph_warmup
+        options.block_draft_graph_warmup_max_kv_len = block_draft_graph_warmup_max_kv_len
+        options.enable_graph_double_buffer = enable_graph_double_buffer
+        options.acl_graph_decode_batch_size_limit = acl_graph_decode_batch_size_limit
         options.enable_graph_mode_decode_no_padding = enable_graph_mode_decode_no_padding
         options.enable_prefill_piecewise_graph = enable_prefill_piecewise_graph
         options.max_tokens_for_graph_mode = max_tokens_for_graph_mode

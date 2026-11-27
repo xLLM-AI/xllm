@@ -132,16 +132,6 @@ void npu_fused_infer_attention_decode_out_cached(
     int64_t block_size,
     torch::Tensor& output);
 
-void batch_chunked_paged_prefill(const torch::Tensor& query,
-                                 const torch::Tensor& k_cache,
-                                 const torch::Tensor& v_cache,
-                                 float scale,
-                                 const torch::Tensor& block_table,
-                                 const torch::Tensor& seq_lens,
-                                 const torch::Tensor& attn_mask,
-                                 const torch::Tensor& q_seq_lens,
-                                 torch::Tensor& output);
-
 // Custom batch decode for ACL graph execution
 // This variant uses CustomPagedAttention to avoid .to(kCPU) operations
 // that break ACL graph capture

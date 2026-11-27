@@ -58,7 +58,7 @@ class LinearStateSlotTable;
 
 template <typename Input>
 void build_dummy_forward_input(Input& input,
-                               int32_t num_speculative_tokens,
+                               int32_t query_width,
                                const torch::Device& device);
 
 class WorkerImpl {

@@ -124,6 +124,8 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 "csrc/npu/reshape_paged_cache.cpp",
                 "csrc/npu/sparse_attention.cpp",
                 "csrc/npu/sparse_indexing.cpp",
+                "csrc/npu/top_k_top_p.cpp",
+                "csrc/npu/sampling_bindings.cpp",
             ],
             include_dirs=[
                 str(Path(__file__).resolve().parent),
@@ -133,7 +135,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 str(atb_root / "include"),
             ],
             library_dirs=[str(npu_root / "lib"), str(ascend_root / "lib64"), str(atb_root / "lib")],
-            libraries=["torch_npu", "atb", "glog", "hccl", "hcomm", "dl"],
+            libraries=["torch_npu", "atb", "glog", "hccl", "hcomm", "opapi", "dl"],
             extra_compile_args=["-O2", "-fvisibility=hidden", "-fvisibility-inlines-hidden"],
         )
     )

@@ -155,7 +155,9 @@ bool has_non_uniform_positive_dp_token_counts(
 }
 
 template <typename Params>
-uint64_t specialize_dp_ep_graph_key(uint64_t graph_key, const Params& params) {
+uint64_t specialize_dp_ep_graph_key(uint64_t graph_key,
+                                    const Params& params,
+                                    bool enable_no_padding) {
   const auto& dp_token_counts = params.parallel.dp_global_token_nums;
   const bool uses_dense_decode_layout =
       params.meta.batch_forward_type.is_decode() &&
@@ -182,9 +184,7 @@ uint64_t specialize_dp_ep_graph_key(uint64_t graph_key, const Params& params) {
     raw_token_count += token_count;
   }
   const int64_t raw_token_bucket = runtime::get_decode_graph_token_bucket(
-      raw_token_count,
-      ::xllm::ExecutionConfig::get_instance()
-          .enable_graph_mode_decode_no_padding());
+      raw_token_count, enable_no_padding);
   graph_key = mix_graph_key(graph_key, static_cast<uint64_t>(raw_token_bucket));
   return graph_namespace | graph_key;
 }
@@ -1032,9 +1032,7 @@ AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
 void AclGraphExecutorImpl::initialize(bool need_update_attn_mask,
                                       bool is_hybrid_linear_attention,
                                       bool supports_mla_graph_kv_bucketing) {
-  graph_slot_count_ =
-      ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() ? 2
-                                                                           : 1;
+  graph_slot_count_ = options_.enable_graph_double_buffer() ? 2 : 1;
   for (int32_t slot_idx = 0; slot_idx < graph_slot_count_; ++slot_idx) {
     GraphSlot& slot = graph_slots_[slot_idx];
     slot.persistent_param =
@@ -1172,9 +1170,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   // Use max_local_batch_size so all DP ranks make the same decision and stay
   // in sync on HCCL collectives.
   const uint32_t decode_batch_size_limit = static_cast<uint32_t>(
-      std::max<int32_t>(1,
-                        ::xllm::ExecutionConfig::get_instance()
-                            .acl_graph_decode_batch_size_limit()));
+      std::max<int32_t>(1, options_.acl_graph_decode_batch_size_limit()));
   if (max_local_batch_size > decode_batch_size_limit) {
     LOG_FIRST_N(WARNING, 1)
         << "Falling back to eager mode because decode local batch_size (max="
@@ -1295,8 +1291,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     return result;
   }
 
-  if (in_decoding_phase && ::xllm::ExecutionConfig::get_instance()
-                               .enable_graph_mode_decode_no_padding()) {
+  if (in_decoding_phase && options_.enable_graph_mode_decode_no_padding()) {
     const uint32_t dp_size =
         static_cast<uint32_t>(std::max<int32_t>(1, options_.dp_size()));
     const uint32_t max_graph_batch_size =
@@ -1521,9 +1516,7 @@ uint32_t AclGraphExecutorImpl::get_bucket_num_tokens(
   // Share the bucketing with the graph warmup plan so executor graph keys and
   // warmup bucket coverage cannot drift apart.
   return static_cast<uint32_t>(runtime::get_decode_graph_token_bucket(
-      num_tokens,
-      ::xllm::ExecutionConfig::get_instance()
-          .enable_graph_mode_decode_no_padding()));
+      num_tokens, options_.enable_graph_mode_decode_no_padding()));
 }
 
 std::optional<uint64_t>
@@ -1586,10 +1579,13 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
         get_mla_capture_kv_seq_len_bucket(params, options_);
     return specialize_dp_ep_graph_key(
         get_mla_graph_key(bucket_num_tokens, capture_kv_seq_len_bucket),
-        params);
+        params,
+        options_.enable_graph_mode_decode_no_padding());
   }
-  return specialize_dp_ep_graph_key(static_cast<uint64_t>(bucket_num_tokens),
-                                    params);
+  return specialize_dp_ep_graph_key(
+      static_cast<uint64_t>(bucket_num_tokens),
+      params,
+      options_.enable_graph_mode_decode_no_padding());
 }
 
 }  // namespace xllm::npu

@@ -20,6 +20,30 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+TEST(PagedCachePartitionTest, RejectsInconsistentAttentionGeometry) {
+  const std::vector<CacheComponent> components{
+      {CacheComponentRole::KEY, CacheScalarType::BFLOAT16, {0}}};
+  EXPECT_DEATH((PagedCachePartition(CachePartitionId{},
+                                    /*token_stride=*/8,
+                                    /*enable_prefix_cache=*/true,
+                                    components,
+                                    /*compression_ratio=*/0)),
+               "Compression ratio must be positive");
+  EXPECT_DEATH((PagedCachePartition(CachePartitionId{},
+                                    /*token_stride=*/6,
+                                    /*enable_prefix_cache=*/true,
+                                    components,
+                                    /*compression_ratio=*/4)),
+               "complete compressed rows");
+  EXPECT_DEATH((PagedCachePartition(CachePartitionId{},
+                                    /*token_stride=*/8,
+                                    /*enable_prefix_cache=*/true,
+                                    components,
+                                    /*compression_ratio=*/2,
+                                    /*window_size=*/16)),
+               "uncompressed token rows");
+}
+
 TEST(PagedCachePartitionTest, RejectsAmbiguousLayerOwnership) {
   EXPECT_DEATH(
       (PagedCachePartition(

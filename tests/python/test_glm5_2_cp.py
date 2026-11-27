@@ -88,7 +88,7 @@ class _Norm(nn.Module):
         return hidden + residual, residual
 
 
-class _Rotary(glm5_2.Glm52YarnRotaryEmbedding):
+class _Rotary(deepseek_v32.DeepseekYarnRotaryEmbedding):
     def __init__(self) -> None:
         nn.Module.__init__(self)
         self.register_buffer("cos_sin_cache", torch.arange(64, dtype=torch.float32).view(16, 4), persistent=False)

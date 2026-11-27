@@ -29,6 +29,7 @@ struct ModelArgs;
 
 struct VlmForwardInputFactoryOptions {
   uint32_t dp_size = 1;
+  bool enable_graph = false;
   bool enable_dp_global_json_object_active = false;
 };
 

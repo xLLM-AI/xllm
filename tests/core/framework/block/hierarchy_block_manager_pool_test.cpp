@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/util/scope_guard.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/block/composite_block_manager.h"
+#include "framework/block/grouped_cache_test_utils.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
 #include "framework/request/stopping_checker.h"
@@ -432,15 +433,12 @@ BlockManagerPool::Options make_typed_cache_options() {
       .block_size(kBaseBlockSize)
       .enable_prefix_cache(true)
       .enable_host_offload(true)
-      .sliding_window_size(kWindow)
       .swa_blocks_per_seq(swa_blocks_per_seq)
       .swa_num_blocks(266)
       .max_tokens_per_batch(32768)
       .max_seqs_per_batch(4)
-      // SlidingWindow + BlockManagerImpl (C4) + BlockManagerImpl (C128).
-      // The 0/4/128 compress_ratios drive the sub-manager block sizes.
-      .manager_types({1u, 0u, 0u})
-      .compress_ratios({0u, 4u, 128u})
+      .grouped_partitions(
+          test::grouped_cache_partitions(kBaseBlockSize, kWindow))
       .host_num_blocks_by_type(
           {{BlockType::SWA, 512}, {BlockType::C4, 128}, {BlockType::C128, 16}});
   return opts;

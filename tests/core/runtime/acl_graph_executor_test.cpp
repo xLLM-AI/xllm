@@ -53,6 +53,7 @@ limitations under the License.
 #include "core/runtime/dflash_worker_impl.h"
 #include "core/runtime/options.h"
 #include "core/runtime/speculative_worker_impl.h"
+#include "core/util/scope_guard.h"
 #include "core/util/tensor_helper.h"
 #include "models/llm/deepseek_v4.h"
 #include "models/llm/dspark_weight_source.h"
@@ -247,6 +248,7 @@ class SimpleCausalLM : public CausalLM {
                       const torch::Tensor& positions,
                       std::vector<KVCache>& kv_caches,
                       const ModelParamsView& params) override {
+    ++forward_count_;
     last_forward_enabled_graph_ = params.enable_graph;
     last_forward_had_attn_metadata_ = params.attn_metadata != nullptr;
     auto token_embeddings = torch::embedding(token_embedding_table_, tokens);
@@ -327,6 +329,7 @@ class SimpleCausalLM : public CausalLM {
     // Simple implementation for testing
   }
 
+  int32_t forward_count_ = 0;
   bool return_aux_hidden_states_ = false;
   bool last_forward_enabled_graph_ = false;
   bool last_forward_had_attn_metadata_ = false;
@@ -443,6 +446,47 @@ class AclGraphExecutorTest : public ::testing::Test {
   IncrementalDecoder fake_decoder_ = IncrementalDecoder("", 1, false, false);
 };
 
+TEST_F(AclGraphExecutorTest, GraphSlotsUseInstanceDoubleBufferOption) {
+  ExecutionConfig& config = ExecutionConfig::get_instance();
+  const bool previous_double_buffer = config.enable_graph_double_buffer();
+  ScopeGuard restore_config(
+      [&] { config.enable_graph_double_buffer(previous_double_buffer); });
+  auto batch = CreateTestBatch();
+  auto input = batch->prepare_forward_input(model_args_, nullptr);
+  input = input.to(*device_, /*dtype=*/torch::kFloat32);
+  const ModelParamsView params(input.input_params);
+  const torch::Tensor eager_output =
+      model_->forward(input.token_ids, input.positions, kv_caches_, params)
+          .hidden_states.clone();
+  const double eager_fallbacks_before =
+      COUNTER_num_model_execution_total_eager.get_value();
+
+  for (const bool double_buffer : {false, true}) {
+    SCOPED_TRACE(double_buffer);
+    config.enable_graph_double_buffer(!double_buffer);
+    runtime::Options options = options_;
+    options.enable_graph_double_buffer(double_buffer);
+    npu::AclGraphExecutorImpl executor(
+        model_.get(), model_args_, *device_, options);
+    options.enable_graph_double_buffer(!double_buffer);
+    for (int32_t step = 0; step < 3; ++step) {
+      SCOPED_TRACE(step);
+      const int32_t forwards_before = model_->forward_count_;
+      const ModelOutput output =
+          executor.run(input.token_ids, input.positions, kv_caches_, params);
+      EXPECT_TRUE(torch::allclose(eager_output,
+                                  output.hidden_states,
+                                  /*rtol=*/1e-5,
+                                  /*atol=*/1e-6));
+      // Capturing calls the model; replaying a captured slot does not.
+      EXPECT_EQ(model_->forward_count_ > forwards_before,
+                step == 0 || (double_buffer && step == 1));
+    }
+  }
+  EXPECT_EQ(COUNTER_num_model_execution_total_eager.get_value(),
+            eager_fallbacks_before);
+}
+
 TEST_F(AclGraphExecutorTest, PreservesAuxHiddenStatesAcrossGraphReplay) {
   auto batch = CreateTestBatch();
 
@@ -460,8 +504,7 @@ TEST_F(AclGraphExecutorTest, PreservesAuxHiddenStatesAcrossGraphReplay) {
   const double eager_fallbacks_before =
       COUNTER_num_model_execution_total_eager.get_value();
   ASSERT_TRUE(eager_output.aux_hidden_states.defined());
-  const int32_t num_runs =
-      ExecutionConfig::get_instance().enable_graph_double_buffer() ? 3 : 2;
+  const int32_t num_runs = options_.enable_graph_double_buffer() ? 3 : 2;
   for (int32_t i = 0; i < num_runs; ++i) {
     const auto output = graph_executor.run(
         forward_input.token_ids, forward_input.positions, kv_caches_, params);
@@ -541,8 +584,7 @@ TEST(DeepseekV4ModelTest, ReturnsPreHcHiddenStatesForMtp) {
 // Test graph creation and execution with different batch sizes
 TEST_F(AclGraphExecutorTest, DifferentBatchSizes) {
   const std::vector<uint32_t> batch_sizes = {1, 2, 4};
-  const bool double_buffer =
-      ExecutionConfig::get_instance().enable_graph_double_buffer();
+  const bool double_buffer = options_.enable_graph_double_buffer();
   npu::AclGraphExecutorImpl graph_executor(
       model_.get(), model_args_, *device_, options_);
   std::vector<LlmForwardInput> captured_inputs;
@@ -618,10 +660,16 @@ TEST_F(AclGraphExecutorTest, DifferentBatchSizes) {
             eager_fallbacks_before);
 }
 
-// Test decode batch-size threshold fallback: ACL graph should fall back to
-// eager when batch_size exceeds the configured limit (default: 16).
+// Exceeding an instance's limit must select eager even if the global limit
+// permits capture.
 TEST_F(AclGraphExecutorTest, DecodeBatchSizeThresholdFallsBackToEager) {
-  constexpr uint32_t batch_size = 17;
+  ExecutionConfig& config = ExecutionConfig::get_instance();
+  const int32_t previous_limit = config.acl_graph_decode_batch_size_limit();
+  ScopeGuard restore_config(
+      [&] { config.acl_graph_decode_batch_size_limit(previous_limit); });
+  config.acl_graph_decode_batch_size_limit(16);
+  options_.acl_graph_decode_batch_size_limit(1);
+  constexpr uint32_t batch_size = 2;
   sequences_.clear();
   auto batch = std::make_unique<Batch>();
 
@@ -673,6 +721,28 @@ TEST_F(AclGraphExecutorTest, DecodeBatchSizeThresholdFallsBackToEager) {
                               graph_out.hidden_states,
                               /*rtol=*/1e-5,
                               /*atol=*/1e-6));
+
+  // The exact threshold captures even when the global limit would reject it.
+  config.acl_graph_decode_batch_size_limit(1);
+  options_.acl_graph_decode_batch_size_limit(2);
+  npu::AclGraphExecutorImpl at_limit(
+      model_.get(), model_args_, *device_, options_);
+  options_.acl_graph_decode_batch_size_limit(1);
+  const double fallbacks_before =
+      COUNTER_num_model_execution_total_eager.get_value();
+  for (int32_t step = 0; step < 3; ++step) {
+    const ModelOutput output =
+        at_limit.run(forward_input.token_ids,
+                     forward_input.positions,
+                     kv_caches_,
+                     ModelParamsView(forward_input.input_params));
+    EXPECT_TRUE(torch::allclose(eager_out.hidden_states,
+                                output.hidden_states,
+                                /*rtol=*/1e-5,
+                                /*atol=*/1e-6));
+  }
+  EXPECT_EQ(COUNTER_num_model_execution_total_eager.get_value(),
+            fallbacks_before);
 }
 
 TEST_F(AclGraphExecutorTest, NoPaddingBucketCapturesOnlyForWarmup) {
@@ -708,9 +778,11 @@ TEST_F(AclGraphExecutorTest, NoPaddingBucketCapturesOnlyForWarmup) {
       execution_config.enable_graph_mode_decode_no_padding();
   const int32_t old_decode_batch_size_limit =
       execution_config.acl_graph_decode_batch_size_limit();
-  execution_config.enable_graph_mode_decode_no_padding(true);
-  execution_config.acl_graph_decode_batch_size_limit(20);
-  options_.max_seqs_per_batch(20);
+  execution_config.enable_graph_mode_decode_no_padding(false);
+  execution_config.acl_graph_decode_batch_size_limit(1);
+  options_.max_seqs_per_batch(20)
+      .enable_graph_mode_decode_no_padding(true)
+      .acl_graph_decode_batch_size_limit(20);
 
   auto npu_executor = std::make_unique<BaseExecutorImpl>(
       model_.get(), model_args_, *device_, options_);
@@ -838,6 +910,82 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
       std::vector<int32_t>({expected_linear_state_id, kPaddingLinearStateId}));
   EXPECT_EQ(params_for_capture->linear_state_validity_mask,
             (std::vector<int64_t>{1, 0}));
+}
+
+TEST(AclGraphPersistentParamTest,
+     PaddingUsesInstanceOptionsForMetadataAndLmHead) {
+  ModelArgs args;
+  args.model_type("deepseek_v4")
+      .dtype("float32")
+      .hidden_size(4)
+      .max_position_embeddings(16)
+      .head_dim(0);
+  const torch::Device device(torch::kCPU);
+  const bool global_no_padding =
+      ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding();
+  // Repeating opposite settings under a fixed global value catches
+  // process-wide caching of the first mode.
+  runtime::Options padded_options;
+  padded_options.max_tokens_per_batch(32)
+      .max_seqs_per_batch(3)
+      .block_size(4)
+      .num_speculative_tokens(2)
+      .enable_graph_mode_decode_no_padding(false);
+  runtime::Options exact_options = padded_options;
+  exact_options.enable_graph_mode_decode_no_padding(true);
+  for (const bool no_padding :
+       {!global_no_padding, global_no_padding, !global_no_padding}) {
+    SCOPED_TRACE(no_padding);
+    const runtime::Options& options =
+        no_padding ? exact_options : padded_options;
+    npu::GraphPersistentParam target(args,
+                                     device,
+                                     options,
+                                     /*need_update_attn_mask=*/false,
+                                     /*is_hybrid_linear_attention=*/true);
+    // 3 sequences x 3 tokens: exact mode needs 3 metadata rows; the padded
+    // bucket has 16 tokens and needs 6 metadata rows.
+    EXPECT_EQ(target.persistent_block_tables().size(0), no_padding ? 3 : 6);
+  }
+
+  // Single-token draft decoding also uses its own padding mode for lm-head
+  // index views, independently of the target's speculative token width.
+  padded_options.is_draft_engine(true).speculative_algorithm("eagle3");
+  exact_options.is_draft_engine(true).speculative_algorithm("eagle3");
+  npu::GraphPersistentParam padded_draft(args, device, padded_options);
+  npu::GraphPersistentParam exact_draft(args, device, exact_options);
+  EXPECT_EQ(padded_draft.persistent_block_tables().size(0), 4);
+  EXPECT_EQ(exact_draft.persistent_block_tables().size(0), 3);
+
+  ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.num_sequences = 3;
+  params.attention.host.q_seq_lens = {1, 1, 1};
+  params.attention.host.kv_seq_lens = {1, 1, 1};
+  params.parallel.dp_ep_padding_data
+      .attn_padding_idx(torch::tensor({0, 1, 2}, torch::kInt32))
+      .lm_head_skip_padding_token_indices(
+          torch::tensor({0, 1, 2}, torch::kInt32));
+  const torch::Tensor tokens = torch::tensor({1, 2, 3}, torch::kInt32);
+  const torch::Tensor positions = torch::zeros({3}, torch::kInt32);
+  for (const bool no_padding : {!global_no_padding, global_no_padding}) {
+    SCOPED_TRACE(no_padding);
+    npu::GraphPersistentParam& draft = no_padding ? exact_draft : padded_draft;
+    const auto captured = draft.update(tokens,
+                                       torch::Tensor(),
+                                       torch::Tensor(),
+                                       positions,
+                                       params,
+                                       /*padded_num_tokens=*/no_padding ? 3 : 4,
+                                       /*return_capture_params=*/true);
+    ASSERT_TRUE(captured.has_value());
+    const torch::Tensor& indices = captured->parallel.dp_ep_padding_data
+                                       .lm_head_skip_padding_token_indices();
+    EXPECT_TRUE(torch::equal(indices,
+                             no_padding
+                                 ? torch::tensor({0, 1, 2}, torch::kInt32)
+                                 : torch::tensor({0, 1, 2, 0}, torch::kInt32)));
+  }
 }
 
 TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
@@ -1236,8 +1384,8 @@ TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
   params.parallel.dp_global_token_nums = {2, 0, 4};
   params.parallel.raw_dp_global_token_nums = {1, 0, 3};
 
-  scale_speculative_parallel_token_counts(params,
-                                          /*num_speculative_tokens=*/4);
+  scale_decode_parallel_token_counts(params,
+                                     /*query_width=*/5);
 
   EXPECT_EQ(params.parallel.dp_global_token_nums,
             (std::vector<int32_t>{10, 0, 20}));

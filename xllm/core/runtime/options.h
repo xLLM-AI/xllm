@@ -256,12 +256,18 @@ struct Options {
 
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;
+  // alternate NPU graph slots so input preparation can overlap replay
+  PROPERTY(bool, enable_graph_double_buffer) = true;
   // enable graph-mode decode without padding
   PROPERTY(bool, enable_graph_mode_decode_no_padding) = false;
   // enable piecewise graph for prefill
   PROPERTY(bool, enable_prefill_piecewise_graph) = false;
   // maximum number of tokens for graph execution
   PROPERTY(int32_t, max_tokens_for_graph_mode) = 2048;
+  // maximum per-DP-rank decode batch size for NPU graphs
+  PROPERTY(int32_t, acl_graph_decode_batch_size_limit) = 16;
+  // Zero covers the full model context; -1 keeps lazy KV-capacity capture.
+  PROPERTY(int32_t, block_draft_graph_warmup_max_kv_len) = 0;
 
   // max tokens per batch
   PROPERTY(int32_t, max_tokens_per_batch) = 4096;

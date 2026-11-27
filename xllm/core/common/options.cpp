@@ -18,9 +18,22 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/common/prefill_policy.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/platform/platform.h"
 
 namespace xllm {
+
+DecodeGraphWarmupConfig Options::decode_graph_warmup_config() const {
+  return {.num_speculative_tokens = num_speculative_tokens(),
+          .enable_graph_mode_decode_no_padding =
+              enable_graph_mode_decode_no_padding(),
+          .max_graph_batch_size =
+              Platform::is_npu()
+                  ? std::max<int32_t>(1, acl_graph_decode_batch_size_limit())
+                  : 0,
+          .speculative_algorithm = speculative_algorithm()};
+}
 
 void Options::resolve_prefill_options() {
   const PrefillPolicy prefill_policy(max_tokens_per_batch(),
@@ -118,6 +131,10 @@ std::string Options::to_string() const {
      << ", enable_multi_stream_parallel: " << enable_multi_stream_parallel()
      << ", disable_ttft_profiling: " << disable_ttft_profiling()
      << ", enable_graph: " << enable_graph()
+     << ", disable_graph_warmup: " << disable_graph_warmup()
+     << ", enable_graph_double_buffer: " << enable_graph_double_buffer()
+     << ", acl_graph_decode_batch_size_limit: "
+     << acl_graph_decode_batch_size_limit()
      << ", enable_graph_mode_decode_no_padding: "
      << enable_graph_mode_decode_no_padding()
      << ", enable_prefill_piecewise_graph: " << enable_prefill_piecewise_graph()

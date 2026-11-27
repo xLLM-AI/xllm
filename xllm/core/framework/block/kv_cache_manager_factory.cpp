@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/common/prefill_policy.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
+#include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/cache_partition_builder.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
@@ -84,6 +85,22 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
       << "KV cache embedding block count exceeds uint32_t range";
   options.num_embedding_blocks(static_cast<uint32_t>(key_cache_shape.front()));
 
+  if (shape.has_grouped_cache_layout()) {
+    options.grouped_partitions(
+        build_grouped_cache_partitions(options.model_id(),
+                                       kv_cache_capacity,
+                                       model_args,
+                                       dtype,
+                                       options.block_size()));
+    const auto& window = options.grouped_partitions().front();
+    options.swa_blocks_per_seq(static_cast<uint32_t>(get_swa_blocks_per_seq(
+        window.window_size(), kv_cache_capacity.block_size())));
+    CHECK_LE(kv_cache_capacity.swa_count(),
+             static_cast<int64_t>(std::numeric_limits<uint32_t>::max()));
+    options.swa_num_blocks(
+        static_cast<uint32_t>(kv_cache_capacity.swa_count()));
+  }
+
   const bool enable_shared_kv_cache = kv_cache_capacity.shared_slot_bytes() > 0;
   CHECK(!options.enable_shared_kv_cache() || enable_shared_kv_cache)
       << "Shared KV cache manager requires shared storage capacity metadata.";
@@ -95,8 +112,8 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
         << "Shared KV cache requires a supported Qwen hybrid model.";
     CHECK(options.enable_linear_state() && !options.enable_vmm_kvcache() &&
           !options.enable_host_offload() && !options.enable_disagg_pd() &&
-          !options.enable_kvcache_store() && options.manager_types().empty() &&
-          shared_vmm_layout == nullptr)
+          !options.enable_kvcache_store() &&
+          options.grouped_partitions().empty() && shared_vmm_layout == nullptr)
         << "Shared KV cache requires local Full and Linear cache managers.";
     CHECK(!host_validation_options.has_value() ||
           host_validation_options->host_blocks_factor == 0.0)
@@ -150,7 +167,7 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
 
   std::optional<PagedCachePartition> paged_partition;
   std::optional<RecurrentCachePartition> recurrent_partition;
-  if (options.manager_types().empty()) {
+  if (options.grouped_partitions().empty()) {
     paged_partition =
         build_paged_cache_partition(CachePartitionId{options.model_id(), 0},
                                     kv_cache_capacity,

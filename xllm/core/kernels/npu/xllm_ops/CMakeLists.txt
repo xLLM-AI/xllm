@@ -9,7 +9,7 @@ cc_library(
   SRCS
     "${PROJECT_SOURCE_DIR}/xllm-kernel/csrc/npu/replace_token.cpp"
     "${PROJECT_SOURCE_DIR}/xllm-kernel/csrc/npu/laser_attention.cpp"
-    top_k_top_p.cpp
+    "${PROJECT_SOURCE_DIR}/xllm-kernel/csrc/npu/top_k_top_p.cpp"
     quant_matmul.cpp
     grouped_matmul.cpp
     moe_grouped_matmul_swiglu_quant.cpp
@@ -41,6 +41,8 @@ cc_library(
     layer_norm_fwd.cpp
     gamma_add_rms_norm.cpp
   INCLUDES
+    ${PROJECT_SOURCE_DIR}/xllm-kernel
+    $ENV{PYTORCH_NPU_INSTALL_PATH}/include/third_party/op-plugin
     ${PROJECT_SOURCE_DIR}/third_party/xllm_ops/build/autogen
   DEPS
     :util

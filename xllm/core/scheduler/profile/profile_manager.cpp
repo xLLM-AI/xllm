@@ -144,14 +144,13 @@ ProfileManager::ProfileManager(
     max_decode_batch_size =
         std::min(max_decode_batch_size, max_concurrent_requests);
   }
-  if (Platform::is_npu()) {
+  if (Platform::is_npu() &&
+      options_.decode_graph_warmup_config().max_graph_batch_size > 0) {
     max_decode_batch_size =
         static_cast<int32_t>(npu::acl_graph_max_global_batch_size(
             static_cast<uint32_t>(std::max<int32_t>(1, max_decode_batch_size)),
             static_cast<uint32_t>(
-                std::max<int32_t>(1,
-                                  ::xllm::ExecutionConfig::get_instance()
-                                      .acl_graph_decode_batch_size_limit())),
+                options_.decode_graph_warmup_config().max_graph_batch_size),
             static_cast<uint32_t>(std::max<int32_t>(1, options_.dp_size()))));
   }
   decode_graph_warmup_plan_ =
@@ -179,10 +178,9 @@ ProfileManager::ProfileManager(
   // prediction.
 
 #if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
-  const auto& execution_config = ::xllm::ExecutionConfig::get_instance();
-  if (execution_config.enable_graph()) {
-    if (execution_config.disable_graph_warmup()) {
-      LOG(INFO) << "Graph warmup disabled by execution config; graphs will "
+  if (options_.enable_graph()) {
+    if (options_.disable_graph_warmup()) {
+      LOG(INFO) << "Graph warmup disabled by instance options; graphs will "
                    "be captured lazily from real requests";
     } else {
       warmup_for_graph();
@@ -823,7 +821,7 @@ std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
   int32_t generated_token = dis(gen);
   generated_token =
       generated_token == eos_token_id ? generated_token + 1 : generated_token;
-  sequence->append_token(generated_token);
+  sequence->append_token(Token(generated_token));
 
   // Synthetic decode requests must carry the same bootstrap geometry as real
   // requests, including the concatenated Target layers consumed by block
@@ -1155,14 +1153,13 @@ void ProfileManager::warmup_decode_for_graph() {
     max_decode_batch_size =
         std::min(max_decode_batch_size, max_concurrent_requests);
   }
-  if (Platform::is_npu()) {
+  if (Platform::is_npu() &&
+      options_.decode_graph_warmup_config().max_graph_batch_size > 0) {
     max_decode_batch_size =
         static_cast<int32_t>(npu::acl_graph_max_global_batch_size(
             static_cast<uint32_t>(std::max<int32_t>(1, max_decode_batch_size)),
             static_cast<uint32_t>(
-                std::max<int32_t>(1,
-                                  ::xllm::ExecutionConfig::get_instance()
-                                      .acl_graph_decode_batch_size_limit())),
+                options_.decode_graph_warmup_config().max_graph_batch_size),
             static_cast<uint32_t>(std::max<int32_t>(1, options_.dp_size()))));
   }
   const int32_t decode_seq_len = warmup_decode_seq_len(

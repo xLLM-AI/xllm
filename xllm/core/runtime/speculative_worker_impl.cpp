@@ -20,7 +20,6 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "core/common/types.h"
 #include "core/framework/batch/decode_input_builder.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/eplb/eplb_utils.h"
@@ -47,55 +46,53 @@ void prepare_dummy_input(Input& input, const WorkerImpl& worker) {
   }
   const auto& options = worker.options();
   const int32_t num_speculative_tokens = options.num_speculative_tokens();
-  int32_t num_decoding_tokens = num_speculative_tokens + 1;
+  int32_t query_width = num_speculative_tokens + 1;
   if (options.is_draft_engine()) {
     const auto& algorithm = options.speculative_algorithm();
     if (SpeculativeConfig::is_dspark_algorithm(algorithm)) {
-      num_decoding_tokens = num_speculative_tokens;
+      query_width = num_speculative_tokens;
     } else if (SpeculativeConfig::is_eagle_family(algorithm)) {
-      num_decoding_tokens = 1;
+      query_width = 1;
     }
   }
-  if (num_decoding_tokens == 1 && input.token_ids.defined() &&
+  if (query_width == 1 && input.token_ids.defined() &&
       input.token_ids.numel() != 0) {
     return;
   }
   const auto device = context.get_tensor_options().device();
-  build_dummy_forward_input(input, num_decoding_tokens - 1, device);
-  if (num_decoding_tokens > 1) {
+  build_dummy_forward_input(input, query_width, device);
+  if (query_width > 1) {
     if (has_linear_attention_layers(context.get_model_args())) {
       params.num_accepted_tokens_host = {1};
       params.num_accepted_tokens =
           torch::ones({1}, input.token_ids.options().dtype(torch::kInt32));
     }
     params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
-    params.meta.q_max_seq_len = num_decoding_tokens;
-    params.meta.kv_max_seq_len = num_decoding_tokens;
+    params.meta.q_max_seq_len = query_width;
+    params.meta.kv_max_seq_len = query_width;
     params.embedding.input_embedding = torch::Tensor();
     params.attn_metadata.reset();
     params.attention = {};
-    params.attention.host.q_seq_lens = {num_decoding_tokens};
-    params.attention.host.q_cu_seq_lens = {0, num_decoding_tokens};
-    params.attention.host.kv_seq_lens = {num_decoding_tokens};
+    params.attention.host.q_seq_lens = {query_width};
+    params.attention.host.q_cu_seq_lens = {0, query_width};
+    params.attention.host.kv_seq_lens = {query_width};
     params.attention.host.kv_cache_tokens_nums = {0};
-    params.attention.host.new_cache_slots.assign(num_decoding_tokens,
+    params.attention.host.new_cache_slots.assign(query_width,
                                                  /*value=*/-1);
     params.attention.rebuild_device_buffer(device);
   }
 }
 
 template <typename Params>
-void scale_speculative_parallel_token_counts(Params& params,
-                                             int32_t num_speculative_tokens) {
-  const int32_t num_decoding_tokens = num_speculative_tokens + 1;
-  scale_parallel_token_counts(params.parallel, num_decoding_tokens);
+void scale_decode_parallel_token_counts(Params& params, int32_t query_width) {
+  scale_parallel_token_counts(params.parallel, query_width);
   params.expert.eplb_decode_token_mask = eplb::expand_decode_token_mask(
-      params.expert.eplb_decode_token_mask, num_decoding_tokens);
+      params.expert.eplb_decode_token_mask, query_width);
 }
 
 template void prepare_dummy_input(LlmForwardInput&, const WorkerImpl&);
-template void scale_speculative_parallel_token_counts(LlmModelParams&, int32_t);
-template void scale_speculative_parallel_token_counts(VlmModelParams&, int32_t);
+template void scale_decode_parallel_token_counts(LlmModelParams&, int32_t);
+template void scale_decode_parallel_token_counts(VlmModelParams&, int32_t);
 
 template <typename TargetInput>
 void SpeculativeWorkerImpl<TargetInput>::apply_target_model_overrides(
@@ -119,10 +116,11 @@ SpeculativeWorkerImpl<TargetInput>::SpeculativeWorkerImpl(
     auto& params = input.input_params;
     const auto& tokens = params.parallel.dp_global_token_nums;
     const auto& raw_tokens = params.parallel.raw_dp_global_token_nums;
+    const auto& target_options = impl_->options();
     const bool graph_decode =
         params.meta.batch_forward_type.is_decode() &&
-        params.meta.q_max_seq_len <= 1 &&
-        ExecutionConfig::get_instance().enable_graph() && tokens.size() > 1 &&
+        params.meta.q_max_seq_len <= 1 && target_options.enable_graph() &&
+        tokens.size() > 1 &&
         params.parallel.dp_is_decode.size() == tokens.size() &&
         std::all_of(params.parallel.dp_is_decode.begin(),
                     params.parallel.dp_is_decode.end(),
@@ -133,8 +131,7 @@ SpeculativeWorkerImpl<TargetInput>::SpeculativeWorkerImpl(
       const int32_t bucket =
           static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
               max_tokens,
-              ExecutionConfig::get_instance()
-                  .enable_graph_mode_decode_no_padding()));
+              target_options.enable_graph_mode_decode_no_padding()));
       if (std::any_of(tokens.begin(), tokens.end(), [bucket](int32_t count) {
             return count != bucket;
           })) {
@@ -332,7 +329,7 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   DecodeBatchContext batch_ctx = make_decode_batch_context(input);
 
   const DecodeExpansionOptions decode_options{
-      {.num_speculative_tokens = num_speculative_tokens,
+      {.query_width = num_val_tokens,
        .per_request = !expand_decode_metadata_per_token},
       block_size};
   DecodeBuildBuffers buf = expand_decode_inputs(batch_ctx, decode_options);
@@ -344,8 +341,7 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
                                     total_num_val_tokens,
                                     device_);
 
-  scale_speculative_parallel_token_counts(
-      input_params, decode_options.num_speculative_tokens);
+  scale_decode_parallel_token_counts(input_params, decode_options.query_width);
   validate_input.runtime.device_tensors_ready = true;
 }
 

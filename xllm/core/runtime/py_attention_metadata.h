@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace xllm::layer {
@@ -117,6 +118,10 @@ class PyAttentionMetadataView final {
   bool is_prefill() const;
   bool is_chunked_prefill() const;
   bool is_mixed() const;
+  // Null for variable-width requests or an absent request layout.
+  std::optional<int32_t> decode_query_width() const {
+    return decode_query_width_;
+  }
   int32_t num_speculative_tokens() const;
   bool is_target_verify() const { return is_target_verify_; }
   bool is_dummy() const;
@@ -128,6 +133,7 @@ class PyAttentionMetadataView final {
 
   std::shared_ptr<layer::AttentionMetadata> metadata_;
   bool is_target_verify_ = false;
+  std::optional<int32_t> decode_query_width_;
   torch::Tensor kv_seq_lens_host_;
   torch::Tensor q_seq_lens_host_;
   std::vector<int32_t> new_cache_slots_host_values_;

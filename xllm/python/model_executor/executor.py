@@ -154,8 +154,9 @@ def _create_attention_backend(
 
         return DsaAttentionBackend(
             **dsa_kwargs,
-            num_speculative_tokens=int(config.get("num_speculative_tokens", 0)),
-            dspark_use_native_sas=bool(config.get("dspark_use_native_sas", False)),
+            num_speculative_tokens=int(config.get("num_speculative_tokens", 0))
+            if model_type == "deepseek_v4_dspark"
+            else 0,
         )
     if current_platform.is_npu():
         dcp_group = distributed.dcp_group(device)
@@ -444,9 +445,6 @@ class ModelExecutor:
                 from xllm.python.model_executor.runners.context_kv_acl_graph import ContextKvAclGraphRunner
 
                 self.context_kv_graph_runner = ContextKvAclGraphRunner(model, device)
-            from xllm.python.model_executor.runners.block_draft_acl_graph import (
-                BlockDraftAclGraphRunner,
-            )
             from xllm.python.model_executor.runners.decode_acl_graph import (
                 DecodeAclGraphRunner,
             )
@@ -465,36 +463,26 @@ class ModelExecutor:
                 )
             # The runner accepts a global token capacity and divides it by DP.
             max_graph_tokens = local_graph_sequence_capacity * max_decode_rows_per_request * dp_size
-            if self._independent_block_draft:
-                self.decode_graph_runner = BlockDraftAclGraphRunner(
-                    execution_model,
-                    self.attention_backend,
-                    device,
-                    local_graph_sequence_capacity * dp_size,
-                    int(config["max_position_embeddings"]),
-                    dp_size,
-                    dp_rank,
-                    block_draft_graph_warmup_max_kv_len=int(config.get("block_draft_graph_warmup_max_kv_len", 0)),
-                )
-            else:
-                self.decode_graph_runner = DecodeAclGraphRunner(
-                    execution_model,
-                    self.attention_backend,
-                    device,
-                    max_graph_tokens,
-                    int(config["max_position_embeddings"]),
-                    dp_size,
-                    dp_rank,
-                    num_speculative_tokens=self.num_speculative_tokens,
-                    is_spec_draft=bool(config.get("is_draft_engine", False)),
-                    enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
-                    enable_graph_mode_decode_no_padding=bool(config.get("enable_graph_mode_decode_no_padding", False)),
-                    # Keep VLM target's live-length TND attention: switching
-                    # to masked BNSD can change BF16 verify outputs.
-                    device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
-                    kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
-                    max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
-                )
+            self.decode_graph_runner = DecodeAclGraphRunner(
+                execution_model,
+                self.attention_backend,
+                device,
+                max_graph_tokens,
+                int(config["max_position_embeddings"]),
+                dp_size,
+                dp_rank,
+                causal=not self._independent_block_draft,
+                block_draft_graph_warmup_max_kv_len=int(config.get("block_draft_graph_warmup_max_kv_len", 0)),
+                num_speculative_tokens=self.num_speculative_tokens,
+                is_spec_draft=bool(config.get("is_draft_engine", False)),
+                enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
+                enable_graph_mode_decode_no_padding=bool(config.get("enable_graph_mode_decode_no_padding", False)),
+                # Keep VLM target's live-length TND attention: switching
+                # to masked BNSD can change BF16 verify outputs.
+                device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
+                kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
+                max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
+            )
         else:
             if self.layerwise_split_size > 1:
                 raise NotImplementedError(
@@ -626,41 +614,24 @@ class ModelExecutor:
             self.decode_graph_runner if layer_synchronizer is None and deepstack_input_embeds is None else None
         )
         if graph_runner is not None and (eplb is None or current_platform.is_npu()):
-            from xllm.python.model_executor.runners.block_draft_acl_graph import BlockDraftAclGraphRunner
             from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
             if isinstance(graph_runner, DecodeAclGraphRunner):
-                decode_metadata = None
-                graph_key = None
-                if isinstance(graph_runner, BlockDraftAclGraphRunner):
-                    if graph_runner.can_execute(input_ids, metadata, input_embedding, mtp_topk_indices):
-                        graph_key = graph_runner.warmup(
-                            input_ids,
-                            positions,
-                            metadata,
-                            input_embedding,
-                            mtp_topk_indices,
-                            eplb=eplb,
-                            pre_capture_kv_buckets=is_graph_warmup,
-                            input_batch=input_batch,
-                        )
-                else:
-                    decode_metadata = graph_runner.prepare_execution(
-                        input_ids, metadata, input_embedding, mtp_topk_indices, is_graph_warmup=is_graph_warmup
+                preparation = graph_runner.prepare_execution(
+                    input_ids, metadata, input_embedding, mtp_topk_indices, is_graph_warmup=is_graph_warmup
+                )
+                if preparation is not None:
+                    graph_key = graph_runner.warmup(
+                        input_ids,
+                        positions,
+                        metadata,
+                        input_embedding,
+                        mtp_topk_indices,
+                        eplb=eplb,
+                        preparation=preparation,
+                        is_graph_warmup=is_graph_warmup,
+                        input_batch=input_batch,
                     )
-                    if decode_metadata is not None:
-                        graph_key = graph_runner.warmup(
-                            input_ids,
-                            positions,
-                            metadata,
-                            input_embedding,
-                            mtp_topk_indices,
-                            eplb=eplb,
-                            decode_metadata=decode_metadata,
-                            is_graph_warmup=is_graph_warmup,
-                            input_batch=input_batch,
-                        )
-                if graph_key is not None:
                     output = graph_runner.execute(
                         input_ids,
                         positions,
@@ -669,7 +640,7 @@ class ModelExecutor:
                         mtp_topk_indices,
                         graph_key=graph_key,
                         eplb=eplb,
-                        decode_metadata=decode_metadata,
+                        preparation=preparation,
                         input_batch=input_batch,
                     )
                     if not is_graph_warmup and not self._serving_acl_graph_logged:

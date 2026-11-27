@@ -20,7 +20,6 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/batch/batch_group.h"
-#include "core/framework/config/execution_config.h"
 #include "core/util/threadpool.h"
 
 namespace xllm {
@@ -93,8 +92,7 @@ void VlmForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
 
 void VlmForwardInputFactory::finalize_inputs(PreparationState& state) {
   // Empty DP ranks participate in graph decode using Worker fake inputs.
-  if (::xllm::ExecutionConfig::get_instance().enable_graph() &&
-      state.batch_forward_type.is_decode()) {
+  if (options_.enable_graph && state.batch_forward_type.is_decode()) {
     for (uint32_t dp_rank = 0; dp_rank < options_.dp_size; ++dp_rank) {
       if (state.inputs[dp_rank]
               .input_params.meta.batch_forward_type.is_empty() &&

@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/framework/multimodal/mm_data.h"
 #include "core/kv_cache/block/block.h"
 #include "core/kv_cache/events/kv_cache_event_journal.h"
+#include "core/kv_cache/layout/paged_cache_partition.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/prefix/prefix_cache_entry.h"
 #include "util/timer.h"
@@ -62,8 +63,7 @@ class BlockManager {
     // Scheduler token budget used to size the shared SWA burst pool.
     PROPERTY(uint32_t, max_tokens_per_batch) = 0;
     // For CompositeBlockManager (passed from upstream).
-    PROPERTY(std::vector<uint32_t>, manager_types) = {};
-    PROPERTY(std::vector<uint32_t>, compress_ratios) = {};
+    PROPERTY(std::vector<PagedCachePartition>, grouped_partitions) = {};
     PROPERTY(uint32_t, max_seqs_per_batch) = 0;
     // Hasher type bound to the engine (TEXT for LLM, MM for VLM).
     PROPERTY(BlockHasherType, hasher_type) = BlockHasherType::TEXT;

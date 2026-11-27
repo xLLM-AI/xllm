@@ -26,10 +26,10 @@ limitations under the License.
 
 #include "core/common/constants.h"
 #include "core/common/metrics.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
+#include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/graph_execution_input.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/tensor_options.h"
@@ -689,8 +689,7 @@ DcuGraphExecutorImpl::DcuGraphExecutorImpl(CausalLM* model,
       device_(device),
       options_(options),
       graph_pool_(at::cuda::graph_pool_handle()) {
-  max_tokens_for_graph_mode_ =
-      ::xllm::ExecutionConfig::get_instance().max_tokens_for_graph_mode();
+  max_tokens_for_graph_mode_ = options_.max_tokens_for_graph_mode();
   if (max_tokens_for_graph_mode_ < options_.max_seqs_per_batch()) {
     max_tokens_for_graph_mode_ = options_.max_seqs_per_batch();
   }
@@ -712,29 +711,8 @@ DcuGraphExecutorImpl::~DcuGraphExecutorImpl() {
 
 uint32_t DcuGraphExecutorImpl::get_bucket_num_tokens(
     uint32_t num_tokens) const {
-  if (::xllm::ExecutionConfig::get_instance()
-          .enable_graph_mode_decode_no_padding()) {
-    return num_tokens;
-  }
-
-  if (num_tokens <= 1) {
-    return 1;
-  }
-
-  if (num_tokens <= 2) {
-    return 2;
-  }
-
-  if (num_tokens <= 4) {
-    return 4;
-  }
-
-  if (num_tokens <= 8) {
-    return 8;
-  }
-
-  constexpr uint32_t kGraphStep = 16;
-  return ((num_tokens + kGraphStep - 1) / kGraphStep) * kGraphStep;
+  return static_cast<uint32_t>(runtime::get_decode_graph_token_bucket(
+      num_tokens, options_.enable_graph_mode_decode_no_padding()));
 }
 
 uint32_t DcuGraphExecutorImpl::get_graph_max_seq_len(
@@ -818,17 +796,14 @@ ModelOutput DcuGraphExecutorImpl::run_impl(ModelType* model,
 
   VLOG(1) << "DCU executor run: "
           << "is_prefill=" << is_prefill << ", is_decode=" << is_decode
-          << ", enable_graph="
-          << ::xllm::ExecutionConfig::get_instance().enable_graph()
+          << ", enable_graph=" << options_.enable_graph()
           << ", enable_prefill_piecewise_graph="
-          << ::xllm::ExecutionConfig::get_instance()
-                 .enable_prefill_piecewise_graph()
+          << options_.enable_prefill_piecewise_graph()
           << ", num_tokens=" << tokens.size(0);
 
   uint32_t actual_num_tokens = static_cast<uint32_t>(tokens.size(/*dim=*/0));
 
-  bool graph_mode =
-      is_decode && ::xllm::ExecutionConfig::get_instance().enable_graph();
+  bool graph_mode = is_decode && options_.enable_graph();
 
   if (params.parallel.dp_global_token_nums.size() > 1) {
     auto max_it = std::max_element(params.parallel.dp_global_token_nums.begin(),
@@ -840,13 +815,13 @@ ModelOutput DcuGraphExecutorImpl::run_impl(ModelType* model,
     const auto& dp_is_decode = params.parallel.dp_is_decode;
     CHECK_EQ(dp_is_decode.size(), params.parallel.dp_global_token_nums.size());
 
-    graph_mode = ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+    graph_mode = options_.enable_graph() &&
                  std::find(dp_is_decode.begin(), dp_is_decode.end(), 0) ==
                      dp_is_decode.end();
   }
 
   const bool enable_prefill_piecewise =
-      ::xllm::ExecutionConfig::get_instance().enable_prefill_piecewise_graph();
+      options_.enable_prefill_piecewise_graph();
 
   if (is_prefill && enable_prefill_piecewise) {
     if (static_cast<int64_t>(actual_num_tokens) > max_tokens_for_graph_mode_) {

@@ -293,6 +293,47 @@ TEST(MtpAsyncInputBuilderTest, RejectsPageCountBeyondBlockTableWidth) {
                "KV length exceeds block-table capacity");
 }
 
+TEST(MtpAsyncInputBuilderTest,
+     PybindViewUsesRequestWidthsInsteadOfCandidateCount) {
+  auto metadata = std::make_shared<layer::AttentionMetadata>();
+  metadata->num_speculative_tokens = 7;
+  metadata->max_query_len = 1;
+  for (const bool is_draft : {false, true}) {
+    for (const int32_t width : {1, 4, 7, 8}) {
+      LlmModelParams storage;
+      storage.meta.batch_forward_type = BatchForwardType::DECODE;
+      storage.meta.execution_batch.num_reqs = 2;
+      storage.meta.execution_batch.num_tokens = 2 * width;
+      storage.meta.execution_batch.num_scheduled_tokens = {width, width};
+      // Attention rows may already be expanded to one row per token.
+      metadata->q_seq_lens_vec.assign(2 * width, 1);
+      metadata->slot_mapping = torch::arange(2 * width, torch::kInt32);
+      PyAttentionMetadataView view(
+          metadata, ModelParamsView(storage), is_draft);
+      ASSERT_TRUE(view.decode_query_width().has_value());
+      EXPECT_EQ(*view.decode_query_width(), width);
+      EXPECT_EQ(view.num_speculative_tokens(), 7);
+      EXPECT_EQ(view.is_target_verify(), !is_draft && width > 1);
+      storage.meta.execution_batch.num_scheduled_tokens = {2, 3};
+      EXPECT_EQ(*view.decode_query_width(), width);
+    }
+  }
+  LlmModelParams variable;
+  variable.meta.execution_batch.num_scheduled_tokens = {1, 2};
+  PyAttentionMetadataView variable_view(
+      metadata, ModelParamsView(variable), /*is_draft_engine=*/true);
+  EXPECT_FALSE(variable_view.decode_query_width().has_value());
+
+  LlmModelParams dummy;
+  dummy.meta.execution_batch.num_tokens = 7;
+  metadata->is_dummy = false;
+  // Block dummy inputs can carry nonzero attention geometry.
+  PyAttentionMetadataView dummy_view(
+      metadata, ModelParamsView(dummy), /*is_draft_engine=*/true);
+  ASSERT_TRUE(dummy_view.decode_query_width().has_value());
+  EXPECT_EQ(*dummy_view.decode_query_width(), 7);
+}
+
 TEST(MtpAsyncInputBuilderTest, PybindViewOwnsGlobalDpKvMaxSequenceLengths) {
   ensure_xllm_torch_ops_registered();
   if (!Py_IsInitialized()) {
@@ -321,10 +362,12 @@ TEST(MtpAsyncInputBuilderTest, PybindViewOwnsGlobalDpKvMaxSequenceLengths) {
       params.parallel.dp_global_token_nums = {expected[0] == 0 ? 0 : 1,
                                               expected[1] == 0 ? 0 : 1};
       params.parallel.dp_global_kv_max_seq_lens = expected;
+      params.meta.execution_batch.num_scheduled_tokens = {3, 3};
       py_metadata =
           py::cast(PyAttentionMetadataView(metadata,
                                            params,
                                            /*is_draft_engine=*/false));
+      EXPECT_EQ(py_metadata.attr("decode_query_width").cast<int32_t>(), 3);
       EXPECT_EQ(py_metadata.attr("raw_dp_execution_token_counts")
                     .cast<std::vector<int32_t>>(),
                 params.parallel.dp_global_token_nums);

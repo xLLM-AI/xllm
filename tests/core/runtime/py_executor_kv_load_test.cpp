@@ -83,8 +83,10 @@ class TestModel:
 class TestExecutor:
     requires_input_batch_metadata = False
     context_kv_graph_runner = None
-    def __init__(self, *args: object) -> None:
+    def __init__(self, model: object, config: dict, *args: object) -> None:
         self.supports_layerwise_kv_load = layerwise
+        executor_configs.append(config.copy())
+        executor_limits.append(args[1])
     def bind_kv_caches(self, caches: object) -> None:
         pass
     def execute(self, tokens: torch.Tensor, positions: torch.Tensor,
@@ -104,6 +106,8 @@ class TestExecutor:
             assert bool((ready == 7).all())
         return tokens.float().view(-1, 1) + ready[0]
 
+executor_configs = []
+executor_limits = []
 registry = types.ModuleType('xllm.python.registry')
 registry.get_model_class = lambda name: TestModel
 executor_module = types.ModuleType('xllm.python.model_executor.executor')
@@ -132,10 +136,32 @@ patch.__enter__()
     ModelContext context(
         parallel, args, QuantArgs(), torch::TensorOptions().device(device));
     PyCausalLM model(context, "test_reload");
+    py::dict model_config = model.config_dict().cast<py::dict>();
+    model_config["block_draft_graph_warmup_max_kv_len"] = 8192;
     std::vector<KVCache> caches;
     for (bool layerwise : {false, true}) {
       scope["layerwise"] = layerwise;
-      PyExecutorImpl executor(&model, args, device, runtime::Options());
+      runtime::Options options;
+      options.enable_graph_mode_decode_no_padding(layerwise)
+          .acl_graph_decode_batch_size_limit(layerwise ? 3 : 7)
+          .block_draft_graph_warmup_max_kv_len(layerwise ? -1 : 4096);
+      PyExecutorImpl executor(&model, args, device, options);
+      // Both modes share the same checkpoint config and unchanged singleton.
+      // The bridge must preserve each executor's graph settings.
+      const py::dict config = scope["executor_configs"]
+                                  .cast<py::list>()[layerwise ? 1 : 0]
+                                  .cast<py::dict>();
+      EXPECT_EQ(config["enable_graph_mode_decode_no_padding"].cast<bool>(),
+                layerwise);
+      EXPECT_EQ(config["block_draft_graph_warmup_max_kv_len"].cast<int32_t>(),
+                layerwise ? -1 : 4096);
+      EXPECT_EQ(
+          model_config["block_draft_graph_warmup_max_kv_len"].cast<int32_t>(),
+          8192);
+      EXPECT_EQ(scope["executor_limits"]
+                    .cast<py::list>()[layerwise ? 1 : 0]
+                    .cast<int32_t>(),
+                layerwise ? 3 : 7);
       for (bool graph : {false, true}) {
         ready.zero_();
         auto load = std::make_shared<TestLoadSynchronizer>(ready);

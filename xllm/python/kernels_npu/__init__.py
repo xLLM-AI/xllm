@@ -27,6 +27,7 @@ import importlib
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .dsa import sparse_flash_mla_swa, sparse_flash_mla_swa_metadata, supports_sparse_flash_mla_swa
     from .gated_delta_net import mega_gdn_decode, mega_gdn_mtp_decode, mega_gdn_mtp_decode_varlen, mega_gdn_prefill
 
 
@@ -137,6 +138,9 @@ _EXPORTS = {
         "sparse_flash_attention_lse_out",
     ),
     "dsa": (
+        "sparse_flash_mla_swa_metadata",
+        "sparse_flash_mla_swa",
+        "supports_sparse_flash_mla_swa",
         "compressor",
         "sparse_attn_sharedkv",
         "sparse_attn_sharedkv_metadata",
@@ -228,6 +232,9 @@ __all__ = [
     "hc_pre",
     "hc_post",
     "moe_gating_top_k_hash",
+    "sparse_flash_mla_swa_metadata",
+    "sparse_flash_mla_swa",
+    "supports_sparse_flash_mla_swa",
     "sparse_attn_sharedkv",
     "sparse_attn_sharedkv_metadata",
     "causal_conv1d_qkv_prefill",
