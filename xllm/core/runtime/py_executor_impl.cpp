@@ -548,9 +548,9 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 }
 
 void PyExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
-                                        const torch::Tensor& positions,
-                                        std::vector<KVCache>& kv_caches,
-                                        const ModelParamsView& params) {
+                                         const torch::Tensor& positions,
+                                         std::vector<KVCache>& kv_caches,
+                                         const ModelParamsView& params) {
   if (!prepares_graph_input_) {
     return;
   }
