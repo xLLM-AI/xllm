@@ -26,7 +26,9 @@ Experts are sharded by their intermediate dimension across the MoE
 tensor-parallel group, so every rank sees every expert and holds a slice of
 each. Each rank therefore computes a partial sum and the group reduces once
 per layer, which keeps the routing decision identical on every rank without
-exchanging tokens.
+exchanging tokens. That group spans the data-parallel ranks -- the runtime
+sizes it as ``world_size / ep_size`` -- so the block gathers the DP tokens
+before routing and scatters them back after the reduction.
 """
 
 from __future__ import annotations
@@ -83,10 +85,15 @@ class Qwen3MoeConfig(Qwen3Config):
             norm_topk_prob=bool(pick("norm_topk_prob", default=True)),
             decoder_sparse_step=int(pick("decoder_sparse_step", default=1)),
             mlp_only_layers=tuple(int(layer_id) for layer_id in pick("mlp_only_layers", default=[])),
-            # Experts are sharded with the attention by default, which is the
-            # only topology this implementation serves.
-            moe_tp_size=int(pick("moe_tp_size", default=base.tp_size)),
-            moe_tp_rank=int(pick("moe_tp_rank", default=base.tp_rank)),
+            # The runtime builds the MoE tensor-parallel group across the
+            # data-parallel ranks, so the defaults describe that group rather
+            # than the attention's split: its size is the two degrees' product,
+            # and -- both groups laying their tensor-parallel dimension out
+            # fastest -- a rank's position in it is `dp_rank * tp_size +
+            # tp_rank`, not `tp_rank` alone, which would give every replica the
+            # same position and the same expert shards.
+            moe_tp_size=int(pick("moe_tp_size", default=base.tp_size * base.dp_size)),
+            moe_tp_rank=int(pick("moe_tp_rank", default=base.dp_rank * base.tp_size + base.tp_rank)),
             ep_size=int(pick("ep_size", default=1)),
             ep_rank=int(pick("ep_rank", default=0)),
         )
@@ -100,10 +107,24 @@ class Qwen3MoeConfig(Qwen3Config):
             raise ValueError("moe_intermediate_size must be positive")
         if self.moe_intermediate_size % self.moe_tp_size:
             raise ValueError("moe_intermediate_size must be divisible by moe_tp_size")
-        if self.moe_tp_size != self.tp_size:
-            raise ValueError("the Python Qwen3-MoE shards experts with the attention: moe_tp_size must equal tp_size")
         if self.ep_size != 1:
             raise NotImplementedError("the Python Qwen3-MoE does not implement expert parallelism")
+        # The block gathers the data-parallel tokens before routing and scatters
+        # them after the reduction, so the MoE group may span the attention's
+        # tensor- and data-parallel ranks -- which is how the runtime sizes it,
+        # `world_size / ep_size`, and why comparing it against `tp_size` alone
+        # rejects every data-parallel launch. A wider group means a parallel
+        # context split, whose ranks hold different sequence rows that the block
+        # does not gather; reducing over them would sum partial sums belonging
+        # to different tokens, so that topology is rejected rather than served.
+        if self.moe_tp_size * self.ep_size != self.tp_size * self.dp_size:
+            raise ValueError(
+                "the Python Qwen3-MoE needs the MoE group to span exactly the attention's "
+                "tensor- and data-parallel ranks (moe_tp_size * ep_size == tp_size * dp_size); "
+                "a parallel context split is not supported"
+            )
+        if not 0 <= self.moe_tp_rank < self.moe_tp_size:
+            raise ValueError("moe_tp_rank must be in [0, moe_tp_size)")
 
     def is_moe_layer(self, layer_id: int) -> bool:
         """Whether this layer routes, mirroring the reference implementation."""
