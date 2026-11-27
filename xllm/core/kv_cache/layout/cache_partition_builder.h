@@ -18,6 +18,8 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <optional>
+#include <string>
+#include <vector>
 
 #include "core/kv_cache/layout/paged_cache_partition.h"
 #include "core/kv_cache/layout/recurrent_cache_partition.h"
@@ -31,7 +33,7 @@ class ModelArgs;
 // Model/backend adaptation stays outside the framework-independent partition
 // type. Qwen and GLM hybrids describe Full history and recurrent state
 // separately. GLM KPool tails share the recurrent slot even in Full-only MTP
-// drafts. Other hybrid and grouped models retain their construction paths.
+// drafts. Grouped attention describes each window/history ID space separately.
 std::optional<PagedCachePartition> build_paged_cache_partition(
     CachePartitionId id,
     const KVCacheCapacity& capacity,
@@ -40,6 +42,13 @@ std::optional<PagedCachePartition> build_paged_cache_partition(
     torch::ScalarType dtype,
     int32_t token_stride,
     bool enable_prefix_cache);
+
+std::vector<PagedCachePartition> build_grouped_cache_partitions(
+    const std::string& model_id,
+    const KVCacheCapacity& capacity,
+    const ModelArgs& model_args,
+    torch::ScalarType dtype,
+    int32_t token_stride);
 
 std::optional<RecurrentCachePartition> build_recurrent_cache_partition(
     CachePartitionId id,

@@ -41,6 +41,7 @@ limitations under the License.
 #include "core/kv_cache/block/static_kv_block_pool.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
+#include "framework/block/grouped_cache_test_utils.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
 #include "framework/request/stopping_checker.h"
@@ -50,8 +51,6 @@ namespace xllm {
 
 namespace {
 
-constexpr uint32_t kManagerTypeBlockManagerImpl = 0;
-constexpr uint32_t kManagerTypeSlidingWindowBlockManager = 1;
 constexpr uint32_t kMaxTokensPerBatch = 1280;
 
 // Base block_size = 128. Two BlockManagerImpl: compress_ratio 4 and 128.
@@ -72,15 +71,12 @@ BlockManager::Options MakeCompositeOptions(uint32_t base_num_blocks,
   BlockManager::Options opts;
   opts.num_blocks(base_num_blocks)
       .block_size(block_size)
-      .sliding_window_size(window_size)
       .swa_blocks_per_seq(swa_blocks_per_seq)
       .swa_num_blocks(swa_num_blocks)
       .max_tokens_per_batch(kMaxTokensPerBatch)
       .max_seqs_per_batch(max_seqs_per_batch)
-      .manager_types({kManagerTypeSlidingWindowBlockManager,
-                      kManagerTypeBlockManagerImpl,
-                      kManagerTypeBlockManagerImpl})
-      .compress_ratios({0, 4, 128});
+      .grouped_partitions(
+          test::grouped_cache_partitions(block_size, window_size));
   return opts;
 }
 
@@ -148,7 +144,7 @@ Sequence MakeTestSequence(size_t index,
 
 // Blocks are keyed by BlockType in the sequence KVCacheState, not by
 // sub-manager index. These helpers read the three DSV4 groups by type so the
-// tests stay independent of compress_ratios ordering.
+// tests stay independent of partition declaration order.
 std::vector<Block> SwaBlocks(Sequence& seq) {
   const Slice<Block> s = seq.kv_state().blocks(BlockType::SWA);
   return std::vector<Block>(s.begin(), s.end());
@@ -585,7 +581,8 @@ TEST(CompositeBlockManagerTest, AllocateForSequence_GrowSameSeq) {
 TEST(CompositeBlockManagerTest, AllocateContinuesAfterSatisfiedTokenManager) {
   BlockManager::Options opts =
       MakeCompositeOptions(4096, kBaseBlockSize, 128, 4);
-  opts.compress_ratios({0, 128, 4});
+  opts.grouped_partitions(test::grouped_cache_partitions(
+      kBaseBlockSize, 128, {{128, true}, {4, true}}));
   CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
   Sequence seq = MakeTestSequence(0, {1});
@@ -1400,7 +1397,7 @@ TEST(CompositeBlockManagerTest,
       .linear_state_num_slots(64)
       .enable_prefix_cache(false)
       .instance_is_decode(true);
-  // No manager_types → flat KV shape. LINEAR is added on top by
+  // No grouped partitions → flat KV shape. LINEAR is added on top by
   // build_composite_leaves.
   CompositeBlockManager manager(build_composite_leaves(opts), opts);
 
@@ -1797,13 +1794,11 @@ TEST(CompositeBlockManagerTest,
   BlockManagerPool::Options options;
   options.num_blocks(composite_options.num_blocks())
       .block_size(composite_options.block_size())
-      .sliding_window_size(composite_options.sliding_window_size())
       .swa_blocks_per_seq(composite_options.swa_blocks_per_seq())
       .swa_num_blocks(composite_options.swa_num_blocks())
       .max_tokens_per_batch(composite_options.max_tokens_per_batch())
       .max_seqs_per_batch(composite_options.max_seqs_per_batch())
-      .manager_types(composite_options.manager_types())
-      .compress_ratios(composite_options.compress_ratios())
+      .grouped_partitions(composite_options.grouped_partitions())
       .enable_prefix_cache(false);
   BlockManagerPool pool(options);
 
@@ -3781,14 +3776,21 @@ TEST_F(SharedSlabKVCacheBlockTest,
   pinned.clear();
 }
 
+TEST(CompositeBlockManagerTest, RejectsPartitionsWithoutLegacyBlockBinding) {
+  BlockManager::Options opts =
+      MakeCompositeOptions(4096, kBaseBlockSize, 128, 4);
+  opts.grouped_partitions(
+      test::grouped_cache_partitions(kBaseBlockSize, 128, {{8, true}}));
+  EXPECT_DEATH(build_composite_leaves(opts),
+               "Unsupported legacy cache compression ratio");
+}
+
 TEST(CompositeBlockManagerTest, V41DefaultPrefixCacheDemotesInsteadOfAbort) {
   const uint32_t window_size = 4 * kBaseBlockSize;
   BlockManager::Options opts =
       MakeCompositeOptions(4096, kBaseBlockSize, window_size, 4);
-  opts.manager_types({kManagerTypeSlidingWindowBlockManager,
-                      kManagerTypeBlockManagerImpl,
-                      kManagerTypeBlockManagerImpl});
-  opts.compress_ratios({0, 2, 1});
+  opts.grouped_partitions(test::grouped_cache_partitions(
+      kBaseBlockSize, window_size, {{2, false}, {1, false}}));
 
   for (const bool is_decode : {false, true}) {
     SCOPED_TRACE(is_decode);

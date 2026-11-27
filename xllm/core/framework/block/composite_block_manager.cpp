@@ -37,9 +37,6 @@ namespace xllm {
 
 namespace {
 
-constexpr uint32_t kManagerTypeBlockManagerImpl = 0;
-constexpr uint32_t kManagerTypeSlidingWindowBlockManager = 1;
-
 // KV completion bounds the block contents; confirmed tokens independently
 // provide the hasher's lookahead. The lookahead token needs no completed KV.
 size_t publishable_tokens(const Sequence& seq, const BlockManager& leaf) {
@@ -87,6 +84,7 @@ inline BlockType block_type_from_compress_ratio(uint32_t ratio) {
   if (ratio == 4) {
     return BlockType::C4;
   }
+  CHECK_EQ(ratio, 128u) << "Unsupported legacy cache compression ratio";
   return BlockType::C128;
 }
 
@@ -318,7 +316,7 @@ CompositeBlockManager::LeafMap build_composite_leaves(
   if (options.enable_shared_kv_cache()) {
     CHECK(!options.enable_vmm_kvcache());
     CHECK(options.enable_linear_state());
-    CHECK(options.manager_types().empty());
+    CHECK(options.grouped_partitions().empty());
     CHECK_EQ(options.num_blocks(),
              static_cast<uint32_t>(options.linear_state_num_slots()));
     cache_options.shared_block_pool(
@@ -329,29 +327,17 @@ CompositeBlockManager::LeafMap build_composite_leaves(
                   options.num_blocks(), options.shared_linear_state_slots()));
   }
 
-  const size_t n = options.manager_types().size();
-  if (n != 0) {
-    CHECK_EQ(n, options.compress_ratios().size())
-        << "manager_types and compress_ratios must have the same size";
-  }
-
   bool prefix_cache_on = options.enable_prefix_cache();
   const bool is_decode = options.instance_is_decode();
-  // C1/C2 cannot restore prefixes; disable the whole composite rather than
-  // cache SWA alone.
+  // A window alone cannot restore a complete grouped prefix.
   bool grouped_anchor_participates = false;
   bool has_token_group = false;
-  for (size_t i = 0; i < n; ++i) {
-    if (options.manager_types()[i] != kManagerTypeBlockManagerImpl) {
+  for (const auto& partition : options.grouped_partitions()) {
+    if (!partition.participates_in_admission()) {
       continue;
     }
-    const uint32_t ratio = options.compress_ratios()[i];
-    const BlockType key = block_type_from_compress_ratio(ratio);
-    has_token_group |= key == BlockType::C1 || key == BlockType::C2;
-    if (key == BlockType::C4 || key == BlockType::C128) {
-      grouped_anchor_participates = true;
-      break;
-    }
+    has_token_group = true;
+    grouped_anchor_participates |= partition.enable_prefix_cache();
   }
   if (prefix_cache_on && has_token_group && !grouped_anchor_participates) {
     LOG(WARNING) << "grouped cache has no prefix-cache-capable group; "
@@ -391,7 +377,7 @@ CompositeBlockManager::LeafMap build_composite_leaves(
             /*supports_prefix_cache=*/prefill_prefix_cache});
   }
 
-  if (options.manager_types().empty()) {
+  if (options.grouped_partitions().empty()) {
     // Normal / Qwen / virtual memory: a single KV leaf.
     BlockManager::Options kv_opts = cache_options;
     kv_opts.block_type(BlockType::KV);
@@ -406,62 +392,41 @@ CompositeBlockManager::LeafMap build_composite_leaves(
     return leaves;
   }
 
-  for (size_t i = 0; i < n; ++i) {
-    const uint32_t type = options.manager_types()[i];
-    const uint32_t compress_ratio = options.compress_ratios()[i];
+  for (const auto& partition : options.grouped_partitions()) {
     BlockManager::Options opts = options;
-
-    if (type == kManagerTypeBlockManagerImpl) {
-      CHECK(compress_ratio == 1 || compress_ratio == 2 || compress_ratio == 4 ||
-            compress_ratio == 128)
-          << "unexpected compress_ratio " << compress_ratio
-          << " for composite BlockManagerImpl sub-manager";
-      opts.block_size(static_cast<uint32_t>(options.block_size()) *
-                      compress_ratio);
-      opts.num_blocks(static_cast<uint32_t>(options.num_blocks()) /
-                      compress_ratio);
-      const BlockType key = block_type_from_compress_ratio(compress_ratio);
-      const bool compressed_prefix_cache =
-          prefix_cache_on && (key == BlockType::C4 || key == BlockType::C128);
-      opts.block_type(key)
-          .enable_prefix_cache(compressed_prefix_cache)
-          .hasher_type(options.hasher_type());
-      // C4/C128: full-history attention (no window), so hits must form a
-      // solid left-to-right prefix. The default BlockManagerImpl probe is
-      // exactly right. Cross-leaf min happens in the composite.
-      leaves.emplace(key,
-                     CompositeBlockManager::LeafEntry{
-                         maybe_concurrent(
-                             std::make_unique<BlockManagerImpl>(opts), options),
-                         /*participates_in_admission=*/true,
-                         /*supports_prefix_cache=*/compressed_prefix_cache});
-    } else if (type == kManagerTypeSlidingWindowBlockManager) {
-      const uint32_t swa_blocks_per_seq = options.swa_blocks_per_seq();
-      CHECK_GT(swa_blocks_per_seq, 0u) << "swa_blocks_per_seq must be positive";
-      CHECK_GT(options.block_size(), 0) << "block_size must be positive";
-      const uint32_t sliding_window_size =
-          std::max(options.sliding_window_size(), 1u);
-      const uint32_t swa_total_blocks = options.swa_num_blocks();
-      CHECK_GT(swa_total_blocks, 0u)
+    const bool sliding = partition.is_sliding_window();
+    const BlockType key =
+        sliding ? BlockType::SWA
+                : block_type_from_compress_ratio(partition.compression_ratio());
+    const bool enable_prefix =
+        partition.enable_prefix_cache() &&
+        (sliding ? prefill_prefix_cache : prefix_cache_on);
+    opts.block_size(partition.token_stride())
+        .block_type(key)
+        .enable_prefix_cache(enable_prefix);
+    std::unique_ptr<BlockManager> leaf;
+    if (sliding) {
+      CHECK_GT(options.swa_blocks_per_seq(), 0u)
+          << "swa_blocks_per_seq must be positive";
+      CHECK_GT(options.swa_num_blocks(), 0u)
           << "swa_num_blocks must be provided by the KV cache estimator";
-      opts.num_blocks(swa_total_blocks)
-          .swa_blocks_per_seq(swa_blocks_per_seq)
-          .sliding_window_size(sliding_window_size)
-          .block_type(BlockType::SWA)
-          .enable_prefix_cache(prefill_prefix_cache)
-          .hasher_type(options.hasher_type());
-      // SWA is not an admission leaf (pool sized by ring, not token budget)
-      // but serves gap-tolerant prefix cache.
-      leaves.emplace(
-          BlockType::SWA,
-          CompositeBlockManager::LeafEntry{
-              maybe_concurrent(
-                  std::make_unique<SlidingWindowBlockManager>(opts), options),
-              /*participates_in_admission=*/false,
-              /*supports_prefix_cache=*/prefill_prefix_cache});
+      opts.num_blocks(options.swa_num_blocks())
+          .sliding_window_size(partition.window_size());
+      leaf = std::make_unique<SlidingWindowBlockManager>(opts);
     } else {
-      LOG(FATAL) << "Unknown manager_type " << type;
+      opts.num_blocks(options.num_blocks() / partition.compression_ratio());
+      leaf = std::make_unique<BlockManagerImpl>(opts);
     }
+    const bool inserted =
+        leaves
+            .emplace(key,
+                     CompositeBlockManager::LeafEntry{
+                         maybe_concurrent(std::move(leaf), options),
+                         partition.participates_in_admission(),
+                         enable_prefix})
+            .second;
+    CHECK(inserted)
+        << "Grouped cache partitions require distinct legacy block types";
   }
   return leaves;
 }
