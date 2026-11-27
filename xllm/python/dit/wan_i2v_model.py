@@ -103,6 +103,19 @@ class _WanAttentionProcessor:
 class WanI2VTransformer(WanTransformer3DModel):
     _sp: SequenceParallel
 
+    def prepare_rotary(self, latents: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # The rotary frequencies depend only on the latent grid, which is fixed
+        # across denoising steps and both CFG branches of a request.
+        cos, sin = self.rope(latents)
+        padding = (-cos.size(1)) % self._sp.size
+        if padding:
+            cos = F.pad(cos, (0, 0, 0, 0, 0, padding))
+            sin = F.pad(sin, (0, 0, 0, 0, 0, padding))
+        return (
+            cos.chunk(self._sp.size, dim=1)[self._sp.rank].contiguous(),
+            sin.chunk(self._sp.size, dim=1)[self._sp.rank].contiguous(),
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -111,18 +124,18 @@ class WanI2VTransformer(WanTransformer3DModel):
         encoder_hidden_states_image: torch.Tensor | None = None,
         return_dict: bool = True,
         attention_kwargs: dict[str, Any] | None = None,
+        *,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> Transformer2DModelOutput | tuple[torch.Tensor]:
         batch, _, frames, height, width = hidden_states.shape
         pt, ph, pw = self.config.patch_size
-        rotary = self.rope(hidden_states)
+        rotary = self.prepare_rotary(hidden_states) if rotary_emb is None else rotary_emb
         states = self.patch_embedding(hidden_states).flatten(2).transpose(1, 2)
         live_rows = states.shape[1]
         padding = (-live_rows) % self._sp.size
-        states = F.pad(states, (0, 0, 0, padding)).chunk(self._sp.size, dim=1)[self._sp.rank].contiguous()
-        rotary = tuple(
-            F.pad(part, (0, 0, 0, 0, 0, padding)).chunk(self._sp.size, dim=1)[self._sp.rank].contiguous()
-            for part in rotary
-        )
+        if padding:
+            states = F.pad(states, (0, 0, 0, padding))
+        states = states.chunk(self._sp.size, dim=1)[self._sp.rank].contiguous()
         temb, timestep_proj, text, image = self.condition_embedder(
             timestep, encoder_hidden_states, encoder_hidden_states_image
         )

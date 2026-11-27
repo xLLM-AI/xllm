@@ -18,6 +18,7 @@ from typing import Any
 import torch
 from diffusers import AutoencoderKLWan, UniPCMultistepScheduler, WanImageToVideoPipeline
 from diffusers.models.autoencoders.autoencoder_kl_wan import WanCausalConv3d
+from torch.nn import functional as F
 from transformers import (
     AutoTokenizer,
     CLIPImageProcessor,
@@ -30,6 +31,30 @@ from transformers import (
 from xllm.python.dit import ComponentLoad
 from xllm.python.dit.parallel import SequenceParallel, StateDictShard, TensorParallel, load_component_weights
 from xllm.python.dit.wan_i2v_model import load_transformer
+
+
+class _WanCausalConv3d(WanCausalConv3d):
+    def __init__(self, convolution: WanCausalConv3d) -> None:
+        width, _, height, _, temporal, _ = convolution._padding
+        super().__init__(
+            convolution.in_channels,
+            convolution.out_channels,
+            convolution.kernel_size,
+            convolution.stride,
+            padding=(temporal // 2, height, width),
+        )
+        self.padding = (0, height, width)
+        self._temporal_padding = temporal
+
+    def forward(self, x: torch.Tensor, cache_x: torch.Tensor | None = None) -> torch.Tensor:
+        temporal_padding = self._temporal_padding
+        if cache_x is not None and temporal_padding:
+            x = torch.cat((cache_x.to(x.device), x), dim=2)
+            temporal_padding -= cache_x.size(2)
+        # PyTorch copies the full tensor when F.pad is called with all zeros.
+        if temporal_padding:
+            x = F.pad(x, (0, 0, 0, 0, temporal_padding, 0))
+        return torch.nn.Conv3d.forward(self, x)
 
 
 class WanI2VPipeline:
@@ -95,13 +120,9 @@ class WanI2VPipeline:
             config = AutoencoderKLWan.load_config(path)
             with torch.device("meta"):
                 component = AutoencoderKLWan.from_config(config)
-            for convolution in component.modules():
-                if isinstance(convolution, WanCausalConv3d):
-                    # Keep the causal time padding explicit. Conv3d can apply
-                    # spatial padding without materializing a padded feature map.
-                    padding_width, _, padding_height, _, padding_time, _ = convolution._padding
-                    convolution.padding = (0, padding_height, padding_width)
-                    convolution._padding = (0, 0, 0, 0, padding_time, 0)
+                for layer_name, layer in component.named_modules():
+                    if isinstance(layer, WanCausalConv3d):
+                        component.set_submodule(layer_name, _WanCausalConv3d(layer))
             load_component_weights(component, shards, self._device, lambda _: torch.float32)
         elif name == "scheduler":
             config = UniPCMultistepScheduler.load_config(path)
@@ -147,7 +168,7 @@ class WanI2VPipeline:
         frames = generation["num_frames"] // pipeline.vae_scale_factor_temporal
         frames = frames * pipeline.vae_scale_factor_temporal + 1
         height, width = generation["height"], generation["width"]
-        pixels = pipeline.video_processor.preprocess(image.float() / 255, height=height, width=width)
+        pixels = pipeline.video_processor.preprocess(image.float() / 255, height=height, width=width).to(self._device)
         generator = torch.Generator(device="cpu").manual_seed(generation["seed"])
         latents, condition = pipeline.prepare_latents(
             image=pixels,
@@ -161,6 +182,7 @@ class WanI2VPipeline:
             generator=generator,
             latents=tensors.get("latent"),
         )
+        rotary_emb = pipeline.transformer.prepare_rotary(latents)
         for timestep in scheduler.timesteps:
             model_input = torch.cat((latents, condition), dim=1).to(pipeline.transformer.dtype)
             timestep_input = timestep.expand(1)
@@ -170,6 +192,7 @@ class WanI2VPipeline:
                 encoder_hidden_states=prompt_embed,
                 encoder_hidden_states_image=image_embed,
                 return_dict=False,
+                rotary_emb=rotary_emb,
             )[0]
             if generation["guidance_scale"] > 1:
                 unconditional = pipeline.transformer(
@@ -178,6 +201,7 @@ class WanI2VPipeline:
                     encoder_hidden_states=negative_embed,
                     encoder_hidden_states_image=image_embed,
                     return_dict=False,
+                    rotary_emb=rotary_emb,
                 )[0]
                 noise = unconditional + generation["guidance_scale"] * (noise - unconditional)
             latents = scheduler.step(noise, timestep, latents, return_dict=False)[0]
