@@ -445,9 +445,6 @@ class ModelExecutor:
                 from xllm.python.model_executor.runners.context_kv_acl_graph import ContextKvAclGraphRunner
 
                 self.context_kv_graph_runner = ContextKvAclGraphRunner(model, device)
-            from xllm.python.model_executor.runners.block_draft_acl_graph import (
-                BlockDraftAclGraphRunner,
-            )
             from xllm.python.model_executor.runners.decode_acl_graph import (
                 DecodeAclGraphRunner,
             )
@@ -466,36 +463,26 @@ class ModelExecutor:
                 )
             # The runner accepts a global token capacity and divides it by DP.
             max_graph_tokens = local_graph_sequence_capacity * max_decode_rows_per_request * dp_size
-            if self._independent_block_draft:
-                self.decode_graph_runner = BlockDraftAclGraphRunner(
-                    execution_model,
-                    self.attention_backend,
-                    device,
-                    local_graph_sequence_capacity * dp_size,
-                    int(config["max_position_embeddings"]),
-                    dp_size,
-                    dp_rank,
-                    block_draft_graph_warmup_max_kv_len=int(config.get("block_draft_graph_warmup_max_kv_len", 0)),
-                )
-            else:
-                self.decode_graph_runner = DecodeAclGraphRunner(
-                    execution_model,
-                    self.attention_backend,
-                    device,
-                    max_graph_tokens,
-                    int(config["max_position_embeddings"]),
-                    dp_size,
-                    dp_rank,
-                    num_speculative_tokens=self.num_speculative_tokens,
-                    is_spec_draft=bool(config.get("is_draft_engine", False)),
-                    enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
-                    enable_graph_mode_decode_no_padding=bool(config.get("enable_graph_mode_decode_no_padding", False)),
-                    # Keep VLM target's live-length TND attention: switching
-                    # to masked BNSD can change BF16 verify outputs.
-                    device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
-                    kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
-                    max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
-                )
+            self.decode_graph_runner = DecodeAclGraphRunner(
+                execution_model,
+                self.attention_backend,
+                device,
+                max_graph_tokens,
+                int(config["max_position_embeddings"]),
+                dp_size,
+                dp_rank,
+                causal=not self._independent_block_draft,
+                block_draft_graph_warmup_max_kv_len=int(config.get("block_draft_graph_warmup_max_kv_len", 0)),
+                num_speculative_tokens=self.num_speculative_tokens,
+                is_spec_draft=bool(config.get("is_draft_engine", False)),
+                enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
+                enable_graph_mode_decode_no_padding=bool(config.get("enable_graph_mode_decode_no_padding", False)),
+                # Keep VLM target's live-length TND attention: switching
+                # to masked BNSD can change BF16 verify outputs.
+                device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
+                kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
+                max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
+            )
         else:
             if self.layerwise_split_size > 1:
                 raise NotImplementedError(

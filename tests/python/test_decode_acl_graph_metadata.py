@@ -26,7 +26,6 @@ from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_m
 from xllm.python.model_executor.executor import ModelExecutor
 from xllm.python.model_executor.forward_context import AclGraphExecutionState
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner
-from xllm.python.model_executor.runners.block_draft_acl_graph import BlockDraftAclGraphRunner
 from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
 
@@ -626,8 +625,9 @@ def test_linear_verify_bucketing_requires_a_fixed_producer_width(
 
 
 @pytest.mark.parametrize("dp_rank", [0, 1])
-def test_executor_reuses_block_graph_with_fresh_preparation_and_rejects_changed_layout(
-    runner: DecodeAclGraphRunner, executor: ModelExecutor, dp_rank: int
+@pytest.mark.parametrize("query_width", [1, 2, 3, 5])
+def test_executor_reuses_non_causal_graph_with_fresh_preparation_and_rejects_changed_layout(
+    runner: DecodeAclGraphRunner, executor: ModelExecutor, dp_rank: int, query_width: int
 ) -> None:
     backend = SimpleNamespace(
         page_size=4,
@@ -636,8 +636,15 @@ def test_executor_reuses_block_graph_with_fresh_preparation_and_rejects_changed_
             actual_seq_q=list(metadata.q_cu_seq_lens_host_values), query_ends=None
         ),
     )
-    block_runner = BlockDraftAclGraphRunner(
-        nn.Identity(), backend, torch.device("cpu"), max_batch=8, max_model_len=8, dp_size=2, dp_rank=dp_rank
+    block_runner = DecodeAclGraphRunner(
+        nn.Identity(),
+        backend,
+        torch.device("cpu"),
+        max_batch=8 * query_width,
+        max_model_len=16,
+        dp_size=2,
+        dp_rank=dp_rank,
+        causal=False,
     )
     # Share only the fixture's simulated device capture boundary; allocation,
     # filling, admission and executor dispatch use the real implementations.
@@ -647,44 +654,58 @@ def test_executor_reuses_block_graph_with_fresh_preparation_and_rejects_changed_
     executor.decode_graph_runner = block_runner
     metadata = _metadata()
     metadata.is_chunked_prefill = True
-    metadata.decode_query_width = 2
-    metadata.q_seq_lens = torch.tensor([2, 2], dtype=torch.int32)
-    metadata.q_cu_seq_lens = torch.tensor([0, 2, 4], dtype=torch.int32)
-    metadata.q_cu_seq_lens_host_values = [2, 4]
-    metadata.slot_mapping = torch.arange(4, dtype=torch.int32)
-    metadata.kv_seq_lens = metadata.kv_seq_lens.to(torch.int32)
+    metadata.decode_query_width = query_width
+    metadata.q_seq_lens = torch.tensor([query_width, query_width], dtype=torch.int32)
+    metadata.q_cu_seq_lens = torch.tensor([0, query_width, 2 * query_width], dtype=torch.int32)
+    metadata.q_cu_seq_lens_host_values = [query_width, 2 * query_width]
+    metadata.slot_mapping = torch.arange(2 * query_width, dtype=torch.int32)
+    metadata.block_table = torch.tensor([[11, 12, 13], [21, 22, 23]], dtype=torch.int32)
+    metadata.kv_seq_lens = torch.tensor([query_width + 1, query_width + 4], dtype=torch.int32)
+    metadata.kv_seq_lens_host_values = metadata.kv_seq_lens.tolist()
     metadata.paged_kv_indptr = None
     metadata.paged_kv_indices = None
     metadata.paged_kv_last_page_len = None
-    metadata.dp_execution_token_counts = (4, 6) if dp_rank == 0 else (6, 4)
+    metadata.dp_execution_token_counts = tuple(count * query_width for count in ((2, 3) if dp_rank == 0 else (3, 2)))
     metadata.dp_is_decode = (1, 1)
-    tokens = torch.arange(4, dtype=torch.int32)
+    tokens = torch.arange(2 * query_width, dtype=torch.int32)
 
     with patch.object(block_runner, "prepare_execution", wraps=block_runner.prepare_execution) as prepare:
         for step in range(2):
             output = executor.execute(tokens, tokens, metadata)
-            assert output.shape == (4, 2)
+            assert output.shape == (2 * query_width, 2)
             assert prepare.call_count == step + 1
             entry = next(iter(block_runner._graphs.values()))
-            assert entry.batch_size == 8
-            assert entry.static_metadata.q_seq_lens.tolist() == [2, 2, 2, 2]
-            assert entry.static_metadata.slot_mapping.tolist() == [0, 1, 2, 3, -1, -1, -1, -1]
-            assert entry.static_metadata.kv_seq_lens.tolist() == [2 + step, 5 + step, 1, 1]
-            torch.testing.assert_close(
-                entry.static_metadata.block_table[0, :1], metadata.block_table[0, :1].to(torch.int32)
+            assert entry.batch_size == 4 * query_width
+            assert entry.static_metadata.q_seq_lens.tolist() == [query_width] * 4
+            assert entry.static_metadata.slot_mapping.tolist() == list(range(2 * query_width)) + [-1] * (
+                2 * query_width
             )
-            torch.testing.assert_close(
-                entry.static_metadata.block_table[1, :2], metadata.block_table[1, :2].to(torch.int32)
-            )
-            assert entry.static_metadata.block_table[0, 1:].count_nonzero().item() == 0
+            assert entry.static_metadata.kv_seq_lens.tolist() == [query_width + 1 + step, query_width + 4 + step, 1, 1]
+            for row, length in enumerate(metadata.kv_seq_lens_host_values):
+                pages = (length + 3) // 4
+                table = entry.static_metadata.block_table[row]
+                torch.testing.assert_close(table[:pages], metadata.block_table[row, :pages])
+                assert table[pages:].count_nonzero().item() == 0
             metadata.block_table.add_(10)
             metadata.kv_seq_lens.add_(1)
             metadata.kv_seq_lens_host_values[:] = metadata.kv_seq_lens.tolist()
 
-        metadata.q_seq_lens[1] = 3
+        metadata.q_seq_lens[1] = query_width + 1
         assert executor.execute(tokens, tokens, metadata) is executor.eager_runner.execute.return_value
         assert prepare.call_count == 3
 
     block_runner._capture.assert_called_once()
     assert entry.graph.replay.call_count == 2
     executor.eager_runner.execute.assert_called_once()
+
+
+@pytest.mark.parametrize("failure_stage", ["_fill_entry", "_prepare_attention", "_capture"])
+def test_causal_preparation_failure_does_not_publish_graph(runner: DecodeAclGraphRunner, failure_stage: str) -> None:
+    tokens = torch.arange(2, dtype=torch.int32)
+    metadata = _metadata()
+    with (
+        patch.object(runner, failure_stage, side_effect=RuntimeError("preparation failed")),
+        pytest.raises(RuntimeError, match="preparation failed"),
+    ):
+        runner.warmup(tokens, tokens, metadata)
+    assert not runner._graphs
