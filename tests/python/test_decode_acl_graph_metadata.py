@@ -101,7 +101,7 @@ def test_linear_verify_bucketing_preserves_complete_requests(
     runner.max_batch = 32 * width
     runner._model_owns_linear_spec_verify = True
     runner._enable_decode_no_padding = no_padding
-    metadata = SimpleNamespace(num_speculative_tokens=width - 1, is_target_verify=True)
+    metadata = SimpleNamespace(decode_query_width=width, num_speculative_tokens=0, is_target_verify=True)
 
     bucket = runner._padded_batch_size(requests * width, metadata)
 
@@ -113,7 +113,7 @@ def test_no_padding_retains_mtp_width_and_capacity_validation(runner: DecodeAclG
     runner.max_batch = 160
     runner._model_owns_linear_spec_verify = True
     runner._enable_decode_no_padding = True
-    metadata = SimpleNamespace(num_speculative_tokens=4, is_target_verify=True)
+    metadata = SimpleNamespace(decode_query_width=5, num_speculative_tokens=0, is_target_verify=True)
 
     with pytest.raises(ValueError, match="complete fixed-width requests"):
         runner._padded_batch_size(119, metadata)
@@ -129,7 +129,9 @@ def test_no_padding_keeps_dp_ranks_on_a_shared_token_shape(
     runner.max_batch = 160
     runner._model_owns_linear_spec_verify = True
     runner._enable_decode_no_padding = no_padding
-    metadata = SimpleNamespace(num_speculative_tokens=4, is_target_verify=True, dp_execution_token_counts=(115, 120))
+    metadata = SimpleNamespace(
+        decode_query_width=5, num_speculative_tokens=0, is_target_verify=True, dp_execution_token_counts=(115, 120)
+    )
 
     assert runner._padded_batch_size(115, metadata) == expected
     assert runner._padded_batch_size(120, metadata) == expected
@@ -539,6 +541,7 @@ def test_metadata_reuse_preserves_expanded_verify_rows_and_query_groups(
     metadata.q_cu_seq_lens = torch.tensor(query_ends, dtype=torch.int32) if query_ends is not None else None
     metadata.q_cu_seq_lens_host_values = query_ends
     metadata.is_target_verify = True
+    metadata.decode_query_width = 2
     metadata.expanded_decode_metadata = SimpleNamespace(
         enabled=True,
         block_table=torch.tensor([[11, 0], [11, 0], [21, 22], [21, 22]], dtype=torch.int32),
@@ -584,6 +587,7 @@ def test_expanded_query_row_offsets_survive_padding_and_bucket_reuse(runner: Dec
         metadata.q_cu_seq_lens = torch.arange(0, rows + 1, 2, dtype=torch.int32)
         metadata.q_cu_seq_lens_host_values = list(range(0, rows + 1, 2))
         metadata.is_target_verify = True
+        metadata.decode_query_width = 2
         metadata.expanded_decode_metadata = SimpleNamespace(
             enabled=True,
             block_table=torch.full((rows, 1), 11, dtype=torch.int32),
@@ -607,3 +611,13 @@ def test_expanded_query_row_offsets_survive_padding_and_bucket_reuse(runner: Dec
         assert entry.static_metadata.q_seq_lens_host.tolist() == [2] * 4
 
     runner._capture.assert_called_once()
+
+
+@pytest.mark.parametrize("width", [None, 0])
+def test_linear_verify_bucketing_requires_a_fixed_producer_width(
+    runner: DecodeAclGraphRunner, width: int | None
+) -> None:
+    runner._model_owns_linear_spec_verify = True
+    metadata = SimpleNamespace(decode_query_width=width, num_speculative_tokens=4, is_target_verify=True)
+    with pytest.raises(ValueError, match="complete fixed-width requests"):
+        runner._padded_batch_size(10, metadata)

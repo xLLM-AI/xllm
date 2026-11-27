@@ -104,15 +104,14 @@ bool DFlashWorkerImpl::prepare_parallel_draft_metadata(
     LlmForwardInput& query_input,
     const DecodeExpansionOptions& decode_options) {
   auto& params = query_input.input_params;
-  scale_speculative_parallel_token_counts(
-      params, decode_options.num_speculative_tokens);
+  scale_decode_parallel_token_counts(params, decode_options.query_width);
   if (!draft_needs_dummy_tokens_) {
     return false;
   }
   std::replace(params.parallel.dp_global_token_nums.begin(),
                params.parallel.dp_global_token_nums.end(),
                0,
-               decode_options.num_speculative_tokens + 1);
+               decode_options.query_width);
   if (params.meta.num_sequences != 0) {
     return false;
   }
@@ -249,8 +248,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   const int32_t num_sequences = query_input.input_params.meta.num_sequences;
   if (!prepare_parallel_draft_metadata(query_input, decode_options)) {
     const int32_t rows_per_sequence =
-        decode_options.per_request ? 1
-                                   : decode_options.num_speculative_tokens + 1;
+        decode_options.per_request ? 1 : decode_options.query_width;
     update_decode_batch_metadata(query_input.input_params,
                                  decode_options,
                                  num_sequences * rows_per_sequence);
@@ -263,8 +261,8 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
                           *compute_stream_);
 
   LlmForwardInput validate_input = input.clone();
-  scale_speculative_parallel_token_counts(validate_input.input_params,
-                                          options_.num_speculative_tokens());
+  scale_decode_parallel_token_counts(validate_input.input_params,
+                                     options_.num_speculative_tokens() + 1);
   LlmForwardInput target_forward_input;
   ForwardOutput output = run_worker_no_sync_impl(*impl_,
                                                  validate_input,
@@ -456,7 +454,7 @@ torch::Tensor DFlashWorkerImpl::anchor_token_ids(
 }
 DecodeExpansionOptions DFlashWorkerImpl::prepare_for_draft() const {
   DecodeExpansionOptions decode_options;
-  decode_options.num_speculative_tokens = options_.num_speculative_tokens();
+  decode_options.query_width = options_.num_speculative_tokens() + 1;
   decode_options.block_size = options_.block_size();
   decode_options.per_request = true;
   decode_options.causal = false;
@@ -516,7 +514,7 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
   } else {
     DecodeBatchContext batch_ctx = make_decode_batch_context(input);
     DecodeBuildBuffers buf = expand_decode_inputs(batch_ctx, decode_options);
-    const int32_t query_width = decode_options.num_speculative_tokens + 1;
+    const int32_t query_width = decode_options.query_width;
     const int32_t num_logits_per_request = options_.num_speculative_tokens();
     const int32_t num_logits = batch_ctx.num_requests * num_logits_per_request;
     const torch::Tensor& draft_query_indices =

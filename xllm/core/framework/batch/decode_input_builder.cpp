@@ -318,9 +318,10 @@ template DecodeBatchContext make_decode_batch_context(const VlmForwardInput&);
 DecodeBuildBuffers expand_decode_inputs(
     const DecodeBatchContext& ctx,
     const DecodeExpansionOptions& decode_options) {
+  CHECK_GT(decode_options.query_width, 0);
   const int32_t num_reqs = ctx.num_requests;
-  const int32_t num_val_tokens = (decode_options.num_speculative_tokens + 1);
-  const int32_t total = num_reqs * num_val_tokens;
+  const int32_t query_width = decode_options.query_width;
+  const int32_t total = num_reqs * query_width;
   DecodeBuildBuffers buf;
 
   prepare_decode_buffers(buf,
@@ -343,20 +344,20 @@ DecodeBuildBuffers expand_decode_inputs(
     token_input.position_offset = val_idx;
     token_input.kv_len_offset = decode_options.causal
                                     ? std::nullopt
-                                    : std::make_optional(num_val_tokens - 1);
+                                    : std::make_optional(query_width - 1);
     append_decode_token(ctx, token_input, decode_options.block_size, buf);
   };
 
   for (int32_t req_id = 0; req_id < num_reqs; ++req_id) {
-    for (int32_t val_idx = 0; val_idx < num_val_tokens; ++val_idx) {
+    for (int32_t val_idx = 0; val_idx < query_width; ++val_idx) {
       append_token_input(req_id, val_idx);
     }
   }
   if (decode_options.per_request) {
     for (int32_t req_id = 0; req_id < num_reqs; ++req_id) {
-      buf.out_kv_seq_lens.emplace_back(ctx.kv_seq_lens[req_id] +
-                                       num_val_tokens - 1);
-      buf.out_q_seq_lens.emplace_back(num_val_tokens);
+      buf.out_kv_seq_lens.emplace_back(ctx.kv_seq_lens[req_id] + query_width -
+                                       1);
+      buf.out_q_seq_lens.emplace_back(query_width);
     }
   }
 
@@ -429,7 +430,8 @@ template void build_decode_metadata(VlmModelParams&,
 
 void build_idle_decode_input(LlmForwardInput& input,
                              const DecodeExpansionOptions& decode_options) {
-  const int32_t query_width = (decode_options.num_speculative_tokens + 1);
+  CHECK_GT(decode_options.query_width, 0);
+  const int32_t query_width = decode_options.query_width;
   CHECK(decode_options.mask_token_id.has_value());
   DecodeBuildBuffers buf;
   buf.out_block_table_stride = 1;

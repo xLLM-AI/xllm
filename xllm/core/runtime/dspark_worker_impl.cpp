@@ -70,7 +70,7 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
 
 DecodeExpansionOptions DSparkWorkerImpl::prepare_for_draft() const {
   auto decode_options = DFlashWorkerImpl::prepare_for_draft();
-  --decode_options.num_speculative_tokens;
+  decode_options.query_width = options_.num_speculative_tokens();
   decode_options.per_request =
       draft_impl_->context_.get_model_args().model_type() !=
       "deepseek_v4_dspark";
