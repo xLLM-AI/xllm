@@ -309,8 +309,14 @@ TEST(NativeKVCacheTest, FP8PagesMatchBudgetAndKeepLinearStateDtypes) {
                                       /*checkpoint_stride=*/16,
                                       /*enable_prefix_cache=*/true);
   ASSERT_TRUE(recurrent.has_value());
-  EXPECT_EQ(recurrent->conv().dtype, CacheScalarType::FLOAT16);
-  EXPECT_EQ(recurrent->ssm().dtype, CacheScalarType::FLOAT32);
+  const auto* conv_component =
+      recurrent->find_component(CacheComponentRole::CONV);
+  const auto* ssm_component =
+      recurrent->find_component(CacheComponentRole::SSM);
+  ASSERT_NE(conv_component, nullptr);
+  ASSERT_NE(ssm_component, nullptr);
+  EXPECT_EQ(conv_component->dtype, CacheScalarType::FLOAT16);
+  EXPECT_EQ(ssm_component->dtype, CacheScalarType::FLOAT32);
   KVCacheCreateOptions options;
   options.device(torch::Device(torch::kCPU))
       .dtype(torch::kFloat8_e4m3fn)

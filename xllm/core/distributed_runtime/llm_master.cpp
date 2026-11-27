@@ -35,7 +35,6 @@ limitations under the License.
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/config/eplb_config.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
@@ -175,6 +174,8 @@ LLMMaster::LLMMaster(const Options& options)
       .server_idx(options_.server_idx())
       .enable_graph(options_.enable_graph())
       .enable_graph_double_buffer(options_.enable_graph_double_buffer())
+      .acl_graph_decode_batch_size_limit(
+          options_.acl_graph_decode_batch_size_limit())
       .enable_graph_mode_decode_no_padding(
           options_.enable_graph_mode_decode_no_padding())
       .enable_prefill_piecewise_graph(options_.enable_prefill_piecewise_graph())
@@ -267,11 +268,7 @@ LLMMaster::LLMMaster(const Options& options)
       .max_tokens_per_chunk_for_prefill(
           options_.max_tokens_per_chunk_for_prefill())
       .num_speculative_tokens(options_.num_speculative_tokens())
-      .decode_graph_warmup_config(
-          ExecutionConfig::get_instance().decode_graph_warmup_config(
-              options_.num_speculative_tokens(),
-              options_.enable_graph_mode_decode_no_padding(),
-              options_.speculative_algorithm()))
+      .decode_graph_warmup_config(options_.decode_graph_warmup_config())
       .nnodes(options_.nnodes())
       .dp_size(options_.dp_size())
       .cp_size(options_.cp_size())

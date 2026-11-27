@@ -55,4 +55,22 @@ if(USE_NPU)
 
   target_link_libraries(block_test PRIVATE Folly::folly OpenSSL::SSL OpenSSL::Crypto protobuf::libprotobuf c_sec)
   add_dependencies(block_test brpc-static)
+
+  # Keep physical NPU cache construction separate from CPU block contracts.
+  cc_test(
+    NAME
+      glm_cache_partition_test
+    SRCS
+      glm_cache_partition_test.cpp
+    DEPS
+      :xllm_server
+      :block
+      :kv_cache
+      :kv_cache_manager_factory
+      :linear_state_restore
+      GTest::gtest_main
+  )
+  target_link_libraries(glm_cache_partition_test PRIVATE
+    Folly::folly OpenSSL::SSL OpenSSL::Crypto protobuf::libprotobuf c_sec)
+  add_dependencies(glm_cache_partition_test brpc-static)
 endif()

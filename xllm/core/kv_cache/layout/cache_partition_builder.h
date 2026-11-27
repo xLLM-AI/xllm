@@ -29,9 +29,9 @@ class KVCacheShape;
 class ModelArgs;
 
 // Model/backend adaptation stays outside the framework-independent partition
-// type. Qwen hybrids describe Full history and recurrent state separately.
-// Other hybrid, grouped and KPool models retain their existing construction
-// paths.
+// type. Qwen and GLM hybrids describe Full history and recurrent state
+// separately. GLM KPool tails share the recurrent slot even in Full-only MTP
+// drafts. Other hybrid and grouped models retain their construction paths.
 std::optional<PagedCachePartition> build_paged_cache_partition(
     CachePartitionId id,
     const KVCacheCapacity& capacity,

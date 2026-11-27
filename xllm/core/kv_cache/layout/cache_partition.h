@@ -37,6 +37,9 @@ enum class CacheComponentRole {
   MLA_SCALE,
   INDEX,
   INDEX_SCALE,
+  INDEX_GATE,
+  INDEX_VALID,
+  KPOOL_TAIL,
   CONV,
   SSM,
 };

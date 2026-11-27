@@ -29,6 +29,8 @@ limitations under the License.
 
 namespace xllm {
 
+struct DecodeGraphWarmupConfig;
+
 class Options {
  public:
   Options() = default;
@@ -39,6 +41,8 @@ class Options {
   void validate(std::string_view model_type) const;
 
   void resolve_prefill_options();
+
+  DecodeGraphWarmupConfig decode_graph_warmup_config() const;
 
   PROPERTY(std::string, model_path);
 
@@ -224,6 +228,8 @@ class Options {
   PROPERTY(bool, enable_prefill_piecewise_graph) = false;
   // maximum number of tokens for graph execution
   PROPERTY(int32_t, max_tokens_for_graph_mode) = 2048;
+  // maximum per-DP-rank decode batch size for NPU graphs
+  PROPERTY(int32_t, acl_graph_decode_batch_size_limit) = 16;
   // all requests use single global ttft
   PROPERTY(int32_t, max_global_ttft_ms) = std::numeric_limits<int32_t>::max();
   // all requests use single global tpot

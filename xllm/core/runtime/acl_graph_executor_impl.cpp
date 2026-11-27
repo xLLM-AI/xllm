@@ -1170,9 +1170,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   // Use max_local_batch_size so all DP ranks make the same decision and stay
   // in sync on HCCL collectives.
   const uint32_t decode_batch_size_limit = static_cast<uint32_t>(
-      std::max<int32_t>(1,
-                        ::xllm::ExecutionConfig::get_instance()
-                            .acl_graph_decode_batch_size_limit()));
+      std::max<int32_t>(1, options_.acl_graph_decode_batch_size_limit()));
   if (max_local_batch_size > decode_batch_size_limit) {
     LOG_FIRST_N(WARNING, 1)
         << "Falling back to eager mode because decode local batch_size (max="

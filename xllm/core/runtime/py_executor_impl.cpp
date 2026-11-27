@@ -248,7 +248,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       py_causal_lm_->python_model(),
       executor_config,
       options_.max_seqs_per_batch(),
-      ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
+      options_.acl_graph_decode_batch_size_limit());
   py_causal_lm_->set_context_kv_graph_runner(
       py_executor_.attr("context_kv_graph_runner"));
   requires_input_batch_metadata_ =

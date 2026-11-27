@@ -229,6 +229,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .disable_ttft_profiling(profile_config.disable_ttft_profiling())
       .enable_graph(execution_config.enable_graph())
       .enable_graph_double_buffer(execution_config.enable_graph_double_buffer())
+      .acl_graph_decode_batch_size_limit(
+          execution_config.acl_graph_decode_batch_size_limit())
       .enable_graph_mode_decode_no_padding(
           execution_config.enable_graph_mode_decode_no_padding())
       .enable_prefill_piecewise_graph(

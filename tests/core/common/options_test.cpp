@@ -18,8 +18,10 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include "core/common/prefill_policy.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/platform/platform.h"
 #include "core/util/scope_guard.h"
 
 namespace xllm {
@@ -162,6 +164,23 @@ TEST(PrefillPolicyTest, AutomaticChunkAndBudgetStayConsistent) {
                                /*enable_fair_budget=*/true);
     EXPECT_EQ(policy.chunk_tokens(), 10);
     EXPECT_EQ(policy.per_dp_group(3, InstanceRole::PREFILL), 10);
+  }
+}
+
+TEST(OptionsTest, DecodeWarmupUsesInstanceGeometryAndClampsNpuLimit) {
+  for (const int32_t limit : {-2, 0, 1, 7}) {
+    Options options;
+    options.num_speculative_tokens(3)
+        .speculative_algorithm("DSpark")
+        .enable_graph_mode_decode_no_padding(true)
+        .acl_graph_decode_batch_size_limit(limit);
+    const DecodeGraphWarmupConfig warmup = options.decode_graph_warmup_config();
+    options.num_speculative_tokens(1).acl_graph_decode_batch_size_limit(8);
+    EXPECT_EQ(warmup.num_speculative_tokens, 3);
+    EXPECT_EQ(warmup.speculative_algorithm, "DSpark");
+    EXPECT_TRUE(warmup.enable_graph_mode_decode_no_padding);
+    EXPECT_EQ(warmup.max_graph_batch_size,
+              Platform::is_npu() ? std::max<int32_t>(1, limit) : 0);
   }
 }
 
