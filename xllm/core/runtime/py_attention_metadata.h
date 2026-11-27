@@ -60,6 +60,7 @@ class PyAttentionMetadataView final {
                           const ModelParamsView& params,
                           bool is_draft_engine);
 
+  int64_t batch_id() const;
   const torch::Tensor& slot_mapping() const;
   pybind11::object local_slot_mapping() const;
   int32_t kv_split_size() const;
@@ -127,6 +128,7 @@ class PyAttentionMetadataView final {
       std::vector<int32_t>& host_vec);
 
   std::shared_ptr<layer::AttentionMetadata> metadata_;
+  int64_t batch_id_ = -1;
   bool is_target_verify_ = false;
   torch::Tensor kv_seq_lens_host_;
   torch::Tensor q_seq_lens_host_;

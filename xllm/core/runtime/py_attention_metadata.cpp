@@ -65,6 +65,7 @@ void register_attention_metadata_views(py::module_& module) {
           &PyExpandedDecodeMetadataView::kv_seq_lens_host_values);
 
   py::class_<PyAttentionMetadataView>(module, "AttentionMetadataView")
+      .def_property_readonly("batch_id", &PyAttentionMetadataView::batch_id)
       .def_property("prepared_attention_state",
                     &PyAttentionMetadataView::prepared_attention_state,
                     &PyAttentionMetadataView::set_prepared_attention_state)
@@ -234,6 +235,7 @@ PyAttentionMetadataView::PyAttentionMetadataView(
     const ModelParamsView& params,
     bool is_draft_engine)
     : metadata_(std::move(metadata)),
+      batch_id_(static_cast<int64_t>(params.meta.batch_id)),
       kv_seq_lens_host_(
           make_host_int32_view(metadata_, metadata_->kv_seq_lens_vec)),
       q_seq_lens_host_(
@@ -294,6 +296,10 @@ PyAttentionMetadataView::PyAttentionMetadataView(
     raw_dp_execution_token_counts_.push_back(params.meta.actual_num_sequences);
   }
 }
+
+// The batch this view describes. A step is told apart from the next one by
+// this, not by the shape of its inputs, which repeats.
+int64_t PyAttentionMetadataView::batch_id() const { return batch_id_; }
 
 const torch::Tensor& PyAttentionMetadataView::slot_mapping() const {
   return metadata_->slot_mapping;

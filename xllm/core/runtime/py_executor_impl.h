@@ -50,6 +50,11 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
                   std::vector<KVCache>& kv_caches,
                   const ModelParamsView& params) override;
 
+  void prepare_graph_input(const torch::Tensor& tokens,
+                           const torch::Tensor& positions,
+                           std::vector<KVCache>& kv_caches,
+                           const ModelParamsView& params) override;
+
  private:
   // Caller holds the GIL.
   void bind_kv_caches(std::vector<KVCache>& kv_caches);
@@ -62,6 +67,7 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
 
   pybind11::object py_executor_;
   bool requires_input_batch_metadata_ = false;
+  bool prepares_graph_input_ = false;
   bool supports_layerwise_kv_load_ = false;
   std::unique_ptr<EncoderCache> encoder_cache_;
   bool kv_bound_ = false;

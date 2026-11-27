@@ -495,6 +495,7 @@ class ModelExecutor:
                     device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
                     kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
                     max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
+                    enable_double_buffer=bool(config.get("enable_graph_double_buffer", False)),
                 )
         else:
             if self.layerwise_split_size > 1:
@@ -554,6 +555,34 @@ class ModelExecutor:
         if self.context_kv_graph_runner is not None:
             self.context_kv_graph_runner.bind_kv_caches(layer_caches)
         self._kv_bound = True
+
+    @property
+    def prepares_graph_input(self) -> bool:
+        """Whether a prepare-ahead call can do anything for this executor.
+
+        The worker asks once at startup; answering False keeps it from entering
+        Python on its prepare thread for every decode step.
+        """
+        return bool(getattr(self.decode_graph_runner, "has_prepared_slots", False))
+
+    @torch.inference_mode()
+    def prepare_graph_input(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        metadata: AttentionMetadata,
+    ) -> None:
+        """Fill the next decode graph slot before the step reaches `execute`.
+
+        The worker calls this one step ahead, from the thread that prepares the
+        step's inputs, so the fill overlaps the replay still in flight. A runner
+        without a second slot, or a step it cannot prepare, leaves the work to
+        `execute`.
+        """
+        runner = self.decode_graph_runner
+        if runner is None or not hasattr(runner, "prepare_next_slot"):
+            return
+        runner.prepare_next_slot(input_ids, positions, metadata)
 
     @torch.inference_mode()
     def execute(

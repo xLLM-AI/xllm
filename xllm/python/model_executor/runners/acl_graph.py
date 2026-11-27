@@ -118,6 +118,7 @@ class AclGraphEntry:
 
     __slots__ = (
         "batch_size",
+        "slot",
         "mega_moe_token_counts",
         "graph",
         "static_output",
@@ -139,6 +140,10 @@ class AclGraphEntry:
     )
 
     def __init__(self) -> None:
+        # Which set of static input buffers this entry owns. Runners that
+        # double-buffer give their slots separate storage so one can be
+        # filled while another replays.
+        self.slot = 0
         self.eplb: EplbRuntimeState | None = None
         self.kv_capacity_pages = 0
         self.is_padding: torch.Tensor | None = None
