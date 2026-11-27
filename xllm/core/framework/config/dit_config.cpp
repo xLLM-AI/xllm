@@ -27,6 +27,11 @@ DEFINE_string(dit_cache_policy,
 
 DEFINE_int64(dit_cache_warmup_steps, 0, "The number of warmup steps.");
 
+DEFINE_int64(dit_h3_fbcache_max_consecutive_reuse_steps,
+             0,
+             "Maximum consecutive cache hits for Python MiniMax-H3 FBCache "
+             "(0 means unlimited).");
+
 DEFINE_int64(dit_cache_n_derivatives,
              3,
              "The number of derivatives to use in TaylorSeer.");
@@ -128,6 +133,7 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_requests_per_batch);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_policy);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_warmup_steps);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_fbcache_max_consecutive_reuse_steps);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_n_derivatives);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_skip_interval_steps);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_residual_diff_threshold);
@@ -155,6 +161,7 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_requests_per_batch);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_policy);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_warmup_steps);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_fbcache_max_consecutive_reuse_steps);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_n_derivatives);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_skip_interval_steps);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_residual_diff_threshold);
@@ -192,6 +199,8 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
   }
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_cache_warmup_steps);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_h3_fbcache_max_consecutive_reuse_steps);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_cache_n_derivatives);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
