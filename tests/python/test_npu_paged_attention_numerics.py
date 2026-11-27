@@ -1161,10 +1161,10 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(
     # prefix. This distinguishes a frozen short capture bound from the mask.
     for length in (129, 1875, 7, 1987):
         metadata = _metadata_for(length)
-        decoded = runner.prepare_execution(tokens, metadata)
-        assert decoded is not None
-        graph_key = runner.warmup(tokens, tokens, metadata, decode_metadata=decoded)
-        actual = runner.execute(tokens, tokens, metadata, graph_key=graph_key, decode_metadata=decoded)
+        preparation = runner.prepare_execution(tokens, metadata)
+        assert preparation is not None
+        graph_key = runner.warmup(tokens, tokens, metadata, preparation=preparation)
+        actual = runner.execute(tokens, tokens, metadata, graph_key=graph_key, preparation=preparation)
         expected = (
             torch.tensor(
                 [(page_size + (live_length - 1) / 2) / 2048 for live_length in metadata.kv_seq_lens_host_values]

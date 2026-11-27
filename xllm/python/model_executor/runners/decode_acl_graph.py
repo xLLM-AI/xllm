@@ -87,6 +87,21 @@ class DecodeAclGraphMetadata:
     token_capacity_bucket: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DecodeAclGraphPreparation:
+    """Admitted layout and borrowed metadata for one prepare/warmup/replay call.
+
+    Keep this result local to the execution; scheduler metadata may change
+    before the next call. Tensor storage is borrowed rather than copied.
+    """
+
+    metadata: AttentionMetadata
+    # Physical token rows after padding, including every row of a draft block.
+    padded_batch_size: int
+    expanded: ExpandedDecodeMetadata | None = None
+    decode_metadata: DecodeAclGraphMetadata | None = None
+
+
 def _same_npu_stream(lhs: object, rhs: object) -> bool:
     """Compare the underlying stream, not just its Python wrapper."""
     if lhs is rhs:
@@ -269,7 +284,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         mtp_topk_indices: torch.Tensor | None = None,
         *,
         is_graph_warmup: bool = False,
-    ) -> DecodeAclGraphMetadata | None:
+    ) -> DecodeAclGraphPreparation | None:
         """Admit a step and return metadata reusable until its replay is queued.
 
         The caller owns this result for one execution only. Keep it local to
@@ -416,7 +431,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 return None
             if bucket > (self.max_model_len + granularity - 1) // granularity:
                 return None
-        return decode_metadata
+        return DecodeAclGraphPreparation(
+            metadata=metadata,
+            padded_batch_size=padded_batch_size,
+            expanded=expanded_view,
+            decode_metadata=decode_metadata,
+        )
 
     def _normalize_dsa_metadata(
         self,
@@ -856,15 +876,18 @@ class DecodeAclGraphRunner(AclGraphRunner):
         mtp_topk_indices: torch.Tensor | None = None,
         *,
         eplb: EplbRuntimeState | None = None,
-        decode_metadata: DecodeAclGraphMetadata | None = None,
+        preparation: DecodeAclGraphPreparation | None = None,
         is_graph_warmup: bool = False,
         input_batch: InputBatch | None = None,
     ) -> _GraphKey:
-        metadata = self._normalize_dsa_metadata(metadata)
-        batch_size = input_ids.shape[0]
-        padded_batch_size = self._padded_batch_size(batch_size, metadata)
-
-        expanded = self._expanded_verify_view(metadata)
+        metadata = self._normalize_dsa_metadata(metadata) if preparation is None else preparation.metadata
+        padded_batch_size = (
+            self._padded_batch_size(input_ids.shape[0], metadata)
+            if preparation is None
+            else preparation.padded_batch_size
+        )
+        expanded = self._expanded_verify_view(metadata) if preparation is None else preparation.expanded
+        decode_metadata = None if preparation is None else preparation.decode_metadata
         graph_key, _, _ = self._resolve_graph_key(
             input_ids,
             metadata,
@@ -1020,15 +1043,16 @@ class DecodeAclGraphRunner(AclGraphRunner):
         graph_key: _GraphKey | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
         eplb: EplbRuntimeState | None = None,
-        decode_metadata: DecodeAclGraphMetadata | None = None,
+        preparation: DecodeAclGraphPreparation | None = None,
         input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput:
-        metadata = self._normalize_dsa_metadata(metadata)
+        metadata = self._normalize_dsa_metadata(metadata) if preparation is None else preparation.metadata
+        decode_metadata = None if preparation is None else preparation.decode_metadata
         batch_size = input_ids.shape[0]
         if graph_key is not None:
             self._synchronize_dp_graph_execute(input_ids)
         prepare_kwargs = {} if decode_metadata is None else {"decode_metadata": decode_metadata}
-        expanded = self._expanded_verify_view(metadata)
+        expanded = self._expanded_verify_view(metadata) if preparation is None else preparation.expanded
         if expanded is not None:
             prepare_kwargs["expanded"] = expanded
         entry = self._prepare_graph_entry(

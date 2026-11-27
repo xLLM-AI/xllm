@@ -627,41 +627,24 @@ class ModelExecutor:
             self.decode_graph_runner if layer_synchronizer is None and deepstack_input_embeds is None else None
         )
         if graph_runner is not None and (eplb is None or current_platform.is_npu()):
-            from xllm.python.model_executor.runners.block_draft_acl_graph import BlockDraftAclGraphRunner
             from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
             if isinstance(graph_runner, DecodeAclGraphRunner):
-                decode_metadata = None
-                graph_key = None
-                if isinstance(graph_runner, BlockDraftAclGraphRunner):
-                    if graph_runner.can_execute(input_ids, metadata, input_embedding, mtp_topk_indices):
-                        graph_key = graph_runner.warmup(
-                            input_ids,
-                            positions,
-                            metadata,
-                            input_embedding,
-                            mtp_topk_indices,
-                            eplb=eplb,
-                            pre_capture_kv_buckets=is_graph_warmup,
-                            input_batch=input_batch,
-                        )
-                else:
-                    decode_metadata = graph_runner.prepare_execution(
-                        input_ids, metadata, input_embedding, mtp_topk_indices, is_graph_warmup=is_graph_warmup
+                preparation = graph_runner.prepare_execution(
+                    input_ids, metadata, input_embedding, mtp_topk_indices, is_graph_warmup=is_graph_warmup
+                )
+                if preparation is not None:
+                    graph_key = graph_runner.warmup(
+                        input_ids,
+                        positions,
+                        metadata,
+                        input_embedding,
+                        mtp_topk_indices,
+                        eplb=eplb,
+                        preparation=preparation,
+                        is_graph_warmup=is_graph_warmup,
+                        input_batch=input_batch,
                     )
-                    if decode_metadata is not None:
-                        graph_key = graph_runner.warmup(
-                            input_ids,
-                            positions,
-                            metadata,
-                            input_embedding,
-                            mtp_topk_indices,
-                            eplb=eplb,
-                            decode_metadata=decode_metadata,
-                            is_graph_warmup=is_graph_warmup,
-                            input_batch=input_batch,
-                        )
-                if graph_key is not None:
                     output = graph_runner.execute(
                         input_ids,
                         positions,
@@ -670,7 +653,7 @@ class ModelExecutor:
                         mtp_topk_indices,
                         graph_key=graph_key,
                         eplb=eplb,
-                        decode_metadata=decode_metadata,
+                        preparation=preparation,
                         input_batch=input_batch,
                     )
                     if not is_graph_warmup and not self._serving_acl_graph_logged:
