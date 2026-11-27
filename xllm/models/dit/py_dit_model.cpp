@@ -93,6 +93,15 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
   py::object pipeline_class =
       py::module_::import("xllm.python.dit.registry")
           .attr("get_pipeline_class")(context.model_type());
+  const auto& config = DiTConfig::get_instance();
+  const auto& cache_config = context.get_dit_config();
+  py::object first_block_cache = py::none();
+  if (cache_config.selected_policy == PolicyType::FBCache) {
+    first_block_cache =
+        py::make_tuple(cache_config.fbcache.warmup_steps,
+                       cache_config.fbcache.residual_diff_threshold,
+                       config.dit_h3_fbcache_max_consecutive_reuse_steps());
+  }
   pipeline_ = pipeline_class(
       c10::str(device()),
       parallel.rank() == 0,
@@ -128,8 +137,13 @@ PyDiTModel::PyDiTModel(const DiTModelContext& context)
         }
         return vae->allgather_base_sync(input);
       }),
-      py::arg("laser_attention_enabled") =
-          DiTConfig::get_instance().dit_laser_attention_enabled());
+      py::arg("laser_attention_enabled") = config.dit_laser_attention_enabled(),
+      py::arg("first_block_cache") = std::move(first_block_cache),
+      py::arg("cache_reduce") = py::cpp_function([vae](torch::Tensor input) {
+        py::gil_scoped_release release;
+        // Python H3 uses all four denoising ranks for VAE parallelism.
+        return parallel_state::reduce(input, vae);
+      }));
 }
 
 PyDiTModel::~PyDiTModel() { clear_python_object(pipeline_); }

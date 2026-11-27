@@ -262,6 +262,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `max_requests_per_batch` | `int32` | `1` | Maximum number of requests per batch. |
 | `dit_cache_policy` | `string` | `"TaylorSeer"` | DiT cache policy, for example `None`, `FBCache`, `TaylorSeer`, `FBCacheTaylorSeer`, or `ResidualCache`. |
 | `dit_cache_warmup_steps` | `int64` | `0` | Number of warmup steps. |
+| `dit_h3_fbcache_max_consecutive_reuse_steps` | `int64` | `0` | Maximum consecutive cache hits for Python MiniMax-H3 FBCache. `0` allows unlimited consecutive hits. |
 | `dit_cache_n_derivatives` | `int64` | `3` | Number of derivatives to use in TaylorSeer. |
 | `dit_cache_skip_interval_steps` | `int64` | `3` | Refresh interval for `TaylorSeer` and `ResidualCache`; must be greater than `0`. For `TaylorSeer`, `1` computes every step. Ignored by other policies. |
 | `dit_cache_residual_diff_threshold` | `double` | `0.09` | Residual difference threshold for cache reuse. |

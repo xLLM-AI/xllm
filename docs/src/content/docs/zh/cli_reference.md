@@ -262,6 +262,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `max_requests_per_batch` | `int32` | `1` | 每个 batch 的最大 request 数。 |
 | `dit_cache_policy` | `string` | `"TaylorSeer"` | DiT cache 策略，例如 `None`、`FBCache`、`TaylorSeer`、`FBCacheTaylorSeer`、`ResidualCache`。 |
 | `dit_cache_warmup_steps` | `int64` | `0` | warmup step 数量。 |
+| `dit_h3_fbcache_max_consecutive_reuse_steps` | `int64` | `0` | Python MiniMax-H3 使用 FBCache 时允许连续命中缓存的最大步数。`0` 表示不限制。 |
 | `dit_cache_n_derivatives` | `int64` | `3` | TaylorSeer 使用的 derivative 数量。 |
 | `dit_cache_skip_interval_steps` | `int64` | `3` | `TaylorSeer` 和 `ResidualCache` 的刷新间隔，必须大于 `0`。对 `TaylorSeer`，`1` 表示每步都计算；其他策略不使用此参数。 |
 | `dit_cache_residual_diff_threshold` | `double` | `0.09` | cache reuse 的 residual difference 阈值。 |

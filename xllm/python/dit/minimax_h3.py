@@ -29,6 +29,7 @@ from xllm.python.dit.minimax_h3_model import (
     SequenceParallel,
     StateDictShard,
     TensorParallel,
+    _FirstBlockCache,
 )
 from xllm.python.dit.minimax_h3_vae import TileParallel, load_audio_decoder, load_audio_geometry, load_video_decoder
 
@@ -187,10 +188,15 @@ class MiniMaxH3Pipeline:
         vae_gather: Callable[[torch.Tensor], torch.Tensor],
         *,
         laser_attention_enabled: bool = False,
+        first_block_cache: tuple[int, float, int] | None = None,
+        cache_reduce: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
         self._device = torch.device(device)
         self._laser_attention_enabled = laser_attention_enabled
         self._is_driver = is_driver
+        self._first_block_cache = first_block_cache
+        self._cache_reduce = cache_reduce
+        self._denoising_world_size = tp_size * sp_size
         self._tp = TensorParallel(tp_rank, tp_size, tp_reduce, tp_gather)
         self._sp = SequenceParallel(sp_rank, sp_size, sp_gather, sp_exchange)
         self._tiles = TileParallel(vae_rank, vae_size, vae_gather)
@@ -319,10 +325,16 @@ class MiniMaxH3Pipeline:
         # Schedule tensors are read-only. Each request advances its own cursor.
         video_scheduler, audio_scheduler = copy(video_template), copy(audio_template)
         timestep_indices = conditioning.layout.timestep_indices
+        cache = None
+        if self._first_block_cache is not None and self._first_block_cache[1] > 0:
+            assert self._cache_reduce is not None
+            cache = _FirstBlockCache(*self._first_block_cache, self._cache_reduce, self._denoising_world_size)
         for step, (times, mode) in enumerate(step_layouts):
             video_t = video_scheduler.timesteps[step]
             audio_t = audio_scheduler.timesteps[step]
-            video_pred, audio_pred = self._denoiser(video, audio, times, timestep_indices[mode], conditioning)
+            video_pred, audio_pred = self._denoiser(
+                video, audio, times, timestep_indices[mode], conditioning, cache=cache, step=step
+            )
             video = video_scheduler.step(video_pred, video_t, video, return_dict=False)[0]
             audio = audio_scheduler.step(audio_pred, audio_t, audio, return_dict=False)[0]
         return video, audio

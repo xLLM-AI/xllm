@@ -163,6 +163,55 @@ class PackedConditioning:
     padded_rows: int
 
 
+class _FirstBlockCache:
+    def __init__(
+        self,
+        warmup_steps: int,
+        residual_diff_threshold: float,
+        max_consecutive_reuse_steps: int,
+        reduce: Callable[[torch.Tensor], torch.Tensor],
+        world_size: int,
+    ) -> None:
+        self._warmup_steps = warmup_steps
+        self._threshold = residual_diff_threshold
+        self._max_reuse = max_consecutive_reuse_steps
+        self._reduce = reduce
+        self._world_size = world_size
+        self._consecutive_hits = 0
+        self._first_residual: torch.Tensor | None = None
+        self._full_residual: torch.Tensor | None = None
+
+    def reuse(self, step: int, first_residual: torch.Tensor) -> torch.Tensor | None:
+        previous = self._first_residual
+        if (
+            previous is None
+            or step < self._warmup_steps
+            or (self._max_reuse and self._consecutive_hits >= self._max_reuse)
+        ):
+            return None
+
+        # The residual covers only this SP shard. Every denoising rank must
+        # make the same decision before entering the next block's collectives.
+        stats = self._reduce(
+            torch.stack(
+                (
+                    (previous - first_residual).abs().sum(dtype=torch.float32),
+                    previous.abs().sum(dtype=torch.float32),
+                )
+            )
+        )
+        denominator = stats[1] + 1e-6 * previous.numel() * self._world_size
+        if (stats[0] < self._threshold * denominator).item():
+            self._consecutive_hits += 1
+            return self._full_residual
+        return None
+
+    def save(self, first_residual: torch.Tensor, full_residual: torch.Tensor) -> None:
+        self._first_residual = first_residual
+        self._full_residual = full_residual
+        self._consecutive_hits = 0
+
+
 def _apply_rotary(states: torch.Tensor, rotary: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
     cos, sin = rotary
     rotary_dims = cos.size(-1)
@@ -320,6 +369,48 @@ class MiniMaxH3Denoiser(nn.Module):
             padded_rows,
         )
 
+    def _run_block(
+        self,
+        block: nn.Module,
+        hidden: torch.Tensor,
+        temb: torch.Tensor,
+        modulation_indices: torch.Tensor,
+        conditioning: PackedConditioning,
+    ) -> torch.Tensor:
+        shift_attn, scale_attn, gate_attn, shift_ff, scale_ff, gate_ff = block.adaln_proj(temb)
+        attn_scale = scale_attn.index_select(0, modulation_indices)
+        attn_shift = shift_attn.index_select(0, modulation_indices)
+        attn_input = block.norm1(hidden) * (1 + attn_scale) + attn_shift
+        attended = _dense_attention(
+            block.attn, attn_input, conditioning.rotary, self._sp, conditioning.layout.tags.numel(), self._laser
+        )
+        hidden = hidden + gate_attn.index_select(0, modulation_indices) * attended
+        ff_scale = scale_ff.index_select(0, modulation_indices)
+        ff_shift = shift_ff.index_select(0, modulation_indices)
+        ff_input = block.norm2(hidden) * (1 + ff_scale) + ff_shift
+        return hidden + gate_ff.index_select(0, modulation_indices) * block.ff(ff_input)
+
+    def _run_cached_blocks(
+        self,
+        hidden: torch.Tensor,
+        temb: torch.Tensor,
+        modulation_indices: torch.Tensor,
+        conditioning: PackedConditioning,
+        cache: _FirstBlockCache,
+        step: int,
+    ) -> torch.Tensor:
+        original_hidden = hidden
+        blocks = iter(self.model.transformer_blocks)
+        hidden = self._run_block(next(blocks), hidden, temb, modulation_indices, conditioning)
+        first_residual = hidden - original_hidden
+        cached_residual = cache.reuse(step, first_residual)
+        if cached_residual is not None:
+            return original_hidden + cached_residual
+        for block in blocks:
+            hidden = self._run_block(block, hidden, temb, modulation_indices, conditioning)
+        cache.save(first_residual, hidden - original_hidden)
+        return hidden
+
     def forward(
         self,
         video: torch.Tensor,
@@ -327,6 +418,9 @@ class MiniMaxH3Denoiser(nn.Module):
         timestep: torch.Tensor,
         timestep_indices: torch.Tensor,
         conditioning: PackedConditioning,
+        *,
+        cache: _FirstBlockCache | None = None,
+        step: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         model = self.model
         layout = conditioning.layout
@@ -340,19 +434,11 @@ class MiniMaxH3Denoiser(nn.Module):
         padding = conditioning.padded_rows - layout.tags.numel()
         modulation_indices = F.pad(timestep_indices * 3 + layout.tags, (0, padding))
         modulation_indices = modulation_indices.narrow(0, conditioning.local_start, conditioning.local_rows)
-        for block in model.transformer_blocks:
-            shift_attn, scale_attn, gate_attn, shift_ff, scale_ff, gate_ff = block.adaln_proj(temb)
-            attn_scale = scale_attn.index_select(0, modulation_indices)
-            attn_shift = shift_attn.index_select(0, modulation_indices)
-            attn_input = block.norm1(hidden) * (1 + attn_scale) + attn_shift
-            attended = _dense_attention(
-                block.attn, attn_input, conditioning.rotary, self._sp, layout.tags.numel(), self._laser
-            )
-            hidden = hidden + gate_attn.index_select(0, modulation_indices) * attended
-            ff_scale = scale_ff.index_select(0, modulation_indices)
-            ff_shift = shift_ff.index_select(0, modulation_indices)
-            ff_input = block.norm2(hidden) * (1 + ff_scale) + ff_shift
-            hidden = hidden + gate_ff.index_select(0, modulation_indices) * block.ff(ff_input)
+        if cache is None:
+            for block in model.transformer_blocks:
+                hidden = self._run_block(block, hidden, temb, modulation_indices, conditioning)
+        else:
+            hidden = self._run_cached_blocks(hidden, temb, modulation_indices, conditioning, cache, step)
 
         hidden = self._sp.gather(hidden.contiguous())[:, : layout.tags.numel()]
         hidden = model.norm_out(hidden, temb, timestep_indices).float()

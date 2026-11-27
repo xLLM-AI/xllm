@@ -44,6 +44,7 @@ class DiTConfig final {
         {"max_requests_per_batch",
          "dit_cache_policy",
          "dit_cache_warmup_steps",
+         "dit_h3_fbcache_max_consecutive_reuse_steps",
          "dit_cache_n_derivatives",
          "dit_cache_skip_interval_steps",
          "dit_cache_residual_diff_threshold",
@@ -73,6 +74,8 @@ class DiTConfig final {
   PROPERTY(std::string, dit_cache_policy) = "TaylorSeer";
 
   PROPERTY(int64_t, dit_cache_warmup_steps) = 0;
+
+  PROPERTY(int64_t, dit_h3_fbcache_max_consecutive_reuse_steps) = 0;
 
   PROPERTY(int64_t, dit_cache_n_derivatives) = 3;
 
