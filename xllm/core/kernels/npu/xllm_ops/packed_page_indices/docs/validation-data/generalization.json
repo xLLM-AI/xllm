@@ -1,0 +1,439 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "id": "packed_skew_valid_prefix",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        3,
+        10
+      ],
+      "input_shapes": [
+        [
+          6,
+          9
+        ],
+        [
+          3,
+          4
+        ],
+        [
+          7
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_route_32736",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        32,
+        1023
+      ],
+      "input_shapes": [
+        [
+          7,
+          385
+        ],
+        [
+          32,
+          67
+        ],
+        [
+          8
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_route_32768",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        32,
+        1024
+      ],
+      "input_shapes": [
+        [
+          7,
+          385
+        ],
+        [
+          32,
+          67
+        ],
+        [
+          8
+        ]
+      ],
+      "attributes": {}
+    },
+    {
+      "id": "packed_single_long_rows",
+      "status": "PASS",
+      "checks": {
+        "candidate_mismatches": 0,
+        "baseline_mismatches": 0,
+        "shape": true,
+        "dtype": true,
+        "npu": true,
+        "contiguous": true,
+        "inputs_unchanged": true,
+        "independent_storage": true
+      },
+      "shape": [
+        4698
+      ],
+      "input_shapes": [
+        [
+          9,
+          1025
+        ],
+        [
+          67
+        ],
+        [
+          10
+        ]
+      ],
+      "attributes": {}
+    }
+  ],
+  "benchmarks": [
+    {
+      "id": "packed_route_32736",
+      "status": "PASS",
+      "required": false,
+      "correctness": "PASS",
+      "baseline_rounds_us": [
+        130.87905,
+        130.87325,
+        128.8453,
+        129.24325,
+        127.5184,
+        129.4105
+      ],
+      "candidate_rounds_us": [
+        35.46385,
+        35.5651,
+        35.1255,
+        35.7331,
+        34.87345,
+        35.3421
+      ],
+      "raw_rounds": [
+        {
+          "round": 1,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 130.87905,
+          "baseline_elapsed_ns": 26175810,
+          "candidate_us": 35.46385,
+          "candidate_elapsed_ns": 7092770
+        },
+        {
+          "round": 2,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 35.5651,
+          "candidate_elapsed_ns": 7113020,
+          "baseline_us": 130.87325,
+          "baseline_elapsed_ns": 26174650
+        },
+        {
+          "round": 3,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 128.8453,
+          "baseline_elapsed_ns": 25769060,
+          "candidate_us": 35.1255,
+          "candidate_elapsed_ns": 7025100
+        },
+        {
+          "round": 4,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 35.7331,
+          "candidate_elapsed_ns": 7146620,
+          "baseline_us": 129.24325,
+          "baseline_elapsed_ns": 25848650
+        },
+        {
+          "round": 5,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 127.5184,
+          "baseline_elapsed_ns": 25503680,
+          "candidate_us": 34.87345,
+          "candidate_elapsed_ns": 6974690
+        },
+        {
+          "round": 6,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 35.3421,
+          "candidate_elapsed_ns": 7068420,
+          "baseline_us": 129.4105,
+          "baseline_elapsed_ns": 25882100
+        }
+      ],
+      "baseline_mean_us": 129.461625,
+      "candidate_mean_us": 35.350516666666664,
+      "baseline_median_us": 129.326875,
+      "candidate_median_us": 35.402975,
+      "saved_mean_us": 94.11110833333333,
+      "saved_median_us": 93.9239,
+      "paired_savings_us": [
+        95.4152,
+        95.30815000000001,
+        93.7198,
+        93.51014999999998,
+        92.64495,
+        94.06840000000001
+      ],
+      "saved_mean_ci95_us": [
+        93.356675,
+        94.890325
+      ],
+      "max_mean_us": null,
+      "gates": {
+        "target_mean": true,
+        "mean_saving": true,
+        "median_saving": true,
+        "paired_bootstrap_lower_positive": true
+      },
+      "warmup": 50,
+      "iterations": 200,
+      "rounds": 6,
+      "unit": "us",
+      "measurement_protocol": {
+        "warmup": 50,
+        "rounds": 6,
+        "iterations_per_round": 200,
+        "execution_order": "alternate baseline and candidate; retain all paired rounds",
+        "timed_entry": "prepared.run",
+        "includes": [
+          "Python submission",
+          "new outputs and per-call temporary allocations",
+          "device execution and completion synchronization"
+        ],
+        "excludes": [
+          "input generation and transfer",
+          "one-time validation",
+          "prepare",
+          "CPU golden",
+          "first compilation"
+        ],
+        "latency_unit": "us",
+        "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+        "target_statistic": "arithmetic mean of six per-round per-call latencies",
+        "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+      },
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear",
+        "rng": "numpy.random.default_rng"
+      },
+      "configuration": {
+        "mode": "fused",
+        "column_tile": 256,
+        "layer_tile": 1
+      }
+    },
+    {
+      "id": "packed_route_32768",
+      "status": "PASS",
+      "required": false,
+      "correctness": "PASS",
+      "baseline_rounds_us": [
+        130.38094999999998,
+        129.5415,
+        129.24155,
+        130.9762,
+        127.97415,
+        131.6046
+      ],
+      "candidate_rounds_us": [
+        57.22505,
+        58.48615,
+        56.21615,
+        57.40815,
+        56.229099999999995,
+        56.709
+      ],
+      "raw_rounds": [
+        {
+          "round": 1,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 130.38094999999998,
+          "baseline_elapsed_ns": 26076190,
+          "candidate_us": 57.22505,
+          "candidate_elapsed_ns": 11445010
+        },
+        {
+          "round": 2,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 58.48615,
+          "candidate_elapsed_ns": 11697230,
+          "baseline_us": 129.5415,
+          "baseline_elapsed_ns": 25908300
+        },
+        {
+          "round": 3,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 129.24155,
+          "baseline_elapsed_ns": 25848310,
+          "candidate_us": 56.21615,
+          "candidate_elapsed_ns": 11243230
+        },
+        {
+          "round": 4,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 57.40815,
+          "candidate_elapsed_ns": 11481630,
+          "baseline_us": 130.9762,
+          "baseline_elapsed_ns": 26195240
+        },
+        {
+          "round": 5,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 127.97415,
+          "baseline_elapsed_ns": 25594830,
+          "candidate_us": 56.229099999999995,
+          "candidate_elapsed_ns": 11245820
+        },
+        {
+          "round": 6,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 56.709,
+          "candidate_elapsed_ns": 11341800,
+          "baseline_us": 131.6046,
+          "baseline_elapsed_ns": 26320920
+        }
+      ],
+      "baseline_mean_us": 129.95315833333333,
+      "candidate_mean_us": 57.0456,
+      "baseline_median_us": 129.961225,
+      "candidate_median_us": 56.96702500000001,
+      "saved_mean_us": 72.90755833333333,
+      "saved_median_us": 72.9942,
+      "paired_savings_us": [
+        73.15589999999997,
+        71.05535,
+        73.02539999999999,
+        73.56805,
+        71.74504999999999,
+        74.8956
+      ],
+      "saved_mean_ci95_us": [
+        71.917425,
+        73.85143333333333
+      ],
+      "max_mean_us": null,
+      "gates": {
+        "target_mean": true,
+        "mean_saving": true,
+        "median_saving": true,
+        "paired_bootstrap_lower_positive": true
+      },
+      "warmup": 50,
+      "iterations": 200,
+      "rounds": 6,
+      "unit": "us",
+      "measurement_protocol": {
+        "warmup": 50,
+        "rounds": 6,
+        "iterations_per_round": 200,
+        "execution_order": "alternate baseline and candidate; retain all paired rounds",
+        "timed_entry": "prepared.run",
+        "includes": [
+          "Python submission",
+          "new outputs and per-call temporary allocations",
+          "device execution and completion synchronization"
+        ],
+        "excludes": [
+          "input generation and transfer",
+          "one-time validation",
+          "prepare",
+          "CPU golden",
+          "first compilation"
+        ],
+        "latency_unit": "us",
+        "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+        "target_statistic": "arithmetic mean of six per-round per-call latencies",
+        "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+      },
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear",
+        "rng": "numpy.random.default_rng"
+      },
+      "configuration": {
+        "mode": "gather",
+        "column_tile": 256,
+        "layer_tile": 1
+      }
+    }
+  ]
+}

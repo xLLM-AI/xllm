@@ -1,0 +1,1289 @@
+{
+  "task_number": 6,
+  "input_cases": [
+    {
+      "id": "packed_literal",
+      "values": [
+        [
+          [
+            0,
+            2,
+            -1
+          ],
+          [
+            3,
+            1,
+            -1
+          ],
+          [
+            1,
+            -1,
+            -1
+          ]
+        ],
+        [
+          [
+            3,
+            0,
+            6,
+            1
+          ],
+          [
+            5,
+            2,
+            7,
+            4
+          ]
+        ],
+        [
+          0,
+          2,
+          2,
+          3
+        ]
+      ],
+      "expected": [
+        [
+          3,
+          6,
+          0
+        ],
+        [
+          5,
+          7,
+          2
+        ]
+      ]
+    },
+    {
+      "id": "packed_prefix_padding",
+      "values": [
+        [
+          [
+            0,
+            -7,
+            2
+          ],
+          [
+            3,
+            1,
+            -1
+          ]
+        ],
+        [
+          [
+            3,
+            0,
+            6,
+            1
+          ],
+          [
+            5,
+            2,
+            7,
+            4
+          ]
+        ],
+        [
+          0,
+          3,
+          4
+        ]
+      ],
+      "expected": [
+        [
+          3,
+          -1,
+          6,
+          1
+        ],
+        [
+          5,
+          -1,
+          7,
+          4
+        ]
+      ]
+    },
+    {
+      "id": "packed_single",
+      "values": [
+        [
+          [
+            3,
+            1
+          ]
+        ],
+        [
+          3,
+          0,
+          6,
+          1
+        ],
+        [
+          0,
+          2
+        ]
+      ],
+      "expected": [
+        1,
+        0
+      ]
+    },
+    {
+      "id": "packed_empty_requests",
+      "requests": 0,
+      "columns": 3
+    },
+    {
+      "id": "packed_zero_counts",
+      "values": [
+        [
+          [
+            999999,
+            -1
+          ],
+          [
+            999999,
+            -2
+          ]
+        ],
+        [
+          [
+            3,
+            0,
+            6,
+            1
+          ],
+          [
+            5,
+            2,
+            7,
+            4
+          ]
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "packed_empty_columns",
+      "requests": 3,
+      "columns": 0
+    },
+    {
+      "id": "packed_offset",
+      "requests": 7,
+      "columns": 33,
+      "layers": 3,
+      "blocks": 129,
+      "offset": true
+    },
+    {
+      "id": "packed_boundary257",
+      "requests": 3,
+      "columns": 257,
+      "layers": 1,
+      "blocks": 257
+    },
+    {
+      "id": "packed_perf_small",
+      "requests": 8,
+      "columns": 64,
+      "layers": 8,
+      "blocks": 1024,
+      "performance": true
+    },
+    {
+      "id": "packed_perf_large",
+      "requests": 64,
+      "columns": 256,
+      "layers": 32,
+      "blocks": 4096,
+      "performance": true
+    },
+    {
+      "id": "packed_skew_valid_prefix",
+      "values": [
+        [
+          [
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647
+          ],
+          [
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647
+          ],
+          [
+            2,
+            2,
+            -12,
+            3,
+            0,
+            2,
+            3,
+            -1,
+            1
+          ],
+          [
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647
+          ],
+          [
+            0,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647
+          ],
+          [
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647,
+            2147483647
+          ]
+        ],
+        [
+          [
+            4,
+            0,
+            8,
+            2
+          ],
+          [
+            40,
+            10,
+            80,
+            20
+          ],
+          [
+            1,
+            3,
+            5,
+            7
+          ]
+        ],
+        [
+          0,
+          0,
+          0,
+          9,
+          9,
+          10,
+          10
+        ]
+      ],
+      "expected": [
+        [
+          8,
+          8,
+          -1,
+          2,
+          4,
+          8,
+          2,
+          -1,
+          0,
+          4
+        ],
+        [
+          80,
+          80,
+          -1,
+          20,
+          40,
+          80,
+          20,
+          -1,
+          10,
+          40
+        ],
+        [
+          5,
+          5,
+          -1,
+          7,
+          1,
+          5,
+          7,
+          -1,
+          3,
+          1
+        ]
+      ],
+      "generalization": {
+        "purpose": "六个请求的有效页数依次为 0、0、9、0、1、0。核对重复逻辑页、有效负 padding、连续空请求，并确认尾部的 INT32_MAX 不会被访问。",
+        "measure": false,
+        "expected_sha256": "d801144a46a41ff545a5804b2b4a6a88e617dbe9fb3c00bd370954ee4dd99e1f",
+        "input_shapes": [
+          [
+            6,
+            9
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            7
+          ]
+        ],
+        "output_shape": [
+          3,
+          10
+        ]
+      }
+    },
+    {
+      "id": "packed_route_32736",
+      "requests": 7,
+      "columns": 385,
+      "layers": 32,
+      "blocks": 67,
+      "seed": 1507,
+      "generalization": {
+        "purpose": "相同矩阵规格 R=7、C=385、L=32、B=67，确定性分段 P=1,023。L×P=32,736，低于当前实现的 32,768 元素分流阈值；核对完整输出并记录此负载的两路耗时。",
+        "measure": true,
+        "expected_sha256": "5b07038b5d30c6fc0fca547a5403e212e29a753bc4299935f3a1fd830356bfc6",
+        "input_shapes": [
+          [
+            7,
+            385
+          ],
+          [
+            32,
+            67
+          ],
+          [
+            8
+          ]
+        ],
+        "output_shape": [
+          32,
+          1023
+        ]
+      }
+    },
+    {
+      "id": "packed_route_32768",
+      "requests": 7,
+      "columns": 385,
+      "layers": 32,
+      "blocks": 67,
+      "seed": 596,
+      "generalization": {
+        "purpose": "相同矩阵规格 R=7、C=385、L=32、B=67，确定性分段 P=1,024。L×P=32,768，恰好达到当前实现的 32,768 元素分流阈值；核对完整输出并记录此负载的两路耗时。",
+        "measure": true,
+        "expected_sha256": "d3c71a4cbec1c63f45010adc05f0385388880335d8146912f5264b126075213e",
+        "input_shapes": [
+          [
+            7,
+            385
+          ],
+          [
+            32,
+            67
+          ],
+          [
+            8
+          ]
+        ],
+        "output_shape": [
+          32,
+          1024
+        ]
+      }
+    },
+    {
+      "id": "packed_single_long_rows",
+      "requests": 9,
+      "columns": 1025,
+      "layers": 1,
+      "blocks": 67,
+      "single": true,
+      "seed": 33,
+      "generalization": {
+        "purpose": "采用一维映射，C=1,025 跨越四个 256 列分块并留下单列尾块。检查不同长度长请求的按序写入和 [P] 的单层输出。",
+        "measure": false,
+        "expected_sha256": "09e681374a1fa703c4eddad60b7fbc40082323364235059efba6904cfa5f6bd2",
+        "input_shapes": [
+          [
+            9,
+            1025
+          ],
+          [
+            67
+          ],
+          [
+            10
+          ]
+        ],
+        "output_shape": [
+          4698
+        ]
+      }
+    }
+  ],
+  "expected_checks": {
+    "result.json": {
+      "cases": [
+        {
+          "id": "packed_literal",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            2,
+            3
+          ],
+          "input_shapes": [
+            [
+              3,
+              3
+            ],
+            [
+              2,
+              4
+            ],
+            [
+              4
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "packed_prefix_padding",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            2,
+            4
+          ],
+          "input_shapes": [
+            [
+              2,
+              3
+            ],
+            [
+              2,
+              4
+            ],
+            [
+              3
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "packed_single",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            2
+          ],
+          "input_shapes": [
+            [
+              1,
+              2
+            ],
+            [
+              4
+            ],
+            [
+              2
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "packed_empty_requests",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            2,
+            0
+          ],
+          "input_shapes": [
+            [
+              0,
+              3
+            ],
+            [
+              2,
+              31
+            ],
+            [
+              1
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "packed_zero_counts",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            2,
+            0
+          ],
+          "input_shapes": [
+            [
+              2,
+              2
+            ],
+            [
+              2,
+              4
+            ],
+            [
+              3
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "packed_empty_columns",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            2,
+            0
+          ],
+          "input_shapes": [
+            [
+              3,
+              0
+            ],
+            [
+              2,
+              31
+            ],
+            [
+              4
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "packed_offset",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            3,
+            84
+          ],
+          "input_shapes": [
+            [
+              7,
+              33
+            ],
+            [
+              3,
+              129
+            ],
+            [
+              8
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "packed_boundary257",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            1,
+            243
+          ],
+          "input_shapes": [
+            [
+              3,
+              257
+            ],
+            [
+              1,
+              257
+            ],
+            [
+              4
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "packed_perf_small",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            8,
+            287
+          ],
+          "input_shapes": [
+            [
+              8,
+              64
+            ],
+            [
+              8,
+              1024
+            ],
+            [
+              9
+            ]
+          ],
+          "attributes": {}
+        },
+        {
+          "id": "packed_perf_large",
+          "status": "PASS",
+          "checks": {
+            "candidate_mismatches": 0,
+            "baseline_mismatches": 0,
+            "shape": true,
+            "dtype": true,
+            "npu": true,
+            "contiguous": true,
+            "inputs_unchanged": true,
+            "independent_storage": true
+          },
+          "shape": [
+            32,
+            7898
+          ],
+          "input_shapes": [
+            [
+              64,
+              256
+            ],
+            [
+              32,
+              4096
+            ],
+            [
+              65
+            ]
+          ],
+          "attributes": {}
+        }
+      ],
+      "negative": [
+        {
+          "id": "input_count",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "unknown_attribute",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "cpu_input",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "dtype",
+          "status": "PASS",
+          "exception": "TypeError"
+        },
+        {
+          "id": "noncontiguous",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "negative_mapping",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "logical_address_out_of_range",
+          "status": "PASS",
+          "exception": "ValueError"
+        },
+        {
+          "id": "nonmonotonic_cu",
+          "status": "PASS",
+          "exception": "ValueError"
+        }
+      ],
+      "dynamic_updates": {
+        "packed_perf_small": [
+          {
+            "id": "logical_values_changed",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          },
+          {
+            "id": "mapping_values_changed",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          },
+          {
+            "id": "cu_counts_changed_same_total",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          }
+        ],
+        "packed_perf_large": [
+          {
+            "id": "logical_values_changed",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          },
+          {
+            "id": "mapping_values_changed",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          },
+          {
+            "id": "large_path_int32_output_boundary",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          },
+          {
+            "id": "cu_counts_changed_same_total",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "compared_with": "independent CPU oracle; outside performance timing"
+          }
+        ]
+      },
+      "storage_rebindings": {
+        "packed_perf_small": [
+          {
+            "id": "mapping_set_storage",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "storage_offset": 1,
+            "pointer_changed": true,
+            "old_alignment_mod16": 0,
+            "new_alignment_mod16": 4
+          },
+          {
+            "id": "logical_set_storage",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "storage_offset": 1,
+            "pointer_changed": true,
+            "old_alignment_mod16": 0,
+            "new_alignment_mod16": 4
+          },
+          {
+            "id": "cu_set_storage_same_total",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "storage_offset": 1,
+            "pointer_changed": true,
+            "old_alignment_mod16": 0,
+            "new_alignment_mod16": 4
+          }
+        ],
+        "packed_perf_large": [
+          {
+            "id": "mapping_set_storage",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "storage_offset": 1,
+            "pointer_changed": true,
+            "old_alignment_mod16": 0,
+            "new_alignment_mod16": 4
+          },
+          {
+            "id": "logical_set_storage",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "storage_offset": 1,
+            "pointer_changed": true,
+            "old_alignment_mod16": 0,
+            "new_alignment_mod16": 4
+          },
+          {
+            "id": "cu_set_storage_same_total",
+            "status": "PASS",
+            "candidate_mismatches": 0,
+            "storage_offset": 1,
+            "pointer_changed": true,
+            "old_alignment_mod16": 0,
+            "new_alignment_mod16": 4
+          }
+        ]
+      },
+      "engineering": {
+        "two_streams": "PASS",
+        "retained_outputs_independent": "PASS",
+        "repeat20_released": "PASS",
+        "active_before_bytes": 38912,
+        "active_after_bytes": 38912,
+        "peak_increment_bytes": 9216,
+        "output_bytes": 9184,
+        "baseline_peak_increment_bytes": 93696,
+        "baseline_output_bytes": 9184,
+        "baseline_active_before_bytes": 38912,
+        "baseline_active_after_bytes": 38912,
+        "candidate_minus_baseline_peak_bytes": -84480,
+        "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+      },
+      "engineering_by_case": {
+        "packed_perf_small": {
+          "two_streams": "PASS",
+          "retained_outputs_independent": "PASS",
+          "repeat20_released": "PASS",
+          "active_before_bytes": 38912,
+          "active_after_bytes": 38912,
+          "peak_increment_bytes": 9216,
+          "output_bytes": 9184,
+          "baseline_peak_increment_bytes": 93696,
+          "baseline_output_bytes": 9184,
+          "baseline_active_before_bytes": 38912,
+          "baseline_active_after_bytes": 38912,
+          "candidate_minus_baseline_peak_bytes": -84480,
+          "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+        },
+        "packed_perf_large": {
+          "two_streams": "PASS",
+          "retained_outputs_independent": "PASS",
+          "repeat20_released": "PASS",
+          "active_before_bytes": 654848,
+          "active_after_bytes": 654848,
+          "peak_increment_bytes": 1160704,
+          "output_bytes": 1010944,
+          "baseline_peak_increment_bytes": 2126336,
+          "baseline_output_bytes": 1010944,
+          "baseline_active_before_bytes": 654848,
+          "baseline_active_after_bytes": 654848,
+          "candidate_minus_baseline_peak_bytes": -965632,
+          "peak_definition": "Warmed PyTorch active allocation for one complete prepared call on identical inputs; excludes persistent prepared input/layout buffers in both; not total HBM or all runtime scratch"
+        }
+      },
+      "large_single_layer": {
+        "id": "packed_large_single_layer",
+        "status": "PASS",
+        "checks": {
+          "candidate_mismatches": 0,
+          "baseline_mismatches": 0,
+          "shape": true,
+          "dtype": true,
+          "npu": true,
+          "contiguous": true,
+          "inputs_unchanged": true,
+          "independent_storage": true
+        },
+        "shape": [
+          32768
+        ],
+        "input_shapes": [
+          [
+            1,
+            32768
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        "attributes": {}
+      }
+    }
+  },
+  "supplement_checks": {},
+  "required_comparisons": [
+    [
+      "result.json",
+      "benchmarks[0]"
+    ],
+    [
+      "result.json",
+      "benchmarks[1]"
+    ]
+  ],
+  "performance_reference": {
+    "number": "06",
+    "title": "ragged page indices打包",
+    "path": "operators/task06_packed",
+    "functional_records": 32,
+    "functional_pass": true,
+    "source_current": true,
+    "environment": {
+      "utc": "2026-10-31T01:16:13.291910+00:00",
+      "hostname": "A03-R40-I191-103-4100002.JD.LOCAL",
+      "python": "3.11.14",
+      "device": "Ascend910_9382",
+      "versions": {
+        "torch": "2.9.0+cpu",
+        "torch-npu": "2.9.0.post1+gitee7ba04",
+        "triton-ascend": "3.2.0.dev20260322"
+      },
+      "triton_target": "GPUTarget(backend='npu', arch='Ascend910_9382', warp_size=0)",
+      "source_sha256": {
+        "baseline.py": "2a64eae708a9d7cefb034cf41d25e36ffc02350665dce7758c43a2072e55553d",
+        "case.json": "dc84fb95b72fcbafd4ebcad1d20883c5e14b0b59a679e383ca809e3656a7c757",
+        "contract.py": "08caacee40811608c1ec149342fe5fb77af93b5d1f1e257127738f5296afbbc9",
+        "finish.cpp": "468da1037a85969d8db7dceb6d74ef33b52229c9abb8c6d10d0d46e6d04d3b42",
+        "generate_data.py": "a27cf622f54df8d56b88d8cf81351cad73bfdb171fea3b361c433344df3474a4",
+        "golden.py": "3ea21768bb38440d59c46000c88901992ec35accda233eef43d3a9950b75a6a9",
+        "metadata.json": "6c20bc7adcfd35e1e37fc79321c99f4351f688a3d4a903827213cecea89b10a8",
+        "paired_statistics.py": "fc4b75b3a17618bad99d79243833815fd686fed2fd457cee7ef9cfa137128f56",
+        "probe_small.py": "bcd457e8759af394a37befa0f6ef08dc311268e105ddcf48a2ffca2e33fd69fd",
+        "solution.py": "39ad30b275055dcbd0599c25fc9646507976b2170bcc175b887a3a282eb1d831",
+        "verify.py": "b1afcea53b8245e066885373cd685f886d115f4801467fc9402203ebfa6990f5"
+      }
+    },
+    "metrics": [
+      {
+        "id": "packed_perf_small",
+        "baseline_key": "baseline",
+        "required": true,
+        "source_file": "task_submission/result.json",
+        "source_path": "benchmarks[0]",
+        "baseline_mean_us": 82.60297,
+        "candidate_mean_us": 25.995276666666665,
+        "saved_mean_us": 56.60769333333333,
+        "baseline_median_us": 82.3501425,
+        "candidate_median_us": 25.996235,
+        "saved_median_us": 56.353907500000005,
+        "baseline_rounds_us": [
+          82.30692,
+          82.051165,
+          82.393365,
+          84.237935,
+          80.906555,
+          83.72188
+        ],
+        "candidate_rounds_us": [
+          26.26366,
+          26.01536,
+          25.889310000000002,
+          25.97711,
+          26.11976,
+          25.70646
+        ],
+        "saved_mean_ci95_us": [
+          55.65201,
+          57.557535
+        ],
+        "iterations": 200,
+        "warmup": 50,
+        "original_unit": "us",
+        "round_order": [
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ],
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ],
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ]
+        ],
+        "measurement_protocol": null,
+        "call_pair_order": null
+      },
+      {
+        "id": "packed_perf_large",
+        "baseline_key": "baseline",
+        "required": true,
+        "source_file": "task_submission/result.json",
+        "source_path": "benchmarks[1]",
+        "baseline_mean_us": 86.60738500000001,
+        "candidate_mean_us": 52.83497916666666,
+        "saved_mean_us": 33.772405833333345,
+        "baseline_median_us": 86.2118725,
+        "candidate_median_us": 52.417775000000006,
+        "saved_median_us": 33.79409749999999,
+        "baseline_rounds_us": [
+          87.80396,
+          88.002415,
+          85.543345,
+          86.35910000000001,
+          85.870845,
+          86.064645
+        ],
+        "candidate_rounds_us": [
+          54.872895,
+          52.84718,
+          52.313275000000004,
+          52.172425000000004,
+          52.522275,
+          52.281825
+        ],
+        "saved_mean_ci95_us": [
+          33.24227666666667,
+          34.39158666666667
+        ],
+        "iterations": 200,
+        "warmup": 50,
+        "original_unit": "us",
+        "round_order": [
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ],
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ],
+          [
+            "baseline_us",
+            "candidate_us"
+          ],
+          [
+            "candidate_us",
+            "baseline_us"
+          ]
+        ],
+        "measurement_protocol": null,
+        "call_pair_order": null
+      }
+    ],
+    "result_sources": [
+      {
+        "path": "task_submission/result.json",
+        "sha256": "6d11bd81b52a9f6d8e9b8760df425750e50acd37d6fa5c6f63acf0e68b5e4233"
+      }
+    ],
+    "source_hashes": {
+      "baseline.py": "2a64eae708a9d7cefb034cf41d25e36ffc02350665dce7758c43a2072e55553d",
+      "case.json": "dc84fb95b72fcbafd4ebcad1d20883c5e14b0b59a679e383ca809e3656a7c757",
+      "contract.py": "08caacee40811608c1ec149342fe5fb77af93b5d1f1e257127738f5296afbbc9",
+      "finish.cpp": "468da1037a85969d8db7dceb6d74ef33b52229c9abb8c6d10d0d46e6d04d3b42",
+      "generate_data.py": "a27cf622f54df8d56b88d8cf81351cad73bfdb171fea3b361c433344df3474a4",
+      "golden.py": "3ea21768bb38440d59c46000c88901992ec35accda233eef43d3a9950b75a6a9",
+      "metadata.json": "6c20bc7adcfd35e1e37fc79321c99f4351f688a3d4a903827213cecea89b10a8",
+      "paired_statistics.py": "fc4b75b3a17618bad99d79243833815fd686fed2fd457cee7ef9cfa137128f56",
+      "probe_small.py": "bcd457e8759af394a37befa0f6ef08dc311268e105ddcf48a2ffca2e33fd69fd",
+      "solution.py": "39ad30b275055dcbd0599c25fc9646507976b2170bcc175b887a3a282eb1d831",
+      "verify.py": "b1afcea53b8245e066885373cd685f886d115f4801467fc9402203ebfa6990f5"
+    },
+    "memory": [
+      {
+        "id": "packed_perf_small",
+        "baseline_bytes": 93696,
+        "candidate_bytes": 9216,
+        "residual_bytes": 0,
+        "output_bytes": 9184,
+        "checks": "{\"two_streams\":\"PASS\",\"retained_outputs_independent\":\"PASS\",\"repeat20_released\":\"PASS\",\"active_before_bytes\":38912,\"active_after_bytes\":38912,\"peak_increment_bytes\":9216,\"output_bytes\":9184,\"baseline_peak_increment_bytes\":93696,\"baseline_output_bytes\":9184,\"baseline_active_before_bytes\":38912,\"baseline_active_after_bytes\":38912,\"candidate_minus_baseline_peak_bytes\":-84480,\"peak_definition\":\"Warmed PyTorch active allocation for one complete prepar…（完整记录见 JSON）",
+        "status": "工程检查通过；峰值观测",
+        "measurement_scope": "活跃分配增量"
+      },
+      {
+        "id": "packed_perf_large",
+        "baseline_bytes": 2126336,
+        "candidate_bytes": 1160704,
+        "residual_bytes": 0,
+        "output_bytes": 1010944,
+        "checks": "{\"two_streams\":\"PASS\",\"retained_outputs_independent\":\"PASS\",\"repeat20_released\":\"PASS\",\"active_before_bytes\":654848,\"active_after_bytes\":654848,\"peak_increment_bytes\":1160704,\"output_bytes\":1010944,\"baseline_peak_increment_bytes\":2126336,\"baseline_output_bytes\":1010944,\"baseline_active_before_bytes\":654848,\"baseline_active_after_bytes\":654848,\"candidate_minus_baseline_peak_bytes\":-965632,\"peak_definition\":\"Warmed PyTorch active allocation for one…（完整记录见 JSON）",
+        "status": "工程检查通过；峰值观测",
+        "measurement_scope": "活跃分配增量"
+      }
+    ]
+  },
+  "acceptance": {
+    "unit": "us",
+    "resamples": 10000,
+    "seed": 20261031,
+    "percentile": "linear",
+    "historical_results_are_not_new_passes": true,
+    "max_mean_us": {
+      "packed_perf_small": 40,
+      "packed_perf_large": 75
+    },
+    "measurement_protocol": {
+      "warmup": 50,
+      "rounds": 6,
+      "iterations_per_round": 200,
+      "execution_order": "alternate baseline and candidate; retain all paired rounds",
+      "timed_entry": "prepared.run",
+      "includes": [
+        "Python submission",
+        "new outputs and per-call temporary allocations",
+        "device execution and completion synchronization"
+      ],
+      "excludes": [
+        "input generation and transfer",
+        "one-time validation",
+        "prepare",
+        "CPU golden",
+        "first compilation"
+      ],
+      "latency_unit": "us",
+      "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+      "target_statistic": "arithmetic mean of six per-round per-call latencies",
+      "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+    },
+    "rule": "all required comparisons: candidate mean latency <= case max_mean_us; positive mean and median paired time saving; lower bound of paired bootstrap mean-saving 95% CI > 0"
+  },
+  "source_sha256": {
+    "reference": {
+      "public_api.py": "3ea21768bb38440d59c46000c88901992ec35accda233eef43d3a9950b75a6a9",
+      "baseline.py": "2a64eae708a9d7cefb034cf41d25e36ffc02350665dce7758c43a2072e55553d",
+      "contract.py": "08caacee40811608c1ec149342fe5fb77af93b5d1f1e257127738f5296afbbc9"
+    },
+    "functional": {
+      "functional_checks.py": "a5f3d1d7506d542eab7968c6ffe8fed8acae7ac85839120c4e10733bf2443a71",
+      "golden.py": "3ea21768bb38440d59c46000c88901992ec35accda233eef43d3a9950b75a6a9",
+      "baseline.py": "2a64eae708a9d7cefb034cf41d25e36ffc02350665dce7758c43a2072e55553d",
+      "contract.py": "08caacee40811608c1ec149342fe5fb77af93b5d1f1e257127738f5296afbbc9",
+      "generate_data.py": "a27cf622f54df8d56b88d8cf81351cad73bfdb171fea3b361c433344df3474a4"
+    }
+  },
+  "generalization": {
+    "case_ids": [
+      "packed_skew_valid_prefix",
+      "packed_route_32736",
+      "packed_route_32768",
+      "packed_single_long_rows"
+    ],
+    "diagnostic_ids": [
+      "packed_route_32736",
+      "packed_route_32768"
+    ],
+    "correctness_required": true,
+    "performance_gate": null
+  }
+}

@@ -1,0 +1,638 @@
+{
+  "status": "PASS",
+  "benchmarks": [
+    {
+      "id": "packed_perf_small",
+      "status": "PASS",
+      "required": true,
+      "correctness": "PASS",
+      "baseline_rounds_us": [
+        138.51870000000002,
+        134.60379999999998,
+        131.46825,
+        132.08265,
+        127.87255,
+        130.409
+      ],
+      "candidate_rounds_us": [
+        36.57375,
+        35.35305,
+        35.52225,
+        36.907599999999995,
+        36.1185,
+        35.056
+      ],
+      "raw_rounds": [
+        {
+          "round": 1,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 138.51870000000002,
+          "baseline_elapsed_ns": 27703740,
+          "candidate_us": 36.57375,
+          "candidate_elapsed_ns": 7314750
+        },
+        {
+          "round": 2,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 35.35305,
+          "candidate_elapsed_ns": 7070610,
+          "baseline_us": 134.60379999999998,
+          "baseline_elapsed_ns": 26920760
+        },
+        {
+          "round": 3,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 131.46825,
+          "baseline_elapsed_ns": 26293650,
+          "candidate_us": 35.52225,
+          "candidate_elapsed_ns": 7104450
+        },
+        {
+          "round": 4,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 36.907599999999995,
+          "candidate_elapsed_ns": 7381520,
+          "baseline_us": 132.08265,
+          "baseline_elapsed_ns": 26416530
+        },
+        {
+          "round": 5,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 127.87255,
+          "baseline_elapsed_ns": 25574510,
+          "candidate_us": 36.1185,
+          "candidate_elapsed_ns": 7223700
+        },
+        {
+          "round": 6,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 35.056,
+          "candidate_elapsed_ns": 7011200,
+          "baseline_us": 130.409,
+          "baseline_elapsed_ns": 26081800
+        }
+      ],
+      "baseline_mean_us": 132.49249166666667,
+      "candidate_mean_us": 35.92185833333333,
+      "baseline_median_us": 131.77545,
+      "candidate_median_us": 35.820375,
+      "saved_mean_us": 96.57063333333333,
+      "saved_median_us": 95.95507500000001,
+      "paired_savings_us": [
+        101.94495000000003,
+        99.25074999999998,
+        95.94600000000001,
+        95.17505,
+        91.75405,
+        95.353
+      ],
+      "saved_mean_ci95_us": [
+        94.15335,
+        99.26894166666669
+      ],
+      "max_mean_us": 40,
+      "gates": {
+        "target_mean": true,
+        "mean_saving": true,
+        "median_saving": true,
+        "paired_bootstrap_lower_positive": true
+      },
+      "warmup": 50,
+      "iterations": 200,
+      "rounds": 6,
+      "unit": "us",
+      "measurement_protocol": {
+        "warmup": 50,
+        "rounds": 6,
+        "iterations_per_round": 200,
+        "execution_order": "alternate baseline and candidate; retain all paired rounds",
+        "timed_entry": "prepared.run",
+        "includes": [
+          "Python submission",
+          "new outputs and per-call temporary allocations",
+          "device execution and completion synchronization"
+        ],
+        "excludes": [
+          "input generation and transfer",
+          "one-time validation",
+          "prepare",
+          "CPU golden",
+          "first compilation"
+        ],
+        "latency_unit": "us",
+        "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+        "target_statistic": "arithmetic mean of six per-round per-call latencies",
+        "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+      },
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear",
+        "rng": "numpy.random.default_rng"
+      },
+      "configuration": {
+        "mode": "fused",
+        "column_tile": 64,
+        "layer_tile": 1
+      }
+    },
+    {
+      "id": "packed_perf_large",
+      "status": "PASS",
+      "required": true,
+      "correctness": "PASS",
+      "baseline_rounds_us": [
+        131.80339999999998,
+        132.53154999999998,
+        133.07125,
+        133.72504999999998,
+        130.64305000000002,
+        133.22665
+      ],
+      "candidate_rounds_us": [
+        56.85,
+        58.3879,
+        56.52915,
+        56.699,
+        57.3018,
+        57.895849999999996
+      ],
+      "raw_rounds": [
+        {
+          "round": 1,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 131.80339999999998,
+          "baseline_elapsed_ns": 26360680,
+          "candidate_us": 56.85,
+          "candidate_elapsed_ns": 11370000
+        },
+        {
+          "round": 2,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 58.3879,
+          "candidate_elapsed_ns": 11677580,
+          "baseline_us": 132.53154999999998,
+          "baseline_elapsed_ns": 26506310
+        },
+        {
+          "round": 3,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 133.07125,
+          "baseline_elapsed_ns": 26614250,
+          "candidate_us": 56.52915,
+          "candidate_elapsed_ns": 11305830
+        },
+        {
+          "round": 4,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 56.699,
+          "candidate_elapsed_ns": 11339800,
+          "baseline_us": 133.72504999999998,
+          "baseline_elapsed_ns": 26745010
+        },
+        {
+          "round": 5,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 130.64305000000002,
+          "baseline_elapsed_ns": 26128610,
+          "candidate_us": 57.3018,
+          "candidate_elapsed_ns": 11460360
+        },
+        {
+          "round": 6,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 57.895849999999996,
+          "candidate_elapsed_ns": 11579170,
+          "baseline_us": 133.22665,
+          "baseline_elapsed_ns": 26645330
+        }
+      ],
+      "baseline_mean_us": 132.50015833333333,
+      "candidate_mean_us": 57.27728333333333,
+      "baseline_median_us": 132.8014,
+      "candidate_median_us": 57.075900000000004,
+      "saved_mean_us": 75.222875,
+      "saved_median_us": 75.7255,
+      "paired_savings_us": [
+        74.95339999999999,
+        74.14364999999998,
+        76.54209999999999,
+        77.02604999999998,
+        73.34125000000002,
+        75.33080000000001
+      ],
+      "saved_mean_ci95_us": [
+        74.20899999999999,
+        76.23675
+      ],
+      "max_mean_us": 75,
+      "gates": {
+        "target_mean": true,
+        "mean_saving": true,
+        "median_saving": true,
+        "paired_bootstrap_lower_positive": true
+      },
+      "warmup": 50,
+      "iterations": 200,
+      "rounds": 6,
+      "unit": "us",
+      "measurement_protocol": {
+        "warmup": 50,
+        "rounds": 6,
+        "iterations_per_round": 200,
+        "execution_order": "alternate baseline and candidate; retain all paired rounds",
+        "timed_entry": "prepared.run",
+        "includes": [
+          "Python submission",
+          "new outputs and per-call temporary allocations",
+          "device execution and completion synchronization"
+        ],
+        "excludes": [
+          "input generation and transfer",
+          "one-time validation",
+          "prepare",
+          "CPU golden",
+          "first compilation"
+        ],
+        "latency_unit": "us",
+        "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+        "target_statistic": "arithmetic mean of six per-round per-call latencies",
+        "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+      },
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear",
+        "rng": "numpy.random.default_rng"
+      },
+      "configuration": {
+        "mode": "gather",
+        "column_tile": 256,
+        "layer_tile": 1
+      }
+    },
+    {
+      "id": "packed_route_32736",
+      "status": "PASS",
+      "required": false,
+      "correctness": "PASS",
+      "baseline_rounds_us": [
+        130.87905,
+        130.87325,
+        128.8453,
+        129.24325,
+        127.5184,
+        129.4105
+      ],
+      "candidate_rounds_us": [
+        35.46385,
+        35.5651,
+        35.1255,
+        35.7331,
+        34.87345,
+        35.3421
+      ],
+      "raw_rounds": [
+        {
+          "round": 1,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 130.87905,
+          "baseline_elapsed_ns": 26175810,
+          "candidate_us": 35.46385,
+          "candidate_elapsed_ns": 7092770
+        },
+        {
+          "round": 2,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 35.5651,
+          "candidate_elapsed_ns": 7113020,
+          "baseline_us": 130.87325,
+          "baseline_elapsed_ns": 26174650
+        },
+        {
+          "round": 3,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 128.8453,
+          "baseline_elapsed_ns": 25769060,
+          "candidate_us": 35.1255,
+          "candidate_elapsed_ns": 7025100
+        },
+        {
+          "round": 4,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 35.7331,
+          "candidate_elapsed_ns": 7146620,
+          "baseline_us": 129.24325,
+          "baseline_elapsed_ns": 25848650
+        },
+        {
+          "round": 5,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 127.5184,
+          "baseline_elapsed_ns": 25503680,
+          "candidate_us": 34.87345,
+          "candidate_elapsed_ns": 6974690
+        },
+        {
+          "round": 6,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 35.3421,
+          "candidate_elapsed_ns": 7068420,
+          "baseline_us": 129.4105,
+          "baseline_elapsed_ns": 25882100
+        }
+      ],
+      "baseline_mean_us": 129.461625,
+      "candidate_mean_us": 35.350516666666664,
+      "baseline_median_us": 129.326875,
+      "candidate_median_us": 35.402975,
+      "saved_mean_us": 94.11110833333333,
+      "saved_median_us": 93.9239,
+      "paired_savings_us": [
+        95.4152,
+        95.30815000000001,
+        93.7198,
+        93.51014999999998,
+        92.64495,
+        94.06840000000001
+      ],
+      "saved_mean_ci95_us": [
+        93.356675,
+        94.890325
+      ],
+      "max_mean_us": null,
+      "gates": {
+        "target_mean": true,
+        "mean_saving": true,
+        "median_saving": true,
+        "paired_bootstrap_lower_positive": true
+      },
+      "warmup": 50,
+      "iterations": 200,
+      "rounds": 6,
+      "unit": "us",
+      "measurement_protocol": {
+        "warmup": 50,
+        "rounds": 6,
+        "iterations_per_round": 200,
+        "execution_order": "alternate baseline and candidate; retain all paired rounds",
+        "timed_entry": "prepared.run",
+        "includes": [
+          "Python submission",
+          "new outputs and per-call temporary allocations",
+          "device execution and completion synchronization"
+        ],
+        "excludes": [
+          "input generation and transfer",
+          "one-time validation",
+          "prepare",
+          "CPU golden",
+          "first compilation"
+        ],
+        "latency_unit": "us",
+        "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+        "target_statistic": "arithmetic mean of six per-round per-call latencies",
+        "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+      },
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear",
+        "rng": "numpy.random.default_rng"
+      },
+      "configuration": {
+        "mode": "fused",
+        "column_tile": 256,
+        "layer_tile": 1
+      }
+    },
+    {
+      "id": "packed_route_32768",
+      "status": "PASS",
+      "required": false,
+      "correctness": "PASS",
+      "baseline_rounds_us": [
+        130.38094999999998,
+        129.5415,
+        129.24155,
+        130.9762,
+        127.97415,
+        131.6046
+      ],
+      "candidate_rounds_us": [
+        57.22505,
+        58.48615,
+        56.21615,
+        57.40815,
+        56.229099999999995,
+        56.709
+      ],
+      "raw_rounds": [
+        {
+          "round": 1,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 130.38094999999998,
+          "baseline_elapsed_ns": 26076190,
+          "candidate_us": 57.22505,
+          "candidate_elapsed_ns": 11445010
+        },
+        {
+          "round": 2,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 58.48615,
+          "candidate_elapsed_ns": 11697230,
+          "baseline_us": 129.5415,
+          "baseline_elapsed_ns": 25908300
+        },
+        {
+          "round": 3,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 129.24155,
+          "baseline_elapsed_ns": 25848310,
+          "candidate_us": 56.21615,
+          "candidate_elapsed_ns": 11243230
+        },
+        {
+          "round": 4,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 57.40815,
+          "candidate_elapsed_ns": 11481630,
+          "baseline_us": 130.9762,
+          "baseline_elapsed_ns": 26195240
+        },
+        {
+          "round": 5,
+          "order": [
+            "baseline",
+            "candidate"
+          ],
+          "baseline_us": 127.97415,
+          "baseline_elapsed_ns": 25594830,
+          "candidate_us": 56.229099999999995,
+          "candidate_elapsed_ns": 11245820
+        },
+        {
+          "round": 6,
+          "order": [
+            "candidate",
+            "baseline"
+          ],
+          "candidate_us": 56.709,
+          "candidate_elapsed_ns": 11341800,
+          "baseline_us": 131.6046,
+          "baseline_elapsed_ns": 26320920
+        }
+      ],
+      "baseline_mean_us": 129.95315833333333,
+      "candidate_mean_us": 57.0456,
+      "baseline_median_us": 129.961225,
+      "candidate_median_us": 56.96702500000001,
+      "saved_mean_us": 72.90755833333333,
+      "saved_median_us": 72.9942,
+      "paired_savings_us": [
+        73.15589999999997,
+        71.05535,
+        73.02539999999999,
+        73.56805,
+        71.74504999999999,
+        74.8956
+      ],
+      "saved_mean_ci95_us": [
+        71.917425,
+        73.85143333333333
+      ],
+      "max_mean_us": null,
+      "gates": {
+        "target_mean": true,
+        "mean_saving": true,
+        "median_saving": true,
+        "paired_bootstrap_lower_positive": true
+      },
+      "warmup": 50,
+      "iterations": 200,
+      "rounds": 6,
+      "unit": "us",
+      "measurement_protocol": {
+        "warmup": 50,
+        "rounds": 6,
+        "iterations_per_round": 200,
+        "execution_order": "alternate baseline and candidate; retain all paired rounds",
+        "timed_entry": "prepared.run",
+        "includes": [
+          "Python submission",
+          "new outputs and per-call temporary allocations",
+          "device execution and completion synchronization"
+        ],
+        "excludes": [
+          "input generation and transfer",
+          "one-time validation",
+          "prepare",
+          "CPU golden",
+          "first compilation"
+        ],
+        "latency_unit": "us",
+        "per_round_latency": "elapsed wall time of 200 calls including final device synchronization, divided by 200",
+        "target_statistic": "arithmetic mean of six per-round per-call latencies",
+        "source_requirements_text": "### 3.3 性能要求\n\n每个主性能 case 均使用相同输入，在同一设备、同一软件环境下比较提交实现与基准。逐项满足：\n\n1. 基准耗时均值 − 提交实现耗时均值 > 0 μs。\n2. 基准耗时中位数 − 提交实现耗时中位数 > 0 μs。\n3. 配对轮次耗时差均值的 95% bootstrap 置信区间下界 > 0 μs。\n4. 提交实现 6 轮单次调用耗时的算术均值，不超过下表对应的目标耗时上限。\n\n预热 50 次，正式计时 6 轮，每轮 200 次，交替执行基准和提交实现。使用全部 6 轮配对数据，进行 10000 次共同重采样，seed=20261031，分位数使用线性插值。\n\n计时从完整 prepared.run 调用开始，到设备工作完成并同步结束，包含 Python 提交、新输出及当次临时张量分配和设备计算。输入生成与传输、一次性校验、prepare、CPU 标杆计算及首次编译不计入。两侧均按相同范围计时，不能只计设备核执行时间。"
+      },
+      "bootstrap": {
+        "resamples": 10000,
+        "seed": 20261031,
+        "percentile": "linear",
+        "rng": "numpy.random.default_rng"
+      },
+      "configuration": {
+        "mode": "gather",
+        "column_tile": 256,
+        "layer_tile": 1
+      }
+    }
+  ],
+  "environment": {
+    "utc": "2026-11-17T06:27:26.931032+00:00",
+    "hostname": "a968b326d12b",
+    "python": "3.12.13",
+    "versions": {
+      "torch": "2.9.0",
+      "torch-npu": "2.9.0.post6",
+      "triton-ascend": "3.2.2"
+    },
+    "device": "Ascend910_9382"
+  },
+  "source_sha256": {
+    "benchmark.py": "7863d5b1e77aeabeb30e1a0b3c83e92a06eec24df133b5d0de5c7de7489bb388",
+    "host.cpp": "3fb5b0e434d40ca24ee27d575afd0f36cfa1507ff5da4a162f3ff835542dfa2e",
+    "kernels.py": "1529dd14f1120627a2df4b5bd483f64434301a648437cc237b10eff3846824b8",
+    "setup.py": "55da564d0e8f098ea34e182a7b240626c7f95b135e0b60b5f00d6191a7dd2116",
+    "solution.py": "085e0cf22f43a0897d57ba99a9f64ed522e709c3b55d9c39cf3a3cbefa967af7",
+    "test_contract.py": "b5a0f406769722fba483081ffe0cd6a7206d460ae9f659696242c50c0d3516a2",
+    "verify.py": "c2b1e707409097fc15944878e45df4885b7e7670eb290cde6909ad61b59b7ea2"
+  },
+  "fixture_case_sha256": "dbb78e3103677d0a1db7476ab309cdde7d748894532e07b1ce13c0bf06483244"
+}

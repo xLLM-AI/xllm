@@ -1,0 +1,85 @@
+[
+  {
+    "op": "PackedPageIndices",
+    "language": "python",
+    "interface": "输入连续NPU int32 X[R,C]、M[B]或M[L,B]、cu[R+1]，attributes为空。cu[0]=0，单调且0≤cu[r+1]−cu[r]≤C；P=cu[-1]。输出独立连续int32[P]或[L,P]，`out[l,cu[r]+j]=−1 if X[r,j]<0 else M[l,X[r,j]]`，只处理0≤j<本请求计数。prepare后P及shape/dtype/device固定，允许合法counts在总P不变时更新。",
+    "parameters": [
+      {
+        "name": "prepare([X,M,cu],{})",
+        "description": "X为int32[R,C]，M为int32[B]或[L,B]，cu为int32[R+1]；检查有效前缀、映射范围与总输出P"
+      },
+      {
+        "name": "cu",
+        "description": "从0开始单调累计；每段长度≤C；P=cu[-1]；prepare后总P固定"
+      },
+      {
+        "name": "prepared.run()",
+        "description": "当前NPU stream；读取当前X/M/CU，输出独立int32[P]或[L,P]"
+      },
+      {
+        "name": "run(inputs,{})",
+        "description": "同上；包含一次性prepare；无效尾部不消费"
+      }
+    ],
+    "golden": "`values, attrs = generate_data.generate(case)`；`golden.calculate(values, attrs, single)` 返回 CPU 列表标杆。`single` 根据 M 的维数确定；空输出按单层/多层定义恢复 shape。",
+    "constraints": "总P改变必须重新prepare；仅改变合法counts且P固定才复用prepared对象。这里产出page indices，不生成token offsets、tile flags或注意力结果。没有模型端到端测试结论。",
+    "input_desc": [
+      {
+        "name": "X",
+        "param_type": "required",
+        "shape": [
+          "R",
+          "C"
+        ],
+        "type": [
+          "int32"
+        ],
+        "format": [
+          "ND"
+        ]
+      },
+      {
+        "name": "M",
+        "param_type": "required",
+        "shape": [
+          "B or L,B"
+        ],
+        "type": [
+          "int32"
+        ],
+        "format": [
+          "ND"
+        ]
+      },
+      {
+        "name": "cu",
+        "param_type": "required",
+        "shape": [
+          "R+1"
+        ],
+        "type": [
+          "int32"
+        ],
+        "format": [
+          "ND"
+        ]
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "output",
+        "param_type": "required",
+        "shape": [
+          "P or L,P"
+        ],
+        "type": [
+          "int32"
+        ],
+        "format": [
+          "ND"
+        ]
+      }
+    ],
+    "attr": []
+  }
+]
