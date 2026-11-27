@@ -140,7 +140,7 @@ def test_fixed_dp_verify_reuses_capture_when_a_rank_becomes_empty() -> None:
             tokens = torch.arange(rows, dtype=torch.int32)
             prepared = runner.prepare_execution(tokens, metadata)
             assert prepared is not None
-            keys.append(runner.warmup(tokens, tokens, metadata, decode_metadata=prepared))
+            keys.append(runner.warmup(tokens, tokens, metadata, preparation=prepared))
             runner._synchronize_dp_graph_execute(tokens)
         assert prepare.call_count == 1
         gather.assert_not_called()
@@ -401,19 +401,24 @@ def test_fixed_draft_graph_uses_configured_width_without_reading_query_lengths(w
     backend = _FakeBlockDraftAttentionBackend()
     backend.draft_query_width = width
     runner = BlockDraftAclGraphRunner(nn.Identity(), backend, torch.device("cpu"), max_batch=2, max_model_len=16)
-    metadata = _block_draft_metadata(torch.zeros((2, 4), dtype=torch.int32))
+    table = torch.zeros((2, 4), dtype=torch.int32)
+    metadata = _block_draft_metadata(table)
+    metadata.block_table = None
+    metadata.multi_block_tables = (table,)
     # A meta tensor has a shape but cannot service item() or tolist().
-    metadata.decode_query_width = width
     metadata.q_seq_lens = torch.empty(2, dtype=torch.int32, device="meta")
     metadata.q_cu_seq_lens_host_values = [width, 2 * width]
     tokens = torch.arange(2 * width, dtype=torch.int32)
 
     metadata.decode_query_width = width - 1
-    assert not runner.can_execute(tokens, metadata)
+    assert runner.prepare_execution(tokens, metadata) is None
     metadata.decode_query_width = width
-    assert runner.can_execute(tokens, metadata)
-    assert not runner.can_execute(tokens[:-1], metadata)
-    entry = runner._allocate_entry(tokens, tokens, metadata, sequence_count=2, page_table_capacity=4)
+    preparation = runner.prepare_execution(tokens, metadata)
+    assert preparation is not None
+    assert preparation.metadata.block_table is table
+    assert preparation.padded_batch_size == tokens.numel()
+    assert runner.prepare_execution(tokens[:-1], metadata) is None
+    entry = runner._allocate_entry(tokens, tokens, preparation.metadata, sequence_count=2, page_table_capacity=4)
     assert entry.static_input_ids.numel() == 2 * width
     assert entry.static_metadata.q_seq_lens.tolist() == [width, width]
 

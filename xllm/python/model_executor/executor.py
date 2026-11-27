@@ -649,7 +649,7 @@ class ModelExecutor:
                     output = graph_runner.execute(
                         input_ids,
                         positions,
-                        graph_metadata,
+                        metadata,
                         input_embedding,
                         mtp_topk_indices,
                         graph_key=graph_key,
