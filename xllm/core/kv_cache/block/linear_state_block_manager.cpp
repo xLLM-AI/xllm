@@ -27,7 +27,8 @@ namespace xllm {
 
 LinearStateBlockManager::LinearStateBlockManager(BlockManager::Options options)
     : BlockManagerImpl(options.block_type(BlockType::LINEAR)
-                           .hasher_type(BlockHasherType::TEXT)) {
+                           .hasher_type(BlockHasherType::TEXT)
+                           .cache_retention(CacheRetention::RECURRENT)) {
   CHECK_GT(options.num_blocks(), 1u)
       << "linear-state leaf needs at least one usable slot (plus padding)";
 }
@@ -39,15 +40,15 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
   if (seq == nullptr) {
     return std::nullopt;
   }
-  std::vector<Block>* blocks = kv_state.mutable_blocks(BlockType::LINEAR);
+  std::vector<Block>* blocks = kv_state.mutable_blocks(partition_id());
   CHECK(blocks->empty() || blocks->back().is_valid());
   if (blocks->size() > 1) {
     const bool shared_source =
-        kv_state.shared_blocks_num(BlockType::LINEAR) == blocks->size();
+        kv_state.shared_blocks_num(partition_id()) == blocks->size();
     const size_t keep_begin = blocks->size() - 1;
     deallocate(Slice<Block>(*blocks).slice(0, keep_begin));
     blocks->erase(blocks->begin(), blocks->begin() + keep_begin);
-    kv_state.set_shared_blocks_num(BlockType::LINEAR, shared_source ? 1 : 0);
+    kv_state.set_shared_blocks_num(partition_id(), shared_source ? 1 : 0);
   }
   const bool decode_step =
       options_.instance_is_decode() || !seq->is_prefill_stage();
@@ -59,12 +60,12 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
     const size_t cached_tokens = kv_state.kv_cache_tokens_num();
     checkpoint_index = cached_tokens / chunk_stride;
     if (cached_tokens % chunk_stride == 0 &&
-        checkpoint_index > kv_state.num_cached_blocks(BlockType::LINEAR)) {
+        checkpoint_index > kv_state.num_cached_blocks(partition_id())) {
       seq->update_linear_state_hashes(static_cast<uint32_t>(chunk_stride));
       const Slice<XXH3Key> hashes = seq->linear_state_hashes();
       CHECK_GE(hashes.size(), checkpoint_index);
       if (prefix_cache_->contains(hashes[checkpoint_index - 1])) {
-        kv_state.set_num_cached_blocks(BlockType::LINEAR, checkpoint_index);
+        kv_state.set_num_cached_blocks(partition_id(), checkpoint_index);
       } else {
         checkpoint_hash = hashes[checkpoint_index - 1];
       }
@@ -89,7 +90,7 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
   if (checkpoint_hash.has_value()) {
     blocks->back().set_hash_value(checkpoint_hash->data);
     prefix_cache_->insert(Slice<Block>(*blocks));
-    kv_state.set_num_cached_blocks(BlockType::LINEAR, checkpoint_index);
+    kv_state.set_num_cached_blocks(partition_id(), checkpoint_index);
   }
   return allocated;
 }
@@ -140,7 +141,8 @@ void LinearStateBlockManager::cache(const Slice<int32_t>& token_ids,
 HostLinearStateBlockManager::HostLinearStateBlockManager(
     BlockManager::Options options)
     : BlockManagerImpl(options.block_type(BlockType::LINEAR)
-                           .hasher_type(BlockHasherType::TEXT)) {}
+                           .hasher_type(BlockHasherType::TEXT)
+                           .cache_retention(CacheRetention::RECURRENT)) {}
 
 bool HostLinearStateBlockManager::allocate_for_prefetch(Sequence* seq,
                                                         size_t num_tokens) {
@@ -149,14 +151,16 @@ bool HostLinearStateBlockManager::allocate_for_prefetch(Sequence* seq,
   }
 
   KVCacheState& host_state = seq->host_kv_state();
+  host_state.bind_partition(
+      partition_id(), legacy_cache_retention(block_type()), block_type());
   const size_t target_blocks = num_tokens / block_size();
-  const size_t cached_blocks = host_state.num_cached_blocks(BlockType::LINEAR);
-  const size_t shared_blocks = host_state.shared_blocks_num(BlockType::LINEAR);
+  const size_t cached_blocks = host_state.num_cached_blocks(partition_id());
+  const size_t shared_blocks = host_state.shared_blocks_num(partition_id());
   const size_t cursor = std::min(cached_blocks, target_blocks);
   const bool source_in_target =
       cached_blocks > 0 && cached_blocks <= target_blocks;
 
-  std::vector<Block> old_blocks = host_state.take_blocks(BlockType::LINEAR);
+  std::vector<Block> old_blocks = host_state.take_blocks(partition_id());
   // The vector is indexed by logical checkpoint, while only the deepest
   // matched checkpoint has a physical source after prefix-cache admission.
   // Keep the earlier positions as invalid placeholders so Store transfers and
@@ -210,7 +214,7 @@ bool HostLinearStateBlockManager::allocate_for_prefetch(Sequence* seq,
   const bool complete = allocate_missing_blocks(missing, hashes, blocks);
   if (!blocks.empty()) {
     host_state.replace_composite_blocks(
-        BlockType::LINEAR,
+        partition_id(),
         std::move(blocks),
         has_source ? std::min(shared_blocks, target_blocks) : 0,
         cursor);
@@ -221,7 +225,9 @@ bool HostLinearStateBlockManager::allocate_for_prefetch(Sequence* seq,
 void HostLinearStateBlockManager::trim_prefetch_blocks(Sequence& seq,
                                                        size_t max_hit_tokens) {
   KVCacheState& host_state = seq.host_kv_state();
-  std::vector<Block> blocks = host_state.take_blocks(BlockType::LINEAR);
+  host_state.bind_partition(
+      partition_id(), legacy_cache_retention(block_type()), block_type());
+  std::vector<Block> blocks = host_state.take_blocks(partition_id());
   const size_t keep = std::min(max_hit_tokens / block_size(), blocks.size());
 
   // A Linear checkpoint vector is a logical index space. Keep only the
@@ -243,7 +249,7 @@ void HostLinearStateBlockManager::trim_prefetch_blocks(Sequence& seq,
   deallocate(blocks);
   blocks.clear();
   if (!source.is_valid()) {
-    host_state.erase_blocks(BlockType::LINEAR);
+    host_state.erase_blocks(partition_id());
     return;
   }
   blocks.resize(source_index + 1);
@@ -260,7 +266,7 @@ void HostLinearStateBlockManager::trim_prefetch_blocks(Sequence& seq,
                           hashes);
 
   host_state.replace_composite_blocks(
-      BlockType::LINEAR, std::move(blocks), source_index + 1, source_index + 1);
+      partition_id(), std::move(blocks), source_index + 1, source_index + 1);
 }
 
 }  // namespace xllm

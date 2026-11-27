@@ -106,6 +106,12 @@ BlockManagerPool::BlockManagerPool(
   BlockManager::Options block_options;
   block_options.num_blocks(options_.num_blocks())
       .block_size(options_.block_size())
+      .partition_id(paged_partition_.has_value()
+                        ? std::optional(paged_partition_->id())
+                        : std::nullopt)
+      .linear_partition_id(recurrent_partition_.has_value()
+                               ? std::optional(recurrent_partition_->id())
+                               : std::nullopt)
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
@@ -141,9 +147,9 @@ BlockManagerPool::BlockManagerPool(
     // grouped partitions; the LINEAR leaf is added by the builder when
     // enable_linear_state. The per-sequence EMBEDDING resource leaf is appended
     // here under the EMBEDDING key when spec decode needs it. Every leaf is
-    // routed by its BlockType.
-    auto leaves =
-        build_composite_leaves(block_options, /*dp_rank=*/i, page_allocator_);
+    // routed by its partition identity.
+    auto leaves = build_composite_partitions(
+        block_options, /*dp_rank=*/i, page_allocator_);
     if (options_.num_speculative_tokens() > 0) {
       // EMBEDDING leaf needs the same concurrency wrapper as the other leaves
       // when sequence-level entry points run off the scheduler thread (disagg
@@ -159,11 +165,13 @@ BlockManagerPool::BlockManagerPool(
         embedding_leaf = std::make_unique<ConcurrentBlockManagerImpl>(
             std::move(embedding_leaf));
       }
+      const CachePartitionId embedding_id = embedding_leaf->partition_id();
       leaves.emplace(
-          BlockType::EMBEDDING,
+          embedding_id,
           CompositeBlockManager::LeafEntry{std::move(embedding_leaf),
                                            /*participates_in_admission=*/false,
-                                           /*supports_prefix_cache=*/false});
+                                           /*supports_prefix_cache=*/false,
+                                           BlockType::EMBEDDING});
     }
     block_managers_.emplace_back(std::make_unique<CompositeBlockManager>(
         std::move(leaves), block_options));
@@ -311,7 +319,7 @@ bool BlockManagerPool::exceeds_total_capacity(Sequence* sequence,
       continue;
     }
     bool fits_rank = true;
-    for (const auto& [type, entry] : composite->leaf_entries()) {
+    for (const auto& [id, entry] : composite->partition_entries()) {
       if (!entry.participates_in_admission || entry.leaf->block_size() == 0) {
         continue;
       }
@@ -319,8 +327,9 @@ bool BlockManagerPool::exceeds_total_capacity(Sequence* sequence,
       const size_t required_blocks =
           num_tokens / block_size + (num_tokens % block_size != 0);
       if (required_blocks >
-          total_admission_blocks(
-              *entry.leaf, type, options_.enable_vmm_kvcache())) {
+          total_admission_blocks(*entry.leaf,
+                                 entry.leaf->block_type(),
+                                 options_.enable_vmm_kvcache())) {
         fits_rank = false;
         break;
       }
@@ -402,7 +411,7 @@ bool BlockManagerPool::exceeds_total_capacity(
       }
       continue;
     }
-    for (const auto& [type, entry] : composite->leaf_entries()) {
+    for (const auto& [id, entry] : composite->partition_entries()) {
       if (!entry.participates_in_admission) {
         continue;
       }
@@ -416,7 +425,7 @@ bool BlockManagerPool::exceeds_total_capacity(
         continue;
       }
       const size_t capacity = total_admission_blocks(
-          *entry.leaf, type, options_.enable_vmm_kvcache());
+          *entry.leaf, entry.leaf->block_type(), options_.enable_vmm_kvcache());
       remaining_slots[dp_rank] =
           std::min(remaining_slots[dp_rank], capacity / required_blocks);
     }

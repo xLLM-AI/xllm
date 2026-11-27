@@ -74,7 +74,7 @@ void publish_blocks(Sequence* seq,
   kv.set_num_cached_blocks(type, end);
 }
 
-inline BlockType block_type_from_compress_ratio(uint32_t ratio) {
+std::optional<BlockType> legacy_history_type(uint32_t ratio) {
   if (ratio == 1) {
     return BlockType::C1;
   }
@@ -84,8 +84,10 @@ inline BlockType block_type_from_compress_ratio(uint32_t ratio) {
   if (ratio == 4) {
     return BlockType::C4;
   }
-  CHECK_EQ(ratio, 128u) << "Unsupported legacy cache compression ratio";
-  return BlockType::C128;
+  if (ratio == 128) {
+    return BlockType::C128;
+  }
+  return std::nullopt;
 }
 
 // Wrap the leaf in a concurrency adapter when sequence-level calls may run
@@ -307,11 +309,11 @@ TrimOutcome trim_swa_compressed(std::vector<ProbeResult> probes,
 
 }  // namespace
 
-CompositeBlockManager::LeafMap build_composite_leaves(
+CompositeBlockManager::PartitionMap build_composite_partitions(
     const BlockManager::Options& options,
     int32_t dp_rank,
     VmmKVPageAllocator* page_allocator) {
-  CompositeBlockManager::LeafMap leaves;
+  CompositeBlockManager::PartitionMap leaves;
   BlockManager::Options cache_options = options;
   if (options.enable_shared_kv_cache()) {
     CHECK(!options.enable_vmm_kvcache());
@@ -366,43 +368,67 @@ CompositeBlockManager::LeafMap build_composite_leaves(
         .num_blocks(static_cast<uint32_t>(options.linear_state_num_slots()))
         .block_size(chunk_stride)
         .enable_prefix_cache(prefill_prefix_cache)
-        .instance_is_decode(is_decode);
-    leaves.emplace(
-        BlockType::LINEAR,
-        CompositeBlockManager::LeafEntry{
-            maybe_concurrent(std::make_unique<LinearStateBlockManager>(
-                                 std::move(linear_opts)),
-                             options),
-            /*participates_in_admission=*/false,
-            /*supports_prefix_cache=*/prefill_prefix_cache});
+        .instance_is_decode(is_decode)
+        .partition_id(options.linear_partition_id().value_or(
+            CachePartitionId{options.model_id(), 1}));
+    const CachePartitionId linear_id = *linear_opts.partition_id();
+    CHECK(leaves
+              .emplace(linear_id,
+                       CompositeBlockManager::LeafEntry{
+                           maybe_concurrent(
+                               std::make_unique<LinearStateBlockManager>(
+                                   std::move(linear_opts)),
+                               options),
+                           /*participates_in_admission=*/false,
+                           /*supports_prefix_cache=*/prefill_prefix_cache,
+                           BlockType::LINEAR})
+              .second)
+        << "Cache partitions require distinct model-scoped identities";
   }
 
   if (options.grouped_partitions().empty()) {
     // Normal / Qwen / virtual memory: a single KV leaf.
     BlockManager::Options kv_opts = cache_options;
-    kv_opts.block_type(BlockType::KV);
+    kv_opts.block_type(BlockType::KV)
+        .partition_id(options.partition_id().value_or(
+            CachePartitionId{options.model_id(), 0}));
     kv_opts.enable_prefix_cache(prefix_cache_on);
-    leaves.emplace(
-        BlockType::KV,
-        CompositeBlockManager::LeafEntry{
-            maybe_concurrent(make_kv_leaf(kv_opts, dp_rank, page_allocator),
-                             options),
-            /*participates_in_admission=*/true,
-            /*supports_prefix_cache=*/prefix_cache_on});
+    CHECK(leaves
+              .emplace(*kv_opts.partition_id(),
+                       CompositeBlockManager::LeafEntry{
+                           maybe_concurrent(
+                               make_kv_leaf(kv_opts, dp_rank, page_allocator),
+                               options),
+                           /*participates_in_admission=*/true,
+                           /*supports_prefix_cache=*/prefix_cache_on,
+                           BlockType::KV})
+              .second)
+        << "Cache partitions require distinct model-scoped identities";
     return leaves;
   }
 
+  std::map<BlockType, size_t> binding_counts;
+  for (const auto& partition : options.grouped_partitions()) {
+    const std::optional<BlockType> category =
+        partition.is_sliding_window()
+            ? std::optional(BlockType::SWA)
+            : legacy_history_type(partition.compression_ratio());
+    if (category.has_value()) {
+      ++binding_counts[*category];
+    }
+  }
   for (const auto& partition : options.grouped_partitions()) {
     BlockManager::Options opts = options;
     const bool sliding = partition.is_sliding_window();
-    const BlockType key =
-        sliding ? BlockType::SWA
-                : block_type_from_compress_ratio(partition.compression_ratio());
+    const std::optional<BlockType> key =
+        sliding ? std::optional(BlockType::SWA)
+                : legacy_history_type(partition.compression_ratio());
     const bool enable_prefix =
         partition.enable_prefix_cache() &&
         (sliding ? prefill_prefix_cache : prefix_cache_on);
     opts.block_size(partition.token_stride())
-        .block_type(key)
+        .block_type(key.value_or(BlockType::KV))
+        .partition_id(partition.id())
         .enable_prefix_cache(enable_prefix);
     std::unique_ptr<BlockManager> leaf;
     if (sliding) {
@@ -417,16 +443,47 @@ CompositeBlockManager::LeafMap build_composite_leaves(
       opts.num_blocks(options.num_blocks() / partition.compression_ratio());
       leaf = std::make_unique<BlockManagerImpl>(opts);
     }
+    const std::optional<BlockType> legacy_type =
+        key.has_value() && binding_counts.at(*key) == 1 ? key : std::nullopt;
     const bool inserted =
         leaves
-            .emplace(key,
+            .emplace(partition.id(),
                      CompositeBlockManager::LeafEntry{
                          maybe_concurrent(std::move(leaf), options),
                          partition.participates_in_admission(),
-                         enable_prefix})
+                         enable_prefix,
+                         legacy_type})
             .second;
     CHECK(inserted)
-        << "Grouped cache partitions require distinct legacy block types";
+        << "Cache partitions require distinct model-scoped identities";
+  }
+  return leaves;
+}
+
+namespace {
+CompositeBlockManager::PartitionMap bind_legacy_leaves(
+    CompositeBlockManager::LeafMap leaves) {
+  CompositeBlockManager::PartitionMap partitions;
+  for (auto& [type, entry] : leaves) {
+    entry.legacy_type = type;
+    const CachePartitionId id = entry.leaf->partition_id();
+    CHECK(partitions.emplace(id, std::move(entry)).second)
+        << "Leaves require distinct partition identities";
+  }
+  return partitions;
+}
+}  // namespace
+
+CompositeBlockManager::LeafMap build_composite_leaves(
+    const BlockManager::Options& options,
+    int32_t dp_rank,
+    VmmKVPageAllocator* page_allocator) {
+  CompositeBlockManager::LeafMap leaves;
+  for (auto& [id, entry] :
+       build_composite_partitions(options, dp_rank, page_allocator)) {
+    CHECK(entry.legacy_type.has_value())
+        << "This composition requires the partition-aware construction API";
+    leaves.emplace(*entry.legacy_type, std::move(entry));
   }
   return leaves;
 }
@@ -434,11 +491,45 @@ CompositeBlockManager::LeafMap build_composite_leaves(
 CompositeBlockManager::CompositeBlockManager(LeafMap leaves,
                                              BlockManager::Options options,
                                              CacheTier cache_tier)
+    : CompositeBlockManager(bind_legacy_leaves(std::move(leaves)),
+                            std::move(options),
+                            cache_tier) {}
+
+CompositeBlockManager::CompositeBlockManager(PartitionMap partitions,
+                                             BlockManager::Options options,
+                                             CacheTier cache_tier)
     : options_(std::move(options)),
-      leaves_(std::move(leaves)),
-      combination_(classify_leaf_combination(leaves_)),
+      partitions_(std::move(partitions)),
       cache_tier_(cache_tier) {
-  CHECK(!leaves_.empty()) << "CompositeBlockManager requires at least one leaf";
+  CHECK(!partitions_.empty());
+  for (const auto& [id, entry] : partitions_) {
+    CHECK(id == entry.leaf->partition_id());
+    CHECK(entry.legacy_type.has_value() ||
+          (!entry.supports_prefix_cache && !options_.enable_disagg_pd() &&
+           !options_.enable_kvcache_store() && !options_.enable_host_offload()))
+        << "Unbound partitions require partition-aware prefix/transfer "
+           "protocols";
+    if (!entry.legacy_type.has_value()) {
+      continue;
+    }
+    CHECK(leaves_
+              .emplace(*entry.legacy_type,
+                       LegacyLeafEntry{entry.leaf.get(),
+                                       entry.participates_in_admission,
+                                       entry.supports_prefix_cache})
+              .second)
+        << "A worker slot can bind only one partition";
+  }
+  growth_order_.reserve(partitions_.size());
+  for (const auto& [type, entry] : leaves_) {
+    growth_order_.emplace_back(entry.leaf);
+  }
+  for (const auto& [id, entry] : partitions_) {
+    if (!entry.legacy_type.has_value()) {
+      growth_order_.emplace_back(entry.leaf.get());
+    }
+  }
+  combination_ = classify_leaf_combination(leaves_);
   if (options_.enable_shared_kv_cache()) {
     CHECK(cache_tier == CacheTier::DEVICE);
     shared_block_pool_ = leaf_of(BlockType::KV)->options().shared_block_pool();
@@ -449,7 +540,7 @@ CompositeBlockManager::CompositeBlockManager(LeafMap leaves,
 }
 
 CompositeBlockManager::LeafCombination
-CompositeBlockManager::classify_leaf_combination(const LeafMap& leaves) {
+CompositeBlockManager::classify_leaf_combination(const LegacyLeafMap& leaves) {
   auto has_prefix = [&](BlockType t) {
     const auto it = leaves.find(t);
     return it != leaves.end() && it->second.supports_prefix_cache;
@@ -489,7 +580,18 @@ CompositeBlockManager::classify_leaf_combination(const LeafMap& leaves) {
 
 BlockManager* CompositeBlockManager::leaf_of(BlockType type) const {
   auto it = leaves_.find(type);
-  return it == leaves_.end() ? nullptr : it->second.leaf.get();
+  return it == leaves_.end() ? nullptr : it->second.leaf;
+}
+
+BlockManager* CompositeBlockManager::leaf_of(const CachePartitionId& id) const {
+  const auto it = partitions_.find(id);
+  return it == partitions_.end() ? nullptr : it->second.leaf.get();
+}
+
+void CompositeBlockManager::bind_sequence_state(KVCacheState& state) const {
+  for (const auto& [id, entry] : partitions_) {
+    state.bind_partition(id, entry.leaf->cache_retention(), entry.legacy_type);
+  }
 }
 
 void CompositeBlockManager::publish_prefix(Sequence* seq) {
@@ -508,6 +610,7 @@ void CompositeBlockManager::publish_completed_prefix(Sequence* seq,
     return;
   }
   KVCacheState& kv = seq->kv_state();
+  bind_sequence_state(kv);
 
   size_t cacheable_tokens = 0;
   size_t cache_unit_size = 0;
@@ -608,6 +711,7 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
     return false;
   }
   KVCacheState& kv_state = kv_state_for(*seq);
+  bind_sequence_state(kv_state);
   const size_t previous_checkpoint =
       kv_state.num_cached_blocks(BlockType::LINEAR);
 
@@ -619,28 +723,29 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
   }
 
   // Fan out growth. Each leaf returns its newly allocated blocks (or nullopt
-  // on failure). Stage keyed by BlockType; commit only after every leaf
-  // succeeds so a failure rolls back cleanly.
-  std::map<BlockType, std::vector<Block>> staged;
+  // on failure). Stage keyed by partition identity; commit only after every
+  // leaf succeeds so a failure rolls back cleanly.
+  std::map<CachePartitionId, std::vector<Block>> staged;
 
   auto release_staged = [&]() {
-    for (auto& [type, blocks] : staged) {
+    for (auto& [id, blocks] : staged) {
       Block::release(std::move(blocks));
     }
     staged.clear();
   };
 
-  for (auto& [type, entry] : leaves_) {
-    auto blocks = entry.leaf->allocate_for_sequence(seq, kv_state, num_tokens);
+  for (BlockManager* leaf : growth_order_) {
+    const CachePartitionId& id = leaf->partition_id();
+    auto blocks = leaf->allocate_for_sequence(seq, kv_state, num_tokens);
     if (!blocks.has_value() && shared_block_pool_ &&
-        entry.leaf->options().shared_block_pool() == shared_block_pool_) {
+        leaf->options().shared_block_pool() == shared_block_pool_) {
       // Bound retries to the cache snapshot: another thread may publish new
       // cache entries while each leaf lock is released between attempts.
       size_t remaining_evictions = num_blocks_in_prefix_cache();
       while (!blocks.has_value() && remaining_evictions > 0 &&
              reclaim_shared_cache()) {
         --remaining_evictions;
-        blocks = entry.leaf->allocate_for_sequence(seq, kv_state, num_tokens);
+        blocks = leaf->allocate_for_sequence(seq, kv_state, num_tokens);
       }
     }
     if (!blocks.has_value()) {
@@ -648,7 +753,7 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
       return false;
     }
     if (!blocks->empty()) {
-      staged.emplace(type, std::move(*blocks));
+      staged.emplace(id, std::move(*blocks));
     }
   }
 
@@ -664,8 +769,9 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
   // is under-provisioned -- forward_input_builder's CHECK then fires
   // downstream. Rolling back lets the scheduler defer to the next tick.
   // EMBEDDING / LINEAR are per-sequence resource slots, not token cache.
-  for (const auto& [type, entry] : leaves_) {
-    if (type == BlockType::EMBEDDING || type == BlockType::LINEAR) {
+  for (const auto& [id, entry] : partitions_) {
+    if (entry.leaf->cache_retention() == CacheRetention::SEQUENCE ||
+        entry.leaf->cache_retention() == CacheRetention::RECURRENT) {
       continue;
     }
     const size_t leaf_block_size = entry.leaf->block_size();
@@ -673,10 +779,10 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
       continue;
     }
     const size_t needed = (num_tokens + leaf_block_size - 1) / leaf_block_size;
-    const auto staged_it = staged.find(type);
+    const auto staged_it = staged.find(id);
     const size_t staged_for_type =
         staged_it == staged.end() ? 0 : staged_it->second.size();
-    const size_t total = kv_state.num_blocks(type) + staged_for_type;
+    const size_t total = kv_state.num_blocks(id) + staged_for_type;
     if (total < needed) {
       release_staged();
       return false;
@@ -686,8 +792,8 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
   // Commit staged blocks before publishing the completed prefix. The token
   // cursor bounds publication, so newly allocated compute blocks are not
   // cached until their tokens have been forwarded.
-  for (auto& [type, blocks] : staged) {
-    kv_state.add_blocks(type, blocks);
+  for (auto& [id, blocks] : staged) {
+    kv_state.add_blocks(id, blocks);
   }
   staged.clear();
   if (cache_prefix) {
@@ -705,7 +811,8 @@ void CompositeBlockManager::release_out_of_window_for_sequence(Sequence* seq) {
     return;
   }
   KVCacheState& kv_state = kv_state_for(*seq);
-  for (auto& [type, entry] : leaves_) {
+  bind_sequence_state(kv_state);
+  for (auto& [id, entry] : partitions_) {
     entry.leaf->release_out_of_window(seq, kv_state);
   }
 }
@@ -725,7 +832,7 @@ void CompositeBlockManager::deallocate_for_sequence(Sequence* seq,
 
 std::vector<CompositeBlockManager::ProbeResult>
 CompositeBlockManager::probe_prefix_cache(Sequence* seq,
-                                          const LeafMap& leaves) {
+                                          const LegacyLeafMap& leaves) {
   if (seq == nullptr) {
     return {};
   }
@@ -734,7 +841,7 @@ CompositeBlockManager::probe_prefix_cache(Sequence* seq,
 
 std::vector<CompositeBlockManager::ProbeResult>
 CompositeBlockManager::probe_prefix_cache(Sequence* seq,
-                                          const LeafMap& leaves,
+                                          const LegacyLeafMap& leaves,
                                           const KVCacheState& existing_state) {
   std::vector<ProbeResult> probes;
   if (seq == nullptr) {
@@ -791,6 +898,7 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
     return;
   }
   KVCacheState& kv_state = kv_state_for(*seq);
+  bind_sequence_state(kv_state);
   if (combination_ == LeafCombination::FLAT_KV_LINEAR &&
       kv_state.prefix_cache_matched()) {
     return;
@@ -899,6 +1007,7 @@ void CompositeBlockManager::publish_prefix(Sequence* seq, size_t num_tokens) {
     case LeafCombination::FLAT_KV_LINEAR: {
       BlockManager& kv_leaf = *leaf_of(BlockType::KV);
       KVCacheState& kv_state = seq->kv_state();
+      bind_sequence_state(kv_state);
       const size_t block_size = kv_leaf.block_size();
       const BlockHasherType hasher_type = kv_leaf.options().hasher_type();
       const Slice<int32_t> tokens = seq->hash_tokens(hasher_type);
@@ -924,6 +1033,7 @@ void CompositeBlockManager::publish_prefix(Sequence* seq, size_t num_tokens) {
 
 void CompositeBlockManager::trim_prefetch_blocks(Sequence& seq,
                                                  size_t max_hit_tokens) {
+  bind_sequence_state(kv_state_for(seq));
   for (auto& [type, entry] : leaves_) {
     if (type == BlockType::EMBEDDING) {
       continue;
@@ -985,7 +1095,7 @@ void CompositeBlockManager::deallocate(const Slice<Block>& blocks) {
 
 size_t CompositeBlockManager::num_blocks_in_prefix_cache() const {
   size_t total = 0;
-  for (const auto& [type, entry] : leaves_) {
+  for (const auto& [id, entry] : partitions_) {
     total += entry.leaf->num_blocks_in_prefix_cache();
   }
   return total;
@@ -996,7 +1106,7 @@ const CompositeBlockManager::LeafEntry* CompositeBlockManager::capacity_leaf()
   // Smallest block_size = finest granularity = closest to the base block the
   // scheduler assumes. KV for normal models; C4 for DSV4.
   const LeafEntry* chosen = nullptr;
-  for (const auto& [type, entry] : leaves_) {
+  for (const auto& [id, entry] : partitions_) {
     if (!entry.participates_in_admission) {
       continue;
     }
@@ -1013,7 +1123,7 @@ bool CompositeBlockManager::reclaim_shared_cache() {
   if (shared_block_pool_->uses_slabs()) {
     return reclaim_shared_prefix();
   }
-  for (auto& [type, entry] : leaves_) {
+  for (auto& [id, entry] : partitions_) {
     if (entry.leaf->options().shared_block_pool() != shared_block_pool_) {
       continue;
     }
@@ -1257,7 +1367,7 @@ size_t CompositeBlockManager::num_total_blocks() const {
 }
 
 void CompositeBlockManager::reserve_virtual_memory_padding_blocks() {
-  for (auto& [type, entry] : leaves_) {
+  for (auto& [id, entry] : partitions_) {
     entry.leaf->reserve_virtual_memory_padding_blocks();
   }
 }

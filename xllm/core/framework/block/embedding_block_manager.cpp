@@ -34,7 +34,8 @@ BlockManager::Options make_embedding_block_options(uint32_t num_blocks) {
   options.block_size(/*unused, one id == one block=*/1);
   options.enable_prefix_cache(false);
   options.enable_disagg_pd(false);
-  options.block_type(BlockType::EMBEDDING);
+  options.block_type(BlockType::EMBEDDING)
+      .cache_retention(CacheRetention::SEQUENCE);
   return options;
 }
 
@@ -55,7 +56,7 @@ std::optional<std::vector<Block>> EmbeddingBlockManager::allocate_for_sequence(
     return std::nullopt;
   }
   // One block per sequence, reused for its lifetime.
-  if (kv_state.num_blocks(block_type()) > 0) {
+  if (kv_state.num_blocks(partition_id()) > 0) {
     return std::vector<Block>{};
   }
   std::vector<Block> blocks = allocate(1);

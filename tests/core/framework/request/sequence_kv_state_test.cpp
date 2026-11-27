@@ -123,4 +123,61 @@ TEST(KVCacheStateTest, HasAnyBlocksIgnoresSingle) {
   }
 }
 
+TEST(KVCacheStateTest, PartitionIdentitySeparatesModelsAndTransferCursors) {
+  const CachePartitionId target{"target", 3};
+  const CachePartitionId draft{"draft", 3};
+  KVCacheState state;
+  state.bind_partition(target, CacheRetention::HISTORY);
+  state.bind_partition(draft, CacheRetention::HISTORY);
+  state.add_blocks(target, {Block(1, nullptr)});
+  state.add_blocks(draft, {Block(2, nullptr)});
+  state.advance_group_transfer_block_idx(target, 4);
+  state.advance_group_transfer_block_idx(draft, 2);
+  EXPECT_EQ(state.blocks(target)[0].id(), 1);
+  EXPECT_EQ(state.blocks(draft)[0].id(), 2);
+  EXPECT_EQ(state.next_group_transfer_block_idx(target), 4u);
+  EXPECT_EQ(state.next_group_transfer_block_idx(draft), 2u);
+  KVCacheState fork = state;
+  state.reset();
+  EXPECT_EQ(state.next_group_transfer_block_idx(target), 0u);
+  EXPECT_EQ(fork.blocks(target)[0].id(), 1);
+  EXPECT_EQ(fork.next_group_transfer_block_idx(draft), 2u);
+}
+
+TEST(KVCacheStateTest, LegacyExportsKeepWorkerOrderAcrossPartitionIdentities) {
+  KVCacheState state;
+  const CachePartitionId swa{"model", 9};
+  const CachePartitionId c4{"model", 8};
+  const CachePartitionId c128{"model", 1};
+  state.bind_partition(c128, CacheRetention::HISTORY, BlockType::C128);
+  state.bind_partition(c4, CacheRetention::HISTORY, BlockType::C4);
+  state.bind_partition(swa, CacheRetention::WINDOW, BlockType::SWA);
+  state.add_blocks(c128, {Block(3, nullptr)});
+  state.add_blocks(c4, {Block(2, nullptr)});
+  state.add_blocks(swa, {Block(), Block(1, nullptr)});
+  const auto exported = state.multi_block_export_view();
+  ASSERT_EQ(exported.size(), 3u);
+  EXPECT_EQ(exported[0].first, BlockType::SWA);
+  EXPECT_EQ(exported[1].first, BlockType::C4);
+  EXPECT_EQ(exported[2].first, BlockType::C128);
+  EXPECT_FALSE((*exported[0].second)[0].is_valid());
+  EXPECT_EQ(state.view(swa).logical_blocks, 2u);
+  EXPECT_EQ(state.view(swa).resident_blocks, 1u);
+  state.reset();
+  EXPECT_TRUE(state.multi_block_export_view().empty());
+}
+
+TEST(KVCacheStateTest, LegacyIdentityBindingExportsPartitionPublicationCursor) {
+  KVCacheState state;
+  const CachePartitionId& id = legacy_cache_partition_id(BlockType::C4);
+  state.bind_partition(id, CacheRetention::HISTORY, BlockType::C4);
+  state.set_num_cached_blocks(id, 3);
+  const auto cursors = state.num_cached_blocks();
+  ASSERT_TRUE(cursors.contains(BlockType::C4));
+  EXPECT_EQ(cursors.at(BlockType::C4), 3u);
+  state.reset();
+  state.set_num_cached_blocks(id, 2);
+  EXPECT_EQ(state.num_cached_blocks().at(BlockType::C4), 2u);
+}
+
 }  // namespace xllm

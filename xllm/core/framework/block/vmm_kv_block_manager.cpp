@@ -195,7 +195,7 @@ std::optional<std::vector<Block>> VmmKVBlockManager::allocate_for_sequence(
   if (block_size == 0) {
     return std::vector<Block>{};
   }
-  const size_t held = kv_state.num_blocks(block_type());
+  const size_t held = kv_state.num_blocks(partition_id());
   const size_t num_blocks_needed = (num_tokens + block_size - 1) / block_size;
   if (num_blocks_needed <= held) {
     return std::vector<Block>{};

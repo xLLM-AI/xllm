@@ -28,7 +28,7 @@ namespace xllm {
 //     tail-continuity check lives on the composite. TEXT hasher only.
 class SlidingWindowBlockManager : public BlockManagerImpl {
  public:
-  explicit SlidingWindowBlockManager(const Options& options);
+  explicit SlidingWindowBlockManager(Options options);
   ~SlidingWindowBlockManager() override = default;
 
   std::optional<std::vector<Block>> allocate_for_sequence(

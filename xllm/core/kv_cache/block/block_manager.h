@@ -34,6 +34,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/kv_cache/block/block.h"
+#include "core/kv_cache/block/cache_partition_binding.h"
 #include "core/kv_cache/events/kv_cache_event_journal.h"
 #include "core/kv_cache/layout/paged_cache_partition.h"
 #include "core/kv_cache/prefix/block_hasher.h"
@@ -67,10 +68,11 @@ class BlockManager {
     PROPERTY(uint32_t, max_seqs_per_batch) = 0;
     // Hasher type bound to the engine (TEXT for LLM, MM for VLM).
     PROPERTY(BlockHasherType, hasher_type) = BlockHasherType::TEXT;
-    // The block category used as the composite's map key for this leaf. The
-    // leaf itself is type-free (no block_type() accessor); the spec builder
-    // carries this value to decide the map key. Flat KV uses KV.
+    // Physical pool/protocol category; never the runtime partition identity.
     PROPERTY(BlockType, block_type) = BlockType::KV;
+    PROPERTY(std::optional<CachePartitionId>, partition_id);
+    PROPERTY(std::optional<CachePartitionId>, linear_partition_id);
+    PROPERTY(CacheRetention, cache_retention) = CacheRetention::HISTORY;
     // Whether the kvcache-store (host offload) path is enabled. Composite
     // leaves are wrapped in ConcurrentBlockManagerImpl when this (or
     // enable_disagg_pd) is set.
@@ -109,7 +111,11 @@ class BlockManager {
     PROPERTY(bool, instance_is_decode) = false;
   };
 
-  explicit BlockManager(Options options) : options_(options) {}
+  explicit BlockManager(Options options) : options_(std::move(options)) {
+    if (!options_.partition_id().has_value()) {
+      options_.partition_id(legacy_cache_partition_id(options_.block_type()));
+    }
+  }
   virtual ~BlockManager() = default;
 
   virtual void deallocate(const Slice<Block>& blocks) = 0;
@@ -174,12 +180,13 @@ class BlockManager {
   // get number of slots per block
   size_t block_size() const { return options_.block_size(); }
 
-  // The block category this leaf serves (KV / SWA / C4 / C128 / EMBEDDING /
-  // LINEAR). A leaf
-  // reads its own held-block count from the sequence under this type, and the
-  // CompositeBlockManager inserts the returned blocks into the sequence under
-  // this type. Carried via Options by the spec builder.
+  // Physical category retained by shared pools and legacy transfer protocols.
   BlockType block_type() const { return options_.block_type(); }
+  const CachePartitionId& partition_id() const {
+    return *options_.partition_id();
+  }
+
+  CacheRetention cache_retention() const { return options_.cache_retention(); }
 
   // call BlockManager to free block used by Block.
   virtual void free(int32_t block_id) = 0;
@@ -197,12 +204,12 @@ class BlockManager {
 
   // —— Sequence-level growth interface (pure: every concrete manager defines
   // its own policy) ——
-  // Grows this manager's block_type() blocks for a sequence and returns the
+  // Grows this manager's partition for a sequence and returns the
   // blocks it newly allocated this round (empty when nothing is needed),
   // std::nullopt on shortage. The flat-KV default lives in BlockManagerImpl;
   // SlidingWindow / Single override; CompositeBlockManager fans out to leaves.
   // Most managers do NOT insert into the sequence -- the composite stages the
-  // returned blocks and commits them under block_type() (the SWA leaf also
+  // returned blocks and commits them under partition_id() (the SWA leaf also
   // releases its own slid-out blocks in place as part of this call).
   virtual std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,

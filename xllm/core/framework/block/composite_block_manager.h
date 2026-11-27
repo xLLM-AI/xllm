@@ -27,9 +27,8 @@ namespace xllm {
 
 class VmmKVPageAllocator;
 
-// Composition of BlockManager leaves keyed by BlockType. The map key decides
-// which KVCacheState slot a leaf's blocks land in. The composite orchestrates
-// sequence operations; physical blocks remain owned by their resource leaves.
+// Owns resource leaves by stable partition identity. Legacy worker-slot views
+// borrow those leaves for existing prefix/Host protocols only.
 class CompositeBlockManager final {
  public:
   // The admission / prefix roles live on the composite, not on the leaf: the
@@ -39,8 +38,18 @@ class CompositeBlockManager final {
     std::unique_ptr<BlockManager> leaf;
     bool participates_in_admission = true;
     bool supports_prefix_cache = false;
+    std::optional<BlockType> legacy_type;
   };
   using LeafMap = std::map<BlockType, LeafEntry>;
+  using PartitionMap = std::map<CachePartitionId, LeafEntry>;
+
+  // Borrowed compatibility entries; the PartitionMap is the sole leaf owner.
+  struct LegacyLeafEntry {
+    BlockManager* leaf;
+    bool participates_in_admission;
+    bool supports_prefix_cache;
+  };
+  using LegacyLeafMap = std::map<BlockType, LegacyLeafEntry>;
 
   // Raw prefix-cache aliases returned by one leaf. The caller must either
   // mount every valid alias or return it with release_probes().
@@ -76,9 +85,13 @@ class CompositeBlockManager final {
                         BlockManager::Options options,
                         CacheTier cache_tier = CacheTier::DEVICE);
 
+  CompositeBlockManager(PartitionMap partitions,
+                        BlockManager::Options options,
+                        CacheTier cache_tier = CacheTier::DEVICE);
+
   // Sequence-level orchestration drives each leaf's own primitives and writes
   // results back into KVCacheState
-  // under the leaf's block_type().
+  // under the leaf's partition_id().
   bool allocate_sequence(Sequence* seq,
                          size_t num_tokens,
                          bool cache_prefix = true);
@@ -92,19 +105,22 @@ class CompositeBlockManager final {
   void trim_prefetch_blocks(Sequence& seq, size_t max_hit_tokens);
 
   // Probe every prefix-capable leaf without mounting the returned aliases.
-  static std::vector<ProbeResult> probe_prefix_cache(Sequence* seq,
-                                                     const LeafMap& leaves);
   static std::vector<ProbeResult> probe_prefix_cache(
       Sequence* seq,
-      const LeafMap& leaves,
+      const LegacyLeafMap& leaves);
+  static std::vector<ProbeResult> probe_prefix_cache(
+      Sequence* seq,
+      const LegacyLeafMap& leaves,
       const KVCacheState& existing_state);
   static void release_probes(std::vector<ProbeResult>* probes);
 
-  const LeafMap& leaf_entries() const { return leaves_; }
+  const LegacyLeafMap& leaf_entries() const { return leaves_; }
+  const PartitionMap& partition_entries() const { return partitions_; }
   LeafCombination leaf_combination() const { return combination_; }
   const BlockManager::Options& options() const { return options_; }
 
   BlockManager* leaf_of(BlockType type) const;
+  BlockManager* leaf_of(const CachePartitionId& id) const;
 
   // Typed block-level allocation routed to the leaf under `type`.
   std::vector<Block> allocate_blocks(BlockType type, size_t num_blocks);
@@ -122,7 +138,7 @@ class CompositeBlockManager final {
 
   void reserve_virtual_memory_padding_blocks();
 
-  size_t num_sub_managers() const { return leaves_.size(); }
+  size_t num_sub_managers() const { return partitions_.size(); }
 
  private:
   friend class BlockManagerPoolTestPeer;
@@ -133,9 +149,10 @@ class CompositeBlockManager final {
   // (smallest block_size): KV for flat layouts, C4 for compressed layouts.
   const LeafEntry* capacity_leaf() const;
 
-  static LeafCombination classify_leaf_combination(const LeafMap& leaves);
+  static LeafCombination classify_leaf_combination(const LegacyLeafMap& leaves);
 
   KVCacheState& kv_state_for(Sequence& seq) const;
+  void bind_sequence_state(KVCacheState& state) const;
 
   bool reclaim_shared_cache();
   bool reclaim_shared_prefix();
@@ -143,18 +160,27 @@ class CompositeBlockManager final {
 
   BlockManager::Options options_;
   std::shared_ptr<StaticKVBlockPool> shared_block_pool_;
-  LeafMap leaves_;
+  PartitionMap partitions_;
+  LegacyLeafMap leaves_;
+  // Preserve legacy acquisition order, including EMBEDDING before LINEAR.
+  std::vector<BlockManager*> growth_order_;
   LeafCombination combination_;
   CacheTier cache_tier_;
 };
 
-// Build the leaf map for one DP rank. Base cache-bearing layouts are flat KV,
-// compressed SWA/C4/C128, and virtual memory-backed KV.
-// A LINEAR leaf is added when enable_linear_state (GDN recurrent models).
-// Leaves are wrapped in ConcurrentBlockManagerImpl for disagg-PD / kvcache
-// store. The EMBEDDING leaf is appended by the pool caller only when spec
-// decode needs it. dp_rank is used by the virtual memory KV leaf (per-rank VMM
-// page pool).
+// Build the identity-keyed resource composition for one DP rank.
+CompositeBlockManager::PartitionMap build_composite_partitions(
+    const BlockManager::Options& options,
+    int32_t dp_rank = 0,
+    VmmKVPageAllocator* page_allocator = nullptr);
+
+// Legacy construction adapter for callers still arranging leaves by worker
+// slot. Build the leaf map for one DP rank. Base cache-bearing layouts are flat
+// KV, compressed SWA/C4/C128, and virtual memory-backed KV. A LINEAR leaf is
+// added when enable_linear_state (GDN recurrent models). Leaves are wrapped in
+// ConcurrentBlockManagerImpl for disagg-PD / kvcache store. The EMBEDDING leaf
+// is appended by the pool caller only when spec decode needs it. dp_rank is
+// used by the virtual memory KV leaf (per-rank VMM page pool).
 CompositeBlockManager::LeafMap build_composite_leaves(
     const BlockManager::Options& options,
     int32_t dp_rank = 0,

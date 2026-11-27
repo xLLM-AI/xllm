@@ -43,6 +43,7 @@ cc_library(
   HDRS
     static_kv_block_pool.h
     block_manager.h
+    cache_partition_binding.h
     linear_state_block_manager.h
     block_manager_impl.h
     concurrent_block_manager_impl.h
