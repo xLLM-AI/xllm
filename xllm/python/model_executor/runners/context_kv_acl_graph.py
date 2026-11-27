@@ -52,9 +52,6 @@ class ContextKvAclGraphRunner:
         self.model = model
         self.device = device
         self._use_swa_cache = use_swa_cache
-        self._write_context_kv = (
-            partial(model.write_context_kv, graph_mode=True) if use_swa_cache else model.write_context_kv
-        )
         self._kv_caches: list[LayerCacheInput] | None = None
         self._cache_signature: tuple[tuple[int, torch.Size, tuple[int, ...], torch.dtype, torch.device], ...] | None = (
             None
@@ -101,6 +98,9 @@ class ContextKvAclGraphRunner:
         ]
         if not missing_rows:
             return
+        write_context_kv = self.model.write_context_kv
+        if self._use_swa_cache:
+            write_context_kv = partial(write_context_kv, graph_mode=True)
         caller_stream = torch.npu.current_stream(self.device)
         if self._capture_stream is None:
             self._capture_stream = torch.npu.Stream(device=self.device)
@@ -117,11 +117,11 @@ class ContextKvAclGraphRunner:
                 positions = torch.zeros(rows, dtype=torch.int32, device=self.device)
                 slots = torch.full((rows,), -1, dtype=torch.int32, device=self.device)
                 for _ in range(_CAPTURE_WARMUP_STEPS):
-                    self._write_context_kv(hidden, positions, slots, self._kv_caches, None)
+                    write_context_kv(hidden, positions, slots, self._kv_caches, None)
                 stream.synchronize()
                 graph = torch.npu.NPUGraph()
                 with torch.npu.graph(graph, pool=_get_graph_pool(), stream=stream):
-                    output = self._write_context_kv(hidden, positions, slots, self._kv_caches, None)
+                    output = write_context_kv(hidden, positions, slots, self._kv_caches, None)
                 if output is None:
                     raise RuntimeError("context KV graph capture produced no output")
                 self._graphs[rows] = _ContextKvGraph(hidden, positions, slots, graph, output)
