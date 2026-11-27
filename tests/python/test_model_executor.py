@@ -2264,7 +2264,7 @@ def test_executor_uses_block_draft_preparation_for_warmup_and_replay(is_graph_wa
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
         executor = ModelExecutor(model, config, max_seqs_per_batch=4)
-    executor._kv_bound = True
+    executor.bind_kv_caches([(torch.zeros(1), torch.zeros(1)) for _ in model.layers])
     runner = executor.decode_graph_runner
     assert isinstance(runner, DecodeAclGraphRunner)
     tokens = torch.arange(2, dtype=torch.int32)
@@ -2272,11 +2272,16 @@ def test_executor_uses_block_draft_preparation_for_warmup_and_replay(is_graph_wa
     graph_key = ("block-key",)
     expected = torch.ones(2, 4)
     with (
+        patch.object(executor.context_kv_graph_runner, "warmup") as context_warmup,
         patch.object(runner, "prepare_execution", return_value=object()) as prepare,
         patch.object(runner, "warmup", return_value=graph_key) as warmup,
         patch.object(runner, "execute", return_value=expected) as execute,
     ):
         assert executor.execute(tokens, tokens, metadata, is_graph_warmup=is_graph_warmup) is expected
+    if is_graph_warmup:
+        context_warmup.assert_called_once_with(3)
+    else:
+        context_warmup.assert_not_called()
     prepare.assert_called_once_with(tokens, metadata, None, None, is_graph_warmup=is_graph_warmup)
     assert warmup.call_args.kwargs["preparation"] is prepare.return_value
     assert warmup.call_args.kwargs["is_graph_warmup"] is is_graph_warmup
