@@ -1,0 +1,22 @@
+{
+  "python": "3.11.4 (main, Sep  9 2026, 06:56:34) [GCC 9.4.0]",
+  "platform": "Linux-5.10.0-182.0.0.95.r2220_156.hce2.aarch64-aarch64-with-glibc2.31",
+  "versions": {
+    "torch": "2.7.1+cpu",
+    "torch-npu": "2.7.1.post4",
+    "triton-ascend": "3.2.1",
+    "numpy": "1.26.4"
+  },
+  "device_name": "Ascend910_9362",
+  "device": "npu:0",
+  "cann_version_files": {
+    "/home/developer/Ascend/cann-9.1.0/cann-9.1.0/aarch64-linux/ascend_toolkit_install.info": "package_name=Ascend-cann-toolkit\nversion=9.1.0\ninnerversion=V100R001C11SPC001B243\ncompatible_version=[V100R001C15],[V100R001C21],[V100R001C23],[V100R001C10]\narch=aarch64\nos=linux\npath=/home/developer/Ascend/cann-9.1.0/cann-9.1.0\n",
+    "/home/developer/Ascend/cann-9.1.0/cann-9.1.0/arm64-linux/ascend_toolkit_install.info": "package_name=Ascend-cann-toolkit\nversion=9.1.0\ninnerversion=V100R001C11SPC001B243\ncompatible_version=[V100R001C15],[V100R001C21],[V100R001C23],[V100R001C10]\narch=aarch64\nos=linux\npath=/home/developer/Ascend/cann-9.1.0/cann-9.1.0\n",
+    "/home/developer/Ascend/cann-9.1.0/cann-9.1.0/opp/version.info": "Version=9.1.0\nversion_dir=cann\nrequired_package_runtime_version=\">=8.5\"\nrequired_package_ge-executor_version=\">=8.5\"\nrequired_package_metadef_version=\">=8.5\"\nrequired_package_asc-devkit_version=\">=8.5\"\nrequired_package_bisheng-compiler_version=\">=8.5\"\ntimestamp=20260730_231653901\n",
+    "/home/developer/Ascend/cann-9.1.0/cann-9.1.0/compiler/version.info": "Version=9.1.0\nversion_dir=cann\nrequired_package_runtime_version=\"9.1\"\nrequired_package_ge-executor_version=\"9.1\"\nrequired_package_metadef_version=\"9.1\"\nrequired_package_bisheng-compiler_version=\"9.1\"\nrequired_package_tbe-tik_version=\"9.1\"\ntimestamp=20260730_231653901\n"
+  },
+  "npu_smi": "+------------------------------------------------------------------------------------------------+\n| npu-smi 25.5.5                   Version: 25.5.5                                               |\n+---------------------------+---------------+----------------------------------------------------+\n| NPU   Name                | Health        | Power(W)    Temp(C)           Hugepages-Usage(page)|\n| Chip  Phy-ID              | Bus-Id        | AICore(%)   Memory-Usage(MB)  HBM-Usage(MB)        |\n+===========================+===============+====================================================+\n| 7     Ascend910           | OK            | 180.1       53                0    / 0             |\n| 0     14                  | 0000:0A:00.0  | 0           0    / 0          3189 / 65536         |\n+------------------------------------------------------------------------------------------------+\n| 7     Ascend910           | OK            | -           53                0    / 0             |\n| 1     15                  | 0000:0B:00.0  | 0           0    / 0          2874 / 65536         |\n+===========================+===============+====================================================+\n+---------------------------+---------------+----------------------------------------------------+\n| NPU     Chip              | Process id    | Process name             | Process memory(MB)      |\n+===========================+===============+====================================================+\n| 7       0                 | 79361         | python3                  | 113                     |\n+===========================+===============+====================================================+\n",
+  "a3_verified": true,
+  "cann_910_verified": true,
+  "official_environment_verified": true
+}

@@ -1,0 +1,387 @@
+{
+  "schema_version": 1,
+  "task": "flags",
+  "kind": "engineering_supplement",
+  "status": "PASS",
+  "device_requested": "npu:0",
+  "started_utc": "2026-11-17T06:19:08.018570+00:00",
+  "cases": [
+    {
+      "id": "flags_perf_small",
+      "status": "PASS",
+      "frozen_verify_case": {
+        "id": "flags_perf_small",
+        "status": "PASS",
+        "shape": [
+          136
+        ],
+        "input_shapes": [
+          [
+            16356
+          ],
+          [
+            9
+          ],
+          [
+            8
+          ],
+          [
+            9
+          ]
+        ],
+        "attributes": {
+          "tile_size": 128,
+          "max_tiles_per_seq": 17
+        },
+        "checks": {
+          "candidate_mismatches": 0,
+          "baseline_mismatches": 0,
+          "shape": true,
+          "dtype": true,
+          "npu": true,
+          "contiguous": true,
+          "inputs_unchanged": true,
+          "independent_storage": true
+        },
+        "golden_sha256": "3219c44b7c1d089d707a47972b086af129f222969922c615a4771f706e55efde",
+        "storage_offsets": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "common_warmup_calls_per_path": 3,
+      "two_streams": {
+        "status": "PASS",
+        "streams": 2,
+        "outputs_per_stream": 3,
+        "golden_mismatches_per_output": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "retained_outputs_independent": true,
+        "outputs_independent_of_inputs": true
+      },
+      "candidate": {
+        "status": "PASS",
+        "warmup_calls": 3,
+        "active_before_bytes": 87040,
+        "one_call_peak_increment_bytes": 512,
+        "output_bytes": 136,
+        "single_call_golden_mismatches": 0,
+        "active_after_one_release_bytes": 87040,
+        "repeat_calls": 20,
+        "repeat_golden_mismatches": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "active_after_each_release_bytes": [
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040
+        ],
+        "active_after_repeat_release_bytes": 87040,
+        "residual_active_bytes": 0,
+        "measurement_scope": "Warmed one-call PyTorch NPU active allocation increment; both prepared objects, input tensors and baseline static layout remain alive. Includes output and visible temporaries; excludes persistent prepared storage, total HBM and untracked CANN/UB scratch."
+      },
+      "baseline": {
+        "status": "PASS",
+        "warmup_calls": 3,
+        "active_before_bytes": 87040,
+        "one_call_peak_increment_bytes": 507904,
+        "output_bytes": 136,
+        "single_call_golden_mismatches": 0,
+        "active_after_one_release_bytes": 87040,
+        "repeat_calls": 20,
+        "repeat_golden_mismatches": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "active_after_each_release_bytes": [
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040,
+          87040
+        ],
+        "active_after_repeat_release_bytes": 87040,
+        "residual_active_bytes": 0,
+        "measurement_scope": "Warmed one-call PyTorch NPU active allocation increment; both prepared objects, input tensors and baseline static layout remain alive. Includes output and visible temporaries; excludes persistent prepared storage, total HBM and untracked CANN/UB scratch."
+      },
+      "inputs_unchanged": true,
+      "baseline_minus_candidate_peak_bytes": 507392,
+      "memory_difference_is_observation_only": true
+    },
+    {
+      "id": "flags_perf_large",
+      "status": "PASS",
+      "frozen_verify_case": {
+        "id": "flags_perf_large",
+        "status": "PASS",
+        "shape": [
+          2080
+        ],
+        "input_shapes": [
+          [
+            261648
+          ],
+          [
+            33
+          ],
+          [
+            32
+          ],
+          [
+            33
+          ]
+        ],
+        "attributes": {
+          "tile_size": 128,
+          "max_tiles_per_seq": 65
+        },
+        "checks": {
+          "candidate_mismatches": 0,
+          "baseline_mismatches": 0,
+          "shape": true,
+          "dtype": true,
+          "npu": true,
+          "contiguous": true,
+          "inputs_unchanged": true,
+          "independent_storage": true
+        },
+        "golden_sha256": "e9367f94e599995179e8d50d83680c089ec6ccb1e8690412ff6c633d5ac3dac4",
+        "storage_offsets": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "common_warmup_calls_per_path": 3,
+      "two_streams": {
+        "status": "PASS",
+        "streams": 2,
+        "outputs_per_stream": 3,
+        "golden_mismatches_per_output": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "retained_outputs_independent": true,
+        "outputs_independent_of_inputs": true
+      },
+      "candidate": {
+        "status": "PASS",
+        "warmup_calls": 3,
+        "active_before_bytes": 1118208,
+        "one_call_peak_increment_bytes": 2560,
+        "output_bytes": 2080,
+        "single_call_golden_mismatches": 0,
+        "active_after_one_release_bytes": 1118208,
+        "repeat_calls": 20,
+        "repeat_golden_mismatches": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "active_after_each_release_bytes": [
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208
+        ],
+        "active_after_repeat_release_bytes": 1118208,
+        "residual_active_bytes": 0,
+        "measurement_scope": "Warmed one-call PyTorch NPU active allocation increment; both prepared objects, input tensors and baseline static layout remain alive. Includes output and visible temporaries; excludes persistent prepared storage, total HBM and untracked CANN/UB scratch."
+      },
+      "baseline": {
+        "status": "PASS",
+        "warmup_calls": 3,
+        "active_before_bytes": 1118208,
+        "one_call_peak_increment_bytes": 7724032,
+        "output_bytes": 2080,
+        "single_call_golden_mismatches": 0,
+        "active_after_one_release_bytes": 1118208,
+        "repeat_calls": 20,
+        "repeat_golden_mismatches": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "active_after_each_release_bytes": [
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208,
+          1118208
+        ],
+        "active_after_repeat_release_bytes": 1118208,
+        "residual_active_bytes": 0,
+        "measurement_scope": "Warmed one-call PyTorch NPU active allocation increment; both prepared objects, input tensors and baseline static layout remain alive. Includes output and visible temporaries; excludes persistent prepared storage, total HBM and untracked CANN/UB scratch."
+      },
+      "inputs_unchanged": true,
+      "baseline_minus_candidate_peak_bytes": 7721472,
+      "memory_difference_is_observation_only": true
+    }
+  ],
+  "device_setup_attempted": true,
+  "performance_measured": false,
+  "scope": "Two unchanged public performance fixtures, independent CPU golden, two-stream retained outputs, one-call allocator peaks and twenty-call release. No performance rerun, cold prepare timing, dynamic-input or storage-rebinding claim.",
+  "memory_gain_required": false,
+  "frozen_results_modified": false,
+  "environment": {
+    "python": "3.11.4",
+    "platform": "Linux-5.10.0-182.0.0.95.r2220_156.hce2.aarch64-aarch64-with-glibc2.31",
+    "machine": "aarch64",
+    "device": "npu:0",
+    "device_name": "Ascend910_9362",
+    "versions": {
+      "torch": "2.7.1+cpu",
+      "torch-npu": "2.7.1.post4",
+      "triton-ascend": "3.2.1"
+    },
+    "triton_target": "GPUTarget(backend='npu', arch='Ascend910_9362', warp_size=0)"
+  },
+  "finished_utc": "2026-11-17T06:19:17.705479+00:00"
+}

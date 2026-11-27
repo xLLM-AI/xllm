@@ -1,0 +1,98 @@
+{
+  "run": "20261117T061908016821Z",
+  "status": "PASS",
+  "environment": {
+    "python": "3.11.4 (main, Sep  9 2026, 06:56:34) [GCC 9.4.0]",
+    "platform": "Linux-5.10.0-182.0.0.95.r2220_156.hce2.aarch64-aarch64-with-glibc2.31",
+    "versions": {
+      "torch": "2.7.1+cpu",
+      "torch-npu": "2.7.1.post4",
+      "triton-ascend": "3.2.1",
+      "numpy": "1.26.4"
+    },
+    "device_name": "Ascend910_9362",
+    "device": "npu:0",
+    "cann_version_files": {
+      "/home/developer/Ascend/cann-9.1.0/cann-9.1.0/aarch64-linux/ascend_toolkit_install.info": "package_name=Ascend-cann-toolkit\nversion=9.1.0\ninnerversion=V100R001C11SPC001B243\ncompatible_version=[V100R001C15],[V100R001C21],[V100R001C23],[V100R001C10]\narch=aarch64\nos=linux\npath=/home/developer/Ascend/cann-9.1.0/cann-9.1.0\n",
+      "/home/developer/Ascend/cann-9.1.0/cann-9.1.0/arm64-linux/ascend_toolkit_install.info": "package_name=Ascend-cann-toolkit\nversion=9.1.0\ninnerversion=V100R001C11SPC001B243\ncompatible_version=[V100R001C15],[V100R001C21],[V100R001C23],[V100R001C10]\narch=aarch64\nos=linux\npath=/home/developer/Ascend/cann-9.1.0/cann-9.1.0\n",
+      "/home/developer/Ascend/cann-9.1.0/cann-9.1.0/opp/version.info": "Version=9.1.0\nversion_dir=cann\nrequired_package_runtime_version=\">=8.5\"\nrequired_package_ge-executor_version=\">=8.5\"\nrequired_package_metadef_version=\">=8.5\"\nrequired_package_asc-devkit_version=\">=8.5\"\nrequired_package_bisheng-compiler_version=\">=8.5\"\ntimestamp=20260730_231653901\n",
+      "/home/developer/Ascend/cann-9.1.0/cann-9.1.0/compiler/version.info": "Version=9.1.0\nversion_dir=cann\nrequired_package_runtime_version=\"9.1\"\nrequired_package_ge-executor_version=\"9.1\"\nrequired_package_metadef_version=\"9.1\"\nrequired_package_bisheng-compiler_version=\"9.1\"\nrequired_package_tbe-tik_version=\"9.1\"\ntimestamp=20260730_231653901\n"
+    },
+    "npu_smi": "+------------------------------------------------------------------------------------------------+\n| npu-smi 25.5.5                   Version: 25.5.5                                               |\n+---------------------------+---------------+----------------------------------------------------+\n| NPU   Name                | Health        | Power(W)    Temp(C)           Hugepages-Usage(page)|\n| Chip  Phy-ID              | Bus-Id        | AICore(%)   Memory-Usage(MB)  HBM-Usage(MB)        |\n+===========================+===============+====================================================+\n| 7     Ascend910           | OK            | 180.1       53                0    / 0             |\n| 0     14                  | 0000:0A:00.0  | 0           0    / 0          3189 / 65536         |\n+------------------------------------------------------------------------------------------------+\n| 7     Ascend910           | OK            | -           53                0    / 0             |\n| 1     15                  | 0000:0B:00.0  | 0           0    / 0          2874 / 65536         |\n+===========================+===============+====================================================+\n+---------------------------+---------------+----------------------------------------------------+\n| NPU     Chip              | Process id    | Process name             | Process memory(MB)      |\n+===========================+===============+====================================================+\n| 7       0                 | 79361         | python3                  | 113                     |\n+===========================+===============+====================================================+\n",
+    "a3_verified": true,
+    "cann_910_verified": true,
+    "official_environment_verified": true
+  },
+  "source_sha256": {
+    "DESIGN.md": "58f77ca1c5115ed9c4214649ac0851f7844abd113b265eafce043bad0ca11895",
+    "README.md": "956f9cf6f08383ec20452baf4a8eea1998640492fef7cd3e98e22e6294205639",
+    "SOURCE_VERSION.json": "4e27d38b9dda17d8fccc7d2199cb7c9edd487bfe153e4002f1a6db2a891cf4b6",
+    "__init__.py": "d49bf25ce7d02a6bd6c35f614d9f583ac02457d8e542ae911f3672d37a9e8fdf",
+    "fixtures.py": "c1958189121c828f893ab68abbf248fc5b12805713a41d6d45a6d310f1e9f097",
+    "kernels.py": "61203996fd30cc4a4fc17dc7817c96f08a44b49dcb8e774ff0c71b430c11544c",
+    "official/case.json": "63e146023f7a72840e6e74605c796c6ec99169e7dfd52a715c89679f825238eb",
+    "official/generate_data.py": "6a33d9e412d15681f8b155a128fc5158e3dc0dff108492bf9541124c457830ed",
+    "official/golden.py": "ec77b83130a9872977e7e38d4065d006b5065c39b1baf2a6f05b291f37bd7cc0",
+    "official/op.json": "fb3328cea6dc54257ebb7be854951ab2ca6d5ffec9d49f76c8751b805cac95c1",
+    "official/任务书.md": "ac8f7462fe1dc2f98df202dd9b52d20aceda06461d074046c9bbac565595c4cc",
+    "official.zip": "f29adfe16a4a7352de37405ff85fa82846ad93a3c2f13e6e732e0382bf01e48c",
+    "offline_checks.py": "5b67f451712dacca1592870d1f4315e74f81b8b6e6b764d20f74f389408cacb0",
+    "run_guard.py": "ceab5d2280682575ddd367cf66ccbc5aacd2d777cb04ccad450c490a5e50d082",
+    "solution.py": "28d4d5058ccd082881dda28982b0424e2a25b96c74c9705033d9352da9dbacbc",
+    "statistics_utils.py": "966bedb24a147dc01ad289aba2d7b2e2d9f2abc933041a8c80bf8c75d9fe2c49",
+    "validation.py": "5ca75101b8f2eb8417d289eca93f84b9f7371a4b36acc9a7f97427fbfc1640c3",
+    "verify.py": "5c221bb190a6f6049d6a41a0194cb1010469ebf0a64d392d925858bbf366a0bf"
+  }
+}
+{"time": "2026-11-17T06:19:15.742178+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 0, "path": "baseline", "latency_us": 271.544225}
+{"time": "2026-11-17T06:19:15.751930+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 0, "path": "candidate", "latency_us": 48.205239999999996}
+{"time": "2026-11-17T06:19:15.761945+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 1, "path": "candidate", "latency_us": 49.582550000000005}
+{"time": "2026-11-17T06:19:15.815655+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 1, "path": "baseline", "latency_us": 268.075245}
+{"time": "2026-11-17T06:19:15.871883+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 2, "path": "baseline", "latency_us": 280.59101}
+{"time": "2026-11-17T06:19:15.881737+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 2, "path": "candidate", "latency_us": 48.781895}
+{"time": "2026-11-17T06:19:15.891820+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 3, "path": "candidate", "latency_us": 49.797605000000004}
+{"time": "2026-11-17T06:19:15.947934+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 3, "path": "baseline", "latency_us": 280.105205}
+{"time": "2026-11-17T06:19:16.004214+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 4, "path": "baseline", "latency_us": 280.91826000000003}
+{"time": "2026-11-17T06:19:16.014048+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 4, "path": "candidate", "latency_us": 48.690144999999994}
+{"time": "2026-11-17T06:19:16.024081+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 5, "path": "candidate", "latency_us": 49.683505}
+{"time": "2026-11-17T06:19:16.079324+00:00", "kind": "performance_round", "id": "flags_perf_small", "round": 5, "path": "baseline", "latency_us": 275.752765}
+{"time": "2026-11-17T06:19:16.080765+00:00", "kind": "performance", "id": "flags_perf_small", "baseline_round_us": [271.544225, 268.075245, 280.59101, 280.105205, 280.91826000000003, 275.752765], "candidate_round_us": [48.205239999999996, 49.582550000000005, 48.781895, 49.797605000000004, 48.690144999999994, 49.683505], "baseline_mean_us": 276.16445166666665, "candidate_mean_us": 49.123490000000004, "mean_difference_us": 227.04096166666665, "median_difference_us": 228.74676250000002, "paired_mean_difference_ci95_us": [222.8524075, 230.67205333333334], "bootstrap": {"resamples": 10000, "seed": 20261031, "percentile": "linear"}, "limit_us": 85, "checks": {"mean_improved": true, "median_improved": true, "paired_ci_lower_positive": true, "within_target": true}, "status": "PASS", "warmup": 50, "iterations": 200, "execution_order": [["baseline", "candidate"], ["candidate", "baseline"], ["baseline", "candidate"], ["candidate", "baseline"], ["baseline", "candidate"], ["candidate", "baseline"]], "timed_entry": "complete prepared.run plus final device synchronization"}
+{"time": "2026-11-17T06:19:16.263224+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 0, "path": "baseline", "latency_us": 500.96832}
+{"time": "2026-11-17T06:19:16.279184+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 0, "path": "candidate", "latency_us": 79.216375}
+{"time": "2026-11-17T06:19:16.296399+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 1, "path": "candidate", "latency_us": 85.56263}
+{"time": "2026-11-17T06:19:16.394653+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 1, "path": "baseline", "latency_us": 490.80782500000004}
+{"time": "2026-11-17T06:19:16.493344+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 2, "path": "baseline", "latency_us": 492.939495}
+{"time": "2026-11-17T06:19:16.510312+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 2, "path": "candidate", "latency_us": 84.33762}
+{"time": "2026-11-17T06:19:16.526661+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 3, "path": "candidate", "latency_us": 81.26974}
+{"time": "2026-11-17T06:19:16.625722+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 3, "path": "baseline", "latency_us": 494.84796500000004}
+{"time": "2026-11-17T06:19:16.723679+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 4, "path": "baseline", "latency_us": 489.230665}
+{"time": "2026-11-17T06:19:16.741359+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 4, "path": "candidate", "latency_us": 87.915905}
+{"time": "2026-11-17T06:19:16.757322+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 5, "path": "candidate", "latency_us": 79.34787}
+{"time": "2026-11-17T06:19:16.856841+00:00", "kind": "performance_round", "id": "flags_perf_large", "round": 5, "path": "baseline", "latency_us": 497.14808500000004}
+{"time": "2026-11-17T06:19:16.858055+00:00", "kind": "performance", "id": "flags_perf_large", "baseline_round_us": [500.96832, 490.80782500000004, 492.939495, 494.84796500000004, 489.230665, 497.14808500000004], "candidate_round_us": [79.216375, 85.56263, 84.33762, 81.26974, 87.915905, 79.34787], "baseline_mean_us": 494.32372583333336, "candidate_mean_us": 82.94169000000001, "mean_difference_us": 411.38203583333336, "median_difference_us": 411.09005, "paired_mean_difference_ci95_us": [405.883335, 417.00646333333333], "bootstrap": {"resamples": 10000, "seed": 20261031, "percentile": "linear"}, "limit_us": 85, "checks": {"mean_improved": true, "median_improved": true, "paired_ci_lower_positive": true, "within_target": true}, "status": "PASS", "warmup": 50, "iterations": 200, "execution_order": [["baseline", "candidate"], ["candidate", "baseline"], ["baseline", "candidate"], ["candidate", "baseline"], ["baseline", "candidate"], ["candidate", "baseline"]], "timed_entry": "complete prepared.run plus final device synchronization"}
+{"time": "2026-11-17T06:19:16.940184+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 0, "path": "baseline", "latency_us": 281.949275}
+{"time": "2026-11-17T06:19:16.950351+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 0, "path": "candidate", "latency_us": 50.34896}
+{"time": "2026-11-17T06:19:16.960446+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 1, "path": "candidate", "latency_us": 49.959955}
+{"time": "2026-11-17T06:19:17.016702+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 1, "path": "baseline", "latency_us": 280.843115}
+{"time": "2026-11-17T06:19:17.073392+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 2, "path": "baseline", "latency_us": 282.973435}
+{"time": "2026-11-17T06:19:17.083393+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 2, "path": "candidate", "latency_us": 49.52395}
+{"time": "2026-11-17T06:19:17.093488+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 3, "path": "candidate", "latency_us": 50.028254999999994}
+{"time": "2026-11-17T06:19:17.149147+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 3, "path": "baseline", "latency_us": 277.857435}
+{"time": "2026-11-17T06:19:17.205762+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 4, "path": "baseline", "latency_us": 282.609075}
+{"time": "2026-11-17T06:19:17.216131+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 4, "path": "candidate", "latency_us": 51.278870000000005}
+{"time": "2026-11-17T06:19:17.226098+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 5, "path": "candidate", "latency_us": 49.384550000000004}
+{"time": "2026-11-17T06:19:17.281610+00:00", "kind": "performance_round", "id": "flags_nonpower_255", "round": 5, "path": "baseline", "latency_us": 277.105575}
+{"time": "2026-11-17T06:19:17.282741+00:00", "kind": "performance", "id": "flags_nonpower_255", "baseline_round_us": [281.949275, 280.843115, 282.973435, 277.857435, 282.609075, 277.105575], "candidate_round_us": [50.34896, 49.959955, 49.52395, 50.028254999999994, 51.278870000000005, 49.384550000000004], "baseline_mean_us": 280.55631833333337, "candidate_mean_us": 50.087423333333334, "mean_difference_us": 230.46889500000003, "median_difference_us": 231.40209000000004, "paired_mean_difference_ci95_us": [228.8856291666667, 232.05216083333332], "bootstrap": {"resamples": 10000, "seed": 20261031, "percentile": "linear"}, "limit_us": null, "checks": {"mean_improved": true, "median_improved": true, "paired_ci_lower_positive": true}, "status": "MEASURED", "warmup": 50, "iterations": 200, "execution_order": [["baseline", "candidate"], ["candidate", "baseline"], ["baseline", "candidate"], ["candidate", "baseline"], ["baseline", "candidate"], ["candidate", "baseline"]], "timed_entry": "complete prepared.run plus final device synchronization"}
+{"time": "2026-11-17T06:19:17.364399+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 0, "path": "baseline", "latency_us": 281.353315}
+{"time": "2026-11-17T06:19:17.374279+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 0, "path": "candidate", "latency_us": 48.901095}
+{"time": "2026-11-17T06:19:17.384332+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 1, "path": "candidate", "latency_us": 49.799755}
+{"time": "2026-11-17T06:19:17.440224+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 1, "path": "baseline", "latency_us": 279.012595}
+{"time": "2026-11-17T06:19:17.496754+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 2, "path": "baseline", "latency_us": 282.175975}
+{"time": "2026-11-17T06:19:17.506638+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 2, "path": "candidate", "latency_us": 48.939995}
+{"time": "2026-11-17T06:19:17.516712+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 3, "path": "candidate", "latency_us": 49.915355000000005}
+{"time": "2026-11-17T06:19:17.572498+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 3, "path": "baseline", "latency_us": 278.47979}
+{"time": "2026-11-17T06:19:17.628350+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 4, "path": "baseline", "latency_us": 278.77589}
+{"time": "2026-11-17T06:19:17.638559+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 4, "path": "candidate", "latency_us": 50.52211}
+{"time": "2026-11-17T06:19:17.648350+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 5, "path": "candidate", "latency_us": 48.506445}
+{"time": "2026-11-17T06:19:17.703874+00:00", "kind": "performance_round", "id": "flags_nonpower_257", "round": 5, "path": "baseline", "latency_us": 277.17413}
+{"time": "2026-11-17T06:19:17.705021+00:00", "kind": "performance", "id": "flags_nonpower_257", "baseline_round_us": [281.353315, 279.012595, 282.175975, 278.47979, 278.77589, 277.17413], "candidate_round_us": [48.901095, 49.799755, 48.939995, 49.915355000000005, 50.52211, 48.506445], "baseline_mean_us": 279.4952825, "candidate_mean_us": 49.4307925, "mean_difference_us": 230.06448999999998, "median_difference_us": 229.5243675, "paired_mean_difference_ci95_us": [228.58615916666668, 231.65623916666664], "bootstrap": {"resamples": 10000, "seed": 20261031, "percentile": "linear"}, "limit_us": null, "checks": {"mean_improved": true, "median_improved": true, "paired_ci_lower_positive": true}, "status": "MEASURED", "warmup": 50, "iterations": 200, "execution_order": [["baseline", "candidate"], ["candidate", "baseline"], ["baseline", "candidate"], ["candidate", "baseline"], ["baseline", "candidate"], ["candidate", "baseline"]], "timed_entry": "complete prepared.run plus final device synchronization"}
