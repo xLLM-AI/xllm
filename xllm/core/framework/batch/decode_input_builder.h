@@ -25,7 +25,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/batch_forward_type.h"
-#include "core/framework/model/model_input_types.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/util/slice.h"
 #include "core/util/tensor_helper.h"
@@ -139,9 +138,7 @@ void update_decode_batch_metadata(Params& input_params,
                                   const DecodeInputOptions& decode_options,
                                   int32_t num_requests) {
   input_params.meta.num_sequences = num_requests;
-  input_params.meta.decode_kv_layout = decode_options.per_request
-                                           ? DecodeKVLayout::REQUEST
-                                           : DecodeKVLayout::TOKEN;
+  input_params.meta.decode_kv_per_request = decode_options.per_request;
   const int32_t query_width = decode_options.query_width;
   if (!decode_options.per_request && !decode_options.causal &&
       input_params.meta.actual_num_sequences > 0) {

@@ -458,7 +458,7 @@ def test_mla_uses_each_steps_query_layout_without_prefill_flags(width: int, prep
     backend = NpuPagedAttentionBackend(2, 1, 8, 0.125, 0, True, torch.device("cpu"), torch.float32)
     cache = torch.zeros(4, 128, 1, 8)
     backend.bind_kv_caches([LayerCache(cache, cache)])
-    for layout, query_width in (("request", width), ("token", 1), ("request", width)):
+    for per_request, query_width in ((True, width), (False, 1), (True, width)):
         metadata = StaticGraphAttentionMetadata(
             slot_mapping=torch.full((2 * query_width,), -1, dtype=torch.int32),
             paged_kv_indptr=torch.tensor([0, 1, 2], dtype=torch.int32),
@@ -470,7 +470,7 @@ def test_mla_uses_each_steps_query_layout_without_prefill_flags(width: int, prep
             kv_seq_lens=torch.tensor([32, 64], dtype=torch.int32),
             kv_seq_lens_host_values=[32, 64],
             block_table=torch.tensor([[1], [2]], dtype=torch.int32),
-            decode_kv_layout=layout,
+            decode_kv_per_request=per_request,
             decode_query_width=query_width,
         )
         if prepared:

@@ -1609,7 +1609,7 @@ def test_non_causal_decode_matches_live_prefix_without_prefill_flags(width: int,
             block_table=torch.tensor([[1], [2]], dtype=torch.int32, device=device),
             kv_seq_lens=torch.tensor(lengths, dtype=torch.int32, device=device),
             kv_seq_lens_host_values=list(lengths),
-            decode_kv_layout="request",
+            decode_kv_per_request=True,
             decode_query_width=width,
         )
         if graph:

@@ -186,7 +186,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
         enable_mega_moe_token_mask: bool = False,
         *,
         is_spec_draft: bool = False,
-        request_warmup_max_kv_len: int = 0,
         enable_graph_mode_decode_no_padding: bool = False,
         device_kv_lengths: bool = False,
         kv_capacity_graphs: bool = False,
@@ -199,9 +198,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.max_model_len = max_model_len
         self.num_speculative_tokens = num_speculative_tokens
         self._is_spec_draft = is_spec_draft
-        if type(request_warmup_max_kv_len) is not int or request_warmup_max_kv_len < -1:
-            raise ValueError("Request-row decode graph warmup KV limit must be -1, zero or a positive integer")
-        self._request_warmup_max_kv_len = request_warmup_max_kv_len
         self._windowed_decode = (
             not getattr(attention_backend, "is_mla", False) and block_draft_model_window_context(model) is not None
         )
@@ -323,7 +319,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         The caller owns this result for one execution only. Keep it local to
         that call so scheduler updates are decoded again on the next step.
         """
-        if getattr(metadata, "decode_kv_layout", "token") == "request":
+        if getattr(metadata, "decode_kv_per_request", False):
             return self._prepare_request_execution(input_ids, metadata, input_embedding, mtp_topk_indices)
         metadata = self._normalize_dsa_metadata(metadata)
         if not getattr(self.attention_backend, "moe_graph_capturable", True):
@@ -536,9 +532,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         return block_table.shape[1] * self._logical_page_size <= max_kv_cap
 
     def _padded_batch_size(self, batch_size: int, metadata: AttentionMetadata) -> int:
-        if getattr(metadata, "decode_kv_layout", "token") == "request":
+        if getattr(metadata, "decode_kv_per_request", False):
             width = metadata.decode_query_width
-            if width is None or width <= 0 or batch_size % width:
+            if width is None or batch_size % width:
                 raise ValueError("Request-row decode graph requires complete fixed-width requests")
             sequences = self._padded_sequence_count(metadata, batch_size // width, width)
             if sequences is None:
@@ -557,7 +553,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         ):
             # Recurrent verify buckets must contain complete requests.
             width = metadata.decode_query_width
-            if width is None or width <= 0 or batch_size % width:
+            if width is None or batch_size % width:
                 raise ValueError("linear verify graph requires complete fixed-width requests")
             if self._enable_decode_no_padding:
                 return batch_size
@@ -923,7 +919,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         is_graph_warmup: bool = False,
         input_batch: InputBatch | None = None,
     ) -> _GraphKey:
-        if preparation is None and getattr(metadata, "decode_kv_layout", "token") == "request":
+        if preparation is None and getattr(metadata, "decode_kv_per_request", False):
             preparation = self.prepare_execution(
                 input_ids, metadata, input_embedding, mtp_topk_indices, is_graph_warmup=is_graph_warmup
             )
@@ -1104,7 +1100,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         preparation: DecodeAclGraphPreparation | None = None,
         input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput:
-        if preparation is None and getattr(metadata, "decode_kv_layout", "token") == "request":
+        if preparation is None and getattr(metadata, "decode_kv_per_request", False):
             preparation = self.prepare_execution(input_ids, metadata, input_embedding, mtp_topk_indices)
             if preparation is None:
                 raise ValueError("Request-row ACL graph requires fixed-width query metadata")
@@ -1203,7 +1199,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         request_layout: RequestDecodeGraphLayout | None = None,
     ) -> AclGraphEntry:
         batch_size = input_ids.shape[0]
-        if request_layout is None and getattr(metadata, "decode_kv_layout", "token") == "request":
+        if request_layout is None and getattr(metadata, "decode_kv_per_request", False):
             preparation = self._prepare_request_execution(input_ids, metadata, input_embedding, mtp_topk_indices)
             if preparation is None:
                 raise ValueError("Request-row ACL graph requires fixed-width query metadata")
@@ -1328,7 +1324,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
 
         self._bind_graph_input_batch(entry, input_batch)
         self._prepare_attention(
-            entry, entry.static_metadata, replay=entry.static_metadata.decode_kv_layout == "token" and not first_capture
+            entry, entry.static_metadata, replay=not entry.static_metadata.decode_kv_per_request and not first_capture
         )
         if first_capture:
             self._capture(entry, self._stream)
@@ -1484,7 +1480,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         kv_capacity_pages: int = 0,
         request_layout: RequestDecodeGraphLayout | None = None,
     ) -> AclGraphEntry:
-        if request_layout is None and getattr(metadata, "decode_kv_layout", "token") == "request":
+        if request_layout is None and getattr(metadata, "decode_kv_per_request", False):
             width = metadata.decode_query_width
             assert width is not None
             request_layout = RequestDecodeGraphLayout(
@@ -1707,7 +1703,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         expanded: ExpandedDecodeMetadata | None = None,
         decode_metadata: DecodeAclGraphMetadata | None = None,
     ) -> None:
-        if entry.static_metadata.decode_kv_layout == "request":
+        if entry.static_metadata.decode_kv_per_request:
             self._fill_request_entry(entry, input_ids, positions, metadata)
             return
         padded_batch_size = entry.batch_size
@@ -2135,7 +2131,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if q_seq_lens.dim() != 1 or q_seq_lens.numel() == 0:
             return None
         query_width = metadata.decode_query_width
-        if query_width is None or query_width <= 0:
+        if query_width is None:
             return None
         sequence_count = q_seq_lens.numel()
         # The bridge supplies Host lengths and ends from the same producer as
@@ -2283,7 +2279,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 page_size,
                 max_pages,
                 query_width,
-                self._request_warmup_max_kv_len,
             )
             # Model-wide tiers have the same order/count on every DP rank.
             # Keep the current local capacity as a separate final step: a
@@ -2398,7 +2393,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             kv_seq_lens_host_values=[kv_capacity] * sequence_count,
             block_table=static_block_table,
             kv_seq_lens=static_kv_lens,
-            decode_kv_layout="request",
+            decode_kv_per_request=True,
             decode_query_width=query_width,
             num_speculative_tokens=getattr(metadata, "num_speculative_tokens", 0),
             dp_execution_token_counts=(token_count,) * self.dp_size if self.dp_size > 1 else (),

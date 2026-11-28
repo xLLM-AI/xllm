@@ -774,53 +774,6 @@ TEST(ConfigJsonTest, RegistersExplicitFiaDecodeCommandLineOption) {
   EXPECT_FALSE(execution_config.enable_fia_decode());
 }
 
-TEST(ConfigJsonTest, BlockDraftKvWarmupDefaultsAndJsonRoundTrip) {
-  google::FlagSaver flag_saver;
-  google::CommandLineFlagInfo flag_info;
-  ASSERT_TRUE(google::GetCommandLineFlagInfo(
-      "block_draft_graph_warmup_max_kv_len", &flag_info));
-  EXPECT_EQ(flag_info.default_value, "0");
-  ExecutionConfig execution_config;
-  EXPECT_EQ(execution_config.block_draft_graph_warmup_max_kv_len(), 0);
-  const auto& names = ExecutionConfig::option_category().option_names;
-  EXPECT_NE(
-      std::find(
-          names.begin(), names.end(), "block_draft_graph_warmup_max_kv_len"),
-      names.end());
-  for (const int32_t limit : {-1, 32768}) {
-    nlohmann::ordered_json exported;
-    {
-      // Each value models a fresh startup; JSON loading writes back flags.
-      google::FlagSaver limit_flag_saver;
-      ExecutionConfig loaded_config;
-      loaded_config.from_flags();
-      loaded_config.from_json(config::parse_json_string(nlohmann::ordered_json{
-          {"block_draft_graph_warmup_max_kv_len", limit}}.dump()));
-      EXPECT_EQ(loaded_config.block_draft_graph_warmup_max_kv_len(), limit);
-      loaded_config.append_config_json(exported);
-    }
-    EXPECT_EQ(exported.at("block_draft_graph_warmup_max_kv_len").get<int32_t>(),
-              limit);
-    google::FlagSaver restored_flag_saver;
-    ExecutionConfig restored_config;
-    restored_config.from_flags();
-    restored_config.from_json(config::parse_json_string(exported.dump()));
-    EXPECT_EQ(restored_config.block_draft_graph_warmup_max_kv_len(), limit);
-  }
-}
-
-TEST(ConfigJsonTest, BlockDraftKvWarmupCommandLineOverridesJson) {
-  google::FlagSaver flag_saver;
-  ASSERT_FALSE(google::SetCommandLineOption(
-                   "block_draft_graph_warmup_max_kv_len", "32768")
-                   .empty());
-  ExecutionConfig execution_config;
-  execution_config.from_flags();
-  execution_config.from_json(config::parse_json_string(
-      R"json({"block_draft_graph_warmup_max_kv_len":-1})json"));
-  EXPECT_EQ(execution_config.block_draft_graph_warmup_max_kv_len(), 32768);
-}
-
 TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
   // The fixture sets more keys than ConfigFlagGuard restores, and from_json
   // writes every resolved value back into its FLAGS_ global. FlagSaver reverts

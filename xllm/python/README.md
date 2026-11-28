@@ -329,15 +329,13 @@ with the attention layer and backend. Genuine prefill and chunked prefill
 remain separate phases and are rejected by the decode graph runner.
 
 The runner owns its KV capacity tiers and uses `is_graph_warmup` to select
-startup pre-capture. The public `block_draft_graph_warmup_max_kv_len` option is
-retained for compatibility and translated at the bridge into
-`request_decode_graph_warmup_max_kv_len`. It controls the request-row layout
-inside `DecodeAclGraphRunner`: `0` pre-captures full context, `-1` keeps only
-required startup shapes, and positive values bound proactive capacity capture.
-Runtime capacity can still grow beyond that bound. The minimum profile context
-and query lookahead are shared by runtime bucket selection and startup tiers;
-DP ranks capture model-wide tiers in the same order before their local shape.
-Token-row decode keeps its existing capacity tiers and startup-only capture rules.
+startup pre-capture. Request-row decode pre-captures power-of-two capacity tiers
+covering the full model context. The minimum profile context and query lookahead
+are shared by runtime bucket selection and startup tiers; DP ranks capture
+model-wide tiers in the same order before their local shape. Token-row decode
+keeps its existing capacity tiers and startup-only capture rules. The existing
+`disable_graph_warmup` option skips synthetic startup warmup and retains lazy
+capture from real requests.
 
 ## Adding an operator
 

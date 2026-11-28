@@ -55,8 +55,6 @@ class PyExpandedDecodeMetadataView final {
   std::shared_ptr<layer::AttentionMetadata> metadata_;
 };
 
-enum class DecodeKVLayout : int8_t;
-
 class PyAttentionMetadataView final {
  public:
   PyAttentionMetadataView(std::shared_ptr<layer::AttentionMetadata> metadata,
@@ -117,11 +115,11 @@ class PyAttentionMetadataView final {
   void set_dsa_graph_block_table_cols(int64_t value);
   bool dsa_graph_mode() const;
   void set_dsa_graph_mode(bool value);
-  const char* decode_kv_layout() const;
+  bool decode_kv_per_request() const { return decode_kv_per_request_; }
   bool is_prefill() const;
   bool is_chunked_prefill() const;
   bool is_mixed() const;
-  // Null for variable-width requests or an absent request layout.
+  // Present widths are positive; null means variable widths or absent layout.
   std::optional<int32_t> decode_query_width() const {
     return decode_query_width_;
   }
@@ -135,7 +133,7 @@ class PyAttentionMetadataView final {
       std::vector<int32_t>& host_vec);
 
   std::shared_ptr<layer::AttentionMetadata> metadata_;
-  DecodeKVLayout decode_kv_layout_;
+  bool decode_kv_per_request_;
   bool is_chunked_prefill_ = false;
   bool is_target_verify_ = false;
   std::optional<int32_t> decode_query_width_;

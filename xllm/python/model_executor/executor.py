@@ -473,7 +473,6 @@ class ModelExecutor:
                 int(config["max_position_embeddings"]),
                 dp_size,
                 dp_rank,
-                request_warmup_max_kv_len=int(config.get("request_decode_graph_warmup_max_kv_len", 0)),
                 num_speculative_tokens=self.num_speculative_tokens,
                 is_spec_draft=bool(config.get("is_draft_engine", False)),
                 enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),

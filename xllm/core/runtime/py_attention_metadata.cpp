@@ -176,8 +176,8 @@ void register_attention_metadata_views(py::module_& module) {
       .def_property_readonly("is_chunked_prefill",
                              &PyAttentionMetadataView::is_chunked_prefill)
       .def_property_readonly("is_mixed", &PyAttentionMetadataView::is_mixed)
-      .def_property_readonly("decode_kv_layout",
-                             &PyAttentionMetadataView::decode_kv_layout)
+      .def_property_readonly("decode_kv_per_request",
+                             &PyAttentionMetadataView::decode_kv_per_request)
       .def_property_readonly("decode_query_width",
                              &PyAttentionMetadataView::decode_query_width)
       .def_property_readonly(/*name=*/"num_speculative_tokens",
@@ -238,7 +238,7 @@ PyAttentionMetadataView::PyAttentionMetadataView(
     const ModelParamsView& params,
     bool is_draft_engine)
     : metadata_(std::move(metadata)),
-      decode_kv_layout_(params.meta.decode_kv_layout),
+      decode_kv_per_request_(params.meta.decode_kv_per_request),
       is_chunked_prefill_(
           metadata_->is_chunked_prefill &&
           !(is_draft_engine && params.meta.batch_forward_type.is_decode())),
@@ -557,10 +557,6 @@ bool PyAttentionMetadataView::dsa_graph_mode() const { return dsa_graph_mode_; }
 
 void PyAttentionMetadataView::set_dsa_graph_mode(bool value) {
   dsa_graph_mode_ = value;
-}
-
-const char* PyAttentionMetadataView::decode_kv_layout() const {
-  return decode_kv_layout_ == DecodeKVLayout::REQUEST ? "request" : "token";
 }
 
 bool PyAttentionMetadataView::is_prefill() const {

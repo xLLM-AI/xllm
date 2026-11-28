@@ -224,9 +224,6 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["requires_aux_hidden_capture"] =
       SpeculativeConfig::requires_aux_hidden_capture(
           options_.speculative_algorithm());
-  // Keep the public compatibility option at the configuration boundary.
-  executor_config["request_decode_graph_warmup_max_kv_len"] =
-      options_.block_draft_graph_warmup_max_kv_len();
   executor_config["enable_graph_mode_decode_no_padding"] =
       options_.enable_graph_mode_decode_no_padding();
   executor_config["enable_graph_mm_encoder"] =

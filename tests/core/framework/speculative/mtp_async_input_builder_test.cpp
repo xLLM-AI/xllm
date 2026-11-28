@@ -317,15 +317,12 @@ TEST(MtpAsyncInputBuilderTest,
         ASSERT_TRUE(view.decode_query_width().has_value());
         EXPECT_EQ(*view.decode_query_width(), width);
         EXPECT_EQ(view.num_speculative_tokens(), 7);
-        EXPECT_STREQ(view.decode_kv_layout(),
-                     per_request ? "request" : "token");
+        EXPECT_EQ(view.decode_kv_per_request(), per_request);
         EXPECT_EQ(view.is_target_verify(), !is_draft && width > 1);
         storage.meta.execution_batch.num_scheduled_tokens = {2, 3};
-        storage.meta.decode_kv_layout =
-            per_request ? DecodeKVLayout::TOKEN : DecodeKVLayout::REQUEST;
+        storage.meta.decode_kv_per_request = !per_request;
         EXPECT_EQ(*view.decode_query_width(), width);
-        EXPECT_STREQ(view.decode_kv_layout(),
-                     per_request ? "request" : "token");
+        EXPECT_EQ(view.decode_kv_per_request(), per_request);
       }
     }
   }
@@ -339,12 +336,12 @@ TEST(MtpAsyncInputBuilderTest,
   dummy.meta.execution_batch.num_tokens = 7;
   metadata->is_dummy = false;
   // Block dummy inputs can carry nonzero attention geometry.
-  dummy.meta.decode_kv_layout = DecodeKVLayout::REQUEST;
+  dummy.meta.decode_kv_per_request = true;
   PyAttentionMetadataView dummy_view(
       metadata, ModelParamsView(dummy), /*is_draft_engine=*/true);
   ASSERT_TRUE(dummy_view.decode_query_width().has_value());
   EXPECT_EQ(*dummy_view.decode_query_width(), 7);
-  EXPECT_STREQ(dummy_view.decode_kv_layout(), "request");
+  EXPECT_TRUE(dummy_view.decode_kv_per_request());
 }
 
 TEST(MtpAsyncInputBuilderTest, PybindDraftDecodeDoesNotBorrowPrefillPhase) {

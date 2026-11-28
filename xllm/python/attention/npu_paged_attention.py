@@ -539,7 +539,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             if not query_ends or query_ends[-1] != slot_mapping.numel():
                 raise ValueError("prepared MLA query ends must describe all input tokens")
             query_lengths = [end - start for start, end in zip([0, *query_ends[:-1]], query_ends)]
-            if getattr(metadata, "decode_kv_layout", "token") == "request" and (
+            if getattr(metadata, "decode_kv_per_request", False) and (
                 not query_lengths or query_lengths[0] <= 0 or any(width != query_lengths[0] for width in query_lengths)
             ):
                 raise ValueError("MLA block attention requires fixed-width queries")
@@ -844,9 +844,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 self._mla_actual_seq_q = actual_seq_q
                 self._mla_actual_seq_kv = actual_seq_kv
             has_query_blocks = (
-                metadata.is_prefill
-                or metadata.is_chunked_prefill
-                or getattr(metadata, "decode_kv_layout", "token") == "request"
+                metadata.is_prefill or metadata.is_chunked_prefill or getattr(metadata, "decode_kv_per_request", False)
             )
             if self.requires_host_kv_lengths:
                 query_ends = (

@@ -53,7 +53,6 @@ class ExecutionConfig final {
         {"extension_impl",
          "enable_graph",
          "disable_graph_warmup",
-         "block_draft_graph_warmup_max_kv_len",
          "enable_graph_mm_encoder",
          "mm_encoder_graph_capture_shapes",
          "enable_graph_double_buffer",
@@ -80,9 +79,6 @@ class ExecutionConfig final {
   PROPERTY(bool, enable_graph) = false;
 
   PROPERTY(bool, disable_graph_warmup) = false;
-
-  // Zero covers the full model context; -1 keeps lazy KV-capacity capture.
-  PROPERTY(int32_t, block_draft_graph_warmup_max_kv_len) = 0;
 
   // Whether the Python Qwen3-VL multimodal encoder is captured as graphs.
   PROPERTY(bool, enable_graph_mm_encoder) = false;
