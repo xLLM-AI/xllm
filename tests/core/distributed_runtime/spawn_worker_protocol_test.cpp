@@ -533,5 +533,51 @@ TEST(SpawnWorkerProtocolTest, RejectsMalformedOrPartialTopologyPair) {
   EXPECT_FALSE(parse_topology_config(argc, argv.data()).has_value());
 }
 
+TEST(SpawnWorkerProtocolTest, DefaultsGraphVmmPoolForLegacyLaunchers) {
+  for (int32_t argc = kMinimumArgumentCount;
+       argc <= kEnableGraphVmmPoolArgumentIndex;
+       ++argc) {
+    std::vector<std::string> arguments(argc, "unused");
+    std::vector<char*> argv = mutable_argv(&arguments);
+    const auto parsed = parse_graph_vmm_pool(argc, argv.data());
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed.value());
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, PreservesGraphVmmPoolWithTrailingArguments) {
+  for (const bool enabled : {false, true}) {
+    for (const int32_t trailing : {0, 1}) {
+      std::vector<std::string> arguments(
+          kEnableGraphVmmPoolArgumentIndex + 1 + trailing, "unused");
+      arguments[kEnableGraphVmmPoolArgumentIndex] = enabled ? "1" : "0";
+      std::vector<char*> argv = mutable_argv(&arguments);
+      const auto parsed =
+          parse_graph_vmm_pool(static_cast<int32_t>(argv.size()), argv.data());
+      ASSERT_TRUE(parsed.has_value());
+      EXPECT_EQ(parsed.value(), enabled);
+    }
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, RejectsMalformedGraphVmmPool) {
+  std::vector<std::string> arguments(kEnableGraphVmmPoolArgumentIndex + 1,
+                                     "unused");
+  for (const char* invalid : {"", "true", "false", "2", "-1", " 1", "1x"}) {
+    arguments[kEnableGraphVmmPoolArgumentIndex] = invalid;
+    std::vector<char*> argv = mutable_argv(&arguments);
+    EXPECT_FALSE(
+        parse_graph_vmm_pool(static_cast<int32_t>(argv.size()), argv.data())
+            .has_value());
+  }
+  std::vector<char*> argv = mutable_argv(&arguments);
+  const int32_t argc = static_cast<int32_t>(argv.size());
+  EXPECT_FALSE(parse_graph_vmm_pool(argc, nullptr).has_value());
+  EXPECT_FALSE(
+      parse_graph_vmm_pool(kMinimumArgumentCount - 1, argv.data()).has_value());
+  argv[kEnableGraphVmmPoolArgumentIndex] = nullptr;
+  EXPECT_FALSE(parse_graph_vmm_pool(argc, argv.data()).has_value());
+}
+
 }  // namespace
 }  // namespace xllm::spawn_worker_protocol

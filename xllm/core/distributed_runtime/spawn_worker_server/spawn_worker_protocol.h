@@ -51,7 +51,28 @@ inline constexpr int32_t kLayerwiseSplitSizeArgumentIndex =
     kAclGraphDecodeBatchSizeLimitArgumentIndex + 1;
 inline constexpr int32_t kEnableMmEncoderDpArgumentIndex =
     kLayerwiseSplitSizeArgumentIndex + 1;
+inline constexpr int32_t kEnableGraphVmmPoolArgumentIndex =
+    kEnableMmEncoderDpArgumentIndex + 1;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
+
+inline std::optional<bool> parse_graph_vmm_pool(int32_t argc,
+                                                char* const argv[]) {
+  if (argv == nullptr || argc < kMinimumArgumentCount) {
+    return std::nullopt;
+  }
+  // Older launchers retain the graph memory pool flag default.
+  if (argc <= kEnableGraphVmmPoolArgumentIndex) {
+    return true;
+  }
+  if (argv[kEnableGraphVmmPoolArgumentIndex] == nullptr) {
+    return std::nullopt;
+  }
+  const std::string_view enabled(argv[kEnableGraphVmmPoolArgumentIndex]);
+  if (enabled != "0" && enabled != "1") {
+    return std::nullopt;
+  }
+  return enabled == "1";
+}
 
 struct TopologyConfig {
   int32_t layerwise_split_size = 1;

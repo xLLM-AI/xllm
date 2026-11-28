@@ -105,7 +105,8 @@ SpawnWorkerServer::SpawnWorkerServer(
     spawn_worker_protocol::PrefillConfig prefill_config,
     bool enable_graph_double_buffer,
     int32_t acl_graph_decode_batch_size_limit,
-    spawn_worker_protocol::TopologyConfig topology_config) {
+    spawn_worker_protocol::TopologyConfig topology_config,
+    bool enable_graph_vmm_pool) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -158,6 +159,7 @@ SpawnWorkerServer::SpawnWorkerServer(
       .is_local(is_local)
       .npu_kernel_backend(npu_kernel_backend)
       .enable_graph(enable_graph)
+      .enable_graph_vmm_pool(enable_graph_vmm_pool)
       .enable_graph_double_buffer(enable_graph_double_buffer)
       .acl_graph_decode_batch_size_limit(acl_graph_decode_batch_size_limit)
       .enable_graph_mode_decode_no_padding(enable_graph_mode_decode_no_padding)

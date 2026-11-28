@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
@@ -177,6 +178,8 @@ LLMMaster::LLMMaster(const Options& options)
       .enable_service_routing(options_.enable_service_routing())
       .server_idx(options_.server_idx())
       .enable_graph(options_.enable_graph())
+      .enable_graph_vmm_pool(
+          ExecutionConfig::get_instance().enable_graph_vmm_pool())
       .enable_graph_double_buffer(options_.enable_graph_double_buffer())
       .acl_graph_decode_batch_size_limit(
           options_.acl_graph_decode_batch_size_limit())

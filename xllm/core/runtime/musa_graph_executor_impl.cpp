@@ -30,7 +30,6 @@ limitations under the License.
 
 #include "core/common/constants.h"
 #include "core/common/metrics.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/kernels/musa/musa_ops_api.h"
 #include "core/kernels/musa/musa_tvmffi_stream.h"
@@ -1179,13 +1178,10 @@ bool MusaGraph::capture(CausalLM* model,
   // prevent conflicting GPU work from other streams (e.g., prepare streams) on
   // the same device when using musaStreamCaptureModeGlobal. Capture requires
   // exclusive access, so we use write lock.
-  std::optional<std::unique_lock<std::shared_mutex>> capture_lock_guard;
-  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
-    auto& capture_lock =
-        ::xllm::cuda::DeviceCaptureLock::get_instance().get_write_lock(
-            device_index_);
-    capture_lock_guard.emplace(capture_lock);
-  }
+  auto& capture_lock =
+      ::xllm::cuda::DeviceCaptureLock::get_instance().get_write_lock(
+          device_index_);
+  std::unique_lock<std::shared_mutex> capture_lock_guard(capture_lock);
   // Always use capture stream for plan/update + capture + forward.
   c10::musa::MUSAStream original_stream =
       c10::musa::getCurrentMUSAStream(device_index_);
@@ -1387,13 +1383,10 @@ ModelOutput MusaGraph::replay(const torch::Tensor& tokens,
   // replay operations to run concurrently while preventing conflicts with
   // capture operations. Replay can share the lock with other replay/prepare
   // operations.
-  std::optional<std::shared_lock<std::shared_mutex>> replay_lock_guard;
-  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
-    auto& replay_lock =
-        ::xllm::cuda::DeviceCaptureLock::get_instance().get_read_lock(
-            device_index_);
-    replay_lock_guard.emplace(replay_lock);
-  }
+  auto& replay_lock =
+      ::xllm::cuda::DeviceCaptureLock::get_instance().get_read_lock(
+          device_index_);
+  std::shared_lock<std::shared_mutex> replay_lock_guard(replay_lock);
 
   // Update persistent parameters with new input data
   auto full_attention_cache =
@@ -1579,7 +1572,7 @@ void MusaGraphExecutorImpl::log_graph_memory_after_capture() {}
 c10::musa::MempoolId_t MusaGraphExecutorImpl::get_mem_pool(
     uint32_t physical_pool_id,
     uint32_t shape_id) {
-  if (!::xllm::ExecutionConfig::get_instance().enable_graph_vmm_pool()) {
+  if (!options_.enable_graph_vmm_pool()) {
     // Non-VMM mode intentionally uses one pool per executor instance.
     // Rationale: this executor is designed for single-threaded invocation, and
     // concurrent run() on the same executor instance is not allowed.
@@ -1745,7 +1738,7 @@ ModelOutput MusaGraphExecutorImpl::run(const torch::Tensor& tokens,
         << "MusaGraphExecutorImpl::run() in decode capture mode";
 
     MusaMemPool* pool_ptr = nullptr;
-    if (::xllm::ExecutionConfig::get_instance().enable_graph_vmm_pool()) {
+    if (options_.enable_graph_vmm_pool()) {
       reset_vmm_allocator_offset(kPhysicalPoolIdDecode);
       const uint32_t shape_id = bucket_num_tokens;
       pool_ptr = get_or_create_vmm_mempool(kPhysicalPoolIdDecode, shape_id);

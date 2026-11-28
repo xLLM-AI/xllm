@@ -25,7 +25,6 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/sampling/sampling_params.h"
@@ -485,7 +484,7 @@ void DFlashWorkerImpl::prepare_validate_inputs(
         torch::tensor(accepted_prefix_lengths,
                       validate_input.token_ids.options().dtype(torch::kInt32));
 #if defined(USE_NPU)
-    if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
+    if (impl_->options().enable_graph()) {
       layer::ExpandedDecodeMetadataBuilder::update_expanded_decode_metadata(
           ModelParamsView(input_params),
           device_.unwrap(),

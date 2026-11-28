@@ -27,7 +27,6 @@ limitations under the License.
 #include <utility>
 
 #include "core/common/types.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -140,8 +139,10 @@ void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_padding(
   }
   {
     std::optional<std::unique_lock<std::mutex>> capture_lock_guard;
-    if (acquire_graph_capture_lock &&
-        ExecutionConfig::get_instance().enable_graph()) {
+    // Draft preparation can overlap target capture even when the draft is
+    // eager.
+    if (acquire_graph_capture_lock && (impl_->options().enable_graph() ||
+                                       draft_impl_->options().enable_graph())) {
       capture_lock_guard.emplace(
           npu::DeviceCaptureLock::get_instance().get_lock(
               draft_impl_->device().index()));

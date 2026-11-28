@@ -29,10 +29,8 @@ limitations under the License.
 #include <unordered_map>
 
 #include "core/common/constants.h"
-#include "core/common/global_flags.h"
 #include "core/common/metrics.h"
 #include "core/common/types.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
@@ -737,13 +735,10 @@ bool CudaGraph::capture(CausalLM* model,
   // prevent conflicting GPU work from other streams (e.g., prepare streams) on
   // the same device when using cudaStreamCaptureModeGlobal. Capture requires
   // exclusive access, so we use write lock.
-  std::optional<std::unique_lock<std::shared_mutex>> capture_lock_guard;
-  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
-    auto& capture_lock =
-        ::xllm::cuda::DeviceCaptureLock::get_instance().get_write_lock(
-            device_index_);
-    capture_lock_guard.emplace(capture_lock);
-  }
+  auto& capture_lock =
+      ::xllm::cuda::DeviceCaptureLock::get_instance().get_write_lock(
+          device_index_);
+  std::unique_lock<std::shared_mutex> capture_lock_guard(capture_lock);
   // Use the returned ModelParamsView for graph capture
   // Always use capture stream for plan/update + capture + forward.
   at::cuda::CUDAStream original_stream =
@@ -908,13 +903,10 @@ ModelOutput CudaGraph::replay(const torch::Tensor& tokens,
   // replay operations to run concurrently while preventing conflicts with
   // capture operations. Replay can share the lock with other replay/prepare
   // operations.
-  std::optional<std::shared_lock<std::shared_mutex>> replay_lock_guard;
-  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
-    auto& replay_lock =
-        ::xllm::cuda::DeviceCaptureLock::get_instance().get_read_lock(
-            device_index_);
-    replay_lock_guard.emplace(replay_lock);
-  }
+  auto& replay_lock =
+      ::xllm::cuda::DeviceCaptureLock::get_instance().get_read_lock(
+          device_index_);
+  std::shared_lock<std::shared_mutex> replay_lock_guard(replay_lock);
 
   // Update persistent parameters with new input data
   auto full_attention_cache =
@@ -1114,7 +1106,7 @@ CudaGraphExecutorImpl::GraphMemoryUsageStats
 CudaGraphExecutorImpl::get_graph_memory_usage_stats() {
   GraphMemoryUsageStats stats;
 
-  if (!::xllm::ExecutionConfig::get_instance().enable_graph_vmm_pool()) {
+  if (!options_.enable_graph_vmm_pool()) {
     const auto pool = get_mem_pool();
     const auto usage = get_graph_pool_memory_usage(device_.index(), pool);
     stats.executor_total_bytes = usage.reserved_bytes;
@@ -1186,8 +1178,7 @@ void CudaGraphExecutorImpl::log_graph_memory_after_capture() {
   }
   last_logged_executor_total_bytes_ = executor_total_bytes;
 
-  const bool vmm_enabled =
-      ::xllm::ExecutionConfig::get_instance().enable_graph_vmm_pool();
+  const bool vmm_enabled = options_.enable_graph_vmm_pool();
   auto format_size = [](size_t bytes) {
     return c10::CachingDeviceAllocator::format_size(bytes);
   };
@@ -1216,7 +1207,7 @@ void CudaGraphExecutorImpl::reset_vmm_allocator_offset(
 at::cuda::MempoolId_t CudaGraphExecutorImpl::get_mem_pool(
     uint32_t physical_pool_id,
     uint32_t shape_id) {
-  if (!::xllm::ExecutionConfig::get_instance().enable_graph_vmm_pool()) {
+  if (!options_.enable_graph_vmm_pool()) {
     // Non-VMM mode intentionally uses one pool per executor instance.
     // Rationale: this executor is designed for single-threaded invocation, and
     // concurrent run() on the same executor instance is not allowed.
@@ -1318,7 +1309,7 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
         << "CudaGraphExecutorImpl::run() in prefill piecewise capture mode";
 
     TorchMemPool* pool_ptr = nullptr;
-    if (::xllm::ExecutionConfig::get_instance().enable_graph_vmm_pool()) {
+    if (options_.enable_graph_vmm_pool()) {
       reset_vmm_allocator_offset(kPhysicalPoolIdPrefill);
       const uint32_t shape_id = bucket_num_tokens;
       pool_ptr = get_or_create_vmm_mempool(kPhysicalPoolIdPrefill, shape_id);
@@ -1404,7 +1395,7 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
         << "CudaGraphExecutorImpl::run() in decode capture mode";
 
     TorchMemPool* pool_ptr = nullptr;
-    if (::xllm::ExecutionConfig::get_instance().enable_graph_vmm_pool()) {
+    if (options_.enable_graph_vmm_pool()) {
       reset_vmm_allocator_offset(kPhysicalPoolIdDecode);
       const uint32_t shape_id = bucket_num_tokens;
       pool_ptr = get_or_create_vmm_mempool(kPhysicalPoolIdDecode, shape_id);
@@ -1442,8 +1433,8 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
 
     // Same fail-fast policy as prefill capture above: keep graph-mode behavior
     // explicit and avoid silently switching execution semantics after a capture
-    // failure. Use ::xllm::ExecutionConfig::get_instance().enable_graph() to
-    // turn off graph mode if eager fallback is desired for resiliency.
+    // failure. Disable the worker enable_graph option to select eager
+    // execution.
     LOG(FATAL) << "Failed to capture CUDA graph for bucket num_tokens: "
                << bucket_num_tokens << " (actual num_tokens: " << n_tokens
                << ")";
