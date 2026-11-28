@@ -801,7 +801,8 @@ class Qwen3VLModel(nn.Module):
         if positions.dim() == 2 and self.mrope_section:
             cos_sin_cache = self._mrope_cos_sin
             mrope_sec = self.mrope_section
-        else:
+        elif positions.device.type != "npu" or positions.dim() != 1:
+            # The 1-D NPU fused kernel reads the cache directly.
             cos, sin = self.rotary(positions)
 
         residual: torch.Tensor | None = None
