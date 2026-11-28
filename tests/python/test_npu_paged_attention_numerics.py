@@ -1258,7 +1258,7 @@ def test_windowed_draft_attention_matches_global_reference_across_long_contexts(
             kv_seq_lens=torch.full((batch,), width, dtype=torch.int32, device=device),
             kv_seq_lens_host_values=[source_pages * page_size] * batch,
             is_prefill=False,
-            is_chunked_prefill=True,
+            is_chunked_prefill=False,
             has_kv_shard=False,
         )
         metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
@@ -1562,3 +1562,67 @@ def test_refreshed_attention_hidden_matches_reexecuted_first_body(draft_width: i
             torch.testing.assert_close(key[sequence, : prefix + committed, 0].cpu(), expected_keys, rtol=0, atol=0)
             torch.testing.assert_close(value[sequence, : prefix + committed, 0].cpu(), expected_values, rtol=0, atol=0)
     torch.npu.synchronize()
+
+
+@pytest.mark.parametrize("width", [1, 3])
+@pytest.mark.parametrize("graph", [False, True])
+@torch.inference_mode()
+def test_non_causal_decode_matches_live_prefix_without_prefill_flags(width: int, graph: bool) -> None:
+    from xllm.python.attention.backend import LayerCache
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+    from xllm.python.layers.attention import Attention
+    from xllm.python.model_executor.forward_context import ForwardContext, forward_context
+    from xllm.python.model_executor.runners.acl_graph import StaticGraphAttentionMetadata
+    from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
+
+    device = torch.device("npu:0")
+    heads, dimension, page_size = 2, 64, 128
+    key = torch.zeros(3, page_size, 1, dimension, device=device, dtype=torch.bfloat16)
+    values = torch.arange(page_size, dtype=torch.float32).view(1, page_size, 1, 1)
+    values = values + torch.tensor([0, 10], dtype=torch.float32).view(2, 1, 1, 1)
+    value = torch.zeros_like(key)
+    value[1:].copy_(values.expand(2, page_size, 1, dimension).contiguous().to(device=device, dtype=key.dtype))
+    caches = [LayerCache(key, value)]
+    backend = NpuPagedAttentionBackend(heads, 1, dimension, 0.125, 0, False, device, key.dtype)
+    backend.bind_kv_caches(caches)
+    attention = Attention(heads, 1, dimension, 0.125, 0, 0, causal=False)
+    query = torch.zeros(2 * width, heads * dimension, device=device, dtype=key.dtype)
+    projected = torch.zeros(2 * width, dimension, device=device, dtype=key.dtype)
+
+    class _NonCausalDecode(torch.nn.Module):
+        def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+            return attention(query, projected, projected)
+
+    model = _NonCausalDecode()
+    runner = DecodeAclGraphRunner(model, backend, device, 2 * width, page_size)
+    runner.bind_layer_caches(caches)
+    tokens = torch.zeros(2 * width, dtype=torch.int32, device=device)
+    for lengths in ([5, 9], [11, 7]):
+        metadata = StaticGraphAttentionMetadata(
+            slot_mapping=torch.full_like(tokens, -1),
+            paged_kv_indptr=torch.tensor([0, 1, 2], dtype=torch.int32, device=device),
+            paged_kv_indices=torch.tensor([1, 2], dtype=torch.int32, device=device),
+            paged_kv_last_page_len=torch.tensor(lengths, dtype=torch.int32, device=device),
+            q_seq_lens=torch.full((2,), width, dtype=torch.int32, device=device),
+            q_cu_seq_lens=torch.tensor([0, width, 2 * width], dtype=torch.int32, device=device),
+            q_cu_seq_lens_host_values=[width, 2 * width],
+            block_table=torch.tensor([[1], [2]], dtype=torch.int32, device=device),
+            kv_seq_lens=torch.tensor(lengths, dtype=torch.int32, device=device),
+            kv_seq_lens_host_values=list(lengths),
+            decode_kv_layout="request",
+            decode_query_width=width,
+        )
+        if graph:
+            preparation = runner.prepare_execution(tokens, metadata)
+            assert preparation is not None
+            graph_key = runner.warmup(tokens, tokens, metadata, preparation=preparation)
+            actual = runner.execute(tokens, tokens, metadata, graph_key=graph_key, preparation=preparation)
+        else:
+            with forward_context(ForwardContext(backend, device, metadata, caches)):
+                backend.prepare(metadata)
+                actual = model(tokens, tokens)
+        # Uniform attention averages every live value. Each request has its
+        # own prefix and all query rows must see that entire prefix.
+        expected = torch.tensor([(lengths[0] - 1) / 2, 10 + (lengths[1] - 1) / 2])
+        expected = expected.repeat_interleave(width).view(-1, 1).expand(2 * width, heads * dimension)
+        torch.testing.assert_close(actual.float().cpu(), expected, rtol=_OUTPUT_RTOL, atol=_OUTPUT_ATOL)

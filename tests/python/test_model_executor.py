@@ -1093,10 +1093,10 @@ class TestDecodeAclGraphSpeculativeMetadata:
             kv_capacity_pages=0,
             graph=graph,
             static_output=static_output,
-            static_metadata=SimpleNamespace(),
+            static_metadata=SimpleNamespace(decode_kv_layout="token"),
             eplb=None,
             graph_tasks=[object()] if task_updates else [],
-            execution_state=SimpleNamespace(persistent_buffers={}),
+            execution_state=SimpleNamespace(persistent_buffers={}, serial_buffers=runner._serial_buffers),
             layer_shared_cache={},
         )
         embedding = torch.zeros(batch_size, 3) if with_embedding else None
@@ -2192,17 +2192,18 @@ def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
     assert runner.dp_size == dp_size
     assert runner.dp_rank == dp_size - 1
     assert runner.max_batch == min((5 + dp_size - 1) // dp_size, 2) * 6
-    assert not runner._causal
     assert executor.context_kv_graph_runner is not None
 
 
-def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> None:
+@pytest.mark.parametrize("warmup_limit", [-1, 0, 4096])
+def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity(warmup_limit: int) -> None:
     model = _FakeModel()
     config = {
         "model_type": "DFlash2DraftModel",
         "num_speculative_tokens": 7,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
+        "non_causal_decode_graph_warmup_max_kv_len": warmup_limit,
     }
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
@@ -2210,10 +2211,10 @@ def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> Non
         executor = ModelExecutor(model, config, max_seqs_per_batch=2)
     assert isinstance(executor.decode_graph_runner, DecodeAclGraphRunner)
     assert executor.decode_graph_runner.max_batch == 16
-    assert not executor.decode_graph_runner._causal
+    assert executor.decode_graph_runner._non_causal_warmup_max_kv_len == warmup_limit
     executor._kv_bound = True
     tokens = torch.zeros(16, dtype=torch.int32)
-    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
+    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=False, prepared_attention_state=None)
     with (
         patch.object(executor.context_kv_graph_runner, "warmup") as warmup,
         patch.object(executor.decode_graph_runner, "prepare_execution", return_value=None),
@@ -2239,7 +2240,7 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
     executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
     tokens = torch.zeros(12, dtype=torch.int32)
     positions = torch.zeros_like(tokens)
-    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
+    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=False, prepared_attention_state=None)
     with (
         patch.object(executor.context_kv_graph_runner, "warmup") as warmup,
         patch.object(executor.decode_graph_runner, "prepare_execution", return_value=None),
@@ -2268,7 +2269,7 @@ def test_executor_uses_block_draft_preparation_for_warmup_and_replay(is_graph_wa
     runner = executor.decode_graph_runner
     assert isinstance(runner, DecodeAclGraphRunner)
     tokens = torch.arange(2, dtype=torch.int32)
-    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=True, prepared_attention_state=None)
+    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=False, prepared_attention_state=None)
     graph_key = ("block-key",)
     expected = torch.ones(2, 4)
     with (

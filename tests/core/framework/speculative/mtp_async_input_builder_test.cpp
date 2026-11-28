@@ -309,10 +309,14 @@ TEST(MtpAsyncInputBuilderTest,
       metadata->q_seq_lens_vec.assign(2 * width, 1);
       metadata->slot_mapping = torch::arange(2 * width, torch::kInt32);
       PyAttentionMetadataView view(
-          metadata, ModelParamsView(storage), is_draft);
+          metadata,
+          ModelParamsView(storage),
+          is_draft,
+          is_draft ? DecodeKVLayout::REQUEST : DecodeKVLayout::TOKEN);
       ASSERT_TRUE(view.decode_query_width().has_value());
       EXPECT_EQ(*view.decode_query_width(), width);
       EXPECT_EQ(view.num_speculative_tokens(), 7);
+      EXPECT_STREQ(view.decode_kv_layout(), is_draft ? "request" : "token");
       EXPECT_EQ(view.is_target_verify(), !is_draft && width > 1);
       storage.meta.execution_batch.num_scheduled_tokens = {2, 3};
       EXPECT_EQ(*view.decode_query_width(), width);
@@ -328,10 +332,41 @@ TEST(MtpAsyncInputBuilderTest,
   dummy.meta.execution_batch.num_tokens = 7;
   metadata->is_dummy = false;
   // Block dummy inputs can carry nonzero attention geometry.
-  PyAttentionMetadataView dummy_view(
-      metadata, ModelParamsView(dummy), /*is_draft_engine=*/true);
+  PyAttentionMetadataView dummy_view(metadata,
+                                     ModelParamsView(dummy),
+                                     /*is_draft_engine=*/true,
+                                     DecodeKVLayout::REQUEST);
   ASSERT_TRUE(dummy_view.decode_query_width().has_value());
   EXPECT_EQ(*dummy_view.decode_query_width(), 7);
+  EXPECT_STREQ(dummy_view.decode_kv_layout(), "request");
+}
+
+TEST(MtpAsyncInputBuilderTest, PybindDraftDecodeDoesNotBorrowPrefillPhase) {
+  for (const bool is_draft : {false, true}) {
+    for (const BatchForwardType::Value phase :
+         {BatchForwardType::DECODE,
+          BatchForwardType::PREFILL,
+          BatchForwardType::CHUNKED_PREFILL,
+          BatchForwardType::MIXED}) {
+      auto metadata = std::make_shared<layer::AttentionMetadata>();
+      // Native kernels still use chunked attention for multi-token decode.
+      metadata->is_prefill = phase == BatchForwardType::PREFILL;
+      metadata->is_chunked_prefill = !metadata->is_prefill;
+      LlmModelParams storage;
+      storage.meta.batch_forward_type = phase;
+      storage.meta.execution_batch.num_scheduled_tokens = {3, 3};
+      storage.meta.execution_batch.num_reqs = 2;
+      storage.meta.execution_batch.num_tokens = 6;
+      PyAttentionMetadataView view(
+          metadata, ModelParamsView(storage), is_draft);
+      EXPECT_EQ(view.is_prefill(), metadata->is_prefill);
+      EXPECT_EQ(view.is_chunked_prefill(),
+                metadata->is_chunked_prefill &&
+                    !(is_draft && phase == BatchForwardType::DECODE));
+      EXPECT_EQ(*view.decode_query_width(), 3);
+      EXPECT_EQ(metadata->is_chunked_prefill, !metadata->is_prefill);
+    }
+  }
 }
 
 TEST(MtpAsyncInputBuilderTest, PybindViewOwnsGlobalDpKvMaxSequenceLengths) {

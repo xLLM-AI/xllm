@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
@@ -92,6 +92,8 @@ class StaticGraphAttentionMetadata:
     mega_moe_token_mask: torch.Tensor | None = None
     is_mixed: bool = False
     is_dummy: bool = False
+    # KV rows address either individual tokens or complete query requests.
+    decode_kv_layout: Literal["token", "request"] = "token"
     decode_query_width: int | None = None
     num_speculative_tokens: int = 0
     is_target_verify: bool = False
