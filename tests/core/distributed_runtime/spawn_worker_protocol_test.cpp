@@ -468,5 +468,70 @@ TEST(SpawnWorkerProtocolTest, RejectsMalformedGraphDecodeLimit) {
                    .has_value());
 }
 
+TEST(SpawnWorkerProtocolTest, TopologyDefaultsForLegacyLaunchers) {
+  for (int32_t argc = kMinimumArgumentCount;
+       argc <= kLayerwiseSplitSizeArgumentIndex;
+       ++argc) {
+    std::vector<std::string> arguments(argc, "unused");
+    std::vector<char*> argv = mutable_argv(&arguments);
+    const auto parsed = parse_topology_config(argc, argv.data());
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->layerwise_split_size, 1);
+    EXPECT_FALSE(parsed->enable_mm_encoder_dp);
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, PreservesTopologyPairWithTrailingArguments) {
+  for (const int32_t split : {1, 2, 8}) {
+    for (const bool encoder_dp : {false, true}) {
+      for (const int32_t trailing : {0, 1}) {
+        std::vector<std::string> arguments(
+            kEnableMmEncoderDpArgumentIndex + 1 + trailing, "unused");
+        arguments[kLayerwiseSplitSizeArgumentIndex] = std::to_string(split);
+        arguments[kEnableMmEncoderDpArgumentIndex] = encoder_dp ? "1" : "0";
+        std::vector<char*> argv = mutable_argv(&arguments);
+        const auto parsed = parse_topology_config(
+            static_cast<int32_t>(argv.size()), argv.data());
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(parsed->layerwise_split_size, split);
+        EXPECT_EQ(parsed->enable_mm_encoder_dp, encoder_dp);
+      }
+    }
+  }
+}
+
+TEST(SpawnWorkerProtocolTest, RejectsMalformedOrPartialTopologyPair) {
+  std::vector<std::string> arguments(kEnableMmEncoderDpArgumentIndex + 1,
+                                     "unused");
+  arguments[kLayerwiseSplitSizeArgumentIndex] = "2";
+  arguments[kEnableMmEncoderDpArgumentIndex] = "1";
+  std::vector<char*> argv = mutable_argv(&arguments);
+  const int32_t argc = static_cast<int32_t>(argv.size());
+  EXPECT_FALSE(parse_topology_config(argc, nullptr).has_value());
+  EXPECT_FALSE(parse_topology_config(kMinimumArgumentCount - 1, argv.data())
+                   .has_value());
+  EXPECT_FALSE(
+      parse_topology_config(kEnableMmEncoderDpArgumentIndex, argv.data())
+          .has_value());
+  for (const char* invalid : {"", "0", "-1", " 2", "2x", "2147483648"}) {
+    arguments[kLayerwiseSplitSizeArgumentIndex] = invalid;
+    argv = mutable_argv(&arguments);
+    EXPECT_FALSE(parse_topology_config(argc, argv.data()).has_value());
+  }
+  arguments[kLayerwiseSplitSizeArgumentIndex] = "2";
+  for (const char* invalid : {"", "true", "2", "-1"}) {
+    arguments[kEnableMmEncoderDpArgumentIndex] = invalid;
+    argv = mutable_argv(&arguments);
+    EXPECT_FALSE(parse_topology_config(argc, argv.data()).has_value());
+  }
+  arguments[kEnableMmEncoderDpArgumentIndex] = "1";
+  argv = mutable_argv(&arguments);
+  argv[kLayerwiseSplitSizeArgumentIndex] = nullptr;
+  EXPECT_FALSE(parse_topology_config(argc, argv.data()).has_value());
+  argv = mutable_argv(&arguments);
+  argv[kEnableMmEncoderDpArgumentIndex] = nullptr;
+  EXPECT_FALSE(parse_topology_config(argc, argv.data()).has_value());
+}
+
 }  // namespace
 }  // namespace xllm::spawn_worker_protocol

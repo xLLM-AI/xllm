@@ -36,7 +36,6 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/config/parallel_config.h"
 #include "core/framework/parallel_state/parallel_topology.h"
 #include "core/platform/platform.h"
 #include "parallel_args.h"
@@ -164,8 +163,10 @@ CollectiveCommunicator::CollectiveCommunicator(
     int32_t dp_size,
     int32_t ep_size,
     int32_t cp_size,
-    EplbWorkerConfig eplb_worker_config)
+    EplbWorkerConfig eplb_worker_config,
+    CollectiveTopologyOptions topology_options)
     : CollectiveCommunicatorBase(global_rank, world_size),
+      topology_options_(std::move(topology_options)),
       parallel_args_(std::make_unique<ParallelArgs>(global_rank,
                                                     world_size,
                                                     dp_size,
@@ -173,9 +174,8 @@ CollectiveCommunicator::CollectiveCommunicator(
                                                     nullptr,
                                                     ep_size)) {
   parallel_args_->eplb_worker_config(std::move(eplb_worker_config));
-  const ParallelConfig& config = ParallelConfig::get_instance();
-  parallel_args_->kv_split_size(config.kv_split_size());
-  parallel_args_->layerwise_split_size(config.layerwise_split_size());
+  parallel_args_->kv_split_size(topology_options_.kv_split_size);
+  parallel_args_->layerwise_split_size(topology_options_.layerwise_split_size);
 }
 
 void CollectiveCommunicator::create_process_groups(
@@ -196,7 +196,7 @@ void CollectiveCommunicator::create_process_groups(
   // Encoder DP is used by multi-modal models to parallelize vision encoder
   // work inside each language-model TP group. The rank set matches the TP
   // group, but each rank runs a full encoder on different multi-modal items.
-  if (::xllm::ParallelConfig::get_instance().enable_mm_encoder_dp()) {
+  if (topology_options_.enable_mm_encoder_dp) {
     const int32_t encoder_dp_size = world_size / dp_size;
     port_offset = global_rank / encoder_dp_size + 1;
     encoder_dp_group_ = create_process_group(global_rank,
@@ -234,10 +234,10 @@ void CollectiveCommunicator::create_process_groups(
   // the all-reduce, which is a silent numerical error rather than a crash.
   const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
   const int32_t kv_split_size = parallel_args_->kv_split_size_effective();
-  const bool native_npu_dcp = Platform::is_npu() &&
-                              !ModelConfig::is_python_model_impl(
-                                  ModelConfig::get_instance().model_impl()) &&
-                              normalized_cp_size == 1 && kv_split_size > 1;
+  const bool native_npu_dcp =
+      Platform::is_npu() &&
+      !ModelConfig::is_python_model_impl(topology_options_.model_impl) &&
+      normalized_cp_size == 1 && kv_split_size > 1;
   // Python owns its pure-DCP groups; the native CP topology still governs TP.
   const parallel_state::ParallelTopology topology(
       global_rank,

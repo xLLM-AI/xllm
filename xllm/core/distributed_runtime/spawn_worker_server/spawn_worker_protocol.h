@@ -47,7 +47,43 @@ inline constexpr int32_t kEnableGraphDoubleBufferArgumentIndex =
     kVaeSizeArgumentIndex + 1;
 inline constexpr int32_t kAclGraphDecodeBatchSizeLimitArgumentIndex =
     kEnableGraphDoubleBufferArgumentIndex + 1;
+inline constexpr int32_t kLayerwiseSplitSizeArgumentIndex =
+    kAclGraphDecodeBatchSizeLimitArgumentIndex + 1;
+inline constexpr int32_t kEnableMmEncoderDpArgumentIndex =
+    kLayerwiseSplitSizeArgumentIndex + 1;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
+
+struct TopologyConfig {
+  int32_t layerwise_split_size = 1;
+  bool enable_mm_encoder_dp = false;
+};
+
+inline std::optional<TopologyConfig> parse_topology_config(int32_t argc,
+                                                           char* const argv[]) {
+  if (argv == nullptr || argc < kMinimumArgumentCount) {
+    return std::nullopt;
+  }
+  if (argc <= kLayerwiseSplitSizeArgumentIndex) {
+    return TopologyConfig{};
+  }
+  if (argc <= kEnableMmEncoderDpArgumentIndex ||
+      argv[kLayerwiseSplitSizeArgumentIndex] == nullptr ||
+      argv[kEnableMmEncoderDpArgumentIndex] == nullptr) {
+    return std::nullopt;
+  }
+  const std::string_view split(argv[kLayerwiseSplitSizeArgumentIndex]);
+  const std::string_view encoder_dp(argv[kEnableMmEncoderDpArgumentIndex]);
+  TopologyConfig config;
+  const auto [end, error] = std::from_chars(
+      split.data(), split.data() + split.size(), config.layerwise_split_size);
+  if (error != std::errc{} || end != split.data() + split.size() ||
+      config.layerwise_split_size < 1 ||
+      (encoder_dp != "0" && encoder_dp != "1")) {
+    return std::nullopt;
+  }
+  config.enable_mm_encoder_dp = encoder_dp == "1";
+  return config;
+}
 
 inline std::optional<int32_t> parse_graph_decode_batch_size_limit(
     int32_t argc,

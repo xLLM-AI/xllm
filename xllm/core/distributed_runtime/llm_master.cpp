@@ -147,6 +147,11 @@ LLMMaster::LLMMaster(const Options& options)
       .dp_size(options_.dp_size())
       .ep_size(options_.ep_size())
       .cp_size(options_.cp_size())
+      .kv_split_size(ParallelConfig::get_instance().kv_split_size())
+      .layerwise_split_size(
+          ParallelConfig::get_instance().layerwise_split_size())
+      .enable_mm_encoder_dp(
+          ParallelConfig::get_instance().enable_mm_encoder_dp())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
       .enable_dp_fair_token_budget(enable_dp_fair_token_budget)

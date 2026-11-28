@@ -182,13 +182,18 @@ void WorkerServer::create_server(const runtime::Options& options,
         options.text_encoder_tp_size());
     comm = std::move(dit_comm);
   } else {
-    auto common_comm =
-        std::make_unique<CollectiveCommunicator>(worker_global_rank,
-                                                 world_size,
-                                                 dp_size,
-                                                 ep_size,
-                                                 cp_size,
-                                                 options.eplb_worker_config());
+    auto common_comm = std::make_unique<CollectiveCommunicator>(
+        worker_global_rank,
+        world_size,
+        dp_size,
+        ep_size,
+        cp_size,
+        options.eplb_worker_config(),
+        CollectiveTopologyOptions{
+            .kv_split_size = options.kv_split_size(),
+            .layerwise_split_size = options.layerwise_split_size(),
+            .enable_mm_encoder_dp = options.enable_mm_encoder_dp(),
+            .model_impl = options.model_impl()});
     comm = std::move(common_comm);
   }
 
@@ -321,9 +326,12 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* ep_size_ptr = ep_size_str.c_str();
   std::string cp_size_str = std::to_string(options.cp_size());
   const char* cp_size_ptr = cp_size_str.c_str();
-  std::string kv_split_size_str =
-      std::to_string(::xllm::ParallelConfig::get_instance().kv_split_size());
+  std::string kv_split_size_str = std::to_string(options.kv_split_size());
   const char* kv_split_size_ptr = kv_split_size_str.c_str();
+  const std::string layerwise_split_size_str =
+      std::to_string(options.layerwise_split_size());
+  const char* enable_mm_encoder_dp_ptr =
+      options.enable_mm_encoder_dp() ? "1" : "0";
   std::string tp_size_str = std::to_string(options.tp_size());
   const char* tp_size_ptr = tp_size_str.c_str();
   std::string sp_size_str = std::to_string(options.sp_size());
@@ -424,10 +432,11 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         vae_size_ptr,
                         enable_graph_double_buffer_ptr,
                         graph_decode_batch_size_limit_str.c_str(),
+                        layerwise_split_size_str.c_str(),
+                        enable_mm_encoder_dp_ptr,
                         nullptr};
-  static_assert(
-      std::size(argv) ==
-      spawn_worker_protocol::kAclGraphDecodeBatchSizeLimitArgumentIndex + 2);
+  static_assert(std::size(argv) ==
+                spawn_worker_protocol::kEnableMmEncoderDpArgumentIndex + 2);
   pid_t pid;
   int status = posix_spawnp(
       &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);
