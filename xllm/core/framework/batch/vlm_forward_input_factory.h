@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "core/runtime/vlm_forward_params.h"
@@ -59,6 +60,7 @@ class VlmForwardInputFactory final {
     std::vector<int32_t> dp_global_json_object_active;
     std::vector<int32_t> dp_is_decode;
     BatchForwardType batch_forward_type;
+    bool is_graph_warmup = false;
   };
 
   void prepare_rank_inputs(BatchGroup& batches,
@@ -68,6 +70,9 @@ class VlmForwardInputFactory final {
 
   VlmForwardInputFactoryOptions options_;
   std::unique_ptr<ThreadPool> threadpool_;
+  std::vector<std::vector<int32_t>> dp_batch_embedding_ids_;
+  std::vector<std::vector<std::string>> dp_batch_request_ids_;
+  std::vector<uint64_t> dp_batch_generations_;
   std::vector<std::unique_ptr<SharedKVMappingTracker>>
       dp_shared_kv_mapping_trackers_;
 };
