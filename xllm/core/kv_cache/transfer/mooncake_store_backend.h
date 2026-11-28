@@ -25,6 +25,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/kv_cache/transfer/kv_cache_store_backend.h"
+
 namespace xllm {
 
 struct MooncakeStoreBackendConfig {
@@ -41,28 +43,28 @@ struct MooncakeRegisteredRange {
   size_t bytes = 0;
 };
 
-struct MooncakeMultiBuffer {
-  std::vector<void*> addresses;
-  std::vector<size_t> sizes;
-};
+using MooncakeMultiBuffer = StoreBuffer;
 
-class MooncakeStoreBackend final {
+class MooncakeStoreBackend final : public KVCacheStoreBackend {
  public:
   MooncakeStoreBackend() = default;
-  ~MooncakeStoreBackend();
+  ~MooncakeStoreBackend() override;
 
   bool init(const MooncakeStoreBackendConfig& config,
             const std::vector<MooncakeRegisteredRange>& ranges);
   std::vector<uint8_t> batch_put(
       const std::vector<std::string>& keys,
-      const std::vector<MooncakeMultiBuffer>& buffers);
-  bool get(const std::string& key, const MooncakeMultiBuffer& buffer);
+      const std::vector<MooncakeMultiBuffer>& buffers) override;
+  std::vector<uint8_t> batch_get(
+      const std::vector<std::string>& keys,
+      const std::vector<MooncakeMultiBuffer>& buffers) override;
 
  private:
   friend class MooncakeStoreBackendTestPeer;
 
   static std::optional<std::vector<MooncakeRegisteredRange>> unique_ranges(
       const std::vector<MooncakeRegisteredRange>& ranges);
+  bool get(const std::string& key, const MooncakeMultiBuffer& buffer);
   static bool get_succeeded(int64_t expected_bytes,
                             const std::vector<int>& results);
   static bool put_succeeded(int result);

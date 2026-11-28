@@ -83,6 +83,7 @@ endif()
 
 if(USE_NPU OR USE_MLU)
 cc_test(
+  DISCOVER_TESTS
   NAME
     kv_cache_store_test
   CPU_ONLY

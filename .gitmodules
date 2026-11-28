@@ -53,3 +53,8 @@
 [submodule "xllm-kernel/third_party/pto-isa"]
 	path = xllm-kernel/third_party/pto-isa
 	url = https://gitcode.com/cann/pto-isa.git
+[submodule "third_party/yuanrong-datasystem"]
+	path = third_party/yuanrong-datasystem
+	url = https://gitcode.com/openeuler/yuanrong-datasystem.git
+	branch = master
+	fetchRecurseSubmodules = false

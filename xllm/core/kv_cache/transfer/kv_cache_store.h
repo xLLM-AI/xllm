@@ -54,12 +54,23 @@ struct KVCacheStoreInitConfig {
   uint32_t kv_replica_rank = 0;
   int32_t kv_split_size = 1;
   int32_t kv_split_rank = 0;
+  // Which backend stores the offloaded blocks. "mooncake" is the peer-to-peer
+  // store already wired into the transfer engine; "yuanrong" is the
+  // content-addressed host store. Selecting "yuanrong" requires a build with
+  // USE_YUANRONG.
+  std::string backend = "mooncake";
+  // YuanRong worker endpoint, only read when backend is "yuanrong".
+  std::string yuanrong_host;
+  int32_t yuanrong_port = 0;
+  int32_t yuanrong_timeout_ms = 500;
 };
 
 class KVCacheStore final {
  public:
   KVCacheStore() = default;
   ~KVCacheStore();
+
+  bool is_storage_writer() const { return is_storage_writer_; }
 
   bool init(const KVCacheStoreInitConfig& config,
             HostCacheStoreIndex store_index);
@@ -134,8 +145,8 @@ class KVCacheStore final {
       const std::vector<uint8_t>& physical_results);
   static std::optional<std::string> get_store_device_names(
       const KVCacheStoreInitConfig& config);
-  std::optional<MooncakeMultiBuffer> build_multi_buffer(const StoreEntry& entry,
-                                                        int32_t block_id) const;
+  std::optional<StoreBuffer> build_multi_buffer(const StoreEntry& entry,
+                                                int32_t block_id) const;
   std::optional<std::vector<MooncakeRegisteredRange>> collect_ranges() const;
 
  private:
@@ -144,7 +155,7 @@ class KVCacheStore final {
   std::map<BlockType, std::vector<StoreEntry>> store_index_;
   size_t max_entries_per_type_ = 0;
   bool is_storage_writer_ = false;
-  std::unique_ptr<MooncakeStoreBackend> backend_;
+  std::unique_ptr<KVCacheStoreBackend> backend_;
 };
 
 }  // namespace xllm

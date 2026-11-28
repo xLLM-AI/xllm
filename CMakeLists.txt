@@ -10,6 +10,7 @@ option(USE_DCU "Enable DCU support" OFF)
 option(USE_MACA "Enable MACA support" OFF)
 option(USE_ETCD "Build Mooncake etcd support" ON)
 option(STORE_USE_ETCD "Build Mooncake Store etcd support" ${USE_ETCD})
+option(USE_YUANRONG "Build the YuanRong KV cache store backend" OFF)
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
@@ -353,6 +354,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
    AND CMAKE_CXX_COMPILER_ABI STREQUAL "ELF"
    AND NOT CMAKE_EXECUTABLE_FORMAT)
   set(CMAKE_EXECUTABLE_FORMAT "ELF")
+endif()
+
+# Build the DataSystem client before applying host-wide Torch flags and device libraries.
+if(USE_YUANRONG)
+  add_subdirectory(cmake/yuanrong_store)
 endif()
 
 # ---------------------------------------------------------------------------

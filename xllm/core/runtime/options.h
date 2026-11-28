@@ -206,6 +206,10 @@ struct Options {
   // enable kvcache store.
   PROPERTY(bool, enable_kvcache_store) = false;
 
+  // KV cache store backend: "mooncake" or "yuanrong" (requires a build with
+  // USE_YUANRONG).
+  PROPERTY(std::string, store_backend) = "mooncake";
+
   // store transfer protocol.
   PROPERTY(std::string, store_protocol) = "tcp";
 
@@ -222,6 +226,13 @@ struct Options {
   //  the IP:Port of the local machine or an accessible domain name (default
   //  value used if port is not included)
   PROPERTY(std::string, store_local_hostname) = "";
+
+  // YuanRong worker endpoint used when store_backend=yuanrong.
+  PROPERTY(std::string, store_yuanrong_host) = "";
+
+  PROPERTY(int32_t, store_yuanrong_port) = 0;
+
+  PROPERTY(int32_t, store_yuanrong_timeout_ms) = 500;
 
   // Prefetch from kvcache store copy batch size
   PROPERTY(uint32_t, prefetch_batch_size) = 2;

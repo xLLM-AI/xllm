@@ -25,8 +25,13 @@ limitations under the License.
 #include <unordered_set>
 #include <utility>
 
+#include "core/framework/config/kv_cache_store_config_validation.h"
 #include "core/framework/multimodal/content_hash.h"
 #include "util/hash_util.h"
+
+#if defined(USE_YUANRONG)
+#include "core/kv_cache/transfer/yuanrong_store_backend.h"
+#endif
 
 namespace xllm {
 namespace {
@@ -50,8 +55,31 @@ bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
   CHECK_GE(config.kv_split_size, 1);
   CHECK_GE(config.kv_split_rank, 0);
   CHECK_LT(config.kv_split_rank, config.kv_split_size);
+  if (const char* error = kv_cache_store_backend_error(
+          config.backend, config.yuanrong_host, config.yuanrong_port)) {
+    LOG(ERROR) << error;
+    return false;
+  }
   config_ = config;
   initialize_store_index(std::move(store_index));
+
+  if (config_.backend == "yuanrong") {
+#if defined(USE_YUANRONG)
+    auto backend = std::make_unique<YuanRongStoreBackend>();
+    if (!backend->init(config_.yuanrong_host,
+                       config_.yuanrong_port,
+                       config_.yuanrong_timeout_ms)) {
+      LOG(ERROR) << "Failed to initialize the YuanRong store backend.";
+      return false;
+    }
+    backend_ = std::move(backend);
+    is_initialized_ = true;
+    return true;
+#else
+    LOG(ERROR) << "store_backend=yuanrong requires a build with USE_YUANRONG.";
+    return false;
+#endif
+  }
 
   const std::optional<std::string> device_names =
       get_store_device_names(config_);
@@ -69,6 +97,7 @@ bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
     LOG(ERROR) << "Failed to collect Mooncake Host tensor ranges.";
     return false;
   }
+
   MooncakeStoreBackendConfig backend_config;
   backend_config.localhost_name = config_.localhost_name;
   backend_config.protocol = config_.protocol;
@@ -76,11 +105,11 @@ bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
   backend_config.metadata_server = config_.metadata_server;
   backend_config.master_server_address = config_.master_server_address;
   backend_config.replica_num = config_.replica_num;
-  backend_ = std::make_unique<MooncakeStoreBackend>();
-  if (!backend_->init(backend_config, *ranges)) {
-    backend_.reset();
+  auto mooncake_backend = std::make_unique<MooncakeStoreBackend>();
+  if (!mooncake_backend->init(backend_config, *ranges)) {
     return false;
   }
+  backend_ = std::move(mooncake_backend);
 
   is_initialized_ = true;
   return true;
@@ -321,7 +350,7 @@ uint32_t KVCacheStore::batch_put(
 
   std::vector<uint8_t> physical_results(requests.size(), /*value=*/0);
   std::vector<std::string> put_keys;
-  std::vector<MooncakeMultiBuffer> put_buffers;
+  std::vector<StoreBuffer> put_buffers;
   std::vector<size_t> put_group_indices;
   put_keys.reserve(groups.size());
   put_buffers.reserve(groups.size());
@@ -335,14 +364,14 @@ uint32_t KVCacheStore::batch_put(
       }
       continue;
     }
-    const std::optional<MooncakeMultiBuffer> buffer = build_multi_buffer(
+    std::optional<StoreBuffer> buffer = build_multi_buffer(
         *request.entry,
         block_transfer_info[request.logical_index].dst_block_id);
     if (!buffer.has_value()) {
       continue;
     }
     put_keys.emplace_back(group.key);
-    put_buffers.emplace_back(*buffer);
+    put_buffers.emplace_back(std::move(*buffer));
     put_group_indices.emplace_back(group_index);
   }
 
@@ -399,23 +428,48 @@ std::vector<uint8_t> KVCacheStore::batch_get_with_status(
   }
 
   std::vector<uint8_t> physical_results(requests.size(), /*value=*/0);
+  // Assemble the whole prefetch before crossing the backend seam. A backend
+  // with a native batch read (YuanRong) then does one store round trip instead
+  // of N sequential calls; the default backend implementation still loops
+  // over get() one key at a time, so Mooncake's behaviour is unchanged.
+  std::vector<std::string> keys;
+  std::vector<StoreBuffer> buffers;
+  std::vector<size_t> request_indices;
+  keys.reserve(requests.size());
+  buffers.reserve(requests.size());
+  request_indices.reserve(requests.size());
   for (size_t request_index = 0; request_index < requests.size();
        ++request_index) {
     const PhysicalRequest& request = requests[request_index];
-    const std::optional<MooncakeMultiBuffer> buffer = build_multi_buffer(
+    std::optional<StoreBuffer> buffer = build_multi_buffer(
         *request.entry,
         block_transfer_info[request.logical_index].dst_block_id);
     if (!buffer.has_value() || backend_ == nullptr) {
       continue;
     }
-    physical_results[request_index] =
-        backend_->get(request.key, *buffer) ? 1 : 0;
+    keys.push_back(request.key);
+    buffers.emplace_back(std::move(*buffer));
+    request_indices.push_back(request_index);
+  }
+
+  if (backend_ != nullptr && !keys.empty()) {
+    const std::vector<uint8_t> batch_status =
+        backend_->batch_get(keys, buffers);
+    if (batch_status.size() != keys.size()) {
+      LOG(ERROR) << "KVCacheStore batch_get returned " << batch_status.size()
+                 << " statuses for " << keys.size() << " keys.";
+    } else {
+      for (size_t index = 0; index < keys.size(); ++index) {
+        physical_results[request_indices[index]] =
+            batch_status[index] != 0 ? 1 : 0;
+      }
+    }
   }
   return aggregate_results(
       block_transfer_info.size(), requests, physical_results);
 }
 
-std::optional<MooncakeMultiBuffer> KVCacheStore::build_multi_buffer(
+std::optional<StoreBuffer> KVCacheStore::build_multi_buffer(
     const StoreEntry& entry,
     int32_t block_id) const {
   if (entry.block_tensors.empty()) {
@@ -424,7 +478,7 @@ std::optional<MooncakeMultiBuffer> KVCacheStore::build_multi_buffer(
     return std::nullopt;
   }
 
-  MooncakeMultiBuffer buffer;
+  StoreBuffer buffer;
   buffer.addresses.reserve(entry.block_tensors.size());
   buffer.sizes.reserve(entry.block_tensors.size());
   for (const torch::Tensor& tensor : entry.block_tensors) {

@@ -15,7 +15,10 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+#include <limits>
 #include <string>
+#include <string_view>
 
 namespace xllm {
 
@@ -26,6 +29,25 @@ struct ModelArgs;
 struct ParallelArgs;
 namespace runtime {
 struct Options;
+}
+
+// Shared by server startup and callers that initialize the store directly.
+inline const char* kv_cache_store_backend_error(std::string_view backend,
+                                                std::string_view host,
+                                                int32_t port) {
+  if (backend == "mooncake") {
+    return nullptr;
+  }
+  if (backend != "yuanrong") {
+    return "Unknown --store_backend (expected mooncake or yuanrong)";
+  }
+  if (host.empty()) {
+    return "YuanRong requires --store_yuanrong_host";
+  }
+  if (port <= 0 || port > std::numeric_limits<uint16_t>::max()) {
+    return "YuanRong requires --store_yuanrong_port in 1..65535";
+  }
+  return nullptr;
 }
 
 void validate_kv_cache_store_config(const std::string& model_type,

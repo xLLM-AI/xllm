@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/kv_cache/transfer/hierarchy_kv_transfer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -211,13 +212,25 @@ bool HierarchyKVTransfer::finalize_registration() {
       }
     }
     KVCacheStoreInitConfig store_config;
-    const std::string store_local_hostname = make_store_local_hostname(
-        options_.store_local_hostname(), options_.store_worker_id());
-    store_config.localhost_name = store_local_hostname;
-    store_config.protocol = options_.store_protocol();
-    store_config.rdma_devices = options_.store_rdma_devices();
-    store_config.metadata_server = options_.store_metadata_server();
-    store_config.master_server_address = options_.store_master_server_address();
+    store_config.backend = options_.store_backend();
+    std::string connection;
+    if (store_config.backend == "yuanrong") {
+      store_config.yuanrong_host = options_.store_yuanrong_host();
+      store_config.yuanrong_port = options_.store_yuanrong_port();
+      store_config.yuanrong_timeout_ms = options_.store_yuanrong_timeout_ms();
+      connection = store_config.yuanrong_host + ":" +
+                   std::to_string(store_config.yuanrong_port);
+    } else {
+      store_config.localhost_name = make_store_local_hostname(
+          options_.store_local_hostname(), options_.store_worker_id());
+      store_config.protocol = options_.store_protocol();
+      store_config.rdma_devices = options_.store_rdma_devices();
+      store_config.metadata_server = options_.store_metadata_server();
+      store_config.master_server_address =
+          options_.store_master_server_address();
+      connection =
+          store_config.localhost_name + ", protocol=" + store_config.protocol;
+    }
     store_config.model_id = options_.store_namespace();
     store_config.tp_rank = options_.tp_rank();
     store_config.tp_size = options_.tp_size();
@@ -225,8 +238,8 @@ bool HierarchyKVTransfer::finalize_registration() {
     store_config.kv_split_rank = options_.kv_split_rank();
     store_config.dp_local_rank = options_.dp_local_rank();
     store_config.kv_replica_rank = options_.kv_replica_rank();
-    LOG(INFO) << "[Mooncake][StoreEngine] initialize, endpoint="
-              << store_local_hostname << ", protocol=" << store_config.protocol
+    LOG(INFO) << "[KVCacheStore] initialize, backend=" << store_config.backend
+              << ", endpoint=" << connection
               << ", worker_rank=" << options_.store_worker_id()
               << ", tp_rank=" << store_config.tp_rank
               << ", tp_size=" << store_config.tp_size
@@ -234,9 +247,10 @@ bool HierarchyKVTransfer::finalize_registration() {
               << ", kv_split_rank=" << store_config.kv_split_rank;
     kv_cache_store_ = std::make_unique<KVCacheStore>();
     CHECK(kv_cache_store_->init(store_config, std::move(store_index)))
-        << "Failed to initialize Mooncake Store.";
-    LOG(INFO) << "[Mooncake][StoreEngine] ready, endpoint="
-              << store_local_hostname << ", protocol=" << store_config.protocol
+        << "Failed to initialize " << store_config.backend
+        << " KV cache store.";
+    LOG(INFO) << "[KVCacheStore][StoreEngine] ready, backend="
+              << store_config.backend << ", endpoint=" << connection
               << ", worker_rank=" << options_.store_worker_id()
               << ", tp_rank=" << store_config.tp_rank
               << ", tp_size=" << store_config.tp_size
@@ -545,16 +559,22 @@ std::vector<uint8_t> HierarchyKVTransfer::prefetch_kv_blocks(
                << static_cast<uint32_t>(block_transfer_info[0].transfer_type);
     return std::vector<uint8_t>(block_transfer_info.size(), /*value=*/0);
   }
+  const auto prefetch_start = std::chrono::steady_clock::now();
   std::vector<uint8_t> hits =
       kv_cache_store_->batch_get_with_status(block_transfer_info);
+  const int64_t elapsed_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - prefetch_start)
+          .count();
   const size_t hit_count =
       std::count(hits.begin(), hits.end(), static_cast<uint8_t>(1));
-  VLOG(1) << "[Mooncake][PrefetchGet] worker_rank="
+  VLOG(1) << "[KVCacheStore][PrefetchGet] worker_rank="
           << options_.store_worker_id()
           << ", kv_split_size=" << options_.kv_split_size()
           << ", kv_split_rank=" << options_.kv_split_rank() << ", type="
           << static_cast<int32_t>(block_transfer_info[0].block_type)
-          << ", blocks=" << hits.size() << ", hits=" << hit_count;
+          << ", blocks=" << hits.size() << ", hits=" << hit_count
+          << ", elapsed_us=" << elapsed_us;
   return hits;
 }
 
@@ -593,19 +613,25 @@ uint32_t HierarchyKVTransfer::offload(
           << ", target_mappings=" << request.target_mappings.size()
           << ", draft_mappings=" << request.draft_mappings.size();
   if (kv_cache_store_ != nullptr) {
+    const auto put_start = std::chrono::steady_clock::now();
     const uint32_t put_count = kv_cache_store_->batch_put(block_transfer_info);
+    const int64_t elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - put_start)
+            .count();
     if (put_count != block_transfer_info.size()) {
-      LOG(WARNING) << "Mooncake BatchPut partially failed: " << put_count << "/"
-                   << block_transfer_info.size();
+      LOG(WARNING) << "[KVCacheStore] BatchPut partially failed: " << put_count
+                   << "/" << block_transfer_info.size();
     }
-    VLOG(1) << "[Mooncake][OffloadPut] worker_rank="
+    VLOG(1) << "[KVCacheStore][OffloadPut] worker_rank="
             << options_.store_worker_id() << ", tp_rank=" << options_.tp_rank()
             << ", tp_size=" << options_.tp_size()
             << ", kv_split_size=" << options_.kv_split_size()
             << ", kv_split_rank=" << options_.kv_split_rank()
             << ", enable_mla=" << options_.enable_mla()
+            << ", store_write_enabled=" << kv_cache_store_->is_storage_writer()
             << ", blocks=" << block_transfer_info.size()
-            << ", success=" << put_count;
+            << ", success=" << put_count << ", elapsed_us=" << elapsed_us;
   }
   return static_cast<uint32_t>(block_transfer_info.size());
 }

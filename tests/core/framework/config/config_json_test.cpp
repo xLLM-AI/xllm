@@ -751,6 +751,26 @@ TEST(KVCacheStoreConfigTest, ReadsAndExportsRdmaDevices) {
             "mlx5_0,mlx5_1");
 }
 
+TEST(KVCacheStoreConfigTest, WorkerEndpointHonorsCliOverridesAndIsExported) {
+  google::FlagSaver flag_saver;
+  ASSERT_FALSE(
+      google::SetCommandLineOption("store_yuanrong_host", "worker-a").empty());
+  KVCacheStoreConfig config;
+  config.from_flags();
+  config.from_json(config::parse_json_string(
+      R"({"store_backend":"yuanrong","store_yuanrong_host":"worker-b","store_yuanrong_port":31501,"store_yuanrong_timeout_ms":750})"));
+  EXPECT_EQ(config.store_backend(), "yuanrong");
+  EXPECT_EQ(config.store_yuanrong_host(), "worker-a");
+  EXPECT_EQ(config.store_yuanrong_port(), 31501);
+  EXPECT_EQ(config.store_yuanrong_timeout_ms(), 750);
+  nlohmann::ordered_json exported;
+  config.append_config_json(exported);
+  EXPECT_EQ(exported.at("store_backend"), "yuanrong");
+  EXPECT_EQ(exported.at("store_yuanrong_host"), "worker-a");
+  EXPECT_EQ(exported.at("store_yuanrong_port"), 31501);
+  EXPECT_EQ(exported.at("store_yuanrong_timeout_ms"), 750);
+}
+
 TEST(ConfigJsonTest, RegistersContextParallelCommandLineOptions) {
   google::CommandLineFlagInfo flag_info;
   EXPECT_TRUE(google::GetCommandLineFlagInfo("cp_size", &flag_info));

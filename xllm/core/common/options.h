@@ -194,6 +194,8 @@ class Options {
 
   PROPERTY(bool, enable_kvcache_store) = false;
 
+  PROPERTY(std::string, store_backend) = "mooncake";
+
   PROPERTY(std::string, store_protocol) = "tcp";
 
   PROPERTY(std::string, store_rdma_devices) = "";
@@ -203,6 +205,12 @@ class Options {
   PROPERTY(std::string, store_metadata_server) = "";
 
   PROPERTY(std::string, store_local_hostname) = "";
+
+  PROPERTY(std::string, store_yuanrong_host) = "";
+
+  PROPERTY(int32_t, store_yuanrong_port) = 0;
+
+  PROPERTY(int32_t, store_yuanrong_timeout_ms) = 500;
 
   PROPERTY(bool, enable_multi_stream_parallel) = false;
 
