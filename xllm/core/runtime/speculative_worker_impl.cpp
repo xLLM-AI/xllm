@@ -59,8 +59,7 @@ void prepare_dummy_input(Input& input, const WorkerImpl& worker) {
       input.token_ids.numel() != 0) {
     return;
   }
-  const auto device = context.get_tensor_options().device();
-  build_dummy_forward_input(input, query_width, device);
+  build_dummy_forward_input(input, query_width, context);
   if (query_width > 1) {
     if (has_linear_attention_layers(context.get_model_args())) {
       params.num_accepted_tokens_host = {1};

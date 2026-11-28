@@ -62,8 +62,7 @@ LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
     : WorkerImpl(parallel_args, device, options, is_input_release_deferred) {
   device_.set_device();
 #if defined(USE_CUDA) || defined(USE_MUSA)
-  const auto& model_config = ModelConfig::get_instance();
-  if (!ModelConfig::is_python_model_impl(model_config.model_impl())) {
+  if (!ModelConfig::is_python_model_impl(options_.model_impl())) {
     threadpool_.schedule([this]() mutable {
       // initialize flashinfer workspace
       ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
@@ -75,7 +74,6 @@ LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
 
 bool LLMWorkerImpl::init_model(ModelContext& context) {
   CHECK(model_ == nullptr) << "Model is already initialized.";
-  const auto& model_config = ModelConfig::get_instance();
 #if defined(USE_MUSA)
   static const bool use_pool_compute_stream = util::get_bool_env(
       "XLLM_MUSA_POOL_COMPUTE_STREAM", /*default_value=*/true);
@@ -101,7 +99,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   // Skip when model_impl=python: Python executor uses flashinfer's Python API
   // directly; initializing the C++ workspace would conflict with Python-side
   // TVM-FFI type registration.
-  if (!ModelConfig::is_python_model_impl(model_config.model_impl())) {
+  if (!ModelConfig::is_python_model_impl(context.get_model_impl())) {
     auto& ws = ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance();
     if (!ws.get_int_workspace_buffer().defined()) {
       ws.initialize(device_);

@@ -150,8 +150,7 @@ void MTPWorkerImpl<TargetInput>::apply_draft_model_overrides(ModelArgs& args) {
       args,
       /*algorithm=*/"MTP",
       /*is_draft_engine=*/true,
-      ModelConfig::is_python_model_impl(
-          ModelConfig::get_instance().model_impl()));
+      ModelConfig::is_python_model_impl(draft_impl_->options().model_impl()));
 
 #if !defined(USE_NPU)
   if (args.num_nextn_predict_layers() != 0) {
@@ -1514,8 +1513,7 @@ bool MTPWorkerImpl<TargetInput>::uses_verifier_conditioned_draft_prefix()
 #if defined(USE_NPU)
   return draft_prefix_policy_ ==
              mtp_async::DraftPrefixPolicy::VERIFIER_CONDITIONED_FIRST_PASS &&
-         ModelConfig::is_python_model_impl(
-             ModelConfig::get_instance().model_impl()) &&
+         ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
          KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
          parallel_args_.dp_size() == 1 && parallel_args_.cp_size() == 1 &&
          parallel_args_.kv_split_size_effective() == 1 &&

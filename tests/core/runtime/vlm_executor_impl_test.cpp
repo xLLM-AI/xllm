@@ -20,10 +20,13 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/platform/platform.h"
+#include "core/runtime/executor.h"
 #include "core/util/scope_guard.h"
 
 namespace xllm {
@@ -31,6 +34,8 @@ namespace {
 
 class RoutingTestModel final : public CausalVLM {
  public:
+  std::string executor_type() const override { return executor_hint; }
+
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
                       std::vector<KVCache>& /*kv_caches*/,
@@ -63,6 +68,8 @@ class RoutingTestModel final : public CausalVLM {
   torch::Device device() const override { return torch::Device(torch::kCPU); }
   const torch::TensorOptions& options() const override { return options_; }
 
+  std::string executor_hint;
+  std::string selected_executor_type;
   int32_t encoder_calls = 0;
   int32_t embedding_calls = 0;
   int32_t executor_runs = 0;
@@ -97,6 +104,65 @@ class RoutingTestExecutor final : public ExecutorImpl {
  private:
   RoutingTestModel* model_;
 };
+
+TEST(VlmExecutorImplTest, ExecutorSelectionFollowsModelContext) {
+  for (const std::string executor_type : {"python", "vlm", "explicit"}) {
+    ASSERT_TRUE(ExecutorImplFactory::get_instance().register_creator(
+        executor_type,
+        "model_impl_routing_test",
+        [executor_type](CausalLM* model,
+                        const ModelArgs& /*args*/,
+                        const torch::Device& /*device*/,
+                        const runtime::Options& /*options*/) {
+          auto* routing_model = dynamic_cast<RoutingTestModel*>(model);
+          EXPECT_NE(routing_model, nullptr);
+          routing_model->selected_executor_type = executor_type;
+          return std::make_unique<RoutingTestExecutor>(routing_model);
+        }));
+  }
+  ModelConfig& config = ModelConfig::get_instance();
+  const std::string previous_impl = config.model_impl();
+  ScopeGuard restore_config([&] { config.model_impl(previous_impl); });
+  const ParallelArgs parallel_args(/*rank=*/0,
+                                   /*world_size=*/1,
+                                   /*process_group=*/nullptr);
+  const torch::Tensor tokens = torch::tensor({1, 2}, torch::kInt32);
+  const torch::Tensor positions = torch::tensor({3, 4}, torch::kInt32);
+  VlmModelParams params;
+  ModelParamsView view(params);
+  std::vector<KVCache> caches;
+  for (const std::string implementation : {"native", "python", "py", ""}) {
+    const bool is_python = ModelConfig::is_python_model_impl(implementation);
+    config.model_impl(is_python ? "native" : "python");
+    ModelContext context(parallel_args,
+                         ModelArgs{},
+                         QuantArgs{},
+                         torch::TensorOptions().device(torch::kCPU));
+    context.set_model_impl(implementation);
+    runtime::Options options;
+    options.backend("vlm")
+        .model_impl(implementation)
+        .extension_impl("model_impl_routing_test");
+    const std::string default_executor = is_python ? "python" : "vlm";
+    for (const bool explicit_executor : {false, true}) {
+      SCOPED_TRACE(implementation);
+      SCOPED_TRACE(explicit_executor);
+      RoutingTestModel model;
+      if (explicit_executor) {
+        model.executor_hint = "explicit";
+      }
+      Executor executor(&model, context, options);
+      const std::string expected_executor =
+          explicit_executor ? model.executor_hint : default_executor;
+      EXPECT_EQ(model.selected_executor_type, expected_executor);
+      const ModelOutput output =
+          executor.forward(tokens, positions, caches, view);
+      EXPECT_TRUE(torch::equal(output.hidden_states,
+                               (tokens + positions).unsqueeze(/*dim=*/1)));
+      EXPECT_EQ(model.executor_runs, 1);
+    }
+  }
+}
 
 TEST(VlmExecutorImplTest, RoutingUsesIndependentInstanceGraphModes) {
   static const bool registered =

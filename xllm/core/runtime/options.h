@@ -34,6 +34,7 @@ struct Options {
 
   PROPERTY(std::string, model_id);
 
+  // Supplied by the master or spawn boundary; empty selects the native model.
   PROPERTY(std::string, model_impl);
 
   PROPERTY(std::string, extension_impl);
