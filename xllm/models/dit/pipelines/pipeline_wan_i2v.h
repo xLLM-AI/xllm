@@ -35,6 +35,7 @@ limitations under the License.
 #endif
 #include "framework/parallel_state/parallel_state.h"
 #include "models/dit/autoencoders/autoencoder_kl_wan.h"
+#include "models/dit/encoders/clip_vision_encoder.h"
 #include "models/dit/encoders/umt5_encoder.h"
 #include "models/dit/processors/vae_video_processor.h"
 #include "models/dit/schedulers/flowmatch_euler_discrete_scheduler.h"
@@ -45,6 +46,7 @@ limitations under the License.
 #endif
 #include "models/dit/utils/dit_parallel_mixin.h"
 #include "models/model_registry.h"
+#include "processors/clip_image_processor.h"
 
 namespace xllm {
 
@@ -76,12 +78,32 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     sparse_attn_config_.mask_refresh_steps =
         dit_config.dit_sparse_attention_mask_refresh_steps();
 
-    LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
-    vae_ = AutoencoderKLWan(context.get_model_context("vae"));
+    LOG(INFO) << "Initializing Wan I2V pipeline...";
+    const auto vae_options = context.has_component("image_encoder")
+                                 ? options_.dtype(torch::kFloat32)
+                                 : options_;
+    const ModelContext vae_context(context.get_parallel_args(),
+                                   vae_args,
+                                   context.get_quant_args("vae"),
+                                   vae_options);
+    vae_ = AutoencoderKLWan(vae_context);
     transformer_ = WanTransformer3DModel(
         context.get_model_context("transformer"), sparse_attn_config_);
-    transformer_2_ = WanTransformer3DModel(
-        context.get_model_context("transformer_2"), sparse_attn_config_);
+    if (context.has_component("transformer_2")) {
+      transformer_2_ = WanTransformer3DModel(
+          context.get_model_context("transformer_2"), sparse_attn_config_);
+      register_module("transformer_2", transformer_2_);
+    } else {
+      boundary_ratio_ = -1.0f;
+    }
+    if (context.has_component("image_encoder")) {
+      const ModelContext vision_context(context.get_parallel_args(),
+                                        context.get_model_args("image_encoder"),
+                                        context.get_quant_args("image_encoder"),
+                                        options_.dtype(torch::kFloat32));
+      image_encoder_ =
+          register_module("image_encoder", CLIPVisionEncoder(vision_context));
+    }
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
     // Pick the scheduler from the class name in scheduler_config.json.
     // Distilled Wan2.2 weights ship FlowMatch; raw_sigmas makes it end the
@@ -95,7 +117,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     } else {
       scheduler_ = std::make_shared<UniPCMultistepSchedulerImpl>(scheduler_ctx);
     }
-    video_processor_ = VAEVideoProcessor(context.get_model_context("vae"),
+    video_processor_ = VAEVideoProcessor(vae_context,
                                          true,
                                          true,
                                          false,
@@ -105,7 +127,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                                          vae_scale_factor_spatial_);
     register_module("vae", vae_);
     register_module("transformer", transformer_);
-    register_module("transformer_2", transformer_2_);
     register_module("umt5", umt5_);
     register_module("scheduler", scheduler_);
     register_module("video_processor_", video_processor_);
@@ -160,15 +181,26 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
   }
 
   void load_model(std::unique_ptr<DiTModelLoader> loader) {
-    LOG(INFO) << "Wan2_2I2VPipeline loading model from"
+    LOG(INFO) << "Wan I2V pipeline loading model from"
               << loader->model_root_path();
     auto transformer_loader = loader->take_component_loader("transformer");
-    auto transformer_2_loader = loader->take_component_loader("transformer_2");
+    std::unique_ptr<DiTFolderLoader> transformer_2_loader;
+    if (transformer_2_) {
+      transformer_2_loader = loader->take_component_loader("transformer_2");
+    }
+    if (image_encoder_) {
+      auto processor_loader = loader->take_component_loader("image_processor");
+      image_processor_ = std::make_unique<CLIPImageProcessor>(
+          processor_loader->model_args(),
+          processor_loader->model_weights_path() + "/preprocessor_config.json");
+      image_encoder_->load_model(
+          loader->take_component_loader("image_encoder"));
+    }
     auto vae_loader = loader->take_component_loader("vae");
     auto umt5_loader = loader->take_component_loader("text_encoder");
     auto tokenizer_loader = loader->take_component_loader("tokenizer");
 
-    LOG(INFO) << "Wan2_2I2VPipeline model components loaded, start to load "
+    LOG(INFO) << "Wan I2V model components loaded, start to load "
                  "weights to sub models";
 #if defined(USE_NPU)
     auto& load_config = LoadConfig::get_instance();
@@ -177,16 +209,20 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     if (use_rolling_load_) {
       transformer_->load_model(std::move(transformer_loader),
                                /*rolling=*/true);
-      transformer_2_->load_model(std::move(transformer_2_loader),
-                                 /*rolling=*/true);
       init_rolling_for(transformer_, rolling_transformer_);
-      init_rolling_for(transformer_2_, rolling_transformer_2_);
+      if (transformer_2_) {
+        transformer_2_->load_model(std::move(transformer_2_loader),
+                                   /*rolling=*/true);
+        init_rolling_for(transformer_2_, rolling_transformer_2_);
+      }
     } else {
 #endif
       transformer_->load_model(std::move(transformer_loader));
       transformer_->to(options_.device());
-      transformer_2_->load_model(std::move(transformer_2_loader));
-      transformer_2_->to(options_.device());
+      if (transformer_2_) {
+        transformer_2_->load_model(std::move(transformer_2_loader));
+        transformer_2_->to(options_.device());
+      }
 #if defined(USE_NPU)
     }
 #endif
@@ -448,7 +484,20 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     int64_t dh = vae_scale_factor_spatial_ * patch_size_h;
 
     // Call unified function for dimension adjustment
-    AdjustVideoSize(images, height, width, dw, dh, false);
+    AdjustVideoSize(
+        images, height, width, dw, dh, static_cast<bool>(image_encoder_));
+
+    torch::Tensor image_embeds;
+    if (image_encoder_) {
+      torch::Tensor clip_image =
+          images.has_value()
+              ? images->cpu()
+              : torch::full({1, 3, height, width}, 255, torch::kUInt8);
+      torch::Tensor pixels = image_processor_->process_images(clip_image);
+      image_embeds =
+          image_encoder_->forward(pixels.to(options_.device(), torch::kFloat32))
+              .to(options_);
+    }
 
     if (boundary_ratio_ > 0.0f && guidance_scale_2 < 0.0f) {
       guidance_scale_2 = guidance_scale;
@@ -566,7 +615,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
             latent_model_input,
             timestep_input,
             embeds,
-            torch::Tensor(),
+            image_embeds,
             sparse_attn_state,
             [&rolling](int32_t i) { rolling.wait_h2d(i); },
             [&rolling](int32_t i) { rolling.schedule_next_h2d(i); },
@@ -590,7 +639,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                      : current_model->forward(latent_model_input,
                                               timestep_input,
                                               embeds,
-                                              torch::Tensor(),
+                                              image_embeds,
                                               sparse_attn_state,
                                               nullptr,
                                               nullptr,
@@ -609,7 +658,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                          : current_model->forward(latent_model_input,
                                                   timestep_input,
                                                   encoded_prompt_embeds,
-                                                  torch::Tensor(),
+                                                  image_embeds,
                                                   sparse_attn_state,
                                                   nullptr,
                                                   nullptr,
@@ -745,6 +794,8 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
   WanTransformer3DModel transformer_{nullptr};
   WanTransformer3DModel transformer_2_{nullptr};
   UMT5EncoderModel umt5_{nullptr};
+  CLIPVisionEncoder image_encoder_{nullptr};
+  std::unique_ptr<CLIPImageProcessor> image_processor_;
   std::unique_ptr<Tokenizer> tokenizer_{nullptr};
   VAEVideoProcessor video_processor_{nullptr};
 

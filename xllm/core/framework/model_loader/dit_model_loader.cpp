@@ -697,6 +697,14 @@ std::unordered_map<std::string, QuantArgs> DiTModelLoader::get_quant_args()
 }
 
 std::string DiTModelLoader::get_torch_dtype() const {
+  if (model_type_ == "WanImageToVideoPipeline") {
+    // Wan's VAE and CLIP encoder can use FP32 with a BF16 transformer.
+    const auto transformer = name_to_loader_.find("transformer");
+    if (transformer != name_to_loader_.end() &&
+        !transformer->second->model_args().dtype().empty()) {
+      return transformer->second->model_args().dtype();
+    }
+  }
   std::string dtype;
   for (const auto& pair : name_to_loader_) {
     const auto& args = pair.second->model_args();

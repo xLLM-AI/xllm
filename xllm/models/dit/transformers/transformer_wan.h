@@ -500,14 +500,15 @@ class WanAttentionImpl : public torch::nn::Module {
     dim_ = model_args.head_dim() * model_args.n_heads();
     heads_ = model_args.n_heads();
     dim_head_ = model_args.head_dim();
-    added_kv_proj_dim_ = model_args.added_kv_proj_dim();
+    added_kv_proj_dim_ =
+        cross_attention_dim_head > 0 ? model_args.added_kv_proj_dim() : -1;
     eps_ = 1e-6f;
     dropout_ = 0.0f;
 
     int64_t cross_dim_head = (cross_attention_dim_head > 0)
                                  ? cross_attention_dim_head
                                  : model_args.head_dim();
-    is_cross_attention_ = cross_dim_head > 0;
+    is_cross_attention_ = cross_attention_dim_head > 0;
 
     if (is_cross_attention_) {
       kv_inner_dim_ = cross_dim_head * heads_;
@@ -893,7 +894,7 @@ class WanAttentionImpl : public torch::nn::Module {
 };
 TORCH_MODULE(WanAttention);
 
-// for wan2.2 I2V, actually not used
+// CLIP image conditioning for Wan2.1 I2V.
 class WanImageEmbeddingImpl : public torch::nn::Module {
  public:
   explicit WanImageEmbeddingImpl(const ModelContext& context)
@@ -905,7 +906,7 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
     pos_embed_seq_len_ = model_args.pos_embed_seq_len();
 
     norm1_ =
-        register_module("norm1", FP32LayerNorm(context, in_features_, 1e-6));
+        register_module("norm1", FP32LayerNorm(context, in_features_, 1e-5));
     ff_ = register_module("ff",
                           WanFeedForward(context,
                                          parallel_args,
@@ -918,7 +919,7 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
                                          -1,
                                          true));
     norm2_ =
-        register_module("norm2", FP32LayerNorm(context, out_features_, 1e-6));
+        register_module("norm2", FP32LayerNorm(context, out_features_, 1e-5));
 
     if (pos_embed_seq_len_ > 0) {
       pos_embed_ = register_parameter(
@@ -1016,9 +1017,7 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
     torch::Tensor timestep_proj = timesteps_proj_->forward(timestep);
     int64_t seq_len = timestep_seq_len.value_or(1);
     if (seq_len > 1) {
-      auto ts = timestep.expand({1, seq_len}).flatten();
-      timestep_proj =
-          timesteps_proj_->forward(ts).view({-1, seq_len, time_freq_dim_});
+      timestep_proj = timestep_proj.view({-1, seq_len, time_freq_dim_});
     }
     // Keeping this in bf16 instead of the fp32 round-trip makes distilled
     // weights ~5% faster.
@@ -1529,9 +1528,9 @@ class WanTransformer3DModelImpl : public torch::nn::Module,
     sparse_attn_state.seq_len = seq_len;
 
     torch::Tensor timestep_input = timestep;
-    int64_t ts_seq_len_val = hidden_states.size(1);
-    std::optional<int64_t> ts_seq_len = ts_seq_len_val;
+    std::optional<int64_t> ts_seq_len;
     if (timestep.dim() == 2) {
+      ts_seq_len = timestep.size(1);
       timestep_input = timestep.flatten();
     }
 

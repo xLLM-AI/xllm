@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "core/framework/model/model_args.h"
@@ -25,7 +26,8 @@ namespace xllm {
 
 class CLIPImageProcessor {
  public:
-  explicit CLIPImageProcessor(const ModelArgs& args);
+  CLIPImageProcessor(const ModelArgs& args,
+                     const std::string& preprocessor_config_path);
 
   torch::Tensor process_images(const torch::Tensor& images) const;
 
@@ -42,6 +44,7 @@ class CLIPImageProcessor {
   int32_t shortest_edge_;
   int32_t resample_;
   double rescale_factor_;
+  std::vector<int64_t> resize_size_;
   std::pair<int32_t, int32_t> crop_size_;
   torch::Tensor image_mean_;
   torch::Tensor image_std_;

@@ -121,7 +121,11 @@ class CLIPMLPImpl : public torch::nn::Module {
   explicit CLIPMLPImpl(const ModelContext& context) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
-    act_ = register_module("act", torch::nn::Functional(quick_gelu));
+    const bool use_gelu = model_args.mm_hidden_act() == "gelu";
+    act_ = register_module(
+        "act", torch::nn::Functional([use_gelu](const torch::Tensor& input) {
+          return use_gelu ? torch::gelu(input) : quick_gelu(input);
+        }));
 
     fc1_ = register_module("fc1",
                            layer::AddMatmul(model_args.mm_hidden_size(),

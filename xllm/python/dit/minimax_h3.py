@@ -26,11 +26,9 @@ from xllm.python.dit.minimax_h3_model import (
     MiniMaxH3Denoiser,
     PackedConditioning,
     PackedLayout,
-    SequenceParallel,
-    StateDictShard,
-    TensorParallel,
 )
 from xllm.python.dit.minimax_h3_vae import TileParallel, load_audio_decoder, load_audio_geometry, load_video_decoder
+from xllm.python.dit.parallel import SequenceParallel, StateDictShard, TensorParallel
 
 _AUDIO_CHANNELS = 2
 _ROPE_FRAME_SCALE = 5 / 3
