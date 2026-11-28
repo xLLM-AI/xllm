@@ -32,6 +32,14 @@ limitations under the License.
 namespace xllm::npu {
 namespace {
 
+TEST(NpuRuntimeTest, LoadsKernelBindingWithHostLogging) {
+  pybind11::gil_scoped_acquire gil;
+  pybind11::module_::import("xllm_kernel._npu_binding");
+  const auto kernel_ops =
+      pybind11::module_::import("torch").attr("ops").attr("xllm_kernel");
+  EXPECT_TRUE(pybind11::hasattr(kernel_ops, "top_k_top_p"));
+}
+
 TEST(NpuRuntimeTest, RepeatedInitializationPreservesTensors) {
   init_npu(/*device_index=*/0);
   const auto options =

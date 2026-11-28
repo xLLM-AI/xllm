@@ -15,7 +15,7 @@ limitations under the License.
 
 #include <acl/acl.h>
 #include <aclnnop/aclnn_apply_top_k_top_p.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include <array>
@@ -50,16 +50,16 @@ class AclWorkspaceCache final {
     }
 
     if (workspace.addr_ != nullptr) {
-      CHECK_EQ(aclrtSynchronizeStream(stream), ACL_SUCCESS)
+      CHECK(aclrtSynchronizeStream(stream) == ACL_SUCCESS)
           << "top_k_top_p: failed to synchronize stream before "
              "workspace resize";
-      CHECK_EQ(aclrtFree(workspace.addr_), ACL_SUCCESS)
+      CHECK(aclrtFree(workspace.addr_) == ACL_SUCCESS)
           << "top_k_top_p: failed to free resized workspace";
     }
 
-    CHECK_EQ(aclrtMalloc(
-                 &workspace.addr_, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST),
-             ACL_SUCCESS)
+    CHECK((aclrtMalloc(
+              &workspace.addr_, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST)) ==
+          ACL_SUCCESS)
         << "top_k_top_p: failed to allocate workspace";
     workspace.size_ = workspace_size;
     return workspace.addr_;
@@ -96,9 +96,9 @@ void top_k_top_p(torch::Tensor& logits,
   for (const torch::Tensor* input :
        std::array<const torch::Tensor*, 3>{&logits, &top_k, &top_p_threshold}) {
     CHECK(input->defined());
-    CHECK_GT(input->numel(), 0);
+    CHECK((input->numel()) > 0);
     CHECK(input->device().is_privateuseone());
-    CHECK_EQ(input->device(), logits.device());
+    CHECK((input->device()) == logits.device());
   }
   const torch::DeviceGuard guard(logits.device());
   int32_t device_id = logits.device().index();
@@ -114,17 +114,16 @@ void top_k_top_p(torch::Tensor& logits,
 
   uint64_t workspace_size = 0;
   aclOpExecutor* executor = nullptr;
-  CHECK_EQ(aclnnApplyTopKTopPGetWorkspaceSize(logits_ids,
-                                              top_p_threshold_ids,
-                                              top_k_ids,
-                                              logits_ids,
-                                              &workspace_size,
-                                              &executor),
-           ACL_SUCCESS)
+  CHECK((aclnnApplyTopKTopPGetWorkspaceSize(logits_ids,
+                                            top_p_threshold_ids,
+                                            top_k_ids,
+                                            logits_ids,
+                                            &workspace_size,
+                                            &executor)) == ACL_SUCCESS)
       << "top_k_top_p: failed to get workspace size";
   void* workspace_addr = workspace_cache().get(stream, workspace_size);
-  CHECK_EQ(aclnnApplyTopKTopP(workspace_addr, workspace_size, executor, stream),
-           ACL_SUCCESS)
+  CHECK(aclnnApplyTopKTopP(workspace_addr, workspace_size, executor, stream) ==
+        ACL_SUCCESS)
       << "top_k_top_p: failed to apply top k top p";
   aclDestroyTensor(logits_ids);
   aclDestroyTensor(top_k_ids);

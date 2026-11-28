@@ -1,7 +1,7 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
 #include <acl/acl.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
@@ -81,9 +81,9 @@ PreOutput hc_pre(const torch::Tensor& x,
                  double hc_eps) {
   CHECK((x.dim() == 3 || x.dim() == 4) && x.numel() > 0)
       << "hc_pre requires nonempty [T, HC, D] or [B, S, HC, D] input";
-  CHECK_GT(hc_mult, 0);
-  CHECK_EQ(x.size(-2), hc_mult);
-  CHECK_GE(hc_sinkhorn_iters, 0);
+  CHECK(hc_mult > 0);
+  CHECK(x.size(-2) == hc_mult);
+  CHECK(hc_sinkhorn_iters >= 0);
   CHECK(std::isfinite(norm_eps) && norm_eps > 0 && std::isfinite(hc_eps) &&
         hc_eps > 0);
   const int64_t mix_count = (2 + hc_mult) * hc_mult;
@@ -162,9 +162,9 @@ torch::Tensor hc_post(const torch::Tensor& x,
                       const torch::Tensor& comb) {
   CHECK(x.dim() == 3 && x.numel() > 0)
       << "hc_post requires nonempty [B, S, D] input";
-  CHECK_EQ(residual.dim(), 4);
+  CHECK(residual.dim() == 4);
   const int64_t hc_mult = residual.size(-2);
-  CHECK_GT(hc_mult, 0);
+  CHECK(hc_mult > 0);
   const int64_t batch = x.size(0);
   const int64_t sequence = x.size(1);
   CHECK(residual.sizes() ==

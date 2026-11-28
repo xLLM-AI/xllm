@@ -135,7 +135,7 @@ if (npu_spec := find_spec("torch_npu")) is not None:
                 str(atb_root / "include"),
             ],
             library_dirs=[str(npu_root / "lib"), str(ascend_root / "lib64"), str(atb_root / "lib")],
-            libraries=["torch_npu", "atb", "glog", "hccl", "hcomm", "opapi", "dl"],
+            libraries=["torch_npu", "atb", "hccl", "hcomm", "opapi", "dl"],
             extra_compile_args=["-O2", "-fvisibility=hidden", "-fvisibility-inlines-hidden"],
         )
     )

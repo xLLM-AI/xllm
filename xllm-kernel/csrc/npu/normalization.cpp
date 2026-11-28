@@ -1,7 +1,7 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
 #include <acl/acl.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
@@ -41,7 +41,7 @@ torch::Tensor rms_norm_gated(const torch::Tensor& input,
                              const torch::Tensor& gate,
                              const torch::Tensor& weight,
                              double eps) {
-  CHECK_GT(input.numel(), 0);
+  CHECK(input.numel() > 0);
   CHECK(input.sizes() == gate.sizes());
   CHECK(weight.dim() == 1 && weight.size(0) == input.size(-1));
 
@@ -100,7 +100,7 @@ std::tuple<torch::Tensor, torch::Tensor> rms_norm_dynamic_quant(
     const torch::Tensor& input,
     const torch::Tensor& weight,
     double eps) {
-  CHECK_GT(input.numel(), 0);
+  CHECK(input.numel() > 0);
   CHECK(weight.dim() == 1 && weight.size(0) == input.size(-1));
 
   auto output =

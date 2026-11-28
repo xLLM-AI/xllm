@@ -26,7 +26,7 @@ limitations under the License.
 #include "csrc/npu/collectives.h"
 
 #include <ATen/MemoryOverlap.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <hccl/hccl.h>
 #include <torch_npu/csrc/aten/CustomFunctions.h>
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
@@ -74,23 +74,23 @@ void check_input(const torch::Tensor& input, bool allow_nz = false) {
   CHECK(is_npu(input)) << "HCCL requires an NPU tensor.";
   CHECK(input.layout() == torch::kStrided) << "HCCL requires a dense tensor.";
   CHECK(input.is_contiguous()) << "HCCL requires a contiguous tensor.";
-  CHECK_GT(input.numel(), 0) << "HCCL requires a nonempty tensor.";
+  CHECK(input.numel() > 0) << "HCCL requires a nonempty tensor.";
   const int64_t format = npu_format(input);
   if (allow_nz && format == ACL_FORMAT_FRACTAL_NZ) {
-    CHECK_EQ(input.dim(), 2) << "NZ AllGather requires a 2D tensor.";
-    CHECK_EQ(input.storage_offset(), 0)
+    CHECK(input.dim() == 2) << "NZ AllGather requires a 2D tensor.";
+    CHECK(input.storage_offset() == 0)
         << "NZ AllGather requires whole storage.";
     const torch::ScalarType dtype = input.scalar_type();
     CHECK(dtype == torch::kChar || dtype == torch::kHalf ||
           dtype == torch::kFloat || dtype == torch::kBFloat16)
         << "Unsupported NZ AllGather dtype " << dtype;
     const int64_t k0 = dtype == torch::kChar ? 32 : 16;
-    CHECK_EQ(input.size(0) % 16, 0) << "NZ AllGather requires aligned N.";
-    CHECK_EQ(input.size(1) % k0, 0) << "NZ AllGather requires aligned K.";
-    CHECK_EQ(input.storage().nbytes(), input.numel() * input.element_size())
+    CHECK(input.size(0) % 16 == 0) << "NZ AllGather requires aligned N.";
+    CHECK(input.size(1) % k0 == 0) << "NZ AllGather requires aligned K.";
+    CHECK(input.storage().nbytes() == input.numel() * input.element_size())
         << "NZ AllGather requires storage without padding.";
   } else {
-    CHECK_EQ(format, ACL_FORMAT_ND) << "HCCL requires ND storage format.";
+    CHECK(format == ACL_FORMAT_ND) << "HCCL requires ND storage format.";
   }
 }
 
@@ -98,9 +98,9 @@ c10_npu::NPUStream collective_stream(const torch::Tensor& input,
                                      int64_t comm,
                                      bool allow_nz = false) {
   check_input(input, allow_nz);
-  CHECK_NE(comm, 0) << "HCCL communicator must not be null.";
+  CHECK(comm != 0) << "HCCL communicator must not be null.";
   const auto stream = c10_npu::getCurrentNPUStream();
-  CHECK_EQ(stream.device_index(), input.device().index())
+  CHECK(stream.device_index() == input.device().index())
       << "HCCL current stream and tensor must be on the same device: "
       << input.device();
   return stream;
@@ -111,10 +111,10 @@ void check_out_of_place_buffers(const torch::Tensor& input,
                                 bool allow_nz = false) {
   check_input(output, allow_nz);
   if (allow_nz) {
-    CHECK_EQ(npu_format(input), npu_format(output));
+    CHECK(npu_format(input) == npu_format(output));
   }
-  CHECK_EQ(output.device(), input.device()) << "HCCL buffer device mismatch.";
-  CHECK_EQ(output.scalar_type(), input.scalar_type())
+  CHECK(output.device() == input.device()) << "HCCL buffer device mismatch.";
+  CHECK(output.scalar_type() == input.scalar_type())
       << "HCCL buffer dtype mismatch.";
   CHECK(torch::get_overlap_status(input, output) == torch::MemOverlapStatus::No)
       << "Out-of-place AllGather/ReduceScatter buffers must not overlap.";
@@ -124,14 +124,14 @@ int64_t comm_rank_size(int64_t comm) {
   uint32_t rank_size = 0;
   const HcclResult result =
       HcclGetRankSize(reinterpret_cast<HcclComm>(comm), &rank_size);
-  CHECK_EQ(result, HCCL_SUCCESS)
+  CHECK(result == HCCL_SUCCESS)
       << "HcclGetRankSize failed, HCCL error " << static_cast<int32_t>(result);
-  CHECK_GT(rank_size, 0) << "HCCL communicator has no ranks.";
+  CHECK(rank_size > 0) << "HCCL communicator has no ranks.";
   return static_cast<int64_t>(rank_size);
 }
 
 void check_hccl(HcclResult result, const char* op_name) {
-  CHECK_EQ(result, HCCL_SUCCESS)
+  CHECK(result == HCCL_SUCCESS)
       << op_name << " failed, HCCL error " << static_cast<int32_t>(result);
 }
 
@@ -155,9 +155,9 @@ void all_gather_on_current_stream(const torch::Tensor& input,
   const auto stream = collective_stream(input, comm, /*allow_nz=*/true);
   check_out_of_place_buffers(input, output, /*allow_nz=*/true);
   const int64_t rank_size = comm_rank_size(comm);
-  CHECK_EQ(output.numel() % rank_size, 0)
+  CHECK(output.numel() % rank_size == 0)
       << "AllGather output size must be divisible by rank size " << rank_size;
-  CHECK_EQ(output.numel() / rank_size, input.numel())
+  CHECK(output.numel() / rank_size == input.numel())
       << "AllGather expects one input-sized output block per rank.";
 
   check_hccl(HcclAllGather(input.data_ptr(),
@@ -175,10 +175,10 @@ void reduce_scatter_on_current_stream(const torch::Tensor& input,
   const auto stream = collective_stream(input, comm);
   check_out_of_place_buffers(input, output);
   const int64_t rank_size = comm_rank_size(comm);
-  CHECK_EQ(input.numel() % rank_size, 0)
+  CHECK(input.numel() % rank_size == 0)
       << "ReduceScatter input size must be divisible by rank size "
       << rank_size;
-  CHECK_EQ(input.numel() / rank_size, output.numel())
+  CHECK(input.numel() / rank_size == output.numel())
       << "ReduceScatter expects one output-sized input block per rank.";
 
   check_hccl(HcclReduceScatter(input.data_ptr(),

@@ -15,7 +15,7 @@ limitations under the License.
 
 #include <atb/atb_infer.h>
 #include <atb/utils.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 #include <torch_npu/csrc/core/npu/NPUFormat.h>

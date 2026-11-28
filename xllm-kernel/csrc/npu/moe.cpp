@@ -1,6 +1,6 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
@@ -96,9 +96,9 @@ std::tuple<Tensor, Tensor, Tensor> moe_gating_top_k_hash(
     int64_t renorm,
     int64_t norm_type,
     bool out_flag) {
-  CHECK_GE(x.dim(), 1);
-  CHECK_GT(k, 0);
-  CHECK_LE(k, x.size(-1));
+  CHECK(x.dim() >= 1);
+  CHECK(k > 0);
+  CHECK(k <= x.size(-1));
   CHECK(x.scalar_type() == torch::kFloat32 ||
         x.scalar_type() == torch::kFloat16 ||
         x.scalar_type() == torch::kBFloat16);
@@ -139,10 +139,10 @@ std::tuple<Tensor, Tensor, Tensor, Tensor> moe_init_routing_v3(
     int64_t quant_mode) {
   CHECK(x.dim() == 2 && expert_idx.dim() == 2 &&
         expert_idx.size(0) == x.size(0));
-  CHECK_EQ(active_expert_range.size(), 2);
-  CHECK_GE(active_expert_range[0], 0);
-  CHECK_LE(active_expert_range[0], active_expert_range[1]);
-  CHECK_LE(active_expert_range[1], expert_num);
+  CHECK(active_expert_range.size() == 2);
+  CHECK(active_expert_range[0] >= 0);
+  CHECK(active_expert_range[0] <= active_expert_range[1]);
+  CHECK(active_expert_range[1] <= expert_num);
   CHECK(quant_mode == -1 || quant_mode == 1);
 
   const torch::DeviceGuard guard(x.device());
@@ -195,7 +195,7 @@ std::tuple<Tensor, Tensor> moe_grouped_matmul_swiglu_quant(
   CHECK(x.dim() == 2 && weight.dim() == 3 && weight_scale.dim() == 2 &&
         x_scale.dim() == 1);
   CHECK(group_list.dim() == 2 && group_list.size(1) == 2);
-  CHECK_EQ(weight.size(2) % 2, 0);
+  CHECK(weight.size(2) % 2 == 0);
   const torch::DeviceGuard guard(x.device());
   const int64_t fused_width = weight.size(2);
   auto output = torch::empty({x.size(0), fused_width / 2},
@@ -297,7 +297,7 @@ std::tuple<Tensor, Tensor> dequant_swiglu_quant(
                      y,
                      scale);
   } else {
-    CHECK_EQ(swiglu_mode, 0)
+    CHECK(swiglu_mode == 0)
         << "SwiGLU mode 1 requires ACLNN DequantSwigluQuantV2";
     EXEC_NPU_CMD_EXT(aclnnXllmKernelDequantSwigluQuant,
                      x,

@@ -15,8 +15,8 @@ limitations under the License.
 
 #include "csrc/npu/mega_moe.h"
 
+#include <c10/util/Logging.h>
 #include <dlfcn.h>
-#include <glog/logging.h>
 #include <torch_npu/csrc/aten/CustomFunctions.h>
 
 #include <array>
@@ -371,7 +371,7 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
                            executor_ptr);
   const int32_t workspace_status =
       call(ConvertToOpApiFunc(args, get_workspace), args);
-  CHECK_EQ(workspace_status, ACL_SUCCESS)
+  CHECK(workspace_status == ACL_SUCCESS)
       << "aclnnMegaMoe workspace query failed: " << aclGetRecentErrMsg();
   void* workspace = GetWorkSpaceAddr(workspace_size);
   RunAclCall("aclnnMegaMoe", [=]() mutable {

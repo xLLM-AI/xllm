@@ -446,10 +446,10 @@ void check_sparse_flash_attention_lse_inputs(
 void check_sparse_flash_attention_lse_output(const torch::Tensor& query,
                                              const torch::Tensor& output,
                                              const std::string& layout_query) {
-  CHECK_EQ(query.dim(), layout_query == "TND" ? 3 : 4);
-  CHECK_EQ(output.device(), query.device())
+  CHECK(query.dim() == (layout_query == "TND" ? 3 : 4));
+  CHECK(output.device() == query.device())
       << "attention output must use the query device.";
-  CHECK_EQ(output.dtype(), query.dtype())
+  CHECK(output.dtype() == query.dtype())
       << "attention output dtype must match query dtype.";
   CHECK(output.is_contiguous()) << "attention output must be contiguous.";
   CHECK(output.sizes() == query.sizes())

@@ -83,14 +83,14 @@ torch::Tensor quant_matmul_out(
     const std::optional<torch::Tensor>& bias,
     std::optional<torch::ScalarType> output_dtype,
     torch::Tensor& out) {
-  CHECK_GE(input.dim(), 2);
-  CHECK_GE(weight.dim(), 2);
-  CHECK_EQ(input.size(-1), weight.size(transpose2 ? -1 : -2));
+  CHECK(input.dim() >= 2);
+  CHECK(weight.dim() >= 2);
+  CHECK(input.size(-1) == (weight.size(transpose2 ? -1 : -2)));
   auto shape = input.sizes().vec();
   shape.back() = weight.size(transpose2 ? 0 : 1);
   CHECK(out.sizes().equals(shape));
   CHECK(out.is_contiguous());
-  CHECK_EQ(out.scalar_type(), output_dtype.value_or(torch::kInt8));
+  CHECK(out.scalar_type() == output_dtype.value_or(torch::kInt8));
 
   const torch::DeviceGuard guard(input.device());
   if (!transpose2 && !offset && !pertoken_scale && bias &&

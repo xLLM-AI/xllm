@@ -1,6 +1,6 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
@@ -90,20 +90,20 @@ Tensor causal_conv1d(const Tensor& input,
                      int64_t activation_mode,
                      int64_t run_mode) {
   CHECK(input.dim() == 2 || input.dim() == 3);
-  CHECK_EQ(weight.dim(), 2);
-  CHECK_EQ(conv_state.dim(), 3);
+  CHECK(weight.dim() == 2);
+  CHECK(conv_state.dim() == 3);
   CHECK(input.numel() > 0);
   if (input.dim() == 3) {
     CHECK(query_start_loc.empty());
-    CHECK_EQ(input.size(0), conv_state.size(0));
+    CHECK(input.size(0) == conv_state.size(0));
   } else {
-    CHECK_EQ(query_start_loc.size(), conv_state.size(0) + 1);
-    CHECK_EQ(query_start_loc.front(), 0);
-    CHECK_EQ(query_start_loc.back(), input.size(0));
+    CHECK(query_start_loc.size() == conv_state.size(0) + 1);
+    CHECK(query_start_loc.front() == 0);
+    CHECK(query_start_loc.back() == input.size(0));
   }
-  CHECK_EQ(input.size(-1), weight.size(1));
-  CHECK_EQ(input.size(-1), conv_state.size(2));
-  CHECK_EQ(conv_state.size(1), weight.size(0) - 1);
+  CHECK(input.size(-1) == weight.size(1));
+  CHECK(input.size(-1) == conv_state.size(2));
+  CHECK(conv_state.size(1) == weight.size(0) - 1);
   CHECK(activation_mode == 0 || activation_mode == 1);
   CHECK(run_mode == 0 || run_mode == 1);
   CHECK(input.scalar_type() == weight.scalar_type() &&
@@ -157,7 +157,7 @@ std::tuple<Tensor, Tensor, Tensor> causal_conv1d_qkv_prefill(
   CHECK(head_k_dim == 128 && head_v_dim == head_k_dim);
   const int64_t qk_dim = num_qk_heads * head_k_dim;
   const int64_t v_dim = num_v_heads * head_v_dim;
-  CHECK_EQ(x.size(1), 2 * qk_dim + v_dim);
+  CHECK(x.size(1) == 2 * qk_dim + v_dim);
 
   const torch::DeviceGuard guard(x.device());
   constexpr int64_t kPackedQkvActivationMode = 2;

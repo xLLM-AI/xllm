@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 
 #include "csrc/npu/mega_moe.h"
 
@@ -22,7 +22,7 @@ inline std::tuple<torch::Tensor, torch::Tensor> mega_moe(
     int64_t ccl_buffer_size,
     int64_t num_max_tokens_per_rank,
     const std::optional<torch::Tensor>& x_active_mask) {
-  CHECK_EQ(weight_scales1.empty(), weight_scales2.empty())
+  CHECK(weight_scales1.empty() == weight_scales2.empty())
       << "MegaMoe weight scales must be provided for both projections or "
          "neither.";
   const bool use_w8a8 = !weight_scales1.empty();
