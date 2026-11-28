@@ -121,6 +121,13 @@ struct Options {
   // Context parallelism size
   PROPERTY(int32_t, cp_size) = 1;
 
+  // Zero inherits CP width through ParallelArgs::kv_split_size_effective().
+  PROPERTY(int32_t, kv_split_size) = 1;
+
+  PROPERTY(int32_t, layerwise_split_size) = 1;
+
+  PROPERTY(bool, enable_mm_encoder_dp) = false;
+
   // tensor parallelism size
   // Default set as 1
   PROPERTY(int32_t, tp_size) = 1;

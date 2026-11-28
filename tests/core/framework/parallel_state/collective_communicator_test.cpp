@@ -18,6 +18,8 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/util/scope_guard.h"
 
 namespace xllm {
 namespace {
@@ -36,7 +38,8 @@ TEST(CollectiveCommunicatorTest,
                                       /*dp_size=*/1,
                                       /*ep_size=*/2,
                                       /*cp_size=*/1,
-                                      config);
+                                      config,
+                                      CollectiveTopologyOptions{});
   config.enabled = false;
   config.redundant_experts_num = 0;
   config.use_decode_only_load = false;
@@ -54,6 +57,44 @@ TEST(CollectiveCommunicatorTest,
       4);
 }
 
+TEST(CollectiveCommunicatorTest, ParallelArgsRetainIndependentTopologyInputs) {
+  ParallelConfig& global = ParallelConfig::get_instance();
+  const ParallelConfig previous = global;
+  ScopeGuard restore_config([&] { global = previous; });
+  global.kv_split_size(8).layerwise_split_size(8);
+  CollectiveTopologyOptions first_options;
+  first_options.kv_split_size = 0;
+  first_options.layerwise_split_size = 2;
+  CollectiveTopologyOptions second_options;
+  second_options.kv_split_size = 2;
+  second_options.layerwise_split_size = 1;
+  CollectiveCommunicator first(/*global_rank=*/0,
+                               /*world_size=*/8,
+                               /*dp_size=*/1,
+                               /*ep_size=*/2,
+                               /*cp_size=*/4,
+                               EplbWorkerConfig{},
+                               first_options);
+  CollectiveCommunicator second(/*global_rank=*/0,
+                                /*world_size=*/8,
+                                /*dp_size=*/1,
+                                /*ep_size=*/2,
+                                /*cp_size=*/4,
+                                EplbWorkerConfig{},
+                                second_options);
+  first_options.kv_split_size = 8;
+  second_options.layerwise_split_size = 8;
+  global.kv_split_size(1).layerwise_split_size(4);
+  const ParallelArgs first_args = *first.parallel_args();
+  const ParallelArgs second_args = *second.parallel_args();
+  EXPECT_EQ(first_args.kv_split_size(), 0);
+  EXPECT_EQ(first_args.kv_split_size_effective(), 4);
+  EXPECT_EQ(first_args.layerwise_split_size(), 2);
+  EXPECT_EQ(second_args.kv_split_size(), 2);
+  EXPECT_EQ(second_args.kv_split_size_effective(), 2);
+  EXPECT_EQ(second_args.layerwise_split_size(), 1);
+}
+
 TEST(CollectiveCommunicatorTest, ExplicitDisabledConfigOverridesGlobalEnable) {
   EPLBConfig& global_config = EPLBConfig::get_instance();
   const bool previous_enabled = global_config.enable_eplb();
@@ -63,7 +104,8 @@ TEST(CollectiveCommunicatorTest, ExplicitDisabledConfigOverridesGlobalEnable) {
                                       /*dp_size=*/1,
                                       /*ep_size=*/2,
                                       /*cp_size=*/1,
-                                      EplbWorkerConfig{});
+                                      EplbWorkerConfig{},
+                                      CollectiveTopologyOptions{});
   global_config.enable_eplb(previous_enabled);
 
   const EplbWorkerConfig& config =

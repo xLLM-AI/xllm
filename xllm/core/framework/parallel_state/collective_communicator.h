@@ -15,12 +15,23 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+#include <string>
+
 #include "core/framework/eplb/eplb_options.h"
 #include "core/framework/parallel_state/collective_communicator_base.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/parallel_state/process_group.h"
 
 namespace xllm {
+
+// Inputs that select communication topology and its native/Python owner.
+struct CollectiveTopologyOptions {
+  int32_t kv_split_size = 1;
+  int32_t layerwise_split_size = 1;
+  bool enable_mm_encoder_dp = false;
+  std::string model_impl;
+};
 
 class CollectiveCommunicator final : public CollectiveCommunicatorBase {
  public:
@@ -29,7 +40,8 @@ class CollectiveCommunicator final : public CollectiveCommunicatorBase {
                          int32_t dp_size,
                          int32_t ep_size,
                          int32_t cp_size,
-                         EplbWorkerConfig eplb_worker_config);
+                         EplbWorkerConfig eplb_worker_config,
+                         CollectiveTopologyOptions topology_options);
   ~CollectiveCommunicator() override = default;
 
   void create_process_groups(const std::string& master_addr,
@@ -39,6 +51,7 @@ class CollectiveCommunicator final : public CollectiveCommunicatorBase {
   const ParallelArgs* parallel_args() override;
 
  private:
+  CollectiveTopologyOptions topology_options_;
   std::unique_ptr<ParallelArgs> parallel_args_;
   std::unique_ptr<ProcessGroup> process_group_;
   std::unique_ptr<ProcessGroup> dp_local_process_group_;

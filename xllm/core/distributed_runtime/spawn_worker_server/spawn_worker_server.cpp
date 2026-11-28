@@ -104,7 +104,8 @@ SpawnWorkerServer::SpawnWorkerServer(
     EplbWorkerConfig eplb_worker_config,
     spawn_worker_protocol::PrefillConfig prefill_config,
     bool enable_graph_double_buffer,
-    int32_t acl_graph_decode_batch_size_limit) {
+    int32_t acl_graph_decode_batch_size_limit,
+    spawn_worker_protocol::TopologyConfig topology_config) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -143,6 +144,9 @@ SpawnWorkerServer::SpawnWorkerServer(
       .dp_size(dp_size)
       .ep_size(ep_size)
       .cp_size(cp_size)
+      .kv_split_size(kv_split_size)
+      .layerwise_split_size(topology_config.layerwise_split_size)
+      .enable_mm_encoder_dp(topology_config.enable_mm_encoder_dp)
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
@@ -178,6 +182,8 @@ SpawnWorkerServer::SpawnWorkerServer(
       .ep_size(ep_size)
       .cp_size(cp_size)
       .kv_split_size(kv_split_size)
+      .layerwise_split_size(topology_config.layerwise_split_size)
+      .enable_mm_encoder_dp(topology_config.enable_mm_encoder_dp)
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
