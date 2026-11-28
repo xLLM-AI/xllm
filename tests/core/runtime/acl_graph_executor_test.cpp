@@ -552,8 +552,8 @@ TEST(DeepseekV4ModelTest, ReturnsPreHcHiddenStatesForMtp) {
                              QuantArgs(),
                              tensor_options,
                              /*num_speculative_tokens=*/1);
-  const CausalLMFactory factory =
-      ModelRegistry::get_causallm_factory("deepseek_v4");
+  const CausalLMFactory factory = ModelRegistry::get_causallm_factory(
+      /*name=*/"deepseek_v4", /*implementation_key=*/"native");
   ASSERT_TRUE(static_cast<bool>(factory));
   std::unique_ptr<CausalLM> model = factory(context);
   ASSERT_NE(model, nullptr);

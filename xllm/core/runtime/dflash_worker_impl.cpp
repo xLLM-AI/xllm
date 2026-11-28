@@ -157,11 +157,6 @@ void DFlashWorkerImpl::apply_target_model_overrides(ModelArgs& args) const {
       read_capture_layer_ids(options_.draft_model_path().value()));
 }
 
-void DFlashWorkerImpl::apply_draft_model_overrides(ModelArgs& args) {
-  args.layers_to_capture({});
-  args.model_type(/*model_type=*/"DFlashDraftModel");
-}
-
 DFlashWorkerImpl::~DFlashWorkerImpl() {
   // Keep launch-thread-owned context alive until queued execution completes.
   drain_pending_execution();

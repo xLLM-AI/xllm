@@ -92,8 +92,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
                            const ParallelArgs& draft_parallel_args,
                            const runtime::Options& draft_opts);
 
-  virtual void apply_draft_model_overrides(ModelArgs& args) = 0;
-
   // Reuse grouped pool counts; otherwise use the draft's geometry and DP-local
   // TP size, borrowing only the target's block count.
   virtual KVCacheShape draft_kv_cache_shape(
@@ -133,7 +131,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
 
-  ModelContext load_model_config(ModelLoader& loader);
   KVCacheCreateOptions build_draft_kv_cache_layout(
       const KVCacheShape& shape) const;
 #if defined(USE_NPU)

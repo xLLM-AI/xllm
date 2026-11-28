@@ -49,7 +49,6 @@ std::pair<torch::Tensor, torch::Tensor> sample_dflash2_path(
     torch::Tensor gumbel_noise,
     int64_t vocab_size) {
   CHECK_EQ(candidates.candidate_ids.dim(), 3);
-  CHECK_EQ(candidates.edge_logits.dim(), 4);
   const int64_t batch_size = candidates.candidate_ids.size(0);
   const int64_t num_steps = candidates.candidate_ids.size(1);
   const int64_t top_k = candidates.candidate_ids.size(2);
@@ -135,11 +134,6 @@ std::pair<torch::Tensor, torch::Tensor> sample_dflash2_path(
 }
 
 }  // namespace
-
-void DFlash2WorkerImpl::apply_draft_model_overrides(ModelArgs& args) {
-  args.layers_to_capture({});
-  args.model_type(/*value=*/"DFlash2DraftModel");
-}
 
 bool DFlash2WorkerImpl::init_model(const std::string& model_weights_path,
                                    int32_t random_seed,

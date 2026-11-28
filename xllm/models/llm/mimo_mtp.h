@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "core/layers/qwen2_decoder_layer.h"
 #include "llm_model_base.h"
+#include "models/model_registry.h"
 
 // MiMo MTP (Multi-Token Prediction) model implementation
 // Based on Qwen2 architecture with custom MTP layers
@@ -31,8 +32,7 @@ namespace xllm {
 
 class MiMoMtpDecoderLayerImpl final : public torch::nn::Module {
  public:
-  MiMoMtpDecoderLayerImpl(const ModelContext& context,
-                          const int32_t layer_index)
+  explicit MiMoMtpDecoderLayerImpl(const ModelContext& context)
       : model_args_(context.get_model_args()) {
     auto options = context.get_tensor_options();
 
@@ -48,7 +48,8 @@ class MiMoMtpDecoderLayerImpl final : public torch::nn::Module {
                                                 /*QuantArgs=*/QuantArgs(),
                                                 options));
     mtp_block_ = register_module(
-        "mtp_block", layer::Qwen2DecoderLayer(context, layer_index));
+        /*name=*/"mtp_block",
+        layer::Qwen2DecoderLayer(context, /*layer_id=*/0));
   }
 
   torch::Tensor forward(torch::Tensor embed,
@@ -122,8 +123,8 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
 
-    mtp_layers_.emplace_back(register_module(
-        "mtp_layers_0", MiMoMtpDecoderLayer(context, /*layer_index=*/0)));
+    mtp_layer_ =
+        register_module(/*name=*/"mtp_layers_0", MiMoMtpDecoderLayer(context));
 
     embed_tokens_ =
         register_module("embed_tokens",
@@ -164,21 +165,18 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
     if (!modified_input_params.synchronize_draft_layer()) {
       return ModelOutput();
     }
-    for (size_t i = 0; i < mtp_layers_.size(); i++) {
 #if defined(USE_CUDA)
-      attn_metadata.plan_info->layer_id = static_cast<int32_t>(i);
+    attn_metadata.plan_info->layer_id = 0;
 #endif
-      auto& layer = mtp_layers_[i];
-      hidden_states = layer(hidden_states,
-                            residual,
-                            positions,
-                            attn_metadata,
-                            kv_caches[i],
-                            modified_input_params);
-      if (!modified_input_params.record_layer(static_cast<uint32_t>(i),
-                                              hidden_states.device())) {
-        return ModelOutput();
-      }
+    hidden_states = mtp_layer_(hidden_states,
+                               residual,
+                               positions,
+                               attn_metadata,
+                               kv_caches.front(),
+                               modified_input_params);
+    if (!modified_input_params.record_layer(/*layer_idx=*/0,
+                                            hidden_states.device())) {
+      return ModelOutput();
     }
     auto [h_out, r_out] = norm_(hidden_states, residual);
     return ModelOutput(h_out, r_out);
@@ -189,17 +187,12 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
     // (0-indexed). export_mtp.py keeps these keys unchanged, so the exported
     // checkpoint retains the "mtp_layers.0.*" prefix used here.
     auto mtp_dict = state_dict.get_dict_with_prefix("mtp_layers.0.");
-    CHECK_EQ(mtp_layers_.size(), 1u)
-        << "MiMo MTP currently supports exactly 1 MTP layer";
-    mtp_layers_[0]->load_state_dict(mtp_dict);
-    // Load final norm from the MTP layer's final_layernorm
+    mtp_layer_->load_state_dict(mtp_dict);
     norm_->load_state_dict(mtp_dict.get_dict_with_prefix("final_layernorm."));
   }
 
   void verify_loaded_weights() const {
-    for (const auto& layer : mtp_layers_) {
-      layer->verify_loaded_weights();
-    }
+    mtp_layer_->verify_loaded_weights();
     CHECK(norm_->weight().defined())
         << "MiMo MTP model: final_layernorm weight not loaded";
   }
@@ -212,7 +205,7 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
 
  private:
   ModelArgs model_args_;
-  std::vector<MiMoMtpDecoderLayer> mtp_layers_;
+  MiMoMtpDecoderLayer mtp_layer_{nullptr};
   int32_t dp_size_;
   torch::Device device_;
   layer::WordEmbedding embed_tokens_{nullptr};
@@ -242,35 +235,8 @@ TORCH_MODULE(MiMoMtpForCausalLM);
 // register the causal model
 REGISTER_CAUSAL_MODEL(mimo_mtp, MiMoMtpForCausalLM);
 
-// register the model args
-// example config: /root/models2/MiMo-7B-Base/config.json
-REGISTER_MODEL_ARGS(mimo_mtp, [&] {
-  LOAD_ARG_OR(model_type, "model_type", "mimo_mtp");
-  LOAD_ARG_OR(dtype, "torch_dtype", "");
-  LOAD_ARG_OR(vocab_size, "vocab_size", 151680);
-  LOAD_ARG_OR(hidden_size, "hidden_size", 4096);
-  LOAD_ARG_OR(n_layers, "num_hidden_layers", 36);
-  LOAD_ARG_OR(n_heads, "num_attention_heads", 32);
-  LOAD_ARG(n_kv_heads, "num_key_value_heads");
-  LOAD_ARG_OR(hidden_act, "hidden_act", "silu");
-  LOAD_ARG_OR(attention_bias, "attention_bias", true);
-  LOAD_ARG_OR(intermediate_size, "intermediate_size", 11008);
-  LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 32768);
-  LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-5);
-  LOAD_ARG_OR(eos_token_id, "eos_token_id", 151643);
-  LOAD_ARG_OR(rope_theta, "rope_theta", 640000.0f);
-  LOAD_ARG_OR(tie_word_embeddings, "tie_word_embeddings", false);
-  LOAD_ARG_OR(use_sliding_window, "use_sliding_window", false);
-  LOAD_ARG_OR(sliding_window, "sliding_window", 32768);
-  LOAD_ARG_OR(max_window_layers, "max_window_layers", 32);
-
-  LOAD_ARG_OR(num_nextn_predict_layers, "num_nextn_predict_layers", 1);
-
-  LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
-    return args->hidden_size() / args->n_heads();
-  });
-
-  SET_ARG(stop_token_ids, std::unordered_set<int32_t>({args->eos_token_id()}));
-});
+const bool mimo_mtp_type_registered =
+    ModelRegistry::register_mtp_metadata(/*name=*/"mimo",
+                                         {.draft_model_type_ = "mimo_mtp"});
 
 }  // namespace xllm

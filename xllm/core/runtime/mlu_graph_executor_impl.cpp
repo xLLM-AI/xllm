@@ -592,7 +592,7 @@ MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
           args_.model_type(), &model_name, &resolve_error)) {
     model_name = args_.model_type();
   }
-  mtp_capabilities_ = ModelRegistry::get_mtp_capabilities(model_name);
+  mtp_capabilities_ = ModelRegistry::get_mtp_metadata(model_name).capabilities_;
   int64_t history_capacity = 0;
   if (args_.max_position_embeddings() > 0) {
     history_capacity = (get_block_capacity(args_.max_position_embeddings(),

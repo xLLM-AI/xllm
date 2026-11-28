@@ -27,36 +27,6 @@ limitations under the License.
 
 namespace xllm {
 
-namespace qwen3_5_mtp {
-
-inline void configure_mtp_args(ModelArgs& args, bool is_python_model) {
-  if (is_python_model) {
-    return;
-  }
-  const int32_t mtp_layers =
-      std::max<int32_t>(args.num_nextn_predict_layers(), 1);
-  args.num_nextn_predict_layers(mtp_layers);
-  args.n_layers(mtp_layers);
-  args.layer_types(std::vector<std::string>(static_cast<size_t>(mtp_layers),
-                                            "full_attention"));
-  args.full_attention_interval(1);
-}
-
-}  // namespace qwen3_5_mtp
-
-const bool qwen3_5_mtp_adapter_registered = []() {
-  for (const char* name : {"qwen3_5",
-                           "qwen3_5_moe",
-                           "qwen3_5_text",
-                           "qwen3_5_moe_text",
-                           "qwen3_5_mtp",
-                           "qwen3_5_moe_mtp"}) {
-    ModelRegistry::register_mtp_args_adapter(name,
-                                             &qwen3_5_mtp::configure_mtp_args);
-  }
-  return true;
-}();
-
 class Qwen3_5MtpModelImpl final : public Qwen3_5MtpModelImplBase {
  public:
   explicit Qwen3_5MtpModelImpl(const ModelContext& context)
@@ -119,24 +89,52 @@ REGISTER_MODEL_ARGS_LOADER(qwen3_5_moe_mtp,
                                  "qwen3_5_moe_mtp");
                            });
 
-const bool qwen3_5_mtp_contract_registered = []() {
-  MtpModelCapabilities target;
-  target.model_family = MtpModelFamily::QWEN35;
-  target.supports_expanded_replay = true;
-  target.supports_grouped_graph = true;
-  target.graph_context_policy = GraphContextPolicy::QWEN_FULL_ATTENTION;
-  MtpModelCapabilities draft;
-  draft.model_family = MtpModelFamily::QWEN35;
-  draft.native_draft_requires_accepted_span_replay = true;
-  draft.allow_tail_fallback = true;
-  draft.supports_grouped_graph = true;
-  draft.graph_context_policy = GraphContextPolicy::QWEN_FULL_ATTENTION;
+const bool qwen3_5_mtp_metadata_registered = [] {
+  const auto prepare_args = [](ModelArgs& args, bool is_python_model) {
+    if (is_qwen3_5_target_model_type(args.model_type()) &&
+        (!is_python_model || args.num_nextn_predict_layers() != 0)) {
+      const bool is_moe = args.model_type() == "qwen3_5_moe" ||
+                          args.model_type() == "qwen3_5_moe_text";
+      args.model_type(is_moe ? "qwen3_5_moe_mtp" : "qwen3_5_mtp");
+    }
+    if (is_python_model) {
+      return;
+    }
+    const int32_t mtp_layers =
+        std::max<int32_t>(args.num_nextn_predict_layers(), /*b=*/1);
+    args.num_nextn_predict_layers(mtp_layers);
+    args.n_layers(mtp_layers);
+    args.layer_types(std::vector<std::string>(static_cast<size_t>(mtp_layers),
+                                              /*value=*/"full_attention"));
+    args.full_attention_interval(/*value=*/1);
+  };
+  const MtpModelMetadata target{
+      .prepare_args_ = prepare_args,
+      .capabilities_ =
+          {
+              .model_family = MtpModelFamily::QWEN35,
+              .supports_expanded_replay = true,
+              .supports_grouped_graph = true,
+              .graph_context_policy = GraphContextPolicy::QWEN_FULL_ATTENTION,
+          },
+  };
+  const MtpModelMetadata draft{
+      .prepare_args_ = prepare_args,
+      .capabilities_ =
+          {
+              .native_draft_requires_accepted_span_replay = true,
+              .allow_tail_fallback = true,
+              .model_family = MtpModelFamily::QWEN35,
+              .supports_grouped_graph = true,
+              .graph_context_policy = GraphContextPolicy::QWEN_FULL_ATTENTION,
+          },
+  };
   for (const char* name :
        {"qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"}) {
-    ModelRegistry::register_mtp_capabilities(name, target);
+    ModelRegistry::register_mtp_metadata(name, target);
   }
   for (const char* name : {"qwen3_5_mtp", "qwen3_5_moe_mtp"}) {
-    ModelRegistry::register_mtp_capabilities(name, draft);
+    ModelRegistry::register_mtp_metadata(name, draft);
   }
   return true;
 }();

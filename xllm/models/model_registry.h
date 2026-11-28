@@ -82,11 +82,6 @@ struct CausalVLMRegistration {
   int32_t priority = 0;
 };
 
-// Rewrites a target model's args into the registered MTP draft form. The
-// registry owns dispatch so engines never name a concrete MTP model.
-using MtpArgsAdapter =
-    std::function<void(ModelArgs& args, bool is_python_model)>;
-
 using GraphKVCapacityAdapter = std::function<int64_t(const ModelArgs&)>;
 
 enum class MtpModelFamily : int8_t {
@@ -111,6 +106,12 @@ struct MtpModelCapabilities {
   GraphContextPolicy graph_context_policy = GraphContextPolicy::MAX_CONTEXT;
 };
 
+struct MtpModelMetadata {
+  std::string draft_model_type_{};
+  void (*prepare_args_)(ModelArgs& args, bool is_python_model) = nullptr;
+  MtpModelCapabilities capabilities_{};
+};
+
 // TODO: add default args loader.
 struct ModelMeta {
   std::unordered_map<std::string, CausalLMRegistration> causal_lm_factories;
@@ -121,8 +122,7 @@ struct ModelMeta {
   ModelArgsLoader model_args_loader;
   TokenizerArgsLoader tokenizer_args_loader;
   bool supports_dcp = false;
-  MtpModelCapabilities mtp_capabilities;
-  MtpArgsAdapter mtp_args_adapter;
+  MtpModelMetadata mtp_;
   GraphKVCapacityAdapter graph_kv_capacity_adapter;
 };
 
@@ -193,13 +193,9 @@ class ModelRegistry {
   static void register_dcp_capability(const std::string& name);
   static bool supports_dcp(const std::string& name);
 
-  static void register_mtp_args_adapter(const std::string& name,
-                                        MtpArgsAdapter adapter);
-
-  static void register_mtp_capabilities(const std::string& name,
-                                        MtpModelCapabilities capabilities);
-
-  static MtpModelCapabilities get_mtp_capabilities(const std::string& name);
+  static bool register_mtp_metadata(const std::string& name,
+                                    MtpModelMetadata metadata);
+  static const MtpModelMetadata& get_mtp_metadata(const std::string& name);
 
   static void register_graph_kv_capacity(const std::string& name,
                                          GraphKVCapacityAdapter adapter);
@@ -208,22 +204,13 @@ class ModelRegistry {
                                        const ModelArgs& args,
                                        int64_t default_capacity);
 
-  static void configure_mtp_args(ModelArgs& args,
-                                 std::string_view algorithm,
-                                 bool is_draft_engine,
-                                 bool is_python_model);
-
-  static CausalLMFactory get_causallm_factory(const std::string& name);
-
   static CausalLMFactory get_causallm_factory(
       const std::string& name,
-      const std::string& implementation);
-
-  static CausalVLMFactory get_causalvlm_factory(const std::string& name);
+      const std::string& implementation_key);
 
   static CausalVLMFactory get_causalvlm_factory(
       const std::string& name,
-      const std::string& implementation);
+      const std::string& implementation_key);
 
   static DiTModelFactory get_dit_model_factory(const std::string& name);
 

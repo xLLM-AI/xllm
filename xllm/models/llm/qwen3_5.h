@@ -23,6 +23,10 @@ limitations under the License.
 #include <vector>
 
 #include "models/model_registry.h"
+#if defined(USE_CUDA) || defined(USE_MUSA)
+#include "models/llm/qwen3_5_mtp_metadata.h"  // IWYU pragma: keep
+#endif
+
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_MUSA) || \
     defined(USE_DCU)
 #include "core/layers/qwen3_5_decoder_layer.h"
@@ -218,35 +222,28 @@ REGISTER_MODEL_ARGS(qwen3_5_moe_text, [&] {
 });
 
 #if defined(USE_NPU)
-namespace qwen3_5_args {
+const bool qwen3_5_mtp_metadata_registered = [] {
+  const MtpModelMetadata metadata{
+      .prepare_args_ =
+          [](ModelArgs& args, bool /*unused*/) {
+            const int32_t mtp_layers = args.num_nextn_predict_layers();
+            if (mtp_layers <= 0) {
+              return;
+            }
 
-inline void configure_mtp_args(ModelArgs& args,
-                               [[maybe_unused]] bool is_python_model) {
-  const int32_t mtp_layers = args.num_nextn_predict_layers();
-  if (mtp_layers <= 0) {
-    return;
+            const bool is_moe = args.model_type() == "qwen3_5_moe" ||
+                                args.model_type() == "qwen3_5_moe_text";
+            args.model_type(is_moe ? "qwen3_5_moe_mtp" : "qwen3_5_mtp");
+            args.n_layers(mtp_layers);
+            args.layer_types(std::vector<std::string>(
+                static_cast<size_t>(mtp_layers), /*value=*/"full_attention"));
+            args.full_attention_interval(/*value=*/1);
+          },
+  };
+  for (const char* name :
+       {"qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"}) {
+    ModelRegistry::register_mtp_metadata(name, metadata);
   }
-
-  const bool is_moe = args.model_type() == "qwen3_5_moe" ||
-                      args.model_type() == "qwen3_5_moe_text";
-  args.model_type(is_moe ? "qwen3_5_moe_mtp" : "qwen3_5_mtp");
-  args.n_layers(mtp_layers);
-  args.layer_types(std::vector<std::string>(static_cast<size_t>(mtp_layers),
-                                            "full_attention"));
-  args.full_attention_interval(1);
-}
-
-}  // namespace qwen3_5_args
-
-const bool qwen3_5_mtp_adapter_registered = []() {
-  ModelRegistry::register_mtp_args_adapter("qwen3_5",
-                                           &qwen3_5_args::configure_mtp_args);
-  ModelRegistry::register_mtp_args_adapter("qwen3_5_moe",
-                                           &qwen3_5_args::configure_mtp_args);
-  ModelRegistry::register_mtp_args_adapter("qwen3_5_text",
-                                           &qwen3_5_args::configure_mtp_args);
-  ModelRegistry::register_mtp_args_adapter("qwen3_5_moe_text",
-                                           &qwen3_5_args::configure_mtp_args);
   return true;
 }();
 

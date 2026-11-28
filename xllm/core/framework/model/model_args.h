@@ -31,8 +31,6 @@ limitations under the License.
 
 namespace xllm {
 
-inline constexpr std::string_view kDSparkGLM5DraftModelType = "glm5_dspark";
-
 class TokenEmbeddingArgs final {
  public:
   REFLECT_PROPERTIES(TokenEmbeddingArgs);
@@ -385,7 +383,6 @@ class DSparkArgs final {
   REFLECT_PROPERTIES(DSparkArgs);
 
   PROPERTY(int64_t, markov_rank) = 0;
-  PROPERTY(int32_t, dspark_num_layers) = 0;
 };
 
 // Vision encoder, projector, and model-defined generation configuration.
@@ -746,7 +743,6 @@ struct ModelArgs {
   PROPERTY(DSparkArgs, dspark_args);
 
   FORWARD_PROPERTY(int64_t, markov_rank, dspark_args);
-  FORWARD_PROPERTY(int32_t, dspark_num_layers, dspark_args);
 
   PROPERTY(ConfidenceHeadArgs, confidence_head_args);
 

@@ -145,12 +145,11 @@ def test_dspark_config_builds_only_draft_layers() -> None:
 
 
 def test_dspark_requires_draft_layers_and_markov_rank() -> None:
-    with pytest.raises(ValueError, match="dspark_num_layers > 0"):
+    with pytest.raises(ValueError, match="at least one draft layer"):
         DeepseekV4DSparkForCausalLM(
             {
                 **_DSPARK_CONFIG,
                 "dspark_target_layer_ids": [],
-                "dspark_num_layers": 0,
             }
         )
     with pytest.raises(ValueError, match="dspark_markov_rank > 0"):
@@ -160,15 +159,6 @@ def test_dspark_requires_draft_layers_and_markov_rank() -> None:
                 "dspark_markov_rank": 0,
             }
         )
-    with pytest.raises(ValueError, match="target layer count"):
-        DeepseekV4DSparkConfig.from_dict(
-            {
-                **_DSPARK_CONFIG,
-                "dspark_num_layers": 2,
-                "dspark_target_layer_ids": [1],
-                "dspark_markov_rank": 4,
-            }
-        ).validate()
 
 
 def test_dspark_confidence_head_is_biasless() -> None:

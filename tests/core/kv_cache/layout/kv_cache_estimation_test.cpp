@@ -33,7 +33,8 @@ limitations under the License.
 #include "tests/core/kv_cache/dcp_indexer_test_fixture.h"
 
 #if defined(USE_NPU)
-#include "models/model_registry.h"
+#include "core/framework/model_loader/hf_model_args.h"
+#include "core/util/json_reader.h"
 #endif
 
 namespace xllm {
@@ -1497,15 +1498,11 @@ TEST(KVCacheEstimationTest, Qwen35NativeMtpDraftUsesFullAttentionCacheBudget) {
                         "full_attention",
                         "linear_attention",
                         "full_attention"});
-      ModelRegistry::configure_mtp_args(target_args,
-                                        /*speculative_algorithm=*/"MTP",
-                                        /*is_draft_engine=*/false,
-                                        /*is_python_model=*/false);
       ModelArgs draft_args = target_args;
-      ModelRegistry::configure_mtp_args(draft_args,
-                                        /*speculative_algorithm=*/"MTP",
-                                        /*is_draft_engine=*/true,
-                                        /*is_python_model=*/false);
+      configure_draft_model_args(draft_args,
+                                 /*algorithm=*/"mtp",
+                                 /*is_python_model=*/false,
+                                 JsonReader{});
 
       KVCacheEstimateOptions target_options = make_linear_attention_options();
       target_options.num_speculative_tokens = 3;

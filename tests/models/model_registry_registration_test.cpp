@@ -145,8 +145,8 @@ TEST(ModelRegistryRegistrationTest, HigherPriorityReplacesFactory) {
 }
 
 TEST(ModelRegistryRegistrationTest, DirectSubclassMacroRegistersFactory) {
-  const CausalLMFactory factory =
-      ModelRegistry::get_causallm_factory("registry_macro_model");
+  const CausalLMFactory factory = ModelRegistry::get_causallm_factory(
+      /*name=*/"registry_macro_model", /*implementation_key=*/"native");
   ASSERT_TRUE(factory);
   std::unique_ptr<CausalLM> model = factory(ModelContext{});
   EXPECT_NE(dynamic_cast<MacroRegisteredModel*>(model.get()), nullptr);
@@ -154,8 +154,8 @@ TEST(ModelRegistryRegistrationTest, DirectSubclassMacroRegistersFactory) {
   ASSERT_EQ(model->children().size(), 1);
   EXPECT_FALSE(model->children().front()->is_training());
 
-  const CausalLMFactory alias_factory =
-      ModelRegistry::get_causallm_factory("registry_macro_lm_alias");
+  const CausalLMFactory alias_factory = ModelRegistry::get_causallm_factory(
+      /*name=*/"registry_macro_lm_alias", /*implementation_key=*/"native");
   ASSERT_TRUE(alias_factory);
   std::unique_ptr<CausalLM> alias_model = alias_factory(ModelContext{});
   EXPECT_NE(dynamic_cast<MacroRegisteredModel*>(alias_model.get()), nullptr);

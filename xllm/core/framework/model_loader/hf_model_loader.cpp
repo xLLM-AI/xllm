@@ -214,27 +214,27 @@ void check_safetensors_cleanup(::Status status,
 
 }  // namespace
 
-HFModelLoader::HFModelLoader(std::string model_weights_path)
-    : HFModelLoader(std::move(model_weights_path),
-                    ModelConfig::get_instance().backend()) {}
-
 HFModelLoader::HFModelLoader(std::string model_weights_path,
-                             const std::string& backend)
+                             const std::string& backend,
+                             std::string_view speculative_algorithm,
+                             std::string_view reference_model_weights_path)
     : model_weights_path_(std::move(model_weights_path)) {
-  CHECK(load_args(model_weights_path_, backend))
-      << "Failed to load model args from " << model_weights_path_;
-  // try to load safetensors first
   for (const auto& entry :
        std::filesystem::directory_iterator(model_weights_path_)) {
-    // load bin or safe tensors
     if (entry.path().extension() == ".safetensors") {
       model_weights_files_.push_back(entry.path().string());
     }
   }
   CHECK(!model_weights_files_.empty())
       << "Failed to find model weights files in " << model_weights_path_;
-  // sort the model weights files by name
   std::sort(model_weights_files_.begin(), model_weights_files_.end());
+
+  CHECK(load_args(model_weights_path_, backend, speculative_algorithm))
+      << "Failed to load model args from " << model_weights_path_;
+  if (!speculative_algorithm.empty() &&
+      reference_model_weights_path != model_weights_path_) {
+    reference_model_weights_path_ = reference_model_weights_path;
+  }
 
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/32,
@@ -249,17 +249,15 @@ std::unique_ptr<Tokenizer> HFModelLoader::tokenizer() const {
 
 std::vector<std::unique_ptr<StateDict>>& HFModelLoader::get_state_dicts() {
   if (state_dicts_.empty()) {
-    // load state dict
-    state_dicts_.reserve(model_weights_files_.size());
-    auto file_cnt = model_weights_files_.size();
+    const size_t file_cnt = model_weights_files_.size();
     BlockingCounter counter(file_cnt);
-    state_dicts_.resize(model_weights_files_.size());
-    for (int file_id = 0; file_id < file_cnt; file_id++) {
-      threadpool_->schedule([this, file_id, &counter]() mutable {
+    state_dicts_.resize(file_cnt);
+    for (size_t file_id = 0; file_id < file_cnt; ++file_id) {
+      threadpool_->schedule([this, file_id, &counter]() {
         LOG(INFO) << "Loading model weights from "
                   << model_weights_files_[file_id];
-        state_dicts_[file_id] = std::move(
-            StateDictFromSafeTensor::load(model_weights_files_[file_id]));
+        state_dicts_[file_id] =
+            StateDictFromSafeTensor::load(model_weights_files_[file_id]);
         counter.decrement_count();
       });
     }
@@ -469,9 +467,11 @@ int64_t HFModelLoader::get_max_decoder_layer_weight_size() const {
 }
 
 bool HFModelLoader::load_args(const std::string& model_weights_path,
-                              const std::string& backend) {
-  if (!load_hf_model_args(model_weights_path, backend, &args_)) {
-    LOG(ERROR) << "Failed to load model args from " << model_weights_path;
+                              const std::string& backend,
+                              std::string_view speculative_algorithm) {
+  JsonReader checkpoint_config;
+  if (!load_hf_model_args(
+          model_weights_path, backend, &args_, checkpoint_config)) {
     return false;
   }
 
@@ -482,7 +482,7 @@ bool HFModelLoader::load_args(const std::string& model_weights_path,
   }
 #endif
 
-  if (!load_quant_args(model_weights_path)) {
+  if (!load_quant_args(model_weights_path, checkpoint_config)) {
     LOG(ERROR) << "Failed to load quant args from " << model_weights_path;
     return false;
   }
@@ -519,19 +519,19 @@ bool HFModelLoader::load_args(const std::string& model_weights_path,
     args_.dtype() = "bfloat16";
   }
 
+  if (!speculative_algorithm.empty()) {
+    configure_draft_model_args(args_,
+                               speculative_algorithm,
+                               ModelConfig::is_python_model_impl(
+                                   ModelConfig::get_instance().model_impl()),
+                               checkpoint_config);
+  }
+
   return true;
 }
 
-bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
-  JsonReader reader;
-  const std::string args_file_path = model_weights_path + "/config.json";
-  if (!reader.parse(args_file_path)) {
-    LOG(ERROR) << "Failed to parse model args file: " << args_file_path;
-    return false;
-  }
-
-  normalize_config_torch_dtype(reader);
-
+bool HFModelLoader::load_quant_args(const std::string& model_weights_path,
+                                    const JsonReader& reader) {
   if (!load_quant_cfg(reader, quant_args_)) {
     return false;
   }
@@ -553,11 +553,6 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
   }
   bool model_is_w4a8_dynamic =
       boost::iequals(quant_args_.quantize_type(), "w4a8_dynamic");
-  if (boost::iequals(quant_args_.quantize_type(), "w4a8_dynamic")) {
-    quant_args_.bits() = 8;
-    quant_args_.moe_weight_bits() = 4;
-    quant_args_.activation_dynamic() = true;
-  }
 
   bool explicit_quant_group_size =
       reader.contains("quantization_config.group_size");
@@ -570,8 +565,7 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
       model_weights_path + "/quant_model_description.json";
   if (quant_desc_reader.parse(quant_desc_file_path)) {
     std::unordered_map<std::string, std::string> quant_descs;
-    const auto quant_desc_data = quant_desc_reader.data();
-    bool desc_model_quant_is_w4a8_dynamic = false;
+    const auto& quant_desc_data = quant_desc_reader.mutable_data();
     bool desc_has_w4a8 = false;
     bool desc_has_w8a8 = false;
     bool desc_has_w4a8_dynamic = false;
@@ -642,43 +636,39 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
                   << quant_args_.quantize_type();
       }
     }
-    desc_model_quant_is_w4a8_dynamic =
+    const bool desc_model_quant_is_w4a8_dynamic =
         boost::iequals(quant_args_.quantize_type(), "w4a8_dynamic") ||
         desc_has_w4a8_dynamic;
     model_is_w4a8_dynamic =
         model_is_w4a8_dynamic || desc_model_quant_is_w4a8_dynamic;
-    if (desc_model_quant_is_w4a8_dynamic) {
-      if (quant_args_.quantize_type().empty()) {
-        quant_args_.quantize_type() = "w4a8_dynamic";
-      }
-      quant_args_.bits() = 8;
-      quant_args_.moe_weight_bits() = 4;
-      quant_args_.activation_dynamic() = true;
+    if (desc_model_quant_is_w4a8_dynamic &&
+        quant_args_.quantize_type().empty()) {
+      quant_args_.quantize_type() = "w4a8_dynamic";
     }
     if (auto v = quant_desc_reader.value<int64_t>("group_size")) {
       quant_args_.group_size() = v.value();
-      explicit_quant_group_size = true;
-    } else if (desc_model_quant_is_w4a8_dynamic && !explicit_quant_group_size) {
-      // Match vllm-ascend W4A8_DYNAMIC's default. A config value of 0 is still
-      // respected as the per-channel mode.
-      quant_args_.group_size() = 256;
       explicit_quant_group_size = true;
     }
     if (auto v = quant_desc_reader.value<std::string>("version")) {
       quant_args_.quant_version() = v.value();
     }
   }
-  if (model_is_w4a8_dynamic && !explicit_quant_group_size) {
-    quant_args_.group_size() = 256;
-  }
-  if (model_is_w4a8_dynamic && quant_args_.quant_version() != "1.0.0") {
-    LOG(ERROR) << "W4A8_DYNAMIC only supports quant_version 1.0.0, got "
-               << (quant_args_.quant_version().empty()
-                       ? "<empty>"
-                       : quant_args_.quant_version())
-               << ". Please provide quant_model_description.json version "
-                  "\"1.0.0\".";
-    return false;
+  if (model_is_w4a8_dynamic) {
+    quant_args_.bits() = 8;
+    quant_args_.moe_weight_bits() = 4;
+    quant_args_.activation_dynamic() = true;
+    if (!explicit_quant_group_size) {
+      quant_args_.group_size() = 256;
+    }
+    if (quant_args_.quant_version() != "1.0.0") {
+      LOG(ERROR) << "W4A8_DYNAMIC only supports quant_version 1.0.0, got "
+                 << (quant_args_.quant_version().empty()
+                         ? "<empty>"
+                         : quant_args_.quant_version())
+                 << ". Please provide quant_model_description.json version "
+                    "\"1.0.0\".";
+      return false;
+    }
   }
 
   // awq quantization args

@@ -19,7 +19,6 @@ limitations under the License.
 #include "framework/model/model_params_view.h"
 #include "framework/quantization/quant_args.h"
 #include "layers/common/dsa_metadata_builder.h"
-#include "layers/npu_torch/deepseek_sparse_attention.h"
 #include "layers/npu_torch/deepseek_v4_indexer.h"
 
 namespace xllm {

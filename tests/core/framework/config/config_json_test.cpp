@@ -28,7 +28,6 @@ limitations under the License.
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/execution_config.h"
-#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/load_config.h"

@@ -68,29 +68,6 @@ ParallelArgs configure_draft_parallel_args(ParallelArgs parallel_args) {
 }
 
 template <typename TargetInput>
-ModelContext DraftModelSpecWorkerImpl<TargetInput>::load_model_config(
-    ModelLoader& loader) {
-  const auto& draft_options = draft_impl_->options();
-  if (!draft_options.model_path().empty() &&
-      draft_options.model_path() != loader.model_weights_path()) {
-    loader.set_reference_model_weights_path(draft_options.model_path());
-  }
-
-  ModelArgs args = loader.model_args();
-  apply_draft_model_overrides(args);
-  if (args.draft_vocab_size() == 0) {
-    args.draft_vocab_size(args.vocab_size());
-  }
-  const int32_t num_speculative_tokens =
-      SpeculativeConfig::is_block_diffusion_algorithm(
-          draft_options.speculative_algorithm())
-          ? draft_options.num_speculative_tokens()
-          : 0;
-  return draft_impl_->load_model_config(
-      std::move(args), loader.quant_args(), num_speculative_tokens, nullptr);
-}
-
-template <typename TargetInput>
 KVCacheCreateOptions
 DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_layout(
     const KVCacheShape& shape) const {
@@ -303,8 +280,25 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
         model_weights_path, random_seed, master_status);
   } else {
     CHECK_EQ(draft_impl_->get_status(), WorkerImpl::Status::UNINITIALIZED);
-    auto loader = ModelLoader::create(model_weights_path);
-    auto context = load_model_config(*loader);
+    const auto& draft_options = draft_impl_->options();
+    const auto& algorithm = draft_options.speculative_algorithm();
+    auto loader = ModelLoader::create(
+        model_weights_path,
+        ModelConfig::get_instance().backend(),
+        algorithm,
+        /*reference_model_weights_path=*/draft_options.model_path());
+    ModelArgs args = loader->model_args();
+    if (args.draft_vocab_size() == 0) {
+      args.draft_vocab_size(args.vocab_size());
+    }
+    const int32_t num_speculative_tokens =
+        SpeculativeConfig::is_block_diffusion_algorithm(algorithm)
+            ? draft_options.num_speculative_tokens()
+            : 0;
+    auto context = draft_impl_->load_model_config(std::move(args),
+                                                  loader->quant_args(),
+                                                  num_speculative_tokens,
+                                                  /*tokenizer=*/nullptr);
     result = draft_impl_->WorkerImpl::init_model(std::move(loader),
                                                  std::move(context),
                                                  nullptr,
