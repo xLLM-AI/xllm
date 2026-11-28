@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/request/request_state.h"
 #include "core/runtime/acl_graph_bucket_policy.h"
 #include "core/scheduler/profile/graph_warmup.h"
@@ -1129,6 +1130,13 @@ void ProfileManager::warmup_prefill_for_graph() {
       options_.dp_size(), options_.instance_role());
   prefill_tokens =
       static_cast<int32_t>(std::min<int64_t>(prefill_tokens, per_group_cap));
+  if (is_deepseek_v41_family(model_args.model_type()) &&
+      prefill_policy_.enable_chunked_prefill()) {
+    // V4.1 prefill gathers the warmup request across DP ranks. Cap it at
+    // one serving chunk to bound the MoE activations and scratch buffers.
+    prefill_tokens = static_cast<int32_t>(
+        std::min<int64_t>(prefill_tokens, prefill_policy_.chunk_tokens()));
+  }
   double prefill_latency = run_request(prefill_tokens,
                                        /*prefix_length=*/0,
                                        /*batch_size=*/1,

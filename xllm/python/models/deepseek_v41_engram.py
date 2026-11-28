@@ -20,14 +20,20 @@ import os
 import re
 import unicodedata
 import weakref
-from typing import Callable, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from xllm.python import distributed
 from xllm.python.attention.dsa_metadata import last_ring_writes
+from xllm.python.layers.moe_parallel import DpScatterState, dp_gather_tokens
 from xllm.python.model_executor.forward_context import in_acl_graph
+
+if TYPE_CHECKING:
+    from xllm.python.distributed.collectives import EngramTpAllGather
+    from xllm.python.models.deepseek_v41_engram_host import EngramHostTable
 
 # Cache value for tokens that take no part in an n-gram (image spans).
 ENGRAM_DEAD_ID = -1
@@ -36,6 +42,7 @@ ENGRAM_IMAGE_SENTINEL_BASE_ID = 129264
 ENGRAM_IMAGE_PAD_ID = 129265
 # Signed-sqrt clamp of the gate input (reference kernel clamp_value).
 _ENGRAM_GATE_CLAMP = 1e-6
+_QUAROT_BLOCK_SIZE = 32
 
 _WHITESPACE_RE = re.compile(r"[ \t\r\n]+")
 # Private-use char so a token that is exactly one space survives Strip().
@@ -391,33 +398,117 @@ class EngramHashState(nn.Module):
         slot_mapping: torch.Tensor | None,
         block_table: torch.Tensor | None,
         swa_block_size: int,
+        *,
+        unit_query_rows: torch.Tensor | None = None,
+        replay_history: torch.Tensor | None = None,
+        replay_requests: tuple[int, ...] = (),
     ) -> torch.Tensor:
         num_tokens = input_ids.shape[0]
         num_layers = len(self.layout.layer_ids)
         n_heads = self.layout.n_heads
         max_ngram = self.layout.max_ngram_size
         device = input_ids.device
-        output = torch.zeros(num_tokens, num_layers, self.layout.n_hash_cols, dtype=torch.int32, device=device)
         if num_tokens == 0:
+            return torch.empty((0, num_layers, self.layout.n_hash_cols), dtype=torch.int32, device=device)
+        pos = positions.reshape(-1)
+        ids = input_ids.reshape(-1)
+        on_npu = device.type in ("npu", "privateuseone")
+        prepared_decode = (
+            on_npu
+            and unit_query_rows is not None
+            and block_table is not None
+            and slot_mapping is not None
+            and replay_history is None
+        )
+        if prepared_decode:
+            from xllm.python.kernels_npu.triton.engram import prepare_unit_query_hash
+
+            req = unit_query_rows.contiguous()
+            pos = pos.contiguous()
+            comp, chunk_start = prepare_unit_query_hash(
+                ids, pos, dead_mask, slot_mapping, block_table, swa_block_size, self.token_map, max_ngram
+            )
+        else:
+            pos = pos.to(torch.int64)
+            ids = ids.to(torch.int64)
+            if unit_query_rows is None:
+                rows = torch.arange(num_tokens, device=device)
+                ends = query_start_loc[1:].to(torch.int64).contiguous()
+                req = torch.searchsorted(ends, rows, right=True).clamp(0, max(ends.numel() - 1, 0))
+            else:
+                # Prepared unit-width offsets give each physical row its own table, including padding.
+                rows = unit_query_rows.to(torch.int64)
+                req = rows
+            if query_start_loc.numel() == num_tokens + 1 and slot_mapping is not None and block_table is not None:
+                # Speculative verification flattens a request into single-token
+                # rows. Consecutive positions backed by the same physical history
+                # still read earlier tokens from this invocation, before cache writeback.
+                prior_pos = (pos - 1).clamp_min(0)
+                column = torch.div(prior_pos, swa_block_size, rounding_mode="floor") % block_table.size(1)
+                prior_slot = block_table.to(torch.int64)[req, column] * swa_block_size + prior_pos % swa_block_size
+                previous = (rows - 1).clamp_min(0)
+                slots = slot_mapping.reshape(-1)
+                continues = (rows > 0) & (pos == pos[previous] + 1) & (slots[previous] >= 0)
+                continues = continues & (slots[previous] == prior_slot)
+                starts = torch.where(continues, 0, rows).cummax(0).values
+                chunk_start = pos[starts]
+            else:
+                chunk_start = pos[query_start_loc.to(torch.int64)[req].clamp(0, num_tokens - 1)]
+
+            comp = self.token_map[ids.clamp(0, self.token_map.numel() - 1)]
+            comp = torch.where(dead_mask.reshape(-1), ENGRAM_DEAD_ID, comp).to(torch.int64)
+
+        cache = self._cache
+        mapped_history = None
+        request_floors = None
+        if replay_history is not None:
+            history_sentinels = image_sentinel_mask(replay_history).reshape_as(replay_history)
+            replay_valid = (replay_history >= 0) & ~history_sentinels
+            mapped_history = self.token_map[replay_history.clamp(0, self.token_map.numel() - 1).to(torch.int64)]
+            mapped_history = torch.where(replay_valid, mapped_history, ENGRAM_DEAD_ID)
+            request_floors = positions.new_tensor(replay_requests)
+        if on_npu:
+            from xllm.python.kernels_npu.triton.engram import hash_rows
+
+            output = hash_rows(
+                comp,
+                pos,
+                req,
+                chunk_start,
+                cache,
+                block_table,
+                swa_block_size,
+                mapped_history,
+                request_floors,
+                self.multipliers,
+                self.primes,
+                self.offsets,
+                self.pad_id,
+            )
+            if cache is not None and slot_mapping is not None:
+                if prepared_decode and in_acl_graph():
+                    from xllm.python.kernels_npu.triton.engram import write_unit_query_history
+
+                    write_unit_query_history(cache, comp, slot_mapping)
+                else:
+                    self._write_hash_cache(cache, comp, slot_mapping)
             return output
-        pos = positions.reshape(-1).to(torch.int64)
-        ids = input_ids.reshape(-1).to(torch.int64)
-        req = self._sequence_index(pos, query_start_loc)
-        chunk_start = pos[query_start_loc.to(torch.int64)[req].clamp(0, num_tokens - 1)]
 
-        comp = self.token_map[ids.clamp(0, self.token_map.numel() - 1)]
-        comp = torch.where(dead_mask.reshape(-1), ENGRAM_DEAD_ID, comp).to(torch.int64)
-
-        rows = torch.arange(num_tokens, device=device)
+        output = torch.empty((num_tokens, num_layers, self.layout.n_hash_cols), dtype=torch.int32, device=device)
         rolling = torch.zeros(num_tokens, num_layers, dtype=torch.int64, device=device)
         blocked = torch.zeros(num_tokens, dtype=torch.bool, device=device)
-        cache = self._cache
+        if mapped_history is not None:
+            replay_rows = request_floors[req] > 0
+            history_width = replay_history.size(1)
         for shift in range(max_ngram):
             lookback = pos - shift
             in_batch = lookback >= chunk_start
             source = self._chunk_source(comp, rows, shift, in_batch, num_tokens)
             if cache is not None and block_table is not None:
                 source = self._cache_source(cache, source, req, lookback, in_batch, block_table, swa_block_size)
+            if replay_history is not None:
+                column = (lookback - chunk_start + history_width).clamp(0, history_width - 1)
+                source = torch.where(replay_rows & ~in_batch, mapped_history[req, column], source)
             blocked = blocked | (lookback < 0) | (source == ENGRAM_DEAD_ID)
             value = torch.where(blocked, self.pad_id, source)
             rolling ^= value.unsqueeze(1) * self.multipliers[:, shift].unsqueeze(0)
@@ -446,17 +537,6 @@ class EngramHashState(nn.Module):
         safe = torch.where(valid, slots, torch.zeros_like(slots))
         keep = cache.index_select(0, safe)
         cache.scatter_(0, safe, torch.where(valid, comp, keep))
-
-    def _sequence_index(
-        self,
-        positions: torch.Tensor,
-        query_start_loc: torch.Tensor,
-    ) -> torch.Tensor:
-        num_tokens = positions.shape[0]
-        qsl = query_start_loc.to(torch.int64).reshape(-1)
-        ends = qsl[1:].contiguous()
-        req = torch.searchsorted(ends, torch.arange(num_tokens, device=positions.device), right=True)
-        return req.clamp(0, max(qsl.numel() - 2, 0))
 
     def _chunk_source(
         self,
@@ -508,6 +588,14 @@ def load_quarot_gate_unrotate(model_path: str, device: torch.device) -> torch.Te
     from safetensors.torch import load_file
 
     q = load_file(quarot_path, device="cpu")["global_rotation"]
+    width = _QUAROT_BLOCK_SIZE
+    if q.ndim == 2 and q.size(0) == q.size(1) and q.size(0) > width and q.size(0) % width == 0:
+        count = q.size(0) // width
+        block = q[:width, :width]
+        diagonal = q.reshape(count, width, count, width).diagonal(dim1=0, dim2=2).movedim(-1, 0)
+        # Equal diagonal blocks account for every nonzero entry iff the off-diagonal blocks are all zero.
+        if torch.equal(diagonal, block.expand_as(diagonal)) and q.count_nonzero() == count * block.count_nonzero():
+            q = block
     return q.t().contiguous().to(device=device, dtype=torch.float32)
 
 
@@ -522,6 +610,10 @@ class EngramEmbedding(nn.Module):
         quant_block: int = 32,
         storage: str = ENGRAM_STORAGE_FP8,
         device: torch.device | None = None,
+        *,
+        dp_size: int = 1,
+        dp_rank: int = 0,
+        host_offload: bool = False,
     ) -> None:
         super().__init__()
         if not head_sizes or any(size <= 0 for size in head_sizes):
@@ -538,24 +630,30 @@ class EngramEmbedding(nn.Module):
         self.part_n_hash_cols = (self.n_hash_cols + tp_size - 1) // tp_size
         self.head_start = tp_rank * self.part_n_hash_cols
         head_end = min(self.head_start + self.part_n_hash_cols, self.n_hash_cols)
-        self.vocab_start = sum(head_sizes[: self.head_start])
-        self.vocab_end = sum(head_sizes[:head_end])
+        tp_vocab_start = sum(head_sizes[: self.head_start])
+        tp_vocab_rows = sum(head_sizes[self.head_start : head_end])
+        # DP peers own disjoint rows of the same TP heads. Keep the head
+        # ranges unchanged so the final TP gather preserves checkpoint order.
+        if host_offload:
+            self.vocab_start = tp_vocab_start
+            self.vocab_end = tp_vocab_start + tp_vocab_rows
+        else:
+            self.vocab_start = tp_vocab_start + tp_vocab_rows * dp_rank // dp_size
+            self.vocab_end = tp_vocab_start + tp_vocab_rows * (dp_rank + 1) // dp_size
         self.part_num_embeddings = self.vocab_end - self.vocab_start
         self.tp_size = int(tp_size)
+        self.dp_size = 1 if host_offload else dp_size
+        self.dp_rank = dp_rank
+        self.host_offload = host_offload
+        self.host_table: EngramHostTable | None = None
         if storage == ENGRAM_STORAGE_INT8:
             self.weight = nn.Parameter(
-                torch.empty(self.part_num_embeddings, self.dim, dtype=torch.int8, device=device),
+                torch.empty(0 if host_offload else self.part_num_embeddings, self.dim, dtype=torch.int8, device=device),
                 requires_grad=False,
             )
-            self.weight_scale = nn.Parameter(
-                torch.empty(
-                    self.part_num_embeddings,
-                    self.dim // self.quant_block,
-                    dtype=torch.float32,
-                    device=device,
-                ),
-                requires_grad=False,
-            )
+            # The loader allocates the scale shard using the checkpoint dtype
+            # so E8M0 scales do not expand to FP32 in persistent memory.
+            self.weight_scale = nn.Parameter(torch.empty(0, dtype=torch.float32, device=device), requires_grad=False)
         else:
             # FP8-E4M3 payloads and ue8m0 scales are kept as raw uint8 bytes:
             # index_select stays on a universally supported dtype and the
@@ -576,6 +674,31 @@ class EngramEmbedding(nn.Module):
 
     def _local_block(self, indices: torch.Tensor) -> torch.Tensor:
         num_tokens = indices.shape[0]
+        if self.host_table is not None:
+            return self.host_table.lookup(
+                indices,
+                self.head_start,
+                self.part_n_hash_cols,
+                self.vocab_start,
+                self.vocab_end,
+                self.dim,
+                self.quant_block,
+            )
+        if self.storage == ENGRAM_STORAGE_INT8 and indices.device.type in ("npu", "privateuseone"):
+            from xllm.python.kernels_npu.triton.engram import lookup_int8
+
+            return lookup_int8(
+                indices,
+                self.weight,
+                self.weight_scale,
+                self.head_start,
+                self.part_n_hash_cols,
+                self.vocab_start,
+                self.vocab_end,
+                self.dim,
+                self.quant_block,
+                e8m0=self.weight_scale.dtype == torch.uint8,
+            )
         if self.part_num_embeddings == 0:
             return torch.zeros(
                 num_tokens,
@@ -599,22 +722,39 @@ class EngramEmbedding(nn.Module):
         scale = self.weight_scale.index_select(0, flat)
         if self.storage == ENGRAM_STORAGE_INT8:
             values = payload.to(torch.float32)
-            scale = scale.repeat_interleave(self.quant_block, dim=-1)
         else:
             values = _e4m3_to_float(payload)
-            # Persistent scales were validated by the weight loader. Keeping
-            # lookup tensor-only avoids a D2H sync and supports graph capture.
-            scale = ue8m0_to_scale(scale, validate=False).repeat_interleave(self.quant_block, dim=-1)
+        if scale.dtype == torch.uint8:
+            # Persistent scales were validated by the weight loader. Decode
+            # only the selected rows without synchronizing back to the CPU.
+            scale = ue8m0_to_scale(scale, validate=False)
+        scale = scale.repeat_interleave(self.quant_block, dim=-1)
         rows = (values * scale).to(torch.bfloat16)
         rows = rows.view(num_tokens, self.part_n_hash_cols, self.dim)
         return torch.where(owned.unsqueeze(-1), rows, torch.zeros_like(rows))
 
-    def lookup(self, indices: torch.Tensor) -> torch.Tensor:
+    def lookup(
+        self,
+        indices: torch.Tensor,
+        dp_scatter: DpScatterState | None = None,
+        *,
+        tp_gather: EngramTpAllGather | None = None,
+    ) -> torch.Tensor:
+        if self.dp_size > 1 and dp_scatter is None:
+            indices, dp_scatter = dp_gather_tokens(indices, self.dp_size, self.dp_rank)
         rows = self._local_block(indices)
-        if self.tp_size > 1:
-            from xllm.python import distributed as _distributed
+        if dp_scatter is not None:
+            distributed.all_reduce_(rows, "dp")
+            rows = dp_scatter.scatter(rows)
+        return self.gather_heads(rows, tp_gather=tp_gather)
 
-            gathered = _distributed.tp_all_gather(rows, dim=1, world_size=self.tp_size)
+    def gather_heads(self, rows: torch.Tensor, *, tp_gather: EngramTpAllGather | None = None) -> torch.Tensor:
+        if self.tp_size > 1:
+            gathered = (
+                tp_gather.gather(rows, dim=1)
+                if tp_gather is not None
+                else distributed.tp_all_gather(rows, dim=1, world_size=self.tp_size)
+            )
             rows = gathered[:, : self.n_hash_cols]
         return rows
 
@@ -635,6 +775,10 @@ class Engram(nn.Module):
         device: torch.device,
         storage: str = ENGRAM_STORAGE_FP8,
         gate_unrotate: torch.Tensor | None = None,
+        *,
+        dp_size: int = 1,
+        dp_rank: int = 0,
+        host_offload: bool = False,
     ) -> None:
         super().__init__()
         self.layer_hash_index = layer_hash_index
@@ -647,6 +791,9 @@ class Engram(nn.Module):
             tp_rank,
             storage=storage,
             device=device,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            host_offload=host_offload,
         )
         n_hash_cols = layout.n_hash_cols
         self.wkv = nn.Linear(
@@ -668,8 +815,8 @@ class Engram(nn.Module):
         self.register_buffer("gate_unrotate", gate_unrotate, persistent=False)
         self._staged_rows: torch.Tensor | None = None
 
-    def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
-        self._staged_rows = self.embed_tokens.lookup(hash_ids)
+    def prepare_embeddings(self, hash_ids: torch.Tensor, dp_scatter: DpScatterState | None = None) -> None:
+        self._staged_rows = self.embed_tokens.lookup(hash_ids, dp_scatter)
 
     def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
         if self._staged_rows is None or self._staged_rows.shape[0] < hash_ids.shape[0]:
@@ -681,17 +828,36 @@ class Engram(nn.Module):
         hidden_states: torch.Tensor,
         hash_ids: torch.Tensor,
         token_mask: torch.Tensor | None = None,
+        *,
+        prefetched: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        rows = self.embed(hash_ids).to(self.wkv.weight.dtype)
+        rows = self.embed(hash_ids) if prefetched is None else prefetched
+        rows = rows.to(self.wkv.weight.dtype)
         kv = self.wkv(rows.flatten(-2))
         num_tokens, hc_mult, dim = hidden_states.shape
-        keys = kv[:, : hc_mult * dim].view(num_tokens, hc_mult, dim).float()
-        value = kv[:, hc_mult * dim :].float()
         hidden = hidden_states.float()
         # The gate needs the original basis; wkv already produces rotated values.
         gate_hidden = hidden
         if self.gate_unrotate is not None:
-            gate_hidden = hidden @ self.gate_unrotate
+            width = self.gate_unrotate.size(0)
+            gate_hidden = (hidden.reshape(-1, width) @ self.gate_unrotate).reshape_as(hidden)
+        if (
+            in_acl_graph()
+            and hidden_states.device.type in ("npu", "privateuseone")
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.is_contiguous()
+            and dim == 5120
+            and num_tokens > 0
+            and token_mask is not None
+            and token_mask.is_contiguous()
+        ):
+            from xllm.python.kernels_npu.triton.engram import engram_gate
+
+            return engram_gate(
+                hidden_states, gate_hidden, kv, self.q_weight, self.k_weight, token_mask, self.eps, _ENGRAM_GATE_CLAMP
+            )
+        keys = kv[:, : hc_mult * dim].view(num_tokens, hc_mult, dim).float()
+        value = kv[:, hc_mult * dim :].float()
         hidden_rms = torch.rsqrt(gate_hidden.square().mean(-1) + self.eps)
         key_rms = torch.rsqrt(keys.square().mean(-1) + self.eps)
         dot = (gate_hidden * self.q_weight.float() * self.k_weight.float() * keys).sum(-1)

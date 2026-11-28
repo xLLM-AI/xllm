@@ -49,6 +49,7 @@ class KVCacheConfig final {
          "kv_cache_dtype",
          "indexer_cache_dtype",
          "enable_prefix_cache",
+         "enable_swa_bounded_replay",
          "kv_events_config",
          "enable_in_batch_prefix_cache",
          "max_linear_state_cache_slots",
@@ -73,6 +74,7 @@ class KVCacheConfig final {
   PROPERTY(std::string, indexer_cache_dtype) = "auto";
 
   PROPERTY(bool, enable_prefix_cache) = true;
+  PROPERTY(bool, enable_swa_bounded_replay) = true;
   PROPERTY(std::string, kv_events_config);
 
   PROPERTY(bool, enable_in_batch_prefix_cache) = false;

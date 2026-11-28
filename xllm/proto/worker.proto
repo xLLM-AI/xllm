@@ -120,6 +120,7 @@ enum BlockType {
   C128 = 3;
   EMBEDDING = 4;
   LINEAR = 5;
+  DECODER_SWA = 8;
 }
 
 message BlockTransferInfo {

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import torch
 
 from xllm.python import distributed
+from xllm.python.distributed.collectives import decode_tp_all_gather
 from xllm.python.model_executor.forward_context import get_forward_context
 
 _SHARED_EXPERT_STREAMS: dict[tuple[str, int | None], torch.npu.Stream] = {}
@@ -240,10 +241,13 @@ class TokenParallelLayout:
             return padded
         return distributed.reduce_scatter(padded, self.tp_size, group_name)
 
-    def gather(self, tensor: torch.Tensor) -> torch.Tensor:
+    def gather(self, tensor: torch.Tensor, *, use_decode_tp: bool = False) -> torch.Tensor:
         if tensor.dim() == 0 or tensor.shape[0] != self.shard_tokens:
             raise ValueError("Token tensor does not match the local layout")
         if self.tp_size == 1:
             return tensor[: self.num_tokens]
-        gathered = distributed.tp_all_gather(tensor.contiguous(), 0, self.tp_size)
+        if use_decode_tp:
+            gathered = decode_tp_all_gather(tensor, self.tp_size)
+        else:
+            gathered = distributed.tp_all_gather(tensor.contiguous(), 0, self.tp_size)
         return gathered[: self.num_tokens]

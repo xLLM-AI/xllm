@@ -45,7 +45,7 @@ def _load_kernel_package() -> ModuleType:
     return importlib.import_module("xllm_kernel")
 
 
-def initialize_runtime() -> None:
+def initialize_runtime(model_type: str = "") -> None:
     """Initialize and publish the active platform's Python kernel package."""
 
     global _runtime_kernels
@@ -148,7 +148,9 @@ def initialize_runtime() -> None:
                         "fused_gdn_gating",
                         "causal_conv1d_decode",
                     )
-                    if find_spec("tilelang") is not None
+                    # V4.1 uses ahead-of-time kernels. Importing the JIT loads a TVM
+                    # that conflicts with the CANN compiler during W8A8 weight packing.
+                    if model_type not in ("deepseek_v41", "deepseek_v41_dspark") and find_spec("tilelang") is not None
                     else ()
                 ),
                 "fused_attention",

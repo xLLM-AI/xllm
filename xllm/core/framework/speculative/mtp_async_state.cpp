@@ -51,7 +51,8 @@ TargetSpecVerifyMode classify_target_spec_verify_mode(
   }
   if (is_python_model &&
       (model_type == "deepseek_v32" || model_type == "deepseek_v4" ||
-       model_type == "deepseek_v4_dspark" || model_type == "glm_moe_dsa")) {
+       model_type == "deepseek_v4_dspark" ||
+       is_deepseek_v41_family(model_type) || model_type == "glm_moe_dsa")) {
     return TargetSpecVerifyMode::EXPANDED_VERIFY;
   }
   if (model_type == "mimo") {

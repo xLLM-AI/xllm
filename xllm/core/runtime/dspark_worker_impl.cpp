@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "runtime/llm_worker_impl.h"
+#include "util/json_reader.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -43,11 +44,34 @@ void DSparkWorkerImpl::apply_draft_model_overrides(ModelArgs& args) {
 #if defined(USE_NPU)
     CHECK_GT(args.dspark_num_layers(), 0)
         << "DeepSeek-V4 DSpark requires at least one draft layer.";
+    const bool is_v41 = args.model_type() == "deepseek_v41";
+    if (is_v41) {
+      CHECK(ModelConfig::is_python_model_impl(context_.get_model_impl()))
+          << "DeepSeek-V4.1 DSpark requires the Python model implementation.";
+      JsonReader reader;
+      CHECK(reader.parse(options_.draft_model_path().value() + "/config.json"));
+      args.n_routed_experts(
+          reader.value_or<int32_t>("text_config.dspark_n_routed_experts", 128));
+      args.num_experts_per_tok(reader.value_or<int32_t>(
+          "text_config.dspark_num_experts_per_tok", 3));
+      args.n_activated_experts(args.num_experts_per_tok());
+      args.kv_source_layer_ids({});
+      args.index_source_layer_ids({});
+      args.candidate_source_layer_id(-1);
+      args.engram_layer_ids({});
+      args.engram_num_embeddings({});
+      args.first_k_dense_replace(0);
+      args.enable_confidence_head(false);
+    }
     args.n_layers(args.dspark_num_layers());
     args.n_hash_layers(0);
-    args.compress_ratios(std::vector<int32_t>(args.dspark_num_layers(), 1));
-#endif
+    args.compress_ratios(
+        std::vector<int32_t>(args.dspark_num_layers(), is_v41 ? 0 : 1));
+    args.model_type(is_v41 ? std::string(kDeepseekV41DSparkModelType)
+                           : "deepseek_v4_dspark");
+#else
     args.model_type("deepseek_v4_dspark");
+#endif
   } else {
     args.model_type(args.model_type() == kDSparkGLM5DraftModelType
                         ? std::string(kDSparkGLM5DraftModelType)
@@ -87,7 +111,6 @@ std::pair<torch::Tensor, torch::Tensor> DSparkWorkerImpl::run_decode_draft(
   prepare_query_inputs(input, query_input);
 
   const int32_t batch_size = input.input_params.meta.num_sequences;
-  const torch::Tensor anchors = anchor_token_ids(input);
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
 
   query_input.skip_sampling_for_logits_only = true;
@@ -106,7 +129,18 @@ std::pair<torch::Tensor, torch::Tensor> DSparkWorkerImpl::run_decode_draft(
   torch::Tensor base_logits = draft_output->logits.view(
       {batch_size, num_speculative_tokens, draft_output->logits.size(-1)});
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+  // The first draft query of each sequence carries its corrected anchor.
+  const torch::Tensor anchors =
+      draft_forward_input.token_ids
+          .slice(0,
+                 0,
+                 static_cast<int64_t>(batch_size) * num_speculative_tokens,
+                 num_speculative_tokens)
+          .to(torch::kLong);
   SamplingParameters draft_sampling_params = input.sampling_params;
+  // The draft forward already selected these logits. Markov sampling uses all
+  // rows, so it does not need another blocking copy of the selection indices.
+  draft_sampling_params.logits_indices() = torch::Tensor();
   prepare_draft_sampling(options_.enable_probabilistic_draft(),
                          draft_sampling_params);
   auto draft_proposal =

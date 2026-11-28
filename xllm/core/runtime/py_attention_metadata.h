@@ -23,6 +23,8 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
+#include "core/framework/model/model_input_types.h"
+
 namespace xllm::layer {
 struct AttentionMetadata;
 struct ExpandedDecodeMetadata;
@@ -78,6 +80,9 @@ class PyAttentionMetadataView final {
   const std::vector<int32_t>& new_cache_slots_host_values() const;
   pybind11::object q_seq_lens_host() const;
   pybind11::list multi_block_tables() const;
+  pybind11::tuple swa_prefix_replay() const;
+  const std::vector<int32_t>& decoder_replay_starts() const;
+  const std::vector<int32_t>& decoder_replay_dp_token_counts() const;
   pybind11::object block_table() const;
   pybind11::object shared_full_block_table() const;
   pybind11::object shared_full_slot_mapping() const;
@@ -147,9 +152,11 @@ class PyAttentionMetadataView final {
   std::vector<int64_t> num_accepted_tokens_host_values_;
   std::vector<int32_t> dp_execution_token_counts_;
   std::vector<int32_t> raw_dp_execution_token_counts_;
+  std::vector<int32_t> decoder_replay_dp_token_counts_;
   std::vector<int32_t> dp_global_sequence_nums_;
   std::vector<int32_t> dp_global_kv_max_seq_lens_;
   std::vector<int32_t> dp_is_decode_;
+  SwaPrefixReplayInput swa_prefix_replay_;
   std::shared_ptr<void> prepared_attention_holder_;
   std::shared_ptr<void> dsa_metadata_holder_;
   torch::Tensor dsa_positions_;

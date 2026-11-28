@@ -18,12 +18,13 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 import torch.nn as nn
 
 from scripts.logger import logger
-from xllm.python.attention.backend import LayerCache
+from xllm.python.attention.backend import LayerCache, LayerCacheInput
 from xllm.python.model_executor.runners.acl_graph import _get_graph_pool
 from xllm.python.model_executor.runners.decode_cuda_graph import _CAPTURE_WARMUP_STEPS
 
@@ -47,34 +48,40 @@ class ContextKvAclGraphRunner:
     stream and consumes the output before another update.
     """
 
-    def __init__(self, model: nn.Module, device: torch.device) -> None:
+    def __init__(self, model: nn.Module, device: torch.device, *, use_swa_cache: bool = False) -> None:
         self.model = model
         self.device = device
-        self._kv_caches: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+        self._use_swa_cache = use_swa_cache
+        self._kv_caches: list[LayerCacheInput] | None = None
+        self._cache_signature: tuple[tuple[int, torch.Size, tuple[int, ...], torch.dtype, torch.device], ...] | None = (
+            None
+        )
         self._graphs: dict[int, _ContextKvGraph] = {}
         self._buckets: list[int] = []
         self._capture_stream: torch.npu.Stream | None = None
         self.replays = 0
 
     def bind_kv_caches(self, caches: list[LayerCache]) -> None:
-        bindings = []
+        bindings: list[LayerCacheInput] = []
+        tensors: list[torch.Tensor] = []
         for cache in caches:
-            if cache.key is None or cache.value is None:
+            if self._use_swa_cache:
+                if cache.swa is None:
+                    raise ValueError("context KV graphs require an SWA cache for every draft layer")
+                bindings.append(cache)
+                tensors.append(cache.swa)
+            elif cache.key is None or cache.value is None:
                 raise ValueError("context KV graphs require key and value caches for every layer")
-            bindings.append((cache.key, cache.value))
-        if self._kv_caches is not None:
-            if len(bindings) != len(self._kv_caches) or any(
-                old.data_ptr() != new.data_ptr()
-                or old.shape != new.shape
-                or old.stride() != new.stride()
-                or old.dtype != new.dtype
-                or old.device != new.device
-                for old_pair, new_pair in zip(self._kv_caches, bindings)
-                for old, new in zip(old_pair, new_pair)
-            ):
-                raise ValueError("context KV cache bindings changed after initialization")
-            return
+            else:
+                bindings.append((cache.key, cache.value))
+                tensors.extend((cache.key, cache.value))
+        signature = tuple(
+            (tensor.data_ptr(), tensor.shape, tensor.stride(), tensor.dtype, tensor.device) for tensor in tensors
+        )
+        if self._cache_signature is not None and self._cache_signature != signature:
+            raise ValueError("context KV cache bindings changed after initialization")
         self._kv_caches = bindings
+        self._cache_signature = signature
 
     @torch.inference_mode()
     def warmup(self, max_rows: int) -> None:
@@ -91,6 +98,9 @@ class ContextKvAclGraphRunner:
         ]
         if not missing_rows:
             return
+        write_context_kv = self.model.write_context_kv
+        if self._use_swa_cache:
+            write_context_kv = partial(write_context_kv, graph_mode=True)
         caller_stream = torch.npu.current_stream(self.device)
         if self._capture_stream is None:
             self._capture_stream = torch.npu.Stream(device=self.device)
@@ -107,11 +117,11 @@ class ContextKvAclGraphRunner:
                 positions = torch.zeros(rows, dtype=torch.int32, device=self.device)
                 slots = torch.full((rows,), -1, dtype=torch.int32, device=self.device)
                 for _ in range(_CAPTURE_WARMUP_STEPS):
-                    self.model.write_context_kv(hidden, positions, slots, self._kv_caches, None)
+                    write_context_kv(hidden, positions, slots, self._kv_caches, None)
                 stream.synchronize()
                 graph = torch.npu.NPUGraph()
                 with torch.npu.graph(graph, pool=_get_graph_pool(), stream=stream):
-                    output = self.model.write_context_kv(hidden, positions, slots, self._kv_caches, None)
+                    output = write_context_kv(hidden, positions, slots, self._kv_caches, None)
                 if output is None:
                     raise RuntimeError("context KV graph capture produced no output")
                 self._graphs[rows] = _ContextKvGraph(hidden, positions, slots, graph, output)

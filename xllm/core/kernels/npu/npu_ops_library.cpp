@@ -31,6 +31,7 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/util/tensor_helper.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -45,6 +46,25 @@ torch::Tensor rms_norm_npu(const torch::Tensor& input,
                            const torch::Tensor& weight,
                            double eps) {
   return xllm::kernel::npu::rms_norm(input, weight, eps, "rmsnorm");
+}
+
+bool supports_rms_norm_cast_npu() {
+  using kernel::npu::aclnn::detail::get_op_api_func_addr;
+  static const bool available =
+      get_op_api_func_addr("aclnnRmsNormCastVaGetWorkspaceSize") != nullptr &&
+      get_op_api_func_addr("aclnnRmsNormCastVa") != nullptr;
+  return available;
+}
+
+std::tuple<torch::Tensor, torch::Tensor> rms_norm_cast_npu(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    double eps) {
+  auto normed = torch::empty_like(input);
+  auto router_input =
+      torch::empty_like(input, input.options().dtype(torch::kFloat32));
+  EXEC_NPU_CMD(aclnnRmsNormCastVa, input, weight, eps, normed, router_input);
+  return {normed, router_input};
 }
 
 torch::Tensor rms_norm_gated_npu(const torch::Tensor& input,
@@ -387,6 +407,36 @@ std::tuple<torch::Tensor, torch::Tensor> fused_add_rms_norm_npu(
   return std::make_tuple(normed, residual_sum);
 }
 
+torch::Tensor dispatch_ffn_combine_npu(const torch::Tensor& x,
+                                       const torch::Tensor& weight1,
+                                       const torch::Tensor& weight2,
+                                       const torch::Tensor& expert_ids,
+                                       const torch::Tensor& scale1,
+                                       const torch::Tensor& scale2,
+                                       const torch::Tensor& probs,
+                                       const torch::Tensor& x_active_mask,
+                                       const std::string& group,
+                                       int64_t max_output_size,
+                                       double swiglu_limit) {
+  torch::Tensor expert_token_nums = torch::empty(
+      {weight1.size(0)}, expert_ids.options().dtype(torch::kInt32));
+  auto [output, counts] =
+      xllm::kernel::npu::apply_npu_dispatch_ffn_combine(x,
+                                                        {weight1},
+                                                        {weight2},
+                                                        expert_ids,
+                                                        {scale1},
+                                                        {scale2},
+                                                        probs,
+                                                        x_active_mask,
+                                                        group,
+                                                        max_output_size,
+                                                        swiglu_limit,
+                                                        /*output=*/std::nullopt,
+                                                        expert_token_nums);
+  return output;
+}
+
 torch::Tensor silu_and_mul_npu(const torch::Tensor& input) {
   return xllm::kernel::npu::active(input, "swiglu");
 }
@@ -647,8 +697,69 @@ void ensure_xllm_ops_registered() {
 // compiled only under USE_NPU (mutually exclusive with USE_CUDA).
 TORCH_LIBRARY(xllm_ops, m) {
   m.def(
+      "quant_lightning_indexer_v2_metadata(Tensor query_offsets, Tensor "
+      "committed_lengths, "
+      "Tensor? residual_lengths, int query_heads, int head_dim, int topk, "
+      "int max_query_len, int max_committed_len, int compression_ratio) -> "
+      "Tensor");
+  m.def(
+      "quant_lightning_indexer_v2(Tensor query, Tensor key, Tensor weights, "
+      "Tensor query_scale, Tensor key_scale, Tensor query_offsets, "
+      "Tensor committed_lengths, Tensor? residual_lengths, Tensor block_table, "
+      "Tensor metadata, Tensor? candidate_blocks, int topk, int max_query_len, "
+      "int compression_ratio, int candidate_mode, int candidate_count, "
+      "int candidate_block_size) -> (Tensor, Tensor)");
+  m.def(
+      "sparse_flash_mla_metadata(Tensor cu_seqlens_q, Tensor seqused_kv, "
+      "Tensor? seqused_cmp_kv, Tensor? cmp_residual_kv, int num_heads_q, "
+      "int head_dim, int max_seqlen_q, int max_seqlen_kv, "
+      "int max_seqlen_cmp_kv, int cmp_topk, int cmp_ratio, int window_size, "
+      "Tensor? ori_topk_length=None, int ori_topk=0) -> Tensor");
+  m.def(
+      "sparse_flash_mla(Tensor q, Tensor kv, Tensor block_table, "
+      "Tensor cu_seqlens_q, Tensor seqused_kv, Tensor? cmp_kv, "
+      "Tensor? cmp_block_table, Tensor? cmp_indices, Tensor? seqused_cmp_kv, "
+      "Tensor? cmp_residual_kv, Tensor? sinks, Tensor metadata, "
+      "float softmax_scale, int cmp_ratio, int window_size, "
+      "Tensor? ori_sparse_indices=None, Tensor? ori_topk_length=None) -> "
+      "Tensor");
+  m.def(
+      "v41_partial_rope_(Tensor(a!) value, Tensor cos, Tensor signed_sin, "
+      "Tensor swap_offsets, bool inverse) -> ()");
+  m.def(
+      "v41_swa_rope_cache_(Tensor(a!) value, Tensor cos, Tensor signed_sin, "
+      "Tensor swap_offsets, Tensor slots, Tensor(b!) cache) -> ()");
+  m.def(
+      "v41_index_key_transform(Tensor key, Tensor weight, Tensor cos_sin, "
+      "float eps) -> Tensor");
+  m.def("v41_index_query_quant(Tensor query) -> (Tensor, Tensor)");
+  m.def(
+      "v41_c2_decode_pool_norm(Tensor kv, Tensor scores, Tensor state_kv, "
+      "Tensor state_scores, Tensor previous_rows, Tensor weight, float eps) "
+      "-> Tensor");
+  m.def(
+      "v41_c2_pool_norm(Tensor kv, Tensor scores, Tensor weight, float eps) "
+      "-> Tensor");
+  m.def("supports_fused_hc_pre() -> bool",
+        TORCH_FN(xllm::kernel::npu::supports_fused_hc_pre));
+  m.def(
+      "hc_pre_delayed(Tensor x, Tensor hc_fn, Tensor hc_scale, Tensor hc_base, "
+      "Tensor pre_mix, int hc_mult, int hc_sinkhorn_iters, float norm_eps, "
+      "float hc_eps) -> (Tensor, Tensor, Tensor, Tensor)");
+  m.def(
+      "dispatch_ffn_combine(Tensor x, Tensor weight1, Tensor weight2, "
+      "Tensor expert_ids, Tensor scale1, Tensor scale2, Tensor probs, "
+      "Tensor x_active_mask, str group, int max_output_size, float "
+      "swiglu_limit) -> Tensor");
+  m.def("has_dispatch_ffn_combine() -> bool");
+  m.def(
       "shared_linear_state_indices_out(Tensor ids, Tensor rows, Tensor(a!) "
       "out) -> ()");
+  m.def("supports_rms_norm_cast() -> bool",
+        TORCH_FN(xllm::supports_rms_norm_cast_npu));
+  m.def(
+      "rms_norm_cast(Tensor input, Tensor weight, float eps) -> (Tensor, "
+      "Tensor)");
   m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
   m.def(
       "rms_norm_gated(Tensor input, Tensor gate, Tensor weight, float eps) -> "
@@ -927,9 +1038,31 @@ TORCH_LIBRARY(xllm_ops, m) {
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
+  m.impl("quant_lightning_indexer_v2_metadata",
+         TORCH_FN(xllm::kernel::npu::quant_lightning_indexer_v2_metadata));
+  m.impl("quant_lightning_indexer_v2",
+         TORCH_FN(xllm::kernel::npu::quant_lightning_indexer_v2));
+  m.impl("sparse_flash_mla_metadata",
+         TORCH_FN(xllm::kernel::npu::sparse_flash_mla_metadata));
+  m.impl("sparse_flash_mla", TORCH_FN(xllm::kernel::npu::sparse_flash_mla));
+  m.impl("v41_partial_rope_",
+         TORCH_FN(xllm::kernel::npu::tilelang::v41_partial_rope_));
+  m.impl("v41_swa_rope_cache_",
+         TORCH_FN(xllm::kernel::npu::tilelang::v41_swa_rope_cache_));
+  m.impl("v41_index_key_transform",
+         TORCH_FN(xllm::kernel::npu::tilelang::v41_index_key_transform));
+  m.impl("v41_index_query_quant",
+         TORCH_FN(xllm::kernel::npu::tilelang::v41_index_query_quant));
+  m.impl("v41_c2_decode_pool_norm",
+         TORCH_FN(xllm::kernel::npu::tilelang::v41_c2_decode_pool_norm));
+  m.impl("v41_c2_pool_norm",
+         TORCH_FN(xllm::kernel::npu::tilelang::v41_c2_pool_norm));
+  m.impl("hc_pre_delayed", TORCH_FN(xllm::kernel::npu::hc_pre_delayed));
+  m.impl("dispatch_ffn_combine", TORCH_FN(xllm::dispatch_ffn_combine_npu));
   m.impl(
       "shared_linear_state_indices_out",
       TORCH_FN(xllm::kernel::npu::tilelang::shared_linear_state_indices_out));
+  m.impl("rms_norm_cast", TORCH_FN(xllm::rms_norm_cast_npu));
   m.impl("rms_norm", TORCH_FN(xllm::rms_norm_npu));
   m.impl("rms_norm_gated", TORCH_FN(xllm::rms_norm_gated_npu));
   m.impl("fused_add_gemma_rms_norm",
@@ -1013,6 +1146,8 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
 TORCH_LIBRARY_IMPL(xllm_ops, CompositeExplicitAutograd, m) {
   m.impl(/*name=*/"supports_sparse_flash_mla_swa",
          TORCH_FN(xllm::kernel::npu::supports_sparse_flash_mla_swa));
+  m.impl("has_dispatch_ffn_combine",
+         TORCH_FN(xllm::kernel::npu::has_dispatch_ffn_combine));
   m.impl("has_mla_preprocess_v2",
          TORCH_FN(xllm::kernel::npu::has_mla_preprocess_v2));
   m.impl("build_cp_context", TORCH_FN(xllm::build_cp_context_npu));

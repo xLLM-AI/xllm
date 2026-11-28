@@ -77,6 +77,7 @@ class DsaMetadata:
 
     # Sequence lengths (host, int32).
     seq_lens: torch.Tensor
+    seq_lens_kv_host: list[int] = field(default_factory=list[int], init=False)
     seq_lens_q: torch.Tensor
     seq_lens_q_host: list[int] = field(default_factory=list[int], init=False)
     actual_seq_lengths_kv: torch.Tensor
@@ -134,6 +135,13 @@ class DsaMetadata:
     is_acl_graph: bool = False
 
     graph_token_capacity: int = 0
+    # Prepared V4.1 metadata keeps each token-cache slot aligned with its
+    # query row, using -1 for queries that do not commit a compressed row.
+    query_aligned_token_slots: bool = False
+
+    # V4.1 prefill replay may leave older SWA positions unmaterialized.
+    swa_history_floors: tuple[int, ...] = ()
+    compressed_write_floors: tuple[int, ...] = ()
 
     # Per-forward DeepSeek-V4 context-parallel state. This is the Python
     # counterpart of DSAMetadata::v4_cp_context; it is populated only for
@@ -242,6 +250,7 @@ def build_deepseek_v41_cache_config(
     kv_source_layer_ids: Sequence[int],
     window_size: int,
     n_layers: int,
+    decoder_swa_start_layer: int | None = None,
 ) -> tuple[list[list[DSACacheInfo]], list[DSAGroupInfo]]:
     base_block_size = 128
     group_infos: list[DSAGroupInfo] = []
@@ -260,6 +269,10 @@ def build_deepseek_v41_cache_config(
     for ratio in sorted(token_ratios):
         _register_dsa_group(group_infos, group_key_map, DSA_CACHE_TOKEN, ratio, base_block_size)
 
+    decoder_swa_group = len(group_infos)
+    if decoder_swa_start_layer is not None:
+        group_infos.append(DSAGroupInfo(DSA_CACHE_SLIDING_WINDOW, 1, window_size))
+
     caches_info: list[list[DSACacheInfo]] = [[] for _ in range(n_layers)]
     for layer_id in range(n_layers):
         ratio = int(compress_ratios[layer_id]) if layer_id < len(compress_ratios) else 0
@@ -276,7 +289,14 @@ def build_deepseek_v41_cache_config(
         else:
             entries = [(DSA_CACHE_SLIDING_WINDOW, 1, window_size)]
         for cache_type, entry_ratio, block_size in entries:
-            gid = _register_dsa_group(group_infos, group_key_map, cache_type, entry_ratio, block_size)
+            if (
+                cache_type == DSA_CACHE_SLIDING_WINDOW
+                and decoder_swa_start_layer is not None
+                and layer_id >= decoder_swa_start_layer
+            ):
+                gid = decoder_swa_group
+            else:
+                gid = _register_dsa_group(group_infos, group_key_map, cache_type, entry_ratio, block_size)
             caches_info[layer_id].append(DSACacheInfo(gid, cache_type, entry_ratio, block_size))
     return caches_info, group_infos
 
@@ -337,6 +357,7 @@ class DsaMetadataBuilder:
             max_seq_len=max_seq_len,
         )
         dsa.seq_lens_q_host = q_lens
+        dsa.seq_lens_kv_host = list(kv_seq_lens)
         dsa.input_positions = positions
         dsa.is_acl_graph = enable_graph
         if positions is not None and positions.numel() > 0:
@@ -411,41 +432,24 @@ class DsaMetadataBuilder:
         the compressed RoPE needs the position ``next_pos - ratio``.
         """
         total_tokens = int(dsa.input_positions.numel())
-        c4_positions: list[int] = []
-        c128_positions: list[int] = []
-        for seq, kv_len in enumerate(kv_seq_lens):
-            q_len = min(q_lens[seq], kv_len)
-            start_pos = kv_len - q_len
-            for i in range(q_len):
-                pos = start_pos + i
-                next_pos = pos + 1
-                if next_pos % 4 == 0:
-                    c4_positions.append(next_pos - 4)
-                if next_pos % 128 == 0:
-                    c128_positions.append(next_pos - 128)
 
-        def _pad(positions: list[int], ratio: int) -> torch.Tensor:
-            if enable_graph:
-                # Graph mode pads to total_tokens so the tensor address is stable
-                # across bucket sizes. C++ vector::resize() zero-fills the tail.
-                out = torch.zeros(total_tokens, dtype=dsa.input_positions.dtype)
-                for idx, p in enumerate(positions):
-                    out[idx] = p
-                return out
-            # Non-graph: resize to min(total_tokens, total_tokens//ratio + batch_size)
-            # with 0 padding, matching C++ dsa_metadata_builder.cpp:717
-            # (c4_target = min(num_tokens, num_tokens/4 + batch_size)).
-            batch_size = len(kv_seq_lens)
-            target = min(total_tokens, total_tokens // ratio + batch_size)
-            out = torch.zeros(target, dtype=dsa.input_positions.dtype)
-            for idx, p in enumerate(positions):
-                if idx >= target:
-                    break
-                out[idx] = p
-            return out
+        def compressed_positions(ratio: int) -> torch.Tensor:
+            positions = []
+            for kv_len, q_len in zip(kv_seq_lens, q_lens):
+                start = kv_len - min(kv_len, q_len)
+                positions.extend(range(start // ratio * ratio, kv_len // ratio * ratio, ratio))
+            # Eager allocates one extra compressed row per sequence. Graph
+            # capture reserves a full token bucket with a zero-filled tail.
+            target = total_tokens if enable_graph else min(total_tokens, total_tokens // ratio + len(q_lens))
+            if len(positions) > target:
+                if enable_graph:
+                    raise ValueError("Compressed RoPE positions exceed the graph token capacity")
+                del positions[target:]
+            positions.extend([0] * (target - len(positions)))
+            return torch.tensor(positions, dtype=dsa.input_positions.dtype)
 
-        dsa.c4_pad_positions = _pad(c4_positions, 4)
-        dsa.c128_pad_positions = _pad(c128_positions, 128)
+        dsa.c4_pad_positions = compressed_positions(4)
+        dsa.c128_pad_positions = compressed_positions(128)
 
     # -- step 3: block_tables / slot_mappings (build_dsa_fields, cpp:169-264)
 
@@ -509,7 +513,7 @@ class DsaMetadataBuilder:
                 total_tokens,
                 graph_slot_capacity,
                 graph_block_table_capacity_cols,
-                new_cache_slots,
+                new_cache_slots if m == 0 else None,
             )
 
         n_layers = len(self.caches_info)
@@ -564,6 +568,38 @@ class DsaMetadataBuilder:
         # SEQUENCE: expand the whole context.
         return self._expand_blocks_to_slots(raw_bt, gi, ctx_lens, batch_size, total_tokens)
 
+    @staticmethod
+    def _append_page_slots(
+        slots: list[int],
+        table: torch.Tensor,
+        seq: int,
+        start: int,
+        end: int,
+        block_size: int,
+        *,
+        ring: bool,
+    ) -> None:
+        """Expand contiguous rows of each physical page with a single page lookup."""
+        columns = table.size(1)
+        if seq >= table.size(0) or columns == 0:
+            slots.extend([-1] * (end - start))
+            return
+        while start < end:
+            column, offset = divmod(start, block_size)
+            if ring:
+                column %= columns
+            elif column >= columns:
+                slots.extend([-1] * (end - start))
+                return
+            count = min(block_size - offset, end - start)
+            page = int(table[seq, column].item())
+            if page < 0:
+                slots.extend([-1] * count)
+            else:
+                first = page * block_size + offset
+                slots.extend(range(first, first + count))
+            start += count
+
     # -- TOKEN group (process_token_group, cpp:364-464) --------------------
     # Commits only the compressed rows crossed by the current forward step.
 
@@ -578,40 +614,14 @@ class DsaMetadataBuilder:
         graph_slot_capacity: int,
         graph_block_table_capacity_cols: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        committed_rows = 0
+        slots_list: list[int] = []
         for seq in range(batch_size):
             ctx_len = int(ctx_lens[seq])
             q_len = max(0, min(int(q_lens[seq]), ctx_len))
-            prev_ctx_len = ctx_len - q_len
-            committed_rows += ctx_len // ratio - prev_ctx_len // ratio
-
-        out_slot_rows = max(graph_slot_capacity, committed_rows) if graph_slot_capacity > 0 else committed_rows
-        semantic_cols = int(raw_bt.size(1))
-
-        def slot_for_compressed_index(seq: int, compressed_idx: int) -> int:
-            if seq >= raw_bt.size(0) or semantic_cols <= 0:
-                return -1
-            block_idx = compressed_idx // block_size
-            if block_idx >= semantic_cols:
-                return -1
-            block_id = int(raw_bt[seq, block_idx].item())
-            if block_id < 0:
-                return -1
-            block_offset = compressed_idx % block_size
-            return block_id * block_size + block_offset
-
-        write_idx = 0
-        slots_list = [-1] * out_slot_rows
-        for seq in range(batch_size):
-            ctx_len = int(ctx_lens[seq])
-            q_len = max(0, min(int(q_lens[seq]), ctx_len))
-            prev_ctx_len = ctx_len - q_len
-            prev_committed = prev_ctx_len // ratio
-            committed = ctx_len // ratio
-            new_committed = committed - prev_committed
-            for i in range(new_committed):
-                slots_list[write_idx] = slot_for_compressed_index(seq, prev_committed + i)
-                write_idx += 1
+            self._append_page_slots(
+                slots_list, raw_bt, seq, (ctx_len - q_len) // ratio, ctx_len // ratio, block_size, ring=False
+            )
+        slots_list.extend([-1] * (graph_slot_capacity - len(slots_list)))
         out_slots = torch.tensor(slots_list, dtype=torch.int32, device=raw_bt.device)
 
         out_bt = raw_bt
@@ -642,37 +652,23 @@ class DsaMetadataBuilder:
             query_total_tokens += q_len if self.preserve_query_padding else valid_q_len
             valid_total_tokens += valid_q_len
 
-        out_slot_rows = max(graph_slot_capacity, query_total_tokens) if graph_slot_capacity > 0 else query_total_tokens
         semantic_cols = int(raw_bt.size(1))
-
-        def slot_for_position(seq: int, pos: int) -> int:
-            if semantic_cols <= 0 or seq >= raw_bt.size(0):
-                return -1
-            block_idx = (pos // block_size) % semantic_cols
-            block_id = int(raw_bt[seq, block_idx].item())
-            if block_id < 0:
-                return -1
-            block_offset = pos % block_size
-            return block_id * block_size + block_offset
-
-        slots_list = [-1] * out_slot_rows
         if (
             new_cache_slots is not None
             and len(new_cache_slots) == query_total_tokens
             and valid_total_tokens == query_total_tokens
         ):
-            slots_list[:query_total_tokens] = [int(slot) for slot in new_cache_slots]
+            slots_list = list(new_cache_slots)
         else:
-            write_idx = 0
+            slots_list = []
             for seq in range(batch_size):
                 ctx_len = int(ctx_lens[seq])
                 q_len = max(0, int(q_lens[seq]))
                 valid_q_len = min(q_len, max(0, ctx_len))
-                if seq < raw_bt.size(0):
-                    q_start = ctx_len - valid_q_len
-                    for i in range(valid_q_len):
-                        slots_list[write_idx + i] = slot_for_position(seq, q_start + i)
-                write_idx += q_len if self.preserve_query_padding else valid_q_len
+                self._append_page_slots(slots_list, raw_bt, seq, ctx_len - valid_q_len, ctx_len, block_size, ring=True)
+                if self.preserve_query_padding:
+                    slots_list.extend([-1] * (q_len - valid_q_len))
+        slots_list.extend([-1] * (graph_slot_capacity - len(slots_list)))
         out_slots = torch.tensor(slots_list, dtype=torch.int32, device=raw_bt.device)
 
         # V4.1 indexes absolute ring columns; V4 retains right-aligned history.

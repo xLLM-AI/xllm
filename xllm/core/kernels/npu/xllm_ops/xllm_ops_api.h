@@ -216,6 +216,84 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> hc_pre_sinkhorn(
     int64_t hc_sinkhorn_iters,
     double hc_eps);
 
+torch::Tensor quant_lightning_indexer_v2_metadata(
+    const torch::Tensor& query_offsets,
+    const torch::Tensor& committed_lengths,
+    const std::optional<torch::Tensor>& residual_lengths,
+    int64_t query_heads,
+    int64_t head_dim,
+    int64_t topk,
+    int64_t max_query_len,
+    int64_t max_committed_len,
+    int64_t compression_ratio);
+
+std::tuple<torch::Tensor, torch::Tensor> quant_lightning_indexer_v2(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& weights,
+    const torch::Tensor& query_scale,
+    const torch::Tensor& key_scale,
+    const torch::Tensor& query_offsets,
+    const torch::Tensor& committed_lengths,
+    const std::optional<torch::Tensor>& residual_lengths,
+    const torch::Tensor& block_table,
+    const torch::Tensor& metadata,
+    const std::optional<torch::Tensor>& candidate_blocks,
+    int64_t topk,
+    int64_t max_query_len,
+    int64_t compression_ratio,
+    int64_t candidate_mode,
+    int64_t candidate_count,
+    int64_t candidate_block_size);
+
+torch::Tensor sparse_flash_mla_metadata(
+    const torch::Tensor& cu_seqlens_q,
+    const torch::Tensor& seqused_kv,
+    const std::optional<torch::Tensor>& seqused_cmp_kv,
+    const std::optional<torch::Tensor>& cmp_residual_kv,
+    int64_t num_heads_q,
+    int64_t head_dim,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    int64_t max_seqlen_cmp_kv,
+    int64_t cmp_topk,
+    int64_t cmp_ratio,
+    int64_t window_size,
+    const std::optional<torch::Tensor>& ori_topk_length = std::nullopt,
+    int64_t ori_topk = 0);
+
+torch::Tensor sparse_flash_mla(
+    const torch::Tensor& q,
+    const torch::Tensor& kv,
+    const torch::Tensor& block_table,
+    const torch::Tensor& cu_seqlens_q,
+    const torch::Tensor& seqused_kv,
+    const std::optional<torch::Tensor>& cmp_kv,
+    const std::optional<torch::Tensor>& cmp_block_table,
+    const std::optional<torch::Tensor>& cmp_indices,
+    const std::optional<torch::Tensor>& seqused_cmp_kv,
+    const std::optional<torch::Tensor>& cmp_residual_kv,
+    const std::optional<torch::Tensor>& sinks,
+    const torch::Tensor& metadata,
+    double softmax_scale,
+    int64_t cmp_ratio,
+    int64_t window_size,
+    const std::optional<torch::Tensor>& ori_sparse_indices = std::nullopt,
+    const std::optional<torch::Tensor>& ori_topk_length = std::nullopt);
+
+bool supports_fused_hc_pre();
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+hc_pre_delayed(const torch::Tensor& x,
+               const torch::Tensor& hc_fn,
+               const torch::Tensor& hc_scale,
+               const torch::Tensor& hc_base,
+               const torch::Tensor& pre_mix,
+               int64_t hc_mult,
+               int64_t hc_sinkhorn_iters,
+               double norm_eps,
+               double hc_eps);
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> hc_pre(
     const at::Tensor& x,
     const at::Tensor& hc_fn,

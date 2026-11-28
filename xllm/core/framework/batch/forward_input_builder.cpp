@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/batch/shared_kv_mapping_tracker.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
@@ -127,6 +128,10 @@ ForwardInputBuilder::ForwardInputBuilder(
       shared_kv_mapping_tracker_(mapping_tracker) {
   build_execution_batch_ = ModelConfig::is_python_model_impl(
       ModelConfig::get_instance().model_impl());
+  build_swa_prefix_replay_ =
+      build_execution_batch_ && args_ != nullptr &&
+      args_->model_type() == "deepseek_v41" && !data.forward_type.is_decode() &&
+      KVCacheConfig::get_instance().enable_swa_bounded_replay();
   CHECK_GT(cp_size_, 0);
   // Reserve space for better performance
   const size_t reserve_size = 1024;
@@ -563,6 +568,18 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
       state_.is_prefilling.insert(state_.is_prefilling.end(),
                                   state.is_prefilling.begin(),
                                   state.is_prefilling.end());
+      auto& replay = state_.swa_prefix_replay;
+      auto& shard = state.swa_prefix_replay;
+      replay.starts.insert(
+          replay.starts.end(), shard.starts.begin(), shard.starts.end());
+      replay.ends.insert(
+          replay.ends.end(), shard.ends.begin(), shard.ends.end());
+      replay.engram_history.insert(replay.engram_history.end(),
+                                   shard.engram_history.begin(),
+                                   shard.engram_history.end());
+      replay.decoder_starts.insert(replay.decoder_starts.end(),
+                                   shard.decoder_starts.begin(),
+                                   shard.decoder_starts.end());
     }
     state_.new_token_slot_ids.insert(state_.new_token_slot_ids.end(),
                                      state.new_token_slot_ids.begin(),
@@ -696,6 +713,29 @@ void ForwardInputBuilder::process_single_sequence(int32_t seq_index,
   }
   state.seq_lens.emplace_back(seq_len);
   state.q_seq_lens.emplace_back(padded_q_seq_len);
+  if (build_swa_prefix_replay_) {
+    const KVCacheState& kv = sequence->kv_state();
+    const auto start = kv.swa_replay_start();
+    const bool replay =
+        start.has_value() && n_kv_cache_tokens < kv.shared_tokens_num();
+    auto& input = state.swa_prefix_replay;
+    const uint32_t window = static_cast<uint32_t>(args_->window_size());
+    input.decoder_starts.push_back(
+        sequence->is_prefill_stage()
+            ? static_cast<int32_t>(n_tokens - std::min(n_tokens, window))
+            : -1);
+    input.starts.push_back(replay ? static_cast<int32_t>(*start) : -1);
+    input.ends.push_back(replay ? static_cast<int32_t>(kv.shared_tokens_num())
+                                : 0);
+    if (!args_->engram_layer_ids().empty()) {
+      const int32_t width = args_->engram_max_ngram_size() - 1;
+      for (int32_t shift = width; shift > 0; --shift) {
+        const int64_t pos = static_cast<int64_t>(n_kv_cache_tokens) - shift;
+        input.engram_history.push_back(replay && pos >= 0 ? token_ids[pos]
+                                                          : -1);
+      }
+    }
+  }
   // Process multi-modal input
   process_multi_modal_inputs(
       sequence, n_kv_cache_tokens, q_seq_len, seq_index, state_ptr);
@@ -1105,6 +1145,15 @@ Input ForwardInputBuilder::build_forward_input() {
     CHECK_EQ(execution_batch.num_computed_tokens.size(),
              static_cast<size_t>(num_reqs));
     execution_batch.is_prefilling = std::move(state_.is_prefilling);
+    auto& replay = state_.swa_prefix_replay;
+    if (std::none_of(replay.starts.begin(),
+                     replay.starts.end(),
+                     [](int32_t start) { return start >= 0; })) {
+      replay.starts.clear();
+      replay.ends.clear();
+      replay.engram_history.clear();
+    }
+    execution_batch.swa_prefix_replay = std::move(replay);
     CHECK_EQ(execution_batch.is_prefilling.size(),
              static_cast<size_t>(num_reqs));
   }

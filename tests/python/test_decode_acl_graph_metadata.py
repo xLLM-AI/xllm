@@ -621,7 +621,7 @@ def test_linear_verify_bucketing_requires_a_fixed_producer_width(
     runner._model_owns_linear_spec_verify = True
     metadata = SimpleNamespace(decode_query_width=width, num_speculative_tokens=4, is_target_verify=True)
     with pytest.raises(ValueError, match="complete fixed-width requests"):
-        runner._padded_batch_size(10, metadata)
+        runner._padded_batch_size(runner.max_batch, metadata)
 
 
 @pytest.mark.parametrize("dp_rank", [0, 1])
@@ -630,6 +630,7 @@ def test_executor_reuses_non_causal_graph_with_fresh_preparation_and_rejects_cha
     runner: DecodeAclGraphRunner, executor: ModelExecutor, dp_rank: int, query_width: int
 ) -> None:
     backend = SimpleNamespace(
+        draft_query_width=0,
         page_size=4,
         is_mla=False,
         prepare_metadata=lambda metadata, **_kwargs: SimpleNamespace(

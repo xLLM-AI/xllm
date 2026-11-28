@@ -184,6 +184,36 @@ tilelang_register_runtime_kernel(
   WRAPPER_SRCS fused_sigmoid_gating_delta_rule_wrapper.cpp
 )
 
+tilelang_register_runtime_kernel(
+  NAME v41_c2_pool_norm
+  WRAPPER_SRCS v41_c2_pool_norm_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
+  NAME v41_c2_decode_pool_norm
+  WRAPPER_SRCS v41_c2_decode_pool_norm_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
+  NAME v41_index_key_transform
+  WRAPPER_SRCS v41_index_key_transform_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
+  NAME v41_index_query_quant
+  WRAPPER_SRCS v41_index_query_quant_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
+  NAME v41_partial_rope
+  WRAPPER_SRCS v41_partial_rope_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
+  NAME v41_swa_rope_cache
+  WRAPPER_SRCS v41_swa_rope_cache_wrapper.cpp
+)
+
 cc_library(
   NAME
     tilelang_kernels

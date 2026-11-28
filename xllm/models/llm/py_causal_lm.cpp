@@ -26,8 +26,10 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/parallel_topology.h"
@@ -41,6 +43,7 @@ limitations under the License.
 
 #if defined(USE_NPU)
 #include "core/framework/parallel_state/mega_moe_comm_resource.h"
+#include "core/framework/quantization/quant_args.h"
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
 
@@ -102,7 +105,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
       options_(context.get_tensor_options()),
       device_(context.get_tensor_options().device()),
       enable_mla_(context.get_model_args().enable_mla()) {
-  ensure_python_interpreter();
+  ensure_python_interpreter(model_args_.model_type());
 
   const ParallelArgs& parallel_args = context.get_parallel_args();
   tp_group_ = parallel_args.tp_group_;
@@ -200,9 +203,26 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
 
   py::gil_scoped_acquire gil;
   const bool is_deepseek_v4 = model_args_.model_type() == "deepseek_v4" ||
-                              model_args_.model_type() == "deepseek_v41";
-  const bool needs_python_process_group =
-      !is_deepseek_v4 || dp_size_ > 1 || cp_size_ > 1;
+                              is_deepseek_v41_family(model_args_.model_type());
+  // V4.1 decode capture creates its stream-local HCCL communicator from the
+  // Python TP group. Other V4 execution paths use the native TP communicator.
+  const bool v41_graph_tp = is_deepseek_v41_family(model_args_.model_type()) &&
+                            tp_size_ == 4 && device_.is_privateuseone() &&
+                            ExecutionConfig::get_instance().enable_graph();
+#if defined(USE_NPU)
+  const auto& quant_args = context.get_quant_args();
+  const bool needs_engram_tp =
+      model_args_.model_type() == "deepseek_v41" && tp_size_ > 1 &&
+      !model_args_.engram_layer_ids().empty() &&
+      (quant_args.quant_method() == kQuantMethodAscendInt4 ||
+       quant_args.quant_method() == kQuantMethodAscendInt8) &&
+      ModelConfig::get_instance().enable_engram_host_offload();
+#else
+  constexpr bool needs_engram_tp = false;
+#endif
+  const bool needs_python_process_group = !is_deepseek_v4 || v41_graph_tp ||
+                                          dp_size_ > 1 || cp_size_ > 1 ||
+                                          needs_engram_tp;
   if (needs_python_process_group) {
     py::object init_process_group =
         py::module_::import("xllm.python.distributed")
@@ -211,8 +231,19 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
     CHECK_GT(parallel_args.python_rendezvous_port_, 0);
     const int32_t global_rank = parallel_args.rank();
     const int32_t global_world_size = parallel_args.world_size();
-    if (!is_deepseek_v4 && tp_size_ > 1) {
+    if ((!is_deepseek_v4 && tp_size_ > 1) || v41_graph_tp) {
       init_process_group("tp",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         tp_rank_,
+                         tp_size_,
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         global_rank / tp_size_);
+    }
+    if (needs_engram_tp) {
+      init_process_group("engram_tp",
                          parallel_args.python_rendezvous_host_,
                          parallel_args.python_rendezvous_port_,
                          tp_rank_,
@@ -352,10 +383,12 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   d["enable_eplb"] = eplb_config.enabled;
   d["redundant_experts_num"] = eplb_config.redundant_experts_num;
   d["eplb_use_decode_only_load"] = eplb_config.use_decode_only_load;
-  d["use_ctc"] = ModelConfig::get_instance().use_ctc();
+  const auto& model_config = ModelConfig::get_instance();
+  d["use_ctc"] = model_config.use_ctc();
+  d["enable_engram_host_offload"] = model_config.enable_engram_host_offload();
   // Checkpoint directory: python models use it to discover side-car files
   // shipped with the weights (e.g. optional/quarot.safetensors).
-  d["model_path"] = ModelConfig::get_instance().model();
+  d["model_path"] = model_config.model();
   d["tp_size"] = tp_size_;
   d["tp_rank"] = tp_rank_;
   d["dp_size"] = dp_size_;
@@ -366,6 +399,9 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   d["ep_rank"] = ep_rank_;
   d["requires_kpool_tail_cache"] =
       uses_compressed_kpool_tail_cache(model_args_);
+  d["enable_swa_bounded_replay"] =
+      model_args_.model_type() == "deepseek_v41" &&
+      KVCacheConfig::get_instance().enable_swa_bounded_replay();
   // cp_size is a reflected ParallelArgs PROPERTY (already in d), but cp_rank is
   // a derived member function, so pass it explicitly for the Python executor.
   d["cp_rank"] = cp_rank_;
@@ -396,6 +432,12 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   d["enable_mmrs_fusion"] = flash_comm1_options.enable_mmrs_fusion;
   d["mmrs_comm_mode"] = flash_comm1_options.mmrs_comm_mode;
   d["enable_fused_mc2"] = KernelConfig::get_instance().enable_fused_mc2() > 0;
+  if (KernelConfig::get_instance().enable_fused_mc2() == 1 &&
+      parallel_args.mc2_group_ != nullptr &&
+      is_deepseek_v41_family(model_args_.model_type())) {
+    d["v41_mc2_comm_name"] =
+        parallel_args.mc2_group_->hccl_comm_name(/*init_comm=*/false);
+  }
   if (is_glm5_next_target_model_type(model_args_.model_type())) {
     d["expert_parallel_degree"] =
         EPLBConfig::get_instance().expert_parallel_degree();
@@ -505,9 +547,43 @@ ModelOutput PyCausalLM::write_context_kv(
         target_hidden, positions, device_cache_slots);
     return ModelOutput(output.cast<torch::Tensor>());
   }
-  py::object output = py_model_.attr("write_context_kv")(target_hidden,
-                                                         positions,
-                                                         device_cache_slots,
+  torch::Tensor context_hidden = target_hidden;
+  torch::Tensor context_positions = positions;
+  torch::Tensor context_slots = device_cache_slots;
+  const auto& replay_starts =
+      input_params.meta.execution_batch.swa_prefix_replay.decoder_starts;
+  if (model_args_.model_type() == kDeepseekV41DSparkModelType &&
+      !replay_starts.empty() &&
+      !input_params.meta.batch_forward_type.is_decode()) {
+    const auto& query_lengths = input_params.attention.host.q_seq_lens;
+    const auto& kv_lengths = input_params.attention.host.kv_seq_lens;
+    CHECK_EQ(query_lengths.size(), replay_starts.size());
+    CHECK_EQ(kv_lengths.size(), replay_starts.size());
+    std::vector<int64_t> tail_rows;
+    int64_t end = 0;
+    for (size_t seq = 0; seq < replay_starts.size(); ++seq) {
+      end += query_lengths[seq];
+      const int32_t keep = std::clamp(
+          kv_lengths[seq] - replay_starts[seq], 0, query_lengths[seq]);
+      for (int64_t row = end - keep; row < end; ++row) {
+        tail_rows.emplace_back(row);
+      }
+    }
+    CHECK_EQ(end, positions.numel());
+    if (tail_rows.empty()) {
+      return ModelOutput(target_hidden.narrow(0, 0, 0));
+    }
+    if (tail_rows.size() != static_cast<size_t>(end)) {
+      const torch::Tensor rows =
+          torch::tensor(tail_rows, torch::kLong).to(positions.device());
+      context_hidden = target_hidden.index_select(0, rows);
+      context_positions = positions.index_select(0, rows);
+      context_slots = device_cache_slots.index_select(0, rows);
+    }
+  }
+  py::object output = py_model_.attr("write_context_kv")(context_hidden,
+                                                         context_positions,
+                                                         context_slots,
                                                          python_kv_caches,
                                                          layer_synchronizer);
   if (output.is_none()) {

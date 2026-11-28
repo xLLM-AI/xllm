@@ -54,6 +54,7 @@ class BlockManagerPool : public KVCacheManager {
     // Effective prefill chunk size used as the state checkpoint interval.
     PROPERTY(int32_t, linear_state_chunk_stride) = -1;
     PROPERTY(bool, enable_prefix_cache) = true;
+    PROPERTY(bool, enable_swa_bounded_replay) = false;
     PROPERTY(bool, enable_disagg_pd) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
     // Host prefix-cache offload (host_blocks_factor > 1). Wraps composite

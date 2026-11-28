@@ -107,6 +107,7 @@ BlockManagerPool::BlockManagerPool(
   block_options.num_blocks(options_.num_blocks())
       .block_size(options_.block_size())
       .enable_prefix_cache(options_.enable_prefix_cache())
+      .enable_swa_bounded_replay(options_.enable_swa_bounded_replay())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
       .enable_host_offload(options_.enable_host_offload())

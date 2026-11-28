@@ -39,6 +39,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `model` | `string` | `""` | Hugging Face 模型名称或模型路径。 |
 | `backend` | `string` | `""` | 后端模型类型；`llm` 表示纯文本模型，`vlm` 表示多模态模型，`dit` 表示扩散模型。 |
 | `task` | `string` | `"generate"` | 模型任务类型，例如 `generate`、`embed`、`mm_embed`。 |
+| `enable_engram_host_offload` | `bool` | `true` | 将 DeepSeek-V4.1 Ascend INT8 Engram 权重表存放在主存，由同节点 DP 组共享。优先使用大页，在辅助流查表并提前发起 TP AllGather。 |
 | `enable_return_embedding_modality_tags` | `bool` | `false` | 是否在完整序列 embedding 中返回每个 token 的 modality tag。 |
 | `limit_image_per_prompt` | `int32` | `8` | 每个 prompt 允许的最大图片数量，仅用于多模态模型。 |
 | `max_encoder_cache_size` | `int64` | `0` | 每个 worker 的 encoder cache 最大显存大小，单位 MB；`0` 表示禁用 encoder cache。 |
@@ -72,6 +73,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `kv_cache_dtype` | `string` | `"auto"` | KV Cache 量化数据类型；`auto` 表示与模型 dtype 对齐且不量化，`int8` 表示启用 INT8 量化，仅 MLU 后端支持。 |
 | `indexer_cache_dtype` | `string` | `"auto"` | 带 indexer cache 的模型所使用的 indexer cache 数据类型。支持 `auto` 和 `int8`；`auto` 表示与模型 dtype 对齐且不量化，`int8` 表示启用 INT8 indexer cache 量化。 |
 | `enable_prefix_cache` | `bool` | `true` | 是否在 block manager 中启用 prefix cache；详见 [Prefix Cache](/zh/features/prefix_cache/)。 |
+| `enable_swa_bounded_replay` | `bool` | `true` | KV 位于本机设备时，DeepSeek-V4.1 Python decoder prefill 只计算每条请求的提示词尾窗。开启 prefix cache 后，Block KV 命中且 SWA KV 缺失时也会回放 encoder 窗口。 |
 | `kv_events_config` | `string` | `""` | KV 驻留事件发布配置，为 JSON 对象字符串；空字符串禁用上报。JSON 字段和示例见下文。 |
 | `enable_in_batch_prefix_cache` | `bool` | `false` | 是否将已准入的 prefill 完整 block 缓存进 prefix cache，使同一 batch 内的后续请求可以共享。 |
 | `max_linear_state_cache_slots` | `int64` | `0` | linear-attention state cache 的最大活跃槽位数；`0` 表示根据可用 KV Cache 预算自动推导容量。 |

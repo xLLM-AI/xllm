@@ -288,15 +288,22 @@ std::vector<PagedCachePartition> build_grouped_cache_partitions(
     components.emplace_back(
         CacheComponent{CacheComponentRole::KEY, value_dtype, owned});
     if (ratio != 128) {
-      components.emplace_back(CacheComponent{
-          CacheComponentRole::INDEX,
-          is_v41 ? value_dtype : cache_scalar_type(cache_policy.index_dtype),
-          owned});
+      auto index_dtype = cache_scalar_type(cache_policy.index_dtype);
+      if (is_v41) {
+        index_dtype = capacity.enable_indexer_cache_quant()
+                          ? CacheScalarType::INT8
+                          : value_dtype;
+      }
+      components.emplace_back(
+          CacheComponent{CacheComponentRole::INDEX, index_dtype, owned});
     }
-    if (!is_v41 && ratio == 4 && cache_policy.has_indexer_cache_scale) {
+    if ((is_v41 && capacity.enable_indexer_cache_quant() &&
+         (ratio == 1 || ratio == 2)) ||
+        (!is_v41 && ratio == 4 && cache_policy.has_indexer_cache_scale)) {
       components.emplace_back(
           CacheComponent{CacheComponentRole::INDEX_SCALE,
-                         cache_scalar_type(cache_policy.scale_dtype),
+                         is_v41 ? CacheScalarType::FLOAT16
+                                : cache_scalar_type(cache_policy.scale_dtype),
                          std::move(owned)});
     }
     const int64_t stride = static_cast<int64_t>(token_stride) * ratio;
@@ -304,7 +311,7 @@ std::vector<PagedCachePartition> build_grouped_cache_partitions(
     partitions.emplace_back(
         CachePartitionId{model_id, static_cast<uint32_t>(partitions.size())},
         static_cast<int32_t>(stride),
-        /*enable_prefix_cache=*/ratio == 4 || ratio == 128,
+        /*enable_prefix_cache=*/is_v41 || ratio == 4 || ratio == 128,
         std::move(components),
         ratio);
   }

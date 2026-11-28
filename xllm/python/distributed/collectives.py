@@ -24,8 +24,11 @@ from __future__ import annotations
 import atexit
 import json
 import math
+import os
 import socket
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import timedelta
 from typing import NamedTuple
 
@@ -59,7 +62,8 @@ else:
     _cuda_collectives = None
     _all_reduce = dist.all_reduce
 
-_GROUP_NAMES = frozenset(("tp", "dp", "moe_tp", "moe_ep", "cp", "layerwise", "dcp", "attn_dp"))
+_ENGRAM_TP_GROUP = "engram_tp"
+_GROUP_NAMES = frozenset(("tp", "dp", "moe_tp", "moe_ep", "cp", "layerwise", "dcp", "attn_dp", _ENGRAM_TP_GROUP))
 # ``tp`` and ``moe_tp`` own a contiguous block of global ranks, while ``dp``,
 # ``moe_ep``, ``cp`` and ``dcp`` stride across those blocks. Both layouts follow
 # from how the caller derives a rank within each group, so a group's full
@@ -72,14 +76,19 @@ _GROUP_NAMES = frozenset(("tp", "dp", "moe_tp", "moe_ep", "cp", "layerwise", "dc
 # within-cohort stride: the strided derivation above would otherwise mix
 # ranks from different requests. DCP then matches the DP-local ownership in
 # ParallelArgs::kv_split_rank.
-_CONTIGUOUS_GROUPS = frozenset(("tp", "moe_tp", "layerwise"))
+_CONTIGUOUS_GROUPS = frozenset(("tp", "moe_tp", "layerwise", _ENGRAM_TP_GROUP))
 _STRIDED_COHORT_GROUPS = frozenset(("cp", "dcp"))
+
+_DEFAULT_HCCL_BUFFER_NAME = "xllm_shared"
+_HCCL_BUFFER_NAME_MAX_LENGTH = 127
+_HCCL_AIV_ONLY_EXPANSION_MODE = 4
 
 _groups = {}
 _group_ranks = {}
 _stores = {}
 _world_topology = None
 _world_initialized = False
+_decode_tp_comm: ContextVar[int | None] = ContextVar("decode_tp_comm", default=None)
 
 
 def _shutdown_process_groups() -> None:
@@ -104,6 +113,51 @@ def _backend_for(device: torch.device) -> str:
     return "hccl"
 
 
+def _hccl_pg_options(device: torch.device) -> object | None:
+    """Return per-process-group HCCL options when running on an NPU.
+
+    ``HCCL_BUFFSIZE`` is process-global in the HCCL runtime, but c10d also
+    accepts the same value as ``hccl_buffer_size`` on each ProcessGroupHCCL.
+    Passing it explicitly keeps the Python world/subgroups on the requested
+    size instead of letting a newly-created group fall back to its own
+    default. The value is in MiB, matching HCCL_BUFFSIZE.
+
+    Match the C++ CCLBuffer name so the usual communicator domains can
+    share scratch storage. The decode capture stream has its own buffer.
+    """
+    if not _USE_PYTHON_NPU_GROUPS or device.type not in ("npu", "privateuseone"):
+        return None
+    raw_size = os.environ.get("HCCL_BUFFSIZE")
+    if raw_size in (None, ""):
+        buffer_size = 512
+    else:
+        if not raw_size.isascii() or not raw_size.isdecimal():
+            raise ValueError(f"HCCL_BUFFSIZE must be a positive int32 decimal value, got {raw_size!r}")
+        buffer_size = int(raw_size)
+        if not 0 < buffer_size <= 2**31 - 1:
+            raise ValueError(f"HCCL_BUFFSIZE must be a positive int32 decimal value, got {raw_size!r}")
+    buffer_name = os.environ.get("XLLM_HCCL_BUFFER_NAME", _DEFAULT_HCCL_BUFFER_NAME)
+    if not buffer_name:
+        buffer_name = _DEFAULT_HCCL_BUFFER_NAME
+    try:
+        buffer_name_bytes = buffer_name.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("XLLM_HCCL_BUFFER_NAME must contain ASCII characters") from exc
+    # HCCL reserves one byte for the terminating NUL.  Keep the same
+    # truncation rule as the C++ ProcessGroupHCCL path so every rank derives
+    # exactly the same name even when a long diagnostic name is supplied.
+    buffer_name = buffer_name_bytes[:_HCCL_BUFFER_NAME_MAX_LENGTH].decode("ascii")
+    config = {
+        "hccl_buffer_size": buffer_size,
+        "hccl_buffer_name": buffer_name,
+    }
+    if os.environ.get("HCCL_OP_EXPANSION_MODE") == "AIV":
+        config["hccl_op_expansion_mode"] = _HCCL_AIV_ONLY_EXPANSION_MODE
+    options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
+    options.hccl_config = config
+    return options
+
+
 def _shared_store(host: str, port: int, global_rank: int, global_world_size: int) -> dist.Store:
     store_key = (host, port)
     store = _stores.get(store_key)
@@ -119,6 +173,15 @@ def _shared_store(host: str, port: int, global_rank: int, global_world_size: int
         )
         _stores[store_key] = store
     return store
+
+
+def node_local_group_store(group_name: str, device: torch.device) -> tuple[dist.Store, int, tuple[int, ...]]:
+    """Return the bootstrap store and this node's ranks in a model group."""
+    ranks = _group_ranks[(group_name, str(device))]
+    rank = dist.get_rank()
+    hostname = _world_topology[rank]["hostname"]
+    local_ranks = tuple(peer for peer in ranks if _world_topology[peer]["hostname"] == hostname)
+    return next(iter(_stores.values())), rank, local_ranks
 
 
 def _exchange_world_topology(
@@ -159,6 +222,7 @@ def _ensure_world(
         rank=global_rank,
         world_size=global_world_size,
         timeout=timedelta(minutes=5),
+        pg_options=_hccl_pg_options(device),
     )
     _world_initialized = True
     if _USE_PYTHON_NPU_GROUPS:
@@ -252,7 +316,15 @@ def init_process_group(
     own_ranks = None
     memberships = _group_memberships(group_name, world_size, global_world_size, group_stride)
     for index, ranks in enumerate(memberships):
-        candidate = dist.new_group(ranks=ranks, timeout=timedelta(minutes=5), backend=backend)
+        pg_options = _hccl_pg_options(device_obj)
+        if group_name == _ENGRAM_TP_GROUP and pg_options is not None:
+            # Engram gathers run on the prefetch stream and need their own CCL buffer.
+            pg_options.hccl_config = {
+                "hccl_buffer_size": 32,
+                "hccl_buffer_name": "xllm_v41_engram_tp",
+                "hccl_op_expansion_mode": _HCCL_AIV_ONLY_EXPANSION_MODE,
+            }
+        candidate = dist.new_group(ranks=ranks, timeout=timedelta(minutes=5), backend=backend, pg_options=pg_options)
         if global_rank in ranks:
             own = candidate
             own_index = index
@@ -326,6 +398,98 @@ def layerwise_rank(device: torch.device | str) -> int:
     """Rank in the layerwise split group, or zero when disabled."""
     group = _groups.get(("layerwise", str(torch.device(device))))
     return group.rank() if group is not None else 0
+
+
+class EngramTpAllGather:
+    """TP AllGather warmed and used on the same producer stream."""
+
+    def __init__(self, device: torch.device, warmup_elements: int) -> None:
+        from xllm.python.distributed.npu.hccl import get_hccl_comm
+
+        self._group = get_process_group(device, _ENGRAM_TP_GROUP)
+        self._comm = get_hccl_comm(self._group, device, initialize=True)
+        warmup = torch.zeros(warmup_elements, dtype=torch.bfloat16, device=device)
+        self.gather(warmup, dim=0)
+        torch.npu.current_stream(device).synchronize()
+
+    def gather(self, x: torch.Tensor, *, dim: int) -> torch.Tensor:
+        dim = _normalize_gather_dim(x, dim)
+        source = _contiguous_gather_input(x)
+        size = self._group.size()
+        gathered = source.new_empty((size * source.numel(),))
+        torch.ops.xllm_ops.npu_all_gather(source.view(-1), gathered, self._comm)
+        return _concat_gathered(gathered.view(size, *source.shape), dim)
+
+
+class DecodeTpCollectives:
+    """Dedicated TP communication domain for one ACL Graph capture stream."""
+
+    def __init__(
+        self, rows: int, hidden_size: int, device: torch.device, *, buffer_name: str = "xllm_v41_decode_tp"
+    ) -> None:
+        from xllm.python.distributed.npu.hccl import get_hccl_comm
+
+        self._device = device
+        self._stream = torch.npu.current_stream(device)
+        tp = get_process_group(device, "tp")
+        options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
+        # A named CCLBuffer belongs to one stream per device. The usual TP
+        # group continues to use its ProcessGroup communication stream.
+        options.hccl_config = {
+            "hccl_buffer_size": 32,
+            "hccl_buffer_name": buffer_name,
+            "hccl_op_expansion_mode": _HCCL_AIV_ONLY_EXPANSION_MODE,
+        }
+        self._group = dist.new_group(
+            ranks=dist.get_process_group_ranks(tp),
+            backend="hccl",
+            pg_options=options,
+            timeout=timedelta(minutes=5),
+            use_local_synchronization=True,
+        )
+        self._comm = get_hccl_comm(self._group, device, initialize=True)
+        warmup = torch.zeros((rows, hidden_size), dtype=torch.bfloat16, device=device)
+        torch.ops.xllm_ops.npu_all_reduce(warmup, self._comm)
+        shard_rows = (rows + tp.size() - 1) // tp.size()
+        gathered = warmup.new_empty((shard_rows * tp.size(), hidden_size))
+        torch.ops.xllm_ops.npu_all_gather(warmup[:shard_rows].view(-1), gathered.view(-1), self._comm)
+        self._stream.synchronize()
+
+    @contextmanager
+    def capture_context(self) -> Iterator[None]:
+        # This communicator is already bound to the first capture's stream.
+        # Captures on another stream use their ordinary TP collectives.
+        current = torch.npu.current_stream(self._device)
+        token = _decode_tp_comm.set(self._comm if current == self._stream else None)
+        try:
+            yield
+        finally:
+            _decode_tp_comm.reset(token)
+
+
+def decode_tp_all_reduce(x: torch.Tensor) -> None:
+    comm = _decode_tp_comm.get()
+    if comm is None:
+        tp_all_reduce(x)
+    else:
+        torch.ops.xllm_ops.npu_all_reduce(x, comm)
+
+
+def decode_tp_all_gather(x: torch.Tensor, world_size: int, *, dim: int = 0) -> torch.Tensor:
+    comm = _decode_tp_comm.get()
+    if comm is None:
+        return tp_all_gather(x.contiguous(), dim, world_size)
+
+    dim = _normalize_gather_dim(x, dim)
+    source = _contiguous_gather_input(x)
+    gathered = source.new_empty((world_size * source.numel(),))
+    torch.ops.xllm_ops.npu_all_gather(source.view(-1), gathered, comm)
+    gathered = gathered.view(world_size, *source.shape)
+    if math.prod(source.shape[:dim]) == 1:
+        shape = list(source.shape)
+        shape[dim] *= world_size
+        return gathered.view(shape)
+    return torch.cat(gathered.unbind(0), dim=dim)
 
 
 def _native_runtime_op(name: str, x: torch.Tensor, group_name: str) -> object | None:
@@ -527,6 +691,15 @@ def _contiguous_gather_input(x: torch.Tensor) -> torch.Tensor:
     return contiguous
 
 
+def _concat_gathered(gathered: torch.Tensor, dim: int) -> torch.Tensor:
+    shape = list(gathered.shape[1:])
+    if math.prod(shape[:dim]) == 1:
+        # Rank-major storage already has concatenation order for this layout.
+        shape[dim] *= gathered.shape[0]
+        return gathered.view(shape)
+    return torch.cat(gathered.unbind(0), dim=dim)
+
+
 @torch.library.custom_op("xllm_ops::all_gather", mutates_args=())
 def all_gather(x: torch.Tensor, dim: int, world_size: int, group_name: str = "tp") -> torch.Tensor:
     group = get_process_group(x.device, group_name)
@@ -537,12 +710,7 @@ def all_gather(x: torch.Tensor, dim: int, world_size: int, group_name: str = "tp
     # HCCL receives a flat ND buffer; adding rank to a 3-D shape can select NCHW storage.
     gathered = input.new_empty((world_size * input.numel(),)).view(world_size, *input.shape)
     _all_gather(input, gathered, group=group)
-    if math.prod(x.shape[:dim]) == 1:
-        # Rank-major storage already has concatenation order for this layout.
-        shape = list(x.shape)
-        shape[dim] *= world_size
-        return gathered.view(shape)
-    return torch.cat(gathered.unbind(0), dim=dim)
+    return _concat_gathered(gathered, dim)
 
 
 @torch.library.custom_op("xllm_ops::all_gather_variable", mutates_args=())

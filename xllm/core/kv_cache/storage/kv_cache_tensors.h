@@ -76,6 +76,7 @@ struct DeepSeekV4KVCacheTensors {
   torch::Tensor compress_index_state;
 #endif
   BlockType compressed_block_type = BlockType::KV;
+  BlockType swa_block_type = BlockType::SWA;
 };
 
 }  // namespace xllm

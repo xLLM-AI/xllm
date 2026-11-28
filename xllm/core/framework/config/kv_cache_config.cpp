@@ -71,6 +71,12 @@ DEFINE_bool(enable_prefix_cache,
             true,
             "Whether to enable the prefix cache for the block manager.");
 
+DEFINE_bool(enable_swa_bounded_replay,
+            true,
+            "Enable decoder SWA bounded replay for DeepSeek-V4.1 Python "
+            "prefill with local device KV cache, and encoder replay when "
+            "prefix caching is enabled.");
+
 DEFINE_string(kv_events_config,
               "",
               "ZMQ KV event publisher JSON; disabled when empty.");
@@ -112,6 +118,7 @@ void KVCacheConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(indexer_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_prefix_cache);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_swa_bounded_replay);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_events_config);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_in_batch_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_linear_state_cache_slots);
@@ -131,6 +138,7 @@ void KVCacheConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_JSON(indexer_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_prefix_cache);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_swa_bounded_replay);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_events_config);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_in_batch_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_linear_state_cache_slots);
@@ -158,6 +166,8 @@ void KVCacheConfig::append_config_json(
       config_json, default_config, indexer_cache_dtype);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_prefix_cache);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_swa_bounded_replay);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, kv_events_config);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

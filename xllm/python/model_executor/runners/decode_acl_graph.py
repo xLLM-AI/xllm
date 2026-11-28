@@ -132,7 +132,7 @@ class _DsaGraphMetadataView:
         self,
         base: AttentionMetadata,
         block_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
         multi_block_tables: tuple[torch.Tensor, ...],
     ) -> None:
         self._base = base
@@ -178,6 +178,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         device_kv_lengths: bool = False,
         kv_capacity_graphs: bool = False,
         max_capture_tokens: int | None = None,
+        fixed_dp_graph_layout: bool = False,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
@@ -185,15 +186,17 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.max_batch = (max_batch + dp_size - 1) // dp_size
         self.max_model_len = max_model_len
         self.num_speculative_tokens = num_speculative_tokens
+        self._fixed_dp_graph_layout = fixed_dp_graph_layout or (
+            not causal and getattr(attention_backend, "draft_query_width", 0) > 0
+        )
         self._is_spec_draft = is_spec_draft
         self._causal = causal
         if type(block_draft_graph_warmup_max_kv_len) is not int or block_draft_graph_warmup_max_kv_len < -1:
             raise ValueError("Block graph warmup KV limit must be -1, zero or a positive integer")
         self._block_draft_graph_warmup_max_kv_len = block_draft_graph_warmup_max_kv_len
-        self._windowed_decode = (
-            not causal
-            and not getattr(attention_backend, "is_mla", False)
-            and block_draft_model_window_context(model) is not None
+        self._windowed_decode = not causal and (
+            self._fixed_dp_graph_layout
+            or (not getattr(attention_backend, "is_mla", False) and block_draft_model_window_context(model) is not None)
         )
         self._max_capture_tokens = max_capture_tokens
         self._enable_decode_no_padding = enable_graph_mode_decode_no_padding
@@ -313,9 +316,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         The caller owns this result for one execution only. Keep it local to
         that call so scheduler updates are decoded again on the next step.
         """
+        metadata = self._normalize_dsa_metadata(metadata)
         if not self._causal:
             return self._prepare_non_causal_execution(input_ids, metadata, input_embedding, mtp_topk_indices)
-        metadata = self._normalize_dsa_metadata(metadata)
         if not getattr(self.attention_backend, "moe_graph_capturable", True):
             return None
         if input_ids.dim() != 1:
@@ -368,6 +371,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 return None
             padded_batch_size = self._padded_batch_size(batch_size, metadata)
 
+        if self._fixed_dp_graph_layout and (
+            not is_expanded_spec_verify or input_embedding is not None or mtp_topk_indices is not None
+        ):
+            raise RuntimeError("fixed-layout DP verify requires a token-only expanded decode batch")
+
         # Physical KV capacity can limit startup shapes. Draft prefix steps
         # also flatten multiple rows per request, so the largest warmed row
         # count does not imply coverage of smaller shapes. Select eager for
@@ -405,6 +413,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
             query_width = _uniform_span_width(expanded_query_lens)
             if query_width is None:
                 return reject_layout("expanded verify query lengths are not uniform")
+            if self._fixed_dp_graph_layout and query_width != 1:
+                return reject_layout("fixed-layout DP verify needs one query token per metadata row")
             if sum(expanded_query_lens) != batch_size:
                 return reject_layout("expanded verify query lengths do not cover the decode batch")
             if padded_batch_size % query_width != 0:
@@ -469,6 +479,14 @@ class DecodeAclGraphRunner(AclGraphRunner):
     ) -> AttentionMetadata:
         """Normalize busy and dummy DSA batches alike so every DP rank selects the same runner."""
         if isinstance(metadata, _DsaGraphMetadataView):
+            return metadata
+        if not self._causal:
+            tables = getattr(metadata, "multi_block_tables", ())
+            if self._fixed_dp_graph_layout and tables:
+                return cast(
+                    "AttentionMetadata",
+                    _DsaGraphMetadataView(metadata, tables[0], metadata.slot_mapping, tuple(tables)),
+                )
             return metadata
         group_infos = getattr(self.attention_backend, "group_infos", None)
         if group_infos is None:
@@ -580,7 +598,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         )
         if block_table is None or kv_seq_lens is None:
             raise RuntimeError("decode graph requires block and KV metadata")
-        block_table = block_table.to(device=kv_seq_lens.device, dtype=torch.int32).contiguous()
+        block_table = block_table.to(device=kv_seq_lens.device, dtype=torch.int32, non_blocking=True).contiguous()
         kv_seq_lens = kv_seq_lens.to(torch.int32)
         if getattr(self.attention_backend, "is_mla", False) and not getattr(
             self.attention_backend, "requires_host_kv_lengths", False
@@ -643,9 +661,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
         expanded = resolve_expanded_decode_metadata(metadata, block_size=self._logical_page_size)
         if expanded is not None:
             return expanded
-        if not getattr(metadata, "is_target_verify", False) or (
-            self.attention_backend.is_mla and not self._has_linear_cache
-        ):
+        dummy_verify = (
+            self._fixed_dp_graph_layout and self.num_speculative_tokens > 0 and getattr(metadata, "is_dummy", False)
+        )
+        if not (getattr(metadata, "is_target_verify", False) or dummy_verify):
+            return None
+        if self.attention_backend.is_mla and not self._has_linear_cache:
             return None
         kv_rows, block_table_rows = metadata.kv_seq_lens, metadata.block_table
         query_ends = metadata.q_cu_seq_lens
@@ -1034,7 +1055,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         to replay graphs captured together: both entries can exist but belong
         to different captures. Include every DP rank's variant in the key.
         """
-        if self.dp_size <= 1 or not dist.is_initialized():
+        if self._fixed_dp_graph_layout or self.dp_size <= 1 or not dist.is_initialized():
             return local_key
         variant = self._dp_graph_variants.setdefault(local_key, len(self._dp_graph_variants) + 1)
         local_variant = torch.tensor([variant], dtype=torch.int32, device=input_ids.device)
@@ -1058,7 +1079,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         signatures can differ for empty ranks (embedding/top-k are absent),
         so a cached local key must still participate on every call.
         """
-        if self.dp_size <= 1 or not dist.is_initialized():
+        if self._fixed_dp_graph_layout or self.dp_size <= 1 or not dist.is_initialized():
             return graph_key not in self._graphs
         presence = torch.tensor(
             [int(graph_key in self._graphs)],
@@ -1078,7 +1099,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         to the host on every decode step. A one-value reduction keeps the
         cross-rank launch barrier without rebuilding the Python cache key.
         """
-        if self.dp_size <= 1 or not dist.is_initialized():
+        if self._fixed_dp_graph_layout or self.dp_size <= 1 or not dist.is_initialized():
             return
         ready = torch.ones(1, dtype=torch.int32, device=input_ids.device)
         from xllm.python import distributed
@@ -1709,7 +1730,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 raise RuntimeError("expanded decode query groups exceed the captured graph layout")
             actual_query_lens_host = torch.tensor(expanded_query_lens, dtype=torch.int32)
             static_metadata.q_seq_lens_host[: len(expanded_query_lens)].copy_(actual_query_lens_host)
-            static_metadata.q_seq_lens[: len(expanded_query_lens)].copy_(actual_query_lens_host)
+            static_metadata.q_seq_lens[: len(expanded_query_lens)].copy_(actual_query_lens_host, non_blocking=True)
             if len(expanded_query_lens) < static_metadata.q_seq_lens.numel():
                 query_width = _uniform_span_width(expanded_query_lens)
                 if query_width is None or query_width <= 0:
@@ -1858,6 +1879,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
             static_metadata.prepared_attention_state = self.attention_backend.prepare_metadata(
                 static_metadata, device_kv_lengths=True
             )
+        elif static_metadata.prepared_attention_state is None and getattr(
+            self.attention_backend, "supports_prepared_metadata", False
+        ):
+            static_metadata.prepared_attention_state = self.attention_backend.prepare_metadata(static_metadata)
 
         if input_embedding is not None:
             if input_embedding.shape[0] != batch_size:
@@ -1984,6 +2009,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 continue
             if source.dim() != 2:
                 raise RuntimeError(f"ACL graph DSA manager {manager_id} block table must be two-dimensional")
+            # Transfer the compact scheduler table before expanding rows or ring columns.
+            # All consumers, including graph replay, are ordered on this stream.
+            if getattr(self.attention_backend, "supports_prepared_metadata", False):
+                source = source.to(device=target.device, non_blocking=True)
             source_rows = int(source.shape[0])
             if source_rows != batch_size:
                 if source_rows <= 0 or batch_size % source_rows != 0:
@@ -1997,7 +2026,20 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     f"ACL graph DSA manager {manager_id} requires {source.shape[1]} "
                     f"columns, capacity is {target.shape[1]}"
                 )
-            target[:batch_size, : source.shape[1]].copy_(source[:batch_size])
+            if (
+                manager_id == 0
+                and getattr(self.attention_backend, "supports_prepared_metadata", False)
+                and source.size(1) > 0
+            ):
+                columns = (
+                    static_metadata.dsa_graph_token_capacity + self._logical_page_size - 1
+                ) // self._logical_page_size
+                # Native batches report physical SWA ring pages. Sparse MLA
+                # takes the logical table up to the captured context bound.
+                ring = torch.arange(columns, device=source.device).remainder_(source.size(1))
+                target[:batch_size, :columns].copy_(source.index_select(1, ring))
+            else:
+                target[:batch_size, : source.shape[1]].copy_(source[:batch_size])
 
     def _fill_graph_dsa_positions(
         self,
@@ -2054,7 +2096,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         """Resolve scheduler cache slots when DSV4 omits the top-level tensor."""
         slot_mapping = getattr(metadata, "slot_mapping", None)
         if slot_mapping is not None and slot_mapping.dim() == 1 and slot_mapping.numel() == token_count:
-            return slot_mapping.to(device=device, dtype=torch.int32).contiguous()
+            return slot_mapping.to(device=device, dtype=torch.int32, non_blocking=True).contiguous()
         host_slots = getattr(metadata, "new_cache_slots_host_values", None)
         if host_slots is not None and len(host_slots) == token_count:
             return torch.tensor(host_slots, dtype=torch.int32, device=device)
@@ -2103,22 +2145,28 @@ class DecodeAclGraphRunner(AclGraphRunner):
         block_table = metadata.block_table
         slot_mapping = metadata.slot_mapping
         kv_seq_lens = metadata.kv_seq_lens
-        if q_seq_lens is None or block_table is None or slot_mapping is None or kv_seq_lens is None:
+        if q_seq_lens is None or block_table is None or kv_seq_lens is None:
             return None
         if q_seq_lens.dim() != 1 or q_seq_lens.numel() == 0:
             return None
-        query_widths = q_seq_lens.to(torch.int64).tolist()
         query_width = metadata.decode_query_width
-        if query_width is None or query_width <= 0 or any(width != query_width for width in query_widths):
+        if query_width is None or query_width <= 0:
             return None
-        sequence_count = len(query_widths)
+        if self._fixed_dp_graph_layout:
+            if query_width != self.attention_backend.draft_query_width:
+                return None
+        elif any(width != query_width for width in q_seq_lens.to(torch.int64).tolist()):
+            return None
+        sequence_count = q_seq_lens.numel()
         if input_ids.numel() > self.max_batch:
             return None
         if block_table.dim() != 2 or block_table.shape[0] != sequence_count:
             return None
         if input_ids.numel() != sequence_count * query_width:
             return None
-        if slot_mapping.dim() != 1 or slot_mapping.numel() != input_ids.numel():
+        if not self._fixed_dp_graph_layout and (
+            slot_mapping is None or slot_mapping.dim() != 1 or slot_mapping.numel() != input_ids.numel()
+        ):
             return None
         if kv_seq_lens.dtype != torch.int32 or kv_seq_lens.shape != (sequence_count,):
             return None
@@ -2127,9 +2175,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
             return None
         if any(int(length) <= 0 for length in host_kv_lens):
             return None
-        if not self._valid_paged_metadata(metadata, sequence_count):
+        if not self._fixed_dp_graph_layout and not self._valid_paged_metadata(metadata, sequence_count):
             return None
-        query_ends = self._query_ends(metadata, query_widths)
+        query_ends = self._query_ends(metadata, sequence_count, query_width)
         if query_ends is None or query_ends[-1] != input_ids.numel():
             return None
         if block_table.shape[1] <= 0:
@@ -2164,21 +2212,15 @@ class DecodeAclGraphRunner(AclGraphRunner):
         return min(_decode_bucket(group_sequences), max_sequences)
 
     @staticmethod
-    def _query_ends(metadata: AttentionMetadata, query_widths: list[int]) -> list[int] | None:
+    def _query_ends(metadata: AttentionMetadata, sequence_count: int, query_width: int) -> list[int] | None:
         host_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
         if host_ends is None:
             return None
         host_ends = list(host_ends)
-        if len(host_ends) == len(query_widths) + 1 and host_ends[0] == 0:
+        if len(host_ends) == sequence_count + 1 and host_ends[0] == 0:
             host_ends = host_ends[1:]
-        if len(host_ends) != len(query_widths):
-            return None
-        expected = []
-        total = 0
-        for width in query_widths:
-            total += width
-            expected.append(total)
-        return host_ends if host_ends == expected else None
+        expected = range(query_width, sequence_count * query_width + 1, query_width)
+        return host_ends if host_ends == list(expected) else None
 
     @staticmethod
     def _valid_paged_metadata(metadata: AttentionMetadata, sequence_count: int) -> bool:
@@ -2320,7 +2362,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if page_size <= 0:
             raise ValueError("Non-causal decode ACL graph page size must be positive")
         kv_capacity = page_table_capacity * page_size
-        if self._query_ends(metadata, [query_width] * metadata.q_seq_lens.numel()) is None:
+        if self._query_ends(metadata, metadata.q_seq_lens.numel(), query_width) is None:
             raise ValueError("Non-causal decode ACL graph requires canonical query ends")
         query_ends = [query_width * (index + 1) for index in range(sequence_count)]
         static_block_table = torch.zeros(
@@ -2331,7 +2373,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
         )
         static_kv_lens = torch.empty(sequence_count, dtype=torch.int32, device=device)
         static_metadata = StaticGraphAttentionMetadata(
-            slot_mapping=torch.full((token_count,), -1, dtype=metadata.slot_mapping.dtype, device=device),
+            slot_mapping=torch.full(
+                (token_count,),
+                -1,
+                dtype=torch.int32 if self._fixed_dp_graph_layout else metadata.slot_mapping.dtype,
+                device=device,
+            ),
             paged_kv_indptr=torch.zeros(sequence_count + 1, dtype=torch.int32, device=device),
             paged_kv_indices=torch.zeros(sequence_count * page_table_capacity, dtype=torch.int32, device=device),
             paged_kv_last_page_len=torch.ones(sequence_count, dtype=torch.int32, device=device),
@@ -2358,6 +2405,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             kv_seq_lens=static_kv_lens,
             is_chunked_prefill=True,
             decode_query_width=getattr(metadata, "decode_query_width", None),
+            dsa_graph_mode=self._fixed_dp_graph_layout,
             num_speculative_tokens=getattr(metadata, "num_speculative_tokens", 0),
             dp_execution_token_counts=(token_count,) * self.dp_size if self.dp_size > 1 else (),
             dp_is_decode=(1,) * self.dp_size if self.dp_size > 1 else (),
@@ -2398,11 +2446,28 @@ class DecodeAclGraphRunner(AclGraphRunner):
             input_ids.dim() != 1
             or token_count != sequence_count * query_width
             or positions.shape != input_ids.shape
-            or metadata.slot_mapping.shape != input_ids.shape
+            or (not self._fixed_dp_graph_layout and metadata.slot_mapping.shape != input_ids.shape)
             or metadata.kv_seq_lens.shape != (sequence_count,)
-            or self._query_ends(metadata, [query_width] * sequence_count) is None
+            or self._query_ends(metadata, sequence_count, query_width) is None
         ):
             raise ValueError("Non-causal decode ACL graph query layout changed within a graph bucket")
+        if self._fixed_dp_graph_layout:
+            entry.static_input_ids[:token_count].copy_(input_ids)
+            entry.static_positions[:token_count].copy_(positions.to(torch.int32))
+            entry.static_input_ids[token_count:].zero_()
+            entry.static_positions[token_count:].zero_()
+            # Expand the physical ring to stable logical columns. Its
+            # physical width comes from the current scheduler batch.
+            block_table = block_table.to(device=static.block_table.device, non_blocking=True)
+            columns = torch.arange(static.block_table.shape[1], device=block_table.device)
+            columns.remainder_(block_table.shape[1])
+            static.block_table[:sequence_count].copy_(block_table.index_select(1, columns))
+            static.block_table[sequence_count:].zero_()
+            static.kv_seq_lens[:sequence_count].copy_(metadata.kv_seq_lens)
+            if getattr(metadata, "is_dummy", False):
+                static.kv_seq_lens[:sequence_count].zero_()
+            static.kv_seq_lens[sequence_count:].zero_()
+            return
         if not self._valid_paged_metadata(metadata, block_table.shape[0]):
             raise ValueError("Non-causal decode ACL graph paged KV metadata is inconsistent")
         page_counts = self._non_causal_page_counts(metadata)

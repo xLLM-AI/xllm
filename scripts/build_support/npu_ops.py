@@ -13,6 +13,7 @@
 
 """Collect the custom operator vendor used by an NPU build into its wheel."""
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -87,6 +88,20 @@ def _validate_vendor(vendor: Path, source_git_head: str) -> None:
             raise RuntimeError(f"Incomplete NPU operator vendor: no {pattern} resources under {directory}")
 
 
+def _stage_qli_metadata_library(vendor: Path) -> None:
+    cpu_ops = vendor / "op_impl/cpu"
+    libraries = cpu_ops / "aicpu_kernel/impl"
+    legacy = libraries / "libmath_aicpu_kernels.so"
+    transformer = libraries / "libtransformer_aicpu_kernels.so"
+    registry = cpu_ops / "config/cust_aicpu_kernel.json"
+    if legacy.exists() or not transformer.is_file() or not registry.is_file():
+        return
+    metadata_op = json.loads(registry.read_text(encoding="utf-8")).get("QuantLightningIndexerV2MetadataVa", {})
+    if metadata_op.get("opInfo", {}).get("kernelSo") == transformer.name:
+        # CANN 9.0's metadata launcher still looks up the legacy filename.
+        shutil.copy2(transformer, legacy)
+
+
 def stage_npu_ops_vendor(base_dir: str, extdir: str, device: str, env: Mapping[str, str]) -> None:
     """Ship the matching vendor, including metadata, kernels and host libraries.
 
@@ -115,6 +130,7 @@ def stage_npu_ops_vendor(base_dir: str, extdir: str, device: str, env: Mapping[s
         staged_vendor = Path(temporary_root) / _BUNDLED_VENDOR
         try:
             shutil.copytree(vendor, staged_vendor, symlinks=False)
+            _stage_qli_metadata_library(staged_vendor)
         except OSError as error:
             raise RuntimeError(f"Failed to collect the complete NPU operator vendor from {vendor}: {error}") from error
         _validate_vendor(staged_vendor, source_git_head)

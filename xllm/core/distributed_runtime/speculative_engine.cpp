@@ -247,7 +247,10 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
     draft_kv_cache_cap.cache_size_in_bytes(pool_bytes + reserved_state_bytes);
   }
 
-  if (target_kv_cache_cap.c4_count() > 0 ||
+  // Keep the grouped KV page counts and the block managers in sync.
+  if (target_kv_cache_cap.c1_count() > 0 ||
+      target_kv_cache_cap.c2_count() > 0 ||
+      target_kv_cache_cap.c4_count() > 0 ||
       target_kv_cache_cap.c128_count() > 0) {
     draft_kv_cache_cap.n_blocks() = target_kv_cache_cap.n_blocks();
     return allocate_target_cache(target_kv_cache_cap) &&

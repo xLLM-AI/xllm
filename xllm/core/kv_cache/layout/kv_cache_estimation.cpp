@@ -391,7 +391,7 @@ DeepSeekV4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
   DeepSeekV4KVCacheEstimateCost cache_cost;
   cache_cost.swa_count = dsv4_swa_block_count(model_args, options);
 
-  if (model_args.model_type() == "deepseek_v41") {
+  if (is_deepseek_v41_family(model_args.model_type())) {
     // Only KV-source layers allocate C1/C2 storage; reuse layers share it.
     // One allocation unit spans two engine blocks to preserve the C1:C2 ratio.
     for (const int32_t layer_id : model_args.kv_source_layer_ids()) {
@@ -414,8 +414,13 @@ DeepSeekV4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
     cache_cost.constant_swa_bytes =
         cache_cost.swa_count * cache_cost.swa_bytes_per_block;
 
+    const bool quantized_indexer = options.indexer_cache_dtype == "int8";
+    const int64_t bytes_per_index_row =
+        quantized_indexer ? index_head_dim * torch::elementSize(torch::kInt8) +
+                                torch::elementSize(torch::kFloat16)
+                          : index_head_dim * dtype_size;
     const int64_t bytes_per_token_block =
-        block_size * (head_dim + index_head_dim) * dtype_size;
+        block_size * (head_dim * dtype_size + bytes_per_index_row);
     cache_cost.manager_blocks_per_unit = 2;
     cache_cost.token_unit_bytes =
         cache_cost.n_c1_layers * cache_cost.manager_blocks_per_unit *

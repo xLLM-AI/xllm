@@ -109,8 +109,7 @@ SampleOutput rejection_sample(const SamplingParameters& params,
   const bool has_token_penalties = params.repetition_penalties().defined() ||
                                    params.frequency_penalties().defined();
   const bool has_bad_words = params.bad_words().defined();
-  if (has_token_penalties || has_bad_words ||
-      params.min_token_ids().defined() || params.logits_bias().defined()) {
+  if (has_token_penalties || has_bad_words || params.logits_bias().defined()) {
     for (int64_t column = 0; column < num_val_tokens; ++column) {
       SamplingParameters step_params = params;
       if (params.min_token_ids().defined() &&
@@ -132,6 +131,19 @@ SampleOutput rejection_sample(const SamplingParameters& params,
       torch::Tensor row_logits = grouped_logits.select(1, column);
       apply_sampling_penalties(row_logits, step_params);
     }
+  } else if (params.min_token_ids().defined()) {
+    // Verify columns share their stop ids but have different remaining lengths.
+    const torch::Tensor& ids = params.min_token_ids();
+    const torch::Tensor& remaining = params.min_tokens_remaining();
+    const torch::Tensor columns =
+        torch::arange(num_val_tokens, remaining.options());
+    const torch::Tensor row_remaining =
+        (remaining.reshape({batch_size, 1}) - columns).reshape({-1});
+    const torch::Tensor row_ids =
+        ids.unsqueeze(1)
+            .expand({batch_size, num_val_tokens, ids.size(1)})
+            .reshape({target_logits.size(0), ids.size(1)});
+    apply_min_token_block(target_logits, row_ids, row_remaining);
   }
   // MTP installs the bitmask at full validate width; other workers pass a
   // per-sequence [batch, words] mask, repeated here per verify row.

@@ -24,6 +24,7 @@ limitations under the License.
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/speculative/verify_layout.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "framework/model_loader/model_loader.h"
@@ -61,6 +62,14 @@ void prepare_dummy_input(Input& input, const WorkerImpl& worker) {
   }
   const auto device = context.get_tensor_options().device();
   build_dummy_forward_input(input, query_width, device);
+  if (!options.is_draft_engine() && query_width > 1 &&
+      params.meta.batch_forward_type.is_decode() &&
+      is_deepseek_v41_family(context.get_model_args().model_type()) &&
+      ::xllm::ExecutionConfig::get_instance().enable_graph()) {
+    // The empty V4.1 target rank must join the same verification graph
+    // as ranks with requests. Preserve the decode phase and dummy marker.
+    return;
+  }
   if (query_width > 1) {
     if (has_linear_attention_layers(context.get_model_args())) {
       params.num_accepted_tokens_host = {1};

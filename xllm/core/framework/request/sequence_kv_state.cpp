@@ -165,6 +165,9 @@ size_t KVCacheState::shared_blocks_num(BlockType type) const {
 }
 
 size_t KVCacheState::shared_tokens_num() const {
+  if (exact_shared_tokens_.has_value()) {
+    return *exact_shared_tokens_;
+  }
   // Shared token count is a sequence-level value: shared_blocks * block_size
   // is the same across cache-bearing block types by construction (composite
   // trim keeps every leaf aligned to a common safe_hit). Read it off any type
@@ -392,5 +395,7 @@ void KVCacheState::reset() {
   transfer_kv_info_.reset();
   next_transfer_block_idx_ = 0;
   next_group_transfer_block_idxes_.clear();
+  exact_shared_tokens_.reset();
+  swa_replay_start_.reset();
 }
 }  // namespace xllm

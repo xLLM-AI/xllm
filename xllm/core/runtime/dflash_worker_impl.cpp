@@ -202,10 +202,12 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     const std::string config_path = model_weights_path + "/config.json";
     CHECK(reader.parse(config_path))
         << "Failed to parse block-diffusion draft config: " << config_path;
-    mask_token_id_ = reader.value_or<int32_t>({"dflash_config.mask_token_id",
-                                               "mask_token_id",
-                                               "dspark_noise_token_id"},
-                                              /*default=*/-1);
+    mask_token_id_ =
+        reader.value_or<int32_t>({"dflash_config.mask_token_id",
+                                  "mask_token_id",
+                                  "dspark_noise_token_id",
+                                  "text_config.dspark_noise_token_id"},
+                                 /*default=*/-1);
     CHECK_GE(mask_token_id_, 0)
         << "Block-diffusion draft config requires mask_token_id, "
            "dflash_config.mask_token_id, or dspark_noise_token_id.";

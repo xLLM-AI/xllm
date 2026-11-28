@@ -116,7 +116,8 @@ def _create_attention_backend(
 ) -> AttentionBackend:
     config = config or {}
     model_type = config.get("model_type", "")
-    if model_type == "deepseek_v41" and not current_platform.is_npu():
+    is_v41 = model_type in ("deepseek_v41", "deepseek_v41_dspark")
+    if is_v41 and not current_platform.is_npu():
         raise NotImplementedError(
             f"DeepSeek-V4.1 runs on NPU only; no attention backend available for device type '{device.type}'"
         )
@@ -128,20 +129,21 @@ def _create_attention_backend(
             num_heads=first_attention.num_heads,
             attn_head_dim=first_attention.head_dim,
             index_topk=int(config.get("index_topk", 512)),
-            index_n_heads=int(config.get("index_n_heads", 32 if model_type == "deepseek_v41" else 64)),
+            index_n_heads=int(config.get("index_n_heads", 32 if is_v41 else 64)),
             index_head_dim=int(config.get("index_head_dim", 128)),
             rope_head_dim=int(config.get("qk_rope_head_dim", 64)),
             device=device,
             dtype=dtype,
         )
-        if model_type == "deepseek_v41":
+        if is_v41:
             from xllm.python.attention.csa2_attention import Csa2AttentionBackend
             from xllm.python.models.deepseek_v41 import V41_QUANT_NONE
 
             serving_len = int(config.get("max_position_embeddings", 0) or 0)
+            kv_sources = list(config.get("kv_source_layer_ids", []))
             return Csa2AttentionBackend(
                 **dsa_kwargs,
-                kv_source_layer_ids=list(config.get("kv_source_layer_ids", [])),
+                kv_source_layer_ids=kv_sources,
                 index_source_layer_ids=list(config.get("index_source_layer_ids", [])),
                 candidate_source_layer_id=int(config.get("candidate_source_layer_id", -1)),
                 candidate_topk_blocks=int(config.get("candidate_topk_blocks", 2048)),
@@ -149,6 +151,11 @@ def _create_attention_backend(
                 max_model_len=serving_len,
                 quant_mode=quant_mode if quant_mode is not None else V41_QUANT_NONE,
                 graph_backend=graph_backend,
+                num_speculative_tokens=(
+                    int(config["num_speculative_tokens"]) if model_type == "deepseek_v41_dspark" else 0
+                ),
+                dp_rank=int(config.get("dp_rank", 0)),
+                decoder_swa_start_layer=max(kv_sources) if config.get("enable_swa_bounded_replay") else None,
             )
         from xllm.python.attention.dsa_attention import DsaAttentionBackend
 
@@ -372,7 +379,11 @@ class ModelExecutor:
             config,
             max(max_seqs_per_batch, 1) * max_decode_rows_per_request,
             graph_backend=graph_backend,
-            quant_mode=cast("str", model.quant_mode) if config.get("model_type") == "deepseek_v41" else None,
+            quant_mode=(
+                cast("str", model.quant_mode)
+                if config.get("model_type") in ("deepseek_v41", "deepseek_v41_dspark")
+                else None
+            ),
         )
 
         execution_model = model.model
@@ -441,10 +452,15 @@ class ModelExecutor:
                 dp_rank,
             )
         elif graph_backend == "aclgraph":
-            if self._independent_block_draft:
+            use_swa_context_graph = config.get("model_type") == "deepseek_v41_dspark" and getattr(
+                self.attention_backend, "uses_a3_cache_precision", False
+            )
+            if self._independent_block_draft or use_swa_context_graph:
                 from xllm.python.model_executor.runners.context_kv_acl_graph import ContextKvAclGraphRunner
 
-                self.context_kv_graph_runner = ContextKvAclGraphRunner(model, device)
+                self.context_kv_graph_runner = ContextKvAclGraphRunner(
+                    model, device, use_swa_cache=use_swa_context_graph
+                )
             from xllm.python.model_executor.runners.decode_acl_graph import (
                 DecodeAclGraphRunner,
             )
@@ -471,7 +487,7 @@ class ModelExecutor:
                 int(config["max_position_embeddings"]),
                 dp_size,
                 dp_rank,
-                causal=not self._independent_block_draft,
+                causal=not (self._independent_block_draft or config.get("model_type") == "deepseek_v41_dspark"),
                 block_draft_graph_warmup_max_kv_len=int(config.get("block_draft_graph_warmup_max_kv_len", 0)),
                 num_speculative_tokens=self.num_speculative_tokens,
                 is_spec_draft=bool(config.get("is_draft_engine", False)),
@@ -482,6 +498,12 @@ class ModelExecutor:
                 device_kv_lengths=(self._qwen_mtp_target and not vlm_mtp_capacity) or self._qwen_mtp_draft,
                 kv_capacity_graphs=self._qwen_mtp_target and vlm_mtp_capacity,
                 max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
+                fixed_dp_graph_layout=(
+                    dp_size > 1
+                    and config.get("model_type") == "deepseek_v41"
+                    and bool(config.get("is_block_diffusion_algorithm", False))
+                    and self.num_speculative_tokens > 0
+                ),
             )
         else:
             if self.layerwise_split_size > 1:

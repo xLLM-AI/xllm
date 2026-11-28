@@ -39,6 +39,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `model` | `string` | `""` | Hugging Face model name or model path. |
 | `backend` | `string` | `""` | Backend model type: `llm` for text-only models, `vlm` for multimodal models, or `dit` for diffusion models. |
 | `task` | `string` | `"generate"` | Model task, for example `generate`, `embed`, or `mm_embed`. |
+| `enable_engram_host_offload` | `bool` | `true` | Store DeepSeek-V4.1 Ascend INT8 Engram tables in host memory shared by local DP peers. Prefer huge pages and prefetch the TP-gathered embeddings on an auxiliary stream. |
 | `enable_return_embedding_modality_tags` | `bool` | `false` | Whether full sequence embeddings include per-token modality tags. |
 | `limit_image_per_prompt` | `int32` | `8` | Maximum number of images per prompt. Only applies to multimodal models. |
 | `max_encoder_cache_size` | `int64` | `0` | Maximum GPU/NPU memory size in MB for the encoder cache per worker. `0` disables the encoder cache. |
@@ -72,6 +73,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `kv_cache_dtype` | `string` | `"auto"` | KV Cache dtype for quantization. `auto` aligns with model dtype and disables quantization. `int8` enables INT8 quantization and is only supported on the MLU backend. |
 | `indexer_cache_dtype` | `string` | `"auto"` | Indexer cache dtype for models with an indexer cache. Supported values are `auto` and `int8`. `auto` aligns with model dtype and disables indexer cache quantization. `int8` enables INT8 indexer cache quantization. |
 | `enable_prefix_cache` | `bool` | `true` | Whether to enable prefix cache in the block manager. See [Prefix Cache](/en/features/prefix_cache/). |
+| `enable_swa_bounded_replay` | `bool` | `true` | Run DeepSeek-V4.1 Python decoder prefill on each request's prompt tail with local device KV. With prefix caching enabled, also replay the encoder window when Block KV hits and SWA KV misses. |
 | `kv_events_config` | `string` | `""` | KV residency event publisher configuration as a JSON object string. An empty string disables reporting. See the fields and example below. |
 | `enable_in_batch_prefix_cache` | `bool` | `false` | Whether to cache admitted prefill full blocks into the prefix cache so that later requests in the same batch can share them. |
 | `max_linear_state_cache_slots` | `int64` | `0` | Maximum number of active linear-attention state cache slots. `0` derives an automatic capacity from the available KV Cache budget. |

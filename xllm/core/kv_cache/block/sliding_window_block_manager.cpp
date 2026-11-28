@@ -45,10 +45,14 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
     return std::nullopt;
   }
   const size_t restore_tokens = seq->kv_cache_tokens_num();
-  if (restore_tokens > kv_state.kv_cache_tokens_num()) {
+  const size_t held = kv_state.num_blocks(block_type());
+  const std::optional<size_t> replay_start = kv_state.swa_replay_start();
+  const bool new_decoder_window =
+      block_type() == BlockType::DECODER_SWA && held == 0 && restore_tokens > 0;
+  if (restore_tokens > kv_state.kv_cache_tokens_num() ||
+      (replay_start.has_value() && held == 0) || new_decoder_window) {
     CHECK_LE(restore_tokens, num_tokens);
     const size_t block_size = options_.block_size();
-    const size_t held = kv_state.num_blocks(block_type());
     const size_t logical_blocks = (num_tokens + block_size - 1) / block_size;
     if (logical_blocks <= held) {
       return std::vector<Block>{};
@@ -58,7 +62,15 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
         std::max<size_t>(options_.sliding_window_size(), 1);
     const size_t restore_window_start =
         restore_tokens - std::min(restore_tokens, sliding_window_tokens);
-    const size_t first_live_block = restore_window_start / block_size;
+    // Replay starts with a private SWA cache. Positions before its first
+    // query have no retained KV and occupy only logical block columns.
+    size_t first_live_token = restore_window_start;
+    if (new_decoder_window) {
+      first_live_token = restore_tokens;
+    } else if (held == 0) {
+      first_live_token = replay_start.value_or(restore_window_start);
+    }
+    const size_t first_live_block = first_live_token / block_size;
     const size_t live_begin = std::max(held, first_live_block);
     const size_t active_blocks = logical_blocks - live_begin;
     std::vector<Block> live_blocks = allocate(active_blocks);
@@ -95,7 +107,6 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
     // reclaimable blocks make the retry large enough to succeed; otherwise a
     // failed composite round must preserve the existing SWA state.
     const size_t block_size = options_.block_size();
-    const size_t held = kv_state.num_blocks(block_type());
     const size_t num_blocks_needed = (num_tokens + block_size - 1) / block_size;
     CHECK_GT(num_blocks_needed, held);
     const size_t num_additional = num_blocks_needed - held;

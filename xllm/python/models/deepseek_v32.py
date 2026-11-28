@@ -733,13 +733,17 @@ class DeepseekV3MLP(nn.Module):
         x: torch.Tensor,
         tp_reduce_add: torch.Tensor | None = None,
         output: torch.Tensor | None = None,
+        *,
+        swiglu_limit: float = 0.0,
     ) -> torch.Tensor:
         x_int8, pertoken = kernels.dynamic_quant(x)
         gate_up = self.gate_up_proj.forward_accumulated(x_int8)
+        swiglu_options = {"swiglu_mode": 1, "clamp_limit": swiglu_limit} if 0.0 < swiglu_limit < 1_000_000.0 else {}
         act_int8, act_scale = kernels.dequant_swiglu_quant(
             gate_up,
             self.gate_up_proj.weight_scale,
             pertoken,
+            **swiglu_options,
         )
         if output is None:
             out = self.down_proj.forward_quantized(act_int8, act_scale)

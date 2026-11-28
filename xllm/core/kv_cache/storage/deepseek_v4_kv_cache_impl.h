@@ -78,6 +78,7 @@ class DeepSeekV4KVCacheImpl final : public KVCacheImpl {
   DeepSeekV4StateCache compress_state_;
   DeepSeekV4StateCache index_state_;
   BlockType compressed_block_type_ = BlockType::KV;
+  BlockType swa_block_type_ = BlockType::SWA;
 };
 
 DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(

@@ -392,6 +392,18 @@ bool LLMEngine::allocate_kv_cache(
     options.linear_state_num_slots(
         static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()));
   }
+  if (args_.model_type() == "deepseek_v41" && !options_.is_draft_engine() &&
+      kv_cache_config.enable_swa_bounded_replay()) {
+    CHECK(ModelConfig::is_python_model_impl(
+        ModelConfig::get_instance().model_impl()))
+        << "DeepSeek-V4.1 SWA bounded replay requires the Python model.";
+    CHECK(!options_.enable_disagg_pd() && options_.host_blocks_factor() <= 1 &&
+          !options_.enable_kvcache_store())
+        << "DeepSeek-V4.1 SWA bounded replay requires local device KV cache.";
+    CHECK_GT(kv_cache_cap.c1_count(), 0);
+    CHECK_GT(kv_cache_cap.c2_count(), 0);
+    options.enable_swa_bounded_replay(true);
+  }
 
   if (options_.enable_kvcache_store()) {
     CHECK_GT(options_.host_blocks_factor(), 1.0)

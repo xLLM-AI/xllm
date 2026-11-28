@@ -100,6 +100,9 @@ class KVCacheState {
   // Number of shared tokens for this sequence. Sequence-level: the value is the
   // same across block types, so it takes no BlockType.
   size_t shared_tokens_num() const;
+  void set_shared_tokens_num(size_t tokens) { exact_shared_tokens_ = tokens; }
+  std::optional<size_t> swa_replay_start() const { return swa_replay_start_; }
+  void set_swa_replay_start(size_t start) { swa_replay_start_ = start; }
 
   // Prefix-cache cursor in units of this BlockType's blocks. It starts at the
   // actual logical reach returned by this state/type's probe (not the common
@@ -175,6 +178,8 @@ class KVCacheState {
   // from the first current handle.
   std::map<BlockType, size_t> block_sizes_;
 
+  std::optional<size_t> exact_shared_tokens_;
+  std::optional<size_t> swa_replay_start_;
   // transfer kv info for disaggregated PD mode.
   std::optional<TransferKVInfo> transfer_kv_info_;
 

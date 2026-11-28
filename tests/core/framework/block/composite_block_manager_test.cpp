@@ -3785,12 +3785,12 @@ TEST(CompositeBlockManagerTest, RejectsPartitionsWithoutLegacyBlockBinding) {
                "Unsupported legacy cache compression ratio");
 }
 
-TEST(CompositeBlockManagerTest, V41DefaultPrefixCacheDemotesInsteadOfAbort) {
+TEST(CompositeBlockManagerTest, V41PrefixCacheKeepsPrefillRolePolicy) {
   const uint32_t window_size = 4 * kBaseBlockSize;
   BlockManager::Options opts =
       MakeCompositeOptions(4096, kBaseBlockSize, window_size, 4);
   opts.grouped_partitions(test::grouped_cache_partitions(
-      kBaseBlockSize, window_size, {{2, false}, {1, false}}));
+      kBaseBlockSize, window_size, {{1, true}, {2, true}}));
 
   for (const bool is_decode : {false, true}) {
     SCOPED_TRACE(is_decode);
@@ -3800,10 +3800,12 @@ TEST(CompositeBlockManagerTest, V41DefaultPrefixCacheDemotesInsteadOfAbort) {
          {BlockType::SWA, BlockType::C1, BlockType::C2}) {
       const BlockManager* leaf = manager.leaf_of(type);
       ASSERT_NE(leaf, nullptr);
-      EXPECT_FALSE(leaf->options().enable_prefix_cache());
+      EXPECT_EQ(leaf->options().enable_prefix_cache(), !is_decode);
     }
     EXPECT_EQ(manager.leaf_combination(),
-              CompositeBlockManager::LeafCombination::UNSUPPORTED);
+              is_decode
+                  ? CompositeBlockManager::LeafCombination::UNSUPPORTED
+                  : CompositeBlockManager::LeafCombination::SWA_COMPRESSED);
   }
 }
 

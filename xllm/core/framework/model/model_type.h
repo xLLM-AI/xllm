@@ -20,8 +20,16 @@ limitations under the License.
 
 namespace xllm {
 
+inline constexpr std::string_view kDeepseekV41DSparkModelType =
+    "deepseek_v41_dspark";
+
+inline bool is_deepseek_v41_family(std::string_view model_type) {
+  return model_type == "deepseek_v41" ||
+         model_type == kDeepseekV41DSparkModelType;
+}
+
 inline bool is_deepseek_v4_family(std::string_view model_type) {
-  return model_type == "deepseek_v4" || model_type == "deepseek_v41" ||
+  return model_type == "deepseek_v4" || is_deepseek_v41_family(model_type) ||
          model_type == "deepseek_v4_dspark" || model_type == "deepseek_v4_mtp";
 }
 

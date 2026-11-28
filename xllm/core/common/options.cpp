@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "core/common/prefill_policy.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/platform/platform.h"
 
@@ -61,9 +62,13 @@ void Options::validate(std::string_view model_type) const {
     CHECK(!enable_kvcache_store() && host_blocks_factor() <= 1.0)
         << "DeepSeek-V4.1 does not support KV cache Store or host offload: "
            "restore for the grouped KV (C1/C2) is not implemented.";
-    CHECK(num_speculative_tokens() == 0 && !has_draft_model)
-        << "DeepSeek-V4.1 does not support speculative decoding: grouped KV "
-           "(C1/C2) is not implemented in the speculative path.";
+    if (num_speculative_tokens() > 0 || has_draft_model) {
+      CHECK(SpeculativeConfig::is_dspark_algorithm(algorithm) &&
+            ModelConfig::is_python_model_impl(
+                ModelConfig::get_instance().model_impl()))
+          << "DeepSeek-V4.1 speculative decoding requires the Python DSpark "
+             "path for grouped KV (C1/C2).";
+    }
     CHECK(!enable_disagg_pd())
         << "DeepSeek-V4.1 does not support disaggregated PD: the grouped "
            "TOKEN KV (C1/C2) transfer path is not implemented.";

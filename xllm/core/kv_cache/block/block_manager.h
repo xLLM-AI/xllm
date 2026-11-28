@@ -53,6 +53,7 @@ class BlockManager {
     PROPERTY(uint32_t, num_blocks) = 0;
     PROPERTY(int32_t, block_size) = 0;
     PROPERTY(bool, enable_prefix_cache) = true;
+    PROPERTY(bool, enable_swa_bounded_replay) = false;
     PROPERTY(bool, enable_disagg_pd) = false;
     // Token-level sliding window size for composite SWA allocation.
     PROPERTY(uint32_t, sliding_window_size) = 0;
