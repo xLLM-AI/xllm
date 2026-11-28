@@ -36,10 +36,8 @@ limitations under the License.
 #include "core/common/prefill_policy.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
-#include "core/distributed_runtime/kv_capacity_planner.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/model_loader/model_loader.h"
@@ -49,6 +47,7 @@ limitations under the License.
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/host_cache_layout.h"
 #include "core/runtime/forward_input_encoding.h"
+#include "core/runtime/worker_client.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/tensor_options.h"
 #include "framework/model/model_args.h"
@@ -58,7 +57,6 @@ limitations under the License.
 #include "runtime/vlm_forward_params.h"
 #include "runtime/worker.h"
 #include "util/env_var.h"
-#include "util/pretty_print.h"
 #include "util/utils.h"
 
 namespace xllm {
@@ -112,11 +110,7 @@ void attach_embedding_output_metadata(const ModelArgs& args,
 
 }  // namespace
 
-VLMEngine::VLMEngine(
-    const runtime::Options& options,
-    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
-    : options_(options),
-      distributed_worker_manager_(std::move(distributed_worker_manager)) {
+VLMEngine::VLMEngine(const runtime::Options& options) : Engine(options) {
   auto master_node_addr = options.master_node_addr().value_or("");
   CHECK(!master_node_addr.empty())
       << " VLM need to set master node addr, Please set --master_node_addr.";
@@ -131,60 +125,21 @@ VLMEngine::VLMEngine(
   }
 
   // setup all workers and create worker clients in nnode_rank=0 engine side.
-  setup_workers(options);
+  setup_workers();
 
-  dp_size_ = options_.dp_size();
-  worker_clients_num_ = worker_clients_.size();
-  dp_local_tp_size_ = worker_clients_num_ / dp_size_;
-
+  dp_local_tp_size_ = worker_clients_num() / dp_size();
   process_group_test();
 
   forward_input_factory_ =
       std::make_unique<ForwardInputFactory<VlmForwardInput>>(
           ForwardInputFactoryOptions{
-              .dp_size = dp_size_,
+              .dp_size = dp_size(),
               .enable_graph = options_.enable_graph(),
               .enable_dp_global_json_object_active =
-                  dp_size_ > 1 && !options_.is_draft_engine() &&
+                  dp_size() > 1 && !options_.is_draft_engine() &&
                   options_.num_speculative_tokens() > 0,
               .enable_shared_kv_cache_deltas =
                   KVCacheConfig::get_instance().enable_shared_kv_cache()});
-}
-
-void VLMEngine::process_group_test() {
-#if !defined(USE_NPU)
-  // In multi-node serving mode, only driver engine
-  // create worker_clients_.
-  if (worker_clients_num_ > 1) {
-    // test process group
-    std::vector<folly::SemiFuture<folly::Unit>> futures;
-    futures.reserve(worker_clients_num_);
-    for (auto& worker : worker_clients_) {
-      futures.emplace_back(worker->process_group_test_async());
-    }
-    // Wait for all futures to complete with a configurable timeout.
-    // The timeout can be adjusted via the
-    // XLLM_PROCESS_GROUP_ASYNC_TIMEOUT_SECONDS environment variable (default: 4
-    // seconds). This is particularly important in multi-node multi-device
-    // communication scenarios where network latency may require a longer
-    // timeout period.
-    const int timeout_seconds = util::get_process_group_test_timeout_seconds();
-    folly::collectAll(futures)
-        .within(std::chrono::seconds(timeout_seconds))
-        .get();
-  }
-#endif
-}
-
-bool VLMEngine::init(MasterStatus master_status) {
-  return init(master_status, /*transfer_coordinator=*/nullptr);
-}
-
-bool VLMEngine::init(
-    MasterStatus master_status,
-    std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator) {
-  return init(
-      master_status, /*prepare_model=*/{}, std::move(transfer_coordinator));
 }
 
 bool VLMEngine::init(
@@ -196,11 +151,15 @@ bool VLMEngine::init(
     return false;
   }
 
-  auto kv_cache_cap = estimate_kv_cache_capacity();
+  const auto plan = init_draft_and_estimate_capacity();
+  if (!plan.has_value()) {
+    return false;
+  }
 
-  if (!allocate_kv_cache(kv_cache_cap,
-                         /*shared_vmm_layout=*/nullptr,
-                         std::move(transfer_coordinator))) {
+  if (!allocate_kv_cache(
+          plan->capacity_,
+          plan->shared_vmm_layout_ ? &*plan->shared_vmm_layout_ : nullptr,
+          std::move(transfer_coordinator))) {
     LOG(ERROR) << "Failed to allocate kv cache";
     return false;
   }
@@ -224,24 +183,7 @@ bool VLMEngine::init_model(MasterStatus master_status,
   LOG(INFO) << "Block info, block_size: " << options_.block_size()
             << ", n_layers: " << args_.n_layers() << ", dtype: " << dtype_;
 
-  const int64_t tokenizer_vocab_size =
-      static_cast<int64_t>(tokenizer_->vocab_size());
-  int64_t model_vocab_size = args_.vocab_size();
-  if (tokenizer_vocab_size != model_vocab_size) {
-    // use tokenizer vocab size if model vocab size is not set
-    if (model_vocab_size <= 0) {
-      LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab "
-                      "size: "
-                   << tokenizer_vocab_size;
-      args_.vocab_size(tokenizer_vocab_size);
-    } else if (tokenizer_vocab_size > model_vocab_size) {
-      LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: "
-                   << tokenizer_vocab_size << ", model: " << model_vocab_size;
-    } else {
-      LOG(INFO) << "Tokenizer/model vocab differ: tokenizer="
-                << tokenizer_vocab_size << ", model=" << model_vocab_size;
-    }
-  }
+  reconcile_vocab_size(static_cast<int64_t>(tokenizer_->vocab_size()));
 
   LOG(INFO) << "Initializing model with " << args_;
   LOG(INFO) << "Initializing model with quant args: "
@@ -250,52 +192,7 @@ bool VLMEngine::init_model(MasterStatus master_status,
   LOG(INFO) << "Initializing model with random seed: "
             << ::xllm::ExecutionConfig::get_instance().random_seed();
 
-  if (prepare_model && !prepare_model(*model_loader,
-                                      args_.n_layers(),
-                                      static_cast<int32_t>(dp_size_),
-                                      static_cast<int32_t>(dp_local_tp_size_),
-                                      master_status)) {
-    return false;
-  }
-  if (LoadConfig::get_instance().enable_vmm_weights() &&
-      !KVCacheConfig::get_instance().enable_vmm_kvcache() &&
-      master_status != MasterStatus::WAKEUP) {
-    initial_weight_reservation_bytes_ =
-        DistributedVmmCoordinator::get_instance().get_weight_page_count(
-            options_.model_id()) *
-        KVCacheConfig::get_instance().phy_page_granularity_size();
-  }
-
-  // init model for each worker in parallel
-  // multiple workers, call async init
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(worker_clients_num_);
-  for (auto& worker : worker_clients_) {
-    futures.push_back(worker->init_model_async(
-        model_path,
-        ::xllm::ExecutionConfig::get_instance().random_seed(),
-        master_status));
-  }
-  // wait for all futures to complete
-  auto results = folly::collectAll(futures).get();
-  for (const auto& result : results) {
-    if (!result.value()) {
-      return false;
-    }
-  }
-  return true;
-}
-
-KVCacheCapacity VLMEngine::estimate_kv_cache_capacity(
-    bool initialize_virtual_memory) {
-  return KVCapacityPlanner(args_,
-                           options_,
-                           dtype_,
-                           dp_local_tp_size_,
-                           worker_clients_,
-                           /*is_multimodal=*/true,
-                           initial_weight_reservation_bytes_)
-      .plan(initialize_virtual_memory);
+  return dispatch_model_load(*model_loader, master_status, prepare_model);
 }
 
 bool VLMEngine::allocate_kv_cache(
@@ -305,31 +202,10 @@ bool VLMEngine::allocate_kv_cache(
   const bool enable_state_cache = has_linear_attention_layers(args_) ||
                                   kv_cache_cap.kpool_tail_slot_size() > 0;
 
-  LOG(INFO) << "kv cache capacity: "
-            << readable_size(kv_cache_cap.cache_size_in_bytes())
-            << ", blocks: " << kv_cache_cap.n_blocks()
-            << ", slot_size: " << kv_cache_cap.slot_size()
-            << ", index_slot_size: " << kv_cache_cap.index_slot_size()
-            << ", indexer_layers: " << kv_cache_cap.num_indexer_layers()
-            << ", scale_slot_size: " << kv_cache_cap.scale_slot_size()
-            << ", linear_slot_size: " << kv_cache_cap.linear_slot_size()
-            << ", linear_blocks: " << kv_cache_cap.num_linear_state_blocks()
-            << ", state_slots: "
-            << (enable_state_cache ? kv_cache_cap.num_linear_state_blocks() : 0)
-            << ", gdn_state_bytes: "
-            << readable_size(kv_cache_cap.num_linear_attention_layers() *
-                             kv_cache_cap.linear_slot_size())
-            << ", kpool_state_bytes: "
-            << readable_size(kv_cache_cap.num_indexer_layers() *
-                             kv_cache_cap.kpool_tail_slot_size())
-            << ", max_linear_state_cache_slots: "
-            << options_.max_linear_state_cache_slots()
-            << ", reserved_state_bytes: "
-            << readable_size(kv_cache_cap.linear_cache_size_in_bytes())
-            << ", n_layers: " << kv_cache_cap.n_layers()
-            << ", kv_cache_dtype: " << options_.kv_cache_dtype();
+  log_capacity_and_validate_chunked_prefill(kv_cache_cap, enable_state_cache);
 
   const int32_t block_size = static_cast<int32_t>(kv_cache_cap.block_size());
+
   HostCacheValidationOptions host_cache_validation_options{
       .host_blocks_factor = options_.host_blocks_factor(),
       .device_block_count = kv_cache_cap.n_blocks(),
@@ -345,18 +221,16 @@ bool VLMEngine::allocate_kv_cache(
   };
 
   // initialize block manager
+  const auto& config = KVCacheConfig::get_instance();
   KVCacheManagerOptions options;
   options.num_blocks(kv_cache_cap.n_blocks())
-      .kv_events_config(options_.is_draft_engine()
-                            ? std::string()
-                            : KVCacheConfig::get_instance().kv_events_config())
-      .host_num_blocks(0)
+      .kv_events_config(config.kv_events_config())
       .block_size(block_size)
       .enable_linear_state(enable_state_cache)
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
-      .enable_vmm_kvcache(KVCacheConfig::get_instance().enable_vmm_kvcache())
+      .enable_vmm_kvcache(config.enable_vmm_kvcache())
       .num_layers(args_.n_layers())
       .slot_size(kv_cache_cap.slot_size())
       .model_id(options_.model_id())
@@ -405,31 +279,19 @@ bool VLMEngine::allocate_kv_cache(
                                     std::move(options),
                                     prefill_policy,
                                     std::move(transfer_coordinator),
-                                    dp_size_,
+                                    dp_size(),
                                     std::move(host_cache_validation_options),
                                     shared_vmm_layout);
   factory_result.shape.print_shapes();
   KVCacheShape kv_cache_shape = std::move(factory_result.shape);
   kv_cache_manager_ = std::move(factory_result.manager);
 
-  // init kv cache for each worker in parallel
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(worker_clients_.size());
-  for (auto& worker : worker_clients_) {
-    futures.emplace_back(
-        options_.instance_role() == InstanceRole::DEFAULT
-            ? worker->allocate_kv_cache_async(kv_cache_shape)
-            : worker->allocate_kv_cache_with_transfer_async(kv_cache_shape));
-  }
-  // wait for all futures to complete
-  auto results = folly::collectAll(futures).get();
-  for (const auto& result : results) {
-    if (!result.value()) {
-      return false;
-    }
+  if (!allocate_kv_cache_on_workers(
+          kv_cache_shape,
+          /*use_transfer_path=*/options_.instance_role() != InstanceRole::DEFAULT)) {
+    return false;
   }
   forward_input_factory_->reset_shared_kv_mapping_tracker();
-  kv_cache_manager_->reserve_virtual_memory_padding_blocks();
   return true;
 }
 
@@ -439,19 +301,17 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
     return {};
   }
   Timer timer;
-  DCHECK(dp_size_ == batch.size())
-      << "Split DP batch failed with dp_size as " << dp_size_
-      << " and actual batch size as " << batch.size() << ".";
 
   std::vector<VlmForwardInput> forward_inputs;
   forward_input_factory_->create_inputs(batch, args_, forward_inputs);
 
-  DCHECK(dp_size_ == forward_inputs.size())
+  DCHECK(dp_size() == forward_inputs.size())
       << "The processed forward inputs size " << forward_inputs.size()
-      << " is not equal to dp size " << dp_size_ << ".";
+      << " is not equal to dp size " << dp_size() << ".";
 
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
-  futures.reserve(worker_clients_num_);
+  const int32_t num_workers = worker_clients_num();
+  futures.reserve(num_workers);
   std::vector<std::shared_ptr<ForwardInputEncoding>> encodings;
   encodings.reserve(forward_inputs.size());
   for (size_t dp_rank = 0; dp_rank < forward_inputs.size(); ++dp_rank) {
@@ -461,8 +321,7 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
   }
 
   // update dp related global parameters and then execute model
-  for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
-       ++worker_rank) {
+  for (int32_t worker_rank = 0; worker_rank < num_workers; ++worker_rank) {
     int32_t dp_rank = worker_rank / dp_local_tp_size_;
     futures.emplace_back(worker_clients_[worker_rank]->step_remote_async(
         forward_inputs[dp_rank], encodings[dp_rank]));
@@ -471,14 +330,14 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
   // wait for the all future to complete
   auto results = folly::collectAll(futures).get();
 
-  assert(dp_size_ == worker_clients_num_ / dp_local_tp_size_);
+  assert(dp_size() == num_workers / dp_local_tp_size_);
   for (const auto& result : results) {
     CHECK(result.hasValue()) << "Failed to execute model, worker RPC failed";
   }
   std::vector<RawForwardOutput> outputs;
-  outputs.reserve(dp_size_);
+  outputs.reserve(dp_size());
   size_t dp_rank = 0;
-  for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
+  for (int32_t worker_rank = 0; worker_rank < num_workers;
        worker_rank += dp_local_tp_size_) {
     const bool empty_shard = batch[dp_rank].size() == 0 &&
                              (!forward_inputs[dp_rank].token_ids.defined() ||
@@ -491,7 +350,6 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
     CHECK(results[worker_rank].value().has_value())
         << "Failed to execute model, result has no value";
     auto& result = results[worker_rank].value();
-
     attach_embedding_output_metadata(
         args_, batch[dp_rank].get_sequences(), result.value());
 
@@ -510,18 +368,19 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
 
 std::vector<RawForwardOutput> VLMEngine::collect_step_outputs(
     const BatchGroup& batch) {
-  CHECK_EQ(batch.size(), dp_size_);
+  CHECK_EQ(batch.size(), dp_size());
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
-  futures.reserve(worker_clients_num_);
+  const int32_t num_workers = worker_clients_num();
+  futures.reserve(num_workers);
   std::vector<RawForwardOutput> raw_forward_outputs;
-  raw_forward_outputs.reserve(dp_size_);
+  raw_forward_outputs.reserve(dp_size());
 
   // NOTE: We only need to get the output from the driver worker,
   // cause the output on other workers is the same as that on driver.
   // Under data parallelism (DP), we need to get dp_size outputs.
   // The `stride` means the workers num we can skip.
   int32_t stride = dp_local_tp_size_;
-  for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
+  for (int32_t worker_rank = 0; worker_rank < num_workers;
        worker_rank += stride) {
     futures.emplace_back(
         worker_clients_[worker_rank]->get_last_vlm_step_result_async());
@@ -534,7 +393,7 @@ std::vector<RawForwardOutput> VLMEngine::collect_step_outputs(
         << "Failed to get last step results, result has no value";
   }
 
-  for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
+  for (int32_t worker_rank = 0; worker_rank < num_workers;
        worker_rank += dp_local_tp_size_) {
     auto& result = last_step_results[worker_rank / stride].value();
     raw_forward_outputs.emplace_back(std::move(result.value()));
@@ -545,58 +404,6 @@ std::vector<RawForwardOutput> VLMEngine::collect_step_outputs(
         args_, batch[dp_rank].get_sequences(), raw_forward_outputs[dp_rank]);
   }
   return raw_forward_outputs;
-}
-
-void VLMEngine::setup_workers(const runtime::Options& options) {
-  if (!distributed_worker_manager_) {
-    distributed_worker_manager_ =
-        std::make_shared<DistributedWorkerManager>(options);
-  }
-  worker_clients_ = distributed_worker_manager_->get_worker_clients();
-}
-
-bool VLMEngine::start_profile() {
-  std::lock_guard<std::mutex> lock(profile_mutex_);
-  if (!profile_workers(/*is_start=*/true)) {
-    if (!profile_workers(/*is_start=*/false)) {
-      LOG(ERROR) << "Failed to stop partially started VLM profiling.";
-    }
-    return false;
-  }
-  return true;
-}
-
-bool VLMEngine::stop_profile() {
-  std::lock_guard<std::mutex> lock(profile_mutex_);
-  return profile_workers(/*is_start=*/false);
-}
-
-bool VLMEngine::profile_workers(bool is_start) {
-  if (worker_clients_.empty()) {
-    LOG(ERROR) << "No worker clients available for profiling.";
-    return false;
-  }
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(worker_clients_.size());
-  for (auto& worker : worker_clients_) {
-    futures.emplace_back(is_start ? worker->start_profile_async()
-                                  : worker->stop_profile_async());
-  }
-  auto results = folly::collectAll(futures).get();
-  bool success = true;
-  for (const auto& result : results) {
-    if (result.hasException()) {
-      LOG(ERROR) << "Profiling worker RPC failed: "
-                 << result.exception().what();
-      success = false;
-      continue;
-    }
-    if (!result.value()) {
-      LOG(ERROR) << "Profiling failed on a worker (start=" << is_start << ").";
-      success = false;
-    }
-  }
-  return success;
 }
 
 }  // namespace xllm

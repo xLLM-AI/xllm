@@ -86,7 +86,7 @@ def _validate_npu_cp_model_config(config: dict[str, Any]) -> None:
     if model_type == "deepseek_v4" and kv_split != 1:
         raise NotImplementedError("Python DeepSeek-V4 CP requires replicated KV caches; use kv_split_size=1")
     if is_glm5_next:
-        if config.get("engine_type", "LLM") == "SSM":
+        if speculative:
             raise NotImplementedError(
                 "Python GLM-5 Next CP does not support target-side speculative verification; "
                 "run speculation on a cp_size=1 Decode instance"

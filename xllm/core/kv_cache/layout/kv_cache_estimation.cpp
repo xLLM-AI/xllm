@@ -1204,4 +1204,47 @@ KVCacheCapacity estimate_kv_cache_capacity(
   return kv_cache_cap;
 }
 
+KVCacheCapacity combine_target_and_draft_kv_cache_capacity(
+    KVCacheCapacity target_cap,
+    const KVCacheCapacity& draft_cap,
+    const ModelArgs& target_args,
+    const ModelArgs& draft_args) {
+  if (target_cap.kpool_tail_slot_size() > 0 &&
+      draft_cap.kpool_tail_slot_size() > 0) {
+    return plan_shared_kpool(std::move(target_cap), draft_cap, draft_args)
+        .target;
+  }
+
+  CHECK_EQ(target_cap.block_size(), draft_cap.block_size())
+      << "target and draft kv cache block size must be the same";
+  const int64_t cache_size_in_bytes = std::min(target_cap.cache_size_in_bytes(),
+                                               draft_cap.cache_size_in_bytes());
+  const int64_t full_cache_bytes = cache_size_in_bytes -
+                                   target_cap.linear_cache_size_in_bytes() -
+                                   draft_cap.linear_cache_size_in_bytes();
+  CHECK_GT(full_cache_bytes, 0)
+      << "no memory left for speculative full-attention kv cache after "
+         "reserving target and draft state caches";
+
+  // The draft's block can be larger than the target's, such as full attention
+  // against an MLA target.
+  const int64_t draft_block_bytes =
+      standard_full_cache_block_size_in_bytes(draft_cap);
+  const int32_t layerwise_split_size =
+      ParallelConfig::get_instance().layerwise_split_size();
+  const int64_t n_blocks =
+      layerwise_split_size > 1
+          ? estimate_layerwise_split_block_count(target_args,
+                                                 layerwise_split_size,
+                                                 target_cap,
+                                                 full_cache_bytes,
+                                                 draft_block_bytes)
+          : full_cache_bytes /
+                (standard_full_cache_block_size_in_bytes(target_cap) +
+                 draft_block_bytes);
+  CHECK_GT(n_blocks, 0) << "no memory for kv cache";
+  target_cap.n_blocks(n_blocks).cache_size_in_bytes(cache_size_in_bytes);
+  return target_cap;
+}
+
 }  // namespace xllm

@@ -152,14 +152,6 @@ void TimePredictor::fit_for_prefill(
   check_coefficients_non_neg(n);
 }
 
-std::vector<double> TimePredictor::get_coefficients() {
-  std::vector<double> coeffs;
-  for (int32_t i = 0; i < coefficients_.size(); ++i) {
-    coeffs.push_back(coefficients_(i));
-  }
-  return coeffs;
-}
-
 double TimePredictor::get_constant_overhead() {
   double result = coefficients_(0);
   if (result < 0) {
@@ -167,34 +159,6 @@ double TimePredictor::get_constant_overhead() {
     result = 0.0;
   }
   return result;
-}
-
-int32_t TimePredictor::get_quadratic_root(int32_t prefix_length,
-                                          double budget) {
-  CHECK(is_prefill_) << "This function is only for prefill.";
-  double a = 0.0, b = 0.0, c = 0.0;
-  if (if_profile_prefix_) {
-    a = coefficients_(1);
-    b = coefficients_(2) + coefficients_(3) * prefix_length;
-    c = coefficients_(4) * prefix_length - budget;
-  } else {
-    a = coefficients_(1);
-    b = coefficients_(2);
-    c = -budget;
-  }
-  double discriminant = b * b - 4 * a * c;
-  if (discriminant < 0) {
-    LOG(ERROR) << "No real roots exist for the given budget: " << budget;
-    return prefix_length;  // No real roots exist
-  } else {
-    double root = (-b + std::sqrt(discriminant)) / (2 * a);
-    if (root >= 0) {
-      return static_cast<int32_t>(root) + prefix_length;
-    } else {
-      LOG(ERROR) << "roots are negative for the given budget: " << budget;
-      return prefix_length;  // Both roots are negative
-    }
-  }
 }
 
 void TimePredictor::fit_for_prefill(

@@ -15,11 +15,15 @@ limitations under the License.
 
 #pragma once
 
-#include <glog/logging.h>
-
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <vector>
 
 #include "common/types.h"
+#include "core/kv_cache/layout/kv_cache_capacity.h"
+#include "core/kv_cache/layout/vmm_kv_layout.h"
 #include "core/kv_cache/manager/kv_cache_manager.h"
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
@@ -28,53 +32,103 @@ limitations under the License.
 
 namespace xllm {
 
+class DistributedWorkerManager;
+class KVCacheShape;
+class ModelLoader;
+class WorkerClient;
+
+using ModelInitCallback = std::function<
+    bool(const ModelLoader&, int64_t, int32_t, int32_t, MasterStatus)>;
+
 class Engine {
  public:
-  virtual ~Engine() = default;
+  explicit Engine(const runtime::Options& options) : options_(options) {}
 
-  virtual bool init() { return true; };
+  std::shared_ptr<DistributedWorkerManager> get_distributed_worker_manager()
+      const {
+    return distributed_worker_manager_;
+  }
 
-  virtual bool init(MasterStatus master_status) { return true; };
+  const Tokenizer* tokenizer() const { return tokenizer_.get(); }
 
-  // return the tokenizer
-  virtual const Tokenizer* tokenizer() const { return tokenizer_.get(); }
-
-  // The initialized engine owns the manager throughout scheduler use.
-  virtual KVCacheManager* kv_cache_manager() const {
+  KVCacheManager* kv_cache_manager() const {
     return kv_cache_manager_.get();
   }
 
-  // return the model args
-  virtual const ModelArgs& model_args() const { return args_; }
+  const ModelArgs& model_args() const { return args_; }
 
-  // return the tokenizer args
-  virtual const TokenizerArgs& tokenizer_args() const {
-    return tokenizer_args_;
-  }
+  const TokenizerArgs& tokenizer_args() const { return tokenizer_args_; }
 
-  // Start/stop online timeline profiling on all workers. CUDA only for now.
-  virtual bool start_profile() {
-    LOG(ERROR) << "start_profile is not implemented for this engine!";
-    return false;
-  };
+  bool start_profile();
 
-  virtual bool stop_profile() {
-    LOG(ERROR) << "stop_profile is not implemented for this engine!";
-    return false;
-  };
+  bool stop_profile();
 
  protected:
-  // model args
+  ~Engine() = default;
+
+  void reconcile_vocab_size(int64_t tokenizer_vocab_size);
+
+  struct KVCachePlan {
+    KVCacheCapacity capacity_;
+    std::optional<VmmKVLayout> shared_vmm_layout_;
+  };
+
+  bool dispatch_model_load(const ModelLoader& model_loader,
+                           MasterStatus master_status,
+                           const ModelInitCallback& prepare_model);
+
+  std::optional<ModelArgs> init_draft_model();
+
+  bool is_multimodal() const {
+    return EngineType(options_.backend()) == EngineType::VLM;
+  }
+
+  void log_capacity_and_validate_chunked_prefill(
+      const KVCacheCapacity& kv_cache_cap,
+      bool enable_state_cache) const;
+
+  bool allocate_kv_cache_on_workers(const KVCacheShape& kv_cache_shape,
+                                    bool use_transfer_path = false);
+
+  std::optional<KVCachePlan> init_draft_and_estimate_capacity();
+
+  void setup_workers();
+
+  bool load_model_to_workers(const std::string& model_path,
+                             MasterStatus master_status);
+
+  void process_group_test();
+
   ModelArgs args_;
 
-  // Tokenizer args
+  runtime::Options options_;
+
+  std::vector<std::shared_ptr<WorkerClient>> worker_clients_;
+
+  uint32_t dp_size() const { return options_.dp_size(); }
+
+  uint32_t dp_local_tp_size_ = 1;
+
+  size_t worker_clients_num() const { return worker_clients_.size(); }
+
   TokenizerArgs tokenizer_args_;
 
-  // Request-cache coordination selected by KVCacheManagerFactory.
+  // Device allocations absent from the worker memory snapshot.
+  int64_t reserved_memory_bytes_ = 0;
+
   std::unique_ptr<KVCacheManager> kv_cache_manager_;
 
   // tokenizer
   std::unique_ptr<Tokenizer> tokenizer_;
+
+  torch::ScalarType dtype_;
+
+  std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_ =
+      nullptr;
+
+ private:
+  bool profile_workers(bool is_start);
+  std::mutex profile_mutex_;
 };
 
 }  // namespace xllm

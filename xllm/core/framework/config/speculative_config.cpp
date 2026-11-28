@@ -18,7 +18,9 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/common/global_flags.h"
+#include "core/common/options.h"
 #include "core/framework/config/config_utils.h"
+#include "core/runtime/options.h"
 
 DEFINE_string(draft_model, "", "draft hf model path to the model file.");
 
@@ -62,6 +64,43 @@ std::optional<bool> SpeculativeConfig::chunked_block_diffusion(
 bool SpeculativeConfig::supports_host_kv_cache(std::string_view algorithm) {
   return is_eagle_family(algorithm) || is_block_diffusion_algorithm(algorithm);
 }
+
+template <typename OptionsT>
+bool SpeculativeConfig::loads_draft_model(const OptionsT& options) {
+  const auto& draft_path = options.draft_model_path();
+  return draft_path && !draft_path->empty() &&
+         !is_suffix_algorithm(options.speculative_algorithm());
+}
+
+template <typename OptionsT>
+bool SpeculativeConfig::uses_speculative_pipeline(const OptionsT& options) {
+  const auto& draft_path = options.draft_model_path();
+  return (draft_path && !draft_path->empty()) ||
+         (is_suffix_algorithm(options.speculative_algorithm()) &&
+          options.num_speculative_tokens() > 0);
+}
+
+template <typename FromOptions, typename ToOptions>
+void SpeculativeConfig::apply_speculative_options(const FromOptions& from,
+                                                  ToOptions& to) {
+  to.draft_model_path(from.draft_model_path())
+      .num_speculative_tokens(from.num_speculative_tokens())
+      .speculative_algorithm(from.speculative_algorithm())
+      .enable_probabilistic_draft(from.enable_probabilistic_draft())
+      .enable_mtp_draft_body_tp1(from.enable_mtp_draft_body_tp1())
+      .speculative_suffix_cache_max_depth(
+          from.speculative_suffix_cache_max_depth())
+      .speculative_suffix_max_cached_requests(
+          from.speculative_suffix_max_cached_requests());
+}
+
+template bool SpeculativeConfig::loads_draft_model(const Options&);
+template bool SpeculativeConfig::loads_draft_model(const runtime::Options&);
+template bool SpeculativeConfig::uses_speculative_pipeline(const Options&);
+template bool SpeculativeConfig::uses_speculative_pipeline(
+    const runtime::Options&);
+template void SpeculativeConfig::apply_speculative_options(const Options&,
+                                                           runtime::Options&);
 
 void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(draft_model);
@@ -123,6 +162,10 @@ void SpeculativeConfig::validate() const {
         << algorithm
         << " does not support enable_probabilistic_draft. Supported: MTP, "
            "DSpark, DFlash2, Eagle3.";
+  }
+  if (!draft_model().empty()) {
+    CHECK_GT(num_speculative_tokens(), 0)
+        << "speculative tokens should not be zero";
   }
 }
 

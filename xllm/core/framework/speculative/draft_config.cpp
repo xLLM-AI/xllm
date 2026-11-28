@@ -22,6 +22,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/util/json_reader.h"
 
 namespace xllm {
@@ -73,6 +74,16 @@ std::vector<int32_t> read_capture_layer_ids(
          "aux_hidden_state_layer_ids: "
       << config_path;
   return capture_layer_ids;
+}
+
+std::vector<int32_t> read_eagle3_capture_layer_ids(
+    const std::string& model_weights_path,
+    int32_t num_layers) {
+  auto layers = read_capture_layer_ids(model_weights_path, /*required=*/false);
+  if (layers.empty()) {
+    return AuxHiddenCapture::legacy_default_capture_layer_ids(num_layers);
+  }
+  return layers;
 }
 
 }  // namespace xllm

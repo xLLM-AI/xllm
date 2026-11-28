@@ -68,6 +68,8 @@ class ModelResidencyCoordinator final {
   // This query does not wait for an in-progress allocator transition.
   bool is_suspended() const;
 
+  bool enabled() const { return options_.enabled; }
+
  private:
   struct PendingSleep {
     MasterStatus master_status;
@@ -90,5 +92,16 @@ class ModelResidencyCoordinator final {
   std::optional<PendingSleep> pending_sleep_;
   std::optional<PendingWakeup> pending_wakeup_;
 };
+
+inline auto make_model_init_callback(ModelResidencyCoordinator* coordinator) {
+  return [coordinator](const ModelLoader& model_loader,
+                       int64_t num_layers,
+                       int32_t dp_size,
+                       int32_t tp_size,
+                       MasterStatus status) {
+    return coordinator->initialize_model(
+        model_loader, num_layers, dp_size, tp_size, status);
+  };
+}
 
 }  // namespace xllm

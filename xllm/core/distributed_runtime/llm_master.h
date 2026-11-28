@@ -33,15 +33,15 @@ limitations under the License.
 #include "framework/request/request_params.h"
 #include "llm_engine.h"
 #include "master.h"
-#include "scheduler/continuous_scheduler.h"
-#include "speculative_engine.h"
 
 namespace xllm {
 
 class Call;
 class Tokenizer;
 class ModelResidencyCoordinator;
+class Scheduler;
 class KVTransferCoordinator;
+class XServiceClient;
 
 class LLMMaster : public Master {
  public:
@@ -81,8 +81,6 @@ class LLMMaster : public Master {
                             BatchOutputCallback callback);
 
   // handle rpc response, send stream generations to xllm service
-  bool handle_rpc_response(const RequestOutput& output);
-
   std::vector<bool> handle_rpc_responses(
       const std::vector<RequestOutput>& outputs);
 
@@ -123,8 +121,8 @@ class LLMMaster : public Master {
 
   bool unlink_p2p(const std::vector<std::string>& remote_addrs);
 
-  bool start_profile();
-  bool stop_profile();
+  bool start_profile() override;
+  bool stop_profile() override;
 
  private:
   template <typename Input>
@@ -132,10 +130,12 @@ class LLMMaster : public Master {
                               std::vector<RequestParams> params,
                               BatchOutputCallback callback);
 
+  bool supports_model_residency() const;
+
   std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator_;
+  XServiceClient* xservice_client_ = nullptr;
 
   MasterStatus master_status_;
-  XServiceClient* xservice_client_ = nullptr;
 
   // Shared workers outlive the scheduler and every engine using them.
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
@@ -143,10 +143,7 @@ class LLMMaster : public Master {
   // Created by the master after worker setup and shared with serving consumers.
   std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator_;
 
-  // Exactly one of these owners is populated, depending on the configured
-  // LLM execution mode.
   std::unique_ptr<LLMEngine> llm_engine_;
-  std::unique_ptr<SpeculativeEngineBase<LLMEngine>> speculative_engine_;
 
   // Scheduler must be destroyed before the engine it references.
   std::unique_ptr<Scheduler> scheduler_;

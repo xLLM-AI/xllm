@@ -41,6 +41,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/kv_cache/manager/block_manager_pool.h"
+#include "core/scheduler/fake_scheduling_engine_test_utils.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "distributed_runtime/engine.h"
 #include "framework/model/model_args.h"
@@ -71,7 +72,7 @@ class FakeTokenizer : public Tokenizer {
   }
 };
 
-class FakeEngine : public Engine {
+class FakeEngine : public FakeSchedulingEngine {
  public:
   FakeEngine(int32_t num_blocks,
              int32_t block_size,
@@ -94,35 +95,17 @@ class FakeEngine : public Engine {
       opt.linear_state_chunk_stride(linear_state_chunk_stride);
       model_args_.layer_types({"linear_attention"});
     }
-    fake_tokenizer_ = std::make_unique<FakeTokenizer>();
-    fake_block_manager_ = std::make_unique<BlockManagerPool>(opt, dp_size);
+    tokenizer_ = std::make_unique<FakeTokenizer>();
+    block_manager_ = std::make_unique<BlockManagerPool>(opt, dp_size);
   }
 
   explicit FakeEngine(std::unique_ptr<BlockManagerPool> block_manager)
-      : fake_tokenizer_(std::make_unique<FakeTokenizer>()),
-        fake_block_manager_(std::move(block_manager)) {
-    if (fake_block_manager_->options().enable_linear_state()) {
+      : FakeSchedulingEngine(std::move(block_manager)) {
+    tokenizer_ = std::make_unique<FakeTokenizer>();
+    if (block_manager_->options().enable_linear_state()) {
       model_args_.layer_types({"linear_attention"});
     }
   }
-
-  virtual ForwardOutput step(BatchGroup& /*batch*/) { return {}; }
-  virtual std::vector<RawForwardOutput> collect_step_outputs(
-      const BatchGroup& /*batch*/) {
-    NOT_IMPLEMENTED();
-  }
-  const Tokenizer* tokenizer() const { return fake_tokenizer_.get(); }
-  BlockManagerPool* kv_cache_manager() const override {
-    return fake_block_manager_.get();
-  }
-  const ModelArgs& model_args() const override { return model_args_; }
-  const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
-  bool init() override { return true; }
-
- private:
-  std::unique_ptr<Tokenizer> fake_tokenizer_;
-  std::unique_ptr<BlockManagerPool> fake_block_manager_;
-  ModelArgs model_args_;
 };
 
 class StaleCapacityBlockManagerPool final : public BlockManagerPool {
@@ -585,30 +568,6 @@ void update_requests(std::vector<std::shared_ptr<Request>> requests) {
   }
 }
 
-class TestableContinuousScheduler final : public ContinuousScheduler<> {
- public:
-  template <typename TargetEngine>
-  TestableContinuousScheduler(TargetEngine* engine, const Options& options)
-      : ContinuousScheduler<>(engine,
-                              options,
-                              /*model_residency_coordinator=*/nullptr,
-                              /*distributed_worker_manager=*/nullptr) {}
-
-  BatchGroup prepare_batch_test() { return prepare_batch(); }
-
-  std::vector<std::shared_ptr<Request>> get_running_requests() {
-    return running_requests_;
-  }
-
-  std::vector<size_t> get_running_sequences_budgets() {
-    return running_sequences_budgets_;
-  }
-
-  ProfileManager* get_profile_manager() { return profile_manager_.get(); }
-
-  void wait_for_responses() { output_dispatcher_->wait_completion(); }
-};
-
 }  // namespace
 
 TEST(SchedulerWarmupTest, ForwardsInstanceModeToProfileManager) {
@@ -616,9 +575,8 @@ TEST(SchedulerWarmupTest, ForwardsInstanceModeToProfileManager) {
   class WarmupEngine final : public FakeEngine {
    public:
     WarmupEngine() : FakeEngine(/*num_blocks=*/64, /*block_size=*/4) {
-      warmup_args_.vocab_size(128).max_position_embeddings(16);
+      model_args_.vocab_size(/*value=*/128).max_position_embeddings(/*value=*/16);
     }
-    const ModelArgs& model_args() const override { return warmup_args_; }
     ForwardOutput step(BatchGroup& /*batch*/) override {
       ++steps_;
       return {};
@@ -626,7 +584,6 @@ TEST(SchedulerWarmupTest, ForwardsInstanceModeToProfileManager) {
     int32_t steps() const { return steps_; }
 
    private:
-    ModelArgs warmup_args_;
     int32_t steps_ = 0;
   };
   for (const bool graph : {false, true}) {
@@ -780,7 +737,7 @@ TEST(SchedulerPolicyTest, PrioritySettingsOverrideConflictingGlobals) {
       std::shared_ptr<Request> request = timed_request;
       ASSERT_TRUE(scheduler.add_request(request));
 
-      scheduler.prepare_batch_test();
+      scheduler.prepare_batch();
 
       EXPECT_EQ(request->urgency(), expected_urgency);
       EXPECT_EQ(request->is_starved(), expected_starved);
@@ -881,7 +838,7 @@ TEST(SchedulerPolicyTest, AdmissionThresholdOverridesConflictingGlobal) {
         ASSERT_TRUE(scheduler.add_request(request));
       }
 
-      BatchGroup batches = scheduler.prepare_batch_test();
+      BatchGroup batches = scheduler.prepare_batch();
 
       ASSERT_EQ(batches.size(), 1u);
       EXPECT_EQ(batches.front().size(), threshold == 0.5 ? 1u : 2u);
@@ -915,7 +872,6 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
         std::make_unique<FakeEngine>(num_blocks[idx], block_size[idx]);
     auto scheduler =
         std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-    EXPECT_TRUE(scheduler != nullptr);
     EXPECT_EQ(scheduler->get_instance_info().kv_split_size, kv_split_size[idx]);
 
     // create requests
@@ -925,7 +881,7 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
       scheduler->add_request(req);
     }
 
-    auto batch = scheduler->prepare_batch_test();
+    auto batch = scheduler->prepare_batch();
     EXPECT_TRUE(batch.size() == 1);
     const std::vector<uint32_t>& allowed_max_tokens =
         batch[0].get_allowed_max_tokens();
@@ -974,7 +930,7 @@ TEST(SchedulerPolicyTest, PrefillBudgetUsesInjectedFairAndChunkSwitches) {
         request->sequences().front()->set_dp_rank(0);
         ASSERT_TRUE(scheduler.add_request(request));
       }
-      auto batches = scheduler.prepare_batch_test();
+      auto batches = scheduler.prepare_batch();
       size_t scheduled_tokens = 0;
       for (const Batch& batch : batches) {
         for (const uint32_t tokens : batch.get_allowed_max_tokens()) {
@@ -1021,7 +977,7 @@ TEST(SchedulerPolicyTest, NonChunkedPrefillAssignsDpBeforeFairBudget) {
   scheduler->add_request(requests[0]);
   scheduler->add_request(requests[1]);
 
-  BatchGroup batches = scheduler->prepare_batch_test();
+  BatchGroup batches = scheduler->prepare_batch();
 
   EXPECT_GE(requests[0]->sequences()[0]->dp_rank(), 0);
   EXPECT_LT(requests[0]->sequences()[0]->dp_rank(), kDpSize);
@@ -1064,7 +1020,7 @@ TEST(SchedulerPolicyTest, UnifiedPrefixHitIncludesScheduledSuffixCapacity) {
       generate_request({kPromptTokens}, {1}, std::nullopt, std::nullopt, 10000);
   scheduler->add_request(requests[0]);
 
-  BatchGroup batches = scheduler->prepare_batch_test();
+  BatchGroup batches = scheduler->prepare_batch();
   ASSERT_EQ(batches.size(), 1u);
   ASSERT_EQ(batches[0].size(), 1u);
   Sequence* hit_sequence = requests[0]->sequences()[0].get();
@@ -1163,7 +1119,7 @@ TEST(SchedulerPolicyTest, LinearSchedulingPreservesReadSourceAcrossPolicies) {
         size_t cached_tokens = 0;
         int32_t previous_output_id = -1;
         for (const size_t expected_tokens : {256, 256, 256, 9}) {
-          auto batches = scheduler.prepare_batch_test();
+          auto batches = scheduler.prepare_batch();
           ASSERT_EQ(batches.size(), 1u);
           ASSERT_EQ(batches.front().size(), 1u);
           EXPECT_EQ(batches.front().get_allowed_max_tokens().front(),
@@ -1210,7 +1166,7 @@ TEST(SchedulerPolicyTest, DecodeFirstSkipsRedistributionForLinearModels) {
       scheduler.add_request(requests.front());
       size_t cached_tokens = 0;
       for (const size_t expected_tokens : {4u, 4u, 4u, 1u}) {
-        auto batches = scheduler.prepare_batch_test();
+        auto batches = scheduler.prepare_batch();
         ASSERT_EQ(batches.size(), 1u);
         ASSERT_EQ(batches.front().size(), 1u);
         EXPECT_EQ(batches.front().get_allowed_max_tokens().front(),
@@ -1270,7 +1226,7 @@ TEST(SchedulerPolicyTest, DecodeQueuePlansColdBestOfCandidatesAsPrefill) {
           first->kv_state().set_kv_cache_tokens_num(7);
           first->append_token(Token(/*id=*/1));
           scheduler.add_request(request);
-          auto batches = scheduler.prepare_batch_test();
+          auto batches = scheduler.prepare_batch();
           ASSERT_EQ(request->sequences().size(), 2u);
           ASSERT_EQ(batches.size(), 1u);
           ASSERT_EQ(batches.front().size(), 2u);
@@ -1339,7 +1295,7 @@ TEST(SchedulerPolicyTest, LinearLatencySchedulingRespectsRemainingTokenBudget) {
           scheduler.add_request(request);
         }
 
-        auto batches = scheduler.prepare_batch_test();
+        auto batches = scheduler.prepare_batch();
 
         ASSERT_EQ(batches.size(), 1u);
         ASSERT_EQ(batches.front().size(), 2u);
@@ -1355,7 +1311,7 @@ TEST(SchedulerPolicyTest, LinearLatencySchedulingRespectsRemainingTokenBudget) {
               .set_kv_cache_tokens_num(
                   batches.front().get_allowed_max_tokens()[sequence_index]);
         }
-        batches = scheduler.prepare_batch_test();
+        batches = scheduler.prepare_batch();
         ASSERT_EQ(batches.size(), 1u);
         ASSERT_EQ(batches.front().size(), 2u);
         const uint32_t expected_first_tokens =
@@ -1448,7 +1404,8 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
   auto profile_engine = std::make_unique<FakeEngine>(512, 128);
   ProfileManager::Options profile_options;
   profile_options.max_tokens_per_batch(16384).max_seqs_per_batch(16);
-  ProfileManager profile_manager(profile_engine.get(), profile_options);
+  ProfileManager profile_manager =
+      make_profile_manager(*profile_engine, profile_options);
 
   std::vector<std::shared_ptr<Request>> requests =
       generate_request({static_cast<int32_t>(kPromptTokens),
@@ -1557,7 +1514,8 @@ TEST(SchedulerPolicyTest, UnifiedReclaimsMutuallyBlockedChunksWhenIdle) {
     BlockManagerPool* pool = engine.kv_cache_manager();
     ProfileManager::Options profile_options;
     profile_options.max_tokens_per_batch(32).max_seqs_per_batch(2);
-    ProfileManager profile_manager(&engine, profile_options);
+    ProfileManager profile_manager =
+        make_profile_manager(engine, profile_options);
     auto requests = generate_request({96, 96},
                                      {16, 16},
                                      std::nullopt,
@@ -1748,7 +1706,8 @@ TEST_P(AsyncBlockReleasePolicyTest, WaitsWithoutPreemptionThenRetries) {
   FakeEngine profile_engine(256, 128);
   ProfileManager::Options profile_options;
   profile_options.max_tokens_per_batch(1024).max_seqs_per_batch(16);
-  ProfileManager profile_manager(&profile_engine, profile_options);
+  ProfileManager profile_manager =
+      make_profile_manager(profile_engine, profile_options);
   auto requests = generate_request(std::vector<int32_t>(request_count, 128),
                                    std::vector<int32_t>(request_count, 16),
                                    std::nullopt,
@@ -1864,7 +1823,8 @@ TEST_P(PendingVmmBatchPolicyTest, RetainsRequestsUntilBatchReleasesBlocks) {
   FakeEngine profile_engine(256, 128);
   ProfileManager::Options profile_options;
   profile_options.max_tokens_per_batch(1024).max_seqs_per_batch(16);
-  ProfileManager profile_manager(&profile_engine, profile_options);
+  ProfileManager profile_manager =
+      make_profile_manager(profile_engine, profile_options);
   auto requests = generate_request(std::vector<int32_t>(request_count, 128),
                                    std::vector<int32_t>(request_count, 16),
                                    std::nullopt,
@@ -1969,7 +1929,8 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
   auto profile_engine = std::make_unique<FakeEngine>(256, 128);
   ProfileManager::Options profile_options;
   profile_options.max_tokens_per_batch(16384).max_seqs_per_batch(16);
-  ProfileManager profile_manager(profile_engine.get(), profile_options);
+  ProfileManager profile_manager =
+      make_profile_manager(*profile_engine, profile_options);
 
   std::vector<std::shared_ptr<Request>> requests = generate_request(
       {32000}, {2}, std::nullopt, std::nullopt, /*max_context_len=*/40000);
@@ -2458,7 +2419,6 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
     auto engine = std::make_unique<FakeEngine>(16, 16);
     auto scheduler =
         std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-    EXPECT_TRUE(scheduler != nullptr);
 
     // request prompt len: 100
     auto requests =
@@ -2466,7 +2426,7 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
     scheduler->add_request(requests[0]);
     scheduler->add_request(requests[1]);
 
-    auto batch = scheduler->prepare_batch_test();
+    auto batch = scheduler->prepare_batch();
     EXPECT_TRUE(batch.size() == 1);
     EXPECT_TRUE(batch[0].size() == 1);  // can not schedule the second.
   }
@@ -2476,14 +2436,13 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
     SchedulerOptions opt = create_scheduler_options(1000, 256, 0, 1024, 1);
     // free block slot: 1
     auto engine = std::make_unique<FakeEngine>(2, 8);
+    std::optional<Status> callback_status;
     auto scheduler =
         std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-    EXPECT_TRUE(scheduler != nullptr);
 
     // request prompt len: 1000
     auto requests = generate_request(
         {1, 1000}, {1, 100}, std::nullopt, std::nullopt, 10000);
-    std::optional<Status> callback_status;
     requests[1]->state().output_func = [&](const RequestOutput& output) {
       callback_status = output.status;
       return true;
@@ -2491,7 +2450,7 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
     scheduler->add_request(requests[0]);
     scheduler->add_request(requests[1]);
 
-    auto batch = scheduler->prepare_batch_test();
+    auto batch = scheduler->prepare_batch();
     scheduler->wait_for_responses();
     ASSERT_EQ(batch.size(), 1u);
     EXPECT_EQ(batch[0].size(), 1u);
@@ -2515,7 +2474,6 @@ TEST(SchedulerPolicyTest, NormalSchedule) {
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  EXPECT_TRUE(scheduler != nullptr);
 
   // 1. schedule some new prefill requests
   auto requests = generate_request(
@@ -2534,7 +2492,7 @@ TEST(SchedulerPolicyTest, NormalSchedule) {
   update_requests(requests);
 
   // 2. schedule decoding requests
-  batch = scheduler->prepare_batch_test();
+  batch = scheduler->prepare_batch();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 3);
   update_requests(requests);
@@ -2545,7 +2503,7 @@ TEST(SchedulerPolicyTest, NormalSchedule) {
   for (auto req : requests1) {
     scheduler->add_request(req);
   }
-  batch = scheduler->prepare_batch_test();
+  batch = scheduler->prepare_batch();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 5);
   update_requests(requests);
@@ -2559,7 +2517,7 @@ TEST(SchedulerPolicyTest, NormalSchedule) {
   for (auto req : requests2) {
     scheduler->add_request(req);
   }
-  batch = scheduler->prepare_batch_test();
+  batch = scheduler->prepare_batch();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 6);
   const std::vector<uint32_t>& allowed_max_tokens =
@@ -2578,7 +2536,7 @@ TEST(SchedulerPolicyTest, NormalSchedule) {
   for (auto req : requests3) {
     scheduler->add_request(req);
   }
-  batch = scheduler->prepare_batch_test();
+  batch = scheduler->prepare_batch();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 7);
   const std::vector<uint32_t>& allowed_max_tokens1 =
@@ -2602,7 +2560,6 @@ TEST(SchedulerPolicyTest, PreemptSchedule) {
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  EXPECT_TRUE(scheduler != nullptr);
 
   std::vector<std::shared_ptr<Request>> running_requests;
 
@@ -2614,12 +2571,12 @@ TEST(SchedulerPolicyTest, PreemptSchedule) {
   for (auto req : requests) {
     scheduler->add_request(req);
   }
-  auto batch = scheduler->prepare_batch_test();
+  auto batch = scheduler->prepare_batch();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 2);
   update_requests(running_requests);
 
-  batch = scheduler->prepare_batch_test();
+  batch = scheduler->prepare_batch();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 2);
   update_requests(running_requests);
@@ -2627,7 +2584,7 @@ TEST(SchedulerPolicyTest, PreemptSchedule) {
   BlockManagerPool* block_manager_pool = engine->kv_cache_manager();
   int free_blocks_before_preempt =
       util::max(block_manager_pool->num_free_blocks());
-  batch = scheduler->prepare_batch_test();
+  batch = scheduler->prepare_batch();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 1);
   int free_blocks_after_preempt =
@@ -2644,7 +2601,7 @@ TEST(SchedulerPolicyTest, PreemptSchedule) {
   // it just like a new prefill request.
   // Continue to run, the new prefill request will not preempt
   // request in running_queue.
-  batch = scheduler->prepare_batch_test();
+  batch = scheduler->prepare_batch();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 1);
 }
@@ -2663,7 +2620,6 @@ TEST(SchedulerPolicyTest, PrioritySchedule) {
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  EXPECT_TRUE(scheduler != nullptr);
 
   std::vector<std::shared_ptr<Request>> running_requests;
 
@@ -2676,7 +2632,7 @@ TEST(SchedulerPolicyTest, PrioritySchedule) {
   for (auto req : requests) {
     scheduler->add_request(req);
   }
-  auto batch = scheduler->prepare_batch_test();
+  auto batch = scheduler->prepare_batch();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 2);
   EXPECT_TRUE(scheduler->get_running_requests().size() == 2);
@@ -2695,7 +2651,7 @@ TEST(SchedulerPolicyTest, PrioritySchedule) {
                                        std::vector<int32_t>{1},
                                        30000);  // use 1 blocks
   scheduler->add_request(new_requests[0]);
-  batch = scheduler->prepare_batch_test();
+  batch = scheduler->prepare_batch();
   // check there are 3 running requests owing to decode-maximal
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 3);
@@ -2703,7 +2659,7 @@ TEST(SchedulerPolicyTest, PrioritySchedule) {
   running_requests.push_back(new_requests[0]);
   update_requests(running_requests);
   // preemption happens, only HIGH and NORMAL decode requests
-  batch = scheduler->prepare_batch_test();
+  batch = scheduler->prepare_batch();
   EXPECT_TRUE(batch.size() == 1);
   EXPECT_TRUE(batch[0].size() == 2);
   EXPECT_TRUE(scheduler->get_running_requests().size() == 2);
@@ -2734,7 +2690,6 @@ TEST(SchedulerPolicyTest, LatencySchedule) {
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  EXPECT_TRUE(scheduler != nullptr);
 
   // manually created profile data for y=0.5x^2+10x
   std::vector<std::pair<int32_t, double>> created_profile_data = {
@@ -2758,7 +2713,7 @@ TEST(SchedulerPolicyTest, LatencySchedule) {
   for (auto req : requests) {
     scheduler->add_request(req);
   }
-  auto batch = scheduler->prepare_batch_test();
+  auto batch = scheduler->prepare_batch();
   EXPECT_EQ(batch.size(), 1);
   EXPECT_EQ(batch[0].size(), 3);
   EXPECT_EQ(scheduler->get_running_requests().size(), 3);
@@ -2769,7 +2724,7 @@ TEST(SchedulerPolicyTest, LatencySchedule) {
   auto new_requests = generate_request(
       {10}, {10}, std::nullopt, std::nullopt, 30000);  // use 1 blocks
   scheduler->add_request(new_requests[0]);
-  batch = scheduler->prepare_batch_test();
+  batch = scheduler->prepare_batch();
   auto running_sequences_budgets = scheduler->get_running_sequences_budgets();
 
   EXPECT_EQ(batch.size(), 1);
@@ -2817,7 +2772,7 @@ TEST(SchedulerPolicyTest, FullFootprintAdmissionGate) {
   scheduler->add_request(requests[0]);
   scheduler->add_request(requests[1]);
 
-  auto batch = scheduler->prepare_batch_test();
+  auto batch = scheduler->prepare_batch();
   ASSERT_EQ(batch.size(), 1);
   // Only A admitted. B blocked: after A uses 1 block, available=8-1=7 < 8.
   EXPECT_EQ(batch[0].size(), 1);
@@ -2853,7 +2808,7 @@ TEST(SchedulerPolicyTest, FullFootprintAdmitsBothWhenFits) {
   scheduler->add_request(requests[0]);
   scheduler->add_request(requests[1]);
 
-  auto batch = scheduler->prepare_batch_test();
+  auto batch = scheduler->prepare_batch();
   ASSERT_EQ(batch.size(), 1);
   EXPECT_EQ(batch[0].size(), 2);  // Both admitted.
 }
@@ -2885,7 +2840,7 @@ TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
     ASSERT_TRUE(scheduler.add_request(requests[0]));
     ASSERT_TRUE(scheduler.add_request(requests[1]));
 
-    BatchGroup batches = scheduler.prepare_batch_test();
+    BatchGroup batches = scheduler.prepare_batch();
 
     ASSERT_EQ(batches.size(), 1u);
     EXPECT_EQ(batches.front().size(), 1u);
@@ -2963,7 +2918,7 @@ TEST(SchedulerPolicyTest, StaleCapacityReservesFullPromptBeforeFirstChunk) {
       // A completed request can free physical pages before the next advisory
       // snapshot. The first chunk must probe the real allocator and retain
       // the full three-block prompt reservation without advancing computation.
-      BatchGroup batches = scheduler.prepare_batch_test();
+      BatchGroup batches = scheduler.prepare_batch();
       ASSERT_EQ(batches.size(), 1u);
       ASSERT_EQ(batches.front().size(), 1u);
       Sequence* sequence = request->sequences().front().get();
@@ -3033,7 +2988,7 @@ TEST(SchedulerPolicyTest, StaleCapacityDefersFailedFullPromptReservation) {
     // Another owner temporarily holds the pages. Failed admission must leave
     // the request queued and return without retrying within the same round.
     for (size_t attempt = 0; attempt < 2; ++attempt) {
-      BatchGroup batches = scheduler.prepare_batch_test();
+      BatchGroup batches = scheduler.prepare_batch();
       scheduler.wait_for_responses();
       ASSERT_EQ(batches.size(), 1u);
       EXPECT_TRUE(batches.front().empty());
@@ -3049,7 +3004,7 @@ TEST(SchedulerPolicyTest, StaleCapacityDefersFailedFullPromptReservation) {
     }
 
     pool->deallocate(blocker.get());
-    BatchGroup batches = scheduler.prepare_batch_test();
+    BatchGroup batches = scheduler.prepare_batch();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
     ASSERT_EQ(batches.front().size(), 1u);
@@ -3104,7 +3059,7 @@ TEST(SchedulerPolicyTest, PersistentPrefillAllocationFailureUnblocksFollower) {
     constexpr size_t kRetryLimit = 4096;
     for (size_t attempt = 0; attempt < kRetryLimit; ++attempt) {
       pool->set_fail_on_attempt(pool->allocation_attempts() + 1);
-      BatchGroup batches = scheduler.prepare_batch_test();
+      BatchGroup batches = scheduler.prepare_batch();
       ASSERT_EQ(batches.size(), 1u);
       ASSERT_TRUE(batches.front().empty());
     }
@@ -3117,7 +3072,7 @@ TEST(SchedulerPolicyTest, PersistentPrefillAllocationFailureUnblocksFollower) {
     EXPECT_EQ(pool->num_free_blocks(), initial_free_blocks);
 
     pool->set_fail_on_attempt(/*attempt=*/0);
-    BatchGroup batches = scheduler.prepare_batch_test();
+    BatchGroup batches = scheduler.prepare_batch();
     ASSERT_EQ(batches.size(), 1u);
     ASSERT_EQ(batches.front().size(), 1u);
     EXPECT_EQ(batches.front()[0], requests.back()->sequences().front().get());
@@ -3167,7 +3122,7 @@ TEST(SchedulerPolicyTest, SuccessfulPrefillResetsAllocationFailureWindow) {
       sequence->kv_state().set_kv_cache_tokens_num(computed_tokens);
       for (size_t attempt = 0; attempt < kFailuresBeforeRecovery; ++attempt) {
         pool->set_fail_on_attempt(pool->allocation_attempts() + 1);
-        BatchGroup batches = scheduler.prepare_batch_test();
+        BatchGroup batches = scheduler.prepare_batch();
         ASSERT_EQ(batches.size(), 1u);
         ASSERT_TRUE(batches.front().empty());
       }
@@ -3175,7 +3130,7 @@ TEST(SchedulerPolicyTest, SuccessfulPrefillResetsAllocationFailureWindow) {
       ASSERT_FALSE(callback_status.has_value());
 
       pool->set_fail_on_attempt(/*attempt=*/0);
-      BatchGroup batches = scheduler.prepare_batch_test();
+      BatchGroup batches = scheduler.prepare_batch();
       ASSERT_EQ(batches.size(), 1u);
       ASSERT_EQ(batches.front().size(), 1u);
       EXPECT_EQ(batches.front()[0], sequence);
@@ -3220,7 +3175,7 @@ TEST(SchedulerPolicyTest, TransientDecodeAllocationFailurePreservesRequest) {
       return true;
     };
     ASSERT_TRUE(scheduler.add_request(request));
-    BatchGroup batches = scheduler.prepare_batch_test();
+    BatchGroup batches = scheduler.prepare_batch();
     ASSERT_EQ(batches.size(), 1u);
     ASSERT_EQ(batches.front().size(), 1u);
     Sequence* sequence = request->sequences().front().get();
@@ -3236,7 +3191,7 @@ TEST(SchedulerPolicyTest, TransientDecodeAllocationFailurePreservesRequest) {
 
     // The first decode token crosses the four-token block boundary. A
     // transient mapping failure must not discard the completed prompt.
-    batches = scheduler.prepare_batch_test();
+    batches = scheduler.prepare_batch();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
     EXPECT_TRUE(batches.front().empty());
@@ -3251,7 +3206,7 @@ TEST(SchedulerPolicyTest, TransientDecodeAllocationFailurePreservesRequest) {
     EXPECT_EQ(pool->num_free_blocks(), free_blocks_before);
     EXPECT_EQ(pool->allocation_attempts(), successful_allocations + 1);
 
-    batches = scheduler.prepare_batch_test();
+    batches = scheduler.prepare_batch();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
     ASSERT_EQ(batches.front().size(), 1u);
@@ -3293,7 +3248,7 @@ TEST(SchedulerPolicyTest, DecodeAllocationFailureDefersNewPrefill) {
   for (auto& request : requests) {
     ASSERT_TRUE(scheduler.add_request(request));
   }
-  BatchGroup batches = scheduler.prepare_batch_test();
+  BatchGroup batches = scheduler.prepare_batch();
   ASSERT_EQ(batches.size(), 1u);
   ASSERT_EQ(batches.front().size(), 2u);
   update_requests(requests);
@@ -3313,7 +3268,7 @@ TEST(SchedulerPolicyTest, DecodeAllocationFailureDefersNewPrefill) {
 
   // The first decode grows successfully; the second mapping fails. Keep the
   // successful decode, but do not spend more memory on a new prefill.
-  batches = scheduler.prepare_batch_test();
+  batches = scheduler.prepare_batch();
   scheduler.wait_for_responses();
   ASSERT_EQ(batches.size(), 1u);
   ASSERT_EQ(batches.front().size(), 1u);
@@ -3331,7 +3286,7 @@ TEST(SchedulerPolicyTest, DecodeAllocationFailureDefersNewPrefill) {
   // waiting prefill alongside both existing decodes on the next pass.
   progressing->kv_state().set_kv_cache_tokens_num(5);
   progressing->append_token(Token(1));
-  batches = scheduler.prepare_batch_test();
+  batches = scheduler.prepare_batch();
   scheduler.wait_for_responses();
   ASSERT_EQ(batches.size(), 1u);
   ASSERT_EQ(batches.front().size(), 3u);
@@ -3372,7 +3327,7 @@ TEST(SchedulerPolicyTest, ChunkAllocationFailureDefersOtherPrefillQueue) {
     auto chunked =
         generate_request({12}, {4}, std::nullopt, std::nullopt, 64)[0];
     ASSERT_TRUE(scheduler.add_request(chunked));
-    BatchGroup batches = scheduler.prepare_batch_test();
+    BatchGroup batches = scheduler.prepare_batch();
     ASSERT_EQ(batches.size(), 1u);
     ASSERT_EQ(batches.front().size(), 1u);
     Sequence* sequence = chunked->sequences().front().get();
@@ -3392,7 +3347,7 @@ TEST(SchedulerPolicyTest, ChunkAllocationFailureDefersOtherPrefillQueue) {
 
     // A blocked continuation must not trigger another allocation through the
     // separate fresh-prefill queue, or discard its already computed prefix.
-    batches = scheduler.prepare_batch_test();
+    batches = scheduler.prepare_batch();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
     EXPECT_TRUE(batches.front().empty());
@@ -3407,7 +3362,7 @@ TEST(SchedulerPolicyTest, ChunkAllocationFailureDefersOtherPrefillQueue) {
     pool->deallocate(holder.get());
     for (const size_t completed_tokens : {4u, 8u}) {
       sequence->kv_state().set_kv_cache_tokens_num(completed_tokens);
-      batches = scheduler.prepare_batch_test();
+      batches = scheduler.prepare_batch();
       ASSERT_EQ(batches.size(), 1u);
       ASSERT_EQ(batches.front().size(), 1u);
       EXPECT_EQ(batches.front()[0], sequence);
@@ -3416,7 +3371,7 @@ TEST(SchedulerPolicyTest, ChunkAllocationFailureDefersOtherPrefillQueue) {
     }
     sequence->kv_state().set_kv_cache_tokens_num(12);
     sequence->append_token(Token(1));
-    batches = scheduler.prepare_batch_test();
+    batches = scheduler.prepare_batch();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
     bool fresh_scheduled = false;
@@ -3459,7 +3414,7 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsDecodeBeyondArena) {
       return true;
     };
     ASSERT_TRUE(scheduler.add_request(request));
-    BatchGroup batches = scheduler.prepare_batch_test();
+    BatchGroup batches = scheduler.prepare_batch();
     ASSERT_EQ(batches.size(), 1u);
     ASSERT_EQ(batches.front().size(), 1u);
     Sequence* sequence = request->sequences().front().get();
@@ -3469,7 +3424,7 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsDecodeBeyondArena) {
 
     // Padding leaves two usable blocks. The next decode token needs a third
     // block, which cannot fit even after all other owners release memory.
-    batches = scheduler.prepare_batch_test();
+    batches = scheduler.prepare_batch();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
     EXPECT_TRUE(batches.front().empty());
@@ -3508,7 +3463,7 @@ TEST(SchedulerPolicyTest, IdleChunkContinuationExceedsUtilizationThreshold) {
       return true;
     };
     ASSERT_TRUE(scheduler.add_request(request));
-    BatchGroup batches = scheduler.prepare_batch_test();
+    BatchGroup batches = scheduler.prepare_batch();
     ASSERT_EQ(batches.size(), 1u);
     ASSERT_EQ(batches.front().size(), 1u);
     EXPECT_EQ(batches.front().get_allowed_max_tokens(),
@@ -3523,7 +3478,7 @@ TEST(SchedulerPolicyTest, IdleChunkContinuationExceedsUtilizationThreshold) {
 
     // No decode or other executable request can lower utilization. The
     // continuation must be allowed to allocate its last prompt block.
-    batches = scheduler.prepare_batch_test();
+    batches = scheduler.prepare_batch();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
     ASSERT_EQ(batches.front().size(), 1u);
@@ -3576,7 +3531,7 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsPromptWithoutReservation) {
 
     // Ten prompt blocks exceed the configured nine-block arena. This is a
     // permanent size limit, so no physical reservation should be attempted.
-    BatchGroup batches = scheduler.prepare_batch_test();
+    BatchGroup batches = scheduler.prepare_batch();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
     EXPECT_TRUE(batches.front().empty());
@@ -3623,7 +3578,7 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsBestOfWithoutReservation) {
     };
     ASSERT_TRUE(scheduler.add_request(request));
 
-    BatchGroup batches = scheduler.prepare_batch_test();
+    BatchGroup batches = scheduler.prepare_batch();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
     EXPECT_TRUE(batches.front().empty());
@@ -3668,7 +3623,7 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsPromptWithActiveRequest) {
     std::shared_ptr<Request>& active = requests[0];
     std::shared_ptr<Request>& oversized = requests[1];
     ASSERT_TRUE(scheduler.add_request(active));
-    BatchGroup batches = scheduler.prepare_batch_test();
+    BatchGroup batches = scheduler.prepare_batch();
     ASSERT_EQ(batches.size(), 1u);
     ASSERT_EQ(batches.front().size(), 1u);
     Sequence* active_sequence = active->sequences().front().get();
@@ -3683,7 +3638,7 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsPromptWithActiveRequest) {
     };
     ASSERT_TRUE(scheduler.add_request(oversized));
 
-    batches = scheduler.prepare_batch_test();
+    batches = scheduler.prepare_batch();
     scheduler.wait_for_responses();
     ASSERT_EQ(batches.size(), 1u);
     ASSERT_EQ(batches.front().size(), 1u);
@@ -3730,7 +3685,7 @@ TEST(SchedulerPolicyTest, BestOfAllocationFailureKeepsSuccessfulSequence) {
       "best-of-fresh", "best-of-fresh", "", std::move(request_state), "");
   ASSERT_TRUE(scheduler.add_request(request));
 
-  BatchGroup batches = scheduler.prepare_batch_test();
+  BatchGroup batches = scheduler.prepare_batch();
   scheduler.wait_for_responses();
   ASSERT_EQ(batches.size(), 1u);
   ASSERT_EQ(batches.front().size(), 1u);
@@ -3748,7 +3703,7 @@ TEST(SchedulerPolicyTest, BestOfAllocationFailureKeepsSuccessfulSequence) {
       first->kv_state().blocks(BlockType::KV).front().id();
 
   first->kv_state().set_kv_cache_tokens_num(4);
-  batches = scheduler.prepare_batch_test();
+  batches = scheduler.prepare_batch();
   ASSERT_EQ(batches.size(), 1u);
   ASSERT_EQ(batches.front().size(), 2u);
   EXPECT_EQ(batches.front()[0], first);
@@ -3799,7 +3754,7 @@ TEST(SchedulerPolicyTest, BestOfAllocationFailurePreservesExistingChunk) {
   ASSERT_EQ(first->kv_state().num_blocks(BlockType::KV), 1u);
   ASSERT_TRUE(scheduler.add_request(request));
 
-  BatchGroup batches = scheduler.prepare_batch_test();
+  BatchGroup batches = scheduler.prepare_batch();
   scheduler.wait_for_responses();
   ASSERT_EQ(batches.size(), 1u);
   ASSERT_EQ(batches.front().size(), 1u);
@@ -3846,8 +3801,8 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   pool->publish_prefix(cached_sequence);
   pool->deallocate(cached_request.get());
 
-  TestableContinuousScheduler scheduler(&engine, options);
   std::optional<bool> cancelled_response;
+  TestableContinuousScheduler scheduler(&engine, options);
   RequestState request_state =
       generate_request({12}, {4}, std::nullopt, std::nullopt, 64)[0]
           ->state()
@@ -3864,7 +3819,7 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   ASSERT_TRUE(scheduler.add_request(request));
 
   const std::vector<size_t> used_blocks_before = pool->num_used_blocks();
-  BatchGroup batches = scheduler.prepare_batch_test();
+  BatchGroup batches = scheduler.prepare_batch();
   scheduler.wait_for_responses();
   ASSERT_EQ(batches.size(), 1u);
   ASSERT_EQ(batches.front().size(), 1u);
@@ -3881,7 +3836,7 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
       first->kv_state().blocks(BlockType::KV).back().id();
 
   first->kv_state().set_kv_cache_tokens_num(8);
-  batches = scheduler.prepare_batch_test();
+  batches = scheduler.prepare_batch();
   ASSERT_EQ(batches.size(), 1u);
   ASSERT_EQ(batches.front().size(), 2u);
   EXPECT_EQ(batches.front()[0], first);
@@ -3893,7 +3848,7 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   EXPECT_EQ(pool->allocation_attempts(), 4u);
 
   request->set_cancel();
-  batches = scheduler.prepare_batch_test();
+  batches = scheduler.prepare_batch();
   scheduler.wait_for_responses();
   ASSERT_EQ(batches.size(), 1u);
   EXPECT_TRUE(batches.front().empty());

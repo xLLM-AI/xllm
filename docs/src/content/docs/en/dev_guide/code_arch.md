@@ -14,7 +14,7 @@ immediate callees before exploring platform-specific implementations.
 | 1 | [`xllm/xllm.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/xllm.cpp): `main()`, `run()` | How are configuration, the master, and the HTTP service connected? |
 | 2 | [`chat_service_impl.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/api_service/chat_service_impl.cpp): `ChatServiceImpl::process_async_impl()` | How do chat messages become an internal request with an output callback? |
 | 3 | [`llm_master.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/distributed_runtime/llm_master.cpp): `LLMMaster::handle_request()`, `run()` | How does a request enter the scheduler, and what drives the scheduling loop? |
-| 4 | [`continuous_scheduler.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/scheduler/continuous_scheduler.cpp): `ContinuousSchedulerBase::step()` | How is one batch scheduled, executed, and processed? |
+| 4 | [`continuous_scheduler.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/scheduler/continuous_scheduler.cpp): `ContinuousScheduler::step()` | How is one batch scheduled, executed, and processed? |
 | 5 | [`llm_engine.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/distributed_runtime/llm_engine.cpp): `LLMEngine::step()` | How does a batch reach the workers, and how are their results collected? |
 | 6 | [`llm_worker_impl.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/runtime/llm_worker_impl.cpp): `LLMWorkerImpl::step_internal()` | Where do model execution, logits, and token sampling happen? |
 
@@ -380,7 +380,7 @@ POST /v1/chat/completions
   -> HTTP route / APIService / ChatServiceImpl
   -> LLMMaster / LLMRequestFactory
        messages -> chat template -> prompt -> token IDs -> Request
-  -> ContinuousSchedulerBase / SchedulerPolicy
+  -> ContinuousScheduler / SchedulerPolicy
        choose sequences and token budgets -> BatchGroup
   -> LLMEngine
        build inputs -> dispatch to worker ranks
@@ -406,7 +406,7 @@ POST /v1/chat/completions
    applies the chat template, tokenizes and validates the prompt, and creates
    request/sequence state. The master then calls `scheduler_->add_request()`.
 
-3. **Choose work for the next step.** `ContinuousSchedulerBase` manages the
+3. **Choose work for the next step.** `ContinuousScheduler` manages the
    request queues and execution loop.
    [`scheduler_policy.cpp`](https://github.com/xLLM-AI/xllm/blob/main/xllm/core/scheduler/scheduler_policy.cpp)
    contains the batch-assembly policies: `PrefillFirstPolicy`,

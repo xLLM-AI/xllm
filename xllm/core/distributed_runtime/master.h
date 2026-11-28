@@ -27,6 +27,8 @@ limitations under the License.
 namespace xllm {
 
 class ModelArgs;
+class XServiceClient;
+struct SchedulerOptions;
 
 class Master {
  public:
@@ -43,12 +45,18 @@ class Master {
 
   virtual const ModelArgs* model_args() const = 0;
 
+  virtual bool start_profile() { return false; }
+  virtual bool stop_profile() { return false; }
+
   RateLimiter* get_rate_limiter() { return &rate_limiter_; }
 
  protected:
   // node_rank == 0. Only the base class and derived masters branch on this;
   // no external caller needs it.
   bool is_leader() const { return options_.node_rank() == 0; }
+
+  SchedulerOptions make_scheduler_options() const;
+  XServiceClient* init_service_routing();
 
   Options options_;
   std::vector<torch::Device> devices_;

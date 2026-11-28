@@ -28,15 +28,15 @@ limitations under the License.
 
 #include "common/options.h"
 #include "common/types.h"
+#include "core/distributed_runtime/vlm_engine.h"
 #include "core/framework/multimodal/mm_input.h"
+#include "core/scheduler/scheduler.h"
 #include "framework/chat_template/chat_template.h"
 #include "framework/request/request_output.h"
 #include "framework/request/request_params.h"
 #include "framework/request/vlm_request_factory.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "master.h"
-#include "scheduler/continuous_scheduler.h"
-#include "speculative_engine.h"
 #include "xllm/processors/multimodal_processor.h"
 
 namespace xllm {
@@ -112,7 +112,6 @@ class VLMMaster : public Master {
                          RequestParams params,
                          std::function<void(Status, int32_t)> callback);
 
-  bool handle_rpc_response(const RequestOutput& output);
   std::vector<bool> handle_rpc_responses(
       const std::vector<RequestOutput>& outputs);
 
@@ -130,11 +129,11 @@ class VLMMaster : public Master {
   // start the handling loop
   void run() override;
 
+  bool start_profile() override;
+  bool stop_profile() override;
+
   // generate will run all requests, this is an blocking call
   void generate();
-
-  bool start_profile();
-  bool stop_profile();
 
   MasterStatus get_master_status() const { return master_status_; }
   bool is_sleeping() const { return master_status_ != MasterStatus::WAKEUP; }
@@ -146,8 +145,6 @@ class VLMMaster : public Master {
   bool unlink_p2p(const std::vector<std::string>& remote_addrs);
 
   int get_image_limit() { return options_.limit_image_per_prompt(); }
-
-  const std::string& model_type() const { return model_args_.model_type(); }
 
  private:
   void schedule_completion(std::string prompt,
@@ -165,13 +162,7 @@ class VLMMaster : public Master {
   std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator_;
   XServiceClient* xservice_client_ = nullptr;
 
-  // The LLM draft prepares VirtualMemory pages before loading worker weights.
-  std::unique_ptr<ModelResidencyCoordinator> draft_model_residency_coordinator_;
-
-  // Exactly one of these owners is populated for VLM and VLM speculative
-  // execution respectively.
   std::unique_ptr<VLMEngine> vlm_engine_;
-  std::unique_ptr<SpeculativeEngineBase<VLMEngine>> speculative_engine_;
 
   // Scheduler must be destroyed before the engine it references.
   std::unique_ptr<Scheduler> scheduler_;

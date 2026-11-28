@@ -16,98 +16,44 @@ limitations under the License.
 
 #pragma once
 
-#include <gflags/gflags.h>
-
-#include <functional>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 #include "common/macros.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/framework/batch/forward_input_factory.h"
-#include "engine.h"
+#include "core/distributed_runtime/engine.h"
+#include "core/runtime/forward_params.h"
 #include "framework/batch/batch_group.h"
-#include "framework/tokenizer/tokenizer.h"
-#include "framework/tokenizer/tokenizer_args.h"
-#include "runtime/vlm_forward_params.h"
 
 namespace xllm {
 
-class ModelLoader;
-
-class VmmKVLayout;
 class KVTransferCoordinatorBase;
 
-class VLMEngine : public Engine {
+class VLMEngine final : public Engine {
  public:
-  using ModelInitCallback = std::function<
-      bool(const ModelLoader&, int64_t, int32_t, int32_t, MasterStatus)>;
-
   // create an engine with the given devices
-  VLMEngine(const runtime::Options& options,
-            std::shared_ptr<DistributedWorkerManager>
-                distributed_worker_manager = nullptr);
+  explicit VLMEngine(const runtime::Options& options);
 
-  virtual ~VLMEngine() = default;
+  ~VLMEngine() = default;
 
   ForwardOutput step(BatchGroup& batch);
 
-  const runtime::Options& options() const { return options_; }
-
-  std::shared_ptr<DistributedWorkerManager> get_distributed_worker_manager()
-      const {
-    return distributed_worker_manager_;
-  }
-
-  bool init(MasterStatus master_status) override;
-  bool init(MasterStatus master_status,
-            std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator);
   bool init(MasterStatus master_status,
             const ModelInitCallback& prepare_model,
             std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator);
 
-  bool start_profile() override;
-  bool stop_profile() override;
-
   std::vector<RawForwardOutput> collect_step_outputs(const BatchGroup& batch);
 
  private:
-  template <typename TargetEngine>
-  friend class SpeculativeEngineBase;
   bool init_model(MasterStatus master_status,
-                  const ModelInitCallback& prepare_model = {});
-  KVCacheCapacity estimate_kv_cache_capacity(
-      bool initialize_virtual_memory = true);
-  bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap,
-                         const VmmKVLayout* shared_vmm_layout = nullptr,
-                         std::shared_ptr<KVTransferCoordinatorBase>
-                             transfer_coordinator = nullptr);
-  void setup_workers(const runtime::Options& options);
-  void process_group_test();
-  bool profile_workers(bool is_start);
-
- private:
-  // options
-  runtime::Options options_;
-
-  // dtype
-  torch::ScalarType dtype_;
-
-  // a list of workers, with each worker handling a partial of model
-  std::vector<std::shared_ptr<WorkerClient>> worker_clients_;
-
-  // common frequently used args
-  uint32_t dp_size_;
-  uint32_t worker_clients_num_;
-  uint32_t dp_local_tp_size_;
-
-  std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_ =
-      nullptr;
+                  const ModelInitCallback& prepare_model);
+  bool allocate_kv_cache(
+      const KVCacheCapacity& kv_cache_cap,
+      const VmmKVLayout* shared_vmm_layout,
+      std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator);
 
   std::unique_ptr<ForwardInputFactory<VlmForwardInput>> forward_input_factory_;
-  std::mutex profile_mutex_;
-  int64_t initial_weight_reservation_bytes_ = 0;
 };
 
 }  // namespace xllm

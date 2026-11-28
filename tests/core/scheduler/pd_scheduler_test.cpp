@@ -48,10 +48,10 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/manager/block_manager_pool.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
-#include "core/platform/device.h"
+#include "core/scheduler/continuous_scheduler.h"
+#include "core/scheduler/fake_scheduling_engine_test_utils.h"
 #include "core/util/scope_guard.h"
 #include "distributed_runtime/distributed_worker_manager.h"
-#include "distributed_runtime/engine.h"
 #include "distributed_runtime/kv_transfer_coordinator.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
@@ -186,7 +186,7 @@ class PrefetchBlockManagerPool final : public BlockManagerPool {
   std::atomic<size_t> prefetch_pipeline_calls_{0};
 };
 
-class FakeEngine final : public Engine {
+class FakeEngine final : public FakeSchedulingEngine {
  public:
   FakeEngine(int32_t num_blocks,
              int32_t block_size,
@@ -202,16 +202,19 @@ class FakeEngine final : public Engine {
         .num_embedding_blocks(embedding_blocks == 0 ? num_blocks
                                                     : embedding_blocks);
     tokenizer_ = std::make_unique<FakeTokenizer>();
-    block_manager_ =
-        std::make_unique<PrefetchBlockManagerPool>(options, dp_size);
+    auto pool = std::make_unique<PrefetchBlockManagerPool>(options, dp_size);
+    prefetch_pool_ = pool.get();
+    block_manager_ = std::move(pool);
   }
 
-  std::function<ForwardOutput(BatchGroup&)> forward;
+  StepCallback forward_;
+
+  PrefetchBlockManagerPool* prefetch_pool_ = nullptr;
   std::function<void(const BatchGroup&)> complete_forward;
 
   ForwardOutput step(BatchGroup& batch) {
-    if (forward) {
-      return forward(batch);
+    if (forward_) {
+      return forward_(batch);
     }
     NOT_IMPLEMENTED();
   }
@@ -223,24 +226,12 @@ class FakeEngine final : public Engine {
     return std::vector<RawForwardOutput>(batch.size());
   }
 
-  const Tokenizer* tokenizer() const override { return tokenizer_.get(); }
-
-  BlockManagerPool* kv_cache_manager() const override {
-    return block_manager_.get();
-  }
-
-  const ModelArgs& model_args() const override { return model_args_; }
-
-  const TokenizerArgs& tokenizer_args() const override { NOT_IMPLEMENTED(); }
-
-  bool init() override { return true; }
-
   void set_storage_prefetch_enabled(bool enabled) {
-    block_manager_->set_storage_prefetch_enabled(enabled);
+    prefetch_pool_->set_storage_prefetch_enabled(enabled);
   }
 
   size_t prefetch_pipeline_calls() const {
-    return block_manager_->prefetch_pipeline_calls();
+    return prefetch_pool_->prefetch_pipeline_calls();
   }
 
   void set_tokenizer(std::unique_ptr<Tokenizer> tokenizer) {
@@ -248,35 +239,27 @@ class FakeEngine final : public Engine {
   }
 
   void set_release_callback(std::function<void()> callback) {
-    block_manager_->on_release = std::move(callback);
+    prefetch_pool_->on_release = std::move(callback);
   }
-
- private:
-  std::unique_ptr<Tokenizer> tokenizer_;
-  std::unique_ptr<PrefetchBlockManagerPool> block_manager_;
-  ModelArgs model_args_;
-};
-
-class TestPDServiceImpl final : public PDServiceImpl {
- public:
-  using PDServiceImpl::generate_request;
-  using PDServiceImpl::PDServiceImpl;
 };
 
 class TestPDScheduler final : public PDScheduler {
  public:
+  using ContinuousScheduler::prepare_batch;
+  using ContinuousScheduler::schedule_request;
+
   using PDScheduler::drain_request_releases;
   using PDScheduler::enqueue_request_block_release;
-  using PDScheduler::prepare_batch;
 
-  template <typename TargetEngine>
   TestPDScheduler(
-      TargetEngine* engine,
+      FakeEngine* engine,
       const Options& options,
       std::shared_ptr<KVTransferCoordinator> transfer_coordinator = nullptr)
-      : PDScheduler(engine,
+      : PDScheduler(engine->kv_cache_manager(),
+                    &engine->model_args(),
+                    engine->tokenizer(),
+                    make_scheduler_callbacks(engine),
                     options,
-                    SkipRuntimeStart{},
                     /*distributed_worker_manager=*/nullptr,
                     /*model_residency_coordinator=*/nullptr,
                     std::move(transfer_coordinator)) {}
@@ -374,10 +357,10 @@ class TestPDScheduler final : public PDScheduler {
   }
 
   void start_idle_runtime() {
-    server_name_ = "PDShutdownTest";
+    server_name_ = "DisaggPDShutdownTest";
     auto server = ServerRegistry::get_instance().register_server(server_name_);
-    auto service = std::make_shared<PDService>();
-    CHECK(server->start(service, "127.0.0.1:0", "PDShutdownTest"));
+    auto service = std::make_shared<PDService>(this);
+    ASSERT_TRUE(server->start(service, /*addr=*/"127.0.0.1:0", server_name_));
     rpc_server_thread_ = std::make_unique<std::thread>(
         [server, service = std::move(service)] { server->run(); });
     dispatch_thread_ = std::make_unique<std::thread>(
@@ -396,6 +379,11 @@ class TestPDScheduler final : public PDScheduler {
   bool has_channel(const std::string& req_id) {
     std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
     return req_to_channel_map_.contains(req_id);
+  }
+
+  std::shared_ptr<Request> reserved_request(const std::string& id) {
+    std::lock_guard<std::mutex> lock(received_request_map_mutex_);
+    return received_request_map_.at(id);
   }
 
   bool reservations_empty() {
@@ -448,7 +436,7 @@ class TestPDScheduler final : public PDScheduler {
 
   void cache_prefill_blocks_for_test(Request* request) {
     for (auto& sequence : request->sequences()) {
-      kv_cache_manager_->publish_prefix(sequence.get());
+      kv_cache_manager()->publish_prefix(sequence.get());
     }
   }
 
@@ -755,6 +743,7 @@ TEST(PDSchedulerShutdownTest, StopsListenerAndWakesIdleDispatchBeforeJoining) {
   ASSERT_EXIT(
       {
         alarm(5);
+        XServiceClientTestPeer::set_initialized(/*initialized=*/true);
         FakeEngine engine(/*num_blocks=*/32, /*block_size=*/16);
         PDScheduler::Options options = make_options();
         {
@@ -1286,18 +1275,6 @@ TEST(PDSchedulerTest, PreservesPrefillCachedTokensOnDecodeRequest) {
   EXPECT_EQ(queued->num_prefix_cache_tokens(), 2u);
 }
 
-TEST(PDSchedulerTest, PromptAtDecodeBlockCapacityIsNotPermanent) {
-  EXPECT_FALSE(exceeds_decode_capacity(
-      /*num_prompt_tokens=*/6, /*block_size=*/2, /*num_blocks=*/4));
-}
-
-TEST(PDSchedulerTest, InvalidMetadataAndOversizedResponsesAreTerminal) {
-  EXPECT_FALSE(is_permanent_rejection(/*status_code=*/404));
-  EXPECT_TRUE(is_permanent_rejection(kDecodeAddNewInvalidRequestStatusCode));
-  EXPECT_TRUE(is_permanent_rejection(kDecodeAddNewPromptTooLongStatusCode));
-  EXPECT_FALSE(is_permanent_rejection(/*status_code=*/500));
-}
-
 TEST(PDSchedulerTest, MissingServiceMetadataFailsBeforeDecodeLookup) {
   for (const auto& [service_id, address] :
        std::vector<std::pair<std::string, std::string>>{
@@ -1339,11 +1316,14 @@ TEST(PDSchedulerTest, DecodeBuildsMinimumLengthLogitsBias) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   PDScheduler::Options options = make_decode_options();
   TestPDScheduler scheduler(&engine, options);
-  TestPDServiceImpl service(&scheduler, &engine);
+  PDServiceImpl service(&scheduler);
   for (const uint32_t minimum : {0u, 3u}) {
     SCOPED_TRACE(minimum);
-    proto::DisaggRequest wire_request;
-    wire_request.set_req_id("decode-min-tokens");
+    proto::DisaggRequests wire_requests;
+    const std::string request_id =
+        "decode-min-tokens-" + std::to_string(minimum);
+    auto& wire_request = *wire_requests.add_reqs();
+    wire_request.set_req_id(request_id);
     wire_request.add_prompt_tokens(1);
     wire_request.set_seq_capacity(16);
     wire_request.set_n(1);
@@ -1355,8 +1335,11 @@ TEST(PDSchedulerTest, DecodeBuildsMinimumLengthLogitsBias) {
     wire_request.set_repetition_penalty(1.0f);
     wire_request.set_eos_token_id(7);
     wire_request.add_all_stop_token_ids(7);
-    auto request = service.generate_request(wire_request);
-    ASSERT_NE(request, nullptr);
+    proto::DisaggResponses responses;
+    service.decode_recv_new_requests(&wire_requests, &responses);
+    ASSERT_EQ(responses.resps_size(), 1);
+    ASSERT_EQ(responses.resps(/*index=*/0).status_code(), 200);
+    const auto request = scheduler.reserved_request(request_id);
     EXPECT_EQ(request->state().sampling_param.min_tokens, minimum);
 
     SamplingInputBuilder builder;
@@ -1422,8 +1405,9 @@ TEST(PDSchedulerTest, DecodeOutputCallbacksOutliveRpcService) {
   TestPDScheduler scheduler(&engine, make_decode_options());
   std::shared_ptr<Request> request;
   {
-    auto rpc_service = std::make_unique<TestPDServiceImpl>(&scheduler, &engine);
-    proto::DisaggRequest wire_request;
+    PDServiceImpl rpc_service(&scheduler);
+    proto::DisaggRequests wire_requests;
+    auto& wire_request = *wire_requests.add_reqs();
     wire_request.set_req_id("retained");
     wire_request.set_service_req_id("service-retained");
     wire_request.set_source_xservice_addr(address);
@@ -1436,8 +1420,11 @@ TEST(PDSchedulerTest, DecodeOutputCallbacksOutliveRpcService) {
     wire_request.set_vocab_size(8);
     wire_request.set_repetition_penalty(1.0f);
     wire_request.set_eos_token_id(7);
-    request = rpc_service->generate_request(wire_request);
-    ASSERT_NE(request, nullptr);
+    proto::DisaggResponses responses;
+    rpc_service.decode_recv_new_requests(&wire_requests, &responses);
+    ASSERT_EQ(responses.resps_size(), 1);
+    ASSERT_EQ(responses.resps(/*index=*/0).status_code(), 200);
+    request = scheduler.reserved_request(wire_request.req_id());
   }
 
   // Queued outputs retain the request after its RPC service is destroyed.
@@ -1470,7 +1457,7 @@ TEST(PDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
   TestPDScheduler scheduler(&engine, make_options());
   PDServiceOptions options;
   options.enable_response_formatting = true;
-  PDServiceImpl service(&scheduler, &engine, options);
+  PDServiceImpl service(&scheduler, options);
   for (int32_t invalid_field = 0; invalid_field < 4; ++invalid_field) {
     proto::DisaggRequests requests;
     auto* request = requests.add_reqs();
@@ -1671,7 +1658,7 @@ TEST(PDSchedulerTest, TemporaryDecodeBlockPressureIsNotPermanent) {
   BlockManagerPool* block_manager = engine.kv_cache_manager();
   std::shared_ptr<Request> holder = make_request({1, 2, 3, 4, 5, 6});
   ASSERT_TRUE(block_manager->try_allocate(holder->sequences()[0].get()));
-  std::shared_ptr<Request> request = make_request({7, 8});
+  std::shared_ptr<Request> request = make_request(/*prompt_tokens=*/{3, 4, 5, 6, 7, 8});
   Sequence* sequence = request->sequences()[0].get();
 
   EXPECT_FALSE(scheduler.try_allocate(sequence));
@@ -2294,7 +2281,7 @@ TEST_P(ChunkReservationTest,
   folly::Promise<std::vector<std::string>> push;
   std::promise<void> started;
   auto entered = started.get_future();
-  engine.forward = [&](BatchGroup& batch) {
+  engine.forward_ = [&](BatchGroup& batch) {
     KVTransferCompletion completion(push.getSemiFuture(),
                                     {local->request_id()});
     started.set_value();
@@ -2411,21 +2398,6 @@ TEST(PDSchedulerTest, MtpExhaustionRollsBackKvReservation) {
 namespace xllm {
 namespace {
 
-class OutputTokenizer final : public Tokenizer {
- public:
-  std::unique_ptr<Tokenizer> clone() const override {
-    return std::make_unique<OutputTokenizer>();
-  }
-  std::string decode(const Slice<int32_t>& ids,
-                     bool /*skip_special_tokens*/) const override {
-    std::string text;
-    for (int32_t id : ids) {
-      text += static_cast<char>(id);
-    }
-    return text;
-  }
-};
-
 TEST(PDSchedulerTest, PrefillEmitsNoSuccessfulOutputInEitherProtocol) {
   for (const bool http : {false, true}) {
     for (const bool stream : {false, true}) {
@@ -2447,7 +2419,7 @@ TEST(PDSchedulerTest, PrefillEmitsNoSuccessfulOutputInEitherProtocol) {
             return std::vector<bool>(outputs.size(), true);
           };
       finish_prefill(request->sequences()[0].get());
-      OutputTokenizer tokenizer;
+      FakeTokenizer tokenizer;
       RequestOutputDispatcher dispatcher(&tokenizer,
                                          /*enable_service_routing=*/true,
                                          /*disable_log_stats=*/true,
@@ -2467,7 +2439,7 @@ TEST(PDSchedulerTest, PrefillEmitsNoSuccessfulOutputInEitherProtocol) {
 TEST(PDSchedulerTest,
      ServiceOutputBatchesRequestsAndMapsPartialAcknowledgements) {
   for (const bool stream : {false, true}) {
-    OutputTokenizer tokenizer;
+    FakeTokenizer tokenizer;
     std::vector<std::string> cancelled;
     RequestOutputDispatcher dispatcher(
         &tokenizer,
@@ -2532,7 +2504,7 @@ TEST(PDSchedulerTest, DecodeEmitsFirstTokenAsynchronouslyBeforeAnyDecodeStep) {
     SCOPED_TRACE("overlap=" + std::to_string(overlap) +
                  ", batched=" + std::to_string(batched));
     FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-    engine.set_tokenizer(std::make_unique<OutputTokenizer>());
+    engine.set_tokenizer(std::make_unique<FakeTokenizer>());
     auto options = make_decode_options();
     options.enable_schedule_overlap(overlap).enable_service_routing(batched);
     TestPDScheduler scheduler(&engine, options);
@@ -2650,7 +2622,7 @@ TEST(PDSchedulerTest, DecodeEmitsFirstTokenAsynchronouslyBeforeAnyDecodeStep) {
 TEST(PDSchedulerTest, DecodeTerminatesFirstTokenWithoutQueueingDecodeWork) {
   for (const bool stream : {false, true}) {
     FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-    engine.set_tokenizer(std::make_unique<OutputTokenizer>());
+    engine.set_tokenizer(std::make_unique<FakeTokenizer>());
     TestPDScheduler scheduler(&engine, make_decode_options());
     auto request = make_request({65, 66},
                                 "req",
@@ -2687,7 +2659,7 @@ TEST(PDSchedulerTest, DecodeTerminatesFirstTokenWithoutQueueingDecodeWork) {
 
 TEST(PDSchedulerTest, FullDecodeQueueFailsAfterFirstTokenAndReleasesKv) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  engine.set_tokenizer(std::make_unique<OutputTokenizer>());
+  engine.set_tokenizer(std::make_unique<FakeTokenizer>());
   auto options = make_decode_options();
   options.request_queue_size(1);
   TestPDScheduler scheduler(&engine, options);
@@ -2747,7 +2719,7 @@ TEST(RequestOutputDispatcherTest, StreamingUsageCountsPreparedPromptTokens) {
             outputs.insert(outputs.end(), batch.begin(), batch.end());
             return std::vector<bool>(batch.size(), true);
           };
-      OutputTokenizer tokenizer;
+      FakeTokenizer tokenizer;
       RequestOutputDispatcher dispatcher(&tokenizer,
                                          batch_response,
                                          /*disable_log_stats=*/true,

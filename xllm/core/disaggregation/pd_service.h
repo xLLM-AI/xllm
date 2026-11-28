@@ -26,9 +26,7 @@ namespace xllm {
 class PDService : public proto::DisaggPDService {
  public:
   explicit PDService(PDScheduler* scheduler,
-                     Engine* engine,
                      PDServiceOptions response_options = {});
-  PDService() = default;
   ~PDService() override = default;
 
   // for decode recv prefill request
