@@ -1,0 +1,211 @@
+{
+  "status": "passed",
+  "results": [
+    {
+      "mode": "eager",
+      "tokens": 17,
+      "q_heads": 32,
+      "kv_heads": 8,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "mode": "fake_meta",
+      "tokens": 17,
+      "q_heads": 32,
+      "kv_heads": 8
+    },
+    {
+      "mode": "eager",
+      "tokens": 257,
+      "q_heads": 32,
+      "kv_heads": 8,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "mode": "graph_replay_mutation",
+      "tokens": 257,
+      "q_heads": 32,
+      "kv_heads": 8,
+      "mutation": 0,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "external_input_addresses_unchanged": true
+    },
+    {
+      "mode": "graph_replay_mutation",
+      "tokens": 257,
+      "q_heads": 32,
+      "kv_heads": 8,
+      "mutation": 1,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "external_input_addresses_unchanged": true
+    },
+    {
+      "mode": "fake_meta",
+      "tokens": 257,
+      "q_heads": 32,
+      "kv_heads": 8
+    },
+    {
+      "mode": "eager",
+      "tokens": 2048,
+      "q_heads": 32,
+      "kv_heads": 8,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "mode": "fake_meta",
+      "tokens": 2048,
+      "q_heads": 32,
+      "kv_heads": 8
+    },
+    {
+      "mode": "eager",
+      "tokens": 65,
+      "q_heads": 16,
+      "kv_heads": 4,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "mode": "graph_replay_mutation",
+      "tokens": 65,
+      "q_heads": 16,
+      "kv_heads": 4,
+      "mutation": 0,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "external_input_addresses_unchanged": true
+    },
+    {
+      "mode": "graph_replay_mutation",
+      "tokens": 65,
+      "q_heads": 16,
+      "kv_heads": 4,
+      "mutation": 1,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "external_input_addresses_unchanged": true
+    },
+    {
+      "mode": "fake_meta",
+      "tokens": 65,
+      "q_heads": 16,
+      "kv_heads": 4
+    },
+    {
+      "mode": "eager",
+      "tokens": 65,
+      "q_heads": 8,
+      "kv_heads": 2,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "mode": "graph_replay_mutation",
+      "tokens": 65,
+      "q_heads": 8,
+      "kv_heads": 2,
+      "mutation": 0,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "external_input_addresses_unchanged": true
+    },
+    {
+      "mode": "graph_replay_mutation",
+      "tokens": 65,
+      "q_heads": 8,
+      "kv_heads": 2,
+      "mutation": 1,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "external_input_addresses_unchanged": true
+    },
+    {
+      "mode": "fake_meta",
+      "tokens": 65,
+      "q_heads": 8,
+      "kv_heads": 2
+    },
+    {
+      "mode": "eager",
+      "tokens": 65,
+      "q_heads": 4,
+      "kv_heads": 1,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "mode": "graph_replay_mutation",
+      "tokens": 65,
+      "q_heads": 4,
+      "kv_heads": 1,
+      "mutation": 0,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "external_input_addresses_unchanged": true
+    },
+    {
+      "mode": "graph_replay_mutation",
+      "tokens": 65,
+      "q_heads": 4,
+      "kv_heads": 1,
+      "mutation": 1,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "external_input_addresses_unchanged": true
+    },
+    {
+      "mode": "fake_meta",
+      "tokens": 65,
+      "q_heads": 4,
+      "kv_heads": 1
+    }
+  ]
+}

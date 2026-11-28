@@ -1,0 +1,215 @@
+{
+  "a_image": {
+    "1": {
+      "measured_waves": 3,
+      "requests": 3,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 176.29690002650023,
+      "tpot_median_ms": 15.961120923335924,
+      "wave_throughput_median_output_tokens_per_second": 62.309415600596004,
+      "output_hash_counts": {
+        "e232214a75ef15244b0c0bfac0746ea2eefc5fc09086067bc76f18b6fe189ce0": 3
+      }
+    },
+    "32": {
+      "measured_waves": 3,
+      "requests": 96,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 2487.8284949809313,
+      "tpot_median_ms": 32.07534849045422,
+      "wave_throughput_median_output_tokens_per_second": 962.1029377752391,
+      "output_hash_counts": {
+        "3648fadb0166317a47218a86b9d370f91674795fe2cb92284997045baddc2acd": 2,
+        "6da0d23ea1091132312ca0cf2f898214b146e645e62ff7b41df8adf9c259124f": 21,
+        "d85fcea37abaab7f9555d16d578418bc3c436ff9e1777ff4db77eaed2b40e113": 21,
+        "11725c017a32b8f33b619a4a87f3f84fdb67ab7787f987afa9a2f957873eb05f": 42,
+        "8096aef8814126251fce55426b0e078e79cc22b59598ca2864f7188c471503ba": 6,
+        "c2c27183f05ab289dfc64084fea976a91b6a04f907371b1907781c58a11fd4ee": 2,
+        "75eb4a067544a55ec3b6a2494a2fa185cc79206a77cba0bc45c8b616b8aea004": 2
+      }
+    }
+  },
+  "a_return_image": {
+    "1": {
+      "measured_waves": 3,
+      "requests": 3,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 177.8776003047824,
+      "tpot_median_ms": 16.021390439615814,
+      "wave_throughput_median_output_tokens_per_second": 62.11225075938988,
+      "output_hash_counts": {
+        "e232214a75ef15244b0c0bfac0746ea2eefc5fc09086067bc76f18b6fe189ce0": 3
+      }
+    },
+    "32": {
+      "measured_waves": 3,
+      "requests": 96,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 2427.1365399472415,
+      "tpot_median_ms": 31.805811768477763,
+      "wave_throughput_median_output_tokens_per_second": 970.3117265850358,
+      "output_hash_counts": {
+        "11725c017a32b8f33b619a4a87f3f84fdb67ab7787f987afa9a2f957873eb05f": 42,
+        "6da0d23ea1091132312ca0cf2f898214b146e645e62ff7b41df8adf9c259124f": 21,
+        "8096aef8814126251fce55426b0e078e79cc22b59598ca2864f7188c471503ba": 9,
+        "d85fcea37abaab7f9555d16d578418bc3c436ff9e1777ff4db77eaed2b40e113": 21,
+        "3648fadb0166317a47218a86b9d370f91674795fe2cb92284997045baddc2acd": 3
+      }
+    }
+  },
+  "a_return_text": {
+    "1": {
+      "measured_waves": 3,
+      "requests": 3,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 149.18379997834563,
+      "tpot_median_ms": 16.228390122346603,
+      "wave_throughput_median_output_tokens_per_second": 61.37549799141435,
+      "output_hash_counts": {
+        "defb788d7f2382b1f8c14fde49d408fa81dd43281741c89acb1d95bd2574e384": 3
+      }
+    },
+    "32": {
+      "measured_waves": 3,
+      "requests": 96,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 2247.996050165966,
+      "tpot_median_ms": 31.74823432097063,
+      "wave_throughput_median_output_tokens_per_second": 973.6843848963056,
+      "output_hash_counts": {
+        "defb788d7f2382b1f8c14fde49d408fa81dd43281741c89acb1d95bd2574e384": 94,
+        "ce5f5e56d971cbdbe711d429a597810ae2cadef8490839d80b5605b7745050a3": 2
+      }
+    }
+  },
+  "a_text": {
+    "1": {
+      "measured_waves": 3,
+      "requests": 3,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 147.80693035572767,
+      "tpot_median_ms": 15.9806441815964,
+      "wave_throughput_median_output_tokens_per_second": 62.32520909520408,
+      "output_hash_counts": {
+        "defb788d7f2382b1f8c14fde49d408fa81dd43281741c89acb1d95bd2574e384": 3
+      }
+    },
+    "32": {
+      "measured_waves": 3,
+      "requests": 96,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 2183.7228047661483,
+      "tpot_median_ms": 32.35042408885799,
+      "wave_throughput_median_output_tokens_per_second": 957.9531215490731,
+      "output_hash_counts": {
+        "defb788d7f2382b1f8c14fde49d408fa81dd43281741c89acb1d95bd2574e384": 93,
+        "ce5f5e56d971cbdbe711d429a597810ae2cadef8490839d80b5605b7745050a3": 3
+      }
+    }
+  },
+  "b_image": {
+    "1": {
+      "measured_waves": 3,
+      "requests": 3,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 161.83454962447286,
+      "tpot_median_ms": 15.918211871098396,
+      "wave_throughput_median_output_tokens_per_second": 62.54194956162144,
+      "output_hash_counts": {
+        "e232214a75ef15244b0c0bfac0746ea2eefc5fc09086067bc76f18b6fe189ce0": 3
+      }
+    },
+    "32": {
+      "measured_waves": 3,
+      "requests": 96,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 2303.1229947227985,
+      "tpot_median_ms": 31.898160083114767,
+      "wave_throughput_median_output_tokens_per_second": 971.8375275603568,
+      "output_hash_counts": {
+        "d85fcea37abaab7f9555d16d578418bc3c436ff9e1777ff4db77eaed2b40e113": 21,
+        "6da0d23ea1091132312ca0cf2f898214b146e645e62ff7b41df8adf9c259124f": 21,
+        "11725c017a32b8f33b619a4a87f3f84fdb67ab7787f987afa9a2f957873eb05f": 42,
+        "8096aef8814126251fce55426b0e078e79cc22b59598ca2864f7188c471503ba": 6,
+        "3648fadb0166317a47218a86b9d370f91674795fe2cb92284997045baddc2acd": 2,
+        "75eb4a067544a55ec3b6a2494a2fa185cc79206a77cba0bc45c8b616b8aea004": 2,
+        "c2c27183f05ab289dfc64084fea976a91b6a04f907371b1907781c58a11fd4ee": 2
+      }
+    }
+  },
+  "b_text": {
+    "1": {
+      "measured_waves": 3,
+      "requests": 3,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 137.2963497415185,
+      "tpot_median_ms": 15.947096135774851,
+      "wave_throughput_median_output_tokens_per_second": 62.47510606932785,
+      "output_hash_counts": {
+        "defb788d7f2382b1f8c14fde49d408fa81dd43281741c89acb1d95bd2574e384": 3
+      }
+    },
+    "32": {
+      "measured_waves": 3,
+      "requests": 96,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 2067.405490204692,
+      "tpot_median_ms": 31.71036257927225,
+      "wave_throughput_median_output_tokens_per_second": 980.2596556189341,
+      "output_hash_counts": {
+        "defb788d7f2382b1f8c14fde49d408fa81dd43281741c89acb1d95bd2574e384": 94,
+        "ce5f5e56d971cbdbe711d429a597810ae2cadef8490839d80b5605b7745050a3": 2
+      }
+    }
+  },
+  "dense_a_text": {
+    "1": {
+      "measured_waves": 3,
+      "requests": 3,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 138.41261016204953,
+      "tpot_median_ms": 15.990612183528729,
+      "wave_throughput_median_output_tokens_per_second": 62.30234455694163,
+      "output_hash_counts": {
+        "3a22bb34b90b4d41aebc2d9c689fbd5f886bb702e26ca82d29d0c5a08d14635e": 3
+      }
+    },
+    "32": {
+      "measured_waves": 3,
+      "requests": 96,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 2008.8979951106012,
+      "tpot_median_ms": 31.520683063024904,
+      "wave_throughput_median_output_tokens_per_second": 987.1283620467123,
+      "output_hash_counts": {
+        "5620059b4ae6dfece479af7b51de5a255b9758bd22e82518088fdd352c585577": 93,
+        "be05780235bd863c99c1e5cf479fb2013a3fb8b3d9831048e71b1f21655eb3a1": 3
+      }
+    }
+  },
+  "dense_b_text": {
+    "1": {
+      "measured_waves": 3,
+      "requests": 3,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 138.786599971354,
+      "tpot_median_ms": 16.186815862142144,
+      "wave_throughput_median_output_tokens_per_second": 61.55036820601806,
+      "output_hash_counts": {
+        "3a22bb34b90b4d41aebc2d9c689fbd5f886bb702e26ca82d29d0c5a08d14635e": 3
+      }
+    },
+    "32": {
+      "measured_waves": 3,
+      "requests": 96,
+      "all_token_counts_exact": true,
+      "ttft_median_ms": 2021.5255748480558,
+      "tpot_median_ms": 31.504924291709337,
+      "wave_throughput_median_output_tokens_per_second": 985.3293092844467,
+      "output_hash_counts": {
+        "5620059b4ae6dfece479af7b51de5a255b9758bd22e82518088fdd352c585577": 93,
+        "be05780235bd863c99c1e5cf479fb2013a3fb8b3d9831048e71b1f21655eb3a1": 3
+      }
+    }
+  }
+}

@@ -1,0 +1,143 @@
+{
+  "status": "passed",
+  "results": [
+    {
+      "case": "supported_tp1",
+      "fused_selected": true,
+      "dtype": "torch.bfloat16",
+      "head_dim": 128,
+      "local_heads": [
+        32,
+        8
+      ],
+      "sections": [
+        24,
+        20,
+        20
+      ],
+      "position_min": 0,
+      "position_max": 262143,
+      "table_capacity": 262144,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "supported_tp2_local",
+      "fused_selected": true,
+      "dtype": "torch.bfloat16",
+      "head_dim": 128,
+      "local_heads": [
+        16,
+        4
+      ],
+      "sections": [
+        24,
+        20,
+        20
+      ],
+      "position_min": 0,
+      "position_max": 4095,
+      "table_capacity": 4096,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "supported_tp4_local",
+      "fused_selected": true,
+      "dtype": "torch.bfloat16",
+      "head_dim": 128,
+      "local_heads": [
+        8,
+        2
+      ],
+      "sections": [
+        24,
+        20,
+        20
+      ],
+      "position_min": 0,
+      "position_max": 4095,
+      "table_capacity": 4096,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "supported_tp8_local",
+      "fused_selected": true,
+      "dtype": "torch.bfloat16",
+      "head_dim": 128,
+      "local_heads": [
+        4,
+        1
+      ],
+      "sections": [
+        24,
+        20,
+        20
+      ],
+      "position_min": 0,
+      "position_max": 4095,
+      "table_capacity": 4096,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "fallback_sections",
+      "fused_selected": false,
+      "dtype": "torch.bfloat16",
+      "head_dim": 128,
+      "local_heads": [
+        32,
+        8
+      ],
+      "sections": [
+        16,
+        24,
+        24
+      ],
+      "position_min": 0,
+      "position_max": 4095,
+      "table_capacity": 4096,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "case": "fallback_fp16",
+      "fused_selected": false,
+      "dtype": "torch.float16",
+      "head_dim": 128,
+      "local_heads": [
+        32,
+        8
+      ],
+      "sections": [
+        24,
+        20,
+        20
+      ],
+      "position_min": 0,
+      "position_max": 4095,
+      "table_capacity": 4096,
+      "max_abs": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ]
+}

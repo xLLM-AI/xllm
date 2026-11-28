@@ -1,0 +1,60 @@
+{
+  "head": "8da1fc5a3937c4314206354bdc98ecd930921735",
+  "branch": "opt01/ascend-qwen3vl-fusion",
+  "original_main_preserved": "22e17180dde26f88e6569d491d8f36210d2ebac9",
+  "files": [
+    {
+      "path": "xllm/python/models/qwen3.py",
+      "sha256_lf": "01de784c753118f573d60b4317a65691406fc8873f99b077d3ca4420f2bbb782"
+    },
+    {
+      "path": "xllm/python/models/qwen3_vl.py",
+      "sha256_lf": "058f53ae576be352710a70102bbdc20e3a62fb8c2f79e767eba2db5c23736f9a"
+    },
+    {
+      "path": "xllm/python/kernels_npu/triton/split_qkv_rmsnorm_mrope_opt01.py",
+      "sha256_lf": "bf98805cc1702ce306c08b1582924d1db5641fbbc3a24bc54aa2e9aa8985eae6"
+    },
+    {
+      "path": "tests/python/test_opt01_mrope_kernel.py",
+      "sha256_lf": "dddc616a39197a5e0e15e29d68219f0e9eb502842bc06acdbaa3183a7fa73052"
+    },
+    {
+      "path": "tests/python/test_opt01_mrope_dispatch.py",
+      "sha256_lf": "7675ff2af1933aee78c8fc4df6dc28635e6597dc8d8c544d9544c2e73f91ca5f"
+    },
+    {
+      "path": "tests/python/test_opt01_mrope_boundaries.py",
+      "sha256_lf": "5fe83160f9dc0a5532465e3b00e4a45c3e5d481ca14bde85c56184f86439761e"
+    },
+    {
+      "path": "benchmarks/opt01/bench_2k2k.py",
+      "sha256_lf": "c4e68454fe20cba5c3ed2f26455482bd22fa76da35f8622808b0b7e03d48216b"
+    },
+    {
+      "path": "benchmarks/opt01/make_fixtures.py",
+      "sha256_lf": "ed0a2d8259a501f9a9d80112c435f9538808e156b8dfaaf2479bbd192eaae764"
+    },
+    {
+      "path": "benchmarks/opt01/opt01_validation_hooks.py",
+      "sha256_lf": "e7f4331dc1ebcc7d853c00a15e901c6c11b8681880b882ddb7dee691af5772af"
+    },
+    {
+      "path": "benchmarks/opt01/README.md",
+      "sha256_lf": "9424030f65740af141a6d09fa50181f1dc3135d84cee24df99ce92fbcf4528c5"
+    },
+    {
+      "path": "benchmarks/opt01/RESULTS.md",
+      "sha256_lf": "f024b681062ee40a82f2413aff55789d1e936fc6be4b75fe29b2a22427043b26"
+    },
+    {
+      "path": "benchmarks/opt01/run_accuracy.py",
+      "sha256_lf": "d6c2565885a3ca1fb6e408af9414c9a44ac0ad7fdfb942dd78702e36dd054416"
+    },
+    {
+      "path": "benchmarks/opt01/vlm_workload.py",
+      "sha256_lf": "7f1427b3a1bbc5c187623ad657fbd4f33242a155ec2caa0abd4233c014951ab6"
+    }
+  ],
+  "core_matches_measured": true
+}

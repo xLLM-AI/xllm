@@ -1,0 +1,493 @@
+{
+  "attention": {
+    "attention_tp1": {
+      "layer_calls": 684,
+      "layers": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35
+      ],
+      "devices": [
+        "npu:0"
+      ],
+      "max_abs_q_k_v_attention": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "attention_tp2": {
+      "layer_calls": 1368,
+      "layers": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35
+      ],
+      "devices": [
+        "npu:0",
+        "npu:1"
+      ],
+      "max_abs_q_k_v_attention": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "measurements": {
+    "measure_a": {
+      "1": {
+        "requests": 3,
+        "measured_waves": 3,
+        "ttft_median_ms": 181.3562698662281,
+        "output_throughput_median": 62.42124019855267,
+        "prefill_device_stream_sum_per_wave_ms": [
+          140.5177764892578,
+          140.86114501953125,
+          139.9443359375
+        ],
+        "prefill_device_stream_sum_median_ms": 140.5177764892578,
+        "prefill_by_model_tokens": {
+          "2048": {
+            "calls": 3,
+            "device_stream_median_ms": 140.5177764892578,
+            "device_stream_min_max_ms": [
+              139.9443359375,
+              140.86114501953125
+            ],
+            "host_synchronized_median_ms": 140.66189993172884
+          }
+        },
+        "memory": {
+          "torch_peak_allocated_bytes": {
+            "median_mib": 55416.53662109375,
+            "min_max_mib": [
+              55416.53662109375,
+              55416.53662109375
+            ]
+          },
+          "torch_peak_reserved_bytes": {
+            "median_mib": 56444.0,
+            "min_max_mib": [
+              56444.0,
+              56444.0
+            ]
+          },
+          "sampled_device_used_peak_bytes": {
+            "median_mib": 57075.46484375,
+            "min_max_mib": [
+              57075.125,
+              57075.66015625
+            ]
+          }
+        },
+        "incremental_peak_allocated_mib": [
+          309.4423828125,
+          309.4423828125,
+          309.4423828125
+        ]
+      },
+      "32": {
+        "requests": 96,
+        "measured_waves": 3,
+        "ttft_median_ms": 2586.2603697460145,
+        "output_throughput_median": 961.3178687431916,
+        "prefill_device_stream_sum_per_wave_ms": [
+          4062.942840576172,
+          4062.423370361328,
+          4066.4451293945312
+        ],
+        "prefill_device_stream_sum_median_ms": 4062.942840576172,
+        "prefill_by_model_tokens": {
+          "2048": {
+            "calls": 1,
+            "device_stream_median_ms": 142.25567626953125,
+            "device_stream_min_max_ms": [
+              142.25567626953125,
+              142.25567626953125
+            ],
+            "host_synchronized_median_ms": 142.49549992382526
+          },
+          "4096": {
+            "calls": 4,
+            "device_stream_median_ms": 260.8418884277344,
+            "device_stream_min_max_ms": [
+              259.2748718261719,
+              261.9814147949219
+            ],
+            "host_synchronized_median_ms": 260.9990101773292
+          },
+          "6144": {
+            "calls": 1,
+            "device_stream_median_ms": 384.49847412109375,
+            "device_stream_min_max_ms": [
+              384.49847412109375,
+              384.49847412109375
+            ],
+            "host_synchronized_median_ms": 384.7775999456644
+          },
+          "8192": {
+            "calls": 21,
+            "device_stream_median_ms": 505.76739501953125,
+            "device_stream_min_max_ms": [
+              505.26690673828125,
+              506.3736877441406
+            ],
+            "host_synchronized_median_ms": 506.10281992703676
+          }
+        },
+        "memory": {
+          "torch_peak_allocated_bytes": {
+            "median_mib": 56283.33349609375,
+            "min_max_mib": [
+              56283.33349609375,
+              56283.33349609375
+            ]
+          },
+          "torch_peak_reserved_bytes": {
+            "median_mib": 57412.0,
+            "min_max_mib": [
+              57412.0,
+              57412.0
+            ]
+          },
+          "sampled_device_used_peak_bytes": {
+            "median_mib": 58043.2734375,
+            "min_max_mib": [
+              58043.16796875,
+              58043.390625
+            ]
+          }
+        },
+        "incremental_peak_allocated_mib": [
+          1176.2392578125,
+          1176.2392578125,
+          1176.2392578125
+        ]
+      }
+    },
+    "measure_b": {
+      "1": {
+        "requests": 3,
+        "measured_waves": 3,
+        "ttft_median_ms": 179.1996299289167,
+        "output_throughput_median": 61.43686886437445,
+        "prefill_device_stream_sum_per_wave_ms": [
+          129.50369262695312,
+          128.35418701171875,
+          133.79849243164062
+        ],
+        "prefill_device_stream_sum_median_ms": 129.50369262695312,
+        "prefill_by_model_tokens": {
+          "2048": {
+            "calls": 3,
+            "device_stream_median_ms": 129.50369262695312,
+            "device_stream_min_max_ms": [
+              128.35418701171875,
+              133.79849243164062
+            ],
+            "host_synchronized_median_ms": 129.69329999759793
+          }
+        },
+        "memory": {
+          "torch_peak_allocated_bytes": {
+            "median_mib": 55417.03759765625,
+            "min_max_mib": [
+              55417.03759765625,
+              55417.03759765625
+            ]
+          },
+          "torch_peak_reserved_bytes": {
+            "median_mib": 56444.0,
+            "min_max_mib": [
+              56444.0,
+              56444.0
+            ]
+          },
+          "sampled_device_used_peak_bytes": {
+            "median_mib": 57074.88671875,
+            "min_max_mib": [
+              57074.73046875,
+              57075.1640625
+            ]
+          }
+        },
+        "incremental_peak_allocated_mib": [
+          309.94287109375,
+          309.94287109375,
+          309.94287109375
+        ]
+      },
+      "32": {
+        "requests": 96,
+        "measured_waves": 3,
+        "ttft_median_ms": 2409.0075448621064,
+        "output_throughput_median": 972.1637888496975,
+        "prefill_device_stream_sum_per_wave_ms": [
+          3733.530532836914,
+          3731.2422485351562,
+          3725.896224975586
+        ],
+        "prefill_device_stream_sum_median_ms": 3731.2422485351562,
+        "prefill_by_model_tokens": {
+          "2048": {
+            "calls": 1,
+            "device_stream_median_ms": 128.41346740722656,
+            "device_stream_min_max_ms": [
+              128.41346740722656,
+              128.41346740722656
+            ],
+            "host_synchronized_median_ms": 128.57834016904235
+          },
+          "4096": {
+            "calls": 4,
+            "device_stream_median_ms": 238.79371643066406,
+            "device_stream_min_max_ms": [
+              237.97561645507812,
+              242.8177947998047
+            ],
+            "host_synchronized_median_ms": 238.98962000384927
+          },
+          "6144": {
+            "calls": 1,
+            "device_stream_median_ms": 353.6803283691406,
+            "device_stream_min_max_ms": [
+              353.6803283691406,
+              353.6803283691406
+            ],
+            "host_synchronized_median_ms": 354.09012995660305
+          },
+          "8192": {
+            "calls": 21,
+            "device_stream_median_ms": 464.3482971191406,
+            "device_stream_min_max_ms": [
+              463.3301086425781,
+              465.14434814453125
+            ],
+            "host_synchronized_median_ms": 464.67701997607946
+          }
+        },
+        "memory": {
+          "torch_peak_allocated_bytes": {
+            "median_mib": 56285.43798828125,
+            "min_max_mib": [
+              56285.43798828125,
+              56285.43798828125
+            ]
+          },
+          "torch_peak_reserved_bytes": {
+            "median_mib": 57412.0,
+            "min_max_mib": [
+              57412.0,
+              57412.0
+            ]
+          },
+          "sampled_device_used_peak_bytes": {
+            "median_mib": 58043.17578125,
+            "min_max_mib": [
+              58042.78125,
+              58043.28125
+            ]
+          }
+        },
+        "incremental_peak_allocated_mib": [
+          1178.34326171875,
+          1178.34326171875,
+          1178.34326171875
+        ]
+      }
+    },
+    "measure_a_return": {
+      "1": {
+        "requests": 3,
+        "measured_waves": 3,
+        "ttft_median_ms": 180.03458995372057,
+        "output_throughput_median": 61.40076727315454,
+        "prefill_device_stream_sum_per_wave_ms": [
+          139.86032104492188,
+          141.0391845703125,
+          139.97572326660156
+        ],
+        "prefill_device_stream_sum_median_ms": 139.97572326660156,
+        "prefill_by_model_tokens": {
+          "2048": {
+            "calls": 3,
+            "device_stream_median_ms": 139.97572326660156,
+            "device_stream_min_max_ms": [
+              139.86032104492188,
+              141.0391845703125
+            ],
+            "host_synchronized_median_ms": 140.11416025459766
+          }
+        },
+        "memory": {
+          "torch_peak_allocated_bytes": {
+            "median_mib": 55416.53662109375,
+            "min_max_mib": [
+              55416.53662109375,
+              55416.53662109375
+            ]
+          },
+          "torch_peak_reserved_bytes": {
+            "median_mib": 56444.0,
+            "min_max_mib": [
+              56444.0,
+              56444.0
+            ]
+          },
+          "sampled_device_used_peak_bytes": {
+            "median_mib": 57075.859375,
+            "min_max_mib": [
+              57075.765625,
+              57075.91796875
+            ]
+          }
+        },
+        "incremental_peak_allocated_mib": [
+          309.4423828125,
+          309.4423828125,
+          309.4423828125
+        ]
+      },
+      "32": {
+        "requests": 96,
+        "measured_waves": 3,
+        "ttft_median_ms": 2470.2099051792175,
+        "output_throughput_median": 967.5228471926725,
+        "prefill_device_stream_sum_per_wave_ms": [
+          4052.7967681884766,
+          4057.5028686523438,
+          4057.5152893066406
+        ],
+        "prefill_device_stream_sum_median_ms": 4057.5028686523438,
+        "prefill_by_model_tokens": {
+          "2048": {
+            "calls": 3,
+            "device_stream_median_ms": 140.17184448242188,
+            "device_stream_min_max_ms": [
+              139.98216247558594,
+              140.36099243164062
+            ],
+            "host_synchronized_median_ms": 140.33274026587605
+          },
+          "6144": {
+            "calls": 3,
+            "device_stream_median_ms": 383.7853088378906,
+            "device_stream_min_max_ms": [
+              383.2633361816406,
+              383.8310546875
+            ],
+            "host_synchronized_median_ms": 383.95740976557136
+          },
+          "8192": {
+            "calls": 21,
+            "device_stream_median_ms": 504.4600830078125,
+            "device_stream_min_max_ms": [
+              503.7584533691406,
+              505.60009765625
+            ],
+            "host_synchronized_median_ms": 504.7861896455288
+          }
+        },
+        "memory": {
+          "torch_peak_allocated_bytes": {
+            "median_mib": 56283.33349609375,
+            "min_max_mib": [
+              56283.33349609375,
+              56283.33349609375
+            ]
+          },
+          "torch_peak_reserved_bytes": {
+            "median_mib": 57412.0,
+            "min_max_mib": [
+              57412.0,
+              57412.0
+            ]
+          },
+          "sampled_device_used_peak_bytes": {
+            "median_mib": 58044.09765625,
+            "min_max_mib": [
+              58044.046875,
+              58044.13671875
+            ]
+          }
+        },
+        "incremental_peak_allocated_mib": [
+          1176.2392578125,
+          1176.2392578125,
+          1176.2392578125
+        ]
+      }
+    }
+  },
+  "all_three_instrumented_runs_completed": true,
+  "measurement_scope": "Decoder model forward only for prefill events; exact Torch allocator peaks over complete 2048/2048 waves including vision and decode. Physical HBM sampled every 50ms is a lower bound."
+}
