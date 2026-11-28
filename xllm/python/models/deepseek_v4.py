@@ -124,7 +124,7 @@ def _pick(d: dict, *keys: str, default: Any = None) -> Any:
     return default
 
 
-def _find_checkpoint_key(loader: W8A8WeightLoader, candidates: Sequence[str]) -> str | None:
+def find_checkpoint_key(loader: W8A8WeightLoader, candidates: Sequence[str]) -> str | None:
     """Return the first checkpoint key present in compatibility order."""
     return next((name for name in candidates if loader.has(name)), None)
 
@@ -134,7 +134,7 @@ def _require_checkpoint_key(
     candidates: Sequence[str],
     description: str,
 ) -> str:
-    key = _find_checkpoint_key(loader, candidates)
+    key = find_checkpoint_key(loader, candidates)
     if key is None:
         expected = ", ".join(candidates)
         raise KeyError(f"{description} not found; expected one of: {expected}")
@@ -1945,7 +1945,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
             loader.get_tensor(attention_prefix + "kv_norm.weight"),
         )
 
-        sink_key = _find_checkpoint_key(
+        sink_key = find_checkpoint_key(
             loader,
             (
                 attention_prefix + "attn_sink",
@@ -2085,7 +2085,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
         checkpoint_prefix = _find_checkpoint_prefix(loader, checkpoint_prefixes, _DSV4_COMPRESSOR_PROBES)
         if checkpoint_prefix is None:
             raise KeyError(missing_message)
-        wkv_key = _find_checkpoint_key(
+        wkv_key = find_checkpoint_key(
             loader,
             tuple(checkpoint_prefix + suffix for suffix in _DSV4_COMPRESSOR_WKV_ALIASES),
         )
@@ -2396,7 +2396,7 @@ class DeepseekV4ForCausalLM(PyModelBase):
             source_prefix + "shared_expert_gate.weight",
             source_prefix + "shared_experts_gate.weight",
         )
-        shared_gate_key = _find_checkpoint_key(loader, shared_gate_keys)
+        shared_gate_key = find_checkpoint_key(loader, shared_gate_keys)
         if shared_gate_key is not None:
             loader.copy_in(
                 pm + "mlp.shared_expert_gate.weight",

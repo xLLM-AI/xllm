@@ -10,6 +10,7 @@ cc_library(
     seq_lens.h
     causal_lm.h
     model.h
+    model_weight_loader.h
     moe_execution_input.h
     causal_vlm.h
     dit_model.h
@@ -19,6 +20,8 @@ cc_library(
     model_args.h
     model_params_view.h
     mtp_topk_state.h
+  SRCS
+    causal_lm.cpp
   DEPS
     :common
     :common_layers

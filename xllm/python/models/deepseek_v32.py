@@ -59,6 +59,7 @@ from xllm.python.model_executor.forward_context import (
     record_layer_event,
 )
 from xllm.python.model_loader import (
+    StateDictLike,
     W8A8WeightLoader,
     mla_head_split,
     moe_shard,
@@ -146,9 +147,7 @@ def _yarn_linear_ramp_mask(low: float, high: float, dim: int, dtype: torch.dtype
     return torch.clamp(linear, 0, 1)
 
 
-def _expand_interleave_rope_cos_sin(
-    half_cos: torch.Tensor, half_sin: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def expand_interleave_rope_cos_sin(half_cos: torch.Tensor, half_sin: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     cos = torch.cat([half_cos, half_cos], dim=-1).unsqueeze(1).unsqueeze(1)
     sin = torch.cat([half_sin, half_sin], dim=-1).unsqueeze(1).unsqueeze(1)
     return cos, sin
@@ -236,7 +235,7 @@ class DeepseekYarnRotaryEmbedding(RotaryEmbedding):
 
     def forward(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         half_cos, half_sin = gather_half_rope_cos_sin(self.cos_sin_cache, positions)
-        cos, sin = _expand_interleave_rope_cos_sin(half_cos, half_sin)
+        cos, sin = expand_interleave_rope_cos_sin(half_cos, half_sin)
         return half_cos, half_sin, cos, sin
 
     @staticmethod
@@ -2326,21 +2325,14 @@ class DeepseekV3ForCausalLM(PyModelBase):
             device=self.device,
         )
 
-    def load_weights(
-        self,
-        state_dicts: list,
-        tp_rank: int,
-        tp_size: int,
-        load_lm_head: bool = True,
-        load_embedding: bool = True,
-        loader: Optional[W8A8WeightLoader] = None,
-    ) -> None:
-        cfg = self.cfg
-        if loader is None:
-            loader = W8A8WeightLoader(self, state_dicts, cfg.tp_size, cfg.tp_rank)
+    def load_weights(self, state_dicts: list[StateDictLike], tp_rank: int, tp_size: int) -> None:
+        loader = W8A8WeightLoader(self, state_dicts, self.cfg.tp_size, self.cfg.tp_rank)
+        self.load_decoder_weights(loader)
+        loader.copy_shard("model.embed_tokens.weight", dim=1)
+        loader.copy_shard("lm_head.weight", dim=0)
 
-        if load_embedding:
-            loader.copy_shard("model.embed_tokens.weight", dim=1)
+    def load_decoder_weights(self, loader: W8A8WeightLoader) -> None:
+        cfg = self.cfg
 
         for i in range(cfg.n_layers):
             p = f"model.layers.{i}."
@@ -2379,5 +2371,3 @@ class DeepseekV3ForCausalLM(PyModelBase):
             self.model.layers[i].mlp.load_from_checkpoint(loader, p + "mlp.")
 
         loader.copy_replicated("model.norm.weight")
-        if load_lm_head:
-            loader.copy_shard("lm_head.weight", dim=0)

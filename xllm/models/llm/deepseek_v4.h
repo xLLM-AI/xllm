@@ -1503,22 +1503,6 @@ class DeepseekV4ForCausalLMImpl
         first_k_dense_replace_(
             context.get_model_args().first_k_dense_replace()) {}
 
-  bool requires_graph_forward_metadata() {
-    return this->model_->requires_graph_forward_metadata();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState>
-  create_graph_forward_metadata_state() {
-    return this->model_->create_graph_forward_metadata_state();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& input_params) {
-    this->model_->prepare_graph_forward_metadata(
-        state, positions, input_params);
-  }
-
   void prepare_expert_weight(int32_t layer_id,
                              const std::vector<int32_t>& expert_ids) override {
     this->model_->prepare_expert_weight(layer_id + first_k_dense_replace_,

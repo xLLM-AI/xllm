@@ -14,10 +14,6 @@
 
 """Shared base for Python model-executor causal LMs.
 
-A concrete model builds its own graph, lm_head, and config; the wiring that is
-identical across models -- the weight-loading entry point and logits
-computation -- lives here.
-
 Model forward is driven by the runners owned by Python ModelExecutor;
 PyCausalLM no longer calls model.forward() directly.
 """
@@ -67,11 +63,6 @@ class PyModelBase(nn.Module):
         if not isinstance(resolved, torch.dtype):
             raise ValueError(f"Unknown dtype: {dtype!r}")
         return resolved
-
-    def compute_logits(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
-        if selected_idxes is not None and selected_idxes.numel() > 0:
-            hidden = hidden.index_select(0, selected_idxes)
-        return self.lm_head(hidden)
 
     # -- weight loading -------------------------------------------------------
     def load_weights(

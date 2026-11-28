@@ -24,11 +24,12 @@ limitations under the License.
 
 namespace xllm {
 
-VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
+VlmExecutorImpl::VlmExecutorImpl(CausalVLM& model,
                                  const ModelArgs& args,
                                  const torch::Device& device,
                                  const runtime::Options& options)
-    : model_(dynamic_cast<CausalVLM*>(model)),
+    : model_(model),
+      language_model_(model.language_model()),
       args_(args),
       device_(device),
       options_(options) {
@@ -39,12 +40,8 @@ VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
 
   if (options_.enable_graph() || options_.enable_prefill_piecewise_graph()) {
     llm_executor_ = ExecutorImplFactory::get_instance().create_executor_impl(
-        model, args, device, options_, Platform::type_str());
+        &language_model_, args, device, options_, Platform::type_str());
   }
-}
-
-MMDict VlmExecutorImpl::encode(const ModelParamsView& params) {
-  return model_->encode(params);
 }
 
 void VlmExecutorImpl::clear_multimodal_cache() {
@@ -72,7 +69,7 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
     if (llm_executor_ && options_.enable_graph()) {
       return llm_executor_->run(tokens, decode_positions, kv_caches, params);
     }
-    return model_->forward(tokens, decode_positions, kv_caches, params);
+    return language_model_.forward(tokens, decode_positions, kv_caches, params);
   }
 
   if (encoder_cache_) {
@@ -84,7 +81,7 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
   mm_data.foreach (input_gather);
   CHECK(input_gather.finish(mm_data));
 
-  MMDict embedding = encode(params);
+  MMDict embedding = model_.encode(params);
   EncoderOutputScatterVisitor scatter(embedding);
   mm_data.foreach (scatter);
   CHECK(scatter.finish());
@@ -102,14 +99,14 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
   CHECK(gather.finish(mm_data));
 
   params.embedding.input_embedding =
-      model_->get_input_embeddings(tokens, params);
+      model_.get_input_embeddings(tokens, params);
 
   if (llm_executor_ && (options_.enable_graph() ||
                         params.meta.batch_forward_type.is_prefill())) {
     return llm_executor_->run(tokens, positions, kv_caches, params);
   }
 
-  return model_->forward(tokens, positions, kv_caches, params);
+  return language_model_.forward(tokens, positions, kv_caches, params);
 }
 
 void VlmExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,

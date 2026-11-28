@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from xllm_kernel.ops.kv_cache import reshape_paged_cache
 
-from xllm.python.layers import Attention, GatedMLP, RMSNorm, RotaryEmbedding, RowParallelLinear
+from xllm.python.layers import Attention, GatedMLP, HiddenParallelEmbedding, RMSNorm, RotaryEmbedding, RowParallelLinear
 from xllm.python.layers.rotary_embedding import apply_rotary_half, gather_half_rope_cos_sin
 from xllm.python.model_executor.forward_context import LayerSynchronizer, get_forward_context, record_layer_event
 from xllm.python.model_loader import (
@@ -176,7 +176,7 @@ class Glm5DSparkModel(nn.Module):
     def __init__(self, cfg: Glm5DSparkConfig, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         self.cfg, self.dtype, self.device = cfg, dtype, device
-        self.embed_tokens = None
+        self.embed_tokens: HiddenParallelEmbedding | None = None
         self.context_proj = DFlashContextProjection(cfg.hidden_size, cfg.tp_size, dtype, device)
         self.context_norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
         self.rotary = RotaryEmbedding(cfg.qk_rope_head_dim, cfg.max_position_embeddings, cfg.rope_theta, dtype, device)

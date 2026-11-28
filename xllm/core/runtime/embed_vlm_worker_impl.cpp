@@ -41,9 +41,10 @@ bool EmbedVLMWorkerImpl::init_model(ModelContext& context) {
   CHECK(model_ == nullptr) << "Model is already initialized.";
 
   context.set_encoder_embedding_mode(false);
-  model_ = create_vlm_model(context);
-  CHECK(model_ != nullptr) << "Failed to create model.";
-  model_executor_ = std::make_unique<Executor>(model_.get(), context, options_);
+  auto model = create_vlm_model(context);
+  CHECK(model != nullptr) << "Failed to create model.";
+  model_executor_ = std::make_unique<Executor>(model.get(), context, options_);
+  model_ = std::move(model);
 
   return true;
 }
@@ -95,8 +96,8 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
         token_start_idx += seq_len;
       }
     } else {
-      sample_output.embeddings =
-          model_->pooler(hidden_states, sampling_params.logits_indices());
+      sample_output.embeddings = static_cast<CausalVLM&>(*model_).pooler(
+          hidden_states, sampling_params.logits_indices());
     }
     output.sample_output = sample_output;
   }

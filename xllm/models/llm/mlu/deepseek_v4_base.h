@@ -24,11 +24,13 @@ limitations under the License.
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/model/causal_lm.h"
+#include "core/framework/state_dict/state_dict.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/deepseek_v4_rotary_embedding.h"
 #include "core/layers/common/dsa_metadata.h"
@@ -166,6 +168,16 @@ inline std::string normalize_model_parameter_name(std::string name,
     }
   }
   return remap_parameter_name(name);
+}
+
+inline StateDict normalize_model_state_dict(const StateDict& state_dict,
+                                            const std::string& prefix) {
+  std::unordered_map<std::string, torch::Tensor> weights;
+  weights.reserve(state_dict.size());
+  for (const auto& [name, weight] : state_dict) {
+    weights[normalize_model_parameter_name(name, prefix)] = weight;
+  }
+  return StateDict(std::move(weights));
 }
 
 }  // namespace detail

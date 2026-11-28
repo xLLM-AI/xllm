@@ -33,20 +33,6 @@ class VocabularyWeightSelector final {
 
   void mark_loaded(VocabularyWeightSource source) { source_ = source; }
 
-  bool loaded() const { return source_ != VocabularyWeightSource::NONE; }
-
-  const char* source_name() const {
-    switch (source_) {
-      case VocabularyWeightSource::TARGET_FALLBACK:
-        return "target vocabulary fallback";
-      case VocabularyWeightSource::DEDICATED:
-        return "dedicated DSpark vocabulary";
-      case VocabularyWeightSource::NONE:
-        return "not loaded";
-    }
-    return "unknown";
-  }
-
  private:
   VocabularyWeightSource source_ = VocabularyWeightSource::NONE;
 };

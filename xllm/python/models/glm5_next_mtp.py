@@ -224,16 +224,20 @@ class Glm5NextMtpForCausalLM(Glm5NextForCausalLM):
             tp_rank,
             name_aliases=_get_mtp_name_aliases(state_dicts, self._mtp_start_layer_idx),
         )
-        # embed_tokens: HiddenParallelEmbedding — shard the hidden dim.
-        L.copy_shard("model.embed_tokens.weight", dim=1)
+        if L.has("model.embed_tokens.weight"):
+            L.copy_shard("model.embed_tokens.weight", dim=1)
+        else:
+            self.model.add_module("embed_tokens", None)
         p = "model.layers.0."
         L.copy_replicated(p + "input_layernorm.weight")
         L.copy_replicated(p + "post_attention_layernorm.weight")
         self._load_dsa_attn(L, p + "self_attn.", 0)
         self._load_mlp(L, p + "mlp.", 0)
         L.copy_replicated("model.norm.weight")
-        # lm_head: ColumnParallelLinear — shard the vocab dim.
-        L.copy_shard("lm_head.weight", dim=0)
+        if L.has("lm_head.weight"):
+            L.copy_shard("lm_head.weight", dim=0)
+        else:
+            self.add_module("lm_head", None)
         # MTP-specific: replicated norms + column-parallel fusion projection.
         L.copy_replicated("model.enorm.weight")
         L.copy_replicated("model.hnorm.weight")

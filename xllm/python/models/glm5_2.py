@@ -60,7 +60,7 @@ from xllm.python.model_executor.forward_context import (
     record_layer_event,
     wait_for_kv_layer,
 )
-from xllm.python.model_loader import W8A8WeightLoader, mla_head_split, moe_shard
+from xllm.python.model_loader import StateDictLike, W8A8WeightLoader, mla_head_split, moe_shard
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.deepseek_v32 import (
@@ -142,12 +142,10 @@ class Glm52Config:
     rope_beta_slow: int = 1
     rope_mscale: float = 1.0
     rope_mscale_all_dim: float = 1.0
-    tie_word_embeddings: bool = False
     q_lora_rank: int = 2048
     kv_lora_rank: int = 512
     qk_nope_head_dim: int = 192
     qk_rope_head_dim: int = 64
-    qk_head_dim: int = 256
     v_head_dim: int = 256
     index_n_heads: int = 32
     index_head_dim: int = 128
@@ -160,7 +158,6 @@ class Glm52Config:
     n_group: int = 1
     topk_group: int = 1
     routed_scaling_factor: float = 2.5
-    topk_method: str = "noaux_tc"
     norm_topk_prob: bool = True
     moe_intermediate_size: int = 2048
     tp_size: int = 1
@@ -183,7 +180,6 @@ class Glm52Config:
     index_topk_pattern: list | None = None
     indexer_rope_interleave: bool = True
     enable_dsa_multi_stream: bool = False
-    num_nextn_predict_layers: int = 0
     index_share_for_mtp_iteration: bool = False
     enable_mlapo: bool = True
     enable_attn_dp_weight_sharding: bool = False
@@ -252,7 +248,6 @@ class Glm52Config:
             rope_beta_slow=int(rpick_nz("beta_slow", default=1)),
             rope_mscale=float(rpick_nz("mscale", default=1.0)),
             rope_mscale_all_dim=float(rpick_nz("mscale_all_dim", default=1.0)),
-            tie_word_embeddings=bool(pick("tie_word_embeddings", default=False)),
             q_lora_rank=int(pick("q_lora_rank", default=2048)),
             kv_lora_rank=int(pick("kv_lora_rank", default=512)),
             index_n_heads=int(pick("index_n_heads", default=32)),
@@ -260,7 +255,6 @@ class Glm52Config:
             index_topk=int(pick("index_topk", default=2048)),
             qk_nope_head_dim=int(pick("qk_nope_head_dim", default=192)),
             qk_rope_head_dim=int(pick("qk_rope_head_dim", default=64)),
-            qk_head_dim=int(pick("qk_head_dim", default=256)),
             v_head_dim=int(pick("v_head_dim", default=256)),
             first_k_dense_replace=int(pick("first_k_dense_replace", default=3)),
             moe_layer_freq=int(pick("moe_layer_freq", default=1)),
@@ -270,7 +264,6 @@ class Glm52Config:
             n_group=int(pick("n_group", default=1)),
             topk_group=int(pick("topk_group", default=1)),
             routed_scaling_factor=float(pick("routed_scaling_factor", default=2.5)),
-            topk_method=str(pick("topk_method", default="noaux_tc")),
             norm_topk_prob=bool(pick("norm_topk_prob", default=True)),
             moe_intermediate_size=int(pick("moe_intermediate_size", default=2048)),
             tp_size=tp_size,
@@ -293,7 +286,6 @@ class Glm52Config:
             index_topk_pattern=pick("index_topk_pattern", default=None),
             indexer_rope_interleave=bool(pick("indexer_rope_interleave", default=True)),
             enable_dsa_multi_stream=bool(pick("enable_dsa_multi_stream", default=False)),
-            num_nextn_predict_layers=int(pick("num_nextn_predict_layers", default=0)),
             index_share_for_mtp_iteration=bool(pick("index_share_for_mtp_iteration", default=False)),
             enable_mlapo=bool(pick("enable_mlapo", default=True)),
             enable_attn_dp_weight_sharding=bool(pick("enable_attn_dp_weight_sharding", default=False)),
@@ -1112,27 +1104,16 @@ class Glm52ForCausalLM(PyModelBase):
             device=self.device,
         )
 
-    def compute_greedy_tokens(self, hidden: torch.Tensor) -> torch.Tensor:
-        assert isinstance(self.lm_head, ColumnParallelLinear)
-        return self.lm_head.greedy_tokens(hidden)
+    def load_weights(self, state_dicts: list[StateDictLike], tp_rank: int, tp_size: int) -> None:
+        loader = W8A8WeightLoader(self, state_dicts, self.cfg.tp_size, self.cfg.tp_rank)
+        self.load_decoder_weights(loader)
+        loader.copy_shard("model.embed_tokens.weight", dim=1)
+        loader.copy_shard("lm_head.weight", dim=0)
 
-    def load_weights(
-        self,
-        state_dicts: list,
-        tp_rank: int,
-        tp_size: int,
-        load_lm_head: bool = True,
-        load_embedding: bool = True,
-        loader: W8A8WeightLoader | None = None,
-    ) -> None:
+    def load_decoder_weights(self, loader: W8A8WeightLoader) -> None:
         cfg = self.cfg
-        if loader is None:
-            loader = W8A8WeightLoader(self, state_dicts, cfg.tp_size, cfg.tp_rank)
         if self.model is None:
             raise RuntimeError("GLM model body must be built before loading weights")
-
-        if load_embedding:
-            loader.copy_shard("model.embed_tokens.weight", dim=1)
 
         for i in range(cfg.n_layers):
             p = f"model.layers.{i}."
@@ -1192,5 +1173,3 @@ class Glm52ForCausalLM(PyModelBase):
             self.model.layers[i].mlp.load_from_checkpoint(loader, p + "mlp.")
 
         loader.copy_replicated("model.norm.weight")
-        if load_lm_head:
-            loader.copy_shard("lm_head.weight", dim=0)

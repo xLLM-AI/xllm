@@ -52,49 +52,37 @@ class Glm5NextMtpForCausalLMImpl final
             std::to_string(context.get_model_args().mtp_start_layer_idx()) +
             ".") {}
 
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "model.") override {
-    LlmForCausalLMImplBase<DeepseekMtpModel>::load_lm_head(loader, prefix);
+  static constexpr const char* kDecoderCheckpointPrefix = "";
 
-    const std::vector<std::string> prefixes{"model.language_model.", prefix};
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      // The appended layer lives inside the target checkpoint, so try the
-      // multimodal language-model root before the plain model root.
-      StateDict model_state = state_dict->get_dict_with_prefix(prefixes);
-      this->model_->load_state_dict(model_state);
-      StateDict embed_tokens =
-          model_state.get_dict_with_prefix(mtp_layer_prefix_ + "embed_tokens.");
-      this->model_->get_word_embedding()->load_state_dict(embed_tokens);
-    }
-    CHECK(this->model_->get_word_embedding()->is_weight_loaded())
-        << "Native MLU GLM5 MTP checkpoint is missing "
-           "appended-layer embed_tokens.weight";
-    CHECK(lm_head_->is_weight_loaded())
-        << "Native MLU GLM5 MTP checkpoint is missing appended-layer "
-           "shared_head.head (lm_head) weights";
-    this->model_->verify_loaded_weights();
+  void load_state_dict(const StateDict& state_dict) override {
+    const std::vector<std::string> prefixes{"model.language_model.",
+                                            kWeightPrefix};
+    StateDict model_state = state_dict.get_dict_with_prefix(prefixes);
+    this->model_->load_state_dict(model_state);
+    StateDict embed_tokens =
+        model_state.get_dict_with_prefix(mtp_layer_prefix_ + "embed_tokens.");
+    this->model_->get_word_embedding()->load_state_dict(embed_tokens);
   }
 
-  void load_lm_head(const StateDict& state_dict,
-                    const std::string& prefix) override {
+  StateDict select_output_weights(const StateDict& state_dict) {
     const std::string suffix =
         tie_word_embeddings_ ? "embed_tokens." : "shared_head.head.";
     const std::vector<std::string> prefixes{
         "model.language_model." + mtp_layer_prefix_ + suffix,
-        prefix + mtp_layer_prefix_ + suffix};
-    lm_head_->load_state_dict(state_dict.get_dict_with_prefix(prefixes));
+        kWeightPrefix + mtp_layer_prefix_ + suffix};
+    return state_dict.get_dict_with_prefix(prefixes);
   }
 
-  bool requires_graph_forward_metadata() override { return true; }
+  bool requires_graph_forward_metadata() { return true; }
 
-  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
-      override {
+  std::unique_ptr<ModelGraphMetadataState>
+  create_graph_forward_metadata_state() {
     return std::make_unique<Glm5NextGraphMetadataState>();
   }
 
   void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
                                       const torch::Tensor& positions,
-                                      ModelParamsView& params) override {
+                                      ModelParamsView& params) {
     auto* graph_state = dynamic_cast<Glm5NextGraphMetadataState*>(state);
     CHECK(graph_state != nullptr) << "GLM5 requires per-graph metadata state";
     graph_state->prepare(positions, params);

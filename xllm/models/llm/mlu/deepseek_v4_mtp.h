@@ -22,7 +22,6 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -127,7 +126,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module,
            "size. n_heads="
         << n_heads << ", local_tp_size=" << dp_local_tp_size;
     hc_mult_ = model_args_.hc_mult();
-    window_size_ = model_args_.window_size_;
+    window_size_ = model_args_.window_size();
 
     init_rope(model_args_, options);
     init_hadamard(model_args_, options);
@@ -288,47 +287,18 @@ TORCH_MODULE(DeepseekV4MtpModel);
 class DeepseekV4MtpForCausalLMImpl final
     : public LlmForCausalLMImplBase<DeepseekV4MtpModel> {
  public:
+  static constexpr const char* kDecoderCheckpointPrefix = "";
+
   explicit DeepseekV4MtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekV4MtpModel>(context) {}
+      : LlmForCausalLMImplBase(context) {}
 
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "model.") override {
-    for (const std::unique_ptr<StateDict>& state_dict :
-         loader->get_state_dicts()) {
-      std::unordered_map<std::string, torch::Tensor> remapped_dict;
-      for (auto it = state_dict->begin(); it != state_dict->end(); ++it) {
-        remapped_dict[detail::normalize_model_parameter_name(
-            it->first, prefix)] = it->second;
-      }
+  static constexpr auto kNormalizeCheckpoint =
+      detail::normalize_model_state_dict;
 
-      StateDict remapped_state_dict(remapped_dict);
-      load_lm_head(remapped_state_dict, "");
-      model_->load_state_dict(remapped_state_dict);
-    }
-    model_->verify_loaded_weights(prefix);
-  }
-
-  void load_lm_head(const StateDict& state_dict,
-                    const std::string& /*prefix*/) override {
-    lm_head_->load_state_dict(state_dict.get_dict_with_prefix(
-        std::vector<std::string>{"lm_head.", "head.", "layers.0.head."}));
-  }
-
-  bool requires_graph_forward_metadata() {
-    return this->model_->requires_graph_forward_metadata();
-  }
-
-  std::unique_ptr<ModelGraphMetadataState>
-  create_graph_forward_metadata_state() {
-    return this->model_->create_graph_forward_metadata_state();
-  }
-
-  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
-                                      const torch::Tensor& positions,
-                                      ModelParamsView& input_params) {
-    this->model_->prepare_graph_forward_metadata(
-        state, positions, input_params);
-  }
+  inline static const std::vector<std::string> kOutputWeightPrefixes{
+      "lm_head.",
+      "head.",
+      "layers.0.head."};
 };
 TORCH_MODULE(DeepseekV4MtpForCausalLM);
 

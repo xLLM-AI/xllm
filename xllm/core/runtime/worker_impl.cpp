@@ -264,6 +264,8 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
 #endif
 }
 
+CausalLM* WorkerImpl::get_causal_lm() const { return language_model_; }
+
 WorkerImpl::~WorkerImpl() {
   drain_pending_execution();
   if (hierarchy_kv_transfer_ != nullptr) {

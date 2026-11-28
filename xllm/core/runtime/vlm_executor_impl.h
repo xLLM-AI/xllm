@@ -35,7 +35,7 @@ namespace xllm {
 
 class VlmExecutorImpl : public ExecutorImpl {
  public:
-  VlmExecutorImpl(CausalLM* model,
+  VlmExecutorImpl(CausalVLM& model,
                   const ModelArgs& args,
                   const torch::Device& device,
                   const runtime::Options& options);
@@ -55,10 +55,9 @@ class VlmExecutorImpl : public ExecutorImpl {
 
   void set_dp_process_group(ProcessGroup* group) override;
 
-  virtual MMDict encode(const ModelParamsView& params);
-
   // not own
-  CausalVLM* model_;
+  CausalVLM& model_;
+  CausalLM& language_model_;
   ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
@@ -70,5 +69,4 @@ class VlmExecutorImpl : public ExecutorImpl {
       const torch::Tensor& positions) const;
 };
 // Q: backend device ?
-REGISTER_EXECUTOR("vlm", VlmExecutorImpl);
 }  // namespace xllm

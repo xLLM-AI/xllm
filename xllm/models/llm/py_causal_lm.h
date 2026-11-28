@@ -50,13 +50,7 @@ int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
     int64_t num_speculative_tokens);
 }  // namespace detail
 
-// Inherits CausalVLM so that ``--backend vlm --model_impl python`` can route a
-// Python VLM (e.g. GLM-5.3-Flash-VL) through the VLM engine while
-// PyExecutorImpl drives it. The CausalVLM ``encode`` / ``get_input_embeddings``
-// virtuals are stubbed: in the Python path, PyExecutorImpl::run calls the
-// Python model's own encode/get_input_embeddings via pybind (they are never
-// reached here).
-class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
+class [[gnu::visibility("hidden")]] PyCausalLM final : public CausalLM {
  public:
   explicit PyCausalLM(const ModelContext& context,
                       std::string python_model_name = {});
@@ -67,30 +61,10 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
                       std::vector<KVCache>& kv_caches,
                       const ModelParamsView& parameters) override;
 
-  MMDict encode(const ModelParamsView& parameters) override {
-    LOG(FATAL) << "PyCausalLM::encode must not be called directly; "
-               << "PyExecutorImpl drives the Python model's encode via pybind.";
-    return MMDict{};
-  }
-
-  torch::Tensor get_input_embeddings(
-      const torch::Tensor& input_ids,
-      const ModelParamsView& input_params) override {
-    LOG(FATAL) << "PyCausalLM::get_input_embeddings must not be called "
-               << "directly; PyExecutorImpl drives it via pybind.";
-    return torch::Tensor();
-  }
+  torch::Tensor logits_processor(const torch::Tensor& hidden_states) override;
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& selected_idxes) override;
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) override;
-
-  // Expose selected hidden rows to MTP and reuse the projection path.
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes,
-                       torch::Tensor& out_hidden) override;
 
   ModelOutput write_context_kv(const torch::Tensor& target_hidden,
                                const torch::Tensor& positions,
@@ -153,7 +127,6 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   std::string python_model_name_;
   torch::TensorOptions options_;
   torch::Device device_;
-  bool enable_mla_ = false;
 
   int64_t tp_size_ = 1;
   int64_t tp_rank_ = 0;
@@ -186,6 +159,26 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   c10::intrusive_ptr<c10d::Work> eplb_p2p_work_;
 
   static thread_local PyCausalLM* active_instance_;
+};
+
+class [[gnu::visibility("hidden")]] PyCausalVLM final : public CausalVLM {
+ public:
+  PyCausalVLM(const ModelContext& context, std::string python_model_name);
+
+  CausalLM& language_model() override;
+
+  MMDict encode(const ModelParamsView& parameters) override;
+
+  torch::Tensor get_input_embeddings(
+      const torch::Tensor& input_ids,
+      const ModelParamsView& input_params) override;
+
+  void load_model(std::unique_ptr<ModelLoader> loader) override;
+  torch::Device device() const override;
+  const torch::TensorOptions& options() const override;
+
+ private:
+  PyCausalLM language_model_;
 };
 
 }  // namespace xllm

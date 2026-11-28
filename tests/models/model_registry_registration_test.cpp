@@ -26,7 +26,7 @@ namespace xllm {
 namespace {
 
 template <int32_t Marker>
-class RegistryTestModel final : public CausalVLM {
+class RegistryTestModel final : public CausalLM {
  public:
   explicit RegistryTestModel(const ModelContext& /*context*/) {
     register_module("dropout", torch::nn::Dropout(/*p=*/0.5));
@@ -36,11 +36,6 @@ class RegistryTestModel final : public CausalVLM {
                       const torch::Tensor& /*positions*/,
                       std::vector<KVCache>& /*kv_caches*/,
                       const ModelParamsView& /*parameters*/) override {
-    return {};
-  }
-
-  torch::Tensor logits(const torch::Tensor& /*hidden_states*/,
-                       const torch::Tensor& /*selected_idxes*/) override {
     return {};
   }
 
@@ -56,20 +51,41 @@ class RegistryTestModel final : public CausalVLM {
 
   void update_expert_weight(int32_t /*layer_id*/) override {}
 
-  MMDict encode(const ModelParamsView& /*parameters*/) override { return {}; }
-
-  torch::Tensor get_input_embeddings(
-      const torch::Tensor& /*input_ids*/,
-      const ModelParamsView& /*input_params*/) override {
-    return {};
-  }
-
  private:
   torch::TensorOptions options_ = torch::TensorOptions().device(torch::kCPU);
 };
 
+template <int32_t Marker>
+class RegistryTestVlm final : public CausalVLM {
+ public:
+  explicit RegistryTestVlm(const ModelContext& context)
+      : language_model_(context) {
+    register_module(/*name=*/"dropout", torch::nn::Dropout(/*p=*/0.5));
+  }
+
+  CausalLM& language_model() override { return language_model_; }
+
+  void load_model(std::unique_ptr<ModelLoader>) override {}
+
+  torch::Device device() const override { return language_model_.device(); }
+
+  const torch::TensorOptions& options() const override {
+    return language_model_.options();
+  }
+
+  MMDict encode(const ModelParamsView&) override { return {}; }
+
+  torch::Tensor get_input_embeddings(const torch::Tensor&,
+                                     const ModelParamsView&) override {
+    return {};
+  }
+
+ private:
+  RegistryTestModel<Marker> language_model_;
+};
+
 using MacroRegisteredModel = RegistryTestModel<7>;
-using MacroRegisteredVlm = RegistryTestModel<9>;
+using MacroRegisteredVlm = RegistryTestVlm<9>;
 
 template <int32_t Marker>
 CausalLMFactory make_factory() {
@@ -81,7 +97,7 @@ CausalLMFactory make_factory() {
 template <int32_t Marker>
 CausalVLMFactory make_vlm_factory() {
   return [](const ModelContext& context) {
-    return std::make_unique<RegistryTestModel<Marker>>(context);
+    return std::make_unique<RegistryTestVlm<Marker>>(context);
   };
 }
 
@@ -228,7 +244,7 @@ TEST(ModelRegistryRegistrationTest, AutoModelImplUsesNativeRegistration) {
 
   std::unique_ptr<CausalVLM> vlm =
       create_vlm_model(make_context(vlm_name, "auto"));
-  EXPECT_NE(dynamic_cast<RegistryTestModel<2>*>(vlm.get()), nullptr);
+  EXPECT_NE(dynamic_cast<RegistryTestVlm<2>*>(vlm.get()), nullptr);
 }
 
 TEST(ModelRegistryRegistrationTest, VlmPrioritySelectsFactory) {
@@ -247,7 +263,7 @@ TEST(ModelRegistryRegistrationTest, VlmPrioritySelectsFactory) {
       ModelRegistry::get_causalvlm_factory(model_name, "custom");
   ASSERT_TRUE(factory);
   std::unique_ptr<CausalVLM> model = factory(ModelContext{});
-  EXPECT_NE(dynamic_cast<RegistryTestModel<2>*>(model.get()), nullptr);
+  EXPECT_NE(dynamic_cast<RegistryTestVlm<2>*>(model.get()), nullptr);
 }
 
 TEST(ModelRegistryRegistrationTest,
@@ -280,7 +296,7 @@ TEST(ModelRegistryRegistrationTest,
       model_name, "python", make_vlm_factory<2>()));
   std::unique_ptr<CausalVLM> model =
       create_vlm_model(make_context(model_name, "py"));
-  EXPECT_NE(dynamic_cast<RegistryTestModel<2>*>(model.get()), nullptr);
+  EXPECT_NE(dynamic_cast<RegistryTestVlm<2>*>(model.get()), nullptr);
 }
 
 TEST(ModelRegistryRegistrationTest, VlmCreationRejectsUnregisteredCustomImpl) {
@@ -330,7 +346,7 @@ TEST(ModelRegistryRegistrationTest, VlmCreationUsesExtensionFamily) {
       model_name, "custom", make_vlm_factory<9>()));
   std::unique_ptr<CausalVLM> model =
       create_vlm_model(make_context(model_name, "native", "custom"));
-  EXPECT_NE(dynamic_cast<RegistryTestModel<9>*>(model.get()), nullptr);
+  EXPECT_NE(dynamic_cast<RegistryTestVlm<9>*>(model.get()), nullptr);
 }
 
 TEST(ModelRegistryRegistrationTest, MissingVlmInSelectedFamilyRejectsNative) {

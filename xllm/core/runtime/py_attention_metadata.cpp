@@ -29,17 +29,6 @@ limitations under the License.
 namespace py = pybind11;
 
 namespace xllm {
-namespace {
-
-struct PythonObjectHolder final {
-  explicit PythonObjectHolder(py::object value) : value(std::move(value)) {}
-
-  ~PythonObjectHolder() { clear_python_object(value); }
-
-  py::object value;
-};
-
-}  // namespace
 
 void register_attention_metadata_views(py::module_& module) {
   py::class_<PyExpandedDecodeMetadataView>(module, "ExpandedDecodeMetadataView")
@@ -137,8 +126,6 @@ void register_attention_metadata_views(py::module_& module) {
       .def_property_readonly(
           "raw_dp_execution_token_counts",
           &PyAttentionMetadataView::raw_dp_execution_token_counts)
-      .def_property_readonly("dp_global_sequence_nums",
-                             &PyAttentionMetadataView::dp_global_sequence_nums)
       .def_property_readonly(
           "dp_global_kv_max_seq_lens",
           &PyAttentionMetadataView::dp_global_kv_max_seq_lens)
@@ -300,7 +287,6 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   // Python model kernels consume materialized execution rows. Empty DP ranks
   // contribute the model's complete dummy input, which may be a draft block.
   dp_execution_token_counts_ = params.parallel.dp_global_token_nums;
-  dp_global_sequence_nums_ = params.parallel.dp_global_sequence_nums;
   dp_global_kv_max_seq_lens_ = params.parallel.dp_global_kv_max_seq_lens;
   std::replace(dp_execution_token_counts_.begin(),
                dp_execution_token_counts_.end(),
@@ -436,11 +422,6 @@ PyAttentionMetadataView::raw_dp_execution_token_counts() const {
   return raw_dp_execution_token_counts_;
 }
 
-const std::vector<int32_t>& PyAttentionMetadataView::dp_global_sequence_nums()
-    const {
-  return dp_global_sequence_nums_;
-}
-
 const std::vector<int32_t>& PyAttentionMetadataView::dp_global_kv_max_seq_lens()
     const {
   return dp_global_kv_max_seq_lens_;
@@ -483,9 +464,7 @@ py::object PyAttentionMetadataView::prepared_attention_state() const {
   if (!prepared_attention_holder_) {
     return py::none();
   }
-  return std::static_pointer_cast<PythonObjectHolder>(
-             prepared_attention_holder_)
-      ->value;
+  return py::reinterpret_borrow<py::object>(prepared_attention_holder_.get());
 }
 
 void PyAttentionMetadataView::set_prepared_attention_state(py::object value) {
@@ -493,16 +472,14 @@ void PyAttentionMetadataView::set_prepared_attention_state(py::object value) {
     prepared_attention_holder_.reset();
     return;
   }
-  prepared_attention_holder_ =
-      std::make_shared<PythonObjectHolder>(std::move(value));
+  prepared_attention_holder_ = share_python_object(std::move(value));
 }
 
 py::object PyAttentionMetadataView::dsa_metadata() const {
   if (!dsa_metadata_holder_) {
     return py::none();
   }
-  return std::static_pointer_cast<PythonObjectHolder>(dsa_metadata_holder_)
-      ->value;
+  return py::reinterpret_borrow<py::object>(dsa_metadata_holder_.get());
 }
 
 void PyAttentionMetadataView::set_dsa_metadata(py::object value) {
@@ -510,7 +487,7 @@ void PyAttentionMetadataView::set_dsa_metadata(py::object value) {
     dsa_metadata_holder_.reset();
     return;
   }
-  dsa_metadata_holder_ = std::make_shared<PythonObjectHolder>(std::move(value));
+  dsa_metadata_holder_ = share_python_object(std::move(value));
 }
 
 py::object PyAttentionMetadataView::dsa_positions() const {

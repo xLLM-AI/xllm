@@ -22,21 +22,30 @@ the next MTP step.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn as nn
 
 from xllm.python.layers import ColumnParallelLinear, RMSNorm
 from xllm.python.model_executor.cp_utils import cp_merge_rows, cp_shard_rows
-from xllm.python.model_loader import W8A8WeightLoader
-from xllm.python.models.base import PyModelBase
+from xllm.python.model_loader import ParallelLoadContext, W8A8WeightLoader
+from xllm.python.model_loader.draft_weight_loader import (
+    load_draft_embedding_if_present,
+    load_draft_lm_head_if_present,
+)
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3Config,
     DeepseekV3ForCausalLM,
     DeepseekV3Model,
     DeepseekYarnRotaryEmbedding,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from xllm.python.model_loader import StateDictLike
+    from xllm.python.models.glm5_2 import Glm52ForCausalLM
 
 # The loader strips "model.", so a bare "shared_head.norm.weight" needs no entry.
 _MTP_NORM_ALIASES: dict[str, tuple[str, ...]] = {
@@ -57,7 +66,8 @@ class DeepseekV32MtpModel(DeepseekV3Model):
         assert cfg.hidden_size % tp == 0
 
         self.cfg = cfg
-        self.embed_tokens: nn.Module | None = None
+        self.add_module("embed_tokens", None)
+        self.dtype, self.device = dtype, device
         self.eh_proj = ColumnParallelLinear(
             2 * cfg.hidden_size,
             cfg.hidden_size // tp,
@@ -98,9 +108,6 @@ class DeepseekV32MtpModel(DeepseekV3Model):
 
     def _recurrent_hidden(self, hidden: torch.Tensor, residual: torch.Tensor | None) -> torch.Tensor:
         hidden, _ = self.norm(hidden, residual)
-        return hidden
-
-    def _prepare_logits_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
         return hidden
 
     def _format_mtp_output(
@@ -144,24 +151,9 @@ class DeepseekV32MtpModel(DeepseekV3Model):
         return self._format_mtp_output(hidden, topk)
 
 
-def _compute_mtp_logits(
-    model: DeepseekV32MtpModel,
-    lm_head: nn.Module | None,
-    hidden: torch.Tensor,
-    selected_idxes: torch.Tensor | None,
-) -> torch.Tensor:
-    if selected_idxes is not None and selected_idxes.numel() > 0:
-        hidden = hidden.index_select(0, selected_idxes)
-    assert lm_head is not None
-    return lm_head(model._prepare_logits_hidden(hidden))
-
-
-def _load_mtp_weights(
-    model: PyModelBase,
-    load_decoder_weights: Callable[..., None],
-    state_dicts: list,
-    tp_rank: int,
-    tp_size: int,
+def load_mtp_weights(
+    model: DeepseekV3ForCausalLM | Glm52ForCausalLM,
+    state_dicts: Sequence[StateDictLike],
 ) -> None:
     loader = W8A8WeightLoader(
         model,
@@ -171,32 +163,24 @@ def _load_mtp_weights(
         src_prefixes=("", "model."),
         name_aliases=_MTP_NORM_ALIASES,
     )
-    load_decoder_weights(
-        state_dicts,
-        tp_rank,
-        tp_size,
-        load_lm_head=False,
-        load_embedding=False,
-        loader=loader,
-    )
+    model.load_decoder_weights(loader)
+    decoder = cast("DeepseekV32MtpModel", model.model)
+    context = ParallelLoadContext(model.cfg.tp_rank, model.cfg.tp_size)
+    load_draft_embedding_if_present(decoder, loader, context=context)
+    load_draft_lm_head_if_present(model, loader, context=context)
 
-    def _copy_if_present(module_name: str, required: bool = False) -> bool:
-        key = module_name + ".weight"
-        if not loader.has(key):
-            if required:
-                raise KeyError(f"missing required MTP weight: {key}")
-            return False
+    weight_keys = ["eh_proj.weight", "enorm.weight", "hnorm.weight"]
+    enable_rot = loader.has("rot.weight")
+    if enable_rot:
+        weight_keys.append("rot.weight")
+    for key in weight_keys:
         tensor = loader.get_tensor(key)
-        parameter = model.get_parameter("model." + key)
+        parameter_name = "model." + key
+        parameter = model.get_parameter(parameter_name)
         if tensor.shape != parameter.shape and tensor.dim() == 2:
             tensor = loader.shard(tensor, dim=0)
-        loader.copy_in("model." + key, tensor)
-        return True
-
-    _copy_if_present("eh_proj", required=True)
-    _copy_if_present("enorm", required=True)
-    _copy_if_present("hnorm", required=True)
-    model.model.enable_rot = _copy_if_present("rot")
+        loader.copy_in(parameter_name, tensor)
+    decoder.enable_rot = enable_rot
 
 
 class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
@@ -206,8 +190,5 @@ class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
         super().__init__(config, build_model=False)
         self.model = DeepseekV32MtpModel(self.cfg, self.dtype, self.device)
 
-    def compute_logits(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
-        return _compute_mtp_logits(self.model, self.lm_head, hidden, selected_idxes)
-
-    def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        _load_mtp_weights(self, super().load_weights, state_dicts, tp_rank, tp_size)
+    def load_weights(self, state_dicts: list[StateDictLike], tp_rank: int, tp_size: int) -> None:
+        load_mtp_weights(self, state_dicts)

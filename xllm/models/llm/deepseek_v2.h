@@ -142,7 +142,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
   }
 
-  void verify_loaded_weights() const {
+  void verify_layer_weights() const {
     for (const auto& layer : layers_) {
       layer->verify_loaded_weights();
     }
@@ -238,17 +238,13 @@ TORCH_MODULE(DeepseekV2Model);
 class DeepseekV2ForCausalLMImpl
     : public LlmForCausalLMImplBase<DeepseekV2Model> {
  public:
-  DeepseekV2ForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekV2Model>(context) {}
+  static constexpr const char* kDecoderCheckpointPrefix = kWeightPrefix;
 
-  void load_model(
-      std::unique_ptr<ModelLoader> loader,
-      std::string prefix = "model." /*llm model weight prefix*/) override {
-    LlmForCausalLMImplBase<DeepseekV2Model>::load_lm_head(loader, prefix);
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-    model_->verify_loaded_weights();
+  DeepseekV2ForCausalLMImpl(const ModelContext& context)
+      : LlmForCausalLMImplBase(context) {}
+
+  void verify_model_weights(const std::string&) override {
+    model_->verify_layer_weights();
   }
 };
 TORCH_MODULE(DeepseekV2ForCausalLM);

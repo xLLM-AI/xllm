@@ -150,97 +150,71 @@ TORCH_MODULE(RWKV7Model);
 // RWKV7ForCausalLM – adds the unembedding LM head
 // ---------------------------------------------------------------------------
 
-class RWKV7ForCausalLMImpl : public torch::nn::Module {
+class RWKV7ForCausalLMImpl final : public CausalLM {
  public:
-  explicit RWKV7ForCausalLMImpl(const ModelContext& context) {
-    const ModelArgs& args = context.get_model_args();
-    const int64_t hidden_size = args.hidden_size();
-    const int64_t vocab_size = args.vocab_size();
-    const torch::TensorOptions opts = context.get_tensor_options();
+  explicit RWKV7ForCausalLMImpl(const ModelContext& context)
+      : model_(register_module(/*name=*/"model", RWKV7Model(context))),
+        head_(torch::nn::LinearOptions(context.get_model_args().hidden_size(),
+                                       context.get_model_args().vocab_size())
+                  .bias(/*bias=*/false)),
+        options_(context.get_tensor_options()) {
+    head_->to(options_.device(), options_.dtype().toScalarType());
+    head_->eval();
+  }
 
-    model_ = register_module("model", RWKV7Model(context));
+  void load_model(std::unique_ptr<ModelLoader> loader) override {
+    d2t_ = load_model_weights(*this, *loader, head_);
+  }
 
-    // LM head: linear, no bias (BlinkDL convention)
-    head_ = register_module(
-        "head",
-        torch::nn::Linear(
-            torch::nn::LinearOptions(hidden_size, vocab_size).bias(false)));
-    head_->to(opts.device());
-    head_->to(opts.dtype().toScalarType());
+  torch::Device device() const override { return options_.device(); }
+  const torch::TensorOptions& options() const override { return options_; }
+
+  torch::Tensor logits_processor(const torch::Tensor& hidden_states) override {
+    return head_(hidden_states);
   }
 
   // Forward: compute hidden states for the packed token sequence.
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
                       std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
+                      const ModelParamsView& input_params) override {
     return model_(tokens, positions, kv_caches, input_params);
   }
 
-  // Compute logits for selected token positions.
-  //   hidden_states:  [total_tokens, hidden_size]
-  //   selected_idxes: optional token selector
-  //   returns:        [selected_tokens, vocab_size]
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) {
-    torch::Tensor h = hidden_states;
-    if (selected_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, selected_idxes);
-    }
-    return head_(h);
+  static constexpr const char* kWeightPrefix = "model.";
+
+  static constexpr const char* kDecoderCheckpointPrefix = "";
+
+  void load_state_dict(const StateDict& state_dict) {
+    model_->load_state_dict(state_dict.get_dict_with_prefix(
+        std::vector<std::string>{kWeightPrefix, ""}));
   }
 
-  // Embedding / rerank path: return selected hidden states as-is.
-  torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) {
-    torch::Tensor h = hidden_states;
-    if (selected_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, selected_idxes);
-    }
-    return h;
-  }
-
-  // Load weights from checkpoint.
-  //
-  // Supported checkpoint layouts:
-  //   • BlinkDL native: flat keys (emb.weight, blocks.*.*, ln_out.*,
-  //   head.weight) • HuggingFace:    "model." prefix (model.emb.weight, …,
-  //   model.ln_out.*, lm_head.weight)
-  void load_model(std::unique_ptr<ModelLoader> loader) {
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      // Try to strip common top-level prefixes for the body weights.
-      // An empty prefix ("") matches the native BlinkDL flat format.
-      model_->load_state_dict(state_dict->get_dict_with_prefix(
-          std::vector<std::string>{"model.", ""}));
-
-      // LM head weight: "head.weight" (native) or "lm_head.weight" (HF)
-      for (const auto& key : std::vector<std::string>{
-               "head.weight", "lm_head.weight", "model.head.weight"}) {
-        torch::Tensor head_w = state_dict->get_tensor(key);
-        if (head_w.defined()) {
-          head_->weight =
-              head_w.to(head_->weight.device()).to(head_->weight.scalar_type());
-          break;
-        }
+  torch::Tensor lm_head_weight(const StateDict& state_dict) const {
+    for (const auto& key :
+         {"head.weight", "lm_head.weight", "model.head.weight"}) {
+      auto weight = state_dict.get_tensor(key);
+      if (weight.defined()) {
+        return weight;
       }
     }
+    return {};
   }
 
-  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) {}
-  void update_expert_weight(int32_t) {}
+  void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
+  void update_expert_weight(int32_t) override {}
 
  private:
-  RWKV7Model model_{nullptr};
-  torch::nn::Linear head_{nullptr};
+  RWKV7Model model_;
+  torch::nn::Linear head_;
+  torch::TensorOptions options_;
 };
-
-TORCH_MODULE(RWKV7ForCausalLM);
 
 // ---------------------------------------------------------------------------
 // Model registration
 // ---------------------------------------------------------------------------
 
-REGISTER_CAUSAL_MODEL(rwkv7, RWKV7ForCausalLM);
+REGISTER_CAUSAL_LM(rwkv7, /*Implementation=*/"native", RWKV7ForCausalLMImpl);
 
 // Model args — supports the RWKV-7 HuggingFace config.json format.
 //

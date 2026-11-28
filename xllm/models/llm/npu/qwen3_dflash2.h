@@ -429,21 +429,21 @@ TORCH_MODULE(DFlash2Qwen3Model);
 class DFlash2Qwen3ForCausalLMImpl final
     : public ::xllm::LlmForCausalLMImplBase<DFlash2Qwen3Model> {
  public:
-  using Base = ::xllm::LlmForCausalLMImplBase<DFlash2Qwen3Model>;
-
   explicit DFlash2Qwen3ForCausalLMImpl(const ModelContext& context)
-      : Base(context, /*share_lm_head=*/true),
+      : LlmForCausalLMImplBase(context),
         selector_(context.get_model_args(), context.get_tensor_options()) {}
 
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string prefix = "") override {
-    for (const std::unique_ptr<StateDict>& state_dict :
-         loader->get_state_dicts()) {
-      const auto weights = state_dict->get_dict_with_prefix(prefix);
-      model_->load_state_dict(weights);
-      selector_.load_state_dict(
-          weights.get_dict_with_prefix(/*prefix=*/"candidate_selector."));
-    }
+  static constexpr const char* kWeightPrefix = "";
+
+  static constexpr const char* kDecoderCheckpointPrefix = "";
+
+  void load_state_dict(const StateDict& state_dict) override {
+    model_->load_state_dict(state_dict);
+    selector_.load_state_dict(
+        state_dict.get_dict_with_prefix(/*prefix=*/"candidate_selector."));
+  }
+
+  void verify_model_weights(const std::string&) override {
     selector_.verify_loaded_weights();
     model_->finalize_loaded_weights();
   }
@@ -469,6 +469,8 @@ class DFlash2Qwen3ForCausalLMImpl final
 };
 TORCH_MODULE(DFlash2Qwen3ForCausalLM);
 
-REGISTER_CAUSAL_MODEL(DFlash2DraftModel, DFlash2Qwen3ForCausalLM);
+const bool DFlash2DraftModel_registered =
+    register_causal_model_with_deferred_head<DFlash2Qwen3ForCausalLM>(
+        /*name=*/"DFlash2DraftModel");
 
 }  // namespace xllm::npu::model

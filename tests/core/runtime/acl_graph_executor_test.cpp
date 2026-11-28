@@ -305,18 +305,7 @@ class SimpleCausalLM : public CausalLM {
     return opts;
   }
 
-  // Implement required virtual functions
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) override {
-    // Simple logits computation
-    const int64_t vocab_size = std::max(args_.vocab_size(), 1000L);
-    return torch::randn({hidden_states.size(0), vocab_size},
-                        torch::dtype(torch::kFloat32).device(device_));
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> loader) override {
-    // Simple implementation for testing
-  }
+  void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {}
 
   torch::Device device() const override { return device_; }
 

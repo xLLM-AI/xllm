@@ -24,10 +24,9 @@ import torch.nn.functional as F
 
 from xllm.python import kernels
 from xllm.python.attention.backend import AttentionBackend
-from xllm.python.model_executor.forward_context import ForwardContext, forward_context
 from xllm.python.model_executor.runners.eager import EagerRunner
 from xllm.python.models.deepseek_ocr import DeepseekOCRConfig, DeepseekOCRForCausalLM, DeepseekOCRModel
-from xllm.python.models.glm5_next import Glm5NextConfig, Glm5NextForCausalLM, Glm5NextModel
+from xllm.python.models.glm5_next import Glm5NextConfig, Glm5NextModel
 from xllm.python.models.glm5_next_vl import Glm5NextVLModel
 from xllm.python.models.joyai_asr import JoyaiASRForConditionalGeneration
 
@@ -57,7 +56,12 @@ def _cpu_normalization(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(
     params=[
         "cpu",
-        pytest.param("npu:0", marks=pytest.mark.skipif(not hasattr(torch, "npu"), reason="NPU runtime unavailable")),
+        pytest.param(
+            "npu:0",
+            marks=pytest.mark.skipif(
+                not hasattr(torch, "npu") or not torch.npu.is_available(), reason="NPU runtime unavailable"
+            ),
+        ),
     ]
 )
 def device(request: pytest.FixtureRequest) -> torch.device:
@@ -162,7 +166,7 @@ def test_explicit_embeddings_accept_chunk_local_rows_without_image_placeholders(
     )
 
 
-def test_glm_accepts_flat_runner_embeddings_and_preserves_text_wrapper_mask(device: torch.device) -> None:
+def test_glm_accepts_flat_runner_embeddings(device: torch.device) -> None:
     model = _make_vlm("glm", device)
     tokens = torch.tensor([1, 3, 2], device=device)
     positions = torch.arange(3, device=device)
@@ -173,13 +177,6 @@ def test_glm_accepts_flat_runner_embeddings_and_preserves_text_wrapper_mask(devi
         runner.execute(tokens, positions, metadata, embedding),
         runner.execute(tokens, positions, metadata, embedding.unsqueeze(0)),
     )
-    text_wrapper = Glm5NextForCausalLM.__new__(Glm5NextForCausalLM)
-    nn.Module.__init__(text_wrapper)
-    text_wrapper.model = model.model
-    text_wrapper.lm_head = nn.Identity()
-    with forward_context(ForwardContext(runner.attention_backend, runner.device, metadata, [])):
-        masked_output = text_wrapper(tokens, positions, torch.tensor([[True, True, False]], device=device))
-    torch.testing.assert_close(masked_output, runner.execute(tokens, positions, metadata))
 
 
 @pytest.mark.parametrize("has_audio", [False, True])

@@ -37,6 +37,7 @@ from xllm.python.models.deepseek_v4 import (
     _hc_head_merge,
     _require_checkpoint_key,
     _require_tensor,
+    find_checkpoint_key,
 )
 
 
@@ -280,31 +281,29 @@ class DeepseekV4MtpForCausalLM(DeepseekV4ForCausalLM):
         # Match C++ DeepseekV4MtpModelImpl::load_state_dict: the embedding,
         # final norm and output head come from the first draft layer's prefix.
         first_prefix = layer_prefixes[0]
-        embed_key = _require_checkpoint_key(
+        embed_key = find_checkpoint_key(
             loader,
             (
                 first_prefix + "emb.tok_emb.weight",
                 first_prefix + "embed.weight",
                 first_prefix + "embed_tokens.weight",
             ),
-            "DeepSeek-V4 MTP embedding weight",
         )
-        loader.copy_in(
-            "model.embed_tokens.weight",
-            loader.shard(loader.get_tensor(embed_key), dim=1),
-        )
+        if embed_key is None:
+            self.model.add_module("embed_tokens", None)
+        else:
+            loader.copy_in(
+                "model.embed_tokens.weight",
+                loader.shard(loader.get_tensor(embed_key), dim=1),
+            )
         norm_key = _require_checkpoint_key(
             loader,
             (first_prefix + "norm.weight",),
             "DeepSeek-V4 MTP final norm",
         )
         loader.copy_in("model.norm.weight", loader.get_tensor(norm_key))
-        head_key = _require_checkpoint_key(
-            loader,
-            (first_prefix + "head.weight",),
-            "DeepSeek-V4 MTP output-head weight",
-        )
-        loader.copy_in(
-            "lm_head.weight",
-            loader.shard(loader.get_tensor(head_key), dim=0),
-        )
+        head_key = first_prefix + "head.weight"
+        if loader.has(head_key):
+            loader.copy_in("lm_head.weight", loader.shard(loader.get_tensor(head_key), dim=0))
+        else:
+            self.add_module("lm_head", None)

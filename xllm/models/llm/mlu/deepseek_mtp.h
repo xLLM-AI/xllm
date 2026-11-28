@@ -51,24 +51,17 @@ TORCH_MODULE(DeepseekMtpModel);
 class DeepseekMtpForCausalLMImpl
     : public LlmForCausalLMImplBase<DeepseekMtpModel> {
  public:
-  DeepseekMtpForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DeepseekMtpModel>(context,
-                                                 /*share_lm_head=*/true) {}
+  static constexpr const char* kDecoderCheckpointPrefix = kWeightPrefix;
 
-  void load_model(
-      std::unique_ptr<ModelLoader> loader,
-      std::string prefix = "model." /*llm model weight prefix*/) override {
-    // no need to load lm_head since it shares the same weights with main models
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-    }
-    model_->verify_loaded_weights();
-  }
+  DeepseekMtpForCausalLMImpl(const ModelContext& context)
+      : LlmForCausalLMImplBase(context) {}
 };
 TORCH_MODULE(DeepseekMtpForCausalLM);
 
 // register the causal model
-REGISTER_CAUSAL_MODEL(deepseek_v3_mtp, DeepseekMtpForCausalLM);
+const bool deepseek_v3_mtp_registered =
+    register_causal_model_with_deferred_head<DeepseekMtpForCausalLM>(
+        /*name=*/"deepseek_v3_mtp");
 
 // example config:
 // https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json

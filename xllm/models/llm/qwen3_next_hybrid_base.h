@@ -315,6 +315,8 @@ class Qwen3HybridForCausalLMImplBase
                                  Qwen3HybridModelModulePtr model)
       : LlmForCausalLMImplBase(context, std::move(model)) {}
 
+  static constexpr const char* kDecoderCheckpointPrefix = kWeightPrefix;
+
   // hidden_states: [num_tokens, hidden_size]
   // seleted_idxes: [num_tokens]
   torch::Tensor pooler(const torch::Tensor& hidden_states,
@@ -327,42 +329,21 @@ class Qwen3HybridForCausalLMImplBase
     return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));
   }
 
-  void load_model(std::unique_ptr<ModelLoader> loader) {
-    load_model(std::move(loader), "model.", "lm_head.");
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  std::string model_prefix) override {
-    load_model(std::move(loader), model_prefix, "lm_head.");
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  const std::string& model_prefix,
-                  const std::string& lm_head_prefix) {
-    auto has_lm_head_weights = [](const StateDict& dict) {
-      return dict.get_tensor("weight").defined() ||
-             dict.get_tensor("qweight").defined();
+  StateDict select_output_weights(const StateDict& state_dict,
+                                  const std::string& prefix) {
+    auto has_weight = [](const StateDict& weights) {
+      return weights.get_tensor(/*tensor_name=*/"weight").defined() ||
+             weights.get_tensor(/*tensor_name=*/"qweight").defined();
     };
-
-    for (const auto& state_dict : loader->get_state_dicts()) {
-      auto model_state_dict = state_dict->get_dict_with_prefix(model_prefix);
-      model_->load_state_dict(model_state_dict);
-      if (lm_head_.is_empty()) {
-        continue;
+    auto head = state_dict.get_dict_with_prefix(/*prefix=*/"lm_head.");
+    if (!has_weight(head) && this->tie_word_embeddings_) {
+      auto embedding =
+          state_dict.get_dict_with_prefix(prefix + "embed_tokens.");
+      if (has_weight(embedding)) {
+        return embedding;
       }
-
-      auto lm_head_state_dict =
-          state_dict->get_dict_with_prefix(lm_head_prefix);
-      if (!has_lm_head_weights(lm_head_state_dict) && tie_word_embeddings_) {
-        auto tied_lm_head_state_dict =
-            model_state_dict.get_dict_with_prefix("embed_tokens.");
-        if (has_lm_head_weights(tied_lm_head_state_dict)) {
-          lm_head_state_dict = tied_lm_head_state_dict;
-        }
-      }
-      lm_head_->load_state_dict(lm_head_state_dict);
     }
-    model_->verify_loaded_weights(model_prefix);
+    return head;
   }
 
   bool is_hybrid_linear_attention() { return true; }

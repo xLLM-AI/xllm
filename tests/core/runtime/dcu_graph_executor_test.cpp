@@ -149,15 +149,6 @@ class FakeSimpleCausalLM final : public CausalLM {
 
   const torch::TensorOptions& options() const override { return options_; }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) override {
-    (void)selected_idxes;
-
-    const int64_t vocab_size = std::max<int64_t>(args_.vocab_size(), 1024);
-    return torch::zeros({hidden_states.size(0), vocab_size},
-                        torch::dtype(torch::kFloat32).device(device_));
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader) override {
     (void)loader;
   }
