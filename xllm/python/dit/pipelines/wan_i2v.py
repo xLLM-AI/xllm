@@ -29,8 +29,8 @@ from transformers import (
 )
 
 from xllm.python.dit import ComponentLoad
+from xllm.python.dit.models.transformers.wan_i2v import load_transformer
 from xllm.python.dit.parallel import SequenceParallel, StateDictShard, TensorParallel, load_component_weights
-from xllm.python.dit.wan_i2v_model import load_transformer
 
 
 class _WanCausalConv3d(WanCausalConv3d):

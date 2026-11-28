@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 
-"""Python DiT pipelines called by the native worker."""
+"""Python DiT components and pipelines called by the native worker."""
 
 from typing import NamedTuple
 

@@ -16,17 +16,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from xllm.python.dit.minimax_h3 import MiniMaxH3Pipeline
-    from xllm.python.dit.wan_i2v import WanI2VPipeline
+    from xllm.python.dit.pipelines.minimax_h3 import MiniMaxH3Pipeline
+    from xllm.python.dit.pipelines.wan_i2v import WanI2VPipeline
 
 
 def get_pipeline_class(model_type: str) -> type[MiniMaxH3Pipeline] | type[WanI2VPipeline]:
     if model_type == "MiniMaxH3ModularPipeline":
-        from xllm.python.dit.minimax_h3 import MiniMaxH3Pipeline
+        from xllm.python.dit.pipelines.minimax_h3 import MiniMaxH3Pipeline
 
         return MiniMaxH3Pipeline
     if model_type == "WanImageToVideoPipeline":
-        from xllm.python.dit.wan_i2v import WanI2VPipeline
+        from xllm.python.dit.pipelines.wan_i2v import WanI2VPipeline
 
         return WanI2VPipeline
     raise ValueError(f"Unsupported Python DiT pipeline: {model_type}")
