@@ -1,20 +1,14 @@
 include(cc_library)
 
-# Runtime adapters combine cache domain leaves with model and worker lifecycle.
+# Framework adapters for sequence-scoped and virtual cache resource leaves.
 cc_library(
   NAME
     block
   HDRS
     embedding_block_manager.h
-    block_manager_pool.h
-    hierarchy_block_manager_pool.h
-    composite_block_manager.h
     vmm_kv_block_manager.h
   SRCS
     embedding_block_manager.cpp
-    block_manager_pool.cpp
-    hierarchy_block_manager_pool.cpp
-    composite_block_manager.cpp
     vmm_kv_block_manager.cpp
   DEPS
     :paged_cache_partition

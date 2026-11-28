@@ -51,13 +51,13 @@ limitations under the License.
 #include "core/framework/speculative/draft_config.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/manager/kv_cache_manager_factory.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/host_cache_layout.h"
 #include "core/platform/platform.h"
 #include "core/runtime/forward_input_encoding.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/tensor_options.h"
-#include "framework/block/kv_cache_manager_factory.h"
 #include "framework/model/model_args.h"
 #include "models/model_registry.h"
 #include "runtime/decode_graph_bucket.h"
@@ -362,7 +362,7 @@ bool LLMEngine::allocate_kv_cache(
   // Logical block_size *= kv_split_size.
   const int32_t kv_split_size_eff =
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
-  BlockManagerPool::Options options;
+  KVCacheManagerOptions options;
   options.num_blocks(kv_cache_cap.n_blocks())
       .kv_events_config(options_.is_draft_engine()
                             ? std::string()

@@ -20,6 +20,7 @@ set(_scheduler_test_deps
   :disaggregation
   :xllm_server
   :block
+  :kv_cache_manager
   GTest::gtest_main
   $<$<BOOL:${USE_NPU}>:nnopbase>
 )

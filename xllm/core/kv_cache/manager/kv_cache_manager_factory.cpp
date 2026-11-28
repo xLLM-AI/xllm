@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/block/kv_cache_manager_factory.h"
+#include "core/kv_cache/manager/kv_cache_manager_factory.h"
 
 #include <glog/logging.h>
 
@@ -22,12 +22,12 @@ limitations under the License.
 
 #include "core/common/prefill_policy.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
-#include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/cache_partition_builder.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/static_kv_layout.h"
 #include "core/kv_cache/layout/vmm_kv_layout.h"
+#include "core/kv_cache/manager/hierarchy_block_manager_pool.h"
 #include "core/kv_cache/storage/host_cache_layout.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator_impl.h"
 #include "core/util/tensor_helper.h"
@@ -40,7 +40,7 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     const ModelArgs& model_args,
     int64_t world_size,
     torch::ScalarType dtype,
-    BlockManagerPool::Options options,
+    KVCacheManagerOptions options,
     const PrefillPolicy& prefill_policy,
     std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
     int32_t dp_size,

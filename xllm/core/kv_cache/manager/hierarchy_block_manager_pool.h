@@ -22,8 +22,8 @@ limitations under the License.
 #include <mutex>
 #include <unordered_map>
 
-#include "core/framework/block/block_manager_pool.h"
-#include "core/framework/block/composite_block_manager.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
+#include "core/kv_cache/manager/composite_block_manager.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/kv_cache/transfer/kv_transfer_coordinator_base.h"
 #include "util/blockingconcurrentqueue.h"

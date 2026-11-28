@@ -34,7 +34,6 @@ limitations under the License.
 #include "engine.h"
 #include "framework/batch/batch_group.h"
 #include "framework/batch/forward_input_factory.h"
-#include "framework/block/block_manager_pool.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "runtime/worker.h"

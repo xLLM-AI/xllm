@@ -24,11 +24,11 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "core/common/prefill_policy.h"
 #include "core/framework/batch/batch.h"
-#include "core/framework/block/block_manager_pool.h"
-#include "core/framework/block/kv_cache_manager_factory.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
+#include "core/kv_cache/manager/kv_cache_manager_factory.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "framework/block/block_manager_pool_test_peer.h"
 #include "framework/model/model_params_view.h"
@@ -1069,6 +1069,70 @@ TEST(BlockManagerTest, Basic) {
     }
     EXPECT_FALSE(block.is_valid());
   }
+}
+
+TEST_F(BlockManagerPoolTest, ManagerContractAssignsDpAndReleasesEmbedding) {
+  KVCacheManagerOptions options;
+  options.num_blocks(8)
+      .block_size(4)
+      .enable_prefix_cache(false)
+      .num_speculative_tokens(1)
+      .num_embedding_blocks(3)
+      .model_id("contract-test");
+  BlockManagerPool pool(options, /*dp_size=*/2);
+  KVCacheManager& manager = pool;
+  Sequence first = make_sequence(0, {1, 2, 3, 4});
+  Sequence second = make_sequence(1, {5, 6, 7, 8});
+
+  ASSERT_TRUE(manager.allocate(&first));
+  ASSERT_TRUE(manager.allocate_for_profiling(&second, second.num_tokens()));
+  EXPECT_NE(first.dp_rank(), second.dp_rank());
+  EXPECT_GT(first.get_embedding_block_id(), 0);
+  EXPECT_GT(second.get_embedding_block_id(), 0);
+  EXPECT_EQ(manager.model_id(), "contract-test");
+  EXPECT_FALSE(manager.uses_virtual_memory());
+  EXPECT_EQ(manager.num_used_blocks(), (std::vector<size_t>{1, 1}));
+
+  manager.deallocate(&first);
+  manager.deallocate_without_cache(&second);
+  EXPECT_FALSE(first.has_any_blocks());
+  EXPECT_FALSE(second.has_any_blocks());
+  EXPECT_EQ(manager.num_used_blocks(), (std::vector<size_t>{0, 0}));
+  EXPECT_EQ(manager.num_blocks_in_prefix_cache(), (std::vector<size_t>{0, 0}));
+  ASSERT_TRUE(manager.allocate(&first));
+  EXPECT_GT(first.get_embedding_block_id(), 0);
+  manager.deallocate_without_cache(&first);
+}
+
+TEST_F(BlockManagerPoolTest, ManagerContractKeepsAverageAndAdmissionUsage) {
+  KVCacheManagerOptions options;
+  options.num_blocks(8).block_size(4).enable_prefix_cache(false);
+  BlockManagerPool pool(options, /*dp_size=*/2);
+  KVCacheManager& manager = pool;
+  Sequence sequence = make_sequence(0, {1, 2, 3, 4});
+  sequence.set_dp_rank(0);
+  ASSERT_TRUE(manager.allocate(&sequence));
+  EXPECT_GT(manager.average_cache_utilization(), 0.0f);
+  EXPECT_DOUBLE_EQ(manager.kv_cache_utilization(), 0.0);
+  manager.deallocate_without_cache(&sequence);
+  EXPECT_FLOAT_EQ(manager.average_cache_utilization(), 0.0f);
+}
+
+TEST_F(BlockManagerPoolTest, ManagerContractKeepsPermanentDecodeBound) {
+  KVCacheManagerOptions options;
+  options.num_blocks(3)
+      .block_size(4)
+      .enable_prefix_cache(false)
+      .instance_is_decode(true);
+  BlockManagerPool pool(options);
+  KVCacheManager& manager = pool;
+  Sequence fits = make_sequence(0, std::vector<int32_t>(8, 1));
+  Sequence too_long = make_sequence(1, std::vector<int32_t>(9, 1));
+  ASSERT_TRUE(manager.allocate(&fits));
+  EXPECT_FALSE(manager.exceeds_decode_capacity(&fits));
+  EXPECT_TRUE(manager.exceeds_decode_capacity(&too_long));
+  manager.deallocate_without_cache(&fits);
+  EXPECT_TRUE(manager.exceeds_decode_capacity(&too_long));
 }
 
 TEST_F(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenEnabled) {

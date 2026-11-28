@@ -29,6 +29,7 @@ cc_library(
   DEPS
     :util
     :batch
+    :kv_cache_manager_interface
     :distributed_runtime
     :request
     :runtime
@@ -61,7 +62,7 @@ cc_binary(
     :config
     :scheduler
     :xllm_server
-    :block
+    :kv_cache_manager
     torch
     benchmark::benchmark
     benchmark::benchmark_main

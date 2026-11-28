@@ -28,7 +28,6 @@ limitations under the License.
 #include "core/framework/batch/forward_input_factory.h"
 #include "engine.h"
 #include "framework/batch/batch_group.h"
-#include "framework/block/block_manager_pool.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "runtime/vlm_forward_params.h"

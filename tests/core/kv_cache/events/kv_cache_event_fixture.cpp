@@ -22,11 +22,11 @@ limitations under the License.
 #include <memory>
 #include <string>
 
-#include "core/framework/block/block_manager_pool.h"
-#include "core/framework/block/composite_block_manager.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/events/kv_cache_event_publisher.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
+#include "core/kv_cache/manager/composite_block_manager.h"
 
 namespace {
 

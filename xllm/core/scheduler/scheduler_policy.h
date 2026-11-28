@@ -26,7 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/prefill_policy.h"
-#include "framework/block/kv_cache_manager.h"
+#include "core/kv_cache/manager/kv_cache_manager.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
 #include "scheduler/continuous_scheduler.h"

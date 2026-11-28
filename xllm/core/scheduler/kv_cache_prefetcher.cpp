@@ -19,8 +19,8 @@ limitations under the License.
 
 #include <utility>
 
-#include "core/framework/block/kv_cache_manager.h"
 #include "core/framework/request/request.h"
+#include "core/kv_cache/manager/kv_cache_manager.h"
 #include "core/scheduler/scheduler_notifier.h"
 
 namespace xllm {

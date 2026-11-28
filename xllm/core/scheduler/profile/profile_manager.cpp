@@ -155,8 +155,8 @@ ProfileManager::ProfileManager(
   }
   decode_graph_warmup_plan_ =
       build_profile_decode_warmup_plan(options_, max_decode_batch_size);
-  block_manager_pool_ = engine_->block_manager_pool();
-  CHECK(block_manager_pool_ != nullptr);
+  kv_cache_manager_ = engine_->kv_cache_manager();
+  CHECK(kv_cache_manager_ != nullptr);
   prefill_time_predictor_ = std::make_unique<TimePredictor>(
       options.enable_profile_kv_blocks(), true /*is_prefill*/);
   decode_time_predictor_ = std::make_unique<TimePredictor>(
@@ -395,7 +395,7 @@ void ProfileManager::profile_step_time(bool if_dump_to_file) {
   // TODO: support length for decode request profile
   int32_t profile_max_prompt_length =
       std::min(max_context_len, options_.profile_max_prompt_length());
-  auto block_size = block_manager_pool_->options().block_size();
+  const int32_t block_size = kv_cache_manager_->block_size();
   bool enable_profile_kv_blocks = options_.enable_profile_kv_blocks();
 
   // warm up
@@ -670,7 +670,7 @@ const ProfileManager::CopyBlockProfile* ProfileManager::find_profile(
 }
 
 int32_t ProfileManager::get_max_copy_block_num(double latency_budget) {
-  auto block_size = block_manager_pool_->options().block_size();
+  const int32_t block_size = kv_cache_manager_->block_size();
   const CopyBlockProfile* profile =
       find_profile(::xllm::ModelConfig::get_instance().model_id(), block_size);
 
@@ -687,7 +687,7 @@ int32_t ProfileManager::get_max_copy_block_num(double latency_budget) {
 double ProfileManager::predict_copy_blocks_time(
     size_t num_copy_blocks,
     bool if_need_add_constant_term) {
-  auto block_size = block_manager_pool_->options().block_size();
+  const int32_t block_size = kv_cache_manager_->block_size();
   const CopyBlockProfile* profile =
       find_profile(::xllm::ModelConfig::get_instance().model_id(), block_size);
 
@@ -732,7 +732,7 @@ std::shared_ptr<Request> ProfileManager::generate_single_request(
 
   // TODO: better disable prefix cache
   if (prefix_length > 0) {
-    if (!block_manager_pool_->BlockManagerPool::allocate(
+    if (!kv_cache_manager_->allocate_for_profiling(
             request->sequences()[0].get(), prefix_length)) {
       LOG(FATAL) << "Profiling time failed! Not enough blocks, prefix length: "
                  << prefix_length;
@@ -740,10 +740,9 @@ std::shared_ptr<Request> ProfileManager::generate_single_request(
     request->sequences()[0]->kv_state().incr_kv_cache_tokens_num(prefix_length);
   }
 
-  if (!block_manager_pool_->BlockManagerPool::allocate(
-          request->sequences()[0].get(), token_length)) {
-    block_manager_pool_->deallocate_without_cache(
-        request->sequences()[0].get());
+  if (!kv_cache_manager_->allocate_for_profiling(request->sequences()[0].get(),
+                                                 token_length)) {
+    kv_cache_manager_->deallocate_without_cache(request->sequences()[0].get());
     LOG(FATAL) << "Profiling time failed! Not enough blocks, token length: "
                << token_length << ", prefix length: " << prefix_length;
   }
@@ -812,8 +811,7 @@ std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
     CHECK_LT(dp_rank.value(), options_.dp_size());
     sequence->set_dp_rank(dp_rank.value());
   }
-  if (!block_manager_pool_->BlockManagerPool::allocate(sequence,
-                                                       seq_capacity)) {
+  if (!kv_cache_manager_->allocate_for_profiling(sequence, seq_capacity)) {
     return nullptr;
   }
   sequence->kv_state().incr_kv_cache_tokens_num(prompt_length);
@@ -860,8 +858,7 @@ int32_t ProfileManager::measure_graph_decode_capacity(
 
   const int32_t allocatable_sequences = static_cast<int32_t>(requests.size());
   for (const std::shared_ptr<Request>& request : requests) {
-    block_manager_pool_->deallocate_without_cache(
-        request->sequences()[0].get());
+    kv_cache_manager_->deallocate_without_cache(request->sequences()[0].get());
   }
   return allocatable_sequences;
 }
@@ -908,8 +905,7 @@ double ProfileManager::run_request(int32_t token_length,
   }
   double latency = absl::ToDoubleMilliseconds(absl::Now() - start_time);
   for (auto& request : requests) {
-    block_manager_pool_->deallocate_without_cache(
-        request->sequences()[0].get());
+    kv_cache_manager_->deallocate_without_cache(request->sequences()[0].get());
   }
 
   return latency;
@@ -949,8 +945,7 @@ double ProfileManager::run_request(
   }
   double latency = absl::ToDoubleMilliseconds(absl::Now() - start_time);
   for (auto& request : requests) {
-    block_manager_pool_->deallocate_without_cache(
-        request->sequences()[0].get());
+    kv_cache_manager_->deallocate_without_cache(request->sequences()[0].get());
   }
 
   return latency;
@@ -979,8 +974,7 @@ double ProfileManager::run_decode_request(
   }
   double latency = absl::ToDoubleMilliseconds(absl::Now() - start_time);
   for (auto& request : requests) {
-    block_manager_pool_->deallocate_without_cache(
-        request->sequences()[0].get());
+    kv_cache_manager_->deallocate_without_cache(request->sequences()[0].get());
   }
 
   return latency;
@@ -1015,8 +1009,7 @@ double ProfileManager::run_graph_decode_request(
   }
   double latency = absl::ToDoubleMilliseconds(absl::Now() - start_time);
   for (auto& request : requests) {
-    block_manager_pool_->deallocate_without_cache(
-        request->sequences()[0].get());
+    kv_cache_manager_->deallocate_without_cache(request->sequences()[0].get());
   }
 
   return latency;

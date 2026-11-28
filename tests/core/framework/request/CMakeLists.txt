@@ -145,6 +145,7 @@ cc_test(
     request_prefix_cache_tokens_test.cpp
   DEPS
     :block
+    :kv_cache_manager
     :config
     :request
     GTest::gtest_main

@@ -28,6 +28,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "core/common/metrics.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/distributed_runtime/engine.h"
@@ -80,7 +81,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
   CHECK(step_callback_);
   CHECK(result_callback_);
 
-  kv_cache_manager_ = resource_engine_->block_manager_pool();
+  kv_cache_manager_ = resource_engine_->kv_cache_manager();
   CHECK(kv_cache_manager_ != nullptr);
   if (kv_cache_manager_->has_storage_prefetch()) {
     kv_cache_prefetcher_ = std::make_unique<KVCachePrefetcher>(
@@ -190,7 +191,7 @@ void ContinuousSchedulerBase::populate_heartbeat_request(
     xllm_service::proto::HeartbeatRequest& request,
     bool include_virtual_memory_info) {
   request.mutable_load_metrics()->set_gpu_cache_usage_perc(
-      resource_engine_->block_manager_pool()->get_gpu_cache_usage_perc());
+      kv_cache_manager_->average_cache_utilization());
   request.mutable_load_metrics()->set_waiting_requests_num(
       get_waiting_requests_num());
 

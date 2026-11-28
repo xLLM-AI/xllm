@@ -12,6 +12,7 @@ cc_test(
   DEPS
     :batch
     :block
+    :kv_cache_manager
     :config
     :request
     :prefix_cache
@@ -44,6 +45,7 @@ if(USE_NPU)
       :xllm_server
       :batch
       :block
+      :kv_cache_manager
       :config
       :kv_cache
       :kv_cache_manager_factory
@@ -65,6 +67,7 @@ if(USE_NPU)
     DEPS
       :xllm_server
       :block
+      :kv_cache_manager
       :kv_cache
       :kv_cache_manager_factory
       :linear_state_restore

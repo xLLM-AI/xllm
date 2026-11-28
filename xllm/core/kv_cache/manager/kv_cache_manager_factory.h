@@ -21,9 +21,10 @@ limitations under the License.
 #include <memory>
 #include <optional>
 
-#include "core/framework/block/block_manager_pool.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/manager/kv_cache_manager.h"
+#include "core/kv_cache/manager/kv_cache_manager_options.h"
 #include "core/kv_cache/storage/host_cache_layout.h"
 
 namespace xllm {
@@ -45,7 +46,7 @@ class KVCacheManagerFactory final {
       const ModelArgs& model_args,
       int64_t world_size,
       torch::ScalarType dtype,
-      BlockManagerPool::Options options,
+      KVCacheManagerOptions options,
       const PrefillPolicy& prefill_policy,
       std::shared_ptr<KVTransferCoordinatorBase> transfer_coordinator,
       int32_t dp_size = 1,

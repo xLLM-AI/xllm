@@ -27,6 +27,7 @@ cc_test(
     :util
     :config
     :batch
+    :kv_cache_manager
     :worker_model_codec
     :kv_cache_block
     absl::time
@@ -90,6 +91,7 @@ cc_test(
   DEPS
     :config
     :batch
+    :kv_cache_manager
     :kv_cache_block
     GTest::gtest_main
     $<$<BOOL:${USE_MLU}>:torch_mlu>
@@ -112,6 +114,7 @@ foreach(factory IN ITEMS vlm dit)
     DEPS
       :config
       :batch
+      $<$<STREQUAL:${factory},vlm>:kv_cache_manager>
       $<$<NOT:$<STREQUAL:${factory},dit>>:kv_cache_block>
       GTest::gtest_main
       $<$<BOOL:${USE_MLU}>:torch_mlu>

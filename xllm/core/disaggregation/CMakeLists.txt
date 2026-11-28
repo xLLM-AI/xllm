@@ -21,6 +21,7 @@ cc_library(
   DEPS
     :util
     :scheduler
+    :kv_cache_manager_interface
     :distributed_runtime
 )
 target_link_libraries(disaggregation PRIVATE

@@ -21,10 +21,10 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/prefill_policy.h"
-#include "core/framework/block/block_manager_pool.h"
-#include "core/framework/block/kv_cache_manager_factory.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/request/sequence.h"
+#include "core/kv_cache/manager/block_manager_pool.h"
+#include "core/kv_cache/manager/kv_cache_manager_factory.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/kv_cache/storage/kv_cache_create_options.h"
 #include "core/kv_cache/storage/linear_state_restore.h"
