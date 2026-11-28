@@ -60,6 +60,8 @@ def _load_reference_quarot_rotation(
 @dataclass
 class DFlashQwen3Config(Qwen3Config):
     supports_reduced_draft_vocab: ClassVar[bool] = False
+    # Context-KV extraction slices QKV weights in checkpoint [N, K] layout.
+    prepare_column_parallel_weight_layout: ClassVar[bool] = False
 
     draft_vocab_size: int = 0
     world_size: int = 1

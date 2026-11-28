@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -59,6 +59,8 @@ from xllm.python.models.base import PyModelBase
 
 @dataclass
 class Qwen3Config:
+    prepare_column_parallel_weight_layout: ClassVar[bool] = True
+
     hidden_size: int = 1024
     n_layers: int = 28
     n_heads: int = 16
@@ -156,6 +158,7 @@ class Qwen3Attention(nn.Module):
             bias=cfg.attention_bias,
             dtype=dtype,
             device=device,
+            prepare_weight_layout=cfg.prepare_column_parallel_weight_layout,
         )
         self.o_proj = RowParallelLinear(
             self.q_size,
@@ -236,7 +239,9 @@ class Qwen3Attention(nn.Module):
         return self.o_proj(attn_out)
 
     def load_weights(self, weights: ScopedWeightLoader, context: ParallelLoadContext) -> None:
+        self.qkv_proj.prepare_weight_for_loading()
         load_gqa_fused_attention(self, weights, context, self.cfg.n_kv_heads)
+        self.qkv_proj.process_weights_after_loading()
         self.o_proj.process_weights_after_loading()
 
 
@@ -260,6 +265,7 @@ class Qwen3DecoderLayer(nn.Module):
             cfg.tp_size,
             dtype,
             device,
+            prepare_gate_up_weight_layout=cfg.prepare_column_parallel_weight_layout,
         )
 
     def forward(
@@ -405,6 +411,7 @@ class Qwen3ForCausalLM(PyModelBase):
                 gather_output=True,
                 dtype=dtype,
                 device=device,
+                prepare_weight_layout=self.cfg.prepare_column_parallel_weight_layout,
             )
 
     def pooler(self, hidden_states: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
@@ -426,6 +433,8 @@ class Qwen3ForCausalLM(PyModelBase):
     ) -> None:
         all_weights = ScopedWeightLoader(state_dicts, src_prefixes=("model.", ""))
         ctx = ParallelLoadContext(tp_rank, tp_size)
+        if self.lm_head is not None:
+            self.lm_head.prepare_weight_for_loading()
         load_causal_lm_weights(
             self.model,
             None if self.lm_head is None else self.lm_head.weight,
@@ -433,3 +442,5 @@ class Qwen3ForCausalLM(PyModelBase):
             ctx,
             tie_word_embeddings=self.cfg.tie_word_embeddings,
         )
+        if self.lm_head is not None:
+            self.lm_head.process_weights_after_loading()

@@ -28,6 +28,8 @@ from xllm.python.models.qwen3_dflash import (
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
 )
+from xllm.python.models.qwen3_dflash2 import DFlash2Qwen3Config
+from xllm.python.models.qwen3_dspark import Qwen3DSparkConfig
 
 
 def _config_dict(**overrides) -> dict:
@@ -124,6 +126,26 @@ def test_draft_attention_is_non_causal() -> None:
     assert isinstance(model, Qwen3Model)
     assert model.embed_tokens is None
     assert not model.layers[0].self_attn.attn.causal
+
+
+@pytest.mark.parametrize(
+    "config_cls",
+    (DFlashQwen3Config, DFlash2Qwen3Config, Qwen3DSparkConfig),
+)
+def test_draft_configs_preserve_qkv_checkpoint_layout(config_cls: type[DFlashQwen3Config]) -> None:
+    config = config_cls.from_dict(_config_dict())
+    model = DFlashQwen3Model(config, torch.float32, torch.device("cpu"))
+
+    model._build_context_kv_buffers()
+
+    attention = model.layers[0].self_attn
+    assert not config.prepare_column_parallel_weight_layout
+    assert not attention.qkv_proj._prepare_weight_layout
+    assert model._fused_kv_weight is not None
+    assert model._fused_kv_weight.shape == (
+        2 * attention.kv_size,
+        config.hidden_size,
+    )
 
 
 def test_context_projection_uses_tensor_parallel_output_shard(

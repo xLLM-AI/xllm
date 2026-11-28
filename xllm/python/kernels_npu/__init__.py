@@ -53,6 +53,7 @@ _EXPORTS = {
     "linear": (
         "grouped_linear",
         "prepare_quant_weight",
+        "prepare_column_parallel_weight",
         "prepare_row_parallel_weight",
     ),
     "mla": (
@@ -198,6 +199,7 @@ __all__ = [
     "supports_cutlass_moe",
     "supports_fused_moe_gmm1",
     "prepare_row_parallel_weight",
+    "prepare_column_parallel_weight",
     "prepare_quant_weight",
     "MLA_PREPROCESS_V2_MAX_TOKENS",
     "deepseek_mla_preprocess_decode",

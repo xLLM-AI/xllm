@@ -38,6 +38,7 @@ class GatedMLP(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
         reduce_results: bool = True,
+        prepare_gate_up_weight_layout: bool = False,
     ) -> None:
         super().__init__()
         if intermediate_size % tp_size:
@@ -49,6 +50,7 @@ class GatedMLP(nn.Module):
             tp_size,
             dtype=dtype,
             device=device,
+            prepare_weight_layout=prepare_gate_up_weight_layout,
         )
         self.down_proj = self.row_parallel_cls(
             local_intermediate_size,
@@ -64,6 +66,7 @@ class GatedMLP(nn.Module):
         state: ScopedWeightLoader,
         context: ParallelLoadContext,
     ) -> None:
+        self.gate_up_proj.prepare_weight_for_loading()
         state.load_fused(
             self.gate_up_proj.weight,
             ["gate_proj.weight", "up_proj.weight"],
@@ -81,6 +84,7 @@ class GatedMLP(nn.Module):
 
     def process_weights_after_loading(self) -> None:
         # Qwen3.5's plain (TileLang/CANN) layout deliberately skips this.
+        self.gate_up_proj.process_weights_after_loading()
         self.down_proj.process_weights_after_loading()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

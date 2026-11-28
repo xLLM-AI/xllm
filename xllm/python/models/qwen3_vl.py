@@ -271,7 +271,13 @@ class Qwen3VLVisionAttention(nn.Module):
         self.head_dim = hidden_size // num_heads
         self.scaling = self.head_dim**-0.5
         local_hidden_size = self.num_heads * self.head_dim
-        self.qkv = ColumnParallelLinear(hidden_size, 3 * local_hidden_size, tp_size, bias=True)
+        self.qkv = ColumnParallelLinear(
+            hidden_size,
+            3 * local_hidden_size,
+            tp_size,
+            bias=True,
+            prepare_weight_layout=True,
+        )
         self.proj = RowParallelLinear(local_hidden_size, hidden_size, tp_size, bias=True)
         if dtype is not None and device is not None:
             self.to(dtype=dtype, device=device)
@@ -320,7 +326,13 @@ class Qwen3VLVisionMLP(nn.Module):
         super().__init__()
         if intermediate_size % tp_size:
             raise ValueError("vision intermediate_size must be divisible by tp_size")
-        self.linear_fc1 = ColumnParallelLinear(hidden_size, intermediate_size // tp_size, tp_size, bias=True)
+        self.linear_fc1 = ColumnParallelLinear(
+            hidden_size,
+            intermediate_size // tp_size,
+            tp_size,
+            bias=True,
+            prepare_weight_layout=True,
+        )
         if hidden_act == "gelu_pytorch_tanh":
             self.act_fn = nn.GELU(approximate="tanh")
         elif hidden_act == "gelu":
@@ -352,10 +364,21 @@ class Qwen3VLVisionBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, eps=1e-6)
-        self.attn = Qwen3VLVisionAttention(hidden_size, num_heads, dtype=dtype, device=device, tp_size=tp_size)
+        self.attn = Qwen3VLVisionAttention(
+            hidden_size,
+            num_heads,
+            dtype=dtype,
+            device=device,
+            tp_size=tp_size,
+        )
         self.norm2 = nn.LayerNorm(hidden_size, eps=1e-6)
         self.mlp = Qwen3VLVisionMLP(
-            hidden_size, intermediate_size, hidden_act, dtype=dtype, device=device, tp_size=tp_size
+            hidden_size,
+            intermediate_size,
+            hidden_act,
+            dtype=dtype,
+            device=device,
+            tp_size=tp_size,
         )
 
     def forward(
@@ -668,6 +691,8 @@ class Qwen3VLVisionTransformer(nn.Module):
                 _copy(f"blocks.{i}.{t}")
             state = weights.with_prefix(f"blocks.{i}.")
             block = self.blocks[i]
+            block.attn.qkv.prepare_weight_for_loading()
+            block.mlp.linear_fc1.prepare_weight_for_loading()
             # Checkpoints pack all Q heads, then all K, then all V. Shard each
             # component before packing the local Q/K/V; a flat shard mixes them.
             for suffix in ("weight", "bias"):
@@ -684,6 +709,8 @@ class Qwen3VLVisionTransformer(nn.Module):
                 ("mlp.linear_fc2.weight", 1),
             ):
                 state.load_tensor(block.get_parameter(name), name, dim=dim, rank=tp_rank, world_size=self.tp_size)
+            block.attn.qkv.process_weights_after_loading()
+            block.mlp.linear_fc1.process_weights_after_loading()
         for t in merger_ts:
             _copy(f"merger.{t}")
         for i in range(len(self.deepstack_visual_indexes)):
@@ -901,7 +928,12 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
         # Vision tower
-        self.vision_model = Qwen3VLVisionTransformer(vision_cfg, dtype=dtype, device=device, tp_size=text_cfg.tp_size)
+        self.vision_model = Qwen3VLVisionTransformer(
+            vision_cfg,
+            dtype=dtype,
+            device=device,
+            tp_size=text_cfg.tp_size,
+        )
         # Armed by configure_runtime when the worker runs graph execution.
         self._vision_graph_runner: VisionAclGraphRunner | None = None
 
@@ -918,6 +950,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             gather_output=True,
             dtype=dtype,
             device=device,
+            prepare_weight_layout=text_cfg.prepare_column_parallel_weight_layout,
         )
 
     # ------------------------------------------------------------------
@@ -1021,6 +1054,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         """
         self.vision_model.load_weights(ScopedWeightLoader(state_dicts, src_prefixes=("model.visual.",)), tp_rank)
         all_weights = ScopedWeightLoader(state_dicts, src_prefixes=("model.language_model.", "model.", ""))
+        self.lm_head.prepare_weight_for_loading()
         load_causal_lm_weights(
             self.model,
             self.lm_head.weight,
@@ -1028,3 +1062,4 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
             ParallelLoadContext(tp_rank, tp_size),
             tie_word_embeddings=self.text_cfg.tie_word_embeddings,
         )
+        self.lm_head.process_weights_after_loading()

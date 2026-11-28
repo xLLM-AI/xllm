@@ -49,10 +49,14 @@ class ColumnParallelLinear(nn.Module):
         bias: bool = False,
         dtype: torch.dtype | None = None,
         device: torch.device | str | None = None,
+        prepare_weight_layout: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = tp_size
         self.gather_output = gather_output
+        self._prepare_weight_layout = prepare_weight_layout
+        self._weight_is_transposed = False
+        self._prepared_weight: torch.Tensor | None = None
         self.weight = nn.Parameter(
             torch.empty(
                 out_features_per_partition,
@@ -66,21 +70,51 @@ class ColumnParallelLinear(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+    def process_weights_after_loading(self) -> None:
+        """Prepare the backend-selected weight layout once after loading."""
+        if not self._prepare_weight_layout or self._weight_is_transposed:
+            return
+        prepared, is_transposed = kernels.prepare_column_parallel_weight(self.weight.data)
+        if (
+            self._prepared_weight is not None
+            and self._prepared_weight.shape == prepared.shape
+            and self._prepared_weight.dtype == prepared.dtype
+            and self._prepared_weight.device == prepared.device
+        ):
+            self._prepared_weight.copy_(prepared)
+        else:
+            self._prepared_weight = prepared
+        self.weight.data = self._prepared_weight
+        self._weight_is_transposed = is_transposed
+
+    def prepare_weight_for_loading(self) -> None:
+        """Restore checkpoint shape before a supported in-place weight reload."""
+        if not self._weight_is_transposed:
+            return
+        self.weight.data = self.weight.new_empty(self.weight.shape[1], self.weight.shape[0])
+        self._weight_is_transposed = False
+
+    def _forward_projection(self, x: torch.Tensor) -> torch.Tensor:
+        if self._weight_is_transposed:
+            out = torch.matmul(x, self.weight)
+            return out if self.bias is None else out + self.bias
+        return torch.nn.functional.linear(x, self.weight, self.bias)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.nn.functional.linear(x, self.weight, self.bias)
+        out = self._forward_projection(x)
         if self.gather_output and self.tp_size > 1:
             out = distributed.tp_all_gather(out, dim=-1, world_size=self.tp_size)
         return out
 
     def greedy_tokens(self, x: torch.Tensor) -> torch.Tensor:
         """Select global token IDs without gathering the vocabulary logits."""
-        logits = torch.nn.functional.linear(x, self.weight, self.bias)
+        logits = self._forward_projection(x)
         if self.tp_size == 1:
             return logits.argmax(dim=-1)
         # Pack both candidates in one collective. A float32 exactly represents
         # every local vocabulary index in this supported range, and every
         # fp16/bf16/fp32 score. Global IDs are assembled in int64 afterwards.
-        partition_size = self.weight.shape[0]
+        partition_size = self.weight.shape[1] if self._weight_is_transposed else self.weight.shape[0]
         if partition_size > 2**24 or logits.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise ValueError("greedy TP candidates require fp16/bf16/fp32 logits and at most 2**24 local tokens")
         scores, indices = logits.max(dim=-1)
