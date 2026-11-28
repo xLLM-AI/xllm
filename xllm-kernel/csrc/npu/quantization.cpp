@@ -1,7 +1,7 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
 #include <acl/acl.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
@@ -21,9 +21,9 @@ torch::Tensor quantize_int4(const torch::Tensor& value,
                             const torch::Tensor& scales,
                             const torch::Tensor& zero_points,
                             int64_t axis) {
-  CHECK_GE(value.dim(), 1);
+  CHECK(value.dim() >= 1);
   auto shape = value.sizes().vec();
-  CHECK_EQ(shape.back() % kInt4ValuesPerWord, 0);
+  CHECK(shape.back() % kInt4ValuesPerWord == 0);
   shape.back() /= kInt4ValuesPerWord;
 
   const auto options = value.options().dtype(torch::kInt32);
@@ -98,14 +98,14 @@ std::tuple<torch::Tensor, torch::Tensor> dynamic_quant(
   const torch::ScalarType dtype = dst_type.value_or(torch::kInt8);
   const bool packed_int4 = dtype == torch::ScalarType::QUInt4x2;
   CHECK(dtype == torch::kInt8 || packed_int4);
-  CHECK_GE(value.dim(), 1);
+  CHECK(value.dim() >= 1);
 
   const torch::DeviceGuard guard(value.device());
   auto shape = value.sizes().vec();
   auto scale = torch::empty(value.sizes().slice(0, value.dim() - 1),
                             value.options().dtype(torch::kFloat32));
   if (packed_int4) {
-    CHECK_EQ(shape.back() % kInt4ValuesPerWord, 0);
+    CHECK(shape.back() % kInt4ValuesPerWord == 0);
     shape.back() /= kInt4ValuesPerWord;
   }
   const torch::ScalarType output_dtype =

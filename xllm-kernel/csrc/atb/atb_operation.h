@@ -16,7 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <atb/atb_infer.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/types.h>
 #include <torch_npu/csrc/core/npu/NPUGraphsUtils.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
@@ -37,28 +37,27 @@ class AtbOperation final {
   template <typename Param>
   AtbOperation(aclrtStream stream, const Param& param)
       : context_(get_context(stream)) {
-    CHECK_EQ(atb::CreateOperation(param, &operation_), 0);
+    CHECK((atb::CreateOperation(param, &operation_)) == 0);
   }
 
-  ~AtbOperation() { CHECK_EQ(atb::DestroyOperation(operation_), 0); }
+  ~AtbOperation() { CHECK(atb::DestroyOperation(operation_) == 0); }
 
   AtbOperation(const AtbOperation&) = delete;
   AtbOperation& operator=(const AtbOperation&) = delete;
 
   uint64_t setup(const atb::VariantPack& pack) {
     uint64_t workspace_size = 0;
-    CHECK_EQ(operation_->Setup(pack, workspace_size, context_->get()), 0);
+    CHECK((operation_->Setup(pack, workspace_size, context_->get())) == 0);
     return workspace_size;
   }
 
   void execute(const atb::VariantPack& pack,
                void* workspace,
                uint64_t workspace_size) {
-    CHECK_EQ(operation_->Execute(pack,
-                                 static_cast<uint8_t*>(workspace),
-                                 workspace_size,
-                                 context_->get()),
-             0);
+    CHECK((operation_->Execute(pack,
+                               static_cast<uint8_t*>(workspace),
+                               workspace_size,
+                               context_->get())) == 0);
   }
 
  private:

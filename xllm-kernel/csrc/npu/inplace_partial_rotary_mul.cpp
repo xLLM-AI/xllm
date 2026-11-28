@@ -38,9 +38,9 @@ void inplace_partial_rotary_mul(torch::Tensor& value,
                                 const torch::Tensor& sine,
                                 int64_t start,
                                 int64_t end) {
-  CHECK_EQ(value.dim(), 4);
+  CHECK(value.dim() == 4);
   CHECK(0 <= start && start < end && end <= value.size(-1));
-  CHECK_EQ((end - start) % 2, 0);
+  CHECK((end - start) % 2 == 0);
 
   const torch::DeviceGuard guard(value.device());
   const int64_t interleave = 1;

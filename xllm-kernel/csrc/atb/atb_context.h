@@ -16,7 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <atb/atb_infer.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 
 #include <memory>
 #include <unordered_map>
@@ -28,11 +28,11 @@ namespace xllm_kernel {
 class AtbContext final {
  public:
   explicit AtbContext(aclrtStream stream) {
-    CHECK_EQ(atb::CreateContext(&context_), 0);
-    CHECK_EQ(context_->SetExecuteStream(stream), 0);
+    CHECK((atb::CreateContext(&context_)) == 0);
+    CHECK((context_->SetExecuteStream(stream)) == 0);
   }
 
-  ~AtbContext() { CHECK_EQ(atb::DestroyContext(context_), 0); }
+  ~AtbContext() { CHECK(atb::DestroyContext(context_) == 0); }
 
   AtbContext(const AtbContext&) = delete;
   AtbContext& operator=(const AtbContext&) = delete;

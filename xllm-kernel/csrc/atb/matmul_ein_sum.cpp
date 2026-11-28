@@ -16,7 +16,7 @@ limitations under the License.
 #include <ATen/MemoryOverlap.h>
 #include <atb/atb_infer.h>
 #include <c10/core/DeviceGuard.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
@@ -61,12 +61,12 @@ torch::Tensor matmul_ein_sum_out(const torch::Tensor& input,
                                  const torch::Tensor& weight,
                                  torch::Tensor& output) {
   check_operands(input, weight);
-  CHECK_EQ(output.device(), input.device());
-  CHECK_EQ(output.scalar_type(), input.scalar_type());
-  CHECK_EQ(output.dim(), 3);
-  CHECK_EQ(output.size(0), input.size(0));
-  CHECK_EQ(output.size(1), input.size(1));
-  CHECK_EQ(output.size(2), weight.size(2));
+  CHECK(output.device() == input.device());
+  CHECK(output.scalar_type() == input.scalar_type());
+  CHECK(output.dim() == 3);
+  CHECK(output.size(0) == input.size(0));
+  CHECK(output.size(1) == input.size(1));
+  CHECK(output.size(2) == weight.size(2));
   CHECK(output.is_contiguous());
   check_base_format(output);
   torch::assert_no_overlap(output, input);

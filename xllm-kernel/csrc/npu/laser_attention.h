@@ -15,7 +15,7 @@ limitations under the License.
 
 #pragma once
 
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/torch.h>
 #include <torch_npu/csrc/aten/CustomFunctions.h>
 
@@ -34,11 +34,11 @@ torch::Tensor run_laser_attention(const torch::Tensor& q_bnsd,
                                   double scale_value,
                                   int64_t head_num,
                                   Launch launch) {
-  CHECK_GT(q_bnsd.numel(), 0);
-  CHECK_GT(k_bnsd.numel(), 0);
-  CHECK_EQ(q_bnsd.dim(), 4) << "Laser attention expects BNSD tensors";
-  CHECK_EQ(k_bnsd.dim(), 4);
-  CHECK_EQ(v_bnsd.dim(), 4);
+  CHECK(q_bnsd.numel() > 0);
+  CHECK(k_bnsd.numel() > 0);
+  CHECK(q_bnsd.dim() == 4) << "Laser attention expects BNSD tensors";
+  CHECK(k_bnsd.dim() == 4);
+  CHECK(v_bnsd.dim() == 4);
   CHECK(q_bnsd.device().is_privateuseone());
   CHECK(q_bnsd.device() == k_bnsd.device());
   CHECK(q_bnsd.device() == v_bnsd.device());
@@ -46,14 +46,14 @@ torch::Tensor run_laser_attention(const torch::Tensor& q_bnsd,
   CHECK(input_dtype == torch::kHalf || input_dtype == torch::kBFloat16);
   CHECK(input_dtype == k_bnsd.scalar_type());
   CHECK(input_dtype == v_bnsd.scalar_type());
-  CHECK_EQ(q_bnsd.size(0), k_bnsd.size(0));
-  CHECK_EQ(q_bnsd.size(1), head_num);
-  CHECK_EQ(q_bnsd.size(1), k_bnsd.size(1));
-  CHECK_EQ(q_bnsd.size(3), k_bnsd.size(3));
+  CHECK(q_bnsd.size(0) == k_bnsd.size(0));
+  CHECK(q_bnsd.size(1) == head_num);
+  CHECK(q_bnsd.size(1) == k_bnsd.size(1));
+  CHECK(q_bnsd.size(3) == k_bnsd.size(3));
   CHECK(k_bnsd.sizes() == v_bnsd.sizes());
-  CHECK_LE(q_bnsd.size(3), 128);
+  CHECK(q_bnsd.size(3) <= 128);
   CHECK(std::isfinite(scale_value));
-  CHECK_GT(scale_value, 0.0);
+  CHECK(scale_value > 0.0);
 
   if (q_bnsd.size(2) < 2048 || q_bnsd.size(2) != k_bnsd.size(2)) {
     const auto results = at_npu::native::custom_ops::npu_fusion_attention(

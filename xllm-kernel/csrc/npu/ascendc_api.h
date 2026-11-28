@@ -2,8 +2,8 @@
 
 #pragma once
 
+#include <c10/util/Logging.h>
 #include <dlfcn.h>
-#include <glog/logging.h>
 
 #include <filesystem>
 

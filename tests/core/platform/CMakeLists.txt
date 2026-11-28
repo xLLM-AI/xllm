@@ -14,6 +14,8 @@ if(USE_NPU)
   cc_test(
     NAME
       npu_runtime_test
+    ENVIRONMENT
+      "PYTHONPATH=${PROJECT_SOURCE_DIR}/xllm-kernel/python:$ENV{PYTHONPATH}"
     SRCS
       npu_runtime_test.cpp
     DEPS

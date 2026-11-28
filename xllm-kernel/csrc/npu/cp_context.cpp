@@ -1,6 +1,6 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
@@ -44,10 +44,10 @@ build_cp_context(const std::vector<int64_t>& q_seq_lens,
                  int64_t cp_size,
                  int64_t cp_rank,
                  torch::Device device) {
-  CHECK_GT(cp_size, 1);
-  CHECK_GE(cp_rank, 0);
-  CHECK_LT(cp_rank, cp_size);
-  CHECK_EQ(q_seq_lens.size(), kv_seq_lens.size());
+  CHECK(cp_size > 1);
+  CHECK(cp_rank >= 0);
+  CHECK(cp_rank < cp_size);
+  CHECK(q_seq_lens.size() == kv_seq_lens.size());
 
   const int64_t num_chunks = cp_size * 2;
   // The two chunk ids this rank owns: an early one and its mirror.
@@ -77,8 +77,8 @@ build_cp_context(const std::vector<int64_t>& q_seq_lens,
   for (size_t seq_id = 0; seq_id < q_seq_lens.size(); ++seq_id) {
     const int64_t length = q_seq_lens[seq_id];
     const int64_t kv_length = kv_seq_lens[seq_id];
-    CHECK_GE(length, 0);
-    CHECK_GE(kv_length, length);
+    CHECK(length >= 0);
+    CHECK(kv_length >= length);
     const int64_t prefix_cache_length = kv_length - length;
     const int64_t padded =
         ((length + num_chunks - 1) / num_chunks) * num_chunks;

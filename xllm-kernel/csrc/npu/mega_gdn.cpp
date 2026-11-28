@@ -1,7 +1,7 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
 #include <acl/acl.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
@@ -83,7 +83,7 @@ int64_t get_ffts_addr(const torch::Device& device) {
   CHECK(soc);
   if (std::string_view(soc).find("Ascend950") != 0) {
     uint32_t length = 0;
-    CHECK_EQ(rtGetC2cCtrlAddr(&address, &length), 0);
+    CHECK((rtGetC2cCtrlAddr(&address, &length)) == 0);
     CHECK(address && length);
   }
   const int64_t result = static_cast<int64_t>(address);

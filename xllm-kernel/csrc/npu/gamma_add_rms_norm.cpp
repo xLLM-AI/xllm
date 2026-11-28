@@ -1,7 +1,7 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
+#include <c10/util/Logging.h>
 #include <dlfcn.h>
-#include <glog/logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
@@ -64,10 +64,10 @@ std::tuple<torch::Tensor, torch::Tensor> fused_add_gemma_rms_norm(
     const torch::Tensor& residual,
     const torch::Tensor& weight,
     double eps) {
-  CHECK_GT(input.numel(), 0);
-  CHECK_GT(weight.numel(), 0);
+  CHECK(input.numel() > 0);
+  CHECK(weight.numel() > 0);
   CHECK(input.sizes() == residual.sizes());
-  CHECK_GE(input.dim(), weight.dim());
+  CHECK(input.dim() >= weight.dim());
 
   auto normalized = torch::empty_like(input);
   auto summed = torch::empty_like(input);

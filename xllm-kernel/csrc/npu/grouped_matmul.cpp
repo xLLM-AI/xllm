@@ -1,6 +1,6 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
@@ -25,12 +25,12 @@ torch::Tensor grouped_matmul_out(const torch::Tensor& x,
                                  int64_t group_type,
                                  int64_t group_list_type,
                                  torch::Tensor& output) {
-  CHECK_EQ(x.dim(), 2);
-  CHECK_EQ(weight.dim(), 3);
-  CHECK_EQ(x.size(1), weight.size(1));
+  CHECK(x.dim() == 2);
+  CHECK(weight.dim() == 3);
+  CHECK(x.size(1) == weight.size(1));
   CHECK(output.is_contiguous());
   CHECK(output.sizes().equals({x.size(0), weight.size(2)}));
-  CHECK_EQ(output.device(), x.device());
+  CHECK(output.device() == x.device());
 
   const torch::DeviceGuard guard(x.device());
   const torch::TensorList x_list(x);

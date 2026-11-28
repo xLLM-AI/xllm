@@ -1,6 +1,6 @@
 // Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
 
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
@@ -79,12 +79,12 @@ torch::Tensor lightning_indexer(
     int64_t pre_tokens,
     int64_t next_tokens,
     bool return_value) {
-  CHECK_GT(selected_count, 0);
+  CHECK(selected_count > 0);
   for (int64_t size : query.sizes()) {
-    CHECK_GT(size, 0);
+    CHECK(size > 0);
   }
   for (int64_t size : key.sizes()) {
-    CHECK_GT(size, 0);
+    CHECK(size > 0);
   }
   const int64_t key_heads = key.size(layout_key == "TND" ? 1 : 2);
   const std::vector<int64_t> shape =

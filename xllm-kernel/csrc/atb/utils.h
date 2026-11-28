@@ -16,7 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <atb/types.h>
-#include <glog/logging.h>
+#include <c10/util/Logging.h>
 #include <torch/types.h>
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
 
@@ -36,19 +36,19 @@ inline void check_base_format(const torch::Tensor& tensor) {
 
 inline void check_operands(const torch::Tensor& input,
                            const torch::Tensor& weight) {
-  CHECK_EQ(input.device().type(), torch::kPrivateUse1)
+  CHECK(input.device().type() == torch::kPrivateUse1)
       << "MLA projection requires NPU input";
-  CHECK_EQ(input.device(), weight.device());
-  CHECK_EQ(input.scalar_type(), torch::kBFloat16);
-  CHECK_EQ(weight.scalar_type(), input.scalar_type());
-  CHECK_EQ(input.dim(), 3) << "input must be [T,H,D]";
-  CHECK_EQ(weight.dim(), 3) << "weight must be [H,D,O]";
-  CHECK_GT(input.size(0), 0);
-  CHECK_GT(input.size(1), 0);
-  CHECK_GT(input.size(2), 0);
-  CHECK_GT(weight.size(2), 0);
-  CHECK_EQ(input.size(1), weight.size(0));
-  CHECK_EQ(input.size(2), weight.size(1));
+  CHECK(input.device() == weight.device());
+  CHECK(input.scalar_type() == torch::kBFloat16);
+  CHECK(weight.scalar_type() == input.scalar_type());
+  CHECK(input.dim() == 3) << "input must be [T,H,D]";
+  CHECK(weight.dim() == 3) << "weight must be [H,D,O]";
+  CHECK(input.size(0) > 0);
+  CHECK(input.size(1) > 0);
+  CHECK(input.size(2) > 0);
+  CHECK(weight.size(2) > 0);
+  CHECK(input.size(1) == weight.size(0));
+  CHECK(input.size(2) == weight.size(1));
   CHECK(weight.is_contiguous());
   check_base_format(input);
   check_base_format(weight);
